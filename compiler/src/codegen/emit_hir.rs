@@ -6045,6 +6045,41 @@ impl Compiler {
         }
     }
 
+    /// Operator call `id` on a raw instance method, just emitted as one
+    /// `CALL` of `arity` boxed-layout operands: direct MIR makes it a plain
+    /// call of the same entry.
+    fn hir_note_op_call_target(&self, hir: &HirBody, emit: &mut HirEmit, id: HirId, arity: u32) {
+        let operands = match &hir.expr(id).kind {
+            HirKind::Bin { lhs, rhs, .. } => vec![*lhs, *rhs],
+            HirKind::Un { operand, .. } => vec![*operand],
+            _ => return,
+        };
+        // Each operand's MIR word is the boxed-layout word the stack passes.
+        let boxed = |o: HirId| Self::hir_ty(hir, o).is_some_and(|t| self.value_layout(t) == ValueLayout::Boxed);
+        if operands.len() as u32 != arity || !operands.iter().all(|&o| boxed(o)) {
+            return;
+        }
+        if let Some(&IlOp::Entry {
+            kind: crate::il::EntryKind::Call,
+            target,
+            arity: called,
+            ret_words: 1,
+            ..
+        }) = self.bytecode.ops().last()
+            && called == arity
+        {
+            emit.call_targets.insert(
+                id.0,
+                crate::mir::HirCallSite {
+                    target,
+                    pair_args: vec![false; arity as usize],
+                    pair_ret: false,
+                    coro: false,
+                },
+            );
+        }
+    }
+
     /// Whether the body being lowered is a generic one's shared body (it
     /// takes dictionaries; a mono clone takes none).
     fn hir_shared_generic(&self) -> bool {
@@ -6288,16 +6323,18 @@ impl Compiler {
                     method,
                 } => {
                     // As `emit_concrete_operator_call`: each operand boxed
-                    // for the instance and stashed in a temp, then the call.
+                    // for the instance (unless it takes them raw) and
+                    // stashed in a temp, then the call.
                     debug_assert_eq!(depth, 0);
                     let (lookup, fqn, class, method) = (lookup.clone(), fqn.clone(), *class, *method);
+                    let raw = self.raw_instance_methods.contains(&fqn);
                     // A shift count is a plain `int` parameter, not the
                     // instance's type, so it is not boxed for it (#883).
                     let shift = matches!(class, "Shl" | "Shr");
                     let mut temps = [0u32; 2];
                     for (i, (temp, operand)) in temps.iter_mut().zip([*lhs, *rhs]).enumerate() {
                         self.hir_value(hir, emit, operand, &BOXED, 0);
-                        if !(shift && i == 1) {
+                        if !raw && !(shift && i == 1) {
                             Self::emit_box_if_needed(&mut self.bytecode, &lookup);
                         }
                         self.expr_depth = 0;
@@ -6312,11 +6349,15 @@ impl Compiler {
                     if self.emit_call_instance_dict(&mut call, (class, method, &fqn), std::slice::from_ref(&lookup), span.0..span.1) {
                         arity += 1;
                     }
+                    self.raw_instance_call = raw;
                     self.emit_direct_fn_call(&mut call, &fqn, arity);
                     self.bytecode.append(&mut call);
-                    // No dictionary and a one-word result: direct MIR boxes
-                    // the operands and calls the same entry.
-                    if arity == 2
+                    // Raw operands: direct MIR makes a plain call. Else, no
+                    // dictionary and a one-word result: direct MIR boxes the
+                    // operands and calls the same entry.
+                    if raw {
+                        self.hir_note_op_call_target(hir, emit, id, 2);
+                    } else if arity == 2
                         && let Some(tag) = Self::ty_to_value_tag(&lookup)
                         && let Some(&IlOp::Entry {
                             kind: crate::il::EntryKind::Call,
@@ -6438,11 +6479,15 @@ impl Compiler {
                 }) = emit.plan.ops.get(&id.0) =>
             {
                 // As the binary instance call: the operand boxed for the
-                // instance and stashed in a temp, then the call.
+                // instance (unless it takes it raw) and stashed in a temp,
+                // then the call.
                 debug_assert_eq!(depth, 0);
                 let (lookup, fqn, class, method) = (lookup.clone(), fqn.clone(), *class, *method);
+                let raw = self.raw_instance_methods.contains(&fqn);
                 self.hir_value(hir, emit, *operand, &BOXED, 0);
-                Self::emit_box_if_needed(&mut self.bytecode, &lookup);
+                if !raw {
+                    Self::emit_box_if_needed(&mut self.bytecode, &lookup);
+                }
                 self.expr_depth = 0;
                 let temp = self.alloc_temp_slot();
                 self.bytecode.push_store_pop(temp);
@@ -6453,8 +6498,12 @@ impl Compiler {
                 if self.emit_call_instance_dict(&mut call, (class, method, &fqn), std::slice::from_ref(&lookup), span.0..span.1) {
                     arity += 1;
                 }
+                self.raw_instance_call = raw;
                 self.emit_direct_fn_call(&mut call, &fqn, arity);
                 self.bytecode.append(&mut call);
+                if raw {
+                    self.hir_note_op_call_target(hir, emit, id, 1);
+                }
             }
             HirKind::Un { op, operand } => {
                 let float = Self::hir_ty(hir, *operand).is_some_and(lower::is_float);
@@ -7071,13 +7120,17 @@ impl Compiler {
                 let key = call.key.clone();
                 let natural = Self::hir_call_rep(call);
                 let inst = call.instance.clone().expect("ground call");
-                let HirGround { method, boxed, stage } = inst.ground.clone().expect("ground call");
+                let HirGround { method, mut boxed, stage } = inst.ground.clone().expect("ground call");
+                // A raw instance method takes the instance's own words.
+                if self.raw_instance_methods.contains(&key) {
+                    boxed.clear();
+                }
                 // Temps only at depth 0, as the method path: under pending
                 // operands (`u.label() + ":"`) a temp slot sits at the
                 // call's own depth, so the result would land above it.
                 let stage = stage && depth == 0;
                 let mut temps = Vec::with_capacity(args.len());
-                for (i, (&arg, param)) in args.iter().zip(params).enumerate() {
+                for (i, (&arg, param)) in args.iter().zip(params.iter().copied()).enumerate() {
                     let at = if stage { depth } else { depth + i as u32 };
                     self.hir_value(hir, emit, arg, &Rep::Word(param), at);
                     if let Some(Some(ty)) = boxed.get(i) {
@@ -7100,8 +7153,33 @@ impl Compiler {
                     arity += 1;
                 }
                 self.bytecode.append(&mut bc);
+                let raw = self.raw_instance_methods.contains(&key);
+                self.raw_instance_call = raw;
                 let ok = self.emit_named_entry_on_module_ret(&key, arity, crate::il::EntryKind::Call, natural.words());
                 debug_assert!(ok, "planned HIR ground call `{key}` has an entry");
+                // Raw words and no dictionary: direct MIR calls the same entry.
+                if raw
+                    && arity == args.len() as u32
+                    && args.iter().zip(&params).all(|(&a, &p)| self.hir_natural(hir, emit, a) == Some(Rep::Word(p)))
+                    && let Some(&IlOp::Entry {
+                        kind: crate::il::EntryKind::Call,
+                        target,
+                        arity: called,
+                        ret_words: ret_words @ (1 | 2),
+                        ..
+                    }) = self.bytecode.ops().last()
+                    && called == arity
+                {
+                    emit.call_targets.insert(
+                        id.0,
+                        crate::mir::HirCallSite {
+                            target,
+                            pair_args: vec![false; args.len()],
+                            pair_ret: ret_words == 2,
+                            coro: false,
+                        },
+                    );
+                }
                 self.expr_depth = depth;
                 self.hir_convert(&natural, want, depth);
                 return;
@@ -7112,7 +7190,10 @@ impl Compiler {
                 let key = call.key.clone();
                 let natural = Self::hir_call_rep(call);
                 let generic = call.generic.clone();
-                let instance = call.instance.clone();
+                // A raw instance method takes its receiver unboxed and no
+                // dictionary.
+                let raw = self.raw_instance_methods.contains(&key);
+                let instance = call.instance.clone().filter(|_| !raw);
                 let boxed = |i: usize| {
                     generic.as_ref().and_then(|g| g.boxed[i].clone()).or_else(|| {
                         instance.as_ref().filter(|_| i == 0).and_then(|inst| inst.recv_box.clone())
@@ -7156,6 +7237,7 @@ impl Compiler {
                 } else {
                     crate::il::EntryKind::Call
                 };
+                self.raw_instance_call = raw;
                 let ok = self.emit_named_entry_on_module_ret(&key, args.len() as u32 + dicts, kind, natural.words());
                 debug_assert!(ok, "planned HIR method `{key}` has an entry");
                 // A plain one-word ABI call, each argument in its own layout:

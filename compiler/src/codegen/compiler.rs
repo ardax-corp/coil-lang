@@ -865,10 +865,10 @@ impl Compiler {
                         .join("_");
                     for method in methods {
                         if let Some(method_name) = Self::impl_method_name(method) {
-                            self.reserve_function_entry(format!(
-                                "{}__{}__{}",
-                                class, ty_part, method_name
-                            ));
+                            let fqn = format!("{}__{}__{}", class, ty_part, method_name);
+                            let is_coro = Self::is_coro_with_body(method);
+                            self.note_raw_instance_method(class, method_name, &arg_tys, &fqn, is_coro);
+                            self.reserve_function_entry(fqn);
                         }
                     }
                 }
@@ -1947,33 +1947,94 @@ impl Compiler {
         format!("{fqn}$dict")
     }
 
+    /// Whether instance method `fqn` takes its bare class type-parameter
+    /// arguments raw: a ground instance with no context, not a default body
+    /// and not a coroutine. Its call sites pass the instance's own words, so
+    /// the body lowers to direct MIR; dictionary callers, which box those
+    /// arguments, reach it through its `$dict` adapter.
+    fn instance_method_raw(&self, class: &str, method: &str, inst_args: &[Ty], fqn: &str, is_coro: bool) -> bool {
+        !is_coro
+            && class != "Iterator"
+            && class != "IntoIterator"
+            && !inst_args.iter().any(Self::ty_has_var)
+            // The checker's head, whose parameters are variables (the AST
+            // spelling names them as constructors).
+            && self
+                .checker
+                .generics()
+                .instances
+                .iter()
+                .find(|inst| inst.method_fqns.values().any(|f| f == fqn))
+                .is_some_and(|inst| !inst.args.iter().any(Self::ty_has_var))
+            && !self.instance_call_takes_dict(class, method, fqn)
+            && self
+                .instance_method_unbox_tys(class, method, inst_args)
+                .iter()
+                .any(|t| t.as_ref().and_then(Self::ty_to_value_tag).is_some())
+    }
+
+    /// Mark instance method `fqn` raw ([`Self::instance_method_raw`]) and
+    /// reserve its adapter, so a dictionary built before the method is
+    /// emitted already points at the adapter.
+    fn note_raw_instance_method(&mut self, class: &str, method: &str, inst_args: &[Ty], fqn: &str, is_coro: bool) -> bool {
+        if !self.instance_method_raw(class, method, inst_args, fqn, is_coro) {
+            return false;
+        }
+        if self.raw_instance_methods.insert(fqn.to_string()) {
+            self.reserve_function_entry(Self::dict_adapter_name(fqn));
+        }
+        true
+    }
+
     /// Dictionary entry for a concrete instance method whose trait signature
     /// has `Option` / `Result` params or return over a class type parameter:
     /// callers through a dictionary (shared generic bodies, existentials)
     /// pass and expect the boxed enum, while the method uses its instance
     /// types' layout (possibly a niche). Converts on the way in and out; the
     /// method's own prologue still unboxes bare `T` params.
+    ///
+    /// A method that takes its arguments raw ([`Self::instance_method_raw`])
+    /// always has one: it also unboxes the bare type-parameter arguments
+    /// (every caller but a raw call site reaches the method through it).
     fn emit_dict_adapter_thunk(&mut self, class: &str, method: &str, inst_args: &[Ty], fqn: &str) {
-        let Some(sig) = self.trait_method_boundary_sig(class, method, inst_args, false) else {
+        let raw = self.raw_instance_methods.contains(fqn);
+        let sig = self.trait_method_boundary_sig(class, method, inst_args, false);
+        if sig.is_none() && !raw {
             return;
-        };
+        }
         let adapter = Self::dict_adapter_name(fqn);
         if self.functions.contains_key(&adapter) {
             return;
         }
         self.bind_function_entry(adapter);
-        let nparams = sig.params.len() as u32;
-        for (slot, target) in sig.params.iter().enumerate() {
+        let unbox = if raw {
+            self.instance_method_unbox_tys(class, method, inst_args)
+        } else {
+            Vec::new()
+        };
+        let nparams = sig.as_ref().map_or(unbox.len(), |s| s.params.len()) as u32;
+        for slot in 0..nparams as usize {
             self.bytecode.push_load(slot as u32);
-            if let Some(target) = target {
-                Self::emit_layout_convert(&mut self.bytecode, ValueLayout::Boxed, *target);
+            if let Some(target) = sig.as_ref().and_then(|s| s.params.get(slot).copied().flatten()) {
+                Self::emit_layout_convert(&mut self.bytecode, ValueLayout::Boxed, target);
+            }
+            if let Some(ty) = unbox.get(slot).cloned().flatten() {
+                Self::emit_unbox_if_needed(&mut self.bytecode, &ty);
             }
         }
-        self.bytecode.push_load(nparams); // trailing dictionary
-        if !self.emit_named_entry_on_module(fqn, nparams + 1, crate::il::EntryKind::Call) {
+        // A raw method has no context and is no default body: it never
+        // reads its dictionary, and a redirected direct call passes none.
+        let arity = if raw {
+            nparams
+        } else {
+            self.bytecode.push_load(nparams); // trailing dictionary
+            nparams + 1
+        };
+        self.raw_instance_call = raw;
+        if !self.emit_named_entry_on_module(fqn, arity, crate::il::EntryKind::Call) {
             self.missing_call_target(fqn, 0..0);
         }
-        if let Some(from) = sig.ret {
+        if let Some(from) = sig.and_then(|s| s.ret) {
             Self::emit_layout_convert(&mut self.bytecode, from, ValueLayout::Boxed);
         }
         self.bytecode.push_return();
@@ -2718,8 +2779,13 @@ impl Compiler {
                     && (self.functions.contains_key(&fqn)
                         || self.fn_entry_labels.contains_key(&fqn))
                 {
-                    Self::emit_box_if_needed(&mut self.bytecode, &lookup_ty);
+                    // A raw `show` takes the value unboxed.
+                    let raw = self.raw_instance_methods.contains(&fqn);
+                    if !raw {
+                        Self::emit_box_if_needed(&mut self.bytecode, &lookup_ty);
+                    }
                     let arity = 1 + self.emit_show_instance_dict(&fqn, &lookup_ty, 0..0);
+                    self.raw_instance_call = raw;
                     let _ = self.emit_named_entry_on_module(&fqn, arity, crate::il::EntryKind::Call);
                 } else {
                     self.bytecode.push(Byte::new(Instruction::STRINGIFY));
@@ -2988,7 +3054,7 @@ impl Compiler {
                 }
                 // Dictionary calls use the generic signature's layouts.
                 let adapter = Self::dict_adapter_name(&name);
-                if self.functions.contains_key(&adapter) {
+                if self.functions.contains_key(&adapter) || self.raw_instance_methods.contains(&name) {
                     fqns.push(adapter);
                 } else {
                     fqns.push(name);
@@ -8096,11 +8162,17 @@ impl Compiler {
                             ..
                         } => {
                             let fqn = format!("{}__{}__{}", class, ty_part, method_name);
-                            let unbox_tys =
-                                self.instance_method_unbox_tys(class, method_name, &arg_tys);
+                            let is_coro = Self::is_coro_with_body(method);
+                            // A raw method takes neither boxed arguments nor a dictionary.
+                            let raw = self.note_raw_instance_method(class, method_name, &arg_tys, &fqn, is_coro);
+                            let unbox_tys = if raw {
+                                Vec::new()
+                            } else {
+                                self.instance_method_unbox_tys(class, method_name, &arg_tys)
+                            };
                             self.pin_trait_method_pair_return(class, method_name, &arg_tys, &fqn);
                             self.pending_instance_ctx = self.instance_ctx_layout(class, &fqn);
-                            self.compile_function_output_with_name(method, fqn.clone(), &unbox_tys, 1);
+                            self.compile_function_output_with_name(method, fqn.clone(), &unbox_tys, usize::from(!raw));
                             self.emit_dict_adapter_thunk(class, method_name, &arg_tys, &fqn);
                         }
                         Expression::Method(_, body) => {
@@ -8113,8 +8185,13 @@ impl Compiler {
                             } = body.1.as_ref()
                             {
                                 let fqn = format!("{}__{}__{}", class, ty_part, method_name);
-                                let unbox_tys =
-                                    self.instance_method_unbox_tys(class, method_name, &arg_tys);
+                                let is_coro = Self::is_coro_with_body(body);
+                                let raw = self.note_raw_instance_method(class, method_name, &arg_tys, &fqn, is_coro);
+                                let unbox_tys = if raw {
+                                    Vec::new()
+                                } else {
+                                    self.instance_method_unbox_tys(class, method_name, &arg_tys)
+                                };
                                 self.pin_trait_method_pair_return(
                                     class,
                                     method_name,
@@ -8126,7 +8203,7 @@ impl Compiler {
                                     body,
                                     fqn.clone(),
                                     &unbox_tys,
-                                    1,
+                                    usize::from(!raw),
                                 );
                                 self.emit_dict_adapter_thunk(class, method_name, &arg_tys, &fqn);
                             } else {

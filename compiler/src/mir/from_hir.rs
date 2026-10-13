@@ -1513,6 +1513,9 @@ impl Lower<'_> {
             HirKind::Bin { op: BinOp::StrConcat, lhs, rhs } if let Some(&idx) = self.inp.formats.get(&id.0) => self.format(idx, &[*lhs, *rhs]),
             HirKind::Bin { lhs, rhs, .. } if let Some(info) = self.inp.aggregates.get(&id.0) => self.aggregate(id, &info.clone(), *lhs, Some(*rhs)),
             HirKind::Un { operand, .. } if let Some(info) = self.inp.aggregates.get(&id.0) => self.aggregate(id, &info.clone(), *operand, None),
+            // An operator on an instance taking its operands raw: a plain call.
+            HirKind::Bin { lhs, rhs, .. } if self.inp.calls.contains_key(&id.0) => self.call(id, &[*lhs, *rhs]),
+            HirKind::Un { operand, .. } if self.inp.calls.contains_key(&id.0) => self.call(id, &[*operand]),
             HirKind::Bin { lhs, rhs, .. } if let Some(call) = self.inp.op_calls.get(&id.0) => self.op_call(id, *lhs, *rhs, &call.clone()),
             HirKind::Bin { op: BinOp::Overloaded(sym), lhs, rhs } if self.inp.op_prims.contains(&id.0) => self.op_prim(sym, *lhs, *rhs),
             HirKind::Bin { op, lhs, rhs } => self.bin(id, *op, *lhs, *rhs),
