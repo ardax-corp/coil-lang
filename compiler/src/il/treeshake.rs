@@ -73,8 +73,17 @@ pub fn prune_unused_functions(
         .min()
         .unwrap_or(0);
     let setup_start = input.preserve_emit_start.unwrap_or(0).min(setup_end);
-    if setup_end > setup_start {
-        let (raw_s, raw_e) = emitting_range_to_raw(ops, setup_start, setup_end);
+    // Bodies emitted after setup starts (recorded spans) are not setup code,
+    // even before the first live body: a dead shared generic body there
+    // neither keeps its callees live nor survives the shake.
+    let bodies: Vec<(usize, usize)> = buf
+        .funcs()
+        .iter()
+        .filter(|f| f.code_start >= setup_start && f.code_start < f.code_end && input.functions.contains_key(&f.name))
+        .map(|f| (f.code_start, f.code_end))
+        .collect();
+    for (piece_s, piece_e) in outside_bodies(setup_start, setup_end, &bodies) {
+        let (raw_s, raw_e) = emitting_range_to_raw(ops, piece_s, piece_e);
         for op in &ops[raw_s..raw_e] {
             for target in entry_targets(op) {
                 if let Some(callee) = resolve_target(&target, label_to_name, pc_to_name)
@@ -136,20 +145,23 @@ pub fn prune_unused_functions(
             .min()
             .unwrap_or(preserve);
         if live_start > preserve {
-            dead_spans = dead_spans
-                .into_iter()
-                .flat_map(|(s, e, n)| {
-                    // Subtract [preserve, live_start) from [s, e).
-                    let mut out = Vec::new();
-                    if s < preserve {
-                        out.push((s, e.min(preserve), n.clone()));
-                    }
-                    if e > live_start {
-                        out.push((s.max(live_start), e, n));
-                    }
-                    out.into_iter().filter(|(a, b, _)| a < b)
-                })
-                .collect();
+            // Subtract each setup piece of [preserve, live_start) (the gap
+            // outside the bodies emitted there) from every dead span.
+            for (gap_s, gap_e) in outside_bodies(preserve, live_start, &bodies) {
+                dead_spans = dead_spans
+                    .into_iter()
+                    .flat_map(|(s, e, n)| {
+                        let mut out = Vec::new();
+                        if s < gap_s {
+                            out.push((s, e.min(gap_s), n.clone()));
+                        }
+                        if e > gap_e {
+                            out.push((s.max(gap_e), e, n));
+                        }
+                        out.into_iter().filter(|(a, b, _)| a < b)
+                    })
+                    .collect();
+            }
         }
     }
     dead_spans.sort_by_key(|(s, _, _)| *s);
@@ -184,6 +196,27 @@ pub fn prune_unused_functions(
     let live_names: HashSet<&str> = input.functions.keys().map(|s| s.as_str()).collect();
     buf.retain_funcs(|f| live_names.contains(f.name.as_str()));
     (dropped, shrinks)
+}
+
+/// The parts of emitting range `[start, end)` outside every span in `bodies`.
+fn outside_bodies(start: usize, end: usize, bodies: &[(usize, usize)]) -> Vec<(usize, usize)> {
+    let mut inside: Vec<(usize, usize)> = bodies.iter().copied().filter(|&(s, e)| s < end && e > start).collect();
+    inside.sort_unstable();
+    let mut out = Vec::new();
+    let mut at = start;
+    for (s, e) in inside {
+        if s > at {
+            out.push((at, s.min(end)));
+        }
+        at = at.max(e);
+        if at >= end {
+            break;
+        }
+    }
+    if at < end {
+        out.push((at, end));
+    }
+    out
 }
 
 /// Function bodies in the flat [`CodeBuf`] and the calls between them, for
