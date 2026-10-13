@@ -2,6 +2,7 @@
 // escapes; field reads and writes after that go through the object, in
 // direct MIR as in HIR emission.
 use tests::assert;
+
 class Cell {
     pub v: int,
     pub next: Option<Cell>,
