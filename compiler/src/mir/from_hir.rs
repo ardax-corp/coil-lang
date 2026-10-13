@@ -79,6 +79,22 @@ pub struct HirOpCall {
     pub shift: bool,
 }
 
+/// A parallel loop HIR emission moved into its own fork-join function
+/// (`hir_par_loop`): the loop is a plain `CALL` of it, which takes the
+/// accumulator, the live captures and the runtime bounds and returns the
+/// new accumulator.
+#[derive(Clone, Debug)]
+pub struct HirParLoop {
+    pub target: Label,
+    /// The `int` locals passed, in order.
+    pub args: Vec<HirLocal>,
+    /// The accumulator the result is stored to.
+    pub acc: HirLocal,
+    /// The loop's index local and its value after the loop, when the loop
+    /// leaves it set.
+    pub index: Option<(HirLocal, i64)>,
+}
+
 impl HirMirInput<'_> {
     /// The MIR type of a one-word value: [`word`], a class object or a
     /// scalar enum's backing word.
@@ -183,6 +199,9 @@ pub struct HirMirInput<'a> {
     pub asserts: &'a HashMap<u32, Option<u32>>,
     /// User operators that call their trait instance method.
     pub op_calls: &'a HashMap<u32, HirOpCall>,
+    /// Parallel loops emitted as a call of their fork-join function, by
+    /// loop.
+    pub par_loops: &'a HashMap<u32, HirParLoop>,
     /// User operators with no instance: the raw opcode on the operands'
     /// words (`==` / `!=`, or a number-backed scalar enum's backing word).
     pub op_prims: &'a HashSet<u32>,
@@ -1468,6 +1487,9 @@ impl Lower<'_> {
     fn value(&mut self, id: HirId) -> Result<Val, Refusal> {
         let e = self.hir.expr(id);
         let returned = std::mem::take(&mut self.ret_tail);
+        if let Some(par) = self.inp.par_loops.get(&id.0) {
+            return self.par_loop(id, par);
+        }
         match &e.kind {
             HirKind::Lit(lit) => {
                 let c = match lit {
@@ -2455,6 +2477,40 @@ impl Lower<'_> {
             None if unit => Val::Unit,
             None => Val::V(dest),
         })
+    }
+
+    /// A parallel loop as HIR emission left it: its fork-join function
+    /// called on the accumulator, the live captures and the bounds, the
+    /// result the new accumulator.
+    fn par_loop(&mut self, id: HirId, par: &HirParLoop) -> Result<Val, Refusal> {
+        let mut words = Vec::with_capacity(par.args.len());
+        for &local in &par.args {
+            if self.local_ty(local)? != MirTy::I64 {
+                return Err("parallel loop word".into());
+            }
+            let slot = self.slot(local)?;
+            words.push(self.b.use_local(slot, MirTy::I64).map_err(mir)?);
+        }
+        let abi = DenseAbi {
+            params: vec![MirTy::I64; words.len()],
+            ret: MirTy::I64,
+            ret_hi: None,
+        };
+        let (dest, _) = self.at_expr(id, |l| l.b.ins_call(par.target, words, &abi).map_err(mir))?;
+        if self.local_ty(par.acc)? != MirTy::I64 {
+            return Err("parallel loop word".into());
+        }
+        let acc = self.slot(par.acc)?;
+        self.b.def_local(acc, dest).map_err(mir)?;
+        if let Some((index, after)) = par.index {
+            if self.local_ty(index)? != MirTy::I64 {
+                return Err("parallel loop word".into());
+            }
+            let slot = self.slot(index)?;
+            let v = self.b.ins_const(MirConst::I64(after)).map_err(mir)?;
+            self.b.def_local(slot, v).map_err(mir)?;
+        }
+        Ok(Val::Unit)
     }
 
     /// `lhs op rhs` through the operand type's instance method: each

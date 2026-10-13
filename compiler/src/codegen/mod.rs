@@ -589,6 +589,11 @@ pub struct Compiler {
     loop_par_sites: crate::typechecking::LoopParSites,
     /// Chunk workers emitted so far, for `__coil_par_loop_*` naming.
     loop_par_helpers: usize,
+    /// Fork-join functions of outlined parallel loops emitted so far, for
+    /// `__coil_par_loop_fork_*` naming.
+    loop_par_forks: usize,
+    /// A body's outlined parallel loops, emitted after its function record.
+    hir_par_tail: Option<Box<compiler::emit_hir::HirParTail>>,
     /// When false, skip auto fork-join even if `COIL_AUTO_PAR` is on.
     auto_par: bool,
 
@@ -768,6 +773,8 @@ impl Default for Compiler {
             par_workers: HashSet::new(),
             loop_par_sites: crate::typechecking::LoopParSites::new(),
             loop_par_helpers: 0,
+            loop_par_forks: 0,
+            hir_par_tail: None,
             auto_par: true,
             operand_stack_slots: crate::typechecking::DEFAULT_OPERAND_STACK_SLOTS,
             opt_options: crate::il::opt::OptimizeOptions::default(),
