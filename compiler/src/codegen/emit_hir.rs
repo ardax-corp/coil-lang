@@ -315,8 +315,11 @@ struct HirEmit {
     /// String table index of each `string` literal, by expression.
     string_lits: HashMap<u32, u32>,
     /// String table index of the format string of each `format` call
-    /// whose arguments all print as words (no `%v`), by call.
+    /// whose arguments all print as words, by call (`%v` as `%s`).
     format_strs: HashMap<u32, u32>,
+    /// Per argument of such a `format` call (after the format string): the
+    /// raw `show` entry a `%v` argument goes through, `None` for a word.
+    format_shows: HashMap<u32, Vec<Option<crate::il::Label>>>,
     /// Each `assert` call: the string table index of its default message,
     /// or `None` when it passes its own.
     asserts: HashMap<u32, Option<u32>>,
@@ -1164,6 +1167,7 @@ impl Compiler {
             statics: &emit.plan.statics,
             consts: &emit.plan.consts,
             formats: &emit.format_strs,
+            format_shows: &emit.format_shows,
             asserts: &emit.asserts,
             op_calls: &emit.op_calls,
             par_loops: &emit.par_calls,
@@ -2133,6 +2137,7 @@ impl Compiler {
             into_iters: HashMap::new(),
             string_lits: HashMap::new(),
             format_strs: HashMap::new(),
+            format_shows: HashMap::new(),
             asserts: HashMap::new(),
             op_calls: HashMap::new(),
             op_prims: HashSet::new(),
@@ -4153,6 +4158,28 @@ impl Compiler {
     }
 
     /// `Show` the value on top of the stack, leaving its string.
+    /// [`Self::hir_show`], and the entry it called when that is one plain
+    /// `CALL` of a raw `show` on the value's own word (a heap or immediate
+    /// word, no dictionary): direct MIR makes it the same call.
+    fn hir_show_target(&mut self, hir: &HirBody, arg: HirId) -> Option<crate::il::Label> {
+        let start = self.bytecode.il_mut().raw_len();
+        self.hir_show(hir, arg);
+        let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, arg)?);
+        if self.value_layout(&ty) != ValueLayout::Boxed {
+            return None;
+        }
+        match self.bytecode.il_mut().ops_slice_mut()[start..] {
+            [IlOp::Entry {
+                kind: crate::il::EntryKind::Call,
+                target,
+                arity: 1,
+                ret_words: 1,
+                ..
+            }] => Some(target),
+            _ => None,
+        }
+    }
+
     fn hir_show(&mut self, hir: &HirBody, arg: HirId) {
         if let Some((dict, method)) = self.hir_bound_show(hir, arg) {
             self.bytecode.push_load(dict);
@@ -7103,12 +7130,19 @@ impl Compiler {
                         let staged = lower::shows_through_temps(hir, &self.checker, hir.expr(id))
                             || self.hir_stages_args(hir, emit, args, depth);
                         let mut temps = Vec::new();
+                        // Each `%v` argument's raw `show` entry, for direct MIR.
+                        let mut shows = Vec::with_capacity(args.len().saturating_sub(1));
+                        let mut shows_ok = true;
                         if staged {
                             for (i, (&arg, &param)) in args.iter().zip(&params).enumerate().skip(1) {
                                 self.hir_value(hir, emit, arg, &Rep::Word(param), 0);
                                 if specs.get(i - 1) == Some(&'v') {
                                     self.expr_depth = 0;
-                                    self.hir_show(hir, arg);
+                                    let show = self.hir_show_target(hir, arg);
+                                    shows_ok &= show.is_some();
+                                    shows.push(show);
+                                } else {
+                                    shows.push(None);
                                 }
                                 self.expr_depth = 0;
                                 let tmp = self.alloc_temp_slot();
@@ -7117,10 +7151,6 @@ impl Compiler {
                             }
                         }
                         self.emit_string_literal(&fmt);
-                        if !specs.contains(&'v') {
-                            let idx = self.intern_string(unescape_coil_string(&fmt));
-                            emit.format_strs.insert(id.0, idx);
-                        }
                         for &tmp in &temps {
                             self.bytecode.push_load(tmp);
                         }
@@ -7130,7 +7160,18 @@ impl Compiler {
                                 // `Show::show` on the value: a call, so it
                                 // keeps the operands below it.
                                 self.expr_depth = depth + i as u32;
-                                self.hir_show(hir, arg);
+                                let show = self.hir_show_target(hir, arg);
+                                shows_ok &= show.is_some();
+                                shows.push(show);
+                            } else {
+                                shows.push(None);
+                            }
+                        }
+                        if shows_ok {
+                            let idx = self.intern_string(unescape_coil_string(&fmt));
+                            emit.format_strs.insert(id.0, idx);
+                            if specs.contains(&'v') {
+                                emit.format_shows.insert(id.0, shows);
                             }
                         }
                         self.bytecode
