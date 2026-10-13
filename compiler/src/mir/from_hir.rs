@@ -217,6 +217,9 @@ pub struct HirMirInput<'a> {
     /// `format` calls with only word arguments, and string `+` (as
     /// `"%s%s"`): the format string's index.
     pub formats: &'a HashMap<u32, u32>,
+    /// Per argument of such a `format` call: the raw `show` entry a `%v`
+    /// argument is first passed through (its string then formats as `%s`).
+    pub format_shows: &'a HashMap<u32, Vec<Option<Label>>>,
     /// `assert` calls: the default message's string table index, `None`
     /// when the call passes its own.
     pub asserts: &'a HashMap<u32, Option<u32>>,
@@ -1737,7 +1740,7 @@ impl Lower<'_> {
             HirKind::Global { .. } | HirKind::Lambda { .. } if let Some(f) = self.inp.fn_values.get(&id.0) => self.fn_value(id, &f.clone()),
             HirKind::Global { .. } => self.global(id),
             // `a + b` on strings is `format("%s%s", a, b)`.
-            HirKind::Bin { op: BinOp::StrConcat, lhs, rhs } if let Some(&idx) = self.inp.formats.get(&id.0) => self.format(idx, &[*lhs, *rhs]),
+            HirKind::Bin { op: BinOp::StrConcat, lhs, rhs } if let Some(&idx) = self.inp.formats.get(&id.0) => self.format(id, idx, &[*lhs, *rhs]),
             HirKind::Bin { lhs, rhs, .. } if let Some(info) = self.inp.aggregates.get(&id.0) => self.aggregate(id, &info.clone(), *lhs, Some(*rhs)),
             HirKind::Un { operand, .. } if let Some(info) = self.inp.aggregates.get(&id.0) => self.aggregate(id, &info.clone(), *operand, None),
             // An operator on an instance taking its operands raw: a plain call.
@@ -1748,7 +1751,7 @@ impl Lower<'_> {
             HirKind::Bin { op, lhs, rhs } => self.bin(id, *op, *lhs, *rhs),
             HirKind::Call { args, .. } if let (Some(&fixed), [arg]) = (self.inp.lens.get(&id.0), args.as_slice()) => self.len(*arg, fixed),
             HirKind::Call { args, .. } if self.inp.pushes.contains(&id.0) => self.push(args),
-            HirKind::Call { args, .. } if let Some(&idx) = self.inp.formats.get(&id.0) => self.format(idx, args.get(1..).unwrap_or_default()),
+            HirKind::Call { args, .. } if let Some(&idx) = self.inp.formats.get(&id.0) => self.format(id, idx, args.get(1..).unwrap_or_default()),
             HirKind::Call { args, .. } if let Some(&default) = self.inp.asserts.get(&id.0) => self.assert(id, args, default),
             HirKind::Call { args, .. } if self.inp.hosts.contains_key(&id.0) => self.host(id, args),
             HirKind::Call { callee: Callee::Value(f), args } if self.inp.value_calls.contains(&id.0) => self.call_value(id, *f, args),
@@ -3522,14 +3525,27 @@ impl Lower<'_> {
 
     /// `format(fmt, args)` with word arguments: `FORMAT` of the format string
     /// and each argument, a heap string the collector may see at once.
-    fn format(&mut self, fmt: u32, args: &[HirId]) -> Result<Val, Refusal> {
+    fn format(&mut self, id: HirId, fmt: u32, args: &[HirId]) -> Result<Val, Refusal> {
         // The string first, as emission loads it, so the arguments land in
         // the registers after it.
         let fmt = self.b.ins_string(fmt).map_err(mir)?;
+        let shows = self.inp.format_shows.get(&id.0);
         let mut words = Vec::with_capacity(args.len());
-        for &arg in args {
+        for (i, &arg) in args.iter().enumerate() {
             let Some(v) = self.word(arg)? else {
                 return Ok(Val::Never);
+            };
+            // `%v`: the value's `show`, a plain call of its raw entry.
+            let v = match shows.and_then(|s| s.get(i).copied().flatten()) {
+                Some(target) => {
+                    let abi = DenseAbi {
+                        params: vec![self.b.value_ty(v)],
+                        ret: MirTy::HeapRef,
+                        ret_hi: None,
+                    };
+                    self.at_expr(id, |l| l.b.ins_call(target, vec![v], &abi).map_err(mir))?.0
+                }
+                None => v,
             };
             words.push(v);
         }
