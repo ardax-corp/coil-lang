@@ -5237,11 +5237,35 @@ impl Compiler {
         box_tag: Option<u32>,
         op: impl FnOnce(&mut crate::hir::synth::Synth, Vec<crate::hir::HirId>) -> crate::hir::HirId,
     ) {
+        self.emit_builtin_body(fqn, params, ret, box_tag, true, op);
+    }
+
+    /// [`Self::emit_builtin_entry`]'s body for a method called by name
+    /// (`CALL`) rather than through a dictionary: no dictionary word.
+    fn emit_builtin_method(
+        &mut self,
+        fqn: &str,
+        params: &[(Ty, Option<u32>)],
+        ret: Ty,
+        op: impl FnOnce(&mut crate::hir::synth::Synth, Vec<crate::hir::HirId>) -> crate::hir::HirId,
+    ) {
+        self.emit_builtin_body(fqn, params, ret, None, false, op);
+    }
+
+    fn emit_builtin_body(
+        &mut self,
+        fqn: &str,
+        params: &[(Ty, Option<u32>)],
+        ret: Ty,
+        box_tag: Option<u32>,
+        dict_entry: bool,
+        op: impl FnOnce(&mut crate::hir::synth::Synth, Vec<crate::hir::HirId>) -> crate::hir::HirId,
+    ) {
         if self.functions.contains_key(fqn) {
             return;
         }
         let hir = crate::hir::synth::builtin_entry(&self.checker, fqn, params, ret, box_tag, op);
-        self.emit_synth_fn(fqn, &hir, HashMap::new(), true);
+        self.emit_synth_fn(fqn, &hir, HashMap::new(), dict_entry);
     }
 
     /// Thunk for `Vec::{name}` stamped with element kind `stamp`
@@ -5294,12 +5318,12 @@ impl Compiler {
             }
             let params: Vec<_> = params.iter().map(|t| (t.clone(), None)).collect();
             let fqn = format!("{owner}::{name}");
-            compiler.emit_builtin_entry(&fqn, &params, ret.clone(), None, |b, a| b.call(native, a, ret.clone()));
+            compiler.emit_builtin_method(&fqn, &params, ret.clone(), |b, a| b.call(native, a, ret.clone()));
         };
 
         // static fn new() -> Vec<T>
         let vec_ty = vec.clone();
-        self.emit_builtin_entry(&format!("{owner}::new"), &[], vec.clone(), None, |b, _| {
+        self.emit_builtin_method(&format!("{owner}::new"), &[], vec.clone(), |b, _| {
             b.push(HirKind::Make { kind: MakeKind::Array, args: Vec::new() }, vec_ty)
         });
         host(self, "with_capacity", "vec_with_capacity", std::slice::from_ref(&int), &vec);
@@ -5328,7 +5352,7 @@ impl Compiler {
                 _ => Vec::new(),
             };
             let vec_ty = vec.clone();
-            self.emit_builtin_entry(&fqn, &params, vec.clone(), None, |b, a| {
+            self.emit_builtin_method(&fqn, &params, vec.clone(), |b, a| {
                 let made = match native {
                     Some(native) => b.call(native, a, vec_ty.clone()),
                     None => b.push(HirKind::Make { kind: MakeKind::Array, args: Vec::new() }, vec_ty.clone()),
@@ -5340,12 +5364,12 @@ impl Compiler {
         // fn push(x): inlined `ArrayPush` (`v.push(x)` on the `Vec`, which
         // resolves to this entry, reserved first).
         self.reserve_function_entry(format!("{owner}::push"));
-        self.emit_builtin_entry(&format!("{owner}::push"), &[(vec.clone(), None), (int.clone(), None)], unit.clone(), None, |b, a| {
+        self.emit_builtin_method(&format!("{owner}::push"), &[(vec.clone(), None), (int.clone(), None)], unit.clone(), |b, a| {
             let callee = crate::hir::Callee::Method { name: "push".to_string() };
             b.push(HirKind::Call { callee, args: a }, unit.clone())
         });
         // fn len(): `ArrayLen`.
-        self.emit_builtin_entry(&format!("{owner}::len"), &[(vec.clone(), None)], int.clone(), None, |b, a| {
+        self.emit_builtin_method(&format!("{owner}::len"), &[(vec.clone(), None)], int.clone(), |b, a| {
             b.call("len", a, int.clone())
         });
         host(self, "capacity", "vec_capacity", std::slice::from_ref(&vec), &int);
