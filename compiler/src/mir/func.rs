@@ -403,7 +403,8 @@ impl MirFunc {
                 let Some(spec) = super::host_allow::host_edge_spec(*native_id) else {
                     return Err(format!("{dest} host {native_id} not a typed edge"));
                 };
-                if spec.args.len() != args.len() {
+                let variadic = super::host_allow::host_variadic(*native_id) && args.len() > spec.args.len();
+                if spec.args.len() != args.len() && !variadic {
                     return Err(format!("{dest} host arity"));
                 }
                 for (i, (a, ty)) in args.iter().zip(spec.args.iter()).enumerate() {

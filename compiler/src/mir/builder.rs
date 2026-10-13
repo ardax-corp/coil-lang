@@ -378,7 +378,8 @@ impl MirBuilder {
             super::host_allow::host_spec(native_id)
         }
         .ok_or_else(|| MirError::msg(format!("host {native_id} is not a typed MIR edge")))?;
-        if spec.args.len() != args.len() {
+        let variadic = super::host_allow::host_variadic(native_id) && args.len() > spec.args.len();
+        if spec.args.len() != args.len() && !variadic {
             return Err(MirError::msg(format!(
                 "host {} arity {} vs {}",
                 spec.name,
@@ -387,7 +388,9 @@ impl MirBuilder {
             )));
         }
         let args: Vec<ValueId> = args.into_iter().map(|v| self.resolve(v)).collect();
-        for (i, (&a, &ty)) in args.iter().zip(spec.args).enumerate() {
+        // A variadic native's extra arguments are Value words.
+        let extra = std::iter::repeat_n(MirTy::I64, args.len().saturating_sub(spec.args.len()));
+        for (i, (&a, ty)) in args.iter().zip(spec.args.iter().copied().chain(extra)).enumerate() {
             let actual = self.resolve_ty(a);
             if !super::host_allow::host_arg_ok(native_id, ty, actual) {
                 return Err(MirError::msg(format!(
