@@ -3765,8 +3765,8 @@ impl Compiler {
         let joined = b.local("__coil_par_arm0", arm_rets[0].clone(), LocalKind::Pattern);
         let mut on_handle = Vec::new();
         let mut held = vec![joined];
-        for i in 1..site.arms.len() {
-            let t = b.local(&format!("__coil_par_arm{i}"), arm_rets[i].clone(), LocalKind::Temp);
+        for (i, r) in arm_rets.iter().enumerate().skip(1) {
+            let t = b.local(&format!("__coil_par_arm{i}"), r.clone(), LocalKind::Temp);
             let value = local_arm(&mut b, i);
             on_handle.push(b.let_(t, value));
             held.push(t);
