@@ -101,7 +101,7 @@ pub fn mir_fuse_takes(name: &str) -> bool {
 
 pub fn mir_fuse_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("COIL_MIR_FUSE").is_some_and(|v| v != "0"))
+    *ON.get_or_init(|| std::env::var_os("COIL_MIR_FUSE").is_some_and(|v| !v.is_empty() && v != "0"))
 }
 
 /// `official_entry` is `IlFunc.meta.entry` (CALL target). New labels must
