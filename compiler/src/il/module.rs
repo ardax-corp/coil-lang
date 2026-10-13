@@ -229,6 +229,15 @@ impl IlModule {
                 jump_entries.insert(old, new);
             }
         }
+        // Prologue and epilogue are copied verbatim, so their labels keep
+        // their ids; a body's opts may have minted the same id, and the
+        // first-wins body map must not claim it (the prologue `JMP` to the
+        // static-init setup would land in that body).
+        for op in self.prologue.iter().chain(module.epilogue.iter()) {
+            if let IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) = op {
+                prior_labels.insert(*id, *id);
+            }
+        }
         let flat_label_ids: std::collections::HashSet<u32> =
             prior_labels.values().copied().collect();
         for (idx, (start, end)) in segment_ranges.iter().copied().enumerate() {
