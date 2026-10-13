@@ -757,6 +757,56 @@ impl Compiler {
         lowered
     }
 
+    /// Lower a compiler-made body ([`crate::hir::synth`]) into the current
+    /// function, then build its direct MIR: planned and emitted as any
+    /// other body, with no HIR passes or inlining. `calls` are the callees
+    /// the checker has no signature for; `start` runs once the body plans,
+    /// before its first op. The current frame (`context.variables`) must be
+    /// empty. Its ops carry no source location. `false` (nothing emitted)
+    /// when the body does not plan.
+    pub(super) fn lower_synth_hir(
+        &mut self,
+        hir: &HirBody,
+        calls: HashMap<String, (Vec<ValueLayout>, ValueLayout)>,
+        start: impl FnOnce(&mut Self),
+    ) -> bool {
+        self.hir_refusal = None;
+        let prev_calls = self.hir_synth_calls.replace(calls);
+        let module = self.hir_module.take();
+        // The frame starts with the parameters, as a declared function's.
+        for &param in &hir.params {
+            self.context.variables.intern(hir.local(param).name.clone());
+        }
+        let plan = lower::refusal(hir, &self.checker).map_or_else(|| self.plan_hir_body(hir), Err);
+        let lowered = match plan {
+            Ok(mut emit) => {
+                start(self);
+                let il_start = self.bytecode.il_mut().raw_len();
+                if let Some(root) = hir.root {
+                    self.hir_effect(hir, &mut emit, root);
+                    self.hir_cold = std::mem::take(&mut emit.cold);
+                }
+                for op in &mut self.bytecode.il_mut().ops_slice_mut()[il_start..] {
+                    op.set_loc(DebugLoc::unknown());
+                }
+                self.hir_mir_why = None;
+                self.hir_mir = self.hir_lower_mir(hir, &emit, None);
+                self.expr_depth = 0;
+                true
+            }
+            Err(reason) => {
+                self.hir_refusal = Some(reason);
+                if std::env::var_os("COIL_HIR_WHY").is_some() {
+                    eprintln!("hir fallback `{}`: {reason}", hir.name);
+                }
+                false
+            }
+        };
+        self.hir_module = module;
+        self.hir_synth_calls = prev_calls;
+        lowered
+    }
+
     /// Hand the MIR of the body just lowered to its function record.
     pub(super) fn attach_hir_mir(&mut self) {
         if let Some(func) = self.hir_mir.take() {
@@ -2293,6 +2343,26 @@ impl Compiler {
         name: &str,
         argc: usize,
     ) -> Result<HirCall, &'static str> {
+        // A compiler-made body's call of a function the checker has no
+        // signature for.
+        if let Some((params, ret)) = self.hir_synth_calls.as_ref().and_then(|calls| calls.get(name)) {
+            if params.len() != argc {
+                return Err("callee-arity");
+            }
+            return Ok(HirCall {
+                key: name.to_string(),
+                pair: None,
+                params: params.clone(),
+                ret: *ret,
+                method: false,
+                mono: false,
+                builtin: None,
+                generic: None,
+                instance: None,
+                ranges: Vec::new(),
+                mono_of: None,
+            });
+        }
         let node = hir.expr(call);
         let (start, end) = node.span;
         let user_len = name == "len" && matches!(&node.kind, HirKind::Call { args, .. } if args.len() == 1 && lower::user_len(hir, &self.checker, args[0]));
@@ -9560,7 +9630,8 @@ impl Compiler {
     /// above the site's cutoff, else the sequential function).
     fn hir_par_call(&mut self, hir: &HirBody, emit: &mut HirEmit, key: &str, args: &[HirId], depth: u32) -> bool {
         let short = Self::par_shape_key(key);
-        if args.is_empty() || !self.par_shapes.contains_key(short) {
+        // A fork-join worker calls the sequential functions it forks.
+        if args.is_empty() || !self.par_shapes.contains_key(short) || self.hir_synth_calls.is_some() {
             return false;
         }
         let spec = crate::typechecking::par_worker_name(short);

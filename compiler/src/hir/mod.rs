@@ -25,6 +25,7 @@ pub mod lower;
 pub mod match_tree;
 pub mod print;
 pub mod stage;
+pub mod synth;
 pub mod cse;
 pub mod fold;
 pub mod licm;
