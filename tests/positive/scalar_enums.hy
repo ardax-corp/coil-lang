@@ -66,7 +66,7 @@ test("string float bool scalar") {
     let mode: string = Mode::Fast;
     assert!(mode == "fast");
     assert!(Ratio::Half + 0.0 == 0.5);
-    assert!(Switch::On);
+    assert!(Switch::On == true);
     let m = match Mode::Slow {
         Mode::Fast => 1,
         Mode::Slow => 2,
