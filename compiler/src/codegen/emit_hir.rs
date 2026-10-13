@@ -4776,6 +4776,9 @@ impl Compiler {
                 args,
             } => self.hir_natural(hir, emit, args[0]),
             HirKind::Builtin { op: Builtin::TypeOf, .. } => Some(BOXED),
+            HirKind::Builtin { op: Builtin::Unbox { .. }, .. } => {
+                Some(Rep::Word(Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |ty| self.value_layout(ty))))
+            }
             // A value `match` (`x ?? y`) yields each arm at the layout asked
             // for; its own type's is the natural one.
             HirKind::Match { .. } => Self::hir_ty(hir, id).map(|ty| Rep::Word(self.value_layout(ty))),
@@ -5889,6 +5892,10 @@ impl Compiler {
             } => {
                 self.hir_typeof(hir, args[0]).ok_or("typeof-type")?;
             }
+            HirKind::Builtin {
+                op: Builtin::Unbox { .. },
+                args,
+            } => self.hir_check_value(hir, emit, args[0], &BOXED)?,
             HirKind::Call { args, .. } => {
                 let call = emit.plan.calls.get(&id.0).ok_or("callee")?;
                 let args = match call.builtin {
@@ -7127,6 +7134,13 @@ impl Compiler {
                 let idx = self.intern_string(&name);
                 emit.string_lits.insert(id.0, idx);
                 self.bytecode.push_string(idx);
+            }
+            HirKind::Builtin {
+                op: Builtin::Unbox { tag },
+                args,
+            } => {
+                self.hir_value(hir, emit, args[0], &BOXED, depth);
+                self.bytecode.push_unbox_value(*tag);
             }
             HirKind::Call { args, .. } if emit.plan.lens.contains_key(&id.0) => match emit.plan.lens[&id.0] {
                 // A fixed size: a local is not read, anything else is
