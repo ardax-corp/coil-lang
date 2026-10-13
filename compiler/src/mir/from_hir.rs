@@ -1050,6 +1050,18 @@ impl Lower<'_> {
         }
     }
 
+    /// The niche layout of `id`'s word of type `ty`: a `NicheRes` word is
+    /// a niche `Result`, a `NicheOpt` one an `Option` or a `Result<(), E>`.
+    fn niche_layout(&self, id: HirId, ty: MirTy) -> Result<ValueLayout, Refusal> {
+        let result = self.expr_ty(id).is_some_and(|t| crate::typechecking::ty::is_result_ty(strip_readonly(t)));
+        match ty {
+            MirTy::NicheRes => Ok(ValueLayout::NicheResult),
+            MirTy::NicheOpt if result => Ok(ValueLayout::NicheUnitResult),
+            MirTy::NicheOpt => Ok(ValueLayout::NicheOption),
+            _ => Err("niche layout".into()),
+        }
+    }
+
     /// A niche `Option` / `Result` word boxed to its `ObjEnum`, as HIR
     /// emission's `emit_niche_option_to_boxed` and siblings.
     fn box_niche(&mut self, layout: ValueLayout, w: ValueId) -> Result<ValueId, Refusal> {
@@ -2864,6 +2876,13 @@ impl Lower<'_> {
         };
         let (lt, rt) = (self.b.value_ty(l), self.b.value_ty(r));
         if lt == MirTy::HeapRef && rt == MirTy::HeapRef && matches!(sym, "==" | "!=") {
+            return Ok(Val::V(self.b.ins_str_eq(l, r, sym == "!=").map_err(mir)?));
+        }
+        // Niche `Option` / `Result` words compare as HIR emission pushes
+        // them: each boxed to its `ObjEnum`, then the VM's structural `EQ`.
+        if lt == rt && matches!(lt, MirTy::NicheOpt | MirTy::NicheRes) && matches!(sym, "==" | "!=") {
+            let l = self.box_niche(self.niche_layout(lhs, lt)?, l)?;
+            let r = self.box_niche(self.niche_layout(rhs, rt)?, r)?;
             return Ok(Val::V(self.b.ins_str_eq(l, r, sym == "!=").map_err(mir)?));
         }
         if lt != rt || !matches!(lt, MirTy::I64 | MirTy::F64) {
