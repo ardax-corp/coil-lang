@@ -5278,47 +5278,31 @@ impl Compiler {
             methods.insert(name.to_string(), format!("{owner}::{name}"));
         }
 
-        let emit_host = |compiler: &mut Self, fqn: String, native: &str, slots: &[u32]| {
-            if compiler.functions.contains_key(&fqn) {
+        use crate::hir::{HirKind, MakeKind};
+        use crate::typechecking::ty as coil_ty;
+        // A shared body over any `T`: its words pass as they are, so an
+        // `int` element stands in (no element kind stamped, results in the
+        // boxed layout).
+        let int = coil_ty::int();
+        let vec = coil_ty::vec_app_ty(int.clone());
+        let opt = coil_ty::option_app_ty(int.clone());
+        let unit = coil_ty::unit();
+        let host = |compiler: &mut Self, name: &str, native: &str, params: &[Ty], ret: &Ty| {
+            if compiler.native_id(native).is_none() {
                 return;
             }
-            let Some(native_id) = compiler.native_id(native) else {
-                return;
-            };
-            compiler.bind_function_entry(fqn);
-            compiler
-                .bytecode
-                .push(Byte::new(Instruction::CONST).with_value_u32(native_id as u32));
-            for &slot in slots {
-                compiler.bytecode.push_load(slot);
-            }
-            // Shared thunk: T is unknown, so HostInvoke stays Boxed.
-            // Heap-niche pop/remove HostInvoke at the call site; int /
-            // boxed Vec keep this CALL + layout-0 body.
-            compiler.bytecode.push_host_invoke(slots.len() as u32);
-            compiler.bytecode.push_return();
+            let params: Vec<_> = params.iter().map(|t| (t.clone(), None)).collect();
+            let fqn = format!("{owner}::{name}");
+            compiler.emit_builtin_entry(&fqn, &params, ret.clone(), None, |b, a| b.call(native, a, ret.clone()));
         };
 
         // static fn new() -> Vec<T>
-        {
-            let fqn = format!("{owner}::new");
-            if !self.functions.contains_key(&fqn) {
-                self.bind_function_entry(fqn);
-                self.bytecode.push_make_array(0);
-                self.bytecode.push_return();
-            }
-        }
-
-        // static fn with_capacity(n) -> Vec<T>
-        emit_host(
-            self,
-            format!("{owner}::with_capacity"),
-            "vec_with_capacity",
-            &[0],
-        );
-
-        // static fn from(arr) -> Vec<T>
-        emit_host(self, format!("{owner}::from"), "vec_from_array", &[0]);
+        let vec_ty = vec.clone();
+        self.emit_builtin_entry(&format!("{owner}::new"), &[], vec.clone(), None, |b, _| {
+            b.push(HirKind::Make { kind: MakeKind::Array, args: Vec::new() }, vec_ty)
+        });
+        host(self, "with_capacity", "vec_with_capacity", std::slice::from_ref(&int), &vec);
+        host(self, "from", "vec_from_array", &[coil_ty::array(int.clone())], &vec);
 
         // Constructors for a ground pointer element type (`Vec<Node>`) or a
         // byte / bool one: the same bodies, then `TagArrayKind` so marking
@@ -5327,72 +5311,49 @@ impl Compiler {
         for (stamp, (name, native)) in [common::WORD_POINTER, common::WORD_BYTE]
             .into_iter()
             .flat_map(|stamp| {
-                [
-                    ("new", None),
-                    ("with_capacity", Some("vec_with_capacity")),
-                    ("from", Some("vec_from_array")),
-                ]
-                .map(|ctor| (stamp, ctor))
+                [("new", None), ("with_capacity", Some("vec_with_capacity")), ("from", Some("vec_from_array"))]
+                    .map(|ctor| (stamp, ctor))
             })
         {
             let Some(fqn) = Self::stamped_vec_ctor_name(name, stamp) else {
                 continue;
             };
-            if self.functions.contains_key(&fqn) {
+            if native.is_some_and(|n| self.native_id(n).is_none()) {
                 continue;
             }
-            let native_id = match native {
-                Some(native) => match self.native_id(native) {
-                    Some(id) => Some(id),
-                    None => continue,
-                },
-                None => None,
+            let params: Vec<(Ty, Option<u32>)> = match name {
+                "with_capacity" => vec![(int.clone(), None)],
+                "from" => vec![(coil_ty::array(int.clone()), None)],
+                _ => Vec::new(),
             };
-            self.bind_function_entry(fqn);
-            match native_id {
-                Some(id) => {
-                    self.bytecode
-                        .push(Byte::new(Instruction::CONST).with_value_u32(id as u32));
-                    self.bytecode.push_load(0);
-                    self.bytecode.push_host_invoke(1);
-                }
-                None => self.bytecode.push_make_array(0),
-            }
-            self.bytecode
-                .push(Byte::new(Instruction::TagArrayKind).with_operand_u32(stamp as u32));
-            self.bytecode.push_return();
+            let vec_ty = vec.clone();
+            self.emit_builtin_entry(&fqn, &params, vec.clone(), None, |b, a| {
+                let made = match native {
+                    Some(native) => b.call(native, a, vec_ty.clone()),
+                    None => b.push(HirKind::Make { kind: MakeKind::Array, args: Vec::new() }, vec_ty.clone()),
+                };
+                b.builtin(crate::hir::Builtin::TagArrayKind { kind: stamp }, vec![made], vec_ty)
+            });
         }
 
-        // fn push(x)
-        {
-            let fqn = format!("{owner}::push");
-            if !self.functions.contains_key(&fqn) {
-                self.bind_function_entry(fqn);
-                self.bytecode.push_load(0);
-                self.bytecode.push_load(1);
-                self.bytecode.push(Byte::new(Instruction::ArrayPush));
-                self.bytecode.push_pop();
-                self.bytecode.push_const(0);
-                self.bytecode.push_return();
-            }
-        }
-
-        // fn len() / capacity() / clear() / pop() / remove(i) / reserve(n) / insert(i, x)
-        {
-            let fqn = format!("{owner}::len");
-            if !self.functions.contains_key(&fqn) {
-                self.bind_function_entry(fqn);
-                self.bytecode.push_load(0);
-                self.bytecode.push(Byte::new(Instruction::ArrayLen));
-                self.bytecode.push_return();
-            }
-        }
-        emit_host(self, format!("{owner}::capacity"), "vec_capacity", &[0]);
-        emit_host(self, format!("{owner}::clear"), "vec_clear", &[0]);
-        emit_host(self, format!("{owner}::pop"), "vec_pop", &[0]);
-        emit_host(self, format!("{owner}::remove"), "vec_remove", &[0, 1]);
-        emit_host(self, format!("{owner}::reserve"), "vec_reserve", &[0, 1]);
-        emit_host(self, format!("{owner}::insert"), "vec_insert", &[0, 1, 2]);
+        // fn push(x): inlined `ArrayPush` (`v.push(x)` on the `Vec`, which
+        // resolves to this entry, reserved first).
+        self.reserve_function_entry(format!("{owner}::push"));
+        self.emit_builtin_entry(&format!("{owner}::push"), &[(vec.clone(), None), (int.clone(), None)], unit.clone(), None, |b, a| {
+            let callee = crate::hir::Callee::Method { name: "push".to_string() };
+            b.push(HirKind::Call { callee, args: a }, unit.clone())
+        });
+        // fn len(): `ArrayLen`.
+        self.emit_builtin_entry(&format!("{owner}::len"), &[(vec.clone(), None)], int.clone(), None, |b, a| {
+            b.call("len", a, int.clone())
+        });
+        host(self, "capacity", "vec_capacity", std::slice::from_ref(&vec), &int);
+        // A `()` native returns its own word, read as an `int`, as it was.
+        host(self, "clear", "vec_clear", std::slice::from_ref(&vec), &int);
+        host(self, "pop", "vec_pop", std::slice::from_ref(&vec), &opt);
+        host(self, "remove", "vec_remove", &[vec.clone(), int.clone()], &opt);
+        host(self, "reserve", "vec_reserve", &[vec.clone(), int.clone()], &int);
+        host(self, "insert", "vec_insert", &[vec.clone(), int.clone(), int.clone()], &int);
         self.emit_range_method_thunks();
     }
 
