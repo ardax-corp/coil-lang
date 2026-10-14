@@ -683,9 +683,10 @@ fn is_var(ty: &Ty) -> bool {
 }
 
 /// A generic body moves its type parameter values but never reads them:
-/// no operator, field, index or call takes one (any of them could read a
-/// box as its payload). The frame maps list the words it keeps live past
-/// a collecting instruction ([`super::gc::live_opaque_words`]).
+/// no operator, field, index or builtin takes one (any of them could read
+/// a box as its payload). Calls pass them on as they are. The frame maps
+/// list the words it keeps live past a collecting instruction
+/// ([`super::gc::live_opaque_words`]).
 fn opaque_moves_only(hir: &HirBody) -> Result<(), Refusal> {
     let var = |id: &HirId| hir.expr(*id).ty.as_ref().is_some_and(is_var);
     let any = hir.locals.iter().any(|l| l.ty.as_ref().is_some_and(is_var)) || hir.exprs.iter().any(|e| e.ty.as_ref().is_some_and(is_var));
@@ -700,7 +701,11 @@ fn opaque_moves_only(hir: &HirBody) -> Result<(), Refusal> {
             // A made object holds the word as HIR emission's does (the body
             // makes them without word kinds).
             HirKind::Make { .. } => false,
-            HirKind::Call { args, .. } | HirKind::Builtin { args, .. } => args.iter().any(var),
+            // A call passes the word as it is to a parameter of the same
+            // type variable (a generic callee or a closure's), as HIR
+            // emission does; the callee reads nothing of it either.
+            HirKind::Call { .. } => false,
+            HirKind::Builtin { args, .. } => args.iter().any(var),
             HirKind::Named { value, .. } | HirKind::Yield { value, .. } => var(value),
             HirKind::Append { base, value } => var(base) || var(value),
             HirKind::Assign { place, value } => var(value) && !matches!(hir.expr(*place).kind, HirKind::Local(_)),
