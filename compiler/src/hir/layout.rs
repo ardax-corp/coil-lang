@@ -207,6 +207,11 @@ pub(crate) fn is_scalar_enum_ty(checker: &Checker, ty: &Ty) -> bool {
     }
 }
 
+/// The enum `ty` names when it is scalar-backed ([`is_scalar_enum_ty`]).
+pub(crate) fn scalar_enum_name<'t>(checker: &Checker, ty: &'t Ty) -> Option<&'t str> {
+    is_scalar_enum_ty(checker, ty).then(|| enum_name(strip_readonly(ty))).flatten()
+}
+
 /// True when `ty` is a ground heap object, so a niche can use `0` / bit 0.
 pub fn niche_heap_only(checker: &Checker, ty: &Ty) -> bool {
     let ty = strip_readonly(ty);
