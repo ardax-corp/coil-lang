@@ -132,6 +132,8 @@ pub fn host_arg_ok(id: u16, expected: MirTy, actual: MirTy) -> bool {
         // A generic word edge takes a `bool` (`set_nodelay(s, true)`) as
         // the Value word it is, as its result may be one.
         || (host_spec(id).is_none() && expected == MirTy::I64 && actual == MirTy::Bool)
+        // A packed kernel's scalar operand (`10.0 - a`) is its word.
+        || (packed_la(id) && expected == MirTy::I64 && actual == MirTy::F64)
 }
 
 /// A packed linear-algebra kernel: its operands are heap arrays or tuples

@@ -44,6 +44,9 @@ pub(super) struct HirMirTables {
     /// `extern` calls and `dload` / `declare` / `invoke`
     /// (`HirBuiltin::Ffi` / `FfiDyn`): their opcode and operands, by call.
     pub(super) ffis: HashMap<u32, crate::mir::HirFfi>,
+    /// `dot` / `matmul` calls and matrix operators emission unrolls (a
+    /// shape past the packed kernel's limits), by expression.
+    pub(super) unrolled_las: HashMap<u32, crate::typechecking::LinearAlgebraKind>,
     /// Fixed array locals copied as they are bound or assigned to another
     /// local ([`Compiler::hir_array_copy`]): the `vec_from_array` native,
     /// by value.
@@ -694,6 +697,10 @@ impl Compiler {
                 });
                 if words && let Some((native, meta)) = self.packed_linear_algebra_op(&info.kind, operands.len()) {
                     t.linalgs.insert(id.0, (native as u16, meta));
+                } else if words {
+                    // Past the kernel's limits: unrolled, as emission's
+                    // `emit_linear_algebra_unrolled`.
+                    t.unrolled_las.insert(id.0, info.kind.clone());
                 }
             }
             HirKind::Bin {
@@ -750,6 +757,11 @@ impl Compiler {
                     {
                         // Unrolled, as `emit_linear_algebra_unrolled`.
                         t.crosses.insert(id.0, (left_is_tuple, elem_is_float));
+                    } else if matches!(info.kind, crate::typechecking::LinearAlgebraKind::Dot { .. } | crate::typechecking::LinearAlgebraKind::MatMul { .. })
+                        && args.len() == 2
+                    {
+                        // So are these, past the kernel's limits.
+                        t.unrolled_las.insert(id.0, info.kind.clone());
                     }
                 }
             }
