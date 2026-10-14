@@ -1289,8 +1289,12 @@ impl Compiler {
         };
         let specs = Self::format_consuming_specs(fmt);
         args.iter().enumerate().skip(1).filter(|&(i, _)| specs.get(i - 1) == Some(&'v')).any(|(_, &arg)| {
-            self.hir_bound_show(hir, arg).is_some()
-                || Self::hir_ty(hir, arg).is_some_and(|ty| self.hir_mir_show_dict_reads(&ty.clone()))
+            match self.hir_bound_show(hir, arg) {
+                // A bound `show` reads the dictionary, which direct MIR
+                // has when it is one of the body's parameters.
+                Some((dict, _)) => !self.hir_mir_dict_param(dict),
+                None => Self::hir_ty(hir, arg).is_some_and(|ty| self.hir_mir_show_dict_reads(&ty.clone())),
+            }
         })
     }
 
@@ -1388,11 +1392,12 @@ impl Compiler {
         }
     }
 
-    /// How [`Self::hir_show`] shows `arg` when that is not a bound
-    /// dictionary's method: as [`Self::hir_show_ty`].
+    /// How [`Self::hir_show`] shows `arg`: a bound dictionary's method
+    /// when that dictionary is one of the body's parameters, else as
+    /// [`Self::hir_show_ty`].
     fn hir_show_plan(&mut self, hir: &HirBody, arg: HirId) -> Option<crate::mir::HirShow> {
-        if self.hir_bound_show(hir, arg).is_some() {
-            return None;
+        if let Some((dict, method)) = self.hir_bound_show(hir, arg) {
+            return self.hir_mir_dict_param(dict).then_some(crate::mir::HirShow::Bound { dict, method });
         }
         let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, arg)?);
         self.hir_show_ty(&ty)
