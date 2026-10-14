@@ -392,22 +392,35 @@ impl Compiler {
                     let target = lam.label;
                     let operand = make_fn_operand(lam.body.captures.len() as u32, 0, lam.body.params.len() as u32, false);
                     let captures = lam.body.captures.iter().map(|&(outer, _)| outer).collect();
-                    t.fn_values.insert(id.0, crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand, mask: 0 }, captures });
+                    t.fn_values.insert(id.0, crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand, mask: 0 }, captures, dicts: Vec::new() });
                 }
             }
-            // A generic function's `MakePolyFn`, when it takes no
-            // dictionaries.
+            // A generic function's `MakePolyFn`, or with bounds its
+            // `MakePolyFnCapture` over the dictionaries
+            // `emit_polyfn_escape_dicts` pushes.
             HirKind::Global { .. } if let Some(name) = emit.plan.polyfns.get(&id.0) => {
-                if self.checker.dict_arity_for(name) == 0
-                    && let Some(target) = self.functions.get(name).and_then(|&entry| self.bytecode.entry_label_for_offset(entry))
-                {
-                    t.fn_values.insert(id.0, crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::PolyFn { target }, captures: Vec::new() });
+                if let Some(target) = self.functions.get(name).and_then(|&entry| self.bytecode.entry_label_for_offset(entry)) {
+                    let value = if self.checker.dict_arity_for(name) == 0 {
+                        Some(crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::PolyFn { target }, captures: Vec::new(), dicts: Vec::new() })
+                    } else {
+                        let (name, ty) = (name.clone(), Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t)));
+                        let code = self.hir_mir_quiet(|this| {
+                            let mut code = CodeBuf::new();
+                            this.emit_polyfn_escape_dicts(&mut code, &name, ty.as_ref());
+                            code
+                        });
+                        self.hir_mir_dict_program(&code)
+                            .map(|dicts| crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::PolyFnCapture { target }, captures: Vec::new(), dicts })
+                    };
+                    if let Some(value) = value {
+                        t.fn_values.insert(id.0, value);
+                    }
                 }
             }
             HirKind::Global { .. } if let Some(&(entry, arity, rest)) = emit.plan.fn_refs.get(&id.0) => {
                 if let Some(target) = self.bytecode.entry_label_for_offset(entry) {
                     let operand = make_fn_operand(0, 0, arity, rest);
-                    t.fn_values.insert(id.0, crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand, mask: 0 }, captures: Vec::new() });
+                    t.fn_values.insert(id.0, crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand, mask: 0 }, captures: Vec::new(), dicts: Vec::new() });
                 }
             }
             HirKind::Global { .. } => {
@@ -493,7 +506,7 @@ impl Compiler {
                     && let Some(target) = self.bytecode.entry_label_for_offset(*entry as usize)
                 {
                     let kind = crate::mir::MirAllocKind::Fn { target, operand: *operand, mask: *mask };
-                    t.fn_values.insert(id.0, crate::mir::HirFnValue { kind, captures: Vec::new() });
+                    t.fn_values.insert(id.0, crate::mir::HirFnValue { kind, captures: Vec::new(), dicts: Vec::new() });
                 }
             }
             HirKind::Call { args, .. } if !emit.plan.lens.contains_key(&id.0) && emit.plan.calls.contains_key(&id.0) => {
@@ -736,8 +749,8 @@ impl Compiler {
     }
 
     /// Call `id` through `PolyFn` local `f`, as [`Self::hir_polyfn_call`]
-    /// emits it, when it passes no dictionary: each argument's `BoxValue`
-    /// tag and the result's `UnboxValue` tag.
+    /// emits it: each argument's `BoxValue` tag, the call site's
+    /// dictionaries and the result's `UnboxValue` tag.
     fn hir_mir_polyfn_call(&mut self, hir: &HirBody, emit: &HirEmit, id: HirId, f: HirId, args: &[HirId], t: &mut HirMirTables) {
         let mut boxes = Vec::with_capacity(args.len());
         let mut arg_tys = Vec::with_capacity(args.len());
@@ -756,18 +769,27 @@ impl Compiler {
         }
         let call_ty = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));
         let source = self.hir_polyfn_source(hir, emit, f);
-        if let Some(source) = &source {
-            let dicts = self.hir_mir_quiet(|this| this.emit_call_site_dicts(&mut CodeBuf::new(), source, &arg_tys, call_ty.as_ref()));
-            if dicts != 0 {
-                return;
+        // The call site's dictionaries, as emission pushes them.
+        let dicts = match &source {
+            Some(source) => {
+                let code = self.hir_mir_quiet(|this| {
+                    let mut code = CodeBuf::new();
+                    this.emit_call_site_dicts(&mut code, source, &arg_tys, call_ty.as_ref());
+                    code
+                });
+                let Some(dicts) = self.hir_mir_dict_program(&code) else {
+                    return;
+                };
+                dicts
             }
-        }
+            None => Vec::new(),
+        };
         let unbox = match &source {
             Some(source) => self.generic_return_depends_on_type_param(source),
             None => Self::hir_polyfn_returns_var(hir, &self.checker, f),
         };
         let unbox = if unbox { call_ty.as_ref().and_then(Self::ty_to_value_tag).map(|tag| tag as u32) } else { None };
-        t.poly_calls.insert(id.0, crate::mir::HirPolyCall { boxes, unbox });
+        t.poly_calls.insert(id.0, crate::mir::HirPolyCall { boxes, dicts, unbox });
     }
 
     /// How many dictionaries [`Self::hir_push_dicts`] pushes for `generic`.

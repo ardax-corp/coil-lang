@@ -127,21 +127,25 @@ pub struct HirIterLoop {
 
 /// A function value HIR emission built: `MakeFn` of a lambda's or a named
 /// function's code (`kind` [`MirAllocKind::Fn`], each capture read from its
-/// local), or `MakePolyFn` of a generic function's. On a call, a partial
-/// application: `MakeFn` of the callee over the call's arguments.
+/// local), or `MakePolyFn` of a generic function's (`MakePolyFnCapture`
+/// over its instance dictionaries, `dicts`, when it has bounds). On a
+/// call, a partial application: `MakeFn` of the callee over the call's
+/// arguments.
 #[derive(Clone, Debug)]
 pub struct HirFnValue {
     pub kind: MirAllocKind,
     pub captures: Vec<HirLocal>,
+    pub dicts: Vec<HirDictOp>,
 }
 
-/// A call through a `PolyFn` local HIR emission made with no dictionary:
-/// each argument boxed to its `BoxValue` tag (`None`: passed as it is),
-/// then `CallIndirect`, then the result unboxed from tag `unbox` when the
-/// function returns a bare type parameter.
+/// A call through a `PolyFn` local as HIR emission made it: each argument
+/// boxed to its `BoxValue` tag (`None`: passed as it is), the call site's
+/// instance dictionaries, then `CallIndirect`, then the result unboxed
+/// from tag `unbox` when the function returns a bare type parameter.
 #[derive(Clone, Debug)]
 pub struct HirPolyCall {
     pub boxes: Vec<Option<u32>>,
+    pub dicts: Vec<HirDictOp>,
     pub unbox: Option<u32>,
 }
 
@@ -3610,6 +3614,7 @@ impl Lower<'_> {
         for &local in &f.captures {
             words.push(self.local_word(local)?);
         }
+        words.extend(self.dict_values(&f.dicts)?);
         let h = self.b.ins_alloc(f.kind, words).map_err(mir)?;
         Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![h]).map_err(mir)?))
     }
@@ -3712,6 +3717,15 @@ impl Lower<'_> {
             };
             words.push(v);
         }
+        let dicts = p.dicts.len() as u32;
+        let dicts = if dicts == 0 {
+            0
+        } else {
+            let values = self.dict_values(&p.dicts)?;
+            let n = values.len() as u32;
+            words.extend(values);
+            n
+        };
         let Some(callee) = self.word(f)? else {
             return Ok(Val::Never);
         };
@@ -3719,7 +3733,7 @@ impl Lower<'_> {
             return Err("call value callee".into());
         }
         let ret = if p.unbox.is_some() { MirTy::HeapRef } else { word };
-        let dest = self.at_expr(id, |l| l.b.ins_call_indirect(callee, words, ret).map_err(mir))?;
+        let dest = self.at_expr(id, |l| l.b.ins_call_indirect_dicts(callee, words, dicts, ret).map_err(mir))?;
         let dest = match p.unbox {
             Some(tag) => self.b.ins_unbox(dest, tag, word).map_err(mir)?,
             None => dest,

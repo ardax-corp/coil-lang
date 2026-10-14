@@ -35,7 +35,7 @@ pub struct GateFacts {
 pub fn refuses_alloc(inst: &MirInst) -> bool {
     match inst {
         MirInst::Alloc { kind, .. } => {
-            !matches!(kind, MirAllocKind::Boxed { .. } | MirAllocKind::Fn { .. } | MirAllocKind::PolyFn { .. })
+            !matches!(kind, MirAllocKind::Boxed { .. } | MirAllocKind::Fn { .. } | MirAllocKind::PolyFn { .. } | MirAllocKind::PolyFnCapture { .. })
         }
         MirInst::ArrayPush { .. } | MirInst::Stringify { .. } => true,
         MirInst::Format { args, .. } => !args.is_empty(),
@@ -61,7 +61,7 @@ fn does_work(inst: &MirInst) -> bool {
             | MirInst::Stringify { .. }
             | MirInst::ResumeCoro { .. }
             | MirInst::Alloc {
-                kind: MirAllocKind::Coro { .. } | MirAllocKind::Fn { .. } | MirAllocKind::PolyFn { .. },
+                kind: MirAllocKind::Coro { .. } | MirAllocKind::Fn { .. } | MirAllocKind::PolyFn { .. } | MirAllocKind::PolyFnCapture { .. },
                 ..
             }
     )
