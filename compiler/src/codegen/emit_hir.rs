@@ -1329,7 +1329,10 @@ impl Compiler {
             (Rep::Word(ValueLayout::Boxed), Some(l @ (ValueLayout::NicheOption | ValueLayout::NicheResult | ValueLayout::NicheUnitResult))) => Some(l),
             _ => None,
         };
+        // A `defer`'s cleanup pad ends in `unwind_resume`.
+        let unwind_native = self.native_id("unwind_resume").and_then(|n| u16::try_from(n).ok());
         Ok(crate::mir::HirMirInput {
+            unwind_native,
             slots: &frame.slots,
             relocate,
             pair_locals,

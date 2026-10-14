@@ -52,8 +52,10 @@ pub fn emit_lir_with_aliases(
             "MIR→LIR refuses Alloc/GcBarrier without S2b maps (S2c)".into(),
         ));
     }
-    let plan = EmitPlan::new(func);
+    let mut plan = EmitPlan::new(func);
     let (regs, scratch) = assign_needed(func, &plan)?;
+    plan.home_base = home_base(func, scratch)?;
+    let plan = plan;
     let regs = coalesce_latch_overwrite(func, regs, &plan.need_slot);
     let cleared = super::emit::cleared_words(func, &regs, &plan.need_slot);
     let max_reg = plan
@@ -82,7 +84,10 @@ pub fn emit_lir_with_aliases(
     let mut out = Vec::new();
     out.push(IlOp::Label(block_lab[func.entry.index()]));
     out.extend(aliases.iter().map(|&l| IlOp::Label(l)));
-    let frame = u32::from(max_reg) + 1;
+    let mut frame = u32::from(max_reg) + 1;
+    if !func.homes.is_empty() {
+        frame = frame.max(plan.home_slot(0) + func.homes.len() as u32);
+    }
     if frame > func.params.len() as u32 {
         out.push(IlOp::byte(
             Byte::new(Instruction::Seek).with_operand_u32(frame),
@@ -172,13 +177,31 @@ pub(super) type LirSidecars = (
 /// of `func`, in the frame registers LIR emission assigns.
 pub(super) fn lir_sidecars(func: &MirFunc) -> LirSidecars {
     let plan = EmitPlan::new(func);
-    let (regs, _) = assign_needed(func, &plan).unwrap_or_else(|_| (Vec::new(), 0));
+    let (regs, scratch) = assign_needed(func, &plan).unwrap_or_else(|_| (Vec::new(), 0));
     let regs = coalesce_latch_overwrite(func, regs, &plan.need_slot);
-    let stack_map = if func.has_mapped_gc_edge() && !regs.is_empty() {
+    let mut stack_map = if func.has_mapped_gc_edge() && !regs.is_empty() {
         super::stackmap::encode_draft_regs(func, &regs, &plan.need_slot)
     } else {
         None
     };
+    // A heap home holds its `defer` capture to the end of the body, past
+    // the capture's own last use: every site roots it.
+    if let (Some(map), Ok(base)) = (stack_map.as_mut(), home_base(func, scratch)) {
+        let heap = func.homes.iter().enumerate().filter(|(_, ty)| ty.is_heap_word());
+        for (k, _) in heap {
+            let slot = u16::from(base) + k as u16;
+            for site in &mut map.sites {
+                if !site.contains(&slot) {
+                    site.push(slot);
+                    site.sort_unstable();
+                }
+            }
+            if !map.frame_slots.contains(&slot) {
+                map.frame_slots.push(slot);
+                map.frame_slots.sort_unstable();
+            }
+        }
+    }
     (
         super::deopt::debug_slot_remap(func, &regs, &plan.need_slot),
         super::deopt::encode_draft(func, &regs, &plan.need_slot),
@@ -186,10 +209,24 @@ pub(super) fn lir_sidecars(func: &MirFunc) -> LirSidecars {
     )
 }
 
+/// The frame `func`'s LIR keeps its homes past: `(home 0's word, frame
+/// words)`, `None` when emission would refuse it.
+pub(super) fn lir_home_frame(func: &MirFunc) -> Option<(u8, u32)> {
+    let mut plan = EmitPlan::new(func);
+    let (regs, scratch) = assign_needed(func, &plan).ok()?;
+    plan.home_base = home_base(func, scratch).ok()?;
+    let regs = coalesce_latch_overwrite(func, regs, &plan.need_slot);
+    let max_reg = plan.need_slot.iter().enumerate().filter(|(_, n)| **n).map(|(i, _)| regs[i]).max().unwrap_or(0);
+    let frame = (u32::from(max_reg) + 1).max(plan.home_slot(0) + func.homes.len() as u32);
+    Some((plan.home_base, frame))
+}
+
 struct EmitPlan {
     tree: Vec<bool>,
     need_slot: Vec<bool>,
     def: Vec<Option<(BlockId, usize)>>,
+    /// Frame word of home 0 ([`MirFunc::homes`]).
+    home_base: u8,
 }
 
 impl EmitPlan {
@@ -309,7 +346,7 @@ impl EmitPlan {
             }
             if def[i].is_some() || def_block[i].is_some() {
                 let print_tok = def[i].is_some_and(|(b, k)| {
-                    matches!(func.block(b).insts.get(k), Some(MirInst::Print { .. } | MirInst::Panic { .. } | MirInst::StoreStatic { .. } | MirInst::ClearWord { .. } | MirInst::KeepAlive { .. }))
+                    matches!(func.block(b).insts.get(k), Some(MirInst::Print { .. } | MirInst::Panic { .. } | MirInst::StoreStatic { .. } | MirInst::HomeStore { .. } | MirInst::ClearWord { .. } | MirInst::KeepAlive { .. }))
                 });
                 if !print_tok {
                     need_slot[i] = true;
@@ -364,8 +401,24 @@ impl EmitPlan {
             tree,
             need_slot,
             def,
+            home_base: 0,
         }
     }
+
+    /// The frame word of `home`.
+    fn home_slot(&self, home: u16) -> u32 {
+        u32::from(self.home_base) + u32::from(home)
+    }
+}
+
+/// Frame word of `func`'s home 0: its cleanup pad's function's, or past
+/// every register and the phi-cycle `scratch` word.
+fn home_base(func: &MirFunc, scratch: u8) -> Result<u8, LowerError> {
+    let base = func.home_base.unwrap_or(scratch.saturating_add(1));
+    if usize::from(base) + func.homes.len() > 255 {
+        return Err(LowerError::Refused("too many homes".into()));
+    }
+    Ok(base)
 }
 
 struct MarkTreeArgs<'args> {
@@ -419,6 +472,7 @@ fn writes_memory(inst: &MirInst) -> bool {
             | MirInst::ResumeCoro { .. }
             | MirInst::Yield { .. }
             | MirInst::StoreStatic { .. }
+            | MirInst::HomeStore { .. }
             | MirInst::ClearWord { .. }
             | MirInst::Print { .. }
             | MirInst::Panic { .. }
@@ -428,7 +482,7 @@ fn writes_memory(inst: &MirInst) -> bool {
 fn reads_memory(inst: &MirInst) -> bool {
     matches!(
         inst,
-        MirInst::HeapFieldLoad { .. } | MirInst::FieldLoad { .. } | MirInst::Index { .. } | MirInst::ArrayLen { .. } | MirInst::DoneCoro { .. } | MirInst::LoadStatic { .. }
+        MirInst::HeapFieldLoad { .. } | MirInst::FieldLoad { .. } | MirInst::Index { .. } | MirInst::ArrayLen { .. } | MirInst::DoneCoro { .. } | MirInst::LoadStatic { .. } | MirInst::HomeLoad { .. }
     )
 }
 
@@ -1056,6 +1110,17 @@ fn emit_stored(
             emit_stack(out, *value, func, plan, regs, pool, loc)?;
             out.push(IlOp::from_plain_byte(Byte::new(Instruction::StoreStatic).with_operand_u32(*slot), loc));
         }
+        MirInst::HomeLoad { dest, home } => {
+            out.push(IlOp::Load { slot: plan.home_slot(*home), loc });
+            out.push(IlOp::StorePop {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
+        }
+        MirInst::HomeStore { home, value, .. } => {
+            emit_stack(out, *value, func, plan, regs, pool, loc)?;
+            out.push(IlOp::StorePop { slot: plan.home_slot(*home), loc });
+        }
         // Emitted where it stands (`cleared_words`).
         MirInst::ClearWord { .. } | MirInst::KeepAlive { .. } => {}
         MirInst::ArrayPush {
@@ -1667,6 +1732,22 @@ fn emit_stack(
         MirInst::StoreStatic { slot, value, .. } => {
             emit_stack(out, *value, func, plan, regs, pool, loc)?;
             out.push(IlOp::from_plain_byte(Byte::new(Instruction::StoreStatic).with_operand_u32(*slot), loc));
+            Ok(())
+        }
+        MirInst::HomeLoad { dest, home } => {
+            out.push(IlOp::Load { slot: plan.home_slot(*home), loc });
+            if plan.need_slot[dest.index()] {
+                out.push(IlOp::Dup { loc });
+                out.push(IlOp::StorePop {
+                    slot: u32::from(regs[dest.index()]),
+                    loc,
+                });
+            }
+            Ok(())
+        }
+        MirInst::HomeStore { home, value, .. } => {
+            emit_stack(out, *value, func, plan, regs, pool, loc)?;
+            out.push(IlOp::StorePop { slot: plan.home_slot(*home), loc });
             Ok(())
         }
         MirInst::ClearWord { .. } | MirInst::KeepAlive { .. } => Ok(()),
