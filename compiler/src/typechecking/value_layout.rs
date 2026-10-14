@@ -81,7 +81,11 @@ pub fn word_kind(checker: &Checker, ty: &Ty) -> u8 {
         return common::WORD_SCALAR;
     }
     if is_scalar_enum_ty(checker, ty) {
-        return common::WORD_SCALAR;
+        // A `#[repr(string)]` value is its backing string's heap word.
+        let string = layout::scalar_enum_name(checker, ty)
+            .and_then(|name| checker.scalar_value_ty(name))
+            .is_some_and(|b| matches!(strip_readonly(&b), Ty::Con(n) if n == super::ty::STRING));
+        return if string { common::WORD_POINTER } else { common::WORD_SCALAR };
     }
     if niche_heap_only(checker, ty) || value_layout(checker, ty) != ValueLayout::Boxed {
         return common::WORD_POINTER;
