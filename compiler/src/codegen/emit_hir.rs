@@ -1450,6 +1450,7 @@ impl Compiler {
             record_fields,
             records,
             matrix_wraps: &tables.matrix_wraps,
+            make_niches: &tables.make_niches,
             aggregates: emit
                 .plan
                 .ops
