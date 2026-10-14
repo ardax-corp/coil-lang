@@ -203,11 +203,12 @@ impl HirMirInput<'_> {
     }
 
     /// The word type of an array's elements that direct MIR reads and
-    /// writes: `int` or `float`, or a heap word.
+    /// writes: a scalar (a packed `byte` / `bool` element is read and
+    /// written as its word), or a heap word.
     fn elem_word(&self, arr: &Ty) -> Option<MirTy> {
         let elem = array_elem(arr)?;
         match scalar(elem) {
-            Some(t @ (MirTy::I64 | MirTy::F64)) => Some(t),
+            Some(t) => Some(t),
             // A type parameter's element: the opaque word as stored.
             _ if self.opaque_vars && is_var(elem) => Some(MirTy::I64),
             _ => self.heap_elem(elem),
@@ -480,11 +481,10 @@ pub fn scalar(ty: &Ty) -> Option<MirTy> {
 }
 
 /// The MIR type of a one-word value: a scalar, or a heap array or `Vec`
-/// of `int` or `float` (elements are raw words).
+/// of scalars (`int` / `float` elements are raw words; `byte` / `bool`
+/// ones are packed, and an index reads or writes the element's word).
 pub fn word(ty: &Ty) -> Option<MirTy> {
-    scalar(ty).or_else(|| {
-        matches!(array_elem(ty).and_then(scalar), Some(MirTy::I64 | MirTy::F64)).then_some(MirTy::HeapRef)
-    })
+    scalar(ty).or_else(|| array_elem(ty).and_then(scalar).map(|_| MirTy::HeapRef))
 }
 
 /// A variant pattern with no payload: `V` or `V()`.
@@ -2083,6 +2083,16 @@ impl Lower<'_> {
             }
             HirKind::Cast { value } => {
                 let names = (self.expr_ty(*value).and_then(lower::primitive), self.expr_ty(id).and_then(lower::primitive));
+                // A cast between two heap words of no primitive type (a
+                // byte string literal's array `as Vec<byte>` / `[byte; N]`)
+                // emits no opcode: the value is its own word.
+                if names == (None, None)
+                    && let (Some(a), Some(b)) = (self.expr_ty(*value), self.expr_ty(id))
+                    && self.inp.word(a) == Some(MirTy::HeapRef)
+                    && self.inp.word(b) == Some(MirTy::HeapRef)
+                {
+                    return self.value(*value);
+                }
                 let from = self.expr_ty(*value).and_then(scalar);
                 let to = self.expr_ty(id).and_then(scalar);
                 let Some(v) = self.word(*value)? else {
