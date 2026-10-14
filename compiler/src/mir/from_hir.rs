@@ -100,6 +100,8 @@ pub enum HirDictOp {
     Null,
     /// `MakeTuple` of the top `n` words: a dictionary.
     Tuple(u32),
+    /// `BoxValue` (`tag`) of the top word: an existential pack's value.
+    Box(u32),
 }
 
 /// How a user iterator's `next` returns `Option<Item>`, as HIR emission
@@ -217,7 +219,7 @@ impl HirMirInput<'_> {
             .or_else(|| (self.scalar_enum)(ty))
             .or_else(|| (self.niche)(ty))
             .or_else(|| (self.boxed_enum)(ty, None).map(|_| MirTy::HeapRef))
-            .or_else(|| array_elem(ty).and_then(|e| self.heap_elem(e)).map(|_| MirTy::HeapRef))
+            .or_else(|| array_elem(ty).and_then(|e| self.heap_elem(e).or_else(|| (self.niche)(e))).map(|_| MirTy::HeapRef))
             .or_else(|| (self.opaque_vars && is_var(ty)).then_some(MirTy::I64))
             .or_else(|| (self.opaque_vars && array_elem(ty).is_some_and(is_var)).then_some(MirTy::HeapRef))
     }
@@ -240,14 +242,15 @@ impl HirMirInput<'_> {
 
     /// The word type of an array's elements that direct MIR reads and
     /// writes: a scalar (a packed `byte` / `bool` element is read and
-    /// written as its word), or a heap word.
+    /// written as its word), a niche `Option` / `Result` word (stored as
+    /// the word itself, as HIR emission stores it), or a heap word.
     fn elem_word(&self, arr: &Ty) -> Option<MirTy> {
         let elem = array_elem(arr)?;
         match scalar(elem) {
             Some(t) => Some(t),
             // A type parameter's element: the opaque word as stored.
             _ if self.opaque_vars && is_var(elem) => Some(MirTy::I64),
-            _ => self.heap_elem(elem),
+            _ => (self.niche)(elem).or_else(|| self.heap_elem(elem)),
         }
     }
 }
@@ -398,8 +401,13 @@ pub struct HirMirInput<'a> {
     /// on the way out.
     pub boxed_niches: HashMap<u32, ValueLayout>,
     /// HIR emission packs some value of the body as a bare-class
-    /// existential (`emit_existential_pack_recipe`).
+    /// existential (`emit_existential_pack_recipe`) that `packs` has no
+    /// program for.
     pub existential_packs: bool,
+    /// Values HIR emission packs as a bare-class existential, by
+    /// expression: the pack's program, run on the value's word
+    /// (`[boxed value, dictionary]`).
+    pub packs: &'a HashMap<u32, Vec<HirDictOp>>,
     /// The `unwind_resume` native a `defer`'s cleanup pad ends in.
     pub unwind_native: Option<u16>,
     /// Field reads and writes on records (dicts): the key's string table
@@ -511,6 +519,8 @@ struct Lower<'a> {
     pins: HashMap<u32, (LocalId, MirTy)>,
     /// The homes a `defer`'s cleanup pad reads, when it gets one.
     pad: Option<PadHomes>,
+    /// Existential packs built so far, by expression.
+    packed: HashSet<u32>,
 }
 
 /// Where a body's `defer` state sits for its unwind cleanup pad: each
@@ -822,6 +832,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         defer_locals: HashMap::new(),
         pins: HashMap::new(),
         pad: None,
+        packed: HashSet::new(),
     };
     lower.pin_locals()?;
     for (i, e) in hir.exprs.iter().enumerate() {
@@ -876,6 +887,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
     let defers = std::mem::take(&mut lower.defers);
     let defer_locals = std::mem::take(&mut lower.defer_locals);
     let boxed: HashSet<u32> = lower.boxes.keys().copied().collect();
+    let unpacked = inp.packs.keys().any(|k| !lower.packed.contains(k));
     let mut func = lower.b.finish().map_err(mir)?;
     // A capture read at a `return` some path reaches without passing its
     // `let` would be a live-in word.
@@ -897,9 +909,9 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         func.opaque_words = true;
     }
     // HIR emission packs a concrete value where a bare-class existential
-    // is expected (`[boxed value, dictionary]`); this lowering passes the
-    // value as is, so no tier emits from it.
-    if inp.existential_packs {
+    // is expected (`[boxed value, dictionary]`): with no program for a
+    // pack, or a pack this lowering passed by, no tier emits from it.
+    if inp.existential_packs || unpacked {
         func.emit_refusal = Some("existential pack");
     }
     Ok(func)
@@ -954,6 +966,7 @@ fn lower_pad(hir: &HirBody, inp: &HirMirInput, parts: PadParts<'_>) -> Result<Mi
         defer_locals: parts.defer_locals,
         pins: HashMap::new(),
         pad: None,
+        packed: HashSet::new(),
     };
     let captures_of = |body: HirId| {
         hir.exprs.iter().find_map(|e| match &e.kind {
@@ -2100,7 +2113,27 @@ impl Lower<'_> {
         (self.inp.calls.get(&id.0).is_some_and(|site| !site.pair_ret) || self.inp.value_calls.contains(&id.0)) && self.inp.pair_tys.contains_key(&id.0)
     }
 
+    /// Lower `id` for its value, packed as a bare-class existential where
+    /// HIR emission packs it.
     fn value(&mut self, id: HirId) -> Result<Val, Refusal> {
+        let val = self.value_unpacked(id)?;
+        let Some(ops) = self.inp.packs.get(&id.0) else {
+            return Ok(val);
+        };
+        let v = match val {
+            Val::V(v) => v,
+            Val::Never => return Ok(Val::Never),
+            _ => return Err("existential pack value".into()),
+        };
+        let mut out = self.dict_program(vec![v], ops)?;
+        let (Some(pack), true) = (out.pop(), out.is_empty()) else {
+            return Err("existential pack program".into());
+        };
+        self.packed.insert(id.0);
+        Ok(Val::V(pack))
+    }
+
+    fn value_unpacked(&mut self, id: HirId) -> Result<Val, Refusal> {
         let e = self.hir.expr(id);
         let returned = std::mem::take(&mut self.ret_tail);
         if let Some(par) = self.inp.par_loops.get(&id.0) {
@@ -3291,7 +3324,9 @@ impl Lower<'_> {
             let Some(&(base, n, ty)) = self.inp.stacks.get(&local) else {
                 return Err("boxed class local".into());
             };
-            if !matches!(ty, MirTy::I64 | MirTy::F64 | MirTy::HeapRef) {
+            // Each slot's word as it is, as HIR emission's `MakeArray`: a
+            // niche word stays the word, a `bool` its word.
+            if !matches!(ty, MirTy::I64 | MirTy::F64 | MirTy::Bool | MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes) {
                 return Err("boxed stack array type".into());
             }
             let mut items = Vec::with_capacity(n);
@@ -3466,7 +3501,11 @@ impl Lower<'_> {
     /// The words of instance dictionary program `ops`: each method's
     /// `CodePtr`, each dictionary a tuple of the words below it.
     fn dict_values(&mut self, ops: &[HirDictOp]) -> Result<Vec<ValueId>, Refusal> {
-        let mut stack = Vec::new();
+        self.dict_program(Vec::new(), ops)
+    }
+
+    /// Run dictionary program `ops` on `stack`, giving the words left.
+    fn dict_program(&mut self, mut stack: Vec<ValueId>, ops: &[HirDictOp]) -> Result<Vec<ValueId>, Refusal> {
         for op in ops {
             match *op {
                 HirDictOp::Code(target) => stack.push(self.b.ins_code_ptr(target).map_err(mir)?),
@@ -3476,6 +3515,11 @@ impl Lower<'_> {
                     let elems = stack.split_off(at);
                     let dict = self.b.ins_alloc(MirAllocKind::Tuple, elems).map_err(mir)?;
                     stack.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![dict]).map_err(mir)?);
+                }
+                HirDictOp::Box(tag) => {
+                    let v = stack.pop().ok_or("dictionary box")?;
+                    let boxed = self.b.ins_alloc(MirAllocKind::Boxed { tag }, vec![v]).map_err(mir)?;
+                    stack.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![boxed]).map_err(mir)?);
                 }
             }
         }
