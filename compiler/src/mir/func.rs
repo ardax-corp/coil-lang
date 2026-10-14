@@ -86,6 +86,9 @@ pub struct MirFunc {
     /// in this body's frame, it runs the armed `defer`s from the homes and
     /// resumes the unwind. Emitted after the body, in its frame.
     pub cleanup: Option<Box<MirFunc>>,
+    /// The body builds a lambda: HIR emission's IL holds that lambda's
+    /// code inline, in a frame that is not this body's.
+    pub inner_code: bool,
 }
 
 impl MirFunc {
@@ -113,6 +116,7 @@ impl MirFunc {
             homes: Vec::new(),
             home_base: None,
             cleanup: None,
+            inner_code: false,
         }
     }
 
@@ -170,7 +174,10 @@ impl MirFunc {
             matches!(
                 i,
                 MirInst::Alloc {
-                    kind: super::inst::MirAllocKind::Fn { .. } | super::inst::MirAllocKind::PolyFn { .. } | super::inst::MirAllocKind::Boxed { .. },
+                    kind: super::inst::MirAllocKind::Fn { .. }
+                        | super::inst::MirAllocKind::PolyFn { .. }
+                        | super::inst::MirAllocKind::PolyFnCapture { .. }
+                        | super::inst::MirAllocKind::Boxed { .. },
                     ..
                 }
             )
@@ -460,7 +467,10 @@ impl MirFunc {
                     return Err(format!("{dest} host dest type"));
                 }
             }
-            MirInst::CallIndirect { dest, callee, args } => {
+            MirInst::CallIndirect { dest, callee, args, dicts } => {
+                if *dicts as usize > args.len() {
+                    return Err(format!("{dest} CallIndirect dicts exceed args"));
+                }
                 if !self.ty(*dest).is_word_lane() {
                     return Err(format!("{dest} CallIndirect dest is not a word lane"));
                 }

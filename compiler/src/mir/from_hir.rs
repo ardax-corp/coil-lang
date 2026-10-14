@@ -56,6 +56,23 @@ enum Val {
     Pair(ValueId, ValueId),
 }
 
+/// How a `%v` argument of a planned `format` call becomes its text, as
+/// `emit_show_for_stack_value` emits it.
+#[derive(Clone, Debug)]
+pub enum HirShow {
+    /// A plain one-word `CALL` of the value's `show` entry: on the value
+    /// itself for a raw entry, else on it boxed (`BoxValue` of `boxed`).
+    Call { target: Label, boxed: Option<u32> },
+    /// `STRINGIFY` (a type with no `Show` instance).
+    Stringify,
+    /// A boxed tuple: each item read by index and shown, then `FORMAT` of
+    /// the tuple's format string (by string table index) on the texts.
+    Tuple { fmt: u32, items: Vec<(Ty, HirShow)> },
+    /// A record: each field read by key (string table index) and shown,
+    /// then `FORMAT` of the record's format string on the texts.
+    Record { fmt: u32, fields: Vec<(u32, Ty, HirShow)> },
+}
+
 /// A call site HIR emission lowered to a plain `CALL`.
 #[derive(Clone, Debug)]
 pub struct HirCallSite {
@@ -112,21 +129,25 @@ pub struct HirIterLoop {
 
 /// A function value HIR emission built: `MakeFn` of a lambda's or a named
 /// function's code (`kind` [`MirAllocKind::Fn`], each capture read from its
-/// local), or `MakePolyFn` of a generic function's. On a call, a partial
-/// application: `MakeFn` of the callee over the call's arguments.
+/// local), or `MakePolyFn` of a generic function's (`MakePolyFnCapture`
+/// over its instance dictionaries, `dicts`, when it has bounds). On a
+/// call, a partial application: `MakeFn` of the callee over the call's
+/// arguments.
 #[derive(Clone, Debug)]
 pub struct HirFnValue {
     pub kind: MirAllocKind,
     pub captures: Vec<HirLocal>,
+    pub dicts: Vec<HirDictOp>,
 }
 
-/// A call through a `PolyFn` local HIR emission made with no dictionary:
-/// each argument boxed to its `BoxValue` tag (`None`: passed as it is),
-/// then `CallIndirect`, then the result unboxed from tag `unbox` when the
-/// function returns a bare type parameter.
+/// A call through a `PolyFn` local as HIR emission made it: each argument
+/// boxed to its `BoxValue` tag (`None`: passed as it is), the call site's
+/// instance dictionaries, then `CallIndirect`, then the result unboxed
+/// from tag `unbox` when the function returns a bare type parameter.
 #[derive(Clone, Debug)]
 pub struct HirPolyCall {
     pub boxes: Vec<Option<u32>>,
+    pub dicts: Vec<HirDictOp>,
     pub unbox: Option<u32>,
 }
 
@@ -309,9 +330,9 @@ pub struct HirMirInput<'a> {
     /// `format` calls with only word arguments, and string `+` (as
     /// `"%s%s"`): the format string's index.
     pub formats: &'a HashMap<u32, u32>,
-    /// Per argument of such a `format` call: the raw `show` entry a `%v`
-    /// argument is first passed through (its string then formats as `%s`).
-    pub format_shows: &'a HashMap<u32, Vec<Option<Label>>>,
+    /// Per argument of such a `format` call: how a `%v` argument is first
+    /// shown (its string then formats as `%s`).
+    pub format_shows: &'a HashMap<u32, Vec<Option<HirShow>>>,
     /// User operators that call their trait instance method.
     pub op_calls: &'a HashMap<u32, HirOpCall>,
     /// Parallel loops emitted as a call of their fork-join function, by
@@ -889,6 +910,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
     {
         func.cleanup = Some(Box::new(cleanup));
     }
+    func.inner_code = hir.exprs.iter().any(|e| matches!(e.kind, HirKind::Lambda { .. }));
     if inp.opaque_vars {
         opaque_moves_only(hir, &func)?;
         func.opaque_words = true;
@@ -3633,6 +3655,7 @@ impl Lower<'_> {
         for &local in &f.captures {
             words.push(self.local_word(local)?);
         }
+        words.extend(self.dict_values(&f.dicts)?);
         let h = self.b.ins_alloc(f.kind, words).map_err(mir)?;
         Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![h]).map_err(mir)?))
     }
@@ -3735,6 +3758,15 @@ impl Lower<'_> {
             };
             words.push(v);
         }
+        let dicts = p.dicts.len() as u32;
+        let dicts = if dicts == 0 {
+            0
+        } else {
+            let values = self.dict_values(&p.dicts)?;
+            let n = values.len() as u32;
+            words.extend(values);
+            n
+        };
         let Some(callee) = self.word(f)? else {
             return Ok(Val::Never);
         };
@@ -3742,7 +3774,7 @@ impl Lower<'_> {
             return Err("call value callee".into());
         }
         let ret = if p.unbox.is_some() { MirTy::HeapRef } else { word };
-        let dest = self.at_expr(id, |l| l.b.ins_call_indirect(callee, words, ret).map_err(mir))?;
+        let dest = self.at_expr(id, |l| l.b.ins_call_indirect_dicts(callee, words, dicts, ret).map_err(mir))?;
         let dest = match p.unbox {
             Some(tag) => self.b.ins_unbox(dest, tag, word).map_err(mir)?,
             None => dest,
@@ -4387,22 +4419,67 @@ impl Lower<'_> {
             let Some(v) = self.word_or_boxed(arg)? else {
                 return Ok(Val::Never);
             };
-            // `%v`: the value's `show`, a plain call of its raw entry.
-            let v = match shows.and_then(|s| s.get(i).copied().flatten()) {
-                Some(target) => {
-                    let abi = DenseAbi {
-                        params: vec![self.b.value_ty(v)],
-                        ret: MirTy::HeapRef,
-                        ret_hi: None,
-                    };
-                    self.at_expr(id, |l| l.b.ins_call(target, vec![v], &abi).map_err(mir))?.0
-                }
+            // `%v`: the value's text.
+            let v = match shows.and_then(|s| s.get(i)).and_then(Option::as_ref) {
+                Some(show) => self.show(id, v, show)?,
                 None => v,
             };
             words.push(v);
         }
         let out = self.b.ins_format(fmt, words).map_err(mir)?;
         Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)?))
+    }
+
+    /// The text of `v` for a `%v` argument of `format` call `id`, as
+    /// `emit_show_for_stack_value`: a raw `show` call, `STRINGIFY`, or a
+    /// tuple's or record's items shown and formatted.
+    fn show(&mut self, id: HirId, v: ValueId, show: &HirShow) -> Result<ValueId, Refusal> {
+        let (fmt, items) = match show {
+            HirShow::Call { target, boxed } => {
+                // Only a heap carrier boxes here, as an operator's operand.
+                let v = match *boxed {
+                    None => v,
+                    Some(_) if self.b.value_ty(v) != MirTy::HeapRef => return Err("show boxed word".into()),
+                    Some(tag) => {
+                        let obj = self.b.ins_alloc(MirAllocKind::Boxed { tag }, vec![v]).map_err(mir)?;
+                        self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?
+                    }
+                };
+                let abi = DenseAbi {
+                    params: vec![self.b.value_ty(v)],
+                    ret: MirTy::HeapRef,
+                    ret_hi: None,
+                };
+                return Ok(self.at_expr(id, |l| l.b.ins_call(*target, vec![v], &abi).map_err(mir))?.0);
+            }
+            HirShow::Stringify => {
+                let s = self.at_expr(id, |l| l.b.ins_stringify(v).map_err(mir))?;
+                return self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![s]).map_err(mir);
+            }
+            HirShow::Tuple { fmt, items } => (fmt, items.iter().map(|(t, s)| (None, t, s)).collect::<Vec<_>>()),
+            HirShow::Record { fmt, fields } => (fmt, fields.iter().map(|(k, t, s)| (Some(*k), t, s)).collect()),
+        };
+        if self.b.value_ty(v) != MirTy::HeapRef {
+            return Err("show aggregate".into());
+        }
+        let mut words = Vec::with_capacity(items.len());
+        for (i, (key, ty, item)) in items.into_iter().enumerate() {
+            let ty_w = self.tuple_item(ty).ok_or("show item type")?;
+            let w = match key {
+                Some(key) => {
+                    let key = self.b.ins_string(key).map_err(mir)?;
+                    self.at_expr(id, |l| l.b.ins_heap_field_load(v, Some(key), 0, ty_w).map_err(mir))?
+                }
+                None => {
+                    let k = self.b.ins_const(MirConst::I64(i as i64)).map_err(mir)?;
+                    self.at_expr(id, |l| l.b.ins_index(v, k, ty_w, false).map_err(mir))?
+                }
+            };
+            words.push(self.show(id, w, item)?);
+        }
+        let fmt = self.b.ins_string(*fmt).map_err(mir)?;
+        let out = self.b.ins_format(fmt, words).map_err(mir)?;
+        self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)
     }
 
     /// A host native: the arguments in order, then `HostInvoke` (the native

@@ -524,6 +524,15 @@ impl MirBuilder {
     /// `CallIndirect`: call the function value `callee` with `args`, its
     /// one-word result typed `ret`.
     pub fn ins_call_indirect(&mut self, callee: ValueId, args: Vec<ValueId>, ret: MirTy) -> Result<ValueId, MirError> {
+        self.ins_call_indirect_dicts(callee, args, 0, ret)
+    }
+
+    /// [`Self::ins_call_indirect`] whose last `dicts` arguments are
+    /// instance dictionaries a `PolyFn` callee takes.
+    pub fn ins_call_indirect_dicts(&mut self, callee: ValueId, args: Vec<ValueId>, dicts: u32, ret: MirTy) -> Result<ValueId, MirError> {
+        if dicts as usize > args.len() {
+            return Err(MirError::msg("CallIndirect dicts exceed args".to_string()));
+        }
         if self.resolve_ty(callee) != MirTy::HeapRef {
             return Err(MirError::msg(format!("CallIndirect callee is {}", self.resolve_ty(callee))));
         }
@@ -541,6 +550,7 @@ impl MirBuilder {
             dest,
             callee: self.resolve(callee),
             args,
+            dicts,
         })?;
         self.snapshot_slots(dest);
         Ok(dest)
