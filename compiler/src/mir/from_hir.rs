@@ -28,7 +28,7 @@ use crate::hir::{lower, BinOp, Builtin, Callee, HirArm, HirBody, HirFlags, HirId
 use crate::il::Label;
 use crate::typechecking::infer::{ForInCounted, ForInKind};
 use crate::typechecking::value_layout::ValueLayout;
-use crate::typechecking::ty::{strip_readonly, vec_element_ty, ArrayLength, Ty};
+use crate::typechecking::ty::{strip_readonly, vec_element_ty, Ty};
 
 use super::abi::DenseAbi;
 use super::builder::{MirBuilder, MirError};
@@ -421,6 +421,9 @@ pub struct HirMirInput<'a> {
     pub record_fields: HashMap<u32, (u32, MirTy)>,
     /// `matrix(data)` calls: the data itself.
     pub matrix_wraps: &'a HashSet<u32>,
+    /// Fixed array locals copied as they are bound or assigned to another
+    /// local: the `vec_from_array` native, by value.
+    pub array_copies: &'a HashMap<u32, u16>,
     /// `Result` variants made at a niche word other than their own
     /// type's, as their context wants it: `Ok(())` (typed `Result<(), E>`)
     /// returned as a `Result<unit, E>` is its zero word.
@@ -2696,10 +2699,9 @@ impl Lower<'_> {
             }
             HirKind::Let { local, init } => {
                 let init = init.ok_or("uninitialized let")?;
-                self.refuse_array_copy(init)?;
                 let ty = self.local_ty(*local)?;
                 let slot = self.slot(*local)?;
-                let Some(v) = (if ty == MirTy::HeapRef { self.boxed_word(init)? } else { self.word(init)? }) else {
+                let Some(v) = (if ty == MirTy::HeapRef { self.boxed_word_copied(init)? } else { self.word(init)? }) else {
                     return Ok(Val::Never);
                 };
                 if self.b.value_ty(v) != ty {
@@ -2716,10 +2718,9 @@ impl Lower<'_> {
                 let HirKind::Local(local) = self.hir.expr(*place).kind else {
                     return Err("assign place".into());
                 };
-                self.refuse_array_copy(*value)?;
                 let ty = self.local_ty(local)?;
                 let slot = self.slot(local)?;
-                let Some(v) = (if ty == MirTy::HeapRef { self.boxed_word(*value)? } else { self.word(*value)? }) else {
+                let Some(v) = (if ty == MirTy::HeapRef { self.boxed_word_copied(*value)? } else { self.word(*value)? }) else {
                     return Ok(Val::Never);
                 };
                 if self.b.value_ty(v) != ty {
@@ -4072,18 +4073,18 @@ impl Lower<'_> {
         Ok(Some(idx))
     }
 
-    /// HIR emission copies a fixed-size array local bound or assigned to
-    /// another (`vec_from_array`); that host call is not lowered here.
-    fn refuse_array_copy(&self, value: HirId) -> Result<(), Refusal> {
-        let HirKind::Local(src) = self.hir.expr(value).kind else {
-            return Ok(());
+    /// A heap local's new word from `value`: [`Self::boxed_word`], or a
+    /// fixed array read from another local copied (`vec_from_array`), as
+    /// HIR emission's `hir_value_copied`: the two never share elements.
+    fn boxed_word_copied(&mut self, value: HirId) -> Result<Option<ValueId>, Refusal> {
+        let Some(&native) = self.inp.array_copies.get(&value.0) else {
+            return self.boxed_word(value);
         };
-        let copied = !self.inp.stacks.contains_key(&src.0)
-            && matches!(self.expr_ty(value).map(strip_readonly), Some(Ty::Array { length, .. }) if *length != ArrayLength::Dynamic);
-        if copied {
-            return Err("fixed array copy".into());
-        }
-        Ok(())
+        let Some(v) = self.word(value)? else {
+            return Ok(None);
+        };
+        let layout = common::HOST_ENUM_LAYOUT_BOXED as u8;
+        Ok(Some(self.at_expr(value, |l| l.b.ins_host_invoke_as(native, vec![v], layout, Some(MirTy::HeapRef)).map_err(mir))?))
     }
 
     /// The word type of a static `id` names: as a local of its type. A

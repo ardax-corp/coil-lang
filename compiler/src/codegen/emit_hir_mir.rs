@@ -25,6 +25,10 @@ pub(super) struct HirMirTables {
     pub(super) format_shows: HashMap<u32, Vec<Option<crate::mir::HirShow>>>,
     /// `matrix(data)` calls, whose value is the data itself.
     pub(super) matrix_wraps: HashSet<u32>,
+    /// Fixed array locals copied as they are bound or assigned to another
+    /// local ([`Compiler::hir_array_copy`]): the `vec_from_array` native,
+    /// by value.
+    pub(super) array_copies: HashMap<u32, u16>,
     /// Entry of each plain one-word-ABI `CALL` (no dictionaries), by call
     /// site: calls, and user operators on a raw instance method.
     pub(super) calls: HashMap<u32, crate::mir::HirCallSite>,
@@ -548,6 +552,12 @@ impl Compiler {
                     let idx = self.intern_string(text);
                     t.strings.insert(id.0, idx);
                 }
+            }
+            // A fixed array local bound or assigned to another is copied.
+            HirKind::Let { init: Some(value), .. } | HirKind::Assign { value, .. }
+                if let Some(native) = self.hir_array_copy(hir, emit, *value).and_then(|n| u16::try_from(n).ok()) =>
+            {
+                t.array_copies.insert(value.0, native);
             }
             HirKind::Bin { op: BinOp::StrConcat, .. } => {
                 let idx = self.intern_string("%s%s");
