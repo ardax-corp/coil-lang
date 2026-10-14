@@ -93,6 +93,12 @@ pub fn emit_dense(
         let mut starts: Vec<(usize, ValueId)> = Vec::new();
         let loc = func.term_loc(block.id);
         seed_jim_taken_stack(&mut out, &mut stacked, func, block.id, &plan, &regs, loc);
+        if let Some(s) = miss_chain_tos(func, block.id) {
+            // The next arm's test peeks the scrutinee the miss left.
+            stacked.push(s);
+        } else if missed_scrutinee_unused(func, block.id) {
+            out.push(IlOp::Pop { loc });
+        }
         for inst in &block.insts {
             if inst.is_phi() {
                 continue;
@@ -111,6 +117,9 @@ pub fn emit_dense(
                 if cleared.contains(dest) {
                     push_clear_word(&mut out, regs[value.index()]);
                 }
+                continue;
+            }
+            if let MirInst::KeepAlive { .. } = inst {
                 continue;
             }
             if let MirInst::Call {
@@ -1165,7 +1174,7 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
             out.push(byte(Byte::new(Instruction::StoreStatic).with_operand_u32(*slot)));
         }
         // Emitted where it stands (`cleared_words`).
-        MirInst::ClearWord { .. } => {}
+        MirInst::ClearWord { .. } | MirInst::KeepAlive { .. } => {}
         MirInst::ArrayPush {
             dest,
             array,
@@ -1950,6 +1959,62 @@ pub(super) fn scrutinee_left_by_miss(func: &MirFunc, block: BlockId, scrutinee: 
                     if *s == scrutinee && *not_taken == block
             )
         })
+}
+
+/// `block` is reached only by boxed `JumpIfMatch` misses, which leave the
+/// scrutinee on the stack, takes no payload of it (a unit or wildcard last
+/// arm, or a later arm's test that pushes the scrutinee again), and can run
+/// again in the frame: the leftover is popped, or every pass grows the
+/// stack.
+pub(super) fn missed_scrutinee_unused(func: &MirFunc, block: BlockId) -> bool {
+    missed_scrutinee(func, block).is_some_and(|s| last_arm_payloads(func, block, s).is_empty()) && on_cycle(func, block)
+}
+
+/// `block` can run again in the same frame. Off a cycle, the word a miss
+/// leaves goes when the frame returns.
+fn on_cycle(func: &MirFunc, block: BlockId) -> bool {
+    let succs = |b: BlockId| func.block(b).term.as_ref().map(Terminator::succs).unwrap_or_default();
+    let mut seen = vec![false; func.blocks.len()];
+    let mut work = succs(block);
+    while let Some(b) = work.pop() {
+        if b == block {
+            return true;
+        }
+        if !std::mem::replace(&mut seen[b.index()], true) {
+            work.extend(succs(b));
+        }
+    }
+    false
+}
+
+/// The boxed scrutinee every pred of `block` leaves on the stack by
+/// missing a `JumpIfMatch` on it.
+fn missed_scrutinee(func: &MirFunc, block: BlockId) -> Option<ValueId> {
+    let &pred = func.preds()[block.index()].first()?;
+    let Some(Terminator::JumpIfMatch { scrutinee, not_taken, .. }) = &func.block(pred).term else {
+        return None;
+    };
+    (*not_taken == block
+        && !matches!(func.ty(*scrutinee), MirTy::NicheOpt | MirTy::NicheRes)
+        && scrutinee_left_by_miss(func, block, *scrutinee))
+    .then_some(*scrutinee)
+}
+
+/// `block` only tests the next arm of the match whose miss reached it (no
+/// instruction but that test's own payloads): the scrutinee the miss left
+/// on the stack is the one it tests, as HIR emission's chained
+/// `JumpIfMatch`.
+pub(super) fn miss_chain_tos(func: &MirFunc, block: BlockId) -> Option<ValueId> {
+    let s = missed_scrutinee(func, block)?;
+    let b = func.block(block);
+    let Some(Terminator::JumpIfMatch { scrutinee, payloads, .. }) = &b.term else {
+        return None;
+    };
+    (*scrutinee == s
+        && b.insts.iter().all(|i| {
+            i.is_phi() || matches!(i, MirInst::MatchPayload { dest, scrutinee: src, .. } if *src == s && payloads.contains(dest))
+        }))
+    .then_some(s)
 }
 
 fn last_arm_payloads(func: &MirFunc, block: BlockId, scrutinee: ValueId) -> Vec<ValueId> {
