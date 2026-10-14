@@ -99,10 +99,10 @@ impl Compiler {
             }
             HirKind::Global { .. } if emit.plan.statics.contains_key(&id.0) => {}
             HirKind::Lambda { .. } => {
-                // Its body was emitted in its own frame, at its entry.
-                if let Some(lam) = emit.plan.lambdas.get(&id.0)
-                    && let Some(target) = lam.entry.and_then(|entry| self.bytecode.entry_label_for_offset(entry as usize))
-                {
+                // Its body lowers in its own frame, at the entry label
+                // reserved when it was planned.
+                if let Some(lam) = emit.plan.lambdas.get(&id.0) {
+                    let target = lam.label;
                     let operand = make_fn_operand(lam.body.captures.len() as u32, 0, lam.body.params.len() as u32, false);
                     let captures = lam.body.captures.iter().map(|&(outer, _)| outer).collect();
                     t.fn_values.insert(id.0, crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand, mask: 0 }, captures });

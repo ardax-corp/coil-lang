@@ -95,6 +95,11 @@ pub fn emit_lir_with_aliases(
         }
         let term_loc = func.term_loc(block.id);
         consume_match_tos(&mut out, func, block.id, &plan, &regs, term_loc);
+        // A miss leaves the scrutinee on the stack: the next arm's test
+        // peeks it there; a block taking no payload of it pops it.
+        if super::emit::miss_chain_tos(func, block.id).is_none() && super::emit::missed_scrutinee_unused(func, block.id) {
+            out.push(IlOp::Pop { loc: term_loc });
+        }
         let mut starts: Vec<(usize, ValueId)> = Vec::new();
         for inst in &block.insts {
             if inst.is_phi() {
@@ -2029,7 +2034,9 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
                     "JumpIfMatch + phi moves (keep fuse-IL)".into(),
                 ));
             }
-            emit_stack(out, *scrutinee, func, plan, regs, pool, loc)?;
+            if super::emit::miss_chain_tos(func, block.id).is_none() {
+                emit_stack(out, *scrutinee, func, plan, regs, pool, loc)?;
+            }
             out.push(IlOp::Jump {
                 kind: IlJumpKind::JumpIfMatch {
                     tag: *tag,
