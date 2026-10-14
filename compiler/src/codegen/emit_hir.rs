@@ -1006,11 +1006,18 @@ impl Compiler {
                 t => crate::typechecking::ty::vec_element_ty(t),
             });
             let elem = match element {
-                // A heap element's slot holds its boxed word.
+                // A heap element's slot holds its boxed word; a fixed
+                // array's pointer-niche `Option` / `Result` element its
+                // niche word (`hir_stack_rep`).
                 Some(element) => crate::mir::scalar_mir_ty(element).or_else(|| {
                     use crate::typechecking::value_layout::{value_layout, word_kind};
-                    (word_kind(&self.checker, element) == common::WORD_POINTER && value_layout(&self.checker, element) == ValueLayout::Boxed)
-                        .then_some(crate::mir::MirTy::HeapRef)
+                    let fixed = ty.as_ref().is_some_and(|t| matches!(crate::typechecking::ty::strip_readonly(t), Ty::Array { .. }));
+                    match value_layout(&self.checker, element) {
+                        ValueLayout::Boxed => (word_kind(&self.checker, element) == common::WORD_POINTER).then_some(crate::mir::MirTy::HeapRef),
+                        ValueLayout::NicheOption | ValueLayout::NicheUnitResult if fixed => Some(crate::mir::MirTy::NicheOpt),
+                        ValueLayout::NicheResult if fixed => Some(crate::mir::MirTy::NicheRes),
+                        _ => None,
+                    }
                 }),
                 _ => None,
             };
