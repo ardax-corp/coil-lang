@@ -118,6 +118,16 @@ pub struct HirFnValue {
     pub captures: Vec<HirLocal>,
 }
 
+/// A call through a `PolyFn` local HIR emission made with no dictionary:
+/// each argument boxed to its `BoxValue` tag (`None`: passed as it is),
+/// then `CallIndirect`, then the result unboxed from tag `unbox` when the
+/// function returns a bare type parameter.
+#[derive(Clone, Debug)]
+pub struct HirPolyCall {
+    pub boxes: Vec<Option<u32>>,
+    pub unbox: Option<u32>,
+}
+
 /// A user operator HIR emission lowered to its trait instance method's
 /// plain `CALL`, each operand boxed as the instance takes it.
 #[derive(Clone, Debug)]
@@ -315,6 +325,8 @@ pub struct HirMirInput<'a> {
     /// Calls through a function value HIR emission made a plain
     /// `CallIndirect` (not a `PolyFn` call with dictionaries).
     pub value_calls: &'a HashSet<u32>,
+    /// Calls through a `PolyFn` local with no dictionaries, by call.
+    pub poly_calls: &'a HashMap<u32, HirPolyCall>,
     /// `len(x)` calls: a fixed size, or `None` for the array's length.
     pub lens: &'a HashMap<u32, Option<u32>>,
     /// Statements before which frame-slot locals box (they escape there).
@@ -1958,6 +1970,7 @@ impl Lower<'_> {
             HirKind::Call { args, .. } if let Some(&idx) = self.inp.formats.get(&id.0) => self.format(id, idx, args.get(1..).unwrap_or_default()),
             HirKind::Call { args, .. } if self.inp.hosts.contains_key(&id.0) => self.host(id, args),
             HirKind::Call { callee: Callee::Value(f), args } if self.inp.value_calls.contains(&id.0) => self.call_value(id, *f, args),
+            HirKind::Call { callee: Callee::Value(f), args } if let Some(p) = self.inp.poly_calls.get(&id.0) => self.call_poly(id, *f, args, &p.clone()),
             HirKind::Call { args, .. } if let Some(fork) = self.inp.par_forks.get(&id.0) => self.par_fork(id, args, &fork.clone()),
             HirKind::Call { args, .. } => self.call(id, args),
             HirKind::Resume { handle, value } => self.resume(id, *handle, *value),
@@ -3434,6 +3447,51 @@ impl Lower<'_> {
             return Err("call value callee".into());
         }
         let dest = self.at_expr(id, |l| l.b.ins_call_indirect(callee, words, ret).map_err(mir))?;
+        Ok(if unit { Val::Unit } else { Val::V(dest) })
+    }
+
+    /// `f(args)` through a `PolyFn` local, as HIR emission's
+    /// `hir_polyfn_call` with no dictionary: each argument's word boxed to
+    /// its tag, then `f`, `CallIndirect`, and the result unboxed when the
+    /// function returns a bare type parameter.
+    fn call_poly(&mut self, id: HirId, f: HirId, args: &[HirId], p: &HirPolyCall) -> Result<Val, Refusal> {
+        self.raw_host = false;
+        if self.inp.pair_tys.contains_key(&id.0) || p.boxes.len() != args.len() {
+            return Err("polyfn call shape".into());
+        }
+        let ty = self.expr_ty(id).ok_or("call type")?;
+        let unit = is_unit(ty);
+        let word = if unit {
+            MirTy::I64
+        } else {
+            self.inp.word(ty).ok_or_else(|| format!("call value type {}", ty_kind(ty)))?
+        };
+        let mut words = Vec::with_capacity(args.len());
+        for (&arg, &tag) in args.iter().zip(&p.boxes) {
+            let Some(v) = self.word(arg)? else {
+                return Ok(Val::Never);
+            };
+            let v = match tag {
+                Some(tag) => {
+                    let boxed = self.at_expr(arg, |l| l.b.ins_alloc(MirAllocKind::Boxed { tag }, vec![v]).map_err(mir))?;
+                    self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![boxed]).map_err(mir)?
+                }
+                None => v,
+            };
+            words.push(v);
+        }
+        let Some(callee) = self.word(f)? else {
+            return Ok(Val::Never);
+        };
+        if self.b.value_ty(callee) != MirTy::HeapRef {
+            return Err("call value callee".into());
+        }
+        let ret = if p.unbox.is_some() { MirTy::HeapRef } else { word };
+        let dest = self.at_expr(id, |l| l.b.ins_call_indirect(callee, words, ret).map_err(mir))?;
+        let dest = match p.unbox {
+            Some(tag) => self.b.ins_unbox(dest, tag, word).map_err(mir)?,
+            None => dest,
+        };
         Ok(if unit { Val::Unit } else { Val::V(dest) })
     }
 

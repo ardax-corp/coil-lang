@@ -34,6 +34,8 @@ pub(super) struct HirMirTables {
     pub(super) op_prims: HashSet<u32>,
     /// Calls through a function value emitted as a plain `CallIndirect`.
     pub(super) value_calls: HashSet<u32>,
+    /// Calls through a `PolyFn` local with no dictionaries.
+    pub(super) poly_calls: HashMap<u32, crate::mir::HirPolyCall>,
     /// Parallel loops the plan moved into their own fork-join functions,
     /// by loop: the direct MIR lowering's calls.
     pub(super) par_loops: HashMap<u32, crate::mir::HirParLoop>,
@@ -448,8 +450,10 @@ impl Compiler {
                 let (lookup, fqn) = (lookup.clone(), fqn.clone());
                 self.hir_mir_op_call(hir, id, &[*operand], (class, method, fqn), lookup, t);
             }
-            HirKind::Call { callee: Callee::Value(f), .. } => {
-                if !lower::polyfn_callee(hir, &self.checker, *f) {
+            HirKind::Call { callee: Callee::Value(f), args } => {
+                if lower::polyfn_callee(hir, &self.checker, *f) {
+                    self.hir_mir_polyfn_call(hir, emit, id, *f, args, t);
+                } else {
                     t.value_calls.insert(id.0);
                 }
             }
@@ -614,9 +618,7 @@ impl Compiler {
         }
         let natural = Self::hir_call_rep(call);
         let span = hir.expr(id).span;
-        let natural_args = |this: &Self, params: &[ValueLayout]| {
-            args.iter().zip(params).all(|(&a, &p)| this.hir_natural(hir, emit, a) == Some(Rep::Word(p)))
-        };
+        let natural_args = |this: &Self, params: &[ValueLayout]| args.iter().zip(params).all(|(&a, &p)| this.hir_arg_passes(hir, emit, a, p));
         if let Some(inst) = call.instance.as_ref().filter(|i| i.ground.is_some()) {
             let ground = inst.ground.as_ref().expect("ground call");
             let method = &ground.method;
@@ -670,7 +672,7 @@ impl Compiler {
                 && generic_plain
                 && let Some(boxed_ret) = self.hir_ret_shape(hir, id, &natural)
                 && !boxed
-                && args.iter().zip(&call.params).all(|(&a, &p)| self.hir_arg_word(hir, emit, a, p))
+                && args.iter().zip(&call.params).all(|(&a, &p)| self.hir_arg_passes(hir, emit, a, p))
                 && let Some(target) = target
             {
                 t.calls.insert(
@@ -727,6 +729,41 @@ impl Compiler {
         }
     }
 
+    /// Call `id` through `PolyFn` local `f`, as [`Self::hir_polyfn_call`]
+    /// emits it, when it passes no dictionary: each argument's `BoxValue`
+    /// tag and the result's `UnboxValue` tag.
+    fn hir_mir_polyfn_call(&mut self, hir: &HirBody, emit: &HirEmit, id: HirId, f: HirId, args: &[HirId], t: &mut HirMirTables) {
+        let mut boxes = Vec::with_capacity(args.len());
+        let mut arg_tys = Vec::with_capacity(args.len());
+        for &arg in args {
+            // Emission passes the boxed-layout word: the MIR word only when
+            // that is the argument's own.
+            if self.hir_natural(hir, emit, arg) != Some(Rep::Word(ValueLayout::Boxed)) {
+                return;
+            }
+            let Some(ty) = Self::hir_ty(hir, arg) else {
+                return;
+            };
+            let ty = apply_ty_prune(self.checker.subst(), ty);
+            boxes.push(Self::ty_to_value_tag(&ty).map(|tag| tag as u32));
+            arg_tys.push(ty);
+        }
+        let call_ty = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));
+        let source = self.hir_polyfn_source(hir, emit, f);
+        if let Some(source) = &source {
+            let dicts = self.hir_mir_quiet(|this| this.emit_call_site_dicts(&mut CodeBuf::new(), source, &arg_tys, call_ty.as_ref()));
+            if dicts != 0 {
+                return;
+            }
+        }
+        let unbox = match &source {
+            Some(source) => self.generic_return_depends_on_type_param(source),
+            None => Self::hir_polyfn_returns_var(hir, &self.checker, f),
+        };
+        let unbox = if unbox { call_ty.as_ref().and_then(Self::ty_to_value_tag).map(|tag| tag as u32) } else { None };
+        t.poly_calls.insert(id.0, crate::mir::HirPolyCall { boxes, unbox });
+    }
+
     /// How many dictionaries [`Self::hir_push_dicts`] pushes for `generic`.
     /// Whether direct MIR passes argument `id` in `param` as HIR emission
     /// does: its own word in that layout, or a numeric range's two words
@@ -773,6 +810,17 @@ impl Compiler {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Whether argument `id` of a method or ground instance call, emitted
+    /// as `Rep::Word(param)`, is what direct MIR's plain call passes: its
+    /// own word ([`Self::hir_arg_word`]), or a two-word value (or a
+    /// constructor) of a type whose word is `param`, which both box the
+    /// same way (MIR's `box_pair_val`, emission's pair-to-word convert).
+    fn hir_arg_passes(&self, hir: &HirBody, emit: &HirEmit, id: HirId, param: ValueLayout) -> bool {
+        self.hir_arg_word(hir, emit, id, param)
+            || (matches!(self.hir_natural(hir, emit, id), None | Some(Rep::Pair(_)))
+                && Self::hir_ty(hir, id).is_some_and(|ty| self.value_layout(&apply_ty_prune(self.checker.subst(), ty)) == param))
     }
 
     fn hir_mir_dicts(&mut self, generic: &HirGeneric) -> u32 {
