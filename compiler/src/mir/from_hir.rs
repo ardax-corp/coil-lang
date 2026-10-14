@@ -2803,6 +2803,16 @@ impl Lower<'_> {
                 }
                 Ok(Val::Unit)
             }
+            // `let (a, b, c) = e` of a heap tuple of any other length: its
+            // items read out, as a nested tuple pattern's.
+            HirKind::LetPat { pat: pat @ HirPat::Tuple(_), init } => {
+                let Some(obj) = self.word(*init)? else {
+                    return Ok(Val::Never);
+                };
+                let ty = self.expr_ty(*init).cloned();
+                self.bind_tuple_item(pat, obj, ty.as_ref())?;
+                Ok(Val::Unit)
+            }
             // `let { a, b } = r` of a record: each bound field read by its
             // key, as `hir_let_pat_binds`' `GetField`.
             HirKind::LetPat { pat: HirPat::Record(parts), init } if let Some(words) = self.inp.record_pats.get(&id.0) => {
