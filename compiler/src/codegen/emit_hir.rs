@@ -1011,17 +1011,15 @@ impl Compiler {
                 t => crate::typechecking::ty::vec_element_ty(t),
             });
             let elem = match element {
-                // A heap element's slot holds its boxed word; a fixed
-                // array's pointer-niche `Option` / `Result` element its
-                // niche word (`hir_stack_rep`).
+                // A heap element's slot holds its boxed word; a
+                // pointer-niche `Option` / `Result` element its niche word
+                // (`hir_stack_rep`).
                 Some(element) => crate::mir::scalar_mir_ty(element).or_else(|| {
                     use crate::typechecking::value_layout::{value_layout, word_kind};
-                    let fixed = ty.as_ref().is_some_and(|t| matches!(crate::typechecking::ty::strip_readonly(t), Ty::Array { .. }));
                     match value_layout(&self.checker, element) {
                         ValueLayout::Boxed => (word_kind(&self.checker, element) == common::WORD_POINTER).then_some(crate::mir::MirTy::HeapRef),
-                        ValueLayout::NicheOption | ValueLayout::NicheUnitResult if fixed => Some(crate::mir::MirTy::NicheOpt),
-                        ValueLayout::NicheResult if fixed => Some(crate::mir::MirTy::NicheRes),
-                        _ => None,
+                        ValueLayout::NicheOption | ValueLayout::NicheUnitResult => Some(crate::mir::MirTy::NicheOpt),
+                        ValueLayout::NicheResult => Some(crate::mir::MirTy::NicheRes),
                     }
                 }),
                 _ => None,
@@ -5899,11 +5897,15 @@ impl Compiler {
         Some((Self::hir_slot(emit, local), n))
     }
 
-    /// The representation of a stack array's elements: one word each.
+    /// The representation of a stack array's elements: one word each, in
+    /// the element's layout, as an index read takes it and a heap array
+    /// holds it (a niche `Option` / `Result` element is its niche word,
+    /// for a fixed array and an array literal bound to a `Vec` local alike).
     fn hir_stack_rep(&self, hir: &HirBody, local: LocalId) -> Rep {
         let elem = hir.local(local).ty.as_ref().map(|ty| apply_ty_prune(self.checker.subst(), ty));
         Rep::Word(match elem.as_ref().map(crate::typechecking::ty::strip_readonly) {
             Some(Ty::Array { element, .. }) => self.value_layout(element),
+            Some(ty) if let Some(element) = crate::typechecking::ty::vec_element_ty(ty) => self.value_layout(element),
             _ => ValueLayout::Boxed,
         })
     }
