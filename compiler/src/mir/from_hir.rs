@@ -465,6 +465,9 @@ pub struct HirMirInput<'a> {
     /// Matrix / vector operators and `dot` / `matmul` calls on a packed
     /// kernel: its native and the meta word packing the shape.
     pub linalgs: &'a HashMap<u32, (u16, u32)>,
+    /// `cross(a, b)` calls unrolled: whether the result is a tuple and
+    /// whether its elements are floats.
+    pub crosses: &'a HashMap<u32, (bool, bool)>,
     /// Fixed array locals copied as they are bound or assigned to another
     /// local: the `vec_from_array` native, by value.
     pub array_copies: &'a HashMap<u32, u16>,
@@ -1859,9 +1862,12 @@ impl Lower<'_> {
     /// they are reached), a dynamic array in a loop pushing each result.
     fn aggregate(&mut self, id: HirId, info: &crate::typechecking::AggregateArithInfo, lhs: HirId, rhs: Option<HirId>) -> Result<Val, Refusal> {
         use crate::typechecking::{AggregateArithKind as K, AggregateOp, ScalarSide};
-        // The packed kernel's edge takes its operands as untyped words.
+        // The packed kernel: each operand one word (boxed), then the meta
+        // word, as a matrix operator's.
         if lower::aggregate_packed(info).is_some() {
-            return Err("packed aggregate".into());
+            let la = *self.inp.linalgs.get(&id.0).ok_or("packed aggregate")?;
+            let args: Vec<HirId> = [lhs].into_iter().chain(rhs).collect();
+            return self.linalg(id, la, &args);
         }
         let op = match info.op {
             AggregateOp::Add => Some(MirBinOp::Add),
@@ -2322,6 +2328,7 @@ impl Lower<'_> {
             HirKind::Bin { lhs, rhs, .. } if let Some(&la) = self.inp.linalgs.get(&id.0) => self.linalg(id, la, &[*lhs, *rhs]),
             HirKind::Un { operand, .. } if let Some(&la) = self.inp.linalgs.get(&id.0) => self.linalg(id, la, &[*operand]),
             HirKind::Call { args, .. } if let Some(&la) = self.inp.linalgs.get(&id.0) => self.linalg(id, la, args),
+            HirKind::Call { args, .. } if let Some(&(tuple, float)) = self.inp.crosses.get(&id.0) => self.cross(id, tuple, float, args),
             HirKind::Bin { lhs, rhs, .. } if let Some(info) = self.inp.aggregates.get(&id.0) => self.aggregate(id, &info.clone(), *lhs, Some(*rhs)),
             HirKind::Un { operand, .. } if let Some(info) = self.inp.aggregates.get(&id.0) => self.aggregate(id, &info.clone(), *operand, None),
             // A bound type parameter's operator: its dictionary method.
@@ -4888,6 +4895,55 @@ impl Lower<'_> {
             l.b.ins_host_invoke_as(native, words, common::HOST_ENUM_LAYOUT_BOXED as u8, Some(ret)).map_err(mir)
         })?;
         Ok(Val::V(out))
+    }
+
+    /// `cross(a, b)` of two 3-vectors, unrolled as HIR emission's
+    /// `emit_linear_algebra_unrolled`: each component read, then
+    /// `(ay*bz - az*by, az*bx - ax*bz, ax*by - ay*bx)` as a tuple or array.
+    fn cross(&mut self, id: HirId, tuple: bool, float: bool, args: &[HirId]) -> Result<Val, Refusal> {
+        let [a, b] = *args else {
+            return Err("cross arity".into());
+        };
+        let elem = if float { MirTy::F64 } else { MirTy::I64 };
+        let mut parts = Vec::with_capacity(6);
+        let mut objs = Vec::with_capacity(2);
+        for arg in [a, b] {
+            let Some(obj) = self.word_or_boxed(arg)? else {
+                return Ok(Val::Never);
+            };
+            if self.b.value_ty(obj) != MirTy::HeapRef {
+                return Err("cross operand".into());
+            }
+            objs.push(obj);
+        }
+        for obj in objs {
+            for i in 0..3 {
+                let k = self.b.ins_const(MirConst::I64(i)).map_err(mir)?;
+                parts.push(self.b.ins_index(obj, k, elem, false).map_err(mir)?);
+            }
+        }
+        let [ax, ay, az, bx, by, bz] = parts[..] else {
+            unreachable!("six components")
+        };
+        let mut words = Vec::with_capacity(3);
+        for (p, q, r, s) in [(ay, bz, az, by), (az, bx, ax, bz), (ax, by, ay, bx)] {
+            // An int product or difference traps on overflow at the call.
+            let w = self.at_expr(id, |l2| {
+                let l = l2.b.ins_binop(MirBinOp::Mul, p, q).map_err(mir)?;
+                let r = l2.b.ins_binop(MirBinOp::Mul, r, s).map_err(mir)?;
+                l2.b.ins_binop(MirBinOp::Sub, l, r).map_err(mir)
+            })?;
+            words.push(w);
+        }
+        let ty = self.expr_ty(id).ok_or("cross type")?.clone();
+        let obj = if tuple {
+            let kinds = common::pack_word_kinds(std::iter::repeat_n(common::WORD_SCALAR, 3));
+            self.b.ins_alloc_kinds(MirAllocKind::Tuple, words, kinds).map_err(mir)?
+        } else {
+            let stamp = array_elem(&ty).map_or(0, |e| (self.inp.array_stamp)(e));
+            self.b.ins_alloc_kinds(MirAllocKind::Array, words, stamp).map_err(mir)?
+        };
+        Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?))
     }
 
     /// A host native: the arguments in order, then `HostInvoke` (the native

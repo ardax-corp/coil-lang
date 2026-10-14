@@ -116,6 +116,13 @@ pub fn host_variadic(id: u16) -> bool {
     )
 }
 
+/// Whether a HostInvoke of native `id` may pass `n` arguments to a spec
+/// of `declared`: exactly, more to a variadic native, or two to
+/// `packed_vec_arith` (a negation: the operand and the meta word).
+pub fn host_arity_ok(id: u16, declared: usize, n: usize) -> bool {
+    n == declared || (host_variadic(id) && n > declared) || (id == PACKED_VEC_ARITH_ID && n == 2)
+}
+
 /// Whether `actual` may feed a HostInvoke argument typed `expected`.
 /// Generic word edges (no precise [`host_spec`]) take any Value word, and a
 /// heap pointer is one; precise math / packed specs stay exact.
