@@ -1112,6 +1112,19 @@ impl Compiler {
             }
             crate::mir::scalar_mir_ty(&backing).filter(|t| matches!(t, crate::mir::MirTy::I64 | crate::mir::MirTy::F64 | crate::mir::MirTy::Bool))
         };
+        // Fields of heap class objects whose slot holds the word the
+        // field's type names (a generic field holds a boxed value).
+        // A string field, or a two-word enum's, holds its boxed heap word.
+        let field_word = |t: &Ty| {
+            word(t).or_else(|| scalar_enum(t)).or_else(|| {
+                let boxed = match lower::classify(checker, t)? {
+                    ValueClass::Opaque => matches!(apply_ty_prune(checker.subst(), t), Ty::Con(ref n) if n == crate::typechecking::ty::STRING),
+                    ValueClass::Enum => true,
+                    _ => false,
+                };
+                boxed.then_some(crate::mir::MirTy::HeapRef)
+            })
+        };
         let mut sroa = HashMap::new();
         for e in &hir.exprs {
             if let HirKind::Let { local, init: Some(init) } = e.kind
@@ -1123,7 +1136,17 @@ impl Compiler {
                 let made = Self::hir_ty(hir, init);
                 let tys: Option<Vec<_>> = tys
                     .iter()
-                    .map(|t| word(t).or_else(|| scalar_enum(t)).or_else(|| word(&self.hir_class_ty_args_at(made?, t)?)))
+                    // A string or boxed enum field's slot holds its boxed
+                    // word, as `new` stores it; an enum with a niche layout
+                    // (`Option<int>`) holds its niche word, not a heap one.
+                    .map(|t| {
+                        word(t)
+                            .or_else(|| scalar_enum(t))
+                            .or_else(|| {
+                                field_word(t).filter(|_| crate::typechecking::value_layout::value_layout(checker, t) == ValueLayout::Boxed)
+                            })
+                            .or_else(|| word(&self.hir_class_ty_args_at(made?, t)?))
+                    })
                     .collect();
                 sroa.insert(local.0, tys.ok_or("scalar-replaced field type")?);
             }
@@ -1153,19 +1176,6 @@ impl Compiler {
                 Some((*l, (self.checker.class_type_id(class), n as u32)))
             })
             .collect();
-        // Fields of heap class objects whose slot holds the word the
-        // field's type names (a generic field holds a boxed value).
-        // A string field, or a two-word enum's, holds its boxed heap word.
-        let field_word = |t: &Ty| {
-            word(t).or_else(|| scalar_enum(t)).or_else(|| {
-                let boxed = match lower::classify(checker, t)? {
-                    ValueClass::Opaque => matches!(apply_ty_prune(checker.subst(), t), Ty::Con(ref n) if n == crate::typechecking::ty::STRING),
-                    ValueClass::Enum => true,
-                    _ => false,
-                };
-                boxed.then_some(crate::mir::MirTy::HeapRef)
-            })
-        };
         // A generic class's field open in a parameter (`head:
         // Option<Node<T>>`) holds its boxed word; read or written at a
         // ground type with a niche layout of its own it converts there.
