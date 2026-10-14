@@ -212,14 +212,24 @@ fn live_heap(
 
 /// The `i64` words of an [`MirFunc::opaque_words`] body (a type
 /// variable's word may be an object) live past an instruction that can
-/// collect: anything but a constant, a parameter or a word one of these
-/// moves consumes. A frame map lists them beside its heap words.
+/// collect: anything but a constant, a code pointer (a `CodePtr`, or a
+/// `CallIndirect`'s dictionary method), a parameter or a word one of
+/// these moves consumes. A frame map lists them beside its heap words.
 pub(super) fn live_opaque_words(func: &MirFunc) -> BTreeSet<ValueId> {
     let mut out = BTreeSet::new();
     if !func.opaque_words {
         return out;
     }
-    let consts: HashSet<ValueId> = func.blocks.iter().flat_map(|b| &b.insts).filter(|i| matches!(i, MirInst::Const { .. })).map(|i| i.dest()).collect();
+    let consts: HashSet<ValueId> = func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .filter_map(|i| match i {
+            MirInst::Const { dest, .. } | MirInst::CodePtr { dest, .. } => Some(*dest),
+            MirInst::CallIndirect { callee, .. } if func.ty(*callee) == MirTy::I64 => Some(*callee),
+            _ => None,
+        })
+        .collect();
     let live = liveness_after(func);
     for (b, block) in func.blocks.iter().enumerate() {
         for (i, inst) in block.insts.iter().enumerate() {

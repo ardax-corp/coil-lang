@@ -521,8 +521,8 @@ impl MirBuilder {
         Ok((dest, dest_hi))
     }
 
-    /// `CallIndirect`: call the function value `callee` with `args`, its
-    /// one-word result typed `ret`.
+    /// `CallIndirect`: call the function value `callee` (or an `i64` code
+    /// pointer) with `args`, its one-word result typed `ret`.
     pub fn ins_call_indirect(&mut self, callee: ValueId, args: Vec<ValueId>, ret: MirTy) -> Result<ValueId, MirError> {
         self.ins_call_indirect_dicts(callee, args, 0, ret)
     }
@@ -533,7 +533,8 @@ impl MirBuilder {
         if dicts as usize > args.len() {
             return Err(MirError::msg("CallIndirect dicts exceed args".to_string()));
         }
-        if self.resolve_ty(callee) != MirTy::HeapRef {
+        // A function value, or a dictionary method's code pointer.
+        if !matches!(self.resolve_ty(callee), MirTy::HeapRef | MirTy::I64) {
             return Err(MirError::msg(format!("CallIndirect callee is {}", self.resolve_ty(callee))));
         }
         let args: Vec<ValueId> = args.into_iter().map(|v| self.resolve(v)).collect();
