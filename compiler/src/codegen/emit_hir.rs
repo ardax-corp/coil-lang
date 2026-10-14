@@ -1447,6 +1447,7 @@ impl Compiler {
             heap_fields,
             boxed_niches,
             existential_packs: tables.existential_packs,
+            packs: &tables.packs,
             record_fields,
             records,
             matrix_wraps: &tables.matrix_wraps,

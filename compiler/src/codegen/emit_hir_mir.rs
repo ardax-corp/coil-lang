@@ -46,8 +46,13 @@ pub(super) struct HirMirTables {
     /// Auto-par call sites sent to a fork-join worker, by call: the direct
     /// MIR lowering's calls.
     pub(super) par_forks: HashMap<u32, crate::mir::HirParFork>,
-    /// Some value emission evaluates packs as a bare-class existential.
+    /// Some value emission packs as a bare-class existential has no
+    /// [`crate::mir::HirDictOp`] program in `packs`.
     pub(super) existential_packs: bool,
+    /// Values emission packs as a bare-class existential, by expression:
+    /// `emit_existential_pack_recipe` as a dictionary program run on the
+    /// value's word.
+    pub(super) packs: HashMap<u32, Vec<crate::mir::HirDictOp>>,
     /// Function values built with `MakeFn` / `MakePolyFn` (lambdas, named
     /// functions read as values and partial applications), by expression.
     pub(super) fn_values: HashMap<u32, crate::mir::HirFnValue>,
@@ -435,7 +440,19 @@ impl Compiler {
     /// it records them.
     fn hir_mir_note(&mut self, hir: &HirBody, emit: &HirEmit, id: HirId, t: &mut HirMirTables) -> Kids {
         // As `hir_value` packs a value after emitting it.
-        t.existential_packs |= self.hir_existential_pack(hir, id).is_some();
+        if let Some(pack) = self.hir_existential_pack(hir, id) {
+            let code = self.hir_mir_once(|this| {
+                let mut code = CodeBuf::new();
+                this.emit_existential_pack_recipe(&mut code, &pack);
+                code
+            });
+            match self.hir_mir_dict_program(&code) {
+                Some(ops) => {
+                    t.packs.insert(id.0, ops);
+                }
+                None => t.existential_packs = true,
+            }
+        }
         let e = hir.expr(id);
         match &e.kind {
             HirKind::Lit(Lit::Str(raw))
@@ -927,6 +944,7 @@ impl Compiler {
                 IlOp::Entry { kind: EntryKind::CodePtr, target, .. } => Some(HirDictOp::Code(*target)),
                 IlOp::MakeTuple { arity, kinds: 0, .. } => Some(HirDictOp::Tuple(*arity)),
                 IlOp::Const { imm: 0, .. } => Some(HirDictOp::Null),
+                IlOp::BoxValue { tag, .. } => Some(HirDictOp::Box(*tag)),
                 _ => None,
             })
             .collect()
