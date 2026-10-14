@@ -380,7 +380,7 @@ impl Compiler {
     fn hir_mir_note(&mut self, hir: &HirBody, emit: &HirEmit, id: HirId, t: &mut HirMirTables) -> Kids {
         // As `hir_value` packs a value after emitting it.
         if let Some(pack) = self.hir_existential_pack(hir, id) {
-            let code = self.hir_mir_quiet(|this| {
+            let code = self.hir_mir_once(|this| {
                 let mut code = CodeBuf::new();
                 this.emit_existential_pack_recipe(&mut code, &pack);
                 code
