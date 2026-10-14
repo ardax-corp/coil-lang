@@ -343,6 +343,8 @@ pub struct HirMirInput<'a> {
     /// HIR emission packs some value of the body as a bare-class
     /// existential (`emit_existential_pack_recipe`).
     pub existential_packs: bool,
+    /// The `unwind_resume` native a `defer`'s cleanup pad ends in.
+    pub unwind_native: Option<u16>,
     /// Field reads and writes on records (dicts): the key's string table
     /// index and the field's word type.
     pub record_fields: HashMap<u32, (u32, MirTy)>,
@@ -444,6 +446,17 @@ struct Lower<'a> {
     /// word type. Each word stays live until the local is rebound and to
     /// every exit, as HIR emission's frame slot holds it.
     pins: HashMap<u32, (LocalId, MirTy)>,
+    /// The homes a `defer`'s cleanup pad reads, when it gets one.
+    pad: Option<PadHomes>,
+}
+
+/// Where a body's `defer` state sits for its unwind cleanup pad: each
+/// flag's home, and each capture's (by HIR local) with its frame slot
+/// (`None`: a slot-less binding, written where it is bound).
+#[derive(Default)]
+struct PadHomes {
+    flags: HashMap<LocalId, u16>,
+    caps: HashMap<u32, (u16, Option<LocalId>)>,
 }
 
 /// The MIR type of a scalar `ty`, or `None` when it is not one.
@@ -748,6 +761,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         defers: Vec::new(),
         defer_locals: HashMap::new(),
         pins: HashMap::new(),
+        pad: None,
     };
     lower.pin_locals()?;
     for (i, e) in hir.exprs.iter().enumerate() {
@@ -779,6 +793,9 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
             lower.defer_flags.insert(i as u32, flag);
         }
     }
+    if !lower.defer_flags.is_empty() && inp.unwind_native.is_some() && !hir.is_coro {
+        lower.pad = lower.pad_homes();
+    }
     let params = lower.b.func().params.len();
     if hir.is_coro {
         // A `gen fn` runs its body for effect (a tail `yield` receives
@@ -795,6 +812,10 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
     }
     let order = lower.layout();
     let spec = std::mem::take(&mut lower.spec);
+    let pad = lower.pad.take();
+    let defers = std::mem::take(&mut lower.defers);
+    let defer_locals = std::mem::take(&mut lower.defer_locals);
+    let boxed: HashSet<u32> = lower.boxes.keys().copied().collect();
     let mut func = lower.b.finish().map_err(mir)?;
     // A capture read at a `return` some path reaches without passing its
     // `let` would be a live-in word.
@@ -803,6 +824,13 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
     }
     prune(&mut func, &spec);
     tidy(&mut func, &order);
+    // A pad is an extra: a body without one stays pinned to HIR emission.
+    if let (Some(pad), Some(native)) = (pad, inp.unwind_native)
+        && !pad.caps.keys().any(|l| boxed.contains(l))
+        && let Ok(cleanup) = lower_pad(hir, inp, PadParts { defers: &defers, defer_locals, homes: &pad, home_tys: &func.homes, native })
+    {
+        func.cleanup = Some(Box::new(cleanup));
+    }
     if inp.opaque_vars {
         opaque_moves_only(hir, &func)?;
         func.opaque_words = true;
@@ -813,6 +841,96 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
     if inp.existential_packs {
         func.emit_refusal = Some("existential pack");
     }
+    Ok(func)
+}
+
+/// What [`lower_pad`] builds a body's cleanup pad from.
+struct PadParts<'p> {
+    /// The body's `defer`s, in the order they were lowered.
+    defers: &'p [(LocalId, HirId)],
+    defer_locals: HashMap<u32, LocalId>,
+    homes: &'p PadHomes,
+    /// The body's homes' word types.
+    home_tys: &'p [MirTy],
+    /// `unwind_resume`.
+    native: u16,
+}
+
+/// The unwind cleanup pad of a body with `defer`s, as HIR emission's
+/// `finish_fn_defers`: each armed `defer`, last first, with its captures
+/// read from their homes as they stood at the panic, then `unwind_resume`.
+/// It runs in the body's frame and reads the homes there.
+fn lower_pad(hir: &HirBody, inp: &HirMirInput, parts: PadParts<'_>) -> Result<MirFunc, Refusal> {
+    let mut b = MirBuilder::new(format!("{}$pad", hir.name));
+    b.allow_host_edges = true;
+    b.set_ret_ty(MirTy::I64);
+    for &ty in parts.home_tys {
+        b.add_home(ty).map_err(mir)?;
+    }
+    let cur = b.entry();
+    let mut pad = Lower {
+        hir,
+        inp,
+        b,
+        cur,
+        loops: Vec::new(),
+        unit_ret: true,
+        ret_hir: Ty::Tuple(Vec::new()),
+        order: vec![cur],
+        cold: Vec::new(),
+        aliases: HashMap::new(),
+        ret_tail: false,
+        next_temp: TEMP_BASE,
+        boxes: HashMap::new(),
+        unniche: HashMap::new(),
+        spec: HashSet::new(),
+        word_src: HashMap::new(),
+        known_niche: HashMap::new(),
+        raw_host: false,
+        defer_flags: HashMap::new(),
+        defers: Vec::new(),
+        defer_locals: parts.defer_locals,
+        pins: HashMap::new(),
+        pad: None,
+    };
+    let captures_of = |body: HirId| {
+        hir.exprs.iter().find_map(|e| match &e.kind {
+            HirKind::Defer { captures, body: b } if *b == body => Some(captures.clone()),
+            _ => None,
+        })
+    };
+    for &(flag, body) in parts.defers.iter().rev() {
+        let home = *parts.homes.flags.get(&flag).ok_or("pad flag")?;
+        let armed = pad.b.ins_home_load(home).map_err(mir)?;
+        let (run, skip) = (pad.b.create_block(), pad.b.create_block());
+        pad.b.branch(armed, run, skip).map_err(mir)?;
+        pad.switch(run);
+        for c in captures_of(body).ok_or("pad defer")?.into_iter().flatten() {
+            let &(home, slot) = parts.homes.caps.get(&c.0).ok_or("pad capture")?;
+            let v = pad.b.ins_home_load(home).map_err(mir)?;
+            match slot {
+                Some(slot) => pad.b.def_local(slot, v).map_err(mir)?,
+                None => {
+                    pad.aliases.insert(c.0, v);
+                }
+            }
+        }
+        if pad.stmt(body)? {
+            pad.jump(skip)?;
+        }
+        pad.switch(skip);
+    }
+    pad.b.ins_host_invoke(parts.native, Vec::new()).map_err(mir)?;
+    let zero = pad.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+    pad.b.ret(Some(zero)).map_err(mir)?;
+    let order = pad.layout();
+    let spec = std::mem::take(&mut pad.spec);
+    let mut func = pad.b.finish().map_err(mir)?;
+    if !func.params.is_empty() {
+        return Err("pad live-in".into());
+    }
+    prune(&mut func, &spec);
+    tidy(&mut func, &order);
     Ok(func)
 }
 
@@ -1001,6 +1119,59 @@ fn retarget(term: &mut Terminator, from: BlockId, to: BlockId) {
 }
 
 impl Lower<'_> {
+    /// Give each `defer` flag and capture a home, written from here on at
+    /// each definition (a parameter's now). `None` when a capture is not a
+    /// one-word local: the body then has no pad.
+    fn pad_homes(&mut self) -> Option<PadHomes> {
+        let mut caps: Vec<HirLocal> = Vec::new();
+        for e in &self.hir.exprs {
+            if let HirKind::Defer { captures, .. } = &e.kind {
+                for c in captures {
+                    let c = (*c)?;
+                    if !caps.contains(&c) {
+                        caps.push(c);
+                    }
+                }
+            }
+        }
+        let mut pad = PadHomes::default();
+        let mut flags: Vec<(u32, LocalId)> = self.defer_flags.iter().map(|(&k, &v)| (k, v)).collect();
+        flags.sort_unstable();
+        let mut stores: Vec<(u16, LocalId, MirTy)> = Vec::new();
+        for (_, flag) in flags {
+            let home = self.b.add_home(MirTy::Bool).ok()?;
+            pad.flags.insert(flag, home);
+            stores.push((home, flag, MirTy::Bool));
+        }
+        for c in caps {
+            if self.pair_local(c).is_some() || self.unit_local(c) || self.defer_locals.contains_key(&c.0) {
+                return None;
+            }
+            let ty = self.local_ty(c).ok()?;
+            let slot = self.inp.slots.get(c.0 as usize).copied().flatten().map(LocalId);
+            let home = self.b.add_home(ty).ok()?;
+            pad.caps.insert(c.0, (home, slot));
+            if let Some(slot) = slot
+                && self.hir.params.contains(&c)
+            {
+                stores.push((home, slot, ty));
+            }
+        }
+        for (home, local, ty) in stores {
+            let v = self.b.use_local(local, ty).ok()?;
+            self.b.ins_home_store(home, v).ok()?;
+        }
+        for (&flag, &home) in &pad.flags {
+            self.b.homed.insert(flag, home);
+        }
+        for &(home, slot) in pad.caps.values() {
+            if let Some(slot) = slot {
+                self.b.homed.insert(slot, home);
+            }
+        }
+        Some(pad)
+    }
+
     fn slot(&self, local: HirLocal) -> Result<LocalId, Refusal> {
         self.inp
             .slots
@@ -4382,6 +4553,9 @@ impl Lower<'_> {
                 return Err("local slot".into());
             }
             self.aliases.insert(local.0, v);
+            if let Some(&(home, None)) = self.pad.as_ref().and_then(|p| p.caps.get(&local.0)) {
+                self.b.ins_home_store(home, v).map_err(mir)?;
+            }
             return Ok(());
         }
         let slot = self.slot(local)?;
