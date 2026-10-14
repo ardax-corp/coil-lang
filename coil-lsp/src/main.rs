@@ -76,6 +76,8 @@ struct LspOptions {
     /// Absolute (relative ones resolve against the current directory).
     extra_roots: Vec<PathBuf>,
     grants: HostGrants,
+    /// `--workspace`: the project directory, used instead of the client's root.
+    workspace: Option<PathBuf>,
 }
 
 #[derive(Parser, Debug)]
@@ -84,6 +86,8 @@ struct LspOptions {
     about = "Start the Coil language server over stdin/stdout",
     disable_help_subcommand = true,
     after_help = "`--root` is searched after `src`, `.` and `.deps/*/src`.\n\
+`--workspace` is the project directory those resolve against; without it the\n\
+client's root folder is used.\n\
 `--stdio` is accepted for LSP clients; stdio is the only transport."
 )]
 struct LspCli {
@@ -91,6 +95,9 @@ struct LspCli {
     grants: HostGrantFlags,
     #[command(flatten)]
     roots: RootFlags,
+    /// Project directory (default: the client's root folder)
+    #[arg(long, value_name = "DIR")]
+    workspace: Option<PathBuf>,
     /// Accepted for LSP clients; stdio is the only transport
     #[arg(long)]
     stdio: bool,
@@ -122,6 +129,7 @@ fn parse_options(
     Ok(Some(LspOptions {
         extra_roots: cli.roots.root.into_iter().map(|path| cwd.join(path)).collect(),
         grants,
+        workspace: cli.workspace.map(|path| cwd.join(path)),
     }))
 }
 
@@ -256,17 +264,14 @@ fn run(connection: &Connection, options: LspOptions) -> Result<(), Box<dyn std::
         extra_roots: options.extra_roots,
         ..ServerState::default()
     };
-    let workspace_root = _params
-        .root_uri
-        .as_ref()
-        .and_then(uri_path)
-        .or_else(|| {
-            _params
-                .workspace_folders
-                .as_ref()
-                .and_then(|folders| folders.first())
-                .and_then(|folder| uri_path(&folder.uri))
-        });
+    let client_root = _params.root_uri.as_ref().and_then(uri_path).or_else(|| {
+        _params
+            .workspace_folders
+            .as_ref()
+            .and_then(|folders| folders.first())
+            .and_then(|folder| uri_path(&folder.uri))
+    });
+    let workspace_root = options.workspace.or(client_root);
     if let Some(root_uri) = workspace_root {
         state.workspace_root = Some(root_uri.clone());
         let mut index = ProjectIndex::with_roots(
@@ -4400,6 +4405,8 @@ mod tests {
             "--allow-dload",
             "sdl2",
             "--ffi-search-path=native",
+            "--workspace",
+            "proj",
         ]
         .map(String::from);
         let options = parse_options(args, cwd).unwrap().expect("not help");
@@ -4411,6 +4418,7 @@ mod tests {
         assert!(!options.grants.allow_attach);
         assert_eq!(options.grants.allow_dload, vec!["sdl2".to_string()]);
         assert_eq!(options.grants.ffi_search_paths, vec![PathBuf::from("/work/app/native")]);
+        assert_eq!(options.workspace, Some(PathBuf::from("/work/app/proj")));
     }
 
     #[test]
