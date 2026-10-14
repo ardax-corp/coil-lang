@@ -307,6 +307,16 @@ pub enum MirInst {
         layout: u8,
         args: Vec<ValueId>,
     },
+    /// An FFI opcode (`extern` calls and `dload` / `declare` / `invoke`):
+    /// `args` are its stack operands in push order, `operand` the opcode's
+    /// own; `dest` is the boxed `Result` the VM pushes. A call that may run
+    /// a callback: an effect barrier, as an impure HostInvoke; dense refuses.
+    Ffi {
+        dest: ValueId,
+        op: MirFfiOp,
+        operand: u32,
+        args: Vec<ValueId>,
+    },
     /// Dense / LIR `CALL` (COI-291 / B3). Args stay on the operand stack
     /// (LOAD / BinSlotImm convoy). One-word `Entry` uses `dest` only;
     /// two-slot `[payload, tag]` sets `dest_hi`. `STORE` only when a dest
@@ -569,6 +579,36 @@ pub enum MirInst {
     },
 }
 
+/// The FFI opcode a [`MirInst::Ffi`] reconstructs.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum MirFfiOp {
+    /// `FfiLoad`: the library name.
+    Load,
+    /// `DeclareFFI`: library, name, signature tag tuple, return tag.
+    Declare,
+    /// `FfiInvoke`: library, function id, argument tuple, and a variadic
+    /// call's tag tuple.
+    Invoke,
+}
+
+impl MirFfiOp {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Load => "load",
+            Self::Declare => "declare",
+            Self::Invoke => "invoke",
+        }
+    }
+
+    pub fn instruction(self) -> common::Instruction {
+        match self {
+            Self::Load => common::Instruction::FfiLoad,
+            Self::Declare => common::Instruction::DeclareFFI,
+            Self::Invoke => common::Instruction::FfiInvoke,
+        }
+    }
+}
+
 /// Heap object constructed by [`MirInst::Alloc`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum MirAllocKind {
@@ -703,6 +743,7 @@ impl MirInst {
             | Self::Cast { dest, .. }
             | Self::Phi { dest, .. }
             | Self::HostInvoke { dest, .. }
+            | Self::Ffi { dest, .. }
             | Self::Call { dest, .. }
             | Self::CallIndirect { dest, .. }
             | Self::MatchPayload { dest, .. }
@@ -776,7 +817,7 @@ impl MirInst {
             Self::Bin { lhs, rhs, .. } | Self::Cmp { lhs, rhs, .. } | Self::StrEq { lhs, rhs, .. } => vec![*lhs, *rhs],
             Self::Unary { src, .. } | Self::Cast { src, .. } => vec![*src],
             Self::Phi { args, .. } => args.iter().map(|(_, v)| *v).collect(),
-            Self::HostInvoke { args, .. } | Self::Call { args, .. } => args.clone(),
+            Self::HostInvoke { args, .. } | Self::Ffi { args, .. } | Self::Call { args, .. } => args.clone(),
             Self::CallIndirect { callee, args, .. } => args.iter().copied().chain([*callee]).collect(),
             Self::MatchPayload { scrutinee, .. } => vec![*scrutinee],
             Self::FieldLoad { object, .. } => vec![*object],
@@ -847,7 +888,7 @@ impl MirInst {
                     *v = map(*v);
                 }
             }
-            Self::HostInvoke { args, .. } | Self::Call { args, .. } => {
+            Self::HostInvoke { args, .. } | Self::Ffi { args, .. } | Self::Call { args, .. } => {
                 for v in args.iter_mut() {
                     *v = map(*v);
                 }

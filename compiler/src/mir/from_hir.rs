@@ -254,6 +254,8 @@ impl HirMirInput<'_> {
             .or_else(|| (self.opaque_vars && is_var_app(ty)).then_some(MirTy::HeapRef))
             // A bare-class existential: its `[boxed value, dictionary]` pack.
             .or_else(|| matches!(strip_readonly(ty), Ty::Existential { .. }).then_some(MirTy::HeapRef))
+            // A foreign `ptr`: a raw address, never a heap word.
+            .or_else(|| (matches!(strip_readonly(ty), Ty::Con(n) if n == "ptr") && !(self.is_class)(ty)).then_some(MirTy::I64))
     }
 
     /// An array element type held as a heap word: a string, class, array,
@@ -323,6 +325,36 @@ pub type PairVariantsFn<'a> = Box<dyn Fn(&Ty) -> Option<(String, Vec<(u32, Optio
 /// [`MirTy::NicheOpt`] when the zero word is one side (`None`, `Ok(())`),
 /// [`MirTy::NicheRes`] when `Err` is the pointer with its low bit set.
 pub type NicheFn<'a> = Box<dyn Fn(&Ty) -> Option<MirTy> + 'a>;
+
+/// One stack operand of an FFI opcode ([`HirFfi`]), in push order.
+#[derive(Clone, Debug)]
+pub enum HirFfiOperand {
+    /// A global static: an `extern`'s library or function id.
+    Static(u32),
+    /// An expression's word.
+    Value(u32),
+    /// A constant word: an FFI type tag.
+    Const(i64),
+    /// A function's code pointer: an `invoke` callback.
+    CodePtr(Label),
+    /// A tuple of these, built in order.
+    Tuple(Vec<HirFfiOperand>),
+}
+
+/// An `extern` call or `dload` / `declare` / `invoke`, as HIR emission's
+/// `HirBuiltin::Ffi` / `FfiDyn`: the opcode over its operands, then the
+/// boxed `Result` it pushes unwrapped (an `extern`), converted to its
+/// niche word, or kept as its object.
+#[derive(Clone, Debug)]
+pub struct HirFfi {
+    pub op: super::inst::MirFfiOp,
+    pub operand: u32,
+    pub operands: Vec<HirFfiOperand>,
+    /// An `extern`: `Ok`'s payload, or a panic with the error's message.
+    pub unwrap: bool,
+    /// The niche word the result converts to.
+    pub niche: Option<MirTy>,
+}
 
 /// What HIR emission decided about a body, for lowering it.
 pub struct HirMirInput<'a> {
@@ -481,6 +513,8 @@ pub struct HirMirInput<'a> {
     /// `cross(a, b)` calls unrolled: whether the result is a tuple and
     /// whether its elements are floats.
     pub crosses: &'a HashMap<u32, (bool, bool)>,
+    /// `extern` calls and `dload` / `declare` / `invoke`, by call.
+    pub ffis: &'a HashMap<u32, HirFfi>,
     /// Fixed array locals copied as they are bound or assigned to another
     /// local: the `vec_from_array` native, by value.
     pub array_copies: &'a HashMap<u32, u16>,
@@ -2371,6 +2405,7 @@ impl Lower<'_> {
             HirKind::Call { args, .. } if let (Some(&wait), [handle]) = (self.inp.block_ons.get(&id.0), args.as_slice()) => self.block_on(id, *handle, wait),
             HirKind::Call { args, .. } if let Some(&idx) = self.inp.formats.get(&id.0) => self.format(id, idx, args.get(1..).unwrap_or_default()),
             HirKind::Call { args, .. } if self.inp.hosts.contains_key(&id.0) => self.host(id, args),
+            HirKind::Call { .. } if let Some(site) = self.inp.ffis.get(&id.0) => self.ffi(id, &site.clone()),
             HirKind::Call { callee: Callee::Value(f), args } if self.inp.value_calls.contains(&id.0) => self.call_value(id, *f, args),
             HirKind::Call { callee: Callee::Value(f), args } if let Some(p) = self.inp.poly_calls.get(&id.0) => self.call_poly(id, *f, args, &p.clone()),
             HirKind::Call { args, .. } if let Some(fork) = self.inp.par_forks.get(&id.0) => self.par_fork(id, args, &fork.clone()),
@@ -5080,6 +5115,82 @@ impl Lower<'_> {
         Ok(if unit { Val::Unit } else { Val::V(out) })
     }
 
+    /// An FFI opcode over its operands, then its boxed `Result`: an
+    /// `extern`'s `Ok` payload (an `Err` panics with the error's message,
+    /// as `emit_result_unwrap_or_panic`), the niche word it converts to, or
+    /// the object as it comes back.
+    fn ffi(&mut self, id: HirId, site: &HirFfi) -> Result<Val, Refusal> {
+        let ret = match self.expr_ty(id) {
+            _ if !site.unwrap => None,
+            Some(ty) if is_unit(ty) => None,
+            Some(ty) => Some(self.inp.word(ty).ok_or_else(|| format!("ffi result {}", ty_kind(ty)))?),
+            None => return Err("ffi result".into()),
+        };
+        let mut words = Vec::with_capacity(site.operands.len());
+        for op in &site.operands {
+            let Some(w) = self.ffi_operand(op)? else {
+                return Ok(Val::Never);
+            };
+            words.push(w);
+        }
+        let obj = self.at_expr(id, |l| l.b.ins_ffi(site.op, site.operand, words).map_err(mir))?;
+        if !site.unwrap {
+            return match site.niche {
+                Some(want) => self.unbox_niche(obj, want),
+                None => Ok(Val::V(obj)),
+            };
+        }
+        let (ok, err) = (self.b.create_block(), self.b.create_block());
+        let payload = match ret {
+            Some(ty) => Some(self.b.ins_match_payload(obj, 0, ty).map_err(mir)?),
+            None => None,
+        };
+        self.b.jump_if_match(obj, 0, payload.into_iter().collect(), ok, err).map_err(mir)?;
+        let start = self.order.len();
+        self.switch(err);
+        self.at_expr(id, |l| {
+            let e = l.b.ins_match_payload(obj, 0, MirTy::HeapRef).map_err(mir)?;
+            let msg = l.b.ins_heap_field_load(e, None, 1, MirTy::HeapRef).map_err(mir)?;
+            l.keep_pins()?;
+            l.b.panic(msg).map_err(mir)
+        })?;
+        self.mark_cold(start);
+        self.switch(ok);
+        Ok(match payload {
+            Some(p) => Val::V(p),
+            None => Val::Unit,
+        })
+    }
+
+    /// One FFI operand's word (`None` when evaluating it never returns).
+    fn ffi_operand(&mut self, op: &HirFfiOperand) -> Result<Option<ValueId>, Refusal> {
+        Ok(Some(match op {
+            HirFfiOperand::Static(slot) => self.b.ins_load_static(*slot, MirTy::I64).map_err(mir)?,
+            HirFfiOperand::Value(id) => match self.word(HirId(*id))? {
+                Some(v) => v,
+                None => return Ok(None),
+            },
+            HirFfiOperand::Const(c) => self.b.ins_const(MirConst::I64(*c)).map_err(mir)?,
+            HirFfiOperand::CodePtr(target) => self.b.ins_code_ptr(*target).map_err(mir)?,
+            HirFfiOperand::Tuple(items) => {
+                let mut words = Vec::with_capacity(items.len());
+                for item in items {
+                    let Some(w) = self.ffi_operand(item)? else {
+                        return Ok(None);
+                    };
+                    words.push(w);
+                }
+                let t = self.b.ins_alloc(MirAllocKind::Tuple, words).map_err(mir)?;
+                self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![t]).map_err(mir)?
+            }
+        }))
+    }
+
+    /// An FFI call whose `Result` is kept as the object it comes back as.
+    fn ffi_boxed(&self, id: HirId) -> bool {
+        self.inp.ffis.get(&id.0).is_some_and(|s| !s.unwrap && s.niche.is_none())
+    }
+
     /// A boxed enum word to `[payload, tag]`, as HIR emission's
     /// `emit_unbox_enum_to_pair`: a `JumpIfMatch` per variant but the last,
     /// which the fallthrough unpacks.
@@ -5583,7 +5694,7 @@ impl Lower<'_> {
             }
             _ => false,
         };
-        let boxed_host = self.host_pair(scrutinee) || self.boxed_call(scrutinee) || self.host_boxed(scrutinee);
+        let boxed_host = self.host_pair(scrutinee) || self.boxed_call(scrutinee) || self.host_boxed(scrutinee) || self.ffi_boxed(scrutinee);
         if boxed_local || boxed_host || self.expr_ty(scrutinee).is_some_and(|t| (self.inp.boxed_enum)(t, None).is_some()) {
             return self.match_boxed(scrutinee, arms, tail);
         }

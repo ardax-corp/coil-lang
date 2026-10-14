@@ -152,6 +152,13 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             }
             Ok(())
         }
+        MirInst::Ffi { dest, op, operand, args } => {
+            write!(f, "{dest} = ffi.{} {operand}", op.as_str())?;
+            for a in args {
+                write!(f, ", {a}")?;
+            }
+            Ok(())
+        }
         MirInst::Call {
             dest,
             dest_hi,

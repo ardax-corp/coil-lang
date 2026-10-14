@@ -56,6 +56,7 @@ fn does_work(inst: &MirInst) -> bool {
         MirInst::Call { .. }
             | MirInst::CallIndirect { .. }
             | MirInst::HostInvoke { .. }
+            | MirInst::Ffi { .. }
             | MirInst::Print { .. }
             | MirInst::Format { .. }
             | MirInst::Stringify { .. }
