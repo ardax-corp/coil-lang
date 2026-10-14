@@ -196,7 +196,7 @@ impl HirMirInput<'_> {
             .or_else(|| (self.scalar_enum)(ty))
             .or_else(|| (self.niche)(ty))
             .or_else(|| (self.boxed_enum)(ty, None).map(|_| MirTy::HeapRef))
-            .or_else(|| array_elem(ty).and_then(|e| self.heap_elem(e)).map(|_| MirTy::HeapRef))
+            .or_else(|| array_elem(ty).and_then(|e| self.heap_elem(e).or_else(|| (self.niche)(e))).map(|_| MirTy::HeapRef))
             .or_else(|| (self.opaque_vars && is_var(ty)).then_some(MirTy::I64))
             .or_else(|| (self.opaque_vars && array_elem(ty).is_some_and(is_var)).then_some(MirTy::HeapRef))
     }
@@ -219,14 +219,15 @@ impl HirMirInput<'_> {
 
     /// The word type of an array's elements that direct MIR reads and
     /// writes: a scalar (a packed `byte` / `bool` element is read and
-    /// written as its word), or a heap word.
+    /// written as its word), a niche `Option` / `Result` word (stored as
+    /// the word itself, as HIR emission stores it), or a heap word.
     fn elem_word(&self, arr: &Ty) -> Option<MirTy> {
         let elem = array_elem(arr)?;
         match scalar(elem) {
             Some(t) => Some(t),
             // A type parameter's element: the opaque word as stored.
             _ if self.opaque_vars && is_var(elem) => Some(MirTy::I64),
-            _ => self.heap_elem(elem),
+            _ => (self.niche)(elem).or_else(|| self.heap_elem(elem)),
         }
     }
 }
@@ -3266,7 +3267,9 @@ impl Lower<'_> {
             let Some(&(base, n, ty)) = self.inp.stacks.get(&local) else {
                 return Err("boxed class local".into());
             };
-            if !matches!(ty, MirTy::I64 | MirTy::F64 | MirTy::HeapRef) {
+            // Each slot's word as it is, as HIR emission's `MakeArray`: a
+            // niche word stays the word, a `bool` its word.
+            if !matches!(ty, MirTy::I64 | MirTy::F64 | MirTy::Bool | MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes) {
                 return Err("boxed stack array type".into());
             }
             let mut items = Vec::with_capacity(n);
