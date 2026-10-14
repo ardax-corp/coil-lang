@@ -2298,7 +2298,14 @@ impl Compiler {
                     self.mono_type_param_tys.push(names);
                     self.mono_var_tys.push(vars);
                     self.inst_clone_fallback = Some((src.clone(), req.clone()));
-                    self.compile_function_output_with_name(method, req.name.clone(), &[], 0, Some(&req.src));
+                    // Checked under the method it clones: an inherent
+                    // method's result mode by its bare name, as its own
+                    // body (and its HIR) reads it.
+                    let mode_src = match &src.method_of {
+                        Some(_) => req.src.rsplit("::").next().unwrap_or(&req.src).to_string(),
+                        None => req.src.clone(),
+                    };
+                    self.compile_function_output_with_name(method, req.name.clone(), &[], 0, Some(&mode_src));
                     self.inst_clone_fallback = None;
                     self.mono_var_tys.pop();
                     self.mono_type_param_tys.pop();
