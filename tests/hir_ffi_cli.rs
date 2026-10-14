@@ -28,8 +28,28 @@ fn check(bin: &str, tmp: &Path, src: &Path) {
         "FFI calls fell back: {why_err}"
     );
 
-    for mode in [&[][..], &["-O", "0"][..]] {
+    // Every body lowers HIR -> MIR directly: none keeps the HIR stack
+    // lowering (`hir:` names the refusal otherwise).
+    let stats = Command::new(bin)
+        .env("COIL_MIR_FUSE", "1")
+        .args(["compile", "--opt-stats", "--allow-dload", "sum", "--ffi-search-path"])
+        .arg(tmp)
+        .arg(src)
+        .arg("-o")
+        .arg(tmp.join("main.hyc"))
+        .output()
+        .expect("coil compile --opt-stats");
+    let stats_out = String::from_utf8_lossy(&stats.stdout).into_owned() + &String::from_utf8_lossy(&stats.stderr);
+    assert!(stats.status.success(), "compile failed: {stats_out}");
+    let refused: Vec<&str> = stats_out
+        .lines()
+        .filter(|l| l.starts_with("    ") && l.contains("; hir: ") && !l.contains("; hir: lowered;"))
+        .collect();
+    assert!(refused.is_empty(), "FFI bodies refused direct MIR: {refused:#?}");
+
+    for (mode, fuse) in [(&[][..], "0"), (&["-O", "0"][..], "0"), (&[][..], "1"), (&["-O", "0"][..], "1")] {
         let run = Command::new(bin)
+            .env("COIL_MIR_FUSE", fuse)
             .args(mode)
             .args(["--allow-dload", "sum", "--dload-trusted", "sum", "--ffi-search-path"])
             .arg(tmp)
@@ -38,7 +58,7 @@ fn check(bin: &str, tmp: &Path, src: &Path) {
             .expect("coil run");
         assert!(
             run.status.success(),
-            "{mode:?} failed: {}",
+            "{mode:?} (COIL_MIR_FUSE={fuse}) failed: {}",
             String::from_utf8_lossy(&run.stderr)
         );
     }
