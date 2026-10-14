@@ -567,6 +567,7 @@ impl Compiler {
         // Clones an earlier body planned but never called give back their room.
         self.planned_method_clones.borrow_mut().clear();
         let entry_sp = self.hir_entry_sp.take();
+        self.hir_mir_ctx = std::mem::take(&mut self.hir_entry_ctx);
         let Some(&index) = self.hir_fns.get(&(span.start, span.end)) else {
             self.hir_refusal = Some("no-hir-body");
             return false;
@@ -834,6 +835,7 @@ impl Compiler {
         start: impl FnOnce(&mut Self),
     ) -> bool {
         self.hir_refusal = None;
+        self.hir_mir_ctx.clear();
         let prev_calls = self.hir_synth_calls.replace(calls);
         let module = self.hir_module.take();
         // The frame starts with the parameters, as a declared function's.
@@ -1380,6 +1382,7 @@ impl Compiler {
             value_calls: &tables.value_calls,
             poly_calls: &tables.poly_calls,
             bound_calls: &tables.bound_calls,
+            ctx_dicts: if entry_words.is_some() { &self.hir_mir_ctx } else { &[] },
             unbox_any: &tables.unbox_any,
             open_params: &tables.open_params,
             lens: &emit.plan.lens,

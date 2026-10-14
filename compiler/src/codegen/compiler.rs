@@ -6066,6 +6066,7 @@ impl Compiler {
         {
             for i in 0..n {
                 let slot = self.context.variables.intern(format!("__dict{}", i + 1)) as u32;
+                self.hir_entry_ctx.push((slot, own, (base + i) as u32));
                 self.bytecode.push_load(own);
                 self.bytecode.push_const((base + i) as i32);
                 self.bytecode.push_index();

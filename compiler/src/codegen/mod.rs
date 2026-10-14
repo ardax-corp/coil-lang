@@ -663,6 +663,14 @@ pub struct Compiler {
     /// Frame words at entry of the body the direct MIR plan walk is
     /// planning: its dictionary parameters sit below it.
     hir_mir_dict_sp: Option<u32>,
+    /// A bounded generic instance method's context dictionaries, as its
+    /// prologue loads them out of its own dictionary: each one's frame
+    /// slot, the own dictionary's slot and the index there. Set by the
+    /// prologue for the next body ([`Compiler::try_lower_hir_function`]
+    /// takes it into `hir_mir_ctx`).
+    hir_entry_ctx: Vec<(u32, u32, u32)>,
+    /// The context dictionaries of the body being lowered.
+    hir_mir_ctx: Vec<(u32, u32, u32)>,
     /// Raw op ranges of the early exits the last HIR body marked cold, laid
     /// out after its epilogue ([`Compiler::flush_hir_cold`]).
     hir_cold: Vec<(usize, usize)>,
@@ -848,6 +856,8 @@ impl Default for Compiler {
             hir_mir_why: None,
             hir_entry_sp: None,
             hir_mir_dict_sp: None,
+            hir_entry_ctx: Vec::new(),
+            hir_mir_ctx: Vec::new(),
             hir_inline_mono: !matches!(
                 std::env::var("COIL_HIR_INLINE_MONO").as_deref(),
                 Ok("0" | "false" | "off" | "no")
