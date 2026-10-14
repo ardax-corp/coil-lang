@@ -1508,6 +1508,7 @@ impl Compiler {
             }),
             heap_fields,
             boxed_niches,
+            niche_args: &tables.niche_args,
             existential_packs: tables.existential_packs,
             packs: &tables.packs,
             record_fields,
@@ -3782,7 +3783,14 @@ impl Compiler {
             .ok_or("callee-signature")?;
         let class_def = self.checker.generics().typeclass(&hint.class).ok_or("callee-trait")?;
         let lookup_n = class_def.type_params.len().max(1).min(arg_tys.len());
-        let (lookup, heads): (Vec<Ty>, &[Ty]) = if lookup_n == 0 {
+        // A trait parameter none of the method's parameters names (`static
+        // fn from_val(Val v) -> T`): the arguments do not name the instance.
+        let result_only = self.checker.typeclass_method_scheme(&hint.class, method).is_some_and(|scheme| {
+            let (params, _) = Self::fun_param_and_ret_tys(&scheme.ty);
+            let named: HashSet<_> = params.iter().flat_map(crate::typechecking::ty::ftv_ty).collect();
+            scheme.bounds.get(..class_def.type_params.len()).is_some_and(|vars| vars.iter().any(|v| !named.contains(v)))
+        });
+        let (lookup, heads): (Vec<Ty>, &[Ty]) = if lookup_n == 0 || result_only {
             // No argument names the instance (`default()`): the method's
             // signature against the call's result type does.
             let lookup = self
