@@ -23,6 +23,8 @@ pub(super) struct HirMirTables {
     /// Per argument of such a `format` call (after the format string): the
     /// raw `show` entry a `%v` argument goes through, `None` for a word.
     pub(super) format_shows: HashMap<u32, Vec<Option<crate::il::Label>>>,
+    /// `matrix(data)` calls, whose value is the data itself.
+    pub(super) matrix_wraps: HashSet<u32>,
     /// Entry of each plain one-word-ABI `CALL` (no dictionaries), by call
     /// site: calls, and user operators on a raw instance method.
     pub(super) calls: HashMap<u32, crate::mir::HirCallSite>,
@@ -39,8 +41,8 @@ pub(super) struct HirMirTables {
     pub(super) par_forks: HashMap<u32, crate::mir::HirParFork>,
     /// Some value emission evaluates packs as a bare-class existential.
     pub(super) existential_packs: bool,
-    /// Function values built with `MakeFn` / `MakePolyFn` (lambdas and
-    /// named functions read as values), by expression.
+    /// Function values built with `MakeFn` / `MakePolyFn` (lambdas, named
+    /// functions read as values and partial applications), by expression.
     pub(super) fn_values: HashMap<u32, crate::mir::HirFnValue>,
     /// Entry of the user `into_iter` a counted `for` loop calls, by loop.
     pub(super) into_iters: HashMap<u32, crate::il::Label>,
@@ -380,7 +382,7 @@ impl Compiler {
                     let target = lam.label;
                     let operand = make_fn_operand(lam.body.captures.len() as u32, 0, lam.body.params.len() as u32, false);
                     let captures = lam.body.captures.iter().map(|&(outer, _)| outer).collect();
-                    t.fn_values.insert(id.0, crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand }, captures });
+                    t.fn_values.insert(id.0, crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand, mask: 0 }, captures });
                 }
             }
             // A generic function's `MakePolyFn`, when it takes no
@@ -395,7 +397,7 @@ impl Compiler {
             HirKind::Global { .. } if let Some(&(entry, arity, rest)) = emit.plan.fn_refs.get(&id.0) => {
                 if let Some(target) = self.bytecode.entry_label_for_offset(entry) {
                     let operand = make_fn_operand(0, 0, arity, rest);
-                    t.fn_values.insert(id.0, crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand }, captures: Vec::new() });
+                    t.fn_values.insert(id.0, crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand, mask: 0 }, captures: Vec::new() });
                 }
             }
             HirKind::Global { .. } => {
@@ -458,12 +460,31 @@ impl Compiler {
                     return Kids::None;
                 }
             }
+            HirKind::Call { .. } if emit.plan.calls.get(&id.0).is_some_and(|c| matches!(c.builtin, Some(HirBuiltin::Matrix))) => {
+                t.matrix_wraps.insert(id.0);
+            }
             HirKind::Call { args, .. }
                 if !emit.plan.lens.contains_key(&id.0)
                     && emit.plan.calls.get(&id.0).is_some_and(|c| matches!(c.builtin, Some(HirBuiltin::Format))) =>
             {
                 self.hir_mir_format(hir, id, args, t);
                 return Kids::Rest;
+            }
+            // A partial application: `MakeFn` over the filled prefix, each
+            // argument its own word.
+            HirKind::Call { args, .. }
+                if let Some(HirCall {
+                    builtin: Some(HirBuiltin::Partial { entry, mask, operand }),
+                    params,
+                    ..
+                }) = emit.plan.calls.get(&id.0) =>
+            {
+                if args.iter().zip(params).all(|(&a, &p)| self.hir_natural(hir, emit, a) == Some(Rep::Word(p)))
+                    && let Some(target) = self.bytecode.entry_label_for_offset(*entry as usize)
+                {
+                    let kind = crate::mir::MirAllocKind::Fn { target, operand: *operand, mask: *mask };
+                    t.fn_values.insert(id.0, crate::mir::HirFnValue { kind, captures: Vec::new() });
+                }
             }
             HirKind::Call { args, .. } if !emit.plan.lens.contains_key(&id.0) && emit.plan.calls.contains_key(&id.0) => {
                 self.hir_mir_call(hir, emit, id, args, t);

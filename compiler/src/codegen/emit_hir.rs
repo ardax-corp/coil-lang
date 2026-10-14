@@ -1055,6 +1055,27 @@ impl Compiler {
                         .then_some(crate::mir::MirTy::HeapRef)
                 })
         };
+        // A scalar enum's backing word.
+        let scalar_enum = move |t: &Ty| {
+            let t = apply_ty_prune(checker.subst(), t);
+            if !crate::hir::layout::is_scalar_enum_ty(checker, &t) {
+                return None;
+            }
+            let name = match crate::typechecking::ty::strip_readonly(&t) {
+                Ty::Constructor { owner, .. } => match owner.as_ref() {
+                    Ty::Con(name) | Ty::Sum { name, .. } => name.clone(),
+                    _ => return None,
+                },
+                Ty::Con(name) | Ty::Sum { name, .. } => name.clone(),
+                _ => return None,
+            };
+            // A `#[repr(string)]` value is its backing string's heap word.
+            let backing = checker.scalar_value_ty(&name)?;
+            if matches!(crate::typechecking::ty::strip_readonly(&backing), Ty::Con(n) if n == crate::typechecking::ty::STRING) {
+                return Some(crate::mir::MirTy::HeapRef);
+            }
+            crate::mir::scalar_mir_ty(&backing).filter(|t| matches!(t, crate::mir::MirTy::I64 | crate::mir::MirTy::F64 | crate::mir::MirTy::Bool))
+        };
         let mut sroa = HashMap::new();
         for e in &hir.exprs {
             if let HirKind::Let { local, init: Some(init) } = e.kind
@@ -1066,7 +1087,7 @@ impl Compiler {
                 let made = Self::hir_ty(hir, init);
                 let tys: Option<Vec<_>> = tys
                     .iter()
-                    .map(|t| word(t).or_else(|| word(&self.hir_class_ty_args_at(made?, t)?)))
+                    .map(|t| word(t).or_else(|| scalar_enum(t)).or_else(|| word(&self.hir_class_ty_args_at(made?, t)?)))
                     .collect();
                 sroa.insert(local.0, tys.ok_or("scalar-replaced field type")?);
             }
@@ -1100,7 +1121,7 @@ impl Compiler {
         // field's type names (a generic field holds a boxed value).
         // A string field, or a two-word enum's, holds its boxed heap word.
         let field_word = |t: &Ty| {
-            word(t).or_else(|| {
+            word(t).or_else(|| scalar_enum(t)).or_else(|| {
                 let boxed = match lower::classify(checker, t)? {
                     ValueClass::Opaque => matches!(apply_ty_prune(checker.subst(), t), Ty::Con(ref n) if n == crate::typechecking::ty::STRING),
                     ValueClass::Enum => true,
@@ -1219,7 +1240,7 @@ impl Compiler {
                         }
                         // A two-word field value is stored boxed.
                         let stored = |t: &Ty| {
-                            word(t).or_else(|| {
+                            word(t).or_else(|| scalar_enum(t)).or_else(|| {
                                 (crate::hir::layout::of_resolved(checker, &apply_ty_prune(checker.subst(), t)) != crate::hir::layout::Layout::Word
                                     && crate::typechecking::value_layout::value_layout(checker, t) == ValueLayout::Boxed)
                                     .then_some(crate::mir::MirTy::HeapRef)
@@ -1379,6 +1400,7 @@ impl Compiler {
             existential_packs: tables.existential_packs,
             record_fields,
             records,
+            matrix_wraps: &tables.matrix_wraps,
             aggregates: emit
                 .plan
                 .ops

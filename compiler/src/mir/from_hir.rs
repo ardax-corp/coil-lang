@@ -95,7 +95,8 @@ pub struct HirIterLoop {
 
 /// A function value HIR emission built: `MakeFn` of a lambda's or a named
 /// function's code (`kind` [`MirAllocKind::Fn`], each capture read from its
-/// local), or `MakePolyFn` of a generic function's.
+/// local), or `MakePolyFn` of a generic function's. On a call, a partial
+/// application: `MakeFn` of the callee over the call's arguments.
 #[derive(Clone, Debug)]
 pub struct HirFnValue {
     pub kind: MirAllocKind,
@@ -171,8 +172,12 @@ impl HirMirInput<'_> {
     /// The MIR type of a one-word value: [`word`], a class object or a
     /// scalar enum's backing word.
     fn word(&self, ty: &Ty) -> Option<MirTy> {
+        // `Matrix<D>` is its data at run time.
+        if let Some(data) = crate::typechecking::aggregate_arith::unwrap_matrix_ty(strip_readonly(ty)) {
+            return self.word(data);
+        }
         word(ty)
-            .or_else(|| ((self.is_class)(ty) || opaque_heap(ty)).then_some(MirTy::HeapRef))
+            .or_else(|| ((self.is_class)(ty) || opaque_heap(ty) || is_gc_handle(ty)).then_some(MirTy::HeapRef))
             .or_else(|| (self.scalar_enum)(ty))
             .or_else(|| (self.niche)(ty))
             .or_else(|| (self.boxed_enum)(ty, None).map(|_| MirTy::HeapRef))
@@ -361,6 +366,8 @@ pub struct HirMirInput<'a> {
     /// Field reads and writes on records (dicts): the key's string table
     /// index and the field's word type.
     pub record_fields: HashMap<u32, (u32, MirTy)>,
+    /// `matrix(data)` calls: the data itself.
+    pub matrix_wraps: &'a HashSet<u32>,
     /// Element-wise array and tuple operators, by expression.
     pub aggregates: HashMap<u32, crate::typechecking::AggregateArithInfo>,
     /// Record literals whose every field holds the word its type says:
@@ -534,6 +541,12 @@ fn is_stream(ty: &Ty) -> bool {
     matches!(strip_readonly(ty), Ty::Con(n) if n == crate::typechecking::ty::STREAM)
 }
 
+/// A GC `Root<T>` / `Weak<T>` handle: a heap object (`ObjRoot` / `ObjWeak`).
+fn is_gc_handle(ty: &Ty) -> bool {
+    matches!(strip_readonly(ty), Ty::App(head, args) if args.len() == 1
+        && matches!(head.as_ref(), Ty::Con(n) if n == crate::typechecking::ty::ROOT || n == crate::typechecking::ty::WEAK))
+}
+
 /// An opaque `thread` module handle (`Thread`, `Sender`, `Receiver`,
 /// `Mutex`, `RwLock`): a heap object.
 fn is_thread(ty: &Ty) -> bool {
@@ -543,6 +556,9 @@ fn is_thread(ty: &Ty) -> bool {
 
 /// The element type of an array or `Vec`.
 fn array_elem(ty: &Ty) -> Option<&Ty> {
+    if let Some(data) = crate::typechecking::aggregate_arith::unwrap_matrix_ty(strip_readonly(ty)) {
+        return array_elem(data);
+    }
     match strip_readonly(ty) {
         Ty::Array { element, .. } => Some(element),
         _ => vec_element_ty(ty),
@@ -1932,8 +1948,10 @@ impl Lower<'_> {
             HirKind::Bin { lhs, rhs, .. } if let Some(call) = self.inp.op_calls.get(&id.0) => self.op_call(id, *lhs, *rhs, &call.clone()),
             HirKind::Bin { op: BinOp::Overloaded(sym), lhs, rhs } if self.inp.op_prims.contains(&id.0) => self.op_prim(sym, *lhs, *rhs),
             HirKind::Bin { op, lhs, rhs } => self.bin(id, *op, *lhs, *rhs),
+            HirKind::Call { args, .. } if let Some(f) = self.inp.fn_values.get(&id.0) => self.partial(id, &f.clone(), args),
             HirKind::Call { args, .. } if let (Some(&fixed), [arg]) = (self.inp.lens.get(&id.0), args.as_slice()) => self.len(*arg, fixed),
             HirKind::Call { args, .. } if self.inp.pushes.contains(&id.0) => self.push(args),
+            HirKind::Call { args, .. } if self.inp.matrix_wraps.contains(&id.0) && args.len() == 1 => self.value(args[0]),
             HirKind::Call { args, .. } if let Some(&idx) = self.inp.formats.get(&id.0) => self.format(id, idx, args.get(1..).unwrap_or_default()),
             HirKind::Call { args, .. } if self.inp.hosts.contains_key(&id.0) => self.host(id, args),
             HirKind::Call { callee: Callee::Value(f), args } if self.inp.value_calls.contains(&id.0) => self.call_value(id, *f, args),
@@ -3310,6 +3328,23 @@ impl Lower<'_> {
         let mut words = Vec::with_capacity(f.captures.len());
         for &local in &f.captures {
             words.push(self.local_word(local)?);
+        }
+        let h = self.b.ins_alloc(f.kind, words).map_err(mir)?;
+        Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![h]).map_err(mir)?))
+    }
+
+    /// A partial application `f(args)`, as HIR emission builds it: each
+    /// filled argument's word, then `MakeFn` with its fill mask.
+    fn partial(&mut self, id: HirId, f: &HirFnValue, args: &[HirId]) -> Result<Val, Refusal> {
+        if self.expr_ty(id).and_then(|t| self.inp.word(t)) != Some(MirTy::HeapRef) {
+            return Err("function value type".into());
+        }
+        let mut words = Vec::with_capacity(args.len());
+        for &arg in args {
+            let Some(v) = self.word(arg)? else {
+                return Ok(Val::Never);
+            };
+            words.push(v);
         }
         let h = self.b.ins_alloc(f.kind, words).map_err(mir)?;
         Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![h]).map_err(mir)?))
