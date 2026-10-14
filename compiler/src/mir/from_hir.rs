@@ -65,6 +65,10 @@ pub enum HirShow {
     Call { target: Label, boxed: Option<u32> },
     /// `STRINGIFY` (a type with no `Show` instance).
     Stringify,
+    /// A bound type parameter's `show` through one of the body's
+    /// dictionary parameters (by frame slot): the code pointer in its
+    /// method slot, `CallIndirect` on the value's word and the dictionary.
+    Bound { dict: u32, method: u32 },
     /// A boxed tuple: each item read by index and shown, then `FORMAT` of
     /// the tuple's format string (by string table index) on the texts.
     Tuple { fmt: u32, items: Vec<(Ty, HirShow)> },
@@ -773,7 +777,8 @@ fn opaque_moves_only(hir: &HirBody, inp: &HirMirInput) -> Result<(), Refusal> {
             HirKind::Builtin { args, .. } => args.iter().any(var),
             HirKind::Named { value, .. } | HirKind::Yield { value, .. } => var(value),
             HirKind::Append { base, value } => var(base) || var(value),
-            HirKind::Assign { place, value } => var(value) && !matches!(hir.expr(*place).kind, HirKind::Local(_)),
+            // A store moves the word as it is, into a local or a field.
+            HirKind::Assign { place, value } => var(value) && !matches!(hir.expr(*place).kind, HirKind::Local(_) | HirKind::Field { .. }),
             HirKind::If { cond, .. } => var(cond),
             HirKind::Match { scrutinee, .. } => var(scrutinee),
             HirKind::LetPat { init, .. } => var(init),
@@ -3931,7 +3936,12 @@ impl Lower<'_> {
         let ret = if unit {
             MirTy::I64
         } else {
-            self.inp.word(ty).ok_or_else(|| format!("bound call type {}", ty_kind(ty)))?
+            // An enum of no pair or niche layout comes back as its boxed
+            // object (an open `Result<T, E>`, the instance's shared layout).
+            self.inp
+                .word(ty)
+                .or_else(|| (self.inp.boxed_view)(ty, None).map(|_| MirTy::HeapRef))
+                .ok_or_else(|| format!("bound call type {}", ty_kind(ty)))?
         };
         let mut words = Vec::with_capacity(args.len() + 1);
         for &arg in args {
@@ -4850,6 +4860,12 @@ impl Lower<'_> {
             HirShow::Stringify => {
                 let s = self.at_expr(id, |l| l.b.ins_stringify(v).map_err(mir))?;
                 return self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![s]).map_err(mir);
+            }
+            &HirShow::Bound { dict, method } => {
+                let dict = *self.dict_params.get(&dict).ok_or("dictionary parameter")?;
+                let slot = self.b.ins_const(MirConst::I64(i64::from(method))).map_err(mir)?;
+                let callee = self.b.ins_index(dict, slot, MirTy::I64, false).map_err(mir)?;
+                return self.at_expr(id, |l| l.b.ins_call_indirect(callee, vec![v, dict], MirTy::HeapRef).map_err(mir));
             }
             HirShow::Tuple { fmt, items } => (fmt, items.iter().map(|(t, s)| (None, t, s)).collect::<Vec<_>>()),
             HirShow::Record { fmt, fields } => (fmt, fields.iter().map(|(k, t, s)| (Some(*k), t, s)).collect()),
