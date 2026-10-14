@@ -208,8 +208,12 @@ enum HirBuiltin {
 struct HirLambda {
     body: HirBody,
     emit: HirEmit,
-    /// Its code's offset, once emitted.
-    entry: Option<u32>,
+    /// Its code's entry label, reserved when planned: direct MIR's
+    /// `MakeFn` targets it whether or not the stack IL binds it.
+    label: IlLabel,
+    /// Whether the stack IL bound `label` (a second copy of the code
+    /// binds a fresh one).
+    bound: bool,
 }
 
 /// Per-body lowering state.
@@ -2108,7 +2112,8 @@ impl Compiler {
             for (slot, &(_, inner)) in lam.captures.iter().enumerate() {
                 plan.slots[inner.0 as usize] = Some(slot as u32);
             }
-            emit.plan.lambdas.insert(i as u32, Box::new(HirLambda { body: lam.clone(), emit: plan, entry: None }));
+            let label = self.bytecode.fresh_label();
+            emit.plan.lambdas.insert(i as u32, Box::new(HirLambda { body: lam.clone(), emit: plan, label, bound: false }));
         }
         Ok(())
     }
@@ -6653,7 +6658,11 @@ impl Compiler {
                 let mut lam = emit.plan.lambdas.remove(&id.0).expect("planned lambda");
                 let after = self.bytecode.fresh_label();
                 self.hir_jump(IlJumpKind::Unconditional, after);
-                self.bytecode.bind_fresh_entry();
+                if std::mem::replace(&mut lam.bound, true) {
+                    self.bytecode.bind_fresh_entry();
+                } else {
+                    self.bytecode.bind_reserved_entry(lam.label);
+                }
                 let entry = self.bytecode.len() as u32;
                 let prev_vars = std::mem::take(&mut self.context.variables);
                 let prev_keys = std::mem::take(&mut self.field_key_slots);
@@ -6693,7 +6702,6 @@ impl Compiler {
                 let captures = lam.body.captures.len() as u32;
                 let operand = make_fn_operand(captures, 0, arity, false);
                 self.bytecode.push(Byte::new(Instruction::MakeFn).with_operand_u32(operand));
-                lam.entry = Some(entry);
                 emit.plan.lambdas.insert(id.0, lam);
             }
             HirKind::Global { .. } if let Some(name) = emit.plan.polyfns.get(&id.0).cloned() => {
