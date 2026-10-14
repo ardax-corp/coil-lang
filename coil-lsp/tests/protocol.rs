@@ -25,6 +25,12 @@ impl Client {
 
     /// Spawn with command-line flags (`--root`, host grants).
     fn spawn_with(root: &Path, args: &[&str]) -> Self {
+        let root_uri = format!("file://{}", root.display());
+        Self::spawn_init(args, json!({ "rootUri": root_uri, "capabilities": {} }))
+    }
+
+    /// Spawn with `args` and send `initialize` with `params`.
+    fn spawn_init(args: &[&str], params: Value) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_coil-lsp"))
             .args(args)
             .stdin(Stdio::piped())
@@ -41,8 +47,7 @@ impl Client {
             next_id: 0,
             notifications: Vec::new(),
         };
-        let root_uri = format!("file://{}", root.display());
-        client.request("initialize", json!({ "rootUri": root_uri, "capabilities": {} }));
+        client.request("initialize", params);
         client.notify("initialized", json!({}));
         client
     }
@@ -250,6 +255,29 @@ fn command_line_roots_and_grants_reach_diagnostics() {
     let vendor = dir.join("vendor");
     let with = last(&["--root", vendor.to_str().unwrap(), "--allow-ffi-exec"]);
     assert!(with.is_empty(), "false diagnostics with flags: {with:?}");
+}
+
+/// `--workspace` names the project directory, so module roots resolve
+/// against it whatever root the client sends (none, or a parent folder).
+#[test]
+fn workspace_flag_sets_the_project_directory() {
+    let main = "use util::{helper};\n\nfn main() {\n    let _ = helper(1);\n}\n";
+    let dir = project(
+        "workspace-flag",
+        &[("src/main.hy", main), ("src/util.hy", "fn helper(int a) -> int {\n    return a;\n}\n")],
+    );
+    let main_uri = uri(&dir.join("src/main.hy"));
+    let parent_uri = uri(dir.parent().unwrap());
+    for params in [
+        json!({ "rootUri": null, "capabilities": {} }),
+        json!({ "rootUri": parent_uri, "capabilities": {} }),
+    ] {
+        let mut client = Client::spawn_init(&["--workspace", dir.to_str().unwrap()], params.clone());
+        open(&mut client, &main_uri, main);
+        client.request("shutdown", Value::Null);
+        let last = client.diagnostics_for(&main_uri).pop().expect("diagnostics published");
+        assert!(last.is_empty(), "false diagnostics with {params}: {last:?}");
+    }
 }
 
 /// #583: a reply already queued when stdin closes is still written, and
@@ -565,4 +593,55 @@ fn code_action_expands_function_macro_calls() {
         .unwrap_or_else(|| panic!("no expand action in {actions:?}"));
     let expanded = apply_action(main_text, &main, expand);
     assert!(expanded.contains("let x = 21 * 2;"), "{expanded}");
+}
+
+fn hover_text(client: &mut Client, uri: &str, text: &str, needle: &str, delta: usize) -> String {
+    let reply = client.request(
+        "textDocument/hover",
+        json!({ "textDocument": { "uri": uri }, "position": position_of(text, needle, delta) }),
+    );
+    reply["result"]["contents"]["value"].as_str().unwrap_or_default().to_owned()
+}
+
+/// Builtins, keywords and primitive types hover with their docs instead of
+/// `unit` or a bare name; declarations show their signature and, when a
+/// `use` can name them, the import row.
+#[test]
+fn hover_shows_signatures_docs_and_import_rows() {
+    let util = "/// Doubles `a`.\n///\n/// ```\n/// # use tests::assert;\n/// assert!(twice(2) == 4);\n/// ```\nfn twice(int a) -> int {\n    return a * 2;\n}\n";
+    let main = "use io::{stdout};\nuse util::{twice};\n\nfn main() {\n    let v: Vec<int> = Vec::new();\n    v.push(twice(1));\n    let s: string = \"x\";\n    for x in v {\n        let _ = x;\n    }\n    let _ = stdout();\n    let _ = Option::Some(1);\n}\n";
+    let dir = project("hover-docs", &[("src/main.hy", main), ("src/util.hy", util)]);
+    let main_uri = uri(&dir.join("src/main.hy"));
+    let mut client = Client::spawn(&dir);
+    open(&mut client, &main_uri, main);
+    let mut hover = |needle: &str, delta: usize| hover_text(&mut client, &main_uri, main, needle, delta);
+
+    let push = hover("push", 0);
+    assert!(push.contains("pub fn push(") && push.contains("impl Vec<T>"), "{push}");
+    assert!(!push.contains("Import:"), "methods are not imported: {push}");
+
+    let new = hover("new()", 0);
+    assert!(new.contains("pub static fn new()"), "{new}");
+
+    let stdout = hover("stdout()", 0);
+    assert!(stdout.contains("fn stdout() -> Stream"), "{stdout}");
+    assert!(stdout.contains("**Import:** `use io::stdout;`"), "{stdout}");
+
+    let keyword = hover("for x", 0);
+    assert!(keyword.contains("```coil\nfor\n```") && keyword.contains("---"), "{keyword}");
+
+    let primitive = hover("string =", 0);
+    assert!(primitive.contains("class string") && !primitive.contains("unit"), "{primitive}");
+
+    let some = hover("Some(1)", 0);
+    assert!(some.contains("Option::Some"), "{some}");
+
+    let twice = hover("twice(1)", 0);
+    assert!(twice.contains("fn twice(int a) -> int"), "{twice}");
+    assert!(twice.contains("**Import:** `use util::twice;`"), "{twice}");
+    assert!(twice.contains("Doubles `a`."), "{twice}");
+    assert!(
+        twice.contains("```coil\nassert!(twice(2) == 4);\n```"),
+        "examples render as coil with `# ` lines hidden: {twice}"
+    );
 }

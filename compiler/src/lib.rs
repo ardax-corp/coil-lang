@@ -1,6 +1,7 @@
 mod ast_cache;
 mod attrs;
 mod block_builder;
+pub mod builtin_docs;
 pub(crate) mod escape;
 mod const_fold;
 pub mod debug_vars;
@@ -41,7 +42,7 @@ pub use dissect::{
     format_il, format_symbol_index, matches_fn_pat,
 };
 pub use host_grants::HostGrants;
-pub use module_roots::default_module_roots;
+pub use module_roots::{default_module_roots, resolve_use_in_roots};
 pub use pipeline::*;
 pub use project_index::ProjectIndex;
 

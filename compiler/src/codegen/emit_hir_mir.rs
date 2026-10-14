@@ -141,13 +141,59 @@ impl Compiler {
             HirKind::Match { arms, .. } => arms.iter().map(|a| a.body).collect(),
             _ => Vec::new(),
         };
+        // A stack array's literal init: each item into its own slot, in
+        // the element's layout (`hir_stack_array_init`).
+        let stack_init = match kind {
+            HirKind::Let { local, init: Some(init) } => Some((*local, *init)),
+            HirKind::Assign { place, value } => match hir.expr(*place).kind {
+                HirKind::Local(local) => Some((local, *value)),
+                _ => None,
+            },
+            _ => None,
+        }
+        .filter(|(local, _)| emit.plan.stacks.contains_key(&local.0));
         for k in lower::children(hir, id) {
+            if let Some((local, init)) = stack_init
+                && k == init
+                && let HirKind::Make { args, .. } = &hir.expr(init).kind
+            {
+                let Rep::Word(elem) = self.hir_stack_rep(hir, local) else {
+                    unreachable!("stack array elements are one word")
+                };
+                for &item in args {
+                    self.hir_mir_make_niches(hir, emit, item, Some(elem), out);
+                }
+                continue;
+            }
             let want = match kind {
                 HirKind::Return(_) => match emit.plan.ret {
                     Rep::Word(l) => Some(l),
                     Rep::Pair(_) => None,
                 },
                 _ if forwards.contains(&k) => want,
+                // An argument as `hir_check_value` wants it: in its
+                // parameter's layout (a `Vec` element argument at the
+                // element's niche).
+                HirKind::Call { callee, args }
+                    if !matches!(callee, Callee::Value(_))
+                        && !emit.plan.lens.contains_key(&id.0)
+                        && let Some(call) = emit.plan.calls.get(&id.0)
+                        && call.builtin.is_none()
+                        && let Some(i) = args.iter().position(|&a| a == k)
+                        && i < call.params.len() =>
+                {
+                    match Self::hir_arg_rep(call, i) {
+                        Rep::Word(l) => Some(l),
+                        Rep::Pair(_) => None,
+                    }
+                }
+                // A value stored by index, at the element slot's niche.
+                HirKind::Assign { place, value } if *value == k && let HirKind::Index { base, .. } = hir.expr(*place).kind => {
+                    match self.hir_index_store_rep(hir, emit, *place, base) {
+                        Some(Rep::Word(l)) => Some(l),
+                        _ => None,
+                    }
+                }
                 _ => None,
             };
             self.hir_mir_make_niches(hir, emit, k, want, out);
@@ -686,6 +732,8 @@ impl Compiler {
             coro: false,
             boxed_ret: false,
             dicts: Vec::new(),
+            boxes: Vec::new(),
+            unbox: None,
         };
         if raw {
             // Each operand's MIR word is the boxed-layout word the stack passes.
@@ -716,14 +764,29 @@ impl Compiler {
             let ground = inst.ground.as_ref().expect("ground call");
             let method = &ground.method;
             let key = self.instance_clone(&call.key, &inst.args).unwrap_or_else(|| call.key.clone());
-            let dict = self.hir_mir_once(|this| this.emit_call_instance_dict(&mut CodeBuf::new(), (&inst.class, method, &key), &inst.args, span.0..span.1));
+            let code = self.hir_mir_once(|this| {
+                let mut code = CodeBuf::new();
+                this.emit_call_instance_dict(&mut code, (&inst.class, method, &key), &inst.args, span.0..span.1);
+                code
+            });
+            let dicts = self.hir_mir_dict_program(&code);
             let raw = self.raw_instance_methods.contains(&key);
             self.raw_instance_call = raw;
             let target = self.named_entry_target(&key, true);
-            // Raw words (or nothing boxed: `T::default()`) and no
-            // dictionary: direct MIR calls the same entry.
-            if (raw || ground.boxed.iter().all(Option::is_none))
-                && !dict
+            // Raw words, or each argument boxed where the instance takes it
+            // boxed (a word, not a pair), and the instance's dictionary:
+            // direct MIR calls the same entry.
+            let boxes: Vec<Option<u32>> = if raw {
+                Vec::new()
+            } else {
+                ground.boxed.iter().map(|ty| ty.as_ref().and_then(Self::ty_to_value_tag).map(|t| t as u32)).collect()
+            };
+            let unpaired = args
+                .iter()
+                .zip(&boxes)
+                .all(|(&a, b)| b.is_none() || !matches!(self.hir_natural(hir, emit, a), Some(Rep::Pair(_))));
+            if let Some(dicts) = dicts
+                && unpaired
                 && natural_args(self, &call.params)
                 && let Some(target) = target
                 && let Some(boxed_ret) = self.hir_ret_shape(hir, id, &natural)
@@ -736,7 +799,9 @@ impl Compiler {
                         pair_ret: natural.words() == 2,
                         coro: false,
                         boxed_ret,
-                        dicts: Vec::new(),
+                        dicts,
+                        boxes,
+                        unbox: None,
                     },
                 );
             }
@@ -750,22 +815,52 @@ impl Compiler {
             };
             let raw = self.raw_instance_methods.contains(&key);
             let instance = instance.filter(|_| !raw);
-            let boxed = (0..args.len()).any(|i| {
-                call.generic.as_ref().is_some_and(|g| g.boxed[i].is_some()) || (i == 0 && instance.is_some_and(|inst| inst.recv_box.is_some()))
-            });
-            // A shared generic body's call is plain with no dictionary.
-            let generic_plain = call.generic.as_deref().is_none_or(|g| self.hir_generic_plain(hir, emit, g, args, &call.params));
-            let dict = call.generic.as_deref().is_some_and(|g| self.hir_mir_dicts(g) > 0)
-                || instance.is_some_and(|inst| self.hir_mir_once(|this| this.emit_instance_dict(&mut CodeBuf::new(), &inst.class, &inst.args)));
+            // Bare type parameter arguments (and a generic-head instance's
+            // receiver) boxed, the result unboxed, as emission tags them.
+            let tag = |ty: Option<&Ty>| ty.and_then(Self::ty_to_value_tag).map(|t| t as u32);
+            let boxes: Vec<Option<u32>> = (0..args.len())
+                .map(|i| {
+                    tag(call
+                        .generic
+                        .as_ref()
+                        .and_then(|g| g.boxed[i].as_ref())
+                        .or_else(|| instance.filter(|_| i == 0).and_then(|inst| inst.recv_box.as_ref())))
+                })
+                .collect();
+            let unbox = tag(call.generic.as_ref().and_then(|g| g.unbox.as_ref()));
+            // The generic's dictionaries, then the instance's, as
+            // `hir_push_dicts` and `emit_instance_dict` push them.
+            let mut dicts = match call.generic.as_deref() {
+                None => Some(Vec::new()),
+                Some(g) if self.hir_generic_boxing(hir, emit, g, args, &call.params) => self.hir_mir_dict_ops(g),
+                Some(_) => None,
+            };
+            if let Some(inst) = instance
+                && dicts.is_some()
+            {
+                let code = self.hir_mir_once(|this| {
+                    let mut code = CodeBuf::new();
+                    this.emit_instance_dict(&mut code, &inst.class, &inst.args);
+                    code
+                });
+                let prev = dicts.take();
+                dicts = self.hir_mir_dict_program(&code).and_then(|ops| {
+                    prev.map(|mut d| {
+                        d.extend(ops);
+                        d
+                    })
+                });
+            }
             let coro = self.coroutine_fns.contains(&key);
             self.hir_request_method_clone(&key);
             self.raw_instance_call = raw;
             let target = self.named_entry_target(&key, true);
-            if !dict
-                && generic_plain
+            if let Some(dicts) = dicts
                 && let Some(boxed_ret) = self.hir_ret_shape(hir, id, &natural)
-                && !boxed
-                && args.iter().zip(&call.params).all(|(&a, &p)| self.hir_arg_passes(hir, emit, a, p))
+                && args.iter().zip(&call.params).zip(&boxes).all(|((&a, &p), b)| {
+                    // A boxed argument goes from its own word.
+                    if b.is_some() { self.hir_arg_word(hir, emit, a, p) } else { self.hir_arg_passes(hir, emit, a, p) }
+                })
                 && let Some(target) = target
             {
                 t.calls.insert(
@@ -776,7 +871,9 @@ impl Compiler {
                         pair_ret: natural.words() == 2,
                         coro,
                         boxed_ret,
-                        dicts: Vec::new(),
+                        dicts,
+                        boxes,
+                        unbox,
                     },
                 );
             }
@@ -807,10 +904,14 @@ impl Compiler {
         // `hir_push_dicts` builds them (none forwarded through a slot).
         let dicts = match call.generic.as_deref() {
             None => Some(Vec::new()),
-            Some(g) if self.hir_generic_plain(hir, emit, g, args, &call.params) => self.hir_mir_dict_ops(g),
+            Some(g) if self.hir_generic_boxing(hir, emit, g, args, &call.params) => self.hir_mir_dict_ops(g),
             Some(_) => None,
         };
-        if let Some(dicts) = dicts.filter(|d| d.is_empty() || !tail)
+        // Bare type parameter arguments boxed and result unboxed, as
+        // `emit_box_if_needed` / `emit_unbox_if_needed` tag them.
+        let tag = |ty: &Option<Ty>| ty.as_ref().and_then(Self::ty_to_value_tag).map(|t| t as u32);
+        let (boxes, unbox) = call.generic.as_deref().map_or((Vec::new(), None), |g| (g.boxed.iter().map(tag).collect(), tag(&g.unbox)));
+        if let Some(dicts) = dicts.filter(|d| (d.is_empty() && unbox.is_none()) || !tail)
             && let Some(boxed_ret) = self.hir_ret_shape(hir, id, &natural)
             && let Some(target) = target
         {
@@ -818,7 +919,19 @@ impl Compiler {
             // A `TailCall`'s callee returns for this function, so in this
             // function's words, whatever the call's own rep.
             let pair_ret = if tail { matches!(emit.plan.ret, Rep::Pair(_)) } else { natural.words() == 2 };
-            t.calls.insert(id.0, crate::mir::HirCallSite { target, pair_args, pair_ret, coro, boxed_ret, dicts });
+            t.calls.insert(
+                id.0,
+                crate::mir::HirCallSite {
+                    target,
+                    pair_args,
+                    pair_ret,
+                    coro,
+                    boxed_ret,
+                    dicts,
+                    boxes,
+                    unbox,
+                },
+            );
         }
     }
 
@@ -866,7 +979,24 @@ impl Compiler {
         t.poly_calls.insert(id.0, crate::mir::HirPolyCall { boxes, dicts, unbox });
     }
 
-    /// How many dictionaries [`Self::hir_push_dicts`] pushes for `generic`.
+    /// Whether a call to the shared body of a generic `generic` is the
+    /// arguments' own words (each boxed where the body takes a bare type
+    /// parameter; none adapted, a lambda literal unboxing its own
+    /// parameters) and no forwarded dictionary. Direct MIR calls the same
+    /// entry then, its result unboxed as emission unboxes it.
+    fn hir_generic_boxing(&self, hir: &HirBody, emit: &HirEmit, generic: &HirGeneric, args: &[HirId], params: &[ValueLayout]) -> bool {
+        generic.forwarded.is_empty()
+            && args.len() == params.len()
+            && args.iter().zip(params).enumerate().all(|(i, (&arg, &param))| {
+                let lambda = matches!(hir.expr(arg).kind, HirKind::Lambda { .. });
+                // A boxed argument goes from its own word, as do the rest
+                // (or boxed from a pair, as a plain call passes them).
+                let tagged = generic.boxed.get(i).and_then(Option::as_ref).and_then(Self::ty_to_value_tag).is_some();
+                let passes = self.hir_arg_passes(hir, emit, arg, param) && !(tagged && matches!(self.hir_natural(hir, emit, arg), Some(Rep::Pair(_))));
+                (lambda || generic.adapt.get(i).is_none_or(Option::is_none)) && passes
+            })
+    }
+
     /// Whether direct MIR passes argument `id` in `param` as HIR emission
     /// does: its own word in that layout, or a numeric range's two words
     /// boxed to its typed object (MIR's `box_pair_val`, as
@@ -924,12 +1054,6 @@ impl Compiler {
         self.hir_arg_word(hir, emit, id, param)
             || (matches!(self.hir_natural(hir, emit, id), None | Some(Rep::Pair(_)))
                 && Self::hir_ty(hir, id).is_some_and(|ty| self.value_layout(&apply_ty_prune(self.checker.subst(), ty)) == param))
-    }
-
-    fn hir_mir_dicts(&mut self, generic: &HirGeneric) -> u32 {
-        let forwarded = generic.forwarded.iter().filter(|&&i| self.lookup_slot(&format!("__dict{i}")).is_some()).count();
-        let site = self.hir_mir_once(|this| this.emit_call_site_dicts(&mut CodeBuf::new(), &generic.lookup, &generic.arg_tys, Some(&generic.ret_ty)));
-        (forwarded + site) as u32
     }
 
     /// Whether the code emission writes for `id` itself (not its operands)
