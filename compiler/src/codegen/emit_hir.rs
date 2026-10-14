@@ -280,6 +280,11 @@ struct HirPlan {
     /// A parallel loop runs its chunked fork-join inline, which the direct
     /// MIR lowering does not model.
     par_inline: bool,
+    /// Frame words the function's entry set up (parameters, dictionaries)
+    /// when the body was planned: direct MIR's planned locals come after.
+    frame_base: u32,
+    /// Each parameter's frame slot, and a two-word parameter's second.
+    params: HashMap<u32, (u32, Option<u32>)>,
 }
 
 /// A parallel loop moved out of its body: the chunk worker running `body`
@@ -917,6 +922,38 @@ impl Compiler {
         }
     }
 
+    /// Where emission put the words of each local direct MIR planned
+    /// ([`emit_hir_mir::HirMirFrame`]), by planned id: direct MIR's locals
+    /// are the stack IL's frame slots, which its GC maps, deopt edges and
+    /// debug slots name. Refused when emission bound other locals than the
+    /// plan. Once no stack IL is emitted, the planned ids are the frame.
+    fn hir_mir_relocate(hir: &HirBody, emit: &HirEmit, frame: &emit_hir_mir::HirMirFrame) -> Result<HashMap<u32, u32>, String> {
+        let mut relocate = HashMap::new();
+        for (local, (&planned, &emitted)) in frame.slots.iter().zip(&emit.slots).enumerate() {
+            let local = local as u32;
+            match (planned, emitted) {
+                (None, None) => {}
+                (Some(planned), Some(emitted)) => {
+                    let width = frame.widths.get(&local).copied().unwrap_or(1);
+                    for k in 0..width {
+                        relocate.insert(planned + k, emitted + k);
+                    }
+                    if let (Some(&planned), Some(&emitted)) = (frame.tags.get(&local), emit.tag_slots.get(&local)) {
+                        relocate.insert(planned, emitted);
+                    }
+                }
+                (planned, _) => {
+                    if std::env::var_os("COIL_HIR_MIR_WHY").is_some() {
+                        let bound = if planned.is_some() { "planned, not emitted" } else { "emitted, not planned" };
+                        eprintln!("hir mir frame `{}`: local `{}` {bound}", hir.name, hir.local(LocalId(local)).name);
+                    }
+                    return Err("frame plan".into());
+                }
+            }
+        }
+        Ok(relocate)
+    }
+
     /// What direct MIR lowering needs from emission: slots, the side
     /// tables planned over the HIR ([`Self::hir_mir_tables`]), call sites,
     /// and the word types of each two-word pair.
@@ -928,17 +965,19 @@ impl Compiler {
         file: Option<u32>,
         entry_words: Option<u32>,
     ) -> Result<crate::mir::HirMirInput<'a>, String> {
+        let frame = &tables.frame;
         let mut pair_locals = HashMap::new();
         for &local in emit.plan.pair_locals.keys() {
             let ty = hir.local(LocalId(local)).ty.as_ref().ok_or("pair local type")?;
             let (lo, hi) = self.hir_mir_pair_tys(ty).ok_or("pair local type")?;
-            // A pair local emission never bound (its `let` folded away by
-            // inlining) has no tag slot: nothing reads it.
-            let Some(&tag) = emit.tag_slots.get(&local) else {
+            // A pair local the body never binds (its `let` folded away by
+            // inlining) has no second word: nothing reads it.
+            let Some(&tag) = frame.tags.get(&local) else {
                 continue;
             };
             pair_locals.insert(local, (tag, lo, hi));
         }
+        let relocate = Self::hir_mir_relocate(hir, emit, frame)?;
         let pair_tys = hir
             .exprs
             .iter()
@@ -950,7 +989,7 @@ impl Compiler {
         let mut outlined = HashSet::new();
         for par in emit.plan.par_loops.values() {
             lower::visit(hir, par.tail.body, &mut |x| match x.kind {
-                HirKind::Local(l) | HirKind::Let { local: l, .. } if emit.slots[l.0 as usize].is_none() => {
+                HirKind::Local(l) | HirKind::Let { local: l, .. } if frame.slots[l.0 as usize].is_none() => {
                     outlined.insert(l.0);
                 }
                 _ => {}
@@ -975,7 +1014,7 @@ impl Compiler {
                 }),
                 _ => None,
             };
-            let base = emit.slots[local as usize].ok_or("stack array slot")?;
+            let base = frame.slots[local as usize].ok_or("stack array slot")?;
             stacks.insert(local, (base, n, elem.ok_or("stack array type")?));
         }
         // Words in direct MIR: scalars, int/float arrays, and class objects.
@@ -1068,7 +1107,7 @@ impl Compiler {
                 let Some((FieldAt::Slot(idx), _)) = self.hir_field(hir, *base, name) else {
                     return Err("scalar-replaced field".into());
                 };
-                fields.insert(i as u32, Self::hir_slot(emit, local) + idx);
+                fields.insert(i as u32, frame.slots[local.0 as usize].ok_or("scalar-replaced field")? + idx);
             }
         }
         // A frame-slot class local that escapes is boxed into an object of
@@ -1270,7 +1309,8 @@ impl Compiler {
             _ => None,
         };
         Ok(crate::mir::HirMirInput {
-            slots: &emit.slots,
+            slots: &frame.slots,
+            relocate,
             pair_locals,
             pair_tys,
             ret_pair,
@@ -2227,6 +2267,8 @@ impl Compiler {
                 cold_ok: false,
                 par_loops: HashMap::new(),
                 par_inline: false,
+                frame_base: self.context.variables.len() as u32,
+                params: HashMap::new(),
             },
             slots: vec![None; hir.locals.len()],
             loops: Vec::new(),
@@ -2429,10 +2471,12 @@ impl Compiler {
                 emit.slots[param.0 as usize] = Some(start);
                 emit.tag_slots.insert(param.0, end);
                 emit.plan.pair_locals.insert(param.0, kind);
+                emit.plan.params.insert(param.0, (start, Some(end)));
                 continue;
             }
             let slot = self.lookup_slot(&local.name).ok_or("parameter-slot")?;
             emit.slots[param.0 as usize] = Some(slot);
+            emit.plan.params.insert(param.0, (slot, None));
         }
         for expr in &hir.exprs {
         if let HirKind::Let {
