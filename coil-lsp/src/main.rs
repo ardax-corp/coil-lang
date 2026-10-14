@@ -37,6 +37,9 @@ use parser::{
 use reporting::{Label, Message as CoilMessage, MessageKind};
 use serde_json::Value;
 
+mod docs;
+mod hover_docs;
+
 #[derive(Default)]
 struct Document {
     text: String,
@@ -1795,11 +1798,12 @@ fn insert_decl_candidate(
         });
 }
 
+/// `///` lines rendered the way rustdoc shows them (see [`docs::render_doc_lines`]).
 fn docs_markdown(docs: &[&str]) -> Option<String> {
     if docs.is_empty() {
         return None;
     }
-    Some(docs.join("\n"))
+    Some(docs::render_doc_lines(docs))
 }
 
 fn virtual_completion_candidates(
@@ -1952,27 +1956,13 @@ fn insert_virtual_candidate(
         .or_insert_with(|| (kind, builtin_documentation(path, &name, export)));
 }
 
-const WEBSITE_DOCS: &str =
-    "https://github.com/ardax-corp/coil-website/blob/main/src/content/docs";
-
 fn builtin_documentation(path: &[String], name: &str, export: &BuiltinExport) -> String {
     let module = path.join("::");
-    let doc_path = match module.as_str() {
-        "prelude" => "references/option-result.md",
-        "prelude::ops" => "references/types.md",
-        "prelude::math" => "references/math.md",
-        "io" => "references/io.md",
-        "io::fs" => "references/io-fs.md",
-        "string" => "references/string.md",
-        "thread" => "manual/tutorial/11-threads.md",
-        "clock" => "references/modules.md",
-        "env" => "references/env.md",
-        "gc" => "references/gc.md",
-        "ffi" | "ffi::types" => "references/ffi.md",
-        _ => "references/modules.md",
-    };
+    if let Some(doc) = docs::BuiltinDocs::get().item(&module, name) {
+        return doc.docs_with_reference();
+    }
     let description = builtin_description(&module, name, export);
-    format!("{description}\n\n[Read the `{module}` reference]({WEBSITE_DOCS}/{doc_path}).")
+    format!("{description}\n\n[Read the `{module}` reference]({}).", docs::reference_url(&module))
 }
 
 fn builtin_description(module: &str, name: &str, export: &BuiltinExport) -> String {
@@ -2180,10 +2170,13 @@ fn project_hover(state: &mut ServerState, uri: &Uri, position: Position) -> Opti
     let offset = position_to_byte(&text, position)?;
     let range = word_range(&text, offset)?;
     let name = text.get(range.clone())?.to_owned();
-    let ast = Pratt::default().parse(&text).ok()?;
     if state.last_entry.as_ref() != Some(&path) {
         refresh_project(state, &path);
     }
+    if let Some(value) = hover_docs::rich_hover(state, uri, position, &text, &range) {
+        return Some(markup_hover(&text, &range, value));
+    }
+    let ast = Pratt::default().parse(&text).ok()?;
     let checker = state.project_index.as_ref()?.checker();
     let ty_text = hover_type(&ast, Some(checker), &text, &name, offset, &range);
     let docs = find_param_docs_for_name(ast.1.as_ref(), &name)
@@ -2967,6 +2960,9 @@ fn hover(document: &Document, position: Position) -> Option<Hover> {
     let offset = position_to_byte(&document.text, position)?;
     let range = word_range(&document.text, offset)?;
     let name = document.text.get(range.clone())?.to_owned();
+    if let Some(value) = hover_docs::standalone_hover(&document.text, &range) {
+        return Some(markup_hover(&document.text, &range, value));
+    }
 
     if let Some(hover) = hover_from_source(&document.text, &name, offset, range.clone())
         && hover_has_detail(&hover) {
@@ -2998,6 +2994,16 @@ fn hover(document: &Document, position: Position) -> Option<Hover> {
     }
 
     hover_markup(&document.text, &name, range, ty_text, docs)
+}
+
+fn markup_hover(source: &str, range: &Range<usize>, value: String) -> Hover {
+    Hover {
+        contents: HoverContents::Markup(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value,
+        }),
+        range: Some(byte_range(source, range)),
+    }
 }
 
 fn hover_has_detail(hover: &Hover) -> bool {
@@ -4419,6 +4425,55 @@ mod tests {
         assert_eq!(options.grants.allow_dload, vec!["sdl2".to_string()]);
         assert_eq!(options.grants.ffi_search_paths, vec![PathBuf::from("/work/app/native")]);
         assert_eq!(options.workspace, Some(PathBuf::from("/work/app/proj")));
+    }
+
+    /// Every builtin the compiler defines has hover docs in
+    /// `compiler/src/builtin_docs/`: virtual-module exports, builtin
+    /// methods and enum variants, the primitive types and the keywords.
+    #[test]
+    fn every_builtin_has_hover_docs() {
+        let docs = docs::BuiltinDocs::get();
+        let mut missing = Vec::new();
+        let mut check = |what: String, doc: Option<&docs::BuiltinDoc>| match doc {
+            Some(doc) if !doc.docs.is_empty() && !doc.signature.is_empty() => {}
+            _ => missing.push(what),
+        };
+        for (module, export) in VirtualModules::new().all_exports() {
+            let name = export.short_name();
+            check(format!("{module}::{name}"), docs.item(module, name));
+        }
+        let mut checker = Checker::new();
+        let _ = checker.check_program(&Pratt::default().parse("fn main() {}\n").unwrap());
+        for class in ["Vec", "Range", "RangeInclusive", "Stream"] {
+            for (name, ..) in members_of(&checker, class) {
+                check(format!("{class}.{name}"), docs.member(class, &name));
+            }
+        }
+        for name in ["new", "with_capacity", "from"] {
+            check(format!("Vec::{name}"), docs.member("Vec", name));
+        }
+        for (owner, variants) in [
+            (common::BUILTIN_OPTION_ENUM, common::BUILTIN_OPTION_VARIANTS),
+            (common::BUILTIN_RESULT_ENUM, common::BUILTIN_RESULT_VARIANTS),
+            (common::BUILTIN_IO_ERROR_ENUM, common::BUILTIN_IO_ERROR_VARIANTS),
+            (common::BUILTIN_THREAD_ERROR_ENUM, common::BUILTIN_THREAD_ERROR_VARIANTS),
+            (common::BUILTIN_ENV_ERROR_ENUM, common::BUILTIN_ENV_ERROR_VARIANTS),
+            (common::BUILTIN_FFI_ERROR_KIND_ENUM, common::BUILTIN_FFI_ERROR_KIND_VARIANTS),
+        ] {
+            for variant in variants {
+                check(format!("{owner}::{variant}"), docs.member(owner, variant));
+            }
+        }
+        for name in ["int", "float", "bool", "byte", "string", "unit"] {
+            check(name.to_owned(), docs.primitive(name));
+        }
+        check("prelude::len".into(), docs.item("prelude", "len"));
+        for word in coil_keywords().iter().chain(highlight_keywords()) {
+            if docs.keyword(word).is_none_or(str::is_empty) {
+                missing.push(format!("keyword `{word}`"));
+            }
+        }
+        assert!(missing.is_empty(), "builtins without hover docs: {missing:#?}");
     }
 
     #[test]
