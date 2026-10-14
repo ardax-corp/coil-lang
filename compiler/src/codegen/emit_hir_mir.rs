@@ -148,6 +148,29 @@ impl Compiler {
                     Rep::Pair(_) => None,
                 },
                 _ if forwards.contains(&k) => want,
+                // An argument as `hir_check_value` wants it: in its
+                // parameter's layout (a `Vec` element argument at the
+                // element's niche).
+                HirKind::Call { callee, args }
+                    if !matches!(callee, Callee::Value(_))
+                        && !emit.plan.lens.contains_key(&id.0)
+                        && let Some(call) = emit.plan.calls.get(&id.0)
+                        && call.builtin.is_none()
+                        && let Some(i) = args.iter().position(|&a| a == k)
+                        && i < call.params.len() =>
+                {
+                    match Self::hir_arg_rep(call, i) {
+                        Rep::Word(l) => Some(l),
+                        Rep::Pair(_) => None,
+                    }
+                }
+                // A value stored by index, at the element slot's niche.
+                HirKind::Assign { place, value } if *value == k && let HirKind::Index { base, .. } = hir.expr(*place).kind => {
+                    match self.hir_index_store_rep(hir, emit, *place, base) {
+                        Some(Rep::Word(l)) => Some(l),
+                        _ => None,
+                    }
+                }
                 _ => None,
             };
             self.hir_mir_make_niches(hir, emit, k, want, out);
