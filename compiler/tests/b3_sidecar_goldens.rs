@@ -66,10 +66,12 @@ const CORPUS: &[&str] = &[
 /// field names, which moves every string index (same lengths).
 /// The tree shake no longer keeps dead bodies emitted between the setup
 /// code and the first live body whole, which shortens `functions.hy`.
+/// Direct MIR dropping `while false` moves `loops.hy`'s test 1 from fuse
+/// to LIR (same length).
 const EXPECTED: &[(&str, &str)] = &[
     ("arithmetic.hy", "d040edffa88728ee_856"),
     ("functions.hy", "670405cf1594729f_171"),
-    ("loops.hy", "d37bd589d7fdeab8_169"),
+    ("loops.hy", "41e295705c9e7e40_169"),
     ("option_pair.hy", "877910cfd67cb148_288"),
     ("user_trait_dispatch.hy", "18fa73c397a09fe3_93"),
 ];
