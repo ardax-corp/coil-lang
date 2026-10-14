@@ -279,7 +279,14 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
                 MirAllocKind::DropEnum { tag, type_id } => write!(f, " {tag}, {type_id}")?,
                 MirAllocKind::Coro { target } => write!(f, " {}", target.0)?,
                 MirAllocKind::Boxed { tag } => write!(f, " {tag}")?,
-                MirAllocKind::Fn { target, operand, mask } => write!(f, " {}, {operand}, {mask}", target.0)?,
+                MirAllocKind::Fn { target, operand, mask } => {
+                    write!(f, " {}, {operand}", target.0)?;
+                    // A partial application's fill mask (none: no filled
+                    // parameters).
+                    if mask != 0 {
+                        write!(f, ", mask {mask}")?;
+                    }
+                }
                 MirAllocKind::PolyFn { target } => write!(f, " {}", target.0)?,
                 MirAllocKind::Array
                 | MirAllocKind::Tuple
@@ -911,8 +918,7 @@ impl<'a> Parser<'a> {
                     let target = crate::il::Label(self.uint()? as u32);
                     self.expect(',')?;
                     let operand = self.uint()? as u32;
-                    self.expect(',')?;
-                    let mask = self.uint()? as u32;
+                    let mask = if self.eat_str(", mask ") { self.uint()? as u32 } else { 0 };
                     MirAllocKind::Fn { target, operand, mask }
                 }
                 "polyfn" => MirAllocKind::PolyFn {
@@ -1401,8 +1407,8 @@ bb3:
         let func = b.finish().unwrap();
         func.verify().unwrap();
         let text = func.to_string();
-        assert!(text.contains("alloc.fn 7, 3, 0, v0"), "{text}");
-        assert!(text.contains("alloc.fn 8, 131328, 1, v1"), "{text}");
+        assert!(text.contains("alloc.fn 7, 3, v0"), "{text}");
+        assert!(text.contains("alloc.fn 8, 131328, mask 1, v1"), "{text}");
         assert!(text.contains("alloc.polyfn 9"), "{text}");
         assert!(text.contains("callind.i64 v"), "{text}");
         let again = parse_func(&text).expect(&text);
