@@ -474,8 +474,8 @@ impl MirFunc {
                 if !self.ty(*dest).is_word_lane() {
                     return Err(format!("{dest} CallIndirect dest is not a word lane"));
                 }
-                if self.ty(*callee) != MirTy::HeapRef {
-                    return Err(format!("{dest} CallIndirect callee is not heapref"));
+                if !matches!(self.ty(*callee), MirTy::HeapRef | MirTy::I64) {
+                    return Err(format!("{dest} CallIndirect callee is not heapref or a code pointer"));
                 }
                 if args.iter().any(|a| !self.ty(*a).is_word_lane()) {
                     return Err(format!("{dest} CallIndirect arg is not a word lane"));

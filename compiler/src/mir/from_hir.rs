@@ -95,6 +95,19 @@ pub struct HirCallSite {
     pub unbox: Option<u32>,
 }
 
+/// A trait method or operator on a bound type parameter in a shared
+/// generic body, as HIR emission's `HirBuiltin::Bound` / `HirOp::Bound`:
+/// each operand's word, the dictionary, then the code pointer in its
+/// method slot through `CallIndirect`.
+#[derive(Copy, Clone, Debug)]
+pub struct HirBoundCall {
+    /// Frame slot of the dictionary: one of the body's dictionary
+    /// parameters.
+    pub dict: u32,
+    /// The method's slot in the dictionary.
+    pub method: u32,
+}
+
 /// One step of building instance dictionaries, as HIR emission pushes
 /// them (`emit_instance_dict`): a stack program whose words left are the
 /// dictionaries.
@@ -360,6 +373,16 @@ pub struct HirMirInput<'a> {
     pub value_calls: &'a HashSet<u32>,
     /// Calls through a `PolyFn` local with no dictionaries, by call.
     pub poly_calls: &'a HashMap<u32, HirPolyCall>,
+    /// Trait methods and operators on a bound type parameter, called
+    /// through the body's own dictionary, by call or operator.
+    pub bound_calls: &'a HashMap<u32, HirBoundCall>,
+    /// Calls and dictionary operators typed a bare type parameter in a
+    /// shared generic body: HIR emission unboxes their result
+    /// (`UNBOX_ANY_TAG`), which may come back boxed.
+    pub unbox_any: &'a HashSet<u32>,
+    /// Parameters typed a bare type parameter of a shared generic body:
+    /// its prologue unboxes each (`UNBOX_ANY_TAG`), as the caller boxed it.
+    pub open_params: &'a [HirLocal],
     /// `len(x)` calls: a fixed size, or `None` for the array's length.
     pub lens: &'a HashMap<u32, Option<u32>>,
     /// Statements before which frame-slot locals box (they escape there).
@@ -691,14 +714,24 @@ fn is_var(ty: &Ty) -> bool {
 /// no operator, field, index or call takes one (any of them could read a
 /// box as its payload). The frame maps list the words it keeps live past
 /// a collecting instruction ([`super::gc::live_opaque_words`]).
-fn opaque_moves_only(hir: &HirBody) -> Result<(), Refusal> {
+fn opaque_moves_only(hir: &HirBody, inp: &HirMirInput) -> Result<(), Refusal> {
     let var = |id: &HirId| hir.expr(*id).ty.as_ref().is_some_and(is_var);
     let any = hir.locals.iter().any(|l| l.ty.as_ref().is_some_and(is_var)) || hir.exprs.iter().any(|e| e.ty.as_ref().is_some_and(is_var));
     if !any {
         return Ok(());
     }
-    for e in &hir.exprs {
+    // The code the body runs: a HIR pass may leave a replaced node behind.
+    let mut reached = Vec::new();
+    let mut todo: Vec<HirId> = hir.root.into_iter().collect();
+    while let Some(id) = todo.pop() {
+        reached.push(id);
+        todo.extend(lower::children(hir, id));
+    }
+    for id in reached {
+        let e = hir.expr(id);
         let read = match &e.kind {
+            // A dictionary method takes the words as they are.
+            _ if inp.bound_calls.contains_key(&id.0) => false,
             HirKind::Bin { lhs, rhs, .. } | HirKind::Logic { lhs, rhs, .. } => var(lhs) || var(rhs),
             HirKind::Un { operand: x, .. } | HirKind::Cast { value: x } | HirKind::Field { base: x, .. } | HirKind::Spread(x) => var(x),
             HirKind::Index { base, index, .. } => var(base) || var(index),
@@ -822,6 +855,17 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
             dict_params.insert(slot, b.add_param(MirTy::HeapRef).map_err(mir)?);
         }
     }
+    // A shared generic body's open parameters come boxed: the prologue
+    // unboxes each in place, as HIR emission's.
+    for &param in inp.open_params {
+        let slot = inp.slots.get(param.0 as usize).copied().flatten().ok_or("param slot")?;
+        if inp.pair_locals.contains_key(&param.0) {
+            return Err("open param pair".into());
+        }
+        let v = b.use_local(LocalId(slot), MirTy::I64).map_err(mir)?;
+        let raw = b.ins_unbox(v, common::UNBOX_ANY_TAG, MirTy::I64).map_err(mir)?;
+        b.def_local(LocalId(slot), raw).map_err(mir)?;
+    }
     let cur = b.entry();
     let mut lower = Lower {
         hir,
@@ -921,7 +965,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
     }
     func.inner_code = hir.exprs.iter().any(|e| matches!(e.kind, HirKind::Lambda { .. }));
     if inp.opaque_vars {
-        opaque_moves_only(hir)?;
+        opaque_moves_only(hir, inp)?;
         func.opaque_words = true;
     }
     // HIR emission packs a concrete value where a bare-class existential
@@ -2133,7 +2177,15 @@ impl Lower<'_> {
     /// Lower `id` for its value, packed as a bare-class existential where
     /// HIR emission packs it.
     fn value(&mut self, id: HirId) -> Result<Val, Refusal> {
-        let val = self.value_unpacked(id)?;
+        let mut val = self.value_unpacked(id)?;
+        // A result typed a bare type parameter may come back boxed.
+        if self.inp.unbox_any.contains(&id.0) {
+            val = match val {
+                Val::V(v) => Val::V(self.b.ins_unbox(v, common::UNBOX_ANY_TAG, MirTy::I64).map_err(mir)?),
+                Val::Never => Val::Never,
+                _ => return Err("unbox any value".into()),
+            };
+        }
         let Some(ops) = self.inp.packs.get(&id.0) else {
             return Ok(val);
         };
@@ -2205,6 +2257,9 @@ impl Lower<'_> {
             HirKind::Bin { op: BinOp::StrConcat, lhs, rhs } if let Some(&idx) = self.inp.formats.get(&id.0) => self.format(id, idx, &[*lhs, *rhs]),
             HirKind::Bin { lhs, rhs, .. } if let Some(info) = self.inp.aggregates.get(&id.0) => self.aggregate(id, &info.clone(), *lhs, Some(*rhs)),
             HirKind::Un { operand, .. } if let Some(info) = self.inp.aggregates.get(&id.0) => self.aggregate(id, &info.clone(), *operand, None),
+            // A bound type parameter's operator: its dictionary method.
+            HirKind::Bin { lhs, rhs, .. } if let Some(&bound) = self.inp.bound_calls.get(&id.0) => self.bound_call(id, &[*lhs, *rhs], bound),
+            HirKind::Un { operand, .. } if let Some(&bound) = self.inp.bound_calls.get(&id.0) => self.bound_call(id, &[*operand], bound),
             // An operator on an instance taking its operands raw: a plain call.
             HirKind::Bin { lhs, rhs, .. } if self.inp.calls.contains_key(&id.0) => self.call(id, &[*lhs, *rhs]),
             HirKind::Un { operand, .. } if self.inp.calls.contains_key(&id.0) => self.call(id, &[*operand]),
@@ -2220,6 +2275,7 @@ impl Lower<'_> {
             HirKind::Call { callee: Callee::Value(f), args } if self.inp.value_calls.contains(&id.0) => self.call_value(id, *f, args),
             HirKind::Call { callee: Callee::Value(f), args } if let Some(p) = self.inp.poly_calls.get(&id.0) => self.call_poly(id, *f, args, &p.clone()),
             HirKind::Call { args, .. } if let Some(fork) = self.inp.par_forks.get(&id.0) => self.par_fork(id, args, &fork.clone()),
+            HirKind::Call { args, .. } if let Some(&bound) = self.inp.bound_calls.get(&id.0) => self.bound_call(id, args, bound),
             HirKind::Call { args, .. } => self.call(id, args),
             HirKind::Resume { handle, value } => self.resume(id, *handle, *value),
             HirKind::Yield { value, from } => self.yield_(id, *value, *from, true),
@@ -3733,6 +3789,38 @@ impl Lower<'_> {
         let ty = self.local_ty(local)?;
         let slot = self.slot(local)?;
         self.b.use_local(slot, ty).map_err(mir)
+    }
+
+    /// A trait method or operator on a bound type parameter, as HIR
+    /// emission's `HirBuiltin::Bound` / `HirOp::Bound`: each operand's one
+    /// word, then the dictionary parameter, then the code pointer in its
+    /// method slot through `CallIndirect`. A code pointer is an `i64`, no
+    /// heap word.
+    fn bound_call(&mut self, id: HirId, args: &[HirId], bound: HirBoundCall) -> Result<Val, Refusal> {
+        self.raw_host = false;
+        if self.inp.pair_tys.contains_key(&id.0) {
+            return Err("bound call pair".into());
+        }
+        let ty = self.expr_ty(id).ok_or("call type")?;
+        let unit = is_unit(ty);
+        let ret = if unit {
+            MirTy::I64
+        } else {
+            self.inp.word(ty).ok_or_else(|| format!("bound call type {}", ty_kind(ty)))?
+        };
+        let mut words = Vec::with_capacity(args.len() + 1);
+        for &arg in args {
+            let Some(v) = self.word(arg)? else {
+                return Ok(Val::Never);
+            };
+            words.push(v);
+        }
+        let dict = *self.dict_params.get(&bound.dict).ok_or("dictionary parameter")?;
+        words.push(dict);
+        let slot = self.b.ins_const(MirConst::I64(i64::from(bound.method))).map_err(mir)?;
+        let callee = self.b.ins_index(dict, slot, MirTy::I64, false).map_err(mir)?;
+        let dest = self.at_expr(id, |l| l.b.ins_call_indirect(callee, words, ret).map_err(mir))?;
+        Ok(if unit { Val::Unit } else { Val::V(dest) })
     }
 
     /// `f(args)` through a function value: each argument's one word (a

@@ -775,14 +775,14 @@ impl Compiler {
                     self.hir_cold = std::mem::take(&mut emit.cold);
                 }
                 self.hir_mir_why = None;
-                // A shared generic body with no open parameter takes its
-                // dictionaries as trailing parameters: direct MIR lowers it
-                // when its code reads none (`HirMirTables::reads_dicts`).
+                // A shared generic body takes its dictionaries as trailing
+                // parameters: direct MIR lowers it when its code reads them
+                // only as it plans (`HirMirTables::reads_dicts`), its open
+                // parameters unboxed as the prologue above unboxes them.
                 let shared = self.hir_shared_generic();
-                let open = hir.params.iter().any(|&p| self.hir_open_ty(hir.local(p).ty.as_ref()));
                 self.hir_mir = if !shared {
                     self.hir_lower_mir(hir, &emit, None)
-                } else if !open && let Some(entry) = entry_sp {
+                } else if let Some(entry) = entry_sp {
                     self.hir_lower_mir(hir, &emit, Some(entry))
                 } else {
                     self.hir_mir_why = Some("converted or shared generic entry".into());
@@ -1379,6 +1379,9 @@ impl Compiler {
             fn_values: &tables.fn_values,
             value_calls: &tables.value_calls,
             poly_calls: &tables.poly_calls,
+            bound_calls: &tables.bound_calls,
+            unbox_any: &tables.unbox_any,
+            open_params: &tables.open_params,
             lens: &emit.plan.lens,
             box_at: &emit.plan.box_at,
             is_class: Box::new(is_class),
@@ -6712,7 +6715,7 @@ impl Compiler {
 
     /// Whether the body being lowered is a generic one's shared body (it
     /// takes dictionaries; a mono clone takes none).
-    fn hir_shared_generic(&self) -> bool {
+    pub(super) fn hir_shared_generic(&self) -> bool {
         !self.compiling_mono_clone && self.lookup_slot("__dict0").is_some()
     }
 
@@ -6737,7 +6740,7 @@ impl Compiler {
     }
 
     /// Whether `ty` is a bare type variable.
-    fn hir_open_ty(&self, ty: Option<&Ty>) -> bool {
+    pub(super) fn hir_open_ty(&self, ty: Option<&Ty>) -> bool {
         ty.is_some_and(|ty| matches!(apply_ty_prune(self.checker.subst(), ty), Ty::Var(_)))
     }
 

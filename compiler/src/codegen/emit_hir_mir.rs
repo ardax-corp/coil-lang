@@ -40,6 +40,17 @@ pub(super) struct HirMirTables {
     pub(super) value_calls: HashSet<u32>,
     /// Calls through a `PolyFn` local with no dictionaries.
     pub(super) poly_calls: HashMap<u32, crate::mir::HirPolyCall>,
+    /// Trait methods and operators on a bound type parameter through one
+    /// of the body's dictionary parameters (`HirBuiltin::Bound`,
+    /// `HirOp::Bound`), by call or operator.
+    pub(super) bound_calls: HashMap<u32, crate::mir::HirBoundCall>,
+    /// Calls and dictionary operators typed a bare type parameter in a
+    /// shared generic body, whose result `hir_value` unboxes
+    /// (`UNBOX_ANY_TAG`).
+    pub(super) unbox_any: HashSet<u32>,
+    /// A shared generic body's parameters typed a bare type parameter,
+    /// which its prologue unboxes (`UNBOX_ANY_TAG`).
+    pub(super) open_params: Vec<LocalId>,
     /// Parallel loops the plan moved into their own fork-join functions,
     /// by loop: the direct MIR lowering's calls.
     pub(super) par_loops: HashMap<u32, crate::mir::HirParLoop>,
@@ -102,6 +113,10 @@ impl Compiler {
             self.hir_mir_make_niches(hir, emit, root, None, &mut tables.make_niches);
         }
         tables.frame = self.hir_mir_frame(hir, emit);
+        // As `lower_hir_body`'s prologue unboxes them.
+        if self.hir_shared_generic() {
+            tables.open_params = hir.params.iter().copied().filter(|&p| self.hir_open_ty(hir.local(p).ty.as_ref())).collect();
+        }
         tables
     }
 
@@ -500,6 +515,33 @@ impl Compiler {
             }
         }
         let e = hir.expr(id);
+        // As `hir_value` unboxes a call's or dictionary operator's result.
+        let produced = match e.kind {
+            HirKind::Call { .. } => true,
+            HirKind::Bin { .. } | HirKind::Un { .. } => matches!(emit.plan.ops.get(&id.0), Some(HirOp::Bound { .. })),
+            _ => false,
+        };
+        if produced && self.hir_open_ty(e.ty.as_ref()) && self.hir_shared_generic() {
+            t.unbox_any.insert(id.0);
+        }
+        // A bound type parameter's operator or method through one of this
+        // body's dictionary parameters.
+        let bound = match &e.kind {
+            HirKind::Bin { .. } | HirKind::Un { .. } => match emit.plan.ops.get(&id.0) {
+                Some(&HirOp::Bound { dict, method }) => Some((dict, method)),
+                _ => None,
+            },
+            HirKind::Call { .. } if !emit.plan.lens.contains_key(&id.0) => match emit.plan.calls.get(&id.0).and_then(|c| c.builtin) {
+                Some(HirBuiltin::Bound { dict, method }) => Some((dict, method)),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some((dict, method)) = bound
+            && self.hir_mir_dict_param(dict)
+        {
+            t.bound_calls.insert(id.0, crate::mir::HirBoundCall { dict, method });
+        }
         match &e.kind {
             HirKind::Lit(Lit::Str(raw))
                 if Self::hir_ty(hir, id).and_then(lower::primitive) != Some(crate::typechecking::ty::BYTE)
@@ -1108,7 +1150,7 @@ impl Compiler {
         let span = e.span.0..e.span.1;
         match &e.kind {
             HirKind::Bin { .. } | HirKind::Un { .. } => match emit.plan.ops.get(&id.0) {
-                Some(HirOp::Bound { .. }) => true,
+                Some(&HirOp::Bound { dict, .. }) => !self.hir_mir_dict_param(dict),
                 Some(HirOp::Call { lookup, fqn, class, method }) => {
                     let lookup = lookup.clone();
                     let fqn = self.instance_clone(fqn, std::slice::from_ref(&lookup)).unwrap_or_else(|| fqn.clone());
@@ -1139,7 +1181,7 @@ impl Compiler {
             }
             HirKind::Call { args, .. } if !emit.plan.lens.contains_key(&id.0) && let Some(call) = emit.plan.calls.get(&id.0) => {
                 match &call.builtin {
-                    Some(HirBuiltin::Bound { .. }) => return true,
+                    Some(HirBuiltin::Bound { dict, .. }) => return !self.hir_mir_dict_param(*dict),
                     Some(HirBuiltin::Format) => return self.hir_mir_format_dict_reads(hir, args),
                     Some(_) => return false,
                     None => {}
