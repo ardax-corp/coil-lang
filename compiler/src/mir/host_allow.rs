@@ -121,14 +121,23 @@ pub fn host_variadic(id: u16) -> bool {
 /// heap pointer is one; precise math / packed specs stay exact.
 pub fn host_arg_ok(id: u16, expected: MirTy, actual: MirTy) -> bool {
     actual == expected
-        || (host_spec(id).is_none() && expected == MirTy::I64 && actual.is_heap_word())
+        || ((host_spec(id).is_none() || packed_la(id)) && expected == MirTy::I64 && actual.is_heap_word())
+}
+
+/// A packed linear-algebra kernel: its operands are heap arrays or tuples
+/// (Value words), its result a new array or `dot`'s `int` / `float`,
+/// which direct MIR types from the expression.
+fn packed_la(id: u16) -> bool {
+    (PACKED_DOT_ID..=PACKED_VEC_ARITH_ID).contains(&id)
 }
 
 /// Whether a HostInvoke typed `expected` may produce `actual`: as
 /// [`host_arg_ok`], and a generic word edge's result may be a `bool`
 /// (`match_at`), the `Value` word the native returns.
 pub fn host_result_ok(id: u16, expected: MirTy, actual: MirTy) -> bool {
-    host_arg_ok(id, expected, actual) || (host_spec(id).is_none() && expected == MirTy::I64 && actual == MirTy::Bool)
+    host_arg_ok(id, expected, actual)
+        || (host_spec(id).is_none() && expected == MirTy::I64 && actual == MirTy::Bool)
+        || (packed_la(id) && matches!(actual, MirTy::I64 | MirTy::F64 | MirTy::HeapRef))
 }
 
 /// Q9 R2 string-bytes HostInvoke (`from_bytes` / `to_bytes`).
