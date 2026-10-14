@@ -20,9 +20,9 @@ pub(super) struct HirMirTables {
     /// whose arguments all print as words (`%v` as `%s`), and of string
     /// `+` (`"%s%s"`), by expression.
     pub(super) formats: HashMap<u32, u32>,
-    /// Per argument of such a `format` call (after the format string): the
-    /// raw `show` entry a `%v` argument goes through, `None` for a word.
-    pub(super) format_shows: HashMap<u32, Vec<Option<crate::il::Label>>>,
+    /// Per argument of such a `format` call (after the format string): how
+    /// a `%v` argument is shown, `None` for a word.
+    pub(super) format_shows: HashMap<u32, Vec<Option<crate::mir::HirShow>>>,
     /// `matrix(data)` calls, whose value is the data itself.
     pub(super) matrix_wraps: HashSet<u32>,
     /// Entry of each plain one-word-ABI `CALL` (no dictionaries), by call
@@ -992,8 +992,9 @@ impl Compiler {
         r
     }
 
-    /// A `format` call whose `%v` arguments each go through one plain
-    /// `show` entry: its format string (`%v` as `%s`) and those entries.
+    /// A `format` call whose `%v` arguments each show as
+    /// [`Self::hir_show_plan`] plans: its format string (`%v` as `%s`) and
+    /// those plans.
     fn hir_mir_format(&mut self, hir: &HirBody, id: HirId, args: &[HirId], t: &mut HirMirTables) {
         let HirKind::Lit(Lit::Str(fmt)) = &hir.expr(args[0]).kind else {
             return;
@@ -1004,7 +1005,7 @@ impl Compiler {
         let mut shows_ok = true;
         for (i, &arg) in args.iter().enumerate().skip(1) {
             if specs.get(i - 1) == Some(&'v') {
-                let show = self.hir_show_entry(hir, arg);
+                let show = self.hir_show_plan(hir, arg);
                 shows_ok &= show.is_some();
                 shows.push(show);
             } else {
@@ -1020,35 +1021,62 @@ impl Compiler {
         }
     }
 
-    /// The raw `show` entry [`Self::hir_show`] calls for `arg` when that is
-    /// one plain one-word `CALL` of the boxed-layout value and nothing else
-    /// (no boxing, conversion or dictionary), as `emit_show_for_stack_value`
-    /// picks it.
-    pub(super) fn hir_show_entry(&mut self, hir: &HirBody, arg: HirId) -> Option<crate::il::Label> {
+    /// How [`Self::hir_show`] shows `arg` when that is not a bound
+    /// dictionary's method: as [`Self::hir_show_ty`].
+    fn hir_show_plan(&mut self, hir: &HirBody, arg: HirId) -> Option<crate::mir::HirShow> {
         if self.hir_bound_show(hir, arg).is_some() {
             return None;
         }
         let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, arg)?);
-        if matches!(ty, Ty::Tuple(_) | Ty::Record { .. }) || self.value_layout(&ty) != ValueLayout::Boxed {
+        self.hir_show_ty(&ty)
+    }
+
+    /// How `emit_show_for_stack_value` shows a value of type `ty`, when
+    /// each step is one direct MIR has: a tuple's or record's items shown
+    /// and formatted, `STRINGIFY` with no `Show` instance, or one plain
+    /// one-word `CALL` of the raw `show` entry on the boxed-layout value
+    /// (no boxing, conversion or dictionary). It interns the strings
+    /// emission does.
+    fn hir_show_ty(&mut self, ty: &Ty) -> Option<crate::mir::HirShow> {
+        match ty {
+            Ty::Tuple(items) => {
+                let items = items.iter().map(|t| Some((t.clone(), self.hir_show_ty(t)?))).collect::<Option<Vec<_>>>()?;
+                let fmt = self.intern_string(unescape_coil_string(&Self::tuple_show_format(items.len())));
+                return Some(crate::mir::HirShow::Tuple { fmt, items });
+            }
+            Ty::Record { fields } => {
+                let mut shown = Vec::with_capacity(fields.len());
+                for (name, t) in fields {
+                    let key = self.intern_string(name);
+                    shown.push((key, t.clone(), self.hir_show_ty(t)?));
+                }
+                let fmt = self.intern_string(unescape_coil_string(&Self::record_show_format(fields)));
+                return Some(crate::mir::HirShow::Record { fmt, fields: shown });
+            }
+            _ => {}
+        }
+        if self.value_layout(ty) != ValueLayout::Boxed {
             return None;
         }
-        let lookup_ty = Self::show_lookup_ty_for_instance(&ty);
-        let fqn = self.find_show_instance(&lookup_ty)?.method_fqns.get("show").cloned()?;
-        if !self.functions.contains_key(&fqn) && !self.fn_entry_labels.contains_key(&fqn) {
-            return None;
-        }
+        let lookup_ty = Self::show_lookup_ty_for_instance(ty);
+        let Some(fqn) = self
+            .find_show_instance(&lookup_ty)
+            .and_then(|inst| inst.method_fqns.get("show").cloned())
+            .filter(|fqn| self.functions.contains_key(fqn) || self.fn_entry_labels.contains_key(fqn))
+        else {
+            return Some(crate::mir::HirShow::Stringify);
+        };
         let fqn = self.instance_clone(&fqn, std::slice::from_ref(&lookup_ty)).unwrap_or(fqn);
         let raw = self.raw_instance_methods.contains(&fqn);
-        if !raw && Self::ty_to_value_tag(&lookup_ty).is_some() {
-            return None;
-        }
+        // A non-raw `show` takes the value boxed (`BoxValue`).
+        let boxed = if raw { None } else { Self::ty_to_value_tag(&lookup_ty).map(|tag| tag as u32) };
         // A dictionary argument: not a plain call. Its code goes nowhere.
         let dict = self.hir_mir_quiet(|this| this.emit_call_instance_dict(&mut CodeBuf::new(), ("Show", "show", &fqn), std::slice::from_ref(&lookup_ty), 0..0));
         if dict || self.two_word_return_kind(&fqn).is_some() {
             return None;
         }
         self.raw_instance_call = raw;
-        self.named_entry_target(&fqn, true)
+        self.named_entry_target(&fqn, true).map(|target| crate::mir::HirShow::Call { target, boxed })
     }
 
     /// Decide, before `root` is emitted, which parallel loops under it move
