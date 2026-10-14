@@ -87,6 +87,12 @@ pub struct HirCallSite {
     pub boxed_ret: bool,
     /// The call site's instance dictionaries, passed after the arguments.
     pub dicts: Vec<HirDictOp>,
+    /// Each argument's `BoxValue` tag, where a shared generic takes it as
+    /// a bare type parameter (empty: none boxed).
+    pub boxes: Vec<Option<u32>>,
+    /// The result's `UnboxValue` tag, where a shared generic returns a
+    /// bare type parameter.
+    pub unbox: Option<u32>,
 }
 
 /// One step of building instance dictionaries, as HIR emission pushes
@@ -3451,8 +3457,12 @@ impl Lower<'_> {
             _ if is_heap_tuple(ty) => (MirTy::HeapRef, None),
             _ => (self.inp.word(ty).ok_or_else(|| format!("call type {}", ty_kind(ty)))?, None),
         };
+        if site.unbox.is_some() && (site.boxed_ret || site.pair_ret || site.coro || unit || ret_hi.is_some()) {
+            return Err("call unbox shape".into());
+        }
         let mut words = Vec::with_capacity(args.len());
-        for (&arg, &pair) in args.iter().zip(&site.pair_args) {
+        for (i, (&arg, &pair)) in args.iter().zip(&site.pair_args).enumerate() {
+            let tag = site.boxes.get(i).copied().flatten();
             // A two-word type not passed as a pair goes boxed.
             let boxed = !pair
                 && self.expr_ty(arg).is_some_and(|t| {
@@ -3463,9 +3473,18 @@ impl Lower<'_> {
             if !pair && !boxed && self.expr_ty(arg).and_then(|t| self.inp.word(t)).is_none() {
                 return Err("call argument type".into());
             }
+            if tag.is_some() && (pair || boxed) {
+                return Err("call argument box".into());
+            }
             match (self.value(arg)?, pair) {
                 (Val::Never, _) => return Ok(Val::Never),
                 (Val::V(v), false) if boxed && self.b.value_ty(v) != MirTy::HeapRef => return Err("call argument boxed".into()),
+                // A bare type parameter of a shared generic: the word boxed
+                // to its tag, as HIR emission's `BoxValue`.
+                (Val::V(v), false) if let Some(tag) = tag => {
+                    let boxed = self.at_expr(arg, |l| l.b.ins_alloc(MirAllocKind::Boxed { tag }, vec![v]).map_err(mir))?;
+                    words.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![boxed]).map_err(mir)?);
+                }
                 (Val::V(v), false) => words.push(v),
                 (Val::Pair(lo, tag), false) if boxed => {
                     let ty = self.expr_ty(arg).ok_or("call argument type")?.clone();
@@ -3501,10 +3520,14 @@ impl Lower<'_> {
         }
         let abi = DenseAbi {
             params: words.iter().map(|&v| self.b.value_ty(v)).collect(),
-            ret,
+            ret: if site.unbox.is_some() { MirTy::HeapRef } else { ret },
             ret_hi,
         };
         let (dest, dest_hi) = self.at_expr(id, |l| l.b.ins_call(site.target, words, &abi).map_err(mir))?;
+        // A bare type parameter result comes back boxed.
+        if let Some(tag) = site.unbox {
+            return Ok(Val::V(self.b.ins_unbox(dest, tag, ret).map_err(mir)?));
+        }
         if let Some(want) = niche {
             return self.unbox_niche(dest, want);
         }
