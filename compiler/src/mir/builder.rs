@@ -52,6 +52,9 @@ pub struct MirBuilder {
     pub allow_host_edges: bool,
     /// Loc of the IL op currently being lowered (C3 sparse DebugLoc).
     pub pending_loc: DebugLoc,
+    /// Locals kept in a home ([`MirInst::HomeStore`]): each
+    /// [`Self::def_local`] of one also writes its home.
+    pub homed: HashMap<LocalId, u16>,
 }
 
 impl MirBuilder {
@@ -68,6 +71,7 @@ impl MirBuilder {
             allow_effects: false,
             allow_host_edges: false,
             pending_loc: DebugLoc::unknown(),
+            homed: HashMap::new(),
         }
     }
 
@@ -101,7 +105,36 @@ impl MirBuilder {
             self.func.word_slots.insert(local);
         }
         self.write_variable(local, b, val);
+        if let Some(&home) = self.homed.get(&local) {
+            self.ins_home_store(home, val)?;
+        }
         Ok(())
+    }
+
+    /// A new home of word type `ty`.
+    pub fn add_home(&mut self, ty: MirTy) -> Result<u16, MirError> {
+        let home = u16::try_from(self.func.homes.len()).map_err(|_| MirError::msg("too many homes"))?;
+        self.func.homes.push(ty);
+        Ok(home)
+    }
+
+    /// [`MirInst::HomeLoad`] of `home`, typed as the home.
+    pub fn ins_home_load(&mut self, home: u16) -> Result<ValueId, MirError> {
+        let ty = *self.func.homes.get(usize::from(home)).ok_or_else(|| MirError::msg("no such home"))?;
+        let dest = self.alloc(ty);
+        self.push(MirInst::HomeLoad { dest, home })?;
+        Ok(dest)
+    }
+
+    /// [`MirInst::HomeStore`] of `value` to `home`. Dest is a `bool` unit token.
+    pub fn ins_home_store(&mut self, home: u16, value: ValueId) -> Result<ValueId, MirError> {
+        let dest = self.alloc(MirTy::Bool);
+        self.push(MirInst::HomeStore {
+            dest,
+            home,
+            value: self.resolve(value),
+        })?;
+        Ok(dest)
     }
 
     /// Read a source local, inserting φs at sealed / incomplete joins.

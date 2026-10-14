@@ -259,6 +259,8 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
         MirInst::DoneCoro { dest, handle } => write!(f, "{dest} = donecoro {handle}"),
         MirInst::LoadStatic { dest, slot } => write!(f, "{dest} = loadstatic {slot}"),
         MirInst::StoreStatic { dest, slot, value } => write!(f, "{dest} = storestatic {slot}, {value}"),
+        MirInst::HomeLoad { dest, home } => write!(f, "{dest} = homeload {home}"),
+        MirInst::HomeStore { dest, home, value } => write!(f, "{dest} = homestore {home}, {value}"),
         MirInst::ClearWord { dest, value } => write!(f, "{dest} = clearword {value}"),
         MirInst::KeepAlive { dest, value } => write!(f, "{dest} = keepalive {value}"),
         MirInst::ArrayPush {

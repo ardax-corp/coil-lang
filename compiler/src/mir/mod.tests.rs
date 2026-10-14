@@ -4678,3 +4678,25 @@ bb0:
     let (_, _, map) = super::emit_lir::lir_sidecars(&f);
     assert!(map.is_none(), "no mapped allocation, no map");
 }
+
+/// A `defer` flag or capture's home sits past every register and the
+/// phi-cycle scratch word, and the prologue's `Seek` covers it: the body's
+/// cleanup pad reads it there at a panic.
+#[test]
+fn lir_homes_sit_past_the_registers() {
+    let mut b = super::builder::MirBuilder::new("homed");
+    b.set_ret_ty(MirTy::I64);
+    let p = b.add_param(MirTy::I64).unwrap();
+    let h = b.add_home(MirTy::I64).unwrap();
+    b.ins_home_store(h, p).unwrap();
+    b.ret(Some(p)).unwrap();
+    let f = b.finish().unwrap();
+    f.verify().unwrap();
+    let mut pool = Vec::new();
+    let lir = emit_lir(&f, Some(Label(0)), &mut pool, false).expect("LIR emits a homed body");
+    let (base, frame) = super::emit_lir::lir_home_frame(&f).expect("home frame");
+    assert!(u32::from(base) >= f.params.len() as u32);
+    assert_eq!(frame, u32::from(base) + 1);
+    assert!(lir.iter().any(|op| matches!(op, IlOp::StorePop { slot, .. } if *slot == u32::from(base))));
+    assert!(lir.iter().any(|op| matches!(op, IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Seek && byte.operand_u32() == frame)));
+}
