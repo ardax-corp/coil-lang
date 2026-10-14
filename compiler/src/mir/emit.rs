@@ -1374,6 +1374,14 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
             emit_dense_push(out, &[*msg], regs, scratch, loc)?;
             out.push(IlOp::from_plain_byte(Byte::new(Instruction::Panic), loc));
         }
+        MirInst::TagArrayKind { dest, src, kind } => {
+            emit_dense_push(out, &[*src], regs, scratch, loc)?;
+            out.push(IlOp::from_plain_byte(Byte::new(Instruction::TagArrayKind).with_operand_u32(u32::from(*kind)), loc));
+            out.push(IlOp::StorePop {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
+        }
         MirInst::Unbox { dest, src, tag } => {
             emit_dense_push(out, &[*src], regs, scratch, loc)?;
             out.push(IlOp::UnboxValue { tag: *tag, loc });
@@ -2180,7 +2188,7 @@ fn gather_window(func: &MirFunc, self_entry: Option<Label>) -> u8 {
                 MirInst::Alloc { elems, .. } => elems.len(),
                 // Format string plus args, pushed like call args.
                 MirInst::Format { args, .. } => args.len() + 1,
-                MirInst::Stringify { .. } | MirInst::Unbox { .. } | MirInst::Print { .. } | MirInst::Panic { .. } => 1,
+                MirInst::Stringify { .. } | MirInst::Unbox { .. } | MirInst::TagArrayKind { .. } | MirInst::Print { .. } | MirInst::Panic { .. } => 1,
                 MirInst::StrEq { .. } => 2,
                 _ => 0,
             };

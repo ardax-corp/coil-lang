@@ -708,6 +708,11 @@ impl MirFunc {
                     return Err(format!("{dest} Stringify src type"));
                 }
             }
+            MirInst::TagArrayKind { dest, src, .. } => {
+                if self.ty(*dest) != MirTy::HeapRef || self.ty(*src) != MirTy::HeapRef {
+                    return Err(format!("{dest} TagArrayKind type"));
+                }
+            }
             MirInst::Unbox { dest, src, .. } => {
                 if !self.ty(*dest).is_specialized() || !self.ty(*src).is_specialized() {
                     return Err(format!("{dest} Unbox type"));

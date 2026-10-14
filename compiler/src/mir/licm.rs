@@ -300,6 +300,7 @@ fn hoistable(inst: &MirInst, allow_index: bool, allow_alloc: bool) -> bool {
         | MirInst::Format { .. }
         | MirInst::Stringify { .. }
         | MirInst::Unbox { .. }
+        | MirInst::TagArrayKind { .. }
         | MirInst::StrEq { .. } => false,
         MirInst::String { .. } => true,
     }
