@@ -1831,6 +1831,19 @@ impl Lower<'_> {
                 _ => Err("make boxed".into()),
             };
         }
+        // A host or call result that comes back boxed is its box already
+        // (`Vec::pop`'s thunk returns `vec_pop`'s word): no unboxing to a
+        // pair just to box it again.
+        if self.host_pair(id) || self.boxed_call(id) {
+            self.raw_host = true;
+            let out = self.value(id);
+            self.raw_host = false;
+            return match out? {
+                Val::V(v) if self.b.value_ty(v) == MirTy::HeapRef => Ok(Some(v)),
+                Val::Never => Ok(None),
+                _ => Err("boxed result".into()),
+            };
+        }
         // A two-word static is its box already.
         if let HirKind::Global { .. } = self.hir.expr(id).kind
             && let Some(&slot) = self.inp.statics.get(&id.0)
