@@ -4678,3 +4678,22 @@ bb0:
     let (_, _, map) = super::emit_lir::lir_sidecars(&f);
     assert!(map.is_none(), "no mapped allocation, no map");
 }
+
+/// A `FORMAT` with no arguments (`Show` of an empty class) is no
+/// `refuses_alloc` site, but it allocates and binds an S2b map site, so
+/// MIR→LIR emits it with the body's map.
+#[test]
+fn lir_takes_fused_body_with_argless_format() {
+    let text = "func @show(v0: heapref) -> heapref {
+bb0:
+    v1 = string 2
+    v2 = format v1
+    v3 = gcbarrier.safepoint v0, v2
+    return v3
+}";
+    let f = parse_func(text).expect(text);
+    f.verify().unwrap();
+    let labels = super::specialize::BodyLabels { first: Some(Label(0)), head: vec![Label(0)] };
+    let lir = super::fuse_fallback(&labels, "show", &[], &f).expect("LIR takes an argless format body");
+    assert!(lir.iter().any(|op| matches!(op, IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::FORMAT)));
+}
