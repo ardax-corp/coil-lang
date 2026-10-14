@@ -401,7 +401,7 @@ impl IlModule {
         let mut side_deopts = Vec::new();
         // Maps of dense and LIR bodies, built from their MIR.
         let mut mir_maps = HashMap::<String, crate::mir::DraftFrameMap>::new();
-        // A fused body (`COIL_MIR_FUSE=1`) takes its stack IL from its MIR,
+        // A fused body (the default) takes its stack IL from its MIR,
         // so its tier gates read that MIR and the fuse IL emitted from it
         // (N1b): of emit_hir's stack IL only the labels it binds.
         let fused: Vec<bool> = self
@@ -569,6 +569,29 @@ impl IlModule {
             }
             if opts.collect_stats && let Some(why) = &lir_why[i] {
                 super::opt::note_fuse_reason(why);
+            }
+        }
+        // M5p: every fused body runs IL emitted from its MIR (dense or
+        // LIR). One left on emit_hir's stack lowering is a compiler bug.
+        if opts.mir_specialize {
+            let fell_back: Vec<String> = (0..self.funcs.len())
+                .filter(|&i| fused[i] && tier[i] == "fuse")
+                .map(|i| {
+                    let body = &self.funcs[i];
+                    let why = match &body.meta.hir_mir {
+                        None => body.meta.hir_mir_why.clone().map_or("no MIR from HIR".to_string(), |w| format!("no MIR from HIR: {w}")),
+                        Some(_) => lir_why[i].clone().or_else(|| dense_why[i].clone()).unwrap_or_else(|| "no tier took it".to_string()),
+                    };
+                    format!("`{}` ({why})", body.meta.name)
+                })
+                .collect();
+            if !fell_back.is_empty() {
+                panic!(
+                    "internal compiler error: {} bod{} fell back to the HIR stack lowering: {}",
+                    fell_back.len(),
+                    if fell_back.len() == 1 { "y" } else { "ies" },
+                    fell_back.join(", ")
+                );
             }
         }
         // Dense and LIR bodies carry GC maps built from their MIR. An
