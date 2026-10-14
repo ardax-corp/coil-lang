@@ -908,7 +908,11 @@ impl Compiler {
         for &local in emit.plan.pair_locals.keys() {
             let ty = hir.local(LocalId(local)).ty.as_ref().ok_or("pair local type")?;
             let (lo, hi) = self.hir_mir_pair_tys(ty).ok_or("pair local type")?;
-            let tag = *emit.tag_slots.get(&local).ok_or("pair local slot")?;
+            // A pair local emission never bound (its `let` folded away by
+            // inlining) has no tag slot: nothing reads it.
+            let Some(&tag) = emit.tag_slots.get(&local) else {
+                continue;
+            };
             pair_locals.insert(local, (tag, lo, hi));
         }
         let pair_tys = hir
@@ -971,13 +975,35 @@ impl Compiler {
         let opaque_vars = hir.is_generic
             || hir.locals.iter().any(|l| l.ty.as_ref().is_some_and(is_var))
             || hir.exprs.iter().any(|e| e.ty.as_ref().is_some_and(is_var));
+        // The backing word of a scalar enum type.
+        let scalar_enum = move |t: &Ty| {
+            let t = apply_ty_prune(checker.subst(), t);
+            if !crate::hir::layout::is_scalar_enum_ty(checker, &t) {
+                return None;
+            }
+            let name = match crate::typechecking::ty::strip_readonly(&t) {
+                Ty::Constructor { owner, .. } => match owner.as_ref() {
+                    Ty::Con(name) | Ty::Sum { name, .. } => name.clone(),
+                    _ => return None,
+                },
+                Ty::Con(name) | Ty::Sum { name, .. } => name.clone(),
+                _ => return None,
+            };
+            // A `#[repr(string)]` value is its backing string's heap word.
+            let backing = checker.scalar_value_ty(&name)?;
+            if matches!(crate::typechecking::ty::strip_readonly(&backing), Ty::Con(n) if n == crate::typechecking::ty::STRING) {
+                return Some(crate::mir::MirTy::HeapRef);
+            }
+            crate::mir::scalar_mir_ty(&backing).filter(|t| matches!(t, crate::mir::MirTy::I64 | crate::mir::MirTy::F64 | crate::mir::MirTy::Bool))
+        };
         let word = |t: &Ty| {
             crate::mir::word_mir_ty(t)
                 .or_else(|| {
-                    let string = matches!(apply_ty_prune(checker.subst(), t), Ty::Con(ref n) if n == crate::typechecking::ty::STRING);
-                    (is_class(t) || string).then_some(crate::mir::MirTy::HeapRef)
+                    let opaque = crate::mir::opaque_heap_ty(&apply_ty_prune(checker.subst(), t));
+                    (is_class(t) || opaque).then_some(crate::mir::MirTy::HeapRef)
                 })
                 .or_else(|| niche(t))
+                .or_else(|| scalar_enum(t))
                 .or_else(|| (opaque_vars && is_var(t)).then_some(crate::mir::MirTy::I64))
                 // An `Option` / `Result` open in a type variable is a boxed
                 // enum object.
@@ -1245,26 +1271,7 @@ impl Compiler {
             lens: &emit.plan.lens,
             box_at: &emit.plan.box_at,
             is_class: Box::new(is_class),
-            scalar_enum: Box::new(move |t: &Ty| {
-                let t = apply_ty_prune(checker.subst(), t);
-                if !crate::hir::layout::is_scalar_enum_ty(checker, &t) {
-                    return None;
-                }
-                let name = match crate::typechecking::ty::strip_readonly(&t) {
-                    Ty::Constructor { owner, .. } => match owner.as_ref() {
-                        Ty::Con(name) | Ty::Sum { name, .. } => name.clone(),
-                        _ => return None,
-                    },
-                    Ty::Con(name) | Ty::Sum { name, .. } => name.clone(),
-                    _ => return None,
-                };
-                // A `#[repr(string)]` value is its backing string's heap word.
-                let backing = checker.scalar_value_ty(&name)?;
-                if matches!(crate::typechecking::ty::strip_readonly(&backing), Ty::Con(n) if n == crate::typechecking::ty::STRING) {
-                    return Some(crate::mir::MirTy::HeapRef);
-                }
-                crate::mir::scalar_mir_ty(&backing).filter(|t| matches!(t, crate::mir::MirTy::I64 | crate::mir::MirTy::F64 | crate::mir::MirTy::Bool))
-            }),
+            scalar_enum: Box::new(scalar_enum),
             niche: Box::new(niche),
             boxed_enum: Box::new(move |t: &Ty, variant: Option<&str>| {
                 let t = apply_ty_prune(checker.subst(), t);

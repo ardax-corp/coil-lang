@@ -47,7 +47,7 @@ pub fn emit_lir_with_aliases(
     pool: &mut Vec<u64>,
     across_alloc: bool,
 ) -> Result<Vec<IlOp>, LowerError> {
-    if func.has_gc_edge() && !across_alloc {
+    if func.has_mapped_gc_edge() && !across_alloc {
         return Err(LowerError::Refused(
             "MIR→LIR refuses Alloc/GcBarrier without S2b maps (S2c)".into(),
         ));
@@ -95,6 +95,11 @@ pub fn emit_lir_with_aliases(
         }
         let term_loc = func.term_loc(block.id);
         consume_match_tos(&mut out, func, block.id, &plan, &regs, term_loc);
+        // A miss leaves the scrutinee on the stack: the next arm's test
+        // peeks it there; a block taking no payload of it pops it.
+        if super::emit::miss_chain_tos(func, block.id).is_none() && super::emit::missed_scrutinee_unused(func, block.id) {
+            out.push(IlOp::Pop { loc: term_loc });
+        }
         let mut starts: Vec<(usize, ValueId)> = Vec::new();
         for inst in &block.insts {
             if inst.is_phi() {
@@ -169,7 +174,7 @@ pub(super) fn lir_sidecars(func: &MirFunc) -> LirSidecars {
     let plan = EmitPlan::new(func);
     let (regs, _) = assign_needed(func, &plan).unwrap_or_else(|_| (Vec::new(), 0));
     let regs = coalesce_latch_overwrite(func, regs, &plan.need_slot);
-    let stack_map = if func.has_gc_edge() && !regs.is_empty() {
+    let stack_map = if func.has_mapped_gc_edge() && !regs.is_empty() {
         super::stackmap::encode_draft_regs(func, &regs, &plan.need_slot)
     } else {
         None
@@ -2029,7 +2034,9 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
                     "JumpIfMatch + phi moves (keep fuse-IL)".into(),
                 ));
             }
-            emit_stack(out, *scrutinee, func, plan, regs, pool, loc)?;
+            if super::emit::miss_chain_tos(func, block.id).is_none() {
+                emit_stack(out, *scrutinee, func, plan, regs, pool, loc)?;
+            }
             out.push(IlOp::Jump {
                 kind: IlJumpKind::JumpIfMatch {
                     tag: *tag,

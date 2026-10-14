@@ -641,7 +641,7 @@ fn lir_tail(
     side.debug_slot_remap = remap;
     side.deopt = Some(deopt);
     // SROA may have taken every allocation out; then there is nothing to map.
-    if func.has_gc_edge() {
+    if func.has_mapped_gc_edge() {
         let Some(map) = stack_map.take() else {
             return refuse("no MIR stack map");
         };
