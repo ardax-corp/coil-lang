@@ -126,6 +126,9 @@ pub fn emit_lir_with_aliases(
                 }
                 continue;
             }
+            if let MirInst::KeepAlive { .. } = inst {
+                continue;
+            }
             let dest = inst.dest();
             if plan.tree[dest.index()] {
                 continue;
@@ -266,7 +269,9 @@ impl EmitPlan {
                         }
                     }
                 for inst in &block.insts {
-                    if inst.is_phi() || fused[inst.dest().index()] {
+                    // A pinned word stays in its slot: the pin emits nothing
+                    // that could take it as an inline operand.
+                    if inst.is_phi() || fused[inst.dest().index()] || matches!(inst, MirInst::KeepAlive { .. }) {
                         continue;
                     }
                     // Operands of stored bins can still be tree (i % 10 → BinSlotImm).
@@ -299,7 +304,7 @@ impl EmitPlan {
             }
             if def[i].is_some() || def_block[i].is_some() {
                 let print_tok = def[i].is_some_and(|(b, k)| {
-                    matches!(func.block(b).insts.get(k), Some(MirInst::Print { .. } | MirInst::Panic { .. } | MirInst::StoreStatic { .. } | MirInst::ClearWord { .. }))
+                    matches!(func.block(b).insts.get(k), Some(MirInst::Print { .. } | MirInst::Panic { .. } | MirInst::StoreStatic { .. } | MirInst::ClearWord { .. } | MirInst::KeepAlive { .. }))
                 });
                 if !print_tok {
                     need_slot[i] = true;
@@ -1047,7 +1052,7 @@ fn emit_stored(
             out.push(IlOp::from_plain_byte(Byte::new(Instruction::StoreStatic).with_operand_u32(*slot), loc));
         }
         // Emitted where it stands (`cleared_words`).
-        MirInst::ClearWord { .. } => {}
+        MirInst::ClearWord { .. } | MirInst::KeepAlive { .. } => {}
         MirInst::ArrayPush {
             dest,
             array,
@@ -1659,7 +1664,7 @@ fn emit_stack(
             out.push(IlOp::from_plain_byte(Byte::new(Instruction::StoreStatic).with_operand_u32(*slot), loc));
             Ok(())
         }
-        MirInst::ClearWord { .. } => Ok(()),
+        MirInst::ClearWord { .. } | MirInst::KeepAlive { .. } => Ok(()),
         MirInst::ArrayPush {
             dest,
             array,

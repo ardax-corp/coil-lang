@@ -536,7 +536,7 @@ impl MirFunc {
                     return Err(format!("{dest} StoreStatic value type"));
                 }
             }
-            MirInst::ClearWord { dest, value } => {
+            MirInst::ClearWord { dest, value } | MirInst::KeepAlive { dest, value } => {
                 if self.ty(*dest) != MirTy::Bool {
                     return Err(format!("{dest} ClearWord dest is not bool"));
                 }

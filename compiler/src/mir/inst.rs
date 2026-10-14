@@ -432,6 +432,14 @@ pub enum MirInst {
         dest: ValueId,
         value: ValueId,
     },
+    /// Keep `value` live to here: a finalizer object's word, held as long
+    /// as HIR emission's frame slot holds it (until the local is rebound
+    /// or the function returns), so its `drop` runs no earlier. Dest is a
+    /// `bool` unit token. Emits nothing.
+    KeepAlive {
+        dest: ValueId,
+        value: ValueId,
+    },
     /// In-place `Vec` / array grow (B6). Dest is the same `HeapRef` identity.
     /// Always a GC safepoint; pair with [`Self::GcBarrier`].
     ArrayPush {
@@ -671,6 +679,7 @@ impl MirInst {
             | Self::LoadStatic { dest, .. }
             | Self::StoreStatic { dest, .. }
             | Self::ClearWord { dest, .. }
+            | Self::KeepAlive { dest, .. }
             | Self::ArrayPush { dest, .. }
             | Self::Alloc { dest, .. }
             | Self::GcBarrier { dest, .. }
@@ -768,7 +777,7 @@ impl MirInst {
             Self::Yield { value, .. } => vec![*value],
             Self::DoneCoro { handle, .. } => vec![*handle],
             Self::LoadStatic { .. } => Vec::new(),
-            Self::StoreStatic { value, .. } | Self::ClearWord { value, .. } => vec![*value],
+            Self::StoreStatic { value, .. } | Self::ClearWord { value, .. } | Self::KeepAlive { value, .. } => vec![*value],
             Self::ArrayPush { array, value, .. } => vec![*array, *value],
             Self::Alloc { elems, .. } => elems.clone(),
             Self::GcBarrier { roots, .. } => roots.clone(),
@@ -853,7 +862,7 @@ impl MirInst {
             Self::Yield { value, .. } => *value = map(*value),
             Self::DoneCoro { handle, .. } => *handle = map(*handle),
             Self::LoadStatic { .. } => {}
-            Self::StoreStatic { value, .. } | Self::ClearWord { value, .. } => *value = map(*value),
+            Self::StoreStatic { value, .. } | Self::ClearWord { value, .. } | Self::KeepAlive { value, .. } => *value = map(*value),
             Self::ArrayPush { array, value, .. } => {
                 *array = map(*array);
                 *value = map(*value);
