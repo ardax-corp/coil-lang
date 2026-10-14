@@ -37,6 +37,10 @@ use parser::{
 use reporting::{Label, Message as CoilMessage, MessageKind};
 use serde_json::Value;
 
+mod coverage;
+mod docs;
+mod hover_docs;
+
 #[derive(Default)]
 struct Document {
     text: String,
@@ -67,6 +71,12 @@ struct ServerState {
     pending_analysis: Vec<Uri>,
     /// `--root` dirs from the command line, searched after the defaults.
     extra_roots: Vec<PathBuf>,
+    /// The `coil test --coverage` tracefile, when there is one.
+    coverage: coverage::Coverage,
+    /// The client re-asks for code lenses on `workspace/codeLens/refresh`.
+    code_lens_refresh: bool,
+    /// Id of the next request this server sends.
+    next_request: i32,
 }
 
 /// Command-line options: extra module roots and host grants, spelled as for
@@ -76,6 +86,8 @@ struct LspOptions {
     /// Absolute (relative ones resolve against the current directory).
     extra_roots: Vec<PathBuf>,
     grants: HostGrants,
+    /// `--workspace`: the project directory, used instead of the client's root.
+    workspace: Option<PathBuf>,
 }
 
 #[derive(Parser, Debug)]
@@ -84,6 +96,8 @@ struct LspOptions {
     about = "Start the Coil language server over stdin/stdout",
     disable_help_subcommand = true,
     after_help = "`--root` is searched after `src`, `.` and `.deps/*/src`.\n\
+`--workspace` is the project directory those resolve against; without it the\n\
+client's root folder is used.\n\
 `--stdio` is accepted for LSP clients; stdio is the only transport."
 )]
 struct LspCli {
@@ -91,6 +105,9 @@ struct LspCli {
     grants: HostGrantFlags,
     #[command(flatten)]
     roots: RootFlags,
+    /// Project directory (default: the client's root folder)
+    #[arg(long, value_name = "DIR")]
+    workspace: Option<PathBuf>,
     /// Accepted for LSP clients; stdio is the only transport
     #[arg(long)]
     stdio: bool,
@@ -122,6 +139,7 @@ fn parse_options(
     Ok(Some(LspOptions {
         extra_roots: cli.roots.root.into_iter().map(|path| cwd.join(path)).collect(),
         grants,
+        workspace: cli.workspace.map(|path| cwd.join(path)),
     }))
 }
 
@@ -209,6 +227,9 @@ fn run(connection: &Connection, options: LspOptions) -> Result<(), Box<dyn std::
             work_done_progress_options: Default::default(),
         })),
         inlay_hint_provider: Some(lsp_types::OneOf::Left(true)),
+        code_lens_provider: Some(lsp_types::CodeLensOptions {
+            resolve_provider: Some(false),
+        }),
         code_action_provider: Some(lsp_types::CodeActionProviderCapability::Options(
             lsp_types::CodeActionOptions {
                 code_action_kinds: Some(vec![
@@ -256,17 +277,14 @@ fn run(connection: &Connection, options: LspOptions) -> Result<(), Box<dyn std::
         extra_roots: options.extra_roots,
         ..ServerState::default()
     };
-    let workspace_root = _params
-        .root_uri
-        .as_ref()
-        .and_then(uri_path)
-        .or_else(|| {
-            _params
-                .workspace_folders
-                .as_ref()
-                .and_then(|folders| folders.first())
-                .and_then(|folder| uri_path(&folder.uri))
-        });
+    let client_root = _params.root_uri.as_ref().and_then(uri_path).or_else(|| {
+        _params
+            .workspace_folders
+            .as_ref()
+            .and_then(|folders| folders.first())
+            .and_then(|folder| uri_path(&folder.uri))
+    });
+    let workspace_root = options.workspace.or(client_root);
     if let Some(root_uri) = workspace_root {
         state.workspace_root = Some(root_uri.clone());
         let mut index = ProjectIndex::with_roots(
@@ -277,6 +295,18 @@ fn run(connection: &Connection, options: LspOptions) -> Result<(), Box<dyn std::
         index.pipeline_mut().set_host_grants(options.grants);
         state.project_index = Some(index);
     }
+    state.coverage = coverage::Coverage::new(
+        coverage::CoverageOptions::from_init(_params.initialization_options.as_ref()),
+        state.workspace_root.as_deref(),
+    );
+    state.coverage.refresh();
+    state.code_lens_refresh = _params
+        .capabilities
+        .workspace
+        .as_ref()
+        .and_then(|workspace| workspace.code_lens.as_ref())
+        .and_then(|lens| lens.refresh_support)
+        .unwrap_or(false);
     // Messages read ahead of the one being handled: cancellations and
     // edits behind a slow request apply before it runs.
     let mut queue: VecDeque<Message> = VecDeque::new();
@@ -284,10 +314,23 @@ fn run(connection: &Connection, options: LspOptions) -> Result<(), Box<dyn std::
     loop {
         if queue.is_empty() {
             flush_pending_analysis(connection, &mut state)?;
-            match connection.receiver.recv() {
-                Ok(message) => queue.push_back(message),
-                Err(_) => break,
+            // Idle: look at the coverage tracefile every few seconds.
+            let message = if state.coverage.enabled() {
+                match connection.receiver.recv_timeout(COVERAGE_POLL) {
+                    Ok(message) => Some(message),
+                    Err(error) if error.is_timeout() => None,
+                    Err(_) => break,
+                }
+            } else {
+                match connection.receiver.recv() {
+                    Ok(message) => Some(message),
+                    Err(_) => break,
+                }
+            };
+            if state.coverage.refresh() {
+                publish_coverage(connection, &mut state)?;
             }
+            queue.extend(message);
         }
         while let Ok(message) = connection.receiver.try_recv() {
             queue.push_back(message);
@@ -345,6 +388,142 @@ fn run(connection: &Connection, options: LspOptions) -> Result<(), Box<dyn std::
         }
     }
     Ok(())
+}
+
+/// How often an idle server checks whether the tracefile changed.
+const COVERAGE_POLL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The tracefile changed: re-publish open documents' diagnostics and ask the
+/// client for fresh code lenses.
+fn publish_coverage(connection: &Connection, state: &mut ServerState) -> Result<(), Box<dyn std::error::Error>> {
+    let open: Vec<Uri> = state.documents.keys().cloned().collect();
+    for uri in open {
+        publish_diagnostics(connection, state, &uri)?;
+    }
+    if state.code_lens_refresh {
+        state.next_request += 1;
+        connection.sender.send(Message::Request(Request::new(
+            RequestId::from(state.next_request),
+            "workspace/codeLens/refresh".into(),
+            Value::Null,
+        )))?;
+    }
+    Ok(())
+}
+
+/// A project source (under the workspace, outside `.deps`): coverage is
+/// shown for these only.
+fn in_workspace(state: &ServerState, path: &Path) -> bool {
+    state.workspace_root.as_ref().is_some_and(|root| {
+        path.strip_prefix(root)
+            .is_ok_and(|rel| !rel.components().any(|c| c.as_os_str() == ".deps"))
+    })
+}
+
+/// Function coverage of an open workspace document, with its line hits.
+fn document_coverage(
+    state: &ServerState,
+    uri: &Uri,
+    text: &str,
+) -> Option<(Vec<coverage::FnCoverage>, std::collections::BTreeMap<u32, u64>)> {
+    let path = uri_path(uri)?;
+    if !in_workspace(state, &path) {
+        return None;
+    }
+    let lines = coverage::source_lines(state.coverage.lines_for(&path, text)?, text);
+    Some((coverage::function_coverage(&coverage::functions(text), &lines), lines))
+}
+
+/// Hints for functions below the coverage threshold and for runs of
+/// uncovered lines. Hints only, never `Unnecessary` (no faded code).
+fn coverage_diagnostics(state: &ServerState, uri: &Uri, text: &str) -> Vec<Diagnostic> {
+    let Some((functions, lines)) = document_coverage(state, uri, text) else {
+        return Vec::new();
+    };
+    let hint = |range: LspRange, message: String| Diagnostic {
+        range,
+        severity: Some(DiagnosticSeverity::HINT),
+        source: Some("coil coverage".into()),
+        message,
+        ..Diagnostic::default()
+    };
+    let mut out: Vec<Diagnostic> = functions
+        .iter()
+        .filter(|f| f.ratio() < state.coverage.options.threshold)
+        .map(|f| {
+            hint(
+                byte_range(text, &f.function.name_range),
+                format!(
+                    "`{}` has low test coverage: {}. Coverage could be improved.",
+                    f.function.name,
+                    f.summary()
+                ),
+            )
+        })
+        .collect();
+    let untested: Vec<(u32, u32)> = functions
+        .iter()
+        .filter(|f| f.hit == 0)
+        .map(|f| f.function.lines)
+        .collect();
+    let starts = coverage::line_starts(text);
+    for (first, last) in coverage::uncovered_runs(&lines, &untested) {
+        let Some(&start) = starts.get(first as usize - 1) else {
+            continue;
+        };
+        let end = starts.get(last as usize).map_or(text.len(), |&next| next.saturating_sub(1));
+        let indent = text[start..].len() - text[start..].trim_start().len();
+        let message = if first == last {
+            "Line not covered by tests.".to_owned()
+        } else {
+            format!("Lines {first}-{last} not covered by tests.")
+        };
+        out.push(hint(byte_range(text, &((start + indent).min(end)..end)), message));
+    }
+    out
+}
+
+/// A lens over each function's name: `covered 7/9 lines (78%)`.
+fn coverage_lenses(state: &ServerState, uri: &Uri) -> Vec<lsp_types::CodeLens> {
+    let Some(document) = state.documents.get(uri) else {
+        return Vec::new();
+    };
+    let Some((functions, _)) = document_coverage(state, uri, &document.text) else {
+        return Vec::new();
+    };
+    functions
+        .iter()
+        .map(|f| lsp_types::CodeLens {
+            range: byte_range(&document.text, &f.function.name_range),
+            command: Some(Command {
+                title: if f.hit == 0 {
+                    "not covered by tests".to_owned()
+                } else {
+                    format!("covered {}", f.summary())
+                },
+                // Display only.
+                command: String::new(),
+                arguments: None,
+            }),
+            data: None,
+        })
+        .collect()
+}
+
+/// `**Coverage:** 7/9 lines (78%)` for the function `name` declared at byte
+/// `at` of the workspace file `path`.
+fn coverage_note(state: &ServerState, path: &Path, source: &str, name: &str, at: usize) -> Option<String> {
+    if !in_workspace(state, path) {
+        return None;
+    }
+    let lines = coverage::source_lines(state.coverage.lines_for(path, source)?, source);
+    let line = coverage::line_of(&coverage::line_starts(source), at);
+    let functions: Vec<_> = coverage::functions(source)
+        .into_iter()
+        .filter(|f| f.name == name && (f.lines.0..=f.lines.1).contains(&line))
+        .collect();
+    let covered = coverage::function_coverage(&functions, &lines).pop()?;
+    Some(format!("**Coverage:** {}", covered.summary()))
 }
 
 fn send_response(
@@ -471,6 +650,10 @@ fn handle_request(
             let params: lsp_types::InlayHintParams = serde_json::from_value(request.params.clone())?;
             let hints = inlay_hints(state, &params.text_document.uri, params.range).unwrap_or_default();
             Some(serde_json::to_value(hints)?)
+        }
+        "textDocument/codeLens" => {
+            let params: lsp_types::CodeLensParams = serde_json::from_value(request.params.clone())?;
+            Some(serde_json::to_value(coverage_lenses(state, &params.text_document.uri))?)
         }
         "textDocument/hover" => {
             let params: HoverParams = serde_json::from_value(request.params.clone())?;
@@ -796,6 +979,11 @@ fn publish_diagnostics(
             .map(|message| diagnostic(&file_uri, &text, message))
             .collect();
         batch.push((file_uri, diagnostics, open.map(|d| d.version)));
+    }
+    for (file_uri, diagnostics, _) in &mut batch {
+        if let Some(document) = state.documents.get(file_uri) {
+            diagnostics.extend(coverage_diagnostics(state, file_uri, &document.text));
+        }
     }
     let mut now_dirty = HashSet::new();
     for (file_uri, diagnostics, version) in batch {
@@ -1790,11 +1978,12 @@ fn insert_decl_candidate(
         });
 }
 
+/// `///` lines rendered the way rustdoc shows them (see [`docs::render_doc_lines`]).
 fn docs_markdown(docs: &[&str]) -> Option<String> {
     if docs.is_empty() {
         return None;
     }
-    Some(docs.join("\n"))
+    Some(docs::render_doc_lines(docs))
 }
 
 fn virtual_completion_candidates(
@@ -1947,27 +2136,13 @@ fn insert_virtual_candidate(
         .or_insert_with(|| (kind, builtin_documentation(path, &name, export)));
 }
 
-const WEBSITE_DOCS: &str =
-    "https://github.com/ardax-corp/coil-website/blob/main/src/content/docs";
-
 fn builtin_documentation(path: &[String], name: &str, export: &BuiltinExport) -> String {
     let module = path.join("::");
-    let doc_path = match module.as_str() {
-        "prelude" => "references/option-result.md",
-        "prelude::ops" => "references/types.md",
-        "prelude::math" => "references/math.md",
-        "io" => "references/io.md",
-        "io::fs" => "references/io-fs.md",
-        "string" => "references/string.md",
-        "thread" => "manual/tutorial/11-threads.md",
-        "clock" => "references/modules.md",
-        "env" => "references/env.md",
-        "gc" => "references/gc.md",
-        "ffi" | "ffi::types" => "references/ffi.md",
-        _ => "references/modules.md",
-    };
+    if let Some(doc) = docs::BuiltinDocs::get().item(&module, name) {
+        return doc.docs_with_reference();
+    }
     let description = builtin_description(&module, name, export);
-    format!("{description}\n\n[Read the `{module}` reference]({WEBSITE_DOCS}/{doc_path}).")
+    format!("{description}\n\n[Read the `{module}` reference]({}).", docs::reference_url(&module))
 }
 
 fn builtin_description(module: &str, name: &str, export: &BuiltinExport) -> String {
@@ -2175,10 +2350,13 @@ fn project_hover(state: &mut ServerState, uri: &Uri, position: Position) -> Opti
     let offset = position_to_byte(&text, position)?;
     let range = word_range(&text, offset)?;
     let name = text.get(range.clone())?.to_owned();
-    let ast = Pratt::default().parse(&text).ok()?;
     if state.last_entry.as_ref() != Some(&path) {
         refresh_project(state, &path);
     }
+    if let Some(value) = hover_docs::rich_hover(state, uri, position, &text, &range) {
+        return Some(markup_hover(&text, &range, value));
+    }
+    let ast = Pratt::default().parse(&text).ok()?;
     let checker = state.project_index.as_ref()?.checker();
     let ty_text = hover_type(&ast, Some(checker), &text, &name, offset, &range);
     let docs = find_param_docs_for_name(ast.1.as_ref(), &name)
@@ -2962,6 +3140,9 @@ fn hover(document: &Document, position: Position) -> Option<Hover> {
     let offset = position_to_byte(&document.text, position)?;
     let range = word_range(&document.text, offset)?;
     let name = document.text.get(range.clone())?.to_owned();
+    if let Some(value) = hover_docs::standalone_hover(&document.text, &range) {
+        return Some(markup_hover(&document.text, &range, value));
+    }
 
     if let Some(hover) = hover_from_source(&document.text, &name, offset, range.clone())
         && hover_has_detail(&hover) {
@@ -2993,6 +3174,16 @@ fn hover(document: &Document, position: Position) -> Option<Hover> {
     }
 
     hover_markup(&document.text, &name, range, ty_text, docs)
+}
+
+fn markup_hover(source: &str, range: &Range<usize>, value: String) -> Hover {
+    Hover {
+        contents: HoverContents::Markup(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value,
+        }),
+        range: Some(byte_range(source, range)),
+    }
 }
 
 fn hover_has_detail(hover: &Hover) -> bool {
@@ -4400,6 +4591,8 @@ mod tests {
             "--allow-dload",
             "sdl2",
             "--ffi-search-path=native",
+            "--workspace",
+            "proj",
         ]
         .map(String::from);
         let options = parse_options(args, cwd).unwrap().expect("not help");
@@ -4411,6 +4604,56 @@ mod tests {
         assert!(!options.grants.allow_attach);
         assert_eq!(options.grants.allow_dload, vec!["sdl2".to_string()]);
         assert_eq!(options.grants.ffi_search_paths, vec![PathBuf::from("/work/app/native")]);
+        assert_eq!(options.workspace, Some(PathBuf::from("/work/app/proj")));
+    }
+
+    /// Every builtin the compiler defines has hover docs in
+    /// `compiler/src/builtin_docs/`: virtual-module exports, builtin
+    /// methods and enum variants, the primitive types and the keywords.
+    #[test]
+    fn every_builtin_has_hover_docs() {
+        let docs = docs::BuiltinDocs::get();
+        let mut missing = Vec::new();
+        let mut check = |what: String, doc: Option<&docs::BuiltinDoc>| match doc {
+            Some(doc) if !doc.docs.is_empty() && !doc.signature.is_empty() => {}
+            _ => missing.push(what),
+        };
+        for (module, export) in VirtualModules::new().all_exports() {
+            let name = export.short_name();
+            check(format!("{module}::{name}"), docs.item(module, name));
+        }
+        let mut checker = Checker::new();
+        let _ = checker.check_program(&Pratt::default().parse("fn main() {}\n").unwrap());
+        for class in ["Vec", "Range", "RangeInclusive", "Stream"] {
+            for (name, ..) in members_of(&checker, class) {
+                check(format!("{class}.{name}"), docs.member(class, &name));
+            }
+        }
+        for name in ["new", "with_capacity", "from"] {
+            check(format!("Vec::{name}"), docs.member("Vec", name));
+        }
+        for (owner, variants) in [
+            (common::BUILTIN_OPTION_ENUM, common::BUILTIN_OPTION_VARIANTS),
+            (common::BUILTIN_RESULT_ENUM, common::BUILTIN_RESULT_VARIANTS),
+            (common::BUILTIN_IO_ERROR_ENUM, common::BUILTIN_IO_ERROR_VARIANTS),
+            (common::BUILTIN_THREAD_ERROR_ENUM, common::BUILTIN_THREAD_ERROR_VARIANTS),
+            (common::BUILTIN_ENV_ERROR_ENUM, common::BUILTIN_ENV_ERROR_VARIANTS),
+            (common::BUILTIN_FFI_ERROR_KIND_ENUM, common::BUILTIN_FFI_ERROR_KIND_VARIANTS),
+        ] {
+            for variant in variants {
+                check(format!("{owner}::{variant}"), docs.member(owner, variant));
+            }
+        }
+        for name in ["int", "float", "bool", "byte", "string", "unit"] {
+            check(name.to_owned(), docs.primitive(name));
+        }
+        check("prelude::len".into(), docs.item("prelude", "len"));
+        for word in coil_keywords().iter().chain(highlight_keywords()) {
+            if docs.keyword(word).is_none_or(str::is_empty) {
+                missing.push(format!("keyword `{word}`"));
+            }
+        }
+        assert!(missing.is_empty(), "builtins without hover docs: {missing:#?}");
     }
 
     #[test]

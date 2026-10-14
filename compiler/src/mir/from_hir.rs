@@ -28,7 +28,7 @@ use crate::hir::{lower, BinOp, Builtin, Callee, HirArm, HirBody, HirFlags, HirId
 use crate::il::Label;
 use crate::typechecking::infer::{ForInCounted, ForInKind};
 use crate::typechecking::value_layout::ValueLayout;
-use crate::typechecking::ty::{strip_readonly, vec_element_ty, ArrayLength, Ty};
+use crate::typechecking::ty::{strip_readonly, vec_element_ty, Ty};
 
 use super::abi::DenseAbi;
 use super::builder::{MirBuilder, MirError};
@@ -87,6 +87,12 @@ pub struct HirCallSite {
     pub boxed_ret: bool,
     /// The call site's instance dictionaries, passed after the arguments.
     pub dicts: Vec<HirDictOp>,
+    /// Each argument's `BoxValue` tag, where a shared generic takes it as
+    /// a bare type parameter (empty: none boxed).
+    pub boxes: Vec<Option<u32>>,
+    /// The result's `UnboxValue` tag, where a shared generic returns a
+    /// bare type parameter.
+    pub unbox: Option<u32>,
 }
 
 /// One step of building instance dictionaries, as HIR emission pushes
@@ -418,6 +424,9 @@ pub struct HirMirInput<'a> {
     /// Matrix / vector operators and `dot` / `matmul` calls on a packed
     /// kernel: its native and the meta word packing the shape.
     pub linalgs: &'a HashMap<u32, (u16, u32)>,
+    /// Fixed array locals copied as they are bound or assigned to another
+    /// local: the `vec_from_array` native, by value.
+    pub array_copies: &'a HashMap<u32, u16>,
     /// `Result` variants made at a niche word other than their own
     /// type's, as their context wants it: `Ok(())` (typed `Result<(), E>`)
     /// returned as a `Result<unit, E>` is its zero word.
@@ -677,10 +686,10 @@ fn is_var(ty: &Ty) -> bool {
 }
 
 /// A generic body moves its type parameter values but never reads them:
-/// no operator, field, index or call takes one (any of them
-/// could read a box as its payload), and nothing that can collect runs
-/// while one is live in a word the frame maps don't trace.
-fn opaque_moves_only(hir: &HirBody, func: &MirFunc) -> Result<(), Refusal> {
+/// no operator, field, index or call takes one (any of them could read a
+/// box as its payload). The frame maps list the words it keeps live past
+/// a collecting instruction ([`super::gc::live_opaque_words`]).
+fn opaque_moves_only(hir: &HirBody) -> Result<(), Refusal> {
     let var = |id: &HirId| hir.expr(*id).ty.as_ref().is_some_and(is_var);
     let any = hir.locals.iter().any(|l| l.ty.as_ref().is_some_and(is_var)) || hir.exprs.iter().any(|e| e.ty.as_ref().is_some_and(is_var));
     if !any {
@@ -705,23 +714,6 @@ fn opaque_moves_only(hir: &HirBody, func: &MirFunc) -> Result<(), Refusal> {
         };
         if read {
             return Err("type variable read".into());
-        }
-    }
-    // A type variable's word is an `i64` the collector does not trace: no
-    // `i64` may stay live past an instruction that can collect (a word one
-    // consumes, such as an object's field, is fine). Parameters are the
-    // exception: the frame map lists every parameter slot.
-    let consts: HashSet<ValueId> = func.blocks.iter().flat_map(|b| &b.insts).filter(|i| matches!(i, MirInst::Const { .. })).map(|i| i.dest()).collect();
-    let live = super::gc::liveness_after(func);
-    for (b, block) in func.blocks.iter().enumerate() {
-        for (i, inst) in block.insts.iter().enumerate() {
-            let moves = matches!(
-                inst,
-                MirInst::Const { .. } | MirInst::Bin { .. } | MirInst::Cmp { .. } | MirInst::Unary { .. } | MirInst::Cast { .. } | MirInst::Phi { .. } | MirInst::ArrayLen { .. } | MirInst::Index { .. } | MirInst::HeapFieldLoad { .. } | MirInst::HeapFieldStore { .. }
-            );
-            if !moves && live[b][i].iter().any(|v| func.ty(*v) == MirTy::I64 && !consts.contains(v) && !func.params.contains(v)) {
-                return Err("type variable across a call".into());
-            }
         }
     }
     Ok(())
@@ -925,7 +917,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
     }
     func.inner_code = hir.exprs.iter().any(|e| matches!(e.kind, HirKind::Lambda { .. }));
     if inp.opaque_vars {
-        opaque_moves_only(hir, &func)?;
+        opaque_moves_only(hir)?;
         func.opaque_words = true;
     }
     // HIR emission packs a concrete value where a bare-class existential
@@ -2713,10 +2705,9 @@ impl Lower<'_> {
             }
             HirKind::Let { local, init } => {
                 let init = init.ok_or("uninitialized let")?;
-                self.refuse_array_copy(init)?;
                 let ty = self.local_ty(*local)?;
                 let slot = self.slot(*local)?;
-                let Some(v) = (if ty == MirTy::HeapRef { self.boxed_word(init)? } else { self.word(init)? }) else {
+                let Some(v) = (if ty == MirTy::HeapRef { self.boxed_word_copied(init)? } else { self.word(init)? }) else {
                     return Ok(Val::Never);
                 };
                 if self.b.value_ty(v) != ty {
@@ -2733,10 +2724,9 @@ impl Lower<'_> {
                 let HirKind::Local(local) = self.hir.expr(*place).kind else {
                     return Err("assign place".into());
                 };
-                self.refuse_array_copy(*value)?;
                 let ty = self.local_ty(local)?;
                 let slot = self.slot(local)?;
-                let Some(v) = (if ty == MirTy::HeapRef { self.boxed_word(*value)? } else { self.word(*value)? }) else {
+                let Some(v) = (if ty == MirTy::HeapRef { self.boxed_word_copied(*value)? } else { self.word(*value)? }) else {
                     return Ok(Val::Never);
                 };
                 if self.b.value_ty(v) != ty {
@@ -3457,8 +3447,12 @@ impl Lower<'_> {
             _ if is_heap_tuple(ty) => (MirTy::HeapRef, None),
             _ => (self.inp.word(ty).ok_or_else(|| format!("call type {}", ty_kind(ty)))?, None),
         };
+        if site.unbox.is_some() && (site.boxed_ret || site.pair_ret || site.coro || unit || ret_hi.is_some()) {
+            return Err("call unbox shape".into());
+        }
         let mut words = Vec::with_capacity(args.len());
-        for (&arg, &pair) in args.iter().zip(&site.pair_args) {
+        for (i, (&arg, &pair)) in args.iter().zip(&site.pair_args).enumerate() {
+            let tag = site.boxes.get(i).copied().flatten();
             // A two-word type not passed as a pair goes boxed.
             let boxed = !pair
                 && self.expr_ty(arg).is_some_and(|t| {
@@ -3469,9 +3463,18 @@ impl Lower<'_> {
             if !pair && !boxed && self.expr_ty(arg).and_then(|t| self.inp.word(t)).is_none() {
                 return Err("call argument type".into());
             }
+            if tag.is_some() && (pair || boxed) {
+                return Err("call argument box".into());
+            }
             match (self.value(arg)?, pair) {
                 (Val::Never, _) => return Ok(Val::Never),
                 (Val::V(v), false) if boxed && self.b.value_ty(v) != MirTy::HeapRef => return Err("call argument boxed".into()),
+                // A bare type parameter of a shared generic: the word boxed
+                // to its tag, as HIR emission's `BoxValue`.
+                (Val::V(v), false) if let Some(tag) = tag => {
+                    let boxed = self.at_expr(arg, |l| l.b.ins_alloc(MirAllocKind::Boxed { tag }, vec![v]).map_err(mir))?;
+                    words.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![boxed]).map_err(mir)?);
+                }
                 (Val::V(v), false) => words.push(v),
                 (Val::Pair(lo, tag), false) if boxed => {
                     let ty = self.expr_ty(arg).ok_or("call argument type")?.clone();
@@ -3507,10 +3510,14 @@ impl Lower<'_> {
         }
         let abi = DenseAbi {
             params: words.iter().map(|&v| self.b.value_ty(v)).collect(),
-            ret,
+            ret: if site.unbox.is_some() { MirTy::HeapRef } else { ret },
             ret_hi,
         };
         let (dest, dest_hi) = self.at_expr(id, |l| l.b.ins_call(site.target, words, &abi).map_err(mir))?;
+        // A bare type parameter result comes back boxed.
+        if let Some(tag) = site.unbox {
+            return Ok(Val::V(self.b.ins_unbox(dest, tag, ret).map_err(mir)?));
+        }
         if let Some(want) = niche {
             return self.unbox_niche(dest, want);
         }
@@ -4072,18 +4079,18 @@ impl Lower<'_> {
         Ok(Some(idx))
     }
 
-    /// HIR emission copies a fixed-size array local bound or assigned to
-    /// another (`vec_from_array`); that host call is not lowered here.
-    fn refuse_array_copy(&self, value: HirId) -> Result<(), Refusal> {
-        let HirKind::Local(src) = self.hir.expr(value).kind else {
-            return Ok(());
+    /// A heap local's new word from `value`: [`Self::boxed_word`], or a
+    /// fixed array read from another local copied (`vec_from_array`), as
+    /// HIR emission's `hir_value_copied`: the two never share elements.
+    fn boxed_word_copied(&mut self, value: HirId) -> Result<Option<ValueId>, Refusal> {
+        let Some(&native) = self.inp.array_copies.get(&value.0) else {
+            return self.boxed_word(value);
         };
-        let copied = !self.inp.stacks.contains_key(&src.0)
-            && matches!(self.expr_ty(value).map(strip_readonly), Some(Ty::Array { length, .. }) if *length != ArrayLength::Dynamic);
-        if copied {
-            return Err("fixed array copy".into());
-        }
-        Ok(())
+        let Some(v) = self.word(value)? else {
+            return Ok(None);
+        };
+        let layout = common::HOST_ENUM_LAYOUT_BOXED as u8;
+        Ok(Some(self.at_expr(value, |l| l.b.ins_host_invoke_as(native, vec![v], layout, Some(MirTy::HeapRef)).map_err(mir))?))
     }
 
     /// The word type of a static `id` names: as a local of its type. A

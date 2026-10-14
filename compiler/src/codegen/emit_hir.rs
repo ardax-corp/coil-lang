@@ -1011,17 +1011,15 @@ impl Compiler {
                 t => crate::typechecking::ty::vec_element_ty(t),
             });
             let elem = match element {
-                // A heap element's slot holds its boxed word; a fixed
-                // array's pointer-niche `Option` / `Result` element its
-                // niche word (`hir_stack_rep`).
+                // A heap element's slot holds its boxed word; a
+                // pointer-niche `Option` / `Result` element its niche word
+                // (`hir_stack_rep`).
                 Some(element) => crate::mir::scalar_mir_ty(element).or_else(|| {
                     use crate::typechecking::value_layout::{value_layout, word_kind};
-                    let fixed = ty.as_ref().is_some_and(|t| matches!(crate::typechecking::ty::strip_readonly(t), Ty::Array { .. }));
                     match value_layout(&self.checker, element) {
                         ValueLayout::Boxed => (word_kind(&self.checker, element) == common::WORD_POINTER).then_some(crate::mir::MirTy::HeapRef),
-                        ValueLayout::NicheOption | ValueLayout::NicheUnitResult if fixed => Some(crate::mir::MirTy::NicheOpt),
-                        ValueLayout::NicheResult if fixed => Some(crate::mir::MirTy::NicheRes),
-                        _ => None,
+                        ValueLayout::NicheOption | ValueLayout::NicheUnitResult => Some(crate::mir::MirTy::NicheOpt),
+                        ValueLayout::NicheResult => Some(crate::mir::MirTy::NicheRes),
                     }
                 }),
                 _ => None,
@@ -1452,6 +1450,7 @@ impl Compiler {
             records,
             matrix_wraps: &tables.matrix_wraps,
             linalgs: &tables.linalgs,
+            array_copies: &tables.array_copies,
             make_niches: &tables.make_niches,
             aggregates: emit
                 .plan
@@ -3454,6 +3453,17 @@ impl Compiler {
             .cloned()
             .ok_or("method-unknown")?;
         let layout = |id: HirId| Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |t| self.value_layout(t));
+        // An element argument (`push`'s value) is built at the receiver's
+        // element niche ([`Self::hir_niche_slot`]).
+        let elem = args.first().and_then(|&recv| self.hir_elem_layout(hir, recv));
+        let params: Vec<ValueLayout> = args
+            .iter()
+            .enumerate()
+            .map(|(i, &a)| match elem {
+                Some(slot) if i > 0 => Self::hir_niche_slot(layout(a), slot),
+                _ => layout(a),
+            })
+            .collect();
         // `pop` / `remove` returning a niche `Option` call the host natives
         // directly, as `compile_call_expr` does; a boxed `Option` is the
         // thunk's own result, and any other layout stays AST.
@@ -3468,7 +3478,7 @@ impl Compiler {
             return Ok(HirCall {
                 key,
                 pair: None,
-                params: args.iter().map(|&a| layout(a)).collect(),
+                params,
                 ret,
                 method: true,
                 mono: false,
@@ -3490,7 +3500,7 @@ impl Compiler {
         Ok(HirCall {
             key,
             pair: None,
-            params: args.iter().map(|&a| layout(a)).collect(),
+            params,
             ret: layout(call),
             method: true,
             mono: false,
@@ -4528,23 +4538,6 @@ impl Compiler {
         self.value_layout(ty) == ValueLayout::Boxed
     }
 
-    /// Whether a call to the shared body of a generic `generic` with no
-    /// dictionaries is a plain `CALL`: no argument boxed or adapted (a
-    /// lambda literal unboxes its own parameters), no result unboxed, and
-    /// each argument already in its parameter's layout. Direct MIR calls
-    /// the same entry then.
-    fn hir_generic_plain(&self, hir: &HirBody, emit: &HirEmit, generic: &HirGeneric, args: &[HirId], params: &[ValueLayout]) -> bool {
-        generic.forwarded.is_empty()
-            && generic.unbox.is_none()
-            && generic.boxed.iter().all(Option::is_none)
-            && args.len() == params.len()
-            && args.iter().zip(params).enumerate().all(|(i, (&arg, &param))| {
-                let lambda = matches!(hir.expr(arg).kind, HirKind::Lambda { .. });
-                (lambda || generic.adapt.get(i).is_none_or(Option::is_none))
-                    && self.hir_natural(hir, emit, arg) == Some(Rep::Word(param))
-            })
-    }
-
     /// Push `generic`'s dictionaries after the arguments; their count.
     fn hir_push_dicts(&mut self, generic: &HirGeneric) -> u32 {
         // The enclosing body's own first, then the call site's, as the AST.
@@ -4677,6 +4670,40 @@ impl Compiler {
         match call.ranges.get(i).cloned().flatten() {
             Some(kind) => Rep::Pair(kind),
             None => Rep::Word(call.params[i]),
+        }
+    }
+
+    /// The layout a value of layout `own` is stored at in a slot of
+    /// layout `slot`: the slot's when the two are the two niche results.
+    /// `Result::Ok(())` is typed `Result<(), E>` (a `NicheResult`, `Ok` the
+    /// `()` tuple) even where it lands in a `Result<unit, E>` slot (a
+    /// `NicheUnitResult`, `Ok` the zero word), and the reverse.
+    fn hir_niche_slot(own: ValueLayout, slot: ValueLayout) -> ValueLayout {
+        use ValueLayout as L;
+        match (own, slot) {
+            (L::NicheResult, L::NicheUnitResult) | (L::NicheUnitResult, L::NicheResult) => slot,
+            _ => own,
+        }
+    }
+
+    /// The layout of the elements of `base`, a `Vec` or array.
+    fn hir_elem_layout(&self, hir: &HirBody, base: HirId) -> Option<ValueLayout> {
+        let ty = Self::hir_ty(hir, base)?;
+        crate::typechecking::value_layout::vec_elem_ty(&self.checker, ty).map(|elem| self.value_layout(&elem))
+    }
+
+    /// The representation the value stored by `place = value` is built
+    /// at, for an index `place` of `base`: the place's, at the element
+    /// slot's niche ([`Self::hir_niche_slot`]). The place takes the
+    /// stored value's type, so an `Ok(())` place is a `Result<(), E>`
+    /// even in a `Vec<Result<unit, E>>`.
+    fn hir_index_store_rep(&self, hir: &HirBody, emit: &HirEmit, place: HirId, base: HirId) -> Option<Rep> {
+        match self.hir_natural(hir, emit, place)? {
+            Rep::Word(own) => Some(Rep::Word(match self.hir_elem_layout(hir, base) {
+                Some(slot) => Self::hir_niche_slot(own, slot),
+                None => own,
+            })),
+            pair => Some(pair),
         }
     }
 
@@ -5872,11 +5899,15 @@ impl Compiler {
         Some((Self::hir_slot(emit, local), n))
     }
 
-    /// The representation of a stack array's elements: one word each.
+    /// The representation of a stack array's elements: one word each, in
+    /// the element's layout, as an index read takes it and a heap array
+    /// holds it (a niche `Option` / `Result` element is its niche word,
+    /// for a fixed array and an array literal bound to a `Vec` local alike).
     fn hir_stack_rep(&self, hir: &HirBody, local: LocalId) -> Rep {
         let elem = hir.local(local).ty.as_ref().map(|ty| apply_ty_prune(self.checker.subst(), ty));
         Rep::Word(match elem.as_ref().map(crate::typechecking::ty::strip_readonly) {
             Some(Ty::Array { element, .. }) => self.value_layout(element),
+            Some(ty) if let Some(element) = crate::typechecking::ty::vec_element_ty(ty) => self.value_layout(element),
             _ => ValueLayout::Boxed,
         })
     }
@@ -6415,7 +6446,7 @@ impl Compiler {
                     self.hir_check_value(hir, emit, *base, &base_rep)
                 }
                 HirKind::Index { base, index, .. } => {
-                    let want = self.hir_natural(hir, emit, *place).ok_or("value-shape")?;
+                    let want = self.hir_index_store_rep(hir, emit, *place, *base).ok_or("value-shape")?;
                     self.hir_check_value(hir, emit, *value, &want)?;
                     if Self::hir_is_stack(hir, emit, *base) {
                         return self.hir_check_value(hir, emit, *index, &BOXED);
@@ -9344,7 +9375,7 @@ impl Compiler {
                 }
                 HirKind::Index { base, index, .. } if let Some(boxed) = Self::hir_stack_box(hir, emit, *base) => {
                     // As the AST's `emit_boxed_array_store`.
-                    let want = self.hir_natural(hir, emit, *place).expect("planned index place");
+                    let want = self.hir_index_store_rep(hir, emit, *place, *base).expect("planned index place");
                     self.hir_value(hir, emit, *value, &want, 0);
                     self.expr_depth = 0;
                     let val = self.alloc_temp_slot();
@@ -9358,7 +9389,7 @@ impl Compiler {
                 HirKind::Index { base, index, .. } if let Some((slot, n)) = Self::hir_stack_base(hir, emit, *base) => {
                     // As the AST: a literal in-range index stores the slot;
                     // any other stages value and index and selects the slot.
-                    let want = self.hir_natural(hir, emit, *place).expect("planned index place");
+                    let want = self.hir_index_store_rep(hir, emit, *place, *base).expect("planned index place");
                     if let HirKind::Lit(Lit::Int(i)) = hir.expr(*index).kind
                         && (0..n as i64).contains(&i)
                     {
@@ -9401,7 +9432,7 @@ impl Compiler {
                 HirKind::Index { base, index, .. } => {
                     // As the AST: the value's temp first, then base, index
                     // (staged unless a bare local or literal), value.
-                    let want = self.hir_natural(hir, emit, *place).expect("planned index place");
+                    let want = self.hir_index_store_rep(hir, emit, *place, *base).expect("planned index place");
                     self.expr_depth = 0;
                     let tmp_val = self.alloc_temp_slot();
                     self.hir_value(hir, emit, *value, &want, 0);
@@ -9628,15 +9659,7 @@ impl Compiler {
     /// copied (`vec_from_array`), as assigning one stack array local to
     /// another copies its slots: the two never share elements.
     fn hir_value_copied(&mut self, hir: &HirBody, emit: &mut HirEmit, value: HirId, want: &Rep) {
-        let copied = match hir.expr(value).kind {
-            HirKind::Local(src) => {
-                !emit.plan.stacks.contains_key(&src.0)
-                    && Self::hir_ty(hir, value).is_some_and(|t| lower::is_fixed_array(&self.checker, t))
-            }
-            _ => false,
-        };
-        let native = copied.then(|| self.native_id("vec_from_array")).flatten();
-        let Some(native) = native else {
+        let Some(native) = self.hir_array_copy(hir, emit, value) else {
             self.hir_value(hir, emit, value, want, 0);
             return;
         };
@@ -9644,6 +9667,20 @@ impl Compiler {
             .push(Byte::new(Instruction::CONST).with_value_u32(native as u32));
         self.hir_value(hir, emit, value, want, 1);
         self.bytecode.push_host_invoke(1);
+    }
+
+    /// The `vec_from_array` native when value `value`, bound or assigned to
+    /// a local, is a fixed array read from another (heap) local, which
+    /// [`Self::hir_value_copied`] copies.
+    fn hir_array_copy(&self, hir: &HirBody, emit: &HirEmit, value: HirId) -> Option<usize> {
+        let copied = match hir.expr(value).kind {
+            HirKind::Local(src) => {
+                !emit.plan.stacks.contains_key(&src.0)
+                    && Self::hir_ty(hir, value).is_some_and(|t| lower::is_fixed_array(&self.checker, t))
+            }
+            _ => false,
+        };
+        copied.then(|| self.native_id("vec_from_array")).flatten()
     }
 
     /// `block_on(h)` at depth zero, as the AST's `emit_block_on`.
