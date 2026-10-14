@@ -1557,6 +1557,9 @@ impl Compiler {
                         // A `bool` payload beside an `i64` one rides as the
                         // same 0/1 word.
                         Some(MirTy::Bool | MirTy::I64) if matches!(w, MirTy::Bool | MirTy::I64) => Some(MirTy::I64),
+                        // So does an `f64` one, as its bits (`Ok(float)`
+                        // beside `Err(int)`).
+                        Some(MirTy::Bool | MirTy::I64 | MirTy::F64) if matches!(w, MirTy::Bool | MirTy::I64 | MirTy::F64) => Some(MirTy::I64),
                         Some(_) => return None,
                     };
                 }

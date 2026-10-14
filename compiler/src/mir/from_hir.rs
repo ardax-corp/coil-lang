@@ -5146,6 +5146,8 @@ impl Lower<'_> {
             (from, to) if from == to => v,
             // A `bool` payload read from an `i64` pair word.
             (MirTy::I64, MirTy::Bool) => self.fit(v, ty)?,
+            // So is an `f64` one (beside an `int` payload), as its bits.
+            (MirTy::I64, MirTy::F64) => self.fit(v, ty)?,
             _ => return Err("binding type".into()),
         };
         if self.inp.slots.get(local.0 as usize).copied().flatten().is_none() {
@@ -5183,7 +5185,7 @@ impl Lower<'_> {
                     // A two-word payload rides boxed.
                     [arg] => match self.word_or_boxed(*arg)? {
                         Some(v) if self.b.value_ty(v) == lo_ty => v,
-                        Some(v) if lo_ty == MirTy::I64 && (self.b.value_ty(v).is_heap_word() || self.b.value_ty(v) == MirTy::Bool) => {
+                        Some(v) if lo_ty == MirTy::I64 && (self.b.value_ty(v).is_heap_word() || matches!(self.b.value_ty(v), MirTy::Bool | MirTy::F64)) => {
                             self.fit(v, lo_ty)?
                         }
                         Some(_) => return Err("variant payload type".into()),
