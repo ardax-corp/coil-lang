@@ -6043,10 +6043,9 @@ impl Compiler {
         let mut a = self.do_compile(args);
         self.bytecode.append(&mut a);
         self.emit_sidecar_array_pins(args);
-        let mut unboxed = false;
         for (slot, ty) in argument_unbox_tys.iter().enumerate() {
             if let Some(tag) = ty.as_ref().and_then(Self::ty_to_value_tag) {
-                unboxed = true;
+                self.hir_entry_unbox.push((slot as u32, tag as u32));
                 self.bytecode.push_load(slot as u32);
                 self.bytecode.push_unbox_value(tag as u32);
                 self.bytecode.push_store_pop(slot as u32);
@@ -6056,9 +6055,9 @@ impl Compiler {
             self.context.variables.intern(format!("__dict{}", dict_idx));
         }
         let entry_sp = self.context.variables.len() as u32;
-        // Direct MIR reads its parameters raw: an argument the prologue
-        // unboxes keeps the stack path.
-        self.hir_entry_sp = (!unboxed).then_some(entry_sp);
+        // Direct MIR unboxes the arguments the prologue unboxes
+        // (`hir_entry_unbox`).
+        self.hir_entry_sp = Some(entry_sp);
         // Bounded generic instance method: `__dict0` is the instance's own
         // dictionary, whose tail holds the context dictionaries.
         if let Some((base, n)) = self.pending_instance_ctx.take()
@@ -6066,6 +6065,7 @@ impl Compiler {
         {
             for i in 0..n {
                 let slot = self.context.variables.intern(format!("__dict{}", i + 1)) as u32;
+                self.hir_entry_ctx.push((slot, own, (base + i) as u32));
                 self.bytecode.push_load(own);
                 self.bytecode.push_const((base + i) as i32);
                 self.bytecode.push_index();

@@ -376,6 +376,13 @@ pub struct HirMirInput<'a> {
     /// Trait methods and operators on a bound type parameter, called
     /// through the body's own dictionary, by call or operator.
     pub bound_calls: &'a HashMap<u32, HirBoundCall>,
+    /// A bounded generic instance method's context dictionaries, as its
+    /// prologue loads them: each one's frame slot, then the slot of the
+    /// dictionary parameter it is read from and its index there.
+    pub ctx_dicts: &'a [(u32, u32, u32)],
+    /// Arguments the prologue unboxes in place (an instance method's
+    /// boxed arguments): each one's slot and `UnboxValue` tag.
+    pub param_unboxes: &'a [(u32, u32)],
     /// Calls and dictionary operators typed a bare type parameter in a
     /// shared generic body: HIR emission unboxes their result
     /// (`UNBOX_ANY_TAG`), which may come back boxed.
@@ -864,6 +871,23 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         for slot in next..entry {
             dict_params.insert(slot, b.add_param(MirTy::HeapRef).map_err(mir)?);
         }
+    }
+    // Arguments the caller passed boxed: unboxed in place, as the
+    // prologue unboxes them.
+    for &(slot, tag) in inp.param_unboxes {
+        let &v = b.func().params.get(slot as usize).ok_or("unboxed param slot")?;
+        let ty = b.value_ty(v);
+        let boxed = b.use_local(LocalId(slot), ty).map_err(mir)?;
+        let raw = b.ins_unbox(boxed, tag, ty).map_err(mir)?;
+        b.def_local(LocalId(slot), raw).map_err(mir)?;
+    }
+    // An instance method's context dictionaries: each read out of its own
+    // dictionary at entry, as the prologue loads them into their slots.
+    for &(slot, own, index) in inp.ctx_dicts {
+        let own = *dict_params.get(&own).ok_or("context dictionary")?;
+        let at = b.ins_const(MirConst::I64(i64::from(index))).map_err(mir)?;
+        let dict = b.ins_index(own, at, MirTy::HeapRef, false).map_err(mir)?;
+        dict_params.insert(slot, dict);
     }
     // A shared generic body's open parameters come boxed: the prologue
     // unboxes each in place, as HIR emission's.
