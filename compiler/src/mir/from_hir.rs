@@ -108,6 +108,9 @@ pub enum HirDictOp {
     Tuple(u32),
     /// `BoxValue` (`tag`) of the top word: an existential pack's value.
     Box(u32),
+    /// `Load` of frame slot `n`, one of the body's own dictionary
+    /// parameters: a dictionary it forwards.
+    Load(u32),
 }
 
 /// How a user iterator's `next` returns `Option<Item>`, as HIR emission
@@ -530,6 +533,8 @@ struct Lower<'a> {
     pad: Option<PadHomes>,
     /// Existential packs built so far, by expression.
     packed: HashSet<u32>,
+    /// The body's dictionary parameters, by frame slot.
+    dict_params: HashMap<u32, ValueId>,
 }
 
 /// Where a body's `defer` state sits for its unwind cleanup pad: each
@@ -807,13 +812,14 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
             next += 1;
         }
     }
+    let mut dict_params = HashMap::new();
     if let Some(entry) = inp.entry_words {
         if entry < next {
             return Err("param slot".into());
         }
-        // Dictionaries: never read by a body this lowering takes.
-        for _ in next..entry {
-            b.add_param(MirTy::HeapRef).map_err(mir)?;
+        // Dictionaries: read only where a dictionary program loads one.
+        for slot in next..entry {
+            dict_params.insert(slot, b.add_param(MirTy::HeapRef).map_err(mir)?);
         }
     }
     let cur = b.entry();
@@ -842,6 +848,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         pins: HashMap::new(),
         pad: None,
         packed: HashSet::new(),
+        dict_params,
     };
     lower.pin_locals()?;
     for (i, e) in hir.exprs.iter().enumerate() {
@@ -976,6 +983,7 @@ fn lower_pad(hir: &HirBody, inp: &HirMirInput, parts: PadParts<'_>) -> Result<Mi
         pins: HashMap::new(),
         pad: None,
         packed: HashSet::new(),
+        dict_params: HashMap::new(),
     };
     let captures_of = |body: HirId| {
         hir.exprs.iter().find_map(|e| match &e.kind {
@@ -3540,6 +3548,7 @@ impl Lower<'_> {
                     let dict = self.b.ins_alloc(MirAllocKind::Tuple, elems).map_err(mir)?;
                     stack.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![dict]).map_err(mir)?);
                 }
+                HirDictOp::Load(slot) => stack.push(*self.dict_params.get(&slot).ok_or("dictionary parameter")?),
                 HirDictOp::Box(tag) => {
                     let v = stack.pop().ok_or("dictionary box")?;
                     let boxed = self.b.ins_alloc(MirAllocKind::Boxed { tag }, vec![v]).map_err(mir)?;
