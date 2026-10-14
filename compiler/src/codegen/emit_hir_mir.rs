@@ -48,6 +48,9 @@ pub(super) struct HirMirTables {
     /// of the body's dictionary parameters (`HirBuiltin::Bound`,
     /// `HirOp::Bound`), by call or operator.
     pub(super) bound_calls: HashMap<u32, crate::mir::HirBoundCall>,
+    /// Trait methods on a bare-class existential pack
+    /// (`HirBuiltin::Existential`): the method's dictionary slot, by call.
+    pub(super) existential_calls: HashMap<u32, u32>,
     /// Calls and dictionary operators typed a bare type parameter in a
     /// shared generic body, whose result `hir_value` unboxes
     /// (`UNBOX_ANY_TAG`).
@@ -549,6 +552,12 @@ impl Compiler {
             && self.hir_mir_dict_param(dict)
         {
             t.bound_calls.insert(id.0, crate::mir::HirBoundCall { dict, method });
+        }
+        if let HirKind::Call { .. } = e.kind
+            && !emit.plan.lens.contains_key(&id.0)
+            && let Some(HirBuiltin::Existential { slot }) = emit.plan.calls.get(&id.0).and_then(|c| c.builtin)
+        {
+            t.existential_calls.insert(id.0, slot);
         }
         match &e.kind {
             HirKind::Lit(Lit::Str(raw))
