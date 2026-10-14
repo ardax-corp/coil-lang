@@ -25,6 +25,12 @@ impl Client {
 
     /// Spawn with command-line flags (`--root`, host grants).
     fn spawn_with(root: &Path, args: &[&str]) -> Self {
+        let root_uri = format!("file://{}", root.display());
+        Self::spawn_init(args, json!({ "rootUri": root_uri, "capabilities": {} }))
+    }
+
+    /// Spawn with `args` and send `initialize` with `params`.
+    fn spawn_init(args: &[&str], params: Value) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_coil-lsp"))
             .args(args)
             .stdin(Stdio::piped())
@@ -41,8 +47,7 @@ impl Client {
             next_id: 0,
             notifications: Vec::new(),
         };
-        let root_uri = format!("file://{}", root.display());
-        client.request("initialize", json!({ "rootUri": root_uri, "capabilities": {} }));
+        client.request("initialize", params);
         client.notify("initialized", json!({}));
         client
     }
@@ -250,6 +255,29 @@ fn command_line_roots_and_grants_reach_diagnostics() {
     let vendor = dir.join("vendor");
     let with = last(&["--root", vendor.to_str().unwrap(), "--allow-ffi-exec"]);
     assert!(with.is_empty(), "false diagnostics with flags: {with:?}");
+}
+
+/// `--workspace` names the project directory, so module roots resolve
+/// against it whatever root the client sends (none, or a parent folder).
+#[test]
+fn workspace_flag_sets_the_project_directory() {
+    let main = "use util::{helper};\n\nfn main() {\n    let _ = helper(1);\n}\n";
+    let dir = project(
+        "workspace-flag",
+        &[("src/main.hy", main), ("src/util.hy", "fn helper(int a) -> int {\n    return a;\n}\n")],
+    );
+    let main_uri = uri(&dir.join("src/main.hy"));
+    let parent_uri = uri(dir.parent().unwrap());
+    for params in [
+        json!({ "rootUri": null, "capabilities": {} }),
+        json!({ "rootUri": parent_uri, "capabilities": {} }),
+    ] {
+        let mut client = Client::spawn_init(&["--workspace", dir.to_str().unwrap()], params.clone());
+        open(&mut client, &main_uri, main);
+        client.request("shutdown", Value::Null);
+        let last = client.diagnostics_for(&main_uri).pop().expect("diagnostics published");
+        assert!(last.is_empty(), "false diagnostics with {params}: {last:?}");
+    }
 }
 
 /// #583: a reply already queued when stdin closes is still written, and
