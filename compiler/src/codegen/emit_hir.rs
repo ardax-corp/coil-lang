@@ -1019,7 +1019,10 @@ impl Compiler {
                 Some(element) => crate::mir::scalar_mir_ty(element).or_else(|| {
                     use crate::typechecking::value_layout::{value_layout, word_kind};
                     match value_layout(&self.checker, element) {
-                        ValueLayout::Boxed => (word_kind(&self.checker, element) == common::WORD_POINTER).then_some(crate::mir::MirTy::HeapRef),
+                        // So does a two-word enum's: its boxed object.
+                        ValueLayout::Boxed => (word_kind(&self.checker, element) == common::WORD_POINTER
+                            || Self::boxed_payloads(&self.checker, element, None).is_some())
+                        .then_some(crate::mir::MirTy::HeapRef),
                         ValueLayout::NicheOption | ValueLayout::NicheUnitResult => Some(crate::mir::MirTy::NicheOpt),
                         ValueLayout::NicheResult => Some(crate::mir::MirTy::NicheRes),
                     }
