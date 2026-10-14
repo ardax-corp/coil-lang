@@ -325,6 +325,7 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
         }
         MirInst::Deopt { dest, kind, .. } => write!(f, "{dest} = deopt.{}", kind.as_str()),
         MirInst::String { dest, idx } => write!(f, "{dest} = string {idx}"),
+        MirInst::CodePtr { dest, target } => write!(f, "{dest} = codeptr {}", target.0),
         MirInst::Print { dest, src } => write!(f, "{dest} = print {src}"),
         MirInst::Panic { dest, msg } => write!(f, "{dest} = panic {msg}"),
         MirInst::Format { dest, fmt, args } => {
@@ -963,6 +964,11 @@ impl<'a> Parser<'a> {
                 loc: common::DebugLoc::unknown(),
             });
         }
+        if op == "codeptr" {
+            let target = crate::il::Label(self.uint()? as u32);
+            ensure_ty(types, dest, MirTy::I64);
+            return Ok(MirInst::CodePtr { dest, target });
+        }
         if op == "string" {
             let idx = self.uint()? as u32;
             ensure_ty(types, dest, MirTy::HeapRef);
@@ -1403,6 +1409,10 @@ bb3:
         };
         let p = b.ins_alloc(partial, vec![x]).unwrap();
         let _ = b.ins_gc_barrier(MirGcKind::Safepoint, vec![p]).unwrap();
+        // An instance dictionary: a method's code pointer in a tuple.
+        let code = b.ins_code_ptr(crate::il::Label(11)).unwrap();
+        let dict = b.ins_alloc(MirAllocKind::Tuple, vec![code]).unwrap();
+        let _ = b.ins_gc_barrier(MirGcKind::Safepoint, vec![dict]).unwrap();
         let y = b.ins_call_indirect(f, vec![x], MirTy::I64).unwrap();
         assert!(b.ins_call_indirect(x, vec![k], MirTy::I64).is_err(), "callee must be a heap word");
         b.ret(Some(y)).unwrap();
@@ -1412,6 +1422,7 @@ bb3:
         assert!(text.contains("alloc.fn 7, 3, v0"), "{text}");
         assert!(text.contains("alloc.fn 8, 131328, mask 1, v1"), "{text}");
         assert!(text.contains("alloc.polyfn 9"), "{text}");
+        assert!(text.contains("= codeptr 11"), "{text}");
         assert!(text.contains("callind.i64 v"), "{text}");
         let again = parse_func(&text).expect(&text);
         again.verify().unwrap();

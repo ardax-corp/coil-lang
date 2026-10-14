@@ -498,6 +498,13 @@ pub enum MirInst {
         dest: ValueId,
         idx: u32,
     },
+    /// `CodePtr` of the function at `target`: its entry as an `int` word,
+    /// as an instance dictionary holds its methods. Dest is
+    /// [`MirTy::I64`].
+    CodePtr {
+        dest: ValueId,
+        target: crate::il::Label,
+    },
     /// `PRINT` (I4 / Q9 R1). Dest is a `bool` unit token. IO barrier.
     Print {
         dest: ValueId,
@@ -705,6 +712,7 @@ impl MirInst {
             | Self::GcBarrier { dest, .. }
             | Self::Deopt { dest, .. }
             | Self::String { dest, .. }
+            | Self::CodePtr { dest, .. }
             | Self::Print { dest, .. }
             | Self::Panic { dest, .. }
             | Self::Format { dest, .. }
@@ -801,7 +809,7 @@ impl MirInst {
             Self::ArrayPush { array, value, .. } => vec![*array, *value],
             Self::Alloc { elems, .. } => elems.clone(),
             Self::GcBarrier { roots, .. } => roots.clone(),
-            Self::Deopt { .. } | Self::String { .. } => Vec::new(),
+            Self::Deopt { .. } | Self::String { .. } | Self::CodePtr { .. } => Vec::new(),
             Self::Print { src, .. } | Self::Stringify { src, .. } | Self::Unbox { src, .. } | Self::TagArrayKind { src, .. } | Self::Panic { msg: src, .. } => vec![*src],
             Self::Format { fmt, args, .. } => {
                 let mut v = vec![*fmt];
@@ -897,7 +905,7 @@ impl MirInst {
                     *v = map(*v);
                 }
             }
-            Self::Deopt { .. } | Self::String { .. } => {}
+            Self::Deopt { .. } | Self::String { .. } | Self::CodePtr { .. } => {}
             Self::Print { src, .. } | Self::Stringify { src, .. } | Self::Unbox { src, .. } | Self::TagArrayKind { src, .. } | Self::Panic { msg: src, .. } => *src = map(*src),
             Self::Format { fmt, args, .. } => {
                 *fmt = map(*fmt);

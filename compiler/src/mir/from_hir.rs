@@ -85,6 +85,21 @@ pub struct HirCallSite {
     pub coro: bool,
     /// The result is a niche `Option` / `Result` the callee returns boxed.
     pub boxed_ret: bool,
+    /// The call site's instance dictionaries, passed after the arguments.
+    pub dicts: Vec<HirDictOp>,
+}
+
+/// One step of building instance dictionaries, as HIR emission pushes
+/// them (`emit_instance_dict`): a stack program whose words left are the
+/// dictionaries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HirDictOp {
+    /// `CodePtr` of a method's entry.
+    Code(Label),
+    /// `Const 0`: evidence a `PolyFn` value's call fills in.
+    Null,
+    /// `MakeTuple` of the top `n` words: a dictionary.
+    Tuple(u32),
 }
 
 /// How a user iterator's `next` returns `Option<Item>`, as HIR emission
@@ -2378,8 +2393,15 @@ impl Lower<'_> {
                 self.stack_store(*place, base, index, *value)
             }
             HirKind::Assign { place, value } if let Some(&slot) = self.inp.fields.get(&place.0) => {
-                let ty = self.expr_ty(*place).and_then(|t| self.inp.word(t)).ok_or("field type")?;
-                let Some(v) = self.word(*value)? else {
+                let boxed = self.boxed_slot_field(*place);
+                let ty = self
+                    .expr_ty(*place)
+                    .and_then(|t| self.inp.word(t))
+                    .or_else(|| boxed.then_some(MirTy::HeapRef))
+                    .ok_or("field type")?;
+                // A two-word value is stored boxed, as the slot's `new` did.
+                let v = if boxed { self.boxed_word(*value)? } else { self.word(*value)? };
+                let Some(v) = v else {
                     return Ok(Val::Never);
                 };
                 if self.b.value_ty(v) != ty {
@@ -2472,7 +2494,11 @@ impl Lower<'_> {
                 Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?))
             }
             HirKind::Field { .. } if let Some(&slot) = self.inp.fields.get(&id.0) => {
-                let ty = self.expr_ty(id).and_then(|t| self.inp.word(t)).ok_or("field type")?;
+                let ty = self
+                    .expr_ty(id)
+                    .and_then(|t| self.inp.word(t))
+                    .or_else(|| self.boxed_slot_field(id).then_some(MirTy::HeapRef))
+                    .ok_or("field type")?;
                 if let Some((obj, index)) = self.boxed_field(id, slot)? {
                     return Ok(Val::V(self.b.ins_heap_field_load(obj, None, index, ty).map_err(mir)?));
                 }
@@ -3289,6 +3315,22 @@ impl Lower<'_> {
         Ok(Some((self.b.use_local(boxed, MirTy::HeapRef).map_err(mir)?, index)))
     }
 
+    /// Whether field `id` of a frame-slot class local is a two-word enum
+    /// its slot holds boxed (as HIR emission's `new` stored it).
+    fn boxed_slot_field(&self, id: HirId) -> bool {
+        let (Some(&slot), HirKind::Field { base, .. }) = (self.inp.fields.get(&id.0), &self.hir.expr(id).kind) else {
+            return false;
+        };
+        let HirKind::Local(local) = self.hir.expr(*base).kind else {
+            return false;
+        };
+        let (Some(tys), Ok(at)) = (self.inp.sroa.get(&local.0), self.slot(local)) else {
+            return false;
+        };
+        slot.checked_sub(at.0).and_then(|i| tys.get(i as usize)) == Some(&MirTy::HeapRef)
+            && self.expr_ty(id).is_some_and(|t| self.inp.word(t).is_none() && (self.inp.boxed_view)(t, None).is_some())
+    }
+
     /// The heap array a boxed stack array local `id` names.
     fn boxed(&self, id: HirId) -> Option<LocalId> {
         match self.hir.expr(id).kind {
@@ -3384,6 +3426,11 @@ impl Lower<'_> {
                 _ => return Err("call argument".into()),
             }
         }
+        // The instance dictionaries, after the arguments.
+        if !site.dicts.is_empty() {
+            let dicts = site.dicts.clone();
+            words.extend(self.dict_values(&dicts)?);
+        }
         // `MakeCoro`: the arguments move into a new coroutine's frame.
         if site.coro {
             if ret != MirTy::HeapRef || ret_hi.is_some() {
@@ -3406,6 +3453,25 @@ impl Lower<'_> {
             None if unit => Val::Unit,
             None => Val::V(dest),
         })
+    }
+
+    /// The words of instance dictionary program `ops`: each method's
+    /// `CodePtr`, each dictionary a tuple of the words below it.
+    fn dict_values(&mut self, ops: &[HirDictOp]) -> Result<Vec<ValueId>, Refusal> {
+        let mut stack = Vec::new();
+        for op in ops {
+            match *op {
+                HirDictOp::Code(target) => stack.push(self.b.ins_code_ptr(target).map_err(mir)?),
+                HirDictOp::Null => stack.push(self.b.ins_const(MirConst::I64(0)).map_err(mir)?),
+                HirDictOp::Tuple(n) => {
+                    let at = stack.len().checked_sub(n as usize).ok_or("dictionary arity")?;
+                    let elems = stack.split_off(at);
+                    let dict = self.b.ins_alloc(MirAllocKind::Tuple, elems).map_err(mir)?;
+                    stack.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![dict]).map_err(mir)?);
+                }
+            }
+        }
+        Ok(stack)
     }
 
     /// An auto-par call as HIR emission left it: the fork-join worker on
@@ -4860,8 +4926,9 @@ impl Lower<'_> {
             HirKind::Local(l) => self.boxed_local(l),
             // A class field holds a two-word enum boxed.
             HirKind::Field { .. } => {
-                self.inp.heap_fields.get(&scrutinee.0).is_some_and(|&(_, w)| w == MirTy::HeapRef)
-                    && !self.inp.boxed_niches.contains_key(&scrutinee.0)
+                (self.inp.heap_fields.get(&scrutinee.0).is_some_and(|&(_, w)| w == MirTy::HeapRef)
+                    && !self.inp.boxed_niches.contains_key(&scrutinee.0))
+                    || self.boxed_slot_field(scrutinee)
             }
             // So does an array element.
             HirKind::Index { base, kind: IndexKind::Array, .. } => {

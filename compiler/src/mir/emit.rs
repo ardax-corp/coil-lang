@@ -291,6 +291,7 @@ pub(super) fn foreign_targets(func: &MirFunc, entry_label: Option<Label>) -> Has
         .flat_map(|b| b.insts.iter())
         .filter_map(|inst| match inst {
             MirInst::Call { target, .. }
+            | MirInst::CodePtr { target, .. }
             | MirInst::Alloc {
                 kind: MirAllocKind::Coro { target } | MirAllocKind::Fn { target, .. } | MirAllocKind::PolyFn { target },
                 ..
@@ -1352,6 +1353,13 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
         MirInst::String { dest, idx } => {
             // Field-name keys (GetField/SetField). Not FORMAT/PRINT (Q9 R1).
             out.push(IlOp::String { idx: *idx, loc });
+            out.push(IlOp::StorePop {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
+        }
+        MirInst::CodePtr { dest, target } => {
+            out.push(code_ptr_op(*target, loc));
             out.push(IlOp::StorePop {
                 slot: u32::from(regs[dest.index()]),
                 loc,
@@ -2932,6 +2940,17 @@ pub(super) fn il_for_alloc(
             ret_words: 1,
         }]),
         _ => il_for_alloc_op(kind, arity, kinds, loc).map(|op| vec![op]),
+    }
+}
+
+/// `CodePtr` of the function at `target`.
+pub(super) fn code_ptr_op(target: Label, loc: DebugLoc) -> IlOp {
+    IlOp::Entry {
+        kind: crate::il::EntryKind::CodePtr,
+        arity: 0,
+        target,
+        loc,
+        ret_words: 1,
     }
 }
 
