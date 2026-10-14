@@ -10,7 +10,7 @@ use common::{Byte, FrameStackMap, Instruction, SlotMap};
 
 use super::func::MirFunc;
 use super::gc::fill_live_roots;
-use super::inst::MirInst;
+use super::inst::{MirAllocKind, MirInst};
 
 /// Draft map keyed by function name until finalize assigns PCs.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,12 +45,17 @@ pub fn encode_draft_regs(func: &MirFunc, regs: &[u8], need_slot: &[bool]) -> Opt
             }
         }
     }
-    // One site per allocating instruction: each emits one alloc opcode.
+    // One site per allocating instruction: each emits one alloc opcode
+    // ([`is_alloc_opcode`]), except a box (`BoxValue` binds no site).
     let n = func
         .blocks
         .iter()
         .flat_map(|b| &b.insts)
-        .filter(|i| matches!(i, MirInst::Alloc { .. } | MirInst::ArrayPush { .. } | MirInst::Format { .. } | MirInst::Stringify { .. }))
+        .filter(|i| match i {
+            MirInst::Alloc { kind, .. } => !matches!(kind, MirAllocKind::Boxed { .. }),
+            MirInst::ArrayPush { .. } | MirInst::Format { .. } | MirInst::Stringify { .. } => true,
+            _ => false,
+        })
         .count();
     if n == 0 {
         return None;

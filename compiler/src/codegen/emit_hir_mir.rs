@@ -45,6 +45,22 @@ pub(super) struct HirMirTables {
     /// The `into_iter` and `next` entries a `for` loop over a user
     /// iterator calls, by loop.
     pub(super) iter_loops: HashMap<u32, crate::mir::HirIterLoop>,
+    /// Direct MIR's frame: the local id of each local's first word.
+    pub(super) frame: HirMirFrame,
+}
+
+/// The frame direct MIR keeps a body's locals in, planned over the HIR:
+/// each parameter where the entry put it, then each local the body binds,
+/// in local order, one id per word (a stack array's elements, a frame-slot
+/// class local's fields, a pair local's two words).
+#[derive(Default)]
+pub(super) struct HirMirFrame {
+    /// First id of each local that has words (`None`: never bound here).
+    pub(super) slots: Vec<Option<u32>>,
+    /// Second id of each two-word (pair) local.
+    pub(super) tags: HashMap<u32, u32>,
+    /// Words of each bound local.
+    pub(super) widths: HashMap<u32, u32>,
 }
 
 /// Which children of an expression emission evaluates.
@@ -62,7 +78,264 @@ impl Compiler {
         if let Some(root) = hir.root {
             self.hir_mir_walk(hir, emit, root, &mut tables);
         }
+        tables.frame = self.hir_mir_frame(hir, emit);
         tables
+    }
+
+    /// The frame of `hir` ([`HirMirFrame`]): the locals emission binds in
+    /// this body's frame, from the HIR and the plan alone.
+    fn hir_mir_frame(&self, hir: &HirBody, emit: &HirEmit) -> HirMirFrame {
+        let mut bound = HashSet::new();
+        if let Some(root) = hir.root {
+            self.hir_mir_bound(hir, emit, root, false, false, &mut bound);
+        }
+        let mut frame = HirMirFrame {
+            slots: vec![None; hir.locals.len()],
+            ..HirMirFrame::default()
+        };
+        for (&local, &(slot, tag)) in &emit.plan.params {
+            frame.slots[local as usize] = Some(slot);
+            frame.widths.insert(local, 1);
+            if let Some(tag) = tag {
+                frame.tags.insert(local, tag);
+            }
+        }
+        let inits: HashMap<u32, HirId> = hir
+            .exprs
+            .iter()
+            .filter_map(|e| match e.kind {
+                HirKind::Let { local, init: Some(init) } => Some((local.0, init)),
+                _ => None,
+            })
+            .collect();
+        let mut next = emit.plan.frame_base;
+        for local in 0..hir.locals.len() as u32 {
+            if emit.plan.params.contains_key(&local) || !bound.contains(&local) {
+                continue;
+            }
+            let width = if let Some(&n) = emit.plan.stacks.get(&local) {
+                n as u32
+            } else if emit.plan.sroa.contains_key(&local) {
+                inits
+                    .get(&local)
+                    .and_then(|&init| self.hir_new_layout(hir, init))
+                    .map_or(1, |(_, tys)| tys.len() as u32)
+            } else if emit.plan.pair_locals.contains_key(&local) {
+                frame.tags.insert(local, next + 1);
+                2
+            } else {
+                1
+            };
+            frame.slots[local as usize] = Some(next);
+            frame.widths.insert(local, width);
+            next += width;
+        }
+        frame
+    }
+
+    /// Collect the locals `id` binds in this body's frame, as emission
+    /// binds them: not a `defer` body's (its thunk's frame), an outlined
+    /// parallel loop's (its worker's), a `()` `let`'s, code emission drops,
+    /// or a `match` arm's that emission reads off the operand stack.
+    /// `value`: whether emission wants `id`'s value (`hir_value`), not
+    /// only its effect.
+    fn hir_mir_bound(&self, hir: &HirBody, emit: &HirEmit, id: HirId, value: bool, defer: bool, bound: &mut HashSet<u32>) {
+        if emit.par_calls.contains_key(&id.0) {
+            return;
+        }
+        let walk = |k: HirId, value: bool, defer: bool, bound: &mut HashSet<u32>| self.hir_mir_bound(hir, emit, k, value, defer, bound);
+        match &hir.expr(id).kind {
+            HirKind::Let { local, init } => {
+                if !defer && init.is_some() && !lower::is_unit_local(hir, &self.checker, *local) {
+                    bound.insert(local.0);
+                }
+            }
+            HirKind::LetPat { pat, .. } if !defer => {
+                Self::hir_pat_locals(pat, &mut |l| {
+                    bound.insert(l.0);
+                });
+            }
+            HirKind::Match { scrutinee, arms } => {
+                let reach = arms
+                    .iter()
+                    .position(|a| matches!(a.pat, HirPat::Wild | HirPat::Bind(_)))
+                    .map_or(arms.len(), |i| i + 1);
+                let arms = &arms[..reach];
+                if !defer {
+                    for local in self.hir_mir_arm_binds(hir, emit, *scrutinee, arms, value) {
+                        bound.insert(local.0);
+                    }
+                }
+                walk(*scrutinee, true, defer, bound);
+                for arm in arms {
+                    walk(arm.body, value, defer, bound);
+                }
+                return;
+            }
+            HirKind::Block { stmts, tail } => {
+                for &s in stmts {
+                    walk(s, false, defer, bound);
+                }
+                if let Some(tail) = tail {
+                    walk(*tail, value, defer, bound);
+                }
+                return;
+            }
+            HirKind::If { cond, then, els } => {
+                walk(*cond, true, defer, bound);
+                walk(*then, value, defer, bound);
+                if let Some(els) = els {
+                    walk(*els, value, defer, bound);
+                }
+                return;
+            }
+            // `while false { .. }` is dropped.
+            HirKind::Loop { body }
+                if lower::while_shape(hir, *body).is_some_and(|(cond, _)| matches!(hir.expr(cond).kind, HirKind::Lit(Lit::Bool(false)))) =>
+            {
+                return;
+            }
+            HirKind::Loop { body } => {
+                walk(*body, false, defer, bound);
+                return;
+            }
+            HirKind::ForIn { pat, iterable, body, .. } => {
+                if !defer {
+                    Self::hir_pat_locals(pat, &mut |l| {
+                        bound.insert(l.0);
+                    });
+                }
+                walk(*iterable, true, defer, bound);
+                walk(*body, false, defer, bound);
+                return;
+            }
+            HirKind::Defer { body, .. } => {
+                walk(*body, false, true, bound);
+                return;
+            }
+            // The operand's type name; the operand is not evaluated.
+            HirKind::Builtin { op: Builtin::TypeOf, .. } => return,
+            _ => {}
+        }
+        for k in lower::children(hir, id) {
+            walk(k, true, defer, bound);
+        }
+    }
+
+    /// The locals the reached `arms` of a `match` on `scrutinee` bind in
+    /// frame slots, as [`Self::hir_match`] and its dispatches bind them. An
+    /// arm emission skips (a niche match's third arm, a rewrapping
+    /// `Err(e) => return Err(e)`), or whose payload word stays the value
+    /// (an identity arm, outside in-place payload slots), binds none.
+    fn hir_mir_arm_binds(&self, hir: &HirBody, emit: &HirEmit, scrutinee: HirId, arms: &[HirArm], value: bool) -> Vec<LocalId> {
+        let mut out = Vec::new();
+        // The arm's binding, or its first `n` payload fields'.
+        let fields = |arm: &HirArm, n: usize, out: &mut Vec<LocalId>| match &arm.pat {
+            HirPat::Bind(l) => out.push(*l),
+            pat => out.extend(lower::arm_fields(hir, pat).unwrap_or_default().into_iter().take(n).flatten()),
+        };
+        if lower::has_nested_test(arms) || lower::is_scalar_match(&self.checker, hir, scrutinee, arms) {
+            for arm in arms {
+                Self::hir_pat_locals(&arm.pat, &mut |l| out.push(l));
+            }
+            return out;
+        }
+        let Some(ty) = Self::hir_ty(hir, scrutinee) else {
+            return out;
+        };
+        let identity = |arm: &HirArm| value && lower::is_identity_arm(hir, arm);
+        let payloads = |variant: &str| self.hir_payload_tys(ty, variant).unwrap_or_default();
+        match self.hir_dispatch_rep(hir, emit, scrutinee, arms) {
+            Rep::Word(ValueLayout::Boxed) => {
+                let in_place = lower::match_needs_slots(hir, arms);
+                for arm in arms {
+                    match &arm.pat {
+                        HirPat::Variant { variant, .. } if in_place || !identity(arm) => fields(arm, payloads(variant).len(), &mut out),
+                        HirPat::Bind(l) => out.push(*l),
+                        _ => {}
+                    }
+                }
+            }
+            Rep::Pair(kind) => {
+                // `Some(x) => x, None => 0` keeps the pair's payload word.
+                let unit = |arm: &HirArm| match &arm.pat {
+                    HirPat::Variant { variant, .. } => payloads(variant).is_empty() && matches!(hir.expr(arm.body).kind, HirKind::Lit(Lit::Int(0))),
+                    _ => false,
+                };
+                let carries = |arm: &HirArm| matches!(&arm.pat, HirPat::Variant { variant, .. } if !payloads(variant).is_empty());
+                if let [a, b] = arms
+                    && (unit(a) || unit(b))
+                    && [a, b].into_iter().any(|arm| !unit(arm) && identity(arm) && carries(arm))
+                {
+                    return out;
+                }
+                for arm in arms {
+                    let skip = match &arm.pat {
+                        HirPat::Wild => true,
+                        HirPat::Variant { .. } => {
+                            self.hir_rewrap_return_tag(hir, emit, ty, &kind, arm).is_some() || (identity(arm) && carries(arm))
+                        }
+                        _ => false,
+                    };
+                    if !skip {
+                        fields(arm, 1, &mut out);
+                    }
+                }
+            }
+            Rep::Word(layout) => {
+                let (payload_side, zero_side) = match layout {
+                    ValueLayout::NicheOption => ("Some", "None"),
+                    ValueLayout::NicheUnitResult => ("Err", "Ok"),
+                    ValueLayout::NicheResult => ("Ok", "Err"),
+                    ValueLayout::Boxed => return out,
+                };
+                let pick = |side: &str| {
+                    arms.iter().position(|a| match &a.pat {
+                        HirPat::Variant { variant, .. } => variant == side,
+                        _ => true,
+                    })
+                };
+                let (Some(first), Some(second)) = (pick(payload_side), pick(zero_side)) else {
+                    return out;
+                };
+                let mut sides = vec![(first, payload_side)];
+                if first != second {
+                    sides.push((second, zero_side));
+                }
+                let rewraps = matches!(emit.plan.ret, Rep::Pair(_)) || emit.plan.ret == BOXED || emit.plan.ret == Rep::Word(layout);
+                for (i, side) in sides {
+                    let arm = &arms[i];
+                    match &arm.pat {
+                        HirPat::Wild => {}
+                        HirPat::Bind(l) => out.push(*l),
+                        _ if rewraps && self.hir_rewrap_tag(hir, ty, arm).is_some() => {}
+                        pat => {
+                            let named = lower::arm_fields(hir, pat).is_ok_and(|f| f.iter().any(Option::is_some));
+                            let reads = !payloads(side).is_empty() && (lower::is_identity_arm(hir, arm) || named);
+                            if reads && !identity(arm) {
+                                fields(arm, 1, &mut out);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Each local `pat` binds.
+    fn hir_pat_locals(pat: &HirPat, f: &mut impl FnMut(LocalId)) {
+        match pat {
+            HirPat::Bind(l) => f(*l),
+            HirPat::Tuple(items) => items.iter().for_each(|p| Self::hir_pat_locals(p, f)),
+            HirPat::Record(fields) => fields.iter().for_each(|(_, p)| Self::hir_pat_locals(p, f)),
+            HirPat::Variant { fields, .. } => match fields {
+                HirPatFields::Unit => {}
+                HirPatFields::Tuple(items) => items.iter().for_each(|p| Self::hir_pat_locals(p, f)),
+                HirPatFields::Record(fields) => fields.iter().for_each(|(_, p)| Self::hir_pat_locals(p, f)),
+            },
+            _ => {}
+        }
     }
 
     fn hir_mir_walk(&mut self, hir: &HirBody, emit: &HirEmit, id: HirId, t: &mut HirMirTables) {
