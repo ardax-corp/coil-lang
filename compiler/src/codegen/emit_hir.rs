@@ -746,7 +746,6 @@ impl Compiler {
                         }
                     }
                 }
-                let body_ops = self.bytecode.ops().len();
                 if let Some(root) = hir.root {
                     emit.plan.cold_ok = self.opt_options.branch_optimization && !self.debugger_attached && !hir.is_coro;
                     self.hir_effect(hir, &mut emit, root);
@@ -754,14 +753,13 @@ impl Compiler {
                 }
                 self.hir_mir_why = None;
                 // A shared generic body with no open parameter takes its
-                // dictionaries as trailing parameters it never reads.
+                // dictionaries as trailing parameters: direct MIR lowers it
+                // when its code reads none (`HirMirTables::reads_dicts`).
                 let shared = self.hir_shared_generic();
                 let open = hir.params.iter().any(|&p| self.hir_open_ty(hir.local(p).ty.as_ref()));
                 self.hir_mir = if !shared {
                     self.hir_lower_mir(hir, &emit, None)
-                } else if !open && let Some(entry) = entry_sp
-                    && !self.hir_reads_dicts(body_ops)
-                {
+                } else if !open && let Some(entry) = entry_sp {
                     self.hir_lower_mir(hir, &emit, Some(entry))
                 } else {
                     self.hir_mir_why = Some("converted or shared generic entry".into());
@@ -865,6 +863,14 @@ impl Compiler {
         if !self.hir_mir_on || !self.opt_options.mir_specialize {
             return None;
         }
+        let tables = self.hir_mir_tables(hir, emit);
+        // A shared generic body's dictionaries are trailing parameters
+        // direct MIR does not read: a body whose code reads one stays on
+        // the stack lowering.
+        if entry_words.is_some() && tables.reads_dicts {
+            self.hir_mir_why = Some("converted or shared generic entry".into());
+            return None;
+        }
         // A compiler-made body has no source: its ops carry no location,
         // as its stack lowering clears them.
         let file = Some(self.loc_from_span(SimpleSpan::from(0..1)))
@@ -878,7 +884,6 @@ impl Compiler {
             // frame slots; direct MIR keeps them in registers or folds them.
             Err("split local under a debugger".to_string())
         } else {
-            let tables = self.hir_mir_tables(hir, emit);
             self.hir_mir_input(hir, emit, &tables, file, entry_words)
                 .and_then(|inp| crate::mir::lower_from_hir(hir, &inp))
         };
@@ -6629,14 +6634,6 @@ impl Compiler {
     /// takes dictionaries; a mono clone takes none).
     fn hir_shared_generic(&self) -> bool {
         !self.compiling_mono_clone && self.lookup_slot("__dict0").is_some()
-    }
-
-    /// Whether the ops from `start` on read a dictionary slot.
-    fn hir_reads_dicts(&self, start: usize) -> bool {
-        let dicts: HashSet<u32> = (0..).map_while(|i| self.lookup_slot(&format!("__dict{i}"))).collect();
-        self.bytecode.ops()[start..].iter().filter_map(IlOp::as_encode_byte).any(|b| {
-            *b.bytecode() == Instruction::LOAD && (0..b.load_store_count()).any(|i| dicts.contains(&b.load_store_slot_at(i)))
-        })
     }
 
     /// How a call's result sits against its own (instance) type's layout,
