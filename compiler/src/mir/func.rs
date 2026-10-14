@@ -147,6 +147,20 @@ impl MirFunc {
             .any(|b| b.insts.iter().any(MirInst::is_gc_edge))
     }
 
+    /// A GC edge the S2b stack maps describe: any but a function value
+    /// (`MakeFn` / `MakePolyFn`) and the barrier right after it, which the
+    /// maps leave to the body's precise frame map or the conservative
+    /// scan, as for its fuse IL ([`super::gates::refuses_alloc`]).
+    pub fn has_mapped_gc_edge(&self) -> bool {
+        let is_fn = |i: &MirInst| matches!(i, MirInst::Alloc { kind: super::inst::MirAllocKind::Fn { .. } | super::inst::MirAllocKind::PolyFn { .. }, .. });
+        self.blocks.iter().any(|b| {
+            b.insts.iter().enumerate().any(|(k, i)| {
+                let after_fn = matches!(i, MirInst::GcBarrier { .. }) && k > 0 && is_fn(&b.insts[k - 1]);
+                i.is_gc_edge() && !is_fn(i) && !after_fn
+            })
+        })
+    }
+
     /// True when any inst is an explicit I7 deopt / stop edge.
     pub fn has_deopt_edge(&self) -> bool {
         self.blocks
@@ -536,7 +550,7 @@ impl MirFunc {
                     return Err(format!("{dest} StoreStatic value type"));
                 }
             }
-            MirInst::ClearWord { dest, value } => {
+            MirInst::ClearWord { dest, value } | MirInst::KeepAlive { dest, value } => {
                 if self.ty(*dest) != MirTy::Bool {
                     return Err(format!("{dest} ClearWord dest is not bool"));
                 }

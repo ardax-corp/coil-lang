@@ -904,7 +904,11 @@ impl Compiler {
         for &local in emit.plan.pair_locals.keys() {
             let ty = hir.local(LocalId(local)).ty.as_ref().ok_or("pair local type")?;
             let (lo, hi) = self.hir_mir_pair_tys(ty).ok_or("pair local type")?;
-            let tag = *emit.tag_slots.get(&local).ok_or("pair local slot")?;
+            // A pair local emission never bound (its `let` folded away by
+            // inlining) has no tag slot: nothing reads it.
+            let Some(&tag) = emit.tag_slots.get(&local) else {
+                continue;
+            };
             pair_locals.insert(local, (tag, lo, hi));
         }
         let pair_tys = hir
@@ -947,13 +951,13 @@ impl Compiler {
             stacks.insert(local, (base, n, elem.ok_or("stack array type")?));
         }
         // Words in direct MIR: scalars, int/float arrays, and class objects.
-        // A finalizer class stays out: its object's lifetime follows the
-        // frame slots emission clears, not MIR values.
+        // A finalizer object's local is pinned (`HirMirInput::pinned`) so
+        // it lives as long as its frame slot would.
         let checker = &self.checker;
         let string_indices = &self.string_indices;
         let is_class = move |t: &Ty| {
             let t = apply_ty_prune(checker.subst(), t);
-            checker.ty_is_class(&t) && !Self::finalized_class(checker, &t)
+            checker.ty_is_class(&t)
         };
         let niche = move |t: &Ty| match crate::typechecking::value_layout::value_layout(checker, t) {
             ValueLayout::NicheOption | ValueLayout::NicheUnitResult => Some(crate::mir::MirTy::NicheOpt),
@@ -967,13 +971,35 @@ impl Compiler {
         let opaque_vars = hir.is_generic
             || hir.locals.iter().any(|l| l.ty.as_ref().is_some_and(is_var))
             || hir.exprs.iter().any(|e| e.ty.as_ref().is_some_and(is_var));
+        // The backing word of a scalar enum type.
+        let scalar_enum = move |t: &Ty| {
+            let t = apply_ty_prune(checker.subst(), t);
+            if !crate::hir::layout::is_scalar_enum_ty(checker, &t) {
+                return None;
+            }
+            let name = match crate::typechecking::ty::strip_readonly(&t) {
+                Ty::Constructor { owner, .. } => match owner.as_ref() {
+                    Ty::Con(name) | Ty::Sum { name, .. } => name.clone(),
+                    _ => return None,
+                },
+                Ty::Con(name) | Ty::Sum { name, .. } => name.clone(),
+                _ => return None,
+            };
+            // A `#[repr(string)]` value is its backing string's heap word.
+            let backing = checker.scalar_value_ty(&name)?;
+            if matches!(crate::typechecking::ty::strip_readonly(&backing), Ty::Con(n) if n == crate::typechecking::ty::STRING) {
+                return Some(crate::mir::MirTy::HeapRef);
+            }
+            crate::mir::scalar_mir_ty(&backing).filter(|t| matches!(t, crate::mir::MirTy::I64 | crate::mir::MirTy::F64 | crate::mir::MirTy::Bool))
+        };
         let word = |t: &Ty| {
             crate::mir::word_mir_ty(t)
                 .or_else(|| {
-                    let string = matches!(apply_ty_prune(checker.subst(), t), Ty::Con(ref n) if n == crate::typechecking::ty::STRING);
-                    (is_class(t) || string).then_some(crate::mir::MirTy::HeapRef)
+                    let opaque = crate::mir::opaque_heap_ty(&apply_ty_prune(checker.subst(), t));
+                    (is_class(t) || opaque).then_some(crate::mir::MirTy::HeapRef)
                 })
                 .or_else(|| niche(t))
+                .or_else(|| scalar_enum(t))
                 .or_else(|| (opaque_vars && is_var(t)).then_some(crate::mir::MirTy::I64))
                 // An `Option` / `Result` open in a type variable is a boxed
                 // enum object.
@@ -1168,7 +1194,6 @@ impl Compiler {
         let mut news = HashMap::new();
         for i in 0..hir.exprs.len() as u32 {
             if let Some((class, tys)) = self.hir_new_layout(hir, HirId(i))
-                && !checker.class_has_drop(&class)
                 && let HirKind::Make { args, .. } = &hir.expr(HirId(i)).kind
                 && let Some(words) = tys
                     .iter()
@@ -1285,6 +1310,7 @@ impl Compiler {
                 }
                 Self::boxed_payloads(checker, &t, variant)
             }),
+            pinned: Box::new(move |t: &Ty| Self::finalized(checker, &apply_ty_prune(checker.subst(), t))),
             enum_drop: Box::new(move |name: &str| {
                 checker.enum_has_drop(name).then(|| checker.class_type_id(name))
             }),
@@ -1361,11 +1387,16 @@ impl Compiler {
         })
     }
 
-    /// A class with a `drop`, or a generic one applied to such a class.
-    fn finalized_class(checker: &crate::typechecking::Checker, ty: &Ty) -> bool {
-        match crate::typechecking::ty::strip_readonly(ty) {
-            Ty::Con(n) => checker.class_has_drop(n),
-            Ty::App(head, _) => Self::finalized_class(checker, head),
+    /// A type whose value can hold an object with a `drop` (a class or
+    /// enum with one, or a type built from such).
+    fn finalized(checker: &crate::typechecking::Checker, ty: &Ty) -> bool {
+        match ty {
+            Ty::Con(n) => checker.class_has_drop(n) || checker.enum_has_drop(n),
+            Ty::App(h, args) => Self::finalized(checker, h) || args.iter().any(|a| Self::finalized(checker, a)),
+            Ty::Tuple(items) => items.iter().any(|t| Self::finalized(checker, t)),
+            Ty::List(inner) | Ty::Readonly(inner) => Self::finalized(checker, inner),
+            Ty::Array { element, .. } => Self::finalized(checker, element),
+            Ty::Sum { name, .. } => checker.enum_has_drop(name),
             _ => false,
         }
     }
@@ -1619,23 +1650,12 @@ impl Compiler {
             // A finalizer runs when its object becomes unreachable: spliced
             // code would hold the object in the caller's frame (in a temp,
             // past any clear) and delay its `drop`.
-            fn finalized(this: &Compiler, ty: &Ty) -> bool {
-                match ty {
-                    Ty::Con(n) => this.checker.class_has_drop(n) || this.checker.enum_has_drop(n),
-                    Ty::App(h, args) => finalized(this, h) || args.iter().any(|a| finalized(this, a)),
-                    Ty::Tuple(items) => items.iter().any(|t| finalized(this, t)),
-                    Ty::List(inner) | Ty::Readonly(inner) => finalized(this, inner),
-                    Ty::Array { element, .. } => finalized(this, element),
-                    Ty::Sum { name, .. } => this.checker.enum_has_drop(name),
-                    _ => false,
-                }
-            }
             if callee
                 .exprs
                 .iter()
                 .filter_map(|e| e.ty.as_ref())
                 .chain(callee.locals.iter().filter_map(|l| l.ty.as_ref()))
-                .any(|t| finalized(self, &apply_ty_prune(self.checker.subst(), t)))
+                .any(|t| Self::finalized(&self.checker, &apply_ty_prune(self.checker.subst(), t)))
             {
                 return Err("drop-value".to_string());
             }

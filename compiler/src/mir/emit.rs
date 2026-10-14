@@ -119,6 +119,9 @@ pub fn emit_dense(
                 }
                 continue;
             }
+            if let MirInst::KeepAlive { .. } = inst {
+                continue;
+            }
             if let MirInst::Call {
                 dest,
                 dest_hi,
@@ -1171,7 +1174,7 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
             out.push(byte(Byte::new(Instruction::StoreStatic).with_operand_u32(*slot)));
         }
         // Emitted where it stands (`cleared_words`).
-        MirInst::ClearWord { .. } => {}
+        MirInst::ClearWord { .. } | MirInst::KeepAlive { .. } => {}
         MirInst::ArrayPush {
             dest,
             array,
