@@ -408,7 +408,8 @@ impl IlModule {
             .funcs
             .iter()
             .map(|b| {
-                crate::mir::mir_fuse_on()
+                !opts.hir_stack
+                    && crate::mir::mir_fuse_on()
                     && (b.meta.hir_mir.is_none() || crate::mir::mir_fuse_takes(&b.meta.name))
             })
             .collect();
@@ -575,7 +576,9 @@ impl IlModule {
         // LIR). One left on emit_hir's stack lowering is a compiler bug.
         if opts.mir_specialize {
             let fell_back: Vec<String> = (0..self.funcs.len())
-                .filter(|&i| fused[i] && tier[i] == "fuse")
+                // A body HIR never lowered (an IL-only test body, or one
+                // past a program error) has no direct MIR to miss.
+                .filter(|&i| fused[i] && tier[i] == "fuse" && (self.funcs[i].meta.hir_mir.is_some() || self.funcs[i].meta.hir_mir_why.is_some()))
                 .map(|i| {
                     let body = &self.funcs[i];
                     let why = match &body.meta.hir_mir {
@@ -1918,6 +1921,7 @@ mod tests {
             branch_optimization: false,
             collect_stats: false,
             mir_specialize: true,
+            hir_stack: false,
         }
     }
 

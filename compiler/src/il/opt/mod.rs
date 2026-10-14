@@ -40,6 +40,10 @@ pub struct OptimizeOptions {
     /// opt level, including `-Og` (B8). Debugger-attached compiles
     /// keep this on; the VM debugger steps the reconstruct.
     pub mir_specialize: bool,
+    /// Bodies run emit_hir's stack lowering, not the IL emitted from their
+    /// MIR (as `COIL_MIR_FUSE=0`): unit tests of that lowering, until it
+    /// is deleted. Default **off**.
+    pub hir_stack: bool,
 }
 
 // Default is `OptLevel::Standard.options()`.

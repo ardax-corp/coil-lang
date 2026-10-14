@@ -132,11 +132,11 @@ fn compile_src_compiler(src: &str, tune: impl FnOnce(&mut Compiler)) -> (Vec<Byt
     }
     // Stable placeholder ids so Approach A packed HostInvoke lowering
     // fires in unit tests (Pipeline assigns real ids at runtime).
-    compiler.register_native_id(machine::PACKED_DOT, 9001);
-    compiler.register_native_id(machine::PACKED_MATMUL, 9002);
-    compiler.register_native_id(machine::PACKED_MATRIX_ZIP, 9003);
-    compiler.register_native_id(machine::PACKED_MATRIX_NEG, 9004);
-    compiler.register_native_id(machine::PACKED_VEC_ARITH, 9005);
+    compiler.register_native_id(machine::PACKED_DOT, common::PACKED_DOT_ID as usize);
+    compiler.register_native_id(machine::PACKED_MATMUL, common::PACKED_MATMUL_ID as usize);
+    compiler.register_native_id(machine::PACKED_MATRIX_ZIP, common::PACKED_MATRIX_ZIP_ID as usize);
+    compiler.register_native_id(machine::PACKED_MATRIX_NEG, common::PACKED_MATRIX_NEG_ID as usize);
+    compiler.register_native_id(machine::PACKED_VEC_ARITH, common::PACKED_VEC_ARITH_ID as usize);
     compiler.register_native_id(machine::GC_REGISTER_FINALIZER_NATIVE, 9100);
     tune(&mut compiler);
     let bc = compiler.compile("", &mut ast);
@@ -6806,9 +6806,10 @@ fn main() {
 
 fn packed_host_meta(bc: &[common::Byte]) -> u32 {
     use common::Instruction;
-    // Layout: CONST packed id (9001..=9005 in `compile_src_tuned`), the
+    // Layout: CONST packed id (registered in `compile_src_tuned`), the
     // operands, CONST meta, HostInvoke.
-    let packed_id = |b: &common::Byte| matches!(b.bytecode(), Instruction::CONST) && (9001..=9005).contains(&b.operand_u32());
+    let ids = u32::from(common::PACKED_DOT_ID)..=u32::from(common::PACKED_VEC_ARITH_ID);
+    let packed_id = |b: &common::Byte| matches!(b.bytecode(), Instruction::CONST) && ids.contains(&b.operand_u32());
     let id_at = bc.iter().position(packed_id).expect("expected a packed native id");
     let hi = id_at
         + bc[id_at..]
