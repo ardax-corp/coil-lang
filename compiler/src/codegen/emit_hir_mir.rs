@@ -141,13 +141,59 @@ impl Compiler {
             HirKind::Match { arms, .. } => arms.iter().map(|a| a.body).collect(),
             _ => Vec::new(),
         };
+        // A stack array's literal init: each item into its own slot, in
+        // the element's layout (`hir_stack_array_init`).
+        let stack_init = match kind {
+            HirKind::Let { local, init: Some(init) } => Some((*local, *init)),
+            HirKind::Assign { place, value } => match hir.expr(*place).kind {
+                HirKind::Local(local) => Some((local, *value)),
+                _ => None,
+            },
+            _ => None,
+        }
+        .filter(|(local, _)| emit.plan.stacks.contains_key(&local.0));
         for k in lower::children(hir, id) {
+            if let Some((local, init)) = stack_init
+                && k == init
+                && let HirKind::Make { args, .. } = &hir.expr(init).kind
+            {
+                let Rep::Word(elem) = self.hir_stack_rep(hir, local) else {
+                    unreachable!("stack array elements are one word")
+                };
+                for &item in args {
+                    self.hir_mir_make_niches(hir, emit, item, Some(elem), out);
+                }
+                continue;
+            }
             let want = match kind {
                 HirKind::Return(_) => match emit.plan.ret {
                     Rep::Word(l) => Some(l),
                     Rep::Pair(_) => None,
                 },
                 _ if forwards.contains(&k) => want,
+                // An argument as `hir_check_value` wants it: in its
+                // parameter's layout (a `Vec` element argument at the
+                // element's niche).
+                HirKind::Call { callee, args }
+                    if !matches!(callee, Callee::Value(_))
+                        && !emit.plan.lens.contains_key(&id.0)
+                        && let Some(call) = emit.plan.calls.get(&id.0)
+                        && call.builtin.is_none()
+                        && let Some(i) = args.iter().position(|&a| a == k)
+                        && i < call.params.len() =>
+                {
+                    match Self::hir_arg_rep(call, i) {
+                        Rep::Word(l) => Some(l),
+                        Rep::Pair(_) => None,
+                    }
+                }
+                // A value stored by index, at the element slot's niche.
+                HirKind::Assign { place, value } if *value == k && let HirKind::Index { base, .. } = hir.expr(*place).kind => {
+                    match self.hir_index_store_rep(hir, emit, *place, base) {
+                        Some(Rep::Word(l)) => Some(l),
+                        _ => None,
+                    }
+                }
                 _ => None,
             };
             self.hir_mir_make_niches(hir, emit, k, want, out);
