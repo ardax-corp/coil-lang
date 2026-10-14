@@ -671,6 +671,12 @@ pub struct Compiler {
     hir_entry_ctx: Vec<(u32, u32, u32)>,
     /// The context dictionaries of the body being lowered.
     hir_mir_ctx: Vec<(u32, u32, u32)>,
+    /// Arguments a function's prologue unboxes in place (an instance
+    /// method's boxed arguments): each one's slot and `UnboxValue` tag.
+    /// Set by the prologue for the next body.
+    hir_entry_unbox: Vec<(u32, u32)>,
+    /// Those of the body being lowered.
+    hir_mir_unbox: Vec<(u32, u32)>,
     /// Raw op ranges of the early exits the last HIR body marked cold, laid
     /// out after its epilogue ([`Compiler::flush_hir_cold`]).
     hir_cold: Vec<(usize, usize)>,
@@ -858,6 +864,8 @@ impl Default for Compiler {
             hir_mir_dict_sp: None,
             hir_entry_ctx: Vec::new(),
             hir_mir_ctx: Vec::new(),
+            hir_entry_unbox: Vec::new(),
+            hir_mir_unbox: Vec::new(),
             hir_inline_mono: !matches!(
                 std::env::var("COIL_HIR_INLINE_MONO").as_deref(),
                 Ok("0" | "false" | "off" | "no")
