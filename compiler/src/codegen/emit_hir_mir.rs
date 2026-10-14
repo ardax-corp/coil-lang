@@ -29,6 +29,9 @@ pub(super) struct HirMirTables {
     /// kernel ([`Compiler::hir_linear_algebra_op`]): the native and the
     /// meta word packing the shape, by expression.
     pub(super) linalgs: HashMap<u32, (u16, u32)>,
+    /// `cross(a, b)` calls emission unrolls: whether the result is a
+    /// tuple and whether its elements are floats, by call.
+    pub(super) crosses: HashMap<u32, (bool, bool)>,
     /// Fixed array locals copied as they are bound or assigned to another
     /// local ([`Compiler::hir_array_copy`]): the `vec_from_array` native,
     /// by value.
@@ -48,6 +51,9 @@ pub(super) struct HirMirTables {
     /// of the body's dictionary parameters (`HirBuiltin::Bound`,
     /// `HirOp::Bound`), by call or operator.
     pub(super) bound_calls: HashMap<u32, crate::mir::HirBoundCall>,
+    /// Trait methods on a bare-class existential pack
+    /// (`HirBuiltin::Existential`): the method's dictionary slot, by call.
+    pub(super) existential_calls: HashMap<u32, u32>,
     /// Calls and dictionary operators typed a bare type parameter in a
     /// shared generic body, whose result `hir_value` unboxes
     /// (`UNBOX_ANY_TAG`).
@@ -87,6 +93,9 @@ pub(super) struct HirMirTables {
     /// The key of each field a record `let` pattern binds (`None`: a
     /// wildcard), by `let`: `hir_let_pat_binds` pushes each as a string.
     pub(super) record_pats: HashMap<u32, Vec<Option<u32>>>,
+    /// `block_on(h)` calls ([`Compiler::hir_block_on`]): the `wait_ready`
+    /// native run between resumes, if the program has one, by call.
+    pub(super) block_ons: HashMap<u32, Option<u16>>,
 }
 
 /// The frame direct MIR keeps a body's locals in, planned over the HIR:
@@ -549,6 +558,12 @@ impl Compiler {
         {
             t.bound_calls.insert(id.0, crate::mir::HirBoundCall { dict, method });
         }
+        if let HirKind::Call { .. } = e.kind
+            && !emit.plan.lens.contains_key(&id.0)
+            && let Some(HirBuiltin::Existential { slot }) = emit.plan.calls.get(&id.0).and_then(|c| c.builtin)
+        {
+            t.existential_calls.insert(id.0, slot);
+        }
         match &e.kind {
             HirKind::Lit(Lit::Str(raw))
                 if Self::hir_ty(hir, id).and_then(lower::primitive) != Some(crate::typechecking::ty::BYTE)
@@ -640,6 +655,15 @@ impl Compiler {
             {
                 return Kids::None;
             }
+            // An element-wise operator on the packed kernel: its operands
+            // boxed, then the meta word, as `hir_aggregate`.
+            HirKind::Bin { .. } | HirKind::Un { .. }
+                if let Some(HirOp::Aggregate(info)) = emit.plan.ops.get(&id.0)
+                    && let Some(meta) = Self::packed_aggregate_meta(info)
+                    && let Some(native) = self.native_id(common::PACKED_VEC_ARITH) =>
+            {
+                t.linalgs.insert(id.0, (native as u16, meta));
+            }
             // A matrix operator on a packed kernel, its operands each one
             // word as emission passes them.
             HirKind::Bin { .. } | HirKind::Un { .. } if let Some(HirOp::LinAlg(info)) = emit.plan.ops.get(&id.0) => {
@@ -702,10 +726,20 @@ impl Compiler {
             {
                 if args.iter().zip(params).all(|(&a, &p)| self.hir_arg_passes(hir, emit, a, p))
                     && let Some(info) = self.hir_linear_algebra(hir, id)
-                    && let Some((native, meta)) = self.packed_linear_algebra_op(&info.kind, args.len())
                 {
-                    t.linalgs.insert(id.0, (native as u16, meta));
+                    if let Some((native, meta)) = self.packed_linear_algebra_op(&info.kind, args.len()) {
+                        t.linalgs.insert(id.0, (native as u16, meta));
+                    } else if let crate::typechecking::LinearAlgebraKind::Cross { left_is_tuple, elem_is_float } = info.kind
+                        && args.len() == 2
+                    {
+                        // Unrolled, as `emit_linear_algebra_unrolled`.
+                        t.crosses.insert(id.0, (left_is_tuple, elem_is_float));
+                    }
                 }
+            }
+            HirKind::Call { .. } if emit.plan.calls.get(&id.0).is_some_and(|c| matches!(c.builtin, Some(HirBuiltin::BlockOn))) => {
+                let wait = self.native_id("wait_ready").and_then(|n| u16::try_from(n).ok());
+                t.block_ons.insert(id.0, wait);
             }
             HirKind::Call { .. } if emit.plan.calls.get(&id.0).is_some_and(|c| matches!(c.builtin, Some(HirBuiltin::Matrix))) => {
                 t.matrix_wraps.insert(id.0);

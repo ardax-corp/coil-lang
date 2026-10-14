@@ -1436,6 +1436,7 @@ impl Compiler {
             value_calls: &tables.value_calls,
             poly_calls: &tables.poly_calls,
             bound_calls: &tables.bound_calls,
+            existential_calls: &tables.existential_calls,
             ctx_dicts: if entry_words.is_some() { &self.hir_mir_ctx } else { &[] },
             param_unboxes: &self.hir_mir_unbox,
             unbox_any: &tables.unbox_any,
@@ -1513,8 +1514,10 @@ impl Compiler {
             records,
             record_pats,
             matrix_wraps: &tables.matrix_wraps,
+            block_ons: &tables.block_ons,
             linalgs: &tables.linalgs,
             array_copies: &tables.array_copies,
+            crosses: &tables.crosses,
             make_niches: &tables.make_niches,
             aggregates: emit
                 .plan
@@ -1607,6 +1610,9 @@ impl Compiler {
                         // A `bool` payload beside an `i64` one rides as the
                         // same 0/1 word.
                         Some(MirTy::Bool | MirTy::I64) if matches!(w, MirTy::Bool | MirTy::I64) => Some(MirTy::I64),
+                        // So does an `f64` one, as its bits (`Ok(float)`
+                        // beside `Err(int)`).
+                        Some(MirTy::Bool | MirTy::I64 | MirTy::F64) if matches!(w, MirTy::Bool | MirTy::I64 | MirTy::F64) => Some(MirTy::I64),
                         Some(_) => return None,
                     };
                 }
@@ -5389,6 +5395,35 @@ impl Compiler {
         Ok(())
     }
 
+    /// The meta word of an element-wise operator on the packed kernel
+    /// (`PACKED_VEC_ARITH`): length, op, float, tuple and broadcast side;
+    /// `None` when the operator does not take the kernel.
+    pub(super) fn packed_aggregate_meta(info: &crate::typechecking::AggregateArithInfo) -> Option<u32> {
+        use crate::typechecking::{AggregateArithKind as K, AggregateOp, ScalarSide};
+        let len = lower::aggregate_packed(info)?;
+        let op_code: u32 = match info.op {
+            AggregateOp::Add => 0,
+            AggregateOp::Sub => 1,
+            AggregateOp::Mul => 2,
+            AggregateOp::Div => 3,
+            _ => 4,
+        };
+        let (tuple, float, scalar_on) = match info.kind {
+            K::ZipTuple { elem_is_float, .. } | K::NegTuple { elem_is_float, .. } => (true, elem_is_float, None),
+            K::BroadcastTuple {
+                elem_is_float, scalar_on, ..
+            } => (true, elem_is_float, Some(scalar_on)),
+            K::BroadcastArray {
+                elem_is_float, scalar_on, ..
+            } => (false, elem_is_float, Some(scalar_on)),
+            K::ZipArray { elem_is_float, .. } | K::NegArray { elem_is_float, .. } => (false, elem_is_float, None),
+        };
+        let mut meta = (len as u32) & 0xFFFF | op_code << 16;
+        meta |= u32::from(float) << 24 | u32::from(tuple) << 25 | u32::from(scalar_on.is_some()) << 26;
+        meta |= u32::from(matches!(scalar_on, Some(ScalarSide::Left))) << 27;
+        Some(meta)
+    }
+
     /// An element-wise `lhs op rhs` / `-lhs` at depth zero, as the AST's
     /// `try_emit_aggregate_arith`: the packed `HostInvoke` for a static
     /// shape of at least 8; else each element (literal items and unboxed
@@ -5404,27 +5439,7 @@ impl Compiler {
         rhs: Option<HirId>,
     ) {
         use crate::typechecking::{AggregateArithKind as K, AggregateOp, ScalarSide};
-        if let Some(len) = lower::aggregate_packed(info) {
-            let op_code: u32 = match info.op {
-                AggregateOp::Add => 0,
-                AggregateOp::Sub => 1,
-                AggregateOp::Mul => 2,
-                AggregateOp::Div => 3,
-                _ => 4,
-            };
-            let (tuple, float, scalar_on) = match info.kind {
-                K::ZipTuple { elem_is_float, .. } | K::NegTuple { elem_is_float, .. } => (true, elem_is_float, None),
-                K::BroadcastTuple {
-                    elem_is_float, scalar_on, ..
-                } => (true, elem_is_float, Some(scalar_on)),
-                K::BroadcastArray {
-                    elem_is_float, scalar_on, ..
-                } => (false, elem_is_float, Some(scalar_on)),
-                K::ZipArray { elem_is_float, .. } | K::NegArray { elem_is_float, .. } => (false, elem_is_float, None),
-            };
-            let mut meta = (len as u32) & 0xFFFF | op_code << 16;
-            meta |= u32::from(float) << 24 | u32::from(tuple) << 25 | u32::from(scalar_on.is_some()) << 26;
-            meta |= u32::from(matches!(scalar_on, Some(ScalarSide::Left))) << 27;
+        if let Some(meta) = Self::packed_aggregate_meta(info) {
             let native = self.native_id(common::PACKED_VEC_ARITH).expect("checked packed kernel");
             self.bytecode.push(Byte::new(Instruction::CONST).with_operand_u32(native as u32));
             self.hir_value(hir, emit, lhs, &BOXED, 1);
