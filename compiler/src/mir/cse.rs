@@ -509,6 +509,8 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         | MirInst::DoneCoro { .. }
         | MirInst::LoadStatic { .. }
         | MirInst::StoreStatic { .. }
+        | MirInst::HomeLoad { .. }
+        | MirInst::HomeStore { .. }
         | MirInst::ClearWord { .. }
         | MirInst::KeepAlive { .. }
         | MirInst::ArrayPush { .. }
@@ -516,6 +518,7 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         | MirInst::GcBarrier { .. }
         | MirInst::Deopt { .. }
         | MirInst::String { .. }
+        | MirInst::CodePtr { .. }
         | MirInst::Print { .. }
         | MirInst::Panic { .. }
         | MirInst::Format { .. }

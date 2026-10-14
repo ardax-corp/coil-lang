@@ -9384,22 +9384,29 @@ impl Compiler {
         self.setup_entry_offset = resolve_entry(self.setup_entry_offset as usize) as u32;
         let mut cleanup = Vec::new();
         for pad in &self.cleanup_pads {
+            // A body the LIR tier took emits its own pad from its MIR, with
+            // its `defer`s inline: no thunk to cut out of its ranges.
+            let lir = lowered.lir_cleanup_pads.get(&pad.func);
+            let (pad_label, thunks, frame_words) = match lir {
+                Some(&(label, words)) => (label, &[][..], words),
+                None => (pad.pad, &pad.thunks[..], pad.frame_words),
+            };
             let ranges = (|| {
                 let start = self
                     .fn_entry_labels
                     .get(&pad.func)
                     .and_then(|l| resolve_fn_label_pc(&pad.func, l.0))
                     .or_else(|| self.functions.get(&pad.func).copied())?;
-                let pad_pc = resolve_fn_label_pc(&pad.func, pad.pad.0)?;
+                let pad_pc = resolve_fn_label_pc(&pad.func, pad_label.0)?;
                 let mut cuts = Vec::new();
-                for &(thunk, after) in &pad.thunks {
+                for &(thunk, after) in thunks {
                     cuts.push((
                         resolve_fn_label_pc(&pad.func, thunk.0)?,
                         resolve_fn_label_pc(&pad.func, after.0)?,
                     ));
                 }
                 cuts.sort_unstable();
-                Some(cleanup_ranges_for(start, pad_pc, &cuts, pad.frame_words))
+                Some(cleanup_ranges_for(start, pad_pc, &cuts, frame_words))
             })();
             // A body that is not its own IL function (a generic template:
             // its instances carry their own pads) resolves to nothing.

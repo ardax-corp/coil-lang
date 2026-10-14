@@ -278,6 +278,8 @@ fn hoistable(inst: &MirInst, allow_index: bool, allow_alloc: bool) -> bool {
         | MirInst::DoneCoro { .. }
         | MirInst::LoadStatic { .. }
         | MirInst::StoreStatic { .. }
+        | MirInst::HomeLoad { .. }
+        | MirInst::HomeStore { .. }
         | MirInst::ClearWord { .. }
         | MirInst::KeepAlive { .. } => false,
         MirInst::Alloc {
@@ -303,7 +305,7 @@ fn hoistable(inst: &MirInst, allow_index: bool, allow_alloc: bool) -> bool {
         | MirInst::Unbox { .. }
         | MirInst::TagArrayKind { .. }
         | MirInst::StrEq { .. } => false,
-        MirInst::String { .. } => true,
+        MirInst::String { .. } | MirInst::CodePtr { .. } => true,
     }
 }
 
