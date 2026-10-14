@@ -57,6 +57,9 @@ pub(super) struct HirMirTables {
     /// Some code emission writes for this body reads one of the frame's
     /// dictionaries (`__dictN`) ([`Compiler::hir_mir_dict_reads`]).
     pub(super) reads_dicts: bool,
+    /// The niche word of each `Result` variant made at a niche layout
+    /// other than its own type's ([`Compiler::hir_mir_make_niches`]).
+    pub(super) make_niches: HashMap<u32, crate::mir::MirTy>,
 }
 
 /// The frame direct MIR keeps a body's locals in, planned over the HIR:
@@ -87,9 +90,63 @@ impl Compiler {
         let mut tables = HirMirTables::default();
         if let Some(root) = hir.root {
             self.hir_mir_walk(hir, emit, root, &mut tables);
+            self.hir_mir_make_niches(hir, emit, root, None, &mut tables.make_niches);
         }
         tables.frame = self.hir_mir_frame(hir, emit);
         tables
+    }
+
+    /// Record the `Result` variants under `id` that emission makes at a
+    /// niche layout other than their own type's. `hir_check_make` builds
+    /// a make at the layout its context wants, and a `Result::Ok(())` is
+    /// typed `Result<(), E>` (a `NicheResult`, `Ok` the `()` tuple) even
+    /// where a `Result<unit, E>` (a `NicheUnitResult`, `Ok` the zero word)
+    /// is wanted: returned from a `-> Result<unit, E>` body, or as the
+    /// value of an inlined call. The wanted layout reaches a value as
+    /// `hir_check_value` passes it: a `return`'s value is wanted as the
+    /// body returns it, a block's tail, an `if`'s arms and a `match`'s
+    /// arms as their parent is; any other value at its own type's layout.
+    fn hir_mir_make_niches(&self, hir: &HirBody, emit: &HirEmit, id: HirId, want: Option<ValueLayout>, out: &mut HashMap<u32, crate::mir::MirTy>) {
+        use ValueLayout as L;
+        if emit.plan.par_loops.contains_key(&id.0) {
+            return;
+        }
+        let own = Self::hir_ty(hir, id).map(|t| self.value_layout(t));
+        let want = want.or(own);
+        let kind = &hir.expr(id).kind;
+        if let HirKind::Make {
+            kind: MakeKind::Variant { enum_name, .. },
+            ..
+        } = kind
+            && common::is_builtin_result_enum(enum_name)
+        {
+            match (own, want) {
+                (Some(L::NicheResult), Some(L::NicheUnitResult)) => {
+                    out.insert(id.0, crate::mir::MirTy::NicheOpt);
+                }
+                (Some(L::NicheUnitResult), Some(L::NicheResult)) => {
+                    out.insert(id.0, crate::mir::MirTy::NicheRes);
+                }
+                _ => {}
+            }
+        }
+        let forwards: Vec<HirId> = match kind {
+            HirKind::Block { tail: Some(tail), .. } => vec![*tail],
+            HirKind::If { then, els: Some(els), .. } => vec![*then, *els],
+            HirKind::Match { arms, .. } => arms.iter().map(|a| a.body).collect(),
+            _ => Vec::new(),
+        };
+        for k in lower::children(hir, id) {
+            let want = match kind {
+                HirKind::Return(_) => match emit.plan.ret {
+                    Rep::Word(l) => Some(l),
+                    Rep::Pair(_) => None,
+                },
+                _ if forwards.contains(&k) => want,
+                _ => None,
+            };
+            self.hir_mir_make_niches(hir, emit, k, want, out);
+        }
     }
 
     /// The frame of `hir` ([`HirMirFrame`]): the locals emission binds in
