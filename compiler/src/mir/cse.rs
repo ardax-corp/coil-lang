@@ -510,6 +510,7 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         | MirInst::LoadStatic { .. }
         | MirInst::StoreStatic { .. }
         | MirInst::ClearWord { .. }
+        | MirInst::KeepAlive { .. }
         | MirInst::ArrayPush { .. }
         | MirInst::Alloc { .. }
         | MirInst::GcBarrier { .. }
@@ -520,6 +521,7 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         | MirInst::Format { .. }
         | MirInst::Stringify { .. }
         | MirInst::Unbox { .. }
+        | MirInst::TagArrayKind { .. }
         | MirInst::StrEq { .. } => {
             return None
         }

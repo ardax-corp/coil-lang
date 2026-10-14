@@ -559,7 +559,7 @@ impl MirFunc {
                     return Err(format!("{dest} StoreStatic value type"));
                 }
             }
-            MirInst::ClearWord { dest, value } => {
+            MirInst::ClearWord { dest, value } | MirInst::KeepAlive { dest, value } => {
                 if self.ty(*dest) != MirTy::Bool {
                     return Err(format!("{dest} ClearWord dest is not bool"));
                 }
@@ -729,6 +729,11 @@ impl MirFunc {
                 }
                 if !self.ty(*src).is_specialized() {
                     return Err(format!("{dest} Stringify src type"));
+                }
+            }
+            MirInst::TagArrayKind { dest, src, .. } => {
+                if self.ty(*dest) != MirTy::HeapRef || self.ty(*src) != MirTy::HeapRef {
+                    return Err(format!("{dest} TagArrayKind type"));
                 }
             }
             MirInst::Unbox { dest, src, .. } => {

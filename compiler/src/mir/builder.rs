@@ -811,6 +811,16 @@ impl MirBuilder {
         Ok(dest)
     }
 
+    /// [`MirInst::KeepAlive`] of `value`.
+    pub fn ins_keep_alive(&mut self, value: ValueId) -> Result<ValueId, MirError> {
+        let dest = self.alloc(MirTy::Bool);
+        self.push(MirInst::KeepAlive {
+            dest,
+            value: self.resolve(value),
+        })?;
+        Ok(dest)
+    }
+
     /// `Panic` of the string `msg`, then [`Terminator::Unreachable`]: the
     /// current block ends here.
     pub fn panic(&mut self, msg: ValueId) -> Result<(), MirError> {
@@ -972,6 +982,20 @@ impl MirBuilder {
             src: self.resolve(src),
         })?;
         self.snapshot_slots(dest);
+        Ok(dest)
+    }
+
+    /// `TagArrayKind kind` of array `src` ([`MirInst::TagArrayKind`]).
+    pub fn ins_tag_array_kind(&mut self, src: ValueId, kind: u8) -> Result<ValueId, MirError> {
+        if self.resolve_ty(src) != MirTy::HeapRef {
+            return Err(MirError::msg("TagArrayKind type".to_string()));
+        }
+        let dest = self.alloc(MirTy::HeapRef);
+        self.push(MirInst::TagArrayKind {
+            dest,
+            src: self.resolve(src),
+            kind,
+        })?;
         Ok(dest)
     }
 

@@ -297,6 +297,10 @@ pub struct HirMirInput<'a> {
     pub box_at: &'a HashMap<u32, Vec<u32>>,
     /// Whether a type is a class: its value is a heap object.
     pub is_class: Box<dyn Fn(&Ty) -> bool + 'a>,
+    /// Whether a local of this type is pinned: it can hold an object with
+    /// a `drop`, which must stay reachable as long as HIR emission's frame
+    /// slot holds it (until the local is rebound or the function returns).
+    pub pinned: Box<dyn Fn(&Ty) -> bool + 'a>,
     /// The backing word of a scalar enum type (`#[repr(int)]` /
     /// `#[repr(float)]`).
     pub scalar_enum: ScalarEnumFn<'a>,
@@ -436,6 +440,10 @@ struct Lower<'a> {
     /// `let`s in a `defer` body, which HIR emission slots in the thunk's
     /// own frame: a temp each.
     defer_locals: HashMap<u32, LocalId>,
+    /// Pinned locals (`HirMirInput::pinned`) by HIR local: their slot and
+    /// word type. Each word stays live until the local is rebound and to
+    /// every exit, as HIR emission's frame slot holds it.
+    pins: HashMap<u32, (LocalId, MirTy)>,
 }
 
 /// The MIR type of a scalar `ty`, or `None` when it is not one.
@@ -731,7 +739,9 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         defer_flags: HashMap::new(),
         defers: Vec::new(),
         defer_locals: HashMap::new(),
+        pins: HashMap::new(),
     };
+    lower.pin_locals()?;
     for (i, e) in hir.exprs.iter().enumerate() {
         if let HirKind::Defer { captures, body } = &e.kind {
             // The thunk's frame holds copies of its captures: one that
@@ -1048,13 +1058,79 @@ impl Lower<'_> {
     /// HIR emission's `emit_run_defers` before each `return`.
     fn ret_word(&mut self, v: ValueId) -> Result<(), Refusal> {
         self.run_defers()?;
+        self.keep_pins()?;
         self.b.ret(Some(v)).map_err(mir)
     }
 
     /// Two-word `RETURN`, after the `defer`s as [`Self::ret_word`].
     fn ret_two(&mut self, lo: ValueId, hi: ValueId) -> Result<(), Refusal> {
         self.run_defers()?;
+        self.keep_pins()?;
         self.b.ret_pair(lo, hi).map_err(mir)
+    }
+
+    /// Find the pinned locals. One bound inside a nested block (a branch
+    /// or loop) starts as a zero word, so the word it is bound to is still
+    /// read at an exit or rebinding past the block's join.
+    fn pin_locals(&mut self) -> Result<(), Refusal> {
+        // Locals the body's own statements bind: they dominate what follows.
+        let top: HashSet<u32> = match self.hir.root.map(|r| &self.hir.expr(r).kind) {
+            Some(HirKind::Block { stmts, .. }) => stmts
+                .iter()
+                .filter_map(|&st| match self.hir.expr(st).kind {
+                    HirKind::Let { local, .. } => Some(local.0),
+                    _ => None,
+                })
+                .collect(),
+            _ => HashSet::new(),
+        };
+        for (i, local) in self.hir.locals.iter().enumerate() {
+            let id = HirLocal(i as u32);
+            if !local.ty.as_ref().is_some_and(|t| (self.inp.pinned)(t))
+                || self.inp.slots.get(i).copied().flatten().is_none()
+                || self.inp.pair_locals.contains_key(&id.0)
+            {
+                continue;
+            }
+            let Ok(ty) = self.local_ty(id) else {
+                continue;
+            };
+            if !matches!(ty, MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes) {
+                continue;
+            }
+            let slot = self.slot(id)?;
+            if !self.hir.params.contains(&id) && !top.contains(&id.0) {
+                let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+                let zero = self.fit(zero, ty)?;
+                self.b.def_local(slot, zero).map_err(mir)?;
+            }
+            self.pins.insert(id.0, (slot, ty));
+        }
+        Ok(())
+    }
+
+    /// Keep the word pinned local `local` holds now live to here (none
+    /// before its first binding).
+    fn keep_pin(&mut self, local: HirLocal) -> Result<(), Refusal> {
+        let Some(&(slot, ty)) = self.pins.get(&local.0) else {
+            return Ok(());
+        };
+        if !self.b.local_defined(slot) {
+            return Ok(());
+        }
+        let v = self.b.use_local(slot, ty).map_err(mir)?;
+        self.b.ins_keep_alive(v).map_err(mir)?;
+        Ok(())
+    }
+
+    /// Keep every pinned local's word live to here (an exit).
+    fn keep_pins(&mut self) -> Result<(), Refusal> {
+        let mut pins: Vec<u32> = self.pins.keys().copied().collect();
+        pins.sort_unstable();
+        for local in pins {
+            self.keep_pin(HirLocal(local))?;
+        }
+        Ok(())
     }
 
     /// Each armed `defer` lowered so far, last first: disarm it and run
@@ -1881,6 +1957,7 @@ impl Lower<'_> {
                     if l.b.value_ty(m) != MirTy::HeapRef {
                         return Err("panic message".into());
                     }
+                    l.keep_pins()?;
                     // `contract_fail` reads the caller's frame, so it runs
                     // here in this body's own frame, as HIR emission's.
                     let m = if blame {
@@ -1920,6 +1997,14 @@ impl Lower<'_> {
                     return Err("box type".into());
                 }
                 Ok(Val::V(self.b.ins_cast(MirCastKind::Word, ty, boxed).map_err(mir)?))
+            }
+            // An array's element kind stamped (compiler-made bodies): the
+            // same array.
+            HirKind::Builtin { op: Builtin::TagArrayKind { kind }, args } if let [inner] = args.as_slice() => {
+                let Some(v) = self.word(*inner)? else {
+                    return Ok(Val::Never);
+                };
+                Ok(Val::V(self.b.ins_tag_array_kind(v, *kind).map_err(mir)?))
             }
             // A primitive's text (compiler-made bodies).
             HirKind::Builtin { op: Builtin::Stringify, args } if let [inner] = args.as_slice() => {
@@ -2276,6 +2361,7 @@ impl Lower<'_> {
                 if self.b.value_ty(v) != ty {
                     return Err("let type".into());
                 }
+                self.keep_pin(*local)?;
                 self.b.def_local(slot, v).map_err(mir)?;
                 Ok(Val::Unit)
             }
@@ -2295,6 +2381,7 @@ impl Lower<'_> {
                 if self.b.value_ty(v) != ty {
                     return Err("assign type".into());
                 }
+                self.keep_pin(local)?;
                 self.b.def_local(slot, v).map_err(mir)?;
                 Ok(Val::Unit)
             }
@@ -4250,6 +4337,7 @@ impl Lower<'_> {
             return Ok(());
         }
         let slot = self.slot(local)?;
+        self.keep_pin(local)?;
         self.b.def_local(slot, v).map_err(mir)
     }
 
