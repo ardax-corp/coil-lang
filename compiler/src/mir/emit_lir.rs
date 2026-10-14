@@ -47,7 +47,7 @@ pub fn emit_lir_with_aliases(
     pool: &mut Vec<u64>,
     across_alloc: bool,
 ) -> Result<Vec<IlOp>, LowerError> {
-    if func.has_gc_edge() && !across_alloc {
+    if func.has_mapped_gc_edge() && !across_alloc {
         return Err(LowerError::Refused(
             "MIR→LIR refuses Alloc/GcBarrier without S2b maps (S2c)".into(),
         ));
@@ -169,7 +169,7 @@ pub(super) fn lir_sidecars(func: &MirFunc) -> LirSidecars {
     let plan = EmitPlan::new(func);
     let (regs, _) = assign_needed(func, &plan).unwrap_or_else(|_| (Vec::new(), 0));
     let regs = coalesce_latch_overwrite(func, regs, &plan.need_slot);
-    let stack_map = if func.has_gc_edge() && !regs.is_empty() {
+    let stack_map = if func.has_mapped_gc_edge() && !regs.is_empty() {
         super::stackmap::encode_draft_regs(func, &regs, &plan.need_slot)
     } else {
         None
