@@ -321,6 +321,9 @@ pub enum MirInst {
         dest: ValueId,
         callee: ValueId,
         args: Vec<ValueId>,
+        /// How many of `args` (the last ones) are instance dictionaries a
+        /// `PolyFn` callee takes after its arguments.
+        dicts: u32,
     },
     /// Taken-edge / last-arm payload of [`Terminator::JumpIfMatch`] or
     /// `Unpack` (I2 / D3). `index` is the declaration-order payload word.
@@ -593,6 +596,12 @@ pub enum MirAllocKind {
     PolyFn {
         target: crate::il::Label,
     },
+    /// `MakePolyFnCapture`: a generic function's value carrying its
+    /// instance dictionaries, the elems (a `0` word for evidence the call
+    /// fills in); `CodePtr` of `target` is pushed after them.
+    PolyFnCapture {
+        target: crate::il::Label,
+    },
 }
 
 impl MirAllocKind {
@@ -609,6 +618,7 @@ impl MirAllocKind {
             Self::Boxed { .. } => "boxed",
             Self::Fn { .. } => "fn",
             Self::PolyFn { .. } => "polyfn",
+            Self::PolyFnCapture { .. } => "polyfncap",
         }
     }
 }

@@ -157,7 +157,10 @@ impl MirFunc {
             matches!(
                 i,
                 MirInst::Alloc {
-                    kind: super::inst::MirAllocKind::Fn { .. } | super::inst::MirAllocKind::PolyFn { .. } | super::inst::MirAllocKind::Boxed { .. },
+                    kind: super::inst::MirAllocKind::Fn { .. }
+                        | super::inst::MirAllocKind::PolyFn { .. }
+                        | super::inst::MirAllocKind::PolyFnCapture { .. }
+                        | super::inst::MirAllocKind::Boxed { .. },
                     ..
                 }
             )
@@ -447,7 +450,10 @@ impl MirFunc {
                     return Err(format!("{dest} host dest type"));
                 }
             }
-            MirInst::CallIndirect { dest, callee, args } => {
+            MirInst::CallIndirect { dest, callee, args, dicts } => {
+                if *dicts as usize > args.len() {
+                    return Err(format!("{dest} CallIndirect dicts exceed args"));
+                }
                 if !self.ty(*dest).is_word_lane() {
                     return Err(format!("{dest} CallIndirect dest is not a word lane"));
                 }

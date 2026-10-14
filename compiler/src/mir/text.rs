@@ -172,10 +172,13 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             }
             Ok(())
         }
-        MirInst::CallIndirect { dest, callee, args } => {
+        MirInst::CallIndirect { dest, callee, args, dicts } => {
             write!(f, "{dest} = callind.{} {callee}", func.ty(*dest))?;
             for a in args {
                 write!(f, ", {a}")?;
+            }
+            if *dicts != 0 {
+                write!(f, " dicts {dicts}")?;
             }
             Ok(())
         }
@@ -287,7 +290,7 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
                         write!(f, ", mask {mask}")?;
                     }
                 }
-                MirAllocKind::PolyFn { target } => write!(f, " {}", target.0)?,
+                MirAllocKind::PolyFn { target } | MirAllocKind::PolyFnCapture { target } => write!(f, " {}", target.0)?,
                 MirAllocKind::Array
                 | MirAllocKind::Tuple
                 | MirAllocKind::Dict
@@ -857,8 +860,9 @@ impl<'a> Parser<'a> {
             while self.eat(',') {
                 args.push(self.value()?);
             }
+            let dicts = if self.eat_str("dicts") { self.uint()? as u32 } else { 0 };
             ensure_ty(types, dest, ty);
-            return Ok(MirInst::CallIndirect { dest, callee, args });
+            return Ok(MirInst::CallIndirect { dest, callee, args, dicts });
         }
         if let Some(ty_s) = op.strip_prefix("call.") {
             let ty = MirTy::parse(ty_s).ok_or_else(|| ParseError(op.clone()))?;
@@ -923,6 +927,9 @@ impl<'a> Parser<'a> {
                     MirAllocKind::Fn { target, operand, mask }
                 }
                 "polyfn" => MirAllocKind::PolyFn {
+                    target: crate::il::Label(self.uint()? as u32),
+                },
+                "polyfncap" => MirAllocKind::PolyFnCapture {
                     target: crate::il::Label(self.uint()? as u32),
                 },
                 _ => return Err(ParseError(format!("unknown alloc {kind_s}"))),
@@ -1410,7 +1417,12 @@ bb3:
         // An instance dictionary: a method's code pointer in a tuple.
         let code = b.ins_code_ptr(crate::il::Label(11)).unwrap();
         let dict = b.ins_alloc(MirAllocKind::Tuple, vec![code]).unwrap();
-        let _ = b.ins_gc_barrier(MirGcKind::Safepoint, vec![dict]).unwrap();
+        let dict = b.ins_gc_barrier(MirGcKind::Safepoint, vec![dict]).unwrap();
+        // A constrained generic's value over its dictionary, called with
+        // the call site's.
+        let poly = b.ins_alloc(MirAllocKind::PolyFnCapture { target: crate::il::Label(12) }, vec![dict]).unwrap();
+        let poly = b.ins_gc_barrier(MirGcKind::Safepoint, vec![poly]).unwrap();
+        let _ = b.ins_call_indirect_dicts(poly, vec![x, dict], 1, MirTy::I64).unwrap();
         let y = b.ins_call_indirect(f, vec![x], MirTy::I64).unwrap();
         assert!(b.ins_call_indirect(x, vec![k], MirTy::I64).is_err(), "callee must be a heap word");
         b.ret(Some(y)).unwrap();
@@ -1421,6 +1433,8 @@ bb3:
         assert!(text.contains("alloc.fn 8, 131328, mask 1, v1"), "{text}");
         assert!(text.contains("alloc.polyfn 9"), "{text}");
         assert!(text.contains("= codeptr 11"), "{text}");
+        assert!(text.contains("alloc.polyfncap 12, v"), "{text}");
+        assert!(text.contains(" dicts 1"), "{text}");
         assert!(text.contains("callind.i64 v"), "{text}");
         let again = parse_func(&text).expect(&text);
         again.verify().unwrap();

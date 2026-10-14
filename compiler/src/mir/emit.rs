@@ -293,7 +293,7 @@ pub(super) fn foreign_targets(func: &MirFunc, entry_label: Option<Label>) -> Has
             MirInst::Call { target, .. }
             | MirInst::CodePtr { target, .. }
             | MirInst::Alloc {
-                kind: MirAllocKind::Coro { target } | MirAllocKind::Fn { target, .. } | MirAllocKind::PolyFn { target },
+                kind: MirAllocKind::Coro { target } | MirAllocKind::Fn { target, .. } | MirAllocKind::PolyFn { target } | MirAllocKind::PolyFnCapture { target },
                 ..
             } if Some(*target) != entry_label => Some(target.0),
             _ => None,
@@ -1024,11 +1024,11 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
                 loc,
             });
         }
-        MirInst::CallIndirect { dest, callee, args } => {
+        MirInst::CallIndirect { dest, callee, args, dicts } => {
             // The arguments, then the function value on top.
             let words: Vec<ValueId> = args.iter().copied().chain([*callee]).collect();
             emit_dense_push(out, &words, regs, scratch, loc)?;
-            out.push(byte(Byte::new(Instruction::CallIndirect).with_operand_u32(args.len() as u32)));
+            out.push(byte(Byte::new(Instruction::CallIndirect).with_operand_u32(call_indirect_operand(args.len(), *dicts))));
             out.push(IlOp::StorePop {
                 slot: u32::from(regs[dest.index()]),
                 loc,
@@ -2816,7 +2816,8 @@ fn dense_make_kind(kind: MirAllocKind) -> Result<Option<u8>, LowerError> {
         | MirAllocKind::Coro { .. }
         | MirAllocKind::Boxed { .. }
         | MirAllocKind::Fn { .. }
-        | MirAllocKind::PolyFn { .. } => Ok(None),
+        | MirAllocKind::PolyFn { .. }
+        | MirAllocKind::PolyFnCapture { .. } => Ok(None),
     }
 }
 
@@ -2928,6 +2929,12 @@ pub(super) fn il_for_alloc(
             il_for_alloc_op(MirAllocKind::Enum { tag }, arity, kinds, loc)?,
             IlOp::from_plain_byte(Byte::new(Instruction::TagEnumType).with_operand_u32(type_id), loc),
         ]),
+        // The dictionaries, then `CodePtr` and `MakePolyFnCapture`, as
+        // HIR emission builds a constrained generic function's value.
+        MirAllocKind::PolyFnCapture { target } => Ok(vec![
+            code_ptr_op(target, loc),
+            IlOp::from_plain_byte(Byte::new(Instruction::MakePolyFnCapture).with_operand_u32(arity), loc),
+        ]),
         MirAllocKind::PolyFn { target } => Ok(vec![IlOp::Entry {
             kind: crate::il::EntryKind::MakePolyFn,
             arity: 0,
@@ -2937,6 +2944,12 @@ pub(super) fn il_for_alloc(
         }]),
         _ => il_for_alloc_op(kind, arity, kinds, loc).map(|op| vec![op]),
     }
+}
+
+/// `CallIndirect`'s operand: the value arguments, and the instance
+/// dictionaries after them in the high half.
+pub(super) fn call_indirect_operand(args: usize, dicts: u32) -> u32 {
+    (args as u32 - dicts) | (dicts << 16)
 }
 
 /// `CodePtr` of the function at `target`.
@@ -2980,7 +2993,7 @@ fn il_for_alloc_op(kind: MirAllocKind, arity: u32, kinds: u8, loc: DebugLoc) -> 
             ret_words: 1,
         }),
         MirAllocKind::Boxed { tag } => Ok(IlOp::BoxValue { tag, loc }),
-        MirAllocKind::Fn { .. } | MirAllocKind::PolyFn { .. } => Err(LowerError::Refused("function value alloc".into())),
+        MirAllocKind::Fn { .. } | MirAllocKind::PolyFn { .. } | MirAllocKind::PolyFnCapture { .. } => Err(LowerError::Refused("function value alloc".into())),
     }
 }
 
