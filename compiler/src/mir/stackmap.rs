@@ -142,6 +142,7 @@ pub fn is_alloc_opcode(inst: Instruction) -> bool {
             | Instruction::MakeCoro
             | Instruction::MakeFn
             | Instruction::MakePolyFn
+            | Instruction::MakePolyFnCapture
     )
 }
 
