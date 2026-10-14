@@ -23,6 +23,8 @@ pub(super) struct HirMirTables {
     /// Per argument of such a `format` call (after the format string): the
     /// raw `show` entry a `%v` argument goes through, `None` for a word.
     pub(super) format_shows: HashMap<u32, Vec<Option<crate::il::Label>>>,
+    /// `matrix(data)` calls, whose value is the data itself.
+    pub(super) matrix_wraps: HashSet<u32>,
     /// Entry of each plain one-word-ABI `CALL` (no dictionaries), by call
     /// site: calls, and user operators on a raw instance method.
     pub(super) calls: HashMap<u32, crate::mir::HirCallSite>,
@@ -32,13 +34,16 @@ pub(super) struct HirMirTables {
     pub(super) op_prims: HashSet<u32>,
     /// Calls through a function value emitted as a plain `CallIndirect`.
     pub(super) value_calls: HashSet<u32>,
+    /// Parallel loops the plan moved into their own fork-join functions,
+    /// by loop: the direct MIR lowering's calls.
+    pub(super) par_loops: HashMap<u32, crate::mir::HirParLoop>,
     /// Auto-par call sites sent to a fork-join worker, by call: the direct
     /// MIR lowering's calls.
     pub(super) par_forks: HashMap<u32, crate::mir::HirParFork>,
     /// Some value emission evaluates packs as a bare-class existential.
     pub(super) existential_packs: bool,
-    /// Function values built with `MakeFn` / `MakePolyFn` (lambdas and
-    /// named functions read as values), by expression.
+    /// Function values built with `MakeFn` / `MakePolyFn` (lambdas, named
+    /// functions read as values and partial applications), by expression.
     pub(super) fn_values: HashMap<u32, crate::mir::HirFnValue>,
     /// Entry of the user `into_iter` a counted `for` loop calls, by loop.
     pub(super) into_iters: HashMap<u32, crate::il::Label>,
@@ -140,7 +145,7 @@ impl Compiler {
     /// `value`: whether emission wants `id`'s value (`hir_value`), not
     /// only its effect.
     fn hir_mir_bound(&self, hir: &HirBody, emit: &HirEmit, id: HirId, value: bool, defer: bool, bound: &mut HashSet<u32>) {
-        if emit.par_calls.contains_key(&id.0) {
+        if emit.plan.par_loops.contains_key(&id.0) {
             return;
         }
         let walk = |k: HirId, value: bool, defer: bool, bound: &mut HashSet<u32>| self.hir_mir_bound(hir, emit, k, value, defer, bound);
@@ -341,7 +346,8 @@ impl Compiler {
     fn hir_mir_walk(&mut self, hir: &HirBody, emit: &HirEmit, id: HirId, t: &mut HirMirTables) {
         // A parallel loop outlined into its fork-join function: its code is
         // not this body's.
-        if emit.par_calls.contains_key(&id.0) {
+        if let Some(par) = emit.plan.par_loops.get(&id.0) {
+            t.par_loops.insert(id.0, par.call.clone());
             return;
         }
         let kids = self.hir_mir_note(hir, emit, id, t);
@@ -378,7 +384,7 @@ impl Compiler {
                     let target = lam.label;
                     let operand = make_fn_operand(lam.body.captures.len() as u32, 0, lam.body.params.len() as u32, false);
                     let captures = lam.body.captures.iter().map(|&(outer, _)| outer).collect();
-                    t.fn_values.insert(id.0, crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand }, captures });
+                    t.fn_values.insert(id.0, crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand, mask: 0 }, captures });
                 }
             }
             // A generic function's `MakePolyFn`, when it takes no
@@ -393,7 +399,7 @@ impl Compiler {
             HirKind::Global { .. } if let Some(&(entry, arity, rest)) = emit.plan.fn_refs.get(&id.0) => {
                 if let Some(target) = self.bytecode.entry_label_for_offset(entry) {
                     let operand = make_fn_operand(0, 0, arity, rest);
-                    t.fn_values.insert(id.0, crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand }, captures: Vec::new() });
+                    t.fn_values.insert(id.0, crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand, mask: 0 }, captures: Vec::new() });
                 }
             }
             HirKind::Global { .. } => {
@@ -454,12 +460,31 @@ impl Compiler {
                     return Kids::None;
                 }
             }
+            HirKind::Call { .. } if emit.plan.calls.get(&id.0).is_some_and(|c| matches!(c.builtin, Some(HirBuiltin::Matrix))) => {
+                t.matrix_wraps.insert(id.0);
+            }
             HirKind::Call { args, .. }
                 if !emit.plan.lens.contains_key(&id.0)
                     && emit.plan.calls.get(&id.0).is_some_and(|c| matches!(c.builtin, Some(HirBuiltin::Format))) =>
             {
                 self.hir_mir_format(hir, id, args, t);
                 return Kids::Rest;
+            }
+            // A partial application: `MakeFn` over the filled prefix, each
+            // argument its own word.
+            HirKind::Call { args, .. }
+                if let Some(HirCall {
+                    builtin: Some(HirBuiltin::Partial { entry, mask, operand }),
+                    params,
+                    ..
+                }) = emit.plan.calls.get(&id.0) =>
+            {
+                if args.iter().zip(params).all(|(&a, &p)| self.hir_natural(hir, emit, a) == Some(Rep::Word(p)))
+                    && let Some(target) = self.bytecode.entry_label_for_offset(*entry as usize)
+                {
+                    let kind = crate::mir::MirAllocKind::Fn { target, operand: *operand, mask: *mask };
+                    t.fn_values.insert(id.0, crate::mir::HirFnValue { kind, captures: Vec::new() });
+                }
             }
             HirKind::Call { args, .. } if !emit.plan.lens.contains_key(&id.0) && emit.plan.calls.contains_key(&id.0) => {
                 self.hir_mir_call(hir, emit, id, args, t);
@@ -778,5 +803,110 @@ impl Compiler {
         }
         self.raw_instance_call = raw;
         self.named_entry_target(&fqn, true)
+    }
+
+    /// Decide, before `root` is emitted, which parallel loops under it move
+    /// into their own fork-join functions ([`HirPlan::par_loops`]) and
+    /// whether one runs its fork-join inline ([`HirPlan::par_inline`]), as
+    /// [`Self::hir_par_loop`] lowers each site. A site's enclosing locals
+    /// are the ones bound when it runs: `emit`'s bound slots (parameters
+    /// and captures, or a chunk worker's site locals), then each local
+    /// bound before the site in emission order.
+    pub(super) fn hir_plan_par_loops(&mut self, hir: &HirBody, emit: &mut HirEmit, root: HirId) {
+        let mut bound: HashSet<u32> = (0..emit.slots.len() as u32).filter(|&l| emit.slots[l as usize].is_some()).collect();
+        self.hir_plan_par_walk(hir, emit, root, &mut bound);
+    }
+
+    fn hir_plan_par_walk(&mut self, hir: &HirBody, emit: &mut HirEmit, id: HirId, bound: &mut HashSet<u32>) {
+        let bind_pat = |pat: &HirPat, bound: &mut HashSet<u32>| {
+            Self::hir_pat_locals(pat, &mut |l| {
+                bound.insert(l.0);
+            })
+        };
+        match &hir.expr(id).kind {
+            // `while false { .. }` is dropped.
+            HirKind::Loop { body }
+                if lower::while_shape(hir, *body).is_some_and(|(cond, _)| matches!(hir.expr(cond).kind, HirKind::Lit(Lit::Bool(false)))) => {}
+            HirKind::Loop { body } if let Some((cond, then)) = lower::while_shape(hir, *body) => {
+                if !self.hir_plan_par_site(hir, emit, id, cond, None, then, bound) {
+                    self.hir_plan_par_walk(hir, emit, cond, bound);
+                    self.hir_plan_par_walk(hir, emit, then, bound);
+                }
+            }
+            HirKind::ForIn {
+                pat: HirPat::Bind(local),
+                iterable,
+                body,
+                ..
+            } if self.hir_plan_par_site(hir, emit, id, *iterable, Some(*local), *body, bound) => {}
+            HirKind::ForIn { pat, iterable, body, .. } => {
+                self.hir_plan_par_walk(hir, emit, *iterable, bound);
+                bind_pat(pat, bound);
+                self.hir_plan_par_walk(hir, emit, *body, bound);
+            }
+            HirKind::Let { local, init } => {
+                if let Some(init) = init {
+                    self.hir_plan_par_walk(hir, emit, *init, bound);
+                    if !lower::is_unit_local(hir, &self.checker, *local) {
+                        bound.insert(local.0);
+                    }
+                }
+            }
+            HirKind::LetPat { pat, init } => {
+                self.hir_plan_par_walk(hir, emit, *init, bound);
+                bind_pat(pat, bound);
+            }
+            HirKind::Match { scrutinee, arms } => {
+                self.hir_plan_par_walk(hir, emit, *scrutinee, bound);
+                for arm in arms {
+                    bind_pat(&arm.pat, bound);
+                    self.hir_plan_par_walk(hir, emit, arm.body, bound);
+                }
+            }
+            // The thunk's frame holds only the captures.
+            HirKind::Defer { captures, body } => {
+                let mut inner = captures.iter().flatten().map(|l| l.0).collect();
+                self.hir_plan_par_walk(hir, emit, *body, &mut inner);
+            }
+            // The operand's type name; the operand is not evaluated.
+            HirKind::Builtin { op: Builtin::TypeOf, .. } => {}
+            _ => {
+                for k in lower::children(hir, id) {
+                    self.hir_plan_par_walk(hir, emit, k, bound);
+                }
+            }
+        }
+    }
+
+    /// Plan parallel-loop site `id` as [`Self::hir_par_loop`] lowers it.
+    /// `false` when it runs sequentially (its parts are then walked as
+    /// any loop's).
+    #[allow(clippy::too_many_arguments)]
+    fn hir_plan_par_site(
+        &mut self,
+        hir: &HirBody,
+        emit: &mut HirEmit,
+        id: HirId,
+        head: HirId,
+        bind: Option<LocalId>,
+        body: HirId,
+        bound: &mut HashSet<u32>,
+    ) -> bool {
+        let Some(locals) = self.hir_par_site(hir, &emit.plan, id, head, bind, body, &|l| bound.contains(&l.0)) else {
+            return false;
+        };
+        if let Some(planned) = self.hir_par_outline(hir, id, &locals, bind, body) {
+            emit.plan.par_loops.insert(id.0, planned);
+            return true;
+        }
+        // Inline: the body runs in the chunk worker's frame; what it binds
+        // there is unbound after it.
+        emit.plan.par_inline = true;
+        if let Some(local) = bind {
+            bound.insert(local.0);
+        }
+        let mut inner = bound.clone();
+        self.hir_plan_par_walk(hir, emit, body, &mut inner);
+        true
     }
 }

@@ -2906,10 +2906,10 @@ pub(super) fn il_for_alloc(
     loc: DebugLoc,
 ) -> Result<Vec<IlOp>, LowerError> {
     match kind {
-        // The captures, then `Const 0` (no filled parameters), `CodePtr`
+        // The captures and filled parameters, then `Const mask`, `CodePtr`
         // and `MakeFn`, as HIR emission builds a function value.
-        MirAllocKind::Fn { target, operand } => Ok(vec![
-            IlOp::Const { imm: 0, loc },
+        MirAllocKind::Fn { target, operand, mask } => Ok(vec![
+            IlOp::Const { imm: mask as i32, loc },
             IlOp::Entry {
                 kind: crate::il::EntryKind::CodePtr,
                 arity: 0,

@@ -588,11 +588,14 @@ pub enum MirAllocKind {
         tag: u32,
     },
     /// `MakeFn`: a function value of the code at `target`, elems its
-    /// captures (`Const 0` fill mask and `CodePtr` pushed after them).
-    /// `operand` is the packed `MakeFn` operand.
+    /// captures then its filled parameters (the `Const mask` fill mask and
+    /// `CodePtr` pushed after them). `operand` is the packed `MakeFn`
+    /// operand; `mask` has a bit per filled parameter (0: none, a closure
+    /// or a named function's value; a prefix: a partial application).
     Fn {
         target: crate::il::Label,
         operand: u32,
+        mask: u32,
     },
     /// `MakePolyFn`: a generic function's value with no dictionaries.
     PolyFn {
