@@ -404,7 +404,7 @@ impl Compiler {
                         Some(crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::PolyFn { target }, captures: Vec::new(), dicts: Vec::new() })
                     } else {
                         let (name, ty) = (name.clone(), Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t)));
-                        let code = self.hir_mir_quiet(|this| {
+                        let code = self.hir_mir_once(|this| {
                             let mut code = CodeBuf::new();
                             this.emit_polyfn_escape_dicts(&mut code, &name, ty.as_ref());
                             code
@@ -597,7 +597,7 @@ impl Compiler {
         let fqn = self.instance_clone(&fqn, std::slice::from_ref(&lookup)).unwrap_or(fqn);
         let raw = self.raw_instance_methods.contains(&fqn);
         let span = hir.expr(id).span;
-        let dict = self.hir_mir_quiet(|this| this.emit_call_instance_dict(&mut CodeBuf::new(), (class, method, &fqn), std::slice::from_ref(&lookup), span.0..span.1));
+        let dict = self.hir_mir_once(|this| this.emit_call_instance_dict(&mut CodeBuf::new(), (class, method, &fqn), std::slice::from_ref(&lookup), span.0..span.1));
         // A two-word result comes back as two words (or boxed after the call).
         let one_word = self.two_word_return_kind(&fqn).is_none();
         self.raw_instance_call = raw;
@@ -642,7 +642,7 @@ impl Compiler {
             let ground = inst.ground.as_ref().expect("ground call");
             let method = &ground.method;
             let key = self.instance_clone(&call.key, &inst.args).unwrap_or_else(|| call.key.clone());
-            let dict = self.hir_mir_quiet(|this| this.emit_call_instance_dict(&mut CodeBuf::new(), (&inst.class, method, &key), &inst.args, span.0..span.1));
+            let dict = self.hir_mir_once(|this| this.emit_call_instance_dict(&mut CodeBuf::new(), (&inst.class, method, &key), &inst.args, span.0..span.1));
             let raw = self.raw_instance_methods.contains(&key);
             self.raw_instance_call = raw;
             let target = self.named_entry_target(&key, true);
@@ -682,7 +682,7 @@ impl Compiler {
             // A shared generic body's call is plain with no dictionary.
             let generic_plain = call.generic.as_deref().is_none_or(|g| self.hir_generic_plain(hir, emit, g, args, &call.params));
             let dict = call.generic.as_deref().is_some_and(|g| self.hir_mir_dicts(g) > 0)
-                || instance.is_some_and(|inst| self.hir_mir_quiet(|this| this.emit_instance_dict(&mut CodeBuf::new(), &inst.class, &inst.args)));
+                || instance.is_some_and(|inst| self.hir_mir_once(|this| this.emit_instance_dict(&mut CodeBuf::new(), &inst.class, &inst.args)));
             let coro = self.coroutine_fns.contains(&key);
             self.hir_request_method_clone(&key);
             self.raw_instance_call = raw;
@@ -772,7 +772,7 @@ impl Compiler {
         // The call site's dictionaries, as emission pushes them.
         let dicts = match &source {
             Some(source) => {
-                let code = self.hir_mir_quiet(|this| {
+                let code = self.hir_mir_once(|this| {
                     let mut code = CodeBuf::new();
                     this.emit_call_site_dicts(&mut code, source, &arg_tys, call_ty.as_ref());
                     code
@@ -814,7 +814,7 @@ impl Compiler {
         if generic.forwarded.iter().any(|&i| self.lookup_slot(&format!("__dict{i}")).is_some()) {
             return None;
         }
-        let code = self.hir_mir_quiet(|this| {
+        let code = self.hir_mir_once(|this| {
             let mut code = CodeBuf::new();
             this.emit_call_site_dicts(&mut code, &generic.lookup, &generic.arg_tys, Some(&generic.ret_ty));
             code
@@ -853,7 +853,7 @@ impl Compiler {
 
     fn hir_mir_dicts(&mut self, generic: &HirGeneric) -> u32 {
         let forwarded = generic.forwarded.iter().filter(|&&i| self.lookup_slot(&format!("__dict{i}")).is_some()).count();
-        let site = self.hir_mir_quiet(|this| this.emit_call_site_dicts(&mut CodeBuf::new(), &generic.lookup, &generic.arg_tys, Some(&generic.ret_ty)));
+        let site = self.hir_mir_once(|this| this.emit_call_site_dicts(&mut CodeBuf::new(), &generic.lookup, &generic.arg_tys, Some(&generic.ret_ty)));
         (forwarded + site) as u32
     }
 
@@ -993,24 +993,31 @@ impl Compiler {
         }
     }
 
-    /// Run a dictionary helper of emission into a scratch buffer, quietly
-    /// ([`Self::hir_mir_quiet`]): whether its code reads a frame
+    /// Run a dictionary helper of emission into a scratch buffer
+    /// ([`Self::hir_mir_once`]): whether its code reads a frame
     /// dictionary. The code goes nowhere.
     fn hir_mir_probe_dicts(&mut self, f: impl FnOnce(&mut Self, &mut CodeBuf)) -> bool {
         let mut code = CodeBuf::new();
-        self.hir_mir_quiet(|this| f(this, &mut code));
+        self.hir_mir_once(|this| f(this, &mut code));
         let dicts: HashSet<u32> = (0..).map_while(|i| self.lookup_slot(&format!("__dict{i}"))).collect();
         code.ops().iter().filter_map(IlOp::as_encode_byte).any(|b| {
             *b.bytecode() == Instruction::LOAD && (0..b.load_store_count()).any(|i| dicts.contains(&b.load_store_slot_at(i)))
         })
     }
 
-    /// `f(self)` with the diagnostics it reports dropped: the walk asks
-    /// what emission decided, which reported them already.
-    fn hir_mir_quiet<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
-        let messages = self.messages.len();
+    /// `f(self)`, an emission helper the walk asks for its decision, with
+    /// each diagnostic it reports kept once: one already reported (the
+    /// same message at the same place, as emission reports it when it runs
+    /// the helper first) is not repeated. The walk's diagnostics are its
+    /// own, so they stand whether or not emission ran.
+    fn hir_mir_once<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let before = self.messages.len();
         let r = f(self);
-        self.messages.truncate(messages);
+        for message in self.messages.split_off(before) {
+            if !self.messages.contains(&message) {
+                self.messages.push(message);
+            }
+        }
         r
     }
 
@@ -1093,7 +1100,7 @@ impl Compiler {
         // A non-raw `show` takes the value boxed (`BoxValue`).
         let boxed = if raw { None } else { Self::ty_to_value_tag(&lookup_ty).map(|tag| tag as u32) };
         // A dictionary argument: not a plain call. Its code goes nowhere.
-        let dict = self.hir_mir_quiet(|this| this.emit_call_instance_dict(&mut CodeBuf::new(), ("Show", "show", &fqn), std::slice::from_ref(&lookup_ty), 0..0));
+        let dict = self.hir_mir_once(|this| this.emit_call_instance_dict(&mut CodeBuf::new(), ("Show", "show", &fqn), std::slice::from_ref(&lookup_ty), 0..0));
         if dict || self.two_word_return_kind(&fqn).is_some() {
             return None;
         }
