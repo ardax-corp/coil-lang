@@ -2794,13 +2794,23 @@ impl Lower<'_> {
                 let Some((a, b)) = ab else {
                     return Ok(Val::Never);
                 };
-                for (item, v) in items.iter().zip([a, b]) {
-                    match item {
-                        HirPat::Wild => {}
-                        HirPat::Bind(local) => self.bind(*local, v)?,
-                        _ => return Err("let pattern".into()),
-                    }
+                let tys = match self.expr_ty(*init).map(strip_readonly) {
+                    Some(Ty::Tuple(tys)) if tys.len() == 2 => Some(tys.clone()),
+                    _ => None,
+                };
+                for (k, (item, v)) in items.iter().zip([a, b]).enumerate() {
+                    self.bind_tuple_item(item, v, tys.as_ref().map(|t| &t[k]))?;
                 }
+                Ok(Val::Unit)
+            }
+            // `let (a, b, c) = e` of a heap tuple of any other length: its
+            // items read out, as a nested tuple pattern's.
+            HirKind::LetPat { pat: pat @ HirPat::Tuple(_), init } => {
+                let Some(obj) = self.word(*init)? else {
+                    return Ok(Val::Never);
+                };
+                let ty = self.expr_ty(*init).cloned();
+                self.bind_tuple_item(pat, obj, ty.as_ref())?;
                 Ok(Val::Unit)
             }
             // `let { a, b } = r` of a record: each bound field read by its
@@ -5431,6 +5441,35 @@ impl Lower<'_> {
     }
 
     /// Bind `local` to the word `v`.
+    /// Bind one item of a `let` tuple pattern to `v`, of type `ty`: a
+    /// nested tuple pattern (`let (a, (b, c)) = ..`) reads its items out
+    /// of the heap tuple `v` is.
+    fn bind_tuple_item(&mut self, pat: &HirPat, v: ValueId, ty: Option<&Ty>) -> Result<(), Refusal> {
+        match pat {
+            HirPat::Wild => Ok(()),
+            HirPat::Bind(local) => self.bind(*local, v),
+            HirPat::Tuple(items) => {
+                let Some(Ty::Tuple(tys)) = ty.map(strip_readonly) else {
+                    return Err("let pattern".into());
+                };
+                if tys.len() != items.len() || self.b.value_ty(v) != MirTy::HeapRef {
+                    return Err("let pattern".into());
+                }
+                for (k, (item, t)) in items.iter().zip(tys).enumerate() {
+                    if matches!(item, HirPat::Wild) {
+                        continue;
+                    }
+                    let item_ty = self.tuple_item(t).ok_or("let pattern")?;
+                    let index = self.b.ins_const(MirConst::I64(k as i64)).map_err(mir)?;
+                    let x = self.b.ins_index(v, index, item_ty, false).map_err(mir)?;
+                    self.bind_tuple_item(item, x, Some(t))?;
+                }
+                Ok(())
+            }
+            _ => Err("let pattern".into()),
+        }
+    }
+
     fn bind(&mut self, local: HirLocal, v: ValueId) -> Result<(), Refusal> {
         let ty = self.local_ty(local)?;
         let v = match (self.b.value_ty(v), ty) {
