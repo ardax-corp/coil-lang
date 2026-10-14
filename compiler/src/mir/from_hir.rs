@@ -5531,17 +5531,22 @@ impl Lower<'_> {
         if !binds.is_empty() && binds.len() != fields.len() {
             return Err("payload pattern".into());
         }
+        let binds = if binds.is_empty() { vec![None; fields.len()] } else { binds };
         let tys = fields
             .iter()
-            .map(|t| {
+            .zip(&binds)
+            .map(|(t, bind)| {
                 self.inp
                     .word(t)
                     .or_else(|| is_unit(t).then_some(MirTy::I64))
                     .or_else(|| (self.inp.boxed_view)(t, None).map(|_| MirTy::HeapRef))
+                    // A field of a type never resolved (a thread's or
+                    // channel's value) that the arm ignores: its word is
+                    // unpacked, as emission's, and never read.
+                    .or_else(|| (bind.is_none() && is_var(t)).then_some(MirTy::I64))
             })
             .collect::<Option<Vec<_>>>()
             .ok_or("payload type")?;
-        let binds = if binds.is_empty() { vec![None; tys.len()] } else { binds };
         Ok((tys, binds))
     }
 
