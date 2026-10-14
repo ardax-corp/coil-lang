@@ -20,9 +20,9 @@ pub(super) struct HirMirTables {
     /// whose arguments all print as words (`%v` as `%s`), and of string
     /// `+` (`"%s%s"`), by expression.
     pub(super) formats: HashMap<u32, u32>,
-    /// Per argument of such a `format` call (after the format string): the
-    /// raw `show` entry a `%v` argument goes through, `None` for a word.
-    pub(super) format_shows: HashMap<u32, Vec<Option<crate::il::Label>>>,
+    /// Per argument of such a `format` call (after the format string): how
+    /// a `%v` argument is shown, `None` for a word.
+    pub(super) format_shows: HashMap<u32, Vec<Option<crate::mir::HirShow>>>,
     /// `matrix(data)` calls, whose value is the data itself.
     pub(super) matrix_wraps: HashSet<u32>,
     /// Entry of each plain one-word-ABI `CALL` (no dictionaries), by call
@@ -392,22 +392,35 @@ impl Compiler {
                     let target = lam.label;
                     let operand = make_fn_operand(lam.body.captures.len() as u32, 0, lam.body.params.len() as u32, false);
                     let captures = lam.body.captures.iter().map(|&(outer, _)| outer).collect();
-                    t.fn_values.insert(id.0, crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand, mask: 0 }, captures });
+                    t.fn_values.insert(id.0, crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand, mask: 0 }, captures, dicts: Vec::new() });
                 }
             }
-            // A generic function's `MakePolyFn`, when it takes no
-            // dictionaries.
+            // A generic function's `MakePolyFn`, or with bounds its
+            // `MakePolyFnCapture` over the dictionaries
+            // `emit_polyfn_escape_dicts` pushes.
             HirKind::Global { .. } if let Some(name) = emit.plan.polyfns.get(&id.0) => {
-                if self.checker.dict_arity_for(name) == 0
-                    && let Some(target) = self.functions.get(name).and_then(|&entry| self.bytecode.entry_label_for_offset(entry))
-                {
-                    t.fn_values.insert(id.0, crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::PolyFn { target }, captures: Vec::new() });
+                if let Some(target) = self.functions.get(name).and_then(|&entry| self.bytecode.entry_label_for_offset(entry)) {
+                    let value = if self.checker.dict_arity_for(name) == 0 {
+                        Some(crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::PolyFn { target }, captures: Vec::new(), dicts: Vec::new() })
+                    } else {
+                        let (name, ty) = (name.clone(), Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t)));
+                        let code = self.hir_mir_quiet(|this| {
+                            let mut code = CodeBuf::new();
+                            this.emit_polyfn_escape_dicts(&mut code, &name, ty.as_ref());
+                            code
+                        });
+                        self.hir_mir_dict_program(&code)
+                            .map(|dicts| crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::PolyFnCapture { target }, captures: Vec::new(), dicts })
+                    };
+                    if let Some(value) = value {
+                        t.fn_values.insert(id.0, value);
+                    }
                 }
             }
             HirKind::Global { .. } if let Some(&(entry, arity, rest)) = emit.plan.fn_refs.get(&id.0) => {
                 if let Some(target) = self.bytecode.entry_label_for_offset(entry) {
                     let operand = make_fn_operand(0, 0, arity, rest);
-                    t.fn_values.insert(id.0, crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand, mask: 0 }, captures: Vec::new() });
+                    t.fn_values.insert(id.0, crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand, mask: 0 }, captures: Vec::new(), dicts: Vec::new() });
                 }
             }
             HirKind::Global { .. } => {
@@ -493,7 +506,7 @@ impl Compiler {
                     && let Some(target) = self.bytecode.entry_label_for_offset(*entry as usize)
                 {
                     let kind = crate::mir::MirAllocKind::Fn { target, operand: *operand, mask: *mask };
-                    t.fn_values.insert(id.0, crate::mir::HirFnValue { kind, captures: Vec::new() });
+                    t.fn_values.insert(id.0, crate::mir::HirFnValue { kind, captures: Vec::new(), dicts: Vec::new() });
                 }
             }
             HirKind::Call { args, .. } if !emit.plan.lens.contains_key(&id.0) && emit.plan.calls.contains_key(&id.0) => {
@@ -736,8 +749,8 @@ impl Compiler {
     }
 
     /// Call `id` through `PolyFn` local `f`, as [`Self::hir_polyfn_call`]
-    /// emits it, when it passes no dictionary: each argument's `BoxValue`
-    /// tag and the result's `UnboxValue` tag.
+    /// emits it: each argument's `BoxValue` tag, the call site's
+    /// dictionaries and the result's `UnboxValue` tag.
     fn hir_mir_polyfn_call(&mut self, hir: &HirBody, emit: &HirEmit, id: HirId, f: HirId, args: &[HirId], t: &mut HirMirTables) {
         let mut boxes = Vec::with_capacity(args.len());
         let mut arg_tys = Vec::with_capacity(args.len());
@@ -756,18 +769,27 @@ impl Compiler {
         }
         let call_ty = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));
         let source = self.hir_polyfn_source(hir, emit, f);
-        if let Some(source) = &source {
-            let dicts = self.hir_mir_quiet(|this| this.emit_call_site_dicts(&mut CodeBuf::new(), source, &arg_tys, call_ty.as_ref()));
-            if dicts != 0 {
-                return;
+        // The call site's dictionaries, as emission pushes them.
+        let dicts = match &source {
+            Some(source) => {
+                let code = self.hir_mir_quiet(|this| {
+                    let mut code = CodeBuf::new();
+                    this.emit_call_site_dicts(&mut code, source, &arg_tys, call_ty.as_ref());
+                    code
+                });
+                let Some(dicts) = self.hir_mir_dict_program(&code) else {
+                    return;
+                };
+                dicts
             }
-        }
+            None => Vec::new(),
+        };
         let unbox = match &source {
             Some(source) => self.generic_return_depends_on_type_param(source),
             None => Self::hir_polyfn_returns_var(hir, &self.checker, f),
         };
         let unbox = if unbox { call_ty.as_ref().and_then(Self::ty_to_value_tag).map(|tag| tag as u32) } else { None };
-        t.poly_calls.insert(id.0, crate::mir::HirPolyCall { boxes, unbox });
+        t.poly_calls.insert(id.0, crate::mir::HirPolyCall { boxes, dicts, unbox });
     }
 
     /// How many dictionaries [`Self::hir_push_dicts`] pushes for `generic`.
@@ -992,8 +1014,9 @@ impl Compiler {
         r
     }
 
-    /// A `format` call whose `%v` arguments each go through one plain
-    /// `show` entry: its format string (`%v` as `%s`) and those entries.
+    /// A `format` call whose `%v` arguments each show as
+    /// [`Self::hir_show_plan`] plans: its format string (`%v` as `%s`) and
+    /// those plans.
     fn hir_mir_format(&mut self, hir: &HirBody, id: HirId, args: &[HirId], t: &mut HirMirTables) {
         let HirKind::Lit(Lit::Str(fmt)) = &hir.expr(args[0]).kind else {
             return;
@@ -1004,7 +1027,7 @@ impl Compiler {
         let mut shows_ok = true;
         for (i, &arg) in args.iter().enumerate().skip(1) {
             if specs.get(i - 1) == Some(&'v') {
-                let show = self.hir_show_entry(hir, arg);
+                let show = self.hir_show_plan(hir, arg);
                 shows_ok &= show.is_some();
                 shows.push(show);
             } else {
@@ -1020,35 +1043,62 @@ impl Compiler {
         }
     }
 
-    /// The raw `show` entry [`Self::hir_show`] calls for `arg` when that is
-    /// one plain one-word `CALL` of the boxed-layout value and nothing else
-    /// (no boxing, conversion or dictionary), as `emit_show_for_stack_value`
-    /// picks it.
-    pub(super) fn hir_show_entry(&mut self, hir: &HirBody, arg: HirId) -> Option<crate::il::Label> {
+    /// How [`Self::hir_show`] shows `arg` when that is not a bound
+    /// dictionary's method: as [`Self::hir_show_ty`].
+    fn hir_show_plan(&mut self, hir: &HirBody, arg: HirId) -> Option<crate::mir::HirShow> {
         if self.hir_bound_show(hir, arg).is_some() {
             return None;
         }
         let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, arg)?);
-        if matches!(ty, Ty::Tuple(_) | Ty::Record { .. }) || self.value_layout(&ty) != ValueLayout::Boxed {
+        self.hir_show_ty(&ty)
+    }
+
+    /// How `emit_show_for_stack_value` shows a value of type `ty`, when
+    /// each step is one direct MIR has: a tuple's or record's items shown
+    /// and formatted, `STRINGIFY` with no `Show` instance, or one plain
+    /// one-word `CALL` of the raw `show` entry on the boxed-layout value
+    /// (no boxing, conversion or dictionary). It interns the strings
+    /// emission does.
+    fn hir_show_ty(&mut self, ty: &Ty) -> Option<crate::mir::HirShow> {
+        match ty {
+            Ty::Tuple(items) => {
+                let items = items.iter().map(|t| Some((t.clone(), self.hir_show_ty(t)?))).collect::<Option<Vec<_>>>()?;
+                let fmt = self.intern_string(unescape_coil_string(&Self::tuple_show_format(items.len())));
+                return Some(crate::mir::HirShow::Tuple { fmt, items });
+            }
+            Ty::Record { fields } => {
+                let mut shown = Vec::with_capacity(fields.len());
+                for (name, t) in fields {
+                    let key = self.intern_string(name);
+                    shown.push((key, t.clone(), self.hir_show_ty(t)?));
+                }
+                let fmt = self.intern_string(unescape_coil_string(&Self::record_show_format(fields)));
+                return Some(crate::mir::HirShow::Record { fmt, fields: shown });
+            }
+            _ => {}
+        }
+        if self.value_layout(ty) != ValueLayout::Boxed {
             return None;
         }
-        let lookup_ty = Self::show_lookup_ty_for_instance(&ty);
-        let fqn = self.find_show_instance(&lookup_ty)?.method_fqns.get("show").cloned()?;
-        if !self.functions.contains_key(&fqn) && !self.fn_entry_labels.contains_key(&fqn) {
-            return None;
-        }
+        let lookup_ty = Self::show_lookup_ty_for_instance(ty);
+        let Some(fqn) = self
+            .find_show_instance(&lookup_ty)
+            .and_then(|inst| inst.method_fqns.get("show").cloned())
+            .filter(|fqn| self.functions.contains_key(fqn) || self.fn_entry_labels.contains_key(fqn))
+        else {
+            return Some(crate::mir::HirShow::Stringify);
+        };
         let fqn = self.instance_clone(&fqn, std::slice::from_ref(&lookup_ty)).unwrap_or(fqn);
         let raw = self.raw_instance_methods.contains(&fqn);
-        if !raw && Self::ty_to_value_tag(&lookup_ty).is_some() {
-            return None;
-        }
+        // A non-raw `show` takes the value boxed (`BoxValue`).
+        let boxed = if raw { None } else { Self::ty_to_value_tag(&lookup_ty).map(|tag| tag as u32) };
         // A dictionary argument: not a plain call. Its code goes nowhere.
         let dict = self.hir_mir_quiet(|this| this.emit_call_instance_dict(&mut CodeBuf::new(), ("Show", "show", &fqn), std::slice::from_ref(&lookup_ty), 0..0));
         if dict || self.two_word_return_kind(&fqn).is_some() {
             return None;
         }
         self.raw_instance_call = raw;
-        self.named_entry_target(&fqn, true)
+        self.named_entry_target(&fqn, true).map(|target| crate::mir::HirShow::Call { target, boxed })
     }
 
     /// Decide, before `root` is emitted, which parallel loops under it move

@@ -1160,12 +1160,13 @@ fn emit_stored(
                 loc,
             });
         }
-        MirInst::CallIndirect { dest, callee, args } => {
+        MirInst::CallIndirect { dest, callee, args, dicts } => {
             // The arguments, then the function value on top.
             for a in args.iter().chain([callee]) {
                 emit_stack(out, *a, func, plan, regs, pool, loc)?;
             }
-            out.push(IlOp::from_plain_byte(Byte::new(Instruction::CallIndirect).with_operand_u32(args.len() as u32), loc));
+            let operand = super::emit::call_indirect_operand(args.len(), *dicts);
+            out.push(IlOp::from_plain_byte(Byte::new(Instruction::CallIndirect).with_operand_u32(operand), loc));
             out.push(IlOp::StorePop {
                 slot: u32::from(regs[dest.index()]),
                 loc,
