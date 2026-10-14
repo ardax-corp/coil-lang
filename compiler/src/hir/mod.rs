@@ -325,6 +325,20 @@ pub enum Builtin {
     /// `PRINT` of a string (compiler-made bodies only: the test-runner
     /// `main`).
     Print,
+    /// `UnboxValue tag` of a word that may come boxed (compiler-made bodies
+    /// only: a dictionary entry's argument). A word that is not a box of
+    /// `tag` passes through.
+    Unbox { tag: u32 },
+    /// `BoxValue tag` of a word (compiler-made bodies only: a dictionary
+    /// entry's result). The node's type is the word it is read as, not the
+    /// boxed value's.
+    Box { tag: u32 },
+    /// `STRINGIFY` of a word (compiler-made bodies only: a primitive's
+    /// `Show::show`), reading a float or bool by its box's tag.
+    Stringify,
+    /// `TagArrayKind kind` of an array word, which it leaves (compiler-made
+    /// bodies only: the stamped `Vec` constructors).
+    TagArrayKind { kind: u8 },
 }
 
 #[derive(Debug, Clone, PartialEq)]

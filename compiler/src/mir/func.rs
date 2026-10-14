@@ -72,6 +72,10 @@ pub struct MirFunc {
     pub heap_slots: BTreeSet<LocalId>,
     /// Locals a non-heap word was stored in.
     pub word_slots: BTreeSet<LocalId>,
+    /// Code HIR emission adds that this MIR (lowered from HIR) leaves out,
+    /// such as an existential pack: the MIR still describes the body's
+    /// frame slots (its GC map), but no tier emits code from it.
+    pub emit_refusal: Option<&'static str>,
 }
 
 impl MirFunc {
@@ -95,6 +99,7 @@ impl MirFunc {
             heap_slots: BTreeSet::new(),
             word_slots: BTreeSet::new(),
             opaque_words: false,
+            emit_refusal: None,
         }
     }
 
@@ -701,6 +706,16 @@ impl MirFunc {
                 }
                 if !self.ty(*src).is_specialized() {
                     return Err(format!("{dest} Stringify src type"));
+                }
+            }
+            MirInst::TagArrayKind { dest, src, .. } => {
+                if self.ty(*dest) != MirTy::HeapRef || self.ty(*src) != MirTy::HeapRef {
+                    return Err(format!("{dest} TagArrayKind type"));
+                }
+            }
+            MirInst::Unbox { dest, src, .. } => {
+                if !self.ty(*dest).is_specialized() || !self.ty(*src).is_specialized() {
+                    return Err(format!("{dest} Unbox type"));
                 }
             }
             MirInst::StrEq { dest, lhs, rhs, .. } => {

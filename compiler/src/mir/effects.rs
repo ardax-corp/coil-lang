@@ -70,7 +70,8 @@ impl MirInst {
             | Self::Print { .. }
             | Self::Panic { .. }
             | Self::Format { .. }
-            | Self::Stringify { .. } => true,
+            | Self::Stringify { .. }
+            | Self::TagArrayKind { .. } => true,
             _ => false,
         }
     }
