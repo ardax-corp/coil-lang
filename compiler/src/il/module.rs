@@ -45,6 +45,9 @@ pub struct IlModule {
     pub needs_frame_extent: HashSet<String>,
     /// Original IL slot → reconstruct slot after dense / LIR (named lets).
     pub debug_slot_remaps: HashMap<String, HashMap<u32, u32>>,
+    /// A pinned (`defer`) body the LIR tier took: its cleanup pad's label
+    /// and frame words, in place of HIR emission's pad and thunks.
+    pub lir_cleanup_pads: HashMap<String, (Label, u32)>,
 }
 
 impl IlModule {
@@ -64,6 +67,7 @@ impl IlModule {
                 deopt_map_drafts: Vec::new(),
                 needs_frame_extent: HashSet::new(),
                 debug_slot_remaps: HashMap::new(),
+                lir_cleanup_pads: HashMap::new(),
             };
         }
 
@@ -487,7 +491,17 @@ impl IlModule {
         }
         let dense_kept = self.funcs.len() - pending.len() - pinned;
         let mut lir_kept = 0usize;
-        for i in pending.iter().copied() {
+        // A pinned (`defer`) body whose MIR has its cleanup pad may take
+        // LIR, which emits that pad after the body; it stays pinned.
+        let padded: Vec<usize> = (0..self.funcs.len())
+            .filter(|&i| {
+                fused[i]
+                    && self.funcs[i].meta.pinned
+                    && self.funcs[i].meta.hir_mir.as_deref().is_some_and(|f| f.cleanup.is_some())
+            })
+            .collect();
+        self.lir_cleanup_pads.clear();
+        for i in pending.iter().copied().chain(padded.iter().copied()) {
             if !opts.mir_specialize {
                 break;
             }
@@ -510,7 +524,12 @@ impl IlModule {
                 // rematerializes a stored remainder (pair_int_churn +12%).
                 if drops_bound_label(&bound[i], &lir) {
                     lir_why[i] = Some("drops a called inner label".to_string());
+                } else if body.meta.pinned && side.cleanup_pad.is_none() {
+                    lir_why[i] = Some("no cleanup pad".to_string());
                 } else if fused[i] || lir_keeps(&body.ops, &lir) {
+                    if let Some(pad) = side.cleanup_pad.filter(|_| body.meta.pinned) {
+                        self.lir_cleanup_pads.insert(body.meta.name.clone(), pad);
+                    }
                     // Even empty: a local it leaves out has no register.
                     side_remaps.insert(body.meta.name.clone(), side.debug_slot_remap);
                     if let Some(deopt) = side.deopt {
@@ -565,6 +584,7 @@ impl IlModule {
 
         if opts.collect_stats {
             let (dense, fuse) = if opts.mir_specialize {
+                // A pinned body LIR took counts in `lir_kept`, not `pinned`.
                 (dense_kept, pending.len() - lir_kept + pinned)
             } else {
                 (0, self.funcs.len())
