@@ -588,9 +588,12 @@ impl IlModule {
                     // A pinned (`defer`) body's frame also runs its thunks
                     // and cleanup pad, which its MIR does not describe.
                     && !body.meta.pinned
-                    && body.ops.iter().any(crate::mir::refuses_alloc)
-                    && !has_inner_code(&body.ops)
                     && let Some(func) = body.meta.hir_mir.as_deref()
+                    // A lambda's code sits inline in this body's IL, in its
+                    // own frame: a map of this body's slots at every PC
+                    // would cover it too.
+                    && !func.inner_code
+                    && crate::mir::maps_allocation(func)
                 {
                     let mut draft = crate::mir::encode_draft_slots(func);
                     draft.name = body.meta.name.clone();
@@ -766,23 +769,6 @@ fn drop_jumps_to_next_label(ops: &mut Vec<IlOp>) {
             i += 1;
         }
     }
-}
-
-/// `new` still jumps to or calls a label `old` bound, but no longer binds it.
-/// Whether `ops` hold the code of a function value they build (a lambda's
-/// body, bound inside the body). Its frame is not this body's, so a map of
-/// this body's slots over every PC would cover it too.
-fn has_inner_code(ops: &[IlOp]) -> bool {
-    let bound: std::collections::HashSet<u32> = ops
-        .iter()
-        .filter_map(|op| match op {
-            IlOp::Label(l) | IlOp::JoinLabel(l) => Some(l.0),
-            _ => None,
-        })
-        .collect();
-    ops.iter().any(|op| {
-        matches!(op, IlOp::Entry { kind: crate::il::EntryKind::CodePtr | crate::il::EntryKind::MakePolyFn, target, .. } if bound.contains(&target.0))
-    })
 }
 
 /// Every label `ops` binds.

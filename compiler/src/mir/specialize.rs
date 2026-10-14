@@ -583,7 +583,7 @@ pub fn try_lower_abi_body_side(
         }
         // An argless `FORMAT` is no `refuses_alloc` site but still a mapped
         // allocation: the body needs its maps all the same.
-        (GateRef::Mir(_), Some(func)) => super::gates::GateFacts::of(func).has_alloc || func.has_mapped_gc_edge(),
+        (GateRef::Mir(_), Some(func)) => super::gates::maps_allocation(func),
         (GateRef::Mir(_), None) => false,
     };
     // MIR lowered from HIR maps its own allocations (`lir_tail` builds the
