@@ -48,4 +48,7 @@ test("two-word enum fields of a frame-slot class local") {
     // i = 0, 2: Done(i) + i * 10; i = 1, 3: Ready + 1; plus len("job").
     assert!(run(4) == 0 + 0 + 1 + 2 + 20 + 1 + 3);
     assert!(run(0) == 3);
+    // Long enough that a word left on the stack per pass would overrun it:
+    // 11 * (0 + 2 + .. + 199998) + 100000 odd passes + 3.
+    assert!(run(200000) == 109999000003);
 }
