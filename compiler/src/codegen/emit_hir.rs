@@ -1153,6 +1153,12 @@ impl Compiler {
                                 field_word(t).filter(|_| crate::typechecking::value_layout::value_layout(checker, t) == ValueLayout::Boxed)
                             })
                             .or_else(|| word(&self.hir_class_ty_args_at(made?, t)?))
+                            // A two-word field's slot holds its box, as
+                            // `new` stores it (`Rep::Word` of a boxed layout).
+                            .or_else(|| {
+                                matches!(crate::hir::layout::of_resolved(checker, &apply_ty_prune(checker.subst(), t)), crate::hir::layout::Layout::Pair(_))
+                                    .then_some(crate::mir::MirTy::HeapRef)
+                            })
                     })
                     .collect();
                 sroa.insert(local.0, tys.ok_or("scalar-replaced field type")?);
@@ -1199,6 +1205,13 @@ impl Compiler {
                 && at_layout != ValueLayout::Boxed)
                 .then_some(at_layout)
         };
+        // A field's word, a two-word value (a pair) held boxed.
+        let record_word = |t: &Ty| {
+            field_word(t).or_else(|| {
+                matches!(crate::hir::layout::of_resolved(checker, &apply_ty_prune(checker.subst(), t)), crate::hir::layout::Layout::Pair(_))
+                    .then_some(crate::mir::MirTy::HeapRef)
+            })
+        };
         let mut boxed_niches = HashMap::new();
         let mut heap_fields = HashMap::new();
         for (i, e) in hir.exprs.iter().enumerate() {
@@ -1213,7 +1226,7 @@ impl Compiler {
                     }
                 })
                 && let Some((FieldAt::Slot(idx), fty)) = self.hir_field(hir, *base, name)
-                && let Some(w) = field_word(&fty).or_else(|| {
+                && let Some(w) = record_word(&fty).or_else(|| {
                     // A generic class's field (`item: T`) at a ground
                     // receiver (`Box<int>`): its slot holds the boxed-layout
                     // word of the field's type there.
@@ -1223,7 +1236,7 @@ impl Compiler {
                         .or_else(|| self.hir_clone_self_field_at(base_ty, &fty, e.ty.as_ref()?))?;
                     field_word(&at)
                 })
-                && e.ty.as_ref().and_then(field_word) == Some(w)
+                && e.ty.as_ref().and_then(record_word) == Some(w)
             {
                 heap_fields.insert(i as u32, (idx, w));
             } else if let HirKind::Field { base, name } = &e.kind
@@ -1241,12 +1254,13 @@ impl Compiler {
         let key = |n: &str| self.string_indices.get(n).copied();
         let mut record_fields = HashMap::new();
         let mut records = HashMap::new();
+        let mut record_pats = HashMap::new();
         for (i, e) in hir.exprs.iter().enumerate() {
             match &e.kind {
                 HirKind::Field { base, name }
                     if let Some((FieldAt::Name, fty)) = self.hir_field(hir, *base, name)
-                        && let Some(w) = field_word(&fty)
-                        && e.ty.as_ref().and_then(field_word) == Some(w)
+                        && let Some(w) = record_word(&fty)
+                        && e.ty.as_ref().and_then(record_word) == Some(w)
                         && let Some(k) = key(name) =>
                 {
                     record_fields.insert(i as u32, (k, w));
@@ -1264,12 +1278,37 @@ impl Compiler {
                         .zip(args)
                         .map(|(n, &arg)| {
                             let (_, fty) = fields.iter().find(|(f, _)| f == n)?;
-                            let w = field_word(fty)?;
-                            (Self::hir_ty(hir, arg).and_then(field_word) == Some(w)).then_some((key(n)?, w))
+                            let w = record_word(fty)?;
+                            (Self::hir_ty(hir, arg).and_then(record_word) == Some(w)).then_some((key(n)?, w))
                         })
                         .collect::<Option<Vec<_>>>();
                     if let Some(words) = words {
                         records.insert(i as u32, words);
+                    }
+                }
+                // A record `let` pattern: each bound field's key and the
+                // word its type names, which the bound local holds.
+                HirKind::LetPat {
+                    pat: HirPat::Record(parts),
+                    init,
+                } if let Some(keys) = tables.record_pats.get(&(i as u32)) => {
+                    let ty = Self::hir_ty(hir, *init).map(|t| apply_ty_prune(checker.subst(), t));
+                    let Some(Ty::Record { fields }) = ty.as_ref().map(crate::typechecking::ty::strip_readonly) else {
+                        continue;
+                    };
+                    let words = parts
+                        .iter()
+                        .zip(keys)
+                        .map(|((n, _), key)| match key {
+                            None => Some(None),
+                            Some(k) => {
+                                let (_, fty) = fields.iter().find(|(f, _)| f == n)?;
+                                Some(Some((*k, record_word(fty)?)))
+                            }
+                        })
+                        .collect::<Option<Vec<_>>>();
+                    if let Some(words) = words {
+                        record_pats.insert(i as u32, words);
                     }
                 }
                 _ => {}
@@ -1301,7 +1340,17 @@ impl Compiler {
                         };
                         // A generic class's field at the made type's
                         // arguments (`new Box(1)`: `T` is `int`).
-                        stored(t).or_else(|| stored(&self.hir_class_ty_args_at(Self::hir_ty(hir, HirId(i))?, t)?))
+                        stored(t).or_else(|| stored(&self.hir_class_ty_args_at(Self::hir_ty(hir, HirId(i))?, t)?)).or_else(|| {
+                            // An enum field open in a class parameter, made
+                            // at a still open type (a shared generic body's
+                            // `Option::None`): its boxed enum object.
+                            let at = Self::hir_ty(hir, arg)?;
+                            (Self::ty_has_var(t)
+                                && field_word(t) == Some(crate::mir::MirTy::HeapRef)
+                                && crate::typechecking::value_layout::value_layout(checker, t) == ValueLayout::Boxed
+                                && crate::typechecking::value_layout::value_layout(checker, at) == ValueLayout::Boxed)
+                                .then_some(crate::mir::MirTy::HeapRef)
+                        })
                     })
                     .collect::<Option<Vec<_>>>()
             {
@@ -1462,6 +1511,7 @@ impl Compiler {
             packs: &tables.packs,
             record_fields,
             records,
+            record_pats,
             matrix_wraps: &tables.matrix_wraps,
             linalgs: &tables.linalgs,
             array_copies: &tables.array_copies,

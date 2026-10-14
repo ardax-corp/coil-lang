@@ -84,6 +84,9 @@ pub(super) struct HirMirTables {
     /// The niche word of each `Result` variant made at a niche layout
     /// other than its own type's ([`Compiler::hir_mir_make_niches`]).
     pub(super) make_niches: HashMap<u32, crate::mir::MirTy>,
+    /// The key of each field a record `let` pattern binds (`None`: a
+    /// wildcard), by `let`: `hir_let_pat_binds` pushes each as a string.
+    pub(super) record_pats: HashMap<u32, Vec<Option<u32>>>,
 }
 
 /// The frame direct MIR keeps a body's locals in, planned over the HIR:
@@ -604,6 +607,20 @@ impl Compiler {
                 if let Some(native) = self.hir_array_copy(hir, emit, *value).and_then(|n| u16::try_from(n).ok()) =>
             {
                 t.array_copies.insert(value.0, native);
+            }
+            // `let { a, b } = r`: each bound field read by its key.
+            HirKind::LetPat { pat: HirPat::Record(parts), .. } => {
+                let keys = parts
+                    .iter()
+                    .map(|(name, part)| match part {
+                        HirPat::Wild => Some(None),
+                        HirPat::Bind(_) => Some(Some(self.intern_string(name))),
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<_>>>();
+                if let Some(keys) = keys {
+                    t.record_pats.insert(id.0, keys);
+                }
             }
             HirKind::Bin { op: BinOp::StrConcat, .. } => {
                 let idx = self.intern_string("%s%s");
