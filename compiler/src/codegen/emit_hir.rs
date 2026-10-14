@@ -1308,6 +1308,7 @@ impl Compiler {
             op_prims: &tables.op_prims,
             fn_values: &tables.fn_values,
             value_calls: &tables.value_calls,
+            poly_calls: &tables.poly_calls,
             lens: &emit.plan.lens,
             box_at: &emit.plan.box_at,
             is_class: Box::new(is_class),
