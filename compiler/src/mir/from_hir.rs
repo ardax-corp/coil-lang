@@ -1887,6 +1887,9 @@ impl Lower<'_> {
         match &e.kind {
             HirKind::Lit(lit) => {
                 let c = match lit {
+                    // A folded `!0` / `!1`: an int `0` / `1` typed `bool` is
+                    // that bool's word.
+                    Lit::Int(n @ (0 | 1)) if self.expr_ty(id).and_then(scalar) == Some(MirTy::Bool) => MirConst::Bool(*n == 1),
                     Lit::Int(n) => MirConst::I64(*n),
                     Lit::Float(f) => MirConst::F64(f.to_bits()),
                     Lit::Bool(v) => MirConst::Bool(*v),
@@ -2060,6 +2063,11 @@ impl Lower<'_> {
                     UnOp::Neg if self.b.value_ty(v) == MirTy::I64 => self.at_expr(id, |l| Ok(l.b.ins_neg(v)))?,
                     UnOp::Neg => self.b.ins_neg(v),
                     UnOp::Not if self.b.value_ty(v) == MirTy::Bool => self.b.ins_not(v),
+                    // `LogNot` of an int word: `!(x != 0)`.
+                    UnOp::Not if self.b.value_ty(v) == MirTy::I64 && self.expr_ty(id).and_then(scalar) == Some(MirTy::Bool) => {
+                        let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+                        self.b.ins_cmp(MirCmpOp::Eq, v, zero)
+                    }
                     UnOp::BitNot if self.b.value_ty(v) == MirTy::I64 => {
                         let ones = self.b.ins_const(MirConst::I64(-1)).map_err(mir)?;
                         self.b.ins_binop(MirBinOp::Xor, v, ones)
@@ -2437,6 +2445,13 @@ impl Lower<'_> {
                 Ok(Val::Unit)
             }
             HirKind::If { cond, then, els } => self.if_(*cond, *then, *els, returned),
+            // `while false { .. }` never runs: HIR emission drops it (and
+            // plans nothing in it).
+            HirKind::Loop { body }
+                if lower::while_shape(self.hir, *body).is_some_and(|(cond, _)| matches!(self.hir.expr(cond).kind, HirKind::Lit(Lit::Bool(false)))) =>
+            {
+                Ok(Val::Unit)
+            }
             HirKind::Loop { body } => {
                 let head = self.b.create_block();
                 self.jump(head)?;
@@ -4370,6 +4385,44 @@ impl Lower<'_> {
         self.b.ins_stack_phi(vec![(in_end, v), (oob_end, w)]).map_err(mir)
     }
 
+    /// Store `v` in stack array slots `base..base + n` at an index that may
+    /// be out of range: as HIR emission, an out-of-range index boxes the
+    /// array and stores into that, which panics.
+    fn stack_store_checked(&mut self, base: u32, n: usize, idx: ValueId, v: ValueId, ty: MirTy) -> Result<(), Refusal> {
+        let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+        let top = self.b.ins_const(MirConst::I64(n as i64)).map_err(mir)?;
+        let neg = self.b.ins_cmp(MirCmpOp::Lt, idx, zero).map_err(mir)?;
+        let oob = self.b.create_block();
+        let low = self.b.create_block();
+        let inb = self.b.create_block();
+        self.b.branch(neg, oob, low).map_err(mir)?;
+        self.switch(low);
+        let over = self.b.ins_cmp(MirCmpOp::Ge, idx, top).map_err(mir)?;
+        self.b.branch(over, oob, inb).map_err(mir)?;
+        self.switch(inb);
+        self.stack_cases(base, n, idx, |l, slot| {
+            l.b.def_local(slot, v).map_err(mir)?;
+            Ok(None)
+        })?;
+        let in_end = self.cur;
+        self.switch(oob);
+        let mut words = Vec::with_capacity(n);
+        for k in 0..n as u32 {
+            words.push(self.b.use_local(LocalId(base + k), ty).map_err(mir)?);
+        }
+        let arr = self.b.ins_alloc(MirAllocKind::Array, words).map_err(mir)?;
+        let arr = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![arr]).map_err(mir)?;
+        self.b.ins_store_index(arr, idx, v, false).map_err(mir)?;
+        let oob_end = self.cur;
+        let join = self.b.create_block();
+        self.b.switch_to_block(in_end);
+        self.jump(join)?;
+        self.b.switch_to_block(oob_end);
+        self.jump(join)?;
+        self.switch(join);
+        Ok(())
+    }
+
     /// `a[i] = v` on a stack array: the value first, then the index, as
     /// HIR emission stages them.
     fn stack_store(&mut self, place: HirId, base: HirId, index: HirId, value: HirId) -> Result<Val, Refusal> {
@@ -4388,6 +4441,14 @@ impl Lower<'_> {
         };
         if self.b.value_ty(v) != ty {
             return Err("stack item type".into());
+        }
+        let lit = matches!(self.hir.expr(index).kind, HirKind::Lit(Lit::Int(i)) if (0..n as i64).contains(&i));
+        if !lit && !lower::stack_index_proven(self.hir, place, index, n) {
+            let Some(idx) = self.index_word(index)? else {
+                return Ok(Val::Never);
+            };
+            self.stack_store_checked(slot, n, idx, v, ty)?;
+            return Ok(Val::Unit);
         }
         let Some(k) = self.stack_index(place, index, n)? else {
             return Ok(Val::Never);
