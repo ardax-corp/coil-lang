@@ -538,6 +538,12 @@ struct Lower<'a> {
     packed: HashSet<u32>,
     /// The body's dictionary parameters, by frame slot.
     dict_params: HashMap<u32, ValueId>,
+    /// Words already lowered for these expressions: an element or field
+    /// `x++` used for its value reads its place once, and its store takes
+    /// the new word.
+    preset: HashMap<u32, Val>,
+    /// The `x++` lowered as a plain store (its value read separately).
+    adjust_store: Option<HirId>,
 }
 
 /// Where a body's `defer` state sits for its unwind cleanup pad: each
@@ -859,6 +865,8 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         pad: None,
         packed: HashSet::new(),
         dict_params,
+        preset: HashMap::new(),
+        adjust_store: None,
     };
     lower.pin_locals()?;
     for (i, e) in hir.exprs.iter().enumerate() {
@@ -994,6 +1002,8 @@ fn lower_pad(hir: &HirBody, inp: &HirMirInput, parts: PadParts<'_>) -> Result<Mi
         pad: None,
         packed: HashSet::new(),
         dict_params: HashMap::new(),
+        preset: HashMap::new(),
+        adjust_store: None,
     };
     let captures_of = |body: HirId| {
         hir.exprs.iter().find_map(|e| match &e.kind {
@@ -2170,6 +2180,9 @@ impl Lower<'_> {
     }
 
     fn value_unpacked(&mut self, id: HirId) -> Result<Val, Refusal> {
+        if let Some(&v) = self.preset.get(&id.0) {
+            return Ok(v);
+        }
         let e = self.hir.expr(id);
         let returned = std::mem::take(&mut self.ret_tail);
         if let Some(par) = self.inp.par_loops.get(&id.0) {
@@ -2464,7 +2477,9 @@ impl Lower<'_> {
                 self.fill_slots(local, *value)
             }
             // `x++` used for its value reads the old or new `x`.
-            HirKind::Assign { place, value } if e.flags.contains(HirFlags::ADJUST) && !self.expr_ty(id).is_some_and(is_unit) => {
+            HirKind::Assign { place, value }
+                if e.flags.contains(HirFlags::ADJUST) && self.adjust_store != Some(id) && !self.expr_ty(id).is_some_and(is_unit) =>
+            {
                 self.adjust_value(id, *place, *value)
             }
             HirKind::Assign { place, value } if let HirKind::Index { base, index, .. } = self.hir.expr(*place).kind => {
@@ -4222,6 +4237,9 @@ impl Lower<'_> {
     /// (prefix) word, as HIR emission's `INC` / `DEC` on the slot.
     fn adjust_value(&mut self, id: HirId, place: HirId, value: HirId) -> Result<Val, Refusal> {
         let prefix = self.hir.expr(id).flags.contains(HirFlags::PREFIX);
+        if matches!(self.hir.expr(place).kind, HirKind::Field { .. } | HirKind::Index { .. }) {
+            return self.adjust_elem(id, place, value, prefix);
+        }
         let Some(old) = self.word(place)? else {
             return Ok(Val::Never);
         };
@@ -4248,6 +4266,46 @@ impl Lower<'_> {
                 self.b.def_local(slot, new).map_err(mir)?;
             }
             _ => return Err("adjust place".into()),
+        }
+        Ok(Val::V(if prefix { new } else { old }))
+    }
+
+    /// `xs[i]++` / `--b.v` used for its value: the element or field read
+    /// once (the old word), `old ± 1` stored as the statement `x = x ± 1`
+    /// would, and the old (postfix) or new (prefix) word. The place's
+    /// operands are read again by the store, so they must be pure.
+    fn adjust_elem(&mut self, id: HirId, place: HirId, value: HirId, prefix: bool) -> Result<Val, Refusal> {
+        let HirKind::Bin { lhs: read, .. } = self.hir.expr(value).kind else {
+            return Err("adjust place".into());
+        };
+        let repeatable = match self.hir.expr(place).kind {
+            HirKind::Field { base, .. } => lower::pure_base(self.hir, base),
+            HirKind::Index { base, index, .. } => lower::pure_base(self.hir, base) && lower::pure_index(self.hir, index),
+            _ => false,
+        };
+        if !repeatable {
+            return Err("adjust place".into());
+        }
+        let Some(old) = self.word(read)? else {
+            return Ok(Val::Never);
+        };
+        self.preset.insert(read.0, Val::V(old));
+        let new = self.word(value);
+        self.preset.remove(&read.0);
+        let Some(new) = new? else {
+            return Ok(Val::Never);
+        };
+        let ty = self.b.value_ty(old);
+        if !matches!(ty, MirTy::I64 | MirTy::F64) || self.b.value_ty(new) != ty {
+            return Err("adjust type".into());
+        }
+        self.preset.insert(value.0, Val::V(new));
+        let prev = self.adjust_store.replace(id);
+        let stored = self.value(id);
+        self.adjust_store = prev;
+        self.preset.remove(&value.0);
+        if matches!(stored?, Val::Never) {
+            return Ok(Val::Never);
         }
         Ok(Val::V(if prefix { new } else { old }))
     }
