@@ -1426,7 +1426,10 @@ bb3:
         let poly = b.ins_gc_barrier(MirGcKind::Safepoint, vec![poly]).unwrap();
         let _ = b.ins_call_indirect_dicts(poly, vec![x, dict], 1, MirTy::I64).unwrap();
         let y = b.ins_call_indirect(f, vec![x], MirTy::I64).unwrap();
-        assert!(b.ins_call_indirect(x, vec![k], MirTy::I64).is_err(), "callee must be a heap word");
+        // A dictionary method: the code pointer itself is the callee.
+        let _ = b.ins_call_indirect(code, vec![x, dict], MirTy::I64).unwrap();
+        let flag = b.ins_const(crate::mir::inst::MirConst::Bool(true)).unwrap();
+        assert!(b.ins_call_indirect(flag, vec![k], MirTy::I64).is_err(), "callee must be a heap word or a code pointer");
         b.ret(Some(y)).unwrap();
         let func = b.finish().unwrap();
         func.verify().unwrap();

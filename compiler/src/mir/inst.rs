@@ -314,7 +314,8 @@ pub enum MirInst {
         args: Vec<ValueId>,
     },
     /// `CallIndirect n`: call the function value `callee` (an `ObjFn` /
-    /// `PolyFn` heap word) with `args`, pushed in order under it. Dest is
+    /// `PolyFn` heap word, or an `i64` code pointer read from an instance
+    /// dictionary) with `args`, pushed in order under it. Dest is
     /// the one word it returns. Opaque: any effect, a GC safepoint in the
     /// callee; never CSE'd or hoisted.
     CallIndirect {
