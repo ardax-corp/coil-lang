@@ -887,10 +887,12 @@ impl Compiler {
         if !self.hir_mir_on || !self.opt_options.mir_specialize {
             return None;
         }
+        self.hir_mir_dict_sp = entry_words;
         let tables = self.hir_mir_tables(hir, emit);
+        self.hir_mir_dict_sp = None;
         // A shared generic body's dictionaries are trailing parameters
-        // direct MIR does not read: a body whose code reads one stays on
-        // the stack lowering.
+        // direct MIR reads only through dictionary programs: a body whose
+        // code reads one any other way stays on the stack lowering.
         if entry_words.is_some() && tables.reads_dicts {
             self.hir_mir_why = Some("converted or shared generic entry".into());
             return None;
@@ -1449,6 +1451,7 @@ impl Compiler {
             record_fields,
             records,
             matrix_wraps: &tables.matrix_wraps,
+            linalgs: &tables.linalgs,
             array_copies: &tables.array_copies,
             make_niches: &tables.make_niches,
             aggregates: emit

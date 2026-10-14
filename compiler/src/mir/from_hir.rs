@@ -108,6 +108,9 @@ pub enum HirDictOp {
     Tuple(u32),
     /// `BoxValue` (`tag`) of the top word: an existential pack's value.
     Box(u32),
+    /// `Load` of frame slot `n`, one of the body's own dictionary
+    /// parameters: a dictionary it forwards.
+    Load(u32),
 }
 
 /// How a user iterator's `next` returns `Option<Item>`, as HIR emission
@@ -421,6 +424,9 @@ pub struct HirMirInput<'a> {
     pub record_fields: HashMap<u32, (u32, MirTy)>,
     /// `matrix(data)` calls: the data itself.
     pub matrix_wraps: &'a HashSet<u32>,
+    /// Matrix / vector operators and `dot` / `matmul` calls on a packed
+    /// kernel: its native and the meta word packing the shape.
+    pub linalgs: &'a HashMap<u32, (u16, u32)>,
     /// Fixed array locals copied as they are bound or assigned to another
     /// local: the `vec_from_array` native, by value.
     pub array_copies: &'a HashMap<u32, u16>,
@@ -530,6 +536,8 @@ struct Lower<'a> {
     pad: Option<PadHomes>,
     /// Existential packs built so far, by expression.
     packed: HashSet<u32>,
+    /// The body's dictionary parameters, by frame slot.
+    dict_params: HashMap<u32, ValueId>,
 }
 
 /// Where a body's `defer` state sits for its unwind cleanup pad: each
@@ -812,13 +820,14 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
             next += 1;
         }
     }
+    let mut dict_params = HashMap::new();
     if let Some(entry) = inp.entry_words {
         if entry < next {
             return Err("param slot".into());
         }
-        // Dictionaries: never read by a body this lowering takes.
-        for _ in next..entry {
-            b.add_param(MirTy::HeapRef).map_err(mir)?;
+        // Dictionaries: read only where a dictionary program loads one.
+        for slot in next..entry {
+            dict_params.insert(slot, b.add_param(MirTy::HeapRef).map_err(mir)?);
         }
     }
     let cur = b.entry();
@@ -847,6 +856,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         pins: HashMap::new(),
         pad: None,
         packed: HashSet::new(),
+        dict_params,
     };
     lower.pin_locals()?;
     for (i, e) in hir.exprs.iter().enumerate() {
@@ -981,6 +991,7 @@ fn lower_pad(hir: &HirBody, inp: &HirMirInput, parts: PadParts<'_>) -> Result<Mi
         pins: HashMap::new(),
         pad: None,
         packed: HashSet::new(),
+        dict_params: HashMap::new(),
     };
     let captures_of = |body: HirId| {
         hir.exprs.iter().find_map(|e| match &e.kind {
@@ -2200,6 +2211,9 @@ impl Lower<'_> {
             HirKind::Global { .. } => self.global(id),
             // `a + b` on strings is `format("%s%s", a, b)`.
             HirKind::Bin { op: BinOp::StrConcat, lhs, rhs } if let Some(&idx) = self.inp.formats.get(&id.0) => self.format(id, idx, &[*lhs, *rhs]),
+            HirKind::Bin { lhs, rhs, .. } if let Some(&la) = self.inp.linalgs.get(&id.0) => self.linalg(id, la, &[*lhs, *rhs]),
+            HirKind::Un { operand, .. } if let Some(&la) = self.inp.linalgs.get(&id.0) => self.linalg(id, la, &[*operand]),
+            HirKind::Call { args, .. } if let Some(&la) = self.inp.linalgs.get(&id.0) => self.linalg(id, la, args),
             HirKind::Bin { lhs, rhs, .. } if let Some(info) = self.inp.aggregates.get(&id.0) => self.aggregate(id, &info.clone(), *lhs, Some(*rhs)),
             HirKind::Un { operand, .. } if let Some(info) = self.inp.aggregates.get(&id.0) => self.aggregate(id, &info.clone(), *operand, None),
             // An operator on an instance taking its operands raw: a plain call.
@@ -3545,6 +3559,7 @@ impl Lower<'_> {
                     let dict = self.b.ins_alloc(MirAllocKind::Tuple, elems).map_err(mir)?;
                     stack.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![dict]).map_err(mir)?);
                 }
+                HirDictOp::Load(slot) => stack.push(*self.dict_params.get(&slot).ok_or("dictionary parameter")?),
                 HirDictOp::Box(tag) => {
                     let v = stack.pop().ok_or("dictionary box")?;
                     let boxed = self.b.ins_alloc(MirAllocKind::Boxed { tag }, vec![v]).map_err(mir)?;
@@ -4515,6 +4530,26 @@ impl Lower<'_> {
         let fmt = self.b.ins_string(*fmt).map_err(mir)?;
         let out = self.b.ins_format(fmt, words).map_err(mir)?;
         self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)
+    }
+
+    /// A matrix / vector operator or `dot` / `matmul` on its packed
+    /// kernel, as HIR emission's `hir_linear_algebra_op`: each operand's
+    /// word, then the meta word, then `HostInvoke`. The result is the
+    /// expression's word: a new matrix or vector array, or `dot`'s scalar.
+    fn linalg(&mut self, id: HirId, (native, meta): (u16, u32), args: &[HirId]) -> Result<Val, Refusal> {
+        let ret = self.expr_ty(id).and_then(|t| self.inp.word(t)).ok_or("linear algebra result")?;
+        let mut words = Vec::with_capacity(args.len() + 1);
+        for &arg in args {
+            let Some(v) = self.word_or_boxed(arg)? else {
+                return Ok(Val::Never);
+            };
+            words.push(v);
+        }
+        words.push(self.b.ins_const(MirConst::I64(i64::from(meta))).map_err(mir)?);
+        let out = self.at_expr(id, |l| {
+            l.b.ins_host_invoke_as(native, words, common::HOST_ENUM_LAYOUT_BOXED as u8, Some(ret)).map_err(mir)
+        })?;
+        Ok(Val::V(out))
     }
 
     /// A host native: the arguments in order, then `HostInvoke` (the native
@@ -5543,17 +5578,22 @@ impl Lower<'_> {
         if !binds.is_empty() && binds.len() != fields.len() {
             return Err("payload pattern".into());
         }
+        let binds = if binds.is_empty() { vec![None; fields.len()] } else { binds };
         let tys = fields
             .iter()
-            .map(|t| {
+            .zip(&binds)
+            .map(|(t, bind)| {
                 self.inp
                     .word(t)
                     .or_else(|| is_unit(t).then_some(MirTy::I64))
                     .or_else(|| (self.inp.boxed_view)(t, None).map(|_| MirTy::HeapRef))
+                    // A field of a type never resolved (a thread's or
+                    // channel's value) that the arm ignores: its word is
+                    // unpacked, as emission's, and never read.
+                    .or_else(|| (bind.is_none() && is_var(t)).then_some(MirTy::I64))
             })
             .collect::<Option<Vec<_>>>()
             .ok_or("payload type")?;
-        let binds = if binds.is_empty() { vec![None; tys.len()] } else { binds };
         Ok((tys, binds))
     }
 
