@@ -1463,6 +1463,7 @@ impl Compiler {
             record_fields,
             records,
             matrix_wraps: &tables.matrix_wraps,
+            block_ons: &tables.block_ons,
             linalgs: &tables.linalgs,
             array_copies: &tables.array_copies,
             make_niches: &tables.make_niches,

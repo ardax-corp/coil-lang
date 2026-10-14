@@ -84,6 +84,9 @@ pub(super) struct HirMirTables {
     /// The niche word of each `Result` variant made at a niche layout
     /// other than its own type's ([`Compiler::hir_mir_make_niches`]).
     pub(super) make_niches: HashMap<u32, crate::mir::MirTy>,
+    /// `block_on(h)` calls ([`Compiler::hir_block_on`]): the `wait_ready`
+    /// native run between resumes, if the program has one, by call.
+    pub(super) block_ons: HashMap<u32, Option<u16>>,
 }
 
 /// The frame direct MIR keeps a body's locals in, planned over the HIR:
@@ -689,6 +692,10 @@ impl Compiler {
                 {
                     t.linalgs.insert(id.0, (native as u16, meta));
                 }
+            }
+            HirKind::Call { .. } if emit.plan.calls.get(&id.0).is_some_and(|c| matches!(c.builtin, Some(HirBuiltin::BlockOn))) => {
+                let wait = self.native_id("wait_ready").and_then(|n| u16::try_from(n).ok());
+                t.block_ons.insert(id.0, wait);
             }
             HirKind::Call { .. } if emit.plan.calls.get(&id.0).is_some_and(|c| matches!(c.builtin, Some(HirBuiltin::Matrix))) => {
                 t.matrix_wraps.insert(id.0);
