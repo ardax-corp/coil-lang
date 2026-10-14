@@ -66,11 +66,13 @@ impl MirInst {
             | Self::StoreIndex { .. }
             | Self::StoreStatic { .. }
             | Self::ClearWord { .. }
+            | Self::KeepAlive { .. }
             | Self::ArrayPush { .. }
             | Self::Print { .. }
             | Self::Panic { .. }
             | Self::Format { .. }
-            | Self::Stringify { .. } => true,
+            | Self::Stringify { .. }
+            | Self::TagArrayKind { .. } => true,
             _ => false,
         }
     }

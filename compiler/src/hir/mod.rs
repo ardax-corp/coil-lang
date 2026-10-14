@@ -336,6 +336,9 @@ pub enum Builtin {
     /// `STRINGIFY` of a word (compiler-made bodies only: a primitive's
     /// `Show::show`), reading a float or bool by its box's tag.
     Stringify,
+    /// `TagArrayKind kind` of an array word, which it leaves (compiler-made
+    /// bodies only: the stamped `Vec` constructors).
+    TagArrayKind { kind: u8 },
 }
 
 #[derive(Debug, Clone, PartialEq)]

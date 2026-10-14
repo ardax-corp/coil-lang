@@ -47,7 +47,7 @@ pub fn emit_lir_with_aliases(
     pool: &mut Vec<u64>,
     across_alloc: bool,
 ) -> Result<Vec<IlOp>, LowerError> {
-    if func.has_gc_edge() && !across_alloc {
+    if func.has_mapped_gc_edge() && !across_alloc {
         return Err(LowerError::Refused(
             "MIR→LIR refuses Alloc/GcBarrier without S2b maps (S2c)".into(),
         ));
@@ -95,6 +95,11 @@ pub fn emit_lir_with_aliases(
         }
         let term_loc = func.term_loc(block.id);
         consume_match_tos(&mut out, func, block.id, &plan, &regs, term_loc);
+        // A miss leaves the scrutinee on the stack: the next arm's test
+        // peeks it there; a block taking no payload of it pops it.
+        if super::emit::miss_chain_tos(func, block.id).is_none() && super::emit::missed_scrutinee_unused(func, block.id) {
+            out.push(IlOp::Pop { loc: term_loc });
+        }
         let mut starts: Vec<(usize, ValueId)> = Vec::new();
         for inst in &block.insts {
             if inst.is_phi() {
@@ -124,6 +129,9 @@ pub fn emit_lir_with_aliases(
                 if cleared.contains(dest) {
                     super::emit::push_clear_word(&mut out, regs[value.index()]);
                 }
+                continue;
+            }
+            if let MirInst::KeepAlive { .. } = inst {
                 continue;
             }
             let dest = inst.dest();
@@ -166,7 +174,7 @@ pub(super) fn lir_sidecars(func: &MirFunc) -> LirSidecars {
     let plan = EmitPlan::new(func);
     let (regs, _) = assign_needed(func, &plan).unwrap_or_else(|_| (Vec::new(), 0));
     let regs = coalesce_latch_overwrite(func, regs, &plan.need_slot);
-    let stack_map = if func.has_gc_edge() && !regs.is_empty() {
+    let stack_map = if func.has_mapped_gc_edge() && !regs.is_empty() {
         super::stackmap::encode_draft_regs(func, &regs, &plan.need_slot)
     } else {
         None
@@ -266,7 +274,9 @@ impl EmitPlan {
                         }
                     }
                 for inst in &block.insts {
-                    if inst.is_phi() || fused[inst.dest().index()] {
+                    // A pinned word stays in its slot: the pin emits nothing
+                    // that could take it as an inline operand.
+                    if inst.is_phi() || fused[inst.dest().index()] || matches!(inst, MirInst::KeepAlive { .. }) {
                         continue;
                     }
                     // Operands of stored bins can still be tree (i % 10 → BinSlotImm).
@@ -299,7 +309,7 @@ impl EmitPlan {
             }
             if def[i].is_some() || def_block[i].is_some() {
                 let print_tok = def[i].is_some_and(|(b, k)| {
-                    matches!(func.block(b).insts.get(k), Some(MirInst::Print { .. } | MirInst::Panic { .. } | MirInst::StoreStatic { .. } | MirInst::ClearWord { .. }))
+                    matches!(func.block(b).insts.get(k), Some(MirInst::Print { .. } | MirInst::Panic { .. } | MirInst::StoreStatic { .. } | MirInst::ClearWord { .. } | MirInst::KeepAlive { .. }))
                 });
                 if !print_tok {
                     need_slot[i] = true;
@@ -1047,7 +1057,7 @@ fn emit_stored(
             out.push(IlOp::from_plain_byte(Byte::new(Instruction::StoreStatic).with_operand_u32(*slot), loc));
         }
         // Emitted where it stands (`cleared_words`).
-        MirInst::ClearWord { .. } => {}
+        MirInst::ClearWord { .. } | MirInst::KeepAlive { .. } => {}
         MirInst::ArrayPush {
             dest,
             array,
@@ -1182,6 +1192,16 @@ fn emit_stored(
         MirInst::Stringify { dest, src } => {
             emit_stack(out, *src, func, plan, regs, pool, loc)?;
             out.push(IlOp::from_plain_byte(Byte::new(Instruction::STRINGIFY), loc));
+            if plan.need_slot[dest.index()] {
+                out.push(IlOp::StorePop {
+                    slot: u32::from(regs[dest.index()]),
+                    loc,
+                });
+            }
+        }
+        MirInst::TagArrayKind { dest, src, kind } => {
+            emit_stack(out, *src, func, plan, regs, pool, loc)?;
+            out.push(IlOp::from_plain_byte(Byte::new(Instruction::TagArrayKind).with_operand_u32(u32::from(*kind)), loc));
             if plan.need_slot[dest.index()] {
                 out.push(IlOp::StorePop {
                     slot: u32::from(regs[dest.index()]),
@@ -1649,7 +1669,7 @@ fn emit_stack(
             out.push(IlOp::from_plain_byte(Byte::new(Instruction::StoreStatic).with_operand_u32(*slot), loc));
             Ok(())
         }
-        MirInst::ClearWord { .. } => Ok(()),
+        MirInst::ClearWord { .. } | MirInst::KeepAlive { .. } => Ok(()),
         MirInst::ArrayPush {
             dest,
             array,
@@ -1797,6 +1817,11 @@ fn emit_stack(
         MirInst::Unbox { src, tag, .. } => {
             emit_stack(out, *src, func, plan, regs, pool, loc)?;
             out.push(IlOp::UnboxValue { tag: *tag, loc });
+            Ok(())
+        }
+        MirInst::TagArrayKind { src, kind, .. } => {
+            emit_stack(out, *src, func, plan, regs, pool, loc)?;
+            out.push(IlOp::from_plain_byte(Byte::new(Instruction::TagArrayKind).with_operand_u32(u32::from(*kind)), loc));
             Ok(())
         }
         MirInst::StrEq { lhs, rhs, ne, .. } => {
@@ -2009,7 +2034,9 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
                     "JumpIfMatch + phi moves (keep fuse-IL)".into(),
                 ));
             }
-            emit_stack(out, *scrutinee, func, plan, regs, pool, loc)?;
+            if super::emit::miss_chain_tos(func, block.id).is_none() {
+                emit_stack(out, *scrutinee, func, plan, regs, pool, loc)?;
+            }
             out.push(IlOp::Jump {
                 kind: IlJumpKind::JumpIfMatch {
                     tag: *tag,

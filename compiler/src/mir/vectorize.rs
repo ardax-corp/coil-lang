@@ -1893,10 +1893,13 @@ fn region_has_barrier(func: &MirFunc, blocks: &[BlockId]) -> bool {
                         | MirInst::LoadStatic { .. }
                         | MirInst::StoreStatic { .. }
                         | MirInst::ClearWord { .. }
+                        | MirInst::KeepAlive { .. }
                         | MirInst::Print { .. }
                         | MirInst::Panic { .. }
                         | MirInst::Format { .. }
                         | MirInst::Stringify { .. }
+                        | MirInst::Unbox { .. }
+                        | MirInst::TagArrayKind { .. }
                 )
         }) || matches!(block.term, Some(Terminator::JumpIfMatch { .. }))
     })

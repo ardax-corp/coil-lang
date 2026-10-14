@@ -260,6 +260,7 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
         MirInst::LoadStatic { dest, slot } => write!(f, "{dest} = loadstatic {slot}"),
         MirInst::StoreStatic { dest, slot, value } => write!(f, "{dest} = storestatic {slot}, {value}"),
         MirInst::ClearWord { dest, value } => write!(f, "{dest} = clearword {value}"),
+        MirInst::KeepAlive { dest, value } => write!(f, "{dest} = keepalive {value}"),
         MirInst::ArrayPush {
             dest,
             array,
@@ -326,6 +327,7 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
         }
         MirInst::Stringify { dest, src } => write!(f, "{dest} = stringify {src}"),
         MirInst::Unbox { dest, src, tag } => write!(f, "{dest} = unbox.{} {tag}, {src}", func.ty(*dest)),
+        MirInst::TagArrayKind { dest, src, kind } => write!(f, "{dest} = tagarraykind {kind}, {src}"),
         MirInst::StrEq { dest, lhs, rhs, ne } => {
             write!(f, "{dest} = {} {lhs}, {rhs}", if *ne { "strne" } else { "streq" })
         }
@@ -697,6 +699,11 @@ impl<'a> Parser<'a> {
             ensure_ty(types, dest, MirTy::Bool);
             return Ok(MirInst::ClearWord { dest, value });
         }
+        if op == "keepalive" {
+            let value = self.value()?;
+            ensure_ty(types, dest, MirTy::Bool);
+            return Ok(MirInst::KeepAlive { dest, value });
+        }
         if op == "arraypush" {
             let array = self.value()?;
             self.expect(',')?;
@@ -977,6 +984,13 @@ impl<'a> Parser<'a> {
             let src = self.value()?;
             ensure_ty(types, dest, ty);
             return Ok(MirInst::Unbox { dest, src, tag });
+        }
+        if op == "tagarraykind" {
+            let kind = self.uint()? as u8;
+            self.expect(',')?;
+            let src = self.value()?;
+            ensure_ty(types, dest, MirTy::HeapRef);
+            return Ok(MirInst::TagArrayKind { dest, src, kind });
         }
         if op == "stringify" {
             let src = self.value()?;
@@ -1311,6 +1325,23 @@ bb0:
         let mut pool = Vec::new();
         let lir = crate::mir::emit_lir::emit_lir(&f, None, &mut pool, false).unwrap();
         assert!(lir.iter().any(|op| matches!(op, crate::il::IlOp::UnboxValue { tag: 0, .. })));
+    }
+
+    #[test]
+    fn tag_array_kind_round_trips_and_emits_the_op() {
+        let src = r#"
+func @stamp(v0: heapref) -> heapref {
+bb0:
+    v1 = tagarraykind 2, v0
+    return v1
+}
+"#;
+        let f = parse_func(src).unwrap();
+        f.verify().unwrap();
+        assert_eq!(parse_func(&f.to_string()).unwrap(), f);
+        let mut pool = Vec::new();
+        let lir = crate::mir::emit_lir::emit_lir(&f, None, &mut pool, false).unwrap();
+        assert!(lir.iter().any(|op| matches!(op, crate::il::IlOp::Byte { byte, .. } if *byte.bytecode() == common::Instruction::TagArrayKind)));
     }
 
     #[test]
