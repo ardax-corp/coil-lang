@@ -407,6 +407,9 @@ pub struct HirMirInput<'a> {
     pub record_fields: HashMap<u32, (u32, MirTy)>,
     /// `matrix(data)` calls: the data itself.
     pub matrix_wraps: &'a HashSet<u32>,
+    /// Matrix / vector operators and `dot` / `matmul` calls on a packed
+    /// kernel: its native and the meta word packing the shape.
+    pub linalgs: &'a HashMap<u32, (u16, u32)>,
     /// Element-wise array and tuple operators, by expression.
     pub aggregates: HashMap<u32, crate::typechecking::AggregateArithInfo>,
     /// Record literals whose every field holds the word its type says:
@@ -2152,6 +2155,9 @@ impl Lower<'_> {
             HirKind::Global { .. } => self.global(id),
             // `a + b` on strings is `format("%s%s", a, b)`.
             HirKind::Bin { op: BinOp::StrConcat, lhs, rhs } if let Some(&idx) = self.inp.formats.get(&id.0) => self.format(id, idx, &[*lhs, *rhs]),
+            HirKind::Bin { lhs, rhs, .. } if let Some(&la) = self.inp.linalgs.get(&id.0) => self.linalg(id, la, &[*lhs, *rhs]),
+            HirKind::Un { operand, .. } if let Some(&la) = self.inp.linalgs.get(&id.0) => self.linalg(id, la, &[*operand]),
+            HirKind::Call { args, .. } if let Some(&la) = self.inp.linalgs.get(&id.0) => self.linalg(id, la, args),
             HirKind::Bin { lhs, rhs, .. } if let Some(info) = self.inp.aggregates.get(&id.0) => self.aggregate(id, &info.clone(), *lhs, Some(*rhs)),
             HirKind::Un { operand, .. } if let Some(info) = self.inp.aggregates.get(&id.0) => self.aggregate(id, &info.clone(), *operand, None),
             // An operator on an instance taking its operands raw: a plain call.
@@ -4439,6 +4445,26 @@ impl Lower<'_> {
         let fmt = self.b.ins_string(*fmt).map_err(mir)?;
         let out = self.b.ins_format(fmt, words).map_err(mir)?;
         self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)
+    }
+
+    /// A matrix / vector operator or `dot` / `matmul` on its packed
+    /// kernel, as HIR emission's `hir_linear_algebra_op`: each operand's
+    /// word, then the meta word, then `HostInvoke`. The result is the
+    /// expression's word: a new matrix or vector array, or `dot`'s scalar.
+    fn linalg(&mut self, id: HirId, (native, meta): (u16, u32), args: &[HirId]) -> Result<Val, Refusal> {
+        let ret = self.expr_ty(id).and_then(|t| self.inp.word(t)).ok_or("linear algebra result")?;
+        let mut words = Vec::with_capacity(args.len() + 1);
+        for &arg in args {
+            let Some(v) = self.word_or_boxed(arg)? else {
+                return Ok(Val::Never);
+            };
+            words.push(v);
+        }
+        words.push(self.b.ins_const(MirConst::I64(i64::from(meta))).map_err(mir)?);
+        let out = self.at_expr(id, |l| {
+            l.b.ins_host_invoke_as(native, words, common::HOST_ENUM_LAYOUT_BOXED as u8, Some(ret)).map_err(mir)
+        })?;
+        Ok(Val::V(out))
     }
 
     /// A host native: the arguments in order, then `HostInvoke` (the native

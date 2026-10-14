@@ -25,6 +25,10 @@ pub(super) struct HirMirTables {
     pub(super) format_shows: HashMap<u32, Vec<Option<crate::mir::HirShow>>>,
     /// `matrix(data)` calls, whose value is the data itself.
     pub(super) matrix_wraps: HashSet<u32>,
+    /// Matrix / vector operators and `dot` / `matmul` calls on a packed
+    /// kernel ([`Compiler::hir_linear_algebra_op`]): the native and the
+    /// meta word packing the shape, by expression.
+    pub(super) linalgs: HashMap<u32, (u16, u32)>,
     /// Entry of each plain one-word-ABI `CALL` (no dictionaries), by call
     /// site: calls, and user operators on a raw instance method.
     pub(super) calls: HashMap<u32, crate::mir::HirCallSite>,
@@ -447,6 +451,22 @@ impl Compiler {
             {
                 return Kids::None;
             }
+            // A matrix operator on a packed kernel, its operands each one
+            // word as emission passes them.
+            HirKind::Bin { .. } | HirKind::Un { .. } if let Some(HirOp::LinAlg(info)) = emit.plan.ops.get(&id.0) => {
+                let operands: Vec<HirId> = match e.kind {
+                    HirKind::Bin { lhs, rhs, .. } => vec![lhs, rhs],
+                    HirKind::Un { operand, .. } => vec![operand],
+                    _ => Vec::new(),
+                };
+                let words = operands.iter().all(|&x| {
+                    let layout = Self::hir_ty(hir, x).map_or(ValueLayout::Boxed, |t| self.value_layout(t));
+                    self.hir_arg_passes(hir, emit, x, layout)
+                });
+                if words && let Some((native, meta)) = self.packed_linear_algebra_op(&info.kind, operands.len()) {
+                    t.linalgs.insert(id.0, (native as u16, meta));
+                }
+            }
             HirKind::Bin {
                 op: BinOp::Overloaded(_),
                 lhs,
@@ -481,6 +501,21 @@ impl Compiler {
             HirKind::Call { args, .. } if let Some(Some(_)) = emit.plan.lens.get(&id.0) => {
                 if matches!(hir.expr(args[0]).kind, HirKind::Local(_) | HirKind::Lit(_) | HirKind::Make { .. }) {
                     return Kids::None;
+                }
+            }
+            // `dot` / `matmul` on a packed kernel.
+            HirKind::Call { args, .. }
+                if let Some(HirCall {
+                    builtin: Some(HirBuiltin::LinAlg),
+                    params,
+                    ..
+                }) = emit.plan.calls.get(&id.0) =>
+            {
+                if args.iter().zip(params).all(|(&a, &p)| self.hir_arg_passes(hir, emit, a, p))
+                    && let Some(info) = self.hir_linear_algebra(hir, id)
+                    && let Some((native, meta)) = self.packed_linear_algebra_op(&info.kind, args.len())
+                {
+                    t.linalgs.insert(id.0, (native as u16, meta));
                 }
             }
             HirKind::Call { .. } if emit.plan.calls.get(&id.0).is_some_and(|c| matches!(c.builtin, Some(HirBuiltin::Matrix))) => {
