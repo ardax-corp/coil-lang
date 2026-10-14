@@ -37,6 +37,7 @@ use parser::{
 use reporting::{Label, Message as CoilMessage, MessageKind};
 use serde_json::Value;
 
+mod coverage;
 mod docs;
 mod hover_docs;
 
@@ -70,6 +71,12 @@ struct ServerState {
     pending_analysis: Vec<Uri>,
     /// `--root` dirs from the command line, searched after the defaults.
     extra_roots: Vec<PathBuf>,
+    /// The `coil test --coverage` tracefile, when there is one.
+    coverage: coverage::Coverage,
+    /// The client re-asks for code lenses on `workspace/codeLens/refresh`.
+    code_lens_refresh: bool,
+    /// Id of the next request this server sends.
+    next_request: i32,
 }
 
 /// Command-line options: extra module roots and host grants, spelled as for
@@ -220,6 +227,9 @@ fn run(connection: &Connection, options: LspOptions) -> Result<(), Box<dyn std::
             work_done_progress_options: Default::default(),
         })),
         inlay_hint_provider: Some(lsp_types::OneOf::Left(true)),
+        code_lens_provider: Some(lsp_types::CodeLensOptions {
+            resolve_provider: Some(false),
+        }),
         code_action_provider: Some(lsp_types::CodeActionProviderCapability::Options(
             lsp_types::CodeActionOptions {
                 code_action_kinds: Some(vec![
@@ -285,6 +295,18 @@ fn run(connection: &Connection, options: LspOptions) -> Result<(), Box<dyn std::
         index.pipeline_mut().set_host_grants(options.grants);
         state.project_index = Some(index);
     }
+    state.coverage = coverage::Coverage::new(
+        coverage::CoverageOptions::from_init(_params.initialization_options.as_ref()),
+        state.workspace_root.as_deref(),
+    );
+    state.coverage.refresh();
+    state.code_lens_refresh = _params
+        .capabilities
+        .workspace
+        .as_ref()
+        .and_then(|workspace| workspace.code_lens.as_ref())
+        .and_then(|lens| lens.refresh_support)
+        .unwrap_or(false);
     // Messages read ahead of the one being handled: cancellations and
     // edits behind a slow request apply before it runs.
     let mut queue: VecDeque<Message> = VecDeque::new();
@@ -292,10 +314,23 @@ fn run(connection: &Connection, options: LspOptions) -> Result<(), Box<dyn std::
     loop {
         if queue.is_empty() {
             flush_pending_analysis(connection, &mut state)?;
-            match connection.receiver.recv() {
-                Ok(message) => queue.push_back(message),
-                Err(_) => break,
+            // Idle: look at the coverage tracefile every few seconds.
+            let message = if state.coverage.enabled() {
+                match connection.receiver.recv_timeout(COVERAGE_POLL) {
+                    Ok(message) => Some(message),
+                    Err(error) if error.is_timeout() => None,
+                    Err(_) => break,
+                }
+            } else {
+                match connection.receiver.recv() {
+                    Ok(message) => Some(message),
+                    Err(_) => break,
+                }
+            };
+            if state.coverage.refresh() {
+                publish_coverage(connection, &mut state)?;
             }
+            queue.extend(message);
         }
         while let Ok(message) = connection.receiver.try_recv() {
             queue.push_back(message);
@@ -353,6 +388,142 @@ fn run(connection: &Connection, options: LspOptions) -> Result<(), Box<dyn std::
         }
     }
     Ok(())
+}
+
+/// How often an idle server checks whether the tracefile changed.
+const COVERAGE_POLL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The tracefile changed: re-publish open documents' diagnostics and ask the
+/// client for fresh code lenses.
+fn publish_coverage(connection: &Connection, state: &mut ServerState) -> Result<(), Box<dyn std::error::Error>> {
+    let open: Vec<Uri> = state.documents.keys().cloned().collect();
+    for uri in open {
+        publish_diagnostics(connection, state, &uri)?;
+    }
+    if state.code_lens_refresh {
+        state.next_request += 1;
+        connection.sender.send(Message::Request(Request::new(
+            RequestId::from(state.next_request),
+            "workspace/codeLens/refresh".into(),
+            Value::Null,
+        )))?;
+    }
+    Ok(())
+}
+
+/// A project source (under the workspace, outside `.deps`): coverage is
+/// shown for these only.
+fn in_workspace(state: &ServerState, path: &Path) -> bool {
+    state.workspace_root.as_ref().is_some_and(|root| {
+        path.strip_prefix(root)
+            .is_ok_and(|rel| !rel.components().any(|c| c.as_os_str() == ".deps"))
+    })
+}
+
+/// Function coverage of an open workspace document, with its line hits.
+fn document_coverage(
+    state: &ServerState,
+    uri: &Uri,
+    text: &str,
+) -> Option<(Vec<coverage::FnCoverage>, std::collections::BTreeMap<u32, u64>)> {
+    let path = uri_path(uri)?;
+    if !in_workspace(state, &path) {
+        return None;
+    }
+    let lines = coverage::source_lines(state.coverage.lines_for(&path, text)?, text);
+    Some((coverage::function_coverage(&coverage::functions(text), &lines), lines))
+}
+
+/// Hints for functions below the coverage threshold and for runs of
+/// uncovered lines. Hints only, never `Unnecessary` (no faded code).
+fn coverage_diagnostics(state: &ServerState, uri: &Uri, text: &str) -> Vec<Diagnostic> {
+    let Some((functions, lines)) = document_coverage(state, uri, text) else {
+        return Vec::new();
+    };
+    let hint = |range: LspRange, message: String| Diagnostic {
+        range,
+        severity: Some(DiagnosticSeverity::HINT),
+        source: Some("coil coverage".into()),
+        message,
+        ..Diagnostic::default()
+    };
+    let mut out: Vec<Diagnostic> = functions
+        .iter()
+        .filter(|f| f.ratio() < state.coverage.options.threshold)
+        .map(|f| {
+            hint(
+                byte_range(text, &f.function.name_range),
+                format!(
+                    "`{}` has low test coverage: {}. Coverage could be improved.",
+                    f.function.name,
+                    f.summary()
+                ),
+            )
+        })
+        .collect();
+    let untested: Vec<(u32, u32)> = functions
+        .iter()
+        .filter(|f| f.hit == 0)
+        .map(|f| f.function.lines)
+        .collect();
+    let starts = coverage::line_starts(text);
+    for (first, last) in coverage::uncovered_runs(&lines, &untested) {
+        let Some(&start) = starts.get(first as usize - 1) else {
+            continue;
+        };
+        let end = starts.get(last as usize).map_or(text.len(), |&next| next.saturating_sub(1));
+        let indent = text[start..].len() - text[start..].trim_start().len();
+        let message = if first == last {
+            "Line not covered by tests.".to_owned()
+        } else {
+            format!("Lines {first}-{last} not covered by tests.")
+        };
+        out.push(hint(byte_range(text, &((start + indent).min(end)..end)), message));
+    }
+    out
+}
+
+/// A lens over each function's name: `covered 7/9 lines (78%)`.
+fn coverage_lenses(state: &ServerState, uri: &Uri) -> Vec<lsp_types::CodeLens> {
+    let Some(document) = state.documents.get(uri) else {
+        return Vec::new();
+    };
+    let Some((functions, _)) = document_coverage(state, uri, &document.text) else {
+        return Vec::new();
+    };
+    functions
+        .iter()
+        .map(|f| lsp_types::CodeLens {
+            range: byte_range(&document.text, &f.function.name_range),
+            command: Some(Command {
+                title: if f.hit == 0 {
+                    "not covered by tests".to_owned()
+                } else {
+                    format!("covered {}", f.summary())
+                },
+                // Display only.
+                command: String::new(),
+                arguments: None,
+            }),
+            data: None,
+        })
+        .collect()
+}
+
+/// `**Coverage:** 7/9 lines (78%)` for the function `name` declared at byte
+/// `at` of the workspace file `path`.
+fn coverage_note(state: &ServerState, path: &Path, source: &str, name: &str, at: usize) -> Option<String> {
+    if !in_workspace(state, path) {
+        return None;
+    }
+    let lines = coverage::source_lines(state.coverage.lines_for(path, source)?, source);
+    let line = coverage::line_of(&coverage::line_starts(source), at);
+    let functions: Vec<_> = coverage::functions(source)
+        .into_iter()
+        .filter(|f| f.name == name && (f.lines.0..=f.lines.1).contains(&line))
+        .collect();
+    let covered = coverage::function_coverage(&functions, &lines).pop()?;
+    Some(format!("**Coverage:** {}", covered.summary()))
 }
 
 fn send_response(
@@ -479,6 +650,10 @@ fn handle_request(
             let params: lsp_types::InlayHintParams = serde_json::from_value(request.params.clone())?;
             let hints = inlay_hints(state, &params.text_document.uri, params.range).unwrap_or_default();
             Some(serde_json::to_value(hints)?)
+        }
+        "textDocument/codeLens" => {
+            let params: lsp_types::CodeLensParams = serde_json::from_value(request.params.clone())?;
+            Some(serde_json::to_value(coverage_lenses(state, &params.text_document.uri))?)
         }
         "textDocument/hover" => {
             let params: HoverParams = serde_json::from_value(request.params.clone())?;
@@ -804,6 +979,11 @@ fn publish_diagnostics(
             .map(|message| diagnostic(&file_uri, &text, message))
             .collect();
         batch.push((file_uri, diagnostics, open.map(|d| d.version)));
+    }
+    for (file_uri, diagnostics, _) in &mut batch {
+        if let Some(document) = state.documents.get(file_uri) {
+            diagnostics.extend(coverage_diagnostics(state, file_uri, &document.text));
+        }
     }
     let mut now_dirty = HashSet::new();
     for (file_uri, diagnostics, version) in batch {

@@ -177,7 +177,15 @@ fn declaration_hover(
     let import = (bare && decl.top_level && location.uri != *from)
         .then(|| import_line(state, &path, name))
         .flatten();
-    Some(hover_text(&decl.signature, import.as_deref(), decl.docs.as_deref()))
+    let hover = hover_text(&decl.signature, import.as_deref(), decl.docs.as_deref());
+    Some(match coverage_note(state, &path, &source, name, at) {
+        // Under the signature and import row, above the docs.
+        Some(note) => match hover.split_once("\n\n---\n\n") {
+            Some((head, docs)) => format!("{head}\n\n{note}\n\n---\n\n{docs}"),
+            None => format!("{hover}\n\n{note}"),
+        },
+        None => hover,
+    })
 }
 
 fn source_of(state: &ServerState, uri: &Uri, path: &Path) -> Option<String> {
