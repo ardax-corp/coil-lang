@@ -84,6 +84,10 @@ pub(super) struct HirMirTables {
     /// The niche word of each `Result` variant made at a niche layout
     /// other than its own type's ([`Compiler::hir_mir_make_niches`]).
     pub(super) make_niches: HashMap<u32, crate::mir::MirTy>,
+    /// Shared generic call arguments of a niche layout passed in a boxed
+    /// parameter ([`Compiler::hir_niche_arg`]): boxed to their enum
+    /// object, by argument.
+    pub(super) niche_args: HashMap<u32, ValueLayout>,
 }
 
 /// The frame direct MIR keeps a body's locals in, planned over the HIR:
@@ -1002,6 +1006,15 @@ impl Compiler {
             && let Some(boxed_ret) = self.hir_ret_shape(hir, id, &natural)
             && let Some(target) = target
         {
+            if call.generic.is_some() {
+                for (&arg, &param) in args.iter().zip(&call.params) {
+                    if !self.hir_arg_passes(hir, emit, arg, param)
+                        && let Some(layout) = self.hir_niche_arg(hir, emit, arg, param)
+                    {
+                        t.niche_args.insert(arg.0, layout);
+                    }
+                }
+            }
             let pair_args = (0..args.len()).map(|i| Self::hir_arg_rep(call, i).words() == 2).collect();
             // A `TailCall`'s callee returns for this function, so in this
             // function's words, whatever the call's own rep.
@@ -1076,12 +1089,23 @@ impl Compiler {
         args.len() == params.len()
             && args.iter().zip(params).enumerate().all(|(i, (&arg, &param))| {
                 let lambda = matches!(hir.expr(arg).kind, HirKind::Lambda { .. });
-                // A boxed argument goes from its own word, as do the rest
-                // (or boxed from a pair, as a plain call passes them).
-                let tagged = generic.boxed.get(i).and_then(Option::as_ref).and_then(Self::ty_to_value_tag).is_some();
-                let passes = self.hir_arg_passes(hir, emit, arg, param) && !(tagged && matches!(self.hir_natural(hir, emit, arg), Some(Rep::Pair(_))));
+                // Each argument goes from its own word, or boxed from a
+                // pair (a tagged one then boxed to its tag), as a plain
+                // call passes them.
+                let passes = self.hir_arg_passes(hir, emit, arg, param) || self.hir_niche_arg(hir, emit, arg, param).is_some();
                 (lambda || generic.adapt.get(i).is_none_or(Option::is_none)) && passes
             })
+    }
+
+    /// The niche layout of argument `id` that emission passes in boxed
+    /// `param` as its enum object (`hir_value` at the boxed layout).
+    fn hir_niche_arg(&self, hir: &HirBody, emit: &HirEmit, id: HirId, param: ValueLayout) -> Option<ValueLayout> {
+        if param != ValueLayout::Boxed {
+            return None;
+        }
+        let layout = self.value_layout(&apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?));
+        let natural = self.hir_natural(hir, emit, id);
+        (layout != ValueLayout::Boxed && natural.is_none_or(|n| n == Rep::Word(layout))).then_some(layout)
     }
 
     /// Whether direct MIR passes argument `id` in `param` as HIR emission
