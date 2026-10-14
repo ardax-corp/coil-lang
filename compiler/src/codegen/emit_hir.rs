@@ -1387,6 +1387,7 @@ impl Compiler {
             value_calls: &tables.value_calls,
             poly_calls: &tables.poly_calls,
             bound_calls: &tables.bound_calls,
+            existential_calls: &tables.existential_calls,
             ctx_dicts: if entry_words.is_some() { &self.hir_mir_ctx } else { &[] },
             param_unboxes: &self.hir_mir_unbox,
             unbox_any: &tables.unbox_any,
