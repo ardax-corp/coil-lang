@@ -156,6 +156,7 @@ impl MirFunc {
         self.blocks.iter().any(|b| {
             b.insts.iter().any(|i| match i {
                 MirInst::HostInvoke { native_id, .. } => !super::effects::host_is_pure(*native_id),
+                MirInst::Ffi { .. } => true,
                 _ => false,
             })
         })
@@ -468,6 +469,14 @@ impl MirFunc {
                 }
                 if !super::host_allow::host_result_ok(*native_id, spec.ret, self.ty(*dest)) {
                     return Err(format!("{dest} host dest type"));
+                }
+            }
+            MirInst::Ffi { dest, args, .. } => {
+                if self.ty(*dest) != MirTy::HeapRef {
+                    return Err(format!("{dest} ffi dest is not heapref"));
+                }
+                if args.iter().any(|a| !self.ty(*a).is_word_lane()) {
+                    return Err(format!("{dest} ffi arg is not a word lane"));
                 }
             }
             MirInst::CallIndirect { dest, callee, args, dicts } => {

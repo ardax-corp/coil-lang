@@ -1521,6 +1521,7 @@ impl Compiler {
             array_copies: &tables.array_copies,
             crosses: &tables.crosses,
             unrolled_las: &tables.unrolled_las,
+            ffis: &tables.ffis,
             make_niches: &tables.make_niches,
             aggregates: emit
                 .plan

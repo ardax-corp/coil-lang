@@ -54,7 +54,8 @@ impl MirInst {
     pub fn is_effect_barrier(&self) -> bool {
         match self {
             Self::HostInvoke { native_id, .. } => !host_is_pure(*native_id),
-            Self::Call { .. }
+            Self::Ffi { .. }
+            | Self::Call { .. }
             | Self::CallIndirect { .. }
             | Self::ResumeCoro { .. }
             | Self::Yield { .. }

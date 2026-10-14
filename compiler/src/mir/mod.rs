@@ -71,7 +71,7 @@ pub use cse::{cse, gvn};
 pub use destprop::destprop;
 pub use emit_lir::emit_lir;
 pub use entry::LirRefuse;
-pub use from_hir::{lower_body as lower_from_hir, opaque_heap as opaque_heap_ty, scalar as scalar_mir_ty, word as word_mir_ty, HirBoundCall, HirCallSite, HirDictOp, HirFnValue, HirIterLoop, HirPolyCall, HirIterNext, HirMirInput, HirOpCall, HirParBound, HirParFork, HirParIndex, HirParLoop, HirShow, ScalarLit};
+pub use from_hir::{lower_body as lower_from_hir, opaque_heap as opaque_heap_ty, scalar as scalar_mir_ty, word as word_mir_ty, HirBoundCall, HirCallSite, HirDictOp, HirFfi, HirFfiOperand, HirFnValue, HirIterLoop, HirPolyCall, HirIterNext, HirMirInput, HirOpCall, HirParBound, HirParFork, HirParIndex, HirParLoop, HirShow, ScalarLit};
 pub use func::{MirBlock, MirFunc};
 pub use specialize::{capture_pinned_mir, start_mir_capture, take_mir_capture};
 pub use deopt::DraftDeoptMap;
@@ -79,7 +79,7 @@ pub use gates::maps_allocation;
 pub use stackmap::{bind_drafts, encode_draft_slots, is_alloc_opcode, DraftFrameMap};
 pub use inst::{
     BlockId, LocalId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst,
-    MirGcKind, MirInst, MirUnaryOp, Terminator, ValueId,
+    MirFfiOp, MirGcKind, MirInst, MirUnaryOp, Terminator, ValueId,
 };
 pub use instcombine::instcombine;
 pub use layout::MirLayout;

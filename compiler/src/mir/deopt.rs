@@ -21,6 +21,7 @@ impl MirInst {
             Self::Deopt { kind, .. } => Some(*kind),
             Self::Call { .. }
             | Self::CallIndirect { .. }
+            | Self::Ffi { .. }
             | Self::Alloc { .. }
             | Self::GcBarrier { .. }
             | Self::Print { .. }

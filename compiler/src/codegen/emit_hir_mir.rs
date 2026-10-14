@@ -10,6 +10,15 @@
 
 use super::*;
 
+/// How many value operands `dload` / `declare` / `invoke` read before
+/// the signature or argument tuple.
+fn kind_arity(kind: crate::typechecking::FfiBuiltin) -> usize {
+    match kind {
+        crate::typechecking::FfiBuiltin::Dload => 1,
+        _ => 2,
+    }
+}
+
 /// What [`Compiler::hir_mir_tables`] plans for one body.
 #[derive(Default)]
 pub(super) struct HirMirTables {
@@ -35,6 +44,9 @@ pub(super) struct HirMirTables {
     /// `dot` / `matmul` calls and matrix operators emission unrolls (a
     /// shape past the packed kernel's limits), by expression.
     pub(super) unrolled_las: HashMap<u32, crate::typechecking::LinearAlgebraKind>,
+    /// `extern` calls and `dload` / `declare` / `invoke`
+    /// (`HirBuiltin::Ffi` / `FfiDyn`): their opcode and operands, by call.
+    pub(super) ffis: HashMap<u32, crate::mir::HirFfi>,
     /// Fixed array locals copied as they are bound or assigned to another
     /// local ([`Compiler::hir_array_copy`]): the `vec_from_array` native,
     /// by value.
@@ -753,6 +765,29 @@ impl Compiler {
                     }
                 }
             }
+            HirKind::Call { args, .. }
+                if let Some(HirCall {
+                    builtin: Some(builtin @ (HirBuiltin::Ffi { .. } | HirBuiltin::FfiDyn(_))),
+                    params,
+                    ..
+                }) = emit.plan.calls.get(&id.0) =>
+            {
+                let (builtin, params) = (*builtin, params.clone());
+                if let Some(site) = self.hir_mir_ffi(hir, emit, id, builtin, args, &params) {
+                    t.ffis.insert(id.0, site);
+                }
+                // What emission evaluates: an `extern`'s arguments, or the
+                // value operands (a signature's tags are constants, a
+                // callback its code pointer).
+                if let HirBuiltin::FfiDyn(_) = builtin {
+                    for a in Self::hir_ffi_operands(hir, builtin, args) {
+                        if self.hir_ffi_callback(hir, builtin, a).is_none() {
+                            self.hir_mir_walk(hir, emit, a, t);
+                        }
+                    }
+                    return Kids::None;
+                }
+            }
             HirKind::Call { .. } if emit.plan.calls.get(&id.0).is_some_and(|c| matches!(c.builtin, Some(HirBuiltin::BlockOn))) => {
                 let wait = self.native_id("wait_ready").and_then(|n| u16::try_from(n).ok());
                 t.block_ons.insert(id.0, wait);
@@ -803,6 +838,83 @@ impl Compiler {
             _ => {}
         }
         Kids::All
+    }
+
+    /// An FFI call's opcode and operands, as `hir_value_unpacked` emits
+    /// `HirBuiltin::Ffi` / `FfiDyn`; `None` when an operand is not the
+    /// word emission pushes.
+    fn hir_mir_ffi(&mut self, hir: &HirBody, emit: &HirEmit, id: HirId, builtin: HirBuiltin, args: &[HirId], params: &[ValueLayout]) -> Option<crate::mir::HirFfi> {
+        use crate::mir::{HirFfiOperand as O, MirFfiOp};
+        use crate::typechecking::FfiBuiltin;
+        let value = |this: &Self, a: HirId, p: ValueLayout| this.hir_arg_passes(hir, emit, a, p).then_some(O::Value(a.0));
+        let tag = |(t, aux): (u32, u32)| O::Const(i64::from(encode_tag_operand(t, aux)));
+        let mut operands = Vec::new();
+        let (op, operand) = match builtin {
+            HirBuiltin::Ffi { lib, func, variadic } => {
+                if params.len() != args.len() {
+                    return None;
+                }
+                let items = args.iter().zip(params).map(|(&a, &p)| value(self, a, p)).collect::<Option<Vec<_>>>()?;
+                operands.extend([O::Static(lib), O::Static(func), O::Tuple(items)]);
+                let mut operand = args.len() as u32 & 0xFFFF;
+                if let Some(def) = variadic {
+                    let tags = self.hir_variadic_tags(def, hir.expr(id).span, args.len())?;
+                    operands.push(O::Tuple(tags.into_iter().map(tag).collect()));
+                    operand |= 1 << 16;
+                }
+                (MirFfiOp::Invoke, operand)
+            }
+            HirBuiltin::FfiDyn(kind) => {
+                let values = Self::hir_ffi_operands(hir, builtin, args);
+                if params.len() < values.len() || values.len() < kind_arity(kind) {
+                    return None;
+                }
+                for (&a, &p) in values.iter().zip(params).take(2) {
+                    operands.push(value(self, a, p)?);
+                }
+                match kind {
+                    FfiBuiltin::Dload => (MirFfiOp::Load, 0),
+                    FfiBuiltin::Declare => {
+                        let items = lower::tuple_items(hir, args[2])?;
+                        let sig = items.iter().map(|&t| lower::ffi_tag(hir, &self.checker, t).map(tag)).collect::<Option<Vec<_>>>()?;
+                        operands.push(O::Tuple(sig));
+                        operands.push(tag(lower::ffi_tag(hir, &self.checker, args[3])?));
+                        let variadic = args.get(4).is_some_and(|&v| matches!(hir.expr(v).kind, HirKind::Lit(Lit::Bool(true))));
+                        (MirFfiOp::Declare, (items.len() as u32 & 0xFFFF) | (u32::from(variadic) << 16))
+                    }
+                    FfiBuiltin::Invoke => {
+                        let n = values.len() as u32 - 2;
+                        let mut items = Vec::with_capacity(n as usize);
+                        for (&a, &p) in values.iter().zip(params).skip(2) {
+                            items.push(match self.hir_ffi_callback(hir, builtin, a) {
+                                Some(offset) => O::CodePtr(self.bytecode.entry_label_for_offset(offset? as usize)?),
+                                None => value(self, a, p)?,
+                            });
+                        }
+                        operands.push(O::Tuple(items));
+                        let mut operand = n & 0xFFFF;
+                        if lower::ffi_fn_variadic(hir, &self.checker, args[1]) {
+                            let items = lower::tuple_items(hir, args[2])?;
+                            let tags = lower::ffi_variadic_tags(hir, &self.checker, id, items)?;
+                            operands.push(O::Tuple(tags.into_iter().map(tag).collect()));
+                            operand |= 1 << 16;
+                        }
+                        (MirFfiOp::Invoke, operand)
+                    }
+                }
+            }
+            _ => return None,
+        };
+        let unwrap = matches!(builtin, HirBuiltin::Ffi { .. });
+        // The VM pushes a boxed `Result`; a niche-shaped one converts.
+        let niche = match Self::hir_call_rep(&emit.plan.calls[&id.0]) {
+            _ if unwrap => None,
+            Rep::Word(ValueLayout::NicheUnitResult) => Some(crate::mir::MirTy::NicheOpt),
+            Rep::Word(ValueLayout::NicheResult) => Some(crate::mir::MirTy::NicheRes),
+            Rep::Word(ValueLayout::Boxed) => None,
+            _ => return None,
+        };
+        Some(crate::mir::HirFfi { op, operand, operands, unwrap, niche })
     }
 
     /// The user `into_iter` / `next` entries `for` loop `id` calls, as
