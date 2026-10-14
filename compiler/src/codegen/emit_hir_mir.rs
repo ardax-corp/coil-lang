@@ -49,6 +49,9 @@ pub(super) struct HirMirTables {
     pub(super) iter_loops: HashMap<u32, crate::mir::HirIterLoop>,
     /// Direct MIR's frame: the local id of each local's first word.
     pub(super) frame: HirMirFrame,
+    /// Some code emission writes for this body reads one of the frame's
+    /// dictionaries (`__dictN`) ([`Compiler::hir_mir_dict_reads`]).
+    pub(super) reads_dicts: bool,
 }
 
 /// The frame direct MIR keeps a body's locals in, planned over the HIR:
@@ -345,6 +348,9 @@ impl Compiler {
         // not this body's.
         if emit.par_calls.contains_key(&id.0) {
             return;
+        }
+        if !t.reads_dicts {
+            t.reads_dicts = self.hir_mir_dict_reads(hir, emit, id);
         }
         let kids = self.hir_mir_note(hir, emit, id, t);
         let all = lower::children(hir, id);
@@ -731,6 +737,154 @@ impl Compiler {
         let forwarded = generic.forwarded.iter().filter(|&&i| self.lookup_slot(&format!("__dict{i}")).is_some()).count();
         let site = self.hir_mir_quiet(|this| this.emit_call_site_dicts(&mut CodeBuf::new(), &generic.lookup, &generic.arg_tys, Some(&generic.ret_ty)));
         (forwarded + site) as u32
+    }
+
+    /// Whether the code emission writes for `id` itself (not its operands)
+    /// reads one of the frame's dictionaries (`__dictN`): a bound operator,
+    /// bound call or bound `%v`, a generic call's forwarded dictionaries,
+    /// or a dictionary the call site's helpers load from the frame
+    /// (instance, call-site, `PolyFn` escape and existential pack
+    /// dictionaries, run into a scratch buffer as emission runs them).
+    fn hir_mir_dict_reads(&mut self, hir: &HirBody, emit: &HirEmit, id: HirId) -> bool {
+        // As `hir_value` packs a value after emitting it.
+        if let Some(pack) = self.hir_existential_pack(hir, id)
+            && self.hir_mir_probe_dicts(|this, code| this.emit_existential_pack_recipe(code, &pack))
+        {
+            return true;
+        }
+        let e = hir.expr(id);
+        let span = e.span.0..e.span.1;
+        match &e.kind {
+            HirKind::Bin { .. } | HirKind::Un { .. } => match emit.plan.ops.get(&id.0) {
+                Some(HirOp::Bound { .. }) => true,
+                Some(HirOp::Call { lookup, fqn, class, method }) => {
+                    let lookup = lookup.clone();
+                    let fqn = self.instance_clone(fqn, std::slice::from_ref(&lookup)).unwrap_or_else(|| fqn.clone());
+                    self.hir_mir_probe_dicts(|this, code| {
+                        this.emit_call_instance_dict(code, (class, method, &fqn), std::slice::from_ref(&lookup), span);
+                    })
+                }
+                _ => false,
+            },
+            // A `PolyFn` value's escape dictionaries.
+            HirKind::Global { .. } if let Some(name) = emit.plan.polyfns.get(&id.0) => {
+                let ty = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));
+                self.hir_mir_probe_dicts(|this, code| {
+                    this.emit_polyfn_escape_dicts(code, name, ty.as_ref());
+                })
+            }
+            // A call through a `PolyFn` local: the call site's dictionaries
+            // for the generic function it was bound from.
+            HirKind::Call { callee: Callee::Value(f), args } if lower::polyfn_callee(hir, &self.checker, *f) => {
+                let Some(source) = self.hir_polyfn_source(hir, emit, *f) else {
+                    return false;
+                };
+                let arg_tys: Vec<Ty> = args.iter().filter_map(|&a| Self::hir_ty(hir, a)).map(|t| apply_ty_prune(self.checker.subst(), t)).collect();
+                let call_ty = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));
+                self.hir_mir_probe_dicts(|this, code| {
+                    this.emit_call_site_dicts(code, &source, &arg_tys, call_ty.as_ref());
+                })
+            }
+            HirKind::Call { args, .. } if !emit.plan.lens.contains_key(&id.0) && let Some(call) = emit.plan.calls.get(&id.0) => {
+                match &call.builtin {
+                    Some(HirBuiltin::Bound { .. }) => return true,
+                    Some(HirBuiltin::Format) => return self.hir_mir_format_dict_reads(hir, args),
+                    Some(_) => return false,
+                    None => {}
+                }
+                if call.key == format!("{}::push", common::BUILTIN_VEC_TYPE) {
+                    return false;
+                }
+                if let Some(inst) = call.instance.as_ref().filter(|i| i.ground.is_some()) {
+                    let method = &inst.ground.as_ref().expect("ground call").method;
+                    let key = self.instance_clone(&call.key, &inst.args).unwrap_or_else(|| call.key.clone());
+                    return self.hir_mir_probe_dicts(|this, code| {
+                        this.emit_call_instance_dict(code, (&inst.class, method, &key), &inst.args, span);
+                    });
+                }
+                if !call.method && self.hir_par_call_plan(hir, &call.key, args).is_some() {
+                    return false;
+                }
+                if let Some(generic) = call.generic.as_deref()
+                    && self.hir_mir_generic_dict_reads(generic)
+                {
+                    return true;
+                }
+                if !call.method {
+                    return false;
+                }
+                // A non-raw instance method's instance dictionary.
+                let Some(inst) = call.instance.as_deref() else {
+                    return false;
+                };
+                let key = match inst.recv_box.clone() {
+                    Some(recv) if call.generic.is_none() => self.instance_clone(&call.key, &[recv]).unwrap_or_else(|| call.key.clone()),
+                    _ => call.key.clone(),
+                };
+                !self.raw_instance_methods.contains(&key)
+                    && self.hir_mir_probe_dicts(|this, code| {
+                        this.emit_instance_dict(code, &inst.class, &inst.args);
+                    })
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether [`Self::hir_push_dicts`] reads a frame dictionary for
+    /// `generic`: one it forwards, or one of the call site's.
+    fn hir_mir_generic_dict_reads(&mut self, generic: &HirGeneric) -> bool {
+        generic.forwarded.iter().any(|&i| self.lookup_slot(&format!("__dict{i}")).is_some())
+            || self.hir_mir_probe_dicts(|this, code| {
+                this.emit_call_site_dicts(code, &generic.lookup, &generic.arg_tys, Some(&generic.ret_ty));
+            })
+    }
+
+    /// Whether a `format` call's `%v` arguments read a frame dictionary
+    /// when [`Self::hir_show`] shows them.
+    fn hir_mir_format_dict_reads(&mut self, hir: &HirBody, args: &[HirId]) -> bool {
+        let HirKind::Lit(Lit::Str(fmt)) = &hir.expr(args[0]).kind else {
+            return false;
+        };
+        let specs = Self::format_consuming_specs(fmt);
+        args.iter().enumerate().skip(1).filter(|&(i, _)| specs.get(i - 1) == Some(&'v')).any(|(_, &arg)| {
+            self.hir_bound_show(hir, arg).is_some()
+                || Self::hir_ty(hir, arg).is_some_and(|ty| self.hir_mir_show_dict_reads(&ty.clone()))
+        })
+    }
+
+    /// Whether `emit_show_for_stack_value` reads a frame dictionary for a
+    /// value of type `ty`: a tuple's or record's parts, or the instance
+    /// dictionary of the `show` it calls.
+    fn hir_mir_show_dict_reads(&mut self, ty: &Ty) -> bool {
+        match apply_ty_prune(self.checker.subst(), ty) {
+            Ty::Tuple(items) => items.iter().any(|item| self.hir_mir_show_dict_reads(item)),
+            Ty::Record { fields } => fields.iter().any(|(_, field)| self.hir_mir_show_dict_reads(field)),
+            other => {
+                let lookup_ty = Self::show_lookup_ty_for_instance(&other);
+                let Some(fqn) = self.find_show_instance(&lookup_ty).and_then(|instance| instance.method_fqns.get("show").cloned()) else {
+                    return false;
+                };
+                if !self.functions.contains_key(&fqn) && !self.fn_entry_labels.contains_key(&fqn) {
+                    return false;
+                }
+                let fqn = self.instance_clone(&fqn, std::slice::from_ref(&lookup_ty)).unwrap_or(fqn);
+                self.hir_mir_probe_dicts(|this, code| {
+                    this.emit_call_instance_dict(code, ("Show", "show", &fqn), std::slice::from_ref(&lookup_ty), 0..0);
+                })
+            }
+        }
+    }
+
+    /// Run a dictionary helper of emission into a scratch buffer, quietly
+    /// ([`Self::hir_mir_quiet`]): whether its code reads a frame
+    /// dictionary. The code goes nowhere.
+    fn hir_mir_probe_dicts(&mut self, f: impl FnOnce(&mut Self, &mut CodeBuf)) -> bool {
+        let mut code = CodeBuf::new();
+        self.hir_mir_quiet(|this| f(this, &mut code));
+        let dicts: HashSet<u32> = (0..).map_while(|i| self.lookup_slot(&format!("__dict{i}"))).collect();
+        code.ops().iter().filter_map(IlOp::as_encode_byte).any(|b| {
+            *b.bytecode() == Instruction::LOAD && (0..b.load_store_count()).any(|i| dicts.contains(&b.load_store_slot_at(i)))
+        })
     }
 
     /// `f(self)` with the diagnostics it reports dropped: the walk asks
