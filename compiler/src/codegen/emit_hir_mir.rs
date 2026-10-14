@@ -141,7 +141,30 @@ impl Compiler {
             HirKind::Match { arms, .. } => arms.iter().map(|a| a.body).collect(),
             _ => Vec::new(),
         };
+        // A stack array's literal init: each item into its own slot, in
+        // the element's layout (`hir_stack_array_init`).
+        let stack_init = match kind {
+            HirKind::Let { local, init: Some(init) } => Some((*local, *init)),
+            HirKind::Assign { place, value } => match hir.expr(*place).kind {
+                HirKind::Local(local) => Some((local, *value)),
+                _ => None,
+            },
+            _ => None,
+        }
+        .filter(|(local, _)| emit.plan.stacks.contains_key(&local.0));
         for k in lower::children(hir, id) {
+            if let Some((local, init)) = stack_init
+                && k == init
+                && let HirKind::Make { args, .. } = &hir.expr(init).kind
+            {
+                let Rep::Word(elem) = self.hir_stack_rep(hir, local) else {
+                    unreachable!("stack array elements are one word")
+                };
+                for &item in args {
+                    self.hir_mir_make_niches(hir, emit, item, Some(elem), out);
+                }
+                continue;
+            }
             let want = match kind {
                 HirKind::Return(_) => match emit.plan.ret {
                     Rep::Word(l) => Some(l),
