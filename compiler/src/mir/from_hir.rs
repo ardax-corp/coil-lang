@@ -479,6 +479,9 @@ pub struct HirMirInput<'a> {
     /// `cross(a, b)` calls unrolled: whether the result is a tuple and
     /// whether its elements are floats.
     pub crosses: &'a HashMap<u32, (bool, bool)>,
+    /// `dot` / `matmul` calls and matrix operators unrolled (a shape past
+    /// the packed kernel's limits), by expression.
+    pub unrolled_las: &'a HashMap<u32, crate::typechecking::LinearAlgebraKind>,
     /// Fixed array locals copied as they are bound or assigned to another
     /// local: the `vec_from_array` native, by value.
     pub array_copies: &'a HashMap<u32, u16>,
@@ -2351,6 +2354,9 @@ impl Lower<'_> {
             HirKind::Un { operand, .. } if let Some(&la) = self.inp.linalgs.get(&id.0) => self.linalg(id, la, &[*operand]),
             HirKind::Call { args, .. } if let Some(&la) = self.inp.linalgs.get(&id.0) => self.linalg(id, la, args),
             HirKind::Call { args, .. } if let Some(&(tuple, float)) = self.inp.crosses.get(&id.0) => self.cross(id, tuple, float, args),
+            HirKind::Call { args, .. } if let Some(kind) = self.inp.unrolled_las.get(&id.0) => self.unrolled_la(id, kind.clone(), args),
+            HirKind::Bin { lhs, rhs, .. } if let Some(kind) = self.inp.unrolled_las.get(&id.0) => self.unrolled_la(id, kind.clone(), &[*lhs, *rhs]),
+            HirKind::Un { operand, .. } if let Some(kind) = self.inp.unrolled_las.get(&id.0) => self.unrolled_la(id, kind.clone(), &[*operand]),
             HirKind::Bin { lhs, rhs, .. } if let Some(info) = self.inp.aggregates.get(&id.0) => self.aggregate(id, &info.clone(), *lhs, Some(*rhs)),
             HirKind::Un { operand, .. } if let Some(info) = self.inp.aggregates.get(&id.0) => self.aggregate(id, &info.clone(), *operand, None),
             // A bound type parameter's operator: its dictionary method.
@@ -5021,6 +5027,191 @@ impl Lower<'_> {
             self.b.ins_alloc_kinds(MirAllocKind::Array, words, stamp).map_err(mir)?
         };
         Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?))
+    }
+
+    /// A linear-algebra op past the packed kernel's limits, unrolled as
+    /// HIR emission's `emit_linear_algebra_unrolled`: `dot`'s products
+    /// summed in order, and each cell of a matrix product, element-wise
+    /// operator or negation; a matrix's rows and the matrix are made as
+    /// tuples or arrays with no word kinds, as `MakeTuple` / `MakeArray`
+    /// there.
+    fn unrolled_la(&mut self, id: HirId, kind: crate::typechecking::LinearAlgebraKind, args: &[HirId]) -> Result<Val, Refusal> {
+        use crate::typechecking::{LinearAlgebraKind as K, ScalarSide};
+        let scalar = match &kind {
+            K::MatrixZip { scalar_on, .. } => *scalar_on,
+            _ => None,
+        };
+        let mut objs = Vec::with_capacity(args.len());
+        for (i, &arg) in args.iter().enumerate() {
+            let Some(obj) = self.word_or_boxed(arg)? else {
+                return Ok(Val::Never);
+            };
+            let is_scalar = matches!((scalar, i), (Some(ScalarSide::Left), 0) | (Some(ScalarSide::Right), 1));
+            if !is_scalar && self.b.value_ty(obj) != MirTy::HeapRef {
+                return Err("linear algebra operand".into());
+            }
+            objs.push(obj);
+        }
+        let elem_of = |float: bool| if float { MirTy::F64 } else { MirTy::I64 };
+        let at = |l: &mut Self, obj: ValueId, i: usize, ty: MirTy| -> Result<ValueId, Refusal> {
+            let i = l.b.ins_const(MirConst::I64(i as i64)).map_err(mir)?;
+            l.b.ins_index(obj, i, ty, false).map_err(mir)
+        };
+        // `m[i][j]`, each row read again as emission's `LOAD; CONST; INDEX`.
+        let cell = |l: &mut Self, obj: ValueId, i: usize, j: usize, ty: MirTy| -> Result<ValueId, Refusal> {
+            let row = at(l, obj, i, MirTy::HeapRef)?;
+            at(l, row, j, ty)
+        };
+        let bin = |l: &mut Self, op: MirBinOp, a: ValueId, b: ValueId| l.at_expr(id, |l2| l2.b.ins_binop(op, a, b).map_err(mir));
+        let made = |l: &mut Self, tuple: bool, words: Vec<ValueId>| -> Result<ValueId, Refusal> {
+            let kind = if tuple { MirAllocKind::Tuple } else { MirAllocKind::Array };
+            let obj = l.b.ins_alloc(kind, words).map_err(mir)?;
+            l.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)
+        };
+        // `m` rows of `n` cells, each from `f(i, j)`.
+        let matrix = |l: &mut Self, (m, n): (usize, usize), (outer, row): (bool, bool), f: &mut dyn FnMut(&mut Self, usize, usize) -> Result<ValueId, Refusal>| -> Result<Val, Refusal> {
+            let mut rows = Vec::with_capacity(m);
+            for i in 0..m {
+                let mut cells = Vec::with_capacity(n);
+                for j in 0..n {
+                    cells.push(f(l, i, j)?);
+                }
+                rows.push(made(l, row, cells)?);
+            }
+            Ok(Val::V(made(l, outer, rows)?))
+        };
+        match kind {
+            K::Dot { length, elem_is_float, .. } if length > 0 && objs.len() == 2 => {
+                let elem = elem_of(elem_is_float);
+                let mut acc = None;
+                for i in 0..length {
+                    let x = at(self, objs[0], i, elem)?;
+                    let y = at(self, objs[1], i, elem)?;
+                    let p = bin(self, MirBinOp::Mul, x, y)?;
+                    acc = Some(match acc {
+                        None => p,
+                        Some(acc) => bin(self, MirBinOp::Add, acc, p)?,
+                    });
+                }
+                Ok(Val::V(acc.ok_or("empty dot")?))
+            }
+            K::MatMul { m, k, n, outer_is_tuple, row_is_tuple, elem_is_float } if k > 0 && objs.len() == 2 => {
+                let elem = elem_of(elem_is_float);
+                let (a, b) = (objs[0], objs[1]);
+                matrix(self, (m, n), (outer_is_tuple, row_is_tuple), &mut |l, i, j| {
+                    let mut acc = None;
+                    for t in 0..k {
+                        let x = cell(l, a, i, t, elem)?;
+                        let y = cell(l, b, t, j, elem)?;
+                        let p = bin(l, MirBinOp::Mul, x, y)?;
+                        acc = Some(match acc {
+                            None => p,
+                            Some(acc) => bin(l, MirBinOp::Add, acc, p)?,
+                        });
+                    }
+                    acc.ok_or_else(|| "empty matmul".into())
+                })
+            }
+            K::MatrixZip { m, n, op, outer_is_tuple, row_is_tuple, elem_is_float, elem_is_byte, scalar_on } if objs.len() == 2 => {
+                let elem = elem_of(elem_is_float);
+                let (a, b) = (objs[0], objs[1]);
+                let (left, right) = (scalar_on == Some(ScalarSide::Left), scalar_on == Some(ScalarSide::Right));
+                matrix(self, (m, n), (outer_is_tuple, row_is_tuple), &mut |l, i, j| {
+                    let x = if left { a } else { cell(l, a, i, j, elem)? };
+                    let y = if right { b } else { cell(l, b, i, j, elem)? };
+                    l.matrix_cell(id, op, elem_is_float, elem_is_byte, x, y)
+                })
+            }
+            K::MatrixNeg { m, n, outer_is_tuple, row_is_tuple, elem_is_float, elem_is_byte, bit_not } if objs.len() == 1 => {
+                let elem = elem_of(elem_is_float);
+                let a = objs[0];
+                matrix(self, (m, n), (outer_is_tuple, row_is_tuple), &mut |l, i, j| {
+                    let x = cell(l, a, i, j, elem)?;
+                    if !bit_not {
+                        return l.at_expr(id, |l2| l2.b.ins_neg(x).map_err(mir));
+                    }
+                    let ones = l.b.ins_const(MirConst::I64(-1)).map_err(mir)?;
+                    let v = l.b.ins_binop(MirBinOp::Xor, x, ones).map_err(mir)?;
+                    l.mask_byte(v, elem_is_byte)
+                })
+            }
+            _ => Err("linear algebra unrolled".into()),
+        }
+    }
+
+    /// `v & 255` for a `byte` cell, as emission's masked bitwise cells.
+    fn mask_byte(&mut self, v: ValueId, byte: bool) -> Result<ValueId, Refusal> {
+        if !byte {
+            return Ok(v);
+        }
+        let mask = self.b.ins_const(MirConst::I64(255)).map_err(mir)?;
+        self.b.ins_binop(MirBinOp::BitAnd, v, mask).map_err(mir)
+    }
+
+    /// One cell of an element-wise matrix operator, as HIR emission's
+    /// `emit_matrix_cell_op`.
+    fn matrix_cell(&mut self, id: HirId, op: crate::typechecking::MatrixCellOp, float: bool, byte: bool, a: ValueId, b: ValueId) -> Result<ValueId, Refusal> {
+        use crate::typechecking::MatrixCellOp as C;
+        // Emission tests a float cell equal as `a <= b && a >= b`: IEEE
+        // `==` (false at a NaN, `-0.0 == 0.0`), each operand read once;
+        // not equal (or nonzero) is its negation, true at a NaN.
+        let nonzero = |l: &mut Self, v: ValueId| -> Result<ValueId, Refusal> {
+            if float {
+                let zero = l.b.ins_const(MirConst::F64(0.0f64.to_bits())).map_err(mir)?;
+                let eq = l.b.ins_cmp(MirCmpOp::Eq, v, zero).map_err(mir)?;
+                l.b.ins_not(eq).map_err(mir)
+            } else {
+                let zero = l.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+                l.b.ins_cmp(MirCmpOp::Ne, v, zero).map_err(mir)
+            }
+        };
+        let cmp = |op: C| match op {
+            C::Eq => Some(MirCmpOp::Eq),
+            C::Ne => Some(MirCmpOp::Ne),
+            C::Lt => Some(MirCmpOp::Lt),
+            C::Le => Some(MirCmpOp::Le),
+            C::Gt => Some(MirCmpOp::Gt),
+            C::Ge => Some(MirCmpOp::Ge),
+            _ => None,
+        };
+        match op {
+            C::Add => self.at_expr(id, |l| l.b.ins_binop(MirBinOp::Add, a, b).map_err(mir)),
+            C::Sub => self.at_expr(id, |l| l.b.ins_binop(MirBinOp::Sub, a, b).map_err(mir)),
+            C::Ne if float => {
+                let eq = self.b.ins_cmp(MirCmpOp::Eq, a, b).map_err(mir)?;
+                self.b.ins_not(eq).map_err(mir)
+            }
+            C::Eq | C::Ne | C::Lt | C::Le | C::Gt | C::Ge => {
+                let op = cmp(op).ok_or("matrix cell compare")?;
+                self.b.ins_cmp(op, a, b).map_err(mir)
+            }
+            C::BitAnd | C::BitOr | C::BitXor => {
+                let op = match op {
+                    C::BitAnd => MirBinOp::BitAnd,
+                    C::BitOr => MirBinOp::BitOr,
+                    _ => MirBinOp::Xor,
+                };
+                let v = self.b.ins_binop(op, a, b).map_err(mir)?;
+                self.mask_byte(v, byte)
+            }
+            C::Shl | C::Shr => {
+                let mask = self.b.ins_const(MirConst::I64(63)).map_err(mir)?;
+                let count = self.b.ins_binop(MirBinOp::BitAnd, b, mask).map_err(mir)?;
+                let op = if op == C::Shl { MirBinOp::Shl } else { MirBinOp::Shr };
+                let v = self.at_expr(id, |l| l.b.ins_binop(op, a, count).map_err(mir))?;
+                self.mask_byte(v, byte)
+            }
+            C::Intersect | C::Diff => {
+                let x = nonzero(self, a)?;
+                let y = if op == C::Intersect {
+                    nonzero(self, b)?
+                } else {
+                    let y = nonzero(self, b)?;
+                    self.b.ins_not(y).map_err(mir)?
+                };
+                self.b.ins_bool_logic(MirBinOp::BitAnd, x, y).map_err(mir)
+            }
+        }
     }
 
     /// A host native: the arguments in order, then `HostInvoke` (the native
