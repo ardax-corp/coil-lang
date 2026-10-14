@@ -208,6 +208,9 @@ pub fn try_specialize_body_side(
     let Some(func) = from_hir else {
         return refuse_dense("no MIR from HIR");
     };
+    if let Some(why) = func.emit_refusal {
+        return refuse_dense(why);
+    }
     let mut direct_side = BodySidecar::default();
     let mut direct_pool = pool.clone();
     let out = specialize_side(gate, labels, name, &mut direct_pool, calls, official_entry, func, &mut direct_side)?;
@@ -583,6 +586,9 @@ pub fn try_lower_abi_body_side(
     let Some(direct) = from_hir else {
         return refuse("no MIR from HIR");
     };
+    if let Some(why) = direct.emit_refusal {
+        return refuse(why);
+    }
     if has_alloc && !super::stackmap::mir_maps_ok(direct) {
         return refuse("no MIR maps");
     }

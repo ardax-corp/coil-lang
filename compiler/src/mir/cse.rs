@@ -519,6 +519,8 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         | MirInst::Panic { .. }
         | MirInst::Format { .. }
         | MirInst::Stringify { .. }
+        | MirInst::Unbox { .. }
+        | MirInst::TagArrayKind { .. }
         | MirInst::StrEq { .. } => {
             return None
         }
