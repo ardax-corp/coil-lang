@@ -4136,6 +4136,13 @@ impl Lower<'_> {
             let r = self.box_niche(self.niche_layout(rhs, rt)?, r)?;
             return Ok(Val::V(self.b.ins_str_eq(l, r, sym == "!=").map_err(mir)?));
         }
+        // A `bool`-backed scalar enum's words compare as their `0` / `1`.
+        if lt == MirTy::Bool && rt == MirTy::Bool && matches!(sym, "==" | "!=") {
+            let l = self.b.ins_cast(MirCastKind::Word, MirTy::I64, l).map_err(mir)?;
+            let r = self.b.ins_cast(MirCastKind::Word, MirTy::I64, r).map_err(mir)?;
+            let cmp = if sym == "==" { MirCmpOp::Eq } else { MirCmpOp::Ne };
+            return Ok(Val::V(self.b.ins_cmp(cmp, l, r).map_err(mir)?));
+        }
         if lt != rt || !matches!(lt, MirTy::I64 | MirTy::F64) {
             return Err(format!("operator {sym} words"));
         }
