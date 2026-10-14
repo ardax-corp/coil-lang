@@ -840,7 +840,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
             lower.defer_flags.insert(i as u32, flag);
         }
     }
-    if !lower.defer_flags.is_empty() && inp.unwind_native.is_some() && !hir.is_coro {
+    if !lower.defer_flags.is_empty() && inp.unwind_native.is_some() {
         lower.pad = lower.pad_homes();
     }
     let params = lower.b.func().params.len();
