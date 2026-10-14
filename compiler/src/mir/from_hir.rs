@@ -3584,6 +3584,8 @@ impl Lower<'_> {
             _ if unit => (MirTy::I64, None),
             // A tuple not returned as a pair comes back boxed.
             _ if is_heap_tuple(ty) => (MirTy::HeapRef, None),
+            // An enum value of no pair or niche layout: its boxed object.
+            None if self.inp.word(ty).is_none() && (self.inp.boxed_view)(ty, None).is_some() => (MirTy::HeapRef, None),
             _ => (self.inp.word(ty).ok_or_else(|| format!("call type {}", ty_kind(ty)))?, None),
         };
         if site.unbox.is_some() && (site.boxed_ret || site.pair_ret || site.coro || unit || ret_hi.is_some()) {
