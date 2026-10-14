@@ -76,6 +76,7 @@ pub use func::{MirBlock, MirFunc};
 pub use specialize::{capture_pinned_mir, start_mir_capture, take_mir_capture};
 pub use deopt::DraftDeoptMap;
 pub use gc::refuses_alloc;
+pub use gates::maps_allocation;
 pub use stackmap::{bind_drafts, encode_draft_slots, is_alloc_opcode, DraftFrameMap};
 pub use inst::{
     BlockId, LocalId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst,

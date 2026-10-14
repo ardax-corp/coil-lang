@@ -43,6 +43,12 @@ pub fn refuses_alloc(inst: &MirInst) -> bool {
     }
 }
 
+/// `func` allocates where a stack map site binds: a [`refuses_alloc`]
+/// site, or an argless `FORMAT` ([`MirFunc::has_mapped_gc_edge`]).
+pub fn maps_allocation(func: &MirFunc) -> bool {
+    func.blocks.iter().flat_map(|b| b.insts.iter()).any(refuses_alloc) || func.has_mapped_gc_edge()
+}
+
 /// Call, host or format work (the stack IL's `CALL | HOST | FORMAT` effects).
 fn does_work(inst: &MirInst) -> bool {
     matches!(
@@ -139,6 +145,18 @@ bb3:
 }}"
         );
         parse_func(&text).expect(&text)
+    }
+
+    /// The GC map draft gate reads MIR: an argless `FORMAT` binds a map
+    /// site though it is no `refuses_alloc` site; a function value alone
+    /// binds none.
+    #[test]
+    fn maps_allocation_counts_argless_format_not_fn_values() {
+        let fmt = parse_func("func @f(v0: heapref) -> heapref {\nbb0:\n    v1 = format v0\n    return v1\n}").unwrap();
+        assert!(!GateFacts::of(&fmt).has_alloc);
+        assert!(maps_allocation(&fmt));
+        let fnv = parse_func("func @f(v0: i64) -> heapref {\nbb0:\n    v1 = alloc.fn 7, 3, v0\n    v2 = gcbarrier.safepoint v1\n    return v2\n}").unwrap();
+        assert!(!maps_allocation(&fnv));
     }
 
     #[test]
