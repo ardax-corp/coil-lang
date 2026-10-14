@@ -129,6 +129,9 @@ pub fn host_arity_ok(id: u16, declared: usize, n: usize) -> bool {
 pub fn host_arg_ok(id: u16, expected: MirTy, actual: MirTy) -> bool {
     actual == expected
         || ((host_spec(id).is_none() || packed_la(id)) && expected == MirTy::I64 && actual.is_heap_word())
+        // A generic word edge takes a `bool` (`set_nodelay(s, true)`) as
+        // the Value word it is, as its result may be one.
+        || (host_spec(id).is_none() && expected == MirTy::I64 && actual == MirTy::Bool)
 }
 
 /// A packed linear-algebra kernel: its operands are heap arrays or tuples
@@ -139,11 +142,10 @@ fn packed_la(id: u16) -> bool {
 }
 
 /// Whether a HostInvoke typed `expected` may produce `actual`: as
-/// [`host_arg_ok`], and a generic word edge's result may be a `bool`
-/// (`match_at`), the `Value` word the native returns.
+/// [`host_arg_ok`] (a generic word edge's result may be a `bool`,
+/// `match_at`, the `Value` word the native returns).
 pub fn host_result_ok(id: u16, expected: MirTy, actual: MirTy) -> bool {
     host_arg_ok(id, expected, actual)
-        || (host_spec(id).is_none() && expected == MirTy::I64 && actual == MirTy::Bool)
         || (packed_la(id) && matches!(actual, MirTy::I64 | MirTy::F64 | MirTy::HeapRef))
 }
 
