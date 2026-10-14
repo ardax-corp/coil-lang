@@ -617,9 +617,7 @@ impl Compiler {
         }
         let natural = Self::hir_call_rep(call);
         let span = hir.expr(id).span;
-        let natural_args = |this: &Self, params: &[ValueLayout]| {
-            args.iter().zip(params).all(|(&a, &p)| this.hir_natural(hir, emit, a) == Some(Rep::Word(p)))
-        };
+        let natural_args = |this: &Self, params: &[ValueLayout]| args.iter().zip(params).all(|(&a, &p)| this.hir_arg_passes(hir, emit, a, p));
         if let Some(inst) = call.instance.as_ref().filter(|i| i.ground.is_some()) {
             let ground = inst.ground.as_ref().expect("ground call");
             let method = &ground.method;
@@ -672,7 +670,7 @@ impl Compiler {
                 && generic_plain
                 && let Some(boxed_ret) = self.hir_ret_shape(hir, id, &natural)
                 && !boxed
-                && args.iter().zip(&call.params).all(|(&a, &p)| self.hir_arg_word(hir, emit, a, p))
+                && args.iter().zip(&call.params).all(|(&a, &p)| self.hir_arg_passes(hir, emit, a, p))
                 && let Some(target) = target
             {
                 t.calls.insert(
@@ -768,6 +766,17 @@ impl Compiler {
                     let ty = apply_ty_prune(self.checker.subst(), ty);
                     crate::typechecking::return_layout::two_word_range_kind(&ty).is_some()
                 }))
+    }
+
+    /// Whether argument `id` of a method or ground instance call, emitted
+    /// as `Rep::Word(param)`, is what direct MIR's plain call passes: its
+    /// own word ([`Self::hir_arg_word`]), or a two-word value (or a
+    /// constructor) of a type whose word is `param`, which both box the
+    /// same way (MIR's `box_pair_val`, emission's pair-to-word convert).
+    fn hir_arg_passes(&self, hir: &HirBody, emit: &HirEmit, id: HirId, param: ValueLayout) -> bool {
+        self.hir_arg_word(hir, emit, id, param)
+            || (matches!(self.hir_natural(hir, emit, id), None | Some(Rep::Pair(_)))
+                && Self::hir_ty(hir, id).is_some_and(|ty| self.value_layout(&apply_ty_prune(self.checker.subst(), ty)) == param))
     }
 
     fn hir_mir_dicts(&mut self, generic: &HirGeneric) -> u32 {
