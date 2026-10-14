@@ -95,7 +95,8 @@ pub struct HirIterLoop {
 
 /// A function value HIR emission built: `MakeFn` of a lambda's or a named
 /// function's code (`kind` [`MirAllocKind::Fn`], each capture read from its
-/// local), or `MakePolyFn` of a generic function's.
+/// local), or `MakePolyFn` of a generic function's. On a call, a partial
+/// application: `MakeFn` of the callee over the call's arguments.
 #[derive(Clone, Debug)]
 pub struct HirFnValue {
     pub kind: MirAllocKind,
@@ -243,8 +244,11 @@ pub type NicheFn<'a> = Box<dyn Fn(&Ty) -> Option<MirTy> + 'a>;
 
 /// What HIR emission decided about a body, for lowering it.
 pub struct HirMirInput<'a> {
-    /// Frame slot of each local (the first word of a pair local).
+    /// Planned local id of each local (the first word of a pair local).
     pub slots: &'a [Option<u32>],
+    /// The stack IL frame slot of each planned id, while the stack IL is
+    /// emitted beside MIR ([`MirBuilder::relocate`]).
+    pub relocate: HashMap<u32, u32>,
     /// Second-word slot and word types of each pair local.
     pub pair_locals: HashMap<u32, (u32, MirTy, MirTy)>,
     /// Word types of each expression of a two-word type.
@@ -705,6 +709,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
     let mut b = MirBuilder::new(hir.name.clone());
     // Host natives are word edges, as the dense lift types them.
     b.allow_host_edges = true;
+    b.relocate = inp.relocate.clone();
     b.set_ret_ty(ret_ty);
     let mut next = 0;
     for &param in &hir.params {
@@ -1931,6 +1936,7 @@ impl Lower<'_> {
             HirKind::Bin { lhs, rhs, .. } if let Some(call) = self.inp.op_calls.get(&id.0) => self.op_call(id, *lhs, *rhs, &call.clone()),
             HirKind::Bin { op: BinOp::Overloaded(sym), lhs, rhs } if self.inp.op_prims.contains(&id.0) => self.op_prim(sym, *lhs, *rhs),
             HirKind::Bin { op, lhs, rhs } => self.bin(id, *op, *lhs, *rhs),
+            HirKind::Call { args, .. } if let Some(f) = self.inp.fn_values.get(&id.0) => self.partial(id, &f.clone(), args),
             HirKind::Call { args, .. } if let (Some(&fixed), [arg]) = (self.inp.lens.get(&id.0), args.as_slice()) => self.len(*arg, fixed),
             HirKind::Call { args, .. } if self.inp.pushes.contains(&id.0) => self.push(args),
             HirKind::Call { args, .. } if self.inp.matrix_wraps.contains(&id.0) && args.len() == 1 => self.value(args[0]),
@@ -3336,6 +3342,23 @@ impl Lower<'_> {
         let mut words = Vec::with_capacity(f.captures.len());
         for &local in &f.captures {
             words.push(self.local_word(local)?);
+        }
+        let h = self.b.ins_alloc(f.kind, words).map_err(mir)?;
+        Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![h]).map_err(mir)?))
+    }
+
+    /// A partial application `f(args)`, as HIR emission builds it: each
+    /// filled argument's word, then `MakeFn` with its fill mask.
+    fn partial(&mut self, id: HirId, f: &HirFnValue, args: &[HirId]) -> Result<Val, Refusal> {
+        if self.expr_ty(id).and_then(|t| self.inp.word(t)) != Some(MirTy::HeapRef) {
+            return Err("function value type".into());
+        }
+        let mut words = Vec::with_capacity(args.len());
+        for &arg in args {
+            let Some(v) = self.word(arg)? else {
+                return Ok(Val::Never);
+            };
+            words.push(v);
         }
         let h = self.b.ins_alloc(f.kind, words).map_err(mir)?;
         Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![h]).map_err(mir)?))
