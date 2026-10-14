@@ -144,12 +144,11 @@ pub fn emit_lir_with_aliases(
                 continue;
             }
             // A tail call is the block's `Return` (`emit_term`).
-            if tail_call(func, block).is_some() {
-                if let MirInst::Call { dest: d, .. } = inst
-                    && *d == dest
-                {
-                    continue;
-                }
+            if tail_call(func, block).is_some()
+                && let MirInst::Call { dest: d, .. } = inst
+                && *d == dest
+            {
+                continue;
             }
             if term_cmp_dest(func, block).is_some_and(|d| dest == d) {
                 continue;
