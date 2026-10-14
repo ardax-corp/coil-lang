@@ -97,13 +97,11 @@ impl GateFacts {
 }
 
 /// The MIR form of [`super::entry::lir_refuse_direct`] for a fused body,
-/// where a user call is no wall: `BoxValue`, or an allocation without
+/// where neither a user call nor a `BoxValue` is a wall (the S2b map
+/// leaves the box to the precise frame map): only an allocation without
 /// maps (`maps_ok`).
 pub fn fuse_lir_wall(func: &MirFunc, maps_ok: bool) -> Option<LirRefuse> {
     let insts = || func.blocks.iter().flat_map(|b| b.insts.iter());
-    if insts().any(|i| matches!(i, MirInst::Alloc { kind: MirAllocKind::Boxed { .. }, .. })) {
-        return Some(LirRefuse::Box);
-    }
     if !maps_ok && insts().any(refuses_alloc) {
         return Some(LirRefuse::Alloc);
     }
@@ -167,7 +165,7 @@ bb3:
     }
 
     #[test]
-    fn boxed_value_is_no_alloc_but_a_wall() {
+    fn boxed_value_is_no_alloc_and_no_wall() {
         let text = "func @f(v0: heapref) -> heapref {
 bb0:
     v1 = alloc.boxed 3, v0
@@ -176,6 +174,6 @@ bb0:
 }";
         let f = parse_func(text).expect(text);
         assert_eq!(GateFacts::of(&f), GateFacts::default());
-        assert_eq!(fuse_lir_wall(&f, true), Some(LirRefuse::Box));
+        assert_eq!(fuse_lir_wall(&f, false), None);
     }
 }
