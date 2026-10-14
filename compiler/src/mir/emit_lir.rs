@@ -1156,6 +1156,15 @@ fn emit_stored(
             }
         }
         MirInst::Deopt { .. } => {}
+        MirInst::CodePtr { dest, target } => {
+            out.push(super::emit::code_ptr_op(*target, loc));
+            if plan.need_slot[dest.index()] {
+                out.push(IlOp::StorePop {
+                    slot: u32::from(regs[dest.index()]),
+                    loc,
+                });
+            }
+        }
         MirInst::String { dest, idx } => {
             out.push(IlOp::String { idx: *idx, loc });
             if plan.need_slot[dest.index()] {
@@ -1786,6 +1795,10 @@ fn emit_stack(
         MirInst::Deopt { .. } => Ok(()),
         MirInst::String { idx, .. } => {
             out.push(IlOp::String { idx: *idx, loc });
+            Ok(())
+        }
+        MirInst::CodePtr { target, .. } => {
+            out.push(super::emit::code_ptr_op(*target, loc));
             Ok(())
         }
         MirInst::Print { src, .. } => {

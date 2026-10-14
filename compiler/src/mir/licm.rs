@@ -303,7 +303,7 @@ fn hoistable(inst: &MirInst, allow_index: bool, allow_alloc: bool) -> bool {
         | MirInst::Unbox { .. }
         | MirInst::TagArrayKind { .. }
         | MirInst::StrEq { .. } => false,
-        MirInst::String { .. } => true,
+        MirInst::String { .. } | MirInst::CodePtr { .. } => true,
     }
 }
 

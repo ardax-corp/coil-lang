@@ -944,6 +944,13 @@ impl MirBuilder {
     }
 
     /// Const string-table push (I4 / Q9 R1).
+    /// `CodePtr` of the function at `target`: an `int` word.
+    pub fn ins_code_ptr(&mut self, target: crate::il::Label) -> Result<ValueId, MirError> {
+        let dest = self.alloc(MirTy::I64);
+        self.push(MirInst::CodePtr { dest, target })?;
+        Ok(dest)
+    }
+
     pub fn ins_string(&mut self, idx: u32) -> Result<ValueId, MirError> {
         let dest = self.alloc(MirTy::HeapRef);
         self.push(MirInst::String { dest, idx })?;
