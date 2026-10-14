@@ -5916,11 +5916,15 @@ impl Compiler {
         Some((Self::hir_slot(emit, local), n))
     }
 
-    /// The representation of a stack array's elements: one word each.
+    /// The representation of a stack array's elements: one word each, in
+    /// the element's layout, as an index read takes it and a heap array
+    /// holds it (a niche `Option` / `Result` element is its niche word,
+    /// for a fixed array and an array literal bound to a `Vec` local alike).
     fn hir_stack_rep(&self, hir: &HirBody, local: LocalId) -> Rep {
         let elem = hir.local(local).ty.as_ref().map(|ty| apply_ty_prune(self.checker.subst(), ty));
         Rep::Word(match elem.as_ref().map(crate::typechecking::ty::strip_readonly) {
             Some(Ty::Array { element, .. }) => self.value_layout(element),
+            Some(ty) if let Some(element) = crate::typechecking::ty::vec_element_ty(ty) => self.value_layout(element),
             _ => ValueLayout::Boxed,
         })
     }
