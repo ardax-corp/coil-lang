@@ -1584,6 +1584,15 @@ impl Lower<'_> {
             };
             return Ok(Some(self.b.ins_heap_field_load(obj, None, slot, ty).map_err(mir)?));
         }
+        // So does a frame-slot class local's open niche field: its slot's box.
+        if let Some(&slot) = self.inp.fields.get(&id.0)
+            && self.open_slot_niche(id).is_some_and(|w| Ok(w) == niche_word(layout))
+        {
+            return Ok(Some(match self.boxed_field(id, slot)? {
+                Some((obj, index)) => self.b.ins_heap_field_load(obj, None, index, MirTy::HeapRef).map_err(mir)?,
+                None => self.b.use_local(LocalId(slot), MirTy::HeapRef).map_err(mir)?,
+            }));
+        }
         let Some(v) = self.word(id)? else {
             return Ok(None);
         };
@@ -2442,13 +2451,23 @@ impl Lower<'_> {
             }
             HirKind::Assign { place, value } if let Some(&slot) = self.inp.fields.get(&place.0) => {
                 let boxed = self.boxed_slot_field(*place);
+                let open = self.open_slot_niche(*place);
                 let ty = self
                     .expr_ty(*place)
                     .and_then(|t| self.inp.word(t))
-                    .or_else(|| boxed.then_some(MirTy::HeapRef))
+                    .filter(|_| open.is_none())
+                    .or_else(|| (boxed || open.is_some()).then_some(MirTy::HeapRef))
                     .ok_or("field type")?;
-                // A two-word value is stored boxed, as the slot's `new` did.
-                let v = if boxed { self.boxed_word(*value)? } else { self.word(*value)? };
+                // A two-word value is stored boxed, as the slot's `new` did;
+                // so is an open niche field's.
+                let v = match open {
+                    Some(niche) => {
+                        let layout = self.niche_layout(*place, niche)?;
+                        self.boxed_niche_word(*value, layout)?
+                    }
+                    None if boxed => self.boxed_word(*value)?,
+                    None => self.word(*value)?,
+                };
                 let Some(v) = v else {
                     return Ok(Val::Never);
                 };
@@ -2540,6 +2559,14 @@ impl Lower<'_> {
                 }
                 let obj = self.b.ins_alloc(MirAllocKind::Dict, elems).map_err(mir)?;
                 Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?))
+            }
+            // An open niche field's box, read back as its niche word.
+            HirKind::Field { .. } if let Some(&slot) = self.inp.fields.get(&id.0) && let Some(niche) = self.open_slot_niche(id) => {
+                let obj = match self.boxed_field(id, slot)? {
+                    Some((obj, index)) => self.b.ins_heap_field_load(obj, None, index, MirTy::HeapRef).map_err(mir)?,
+                    None => self.b.use_local(LocalId(slot), MirTy::HeapRef).map_err(mir)?,
+                };
+                self.unbox_niche(obj, niche)
             }
             HirKind::Field { .. } if let Some(&slot) = self.inp.fields.get(&id.0) => {
                 let ty = self
@@ -3381,6 +3408,23 @@ impl Lower<'_> {
             && self.expr_ty(id).is_some_and(|t| self.inp.word(t).is_none() && (self.inp.boxed_view)(t, None).is_some())
     }
 
+    /// Whether field `id` of a frame-slot class local is a niche `Option`
+    /// / `Result` its slot holds boxed (a generic class's field open in a
+    /// parameter, as the class's heap object holds it): its niche word.
+    fn open_slot_niche(&self, id: HirId) -> Option<MirTy> {
+        let (Some(&slot), HirKind::Field { base, .. }) = (self.inp.fields.get(&id.0), &self.hir.expr(id).kind) else {
+            return None;
+        };
+        let HirKind::Local(local) = self.hir.expr(*base).kind else {
+            return None;
+        };
+        let (Some(tys), Ok(at)) = (self.inp.sroa.get(&local.0), self.slot(local)) else {
+            return None;
+        };
+        let niche = self.expr_ty(id).and_then(|t| self.inp.word(t)).filter(|w| matches!(w, MirTy::NicheOpt | MirTy::NicheRes))?;
+        (slot.checked_sub(at.0).and_then(|i| tys.get(i as usize)) == Some(&MirTy::HeapRef)).then_some(niche)
+    }
+
     /// The heap array a boxed stack array local `id` names.
     fn boxed(&self, id: HirId) -> Option<LocalId> {
         match self.hir.expr(id).kind {
@@ -4013,7 +4057,17 @@ impl Lower<'_> {
                 let mut words = Vec::with_capacity(args.len());
                 for (&arg, &ty) in args.iter().zip(&tys) {
                     // A two-word item's slot holds its box.
-                    let v = if ty == MirTy::HeapRef { self.word_or_boxed(arg)? } else { self.word(arg)? };
+                    let niche = self.expr_ty(arg).and_then(|t| self.inp.word(t)).filter(|w| matches!(w, MirTy::NicheOpt | MirTy::NicheRes));
+                    let v = match niche {
+                        // A slot of a generic class's field open in a
+                        // parameter holds a niche `Option` / `Result` boxed.
+                        Some(niche) if ty == MirTy::HeapRef => {
+                            let layout = self.niche_layout(arg, niche)?;
+                            self.boxed_niche_word(arg, layout)?
+                        }
+                        _ if ty == MirTy::HeapRef => self.word_or_boxed(arg)?,
+                        _ => self.word(arg)?,
+                    };
                     let Some(v) = v else {
                         return Ok(Val::Never);
                     };
