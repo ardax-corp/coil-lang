@@ -519,9 +519,11 @@ fn is_stream(ty: &Ty) -> bool {
     matches!(strip_readonly(ty), Ty::Con(n) if n == crate::typechecking::ty::STREAM)
 }
 
-/// A `Thread` handle: a heap object (`ObjThread`).
+/// An opaque `thread` module handle (`Thread`, `Sender`, `Receiver`,
+/// `Mutex`, `RwLock`): a heap object.
 fn is_thread(ty: &Ty) -> bool {
-    matches!(strip_readonly(ty), Ty::Con(n) if n == crate::typechecking::ty::THREAD)
+    use crate::typechecking::ty::{MUTEX, RECEIVER, RWLOCK, SENDER, THREAD};
+    matches!(strip_readonly(ty), Ty::Con(n) if [THREAD, SENDER, RECEIVER, MUTEX, RWLOCK].contains(&n.as_str()))
 }
 
 /// The element type of an array or `Vec`.
