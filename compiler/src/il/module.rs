@@ -506,6 +506,24 @@ impl IlModule {
                 body.meta.hir_mir.as_deref(),
                 &mut side,
             ) {
+                // A fused body's lambdas: their code, inline in HIR
+                // emission's IL, follows the LIR.
+                let lir = if fused[i] && drops_bound_label(&bound[i], &lir) {
+                    match splice_inner_code(&body.ops, lir.clone(), &bound[i]) {
+                        Some((spliced, allocs)) => {
+                            // Their allocations bind map sites too; a
+                            // lambda's frame is not this body's, so they
+                            // root nothing (its precise frame map does).
+                            if let Some(map) = side.stack_map.as_mut() {
+                                map.sites.extend(std::iter::repeat_n(Vec::new(), allocs));
+                            }
+                            spliced
+                        }
+                        None => lir,
+                    }
+                } else {
+                    lir
+                };
                 // Do not re-run stack-IL opts: `local_cse` refuses MOD and
                 // rematerializes a stored remainder (pair_int_churn +12%).
                 if drops_bound_label(&bound[i], &lir) {
@@ -755,6 +773,88 @@ fn bound_labels(ops: &[IlOp]) -> std::collections::HashSet<u32> {
             _ => None,
         })
         .collect()
+}
+
+/// A fused body's LIR (`lir`) builds the function values HIR emission
+/// emitted inline (`JMP after; entry: code; after:`), but not their code:
+/// copy each such range of `old` after it, every label it binds but its
+/// entry renamed past the labels in play. The count of allocating opcodes
+/// copied comes with it. `None` when a dropped label is not such an entry,
+/// or the LIR could fall into the copy.
+fn splice_inner_code(old: &[IlOp], mut lir: Vec<IlOp>, was: &std::collections::HashSet<u32>) -> Option<(Vec<IlOp>, usize)> {
+    let now = bound_labels(&lir);
+    let mut missing: Vec<u32> = lir
+        .iter()
+        .filter_map(|op| match op {
+            IlOp::Entry { target, .. } | IlOp::Jump { target, .. } if was.contains(&target.0) && !now.contains(&target.0) => Some(target.0),
+            _ => None,
+        })
+        .collect();
+    missing.sort_unstable();
+    missing.dedup();
+    let last = lir.iter().rev().find(|op| op.emits_code())?;
+    let ends = !last.can_fall_through() || last.as_encode_byte().is_some_and(|b| *b.bytecode() == common::Instruction::Panic);
+    if missing.is_empty() || !ends {
+        return None;
+    }
+    let mut ranges = Vec::new();
+    for &l in &missing {
+        let start = old.iter().position(|op| op.bind_label() == Some(Label(l)))?;
+        let jmp = old[..start].iter().rposition(IlOp::emits_code)?;
+        let IlOp::Jump { kind: IlJumpKind::Unconditional, target: after, .. } = old[jmp] else {
+            return None;
+        };
+        let end = start + old[start..].iter().position(|op| op.bind_label() == Some(after))?;
+        ranges.push((l, start, end));
+    }
+    // A lambda inside another is copied with it, renamed: not on its own.
+    if ranges.iter().any(|&(l, s, e)| ranges.iter().any(|&(l2, s2, e2)| l2 != l && s2 <= s && e <= e2)) {
+        return None;
+    }
+    let label_ids = |op: &IlOp| match op {
+        IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
+        IlOp::Jump { target: Label(id), .. } | IlOp::Entry { target: Label(id), .. } => Some(*id),
+        _ => None,
+    };
+    let mut next = old.iter().chain(lir.iter()).filter_map(label_ids).max().unwrap_or(0) + 1;
+    let mut allocs = 0usize;
+    for (entry, start, end) in ranges {
+        let code = &old[start..end];
+        let mut rename: HashMap<u32, u32> = HashMap::new();
+        for op in code {
+            if let Some(Label(id)) = op.bind_label()
+                && id != entry
+            {
+                rename.entry(id).or_insert_with(|| {
+                    next += 1;
+                    next - 1
+                });
+            }
+        }
+        for op in code {
+            let mut op = op.clone();
+            match &mut op {
+                IlOp::Label(l) | IlOp::JoinLabel(l) | IlOp::Jump { target: l, .. } | IlOp::Entry { target: l, .. } => {
+                    if let Some(&to) = rename.get(&l.0) {
+                        *l = Label(to);
+                    }
+                }
+                _ => {}
+            }
+            allocs += usize::from(allocates(&op));
+            lir.push(op);
+        }
+    }
+    Some((lir, allocs))
+}
+
+/// `op` lowers to an allocating opcode ([`crate::mir::is_alloc_opcode`]).
+fn allocates(op: &IlOp) -> bool {
+    match op {
+        IlOp::MakeArray { .. } | IlOp::MakeTuple { .. } | IlOp::MakeEnum { .. } => true,
+        IlOp::Entry { kind: crate::il::EntryKind::MakeCoro | crate::il::EntryKind::MakePolyFn, .. } => true,
+        _ => op.as_encode_byte().is_some_and(|b| crate::mir::is_alloc_opcode(*b.bytecode())),
+    }
 }
 
 /// `new` names a label the body bound (`was`) but `new` no longer binds.
