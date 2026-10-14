@@ -426,8 +426,7 @@ impl MirBuilder {
             super::host_allow::host_spec(native_id)
         }
         .ok_or_else(|| MirError::msg(format!("host {native_id} is not a typed MIR edge")))?;
-        let variadic = super::host_allow::host_variadic(native_id) && args.len() > spec.args.len();
-        if spec.args.len() != args.len() && !variadic {
+        if !super::host_allow::host_arity_ok(native_id, spec.args.len(), args.len()) {
             return Err(MirError::msg(format!(
                 "host {} arity {} vs {}",
                 spec.name,

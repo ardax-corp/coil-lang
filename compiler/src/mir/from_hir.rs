@@ -466,9 +466,15 @@ pub struct HirMirInput<'a> {
     pub record_fields: HashMap<u32, (u32, MirTy)>,
     /// `matrix(data)` calls: the data itself.
     pub matrix_wraps: &'a HashSet<u32>,
+    /// `block_on(h)` calls: the `wait_ready` native run between resumes,
+    /// if any.
+    pub block_ons: &'a HashMap<u32, Option<u16>>,
     /// Matrix / vector operators and `dot` / `matmul` calls on a packed
     /// kernel: its native and the meta word packing the shape.
     pub linalgs: &'a HashMap<u32, (u16, u32)>,
+    /// `cross(a, b)` calls unrolled: whether the result is a tuple and
+    /// whether its elements are floats.
+    pub crosses: &'a HashMap<u32, (bool, bool)>,
     /// Fixed array locals copied as they are bound or assigned to another
     /// local: the `vec_from_array` native, by value.
     pub array_copies: &'a HashMap<u32, u16>,
@@ -580,6 +586,12 @@ struct Lower<'a> {
     packed: HashSet<u32>,
     /// The body's dictionary parameters, by frame slot.
     dict_params: HashMap<u32, ValueId>,
+    /// Words already lowered for these expressions: an element or field
+    /// `x++` used for its value reads its place once, and its store takes
+    /// the new word.
+    preset: HashMap<u32, Val>,
+    /// The `x++` lowered as a plain store (its value read separately).
+    adjust_store: Option<HirId>,
 }
 
 /// Where a body's `defer` state sits for its unwind cleanup pad: each
@@ -945,6 +957,8 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         pad: None,
         packed: HashSet::new(),
         dict_params,
+        preset: HashMap::new(),
+        adjust_store: None,
     };
     lower.pin_locals()?;
     for (i, e) in hir.exprs.iter().enumerate() {
@@ -1080,6 +1094,8 @@ fn lower_pad(hir: &HirBody, inp: &HirMirInput, parts: PadParts<'_>) -> Result<Mi
         pad: None,
         packed: HashSet::new(),
         dict_params: HashMap::new(),
+        preset: HashMap::new(),
+        adjust_store: None,
     };
     let captures_of = |body: HirId| {
         hir.exprs.iter().find_map(|e| match &e.kind {
@@ -1859,9 +1875,12 @@ impl Lower<'_> {
     /// they are reached), a dynamic array in a loop pushing each result.
     fn aggregate(&mut self, id: HirId, info: &crate::typechecking::AggregateArithInfo, lhs: HirId, rhs: Option<HirId>) -> Result<Val, Refusal> {
         use crate::typechecking::{AggregateArithKind as K, AggregateOp, ScalarSide};
-        // The packed kernel's edge takes its operands as untyped words.
+        // The packed kernel: each operand one word (boxed), then the meta
+        // word, as a matrix operator's.
         if lower::aggregate_packed(info).is_some() {
-            return Err("packed aggregate".into());
+            let la = *self.inp.linalgs.get(&id.0).ok_or("packed aggregate")?;
+            let args: Vec<HirId> = [lhs].into_iter().chain(rhs).collect();
+            return self.linalg(id, la, &args);
         }
         let op = match info.op {
             AggregateOp::Add => Some(MirBinOp::Add),
@@ -2264,6 +2283,9 @@ impl Lower<'_> {
     }
 
     fn value_unpacked(&mut self, id: HirId) -> Result<Val, Refusal> {
+        if let Some(&v) = self.preset.get(&id.0) {
+            return Ok(v);
+        }
         let e = self.hir.expr(id);
         let returned = std::mem::take(&mut self.ret_tail);
         if let Some(par) = self.inp.par_loops.get(&id.0) {
@@ -2319,6 +2341,7 @@ impl Lower<'_> {
             HirKind::Bin { lhs, rhs, .. } if let Some(&la) = self.inp.linalgs.get(&id.0) => self.linalg(id, la, &[*lhs, *rhs]),
             HirKind::Un { operand, .. } if let Some(&la) = self.inp.linalgs.get(&id.0) => self.linalg(id, la, &[*operand]),
             HirKind::Call { args, .. } if let Some(&la) = self.inp.linalgs.get(&id.0) => self.linalg(id, la, args),
+            HirKind::Call { args, .. } if let Some(&(tuple, float)) = self.inp.crosses.get(&id.0) => self.cross(id, tuple, float, args),
             HirKind::Bin { lhs, rhs, .. } if let Some(info) = self.inp.aggregates.get(&id.0) => self.aggregate(id, &info.clone(), *lhs, Some(*rhs)),
             HirKind::Un { operand, .. } if let Some(info) = self.inp.aggregates.get(&id.0) => self.aggregate(id, &info.clone(), *operand, None),
             // A bound type parameter's operator: its dictionary method.
@@ -2334,6 +2357,7 @@ impl Lower<'_> {
             HirKind::Call { args, .. } if let (Some(&fixed), [arg]) = (self.inp.lens.get(&id.0), args.as_slice()) => self.len(*arg, fixed),
             HirKind::Call { args, .. } if self.inp.pushes.contains(&id.0) => self.push(args),
             HirKind::Call { args, .. } if self.inp.matrix_wraps.contains(&id.0) && args.len() == 1 => self.value(args[0]),
+            HirKind::Call { args, .. } if let (Some(&wait), [handle]) = (self.inp.block_ons.get(&id.0), args.as_slice()) => self.block_on(id, *handle, wait),
             HirKind::Call { args, .. } if let Some(&idx) = self.inp.formats.get(&id.0) => self.format(id, idx, args.get(1..).unwrap_or_default()),
             HirKind::Call { args, .. } if self.inp.hosts.contains_key(&id.0) => self.host(id, args),
             HirKind::Call { callee: Callee::Value(f), args } if self.inp.value_calls.contains(&id.0) => self.call_value(id, *f, args),
@@ -2563,7 +2587,9 @@ impl Lower<'_> {
                 self.fill_slots(local, *value)
             }
             // `x++` used for its value reads the old or new `x`.
-            HirKind::Assign { place, value } if e.flags.contains(HirFlags::ADJUST) && !self.expr_ty(id).is_some_and(is_unit) => {
+            HirKind::Assign { place, value }
+                if e.flags.contains(HirFlags::ADJUST) && self.adjust_store != Some(id) && !self.expr_ty(id).is_some_and(is_unit) =>
+            {
                 self.adjust_value(id, *place, *value)
             }
             HirKind::Assign { place, value } if let HirKind::Index { base, index, .. } = self.hir.expr(*place).kind => {
@@ -4154,6 +4180,13 @@ impl Lower<'_> {
             let r = self.box_niche(self.niche_layout(rhs, rt)?, r)?;
             return Ok(Val::V(self.b.ins_str_eq(l, r, sym == "!=").map_err(mir)?));
         }
+        // A `bool`-backed scalar enum's words compare as their `0` / `1`.
+        if lt == MirTy::Bool && rt == MirTy::Bool && matches!(sym, "==" | "!=") {
+            let l = self.b.ins_cast(MirCastKind::Word, MirTy::I64, l).map_err(mir)?;
+            let r = self.b.ins_cast(MirCastKind::Word, MirTy::I64, r).map_err(mir)?;
+            let cmp = if sym == "==" { MirCmpOp::Eq } else { MirCmpOp::Ne };
+            return Ok(Val::V(self.b.ins_cmp(cmp, l, r).map_err(mir)?));
+        }
         if lt != rt || !matches!(lt, MirTy::I64 | MirTy::F64) {
             return Err(format!("operator {sym} words"));
         }
@@ -4202,6 +4235,43 @@ impl Lower<'_> {
             return Ok(Val::Never);
         };
         let out = self.b.ins_resume_coro(h, send, dest_ty).map_err(mir)?;
+        match pair {
+            _ if unit => Ok(Val::Unit),
+            Some((lo_ty, hi_ty)) => self.unbox_word(&ty, out, lo_ty, hi_ty),
+            None => Ok(Val::V(out)),
+        }
+    }
+
+    /// `block_on(h)`: `h` resumed until it is done, running `wait` (the
+    /// `wait_ready` native) between resumes, then its last resumed word,
+    /// as HIR emission's `hir_block_on`.
+    fn block_on(&mut self, id: HirId, handle: HirId, wait: Option<u16>) -> Result<Val, Refusal> {
+        let ty = self.expr_ty(id).ok_or("block_on type")?.clone();
+        let unit = is_unit(&ty);
+        // A two-word value moves through the coroutine boxed.
+        let pair = self.inp.pair_tys.get(&id.0).copied();
+        let dest_ty = match pair {
+            _ if unit => MirTy::I64,
+            Some(_) => MirTy::HeapRef,
+            None => self.inp.word(&ty).ok_or("block_on type")?,
+        };
+        let Some(h) = self.word(handle)? else {
+            return Ok(Val::Never);
+        };
+        let head = self.b.create_block();
+        let again = self.b.create_block();
+        let exit = self.b.create_block();
+        self.jump(head)?;
+        self.switch(head);
+        let out = self.at_expr(id, |l| l.b.ins_resume_coro(h, None, dest_ty).map_err(mir))?;
+        let done = self.b.ins_done_coro(h).map_err(mir)?;
+        self.b.branch(done, exit, again).map_err(mir)?;
+        self.switch(again);
+        if let Some(native) = wait {
+            self.b.ins_host_invoke(native, Vec::new()).map_err(mir)?;
+        }
+        self.jump(head)?;
+        self.switch(exit);
         match pair {
             _ if unit => Ok(Val::Unit),
             Some((lo_ty, hi_ty)) => self.unbox_word(&ty, out, lo_ty, hi_ty),
@@ -4425,6 +4495,9 @@ impl Lower<'_> {
     /// (prefix) word, as HIR emission's `INC` / `DEC` on the slot.
     fn adjust_value(&mut self, id: HirId, place: HirId, value: HirId) -> Result<Val, Refusal> {
         let prefix = self.hir.expr(id).flags.contains(HirFlags::PREFIX);
+        if matches!(self.hir.expr(place).kind, HirKind::Field { .. } | HirKind::Index { .. }) {
+            return self.adjust_elem(id, place, value, prefix);
+        }
         let Some(old) = self.word(place)? else {
             return Ok(Val::Never);
         };
@@ -4451,6 +4524,46 @@ impl Lower<'_> {
                 self.b.def_local(slot, new).map_err(mir)?;
             }
             _ => return Err("adjust place".into()),
+        }
+        Ok(Val::V(if prefix { new } else { old }))
+    }
+
+    /// `xs[i]++` / `--b.v` used for its value: the element or field read
+    /// once (the old word), `old ± 1` stored as the statement `x = x ± 1`
+    /// would, and the old (postfix) or new (prefix) word. The place's
+    /// operands are read again by the store, so they must be pure.
+    fn adjust_elem(&mut self, id: HirId, place: HirId, value: HirId, prefix: bool) -> Result<Val, Refusal> {
+        let HirKind::Bin { lhs: read, .. } = self.hir.expr(value).kind else {
+            return Err("adjust place".into());
+        };
+        let repeatable = match self.hir.expr(place).kind {
+            HirKind::Field { base, .. } => lower::pure_base(self.hir, base),
+            HirKind::Index { base, index, .. } => lower::pure_base(self.hir, base) && lower::pure_index(self.hir, index),
+            _ => false,
+        };
+        if !repeatable {
+            return Err("adjust place".into());
+        }
+        let Some(old) = self.word(read)? else {
+            return Ok(Val::Never);
+        };
+        self.preset.insert(read.0, Val::V(old));
+        let new = self.word(value);
+        self.preset.remove(&read.0);
+        let Some(new) = new? else {
+            return Ok(Val::Never);
+        };
+        let ty = self.b.value_ty(old);
+        if !matches!(ty, MirTy::I64 | MirTy::F64) || self.b.value_ty(new) != ty {
+            return Err("adjust type".into());
+        }
+        self.preset.insert(value.0, Val::V(new));
+        let prev = self.adjust_store.replace(id);
+        let stored = self.value(id);
+        self.adjust_store = prev;
+        self.preset.remove(&value.0);
+        if matches!(stored?, Val::Never) {
+            return Ok(Val::Never);
         }
         Ok(Val::V(if prefix { new } else { old }))
     }
@@ -4819,6 +4932,55 @@ impl Lower<'_> {
             l.b.ins_host_invoke_as(native, words, common::HOST_ENUM_LAYOUT_BOXED as u8, Some(ret)).map_err(mir)
         })?;
         Ok(Val::V(out))
+    }
+
+    /// `cross(a, b)` of two 3-vectors, unrolled as HIR emission's
+    /// `emit_linear_algebra_unrolled`: each component read, then
+    /// `(ay*bz - az*by, az*bx - ax*bz, ax*by - ay*bx)` as a tuple or array.
+    fn cross(&mut self, id: HirId, tuple: bool, float: bool, args: &[HirId]) -> Result<Val, Refusal> {
+        let [a, b] = *args else {
+            return Err("cross arity".into());
+        };
+        let elem = if float { MirTy::F64 } else { MirTy::I64 };
+        let mut parts = Vec::with_capacity(6);
+        let mut objs = Vec::with_capacity(2);
+        for arg in [a, b] {
+            let Some(obj) = self.word_or_boxed(arg)? else {
+                return Ok(Val::Never);
+            };
+            if self.b.value_ty(obj) != MirTy::HeapRef {
+                return Err("cross operand".into());
+            }
+            objs.push(obj);
+        }
+        for obj in objs {
+            for i in 0..3 {
+                let k = self.b.ins_const(MirConst::I64(i)).map_err(mir)?;
+                parts.push(self.b.ins_index(obj, k, elem, false).map_err(mir)?);
+            }
+        }
+        let [ax, ay, az, bx, by, bz] = parts[..] else {
+            unreachable!("six components")
+        };
+        let mut words = Vec::with_capacity(3);
+        for (p, q, r, s) in [(ay, bz, az, by), (az, bx, ax, bz), (ax, by, ay, bx)] {
+            // An int product or difference traps on overflow at the call.
+            let w = self.at_expr(id, |l2| {
+                let l = l2.b.ins_binop(MirBinOp::Mul, p, q).map_err(mir)?;
+                let r = l2.b.ins_binop(MirBinOp::Mul, r, s).map_err(mir)?;
+                l2.b.ins_binop(MirBinOp::Sub, l, r).map_err(mir)
+            })?;
+            words.push(w);
+        }
+        let ty = self.expr_ty(id).ok_or("cross type")?.clone();
+        let obj = if tuple {
+            let kinds = common::pack_word_kinds(std::iter::repeat_n(common::WORD_SCALAR, 3));
+            self.b.ins_alloc_kinds(MirAllocKind::Tuple, words, kinds).map_err(mir)?
+        } else {
+            let stamp = array_elem(&ty).map_or(0, |e| (self.inp.array_stamp)(e));
+            self.b.ins_alloc_kinds(MirAllocKind::Array, words, stamp).map_err(mir)?
+        };
+        Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?))
     }
 
     /// A host native: the arguments in order, then `HostInvoke` (the native
@@ -5235,6 +5397,8 @@ impl Lower<'_> {
             (from, to) if from == to => v,
             // A `bool` payload read from an `i64` pair word.
             (MirTy::I64, MirTy::Bool) => self.fit(v, ty)?,
+            // So is an `f64` one (beside an `int` payload), as its bits.
+            (MirTy::I64, MirTy::F64) => self.fit(v, ty)?,
             _ => return Err("binding type".into()),
         };
         if self.inp.slots.get(local.0 as usize).copied().flatten().is_none() {
@@ -5272,7 +5436,7 @@ impl Lower<'_> {
                     // A two-word payload rides boxed.
                     [arg] => match self.word_or_boxed(*arg)? {
                         Some(v) if self.b.value_ty(v) == lo_ty => v,
-                        Some(v) if lo_ty == MirTy::I64 && (self.b.value_ty(v).is_heap_word() || self.b.value_ty(v) == MirTy::Bool) => {
+                        Some(v) if lo_ty == MirTy::I64 && (self.b.value_ty(v).is_heap_word() || matches!(self.b.value_ty(v), MirTy::Bool | MirTy::F64)) => {
                             self.fit(v, lo_ty)?
                         }
                         Some(_) => return Err("variant payload type".into()),

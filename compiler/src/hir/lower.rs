@@ -1088,7 +1088,7 @@ pub fn logic_eager(body: &HirBody, rhs: HirId) -> bool {
 
 /// An index that is safe to evaluate twice (a compound assignment builds
 /// its place twice): locals, literals and arithmetic on them.
-fn pure_index(body: &HirBody, id: HirId) -> bool {
+pub(crate) fn pure_index(body: &HirBody, id: HirId) -> bool {
     match &body.expr(id).kind {
         HirKind::Local(_) | HirKind::Lit(_) => true,
         HirKind::Bin { lhs, rhs, .. } => pure_index(body, *lhs) && pure_index(body, *rhs),
@@ -1100,7 +1100,7 @@ fn pure_index(body: &HirBody, id: HirId) -> bool {
 
 /// A place base that reads no state twice: `x` or `x.f.g`. A compound
 /// assignment builds its place twice, so the base must be safe to repeat.
-fn pure_base(body: &HirBody, id: HirId) -> bool {
+pub(crate) fn pure_base(body: &HirBody, id: HirId) -> bool {
     match &body.expr(id).kind {
         HirKind::Local(_) => true,
         HirKind::Field { base, .. } => pure_base(body, *base),
