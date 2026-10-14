@@ -714,9 +714,10 @@ fn is_var(ty: &Ty) -> bool {
 }
 
 /// A generic body moves its type parameter values but never reads them:
-/// no operator, field, index or call takes one (any of them could read a
-/// box as its payload). The frame maps list the words it keeps live past
-/// a collecting instruction ([`super::gc::live_opaque_words`]).
+/// no operator, field, index or builtin takes one (any of them could read
+/// a box as its payload) but a bound type parameter's dictionary method.
+/// Calls pass them on as they are. The frame maps list the words it keeps
+/// live past a collecting instruction ([`super::gc::live_opaque_words`]).
 fn opaque_moves_only(hir: &HirBody, inp: &HirMirInput) -> Result<(), Refusal> {
     let var = |id: &HirId| hir.expr(*id).ty.as_ref().is_some_and(is_var);
     let any = hir.locals.iter().any(|l| l.ty.as_ref().is_some_and(is_var)) || hir.exprs.iter().any(|e| e.ty.as_ref().is_some_and(is_var));
@@ -741,7 +742,11 @@ fn opaque_moves_only(hir: &HirBody, inp: &HirMirInput) -> Result<(), Refusal> {
             // A made object holds the word as HIR emission's does (the body
             // makes them without word kinds).
             HirKind::Make { .. } => false,
-            HirKind::Call { args, .. } | HirKind::Builtin { args, .. } => args.iter().any(var),
+            // A call passes the word as it is to a parameter of the same
+            // type variable (a generic callee or a closure's), as HIR
+            // emission does; the callee reads nothing of it either.
+            HirKind::Call { .. } => false,
+            HirKind::Builtin { args, .. } => args.iter().any(var),
             HirKind::Named { value, .. } | HirKind::Yield { value, .. } => var(value),
             HirKind::Append { base, value } => var(base) || var(value),
             HirKind::Assign { place, value } => var(value) && !matches!(hir.expr(*place).kind, HirKind::Local(_)),
@@ -834,9 +839,11 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
             Some(_) => return Err("param slot".into()),
             None => {
                 let ty = hir.local(param).ty.as_ref().ok_or("param type")?;
-                // A two-word type or tuple not passed as a pair comes boxed.
+                // A two-word type or tuple not passed as a pair comes boxed;
+                // a `()` comes as the empty tuple object.
                 let word = inp
                     .word(ty)
+                    .or_else(|| is_unit(ty).then_some(MirTy::HeapRef))
                     .or_else(|| (inp.boxed_view)(ty, None).map(|_| MirTy::HeapRef))
                     .or_else(|| matches!(strip_readonly(ty), Ty::Tuple(items) if !items.is_empty()).then_some(MirTy::HeapRef));
                 vec![word.ok_or_else(|| format!("param type {}", ty_kind(ty)))?]
@@ -2763,8 +2770,8 @@ impl Lower<'_> {
                 kind: Some(ForInKind::Coroutine),
             } => self.for_coroutine(*local, *iterable, *body),
             HirKind::Match { scrutinee, arms } => self.match_(*scrutinee, arms, returned),
-            // `let _ = e`: nothing can read `_`.
-            HirKind::Let { local, init: Some(init) } if self.hir.local(*local).name == "_" => {
+            // `let _ = e`: nothing can read `_`; nor a `()` local's word.
+            HirKind::Let { local, init: Some(init) } if self.hir.local(*local).name == "_" || self.unit_local(*local) => {
                 Ok(if self.effect(*init)? { Val::Unit } else { Val::Never })
             }
             HirKind::Let { local, init } => {
@@ -3524,6 +3531,16 @@ impl Lower<'_> {
                     crate::typechecking::return_layout::two_word_range_kind(t).is_some()
                         || (self.inp.word(t).is_none() && ((self.inp.boxed_view)(t, None).is_some() || is_heap_tuple(t)))
                 });
+            // A `()` goes as the empty tuple object, as HIR emission
+            // passes it.
+            if !pair && self.expr_ty(arg).is_some_and(|t| is_unit(t) && self.inp.word(t).is_none()) {
+                if !self.effect(arg)? {
+                    return Ok(Val::Never);
+                }
+                let obj = self.b.ins_alloc(MirAllocKind::Tuple, Vec::new()).map_err(mir)?;
+                words.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?);
+                continue;
+            }
             if !pair && !boxed && self.expr_ty(arg).and_then(|t| self.inp.word(t)).is_none() {
                 return Err("call argument type".into());
             }
