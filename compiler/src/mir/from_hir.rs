@@ -383,6 +383,8 @@ pub struct HirMirInput<'a> {
     /// HIR emission packs some value of the body as a bare-class
     /// existential (`emit_existential_pack_recipe`).
     pub existential_packs: bool,
+    /// The `unwind_resume` native a `defer`'s cleanup pad ends in.
+    pub unwind_native: Option<u16>,
     /// Field reads and writes on records (dicts): the key's string table
     /// index and the field's word type.
     pub record_fields: HashMap<u32, (u32, MirTy)>,
@@ -486,6 +488,17 @@ struct Lower<'a> {
     /// word type. Each word stays live until the local is rebound and to
     /// every exit, as HIR emission's frame slot holds it.
     pins: HashMap<u32, (LocalId, MirTy)>,
+    /// The homes a `defer`'s cleanup pad reads, when it gets one.
+    pad: Option<PadHomes>,
+}
+
+/// Where a body's `defer` state sits for its unwind cleanup pad: each
+/// flag's home, and each capture's (by HIR local) with its frame slot
+/// (`None`: a slot-less binding, written where it is bound).
+#[derive(Default)]
+struct PadHomes {
+    flags: HashMap<LocalId, u16>,
+    caps: HashMap<u32, (u16, Option<LocalId>)>,
 }
 
 /// The MIR type of a scalar `ty`, or `None` when it is not one.
@@ -799,6 +812,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         defers: Vec::new(),
         defer_locals: HashMap::new(),
         pins: HashMap::new(),
+        pad: None,
     };
     lower.pin_locals()?;
     for (i, e) in hir.exprs.iter().enumerate() {
@@ -830,6 +844,9 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
             lower.defer_flags.insert(i as u32, flag);
         }
     }
+    if !lower.defer_flags.is_empty() && inp.unwind_native.is_some() && !hir.is_coro {
+        lower.pad = lower.pad_homes();
+    }
     let params = lower.b.func().params.len();
     if hir.is_coro {
         // A `gen fn` runs its body for effect (a tail `yield` receives
@@ -846,6 +863,10 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
     }
     let order = lower.layout();
     let spec = std::mem::take(&mut lower.spec);
+    let pad = lower.pad.take();
+    let defers = std::mem::take(&mut lower.defers);
+    let defer_locals = std::mem::take(&mut lower.defer_locals);
+    let boxed: HashSet<u32> = lower.boxes.keys().copied().collect();
     let mut func = lower.b.finish().map_err(mir)?;
     // A capture read at a `return` some path reaches without passing its
     // `let` would be a live-in word.
@@ -854,6 +875,13 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
     }
     prune(&mut func, &spec);
     tidy(&mut func, &order);
+    // A pad is an extra: a body without one stays pinned to HIR emission.
+    if let (Some(pad), Some(native)) = (pad, inp.unwind_native)
+        && !pad.caps.keys().any(|l| boxed.contains(l))
+        && let Ok(cleanup) = lower_pad(hir, inp, PadParts { defers: &defers, defer_locals, homes: &pad, home_tys: &func.homes, native })
+    {
+        func.cleanup = Some(Box::new(cleanup));
+    }
     if inp.opaque_vars {
         opaque_moves_only(hir, &func)?;
         func.opaque_words = true;
@@ -864,6 +892,97 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
     if inp.existential_packs {
         func.emit_refusal = Some("existential pack");
     }
+    Ok(func)
+}
+
+/// What [`lower_pad`] builds a body's cleanup pad from.
+struct PadParts<'p> {
+    /// The body's `defer`s, in the order they were lowered.
+    defers: &'p [(LocalId, HirId)],
+    defer_locals: HashMap<u32, LocalId>,
+    homes: &'p PadHomes,
+    /// The body's homes' word types.
+    home_tys: &'p [MirTy],
+    /// `unwind_resume`.
+    native: u16,
+}
+
+/// The unwind cleanup pad of a body with `defer`s, as HIR emission's
+/// `finish_fn_defers`: each armed `defer`, last first, with its captures
+/// read from their homes as they stood at the panic, then `unwind_resume`.
+/// It runs in the body's frame and reads the homes there.
+fn lower_pad(hir: &HirBody, inp: &HirMirInput, parts: PadParts<'_>) -> Result<MirFunc, Refusal> {
+    let mut b = MirBuilder::new(format!("{}$pad", hir.name));
+    b.allow_host_edges = true;
+    b.relocate = inp.relocate.clone();
+    b.set_ret_ty(MirTy::I64);
+    for &ty in parts.home_tys {
+        b.add_home(ty).map_err(mir)?;
+    }
+    let cur = b.entry();
+    let mut pad = Lower {
+        hir,
+        inp,
+        b,
+        cur,
+        loops: Vec::new(),
+        unit_ret: true,
+        ret_hir: Ty::Tuple(Vec::new()),
+        order: vec![cur],
+        cold: Vec::new(),
+        aliases: HashMap::new(),
+        ret_tail: false,
+        next_temp: TEMP_BASE,
+        boxes: HashMap::new(),
+        unniche: HashMap::new(),
+        spec: HashSet::new(),
+        word_src: HashMap::new(),
+        known_niche: HashMap::new(),
+        raw_host: false,
+        defer_flags: HashMap::new(),
+        defers: Vec::new(),
+        defer_locals: parts.defer_locals,
+        pins: HashMap::new(),
+        pad: None,
+    };
+    let captures_of = |body: HirId| {
+        hir.exprs.iter().find_map(|e| match &e.kind {
+            HirKind::Defer { captures, body: b } if *b == body => Some(captures.clone()),
+            _ => None,
+        })
+    };
+    for &(flag, body) in parts.defers.iter().rev() {
+        let home = *parts.homes.flags.get(&flag).ok_or("pad flag")?;
+        let armed = pad.b.ins_home_load(home).map_err(mir)?;
+        let (run, skip) = (pad.b.create_block(), pad.b.create_block());
+        pad.b.branch(armed, run, skip).map_err(mir)?;
+        pad.switch(run);
+        for c in captures_of(body).ok_or("pad defer")?.into_iter().flatten() {
+            let &(home, slot) = parts.homes.caps.get(&c.0).ok_or("pad capture")?;
+            let v = pad.b.ins_home_load(home).map_err(mir)?;
+            match slot {
+                Some(slot) => pad.b.def_local(slot, v).map_err(mir)?,
+                None => {
+                    pad.aliases.insert(c.0, v);
+                }
+            }
+        }
+        if pad.stmt(body)? {
+            pad.jump(skip)?;
+        }
+        pad.switch(skip);
+    }
+    pad.b.ins_host_invoke(parts.native, Vec::new()).map_err(mir)?;
+    let zero = pad.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+    pad.b.ret(Some(zero)).map_err(mir)?;
+    let order = pad.layout();
+    let spec = std::mem::take(&mut pad.spec);
+    let mut func = pad.b.finish().map_err(mir)?;
+    if !func.params.is_empty() {
+        return Err("pad live-in".into());
+    }
+    prune(&mut func, &spec);
+    tidy(&mut func, &order);
     Ok(func)
 }
 
@@ -1052,6 +1171,59 @@ fn retarget(term: &mut Terminator, from: BlockId, to: BlockId) {
 }
 
 impl Lower<'_> {
+    /// Give each `defer` flag and capture a home, written from here on at
+    /// each definition (a parameter's now). `None` when a capture is not a
+    /// one-word local: the body then has no pad.
+    fn pad_homes(&mut self) -> Option<PadHomes> {
+        let mut caps: Vec<HirLocal> = Vec::new();
+        for e in &self.hir.exprs {
+            if let HirKind::Defer { captures, .. } = &e.kind {
+                for c in captures {
+                    let c = (*c)?;
+                    if !caps.contains(&c) {
+                        caps.push(c);
+                    }
+                }
+            }
+        }
+        let mut pad = PadHomes::default();
+        let mut flags: Vec<(u32, LocalId)> = self.defer_flags.iter().map(|(&k, &v)| (k, v)).collect();
+        flags.sort_unstable();
+        let mut stores: Vec<(u16, LocalId, MirTy)> = Vec::new();
+        for (_, flag) in flags {
+            let home = self.b.add_home(MirTy::Bool).ok()?;
+            pad.flags.insert(flag, home);
+            stores.push((home, flag, MirTy::Bool));
+        }
+        for c in caps {
+            if self.pair_local(c).is_some() || self.unit_local(c) || self.defer_locals.contains_key(&c.0) {
+                return None;
+            }
+            let ty = self.local_ty(c).ok()?;
+            let slot = self.inp.slots.get(c.0 as usize).copied().flatten().map(LocalId);
+            let home = self.b.add_home(ty).ok()?;
+            pad.caps.insert(c.0, (home, slot));
+            if let Some(slot) = slot
+                && self.hir.params.contains(&c)
+            {
+                stores.push((home, slot, ty));
+            }
+        }
+        for (home, local, ty) in stores {
+            let v = self.b.use_local(local, ty).ok()?;
+            self.b.ins_home_store(home, v).ok()?;
+        }
+        for (&flag, &home) in &pad.flags {
+            self.b.homed.insert(flag, home);
+        }
+        for &(home, slot) in pad.caps.values() {
+            if let Some(slot) = slot {
+                self.b.homed.insert(slot, home);
+            }
+        }
+        Some(pad)
+    }
+
     fn slot(&self, local: HirLocal) -> Result<LocalId, Refusal> {
         self.inp
             .slots
@@ -1918,6 +2090,9 @@ impl Lower<'_> {
         match &e.kind {
             HirKind::Lit(lit) => {
                 let c = match lit {
+                    // A folded `!0` / `!1`: an int `0` / `1` typed `bool` is
+                    // that bool's word.
+                    Lit::Int(n @ (0 | 1)) if self.expr_ty(id).and_then(scalar) == Some(MirTy::Bool) => MirConst::Bool(*n == 1),
                     Lit::Int(n) => MirConst::I64(*n),
                     Lit::Float(f) => MirConst::F64(f.to_bits()),
                     Lit::Bool(v) => MirConst::Bool(*v),
@@ -2092,6 +2267,11 @@ impl Lower<'_> {
                     UnOp::Neg if self.b.value_ty(v) == MirTy::I64 => self.at_expr(id, |l| Ok(l.b.ins_neg(v)))?,
                     UnOp::Neg => self.b.ins_neg(v),
                     UnOp::Not if self.b.value_ty(v) == MirTy::Bool => self.b.ins_not(v),
+                    // `LogNot` of an int word: `!(x != 0)`.
+                    UnOp::Not if self.b.value_ty(v) == MirTy::I64 && self.expr_ty(id).and_then(scalar) == Some(MirTy::Bool) => {
+                        let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+                        self.b.ins_cmp(MirCmpOp::Eq, v, zero)
+                    }
                     UnOp::BitNot if self.b.value_ty(v) == MirTy::I64 => {
                         let ones = self.b.ins_const(MirConst::I64(-1)).map_err(mir)?;
                         self.b.ins_binop(MirBinOp::Xor, v, ones)
@@ -2200,8 +2380,15 @@ impl Lower<'_> {
                 self.stack_store(*place, base, index, *value)
             }
             HirKind::Assign { place, value } if let Some(&slot) = self.inp.fields.get(&place.0) => {
-                let ty = self.expr_ty(*place).and_then(|t| self.inp.word(t)).ok_or("field type")?;
-                let Some(v) = self.word(*value)? else {
+                let boxed = self.boxed_slot_field(*place);
+                let ty = self
+                    .expr_ty(*place)
+                    .and_then(|t| self.inp.word(t))
+                    .or_else(|| boxed.then_some(MirTy::HeapRef))
+                    .ok_or("field type")?;
+                // A two-word value is stored boxed, as the slot's `new` did.
+                let v = if boxed { self.boxed_word(*value)? } else { self.word(*value)? };
+                let Some(v) = v else {
                     return Ok(Val::Never);
                 };
                 if self.b.value_ty(v) != ty {
@@ -2294,7 +2481,11 @@ impl Lower<'_> {
                 Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?))
             }
             HirKind::Field { .. } if let Some(&slot) = self.inp.fields.get(&id.0) => {
-                let ty = self.expr_ty(id).and_then(|t| self.inp.word(t)).ok_or("field type")?;
+                let ty = self
+                    .expr_ty(id)
+                    .and_then(|t| self.inp.word(t))
+                    .or_else(|| self.boxed_slot_field(id).then_some(MirTy::HeapRef))
+                    .ok_or("field type")?;
                 if let Some((obj, index)) = self.boxed_field(id, slot)? {
                     return Ok(Val::V(self.b.ins_heap_field_load(obj, None, index, ty).map_err(mir)?));
                 }
@@ -2479,6 +2670,13 @@ impl Lower<'_> {
                 Ok(Val::Unit)
             }
             HirKind::If { cond, then, els } => self.if_(*cond, *then, *els, returned),
+            // `while false { .. }` never runs: HIR emission drops it (and
+            // plans nothing in it).
+            HirKind::Loop { body }
+                if lower::while_shape(self.hir, *body).is_some_and(|(cond, _)| matches!(self.hir.expr(cond).kind, HirKind::Lit(Lit::Bool(false)))) =>
+            {
+                Ok(Val::Unit)
+            }
             HirKind::Loop { body } => {
                 let head = self.b.create_block();
                 self.jump(head)?;
@@ -3102,6 +3300,22 @@ impl Lower<'_> {
         };
         let index = slot.checked_sub(self.slot(local)?.0).ok_or("boxed class field")?;
         Ok(Some((self.b.use_local(boxed, MirTy::HeapRef).map_err(mir)?, index)))
+    }
+
+    /// Whether field `id` of a frame-slot class local is a two-word enum
+    /// its slot holds boxed (as HIR emission's `new` stored it).
+    fn boxed_slot_field(&self, id: HirId) -> bool {
+        let (Some(&slot), HirKind::Field { base, .. }) = (self.inp.fields.get(&id.0), &self.hir.expr(id).kind) else {
+            return false;
+        };
+        let HirKind::Local(local) = self.hir.expr(*base).kind else {
+            return false;
+        };
+        let (Some(tys), Ok(at)) = (self.inp.sroa.get(&local.0), self.slot(local)) else {
+            return false;
+        };
+        slot.checked_sub(at.0).and_then(|i| tys.get(i as usize)) == Some(&MirTy::HeapRef)
+            && self.expr_ty(id).is_some_and(|t| self.inp.word(t).is_none() && (self.inp.boxed_view)(t, None).is_some())
     }
 
     /// The heap array a boxed stack array local `id` names.
@@ -4491,6 +4705,44 @@ impl Lower<'_> {
         self.b.ins_stack_phi(vec![(in_end, v), (oob_end, w)]).map_err(mir)
     }
 
+    /// Store `v` in stack array slots `base..base + n` at an index that may
+    /// be out of range: as HIR emission, an out-of-range index boxes the
+    /// array and stores into that, which panics.
+    fn stack_store_checked(&mut self, base: u32, n: usize, idx: ValueId, v: ValueId, ty: MirTy) -> Result<(), Refusal> {
+        let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+        let top = self.b.ins_const(MirConst::I64(n as i64)).map_err(mir)?;
+        let neg = self.b.ins_cmp(MirCmpOp::Lt, idx, zero).map_err(mir)?;
+        let oob = self.b.create_block();
+        let low = self.b.create_block();
+        let inb = self.b.create_block();
+        self.b.branch(neg, oob, low).map_err(mir)?;
+        self.switch(low);
+        let over = self.b.ins_cmp(MirCmpOp::Ge, idx, top).map_err(mir)?;
+        self.b.branch(over, oob, inb).map_err(mir)?;
+        self.switch(inb);
+        self.stack_cases(base, n, idx, |l, slot| {
+            l.b.def_local(slot, v).map_err(mir)?;
+            Ok(None)
+        })?;
+        let in_end = self.cur;
+        self.switch(oob);
+        let mut words = Vec::with_capacity(n);
+        for k in 0..n as u32 {
+            words.push(self.b.use_local(LocalId(base + k), ty).map_err(mir)?);
+        }
+        let arr = self.b.ins_alloc(MirAllocKind::Array, words).map_err(mir)?;
+        let arr = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![arr]).map_err(mir)?;
+        self.b.ins_store_index(arr, idx, v, false).map_err(mir)?;
+        let oob_end = self.cur;
+        let join = self.b.create_block();
+        self.b.switch_to_block(in_end);
+        self.jump(join)?;
+        self.b.switch_to_block(oob_end);
+        self.jump(join)?;
+        self.switch(join);
+        Ok(())
+    }
+
     /// `a[i] = v` on a stack array: the value first, then the index, as
     /// HIR emission stages them.
     fn stack_store(&mut self, place: HirId, base: HirId, index: HirId, value: HirId) -> Result<Val, Refusal> {
@@ -4509,6 +4761,14 @@ impl Lower<'_> {
         };
         if self.b.value_ty(v) != ty {
             return Err("stack item type".into());
+        }
+        let lit = matches!(self.hir.expr(index).kind, HirKind::Lit(Lit::Int(i)) if (0..n as i64).contains(&i));
+        if !lit && !lower::stack_index_proven(self.hir, place, index, n) {
+            let Some(idx) = self.index_word(index)? else {
+                return Ok(Val::Never);
+            };
+            self.stack_store_checked(slot, n, idx, v, ty)?;
+            return Ok(Val::Unit);
         }
         let Some(k) = self.stack_index(place, index, n)? else {
             return Ok(Val::Never);
@@ -4542,6 +4802,9 @@ impl Lower<'_> {
                 return Err("local slot".into());
             }
             self.aliases.insert(local.0, v);
+            if let Some(&(home, None)) = self.pad.as_ref().and_then(|p| p.caps.get(&local.0)) {
+                self.b.ins_home_store(home, v).map_err(mir)?;
+            }
             return Ok(());
         }
         let slot = self.slot(local)?;
@@ -4615,8 +4878,9 @@ impl Lower<'_> {
             HirKind::Local(l) => self.boxed_local(l),
             // A class field holds a two-word enum boxed.
             HirKind::Field { .. } => {
-                self.inp.heap_fields.get(&scrutinee.0).is_some_and(|&(_, w)| w == MirTy::HeapRef)
-                    && !self.inp.boxed_niches.contains_key(&scrutinee.0)
+                (self.inp.heap_fields.get(&scrutinee.0).is_some_and(|&(_, w)| w == MirTy::HeapRef)
+                    && !self.inp.boxed_niches.contains_key(&scrutinee.0))
+                    || self.boxed_slot_field(scrutinee)
             }
             // So does an array element.
             HirKind::Index { base, kind: IndexKind::Array, .. } => {

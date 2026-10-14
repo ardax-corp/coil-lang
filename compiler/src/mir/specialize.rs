@@ -23,6 +23,9 @@ pub struct BodySidecar {
     /// GC map of a dense or LIR body, built from its MIR (lowered from HIR)
     /// in the frame registers emission assigns.
     pub stack_map: Option<super::stackmap::DraftFrameMap>,
+    /// A LIR body's unwind cleanup pad, emitted after it: its label and the
+    /// frame words it reads ([`super::MirFunc::cleanup`]).
+    pub cleanup_pad: Option<(Label, u32)>,
 }
 
 type RefusalSlot = std::thread::LocalKey<std::cell::RefCell<Option<String>>>;
@@ -652,10 +655,18 @@ fn lir_tail(
         side.stack_map = Some(map);
     }
     capture_mir(name, "lir", &func);
-    let out = match super::emit_lir::emit_lir_with_aliases(&func, entry, &aliases, pool, has_alloc) {
+    let mut out = match super::emit_lir::emit_lir_with_aliases(&func, entry, &aliases, pool, has_alloc) {
         Ok(o) => o,
         Err(e) => return refuse(format!("emit: {e}")),
     };
+    if let Some(pad) = func.cleanup.as_deref() {
+        let (label, frame, ops) = match emit_cleanup_pad(&func, pad, &out, pool) {
+            Ok(p) => p,
+            Err(why) => return refuse(why),
+        };
+        out.extend(ops);
+        side.cleanup_pad = Some((label, frame));
+    }
     // Compares against emit_hir's stack IL, the code that runs if LIR
     // refuses. A fused body's LIR is its fuse IL: there is no other.
     if let GateRef::Stack(ops) = gate {
@@ -667,6 +678,37 @@ fn lir_tail(
         }
     }
     Some(out)
+}
+
+/// The LIR of `func`'s cleanup `pad`, to follow `body` (`func`'s LIR): its
+/// label (past every label `body` names), the frame words of `func` it
+/// reads, and its ops. Its own registers sit past that frame.
+fn emit_cleanup_pad(func: &crate::mir::MirFunc, pad: &crate::mir::MirFunc, body: &[IlOp], pool: &mut Vec<u64>) -> Result<(Label, u32, Vec<IlOp>), String> {
+    if pad.has_gc_edge() {
+        return Err("cleanup pad allocates".into());
+    }
+    let (base, frame) = super::emit_lir::lir_home_frame(func).ok_or("cleanup pad frame")?;
+    let mut pad = pad.clone();
+    pad.home_base = Some(base);
+    let words: Vec<crate::mir::ValueId> = (0..frame)
+        .map(|_| {
+            pad.types.push(crate::mir::MirTy::I64);
+            crate::mir::ValueId(pad.types.len() as u32 - 1)
+        })
+        .collect();
+    pad.params = words;
+    let top = body
+        .iter()
+        .filter_map(|op| match op {
+            IlOp::Label(l) | IlOp::JoinLabel(l) => Some(l.0),
+            IlOp::Entry { target, .. } | IlOp::Jump { target, .. } => Some(target.0),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
+    let label = Label(top + 1);
+    let ops = super::emit_lir::emit_lir(&pad, Some(label), pool, false).map_err(|e| format!("cleanup pad: {e}"))?;
+    Ok((label, frame, ops))
 }
 
 /// Last-arm writes must remain as `StorePop` (LIR) or `DenseMove` (dense

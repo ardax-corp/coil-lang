@@ -38,6 +38,8 @@ pub struct Lowered {
     pub deopt_map_drafts: Vec<crate::mir::DraftDeoptMap>,
     pub needs_frame_extent: std::collections::HashSet<String>,
     pub debug_slot_remaps: HashMap<String, HashMap<u32, u32>>,
+    /// [`super::IlModule::lir_cleanup_pads`].
+    pub lir_cleanup_pads: HashMap<String, (super::Label, u32)>,
 }
 
 /// Intermediate slot before PC assignment. Jump targets stay symbolic.
@@ -177,6 +179,7 @@ pub(crate) fn lower_module_inner(
     lowered.deopt_map_drafts = std::mem::take(&mut module.deopt_map_drafts);
     lowered.needs_frame_extent = std::mem::take(&mut module.needs_frame_extent);
     lowered.debug_slot_remaps = std::mem::take(&mut module.debug_slot_remaps);
+    lowered.lir_cleanup_pads = std::mem::take(&mut module.lir_cleanup_pads);
     if capture_ops {
         lowered.pre_fuse_ops = Some(flat);
     }
@@ -243,6 +246,7 @@ fn try_lower_optimized(ops: &[IlOp], pool: &mut Vec<u64>) -> Result<Lowered, IlE
         deopt_map_drafts: Vec::new(),
         needs_frame_extent: Default::default(),
         debug_slot_remaps: HashMap::new(),
+        lir_cleanup_pads: HashMap::new(),
     })
 }
 

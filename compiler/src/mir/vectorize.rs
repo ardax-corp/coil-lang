@@ -1893,6 +1893,8 @@ fn region_has_barrier(func: &MirFunc, blocks: &[BlockId]) -> bool {
                         | MirInst::CodePtr { .. }
                         | MirInst::LoadStatic { .. }
                         | MirInst::StoreStatic { .. }
+                        | MirInst::HomeLoad { .. }
+                        | MirInst::HomeStore { .. }
                         | MirInst::ClearWord { .. }
                         | MirInst::KeepAlive { .. }
                         | MirInst::Print { .. }

@@ -76,6 +76,16 @@ pub struct MirFunc {
     /// such as an existential pack: the MIR still describes the body's
     /// frame slots (its GC map), but no tier emits code from it.
     pub emit_refusal: Option<&'static str>,
+    /// Word type of each home ([`MirInst::HomeLoad`] / [`MirInst::HomeStore`]):
+    /// frame words past the registers, a `defer`'s flag or capture each.
+    pub homes: Vec<MirTy>,
+    /// Frame word of home 0 when another body's frame holds the homes (a
+    /// cleanup pad reads its function's); else past this body's registers.
+    pub home_base: Option<u8>,
+    /// The unwind cleanup pad of a body with `defer`s: entered at a panic
+    /// in this body's frame, it runs the armed `defer`s from the homes and
+    /// resumes the unwind. Emitted after the body, in its frame.
+    pub cleanup: Option<Box<MirFunc>>,
 }
 
 impl MirFunc {
@@ -100,6 +110,9 @@ impl MirFunc {
             word_slots: BTreeSet::new(),
             opaque_words: false,
             emit_refusal: None,
+            homes: Vec::new(),
+            home_base: None,
+            cleanup: None,
         }
     }
 
@@ -555,6 +568,20 @@ impl MirFunc {
             MirInst::LoadStatic { dest, .. } => {
                 if !self.ty(*dest).is_word_lane() {
                     return Err(format!("{dest} LoadStatic dest type"));
+                }
+            }
+            MirInst::HomeLoad { dest, home } => {
+                if self.homes.get(usize::from(*home)) != Some(&self.ty(*dest)) {
+                    return Err(format!("{dest} HomeLoad type"));
+                }
+            }
+            MirInst::HomeStore { dest, home, value } => {
+                if self.ty(*dest) != MirTy::Bool {
+                    return Err(format!("{dest} HomeStore dest is not bool"));
+                }
+                let (have, want) = (self.ty(*value), self.homes.get(usize::from(*home)).copied().unwrap_or(MirTy::Bottom));
+                if !have.is_word_lane() || have.is_heap_word() != want.is_heap_word() {
+                    return Err(format!("{dest} HomeStore value type"));
                 }
             }
             MirInst::StoreStatic { dest, value, .. } => {

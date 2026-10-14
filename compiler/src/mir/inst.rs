@@ -427,6 +427,21 @@ pub enum MirInst {
         slot: u32,
         value: ValueId,
     },
+    /// Read home `home` ([`super::MirFunc::homes`]): a frame word past the
+    /// body's registers that holds a `defer`'s flag or capture where its
+    /// unwind cleanup pad reads it. Never CSE'd or hoisted.
+    HomeLoad {
+        dest: ValueId,
+        home: u16,
+    },
+    /// Write `value` to home `home`: each definition of a `defer` flag or
+    /// capture, so the cleanup pad finds it at any panic. Dest is a `bool`
+    /// unit token. A side effect.
+    HomeStore {
+        dest: ValueId,
+        home: u16,
+        value: ValueId,
+    },
     /// Zero the frame word holding `value` (a spliced heap local past its
     /// last use, HIR `Clear`), so the frame no longer roots its object.
     /// Dest is a `bool` unit token. A side effect; emission writes the zero
@@ -698,6 +713,8 @@ impl MirInst {
             | Self::DoneCoro { dest, .. }
             | Self::LoadStatic { dest, .. }
             | Self::StoreStatic { dest, .. }
+            | Self::HomeLoad { dest, .. }
+            | Self::HomeStore { dest, .. }
             | Self::ClearWord { dest, .. }
             | Self::KeepAlive { dest, .. }
             | Self::ArrayPush { dest, .. }
@@ -797,8 +814,8 @@ impl MirInst {
             }
             Self::Yield { value, .. } => vec![*value],
             Self::DoneCoro { handle, .. } => vec![*handle],
-            Self::LoadStatic { .. } => Vec::new(),
-            Self::StoreStatic { value, .. } | Self::ClearWord { value, .. } | Self::KeepAlive { value, .. } => vec![*value],
+            Self::LoadStatic { .. } | Self::HomeLoad { .. } => Vec::new(),
+            Self::StoreStatic { value, .. } | Self::HomeStore { value, .. } | Self::ClearWord { value, .. } | Self::KeepAlive { value, .. } => vec![*value],
             Self::ArrayPush { array, value, .. } => vec![*array, *value],
             Self::Alloc { elems, .. } => elems.clone(),
             Self::GcBarrier { roots, .. } => roots.clone(),
@@ -882,8 +899,8 @@ impl MirInst {
             }
             Self::Yield { value, .. } => *value = map(*value),
             Self::DoneCoro { handle, .. } => *handle = map(*handle),
-            Self::LoadStatic { .. } => {}
-            Self::StoreStatic { value, .. } | Self::ClearWord { value, .. } | Self::KeepAlive { value, .. } => *value = map(*value),
+            Self::LoadStatic { .. } | Self::HomeLoad { .. } => {}
+            Self::StoreStatic { value, .. } | Self::HomeStore { value, .. } | Self::ClearWord { value, .. } | Self::KeepAlive { value, .. } => *value = map(*value),
             Self::ArrayPush { array, value, .. } => {
                 *array = map(*array);
                 *value = map(*value);

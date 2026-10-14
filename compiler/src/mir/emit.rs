@@ -1176,6 +1176,10 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
         }
         // Emitted where it stands (`cleared_words`).
         MirInst::ClearWord { .. } | MirInst::KeepAlive { .. } => {}
+        // A cleanup pad's homes: the LIR tier only (`emit_lir`).
+        MirInst::HomeLoad { .. } | MirInst::HomeStore { .. } => {
+            return Err(LowerError::Refused("homes are LIR-only".into()));
+        }
         MirInst::ArrayPush {
             dest,
             array,

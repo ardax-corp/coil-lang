@@ -65,6 +65,7 @@ impl MirInst {
             | Self::HeapFieldStore { .. }
             | Self::StoreIndex { .. }
             | Self::StoreStatic { .. }
+            | Self::HomeStore { .. }
             | Self::ClearWord { .. }
             | Self::KeepAlive { .. }
             | Self::ArrayPush { .. }
