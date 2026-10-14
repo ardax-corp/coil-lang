@@ -1,7 +1,8 @@
 // `Result::Ok(())` in a `Result<unit, E>` context is the niche unit-result
 // word (Ok = 0), whether the make is returned from a generic class method,
 // returned from a plain function, or inlined into a caller's `match`. The
-// make's own type is `Result<(), E>`, so the word must follow the context.
+// make's own type is `Result<(), E>`, so the word must follow the context
+// (through a returned `match`'s arms too).
 use tests::assert;
 
 enum Err2 {
@@ -37,6 +38,13 @@ fn plain(bool c) -> Result<unit, Err2> {
     return Result::Ok(());
 }
 
+fn by_match(int n) -> Result<unit, Err2> {
+    return match n {
+        0 => Result::Ok(()),
+        default => Result::Err(Err2::Full),
+    };
+}
+
 test("generic unit result") {
     let v: Vec<Option<int>> = Vec::new();
     v.push(Option::None);
@@ -61,4 +69,14 @@ test("generic unit result") {
         Result::Ok(_) => true,
         default => false,
     });
+    assert!(match by_match(0) {
+        Result::Ok(_) => true,
+        default => false,
+    });
+    assert!(
+        match by_match(1) {
+            Result::Err(Err2::Full) => true,
+            default => false,
+        },
+    );
 }

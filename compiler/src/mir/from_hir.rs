@@ -407,6 +407,10 @@ pub struct HirMirInput<'a> {
     pub record_fields: HashMap<u32, (u32, MirTy)>,
     /// `matrix(data)` calls: the data itself.
     pub matrix_wraps: &'a HashSet<u32>,
+    /// `Result` variants made at a niche word other than their own
+    /// type's, as their context wants it: `Ok(())` (typed `Result<(), E>`)
+    /// returned as a `Result<unit, E>` is its zero word.
+    pub make_niches: &'a HashMap<u32, MirTy>,
     /// Element-wise array and tuple operators, by expression.
     pub aggregates: HashMap<u32, crate::typechecking::AggregateArithInfo>,
     /// Record literals whose every field holds the word its type says:
@@ -534,6 +538,11 @@ pub fn scalar(ty: &Ty) -> Option<MirTy> {
 /// ones are packed, and an index reads or writes the element's word).
 pub fn word(ty: &Ty) -> Option<MirTy> {
     scalar(ty).or_else(|| array_elem(ty).and_then(scalar).map(|_| MirTy::HeapRef))
+}
+
+/// A pointer-niche `Option` / `Result` word type.
+fn is_niche(ty: MirTy) -> bool {
+    matches!(ty, MirTy::NicheOpt | MirTy::NicheRes)
 }
 
 /// A variant pattern with no payload: `V` or `V()`.
@@ -1457,6 +1466,10 @@ impl Lower<'_> {
             }
             // A unit body's tail value (a call kept for its effect) is dropped.
             (Val::V(_) | Val::Pair(..), _) if self.unit_ret => self.ret_unit(),
+            // A niche word of the other niche layout has other bits.
+            (Val::V(v), None) if self.b.func().ret_ty.is_some_and(|t| is_niche(t) && is_niche(self.b.value_ty(v)) && t != self.b.value_ty(v)) => {
+                Err("return niche word".into())
+            }
             (Val::V(v), None) if !self.unit_ret => self.ret_word(v),
             // A two-word value the function returns boxed.
             (Val::Pair(lo, hi), None) if self.b.func().ret_ty == Some(MirTy::HeapRef) => {
@@ -1599,6 +1612,11 @@ impl Lower<'_> {
     /// `v` as a word of type `ty`: itself, or the same word retyped (a heap
     /// payload moves through a pair as an opaque `i64`).
     fn fit(&mut self, v: ValueId, ty: MirTy) -> Result<ValueId, Refusal> {
+        // The two niche words differ in their bits (`Ok(())` is `0` in one
+        // and the `()` tuple in the other): never one as the other.
+        if is_niche(self.b.value_ty(v)) && is_niche(ty) && self.b.value_ty(v) != ty {
+            return Err(format!("word {} as {ty}", self.b.value_ty(v)));
+        }
         // Through an earlier retype: one cast, or none, from the source.
         let v = match self.word_src.get(&v) {
             Some(&src) if self.b.value_ty(src) == ty || MirCastKind::Word.allows(self.b.value_ty(src), ty) => src,
@@ -2584,7 +2602,9 @@ impl Lower<'_> {
             HirKind::Make {
                 kind: MakeKind::Variant { variant, .. },
                 args,
-            } if let Some(niche) = self.expr_ty(id).and_then(|t| (self.inp.niche)(t)) => self.make_niche(variant, args, niche),
+            } if let Some(niche) = self.inp.make_niches.get(&id.0).copied().or_else(|| self.expr_ty(id).and_then(|t| (self.inp.niche)(t))) => {
+                self.make_niche(variant, args, niche)
+            }
             HirKind::Make {
                 kind: MakeKind::Variant { enum_name, variant, tag: Some(tag), .. },
                 args,
@@ -5327,6 +5347,9 @@ impl Lower<'_> {
         let Some(w) = self.word(scrutinee)? else {
             return Ok(Val::Never);
         };
+        if is_niche(self.b.value_ty(w)) && self.b.value_ty(w) != niche {
+            return Err("match niche word".into());
+        }
         let mut out = Vec::new();
         if std::ptr::eq(first, second) {
             self.niche_arm(first, w, false, tail, &mut out)?;
