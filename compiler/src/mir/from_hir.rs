@@ -162,7 +162,7 @@ impl HirMirInput<'_> {
     /// scalar enum's backing word.
     fn word(&self, ty: &Ty) -> Option<MirTy> {
         word(ty)
-            .or_else(|| ((self.is_class)(ty) || is_record(ty) || is_stream(ty) || is_thread(ty) || is_string(ty) || is_coroutine(ty) || is_fn(ty)).then_some(MirTy::HeapRef))
+            .or_else(|| ((self.is_class)(ty) || opaque_heap(ty)).then_some(MirTy::HeapRef))
             .or_else(|| (self.scalar_enum)(ty))
             .or_else(|| (self.niche)(ty))
             .or_else(|| (self.boxed_enum)(ty, None).map(|_| MirTy::HeapRef))
@@ -519,9 +519,11 @@ fn is_stream(ty: &Ty) -> bool {
     matches!(strip_readonly(ty), Ty::Con(n) if n == crate::typechecking::ty::STREAM)
 }
 
-/// A `Thread` handle: a heap object (`ObjThread`).
+/// An opaque `thread` module handle (`Thread`, `Sender`, `Receiver`,
+/// `Mutex`, `RwLock`): a heap object.
 fn is_thread(ty: &Ty) -> bool {
-    matches!(strip_readonly(ty), Ty::Con(n) if n == crate::typechecking::ty::THREAD)
+    use crate::typechecking::ty::{MUTEX, RECEIVER, RWLOCK, SENDER, THREAD};
+    matches!(strip_readonly(ty), Ty::Con(n) if [THREAD, SENDER, RECEIVER, MUTEX, RWLOCK].contains(&n.as_str()))
 }
 
 /// The element type of an array or `Vec`.
@@ -551,6 +553,12 @@ fn ty_kind(ty: &Ty) -> &'static str {
         Ty::Sum { .. } | Ty::Constructor { .. } => "enum",
         _ => "other",
     }
+}
+
+/// A value that is one opaque heap word whatever its use: a string,
+/// record, IO stream, thread handle, coroutine or function value.
+pub fn opaque_heap(ty: &Ty) -> bool {
+    is_string(ty) || is_record(ty) || is_stream(ty) || is_thread(ty) || is_coroutine(ty) || is_fn(ty)
 }
 
 /// A function type: its values are `ObjFn` / `PolyFn` heap words.
@@ -1757,7 +1765,8 @@ impl Lower<'_> {
     fn make_tuple(&mut self, args: &[HirId]) -> Result<Val, Refusal> {
         let mut words = Vec::with_capacity(args.len());
         for &arg in args {
-            let Some(v) = self.word(arg)? else {
+            // A two-word item is stored boxed.
+            let Some(v) = self.word_or_boxed(arg)? else {
                 return Ok(Val::Never);
             };
             words.push(v);
@@ -2262,7 +2271,27 @@ impl Lower<'_> {
             }
             // `let (a, b) = e` of a two-word tuple.
             HirKind::LetPat { pat: HirPat::Tuple(items), init } if items.len() == 2 => {
-                let Some((a, b)) = self.pair(*init)? else {
+                // A heap tuple (not kept as a pair): its two items read out.
+                let heap = (!self.inp.pair_tys.contains_key(&init.0))
+                    .then(|| match self.expr_ty(*init).map(strip_readonly) {
+                        Some(Ty::Tuple(tys)) if tys.len() == 2 => Some((self.tuple_item(&tys[0])?, self.tuple_item(&tys[1])?)),
+                        _ => None,
+                    })
+                    .flatten();
+                let ab = match heap {
+                    Some((ta, tb)) => match self.word(*init)? {
+                        Some(obj) if self.b.value_ty(obj) == MirTy::HeapRef => {
+                            let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+                            let a = self.b.ins_index(obj, zero, ta, false).map_err(mir)?;
+                            let one = self.b.ins_const(MirConst::I64(1)).map_err(mir)?;
+                            Some((a, self.b.ins_index(obj, one, tb, false).map_err(mir)?))
+                        }
+                        Some(_) => return Err("let pattern tuple".into()),
+                        None => None,
+                    },
+                    None => self.pair(*init)?,
+                };
+                let Some((a, b)) = ab else {
                     return Ok(Val::Never);
                 };
                 for (item, v) in items.iter().zip([a, b]) {
@@ -2745,6 +2774,21 @@ impl Lower<'_> {
         };
         if arith.is_none() && cmp.is_none() {
             return Err(format!("operator {op:?}"));
+        }
+        // `==` / `!=` on two-word values (an enum, tuple or range kept as
+        // a pair): both boxed, then the VM's structural `EQ`, as HIR
+        // emission compares them.
+        if matches!(op, BinOp::Eq | BinOp::Ne) && (self.inp.pair_tys.contains_key(&lhs.0) || self.inp.pair_tys.contains_key(&rhs.0)) {
+            let Some(l) = self.boxed_word(lhs)? else {
+                return Ok(Val::Never);
+            };
+            let Some(r) = self.boxed_word(rhs)? else {
+                return Ok(Val::Never);
+            };
+            if self.b.value_ty(l) != MirTy::HeapRef || self.b.value_ty(r) != MirTy::HeapRef {
+                return Err("operator operand type".into());
+            }
+            return Ok(Val::V(self.b.ins_str_eq(l, r, op == BinOp::Ne).map_err(mir)?));
         }
         if let Some(out) = self.bitop_identity(id, op, lhs, rhs) {
             return out;
@@ -3353,7 +3397,8 @@ impl Lower<'_> {
     /// opcode: `==` / `!=` of two heap words (the VM's structural `EQ`), or
     /// a number-backed scalar enum's backing words.
     fn op_prim(&mut self, sym: &str, lhs: HirId, rhs: HirId) -> Result<Val, Refusal> {
-        let (Some(l), Some(r)) = (self.word(lhs)?, self.word(rhs)?) else {
+        // A two-word operand compares boxed, as emission pushes it.
+        let (Some(l), Some(r)) = (self.word_or_boxed(lhs)?, self.word_or_boxed(rhs)?) else {
             return Ok(Val::Never);
         };
         let (lt, rt) = (self.b.value_ty(l), self.b.value_ty(r));
@@ -3504,7 +3549,9 @@ impl Lower<'_> {
                 // Every item before any slot changes (`a = [a[1], a[0]]`).
                 let mut words = Vec::with_capacity(args.len());
                 for (&arg, &ty) in args.iter().zip(&tys) {
-                    let Some(v) = self.word(arg)? else {
+                    // A two-word item's slot holds its box.
+                    let v = if ty == MirTy::HeapRef { self.word_or_boxed(arg)? } else { self.word(arg)? };
+                    let Some(v) = v else {
                         return Ok(Val::Never);
                     };
                     if self.b.value_ty(v) != ty {
@@ -3935,7 +3982,8 @@ impl Lower<'_> {
         let shows = self.inp.format_shows.get(&id.0);
         let mut words = Vec::with_capacity(args.len());
         for (i, &arg) in args.iter().enumerate() {
-            let Some(v) = self.word(arg)? else {
+            // A two-word argument goes boxed, as emission passes it.
+            let Some(v) = self.word_or_boxed(arg)? else {
                 return Ok(Val::Never);
             };
             // `%v`: the value's `show`, a plain call of its raw entry.
@@ -4425,6 +4473,13 @@ impl Lower<'_> {
         if let Some(niche) = self.expr_ty(scrutinee).and_then(|t| (self.inp.niche)(t)) {
             return self.match_niche(scrutinee, arms, niche, tail);
         }
+        // A value only ever kept boxed (an `Option` / `Result` whose
+        // payload is two words itself): matched on its object.
+        if !self.inp.pair_tys.contains_key(&scrutinee.0)
+            && self.expr_ty(scrutinee).is_some_and(|t| self.inp.word(t).is_none() && (self.inp.boxed_view)(t, None).is_some())
+        {
+            return self.match_boxed(scrutinee, arms, tail);
+        }
         let (payload, tag) = match self.value(scrutinee)? {
             Val::Pair(payload, tag) => (payload, tag),
             Val::Never => return Ok(Val::Never),
@@ -4881,7 +4936,8 @@ impl Lower<'_> {
             [arg] => *arg,
             _ => return Err("variant payload".into()),
         };
-        let Some(v) = self.word(arg)? else {
+        // A two-word payload (a tuple) rides boxed.
+        let Some(v) = self.word_or_boxed(arg)? else {
             return Ok(Val::Never);
         };
         if !self.b.value_ty(v).is_heap_word() {
