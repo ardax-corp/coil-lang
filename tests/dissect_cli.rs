@@ -327,3 +327,33 @@ fn dissect_expand_prints_macro_output() {
     assert!(stdout.contains("pub fn get_twice() -> int"), "{stdout}");
     assert!(!stdout.contains("#[twice]"), "{stdout}");
 }
+
+/// With stack IL from MIR (`COIL_MIR_FUSE=1`), `Vec::pop` returns
+/// `vec_pop`'s Option word as it is: no unboxing to a pair and building
+/// the enum again (a `MakeEnum` per pop made tak_iter 2x slower).
+#[test]
+fn dissect_vec_pop_returns_the_native_option_on_mir() {
+    ensure_coil_dissect();
+    let bin = coil_bin();
+    let dir = std::env::temp_dir().join(format!("coil_dissect_vec_pop_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let entry = dir.join("pop.hy");
+    std::fs::write(
+        &entry,
+        "fn main() {\n    let v: Vec<int> = Vec::new();\n    v.push(1);\n    let _ = v.pop();\n}\n",
+    )
+    .unwrap();
+    let out = coil_dissect(&bin, Some(&dir), &entry)
+        .env("COIL_MIR_FUSE", "1")
+        .args(["--fn", "pop", "--no-source"])
+        .output()
+        .expect("spawn coil dissect");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let body = stdout.split(";; fn Vec::pop").nth(1).expect("Vec::pop body");
+    let body = body.split(";; fn ").next().unwrap_or(body);
+    assert!(body.contains("HostInvoke"), "{stdout}");
+    assert!(!body.contains("MakeEnum"), "Vec::pop rebuilds the Option: {stdout}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
