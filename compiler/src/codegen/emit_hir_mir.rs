@@ -936,11 +936,11 @@ impl Compiler {
     /// Whether a call to the shared body of a generic `generic` is the
     /// arguments' own words (each boxed where the body takes a bare type
     /// parameter; none adapted, a lambda literal unboxing its own
-    /// parameters) and no forwarded dictionary. Direct MIR calls the same
-    /// entry then, its result unboxed as emission unboxes it.
+    /// parameters). Direct MIR calls the same entry then, its result
+    /// unboxed as emission unboxes it; [`Self::hir_mir_dict_ops`] says
+    /// whether it can pass the dictionaries.
     fn hir_generic_boxing(&self, hir: &HirBody, emit: &HirEmit, generic: &HirGeneric, args: &[HirId], params: &[ValueLayout]) -> bool {
-        generic.forwarded.is_empty()
-            && args.len() == params.len()
+        args.len() == params.len()
             && args.iter().zip(params).enumerate().all(|(i, (&arg, &param))| {
                 let lambda = matches!(hir.expr(arg).kind, HirKind::Lambda { .. });
                 // A boxed argument goes from its own word, as do the rest
@@ -965,19 +965,35 @@ impl Compiler {
     }
 
     /// The dictionaries [`Self::hir_push_dicts`] pushes for `generic`, as
-    /// a program of the steps emission takes; `None` when one is
-    /// forwarded from a slot of this frame, or a step is not a code
-    /// pointer, a null or a tuple.
+    /// a program of the steps emission takes: the ones it forwards from
+    /// this body's dictionary parameters, then the call site's. `None`
+    /// when one is forwarded from another frame slot, or a step is not
+    /// one of [`crate::mir::HirDictOp`].
     fn hir_mir_dict_ops(&mut self, generic: &HirGeneric) -> Option<Vec<crate::mir::HirDictOp>> {
-        if generic.forwarded.iter().any(|&i| self.lookup_slot(&format!("__dict{i}")).is_some()) {
-            return None;
+        let mut ops = Vec::new();
+        for &i in &generic.forwarded {
+            if let Some(slot) = self.lookup_slot(&format!("__dict{i}")) {
+                if !self.hir_mir_dict_param(slot) {
+                    return None;
+                }
+                ops.push(crate::mir::HirDictOp::Load(slot));
+            }
         }
         let code = self.hir_mir_once(|this| {
             let mut code = CodeBuf::new();
             this.emit_call_site_dicts(&mut code, &generic.lookup, &generic.arg_tys, Some(&generic.ret_ty));
             code
         });
-        self.hir_mir_dict_program(&code)
+        ops.extend(self.hir_mir_dict_program(&code)?);
+        Some(ops)
+    }
+
+    /// Whether frame slot `slot` is one of this body's dictionary
+    /// parameters (a `__dictN` below its entry words), which direct MIR
+    /// reads as that parameter. An instance's context dictionaries the
+    /// prologue loads out of `__dict0` are not.
+    fn hir_mir_dict_param(&self, slot: u32) -> bool {
+        self.hir_mir_dict_sp.is_some_and(|sp| slot < sp) && (0..).map_while(|i| self.lookup_slot(&format!("__dict{i}"))).any(|s| s == slot)
     }
 
     /// Dictionary code emission put in `code` as a [`crate::mir::HirDictOp`]
@@ -989,6 +1005,15 @@ impl Compiler {
             .map(|op| match op {
                 IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::CodePtr => {
                     self.bytecode.entry_label_for_offset(byte.operand_u32() as usize).map(HirDictOp::Code)
+                }
+                // One of this body's dictionary parameters.
+                IlOp::Load { slot, .. } if self.hir_mir_dict_param(*slot) => Some(HirDictOp::Load(*slot)),
+                _ if let Some(b) = op.as_encode_byte()
+                    && *b.bytecode() == Instruction::LOAD
+                    && b.load_store_count() == 1
+                    && self.hir_mir_dict_param(b.load_store_slot_at(0)) =>
+                {
+                    Some(HirDictOp::Load(b.load_store_slot_at(0)))
                 }
                 IlOp::Entry { kind: EntryKind::CodePtr, target, .. } => Some(HirDictOp::Code(*target)),
                 IlOp::MakeTuple { arity, kinds: 0, .. } => Some(HirDictOp::Tuple(*arity)),
@@ -1019,7 +1044,7 @@ impl Compiler {
     fn hir_mir_dict_reads(&mut self, hir: &HirBody, emit: &HirEmit, id: HirId) -> bool {
         // As `hir_value` packs a value after emitting it.
         if let Some(pack) = self.hir_existential_pack(hir, id)
-            && self.hir_mir_probe_dicts(|this, code| this.emit_existential_pack_recipe(code, &pack))
+            && self.hir_mir_probe_unplanned(|this, code| this.emit_existential_pack_recipe(code, &pack))
         {
             return true;
         }
@@ -1040,7 +1065,7 @@ impl Compiler {
             // A `PolyFn` value's escape dictionaries.
             HirKind::Global { .. } if let Some(name) = emit.plan.polyfns.get(&id.0) => {
                 let ty = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));
-                self.hir_mir_probe_dicts(|this, code| {
+                self.hir_mir_probe_unplanned(|this, code| {
                     this.emit_polyfn_escape_dicts(code, name, ty.as_ref());
                 })
             }
@@ -1052,7 +1077,7 @@ impl Compiler {
                 };
                 let arg_tys: Vec<Ty> = args.iter().filter_map(|&a| Self::hir_ty(hir, a)).map(|t| apply_ty_prune(self.checker.subst(), t)).collect();
                 let call_ty = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));
-                self.hir_mir_probe_dicts(|this, code| {
+                self.hir_mir_probe_unplanned(|this, code| {
                     this.emit_call_site_dicts(code, &source, &arg_tys, call_ty.as_ref());
                 })
             }
@@ -1069,7 +1094,7 @@ impl Compiler {
                 if let Some(inst) = call.instance.as_ref().filter(|i| i.ground.is_some()) {
                     let method = &inst.ground.as_ref().expect("ground call").method;
                     let key = self.instance_clone(&call.key, &inst.args).unwrap_or_else(|| call.key.clone());
-                    return self.hir_mir_probe_dicts(|this, code| {
+                    return self.hir_mir_probe_unplanned(|this, code| {
                         this.emit_call_instance_dict(code, (&inst.class, method, &key), &inst.args, span);
                     });
                 }
@@ -1093,7 +1118,7 @@ impl Compiler {
                     _ => call.key.clone(),
                 };
                 !self.raw_instance_methods.contains(&key)
-                    && self.hir_mir_probe_dicts(|this, code| {
+                    && self.hir_mir_probe_unplanned(|this, code| {
                         this.emit_instance_dict(code, &inst.class, &inst.args);
                     })
             }
@@ -1104,8 +1129,8 @@ impl Compiler {
     /// Whether [`Self::hir_push_dicts`] reads a frame dictionary for
     /// `generic`: one it forwards, or one of the call site's.
     fn hir_mir_generic_dict_reads(&mut self, generic: &HirGeneric) -> bool {
-        generic.forwarded.iter().any(|&i| self.lookup_slot(&format!("__dict{i}")).is_some())
-            || self.hir_mir_probe_dicts(|this, code| {
+        generic.forwarded.iter().any(|&i| self.lookup_slot(&format!("__dict{i}")).is_some_and(|slot| !self.hir_mir_dict_param(slot)))
+            || self.hir_mir_probe_unplanned(|this, code| {
                 this.emit_call_site_dicts(code, &generic.lookup, &generic.arg_tys, Some(&generic.ret_ty));
             })
     }
@@ -1152,6 +1177,20 @@ impl Compiler {
     fn hir_mir_probe_dicts(&mut self, f: impl FnOnce(&mut Self, &mut CodeBuf)) -> bool {
         let mut code = CodeBuf::new();
         self.hir_mir_once(|this| f(this, &mut code));
+        self.hir_mir_code_reads_dicts(&code)
+    }
+
+    /// As [`Self::hir_mir_probe_dicts`], for a site whose plan builds its
+    /// dictionaries from a [`crate::mir::HirDictOp`] program: whether its
+    /// code reads a frame dictionary no program step stands for.
+    fn hir_mir_probe_unplanned(&mut self, f: impl FnOnce(&mut Self, &mut CodeBuf)) -> bool {
+        let mut code = CodeBuf::new();
+        self.hir_mir_once(|this| f(this, &mut code));
+        self.hir_mir_code_reads_dicts(&code) && self.hir_mir_dict_program(&code).is_none()
+    }
+
+    /// Whether `code` loads one of the frame's dictionaries.
+    fn hir_mir_code_reads_dicts(&self, code: &CodeBuf) -> bool {
         let dicts: HashSet<u32> = (0..).map_while(|i| self.lookup_slot(&format!("__dict{i}"))).collect();
         code.ops().iter().filter_map(IlOp::as_encode_byte).any(|b| {
             *b.bytecode() == Instruction::LOAD && (0..b.load_store_count()).any(|i| dicts.contains(&b.load_store_slot_at(i)))
