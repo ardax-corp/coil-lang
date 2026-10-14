@@ -1459,6 +1459,7 @@ impl Compiler {
             }),
             heap_fields,
             boxed_niches,
+            niche_args: &tables.niche_args,
             existential_packs: tables.existential_packs,
             packs: &tables.packs,
             record_fields,

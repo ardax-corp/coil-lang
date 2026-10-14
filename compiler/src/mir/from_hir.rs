@@ -248,6 +248,10 @@ impl HirMirInput<'_> {
             .or_else(|| array_elem(ty).and_then(|e| self.heap_elem(e).or_else(|| (self.niche)(e))).map(|_| MirTy::HeapRef))
             .or_else(|| (self.opaque_vars && is_var(ty)).then_some(MirTy::I64))
             .or_else(|| (self.opaque_vars && array_elem(ty).is_some_and(is_var)).then_some(MirTy::HeapRef))
+            // A higher-kinded `P<A>` (a type variable applied): an object
+            // of whatever type constructor `P` is, which the body only
+            // moves.
+            .or_else(|| (self.opaque_vars && is_var_app(ty)).then_some(MirTy::HeapRef))
             // A bare-class existential: its `[boxed value, dictionary]` pack.
             .or_else(|| matches!(strip_readonly(ty), Ty::Existential { .. }).then_some(MirTy::HeapRef))
     }
@@ -448,6 +452,9 @@ pub struct HirMirInput<'a> {
     /// whose own word is this niche layout: boxed on the way in, unboxed
     /// on the way out.
     pub boxed_niches: HashMap<u32, ValueLayout>,
+    /// Call arguments of a niche layout a shared generic takes in a boxed
+    /// parameter: boxed to their enum object, by argument.
+    pub niche_args: &'a HashMap<u32, ValueLayout>,
     /// HIR emission packs some value of the body as a bare-class
     /// existential (`emit_existential_pack_recipe`) that `packs` has no
     /// program for.
@@ -737,6 +744,11 @@ fn is_fn(ty: &Ty) -> bool {
     }
 }
 
+/// A type variable applied to arguments: a higher-kinded `P<A>`.
+fn is_var_app(ty: &Ty) -> bool {
+    matches!(strip_readonly(ty), Ty::App(head, _) if is_var(head))
+}
+
 fn is_var(ty: &Ty) -> bool {
     matches!(strip_readonly(ty), Ty::Var(_))
 }
@@ -747,8 +759,9 @@ fn is_var(ty: &Ty) -> bool {
 /// Calls pass them on as they are. The frame maps list the words it keeps
 /// live past a collecting instruction ([`super::gc::live_opaque_words`]).
 fn opaque_moves_only(hir: &HirBody, inp: &HirMirInput) -> Result<(), Refusal> {
-    let var = |id: &HirId| hir.expr(*id).ty.as_ref().is_some_and(is_var);
-    let any = hir.locals.iter().any(|l| l.ty.as_ref().is_some_and(is_var)) || hir.exprs.iter().any(|e| e.ty.as_ref().is_some_and(is_var));
+    let opaque = |t: &Ty| is_var(t) || is_var_app(t);
+    let var = |id: &HirId| hir.expr(*id).ty.as_ref().is_some_and(opaque);
+    let any = hir.locals.iter().any(|l| l.ty.as_ref().is_some_and(opaque)) || hir.exprs.iter().any(|e| e.ty.as_ref().is_some_and(opaque));
     if !any {
         return Ok(());
     }
@@ -3651,8 +3664,24 @@ impl Lower<'_> {
             if !pair && !boxed && self.expr_ty(arg).and_then(|t| self.inp.word(t)).is_none() {
                 return Err("call argument type".into());
             }
-            if tag.is_some() && (pair || boxed) {
+            if tag.is_some() && pair {
                 return Err("call argument box".into());
+            }
+            // A niche word passed in a boxed parameter: its enum object
+            // (then boxed to a bare type parameter's tag).
+            if !pair && let Some(&layout) = self.inp.niche_args.get(&arg.0) {
+                let Some(w) = self.word(arg)? else {
+                    return Ok(Val::Never);
+                };
+                let v = self.box_niche(layout, w)?;
+                match tag {
+                    Some(tag) => {
+                        let boxed = self.at_expr(arg, |l| l.b.ins_alloc(MirAllocKind::Boxed { tag }, vec![v]).map_err(mir))?;
+                        words.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![boxed]).map_err(mir)?);
+                    }
+                    None => words.push(v),
+                }
+                continue;
             }
             match (self.value(arg)?, pair) {
                 (Val::Never, _) => return Ok(Val::Never),
@@ -3664,11 +3693,19 @@ impl Lower<'_> {
                     words.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![boxed]).map_err(mir)?);
                 }
                 (Val::V(v), false) => words.push(v),
-                (Val::Pair(lo, tag), false) if boxed => {
+                (Val::Pair(lo, hi), false) if boxed => {
                     let ty = self.expr_ty(arg).ok_or("call argument type")?.clone();
-                    match self.box_pair_val(&ty, lo, tag)? {
-                        Val::V(v) => words.push(v),
-                        _ => return Ok(Val::Never),
+                    let Val::V(v) = self.box_pair_val(&ty, lo, hi)? else {
+                        return Ok(Val::Never);
+                    };
+                    // A bare type parameter: the enum object boxed to its
+                    // tag, as HIR emission's `BoxValue` after the boxing.
+                    match tag {
+                        Some(tag) => {
+                            let boxed = self.at_expr(arg, |l| l.b.ins_alloc(MirAllocKind::Boxed { tag }, vec![v]).map_err(mir))?;
+                            words.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![boxed]).map_err(mir)?);
+                        }
+                        None => words.push(v),
                     }
                 }
                 (Val::Pair(lo, hi), true) => words.extend([lo, hi]),
