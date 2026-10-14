@@ -143,6 +143,14 @@ pub fn emit_lir_with_aliases(
             if plan.tree[dest.index()] {
                 continue;
             }
+            // A tail call is the block's `Return` (`emit_term`).
+            if tail_call(func, block).is_some() {
+                if let MirInst::Call { dest: d, .. } = inst
+                    && *d == dest
+                {
+                    continue;
+                }
+            }
             if term_cmp_dest(func, block).is_some_and(|d| dest == d) {
                 continue;
             }
@@ -1978,6 +1986,17 @@ struct EmitTermArgs<'args> {
     loc: DebugLoc,
 }
 
+/// The call `block` ends with when it is a tail call: its result is what
+/// the block returns, and its callee may take the frame
+/// ([`MirFunc::tail_targets`]).
+fn tail_call<'f>(func: &MirFunc, block: &'f super::func::MirBlock) -> Option<&'f MirInst> {
+    let inst = block.insts.last()?;
+    match inst {
+        MirInst::Call { target, .. } if func.tail_targets.contains(target) && super::call_convoy::is_tail_call_inst(block, inst) => Some(inst),
+        _ => None,
+    }
+}
+
 fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
     let EmitTermArgs {
         out,
@@ -2080,6 +2099,19 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
                     });
                 }
             }
+        }
+        Terminator::Return { .. } if let Some(MirInst::Call { args: call_args, target, dest_hi, .. }) = tail_call(func, block) => {
+            // The callee takes this frame: its arguments, then `TailCall`.
+            for a in call_args {
+                emit_stack(out, *a, func, plan, regs, pool, loc)?;
+            }
+            out.push(IlOp::Entry {
+                kind: crate::il::EntryKind::TailCall,
+                arity: call_args.len() as u32,
+                target: *target,
+                loc,
+                ret_words: super::abi::ret_words_from_hi(*dest_hi),
+            });
         }
         Terminator::Return { lo, hi } => {
             let ret_words = super::abi::ret_words_from_hi(*hi);

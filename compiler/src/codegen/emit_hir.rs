@@ -1421,6 +1421,7 @@ impl Compiler {
             sroa_classes,
             fields,
             calls: &tables.calls,
+            tail_calls: &emit.plan.tail_calls,
             into_iters: &tables.into_iters,
             iter_loops: &tables.iter_loops,
             strings: &tables.strings,
