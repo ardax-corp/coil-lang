@@ -598,6 +598,7 @@ impl Compiler {
             pair_ret: false,
             coro: false,
             boxed_ret: false,
+            dicts: Vec::new(),
         };
         if raw {
             // Each operand's MIR word is the boxed-layout word the stack passes.
@@ -648,6 +649,7 @@ impl Compiler {
                         pair_ret: natural.words() == 2,
                         coro: false,
                         boxed_ret,
+                        dicts: Vec::new(),
                     },
                 );
             }
@@ -687,6 +689,7 @@ impl Compiler {
                         pair_ret: natural.words() == 2,
                         coro,
                         boxed_ret,
+                        dicts: Vec::new(),
                     },
                 );
             }
@@ -713,7 +716,14 @@ impl Compiler {
         let coro = !tail && self.coroutine_fns.contains(&call.key);
         self.raw_instance_call = false;
         let target = self.named_entry_target(&call.key, true);
-        if call.generic.as_deref().is_none_or(|g| self.hir_generic_plain(hir, emit, g, args, &call.params) && self.hir_mir_dicts(g) == 0)
+        // A shared generic's call is plain, its dictionaries built as
+        // `hir_push_dicts` builds them (none forwarded through a slot).
+        let dicts = match call.generic.as_deref() {
+            None => Some(Vec::new()),
+            Some(g) if self.hir_generic_plain(hir, emit, g, args, &call.params) => self.hir_mir_dict_ops(g),
+            Some(_) => None,
+        };
+        if let Some(dicts) = dicts.filter(|d| d.is_empty() || !tail)
             && let Some(boxed_ret) = self.hir_ret_shape(hir, id, &natural)
             && let Some(target) = target
         {
@@ -721,7 +731,7 @@ impl Compiler {
             // A `TailCall`'s callee returns for this function, so in this
             // function's words, whatever the call's own rep.
             let pair_ret = if tail { matches!(emit.plan.ret, Rep::Pair(_)) } else { natural.words() == 2 };
-            t.calls.insert(id.0, crate::mir::HirCallSite { target, pair_args, pair_ret, coro, boxed_ret });
+            t.calls.insert(id.0, crate::mir::HirCallSite { target, pair_args, pair_ret, coro, boxed_ret, dicts });
         }
     }
 
@@ -772,6 +782,40 @@ impl Compiler {
                     let ty = apply_ty_prune(self.checker.subst(), ty);
                     crate::typechecking::return_layout::two_word_range_kind(&ty).is_some()
                 }))
+    }
+
+    /// The dictionaries [`Self::hir_push_dicts`] pushes for `generic`, as
+    /// a program of the steps emission takes; `None` when one is
+    /// forwarded from a slot of this frame, or a step is not a code
+    /// pointer, a null or a tuple.
+    fn hir_mir_dict_ops(&mut self, generic: &HirGeneric) -> Option<Vec<crate::mir::HirDictOp>> {
+        if generic.forwarded.iter().any(|&i| self.lookup_slot(&format!("__dict{i}")).is_some()) {
+            return None;
+        }
+        let code = self.hir_mir_quiet(|this| {
+            let mut code = CodeBuf::new();
+            this.emit_call_site_dicts(&mut code, &generic.lookup, &generic.arg_tys, Some(&generic.ret_ty));
+            code
+        });
+        self.hir_mir_dict_program(&code)
+    }
+
+    /// Dictionary code emission put in `code` as a [`crate::mir::HirDictOp`]
+    /// program, when every step is one.
+    fn hir_mir_dict_program(&self, code: &CodeBuf) -> Option<Vec<crate::mir::HirDictOp>> {
+        use crate::mir::HirDictOp;
+        code.ops()
+            .iter()
+            .map(|op| match op {
+                IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::CodePtr => {
+                    self.bytecode.entry_label_for_offset(byte.operand_u32() as usize).map(HirDictOp::Code)
+                }
+                IlOp::Entry { kind: EntryKind::CodePtr, target, .. } => Some(HirDictOp::Code(*target)),
+                IlOp::MakeTuple { arity, kinds: 0, .. } => Some(HirDictOp::Tuple(*arity)),
+                IlOp::Const { imm: 0, .. } => Some(HirDictOp::Null),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Whether argument `id` of a method or ground instance call, emitted

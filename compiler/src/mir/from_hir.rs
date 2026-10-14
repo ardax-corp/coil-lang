@@ -68,6 +68,21 @@ pub struct HirCallSite {
     pub coro: bool,
     /// The result is a niche `Option` / `Result` the callee returns boxed.
     pub boxed_ret: bool,
+    /// The call site's instance dictionaries, passed after the arguments.
+    pub dicts: Vec<HirDictOp>,
+}
+
+/// One step of building instance dictionaries, as HIR emission pushes
+/// them (`emit_instance_dict`): a stack program whose words left are the
+/// dictionaries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HirDictOp {
+    /// `CodePtr` of a method's entry.
+    Code(Label),
+    /// `Const 0`: evidence a `PolyFn` value's call fills in.
+    Null,
+    /// `MakeTuple` of the top `n` words: a dictionary.
+    Tuple(u32),
 }
 
 /// How a user iterator's `next` returns `Option<Item>`, as HIR emission
@@ -3394,6 +3409,11 @@ impl Lower<'_> {
                 _ => return Err("call argument".into()),
             }
         }
+        // The instance dictionaries, after the arguments.
+        if !site.dicts.is_empty() {
+            let dicts = site.dicts.clone();
+            words.extend(self.dict_values(&dicts)?);
+        }
         // `MakeCoro`: the arguments move into a new coroutine's frame.
         if site.coro {
             if ret != MirTy::HeapRef || ret_hi.is_some() {
@@ -3416,6 +3436,25 @@ impl Lower<'_> {
             None if unit => Val::Unit,
             None => Val::V(dest),
         })
+    }
+
+    /// The words of instance dictionary program `ops`: each method's
+    /// `CodePtr`, each dictionary a tuple of the words below it.
+    fn dict_values(&mut self, ops: &[HirDictOp]) -> Result<Vec<ValueId>, Refusal> {
+        let mut stack = Vec::new();
+        for op in ops {
+            match *op {
+                HirDictOp::Code(target) => stack.push(self.b.ins_code_ptr(target).map_err(mir)?),
+                HirDictOp::Null => stack.push(self.b.ins_const(MirConst::I64(0)).map_err(mir)?),
+                HirDictOp::Tuple(n) => {
+                    let at = stack.len().checked_sub(n as usize).ok_or("dictionary arity")?;
+                    let elems = stack.split_off(at);
+                    let dict = self.b.ins_alloc(MirAllocKind::Tuple, elems).map_err(mir)?;
+                    stack.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![dict]).map_err(mir)?);
+                }
+            }
+        }
+        Ok(stack)
     }
 
     /// An auto-par call as HIR emission left it: the fork-join worker on

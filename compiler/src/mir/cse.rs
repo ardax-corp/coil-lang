@@ -518,6 +518,7 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         | MirInst::GcBarrier { .. }
         | MirInst::Deopt { .. }
         | MirInst::String { .. }
+        | MirInst::CodePtr { .. }
         | MirInst::Print { .. }
         | MirInst::Panic { .. }
         | MirInst::Format { .. }
