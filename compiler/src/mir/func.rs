@@ -1,6 +1,6 @@
 //! MIR function / block containers and SSA verification.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use common::DebugLoc;
 
@@ -89,6 +89,9 @@ pub struct MirFunc {
     /// The body builds a lambda: HIR emission's IL holds that lambda's
     /// code inline, in a frame that is not this body's.
     pub inner_code: bool,
+    /// Callees a call of this body may reach as a `TailCall` (planned tail
+    /// calls of a `return`): a call to one whose result the block returns.
+    pub tail_targets: HashSet<crate::il::Label>,
 }
 
 impl MirFunc {
@@ -117,6 +120,7 @@ impl MirFunc {
             home_base: None,
             cleanup: None,
             inner_code: false,
+            tail_targets: HashSet::new(),
         }
     }
 

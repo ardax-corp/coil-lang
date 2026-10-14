@@ -349,6 +349,8 @@ pub struct HirMirInput<'a> {
     /// The slot of each field read or written on such a class local.
     pub fields: HashMap<u32, u32>,
     pub calls: &'a HashMap<u32, HirCallSite>,
+    /// Calls a `return` of the body may make as `TailCall` (the plan's).
+    pub tail_calls: &'a std::collections::HashSet<u32>,
     /// The user `into_iter` entry each counted `for` loop calls.
     pub into_iters: &'a HashMap<u32, Label>,
     /// Each `for` loop over a user iterator's `into_iter` and `next`.
@@ -2800,13 +2802,23 @@ impl Lower<'_> {
                 let Some((a, b)) = ab else {
                     return Ok(Val::Never);
                 };
-                for (item, v) in items.iter().zip([a, b]) {
-                    match item {
-                        HirPat::Wild => {}
-                        HirPat::Bind(local) => self.bind(*local, v)?,
-                        _ => return Err("let pattern".into()),
-                    }
+                let tys = match self.expr_ty(*init).map(strip_readonly) {
+                    Some(Ty::Tuple(tys)) if tys.len() == 2 => Some(tys.clone()),
+                    _ => None,
+                };
+                for (k, (item, v)) in items.iter().zip([a, b]).enumerate() {
+                    self.bind_tuple_item(item, v, tys.as_ref().map(|t| &t[k]))?;
                 }
+                Ok(Val::Unit)
+            }
+            // `let (a, b, c) = e` of a heap tuple of any other length: its
+            // items read out, as a nested tuple pattern's.
+            HirKind::LetPat { pat: pat @ HirPat::Tuple(_), init } => {
+                let Some(obj) = self.word(*init)? else {
+                    return Ok(Val::Never);
+                };
+                let ty = self.expr_ty(*init).cloned();
+                self.bind_tuple_item(pat, obj, ty.as_ref())?;
                 Ok(Val::Unit)
             }
             // `let { a, b } = r` of a record: each bound field read by its
@@ -3769,6 +3781,11 @@ impl Lower<'_> {
             ret_hi,
         };
         let (dest, dest_hi) = self.at_expr(id, |l| l.b.ins_call(site.target, words, &abi).map_err(mir))?;
+        // A planned tail call: its callee may take this frame when the
+        // call's result is what the body returns.
+        if self.inp.tail_calls.contains(&id.0) && site.unbox.is_none() && niche.is_none() {
+            self.b.allow_tail_call(site.target);
+        }
         // A bare type parameter result comes back boxed.
         if let Some(tag) = site.unbox {
             return Ok(Val::V(self.b.ins_unbox(dest, tag, ret).map_err(mir)?));
@@ -5622,6 +5639,35 @@ impl Lower<'_> {
     }
 
     /// Bind `local` to the word `v`.
+    /// Bind one item of a `let` tuple pattern to `v`, of type `ty`: a
+    /// nested tuple pattern (`let (a, (b, c)) = ..`) reads its items out
+    /// of the heap tuple `v` is.
+    fn bind_tuple_item(&mut self, pat: &HirPat, v: ValueId, ty: Option<&Ty>) -> Result<(), Refusal> {
+        match pat {
+            HirPat::Wild => Ok(()),
+            HirPat::Bind(local) => self.bind(*local, v),
+            HirPat::Tuple(items) => {
+                let Some(Ty::Tuple(tys)) = ty.map(strip_readonly) else {
+                    return Err("let pattern".into());
+                };
+                if tys.len() != items.len() || self.b.value_ty(v) != MirTy::HeapRef {
+                    return Err("let pattern".into());
+                }
+                for (k, (item, t)) in items.iter().zip(tys).enumerate() {
+                    if matches!(item, HirPat::Wild) {
+                        continue;
+                    }
+                    let item_ty = self.tuple_item(t).ok_or("let pattern")?;
+                    let index = self.b.ins_const(MirConst::I64(k as i64)).map_err(mir)?;
+                    let x = self.b.ins_index(v, index, item_ty, false).map_err(mir)?;
+                    self.bind_tuple_item(item, x, Some(t))?;
+                }
+                Ok(())
+            }
+            _ => Err("let pattern".into()),
+        }
+    }
+
     fn bind(&mut self, local: HirLocal, v: ValueId) -> Result<(), Refusal> {
         let ty = self.local_ty(local)?;
         let v = match (self.b.value_ty(v), ty) {
