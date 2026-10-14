@@ -88,6 +88,12 @@ impl MirBuilder {
         &self.func
     }
 
+    /// Let a call to `target` whose result the block returns be a
+    /// `TailCall` ([`MirFunc::tail_targets`]).
+    pub fn allow_tail_call(&mut self, target: crate::il::Label) {
+        self.func.tail_targets.insert(target);
+    }
+
     pub fn entry(&self) -> BlockId {
         self.func.entry
     }

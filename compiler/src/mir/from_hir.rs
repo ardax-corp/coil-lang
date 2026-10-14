@@ -349,6 +349,8 @@ pub struct HirMirInput<'a> {
     /// The slot of each field read or written on such a class local.
     pub fields: HashMap<u32, u32>,
     pub calls: &'a HashMap<u32, HirCallSite>,
+    /// Calls a `return` of the body may make as `TailCall` (the plan's).
+    pub tail_calls: &'a std::collections::HashSet<u32>,
     /// The user `into_iter` entry each counted `for` loop calls.
     pub into_iters: &'a HashMap<u32, Label>,
     /// Each `for` loop over a user iterator's `into_iter` and `next`.
@@ -3773,6 +3775,11 @@ impl Lower<'_> {
             ret_hi,
         };
         let (dest, dest_hi) = self.at_expr(id, |l| l.b.ins_call(site.target, words, &abi).map_err(mir))?;
+        // A planned tail call: its callee may take this frame when the
+        // call's result is what the body returns.
+        if self.inp.tail_calls.contains(&id.0) && site.unbox.is_none() && niche.is_none() {
+            self.b.allow_tail_call(site.target);
+        }
         // A bare type parameter result comes back boxed.
         if let Some(tag) = site.unbox {
             return Ok(Val::V(self.b.ins_unbox(dest, tag, ret).map_err(mir)?));
