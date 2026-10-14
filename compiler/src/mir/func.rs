@@ -148,11 +148,20 @@ impl MirFunc {
     }
 
     /// A GC edge the S2b stack maps describe: any but a function value
-    /// (`MakeFn` / `MakePolyFn`) and the barrier right after it, which the
-    /// maps leave to the body's precise frame map or the conservative
-    /// scan, as for its fuse IL ([`super::gates::refuses_alloc`]).
+    /// (`MakeFn` / `MakePolyFn`) or a boxed carrier (`BoxValue`) and the
+    /// barrier right after it, which the maps leave to the body's precise
+    /// frame map or the conservative scan, as for its fuse IL
+    /// ([`super::gates::refuses_alloc`]).
     pub fn has_mapped_gc_edge(&self) -> bool {
-        let is_fn = |i: &MirInst| matches!(i, MirInst::Alloc { kind: super::inst::MirAllocKind::Fn { .. } | super::inst::MirAllocKind::PolyFn { .. }, .. });
+        let is_fn = |i: &MirInst| {
+            matches!(
+                i,
+                MirInst::Alloc {
+                    kind: super::inst::MirAllocKind::Fn { .. } | super::inst::MirAllocKind::PolyFn { .. } | super::inst::MirAllocKind::Boxed { .. },
+                    ..
+                }
+            )
+        };
         self.blocks.iter().any(|b| {
             b.insts.iter().enumerate().any(|(k, i)| {
                 let after_fn = matches!(i, MirInst::GcBarrier { .. }) && k > 0 && is_fn(&b.insts[k - 1]);
