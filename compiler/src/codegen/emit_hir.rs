@@ -4525,23 +4525,6 @@ impl Compiler {
         self.value_layout(ty) == ValueLayout::Boxed
     }
 
-    /// Whether a call to the shared body of a generic `generic` with no
-    /// dictionaries is a plain `CALL`: no argument boxed or adapted (a
-    /// lambda literal unboxes its own parameters), no result unboxed, and
-    /// each argument already in its parameter's layout. Direct MIR calls
-    /// the same entry then.
-    fn hir_generic_plain(&self, hir: &HirBody, emit: &HirEmit, generic: &HirGeneric, args: &[HirId], params: &[ValueLayout]) -> bool {
-        generic.forwarded.is_empty()
-            && generic.unbox.is_none()
-            && generic.boxed.iter().all(Option::is_none)
-            && args.len() == params.len()
-            && args.iter().zip(params).enumerate().all(|(i, (&arg, &param))| {
-                let lambda = matches!(hir.expr(arg).kind, HirKind::Lambda { .. });
-                (lambda || generic.adapt.get(i).is_none_or(Option::is_none))
-                    && self.hir_natural(hir, emit, arg) == Some(Rep::Word(param))
-            })
-    }
-
     /// Push `generic`'s dictionaries after the arguments; their count.
     fn hir_push_dicts(&mut self, generic: &HirGeneric) -> u32 {
         // The enclosing body's own first, then the call site's, as the AST.
