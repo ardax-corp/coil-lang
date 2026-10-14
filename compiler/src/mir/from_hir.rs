@@ -664,10 +664,10 @@ fn is_var(ty: &Ty) -> bool {
 }
 
 /// A generic body moves its type parameter values but never reads them:
-/// no operator, field, index or call takes one (any of them
-/// could read a box as its payload), and nothing that can collect runs
-/// while one is live in a word the frame maps don't trace.
-fn opaque_moves_only(hir: &HirBody, func: &MirFunc) -> Result<(), Refusal> {
+/// no operator, field, index or call takes one (any of them could read a
+/// box as its payload). The frame maps list the words it keeps live past
+/// a collecting instruction ([`super::gc::live_opaque_words`]).
+fn opaque_moves_only(hir: &HirBody) -> Result<(), Refusal> {
     let var = |id: &HirId| hir.expr(*id).ty.as_ref().is_some_and(is_var);
     let any = hir.locals.iter().any(|l| l.ty.as_ref().is_some_and(is_var)) || hir.exprs.iter().any(|e| e.ty.as_ref().is_some_and(is_var));
     if !any {
@@ -692,23 +692,6 @@ fn opaque_moves_only(hir: &HirBody, func: &MirFunc) -> Result<(), Refusal> {
         };
         if read {
             return Err("type variable read".into());
-        }
-    }
-    // A type variable's word is an `i64` the collector does not trace: no
-    // `i64` may stay live past an instruction that can collect (a word one
-    // consumes, such as an object's field, is fine). Parameters are the
-    // exception: the frame map lists every parameter slot.
-    let consts: HashSet<ValueId> = func.blocks.iter().flat_map(|b| &b.insts).filter(|i| matches!(i, MirInst::Const { .. })).map(|i| i.dest()).collect();
-    let live = super::gc::liveness_after(func);
-    for (b, block) in func.blocks.iter().enumerate() {
-        for (i, inst) in block.insts.iter().enumerate() {
-            let moves = matches!(
-                inst,
-                MirInst::Const { .. } | MirInst::Bin { .. } | MirInst::Cmp { .. } | MirInst::Unary { .. } | MirInst::Cast { .. } | MirInst::Phi { .. } | MirInst::ArrayLen { .. } | MirInst::Index { .. } | MirInst::HeapFieldLoad { .. } | MirInst::HeapFieldStore { .. }
-            );
-            if !moves && live[b][i].iter().any(|v| func.ty(*v) == MirTy::I64 && !consts.contains(v) && !func.params.contains(v)) {
-                return Err("type variable across a call".into());
-            }
         }
     }
     Ok(())
@@ -910,7 +893,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
     }
     func.inner_code = hir.exprs.iter().any(|e| matches!(e.kind, HirKind::Lambda { .. }));
     if inp.opaque_vars {
-        opaque_moves_only(hir, &func)?;
+        opaque_moves_only(hir)?;
         func.opaque_words = true;
     }
     // HIR emission packs a concrete value where a bare-class existential
