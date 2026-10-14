@@ -1451,6 +1451,7 @@ impl Compiler {
             records,
             matrix_wraps: &tables.matrix_wraps,
             linalgs: &tables.linalgs,
+            make_niches: &tables.make_niches,
             aggregates: emit
                 .plan
                 .ops
