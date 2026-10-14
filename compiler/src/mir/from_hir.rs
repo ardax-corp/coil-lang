@@ -244,6 +244,8 @@ impl HirMirInput<'_> {
             .or_else(|| array_elem(ty).and_then(|e| self.heap_elem(e).or_else(|| (self.niche)(e))).map(|_| MirTy::HeapRef))
             .or_else(|| (self.opaque_vars && is_var(ty)).then_some(MirTy::I64))
             .or_else(|| (self.opaque_vars && array_elem(ty).is_some_and(is_var)).then_some(MirTy::HeapRef))
+            // A bare-class existential: its `[boxed value, dictionary]` pack.
+            .or_else(|| matches!(strip_readonly(ty), Ty::Existential { .. }).then_some(MirTy::HeapRef))
     }
 
     /// An array element type held as a heap word: a string, class, array,
@@ -376,6 +378,9 @@ pub struct HirMirInput<'a> {
     /// Trait methods and operators on a bound type parameter, called
     /// through the body's own dictionary, by call or operator.
     pub bound_calls: &'a HashMap<u32, HirBoundCall>,
+    /// Trait methods on a bare-class existential pack, by call: the
+    /// method's slot in the pack's dictionary.
+    pub existential_calls: &'a HashMap<u32, u32>,
     /// Calls and dictionary operators typed a bare type parameter in a
     /// shared generic body: HIR emission unboxes their result
     /// (`UNBOX_ANY_TAG`), which may come back boxed.
@@ -2282,6 +2287,7 @@ impl Lower<'_> {
             HirKind::Call { callee: Callee::Value(f), args } if let Some(p) = self.inp.poly_calls.get(&id.0) => self.call_poly(id, *f, args, &p.clone()),
             HirKind::Call { args, .. } if let Some(fork) = self.inp.par_forks.get(&id.0) => self.par_fork(id, args, &fork.clone()),
             HirKind::Call { args, .. } if let Some(&bound) = self.inp.bound_calls.get(&id.0) => self.bound_call(id, args, bound),
+            HirKind::Call { args, .. } if let Some(&slot) = self.inp.existential_calls.get(&id.0) => self.existential_call(id, args, slot),
             HirKind::Call { args, .. } => self.call(id, args),
             HirKind::Resume { handle, value } => self.resume(id, *handle, *value),
             HirKind::Yield { value, from } => self.yield_(id, *value, *from, true),
@@ -3825,6 +3831,52 @@ impl Lower<'_> {
         words.push(dict);
         let slot = self.b.ins_const(MirConst::I64(i64::from(bound.method))).map_err(mir)?;
         let callee = self.b.ins_index(dict, slot, MirTy::I64, false).map_err(mir)?;
+        let dest = self.at_expr(id, |l| l.b.ins_call_indirect(callee, words, ret).map_err(mir))?;
+        Ok(if unit { Val::Unit } else { Val::V(dest) })
+    }
+
+    /// A trait method on a bare-class existential pack, as HIR emission's
+    /// `HirBuiltin::Existential`: the pack's boxed value, the further
+    /// arguments' words, the pack's dictionary, then the code pointer in
+    /// the method's slot through `CallIndirect`.
+    fn existential_call(&mut self, id: HirId, args: &[HirId], slot: u32) -> Result<Val, Refusal> {
+        self.raw_host = false;
+        if self.inp.pair_tys.contains_key(&id.0) {
+            return Err("existential call pair".into());
+        }
+        let ty = self.expr_ty(id).ok_or("call type")?;
+        let unit = is_unit(ty);
+        let ret = if unit {
+            MirTy::I64
+        } else {
+            self.inp.word(ty).ok_or_else(|| format!("existential call type {}", ty_kind(ty)))?
+        };
+        let (&recv, rest) = args.split_first().ok_or("existential call arity")?;
+        let Some(pack) = self.word(recv)? else {
+            return Ok(Val::Never);
+        };
+        if self.b.value_ty(pack) != MirTy::HeapRef {
+            return Err("existential pack word".into());
+        }
+        let mut rest_words = Vec::with_capacity(rest.len());
+        for &arg in rest {
+            let Some(v) = self.word(arg)? else {
+                return Ok(Val::Never);
+            };
+            rest_words.push(v);
+        }
+        let field = |l: &mut Self, i: i64, ty: MirTy| -> Result<ValueId, Refusal> {
+            let at = l.b.ins_const(MirConst::I64(i)).map_err(mir)?;
+            l.b.ins_index(pack, at, ty, false).map_err(mir)
+        };
+        let value = field(self, 0, MirTy::HeapRef)?;
+        let dict = field(self, 1, MirTy::HeapRef)?;
+        let mut words = Vec::with_capacity(args.len() + 1);
+        words.push(value);
+        words.extend(rest_words);
+        words.push(dict);
+        let at = self.b.ins_const(MirConst::I64(i64::from(slot))).map_err(mir)?;
+        let callee = self.b.ins_index(dict, at, MirTy::I64, false).map_err(mir)?;
         let dest = self.at_expr(id, |l| l.b.ins_call_indirect(callee, words, ret).map_err(mir))?;
         Ok(if unit { Val::Unit } else { Val::V(dest) })
     }

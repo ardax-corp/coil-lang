@@ -1380,6 +1380,7 @@ impl Compiler {
             value_calls: &tables.value_calls,
             poly_calls: &tables.poly_calls,
             bound_calls: &tables.bound_calls,
+            existential_calls: &tables.existential_calls,
             unbox_any: &tables.unbox_any,
             open_params: &tables.open_params,
             lens: &emit.plan.lens,
