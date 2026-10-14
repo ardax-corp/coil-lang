@@ -1135,7 +1135,11 @@ impl Compiler {
     /// reads as that parameter. An instance's context dictionaries the
     /// prologue loads out of `__dict0` are not.
     fn hir_mir_dict_param(&self, slot: u32) -> bool {
-        self.hir_mir_dict_sp.is_some_and(|sp| slot < sp) && (0..).map_while(|i| self.lookup_slot(&format!("__dict{i}"))).any(|s| s == slot)
+        let Some(sp) = self.hir_mir_dict_sp else {
+            return false;
+        };
+        (slot < sp && (0..).map_while(|i| self.lookup_slot(&format!("__dict{i}"))).any(|s| s == slot))
+            || self.hir_mir_ctx.iter().any(|&(s, own, _)| s == slot && own < sp)
     }
 
     /// Dictionary code emission put in `code` as a [`crate::mir::HirDictOp`]
