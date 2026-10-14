@@ -491,6 +491,10 @@ pub struct HirMirInput<'a> {
     /// Record literals whose every field holds the word its type says:
     /// each field's key index and word type, in literal order.
     pub records: HashMap<u32, Vec<(u32, MirTy)>>,
+    /// Record `let` patterns that bind only locals and wildcards: each
+    /// bound field's key index and word type (`None`: a wildcard), in
+    /// pattern order.
+    pub record_pats: HashMap<u32, Vec<Option<(u32, MirTy)>>>,
     /// `Vec::push` calls HIR emission inlines.
     pub pushes: HashSet<u32>,
     /// Host native calls whose arguments and result are plain (boxed
@@ -2680,8 +2684,9 @@ impl Lower<'_> {
                 if let HirKind::Field { base, .. } = self.hir.expr(*place).kind
                     && let Some(&(key, ty)) = self.inp.record_fields.get(&place.0) =>
             {
-                // The value, the object, then the key, as `SetField`.
-                let Some(v) = self.word(*value)? else {
+                // The value, the object, then the key, as `SetField`; a
+                // two-word value boxed.
+                let Some(v) = (if ty == MirTy::HeapRef { self.boxed_word(*value)? } else { self.word(*value)? }) else {
                     return Ok(Val::Never);
                 };
                 if self.b.value_ty(v) != ty {
@@ -2699,7 +2704,8 @@ impl Lower<'_> {
                 let words = words.clone();
                 let mut elems = Vec::with_capacity(2 * args.len());
                 for (&arg, (key, ty)) in args.iter().zip(words) {
-                    let Some(v) = self.word(arg)? else {
+                    // A two-word value is stored boxed.
+                    let Some(v) = (if ty == MirTy::HeapRef { self.boxed_word(arg)? } else { self.word(arg)? }) else {
                         return Ok(Val::Never);
                     };
                     if self.b.value_ty(v) != ty {
@@ -2793,6 +2799,24 @@ impl Lower<'_> {
                         HirPat::Wild => {}
                         HirPat::Bind(local) => self.bind(*local, v)?,
                         _ => return Err("let pattern".into()),
+                    }
+                }
+                Ok(Val::Unit)
+            }
+            // `let { a, b } = r` of a record: each bound field read by its
+            // key, as `hir_let_pat_binds`' `GetField`.
+            HirKind::LetPat { pat: HirPat::Record(parts), init } if let Some(words) = self.inp.record_pats.get(&id.0) => {
+                let Some(obj) = self.word(*init)? else {
+                    return Ok(Val::Never);
+                };
+                if self.b.value_ty(obj) != MirTy::HeapRef {
+                    return Err("let pattern record".into());
+                }
+                for ((_, part), word) in parts.iter().zip(words) {
+                    if let (HirPat::Bind(local), Some((key, ty))) = (part, *word) {
+                        let key = self.b.ins_string(key).map_err(mir)?;
+                        let v = self.b.ins_heap_field_load(obj, Some(key), 0, ty).map_err(mir)?;
+                        self.bind(*local, v)?;
                     }
                 }
                 Ok(Val::Unit)
@@ -3556,7 +3580,7 @@ impl Lower<'_> {
             return false;
         };
         slot.checked_sub(at.0).and_then(|i| tys.get(i as usize)) == Some(&MirTy::HeapRef)
-            && self.expr_ty(id).is_some_and(|t| self.inp.word(t).is_none() && (self.inp.boxed_view)(t, None).is_some())
+            && (self.inp.pair_tys.contains_key(&id.0) || self.expr_ty(id).is_some_and(|t| self.inp.word(t).is_none() && (self.inp.boxed_view)(t, None).is_some()))
     }
 
     /// Whether field `id` of a frame-slot class local is a niche `Option`
@@ -5110,12 +5134,12 @@ impl Lower<'_> {
         self.join_arms(out)
     }
 
-    /// `len(x)`: a fixed size (a local or literal is not read), or the
-    /// heap array's length.
+    /// `len(x)`: a fixed size (a local or literal is not read; any other
+    /// operand is evaluated and dropped), or the heap array's length.
     fn len(&mut self, arg: HirId, fixed: Option<u32>) -> Result<Val, Refusal> {
         if let Some(n) = fixed {
-            if !matches!(self.hir.expr(arg).kind, HirKind::Local(_) | HirKind::Lit(_) | HirKind::Make { .. }) {
-                return Err("len operand".into());
+            if !matches!(self.hir.expr(arg).kind, HirKind::Local(_) | HirKind::Lit(_) | HirKind::Make { .. }) && !self.effect(arg)? {
+                return Ok(Val::Never);
             }
             return Ok(Val::V(self.b.ins_const(MirConst::I64(i64::from(n))).map_err(mir)?));
         }
