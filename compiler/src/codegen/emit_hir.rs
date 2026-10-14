@@ -887,10 +887,12 @@ impl Compiler {
         if !self.hir_mir_on || !self.opt_options.mir_specialize {
             return None;
         }
+        self.hir_mir_dict_sp = entry_words;
         let tables = self.hir_mir_tables(hir, emit);
+        self.hir_mir_dict_sp = None;
         // A shared generic body's dictionaries are trailing parameters
-        // direct MIR does not read: a body whose code reads one stays on
-        // the stack lowering.
+        // direct MIR reads only through dictionary programs: a body whose
+        // code reads one any other way stays on the stack lowering.
         if entry_words.is_some() && tables.reads_dicts {
             self.hir_mir_why = Some("converted or shared generic entry".into());
             return None;
@@ -1449,6 +1451,8 @@ impl Compiler {
             record_fields,
             records,
             matrix_wraps: &tables.matrix_wraps,
+            linalgs: &tables.linalgs,
+            array_copies: &tables.array_copies,
             make_niches: &tables.make_niches,
             aggregates: emit
                 .plan
@@ -9657,15 +9661,7 @@ impl Compiler {
     /// copied (`vec_from_array`), as assigning one stack array local to
     /// another copies its slots: the two never share elements.
     fn hir_value_copied(&mut self, hir: &HirBody, emit: &mut HirEmit, value: HirId, want: &Rep) {
-        let copied = match hir.expr(value).kind {
-            HirKind::Local(src) => {
-                !emit.plan.stacks.contains_key(&src.0)
-                    && Self::hir_ty(hir, value).is_some_and(|t| lower::is_fixed_array(&self.checker, t))
-            }
-            _ => false,
-        };
-        let native = copied.then(|| self.native_id("vec_from_array")).flatten();
-        let Some(native) = native else {
+        let Some(native) = self.hir_array_copy(hir, emit, value) else {
             self.hir_value(hir, emit, value, want, 0);
             return;
         };
@@ -9673,6 +9669,20 @@ impl Compiler {
             .push(Byte::new(Instruction::CONST).with_value_u32(native as u32));
         self.hir_value(hir, emit, value, want, 1);
         self.bytecode.push_host_invoke(1);
+    }
+
+    /// The `vec_from_array` native when value `value`, bound or assigned to
+    /// a local, is a fixed array read from another (heap) local, which
+    /// [`Self::hir_value_copied`] copies.
+    fn hir_array_copy(&self, hir: &HirBody, emit: &HirEmit, value: HirId) -> Option<usize> {
+        let copied = match hir.expr(value).kind {
+            HirKind::Local(src) => {
+                !emit.plan.stacks.contains_key(&src.0)
+                    && Self::hir_ty(hir, value).is_some_and(|t| lower::is_fixed_array(&self.checker, t))
+            }
+            _ => false,
+        };
+        copied.then(|| self.native_id("vec_from_array")).flatten()
     }
 
     /// `block_on(h)` at depth zero, as the AST's `emit_block_on`.

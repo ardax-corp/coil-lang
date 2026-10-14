@@ -45,6 +45,14 @@ pub fn encode_draft_regs(func: &MirFunc, regs: &[u8], need_slot: &[bool]) -> Opt
             }
         }
     }
+    // A type variable's word may be an object only it keeps: list each
+    // slotted one live past a collecting instruction, as the heap words
+    // above (a scalar there is skipped by the collector).
+    for v in super::gc::live_opaque_words(&func) {
+        if need_slot.get(v.index()).copied().unwrap_or(false) && let Some(&r) = regs.get(v.index()) {
+            slots.insert(u16::from(r));
+        }
+    }
     // One site per allocating instruction: each emits one alloc opcode
     // ([`is_alloc_opcode`]), except a box (`BoxValue` binds no site).
     let n = func
@@ -75,11 +83,13 @@ pub fn encode_draft_regs(func: &MirFunc, regs: &[u8], need_slot: &[bool]) -> Opt
 /// precise frame map, so no scalar is read as a handle. A body that keeps
 /// no heap word in a slot gets an empty map.
 pub fn encode_draft_slots(func: &MirFunc) -> DraftFrameMap {
-    let frame_slots = func
-        .heap_slots
-        .difference(&func.word_slots)
-        .filter_map(|l| u16::try_from(l.0).ok())
-        .collect();
+    // A body whose `i64` words may be a type variable's object lists its
+    // word slots too: the collector skips one that holds no object.
+    let frame_slots = if func.opaque_words {
+        func.heap_slots.union(&func.word_slots).filter_map(|l| u16::try_from(l.0).ok()).collect()
+    } else {
+        func.heap_slots.difference(&func.word_slots).filter_map(|l| u16::try_from(l.0).ok()).collect()
+    };
     DraftFrameMap {
         name: func.name.clone(),
         sites: Vec::new(),

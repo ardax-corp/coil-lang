@@ -210,6 +210,36 @@ fn live_heap(
         .collect()
 }
 
+/// The `i64` words of an [`MirFunc::opaque_words`] body (a type
+/// variable's word may be an object) live past an instruction that can
+/// collect: anything but a constant, a parameter or a word one of these
+/// moves consumes. A frame map lists them beside its heap words.
+pub(super) fn live_opaque_words(func: &MirFunc) -> BTreeSet<ValueId> {
+    let mut out = BTreeSet::new();
+    if !func.opaque_words {
+        return out;
+    }
+    let consts: HashSet<ValueId> = func.blocks.iter().flat_map(|b| &b.insts).filter(|i| matches!(i, MirInst::Const { .. })).map(|i| i.dest()).collect();
+    let live = liveness_after(func);
+    for (b, block) in func.blocks.iter().enumerate() {
+        for (i, inst) in block.insts.iter().enumerate() {
+            if collects(inst) {
+                out.extend(live[b][i].iter().copied().filter(|v| func.ty(*v) == MirTy::I64 && !consts.contains(v) && !func.params.contains(v)));
+            }
+        }
+    }
+    out
+}
+
+/// Whether `inst` may run the collector: all but the moves of words
+/// [`live_opaque_words`] looks past.
+pub(super) fn collects(inst: &MirInst) -> bool {
+    !matches!(
+        inst,
+        MirInst::Const { .. } | MirInst::Bin { .. } | MirInst::Cmp { .. } | MirInst::Unary { .. } | MirInst::Cast { .. } | MirInst::Phi { .. } | MirInst::ArrayLen { .. } | MirInst::Index { .. } | MirInst::HeapFieldLoad { .. } | MirInst::HeapFieldStore { .. }
+    )
+}
+
 fn barrier_dests(func: &MirFunc) -> HashSet<ValueId> {
     let mut s = HashSet::new();
     for b in &func.blocks {

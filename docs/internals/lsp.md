@@ -40,6 +40,7 @@ These requests are implemented and covered by `coil-lsp` scenario tests:
 | Folding | One fold per top-level document symbol that spans lines |
 | Selection ranges | Nested AST spans containing the cursor (full file if parse fails) |
 | Semantic tokens | Lexical comments (`//`, nestable `/* */`), strings (including escaped quotes), numbers, operators, plus AST / `Checker` classification. Contextual `derive` / `macro` / `quote` / `attrs` highlight as keywords; `name!(…)` calls use the `macro` token type |
+| Coverage | From the `coil test --coverage` tracefile, for workspace sources (not `.deps`): a code lens over each function (`covered 7/9 lines (78%)`), a **Coverage:** row in its hover, and hint diagnostics for functions below the threshold and for runs of uncovered lines. See [Coverage](#coverage) |
 
 Search roots for an opened workspace are `src`, `.` (sibling files at the
 project root), and each `.deps/*/src` checkout when present, then any
@@ -76,6 +77,27 @@ HostInvoke FFI stubs.
 Function completion items use snippet insertion: selecting `fib` inserts
 parameter placeholders such as `fib(${1:n})$0` and advertises `(` / `,` as
 signature-help triggers.
+
+## Coverage
+
+The server reads `target/coverage/lcov.info` (relative to the workspace),
+the tracefile `coil test --coverage` writes ([test-runner.md](test-runner.md#coverage)).
+It never runs tests. An idle server looks at the file every two seconds; when
+it changes, open documents get their diagnostics re-published and clients
+with `workspace.codeLens.refreshSupport` are asked to refresh lenses.
+
+- **Functions** are top-level `fn`s and the methods of `impl` and trait
+  blocks; a function's lines are those of its declaration span, so a nested
+  function's lines also count for the outer one. Functions with no coverable
+  line (never-instantiated generics) get nothing.
+- **Hints** (`DiagnosticSeverity::Hint`, source `coil coverage`): a function
+  below the threshold gets one on its name; each run of uncovered lines gets
+  one, except inside a function nothing covered (its own hint says so). No
+  `Unnecessary` tag: code is never faded.
+- **Stale data** shows nothing: a file changed on disk after the tracefile
+  was written, or an open buffer that differs from the file.
+- `initializationOptions.coverage`: `false` turns it off; or an object with
+  `enabled`, `threshold` (default `0.8`) and `path` (for `--coverage-out`).
 
 ## Deferred
 

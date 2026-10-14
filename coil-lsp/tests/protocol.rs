@@ -645,3 +645,145 @@ fn hover_shows_signatures_docs_and_import_rows() {
         "examples render as coil with `# ` lines hidden: {twice}"
     );
 }
+
+const COVERED_SOURCE: &str = "/// Clamp `x` to `lo..=hi`.\nfn clamp(int x, int lo, int hi) -> int {\n    if x < lo {\n        return lo;\n    }\n    if x > hi {\n        return hi;\n    }\n    return x;\n}\n\nfn unused(int x) -> int {\n    let y = x * 2;\n    return y + 1;\n}\n\nclass Acc {\n    pub n: int,\n}\n\nimpl Acc {\n    pub fn add(int k) -> int {\n        return self.n + k;\n    }\n}\n";
+
+const COVERED_TEST: &str = "use mathx::{clamp, Acc};\n\ntest(\"clamps low\") {\n    let a = new Acc(1);\n    if clamp(-1, 0, 5) + a.add(0) != 1 {\n        panic(\"bad\");\n    }\n}\n";
+
+/// `coil test --coverage` on the two files above (line 26 is past the end).
+const COVERED_LCOV: &str = "TN:\nSF:src/mathx.hy\nDA:3,1\nDA:4,1\nDA:6,0\nDA:7,0\nDA:9,0\nDA:13,0\nDA:14,0\nDA:23,3\nDA:26,0\nLF:9\nLH:3\nend_of_record\n";
+
+fn code_lens_titles(client: &mut Client, uri: &str) -> Vec<String> {
+    let reply = client.request("textDocument/codeLens", json!({ "textDocument": { "uri": uri } }));
+    reply["result"]
+        .as_array()
+        .map(|lenses| {
+            lenses
+                .iter()
+                .map(|lens| lens["command"]["title"].as_str().unwrap_or_default().to_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The last diagnostics published for `uri` from `coil coverage`.
+fn coverage_hints(client: &Client, uri: &str) -> Vec<Value> {
+    client
+        .notifications
+        .iter()
+        .rev()
+        .find(|n| n["method"] == "textDocument/publishDiagnostics" && n["params"]["uri"] == uri)
+        .and_then(|n| n["params"]["diagnostics"].as_array())
+        .map(|diagnostics| {
+            diagnostics
+                .iter()
+                .filter(|d| d["source"] == "coil coverage")
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Coverage from an existing tracefile shows as hints (never faded), code
+/// lenses and a hover row; an edit hides it until the tests run again.
+#[test]
+fn coverage_shows_as_hints_lenses_and_hover() {
+    let dir = project(
+        "coverage",
+        &[
+            ("src/mathx.hy", COVERED_SOURCE),
+            ("tests/clamp.hy", COVERED_TEST),
+            ("target/coverage/lcov.info", COVERED_LCOV),
+        ],
+    );
+    let src_uri = uri(&dir.join("src/mathx.hy"));
+    let test_uri = uri(&dir.join("tests/clamp.hy"));
+    let mut client = Client::spawn(&dir);
+    open(&mut client, &src_uri, COVERED_SOURCE);
+
+    assert_eq!(
+        code_lens_titles(&mut client, &src_uri),
+        ["covered 2/5 lines (40%)", "not covered by tests", "covered 1/1 lines (100%)"]
+    );
+    let hints = coverage_hints(&client, &src_uri);
+    let messages: Vec<&str> = hints.iter().map(|d| d["message"].as_str().unwrap()).collect();
+    assert_eq!(
+        messages,
+        [
+            "`clamp` has low test coverage: 2/5 lines (40%). Coverage could be improved.",
+            "`unused` has low test coverage: 0/2 lines (0%). Coverage could be improved.",
+            "Lines 6-9 not covered by tests.",
+        ]
+    );
+    for hint in &hints {
+        assert_eq!(hint["severity"], 4, "hint severity: {hint}");
+        assert!(hint.get("tags").is_none_or(Value::is_null), "never faded: {hint}");
+    }
+    assert_eq!(hints[0]["range"]["start"], json!({ "line": 1, "character": 3 }));
+    assert_eq!(hints[2]["range"]["start"], json!({ "line": 5, "character": 4 }));
+
+    open(&mut client, &test_uri, COVERED_TEST);
+    let clamp = hover_text(&mut client, &test_uri, COVERED_TEST, "clamp(-1", 0);
+    assert!(clamp.contains("**Coverage:** 2/5 lines (40%)"), "{clamp}");
+    assert!(clamp.find("Coverage:") < clamp.find("Clamp `x`"), "above the docs: {clamp}");
+    assert!(code_lens_titles(&mut client, &test_uri).is_empty(), "test files are not measured");
+
+    client.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": src_uri, "version": 2 },
+            "contentChanges": [{ "text": format!("\n{COVERED_SOURCE}") }],
+        }),
+    );
+    assert!(code_lens_titles(&mut client, &src_uri).is_empty(), "stale after an edit");
+    assert!(coverage_hints(&client, &src_uri).is_empty(), "stale after an edit");
+}
+
+/// A tracefile written while the server runs is picked up without a
+/// request, and clients that support it are asked to refresh lenses.
+#[test]
+fn coverage_tracefile_is_watched() {
+    let dir = project("coverage-watch", &[("src/mathx.hy", COVERED_SOURCE)]);
+    let src_uri = uri(&dir.join("src/mathx.hy"));
+    let mut client = Client::spawn_init(
+        &[],
+        json!({
+            "rootUri": uri(&dir),
+            "capabilities": { "workspace": { "codeLens": { "refreshSupport": true } } },
+        }),
+    );
+    open(&mut client, &src_uri, COVERED_SOURCE);
+    assert!(code_lens_titles(&mut client, &src_uri).is_empty());
+
+    std::fs::create_dir_all(dir.join("target/coverage")).unwrap();
+    std::fs::write(dir.join("target/coverage/lcov.info"), COVERED_LCOV).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while coverage_hints(&client, &src_uri).is_empty() {
+        assert!(std::time::Instant::now() < deadline, "tracefile not picked up");
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        // Any round trip collects what the server sent meanwhile.
+        client.request("textDocument/documentSymbol", json!({ "textDocument": { "uri": src_uri } }));
+    }
+    assert!(
+        client.notifications.iter().any(|n| n["method"] == "workspace/codeLens/refresh"),
+        "lens refresh requested"
+    );
+    assert_eq!(code_lens_titles(&mut client, &src_uri).len(), 3);
+}
+
+/// `initializationOptions.coverage: false` turns it off.
+#[test]
+fn coverage_can_be_turned_off() {
+    let dir = project(
+        "coverage-off",
+        &[("src/mathx.hy", COVERED_SOURCE), ("target/coverage/lcov.info", COVERED_LCOV)],
+    );
+    let src_uri = uri(&dir.join("src/mathx.hy"));
+    let mut client = Client::spawn_init(
+        &[],
+        json!({ "rootUri": uri(&dir), "capabilities": {}, "initializationOptions": { "coverage": false } }),
+    );
+    open(&mut client, &src_uri, COVERED_SOURCE);
+    assert!(code_lens_titles(&mut client, &src_uri).is_empty());
+    assert!(coverage_hints(&client, &src_uri).is_empty());
+}
