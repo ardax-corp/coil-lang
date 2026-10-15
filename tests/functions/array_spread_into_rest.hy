@@ -39,3 +39,12 @@ test("fixed-array local spread into a rest") {
 test("tuple spread into a rest") {
     assert!(sum(...(1, 2, 3)) == 6);
 }
+
+fn joined(string sep, string... parts) -> int {
+    return len(parts);
+}
+
+test("tuple spread fills the fixed parameter, then the rest") {
+    assert!(joined(...("+", "a")) == 1);
+    assert!(joined(...("+", "a", "b", "c")) == 3);
+}
