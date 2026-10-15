@@ -18,6 +18,9 @@ pub fn stage(body: &HirBody, target: HirId) -> Option<HirBody> {
     if body.expr(target).flags.contains(HirFlags::ADJUST) {
         return split_adjust(body, target);
     }
+    if matches!(body.expr(target).kind, HirKind::Assign { .. }) {
+        return split_assign(body, target);
+    }
     let (block, at) = match statement_of(body, target) {
         Ok(found) => found,
         // An operand with an effect runs first: staging it, in place, keeps
@@ -153,6 +156,58 @@ fn split_adjust(body: &HirBody, target: HirId) -> Option<HirBody> {
         unreachable!()
     };
     block_stmts.splice(at..at, stmts);
+    Some(b)
+}
+
+/// An assignment value `p = e` (or `p op= e`, built as `p = p op e`) as
+/// statements ahead of its own: `let t = e; p = t;`, then `t` where the
+/// assignment was. A plain assignment runs its value before its place
+/// anyway; a compound one reads the place in `e` too, so its operands must
+/// be pure.
+fn split_assign(body: &HirBody, target: HirId) -> Option<HirBody> {
+    let HirKind::Assign { place, value } = body.expr(target).kind else {
+        return None;
+    };
+    if body.expr(target).flags.contains(HirFlags::COMPOUND) && !repeatable(body, place) {
+        return None;
+    }
+    let (block, at) = match statement_of(body, target) {
+        Ok(found) => found,
+        Err(Some(first)) => return split_assign(&stage(body, first)?, target),
+        Err(None) => return None,
+    };
+    let mut b = body.clone();
+    let node = b.expr(target).clone();
+    let ty = b.expr(value).ty.clone().or_else(|| node.ty.clone());
+    let temp = LocalId(b.locals.len() as u32);
+    b.locals.push(HirLocal {
+        name: format!("__assign{}", temp.0),
+        ty: ty.clone(),
+        kind: LocalKind::Temp,
+        captured: false,
+    });
+    let bind = push_let(&mut b, temp, value, node.span);
+    let read = HirExpr {
+        kind: HirKind::Local(temp),
+        flags: HirFlags::default(),
+        node: None,
+        ..b.expr(value).clone()
+    };
+    let read = push(&mut b, read);
+    let mut store = node.clone();
+    store.kind = HirKind::Assign { place, value: read };
+    store.flags = HirFlags::default();
+    store.node = None;
+    let store = push(&mut b, store);
+    let e = &mut b.exprs[target.0 as usize];
+    e.kind = HirKind::Local(temp);
+    e.ty = ty;
+    e.node = None;
+    e.flags = HirFlags::default();
+    let HirKind::Block { stmts, .. } = &mut b.exprs[block].kind else {
+        unreachable!()
+    };
+    stmts.splice(at..at, [bind, store]);
     Some(b)
 }
 
