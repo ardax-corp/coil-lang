@@ -7360,9 +7360,15 @@ impl Compiler {
         let main_off = self.functions.get("main").copied();
         if let Some((pos, init_len)) = static_init_region {
             let jmp_pos = pos + init_len;
-            let target_label = self
-                .bytecode
-                .entry_label_at(main_off.unwrap_or(PROLOGUE_HALT_OFFSET));
+            // `main`'s own entry label, which flattening maps to its body:
+            // the first label at its offset may be a neighbour's, and a
+            // label put there is private to whichever chunk holds it.
+            let target_label = match main_off.and_then(|_| self.fn_entry_labels.get("main").copied()) {
+                Some(label) => label,
+                None => self
+                    .bytecode
+                    .entry_label_at(main_off.unwrap_or(PROLOGUE_HALT_OFFSET)),
+            };
             self.bytecode.insert_jump_at(jmp_pos, target_label);
             self.bytecode.bump_absolute_entry_targets(jmp_pos, 1);
             self.bytecode.bump_func_spans(jmp_pos, 1);
