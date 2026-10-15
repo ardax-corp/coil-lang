@@ -160,7 +160,7 @@ impl ConvoyPlan {
         // TailCall dests never live in the caller frame.
         for block in &func.blocks {
             for inst in &block.insts {
-                if !is_tail_call_inst(block, inst) {
+                if !is_tail_call_inst(func, block, inst) {
                     continue;
                 }
                 let MirInst::Call { dest, dest_hi, .. } = inst else {
@@ -197,7 +197,7 @@ impl ConvoyPlan {
         if has_match_payload {
             for block in &func.blocks {
                 for inst in &block.insts {
-                    if is_tail_call_inst(block, inst) {
+                    if is_tail_call_inst(func, block, inst) {
                         continue;
                     }
                     if let MirInst::Call { dest, dest_hi, .. } = inst {
@@ -342,10 +342,16 @@ fn is_self_call_value(
         .is_some_and(|inst| is_self_call_inst(inst, entry))
 }
 
-pub(super) fn is_tail_call_inst(block: &super::func::MirBlock, inst: &MirInst) -> bool {
-    let MirInst::Call { dest, dest_hi, .. } = inst else {
+/// `inst` is a planned tail call ([`MirFunc::tail_targets`]) whose result
+/// `block` returns: a `TailCall`. Any other call keeps the caller's frame,
+/// which a failed `requires` in the callee blames and a backtrace names.
+pub(super) fn is_tail_call_inst(func: &MirFunc, block: &super::func::MirBlock, inst: &MirInst) -> bool {
+    let MirInst::Call { dest, dest_hi, target, .. } = inst else {
         return false;
     };
+    if !func.tail_targets.contains(target) {
+        return false;
+    }
     match block.term {
         Some(Terminator::Return { lo: Some(v), hi }) if v == *dest && hi == *dest_hi => {
             matches!(
@@ -379,7 +385,7 @@ fn feeds_only_tail_call(
                 return false;
             }
             if inst.operands().contains(&v) {
-                if block.id != home || !is_tail_call_inst(block, inst) {
+                if block.id != home || !is_tail_call_inst(func, block, inst) {
                     return false;
                 }
                 saw = true;

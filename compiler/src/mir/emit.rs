@@ -109,7 +109,7 @@ pub fn emit_dense(
             }) {
                 continue;
             }
-            if is_tail_call_inst(block, inst) {
+            if is_tail_call_inst(func, block, inst) {
                 continue;
             }
             starts.push((out.len(), inst.dest()));
@@ -1538,13 +1538,16 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
         }
         Terminator::Return { lo, hi } => {
             if let Some(v) = lo {
-                if let Some(MirInst::Call {
-                    dest,
-                    dest_hi,
-                    target,
-                    args,
-                }) = block.insts.last()
-                    && *dest == *v && *dest_hi == *hi {
+                if let Some(
+                    last @ MirInst::Call {
+                        dest,
+                        dest_hi,
+                        target,
+                        args,
+                    },
+                ) = block.insts.last()
+                    && *dest == *v && *dest_hi == *hi
+                    && is_tail_call_inst(func, block, last) {
                         emit_call(EmitCallArgs {
                             out,
                             stacked,
@@ -2260,7 +2263,7 @@ fn gather_window(func: &MirFunc, self_entry: Option<Label>) -> u8 {
     let mut n = 0u8;
     for b in &func.blocks {
         for inst in &b.insts {
-            if is_tail_call_inst(b, inst) {
+            if is_tail_call_inst(func, b, inst) {
                 continue;
             }
             let w = match inst {

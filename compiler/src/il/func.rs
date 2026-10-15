@@ -31,6 +31,9 @@ pub struct IlFunc {
     pub hir_mir: Option<Box<crate::mir::MirFunc>>,
     /// Why the body did not lower straight from HIR to MIR (`--opt-stats`).
     pub hir_mir_why: Option<String>,
+    /// A lambda's body, which may run its HIR stack lowering when direct
+    /// MIR refuses it, as it did inline in its enclosing body.
+    pub stack_ok: bool,
 }
 
 impl IlFunc {
@@ -61,6 +64,7 @@ impl IlFunc {
             pinned: false,
             hir_mir: None,
             hir_mir_why: None,
+            stack_ok: false,
         }
     }
 }
