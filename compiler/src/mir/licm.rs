@@ -244,7 +244,8 @@ fn hoist_loop(func: &mut MirFunc, lp: &LoopInfo) -> usize {
 /// header, after only phis and ops that cannot trap.
 pub(crate) fn int_may_trap(func: &MirFunc, inst: &MirInst) -> bool {
     match inst {
-        MirInst::Bin { op: MirBinOp::Add | MirBinOp::Sub | MirBinOp::Mul, ty, .. } => ty.is_int(),
+        // A shift traps on a count outside 0..=63 (#1076).
+        MirInst::Bin { op: MirBinOp::Add | MirBinOp::Sub | MirBinOp::Mul | MirBinOp::Shl | MirBinOp::Shr, ty, .. } => ty.is_int(),
         MirInst::Unary { op: super::inst::MirUnaryOp::Neg, dest, .. } => func.ty(*dest).is_int(),
         _ => false,
     }

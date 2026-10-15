@@ -233,14 +233,14 @@ fn def_blocks(func: &MirFunc) -> Vec<Option<BlockId>> {
 }
 
 /// Whether an expression may be computed at a fork ahead of the successors
-/// that compute it. Int arithmetic that can trap (`/ %`, and `+ - *` and
-/// negation on overflow) stays put: moving it ahead of a successor's
+/// that compute it. Int arithmetic that can trap (`/ %`, `+ - *` and
+/// negation on overflow, shifts on a bad count) stays put: moving it ahead of a successor's
 /// output or call would change what runs before the panic.
 fn pre_safe(func: &MirFunc, key: &ExprKey) -> bool {
     match *key {
         ExprKey::Const(_) => false,
         ExprKey::Bin {
-            op: MirBinOp::Div | MirBinOp::Rem | MirBinOp::Add | MirBinOp::Sub | MirBinOp::Mul | MirBinOp::Pow,
+            op: MirBinOp::Div | MirBinOp::Rem | MirBinOp::Add | MirBinOp::Sub | MirBinOp::Mul | MirBinOp::Pow | MirBinOp::Shl | MirBinOp::Shr,
             ty,
             ..
         } if !ty.is_float() => false,

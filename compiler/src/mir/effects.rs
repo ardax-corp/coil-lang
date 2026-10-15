@@ -42,7 +42,11 @@ impl MirInst {
         use super::ty::MirTy;
         match self {
             Self::Bin { op, ty, .. } => {
-                *ty == MirTy::I64 && matches!(op, MirBinOp::Add | MirBinOp::Sub | MirBinOp::Mul | MirBinOp::Div | MirBinOp::Rem | MirBinOp::Pow)
+                *ty == MirTy::I64
+                    && matches!(
+                        op,
+                        MirBinOp::Add | MirBinOp::Sub | MirBinOp::Mul | MirBinOp::Div | MirBinOp::Rem | MirBinOp::Pow | MirBinOp::Shl | MirBinOp::Shr
+                    )
             }
             Self::Unary { op: MirUnaryOp::Neg, src, .. } => func.ty(*src) == MirTy::I64,
             Self::Index { unchecked, .. } => !unchecked,
