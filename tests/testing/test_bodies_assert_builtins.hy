@@ -1,7 +1,5 @@
-// Test bodies, `assert!` and host builtins lower from HIR. A test returns
-// its `Result<(), string>` boxed, `assert!` raises from its body, and a
-// host call pushes its native id under the arguments. The language
-// harness also runs under `--hir`, so each case pins both codegens.
+// Test bodies use `assert!` (raising its message), host builtins such as
+// `sqrt` / `floor` / `ord`, early `return`, and `Result` values as arguments.
 use tests::assert;
 
 fn positive(int x) -> Result<(), string> {
