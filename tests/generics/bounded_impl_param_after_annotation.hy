@@ -1,6 +1,7 @@
 // A bounded inherent impl's parameter is the same `K` in every method: a
 // sibling that annotates a local `Vec<K>` does not split it, so `==` on `K`
-// in a later method still goes through the `Eq` dictionary (#1277).
+// in a later method still goes through the `Eq` dictionary, and `.hash()`
+// through the `Hash` one (#1277).
 use tests::assert;
 
 class Bag<K, V> {
@@ -16,7 +17,7 @@ impl Bag<K, V> {
     }
 }
 
-impl Bag<K: Eq, V> {
+impl Bag<K: Eq + Hash, V> {
     fn scratch() -> int {
         let ks: Vec<K> = Vec::new();
         return ks.len();
@@ -24,6 +25,10 @@ impl Bag<K: Eq, V> {
 
     pub fn first_is(K k) -> bool {
         return self.keys[0] == k;
+    }
+
+    pub fn first_hashes_as(K k) -> bool {
+        return self.keys[0].hash() == k.hash();
     }
 
     pub fn index_of(K k) -> int {
@@ -46,6 +51,7 @@ test("== on the impl parameter after a sibling annotates Vec<K>") {
     assert!(!b.first_is(2));
     assert!(b.index_of(2) == 1);
     assert!(b.index_of(3) == -1);
+    assert!(b.first_hashes_as(1));
 }
 
 test("the same with string keys") {
@@ -54,4 +60,5 @@ test("the same with string keys") {
     b.vals.push(1);
     assert!(b.first_is("a"));
     assert!(b.index_of("b") == -1);
+    assert!(b.first_hashes_as("a"));
 }
