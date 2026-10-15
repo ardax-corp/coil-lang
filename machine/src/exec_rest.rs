@@ -692,6 +692,11 @@ impl<const S: usize> Machine<S> {
                                     }
                                 }
                                 Err(crate::FfiError::IntTrap(t)) => int_trap!(t),
+                                Err(crate::FfiError::Panic(msg)) => {
+                                    *ip_out = ip;
+                                    *sp_out = sp;
+                                    return dispatch::RestFlow::Done(self.runtime_panic(&msg, ip.saturating_sub(1)));
+                                }
                                 Err(e) => {
                                     let name = native.name();
                                     *ip_out = ip;

@@ -66,16 +66,16 @@ pub fn host_vec_pop(heap: &mut Heap, args: &[Value]) -> Value {
 }
 
 /// `v.insert(i, x) -> ()` — panics when `i` is out of range (not clamped).
-pub fn host_vec_insert(heap: &mut Heap, args: &[Value]) -> Result<Value, &'static str> {
+pub fn host_vec_insert(heap: &mut Heap, args: &[Value]) -> Result<Value, String> {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
     let index = args.get(1).map(|v| v.as_int()).unwrap_or(0);
     let value = args.get(2).copied().unwrap_or(Value::from(0i64));
     let Some(Object::Array(mut gc)) = heap.find_object_by_addr(handle.raw() as u64) else {
-        return Err("Vec::insert on non-array");
+        return Err("Vec::insert on non-array".to_string());
     };
     let len = gc.as_ref().len();
     if index < 0 || (index as usize) > len {
-        return Err("index out of bounds");
+        return Err(format!("Vec::insert: index {index} out of bounds (len {len})"));
     }
     gc.as_mut().insert(index as usize, value);
     heap.account_array(gc.as_mut());

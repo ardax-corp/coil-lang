@@ -58,6 +58,9 @@ pub enum FfiError {
         detail: String,
     },
     Unsupported(String),
+    /// A builtin host op's own runtime error (`Vec::insert` out of range):
+    /// raised as a plain Coil panic with this message.
+    Panic(String),
     /// Bad library handle or out-of-range function id at invoke/declare time.
     InvalidHandle(String),
     /// Shared library blocked by the `dload` integrity gate (hash / trusted).
@@ -95,6 +98,7 @@ impl std::fmt::Display for FfiError {
                 )
             }
             Self::Unsupported(msg) => write!(f, "unsupported FFI signature: {msg}"),
+            Self::Panic(msg) => write!(f, "{msg}"),
             Self::InvalidHandle(msg) => write!(f, "{msg}"),
             Self::LibraryDenied { name, stem, reason } => {
                 write!(f, "FFI library `{name}` (stem `{stem}`) denied: {reason}")

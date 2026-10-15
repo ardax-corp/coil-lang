@@ -434,7 +434,7 @@ fn push_wiring(
             out.push(Arc::new(HostClosureFn::new(sig, move |heap, args| {
                 crate::vec_ops::host_vec_insert(heap, args)
                     .map(Some)
-                    .map_err(|msg| FfiError::Unsupported(msg.to_string()))
+                    .map_err(FfiError::Panic)
             })));
             continue;
         }
