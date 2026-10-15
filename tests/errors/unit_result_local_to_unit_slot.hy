@@ -9,6 +9,17 @@ fn take(Result<unit, string> r) -> bool {
     };
 }
 
+fn message(Result<unit, string> r) -> string {
+    return match r {
+        Result::Ok(_) => "ok",
+        Result::Err(m) => m,
+    };
+}
+
+fn fail() -> Result<(), string> {
+    return Result::Err("boom");
+}
+
 fn give() -> Result<unit, string> {
     let r = Result::Ok(());
     return r;
@@ -32,4 +43,15 @@ test("let-bound Ok(()) passed to a Result<unit, string> parameter") {
 
 test("let-bound Ok(()) returned as Result<unit, string>") {
     assert!(take(give()));
+}
+
+test("a Result<(), string> Err keeps its payload in a Result<unit, string> slot") {
+    let r = fail();
+    assert!(message(r) == "boom");
+    let v: Vec<Result<unit, string>> = [];
+    v.push(fail());
+    let ok = Result::Ok(());
+    v.push(ok);
+    assert!(message(v[0]) == "boom");
+    assert!(message(v[1]) == "ok");
 }
