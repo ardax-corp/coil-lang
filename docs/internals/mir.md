@@ -411,8 +411,8 @@ Host Option / `Result<(),E>` / heap-heap Result still pack once at
 
 ## Acceptance
 
-`mir::mandelbrot_inner_loop` is typed SSA. `tests/positive/mir_dense_float.hy`
+`mir::mandelbrot_inner_loop` is typed SSA. `tests/codegen/dense_float.hy`
 and `examples/perf/mir_dense_float.hy` (`escape`) execute via `DenseBin`.
 Flagship `mandelbrot.hy` (three nested loops) is eligible for dense.
 `Result<int,int>` / `Option<int>` leafs lower through MIR→LIR with the
-shipped two-slot ABI (`tests/positive/mir_result_int.hy`).
+shipped two-slot ABI (`tests/errors/result_int_two_slot.hy`).

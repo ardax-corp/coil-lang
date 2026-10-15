@@ -2103,7 +2103,7 @@ fn attr_test_fn_discovered_by_harness() {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
-            .join("tests/positive/attr_test.hy"),
+            .join("tests/testing/test_blocks_basic.hy"),
     )
     .expect("read attr_test.hy");
     let (bytecode, constants) = pipeline.compile_src(&src).expect("compile attr_test.hy");
@@ -2133,7 +2133,7 @@ fn tail_sibling_hy_harness_cases_pass() {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
-            .join("tests/positive/tail_sibling.hy"),
+            .join("tests/functions/sibling_tail_calls.hy"),
     )
     .expect("read tail_sibling.hy");
     let (bytecode, constants) = pipeline.compile_src(&src).expect("compile tail_sibling.hy");

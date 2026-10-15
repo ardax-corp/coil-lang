@@ -145,7 +145,7 @@ spliced from the user. Bare names of the provider module's own items
 (`Tag`, `tag_prefix()`) are written as `module::Tag`, so an expansion never
 depends on the user's imports. That includes a provider's trait in an `impl`
 head (`impl derive_macros::Summary for Point`,
-`tests/positive/derive_macro_package_trait.hy`); only macro output may write a
+`tests/macros/derive_macro_package_trait.hy`); only macro output may write a
 qualified `impl` head, hand-written source gets an error suggesting `use`
 (`attrs::expand_source_in`). No hidden `use` lines are added to user code.
 The provider module itself gets `use macro::{Code, join}` added when its quotes

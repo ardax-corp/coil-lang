@@ -9,7 +9,7 @@ the same flags with the same output.
 ```bash
 cargo build              # coil + coil-test (+ other helpers)
 coil test                # ./tests
-coil test tests/positive --fail-fast -O0
+coil test tests/patterns --fail-fast -O0
 coil test --root examples/src --root .deps/coil-stdlib/src
 coil-test --help         # same flags as `coil test --help`
 ```

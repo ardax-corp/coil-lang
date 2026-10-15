@@ -1,5 +1,5 @@
 //! What users see when a macro goes wrong. Fixtures live in
-//! `tests/compile_fail/macro_*.hy` (so `coil test` also checks they fail);
+//! `tests/macros/compile_fail/macro_*.hy` (so `coil test` also checks they fail);
 //! providers in `examples/src/derive_macros*.hy`.
 
 use std::io::Write;
@@ -26,13 +26,13 @@ fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
 }
 
-/// Compile `tests/compile_fail/<name>.hy`; return rendered diagnostics.
+/// Compile `tests/macros/compile_fail/<name>.hy`; return rendered diagnostics.
 fn compile_fail(name: &str) -> String {
     comptime::install();
     let buf = Buf::default();
     let mut pipeline = Pipeline::with_reporter(ReportConfig::default(), Box::new(buf.clone()));
     pipeline.bind_project_root(repo(), vec![PathBuf::from("examples/src")]);
-    let file = repo().join("tests/compile_fail").join(format!("{name}.hy"));
+    let file = repo().join("tests/macros/compile_fail").join(format!("{name}.hy"));
     let result = pipeline.compile_src_from_file(file.to_str().unwrap());
     let _ = pipeline.finish_reporting();
     let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
