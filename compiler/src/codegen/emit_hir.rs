@@ -909,10 +909,6 @@ impl Compiler {
         let plan = &emit.plan;
         let why = if plan.par_inline {
             Err("parallel loop".to_string())
-        } else if self.debugger_attached && (!plan.sroa.is_empty() || !plan.stacks.is_empty()) {
-            // The debugger reads split class / array locals from their
-            // frame slots; direct MIR keeps them in registers or folds them.
-            Err("split local under a debugger".to_string())
         } else {
             self.hir_mir_input(hir, emit, &tables, file, entry_words)
                 .and_then(|inp| crate::mir::lower_from_hir(hir, &inp))
@@ -1544,6 +1540,7 @@ impl Compiler {
             file,
             entry_words,
             opaque_vars,
+            debugger: self.debugger_attached,
             ret_boxed_niche,
         })
     }
