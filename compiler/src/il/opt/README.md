@@ -34,8 +34,8 @@ are identical. Skip only on a hit-bench wash or regression. See
 | `slot_promote`, `dead_store_at` | lowering reads one-word locals in place; `hir::fold` drops stores to locals nothing reads | — |
 | `stack_dce` | `CodeBuf::push_pop` drops a pure value pushed just before; `hir::fold` drops `x = x` | — |
 | `dead_block` | lowering emits no jump or closing return after an exit (`CodeBuf::ends_in_exit`); the MIR lift skips blocks nothing reaches | — |
-| `branch_optimization`, `block_reordering` | early exits laid out after the body (`CodeBuf::move_exits_to_end`) | `branch_optimization` |
-| `jump_thread` | an `if` ending a loop body jumps straight to the back edge (`HirEmit::next_jump`) | — |
+| `branch_optimization`, `block_reordering` | early exits laid out after the body (direct MIR's block layout, `HirPlan::cold_ok`) | `branch_optimization` |
+| `jump_thread` | an `if` ending a loop body jumps straight to the back edge (direct MIR's control flow) | — |
 
 Removed with no replacement, because measurement showed no effect:
 `copy_prop`, `dest_prop`, `mem_fwd` + `dead_store`, `strength_reduce`,

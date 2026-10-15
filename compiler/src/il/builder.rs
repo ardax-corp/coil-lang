@@ -88,34 +88,6 @@ impl IlBuilder {
         self.code_index.borrow()
     }
 
-    /// Record a jump to `label` written in place ([`Self::ops_slice_mut`]).
-    pub fn note_targeted(&mut self, label: Label) {
-        self.targeted.insert(label.0);
-    }
-
-    /// Code offset of the raw op `raw` (the emitting ops before it).
-    pub fn code_pos_of_raw(&self, raw: usize) -> usize {
-        self.indexed().positions.partition_point(|&p| p < raw)
-    }
-
-    /// Move `ops[start..end]` to the end of the stream, behind a fresh bound
-    /// `label` when there is one; the code index before `start` stays valid.
-    pub fn move_to_end(&mut self, start: usize, end: usize, label: Option<Label>) {
-        let mut end = end;
-        if let Some(label) = label {
-            self.bound.insert(label.0);
-            self.ops.insert(start, IlOp::Label(label));
-            end += 1;
-        }
-        self.ops[start..].rotate_left(end - start);
-        let index = self.code_index.get_mut();
-        if index.scanned > start {
-            let keep = index.positions.partition_point(|&p| p < start);
-            index.positions.truncate(keep);
-            index.scanned = start;
-        }
-    }
-
     /// Raw index of the emitting op at code offset `pc`, if there is one.
     pub fn raw_index_of_code(&self, pc: usize) -> Option<usize> {
         self.indexed().positions.get(pc).copied()
@@ -197,14 +169,6 @@ impl IlBuilder {
     pub fn bind_label(&mut self, label: Label) {
         self.bound.insert(label.0);
         self.ops.push(IlOp::Label(label));
-    }
-
-    /// Drop the label marker last pushed.
-    pub fn pop_label(&mut self) {
-        let Some(IlOp::Label(label) | IlOp::JoinLabel(label)) = self.ops.pop() else {
-            panic!("pop_label: last op is not a label");
-        };
-        self.bound.remove(&label.0);
     }
 
     /// Insert a bound label marker at raw op index `raw_idx` (does not append).
