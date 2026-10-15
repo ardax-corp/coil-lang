@@ -6083,15 +6083,9 @@ impl Compiler {
         let body_op_start = self.bytecode.ops().len();
         let lowered = self.try_lower_hir_function(&method.0, body);
         if !lowered {
-            // A clone its method's HIR does not lower at its types calls
-            // the shared entry instead.
-            match self.inst_clone_fallback.take() {
-                Some((src, req)) => {
-                    self.hir_refusal = None;
-                    self.emit_instance_clone_call_shared(&src, &req);
-                }
-                None => self.report_unlowered(&method.0, &qualified),
-            }
+            // Every body runs IL from its direct MIR, so one HIR does not
+            // lower (an instance clone included) is a compile error.
+            self.report_unlowered(&method.0, &qualified);
         }
 
         let ends_on_label = lowered && self.ends_on_jumped_label(body_op_start);
@@ -9266,7 +9260,15 @@ impl Compiler {
             None
         };
 
-        self.bytecode.set_opt_options(self.opt_options.clone());
+        // A body without direct MIR is an internal error once codegen is
+        // clean; a module with errors still lowers (its bodies may be
+        // `report_unlowered` stubs) but never runs.
+        let mut opts = self.opt_options.clone();
+        opts.require_mir = !self
+            .messages
+            .iter()
+            .any(|m| *m.kind() == reporting::MessageKind::ERROR);
+        self.bytecode.set_opt_options(opts);
         let entry_sps: HashMap<String, u32> = self
             .bytecode
             .funcs()

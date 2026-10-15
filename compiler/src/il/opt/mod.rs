@@ -36,6 +36,10 @@ pub struct OptimizeOptions {
     /// Record body tiers and HIR counters into [`stats::OptStats`] (COI-131).
     /// Default **off**.
     pub collect_stats: bool,
+    /// Every function must lower through direct MIR: a body left on its
+    /// raw stack IL (the fuse tier) is an internal error. The compiler sets
+    /// this when codegen reported no errors; IL-only modules leave it off.
+    pub require_mir: bool,
 }
 
 // Default is `OptLevel::Standard.options()`.
