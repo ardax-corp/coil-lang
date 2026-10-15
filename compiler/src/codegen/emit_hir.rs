@@ -4343,6 +4343,17 @@ impl Compiler {
                 params.push(layout);
                 param_tys[1..].to_vec()
             }
+            // A method returning a function (#1007): as below, the peel
+            // took the returned function's params too.
+            Some(layout)
+                if let Some(n) = self.checker.fn_param_names(&lookup).map(<[String]>::len)
+                    && (n == explicit || n == argc)
+                    && param_tys.len() > n =>
+            {
+                params.push(layout);
+                returned = param_tys.split_off(n);
+                if n == argc { param_tys[1..].to_vec() } else { param_tys }
+            }
             None if param_tys.len() == argc => param_tys,
             // `fn mk(..) -> fn(..) -> T`: the scheme's curried peel also took
             // the returned function's params; they belong to the result.
