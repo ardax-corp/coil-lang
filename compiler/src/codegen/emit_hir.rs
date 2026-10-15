@@ -4357,6 +4357,11 @@ impl Compiler {
         for ty in &param_tys {
             match lower::classify(&self.checker, ty) {
                 Some(class) if lower::is_word(class) => {}
+                // A `()` parameter takes the empty tuple object (#1086).
+                Some(ValueClass::Unit) => {
+                    params.push(ValueLayout::Boxed);
+                    continue;
+                }
                 _ if open_ty(ty) => {}
                 _ => return Err("callee-signature"),
             }

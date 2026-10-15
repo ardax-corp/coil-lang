@@ -1,6 +1,6 @@
 // `()` as a method receiver: a trait method on the unit type takes a
 // `()` parameter, passed as the empty tuple object and never read. (A
-// plain function taking `()` does not compile yet, #1086.)
+// plain function taking `()`: tests/functions/unit_parameter.hy.)
 use tests::assert;
 
 trait Tag<T> {
