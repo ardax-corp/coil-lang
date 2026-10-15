@@ -650,9 +650,6 @@ pub struct Compiler {
 
     /// Why the last [`Self::try_lower_hir_function`] did not lower its body.
     hir_refusal: Option<&'static str>,
-    /// Lower HIR straight to MIR where the body allows (off with
-    /// `COIL_HIR_MIR=0`, which leaves every body to the IL lift).
-    hir_mir_on: bool,
     /// MIR of the last body HIR lowered, waiting for its function record.
     hir_mir: Option<crate::mir::MirFunc>,
     /// Why the body just emitted did not lower straight to MIR.
@@ -854,10 +851,6 @@ impl Default for Compiler {
             hir_inline_pair: crate::hir::inline::pair_from_env(),
             hir_inline_heap: crate::hir::inline::heap_from_env(),
             inlined_bodies: Vec::new(),
-            hir_mir_on: !matches!(
-                std::env::var("COIL_HIR_MIR").as_deref(),
-                Ok("0" | "false" | "off" | "no")
-            ),
             hir_mir: None,
             hir_mir_why: None,
             hir_entry_sp: None,
