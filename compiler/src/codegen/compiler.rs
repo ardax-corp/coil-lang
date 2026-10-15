@@ -990,54 +990,6 @@ impl Compiler {
         self.debug_stmt_start = saved_stmt_start;
     }
 
-    /// Split layouts codegen chose for `name` (Q1 array slots, Q2 class
-    /// fields, two-slot enum).
-    fn debug_layout_of(&self, name: &str) -> Option<crate::debug_vars::DebugVarLoc> {
-        use crate::debug_vars::{DebugTy, DebugVarLoc};
-        if let Some((base, n)) = self.stack_array_info(name) {
-            let elem = self
-                .checker
-                .codegen_var_type(name)
-                .and_then(|t| match crate::typechecking::subst::apply_ty_prune(self.checker.subst(), t) {
-                    crate::typechecking::Ty::Array { element, .. } => Some(DebugTy::from_ty(&element)),
-                    _ => None,
-                })
-                .unwrap_or(DebugTy::Other("?".into()));
-            return Some(DebugVarLoc::Elems {
-                slots: (base..base + n as u32).collect(),
-                elem,
-            });
-        }
-        if let (Some((base, n)), Some(class)) =
-            (self.unboxed_class_info(name), self.unboxed_class_type_name(name))
-        {
-            let fields = self
-                .checker
-                .class_fields(class)
-                .unwrap_or_default()
-                .into_iter()
-                .take(n)
-                .enumerate()
-                .map(|(i, (f, t))| (f, base + i as u32, DebugTy::from_ty(&t)))
-                .collect();
-            return Some(DebugVarLoc::Fields {
-                class: class.to_string(),
-                fields,
-            });
-        }
-        if let (Some((payload, tag)), Some(kind)) =
-            (self.unboxed_enum_info(name), self.unboxed_enum_kind(name))
-        {
-            return Some(DebugVarLoc::Pair {
-                enum_name: kind.to_string(),
-                payload,
-                tag,
-                payload_ty: DebugTy::Other("?".into()),
-            });
-        }
-        None
-    }
-
     /// Look up the slot for a name used in an arm body. First
     /// checks the nested `match_bindings` map (inner names shadow
     /// outer ones). Falls back to block overlays, then `variables`.
@@ -1114,10 +1066,6 @@ impl Compiler {
             self.record_debug_local(name, slot);
             slot
         }
-    }
-
-    fn stack_array_info(&self, name: &str) -> Option<(u32, usize)> {
-        self.context.stack_array_locals.get(name).copied()
     }
 
     /// Push elements of a multi-slot local then `MakeArray` (escape to heap).
@@ -1509,20 +1457,6 @@ impl Compiler {
             .unboxed_enum_locals
             .get(name)
             .map(|(_, _, kind)| kind.as_str())
-    }
-
-    fn unboxed_class_info(&self, name: &str) -> Option<(u32, usize)> {
-        self.context
-            .unboxed_class_locals
-            .get(name)
-            .map(|(base, n, _)| (*base, *n))
-    }
-
-    fn unboxed_class_type_name(&self, name: &str) -> Option<&str> {
-        self.context
-            .unboxed_class_locals
-            .get(name)
-            .map(|(_, _, cname)| cname.as_str())
     }
 
     /// Build a heap instance from field slots (TOS = instance).
