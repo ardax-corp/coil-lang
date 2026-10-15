@@ -1,5 +1,5 @@
-// Calls to functions and methods declared later in the file lower from HIR
-// (arity from the signature); ones returning an enum stay on the AST.
+// Functions and methods may be called before they are declared in the file,
+// including ones that return an enum.
 use tests::assert;
 
 fn is_even(int n) -> bool {

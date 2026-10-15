@@ -1,5 +1,5 @@
-// Nested partials (`f(1)` → `p(2)` → `q(3)`) must merge filled masks without
-// clobbering earlier holes — a common ObjFn regression.
+// A partial of a partial (`f(1)` then `p(2)` then `q(3)`) keeps every earlier
+// filled argument in its own place.
 // Output: 6
 use io::{stdout, write};
 use string::{format, to_bytes};

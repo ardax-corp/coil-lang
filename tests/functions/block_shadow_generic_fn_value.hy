@@ -1,4 +1,5 @@
-// Inner-block PolyFn let must not poison an outer same-named ObjFn local.
+// A generic function value bound with `let` in an inner block shadows only
+// inside that block; the outer local of the same name is unchanged after it.
 // Output: 423
 use io::{stdout, write};
 use string::{format, to_bytes};

@@ -1,5 +1,5 @@
-// A `return match` whose every arm is a self call becomes tail calls, so
-// deep bouncing recursion runs in constant frames under both codegens.
+// A `return match` whose every arm is a self call is a tail call, so deep
+// bouncing recursion runs without growing the stack per call.
 use tests::assert;
 
 fn bounce(Option<int> o, int n) -> int {

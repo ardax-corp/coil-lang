@@ -1,5 +1,5 @@
-// Named under-apply must build a partial whose holes fill in declaration
-// order at CallIndirect time (not print the named value as the only arg).
+// Under-applying a function with named arguments builds a partial whose
+// remaining holes fill in declaration order when it is called.
 // Output: 3
 use io::{stdout, write};
 use string::{format, to_bytes};

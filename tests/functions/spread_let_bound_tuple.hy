@@ -1,5 +1,5 @@
-// Let-bound packs exercise the typed-lookup codegen path (not the literal
-// Tuple/Array shortcuts). Wrong Index expansion would silently mis-bind.
+// Spreading a `let`-bound tuple or array fills the parameters in element
+// order, the same as spreading a literal.
 // Output: 6
 use io::{stdout, write};
 use string::{format, to_bytes};

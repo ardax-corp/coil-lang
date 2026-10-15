@@ -1,6 +1,5 @@
-// Phase P0: `let x = match { … }` must bind the arm value via
-// StorePop. Pre-fix Match emitted RETURN at end_label, so the
-// StorePop was unreachable and prints never ran / saw 0.
+// `let x = match { … }` binds the value of the arm that ran, and the
+// statements after the `let` still run.
 // Output: 742
 use io::{stdout, write};
 use string::{format, to_bytes};

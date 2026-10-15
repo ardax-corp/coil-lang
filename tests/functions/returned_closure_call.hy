@@ -1,6 +1,5 @@
-// A closure returned by a named, non-generic function lowers from HIR when
-// a local bound to it is called: the call returns one function word, then
-// `CallIndirect` through the local.
+// A closure returned by a named function can be bound to a local and called
+// through it, with its captures intact.
 use tests::assert;
 
 fn adder(int k) -> fn(int x) -> int {

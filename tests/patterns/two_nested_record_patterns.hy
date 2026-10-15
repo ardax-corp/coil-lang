@@ -1,7 +1,5 @@
-// Two nested multifield records in one outer arm — each must unpack into
-// distinct scratch regions so the second nested payload cannot overwrite
-// the first nested bindings.
-// both nested multifield bindings must survive
+// Two nested multi-field record patterns in one arm each bind their own
+// fields.
 // Output: 33
 use io::{stdout, write};
 use string::{format, to_bytes};

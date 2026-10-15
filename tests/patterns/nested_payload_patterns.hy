@@ -1,8 +1,5 @@
-// Nested payload patterns lower from HIR: the arms of each outer variant
-// regroup into one arm over an inner `match` on the payload. A variant
-// that is not exhaustive on its own (a later catch-all covers it) keeps
-// the AST codegen. The language harness also runs under `--hir`, so each
-// case pins both codegens.
+// Nested payload patterns: arms of one outer variant dispatch on the inner
+// payload, and a variant left partly uncovered falls to a later catch-all.
 use tests::assert;
 
 enum Shape {

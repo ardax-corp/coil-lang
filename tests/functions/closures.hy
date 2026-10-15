@@ -1,6 +1,5 @@
-// Lambdas, named functions read as values and calls through function
-// values lower straight to MIR: captures, then `MakeFn` of the code; the
-// arguments, the function word, then `CallIndirect`, as HIR emission.
+// Lambdas with captures, named functions read as values, and calls through
+// function values with word, string, class and enum arguments and results.
 use tests::assert;
 use gc::collect;
 

@@ -1,6 +1,5 @@
-// A named function whose result is a one-word enum is one function word as
-// a value, so a body that only passes it on lowers from HIR (a call through
-// it still takes the AST path).
+// A named function returning a one-word enum can be passed on as a value
+// and called through it, and its result keeps its variant and payload.
 use tests::assert;
 use thread::{join, spawn};
 

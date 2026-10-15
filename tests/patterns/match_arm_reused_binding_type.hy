@@ -1,7 +1,5 @@
-// Match arms that reuse a binding name with different payload types
-// must resolve field access against *that arm's* type. A flat
-// `codegen_var_types` side-table last-wins would make `p.y` emit
-// `LoadField(0)` (against Rect) and return `x` instead of `y`.
+// Arms that reuse a binding name for payloads of different types read each
+// field against that arm's own payload type.
 // Output: 24
 use io::{stdout, write};
 use string::{format, to_bytes};

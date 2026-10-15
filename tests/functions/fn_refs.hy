@@ -1,5 +1,5 @@
-// A named function read as a value is `MakeFn` over its entry, as the
-// AST does; the callee is then called through `CallIndirect`.
+// A named function read as a value can be stored, passed and called like
+// any other function value.
 use tests::assert;
 
 fn double(int x) -> int {

@@ -1,5 +1,5 @@
-// Function-value parameters and curried results: the args, the function
-// word, then `CallIndirect`, as the AST does.
+// Function-value parameters called directly or forwarded, and curried
+// functions that return function values.
 use tests::assert;
 
 fn apply(int -> int f, int x) -> int {

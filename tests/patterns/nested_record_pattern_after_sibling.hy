@@ -1,6 +1,5 @@
-// Nested multifield record that is not the first outer field must still
-// relocate into scratch and preserve the preceding sibling binding.
-// preceding sibling `name` and nested `x`/`y` must all bind
+// A nested multi-field record pattern after a sibling field binds both the
+// sibling and the nested fields.
 // Output: 33
 use io::{stdout, write};
 use string::{format, to_bytes};

@@ -1,6 +1,5 @@
-// Nested typed lambdas must keep Fragment/Argument NodeIds lockstep with
-// codegen (`assign_fn_arg_node_ids`); a desync surfaces as wrong results or
-// compile failure rather than Identifier span prefer.
+// Lambdas with typed parameters nested inside other lambdas see their own
+// parameters and compute the right result.
 // Output: 42
 use io::{stdout, write};
 use string::{format, to_bytes};

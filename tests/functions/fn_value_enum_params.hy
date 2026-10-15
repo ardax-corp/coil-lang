@@ -1,6 +1,5 @@
-// A function value whose parameters are enums: each enum argument goes
-// through `CallIndirect` as its one word (a niche enum as its niche word,
-// any other boxed), as the AST's escaped-function ABI.
+// Function values whose parameters are enums (Option, Result, user enums)
+// receive each enum argument intact when called through the value.
 use tests::assert;
 use string::format;
 

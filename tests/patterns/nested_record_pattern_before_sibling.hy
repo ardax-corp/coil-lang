@@ -1,7 +1,5 @@
-// Nested multi-field record patterns must not clobber sibling outer fields.
-// Pre-fix, in-place `UnpackAt` at the outer field slot overwrote later
-// siblings when the inner arity exceeded one.
-// inner fields and outer sibling `name` must all bind correctly
+// A nested multi-field record pattern before a sibling field binds both the
+// nested fields and the sibling.
 // Output: 33
 use io::{stdout, write};
 use string::{format, to_bytes};
