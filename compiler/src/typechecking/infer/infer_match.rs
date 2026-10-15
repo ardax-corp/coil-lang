@@ -232,6 +232,23 @@ impl Checker {
                         return expected_ty.clone();
                     }
                 };
+                // A constructor from another enum can never match. Generic
+                // enums get this from the unify in `poly_or_registry_payload`;
+                // plain enums carry no type args, so compare the names.
+                if !self.is_poly_enum(&enum_str)
+                    && let Some(found) = self.scrutinee_enum_key(expected_ty)
+                    && found != enum_str
+                {
+                    self.messages.push(Message::error(
+                        ErrorCode::TypeMismatch,
+                        format!(
+                            "Type mismatch: expected {}, found {} (pattern `{}::{}`)",
+                            found, enum_str, enum_str, variant_str
+                        ),
+                        pattern_range.clone(),
+                    ));
+                    return expected_ty.clone();
+                }
                 let _arity = self
                     .enum_arities
                     .get(&enum_str)
@@ -383,5 +400,22 @@ impl Checker {
                 expected_ty.clone()
             }
         }
+    }
+
+    /// The registry key of the enum a scrutinee type names, if it names one.
+    fn scrutinee_enum_key(&self, ty: &Ty) -> Option<String> {
+        let name = match apply_ty_prune(&self.subst, ty) {
+            Ty::Con(n) | Ty::Sum { name: n, .. } => n,
+            Ty::App(head, _) => match *head {
+                Ty::Con(n) => n,
+                _ => return None,
+            },
+            Ty::Constructor { owner, .. } => match *owner {
+                Ty::Sum { name, .. } => name,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        self.enum_tags.contains_key(&name).then_some(name)
     }
 }
