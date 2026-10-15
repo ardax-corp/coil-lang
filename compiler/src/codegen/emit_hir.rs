@@ -1050,9 +1050,12 @@ impl Compiler {
         // moves; a generic class's shared method sees its class's
         // parameters as type variables too.
         let is_var = |t: &Ty| matches!(crate::typechecking::ty::strip_readonly(t), Ty::Var(_));
+        // A `Vec<T>` of them too (`len(self.keys)` in a `HashMap<K, V>`
+        // invariant reads no `K`).
+        let holds_var = |t: &Ty| is_var(t) || crate::typechecking::ty::vec_element_ty(t).is_some_and(is_var);
         let opaque_vars = hir.is_generic
-            || hir.locals.iter().any(|l| l.ty.as_ref().is_some_and(is_var))
-            || hir.exprs.iter().any(|e| e.ty.as_ref().is_some_and(is_var));
+            || hir.locals.iter().any(|l| l.ty.as_ref().is_some_and(holds_var))
+            || hir.exprs.iter().any(|e| e.ty.as_ref().is_some_and(holds_var));
         // The backing word of a scalar enum type.
         let scalar_enum = move |t: &Ty| {
             let t = apply_ty_prune(checker.subst(), t);
@@ -1513,6 +1516,7 @@ impl Compiler {
             record_pats,
             matrix_wraps: &tables.matrix_wraps,
             block_ons: &tables.block_ons,
+            field_news: &tables.field_news,
             linalgs: &tables.linalgs,
             array_copies: &tables.array_copies,
             crosses: &tables.crosses,
@@ -5833,7 +5837,7 @@ impl Compiler {
 
     /// `new C(args).f` of a class with no `drop`: the arguments, their
     /// field types, and the index of `f`.
-    fn hir_field_of_new(&self, hir: &HirBody, base: HirId, field: &str) -> Option<(Vec<HirId>, Vec<Ty>, usize)> {
+    pub(super) fn hir_field_of_new(&self, hir: &HirBody, base: HirId, field: &str) -> Option<(Vec<HirId>, Vec<Ty>, usize)> {
         let HirKind::Make {
             kind: MakeKind::Class(name),
             args,
