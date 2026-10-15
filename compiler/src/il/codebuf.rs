@@ -927,6 +927,19 @@ mod tests {
         assert!(matches!(ops[1], IlOp::StorePop { slot: 4, .. }));
     }
 
+    /// A body ending where the setup region is spliced keeps its span.
+    #[test]
+    fn bump_func_spans_leaves_a_body_ending_at_the_splice() {
+        let mut buf = CodeBuf::new();
+        buf.push_const(1);
+        buf.record_func_with_sp("a", None, 0, 1, 0);
+        buf.push_const(2);
+        buf.record_func_with_sp("b", None, 1, 2, 0);
+        buf.bump_func_spans(1, 3);
+        let spans: Vec<(usize, usize)> = buf.funcs.iter().map(|f| (f.code_start, f.code_end)).collect();
+        assert_eq!(spans, [(0, 1), (4, 5)]);
+    }
+
     /// COI-19: `ffi_init` is spliced into the prologue via `splice_buf_at`.
     #[test]
     fn splice_buf_at_inserts_ops_before_code_pos() {
