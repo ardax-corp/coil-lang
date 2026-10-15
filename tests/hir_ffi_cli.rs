@@ -31,7 +31,6 @@ fn check(bin: &str, tmp: &Path, src: &Path) {
     // Every body lowers HIR -> MIR directly: none keeps the HIR stack
     // lowering (`hir:` names the refusal otherwise).
     let stats = Command::new(bin)
-        .env("COIL_MIR_FUSE", "1")
         .args(["compile", "--opt-stats", "--allow-dload", "sum", "--ffi-search-path"])
         .arg(tmp)
         .arg(src)
@@ -47,9 +46,8 @@ fn check(bin: &str, tmp: &Path, src: &Path) {
         .collect();
     assert!(refused.is_empty(), "FFI bodies refused direct MIR: {refused:#?}");
 
-    for (mode, fuse) in [(&[][..], "0"), (&["-O", "0"][..], "0"), (&[][..], "1"), (&["-O", "0"][..], "1")] {
+    for mode in [&[][..], &["-O", "0"][..]] {
         let run = Command::new(bin)
-            .env("COIL_MIR_FUSE", fuse)
             .args(mode)
             .args(["--allow-dload", "sum", "--dload-trusted", "sum", "--ffi-search-path"])
             .arg(tmp)
@@ -58,7 +56,7 @@ fn check(bin: &str, tmp: &Path, src: &Path) {
             .expect("coil run");
         assert!(
             run.status.success(),
-            "{mode:?} (COIL_MIR_FUSE={fuse}) failed: {}",
+            "{mode:?} failed: {}",
             String::from_utf8_lossy(&run.stderr)
         );
     }

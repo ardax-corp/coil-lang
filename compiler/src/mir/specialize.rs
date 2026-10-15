@@ -10,7 +10,6 @@ use std::collections::HashMap;
 use super::abi::{DenseAbi, DenseCallMap};
 use super::deopt::DraftDeoptMap;
 use super::emit::emit_dense;
-use super::gc::refuses_alloc;
 
 /// C3 sidecar from a dense / LIR replace (named lets + deopt maps).
 #[derive(Clone, Debug, Default)]
@@ -95,50 +94,6 @@ fn refuse<T>(why: impl std::fmt::Display) -> Option<T> {
     note_refusal(&LIR_REFUSAL, why)
 }
 
-/// Every body takes its stack IL from its MIR lowered from HIR (`emit_lir`),
-/// past the LIR walls and cost gate (M5p: the default). A body left on
-/// emit_hir's stack lowering is an internal compiler error.
-/// `COIL_MIR_FUSE=0` turns this off (the HIR stack lowering, until it is
-/// deleted); `COIL_MIR_FUSE_ONLY=a,b` limits it to bodies whose names
-/// contain one of the parts (bisecting); `COIL_MIR_FUSE_LOG=1` lists the
-/// bodies taken.
-pub fn mir_fuse_takes(name: &str) -> bool {
-    let take = std::env::var("COIL_MIR_FUSE_ONLY").map_or(true, |only| only.split(',').any(|p| name.contains(p)));
-    if take && std::env::var_os("COIL_MIR_FUSE_LOG").is_some() {
-        eprintln!("mir fuse: {name}");
-    }
-    take
-}
-
-pub fn mir_fuse_on() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("COIL_MIR_FUSE").is_none_or(|v| v != "0"))
-}
-
-/// What the dense / LIR gates of one body read (N1b).
-#[derive(Clone, Copy)]
-pub enum GateRef<'a> {
-    /// Default: emit_hir's stack IL, which runs when every tier refuses.
-    /// Facts (allocation, loops, params) and comparisons read it.
-    Stack(&'a [IlOp]),
-    /// A fused body (the default): facts come from its MIR
-    /// ([`super::gates::GateFacts`]), and comparisons read the fuse IL the
-    /// LIR tier emits from that same MIR, which is what runs when dense
-    /// refuses (`None` when the LIR tier refuses too: nothing to compare).
-    /// emit_hir's stack IL is not reachable from here.
-    Mir(Option<&'a [IlOp]>),
-}
-
-impl<'a> GateRef<'a> {
-    /// The stack IL that runs if this tier refuses the body, when known.
-    fn fallback(self) -> Option<&'a [IlOp]> {
-        match self {
-            Self::Stack(ops) => Some(ops),
-            Self::Mir(fuse) => fuse,
-        }
-    }
-}
-
 /// The labels a body binds: its entry and the aliases a call may name.
 /// Read off the `Label` / `JoinLabel` ops alone, never the body's code.
 #[derive(Clone, Debug, Default)]
@@ -159,22 +114,6 @@ impl BodyLabels {
             first: ops.iter().find_map(label),
             head: ops.iter().map_while(label).collect(),
         }
-    }
-}
-
-/// The facts the gates ask of a body, from its stack IL or its MIR.
-fn gate_facts(gate: GateRef<'_>, func: &crate::mir::MirFunc) -> super::gates::GateFacts {
-    match gate {
-        GateRef::Stack(ops) => {
-            let has_alloc = ops.iter().any(refuses_alloc);
-            super::gates::GateFacts {
-                has_alloc,
-                has_loop: has_back_edge(ops),
-                alloc_in_loop: has_alloc_inside_loop(ops),
-                post_loop_alloc_return: has_alloc && has_post_loop_alloc_return(ops),
-            }
-        }
-        GateRef::Mir(_) => super::gates::GateFacts::of(func),
     }
 }
 
@@ -202,7 +141,7 @@ fn is_mir_index(i: &crate::mir::MirInst) -> bool {
 /// `calls` lists the callee).
 #[allow(clippy::too_many_arguments)]
 pub fn try_specialize_body_side(
-    gate: GateRef<'_>,
+    fallback: Option<&[IlOp]>,
     labels: &BodyLabels,
     name: &str,
     pool: &mut Vec<u64>,
@@ -219,7 +158,7 @@ pub fn try_specialize_body_side(
     }
     let mut direct_side = BodySidecar::default();
     let mut direct_pool = pool.clone();
-    let out = specialize_side(gate, labels, name, &mut direct_pool, calls, official_entry, func, &mut direct_side)?;
+    let out = specialize_side(fallback, labels, name, &mut direct_pool, calls, official_entry, func, &mut direct_side)?;
     *pool = direct_pool;
     *side = direct_side;
     crate::il::opt::note_hir_mir_kept();
@@ -228,7 +167,7 @@ pub fn try_specialize_body_side(
 
 #[allow(clippy::too_many_arguments)]
 fn specialize_side(
-    gate: GateRef<'_>,
+    fallback: Option<&[IlOp]>,
     labels: &BodyLabels,
     name: &str,
     pool: &mut Vec<u64>,
@@ -262,9 +201,8 @@ fn specialize_side(
     // B7 / C1: sibling / mutual TailCall and self multi-word CALL/RETURN
     // may lift (stack-arg protocol, reserved callee entry labels). N>2
     // still refuses at infer/lower (`MAX_MODELED_RET_WORDS`).
-    let fallback = gate.fallback();
     let select_cfg = fallback.is_some_and(has_sroa_select_cfg);
-    let facts = gate_facts(gate, from_hir);
+    let facts = super::gates::GateFacts::of(from_hir);
     let has_alloc = facts.has_alloc;
     let inloop_alloc = facts.alloc_in_loop;
     if facts.post_loop_alloc_return {
@@ -299,29 +237,18 @@ fn specialize_side(
         .flat_map(|b| b.insts.iter())
         .filter(|i| matches!(i, crate::mir::MirInst::StoreIndex { .. }))
         .count();
-    // Heap writes and reads the source holds: emit_hir's stack IL, or the
-    // MIR the fuse IL comes from.
-    let (src_stores, src_index) = match gate {
-        GateRef::Stack(ops) => (count_store_index(ops), count_index(ops)),
-        GateRef::Mir(_) => (count_mir(from_hir, is_mir_store_index), count_mir(from_hir, is_mir_index)),
-    };
+    // Heap writes and reads the source holds: the MIR the fuse IL comes
+    // from.
+    let (src_stores, src_index) = (count_mir(from_hir, is_mir_store_index), count_mir(from_hir, is_mir_index));
     if src_stores > 0 && stores_ssa == 0 {
         return refuse_dense("store index dropped in SSA");
     }
-    // A fused body's params are its MIR's: no stack-IL live-in recovery.
-    let abi = match gate {
-        GateRef::Stack(ops) => DenseAbi::from_func_and_live_ins(&func, ops, &HashMap::new()),
-        GateRef::Mir(_) => DenseAbi::from_func(&func),
-    };
-    let Some(abi) = abi else {
+    // The body's params are its MIR's.
+    let Some(abi) = DenseAbi::from_func(&func) else {
         return refuse_dense("dense abi");
     };
     let entry = official_entry.or(labels.first);
-    let named_hi = match gate {
-        GateRef::Stack(ops) => crate::il::opt::max_code_label(ops),
-        GateRef::Mir(_) => super::gates::max_named_label(from_hir)
-            .max(labels.head.iter().map(|&Label(id)| id).max().unwrap_or(0)),
-    };
+    let named_hi = super::gates::max_named_label(from_hir).max(labels.head.iter().map(|&Label(id)| id).max().unwrap_or(0));
     let label_hi = named_hi.max(official_entry.map(|Label(id)| id).unwrap_or(0));
     let (remap, deopt, stack_map) = super::emit::dense_sidecars(&func, entry);
     side.debug_slot_remap = remap;
@@ -348,15 +275,6 @@ fn specialize_side(
     // Const-fold must not erase every Index (for-in / invert+fuse leftover).
     if fallback.map_or(src_index, count_index) > 0 && count_index(&out) == 0 {
         return refuse_dense("index erased");
-    }
-    // Last-arm writes are frame stores in emit_hir's stack IL. A fused
-    // body's fuse IL is a reconstruct of the same MIR as this one, its
-    // writes phi copies: nothing to hold this one to.
-    if let GateRef::Stack(ops) = gate
-        && select_cfg
-        && !select_reconstruct_ok(ops, &out)
-    {
-        return refuse_dense("select reconstruct");
     }
     // In-loop Make*: keep dense only when heap ops are native (S2l / A2).
     if inloop_alloc
@@ -562,10 +480,9 @@ fn emit_cost(ops: &[IlOp]) -> usize {
 /// single-use values on the stack. Keep/refuse is the LIR cost gate in
 /// `IlModule`, not a feature floor.
 ///
-/// A fused body (`GateRef::Mir`) reads its walls off its MIR, and its LIR
-/// is the fuse IL itself: no compare against emit_hir's stack IL.
+/// The body reads its walls off its MIR, and its LIR is the fuse IL
+/// itself: there is no other stack IL to compare against.
 pub fn try_lower_abi_body_side(
-    gate: GateRef<'_>,
     labels: &BodyLabels,
     name: &str,
     pool: &mut Vec<u64>,
@@ -576,21 +493,9 @@ pub fn try_lower_abi_body_side(
     // S2c: allocating leftovers need a real S2b draft; else fuse-IL.
     // S2d: mapped in-loop / preheader Make* may reconstruct; post-loop-only
     // `return [x]` stays fuse-IL so invert+fuse (COI-87) remains.
-    let has_alloc = match (gate, from_hir) {
-        (GateRef::Stack(ops), _) => {
-            let has_alloc = ops.iter().any(refuses_alloc);
-            // A stack-gated body is unfused (`COIL_MIR_FUSE=0` or a test's
-            // `hir_stack`): it keeps the unfused walls.
-            if has_alloc && has_post_loop_alloc_return(ops) {
-                return refuse("post-loop alloc return");
-            }
-            has_alloc
-        }
-        // An argless `FORMAT` is no `refuses_alloc` site but still a mapped
-        // allocation: the body needs its maps all the same.
-        (GateRef::Mir(_), Some(func)) => super::gates::maps_allocation(func),
-        (GateRef::Mir(_), None) => false,
-    };
+    // An argless `FORMAT` is no `refuses_alloc` site but still a mapped
+    // allocation: the body needs its maps all the same.
+    let has_alloc = from_hir.is_some_and(super::gates::maps_allocation);
     // MIR lowered from HIR maps its own allocations (`lir_tail` builds the
     // body's draft from it).
     let Some(direct) = from_hir else {
@@ -602,11 +507,7 @@ pub fn try_lower_abi_body_side(
     if has_alloc && !super::stackmap::mir_maps_ok(direct) {
         return refuse("no MIR maps");
     }
-    let wall = match gate {
-        GateRef::Stack(ops) => super::entry::lir_refuse_direct(ops, has_alloc),
-        GateRef::Mir(_) => super::gates::fuse_lir_wall(direct, has_alloc),
-    };
-    if let Some(wall) = wall {
+    if let Some(wall) = super::gates::fuse_lir_wall(direct, has_alloc) {
         return refuse(format!("lir wall {wall:?}"));
     }
     let mut func = direct.clone();
@@ -615,7 +516,7 @@ pub fn try_lower_abi_body_side(
     } else {
         crate::mir::cse(&mut func);
     }
-    lir_tail(gate, labels, name, pool, has_alloc, func, side)
+    lir_tail(labels, name, pool, has_alloc, func, side)
 }
 
 /// The fuse IL the LIR tier would emit from a fused body's MIR: what runs
@@ -625,7 +526,7 @@ pub fn fuse_fallback(labels: &BodyLabels, name: &str, pool: &[u64], func: &crate
     let captured = MIR_CAPTURE.with(|c| c.borrow_mut().take());
     let mut pool = pool.to_vec();
     let mut side = BodySidecar::default();
-    let out = try_lower_abi_body_side(GateRef::Mir(None), labels, name, &mut pool, Some(func), &mut side);
+    let out = try_lower_abi_body_side(labels, name, &mut pool, Some(func), &mut side);
     MIR_CAPTURE.with(|c| *c.borrow_mut() = captured);
     LIR_REFUSAL.with(|c| c.borrow_mut().take());
     out
@@ -634,7 +535,6 @@ pub fn fuse_fallback(labels: &BodyLabels, name: &str, pool: &[u64], func: &crate
 /// Emit the LIR tier's stack IL from `func`.
 #[allow(clippy::too_many_arguments)]
 fn lir_tail(
-    gate: GateRef<'_>,
     labels: &BodyLabels,
     name: &str,
     pool: &mut Vec<u64>,
@@ -687,16 +587,6 @@ fn lir_tail(
         out.extend(ops);
         side.cleanup_pad = Some((label, frame));
     }
-    // Compares against emit_hir's stack IL, the code that runs if LIR
-    // refuses. A fused body's LIR is its fuse IL: there is no other.
-    if let GateRef::Stack(ops) = gate {
-        if has_sroa_select_cfg(ops) && !select_reconstruct_ok(ops, &out) {
-            return refuse("select reconstruct");
-        }
-        if count_make_enum(&out) > count_make_enum(ops) {
-            return refuse("MakeEnum growth");
-        }
-    }
     Some(out)
 }
 
@@ -743,55 +633,6 @@ fn emit_cleanup_pad(
     Ok((label, frame, ops, map))
 }
 
-/// Last-arm writes must remain as `StorePop` (LIR) or `DenseMove` (dense
-/// phi copies). Seek frame size is measured in [`emit_cost`], not capped.
-fn select_reconstruct_ok(src: &[IlOp], out: &[IlOp]) -> bool {
-    last_arm_writes(out) >= last_arm_writes(src)
-}
-
-/// Writes before the first branch are not arm writes: a prologue store that
-/// falls into the loop head is not one, however the head is laid out.
-fn last_arm_writes(ops: &[IlOp]) -> usize {
-    let first = ops.iter().position(is_cond_branch).unwrap_or(ops.len());
-    let mut n = 0usize;
-    for (i, op) in ops.iter().enumerate().skip(first) {
-        if !is_select_write(op) {
-            continue;
-        }
-        if is_last_arm_write(ops, i) {
-            n += 1;
-        }
-    }
-    n
-}
-
-fn is_select_write(op: &IlOp) -> bool {
-    matches!(op, IlOp::StorePop { .. })
-        || matches!(
-            op,
-            IlOp::Byte { byte, .. }
-                if matches!(
-                    *byte.bytecode(),
-                    Instruction::STORE | Instruction::StorePop | Instruction::DenseMove
-                )
-        )
-}
-
-/// A last arm falls into a join: write, then only labels until a join bind
-/// (no intervening jump).
-fn is_last_arm_write(ops: &[IlOp], write_i: usize) -> bool {
-    let mut saw_join = false;
-    for op in &ops[write_i + 1..] {
-        match op {
-            IlOp::Label(_) | IlOp::JoinLabel(_) => saw_join = true,
-            IlOp::Jump { .. } | IlOp::Return { .. } | IlOp::Halt { .. } => return false,
-            _ if saw_join => return true,
-            _ => {}
-        }
-    }
-    saw_join
-}
-
 /// S2f computed-index slot-select: several EQ/JMPF arms into one join.
 fn has_sroa_select_cfg(ops: &[IlOp]) -> bool {
     use crate::il::IlJumpKind;
@@ -807,29 +648,6 @@ fn has_sroa_select_cfg(ops: &[IlOp]) -> bool {
         }
     }
     n >= 2
-}
-
-fn is_cond_branch(op: &IlOp) -> bool {
-    use crate::il::IlJumpKind;
-    match op {
-        IlOp::Jump { kind, .. } => *kind != IlJumpKind::Unconditional,
-        IlOp::Byte { byte, .. } => matches!(
-            *byte.bytecode(),
-            Instruction::BinSlotImmJmpf
-                | Instruction::BinSlotImmJmpt
-                | Instruction::BinSlotSlotConstJmpf
-                | Instruction::BinSlotSlotConstJmpt
-                | Instruction::BinSlotSlotJmpf
-                | Instruction::BinSlotSlotJmpt
-                | Instruction::CmpJmpf
-                | Instruction::CmpJmpt
-                | Instruction::DenseBinJmpf
-                | Instruction::DenseIndexJmpf
-                | Instruction::LogNotJmpf
-                | Instruction::LogNotJmpt
-        ),
-        _ => false,
-    }
 }
 
 fn eq_immediately_before(ops: &[IlOp], jump_i: usize) -> bool {
@@ -863,11 +681,6 @@ fn fused_eq_jmp(byte: &common::Byte) -> bool {
     }
 }
 
-/// True when a jump targets an earlier label (counted / while loops).
-fn has_back_edge(ops: &[IlOp]) -> bool {
-    !loop_ranges(ops).is_empty()
-}
-
 /// Make* / InitTyped between a loop header and its back-edge.
 /// Preheader alloc plus an index loop is not this — S2d may specialize those
 /// when S2b maps exist.
@@ -879,36 +692,6 @@ fn has_alloc_inside_loop(ops: &[IlOp]) -> bool {
     ops.iter().enumerate().any(|(i, op)| {
         super::gc::refuse_reason(op).is_some() && loops.iter().any(|&(h, j)| h <= i && i < j)
     })
-}
-
-/// Every Make* / InitTyped sits after the last back-edge and that tail only
-/// shapes the result (`return [sum]`: no call / host / format work). Those
-/// bodies stay fuse-IL so COI-87 invert+fuse remains observable. A tail that
-/// does real work after the loop (formatted output, a discarded `Result`
-/// from a call) does not refuse the body: its hot loop may still take MIR.
-fn has_post_loop_alloc_return(ops: &[IlOp]) -> bool {
-    use crate::il::effects::{Effects, effects};
-    if has_alloc_inside_loop(ops) {
-        return false;
-    }
-    let loops = loop_ranges(ops);
-    if loops.is_empty() {
-        return false;
-    }
-    let last_back = loops.iter().map(|&(_, j)| j).max().unwrap_or(0);
-    let mut any = false;
-    for (i, op) in ops.iter().enumerate() {
-        if super::gc::refuse_reason(op).is_some() {
-            any = true;
-            if i < last_back {
-                return false;
-            }
-        }
-    }
-    let tail_works = ops[last_back..]
-        .iter()
-        .any(|op| effects(op).any(Effects::CALL | Effects::HOST | Effects::FORMAT));
-    any && !tail_works
 }
 
 fn loop_ranges(ops: &[IlOp]) -> Vec<(usize, usize)> {
