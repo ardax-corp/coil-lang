@@ -13543,6 +13543,10 @@ impl Checker {
         };
         let saved_idx = self.next_id_idx;
         let msg_len = self.messages.len();
+        let mut local_types = HashSet::new();
+        for child in children {
+            Self::collect_local_type_names(child, &mut local_types);
+        }
         for child in children {
             let stmt = Self::pre_pass_unwrap_stmt(child);
             let Expression::TypeClassImpl {
@@ -13576,7 +13580,7 @@ impl Checker {
                 .collect();
             let arg_tys: Vec<Ty> = args
                 .iter()
-                .map(|a| self.ast_instance_head_ty_with(a, &param_map))
+                .map(|a| self.ast_instance_head_ty_with(a, &param_map, &local_types))
                 .collect();
             if self
                 .generics
@@ -13609,7 +13613,7 @@ impl Checker {
                         type_params,
                         ty,
                     } => {
-                        let resolved = self.ast_instance_head_ty(ty);
+                        let resolved = self.ast_instance_head_ty(ty, &local_types);
                         assoc_tys.insert(
                             (*name).to_string(),
                             AssocTypeValue {
@@ -13640,8 +13644,33 @@ impl Checker {
 
     /// Shape-only instance head for the trait-impl pre-pass (no ID consumption).
     /// Built-in spellings follow [`Self::canonical_ctor_name`].
-    fn ast_instance_head_ty(&self, arg: &Output) -> Ty {
-        self.ast_instance_head_ty_with(arg, &HashMap::new())
+    fn ast_instance_head_ty(&self, arg: &Output, local_types: &HashSet<&str>) -> Ty {
+        self.ast_instance_head_ty_with(arg, &HashMap::new(), local_types)
+    }
+
+    /// Names of the classes and enums this module declares at the top level.
+    fn collect_local_type_names<'a>(node: &'a Output<'a>, out: &mut HashSet<&'a str>) {
+        match Self::pre_pass_unwrap_stmt(node).1.as_ref() {
+            Expression::Class { name, .. } | Expression::EnumDecl { name, .. } => {
+                out.insert(name);
+            }
+            Expression::Fragment(children) => {
+                for child in children {
+                    Self::collect_local_type_names(child, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A head naming one of this module's own classes or enums is keyed by
+    /// its module-qualified name, as the real pass (`resolve_class_key`)
+    /// keys it, so a same-named type in another module does not share the
+    /// stub (#957).
+    fn pre_pass_local_head(&self, name: &str, local_types: &HashSet<&str>) -> Option<String> {
+        local_types
+            .contains(name)
+            .then(|| self.qualify_module_name(name))
     }
 
     /// Type parameters of an instance head: the head's own bounded list when
@@ -13683,11 +13712,19 @@ impl Checker {
     /// [`Self::ast_instance_head_ty`] with the head's own type parameters
     /// mapped to variables (`Box<T>` → `Box<'a>`), so a generic instance
     /// unifies with every `Box<_>` goal (#550).
-    fn ast_instance_head_ty_with(&self, arg: &Output, params: &HashMap<String, TyVarId>) -> Ty {
+    fn ast_instance_head_ty_with(
+        &self,
+        arg: &Output,
+        params: &HashMap<String, TyVarId>,
+        local_types: &HashSet<&str>,
+    ) -> Ty {
         match arg.1.as_ref() {
             Expression::Type(name) | Expression::Identifier(name) => {
                 if let Some(&var) = params.get(*name) {
                     return Ty::Var(var);
+                }
+                if let Some(key) = self.pre_pass_local_head(name, local_types) {
+                    return Ty::Con(key);
                 }
                 Ty::Con(Self::canonical_ctor_name(name))
             }
@@ -13695,11 +13732,14 @@ impl Checker {
                 let head = match name.to_ascii_lowercase().as_str() {
                     "option" => Ty::Con(common::BUILTIN_OPTION_ENUM.into()),
                     "result" => Ty::Con(common::BUILTIN_RESULT_ENUM.into()),
-                    _ => Ty::Con((*name).to_string()),
+                    _ => Ty::Con(
+                        self.pre_pass_local_head(name, local_types)
+                            .unwrap_or_else(|| (*name).to_string()),
+                    ),
                 };
                 let arg_tys: Vec<Ty> = args
                     .iter()
-                    .map(|a| self.ast_instance_head_ty_with(a, params))
+                    .map(|a| self.ast_instance_head_ty_with(a, params, local_types))
                     .collect();
                 Ty::App(Box::new(head), arg_tys)
             }
@@ -13711,7 +13751,7 @@ impl Checker {
                 }
                 let arg_tys: Vec<Ty> = args
                     .iter()
-                    .map(|a| self.ast_instance_head_ty_with(a, params))
+                    .map(|a| self.ast_instance_head_ty_with(a, params, local_types))
                     .collect();
                 Ty::App(Box::new(head), arg_tys)
             }
