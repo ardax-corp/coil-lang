@@ -1054,9 +1054,12 @@ impl Compiler {
         // moves; a generic class's shared method sees its class's
         // parameters as type variables too.
         let is_var = |t: &Ty| matches!(crate::typechecking::ty::strip_readonly(t), Ty::Var(_));
+        // A `Vec<T>` of them too (`len(self.keys)` in a `HashMap<K, V>`
+        // invariant reads no `K`).
+        let holds_var = |t: &Ty| is_var(t) || crate::typechecking::ty::vec_element_ty(t).is_some_and(is_var);
         let opaque_vars = hir.is_generic
-            || hir.locals.iter().any(|l| l.ty.as_ref().is_some_and(is_var))
-            || hir.exprs.iter().any(|e| e.ty.as_ref().is_some_and(is_var));
+            || hir.locals.iter().any(|l| l.ty.as_ref().is_some_and(holds_var))
+            || hir.exprs.iter().any(|e| e.ty.as_ref().is_some_and(holds_var));
         // The backing word of a scalar enum type.
         let scalar_enum = move |t: &Ty| {
             let t = apply_ty_prune(checker.subst(), t);

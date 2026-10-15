@@ -833,8 +833,17 @@ fn opaque_moves_only(hir: &HirBody, inp: &HirMirInput) -> Result<(), Refusal> {
             HirKind::Builtin { args, .. } => args.iter().any(var),
             HirKind::Named { value, .. } | HirKind::Yield { value, .. } => var(value),
             HirKind::Append { base, value } => var(base) || var(value),
-            // A store moves the word as it is, into a local or a field.
-            HirKind::Assign { place, value } => var(value) && !matches!(hir.expr(*place).kind, HirKind::Local(_) | HirKind::Field { .. }),
+            // A store moves the word as it is, into a local, a field or a
+            // type variable's array slot (`xs[i] = v` on a `Vec<T>`, stored
+            // as the opaque word it holds).
+            HirKind::Assign { place, value } => {
+                var(value)
+                    && !match &hir.expr(*place).kind {
+                        HirKind::Local(_) | HirKind::Field { .. } => true,
+                        HirKind::Index { base, index, .. } => !var(index) && hir.expr(*base).ty.as_ref().and_then(array_elem).is_some_and(is_var),
+                        _ => false,
+                    }
+            }
             HirKind::If { cond, .. } => var(cond),
             HirKind::Match { scrutinee, .. } => var(scrutinee),
             HirKind::LetPat { init, .. } => var(init),
