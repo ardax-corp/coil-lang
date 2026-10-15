@@ -1,6 +1,5 @@
-// A class local whose fields are written before it escapes keeps them in
-// frame slots and is boxed once, at the statement (or block tail) where it
-// first escapes, as the AST's unboxed class local.
+// A class local whose fields are written before it escapes (passed, returned
+// or stored) keeps every field value once it escapes.
 use tests::assert;
 
 class Pair {

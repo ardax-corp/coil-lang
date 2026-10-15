@@ -1,4 +1,5 @@
-// Non-escaping fixed arrays stay local (codegen stack slots + IL escape analysis).
+// A fixed array local that never escapes reads back its literal and stored
+// elements.
 use tests::assert;
 
 test("local array does not need heap identity") {

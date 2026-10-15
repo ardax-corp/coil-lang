@@ -1,7 +1,5 @@
-// Statics carry compile-time word kinds (archive minor 29): a pointer static
-// is a precise root the collector may rewrite when its target moves, a scalar
-// static is no root. Collections (and evacuation) in between must keep every
-// static's value intact.
+// Heap statics are GC roots and scalar statics are plain values: collections
+// in between keep every static's value intact.
 use tests::assert;
 use gc::collect;
 
