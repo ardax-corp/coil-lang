@@ -110,14 +110,12 @@ fn all_off() -> OptimizeOptions {
         escape_analysis: false,
         branch_optimization: false,
         collect_stats: false,
-        mir_specialize: false,
     }
 }
 
 /// The switches `level` turns on.
 fn base_knobs(level: OptLevel) -> OptimizeOptions {
     let mut o = all_off();
-    o.mir_specialize = true;
     // Gate HIR passes in `emit_hir`, not IL table rows: constant folding (at
     // every level), scalar replacement (enum / tuple SROA), local CSE,
     // loop-invariant code motion, counted-loop bounds proofs and full unroll
@@ -239,8 +237,6 @@ mod tests {
         let o = OptLevel::Debug.options();
         assert!(o.algebraic);
         assert!(!o.escape_analysis && !o.loop_unroll);
-        assert!(o.mir_specialize);
-        assert!(OptLevel::Standard.options().mir_specialize);
     }
 
     #[test]

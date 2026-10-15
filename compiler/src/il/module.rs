@@ -411,7 +411,7 @@ impl IlModule {
         // Per body, once: the fuse IL its MIR emits (what runs if dense
         // refuses), `None` when the LIR tier refuses it.
         let mut fuse_fallbacks: Vec<Option<Option<Vec<IlOp>>>> = vec![None; self.funcs.len()];
-        while !pending.is_empty() && opts.mir_specialize {
+        while !pending.is_empty() {
             let mut next = Vec::new();
             let mut progressed = false;
             for i in pending.iter().copied() {
@@ -485,9 +485,6 @@ impl IlModule {
             .collect();
         self.lir_cleanup_pads.clear();
         for i in pending.iter().copied().chain(padded.iter().copied()) {
-            if !opts.mir_specialize {
-                break;
-            }
             let body = &mut self.funcs[i];
             let mut side = crate::mir::BodySidecar::default();
             if let Some(lir) = crate::mir::try_lower_abi_body_side(
@@ -548,31 +545,29 @@ impl IlModule {
         }
         // M5p: every body runs IL emitted from its MIR (dense or LIR).
         // One left on emit_hir's stack lowering is a compiler bug.
-        if opts.mir_specialize {
-            let fell_back: Vec<String> = (0..self.funcs.len())
-                // A body HIR never lowered (an IL-only test body, or one
-                // past a program error) has no direct MIR to miss.
-                .filter(|&i| {
-                    let meta = &self.funcs[i].meta;
-                    tier[i] == "fuse" && (meta.hir_mir.is_some() || meta.hir_mir_why.is_some())
-                })
-                .map(|i| {
-                    let body = &self.funcs[i];
-                    let why = match &body.meta.hir_mir {
-                        None => body.meta.hir_mir_why.clone().map_or("no MIR from HIR".to_string(), |w| format!("no MIR from HIR: {w}")),
-                        Some(_) => lir_why[i].clone().or_else(|| dense_why[i].clone()).unwrap_or_else(|| "no tier took it".to_string()),
-                    };
-                    format!("`{}` ({why})", body.meta.name)
-                })
-                .collect();
-            if !fell_back.is_empty() {
-                panic!(
-                    "internal compiler error: {} bod{} fell back to the HIR stack lowering: {}",
-                    fell_back.len(),
-                    if fell_back.len() == 1 { "y" } else { "ies" },
-                    fell_back.join(", ")
-                );
-            }
+        let fell_back: Vec<String> = (0..self.funcs.len())
+            // A body HIR never lowered (an IL-only test body, or one
+            // past a program error) has no direct MIR to miss.
+            .filter(|&i| {
+                let meta = &self.funcs[i].meta;
+                tier[i] == "fuse" && (meta.hir_mir.is_some() || meta.hir_mir_why.is_some())
+            })
+            .map(|i| {
+                let body = &self.funcs[i];
+                let why = match &body.meta.hir_mir {
+                    None => body.meta.hir_mir_why.clone().map_or("no MIR from HIR".to_string(), |w| format!("no MIR from HIR: {w}")),
+                    Some(_) => lir_why[i].clone().or_else(|| dense_why[i].clone()).unwrap_or_else(|| "no tier took it".to_string()),
+                };
+                format!("`{}` ({why})", body.meta.name)
+            })
+            .collect();
+        if !fell_back.is_empty() {
+            panic!(
+                "internal compiler error: {} bod{} fell back to the HIR stack lowering: {}",
+                fell_back.len(),
+                if fell_back.len() == 1 { "y" } else { "ies" },
+                fell_back.join(", ")
+            );
         }
         // Dense and LIR bodies carry GC maps built from their MIR. An
         // allocating fuse-IL body with MIR from HIR keeps its heap words in
@@ -582,38 +577,31 @@ impl IlModule {
         // conservative frame scan. Drafts see bodies before the loop cursor
         // raises (added just below).
         let mut map_from: Vec<&'static str> = vec!["-"; self.funcs.len()];
-        if opts.mir_specialize {
-            for (i, body) in self.funcs.iter().enumerate() {
-                if let Some(draft) = mir_maps.remove(&body.meta.name) {
-                    self.stack_map_drafts.push(draft);
-                    map_from[i] = "mir";
-                } else if tier[i] == "fuse"
-                    // A pinned (`defer`) body's frame also runs its thunks
-                    // and cleanup pad, which its MIR does not describe.
-                    && !body.meta.pinned
-                    && let Some(func) = body.meta.hir_mir.as_deref()
-                    // A lambda's code sits inline in this body's IL, in its
-                    // own frame: a map of this body's slots at every PC
-                    // would cover it too.
-                    && !func.inner_code
-                    && crate::mir::maps_allocation(func)
-                {
-                    let mut draft = crate::mir::encode_draft_slots(func);
-                    draft.name = body.meta.name.clone();
-                    self.stack_map_drafts.push(draft);
-                    map_from[i] = "mir";
-                }
+        for (i, body) in self.funcs.iter().enumerate() {
+            if let Some(draft) = mir_maps.remove(&body.meta.name) {
+                self.stack_map_drafts.push(draft);
+                map_from[i] = "mir";
+            } else if tier[i] == "fuse"
+                // A pinned (`defer`) body's frame also runs its thunks
+                // and cleanup pad, which its MIR does not describe.
+                && !body.meta.pinned
+                && let Some(func) = body.meta.hir_mir.as_deref()
+                // A lambda's code sits inline in this body's IL, in its
+                // own frame: a map of this body's slots at every PC
+                // would cover it too.
+                && !func.inner_code
+                && crate::mir::maps_allocation(func)
+            {
+                let mut draft = crate::mir::encode_draft_slots(func);
+                draft.name = body.meta.name.clone();
+                self.stack_map_drafts.push(draft);
+                map_from[i] = "mir";
             }
         }
 
         if opts.collect_stats {
-            let (dense, fuse) = if opts.mir_specialize {
-                // A pinned body LIR took counts in `lir_kept`, not `pinned`.
-                (dense_kept, pending.len() + pinned - lir_kept)
-            } else {
-                (0, self.funcs.len())
-            };
-            super::opt::note_body_tiers(dense, lir_kept, fuse);
+            // A pinned body LIR took counts in `lir_kept`, not `pinned`.
+            super::opt::note_body_tiers(dense_kept, lir_kept, pending.len() + pinned - lir_kept);
             for (i, body) in self.funcs.iter().enumerate() {
                 super::opt::note_body_tier(super::opt::BodyTier {
                     name: body.meta.name.clone(),
@@ -631,11 +619,7 @@ impl IlModule {
         self.debug_slot_remaps.extend(side_remaps);
         self.deopt_map_drafts.extend(side_deopts);
 
-        if opts.mir_specialize {
-            self.apply_loop_cursor_raises(&tier);
-        } else {
-            self.apply_loop_cursor_raises(&vec!["fuse"; self.funcs.len()]);
-        }
+        self.apply_loop_cursor_raises(&tier);
         self.to_flat()
     }
 }
@@ -1837,7 +1821,6 @@ mod tests {
             escape_analysis: false,
             branch_optimization: false,
             collect_stats: false,
-            mir_specialize: true,
         }
     }
 
