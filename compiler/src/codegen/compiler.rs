@@ -9444,6 +9444,18 @@ impl Compiler {
                         v.validated = true;
                         v.ranges.clear();
                     }
+                    // So does a split local's component: each lives in the
+                    // register the remap names for the whole body, or
+                    // nowhere. Its stores carry no def-site tags there.
+                    let comps = v.component_slots();
+                    if !comps.is_empty() {
+                        v.def_sites.clear();
+                        v.validated = true;
+                        v.comp_ranges = comps
+                            .iter()
+                            .map(|c| remap.get(c).map(|&r| vec![(0, u32::MAX, r)]).unwrap_or_default())
+                            .collect();
+                    }
                     v.loc.remap(remap);
                 }
             }

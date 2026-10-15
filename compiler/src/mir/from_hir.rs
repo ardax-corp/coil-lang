@@ -557,6 +557,8 @@ pub struct HirMirInput<'a> {
     /// A generic body's type parameter values are opaque words it only
     /// moves (a raw scalar or a box, as the caller passed it).
     pub opaque_vars: bool,
+    /// A debugger reads the body's locals from their frame words.
+    pub debugger: bool,
     /// The niche layout of a result the body returns boxed (a test body's
     /// `Result`): each return builds the `ObjEnum`.
     pub ret_boxed_niche: Option<ValueLayout>,
@@ -1095,6 +1097,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         func.cleanup = Some(Box::new(cleanup));
     }
     func.inner_code = hir.exprs.iter().any(|e| matches!(e.kind, HirKind::Lambda { .. }));
+    func.debug_keep = inp.debugger;
     if inp.opaque_vars {
         opaque_moves_only(hir, inp)?;
         func.opaque_words = true;

@@ -295,6 +295,7 @@ fn apply_sr(func: &mut MirFunc, lp: &LoopInfo, cand: Candidate) -> bool {
             term.rewrite_values(map);
         }
     }
+    func.rewrite_debug_slots(map);
     for block in &mut func.blocks {
         block.insts.retain(|i| i.dest() != cand.mul_dest);
     }

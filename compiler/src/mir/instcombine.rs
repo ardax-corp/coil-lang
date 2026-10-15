@@ -103,6 +103,7 @@ fn instcombine_once(func: &mut MirFunc) -> usize {
         }
         block.insts.retain(|i| !drop.contains(&i.dest()));
     }
+    func.rewrite_debug_slots(map);
 
     let mut known: HashMap<ValueId, MirConst> = HashMap::new();
     for block in &func.blocks {
