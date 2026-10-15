@@ -69,6 +69,17 @@ fn bare_statement_match<'a, 'p>(stmt: &'a Output<'p>) -> Option<&'a Output<'p>> 
     (matches!(m.1.as_ref(), Expression::Match { .. }) && inner.0 == m.0).then_some(m)
 }
 
+/// A lone `_` wildcard: not the start of an identifier such as `_b` (#1072).
+fn wildcard_underscore<'a>() -> impl Parser<'a, &'a str, (), extra::Err<Rich<'a, char>>> + Clone {
+    just('_')
+        .then_ignore(
+            any()
+                .filter(|c: &char| c.is_alphanumeric() || *c == '_')
+                .not(),
+        )
+        .ignored()
+}
+
 /// Whitespace and comments between tokens.
 ///
 /// `// …` line comments and `/* … */` block comments (nestable) are trivia:
@@ -1712,7 +1723,7 @@ impl<'pratt> Pratt<'pratt> {
             .map_with(output!(Identifier))
             .map(|identifier| (Some(identifier), None));
         let pattern_bind = choice((
-            just("_").padded_by(trivia()).to(LetPattern::Wildcard),
+            wildcard_underscore().padded_by(trivia()).to(LetPattern::Wildcard),
             self.let_tuple_pattern(),
             self.let_record_pattern(),
         ))
@@ -3108,7 +3119,7 @@ impl<'pratt> Pratt<'pratt> {
             let tuple = choice((tuple_multi, tuple_trailing)).map(LetPattern::Tuple);
 
             choice((
-                just("_").padded_by(trivia()).to(LetPattern::Wildcard),
+                wildcard_underscore().padded_by(trivia()).to(LetPattern::Wildcard),
                 tuple,
                 record,
                 text::ident()
@@ -3535,7 +3546,7 @@ impl<'pratt> Pratt<'pratt> {
                 });
 
             choice((
-                just("_")
+                wildcard_underscore()
                     .padded_by(trivia())
                     .map_with(|_, e| (e.span(), Pattern::Wildcard)),
                 constructor,
