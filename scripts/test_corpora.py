@@ -9,9 +9,9 @@ up the others and a `-j 1` run (the leak smoke) still uses every core.
     scripts/test_corpora.py -- -O 0 --root examples/src   # flags for coil test
     scripts/test_corpora.py --shard 1/3           # a third of the corpora (CI)
 
-The binaries come from `cargo build --profile harness` (optimized, with
-debug assertions; see `[profile.harness]` in Cargo.toml). Cargo's own cache
-makes a rebuild with no source change a no-op; `--no-build` skips cargo
+The binaries come from `cargo build` (`--release`: `cargo build --release`,
+the same build mode as shipped binaries). Cargo's own cache makes a rebuild
+with no source change a no-op; `--no-build` skips cargo
 entirely and `--bin DIR` runs the `coil` / `coil-test` already in DIR.
 `--harness PATH` runs that binary instead of `coil test` (the GC-stress
 build of `coil-test`). `--limit-as-kb` caps each process's address space
@@ -66,6 +66,8 @@ def main():
     ap.add_argument("-j", "--jobs", type=int, default=0,
                     help="`coil test -j` per corpus (default: CPUs / --parallel)")
     ap.add_argument("--shard", help="I/N: run every Nth corpus starting at I")
+    ap.add_argument("--release", action="store_true",
+                    help="build and run target/release instead of target/debug")
     ap.add_argument("--no-build", action="store_true", help="do not run cargo")
     ap.add_argument("--bin", type=Path, help="directory with coil / coil-test")
     ap.add_argument("--harness", type=Path, help="run this coil-test binary directly")
@@ -82,11 +84,11 @@ def main():
     if args.shard:
         names = shard(names, args.shard)
 
-    bindir = args.bin or ROOT / "target" / "harness"
+    profile = "release" if args.release else "debug"
+    bindir = args.bin or ROOT / "target" / profile
     if not args.no_build and not args.bin and not args.harness:
-        subprocess.run(
-            ["cargo", "build", "--profile", "harness", "--bin", "coil", "--bin", "coil-test"],
-            cwd=ROOT, check=True)
+        build = ["cargo", "build", "--bin", "coil", "--bin", "coil-test"]
+        subprocess.run(build + (["--release"] if args.release else []), cwd=ROOT, check=True)
     if args.harness:
         cmd = [str(args.harness)]
     else:

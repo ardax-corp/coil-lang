@@ -213,16 +213,19 @@ jobs:
         run: |
           BIN=./target/debug/coil ./examples/projects/run-tests.sh
 
-  # The `.hy` harness binaries, built once per OS with the `harness` profile
-  # (optimized, debug assertions on) and cached by rust-cache. Every
-  # `harness` cell below downloads them instead of building its own.
+  # The `.hy` harness binaries, built once per OS and build mode (debug and
+  # release: the same corpus must pass in both, so a build-mode difference
+  # such as an optimizer or overflow-check bug shows up) and cached by
+  # rust-cache. Every `harness` cell below downloads them instead of
+  # building its own.
   harness-build:
-    name: harness build (${{ matrix.os }})
+    name: harness build (${{ matrix.mode }}, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+        mode: [debug, release]
     steps:
       - uses: actions/checkout@v4
 
@@ -243,49 +246,51 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          key: harness-build
+          key: harness-build-${{ matrix.mode }}
           cache-directories: target/gc-stress
 
       - name: Build coil and coil-test
-        run: cargo build --profile harness --bin coil --bin coil-test
+        run: cargo build ${{ matrix.mode == 'release' && '--release' || '' }} --bin coil --bin coil-test
 
       - name: Build coil-test with GC stress
         # `coil test` re-execs `coil-test`; build the harness itself with the feature.
-        run: cargo build --profile harness -p coil-test --features gc-stress --target-dir target/gc-stress
+        run: cargo build ${{ matrix.mode == 'release' && '--release' || '' }} -p coil-test --features gc-stress --target-dir target/gc-stress
 
       - name: Collect binaries
         run: |
           mkdir -p harness-bin/gc-stress
-          cp target/harness/coil target/harness/coil-test harness-bin/
-          cp target/gc-stress/harness/coil-test harness-bin/gc-stress/
+          cp target/${{ matrix.mode }}/coil target/${{ matrix.mode }}/coil-test harness-bin/
+          cp target/gc-stress/${{ matrix.mode }}/coil-test harness-bin/gc-stress/
 
       - uses: actions/upload-artifact@v4
         with:
-          name: harness-bin-${{ matrix.os }}
+          name: harness-bin-${{ matrix.os }}-${{ matrix.mode }}
           path: harness-bin
           retention-days: 1
 
-  # The `.hy` corpora under each compiler / VM setting, one cell per setting
-  # so they run side by side. `scripts/test_corpora.py` runs each
-  # `tests/<corpus>` as its own process, in parallel.
+  # The `.hy` corpora under each compiler / VM setting and build mode, one
+  # cell each so debug and release run side by side.
+  # `scripts/test_corpora.py` runs each `tests/<corpus>` as its own process,
+  # in parallel.
   harness:
-    name: harness ${{ matrix.variant }} (${{ matrix.os }})
+    name: harness ${{ matrix.variant }} (${{ matrix.mode }}, ${{ matrix.os }})
     needs: harness-build
     runs-on: ${{ matrix.os }}
     # A hung IO test fails here instead of holding the runner for 6 h (#869).
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
+        mode: [debug, release]
         variant: [default, O0, no-inline, leak-smoke, gc-stress]
         include:
           # macOS (aarch64): stack scanning and the frame maps are per
           # target, the compiler settings are not.
-          - os: macos-latest
-            variant: default
-          - os: macos-latest
-            variant: gc-stress
+          - { os: macos-latest, mode: debug, variant: default }
+          - { os: macos-latest, mode: debug, variant: gc-stress }
+          - { os: macos-latest, mode: release, variant: default }
+          - { os: macos-latest, mode: release, variant: gc-stress }
     env:
       # A worker abort (coil-lang#804) prints where it happened.
       RUST_BACKTRACE: "1"
@@ -311,10 +316,10 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: harness-bin-${{ matrix.os }}
+          name: harness-bin-${{ matrix.os }}-${{ matrix.mode }}
           path: harness-bin
 
-      - name: Language harness (${{ matrix.variant }})
+      - name: Language harness (${{ matrix.variant }}, ${{ matrix.mode }})
         run: |
           chmod +x harness-bin/coil harness-bin/coil-test harness-bin/gc-stress/coil-test
           run="python3 scripts/test_corpora.py --bin harness-bin"
@@ -340,7 +345,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: harness-logs-${{ matrix.os }}-${{ matrix.variant }}
+          name: harness-logs-${{ matrix.os }}-${{ matrix.mode }}-${{ matrix.variant }}
           path: target/corpora
           retention-days: 7
 

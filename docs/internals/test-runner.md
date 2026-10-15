@@ -127,19 +127,22 @@ scripts/test_corpora.py patterns traits -- -O 0
 scripts/test_corpora.py --shard 2/3 --no-build -- …   # every 3rd corpus from the 2nd
 ```
 
-It builds `coil` / `coil-test` with the `harness` profile first
-(`[profile.harness]` in `Cargo.toml`: release optimizations without LTO,
-plus debug assertions, overflow checks and unwinding panics). That build
-runs the corpus about 15× faster than a debug build; cargo's cache makes
-the rebuild a no-op when nothing changed. `--bin DIR` uses binaries already
-built (CI builds them once per OS in `harness-build` and every `harness`
-cell downloads them), `--harness PATH` runs a `coil-test` directly (the
+It builds `coil` / `coil-test` first (`--release` for the release build;
+cargo's cache makes that a no-op when nothing changed). `--bin DIR` uses
+binaries already built, `--harness PATH` runs a `coil-test` directly (the
 GC-stress build), `--limit-as-kb N` caps each process's address space like
 `ulimit -v` (the leak smoke, `-j 1` per process). Logs land in
 `target/corpora/<corpus>.log`.
 
+CI builds the binaries once per OS and build mode (`harness-build`: debug
+and release, each with its GC-stress `coil-test`) and runs every setting
+(default, `-O 0`, `COIL_HIR_INLINE=0`, leak smoke, GC stress) in both modes
+as separate `harness` cells, side by side. The same corpus must pass in both
+modes, so a build-mode difference (optimizer, overflow checks, debug
+assertions) fails one of them.
+
 On four cores the whole corpus takes ~14 s this way against ~31 s for one
-`coil test` process on the same build (2026-10-15).
+`coil test` process on a release build (2026-10-15).
 
 ## Coverage
 
