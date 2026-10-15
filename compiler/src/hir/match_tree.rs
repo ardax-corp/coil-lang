@@ -75,15 +75,6 @@ pub fn irrefutable(fields: &HirPatFields) -> bool {
     }
 }
 
-/// Binary search for `int` matches is on unless `COIL_HIR_INT_SEARCH=0`
-/// (or `false` / `off` / `no`).
-pub(crate) fn int_search_from_env() -> bool {
-    !matches!(
-        std::env::var("COIL_HIR_INT_SEARCH").as_deref(),
-        Ok("0" | "false" | "off" | "no")
-    )
-}
-
 /// Fewest literal cases worth a search: below this a linear chain of
 /// equality tests is as short.
 pub const MIN_SEARCH_CASES: usize = 8;
