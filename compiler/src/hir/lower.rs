@@ -1665,8 +1665,24 @@ pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
                 // may return a `PolyFn`, called with boxed args).
                 HirKind::Call {
                     callee: Callee::Named { name, .. },
-                    ..
-                } => !checker.is_generic_fn(name) && !checker.is_overloaded(name),
+                    args,
+                } => !checker.is_overloaded(name) && (!checker.is_generic_fn(name) || generic_passes_closure(body, checker, name, args)),
+                // A ground method's returned closure (#1007): not a bound or
+                // existential dictionary call, and not a generic method.
+                HirKind::Call {
+                    callee: Callee::Method { name },
+                    args,
+                } => {
+                    let (start, end) = body.expr(*init).span;
+                    let owner = args
+                        .first()
+                        .and_then(|r| body.expr(*r).ty.as_ref())
+                        .map(|t| apply_ty_prune(checker.subst(), t));
+                    matches!(owner.as_ref().map(strip_readonly), Some(Ty::Con(owner))
+                        if checker.has_method(owner, name) && !checker.is_generic_fn(&format!("{owner}::{name}")))
+                        && checker.bound_method_call_for_span(start, end).is_none()
+                        && checker.existential_method_call_for_span(start, end).is_none()
+                }
                 HirKind::Global { .. } | HirKind::Lambda { .. } => true,
                 _ => false,
             },
@@ -1674,6 +1690,20 @@ pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
         }),
         _ => false,
     }
+}
+
+/// A generic call whose result is one of its arguments as is (#1010): the
+/// scheme returns a bare type variable, so the closure that comes back is
+/// the caller's own plain closure. A generic function read as an argument
+/// could come back as a `PolyFn`, so that stays refused.
+fn generic_passes_closure(body: &HirBody, checker: &Checker, name: &str, args: &[HirId]) -> bool {
+    checker.fn_param_tys(name).is_some_and(|p| p.len() == args.len())
+        && matches!(checker.fn_return_ty(name), Some(Ty::Var(_)))
+        && !args.iter().any(|a| match &body.expr(*a).kind {
+            HirKind::Global { name, .. } => checker.is_generic_fn(name),
+            HirKind::Local(_) => polyfn_callee(body, checker, *a),
+            _ => false,
+        })
 }
 
 /// A match of an `int` on integer literals, or of a scalar-backed enum on
