@@ -311,6 +311,7 @@ fn apply_subst(func: &mut MirFunc, subst: &HashMap<ValueId, ValueId>) -> usize {
             term.rewrite_values(map);
         }
     }
+    func.rewrite_debug_slots(map);
     let removed: HashSet<ValueId> = subst.keys().copied().collect();
     for block in &mut func.blocks {
         block.insts.retain(|i| !removed.contains(&i.dest()));

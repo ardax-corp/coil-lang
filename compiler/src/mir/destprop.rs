@@ -66,6 +66,7 @@ fn destprop_once(func: &mut MirFunc) -> usize {
             term.rewrite_values(map);
         }
     }
+    func.rewrite_debug_slots(map);
     for block in &mut func.blocks {
         block.insts.retain(|i| !drop.contains(&i.dest()));
     }

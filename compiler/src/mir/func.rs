@@ -62,6 +62,9 @@ pub struct MirFunc {
     pub term_locs: HashMap<BlockId, DebugLoc>,
     /// Last SSA def of each IL local after construction (named-let remap).
     pub debug_slots: HashMap<LocalId, ValueId>,
+    /// A debugger reads the body's locals: each `debug_slots` value keeps
+    /// a frame word of its own, never an inline operand.
+    pub debug_keep: bool,
     /// Implicit + explicit leave / stop sites (I7 / C3). Not archive-encoded.
     pub deopt_sites: Vec<DeoptSite>,
     /// An `i64` may be a type variable's word, a raw scalar or a box: the
@@ -95,6 +98,14 @@ pub struct MirFunc {
 }
 
 impl MirFunc {
+    /// A pass replaced values: each named local follows its value to the
+    /// one that replaces it.
+    pub fn rewrite_debug_slots(&mut self, map: impl Fn(ValueId) -> ValueId) {
+        for v in self.debug_slots.values_mut() {
+            *v = map(*v);
+        }
+    }
+
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -111,6 +122,7 @@ impl MirFunc {
             op_locs: HashMap::new(),
             term_locs: HashMap::new(),
             debug_slots: HashMap::new(),
+            debug_keep: false,
             deopt_sites: Vec::new(),
             heap_slots: BTreeSet::new(),
             word_slots: BTreeSet::new(),

@@ -96,6 +96,7 @@ pub fn sroa(func: &mut MirFunc) -> usize {
             term.rewrite_values(|v| *subst.get(&v).unwrap_or(&v));
         }
     }
+    func.rewrite_debug_slots(|v| *subst.get(&v).unwrap_or(&v));
     let used = used_values(func);
     let mut removed = 0;
     for block in &mut func.blocks {

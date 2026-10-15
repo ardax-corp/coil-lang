@@ -2917,6 +2917,42 @@ fn main() {
     vm_og.run_raw(&bc_og, &constants_og, og.strings(), og.static_slot_count());
 }
 
+/// Under a debugger, a body with a class local and an array local (which
+/// the HIR plan would split into frame slots) still lowers to direct MIR
+/// (the tier it then takes, LIR or the fused stack, follows `COIL_MIR_FUSE`).
+#[test]
+fn debugger_attached_split_locals_take_direct_mir() {
+    let src = r#"
+class Point {
+    pub x: int,
+    pub y: int,
+}
+fn sum3(int n) -> int {
+    let p = new Point(n, 4);
+    let xs = [1, 2, 3];
+    let total = 0;
+    for x in xs {
+        total = total + x + p.x;
+    }
+    return total + p.y;
+}
+fn main() {
+    let r = sum3(5);
+}
+"#;
+    let mut p = crate::Pipeline::new();
+    p.set_debugger_attached(true);
+    p.set_collect_opt_stats(true);
+    p.compile_src(src).expect("compile debugger-attached");
+    let stats = crate::last_opt_stats();
+    let sum3 = stats
+        .body_tiers
+        .iter()
+        .find(|b| b.name == "sum3")
+        .unwrap_or_else(|| panic!("sum3 tier; stats={stats:?}"));
+    assert_eq!(sum3.hir_reason.as_deref(), Some("lowered"), "{sum3:?}");
+}
+
 #[test]
 fn c3_deopt_maps_named_lets_and_sparse_locs() {
     let src = r#"
