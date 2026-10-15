@@ -115,6 +115,10 @@ pub(super) struct HirMirTables {
     /// `block_on(h)` calls ([`Compiler::hir_block_on`]): the `wait_ready`
     /// native run between resumes, if the program has one, by call.
     pub(super) block_ons: HashMap<u32, Option<u16>>,
+    /// `new C(args).f` reads emission elides the object of
+    /// ([`Compiler::hir_field_of_new`]): each argument runs in order and
+    /// `f`'s is the value, by field read.
+    pub(super) field_news: HashSet<u32>,
 }
 
 /// The frame direct MIR keeps a body's locals in, planned over the HIR:
@@ -582,6 +586,11 @@ impl Compiler {
             && let Some(HirBuiltin::Existential { slot }) = emit.plan.calls.get(&id.0).and_then(|c| c.builtin)
         {
             t.existential_calls.insert(id.0, slot);
+        }
+        if let HirKind::Field { base, name } = &e.kind
+            && self.hir_field_of_new(hir, *base, name).is_some()
+        {
+            t.field_news.insert(id.0);
         }
         match &e.kind {
             HirKind::Lit(Lit::Str(raw))
