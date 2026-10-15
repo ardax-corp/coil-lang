@@ -897,7 +897,15 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         Ty::App(_, args) if hir.is_coro && is_coroutine(ret) => &args[0],
         _ => ret,
     };
-    let unit_ret = is_unit(ret);
+    // A body that never returns (it only panics) leaves its return type a
+    // type variable no word layout covers (a shared generic body's is a
+    // word): nothing reads its word, so it returns as a unit body.
+    let never_ret = matches!(strip_readonly(ret), Ty::Var(_))
+        && inp.ret_pair.is_none()
+        && inp.ret_boxed_niche.is_none()
+        && inp.word(ret).is_none()
+        && (inp.boxed_view)(ret, None).is_none();
+    let unit_ret = is_unit(ret) || never_ret;
     let ret_ty = match inp.ret_pair {
         _ if unit_ret => MirTy::I64,
         None if inp.ret_boxed_niche.is_some() => MirTy::HeapRef,
@@ -1052,6 +1060,11 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
     } else {
         match lower.value(root)? {
             Val::Never => {}
+            // A valued body the checker lets end without a return (a
+            // `while` on a constant `true`) never gets here.
+            Val::Unit if !lower.unit_ret && lower.inp.ret_boxed_niche.is_none() && !unit_result(&lower.ret_hir) => {
+                lower.b.unreachable().map_err(mir)?;
+            }
             val => lower.ret(val)?,
         }
     }
