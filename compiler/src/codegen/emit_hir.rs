@@ -778,11 +778,13 @@ impl Compiler {
                     }
                 }
                 if let Some(root) = hir.root {
+                    // Early exits are laid out after the body.
                     emit.plan.cold_ok = self.opt_options.branch_optimization && !self.debugger_attached && !hir.is_coro;
                     self.hir_plan_par_loops(hir, &mut emit, root);
-                    self.hir_effect(hir, &mut emit, root);
-                    self.hir_cold = std::mem::take(&mut emit.cold);
                 }
+                // Its code is emitted from its direct MIR; the stack IL
+                // only keeps its function record non-empty.
+                self.bytecode.push_return();
                 self.hir_mir_why = None;
                 self.hir_defers = hir.exprs.iter().any(|e| matches!(e.kind, HirKind::Defer { .. }));
                 // A shared generic body takes its dictionaries as trailing
@@ -861,9 +863,10 @@ impl Compiler {
                 let il_start = self.bytecode.il_mut().raw_len();
                 if let Some(root) = hir.root {
                     self.hir_plan_par_loops(hir, &mut emit, root);
-                    self.hir_effect(hir, &mut emit, root);
-                    self.hir_cold = std::mem::take(&mut emit.cold);
                 }
+                // Its code is emitted from its direct MIR; the stack IL
+                // only keeps its function record non-empty.
+                self.bytecode.push_return();
                 for op in &mut self.bytecode.il_mut().ops_slice_mut()[il_start..] {
                     op.set_loc(DebugLoc::unknown());
                 }
@@ -926,9 +929,7 @@ impl Compiler {
         match why {
             Ok(func) => {
                 crate::il::opt::note_hir_mir(None);
-                if let Ok(relocate) = Self::hir_mir_relocate(hir, emit, &tables.frame) {
-                    self.hir_mir_debug_vars(hir, emit, &tables.frame, &relocate);
-                }
+                self.hir_mir_debug_vars(hir, emit, &tables.frame);
                 Some(func)
             }
             Err(why) => {
@@ -990,7 +991,7 @@ impl Compiler {
     /// the function's prologue records) for `coil debug`, from the frame
     /// direct MIR plans: a scalar-replaced class local as its fields, a
     /// stack array as its elements, each in its own slot.
-    fn hir_mir_debug_vars(&mut self, hir: &HirBody, emit: &HirEmit, frame: &emit_hir_mir::HirMirFrame, relocate: &HashMap<u32, u32>) {
+    fn hir_mir_debug_vars(&mut self, hir: &HirBody, emit: &HirEmit, frame: &emit_hir_mir::HirMirFrame) {
         use crate::debug_vars::{DebugTy, DebugVarLoc};
         let params: HashSet<u32> = hir.params.iter().map(|l| l.0).collect();
         // The name's span: its first whole-word occurrence in its `let`.
@@ -1008,7 +1009,7 @@ impl Compiler {
                 continue;
             }
             let local = hir.local(LocalId(l));
-            let slot = relocate.get(&planned).copied().unwrap_or(planned);
+            let slot = planned;
             self.record_debug_local(&local.name, slot);
             let ty = local.ty.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t));
             let width = frame.widths.get(&l).copied().unwrap_or(1);
@@ -1052,38 +1053,6 @@ impl Compiler {
         }
     }
 
-    /// Where emission put the words of each local direct MIR planned
-    /// ([`emit_hir_mir::HirMirFrame`]), by planned id: direct MIR's locals
-    /// are the stack IL's frame slots, which its GC maps, deopt edges and
-    /// debug slots name. Refused when emission bound other locals than the
-    /// plan. Once no stack IL is emitted, the planned ids are the frame.
-    fn hir_mir_relocate(hir: &HirBody, emit: &HirEmit, frame: &emit_hir_mir::HirMirFrame) -> Result<HashMap<u32, u32>, String> {
-        let mut relocate = HashMap::new();
-        for (local, (&planned, &emitted)) in frame.slots.iter().zip(&emit.slots).enumerate() {
-            let local = local as u32;
-            match (planned, emitted) {
-                (None, None) => {}
-                (Some(planned), Some(emitted)) => {
-                    let width = frame.widths.get(&local).copied().unwrap_or(1);
-                    for k in 0..width {
-                        relocate.insert(planned + k, emitted + k);
-                    }
-                    if let (Some(&planned), Some(&emitted)) = (frame.tags.get(&local), emit.tag_slots.get(&local)) {
-                        relocate.insert(planned, emitted);
-                    }
-                }
-                (planned, _) => {
-                    if std::env::var_os("COIL_HIR_MIR_WHY").is_some() {
-                        let bound = if planned.is_some() { "planned, not emitted" } else { "emitted, not planned" };
-                        eprintln!("hir mir frame `{}`: local `{}` {bound}", hir.name, hir.local(LocalId(local)).name);
-                    }
-                    return Err("frame plan".into());
-                }
-            }
-        }
-        Ok(relocate)
-    }
-
     /// What direct MIR lowering needs from emission: slots, the side
     /// tables planned over the HIR ([`Self::hir_mir_tables`]), call sites,
     /// and the word types of each two-word pair.
@@ -1107,7 +1076,6 @@ impl Compiler {
             };
             pair_locals.insert(local, (tag, lo, hi));
         }
-        let relocate = Self::hir_mir_relocate(hir, emit, frame)?;
         let pair_tys = hir
             .exprs
             .iter()
@@ -1534,7 +1502,6 @@ impl Compiler {
         Ok(crate::mir::HirMirInput {
             unwind_native,
             slots: &frame.slots,
-            relocate,
             pair_locals,
             pair_tys,
             ret_pair,
@@ -10273,13 +10240,10 @@ impl Compiler {
             }
         }
         let root = body.root.expect("planned lambda body");
-        let ret = emit.plan.ret.clone();
         self.hir_plan_par_loops(&body, &mut emit, root);
-        self.hir_value(&body, &mut emit, root, &ret, 0);
-        // A body that returned on every path needs no closing return.
-        if !self.bytecode.ends_in_exit() {
-            self.bytecode.push_return();
-        }
+        // Its code is emitted from its direct MIR; the stack IL only keeps
+        // its function record non-empty.
+        self.bytecode.push_return();
         // Direct MIR takes the captures as the first parameters.
         let mut flat = body.clone();
         flat.params = body.captures.iter().map(|&(_, inner)| inner).chain(body.params.iter().copied()).collect();
@@ -10697,9 +10661,9 @@ impl Compiler {
         emit.plan.cold_ok = self.opt_options.branch_optimization && !self.debugger_attached;
         let root = w.root.expect("worker root");
         self.hir_plan_par_loops(w, &mut emit, root);
-        self.hir_effect(w, &mut emit, root);
-        self.hir_cold = std::mem::take(&mut emit.cold);
-        self.flush_hir_cold();
+        // Its code is emitted from its direct MIR; the stack IL only keeps
+        // its function record non-empty.
+        self.bytecode.push_return();
         self.hir_mir = self.hir_lower_mir(w, &mut emit, None);
         self.bytecode.record_func_with_sp(name.clone(), Some(label), entry, self.bytecode.len(), arity);
         self.attach_hir_mir();
