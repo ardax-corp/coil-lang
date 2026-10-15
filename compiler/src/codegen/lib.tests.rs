@@ -1601,19 +1601,15 @@ fn compile_module_diff_matches_compile_tail_for_fib() {
     let mut ast = Pratt::default().parse(src).expect("parse fib");
 
     // `compile_module` appends IL to the shared buffer; fusion/label
-    // resolution happens once via `finalize_bytecode`.
+    // resolution happens once via `finalize_bytecode`, which emits each
+    // body from its direct MIR.
     let mut module = Compiler::default();
     let _ = module.compile_module("", &mut ast);
-    assert!(
-        module.bytecode.ops().iter().any(|op| {
-            matches!(
-                op.as_plain_byte().map(|b| *b.bytecode()),
-                Some(Instruction::LOAD)
-            )
-        }),
-        "module compile should still contain LOAD in IL before finalize"
-    );
     module.finalize_bytecode();
+    assert!(
+        module.bytecode_slice().iter().any(|b| *b.bytecode() != Instruction::RETURN && *b.bytecode() != Instruction::HALT),
+        "finalized module should hold the bodies' code"
+    );
 
     let mut full = Compiler::default();
     let bc_full = full.compile("", &mut ast);

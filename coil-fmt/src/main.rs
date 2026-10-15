@@ -58,6 +58,11 @@ fn collect_hy_files(root: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
     children.sort();
     for child in children {
         if child.is_dir() {
+            // Deliberately broken programs (`coil test` expects them to be
+            // rejected); a path naming one directly is still formatted.
+            if child.file_name().is_some_and(|n| n == "compile_fail") {
+                continue;
+            }
             collect_hy_files(&child, out)?;
         } else if child.extension().and_then(|e| e.to_str()) == Some("hy") {
             out.push(child);

@@ -1,4 +1,4 @@
-// Helper module for tests/positive/module_static_before_branchy_fn.hy (#958):
+// Helper module for tests/modules/module_static_before_branchy_fn.hy (#958):
 // statics followed by a function whose body has branches, so its labels can
 // share ids with the static-init setup that is laid out right after it.
 
