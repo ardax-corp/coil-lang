@@ -2122,6 +2122,12 @@ impl Walk<'_> {
             ) {
                 return Err("call-argument");
             }
+            // A `()` argument runs for its effect; the call passes the
+            // empty tuple object (#1086).
+            if is_unit_value(self.body, self.checker, arg) {
+                self.effect(arg, if staged { 0 } else { depth + i as u32 })?;
+                continue;
+            }
             self.word(arg)?;
             self.value(arg, if staged { 0 } else { depth + i as u32 })?;
         }
@@ -2366,10 +2372,12 @@ impl Walk<'_> {
                 // Any one-word receiver may name a ground trait instance's
                 // method; codegen resolves inherent methods on objects only.
                 // `().m()`: the unit receiver is an empty tuple object.
-                if !self.shared_receiver(recv) && self.object(recv).is_err() && !is_unit_make(body, recv) {
+                let unit_recv = is_unit_value(body, self.checker, recv);
+                if !self.shared_receiver(recv) && self.object(recv).is_err() && !unit_recv {
                     self.word(recv).map_err(|_| "receiver-type")?;
                 }
-                if is_unit_make(body, recv) {
+                if unit_recv {
+                    self.effect(recv, depth)?;
                     return self.args(&args[1..], depth + 1, depth == 0);
                 }
                 self.args(args, depth, depth == 0)
