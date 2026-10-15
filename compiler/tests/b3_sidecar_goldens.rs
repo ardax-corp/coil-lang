@@ -1,15 +1,15 @@
 //! B3 goldens: sidecar meaning must not change bytecode on a small
-//! `tests/positive` corpus (small files; only the stdlib `assert!` macro).
+//! `tests` corpus (small files; only the stdlib `assert!` macro).
 
 use common::Byte;
 use compiler::Pipeline;
 
 const CORPUS: &[&str] = &[
-    "arithmetic.hy",
-    "functions.hy",
-    "loops.hy",
-    "option_pair.hy",
-    "user_trait_dispatch.hy",
+    "types/arithmetic.hy",
+    "functions/functions.hy",
+    "control_flow/loops.hy",
+    "errors/option_pair.hy",
+    "traits/user_trait_dispatch.hy",
 ];
 
 /// Fingerprints from B2 (pre-swap). Length + FNV-1a over opcode/operand.
@@ -72,11 +72,11 @@ const CORPUS: &[&str] = &[
 /// a host call's result goes through a frame slot (`Seek`, `STORE`,
 /// `LoadReturnSlot`) where emit_hir's stack IL left it on the stack.
 const EXPECTED: &[(&str, &str)] = &[
-    ("arithmetic.hy", "37175bede7c0ac38_1157"),
-    ("functions.hy", "c317db75449f1b1b_282"),
-    ("loops.hy", "397c9331610fd9cc_317"),
-    ("option_pair.hy", "cf3c8119f4a06339_448"),
-    ("user_trait_dispatch.hy", "84a6ac4b793467a4_158"),
+    ("types/arithmetic.hy", "37175bede7c0ac38_1157"),
+    ("functions/functions.hy", "c317db75449f1b1b_282"),
+    ("control_flow/loops.hy", "397c9331610fd9cc_317"),
+    ("errors/option_pair.hy", "cf3c8119f4a06339_448"),
+    ("traits/user_trait_dispatch.hy", "84a6ac4b793467a4_158"),
 ];
 
 fn fingerprint(bc: &[Byte]) -> String {
@@ -94,7 +94,7 @@ fn positive(name: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
-        .join("tests/positive")
+        .join("tests")
         .join(name)
 }
 

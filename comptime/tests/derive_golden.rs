@@ -21,7 +21,7 @@ fn derive_expansion_matches_golden() {
     comptime::install();
     let mut pipeline = Pipeline::with_reporter(ReportConfig::default(), Box::new(std::io::sink()));
     pipeline.bind_workspace_language_roots();
-    let file = repo().join("tests/positive/derive_all_shapes.hy");
+    let file = repo().join("tests/traits/derive_all_shapes.hy");
     let text = pipeline.expanded_source(file.to_str().unwrap()).expect("expands");
     let golden = repo().join("comptime/tests/golden/derive_all_shapes.expanded.hy");
     if std::env::var_os("COIL_BLESS").is_some() {
@@ -33,14 +33,14 @@ fn derive_expansion_matches_golden() {
 }
 
 /// `name!(…)` in expression, statement and item position
-/// (`tests/positive/function_macro.hy`, providers in `examples/src` and
+/// (`tests/macros/function_macro.hy`, providers in `examples/src` and
 /// the stdlib's `assert!`).
 #[test]
 fn function_macro_expansion_matches_golden() {
     comptime::install();
     let mut pipeline = Pipeline::with_reporter(ReportConfig::default(), Box::new(std::io::sink()));
     pipeline.bind_workspace_language_roots();
-    let file = repo().join("tests/positive/function_macro.hy");
+    let file = repo().join("tests/macros/function_macro.hy");
     let text = pipeline.expanded_source(file.to_str().unwrap()).expect("expands");
     let golden = repo().join("comptime/tests/golden/function_macro.expanded.hy");
     if std::env::var_os("COIL_BLESS").is_some() {

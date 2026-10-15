@@ -6,7 +6,7 @@ lines (`name: dense|lir|fuse (dense: why; lir: why; hir: why)`).
 
     # count tiers and refusal reasons, save the per-body result
     scripts/tier_census.py run --coil target/release/coil \
-        --root ../coil-stdlib/src -o new.json examples/perf tests/positive
+        --root ../coil-stdlib/src -o new.json examples/perf tests
 
     # compare two saved runs; exits 1 when any body drops a tier
     scripts/tier_census.py compare old.json new.json

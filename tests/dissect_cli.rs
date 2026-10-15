@@ -318,7 +318,7 @@ fn dissect_reads_hyc_archive() {
 fn dissect_expand_prints_macro_output() {
     ensure_coil_dissect();
     let bin = coil_bin();
-    let entry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/positive/attr_macro.hy");
+    let entry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/macros/attr_macro.hy");
     let out = coil_dissect(&bin, Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))), &entry)
         .arg("--expand")
         .output()

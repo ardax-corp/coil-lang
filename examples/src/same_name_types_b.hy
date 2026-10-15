@@ -1,4 +1,4 @@
-// Second helper module for tests/positive/same_name_types_across_modules.hy
+// Second helper module for tests/modules/same_name_types_across_modules.hy
 // (#957): another `Reader`, so two non-entry modules share the name too.
 use string::format;
 

@@ -1,4 +1,4 @@
-// Helper module for tests/positive/same_name_types_across_modules.hy (#957):
+// Helper module for tests/modules/same_name_types_across_modules.hy (#957):
 // a class and an enum that share their names with the test file's own.
 
 use string::format;

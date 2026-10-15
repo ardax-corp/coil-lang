@@ -636,6 +636,19 @@ impl Compiler {
         {
             t.existential_calls.insert(id.0, slot);
         }
+        // A host call that needs a capability: the check finds its
+        // `HostInvoke` in this body's MIR by the call's loc.
+        if let HirKind::Call { args, .. } = &e.kind
+            && let Some(HirBuiltin::Host(native)) = emit.plan.calls.get(&id.0).and_then(|c| c.builtin)
+            && let Some(row) = common::HOST_NATIVES.get(native)
+            && self.native_id(row.name) == Some(native)
+        {
+            let mode = match args.get(1).map(|&a| &hir.expr(a).kind) {
+                Some(HirKind::Lit(Lit::Str(m))) => Some(m.as_str()),
+                _ => None,
+            };
+            self.note_gated_host_call(row.name, e.span, mode);
+        }
         if let HirKind::Field { base, name } = &e.kind
             && self.hir_field_of_new(hir, *base, name).is_some()
         {

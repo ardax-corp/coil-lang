@@ -1864,7 +1864,7 @@ fn fn_param_ids_do_not_overwrite_other_nodes() {
     // Once the counter drifted, a later `float x` param landed on `lcm`'s
     // int `a`, and codegen compiled `a * b` to MULF.
     // Windows checkouts may carry CRLF; spans below assume `\n`.
-    let src = include_str!("../../../../tests/positive/overload_int_mul_after_float.hy")
+    let src = include_str!("../../../../tests/functions/overload_int_mul_after_float.hy")
         .replace("\r\n", "\n");
     let src = src.as_str();
     let mut c = Checker::new();

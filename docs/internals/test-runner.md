@@ -9,7 +9,7 @@ the same flags with the same output.
 ```bash
 cargo build              # coil + coil-test (+ other helpers)
 coil test                # ./tests
-coil test tests/positive --fail-fast -O0
+coil test tests/patterns --fail-fast -O0
 coil test --root examples/src --root .deps/coil-stdlib/src
 coil-test --help         # same flags as `coil test --help`
 ```
@@ -113,6 +113,36 @@ worker count and the number of compile threads.
   maps as `coil <file>` (`wire_pipeline_threads`), so a `collect()` in a test
   exercises production roots.
 - Cases that call `thread::spawn` put their jobs on the same reactor.
+
+## Corpora in parallel
+
+`tests/` holds one corpus per part of the language (`tests/README.md`).
+`scripts/test_corpora.py` runs each corpus as its own `coil test` process,
+largest first, several at once, and prints one line per corpus plus the
+failing files' output:
+
+```bash
+scripts/test_corpora.py -- --root examples/src --root ../coil-stdlib/src
+scripts/test_corpora.py patterns traits -- -O 0
+scripts/test_corpora.py --shard 2/3 --no-build -- …   # every 3rd corpus from the 2nd
+```
+
+It builds `coil` / `coil-test` first (`--release` for the release build;
+cargo's cache makes that a no-op when nothing changed). `--bin DIR` uses
+binaries already built, `--harness PATH` runs a `coil-test` directly (the
+GC-stress build), `--limit-as-kb N` caps each process's address space like
+`ulimit -v` (the leak smoke, `-j 1` per process). Logs land in
+`target/corpora/<corpus>.log`.
+
+CI builds the binaries once per OS and build mode (`harness-build`: debug
+and release, each with its GC-stress `coil-test`) and runs every setting
+(default, `-O 0`, `COIL_HIR_INLINE=0`, leak smoke, GC stress) in both modes
+as separate `harness` cells, side by side. The same corpus must pass in both
+modes, so a build-mode difference (optimizer, overflow checks, debug
+assertions) fails one of them.
+
+On four cores the whole corpus takes ~14 s this way against ~31 s for one
+`coil test` process on a release build (2026-10-15).
 
 ## Coverage
 

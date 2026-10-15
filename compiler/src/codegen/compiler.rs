@@ -9063,7 +9063,11 @@ impl Compiler {
     fn finalize_bytecode_inner(&mut self, capture_il: bool) -> FinalizeIlOut {
         // Splice static initializers + `extern` setup into the IL before lower.
         // Order: user static inits, then FFI dlopen/declare, then JMP → main.
-        let setup_pos = self.program_start_offset as usize;
+        // Right after the prologue `HALT`, ahead of every body, so the
+        // setup is prologue code: its labels keep their ids when the module
+        // flattens. Glue after a body shares that body's relabelling, and
+        // an id the body minted could claim the setup's entry or its jumps.
+        let setup_pos = PROLOGUE_HALT_OFFSET + 1;
         let mut init_len = 0usize;
 
         if !self.static_init.is_empty() {
