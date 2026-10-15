@@ -5868,7 +5868,13 @@ impl Checker {
             match child.1.as_ref() {
                 Expression::Variable(name, ty_opt) => {
                     let var_ty = match ty_opt {
-                        Some(ann) => self.parse_type_name(ann),
+                        Some(ann) => {
+                            let ty = self.parse_type_name(ann);
+                            // A type-only `let x: T;` has no initializer to
+                            // type its local: codegen reads `T` here.
+                            self.codegen_types_by_span.insert((ann.0.start, ann.0.end), ty.clone());
+                            ty
+                        }
                         None => Ty::Var(self.counter.fresh()),
                     };
                     self.env

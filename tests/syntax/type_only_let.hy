@@ -36,7 +36,7 @@ test("type-only float, bool and byte lets") {
     y = 7;
     assert!(f == 1.5);
     assert!(b);
-    assert!(y == 7);
+    assert!((y as int) == 7);
 }
 
 test("type-only let assigned in a loop") {

@@ -1153,9 +1153,12 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             E::Program(items) => self.block(b, node, items, false),
             E::Fragment(items) => self.fragment(b, node, items),
 
-            E::Variable(name, _) => {
+            E::Variable(name, ann) => {
                 // A bare `let x;` (the init, if any, is the next fragment item).
-                let ty = self.local_ty(node, name);
+                let ty = self.local_ty(node, name).or_else(|| {
+                    let ann = ann.as_ref()?;
+                    self.ty_of(ann)
+                });
                 let local = b.local(name, ty, LocalKind::Let);
                 self.emit_ty(b, node, HirKind::Let { local, init: None }, Some(coil_ty::unit()))
             }

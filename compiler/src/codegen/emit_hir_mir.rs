@@ -370,8 +370,8 @@ impl Compiler {
         }
         let walk = |k: HirId, value: bool, defer: bool, bound: &mut HashSet<u32>| self.hir_mir_bound(hir, emit, k, value, defer, bound);
         match &hir.expr(id).kind {
-            HirKind::Let { local, init } => {
-                if !defer && init.is_some() && !lower::is_unit_local(hir, &self.checker, *local) {
+            HirKind::Let { local, .. } => {
+                if !defer && !lower::is_unit_local(hir, &self.checker, *local) {
                     bound.insert(local.0);
                 }
             }

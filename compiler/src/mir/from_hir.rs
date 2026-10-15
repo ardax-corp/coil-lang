@@ -3012,6 +3012,14 @@ impl Lower<'_> {
             HirKind::Let { local, init: Some(init) } if self.hir.local(*local).name == "_" || self.unit_local(*local) => {
                 Ok(if self.effect(*init)? { Val::Unit } else { Val::Never })
             }
+            // A type-only `let x: T;` of a scalar: zero until assigned.
+            HirKind::Let { local, init: None } => {
+                let ty = self.local_ty(*local)?;
+                let slot = self.slot(*local)?;
+                let v = self.zero(ty)?;
+                self.b.def_local(slot, v).map_err(mir)?;
+                Ok(Val::Unit)
+            }
             HirKind::Let { local, init } => {
                 let init = init.ok_or("uninitialized let")?;
                 let ty = self.local_ty(*local)?;

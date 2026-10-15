@@ -2769,7 +2769,11 @@ impl Walk<'_> {
                 self.word(*init)?;
                 self.value(*init, depth)
             }
-            HirKind::Let { init: None, .. } => Err("uninitialized-let"),
+            // A type-only `let x: T;` of a scalar starts at zero.
+            HirKind::Let { local, init: None } => match body.local(*local).ty.as_ref().and_then(primitive) {
+                Some(coil_ty::INT | coil_ty::FLOAT | coil_ty::BOOL | coil_ty::BYTE) if depth == 0 => Ok(()),
+                _ => Err("uninitialized-let"),
+            },
             HirKind::Clear(_) => Ok(()),
             // `let (a, b) = t` / `let { x } = r`: the value to a temp, then
             // each name read from it (`Index` / `GetField`).
