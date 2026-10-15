@@ -909,6 +909,12 @@ impl MirBuilder {
         self.set_term(Terminator::Unreachable)
     }
 
+    /// [`Terminator::Unreachable`]: no path reaches the end of the current
+    /// block.
+    pub fn unreachable(&mut self) -> Result<(), MirError> {
+        self.set_term(Terminator::Unreachable)
+    }
+
     /// Whether every path from the entry to the current block defines
     /// `local` (a known predecessor that does not leads to one that does).
     pub fn local_defined(&self, local: LocalId) -> bool {

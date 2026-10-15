@@ -594,6 +594,9 @@ struct Lower<'a> {
     /// The expression being lowered is `return`ed: a `match` or `if`
     /// returns from each arm instead of joining, as HIR emission does.
     ret_tail: bool,
+    /// The source type of each arm value, by the block the arm ends in: a
+    /// join of a boxed arm with pair arms unboxes it there.
+    arm_tys: HashMap<BlockId, Ty>,
     /// Next local for a value HIR emission keeps in a temp slot (a `for`
     /// loop's index), numbered past any frame slot.
     next_temp: u32,
@@ -897,7 +900,15 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         Ty::App(_, args) if hir.is_coro && is_coroutine(ret) => &args[0],
         _ => ret,
     };
-    let unit_ret = is_unit(ret);
+    // A body that never returns (it only panics) leaves its return type a
+    // type variable no word layout covers (a shared generic body's is a
+    // word): nothing reads its word, so it returns as a unit body.
+    let never_ret = matches!(strip_readonly(ret), Ty::Var(_))
+        && inp.ret_pair.is_none()
+        && inp.ret_boxed_niche.is_none()
+        && inp.word(ret).is_none()
+        && (inp.boxed_view)(ret, None).is_none();
+    let unit_ret = is_unit(ret) || never_ret;
     let ret_ty = match inp.ret_pair {
         _ if unit_ret => MirTy::I64,
         None if inp.ret_boxed_niche.is_some() => MirTy::HeapRef,
@@ -991,6 +1002,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         cold: Vec::new(),
         aliases: HashMap::new(),
         ret_tail: false,
+        arm_tys: HashMap::new(),
         next_temp: TEMP_BASE,
         boxes: HashMap::new(),
         unniche: HashMap::new(),
@@ -1052,6 +1064,11 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
     } else {
         match lower.value(root)? {
             Val::Never => {}
+            // A valued body the checker lets end without a return (a
+            // `while` on a constant `true`) never gets here.
+            Val::Unit if !lower.unit_ret && lower.inp.ret_boxed_niche.is_none() && !unit_result(&lower.ret_hir) => {
+                lower.b.unreachable().map_err(mir)?;
+            }
             val => lower.ret(val)?,
         }
     }
@@ -1128,6 +1145,7 @@ fn lower_pad(hir: &HirBody, inp: &HirMirInput, parts: PadParts<'_>) -> Result<Mi
         cold: Vec::new(),
         aliases: HashMap::new(),
         ret_tail: false,
+        arm_tys: HashMap::new(),
         next_temp: TEMP_BASE,
         boxes: HashMap::new(),
         unniche: HashMap::new(),
@@ -6675,7 +6693,12 @@ impl Lower<'_> {
                 self.ret(val)?;
                 Ok(Val::Never)
             }
-            val => Ok(val),
+            val => {
+                if let (Val::V(_), Some(ty)) = (val, self.expr_ty(body).cloned()) {
+                    self.arm_tys.insert(self.cur, ty);
+                }
+                Ok(val)
+            }
         }
     }
 
@@ -6763,6 +6786,7 @@ impl Lower<'_> {
         if arms.is_empty() {
             return Ok(Val::Never);
         }
+        let arms = self.unbox_arms(arms)?;
         let join = self.b.create_block();
         for &(block, _) in &arms {
             self.b.switch_to_block(block);
@@ -6770,6 +6794,34 @@ impl Lower<'_> {
         }
         self.switch(join);
         self.join(arms)
+    }
+
+    /// Arms meeting where some give a pair and others a boxed word (an
+    /// `Option` payload of a `Result` beside an `Option::None` built
+    /// boxed): each boxed arm unboxes to the pair at its end, as HIR
+    /// emission's join converts it.
+    fn unbox_arms(&mut self, arms: Vec<(BlockId, Val)>) -> Result<Vec<(BlockId, Val)>, Refusal> {
+        let Some((lo_ty, hi_ty)) = arms.iter().find_map(|&(_, v)| match v {
+            Val::Pair(lo, hi) => Some((self.b.value_ty(lo), self.b.value_ty(hi))),
+            _ => None,
+        }) else {
+            return Ok(arms);
+        };
+        if !arms.iter().any(|&(_, v)| matches!(v, Val::V(w) if self.b.value_ty(w) == MirTy::HeapRef)) {
+            return Ok(arms);
+        }
+        let mut out = Vec::with_capacity(arms.len());
+        for (block, val) in arms {
+            match (val, self.arm_tys.get(&block).cloned()) {
+                (Val::V(v), Some(ty)) if self.b.value_ty(v) == MirTy::HeapRef => {
+                    self.switch(block);
+                    let val = self.unbox_word(&ty, v, lo_ty, hi_ty)?;
+                    out.push((self.cur, val));
+                }
+                arm => out.push((block, arm.0)),
+            }
+        }
+        Ok(out)
     }
 }
 

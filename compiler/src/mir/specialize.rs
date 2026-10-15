@@ -664,10 +664,26 @@ fn lir_tail(
         Err(e) => return refuse(format!("emit: {e}")),
     };
     if let Some(pad) = func.cleanup.as_deref() {
-        let (label, frame, ops) = match emit_cleanup_pad(&func, pad, &out, pool) {
+        let (label, frame, ops, pad_map) = match emit_cleanup_pad(&func, pad, &out, pool) {
             Ok(p) => p,
             Err(why) => return refuse(why),
         };
+        // The pad's allocation sites follow the body's: its map's sites
+        // continue the body's (a body with none starts a map).
+        if let Some(pad_map) = pad_map {
+            if side.stack_map.is_none() && func.has_gc_edge() {
+                return refuse("cleanup pad map");
+            }
+            let map = side.stack_map.get_or_insert_with(|| super::stackmap::DraftFrameMap {
+                name: name.to_string(),
+                sites: Vec::new(),
+                frame_slots: Vec::new(),
+            });
+            map.sites.extend(pad_map.sites);
+            map.frame_slots.extend(pad_map.frame_slots);
+            map.frame_slots.sort_unstable();
+            map.frame_slots.dedup();
+        }
         out.extend(ops);
         side.cleanup_pad = Some((label, frame));
     }
@@ -686,11 +702,16 @@ fn lir_tail(
 
 /// The LIR of `func`'s cleanup `pad`, to follow `body` (`func`'s LIR): its
 /// label (past every label `body` names), the frame words of `func` it
-/// reads, and its ops. Its own registers sit past that frame.
-fn emit_cleanup_pad(func: &crate::mir::MirFunc, pad: &crate::mir::MirFunc, body: &[IlOp], pool: &mut Vec<u64>) -> Result<(Label, u32, Vec<IlOp>), String> {
-    if pad.has_gc_edge() {
-        return Err("cleanup pad allocates".into());
-    }
+/// reads, its ops, and the stack map of its allocation sites (its heap
+/// registers and the heap homes it reads, in the shared frame). Its own
+/// registers sit past that frame.
+#[allow(clippy::type_complexity)]
+fn emit_cleanup_pad(
+    func: &crate::mir::MirFunc,
+    pad: &crate::mir::MirFunc,
+    body: &[IlOp],
+    pool: &mut Vec<u64>,
+) -> Result<(Label, u32, Vec<IlOp>, Option<super::stackmap::DraftFrameMap>), String> {
     let (base, frame) = super::emit_lir::lir_home_frame(func).ok_or("cleanup pad frame")?;
     let mut pad = pad.clone();
     pad.home_base = Some(base);
@@ -711,8 +732,15 @@ fn emit_cleanup_pad(func: &crate::mir::MirFunc, pad: &crate::mir::MirFunc, body:
         .max()
         .unwrap_or(0);
     let label = Label(top + 1);
-    let ops = super::emit_lir::emit_lir(&pad, Some(label), pool, false).map_err(|e| format!("cleanup pad: {e}"))?;
-    Ok((label, frame, ops))
+    let mapped = pad.has_mapped_gc_edge();
+    let map = if mapped {
+        let (_, _, map) = super::emit_lir::lir_sidecars(&pad);
+        Some(map.ok_or("cleanup pad map")?)
+    } else {
+        None
+    };
+    let ops = super::emit_lir::emit_lir(&pad, Some(label), pool, mapped).map_err(|e| format!("cleanup pad: {e}"))?;
+    Ok((label, frame, ops, map))
 }
 
 /// Last-arm writes must remain as `StorePop` (LIR) or `DenseMove` (dense
