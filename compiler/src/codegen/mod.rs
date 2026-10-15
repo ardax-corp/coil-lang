@@ -4,14 +4,14 @@ use std::{
 };
 
 use common::{
-    Byte, DEBUG_FILE_UNKNOWN, DebugLoc, FnDebugSym, Instruction, Interner, Value, ValueTag,
+    Byte, DEBUG_FILE_UNKNOWN, DebugLoc, FnDebugSym, Instruction, Interner, ValueTag,
     encode_tag_operand, tag,
 };
 use reporting::Label as DiagLabel;
 
 use crate::block_builder::{BlockBuilder, JumpKind as BbJumpKind, Label as BbLabel};
 use crate::const_fold::ConstValue;
-use crate::il::{CodeBuf, EmitBuf, EntryKind, FuseHint, IlJumpKind, IlOp, Label as IlLabel};
+use crate::il::{CodeBuf, EmitBuf, EntryKind, FuseHint, IlOp, Label as IlLabel};
 use crate::monomorphize::{MonoKey, MonoPlan};
 use crate::typechecking::{Checker, Ty};
 use parser::{
@@ -411,16 +411,6 @@ pub struct Compiler {
     /// Active loop patchers. Break/continue emit through the innermost builder.
     loop_bbs: Vec<BlockBuilder>,
 
-    /// Registered `defer` thunks in the function currently being compiled
-    /// (declaration order). Run LIFO on return / fall-through via
-    /// `emit_run_defers`. Kept on `Compiler` (not `Context`) so nested
-    /// block frames do not drop registered defers.
-                        ///
-    /// Each thunk stores an IL label bound at its body entry and the `use (…)`
-    /// capture names. At run time those captures are LOADed from the enclosing
-    /// frame and passed as CALL arguments so the thunk's fresh frame sees them
-    /// at slots 0..N-1 (same layout as lambda capture slots).
-    fn_defers: FnDefers,
     /// Functions with a `defer` cleanup pad, resolved to pcs at finalize.
     cleanup_pads: Vec<CleanupPad>,
     /// [`Self::cleanup_pads`] resolved at finalize (sorted by `start_pc`).
@@ -674,9 +664,6 @@ pub struct Compiler {
     hir_entry_unbox: Vec<(u32, u32)>,
     /// Those of the body being lowered.
     hir_mir_unbox: Vec<(u32, u32)>,
-    /// Raw op ranges of the early exits the last HIR body marked cold, laid
-    /// out after its epilogue ([`Compiler::flush_hir_cold`]).
-    hir_cold: Vec<(usize, usize)>,
     /// HIR of the module being compiled.
     hir_module: Option<crate::hir::HirModule>,
     /// Function body index in [`Self::hir_module`] by declaration span.
@@ -757,7 +744,6 @@ impl Default for Compiler {
             codegen_depth: 0,
             loop_stack: Vec::new(),
             loop_bbs: Vec::new(),
-            fn_defers: FnDefers::default(),
             cleanup_pads: Vec::new(),
             cleanup_ranges: Vec::new(),
             active_fn_name: None,
@@ -842,7 +828,6 @@ impl Default for Compiler {
             stack_map_drafts: Vec::new(),
             deopt_map_drafts: Vec::new(),
             hir_refusal: None,
-            hir_cold: Vec::new(),
             hir_module: None,
             hir_fns: HashMap::new(),
             hir_inline: crate::hir::inline::inline_from_env(),
@@ -935,44 +920,12 @@ pub(crate) struct InstClone {
     name: String,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct DeferThunk {
-    /// Thunk entry (bound inside the function body, jumped over).
-    pub label: BbLabel,
-    /// Bound right after the thunk: where the function continues.
-    pub after: BbLabel,
-    /// `use (…)` capture names, LOADed from the frame when the thunk runs.
-    pub captures: Vec<String>,
-    /// Each capture's slot where the `defer` stands: the cleanup pad's
-    /// fallback once a block-scoped name is gone.
-    pub slots: Vec<Option<u32>>,
-    /// Armed flag slot (set when the `defer` statement runs).
-    pub flag: Option<u32>,
-}
-
-/// The `defer`s of the function being compiled.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct FnDefers {
-    pub thunks: Vec<DeferThunk>,
-    /// Armed flag slots, zeroed at function entry; thunk `k` takes `flags[k]`.
-    pub flags: Vec<u32>,
-}
-
-impl FnDefers {
-    pub fn is_empty(&self) -> bool {
-        self.thunks.is_empty()
-    }
-}
-
 /// A function's cleanup pad, before label resolution.
 #[derive(Clone, Debug)]
 pub(crate) struct CleanupPad {
     /// Function table key (resolves labels through its IL chunk).
     pub func: String,
     pub pad: BbLabel,
-    /// `(thunk, after)` label pairs: pcs in `thunk..after` are thunk code,
-    /// not the function's own frame.
-    pub thunks: Vec<(BbLabel, BbLabel)>,
     /// Slots the frame uses; the unwinder raises the stack top past them.
     pub frame_words: u32,
 }

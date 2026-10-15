@@ -1597,8 +1597,7 @@ pub fn arm_fields(body: &HirBody, pat: &HirPat) -> Result<Vec<Option<super::Loca
 /// generic function, or a call returning a captured `PolyFn`, boxes its
 /// arguments in the AST and stays there.
 /// A never-reassigned parameter or `let` local holding a `PolyFn`: its
-/// calls box each argument and may pass dictionaries
-/// (`Compiler::hir_polyfn_call`).
+/// calls box each argument and may pass dictionaries.
 pub fn polyfn_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
     let HirKind::Local(local) = body.expr(f).kind else {
         return false;

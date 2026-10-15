@@ -255,7 +255,7 @@ struct HirPlan {
     stacks: HashMap<u32, usize>,
     /// Block statements that box escaping stack arrays before they run.
     box_at: HashMap<u32, Vec<u32>>,
-    /// Whether early exits move out of line ([`Compiler::hir_mark_cold`]).
+    /// Whether early exits move out of line (MIR block layout).
     cold_ok: bool,
     /// Parallel loops moved into their own fork-join functions, by loop
     /// ([`Compiler::hir_plan_par_loops`]): the direct MIR lowering's calls.
@@ -308,7 +308,7 @@ struct HirParPlanned {
 }
 
 /// How a call to a function with an auto-par fork site forks
-/// ([`Compiler::hir_par_call`]).
+/// ([`Compiler::hir_par_call_plan`]).
 enum HirParCall {
     /// All-literal arguments the site's guards accept: the worker with its
     /// hop budget.
@@ -354,10 +354,9 @@ enum HirOp {
     /// instance method in dictionary slot `dict` at `method`, through
     /// `CallIndirect` (`emit_bound_operator_call`).
     Bound { dict: u32, method: u32 },
-    /// An element-wise op (`Compiler::hir_aggregate`).
+    /// An element-wise op on the packed kernel.
     Aggregate(crate::typechecking::AggregateArithInfo),
-    /// A matrix / vector operator the checker recorded as linear algebra
-    /// (`Compiler::hir_linear_algebra_op`).
+    /// A matrix / vector operator the checker recorded as linear algebra.
     LinAlg(crate::typechecking::aggregate_arith::LinearAlgebraInfo),
 }
 
@@ -1431,7 +1430,7 @@ impl Compiler {
                 _ => None,
             })
             .collect();
-        // As `hir_for_in`'s `pin`: array loops the checker pinned.
+        // Array loops the checker pinned.
         let pinned_for = (0..hir.exprs.len() as u32)
             .filter(|&i| {
                 let node = hir.expr(HirId(i));
@@ -4215,7 +4214,7 @@ impl Compiler {
                 _ => return Err("callee-signature"),
             }
             // A `%v` argument stays in its own layout: `Show` boxes it as
-            // the AST's `emit_show_for_stack_value` does.
+            // the AST did.
             let show = !params.is_empty() && shows.get(params.len() - 1) == Some(&'v');
             params.push(match self.value_layout(ty) {
                 ValueLayout::NicheUnitResult | ValueLayout::NicheResult if !show => ValueLayout::Boxed,
@@ -4664,8 +4663,7 @@ impl Compiler {
         let Some(cur) = self.current_function_table_key.as_deref() else {
             return false;
         };
-        self.fn_defers.is_empty()
-            && (self.same_fn_key(key, cur) || self.both_in_rec_cycle(cur, key))
+        (self.same_fn_key(key, cur) || self.both_in_rec_cycle(cur, key))
             && self.tail_call_abi_matches(key)
     }
 
@@ -5939,7 +5937,7 @@ impl Compiler {
         }
     }
 
-    /// A pattern [`Self::hir_seq_test`] tests against a word of type `ty`
+    /// A pattern a match tests against a word of type `ty`
     /// in `layout`: each binding must take the word's layout.
     fn hir_check_seq_pattern(&self, hir: &HirBody, pat: &HirPat, ty: Option<&Ty>, layout: ValueLayout) -> Check {
         let HirPat::Variant {
@@ -6356,17 +6354,9 @@ impl Compiler {
         (self.hir_tag(made_ty, made_enum, made_variant)? == tag).then_some(tag)
     }
 
-    /// Lay out the early exits of the body just lowered after its end (its
-    /// fall-through return emitted, so no jump over them is needed).
-    pub(super) fn flush_hir_cold(&mut self) {
-        let cold = std::mem::take(&mut self.hir_cold);
-        let moved = self.bytecode.move_exits_to_end(&cold);
-        crate::il::opt::note_branches_optimized(moved);
-    }
-
     /// The `vec_from_array` native when value `value`, bound or assigned to
     /// a local, is a fixed array read from another (heap) local, which
-    /// [`Self::hir_value_copied`] copies.
+    /// direct MIR copies.
     fn hir_array_copy(&self, hir: &HirBody, emit: &HirEmit, value: HirId) -> Option<usize> {
         let copied = match hir.expr(value).kind {
             HirKind::Local(src) => {
@@ -6585,7 +6575,6 @@ impl Compiler {
         let prev_keys = std::mem::take(&mut self.field_key_slots);
         let prev_unbox = std::mem::take(&mut self.hir_mir_unbox);
         let prev_ctx = std::mem::take(&mut self.hir_mir_ctx);
-        let prev_defers = std::mem::take(&mut self.fn_defers);
         let start = self.bytecode.len();
         self.fn_entry_labels.insert(name.clone(), label);
         self.bind_function_entry(name.clone());
@@ -6626,7 +6615,6 @@ impl Compiler {
         self.bytecode.record_func_with_sp(name.clone(), Some(label), start, self.bytecode.len(), arity);
         self.attach_hir_mir();
         self.record_unboxed_class_fields();
-        self.fn_defers = prev_defers;
         self.hir_mir_ctx = prev_ctx;
         self.hir_mir_unbox = prev_unbox;
         self.field_key_slots = prev_keys;
@@ -6695,7 +6683,6 @@ impl Compiler {
             c.bind_function_entry(bind);
         });
         if lowered {
-            self.flush_hir_cold();
             let label = self.fn_entry_labels.get(driver).copied();
             self.bytecode.record_func_with_sp(driver.to_string(), label, start, self.bytecode.len(), words);
             self.attach_hir_mir();
@@ -6705,7 +6692,7 @@ impl Compiler {
     }
 
     /// The fork-join of `site` as HIR, `(acc, …live captures, [begin],
-    /// [end]) -> acc`, as `emit_par_loop_chunks` writes it: spawn every
+    /// [end]) -> acc`: spawn every
     /// chunk on `worker`, join each in order and fold its partial onto the
     /// accumulator. A failed spawn or join joins the handles still out and
     /// runs the whole range on this thread. A dynamic range splits in two
@@ -6821,7 +6808,7 @@ impl Compiler {
             let whole = (Bound::Const(bounds[0]), Bound::Const(*bounds.last().expect("chunk bounds")));
             stmts.push(fork(&mut b, &chunks, whole));
         } else {
-            // `[lo, hi)` and its trip count, as `emit_dynamic_par_chunks`.
+            // `[lo, hi)` and its trip count.
             let bound = |b: &mut Synth, local: Option<LocalId>, konst: i64, bias: i64| {
                 let v = match local {
                     Some(l) => b.read(l),
@@ -7016,7 +7003,7 @@ impl Compiler {
         Some((entry as u32, name))
     }
 
-    /// Whether and how [`Self::hir_par_call`] forks the call of `key`.
+    /// Whether and how the call of `key` forks.
     fn hir_par_call_plan(&self, hir: &HirBody, key: &str, args: &[HirId]) -> Option<HirParCall> {
         let short = Self::par_shape_key(key);
         // A fork-join worker calls the sequential functions it forks.
