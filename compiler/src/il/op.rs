@@ -327,6 +327,8 @@ fn is_plain_bin_instruction(op: Instruction) -> bool {
             | Instruction::MODF
             | Instruction::LEF
             | Instruction::LEQF
+            | Instruction::EQF
+            | Instruction::NEQF
             | Instruction::GTF
             | Instruction::GEQF
             | Instruction::PowF

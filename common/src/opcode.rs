@@ -463,6 +463,11 @@ pub enum Instruction {
     /// [`Self::MakeArray`] plus the element word kind: `[17:16]` kind
     /// (`WORD_*`; only pointer is kept), `[15:0]` arity. Archive **minor 28**.
     MakeArrayK,
+    /// IEEE 754 `float` `==`: NaN is unequal to itself, `0.0 == -0.0`.
+    /// Archive **minor 38**.
+    EQF,
+    /// IEEE 754 `float` `!=`. Archive **minor 38**.
+    NEQF,
 }
 
 impl From<u8> for Instruction {
@@ -914,6 +919,8 @@ impl Instruction {
             Self::DenseMakeK => "DenseMakeK",
             Self::TagArrayKind => "TagArrayKind",
             Self::MakeArrayK => "MakeArrayK",
+            Self::EQF => "EQF",
+            Self::NEQF => "NEQF",
         }
     }
 }
@@ -2031,7 +2038,7 @@ mod tests {
     fn instruction_from_u8_covers_last_appended_variant() {
         // ARCHIVE stability: last variant must remain decodable (keep in sync
         // with machine release `promise!` ceiling).
-        let last = Instruction::MakeArrayK as u8;
+        let last = Instruction::NEQF as u8;
         let decoded: Instruction = last.into();
         assert_eq!(decoded as u8, last);
     }

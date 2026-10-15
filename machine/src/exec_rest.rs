@@ -202,6 +202,8 @@ impl<const S: usize> Machine<S> {
                 }
                 Instruction::LEF => binary!(self.stack, <, as_float),
                 Instruction::LEQF => binary!(self.stack, <=, as_float),
+                Instruction::EQF => binary!(self.stack, ==, as_float),
+                Instruction::NEQF => binary!(self.stack, !=, as_float),
                 Instruction::GTF => binary!(self.stack, >, as_float),
                 Instruction::GEQF => binary!(self.stack, >=, as_float),
                 Instruction::FORMAT => {

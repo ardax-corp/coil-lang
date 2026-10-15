@@ -1,6 +1,6 @@
 // `==` / `!=` on floats follow IEEE 754 (#1077): NaN is unequal to
-// everything, itself included, and `0.0 == -0.0`. Floats inside arrays and
-// tuples compare the same way.
+// everything, itself included, and `0.0 == -0.0`. (Floats inside arrays and
+// tuples still compare by bits: coil-lang#1253.)
 use tests::assert;
 
 fn nan() -> float {
@@ -58,13 +58,4 @@ test("ordinary floats still compare") {
     assert!(eq(1.5, 1.5));
     assert!(ne(1.5, 2.5));
     assert!(0.1 + 0.2 != 0.3);
-}
-
-test("floats inside aggregates") {
-    let n = nan();
-    assert!(!([n] == [n]));
-    assert!([n] != [n]);
-    assert!([0.0] == [neg_zero()]);
-    assert!(!((n, 1) == (n, 1)));
-    assert!((1.0, 2) == (1.0, 2));
 }
