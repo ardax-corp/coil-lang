@@ -95,10 +95,13 @@ fn refuse<T>(why: impl std::fmt::Display) -> Option<T> {
     note_refusal(&LIR_REFUSAL, why)
 }
 
-/// `COIL_MIR_FUSE=1` (M5g, measuring): every body with MIR from HIR takes
-/// its stack IL from that MIR (`emit_lir`), past the LIR walls and cost gate.
-/// `COIL_MIR_FUSE_ONLY=a,b` limits the flag to bodies whose names contain
-/// one of the parts (bisecting); `COIL_MIR_FUSE_LOG=1` lists the bodies taken.
+/// Every body takes its stack IL from its MIR lowered from HIR (`emit_lir`),
+/// past the LIR walls and cost gate (M5p: the default). A body left on
+/// emit_hir's stack lowering is an internal compiler error.
+/// `COIL_MIR_FUSE=0` turns this off (the HIR stack lowering, until it is
+/// deleted); `COIL_MIR_FUSE_ONLY=a,b` limits it to bodies whose names
+/// contain one of the parts (bisecting); `COIL_MIR_FUSE_LOG=1` lists the
+/// bodies taken.
 pub fn mir_fuse_takes(name: &str) -> bool {
     let take = std::env::var("COIL_MIR_FUSE_ONLY").map_or(true, |only| only.split(',').any(|p| name.contains(p)));
     if take && std::env::var_os("COIL_MIR_FUSE_LOG").is_some() {
@@ -109,7 +112,7 @@ pub fn mir_fuse_takes(name: &str) -> bool {
 
 pub fn mir_fuse_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("COIL_MIR_FUSE").is_some_and(|v| !v.is_empty() && v != "0"))
+    *ON.get_or_init(|| std::env::var_os("COIL_MIR_FUSE").is_none_or(|v| v != "0"))
 }
 
 /// What the dense / LIR gates of one body read (N1b).
@@ -118,7 +121,7 @@ pub enum GateRef<'a> {
     /// Default: emit_hir's stack IL, which runs when every tier refuses.
     /// Facts (allocation, loops, params) and comparisons read it.
     Stack(&'a [IlOp]),
-    /// A fused body (`COIL_MIR_FUSE=1`): facts come from its MIR
+    /// A fused body (the default): facts come from its MIR
     /// ([`super::gates::GateFacts`]), and comparisons read the fuse IL the
     /// LIR tier emits from that same MIR, which is what runs when dense
     /// refuses (`None` when the LIR tier refuses too: nothing to compare).
@@ -576,7 +579,9 @@ pub fn try_lower_abi_body_side(
     let has_alloc = match (gate, from_hir) {
         (GateRef::Stack(ops), _) => {
             let has_alloc = ops.iter().any(refuses_alloc);
-            if has_alloc && has_post_loop_alloc_return(ops) && !mir_fuse_on() {
+            // A stack-gated body is unfused (`COIL_MIR_FUSE=0` or a test's
+            // `hir_stack`): it keeps the unfused walls.
+            if has_alloc && has_post_loop_alloc_return(ops) {
                 return refuse("post-loop alloc return");
             }
             has_alloc
@@ -598,8 +603,7 @@ pub fn try_lower_abi_body_side(
         return refuse("no MIR maps");
     }
     let wall = match gate {
-        GateRef::Stack(ops) => super::entry::lir_refuse_direct(ops, has_alloc)
-            .filter(|&wall| !(mir_fuse_on() && wall == super::entry::LirRefuse::Call)),
+        GateRef::Stack(ops) => super::entry::lir_refuse_direct(ops, has_alloc),
         GateRef::Mir(_) => super::gates::fuse_lir_wall(direct, has_alloc),
     };
     if let Some(wall) = wall {

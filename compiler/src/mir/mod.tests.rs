@@ -1981,16 +1981,24 @@ fn fn_body(src: &str, name: &str) -> (Vec<common::Byte>, Vec<common::Byte>, Vec<
 /// recursive calls' results. The stack lift once typed them scalar (open
 /// call results), which dropped the first subtree from the GC roots across
 /// the second call and marked it scalar in the object. Lowered straight
-/// from HIR they are heap words: both payload words carry pointer kinds.
+/// from HIR they are heap words: both payload words carry pointer kinds,
+/// whether the body is dense (`DenseMakeK`) or stack IL from its MIR
+/// (`MakeEnumReturnK`).
 #[test]
 fn b6_recursive_make_enum_of_call_results_marks_pointers() {
     let (body, _, constants, _) = bottom_up_body();
     let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
-    let make = body
+    let (arity, kinds) = body
         .iter()
-        .find(|b| *b.bytecode() == Instruction::DenseMakeK)
-        .unwrap_or_else(|| panic!("Node builds with DenseMakeK; ops={names:?}"));
-    let (_, _, arity, _, kinds) = make.dense_make_k_parts(&constants).expect("DenseMakeK pool entry");
+        .find_map(|b| match *b.bytecode() {
+            Instruction::DenseMakeK => {
+                let (_, _, arity, _, kinds) = b.dense_make_k_parts(&constants).expect("DenseMakeK pool entry");
+                Some((arity, kinds))
+            }
+            Instruction::MakeEnumReturnK => Some((b.make_arity() as usize, b.make_kinds())),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("Node builds with DenseMakeK or MakeEnumReturnK; ops={names:?}"));
     assert_eq!(arity, 2, "ops={names:?}");
     for word in 0..2 {
         assert_eq!(
@@ -2002,20 +2010,25 @@ fn b6_recursive_make_enum_of_call_results_marks_pointers() {
 }
 
 /// COI-388 fused `MakeEnum; RETURN` on the stack path; in registers each
-/// variant is one `DenseMake`/`DenseMakeK` straight into its return, with
-/// no stack `MakeEnum` left over.
+/// variant is one `DenseMake`/`DenseMakeK` straight into its return. Either
+/// way each variant is made into its return, with no stack `MakeEnum` left
+/// over.
 #[test]
 fn pipeline_bottom_up_makes_enums_into_return() {
     let (body, bc, constants, p) = bottom_up_body();
     let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
-    let makes: Vec<usize> = body
+    let dense_makes: Vec<usize> = body
         .iter()
         .enumerate()
         .filter(|(_, b)| matches!(*b.bytecode(), Instruction::DenseMake | Instruction::DenseMakeK))
         .map(|(i, _)| i)
         .collect();
-    assert_eq!(makes.len(), 2, "Leaf + Node each make once; ops={names:?}");
-    for i in makes {
+    let stack_makes = body
+        .iter()
+        .filter(|b| matches!(*b.bytecode(), Instruction::MakeEnumReturn | Instruction::MakeEnumReturnK))
+        .count();
+    assert_eq!(dense_makes.len() + stack_makes, 2, "Leaf + Node each make once; ops={names:?}");
+    for i in dense_makes {
         assert_eq!(
             body.get(i + 1).map(|b| *b.bytecode()),
             Some(Instruction::LoadReturnSlot),
@@ -2033,7 +2046,7 @@ fn pipeline_bottom_up_makes_enums_into_return() {
     let mut vm = machine::Machine::<64>::with_operand_capacity(64);
     p.wire_host_natives(&mut vm);
     vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
-    assert!(!vm.panicked(), "bottom_up after DenseMake");
+    assert!(!vm.panicked(), "bottom_up after its makes");
 }
 
 /// `Ok(v) => v, Err(e) => e` yields the payload word either way: the tag
@@ -4182,10 +4195,14 @@ fn main() {
     let body = &bc[start..end];
     let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
     let dense = body.iter().any(|b| is_dense_bin_op(*b.bytecode()));
-    let two_slot_tag = body.windows(2).any(|w| {
-        matches!(w[0].bytecode(), Instruction::CALL)
-            && w[0].call_ret_words() == 2
-            && matches!(w[1].bytecode(), Instruction::JMPF | Instruction::JMPT)
+    // The tag test may sit a store / load past the CALL (stack IL from
+    // MIR keeps `[payload, tag]` in slots and fuses the test).
+    let two_slot_tag = body.iter().enumerate().any(|(i, b)| {
+        matches!(b.bytecode(), Instruction::CALL)
+            && b.call_ret_words() == 2
+            && body[i + 1..].iter().take(4).any(|j| {
+                matches!(j.bytecode(), Instruction::JMPF | Instruction::JMPT | Instruction::BinSlotImmJmpt | Instruction::BinSlotImmJmpf)
+            })
     });
     assert!(
         dense || two_slot_tag,

@@ -111,6 +111,7 @@ fn all_off() -> OptimizeOptions {
         branch_optimization: false,
         collect_stats: false,
         mir_specialize: false,
+        hir_stack: false,
     }
 }
 

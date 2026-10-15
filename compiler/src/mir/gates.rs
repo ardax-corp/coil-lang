@@ -1,9 +1,9 @@
 //! Tier-gate facts read off a body's MIR (N1b).
 //!
 //! The dense / LIR gates ask whether a body allocates, where its loops are
-//! and which reconstruct walls it holds. In default mode they read those
-//! facts off emit_hir's stack IL; with `COIL_MIR_FUSE=1` every body takes
-//! its stack IL from MIR, so the gates read them here instead. The
+//! and which reconstruct walls it holds. Every body takes its stack IL
+//! from MIR (the default), so the gates read them here (with
+//! `COIL_MIR_FUSE=0`, off emit_hir's stack IL). The
 //! questions match their stack-IL forms ([`super::gc::refuses_alloc`],
 //! `loop_ranges`, [`super::entry::lir_refuse_direct`]) instruction for
 //! instruction.

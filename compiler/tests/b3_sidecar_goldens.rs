@@ -68,12 +68,15 @@ const CORPUS: &[&str] = &[
 /// code and the first live body whole, which shortens `functions.hy`.
 /// Direct MIR dropping `while false` moves `loops.hy`'s test 1 from fuse
 /// to LIR (same length).
+/// Stack IL from MIR by default (M5p) lengthens all five, partly because
+/// a host call's result goes through a frame slot (`Seek`, `STORE`,
+/// `LoadReturnSlot`) where emit_hir's stack IL left it on the stack.
 const EXPECTED: &[(&str, &str)] = &[
-    ("arithmetic.hy", "d040edffa88728ee_856"),
-    ("functions.hy", "670405cf1594729f_171"),
-    ("loops.hy", "41e295705c9e7e40_169"),
-    ("option_pair.hy", "877910cfd67cb148_288"),
-    ("user_trait_dispatch.hy", "18fa73c397a09fe3_93"),
+    ("arithmetic.hy", "37175bede7c0ac38_1157"),
+    ("functions.hy", "c317db75449f1b1b_282"),
+    ("loops.hy", "397c9331610fd9cc_317"),
+    ("option_pair.hy", "cf3c8119f4a06339_448"),
+    ("user_trait_dispatch.hy", "84a6ac4b793467a4_158"),
 ];
 
 fn fingerprint(bc: &[Byte]) -> String {

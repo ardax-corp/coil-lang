@@ -243,7 +243,9 @@ fn dissect_views_source_opt_ilpost_mir_ast() {
         .expect("spawn coil dissect");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    assert!(stdout.contains("loop.hy:2 │ let t = 0;"), "source interleave: {stdout}");
+    // `let t = 0` folds into the loop call's operand on direct MIR; the
+    // loop header always has code.
+    assert!(stdout.contains("loop.hy:4 │ while i < n {"), "source interleave: {stdout}");
     assert!(stdout.contains("=== il (optimized) ==="), "{stdout}");
     assert!(stdout.contains("=== mir ==="), "{stdout}");
     assert!(stdout.contains("    let t = 0;"), "--ast prints source: {stdout}");

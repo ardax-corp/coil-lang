@@ -202,6 +202,9 @@ const CORPUS: &[&str] = &[
     "examples/option.hy",
     "examples/result.hy",
     "examples/tree.hy",
+    // A fused store (`BinSlotSlotStore`) in stack IL from MIR: the loop's
+    // counter update.
+    "examples/perf/for_in_iter.hy",
 ];
 
 #[test]
