@@ -1112,7 +1112,6 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
     {
         func.cleanup = Some(Box::new(cleanup));
     }
-    func.inner_code = hir.exprs.iter().any(|e| matches!(e.kind, HirKind::Lambda { .. }));
     func.debug_keep = inp.debugger;
     if inp.opaque_vars {
         opaque_moves_only(hir, inp)?;
