@@ -4038,6 +4038,9 @@ impl Checker {
         // supports integer indices).
         let _ = unify_with(&self.subst, &index_ty_pruned, &int());
         let resolved = apply_ty_prune(&self.subst, &target_ty);
+        // Reads see through `readonly` (#1073); `xs[i] = …` is rejected on
+        // the store path.
+        let resolved = crate::typechecking::ty::strip_readonly(&resolved).clone();
         // Peel `Matrix<Data>` so `m[i][j]` indexes the nested rows.
         let resolved =
             if let Some(data) = crate::typechecking::aggregate_arith::unwrap_matrix_ty(&resolved) {
@@ -17575,6 +17578,8 @@ impl Checker {
     /// to trait instance lookup). Emits diagnostics for hetero tuple/dict.
     fn builtin_for_in_kind(&mut self, te: &Ty, range: &Range<usize>) -> Option<(Ty, ForInKind)> {
         match te {
+            // Iterating only reads, so it sees through `readonly` (#1073).
+            Ty::Readonly(inner) => self.builtin_for_in_kind(inner, range),
             Ty::Array { element, .. } => Some((element.as_ref().clone(), ForInKind::Array)),
             other if vec_element_ty(other).is_some() => {
                 Some((vec_element_ty(other)?.clone(), ForInKind::Array))
