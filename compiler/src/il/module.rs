@@ -406,8 +406,6 @@ impl IlModule {
         // emit_hir's stack IL only the labels it binds.
         let labels: Vec<crate::mir::BodyLabels> =
             self.funcs.iter().map(|b| crate::mir::BodyLabels::of(&b.ops)).collect();
-        let bound: Vec<std::collections::HashSet<u32>> =
-            self.funcs.iter().map(|b| bound_labels(&b.ops)).collect();
         // Per body, once: the fuse IL its MIR emits (what runs if dense
         // refuses), `None` when the LIR tier refuses it.
         let mut fuse_fallbacks: Vec<Option<Option<Vec<IlOp>>>> = vec![None; self.funcs.len()];
@@ -420,7 +418,6 @@ impl IlModule {
                 let fallback = fuse_fallbacks[i].get_or_insert_with(|| {
                     let func = body.meta.hir_mir.as_deref()?;
                     crate::mir::fuse_fallback(&labels[i], &body.meta.name, pool, func)
-                        .filter(|lir| !drops_bound_label(&bound[i], lir))
                 });
                 if let Some((dense, abi)) = crate::mir::try_specialize_body_side(
                     fallback.as_deref(),
@@ -432,14 +429,6 @@ impl IlModule {
                     body.meta.hir_mir.as_deref(),
                     &mut side,
                 ) {
-                    if drops_bound_label(&bound[i], &dense) {
-                        // A `defer` thunk sits in its function's body and is
-                        // reached only by `CALL`; the reconstruct keeps blocks
-                        // reachable from the entry and loses it (#760).
-                        dense_why[i] = Some("drops a called inner label".to_string());
-                        next.push(i);
-                        continue;
-                    }
                     // Even empty: a local it leaves out has no register.
                     side_remaps.insert(body.meta.name.clone(), side.debug_slot_remap);
                     if let Some(deopt) = side.deopt {
@@ -494,29 +483,9 @@ impl IlModule {
                 body.meta.hir_mir.as_deref(),
                 &mut side,
             ) {
-                // The body's lambdas: their code, inline in HIR emission's
-                // IL, follows the LIR.
-                let lir = if drops_bound_label(&bound[i], &lir) {
-                    match splice_inner_code(&body.ops, lir.clone(), &bound[i]) {
-                        Some((spliced, allocs)) => {
-                            // Their allocations bind map sites too; a
-                            // lambda's frame is not this body's, so they
-                            // root nothing (its precise frame map does).
-                            if let Some(map) = side.stack_map.as_mut() {
-                                map.sites.extend(std::iter::repeat_n(Vec::new(), allocs));
-                            }
-                            spliced
-                        }
-                        None => lir,
-                    }
-                } else {
-                    lir
-                };
                 // Do not re-run stack-IL opts: `local_cse` refuses MOD and
                 // rematerializes a stored remainder (pair_int_churn +12%).
-                if drops_bound_label(&bound[i], &lir) {
-                    lir_why[i] = Some("drops a called inner label".to_string());
-                } else if body.meta.pinned && side.cleanup_pad.is_none() {
+                if body.meta.pinned && side.cleanup_pad.is_none() {
                     lir_why[i] = Some("no cleanup pad".to_string());
                 } else {
                     if let Some(pad) = side.cleanup_pad.filter(|_| body.meta.pinned) {
@@ -586,10 +555,6 @@ impl IlModule {
                 // and cleanup pad, which its MIR does not describe.
                 && !body.meta.pinned
                 && let Some(func) = body.meta.hir_mir.as_deref()
-                // A lambda's code sits inline in this body's IL, in its
-                // own frame: a map of this body's slots at every PC
-                // would cover it too.
-                && !func.inner_code
                 && crate::mir::maps_allocation(func)
             {
                 let mut draft = crate::mir::encode_draft_slots(func);
@@ -756,107 +721,6 @@ fn drop_jumps_to_next_label(ops: &mut Vec<IlOp>) {
             i += 1;
         }
     }
-}
-
-/// Every label `ops` binds.
-fn bound_labels(ops: &[IlOp]) -> std::collections::HashSet<u32> {
-    ops.iter()
-        .filter_map(|op| match op {
-            IlOp::Label(l) | IlOp::JoinLabel(l) => Some(l.0),
-            _ => None,
-        })
-        .collect()
-}
-
-/// A fused body's LIR (`lir`) builds the function values HIR emission
-/// emitted inline (`JMP after; entry: code; after:`), but not their code:
-/// copy each such range of `old` after it, every label it binds but its
-/// entry renamed past the labels in play. The count of allocating opcodes
-/// copied comes with it. `None` when a dropped label is not such an entry,
-/// or the LIR could fall into the copy.
-fn splice_inner_code(old: &[IlOp], mut lir: Vec<IlOp>, was: &std::collections::HashSet<u32>) -> Option<(Vec<IlOp>, usize)> {
-    let now = bound_labels(&lir);
-    let mut missing: Vec<u32> = lir
-        .iter()
-        .filter_map(|op| match op {
-            IlOp::Entry { target, .. } | IlOp::Jump { target, .. } if was.contains(&target.0) && !now.contains(&target.0) => Some(target.0),
-            _ => None,
-        })
-        .collect();
-    missing.sort_unstable();
-    missing.dedup();
-    let last = lir.iter().rev().find(|op| op.emits_code())?;
-    let ends = !last.can_fall_through() || last.as_encode_byte().is_some_and(|b| *b.bytecode() == common::Instruction::Panic);
-    if missing.is_empty() || !ends {
-        return None;
-    }
-    let mut ranges = Vec::new();
-    for &l in &missing {
-        let start = old.iter().position(|op| op.bind_label() == Some(Label(l)))?;
-        let jmp = old[..start].iter().rposition(IlOp::emits_code)?;
-        let IlOp::Jump { kind: IlJumpKind::Unconditional, target: after, .. } = old[jmp] else {
-            return None;
-        };
-        let end = start + old[start..].iter().position(|op| op.bind_label() == Some(after))?;
-        ranges.push((l, start, end));
-    }
-    // A lambda inside another is copied with it, renamed: not on its own.
-    if ranges.iter().any(|&(l, s, e)| ranges.iter().any(|&(l2, s2, e2)| l2 != l && s2 <= s && e <= e2)) {
-        return None;
-    }
-    let label_ids = |op: &IlOp| match op {
-        IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
-        IlOp::Jump { target: Label(id), .. } | IlOp::Entry { target: Label(id), .. } => Some(*id),
-        _ => None,
-    };
-    let mut next = old.iter().chain(lir.iter()).filter_map(label_ids).max().unwrap_or(0) + 1;
-    let mut allocs = 0usize;
-    for (entry, start, end) in ranges {
-        let code = &old[start..end];
-        let mut rename: HashMap<u32, u32> = HashMap::new();
-        for op in code {
-            if let Some(Label(id)) = op.bind_label()
-                && id != entry
-            {
-                rename.entry(id).or_insert_with(|| {
-                    next += 1;
-                    next - 1
-                });
-            }
-        }
-        for op in code {
-            let mut op = op.clone();
-            match &mut op {
-                IlOp::Label(l) | IlOp::JoinLabel(l) | IlOp::Jump { target: l, .. } | IlOp::Entry { target: l, .. } => {
-                    if let Some(&to) = rename.get(&l.0) {
-                        *l = Label(to);
-                    }
-                }
-                _ => {}
-            }
-            allocs += usize::from(allocates(&op));
-            lir.push(op);
-        }
-    }
-    Some((lir, allocs))
-}
-
-/// `op` lowers to an allocating opcode ([`crate::mir::is_alloc_opcode`]).
-fn allocates(op: &IlOp) -> bool {
-    match op {
-        IlOp::MakeArray { .. } | IlOp::MakeTuple { .. } | IlOp::MakeEnum { .. } => true,
-        IlOp::Entry { kind: crate::il::EntryKind::MakeCoro | crate::il::EntryKind::MakePolyFn, .. } => true,
-        _ => op.as_encode_byte().is_some_and(|b| crate::mir::is_alloc_opcode(*b.bytecode())),
-    }
-}
-
-/// `new` names a label the body bound (`was`) but `new` no longer binds.
-fn drops_bound_label(was: &std::collections::HashSet<u32>, new: &[IlOp]) -> bool {
-    let now = bound_labels(new);
-    new.iter().any(|op| match op {
-        IlOp::Entry { target, .. } | IlOp::Jump { target, .. } => was.contains(&target.0) && !now.contains(&target.0),
-        _ => false,
-    })
 }
 
 /// Trailing `if { raise }` end-labels sit in glue / epilogue
