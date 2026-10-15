@@ -16540,27 +16540,17 @@ impl Checker {
                 return;
             }
             let expected_ty = match spec {
-                'i' | 'd' | 'b' | 'x' | 'u' | 'p' => int(),
+                'i' | 'b' | 'x' | 'u' | 'p' => int(),
                 'f' => float(),
                 's' => string(),
                 'z' => boolean(),
                 _ => {
-                    let mut msg = Message::error(
-                        ErrorCode::FormatSpecifierMismatch,
-                        format!("Unknown format specifier `%{}`", spec),
-                        arg_range.clone(),
-                    );
-                    msg.with_help(format!(
-                        "while checking `{}` format argument #{}",
-                        ctx,
-                        spec_index + 1
-                    ));
-                    self.messages.push(msg);
+                    self.push_unknown_format_specifier(spec, ctx, spec_index, arg_range);
                     return;
                 }
             };
             // `byte` is printable with integer format specs (same runtime word).
-            if matches!(spec, 'i' | 'd' | 'b' | 'x' | 'u' | 'p') && Self::is_byte_ty(arg_ty) {
+            if matches!(spec, 'i' | 'b' | 'x' | 'u' | 'p') && Self::is_byte_ty(arg_ty) {
                 return;
             }
             if self
@@ -16579,8 +16569,12 @@ impl Checker {
         }
 
         let expected = format_specifier_type(spec);
+        if !matches!(spec, 'i' | 'b' | 'x' | 'u' | 'p' | 'f' | 's' | 'z' | 'v') {
+            self.push_unknown_format_specifier(spec, ctx, spec_index, arg_range);
+            return;
+        }
         let backing_expected = match spec {
-            'i' | 'd' | 'b' | 'x' | 'u' | 'p' => Some(int()),
+            'i' | 'b' | 'x' | 'u' | 'p' => Some(int()),
             'f' => Some(float()),
             's' => Some(string()),
             'z' => Some(boolean()),
@@ -16609,6 +16603,30 @@ impl Checker {
             ));
             self.messages.push(msg);
         }
+    }
+
+    /// E0300 for a `%` letter the runtime formatter does not implement
+    /// (`%d` is the usual slip, so it names `%i`).
+    fn push_unknown_format_specifier(
+        &mut self,
+        spec: char,
+        ctx: &str,
+        spec_index: usize,
+        arg_range: &Range<usize>,
+    ) {
+        let mut msg = Message::error(
+            ErrorCode::FormatSpecifierMismatch,
+            format!("Unknown format specifier `%{}`", spec),
+            arg_range.clone(),
+        );
+        let hint = if spec == 'd' { "integers use `%i`; " } else { "" };
+        msg.with_help(format!(
+            "{}while checking `{}` format argument #{}",
+            hint,
+            ctx,
+            spec_index + 1
+        ));
+        self.messages.push(msg);
     }
 
     fn is_showable_for_format(&self, ty: &Ty) -> bool {
