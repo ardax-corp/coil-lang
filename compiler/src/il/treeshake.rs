@@ -44,7 +44,7 @@ pub fn prune_unused_functions(
     }
 
     let graph = CallGraph::new(buf, input.functions, input.fn_entry_labels, input.preserve_emit_start);
-    let CallGraph { spans, label_to_name, pc_to_name } = &graph;
+    let CallGraph { spans, label_to_name, pc_to_name, .. } = &graph;
 
     let mut live: HashSet<String> = HashSet::new();
     let mut work: VecDeque<String> = VecDeque::new();
@@ -117,6 +117,11 @@ pub fn prune_unused_functions(
                     && live.insert(callee.clone()) {
                         work.push_back(callee);
                     }
+            }
+        }
+        for callee in graph.mir_callees(&name) {
+            if live.insert(callee.clone()) {
+                work.push_back(callee);
             }
         }
     }
@@ -226,6 +231,9 @@ pub struct CallGraph {
     spans: HashMap<String, (usize, usize)>,
     label_to_name: HashMap<u32, String>,
     pc_to_name: HashMap<usize, String>,
+    /// Function name → the entries its direct MIR names, which its code is
+    /// emitted from at lowering.
+    mir_targets: HashMap<String, Vec<u32>>,
 }
 
 impl CallGraph {
@@ -293,7 +301,23 @@ impl CallGraph {
                 pc_to_name.entry(pc).or_insert_with(|| name.clone());
             }
         }
-        Self { spans, label_to_name, pc_to_name }
+        let mut mir_targets: HashMap<String, Vec<u32>> = HashMap::new();
+        for f in buf.funcs() {
+            if let Some(mir) = f.hir_mir.as_deref() {
+                mir_targets.entry(f.name.clone()).or_default().extend(mir.code_targets().into_iter().map(|l| l.0));
+            }
+        }
+        Self { spans, label_to_name, pc_to_name, mir_targets }
+    }
+
+    /// The functions body `name`'s direct MIR calls or takes the address of.
+    fn mir_callees(&self, name: &str) -> Vec<String> {
+        self.mir_targets
+            .get(name)
+            .into_iter()
+            .flatten()
+            .filter_map(|&l| self.label_to_name.get(&l).cloned())
+            .collect()
     }
 
     /// The functions the ops in emitting range `[start, end)` call or take
@@ -366,7 +390,7 @@ pub fn reachable_functions(
         let Some(&(start, end)) = graph.spans.get(&name) else {
             continue;
         };
-        for callee in graph.callees(ops, start, end) {
+        for callee in graph.callees(ops, start, end).into_iter().chain(graph.mir_callees(&name)) {
             if !parent.contains_key(&callee) {
                 parent.insert(callee.clone(), Some(name.clone()));
                 work.push_back(callee);

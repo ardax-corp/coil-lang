@@ -95,6 +95,32 @@ pub struct MirFunc {
 }
 
 impl MirFunc {
+    /// The function entries this body's code names: the callees of its
+    /// calls, its code pointers and function values, its cleanup pad's
+    /// included.
+    pub fn code_targets(&self) -> Vec<crate::il::Label> {
+        use super::MirAllocKind;
+        let mut out = Vec::new();
+        for inst in self.blocks.iter().flat_map(|b| &b.insts) {
+            match inst {
+                MirInst::Call { target, .. } | MirInst::CodePtr { target, .. } => out.push(*target),
+                MirInst::Alloc {
+                    kind:
+                        MirAllocKind::Coro { target, .. }
+                        | MirAllocKind::Fn { target, .. }
+                        | MirAllocKind::PolyFn { target, .. }
+                        | MirAllocKind::PolyFnCapture { target, .. },
+                    ..
+                } => out.push(*target),
+                _ => {}
+            }
+        }
+        if let Some(pad) = &self.cleanup {
+            out.extend(pad.code_targets());
+        }
+        out
+    }
+
     /// A pass replaced values: each named local follows its value to the
     /// one that replaces it.
     pub fn rewrite_debug_slots(&mut self, map: impl Fn(ValueId) -> ValueId) {
