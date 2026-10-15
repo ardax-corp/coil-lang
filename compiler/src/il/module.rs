@@ -48,10 +48,6 @@ pub struct IlModule {
     /// A pinned (`defer`) body the LIR tier took: its cleanup pad's label
     /// and frame words, in place of HIR emission's pad and thunks.
     pub lir_cleanup_pads: HashMap<String, (Label, u32)>,
-    /// Emit-time label id → index of the body (with its glue) that binds it,
-    /// taken before per-body opts mint ids of their own. Emit-time ids are
-    /// unique, so this names the label a cross-chunk reference means (#958).
-    pub emit_label_owner: HashMap<u32, (usize, bool)>,
 }
 
 impl IlModule {
@@ -72,7 +68,6 @@ impl IlModule {
                 needs_frame_extent: HashSet::new(),
                 debug_slot_remaps: HashMap::new(),
                 lir_cleanup_pads: HashMap::new(),
-                emit_label_owner: HashMap::new(),
             };
         }
 
@@ -181,21 +176,6 @@ impl IlModule {
                     }
                 }
             }
-            // The glue (static-init setup, adapter thunks) was emitted before
-            // the body's opts, so a call or jump in it to an emit-time label
-            // of another chunk must not bind to a label this body minted with
-            // the same id (#958). Keep the old id for the cross-function
-            // remaps below.
-            for (new_op, old_op) in chunk[body_len..].iter_mut().zip(module.glue.get(i).into_iter().flatten()) {
-                if let (
-                    IlOp::Jump { target, .. } | IlOp::Entry { target, .. },
-                    IlOp::Jump { target: old, .. } | IlOp::Entry { target: old, .. },
-                ) = (new_op, old_op)
-                    && module.emit_label_owner.get(&old.0).is_some_and(|&(j, _)| j != i)
-                {
-                    target.0 = old.0;
-                }
-            }
             // Prefer the remapped emit-time entry. If opts dropped that id
             // (preheader / relabel), CALL still has to land on this body.
             let new_entry = old_entry
@@ -251,24 +231,6 @@ impl IlModule {
                 });
             if let Some(new) = owner.and_then(|m| m.get(&old).copied()) {
                 jump_entries.insert(old, new);
-            }
-        }
-        // A jump to another chunk's emit-time label (the prologue's `JMP` to
-        // the static-init setup, laid out after some body) takes that chunk's
-        // remap, not a label another body minted with the same id (#958).
-        for (&old, &(i, in_glue)) in &module.emit_label_owner {
-            let in_body = body_bound.get(i).is_some_and(|b| b.contains(&old));
-            let in_glue_now = glue_bound.get(i).is_some_and(|g| g.contains(&old));
-            let map = if (in_glue && in_glue_now) || !in_body {
-                glue_label_maps.get(i)
-            } else {
-                func_label_maps.get(i)
-            };
-            if let Some(&new) = map.and_then(|m| m.get(&old)) {
-                jump_entries.entry(old).or_insert(new);
-                // Codegen resolves emit-time labels (the setup entry) through
-                // this map too.
-                prior_labels.insert(old, new);
             }
         }
         // Prologue and epilogue are copied verbatim, so their labels keep
@@ -335,16 +297,6 @@ impl IlModule {
     ) -> FlatIl {
         if self.funcs.is_empty() {
             return self.to_flat();
-        }
-
-        self.emit_label_owner.clear();
-        for (i, body) in self.funcs.iter().enumerate() {
-            let glue = self.glue.get(i).map(Vec::as_slice).unwrap_or_default();
-            for (in_glue, ops) in [(false, &body.ops[..]), (true, glue)] {
-                for id in bound_label_ids(ops) {
-                    self.emit_label_owner.insert(id, (i, in_glue));
-                }
-            }
         }
 
         for body in self.funcs.iter_mut().filter(|b| !b.meta.pinned) {
