@@ -147,6 +147,7 @@ impl Compiler {
     /// The side tables of `hir`, planned as [`Self::hir_value`] emits it.
     pub(super) fn hir_mir_tables(&mut self, hir: &HirBody, emit: &HirEmit) -> HirMirTables {
         let mut tables = HirMirTables::default();
+        self.hir_mir_intern_keys(hir);
         if let Some(root) = hir.root {
             self.hir_mir_walk(hir, emit, root, &mut tables);
             self.hir_mir_make_niches(hir, emit, root, None, &mut tables.make_niches);
@@ -157,6 +158,52 @@ impl Compiler {
             tables.open_params = hir.params.iter().copied().filter(|&p| self.hir_open_ty(hir.local(p).ty.as_ref())).collect();
         }
         tables
+    }
+
+    /// Intern the strings direct MIR reads by name that `hir`'s code
+    /// pushes: record keys (a record literal's, a field read or written by
+    /// name) and the backing string of each string-backed scalar enum
+    /// variant it makes or matches.
+    fn hir_mir_intern_keys(&mut self, hir: &HirBody) {
+        let mut variants: Vec<(String, String)> = Vec::new();
+        fn pat_variants(pat: &HirPat, out: &mut Vec<(String, String)>) {
+            match pat {
+                HirPat::Variant { enum_name, variant, fields, .. } => {
+                    out.push((enum_name.clone(), variant.clone()));
+                    match fields {
+                        HirPatFields::Unit => {}
+                        HirPatFields::Tuple(ps) => ps.iter().for_each(|p| pat_variants(p, out)),
+                        HirPatFields::Record(ps) => ps.iter().for_each(|(_, p)| pat_variants(p, out)),
+                    }
+                }
+                HirPat::Tuple(ps) => ps.iter().for_each(|p| pat_variants(p, out)),
+                HirPat::Record(ps) => ps.iter().for_each(|(_, p)| pat_variants(p, out)),
+                HirPat::Wild | HirPat::Bind(_) | HirPat::Int(_) => {}
+            }
+        }
+        for e in &hir.exprs {
+            match &e.kind {
+                HirKind::Make { kind: MakeKind::Record(names), .. } => {
+                    for name in names {
+                        self.intern_string(name);
+                    }
+                }
+                HirKind::Field { base, name } if matches!(self.hir_field(hir, *base, name), Some((FieldAt::Name, _))) => {
+                    self.intern_string(name);
+                }
+                HirKind::Make { kind: MakeKind::Variant { enum_name, variant, .. }, .. } => {
+                    variants.push((enum_name.clone(), variant.clone()));
+                }
+                HirKind::Match { arms, .. } => arms.iter().for_each(|a| pat_variants(&a.pat, &mut variants)),
+                HirKind::LetPat { pat, .. } => pat_variants(pat, &mut variants),
+                _ => {}
+            }
+        }
+        for (enum_name, variant) in variants {
+            if let Some(crate::typechecking::ty::ScalarBacking::String(s)) = self.checker.scalar_for(&enum_name, &variant).cloned() {
+                self.intern_string(unescape_coil_string(&s));
+            }
+        }
     }
 
     /// Record the `Result` variants under `id` that emission makes at a

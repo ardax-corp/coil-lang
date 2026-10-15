@@ -44,7 +44,7 @@ pub fn prune_unused_functions(
     }
 
     let graph = CallGraph::new(buf, input.functions, input.fn_entry_labels, input.preserve_emit_start);
-    let CallGraph { spans, label_to_name, pc_to_name } = &graph;
+    let CallGraph { spans, label_to_name, pc_to_name, .. } = &graph;
 
     let mut live: HashSet<String> = HashSet::new();
     let mut work: VecDeque<String> = VecDeque::new();
@@ -117,6 +117,11 @@ pub fn prune_unused_functions(
                     && live.insert(callee.clone()) {
                         work.push_back(callee);
                     }
+            }
+        }
+        for callee in graph.mir_callees(&name) {
+            if live.insert(callee.clone()) {
+                work.push_back(callee);
             }
         }
     }
@@ -226,6 +231,9 @@ pub struct CallGraph {
     spans: HashMap<String, (usize, usize)>,
     label_to_name: HashMap<u32, String>,
     pc_to_name: HashMap<usize, String>,
+    /// Function name → the entries its direct MIR names, which its code is
+    /// emitted from at lowering.
+    mir_targets: HashMap<String, Vec<u32>>,
 }
 
 impl CallGraph {
@@ -293,7 +301,23 @@ impl CallGraph {
                 pc_to_name.entry(pc).or_insert_with(|| name.clone());
             }
         }
-        Self { spans, label_to_name, pc_to_name }
+        let mut mir_targets: HashMap<String, Vec<u32>> = HashMap::new();
+        for f in buf.funcs() {
+            if let Some(mir) = f.hir_mir.as_deref() {
+                mir_targets.entry(f.name.clone()).or_default().extend(mir.code_targets().into_iter().map(|l| l.0));
+            }
+        }
+        Self { spans, label_to_name, pc_to_name, mir_targets }
+    }
+
+    /// The functions body `name`'s direct MIR calls or takes the address of.
+    fn mir_callees(&self, name: &str) -> Vec<String> {
+        self.mir_targets
+            .get(name)
+            .into_iter()
+            .flatten()
+            .filter_map(|&l| self.label_to_name.get(&l).cloned())
+            .collect()
     }
 
     /// The functions the ops in emitting range `[start, end)` call or take
@@ -366,7 +390,7 @@ pub fn reachable_functions(
         let Some(&(start, end)) = graph.spans.get(&name) else {
             continue;
         };
-        for callee in graph.callees(ops, start, end) {
+        for callee in graph.callees(ops, start, end).into_iter().chain(graph.mir_callees(&name)) {
             if !parent.contains_key(&callee) {
                 parent.insert(callee.clone(), Some(name.clone()));
                 work.push_back(callee);
@@ -492,6 +516,53 @@ mod tests {
         assert!(!functions.contains_key("Hash__unit__hash"));
         assert_eq!(functions["main"], 0);
         assert_eq!(buf.len(), 2); // CONST; RETURN
+    }
+
+    /// A body whose code is emitted from its direct MIR keeps the
+    /// functions that MIR calls, though its stack IL names none.
+    #[test]
+    fn keeps_callee_of_main_mir() {
+        let mut buf = CodeBuf::new();
+        let mut functions = HashMap::new();
+        let mut labels = HashMap::new();
+
+        let foo_pc = buf.len();
+        let foo_l = buf.bind_fresh_entry();
+        functions.insert("foo".into(), foo_pc);
+        labels.insert("foo".into(), foo_l);
+        buf.push_const(7);
+        buf.push_return();
+        let end = buf.len();
+        buf.record_func_with_sp("foo", Some(foo_l), foo_pc, end, 0);
+
+        let main_pc = buf.len();
+        let main_l = buf.bind_fresh_entry();
+        functions.insert("main".into(), main_pc);
+        labels.insert("main".into(), main_l);
+        buf.push_const(0);
+        buf.push_return();
+        let end = buf.len();
+        buf.record_func_with_sp("main", Some(main_l), main_pc, end, 0);
+        let text = format!("func @main() -> i64 {{\nbb0:\n    v0 = call.i64 {}\n    return v0\n}}", foo_l.0);
+        buf.set_last_func_hir_mir(crate::mir::parse_func(&text).unwrap());
+
+        let mut locals = HashMap::new();
+        let mut tests = Vec::new();
+        let roots = vec!["main".into()];
+        let (dropped, _) = prune_unused_functions(
+            &mut buf,
+            TreeshakeInput {
+                functions: &mut functions,
+                fn_entry_labels: &mut labels,
+                fn_debug_locals: &mut locals,
+                test_cases: &mut tests,
+                root_names: &roots,
+                include_tests: false,
+                preserve_emit_start: None,
+            },
+        );
+        assert_eq!(dropped, 0);
+        assert!(functions.contains_key("foo"));
     }
 
     #[test]
