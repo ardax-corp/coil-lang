@@ -6599,8 +6599,12 @@ impl Compiler {
         self.checker.c_structs()
     }
 
+    /// Register an embedder native: its HostInvoke id follows the frozen
+    /// [`common::HOST_NATIVES`] table and the natives registered before it,
+    /// as the VM's native registry numbers them.
     pub fn register(&mut self, name: &str, params: &[Ty], returns: &Ty) -> &mut Self {
-        let idx = self.native.len();
+        let base = common::HOST_NATIVES.len();
+        let idx = self.native.values().copied().filter(|&id| id >= base).max().map_or(base, |id| id + 1);
         self.native.insert(name.to_string(), idx);
         self.checker.register_native(name, params, returns);
 

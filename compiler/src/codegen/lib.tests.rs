@@ -1259,7 +1259,6 @@ fn type_errors_appear_in_messages() {
 /// `register_native` adds the native to the HM checker. A subsequent
 /// call to the native type-checks cleanly.
 #[test]
-#[ignore = "#1127: a `Compiler::register` native has no typed MIR edge"]
 fn register_native_visible_to_emitter() {
     use crate::typechecking::ty::{string, unit};
     let mut c = Compiler::default();
@@ -6233,7 +6232,6 @@ fn polyfn_plus_fib_style_body_still_fuses() {
 /// require two `HostInvoke`s and assert the outer id `CONST` sits under the
 /// *inner* `HostInvoke`'s value (not merely the first one).
 #[test]
-#[ignore = "#1127: a `Compiler::register` native has no typed MIR edge"]
 fn nested_generic_host_invoke_emits_outer_id_before_inner_invoke() {
     use crate::typechecking::ty::int;
     use common::Instruction;

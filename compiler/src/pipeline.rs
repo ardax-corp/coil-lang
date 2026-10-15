@@ -2729,6 +2729,10 @@ fn main() { sum(10); }
         pipeline.register_host_native(sig, |_, args| Ok(Some(common::Value::from(args[0].as_int() * 2))));
         let sig = FfiSignature::from_parts("seven", vec![], FfiType::Int).expect("sig");
         pipeline.register_host_native(sig, |_, _| Ok(Some(common::Value::from(7))));
+        let sig = FfiSignature::from_parts("is_pos", vec![FfiType::Int], FfiType::Bool).expect("sig");
+        pipeline.register_host_native(sig, |_, args| Ok(Some(common::Value::from(args[0].as_int() > 0))));
+        let sig = FfiSignature::from_parts("half", vec![FfiType::Float], FfiType::Float).expect("sig");
+        pipeline.register_host_native(sig, |_, args| Ok(Some(common::Value::from(args[0].as_float() / 2.0))));
         let src = r#"
 fn main() {
     if twice(twice(seven())) != 28 {
@@ -2740,6 +2744,12 @@ fn main() {
     }
     if s != 12 {
         panic "loop";
+    }
+    if !is_pos(3) || is_pos(-3) {
+        panic "bool";
+    }
+    if half(5.0) != 2.5 {
+        panic "float";
     }
 }
 "#;
