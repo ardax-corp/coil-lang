@@ -3583,7 +3583,7 @@ impl Compiler {
             let params = [(ty.clone(), tag_of(tag)), (ty.clone(), tag_of(tag))];
             for (class, method, op) in arithmetic {
                 let fqn = Generics::builtin_instance_fqn(class, &name, method);
-                self.emit_builtin_entry(&fqn, &params, ty.clone(), tag_of(tag), |b, a| b.bin(op, a[0], a[1], ty.clone()));
+                self.emit_boxing_builtin_entry(&fqn, &params, ty.clone(), tag_of(tag), |b, a| b.bin(op, a[0], a[1], ty.clone()));
             }
             for (class, method, op) in comparisons {
                 let fqn = Generics::builtin_instance_fqn(class, &name, method);
@@ -3602,7 +3602,7 @@ impl Compiler {
                 ("BitXor", "bitxor", BinOp::BitXor),
             ] {
                 let fqn = Generics::builtin_instance_fqn(class, ty, method);
-                self.emit_builtin_entry(&fqn, &params, int.clone(), tag_of(ValueTag::Int), |b, a| b.bin(op, a[0], a[1], int.clone()));
+                self.emit_boxing_builtin_entry(&fqn, &params, int.clone(), tag_of(ValueTag::Int), |b, a| b.bin(op, a[0], a[1], int.clone()));
             }
         }
         // `Neg` / `BitNot` take one operand (plus the ignored trailing dictionary).
@@ -3612,7 +3612,7 @@ impl Compiler {
             ("BitNot", "bitnot", &int, ValueTag::Int, UnOp::BitNot),
         ] {
             let fqn = Generics::builtin_instance_fqn(class, &ty.to_string(), method);
-            self.emit_builtin_entry(&fqn, &[(ty.clone(), tag_of(tag))], ty.clone(), tag_of(tag), |b, a| {
+            self.emit_boxing_builtin_entry(&fqn, &[(ty.clone(), tag_of(tag))], ty.clone(), tag_of(tag), |b, a| {
                 b.push(HirKind::Un { op, operand: a[0] }, ty.clone())
             });
         }
@@ -3768,7 +3768,7 @@ impl Compiler {
             let fqn = into_primitive_fqn(from, to);
             let to_ty = prim(to);
             let box_tag = (from_tag != to_tag).then_some(to_tag as u32);
-            self.emit_builtin_entry(&fqn, &[(prim(from), tag_of(from_tag))], to_ty.clone(), box_tag, |b, a| {
+            self.emit_boxing_builtin_entry(&fqn, &[(prim(from), tag_of(from_tag))], to_ty.clone(), box_tag, |b, a| {
                 b.push(HirKind::Cast { value: a[0] }, to_ty.clone())
             });
         }
@@ -3785,6 +3785,28 @@ impl Compiler {
         op: impl FnOnce(&mut crate::hir::synth::Synth, Vec<crate::hir::HirId>) -> crate::hir::HirId,
     ) {
         self.emit_builtin_body(fqn, params, ret, box_tag, true, op);
+    }
+
+    /// A builtin entry whose dictionary ABI boxes its result (`box_tag`):
+    /// `fqn` itself is raw, taking and returning the words a ground call
+    /// (`a.add(4)`, `3.into()`) passes and expects, and its `$dict` adapter
+    /// keeps the boxed ABI shared generic bodies call through (#1030).
+    fn emit_boxing_builtin_entry(
+        &mut self,
+        fqn: &str,
+        params: &[(Ty, Option<u32>)],
+        ret: Ty,
+        box_tag: Option<u32>,
+        op: impl Fn(&mut crate::hir::synth::Synth, Vec<crate::hir::HirId>) -> crate::hir::HirId,
+    ) {
+        if box_tag.is_none() || self.functions.contains_key(fqn) {
+            self.emit_builtin_entry(fqn, params, ret, box_tag, op);
+            return;
+        }
+        self.note_raw_builtin_thunk(fqn);
+        let raw_params: Vec<(Ty, Option<u32>)> = params.iter().map(|(t, _)| (t.clone(), None)).collect();
+        self.emit_builtin_entry(fqn, &raw_params, ret.clone(), None, &op);
+        self.emit_builtin_entry(&Self::dict_adapter_name(fqn), params, ret, box_tag, op);
     }
 
     /// [`Self::emit_builtin_entry`]'s body for a method called by name

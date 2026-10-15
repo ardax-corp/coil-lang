@@ -735,9 +735,8 @@ fn int_unary_minus_still_emits_neg() {
 #[test]
 fn integer_arithmetic_emits_int_opcode() {
     use common::Instruction;
-    let (bc, _pool) = compile_src("fn add(int a, int b) -> int { return a + b; }");
-    // Builtin Num dictionary thunks also contain ADD/ADDF; the user function
-    // body should use int ADD (fused BinSlotSlot or bare LOAD/LOAD/ADD).
+    // Only `add`'s own body: the builtin Num thunks hold float ADDF too.
+    let bc = compile_fn_body("fn add(int a, int b) -> int { return a + b; }", "add");
     let has_int_bin_slot = bc.iter().any(|b| {
         *b.bytecode() == Instruction::BinSlotSlot
             && b.bin_slot_slot_parts().0 == Instruction::ADD as u8
