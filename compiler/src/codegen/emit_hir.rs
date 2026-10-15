@@ -1040,14 +1040,14 @@ impl Compiler {
                 })?;
                 Some(((start + at) as u32, (start + at + local.name.len()) as u32))
             });
-            if let Some(var) = self.last_debug_var_mut(&local.name) {
-                if let Some(layout) = layout {
-                    if let Some(ty) = &ty {
-                        var.ty = DebugTy::from_ty(ty);
-                    }
-                    var.loc = layout;
-                    var.name_span = name_span.or(var.name_span);
+            if let Some(var) = self.last_debug_var_mut(&local.name)
+                && let Some(layout) = layout
+            {
+                if let Some(ty) = &ty {
+                    var.ty = DebugTy::from_ty(ty);
                 }
+                var.loc = layout;
+                var.name_span = name_span.or(var.name_span);
             }
         }
     }
@@ -8639,7 +8639,7 @@ impl Compiler {
                 irrefutable: is_last,
                 misses: Vec::new(),
             };
-            self.hir_seq_test(hir, emit, &mut test, &arm.pat, slot, Some(&ty), ValueLayout::Boxed);
+            self.hir_seq_test(emit, &mut test, &arm.pat, slot, Some(&ty), ValueLayout::Boxed);
             // Arm-body temps go above the payload words.
             while (self.context.variables.len() as u32) < test.base + test.max_depth {
                 let pad = format!("__match{}", self.context.variables.len());
@@ -8716,7 +8716,7 @@ impl Compiler {
                     irrefutable: true,
                     misses: Vec::new(),
                 };
-                self.hir_seq_test(hir, emit, &mut test, &arm.pat, slot, Some(ty), ValueLayout::Boxed);
+                self.hir_seq_test(emit, &mut test, &arm.pat, slot, Some(ty), ValueLayout::Boxed);
                 self.hir_grouped_body(hir, emit, arm.body, &test, want);
                 self.hir_jump(IlJumpKind::Unconditional, end);
             }
@@ -8747,7 +8747,7 @@ impl Compiler {
                 for k in 0..arity as usize {
                     if let Some(Some(sub)) = subs.get(k).copied() {
                         let layout = field_tys.get(k).map_or(ValueLayout::Boxed, |t| self.value_layout(t));
-                        self.hir_seq_test(hir, emit, &mut test, sub, slot + 1 + k as u32, field_tys.get(k), layout);
+                        self.hir_seq_test(emit, &mut test, sub, slot + 1 + k as u32, field_tys.get(k), layout);
                     }
                 }
                 self.hir_grouped_body(hir, emit, arm.body, &test, want);
@@ -8800,7 +8800,6 @@ impl Compiler {
     #[allow(clippy::too_many_arguments)]
     fn hir_seq_test(
         &mut self,
-        hir: &HirBody,
         emit: &mut HirEmit,
         test: &mut SeqTest,
         pat: &HirPat,
@@ -8872,7 +8871,7 @@ impl Compiler {
                 test.max_depth = test.max_depth.max(test.depth);
             }
             let sub_layout = field_layout(self, 0);
-            self.hir_seq_test(hir, emit, test, sub, inner, field_tys.first(), sub_layout);
+            self.hir_seq_test(emit, test, sub, inner, field_tys.first(), sub_layout);
             return;
         }
         let tag = self.checker.tag_for(enum_name, variant).expect("planned pattern tag");
@@ -8895,7 +8894,7 @@ impl Compiler {
         for k in 0..arity as usize {
             if let Some(Some(sub)) = subs.get(k).copied() {
                 let sub_layout = field_layout(self, k);
-                self.hir_seq_test(hir, emit, test, sub, first + k as u32, field_tys.get(k), sub_layout);
+                self.hir_seq_test(emit, test, sub, first + k as u32, field_tys.get(k), sub_layout);
             }
         }
     }
