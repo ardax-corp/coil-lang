@@ -2927,6 +2927,18 @@ impl Checker {
                         option_inner(&resolved).unwrap_or_else(|| Ty::Var(self.counter.fresh()));
                     self.ensure_option_mode(&inner, &range);
                     inner
+                } else if matches!(resolved, Ty::Var(_))
+                    && self
+                        .current_return_ty
+                        .as_ref()
+                        .is_some_and(|t| is_option_ty(&apply_ty_prune(&self.subst, t)))
+                {
+                    // Not yet pinned (a self-recursive call) in a function
+                    // declared `-> Option<T>`: an Option `?`.
+                    let inner = Ty::Var(self.counter.fresh());
+                    self.unify(&inner_ty, &option_ty(inner.clone()), &range, "try operand");
+                    self.ensure_option_mode(&inner, &range);
+                    inner
                 } else if matches!(resolved, Ty::Var(_)) {
                     // Not yet pinned, assume Result and let later
                     // unifications fill Ok/Err (or fail).
