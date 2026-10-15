@@ -5048,7 +5048,12 @@ impl Lower<'_> {
     /// word, then the meta word, then `HostInvoke`. The result is the
     /// expression's word: a new matrix or vector array, or `dot`'s scalar.
     fn linalg(&mut self, id: HirId, (native, meta): (u16, u32), args: &[HirId]) -> Result<Val, Refusal> {
-        let ret = self.expr_ty(id).and_then(|t| self.inp.word(t)).ok_or("linear algebra result")?;
+        // A tuple result (a tuple of row tuples) is one boxed tuple word.
+        let ret = self
+            .expr_ty(id)
+            .and_then(|t| self.inp.word(t).or_else(|| self.inp.plain_heap(t).then_some(MirTy::HeapRef)))
+            .filter(|_| !self.inp.pair_tys.contains_key(&id.0))
+            .ok_or("linear algebra result")?;
         let mut words = Vec::with_capacity(args.len() + 1);
         for &arg in args {
             let Some(v) = self.word_or_boxed(arg)? else {
