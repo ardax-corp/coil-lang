@@ -909,6 +909,10 @@ impl Compiler {
         let plan = &emit.plan;
         let why = if plan.par_inline {
             Err("parallel loop".to_string())
+        } else if self.debugger_attached && (!plan.sroa.is_empty() || !plan.stacks.is_empty()) {
+            // The debugger reads split class / array locals from their
+            // frame slots; direct MIR keeps them in registers or folds them.
+            Err(crate::il::DEBUGGER_SPLIT.to_string())
         } else {
             self.hir_mir_input(hir, emit, &tables, file, entry_words)
                 .and_then(|inp| crate::mir::lower_from_hir(hir, &inp))
@@ -2573,14 +2577,11 @@ impl Compiler {
     /// (`sroa`), and enum locals kept as `[payload, tag]` pairs. Needs the
     /// planned calls, whose results decide pair locals.
     fn plan_hir_local_layouts(&self, hir: &HirBody, emit: &mut HirEmit) -> Result<(), &'static str> {
-        // A debugger reads class and array locals as their objects: under
-        // one, none is split into frame slots (direct MIR would keep the
-        // slots in registers or fold them away).
-        let stacks = if self.debugger_attached { lower::StackArrays::default() } else { lower::stack_arrays(hir, &self.checker) };
+        let stacks = lower::stack_arrays(hir, &self.checker);
         emit.plan.stacks = stacks.len;
         emit.plan.box_at = stacks.box_at;
         // Escaping frame-slot class locals box before their escape too.
-        let class_boxes = if self.debugger_attached { Default::default() } else { lower::class_boxes(hir, &self.checker) };
+        let class_boxes = lower::class_boxes(hir, &self.checker);
         let class_boxed: HashSet<u32> = class_boxes.values().flatten().copied().collect();
         for (stmt, locals) in class_boxes {
             emit.plan.box_at.entry(stmt).or_default().extend(locals);
@@ -2606,7 +2607,6 @@ impl Compiler {
             local,
             init: Some(init),
         } = expr.kind
-            && !self.debugger_attached
             && lower::sroa_local(hir, &self.checker, &class_boxed, local, init)
             && let Some(class) = lower::sroa_class(hir, &self.checker, init)
         {

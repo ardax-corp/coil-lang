@@ -38,3 +38,8 @@ pub use lower::{lower, try_lower};
 pub use module::IlModule;
 pub use op::{EntryKind, FuseHint, IlJumpKind, IlOp, Label};
 pub use treeshake::{TreeshakeInput, prune_unused_functions, reachable_functions};
+
+/// Why a body with split class / array locals gets no direct MIR under a
+/// debugger, which reads those locals from their frame slots: the one
+/// body that may stay on the HIR stack lowering (M5p).
+pub(crate) const DEBUGGER_SPLIT: &str = "split local under a debugger";

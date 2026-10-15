@@ -577,8 +577,16 @@ impl IlModule {
         if opts.mir_specialize {
             let fell_back: Vec<String> = (0..self.funcs.len())
                 // A body HIR never lowered (an IL-only test body, or one
-                // past a program error) has no direct MIR to miss.
-                .filter(|&i| fused[i] && tier[i] == "fuse" && (self.funcs[i].meta.hir_mir.is_some() || self.funcs[i].meta.hir_mir_why.is_some()))
+                // past a program error) has no direct MIR to miss. Under a
+                // debugger a body with split class / array locals stays on
+                // the HIR stack lowering, which keeps them in frame slots
+                // the debugger reads (no direct MIR equivalent yet).
+                .filter(|&i| {
+                    let meta = &self.funcs[i].meta;
+                    fused[i]
+                        && tier[i] == "fuse"
+                        && (meta.hir_mir.is_some() || meta.hir_mir_why.as_deref().is_some_and(|w| w != crate::il::DEBUGGER_SPLIT))
+                })
                 .map(|i| {
                     let body = &self.funcs[i];
                     let why = match &body.meta.hir_mir {
