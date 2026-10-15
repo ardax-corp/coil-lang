@@ -70,12 +70,22 @@ impl Compiler {
     /// onto `self.bytecode` with the call's span so the check can find it.
     /// `open_mode` is `open`'s mode argument when it is a literal.
     pub(super) fn tag_gated_host_call(&mut self, native: &str, span: (usize, usize), open_mode: Option<&str>) {
-        let Some(row) = common::HOST_NATIVES.iter().find(|n| n.name == native) else {
+        let Some(loc) = self.note_gated_host_call(native, span, open_mode) else {
             return;
         };
+        if let Some(op @ IlOp::HostInvoke { .. }) = self.bytecode.il_mut().ops_slice_mut().last_mut() {
+            op.set_loc(loc);
+        }
+    }
+
+    /// When `native` needs a capability, record its call at `span` for the
+    /// check, which finds the call's `HostInvoke` (in the stack IL, or in
+    /// its body's direct MIR) by that loc. The loc, when it is recorded.
+    pub(super) fn note_gated_host_call(&mut self, native: &str, span: (usize, usize), open_mode: Option<&str>) -> Option<DebugLoc> {
+        let row = common::HOST_NATIVES.iter().find(|n| n.name == native)?;
         let caps = if row.name == "open" { common::open_mode_caps(open_mode) } else { row.caps };
         if caps.is_empty() {
-            return;
+            return None;
         }
         let mut loc = self.loc_from_span(SimpleSpan::from(span.0..span.1));
         if loc.file == DEBUG_FILE_UNKNOWN {
@@ -84,16 +94,13 @@ impl Compiler {
             loc.start_byte = span.0 as u32;
             loc.end_byte = span.1.max(span.0 + 1) as u32;
         }
-        let Some(op @ IlOp::HostInvoke { .. }) = self.bytecode.il_mut().ops_slice_mut().last_mut() else {
-            return;
-        };
-        op.set_loc(loc);
         let key = (loc.file, loc.start_byte, loc.end_byte);
         let entry = self.gated_host_calls.entry(key).or_insert(GatedHostCall {
             caps: Caps::NONE,
             native: row.name,
         });
         entry.caps = entry.caps.union(caps);
+        Some(loc)
     }
 
     /// Report [`Self::capability_violations`] against this compile's grants
@@ -176,8 +183,7 @@ impl Compiler {
         };
         let mut found: Vec<CapViolation> = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        let mut visit = |op: &IlOp, chain: Option<Vec<String>>| {
-            let IlOp::HostInvoke { loc, .. } = op else { return };
+        let mut visit = |loc: DebugLoc, chain: Option<Vec<String>>| {
             let key = (loc.file, loc.start_byte, loc.end_byte);
             let Some(gated) = self.gated_host_calls.get(&key) else { return };
             let needed = gated.caps.without(granted);
@@ -215,10 +221,29 @@ impl Compiler {
                 Some(_) => None,
                 None => Some(Vec::new()),
             };
-            visit(op, chain);
+            if let IlOp::HostInvoke { loc, .. } = op {
+                visit(*loc, chain);
+            }
         }
         for op in self.static_init.ops().iter().chain(self.ffi_init.ops()) {
-            visit(op, Some(Vec::new()));
+            if let IlOp::HostInvoke { loc, .. } = op {
+                visit(*loc, Some(Vec::new()));
+            }
+        }
+        // A body emitted from its direct MIR: its `HostInvoke`s, by the
+        // loc each carries.
+        for f in self.bytecode.funcs() {
+            let Some(mir) = f.hir_mir.as_deref() else { continue };
+            let chain = parent.contains_key(&f.name).then(|| chain_to(&f.name));
+            for block in &mir.blocks {
+                for inst in &block.insts {
+                    if let crate::mir::MirInst::HostInvoke { dest, .. } = inst
+                        && let Some(&loc) = mir.value_locs.get(dest)
+                    {
+                        visit(loc, chain.clone());
+                    }
+                }
+            }
         }
         found.sort_by(|a, b| (&a.file, a.range.start).cmp(&(&b.file, b.range.start)));
         found
