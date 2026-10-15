@@ -1,7 +1,7 @@
 // `readonly` seals a value against external writes only: field reads and
 // `len` work, the variable can be rebound to another value, and an `impl`
-// method may still mutate the object through `self`. (Indexing and
-// iterating a readonly array is a known bug, see findings.)
+// method may still mutate the object through `self`. Index and for-in
+// reads are in readonly_array_reads.hy.
 use tests::assert;
 
 class Counter {
