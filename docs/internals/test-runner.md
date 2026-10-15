@@ -114,6 +114,33 @@ worker count and the number of compile threads.
   exercises production roots.
 - Cases that call `thread::spawn` put their jobs on the same reactor.
 
+## Corpora in parallel
+
+`tests/` holds one corpus per part of the language (`tests/README.md`).
+`scripts/test_corpora.py` runs each corpus as its own `coil test` process,
+largest first, several at once, and prints one line per corpus plus the
+failing files' output:
+
+```bash
+scripts/test_corpora.py -- --root examples/src --root ../coil-stdlib/src
+scripts/test_corpora.py patterns traits -- -O 0
+scripts/test_corpora.py --shard 2/3 --no-build -- …   # every 3rd corpus from the 2nd
+```
+
+It builds `coil` / `coil-test` with the `harness` profile first
+(`[profile.harness]` in `Cargo.toml`: release optimizations without LTO,
+plus debug assertions, overflow checks and unwinding panics). That build
+runs the corpus about 15× faster than a debug build; cargo's cache makes
+the rebuild a no-op when nothing changed. `--bin DIR` uses binaries already
+built (CI builds them once per OS in `harness-build` and every `harness`
+cell downloads them), `--harness PATH` runs a `coil-test` directly (the
+GC-stress build), `--limit-as-kb N` caps each process's address space like
+`ulimit -v` (the leak smoke, `-j 1` per process). Logs land in
+`target/corpora/<corpus>.log`.
+
+On four cores the whole corpus takes ~14 s this way against ~31 s for one
+`coil test` process on the same build (2026-10-15).
+
 ## Coverage
 
 `coil test --coverage` reports line coverage of the project's own sources and
