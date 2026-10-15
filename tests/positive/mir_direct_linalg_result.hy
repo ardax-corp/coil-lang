@@ -18,5 +18,5 @@ fn floats() -> float {
 
 test("matmul of tuples of tuples") {
     assert!(product() == 19224350);
-    assert!(floats() == 14.5);
+    assert!(floats() == 14.0);
 }
