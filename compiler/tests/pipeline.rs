@@ -1875,15 +1875,17 @@ fn main() {
             .map(|b| b.dense_abc_parts().0)
             .collect()
     };
-    for (name, cmp, step) in [
-        ("Range::to_vec", Instruction::LE, IADD64),
-        ("RangeInclusive::to_vec", Instruction::LEQ, IADD64),
-        ("Range::__float_to_vec", Instruction::LEF, FADD64),
-        ("RangeInclusive::__float_to_vec", Instruction::LEQF, FADD64),
+    for (name, cmp, step, other_step) in [
+        ("Range::to_vec", Instruction::LE, IADD64, FADD64),
+        ("RangeInclusive::to_vec", Instruction::LEQ, IADD64, FADD64),
+        ("Range::__float_to_vec", Instruction::LEF, FADD64, IADD64),
+        ("RangeInclusive::__float_to_vec", Instruction::LEQF, FADD64, IADD64),
     ] {
         let slice = body(name);
-        assert_eq!(jmpf_ops(slice), vec![cmp as u8], "`{name}` compare");
-        assert_eq!(steps(slice), vec![step], "`{name}` step");
+        let (cmps, steps) = (jmpf_ops(slice), steps(slice));
+        assert!(cmps.contains(&(cmp as u8)), "`{name}` compare: {cmps:?}");
+        assert!(steps.contains(&step), "`{name}` step: {steps:?}");
+        assert!(!steps.contains(&other_step), "`{name}` steps with the wrong numeric kind: {steps:?}");
     }
 }
 

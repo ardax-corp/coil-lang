@@ -4,20 +4,6 @@ use super::*;
 
 impl Compiler {
 
-    /// Direct `CALL`, or `Entry` when the callee body is still ahead.
-    ///
-    /// `dest` must be a fragment that will be appended onto [`Self::bytecode`]
-    /// (not `self.bytecode` itself). Forward refs flush `dest` first so the
-    /// reserved module label is not remapped as fragment-local.
-    pub(super) fn emit_direct_fn_call(
-        &mut self,
-        dest: &mut CodeBuf,
-        name: &str,
-        arity: u32,
-    ) -> bool {
-        self.emit_named_entry(dest, name, arity, crate::il::EntryKind::Call)
-    }
-
     pub(super) fn emit_named_entry(
         &mut self,
         dest: &mut CodeBuf,

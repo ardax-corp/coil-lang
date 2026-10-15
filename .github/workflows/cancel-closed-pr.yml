@@ -1,0 +1,21 @@
+name: Cancel closed PR runs
+
+# When a pull request is merged or closed, cancel its CI runs still in
+# flight. This run joins ci.yml's concurrency group for the PR
+# (`CI-<number>`), and `cancel-in-progress` there cancels whatever is
+# running in it. Pushes to main use their own groups and are untouched.
+on:
+  pull_request:
+    types: [closed]
+
+concurrency:
+  group: CI-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  cancel:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Cancelled CI runs for PR #${{ github.event.pull_request.number }}"
