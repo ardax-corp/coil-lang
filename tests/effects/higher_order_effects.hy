@@ -52,6 +52,7 @@ test("a pure higher-order function runs impure arguments") {
     let before = HITS;
     assert!(apply(fn (int v) => bump(v), 0) == before + 1);
     assert!(HITS == before + 1);
-    counting_caller(0);
+    let h = HITS;
+    assert!(counting_caller(0) == 3 * h + 6);
     assert!(HITS == before + 4);
 }

@@ -64,6 +64,7 @@ test("ensures holds on every return path") {
     assert!(clamp(50, 0, 10) == 10);
     assert!(clamp(7, 0, 10) == 7);
     assert!(twice(new In(4)) == 8);
+    assert!(twice(new In(10)) == 20);
 }
 
 test("a broken ensures on an early return panics") {

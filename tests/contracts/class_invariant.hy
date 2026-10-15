@@ -38,7 +38,7 @@ impl Account {
         return new Account(0, limit);
     }
 
-    // Static methods are not checked, even on a broken instance.
+    // A static method has no receiver to check.
     pub static fn raw(int balance, int limit) -> int {
         return balance + limit;
     }
@@ -71,7 +71,7 @@ test("construction and methods that keep the invariant") {
     a.withdraw(5);
     assert!(a.balance() == 0);
     assert!(Account::open(3).balance() == 0);
-    assert!(Account::raw(0 - 1, 0) == 0 - 1);
+    assert!(Account::raw(0 - 1, 3) == 2);
 }
 
 test("a private helper may break the invariant in the middle") {

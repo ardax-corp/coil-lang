@@ -105,6 +105,7 @@ test("invariants that hold") {
 
 test("a break skips the check") {
     assert!(breaks_after(new In(3)) == 3);
+    assert!(breaks_after(new In(1)) == 1);
 }
 
 test("an invariant broken after an iteration panics") {

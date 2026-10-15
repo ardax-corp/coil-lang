@@ -88,7 +88,7 @@ test("a method's requires blames the caller") {
             0
         },
     );
-    assert!(has(m, "requires amount > 0 (\"deposit must be positive\")"), m);
+    assert!(has(m, "contract violated: requires amount > 0 (\"deposit must be positive\")"), m);
     assert!(has(m, "called from"), m);
 }
 
