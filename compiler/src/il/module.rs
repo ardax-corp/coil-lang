@@ -286,87 +286,6 @@ impl IlModule {
         max.max(opt::max_code_label(&self.epilogue))
     }
 
-    /// Loops whose body stores locals above the entry cursor reach their
-    /// header with one cursor on entry and a higher one on the back edge, so
-    /// precise frame maps only know a range there and stale loop words stay
-    /// ambiguous GC roots. For an interpreted (fuse-IL) body, a
-    /// `CONST 0; STORE b-1` preheader raises the entry cursor to the back-edge
-    /// one `b` (from the tell analysis). It runs after IL optimization and
-    /// MIR tiering, so neither sees it; dense / LIR bodies manage their own
-    /// frame. Only loops that can reach a GC safepoint are touched, and only
-    /// when the tell analysis confirms the entry cursor is below `b` (so
-    /// slot `b-1` is no live local) and the header then has cursor `b` on
-    /// every edge.
-    fn apply_loop_cursor_raises(&mut self, tier: &[&str]) {
-        for (i, body) in self.funcs.iter_mut().enumerate() {
-            if tier.get(i).copied() != Some("fuse") {
-                continue;
-            }
-            let entry_sp = body.meta.entry_sp;
-            let mut done: HashSet<Label> = HashSet::new();
-            while let Some(lp) = super::analysis::find_natural_loops(&body.ops)
-                .into_iter()
-                .find(|lp| !done.contains(&lp.header_label))
-            {
-                done.insert(lp.header_label);
-                if !body.ops[lp.header..=lp.latch].iter().any(il_may_collect) {
-                    continue;
-                }
-                let info = super::tell::analyze_il_at(&body.ops, entry_sp);
-                if info.tell_before(lp.header).known().is_some() {
-                    continue;
-                }
-                let Some(back) = loop_back_edge_tell(&body.ops, &lp, entry_sp) else {
-                    continue;
-                };
-                let mut trial = body.ops.clone();
-                let pre = Label(
-                    trial
-                        .iter()
-                        .filter_map(|op| match op {
-                            IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
-                            IlOp::Jump { target: Label(id), .. } => Some(*id),
-                            _ => None,
-                        })
-                        .max()
-                        .unwrap_or(0)
-                        + 1,
-                );
-                for (j, op) in trial.iter_mut().enumerate() {
-                    if (lp.header..=lp.latch).contains(&j) {
-                        continue;
-                    }
-                    if let IlOp::Jump { target, .. } = op
-                        && *target == lp.header_label
-                    {
-                        *target = pre;
-                    }
-                }
-                let loc = common::DebugLoc::unknown();
-                trial.splice(
-                    lp.header..lp.header,
-                    [
-                        IlOp::Label(pre),
-                        IlOp::Const { imm: 0, loc },
-                        IlOp::StorePop {
-                            slot: back - 1,
-                            loc,
-                        },
-                    ],
-                );
-                let check = super::tell::analyze_il_at(&trial, entry_sp);
-                let entry_ok = check
-                    .tell_before(lp.header + 1)
-                    .known()
-                    .is_some_and(|e| e < back);
-                let header_ok = check.tell_before(lp.header + 3).known() == Some(back);
-                if entry_ok && header_ok {
-                    body.ops = trial;
-                }
-            }
-        }
-    }
-
     /// MIR specialization of each body, then concatenate the bodies.
     ///
     /// `pool` is the module const pool, which MIR specialization reads and
@@ -515,11 +434,13 @@ impl IlModule {
         // M5p: every body runs IL emitted from its MIR (dense or LIR).
         // One left on emit_hir's stack lowering is a compiler bug.
         let fell_back: Vec<String> = (0..self.funcs.len())
-            // A body HIR never lowered (an IL-only test body, or one
-            // past a program error) has no direct MIR to miss.
+            // With `require_mir` (a clean compile) every body must have
+            // MIR. Without it (an IL-only test module, or one past a
+            // program error that never runs) only bodies HIR lowered count.
             .filter(|&i| {
                 let meta = &self.funcs[i].meta;
-                tier[i] == "fuse" && (meta.hir_mir.is_some() || meta.hir_mir_why.is_some())
+                tier[i] == "fuse"
+                    && (opts.require_mir || meta.hir_mir.is_some() || meta.hir_mir_why.is_some())
             })
             .map(|i| {
                 let body = &self.funcs[i];
@@ -538,27 +459,10 @@ impl IlModule {
                 fell_back.join(", ")
             );
         }
-        // Dense and LIR bodies carry GC maps built from their MIR. An
-        // allocating fuse-IL body with MIR from HIR keeps its heap words in
-        // the slots of that MIR's locals, which its map pins at every PC;
-        // its staging temps, and every slot of a body without MIR, are
-        // rooted by its precise frame map (`precise_frames`) or the
-        // conservative frame scan. Drafts see bodies before the loop cursor
-        // raises (added just below).
+        // Dense and LIR bodies carry GC maps built from their MIR.
         let mut map_from: Vec<&'static str> = vec!["-"; self.funcs.len()];
         for (i, body) in self.funcs.iter().enumerate() {
             if let Some(draft) = mir_maps.remove(&body.meta.name) {
-                self.stack_map_drafts.push(draft);
-                map_from[i] = "mir";
-            } else if tier[i] == "fuse"
-                // A pinned (`defer`) body's frame also runs its thunks
-                // and cleanup pad, which its MIR does not describe.
-                && !body.meta.pinned
-                && let Some(func) = body.meta.hir_mir.as_deref()
-                && crate::mir::maps_allocation(func)
-            {
-                let mut draft = crate::mir::encode_draft_slots(func);
-                draft.name = body.meta.name.clone();
                 self.stack_map_drafts.push(draft);
                 map_from[i] = "mir";
             }
@@ -583,8 +487,6 @@ impl IlModule {
         }
         self.debug_slot_remaps.extend(side_remaps);
         self.deopt_map_drafts.extend(side_deopts);
-
-        self.apply_loop_cursor_raises(&tier);
         self.to_flat()
     }
 }
@@ -879,71 +781,6 @@ fn remap_cross_function_jump_targets(
                 }
         }
     }
-}
-
-/// The cursor the loop's back edge settles on: the entry cursor (the body
-/// with this back edge cut), then one iteration from the header at a time
-/// until the latch reproduces the assumed header cursor.
-fn loop_back_edge_tell(
-    ops: &[IlOp],
-    lp: &super::analysis::NaturalLoop,
-    entry_sp: u32,
-) -> Option<u32> {
-    let halt = || IlOp::Halt {
-        loc: common::DebugLoc::unknown(),
-    };
-    let mut cut = ops.to_vec();
-    cut[lp.latch] = halt();
-    let mut at = super::tell::analyze_il_at(&cut, entry_sp)
-        .tell_before(lp.header)
-        .known()?;
-    let entry = at;
-    let mut once: Vec<IlOp> = ops[lp.header..lp.latch].to_vec();
-    once.push(halt());
-    for _ in 0..4 {
-        let next = super::tell::analyze_il_at(&once, at).tell_before(once.len() - 1).known()?;
-        if next == at {
-            return (at > entry).then_some(at);
-        }
-        at = next;
-    }
-    None
-}
-
-/// An op that may allocate or call (a GC safepoint in an interpreted body).
-fn il_may_collect(op: &IlOp) -> bool {
-    use common::Instruction;
-    if matches!(
-        op,
-        IlOp::Entry { .. }
-            | IlOp::MakeTuple { .. }
-            | IlOp::MakeArray { .. }
-            | IlOp::MakeEnum { .. }
-            | IlOp::BoxValue { .. }
-            | IlOp::HostInvoke { .. }
-            | IlOp::String { .. }
-    ) {
-        return true;
-    }
-    op.as_encode_byte().is_some_and(|b| {
-        matches!(
-            *b.bytecode(),
-            Instruction::CALL
-                | Instruction::CallIndirect
-                | Instruction::InitTyped
-                | Instruction::INIT
-                | Instruction::ArrayPush
-                | Instruction::MakeDict
-                | Instruction::FORMAT
-                | Instruction::STRINGIFY
-                | Instruction::MakeFn
-                | Instruction::MakePolyFnCapture
-                | Instruction::DictEntries
-                | Instruction::MakeEnumK
-                | Instruction::MakeTupleK
-                | Instruction::MakeCoro
-        )
-    })
 }
 
 #[cfg(test)]
@@ -1685,6 +1522,7 @@ mod tests {
             escape_analysis: false,
             branch_optimization: false,
             collect_stats: false,
+            require_mir: false,
         }
     }
 
@@ -1724,55 +1562,5 @@ mod tests {
         );
     }
 
-    /// A loop that allocates and stores a body local above the entry cursor
-    /// gets a `CONST 0; STORE b-1` preheader so its header cursor is exact;
-    /// a loop whose header cursor is already known is left alone.
-    #[test]
-    fn loop_cursor_raise_makes_the_header_cursor_exact() {
-        let alloc = || IlOp::MakeArray {
-            arity: 0,
-            elem_kind: 0,
-            loc: loc(),
-        };
-        let jump = |kind, target| IlOp::Jump {
-            kind,
-            target,
-            loc: loc(),
-            hint: Default::default(),
-        };
-        let ops = vec![
-            IlOp::Const { imm: 0, loc: loc() },
-            IlOp::StorePop { slot: 1, loc: loc() },
-            IlOp::Label(Label(1)),
-            IlOp::Load { slot: 0, loc: loc() },
-            jump(IlJumpKind::JumpIfFalse, Label(2)),
-            alloc(),
-            IlOp::StorePop { slot: 3, loc: loc() },
-            jump(IlJumpKind::Unconditional, Label(1)),
-            IlOp::Label(Label(2)),
-            IlOp::Const { imm: 0, loc: loc() },
-            IlOp::Return { loc: loc(), ret_words: 1 },
-        ];
-        let emit_end = ops.iter().filter(|op| op.emits_code()).count();
-        let funcs = vec![IlFunc::with_entry_sp("f", None, 0, emit_end, 1)];
-        let mut m = IlModule::from_flat(&ops, &funcs);
-        m.apply_loop_cursor_raises(&["fuse"]);
-        let body = &m.funcs[0].ops;
-        let header = body
-            .iter()
-            .position(|op| matches!(op, IlOp::Label(Label(1))))
-            .expect("header label");
-        assert!(
-            matches!(body[header - 1], IlOp::StorePop { slot: 3, .. }),
-            "raise to the back-edge cursor 4"
-        );
-        let tell = super::super::tell::analyze_il_at(body, 1);
-        assert_eq!(tell.tell_before(header).known(), Some(4));
-
-        // Already exact (or not interpreted): untouched.
-        let mut m = IlModule::from_flat(&ops, &funcs);
-        m.apply_loop_cursor_raises(&["dense"]);
-        assert_eq!(m.funcs[0].ops.len(), ops.len());
-    }
 
 }

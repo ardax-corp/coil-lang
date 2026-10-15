@@ -110,6 +110,7 @@ fn all_off() -> OptimizeOptions {
         escape_analysis: false,
         branch_optimization: false,
         collect_stats: false,
+        require_mir: false,
     }
 }
 

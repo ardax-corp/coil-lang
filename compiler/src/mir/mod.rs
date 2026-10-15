@@ -75,8 +75,7 @@ pub use from_hir::{lower_body as lower_from_hir, opaque_heap as opaque_heap_ty, 
 pub use func::{MirBlock, MirFunc};
 pub use specialize::{capture_pinned_mir, start_mir_capture, take_mir_capture};
 pub use deopt::DraftDeoptMap;
-pub use gates::maps_allocation;
-pub use stackmap::{bind_drafts, encode_draft_slots, is_alloc_opcode, DraftFrameMap};
+pub use stackmap::{bind_drafts, is_alloc_opcode, DraftFrameMap};
 pub use inst::{
     BlockId, LocalId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst,
     MirFfiOp, MirGcKind, MirInst, MirUnaryOp, Terminator, ValueId,
