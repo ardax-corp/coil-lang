@@ -494,6 +494,7 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         MirInst::Cast { kind, to, src, .. } => ExprKey::Cast { kind, to, src },
         MirInst::Phi { .. }
         | MirInst::HostInvoke { .. }
+        | MirInst::Ffi { .. }
         | MirInst::Call { .. }
         | MirInst::CallIndirect { .. }
         | MirInst::MatchPayload { .. }

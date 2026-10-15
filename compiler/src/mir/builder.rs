@@ -475,6 +475,22 @@ impl MirBuilder {
         Ok(dest)
     }
 
+    /// An FFI opcode over `args` (its stack operands in push order): the
+    /// boxed `Result` it pushes. It may run a callback, so the frame's
+    /// slots are snapshot as for an impure host.
+    pub fn ins_ffi(&mut self, op: super::inst::MirFfiOp, operand: u32, args: Vec<ValueId>) -> Result<ValueId, MirError> {
+        let args: Vec<ValueId> = args.into_iter().map(|v| self.resolve(v)).collect();
+        for (i, &a) in args.iter().enumerate() {
+            if !self.resolve_ty(a).is_word_lane() {
+                return Err(MirError::msg(format!("ffi {} arg {i} is {}", op.as_str(), self.resolve_ty(a))));
+            }
+        }
+        let dest = self.alloc(MirTy::HeapRef);
+        self.push(MirInst::Ffi { dest, op, operand, args })?;
+        self.snapshot_slots(dest);
+        Ok(dest)
+    }
+
     pub fn ins_call(
         &mut self,
         target: crate::il::Label,

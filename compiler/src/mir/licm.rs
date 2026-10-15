@@ -147,6 +147,8 @@ fn loop_mutates_heap_or_calls(func: &MirFunc, lp: &LoopInfo) -> bool {
                     | MirInst::Call { .. }
                     | MirInst::Yield { .. }
                     | MirInst::CallIndirect { .. }
+                    // An FFI call copies array buffers back.
+                    | MirInst::Ffi { .. }
                     | MirInst::FieldStore { .. }
                     | MirInst::HeapFieldStore { .. }
             ) {
@@ -289,6 +291,7 @@ fn hoistable(inst: &MirInst, allow_index: bool, allow_alloc: bool) -> bool {
         | MirInst::GcBarrier { .. } => allow_alloc,
         MirInst::Call { .. }
         | MirInst::CallIndirect { .. }
+        | MirInst::Ffi { .. }
         | MirInst::MatchPayload { .. }
         | MirInst::FieldLoad { .. }
         | MirInst::FieldStore { .. }

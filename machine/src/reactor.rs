@@ -1133,10 +1133,13 @@ mod tests {
             "workers should park after the injector drains ({parked})"
         );
         thread::sleep(Duration::from_millis(80));
-        assert_eq!(
-            reactor.idle_wait_count(),
-            parked,
-            "idle workers must not 2 ms-poll while waiting for notify"
+        // A condvar may wake spuriously (Windows does), and each wake parks
+        // again, so allow a few extra waits. A 2 ms poll would add about 40
+        // per worker in 80 ms (#1115).
+        let after = reactor.idle_wait_count();
+        assert!(
+            after < parked + 10,
+            "idle workers must not 2 ms-poll while waiting for notify ({parked} -> {after})"
         );
         let t0 = std::time::Instant::now();
         let second = submit_const_job(&reactor, 8);

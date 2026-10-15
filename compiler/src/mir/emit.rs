@@ -36,6 +36,7 @@ pub fn emit_dense(
             MirInst::HostInvoke { native_id, .. } => {
                 !super::host_allow::dense_host_ok(*native_id)
             }
+            MirInst::Ffi { .. } => true,
             _ => false,
         })
     }) {
@@ -1023,6 +1024,10 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
                 slot: u32::from(regs[dest.index()]),
                 loc,
             });
+        }
+        // Refused up front (`emit_dense`).
+        MirInst::Ffi { .. } => {
+            return Err(LowerError::Refused("dense emit refuses FFI".into()));
         }
         MirInst::CallIndirect { dest, callee, args, dicts } => {
             // The arguments, then the function value on top.
@@ -2260,7 +2265,7 @@ fn gather_window(func: &MirFunc, self_entry: Option<Label>) -> u8 {
             }
             let w = match inst {
                 MirInst::Call { args, target, .. } if Some(*target) != self_entry => args.len(),
-                MirInst::HostInvoke { args, .. } => args.len(),
+                MirInst::HostInvoke { args, .. } | MirInst::Ffi { args, .. } => args.len(),
                 MirInst::CallIndirect { args, .. } => args.len() + 1,
                 MirInst::Alloc { elems, .. } => elems.len(),
                 // Format string plus args, pushed like call args.
