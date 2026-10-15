@@ -234,9 +234,15 @@ fn params_closed(ty: &Ty) -> bool {
 fn aggregate<'t>(checker: &Checker, mut items: impl Iterator<Item = &'t Ty>, seen: &mut Vec<String>) -> Option<ValueClass> {
     items
         .all(|t| {
-            params_closed(t) && classify_in(checker, t, seen).is_none_or(is_word)
+            (params_closed(t) || mono_fun(checker, t, seen)) && classify_in(checker, t, seen).is_none_or(is_word)
         })
         .then_some(ValueClass::Aggregate)
+}
+
+/// A monomorphic function type of plain words: its value is one closure
+/// word, stored in an aggregate as that word.
+fn mono_fun(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> bool {
+    matches!(strip_readonly(ty), Ty::Fun(..)) && crate::typechecking::subst::ftv(ty).is_empty() && fun_words(checker, ty, seen)
 }
 
 /// A class declared with type parameters (`class HashMap<K, V>`).
@@ -259,7 +265,7 @@ fn object_class(checker: &Checker, name: &str) -> Option<ValueClass> {
     let fields = checker.class_fields(&key)?;
     fields
         .iter()
-        .all(|(_, ty)| super::layout::ty_is_closed(ty))
+        .all(|(_, ty)| super::layout::ty_is_closed(ty) || mono_fun(checker, ty, &mut Vec::new()))
         .then_some(ValueClass::Object)
 }
 
@@ -423,6 +429,14 @@ pub fn stack_arrays(body: &HirBody, checker: &Checker) -> StackArrays {
             }
         }
     }
+    // A function element stays in the array object: its closure word has
+    // no slot type.
+    cands.retain(|&local, _| {
+        !body.local(LocalId(local)).ty.as_ref().is_some_and(|t| match crate::typechecking::ty::strip_readonly(&apply_ty_prune(checker.subst(), t)) {
+            Ty::Array { element, .. } => matches!(crate::typechecking::ty::strip_readonly(element), Ty::Fun(..)),
+            t => crate::typechecking::ty::vec_element_ty(t).is_some_and(|e| matches!(crate::typechecking::ty::strip_readonly(e), Ty::Fun(..))),
+        })
+    });
     // Stores into a local: `dst = value`.
     let mut stores: Vec<(u32, HirId, HirId)> = Vec::new();
     let mut refused: HashSet<u32> = HashSet::new();
@@ -1627,6 +1641,14 @@ pub fn polyfn_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
 }
 
 pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
+    // An element of a `Vec`, array or tuple of monomorphic functions: the
+    // closure word it was stored as.
+    if let HirKind::Index { .. } = body.expr(f).kind {
+        return body.expr(f).ty.as_ref().is_some_and(|t| {
+            let t = apply_ty_prune(checker.subst(), t);
+            mono_fun(checker, &t, &mut Vec::new())
+        });
+    }
     let HirKind::Local(local) = body.expr(f).kind else {
         return false;
     };
@@ -1648,7 +1670,9 @@ pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
         return false;
     }
     match info.kind {
-        LocalKind::Param => true,
+        // A `for` or destructuring binding of a monomorphic function
+        // element: the closure word it was stored as.
+        LocalKind::Param | LocalKind::Pattern => true,
         LocalKind::Let => body.exprs.iter().any(|e| match &e.kind {
             // A named function read as a value is `MakeFn` (codegen refuses
             // a generic one, whose `MakePolyFn` calls differently).
@@ -1679,6 +1703,11 @@ pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
                         && checker.existential_method_call_for_span(start, end).is_none()
                 }
                 HirKind::Global { .. } | HirKind::Lambda { .. } => true,
+                // A function field or element: the closure word stored there.
+                HirKind::Field { .. } | HirKind::Index { .. } => body.expr(*init).ty.as_ref().is_some_and(|t| {
+                    let t = apply_ty_prune(checker.subst(), t);
+                    mono_fun(checker, &t, &mut Vec::new())
+                }),
                 _ => false,
             },
             _ => false,
