@@ -348,6 +348,14 @@ fn op_safety(body: &HirBody, op: BinOp, id: HirId) -> Option<Safety> {
         }
         // Overflow traps.
         BinOp::IntAdd | BinOp::IntSub | BinOp::IntMul | BinOp::IntPow => Safety::Traps,
+        // A count outside 0..=63 traps (#1076).
+        BinOp::Shl | BinOp::Shr => {
+            if crate::hir::op_may_trap(body, id) {
+                Safety::Traps
+            } else {
+                Safety::Free
+            }
+        }
         _ => Safety::Free,
     })
 }

@@ -1073,11 +1073,11 @@ pub fn logic_eager(body: &HirBody, rhs: HirId) -> bool {
         } => matches!(body.expr(*rhs).kind, HirKind::Lit(Lit::Int(k)) if k != 0 && k != -1) && logic_eager(body, *lhs),
         // Other int arithmetic can overflow: `x != MAX && x + 1 > y` must
         // not compute `x + 1`.
-        HirKind::Bin { op, lhs, rhs } => {
-            !op.int_may_trap()
+        HirKind::Bin { op, lhs, rhs: r } => {
+            !super::op_may_trap(body, rhs)
                 && !matches!(op, BinOp::StrConcat | BinOp::Overloaded(_))
                 && logic_eager(body, *lhs)
-                && logic_eager(body, *rhs)
+                && logic_eager(body, *r)
         }
         HirKind::Logic { lhs, rhs, .. } => logic_eager(body, *lhs) && logic_eager(body, *rhs),
         HirKind::Un { operand, .. } => !super::op_may_trap(body, rhs) && logic_eager(body, *operand),
@@ -1597,8 +1597,7 @@ pub fn arm_fields(body: &HirBody, pat: &HirPat) -> Result<Vec<Option<super::Loca
 /// generic function, or a call returning a captured `PolyFn`, boxes its
 /// arguments in the AST and stays there.
 /// A never-reassigned parameter or `let` local holding a `PolyFn`: its
-/// calls box each argument and may pass dictionaries
-/// (`Compiler::hir_polyfn_call`).
+/// calls box each argument and may pass dictionaries.
 pub fn polyfn_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
     let HirKind::Local(local) = body.expr(f).kind else {
         return false;

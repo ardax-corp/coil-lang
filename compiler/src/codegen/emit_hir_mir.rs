@@ -35,7 +35,7 @@ pub(super) struct HirMirTables {
     /// `matrix(data)` calls, whose value is the data itself.
     pub(super) matrix_wraps: HashSet<u32>,
     /// Matrix / vector operators and `dot` / `matmul` calls on a packed
-    /// kernel ([`Compiler::hir_linear_algebra_op`]): the native and the
+    /// kernel: the native and the
     /// meta word packing the shape, by expression.
     pub(super) linalgs: HashMap<u32, (u16, u32)>,
     /// `cross(a, b)` calls emission unrolls: whether the result is a
@@ -70,7 +70,7 @@ pub(super) struct HirMirTables {
     /// (`HirBuiltin::Existential`): the method's dictionary slot, by call.
     pub(super) existential_calls: HashMap<u32, u32>,
     /// Calls and dictionary operators typed a bare type parameter in a
-    /// shared generic body, whose result `hir_value` unboxes
+    /// shared generic body, whose result MIR unboxes
     /// (`UNBOX_ANY_TAG`).
     pub(super) unbox_any: HashSet<u32>,
     /// A shared generic body's parameters typed a bare type parameter,
@@ -106,7 +106,7 @@ pub(super) struct HirMirTables {
     /// other than its own type's ([`Compiler::hir_mir_make_niches`]).
     pub(super) make_niches: HashMap<u32, crate::mir::MirTy>,
     /// The key of each field a record `let` pattern binds (`None`: a
-    /// wildcard), by `let`: `hir_let_pat_binds` pushes each as a string.
+    /// wildcard), by `let`: MIR pushes each as a string.
     pub(super) record_pats: HashMap<u32, Vec<Option<u32>>>,
     /// Shared generic call arguments of a niche layout passed in a boxed
     /// parameter ([`Compiler::hir_niche_arg`]): boxed to their enum
@@ -115,7 +115,7 @@ pub(super) struct HirMirTables {
     /// `Result<(), E>` call arguments a `Result<unit, E>` parameter takes
     /// (#1085): MIR rewrites the niche word, by argument.
     pub(super) unit_result_args: std::collections::HashSet<u32>,
-    /// `block_on(h)` calls ([`Compiler::hir_block_on`]): the `wait_ready`
+    /// `block_on(h)` calls: the `wait_ready`
     /// native run between resumes, if the program has one, by call.
     pub(super) block_ons: HashMap<u32, Option<u16>>,
     /// `new C(args).f` reads emission elides the object of
@@ -147,7 +147,7 @@ enum Kids {
 }
 
 impl Compiler {
-    /// The side tables of `hir`, planned as [`Self::hir_value`] emits it.
+    /// The side tables direct MIR lowers `hir` with.
     pub(super) fn hir_mir_tables(&mut self, hir: &HirBody, emit: &HirEmit) -> HirMirTables {
         let mut tables = HirMirTables::default();
         self.hir_mir_intern_keys(hir);
@@ -250,7 +250,7 @@ impl Compiler {
             _ => Vec::new(),
         };
         // A stack array's literal init: each item into its own slot, in
-        // the element's layout (`hir_stack_array_init`).
+        // the element's layout.
         let stack_init = match kind {
             HirKind::Let { local, init: Some(init) } => Some((*local, *init)),
             HirKind::Assign { place, value } => match hir.expr(*place).kind {
@@ -365,7 +365,7 @@ impl Compiler {
     /// binds them: not a `defer` body's (its thunk's frame), an outlined
     /// parallel loop's (its worker's), a `()` `let`'s, code emission drops,
     /// or a `match` arm's that emission reads off the operand stack.
-    /// `value`: whether emission wants `id`'s value (`hir_value`), not
+    /// `value`: whether emission wants `id`'s value, not
     /// only its effect.
     fn hir_mir_bound(&self, hir: &HirBody, emit: &HirEmit, id: HirId, value: bool, defer: bool, bound: &mut HashSet<u32>) {
         if emit.plan.par_loops.contains_key(&id.0) {
@@ -451,7 +451,7 @@ impl Compiler {
     }
 
     /// The locals the reached `arms` of a `match` on `scrutinee` bind in
-    /// frame slots, as [`Self::hir_match`] and its dispatches bind them. An
+    /// frame slots, as the match dispatches bind them. An
     /// arm emission skips (a niche match's third arm, a rewrapping
     /// `Err(e) => return Err(e)`), or whose payload word stays the value
     /// (an identity arm, outside in-place payload slots), binds none.
@@ -588,10 +588,9 @@ impl Compiler {
         }
     }
 
-    /// Plan `id`'s own entries, as [`Self::hir_value_unpacked`]'s arm for
-    /// it records them.
+    /// Plan `id`'s own entries.
     fn hir_mir_note(&mut self, hir: &HirBody, emit: &HirEmit, id: HirId, t: &mut HirMirTables) -> Kids {
-        // As `hir_value` packs a value after emitting it.
+        // A value packed after it is built.
         if let Some(pack) = self.hir_existential_pack(hir, id) {
             let code = self.hir_mir_once(|this| {
                 let mut code = CodeBuf::new();
@@ -606,7 +605,7 @@ impl Compiler {
             }
         }
         let e = hir.expr(id);
-        // As `hir_value` unboxes a call's or dictionary operator's result.
+        // A call's or dictionary operator's result unboxed.
         let produced = match e.kind {
             HirKind::Call { .. } => true,
             HirKind::Bin { .. } | HirKind::Un { .. } => matches!(emit.plan.ops.get(&id.0), Some(HirOp::Bound { .. })),
@@ -749,7 +748,7 @@ impl Compiler {
                 return Kids::None;
             }
             // An element-wise operator on the packed kernel: its operands
-            // boxed, then the meta word, as `hir_aggregate`.
+            // boxed, then the meta word.
             HirKind::Bin { .. } | HirKind::Un { .. }
                 if let Some(HirOp::Aggregate(info)) = emit.plan.ops.get(&id.0)
                     && let Some(meta) = Self::packed_aggregate_meta(info)
@@ -772,8 +771,7 @@ impl Compiler {
                 if words && let Some((native, meta)) = self.packed_linear_algebra_op(&info.kind, operands.len()) {
                     t.linalgs.insert(id.0, (native as u16, meta));
                 } else if words {
-                    // Past the kernel's limits: unrolled, as emission's
-                    // `emit_linear_algebra_unrolled`.
+                    // Past the kernel's limits: unrolled.
                     t.unrolled_las.insert(id.0, info.kind.clone());
                 }
             }
@@ -829,7 +827,7 @@ impl Compiler {
                     } else if let crate::typechecking::LinearAlgebraKind::Cross { left_is_tuple, elem_is_float } = info.kind
                         && args.len() == 2
                     {
-                        // Unrolled, as `emit_linear_algebra_unrolled`.
+                        // Unrolled.
                         t.crosses.insert(id.0, (left_is_tuple, elem_is_float));
                     } else if matches!(info.kind, crate::typechecking::LinearAlgebraKind::Dot { .. } | crate::typechecking::LinearAlgebraKind::MatMul { .. })
                         && args.len() == 2
@@ -914,8 +912,8 @@ impl Compiler {
         Kids::All
     }
 
-    /// An FFI call's opcode and operands, as `hir_value_unpacked` emits
-    /// `HirBuiltin::Ffi` / `FfiDyn`; `None` when an operand is not the
+    /// An FFI call's opcode and operands for `HirBuiltin::Ffi` /
+    /// `FfiDyn`; `None` when an operand is not the
     /// word emission pushes.
     fn hir_mir_ffi(&mut self, hir: &HirBody, emit: &HirEmit, id: HirId, builtin: HirBuiltin, args: &[HirId], params: &[ValueLayout]) -> Option<crate::mir::HirFfi> {
         use crate::mir::{HirFfiOperand as O, MirFfiOp};
@@ -992,7 +990,7 @@ impl Compiler {
     }
 
     /// The user `into_iter` / `next` entries `for` loop `id` calls, as
-    /// [`Self::hir_for_in`] emits them.
+    /// MIR calls them.
     fn hir_mir_for_in(&mut self, hir: &HirBody, id: HirId, pat: &HirPat, iterable: HirId, kind: &ForInKind, t: &mut HirMirTables) {
         let ForInKind::Custom { into_iter_fqn, next_fqn, counted } = kind else {
             return;
@@ -1041,8 +1039,8 @@ impl Compiler {
         }
     }
 
-    /// User operator `id` on `operands` calling its instance method, as
-    /// `hir_value_unpacked`'s `HirOp::Call` arms: a raw method takes the
+    /// User operator `id` on `operands` calling its instance method
+    /// (`HirOp::Call`): a raw method takes the
     /// operands' own words (a plain call), any other a binary operator's
     /// boxed operands (an operator call).
     fn hir_mir_op_call(
@@ -1089,8 +1087,7 @@ impl Compiler {
         }
     }
 
-    /// Call `id` of a function or method, as `hir_value_unpacked`'s
-    /// `HirKind::Call` arms past the builtins: its entry when it is one
+    /// Call `id` of a function or method, past the builtins: its entry when it is one
     /// plain `CALL` (or `TailCall` / `MakeCoro`) of the arguments' own
     /// words with no dictionary.
     fn hir_mir_call(&mut self, hir: &HirBody, emit: &HirEmit, id: HirId, args: &[HirId], t: &mut HirMirTables) {
@@ -1224,7 +1221,7 @@ impl Compiler {
         }
         if let Some(plan) = self.hir_par_call_plan(hir, &call.key, args) {
             // The worker (and a dynamic site's sequential function) as the
-            // `CALL`s `hir_par_call` emits resolve them.
+            // forking `CALL`s resolve them.
             let (worker, seq) = match plan {
                 HirParCall::Spec { worker, .. } => (worker, None),
                 HirParCall::Dynamic { cutoff, orig, worker } => (worker, Some((orig, cutoff))),
@@ -1296,8 +1293,7 @@ impl Compiler {
         }
     }
 
-    /// Call `id` through `PolyFn` local `f`, as [`Self::hir_polyfn_call`]
-    /// emits it: each argument's `BoxValue` tag, the call site's
+    /// Call `id` through `PolyFn` local `f`: each argument's `BoxValue` tag, the call site's
     /// dictionaries and the result's `UnboxValue` tag.
     fn hir_mir_polyfn_call(&mut self, hir: &HirBody, emit: &HirEmit, id: HirId, f: HirId, args: &[HirId], t: &mut HirMirTables) {
         let mut boxes = Vec::with_capacity(args.len());
@@ -1340,9 +1336,8 @@ impl Compiler {
         t.poly_calls.insert(id.0, crate::mir::HirPolyCall { boxes, dicts, unbox });
     }
 
-    /// Each argument's closure adapter, as emission wraps it
-    /// (`hir_adapt_fn_arg`): a function value the generic callee calls
-    /// with boxed arguments. A lambda literal unboxes them itself.
+    /// Each argument's closure adapter: a function value the generic
+    /// callee calls with boxed arguments. A lambda literal unboxes them itself.
     fn hir_mir_adapters(&mut self, hir: &HirBody, generic: Option<&HirGeneric>, args: &[HirId]) -> Vec<Option<(crate::il::Label, u32)>> {
         let Some(g) = generic else {
             return Vec::new();
@@ -1374,7 +1369,7 @@ impl Compiler {
     }
 
     /// The niche layout of argument `id` that emission passes in boxed
-    /// `param` as its enum object (`hir_value` at the boxed layout).
+    /// `param` as its enum object (at the boxed layout).
     fn hir_niche_arg(&self, hir: &HirBody, emit: &HirEmit, id: HirId, param: ValueLayout) -> Option<ValueLayout> {
         if param != ValueLayout::Boxed {
             return None;
@@ -1479,7 +1474,7 @@ impl Compiler {
     /// (instance, call-site, `PolyFn` escape and existential pack
     /// dictionaries, run into a scratch buffer as emission runs them).
     fn hir_mir_dict_reads(&mut self, hir: &HirBody, emit: &HirEmit, id: HirId) -> bool {
-        // As `hir_value` packs a value after emitting it.
+        // A value packed after it is built.
         if let Some(pack) = self.hir_existential_pack(hir, id)
             && self.hir_mir_probe_unplanned(|this, code| this.emit_existential_pack_recipe(code, &pack))
         {
@@ -1573,7 +1568,7 @@ impl Compiler {
     }
 
     /// Whether a `format` call's `%v` arguments read a frame dictionary
-    /// when [`Self::hir_show`] shows them.
+    /// when they are shown.
     fn hir_mir_format_dict_reads(&mut self, hir: &HirBody, args: &[HirId]) -> bool {
         let HirKind::Lit(Lit::Str(fmt)) = &hir.expr(args[0]).kind else {
             return false;
@@ -1589,8 +1584,7 @@ impl Compiler {
         })
     }
 
-    /// Whether `emit_show_for_stack_value` reads a frame dictionary for a
-    /// value of type `ty`: a tuple's or record's parts, or the instance
+    /// Whether showing a `%v` value of type `ty` reads a frame dictionary: a tuple's or record's parts, or the instance
     /// dictionary of the `show` it calls.
     fn hir_mir_show_dict_reads(&mut self, ty: &Ty) -> bool {
         match apply_ty_prune(self.checker.subst(), ty) {
@@ -1683,7 +1677,7 @@ impl Compiler {
         }
     }
 
-    /// How [`Self::hir_show`] shows `arg`: a bound dictionary's method
+    /// How a `format` shows `arg`: a bound dictionary's method
     /// when that dictionary is one of the body's parameters, else as
     /// [`Self::hir_show_ty`].
     fn hir_show_plan(&mut self, hir: &HirBody, arg: HirId) -> Option<crate::mir::HirShow> {
@@ -1694,7 +1688,7 @@ impl Compiler {
         self.hir_show_ty(&ty)
     }
 
-    /// How `emit_show_for_stack_value` shows a value of type `ty`, when
+    /// How a `%v` value of type `ty` is shown, when
     /// each step is one direct MIR has: a tuple's or record's items shown
     /// and formatted, `STRINGIFY` with no `Show` instance, or one plain
     /// one-word `CALL` of the raw `show` entry on the boxed-layout value
@@ -1745,7 +1739,7 @@ impl Compiler {
     /// Decide, before `root` is emitted, which parallel loops under it move
     /// into their own fork-join functions ([`HirPlan::par_loops`]) and
     /// whether one runs its fork-join inline ([`HirPlan::par_inline`]), as
-    /// [`Self::hir_par_loop`] lowers each site. A site's enclosing locals
+    /// direct MIR lowers each site. A site's enclosing locals
     /// are the ones bound when it runs: `emit`'s bound slots (parameters
     /// and captures, or a chunk worker's site locals), then each local
     /// bound before the site in emission order.
@@ -1815,7 +1809,7 @@ impl Compiler {
         }
     }
 
-    /// Plan parallel-loop site `id` as [`Self::hir_par_loop`] lowers it.
+    /// Plan parallel-loop site `id` as direct MIR lowers it.
     /// `false` when it runs sequentially (its parts are then walked as
     /// any loop's).
     #[allow(clippy::too_many_arguments)]

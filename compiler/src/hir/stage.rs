@@ -265,7 +265,7 @@ fn pure(body: &HirBody, e: HirId) -> bool {
     match &body.expr(e).kind {
         HirKind::Lit(_) | HirKind::Local(_) => true,
         HirKind::Bin { op, lhs, rhs } => {
-            !op.int_may_trap() && !matches!(op, BinOp::Overloaded(_)) && pure(body, *lhs) && pure(body, *rhs)
+            !super::op_may_trap(body, e) && !matches!(op, BinOp::Overloaded(_)) && pure(body, *lhs) && pure(body, *rhs)
         }
         HirKind::Un { operand, .. } => !super::op_may_trap(body, e) && pure(body, *operand),
         _ => false,

@@ -4,7 +4,6 @@
 use std::cell::RefCell;
 use std::fmt::{self, Write as _};
 
-
 thread_local! {
     static LAST_STATS: RefCell<Option<OptStats>> = const { RefCell::new(None) };
 }
@@ -294,11 +293,6 @@ pub(crate) fn note_fuse_reason(reason: &str) {
 /// Count one function body lowered from HIR.
 pub(crate) fn note_hir_lowered() {
     with_stats(|s| s.hir_lowered += 1);
-}
-
-/// Count early exits HIR lowering laid out after their function's body.
-pub(crate) fn note_branches_optimized(n: usize) {
-    with_stats(|s| s.branches_optimized += n);
 }
 
 /// Count one function body `--hir` left to the AST codegen, and why.

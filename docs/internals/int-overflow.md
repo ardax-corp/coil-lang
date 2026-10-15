@@ -10,8 +10,11 @@ Coil `int` arithmetic is exact or it panics, in every build
 | `a / 0`, `a % 0` | `division by zero` |
 | `a ** b` that does not fit | `integer overflow` |
 | `a ** b` with `b < 0` | `negative exponent` |
+| `a << n`, `a >> n` with `n` outside `0..=63` | `shift count out of range` |
 
-`MIN % -1` is `0`. Shifts and bitwise operators do not trap. Floats keep
+`MIN % -1` is `0`. A shift keeps no overflow check on its value (bits shifted
+out are dropped), only on its count; a count known at compile time outside
+`0..=63` is error E0131 (coil-lang#1076). Bitwise operators do not trap. Floats keep
 IEEE behaviour (`inf`, `NaN`). Checked, wrapping, saturating and
 overflowing arithmetic are userland traits in coil-stdlib's `arith` module
 (`Checked`, `Wrapping`, `Saturating`, `Overflowing`;
