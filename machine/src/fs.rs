@@ -198,6 +198,21 @@ pub fn fs_read_link(heap: &mut Heap, path: Value) -> Value {
     })
 }
 
+#[cfg(any(windows, test))]
+fn resolve_symlink_target(
+    original: &std::path::Path,
+    link_path: &std::path::Path,
+) -> std::path::PathBuf {
+    if original.is_relative()
+        && let Some(parent) = link_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        parent.join(original)
+    } else {
+        original.to_path_buf()
+    }
+}
+
 pub fn fs_symlink(heap: &mut Heap, target: Value, link: Value) -> Value {
     with_two_paths(heap, target, link, |heap, original, link_path| {
         #[cfg(unix)]
@@ -207,7 +222,9 @@ pub fn fs_symlink(heap: &mut Heap, target: Value, link: Value) -> Value {
         }
         #[cfg(windows)]
         {
-            let r = host_fs::metadata(original)
+            use std::path::Path;
+            let resolved = resolve_symlink_target(Path::new(original), Path::new(link_path));
+            let r = host_fs::metadata(&resolved)
                 .map_err(io_err)
                 .and_then(|meta| {
                     if meta.is_dir() {
@@ -331,7 +348,6 @@ mod tests {
     fn coil_string(heap: &mut Heap, s: &str) -> Value {
         alloc_path_string(heap, s)
     }
-
 
     fn io_tag_from_u32(tag: u32) -> Option<IoErrorTag> {
         match tag {
@@ -533,7 +549,29 @@ mod tests {
         assert_eq!(result_err_io_tag(&heap, r), Some(IoErrorTag::InvalidInput));
     }
 
-    #[cfg(unix)]
+    #[test]
+    fn resolve_symlink_target_joins_relative_target_with_link_parent() {
+        use std::path::{Path, PathBuf};
+        assert_eq!(
+            resolve_symlink_target(Path::new("target.txt"), Path::new("coil_rel_link/link.txt")),
+            Path::new("coil_rel_link").join("target.txt")
+        );
+        assert_eq!(
+            resolve_symlink_target(Path::new("../sub/target.txt"), Path::new("a/b/link.txt")),
+            Path::new("a/b").join("../sub/target.txt")
+        );
+        assert_eq!(
+            resolve_symlink_target(Path::new("target.txt"), Path::new("link.txt")),
+            PathBuf::from("target.txt")
+        );
+        let abs = std::env::temp_dir().join("target.txt");
+        assert_eq!(
+            resolve_symlink_target(&abs, Path::new("coil_rel_link/link.txt")),
+            abs
+        );
+    }
+
+    #[cfg(any(unix, windows))]
     #[test]
     fn read_link_symlink_round_trip() {
         let base = std::env::temp_dir().join(format!("coil_fs_link_{}", std::process::id()));
@@ -543,21 +581,80 @@ mod tests {
         fs::write(&target, b"t").unwrap();
         let link = base.join("link.txt");
         let mut heap = Heap::default();
+
+        // On Windows, a nonexistent relative target returns NotFound from the metadata probe.
+        #[cfg(windows)]
+        {
+            let missing_target_v = coil_string(&mut heap, "nonexistent_target.txt");
+            let missing_link_v = coil_string(&mut heap, link.to_str().unwrap());
+            let missing_r = fs_symlink(&mut heap, missing_target_v, missing_link_v);
+            assert_eq!(
+                result_err_io_tag(&heap, missing_r),
+                Some(IoErrorTag::NotFound)
+            );
+        }
+
+        // Relative file target resolved against link's parent directory (not process cwd).
+        let rel_link = base.join("rel_link.txt");
+        let rel_link_s = rel_link.to_str().unwrap().to_string();
+        let rel_target_v = coil_string(&mut heap, "target.txt");
+        let rel_link_v = coil_string(&mut heap, &rel_link_s);
+        let rel_r = fs_symlink(&mut heap, rel_target_v, rel_link_v);
+        assert_ne!(
+            result_err_io_tag(&heap, rel_r),
+            Some(IoErrorTag::NotFound),
+            "existing relative file target must not fail with NotFound"
+        );
+
+        // Relative directory target resolved against link's parent directory.
+        let sub_dir = base.join("subdir");
+        fs::create_dir_all(&sub_dir).unwrap();
+        fs::write(sub_dir.join("inner.txt"), b"in").unwrap();
+        let dir_link = base.join("dir_link");
+        let dir_link_s = dir_link.to_str().unwrap().to_string();
+        let dir_target_v = coil_string(&mut heap, "subdir");
+        let dir_link_v = coil_string(&mut heap, &dir_link_s);
+        let dir_r = fs_symlink(&mut heap, dir_target_v, dir_link_v);
+        assert_ne!(
+            result_err_io_tag(&heap, dir_r),
+            Some(IoErrorTag::NotFound),
+            "existing relative directory target must not fail with NotFound"
+        );
+
         let target_s = target.to_str().unwrap().to_string();
         let link_s = link.to_str().unwrap().to_string();
         let target_v = coil_string(&mut heap, &target_s);
         let link_v = coil_string(&mut heap, &link_s);
-        fs_symlink(&mut heap, target_v, link_v);
-        let link_check = coil_string(&mut heap, &link_s);
-        let r = fs_is_symlink(&mut heap, link_check);
-        assert!(unwrap_ok_bool(&heap, r));
-        let link_read = coil_string(&mut heap, &link_s);
-        let r = fs_read_link(&mut heap, link_read);
-        let text = unwrap_ok_string(&heap, r);
-        assert!(text.ends_with("target.txt"));
-        let _ = fs::remove_file(&link);
-        let _ = fs::remove_file(&target);
-        let _ = fs::remove_dir(&base);
+        let sym_r = fs_symlink(&mut heap, target_v, link_v);
+        #[cfg(unix)]
+        assert_eq!(result_ok_tag(&heap, sym_r), Some(0));
+
+        if result_ok_tag(&heap, sym_r) == Some(0) {
+            let link_check = coil_string(&mut heap, &link_s);
+            let r = fs_is_symlink(&mut heap, link_check);
+            assert!(unwrap_ok_bool(&heap, r));
+            let link_read = coil_string(&mut heap, &link_s);
+            let r = fs_read_link(&mut heap, link_read);
+            let text = unwrap_ok_string(&heap, r);
+            assert!(text.ends_with("target.txt"));
+
+            assert_eq!(result_ok_tag(&heap, rel_r), Some(0));
+            let rel_read_v = coil_string(&mut heap, &rel_link_s);
+            let rel_read = fs_read_link(&mut heap, rel_read_v);
+            assert_eq!(unwrap_ok_string(&heap, rel_read), "target.txt");
+            assert_eq!(fs::read_to_string(&rel_link).unwrap(), "t");
+
+            assert_eq!(result_ok_tag(&heap, dir_r), Some(0));
+            let dir_read_v = coil_string(&mut heap, &dir_link_s);
+            let dir_read = fs_read_link(&mut heap, dir_read_v);
+            assert_eq!(unwrap_ok_string(&heap, dir_read), "subdir");
+            assert_eq!(
+                fs::read_to_string(dir_link.join("inner.txt")).unwrap(),
+                "in"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
