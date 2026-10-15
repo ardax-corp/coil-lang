@@ -371,8 +371,8 @@ struct HirEmit {
     /// jumps there directly.
     next_jump: Option<IlLabel>,
     /// The fork-join functions of the planned parallel loops
-    /// ([`HirPlan::par_loops`]) emitted so far, emitted after this body
-    /// ([`Compiler::flush_hir_par_tail`]).
+    /// ([`HirPlan::par_loops`]), queued when the body lowers to MIR and
+    /// emitted after it ([`Compiler::flush_hir_par_tail`]).
     par_tail: Vec<HirParSite>,
 }
 
@@ -795,6 +795,7 @@ impl Compiler {
                     self.hir_lower_mir(hir, &mut emit, Some(entry))
                 } else {
                     self.queue_hir_lambdas(hir, &mut emit);
+                    Self::queue_hir_par_loops(&mut emit);
                     self.hir_mir_why = Some("converted or shared generic entry".into());
                     None
                 };
@@ -897,6 +898,7 @@ impl Compiler {
     /// scalar locals only (no pair, SROA or stack-array locals, no lambdas).
     fn hir_lower_mir(&mut self, hir: &HirBody, emit: &mut HirEmit, entry_words: Option<u32>) -> Option<crate::mir::MirFunc> {
         self.queue_hir_lambdas(hir, emit);
+        Self::queue_hir_par_loops(emit);
         let emit = &*emit;
         self.hir_mir_dict_sp = entry_words;
         let tables = self.hir_mir_tables(hir, emit);
@@ -969,6 +971,15 @@ impl Compiler {
                 self.hir_lambda_tail.push(tail);
             }
         }
+    }
+
+    /// Queue the fork-join function and chunk worker of each parallel loop
+    /// planned to move out of the body ([`HirPlan::par_loops`]), emitted
+    /// after it ([`Self::flush_hir_par_tail`]).
+    fn queue_hir_par_loops(emit: &mut HirEmit) {
+        let mut ids: Vec<u32> = emit.plan.par_loops.keys().copied().collect();
+        ids.sort_unstable();
+        emit.par_tail = ids.iter().map(|id| emit.plan.par_loops[id].tail.clone()).collect();
     }
 
     /// Where emission put the words of each local direct MIR planned
@@ -9877,9 +9888,8 @@ impl Compiler {
     /// sequentially.
     fn hir_par_loop(&mut self, hir: &HirBody, emit: &mut HirEmit, id: HirId, head: HirId, bind: Option<LocalId>, body: HirId) -> bool {
         if let Some(planned) = emit.plan.par_loops.get(&id.0) {
-            let (call, tail) = (planned.call.clone(), planned.tail.clone());
+            let call = planned.call.clone();
             self.hir_par_call_loop(emit, &call);
-            emit.par_tail.push(tail);
             return true;
         }
         let Some(locals) = self.hir_par_site(hir, &emit.plan, id, head, bind, body, &|l| emit.slots[l.0 as usize].is_some()) else {
@@ -10658,7 +10668,12 @@ impl Compiler {
         if let Some(local) = par.bind {
             emit.slots[local.0 as usize] = Some(0);
         }
+        let planned: HashSet<u32> = emit.plan.par_loops.keys().copied().collect();
         self.hir_plan_par_loops(hir, emit, par.body);
+        // Loops it moves out of the worker join the queue.
+        let mut moved: Vec<u32> = emit.plan.par_loops.keys().copied().filter(|id| !planned.contains(id)).collect();
+        moved.sort_unstable();
+        emit.par_tail.extend(moved.iter().map(|id| emit.plan.par_loops[id].tail.clone()));
         self.hir_effect(hir, emit, par.body);
         let entry = self.par_worker_end(&par.site, worker);
         let cold = std::mem::take(&mut emit.cold);
