@@ -1,4 +1,5 @@
-// CALL into_iter/next must use reserved labels when impls follow the user.
+// `for x in c` over a user iterator works when the `IntoIterator` /
+// `Iterator` impls are declared after the function that loops.
 use tests::assert;
 
 class Counter {

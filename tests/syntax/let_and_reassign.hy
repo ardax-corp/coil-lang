@@ -1,6 +1,5 @@
-// A `let` and a re-assignment of the same binding both reach the output:
-// the stack path stores each to the binding's slot, a body lowered
-// straight from HIR keeps the binding in a register.
+// A `let` binding and a later re-assignment of it: each read sees the
+// value stored most recently.
 // Output: 510
 use io::{stdout, write};
 use string::{format, to_bytes};

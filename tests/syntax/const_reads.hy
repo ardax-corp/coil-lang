@@ -1,4 +1,5 @@
-// `const` reads lower from HIR as the folded value, as the AST emits them.
+// Module `const`s of every primitive type (including an int wider than 32
+// bits and a negative literal) read back their value inside functions.
 use tests::assert;
 
 const LIMIT = 10;

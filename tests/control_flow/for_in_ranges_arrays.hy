@@ -1,6 +1,6 @@
-// `for` over ranges and arrays lowers from HIR in the AST's counted-loop
-// shapes: the IV aliases the binding unless the body assigns it, and a
-// `continue` gets its own latch label.
+// `for` over half-open and inclusive ranges, float ranges and Vecs, with
+// `continue`, an early `return`, and a body that reassigns the loop binding
+// (which changes only that iteration's value, not the iteration count).
 use tests::assert;
 
 fn sum_to(int n) -> int {

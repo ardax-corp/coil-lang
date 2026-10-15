@@ -1,7 +1,5 @@
-// Bodies the HIR lowering covers since `byte` scalars: byte locals and
-// one-byte string literals, casts between scalars, and the `()` binding
-// of `?` on a unit `Result`. The language harness also runs under
-// `--hir`, so each case pins both codegens.
+// `byte` locals compared with one-byte string literals, casts between
+// `byte` / `int` / `float` / `bool`, and `?` on a `Result<(), string>`.
 use tests::assert;
 use string::to_bytes;
 

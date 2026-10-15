@@ -1,5 +1,5 @@
-// `~x` is bitwise: the MIR lifting took the `NOT` opcode for the logical
-// `LogNot`, so at -O0 `~5` was `false` (`coil test -O 0` runs this file).
+// `~x` is bitwise NOT on an `int` (two's complement: `~x == -x - 1`), not
+// logical `!`, including combined with `&`.
 use tests::assert;
 
 fn flip(int a) -> int {
