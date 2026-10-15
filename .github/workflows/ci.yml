@@ -89,8 +89,8 @@ jobs:
           export PATH="$MINGW_PREFIX/bin:$cargo_bin:/usr/bin:$PATH"
           cargo clippy --workspace --lib --tests --bins -- -D warnings
 
-  # `.hy` sources must be `coil fmt`-clean. `tests/compile_fail` holds
-  # deliberately broken programs and is not checked. The embedded prelude
+  # `.hy` sources must be `coil fmt`-clean. `compile_fail/` directories hold
+  # deliberately broken programs; `coil fmt` skips them when walking. The embedded prelude
   # (`compiler/src/prelude`) and the comptime fixtures are.
   fmt:
     name: coil fmt --check
@@ -114,7 +114,7 @@ jobs:
       - name: coil fmt --check
         run: |
           cargo build -p coil-fmt
-          ./target/debug/coil-fmt --check examples tests/positive tests/negative_runtime tests/*.hy compiler/src/prelude comptime/tests
+          ./target/debug/coil-fmt --check examples tests compiler/src/prelude comptime/tests
 
   test:
     name: test (${{ matrix.os }})
