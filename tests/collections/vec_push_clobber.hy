@@ -1,5 +1,5 @@
-// COI-16: inlined Vec::push must not leave the receiver under format / match /
-// `new Class` args (those STORE/Seek on the shared operand/local buffer).
+// `v.push(x)` keeps every element when `x` is a `format` call, a `match`
+// or a `new Class(...)` expression.
 use tests::assert;
 use string::format;
 

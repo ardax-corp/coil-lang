@@ -1,8 +1,6 @@
-// Bodies the HIR lowering covers since tuples, arrays and Vec: literals,
-// indexing (with the Euclidean fix-up for `x % m`), index writes and
-// `op=`, `len`, and the builtin Vec constructor and methods. The
-// language harness also runs under `--hir`, so each case pins both
-// codegens.
+// Tuples, fixed arrays and Vec in ordinary function bodies: literals,
+// indexing (`x % m` indexes are Euclidean), index writes and `op=`, `len`,
+// and the Vec constructors and methods.
 use tests::assert;
 
 fn sum_arr(Vec<int> xs) -> int {

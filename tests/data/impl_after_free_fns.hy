@@ -1,6 +1,5 @@
-// A free function that calls a method of a later `impl` makes the file emit
-// its impls first; with the `impl` last that exhausts the emit cursor, and
-// the free functions emitted after it still lower from HIR.
+// An `impl` may come after the free functions and tests that call its
+// methods.
 use tests::assert;
 
 class Counter {

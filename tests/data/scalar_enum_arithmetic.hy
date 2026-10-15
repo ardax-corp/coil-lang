@@ -1,5 +1,5 @@
-// An int-backed scalar enum with no operator instance is its backing word:
-// arithmetic is the raw int opcodes, as in the AST.
+// An int-backed scalar enum takes part in int arithmetic as its backing
+// value.
 use tests::assert;
 
 #[repr(int)]

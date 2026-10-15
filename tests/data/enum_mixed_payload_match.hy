@@ -1,4 +1,4 @@
-// MakeEnum one-pass payload build must keep mixed Value/Object order for match.
+// A variant with an int and a string payload binds both in `match`.
 // Output: 11
 use io::{stdout, write};
 use string::{format, to_bytes};

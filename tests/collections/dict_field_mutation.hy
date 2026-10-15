@@ -1,4 +1,4 @@
-// Phase P1: in-place dict mutation via `d.field = value` then re-read.
+// `d.field = value` updates a dict field in place; later reads see it.
 // Output: 99z
 use io::{stdout, write};
 use string::{format, to_bytes};

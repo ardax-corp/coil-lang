@@ -1,5 +1,4 @@
-// Phase P0: dict fields that hold heap objects (strings) must
-// round-trip through GetField.
+// Dict fields holding strings and ints read back their values.
 // Output: hi9
 use io::{stdout, write};
 use string::{format, to_bytes};

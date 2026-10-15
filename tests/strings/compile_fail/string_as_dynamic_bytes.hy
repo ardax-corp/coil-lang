@@ -1,5 +1,4 @@
-// Expected: E0119
-// #890: `s as [byte]` is gone; `to_bytes(s)` returns `Vec<byte>`.
+// Expected: E0119 — `[byte]` is not a type; `to_bytes(s)` gives the `Vec<byte>` of a string.
 
 fn main() {
     let s = "hi";

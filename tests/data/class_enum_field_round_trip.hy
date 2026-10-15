@@ -1,4 +1,4 @@
-// P6: class field holding an enum round-trips via GetField.
+// A class field holding a payload enum reads back the stored variant.
 // Output: 99
 use io::{stdout, write};
 use string::{format, to_bytes};

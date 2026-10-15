@@ -1,7 +1,5 @@
-// Regression: field access on `new Class(...)` must use GetField, and
-// `new` must not leave a stash slot between a HostInvoke native-id and
-// the field value (StorePop+final LOAD used to bury the id so `send`
-// saw the instance address as the native id).
+// Reading a field straight off `new Class(...)` yields that field's value
+// (here a channel sender that is then used).
 // Output: hi
 use thread::{channel, recv, send, Sender};
 use io::{stdout, write};

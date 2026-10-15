@@ -1,5 +1,4 @@
-// Repeated reads of the same field run correctly. (Reusing the loaded value
-// via `Dup` was `cfg_gvn`, removed 2026-10.)
+// Reading the same field twice in one expression gives the same value.
 // Output: 6
 use io::{stdout, write};
 use string::{format, to_bytes};

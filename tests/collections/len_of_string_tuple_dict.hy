@@ -1,5 +1,4 @@
-// Structural `len` on non-literal values: string hits VM `ArrayLen`;
-// tuple/dict use typed static length after binding (not literal fold).
+// `len` of a string, tuple and dict bound to locals or returned from calls.
 // Output: 2\n3\n2\n
 use io::{stdout, write};
 use string::{format, to_bytes};

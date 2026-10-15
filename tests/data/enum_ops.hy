@@ -1,7 +1,5 @@
-// Bodies the HIR lowering covers since enums, Option/Result and `match`:
-// boxed and two-slot dispatch, in-place payload bindings, `?` / `??`,
-// Result-mode returns and payloads built above live operands. The language
-// harness also runs under `--hir`, so each case pins both codegens.
+// Enums, Option and Result in ordinary function bodies: multi-field
+// payload bindings, `?` / `??`, Result-mode returns and `raise`.
 use tests::assert;
 
 enum Shape {

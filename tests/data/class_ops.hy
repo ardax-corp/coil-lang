@@ -1,7 +1,5 @@
-// Bodies the HIR lowering covers since classes: `new`, field reads and
-// writes, inherent method and static calls, and `let p = new C(..)` kept in
-// frame slots while only its fields are used. The language harness also
-// runs under `--hir`, so each case pins both codegens.
+// Classes in ordinary function bodies: `new`, field reads and writes,
+// inherent and static method calls, and objects stored in fields.
 use tests::assert;
 
 class Point {

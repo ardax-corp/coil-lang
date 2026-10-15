@@ -1,4 +1,5 @@
-// Typed class fields use slot LoadField/SetField; checksum matches gc_churn.
+// Class fields of typed values (`int`, `Option<Node>`) read and write in
+// declaration order, including a linked list built and walked in a loop.
 use tests::assert;
 
 class Node {

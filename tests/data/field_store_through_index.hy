@@ -1,5 +1,5 @@
-// A field store whose base indexes a Vec, an array or a tuple: the value,
-// then the base, then `SetField`, as the AST.
+// A field store whose base is an element of a Vec, an array or a tuple
+// updates that element's object.
 use tests::assert;
 
 class B {

@@ -1,7 +1,5 @@
-// String `==` / `!=`, `+` and literal `format` calls lower from HIR. `+`
-// is `FORMAT "%s%s"` with the format string under both operands, and a
-// call or `?` operand is not staged through temps. The language harness
-// also runs under `--hir`, so each case pins both codegens.
+// String `==` / `!=`, `+` and literal `format` calls, including a `?`
+// operand inside a concatenation.
 use tests::assert;
 use string::format;
 

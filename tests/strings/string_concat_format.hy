@@ -1,5 +1,5 @@
-// String concat / format. Note: `==` on strings is pointer identity (interned
-// literals compare equal; concat/format results are fresh allocations).
+// String `+` and `format` build strings that compare by content with
+// `==` (not by identity).
 use tests::assert;
 use io::stdout;
 use io::sync::write_all;

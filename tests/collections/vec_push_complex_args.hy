@@ -1,8 +1,5 @@
-// COI-16: inlined `Vec::push` must stage the receiver when the arg emits
-// `STORE`/`Seek` (`format`, `match`, `new Class`). Pre-fix, those pushes
-// silently dropped values (enum serialize via match+format yielded only the
-// header; `v.push(new C(...))` left len=0).
-// format / new Class / match+format push args must not drop the vec
+// `v.push(x)` keeps every element when `x` is a `format` call, a `match`
+// or a `new Class(...)` expression.
 // Output: lines=2 pkgs=2 names=1 n0=name='n'
 use io::stdout;
 use io::sync::write_all;

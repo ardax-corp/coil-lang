@@ -1,6 +1,5 @@
-// A field read through a dynamic index into a small array literal selects
-// over its frame slots; under a binary operator the left operand stages
-// through a temp first, as the AST does.
+// A field read through a dynamic index into a small array of objects picks
+// the right element, also as the left operand of a binary operator.
 use tests::assert;
 
 class N {

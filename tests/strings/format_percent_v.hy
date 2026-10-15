@@ -1,4 +1,4 @@
-// Phase 4: `string::format("%v", ...)` produces a string for further use.
+// `format("%v", ...)` returns a string that can be formatted again.
 // Output: 1-x
 use io::{stdout, write};
 use string::{format, to_bytes};

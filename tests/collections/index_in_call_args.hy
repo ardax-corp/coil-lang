@@ -1,6 +1,5 @@
-// A call-indexed read (`v[f(i)]`) inside call arguments or a string `+`
-// lowers from HIR: the arguments and both concat operands stage through
-// temps at depth zero, as the AST does.
+// An index whose position is a call result (`v[f(i)]`) reads the right
+// element inside call arguments and as a string `+` operand.
 use tests::assert;
 use string::format;
 

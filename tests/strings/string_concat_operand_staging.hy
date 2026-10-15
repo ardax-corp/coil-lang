@@ -1,7 +1,5 @@
-// String concatenation pushes the `%s%s` format string before its operands.
-// An operand whose code STOREs (an inlined call's parameter temp, a match, a
-// constructor) must be staged first: locals and the operand stack share
-// memory, so the store would overwrite the format string.
+// String `+` keeps both operands when one is an inlined call, an indirect
+// call, a `match` or a constructor.
 use tests::assert;
 use string::format;
 
