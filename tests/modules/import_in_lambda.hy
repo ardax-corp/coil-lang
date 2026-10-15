@@ -1,6 +1,5 @@
-// Disk-module imports (e.g. `io::sync::write_all`) are file-level globals.
-// After `take_and_isolate` they must be rebound like virtual imports — not
-// treated as missing captures inside lambdas.
+// A disk-module import (`io::sync::write_all`) is visible inside a lambda body
+// without a `use (…)` capture, like a virtual-module import.
 // Output: ok
 use io::stdout;
 use io::sync::write_all;

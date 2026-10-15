@@ -1,8 +1,5 @@
-// `return e;` inside an `async fn` now produces a real completion
-// value (previously it was silently unified against `unit` and the
-// typechecker rejected any non-unit `return`). The value returned by
-// `return` propagates to the `resume` call that completes the
-// coroutine, exactly like a yielded value.
+// `return e;` in a `gen fn` is its completion value: the `resume` that
+// finishes the coroutine evaluates to `e`, like a yielded value.
 // Output: 1,2,42
 use io::{stdout, write};
 use string::{format, to_bytes};

@@ -1,9 +1,5 @@
-// Regression guard: two handles from the SAME parameterized
-// `async fn`, interleaved, with `resume` used inline. Pre-fix, the
-// same spurious trailing `POP` corrupted each coroutine's argument
-// slot (`base`) on every resume after the first yield, producing
-// wrong values once interleaving pushed other locals onto the
-// shared stack.
+// Two handles from the same parameterized `gen fn`, resumed alternately and
+// inline as call arguments, each keep their own argument and position.
 // Output: 1,100,2,101,3,102
 use io::{stdout, write};
 use string::{format, to_bytes};

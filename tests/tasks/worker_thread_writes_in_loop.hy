@@ -1,5 +1,5 @@
-// Worker `write(stdout(), …)` in a multi-iteration loop must keep HostInvoke
-// results on the stack and honor shared-print capture TLS.
+// A `thread::spawn` worker writing to stdout in a loop prints every iteration
+// before `join` returns.
 // Output: 012
 use thread::{join, spawn};
 use io::{stdout, write};

@@ -1,10 +1,5 @@
-// Regression guard: `resume h` used INLINE as a `print` argument
-// (no intermediate `let` binding) must not corrupt the operand
-// stack. Pre-fix, the bare `yield expr;` statement's spurious
-// trailing `POP` (see `bare_yield_statement_does_not_emit_trailing_pop`
-// in `compiler/src/lib.rs`) would pop whatever the resumer had
-// already pushed for the in-progress `print` call (e.g. the format
-// string), leading to a misaligned pointer dereference.
+// `resume h` used inline as a call argument (no `let`) yields each value in
+// order.
 // Output: 0,1,2
 use io::{stdout, write};
 use string::{format, to_bytes};

@@ -1,4 +1,5 @@
-// `static const` is readable via LoadStatic; only reassignment is rejected.
+// A `static const` is readable from any function; only reassignment is
+// rejected.
 // Output: 42
 use io::{stdout, write};
 use string::{format, to_bytes};

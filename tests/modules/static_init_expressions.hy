@@ -1,6 +1,5 @@
-// Static initializers lower from their HIR to direct MIR like any other
-// body: arithmetic, branches, matches, allocations and calls in an
-// initializer keep their values, and heap statics stay precise roots.
+// Static initializers may use arithmetic, branches, matches, allocations and
+// calls; the values persist, and heap statics survive collection.
 use tests::assert;
 use gc::collect;
 
