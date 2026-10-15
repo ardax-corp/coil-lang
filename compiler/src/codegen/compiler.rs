@@ -7360,9 +7360,13 @@ impl Compiler {
         let main_off = self.functions.get("main").copied();
         if let Some((pos, init_len)) = static_init_region {
             let jmp_pos = pos + init_len;
-            let target_label = self
-                .bytecode
-                .entry_label_at(main_off.unwrap_or(PROLOGUE_HALT_OFFSET));
+            // `main`'s own entry label, not the first label at its offset:
+            // that can be a label left by the body before it, which the
+            // module flatten relabels into that body (coil-lang#1249).
+            let target_label = match self.fn_entry_labels.get("main").copied() {
+                Some(l) if main_off.is_some() => l,
+                _ => self.bytecode.entry_label_at(main_off.unwrap_or(PROLOGUE_HALT_OFFSET)),
+            };
             self.bytecode.insert_jump_at(jmp_pos, target_label);
             self.bytecode.bump_absolute_entry_targets(jmp_pos, 1);
             self.bytecode.bump_func_spans(jmp_pos, 1);
