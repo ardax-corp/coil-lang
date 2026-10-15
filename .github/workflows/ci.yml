@@ -209,37 +209,22 @@ jobs:
           cargo test -p compiler --features vm-wire \
             --test pipeline --test perf_metrics --test namespace --test cursor_model
 
-      - name: Language harness (`coil test`)
-        env:
-          # A worker abort (coil-lang#804) prints where it happened.
-          RUST_BACKTRACE: "1"
-        run: |
-          ./target/debug/coil test --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
-
       - name: Showcase project tests
         run: |
           BIN=./target/debug/coil ./examples/projects/run-tests.sh
 
-  # The same `.hy` suite under other compiler / VM settings. A job of its own
-  # so it runs beside `test` instead of after it.
-  harness-variants:
-    name: harness variants (${{ matrix.os }})
+  # The `.hy` harness binaries, built once per OS with the `harness` profile
+  # (optimized, debug assertions on) and cached by rust-cache. Every
+  # `harness` cell below downloads them instead of building its own.
+  harness-build:
+    name: harness build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # A hung IO test fails here instead of holding the runner for 6 h (#869).
-    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        # macOS (aarch64) runs GC stress only: stack scanning and the frame
-        # maps are per target, the compiler settings are not.
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/checkout@v4
-        with:
-          repository: ardax-corp/coil-stdlib
-          path: .deps/coil-stdlib
 
       - name: Install system deps (Ubuntu)
         if: runner.os == 'Linux'
@@ -258,42 +243,106 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          key: harness-variants
+          key: harness-build
+          cache-directories: target/gc-stress
 
       - name: Build coil and coil-test
-        if: runner.os == 'Linux'
-        run: cargo build --bin coil --bin coil-test
+        run: cargo build --profile harness --bin coil --bin coil-test
 
-      - name: Language harness at -O0 (`coil test -O 0`)
+      - name: Build coil-test with GC stress
+        # `coil test` re-execs `coil-test`; build the harness itself with the feature.
+        run: cargo build --profile harness -p coil-test --features gc-stress --target-dir target/gc-stress
+
+      - name: Collect binaries
+        run: |
+          mkdir -p harness-bin/gc-stress
+          cp target/harness/coil target/harness/coil-test harness-bin/
+          cp target/gc-stress/harness/coil-test harness-bin/gc-stress/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: harness-bin-${{ matrix.os }}
+          path: harness-bin
+          retention-days: 1
+
+  # The `.hy` corpora under each compiler / VM setting, one cell per setting
+  # so they run side by side. `scripts/test_corpora.py` runs each
+  # `tests/<corpus>` as its own process, in parallel.
+  harness:
+    name: harness ${{ matrix.variant }} (${{ matrix.os }})
+    needs: harness-build
+    runs-on: ${{ matrix.os }}
+    # A hung IO test fails here instead of holding the runner for 6 h (#869).
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        variant: [default, O0, no-inline, leak-smoke, gc-stress]
+        include:
+          # macOS (aarch64): stack scanning and the frame maps are per
+          # target, the compiler settings are not.
+          - os: macos-latest
+            variant: default
+          - os: macos-latest
+            variant: gc-stress
+    env:
+      # A worker abort (coil-lang#804) prints where it happened.
+      RUST_BACKTRACE: "1"
+      FLAGS: --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ardax-corp/coil-stdlib
+          path: .deps/coil-stdlib
+
+      - name: Install system deps (Ubuntu)
         if: runner.os == 'Linux'
         run: |
-          # Optimizations hide codegen bugs (LICM materializes invariants,
-          # inlining drops CALL targets); run the unoptimized pipeline too.
-          ./target/debug/coil test -O 0 --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
+          sudo apt-get update
+          sudo apt-get install -y libffi-dev
 
-      - name: Language harness without typed inlining (`COIL_HIR_INLINE=0 coil test`)
-        if: runner.os == 'Linux'
+      - name: Install system deps (macOS)
+        if: runner.os == 'macOS'
         run: |
-          # Typed inlining is the default; every test must give the same
-          # result with it off.
-          COIL_HIR_INLINE=0 ./target/debug/coil test --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
+          brew install libffi
 
-      - name: Leak smoke (`coil test` under ulimit -v)
-        if: runner.os == 'Linux'
-        run: |
-          # The cap is 128 MiB above the harness's own code, which grows with
-          # every change (a fixed 64 MiB cap had shrunk to ~35 MiB of room).
-          code_kb=$(( $(size -d target/debug/coil-test | awk 'NR==2 {print $4}') / 1024 ))
-          ulimit -v $(( code_kb + 131072 ))
-          # One job: every extra thread reserves a glibc malloc arena (64 MiB
-          # of address space), which alone exceeds the room left.
-          ./target/debug/coil test -j 1 --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
+      - uses: actions/download-artifact@v4
+        with:
+          name: harness-bin-${{ matrix.os }}
+          path: harness-bin
 
-      - name: GC stress (`coil test`, collect and evacuate at every allocation)
+      - name: Language harness (${{ matrix.variant }})
         run: |
-          # `coil test` re-execs `coil-test`; build the harness itself with the feature.
-          cargo build -p coil-test --features gc-stress --target-dir target/gc-stress
-          ./target/gc-stress/debug/coil-test --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
+          chmod +x harness-bin/coil harness-bin/coil-test harness-bin/gc-stress/coil-test
+          run="python3 scripts/test_corpora.py --bin harness-bin"
+          case "${{ matrix.variant }}" in
+            default) $run -- $FLAGS ;;
+            # Optimizations hide codegen bugs (LICM materializes invariants,
+            # inlining drops CALL targets); run the unoptimized pipeline too.
+            O0) $run -- -O 0 $FLAGS ;;
+            # Typed inlining is the default; every test must give the same
+            # result with it off.
+            no-inline) COIL_HIR_INLINE=0 $run -- $FLAGS ;;
+            leak-smoke)
+              # Each corpus process gets 128 MiB of address space above the
+              # harness's own code, and one job: every extra thread reserves
+              # a glibc malloc arena (64 MiB of address space), which alone
+              # exceeds the room left.
+              code_kb=$(( $(size -d harness-bin/coil-test | awk 'NR==2 {print $4}') / 1024 ))
+              $run -j 1 --limit-as-kb $(( code_kb + 131072 )) -- $FLAGS ;;
+            # Collect and evacuate at every allocation (precise-root soundness).
+            gc-stress) $run --harness harness-bin/gc-stress/coil-test -- $FLAGS ;;
+          esac
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: harness-logs-${{ matrix.os }}-${{ matrix.variant }}
+          path: target/corpora
+          retention-days: 7
 
   # MinGW host matches release-binaries (COI-100/102): MSVC cannot link the
   # MSYS2 libffi package. Keep this on PRs so Unix-only host APIs fail
