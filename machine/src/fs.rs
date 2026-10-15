@@ -8,7 +8,7 @@ use common::Value;
 
 use crate::host_enum::pack_result_or_panic;
 use crate::io::{
-    IoErrorTag, alloc_io_error, alloc_result_err, alloc_result_ok, as_result_int, as_result_unit,
+    IoErrorTag, alloc_io_error, alloc_result_err, alloc_result_ok, as_result_unit,
     as_result_value, value_as_string,
 };
 use crate::memory::{Heap, Member, ObjArray, ObjInstance, Object};
@@ -182,8 +182,7 @@ pub fn fs_rename(heap: &mut Heap, from: Value, to: Value) -> Value {
 
 pub fn fs_copy(heap: &mut Heap, from: Value, to: Value) -> Value {
     with_two_paths(heap, from, to, |heap, a, b| {
-        let r = host_fs::copy(a, b).map(|n| n as usize).map_err(io_err);
-        as_result_int(heap, r)
+        as_result_unit(heap, host_fs::copy(a, b).map(|_| ()).map_err(io_err))
     })
 }
 
