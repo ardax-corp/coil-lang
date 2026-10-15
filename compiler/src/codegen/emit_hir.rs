@@ -926,6 +926,9 @@ impl Compiler {
         match why {
             Ok(func) => {
                 crate::il::opt::note_hir_mir(None);
+                if let Ok(relocate) = Self::hir_mir_relocate(hir, emit, &tables.frame) {
+                    self.hir_mir_debug_vars(hir, emit, &tables.frame, &relocate);
+                }
                 Some(func)
             }
             Err(why) => {
@@ -981,6 +984,72 @@ impl Compiler {
         let mut ids: Vec<u32> = emit.plan.par_loops.keys().copied().collect();
         ids.sort_unstable();
         emit.par_tail = ids.iter().map(|id| emit.plan.par_loops[id].tail.clone()).collect();
+    }
+
+    /// Record each local of `hir` its frame binds (not a parameter, which
+    /// the function's prologue records) for `coil debug`, from the frame
+    /// direct MIR plans: a scalar-replaced class local as its fields, a
+    /// stack array as its elements, each in its own slot.
+    fn hir_mir_debug_vars(&mut self, hir: &HirBody, emit: &HirEmit, frame: &emit_hir_mir::HirMirFrame, relocate: &HashMap<u32, u32>) {
+        use crate::debug_vars::{DebugTy, DebugVarLoc};
+        let params: HashSet<u32> = hir.params.iter().map(|l| l.0).collect();
+        // The name's span: its first whole-word occurrence in its `let`.
+        let mut lets: HashMap<u32, (usize, usize)> = HashMap::new();
+        for e in &hir.exprs {
+            if let HirKind::Let { local, .. } = e.kind {
+                lets.entry(local.0).or_insert(e.span);
+            }
+        }
+        for (l, planned) in frame.slots.iter().enumerate() {
+            let (l, Some(planned)) = (l as u32, *planned) else {
+                continue;
+            };
+            if params.contains(&l) {
+                continue;
+            }
+            let local = hir.local(LocalId(l));
+            let slot = relocate.get(&planned).copied().unwrap_or(planned);
+            self.record_debug_local(&local.name, slot);
+            let ty = local.ty.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t));
+            let width = frame.widths.get(&l).copied().unwrap_or(1);
+            let layout = if emit.plan.stacks.contains_key(&l) {
+                let elem = match ty.as_ref().map(crate::typechecking::ty::strip_readonly) {
+                    Some(Ty::Array { element, .. }) => DebugTy::from_ty(element),
+                    _ => DebugTy::Other("?".into()),
+                };
+                Some(DebugVarLoc::Elems { slots: (slot..slot + width).collect(), elem })
+            } else if let Some(class) = emit.plan.sroa.get(&l) {
+                let fields = self
+                    .checker
+                    .class_fields(class)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .take(width as usize)
+                    .enumerate()
+                    .map(|(i, (f, t))| (f, slot + i as u32, DebugTy::from_ty(&t)))
+                    .collect();
+                Some(DebugVarLoc::Fields { class: class.clone(), fields })
+            } else {
+                None
+            };
+            let name_span = lets.get(&l).and_then(|&(start, end)| {
+                let text = self.source_text.get(start..end)?;
+                let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+                let at = text.match_indices(local.name.as_str()).map(|(i, _)| i).find(|&i| {
+                    !word(text[..i].chars().next_back()) && !word(text[i + local.name.len()..].chars().next())
+                })?;
+                Some(((start + at) as u32, (start + at + local.name.len()) as u32))
+            });
+            if let Some(var) = self.last_debug_var_mut(&local.name) {
+                if let Some(layout) = layout {
+                    if let Some(ty) = &ty {
+                        var.ty = DebugTy::from_ty(ty);
+                    }
+                    var.loc = layout;
+                    var.name_span = name_span.or(var.name_span);
+                }
+            }
+        }
     }
 
     /// Where emission put the words of each local direct MIR planned
@@ -8319,7 +8388,6 @@ impl Compiler {
                 if let Some(local) = field {
                     let slot = base + k as u32;
                     emit.slots[local.0 as usize] = Some(slot);
-                    self.record_debug_local(&hir.local(*local).name, slot);
                 }
             }
             return;
@@ -8750,7 +8818,6 @@ impl Compiler {
             match pat {
                 HirPat::Bind(local) => {
                     emit.slots[local.0 as usize] = Some(slot);
-                    self.record_debug_local(&hir.local(*local).name, slot);
                 }
                 HirPat::Int(n) if !test.irrefutable => {
                     self.hir_seq_scalar(test, slot, &crate::typechecking::ty::ScalarBacking::Int(*n));
@@ -8957,7 +9024,6 @@ impl Compiler {
             self.bytecode.bind_label(labels[i].expect("reached arm has a label"));
             if let HirPat::Bind(local) = &arms[i].pat {
                 emit.slots[local.0 as usize] = Some(slot);
-                self.record_debug_local(&hir.local(*local).name, slot);
             }
             match want {
                 Some(want) => self.hir_value(hir, emit, arms[i].body, want, 0),
@@ -9453,15 +9519,12 @@ impl Compiler {
                     self.context
                         .unboxed_class_locals
                         .insert(key.clone(), (base, tys.len(), class));
-                    self.hir_debug_split(hir, *local, &key);
                     emit.slots[local.0 as usize] = Some(base);
-                    let il_start = self.bytecode.il_mut().raw_len();
                     for (i, (&arg, ty)) in args.iter().zip(&tys).enumerate() {
                         let want = Rep::Word(self.value_layout(ty));
                         self.hir_value(hir, emit, arg, &want, 0);
                         self.bytecode.push_store_pop(base + i as u32);
                     }
-                    self.hir_debug_tag_components(hir, *local, id, il_start);
                     return;
                 }
                 if let Some(&n) = emit.plan.stacks.get(&local.0) {
@@ -9474,11 +9537,8 @@ impl Compiler {
                         debug_assert_eq!(slot, base + i as u32);
                     }
                     self.context.stack_array_locals.insert(key.clone(), (base, n));
-                    self.hir_debug_split(hir, *local, &key);
                     emit.slots[local.0 as usize] = Some(base);
-                    let il_start = self.bytecode.il_mut().raw_len();
                     self.hir_stack_array_init(hir, emit, *local, *init);
-                    self.hir_debug_tag_components(hir, *local, id, il_start);
                     return;
                 }
                 // Value first: its operands live above every bound slot.
@@ -11205,85 +11265,6 @@ impl Compiler {
         }
     }
 
-    /// A split local's debug location: its fields or elements in their
-    /// own slots, as the AST's `debug_layout_of` at the `let`.
-    fn hir_debug_split(&mut self, hir: &HirBody, local: LocalId, key: &str) {
-        let Some(mut layout) = self.debug_layout_of(key) else {
-            return;
-        };
-        let ty = hir
-            .local(local)
-            .ty
-            .as_ref()
-            .map(|t| crate::typechecking::subst::apply_ty_prune(self.checker.subst(), t));
-        if let (crate::debug_vars::DebugVarLoc::Elems { elem, .. }, Some(Ty::Array { element, .. })) =
-            (&mut layout, ty.as_ref().map(crate::typechecking::ty::strip_readonly))
-        {
-            *elem = crate::debug_vars::DebugTy::from_ty(element);
-        }
-        if let Some(var) = self.last_debug_var_mut(&hir.local(local).name) {
-            if let Some(ty) = &ty {
-                var.ty = crate::debug_vars::DebugTy::from_ty(ty);
-            }
-            var.loc = layout;
-        }
-    }
-
-    /// Tag each store of a split local's component since `il_start` with
-    /// the component's own site (the AST's `tag_statement_defs`), so the
-    /// debugger shows a component a pass dropped as optimized out.
-    fn hir_debug_tag_components(&mut self, hir: &HirBody, local: LocalId, stmt: HirId, il_start: usize) {
-        let name = &hir.local(local).name;
-        // The name's span: its first whole-word occurrence in the `let`.
-        let (start, end) = hir.expr(stmt).span;
-        let Some(text) = self.source_text.get(start..end) else {
-            return;
-        };
-        let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
-        let Some(at) = text.match_indices(name.as_str()).map(|(i, _)| i).find(|&i| {
-            !word(text[..i].chars().next_back()) && !word(text[i + name.len()..].chars().next())
-        }) else {
-            return;
-        };
-        let site = ((start + at) as u32, (start + at + name.len()) as u32);
-        let Some(var) = self.last_debug_var_mut(name) else {
-            return;
-        };
-        var.name_span = Some(site);
-        let slots = var.component_slots();
-        if slots.is_empty() {
-            return;
-        }
-        let file = self.intern_source_file();
-        let mut tagged = false;
-        let ops = self.bytecode.il_mut().ops_slice_mut();
-        let from = il_start.min(ops.len());
-        for op in &mut ops[from..] {
-            let written = match op {
-                IlOp::StorePop { slot, .. } => Some(*slot),
-                IlOp::Byte { byte, .. }
-                    if matches!(*byte.bytecode(), Instruction::STORE | Instruction::StorePop)
-                        && byte.load_store_count() == 1 =>
-                {
-                    Some(byte.load_store_slot_at(0))
-                }
-                _ => None,
-            };
-            if let Some(i) = written.and_then(|w| slots.iter().position(|&s| s == w)) {
-                let (start, end) = crate::debug_vars::DebugVar::component_site(site, i);
-                op.set_loc(common::DebugLoc {
-                    file,
-                    start_byte: start,
-                    end_byte: end.max(start + 1),
-                });
-                tagged = true;
-            }
-        }
-        if tagged && let Some(var) = self.last_debug_var_mut(&hir.local(local).name) {
-            var.def_sites.push(site);
-        }
-    }
-
     fn hir_bind_local(&mut self, hir: &HirBody, local: LocalId) -> u32 {
         let name = &hir.local(local).name;
         let key = if self.context.variables.key(name).is_some() {
@@ -11291,9 +11272,7 @@ impl Compiler {
         } else {
             name.clone()
         };
-        let slot = self.context.variables.intern(key.clone()) as u32;
-        self.record_debug_local(&key, slot);
-        slot
+        self.context.variables.intern(key) as u32
     }
 
     /// Push `lhs` then `rhs`, staging both through temps when
