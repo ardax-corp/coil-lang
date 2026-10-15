@@ -3536,6 +3536,7 @@ impl Checker {
         // `int`, the other bitwise operators take two operands of one type.
         if matches!(op, parser::ast::AssignOp::Shl | parser::ast::AssignOp::Shr) {
             self.unify(&int(), &val_ty, &range, &format!("shift count of `{op_name}=`"));
+            self.check_shift_count(value, &range);
             match apply_ty_prune(&self.subst, &target_ty) {
                 Ty::Var(v) => self.bind_arith_operator(v, op_name, id, &range),
                 ground => self.check_ground_arith_operands(&ground, op_name, &range),
@@ -6367,6 +6368,7 @@ impl Checker {
         op: &str,
     ) -> Ty {
         self.unify(&int(), &rt, &range, &format!("shift count of `{op}`"));
+        self.check_shift_count(rhs, &range);
         match apply_ty_prune(&self.subst, &lt) {
             Ty::Var(v) => self.bind_arith_operator(v, op, id, &range),
             ground => {
@@ -6381,6 +6383,26 @@ impl Checker {
             }
         }
         lt
+    }
+
+    /// E0131 for a shift count known at compile time outside `0..=63`: at
+    /// run time it would trap with `shift count out of range` (#1076).
+    fn check_shift_count(&mut self, count: &Output, range: &Range<usize>) {
+        let peeled = Self::peel_literal_expr(count);
+        let n = match peeled.1.as_ref() {
+            Expression::Negate(inner) => Self::const_int(inner).and_then(i64::checked_neg),
+            _ => Self::const_int(count),
+        };
+        let Some(n) = n.filter(|n| !(0..64).contains(n)) else {
+            return;
+        };
+        let mut msg = Message::error(
+            ErrorCode::ShiftCountOutOfRange,
+            format!("shift count {n} is out of range"),
+            range.clone(),
+        );
+        msg.with_help("a shift count must be in 0..=63".to_string());
+        self.messages.push(msg);
     }
 
     /// `byte` `+ - * ** <<` and negation keep the low 8 bits of the result
