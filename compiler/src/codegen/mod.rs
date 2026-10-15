@@ -626,6 +626,8 @@ pub struct Compiler {
     loop_par_forks: usize,
     /// A body's outlined parallel loops, emitted after its function record.
     hir_par_tail: Option<Box<compiler::emit_hir::HirParTail>>,
+    /// A body's anonymous `fn`s, emitted after its function record.
+    hir_lambda_tail: Vec<compiler::emit_hir::HirLambdaTail>,
     /// When false, skip auto fork-join even if `COIL_AUTO_PAR` is on.
     auto_par: bool,
 
@@ -832,6 +834,7 @@ impl Default for Compiler {
             loop_par_helpers: 0,
             loop_par_forks: 0,
             hir_par_tail: None,
+            hir_lambda_tail: Vec::new(),
             auto_par: true,
             operand_stack_slots: crate::typechecking::DEFAULT_OPERAND_STACK_SLOTS,
             opt_options: crate::il::opt::OptimizeOptions::default(),

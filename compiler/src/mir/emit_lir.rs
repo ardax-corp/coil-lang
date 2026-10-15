@@ -2012,7 +2012,7 @@ struct EmitTermArgs<'args> {
 fn tail_call<'f>(func: &MirFunc, block: &'f super::func::MirBlock) -> Option<&'f MirInst> {
     let inst = block.insts.last()?;
     match inst {
-        MirInst::Call { target, .. } if func.tail_targets.contains(target) && super::call_convoy::is_tail_call_inst(block, inst) => Some(inst),
+        MirInst::Call { .. } if super::call_convoy::is_tail_call_inst(func, block, inst) => Some(inst),
         _ => None,
     }
 }

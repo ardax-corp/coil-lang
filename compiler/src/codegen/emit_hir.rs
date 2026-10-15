@@ -207,13 +207,22 @@ enum HirBuiltin {
 /// the captures in the first slots, then the parameters.
 struct HirLambda {
     body: HirBody,
-    emit: HirEmit,
-    /// Its code's entry label, reserved when planned: direct MIR's
-    /// `MakeFn` targets it whether or not the stack IL binds it.
+    /// Its body's plan, until the first `MakeFn` of it hands the body to
+    /// [`Compiler::flush_hir_lambdas`].
+    emit: Option<HirEmit>,
+    /// Its code's entry label, reserved when planned: the entry of the
+    /// function its body is emitted as.
     label: IlLabel,
-    /// Whether the stack IL bound `label` (a second copy of the code
-    /// binds a fresh one).
-    bound: bool,
+}
+
+/// An anonymous `fn` whose body is emitted as a function of its own once
+/// the enclosing body's record is made ([`Compiler::flush_hir_lambdas`]).
+pub(in crate::codegen) struct HirLambdaTail {
+    body: HirBody,
+    emit: HirEmit,
+    label: IlLabel,
+    /// Parameters to `UnboxValue` on entry ([`HirPlan::lambda_unbox`]).
+    unbox: Option<Vec<Option<Ty>>>,
 }
 
 /// Per-body lowering state.
@@ -2296,11 +2305,13 @@ impl Compiler {
             self.context.variables = prev_vars;
             self.compiling_two_word_enum = prev_two_word;
             let mut plan = plan?;
+            // The captures are its function's first parameters.
             for (slot, &(_, inner)) in lam.captures.iter().enumerate() {
                 plan.slots[inner.0 as usize] = Some(slot as u32);
+                plan.plan.params.insert(inner.0, (slot as u32, None));
             }
             let label = self.bytecode.fresh_label();
-            emit.plan.lambdas.insert(i as u32, Box::new(HirLambda { body: lam.clone(), emit: plan, label, bound: false }));
+            emit.plan.lambdas.insert(i as u32, Box::new(HirLambda { body: lam.clone(), emit: Some(plan), label }));
         }
         Ok(())
     }
@@ -6884,57 +6895,24 @@ impl Compiler {
                 self.bytecode.push(Byte::new(Instruction::LoadStatic).with_operand_u32(slot));
             }
             HirKind::Lambda { .. } => {
-                // `JMP after`, the body in its own frame, then the captures,
-                // `CodePtr` and `MakeFn`, as `do_compile`'s `Lambda`.
-                let mut lam = emit.plan.lambdas.remove(&id.0).expect("planned lambda");
-                let after = self.bytecode.fresh_label();
-                self.hir_jump(IlJumpKind::Unconditional, after);
-                if std::mem::replace(&mut lam.bound, true) {
-                    self.bytecode.bind_fresh_entry();
-                } else {
-                    self.bytecode.bind_reserved_entry(lam.label);
+                // The captures, `CodePtr` and `MakeFn`, as `do_compile`'s
+                // `Lambda`; the body is a function of its own, emitted
+                // after this one ([`Self::flush_hir_lambdas`]).
+                let lam = emit.plan.lambdas.get_mut(&id.0).expect("planned lambda");
+                if let Some(code) = lam.emit.take() {
+                    let unbox = emit.plan.lambda_unbox.remove(&id.0);
+                    self.hir_lambda_tail.push(HirLambdaTail { body: lam.body.clone(), emit: code, label: lam.label, unbox });
                 }
-                let entry = self.bytecode.len() as u32;
-                let prev_vars = std::mem::take(&mut self.context.variables);
-                let prev_keys = std::mem::take(&mut self.field_key_slots);
-                let slots = Self::hir_lambda_frame(&mut self.context.variables, &lam.body);
-                for (&param, &slot) in lam.body.params.iter().zip(&slots[lam.body.captures.len()..]) {
-                    let name = lam.body.local(param).name.clone();
-                    self.record_debug_param(&name, slot);
-                }
-                if let Some(unbox) = emit.plan.lambda_unbox.remove(&id.0) {
-                    for (ty, &slot) in unbox.iter().zip(&slots[lam.body.captures.len()..]) {
-                        if let Some(ty) = ty {
-                            self.bytecode.push_load(slot);
-                            Self::emit_unbox_if_needed(&mut self.bytecode, ty);
-                            self.bytecode.push_store_pop(slot);
-                        }
-                    }
-                }
-                self.expr_depth = 0;
-                let root = lam.body.root.expect("planned lambda body");
-                let ret = lam.emit.plan.ret.clone();
-                self.hir_plan_par_loops(&lam.body, &mut lam.emit, root);
-                self.hir_value(&lam.body, &mut lam.emit, root, &ret, 0);
-                // A body that returned on every path needs no closing return.
-                if !self.bytecode.ends_in_exit() {
-                    self.bytecode.push_return();
-                }
-                self.field_key_slots = prev_keys;
-                self.context.variables = prev_vars;
-                self.expr_depth = depth;
-                self.bytecode.bind_label(after);
+                let lam = &emit.plan.lambdas[&id.0];
+                let (label, arity, captures) = (lam.label, lam.body.params.len() as u32, lam.body.captures.len() as u32);
                 for &(outer, _) in &lam.body.captures {
                     let slot = Self::hir_slot(emit, outer);
                     self.bytecode.push_load(slot);
                 }
                 self.bytecode.push_const(0);
-                self.bytecode.push(Byte::new(Instruction::CodePtr).with_operand_u32(entry));
-                let arity = lam.body.params.len() as u32;
-                let captures = lam.body.captures.len() as u32;
+                self.bytecode.emit_entry(crate::il::EntryKind::CodePtr, 0, label);
                 let operand = make_fn_operand(captures, 0, arity, false);
                 self.bytecode.push(Byte::new(Instruction::MakeFn).with_operand_u32(operand));
-                emit.plan.lambdas.insert(id.0, lam);
             }
             HirKind::Global { .. } if let Some(name) = emit.plan.polyfns.get(&id.0).cloned() => {
                 let ty = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));
@@ -10096,10 +10074,97 @@ impl Compiler {
         }
     }
 
+    /// Emit the anonymous `fn`s of the body just recorded, each a function
+    /// of its own at the entry label its `MakeFn` targets: captures in its
+    /// first slots, then the parameters. Its direct MIR takes the captures
+    /// as its first parameters. Lambdas inside one follow it.
+    pub(super) fn flush_hir_lambdas(&mut self) {
+        while !self.hir_lambda_tail.is_empty() {
+            for lam in std::mem::take(&mut self.hir_lambda_tail) {
+                self.hir_lambda_fn(lam);
+            }
+        }
+    }
+
+    fn hir_lambda_fn(&mut self, lam: HirLambdaTail) {
+        let HirLambdaTail { body, mut emit, label, unbox } = lam;
+        // A lambda spliced into several bodies is a function per copy.
+        let mut name = body.name.clone();
+        let mut k = 1;
+        while self.functions.contains_key(&name) || self.fn_entry_labels.contains_key(&name) {
+            k += 1;
+            name = format!("{}#{k}", body.name);
+        }
+        let frame = self.par_frame_enter();
+        let prev_key = self.current_function_table_key.replace(name.clone());
+        let prev_two_word = self.compiling_two_word_enum.take();
+        let prev_keys = std::mem::take(&mut self.field_key_slots);
+        let prev_unbox = std::mem::take(&mut self.hir_mir_unbox);
+        let prev_ctx = std::mem::take(&mut self.hir_mir_ctx);
+        let prev_defers = std::mem::take(&mut self.fn_defers);
+        let start = self.bytecode.len();
+        self.fn_entry_labels.insert(name.clone(), label);
+        self.bind_function_entry(name.clone());
+        let slots = Self::hir_lambda_frame(&mut self.context.variables, &body);
+        let ncap = body.captures.len();
+        for (&param, &slot) in body.params.iter().zip(&slots[ncap..]) {
+            let pname = body.local(param).name.clone();
+            self.record_debug_param(&pname, slot);
+        }
+        for (ty, &slot) in unbox.iter().flatten().zip(&slots[ncap..]) {
+            if let Some(ty) = ty {
+                self.bytecode.push_load(slot);
+                Self::emit_unbox_if_needed(&mut self.bytecode, ty);
+                self.bytecode.push_store_pop(slot);
+                if let Some(tag) = Self::ty_to_value_tag(ty) {
+                    self.hir_mir_unbox.push((slot, tag as u32));
+                }
+            }
+        }
+        let root = body.root.expect("planned lambda body");
+        let ret = emit.plan.ret.clone();
+        self.hir_plan_par_loops(&body, &mut emit, root);
+        self.hir_value(&body, &mut emit, root, &ret, 0);
+        // A body that returned on every path needs no closing return.
+        if !self.bytecode.ends_in_exit() {
+            self.bytecode.push_return();
+        }
+        // Direct MIR takes the captures as the first parameters.
+        let mut flat = body.clone();
+        flat.params = body.captures.iter().map(|&(_, inner)| inner).chain(body.params.iter().copied()).collect();
+        flat.captures.clear();
+        // Its types may still name inference variables the checker solved.
+        let subst = self.checker.subst();
+        for ty in flat.locals.iter_mut().filter_map(|l| l.ty.as_mut()).chain(flat.exprs.iter_mut().filter_map(|e| e.ty.as_mut())).chain(flat.ret.as_mut()) {
+            *ty = apply_ty_prune(subst, ty);
+        }
+        self.hir_mir_why = None;
+        self.hir_mir = self.hir_lower_mir(&flat, &emit, None);
+        let arity = (ncap + body.params.len()) as u32;
+        self.fn_arities.insert(name.clone(), (arity, false));
+        self.bytecode.record_func_with_sp(name.clone(), Some(label), start, self.bytecode.len(), arity);
+        self.bytecode.set_last_func_stack_ok();
+        self.attach_hir_mir();
+        self.record_unboxed_class_fields();
+        self.fn_defers = prev_defers;
+        self.hir_mir_ctx = prev_ctx;
+        self.hir_mir_unbox = prev_unbox;
+        self.field_key_slots = prev_keys;
+        self.compiling_two_word_enum = prev_two_word;
+        self.current_function_table_key = prev_key;
+        self.par_frame_exit(frame);
+        // A parallel loop inside the lambda moved out of it too.
+        if !emit.par_tail.is_empty() {
+            self.hir_par_tail = Some(Box::new(HirParTail { hir: flat, emit }));
+            self.flush_hir_par_tail();
+        }
+    }
+
     /// Emit the functions of the parallel loops [`Self::hir_par_outline`]
     /// moved out of the body just recorded: each chunk worker, then the
     /// fork-join function over it, each its own function record.
     pub(super) fn flush_hir_par_tail(&mut self) {
+        self.flush_hir_lambdas();
         let Some(tail) = self.hir_par_tail.take() else { return };
         let HirParTail { hir, mut emit } = *tail;
         // A worker emitted from this body's plan may move out parallel
@@ -10145,6 +10210,8 @@ impl Compiler {
                 self.bytecode.record_func_with_sp(driver, label, start, self.bytecode.len(), words);
             }
         }
+        // Lambdas of the chunk workers emitted from this body's plan.
+        self.flush_hir_lambdas();
     }
 
     /// The fork-join function `driver` of `site` over chunk worker `worker`

@@ -2436,12 +2436,13 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         inner.outer = b.outer.clone();
         inner.outer.extend(b.scopes.iter().cloned());
         let fn_ty = self.ty_of(node);
-        if let Some(Ty::Fun(_, ret)) = fn_ty.as_ref().map(strip_readonly) {
-            let ret = final_ret(ret);
+        self.params(&mut inner, args, None);
+        // A lambda of `n` parameters takes `n` arrows of its curried type
+        // (one for none); what is left, a function type too, is its result.
+        if let Some(ret) = fn_ty.as_ref().and_then(|t| lambda_ret(t, inner.body.params.len().max(1))) {
             inner.body.ret_layout = layout::of_resolved(self.checker, &ret);
             inner.body.ret = Some(ret);
         }
-        self.params(&mut inner, args, None);
         let root = self.expr(&mut inner, body);
         inner.body.root = Some(root);
         // Captures resolved through `outer` refer to `b`'s locals only when
@@ -2498,11 +2499,12 @@ fn fn_name<'e>(node: &Output<'e>) -> Option<&'e str> {
     }
 }
 
-/// The result of a curried `A -> B -> R` function type.
-fn final_ret(ty: &Ty) -> Ty {
+/// The result of curried function type `ty` after `n` arguments.
+fn lambda_ret(ty: &Ty, n: usize) -> Option<Ty> {
     match strip_readonly(ty) {
-        Ty::Fun(_, ret) => final_ret(ret),
-        other => other.clone(),
+        Ty::Fun(_, ret) if n == 1 => Some(ret.as_ref().clone()),
+        Ty::Fun(_, ret) => lambda_ret(ret, n - 1),
+        _ => None,
     }
 }
 
