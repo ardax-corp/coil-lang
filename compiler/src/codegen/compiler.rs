@@ -288,6 +288,7 @@ impl Compiler {
             flags.push(slot);
         }
         self.fn_defers.flags = flags;
+        self.hir_defers = false;
     }
 
     /// End a function body: a function with `defer`s gets a cleanup pad
@@ -296,7 +297,10 @@ impl Compiler {
     /// `unwind_resume` hands the frame back to the unwinder. The body is
     /// pinned so the pad's slot numbers stay true.
     fn finish_fn_defers(&mut self, table_key: &str) -> bool {
-        if self.fn_defers.is_empty() {
+        // A body HIR lowered has a pad when it holds a `defer`, whether or
+        // not its stack IL registered the thunk: its MIR runs the defers.
+        let hir_defers = std::mem::take(&mut self.hir_defers);
+        if self.fn_defers.is_empty() && !hir_defers {
             return false;
         }
         let Some(native_id) = self.native_id("unwind_resume") else {

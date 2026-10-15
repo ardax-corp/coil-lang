@@ -784,6 +784,7 @@ impl Compiler {
                     self.hir_cold = std::mem::take(&mut emit.cold);
                 }
                 self.hir_mir_why = None;
+                self.hir_defers = hir.exprs.iter().any(|e| matches!(e.kind, HirKind::Defer { .. }));
                 // A shared generic body takes its dictionaries as trailing
                 // parameters: direct MIR lowers it when its code reads them
                 // only as it plans (`HirMirTables::reads_dicts`), its open
