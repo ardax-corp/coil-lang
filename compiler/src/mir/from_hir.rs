@@ -4745,7 +4745,11 @@ impl Lower<'_> {
     /// The word a boxed tuple's field of type `ty` holds: a scalar or a
     /// plain heap word.
     fn tuple_item(&self, ty: &Ty) -> Option<MirTy> {
-        scalar(ty).or_else(|| self.inp.plain_heap(ty).then_some(MirTy::HeapRef))
+        scalar(ty)
+            .or_else(|| self.inp.plain_heap(ty).then_some(MirTy::HeapRef))
+            // A type parameter's item in a shared body: the opaque word as
+            // stored, as an array's (#1143).
+            .or_else(|| (self.inp.opaque_vars && is_var(ty)).then_some(MirTy::I64))
     }
 
     fn heap_array(&self, id: HirId) -> bool {
