@@ -163,20 +163,23 @@ test("blocking runs on a worker while other tasks keep going") {
     assert!(log[0] == "other task ran" && log[1] == "blocking done");
 }
 
-fn produce(Sender tx) -> int {
+// Sends nothing until the ticker task says go, so the reader's first
+// `recv` always finds the channel empty and has to suspend (#1001).
+fn produce((Sender, Receiver) ends) -> int {
+    let _ = recv(ends[1]);
+    let _ = send(ends[0], 5);
     sleep_ms(20);
-    let _ = send(tx, 5);
-    sleep_ms(20);
-    let _ = send(tx, 6);
+    let _ = send(ends[0], 6);
     return 0;
 }
 
 test("a thread channel recv suspends only the receiving task") {
     let (tx, rx) = thread_channel()?;
-    let worker = spawn(produce, tx)?;
+    let (go_tx, go_rx) = thread_channel()?;
+    let worker = spawn(produce, (tx, go_rx))?;
     let log: Vec<string> = Vec::new();
     let r = scope(
-        fn (Scope s) use (rx, log) {
+        fn (Scope s) use (rx, go_tx, log) {
             let reader = s
                 .spawn(
                     fn () use (rx, log) {
@@ -188,8 +191,9 @@ test("a thread channel recv suspends only the receiving task") {
                 );
             s
                 .spawn(
-                    fn () use (log) {
+                    fn () use (go_tx, log) {
                         log.push("ticker");
+                        let _ = send(go_tx, 1);
                         0
                     },
                 );

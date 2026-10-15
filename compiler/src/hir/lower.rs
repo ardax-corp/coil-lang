@@ -1309,13 +1309,6 @@ pub fn has_own_continue(hir: &HirBody, body: HirId) -> bool {
     }
 }
 
-/// Whether `id` reads `local` anywhere in it.
-pub fn reads_local(hir: &HirBody, id: HirId, local: LocalId) -> bool {
-    let mut found = false;
-    visit(hir, id, &mut |e| found |= matches!(e.kind, HirKind::Local(l) if l == local));
-    found
-}
-
 /// Whether `local` is assigned anywhere in `body`.
 pub fn assigns_local(hir: &HirBody, body: HirId, local: LocalId) -> bool {
     let mut found = false;
@@ -1530,11 +1523,6 @@ pub fn byte_literal(raw: &str) -> Option<u8> {
         [b] => Some(*b),
         _ => None,
     }
-}
-
-/// `float` (the lane picks the `*F` opcodes).
-pub fn is_float(ty: &Ty) -> bool {
-    matches!(strip_readonly(ty), Ty::Con(n) if n == coil_ty::FLOAT)
 }
 
 /// `Make Tuple []`: the unit value `()`.
