@@ -69,7 +69,7 @@ pub struct OptStats {
     /// Why each fallback body was refused (coarse keys, counted).
     #[serde(default)]
     pub hir_fallback_reasons: Vec<PassHit>,
-    /// Bodies lowered straight from HIR to MIR (`COIL_HIR_MIR`).
+    /// Bodies lowered straight from HIR to MIR.
     #[serde(default)]
     pub hir_mir: usize,
     /// Bodies whose dense tier came from that MIR rather than the IL lift.
