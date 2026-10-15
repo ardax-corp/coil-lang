@@ -1967,7 +1967,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         let wrap = b.body.result_mode
             && !is_result_construct(value, b.ok_is_result)
             && !self.checker.returns_whole_result(value.0.start, value.0.end)
-            && b.body.ret.as_ref().and_then(result_ok_err).is_some();
+            && miss_ret(b).as_ref().and_then(result_ok_err).is_some();
         // `return e?` (re-wrapped in Ok by result mode) and `return Ok(e?)` /
         // `return Some(e?)` of the function's own type return `e` as is, as
         // the AST's `expr_try_return_src` forwards the pair.
@@ -1976,8 +1976,19 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             return self.emit_ty(b, node, HirKind::Return(Some(v)), Some(coil_ty::never()));
         }
         let v = self.expr(b, value);
+        // A coroutine that used `?` is not in the checker's result-mode set
+        // (its type is `coroutine<…>`), yet its `return` of the Ok payload
+        // is Ok-wrapped as well: the final value is the yielded `Result`.
+        let wrap = wrap
+            || (b.body.is_coro
+                && !is_unit
+                && miss_ret(b).as_ref().and_then(result_ok_err).is_some()
+                && self
+                    .ty_at(b, v)
+                    .is_some_and(|t| !matches!(t, Ty::Never) && result_ok_err(&t).is_none()));
         let v = if wrap {
-            let ret = b.body.ret.clone();
+            // A coroutine's `return` gives its final value (the yielded type).
+            let ret = miss_ret(b);
             let span = span_of(value);
             self.synth_variant(b, span, common::BUILTIN_RESULT_ENUM, "Ok", vec![v], ret)
         } else {
