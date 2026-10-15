@@ -2919,7 +2919,7 @@ fn main() {
 
 /// Under a debugger, a body with a class local and an array local (which
 /// the HIR plan would split into frame slots) still lowers to direct MIR
-/// (the tier it then takes, LIR or the fused stack, follows `COIL_MIR_FUSE`).
+/// and takes a MIR tier.
 #[test]
 fn debugger_attached_split_locals_take_direct_mir() {
     let src = r#"
@@ -2951,6 +2951,7 @@ fn main() {
         .find(|b| b.name == "sum3")
         .unwrap_or_else(|| panic!("sum3 tier; stats={stats:?}"));
     assert_eq!(sum3.hir_reason.as_deref(), Some("lowered"), "{sum3:?}");
+    assert_ne!(sum3.tier, "fuse", "{sum3:?}");
 }
 
 #[test]

@@ -144,11 +144,11 @@ fn compile_src_compiler(src: &str, tune: impl FnOnce(&mut Compiler)) -> (Vec<Byt
     compiler.register_native_id(machine::PACKED_MATRIX_NEG, 9004);
     compiler.register_native_id(machine::PACKED_VEC_ARITH, 9005);
     compiler.register_native_id(machine::GC_REGISTER_FINALIZER_NATIVE, 9100);
-    // These tests pin emit_hir's stack lowering (`COIL_MIR_FUSE=0`): the
+    // These tests check emit_hir's stack IL with no MIR tiers: the
     // programs run without the stdlib, which direct MIR's host edges need.
     // They go with that lowering when it is deleted; the harness covers
     // the default path.
-    compiler.opt_options.hir_stack = true;
+    compiler.opt_options.mir_specialize = false;
     tune(&mut compiler);
     let bc = compiler.compile("", &mut ast);
     (bc, compiler)
@@ -1259,9 +1259,8 @@ fn type_errors_appear_in_messages() {
 fn register_native_visible_to_emitter() {
     use crate::typechecking::ty::{string, unit};
     let mut c = Compiler::default();
-    // Synthetic native ids: pinned to emit_hir's stack lowering, as
-    // `compile_src_compiler`.
-    c.opt_options.hir_stack = true;
+    // Synthetic native ids: no MIR tiers, as `compile_src_compiler`.
+    c.opt_options.mir_specialize = false;
     c.register("native_print", &[string()], &unit());
     // Native calls registered with the checker should compile without errors.
     let mut ast = Pratt::default()
@@ -3156,7 +3155,8 @@ fn let_x_reassignment_emits_store_pop_not_store() {
 #[test]
 fn const_scalar_folds_add_to_single_const() {
     use common::Instruction;
-    let (bc, _pool) = compile_src("fn value() -> int { const x = 5; return x + 5; }");
+    // The fold shows as a `CONST 10` once the MIR tiers run.
+    let (bc, _pool) = compile_src_tuned("fn value() -> int { const x = 5; return x + 5; }", |c| c.opt_options.mir_specialize = true);
     let const_count = bc
         .iter()
         .filter(|b| matches!(b.bytecode(), Instruction::CONST))
@@ -6072,9 +6072,8 @@ fn main() { \
     let mut compiler = Compiler::default();
     // Stable ids matching Pipeline::register_io_natives order is not
     // required ,  only the relative nesting shape is asserted.
-    // Synthetic native ids: pinned to emit_hir's stack lowering, as
-    // `compile_src_compiler`.
-    compiler.opt_options.hir_stack = true;
+    // Synthetic native ids: no MIR tiers, as `compile_src_compiler`.
+    compiler.opt_options.mir_specialize = false;
     compiler.register_native_id("stdin", 1);
     compiler.register_native_id("read", 2);
     let bc = compiler.compile("", &mut ast);
@@ -6354,9 +6353,8 @@ fn main() {
         )
         .expect("parse failed");
     let mut compiler = Compiler::default();
-    // Synthetic native ids: pinned to emit_hir's stack lowering, as
-    // `compile_src_compiler`.
-    compiler.opt_options.hir_stack = true;
+    // Synthetic native ids: no MIR tiers, as `compile_src_compiler`.
+    compiler.opt_options.mir_specialize = false;
     compiler.register("inner", &[], &int());
     compiler.register("outer", &[int()], &int());
     let outer_id = compiler.native_id("outer").expect("outer registered") as u32;

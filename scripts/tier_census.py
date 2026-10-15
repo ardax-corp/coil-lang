@@ -15,7 +15,7 @@ Each body also reports where its GC stack map came from (`mir`, `il`,
 `il snapshot`, or `-` for none; `unbound` when its sites did not match the
 body's alloc opcodes); `compare` lists bodies that lose a bound map.
 
-Environment variables set for `run` (for example `COIL_MIR_FUSE=0`) reach the
+Environment variables set for `run` (for example `COIL_HIR_INLINE=0`) reach the
 compiler, so one binary can be compared against itself under a switch.
 """
 

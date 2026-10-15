@@ -26,7 +26,7 @@ fn mir_direct_positive_tests_lower_every_body() {
     let mut refused = Vec::new();
     for file in &files {
         let mut cmd = Command::new(&bin);
-        cmd.env("COIL_MIR_FUSE", "1").args(["compile", "--opt-stats", "--include-tests"]);
+        cmd.args(["compile", "--opt-stats", "--include-tests"]);
         cmd.arg("--root").arg(root.join("examples/src"));
         for extra in compiler::Pipeline::workspace_language_extra_roots() {
             cmd.arg("--root").arg(extra);

@@ -24,10 +24,7 @@
 //! SSA models at most dest + `dest_hi`. N>2 is the same `ret_words` field
 //! but needs extra dests + archive encoding — not a self-vs-helper wall.
 
-use std::collections::{HashMap, HashSet};
-
-use crate::il::IlOp;
-use common::Instruction;
+use std::collections::HashMap;
 
 use super::func::MirFunc;
 use super::layout::MirLayout;
@@ -97,81 +94,6 @@ impl DenseAbi {
         })
     }
 
-    /// Recover params when `IlFunc.entry_sp` is 0 (frame-base seed, not arity).
-    pub fn from_func_and_live_ins(
-        func: &MirFunc,
-        ops: &[IlOp],
-        slot_ty: &HashMap<u32, MirTy>,
-    ) -> Option<Self> {
-        let mut abi = Self::from_func(func)?;
-        if abi.params.is_empty()
-            && let Some(params) = live_in_params(ops, slot_ty) {
-                abi.params = params;
-            }
-        Some(abi)
-    }
-}
-
-/// Prefix `0..arity` of slots read before they are stored (CALL args).
-pub fn live_in_params(ops: &[IlOp], slot_ty: &HashMap<u32, MirTy>) -> Option<Vec<MirTy>> {
-    let mut stored = HashSet::new();
-    let mut live = HashSet::new();
-    for op in ops {
-        match op {
-            IlOp::StorePop { slot, .. } => {
-                stored.insert(*slot);
-            }
-            IlOp::Load { slot, .. } | IlOp::LoadReturnSlot { slot, .. } => {
-                if !stored.contains(slot) {
-                    live.insert(*slot);
-                }
-            }
-            IlOp::BinSlotImm { slot, .. } => {
-                if !stored.contains(&u32::from(*slot)) {
-                    live.insert(u32::from(*slot));
-                }
-            }
-            IlOp::BinSlotSlot { a, b, .. } => {
-                let a = u32::from(*a);
-                let b = u32::from(*b);
-                if !stored.contains(&a) {
-                    live.insert(a);
-                }
-                if !stored.contains(&b) {
-                    live.insert(b);
-                }
-            }
-            IlOp::Byte { byte, .. }
-                if matches!(
-                    *byte.bytecode(),
-                    Instruction::INC | Instruction::DEC
-                ) =>
-            {
-                let (slot, _, _) = byte.inc_dec_parts();
-                let slot = slot as u32;
-                if !stored.contains(&slot) {
-                    live.insert(slot);
-                }
-            }
-            _ => {}
-        }
-    }
-    if live.is_empty() {
-        return Some(Vec::new());
-    }
-    let max = live.iter().copied().max()?;
-    if live.len() != max as usize + 1 || (0..=max).any(|i| !live.contains(&i)) {
-        return None;
-    }
-    let mut params = Vec::with_capacity(max as usize + 1);
-    for i in 0..=max {
-        let ty = *slot_ty.get(&i)?;
-        if !ty.is_word_lane() {
-            return None;
-        }
-        params.push(ty);
-    }
-    Some(params)
 }
 
 #[cfg(test)]
@@ -192,61 +114,6 @@ mod tests {
         let abi = DenseAbi::from_func(&f).expect("word abi");
         assert_eq!(abi.params, vec![MirTy::F64, MirTy::I64]);
         assert_eq!(abi.ret, MirTy::F64);
-    }
-
-    #[test]
-    fn live_in_params_reads_prefix() {
-        use crate::il::{IlOp, Label};
-        use common::DebugLoc;
-        let loc = DebugLoc::unknown();
-        let ops = vec![
-            IlOp::Label(Label(0)),
-            IlOp::Load { slot: 0, loc },
-            IlOp::Load { slot: 1, loc },
-            IlOp::Bin {
-                op: common::Instruction::ADDF,
-                loc,
-            },
-            IlOp::StorePop { slot: 2, loc },
-            IlOp::Load { slot: 2, loc },
-            IlOp::Return {
-                loc,
-                ret_words: 1,
-            },
-        ];
-        let mut slot_ty = HashMap::new();
-        slot_ty.insert(0, MirTy::F64);
-        slot_ty.insert(1, MirTy::F64);
-        slot_ty.insert(2, MirTy::F64);
-        assert_eq!(
-            live_in_params(&ops, &slot_ty),
-            Some(vec![MirTy::F64, MirTy::F64])
-        );
-    }
-
-    #[test]
-    fn live_in_params_counts_fused_return_slot() {
-        use crate::il::{IlOp, Label};
-        use common::DebugLoc;
-        let loc = DebugLoc::unknown();
-        let ops = vec![
-            IlOp::Label(Label(0)),
-            IlOp::Load { slot: 1, loc },
-            IlOp::Load { slot: 0, loc },
-            IlOp::Bin {
-                op: common::Instruction::GEQ,
-                loc,
-            },
-            IlOp::LoadReturnSlot { slot: 2, loc },
-        ];
-        let mut slot_ty = HashMap::new();
-        slot_ty.insert(0, MirTy::I64);
-        slot_ty.insert(1, MirTy::I64);
-        slot_ty.insert(2, MirTy::I64);
-        assert_eq!(
-            live_in_params(&ops, &slot_ty),
-            Some(vec![MirTy::I64, MirTy::I64, MirTy::I64])
-        );
     }
 
     #[test]

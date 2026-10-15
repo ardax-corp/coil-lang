@@ -330,7 +330,7 @@ fn dissect_expand_prints_macro_output() {
     assert!(!stdout.contains("#[twice]"), "{stdout}");
 }
 
-/// With stack IL from MIR (`COIL_MIR_FUSE=1`), `Vec::pop` returns
+/// With stack IL from MIR, `Vec::pop` returns
 /// `vec_pop`'s Option word as it is: no unboxing to a pair and building
 /// the enum again (a `MakeEnum` per pop made tak_iter 2x slower).
 #[test]
@@ -347,7 +347,6 @@ fn dissect_vec_pop_returns_the_native_option_on_mir() {
     )
     .unwrap();
     let out = coil_dissect(&bin, Some(&dir), &entry)
-        .env("COIL_MIR_FUSE", "1")
         .args(["--fn", "pop", "--no-source"])
         .output()
         .expect("spawn coil dissect");

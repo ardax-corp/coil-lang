@@ -401,24 +401,15 @@ impl IlModule {
         let mut side_deopts = Vec::new();
         // Maps of dense and LIR bodies, built from their MIR.
         let mut mir_maps = HashMap::<String, crate::mir::DraftFrameMap>::new();
-        // A fused body (the default) takes its stack IL from its MIR,
-        // so its tier gates read that MIR and the fuse IL emitted from it
-        // (N1b): of emit_hir's stack IL only the labels it binds.
-        let fused: Vec<bool> = self
-            .funcs
-            .iter()
-            .map(|b| {
-                !opts.hir_stack
-                    && crate::mir::mir_fuse_on()
-                    && (b.meta.hir_mir.is_none() || crate::mir::mir_fuse_takes(&b.meta.name))
-            })
-            .collect();
+        // Every body takes its stack IL from its MIR, so its tier gates
+        // read that MIR and the fuse IL emitted from it (N1b): of
+        // emit_hir's stack IL only the labels it binds.
         let labels: Vec<crate::mir::BodyLabels> =
             self.funcs.iter().map(|b| crate::mir::BodyLabels::of(&b.ops)).collect();
         let bound: Vec<std::collections::HashSet<u32>> =
             self.funcs.iter().map(|b| bound_labels(&b.ops)).collect();
-        // Per fused body, once: the fuse IL its MIR emits (what runs if
-        // dense refuses), `None` when the LIR tier refuses it.
+        // Per body, once: the fuse IL its MIR emits (what runs if dense
+        // refuses), `None` when the LIR tier refuses it.
         let mut fuse_fallbacks: Vec<Option<Option<Vec<IlOp>>>> = vec![None; self.funcs.len()];
         while !pending.is_empty() && opts.mir_specialize {
             let mut next = Vec::new();
@@ -426,18 +417,13 @@ impl IlModule {
             for i in pending.iter().copied() {
                 let body = &mut self.funcs[i];
                 let mut side = crate::mir::BodySidecar::default();
-                let gate = if fused[i] {
-                    let fallback = fuse_fallbacks[i].get_or_insert_with(|| {
-                        let func = body.meta.hir_mir.as_deref()?;
-                        crate::mir::fuse_fallback(&labels[i], &body.meta.name, pool, func)
-                            .filter(|lir| !drops_bound_label(&bound[i], lir))
-                    });
-                    crate::mir::GateRef::Mir(fallback.as_deref())
-                } else {
-                    crate::mir::GateRef::Stack(&body.ops)
-                };
+                let fallback = fuse_fallbacks[i].get_or_insert_with(|| {
+                    let func = body.meta.hir_mir.as_deref()?;
+                    crate::mir::fuse_fallback(&labels[i], &body.meta.name, pool, func)
+                        .filter(|lir| !drops_bound_label(&bound[i], lir))
+                });
                 if let Some((dense, abi)) = crate::mir::try_specialize_body_side(
-                    gate,
+                    fallback.as_deref(),
                     &labels[i],
                     &body.meta.name,
                     pool,
@@ -495,11 +481,7 @@ impl IlModule {
         // A pinned (`defer`) body whose MIR has its cleanup pad may take
         // LIR, which emits that pad after the body; it stays pinned.
         let padded: Vec<usize> = (0..self.funcs.len())
-            .filter(|&i| {
-                fused[i]
-                    && self.funcs[i].meta.pinned
-                    && self.funcs[i].meta.hir_mir.as_deref().is_some_and(|f| f.cleanup.is_some())
-            })
+            .filter(|&i| self.funcs[i].meta.pinned && self.funcs[i].meta.hir_mir.as_deref().is_some_and(|f| f.cleanup.is_some()))
             .collect();
         self.lir_cleanup_pads.clear();
         for i in pending.iter().copied().chain(padded.iter().copied()) {
@@ -508,22 +490,16 @@ impl IlModule {
             }
             let body = &mut self.funcs[i];
             let mut side = crate::mir::BodySidecar::default();
-            let gate = if fused[i] {
-                crate::mir::GateRef::Mir(None)
-            } else {
-                crate::mir::GateRef::Stack(&body.ops)
-            };
             if let Some(lir) = crate::mir::try_lower_abi_body_side(
-                gate,
                 &labels[i],
                 &body.meta.name,
                 pool,
                 body.meta.hir_mir.as_deref(),
                 &mut side,
             ) {
-                // A fused body's lambdas: their code, inline in HIR
-                // emission's IL, follows the LIR.
-                let lir = if fused[i] && drops_bound_label(&bound[i], &lir) {
+                // The body's lambdas: their code, inline in HIR emission's
+                // IL, follows the LIR.
+                let lir = if drops_bound_label(&bound[i], &lir) {
                     match splice_inner_code(&body.ops, lir.clone(), &bound[i]) {
                         Some((spliced, allocs)) => {
                             // Their allocations bind map sites too; a
@@ -545,7 +521,7 @@ impl IlModule {
                     lir_why[i] = Some("drops a called inner label".to_string());
                 } else if body.meta.pinned && side.cleanup_pad.is_none() {
                     lir_why[i] = Some("no cleanup pad".to_string());
-                } else if fused[i] || lir_keeps(&body.ops, &lir) {
+                } else {
                     if let Some(pad) = side.cleanup_pad.filter(|_| body.meta.pinned) {
                         self.lir_cleanup_pads.insert(body.meta.name.clone(), pad);
                     }
@@ -560,8 +536,6 @@ impl IlModule {
                     body.ops = lir;
                     tier[i] = "lir";
                     lir_kept += 1;
-                } else {
-                    lir_why[i] = Some("lir cost gate".to_string());
                 }
             } else {
                 lir_why[i] = Some(
@@ -572,15 +546,15 @@ impl IlModule {
                 super::opt::note_fuse_reason(why);
             }
         }
-        // M5p: every fused body runs IL emitted from its MIR (dense or
-        // LIR). One left on emit_hir's stack lowering is a compiler bug.
+        // M5p: every body runs IL emitted from its MIR (dense or LIR).
+        // One left on emit_hir's stack lowering is a compiler bug.
         if opts.mir_specialize {
             let fell_back: Vec<String> = (0..self.funcs.len())
                 // A body HIR never lowered (an IL-only test body, or one
                 // past a program error) has no direct MIR to miss.
                 .filter(|&i| {
                     let meta = &self.funcs[i].meta;
-                    fused[i] && tier[i] == "fuse" && (meta.hir_mir.is_some() || meta.hir_mir_why.is_some())
+                    tier[i] == "fuse" && (meta.hir_mir.is_some() || meta.hir_mir_why.is_some())
                 })
                 .map(|i| {
                     let body = &self.funcs[i];
@@ -899,66 +873,6 @@ fn drops_bound_label(was: &std::collections::HashSet<u32>, new: &[IlOp]) -> bool
         IlOp::Entry { target, .. } | IlOp::Jump { target, .. } => was.contains(&target.0) && !now.contains(&target.0),
         _ => false,
     })
-}
-
-fn lir_keeps(fuse_ops: &[IlOp], lir: &[IlOp]) -> bool {
-    let fuse_loops = super::analysis::find_natural_loops(fuse_ops);
-    let lir_loops = super::analysis::find_natural_loops(lir);
-    let slack = lir_cost_slack(fuse_ops);
-    let flat_ok = lir_emit_cost(lir, &[]) <= lir_emit_cost(fuse_ops, &[]).saturating_add(slack);
-    if fuse_loops.is_empty() || fuse_loops.len() != lir_loops.len() {
-        return flat_ok;
-    }
-    let f = lir_emit_cost(fuse_ops, &fuse_loops);
-    let l = lir_emit_cost(lir, &lir_loops);
-    // IL-level cost cannot see fuse-select packing; a weighted tie goes to
-    // the flat count, which still favours the tighter fuse-IL loop.
-    l < f || (l <= f.saturating_add(slack) && flat_ok)
-}
-
-/// Static reconstruct cost; ops inside `loops` weigh ×8 per level (max 2).
-fn lir_emit_cost(ops: &[IlOp], loops: &[super::analysis::NaturalLoop]) -> usize {
-    ops.iter()
-        .enumerate()
-        .filter(|(_, op)| !matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)))
-        .map(|(i, op)| {
-            let base = match op {
-                IlOp::StorePop { .. } => 2,
-                IlOp::Byte { byte, .. }
-                    if matches!(*byte.bytecode(), common::Instruction::Seek) =>
-                {
-                    2 + (byte.operand_u32() as usize) / 16
-                }
-                _ => 1,
-            };
-            let depth = loops
-                .iter()
-                .filter(|lp| lp.header <= i && i <= lp.latch)
-                .count()
-                .min(2) as u32;
-            base * 8usize.pow(depth)
-        })
-        .sum()
-}
-
-/// Runtime-neutral slack for I2 match / two-slot construct reconstructs
-/// that add a frame `Seek` the opted fuse-IL never emitted.
-fn lir_cost_slack(ops: &[IlOp]) -> usize {
-    let mut slack = 0usize;
-    for op in ops {
-        match op {
-            IlOp::Return { ret_words, .. } if *ret_words >= 2 => slack = slack.max(3),
-            IlOp::Jump {
-                kind: IlJumpKind::JumpIfMatch { .. },
-                ..
-            } => slack = slack.max(3),
-            IlOp::Byte { byte, .. } if *byte.bytecode() == common::Instruction::Unpack => {
-                slack = slack.max(3);
-            }
-            _ => {}
-        }
-    }
-    slack
 }
 
 /// Trailing `if { raise }` end-labels sit in glue / epilogue
@@ -1924,7 +1838,6 @@ mod tests {
             branch_optimization: false,
             collect_stats: false,
             mir_specialize: true,
-            hir_stack: false,
         }
     }
 

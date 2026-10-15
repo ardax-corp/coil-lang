@@ -10,7 +10,6 @@
 mod analysis;
 mod builder;
 mod codebuf;
-pub(crate) mod effects;
 mod emit_buf;
 mod func;
 mod lower;

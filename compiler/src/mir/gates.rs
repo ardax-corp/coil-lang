@@ -2,11 +2,9 @@
 //!
 //! The dense / LIR gates ask whether a body allocates, where its loops are
 //! and which reconstruct walls it holds. Every body takes its stack IL
-//! from MIR (the default), so the gates read them here (with
-//! `COIL_MIR_FUSE=0`, off emit_hir's stack IL). The
-//! questions match their stack-IL forms ([`super::gc::refuses_alloc`],
-//! `loop_ranges`, [`super::entry::lir_refuse_direct`]) instruction for
-//! instruction.
+//! from MIR, so the gates read them here. The questions match their
+//! stack-IL forms ([`super::gc::refuses_alloc`], `loop_ranges`)
+//! instruction for instruction.
 
 use std::collections::HashSet;
 
@@ -103,10 +101,9 @@ impl GateFacts {
     }
 }
 
-/// The MIR form of [`super::entry::lir_refuse_direct`] for a fused body,
-/// where neither a user call nor a `BoxValue` is a wall (the S2b map
-/// leaves the box to the precise frame map): only an allocation without
-/// maps (`maps_ok`).
+/// The LIR walls of a body: neither a user call nor a `BoxValue` is one
+/// (the S2b map leaves the box to the precise frame map), only an
+/// allocation without maps (`maps_ok`).
 pub fn fuse_lir_wall(func: &MirFunc, maps_ok: bool) -> Option<LirRefuse> {
     let insts = || func.blocks.iter().flat_map(|b| b.insts.iter());
     if !maps_ok && insts().any(refuses_alloc) {
