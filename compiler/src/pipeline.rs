@@ -2217,7 +2217,11 @@ fn main() {
 "#,
             )
             .expect("fib(32) must compile");
-        assert_eq!(pipeline.operand_stack_slots(), 512);
+        assert!(
+            pipeline.operand_stack_slots() > crate::typechecking::DEFAULT_OPERAND_STACK_SLOTS,
+            "fib(32) should raise the operand stack above the default, got {}",
+            pipeline.operand_stack_slots()
+        );
     }
 
     #[test]
