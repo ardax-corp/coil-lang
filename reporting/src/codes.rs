@@ -64,6 +64,8 @@ pub enum ErrorCode {
     Deprecated,
     /// `byte` arithmetic whose result wraps modulo 256 (warning).
     ByteWrap,
+    /// A shift count known at compile time is outside `0..=63`.
+    ShiftCountOutOfRange,
 
     DuplicateEnum,
     DuplicateConstructor,
@@ -169,6 +171,7 @@ impl ErrorCode {
             Self::PrivateMember => "E0128",
             Self::Deprecated => "E0129",
             Self::ByteWrap => "E0130",
+            Self::ShiftCountOutOfRange => "E0131",
             Self::DuplicateEnum => "E0200",
             Self::DuplicateConstructor => "E0201",
             Self::UnknownEnum => "E0202",
@@ -256,6 +259,7 @@ impl ErrorCode {
             Self::PrivateMember => "private member is not accessible",
             Self::Deprecated => "deprecated function",
             Self::ByteWrap => "byte arithmetic wraps",
+            Self::ShiftCountOutOfRange => "shift count out of range",
             Self::DuplicateEnum => "duplicate enum",
             Self::DuplicateConstructor => "duplicate constructor",
             Self::UnknownEnum => "unknown enum",
@@ -351,6 +355,7 @@ mod tests {
             | PrivateMember
             | Deprecated
             | ByteWrap
+            | ShiftCountOutOfRange
             | DuplicateEnum
             | DuplicateConstructor
             | UnknownEnum
@@ -428,6 +433,7 @@ mod tests {
             PrivateMember,
             Deprecated,
             ByteWrap,
+            ShiftCountOutOfRange,
             DuplicateEnum,
             DuplicateConstructor,
             UnknownEnum,

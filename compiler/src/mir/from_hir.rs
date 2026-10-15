@@ -3464,7 +3464,7 @@ impl Lower<'_> {
                 if self.expr_ty(id).and_then(scalar) != Some(lt) {
                     return Err("operator type".into());
                 }
-                if op.int_may_trap() {
+                if op.int_may_trap() || matches!(op, BinOp::Shl | BinOp::Shr) {
                     self.at_expr(id, |l2| Ok(l2.b.ins_binop(arith, l, r)))?
                 } else {
                     self.b.ins_binop(arith, l, r)
