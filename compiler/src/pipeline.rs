@@ -2718,6 +2718,38 @@ fn main() { sum(10); }
         assert!(!vm.panicked(), "vec_scan panicked");
     }
 
+    /// An embedder native (`register_host_native`, an id past
+    /// `HOST_NATIVES`) is a HostInvoke edge on direct MIR (#1127): calls to
+    /// it, nested and in a loop, run and return its value.
+    #[test]
+    fn embedder_host_native_runs_on_direct_mir() {
+        use machine::{FfiSignature, FfiType};
+        let mut pipeline = Pipeline::new();
+        let sig = FfiSignature::from_parts("twice", vec![FfiType::Int], FfiType::Int).expect("sig");
+        pipeline.register_host_native(sig, |_, args| Ok(Some(common::Value::from(args[0].as_int() * 2))));
+        let sig = FfiSignature::from_parts("seven", vec![], FfiType::Int).expect("sig");
+        pipeline.register_host_native(sig, |_, _| Ok(Some(common::Value::from(7))));
+        let src = r#"
+fn main() {
+    if twice(twice(seven())) != 28 {
+        panic "nested";
+    }
+    let s = 0;
+    for i in 0..4 {
+        s = s + twice(i);
+    }
+    if s != 12 {
+        panic "loop";
+    }
+}
+"#;
+        let (bytecode, constants) = pipeline.compile_src(src).expect("compile");
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        pipeline.wire_host_natives(&mut vm);
+        vm.run_raw(&bytecode, &constants, pipeline.strings(), pipeline.static_slot_count());
+        assert!(!vm.panicked(), "embedder natives returned the wrong values");
+    }
+
     /// Naive `fib` and `fact` through the real compiler and VM.
     ///
     /// `fib(n <= 2)` returns the constant 1; the VM may skip that call.
