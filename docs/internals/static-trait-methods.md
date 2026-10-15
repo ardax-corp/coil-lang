@@ -20,7 +20,7 @@ fn decode_as<T: FromVal>(Val v) -> Result<T, DecodeError> {
 let cfg: Config = decode_as(v)?;                  // T chosen by the expected type
 ```
 
-Runnable example: `examples/static_trait_method.hy`. Tests: `tests/positive/static_trait_methods.hy`, `tests/positive/derive_default_static.hy`, `tests/compile_fail/trait_static_*.hy`, `tests/compile_fail/trait_instance_method_as_static.hy`.
+Runnable example: `examples/static_trait_method.hy`. Tests: `tests/traits/static_trait_methods.hy`, `tests/traits/derive_default_static.hy`, `tests/traits/compile_fail/trait_static_*.hy`, `tests/traits/compile_fail/trait_instance_method_as_static.hy`.
 
 ## Surface (one spelling)
 
@@ -38,7 +38,7 @@ Runnable example: `examples/static_trait_method.hy`. Tests: `tests/positive/stat
   - **Type parameter in scope:** `bound_method_candidates(m, Some(var))` selects the bound, the scheme's class parameter is unified with the parameter's variable, and a `BoundMethodCall { has_receiver: false, .. }` is recorded (the existing UFCS-under-a-bound shape).
   - **Concrete owner:** every single-parameter trait that declares `m` and has an instance for the owner is a candidate; more than one is an ambiguity error. The scheme's class parameter is unified with the owner type before discharge, so the constraint resolves to the owner's instance, not to the first instance that unifies.
 - **Return-type-directed resolution** (`bind_call_result_to_expected`): before a call's bounds are discharged, a still-open result type is trial-unified with the node's expected type (`expected_here`: `let x: T = f()`, `return f()`, an argument with a known parameter type). `f()?` sets the inner call's expectation to `Result<E, err>` (the fn's error type in result mode). Only a successful unification is committed; the binding site still reports its own mismatch. This applies to generic fn calls, UFCS bound calls and static calls.
-- With one matching instance and no expectation the instance is still picked (the choice is forced). With several and no expectation the existing "Ambiguous instance" error stands (`tests/compile_fail/trait_static_uninferable.hy`).
+- With one matching instance and no expectation the instance is still picked (the choice is forced). With several and no expectation the existing "Ambiguous instance" error stands (`tests/traits/compile_fail/trait_static_uninferable.hy`).
 
 ## Codegen
 

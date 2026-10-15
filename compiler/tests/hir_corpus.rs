@@ -1,4 +1,4 @@
-//! HIR Phase 1 gate: every `tests/positive` program builds HIR with no
+//! HIR Phase 1 gate: every positive `tests/<domain>` program builds HIR with no
 //! unsupported node and every node's span matches its AST node.
 
 use compiler::Pipeline;
@@ -8,12 +8,9 @@ fn positive_corpus_builds_hir_without_problems() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
-        .join("tests/positive");
-    let mut files: Vec<_> = std::fs::read_dir(&dir)
-        .expect("read tests/positive")
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "hy"))
-        .collect();
+        .join("tests");
+    let mut files = Vec::new();
+    positive_hy_files(&dir, &mut files);
     files.sort();
     let mut built = 0;
     let mut problems = Vec::new();
@@ -36,4 +33,18 @@ fn positive_corpus_builds_hir_without_problems() {
     }
     assert!(built * 10 >= files.len() * 9, "only {built} of {} files compiled", files.len());
     assert!(problems.is_empty(), "{} HIR problems:\n{}", problems.len(), problems.join("\n"));
+}
+
+/// `.hy` files under `dir`, recursively, skipping `compile_fail/` directories.
+fn positive_hy_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    for entry in std::fs::read_dir(dir).expect("read tests") {
+        let path = entry.expect("dir entry").path();
+        if path.is_dir() {
+            if path.file_name().is_some_and(|n| n != "compile_fail") {
+                positive_hy_files(&path, out);
+            }
+        } else if path.extension().is_some_and(|x| x == "hy") {
+            out.push(path);
+        }
+    }
 }

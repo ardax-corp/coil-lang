@@ -12,9 +12,9 @@ coil fmt --check .
 coil-fmt --check examples/fib.hy
 ```
 
-CI runs `coil-fmt --check` over `examples`, `tests/positive`,
-`tests/negative_runtime` and `tests/*.hy` (`tests/compile_fail` holds
-deliberately broken programs and is skipped).
+CI runs `coil-fmt --check` over `examples` and `tests`. Walking a
+directory skips `compile_fail/` subdirectories: they hold deliberately broken
+programs (a `compile_fail` file named on the command line is still checked).
 
 ## Behavior
 
