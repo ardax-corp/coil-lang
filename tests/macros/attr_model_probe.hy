@@ -87,7 +87,10 @@ test("a method knows its class; a static method is marked") {
 test("the body as written") {
     let b = noisy_body();
     assert!(noisy() == 2);
-    assert!(b == "{let x = 1;\n    return x + 1;\n}", b);
+    // Line endings are the checkout's own (CRLF on a Windows checkout).
+    let lf = b == "{let x = 1;\n    return x + 1;\n}";
+    let crlf = b == "{let x = 1;\r\n    return x + 1;\r\n}";
+    assert!(lf || crlf, b);
 }
 
 test("string, int and bool arguments by name, in any order") {

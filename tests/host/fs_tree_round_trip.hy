@@ -3,6 +3,7 @@
 // path gives.
 use tests::assert;
 use io::IoError;
+use env::cwd;
 use string::format;
 use io::fs::create_dir;
 use io::fs::create_dir_all;
@@ -84,10 +85,18 @@ test("rename keeps the contents") {
 test("a symlink reads back and resolves") {
     let root = fresh("coil_host_fs_link")?;
     write_text(root + "/target.txt", "t")?;
-    symlink("target.txt", root + "/link.txt")?;
+    // An absolute target: a relative one is resolved against the working
+    // directory on Windows (coil-lang#1219).
+    let dir = match cwd() {
+        Result::Ok(d) => d,
+        Result::Err(_) => ".",
+    };
+    let target = dir + "/" + root + "/target.txt";
+    symlink(target, root + "/link.txt")?;
     assert!(is_symlink(root + "/link.txt")?);
-    assert!(!is_symlink(root + "/target.txt")?);
-    assert!(read_link(root + "/link.txt")? == "target.txt");
+    assert!(!is_symlink(target)?);
+    // Windows may hand the target back in its `\\?\` form.
+    assert!(realpath(read_link(root + "/link.txt")?)? == realpath(target)?);
     assert!(read_text(root + "/link.txt")? == "t");
     assert!(realpath(root + "/link.txt")? == realpath(root + "/target.txt")?);
     remove_dir_all(root)?;
