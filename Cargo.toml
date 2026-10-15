@@ -65,3 +65,18 @@ strip = true
 [profile.branch_misses]
 inherits="release"
 debug = 2
+
+# The `.hy` harness (`coil test`) in CI and `scripts/test-corpora.sh`:
+# optimized like release so the VM runs the corpus ~15x faster than a debug
+# build, but quick to build (no LTO, parallel codegen) and with the debug
+# build's checks (debug assertions, overflow checks, unwinding panics so a
+# compiler panic fails one file instead of aborting the run).
+[profile.harness]
+inherits = "release"
+lto = false
+codegen-units = 16
+debug-assertions = true
+overflow-checks = true
+panic = "unwind"
+strip = false
+incremental = true
