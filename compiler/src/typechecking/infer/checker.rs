@@ -3815,7 +3815,15 @@ impl Checker {
             } else {
                 for (arg, fty) in provided.iter().zip(field_tys.iter()) {
                     let aty = self.infer(arg);
-                    self.unify(&aty, fty, &arg.0.into_range(), "constructor argument");
+                    // Coerce like a function argument (#1079): an array
+                    // literal builds a `Vec<T>` field.
+                    self.coerce_or_unify(
+                        fty,
+                        &aty,
+                        Some(arg),
+                        &arg.0.into_range(),
+                        "constructor argument",
+                    );
                 }
             }
             return apply_ty_prune(&self.subst, &result_ty);
