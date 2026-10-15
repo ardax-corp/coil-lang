@@ -2001,10 +2001,10 @@ impl Compiler {
                 key = format!("{}::{}", self.namespace, key);
             }
             let lookup = strip_overload_key(&key).to_string();
-            // A heterogeneous `... name` pack stays on the AST.
+            // A bare `... name` packs its arguments into a tuple.
             let tuple_rest = self.checker.fn_tuple_rest(&lookup) || self.checker.fn_tuple_rest(name);
             let generic = self.checker.is_generic_fn(&lookup);
-            if tuple_rest || (generic && shaped) {
+            if generic && shaped {
                 return Err("call-argument");
             }
             // An overloaded name shapes by the overload the checker picked.
@@ -2076,8 +2076,19 @@ impl Compiler {
                 }
                 next += 1;
             }
-            // A generic pack's type is its items' one ground type.
+            // A generic pack's type is its items' one ground type; a
+            // tuple pack's is its items' types in order.
             let rest_ty = match rest_ty {
+                Some(_) if tuple_rest => {
+                    let items: Option<Vec<Ty>> = rest
+                        .iter()
+                        .map(|&r| b.expr(r).ty.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t)))
+                        .collect();
+                    match items {
+                        Some(items) if items.iter().all(crate::hir::layout::ty_is_closed) => Some(Ty::Tuple(items)),
+                        _ => return Err("call-argument"),
+                    }
+                }
                 Some(declared) if generic => {
                     let item = rest.first().and_then(|&r| b.expr(r).ty.clone()).map(|t| apply_ty_prune(self.checker.subst(), &t));
                     let same = |t: &Ty| rest.iter().all(|&r| b.expr(r).ty.as_ref().map(|u| apply_ty_prune(self.checker.subst(), u)).as_ref() == Some(t));
@@ -2103,7 +2114,7 @@ impl Compiler {
             let mut new_args = slots.into_iter().flatten().collect::<Vec<_>>();
             if pack {
                 let span = (call_span.1, call_span.1);
-                let kind = MakeKind::Array;
+                let kind = if tuple_rest { MakeKind::Tuple } else { MakeKind::Array };
                 new_args.push(Self::hir_push(b, &self.checker, HirKind::Make { kind, args: rest }, rest_ty, span));
             }
             if let HirKind::Call { args, .. } = &mut b.exprs[i].kind {
