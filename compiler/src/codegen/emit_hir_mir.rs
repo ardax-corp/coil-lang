@@ -779,7 +779,7 @@ impl Compiler {
                 lhs,
                 rhs,
             } => match emit.plan.ops.get(&id.0) {
-                Some(HirOp::Prim(_)) => {
+                Some(HirOp::Prim) => {
                     t.op_prims.insert(id.0);
                 }
                 Some(HirOp::Call { lookup, fqn, class, method }) => {
