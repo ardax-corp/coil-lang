@@ -1,6 +1,5 @@
-// A user type's operator stages its operands through temps, so as a call,
-// `format` or host argument, or the right side of `&&`, it runs with no
-// operand below it, as the AST stages those arguments first.
+// An operator over a user type works as a call argument, a `format` or
+// host-call argument and on the right side of `&&`.
 use tests::assert;
 use string::{format, to_bytes};
 

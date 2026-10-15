@@ -1,6 +1,6 @@
-// A generic class's shared method bodies lower from HIR when they return or
-// hold its type parameter: `T`, `Option<T>`, `Vec<T>`, `(T, int)` and the
-// class itself are boxed words, as the AST codegen lays them out.
+// A generic class's methods can return or store its type parameter `T`,
+// `Option<T>`, `Vec<T>`, `(T, int)` and the class itself, at int, string
+// and other field types.
 use tests::assert;
 
 class Holder<T> {

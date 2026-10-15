@@ -1,5 +1,4 @@
-// Copied locals feeding MakeArray must not be rewritten into shape-sensitive
-// stack producers that break array construction.
+// An array literal built from a copied local holds the copied value.
 // Output: 30
 use io::{stdout, write};
 use string::{format, to_bytes};

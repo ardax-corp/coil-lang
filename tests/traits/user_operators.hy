@@ -1,6 +1,5 @@
-// Operators over user types lower from HIR as the AST codegen emits them:
-// a call of the type's trait instance (derived or written), or `EQ` / `NEQ`
-// when the type has no `Eq` instance.
+// Operators over user types call the type's trait instance (derived or
+// written); `==` on a type with no `Eq` instance compares identity.
 use tests::assert;
 
 class Vec2 {

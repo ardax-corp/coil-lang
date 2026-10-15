@@ -1,5 +1,5 @@
-// Inline receiver `new Celsius(0).into()` must typecheck and run (Bugbot:
-// codegen used to skip boxing when `receiver_type` only handled Identifier/Access).
+// `.into()` works on a `new C(...)` receiver written inline, with the
+// target type chosen by the expected type.
 // Output: 32
 use io::{stdout, write};
 use string::{format, to_bytes};

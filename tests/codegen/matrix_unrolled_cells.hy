@@ -1,7 +1,6 @@
-// Matrix operators and `matmul` on shapes past the packed kernels' meta
-// limit (255) unroll cell by cell on direct MIR, as HIR emission did:
-// byte and float cells. One operator per test, and few tests per file: each
-// unrolled body is large to compile (the harness's leak smoke caps memory).
+// Matrix operators on shapes too large for the packed kernels (over 255
+// cells) give the cell-by-cell results: byte and float cells. One operator
+// per test, few tests per file: each unrolled body is large to compile.
 use tests::assert;
 
 test("byte << past the packed limit") {

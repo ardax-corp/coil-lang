@@ -1,4 +1,5 @@
-// IL unroll of counted `while` must still run the induction step each trip.
+// A short counted `while` loop (a candidate for full unrolling) still runs
+// its induction step on every trip and sums 0..4.
 // Output: 6
 use io::{stdout, write};
 use string::{format, to_bytes};

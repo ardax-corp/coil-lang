@@ -1,6 +1,5 @@
-// `s.show()` and `s.hash()` on a string call the builtin thunk with the
-// string's own word; a dictionary (a shared generic body, `%v`) reaches
-// the same text and hash through the thunk's `$dict` adapter.
+// `s.show()` and `s.hash()` on a string give the same text and hash as a
+// direct call and through a generic body or `%v`.
 use tests::assert;
 use string::format;
 

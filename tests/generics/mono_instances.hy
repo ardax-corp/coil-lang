@@ -1,8 +1,6 @@
-// Generic functions lower from HIR once per mono instance, at that
-// instance's types, and ground calls reach the clone directly. Enum
-// boundaries that mention a type parameter stay with the AST (boxed).
-// The language harness also runs under `--hir`, so each case pins both
-// codegens.
+// A generic function gives the same results at each type it is called
+// with (int, float, string), including when its signature mentions an
+// enum of its type parameter.
 use tests::assert;
 
 fn first<T>(Vec<T> xs, T fallback) -> T {

@@ -1,6 +1,6 @@
-// An inlined callee's stack array is cleared after the statement. The IL
-// value numbering must see that clear as a write: before it did, `i + 1`
-// was read back from the cleared element slot and the loop never ended.
+// A small function that builds a local array, called in a counted loop,
+// returns the right value each call and the loop ends (the array's elements
+// are not confused with values computed from the loop counter).
 use tests::assert;
 
 fn take(int i) -> int {

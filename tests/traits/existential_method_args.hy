@@ -1,3 +1,6 @@
+// A method called through an existential (`Handler h`) takes further
+// arguments, including when the existential comes from a call or the
+// call is nested in a larger expression.
 use tests::assert;
 
 class Req {
@@ -38,7 +41,6 @@ test("a trait object method takes further arguments") {
 }
 
 test("a trait object from a call stages through a temp") {
-    // A `new` argument here trips the AST (coil-lang#749).
     let q = new Req("/x", 3);
     let resp = handle(make(100), q, 0);
     assert!(resp.code == 106);

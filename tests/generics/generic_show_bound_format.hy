@@ -1,4 +1,4 @@
-// Phase 4: open `%v` inside a Show-bound generic body.
+// `%v` formats a value of an open type parameter under a `Show` bound.
 // Output: 10,20,
 use io::{stdout, write};
 use string::{format, to_bytes};

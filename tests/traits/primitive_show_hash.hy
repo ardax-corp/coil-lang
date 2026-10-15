@@ -1,6 +1,6 @@
-// `show` / `hash` on int, float, bool and byte: a ground call passes the
-// raw word to the compiler's thunk (so the caller lowers to direct MIR),
-// a dictionary call reaches the same thunk through its `$dict` adapter.
+// `show` / `hash` on int, float, bool and byte give the same result as a
+// direct call and through a `Show` / `Hash` bound, and on a derived
+// scalar enum.
 
 use tests::assert;
 

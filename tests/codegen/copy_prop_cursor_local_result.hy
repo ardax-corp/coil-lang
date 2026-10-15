@@ -1,5 +1,5 @@
-// A local copy must preserve the shared cursor when its temporary store is
-// above the live operand height.
+// A local copied into another local keeps its value when used in a return
+// expression with a parameter.
 // Output: 42
 use io::{stdout, write};
 use string::{format, to_bytes};

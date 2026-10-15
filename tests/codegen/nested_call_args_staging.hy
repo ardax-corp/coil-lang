@@ -1,5 +1,5 @@
-// Nested HostInvoke call args must stage through temps — evaluating the second
-// `to_bytes` inline must not clobber the first result on the operand stack.
+// Two nested host calls as arguments of one call (`to_bytes(...)` twice)
+// each keep their own result: the first is not overwritten by the second.
 // Output: GET /hi
 use io::{stdout, write};
 use string::{format, to_bytes};

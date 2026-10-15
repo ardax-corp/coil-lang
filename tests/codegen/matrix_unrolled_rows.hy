@@ -1,7 +1,5 @@
-// Matrix operators and `matmul` on shapes past the packed kernels' meta
-// limit (255) unroll cell by cell on direct MIR, as HIR emission did:
-// matrices taller than 255 rows. One operator per test, and few tests per file: each
-// unrolled body is large to compile (the harness's leak smoke caps memory).
+// Matrix operators on matrices taller than 255 rows give the cell-by-cell
+// results. Few tests per file: each unrolled body is large to compile.
 use tests::assert;
 
 test("rows + past the packed limit") {
