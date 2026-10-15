@@ -502,16 +502,20 @@ impl CodeBuf {
     }
 
     /// Shift recorded [`IlFunc`] emitting spans after a splice at `threshold`.
+    /// A body that ends at `threshold` does not take in the spliced code:
+    /// the setup region (static initializers, `extern` setup) lands right
+    /// after the last initializer's body, and stack IL from MIR replaces a
+    /// body's ops whole, which would drop it.
     pub fn bump_func_spans(&mut self, threshold: usize, delta: usize) {
         if delta == 0 {
             return;
         }
         for f in &mut self.funcs {
+            if f.code_end > threshold || f.code_start >= threshold {
+                f.code_end += delta;
+            }
             if f.code_start >= threshold {
                 f.code_start += delta;
-            }
-            if f.code_end >= threshold {
-                f.code_end += delta;
             }
         }
     }
