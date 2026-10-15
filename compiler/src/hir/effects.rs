@@ -1212,6 +1212,13 @@ impl Cx<'_> {
         {
             return Summary::default();
         }
+        // `use string::{to_bytes as tb}`: classify the builtin by its export
+        // name, not the local alias (#1075).
+        if self.checker.current_module_name() == self.module_path
+            && let Some(export) = self.checker.scope_binding(name)
+        {
+            return Summary::of(classify_host_name(export.short_name()));
+        }
         Summary::of(classify_host_name(name))
     }
 
