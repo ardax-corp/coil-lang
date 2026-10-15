@@ -2802,9 +2802,6 @@ impl Compiler {
             }
             return Err("callee-unknown");
         }
-        if self.native.contains_key(&key) {
-            return Err("callee-native");
-        }
         if key.starts_with(&format!("{}::", common::BUILTIN_VEC_TYPE)) {
             return self.resolve_hir_vec_ctor(hir, call, &key, argc);
         }
