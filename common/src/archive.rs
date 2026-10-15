@@ -1082,9 +1082,9 @@ mod tests {
     #[test]
     fn archive_version_matches_current_abi() {
         assert_eq!(ARCHIVE_MAJOR, 4);
-        assert_eq!(ARCHIVE_MINOR, 37);
-        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 37));
-        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.37");
+        assert_eq!(ARCHIVE_MINOR, 38);
+        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 38));
+        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.38");
     }
 
     #[test]
