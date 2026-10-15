@@ -66,6 +66,10 @@ test("return from nested loops runs the armed defers") {
     log = "";
     assert!(exit_from_loops(99) == -1);
     assert!(log == "1");
+    assert!(exit_from_loops(0) == 0);
+    assert!(exit_from_loops(5) == 10);
+    assert!(exit_from_loops(24) == 44);
+    assert!(exit_from_loops(25) == -1);
 }
 
 test("break and iterations do not run defers") {

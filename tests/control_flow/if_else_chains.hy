@@ -36,8 +36,12 @@ test("first matching branch wins") {
     assert!(grade(95) == "A");
     assert!(grade(90) == "A");
     assert!(grade(89) == "B");
+    assert!(grade(80) == "B");
+    assert!(grade(79) == "C");
     assert!(grade(70) == "C");
     assert!(grade(65) == "D");
+    assert!(grade(60) == "D");
+    assert!(grade(59) == "F");
     assert!(grade(0) == "F");
 }
 

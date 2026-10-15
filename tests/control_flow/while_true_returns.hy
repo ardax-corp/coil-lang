@@ -43,6 +43,7 @@ fn count_until(int stop) -> int {
 test("return out of while true") {
     assert!(first_square_over(10) == 4);
     assert!(first_square_over(0) == 1);
+    assert!(first_square_over(-1) == 0);
     assert!(collatz_steps(1) == 0);
     assert!(collatz_steps(6) == 8);
     assert!(collatz_steps(27) == 111);
