@@ -1368,15 +1368,15 @@ impl<const S: usize> Machine<S> {
                     *sp_out = sp;
                     return dispatch::RestFlow::Done(self.runtime_panic("resumed after completion", ip.saturating_sub(1)));
                         }
-                        let target = match gc.as_ref().yield_from {
-                            Some(sub) => {
-                                Self::with_coroutine_mut(gc, |c| {
-                                    c.pending_send = send_val;
-                                });
-                                sub
-                            }
-                            None => gc,
-                        };
+                        // A delegating coroutine resumes its innermost
+                        // `yield from` delegate.
+                        let mut target = gc;
+                        while let Some(sub) = target.as_ref().yield_from {
+                            Self::with_coroutine_mut(target, |c| {
+                                c.pending_send = send_val;
+                            });
+                            target = sub;
+                        }
                         if !self.resume_coroutine(&mut ip, &mut sp, target, send_val, code, true) {
                             *ip_out = ip;
                             *sp_out = sp;

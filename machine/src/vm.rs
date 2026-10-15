@@ -2733,11 +2733,55 @@ impl<const S: usize> Machine<S> {
             if ctx.task {
                 // A task's body returned: the scheduler picks what runs next.
                 self.task_finished(ip, sp);
+            } else if let Some(parent) = self.find_delegator(coro_ref) {
+                self.finish_yield_from(parent, coro_ref, ctx.base_sp, ip, sp);
             }
         }
         self.return_bookkeeping = self.nested_depth > 0
             || !self.resume_stack.is_empty()
             || !self.frame_pins.is_empty();
+    }
+
+    /// A `yield from` delegate returned: its delegator continues after the
+    /// `yield from` with the delegate's return value (#961). When the
+    /// delegator itself started the delegate, it is still running under it
+    /// and the return already lands in its frame; when a later `resume` was
+    /// redirected to the delegate, the delegator is resumed here in place of
+    /// returning to the resumer.
+    fn finish_yield_from(
+        &mut self,
+        parent: RefCoroutine,
+        sub: RefCoroutine,
+        sub_base_sp: usize,
+        ip: &mut usize,
+        sp: &mut usize,
+    ) {
+        Self::with_coroutine_mut(parent, |p| p.yield_from = None);
+        Self::with_coroutine_mut(sub, |c| c.delegator = None);
+        if self
+            .resume_stack
+            .last()
+            .is_some_and(|c| c.coro.as_ptr() == parent.as_ptr())
+        {
+            return;
+        }
+        let top = self.stack.tell();
+        let ret: Vec<Value> = if sub_base_sp <= top {
+            self.stack.as_slice()[sub_base_sp..top].to_vec()
+        } else {
+            Vec::new()
+        };
+        self.stack.seek(sub_base_sp.min(top));
+        let send = ret.first().copied().unwrap_or_else(|| Value::from(0_i64));
+        if !self.resume_coroutine(ip, sp, parent, send, &[], false)
+            || !self.reserve_operand_words(ret.len())
+        {
+            // Out of operand stack: the overflow surfaces on the next push.
+            return;
+        }
+        for v in ret {
+            self.stack.push(v);
+        }
     }
 
     fn resume_coroutine(
@@ -2814,39 +2858,38 @@ impl<const S: usize> Machine<S> {
 
         self.save_coroutine_state(sub_gc, *ip, *sp, sub_base_sp, sub_frame_depth);
 
-        let parent_entry_idx = self
-            .resume_stack
-            .iter()
-            .position(|c| c.coro.as_ptr() == parent.as_ptr())
-            .unwrap_or(self.resume_stack.len().saturating_sub(1));
-        let parent_ctx = &self.resume_stack[parent_entry_idx];
-        let parent_base_sp = parent_ctx.base_sp;
-        let parent_frame_depth = parent_ctx.frame_depth;
+        // The value goes to whoever resumed the delegation chain: the
+        // lowest `resume_stack` entry among the delegate and its delegators
+        // (a delegator still running under the delegate it started, else
+        // the delegate a redirected `resume` ran). Each delegator's state
+        // was saved when it started its `yield from` and is unchanged.
+        let mut chain_idx = self.resume_stack.len().saturating_sub(1);
+        let mut link = Some(parent);
+        while let Some(coro) = link {
+            if let Some(idx) = self
+                .resume_stack
+                .iter()
+                .position(|c| c.coro.as_ptr() == coro.as_ptr())
+            {
+                chain_idx = chain_idx.min(idx);
+            }
+            link = self.find_delegator(coro);
+        }
+        let chain_ctx = self.resume_stack[chain_idx];
 
-        self.save_coroutine_state(
-            parent,
-            parent.as_ref().yield_from_resume_ip,
-            self.stack.tell(),
-            parent_base_sp,
-            parent_frame_depth,
-        );
-
-        self.stack.seek(parent_base_sp);
-        while self.frames.len() > parent_frame_depth {
+        self.stack.seek(chain_ctx.base_sp);
+        while self.frames.len() > chain_ctx.frame_depth {
             self.pop_pin_map_for_current_frame();
             self.frames.pop();
         }
-        if self.resume_stack.len() > parent_entry_idx + 1 {
-            self.resume_stack.truncate(parent_entry_idx + 1);
-        }
+        // Mirror `yield_coroutine`: no coroutine of the chain stays active
+        // while the resumer runs.
+        self.resume_stack.truncate(chain_idx);
 
         self.stack.push(yield_val);
         let caller = self.frames.get_mut();
         *ip = caller.tell();
         *sp = caller.get();
-        // Mirror `yield_coroutine`: delegating coroutine is not active while
-        // main runs between resumes.
-        self.resume_stack.pop();
     }
 
     fn yield_coroutine(&mut self, ip: &mut usize, sp: &mut usize, yield_val: Value) {
