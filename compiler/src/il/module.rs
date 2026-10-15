@@ -606,7 +606,7 @@ impl IlModule {
         if opts.collect_stats {
             let (dense, fuse) = if opts.mir_specialize {
                 // A pinned body LIR took counts in `lir_kept`, not `pinned`.
-                (dense_kept, pending.len() - lir_kept + pinned)
+                (dense_kept, pending.len() + pinned - lir_kept)
             } else {
                 (0, self.funcs.len())
             };
