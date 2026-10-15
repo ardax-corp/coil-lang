@@ -494,6 +494,53 @@ mod tests {
         assert_eq!(buf.len(), 2); // CONST; RETURN
     }
 
+    /// A body whose code is emitted from its direct MIR keeps the
+    /// functions that MIR calls, though its stack IL names none.
+    #[test]
+    fn keeps_callee_of_main_mir() {
+        let mut buf = CodeBuf::new();
+        let mut functions = HashMap::new();
+        let mut labels = HashMap::new();
+
+        let foo_pc = buf.len();
+        let foo_l = buf.bind_fresh_entry();
+        functions.insert("foo".into(), foo_pc);
+        labels.insert("foo".into(), foo_l);
+        buf.push_const(7);
+        buf.push_return();
+        let end = buf.len();
+        buf.record_func_with_sp("foo", Some(foo_l), foo_pc, end, 0);
+
+        let main_pc = buf.len();
+        let main_l = buf.bind_fresh_entry();
+        functions.insert("main".into(), main_pc);
+        labels.insert("main".into(), main_l);
+        buf.push_const(0);
+        buf.push_return();
+        let end = buf.len();
+        buf.record_func_with_sp("main", Some(main_l), main_pc, end, 0);
+        let text = format!("func @main() -> i64 {{\nbb0:\n    v0 = call.i64 {}\n    return v0\n}}", foo_l.0);
+        buf.set_last_func_hir_mir(crate::mir::parse_func(&text).unwrap());
+
+        let mut locals = HashMap::new();
+        let mut tests = Vec::new();
+        let roots = vec!["main".into()];
+        let (dropped, _) = prune_unused_functions(
+            &mut buf,
+            TreeshakeInput {
+                functions: &mut functions,
+                fn_entry_labels: &mut labels,
+                fn_debug_locals: &mut locals,
+                test_cases: &mut tests,
+                root_names: &roots,
+                include_tests: false,
+                preserve_emit_start: None,
+            },
+        );
+        assert_eq!(dropped, 0);
+        assert!(functions.contains_key("foo"));
+    }
+
     #[test]
     fn keeps_callee_of_main() {
         let mut buf = CodeBuf::new();
