@@ -221,7 +221,8 @@ pub(in crate::codegen) struct HirLambdaTail {
     body: HirBody,
     emit: HirEmit,
     label: IlLabel,
-    /// Parameters to `UnboxValue` on entry ([`HirPlan::lambda_unbox`]).
+    /// Parameters to `UnboxValue` on entry: a lambda literal passed where
+    /// a generic callee boxes its arguments (#699).
     unbox: Option<Vec<Option<Ty>>>,
 }
 
@@ -266,9 +267,6 @@ struct HirPlan {
     polyfns: HashMap<u32, String>,
     /// Each anonymous `fn`, by node: its body and that body's plan.
     lambdas: HashMap<u32, Box<HirLambda>>,
-    /// Lambda literals passed where a generic callee boxes their arguments:
-    /// which parameters to `UnboxValue` on entry (#699).
-    lambda_unbox: HashMap<u32, Vec<Option<Ty>>>,
     /// Each `static let` read or write, by node: its static slot.
     statics: HashMap<u32, u32>,
     /// `len(x)` calls: the constant length of a fixed-size type, or `None`
@@ -792,10 +790,11 @@ impl Compiler {
                 // parameters unboxed as the prologue above unboxes them.
                 let shared = self.hir_shared_generic();
                 self.hir_mir = if !shared {
-                    self.hir_lower_mir(hir, &emit, None)
+                    self.hir_lower_mir(hir, &mut emit, None)
                 } else if let Some(entry) = entry_sp {
-                    self.hir_lower_mir(hir, &emit, Some(entry))
+                    self.hir_lower_mir(hir, &mut emit, Some(entry))
                 } else {
+                    self.queue_hir_lambdas(hir, &mut emit);
                     self.hir_mir_why = Some("converted or shared generic entry".into());
                     None
                 };
@@ -867,7 +866,7 @@ impl Compiler {
                     op.set_loc(DebugLoc::unknown());
                 }
                 self.hir_mir_why = None;
-                self.hir_mir = self.hir_lower_mir(hir, &emit, None);
+                self.hir_mir = self.hir_lower_mir(hir, &mut emit, None);
                 self.expr_depth = 0;
                 true
             }
@@ -896,7 +895,9 @@ impl Compiler {
 
     /// `hir` lowered straight to MIR, when this phase covers it: plain
     /// scalar locals only (no pair, SROA or stack-array locals, no lambdas).
-    fn hir_lower_mir(&mut self, hir: &HirBody, emit: &HirEmit, entry_words: Option<u32>) -> Option<crate::mir::MirFunc> {
+    fn hir_lower_mir(&mut self, hir: &HirBody, emit: &mut HirEmit, entry_words: Option<u32>) -> Option<crate::mir::MirFunc> {
+        self.queue_hir_lambdas(hir, emit);
+        let emit = &*emit;
         self.hir_mir_dict_sp = entry_words;
         let tables = self.hir_mir_tables(hir, emit);
         self.hir_mir_dict_sp = None;
@@ -931,6 +932,41 @@ impl Compiler {
                 crate::il::opt::note_hir_mir(Some(&why));
                 self.hir_mir_why = Some(why);
                 None
+            }
+        }
+    }
+
+    /// Queue each lambda planned in `hir` to be emitted as a function of
+    /// its own after the body ([`Self::flush_hir_lambdas`]), each with the
+    /// parameters it unboxes on entry when it is passed where a generic
+    /// callee boxes its arguments (#699).
+    fn queue_hir_lambdas(&mut self, hir: &HirBody, emit: &mut HirEmit) {
+        let mut unbox: HashMap<u32, Vec<Option<Ty>>> = HashMap::new();
+        for (&id, call) in &emit.plan.calls {
+            let (Some(g), Some(e)) = (&call.generic, hir.exprs.get(id as usize)) else {
+                continue;
+            };
+            let HirKind::Call { args, .. } = &e.kind else {
+                continue;
+            };
+            if call.method {
+                continue;
+            }
+            for (&arg, adapt) in args.iter().zip(&g.adapt) {
+                if let Some(adapt) = adapt
+                    && matches!(hir.expr(arg).kind, HirKind::Lambda { .. })
+                {
+                    unbox.insert(arg.0, adapt.clone());
+                }
+            }
+        }
+        let mut ids: Vec<u32> = emit.plan.lambdas.keys().copied().collect();
+        ids.sort_unstable();
+        for id in ids {
+            let lam = emit.plan.lambdas.get_mut(&id).expect("planned lambda");
+            if let Some(code) = lam.emit.take() {
+                let tail = HirLambdaTail { body: lam.body.clone(), emit: code, label: lam.label, unbox: unbox.remove(&id) };
+                self.hir_lambda_tail.push(tail);
             }
         }
     }
@@ -2391,7 +2427,6 @@ impl Compiler {
                 fn_refs: HashMap::new(),
                 polyfns: HashMap::new(),
                 lambdas: HashMap::new(),
-                lambda_unbox: HashMap::new(),
                 statics: HashMap::new(),
                 lens: HashMap::new(),
                 ops: HashMap::new(),
@@ -6950,13 +6985,8 @@ impl Compiler {
             }
             HirKind::Lambda { .. } => {
                 // The captures, `CodePtr` and `MakeFn`, as `do_compile`'s
-                // `Lambda`; the body is a function of its own, emitted
-                // after this one ([`Self::flush_hir_lambdas`]).
-                let lam = emit.plan.lambdas.get_mut(&id.0).expect("planned lambda");
-                if let Some(code) = lam.emit.take() {
-                    let unbox = emit.plan.lambda_unbox.remove(&id.0);
-                    self.hir_lambda_tail.push(HirLambdaTail { body: lam.body.clone(), emit: code, label: lam.label, unbox });
-                }
+                // `Lambda`; the body is a function of its own, queued with
+                // this body's MIR ([`Self::queue_hir_lambdas`]).
                 let lam = &emit.plan.lambdas[&id.0];
                 let (label, arity, captures) = (lam.label, lam.body.params.len() as u32, lam.body.captures.len() as u32);
                 for &(outer, _) in &lam.body.captures {
@@ -7984,15 +8014,6 @@ impl Compiler {
                 let call = &emit.plan.calls[&id.0];
                 let generic = call.generic.clone();
                 let words = Self::hir_arg_words(call, args.len());
-                if let Some(g) = &generic {
-                    for (&arg, unbox) in args.iter().zip(&g.adapt) {
-                        if let Some(unbox) = unbox
-                            && matches!(hir.expr(arg).kind, HirKind::Lambda { .. })
-                        {
-                            emit.plan.lambda_unbox.insert(arg.0, unbox.clone());
-                        }
-                    }
-                }
                 if self.hir_stages_args(hir, emit, args, depth) {
                     // Each argument (one or two words) to temps, then
                     // reloaded in order, as the AST's `emit_call_args_stage_all`.
@@ -10199,7 +10220,7 @@ impl Compiler {
             *ty = apply_ty_prune(subst, ty);
         }
         self.hir_mir_why = None;
-        self.hir_mir = self.hir_lower_mir(&flat, &emit, None);
+        self.hir_mir = self.hir_lower_mir(&flat, &mut emit, None);
         let arity = (ncap + body.params.len()) as u32;
         self.fn_arities.insert(name.clone(), (arity, false));
         self.bytecode.record_func_with_sp(name.clone(), Some(label), start, self.bytecode.len(), arity);
@@ -10609,7 +10630,7 @@ impl Compiler {
         self.hir_effect(w, &mut emit, root);
         self.hir_cold = std::mem::take(&mut emit.cold);
         self.flush_hir_cold();
-        self.hir_mir = self.hir_lower_mir(w, &emit, None);
+        self.hir_mir = self.hir_lower_mir(w, &mut emit, None);
         self.bytecode.record_func_with_sp(name.clone(), Some(label), entry, self.bytecode.len(), arity);
         self.attach_hir_mir();
         self.record_unboxed_class_fields();
