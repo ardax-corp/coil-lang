@@ -696,13 +696,9 @@ impl Walk<'_> {
                 kind: MakeKind::Array | MakeKind::Tuple | MakeKind::Record(_),
                 ..
             } => Ok(()),
-            HirKind::Call { .. }
-            | HirKind::Field { .. }
-            | HirKind::Index { .. }
-            | HirKind::Global { .. }
-            | HirKind::Builtin { op: Builtin::Unbox { .. }, .. }
-                if structural =>
-            {
+            // Any other operand (a call, a `?`, a `const` local, a string
+            // concatenation, …) is evaluated, then measured (#1071, #1147).
+            _ if structural => {
                 self.word(arg)?;
                 self.value(arg, depth)
             }
