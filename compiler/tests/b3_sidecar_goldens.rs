@@ -71,12 +71,15 @@ const CORPUS: &[&str] = &[
 /// Stack IL from MIR by default (M5p) lengthens all five, partly because
 /// a host call's result goes through a frame slot (`Seek`, `STORE`,
 /// `LoadReturnSlot`) where emit_hir's stack IL left it on the stack.
+/// Emitting bodies from their direct MIR only (#1220) retargets all five
+/// (same opcodes and lengths): emit_hir's stack IL no longer interns
+/// constants and strings first, so their pool indices move.
 const EXPECTED: &[(&str, &str)] = &[
-    ("types/arithmetic.hy", "37175bede7c0ac38_1157"),
-    ("functions/functions.hy", "c317db75449f1b1b_282"),
-    ("control_flow/loops.hy", "397c9331610fd9cc_317"),
-    ("errors/option_pair.hy", "cf3c8119f4a06339_448"),
-    ("traits/user_trait_dispatch.hy", "84a6ac4b793467a4_158"),
+    ("types/arithmetic.hy", "19e477db60bb812c_1157"),
+    ("functions/functions.hy", "f8d6ab076b208b38_282"),
+    ("control_flow/loops.hy", "e160f5a6ef9a2563_317"),
+    ("errors/option_pair.hy", "9749bea44aea9bfc_448"),
+    ("traits/user_trait_dispatch.hy", "f2916046fe414175_158"),
 ];
 
 fn fingerprint(bc: &[Byte]) -> String {
