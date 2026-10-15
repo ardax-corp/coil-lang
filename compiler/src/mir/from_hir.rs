@@ -6048,7 +6048,12 @@ impl Lower<'_> {
             } else {
                 None
             };
-            self.bind_payload(&arm.pat, payload)?;
+            match arm.pat {
+                // `rest => …` binds the whole value (#1161): the pair as
+                // two words, or boxed to one.
+                HirPat::Bind(local) if i == last => self.bind_whole_pair(scrutinee, local, payload, tag)?,
+                _ => self.bind_payload(&arm.pat, payload)?,
+            }
             let val = self.arm_value(arm.body, tail)?;
             if !matches!(val, Val::Never) {
                 out.push((self.cur, val));
@@ -6676,6 +6681,25 @@ impl Lower<'_> {
     }
 
     /// Bind a match arm's payload names to the payload word.
+    /// A binding arm's local as the whole `[payload, tag]` scrutinee.
+    fn bind_whole_pair(&mut self, scrutinee: HirId, local: HirLocal, payload: ValueId, tag: ValueId) -> Result<(), Refusal> {
+        if self.unit_local(local) {
+            return Ok(());
+        }
+        if let Some((lo, hi, lo_ty, hi_ty)) = self.pair_local(local) {
+            if self.b.value_ty(payload) != lo_ty || self.b.value_ty(tag) != hi_ty {
+                return Err("binding pair type".into());
+            }
+            self.b.def_local(lo, payload).map_err(mir)?;
+            return self.b.def_local(hi, tag).map_err(mir);
+        }
+        let ty = self.expr_ty(scrutinee).ok_or("match scrutinee")?.clone();
+        let Val::V(obj) = self.box_pair(&ty, payload, tag)? else {
+            return Err("binding pair".into());
+        };
+        self.bind(local, obj)
+    }
+
     fn bind_payload(&mut self, pat: &HirPat, payload: ValueId) -> Result<(), Refusal> {
         let HirPat::Variant { fields, .. } = pat else {
             return match pat {
