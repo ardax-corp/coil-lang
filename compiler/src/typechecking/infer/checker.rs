@@ -3536,6 +3536,7 @@ impl Checker {
         // `int`, the other bitwise operators take two operands of one type.
         if matches!(op, parser::ast::AssignOp::Shl | parser::ast::AssignOp::Shr) {
             self.unify(&int(), &val_ty, &range, &format!("shift count of `{op_name}=`"));
+            self.check_shift_count(value, &range);
             match apply_ty_prune(&self.subst, &target_ty) {
                 Ty::Var(v) => self.bind_arith_operator(v, op_name, id, &range),
                 ground => self.check_ground_arith_operands(&ground, op_name, &range),
@@ -6367,6 +6368,7 @@ impl Checker {
         op: &str,
     ) -> Ty {
         self.unify(&int(), &rt, &range, &format!("shift count of `{op}`"));
+        self.check_shift_count(rhs, &range);
         match apply_ty_prune(&self.subst, &lt) {
             Ty::Var(v) => self.bind_arith_operator(v, op, id, &range),
             ground => {
@@ -6381,6 +6383,26 @@ impl Checker {
             }
         }
         lt
+    }
+
+    /// E0131 for a shift count known at compile time outside `0..=63`: at
+    /// run time it would trap with `shift count out of range` (#1076).
+    fn check_shift_count(&mut self, count: &Output, range: &Range<usize>) {
+        let peeled = Self::peel_literal_expr(count);
+        let n = match peeled.1.as_ref() {
+            Expression::Negate(inner) => Self::const_int(inner).and_then(i64::checked_neg),
+            _ => Self::const_int(count),
+        };
+        let Some(n) = n.filter(|n| !(0..64).contains(n)) else {
+            return;
+        };
+        let mut msg = Message::error(
+            ErrorCode::ShiftCountOutOfRange,
+            format!("shift count {n} is out of range"),
+            range.clone(),
+        );
+        msg.with_help("a shift count must be in 0..=63".to_string());
+        self.messages.push(msg);
     }
 
     /// `byte` `+ - * ** <<` and negation keep the low 8 bits of the result
@@ -16540,27 +16562,17 @@ impl Checker {
                 return;
             }
             let expected_ty = match spec {
-                'i' | 'd' | 'b' | 'x' | 'u' | 'p' => int(),
+                'i' | 'b' | 'x' | 'u' | 'p' => int(),
                 'f' => float(),
                 's' => string(),
                 'z' => boolean(),
                 _ => {
-                    let mut msg = Message::error(
-                        ErrorCode::FormatSpecifierMismatch,
-                        format!("Unknown format specifier `%{}`", spec),
-                        arg_range.clone(),
-                    );
-                    msg.with_help(format!(
-                        "while checking `{}` format argument #{}",
-                        ctx,
-                        spec_index + 1
-                    ));
-                    self.messages.push(msg);
+                    self.push_unknown_format_specifier(spec, ctx, spec_index, arg_range);
                     return;
                 }
             };
             // `byte` is printable with integer format specs (same runtime word).
-            if matches!(spec, 'i' | 'd' | 'b' | 'x' | 'u' | 'p') && Self::is_byte_ty(arg_ty) {
+            if matches!(spec, 'i' | 'b' | 'x' | 'u' | 'p') && Self::is_byte_ty(arg_ty) {
                 return;
             }
             if self
@@ -16579,8 +16591,12 @@ impl Checker {
         }
 
         let expected = format_specifier_type(spec);
+        if !matches!(spec, 'i' | 'b' | 'x' | 'u' | 'p' | 'f' | 's' | 'z' | 'v') {
+            self.push_unknown_format_specifier(spec, ctx, spec_index, arg_range);
+            return;
+        }
         let backing_expected = match spec {
-            'i' | 'd' | 'b' | 'x' | 'u' | 'p' => Some(int()),
+            'i' | 'b' | 'x' | 'u' | 'p' => Some(int()),
             'f' => Some(float()),
             's' => Some(string()),
             'z' => Some(boolean()),
@@ -16609,6 +16625,30 @@ impl Checker {
             ));
             self.messages.push(msg);
         }
+    }
+
+    /// E0300 for a `%` letter the runtime formatter does not implement
+    /// (`%d` is the usual slip, so it names `%i`).
+    fn push_unknown_format_specifier(
+        &mut self,
+        spec: char,
+        ctx: &str,
+        spec_index: usize,
+        arg_range: &Range<usize>,
+    ) {
+        let mut msg = Message::error(
+            ErrorCode::FormatSpecifierMismatch,
+            format!("Unknown format specifier `%{}`", spec),
+            arg_range.clone(),
+        );
+        let hint = if spec == 'd' { "integers use `%i`; " } else { "" };
+        msg.with_help(format!(
+            "{}while checking `{}` format argument #{}",
+            hint,
+            ctx,
+            spec_index + 1
+        ));
+        self.messages.push(msg);
     }
 
     fn is_showable_for_format(&self, ty: &Ty) -> bool {

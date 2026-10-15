@@ -56,8 +56,7 @@ enum Val {
     Pair(ValueId, ValueId),
 }
 
-/// How a `%v` argument of a planned `format` call becomes its text, as
-/// `emit_show_for_stack_value` emits it.
+/// How a `%v` argument of a planned `format` call becomes its text.
 #[derive(Clone, Debug)]
 pub enum HirShow {
     /// A plain one-word `CALL` of the value's `show` entry: on the value
@@ -192,8 +191,8 @@ pub struct HirOpCall {
     pub shift: bool,
 }
 
-/// An auto-par call site HIR emission sent to the callee's fork-join
-/// worker (`hir_par_call`): the worker called on the arguments and the
+/// An auto-par call site planning sent to the callee's fork-join
+/// worker: the worker called on the arguments and the
 /// `hops` budget; with `seq`, a one-argument site whose argument is below
 /// the cutoff calls the sequential function instead.
 #[derive(Clone, Debug)]
@@ -204,8 +203,8 @@ pub struct HirParFork {
     pub seq: Option<(Label, i64)>,
 }
 
-/// A parallel loop HIR emission moved into its own fork-join function
-/// (`hir_par_loop`): the loop is a plain `CALL` of it, which takes the
+/// A parallel loop planning moved into its own fork-join function:
+/// the loop is a plain `CALL` of it, which takes the
 /// accumulator, the live captures and the runtime bounds and returns the
 /// new accumulator.
 #[derive(Clone, Debug)]
@@ -471,8 +470,8 @@ pub struct HirMirInput<'a> {
     /// A variant's payload field names in declaration order, by enum and
     /// variant name (a record pattern's fields in word order).
     pub payload_names: PayloadNamesFn<'a>,
-    /// Nested matches dispatch on their outer tag first, as HIR emission's
-    /// `hir_match_grouped` (`COIL_HIR_MATCH_TREE`).
+    /// Nested matches dispatch on their outer tag first
+    /// (`COIL_HIR_MATCH_TREE`).
     pub match_tree: bool,
     /// Like `boxed_enum` for any enum, `Option` or `Result` type: the view
     /// of a value of it boxed to one word (a pair kept in one local).
@@ -550,8 +549,7 @@ pub struct HirMirInput<'a> {
     /// `for x in xs` loops whose array the checker pinned: their reads
     /// need no bounds check.
     pub pinned_for: HashSet<u32>,
-    /// Whether early exits move out of line, as HIR emission's
-    /// `hir_mark_cold`.
+    /// Whether early exits move out of line.
     pub cold_ok: bool,
     /// Source file of the body, for statement locations.
     pub file: Option<u32>,
@@ -1516,8 +1514,7 @@ impl Lower<'_> {
         self.b.jump(to).map_err(mir)
     }
 
-    /// `RETURN` of `v`, after the `defer`s lowered so far, last first, as
-    /// HIR emission's `emit_run_defers` before each `return`.
+    /// `RETURN` of `v`, after the `defer`s lowered so far, last first.
     fn ret_word(&mut self, v: ValueId) -> Result<(), Refusal> {
         self.run_defers()?;
         self.keep_pins()?;
@@ -1888,8 +1885,8 @@ impl Lower<'_> {
     /// `id`'s word, a two-word value boxed to one, as HIR emission's
     /// conversion of a pair to a boxed local or return.
     fn boxed_word(&mut self, id: HirId) -> Result<Option<ValueId>, Refusal> {
-        // A two-word variant made boxed: one `MakeEnum`, as HIR emission's
-        // `hir_make`, not the pair then its box.
+        // A two-word variant made boxed: one `MakeEnum`, not the pair then
+        // its box.
         if let HirKind::Make { kind: MakeKind::Variant { enum_name, variant, tag: Some(tag), .. }, args } = &self.hir.expr(id).kind
             && self.inp.pair_tys.contains_key(&id.0)
             && let Some(tys) = self.expr_ty(id).and_then(|t| (self.inp.boxed_view)(t, Some(variant)))
@@ -1935,8 +1932,7 @@ impl Lower<'_> {
         }
     }
 
-    /// A boxed word of two-word type `ty` as its pair, as HIR emission's
-    /// `emit_unbox_product_to_pair` / `emit_unbox_enum_to_pair`.
+    /// A boxed word of two-word type `ty` as its pair.
     fn unbox_word(&mut self, ty: &Ty, v: ValueId, lo_ty: MirTy, hi_ty: MirTy) -> Result<Val, Refusal> {
         if let Ty::Tuple(items) = strip_readonly(ty) {
             if items.len() != 2 {
@@ -1962,7 +1958,7 @@ impl Lower<'_> {
         self.unbox_pair(v, lo_ty, &variants)
     }
 
-    /// An element-wise operator, as HIR emission's `hir_aggregate`: a
+    /// An element-wise operator: a
     /// static shape item by item (literal array items read in place, as
     /// they are reached), a dynamic array in a loop pushing each result.
     fn aggregate(&mut self, id: HirId, info: &crate::typechecking::AggregateArithInfo, lhs: HirId, rhs: Option<HirId>) -> Result<Val, Refusal> {
@@ -2921,7 +2917,7 @@ impl Lower<'_> {
                 Ok(Val::Unit)
             }
             // `let { a, b } = r` of a record: each bound field read by its
-            // key, as `hir_let_pat_binds`' `GetField`.
+            // key (`GetField`).
             HirKind::LetPat { pat: HirPat::Record(parts), init } if let Some(words) = self.inp.record_pats.get(&id.0) => {
                 let Some(obj) = self.word(*init)? else {
                     return Ok(Val::Never);
@@ -3468,7 +3464,7 @@ impl Lower<'_> {
                 if self.expr_ty(id).and_then(scalar) != Some(lt) {
                     return Err("operator type".into());
                 }
-                if op.int_may_trap() {
+                if op.int_may_trap() || matches!(op, BinOp::Shl | BinOp::Shr) {
                     self.at_expr(id, |l2| Ok(l2.b.ins_binop(arith, l, r)))?
                 } else {
                     self.b.ins_binop(arith, l, r)
@@ -3489,7 +3485,7 @@ impl Lower<'_> {
         Ok(Val::V(out.map_err(mir)?))
     }
 
-    /// As HIR emission's `hir_strength_reduce`: `x / 2^n` as `x >> n` when
+    /// Strength reduction: `x / 2^n` as `x >> n` when
     /// `x` is a `byte` or proved non-negative, and `x * 2^n` as `x << n`
     /// when `x` is a `byte`. An int multiply stays: a shift would not trap
     /// on overflow.
@@ -3507,7 +3503,7 @@ impl Lower<'_> {
         }
     }
 
-    /// As HIR emission's `hir_bitop_identity`: a bitwise identity or
+    /// A bitwise identity or
     /// annihilator lowers to its operand or a constant. Only a local or
     /// literal operand is dropped, so an effect still runs.
     fn bitop_identity(&mut self, id: HirId, op: BinOp, lhs: HirId, rhs: HirId) -> Option<Result<Val, Refusal>> {
@@ -3551,8 +3547,8 @@ impl Lower<'_> {
         })
     }
 
-    /// An integer literal, or a `const` local bound to one (HIR emission's
-    /// `hir_int_imm`; `const` globals do not reach direct MIR).
+    /// An integer literal, or a `const` local bound to one (`const`
+    /// globals do not reach direct MIR).
     fn int_imm(&self, id: HirId) -> Option<i64> {
         match &self.hir.expr(id).kind {
             HirKind::Lit(Lit::Int(k)) => Some(*k),
@@ -3614,7 +3610,7 @@ impl Lower<'_> {
     }
 
     /// Box the stack arrays that escape first in statement (or block tail)
-    /// `id` into one heap array each, as HIR emission's `hir_box_before`:
+    /// `id` into one heap array each:
     /// every use after it in source order goes through the array.
     fn box_before(&mut self, id: HirId) -> Result<(), Refusal> {
         let Some(locals) = self.inp.box_at.get(&id.0) else {
@@ -3622,7 +3618,7 @@ impl Lower<'_> {
         };
         for &local in locals {
             // A frame-slot class local: an object of its class, each slot
-            // stored to its field, as HIR emission's `hir_box_sroa_class`.
+            // stored to its field.
             if let (Some(tys), Some(&(type_id, nfields))) = (self.inp.sroa.get(&local), self.inp.sroa_classes.get(&local)) {
                 if tys.len() != nfields as usize {
                     return Err("boxed class local".into());
@@ -4226,8 +4222,8 @@ impl Lower<'_> {
         Ok(if unit { Val::Unit } else { Val::V(dest) })
     }
 
-    /// `f(args)` through a `PolyFn` local, as HIR emission's
-    /// `hir_polyfn_call` with no dictionary: each argument's word boxed to
+    /// `f(args)` through a `PolyFn` local with no dictionary: each
+    /// argument's word boxed to
     /// its tag, then `f`, `CallIndirect`, and the result unboxed when the
     /// function returns a bare type parameter.
     fn call_poly(&mut self, id: HirId, f: HirId, args: &[HirId], p: &HirPolyCall) -> Result<Val, Refusal> {
@@ -4406,8 +4402,7 @@ impl Lower<'_> {
     }
 
     /// `block_on(h)`: `h` resumed until it is done, running `wait` (the
-    /// `wait_ready` native) between resumes, then its last resumed word,
-    /// as HIR emission's `hir_block_on`.
+    /// `wait_ready` native) between resumes, then its last resumed word.
     fn block_on(&mut self, id: HirId, handle: HirId, wait: Option<u16>) -> Result<Val, Refusal> {
         let ty = self.expr_ty(id).ok_or("block_on type")?.clone();
         let unit = is_unit(&ty);
@@ -4442,8 +4437,8 @@ impl Lower<'_> {
         }
     }
 
-    /// `yield v` / `yield from h`: one instruction, as HIR emission's
-    /// `hir_yield` (the VM saves the frame and resumes after it). The word
+    /// `yield v` / `yield from h`: one instruction (the VM saves the frame
+    /// and resumes after it). The word
     /// moves boxed. A receiving yield's value is the word the next
     /// `resume .. with` sends.
     fn yield_(&mut self, id: HirId, value: HirId, from: bool, receive: bool) -> Result<Val, Refusal> {
@@ -4505,7 +4500,7 @@ impl Lower<'_> {
 
     /// Fill the slots of stack array or class local `local` from `init`:
     /// each item or field into its own slot, or another stack array's slots
-    /// copied, as HIR emission's `hir_stack_array_init`.
+    /// copied.
     fn fill_slots(&mut self, local: HirLocal, init: HirId) -> Result<Val, Refusal> {
         if self.boxes.contains_key(&local.0) {
             return Err("refill boxed stack array".into());
@@ -4597,7 +4592,7 @@ impl Lower<'_> {
 
     /// A heap local's new word from `value`: [`Self::boxed_word`], or a
     /// fixed array read from another local copied (`vec_from_array`), as
-    /// HIR emission's `hir_value_copied`: the two never share elements.
+    /// the two never share elements.
     fn boxed_word_copied(&mut self, value: HirId) -> Result<Option<ValueId>, Refusal> {
         let Some(&native) = self.inp.array_copies.get(&value.0) else {
             return self.boxed_word(value);
@@ -4901,8 +4896,7 @@ impl Lower<'_> {
     }
 
     /// A boxed user enum variant: `MakeEnum` of the payload words, pushed
-    /// last field first (it pops field 0 first), as HIR emission's
-    /// `hir_make`.
+    /// last field first (it pops field 0 first).
     fn make_boxed(&mut self, enum_name: &str, tag: u32, tys: &[Ty], args: &[HirId]) -> Result<Val, Refusal> {
         // A unit variant is a shared immortal: only payload variants drop.
         let drop_type = if args.is_empty() { None } else { (self.inp.enum_drop)(enum_name) };
@@ -5034,8 +5028,7 @@ impl Lower<'_> {
         Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)?))
     }
 
-    /// The text of `v` for a `%v` argument of `format` call `id`, as
-    /// `emit_show_for_stack_value`: a raw `show` call, `STRINGIFY`, or a
+    /// The text of `v` for a `%v` argument of `format` call `id`: a raw `show` call, `STRINGIFY`, or a
     /// tuple's or record's items shown and formatted.
     fn show(&mut self, id: HirId, v: ValueId, show: &HirShow) -> Result<ValueId, Refusal> {
         let (fmt, items) = match show {
@@ -5093,7 +5086,7 @@ impl Lower<'_> {
     }
 
     /// A matrix / vector operator or `dot` / `matmul` on its packed
-    /// kernel, as HIR emission's `hir_linear_algebra_op`: each operand's
+    /// kernel: each operand's
     /// word, then the meta word, then `HostInvoke`. The result is the
     /// expression's word: a new matrix or vector array, or `dot`'s scalar.
     fn linalg(&mut self, id: HirId, (native, meta): (u16, u32), args: &[HirId]) -> Result<Val, Refusal> {
@@ -5117,8 +5110,7 @@ impl Lower<'_> {
         Ok(Val::V(out))
     }
 
-    /// `cross(a, b)` of two 3-vectors, unrolled as HIR emission's
-    /// `emit_linear_algebra_unrolled`: each component read, then
+    /// `cross(a, b)` of two 3-vectors, unrolled: each component read, then
     /// `(ay*bz - az*by, az*bx - ax*bz, ax*by - ay*bx)` as a tuple or array.
     fn cross(&mut self, id: HirId, tuple: bool, float: bool, args: &[HirId]) -> Result<Val, Refusal> {
         let [a, b] = *args else {
@@ -5166,8 +5158,8 @@ impl Lower<'_> {
         Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?))
     }
 
-    /// A linear-algebra op past the packed kernel's limits, unrolled as
-    /// HIR emission's `emit_linear_algebra_unrolled`: `dot`'s products
+    /// A linear-algebra op past the packed kernel's limits, unrolled:
+    /// `dot`'s products
     /// summed in order, and each cell of a matrix product, element-wise
     /// operator or negation; a matrix's rows and the matrix are made as
     /// tuples or arrays with no word kinds, as `MakeTuple` / `MakeArray`
@@ -5285,8 +5277,7 @@ impl Lower<'_> {
         self.b.ins_binop(MirBinOp::BitAnd, v, mask).map_err(mir)
     }
 
-    /// One cell of an element-wise matrix operator, as HIR emission's
-    /// `emit_matrix_cell_op`.
+    /// One cell of an element-wise matrix operator.
     fn matrix_cell(&mut self, id: HirId, op: crate::typechecking::MatrixCellOp, float: bool, byte: bool, a: ValueId, b: ValueId) -> Result<ValueId, Refusal> {
         use crate::typechecking::MatrixCellOp as C;
         // Emission tests a float cell equal as `a <= b && a >= b`: IEEE
@@ -5467,8 +5458,8 @@ impl Lower<'_> {
         self.inp.ffis.get(&id.0).is_some_and(|s| !s.unwrap && s.niche.is_none())
     }
 
-    /// A boxed enum word to `[payload, tag]`, as HIR emission's
-    /// `emit_unbox_enum_to_pair`: a `JumpIfMatch` per variant but the last,
+    /// A boxed enum word to `[payload, tag]`: a `JumpIfMatch` per variant
+    /// but the last,
     /// which the fallthrough unpacks.
     fn unbox_pair(&mut self, obj: ValueId, lo_ty: MirTy, variants: &[(u32, u32)]) -> Result<Val, Refusal> {
         let Some((&(last_tag, last_arity), rest)) = variants.split_last() else {
@@ -5940,7 +5931,7 @@ impl Lower<'_> {
     }
 
     /// `match` on a `[payload, tag]` pair: each arm but the last tests the
-    /// tag, as HIR emission's `hir_match_pair`.
+    /// tag.
     fn match_(&mut self, scrutinee: HirId, arms: &[HirArm], tail: bool) -> Result<Val, Refusal> {
         // Arms up to the first catch-all; later ones never run.
         let reach = arms
@@ -6107,8 +6098,8 @@ impl Lower<'_> {
         self.join_arms(out)
     }
 
-    /// A `match` whose patterns test inside a payload, as HIR emission's
-    /// `hir_match_seq`: the scrutinee boxed, then each arm's tests in turn,
+    /// A `match` whose patterns test inside a payload: the scrutinee boxed,
+    /// then each arm's tests in turn,
     /// a miss falling to the next arm. The last arm tests nothing: the
     /// checker proved the match exhaustive.
     fn match_nested(&mut self, scrutinee: HirId, arms: &[HirArm], tail: bool) -> Result<Val, Refusal> {
@@ -6144,8 +6135,8 @@ impl Lower<'_> {
         self.join_arms(out)
     }
 
-    /// A nested match as a decision tree on its outer tag, as HIR
-    /// emission's `hir_match_grouped`: one `JumpIfMatch` per variant, then
+    /// A nested match as a decision tree on its outer tag: one
+    /// `JumpIfMatch` per variant, then
     /// that variant's rows test only their sub-patterns. A group whose rows
     /// all miss runs the catch-all, emitted once.
     fn match_grouped(&mut self, tree: &crate::hir::match_tree::OuterTree<'_>, obj: ValueId, ty: &Ty, tail: bool) -> Result<Val, Refusal> {
@@ -6328,8 +6319,8 @@ impl Lower<'_> {
         }
     }
 
-    /// `match` on a pointer-niche word, as HIR emission's
-    /// `hir_match_niche`: the payload side falls through and is laid out
+    /// `match` on a pointer-niche word: the payload side falls through and
+    /// is laid out
     /// first; the zero side (or `Err`, its pointer untagged) is the jump.
     fn match_niche(&mut self, scrutinee: HirId, arms: &[HirArm], niche: MirTy, tail: bool) -> Result<Val, Refusal> {
         let (payload_side, other_side) = self.niche_sides(scrutinee, niche);
@@ -6525,8 +6516,7 @@ impl Lower<'_> {
     }
 
     /// `match` of a scalar word on constants: one equality test per arm but
-    /// the last, or a binary search over many `int` literals, as HIR
-    /// emission's `hir_match_scalar` / `hir_match_search`.
+    /// the last, or a binary search over many `int` literals.
     fn match_scalar(&mut self, scrutinee: HirId, arms: &[HirArm], consts: &[Option<ScalarLit>], tail: bool) -> Result<Val, Refusal> {
         let Some(v) = self.word(scrutinee)? else {
             return Ok(Val::Never);
@@ -6618,7 +6608,7 @@ impl Lower<'_> {
         }
     }
 
-    /// Search the sorted `cases` for `v`, as `hir_search_node`: split on the
+    /// Search the sorted `cases` for `v`: split on the
     /// middle literal with `<` (bytecode `LE`), and test a small leaf case by
     /// case.
     fn search_node(&mut self, v: ValueId, cases: &[(i64, usize)], blocks: &[Option<BlockId>], default: BlockId) -> Result<(), Refusal> {

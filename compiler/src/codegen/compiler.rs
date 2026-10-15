@@ -192,92 +192,9 @@ impl Compiler {
             .resize(self.bytecode.len(), DebugLoc::unknown());
     }
 
-    /// Run registered `defer` thunks in LIFO order.
-    ///
-    /// For each armed thunk: disarm it (so a panic inside it does not run it
-    /// again from the cleanup pad), LOAD its `use (…)` captures from the
-    /// enclosing frame, then `CALL` the thunk entry with that arity (push
-    /// return IP + new frame whose slots 0..N-1 are the captures). The thunk
-    /// ends in `RETURN`, which resumes at the next op. A following `POP`
-    /// discards the thunk's sentinel return value so a pending function
-    /// return value stays on top.
-    fn emit_run_defers(&mut self) {
-        let defers = self.fn_defers.thunks.clone();
-        for thunk in defers.iter().rev() {
-            let skip = self.bytecode.fresh_label();
-            if let Some(flag) = thunk.flag {
-                self.bytecode.push_load(flag);
-                self.bytecode.push_op(IlOp::Jump {
-                    kind: IlJumpKind::JumpIfFalse,
-                    target: skip,
-                    loc: DebugLoc::unknown(),
-                    hint: Default::default(),
-                });
-                self.emit_defer_flag(flag, false);
-            }
-            for (k, cap) in thunk.captures.iter().enumerate() {
-                let slot = self.lookup_slot(cap).or(thunk.slots.get(k).copied().flatten());
-                if let Some(slot) = slot {
-                    self.bytecode.push_load(slot);
-                } else {
-                    // Typecheck should have rejected unknown captures; emit a
-                    // zero so the CALL arity still matches.
-                    debug_assert!(
-                        false,
-                        "defer capture `{cap}` missing from enclosing frame at codegen"
-                    );
-                    self.bytecode.push(Byte::new_with_value(
-                        Instruction::CONST,
-                        Value::default().raw() as _,
-                    ));
-                }
-            }
-            self.bytecode
-                .emit_entry(EntryKind::Call, thunk.captures.len() as u32, thunk.label);
-            self.bytecode.push_pop();
-            if thunk.flag.is_some() {
-                self.bytecode.bind_label(skip);
-            }
-        }
-    }
-
-    /// `flag = armed` for a `defer` armed flag slot.
-    fn emit_defer_flag(&mut self, flag: u32, armed: bool) {
-        self.bytecode.push(Byte::new_with_value(
-            Instruction::CONST,
-            Value::from(armed).raw() as _,
-        ));
-        self.bytecode.push_store_pop(flag);
-    }
-
-    /// Number of `defer` statements in a function body (not in nested
-    /// lambdas, which are functions of their own).
-    fn count_defers(body: &Output) -> usize {
-        fn walk(node: &Output, n: &mut usize) {
-            match node.1.as_ref() {
-                Expression::Lambda { .. } => return,
-                Expression::Defer { .. } => *n += 1,
-                _ => {}
-            }
-            node.1.for_each_child(&mut |c| walk(c, n));
-        }
-        let mut n = 0;
-        walk(body, &mut n);
-        n
-    }
-
-    /// Start a function body that may hold `defer`s: one armed flag slot
-    /// per `defer`, cleared here so an exit (or the unwinder) runs only the
-    /// thunks whose `defer` statement ran.
-    fn begin_fn_defers(&mut self, body: &Output) {
-        let n = Self::count_defers(body);
-        let mut flags = Vec::with_capacity(n);
-        for i in 0..n {
-            let slot = self.context.variables.intern(format!("__defer_armed{i}")) as u32;
-            self.emit_defer_flag(slot, false);
-            flags.push(slot);
-        }
-        self.fn_defers.flags = flags;
+    /// Start a function body that may hold `defer`s: whether it does is
+    /// known once its HIR lowers ([`Self::finish_fn_defers`]).
+    fn begin_fn_defers(&mut self) {
         self.hir_defers = false;
     }
 
@@ -289,8 +206,7 @@ impl Compiler {
     fn finish_fn_defers(&mut self, table_key: &str) -> bool {
         // A body HIR lowered has a pad when it holds a `defer`, whether or
         // not its stack IL registered the thunk: its MIR runs the defers.
-        let hir_defers = std::mem::take(&mut self.hir_defers);
-        if self.fn_defers.is_empty() && !hir_defers {
+        if !std::mem::take(&mut self.hir_defers) {
             return false;
         }
         let Some(native_id) = self.native_id("unwind_resume") else {
@@ -298,17 +214,14 @@ impl Compiler {
         };
         let pad = self.bytecode.fresh_label();
         self.bytecode.bind_label(pad);
-        self.emit_run_defers();
         self.bytecode
             .push(Byte::new(Instruction::CONST).with_value_u32(native_id as u32));
         self.bytecode.push_host_invoke(0);
         // Not reached (`unwind_resume` never returns to the pad).
         self.bytecode.push_return();
-        let thunks = self.fn_defers.thunks.iter().map(|t| (t.label, t.after)).collect();
         self.cleanup_pads.push(CleanupPad {
             func: table_key.to_string(),
             pad,
-            thunks,
             frame_words: self.context.variables.len() as u32,
         });
         true
@@ -3232,7 +3145,6 @@ impl Compiler {
             c.bind_function_entry(bind);
         });
         if lowered {
-            self.flush_hir_cold();
             let body_end = self.bytecode.len();
             self.record_fn_span(worker_name.clone(), body_start, body_end);
             let entry = self.fn_entry_labels.get(&worker_name).copied();
@@ -4099,7 +4011,6 @@ impl Compiler {
             self.report_unlowered(&SimpleSpan::from(0..0), name);
             self.bind_function_entry(name.to_string());
         }
-        self.flush_hir_cold();
         let body_end = self.bytecode.len();
         self.record_fn_span(name.to_string(), body_start, body_end);
         let entry = self.fn_entry_labels.get(name).copied();
@@ -4467,7 +4378,6 @@ impl Compiler {
     /// invents a unit/`0` sentinel (plus Result Ok-wrap in result-mode) so frames
     /// unwind and defers run. No Option/`None` invent.
     fn emit_fallthrough_return(&mut self, _name: &str, _span: SimpleSpan) {
-        self.emit_run_defers();
         self.bytecode.push_const(0);
         if self.compiling_two_word_enum.is_some() {
             // Fallback two-word default: payload 0, tag 0 (HM already diagnoses non-unit fall-through).
@@ -4608,7 +4518,6 @@ impl Compiler {
         } else {
             self.two_word_return_kind(&qualified)
         };
-        let prev_fn_defers = std::mem::take(&mut self.fn_defers);
 
         let mut a = self.do_compile(args);
         self.bytecode.append(&mut a);
@@ -4642,7 +4551,7 @@ impl Compiler {
                 self.bytecode.push_store_pop(slot);
             }
         }
-        self.begin_fn_defers(body);
+        self.begin_fn_defers();
         let body_op_start = self.bytecode.ops().len();
         let lowered = self.try_lower_hir_function(&method.0, body);
         if !lowered {
@@ -4655,7 +4564,6 @@ impl Compiler {
         if ends_on_label || !self.region_ends_with_return(body_op_start) {
             self.emit_fallthrough_return(name, body.0);
         }
-        self.flush_hir_cold();
         let pinned = self.finish_fn_defers(&qualified);
 
         let body_end = self.bytecode.len();
@@ -4670,7 +4578,6 @@ impl Compiler {
         self.record_unboxed_class_fields();
         self.flush_hir_par_tail();
 
-        self.fn_defers = prev_fn_defers;
         self.compiling_result_mode = prev_result_mode;
         self.compiling_result_ok_is_result = prev_result_ok_is_result;
         self.compiling_two_word_enum = prev_two_word_enum;
@@ -4983,7 +4890,6 @@ impl Compiler {
             self.mono_type_param_tys.push(type_param_tys);
             self.mono_var_tys.push(var_tys);
 
-            let prev_fn_defers = std::mem::take(&mut self.fn_defers);
             let mut a = self.do_compile(args);
             self.bytecode.append(&mut a);
             self.emit_sidecar_array_pins(args);
@@ -4991,7 +4897,7 @@ impl Compiler {
             let body_op_start = self.bytecode.ops().len();
             let prev_field_keys = std::mem::take(&mut self.field_key_slots);
             self.emit_field_key_prologue(body);
-            self.begin_fn_defers(body);
+            self.begin_fn_defers();
             // One HIR per instance: the generic body's HIR at this clone's
             // type arguments.
             let lowered = self.try_lower_hir_function(span, body);
@@ -5003,7 +4909,6 @@ impl Compiler {
             if ends_on_label || !self.region_ends_with_return(body_op_start) {
                 self.emit_fallthrough_return(source_name, body.0);
             }
-            self.flush_hir_cold();
             let pinned = self.finish_fn_defers(&mono_name);
             // Its own IL function: a clone left as trailing glue of the source
             // body has no registered entry, so a CALL to it from another
@@ -5024,7 +4929,6 @@ impl Compiler {
             }
             self.flush_hir_par_tail();
 
-            self.fn_defers = prev_fn_defers;
             self.mono_codegen_var_types.pop();
             self.mono_type_param_tys.pop();
             self.mono_var_tys.pop();
@@ -5582,7 +5486,6 @@ impl Compiler {
         let prev_polyfn_sources = std::mem::take(&mut self.polyfn_sources);
         let prev_pins = std::mem::take(&mut self.pinned_array_slots);
         let prev_field_keys = std::mem::take(&mut self.field_key_slots);
-        let prev_fn_defers = std::mem::take(&mut self.fn_defers);
         let prev_fn_qualified = self.current_function_qualified.replace(name.clone());
         let prev_fn_table_key = self.current_function_table_key.replace(name.clone());
         let prev_result_mode = std::mem::replace(&mut self.compiling_result_mode, false);
@@ -5597,7 +5500,6 @@ impl Compiler {
         if !self.try_lower_hir_function(&init.0, init) {
             self.report_unlowered(&init.0, fqn);
         }
-        self.flush_hir_cold();
         let body_end = self.bytecode.len();
         self.record_fn_span(name.clone(), body_start, body_end);
         let entry = self.fn_entry_labels.get(&name).copied();
@@ -5612,7 +5514,6 @@ impl Compiler {
         self.compiling_result_mode = prev_result_mode;
         self.current_function_table_key = prev_fn_table_key;
         self.current_function_qualified = prev_fn_qualified;
-        self.fn_defers = prev_fn_defers;
         self.field_key_slots = prev_field_keys;
         self.pinned_array_slots = prev_pins;
         self.polyfn_sources = prev_polyfn_sources;
@@ -6025,7 +5926,6 @@ impl Compiler {
             self.report_unlowered(&SimpleSpan::from(0..0), "main");
             self.bind_function_entry("main".to_string());
         }
-        self.flush_hir_cold();
         let body_end = self.bytecode.len();
         self.record_fn_span("main".to_string(), body_start, body_end);
         let entry = self.fn_entry_labels.get("main").copied();
@@ -6311,9 +6211,8 @@ impl Compiler {
             let prev_field_keys = std::mem::take(&mut self.field_key_slots);
             self.emit_field_key_prologue(body);
             let prev_active = self.active_fn_name.take();
-            let prev_fn_defers = std::mem::take(&mut self.fn_defers);
             self.active_fn_name = Some(name.to_string());
-            self.begin_fn_defers(body);
+            self.begin_fn_defers();
             let lowered = prev_fn_table_key_was_none && self.try_lower_hir_function(span, body);
             if !lowered {
                 if !prev_fn_table_key_was_none {
@@ -6331,11 +6230,9 @@ impl Compiler {
             if ends_on_label || !self.region_ends_with_return(body_op_start) {
                 self.emit_fallthrough_return(name, body.0);
             }
-            self.flush_hir_cold();
             let pinned = self.finish_fn_defers(&table_key);
             self.debug_scope_exit(saved_debug_scope);
 
-            self.fn_defers = prev_fn_defers;
             self.compiling_result_mode = prev_result_mode;
             self.compiling_result_ok_is_result = prev_result_ok_is_result;
             self.compiling_two_word_enum = prev_two_word_enum;
@@ -6946,8 +6843,7 @@ impl Compiler {
                 let body_op_start = self.bytecode.ops().len();
                 let prev_field_keys = std::mem::take(&mut self.field_key_slots);
                 self.emit_field_key_prologue(body);
-                let prev_fn_defers = std::mem::take(&mut self.fn_defers);
-                self.begin_fn_defers(body);
+                self.begin_fn_defers();
                 let lowered = self.try_lower_hir_function(span, body);
                 if !lowered {
                     self.report_unlowered(span, &fn_name);
@@ -6959,9 +6855,7 @@ impl Compiler {
                     // Test cases are typed as unit / Result<(), string>, zero is safe.
                     self.emit_fallthrough_return(&fn_name, body.0);
                 }
-                self.flush_hir_cold();
                 let pinned = self.finish_fn_defers(&fn_name);
-                self.fn_defers = prev_fn_defers;
 
                 let body_end = self.bytecode.len();
                 // Flatten remaps per IlFunc; unrecorded tests share the epilogue
@@ -7360,9 +7254,15 @@ impl Compiler {
         let main_off = self.functions.get("main").copied();
         if let Some((pos, init_len)) = static_init_region {
             let jmp_pos = pos + init_len;
-            let target_label = self
-                .bytecode
-                .entry_label_at(main_off.unwrap_or(PROLOGUE_HALT_OFFSET));
+            // `main`'s own entry label, which flattening maps to its body:
+            // the first label at its offset may be a neighbour's, and a
+            // label put there is private to whichever chunk holds it.
+            let target_label = match main_off.and_then(|_| self.fn_entry_labels.get("main").copied()) {
+                Some(label) => label,
+                None => self
+                    .bytecode
+                    .entry_label_at(main_off.unwrap_or(PROLOGUE_HALT_OFFSET)),
+            };
             self.bytecode.insert_jump_at(jmp_pos, target_label);
             self.bytecode.bump_absolute_entry_targets(jmp_pos, 1);
             self.bytecode.bump_func_spans(jmp_pos, 1);
@@ -7572,11 +7472,11 @@ impl Compiler {
         let mut cleanup = Vec::new();
         for pad in &self.cleanup_pads {
             // A body the LIR tier took emits its own pad from its MIR, with
-            // its `defer`s inline: no thunk to cut out of its ranges.
+            // its `defer`s inline.
             let lir = lowered.lir_cleanup_pads.get(&pad.func);
-            let (pad_label, thunks, frame_words) = match lir {
-                Some(&(label, words)) => (label, &[][..], words),
-                None => (pad.pad, &pad.thunks[..], pad.frame_words),
+            let (pad_label, frame_words) = match lir {
+                Some(&(label, words)) => (label, words),
+                None => (pad.pad, pad.frame_words),
             };
             let ranges = (|| {
                 let start = self
@@ -7585,15 +7485,7 @@ impl Compiler {
                     .and_then(|l| resolve_fn_label_pc(&pad.func, l.0))
                     .or_else(|| self.functions.get(&pad.func).copied())?;
                 let pad_pc = resolve_fn_label_pc(&pad.func, pad_label.0)?;
-                let mut cuts = Vec::new();
-                for &(thunk, after) in thunks {
-                    cuts.push((
-                        resolve_fn_label_pc(&pad.func, thunk.0)?,
-                        resolve_fn_label_pc(&pad.func, after.0)?,
-                    ));
-                }
-                cuts.sort_unstable();
-                Some(cleanup_ranges_for(start, pad_pc, &cuts, frame_words))
+                Some(cleanup_ranges_for(start, pad_pc, frame_words))
             })();
             // A body that is not its own IL function (a generic template:
             // its instances carry their own pads) resolves to nothing.
@@ -7851,30 +7743,15 @@ impl Compiler {
 #[path = "lib.tests.rs"]
 mod tests;
 
-/// The stretches of `start..pad` outside the thunk bodies `cuts` (sorted
-/// `(thunk, after)` pcs), each unwinding through `pad`.
-fn cleanup_ranges_for(
-    start: usize,
-    pad: usize,
-    cuts: &[(usize, usize)],
-    frame_words: u32,
-) -> Vec<common::CleanupRange> {
-    let mut out = Vec::new();
-    let mut lo = start;
-    let mut push = |lo: usize, hi: usize| {
-        if lo < hi {
-            out.push(common::CleanupRange {
-                start_pc: lo as u32,
-                end_pc: hi as u32,
-                pad_pc: pad as u32,
-                frame_words,
-            });
-        }
-    };
-    for &(thunk, after) in cuts {
-        push(lo, thunk.min(pad));
-        lo = lo.max(after);
-    }
-    push(lo, pad);
-    out
+/// The body `start..pad`, unwinding through `pad`.
+fn cleanup_ranges_for(start: usize, pad: usize, frame_words: u32) -> Vec<common::CleanupRange> {
+    (start < pad)
+        .then_some(common::CleanupRange {
+            start_pc: start as u32,
+            end_pc: pad as u32,
+            pad_pc: pad as u32,
+            frame_words,
+        })
+        .into_iter()
+        .collect()
 }

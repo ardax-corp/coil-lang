@@ -11,7 +11,9 @@
 /// `integer overflow` when the result does not fit; `/` and `%` by zero panic
 /// with `division by zero`; `**` with a negative exponent panics with
 /// `negative exponent`. `/` truncates toward zero and `%` takes the sign of
-/// the left operand. Shifts and bitwise operators never panic. For wrapping,
+/// the left operand. `<<` and `>>` panic with `shift count out of range`
+/// when the count is outside `0..=63` (a constant count is a compile error);
+/// bitwise operators never panic. For wrapping,
 /// checked or saturating arithmetic see the stdlib `arith` module.
 ///
 /// Casts with `as`: `int as float` converts exactly when it can;

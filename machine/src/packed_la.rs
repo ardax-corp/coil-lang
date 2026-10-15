@@ -376,6 +376,11 @@ pub fn packed_matrix_zip(heap: &mut Heap, args: &[Value]) -> Result<Value, IntTr
                 zip_i64(&a_cells[..nlen], &b_cells[..nlen], &mut out[..nlen], int_arith::add)?;
             }
         } else {
+            // Element-wise `<<` / `>>` trap on a count outside 0..=63 like
+            // the scalar ops (#1076); the kernels only see in-range counts.
+            if matches!(zip_kind, 11 | 12) && b_cells[..nlen].iter().any(|c| !(0..64).contains(c)) {
+                return Err(IntTrap::ShiftOutOfRange);
+            }
             coil_simd::zip_i64_op(
                 zip_kind,
                 &a_cells[..nlen],

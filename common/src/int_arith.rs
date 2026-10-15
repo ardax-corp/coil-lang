@@ -10,6 +10,7 @@ pub enum IntTrap {
     Overflow,
     DivByZero,
     NegativeExponent,
+    ShiftOutOfRange,
 }
 
 impl IntTrap {
@@ -20,6 +21,7 @@ impl IntTrap {
             IntTrap::Overflow => "integer overflow",
             IntTrap::DivByZero => "division by zero",
             IntTrap::NegativeExponent => "negative exponent",
+            IntTrap::ShiftOutOfRange => "shift count out of range",
         }
     }
 }
@@ -62,6 +64,24 @@ pub fn rem(a: i64, b: i64) -> IntResult {
     Ok(a.wrapping_rem(b))
 }
 
+/// `a << b`: the count must be in `0..=63`; bits shifted out are dropped.
+#[inline(always)]
+pub fn shl(a: i64, b: i64) -> IntResult {
+    if !(0..64).contains(&b) {
+        return Err(IntTrap::ShiftOutOfRange);
+    }
+    Ok(a << b)
+}
+
+/// `a >> b` (arithmetic): the count must be in `0..=63`.
+#[inline(always)]
+pub fn shr(a: i64, b: i64) -> IntResult {
+    if !(0..64).contains(&b) {
+        return Err(IntTrap::ShiftOutOfRange);
+    }
+    Ok(a >> b)
+}
+
 /// `a ** b`.
 pub fn pow(a: i64, b: i64) -> IntResult {
     if b < 0 {
@@ -101,5 +121,9 @@ mod tests {
         assert_eq!(pow(-1, i64::MAX), Ok(-1));
         assert_eq!(pow(0, 0), Ok(1));
         assert_eq!(pow(3, -1), Err(IntTrap::NegativeExponent));
+        assert_eq!(shl(1, 63), Ok(i64::MIN));
+        assert_eq!(shl(1, 64), Err(IntTrap::ShiftOutOfRange));
+        assert_eq!(shr(-8, 63), Ok(-1));
+        assert_eq!(shr(1, -1), Err(IntTrap::ShiftOutOfRange));
     }
 }

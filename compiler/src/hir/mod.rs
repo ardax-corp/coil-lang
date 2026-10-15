@@ -253,10 +253,14 @@ impl BinOp {
 }
 
 /// Whether the operator at `id` itself (not its operands) can trap: int
-/// arithmetic, or negating an int (`-MIN` overflows).
+/// arithmetic, negating an int (`-MIN` overflows), or a shift whose count
+/// is not a literal in `0..=63` (#1076).
 pub fn op_may_trap(body: &HirBody, id: HirId) -> bool {
     let e = body.expr(id);
     match &e.kind {
+        HirKind::Bin { op: BinOp::Shl | BinOp::Shr, rhs, .. } => {
+            !matches!(body.expr(*rhs).kind, HirKind::Lit(Lit::Int(k)) if (0..64).contains(&k))
+        }
         HirKind::Bin { op, .. } => op.int_may_trap(),
         HirKind::Un { op: UnOp::Neg, .. } => !e.ty.as_ref().is_some_and(|t| {
             matches!(crate::typechecking::ty::strip_readonly(t), Ty::Con(n) if matches!(n.as_str(), "float" | "f32" | "f64"))
