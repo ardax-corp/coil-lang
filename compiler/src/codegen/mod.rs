@@ -660,6 +660,9 @@ pub struct Compiler {
     hir_mir: Option<crate::mir::MirFunc>,
     /// Why the body just emitted did not lower straight to MIR.
     hir_mir_why: Option<String>,
+    /// The body HIR just lowered holds a `defer`: its function gets a
+    /// cleanup pad and is pinned ([`Self::finish_fn_defers`]).
+    hir_defers: bool,
     /// Frame words at entry of the function being compiled (its arguments
     /// and dictionaries), when its compile path records them.
     hir_entry_sp: Option<u32>,
@@ -862,6 +865,7 @@ impl Default for Compiler {
             inlined_bodies: Vec::new(),
             hir_mir: None,
             hir_mir_why: None,
+            hir_defers: false,
             hir_entry_sp: None,
             hir_mir_dict_sp: None,
             hir_entry_ctx: Vec::new(),

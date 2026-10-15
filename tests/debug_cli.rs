@@ -401,3 +401,25 @@ fn debug_locals_are_accurate_under_optimization() {
     let xs1 = value_of("xs[1]");
     assert!(xs1.iter().all(|v| v == "2" || v == "<optimized out>"), "{stdout}");
 }
+
+const BINDS: &str = "enum Shape {\n    Circle(int),\n    Rect(int, int),\n}\n\nfn area(Shape s) -> int {\n    let k = 3;\n    match s {\n        Shape::Circle(r) => {\n            let a = r * r * k;\n            return a;\n        },\n        Shape::Rect(w, h) => {\n            let a = w * h;\n            return a;\n        },\n    }\n}\n\nfn main() {\n    let x = area(Shape::Rect(4, 5));\n}\n";
+
+/// Locals bound by `let` and by a `match` arm's pattern, recorded from
+/// the frame direct MIR plans: each shows its value or `<optimized out>`.
+#[test]
+fn debug_locals_bound_by_match_arms() {
+    let (_out, stdout) = debug_program(BINDS, "break 15\nrun\ninfo locals\nquit\n", "match_locals");
+    let value_of = |name: &str| -> Vec<String> {
+        stdout
+            .lines()
+            .filter(|l| l.trim_start().starts_with(&format!("{name} ")))
+            .filter_map(|l| l.split_once(" = ").map(|(_, v)| v.trim().to_string()))
+            .collect()
+    };
+    assert!(stdout.contains("Breakpoint 1"), "{stdout}");
+    for (name, want) in [("k", "3"), ("w", "4"), ("h", "5")] {
+        let seen = value_of(name);
+        assert!(!seen.is_empty(), "`{name}` listed: {stdout}");
+        assert!(seen.iter().all(|v| v == want || v == "<optimized out>"), "{name} = {seen:?}\n{stdout}");
+    }
+}
