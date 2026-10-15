@@ -99,8 +99,12 @@ fn rewrite(body: &HirBody, id: HirId) -> Option<HirKind> {
             identity(body, *op, *lhs, *rhs, e).or_else(|| literal_right(body, *op, *lhs, *rhs))
         }
         HirKind::Un { op: UnOp::Not, operand } => match &body.expr(*operand).kind {
-            HirKind::Un { op: UnOp::Not, operand: inner } => Some(body.expr(*inner).kind.clone()),
+            // `!!b` is `b` only for a bool: `!!n` on an int is `n != 0`.
+            HirKind::Un { op: UnOp::Not, operand: inner } if body.expr(*inner).ty.as_ref().is_some_and(|t| named(t, "bool")) => {
+                Some(body.expr(*inner).kind.clone())
+            }
             HirKind::Lit(Lit::Bool(b)) => Some(HirKind::Lit(Lit::Bool(!b))),
+            HirKind::Lit(Lit::Int(n)) if named(e.ty.as_ref()?, "bool") => Some(HirKind::Lit(Lit::Bool(*n == 0))),
             _ => None,
         },
         HirKind::Un { op: UnOp::Neg, operand } if named(e.ty.as_ref()?, "int") => match body.expr(*operand).kind {
