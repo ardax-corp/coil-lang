@@ -43,7 +43,8 @@ impl TyVarCounter {
 /// linear time.
 #[derive(Debug, Default, Clone)]
 pub struct Frame {
-    bindings: Vec<(String, Scheme)>,
+    /// Name, scheme, and whether the binding is a `const`.
+    bindings: Vec<(String, Scheme, bool)>,
 }
 
 impl Frame {
@@ -54,7 +55,14 @@ impl Frame {
     /// Bind `name` to `scheme` in this frame. Later bindings with the same
     /// name shadow earlier ones within the same frame.
     pub fn insert(&mut self, name: impl Into<String>, scheme: Scheme) {
-        self.bindings.push((name.into(), scheme));
+        self.bindings.push((name.into(), scheme, false));
+    }
+
+    /// Mark the latest binding of `name` in this frame as a `const`.
+    pub fn mark_const(&mut self, name: &str) {
+        if let Some(b) = self.bindings.iter_mut().rev().find(|(n, ..)| n == name) {
+            b.2 = true;
+        }
     }
 
     /// Number of bindings in this frame.
@@ -70,7 +78,7 @@ impl Frame {
     /// [`Self::len`]), exposing whatever `name` was bound to before.
     pub fn drop_since(&mut self, name: &str, mark: usize) {
         let mut i = 0;
-        self.bindings.retain(|(n, _)| {
+        self.bindings.retain(|(n, ..)| {
             let keep = i < mark || n != name;
             i += 1;
             keep
@@ -82,15 +90,20 @@ impl Frame {
         self.bindings
             .iter()
             .rev()
-            .find(|(n, _)| n == name)
-            .map(|(_, s)| s)
+            .find(|(n, ..)| n == name)
+            .map(|(_, s, _)| s)
+    }
+
+    /// Whether the latest binding of `name` in this frame is a `const`.
+    fn binds_const(&self, name: &str) -> Option<bool> {
+        self.bindings.iter().rev().find(|(n, ..)| n == name).map(|b| b.2)
     }
 
     /// Iterate bindings in insertion order for tooling such as completions.
     pub fn bindings(&self) -> impl Iterator<Item = (&str, &Scheme)> {
         self.bindings
             .iter()
-            .map(|(name, scheme)| (name.as_str(), scheme))
+            .map(|(name, scheme, _)| (name.as_str(), scheme))
     }
 }
 
@@ -136,7 +149,7 @@ impl Env {
     pub fn all_names(&self) -> HashSet<String> {
         let mut names = HashSet::new();
         for frame in &self.frames {
-            for (n, _) in &frame.bindings {
+            for (n, ..) in &frame.bindings {
                 names.insert(n.clone());
             }
         }
@@ -147,7 +160,7 @@ impl Env {
     pub fn visible_names(&self) -> Vec<String> {
         let mut names = Vec::new();
         for frame in self.frames.iter().rev() {
-            for (name, _) in frame.bindings.iter().rev() {
+            for (name, ..) in frame.bindings.iter().rev() {
                 if !names.iter().any(|seen| seen == name) {
                     names.push(name.clone());
                 }
@@ -184,6 +197,19 @@ impl Env {
         None
     }
 
+    /// Mark the latest binding of `name` in the innermost frame as a `const`.
+    pub fn mark_top_const(&mut self, name: &str) {
+        if let Some(frame) = self.frames.last_mut() {
+            frame.mark_const(name);
+        }
+    }
+
+    /// Whether `name` resolves to a `const` binding: a `let`, parameter or
+    /// loop binding that shadows a const is not one.
+    pub fn is_const(&self, name: &str) -> bool {
+        self.frames.iter().rev().find_map(|frame| frame.binds_const(name)).unwrap_or(false)
+    }
+
     /// Index of the innermost frame that binds `name` (0 = outermost).
     pub fn lookup_frame(&self, name: &str) -> Option<usize> {
         self.frames
@@ -196,7 +222,7 @@ impl Env {
     pub fn ftv(&self) -> HashSet<TyVarId> {
         let mut acc = HashSet::new();
         for frame in &self.frames {
-            for (_, scheme) in &frame.bindings {
+            for (_, scheme, _) in &frame.bindings {
                 acc.extend(ftv_scheme(scheme));
             }
         }

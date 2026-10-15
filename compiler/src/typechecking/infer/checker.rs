@@ -176,7 +176,6 @@ impl Checker {
             generic_aliases: HashMap::new(),
             qualified_type_aliases: HashMap::new(),
             qualified_generic_aliases: HashMap::new(),
-            const_scopes: vec![HashSet::new()],
             const_fold_env: HashMap::new(),
             static_slots: HashMap::new(),
             static_slot_types: HashMap::new(),
@@ -1535,8 +1534,6 @@ impl Checker {
         self.type_aliases.clear();
         self.type_aliases.push(HashMap::new());
         self.generic_aliases.clear();
-        self.const_scopes.clear();
-        self.const_scopes.push(HashSet::new());
         self.abstract_constraint_bindings.clear();
         self.enums.retain(|k, _| k.contains("::"));
         self.enum_tags.retain(|k, _| k.contains("::"));
@@ -1805,13 +1802,11 @@ impl Checker {
 
     fn push_scope(&mut self) {
         self.env.push();
-        self.const_scopes.push(HashSet::new());
         self.type_aliases.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
         let _ = self.env.pop();
-        let _ = self.const_scopes.pop();
         if self.type_aliases.len() > 1 {
             let _ = self.type_aliases.pop();
         } else if let Some(frame) = self.type_aliases.last_mut() {
@@ -2151,21 +2146,14 @@ impl Checker {
         }
     }
 
+    /// Mark `name`'s binding in the innermost scope (just inserted) as a
+    /// `const`. A later binding of the same name shadows it as mutable.
     fn insert_const_binding(&mut self, name: impl Into<String>) {
-        if self.const_scopes.is_empty() {
-            self.const_scopes.push(HashSet::new());
-        }
-        self.const_scopes
-            .last_mut()
-            .expect("const scope should exist")
-            .insert(name.into());
+        self.env.mark_top_const(&name.into());
     }
 
     fn is_const_binding(&self, name: &str) -> bool {
-        self.const_scopes
-            .iter()
-            .rev()
-            .any(|scope| scope.contains(name))
+        self.env.is_const(name)
     }
 
     fn coroutine_type(&self, yield_ty: Ty, send_ty: Ty) -> Ty {
@@ -3122,11 +3110,15 @@ impl Checker {
                 let import_rebinds =
                     self.snapshot_file_level_imports(&mut uncaptured, range.clone());
 
+                let const_caps: Vec<bool> = cap_bindings.iter().map(|(n, _)| self.env.is_const(n)).collect();
                 let saved_frames = self.env.take_and_isolate();
                 let prev_uncaptured = self.lambda_uncaptured_outer.replace(uncaptured);
                 self.rebind_file_level_imports(import_rebinds);
-                for (n, ty) in &cap_bindings {
+                for ((n, ty), is_const) in cap_bindings.iter().zip(const_caps) {
                     self.env.insert_top(n.clone(), Scheme::mono(ty.clone()));
+                    if is_const {
+                        self.env.mark_top_const(n);
+                    }
                     self.record_codegen_var_type(n.clone(), ty.clone());
                 }
                 let _ = self.infer(body);

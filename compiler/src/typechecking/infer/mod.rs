@@ -459,10 +459,6 @@ pub struct Checker {
     /// Generic counterpart of [`Self::qualified_type_aliases`].
     qualified_generic_aliases: HashMap<String, GenericAliasDef>,
 
-    /// Names declared with `const`, tracked per lexical scope so assignment
-    /// diagnostics can distinguish immutable bindings from mutable `let`s.
-    const_scopes: Vec<HashSet<String>>,
-
     /// Foldable values for `const` bindings (loop-condition const eval).
     const_fold_env: HashMap<String, crate::typechecking::const_eval::ConstVal>,
 
