@@ -579,7 +579,9 @@ pub fn try_lower_abi_body_side(
     let has_alloc = match (gate, from_hir) {
         (GateRef::Stack(ops), _) => {
             let has_alloc = ops.iter().any(refuses_alloc);
-            if has_alloc && has_post_loop_alloc_return(ops) && !mir_fuse_on() {
+            // A stack-gated body is unfused (`COIL_MIR_FUSE=0` or a test's
+            // `hir_stack`): it keeps the unfused walls.
+            if has_alloc && has_post_loop_alloc_return(ops) {
                 return refuse("post-loop alloc return");
             }
             has_alloc
@@ -601,8 +603,7 @@ pub fn try_lower_abi_body_side(
         return refuse("no MIR maps");
     }
     let wall = match gate {
-        GateRef::Stack(ops) => super::entry::lir_refuse_direct(ops, has_alloc)
-            .filter(|&wall| !(mir_fuse_on() && wall == super::entry::LirRefuse::Call)),
+        GateRef::Stack(ops) => super::entry::lir_refuse_direct(ops, has_alloc),
         GateRef::Mir(_) => super::gates::fuse_lir_wall(direct, has_alloc),
     };
     if let Some(wall) = wall {

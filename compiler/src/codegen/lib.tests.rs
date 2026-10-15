@@ -48,6 +48,12 @@ fn string_index_out_of_range_panics() {
     run_src_panics("fn main() { let s = \"ab\"; let i = -1; let _ = s[i]; }");
 }
 
+/// A standard host native's real id, as `Pipeline` registers it (direct
+/// MIR types its host edges by id).
+fn host_id(name: &str) -> usize {
+    common::host_native_ids().find(|&(n, _)| n == name).map(|(_, id)| id).unwrap_or_else(|| panic!("no host native `{name}`"))
+}
+
 fn compile_src(src: &str) -> (Vec<Byte>, Vec<u64>) {
     compile_src_tuned(src, |_| {})
 }
@@ -132,12 +138,17 @@ fn compile_src_compiler(src: &str, tune: impl FnOnce(&mut Compiler)) -> (Vec<Byt
     }
     // Stable placeholder ids so Approach A packed HostInvoke lowering
     // fires in unit tests (Pipeline assigns real ids at runtime).
-    compiler.register_native_id(machine::PACKED_DOT, common::PACKED_DOT_ID as usize);
-    compiler.register_native_id(machine::PACKED_MATMUL, common::PACKED_MATMUL_ID as usize);
-    compiler.register_native_id(machine::PACKED_MATRIX_ZIP, common::PACKED_MATRIX_ZIP_ID as usize);
-    compiler.register_native_id(machine::PACKED_MATRIX_NEG, common::PACKED_MATRIX_NEG_ID as usize);
-    compiler.register_native_id(machine::PACKED_VEC_ARITH, common::PACKED_VEC_ARITH_ID as usize);
+    compiler.register_native_id(machine::PACKED_DOT, 9001);
+    compiler.register_native_id(machine::PACKED_MATMUL, 9002);
+    compiler.register_native_id(machine::PACKED_MATRIX_ZIP, 9003);
+    compiler.register_native_id(machine::PACKED_MATRIX_NEG, 9004);
+    compiler.register_native_id(machine::PACKED_VEC_ARITH, 9005);
     compiler.register_native_id(machine::GC_REGISTER_FINALIZER_NATIVE, 9100);
+    // These tests pin emit_hir's stack lowering (`COIL_MIR_FUSE=0`): the
+    // programs run without the stdlib, which direct MIR's host edges need.
+    // They go with that lowering when it is deleted; the harness covers
+    // the default path.
+    compiler.opt_options.hir_stack = true;
     tune(&mut compiler);
     let bc = compiler.compile("", &mut ast);
     (bc, compiler)
@@ -187,12 +198,20 @@ fn bytecode_has_shl_by(bc: &[Byte], shift: i64) -> bool {
     has_load_const_shl || has_fused_shl
 }
 
+/// A two-word `CALL` whose tag a jump tests: next to it on emit_hir's stack
+/// IL, or a store / load later (stack IL from MIR keeps `[payload, tag]` in
+/// slots and fuses the test).
 fn two_slot_call_followed_by_tag_jump(bc: &[Byte]) -> bool {
     use common::Instruction;
-    bc.windows(2).any(|w| {
-        matches!(w[0].bytecode(), Instruction::CALL)
-            && w[0].call_ret_words() == 2
-            && matches!(w[1].bytecode(), Instruction::JMPF | Instruction::JMPT)
+    bc.iter().enumerate().any(|(i, b)| {
+        matches!(b.bytecode(), Instruction::CALL)
+            && b.call_ret_words() == 2
+            && bc[i + 1..].iter().take(4).any(|j| {
+                matches!(
+                    j.bytecode(),
+                    Instruction::JMPF | Instruction::JMPT | Instruction::BinSlotImmJmpt | Instruction::BinSlotImmJmpf
+                )
+            })
     })
 }
 
@@ -1240,6 +1259,9 @@ fn type_errors_appear_in_messages() {
 fn register_native_visible_to_emitter() {
     use crate::typechecking::ty::{string, unit};
     let mut c = Compiler::default();
+    // Synthetic native ids: pinned to emit_hir's stack lowering, as
+    // `compile_src_compiler`.
+    c.opt_options.hir_stack = true;
     c.register("native_print", &[string()], &unit());
     // Native calls registered with the checker should compile without errors.
     let mut ast = Pratt::default()
@@ -6050,6 +6072,9 @@ fn main() { \
     let mut compiler = Compiler::default();
     // Stable ids matching Pipeline::register_io_natives order is not
     // required ,  only the relative nesting shape is asserted.
+    // Synthetic native ids: pinned to emit_hir's stack lowering, as
+    // `compile_src_compiler`.
+    compiler.opt_options.hir_stack = true;
     compiler.register_native_id("stdin", 1);
     compiler.register_native_id("read", 2);
     let bc = compiler.compile("", &mut ast);
@@ -6329,6 +6354,9 @@ fn main() {
         )
         .expect("parse failed");
     let mut compiler = Compiler::default();
+    // Synthetic native ids: pinned to emit_hir's stack lowering, as
+    // `compile_src_compiler`.
+    compiler.opt_options.hir_stack = true;
     compiler.register("inner", &[], &int());
     compiler.register("outer", &[int()], &int());
     let outer_id = compiler.native_id("outer").expect("outer registered") as u32;
@@ -6806,10 +6834,9 @@ fn main() {
 
 fn packed_host_meta(bc: &[common::Byte]) -> u32 {
     use common::Instruction;
-    // Layout: CONST packed id (registered in `compile_src_tuned`), the
+    // Layout: CONST packed id (9001..=9005 in `compile_src_tuned`), the
     // operands, CONST meta, HostInvoke.
-    let ids = u32::from(common::PACKED_DOT_ID)..=u32::from(common::PACKED_VEC_ARITH_ID);
-    let packed_id = |b: &common::Byte| matches!(b.bytecode(), Instruction::CONST) && ids.contains(&b.operand_u32());
+    let packed_id = |b: &common::Byte| matches!(b.bytecode(), Instruction::CONST) && (9001..=9005).contains(&b.operand_u32());
     let id_at = bc.iter().position(packed_id).expect("expected a packed native id");
     let hi = id_at
         + bc[id_at..]
@@ -7464,8 +7491,8 @@ fn main() {
         )
         .expect("parse");
     let mut compiler = Compiler::default();
-    compiler.register_native_id("vec_from_array", 1);
-    compiler.register_native_id("vec_pop", 2);
+    compiler.register_native_id("vec_from_array", host_id("vec_from_array"));
+    compiler.register_native_id("vec_pop", host_id("vec_pop"));
     let bc = compiler.compile("", &mut ast);
     assert!(
         !bc.iter()
@@ -7503,8 +7530,8 @@ fn main() {
         )
         .expect("parse");
     let mut compiler = Compiler::default();
-    compiler.register_native_id("vec_from_array", 1);
-    compiler.register_native_id("vec_pop", 2);
+    compiler.register_native_id("vec_from_array", host_id("vec_from_array"));
+    compiler.register_native_id("vec_pop", host_id("vec_pop"));
     let bc = compiler.compile("", &mut ast);
     assert!(
         !bc.iter()
@@ -7543,8 +7570,8 @@ fn main() {
         )
         .expect("parse");
     let mut compiler = Compiler::default();
-    compiler.register_native_id("gc_root", 1);
-    compiler.register_native_id("gc_get", 2);
+    compiler.register_native_id("gc_root", host_id("gc_root"));
+    compiler.register_native_id("gc_get", host_id("gc_get"));
     let bc = compiler.compile("", &mut ast);
     assert!(
         bc.iter().any(|b| {
@@ -7572,7 +7599,7 @@ fn main() {
         )
         .expect("parse");
     let mut compiler = Compiler::default();
-    compiler.register_native_id("result_unit_probe", 1);
+    compiler.register_native_id("result_unit_probe", host_id("result_unit_probe"));
     let bc = compiler.compile("", &mut ast);
     assert!(
         bc.iter().any(|b| {
@@ -7656,8 +7683,8 @@ fn main() {
         )
         .expect("parse");
     let mut compiler = Compiler::default();
-    compiler.register_native_id("to_bytes", 1);
-    compiler.register_native_id("from_bytes", 2);
+    compiler.register_native_id("to_bytes", host_id("to_bytes"));
+    compiler.register_native_id("from_bytes", host_id("from_bytes"));
     let bc = compiler.compile("", &mut ast);
     assert!(
         bc.iter().any(|b| {
@@ -7688,7 +7715,7 @@ fn main() {
         )
         .expect("parse");
     let mut compiler = Compiler::default();
-    compiler.register_native_id("fs_exists", 1);
+    compiler.register_native_id("fs_exists", host_id("fs_exists"));
     let bc = compiler.compile("", &mut ast);
     let host = bc
         .iter()
@@ -7730,9 +7757,9 @@ fn main() {
         )
         .expect("parse");
     let mut compiler = Compiler::default();
-    compiler.register_native_id("stdout", 1);
-    compiler.register_native_id("write", 2);
-    compiler.register_native_id("to_bytes", 3);
+    compiler.register_native_id("stdout", host_id("stdout"));
+    compiler.register_native_id("write", host_id("write"));
+    compiler.register_native_id("to_bytes", host_id("to_bytes"));
     let bc = compiler.compile("", &mut ast);
     assert!(
         bc.iter()
@@ -7776,8 +7803,8 @@ fn main() {
         )
         .expect("parse");
     let mut compiler = Compiler::default();
-    compiler.register_native_id("vec_from_array", 1);
-    compiler.register_native_id("vec_pop", 2);
+    compiler.register_native_id("vec_from_array", host_id("vec_from_array"));
+    compiler.register_native_id("vec_pop", host_id("vec_pop"));
     let bc = compiler.compile("", &mut ast);
     assert!(
         !bc.is_empty(),
@@ -7809,8 +7836,8 @@ fn main() {
         )
         .expect("parse");
     let mut compiler = Compiler::default();
-    compiler.register_native_id("vec_from_array", 1);
-    compiler.register_native_id("vec_pop", 2);
+    compiler.register_native_id("vec_from_array", host_id("vec_from_array"));
+    compiler.register_native_id("vec_pop", host_id("vec_pop"));
     let bc = compiler.compile("", &mut ast);
     assert!(
         !host_niche_immediately_unwraps(&bc),
@@ -7840,8 +7867,8 @@ fn main() {
         )
         .expect("parse");
     let mut compiler = Compiler::default();
-    compiler.register_native_id("vec_from_array", 1);
-    compiler.register_native_id("vec_pop", 2);
+    compiler.register_native_id("vec_from_array", host_id("vec_from_array"));
+    compiler.register_native_id("vec_pop", host_id("vec_pop"));
     let bc = compiler.compile("", &mut ast);
     let boxed_hosts = bc
         .iter()
@@ -8218,8 +8245,8 @@ fn main() {
         )
         .expect("parse");
     let mut compiler = Compiler::default();
-    compiler.register_native_id("vec_from_array", 1);
-    compiler.register_native_id("vec_remove", 2);
+    compiler.register_native_id("vec_from_array", host_id("vec_from_array"));
+    compiler.register_native_id("vec_remove", host_id("vec_remove"));
     let bc = compiler.compile("", &mut ast);
     assert!(
         !bc.iter()
