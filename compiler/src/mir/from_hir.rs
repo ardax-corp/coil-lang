@@ -1621,7 +1621,13 @@ impl Lower<'_> {
     /// returns boxed is built boxed.
     fn ret_value(&mut self, v: HirId) -> Result<Val, Refusal> {
         if self.inp.ret_pair.is_none() && self.b.func().ret_ty == Some(MirTy::HeapRef) && self.inp.pair_tys.contains_key(&v.0) {
-            return Ok(match self.boxed_word(v)? {
+            let w = self.boxed_word(v)?;
+            // A box built without lowering `v` as a value (`None` made
+            // boxed: one `MakeEnum`) never consumed the returned flag:
+            // left set, it would leak into the next statement and
+            // lower a statement `if` as a returned one (#1271).
+            self.ret_tail = false;
+            return Ok(match w {
                 Some(w) => Val::V(w),
                 None => Val::Never,
             });
