@@ -3,6 +3,7 @@
 use tests::assert;
 
 static let RATE: float = 0.05;
+
 const STEP = 1.003;
 
 test("leading zeros in the fraction") {
@@ -18,7 +19,7 @@ test("leading zeros in the fraction") {
 }
 
 test("a fraction of only zeros") {
-    let z = 3.000;
+    let z = 3.0;
     assert!(z == 3.0);
     let w = 0.0;
     assert!(w == 0.0);
@@ -32,7 +33,8 @@ test("statics, consts and negated literals") {
     assert!(n + 0.05 == 0.0);
 }
 
-test("same value as the plain spelling") {
-    assert!(0.50 == 0.5);
-    assert!(10.010 == 10.01);
+test("same value as the division it spells") {
+    assert!(0.05 == 5.0 / 100.0);
+    assert!(1.03 == 103.0 / 100.0);
+    assert!(10.001 == 10001.0 / 1000.0);
 }

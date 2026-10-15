@@ -226,8 +226,10 @@ impl<'pratt> Pratt<'pratt> {
         &self,
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
     {
+        // The fraction is any digits: `text::int` stops at a leading zero
+        // (`0.05`, #997).
         text::int(10)
-            .then(just(".").then(text::int(10)))
+            .then(just(".").then(text::digits(10)))
             .to_slice()
             .from_str()
             .validate(|v: Result<f64, ParseFloatError>, e, emitter| match v {
@@ -2434,7 +2436,7 @@ impl<'pratt> Pratt<'pratt> {
            + Clone
            + 'pratt {
         let attr_float = text::int(10)
-            .then(just('.').then(text::int(10)))
+            .then(just('.').then(text::digits(10)))
             .to_slice()
             .from_str::<f64>()
             .validate(|v: Result<f64, _>, _, _| v.unwrap_or(0.0))
