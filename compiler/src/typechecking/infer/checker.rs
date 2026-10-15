@@ -10025,7 +10025,7 @@ impl Checker {
             .active_constraints
             .iter()
             .filter(|constraint| self.constraint_param_kind(&constraint.class).is_some())
-            .filter(|constraint| receiver_var.is_none_or(|var| self.constraint_mentions_var(constraint, var)))
+            .filter(|constraint| receiver_var.is_none_or(|var| self.constraint_on_var(constraint, var, false)))
             .map(|constraint| constraint.class.clone())
             .collect();
         for name in names {
@@ -10127,30 +10127,34 @@ impl Checker {
                         .generics
                         .typeclass(concrete)
                         .is_some_and(|def| def.has_superclass(class, &self.generics));
-                let constraint = self.pruned_constraint(constraint);
-                (covers && (constraint.is_unary_on(var) || constraint.primary_var() == Some(var)))
-                    .then(|| (idx, concrete.to_string()))
+                (covers && self.constraint_on_var(constraint, var, true)).then(|| (idx, concrete.to_string()))
             })
     }
 
-    /// `constraint` with its arguments under the current substitution. An
-    /// impl or fn type parameter can be unified with another variable in a
-    /// body (`let ks: Vec<K> = Vec::new()` binds `K` to `Vec::new`'s fresh
-    /// element variable); the constraint still names the parameter's own
-    /// variable, while the operands of a later `==` or `.hash()` on a `K`
-    /// prune to the other one (#1277).
-    fn pruned_constraint(&self, constraint: &Constraint) -> Constraint {
-        Constraint {
+    /// `constraint` is on `var`: as written, or with both under the current
+    /// substitution. A body can unify a type parameter with another
+    /// variable (`let ks: Vec<K> = Vec::new()` binds `K` to `Vec::new`'s
+    /// fresh element variable): the constraint still names the parameter's
+    /// own variable while the operands of a later `==` or `.hash()` on a
+    /// `K` prune to the other one, and a `K::method` names the parameter's
+    /// (#1277). `primary_only` asks for the constraint's primary variable
+    /// (or its only argument); otherwise any variable argument counts.
+    fn constraint_on_var(&self, constraint: &Constraint, var: TyVarId, primary_only: bool) -> bool {
+        let on = |c: &Constraint, v: TyVarId| {
+            c.primary_var() == Some(v)
+                || if primary_only { c.is_unary_on(v) } else { c.args.iter().any(|a| matches!(a, Ty::Var(x) if *x == v)) }
+        };
+        if on(constraint, var) {
+            return true;
+        }
+        let Ty::Var(var) = apply_ty_prune(&self.subst, &Ty::Var(var)) else {
+            return false;
+        };
+        let pruned = Constraint {
             class: constraint.class.clone(),
             args: constraint.args.iter().map(|a| apply_ty_prune(&self.subst, a)).collect(),
-        }
-    }
-
-    /// `constraint` is on `var`: its primary variable or one of its
-    /// variable arguments, under the current substitution.
-    fn constraint_mentions_var(&self, constraint: &Constraint, var: TyVarId) -> bool {
-        let constraint = self.pruned_constraint(constraint);
-        constraint.primary_var() == Some(var) || constraint.args.iter().any(|a| matches!(a, Ty::Var(v) if *v == var))
+        };
+        on(&pruned, var)
     }
 
     fn bound_method_candidates(
@@ -10161,7 +10165,7 @@ impl Checker {
         self.active_constraints
             .iter()
             .enumerate()
-            .filter(|(_, constraint)| receiver_var.is_none_or(|var| self.constraint_mentions_var(constraint, var)))
+            .filter(|(_, constraint)| receiver_var.is_none_or(|var| self.constraint_on_var(constraint, var, false)))
             .flat_map(|(dict_index, constraint)| {
                 self.possible_classes_for_constraint_method(constraint, method)
                     .into_iter()
