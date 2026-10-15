@@ -278,6 +278,15 @@ impl EmitPlan {
             }
         }
 
+        // Under a debugger each named local's value keeps its own word,
+        // as a φ's does: the debugger reads it there.
+        if func.debug_keep {
+            for v in func.debug_slots.values() {
+                if let Some(pin) = phi_in.get_mut(v.index()) {
+                    *pin = true;
+                }
+            }
+        }
         let fused = fused_cmp_dests(func);
         let mut tree = vec![false; n];
         let mut changed = true;

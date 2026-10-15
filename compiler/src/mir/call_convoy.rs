@@ -54,13 +54,23 @@ impl ConvoyPlan {
             }
         }
 
+        // Under a debugger each named local's value keeps its own word:
+        // never on the operand stack, never rebuilt where it is read.
+        let mut keep = vec![false; n];
+        if func.debug_keep {
+            for v in func.debug_slots.values() {
+                if let Some(k) = keep.get_mut(v.index()) {
+                    *k = true;
+                }
+            }
+        }
         let fused = fused_cmp_dests(func);
         let mut convoy = vec![false; n];
         let mut changed = true;
         while changed {
             changed = false;
             for i in 0..n {
-                if convoy[i] || fused[i] || phi_in[i] {
+                if convoy[i] || fused[i] || phi_in[i] || keep[i] {
                     continue;
                 }
                 if func.params.iter().any(|p| p.index() == i) {
@@ -95,7 +105,7 @@ impl ConvoyPlan {
             if fused[i] || convoy[i] {
                 continue;
             }
-            if rematerialize_const(func, &def[i]) {
+            if rematerialize_const(func, &def[i]) && !keep[i] {
                 continue;
             }
             if def[i].is_some() || def_block[i].is_some() {
