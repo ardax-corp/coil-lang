@@ -3678,19 +3678,19 @@
             load(0),
             Byte::new(Instruction::ResumeCoro),
             store_pop(1), // first yield
-            Byte::new(Instruction::CALL).with_call_packed(0, 15), // host stub
+            Byte::new(Instruction::CALL).with_call_packed(0, 14), // host stub
             load(0),
             Byte::new(Instruction::ResumeCoro),
             store_pop(2), // second yield
             Byte::new(Instruction::HALT),
-            // 10: outer, yield from inner @ 17
-            make_coro(0, 17),
+            // 10: outer, yield from inner @ 15
+            make_coro(0, 15),
             Byte::new(Instruction::YieldFromCoro),
             const_int(0),
             Byte::new(Instruction::RETURN),
-            // 15: host stub
+            // 14: host stub
             Byte::new(Instruction::RETURN),
-            // 17: inner
+            // 15: inner
             const_int(10),
             Byte::new(Instruction::YieldCoro),
             const_int(20),
@@ -3698,6 +3698,7 @@
             Byte::new(Instruction::RETURN),
         ]);
         assert!(!vm.panicked());
+        assert_eq!(vm.stack[1].as_int(), 10);
         assert_eq!(vm.stack[2].as_int(), 20);
     }
 
