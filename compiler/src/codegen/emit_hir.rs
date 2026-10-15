@@ -1516,8 +1516,8 @@ impl Compiler {
             linalgs: &tables.linalgs,
             array_copies: &tables.array_copies,
             crosses: &tables.crosses,
-            unrolled_las: &tables.unrolled_las,
             ffis: &tables.ffis,
+            unrolled_las: &tables.unrolled_las,
             make_niches: &tables.make_niches,
             aggregates: emit
                 .plan

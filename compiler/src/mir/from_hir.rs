@@ -513,11 +513,11 @@ pub struct HirMirInput<'a> {
     /// `cross(a, b)` calls unrolled: whether the result is a tuple and
     /// whether its elements are floats.
     pub crosses: &'a HashMap<u32, (bool, bool)>,
+    /// `extern` calls and `dload` / `declare` / `invoke`, by call.
+    pub ffis: &'a HashMap<u32, HirFfi>,
     /// `dot` / `matmul` calls and matrix operators unrolled (a shape past
     /// the packed kernel's limits), by expression.
     pub unrolled_las: &'a HashMap<u32, crate::typechecking::LinearAlgebraKind>,
-    /// `extern` calls and `dload` / `declare` / `invoke`, by call.
-    pub ffis: &'a HashMap<u32, HirFfi>,
     /// Fixed array locals copied as they are bound or assigned to another
     /// local: the `vec_from_array` native, by value.
     pub array_copies: &'a HashMap<u32, u16>,

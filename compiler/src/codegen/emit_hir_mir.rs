@@ -41,12 +41,12 @@ pub(super) struct HirMirTables {
     /// `cross(a, b)` calls emission unrolls: whether the result is a
     /// tuple and whether its elements are floats, by call.
     pub(super) crosses: HashMap<u32, (bool, bool)>,
-    /// `dot` / `matmul` calls and matrix operators emission unrolls (a
-    /// shape past the packed kernel's limits), by expression.
-    pub(super) unrolled_las: HashMap<u32, crate::typechecking::LinearAlgebraKind>,
     /// `extern` calls and `dload` / `declare` / `invoke`
     /// (`HirBuiltin::Ffi` / `FfiDyn`): their opcode and operands, by call.
     pub(super) ffis: HashMap<u32, crate::mir::HirFfi>,
+    /// `dot` / `matmul` calls and matrix operators emission unrolls (a
+    /// shape past the packed kernel's limits), by expression.
+    pub(super) unrolled_las: HashMap<u32, crate::typechecking::LinearAlgebraKind>,
     /// Fixed array locals copied as they are bound or assigned to another
     /// local ([`Compiler::hir_array_copy`]): the `vec_from_array` native,
     /// by value.
