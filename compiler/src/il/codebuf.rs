@@ -152,19 +152,9 @@ impl CodeBuf {
         self.il.push_index();
     }
 
-    pub fn push_index_unchecked(&mut self) {
-        self.invalidate_lowered();
-        self.il.push_index_unchecked();
-    }
-
     pub fn push_array_pin(&mut self, slot: u32) {
         self.invalidate_lowered();
         self.il.push_array_pin(slot);
-    }
-
-    pub fn push_index_pin_unchecked(&mut self, slot: u32) {
-        self.invalidate_lowered();
-        self.il.push_index_pin_unchecked(slot);
     }
 
     pub fn push_make_tuple(&mut self, arity: u32) {
@@ -172,29 +162,9 @@ impl CodeBuf {
         self.il.push_make_tuple(arity);
     }
 
-    pub fn push_make_tuple_kinds(&mut self, arity: u32, kinds: u8) {
-        self.invalidate_lowered();
-        self.il.push_make_tuple_kinds(arity, kinds);
-    }
-
-    pub fn push_make_array(&mut self, arity: u32) {
-        self.invalidate_lowered();
-        self.il.push_make_array(arity);
-    }
-
-    pub fn push_make_array_kind(&mut self, arity: u32, elem_kind: u8) {
-        self.invalidate_lowered();
-        self.il.push_make_array_kind(arity, elem_kind);
-    }
-
     pub fn push_make_enum(&mut self, tag: u16, arity: u16) {
         self.invalidate_lowered();
         self.il.push_make_enum(tag, arity);
-    }
-
-    pub fn push_make_enum_kinds(&mut self, tag: u16, arity: u16, kinds: u8) {
-        self.invalidate_lowered();
-        self.il.push_make_enum_kinds(tag, arity, kinds);
     }
 
     pub fn push_box_value(&mut self, tag: u32) {
@@ -212,16 +182,6 @@ impl CodeBuf {
         self.il.push_load_field(index);
     }
 
-    pub fn push_get_field(&mut self) {
-        self.invalidate_lowered();
-        self.il.push_get_field();
-    }
-
-    pub fn push_set_field(&mut self) {
-        self.invalidate_lowered();
-        self.il.push_set_field();
-    }
-
     pub fn push_set_field_slot(&mut self, index: u32) {
         self.invalidate_lowered();
         self.il.push_set_field_slot(index);
@@ -230,21 +190,6 @@ impl CodeBuf {
     pub fn push_host_invoke(&mut self, arity: u32) {
         self.invalidate_lowered();
         self.il.push_host_invoke(arity);
-    }
-
-    pub fn push_host_invoke_layout(&mut self, arity: u32, layout: u32) {
-        self.invalidate_lowered();
-        self.il.push_host_invoke_layout(arity, layout);
-    }
-
-    pub fn push_print(&mut self) {
-        self.invalidate_lowered();
-        self.il.push_print();
-    }
-
-    pub fn push_const_pool(&mut self, idx: u32) {
-        self.invalidate_lowered();
-        self.il.push_const_pool(idx);
     }
 
     pub fn push_string(&mut self, idx: u32) {

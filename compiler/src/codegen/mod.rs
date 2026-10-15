@@ -31,7 +31,6 @@ const CODEGEN_RECURSION_LIMIT: u32 = 2000;
 /// way a genuine native stack overflow does.
 struct CodegenRecursionLimitExceeded;
 
-
 /// Map FFI type expressions to runtime `(tag, aux)` for declare/invoke codegen.
 fn ffi_type_tag_from_output(checker: &Checker, expr: &Output) -> Option<(u32, u32)> {
     checker.ffi_type_tag_from_output(expr)
@@ -242,7 +241,6 @@ struct Context {
     prev: Option<Box<Self>>,
 }
 
-
 /// Length of the CALL + JMP + HALT prologue every [`Compiler`] starts with.
 /// Multi-file linking treats `bytecode.len() <= PROLOGUE_BYTECODE_LEN` as a
 /// fresh compile (safe to clear the shared constant pool).
@@ -397,13 +395,9 @@ pub struct Compiler {
     /// memory).
     expr_depth: u32,
 
-
     /// Top-level functions whose frames can never hold a heap word
     /// ([`Compiler::fn_is_heap_free`]); finalize binds them to precise maps.
     precise_frame_fns: HashSet<String>,
-    /// Functions with a `requires` check: `contract_fail` reads the
-    /// caller's frame, so the tiny-inliner keeps their calls.
-    caller_blame_fns: HashSet<String>,
     precise_frames: Vec<common::PreciseFrameMap>,
 
     /// Native call-stack depth of [`Compiler::do_compile`]'s recursion,
@@ -476,7 +470,6 @@ pub struct Compiler {
 
     /// True when a user-written `fn main` was emitted this compile.
     user_main_defined: bool,
-
 
     /// When false (default), harness `test("…")` blocks and `#[test]` functions
     /// are stripped before typecheck/codegen. Set true for `coil test`
@@ -592,8 +585,6 @@ pub struct Compiler {
     /// in it.
     source_text: String,
 
-
-
     /// User `fn` names that sit on a call-graph cycle (self or mutual).
     recursive_fns: HashSet<String>,
     /// Self-recursive pure function names eligible for auto fork-join.
@@ -696,8 +687,6 @@ pub struct Compiler {
     debugger_attached: bool,
     /// Nested matches dispatch on their outer tag once (`COIL_HIR_MATCH_TREE=0` off).
     hir_match_tree: bool,
-    /// Matches on many int literals binary-search (`COIL_HIR_INT_SEARCH=0` off).
-    hir_int_search: bool,
     /// Typed inlining takes callees returning a two-word `Option`, `Result`
     /// or enum (`COIL_HIR_INLINE_PAIR=0` off).
     hir_inline_pair: bool,
@@ -764,7 +753,6 @@ impl Default for Compiler {
             pinned_array_slots: HashSet::new(),
             expr_depth: 0,
             precise_frame_fns: HashSet::new(),
-            caller_blame_fns: HashSet::new(),
             precise_frames: Vec::new(),
             codegen_depth: 0,
             loop_stack: Vec::new(),
@@ -880,14 +868,11 @@ impl Default for Compiler {
                 std::env::var("COIL_HIR_PAIR_LOCALS").as_deref(),
                 Ok("0" | "false" | "off" | "no")
             ),
-            hir_int_search: crate::hir::match_tree::int_search_from_env(),
             hir_fn_names: HashMap::new(),
             hir_portable: HashMap::new(),
         }
     }
 }
-
-
 
 /// `COIL_AUTO_PAR=0` disables automatic fork-join of pure recursive binops.
 fn auto_par_enabled() -> bool {
@@ -976,11 +961,6 @@ pub(crate) struct FnDefers {
 impl FnDefers {
     pub fn is_empty(&self) -> bool {
         self.thunks.is_empty()
-    }
-
-    /// The flag for the next registered thunk.
-    pub fn next_flag(&self) -> Option<u32> {
-        self.flags.get(self.thunks.len()).copied()
     }
 }
 

@@ -66,21 +66,9 @@ fn shown_fn(name: &str) -> String {
 }
 
 impl Compiler {
-    /// When `native` needs a capability, tag the `HostInvoke` just pushed
-    /// onto `self.bytecode` with the call's span so the check can find it.
-    /// `open_mode` is `open`'s mode argument when it is a literal.
-    pub(super) fn tag_gated_host_call(&mut self, native: &str, span: (usize, usize), open_mode: Option<&str>) {
-        let Some(loc) = self.note_gated_host_call(native, span, open_mode) else {
-            return;
-        };
-        if let Some(op @ IlOp::HostInvoke { .. }) = self.bytecode.il_mut().ops_slice_mut().last_mut() {
-            op.set_loc(loc);
-        }
-    }
-
     /// When `native` needs a capability, record its call at `span` for the
-    /// check, which finds the call's `HostInvoke` (in the stack IL, or in
-    /// its body's direct MIR) by that loc. The loc, when it is recorded.
+    /// check, which finds the call's `HostInvoke` in its body's direct MIR
+    /// by that loc. The loc, when it is recorded.
     pub(super) fn note_gated_host_call(&mut self, native: &str, span: (usize, usize), open_mode: Option<&str>) -> Option<DebugLoc> {
         let row = common::HOST_NATIVES.iter().find(|n| n.name == native)?;
         let caps = if row.name == "open" { common::open_mode_caps(open_mode) } else { row.caps };
