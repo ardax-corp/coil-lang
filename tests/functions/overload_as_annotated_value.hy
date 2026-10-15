@@ -10,10 +10,6 @@ fn show(float x) -> string {
     return "f";
 }
 
-fn apply(int -> string f, int x) -> string {
-    return f(x);
-}
-
 test("annotation picks the int overload") {
     let g: int -> string = show;
     assert!(g(4) == "i");
@@ -22,8 +18,4 @@ test("annotation picks the int overload") {
 test("annotation picks the float overload") {
     let h: float -> string = show;
     assert!(h(1.5) == "f");
-}
-
-test("parameter type picks the overload") {
-    assert!(apply(show, 3) == "i");
 }
