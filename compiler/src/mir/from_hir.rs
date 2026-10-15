@@ -598,8 +598,9 @@ struct Lower<'a> {
     /// The expression being lowered is `return`ed: a `match` or `if`
     /// returns from each arm instead of joining, as HIR emission does.
     ret_tail: bool,
-    /// The statement `match` `effect` is lowering: nothing reads its value.
-    stmt_match: Option<HirId>,
+    /// Statement `match`es not yet lowered (one `effect` lowers, or the
+    /// tail of a block whose value is dropped): nothing reads their value.
+    stmt_matches: HashSet<HirId>,
     /// The arm bodies of statement `match`es: each one's value is dropped
     /// where the arm ends, as HIR emission did, so arms leaving different
     /// shapes (a word beside a block that falls through with nothing) need
@@ -1021,7 +1022,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         cold: Vec::new(),
         aliases: HashMap::new(),
         ret_tail: false,
-        stmt_match: None,
+        stmt_matches: HashSet::new(),
         discard_arms: HashSet::new(),
         arm_tys: HashMap::new(),
         next_temp: TEMP_BASE,
@@ -1165,7 +1166,7 @@ fn lower_pad(hir: &HirBody, inp: &HirMirInput, parts: PadParts<'_>) -> Result<Mi
         cold: Vec::new(),
         aliases: HashMap::new(),
         ret_tail: false,
-        stmt_match: None,
+        stmt_matches: HashSet::new(),
         discard_arms: HashSet::new(),
         arm_tys: HashMap::new(),
         next_temp: TEMP_BASE,
@@ -2317,13 +2318,21 @@ impl Lower<'_> {
         // A host's two-word result nobody reads stays the boxed word it
         // comes back as: no unboxing to a pair just to drop it.
         self.raw_host = self.host_pair(id) || self.boxed_call(id);
-        if matches!(self.hir.expr(id).kind, HirKind::Match { .. }) {
-            self.stmt_match = Some(id);
-        }
+        self.drop_value(id);
         let out = self.value(id);
         self.raw_host = false;
-        self.stmt_match = None;
         Ok(!matches!(out?, Val::Never))
+    }
+
+    /// Nothing reads `id`'s value: when it is a `match` (or a block ending
+    /// in one), that `match`'s arms drop their values.
+    fn drop_value(&mut self, mut id: HirId) {
+        while let HirKind::Block { tail: Some(t), .. } = self.hir.expr(id).kind {
+            id = t;
+        }
+        if matches!(self.hir.expr(id).kind, HirKind::Match { .. }) {
+            self.stmt_matches.insert(id);
+        }
     }
 
     /// A host call whose result is a boxed enum unboxed to a pair.
@@ -3023,7 +3032,7 @@ impl Lower<'_> {
                 kind: Some(ForInKind::Coroutine),
             } => self.for_coroutine(*local, *iterable, *body),
             HirKind::Match { scrutinee, arms } => {
-                if !returned && self.stmt_match.take() == Some(id) {
+                if self.stmt_matches.remove(&id) && !returned {
                     self.discard_arms.extend(arms.iter().map(|a| a.body));
                 }
                 self.match_(*scrutinee, arms, returned)
@@ -6751,6 +6760,9 @@ impl Lower<'_> {
     fn arm_value(&mut self, body: HirId, tail: bool) -> Result<Val, Refusal> {
         self.ret_tail = tail;
         let discard = self.discard_arms.contains(&body);
+        if discard {
+            self.drop_value(body);
+        }
         let val = if tail { self.ret_value(body)? } else { self.value(body)? };
         match val {
             Val::Never => Ok(Val::Never),
