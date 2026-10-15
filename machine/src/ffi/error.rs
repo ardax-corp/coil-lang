@@ -35,7 +35,7 @@ impl FfiErrorKindTag {
             | FfiError::EmptyName => Self::InvalidSignature,
             FfiError::Unsupported(_) | FfiError::InteriorNul => Self::Unsupported,
             FfiError::InvalidHandle(_) => Self::InvalidHandle,
-            FfiError::LibraryDenied { .. } | FfiError::IntTrap(_) => Self::Other,
+            FfiError::LibraryDenied { .. } | FfiError::IntTrap(_) | FfiError::Panic(_) => Self::Other,
         }
     }
 }
