@@ -5051,18 +5051,9 @@ impl Compiler {
         {
             return u32::try_from(items.len()).ok().map(Some);
         }
-        if !is_len
-            || !matches!(
-                hir.expr(*arg).kind,
-                HirKind::Local(_)
-                    | HirKind::Call { .. }
-                    | HirKind::Field { .. }
-                    | HirKind::Index { .. }
-                    | HirKind::Global { .. }
-                    | HirKind::Lit(Lit::Str(_))
-                    | HirKind::Builtin { op: Builtin::Unbox { .. }, .. }
-            )
-        {
+        // Any operand kind: `?`, a `const` local, a concatenation, …
+        // (#1071, #1147); the type decides below.
+        if !is_len {
             return None;
         }
         // A string literal folds to its byte length, with the escapes
