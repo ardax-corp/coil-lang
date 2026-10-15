@@ -4562,13 +4562,40 @@ impl Compiler {
     }
 
     /// Wrap the function value on top of the stack in a closure that
-    /// unboxes the arguments `unbox` marks, then calls it (#699).
+    /// unboxes the arguments `unbox` marks, then calls it (#699): `MakeFn`
+    /// of the adapter function over it ([`Self::hir_fn_adapter`]).
     fn hir_adapt_fn_arg(&mut self, unbox: &[Option<Ty>]) {
-        let after = self.bytecode.fresh_label();
-        self.hir_jump(IlJumpKind::Unconditional, after);
-        self.bytecode.bind_fresh_entry();
-        let entry = self.bytecode.len() as u32;
-        // Frame: the wrapped function (the one capture), then the arguments.
+        let (label, operand) = self.hir_fn_adapter(unbox);
+        self.bytecode.push_const(0);
+        self.bytecode.emit_entry(crate::il::EntryKind::CodePtr, 0, label);
+        self.bytecode.push(Byte::new(Instruction::MakeFn).with_operand_u32(operand));
+    }
+
+    /// The entry of the function that unboxes the arguments `unbox` marks
+    /// and calls the function value it captures, and its `MakeFn` operand
+    /// (one capture). One per shape, emitted after the body being compiled
+    /// ([`Self::flush_hir_lambdas`]).
+    pub(super) fn hir_fn_adapter(&mut self, unbox: &[Option<Ty>]) -> (IlLabel, u32) {
+        let tags: Vec<Option<u32>> = unbox.iter().map(|t| t.as_ref().and_then(Self::ty_to_value_tag).map(|t| t as u32)).collect();
+        let operand = make_fn_operand(1, 0, unbox.len() as u32, false);
+        if let Some(&label) = self.hir_fn_adapters.get(&tags) {
+            return (label, operand);
+        }
+        let label = self.bytecode.fresh_label();
+        self.hir_fn_adapters.insert(tags, label);
+        self.hir_adapter_tail.push((label, unbox.to_vec()));
+        (label, operand)
+    }
+
+    /// The adapter function [`Self::hir_fn_adapter`] reserved `label` for:
+    /// its frame the wrapped function (the capture), then the arguments.
+    /// Its direct MIR is built here, as it has no HIR.
+    fn hir_fn_adapter_fn(&mut self, label: IlLabel, unbox: &[Option<Ty>]) {
+        self.loop_par_helpers += 1;
+        let name = format!("__coil_fn_adapter_{}", self.loop_par_helpers);
+        let start = self.bytecode.len();
+        self.fn_entry_labels.insert(name.clone(), label);
+        self.bind_function_entry(name.clone());
         for (i, ty) in unbox.iter().enumerate() {
             self.bytecode.push_load(1 + i as u32);
             if let Some(ty) = ty {
@@ -4579,12 +4606,39 @@ impl Compiler {
         self.bytecode
             .push(Byte::new(Instruction::CallIndirect).with_operand_u32(unbox.len() as u32));
         self.bytecode.push_return();
-        self.bytecode.bind_label(after);
-        self.bytecode.push_const(0);
-        self.bytecode.push(Byte::new(Instruction::CodePtr).with_operand_u32(entry));
-        let arity = unbox.len() as u32;
-        self.bytecode
-            .push(Byte::new(Instruction::MakeFn).with_operand_u32(make_fn_operand(1, 0, arity, false)));
+        let arity = 1 + unbox.len() as u32;
+        self.fn_arities.insert(name.clone(), (arity, false));
+        self.bytecode.record_func_with_sp(name.clone(), Some(label), start, self.bytecode.len(), arity);
+        match Self::fn_adapter_mir(&name, unbox) {
+            Ok(func) => self.bytecode.set_last_func_hir_mir(func),
+            Err(why) => self.bytecode.set_last_func_hir_mir_why(why),
+        }
+    }
+
+    /// [`Self::hir_fn_adapter_fn`]'s direct MIR. An argument it does not
+    /// unbox, and the result, are words it only moves.
+    fn fn_adapter_mir(name: &str, unbox: &[Option<Ty>]) -> Result<crate::mir::MirFunc, String> {
+        use crate::mir::MirTy;
+        let err = |e: crate::mir::MirError| format!("mir: {e}");
+        let mut b = crate::mir::MirBuilder::new(name.to_string());
+        b.set_ret_ty(MirTy::I64);
+        let f = b.add_param(MirTy::HeapRef).map_err(err)?;
+        let mut args = Vec::with_capacity(unbox.len());
+        for ty in unbox {
+            let tag = ty.as_ref().and_then(Self::ty_to_value_tag);
+            let word = match (ty, tag) {
+                (Some(ty), Some(_)) => crate::mir::scalar_mir_ty(ty).unwrap_or(MirTy::HeapRef),
+                _ => MirTy::I64,
+            };
+            let p = b.add_param(if tag.is_some() { MirTy::HeapRef } else { MirTy::I64 }).map_err(err)?;
+            args.push(match tag {
+                Some(tag) => b.ins_unbox(p, tag as u32, word).map_err(err)?,
+                None => p,
+            });
+        }
+        let r = b.ins_call_indirect(f, args, MirTy::I64).map_err(err)?;
+        b.ret(Some(r)).map_err(err)?;
+        b.finish().map_err(err)
     }
 
     /// The frame's dictionary slot and `show` method slot for a `%v` of a
@@ -10079,11 +10133,17 @@ impl Compiler {
     /// first slots, then the parameters. Its direct MIR takes the captures
     /// as its first parameters. Lambdas inside one follow it.
     pub(super) fn flush_hir_lambdas(&mut self) {
-        while !self.hir_lambda_tail.is_empty() {
+        while !self.hir_lambda_tail.is_empty() || !self.hir_adapter_tail.is_empty() {
             for lam in std::mem::take(&mut self.hir_lambda_tail) {
                 self.hir_lambda_fn(lam);
             }
+            for (label, unbox) in std::mem::take(&mut self.hir_adapter_tail) {
+                self.hir_fn_adapter_fn(label, &unbox);
+            }
         }
+        // A later body's adapters are its own: its labels may live in
+        // another buffer.
+        self.hir_fn_adapters.clear();
     }
 
     fn hir_lambda_fn(&mut self, lam: HirLambdaTail) {
@@ -10143,7 +10203,6 @@ impl Compiler {
         let arity = (ncap + body.params.len()) as u32;
         self.fn_arities.insert(name.clone(), (arity, false));
         self.bytecode.record_func_with_sp(name.clone(), Some(label), start, self.bytecode.len(), arity);
-        self.bytecode.set_last_func_stack_ok();
         self.attach_hir_mir();
         self.record_unboxed_class_fields();
         self.fn_defers = prev_defers;
