@@ -40,6 +40,24 @@ fn shr_assign(int a, int n) -> int {
     return x;
 }
 
+// The shift's value is unused: it still runs, and traps.
+fn shl_unused(int a, int n) -> int {
+    let _ = a << n;
+    return 0;
+}
+
+// The shift is loop-invariant but guarded: it must not run before the guard.
+fn shr_guarded(int a, int n, int rounds) -> int {
+    let total = 0;
+    for i in 0..rounds {
+        if n < 64 {
+            total += a >> n;
+        }
+        total += i;
+    }
+    return total;
+}
+
 fn shl_byte(byte a, int n) -> int {
     return (a << n) as int;
 }
@@ -67,6 +85,16 @@ test("compound shifts trap") {
     assert!(outcome(fn () => shl_assign(1, 64)) == "shift count out of range");
     assert!(outcome(fn () => shr_assign(1, -3)) == "shift count out of range");
     assert!(shl_assign(3, 4) == 48);
+}
+
+test("an unused shift still traps") {
+    assert!(outcome(fn () => shl_unused(1, 64)) == "shift count out of range");
+    assert!(outcome(fn () => shl_unused(1, 3)) == "ok");
+}
+
+test("a guarded shift is not hoisted above its guard") {
+    assert!(shr_guarded(64, 100, 3) == 3);
+    assert!(shr_guarded(64, 3, 3) == 27);
 }
 
 test("a byte shifted by 64 or more traps") {
