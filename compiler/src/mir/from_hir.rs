@@ -507,6 +507,9 @@ pub struct HirMirInput<'a> {
     /// `block_on(h)` calls: the `wait_ready` native run between resumes,
     /// if any.
     pub block_ons: &'a HashMap<u32, Option<u16>>,
+    /// `new C(args).f` reads whose object is never built: each argument
+    /// runs in order and `f`'s word is the value, by field read.
+    pub field_news: &'a HashSet<u32>,
     /// Matrix / vector operators and `dot` / `matmul` calls on a packed
     /// kernel: its native and the meta word packing the shape.
     pub linalgs: &'a HashMap<u32, (u16, u32)>,
@@ -836,8 +839,17 @@ fn opaque_moves_only(hir: &HirBody, inp: &HirMirInput) -> Result<(), Refusal> {
             HirKind::Builtin { args, .. } => args.iter().any(var),
             HirKind::Named { value, .. } | HirKind::Yield { value, .. } => var(value),
             HirKind::Append { base, value } => var(base) || var(value),
-            // A store moves the word as it is, into a local or a field.
-            HirKind::Assign { place, value } => var(value) && !matches!(hir.expr(*place).kind, HirKind::Local(_) | HirKind::Field { .. }),
+            // A store moves the word as it is, into a local, a field or a
+            // type variable's array slot (`xs[i] = v` on a `Vec<T>`, stored
+            // as the opaque word it holds).
+            HirKind::Assign { place, value } => {
+                var(value)
+                    && !match &hir.expr(*place).kind {
+                        HirKind::Local(_) | HirKind::Field { .. } => true,
+                        HirKind::Index { base, index, .. } => !var(index) && hir.expr(*base).ty.as_ref().and_then(array_elem).is_some_and(is_var),
+                        _ => false,
+                    }
+            }
             HirKind::If { cond, .. } => var(cond),
             HirKind::Match { scrutinee, .. } => var(scrutinee),
             HirKind::LetPat { init, .. } => var(init),
@@ -2710,6 +2722,26 @@ impl Lower<'_> {
                     None => self.b.def_local(LocalId(slot), v).map_err(mir)?,
                 }
                 Ok(Val::Unit)
+            }
+            HirKind::Field { base, .. }
+                if self.inp.field_news.contains(&id.0)
+                    && let Some(&(slot, ty)) = self.inp.heap_fields.get(&id.0)
+                    && self.inp.news.contains_key(&base.0)
+                    && let HirKind::Make { args, .. } = &self.hir.expr(*base).kind =>
+            {
+                // As HIR emission's: the object is never observed, so its
+                // words run in order and the field's is read back.
+                let Some(words) = self.object_words(*base, &args.clone())? else {
+                    return Ok(Val::Never);
+                };
+                let w = *words.get(slot as usize).ok_or("field slot")?;
+                if self.b.value_ty(w) != ty {
+                    return Err("field type".into());
+                }
+                match self.inp.boxed_niches.get(&id.0) {
+                    Some(&layout) => self.unbox_niche(w, niche_word(layout)?),
+                    None => Ok(Val::V(w)),
+                }
             }
             HirKind::Field { base, .. } if let Some(&(slot, ty)) = self.inp.heap_fields.get(&id.0) => {
                 // A two-word enum is boxed for the read, as HIR emission's.
@@ -4825,8 +4857,23 @@ impl Lower<'_> {
     /// `new C(..)`: every argument, then the object and each field's store
     /// (no argument sees the object, so none runs with it allocated).
     fn make_object(&mut self, id: HirId, args: &[HirId]) -> Result<Val, Refusal> {
-        let (type_id, tys) = &self.inp.news[&id.0];
-        let (type_id, tys) = (*type_id, tys.clone());
+        let type_id = self.inp.news[&id.0].0;
+        let Some(words) = self.object_words(id, args)? else {
+            return Ok(Val::Never);
+        };
+        let nfields = words.len() as u32;
+        let obj = self.b.ins_alloc(MirAllocKind::Object { type_id, nfields }, Vec::new()).map_err(mir)?;
+        let obj = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?;
+        for (slot, v) in words.into_iter().enumerate() {
+            self.b.ins_heap_field_store(obj, v, None, Some(slot as u32)).map_err(mir)?;
+        }
+        Ok(Val::V(obj))
+    }
+
+    /// The field words of `new C(args)` (`id`), each argument run in
+    /// order into the word its slot holds; `None` if one never returns.
+    fn object_words(&mut self, id: HirId, args: &[HirId]) -> Result<Option<Vec<ValueId>>, Refusal> {
+        let tys = self.inp.news[&id.0].1.clone();
         let mut words = Vec::with_capacity(args.len());
         for (&arg, ty) in args.iter().zip(tys) {
             let v = match self.inp.boxed_niches.get(&arg.0) {
@@ -4835,20 +4882,14 @@ impl Lower<'_> {
                 None => self.word(arg)?,
             };
             let Some(v) = v else {
-                return Ok(Val::Never);
+                return Ok(None);
             };
             if self.b.value_ty(v) != ty {
                 return Err("field type".into());
             }
             words.push(v);
         }
-        let nfields = words.len() as u32;
-        let obj = self.b.ins_alloc(MirAllocKind::Object { type_id, nfields }, Vec::new()).map_err(mir)?;
-        let obj = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?;
-        for (slot, v) in words.into_iter().enumerate() {
-            self.b.ins_heap_field_store(obj, v, None, Some(slot as u32)).map_err(mir)?;
-        }
-        Ok(Val::V(obj))
+        Ok(Some(words))
     }
 
     /// A boxed user enum variant: `MakeEnum` of the payload words, pushed
@@ -5048,7 +5089,12 @@ impl Lower<'_> {
     /// word, then the meta word, then `HostInvoke`. The result is the
     /// expression's word: a new matrix or vector array, or `dot`'s scalar.
     fn linalg(&mut self, id: HirId, (native, meta): (u16, u32), args: &[HirId]) -> Result<Val, Refusal> {
-        let ret = self.expr_ty(id).and_then(|t| self.inp.word(t)).ok_or("linear algebra result")?;
+        // A tuple result (a tuple of row tuples) is one boxed tuple word.
+        let ret = self
+            .expr_ty(id)
+            .and_then(|t| self.inp.word(t).or_else(|| self.inp.plain_heap(t).then_some(MirTy::HeapRef)))
+            .filter(|_| !self.inp.pair_tys.contains_key(&id.0))
+            .ok_or("linear algebra result")?;
         let mut words = Vec::with_capacity(args.len() + 1);
         for &arg in args {
             let Some(v) = self.word_or_boxed(arg)? else {
