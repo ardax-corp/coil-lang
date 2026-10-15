@@ -216,7 +216,7 @@ pub(super) fn slot_extent(b: &Byte, constants: &[u64]) -> Option<usize> {
         VMove | VFma => Some(0),
         NOOP | DATA | HALT | Panic | CONST | STRING | CodePtr | DUPLICATE | POP | PRINT
         | ADD | SUB | MUL | DIV | MOD | LE | LEQ | GT | GEQ | EQ | NEQ | Pow | BITAND | BITOR
-        | ADDF | SUBF | MULF | DIVF | MODF | LEF | LEQF | GTF | GEQF | PowF | SHL | SHR | XOR
+        | ADDF | SUBF | MULF | DIVF | MODF | LEF | LEQF | EQF | NEQF | GTF | GEQF | PowF | SHL | SHR | XOR
         | AND | OR | NOT | LogNot | NEG | NEGF | CastIntToFloat | CastFloatToInt
         | CastIntToByte | CastByteToInt | CastIntToBool | CastBoolToInt | JMP | JMPF | JMPT
         | CmpJmpf | CmpJmpt | LogNotJmpf | LogNotJmpt | JumpIfMatch | Unpack | RETURN
@@ -1269,7 +1269,7 @@ fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Opt
             st.push(a_heap || b_heap)?;
         }
         ADD | SUB | MUL | DIV | MOD | LE | LEQ | GT | GEQ | EQ | NEQ | Pow | ADDF | SUBF
-        | MULF | DIVF | MODF | LEF | LEQF | GTF | GEQF | PowF | SHL | SHR | AND | OR => {
+        | MULF | DIVF | MODF | LEF | LEQF | EQF | NEQF | GTF | GEQF | PowF | SHL | SHR | AND | OR => {
             st.pop_n(2)?;
             st.push(false)?;
         }

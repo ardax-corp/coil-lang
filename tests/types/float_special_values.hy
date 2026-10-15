@@ -1,7 +1,7 @@
 // Floats keep IEEE-754 behaviour: dividing by zero gives `inf` / `-inf`
 // (no panic), `NaN` is unordered (every `<` `<=` `>` `>=` with it is
 // false) and `sqrt` / `ln` produce NaN and `-inf` instead of clamping.
-// (`==` on NaN and -0.0 is a known bug, see findings; not asserted here.)
+// (`==` on NaN and -0.0 is in float_eq_ieee.hy.)
 use tests::assert;
 
 fn fdiv(float a, float b) -> float {

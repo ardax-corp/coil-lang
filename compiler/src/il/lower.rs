@@ -832,6 +832,8 @@ fn is_cmp_op(i: Instruction) -> bool {
             | Instruction::LEQF
             | Instruction::GTF
             | Instruction::GEQF
+            | Instruction::EQF
+            | Instruction::NEQF
     )
 }
 
@@ -863,6 +865,8 @@ fn is_bin_op(i: Instruction) -> bool {
                 | Instruction::LEQF
                 | Instruction::GTF
                 | Instruction::GEQF
+                | Instruction::EQF
+                | Instruction::NEQF
                 | Instruction::PowF
         )
 }

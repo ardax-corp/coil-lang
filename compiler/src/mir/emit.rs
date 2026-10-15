@@ -716,8 +716,8 @@ fn stack_cmp_op(op: MirCmpOp, ty: MirTy) -> Result<Instruction, LowerError> {
         (MirCmpOp::Le, true) => Instruction::LEQF,
         (MirCmpOp::Gt, true) => Instruction::GTF,
         (MirCmpOp::Ge, true) => Instruction::GEQF,
-        (MirCmpOp::Eq, true) => Instruction::EQ,
-        (MirCmpOp::Ne, true) => Instruction::NEQ,
+        (MirCmpOp::Eq, true) => Instruction::EQF,
+        (MirCmpOp::Ne, true) => Instruction::NEQF,
     })
 }
 
@@ -889,6 +889,8 @@ fn is_jmpf_cond_op(i: Instruction) -> bool {
             | Instruction::NEQ
             | Instruction::LEF
             | Instruction::LEQF
+            | Instruction::EQF
+            | Instruction::NEQF
             | Instruction::GTF
             | Instruction::GEQF
             | Instruction::AND

@@ -163,6 +163,8 @@ pub(super) fn byte_stack_delta(insn: Instruction, byte: &common::Byte) -> Option
         | Instruction::MODF
         | Instruction::LEF
         | Instruction::LEQF
+        | Instruction::EQF
+        | Instruction::NEQF
         | Instruction::GTF
         | Instruction::GEQF
         | Instruction::PowF
