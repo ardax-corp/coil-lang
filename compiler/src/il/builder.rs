@@ -318,21 +318,8 @@ impl IlBuilder {
         });
     }
 
-    pub fn push_index_unchecked(&mut self) {
-        self.push_op(IlOp::IndexUnchecked {
-            loc: DebugLoc::unknown(),
-        });
-    }
-
     pub fn push_array_pin(&mut self, slot: u32) {
         self.push_op(IlOp::ArrayPin {
-            slot,
-            loc: DebugLoc::unknown(),
-        });
-    }
-
-    pub fn push_index_pin_unchecked(&mut self, slot: u32) {
-        self.push_op(IlOp::IndexPinUnchecked {
             slot,
             loc: DebugLoc::unknown(),
         });
@@ -347,19 +334,6 @@ impl IlBuilder {
         self.push_op(IlOp::MakeTuple {
             kinds,
             arity,
-            loc: DebugLoc::unknown(),
-        });
-    }
-
-    pub fn push_make_array(&mut self, arity: u32) {
-        self.push_make_array_kind(arity, common::WORD_UNKNOWN);
-    }
-
-    /// `MakeArray` with the element word kind (`common::WORD_*`).
-    pub fn push_make_array_kind(&mut self, arity: u32, elem_kind: u8) {
-        self.push_op(IlOp::MakeArray {
-            arity,
-            elem_kind,
             loc: DebugLoc::unknown(),
         });
     }
@@ -399,19 +373,6 @@ impl IlBuilder {
         });
     }
 
-    pub fn push_get_field(&mut self) {
-        self.push_op(IlOp::GetField {
-            loc: DebugLoc::unknown(),
-        });
-    }
-
-    pub fn push_set_field(&mut self) {
-        self.push_op(IlOp::SetField {
-            index: None,
-            loc: DebugLoc::unknown(),
-        });
-    }
-
     pub fn push_set_field_slot(&mut self, index: u32) {
         self.push_op(IlOp::SetField {
             index: Some(index),
@@ -427,19 +388,6 @@ impl IlBuilder {
         self.push_op(IlOp::HostInvoke {
             arity,
             layout: layout as u8,
-            loc: DebugLoc::unknown(),
-        });
-    }
-
-    pub fn push_print(&mut self) {
-        self.push_op(IlOp::Print {
-            loc: DebugLoc::unknown(),
-        });
-    }
-
-    pub fn push_const_pool(&mut self, idx: u32) {
-        self.push_op(IlOp::ConstPool {
-            idx,
             loc: DebugLoc::unknown(),
         });
     }
