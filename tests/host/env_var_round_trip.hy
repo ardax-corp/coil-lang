@@ -1,4 +1,4 @@
-// HostInvoke + virtual `env` wiring: set/get/remove round-trip.
+// `env::set_var`, `env::var` and `env::remove_var` round-trip a value.
 // Output: coil_ok
 use env::{remove_var, set_var, var};
 use io::{stdout, write};

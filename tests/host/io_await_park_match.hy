@@ -1,5 +1,5 @@
-// COI-408: park on WouldBlock, resume, match Result::Ok (not boxed-as-Err).
-// Uses the old names `await_readable` / `await_writable` on purpose; io_wait_park_match.hy covers the new ones.
+// The old names `await_readable` / `await_writable` still work: a read that
+// would block waits, resumes, and the wait's result matches `Ok`.
 use tests::assert;
 use io::{await_readable, await_writable, close, read};
 use task::{scope, Scope};

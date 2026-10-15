@@ -1,4 +1,4 @@
-// HostInvoke + virtual `io::fs` wiring: `exists(".")` returns Ok.
+// `io::fs::exists(".")` returns `Ok` for the working directory.
 // Output: 1
 use io::fs::exists;
 use io::stdout;
