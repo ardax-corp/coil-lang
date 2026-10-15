@@ -1286,9 +1286,15 @@ impl Compiler {
     /// Call `id` through `PolyFn` local `f`: each argument's `BoxValue` tag, the call site's
     /// dictionaries and the result's `UnboxValue` tag.
     fn hir_mir_polyfn_call(&mut self, hir: &HirBody, emit: &HirEmit, id: HirId, f: HirId, args: &[HirId], t: &mut HirMirTables) {
+        let source = self.hir_polyfn_source(hir, emit, f);
+        // Only a bare type-parameter parameter is boxed; the shared body
+        // takes a concrete one as its own word (#1089).
+        let Some(bare) = self.hir_polyfn_bare_params(hir, source.as_deref(), f, args.len()) else {
+            return;
+        };
         let mut boxes = Vec::with_capacity(args.len());
         let mut arg_tys = Vec::with_capacity(args.len());
-        for &arg in args {
+        for (i, &arg) in args.iter().enumerate() {
             // Emission passes the boxed-layout word: the MIR word only when
             // that is the argument's own.
             if self.hir_natural(hir, emit, arg) != Some(Rep::Word(ValueLayout::Boxed)) {
@@ -1298,11 +1304,10 @@ impl Compiler {
                 return;
             };
             let ty = apply_ty_prune(self.checker.subst(), ty);
-            boxes.push(Self::ty_to_value_tag(&ty).map(|tag| tag as u32));
+            boxes.push(if bare[i] { Self::ty_to_value_tag(&ty).map(|tag| tag as u32) } else { None });
             arg_tys.push(ty);
         }
         let call_ty = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));
-        let source = self.hir_polyfn_source(hir, emit, f);
         // The call site's dictionaries, as emission pushes them.
         let dicts = match &source {
             Some(source) => {
@@ -1324,6 +1329,31 @@ impl Compiler {
         };
         let unbox = if unbox { call_ty.as_ref().and_then(Self::ty_to_value_tag).map(|tag| tag as u32) } else { None };
         t.poly_calls.insert(id.0, crate::mir::HirPolyCall { boxes, dicts, unbox });
+    }
+
+    /// Whether each of a `PolyFn` call's `n` parameters is a bare type
+    /// variable: from the source function's scheme, else the local's own
+    /// un-instantiated type.
+    fn hir_polyfn_bare_params(&self, hir: &HirBody, source: Option<&str>, f: HirId, n: usize) -> Option<Vec<bool>> {
+        let params = match source {
+            Some(source) => self.checker.fn_param_tys(source)?,
+            None => {
+                let HirKind::Local(local) = hir.expr(f).kind else {
+                    return None;
+                };
+                let mut ty = apply_ty_prune(self.checker.subst(), hir.local(local).ty.as_ref()?);
+                while let Ty::Forall { body, .. } = ty {
+                    ty = *body;
+                }
+                let mut params = Vec::new();
+                while let Ty::Fun(p, ret) = ty {
+                    params.push(*p);
+                    ty = *ret;
+                }
+                params
+            }
+        };
+        (params.len() >= n).then(|| params[..n].iter().map(|p| matches!(p, Ty::Var(_))).collect())
     }
 
     /// Each argument's closure adapter: a function value the generic
