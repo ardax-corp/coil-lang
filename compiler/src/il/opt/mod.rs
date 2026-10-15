@@ -36,10 +36,6 @@ pub struct OptimizeOptions {
     /// Record body tiers and HIR counters into [`stats::OptStats`] (COI-131).
     /// Default **off**.
     pub collect_stats: bool,
-    /// Dense specialize + MIR→LIR body replace. On for every named
-    /// opt level, including `-Og` (B8). Debugger-attached compiles
-    /// keep this on; the VM debugger steps the reconstruct.
-    pub mir_specialize: bool,
 }
 
 // Default is `OptLevel::Standard.options()`.

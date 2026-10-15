@@ -30,8 +30,8 @@ source-level MIR stepping rewrite.
   local has no reconstruct slot (stack-only / CALL convoy TOS). A future
   native tier must refuse incomplete maps — do not resume from them.
 - Debugger-attached compiles (`Pipeline::set_debugger_attached`, used by
-  `coil debug`) and `-Og` / `OptLevel::Debug` **keep**
-  `OptimizeOptions::mir_specialize`. `-Og` otherwise runs only the HIR constant fold
+  `coil debug`) and `-Og` / `OptLevel::Debug` still take every body
+  from its MIR. `-Og` otherwise runs only the HIR constant fold
   (no inlining, scalar replacement or unroll). Stops stay on
   the reconstruct (fuse-IL, LIR, or dense).
 

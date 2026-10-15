@@ -94,6 +94,16 @@ pub fn host_edge_spec(id: u16) -> Option<HostSpec> {
     if let Some(spec) = host_spec(id) {
         return Some(spec);
     }
+    if embedder_native(id) {
+        // Its arity is the checker's, as the call site already agreed;
+        // every argument is a Value word ([`host_variadic`]).
+        return Some(HostSpec {
+            id,
+            name: "embedder native",
+            args: I64_0,
+            ret: I64,
+        });
+    }
     let native = HOST_NATIVES.get(id as usize)?;
     if native.id != id {
         return None;
@@ -110,10 +120,18 @@ pub fn host_edge_spec(id: u16) -> Option<HostSpec> {
 /// A native taking more arguments than its declared arity: a thread spawn
 /// passes the function's own arguments after it.
 pub fn host_variadic(id: u16) -> bool {
-    matches!(
-        HOST_NATIVES.get(id as usize).map(|n| n.name),
-        Some("thread_spawn" | "thread_spawn_shared")
-    )
+    embedder_native(id)
+        || matches!(
+            HOST_NATIVES.get(id as usize).map(|n| n.name),
+            Some("thread_spawn" | "thread_spawn_shared")
+        )
+}
+
+/// A native the embedder registered (`Compiler::register`,
+/// `Pipeline::register_host_native`): its id follows the frozen
+/// [`HOST_NATIVES`] table, as the VM registry numbers it.
+pub fn embedder_native(id: u16) -> bool {
+    id as usize >= HOST_NATIVES.len()
 }
 
 /// Whether a HostInvoke of native `id` may pass `n` arguments to a spec
@@ -132,8 +150,9 @@ pub fn host_arg_ok(id: u16, expected: MirTy, actual: MirTy) -> bool {
         // A generic word edge takes a `bool` (`set_nodelay(s, true)`) as
         // the Value word it is, as its result may be one.
         || (host_spec(id).is_none() && expected == MirTy::I64 && actual == MirTy::Bool)
-        // A packed kernel's scalar operand (`10.0 - a`) is its word.
-        || (packed_la(id) && expected == MirTy::I64 && actual == MirTy::F64)
+        // A packed kernel's scalar operand (`10.0 - a`) is its word, as an
+        // embedder native's `float` argument or result is.
+        || ((packed_la(id) || embedder_native(id)) && expected == MirTy::I64 && actual == MirTy::F64)
 }
 
 /// A packed linear-algebra kernel: its operands are heap arrays or tuples

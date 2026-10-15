@@ -108,6 +108,38 @@ fn compile_fn_body(src: &str, name: &str) -> Vec<Byte> {
     bc[start..end].to_vec()
 }
 
+/// Like [`compile_fn_body`], with no inlining: `main` calls `name`, so the
+/// body is kept (a body nothing calls is shaken) but not spliced away.
+fn compile_fn_body_no_inline(src: &str, name: &str) -> Vec<Byte> {
+    let (bc, compiler) = compile_src_compiler(src, |c| c.inline_cost.max_inline_cost = 0);
+    let start = *compiler.functions.get(name).unwrap_or_else(|| panic!("no fn `{name}`"));
+    let end = compiler.functions.values().copied().filter(|&pc| pc > start).min().unwrap_or(bc.len()).min(bc.len());
+    bc[start..end].to_vec()
+}
+
+/// A conditional branch, plain or fused.
+fn is_cond_branch(b: &Byte) -> bool {
+    use common::Instruction as I;
+    matches!(
+        b.bytecode(),
+        I::JMPT
+            | I::JMPF
+            | I::JumpIfMatch
+            | I::CmpJmpf
+            | I::CmpJmpt
+            | I::BinSlotImmJmpf
+            | I::BinSlotImmJmpt
+            | I::LogNotJmpf
+            | I::LogNotJmpt
+            | I::BinSlotSlotJmpf
+            | I::BinSlotSlotJmpt
+            | I::BinSlotSlotConstJmpf
+            | I::BinSlotSlotConstJmpt
+            | I::DenseBinJmpf
+            | I::DenseIndexJmpf
+    )
+}
+
 fn compile_src_compiler(src: &str, tune: impl FnOnce(&mut Compiler)) -> (Vec<Byte>, Compiler) {
     let mut owned = String::new();
     let needs_io = src.contains("write(")
@@ -136,19 +168,6 @@ fn compile_src_compiler(src: &str, tune: impl FnOnce(&mut Compiler)) -> (Vec<Byt
     for (name, id) in common::host_native_ids() {
         compiler.register_native_id(name, id);
     }
-    // Stable placeholder ids so Approach A packed HostInvoke lowering
-    // fires in unit tests (Pipeline assigns real ids at runtime).
-    compiler.register_native_id(machine::PACKED_DOT, 9001);
-    compiler.register_native_id(machine::PACKED_MATMUL, 9002);
-    compiler.register_native_id(machine::PACKED_MATRIX_ZIP, 9003);
-    compiler.register_native_id(machine::PACKED_MATRIX_NEG, 9004);
-    compiler.register_native_id(machine::PACKED_VEC_ARITH, 9005);
-    compiler.register_native_id(machine::GC_REGISTER_FINALIZER_NATIVE, 9100);
-    // These tests check emit_hir's stack IL with no MIR tiers: the
-    // programs run without the stdlib, which direct MIR's host edges need.
-    // They go with that lowering when it is deleted; the harness covers
-    // the default path.
-    compiler.opt_options.mir_specialize = false;
     tune(&mut compiler);
     let bc = compiler.compile("", &mut ast);
     (bc, compiler)
@@ -938,35 +957,19 @@ fn pow_zero_emits_const_one() {
     );
 }
 
-/// `if (!cond) { A } else { B }` inverts so fused JMPF sees `cond` (no LogNotJmpf).
+/// `if (!cond) { A } else { B }` inverts so the branch tests `cond` (no
+/// `LogNot` / `LogNotJmpf`), and takes the right arm.
 #[test]
 fn not_if_else_inverts_away_log_not_jmpf() {
     use common::Instruction;
-    let (bc, _pool) = compile_src(
-        r#"
-            fn f(int i) -> int {
-                if (!(i & 1)) {
-                    return 10;
-                } else {
-                    return 20;
-                }
-            }
-            "#,
-    );
-    let has_log_not_jmpf = bc
-        .iter()
-        .any(|b| matches!(b.bytecode(), Instruction::LogNotJmpf));
-    let has_bin_slot_jmp = bc.iter().any(|b| {
-        matches!(
-            b.bytecode(),
-            Instruction::BinSlotImmJmpf | Instruction::BinSlotImmJmpt
-        ) && b.bin_slot_imm_jmpf_parts().0 == Instruction::BITAND as u8
-    });
+    let src = "fn f(int i) -> int { if (!(i & 1)) { return 10; } else { return 20; } }";
+    let bc = compile_fn_body_no_inline(&format!("{src} fn main() {{ return f(3) + f(4); }}"), "f");
     assert!(
-        !has_log_not_jmpf && has_bin_slot_jmp,
-        "expected BinSlotImmJmpf/Jmpt(BITAND) without LogNotJmpf; opcodes: {:?}",
+        !bc.iter().any(|b| matches!(b.bytecode(), Instruction::LogNot | Instruction::LogNotJmpf)),
+        "expected the `!` folded into the branch; opcodes: {:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
     );
+    run_src_ok(&format!("{src} fn main() {{ if f(3) != 20 || f(4) != 10 {{ panic \"arm\"; }} }}"));
 }
 
 /// Commuted form `8 * x` on a byte uses the same SHL lowering (LHS factor).
@@ -1259,8 +1262,6 @@ fn type_errors_appear_in_messages() {
 fn register_native_visible_to_emitter() {
     use crate::typechecking::ty::{string, unit};
     let mut c = Compiler::default();
-    // Synthetic native ids: no MIR tiers, as `compile_src_compiler`.
-    c.opt_options.mir_specialize = false;
     c.register("native_print", &[string()], &unit());
     // Native calls registered with the checker should compile without errors.
     let mut ast = Pratt::default()
@@ -1540,27 +1541,10 @@ fn match_emits_jump_if_match_cascade() {
     );
 }
 
-/// Codegen test 3: a `default` match arm emits `POP` to
-/// discard the scrutinee.
+/// Codegen test 3: a `default` match arm takes any scrutinee.
 #[test]
 fn default_match_arm_emits_pop() {
-    use common::Instruction;
-    let (bc, _pool) = compile_src(
-        "let x = Option::Some(42); \
- match x { default => 42 };",
-    );
-
-    // The catch-all arm is the LAST (and only) arm, reached
-    // by fall-through from the scrutinee. It emits `POP` to
-    // discard the scrutinee.
-    let pop_count = bc
-        .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::POP))
-        .count();
-    assert!(
-        pop_count >= 1,
-        "expected at least one POP for the catch-all scrutinee"
-    );
+    run_src_ok("fn main() { let x = Option::Some(42); let n = match x { default => 7 }; if n != 7 { panic \"default arm\"; } }");
 }
 
 /// Codegen test 4 (LOW #5): a `match` with a
@@ -1853,38 +1837,16 @@ fn branching_binop_operands_keep_order() {
     );
 }
 
-/// Nested call args are not stack leaves ,  binop arms must stage so the
-/// nested CALL's temps cannot bury the stacked sibling.
+/// Nested call args are not stack leaves: the nested CALL's temps must not
+/// bury the stacked sibling of a binop.
 #[test]
 fn nested_call_arg_binop_arms_stage_through_temps() {
-    use common::Instruction;
-    let (bc, _) = compile_src(
+    run_src_ok(
         "fn leaf(int n) -> int { \
                if n <= 0 { return 1; } \
                return n + leaf(n - 1); \
              } \
-             fn main() { return leaf(leaf(2)) + leaf(3); }",
-    );
-    let call_pos: Vec<usize> = bc
-        .iter()
-        .enumerate()
-        .filter(|(_, b)| *b.bytecode() == Instruction::CALL)
-        .map(|(i, _)| i)
-        .collect();
-    // main: CALL leaf(2), CALL leaf(leaf(2)), CALL leaf(3) ,  at least 3.
-    assert!(
-        call_pos.len() >= 3,
-        "expected nested + sibling CALLs; ops={:?}",
-        bc.iter().map(|b| *b.bytecode()).collect::<Vec<_>>()
-    );
-    // Between the outer nested CALL and the sibling CALL there must be a
-    // staging STORE (result of lhs parked before rhs emit).
-    let outer_nested = call_pos[call_pos.len() - 2];
-    let sibling = call_pos[call_pos.len() - 1];
-    assert!(
-        (outer_nested + 1..sibling).any(|i| *bc[i].bytecode() == Instruction::STORE),
-        "expected STORE staging between nested-arg arm and sibling; ops={:?}",
-        bc.iter().map(|b| *b.bytecode()).collect::<Vec<_>>()
+             fn main() { if leaf(leaf(2)) + leaf(3) != 18 { panic \"nested arg\"; } }",
     );
 }
 
@@ -1995,24 +1957,22 @@ fn bitand_imm_fuses_bin_slot_imm() {
     );
 }
 
-/// Eager `a && b` as an if-condition fuses to `BinSlotSlotJmpf(AND)`.
+/// Eager `a && b` as an if-condition is one bitwise AND and one branch,
+/// not two short-circuit branches.
 #[test]
-fn logical_and_if_fuses_bin_slot_slot_jmpf() {
-    use common::Instruction;
-    let (bc, _pool) = compile_src(
+fn logical_and_if_takes_one_branch() {
+    let bc = compile_fn_body_no_inline(
         "fn both(bool a, bool b) -> int { \
                if a && b { return 1; } \
                return 0; \
-             }",
+             } \
+             fn main() { return both(true, false) + both(false, true); }",
+        "both",
     );
-    assert!(
-        bc.iter().any(|b| {
-            matches!(
-                *b.bytecode(),
-                Instruction::BinSlotSlotJmpf | Instruction::BinSlotSlotJmpt
-            ) && b.bin_slot_slot_jmpf_parts().0 == Instruction::AND as u8
-        }),
-        "expected BinSlotSlotJmpf/Jmpt(AND) for a && b; opcodes: {:?}",
+    let branches = bc.iter().filter(|b| is_cond_branch(b)).count();
+    assert_eq!(
+        branches, 1,
+        "expected one branch for an eager a && b; opcodes: {:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
     );
 }
@@ -2028,7 +1988,7 @@ fn assign_add_imm_fuses_bin_slot_imm_store() {
                i = i + 1; \
                return i; \
              }",
-        |c| c.opt_options.mir_specialize = false,
+        |_| {},
     );
     let start = compiler.functions["bump"];
     let end = compiler.functions.values().copied().filter(|&pc| pc > start).min().unwrap_or(bc.len()).min(bc.len());
@@ -2370,10 +2330,7 @@ fn main() { let c = new Counter(0, 3); for x in c { write(stdout(), to_bytes(for
         .iter()
         .filter(|b| matches!(b.bytecode(), Instruction::EQ))
         .count();
-    let tag_jmp = bc
-        .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::JMPF | Instruction::JMPT))
-        .count();
+    let tag_jmp = bc.iter().filter(|b| is_cond_branch(b)).count();
     assert!(
         calls >= 2,
         "custom for-in should CALL into_iter and next; got {calls}"
@@ -2410,7 +2367,7 @@ fn main() { for x in counter() { write(stdout(), to_bytes(format(\"%i\", x))); }
         .count();
     let jmpf = bc
         .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::JMPF | Instruction::LogNotJmpf))
+        .filter(|b| is_cond_branch(b))
         .count();
     let jmp = bc
         .iter()
@@ -2421,7 +2378,7 @@ fn main() { for x in counter() { write(stdout(), to_bytes(format(\"%i\", x))); }
     assert!(done >= 1, "expected DoneCoro in for-in; got {done}");
     assert!(
         log_not + jmpf >= 1,
-        "expected done-check exit branch (LogNot/JMPF); log_not={log_not} jmpf={jmpf}"
+        "expected done-check exit branch; log_not={log_not} branches={jmpf}"
     );
     assert!(jmp >= 1, "expected back-edge JMP; got {jmp}");
 }
@@ -2712,14 +2669,14 @@ fn main() {
     assert_eq!(arity, 3, "expected arity=3 for Foo {{ x, y, z }}");
 }
 
-/// Codegen test 11 : a record construct with one
-/// field emits exactly 1 CONST followed by MAKE_ENUM with
+/// Codegen test 11 : a record construct with one field, boxed (pushed
+/// into a `Vec`), emits exactly 1 CONST followed by MAKE_ENUM with
 /// arity=1.
 #[test]
 fn record_construct_one_field_emits_correct_bytecode() {
     use common::Instruction;
     let (bc, _pool) =
-        compile_src_boxed_locals("enum E { Foo { x: int } } fn main() { let _ = E::Foo { x: 1 }; }");
+        compile_src_boxed_locals("enum E { Foo { x: int } } fn main() { let v: Vec<E> = Vec::new(); v.push(E::Foo { x: 1 }); return len(v); }");
 
     // Find the MAKE_ENUM. Its operand is tag (upper 16) and
     // arity (lower 16).
@@ -2744,41 +2701,14 @@ fn record_construct_one_field_emits_correct_bytecode() {
     );
 }
 
-/// Codegen test 12 : a match pattern with SHUFFLED record
-/// fields (`{ y: _, x: a }`) emits no STORE for binding `a`
-/// (value already in slot) and at least one POP for `_` / omitted
-/// fields. Declaration-order binding is covered by the pipeline
-/// golden `shuffled_record_pattern_binds_declaration_order_field`.
+/// Codegen test 12 : a match pattern with SHUFFLED record fields
+/// (`{ y: _, x: a }`) binds `a` to field `x`, whatever the pattern order.
 #[test]
 fn match_emits_binding_interns_in_declaration_order() {
-    use common::Instruction;
-    let (bc, _pool) = compile_src(
+    run_src_ok(
         "enum E { Foo { x: int, y: int, z: int } } \
- fn main() { \
- let e = E::Foo { x: 1, y: 2, z: 3 }; \
- let v = match e { \
- E::Foo { y: _, x: a, z: _ } => a, \
- }; \
- write(stdout(), to_bytes(format(\"%i\", v))); \
- }",
-    );
-    // `let e` / `let v` emit STORE; match binding `a` does not.
-    // An extra STORE may appear for match temps / relocate.
-    let store_count = bc
-        .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::STORE))
-        .count();
-    assert!(
-        store_count >= 2,
-        "expected ≥2 STORE (lets e/v); match binding needs none; got {store_count}"
-    );
-    let pop_count = bc
-        .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::POP))
-        .count();
-    assert!(
-        pop_count >= 1,
-        "expected at least 1 POP for the wildcard `_`"
+ fn pick(E e) -> int { return match e { E::Foo { y: _, x: a, z: _ } => a }; } \
+ fn main() { if pick(E::Foo { x: 1, y: 2, z: 3 }) != 1 { panic \"x\"; } }",
     );
 }
 
@@ -3086,41 +3016,6 @@ fn self_recursive_sites_are_not_predicate_peeled() {
     );
 }
 
-/// Codegen test 25 : two `let` bindings in the same
-/// scope emit two `STORE_POP`s ,  one per binding, with
-/// distinct slot operands (0 and 1). Fuse-IL only: dense MIR folds the
-/// dead body away.
-#[test]
-fn let_two_bindings_emit_two_store_pops() {
-    use common::Instruction;
-    let (bc, _pool) = compile_src_tuned(
-        "fn main() { \
- let x = 5; \
- let y = 10; \
- let z = x + y; \
- }",
-        |c| c.opt_options.mir_specialize = false,
-    );
-
-    let store_pops: Vec<u32> = bc
-        .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::STORE))
-        .filter_map(|b| b.load_store_single_slot())
-        .collect();
-    assert!(
-        store_pops.len() >= 2,
-        "expected ≥2 STORE for two `let` bindings; got {}",
-        store_pops.len()
-    );
-    // The slot operands should include 0 and 1 (in source order ,
-    // `x` first, then `y`).
-    assert!(
-        store_pops.contains(&0) && store_pops.contains(&1),
-        "expected STORE slots including [0, 1] for x, y; got {:?}",
-        store_pops
-    );
-}
-
 /// Codegen test 26 : `x = 10;` re-assignment emits
 /// `STORE_POP slot` (the new opcode) ,  NOT the
 /// `STORE` (a no-op since ) + `DUPLICATE`
@@ -3156,7 +3051,7 @@ fn let_x_reassignment_emits_store_pop_not_store() {
 fn const_scalar_folds_add_to_single_const() {
     use common::Instruction;
     // The fold shows as a `CONST 10` once the MIR tiers run.
-    let (bc, _pool) = compile_src_tuned("fn value() -> int { const x = 5; return x + 5; }", |c| c.opt_options.mir_specialize = true);
+    let (bc, _pool) = compile_src("fn value() -> int { const x = 5; return x + 5; }");
     let const_count = bc
         .iter()
         .filter(|b| matches!(b.bytecode(), Instruction::CONST))
@@ -3461,7 +3356,7 @@ fn if_else_ending_a_loop_body_jumps_to_the_back_edge() {
                return s; \
              } \
              fn main() { return walk(5); }",
-        |c| c.opt_options.mir_specialize = false,
+        |_| {},
     );
     let jmp = |pc: usize| *bc[pc].bytecode() == Instruction::JMP;
     for (pc, b) in bc.iter().enumerate() {
@@ -6070,12 +5965,10 @@ fn main() { \
 }";
     let mut ast = Pratt::default().parse(src).expect("parse failed");
     let mut compiler = Compiler::default();
-    // Stable ids matching Pipeline::register_io_natives order is not
-    // required ,  only the relative nesting shape is asserted.
-    // Synthetic native ids: no MIR tiers, as `compile_src_compiler`.
-    compiler.opt_options.mir_specialize = false;
-    compiler.register_native_id("stdin", 1);
-    compiler.register_native_id("read", 2);
+    for (name, id) in common::host_native_ids() {
+        compiler.register_native_id(name, id);
+    }
+    let read_id = host_id("read") as u32;
     let bc = compiler.compile("", &mut ast);
 
     let host_idxs: Vec<usize> = bc
@@ -6090,12 +5983,12 @@ fn main() { \
         host_idxs.len()
     );
     let outer_host = *host_idxs.last().expect("outer HostInvoke");
-    // Outer native id is CONST value 2, emitted after its args (which
-    // include the inner HostInvoke) but before the outer HostInvoke.
+    // Outer native id is a CONST, emitted after its args (which include
+    // the inner HostInvoke) but before the outer HostInvoke.
     let outer_const = bc[..outer_host]
         .iter()
-        .rposition(|b| matches!(b.bytecode(), Instruction::CONST) && b.value_u32() == 2)
-        .expect("outer read CONST(id=2) before outer HostInvoke");
+        .rposition(|b| matches!(b.bytecode(), Instruction::CONST) && b.value_u32() == read_id)
+        .expect("outer read CONST(id) before outer HostInvoke");
     let inner_host = host_idxs
         .iter()
         .copied()
@@ -6353,8 +6246,6 @@ fn main() {
         )
         .expect("parse failed");
     let mut compiler = Compiler::default();
-    // Synthetic native ids: no MIR tiers, as `compile_src_compiler`.
-    compiler.opt_options.mir_specialize = false;
     compiler.register("inner", &[], &int());
     compiler.register("outer", &[int()], &int());
     let outer_id = compiler.native_id("outer").expect("outer registered") as u32;
@@ -6734,6 +6625,7 @@ fn main() {
     let a = [[1, 2], [3, 4]];
     let b = [[5, 6], [7, 8]];
     let c = matmul(a, b);
+    return c[0][0];
 }
 "#,
     );
@@ -6793,7 +6685,7 @@ fn dot_emits_packed_dot_opcode() {
     let (bc, _) = compile_src(
         r#"
 fn main() {
-    let x = dot([1, 2], [3, 4]);
+    return dot([1, 2], [3, 4]);
 }
 "#,
     );
@@ -6832,9 +6724,9 @@ fn main() {
 
 fn packed_host_meta(bc: &[common::Byte]) -> u32 {
     use common::Instruction;
-    // Layout: CONST packed id (9001..=9005 in `compile_src_tuned`), the
-    // operands, CONST meta, HostInvoke.
-    let packed_id = |b: &common::Byte| matches!(b.bytecode(), Instruction::CONST) && (9001..=9005).contains(&b.operand_u32());
+    // Layout: CONST packed id, the operands, CONST meta, HostInvoke.
+    let ids = u32::from(common::PACKED_DOT_ID)..=u32::from(common::PACKED_VEC_ARITH_ID);
+    let packed_id = |b: &common::Byte| matches!(b.bytecode(), Instruction::CONST) && ids.contains(&b.operand_u32());
     let id_at = bc.iter().position(packed_id).expect("expected a packed native id");
     let hi = id_at
         + bc[id_at..]
@@ -6973,7 +6865,7 @@ fn float_dot_emits_packed_dot_with_float_flag() {
     let (bc, _) = compile_src(
         r#"
 fn main() {
-    let x = dot([1.0, 2.0], [3.0, 4.0]);
+    return dot([1.0, 2.0], [3.0, 4.0]);
 }
 "#,
     );
@@ -6998,7 +6890,7 @@ fn aggregate_zip_len8_emits_packed_vec_arith() {
 fn main() {
     let a = [1, 2, 3, 4, 5, 6, 7, 8];
     let b = [2, 2, 2, 2, 2, 2, 2, 2];
-    let _ = a * b;
+    return (a * b)[0];
 }
 "#,
     );
@@ -7077,7 +6969,7 @@ fn aggregate_packed_vec_arith_meta_flags() {
         r#"
 fn main() {
     let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
-    let _ = 10.0 - a;
+    return (10.0 - a)[0];
 }
 "#,
     );
@@ -7098,7 +6990,7 @@ fn main() {
         r#"
 fn main() {
     let a = (1, 2, 3, 4, 5, 6, 7, 8);
-    let _ = -a;
+    return (-a)[0];
 }
 "#,
     );
@@ -8052,11 +7944,12 @@ fn main() {
 /// niche-Result Err-bit test (`DUP; CONST 1; BITAND; JMPF`) into one op
 /// once a `DUPLICATE` keeps the pointer alive under the jump.
 fn tests_err_bit(b: &Byte) -> bool {
+    let bitand = Instruction::BITAND as u8;
     match b.bytecode() {
         Instruction::BITAND => true,
-        Instruction::CmpJmpf | Instruction::CmpJmpt => {
-            b.cmp_jmpf_parts().0 == Instruction::BITAND as u8
-        }
+        Instruction::CmpJmpf | Instruction::CmpJmpt => b.cmp_jmpf_parts().0 == bitand,
+        Instruction::BinSlotImm => b.bin_slot_imm_parts().0 == bitand,
+        Instruction::BinSlotImmJmpf | Instruction::BinSlotImmJmpt => b.bin_slot_imm_jmpf_parts().0 == bitand,
         _ => false,
     }
 }
@@ -8633,12 +8526,18 @@ fn main() {
         "return e? must stay two-slot; opcodes={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
     );
-    // Identity `return e?` / `return Ok(e?)` is CALL then RETURN, no tag test.
-    let has_call_then_return = bc.windows(2).any(|w| {
-        matches!(w[0].bytecode(), Instruction::CALL)
-            && w[0].call_ret_words() == 2
-            && matches!(w[1].bytecode(), Instruction::RETURN)
-            && w[1].return_words() == 2
+    // Identity `return e?` / `return Ok(e?)` is CALL then RETURN, no tag
+    // test: only slot moves of the pair between them.
+    let has_call_then_return = bc.iter().enumerate().any(|(i, b)| {
+        matches!(b.bytecode(), Instruction::CALL)
+            && b.call_ret_words() == 2
+            && bc[i + 1..]
+                .iter()
+                .take_while(|b| matches!(b.bytecode(), Instruction::STORE | Instruction::LOAD))
+                .count()
+                .checked_add(i + 1)
+                .and_then(|r| bc.get(r))
+                .is_some_and(|r| matches!(r.bytecode(), Instruction::RETURN) && r.return_words() == 2)
     });
     assert!(
         has_call_then_return,
