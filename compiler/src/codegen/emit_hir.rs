@@ -1520,6 +1520,7 @@ impl Compiler {
             record_pats,
             matrix_wraps: &tables.matrix_wraps,
             block_ons: &tables.block_ons,
+            field_news: &tables.field_news,
             linalgs: &tables.linalgs,
             array_copies: &tables.array_copies,
             crosses: &tables.crosses,
@@ -5839,7 +5840,7 @@ impl Compiler {
 
     /// `new C(args).f` of a class with no `drop`: the arguments, their
     /// field types, and the index of `f`.
-    fn hir_field_of_new(&self, hir: &HirBody, base: HirId, field: &str) -> Option<(Vec<HirId>, Vec<Ty>, usize)> {
+    pub(super) fn hir_field_of_new(&self, hir: &HirBody, base: HirId, field: &str) -> Option<(Vec<HirId>, Vec<Ty>, usize)> {
         let HirKind::Make {
             kind: MakeKind::Class(name),
             args,
