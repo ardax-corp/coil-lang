@@ -29,3 +29,10 @@ fn fast() -> Mode {
 fn show_reader(int n) -> string {
     return format("%v", new Reader(n));
 }
+
+fn is_fast(Mode m) -> bool {
+    return match m {
+        Mode::Fast => true,
+        Mode::Slow => false,
+    };
+}

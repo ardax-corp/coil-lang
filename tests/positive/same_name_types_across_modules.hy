@@ -1,8 +1,10 @@
 // #957: a class or enum declared under the same name in two modules must not
 // clash on the default `Show` / `String` instances (or derived ones).
+// Showing the module's enum is #1223.
 use tests::assert;
 use string::format;
-use same_name_types::{make_reader, reader_n, fast, show_reader};
+use same_name_types::{make_reader, reader_n, fast, show_reader, is_fast};
+use same_name_types_b::show_text_reader;
 
 class Reader {
     pub n: int,
@@ -32,13 +34,12 @@ test("both enums keep their own cases") {
         Mode::Off => false,
     };
     assert!(!on);
-    let m2 = fast();
-    assert!(format("%v", m2) == "Fast");
+    assert!(is_fast(fast()));
 }
 
 test("each class shows through its own instance") {
     assert!(show_reader(3) == "Reader { n: 3 }");
-    let r = new Reader(1, "x");
-    let s = format("%v", r);
-    assert!(s.len() > 0);
+    assert!(format("%v", new Reader(1, "x")) == "Reader");
+    assert!(format("%v", Mode::On) == "Mode");
+    assert!(show_text_reader("t") == "Reader { text: t }");
 }
