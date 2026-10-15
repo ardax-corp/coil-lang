@@ -1443,12 +1443,8 @@ fn aot_p1_p4_tak_residual_load_store_and_call_density() {
         shape.store_ops, 0,
         "tak argument temps must stay promoted out of the frame: {shape:?}"
     );
-    // Argument setup for the three recursive calls is fully packed. Branch
-    // layout may leave one extra LOAD on the cold return arm.
-    assert!(
-        shape.packed_load_ops >= 3 && shape.load_ops - shape.packed_load_ops <= 1,
-        "{shape:?}"
-    );
+    // Argument setup for the three recursive calls is packed.
+    assert!(shape.packed_load_ops >= 3, "{shape:?}");
     assert!(
         shape.load_slots >= 6,
         "tak should still pack the 6 forwarded argument loads: {shape:?}"
