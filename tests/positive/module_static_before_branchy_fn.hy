@@ -2,7 +2,7 @@
 // has branches (the static-init setup is laid out after that function and
 // must still call each initializer). Failed at -O0 and under `--coverage`.
 use tests::assert;
-use static_then_branchy_fn::{RATIO, COUNT, NAME, magnitude};
+use static_then_branchy_fn::{RATIO, COUNT, NAME, magnitude, power};
 
 test("float const static is initialized") {
     assert!(RATIO > 3.14);
@@ -17,4 +17,9 @@ test("int and string statics are initialized") {
 test("the function after the statics still runs") {
     assert!(magnitude(0 - 3) == 3);
     assert!(magnitude(COUNT) == 41);
+}
+
+test("a loop function after the statics still runs") {
+    assert!(power(2, 10) == 1024);
+    assert!(power(COUNT, 0) == 1);
 }

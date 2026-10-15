@@ -14,3 +14,18 @@ fn magnitude(int x) -> int {
     }
     return x;
 }
+
+// A counted loop the compiler may split into parallel loop bodies, laid out
+// between this module's code and the static-init setup.
+fn power(int base, int exp) -> int {
+    if exp < 0 {
+        return 0;
+    }
+    let r = 1;
+    let i = 0;
+    while i < exp {
+        r = r * base;
+        i = i + 1;
+    }
+    return r;
+}
