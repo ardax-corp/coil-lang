@@ -2044,7 +2044,21 @@ impl Compiler {
                 (names, has_rest, rest_ty)
             };
             let call_span = body.exprs[i].span;
-            let args = args.clone();
+            let mut args = args.clone();
+            // `f(...vec)` into a `T... xs` rest: the `Vec` is the pack.
+            let whole_rest = match args.last().map(|&a| &body.expr(a).kind) {
+                Some(&HirKind::Spread(inner)) if has_rest && !tuple_rest => {
+                    let ty = body.expr(inner).ty.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t));
+                    match ty {
+                        Some(ty) if crate::typechecking::ty::vec_element_ty(&ty).is_some() => {
+                            args.pop();
+                            Some(inner)
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
             let b = out.get_or_insert_with(|| body.clone());
             let flat = self.hir_flatten_spreads(b, &args)?;
             let fixed_count = if has_rest { names.len().saturating_sub(1) } else { names.len() };
@@ -2078,6 +2092,7 @@ impl Compiler {
             }
             // A generic pack's type is its items' one ground type.
             let rest_ty = match rest_ty {
+                _ if whole_rest.is_some() => None,
                 Some(declared) if generic => {
                     let item = rest.first().and_then(|&r| b.expr(r).ty.clone()).map(|t| apply_ty_prune(self.checker.subst(), &t));
                     let same = |t: &Ty| rest.iter().all(|&r| b.expr(r).ty.as_ref().map(|u| apply_ty_prune(self.checker.subst(), u)).as_ref() == Some(t));
@@ -2101,7 +2116,12 @@ impl Compiler {
                 return Err("call-argument");
             }
             let mut new_args = slots.into_iter().flatten().collect::<Vec<_>>();
-            if pack {
+            if let Some(inner) = whole_rest {
+                if !rest.is_empty() || filled < fixed_count {
+                    return Err("call-argument");
+                }
+                new_args.push(inner);
+            } else if pack {
                 let span = (call_span.1, call_span.1);
                 let kind = MakeKind::Array;
                 new_args.push(Self::hir_push(b, &self.checker, HirKind::Make { kind, args: rest }, rest_ty, span));
