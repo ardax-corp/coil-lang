@@ -628,6 +628,10 @@ pub struct Compiler {
     hir_par_tail: Option<Box<compiler::emit_hir::HirParTail>>,
     /// A body's anonymous `fn`s, emitted after its function record.
     hir_lambda_tail: Vec<compiler::emit_hir::HirLambdaTail>,
+    /// Closure adapters ([`Compiler::hir_fn_adapter`]) by unboxed tags,
+    /// and those still to emit after the current body.
+    hir_fn_adapters: HashMap<Vec<Option<u32>>, crate::il::Label>,
+    hir_adapter_tail: Vec<(crate::il::Label, Vec<Option<crate::typechecking::Ty>>)>,
     /// When false, skip auto fork-join even if `COIL_AUTO_PAR` is on.
     auto_par: bool,
 
@@ -835,6 +839,8 @@ impl Default for Compiler {
             loop_par_forks: 0,
             hir_par_tail: None,
             hir_lambda_tail: Vec::new(),
+            hir_fn_adapters: HashMap::new(),
+            hir_adapter_tail: Vec::new(),
             auto_par: true,
             operand_stack_slots: crate::typechecking::DEFAULT_OPERAND_STACK_SLOTS,
             opt_options: crate::il::opt::OptimizeOptions::default(),

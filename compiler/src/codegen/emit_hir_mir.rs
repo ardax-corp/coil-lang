@@ -262,8 +262,10 @@ impl Compiler {
     /// this body's frame, from the HIR and the plan alone.
     fn hir_mir_frame(&self, hir: &HirBody, emit: &HirEmit) -> HirMirFrame {
         let mut bound = HashSet::new();
+        // A lambda's body is emitted for its value ([`Self::hir_lambda_fn`]).
         if let Some(root) = hir.root {
-            self.hir_mir_bound(hir, emit, root, false, false, &mut bound);
+            let value = hir.kind == crate::hir::BodyKind::Lambda;
+            self.hir_mir_bound(hir, emit, root, value, false, &mut bound);
         }
         let mut frame = HirMirFrame {
             slots: vec![None; hir.locals.len()],
@@ -1008,6 +1010,7 @@ impl Compiler {
             boxed_ret: false,
             dicts: Vec::new(),
             boxes: Vec::new(),
+            adapt: Vec::new(),
             unbox: None,
         };
         if raw {
@@ -1076,6 +1079,7 @@ impl Compiler {
                         boxed_ret,
                         dicts,
                         boxes,
+                        adapt: Vec::new(),
                         unbox: None,
                     },
                 );
@@ -1107,7 +1111,7 @@ impl Compiler {
             // `hir_push_dicts` and `emit_instance_dict` push them.
             let mut dicts = match call.generic.as_deref() {
                 None => Some(Vec::new()),
-                Some(g) if self.hir_generic_boxing(hir, emit, g, args, &call.params) => self.hir_mir_dict_ops(g),
+                Some(g) if self.hir_generic_boxing(hir, emit, args, &call.params) => self.hir_mir_dict_ops(g),
                 Some(_) => None,
             };
             if let Some(inst) = instance
@@ -1148,6 +1152,7 @@ impl Compiler {
                         boxed_ret,
                         dicts,
                         boxes,
+                        adapt: self.hir_mir_adapters(hir, call.generic.as_deref(), args),
                         unbox,
                     },
                 );
@@ -1179,7 +1184,7 @@ impl Compiler {
         // `hir_push_dicts` builds them (none forwarded through a slot).
         let dicts = match call.generic.as_deref() {
             None => Some(Vec::new()),
-            Some(g) if self.hir_generic_boxing(hir, emit, g, args, &call.params) => self.hir_mir_dict_ops(g),
+            Some(g) if self.hir_generic_boxing(hir, emit, args, &call.params) => self.hir_mir_dict_ops(g),
             Some(_) => None,
         };
         // Bare type parameter arguments boxed and result unboxed, as
@@ -1199,6 +1204,7 @@ impl Compiler {
                     }
                 }
             }
+            let adapt = self.hir_mir_adapters(hir, call.generic.as_deref(), args);
             let pair_args = (0..args.len()).map(|i| Self::hir_arg_rep(call, i).words() == 2).collect();
             // A `TailCall`'s callee returns for this function, so in this
             // function's words, whatever the call's own rep.
@@ -1214,6 +1220,7 @@ impl Compiler {
                     dicts,
                     boxes,
                     unbox,
+                    adapt,
                 },
             );
         }
@@ -1263,21 +1270,36 @@ impl Compiler {
         t.poly_calls.insert(id.0, crate::mir::HirPolyCall { boxes, dicts, unbox });
     }
 
-    /// Whether a call to the shared body of a generic `generic` is the
-    /// arguments' own words (each boxed where the body takes a bare type
-    /// parameter; none adapted, a lambda literal unboxing its own
-    /// parameters). Direct MIR calls the same entry then, its result
-    /// unboxed as emission unboxes it; [`Self::hir_mir_dict_ops`] says
-    /// whether it can pass the dictionaries.
-    fn hir_generic_boxing(&self, hir: &HirBody, emit: &HirEmit, generic: &HirGeneric, args: &[HirId], params: &[ValueLayout]) -> bool {
+    /// Each argument's closure adapter, as emission wraps it
+    /// (`hir_adapt_fn_arg`): a function value the generic callee calls
+    /// with boxed arguments. A lambda literal unboxes them itself.
+    fn hir_mir_adapters(&mut self, hir: &HirBody, generic: Option<&HirGeneric>, args: &[HirId]) -> Vec<Option<(crate::il::Label, u32)>> {
+        let Some(g) = generic else {
+            return Vec::new();
+        };
+        args.iter()
+            .zip(&g.adapt)
+            .map(|(&arg, unbox)| match unbox {
+                Some(unbox) if !matches!(hir.expr(arg).kind, HirKind::Lambda { .. }) => Some(self.hir_fn_adapter(unbox)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Whether a call to the shared body of a generic is the arguments'
+    /// own words (each boxed where the body takes a bare type parameter; a
+    /// function value an adapter wraps, or a lambda literal unboxing its
+    /// own parameters, its own word too). Direct MIR calls the same entry
+    /// then, its result unboxed as emission unboxes it;
+    /// [`Self::hir_mir_dict_ops`] says whether it can pass the
+    /// dictionaries.
+    fn hir_generic_boxing(&self, hir: &HirBody, emit: &HirEmit, args: &[HirId], params: &[ValueLayout]) -> bool {
         args.len() == params.len()
-            && args.iter().zip(params).enumerate().all(|(i, (&arg, &param))| {
-                let lambda = matches!(hir.expr(arg).kind, HirKind::Lambda { .. });
+            && args.iter().zip(params).all(|(&arg, &param)| {
                 // Each argument goes from its own word, or boxed from a
                 // pair (a tagged one then boxed to its tag), as a plain
                 // call passes them.
-                let passes = self.hir_arg_passes(hir, emit, arg, param) || self.hir_niche_arg(hir, emit, arg, param).is_some();
-                (lambda || generic.adapt.get(i).is_none_or(Option::is_none)) && passes
+                self.hir_arg_passes(hir, emit, arg, param) || self.hir_niche_arg(hir, emit, arg, param).is_some()
             })
     }
 

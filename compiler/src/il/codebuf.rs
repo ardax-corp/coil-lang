@@ -425,13 +425,6 @@ impl CodeBuf {
         }
     }
 
-    /// Mark the last recorded function [`IlFunc::stack_ok`].
-    pub fn set_last_func_stack_ok(&mut self) {
-        if let Some(f) = self.funcs.last_mut() {
-            f.stack_ok = true;
-        }
-    }
-
     /// Mark the last recorded function [`IlFunc::pinned`].
     pub fn set_last_func_pinned(&mut self) {
         if let Some(f) = self.funcs.last_mut() {

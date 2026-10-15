@@ -97,6 +97,10 @@ pub struct HirCallSite {
     /// The result's `UnboxValue` tag, where a shared generic returns a
     /// bare type parameter.
     pub unbox: Option<u32>,
+    /// Each argument's closure adapter, where the callee calls the
+    /// function value with boxed arguments: `MakeFn` of the adapter's
+    /// entry (the label, then the operand) over the value (empty: none).
+    pub adapt: Vec<Option<(Label, u32)>>,
 }
 
 /// A trait method or operator on a bound type parameter in a shared
@@ -3830,6 +3834,13 @@ impl Lower<'_> {
                 (Val::V(v), false) if boxed && self.b.value_ty(v) != MirTy::HeapRef => return Err("call argument boxed".into()),
                 // A bare type parameter of a shared generic: the word boxed
                 // to its tag, as HIR emission's `BoxValue`.
+                (Val::V(v), false) if let Some(&Some((target, operand))) = site.adapt.get(i) => {
+                    if self.b.value_ty(v) != MirTy::HeapRef {
+                        return Err("call argument adapter".into());
+                    }
+                    let f = self.at_expr(arg, |l| l.b.ins_alloc(MirAllocKind::Fn { target, operand, mask: 0 }, vec![v]).map_err(mir))?;
+                    words.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![f]).map_err(mir)?);
+                }
                 (Val::V(v), false) if let Some(tag) = tag => {
                     let boxed = self.at_expr(arg, |l| l.b.ins_alloc(MirAllocKind::Boxed { tag }, vec![v]).map_err(mir))?;
                     words.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![boxed]).map_err(mir)?);

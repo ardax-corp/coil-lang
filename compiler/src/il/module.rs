@@ -519,7 +519,7 @@ impl IlModule {
             // past a program error) has no direct MIR to miss.
             .filter(|&i| {
                 let meta = &self.funcs[i].meta;
-                tier[i] == "fuse" && !meta.stack_ok && (meta.hir_mir.is_some() || meta.hir_mir_why.is_some())
+                tier[i] == "fuse" && (meta.hir_mir.is_some() || meta.hir_mir_why.is_some())
             })
             .map(|i| {
                 let body = &self.funcs[i];
