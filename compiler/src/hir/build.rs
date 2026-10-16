@@ -1304,13 +1304,15 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                     E::Identifier(n) | E::Type(n) => n.to_string(),
                     other => other.to_string(),
                 };
-                let args = args.as_ref().map_or_else(Vec::new, |a| self.exprs(b, a));
+                let mut args = args.as_ref().map_or_else(Vec::new, |a| self.exprs(b, a));
+                let ahead = self.named_args_in_source_order(b, span_of(node), &mut args);
                 let invariants = match self.invariants.get(&name) {
                     Some(inv) if super::contract_level().checks_ensures() => inv.clone(),
                     _ => Vec::new(),
                 };
                 let fname = format!("new {name}");
                 let made = self.emit(b, node, HirKind::Make { kind: MakeKind::Class(name), args });
+                let made = self.after(b, span_of(node), ahead, made);
                 if invariants.is_empty() {
                     return made;
                 }
@@ -1764,15 +1766,17 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                     .and_then(|i| self.sidecar.def_id(i))
                     .or_else(|| id.and_then(|i| self.sidecar.def_id(i)));
                 let overload = id.and_then(|i| self.sidecar.overload(i)).map(|o| o.candidate_id);
-                let args = self.exprs(b, args);
-                self.emit(
+                let mut args = self.exprs(b, args);
+                let stmts = self.named_args_in_source_order(b, span_of(node), &mut args);
+                let call = self.emit(
                     b,
                     node,
                     HirKind::Call {
                         callee: Callee::Named { name: n.to_string(), def, overload },
                         args,
                     },
-                )
+                );
+                self.after(b, span_of(node), stmts, call)
             }
             E::QualifiedAccess { owner, member } => {
                 if self.checker.tag_for(owner, member).is_some() {
@@ -1782,15 +1786,17 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 let id = self.node_id(node);
                 let overload = id.and_then(|i| self.sidecar.overload(i)).map(|o| o.candidate_id);
                 let def = self.node_id(callee_node).and_then(|i| self.sidecar.def_id(i));
-                let args = self.exprs(b, args);
-                self.emit(
+                let mut args = self.exprs(b, args);
+                let stmts = self.named_args_in_source_order(b, span_of(node), &mut args);
+                let call = self.emit(
                     b,
                     node,
                     HirKind::Call {
                         callee: Callee::Named { name: format!("{owner}::{member}"), def, overload },
                         args,
                     },
-                )
+                );
+                self.after(b, span_of(node), stmts, call)
             }
             E::Access(recv, method) => {
                 let recv = self.expr(b, recv);
@@ -1868,6 +1874,60 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         let make = self.make_variant(b, node, enum_name, variant, args, Some(decl_names));
         let ty = self.ty_at(b, make);
         self.synth(b, span, HirKind::Block { stmts, tail: Some(make) }, ty)
+    }
+
+    /// Named arguments run in the order they are written (#1365): the
+    /// call shapes them into parameter or field order later, so each
+    /// argument that is not a literal is read into a temp first, in source
+    /// order. Returns the `let`s to run ahead of the call.
+    fn named_args_in_source_order(&mut self, b: &mut BodyBuilder, span: Span, args: &mut [HirId]) -> Vec<HirId> {
+        let named = |b: &BodyBuilder, a: HirId| matches!(b.body.exprs[a.0 as usize].kind, HirKind::Named { .. });
+        let lit = |b: &BodyBuilder, a: HirId| matches!(b.body.exprs[a.0 as usize].kind, HirKind::Lit(_));
+        // Reads and arithmetic on them: nothing an argument runs can change.
+        fn pure(b: &BodyBuilder, a: HirId) -> bool {
+            match &b.body.exprs[a.0 as usize].kind {
+                HirKind::Lit(_) | HirKind::Local(_) | HirKind::Global { .. } => true,
+                HirKind::Named { value, .. } | HirKind::Un { operand: value, .. } | HirKind::Field { base: value, .. } => pure(b, *value),
+                HirKind::Bin { lhs, rhs, .. } | HirKind::Logic { lhs, rhs, .. } => pure(b, *lhs) && pure(b, *rhs),
+                _ => false,
+            }
+        }
+        let value = |b: &BodyBuilder, a: HirId| match b.body.exprs[a.0 as usize].kind {
+            HirKind::Named { value, .. } => value,
+            _ => a,
+        };
+        if !args.iter().any(|&a| named(b, a))
+            || args.iter().any(|&a| matches!(b.body.exprs[a.0 as usize].kind, HirKind::Spread(_)))
+            || args.iter().filter(|&&a| !lit(b, value(b, a))).count() < 2
+            || args.iter().all(|&a| pure(b, a))
+        {
+            return Vec::new();
+        }
+        let mut stmts = Vec::new();
+        for (i, arg) in args.iter_mut().enumerate() {
+            let v = value(b, *arg);
+            if lit(b, v) {
+                continue;
+            }
+            let ty = self.ty_at(b, v);
+            let t = b.temp(&format!("arg{i}"), ty.clone());
+            stmts.push(self.synth(b, span, HirKind::Let { local: t, init: Some(v) }, Some(coil_ty::unit())));
+            let read = self.synth(b, span, HirKind::Local(t), ty);
+            match &mut b.body.exprs[arg.0 as usize].kind {
+                HirKind::Named { value, .. } => *value = read,
+                _ => *arg = read,
+            }
+        }
+        stmts
+    }
+
+    /// `call` run after `stmts` (the source-order argument temps).
+    fn after(&mut self, b: &mut BodyBuilder, span: Span, stmts: Vec<HirId>, call: HirId) -> HirId {
+        if stmts.is_empty() {
+            return call;
+        }
+        let ty = self.ty_at(b, call);
+        self.synth(b, span, HirKind::Block { stmts, tail: Some(call) }, ty)
     }
 
     fn make_variant(&mut self, b: &mut BodyBuilder, node: &Output<'_>, enum_name: &str, variant: &str, args: Vec<HirId>, fields: Option<Vec<String>>) -> HirId {

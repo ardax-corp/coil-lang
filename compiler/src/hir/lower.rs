@@ -1523,7 +1523,7 @@ pub fn ffi_variadic_tags(body: &HirBody, checker: &Checker, call: HirId, items: 
 }
 
 /// Depth refusals [`refusal_at`] names an operand for.
-const STAGED: &[&str] = &["assign-index", "stack-select-depth", "adjust-value", "assign-value", "range-depth", "existential-depth", "operator-depth"];
+const STAGED: &[&str] = &["assign-index", "stack-select-depth", "adjust-value", "assign-value", "range-depth", "existential-depth", "operator-depth", "nested-let"];
 
 /// Why `body` is outside the lowered subset, or `None` when it is inside.
 pub fn refusal(body: &HirBody, checker: &Checker) -> Option<&'static str> {
@@ -2769,6 +2769,13 @@ impl Walk<'_> {
                 stmts,
                 tail: Some(tail),
             } => {
+                // A block binding temps (named arguments read in source
+                // order, #1365) above live operands runs into a temp ahead
+                // of its statement, where its `let`s sit at the top.
+                if depth != 0 && self.stage_at.is_none() && stmts.iter().any(|&s| matches!(body.expr(s).kind, HirKind::Let { .. })) {
+                    self.stage_at = Some(id);
+                    return Err("nested-let");
+                }
                 for &s in stmts {
                     self.effect(s, depth)?;
                 }
