@@ -26,6 +26,14 @@ fn sum(... xs) -> int {
     return total;
 }
 
+fn never_called(... xs) -> int {
+    return xs[9] * "only checked per call";
+}
+
+fn label(string head, ... xs) -> string {
+    return head + xs[len(xs) - 1];
+}
+
 fn forward(... xs) -> int {
     return count(...xs) * 10;
 }
@@ -48,6 +56,11 @@ test("a runtime index walks same-typed elements") {
     assert!(sum(1, 2, 3) == 6);
     assert!(sum(5) == 5);
     assert!(sum(4, 4) == 8);
+}
+
+test("fixed parameters, named or not, come before the pack") {
+    assert!(label("a", 1, "b") == "ab");
+    assert!(label(head: "c", true, 2.5, "d") == "cd");
 }
 
 test("a pack spreads into another variadic call") {
