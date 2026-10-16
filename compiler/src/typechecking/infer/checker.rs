@@ -1641,6 +1641,7 @@ impl Checker {
         if let Err(msgs) = self.pre_register_enums(ast) {
             self.messages.extend(msgs);
         }
+        self.check_duplicate_classes(ast);
         self.pre_collect_free_function_param_names(ast);
         self.pre_register_inherent_methods(ast);
         self.pre_register_typeclass_impls(ast);
@@ -2168,7 +2169,7 @@ impl Checker {
     /// node once the counter drifts (it typed `lcm`'s int `a` as the float
     /// param of a later function in coil-stdlib `num.hy`).
     fn next_walk_id(&mut self, node: &Output) -> NodeId {
-        let seq_id = self.ids.ids()[self.next_id_idx];
+        let seq_id = self.ids.ids().get(self.next_id_idx).copied();
         self.next_id_idx += 1;
         self.ids.resolve_walk_id(node, seq_id)
     }
@@ -2189,7 +2190,10 @@ impl Checker {
 
         // Key facts by the node's own id; the pre-order counter drifts when a
         // rule skips or revisits children (see `IdTable::walk_id`).
-        let seq_id = self.ids.ids()[self.next_id_idx];
+        // Synthetic nodes (a spread's per-item `Index`) consume pre-order
+        // ids too, so the counter can run past the table: those resolve by
+        // pointer or mint a synthetic id.
+        let seq_id = self.ids.ids().get(self.next_id_idx).copied();
         self.next_id_idx += 1;
         let id = self.ids.resolve_walk_id(expr, seq_id);
         self.maybe_attach_def_id(id, expr);
@@ -2913,6 +2917,18 @@ impl Checker {
                 } else if is_option_ty(&resolved) {
                     let inner =
                         option_inner(&resolved).unwrap_or_else(|| Ty::Var(self.counter.fresh()));
+                    self.ensure_option_mode(&inner, &range);
+                    inner
+                } else if matches!(resolved, Ty::Var(_))
+                    && self
+                        .current_return_ty
+                        .as_ref()
+                        .is_some_and(|t| is_option_ty(&apply_ty_prune(&self.subst, t)))
+                {
+                    // Not yet pinned (a self-recursive call) in a function
+                    // declared `-> Option<T>`: an Option `?`.
+                    let inner = Ty::Var(self.counter.fresh());
+                    self.unify(&inner_ty, &option_ty(inner.clone()), &range, "try operand");
                     self.ensure_option_mode(&inner, &range);
                     inner
                 } else if matches!(resolved, Ty::Var(_)) {
@@ -4826,7 +4842,9 @@ impl Checker {
         if let Expression::Identifier(callee) = name.1.as_ref()
             && let Some(arg_list) = args.as_deref()
                 && arg_list.len() == 1
-                    && let Expression::Spread(pack) = arg_list[0].1.as_ref() {
+                    && let Expression::Spread(pack) = arg_list[0].1.as_ref()
+                    // A rest parameter packs the spread's items instead.
+                    && !self.fn_has_rest.get(*callee).copied().unwrap_or(false) {
                         if self.next_id_idx < self.ids.ids().len() {
                             self.next_id_idx += 1;
                         }
@@ -10031,15 +10049,7 @@ impl Checker {
             .active_constraints
             .iter()
             .filter(|constraint| self.constraint_param_kind(&constraint.class).is_some())
-            .filter(|constraint| {
-                receiver_var.is_none_or(|var| {
-                    constraint.primary_var() == Some(var)
-                        || constraint
-                            .args
-                            .iter()
-                            .any(|a| matches!(a, Ty::Var(v) if *v == var))
-                })
-            })
+            .filter(|constraint| receiver_var.is_none_or(|var| self.constraint_on_var(constraint, var, false)))
             .map(|constraint| constraint.class.clone())
             .collect();
         for name in names {
@@ -10141,9 +10151,34 @@ impl Checker {
                         .generics
                         .typeclass(concrete)
                         .is_some_and(|def| def.has_superclass(class, &self.generics));
-                (covers && (constraint.is_unary_on(var) || constraint.primary_var() == Some(var)))
-                    .then(|| (idx, concrete.to_string()))
+                (covers && self.constraint_on_var(constraint, var, true)).then(|| (idx, concrete.to_string()))
             })
+    }
+
+    /// `constraint` is on `var`: as written, or with both under the current
+    /// substitution. A body can unify a type parameter with another
+    /// variable (`let ks: Vec<K> = Vec::new()` binds `K` to `Vec::new`'s
+    /// fresh element variable): the constraint still names the parameter's
+    /// own variable while the operands of a later `==` or `.hash()` on a
+    /// `K` prune to the other one, and a `K::method` names the parameter's
+    /// (#1277). `primary_only` asks for the constraint's primary variable
+    /// (or its only argument); otherwise any variable argument counts.
+    fn constraint_on_var(&self, constraint: &Constraint, var: TyVarId, primary_only: bool) -> bool {
+        let on = |c: &Constraint, v: TyVarId| {
+            c.primary_var() == Some(v)
+                || if primary_only { c.is_unary_on(v) } else { c.args.iter().any(|a| matches!(a, Ty::Var(x) if *x == v)) }
+        };
+        if on(constraint, var) {
+            return true;
+        }
+        let Ty::Var(var) = apply_ty_prune(&self.subst, &Ty::Var(var)) else {
+            return false;
+        };
+        let pruned = Constraint {
+            class: constraint.class.clone(),
+            args: constraint.args.iter().map(|a| apply_ty_prune(&self.subst, a)).collect(),
+        };
+        on(&pruned, var)
     }
 
     fn bound_method_candidates(
@@ -10154,15 +10189,7 @@ impl Checker {
         self.active_constraints
             .iter()
             .enumerate()
-            .filter(|(_, constraint)| {
-                receiver_var.is_none_or(|var| {
-                    constraint.primary_var() == Some(var)
-                        || constraint
-                            .args
-                            .iter()
-                            .any(|a| matches!(a, Ty::Var(v) if *v == var))
-                })
-            })
+            .filter(|(_, constraint)| receiver_var.is_none_or(|var| self.constraint_on_var(constraint, var, false)))
             .flat_map(|(dict_index, constraint)| {
                 self.possible_classes_for_constraint_method(constraint, method)
                     .into_iter()
@@ -11285,6 +11312,11 @@ impl Checker {
     }
 
     /// Whether `fn_name`'s Result Ok payload is itself a Result (nested).
+    /// The result-mode key of the lambda whose source starts at `start`.
+    pub fn lambda_mode_key(start: usize) -> String {
+        format!("<lambda@{start}>")
+    }
+
     pub fn fn_result_ok_is_result(&self, fn_name: &str) -> bool {
         self.result_mode_ok_is_result.contains(fn_name)
     }
@@ -13654,6 +13686,34 @@ impl Checker {
         self.ast_instance_head_ty_with(arg, &HashMap::new(), local_types)
     }
 
+    /// A second top-level `class` of a name already declared in this module
+    /// would silently replace the first (#1169): report it.
+    fn check_duplicate_classes(&mut self, ast: &Output) {
+        fn walk<'a>(node: &'a Output<'a>, seen: &mut HashSet<&'a str>, dups: &mut Vec<(&'a str, Range<usize>)>) {
+            match Checker::pre_pass_unwrap_stmt(node).1.as_ref() {
+                Expression::Class { name, .. } => {
+                    if !seen.insert(name) {
+                        dups.push((name, node.0.into_range()));
+                    }
+                }
+                Expression::Program(children) | Expression::Fragment(children) => {
+                    for child in children {
+                        walk(child, seen, dups);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut seen = HashSet::new();
+        let mut dups = Vec::new();
+        walk(ast, &mut seen, &mut dups);
+        for (name, range) in dups {
+            let mut msg = Message::error(ErrorCode::GenericTypeError, format!("Duplicate class `{name}`"), range);
+            msg.with_help(format!("a class named `{name}` was already declared in this module; remove or rename this declaration"));
+            self.messages.push(msg);
+        }
+    }
+
     /// Names of the classes and enums this module declares at the top level.
     fn collect_local_type_names<'a>(node: &'a Output<'a>, out: &mut HashSet<&'a str>) {
         match Self::pre_pass_unwrap_stmt(node).1.as_ref() {
@@ -14785,7 +14845,13 @@ impl Checker {
                     {
                         variant_names.push(vname.to_string());
                         let payload_ty = match payload {
+                            // `Unit()` declares a unit variant, as `Unit`
+                            // does (#1168).
                             EnumVariantPayload::Unit => {
+                                arities.push(0);
+                                EnumVariantPayloadTy::Unit
+                            }
+                            EnumVariantPayload::Tuple(parts) if parts.is_empty() => {
                                 arities.push(0);
                                 EnumVariantPayloadTy::Unit
                             }
@@ -17028,17 +17094,18 @@ impl Checker {
             );
             return;
         }
-        if let Some(inner) = self.fn_option_mode.clone() {
-            self.unify(&inner, inner_ty, range, "option payload");
+        // `None` carries no payload: the operand's `Option<T>` need not
+        // share the function's `T` (#1165).
+        let _ = inner_ty;
+        if self.fn_option_mode.is_some() {
             return;
         }
         if let Some(ret) = self.current_return_ty.clone() {
             let resolved = apply_ty_prune(&self.subst, &ret);
             if is_option_ty(&resolved) {
                 if let Some(existing) = option_inner(&resolved) {
-                    self.unify(&existing, inner_ty, range, "option payload");
+                    self.fn_option_mode = Some(existing);
                 }
-                self.fn_option_mode = Some(inner_ty.clone());
                 return;
             }
             if is_result_ty(&resolved) {
@@ -17049,9 +17116,10 @@ impl Checker {
                 );
                 return;
             }
-            let opt = option_ty(inner_ty.clone());
+            let payload = Ty::Var(self.counter.fresh());
+            let opt = option_ty(payload.clone());
             self.unify(&ret, &opt, range, "option return type");
-            self.fn_option_mode = Some(inner_ty.clone());
+            self.fn_option_mode = Some(payload);
         } else {
             self.error(
                 ErrorCode::InvalidTry,

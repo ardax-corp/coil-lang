@@ -1636,12 +1636,13 @@ impl Lower<'_> {
     /// returns boxed is built boxed.
     fn ret_value(&mut self, v: HirId) -> Result<Val, Refusal> {
         if self.inp.ret_pair.is_none() && self.b.func().ret_ty == Some(MirTy::HeapRef) && self.inp.pair_tys.contains_key(&v.0) {
-            let w = self.boxed_word(v)?;
-            // A box built without lowering `v` as a value (`None` made
-            // boxed: one `MakeEnum`) never consumed the returned flag:
-            // left set, it would leak into the next statement and
-            // lower a statement `if` as a returned one (#1271).
+            // The box is what returns, not the first value lowered inside
+            // it: clear the returned flag first, or a payload `match`
+            // returns its arms' words (#1164: `return Some(e?)` in a
+            // lambda). A `None` made boxed lowers no value at all; left
+            // set, the flag would leak into the next statement (#1271).
             self.ret_tail = false;
+            let w = self.boxed_word(v)?;
             return Ok(match w {
                 Some(w) => Val::V(w),
                 None => Val::Never,
@@ -6056,6 +6057,15 @@ impl Lower<'_> {
         let (payload, tag) = match self.value(scrutinee)? {
             Val::Pair(payload, tag) => (payload, tag),
             Val::Never => return Ok(Val::Never),
+            // A value that comes out boxed (an inner `r?` whose `Result`
+            // was a boxed payload, #1166): matched on its object.
+            Val::V(obj)
+                if self.b.value_ty(obj) == MirTy::HeapRef
+                    && let Some(ty) = self.expr_ty(scrutinee).cloned()
+                    && (self.inp.boxed_view)(&ty, None).is_some() =>
+            {
+                return self.match_boxed_obj(obj, &ty, arms, tail);
+            }
             _ => return Err("match scrutinee".into()),
         };
         // `Some(x) => x, None => 0`: a unit variant's payload word is `0`,
@@ -6088,7 +6098,12 @@ impl Lower<'_> {
             } else {
                 None
             };
-            self.bind_payload(&arm.pat, payload)?;
+            match arm.pat {
+                // `rest => …` binds the whole value (#1161): the pair as
+                // two words, or boxed to one.
+                HirPat::Bind(local) if i == last => self.bind_whole_pair(scrutinee, local, payload, tag)?,
+                _ => self.bind_payload(&arm.pat, payload)?,
+            }
             let val = self.arm_value(arm.body, tail)?;
             if !matches!(val, Val::Never) {
                 out.push((self.cur, val));
@@ -6119,6 +6134,12 @@ impl Lower<'_> {
         let Some(obj) = obj? else {
             return Ok(Val::Never);
         };
+        self.match_boxed_obj(obj, &ty, arms, tail)
+    }
+
+    /// [`Self::match_boxed`] on the scrutinee's object, already lowered.
+    fn match_boxed_obj(&mut self, obj: ValueId, ty: &Ty, arms: &[HirArm], tail: bool) -> Result<Val, Refusal> {
+        let ty = ty.clone();
         let last = arms.len() - 1;
         let mut hits = Vec::new();
         for arm in &arms[..last] {
@@ -6716,6 +6737,25 @@ impl Lower<'_> {
     }
 
     /// Bind a match arm's payload names to the payload word.
+    /// A binding arm's local as the whole `[payload, tag]` scrutinee.
+    fn bind_whole_pair(&mut self, scrutinee: HirId, local: HirLocal, payload: ValueId, tag: ValueId) -> Result<(), Refusal> {
+        if self.unit_local(local) {
+            return Ok(());
+        }
+        if let Some((lo, hi, lo_ty, hi_ty)) = self.pair_local(local) {
+            if self.b.value_ty(payload) != lo_ty || self.b.value_ty(tag) != hi_ty {
+                return Err("binding pair type".into());
+            }
+            self.b.def_local(lo, payload).map_err(mir)?;
+            return self.b.def_local(hi, tag).map_err(mir);
+        }
+        let ty = self.expr_ty(scrutinee).ok_or("match scrutinee")?.clone();
+        let Val::V(obj) = self.box_pair(&ty, payload, tag)? else {
+            return Err("binding pair".into());
+        };
+        self.bind(local, obj)
+    }
+
     fn bind_payload(&mut self, pat: &HirPat, payload: ValueId) -> Result<(), Refusal> {
         let HirPat::Variant { fields, .. } = pat else {
             return match pat {

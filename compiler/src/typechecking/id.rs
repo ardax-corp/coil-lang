@@ -69,8 +69,8 @@ impl IdTable {
 
     /// [`Self::walk_id`], minting a synthetic id instead of `None` so facts
     /// about an unrecorded node never overwrite another node's.
-    pub fn resolve_walk_id(&mut self, node: &Output<'_>, seq: NodeId) -> NodeId {
-        if let Some(id) = self.walk_id(node, Some(seq)) {
+    pub fn resolve_walk_id(&mut self, node: &Output<'_>, seq: Option<NodeId>) -> NodeId {
+        if let Some(id) = self.walk_id(node, seq) {
             return id;
         }
         let id = NodeId((1 << 31) + self.next_synthetic);

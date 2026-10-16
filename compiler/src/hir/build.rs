@@ -2436,6 +2436,9 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
     fn lambda(&mut self, b: &mut BodyBuilder, node: &Output<'_>, args: &Output<'_>, body: &Output<'_>) -> HirId {
         let name = format!("{}::<lambda@{}>", b.body.name, node.0.start);
         let mut inner = BodyBuilder::new(&name, BodyKind::Lambda, span_of(node));
+        let mode_key = Checker::lambda_mode_key(node.0.start);
+        inner.body.result_mode = self.checker.fn_is_result_mode(&mode_key);
+        inner.ok_is_result = self.checker.fn_result_ok_is_result(&mode_key);
         inner.outer = b.outer.clone();
         inner.outer.extend(b.scopes.iter().cloned());
         let fn_ty = self.ty_of(node);
@@ -2465,6 +2468,17 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 let inner_local = inner.body.captures[i].1;
                 if b.body.locals[outer.0 as usize].ty.is_none() {
                     b.body.locals[outer.0 as usize].ty = inner.body.locals[inner_local.0 as usize].ty.clone();
+                }
+                // Nor does a capture the lambda only calls (`f(x)`): it has
+                // the outer local's type.
+                if inner.body.locals[inner_local.0 as usize].ty.is_none() {
+                    let ty = b.body.locals[outer.0 as usize].ty.clone();
+                    for e in &mut inner.body.exprs {
+                        if matches!(e.kind, HirKind::Local(l) if l == inner_local) && e.ty.is_none() {
+                            e.ty.clone_from(&ty);
+                        }
+                    }
+                    inner.body.locals[inner_local.0 as usize].ty = ty;
                 }
             }
         }
