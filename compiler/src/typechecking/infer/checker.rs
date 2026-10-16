@@ -1293,6 +1293,29 @@ impl Checker {
         }
     }
 
+    /// A spawned closure's `use` captures are copied to the thread like its
+    /// argument, so each must be sendable too.
+    fn check_spawn_captures_sendable(&mut self, work: Option<&Output>, range: &Range<usize>) {
+        let Some(Expression::Lambda { captures, .. }) = work.map(|w| w.1.as_ref()) else {
+            return;
+        };
+        for cap in captures {
+            let Some(scheme) = self.env.lookup(cap).cloned() else {
+                continue;
+            };
+            let ty = self.instantiate_ty(&scheme);
+            let ty = apply_ty_prune(&self.subst, &ty);
+            if !self.is_thread_sendable_ty(&ty) {
+                self.error_with_help(
+                    ErrorCode::GenericTypeError,
+                    format!("spawn closure capture `{cap}` of type `{ty}` is not sendable across threads"),
+                    range.clone(),
+                    Some("a spawned closure's `use` captures are copied to the thread, so they must be sendable".to_string()),
+                );
+            }
+        }
+    }
+
     fn infer_thread_spawn_call(
         &mut self,
         arg_tys: &[Ty],
@@ -1320,6 +1343,7 @@ impl Checker {
                     &range,
                     "spawn function",
                 );
+                self.check_spawn_captures_sendable(arg_exprs.and_then(|a| a.first()), &range);
                 res_thread
             }
             2 => {
@@ -1340,6 +1364,7 @@ impl Checker {
                     &range,
                     "spawn argument",
                 );
+                self.check_spawn_captures_sendable(arg_exprs.and_then(|a| a.first()), &range);
                 let arg_resolved = apply_ty_prune(&self.subst, &arg_tys[1]);
                 if !self.is_thread_sendable_ty(&arg_resolved) {
                     self.error_with_help(
