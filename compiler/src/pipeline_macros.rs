@@ -859,7 +859,7 @@ impl Pipeline {
         });
         let expand = crate::attrs::expand_program_in(&mut generated, &module);
         messages.extend(expand.messages);
-        let nested: Vec<PendingMacro> = expand
+        let mut nested: Vec<PendingMacro> = expand
             .pending
             .into_iter()
             .map(|mut p| {
@@ -868,11 +868,8 @@ impl Pipeline {
                 p
             })
             .collect();
-        cached.push_pending_macros(nested);
         let Some(mut body) = function_body(*generated.1) else {
-            return messages;
-        };
-        let Some(ast) = cached.ast_mut() else {
+            cached.push_pending_macros(nested);
             return messages;
         };
         let replacement = if stmt {
@@ -887,10 +884,12 @@ impl Pipeline {
                 _ => None,
             };
             let Some(mut value) = value else {
+                cached.push_pending_macros(nested);
                 return messages;
             };
-            // Drop the parentheses the snippet put around the output; the
-            // tree already keeps it whole where it lands.
+            // Drop the parentheses the snippet put around the output (`(e)`
+            // is `Group(Fragment([e]))`); the tree already keeps it whole
+            // where it lands.
             while let Expression::Expr(_) = value.1.as_ref() {
                 let Expression::Expr(inner) = *value.1 else { unreachable!() };
                 value = inner;
@@ -899,7 +898,24 @@ impl Pipeline {
                 let Expression::Group(inner) = *value.1 else { unreachable!() };
                 value = inner;
             }
+            if let Expression::Fragment(items) = value.1.as_ref()
+                && items.len() == 1
+            {
+                let Expression::Fragment(mut items) = *value.1 else { unreachable!() };
+                value = items.pop().expect("one item");
+            }
+            // The output lands with the call's span (`replace_calls`); when
+            // it is itself a call, queue that call under the span it gets.
+            if matches!(value.1.as_ref(), Expression::MacroCall { .. }) {
+                for p in nested.iter_mut().filter(|p| p.target == value.0) {
+                    p.target = job.pending.target;
+                }
+            }
             Replacement::Expr(value)
+        };
+        cached.push_pending_macros(nested);
+        let Some(ast) = cached.ast_mut() else {
+            return messages;
         };
         let calls = replacements.entry(job.file.clone()).or_default();
         // A second output for one call replaces what the first put there.
