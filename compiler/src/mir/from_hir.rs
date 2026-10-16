@@ -6054,6 +6054,15 @@ impl Lower<'_> {
         let (payload, tag) = match self.value(scrutinee)? {
             Val::Pair(payload, tag) => (payload, tag),
             Val::Never => return Ok(Val::Never),
+            // A value that comes out boxed (an inner `r?` whose `Result`
+            // was a boxed payload, #1166): matched on its object.
+            Val::V(obj)
+                if self.b.value_ty(obj) == MirTy::HeapRef
+                    && let Some(ty) = self.expr_ty(scrutinee).cloned()
+                    && (self.inp.boxed_view)(&ty, None).is_some() =>
+            {
+                return self.match_boxed_obj(obj, &ty, arms, tail);
+            }
             _ => return Err("match scrutinee".into()),
         };
         // `Some(x) => x, None => 0`: a unit variant's payload word is `0`,
@@ -6122,6 +6131,12 @@ impl Lower<'_> {
         let Some(obj) = obj? else {
             return Ok(Val::Never);
         };
+        self.match_boxed_obj(obj, &ty, arms, tail)
+    }
+
+    /// [`Self::match_boxed`] on the scrutinee's object, already lowered.
+    fn match_boxed_obj(&mut self, obj: ValueId, ty: &Ty, arms: &[HirArm], tail: bool) -> Result<Val, Refusal> {
+        let ty = ty.clone();
         let last = arms.len() - 1;
         let mut hits = Vec::new();
         for arm in &arms[..last] {
