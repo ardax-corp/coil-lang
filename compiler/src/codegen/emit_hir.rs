@@ -5158,15 +5158,31 @@ impl Compiler {
             return None;
         }
         let expr = hir.expr(id);
-        let resolved = self.resolve_free_fn(name);
+        let mut resolved = self.resolve_free_fn(name);
         let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
+        // An overloaded name the checker resolved by the expected function
+        // type (`let g: int -> string = show;`): that candidate's entry.
+        let picked = self.sidecar_overload(expr.node, expr.span.0, expr.span.1);
+        if let Some((arity, rest, cand)) = picked
+            && self.checker.is_overloaded(&resolved)
+        {
+            let generic = self
+                .checker
+                .overload_candidates(&resolved)
+                .and_then(|cands| cands.iter().find(|c| c.id == cand))
+                .is_none_or(|c| !c.scheme.bounds.is_empty() || !c.scheme.constraints.is_empty());
+            if generic {
+                return None;
+            }
+            resolved = overload_fn_key(&resolved, arity, rest, cand);
+        } else if self.checker.is_overloaded(&resolved) || picked.is_some() {
+            return None;
+        }
         if !matches!(lower::classify(&self.checker, &ty), Some(ValueClass::Opaque))
             || !matches!(crate::typechecking::ty::strip_readonly(&ty), Ty::Fun(..))
-            || self.checker.is_generic_fn(&resolved)
-            || self.checker.is_overloaded(&resolved)
+            || self.checker.is_generic_fn(strip_overload_key(&resolved))
             || self.lookup_slot(name).is_some()
             || self.checker.bare_construct_at(expr.span.0, expr.span.1).is_some()
-            || self.sidecar_overload(expr.node, expr.span.0, expr.span.1).is_some()
         {
             return None;
         }
