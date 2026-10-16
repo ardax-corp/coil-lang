@@ -50,7 +50,9 @@ test("a coroutine handle is a return type and a let annotation") {
 }
 
 test("a coroutine handle is a Vec element") {
-    let hs: Vec<coroutine<int>> = [counter(), counter()];
+    let hs: Vec<coroutine<int>> = Vec::new();
+    hs.push(counter());
+    hs.push(counter());
     assert!(first(hs[0]) == 0);
     assert!(first(hs[0]) == 1);
     assert!(first(hs[1]) == 0);
