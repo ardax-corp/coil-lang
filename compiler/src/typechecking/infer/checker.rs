@@ -14793,7 +14793,13 @@ impl Checker {
                     {
                         variant_names.push(vname.to_string());
                         let payload_ty = match payload {
+                            // `Unit()` declares a unit variant, as `Unit`
+                            // does (#1168).
                             EnumVariantPayload::Unit => {
+                                arities.push(0);
+                                EnumVariantPayloadTy::Unit
+                            }
+                            EnumVariantPayload::Tuple(parts) if parts.is_empty() => {
                                 arities.push(0);
                                 EnumVariantPayloadTy::Unit
                             }
