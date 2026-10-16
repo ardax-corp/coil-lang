@@ -2970,6 +2970,62 @@ impl Compiler {
         }))
     }
 
+    /// `recv.m(a)` with fewer arguments than `m` declares (#1231): a
+    /// partial application over the receiver and the given arguments, as
+    /// [`Self::hir_partial`] makes one for a function. The receiver is the
+    /// method's first parameter.
+    fn hir_method_partial(&self, hir: &HirBody, call: HirId, key: &str, argc: usize) -> Result<Option<HirCall>, &'static str> {
+        let Some(&(fixed, rest)) = self.fn_arities.get(key) else {
+            return Ok(None);
+        };
+        let total = fixed as usize + 1;
+        if rest || argc >= total {
+            return Ok(None);
+        }
+        if self.checker.is_generic_fn(key)
+            || self.coroutine_fns.contains(key)
+            || self.two_word_return_kind(key).is_some()
+            || self.callee_has_unboxed_range_params(key)
+        {
+            return Err("callee-partial");
+        }
+        let HirKind::Call { args, .. } = &hir.expr(call).kind else {
+            return Err("callee");
+        };
+        let entry = *self.functions.get(key).ok_or("callee-partial")?;
+        let mut params = Vec::with_capacity(argc);
+        for &arg in args {
+            let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, arg).ok_or("callee-signature")?);
+            match lower::classify(&self.checker, &ty) {
+                Some(ValueClass::Enum) | None => return Err("callee-partial"),
+                Some(class) if lower::is_word(class) => params.push(self.value_layout(&ty)),
+                Some(_) => return Err("callee-partial"),
+            }
+        }
+        let ty = Self::hir_ty(hir, call).ok_or("call-type")?;
+        if lower::classify(&self.checker, ty) != Some(ValueClass::Opaque) {
+            return Err("callee-partial");
+        }
+        let mask = (1u32 << argc).wrapping_sub(1);
+        Ok(Some(HirCall {
+            key: String::new(),
+            pair: None,
+            params,
+            ret: ValueLayout::Boxed,
+            method: false,
+            mono: false,
+            builtin: Some(HirBuiltin::Partial {
+                entry: entry as u32,
+                mask,
+                operand: make_fn_operand(0, argc as u32, total as u32, false),
+            }),
+            generic: None,
+            instance: None,
+            ranges: Vec::new(),
+            mono_of: None,
+        }))
+    }
+
     /// A call the checker resolved to one arity overload, keyed as
     /// `compile_call_expr` keys it (`name#arity.id`, namespace-qualified
     /// when bare). Its layouts are read off the call's own argument and
@@ -3530,6 +3586,9 @@ impl Compiler {
         let generic = self.checker.is_generic_fn(&lookup);
         if forwards && !generic {
             return Err("callee-trait");
+        }
+        if let Some(call) = self.hir_method_partial(hir, call, &key, args.len())? {
+            return Ok(call);
         }
         let mut abi = self.hir_call_abi(key, &lookup, args.len(), Some(self.value_layout(&recv_ty)), shared || generic)?;
         if generic {
