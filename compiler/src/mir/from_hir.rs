@@ -1926,6 +1926,10 @@ impl Lower<'_> {
     /// `id`'s word, a two-word value boxed to one, as HIR emission's
     /// conversion of a pair to a boxed local or return.
     fn boxed_word(&mut self, id: HirId) -> Result<Option<ValueId>, Refusal> {
+        // A value packed as an existential is its pack's one word.
+        if self.inp.packs.contains_key(&id.0) {
+            return self.word(id);
+        }
         // A two-word variant made boxed: one `MakeEnum`, not the pair then
         // its box.
         if let HirKind::Make { kind: MakeKind::Variant { enum_name, variant, tag: Some(tag), .. }, args } = &self.hir.expr(id).kind
@@ -2413,6 +2417,15 @@ impl Lower<'_> {
         let v = match val {
             Val::V(v) => v,
             Val::Never => return Ok(Val::Never),
+            // A two-word enum packs its boxed form, as the instance's
+            // methods take it.
+            Val::Pair(lo, hi) => {
+                let ty = self.expr_ty(id).ok_or("existential pack type")?.clone();
+                match self.box_pair_val(&ty, lo, hi)? {
+                    Val::V(v) => v,
+                    _ => return Err("existential pack value".into()),
+                }
+            }
             _ => return Err("existential pack value".into()),
         };
         let mut out = self.dict_program(vec![v], ops)?;
