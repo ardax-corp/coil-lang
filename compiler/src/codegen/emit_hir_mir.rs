@@ -656,6 +656,15 @@ impl Compiler {
         {
             t.field_news.insert(id.0);
         }
+        // `==` / `!=` on an aggregate with `float` leaves: the shape
+        // `values_eq_shaped` compares it by (#1253).
+        if let HirKind::Bin { op: BinOp::Eq | BinOp::Ne | BinOp::Overloaded("==" | "!="), lhs, .. } = &e.kind
+            && matches!(emit.plan.ops.get(&id.0), None | Some(HirOp::Prim))
+            && let Some(shape) = Self::hir_ty(hir, *lhs).and_then(|t| self.eq_float_shape(t))
+        {
+            let idx = self.intern_string(&shape);
+            t.strings.insert(id.0, idx);
+        }
         match &e.kind {
             HirKind::Lit(Lit::Str(raw))
                 if Self::hir_ty(hir, id).and_then(lower::primitive) != Some(crate::typechecking::ty::BYTE)
@@ -1595,6 +1604,39 @@ impl Compiler {
             || self.hir_mir_probe_unplanned(|this, code| {
                 this.emit_call_site_dicts(code, &generic.lookup, &generic.arg_tys, Some(&generic.ret_ty));
             })
+    }
+
+    /// The shape `values_eq_shaped` compares a value of `ty` by, when it
+    /// is an array, `Vec` or tuple with a `float` leaf (#1253): `f` a
+    /// float, `w` anything else, `a` an array's element shape, `t` a
+    /// tuple's count digit and element shapes.
+    pub(super) fn eq_float_shape(&self, ty: &Ty) -> Option<String> {
+        fn walk(ty: &Ty, out: &mut String) -> Option<()> {
+            let ty = crate::typechecking::ty::strip_readonly(ty);
+            if lower::primitive(ty) == Some(crate::typechecking::ty::FLOAT) {
+                out.push('f');
+            } else if let Ty::Array { element, .. } = ty {
+                out.push('a');
+                walk(element.as_ref(), out)?;
+            } else if let Some(elem) = crate::typechecking::ty::vec_element_ty(ty) {
+                out.push('a');
+                walk(elem, out)?;
+            } else if let Ty::Tuple(items) = ty {
+                let n = u8::try_from(items.len()).ok().filter(|&n| n <= 9)?;
+                out.push('t');
+                out.push(char::from(b'0' + n));
+                for item in items {
+                    walk(item, out)?;
+                }
+            } else {
+                out.push('w');
+            }
+            Some(())
+        }
+        let ty = apply_ty_prune(self.checker.subst(), ty);
+        let mut out = String::new();
+        walk(&ty, &mut out)?;
+        (out.contains('f') && out != "f").then_some(out)
     }
 
     /// Whether a `format` call's `%v` arguments read a frame dictionary
