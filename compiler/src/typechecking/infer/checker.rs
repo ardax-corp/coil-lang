@@ -4437,6 +4437,21 @@ impl Checker {
 
     /// Whether `name` is bound by the natives or by this module's own
     /// frames, not only by the frame an earlier `check_program` left behind.
+    /// `name` resolves only through an earlier module's frame (not this
+    /// module's own defs, imports or the global natives frame).
+    fn bound_only_by_other_module(&self, name: &str) -> bool {
+        // An isolated lambda / defer env renumbers its frames and holds no
+        // other module's frames at all.
+        self.lambda_uncaptured_outer.is_none()
+            && !name.contains("::")
+            && !self.local_defs.contains_key(name)
+            && !self.forward_free_fn_schemes.contains_key(name)
+            && self
+                .env
+                .lookup_frame(name)
+                .is_some_and(|f| f != 0 && f < self.module_frame)
+    }
+
     fn binds_in_this_module(&self, name: &str) -> bool {
         self.env
             .lookup_frame(name)
@@ -5562,7 +5577,12 @@ impl Checker {
             return apply_ty_prune(&self.subst, &result);
         }
 
-        let scheme = self.lookup_fn_scheme(&ident);
+        // A bare name only an earlier module's frame binds (that module's
+        // own `fn`) is not in scope here: `use m::f as g` binds `g` only and
+        // `mod m;` binds nothing (#1211).
+        let scheme = self
+            .lookup_fn_scheme(&ident)
+            .filter(|_| !self.bound_only_by_other_module(&ident));
         let (fun_ty, fresh_constraints, fresh_mapping, original_scheme) = match scheme {
             Some(s) => {
                 let (fun_ty, constraints, mapping) = self.instantiate_scheme_mapped(&s);
