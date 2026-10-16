@@ -2966,10 +2966,26 @@ impl Compiler {
         let Some(scheme) = self.checker.env().lookup(fn_name).cloned() else {
             return 0;
         };
+        self.emit_dicts_for_signature(bytecode, &scheme.ty, &scheme.constraints, arg_tys, ret_ty)
+    }
+
+    /// The instance dictionaries for `constraints` at a call of a function
+    /// typed `fun_ty` on `arg_tys` (and returning `ret_ty`): a generic's
+    /// scheme, or a `forall T: Show. T -> string` parameter's body (#1188).
+    pub(crate) fn emit_dicts_for_signature(
+        &mut self,
+        bytecode: &mut CodeBuf,
+        fun_ty: &crate::typechecking::Ty,
+        constraints: &[crate::typechecking::ty::Constraint],
+        arg_tys: &[crate::typechecking::Ty],
+        ret_ty: Option<&crate::typechecking::Ty>,
+    ) -> usize {
+        use crate::typechecking::Ty;
+
         // Bind quantified vars by matching curried fn type to args; do not apply global subst (vars reused).
         let mut var_to_ty: HashMap<crate::typechecking::ty::TyVarId, crate::typechecking::Ty> =
             HashMap::new();
-        let mut fun = &scheme.ty;
+        let mut fun = fun_ty;
         let mut arg_idx = 0usize;
         while let Ty::Fun(param, ret) = fun {
             if arg_idx >= arg_tys.len() {
@@ -2996,7 +3012,7 @@ impl Compiler {
         }
 
         let mut dict_count = 0;
-        for constraint in &scheme.constraints {
+        for constraint in constraints {
             let Some(lookup) =
                 Self::resolve_constraint_lookup(constraint, &var_to_ty, &self.checker)
             else {

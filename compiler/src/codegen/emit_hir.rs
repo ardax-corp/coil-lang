@@ -5242,6 +5242,16 @@ impl Compiler {
         })
     }
 
+    /// A `PolyFn` local's own type when it is a `forall` (a rank-n parameter).
+    fn hir_forall_param_ty(hir: &HirBody, checker: &crate::typechecking::infer::Checker, f: HirId) -> Option<Ty> {
+        let HirKind::Local(local) = hir.expr(f).kind else {
+            return None;
+        };
+        let ty = apply_ty_prune(checker.subst(), hir.local(local).ty.as_ref()?);
+        let ty = crate::typechecking::ty::strip_readonly(&ty).clone();
+        matches!(ty, Ty::Forall { .. }).then_some(ty)
+    }
+
     /// Whether a `PolyFn` local's own type returns a bare type parameter
     /// (boxed at run time), as `local_polyfn_call_needs_unbox`.
     fn hir_polyfn_returns_var(hir: &HirBody, checker: &crate::typechecking::infer::Checker, f: HirId) -> bool {
