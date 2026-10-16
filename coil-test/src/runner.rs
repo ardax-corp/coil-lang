@@ -750,6 +750,8 @@ fn start_file(run: &Run<'_>, dispatch: Dispatch, path: &Path) -> PendingFile {
 
 /// Run the harness over `options.root` without exiting.
 pub fn run_test_suite(config: ReportConfig, options: &TestOptions) -> Result<SuiteResult, String> {
+    // Every case runs in this process: `env::exit` ends its case, not the run (#1401).
+    machine::env::trap_exit(true);
     let mut files = collect_test_files(&options.root)?;
     options.order.order_files(&mut files);
     let jobs = options.jobs.max(1);
