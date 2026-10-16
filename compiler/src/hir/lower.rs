@@ -1399,7 +1399,7 @@ pub fn ffi_variadic_tags(body: &HirBody, checker: &Checker, call: HirId, items: 
 }
 
 /// Depth refusals [`refusal_at`] names an operand for.
-const STAGED: &[&str] = &["stack-select-depth", "adjust-value", "assign-value", "range-depth", "existential-depth", "operator-depth"];
+const STAGED: &[&str] = &["assign-index", "stack-select-depth", "adjust-value", "assign-value", "range-depth", "existential-depth", "operator-depth"];
 
 /// Why `body` is outside the lowered subset, or `None` when it is inside.
 pub fn refusal(body: &HirBody, checker: &Checker) -> Option<&'static str> {
@@ -2935,7 +2935,10 @@ impl Walk<'_> {
                             return Err("index-kind");
                         }
                         if compound && (!read_base(body, *base) || !pure_index(body, *index)) {
-                            return Err("assign-base");
+                            // Each index with an effect runs once into a
+                            // temp, when the rest of the place repeats (#1266).
+                            self.stage_at = Some(id);
+                            return Err("assign-index");
                         }
                         self.word(*place)?;
                         self.aggregate(*base)?;

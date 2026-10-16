@@ -15,6 +15,9 @@ use crate::typechecking::ty;
 /// or after an operand with an effect, where moving it would change what
 /// runs first.
 pub fn stage(body: &HirBody, target: HirId) -> Option<HirBody> {
+    if let Some(staged) = stage_place_indices(body, target) {
+        return Some(staged);
+    }
     if body.expr(target).flags.contains(HirFlags::ADJUST) {
         return split_adjust(body, target);
     }
@@ -218,6 +221,83 @@ fn repeatable(body: &HirBody, place: HirId) -> bool {
         HirKind::Local(_) | HirKind::Global { .. } | HirKind::Lit(_) => true,
         HirKind::Field { base, .. } => repeatable(body, *base),
         HirKind::Index { base, index, .. } => repeatable(body, *base) && pure(body, *index),
+        _ => false,
+    }
+}
+
+/// A compound assignment or adjust statement on an element at an index
+/// with an effect or a trap (`xs[f()]--;`, `xs[f()] += 1;`): each such
+/// index runs once, in evaluation order, into a temp bound just before the
+/// statement, and both the place and the value's read of it take the temp
+/// (#1266). `None` unless `target` is such a statement of a block.
+fn stage_place_indices(body: &HirBody, target: HirId) -> Option<HirBody> {
+    let e = body.expr(target);
+    if !e.flags.contains(HirFlags::COMPOUND) {
+        return None;
+    }
+    let HirKind::Assign { place, value } = e.kind else {
+        return None;
+    };
+    let HirKind::Bin { lhs, .. } = body.expr(value).kind else {
+        return None;
+    };
+    if repeatable(body, place) {
+        return None;
+    }
+    let (block, mut at) = body.exprs.iter().enumerate().find_map(|(i, b)| match &b.kind {
+        HirKind::Block { stmts, .. } => stmts.iter().position(|&s| s == target).map(|at| (i, at)),
+        _ => None,
+    })?;
+    let mut b = body.clone();
+    while let Some(index) = first_impure_index(&b, place) {
+        // Everything the place evaluates ahead of the index is a pure read.
+        if !place_reads_before(&b, place, index) {
+            return None;
+        }
+        let twin = counterpart(&b, place, lhs, index)?;
+        let moved = b.expr(index).clone();
+        let temp = LocalId(b.locals.len() as u32);
+        b.locals.push(HirLocal {
+            name: format!("__stage{}", temp.0),
+            ty: moved.ty.clone(),
+            kind: LocalKind::Temp,
+            captured: false,
+        });
+        let init = push(&mut b, moved.clone());
+        let bind = push_let(&mut b, temp, init, moved.span);
+        for id in [index, twin] {
+            let e = &mut b.exprs[id.0 as usize];
+            e.kind = HirKind::Local(temp);
+            e.node = None;
+            e.flags = HirFlags::default();
+        }
+        let HirKind::Block { stmts, .. } = &mut b.exprs[block].kind else {
+            unreachable!()
+        };
+        stmts.insert(at, bind);
+        at += 1;
+    }
+    repeatable(&b, place).then_some(b)
+}
+
+/// The first index of `place`, in evaluation order, that is not a pure read.
+fn first_impure_index(body: &HirBody, place: HirId) -> Option<HirId> {
+    match &body.expr(place).kind {
+        HirKind::Field { base, .. } => first_impure_index(body, *base),
+        HirKind::Index { base, index, .. } => {
+            first_impure_index(body, *base).or_else(|| (!pure(body, *index)).then_some(*index))
+        }
+        _ => None,
+    }
+}
+
+/// Whether the operands `place` evaluates before `index` are pure reads.
+fn place_reads_before(body: &HirBody, place: HirId, index: HirId) -> bool {
+    match &body.expr(place).kind {
+        HirKind::Field { base, .. } => place_reads_before(body, *base, index),
+        HirKind::Index { base, index: i, .. } if *i == index => repeatable(body, *base),
+        HirKind::Index { base, .. } => place_reads_before(body, *base, index),
+        HirKind::Local(_) | HirKind::Global { .. } => true,
         _ => false,
     }
 }
