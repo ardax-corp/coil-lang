@@ -1297,7 +1297,7 @@ fn user_enum(checker: &Checker, name: &str, seen: &mut Vec<String>) -> Option<Va
 /// `enum_name::variant`'s payload types at a ground instance of a generic
 /// user enum (`Tree<int>`): the declared types with its parameters bound.
 pub fn generic_enum_payload(checker: &Checker, enum_name: &str, variant: &str, args: &[Ty]) -> Option<Vec<Ty>> {
-    let params = checker.generics().generic_type_ctors.get(enum_name)?;
+    let params = checker.type_ctor_params(enum_name)?;
     if params.len() != args.len() {
         return None;
     }

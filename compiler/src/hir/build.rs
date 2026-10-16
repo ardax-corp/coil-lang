@@ -691,8 +691,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         }
         b.type_params = type_params.iter().map(|p| p.name.to_string()).collect();
         if let Some(owner) = owner {
-            let key = self.checker.resolve_class_key(owner).unwrap_or_else(|| owner.to_string());
-            if let Some(params) = self.checker.generics().generic_type_ctors.get(&key) {
+            if let Some(params) = self.checker.type_ctor_params(owner) {
                 b.type_params.extend(params.iter().cloned());
             }
         }
