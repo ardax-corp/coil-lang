@@ -98,6 +98,23 @@ and relocate mapped slots on collect.
   bodies get an extent; widening every conservative frame would also root
   stale dead words (finalizers stopped running). A body whose ops do not all
   decode is scanned to the end of the stack.
+- **Rebinds drop the old value** (#1402). The frame-word liveness keeps
+  every word to the function's exit (scope lifetime), so a word only stops
+  rooting when it is overwritten. HIR emission overwrites a local's slot on
+  `x = e`; MIR gives each SSA value its own register, so `from_hir` emits a
+  `ClearWord` of the old value after a heap local's rebind.
+  `cleared_words` drops the zero while another live value shares that
+  register, or when the block's back-edge φ copy rewrites it before
+  anything can collect (a loop-carried local rebound in the body). The
+  loop-entry copy of a rebound header φ leaves its source register holding
+  the pre-loop value, so `entry_clears` zeroes that register once per loop
+  entry. Constants root nothing and are skipped. Flagship `.hyc` are
+  unchanged; on `examples/perf` only `gc_frag` (one zero per inner-loop
+  entry), `gc_rebuild` (one per loop entry) and `gc_churn` (one fewer frame
+  word) change, and their run times stayed within noise (medians of 11:
+  `gc_frag` 303–353 → 326–341 ms, `gc_rebuild` 705–800 → 687–697 ms,
+  `gc_churn` 144–147 → 149–151 ms, run-to-run spread larger than the gaps).
+  `tests/memory/gc_weak_after_reassign.hy`.
 - **Collection budget.** After a sweep the next threshold is
   `live × 4` when more than half the heap survived (a growing live set) and
   `live × 2` otherwise, never below the initial 1 MB budget.
