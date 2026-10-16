@@ -159,7 +159,22 @@ impl Pipeline {
                             Err(msg) => errors.push(msg),
                         }
                     }
-                    Err(None) => errors.push(crate::attrs::unresolved_macro_message(&p)),
+                    Err(None) => {
+                        let mut msg = crate::attrs::unresolved_macro_message(&p);
+                        // A call in macro output resolves where it lands and
+                        // in the provider that wrote it.
+                        if p.kind == MacroKind::Function
+                            && let Some(provider) = &p.from_provider
+                        {
+                            msg.with_help(format!(
+                                "`{}!` is called by macro output from `{}`; declare a `macro {}` there or import one with `use`",
+                                p.name,
+                                self.namespace_for(provider),
+                                p.name
+                            ));
+                        }
+                        errors.push(msg);
+                    }
                     Err(Some(msg)) => errors.push(msg),
                 }
             }
@@ -265,37 +280,47 @@ impl Pipeline {
             let module = self.namespace_for(file);
             return Ok((file.to_path_buf(), decl, module));
         }
-        let mut found: Vec<(PathBuf, MacroDecl)> = Vec::new();
         // An embedded module (`arbitrary`) or a file under the roots.
         let resolve = |path: &[String], name: &str| {
             crate::macros::embedded_use(path, name)
                 .map(|(file, _)| file)
                 .or_else(|| resolve_use_in_roots(&self.roots, &self.project_root, path, name))
         };
-        for (path, name, alias) in top_level_uses(ast) {
-            let visible = alias.as_deref().unwrap_or(&name);
-            let (candidate, item) = if name == "*" {
-                let mut segs = path.clone();
-                let Some(last) = segs.pop() else { continue };
-                (resolve(&segs, &last), p.name.clone())
-            } else if visible == p.name {
-                (resolve(&path, &name), name.clone())
-            } else {
-                continue;
-            };
-            let Some(candidate) = candidate else { continue };
-            if let Some(decl) = pick(&candidate, &item).map_err(Some)?
-                && !found.iter().any(|(f, _)| *f == candidate)
-            {
-                found.push((candidate, decl));
+        // Declarations of `p` that the top-level `use` items of `ast` import,
+        // one per providing module.
+        let imported = |ast: &Output<'_>| -> Result<Vec<(PathBuf, MacroDecl)>, Message> {
+            let mut found: Vec<(PathBuf, MacroDecl)> = Vec::new();
+            for (path, name, alias) in top_level_uses(ast) {
+                let visible = alias.as_deref().unwrap_or(&name);
+                let (candidate, item) = if name == "*" {
+                    let mut segs = path.clone();
+                    let Some(last) = segs.pop() else { continue };
+                    (resolve(&segs, &last), p.name.clone())
+                } else if visible == p.name {
+                    (resolve(&path, &name), name.clone())
+                } else {
+                    continue;
+                };
+                let Some(candidate) = candidate else { continue };
+                if let Some(decl) = pick(&candidate, &item)?
+                    && !found.iter().any(|(f, _)| *f == candidate)
+                {
+                    found.push((candidate, decl));
+                }
             }
-        }
-        // Macro output may use its provider's other macros without an import.
+            Ok(found)
+        };
+        let mut found = imported(ast).map_err(Some)?;
+        // Macro output may use its provider's other macros without an import,
+        // and the macros the provider itself imports (#1407).
         if found.is_empty()
             && let Some(provider) = &p.from_provider
-            && let Some(decl) = pick(provider, &p.name).map_err(Some)?
         {
-            found.push((provider.clone(), decl));
+            if let Some(decl) = pick(provider, &p.name).map_err(Some)? {
+                found.push((provider.clone(), decl));
+            } else if let Some(provider_ast) = self.ast_cache.get(provider).and_then(|c| c.ast()) {
+                found = imported(provider_ast).map_err(Some)?;
+            }
         }
         // Built-in derives come from the embedded `derive` module. It is not
         // compiled into the user's program: only the expansion program
