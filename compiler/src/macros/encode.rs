@@ -497,7 +497,12 @@ pub fn expr(w: &mut Wire, e: &Output<'_>, source: &str) {
 }
 
 pub fn arg(w: &mut Wire, arg: &MacroArg) {
-    w.str(&arg.value);
+    // `Reader::bool` reads the wire's `1` / `0`, not the literal's text.
+    if arg.kind == "bool" {
+        w.bool(arg.value == "true");
+    } else {
+        w.str(&arg.value);
+    }
 }
 
 #[cfg(test)]
