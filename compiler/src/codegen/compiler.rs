@@ -2750,6 +2750,9 @@ impl Compiler {
                     }
                 }
             }
+            for (var, ty) in self.checker.mono_assoc_projection_tys(scheme, &out) {
+                out.entry(var).or_insert(ty);
+            }
         }
         out
     }

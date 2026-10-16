@@ -11254,8 +11254,15 @@ impl Checker {
             if class_def.assoc_type(&assoc_name).is_none() {
                 continue;
             }
-            // Owner must unify with the primary instance arg(s).
+            // Owner must unify with the primary instance arg(s). A still-open
+            // owner is a generic fn's own type parameter: unifying it would
+            // pin the declaration's projection from the first call site's
+            // instance (#1187); calls pin their freshened copy instead
+            // (`pin_assoc_vars_from_mapping`).
             let owner_ty = apply_ty_prune(&self.subst, &Ty::Var(owner_var));
+            if matches!(owner_ty, Ty::Var(_)) {
+                continue;
+            }
             let matches_owner = instance
                 .args
                 .iter()
@@ -11523,6 +11530,65 @@ impl Checker {
             ty = *next;
         }
         Some(apply_ty_prune(&self.subst, &ty))
+    }
+
+    /// A mono clone's associated-type projections (`C::Elem` in
+    /// `fn or_head<C: Collect>(..) -> C::Elem`) at the clone's type
+    /// arguments: each projection variable of `scheme` whose owner `vars`
+    /// binds to a type with a ground instance, mapped to that instance's
+    /// associated type (#1187). The declaration's projection stays open, so
+    /// each clone resolves its own.
+    pub fn mono_assoc_projection_tys(
+        &self,
+        scheme: &Scheme,
+        vars: &HashMap<TyVarId, Ty>,
+    ) -> Vec<(TyVarId, Ty)> {
+        let rep = |v: TyVarId| match apply_ty_prune(&self.subst, &Ty::Var(v)) {
+            Ty::Var(r) => r,
+            _ => v,
+        };
+        let mut out = Vec::new();
+        for ((owner_var, assoc, _), (pvar, args)) in &self.open_assoc_projections {
+            if !scheme.assoc_projections.iter().any(|p| rep(p.var) == rep(*pvar)) {
+                continue;
+            }
+            let Some(owner_ty) = vars.get(owner_var).or_else(|| vars.get(&rep(*owner_var))) else {
+                continue;
+            };
+            for c in &scheme.constraints {
+                let [arg] = c.args.as_slice() else {
+                    continue;
+                };
+                if !matches!(apply_ty_prune(&self.subst, arg), Ty::Var(v) if rep(v) == rep(*owner_var)) {
+                    continue;
+                }
+                let declares = self
+                    .generics
+                    .typeclass(&c.class)
+                    .is_some_and(|cdef| cdef.assoc_type(assoc).is_some());
+                if !declares {
+                    continue;
+                }
+                let Some(value) = self
+                    .generics
+                    .find_instance(&c.class, std::slice::from_ref(owner_ty))
+                    .and_then(|inst| inst.assoc_tys.get(assoc))
+                else {
+                    continue;
+                };
+                let mut at = Subst::empty();
+                for (v, t) in vars {
+                    at.insert(*v, t.clone());
+                }
+                let args: Vec<Ty> = args
+                    .iter()
+                    .map(|a| apply_ty(&at, &apply_ty_prune(&self.subst, a)))
+                    .collect();
+                out.push((rep(*pvar), self.instantiate_assoc_value(value, &args)));
+                break;
+            }
+        }
+        out
     }
 
     /// The variables of generic `fn_name`'s first `n` type parameters, in
