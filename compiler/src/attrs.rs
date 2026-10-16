@@ -251,6 +251,13 @@ fn validate_attrs<'x, 'a>(
                 span.into_range(),
             ));
         }
+        if attr.name == "derive" && !matches!(target, "class" | "enum") {
+            messages.push(Message::error(
+                ErrorCode::GenericTypeError,
+                format!("`#[derive]` applies to a class or enum, not a {}", target),
+                span.into_range(),
+            ));
+        }
         if attr.name == "repr" && target != "enum" {
             messages.push(Message::error(
                 ErrorCode::GenericTypeError,

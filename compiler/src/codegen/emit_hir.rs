@@ -1191,6 +1191,8 @@ impl Compiler {
                     .map(|t| {
                         word(t)
                             .or_else(|| scalar_enum(t))
+                            // An existential field holds its pack's heap word.
+                            .or_else(|| matches!(crate::typechecking::ty::strip_readonly(t), Ty::Existential { .. }).then_some(crate::mir::MirTy::HeapRef))
                             .or_else(|| {
                                 field_word(t).filter(|_| crate::typechecking::value_layout::value_layout(checker, t) == ValueLayout::Boxed)
                             })
@@ -1199,6 +1201,11 @@ impl Compiler {
                             // `new` stores it (`Rep::Word` of a boxed layout).
                             .or_else(|| {
                                 matches!(crate::hir::layout::of_resolved(checker, &apply_ty_prune(checker.subst(), t)), crate::hir::layout::Layout::Pair(_))
+                                    .then_some(crate::mir::MirTy::HeapRef)
+                            })
+                            // Any other tuple is a heap tuple object (#1170).
+                            .or_else(|| {
+                                matches!(apply_ty_prune(checker.subst(), t), Ty::Tuple(ref items) if !items.is_empty())
                                     .then_some(crate::mir::MirTy::HeapRef)
                             })
                     })
@@ -1250,8 +1257,11 @@ impl Compiler {
         // A field's word, a two-word value (a pair) held boxed.
         let record_word = |t: &Ty| {
             field_word(t).or_else(|| {
-                matches!(crate::hir::layout::of_resolved(checker, &apply_ty_prune(checker.subst(), t)), crate::hir::layout::Layout::Pair(_))
-                    .then_some(crate::mir::MirTy::HeapRef)
+                let t = apply_ty_prune(checker.subst(), t);
+                // A heap tuple is its object's word (#1170).
+                (matches!(crate::hir::layout::of_resolved(checker, &t), crate::hir::layout::Layout::Pair(_))
+                    || matches!(t, Ty::Tuple(ref items) if !items.is_empty()))
+                .then_some(crate::mir::MirTy::HeapRef)
             })
         };
         let mut boxed_niches = HashMap::new();
@@ -1276,7 +1286,7 @@ impl Compiler {
                     let at = self
                         .hir_class_ty_args_at(base_ty, &fty)
                         .or_else(|| self.hir_clone_self_field_at(base_ty, &fty, e.ty.as_ref()?))?;
-                    field_word(&at)
+                    record_word(&at)
                 })
                 && e.ty.as_ref().and_then(record_word) == Some(w)
             {
@@ -1383,6 +1393,11 @@ impl Compiler {
                             // payload fields) is one heap word already (#1167).
                             .or_else(|| {
                                 field_word(t).filter(|_| crate::typechecking::value_layout::value_layout(checker, t) == ValueLayout::Boxed)
+                            })
+                            // A heap tuple is its object's word (#1170).
+                            .or_else(|| {
+                                matches!(apply_ty_prune(checker.subst(), t), Ty::Tuple(ref items) if !items.is_empty())
+                                    .then_some(crate::mir::MirTy::HeapRef)
                             })
                         };
                         // A generic class's field at the made type's
@@ -2050,7 +2065,21 @@ impl Compiler {
                 (names, has_rest, rest_ty)
             };
             let call_span = body.exprs[i].span;
-            let args = args.clone();
+            let mut args = args.clone();
+            // `f(...vec)` into a `T... xs` rest: the `Vec` is the pack.
+            let whole_rest = match args.last().map(|&a| &body.expr(a).kind) {
+                Some(&HirKind::Spread(inner)) if has_rest && !tuple_rest => {
+                    let ty = body.expr(inner).ty.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t));
+                    match ty {
+                        Some(ty) if crate::typechecking::ty::vec_element_ty(&ty).is_some() => {
+                            args.pop();
+                            Some(inner)
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
             let b = out.get_or_insert_with(|| body.clone());
             let flat = self.hir_flatten_spreads(b, &args)?;
             let fixed_count = if has_rest { names.len().saturating_sub(1) } else { names.len() };
@@ -2085,6 +2114,7 @@ impl Compiler {
             // A generic pack's type is its items' one ground type; a
             // tuple pack's is its items' types in order.
             let rest_ty = match rest_ty {
+                _ if whole_rest.is_some() => None,
                 Some(_) if tuple_rest => {
                     let items: Option<Vec<Ty>> = rest
                         .iter()
@@ -2118,7 +2148,12 @@ impl Compiler {
                 return Err("call-argument");
             }
             let mut new_args = slots.into_iter().flatten().collect::<Vec<_>>();
-            if pack {
+            if let Some(inner) = whole_rest {
+                if !rest.is_empty() || filled < fixed_count {
+                    return Err("call-argument");
+                }
+                new_args.push(inner);
+            } else if pack {
                 let span = (call_span.1, call_span.1);
                 let kind = if tuple_rest { MakeKind::Tuple } else { MakeKind::Array };
                 new_args.push(Self::hir_push(b, &self.checker, HirKind::Make { kind, args: rest }, rest_ty, span));
@@ -2707,6 +2742,11 @@ impl Compiler {
             // `let r = a..b` or a copy of an unboxed range local, as
             // `expr_unboxed_range_kind`.
             let range = match &hir.expr(init).kind {
+                // A range over an open `T` is one word, its object (#1230).
+                HirKind::Make {
+                    kind: MakeKind::Range { .. },
+                    ..
+                } if hir.expr(init).ty.as_ref().is_some_and(|t| lower::is_open_range(&apply_ty_prune(self.checker.subst(), t))) => None,
                 HirKind::Make {
                     kind: MakeKind::Range { inclusive },
                     ..
@@ -3415,7 +3455,8 @@ impl Compiler {
             return self.resolve_hir_vec_method(hir, call, method, args);
         }
         let recv_ty = Self::hir_ty(hir, recv).ok_or("method-receiver")?;
-        let recv_ty = apply_ty_prune(self.checker.subst(), recv_ty);
+        // A constructor receiver (`E::A.tag()`) is typed as its variant.
+        let recv_ty = crate::typechecking::ty::peel_constructor_refinement(apply_ty_prune(self.checker.subst(), recv_ty));
         let owner = Checker::class_name_of_ty(&recv_ty).ok_or("method-receiver")?;
         // A numeric range's `to_vec` thunk takes the boxed range (as
         // `compile_call_expr`, the float thunk for a float range).
@@ -5093,15 +5134,10 @@ impl Compiler {
         if !is_len {
             return None;
         }
-        // A string literal folds to its byte length, with the escapes
-        // `const_fold::eval_len_operand` undoes.
+        // A string literal folds to its byte length after every escape is
+        // decoded, as the runtime string holds it (#1174).
         if let HirKind::Lit(Lit::Str(raw)) = &hir.expr(*arg).kind {
-            let text = raw
-                .replace("\\n", "\n")
-                .replace("\\r", "\r")
-                .replace("\\t", "\t")
-                .replace("\\0", "\0");
-            return u32::try_from(text.len()).ok().map(Some);
+            return u32::try_from(unescape_coil_string(raw).len()).ok().map(Some);
         }
         use crate::typechecking::ty::{ArrayLength, strip_readonly};
         let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, *arg)?);
@@ -5246,6 +5282,16 @@ impl Compiler {
             HirKind::Let { local: l, init: Some(init) } if *l == local => emit.plan.polyfns.get(&init.0).cloned(),
             _ => None,
         })
+    }
+
+    /// A `PolyFn` local's own type when it is a `forall` (a rank-n parameter).
+    fn hir_forall_param_ty(hir: &HirBody, checker: &crate::typechecking::infer::Checker, f: HirId) -> Option<Ty> {
+        let HirKind::Local(local) = hir.expr(f).kind else {
+            return None;
+        };
+        let ty = apply_ty_prune(checker.subst(), hir.local(local).ty.as_ref()?);
+        let ty = crate::typechecking::ty::strip_readonly(&ty).clone();
+        matches!(ty, Ty::Forall { .. }).then_some(ty)
     }
 
     /// Whether a `PolyFn` local's own type returns a bare type parameter
@@ -6364,8 +6410,9 @@ impl Compiler {
             .node
             .and_then(|n| self.checker.existential_pack_at(n))
             .or_else(|| self.checker.existential_pack_span(e.span.0, e.span.1))?;
-        let ty = apply_ty_prune(self.checker.subst(), e.ty.as_ref()?);
-        (ty == apply_ty_prune(self.checker.subst(), &pack.value_ty)).then(|| pack.clone())
+        let subst = self.checker.subst();
+        let ty = crate::typechecking::ty::nominal_enum(apply_ty_prune(subst, e.ty.as_ref()?));
+        (ty == crate::typechecking::ty::nominal_enum(apply_ty_prune(subst, &pack.value_ty))).then(|| pack.clone())
     }
 
     /// The tag of an arm `V(x) => return V(x)` whose return rebuilds the
@@ -6662,10 +6709,18 @@ impl Compiler {
         }
         self.hir_mir_why = None;
         self.hir_mir = self.hir_lower_mir(&flat, &mut emit, None);
+        // A lambda with a `defer` gets its cleanup pad, as a function does,
+        // so a cancelled task's unwinder runs it (#1194).
+        let prev_defers = std::mem::replace(&mut self.hir_defers, flat.exprs.iter().any(|e| matches!(e.kind, HirKind::Defer { .. })));
+        let pinned = self.finish_fn_defers(&name);
+        self.hir_defers = prev_defers;
         let arity = (ncap + body.params.len()) as u32;
         self.fn_arities.insert(name.clone(), (arity, false));
         self.bytecode.record_func_with_sp(name.clone(), Some(label), start, self.bytecode.len(), arity);
         self.attach_hir_mir();
+        if pinned {
+            self.bytecode.set_last_func_pinned();
+        }
         self.record_unboxed_class_fields();
         self.hir_mir_ctx = prev_ctx;
         self.hir_mir_unbox = prev_unbox;

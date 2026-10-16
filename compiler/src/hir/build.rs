@@ -65,7 +65,11 @@ pub fn build_module<'a>(checker: &Checker, sidecar: &TypedSidecar, module_path: 
         top.body.root = Some(root);
         let body = top.finish();
         module.bodies.insert(0, body);
-        // Lambdas name their body by index; the top body now comes first.
+        // Lambdas and trait instance methods name their body by index;
+        // the top body now comes first.
+        for index in module.instance_fns.values_mut() {
+            *index += 1;
+        }
         for body in &mut module.bodies {
             for expr in &mut body.exprs {
                 if let HirKind::Lambda { body } = &mut expr.kind {
@@ -1443,6 +1447,18 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
 
     /// Type of a `let` local: the node's own or, for `let x = …` fragments,
     /// the init's (filled at the fragment).
+    /// The trait `id` is packed into as an existential, when it is the
+    /// packed value itself (a wrapper sharing its span has another type).
+    fn packed_class(&self, b: &BodyBuilder, id: HirId) -> Option<String> {
+        let e = &b.body.exprs[id.0 as usize];
+        let pack = e
+            .node
+            .and_then(|n| self.checker.existential_pack_at(n))
+            .or_else(|| self.checker.existential_pack_span(e.span.0, e.span.1))?;
+        let subst = self.checker.subst();
+        (crate::typechecking::subst::apply_ty_prune(subst, e.ty.as_ref()?) == crate::typechecking::subst::apply_ty_prune(subst, &pack.value_ty)).then(|| pack.class.clone())
+    }
+
     fn local_ty(&self, node: &Output<'_>, _name: &str) -> Option<Ty> {
         self.ty_of(node).filter(|ty| !matches!(ty, Ty::Con(n) if n == coil_ty::UNIT))
     }
@@ -1518,7 +1534,12 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             match decl.1.as_ref() {
                 Expression::Variable(name, _) => {
                     let init = self.expr(b, init);
-                    let ty = self.local_ty(decl, name).or_else(|| self.ty_at(b, init));
+                    // `let x: Show = 1` holds the pack, not the packed `int`.
+                    let ty = self
+                        .packed_class(b, init)
+                        .map(|class| Ty::Existential { class })
+                        .or_else(|| self.local_ty(decl, name))
+                        .or_else(|| self.ty_at(b, init));
                     let local = b.local(name, ty, LocalKind::Let);
                     return self.emit_ty(b, node, HirKind::Let { local, init: Some(init) }, Some(coil_ty::unit()));
                 }

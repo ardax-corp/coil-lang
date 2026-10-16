@@ -378,7 +378,16 @@ impl Pipeline {
         // (`key = value`) or in order.
         let mut values: Vec<Option<&MacroArg>> = vec![None; decl.params.len()];
         let mut next = 0;
+        let mut named_seen = false;
         for arg in &p.args {
+            if arg.key.is_empty() && named_seen {
+                return Err(Message::error(
+                    ErrorCode::GenericTypeError,
+                    format!("attribute macro `{}`: a positional argument cannot follow a named one", p.name),
+                    p.range.clone(),
+                ));
+            }
+            named_seen |= !arg.key.is_empty();
             let slot = if arg.key.is_empty() {
                 let s = next;
                 next += 1;
@@ -402,6 +411,24 @@ impl Pipeline {
                         "attribute macro `{}` takes {} argument(s)",
                         p.name,
                         decl.params.len()
+                    ),
+                    p.range.clone(),
+                ));
+            }
+            // Arguments travel as text and decode by the parameter's type:
+            // `"ten"` for an `int` would decode as garbage.
+            let want = decl.params[slot].1.as_str();
+            let fits = match want {
+                "string" => matches!(arg.kind, "string" | "ident"),
+                other => arg.kind == other,
+            };
+            if !fits {
+                let found = if arg.kind == "ident" { "an identifier".to_string() } else { format!("`{}`", arg.kind) };
+                return Err(Message::error(
+                    ErrorCode::GenericTypeError,
+                    format!(
+                        "attribute macro `{}` argument `{}` takes `{want}`, found {found}",
+                        p.name, decl.params[slot].0
                     ),
                     p.range.clone(),
                 ));
@@ -482,6 +509,26 @@ impl Pipeline {
             }
         }
         results
+    }
+
+    /// Local names `file` imports with `use` that name a macro of the
+    /// providing module (a macro is not a value: #1203).
+    pub(super) fn macro_import_names(&self, file: &Path) -> std::collections::HashSet<String> {
+        let mut out = std::collections::HashSet::new();
+        let Some(ast) = self.ast_cache.get(file).and_then(|c| c.ast()) else {
+            return out;
+        };
+        for (path, name, alias) in top_level_uses(ast) {
+            let provider = crate::macros::embedded_use(&path, &name)
+                .map(|(file, _)| file)
+                .or_else(|| resolve_use_in_roots(&self.roots, &self.project_root, &path, &name));
+            if let Some(provider) = provider
+                && self.provider_decls(&provider).iter().any(|d| d.name == name)
+            {
+                out.insert(alias.unwrap_or(name));
+            }
+        }
+        out
     }
 
     /// Every macro a provider module declares (all of them, so the compiled

@@ -201,7 +201,9 @@ pub enum AttrArgs<'expr> {
     Empty,
     /// `#[derive(Show, Eq)]` — comma-separated identifiers.
     Idents(Vec<&'expr str>),
-    /// `#[ffi(lib = "c", name = "sym")]` — key/value pairs.
+    /// `#[ffi(lib = "c", name = "sym")]` — key/value pairs. In a mix with
+    /// positional literals (`#[retry(3, times = 2)]`), each positional one
+    /// has an empty key, in the order written.
     KeyValues(Vec<(&'expr str, AttrLit<'expr>)>),
     /// `#[log("msg")]` / `#[retry(3, times = 2)]` — positional literals.
     Positional(Vec<AttrLit<'expr>>),
@@ -866,6 +868,7 @@ impl<'a> Display for Attribute<'a> {
                 let parts: Vec<String> = kvs
                     .iter()
                     .map(|(k, v)| match v {
+                        _ if k.is_empty() => fmt_attr_lit(v),
                         AttrLit::String(s) => format!("{} = \"{}\"", k, s),
                         AttrLit::Int(i) => format!("{} = {}", k, i),
                         AttrLit::Float(v) => format!("{} = {}", k, v),

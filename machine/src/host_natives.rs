@@ -116,6 +116,8 @@ pub fn build_standard_host_natives(
     );
     // Append-only after contract_fail: `ffi::read_ints` (minor 36).
     push_ffi_read_ints(&mut out, &mut register_id);
+    // Append-only after ffi_read_ints: shaped `==` (minor 39).
+    push_values_eq_shaped(&mut out, &mut register_id);
     assert_eq!(
         out.len(),
         common::HOST_NATIVES.len(),
@@ -306,6 +308,25 @@ fn push_string_bytes(
             Ok(Some(host(heap, args)))
         })));
     }
+}
+
+/// `values_eq_shaped(a, b, shape) -> bool`: `==` on an aggregate whose
+/// `float` leaves compare by IEEE ([`crate::value_eq::values_eq_shaped`]).
+fn push_values_eq_shaped(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
+    let name = common::VALUES_EQ_SHAPED_NATIVE;
+    let sig = FfiSignature::from_parts(name.to_string(), vec![FfiType::Int; 3], FfiType::Int)
+        .expect("values_eq_shaped signature");
+    let id = out.len();
+    register_id(name, id);
+    out.push(Arc::new(HostClosureFn::new(sig, |heap, args| {
+        let eq = match heap.find_object_by_addr(args[2].raw() as u64) {
+            Some(crate::memory::Object::String(gc)) => {
+                crate::value_eq::values_eq_shaped(heap, args[0], args[1], gc.as_ref().data.as_bytes())
+            }
+            _ => crate::value_eq::values_eq(heap, args[0], args[1]),
+        };
+        Ok(Some(Value::from(i64::from(eq))))
+    })));
 }
 
 /// `ffi::read_ints(lib, ptr, count) -> Result<Vec<int>, ffi::Error>`.

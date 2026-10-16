@@ -362,6 +362,13 @@ pub struct Checker {
     /// Tuple bases expanded by [`flatten_spread_call_args`] (by span).
     spread_expanded_bases: std::collections::HashSet<(usize, usize)>,
 
+    /// Whether the call being flattened takes a `T... xs` rest, which a
+    /// trailing `...vec` fills whole.
+    vec_rest_spread: bool,
+
+    /// `Vec`s spread whole into a rest parameter (by span).
+    vec_rest_spreads: std::collections::HashSet<(usize, usize)>,
+
     /// All overload candidates for each function name.
     ///
     /// Populated at the end of each `infer_function` call.  When a name has
@@ -517,6 +524,14 @@ pub struct Checker {
     /// subsequent `invoke(..., id, ...)` can refine its result type.
     ffi_fn_ret_tys: HashMap<String, Ty>,
 
+    /// The function whose `let` recorded each [`Self::ffi_fn_ret_tys`]
+    /// binding: another function's same-named parameter or local is a
+    /// different binding (#1233).
+    ffi_fn_ret_owner: HashMap<String, Option<String>>,
+
+    /// The function the `invoke` pre-pass is walking.
+    ffi_prescan_fn: Option<String>,
+
     /// Whether `let id = declare(..., ret, variadic)` marked the binding as C varargs.
     ffi_fn_variadic: HashMap<String, bool>,
 
@@ -569,6 +584,9 @@ pub struct Checker {
     in_test_case: bool,
     /// Module-level `const`s of other modules, by `module::NAME` (#1207).
     module_consts: HashMap<String, Ty>,
+    /// Local names this module's `use`s import that name a macro of the
+    /// providing module: no value binding is made up for them (#1203).
+    macro_imports: HashSet<String>,
     /// Test-body `?` sites that fail the case themselves, by operand span.
     test_try_sites: HashMap<(usize, usize), TestTry>,
 
@@ -631,6 +649,10 @@ pub struct Checker {
     /// not listed in `use (…)`. Looking them up yields a capture diagnostic
     /// instead of a generic "Cannot find value".
     lambda_uncaptured_outer: Option<std::collections::HashSet<String>>,
+
+    /// When inside a lambda body: module `static let`s rebound as bare
+    /// names (#1177). A read of one is the static, not a capture.
+    lambda_rebound_statics: std::collections::HashSet<String>,
 
     /// Call sites that under-applied a fixed-arity (or rest) function and
     /// produced a residual `Fun` / partial. Value is the bitmask of filled
