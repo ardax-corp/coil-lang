@@ -5113,15 +5113,10 @@ impl Compiler {
         if !is_len {
             return None;
         }
-        // A string literal folds to its byte length, with the escapes
-        // `const_fold::eval_len_operand` undoes.
+        // A string literal folds to its byte length after every escape is
+        // decoded, as the runtime string holds it (#1174).
         if let HirKind::Lit(Lit::Str(raw)) = &hir.expr(*arg).kind {
-            let text = raw
-                .replace("\\n", "\n")
-                .replace("\\r", "\r")
-                .replace("\\t", "\t")
-                .replace("\\0", "\0");
-            return u32::try_from(text.len()).ok().map(Some);
+            return u32::try_from(unescape_coil_string(raw).len()).ok().map(Some);
         }
         use crate::typechecking::ty::{ArrayLength, strip_readonly};
         let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, *arg)?);
