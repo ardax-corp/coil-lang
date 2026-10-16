@@ -14,9 +14,12 @@ fn unique_tmp(label: &str) -> PathBuf {
     ))
 }
 
+/// A reported case: `(name, ok, reason)`.
+type Case = (String, bool, Option<String>);
+
 /// `(name, ok, reason)` of every case the `--json` run of `args` in `dir`
 /// reported, and the process status.
-fn run(dir: &Path, args: &[&str]) -> (Vec<(String, bool, Option<String>)>, Option<i32>) {
+fn run(dir: &Path, args: &[&str]) -> (Vec<Case>, Option<i32>) {
     let out = Command::new(env!("CARGO_BIN_EXE_coil-test"))
         .current_dir(dir)
         .args(["--no-shuffle", "-j", "2", "--json"])
@@ -44,7 +47,7 @@ fn run(dir: &Path, args: &[&str]) -> (Vec<(String, bool, Option<String>)>, Optio
     (cases, out.status.code())
 }
 
-fn case<'a>(cases: &'a [(String, bool, Option<String>)], name: &str) -> &'a (String, bool, Option<String>) {
+fn case<'a>(cases: &'a [Case], name: &str) -> &'a Case {
     cases
         .iter()
         .find(|(n, _, _)| n == name)
