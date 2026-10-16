@@ -1199,6 +1199,11 @@ pub fn is_range_pair(ty: &Ty) -> bool {
     crate::typechecking::return_layout::two_word_range_kind(ty).is_some()
 }
 
+/// A `Range<T>` / `RangeInclusive<T>` over an open type parameter `T`.
+pub fn is_open_range(ty: &Ty) -> bool {
+    crate::typechecking::ty::range_app(ty).is_some_and(|(elem, _)| matches!(strip_readonly(elem), Ty::Var(_)))
+}
+
 /// An irrefutable `let` pattern of tuples, records, names and `_`.
 pub fn let_pat_shape(pat: &HirPat) -> bool {
     match pat {
@@ -2504,6 +2509,18 @@ impl Walk<'_> {
                     self.value(arg, depth + 2 * i as u32)?;
                 }
                 Ok(())
+            }
+            // `a..b` over a shared generic body's open `T` (#1230): the
+            // typed range object, its bounds the unboxed words.
+            HirKind::Make {
+                kind: MakeKind::Range { .. },
+                args,
+            } if self.ty(id).is_some_and(is_open_range) => {
+                let [lo, hi] = <[HirId; 2]>::try_from(args.as_slice()).map_err(|_| "make-range")?;
+                self.word(lo)?;
+                self.word(hi)?;
+                self.value(lo, depth)?;
+                self.value(hi, depth + 1)
             }
             HirKind::Make {
                 kind: MakeKind::Range { .. },

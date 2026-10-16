@@ -2304,6 +2304,29 @@ impl Lower<'_> {
         Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?))
     }
 
+    /// `a..b` over a shared generic body's open `T` (#1230): the typed
+    /// range object a boxed `Range<int>` is, its bounds the unboxed words.
+    fn make_open_range(&mut self, id: HirId, args: &[HirId]) -> Result<Val, Refusal> {
+        use crate::typechecking::return_layout as rl;
+        let [a, b] = args else {
+            return Err("make range".into());
+        };
+        let (_, inclusive) = self.expr_ty(id).and_then(crate::typechecking::ty::range_app).ok_or("make range type")?;
+        let Some(lo) = self.word(*a)? else {
+            return Ok(Val::Never);
+        };
+        let Some(hi) = self.word(*b)? else {
+            return Ok(Val::Never);
+        };
+        let (lo, hi) = (self.fit(lo, MirTy::I64)?, self.fit(hi, MirTy::I64)?);
+        let type_id = rl::range_heap_type_id(inclusive);
+        let obj = self.b.ins_alloc(MirAllocKind::Object { type_id, nfields: 2 }, Vec::new()).map_err(mir)?;
+        let obj = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?;
+        self.b.ins_heap_field_store(obj, lo, None, Some(0)).map_err(mir)?;
+        self.b.ins_heap_field_store(obj, hi, None, Some(1)).map_err(mir)?;
+        Ok(Val::V(obj))
+    }
+
     /// A pair of type `ty` boxed: a two-field tuple, or an enum value.
     fn box_pair_val(&mut self, ty: &Ty, lo: ValueId, hi: ValueId) -> Result<Val, Refusal> {
         if let Ty::Tuple(items) = strip_readonly(ty) {
@@ -2991,6 +3014,7 @@ impl Lower<'_> {
             _ if lower::is_unit_make(self.hir, id) => Ok(Val::Unit),
             HirKind::Make { kind, args } if self.inp.pair_tys.contains_key(&id.0) => self.make_pair(id, kind, args),
             HirKind::Make { kind: MakeKind::Tuple, args } => self.make_tuple(args),
+            HirKind::Make { kind: MakeKind::Range { .. }, args } if self.expr_ty(id).is_some_and(lower::is_open_range) => self.make_open_range(id, args),
             HirKind::Make { kind: MakeKind::Array, args } if self.heap_array(id) => self.make_array(id, args),
             HirKind::Make { kind: MakeKind::Class(_), args } if self.inp.news.contains_key(&id.0) => self.make_object(id, args),
             HirKind::Make {
