@@ -887,8 +887,9 @@ impl Pipeline {
                 cached.push_pending_macros(nested);
                 return messages;
             };
-            // Drop the parentheses the snippet put around the output; the
-            // tree already keeps it whole where it lands.
+            // Drop the parentheses the snippet put around the output (`(e)`
+            // is `Group(Fragment([e]))`); the tree already keeps it whole
+            // where it lands.
             while let Expression::Expr(_) = value.1.as_ref() {
                 let Expression::Expr(inner) = *value.1 else { unreachable!() };
                 value = inner;
@@ -896,6 +897,12 @@ impl Pipeline {
             if let Expression::Group(_) = value.1.as_ref() {
                 let Expression::Group(inner) = *value.1 else { unreachable!() };
                 value = inner;
+            }
+            if let Expression::Fragment(items) = value.1.as_ref()
+                && items.len() == 1
+            {
+                let Expression::Fragment(mut items) = *value.1 else { unreachable!() };
+                value = items.pop().expect("one item");
             }
             // The output lands with the call's span (`replace_calls`); when
             // it is itself a call, queue that call under the span it gets.
