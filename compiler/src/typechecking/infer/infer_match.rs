@@ -41,6 +41,7 @@ impl Checker {
             );
         }
 
+        let mut pattern_failed = false;
         for arm in arms {
             self.push_scope();
 
@@ -57,6 +58,7 @@ impl Checker {
                 );
                 self.messages.push(msg);
             }
+            let msgs_before = self.messages.len();
             let pat_ty = self.infer_pattern(&arm.pattern.1, &resolved_scrutinee, &pattern_range);
 
             // Narrow an Identifier scrutinee to the matched variant so
@@ -119,6 +121,9 @@ impl Checker {
                 "match pattern against scrutinee",
             );
 
+            // A pattern that failed to check has no coherent coverage
+            // shape; skip the exhaustiveness pass for this match.
+            pattern_failed |= self.messages[msgs_before..].iter().any(|m| matches!(m.kind(), reporting::MessageKind::ERROR));
             let arm_cov = self.arm_coverage(&arm.pattern.1, &pattern_range);
             coverage.push(arm_cov);
 
@@ -151,11 +156,13 @@ impl Checker {
         self.current_match_lhs = prev;
 
         // Post-pass exhaustiveness re-applies the current subst to scrutinee_ty.
-        self.pending_exhaustive.push(PendingExhaustive {
-            scrutinee_ty: resolved_scrutinee,
-            arms: coverage,
-            match_range: range,
-        });
+        if !pattern_failed {
+            self.pending_exhaustive.push(PendingExhaustive {
+                scrutinee_ty: resolved_scrutinee,
+                arms: coverage,
+                match_range: range,
+            });
+        }
 
         result_ty
     }
@@ -173,6 +180,19 @@ impl Checker {
     /// range). It is used to anchor pattern-related diagnostics
     /// (`unknown constructor`, `wrong arity`) so ariadne points at
     /// the offending pattern instead of byte 0 of the source.
+    /// The enum a scrutinee type names, if it is a known enum.
+    fn scrutinee_enum_name(&self, ty: &Ty) -> Option<String> {
+        match apply_ty_prune(&self.subst, ty) {
+            Ty::Sum { name, .. } | Ty::Con(name) => Some(name),
+            Ty::App(con, _) => match *con {
+                Ty::Con(name) => Some(name),
+                _ => None,
+            },
+            Ty::Constructor { owner, .. } => self.scrutinee_enum_name(&owner),
+            _ => None,
+        }
+    }
+
     pub(super) fn infer_pattern(
         &mut self,
         pattern: &Pattern,
@@ -232,6 +252,19 @@ impl Checker {
                         return expected_ty.clone();
                     }
                 };
+                // A pattern of one enum against a scrutinee of another
+                // (`Option::None` on a `Result`) is a type mismatch.
+                if let Some(scrut_enum) = self.scrutinee_enum_name(expected_ty)
+                    && scrut_enum != enum_str
+                    && self.enum_tags.contains_key(&scrut_enum)
+                {
+                    self.messages.push(Message::error(
+                        ErrorCode::TypeMismatch,
+                        format!("Type mismatch: expected `{scrut_enum}`, found `{enum_str}`"),
+                        pattern_range.clone(),
+                    ));
+                    return expected_ty.clone();
+                }
                 let _arity = self
                     .enum_arities
                     .get(&enum_str)
