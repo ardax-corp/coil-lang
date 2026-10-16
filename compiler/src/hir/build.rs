@@ -1371,6 +1371,9 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                     (Some(ok), Some(e)) => Some(result_ty(ok, e)),
                     _ => b.body.ret.clone(),
                 };
+                if is_result_main(b) {
+                    return self.main_err_panic(b, Some(node), span_of(node), err);
+                }
                 let make = self.synth_variant(b, span_of(node), common::BUILTIN_RESULT_ENUM, "Err", vec![err], ty);
                 self.emit_ty(b, node, HirKind::Return(Some(make)), Some(coil_ty::never()))
             }
@@ -2023,8 +2026,40 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         } else {
             v
         };
+        // `return Err(e)` / `return r` from `main` fails the program on an
+        // `Err` (#1353).
+        if !wrap && !is_unit && is_result_main(b) && self.ty_at(b, v).as_ref().and_then(result_ok_err).is_some() {
+            let span = span_of(value);
+            let vty = self.ty_at(b, v);
+            let (ok_ty, err_ty) = vty.as_ref().and_then(result_ok_err).unzip();
+            let e = b.temp("err", err_ty.clone());
+            let x = b.temp("ok", ok_ty.clone());
+            let read_e = self.synth(b, span, HirKind::Local(e), err_ty);
+            let panic = self.main_err_panic(b, None, span, read_e);
+            let read_x = self.synth(b, span, HirKind::Local(x), ok_ty);
+            let ok = self.synth_variant(b, span, common::BUILTIN_RESULT_ENUM, "Ok", vec![read_x], miss_ret(b));
+            let ret = self.synth(b, span, HirKind::Return(Some(ok)), Some(coil_ty::never()));
+            let arms = vec![
+                HirArm { pat: self.variant_pat(common::BUILTIN_RESULT_ENUM, "Err", HirPatFields::Tuple(vec![HirPat::Bind(e)])), body: panic },
+                HirArm { pat: self.variant_pat(common::BUILTIN_RESULT_ENUM, "Ok", HirPatFields::Tuple(vec![HirPat::Bind(x)])), body: ret },
+            ];
+            return self.emit_ty(b, node, HirKind::Match { scrutinee: v, arms }, Some(coil_ty::never()));
+        }
         let v = if is_unit && !wrap { None } else { Some(v) };
         self.emit_ty(b, node, HirKind::Return(v), Some(coil_ty::never()))
+    }
+
+    /// `panic(format("main returned Err(%v)", err))`: how an `Err` that
+    /// reaches the end of `main` ends the program (#1353).
+    fn main_err_panic(&mut self, b: &mut BodyBuilder, node: Option<&Output<'_>>, span: Span, err: HirId) -> HirId {
+        let fmt = self.synth(b, span, HirKind::Lit(Lit::Str("main returned Err(%v)".into())), Some(coil_ty::string()));
+        let callee = Callee::Named { name: "string::format".into(), def: None, overload: None };
+        let text = self.synth(b, span, HirKind::Call { callee, args: vec![fmt, err] }, Some(coil_ty::string()));
+        let kind = HirKind::Builtin { op: Builtin::Panic, args: vec![text] };
+        match node {
+            Some(node) => self.emit_ty(b, node, kind, Some(coil_ty::never())),
+            None => self.synth(b, span, kind, Some(coil_ty::never())),
+        }
     }
 
     /// The `e` of a returned `e?` that is the identity: `e` has the
@@ -2106,11 +2141,15 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             let err_ty = resolved.and_then(result_ok_err).map(|(_, e)| e);
             let e = b.temp("err", err_ty.clone());
             let read = self.synth(b, span, HirKind::Local(e), err_ty);
+            let pat = self.variant_pat(enum_name, miss, HirPatFields::Tuple(vec![HirPat::Bind(e)]));
+            // An `Err` reaching the end of `main` fails the program (#1353).
+            if is_result_main(b) {
+                let panic = self.main_err_panic(b, None, span, read);
+                let arms = vec![HirArm { pat: hit_pat, body: hit_body }, HirArm { pat, body: panic }];
+                return self.emit(b, node, HirKind::Match { scrutinee, arms });
+            }
             let ret = miss_ret(b);
-            (
-                self.variant_pat(enum_name, miss, HirPatFields::Tuple(vec![HirPat::Bind(e)])),
-                self.synth_variant(b, span, enum_name, miss, vec![read], ret),
-            )
+            (pat, self.synth_variant(b, span, enum_name, miss, vec![read], ret))
         };
         let ret = self.synth(b, span, HirKind::Return(Some(miss_val)), Some(coil_ty::never()));
         let arms = vec![
@@ -2708,6 +2747,12 @@ mod tests;
 
 /// The type a `?` miss returns: the function's own return type, or a
 /// coroutine's yielded type (its final value).
+/// The program's `main` in result mode: it returns a `Result` no caller
+/// sees.
+fn is_result_main(b: &BodyBuilder) -> bool {
+    b.body.name == "main" && b.body.kind == BodyKind::Function && b.body.result_mode && !b.body.is_coro
+}
+
 fn miss_ret(b: &BodyBuilder) -> Option<Ty> {
     let ret = b.body.ret.clone();
     if !b.body.is_coro {
