@@ -17,7 +17,6 @@ pub fn sroa(func: &mut MirFunc) -> usize {
     let mut subst: HashMap<ValueId, ValueId> = HashMap::new();
     for block in &func.blocks {
         let mut alloc_of: HashMap<ValueId, Vec<ValueId>> = HashMap::new();
-        let mut live_obj: HashMap<Vec<ValueId>, ValueId> = HashMap::new();
         // Reconstruct may Alloc the same elems immediately after StoreIndex.
         // A later sibling zip with the same recipe must stay a fresh object.
         let mut pending_reuse: Option<(Vec<ValueId>, ValueId)> = None;
@@ -39,11 +38,11 @@ pub fn sroa(func: &mut MirFunc) -> usize {
                     {
                         let arr = pending_reuse.as_ref().unwrap().1;
                         subst.insert(*dest, arr);
-                    } else if let Some(&prev) = live_obj.get(elems) {
-                        subst.insert(*dest, prev);
-                    } else {
-                        live_obj.insert(elems.clone(), *dest);
                     }
+                    // Any other `Alloc` is a new object, even of the same
+                    // items (`[]` and `[]`, `[x]` and `[x]`): only a
+                    // reconstruct right after its store is the same array
+                    // (#1373).
                     pending_reuse = None;
                     pending_alloc = Some(*dest);
                 }
@@ -67,7 +66,6 @@ pub fn sroa(func: &mut MirFunc) -> usize {
                             {
                                 // Keep reconstruct pending across the store's barrier.
                             } else {
-                                live_obj.insert(elems, obj);
                                 pending_reuse = None;
                             }
                         }
@@ -77,7 +75,6 @@ pub fn sroa(func: &mut MirFunc) -> usize {
                 MirInst::StoreIndex { array, .. } => {
                     let arr = subst.get(array).copied().unwrap_or(*array);
                     if let Some(elems) = alloc_of.get(&arr).cloned() {
-                        live_obj.remove(&elems);
                         pending_reuse = Some((elems, arr));
                     }
                 }
