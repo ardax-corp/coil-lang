@@ -1786,8 +1786,13 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
     /// `Owner::member` in construct form calls a class's static method.
     /// `owner::member` names a static field of class `owner`.
     fn class_static(&self, owner: &str, member: &str) -> bool {
-        if self.checker.tag_for(owner, member).is_some() || !self.checker.has_impl(owner) {
+        if self.checker.tag_for(owner, member).is_some() {
             return false;
+        }
+        // `module::NAME`: another module's `const` or `static` (#1207).
+        if !self.checker.has_impl(owner) {
+            let fqn = format!("{owner}::{member}");
+            return self.checker.module_const_ty(&fqn).is_some() || self.checker.static_slot_index(&fqn).is_some();
         }
         let key = self.checker.resolve_class_key(owner).unwrap_or_else(|| owner.to_string());
         self.checker.static_slot_index(&format!("{key}::{member}")).is_some()

@@ -548,6 +548,9 @@ pub struct Compiler {
 
     /// Compile-time scalar values for `const` bindings (frame stack).
     const_env_stack: Vec<HashMap<String, ConstValue>>,
+    /// Every module's module-level `const` values by `module::NAME`, kept
+    /// across modules for importers (#1207).
+    module_const_values: HashMap<String, ConstValue>,
     /// Folded scalar initializers for module `static const` / `static` slots.
     static_const_values: HashMap<String, ConstValue>,
 
@@ -790,6 +793,7 @@ impl Default for Compiler {
             source_file_list: Vec::new(),
             gated_host_calls: HashMap::new(),
             const_env_stack: Vec::new(),
+            module_const_values: HashMap::new(),
             static_const_values: HashMap::new(),
             current_function_qualified: None,
             current_function_table_key: None,

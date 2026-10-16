@@ -567,6 +567,8 @@ pub struct Checker {
     /// Inside a `test("…") { … }` body (not a nested function or lambda):
     /// `?` there may unwrap any showable error or an `Option` (#628).
     in_test_case: bool,
+    /// Module-level `const`s of other modules, by `module::NAME` (#1207).
+    module_consts: HashMap<String, Ty>,
     /// Test-body `?` sites that fail the case themselves, by operand span.
     test_try_sites: HashMap<(usize, usize), TestTry>,
 

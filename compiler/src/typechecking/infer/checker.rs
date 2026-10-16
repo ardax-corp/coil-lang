@@ -214,6 +214,7 @@ impl Checker {
             variadic_call_arg_tags: HashMap::new(),
             fn_result_mode: None,
             in_test_case: false,
+            module_consts: HashMap::new(),
             test_try_sites: HashMap::new(),
             fn_option_mode: None,
             result_mode_fns: HashSet::new(),
@@ -5994,6 +5995,12 @@ impl Checker {
                                     })
                                 {
                                     self.const_fold_env.insert(n.to_string(), cv);
+                                }
+                                // A module's own `const`: other modules read
+                                // it imported or as `module::NAME`.
+                                if self.current_return_ty.is_none() && !self.current_module.is_empty() {
+                                    let fqn = self.qualify_module_name(n);
+                                    self.module_consts.insert(fqn, pruned.clone());
                                 }
                                 self.maybe_record_polyfn_binding(
                                     (child.0.start, child.0.end),
@@ -15559,6 +15566,12 @@ impl Checker {
                     && let Some(ty) = self.static_slot_types.get(&static_fqn).cloned() {
                         return apply_ty_prune(&self.subst, &ty);
                     }
+                // `module::NAME` of another module's `const`.
+                if matches!(fields, EnumConstructPayload::Unit)
+                    && let Some(ty) = self.module_consts.get(&format!("{enum_name}::{variant_name}")).cloned()
+                {
+                    return ty;
+                }
                 if let Some(ty) = self.try_infer_static_method_call(
                     enum_name,
                     variant_name,
@@ -18276,9 +18289,17 @@ impl Checker {
     /// Bind `local` to the defining module's scheme for `fqn` when known;
     /// otherwise insert a fresh monomorphic placeholder (historical disk-module
     /// ABI). Marks generic aliases so codegen emits dictionaries.
+    /// Type of another module's `const` named `module::NAME`.
+    pub fn module_const_ty(&self, fqn: &str) -> Option<&Ty> {
+        self.module_consts.get(fqn)
+    }
+
     fn reexport_module_item(&mut self, fqn: &str, local: &str) {
         if let Some(scheme) = self.env.lookup(fqn).cloned() {
             self.env.insert_top(local.to_string(), scheme);
+        } else if let Some(ty) = self.module_consts.get(fqn).cloned() {
+            self.env.insert_top(local.to_string(), Scheme::mono(ty));
+            self.insert_const_binding(local.to_string());
         } else if self.env.lookup(local).is_none() {
             self.env.insert_top(
                 local.to_string(),

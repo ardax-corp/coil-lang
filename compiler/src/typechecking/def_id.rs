@@ -40,6 +40,8 @@ pub enum DefKind {
     Enum,
     TypeAlias,
     Static,
+    /// A module-level `const`.
+    Const,
     /// `extern { fn … }` declaration. Same intern table as other defs.
     Ffi,
 }

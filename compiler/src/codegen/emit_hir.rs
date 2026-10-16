@@ -5142,6 +5142,7 @@ impl Compiler {
         let qualified = self.qualify_static_fqn(name);
         let is_const = self.const_env().contains_key(&resolved)
             || self.const_env().contains_key(name)
+            || self.module_const_values.contains_key(&resolved)
             || (!shadows
                 && (self.static_const_values.contains_key(&resolved) && self.checker.is_static_const_fqn(&resolved)
                     || self.static_const_values.contains_key(&qualified) && self.checker.is_static_const_fqn(&qualified)));
@@ -5268,19 +5269,21 @@ impl Compiler {
 
     fn hir_global_const(&self, hir: &HirBody, id: HirId, name: &str) -> Option<crate::const_fold::ConstValue> {
         use crate::const_fold::ConstValue;
-        if name.contains("::") {
-            return None;
-        }
         let expr = hir.expr(id);
         let resolved = self.resolve_free_fn(name);
         let shadows = self
             .checker
             .ident_shadows_static_name((expr.span.0, expr.span.1), name, &resolved);
         let qualified = self.qualify_static_fqn(name);
-        let value = self
+        // `module::NAME`: only another module's `const` (#1207).
+        let value = if name.contains("::") {
+            self.module_const_values.get(name)?
+        } else {
+            self
             .const_env()
             .get(&resolved)
             .or_else(|| self.const_env().get(name))
+            .or_else(|| self.module_const_values.get(&resolved).filter(|_| !shadows))
             .or_else(|| {
                 self.static_const_values
                     .get(&resolved)
@@ -5290,7 +5293,8 @@ impl Compiler {
                 self.static_const_values
                     .get(&qualified)
                     .filter(|_| !shadows && self.checker.is_static_const_fqn(&qualified))
-            })?;
+            })?
+        };
         let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
         let prim = lower::primitive(&ty);
         let fits = match value {
