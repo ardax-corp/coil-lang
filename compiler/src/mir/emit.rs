@@ -51,6 +51,7 @@ pub fn emit_dense(
     let (regs, scratch) = assign_regs(func, &plan.need_slot)?;
     let regs = coalesce_latch_overwrite(func, regs, &plan.need_slot);
     let cleared = cleared_words(func, &regs, &plan.need_slot);
+    let entry_clears = entry_clears(func, &regs, &plan.need_slot);
     let gather = gather_window(func, entry_label);
     let mut max_slot = plan
         .need_slot
@@ -258,6 +259,7 @@ pub fn emit_dense(
             reserved: &reserved,
             pool,
             loc: func.term_loc(block.id),
+            clears: entry_clears.get(&block.id).map(Vec::as_slice).unwrap_or(&[]),
         })?;
     }
     coalesce_dense_moves(&mut out);
@@ -344,8 +346,131 @@ pub(super) fn cleared_words(func: &MirFunc, regs: &[u8], need_slot: &[bool]) -> 
                 && !fused_reads.contains(value)
                 && !func.params.contains(value)
                 && !live[b][k].iter().any(|v| slot(v) && regs[v.index()] == regs[value.index()])
+                && !copied_over_first(func, block, k, regs, regs[value.index()], &slot)
             {
                 out.insert(*dest);
+            }
+        }
+    }
+    out
+}
+
+/// The block's edge copy rewrites register `reg` after instruction `k` with
+/// no collection possible in between, so a zero there is dead: a loop local
+/// rebound in the body, whose header φ shares `reg` (#1402).
+fn copied_over_first(
+    func: &MirFunc,
+    block: &super::func::MirBlock,
+    k: usize,
+    regs: &[u8],
+    reg: u8,
+    slot: &impl Fn(&ValueId) -> bool,
+) -> bool {
+    let Some(Terminator::Jump { dest: succ }) = block.term else {
+        return false;
+    };
+    // Ops that cannot collect, nor trap (a trap may unwind into a cleanup
+    // pad that collects).
+    let quiet = |inst: &MirInst| {
+        (!super::gc::collects(inst) || matches!(inst, MirInst::ClearWord { .. } | MirInst::KeepAlive { .. })) && !inst.may_trap(func)
+    };
+    if !block.insts[k + 1..].iter().all(quiet) {
+        return false;
+    }
+    func.block(succ)
+        .insts
+        .iter()
+        .map_while(|inst| match inst {
+            MirInst::Phi { dest, args, .. } => Some((dest, args)),
+            _ => None,
+        })
+        .any(|(dest, args)| {
+            slot(dest) && regs[dest.index()] == reg && args.iter().any(|&(p, src)| p == block.id && regs[src.index()] != reg)
+        })
+}
+
+/// Registers to zero after the φ copies of each loop-entry `Jump` (by
+/// predecessor block): a heap word copied into a loop header φ that the
+/// loop rebinds (a `ClearWord` of the φ) and nothing reads past the edge.
+/// The copy carries the value on; its source register would keep rooting
+/// it after the rebind (#1402). Once per loop entry, never on the back edge.
+pub(super) fn entry_clears(func: &MirFunc, regs: &[u8], need_slot: &[bool]) -> HashMap<BlockId, Vec<u8>> {
+    let mut out: HashMap<BlockId, Vec<u8>> = HashMap::new();
+    let rebound: HashSet<ValueId> = func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .filter_map(|i| match i {
+            MirInst::ClearWord { value, .. } => Some(*value),
+            _ => None,
+        })
+        .collect();
+    if rebound.is_empty() {
+        return out;
+    }
+    // A constant (a `None` niche, null), or a cast of one, roots nothing.
+    let mut consts: HashSet<ValueId> = HashSet::new();
+    for inst in func.blocks.iter().flat_map(|b| &b.insts) {
+        match inst {
+            MirInst::Const { dest, .. } => {
+                consts.insert(*dest);
+            }
+            MirInst::Cast { dest, src, .. } if consts.contains(src) => {
+                consts.insert(*dest);
+            }
+            _ => {}
+        }
+    }
+    let slot = |v: ValueId| need_slot.get(v.index()).copied().unwrap_or(false) && v.index() < regs.len();
+    let headers: Vec<&super::func::MirBlock> = func
+        .blocks
+        .iter()
+        .filter(|h| {
+            h.insts.first().is_some_and(MirInst::is_phi)
+                && h.insts.iter().take_while(|i| i.is_phi()).any(|i| {
+                    matches!(i, MirInst::Phi { args, .. } if args.iter().any(|(p, _)| p.index() >= h.id.index()))
+                })
+        })
+        .collect();
+    if headers.is_empty() {
+        return out;
+    }
+    let live = super::gc::liveness_after(func);
+    for h in headers {
+        let phis: Vec<(ValueId, &Vec<(BlockId, ValueId)>)> = h
+            .insts
+            .iter()
+            .map_while(|i| match i {
+                MirInst::Phi { dest, args, .. } => Some((*dest, args)),
+                _ => None,
+            })
+            .collect();
+        // Live at the top of the header: the φs and everything live through.
+        let live_in = &live[h.id.index()][phis.len() - 1];
+        let taken = |r: u8| {
+            phis.iter().any(|(d, _)| regs[d.index()] == r) || live_in.iter().any(|v| slot(*v) && regs[v.index()] == r)
+        };
+        let preds: HashSet<BlockId> = phis.iter().flat_map(|(_, a)| a.iter().map(|(p, _)| *p)).collect();
+        for p in preds {
+            if p.index() >= h.id.index() || !matches!(func.block(p).term, Some(Terminator::Jump { dest }) if dest == h.id) {
+                continue;
+            }
+            for (dest, args) in &phis {
+                for &(q, src) in args.iter() {
+                    let r = regs[src.index()];
+                    if q == p
+                        && rebound.contains(dest)
+                        && !consts.contains(&src)
+                        && slot(src)
+                        && slot(*dest)
+                        && func.ty(src).is_heap_word()
+                        && !func.params.contains(&src)
+                        && !taken(r)
+                        && !out.get(&p).is_some_and(|rs| rs.contains(&r))
+                    {
+                        out.entry(p).or_default().push(r);
+                    }
+                }
             }
         }
     }
@@ -567,7 +692,10 @@ fn latch_overwrite_ok(
             seen_def = true;
             continue;
         }
-        if seen_def && inst.operands().contains(&dest) {
+        // A rebind's `ClearWord` of the old value reads no word: once
+        // aliased, `cleared_words` sees the live latch value in the shared
+        // register and skips the zero.
+        if seen_def && !matches!(inst, MirInst::ClearWord { .. }) && inst.operands().contains(&dest) {
             return false;
         }
     }
@@ -1455,6 +1583,8 @@ struct EmitTermArgs<'args> {
     reserved: &'args HashSet<u32>,
     pool: &'args mut Vec<u64>,
     loc: DebugLoc,
+    /// Registers zeroed after a `Jump`'s φ copies ([`entry_clears`]).
+    clears: &'args [u8],
 }
 
 fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
@@ -1471,6 +1601,7 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
         reserved,
         pool,
         loc,
+        clears,
     } = args;
 
     let Some(term) = &block.term else {
@@ -1479,6 +1610,9 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
     match term {
         Terminator::Jump { dest } => {
             emit_phi_moves(out, func, block.id, *dest, regs, scratch);
+            for &r in clears {
+                push_clear_word(out, r);
+            }
             if !is_fallthrough(func, block.id, *dest) {
                 out.push(IlOp::Jump {
                     kind: IlJumpKind::Unconditional,

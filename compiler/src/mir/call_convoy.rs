@@ -108,7 +108,11 @@ impl ConvoyPlan {
             if rematerialize_const(func, &def[i]) && !keep[i] {
                 continue;
             }
-            if def[i].is_some() || def_block[i].is_some() {
+            // A `ClearWord` / `KeepAlive` token is never written or read.
+            let token = def[i].is_some_and(|(b, k)| {
+                matches!(func.block(b).insts.get(k), Some(MirInst::ClearWord { .. } | MirInst::KeepAlive { .. }))
+            });
+            if !token && (def[i].is_some() || def_block[i].is_some()) {
                 need_slot[i] = true;
             }
         }

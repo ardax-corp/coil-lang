@@ -1597,6 +1597,19 @@ impl Lower<'_> {
         Ok(())
     }
 
+    /// The heap word `slot` holds before a rebind, for a `ClearWord` once the
+    /// new value is bound (#1402). HIR emission overwrites the local's frame
+    /// slot, which ends the old value's lifetime; here the new value gets a
+    /// register of its own, and the old one would stay in its register (a
+    /// root to the end of the frame) unless zeroed. Emission skips the zero
+    /// while another live value shares that register (`cleared_words`).
+    fn rebound_word(&mut self, slot: LocalId, ty: MirTy) -> Result<Option<ValueId>, Refusal> {
+        if !ty.is_heap_word() || !self.b.local_defined(slot) {
+            return Ok(None);
+        }
+        Ok(Some(self.b.use_local(slot, ty).map_err(mir)?))
+    }
+
     /// Keep every pinned local's word live to here (an exit).
     fn keep_pins(&mut self) -> Result<(), Refusal> {
         let mut pins: Vec<u32> = self.pins.keys().copied().collect();
@@ -3164,7 +3177,11 @@ impl Lower<'_> {
                     return Err("assign type".into());
                 }
                 self.keep_pin(local)?;
+                let old = self.rebound_word(slot, ty)?;
                 self.b.def_local(slot, v).map_err(mir)?;
+                if let Some(old) = old {
+                    self.b.ins_clear_word(old).map_err(mir)?;
+                }
                 Ok(Val::Unit)
             }
             HirKind::If { cond, then, els } => self.if_(*cond, *then, *els, returned),
