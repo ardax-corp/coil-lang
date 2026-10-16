@@ -658,6 +658,9 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
         vm.bind_shared_heap(e);
     }
     let shared = epoch.is_some();
+    // A trapped `env::exit` belongs to the job that made it; a job this
+    // thread runs while helping a join neither sees nor clears it.
+    let outer_exit = crate::env::take_exit_request();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         vm.install_natives(&natives);
         vm.set_thread_program(Arc::clone(&program));
@@ -701,6 +704,7 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
             value_to_portable(vm.heap(), ret)
         }
     }));
+    crate::env::restore_exit_request(outer_exit);
     if redirected {
         crate::io::set_output_redirect(prev_output);
         crate::io::set_shared_print_redirect(prev_shared_print);
@@ -845,7 +849,7 @@ fn run_test_job(vm: &mut Machine<WORKER_STACK_SLOTS>, entry: u32, test: &TestJob
     if let Some(ip) = test.init_ip {
         vm.run_from(ip as usize);
     }
-    let (passed, reason) = if vm.panicked() {
+    let (mut passed, reason) = if vm.panicked() {
         (false, None)
     } else {
         let ret = vm.call_function(entry, &[]);
@@ -863,6 +867,12 @@ fn run_test_job(vm: &mut Machine<WORKER_STACK_SLOTS>, entry: u32, test: &TestJob
             (false, vm.result_err_text(ret))
         }
     };
+    // A trapped `env::exit` (#1401) panicked the job. A `main` case is a
+    // program, so `exit(0)` is its clean end; a `test` case that exits
+    // skipped the rest of its body, so it fails whatever the code.
+    if let Some(code) = crate::env::take_exit_request() {
+        passed = !test.expect_ok_result && code == 0 && !vm.step_budget_exhausted();
+    }
     #[cfg(feature = "coverage")]
     let hits = vm.take_coverage();
     #[cfg(not(feature = "coverage"))]
