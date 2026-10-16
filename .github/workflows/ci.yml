@@ -351,6 +351,14 @@ jobs:
             gc-stress) $run --harness harness-bin/gc-stress/coil-test -- $FLAGS ;;
           esac
 
+      # The examples in the builtin doc stubs (compiler/src/builtin_docs/),
+      # which no test file imports. `-A`: they show exec, exit and FFI too.
+      - name: Builtin doc-tests (${{ matrix.variant }}, ${{ matrix.mode }})
+        if: matrix.variant == 'default' || matrix.variant == 'O0'
+        run: |
+          harness-bin/coil test --doc-tests-only -A ${{ matrix.variant == 'O0' && '-O 0' || '' }} \
+            --root examples/src --root .deps/coil-stdlib/src compiler/src/builtin_docs
+
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
