@@ -849,6 +849,12 @@ fn run_test_job(vm: &mut Machine<WORKER_STACK_SLOTS>, entry: u32, test: &TestJob
         (false, None)
     } else {
         let ret = vm.call_function(entry, &[]);
+        if !test.expect_ok_result {
+            // A `main` case is a whole program: as with `coil FILE`, the
+            // finalizers still pending run before exit, while their output
+            // is still captured (the worker heap is reset after the job).
+            vm.run_remaining_finalizers();
+        }
         if vm.panicked() {
             (false, None)
         } else if !test.expect_ok_result || vm.result_is_ok(ret) {
