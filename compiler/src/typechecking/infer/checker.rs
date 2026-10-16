@@ -3185,6 +3185,13 @@ impl Checker {
                 }
                 if let Some(send_ty) = self.current_send_ty.clone() {
                     self.unify(&send_ty, &s_var, &range, "yield from send type");
+                    // A delegate that receives sends makes this coroutine
+                    // receive them too (forwarded), so its send type stays
+                    // the delegate's instead of defaulting to `unit`.
+                    let resolved = apply_ty_prune(&self.subst, &s_var);
+                    if !matches!(resolved, Ty::Var(_)) && resolved != unit_ty() {
+                        self.yield_receives_used = true;
+                    }
                 }
                 unit_ty()
             }
