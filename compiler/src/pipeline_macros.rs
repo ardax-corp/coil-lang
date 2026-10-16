@@ -115,8 +115,14 @@ impl Pipeline {
                 .unwrap_or_default();
             let mut errors = Vec::new();
             let mut file_jobs = Vec::new();
+            let cached = self.ast_cache.get(file);
+            // Includes earlier rounds' generated code (its spans point past the file).
+            let report = cached.map(|c| c.report_source()).unwrap_or_default();
+            // Calls looked up by span, one walk for the whole round.
+            let calls = cached.and_then(|c| c.ast()).map(index_calls).unwrap_or_default();
             for p in pending {
-                match self.resolve_macro(file, &p) {
+                let call = calls.get(&p.target).copied();
+                match self.resolve_macro(file, &p, call) {
                     Ok((provider, decl, provider_module)) => {
                         if &provider == file {
                             errors.push(Message::error(
@@ -141,7 +147,7 @@ impl Pipeline {
                             ));
                             continue;
                         }
-                        match self.encode_input(file, &module, &p, &decl) {
+                        match self.encode_input(file, &module, &p, &decl, &report, call) {
                             Ok(input) => file_jobs.push(Job {
                                 file: file.clone(),
                                 pending: p,
@@ -221,7 +227,8 @@ impl Pipeline {
         })
     }
 
-    /// Find the module providing `p` through `file`'s `use` items.
+    /// Find the module providing `p` through `file`'s `use` items. `call`
+    /// is the `name!(…)` node at `p.target`, if any.
     ///
     /// `Err(None)`: nothing in scope provides it.
     #[allow(clippy::type_complexity)]
@@ -229,13 +236,14 @@ impl Pipeline {
         &self,
         file: &Path,
         p: &PendingMacro,
+        call: Option<&Output<'_>>,
     ) -> Result<(PathBuf, MacroDecl, String), Option<Message>> {
         let Some(ast) = self.ast_cache.get(file).and_then(|c| c.ast()) else {
             return Err(None);
         };
         // A function-style macro may be overloaded by arity: the call's
         // argument count picks the declaration.
-        let argc = match find_call(ast, p.target).map(|c| c.1.as_ref()) {
+        let argc = match call.map(|c| c.1.as_ref()) {
             Some(Expression::MacroCall { args, .. }) if p.kind == MacroKind::Function => Some(args.len()),
             _ => None,
         };
@@ -320,15 +328,21 @@ impl Pipeline {
     }
 
     /// The macro call's input: the declaration, then its attribute
-    /// arguments in parameter order.
-    fn encode_input(&self, file: &Path, module: &str, p: &PendingMacro, decl: &MacroDecl) -> Result<String, Message> {
+    /// arguments in parameter order. `source` is the file's report text,
+    /// `call` the `name!(…)` node at `p.target`.
+    fn encode_input(
+        &self,
+        file: &Path,
+        module: &str,
+        p: &PendingMacro,
+        decl: &MacroDecl,
+        source: &str,
+        call: Option<&Output<'_>>,
+    ) -> Result<String, Message> {
         let cached = self.ast_cache.get(file).expect("pending macros come from a cached file");
-        // Includes earlier rounds' generated code (its spans point past the file).
-        let report = cached.report_source();
-        let source = report.as_str();
         let ast = cached.ast().expect("parsed");
         if decl.input == MacroInput::Exprs {
-            return encode_call(ast, source, p, decl);
+            return encode_call(call, source, p, decl);
         }
         let Some(node) = find_target(ast, p) else {
             return Err(Message::error(
@@ -970,18 +984,18 @@ fn replace_call<'a>(node: &mut Output<'a>, target: parser::SimpleSpan, replaceme
     node.1.for_each_child_mut(&mut |c| replace_call(c, target, replacement));
 }
 
-/// The `name!(…)` call at `target`.
-fn find_call<'b, 'a>(node: &'b Output<'a>, target: parser::SimpleSpan) -> Option<&'b Output<'a>> {
-    if node.0 == target && matches!(node.1.as_ref(), Expression::MacroCall { .. }) {
-        return Some(node);
-    }
-    let mut found = None;
-    node.1.for_each_child(&mut |c| {
-        if found.is_none() {
-            found = find_call(c, target);
+/// Every `name!(…)` call under `node` by its span; the first in tree order
+/// when two share one.
+fn index_calls<'b, 'a>(node: &'b Output<'a>) -> HashMap<parser::SimpleSpan, &'b Output<'a>> {
+    fn walk<'b, 'a>(node: &'b Output<'a>, out: &mut HashMap<parser::SimpleSpan, &'b Output<'a>>) {
+        if matches!(node.1.as_ref(), Expression::MacroCall { .. }) {
+            out.entry(node.0).or_insert(node);
         }
-    });
-    found
+        node.1.for_each_child(&mut |c| walk(c, out));
+    }
+    let mut out = HashMap::new();
+    walk(node, &mut out);
+    out
 }
 
 /// The declaration of `name` in `decls` that `p` uses. Overloads of a
@@ -1013,13 +1027,13 @@ fn pick_decl(decls: &[MacroDecl], p: &PendingMacro, name: &str, argc: Option<usi
 
 /// A function-style macro's input: each `Expr` parameter's argument, then
 /// the rest (count, items) for a last `Vec<Expr>` parameter.
-fn encode_call(ast: &Output<'_>, source: &str, p: &PendingMacro, decl: &MacroDecl) -> Result<String, Message> {
+fn encode_call(call: Option<&Output<'_>>, source: &str, p: &PendingMacro, decl: &MacroDecl) -> Result<String, Message> {
     let err = |text: String| Message::error(ErrorCode::GenericTypeError, text, p.range.clone());
-    let Some(call) = find_call(ast, p.target) else {
+    let Some(call) = call else {
         return Err(err(format!("macro `{}!` call not found", p.name)));
     };
     let Expression::MacroCall { args, .. } = call.1.as_ref() else {
-        unreachable!("find_call returns calls");
+        unreachable!("index_calls holds calls");
     };
     if let Some(bad) = args
         .iter()
