@@ -113,3 +113,22 @@ test("the join value stays alive while another local holds it") {
     assert!(!gone(w));
     assert!(keep.len() == 3 && v.len() == 0);
 }
+
+test("a nested join value is dropped by a rebind after the outer join") {
+    let n = Vec::from([1, 2]);
+    let v = Vec::new();
+    if n.len() > 1 {
+        if n.len() == 2 {
+            v = Vec::from([1, 2, 3]);
+        } else {
+            v = Vec::from([4]);
+        }
+    } else {
+        v = Vec::from([5, 6]);
+    }
+    let w = weak(v);
+    v = Vec::new();
+    collect();
+    assert!(gone(w));
+    assert!(v.len() == 0);
+}
