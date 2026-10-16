@@ -2,7 +2,7 @@
 // `Result` or a two-word value goes to them as a generic argument does:
 // boxed to its object, which `upgrade` / `get` / `unroot` hand back.
 use tests::assert;
-use gc::{get, root, unroot, upgrade, weak};
+use gc::{collect, get, root, unroot, upgrade, weak, Root};
 
 class Node {
     pub v: int,
@@ -14,6 +14,16 @@ fn some_node(int v) -> Option<Node> {
 
 fn no_node() -> Option<Node> {
     return Option::None;
+}
+
+fn pinned(int v) -> Root<Option<Node>> {
+    let x = some_node(v);
+    return root(x);
+}
+
+fn pinned_ok(int v) -> Root<Result<Node, string>> {
+    let x: Result<Node, string> = Result::Ok(new Node(v));
+    return root(x);
 }
 
 test("weak of an Option<Node> local upgrades to it") {
@@ -117,3 +127,53 @@ test("weak of the Option get returns") {
     };
     assert!(v == 5);
 }
+
+test("weak of Some(node) refers to the node: alive while it is held") {
+    let x = some_node(8);
+    let w = weak(x);
+    collect();
+    assert!(
+        match upgrade(w) {
+            Option::Some(Option::Some(n)) => n.v == 8,
+            default => false,
+        },
+    );
+    assert!(match x {
+        Option::Some(n) => n.v == 8,
+        Option::None => false,
+    });
+}
+
+test("weak of None always upgrades") {
+    let w = weak(no_node());
+    collect();
+    assert!(
+        match upgrade(w) {
+            Option::Some(Option::None) => true,
+            default => false,
+        },
+    );
+}
+
+test("root of Some(node) keeps the node alive") {
+    let r = pinned(9);
+    collect();
+    assert!(
+        match get(r) {
+            Option::Some(Option::Some(n)) => n.v == 9,
+            default => false,
+        },
+    );
+}
+
+test("root of Ok(node) keeps the node alive") {
+    let r = pinned_ok(10);
+    collect();
+    assert!(
+        match get(r) {
+            Option::Some(Result::Ok(n)) => n.v == 10,
+            default => false,
+        },
+    );
+}
+
