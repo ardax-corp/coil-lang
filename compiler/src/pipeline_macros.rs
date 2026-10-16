@@ -406,6 +406,24 @@ impl Pipeline {
                     p.range.clone(),
                 ));
             }
+            // Arguments travel as text and decode by the parameter's type:
+            // `"ten"` for an `int` would decode as garbage.
+            let want = decl.params[slot].1.as_str();
+            let fits = match want {
+                "string" => matches!(arg.kind, "string" | "ident"),
+                other => arg.kind == other,
+            };
+            if !fits {
+                let found = if arg.kind == "ident" { "an identifier".to_string() } else { format!("`{}`", arg.kind) };
+                return Err(Message::error(
+                    ErrorCode::GenericTypeError,
+                    format!(
+                        "attribute macro `{}` argument `{}` takes `{want}`, found {found}",
+                        p.name, decl.params[slot].0
+                    ),
+                    p.range.clone(),
+                ));
+            }
             values[slot] = Some(arg);
         }
         for (i, v) in values.into_iter().enumerate() {
