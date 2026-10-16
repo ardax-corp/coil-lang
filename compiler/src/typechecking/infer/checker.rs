@@ -1637,6 +1637,8 @@ impl Checker {
         self.module_locals
             .insert(self.current_module_id, self.local_defs.clone());
 
+        // Imported type aliases first: any signature may name one (#1208).
+        self.import_type_aliases(ast);
         // Register enum shapes before infer so early constructor/match uses resolve.
         if let Err(msgs) = self.pre_register_enums(ast) {
             self.messages.extend(msgs);
@@ -13991,6 +13993,35 @@ impl Checker {
         };
         for child in children {
             self.pre_process_top_level_use_node(child);
+        }
+    }
+
+    /// Bind `use m::{Alias}` to another module's type alias, as the qualified
+    /// `m::Alias` resolves (`qualified_type_aliases`).
+    fn import_type_aliases(&mut self, node: &Output) {
+        match node.1.as_ref() {
+            Expression::Statement(inner)
+            | Expression::ExprStatement(inner)
+            | Expression::Expr(inner)
+            | Expression::Group(inner) => self.import_type_aliases(inner),
+            Expression::Program(children) | Expression::Fragment(children) | Expression::Block(children) => {
+                for child in children {
+                    self.import_type_aliases(child);
+                }
+            }
+            Expression::Use { path, name, alias } if name != "*" && !path.is_empty() => {
+                let fqn = format!("{}::{name}", path.join("::"));
+                let local = alias.clone().unwrap_or_else(|| name.clone());
+                if let Some(ty) = self.qualified_type_aliases.get(&fqn).cloned() {
+                    if self.type_aliases.is_empty() {
+                        self.type_aliases.push(HashMap::new());
+                    }
+                    self.type_aliases[0].insert(local, ty);
+                } else if let Some(def) = self.qualified_generic_aliases.get(&fqn).cloned() {
+                    self.generic_aliases.insert(local, def);
+                }
+            }
+            _ => {}
         }
     }
 
