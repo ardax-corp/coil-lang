@@ -53,7 +53,7 @@ pub fn emit_lir_with_aliases(
         ));
     }
     let mut plan = EmitPlan::new(func);
-    let (regs, scratch) = assign_needed(func, &plan)?;
+    let (regs, scratch) = assign_needed(func, &mut plan)?;
     plan.home_base = home_base(func, scratch)?;
     let plan = plan;
     let regs = coalesce_latch_overwrite(func, regs, &plan.need_slot);
@@ -183,8 +183,8 @@ pub(super) type LirSidecars = (
 /// Debug slot remap, deopt map and (for a body with GC edges) the stack map
 /// of `func`, in the frame registers LIR emission assigns.
 pub(super) fn lir_sidecars(func: &MirFunc) -> LirSidecars {
-    let plan = EmitPlan::new(func);
-    let (regs, scratch) = assign_needed(func, &plan).unwrap_or_else(|_| (Vec::new(), 0));
+    let mut plan = EmitPlan::new(func);
+    let (regs, scratch) = assign_needed(func, &mut plan).unwrap_or_else(|_| (Vec::new(), 0));
     let regs = coalesce_latch_overwrite(func, regs, &plan.need_slot);
     let mut stack_map = if func.has_mapped_gc_edge() && !regs.is_empty() {
         super::stackmap::encode_draft_regs(func, &regs, &plan.need_slot)
@@ -220,7 +220,7 @@ pub(super) fn lir_sidecars(func: &MirFunc) -> LirSidecars {
 /// words)`, `None` when emission would refuse it.
 pub(super) fn lir_home_frame(func: &MirFunc) -> Option<(u8, u32)> {
     let mut plan = EmitPlan::new(func);
-    let (regs, scratch) = assign_needed(func, &plan).ok()?;
+    let (regs, scratch) = assign_needed(func, &mut plan).ok()?;
     plan.home_base = home_base(func, scratch).ok()?;
     let regs = coalesce_latch_overwrite(func, regs, &plan.need_slot);
     let max_reg = plan.need_slot.iter().enumerate().filter(|(_, n)| **n).map(|(i, _)| regs[i]).max().unwrap_or(0);
@@ -772,8 +772,217 @@ fn emit_last_arm_unpack(args: EmitLastArmUnpackArgs<'_>) -> Result<(), LowerErro
     Ok(())
 }
 
-fn assign_needed(func: &MirFunc, plan: &EmitPlan) -> Result<(Vec<u8>, u8), LowerError> {
-    super::emit::assign_regs_prefer_payloads(func, &plan.need_slot)
+fn assign_needed(func: &MirFunc, plan: &mut EmitPlan) -> Result<(Vec<u8>, u8), LowerError> {
+    match super::emit::assign_regs_prefer_payloads(func, &plan.need_slot) {
+        // One register per value overflows the frame (a body with many
+        // inlined calls, #1375): share registers between values never live
+        // at once. Under a debugger every value keeps its own word.
+        Err(LowerError::Refused(why)) if why.starts_with("too many") && !why.contains("params") && !func.debug_keep => {
+            // An inline operand reads its own operands where its consumer
+            // is: a long chain (`t = t + i` per call) would hold every
+            // leaf to the end. Each value with operands takes a slot.
+            for i in 0..plan.tree.len() {
+                let has_operands = plan.def[i].is_some_and(|(b, k)| !func.block(b).insts[k].operands().is_empty());
+                if plan.tree[i] && has_operands {
+                    plan.tree[i] = false;
+                    plan.need_slot[i] = true;
+                }
+            }
+            assign_shared(func, plan)
+        }
+        other => other,
+    }
+}
+
+/// Registers for the slotted values of `func`, shared between values never
+/// live at the same time. Parameters keep their own words. A heap word and
+/// a scalar never share one (the stack map lists every heap register at
+/// every site), and a value's register is held until its last read,
+/// counting a `ClearWord` or `Deopt` naming it and a tree operand read
+/// where its consumer is emitted.
+fn assign_shared(func: &MirFunc, plan: &EmitPlan) -> Result<(Vec<u8>, u8), LowerError> {
+    use std::collections::{BTreeSet, HashSet};
+    let n = func.types.len();
+    let slot = |v: ValueId| plan.need_slot.get(v.index()).copied().unwrap_or(false);
+    let fused: HashSet<ValueId> = func.blocks.iter().filter_map(|b| super::emit::term_cmp_dest(func, b)).collect();
+    // The slotted words reading `v` reads: `v` itself, or the operands of
+    // the tree (or fused compare) it is emitted as at its consumer.
+    fn reads(func: &MirFunc, plan: &EmitPlan, fused: &HashSet<ValueId>, v: ValueId, out: &mut Vec<ValueId>) {
+        if plan.need_slot.get(v.index()).copied().unwrap_or(false) {
+            out.push(v);
+            return;
+        }
+        let inline = plan.tree.get(v.index()).copied().unwrap_or(false) || fused.contains(&v);
+        if let (true, Some((b, i))) = (inline, plan.def.get(v.index()).copied().flatten()) {
+            for o in func.block(b).insts[i].operands() {
+                reads(func, plan, fused, o, out);
+            }
+        }
+    }
+    let read = |v: ValueId, out: &mut Vec<ValueId>| reads(func, plan, &fused, v, out);
+    // Emitted where its consumer is, not at its definition.
+    let inline_def = |inst: &MirInst| {
+        let d = inst.dest();
+        !slot(d) && (plan.tree.get(d.index()).copied().unwrap_or(false) || fused.contains(&d))
+    };
+    let phi_dests = |b: &super::func::MirBlock| -> Vec<ValueId> {
+        b.insts.iter().take_while(|i| i.is_phi()).map(|i| i.dest()).collect()
+    };
+    let nb = func.blocks.len();
+    let mut live_in: Vec<HashSet<ValueId>> = vec![HashSet::new(); nb];
+    let live_out = |bi: usize, live_in: &[HashSet<ValueId>]| -> HashSet<ValueId> {
+        let mut live = HashSet::new();
+        let Some(term) = &func.blocks[bi].term else {
+            return live;
+        };
+        let me = func.blocks[bi].id;
+        for s in term.succs() {
+            let Some(succ) = func.blocks.get(s.index()) else {
+                continue;
+            };
+            live.extend(live_in[s.index()].iter().copied());
+            for inst in succ.insts.iter().take_while(|i| i.is_phi()) {
+                if let MirInst::Phi { args, .. } = inst {
+                    let mut out = Vec::new();
+                    for &(_, v) in args.iter().filter(|(p, _)| *p == me) {
+                        read(v, &mut out);
+                    }
+                    live.extend(out);
+                }
+            }
+        }
+        live
+    };
+    // One backward walk of block `bi`; `edge` records an interference.
+    let walk = |bi: usize, live_in: &[HashSet<ValueId>], edge: &mut dyn FnMut(ValueId, ValueId)| -> HashSet<ValueId> {
+        let block = &func.blocks[bi];
+        let mut live = live_out(bi, live_in);
+        let def = |defs: &[ValueId], uses: &[ValueId], live: &mut HashSet<ValueId>, edge: &mut dyn FnMut(ValueId, ValueId)| {
+            for &d in defs {
+                for &o in live.iter().chain(uses).chain(defs) {
+                    if o != d {
+                        edge(d, o);
+                    }
+                }
+            }
+            for d in defs {
+                live.remove(d);
+            }
+            live.extend(uses.iter().copied());
+        };
+        if let Some(term) = &block.term {
+            let (defs, used): (Vec<ValueId>, Vec<ValueId>) = match term {
+                Terminator::JumpIfMatch { scrutinee, payloads, .. } => {
+                    (payloads.iter().copied().filter(|&v| slot(v)).collect(), vec![*scrutinee])
+                }
+                other => (Vec::new(), term_values(other)),
+            };
+            let mut uses = Vec::new();
+            for v in used {
+                read(v, &mut uses);
+            }
+            def(&defs, &uses, &mut live, edge);
+        }
+        for inst in block.insts.iter().rev() {
+            if inst.is_phi() || inline_def(inst) {
+                continue;
+            }
+            let defs: Vec<ValueId> = inst.dests().filter(|&d| slot(d)).collect();
+            let mut uses = Vec::new();
+            for o in inst.operands() {
+                read(o, &mut uses);
+            }
+            def(&defs, &uses, &mut live, edge);
+        }
+        let phis = phi_dests(block);
+        for &d in &phis {
+            if slot(d) {
+                for &o in live.iter().chain(&phis) {
+                    if o != d && slot(o) {
+                        edge(d, o);
+                    }
+                }
+            }
+        }
+        for d in &phis {
+            live.remove(d);
+        }
+        live
+    };
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for bi in (0..nb).rev() {
+            let live = walk(bi, &live_in, &mut |_, _| {});
+            if live != live_in[bi] {
+                live_in[bi] = live;
+                changed = true;
+            }
+        }
+    }
+    let mut adj: Vec<BTreeSet<ValueId>> = vec![BTreeSet::new(); n];
+    {
+        let mut edge = |a: ValueId, b: ValueId| {
+            if a.index() < n && b.index() < n {
+                adj[a.index()].insert(b);
+                adj[b.index()].insert(a);
+            }
+        };
+        for bi in 0..nb {
+            let _ = walk(bi, &live_in, &mut edge);
+        }
+        // A φ is written on each incoming edge, over what that edge keeps.
+        for block in &func.blocks {
+            for inst in block.insts.iter().take_while(|i| i.is_phi()) {
+                let MirInst::Phi { dest, args, .. } = inst else { continue };
+                if !slot(*dest) {
+                    continue;
+                }
+                for &(pred, _) in args {
+                    if pred.index() < nb {
+                        for o in live_out(pred.index(), &live_in) {
+                            if o != *dest {
+                                edge(*dest, o);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let opaque = super::gc::live_opaque_words(func);
+    let heap = |v: ValueId| func.types.get(v.index()).is_some_and(|t| t.is_heap_word()) || opaque.contains(&v);
+    let mut reg = vec![0u8; n];
+    let mut color: Vec<Option<usize>> = vec![None; n];
+    for (i, &p) in func.params.iter().enumerate() {
+        reg[p.index()] = i as u8;
+    }
+    let base = func.params.len();
+    // Whether each register holds heap words (`Some(true)`) or scalars.
+    let mut class: Vec<Option<bool>> = Vec::new();
+    let mut top = base;
+    for i in 0..n {
+        let v = ValueId(i as u32);
+        if !slot(v) || func.params.contains(&v) {
+            continue;
+        }
+        let taken: HashSet<usize> = adj[i].iter().filter_map(|o| color[o.index()]).collect();
+        let h = heap(v);
+        let c = (base..)
+            .find(|c| !taken.contains(c) && class.get(c - base).copied().flatten().is_none_or(|k| k == h))
+            .expect("unbounded");
+        if c > 254 {
+            return Err(LowerError::Refused("too many live slots".into()));
+        }
+        if class.len() <= c - base {
+            class.resize(c - base + 1, None);
+        }
+        class[c - base] = Some(h);
+        color[i] = Some(c);
+        reg[i] = c as u8;
+        top = top.max(c + 1);
+    }
+    Ok((reg, top as u8))
 }
 
 /// `v` is `x & 1`: its word is 0 or 1.

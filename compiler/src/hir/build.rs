@@ -690,10 +690,10 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             b.body.params.push(id);
         }
         b.type_params = type_params.iter().map(|p| p.name.to_string()).collect();
-        if let Some(owner) = owner {
-            if let Some(params) = self.checker.type_ctor_params(owner) {
-                b.type_params.extend(params.iter().cloned());
-            }
+        if let Some(owner) = owner
+            && let Some(params) = self.checker.type_ctor_params(owner)
+        {
+            b.type_params.extend(params.iter().cloned());
         }
         let param_tys = sig.map(|(params, _)| params).or_else(|| default_sig.map(|(params, _)| params));
         self.params(&mut b, args, param_tys.as_deref());
