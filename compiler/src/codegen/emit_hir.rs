@@ -1191,6 +1191,8 @@ impl Compiler {
                     .map(|t| {
                         word(t)
                             .or_else(|| scalar_enum(t))
+                            // An existential field holds its pack's heap word.
+                            .or_else(|| matches!(crate::typechecking::ty::strip_readonly(t), Ty::Existential { .. }).then_some(crate::mir::MirTy::HeapRef))
                             .or_else(|| {
                                 field_word(t).filter(|_| crate::typechecking::value_layout::value_layout(checker, t) == ValueLayout::Boxed)
                             })
