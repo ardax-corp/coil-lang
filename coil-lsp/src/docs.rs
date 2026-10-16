@@ -7,6 +7,7 @@ use std::sync::OnceLock;
 use parser::{
     Pratt,
     ast::{Expression, Output},
+    doc_examples,
 };
 
 /// Virtual modules whose exports are in scope without a `use`.
@@ -22,11 +23,10 @@ pub fn render_doc_lines(lines: &[&str]) -> String {
     let mut fence: Option<bool> = None;
     for line in lines {
         let trimmed = line.trim_start();
-        if let Some(info) = trimmed.strip_prefix("```") {
+        if let Some(info) = doc_examples::fence_info(line) {
             match fence {
                 None => {
-                    let lang = info.split(',').next().unwrap_or("").trim();
-                    let coil = matches!(lang, "" | "coil" | "ignore" | "no_run" | "should_panic");
+                    let coil = doc_examples::fence_mode(info).is_some();
                     fence = Some(coil);
                     let indent = &line[..line.len() - trimmed.len()];
                     out.push(if coil {
@@ -42,7 +42,7 @@ pub fn render_doc_lines(lines: &[&str]) -> String {
             }
             continue;
         }
-        if fence == Some(true) && (trimmed == "#" || trimmed.starts_with("# ")) {
+        if fence == Some(true) && doc_examples::is_hidden_line(line) {
             continue;
         }
         out.push((*line).to_owned());

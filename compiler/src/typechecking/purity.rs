@@ -8,8 +8,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
-use parser::ast::{EnumConstructPayload, Expression, LetPattern, Output, Pattern, PatternPayload};
+use parser::ast::{EnumConstructPayload, Expression, LetPattern, Output, PatternOutput};
 
+use super::bare_cases::BareCases;
 use super::id::walk_children;
 use super::virtual_modules::{BuiltinExport, VirtualModules};
 
@@ -101,14 +102,14 @@ fn settle_method_calls(facts: &mut HashMap<String, FnFacts>, target: &MethodTarg
 
 /// Every name `ast` binds, at any depth: params, `let`, `const`, for-in and
 /// match / `if let` pattern bindings.
-fn collect_binders(ast: &Output<'_>, out: &mut HashSet<String>) {
-    each_binder(ast, &mut |n| {
+fn collect_binders(ast: &Output<'_>, cases: &BareCases, out: &mut HashSet<String>) {
+    each_binder(ast, cases, &mut |n| {
         out.insert(n.to_string());
     });
 }
 
 /// Call `f` once per binding site in `ast` (see [`collect_binders`]).
-fn each_binder(ast: &Output<'_>, f: &mut dyn FnMut(&str)) {
+fn each_binder(ast: &Output<'_>, cases: &BareCases, f: &mut dyn FnMut(&str)) {
     let mut here: HashSet<String> = HashSet::new();
     let out = &mut here;
     match ast.1.as_ref() {
@@ -137,27 +138,27 @@ fn each_binder(ast: &Output<'_>, f: &mut dyn FnMut(&str)) {
         }
         Expression::Match { arms, .. } => {
             for arm in arms {
-                pattern_binders(&arm.pattern.1, out);
+                pattern_binders(&arm.pattern, cases, out);
             }
         }
         Expression::IfLet {
             then_arm, else_arm, ..
         } => {
-            pattern_binders(&then_arm.pattern.1, out);
-            pattern_binders(&else_arm.pattern.1, out);
+            pattern_binders(&then_arm.pattern, cases, out);
+            pattern_binders(&else_arm.pattern, cases, out);
         }
         Expression::WhileLet {
             then_arm, on_miss, ..
         } => {
-            pattern_binders(&then_arm.pattern.1, out);
-            pattern_binders(&on_miss.pattern.1, out);
+            pattern_binders(&then_arm.pattern, cases, out);
+            pattern_binders(&on_miss.pattern, cases, out);
         }
         _ => {}
     }
     for n in &here {
         f(n);
     }
-    walk_children(ast, &mut |c| each_binder(c, f));
+    walk_children(ast, &mut |c| each_binder(c, cases, f));
 }
 
 fn let_pattern_binders(p: &LetPattern<'_>, out: &mut HashSet<String>) {
@@ -179,37 +180,23 @@ fn let_pattern_binders(p: &LetPattern<'_>, out: &mut HashSet<String>) {
     }
 }
 
-fn pattern_binders(p: &Pattern<'_>, out: &mut HashSet<String>) {
-    match p {
-        Pattern::Binding { name } => {
-            out.insert((*name).to_string());
-        }
-        Pattern::Constructor { payload, .. } => match payload {
-            PatternPayload::Unit => {}
-            PatternPayload::Tuple(items) => {
-                for (_, item) in items {
-                    pattern_binders(item, out);
-                }
-            }
-            PatternPayload::Record(fields) => {
-                for f in fields {
-                    pattern_binders(&f.pattern.1, out);
-                }
-            }
-        },
-        Pattern::Wildcard | Pattern::Default | Pattern::Integer(_) => {}
-    }
+/// Names a match / `if let` pattern binds; a bare unit case (`None`, `Red`)
+/// binds nothing (#1394).
+fn pattern_binders(p: &PatternOutput<'_>, cases: &BareCases, out: &mut HashSet<String>) {
+    cases.each_binder(p, &mut |name, _| {
+        out.insert(name.to_string());
+    });
 }
 
 /// Facts for one `fn` declaration: its body effects plus every bound name.
-fn fn_facts(args: &Output<'_>, body: &Output<'_>) -> FnFacts {
+fn fn_facts(args: &Output<'_>, body: &Output<'_>, cases: &BareCases) -> FnFacts {
     let mut f = FnFacts {
-        private: private_locals(args, body),
+        private: private_locals(args, body, cases),
         ..FnFacts::default()
     };
     walk_body(body, &mut f);
-    collect_binders(args, &mut f.bound);
-    collect_binders(body, &mut f.bound);
+    collect_binders(args, cases, &mut f.bound);
+    collect_binders(body, cases, &mut f.bound);
     let bound = &f.bound;
     f.free.retain(|n| !bound.contains(n));
     f.free_writes.retain(|n| !bound.contains(n));
@@ -219,7 +206,7 @@ fn fn_facts(args: &Output<'_>, body: &Output<'_>) -> FnFacts {
 /// Collect per-function callee sets (and local impurity) for call-graph analyses.
 fn collect_fn_facts(ast: &Output<'_>) -> HashMap<String, FnFacts> {
     let mut facts: HashMap<String, FnFacts> = HashMap::new();
-    collect_fns(ast, &mut facts, false);
+    collect_fns(ast, &mut facts, false, &BareCases::of(ast));
     settle_method_calls(&mut facts, &|_, _| None);
     settle_statics(&mut facts, ast);
     facts
@@ -232,7 +219,7 @@ fn collect_fn_facts(ast: &Output<'_>) -> HashMap<String, FnFacts> {
 /// free function (`join(self.thread)`), not a self-call.
 pub fn analyze_recursive_fns(ast: &Output<'_>) -> HashSet<String> {
     let mut facts: HashMap<String, FnFacts> = HashMap::new();
-    collect_toplevel_fns(ast, &mut facts);
+    collect_toplevel_fns(ast, &mut facts, &BareCases::of(ast));
     let user_fns: HashSet<String> = facts.keys().cloned().collect();
     let mut in_cycle = HashSet::new();
 
@@ -299,27 +286,27 @@ pub fn analyze_recursive_fns(ast: &Output<'_>) -> HashSet<String> {
     in_cycle
 }
 
-fn collect_toplevel_fns(ast: &Output<'_>, facts: &mut HashMap<String, FnFacts>) {
+fn collect_toplevel_fns(ast: &Output<'_>, facts: &mut HashMap<String, FnFacts>, cases: &BareCases) {
     match ast.1.as_ref() {
         Expression::Program(items) | Expression::Block(items) | Expression::Fragment(items) => {
             for item in items {
-                collect_toplevel_fns(item, facts);
+                collect_toplevel_fns(item, facts, cases);
             }
         }
-        Expression::Module(_, body) => collect_toplevel_fns(body, facts),
+        Expression::Module(_, body) => collect_toplevel_fns(body, facts, cases),
         Expression::Statement(inner)
         | Expression::Expr(inner)
         | Expression::ExprStatement(inner)
-        | Expression::Group(inner) => collect_toplevel_fns(inner, facts),
+        | Expression::Group(inner) => collect_toplevel_fns(inner, facts, cases),
         Expression::Function {
             name,
             args,
             body: Some(body),
             ..
         } => {
-            insert_facts(facts, name, fn_facts(args, body));
+            insert_facts(facts, name, fn_facts(args, body, cases));
             // Nested fns inside this body still count as top-level for recursion.
-            collect_toplevel_fns(body, facts);
+            collect_toplevel_fns(body, facts, cases);
         }
         // Skip `impl` methods — see [`analyze_recursive_fns`].
         _ => {}
@@ -565,42 +552,47 @@ fn export_effects(export: &BuiltinExport) -> Option<EffectFlags> {
 
 /// `by_owner` keys impl methods `Owner::m` (so method calls can resolve to
 /// them); otherwise they share the bare name with any same-named `fn`.
-fn collect_fns(ast: &Output<'_>, facts: &mut HashMap<String, FnFacts>, by_owner: bool) {
+fn collect_fns(
+    ast: &Output<'_>,
+    facts: &mut HashMap<String, FnFacts>,
+    by_owner: bool,
+    cases: &BareCases,
+) {
     match ast.1.as_ref() {
         Expression::Program(items) | Expression::Block(items) | Expression::Fragment(items) => {
             for item in items {
-                collect_fns(item, facts, by_owner);
+                collect_fns(item, facts, by_owner, cases);
             }
         }
-        Expression::Module(_, body) => collect_fns(body, facts, by_owner),
+        Expression::Module(_, body) => collect_fns(body, facts, by_owner, cases),
         Expression::Statement(inner)
         | Expression::Expr(inner)
         | Expression::ExprStatement(inner)
-        | Expression::Group(inner) => collect_fns(inner, facts, by_owner),
+        | Expression::Group(inner) => collect_fns(inner, facts, by_owner, cases),
         Expression::Function {
             name,
             args,
             body: Some(body),
             ..
         } => {
-            insert_facts(facts, name, fn_facts(args, body));
-            collect_nested_fns(body, facts);
+            insert_facts(facts, name, fn_facts(args, body, cases));
+            collect_nested_fns(body, facts, cases);
         }
         Expression::Implementation { owner, methods, .. } if by_owner => {
             for m in methods {
                 if let Some((name, args, body)) = method_fn(m) {
-                    insert_facts(facts, &format!("{owner}::{name}"), fn_facts(args, body));
-                    collect_nested_fns(body, facts);
+                    insert_facts(facts, &format!("{owner}::{name}"), fn_facts(args, body, cases));
+                    collect_nested_fns(body, facts, cases);
                 }
             }
         }
         Expression::Implementation { methods, .. } => {
             for m in methods {
-                collect_fns(m, facts, by_owner);
+                collect_fns(m, facts, by_owner, cases);
             }
         }
         Expression::Method(_, inner) | Expression::Member(inner) => {
-            collect_fns(inner, facts, by_owner)
+            collect_fns(inner, facts, by_owner, cases)
         }
         _ => {}
     }
@@ -620,7 +612,7 @@ fn method_fn<'n, 's>(m: &'n Output<'s>) -> Option<(&'s str, &'n Output<'s>, &'n 
     }
 }
 
-fn collect_nested_fns(ast: &Output<'_>, facts: &mut HashMap<String, FnFacts>) {
+fn collect_nested_fns(ast: &Output<'_>, facts: &mut HashMap<String, FnFacts>, cases: &BareCases) {
     match ast.1.as_ref() {
         Expression::Program(items)
         | Expression::Block(items)
@@ -629,7 +621,7 @@ fn collect_nested_fns(ast: &Output<'_>, facts: &mut HashMap<String, FnFacts>) {
         | Expression::Array(items)
         | Expression::Tuple(items) => {
             for item in items {
-                collect_nested_fns(item, facts);
+                collect_nested_fns(item, facts, cases);
             }
         }
         Expression::Function {
@@ -638,8 +630,8 @@ fn collect_nested_fns(ast: &Output<'_>, facts: &mut HashMap<String, FnFacts>) {
             body: Some(body),
             ..
         } => {
-            insert_facts(facts, name, fn_facts(args, body));
-            collect_nested_fns(body, facts);
+            insert_facts(facts, name, fn_facts(args, body, cases));
+            collect_nested_fns(body, facts, cases);
         }
         Expression::Statement(inner)
         | Expression::Expr(inner)
@@ -661,7 +653,7 @@ fn collect_nested_fns(ast: &Output<'_>, facts: &mut HashMap<String, FnFacts>) {
         | Expression::Panic(inner)
         | Expression::OptionalAccess(inner, _)
         | Expression::Method(_, inner)
-        | Expression::Member(inner) => collect_nested_fns(inner, facts),
+        | Expression::Member(inner) => collect_nested_fns(inner, facts, cases),
         Expression::Add(a, b)
         | Expression::Sub(a, b)
         | Expression::Mul(a, b)
@@ -687,43 +679,43 @@ fn collect_nested_fns(ast: &Output<'_>, facts: &mut HashMap<String, FnFacts>) {
         | Expression::Range {
             start: a, end: b, ..
         } => {
-            collect_nested_fns(a, facts);
-            collect_nested_fns(b, facts);
+            collect_nested_fns(a, facts, cases);
+            collect_nested_fns(b, facts, cases);
         }
         Expression::Call { name, args } => {
-            collect_nested_fns(name, facts);
+            collect_nested_fns(name, facts, cases);
             if let Some(args) = args {
                 for a in args {
-                    collect_nested_fns(a, facts);
+                    collect_nested_fns(a, facts, cases);
                 }
             }
         }
         Expression::If(branches) => {
             for b in branches {
-                collect_nested_fns(b, facts);
+                collect_nested_fns(b, facts, cases);
             }
         }
         Expression::Branch(cond, body) => {
             if let Some(c) = cond {
-                collect_nested_fns(c, facts);
+                collect_nested_fns(c, facts, cases);
             }
-            collect_nested_fns(body, facts);
+            collect_nested_fns(body, facts, cases);
         }
         Expression::Match { scrutinee, arms } => {
-            collect_nested_fns(scrutinee, facts);
+            collect_nested_fns(scrutinee, facts, cases);
             for arm in arms {
-                collect_nested_fns(&arm.body, facts);
+                collect_nested_fns(&arm.body, facts, cases);
             }
         }
         Expression::Construct { fields, .. } => match fields {
             EnumConstructPayload::Tuple(items) => {
                 for item in items {
-                    collect_nested_fns(item, facts);
+                    collect_nested_fns(item, facts, cases);
                 }
             }
             EnumConstructPayload::Record(fields) => {
                 for f in fields {
-                    collect_nested_fns(&f.value, facts);
+                    collect_nested_fns(&f.value, facts, cases);
                 }
             }
             EnumConstructPayload::Unit => {}
@@ -736,35 +728,35 @@ fn collect_nested_fns(ast: &Output<'_>, facts: &mut HashMap<String, FnFacts>) {
             body,
         } => {
             if let Some(id) = identifier {
-                collect_nested_fns(id, facts);
+                collect_nested_fns(id, facts, cases);
             }
-            collect_nested_fns(iterable, facts);
-            collect_nested_fns(body, facts);
+            collect_nested_fns(iterable, facts, cases);
+            collect_nested_fns(body, facts, cases);
         }
         Expression::Defer { body, .. } | Expression::Lambda { body, .. } => {
-            collect_nested_fns(body, facts);
+            collect_nested_fns(body, facts, cases);
         }
-        Expression::Variable(_, Some(init)) => collect_nested_fns(init, facts),
-        Expression::Constant(_, Some(init)) => collect_nested_fns(init, facts),
-        Expression::LetDestructure { rhs, .. } => collect_nested_fns(rhs, facts),
+        Expression::Variable(_, Some(init)) => collect_nested_fns(init, facts, cases),
+        Expression::Constant(_, Some(init)) => collect_nested_fns(init, facts, cases),
+        Expression::LetDestructure { rhs, .. } => collect_nested_fns(rhs, facts, cases),
         Expression::Resume(t, arg) => {
-            collect_nested_fns(t, facts);
+            collect_nested_fns(t, facts, cases);
             if let Some(a) = arg {
-                collect_nested_fns(a, facts);
+                collect_nested_fns(a, facts, cases);
             }
         }
-        Expression::Adjust { target, .. } => collect_nested_fns(target, facts),
+        Expression::Adjust { target, .. } => collect_nested_fns(target, facts, cases),
         Expression::Index(base, Some(idx)) => {
-            collect_nested_fns(base, facts);
-            collect_nested_fns(idx, facts);
+            collect_nested_fns(base, facts, cases);
+            collect_nested_fns(idx, facts, cases);
         }
         Expression::Index(base, None) | Expression::Access(base, _) => {
-            collect_nested_fns(base, facts);
+            collect_nested_fns(base, facts, cases);
         }
-        Expression::NamedArg(_, v) => collect_nested_fns(v, facts),
+        Expression::NamedArg(_, v) => collect_nested_fns(v, facts, cases),
         Expression::Implementation { methods, .. } => {
             for m in methods {
-                collect_nested_fns(m, facts);
+                collect_nested_fns(m, facts, cases);
             }
         }
         _ => {}
@@ -975,10 +967,10 @@ fn writes_shared_heap(lhs: &Output<'_>, private: &HashSet<String>) -> bool {
 ///
 /// Only writes directly through `x` count: `x[i][j] = v` writes into an
 /// element, which may be shared.
-fn private_locals(args: &Output<'_>, body: &Output<'_>) -> HashSet<String> {
+fn private_locals(args: &Output<'_>, body: &Output<'_>, cases: &BareCases) -> HashSet<String> {
     let mut counts: HashMap<String, usize> = HashMap::new();
-    each_binder(args, &mut |n| *counts.entry(n.to_string()).or_default() += 1);
-    each_binder(body, &mut |n| *counts.entry(n.to_string()).or_default() += 1);
+    each_binder(args, cases, &mut |n| *counts.entry(n.to_string()).or_default() += 1);
+    each_binder(body, cases, &mut |n| *counts.entry(n.to_string()).or_default() += 1);
     let mut fresh = HashSet::new();
     fresh_lets(body, &mut fresh);
     fresh.retain(|n: &String| counts.get(n) == Some(&1));
@@ -1090,7 +1082,7 @@ pub fn record_fn_effects(checker: &mut super::infer::Checker, ast: &Output<'_>) 
             checker.program_fn_effects.get(&id).copied()
         };
         let mut facts = HashMap::new();
-        collect_fns(ast, &mut facts, true);
+        collect_fns(ast, &mut facts, true, &BareCases::of(ast));
         let target = |span: (usize, usize), m: &str| {
             let owner = checker.class_owner_at_span(span)?;
             let local = owner
@@ -1176,6 +1168,45 @@ fn main() { return; }
         assert!(!pure.contains("bumps"));
         assert!(pure.contains("konst"));
         assert!(pure.contains("shadow"));
+    }
+
+    // #1394: a bare unit case in a pattern (`Red`) binds nothing, so it does
+    // not shadow a same-named static; an uppercase name no enum declares
+    // (`N`) still binds, as in the checker.
+    #[test]
+    fn bare_unit_case_pattern_is_not_a_binder() {
+        let ast = parse_ast(
+            r#"
+static let Red: int = 0;
+static let N: int = 0;
+enum Color {
+    Red,
+    Green,
+}
+fn case_arm(Color c) -> int {
+    return match c {
+        Red => Red,
+        default => 1,
+    };
+}
+fn none_arm(Option<int> o) -> int {
+    return match o {
+        None => N,
+        Some(v) => v,
+    };
+}
+fn binding_arm(int x) -> int {
+    return match x {
+        N => N + 1,
+    };
+}
+fn main() { return; }
+"#,
+        );
+        let pure = analyze_pure_fns(&ast);
+        assert!(!pure.contains("case_arm"), "`Red` reads the static: {pure:?}");
+        assert!(!pure.contains("none_arm"), "`N` reads the static: {pure:?}");
+        assert!(pure.contains("binding_arm"), "`N` binds the scrutinee: {pure:?}");
     }
 
     #[test]

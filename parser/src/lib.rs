@@ -171,6 +171,7 @@ macro_rules! output {
 
 pub mod ast;
 pub mod comments;
+pub mod doc_examples;
 pub mod fmt;
 
 pub use ast::item_docs;
@@ -3760,6 +3761,15 @@ impl<'pratt> Pratt<'pratt> {
     }
 
     pub fn parse(&self, input: &'pratt str) -> Result<Output<'pratt>, Message> {
+        self.parse_at(input, 0)
+    }
+
+    /// Parse `input` as the text at byte `offset` of a larger one: every
+    /// span of the tree, and every range of a parse error, is `offset` bytes
+    /// later. The same as parsing `input` behind `offset` bytes of
+    /// whitespace, without the padding (macro output, coil-lang#1398).
+    pub fn parse_at(&self, input: &'pratt str, offset: usize) -> Result<Output<'pratt>, Message> {
+        let shift = |r: std::ops::Range<usize>| r.start + offset..r.end + offset;
         match trivia()
             .ignore_then(self.declaration().repeated().collect().map_with(output!(Program)))
             .then_ignore(trivia())
@@ -3772,7 +3782,7 @@ impl<'pratt> Pratt<'pratt> {
                     .find(|err| is_duplicate_field_parse_error(err))
                     .or(errs.first());
                 let primary = primary_err
-                    .map(|err| err.span().into_range())
+                    .map(|err| shift(err.span().into_range()))
                     .unwrap_or_default();
                 let title = primary_err
                     .map(|err| format_parse_error_title(input, err))
@@ -3787,7 +3797,7 @@ impl<'pratt> Pratt<'pratt> {
                 errs.iter().for_each(|err| {
                     message.push(Label::new(
                         format_parse_error_label(input, err),
-                        err.span().into_range(),
+                        shift(err.span().into_range()),
                     ));
                 });
 
@@ -3797,7 +3807,12 @@ impl<'pratt> Pratt<'pratt> {
 
                 Err(message)
             }
-            Ok(ast) => Ok(ast),
+            Ok(mut ast) => {
+                if offset != 0 {
+                    ast::shift_spans(&mut ast, offset);
+                }
+                Ok(ast)
+            }
         }
     }
 }

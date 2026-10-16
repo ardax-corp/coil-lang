@@ -9,9 +9,9 @@
 
 use std::ops::Range;
 
-use parser::ast::{
-    Expression, LetPattern, Output, Pattern, PatternPayload,
-};
+use parser::ast::{Expression, LetPattern, Output};
+
+use crate::typechecking::bare_cases::BareCases;
 
 /// One local binding: its declaration site and every use that resolves to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +46,7 @@ pub fn local_bindings_in(source: &str, ast: &Output<'_>) -> Vec<LocalBinding> {
         source,
         bindings: Vec::new(),
         scopes: Vec::new(),
+        cases: BareCases::of(ast),
     };
     resolver.walk(ast);
     for binding in &mut resolver.bindings {
@@ -74,6 +75,8 @@ struct Resolver<'s> {
     source: &'s str,
     bindings: Vec<LocalBinding>,
     scopes: Vec<Frame>,
+    /// Bare unit cases (`None`, `Red`): a pattern naming one binds nothing.
+    cases: BareCases,
 }
 
 impl<'s> Resolver<'s> {
@@ -165,24 +168,11 @@ impl<'s> Resolver<'s> {
         }
     }
 
-    fn bind_pattern(&mut self, pattern: &(parser::SimpleSpan, Pattern<'_>)) {
-        let span = pattern.0.start..pattern.0.end;
-        match &pattern.1 {
-            Pattern::Binding { name } => self.bind(name, span),
-            Pattern::Constructor { payload, .. } => match payload {
-                PatternPayload::Unit => {}
-                PatternPayload::Tuple(items) => {
-                    for item in items {
-                        self.bind_pattern(item);
-                    }
-                }
-                PatternPayload::Record(fields) => {
-                    for field in fields {
-                        self.bind_pattern(&field.pattern);
-                    }
-                }
-            },
-            Pattern::Wildcard | Pattern::Default | Pattern::Integer(_) => {}
+    fn bind_pattern(&mut self, pattern: &(parser::SimpleSpan, parser::ast::Pattern<'_>)) {
+        let mut binders = Vec::new();
+        self.cases.each_binder(pattern, &mut |name, span| binders.push((name, span)));
+        for (name, span) in binders {
+            self.bind(name, span.start..span.end);
         }
     }
 
@@ -345,6 +335,25 @@ mod tests {
     fn lambda_sees_outer_only_through_captures() {
         let src = "fn main() {\n    let k = 1;\n    let f = fn(int a) use (k) { return a + k; };\n}\n";
         assert_eq!(occurrences_at(src, "k", 0), ["1:k", "2:k", "2:k"]);
+    }
+
+    // #1394: a bare unit case (`None`, `Red`) in a pattern is not a local,
+    // matching the checker; an uppercase name no enum declares still binds.
+    #[test]
+    fn bare_unit_cases_are_not_locals() {
+        let src = "enum Color {\n    Red,\n    Green,\n}\nfn f(Option<Color> o) -> int {\n    let n = match o {\n        None => 0,\n        Some(Red) => 1,\n        Some(Other) => { let _ = Other; return 2; },\n    };\n    return n;\n}\n";
+        let none = src.find("None").unwrap();
+        assert!(binding_at(src, none).is_none(), "`None` is a case");
+        let red = src.find("Red)").unwrap();
+        assert!(binding_at(src, red).is_none(), "`Red` is a case");
+        assert_eq!(occurrences_at(src, "Other", 0), ["8:Other", "8:Other"]);
+    }
+
+    // Record shorthand `{ Red }` always binds, even when `Red` names a case.
+    #[test]
+    fn record_shorthand_binds_a_case_name() {
+        let src = "enum Color {\n    Red,\n}\nenum Box {\n    Item { Red: int },\n}\nfn f(Box b) -> int {\n    return match b {\n        Item { Red } => Red,\n    };\n}\n";
+        assert_eq!(occurrences_at(src, "Red }", 0), ["8:Red", "8:Red"]);
     }
 
     #[test]
