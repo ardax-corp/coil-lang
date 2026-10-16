@@ -1644,6 +1644,7 @@ impl Checker {
         if let Err(msgs) = self.pre_register_enums(ast) {
             self.messages.extend(msgs);
         }
+        self.check_duplicate_classes(ast);
         self.pre_collect_free_function_param_names(ast);
         self.pre_register_inherent_methods(ast);
         self.pre_register_typeclass_impls(ast);
@@ -13660,6 +13661,34 @@ impl Checker {
     /// Built-in spellings follow [`Self::canonical_ctor_name`].
     fn ast_instance_head_ty(&self, arg: &Output, local_types: &HashSet<&str>) -> Ty {
         self.ast_instance_head_ty_with(arg, &HashMap::new(), local_types)
+    }
+
+    /// A second top-level `class` of a name already declared in this module
+    /// would silently replace the first (#1169): report it.
+    fn check_duplicate_classes(&mut self, ast: &Output) {
+        fn walk<'a>(node: &'a Output<'a>, seen: &mut HashSet<&'a str>, dups: &mut Vec<(&'a str, Range<usize>)>) {
+            match Checker::pre_pass_unwrap_stmt(node).1.as_ref() {
+                Expression::Class { name, .. } => {
+                    if !seen.insert(name) {
+                        dups.push((name, node.0.into_range()));
+                    }
+                }
+                Expression::Program(children) | Expression::Fragment(children) => {
+                    for child in children {
+                        walk(child, seen, dups);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut seen = HashSet::new();
+        let mut dups = Vec::new();
+        walk(ast, &mut seen, &mut dups);
+        for (name, range) in dups {
+            let mut msg = Message::error(ErrorCode::GenericTypeError, format!("Duplicate class `{name}`"), range);
+            msg.with_help(format!("a class named `{name}` was already declared in this module; remove or rename this declaration"));
+            self.messages.push(msg);
+        }
     }
 
     /// Names of the classes and enums this module declares at the top level.
