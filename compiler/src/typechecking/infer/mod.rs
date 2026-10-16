@@ -524,6 +524,14 @@ pub struct Checker {
     /// subsequent `invoke(..., id, ...)` can refine its result type.
     ffi_fn_ret_tys: HashMap<String, Ty>,
 
+    /// The function whose `let` recorded each [`Self::ffi_fn_ret_tys`]
+    /// binding: another function's same-named parameter or local is a
+    /// different binding (#1233).
+    ffi_fn_ret_owner: HashMap<String, Option<String>>,
+
+    /// The function the `invoke` pre-pass is walking.
+    ffi_prescan_fn: Option<String>,
+
     /// Whether `let id = declare(..., ret, variadic)` marked the binding as C varargs.
     ffi_fn_variadic: HashMap<String, bool>,
 
