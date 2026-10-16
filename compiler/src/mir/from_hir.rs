@@ -3301,7 +3301,10 @@ impl Lower<'_> {
             self.b.def_local(x, cur).map_err(mir)?;
         }
         let one = if float { MirConst::F64(1.0_f64.to_bits()) } else { MirConst::I64(1) };
-        self.counted_body(body, head, exit, counter, ty, one)
+        // An inclusive `int` range leaves at its end before stepping past
+        // it, which would overflow at `int` max (#1171).
+        let last = (inclusive && !float).then_some(end);
+        self.counted_body(body, head, exit, counter, ty, one, last)
     }
 
     /// A counted loop's body, then `counter += one` and back to `head`. The
@@ -3419,7 +3422,9 @@ impl Lower<'_> {
         Ok(Val::Unit)
     }
 
-    fn counted_body(&mut self, body: HirId, head: BlockId, exit: BlockId, counter: LocalId, ty: MirTy, one: MirConst) -> Result<Val, Refusal> {
+    /// With `last`, the loop leaves once the counter reaches it, before the
+    /// step.
+    fn counted_body(&mut self, body: HirId, head: BlockId, exit: BlockId, counter: LocalId, ty: MirTy, one: MirConst, last: Option<ValueId>) -> Result<Val, Refusal> {
         let step = lower::has_own_continue(self.hir, body).then(|| self.b.create_block());
         self.loops.push(Loop {
             cont: step.unwrap_or(head),
@@ -3442,6 +3447,13 @@ impl Lower<'_> {
                 self.switch(exit);
                 return Ok(Val::Unit);
             }
+        }
+        let cur = self.b.use_local(counter, ty).map_err(mir)?;
+        if let Some(last) = last {
+            let done = self.b.ins_cmp(MirCmpOp::Eq, cur, last).map_err(mir)?;
+            let step = self.b.create_block();
+            self.b.branch(done, exit, step).map_err(mir)?;
+            self.switch(step);
         }
         let cur = self.b.use_local(counter, ty).map_err(mir)?;
         let one = self.b.ins_const(one).map_err(mir)?;
@@ -5741,7 +5753,7 @@ impl Lower<'_> {
             }
             _ => return Err("for in pattern".into()),
         }
-        self.counted_body(body, head, exit, i, MirTy::I64, MirConst::I64(1))
+        self.counted_body(body, head, exit, i, MirTy::I64, MirConst::I64(1), None)
     }
 
     /// Branch on `idx` to each of slots `base..base + n`, as HIR emission's
