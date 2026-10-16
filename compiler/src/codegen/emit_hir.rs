@@ -6333,8 +6333,9 @@ impl Compiler {
             .node
             .and_then(|n| self.checker.existential_pack_at(n))
             .or_else(|| self.checker.existential_pack_span(e.span.0, e.span.1))?;
-        let ty = apply_ty_prune(self.checker.subst(), e.ty.as_ref()?);
-        (ty == apply_ty_prune(self.checker.subst(), &pack.value_ty)).then(|| pack.clone())
+        let subst = self.checker.subst();
+        let ty = crate::typechecking::ty::nominal_enum(apply_ty_prune(subst, e.ty.as_ref()?));
+        (ty == crate::typechecking::ty::nominal_enum(apply_ty_prune(subst, &pack.value_ty))).then(|| pack.clone())
     }
 
     /// The tag of an arm `V(x) => return V(x)` whose return rebuilds the
