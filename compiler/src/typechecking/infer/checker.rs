@@ -3372,7 +3372,9 @@ impl Checker {
                 variants,
                 ..
             } => {
-                let _ = self.register_generic_type_ctor(name, type_params);
+                // Keyed like the enum itself (`module::Name`, #1356).
+                let key = self.qualify_module_name(name);
+                let _ = self.register_generic_type_ctor(&key, type_params);
                 self.infer_enum_decl(name, variants, &range);
                 unit_ty()
             }
@@ -11184,6 +11186,7 @@ impl Checker {
 
         let ctor = self
             .resolve_class_key(name)
+            .or_else(|| self.resolve_enum_key(name))
             .unwrap_or_else(|| name.to_string());
         if let Some(expected_arity) = self
             .generics
@@ -15347,7 +15350,7 @@ impl Checker {
                 variants,
             } => {
                 let name_str = self.qualify_module_name(name);
-                let previous_generic_ctor = self.register_generic_type_ctor(name, type_params);
+                let previous_generic_ctor = self.register_generic_type_ctor(&name_str, type_params);
                 let pushed = self.push_type_params_for_type_parsing(type_params);
                 let mut variant_names = Vec::new();
                 let mut arities = Vec::new();
@@ -17418,6 +17421,17 @@ impl Checker {
     }
 
     /// Variants in source-declaration order: `(name, tag, payload_types)`.
+    /// The declared type parameters of a generic class or enum, by its
+    /// key or by the name a module's source writes (`Tree` for
+    /// `module::Tree`, #1356).
+    pub fn type_ctor_params(&self, name: &str) -> Option<&Vec<String>> {
+        let ctors = &self.generics.generic_type_ctors;
+        ctors
+            .get(name)
+            .or_else(|| self.resolve_class_key(name).and_then(|key| ctors.get(&key)))
+            .or_else(|| ctors.get(&self.registry_enum_key(name)))
+    }
+
     pub fn enum_variants(&self, enum_name: &str) -> Option<Vec<(String, u32, Vec<Ty>)>> {
         let key = self.registry_enum_key(enum_name);
         let names = self.enums.get(&key)?.clone();
