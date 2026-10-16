@@ -1048,6 +1048,38 @@
         }
     }
 
+    /// #1352: `Some(v)` / `Rect { w }` parse as bare constructor patterns
+    /// (empty `enum_name`); a bare `None` stays a binding for the checker.
+    #[test]
+    fn bare_constructor_patterns_parse() {
+        let ast = expr_ast!("match o { Some(Circle(r)) => r, Rect { w } => w, Dot() => 0, None => 1 }");
+        let inner = match ast {
+            Expression::Expr(e) => e.1.as_ref().clone(),
+            other => other,
+        };
+        let Expression::Match { arms, .. } = inner else {
+            panic!("expected Match, got {:?}", inner);
+        };
+        let shown: Vec<String> = arms.iter().map(|a| a.pattern.1.to_string()).collect();
+        assert_eq!(shown, ["Some(Circle(r))", "Rect { w }", "Dot()", "None"]);
+        match &arms[0].pattern.1 {
+            Pattern::Constructor {
+                enum_name: "",
+                variant_name: "Some",
+                payload: PatternPayload::Tuple(parts),
+            } => assert!(matches!(
+                parts[0].1,
+                Pattern::Constructor { enum_name: "", variant_name: "Circle", .. }
+            )),
+            other => panic!("expected bare Some(..), got {:?}", other),
+        }
+        assert!(matches!(
+            arms[1].pattern.1,
+            Pattern::Constructor { enum_name: "", payload: PatternPayload::Record(_), .. }
+        ));
+        assert!(matches!(arms[3].pattern.1, Pattern::Binding { name: "None" }));
+    }
+
     #[test]
     fn wildcard_parses() {
         let ast1 = expr_ast!("match x { _ => 0 }");

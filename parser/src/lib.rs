@@ -3526,9 +3526,28 @@ impl<'pratt> Pratt<'pratt> {
                 });
 
             let payload_choice = tuple_payload
-                .or(record_pattern_payload)
+                .clone()
+                .or(record_pattern_payload.clone())
                 .or_not()
                 .map(|opt| opt.unwrap_or(PatternPayload::Unit));
+
+            // Bare `Variant(p, …)` / `Variant { … }` (#1352): an empty
+            // `enum_name` marks it for the checker to resolve, like a bare
+            // constructor expression. A bare name with no payload stays a
+            // binding here; the checker decides whether it names a case.
+            let bare_constructor = text::ident()
+                .padded_by(trivia())
+                .then(tuple_payload.or(record_pattern_payload))
+                .map_with(|(variant_name, payload), e| {
+                    (
+                        e.span(),
+                        Pattern::Constructor {
+                            enum_name: "",
+                            variant_name,
+                            payload,
+                        },
+                    )
+                });
 
             // `Enum::Variant` or module-qualified `a::b::Enum::Variant`.
             let constructor = text::ident()
@@ -3557,6 +3576,7 @@ impl<'pratt> Pratt<'pratt> {
                     .padded_by(trivia())
                     .map_with(|_, e| (e.span(), Pattern::Wildcard)),
                 constructor,
+                bare_constructor,
                 // A negative literal is one pattern (`-1 =>`, #897).
                 just('-')
                     .or_not()
