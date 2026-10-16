@@ -676,7 +676,7 @@ fn main() {
 }
 
 #[test]
-fn raise_from_main_does_not_set_panicked() {
+fn raise_from_main_fails_the_program() {
     let mut pipeline = test_pipeline();
     let (bytecode, constants) = pipeline
         .compile_src(
@@ -687,17 +687,19 @@ fn main() {
 "#,
         )
         .expect("raise in main should compile (Result mode)");
+    let shared = SharedBuf::new();
     let mut machine = Machine::<128>::default();
+    machine.with_output(shared.clone());
     machine.run_raw(
         &bytecode,
         &constants,
         pipeline.strings(),
         pipeline.static_slot_count(),
     );
-    assert!(
-        !machine.panicked(),
-        "Q5: raise is catchable Result.Err, not a process abort"
-    );
+    // An `Err` that ends `main` is not silent (#1353).
+    assert!(machine.panicked(), "an Err returned from main fails the program");
+    let _ = machine.restore_output();
+    assert_eq!(shared.into_utf8(), "panic: main returned Err(boom)");
 }
 
 
