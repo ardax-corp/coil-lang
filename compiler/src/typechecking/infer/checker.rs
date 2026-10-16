@@ -3864,6 +3864,12 @@ impl Checker {
                 )
             };
             let provided = args.as_ref().map(|a| a.as_slice()).unwrap_or(&[]);
+            // `new P(y: 1, x: 2)` (#1074): named arguments fill the fields
+            // they name, after any positional prefix.
+            if provided.iter().any(|a| matches!(a.1.as_ref(), Expression::NamedArg(..))) {
+                let names: Vec<&str> = fields.iter().map(|(_, n, _)| n.as_str()).collect();
+                return self.infer_named_instantiate(&class_name, &names, &field_tys, provided, result_ty, range);
+            }
             if provided.len() != fields.len() {
                 let _ = self.error_with_help(
                     ErrorCode::ConstructorArity,
@@ -3893,6 +3899,94 @@ impl Checker {
             return apply_ty_prune(&self.subst, &result_ty);
         }
         Ty::Con(class_name)
+    }
+
+    /// `new C(..)` with named arguments: each fills the field it names,
+    /// after the positional prefix; every field must be given once.
+    fn infer_named_instantiate(
+        &mut self,
+        class_name: &str,
+        names: &[&str],
+        field_tys: &[Ty],
+        provided: &[Output],
+        result_ty: Ty,
+        range: Range<usize>,
+    ) -> Ty {
+        let mut filled = vec![false; names.len()];
+        let mut next = 0usize;
+        let mut seen_named = false;
+        for arg in provided {
+            let arg_range = arg.0.into_range();
+            let (slot, value) = match arg.1.as_ref() {
+                Expression::NamedArg(name, value) => {
+                    seen_named = true;
+                    match names.iter().position(|n| n == name) {
+                        Some(k) if filled[k] => {
+                            self.messages.push(Message::error(
+                                ErrorCode::DuplicateField,
+                                format!("Duplicate named argument `{name}` in `new {class_name}`"),
+                                arg_range,
+                            ));
+                            (None, value)
+                        }
+                        Some(k) => (Some(k), value),
+                        None => {
+                            let mut msg = Message::error(
+                                ErrorCode::UnknownField,
+                                format!("Class `{class_name}` has no field `{name}`"),
+                                arg_range,
+                            );
+                            msg.with_help(format!("expected one of: {}", names.join(", ")));
+                            self.messages.push(msg);
+                            (None, value)
+                        }
+                    }
+                }
+                _ => {
+                    if seen_named {
+                        let mut msg = Message::error(
+                            ErrorCode::GenericTypeError,
+                            format!("Positional argument after named argument in `new {class_name}`"),
+                            arg_range.clone(),
+                        );
+                        msg.with_help("all positional arguments must come before named arguments".to_string());
+                        self.messages.push(msg);
+                    }
+                    while next < names.len() && filled[next] {
+                        next += 1;
+                    }
+                    let slot = (next < names.len()).then_some(next);
+                    next += 1;
+                    (slot, arg)
+                }
+            };
+            let aty = self.infer(arg);
+            match slot {
+                Some(k) => {
+                    filled[k] = true;
+                    self.coerce_or_unify(&field_tys[k], &aty, Some(value), &value.0.into_range(), "constructor argument");
+                }
+                None if !matches!(arg.1.as_ref(), Expression::NamedArg(..)) => {
+                    let _ = self.error_with_help(
+                        ErrorCode::ConstructorArity,
+                        format!("Constructor `{class_name}` expects {} arguments, got {}", names.len(), provided.len()),
+                        range.clone(),
+                        Some("pass one argument per class field".to_string()),
+                    );
+                }
+                None => {}
+            }
+        }
+        let missing: Vec<&str> = names.iter().zip(&filled).filter(|(_, f)| !**f).map(|(n, _)| *n).collect();
+        if !missing.is_empty() {
+            let _ = self.error_with_help(
+                ErrorCode::ConstructorArity,
+                format!("Constructor `{class_name}` is missing field {}", missing.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ")),
+                range,
+                Some("pass one argument per class field".to_string()),
+            );
+        }
+        apply_ty_prune(&self.subst, &result_ty)
     }
 
     #[inline(never)]

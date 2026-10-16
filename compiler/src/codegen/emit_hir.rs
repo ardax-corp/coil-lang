@@ -2002,6 +2002,35 @@ impl Compiler {
                 }
                 continue;
             }
+            // `new C(y: 1, x: 2)` (#1074): named arguments into field order.
+            if let HirKind::Make { kind: MakeKind::Class(name), args } = &body.exprs[i].kind
+                && args.iter().any(|&a| matches!(body.expr(a).kind, HirKind::Named { .. }))
+            {
+                let fields = self.hir_class_fields(&self.resolve_class_ident(name)).ok_or("call-argument")?;
+                let args = args.clone();
+                let b = out.get_or_insert_with(|| body.clone());
+                let mut slots: Vec<Option<HirId>> = vec![None; fields.len()];
+                let mut next = 0usize;
+                for arg in args {
+                    let (k, value) = match &b.expr(arg).kind {
+                        HirKind::Named { name, value } => {
+                            (fields.iter().position(|(f, _)| f == name).ok_or("call-argument")?, *value)
+                        }
+                        _ => {
+                            while next < slots.len() && slots[next].is_some() {
+                                next += 1;
+                            }
+                            (next, arg)
+                        }
+                    };
+                    *slots.get_mut(k).ok_or("call-argument")? = Some(value);
+                }
+                let ordered = slots.into_iter().collect::<Option<Vec<_>>>().ok_or("call-argument")?;
+                if let HirKind::Make { args, .. } = &mut b.exprs[i].kind {
+                    *args = ordered;
+                }
+                continue;
+            }
             let HirKind::Call { callee: Callee::Named { name, .. }, args } = &body.exprs[i].kind else {
                 continue;
             };
