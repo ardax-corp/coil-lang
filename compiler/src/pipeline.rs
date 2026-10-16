@@ -1239,6 +1239,12 @@ impl Pipeline {
             return true;
         }
         let macro_imports = self.macro_import_names(file);
+        // `... xs` templates of modules checked so far (#1386).
+        let foreign: Vec<crate::variadic::ForeignTemplate<'static>> = self
+            .ast_cache
+            .values()
+            .flat_map(|c| c.variadic_templates().iter().cloned())
+            .collect();
         let _ = self.compiler_lazy_mut();
         let compiler = self.compiler.get_mut().expect("compiler initialized");
         compiler.checker_mut().set_macro_imports(macro_imports);
@@ -1249,11 +1255,30 @@ impl Pipeline {
         if cached.expanded() {
             let expand = cached.take_expand();
             compiler.apply_expand_result(expand);
-            if let Some(ast) = cached.ast_mut() {
-                compiler.typecheck_module(module, ast);
-            }
         } else if let Some(ast) = cached.ast_mut() {
-            compiler.expand_and_check(module, ast);
+            let expand = crate::attrs::expand_source_in(ast, module);
+            compiler.apply_expand_result(expand);
+        }
+        if let Some(ast) = cached.ast_mut() {
+            let templates = compiler.typecheck_module_with(module, ast, &foreign);
+            if !module.is_empty() && !templates.is_empty() {
+                let names: Vec<&str> =
+                    templates.iter().filter_map(crate::variadic::template_name).collect();
+                let uses = crate::variadic::copy_scope(module, ast, &names);
+                let exported = templates
+                    .into_iter()
+                    .filter_map(|function| {
+                        let name = crate::variadic::template_name(&function)?.to_string();
+                        Some(crate::variadic::ForeignTemplate {
+                            module: module.to_string(),
+                            name,
+                            function,
+                            uses: uses.clone(),
+                        })
+                    })
+                    .collect();
+                cached.set_variadic_templates(exported);
+            }
         }
         cached.mark_checked();
         true

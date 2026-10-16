@@ -362,6 +362,8 @@ pub struct Checker {
 
     /// Variadic `... xs` templates and their per-pack instances (#1281).
     variadic: checker::variadic::VariadicState,
+    /// Templates and copies other modules can call (#1386); kept across modules.
+    variadic_exports: checker::variadic::VariadicExports,
 
     /// Shared tuple-pack type for the current function's bare `...args` param
     /// and any `fn(...args) -> R` parameter types in its signature.
