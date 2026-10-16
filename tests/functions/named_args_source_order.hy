@@ -1,6 +1,6 @@
 // Named arguments run in the order they are written, not in parameter or
 // field order, for calls and constructors alike (#1365).
-// Output: ba3 yx12 1cb123 b2
+// Output: ba3 yx12 1cb123 b2 ba1
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};
@@ -32,5 +32,13 @@ fn main() {
     write_all(stdout(), to_bytes(format("%s ", s)));
     let n = 1;
     let q = f(b: n, a: t("b", 1));
-    write_all(stdout(), to_bytes(format("%i", q)));
+    write_all(stdout(), to_bytes(format("%i ", q)));
+    if nested() {
+        write_all(stdout(), to_bytes("1"));
+    }
+}
+
+fn nested() -> bool {
+    // Inside a larger expression, as an operand above others.
+    return 1 + f(b: t("b", 2), a: t("a", 1)) == 4;
 }
