@@ -87,13 +87,13 @@ fn collect_rebound(node: &Output<'_>, out: &mut HashSet<String>) {
     }
 }
 
-fn swap<'a>(name: &mut &'a str, renames: &[(&'static str, &'static str)]) {
+fn swap(name: &mut &str, renames: &[(&'static str, &'static str)]) {
     if let Some((_, to)) = renames.iter().find(|(from, _)| from == name) {
         *name = to;
     }
 }
 
-fn rename_params<'a>(params: &mut [TypeParam<'a>], renames: &[(&'static str, &'static str)]) {
+fn rename_params(params: &mut [TypeParam<'_>], renames: &[(&'static str, &'static str)]) {
     for p in params {
         for b in &mut p.bounds {
             swap(b, renames);
@@ -101,7 +101,7 @@ fn rename_params<'a>(params: &mut [TypeParam<'a>], renames: &[(&'static str, &'s
     }
 }
 
-fn rename_wheres<'a>(wheres: &mut [WhereConstraint<'a>], renames: &[(&'static str, &'static str)]) {
+fn rename_wheres(wheres: &mut [WhereConstraint<'_>], renames: &[(&'static str, &'static str)]) {
     for w in wheres {
         swap(&mut w.class, renames);
         for a in &mut w.args {
