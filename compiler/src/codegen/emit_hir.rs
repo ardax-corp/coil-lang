@@ -6124,6 +6124,8 @@ impl Compiler {
                 let want = self.hir_local_rep(hir, emit, *local);
                 self.hir_check_value(hir, emit, *init, &want)
             }
+            // A type-only scalar `let x: T;`: zero until assigned.
+            HirKind::Let { init: None, .. } => Ok(()),
             HirKind::LetPat { pat, init } => {
                 self.hir_check_let_pat(hir, pat)?;
                 if self.hir_product_let(hir, emit, pat, *init).is_some() {
