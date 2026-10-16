@@ -286,23 +286,6 @@ impl<'pratt> Pratt<'pratt> {
         text::ident().padded_by(trivia()).map_with(output!(Identifier))
     }
 
-    /// Type atoms and function types without nested `fn(...)` signatures in
-    /// parameter positions (used by `arg_list` to avoid parser recursion).
-    fn type_annotation_no_fn(
-        &self,
-    ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
-    {
-        use chumsky::Parser;
-        recursive(|type_ann| {
-            self.type_annotation_atoms(type_ann.clone())
-                .then(op!("->").ignore_then(type_ann.clone()).or_not())
-                .map_with(|(lhs, rhs), e| match rhs {
-                    Some(rhs) => (e.span(), Box::new(Expression::TypeFun(lhs, rhs))),
-                    None => lhs,
-                })
-        })
-    }
-
     /// Shared type-atom parser: arrays, tuples, `forall`, projections, names.
     fn type_annotation_atoms<T>(
         &self,
@@ -397,17 +380,25 @@ impl<'pratt> Pratt<'pratt> {
                     }),
                 )
             });
+        // `(T)` groups a type, so `(int -> int) -> int` and
+        // `(fn(int) -> int) f` read as written. Tried after `tuple_type`,
+        // which needs a comma (or `()`).
+        let group_type = type_ann.clone().delimited_by(op!('('), op!(')'));
         choice((
             array_type,
             tuple_type,
+            group_type,
             forall_type,
             projection_type,
             named_type,
         ))
     }
 
-    /// Type annotation: bare identifiers, `[T]`, `[T; N]`, `(T1, T2, ...)`, or
-    /// `fn(T x, ...args) -> R`.
+    /// Type annotation: bare identifiers, `[T]`, `[T; N]`, `(T1, T2, ...)`,
+    /// `(T)`, `T -> R`, or `fn(T x, ...args) -> R` / `fn(T) -> R`.
+    ///
+    /// Every type position (parameters, returns, fields, `let`, generic
+    /// args, aliases) shares this one grammar (#1391).
     fn type_annotation(
         &self,
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
@@ -416,7 +407,7 @@ impl<'pratt> Pratt<'pratt> {
         recursive(|type_ann| {
             let base_atom = self.type_annotation_atoms(type_ann.clone());
             let fn_sig_type = keyword!("fn")
-                .ignore_then(self.arg_list_typed(base_atom.clone()))
+                .ignore_then(self.fn_type_params(type_ann.clone()))
                 .then(op!("->").ignore_then(type_ann.clone()))
                 .map_with(|(params, ret), e| {
                     (e.span(), Box::new(Expression::TypeFnSig { params, ret }))
@@ -428,6 +419,42 @@ impl<'pratt> Pratt<'pratt> {
                     None => lhs,
                 })
         })
+    }
+
+    /// Parameter list of a `fn(...) -> R` type: `(T x, U... rest)` like a
+    /// declaration, `(... args)`, or names left out: `(int, string)`.
+    /// An unnamed parameter is an `Argument` with an empty name.
+    fn fn_type_params<T>(
+        &self,
+        ty_parser: T,
+    ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
+    where
+        T: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+    {
+        let unnamed_arg = ty_parser
+            .clone()
+            .then_ignore(choice((op!(','), op!(')'))).rewind())
+            .map_with(|ty, e| {
+                (
+                    e.span(),
+                    Box::new(Expression::Argument {
+                        docs: vec![],
+                        ty: Some(ty),
+                        name: "",
+                        is_rest: false,
+                    }),
+                )
+            });
+        let named = self.arg_list_typed(ty_parser);
+        let unnamed = unnamed_arg
+            .separated_by(op!(','))
+            .allow_trailing()
+            .collect::<Vec<_>>()
+            .map_with(output!(Fragment))
+            .delimited_by(op!("("), op!(")"));
+        named.or(unnamed).labelled("parameter list")
     }
 
     /// One type parameter: `T`, `T: Num + Eq`, `F: * -> *`, or
@@ -994,7 +1021,7 @@ impl<'pratt> Pratt<'pratt> {
         &self,
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
     {
-        self.arg_list_typed(self.type_annotation_no_fn())
+        self.arg_list_typed(self.type_annotation())
     }
 
     /// Anonymous lambda: `fn (T x) use (y) => expr` or
@@ -4019,3 +4046,6 @@ mod tests_lambdas;
 #[cfg(test)]
 #[path = "tests/tests_macros.rs"]
 mod tests_macros;
+#[cfg(test)]
+#[path = "tests/tests_fn_types.rs"]
+mod tests_fn_types;
