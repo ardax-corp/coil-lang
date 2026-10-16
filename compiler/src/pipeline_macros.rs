@@ -378,7 +378,16 @@ impl Pipeline {
         // (`key = value`) or in order.
         let mut values: Vec<Option<&MacroArg>> = vec![None; decl.params.len()];
         let mut next = 0;
+        let mut named_seen = false;
         for arg in &p.args {
+            if arg.key.is_empty() && named_seen {
+                return Err(Message::error(
+                    ErrorCode::GenericTypeError,
+                    format!("attribute macro `{}`: a positional argument cannot follow a named one", p.name),
+                    p.range.clone(),
+                ));
+            }
+            named_seen |= !arg.key.is_empty();
             let slot = if arg.key.is_empty() {
                 let s = next;
                 next += 1;

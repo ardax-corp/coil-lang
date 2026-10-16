@@ -1,7 +1,7 @@
 // #1205: attribute macro arguments in order, by name, or positional ones
 // followed by named ones (`flags(FnDecl f, string label, int times, bool loud)`).
 use tests::assert;
-use macro_probe::{flags};
+use macro_probe::flags;
 
 #[flags("yo", 2, false)]
 fn in_order() -> int {
