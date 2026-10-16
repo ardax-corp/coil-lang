@@ -7600,7 +7600,11 @@ impl Checker {
                 Some("use `char(b)` with a `byte` value".to_string()),
             );
         }
+        // `byte` is expected, so an int literal coerces as for a user
+        // function's `byte` parameter (#1175).
+        let prev_expected = self.current_expected.replace(byte());
         let b_ty = self.infer(&args[0]);
+        self.current_expected = prev_expected;
         self.unify(&b_ty, &byte(), &args[0].0.into_range(), "char argument");
         result_app_ty(string(), string())
     }
