@@ -176,7 +176,6 @@ impl Checker {
             generic_aliases: HashMap::new(),
             qualified_type_aliases: HashMap::new(),
             qualified_generic_aliases: HashMap::new(),
-            const_scopes: vec![HashSet::new()],
             const_fold_env: HashMap::new(),
             static_slots: HashMap::new(),
             static_slot_types: HashMap::new(),
@@ -1535,8 +1534,6 @@ impl Checker {
         self.type_aliases.clear();
         self.type_aliases.push(HashMap::new());
         self.generic_aliases.clear();
-        self.const_scopes.clear();
-        self.const_scopes.push(HashSet::new());
         self.abstract_constraint_bindings.clear();
         self.enums.retain(|k, _| k.contains("::"));
         self.enum_tags.retain(|k, _| k.contains("::"));
@@ -1805,13 +1802,11 @@ impl Checker {
 
     fn push_scope(&mut self) {
         self.env.push();
-        self.const_scopes.push(HashSet::new());
         self.type_aliases.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
         let _ = self.env.pop();
-        let _ = self.const_scopes.pop();
         if self.type_aliases.len() > 1 {
             let _ = self.type_aliases.pop();
         } else if let Some(frame) = self.type_aliases.last_mut() {
@@ -2151,21 +2146,14 @@ impl Checker {
         }
     }
 
+    /// Mark `name`'s binding in the innermost scope (just inserted) as a
+    /// `const`. A later binding of the same name shadows it as mutable.
     fn insert_const_binding(&mut self, name: impl Into<String>) {
-        if self.const_scopes.is_empty() {
-            self.const_scopes.push(HashSet::new());
-        }
-        self.const_scopes
-            .last_mut()
-            .expect("const scope should exist")
-            .insert(name.into());
+        self.env.mark_top_const(&name.into());
     }
 
     fn is_const_binding(&self, name: &str) -> bool {
-        self.const_scopes
-            .iter()
-            .rev()
-            .any(|scope| scope.contains(name))
+        self.env.is_const(name)
     }
 
     fn coroutine_type(&self, yield_ty: Ty, send_ty: Ty) -> Ty {
@@ -3122,11 +3110,15 @@ impl Checker {
                 let import_rebinds =
                     self.snapshot_file_level_imports(&mut uncaptured, range.clone());
 
+                let const_caps: Vec<bool> = cap_bindings.iter().map(|(n, _)| self.env.is_const(n)).collect();
                 let saved_frames = self.env.take_and_isolate();
                 let prev_uncaptured = self.lambda_uncaptured_outer.replace(uncaptured);
                 self.rebind_file_level_imports(import_rebinds);
-                for (n, ty) in &cap_bindings {
+                for ((n, ty), is_const) in cap_bindings.iter().zip(const_caps) {
                     self.env.insert_top(n.clone(), Scheme::mono(ty.clone()));
+                    if is_const {
+                        self.env.mark_top_const(n);
+                    }
                     self.record_codegen_var_type(n.clone(), ty.clone());
                 }
                 let _ = self.infer(body);
@@ -5876,7 +5868,13 @@ impl Checker {
             match child.1.as_ref() {
                 Expression::Variable(name, ty_opt) => {
                     let var_ty = match ty_opt {
-                        Some(ann) => self.parse_type_name(ann),
+                        Some(ann) => {
+                            let ty = self.parse_type_name(ann);
+                            // A type-only `let x: T;` has no initializer to
+                            // type its local: codegen reads `T` here.
+                            self.codegen_types_by_span.insert((ann.0.start, ann.0.end), ty.clone());
+                            ty
+                        }
                         None => Ty::Var(self.counter.fresh()),
                     };
                     self.env
@@ -10033,15 +10031,7 @@ impl Checker {
             .active_constraints
             .iter()
             .filter(|constraint| self.constraint_param_kind(&constraint.class).is_some())
-            .filter(|constraint| {
-                receiver_var.is_none_or(|var| {
-                    constraint.primary_var() == Some(var)
-                        || constraint
-                            .args
-                            .iter()
-                            .any(|a| matches!(a, Ty::Var(v) if *v == var))
-                })
-            })
+            .filter(|constraint| receiver_var.is_none_or(|var| self.constraint_on_var(constraint, var, false)))
             .map(|constraint| constraint.class.clone())
             .collect();
         for name in names {
@@ -10143,9 +10133,34 @@ impl Checker {
                         .generics
                         .typeclass(concrete)
                         .is_some_and(|def| def.has_superclass(class, &self.generics));
-                (covers && (constraint.is_unary_on(var) || constraint.primary_var() == Some(var)))
-                    .then(|| (idx, concrete.to_string()))
+                (covers && self.constraint_on_var(constraint, var, true)).then(|| (idx, concrete.to_string()))
             })
+    }
+
+    /// `constraint` is on `var`: as written, or with both under the current
+    /// substitution. A body can unify a type parameter with another
+    /// variable (`let ks: Vec<K> = Vec::new()` binds `K` to `Vec::new`'s
+    /// fresh element variable): the constraint still names the parameter's
+    /// own variable while the operands of a later `==` or `.hash()` on a
+    /// `K` prune to the other one, and a `K::method` names the parameter's
+    /// (#1277). `primary_only` asks for the constraint's primary variable
+    /// (or its only argument); otherwise any variable argument counts.
+    fn constraint_on_var(&self, constraint: &Constraint, var: TyVarId, primary_only: bool) -> bool {
+        let on = |c: &Constraint, v: TyVarId| {
+            c.primary_var() == Some(v)
+                || if primary_only { c.is_unary_on(v) } else { c.args.iter().any(|a| matches!(a, Ty::Var(x) if *x == v)) }
+        };
+        if on(constraint, var) {
+            return true;
+        }
+        let Ty::Var(var) = apply_ty_prune(&self.subst, &Ty::Var(var)) else {
+            return false;
+        };
+        let pruned = Constraint {
+            class: constraint.class.clone(),
+            args: constraint.args.iter().map(|a| apply_ty_prune(&self.subst, a)).collect(),
+        };
+        on(&pruned, var)
     }
 
     fn bound_method_candidates(
@@ -10156,15 +10171,7 @@ impl Checker {
         self.active_constraints
             .iter()
             .enumerate()
-            .filter(|(_, constraint)| {
-                receiver_var.is_none_or(|var| {
-                    constraint.primary_var() == Some(var)
-                        || constraint
-                            .args
-                            .iter()
-                            .any(|a| matches!(a, Ty::Var(v) if *v == var))
-                })
-            })
+            .filter(|(_, constraint)| receiver_var.is_none_or(|var| self.constraint_on_var(constraint, var, false)))
             .flat_map(|(dict_index, constraint)| {
                 self.possible_classes_for_constraint_method(constraint, method)
                     .into_iter()

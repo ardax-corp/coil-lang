@@ -601,6 +601,14 @@ struct Lower<'a> {
     /// The expression being lowered is `return`ed: a `match` or `if`
     /// returns from each arm instead of joining, as HIR emission does.
     ret_tail: bool,
+    /// Statement `match`es not yet lowered (one `effect` lowers, or the
+    /// tail of a block whose value is dropped): nothing reads their value.
+    stmt_matches: HashSet<HirId>,
+    /// The arm bodies of statement `match`es: each one's value is dropped
+    /// where the arm ends, as HIR emission did, so arms leaving different
+    /// shapes (a word beside a block that falls through with nothing) need
+    /// not meet in a φ.
+    discard_arms: HashSet<HirId>,
     /// The source type of each arm value, by the block the arm ends in: a
     /// join of a boxed arm with pair arms unboxes it there.
     arm_tys: HashMap<BlockId, Ty>,
@@ -1017,6 +1025,8 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         cold: Vec::new(),
         aliases: HashMap::new(),
         ret_tail: false,
+        stmt_matches: HashSet::new(),
+        discard_arms: HashSet::new(),
         arm_tys: HashMap::new(),
         next_temp: TEMP_BASE,
         boxes: HashMap::new(),
@@ -1159,6 +1169,8 @@ fn lower_pad(hir: &HirBody, inp: &HirMirInput, parts: PadParts<'_>) -> Result<Mi
         cold: Vec::new(),
         aliases: HashMap::new(),
         ret_tail: false,
+        stmt_matches: HashSet::new(),
+        discard_arms: HashSet::new(),
         arm_tys: HashMap::new(),
         next_temp: TEMP_BASE,
         boxes: HashMap::new(),
@@ -1624,7 +1636,13 @@ impl Lower<'_> {
     /// returns boxed is built boxed.
     fn ret_value(&mut self, v: HirId) -> Result<Val, Refusal> {
         if self.inp.ret_pair.is_none() && self.b.func().ret_ty == Some(MirTy::HeapRef) && self.inp.pair_tys.contains_key(&v.0) {
-            return Ok(match self.boxed_word(v)? {
+            let w = self.boxed_word(v)?;
+            // A box built without lowering `v` as a value (`None` made
+            // boxed: one `MakeEnum`) never consumed the returned flag:
+            // left set, it would leak into the next statement and
+            // lower a statement `if` as a returned one (#1271).
+            self.ret_tail = false;
+            return Ok(match w {
                 Some(w) => Val::V(w),
                 None => Val::Never,
             });
@@ -2329,9 +2347,21 @@ impl Lower<'_> {
         // A host's two-word result nobody reads stays the boxed word it
         // comes back as: no unboxing to a pair just to drop it.
         self.raw_host = self.host_pair(id) || self.boxed_call(id);
+        self.drop_value(id);
         let out = self.value(id);
         self.raw_host = false;
         Ok(!matches!(out?, Val::Never))
+    }
+
+    /// Nothing reads `id`'s value: when it is a `match` (or a block ending
+    /// in one), that `match`'s arms drop their values.
+    fn drop_value(&mut self, mut id: HirId) {
+        while let HirKind::Block { tail: Some(t), .. } = self.hir.expr(id).kind {
+            id = t;
+        }
+        if matches!(self.hir.expr(id).kind, HirKind::Match { .. }) {
+            self.stmt_matches.insert(id);
+        }
     }
 
     /// A host call whose result is a boxed enum unboxed to a pair.
@@ -3030,10 +3060,23 @@ impl Lower<'_> {
                 body,
                 kind: Some(ForInKind::Coroutine),
             } => self.for_coroutine(*local, *iterable, *body),
-            HirKind::Match { scrutinee, arms } => self.match_(*scrutinee, arms, returned),
+            HirKind::Match { scrutinee, arms } => {
+                if self.stmt_matches.remove(&id) && !returned {
+                    self.discard_arms.extend(arms.iter().map(|a| a.body));
+                }
+                self.match_(*scrutinee, arms, returned)
+            }
             // `let _ = e`: nothing can read `_`; nor a `()` local's word.
             HirKind::Let { local, init: Some(init) } if self.hir.local(*local).name == "_" || self.unit_local(*local) => {
                 Ok(if self.effect(*init)? { Val::Unit } else { Val::Never })
+            }
+            // A type-only `let x: T;` of a scalar: zero until assigned.
+            HirKind::Let { local, init: None } => {
+                let ty = self.local_ty(*local)?;
+                let slot = self.slot(*local)?;
+                let v = self.zero(ty)?;
+                self.b.def_local(slot, v).map_err(mir)?;
+                Ok(Val::Unit)
             }
             HirKind::Let { local, init } => {
                 let init = init.ok_or("uninitialized let")?;
@@ -6762,9 +6805,14 @@ impl Lower<'_> {
     /// The value of an arm body; with `tail`, returned from the arm.
     fn arm_value(&mut self, body: HirId, tail: bool) -> Result<Val, Refusal> {
         self.ret_tail = tail;
+        let discard = self.discard_arms.contains(&body);
+        if discard {
+            self.drop_value(body);
+        }
         let val = if tail { self.ret_value(body)? } else { self.value(body)? };
         match val {
             Val::Never => Ok(Val::Never),
+            _ if discard => Ok(Val::Unit),
             val if tail => {
                 self.ret(val)?;
                 Ok(Val::Never)

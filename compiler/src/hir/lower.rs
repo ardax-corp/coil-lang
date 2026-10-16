@@ -1290,10 +1290,16 @@ pub fn unrolled_range(hir: &HirBody, iterable: HirId, body: HirId, inclusive: bo
     } else {
         e.saturating_sub(*s)
     };
-    if !(0..=8).contains(&count) || has_own_jump(hir, body) || has_lambda(hir, body) {
+    if !(0..=8).contains(&count) || has_own_jump(hir, body) || has_lambda(hir, body) || has_defer(hir, body) {
         return None;
     }
     Some((*s, count as u32))
+}
+
+/// Each copy of a `defer` is its own site that every later exit checks,
+/// so repeating one grows the exits with the square of the copies.
+fn has_defer(hir: &HirBody, id: HirId) -> bool {
+    matches!(hir.expr(id).kind, HirKind::Defer { .. }) || children(hir, id).into_iter().any(|k| has_defer(hir, k))
 }
 
 fn has_own_jump(hir: &HirBody, id: HirId) -> bool {
@@ -1382,7 +1388,7 @@ pub fn ffi_variadic_tags(body: &HirBody, checker: &Checker, call: HirId, items: 
 }
 
 /// Depth refusals [`refusal_at`] names an operand for.
-const STAGED: &[&str] = &["stack-select-depth", "adjust-value", "range-depth"];
+const STAGED: &[&str] = &["stack-select-depth", "adjust-value", "assign-value", "range-depth"];
 
 /// Why `body` is outside the lowered subset, or `None` when it is inside.
 pub fn refusal(body: &HirBody, checker: &Checker) -> Option<&'static str> {
@@ -1671,8 +1677,10 @@ pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
     }
     match info.kind {
         // A `for` or destructuring binding of a monomorphic function
-        // element: the closure word it was stored as.
-        LocalKind::Param | LocalKind::Pattern => true,
+        // element: the closure word it was stored as. A captured one is
+        // its closure word, as the enclosing body's own call through it
+        // would be.
+        LocalKind::Param | LocalKind::Pattern | LocalKind::Capture => true,
         LocalKind::Let => body.exprs.iter().any(|e| match &e.kind {
             // A named function read as a value is `MakeFn` (codegen refuses
             // a generic one, whose `MakePolyFn` calls differently).
@@ -2693,6 +2701,12 @@ impl Walk<'_> {
                     _ => Err("assign"),
                 }
             }
+            // `x = e` / `x op= e` as a value splits into `let t = e; x = t;`
+            // ahead of its statement, leaving `t`.
+            HirKind::Assign { .. } => {
+                self.stage_at = Some(id);
+                Err("assign-value")
+            }
             _ => Err(kind_name(&body.expr(id).kind)),
         }
     }
@@ -2832,7 +2846,11 @@ impl Walk<'_> {
                 self.word(*init)?;
                 self.value(*init, depth)
             }
-            HirKind::Let { init: None, .. } => Err("uninitialized-let"),
+            // A type-only `let x: T;` of a scalar starts at zero.
+            HirKind::Let { local, init: None } => match body.local(*local).ty.as_ref().and_then(primitive) {
+                Some(coil_ty::INT | coil_ty::FLOAT | coil_ty::BOOL | coil_ty::BYTE) if depth == 0 => Ok(()),
+                _ => Err("uninitialized-let"),
+            },
             HirKind::Clear(_) => Ok(()),
             // `let (a, b) = t` / `let { x } = r`: the value to a temp, then
             // each name read from it (`Index` / `GetField`).
@@ -3078,7 +3096,8 @@ impl Walk<'_> {
                     let Some(local) = cap else {
                         return Err("defer-capture");
                     };
-                    if !matches!(body.local(*local).kind, LocalKind::Let | LocalKind::Param)
+                    // A lambda's own capture is a frame slot too (#1137).
+                    if !matches!(body.local(*local).kind, LocalKind::Let | LocalKind::Param | LocalKind::Capture)
                         || is_unit_local(body, self.checker, *local)
                         || self.stack.contains_key(&local.0)
                     {

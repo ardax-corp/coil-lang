@@ -656,7 +656,15 @@ impl<'s> Formatter<'s> {
     fn fmt_expression(&mut self, expr: &Expression<'_>) {
         match expr {
             Expression::Integer(n) => self.push_str(&n.to_string()),
-            Expression::Float(n) => self.push_str(&format!("{n:?}")),
+            // Display never uses an exponent, which Coil cannot parse
+            // (`{:?}` writes `1e16`, #1142); keep a fraction so it stays a float.
+            Expression::Float(n) => {
+                let mut text = format!("{n}");
+                if n.is_finite() && !text.contains('.') {
+                    text.push_str(".0");
+                }
+                self.push_str(&text)
+            }
             Expression::Bool(b) => self.push_str(if *b { "true" } else { "false" }),
             Expression::String(s) => {
                 self.push_str("\"");

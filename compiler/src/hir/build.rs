@@ -1153,9 +1153,12 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             E::Program(items) => self.block(b, node, items, false),
             E::Fragment(items) => self.fragment(b, node, items),
 
-            E::Variable(name, _) => {
+            E::Variable(name, ann) => {
                 // A bare `let x;` (the init, if any, is the next fragment item).
-                let ty = self.local_ty(node, name);
+                let ty = self.local_ty(node, name).or_else(|| {
+                    let ann = ann.as_ref()?;
+                    self.ty_of(ann)
+                });
                 let local = b.local(name, ty, LocalKind::Let);
                 self.emit_ty(b, node, HirKind::Let { local, init: None }, Some(coil_ty::unit()))
             }
@@ -2462,6 +2465,17 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 let inner_local = inner.body.captures[i].1;
                 if b.body.locals[outer.0 as usize].ty.is_none() {
                     b.body.locals[outer.0 as usize].ty = inner.body.locals[inner_local.0 as usize].ty.clone();
+                }
+                // Nor does a capture the lambda only calls (`f(x)`): it has
+                // the outer local's type.
+                if inner.body.locals[inner_local.0 as usize].ty.is_none() {
+                    let ty = b.body.locals[outer.0 as usize].ty.clone();
+                    for e in &mut inner.body.exprs {
+                        if matches!(e.kind, HirKind::Local(l) if l == inner_local) && e.ty.is_none() {
+                            e.ty.clone_from(&ty);
+                        }
+                    }
+                    inner.body.locals[inner_local.0 as usize].ty = ty;
                 }
             }
         }
