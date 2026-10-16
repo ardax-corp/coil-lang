@@ -1271,21 +1271,25 @@ impl Cx<'_> {
         let owner = self
             .checker
             .class_owner_at_span(e.span)
-            .or_else(|| class_of(e.ty.as_ref()).map(str::to_string))?;
-        let key = format!("{owner}::{name}");
-        if let Some(Some(i)) = self.by_name.get(key.as_str()) {
-            return Some((w.summaries[*i], Some(*i)));
-        }
-        let qualified = format!("{}::{key}", self.module_path);
-        for k in [key.as_str(), qualified.as_str()] {
-            if let Some(&s) = self.program.by_name.get(k) {
-                return Some((s, None));
+            .or_else(|| class_of(e.ty.as_ref()).map(str::to_string));
+        if let Some(owner) = owner {
+            let key = format!("{owner}::{name}");
+            if let Some(Some(i)) = self.by_name.get(key.as_str()) {
+                return Some((w.summaries[*i], Some(*i)));
             }
-            if let Some(fx) = self.checker.program_method_effects.get(k) {
-                return Some((Summary::of(*fx), None));
+            let qualified = format!("{}::{key}", self.module_path);
+            for k in [key.as_str(), qualified.as_str()] {
+                if let Some(&s) = self.program.by_name.get(k) {
+                    return Some((s, None));
+                }
+                if let Some(fx) = self.checker.program_method_effects.get(k) {
+                    return Some((Summary::of(*fx), None));
+                }
             }
         }
-        None
+        // Not an inherent method: a trait method on a bound or a concrete
+        // receiver costs what the trait declares, as `name(recv)` does.
+        self.trait_method(None, name).map(|s| (s, None))
     }
 }
 
