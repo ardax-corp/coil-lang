@@ -214,7 +214,7 @@ pub struct InstanceDef {
 //  Generics registry
 
 /// Registry of typeclasses and their instances, owned by [`Checker`].
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Generics {
     /// All declared typeclasses.
     pub typeclasses: HashMap<String, TypeClassDef>,

@@ -30,6 +30,7 @@ mod pipeline;
 mod project_index;
 mod shadow_traits;
 mod strip_tests;
+mod variadic;
 pub mod symbols;
 mod typechecking;
 pub mod verify;

@@ -172,6 +172,7 @@ struct GenericAliasDef {
 
 /// The typechecker. Owns the environment, the fresh-variable counter, the
 /// running substitution, and the accumulated diagnostic messages.
+#[derive(Clone)]
 pub struct Checker {
     env: Env,
     counter: TyVarCounter,
@@ -359,6 +360,9 @@ pub struct Checker {
     /// heterogeneous tuple instead of `[T]`.
     fn_tuple_rest: std::collections::HashMap<String, bool>,
 
+    /// Variadic `... xs` templates and their per-pack instances (#1281).
+    variadic: checker::variadic::VariadicState,
+
     /// Shared tuple-pack type for the current function's bare `...args` param
     /// and any `fn(...args) -> R` parameter types in its signature.
     current_tuple_pack: Option<Ty>,
@@ -502,6 +506,10 @@ pub struct Checker {
 
     /// Bare `Some`/`Ok`/`Red` (Call or Identifier) resolved to `Enum::Case`.
     bare_constructs_by_span: HashMap<(usize, usize), (String, String)>,
+
+    /// Bare constructor patterns (`Some(v)`, `None`, `Red`) resolved to their
+    /// enum's registry key, by pattern span (#1352).
+    bare_patterns_by_span: HashMap<(usize, usize), String>,
 
     /// Match exhaustiveness checks deferred until substitution is closed.
     pending_exhaustive: Vec<PendingExhaustive>,

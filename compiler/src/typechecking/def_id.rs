@@ -47,7 +47,7 @@ pub enum DefKind {
 }
 
 /// Intern table for modules and top-level defs.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct DefInterner {
     modules: HashMap<String, ModuleId>,
     module_names: Vec<String>,
