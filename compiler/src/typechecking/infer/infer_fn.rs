@@ -352,7 +352,7 @@ impl Checker {
         for wc in where_constraints {
             let args: Vec<Ty> = wc.args.iter().map(|a| self.parse_type_name(a)).collect();
             param_constraints.push(Constraint {
-                class: wc.class.to_string(),
+                class: self.canonical_trait_name(wc.class),
                 args,
             });
         }

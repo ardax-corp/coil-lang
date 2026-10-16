@@ -10335,12 +10335,50 @@ impl Checker {
         Kind::arrow(self.kind_of_type_argument(arg), Kind::Constraint)
     }
 
+    /// A trait name as written, with a builtin trait's `use … as` alias
+    /// (`use prelude::ops::Eq as PreludeEq`) mapped to the builtin's name
+    /// while no module trait replaces it (#1209).
+    pub(crate) fn canonical_trait_name(&self, name: &str) -> String {
+        if let Some(BuiltinExport::TypeClass { name: builtin }) = self.scope_bindings.get(name)
+            && *builtin != name
+            && self.type_param_kind(name).is_none()
+            && self
+                .generics
+                .typeclass(builtin)
+                .is_some_and(|c| c.defined_module == crate::typechecking::virtual_modules::PRELUDE_OPS_MODULE)
+        {
+            return builtin.to_string();
+        }
+        name.to_string()
+    }
+
     fn constraint_from_bound(
         &mut self,
         bound: &str,
         arg: Ty,
         range: &Range<usize>,
     ) -> Option<Constraint> {
+        // `use prelude::ops::Eq as PreludeEq`: the alias names the builtin.
+        if let Some(BuiltinExport::TypeClass { name }) = self.scope_bindings.get(bound).cloned()
+            && name != bound
+            && self.type_param_kind(bound).is_none()
+        {
+            let replaced = self
+                .generics
+                .typeclass(name)
+                .is_some_and(|c| c.defined_module != crate::typechecking::virtual_modules::PRELUDE_OPS_MODULE);
+            if replaced {
+                self.messages.push(Message::error(
+                    ErrorCode::GenericTypeError,
+                    format!(
+                        "`{bound}` names the builtin `{name}`, which this module's trait `{name}` replaces; it cannot be a bound here"
+                    ),
+                    range.clone(),
+                ));
+                return None;
+            }
+            return self.constraint_from_bound(name, arg, range);
+        }
         if let Some(kind) = self.constraint_param_kind(bound) {
             let expected = self.expected_constraint_kind_for_arg(&arg);
             if kind != expected {
@@ -13881,7 +13919,7 @@ impl Checker {
             for (tp, var) in type_params.iter().zip(param_vars.iter()) {
                 for bound in &tp.bounds {
                     impl_constraints.push(Constraint {
-                        class: bound.to_string(),
+                        class: self.canonical_trait_name(bound),
                         args: vec![Ty::Var(*var)],
                     });
                 }
@@ -13937,7 +13975,7 @@ impl Checker {
             for wc in where_constraints {
                 let args: Vec<Ty> = wc.args.iter().map(|a| self.parse_type_name(a)).collect();
                 constraints.push(Constraint {
-                    class: wc.class.to_string(),
+                    class: self.canonical_trait_name(wc.class),
                     args,
                 });
             }
@@ -14407,7 +14445,7 @@ impl Checker {
         for (tp, var) in type_params.iter().zip(param_vars.iter()) {
             for bound in &tp.bounds {
                 param_constraints.push(Constraint {
-                    class: bound.to_string(),
+                    class: self.canonical_trait_name(bound),
                     args: vec![Ty::Var(*var)],
                 });
             }
@@ -14415,7 +14453,7 @@ impl Checker {
         for wc in where_constraints {
             let args: Vec<Ty> = wc.args.iter().map(|a| self.parse_type_name(a)).collect();
             param_constraints.push(Constraint {
-                class: wc.class.to_string(),
+                class: self.canonical_trait_name(wc.class),
                 args,
             });
         }
