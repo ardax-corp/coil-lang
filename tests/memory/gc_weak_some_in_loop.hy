@@ -77,6 +77,24 @@ test("the last object a churn loop wrapped is dropped after the loop") {
     assert!(gone(w));
 }
 
+test("a churn loop drops the list it wrapped once it is reset") {
+    let junk: Option<Node> = Option::None;
+    let w = weak_of(junk);
+    let round = 1;
+    let ok = true;
+    while round < 13 {
+        junk = churn(junk, round);
+        if round % 4 == 0 {
+            collect();
+            ok = ok && gone(w);
+        } else {
+            w = weak_of(junk);
+        }
+        round = round + 1;
+    }
+    assert!(ok);
+}
+
 test("a Some made on either arm is dropped when the Option is rebound") {
     let junk: Option<Node> = Option::None;
     let i = 0;

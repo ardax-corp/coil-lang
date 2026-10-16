@@ -482,6 +482,7 @@ pub(super) fn entry_clears(func: &MirFunc, regs: &[u8], need_slot: &[bool]) -> H
         return out;
     }
     let live = super::gc::liveness_after(func);
+    let sources = CopySources::new(func);
     for h in headers {
         let phis: Vec<(ValueId, &Vec<(BlockId, ValueId)>)> = h
             .insts
@@ -517,6 +518,42 @@ pub(super) fn entry_clears(func: &MirFunc, regs: &[u8], need_slot: &[bool]) -> H
                         && collects_before_rewrite(func, h.id, r, regs, &slot)
                     {
                         out.entry(p).or_default().push(r);
+                    }
+                }
+            }
+            // The registers another forward predecessor's copy came from
+            // still hold what that edge carried last (#1411): in a loop
+            // that took the other arm before, the `Some` wrap and the
+            // object it was cast from, now rebound away. Only this edge
+            // leaves them stale.
+            for (dest, args) in &phis {
+                if !rebound.contains(dest) || !slot(*dest) {
+                    continue;
+                }
+                let own: Vec<u8> = args
+                    .iter()
+                    .filter(|&&(q, _)| q == p)
+                    .flat_map(|&(_, src)| std::iter::once(src).chain(sources.of(func, src, |_| false)))
+                    .filter(|&v| slot(v))
+                    .map(|v| regs[v.index()])
+                    .collect();
+                // A back edge's sources are not written yet on loop entry.
+                for &(q, src) in args.iter() {
+                    if q == p || q.index() >= h.id.index() || consts.contains(&src) || !func.ty(src).is_heap_word() {
+                        continue;
+                    }
+                    for v in std::iter::once(src).chain(sources.of(func, src, |x| live_in.contains(&x))) {
+                        if !slot(v) || func.params.contains(&v) {
+                            continue;
+                        }
+                        let r = regs[v.index()];
+                        if !own.contains(&r)
+                            && !taken(r)
+                            && !out.get(&p).is_some_and(|rs| rs.contains(&r))
+                            && collects_before_rewrite(func, h.id, r, regs, &slot)
+                        {
+                            out.entry(p).or_default().push(r);
+                        }
                     }
                 }
             }
