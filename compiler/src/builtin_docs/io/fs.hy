@@ -153,20 +153,24 @@ fn is_file(string path) -> Result<bool, IoError> {}
 /// # Examples
 ///
 /// ```
-/// use io::fs::{is_symlink, remove_file, symlink};
+/// use io::fs::{create_dir, is_symlink, remove_dir, remove_file, symlink};
 /// # use tests::assert;
+/// // A directory of our own: `/tmp` itself is a link on macOS.
+/// let dir = "/tmp/coil_doc_fs_is_symlink_dir";
 /// let link = "/tmp/coil_doc_fs_is_symlink";
+/// let _ = create_dir(dir);
 /// let _ = remove_file(link);
-/// let _ = symlink("/tmp", link);
+/// let _ = symlink(dir, link);
 /// let yes = match is_symlink(link) {
 ///     Result::Ok(b) => b,
 ///     Result::Err(_) => false,
 /// };
-/// let no = match is_symlink("/tmp") {
+/// let no = match is_symlink(dir) {
 ///     Result::Ok(b) => b,
 ///     Result::Err(_) => true,
 /// };
 /// let _ = remove_file(link);
+/// let _ = remove_dir(dir);
 /// assert!(yes && !no);
 /// ```
 fn is_symlink(string path) -> Result<bool, IoError> {}

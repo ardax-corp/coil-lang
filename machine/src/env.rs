@@ -1,6 +1,8 @@
 //! Host process environment: argv, env vars, cwd, exec (no shell).
 
+use std::cell::Cell;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use common::{BUILTIN_ENV_ERROR_VARIANTS, BUILTIN_RESULT_VARIANTS, Value};
 
@@ -211,10 +213,49 @@ fn try_host_set_cwd(heap: &mut Heap, args: &[Value]) -> Result<(), EnvErrorTag> 
 ///
 /// Compile-time `--allow-exit` is the grant; archived bytecode with this op
 /// runs it. [`EnvErrorTag::ExecDisabled`] remains an ABI tag but is not
-/// produced here.
+/// produced here. Under [`trap_exit`] the wired native is [`try_host_exit`]
+/// instead, which does return.
 pub fn host_exit(_heap: &mut Heap, args: &[Value]) -> Value {
     let code = if args.is_empty() { 0 } else { args[0].as_int() };
     std::process::exit(code as i32);
+}
+
+/// Set by a harness (`coil-test`) that runs many programs in one process:
+/// `env::exit` must end the running job, not the process (#1401).
+static EXIT_TRAPPED: AtomicBool = AtomicBool::new(false);
+
+thread_local! {
+    /// Code of the trapped `env::exit` that is unwinding this thread's job.
+    static EXIT_REQUEST: Cell<Option<i32>> = const { Cell::new(None) };
+}
+
+/// Make `env::exit` a VM panic of the calling job (for every machine in this
+/// process) instead of a process exit. The panic runs the job's `defer`s;
+/// [`take_exit_request`] then tells the job's runner it was an exit.
+pub fn trap_exit(on: bool) {
+    EXIT_TRAPPED.store(on, Ordering::SeqCst);
+}
+
+/// Take the exit code a trapped `env::exit` recorded on this thread.
+pub fn take_exit_request() -> Option<i32> {
+    EXIT_REQUEST.with(Cell::take)
+}
+
+/// Put back what [`take_exit_request`] returned (a job nested on this thread
+/// by join-help must not consume or leak the outer job's request).
+pub fn restore_exit_request(code: Option<i32>) {
+    EXIT_REQUEST.with(|c| c.set(code));
+}
+
+/// The wired `env_exit`: exits the process, or under [`trap_exit`] records
+/// the code and returns the panic message that ends the job.
+pub fn try_host_exit(heap: &mut Heap, args: &[Value]) -> Result<Value, String> {
+    if !EXIT_TRAPPED.load(Ordering::SeqCst) {
+        return Ok(host_exit(heap, args));
+    }
+    let code = if args.is_empty() { 0 } else { args[0].as_int() } as i32;
+    EXIT_REQUEST.with(|c| c.set(Some(code)));
+    Err(format!("env::exit({code}) ends only this job under the test harness"))
 }
 
 /// Spawn `program` with argv from `args_array` (no shell). NUL bytes rejected.

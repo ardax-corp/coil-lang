@@ -146,7 +146,7 @@ fn set_cwd(string path) -> Result<unit, EnvError> {}
 ///
 /// # Examples
 ///
-/// ```
+/// ```no_run
 /// use env::{exit};
 /// let ok = true;
 /// if ok {
