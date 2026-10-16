@@ -5570,10 +5570,21 @@ impl Lower<'_> {
         };
         let mut words = Vec::with_capacity(args.len());
         for &arg in args {
-            let Some(v) = self.word(arg)? else {
-                return Ok(Val::Never);
-            };
-            words.push(v);
+            // A two-word value (`Option<int>`, a pair tuple) goes boxed, as
+            // to a plain call's boxed parameter (#1414).
+            match self.value(arg)? {
+                Val::V(v) => words.push(v),
+                Val::Never => return Ok(Val::Never),
+                Val::Unit => return Err("unit operand".into()),
+                Val::Pair(lo, hi) => {
+                    let ty = self.expr_ty(arg).ok_or("host argument type")?.clone();
+                    match self.box_pair_val(&ty, lo, hi)? {
+                        Val::V(v) => words.push(v),
+                        Val::Never => return Ok(Val::Never),
+                        _ => return Err("host argument boxed".into()),
+                    }
+                }
+            }
         }
         let out = self.at_expr(id, |l| l.b.ins_host_invoke_as(native, words, layout, ret).map_err(mir))?;
         if let Some(((lo_ty, _), variants)) = pair {
