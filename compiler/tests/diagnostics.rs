@@ -411,3 +411,49 @@ fn main() {
         msgs.iter().map(|m| (m.code(), m.message())).collect::<Vec<_>>()
     );
 }
+
+// #1394: the same holds when a known constructor's payload does not fit
+// (arity, shape, missing field): only that error is reported.
+#[test]
+fn mismatched_constructor_pattern_bindings_do_not_cascade() {
+    let msgs = check_messages(
+        r#"
+enum Shape {
+    Circle(int),
+    Rect { w: int, h: int },
+}
+
+fn f(Shape s) -> int {
+    return match s {
+        Circle(a, b) => a + b,
+        Rect { w, q } => w + q,
+        Rect(z) => z,
+    };
+}
+
+fn g(Shape s) -> int {
+    return match s {
+        Shape::Rect { h: hh } => hh,
+        default => 0,
+    };
+}
+
+fn main() {
+    let x = f(Shape::Circle(1)) + g(Shape::Circle(1));
+}
+"#,
+    );
+    let all: Vec<_> = msgs.iter().map(|m| (m.code(), m.message())).collect();
+    assert!(
+        msgs.iter().any(|m| m.code() == Some(ErrorCode::PayloadShapeMismatch)),
+        "{all:?}"
+    );
+    assert!(
+        msgs.iter().any(|m| m.code() == Some(ErrorCode::MissingField)),
+        "{all:?}"
+    );
+    assert!(
+        !msgs.iter().any(|m| m.code() == Some(ErrorCode::UnknownValue)),
+        "bindings inside a mismatched constructor must not cascade into E0100: {all:?}"
+    );
+}
