@@ -1374,7 +1374,7 @@ pub fn ffi_variadic_tags(body: &HirBody, checker: &Checker, call: HirId, items: 
 }
 
 /// Depth refusals [`refusal_at`] names an operand for.
-const STAGED: &[&str] = &["stack-select-depth", "adjust-value", "assign-value", "range-depth"];
+const STAGED: &[&str] = &["stack-select-depth", "adjust-value", "assign-value", "range-depth", "operator-depth"];
 
 /// Why `body` is outside the lowered subset, or `None` when it is inside.
 pub fn refusal(body: &HirBody, checker: &Checker) -> Option<&'static str> {
@@ -2179,6 +2179,11 @@ impl Walk<'_> {
             && matches!(self.body.expr(id).kind, HirKind::Call { .. })
             && !self.ty(id).is_some_and(is_range_pair)
         {
+            self.stage_at = Some(id);
+        }
+        // A user type's operator above live operands (`x + -y` in a
+        // generic body) runs into a temp ahead of its statement.
+        if r == Err("operator-depth") && depth != 0 && self.stage_at.is_none() {
             self.stage_at = Some(id);
         }
         r
