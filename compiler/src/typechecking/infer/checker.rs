@@ -4035,8 +4035,22 @@ impl Checker {
         let index_ty = self.infer(index_expr);
         let index_ty_pruned = apply_ty_prune(&self.subst, &index_ty);
         // Constrain the index to be an `int` (the VM only
-        // supports integer indices).
-        let _ = unify_with(&self.subst, &index_ty_pruned, &int());
+        // supports integer indices); a `byte` widens. Any other type is
+        // rejected here rather than at lowering (#1172).
+        let is_byte = Self::is_byte_ty(&index_ty_pruned);
+        if !is_byte {
+            match unify_with(&self.subst, &index_ty_pruned, &int()) {
+                Ok(s) => self.absorb(&s),
+                Err(_) => {
+                    let _ = self.error_with_help(
+                        ErrorCode::TypeMismatch,
+                        format!("Type mismatch: an index must be `int`, found `{}`", index_ty_pruned),
+                        index_expr.0.into_range(),
+                        Some("index with an `int` (or a `byte`)".to_string()),
+                    );
+                }
+            }
+        }
         let resolved = apply_ty_prune(&self.subst, &target_ty);
         // Reads see through `readonly` (#1073); `xs[i] = …` is rejected on
         // the store path.
