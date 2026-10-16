@@ -234,7 +234,7 @@ fn params_closed(ty: &Ty) -> bool {
 fn aggregate<'t>(checker: &Checker, mut items: impl Iterator<Item = &'t Ty>, seen: &mut Vec<String>) -> Option<ValueClass> {
     items
         .all(|t| {
-            params_closed(t) && classify_in(checker, t, seen).is_none_or(is_word)
+            (params_closed(t) || is_existential(t)) && classify_in(checker, t, seen).is_none_or(is_word)
         })
         .then_some(ValueClass::Aggregate)
 }
@@ -259,8 +259,14 @@ fn object_class(checker: &Checker, name: &str) -> Option<ValueClass> {
     let fields = checker.class_fields(&key)?;
     fields
         .iter()
-        .all(|(_, ty)| super::layout::ty_is_closed(ty))
+        .all(|(_, ty)| super::layout::ty_is_closed(ty) || is_existential(ty))
         .then_some(ValueClass::Object)
+}
+
+/// A bare-class existential (`Show`): one `[value, dictionary]` word, closed
+/// as an element or a field though its packed type is not.
+fn is_existential(ty: &Ty) -> bool {
+    matches!(strip_readonly(ty), Ty::Existential { .. })
 }
 
 /// The class `let x = new C(..)` keeps in frame slots instead of a heap
@@ -1374,7 +1380,7 @@ pub fn ffi_variadic_tags(body: &HirBody, checker: &Checker, call: HirId, items: 
 }
 
 /// Depth refusals [`refusal_at`] names an operand for.
-const STAGED: &[&str] = &["stack-select-depth", "adjust-value", "assign-value", "range-depth"];
+const STAGED: &[&str] = &["stack-select-depth", "adjust-value", "assign-value", "range-depth", "existential-depth"];
 
 /// Why `body` is outside the lowered subset, or `None` when it is inside.
 pub fn refusal(body: &HirBody, checker: &Checker) -> Option<&'static str> {
@@ -2179,6 +2185,11 @@ impl Walk<'_> {
             && matches!(self.body.expr(id).kind, HirKind::Call { .. })
             && !self.ty(id).is_some_and(is_range_pair)
         {
+            self.stage_at = Some(id);
+        }
+        // A call whose arguments stage through temps (an existential
+        // pack among them) runs into a temp ahead of its statement.
+        if r == Err("existential-depth") && depth != 0 && self.stage_at.is_none() {
             self.stage_at = Some(id);
         }
         r
