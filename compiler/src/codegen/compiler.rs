@@ -2961,8 +2961,6 @@ impl Compiler {
         arg_tys: &[crate::typechecking::Ty],
         ret_ty: Option<&crate::typechecking::Ty>,
     ) -> usize {
-        use crate::typechecking::Ty;
-
         let Some(scheme) = self.checker.env().lookup(fn_name).cloned() else {
             return 0;
         };
