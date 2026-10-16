@@ -51,7 +51,7 @@ its code on the thread and raises a VM panic
 |----------------------|---------|
 | a `test` case (or its static init) | fails, whatever `N`: the rest of the body never ran |
 | a case-less file's `main` | passes when `N == 0` (a program's clean end), fails otherwise |
-| a thread / task the case spawned | that thread's job panics (its join fails); the case sees only that |
+| a `thread::spawn` job the case started | that job panics on its own VM (its join fails); the case sees only the failed join |
 
 A test that needs a real exit status runs the program as a subprocess.
 
