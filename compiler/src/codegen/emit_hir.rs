@@ -3448,7 +3448,8 @@ impl Compiler {
             return self.resolve_hir_vec_method(hir, call, method, args);
         }
         let recv_ty = Self::hir_ty(hir, recv).ok_or("method-receiver")?;
-        let recv_ty = apply_ty_prune(self.checker.subst(), recv_ty);
+        // A constructor receiver (`E::A.tag()`) is typed as its variant.
+        let recv_ty = crate::typechecking::ty::peel_constructor_refinement(apply_ty_prune(self.checker.subst(), recv_ty));
         let owner = Checker::class_name_of_ty(&recv_ty).ok_or("method-receiver")?;
         // A numeric range's `to_vec` thunk takes the boxed range (as
         // `compile_call_expr`, the float thunk for a float range).
