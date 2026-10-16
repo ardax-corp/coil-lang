@@ -9,9 +9,9 @@
 
 use std::ops::Range;
 
-use parser::ast::{
-    Expression, LetPattern, Output, Pattern, PatternPayload,
-};
+use parser::ast::{Expression, LetPattern, Output};
+
+use crate::typechecking::bare_cases::BareCases;
 
 /// One local binding: its declaration site and every use that resolves to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +46,7 @@ pub fn local_bindings_in(source: &str, ast: &Output<'_>) -> Vec<LocalBinding> {
         source,
         bindings: Vec::new(),
         scopes: Vec::new(),
+        cases: BareCases::of(ast),
     };
     resolver.walk(ast);
     for binding in &mut resolver.bindings {
@@ -74,6 +75,8 @@ struct Resolver<'s> {
     source: &'s str,
     bindings: Vec<LocalBinding>,
     scopes: Vec<Frame>,
+    /// Bare unit cases (`None`, `Red`): a pattern naming one binds nothing.
+    cases: BareCases,
 }
 
 impl<'s> Resolver<'s> {
@@ -165,24 +168,11 @@ impl<'s> Resolver<'s> {
         }
     }
 
-    fn bind_pattern(&mut self, pattern: &(parser::SimpleSpan, Pattern<'_>)) {
-        let span = pattern.0.start..pattern.0.end;
-        match &pattern.1 {
-            Pattern::Binding { name } => self.bind(name, span),
-            Pattern::Constructor { payload, .. } => match payload {
-                PatternPayload::Unit => {}
-                PatternPayload::Tuple(items) => {
-                    for item in items {
-                        self.bind_pattern(item);
-                    }
-                }
-                PatternPayload::Record(fields) => {
-                    for field in fields {
-                        self.bind_pattern(&field.pattern);
-                    }
-                }
-            },
-            Pattern::Wildcard | Pattern::Default | Pattern::Integer(_) => {}
+    fn bind_pattern(&mut self, pattern: &(parser::SimpleSpan, parser::ast::Pattern<'_>)) {
+        let mut binders = Vec::new();
+        self.cases.each_binder(pattern, &mut |name, span| binders.push((name, span)));
+        for (name, span) in binders {
+            self.bind(name, span.start..span.end);
         }
     }
 

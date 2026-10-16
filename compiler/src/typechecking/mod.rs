@@ -4,6 +4,7 @@
 //! for inference, native registration, and span-indexed type lookup.
 
 pub mod aggregate_arith;
+pub mod bare_cases;
 pub mod const_eval;
 pub mod control_flow;
 pub mod def_id;
