@@ -41,6 +41,7 @@ impl Checker {
             );
         }
 
+        let mut pattern_failed = false;
         for arm in arms {
             self.push_scope();
 
@@ -57,6 +58,7 @@ impl Checker {
                 );
                 self.messages.push(msg);
             }
+            let msgs_before = self.messages.len();
             let pat_ty = self.infer_pattern(&arm.pattern.1, &resolved_scrutinee, &pattern_range);
 
             // Narrow an Identifier scrutinee to the matched variant so
@@ -119,6 +121,9 @@ impl Checker {
                 "match pattern against scrutinee",
             );
 
+            // A pattern that failed to check has no coherent coverage
+            // shape; skip the exhaustiveness pass for this match.
+            pattern_failed |= self.messages[msgs_before..].iter().any(|m| matches!(m.kind(), reporting::MessageKind::ERROR));
             let arm_cov = self.arm_coverage(&arm.pattern.1, &pattern_range);
             coverage.push(arm_cov);
 
@@ -151,11 +156,13 @@ impl Checker {
         self.current_match_lhs = prev;
 
         // Post-pass exhaustiveness re-applies the current subst to scrutinee_ty.
-        self.pending_exhaustive.push(PendingExhaustive {
-            scrutinee_ty: resolved_scrutinee,
-            arms: coverage,
-            match_range: range,
-        });
+        if !pattern_failed {
+            self.pending_exhaustive.push(PendingExhaustive {
+                scrutinee_ty: resolved_scrutinee,
+                arms: coverage,
+                match_range: range,
+            });
+        }
 
         result_ty
     }
@@ -232,6 +239,23 @@ impl Checker {
                         return expected_ty.clone();
                     }
                 };
+                // A constructor from another enum can never match. Generic
+                // enums get this from the unify in `poly_or_registry_payload`;
+                // plain enums carry no type args, so compare the names.
+                if !self.is_poly_enum(&enum_str)
+                    && let Some(found) = self.scrutinee_enum_key(expected_ty)
+                    && found != enum_str
+                {
+                    self.messages.push(Message::error(
+                        ErrorCode::TypeMismatch,
+                        format!(
+                            "Type mismatch: expected {}, found {} (pattern `{}::{}`)",
+                            found, enum_str, enum_str, variant_str
+                        ),
+                        pattern_range.clone(),
+                    ));
+                    return expected_ty.clone();
+                }
                 let _arity = self
                     .enum_arities
                     .get(&enum_str)
@@ -383,5 +407,22 @@ impl Checker {
                 expected_ty.clone()
             }
         }
+    }
+
+    /// The registry key of the enum a scrutinee type names, if it names one.
+    fn scrutinee_enum_key(&self, ty: &Ty) -> Option<String> {
+        let name = match apply_ty_prune(&self.subst, ty) {
+            Ty::Con(n) | Ty::Sum { name: n, .. } => n,
+            Ty::App(head, _) => match *head {
+                Ty::Con(n) => n,
+                _ => return None,
+            },
+            Ty::Constructor { owner, .. } => match *owner {
+                Ty::Sum { name, .. } => name,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        self.enum_tags.contains_key(&name).then_some(name)
     }
 }

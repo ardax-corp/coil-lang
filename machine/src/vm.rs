@@ -2178,7 +2178,7 @@ impl<const S: usize> Machine<S> {
         self.finalizer_pcs.insert(pc);
     }
 
-    fn run_remaining_finalizers(&mut self) {
+    pub(crate) fn run_remaining_finalizers(&mut self) {
         if self.program_code.is_empty() || self.finalizer_by_type.is_empty() {
             return;
         }

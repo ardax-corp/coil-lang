@@ -234,9 +234,15 @@ fn params_closed(ty: &Ty) -> bool {
 fn aggregate<'t>(checker: &Checker, mut items: impl Iterator<Item = &'t Ty>, seen: &mut Vec<String>) -> Option<ValueClass> {
     items
         .all(|t| {
-            (params_closed(t) || is_existential(t)) && classify_in(checker, t, seen).is_none_or(is_word)
+            (params_closed(t) || is_existential(t) || mono_fun(checker, t, seen)) && classify_in(checker, t, seen).is_none_or(is_word)
         })
         .then_some(ValueClass::Aggregate)
+}
+
+/// A monomorphic function type of plain words: its value is one closure
+/// word, stored in an aggregate as that word.
+fn mono_fun(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> bool {
+    matches!(strip_readonly(ty), Ty::Fun(..)) && crate::typechecking::subst::ftv(ty).is_empty() && fun_words(checker, ty, seen)
 }
 
 /// A class declared with type parameters (`class HashMap<K, V>`).
@@ -259,7 +265,7 @@ fn object_class(checker: &Checker, name: &str) -> Option<ValueClass> {
     let fields = checker.class_fields(&key)?;
     fields
         .iter()
-        .all(|(_, ty)| super::layout::ty_is_closed(ty) || is_existential(ty))
+        .all(|(_, ty)| super::layout::ty_is_closed(ty) || is_existential(ty) || mono_fun(checker, ty, &mut Vec::new()))
         .then_some(ValueClass::Object)
 }
 
@@ -429,6 +435,14 @@ pub fn stack_arrays(body: &HirBody, checker: &Checker) -> StackArrays {
             }
         }
     }
+    // A function element stays in the array object: its closure word has
+    // no slot type.
+    cands.retain(|&local, _| {
+        !body.local(LocalId(local)).ty.as_ref().is_some_and(|t| match crate::typechecking::ty::strip_readonly(&apply_ty_prune(checker.subst(), t)) {
+            Ty::Array { element, .. } => matches!(crate::typechecking::ty::strip_readonly(element), Ty::Fun(..)),
+            t => crate::typechecking::ty::vec_element_ty(t).is_some_and(|e| matches!(crate::typechecking::ty::strip_readonly(e), Ty::Fun(..))),
+        })
+    });
     // Stores into a local: `dst = value`.
     let mut stores: Vec<(u32, HirId, HirId)> = Vec::new();
     let mut refused: HashSet<u32> = HashSet::new();
@@ -1205,6 +1219,11 @@ pub fn is_range_pair(ty: &Ty) -> bool {
     crate::typechecking::return_layout::two_word_range_kind(ty).is_some()
 }
 
+/// A `Range<T>` / `RangeInclusive<T>` over an open type parameter `T`.
+pub fn is_open_range(ty: &Ty) -> bool {
+    crate::typechecking::ty::range_app(ty).is_some_and(|(elem, _)| matches!(strip_readonly(elem), Ty::Var(_)))
+}
+
 /// An irrefutable `let` pattern of tuples, records, names and `_`.
 pub fn let_pat_shape(pat: &HirPat) -> bool {
     match pat {
@@ -1380,7 +1399,7 @@ pub fn ffi_variadic_tags(body: &HirBody, checker: &Checker, call: HirId, items: 
 }
 
 /// Depth refusals [`refusal_at`] names an operand for.
-const STAGED: &[&str] = &["stack-select-depth", "adjust-value", "assign-value", "range-depth", "existential-depth"];
+const STAGED: &[&str] = &["stack-select-depth", "adjust-value", "assign-value", "range-depth", "existential-depth", "operator-depth"];
 
 /// Why `body` is outside the lowered subset, or `None` when it is inside.
 pub fn refusal(body: &HirBody, checker: &Checker) -> Option<&'static str> {
@@ -1639,6 +1658,14 @@ pub fn polyfn_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
 }
 
 pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
+    // An element of a `Vec`, array or tuple of monomorphic functions: the
+    // closure word it was stored as.
+    if let HirKind::Index { .. } = body.expr(f).kind {
+        return body.expr(f).ty.as_ref().is_some_and(|t| {
+            let t = apply_ty_prune(checker.subst(), t);
+            mono_fun(checker, &t, &mut Vec::new())
+        });
+    }
     let HirKind::Local(local) = body.expr(f).kind else {
         return false;
     };
@@ -1660,9 +1687,11 @@ pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
         return false;
     }
     match info.kind {
-        // A captured monomorphic function value is its closure word, as
-        // the enclosing body's own call through it would be.
-        LocalKind::Param | LocalKind::Capture => true,
+        // A `for` or destructuring binding of a monomorphic function
+        // element: the closure word it was stored as. A captured one is
+        // its closure word, as the enclosing body's own call through it
+        // would be.
+        LocalKind::Param | LocalKind::Pattern | LocalKind::Capture => true,
         LocalKind::Let => body.exprs.iter().any(|e| match &e.kind {
             // A named function read as a value is `MakeFn` (codegen refuses
             // a generic one, whose `MakePolyFn` calls differently).
@@ -1693,6 +1722,11 @@ pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
                         && checker.existential_method_call_for_span(start, end).is_none()
                 }
                 HirKind::Global { .. } | HirKind::Lambda { .. } => true,
+                // A function field or element: the closure word stored there.
+                HirKind::Field { .. } | HirKind::Index { .. } => body.expr(*init).ty.as_ref().is_some_and(|t| {
+                    let t = apply_ty_prune(checker.subst(), t);
+                    mono_fun(checker, &t, &mut Vec::new())
+                }),
                 _ => false,
             },
             _ => false,
@@ -2188,8 +2222,10 @@ impl Walk<'_> {
             self.stage_at = Some(id);
         }
         // A call whose arguments stage through temps (an existential
-        // pack among them) runs into a temp ahead of its statement.
-        if r == Err("existential-depth") && depth != 0 && self.stage_at.is_none() {
+        // pack among them), or a user type's operator above live operands
+        // (`x + -y` in a generic body), runs into a temp ahead of its
+        // statement.
+        if matches!(r, Err("existential-depth" | "operator-depth")) && depth != 0 && self.stage_at.is_none() {
             self.stage_at = Some(id);
         }
         r
@@ -2436,7 +2472,10 @@ impl Walk<'_> {
                 if !indirect_callee(body, self.checker, *f) && !polyfn_callee(body, self.checker, *f) {
                     return Err("callee-value");
                 }
-                self.word(id)?;
+                // A `()` result is the word `CallIndirect` leaves, dropped (#1214).
+                if !is_unit_value(body, self.checker, id) {
+                    self.word(id)?;
+                }
                 self.args(args, depth, false)?;
                 self.value(*f, depth + args.len() as u32)
             }
@@ -2515,6 +2554,18 @@ impl Walk<'_> {
                     self.value(arg, depth + 2 * i as u32)?;
                 }
                 Ok(())
+            }
+            // `a..b` over a shared generic body's open `T` (#1230): the
+            // typed range object, its bounds the unboxed words.
+            HirKind::Make {
+                kind: MakeKind::Range { .. },
+                args,
+            } if self.ty(id).is_some_and(is_open_range) => {
+                let [lo, hi] = <[HirId; 2]>::try_from(args.as_slice()).map_err(|_| "make-range")?;
+                self.word(lo)?;
+                self.word(hi)?;
+                self.value(lo, depth)?;
+                self.value(hi, depth + 1)
             }
             HirKind::Make {
                 kind: MakeKind::Range { .. },

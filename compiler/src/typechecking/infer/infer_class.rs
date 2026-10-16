@@ -261,6 +261,68 @@ impl Checker {
         unit_ty()
     }
 
+    /// An impl method's type must match the trait's declaration with the
+    /// trait's parameters set to the instance head (#1185): a body typed
+    /// against a different signature would be called through the trait's.
+    /// Both sides are instantiated fresh, so method-level generics and
+    /// associated-type projections stay flexible; only a concrete clash
+    /// (`-> string` for `-> int`) is reported.
+    fn check_instance_method_signature(
+        &mut self,
+        class: &str,
+        arg_tys: &[Ty],
+        mname: &str,
+        fqn: &str,
+        range: &Range<usize>,
+    ) {
+        let Some(decl) = self
+            .typeclass_method_schemes
+            .get(&(class.to_string(), mname.to_string()))
+            .cloned()
+        else {
+            return;
+        };
+        let Some(have) = self.env.lookup(fqn).cloned() else {
+            return;
+        };
+        let (want_ty, want_cs, _) = self.instantiate_scheme_mapped(&decl);
+        let Some(head) = want_cs.iter().find(|c| c.class == class) else {
+            return;
+        };
+        if head.args.len() != arg_tys.len() {
+            return;
+        }
+        let mut local = self.subst.clone();
+        for (param, arg) in head.args.iter().zip(arg_tys) {
+            match crate::typechecking::unify::unify_with(&local, param, arg) {
+                Ok(s) => local = s,
+                Err(_) => return,
+            }
+        }
+        let (have_ty, _, _) = self.instantiate_scheme_mapped(&have);
+        let want_ty = apply_ty_prune(&local, &want_ty);
+        let mut have_ty = apply_ty_prune(&local, &have_ty);
+        // A trait's zero-arg signature is its bare return type; an impl
+        // fn's is `unit -> ret`.
+        if !matches!(want_ty, Ty::Fun(..))
+            && let Ty::Fun(arg, ret) = &have_ty
+            && matches!(arg.as_ref(), Ty::Con(u) if u == crate::typechecking::ty::UNIT)
+        {
+            have_ty = ret.as_ref().clone();
+        }
+        if crate::typechecking::unify::unify_with(&local, &want_ty, &have_ty).is_ok() {
+            return;
+        }
+        self.messages.push(Message::error(
+            ErrorCode::TypeMismatch,
+            format!(
+                "method `{}` in instance of `{}` has type `{}`, but the trait declares `{}`",
+                mname, class, have_ty, want_ty
+            ),
+            range.clone(),
+        ));
+    }
+
     #[inline(never)]
     pub(super) fn infer_typeclass_impl(
         &mut self,
@@ -666,6 +728,13 @@ impl Checker {
                             contracts: super::infer_fn::decl_contracts(m),
                         });
                         self.record_instance_method_under_fqn(mname, &fqn);
+                        self.check_instance_method_signature(
+                            class,
+                            &arg_tys,
+                            mname,
+                            &fqn,
+                            &m.0.into_range(),
+                        );
                         self.unshield_bare_names(shield);
                     } else {
                         let _ = self.infer(m);

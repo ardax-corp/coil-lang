@@ -126,14 +126,8 @@ fn eval_len_call<'a>(
 
 fn eval_len_operand<'a>(ast: &Output<'a>, env: &HashMap<String, ConstValue>) -> Option<ConstValue> {
     match ast.1.as_ref() {
-        Expression::String(s) => {
-            let unescaped = s
-                .replace("\\n", "\n")
-                .replace("\\r", "\r")
-                .replace("\\t", "\t")
-                .replace("\\0", "\0");
-            Some(ConstValue::Int(unescaped.len() as i64))
-        }
+        // Every escape decoded, as the runtime string holds it (#1174).
+        Expression::String(s) => Some(ConstValue::Int(crate::codegen::unescape_coil_string(s).len() as i64)),
         Expression::Array(items) | Expression::Tuple(items) => {
             Some(ConstValue::Int(items.len() as i64))
         }

@@ -2470,23 +2470,28 @@ impl<'pratt> Pratt<'pratt> {
 
         let attr_kv = text::ident().then_ignore(op!("=")).then(attr_lit.clone());
 
+        // Literals in order and/or `key = lit` pairs. All named: `KeyValues`;
+        // none named: `Positional` (one string: `String`); a mix keeps the
+        // order as `KeyValues` with an empty key for each positional one.
+        let attr_item = choice((attr_kv, attr_lit.clone().map(|v| ("", v))));
+        let attr_items = attr_item
+            .padded_by(trivia())
+            .separated_by(op!(','))
+            .at_least(1)
+            .collect::<Vec<_>>()
+            .map(|items: Vec<(&'pratt str, AttrLit<'pratt>)>| {
+                if items.iter().all(|(k, _)| k.is_empty()) {
+                    match items.as_slice() {
+                        [(_, AttrLit::String(s))] => AttrArgs::String(s),
+                        _ => AttrArgs::Positional(items.into_iter().map(|(_, v)| v).collect()),
+                    }
+                } else {
+                    AttrArgs::KeyValues(items)
+                }
+            });
+
         let attr_args = choice((
-            attr_kv
-                .padded_by(trivia())
-                .separated_by(op!(','))
-                .at_least(1)
-                .collect::<Vec<_>>()
-                .map(AttrArgs::KeyValues),
-            just('"')
-                .ignore_then(self.string_lit_body())
-                .then_ignore(just('"'))
-                .map(AttrArgs::String),
-            attr_lit
-                .padded_by(trivia())
-                .separated_by(op!(','))
-                .at_least(1)
-                .collect::<Vec<_>>()
-                .map(AttrArgs::Positional),
+            attr_items,
             text::ident()
                 .padded_by(trivia())
                 .separated_by(op!(','))
@@ -3567,7 +3572,17 @@ impl<'pratt> Pratt<'pratt> {
                     })
                     .padded_by(trivia())
                     .map_with(|n, e| (e.span(), Pattern::Integer(n))),
-                text::ident().padded_by(trivia()).map_with(|name, e| {
+                text::ident().padded_by(trivia()).validate(|name: &str, e, emitter| {
+                    // `true` / `false` would bind a variable that matches
+                    // anything (#1160); patterns take no bool literals.
+                    if name == "true" || name == "false" {
+                        emitter.emit(Rich::custom(
+                            e.span(),
+                            format!("`{name}` is not a pattern: patterns take no bool literals; use `if` / `else` on a bool"),
+                        ));
+                    }
+                    name
+                }).map_with(|name, e| {
                     let pat = if name == "default" {
                         Pattern::Default
                     } else {

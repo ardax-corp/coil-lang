@@ -145,6 +145,8 @@ impl Checker {
             current_tuple_pack: None,
             spread_call_arity: HashMap::new(),
             spread_expanded_bases: std::collections::HashSet::new(),
+            vec_rest_spread: false,
+            vec_rest_spreads: std::collections::HashSet::new(),
             overload_sets: std::collections::HashMap::new(),
             selected_overloads_by_span: std::collections::HashMap::new(),
             selected_overloads: std::collections::HashMap::new(),
@@ -198,6 +200,8 @@ impl Checker {
             c_structs: Vec::new(),
             callback_sigs: Vec::new(),
             ffi_fn_ret_tys: HashMap::new(),
+            ffi_fn_ret_owner: HashMap::new(),
+            ffi_prescan_fn: None,
             ffi_fn_variadic: HashMap::new(),
             ffi_fn_nfixed: HashMap::new(),
             ffi_fn_arg_tags: HashMap::new(),
@@ -214,6 +218,7 @@ impl Checker {
             variadic_call_arg_tags: HashMap::new(),
             fn_result_mode: None,
             in_test_case: false,
+            macro_imports: HashSet::new(),
             test_try_sites: HashMap::new(),
             fn_option_mode: None,
             result_mode_fns: HashSet::new(),
@@ -232,6 +237,7 @@ impl Checker {
             current_typeclass: None,
             registering_overloadable_fn: false,
             lambda_uncaptured_outer: None,
+            lambda_rebound_statics: HashSet::new(),
             partial_fills_by_span: std::collections::HashMap::new(),
             partial_filled_tys_by_span: std::collections::HashMap::new(),
             current_assoc_projections: None,
@@ -1293,6 +1299,29 @@ impl Checker {
         }
     }
 
+    /// A spawned closure's `use` captures are copied to the thread like its
+    /// argument, so each must be sendable too.
+    fn check_spawn_captures_sendable(&mut self, work: Option<&Output>, range: &Range<usize>) {
+        let Some(Expression::Lambda { captures, .. }) = work.map(|w| w.1.as_ref()) else {
+            return;
+        };
+        for cap in captures {
+            let Some(scheme) = self.env.lookup(cap).cloned() else {
+                continue;
+            };
+            let ty = self.instantiate_ty(&scheme);
+            let ty = apply_ty_prune(&self.subst, &ty);
+            if !self.is_thread_sendable_ty(&ty) {
+                self.error_with_help(
+                    ErrorCode::GenericTypeError,
+                    format!("spawn closure capture `{cap}` of type `{ty}` is not sendable across threads"),
+                    range.clone(),
+                    Some("a spawned closure's `use` captures are copied to the thread, so they must be sendable".to_string()),
+                );
+            }
+        }
+    }
+
     fn infer_thread_spawn_call(
         &mut self,
         arg_tys: &[Ty],
@@ -1320,6 +1349,7 @@ impl Checker {
                     &range,
                     "spawn function",
                 );
+                self.check_spawn_captures_sendable(arg_exprs.and_then(|a| a.first()), &range);
                 res_thread
             }
             2 => {
@@ -1340,6 +1370,7 @@ impl Checker {
                     &range,
                     "spawn argument",
                 );
+                self.check_spawn_captures_sendable(arg_exprs.and_then(|a| a.first()), &range);
                 let arg_resolved = apply_ty_prune(&self.subst, &arg_tys[1]);
                 if !self.is_thread_sendable_ty(&arg_resolved) {
                     self.error_with_help(
@@ -1489,6 +1520,7 @@ impl Checker {
         self.current_tuple_pack = None;
         self.spread_call_arity.clear();
         self.spread_expanded_bases.clear();
+        self.vec_rest_spreads.clear();
         // Keep module-qualified overloads across files; drop bare keys so they do not leak.
         self.overload_sets.retain(|k, _| k.contains("::"));
         // Declaration/call span tables are per-module.
@@ -1544,6 +1576,8 @@ impl Checker {
         self.c_structs.clear();
         self.callback_sigs.clear();
         self.ffi_fn_ret_tys.clear();
+        self.ffi_fn_ret_owner.clear();
+        self.ffi_prescan_fn = None;
         self.ffi_fn_variadic.clear();
         self.ffi_fn_nfixed.clear();
         self.ffi_fn_arg_tags.clear();
@@ -1637,10 +1671,13 @@ impl Checker {
         self.module_locals
             .insert(self.current_module_id, self.local_defs.clone());
 
+        // Imported type aliases first: any signature may name one (#1208).
+        self.import_type_aliases(ast);
         // Register enum shapes before infer so early constructor/match uses resolve.
         if let Err(msgs) = self.pre_register_enums(ast) {
             self.messages.extend(msgs);
         }
+        self.check_duplicate_classes(ast);
         self.pre_collect_free_function_param_names(ast);
         self.pre_register_inherent_methods(ast);
         self.pre_register_typeclass_impls(ast);
@@ -2163,12 +2200,22 @@ impl Checker {
         )
     }
 
+    /// The yield and send types of a `coroutine<Y, S>` annotation.
+    pub(crate) fn coroutine_parts(ty: &Ty) -> Option<(Ty, Ty)> {
+        match ty {
+            Ty::App(head, args) if args.len() == 2 && matches!(head.as_ref(), Ty::Con(n) if n == "coroutine") => {
+                Some((args[0].clone(), args[1].clone()))
+            }
+            _ => None,
+        }
+    }
+
     /// Consume the next pre-order id for `node` and resolve it to the node's
     /// own id. Writing facts under the raw counter id lands them on another
     /// node once the counter drifts (it typed `lcm`'s int `a` as the float
     /// param of a later function in coil-stdlib `num.hy`).
     fn next_walk_id(&mut self, node: &Output) -> NodeId {
-        let seq_id = self.ids.ids()[self.next_id_idx];
+        let seq_id = self.ids.ids().get(self.next_id_idx).copied();
         self.next_id_idx += 1;
         self.ids.resolve_walk_id(node, seq_id)
     }
@@ -2189,7 +2236,10 @@ impl Checker {
 
         // Key facts by the node's own id; the pre-order counter drifts when a
         // rule skips or revisits children (see `IdTable::walk_id`).
-        let seq_id = self.ids.ids()[self.next_id_idx];
+        // Synthetic nodes (a spread's per-item `Index`) consume pre-order
+        // ids too, so the counter can run past the table: those resolve by
+        // pointer or mint a synthetic id.
+        let seq_id = self.ids.ids().get(self.next_id_idx).copied();
         self.next_id_idx += 1;
         let id = self.ids.resolve_walk_id(expr, seq_id);
         self.maybe_attach_def_id(id, expr);
@@ -2915,6 +2965,18 @@ impl Checker {
                         option_inner(&resolved).unwrap_or_else(|| Ty::Var(self.counter.fresh()));
                     self.ensure_option_mode(&inner, &range);
                     inner
+                } else if matches!(resolved, Ty::Var(_))
+                    && self
+                        .current_return_ty
+                        .as_ref()
+                        .is_some_and(|t| is_option_ty(&apply_ty_prune(&self.subst, t)))
+                {
+                    // Not yet pinned (a self-recursive call) in a function
+                    // declared `-> Option<T>`: an Option `?`.
+                    let inner = Ty::Var(self.counter.fresh());
+                    self.unify(&inner_ty, &option_ty(inner.clone()), &range, "try operand");
+                    self.ensure_option_mode(&inner, &range);
+                    inner
                 } else if matches!(resolved, Ty::Var(_)) {
                     // Not yet pinned, assume Result and let later
                     // unifications fill Ok/Err (or fail).
@@ -3107,6 +3169,7 @@ impl Checker {
                     uncaptured.remove(n);
                 }
 
+                let prev_statics = std::mem::take(&mut self.lambda_rebound_statics);
                 let import_rebinds =
                     self.snapshot_file_level_imports(&mut uncaptured, range.clone());
 
@@ -3123,6 +3186,7 @@ impl Checker {
                 }
                 let _ = self.infer(body);
                 self.lambda_uncaptured_outer = prev_uncaptured;
+                self.lambda_rebound_statics = prev_statics;
                 self.env.restore_frames(saved_frames);
                 unit_ty()
             }
@@ -3163,6 +3227,13 @@ impl Checker {
                 }
                 if let Some(send_ty) = self.current_send_ty.clone() {
                     self.unify(&send_ty, &s_var, &range, "yield from send type");
+                    // A delegate that receives sends makes this coroutine
+                    // receive them too (forwarded), so its send type stays
+                    // the delegate's instead of defaulting to `unit`.
+                    let resolved = apply_ty_prune(&self.subst, &s_var);
+                    if !matches!(resolved, Ty::Var(_)) && resolved != unit_ty() {
+                        self.yield_receives_used = true;
+                    }
                 }
                 unit_ty()
             }
@@ -4035,8 +4106,22 @@ impl Checker {
         let index_ty = self.infer(index_expr);
         let index_ty_pruned = apply_ty_prune(&self.subst, &index_ty);
         // Constrain the index to be an `int` (the VM only
-        // supports integer indices).
-        let _ = unify_with(&self.subst, &index_ty_pruned, &int());
+        // supports integer indices); a `byte` widens. Any other type is
+        // rejected here rather than at lowering (#1172).
+        let is_byte = Self::is_byte_ty(&index_ty_pruned);
+        if !is_byte {
+            match unify_with(&self.subst, &index_ty_pruned, &int()) {
+                Ok(s) => self.absorb(&s),
+                Err(_) => {
+                    let _ = self.error_with_help(
+                        ErrorCode::TypeMismatch,
+                        format!("Type mismatch: an index must be `int`, found `{}`", index_ty_pruned),
+                        index_expr.0.into_range(),
+                        Some("index with an `int` (or a `byte`)".to_string()),
+                    );
+                }
+            }
+        }
         let resolved = apply_ty_prune(&self.subst, &target_ty);
         // Reads see through `readonly` (#1073); `xs[i] = …` is rejected on
         // the store path.
@@ -4054,20 +4139,18 @@ impl Checker {
                 // target is a *static-length* array and the
                 // index is a literal integer.
                 if let ArrayLength::Static(n) = length
-                    && let Expression::Integer(idx) = index_expr.1.as_ref()
+                    && let Some(i) = Self::literal_index(index_expr)
+                    && (i < 0 || (i as usize) >= *n)
                 {
-                    let i = *idx;
-                    if i < 0 || (i as usize) >= *n {
-                        let _ = self.error_with_help(
-                            ErrorCode::IndexOutOfBounds,
-                            format!("array index {} out of bounds for array of length {}", i, n),
-                            range.clone(),
-                            Some(format!(
-                                "indices are valid in [0..{}); the array has length {}",
-                                n, n
-                            )),
-                        );
-                    }
+                    let _ = self.error_with_help(
+                        ErrorCode::IndexOutOfBounds,
+                        format!("array index {} out of bounds for array of length {}", i, n),
+                        range.clone(),
+                        Some(format!(
+                            "indices are valid in [0..{}); the array has length {}",
+                            n, n
+                        )),
+                    );
                 }
                 (**element).clone()
             }
@@ -4076,8 +4159,7 @@ impl Checker {
             }
             Ty::Tuple(tys) => {
                 // Tuple index: constant OOB diagnostic; dynamic OOB → fresh ty (runtime -1).
-                if let Expression::Integer(idx) = index_expr.1.as_ref() {
-                    let i = *idx;
+                if let Some(i) = Self::literal_index(index_expr) {
                     if i < 0 || (i as usize) >= tys.len() {
                         let _ = self.error_with_help(
                             ErrorCode::IndexOutOfBounds,
@@ -4112,6 +4194,18 @@ impl Checker {
                 );
                 Ty::Var(self.counter.fresh())
             }
+        }
+    }
+
+    /// A literal index, negative ones included (`a[-1]`, #1173).
+    fn literal_index(index_expr: &Output) -> Option<i64> {
+        match index_expr.1.as_ref() {
+            Expression::Integer(i) => Some(*i),
+            Expression::Negate(inner) => match inner.1.as_ref() {
+                Expression::Integer(i) => i.checked_neg(),
+                _ => None,
+            },
+            _ => None,
         }
     }
 
@@ -4347,6 +4441,21 @@ impl Checker {
 
     /// Whether `name` is bound by the natives or by this module's own
     /// frames, not only by the frame an earlier `check_program` left behind.
+    /// `name` resolves only through an earlier module's frame (not this
+    /// module's own defs, imports or the global natives frame).
+    fn bound_only_by_other_module(&self, name: &str) -> bool {
+        // An isolated lambda / defer env renumbers its frames and holds no
+        // other module's frames at all.
+        self.lambda_uncaptured_outer.is_none()
+            && !name.contains("::")
+            && !self.local_defs.contains_key(name)
+            && !self.forward_free_fn_schemes.contains_key(name)
+            && self
+                .env
+                .lookup_frame(name)
+                .is_some_and(|f| f != 0 && f < self.module_frame)
+    }
+
     fn binds_in_this_module(&self, name: &str) -> bool {
         self.env
             .lookup_frame(name)
@@ -4826,7 +4935,9 @@ impl Checker {
         if let Expression::Identifier(callee) = name.1.as_ref()
             && let Some(arg_list) = args.as_deref()
                 && arg_list.len() == 1
-                    && let Expression::Spread(pack) = arg_list[0].1.as_ref() {
+                    && let Expression::Spread(pack) = arg_list[0].1.as_ref()
+                    // A rest parameter packs the spread's items instead.
+                    && !self.fn_has_rest.get(*callee).copied().unwrap_or(false) {
                         if self.next_id_idx < self.ids.ids().len() {
                             self.next_id_idx += 1;
                         }
@@ -5470,7 +5581,12 @@ impl Checker {
             return apply_ty_prune(&self.subst, &result);
         }
 
-        let scheme = self.lookup_fn_scheme(&ident);
+        // A bare name only an earlier module's frame binds (that module's
+        // own `fn`) is not in scope here: `use m::f as g` binds `g` only and
+        // `mod m;` binds nothing (#1211).
+        let scheme = self
+            .lookup_fn_scheme(&ident)
+            .filter(|_| !self.bound_only_by_other_module(&ident));
         let (fun_ty, fresh_constraints, fresh_mapping, original_scheme) = match scheme {
             Some(s) => {
                 let (fun_ty, constraints, mapping) = self.instantiate_scheme_mapped(&s);
@@ -5814,22 +5930,27 @@ impl Checker {
     /// Top-level / module-visible named `fn`s (and `extern` decls) rebind like
     /// imports. A later local that shadows the name stays a capture.
     fn snapshot_named_fns(
-        &self,
+        &mut self,
         uncaptured: &mut HashSet<String>,
         rebinds: &mut Vec<(String, Scheme)>,
     ) {
-        let names: Vec<String> = self
+        let names: Vec<(String, bool)> = self
             .local_defs
             .iter()
             .filter_map(|(name, &id)| {
                 let kind = self.def_interner.info(id)?.kind;
-                matches!(kind, DefKind::Fn | DefKind::Ffi).then(|| name.clone())
+                // A `static let` is a bare module name too (#1177).
+                matches!(kind, DefKind::Fn | DefKind::Ffi | DefKind::Static).then(|| (name.clone(), kind == DefKind::Static))
             })
             .collect();
-        for name in names {
+        for (name, is_static) in names {
             let Some(env_scheme) = self.env.lookup(&name).cloned() else {
                 continue;
             };
+            // A local of the same name shadows the static: a capture.
+            if is_static && self.env.lookup_frame(&name) != self.static_decl_frames.get(&self.qualify_module_name(&name)).copied() {
+                continue;
+            }
             if let Some(&id) = self.local_defs.get(&name)
                 && let Some(def_scheme) = self.schemes_by_def.get(&id)
                 && env_scheme != *def_scheme
@@ -5837,6 +5958,9 @@ impl Checker {
                 continue;
             }
             uncaptured.remove(&name);
+            if is_static {
+                self.lambda_rebound_statics.insert(name.clone());
+            }
             rebinds.push((name, env_scheme));
         }
     }
@@ -6571,11 +6695,21 @@ impl Checker {
             .generics
             .find_instance(class, std::slice::from_ref(&lookup))
             .is_some()
-            || self
-                .generics
-                .find_generic_instance(class, std::slice::from_ref(&lookup))
-                .is_some()
         {
+            return;
+        }
+        if self
+            .generics
+            .find_generic_instance(class, std::slice::from_ref(&lookup))
+            .is_some()
+        {
+            // A bounded generic instance (`Lt for Box<T: Ord + Eq>`) needs
+            // its context at the operand's arguments (#1186).
+            if let Ok(Some(instance)) =
+                self.find_unique_instance(class, std::slice::from_ref(&lookup), range)
+            {
+                self.check_instance_context(&instance, range, 0);
+            }
             return;
         }
         let op = match method {
@@ -7600,7 +7734,11 @@ impl Checker {
                 Some("use `char(b)` with a `byte` value".to_string()),
             );
         }
+        // `byte` is expected, so an int literal coerces as for a user
+        // function's `byte` parameter (#1175).
+        let prev_expected = self.current_expected.replace(byte());
         let b_ty = self.infer(&args[0]);
+        self.current_expected = prev_expected;
         self.unify(&b_ty, &byte(), &args[0].0.into_range(), "char argument");
         result_app_ty(string(), string())
     }
@@ -9362,14 +9500,22 @@ impl Checker {
         range: &Range<usize>,
     ) {
         let (expected_body, expected_constraints) = self.skolemize_forall_ty(expected);
-        let (candidate, candidate_constraints) = match arg_expr.and_then(identifier_name) {
+        let (candidate, mut candidate_constraints) = match arg_expr.and_then(identifier_name) {
             Some(name) => match self.env.lookup(name).cloned() {
                 Some(scheme) => self.instantiate_scheme(&scheme),
                 None => (inferred_arg.clone(), Vec::new()),
             },
             None => (inferred_arg.clone(), Vec::new()),
         };
-        let candidate = apply_ty_prune(&self.subst, &candidate);
+        let mut candidate = apply_ty_prune(&self.subst, &candidate);
+        // A rank-n parameter passed on (`app(f, x)` with `f` itself a
+        // `forall`): instantiate its binder like a generic's scheme (#1189).
+        while let Ty::Forall { .. } = crate::typechecking::ty::strip_readonly(&candidate) {
+            let forall = crate::typechecking::ty::strip_readonly(&candidate).clone();
+            let (body, constraints) = self.instantiate_forall_ty(&forall);
+            candidate_constraints.extend(constraints);
+            candidate = apply_ty_prune(&self.subst, &body);
+        }
 
         let local = match unify_with(&Subst::empty(), &candidate, &expected_body) {
             Ok(s) => s,
@@ -10317,12 +10463,50 @@ impl Checker {
         Kind::arrow(self.kind_of_type_argument(arg), Kind::Constraint)
     }
 
+    /// A trait name as written, with a builtin trait's `use … as` alias
+    /// (`use prelude::ops::Eq as PreludeEq`) mapped to the builtin's name
+    /// while no module trait replaces it (#1209).
+    pub(crate) fn canonical_trait_name(&self, name: &str) -> String {
+        if let Some(BuiltinExport::TypeClass { name: builtin }) = self.scope_bindings.get(name)
+            && *builtin != name
+            && self.type_param_kind(name).is_none()
+            && self
+                .generics
+                .typeclass(builtin)
+                .is_some_and(|c| c.defined_module == crate::typechecking::virtual_modules::PRELUDE_OPS_MODULE)
+        {
+            return builtin.to_string();
+        }
+        name.to_string()
+    }
+
     fn constraint_from_bound(
         &mut self,
         bound: &str,
         arg: Ty,
         range: &Range<usize>,
     ) -> Option<Constraint> {
+        // `use prelude::ops::Eq as PreludeEq`: the alias names the builtin.
+        if let Some(BuiltinExport::TypeClass { name }) = self.scope_bindings.get(bound).cloned()
+            && name != bound
+            && self.type_param_kind(bound).is_none()
+        {
+            let replaced = self
+                .generics
+                .typeclass(name)
+                .is_some_and(|c| c.defined_module != crate::typechecking::virtual_modules::PRELUDE_OPS_MODULE);
+            if replaced {
+                self.messages.push(Message::error(
+                    ErrorCode::GenericTypeError,
+                    format!(
+                        "`{bound}` names the builtin `{name}`, which this module's trait `{name}` replaces; it cannot be a bound here"
+                    ),
+                    range.clone(),
+                ));
+                return None;
+            }
+            return self.constraint_from_bound(name, arg, range);
+        }
         if let Some(kind) = self.constraint_param_kind(bound) {
             let expected = self.expected_constraint_kind_for_arg(&arg);
             if kind != expected {
@@ -10809,6 +10993,28 @@ impl Checker {
             return self.expand_generic_alias(&def, &arg_tys);
         }
 
+        // `coroutine<Y>` (send type `unit`) / `coroutine<Y, S>`: the type a
+        // `gen fn` returns, unless a user type takes the name.
+        if name == "coroutine"
+            && self.resolve_class_key(name).is_none()
+            && !self.generics.generic_type_ctors.contains_key(name)
+        {
+            let mut arg_tys = arg_tys;
+            match arg_tys.len() {
+                1 => arg_tys.push(unit_ty()),
+                2 => {}
+                n => {
+                    self.messages.push(Message::error(
+                        ErrorCode::GenericTypeError,
+                        format!("Type constructor `coroutine` expects 1 or 2 type arguments, got {n}"),
+                        range,
+                    ));
+                    arg_tys.resize_with(2, || Ty::Var(self.counter.fresh()));
+                }
+            }
+            return self.coroutine_type(arg_tys[0].clone(), arg_tys[1].clone());
+        }
+
         let ctor = self
             .resolve_class_key(name)
             .unwrap_or_else(|| name.to_string());
@@ -11185,8 +11391,15 @@ impl Checker {
             if class_def.assoc_type(&assoc_name).is_none() {
                 continue;
             }
-            // Owner must unify with the primary instance arg(s).
+            // Owner must unify with the primary instance arg(s). A still-open
+            // owner is a generic fn's own type parameter: unifying it would
+            // pin the declaration's projection from the first call site's
+            // instance (#1187); calls pin their freshened copy instead
+            // (`pin_assoc_vars_from_mapping`).
             let owner_ty = apply_ty_prune(&self.subst, &Ty::Var(owner_var));
+            if matches!(owner_ty, Ty::Var(_)) {
+                continue;
+            }
             let matches_owner = instance
                 .args
                 .iter()
@@ -11294,6 +11507,11 @@ impl Checker {
     }
 
     /// Whether `fn_name`'s Result Ok payload is itself a Result (nested).
+    /// The result-mode key of the lambda whose source starts at `start`.
+    pub fn lambda_mode_key(start: usize) -> String {
+        format!("<lambda@{start}>")
+    }
+
     pub fn fn_result_ok_is_result(&self, fn_name: &str) -> bool {
         self.result_mode_ok_is_result.contains(fn_name)
     }
@@ -11449,6 +11667,65 @@ impl Checker {
             ty = *next;
         }
         Some(apply_ty_prune(&self.subst, &ty))
+    }
+
+    /// A mono clone's associated-type projections (`C::Elem` in
+    /// `fn or_head<C: Collect>(..) -> C::Elem`) at the clone's type
+    /// arguments: each projection variable of `scheme` whose owner `vars`
+    /// binds to a type with a ground instance, mapped to that instance's
+    /// associated type (#1187). The declaration's projection stays open, so
+    /// each clone resolves its own.
+    pub fn mono_assoc_projection_tys(
+        &self,
+        scheme: &Scheme,
+        vars: &HashMap<TyVarId, Ty>,
+    ) -> Vec<(TyVarId, Ty)> {
+        let rep = |v: TyVarId| match apply_ty_prune(&self.subst, &Ty::Var(v)) {
+            Ty::Var(r) => r,
+            _ => v,
+        };
+        let mut out = Vec::new();
+        for ((owner_var, assoc, _), (pvar, args)) in &self.open_assoc_projections {
+            if !scheme.assoc_projections.iter().any(|p| rep(p.var) == rep(*pvar)) {
+                continue;
+            }
+            let Some(owner_ty) = vars.get(owner_var).or_else(|| vars.get(&rep(*owner_var))) else {
+                continue;
+            };
+            for c in &scheme.constraints {
+                let [arg] = c.args.as_slice() else {
+                    continue;
+                };
+                if !matches!(apply_ty_prune(&self.subst, arg), Ty::Var(v) if rep(v) == rep(*owner_var)) {
+                    continue;
+                }
+                let declares = self
+                    .generics
+                    .typeclass(&c.class)
+                    .is_some_and(|cdef| cdef.assoc_type(assoc).is_some());
+                if !declares {
+                    continue;
+                }
+                let Some(value) = self
+                    .generics
+                    .find_instance(&c.class, std::slice::from_ref(owner_ty))
+                    .and_then(|inst| inst.assoc_tys.get(assoc))
+                else {
+                    continue;
+                };
+                let mut at = Subst::empty();
+                for (v, t) in vars {
+                    at.insert(*v, t.clone());
+                }
+                let args: Vec<Ty> = args
+                    .iter()
+                    .map(|a| apply_ty(&at, &apply_ty_prune(&self.subst, a)))
+                    .collect();
+                out.push((rep(*pvar), self.instantiate_assoc_value(value, &args)));
+                break;
+            }
+        }
+        out
     }
 
     /// The variables of generic `fn_name`'s first `n` type parameters, in
@@ -11630,6 +11907,21 @@ impl Checker {
         format!("{class}::{field}")
     }
 
+    /// The function a `declare` binding being recorded or read belongs to.
+    fn ffi_binding_fn(&self) -> Option<String> {
+        self.current_function.clone().or_else(|| self.ffi_prescan_fn.clone())
+    }
+
+    /// Whether the `let name = declare(..)` recorded under `name` is the
+    /// binding `name` means here: one recorded in this function (or
+    /// outside any), not another function's same-named local (#1233).
+    fn ffi_local_binding_here(&self, name: &str) -> bool {
+        match (self.ffi_fn_ret_owner.get(name), self.ffi_binding_fn()) {
+            (Some(Some(owner)), Some(here)) => *owner == here,
+            _ => true,
+        }
+    }
+
     fn ffi_param_invoke_key(fn_name: &str, param: &str) -> String {
         format!("{fn_name}::{param}")
     }
@@ -11686,6 +11978,7 @@ impl Checker {
             self.ffi_fn_nfixed_by_field.insert(key.clone(), nfixed);
             self.ffi_fn_arg_tags_by_field.insert(key, arg_tags);
         } else {
+            self.ffi_fn_ret_owner.insert(key.clone(), self.ffi_binding_fn());
             self.ffi_fn_ret_tys.insert(key.clone(), ret);
             self.ffi_fn_variadic.insert(key.clone(), variadic);
             self.ffi_fn_nfixed.insert(key.clone(), nfixed);
@@ -11708,7 +12001,7 @@ impl Checker {
     fn ffi_invoke_fn_id_metadata(&self, expr: &Output) -> Option<(Ty, bool, usize)> {
         match expr.1.as_ref() {
             Expression::Identifier(name) => {
-                if let Some(ty) = self.ffi_fn_ret_tys.get(*name) {
+                if let Some(ty) = self.ffi_fn_ret_tys.get(*name).filter(|_| self.ffi_local_binding_here(name)) {
                     let variadic = self.ffi_fn_variadic.get(*name).copied().unwrap_or(false);
                     let nfixed = self.ffi_fn_nfixed.get(*name).copied().unwrap_or(0);
                     return Some((ty.clone(), variadic, nfixed));
@@ -11742,7 +12035,7 @@ impl Checker {
     fn ffi_invoke_arg_tags(&self, expr: &Output) -> Option<Vec<u32>> {
         match expr.1.as_ref() {
             Expression::Identifier(name) => {
-                if let Some(tys) = self.ffi_fn_arg_tags.get(*name) {
+                if let Some(tys) = self.ffi_fn_arg_tags.get(*name).filter(|_| self.ffi_local_binding_here(name)) {
                     return Some(tys.clone());
                 }
                 if let Some(fn_name) = &self.current_function {
@@ -11766,7 +12059,7 @@ impl Checker {
         local_class_scopes: &[HashMap<String, String>],
     ) -> Option<Vec<u32>> {
         match expr.1.as_ref() {
-            Expression::Identifier(name) => self.ffi_fn_arg_tags.get(*name).cloned(),
+            Expression::Identifier(name) => self.ffi_fn_arg_tags.get(*name).filter(|_| self.ffi_local_binding_here(name)).cloned(),
             Expression::Access(receiver, field) => {
                 let class = match receiver.1.as_ref() {
                     Expression::Identifier("self") => self.impl_owner.clone()?,
@@ -11817,6 +12110,7 @@ impl Checker {
                         .get(&key)
                         .cloned()
                         .unwrap_or_default();
+                    self.ffi_fn_ret_owner.insert(name.to_string(), self.ffi_binding_fn());
                     self.ffi_fn_ret_tys.insert(name.to_string(), ret);
                     self.ffi_fn_variadic.insert(name.to_string(), variadic);
                     self.ffi_fn_nfixed.insert(name.to_string(), nfixed);
@@ -11865,7 +12159,7 @@ impl Checker {
     ) -> Option<(Ty, bool, usize)> {
         match expr.1.as_ref() {
             Expression::Identifier(name) => {
-                if let Some(ty) = self.ffi_fn_ret_tys.get(*name) {
+                if let Some(ty) = self.ffi_fn_ret_tys.get(*name).filter(|_| self.ffi_local_binding_here(name)) {
                     let variadic = self.ffi_fn_variadic.get(*name).copied().unwrap_or(false);
                     let nfixed = self.ffi_fn_nfixed.get(*name).copied().unwrap_or(0);
                     return Some((ty.clone(), variadic, nfixed));
@@ -12991,7 +13285,7 @@ impl Checker {
     /// tuple/array types. Returns a flat argument list for arity checking.
     pub fn flatten_spread_call_args<'a>(&mut self, args: &[Output<'a>]) -> Vec<Output<'a>> {
         let mut out = Vec::new();
-        for arg in args {
+        for (k, arg) in args.iter().enumerate() {
             if let Expression::Spread(inner) = arg.1.as_ref() {
                 // Consume the `Spread` node's pre-walk ID (call sites flatten
                 // instead of inferring `Expression::Spread` directly).
@@ -13027,12 +13321,20 @@ impl Checker {
                             );
                         }
                     }
+                    // The last argument fills a `T... xs` rest whole.
+                    ref vec if vec_element_ty(vec).is_some() && self.vec_rest_spread && k + 1 == args.len() => {
+                        self.vec_rest_spreads.insert((inner.0.start, inner.0.end));
+                        out.push(inner.clone());
+                    }
                     ref vec if vec_element_ty(vec).is_some() => {
                         let _ = self.error_with_help(
                             ErrorCode::GenericTypeError,
                             "cannot spread dynamic-length array".to_string(),
                             arg.0.into_range(),
-                            Some("use a tuple or a fixed-length array `[T; N]` at the spread site".to_string()),
+                            Some(
+                                "a `Vec` spread can only be the last argument, filling a `T... xs` rest parameter; use a tuple or a fixed-length array `[T; N]` for fixed parameters"
+                                    .to_string(),
+                            ),
                         );
                     }
                     _ => {
@@ -13136,12 +13438,15 @@ impl Checker {
         args: &'a [Output<'a>],
         range: &Range<usize>,
     ) -> (Vec<Ty>, Vec<Output<'a>>) {
+        let has_rest = self.fn_has_rest.get(fn_name).copied().unwrap_or(false);
+        self.vec_rest_spread =
+            has_rest && !self.fn_tuple_rest.get(fn_name).copied().unwrap_or(false);
         let flat_args: Vec<Output<'a>> = self.flatten_spread_call_args(args);
+        self.vec_rest_spread = false;
         let args = flat_args.as_slice();
         let has_named = args
             .iter()
             .any(|a| matches!(a.1.as_ref(), Expression::NamedArg(..)));
-        let has_rest = self.fn_has_rest.get(fn_name).copied().unwrap_or(false);
 
         if !has_named && !has_rest {
             let mut tys = Vec::with_capacity(args.len());
@@ -13196,6 +13501,8 @@ impl Checker {
 
         let mut slots: Vec<Option<(Ty, Output)>> = vec![None; fixed_count];
         let mut rest_elems: Vec<(Ty, Output)> = Vec::new();
+        // A `...vec` that is the whole rest pack.
+        let mut rest_whole: Option<(Ty, Output)> = None;
         let mut next_pos = 0usize;
         let mut seen_named = false;
 
@@ -13268,7 +13575,21 @@ impl Checker {
                     while next_pos < fixed_count && slots[next_pos].is_some() {
                         next_pos += 1;
                     }
-                    if next_pos < fixed_count {
+                    if next_pos < fixed_count
+                        && self.vec_rest_spreads.contains(&(arg.0.start, arg.0.end))
+                    {
+                        let _ = self.error_with_help(
+                            ErrorCode::GenericTypeError,
+                            "cannot spread dynamic-length array".to_string(),
+                            arg.0.into_range(),
+                            Some(
+                                "a `Vec` spread fills only the `T... xs` rest parameter; pass the fixed arguments before it"
+                                    .to_string(),
+                            ),
+                        );
+                        slots[next_pos] = Some((Ty::Var(self.counter.fresh()), arg.clone()));
+                        next_pos += 1;
+                    } else if next_pos < fixed_count {
                         if seen_named {
                             let mut msg = Message::error(
                                 ErrorCode::GenericTypeError,
@@ -13285,6 +13606,20 @@ impl Checker {
                             self.messages.push(msg);
                         }
                         slots[next_pos] = Some((ty, arg.clone()));
+                        next_pos += 1;
+                    } else if has_rest
+                        && self.vec_rest_spreads.contains(&(arg.0.start, arg.0.end))
+                    {
+                        if rest_elems.is_empty() {
+                            rest_whole = Some((ty, arg.clone()));
+                        } else {
+                            let _ = self.error_with_help(
+                                ErrorCode::GenericTypeError,
+                                "cannot spread a `Vec` after other rest arguments".to_string(),
+                                arg.0.into_range(),
+                                Some("a `Vec` spread fills the whole rest parameter on its own".to_string()),
+                            );
+                        }
                         next_pos += 1;
                     } else if has_rest {
                         // Trailing positionals after fixed (and after named
@@ -13399,7 +13734,11 @@ impl Checker {
         }
         let _ = saw_hole; // used for clarity in the None branch
 
-        if pack_rest {
+        if pack_rest && let Some((ty, e)) = rest_whole {
+            // `f(...vec)`: the `Vec` itself is the rest pack.
+            tys.push(ty);
+            exprs.push(e);
+        } else if pack_rest {
             let tuple_rest = self.fn_tuple_rest.get(fn_name).copied().unwrap_or(false);
             if tuple_rest {
                 let elem_tys: Vec<Ty> = rest_elems
@@ -13663,6 +14002,34 @@ impl Checker {
         self.ast_instance_head_ty_with(arg, &HashMap::new(), local_types)
     }
 
+    /// A second top-level `class` of a name already declared in this module
+    /// would silently replace the first (#1169): report it.
+    fn check_duplicate_classes(&mut self, ast: &Output) {
+        fn walk<'a>(node: &'a Output<'a>, seen: &mut HashSet<&'a str>, dups: &mut Vec<(&'a str, Range<usize>)>) {
+            match Checker::pre_pass_unwrap_stmt(node).1.as_ref() {
+                Expression::Class { name, .. } => {
+                    if !seen.insert(name) {
+                        dups.push((name, node.0.into_range()));
+                    }
+                }
+                Expression::Program(children) | Expression::Fragment(children) => {
+                    for child in children {
+                        walk(child, seen, dups);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut seen = HashSet::new();
+        let mut dups = Vec::new();
+        walk(ast, &mut seen, &mut dups);
+        for (name, range) in dups {
+            let mut msg = Message::error(ErrorCode::GenericTypeError, format!("Duplicate class `{name}`"), range);
+            msg.with_help(format!("a class named `{name}` was already declared in this module; remove or rename this declaration"));
+            self.messages.push(msg);
+        }
+    }
+
     /// Names of the classes and enums this module declares at the top level.
     fn collect_local_type_names<'a>(node: &'a Output<'a>, out: &mut HashSet<&'a str>) {
         match Self::pre_pass_unwrap_stmt(node).1.as_ref() {
@@ -13830,7 +14197,7 @@ impl Checker {
             for (tp, var) in type_params.iter().zip(param_vars.iter()) {
                 for bound in &tp.bounds {
                     impl_constraints.push(Constraint {
-                        class: bound.to_string(),
+                        class: self.canonical_trait_name(bound),
                         args: vec![Ty::Var(*var)],
                     });
                 }
@@ -13886,7 +14253,7 @@ impl Checker {
             for wc in where_constraints {
                 let args: Vec<Ty> = wc.args.iter().map(|a| self.parse_type_name(a)).collect();
                 constraints.push(Constraint {
-                    class: wc.class.to_string(),
+                    class: self.canonical_trait_name(wc.class),
                     args,
                 });
             }
@@ -13943,6 +14310,35 @@ impl Checker {
         }
     }
 
+    /// Bind `use m::{Alias}` to another module's type alias, as the qualified
+    /// `m::Alias` resolves (`qualified_type_aliases`).
+    fn import_type_aliases(&mut self, node: &Output) {
+        match node.1.as_ref() {
+            Expression::Statement(inner)
+            | Expression::ExprStatement(inner)
+            | Expression::Expr(inner)
+            | Expression::Group(inner) => self.import_type_aliases(inner),
+            Expression::Program(children) | Expression::Fragment(children) | Expression::Block(children) => {
+                for child in children {
+                    self.import_type_aliases(child);
+                }
+            }
+            Expression::Use { path, name, alias } if name != "*" && !path.is_empty() => {
+                let fqn = format!("{}::{name}", path.join("::"));
+                let local = alias.clone().unwrap_or_else(|| name.clone());
+                if let Some(ty) = self.qualified_type_aliases.get(&fqn).cloned() {
+                    if self.type_aliases.is_empty() {
+                        self.type_aliases.push(HashMap::new());
+                    }
+                    self.type_aliases[0].insert(local, ty);
+                } else if let Some(def) = self.qualified_generic_aliases.get(&fqn).cloned() {
+                    self.generic_aliases.insert(local, def);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Walk statement wrappers and brace-`use` `Fragment`s so
     /// `use ffi::types::{Int, Float}` applies each binding.
     fn pre_process_top_level_use_node(&mut self, node: &Output) {
@@ -13996,7 +14392,8 @@ impl Checker {
                 }
                 self.impl_owner = prev_owner;
             }
-            Expression::Function { args, body, .. } => {
+            Expression::Function { name, args, body, .. } => {
+                let prev_fn = self.ffi_prescan_fn.replace(name.to_string());
                 let mut scope = HashMap::new();
                 if let Expression::Fragment(children) = args.1.as_ref() {
                     for child in children {
@@ -14016,6 +14413,7 @@ impl Checker {
                     self.pre_pass_ffi_invoke_param_flow_walk(body, local_class_scopes);
                 }
                 local_class_scopes.pop();
+                self.ffi_prescan_fn = prev_fn;
             }
             Expression::Call { name, args } => {
                 if let Expression::Identifier(fn_name) = name.1.as_ref() {
@@ -14356,7 +14754,7 @@ impl Checker {
         for (tp, var) in type_params.iter().zip(param_vars.iter()) {
             for bound in &tp.bounds {
                 param_constraints.push(Constraint {
-                    class: bound.to_string(),
+                    class: self.canonical_trait_name(bound),
                     args: vec![Ty::Var(*var)],
                 });
             }
@@ -14364,7 +14762,7 @@ impl Checker {
         for wc in where_constraints {
             let args: Vec<Ty> = wc.args.iter().map(|a| self.parse_type_name(a)).collect();
             param_constraints.push(Constraint {
-                class: wc.class.to_string(),
+                class: self.canonical_trait_name(wc.class),
                 args,
             });
         }
@@ -14396,8 +14794,12 @@ impl Checker {
         // A `gen fn` returns its coroutine, as `infer_function_expr` types it:
         // `-> T` is the yield / return slot.
         let ret_ty = if is_coro {
-            let send_ty = Ty::Var(self.counter.fresh());
-            self.coroutine_type(ret_ty, send_ty)
+            if Self::coroutine_parts(&ret_ty).is_some() {
+                ret_ty
+            } else {
+                let send_ty = Ty::Var(self.counter.fresh());
+                self.coroutine_type(ret_ty, send_ty)
+            }
         } else {
             ret_ty
         };
@@ -14794,7 +15196,13 @@ impl Checker {
                     {
                         variant_names.push(vname.to_string());
                         let payload_ty = match payload {
+                            // `Unit()` declares a unit variant, as `Unit`
+                            // does (#1168).
                             EnumVariantPayload::Unit => {
+                                arities.push(0);
+                                EnumVariantPayloadTy::Unit
+                            }
+                            EnumVariantPayload::Tuple(parts) if parts.is_empty() => {
                                 arities.push(0);
                                 EnumVariantPayloadTy::Unit
                             }
@@ -15546,6 +15954,16 @@ impl Checker {
         let tag = match tags.get(&variant_str) {
             Some(t) => *t,
             None => {
+                // `E::make()`: an inherent `static fn` on the enum.
+                if let Some(ty) = self.try_infer_static_method_call(
+                    &enum_str,
+                    variant_name,
+                    fields,
+                    range.clone(),
+                    call_id,
+                ) {
+                    return ty;
+                }
                 // `MyEnum::from_val(v)`: a static trait method on an enum.
                 if let Some(ty) = self.try_infer_trait_static_call(
                     enum_name,
@@ -17037,17 +17455,18 @@ impl Checker {
             );
             return;
         }
-        if let Some(inner) = self.fn_option_mode.clone() {
-            self.unify(&inner, inner_ty, range, "option payload");
+        // `None` carries no payload: the operand's `Option<T>` need not
+        // share the function's `T` (#1165).
+        let _ = inner_ty;
+        if self.fn_option_mode.is_some() {
             return;
         }
         if let Some(ret) = self.current_return_ty.clone() {
             let resolved = apply_ty_prune(&self.subst, &ret);
             if is_option_ty(&resolved) {
                 if let Some(existing) = option_inner(&resolved) {
-                    self.unify(&existing, inner_ty, range, "option payload");
+                    self.fn_option_mode = Some(existing);
                 }
-                self.fn_option_mode = Some(inner_ty.clone());
                 return;
             }
             if is_result_ty(&resolved) {
@@ -17058,9 +17477,10 @@ impl Checker {
                 );
                 return;
             }
-            let opt = option_ty(inner_ty.clone());
+            let payload = Ty::Var(self.counter.fresh());
+            let opt = option_ty(payload.clone());
             self.unify(&ret, &opt, range, "option return type");
-            self.fn_option_mode = Some(inner_ty.clone());
+            self.fn_option_mode = Some(payload);
         } else {
             self.error(
                 ErrorCode::InvalidTry,
@@ -17196,7 +17616,9 @@ impl Checker {
         };
         let frame = if self.lambda_uncaptured_outer.is_some() {
             if frame == 0
-                && (self.disk_imports.contains(name) || self.scope_bindings.contains_key(name))
+                && (self.disk_imports.contains(name)
+                    || self.scope_bindings.contains_key(name)
+                    || self.lambda_rebound_statics.contains(name))
             {
                 return;
             }
@@ -17366,6 +17788,15 @@ impl Checker {
         } else {
             None
         }
+    }
+
+    /// As [`Self::resolve_class_key`], also for this module's own enums:
+    /// the key an instance head names (`Show__m::Mode__show`, #1223).
+    pub fn resolve_instance_head_key(&self, name: &str) -> Option<String> {
+        self.resolve_class_key(name).or_else(|| {
+            let qualified = self.qualify_module_name(name);
+            (qualified != name && self.enums.contains_key(&qualified)).then_some(qualified)
+        })
     }
 
     fn class_member_fqn(&self, owner: &str, member: &str) -> String {
@@ -17822,7 +18253,10 @@ impl Checker {
     }
 
     fn class_owner_from_ty(&self, ty: &Ty) -> Option<String> {
-        Self::class_name_of_ty(ty)
+        // A constructor expression (`E::A.tag()`) is typed as the variant;
+        // its inherent methods are the enum's.
+        let ty = crate::typechecking::ty::peel_constructor_refinement(strip_readonly(ty).clone());
+        Self::class_name_of_ty(&ty)
             .filter(|n| self.classes.contains_key(*n))
             .map(|n| n.to_string())
     }
@@ -18217,10 +18651,16 @@ impl Checker {
     /// Bind `local` to the defining module's scheme for `fqn` when known;
     /// otherwise insert a fresh monomorphic placeholder (historical disk-module
     /// ABI). Marks generic aliases so codegen emits dictionaries.
+    /// Set the macro names the next module's `use`s import (see
+    /// `macro_imports`).
+    pub fn set_macro_imports(&mut self, names: HashSet<String>) {
+        self.macro_imports = names;
+    }
+
     fn reexport_module_item(&mut self, fqn: &str, local: &str) {
         if let Some(scheme) = self.env.lookup(fqn).cloned() {
             self.env.insert_top(local.to_string(), scheme);
-        } else if self.env.lookup(local).is_none() {
+        } else if self.env.lookup(local).is_none() && !self.macro_imports.contains(local) {
             self.env.insert_top(
                 local.to_string(),
                 Scheme::mono(Ty::Var(self.counter.fresh())),

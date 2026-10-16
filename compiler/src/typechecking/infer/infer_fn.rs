@@ -244,6 +244,7 @@ impl Checker {
 
         // File-level imports and module-visible named `fn`s are globals,
         // not closure captures. Rebind after isolating the env.
+        let prev_statics = std::mem::take(&mut self.lambda_rebound_statics);
         let import_rebinds = self.snapshot_file_level_imports(&mut uncaptured, range.clone());
 
         let const_caps: Vec<bool> = cap_bindings.iter().map(|(n, _)| self.env.is_const(n)).collect();
@@ -267,11 +268,21 @@ impl Checker {
         let ret_slot = Ty::Var(self.counter.fresh());
         let prev_ret = self.current_return_ty.replace(ret_slot.clone());
         let prev_in_test = std::mem::replace(&mut self.in_test_case, false);
+        // A lambda's `return` returns from the lambda: its `raise` / `?`
+        // put the lambda, not the enclosing function, in result or option
+        // mode (#1164).
+        let prev_result_mode = self.fn_result_mode.take();
+        let prev_option_mode = self.fn_option_mode.take();
         let body_ty = self.infer(body);
         self.in_test_case = prev_in_test;
         self.unify(&ret_slot, &body_ty, &range, "lambda body");
+        if let Some((ok, _)) = std::mem::replace(&mut self.fn_result_mode, prev_result_mode) {
+            self.note_result_mode_fn(&Self::lambda_mode_key(range.start), &ok);
+        }
+        self.fn_option_mode = prev_option_mode;
         self.current_return_ty = prev_ret;
         self.lambda_uncaptured_outer = prev_uncaptured;
+        self.lambda_rebound_statics = prev_statics;
         self.env.restore_frames(saved_frames);
 
         let ret = apply_ty_prune(&self.subst, &ret_slot);
@@ -343,7 +354,7 @@ impl Checker {
         for wc in where_constraints {
             let args: Vec<Ty> = wc.args.iter().map(|a| self.parse_type_name(a)).collect();
             param_constraints.push(Constraint {
-                class: wc.class.to_string(),
+                class: self.canonical_trait_name(wc.class),
                 args,
             });
         }
@@ -378,6 +389,7 @@ impl Checker {
         }));
         self.fn_has_rest.insert(name.to_string(), has_rest);
         self.fn_tuple_rest.insert(name.to_string(), has_tuple_rest);
+        let mut declared_send_ty = false;
         let (ret_ty, yield_slot, send_slot) = if is_coro {
             let yield_ty = Ty::Var(self.counter.fresh());
             let send_ty = Ty::Var(self.counter.fresh());
@@ -385,12 +397,22 @@ impl Checker {
             // return slot so annotation mismatches are diagnosed.
             if let Some(r) = returns {
                 let declared = self.parse_type_name(r);
+                // `-> coroutine<Y, S>` spells the whole handle type;
+                // a bare `-> T` is the yield type.
+                let (declared_yield, declared_send) = match Self::coroutine_parts(&declared) {
+                    Some((y, s)) => (y, Some(s)),
+                    None => (declared, None),
+                };
                 self.unify(
                     &yield_ty,
-                    &declared,
+                    &declared_yield,
                     &r.0.into_range(),
                     "async fn return type",
                 );
+                if let Some(s) = declared_send {
+                    self.unify(&send_ty, &s, &r.0.into_range(), "async fn send type");
+                    declared_send_ty = true;
+                }
             }
             let coro = self.coroutine_type(yield_ty.clone(), send_ty.clone());
             (coro, Some(yield_ty), Some(send_ty))
@@ -427,6 +449,13 @@ impl Checker {
         // bare name — so `use thread::{send}` is not shadowed by
         // `impl Foo { fn send(...) { send(...) } }`.
         let alpha = self.counter.fresh();
+        // A declared signature types the body's own recursive calls up
+        // front (#1191): `let r = f(rest); r.push(..)` needs `r`'s type
+        // before the post-body unify below would give it.
+        if !is_coro && returns.is_some() {
+            let declared = Self::seal_nullary_fun_ty(fun_ty.clone(), arg_tys.len(), self_ty.is_some());
+            self.unify(&Ty::Var(alpha), &declared, range, "function type");
+        }
 
         // Result/Option mode from an annotated return type. Bare
         // `return v` unifies against the Ok / payload slot; the
@@ -453,7 +482,8 @@ impl Checker {
         let prev_yield = self.current_yield_ty.take();
         let prev_send = self.current_send_ty.take();
         let prev_yield_receives = self.yield_receives_used;
-        self.yield_receives_used = false;
+        // A declared send type is kept even when no `yield` result is used.
+        self.yield_receives_used = declared_send_ty;
         if let Some(yield_ty) = yield_slot {
             self.current_yield_ty = Some(yield_ty);
         }

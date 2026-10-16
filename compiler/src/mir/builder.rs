@@ -3,7 +3,7 @@
 //! Locals are IL slots. Sealing a block completes incomplete φs. This is
 //! construction only — fuse-IL stays the production lowering; dense exec is P1.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use common::DebugLoc;
 
@@ -43,6 +43,8 @@ pub struct MirBuilder {
     sealed: Vec<bool>,
     preds: Vec<Vec<BlockId>>,
     incomplete_phis: Vec<Vec<(LocalId, ValueId)>>,
+    /// The φs `read_variable` placed, as opposed to stack-join φs.
+    var_phis: HashSet<ValueId>,
     subst: HashMap<ValueId, ValueId>,
     finished: bool,
     /// I6: type non-W4 HostInvoke as Value-word edges (barriers).
@@ -66,6 +68,7 @@ impl MirBuilder {
             sealed: vec![false],
             preds: vec![Vec::new()],
             incomplete_phis: vec![Vec::new()],
+            var_phis: HashSet::new(),
             subst: HashMap::new(),
             finished: false,
             allow_effects: false,
@@ -1157,6 +1160,7 @@ impl MirBuilder {
 
     pub fn finish(mut self) -> Result<MirFunc, MirError> {
         self.seal_all();
+        self.remove_merged_phis();
         self.rewrite_subst();
         self.finished = true;
         self.func.debug_slots = self.snapshot_debug_slots();
@@ -1313,6 +1317,7 @@ impl MirBuilder {
 
     fn make_phi(&mut self, block: BlockId, ty: MirTy) -> ValueId {
         let dest = self.alloc(ty);
+        self.var_phis.insert(dest);
         let inst = MirInst::Phi {
             dest,
             ty,
@@ -1347,6 +1352,39 @@ impl MirBuilder {
                 *slot = args;
             }
         self.try_remove_trivial_phi(phi, block);
+    }
+
+    /// A φ sealed while an operand was still an incomplete φ keeps that
+    /// operand after it folds away, so it can end up merging one value
+    /// from every pred (#1162: the scrutinee of an `else if let`). Fold
+    /// those. A loop φ that only merges itself with an entry value stays:
+    /// heap updates in the loop are carried through it.
+    fn remove_merged_phis(&mut self) {
+        loop {
+            let mut folded = false;
+            for bi in 0..self.func.blocks.len() {
+                let block = self.func.blocks[bi].id;
+                let merged: Vec<(ValueId, ValueId)> = self.func.blocks[bi]
+                    .insts
+                    .iter()
+                    .filter_map(|i| match i {
+                        MirInst::Phi { dest, args, .. } if self.var_phis.contains(dest) && args.len() > 1 => {
+                            let first = self.resolve(args[0].1);
+                            (first != *dest && args.iter().all(|&(_, v)| self.resolve(v) == first)).then_some((*dest, first))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                for (phi, same) in merged {
+                    self.subst.insert(phi, same);
+                    self.func.block_mut(block).insts.retain(|i| i.dest() != phi);
+                    folded = true;
+                }
+            }
+            if !folded {
+                return;
+            }
+        }
     }
 
     fn try_remove_trivial_phi(&mut self, phi: ValueId, block: BlockId) {

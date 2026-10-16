@@ -65,7 +65,11 @@ pub fn build_module<'a>(checker: &Checker, sidecar: &TypedSidecar, module_path: 
         top.body.root = Some(root);
         let body = top.finish();
         module.bodies.insert(0, body);
-        // Lambdas name their body by index; the top body now comes first.
+        // Lambdas and trait instance methods name their body by index;
+        // the top body now comes first.
+        for index in module.instance_fns.values_mut() {
+            *index += 1;
+        }
         for body in &mut module.bodies {
             for expr in &mut body.exprs {
                 if let HirKind::Lambda { body } = &mut expr.kind {
@@ -2453,6 +2457,9 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
     fn lambda(&mut self, b: &mut BodyBuilder, node: &Output<'_>, args: &Output<'_>, body: &Output<'_>) -> HirId {
         let name = format!("{}::<lambda@{}>", b.body.name, node.0.start);
         let mut inner = BodyBuilder::new(&name, BodyKind::Lambda, span_of(node));
+        let mode_key = Checker::lambda_mode_key(node.0.start);
+        inner.body.result_mode = self.checker.fn_is_result_mode(&mode_key);
+        inner.ok_is_result = self.checker.fn_result_ok_is_result(&mode_key);
         inner.outer = b.outer.clone();
         inner.outer.extend(b.scopes.iter().cloned());
         let fn_ty = self.ty_of(node);

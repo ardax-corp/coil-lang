@@ -2750,6 +2750,9 @@ impl Compiler {
                     }
                 }
             }
+            for (var, ty) in self.checker.mono_assoc_projection_tys(scheme, &out) {
+                out.entry(var).or_insert(ty);
+            }
         }
         out
     }
@@ -2961,15 +2964,29 @@ impl Compiler {
         arg_tys: &[crate::typechecking::Ty],
         ret_ty: Option<&crate::typechecking::Ty>,
     ) -> usize {
-        use crate::typechecking::Ty;
-
         let Some(scheme) = self.checker.env().lookup(fn_name).cloned() else {
             return 0;
         };
+        self.emit_dicts_for_signature(bytecode, &scheme.ty, &scheme.constraints, arg_tys, ret_ty)
+    }
+
+    /// The instance dictionaries for `constraints` at a call of a function
+    /// typed `fun_ty` on `arg_tys` (and returning `ret_ty`): a generic's
+    /// scheme, or a `forall T: Show. T -> string` parameter's body (#1188).
+    pub(crate) fn emit_dicts_for_signature(
+        &mut self,
+        bytecode: &mut CodeBuf,
+        fun_ty: &crate::typechecking::Ty,
+        constraints: &[crate::typechecking::ty::Constraint],
+        arg_tys: &[crate::typechecking::Ty],
+        ret_ty: Option<&crate::typechecking::Ty>,
+    ) -> usize {
+        use crate::typechecking::Ty;
+
         // Bind quantified vars by matching curried fn type to args; do not apply global subst (vars reused).
         let mut var_to_ty: HashMap<crate::typechecking::ty::TyVarId, crate::typechecking::Ty> =
             HashMap::new();
-        let mut fun = &scheme.ty;
+        let mut fun = fun_ty;
         let mut arg_idx = 0usize;
         while let Ty::Fun(param, ret) = fun {
             if arg_idx >= arg_tys.len() {
@@ -2996,7 +3013,7 @@ impl Compiler {
         }
 
         let mut dict_count = 0;
-        for constraint in &scheme.constraints {
+        for constraint in constraints {
             let Some(lookup) =
                 Self::resolve_constraint_lookup(constraint, &var_to_ty, &self.checker)
             else {
@@ -4912,6 +4929,13 @@ impl Compiler {
             self.mono_type_param_tys.push(type_param_tys);
             self.mono_var_tys.push(var_tys);
 
+            // The clone replays the source's ids from its parameters, as an
+            // instance clone does: the cursor it leaves behind would run the
+            // walk past the module's ids for the items after (#1190).
+            let prev_idx = self.emit_idx;
+            if let Some(id) = self.checker.id_table().id_of_output(args) {
+                self.emit_idx = id.0 as usize;
+            }
             let mut a = self.do_compile(args);
             self.bytecode.append(&mut a);
             self.emit_sidecar_array_pins(args);
@@ -4954,6 +4978,7 @@ impl Compiler {
             self.mono_codegen_var_types.pop();
             self.mono_type_param_tys.pop();
             self.mono_var_tys.pop();
+            self.emit_idx = prev_idx;
             self.compiling_result_mode = prev_result_mode;
             self.compiling_result_ok_is_result = prev_result_ok_is_result;
             self.compiling_mono_clone = prev_mono_clone;
@@ -5330,12 +5355,12 @@ impl Compiler {
                     "bool" => Ty::Con("bool".into()),
                     "byte" => Ty::Con("byte".into()),
                     "void" => Ty::Con("unit".into()),
-                    // Same class key the checker's instance head uses, so an
-                    // imported class names `Trait__module::Class__method`.
+                    // Same class or enum key the checker's instance head
+                    // uses, so an imported type names `Trait__module::Type__method`.
                     _ if !self.checker.generics().generic_type_ctors.contains_key(*name) => {
                         Ty::Con(
                             self.checker
-                                .resolve_class_key(name)
+                                .resolve_instance_head_key(name)
                                 .unwrap_or_else(|| name.to_string()),
                         )
                     }
@@ -5346,7 +5371,7 @@ impl Compiler {
                 let head = match name.to_ascii_lowercase().as_str() {
                     "option" => Ty::Con(common::BUILTIN_OPTION_ENUM.into()),
                     "result" => Ty::Con(common::BUILTIN_RESULT_ENUM.into()),
-                    _ => Ty::Con(name.to_string()),
+                    _ => Ty::Con(self.checker.resolve_instance_head_key(name).unwrap_or_else(|| name.to_string())),
                 };
                 let arg_tys: Vec<Ty> = args
                     .iter()
@@ -7314,7 +7339,18 @@ impl Compiler {
         if self.functions.contains_key("main") {
             let mut roots = vec!["main".to_string()];
             if let Some(keep) = &self.keep_fns_in {
-                roots.extend(self.fns_defined_in(keep));
+                // A body nothing calls that direct MIR does not lower (a
+                // shared generic one a clone stands in for, as a derived
+                // `Eq for Box<T>`'s `ne`) stays unrooted: kept, it would
+                // be a stack-lowered body (#1192).
+                let no_mir: HashSet<&str> = self
+                    .bytecode
+                    .funcs()
+                    .iter()
+                    .filter(|f| f.hir_mir.is_none() && f.hir_mir_why.is_some())
+                    .map(|f| f.name.as_str())
+                    .collect();
+                roots.extend(self.fns_defined_in(keep).into_iter().filter(|name| !no_mir.contains(name.as_str())));
             }
             let (_dropped, shrinks) = crate::il::prune_unused_functions(
                 &mut self.bytecode,
