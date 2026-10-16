@@ -106,6 +106,7 @@ pub fn fill_live_roots(func: &mut MirFunc) {
     }
     let live_after = liveness_after(func);
     let barrier_tokens = barrier_dests(func);
+    let defined = defined_ssa(func);
     for (bi, block) in func.blocks.iter().enumerate() {
         let mut prev_alloc: Option<ValueId> = None;
         for (ii, inst) in block.insts.iter().enumerate() {
@@ -116,7 +117,7 @@ pub fn fill_live_roots(func: &mut MirFunc) {
                 | MirInst::Stringify { dest, .. } => {
                     let mut roots = live_heap(func, &live_after[bi][ii], &barrier_tokens);
                     roots.insert(*dest);
-                    roots.append(&mut slot_heap(func, *dest));
+                    roots.append(&mut slot_heap(func, &defined, *dest));
                     let set = finish_set(func, *dest, roots);
                     func.gc_roots.push(set);
                     prev_alloc = Some(*dest);
@@ -126,7 +127,7 @@ pub fn fill_live_roots(func: &mut MirFunc) {
                     if let Some(obj) = prev_alloc {
                         roots.insert(obj);
                     }
-                    roots.append(&mut slot_heap(func, *dest));
+                    roots.append(&mut slot_heap(func, &defined, *dest));
                     let set = finish_set(func, *dest, roots);
                     func.gc_roots.push(set);
                     prev_alloc = None;
@@ -171,8 +172,7 @@ fn apply_barrier_roots(func: &mut MirFunc) {
     }
 }
 
-fn slot_heap(func: &MirFunc, at: ValueId) -> BTreeSet<ValueId> {
-    let defined = defined_ssa(func);
+fn slot_heap(func: &MirFunc, defined: &HashSet<ValueId>, at: ValueId) -> BTreeSet<ValueId> {
     let mut roots = BTreeSet::new();
     if let Some(env) = func.slot_env.get(&at) {
         for (_, v) in env {

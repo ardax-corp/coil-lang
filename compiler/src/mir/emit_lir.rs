@@ -14,7 +14,7 @@ use crate::il::{IlJumpKind, IlOp, Label};
 
 use super::emit::{
     coalesce_latch_overwrite, emit_cond_jumps, foreign_targets, il_for_alloc, is_fallthrough,
-    max_label_hint, paired_alloc_dest, restore_block_op_locs, take_label, term_cmp_dest,
+    max_label_hint, paired_alloc_dest, restore_block_op_locs, take_label,
 };
 use super::func::MirFunc;
 use super::inst::{
@@ -102,7 +102,10 @@ pub fn emit_lir_with_aliases(
         consume_match_tos(&mut out, func, block.id, &plan, &regs, term_loc);
         // A miss leaves the scrutinee on the stack: the next arm's test
         // peeks it there; a block taking no payload of it pops it.
-        if super::emit::miss_chain_tos(func, block.id).is_none() && super::emit::missed_scrutinee_unused(func, block.id) {
+        let preds = &plan.preds[block.id.index()];
+        if super::emit::miss_chain_tos(func, preds, block.id).is_none()
+            && super::emit::missed_scrutinee_unused(func, preds, block.id)
+        {
             out.push(IlOp::Pop { loc: term_loc });
         }
         let mut starts: Vec<(usize, ValueId)> = Vec::new();
@@ -150,7 +153,7 @@ pub fn emit_lir_with_aliases(
             {
                 continue;
             }
-            if term_cmp_dest(func, block).is_some_and(|d| dest == d) {
+            if plan.cmp_dests[block.id.index()].is_some_and(|d| dest == d) {
                 continue;
             }
             emit_stored(&mut out, inst, func, &plan, &regs, pool, loc)?;
@@ -232,6 +235,10 @@ struct EmitPlan {
     tree: Vec<bool>,
     need_slot: Vec<bool>,
     def: Vec<Option<(BlockId, usize)>>,
+    /// Each block's compare fused into its branch ([`super::emit::term_cmp_dests`]).
+    cmp_dests: Vec<Option<ValueId>>,
+    /// Each block's preds ([`MirFunc::preds`]).
+    preds: Vec<Vec<BlockId>>,
     /// Frame word of home 0 ([`MirFunc::homes`]).
     home_base: u8,
 }
@@ -287,7 +294,8 @@ impl EmitPlan {
                 }
             }
         }
-        let fused = fused_cmp_dests(func);
+        let cmp_dests = super::emit::term_cmp_dests(func);
+        let fused = fused_cmp_dests(func, &cmp_dests);
         let mut tree = vec![false; n];
         let mut changed = true;
         while changed {
@@ -307,7 +315,7 @@ impl EmitPlan {
                         });
                     }
                 }
-                if let Some(d) = term_cmp_dest(func, block)
+                if let Some(d) = cmp_dests[block.id.index()]
                     && let Some(MirInst::Cmp { lhs, rhs, .. }) =
                         def[d.index()].and_then(|(b, i)| {
                             (b == block.id).then_some(&func.block(b).insts[i])
@@ -428,6 +436,8 @@ impl EmitPlan {
             tree,
             need_slot,
             def,
+            cmp_dests,
+            preds: func.preds(),
             home_base: 0,
         }
     }
@@ -640,12 +650,10 @@ fn keep_payload_first(func: &MirFunc, tree: &mut [bool], fused: &[bool]) {
     }
 }
 
-fn fused_cmp_dests(func: &MirFunc) -> Vec<bool> {
+fn fused_cmp_dests(func: &MirFunc, cmp_dests: &[Option<ValueId>]) -> Vec<bool> {
     let mut fused = vec![false; func.types.len()];
-    for block in &func.blocks {
-        if let Some(d) = term_cmp_dest(func, block) {
-            fused[d.index()] = true;
-        }
+    for d in cmp_dests.iter().flatten() {
+        fused[d.index()] = true;
     }
     fused
 }
@@ -686,7 +694,7 @@ fn consume_match_tos(
     regs: &[u8],
     loc: DebugLoc,
 ) {
-    for pred in &func.preds()[block.index()] {
+    for pred in &plan.preds[block.index()] {
         let Some(Terminator::JumpIfMatch {
             taken,
             payloads,
@@ -815,7 +823,7 @@ fn assign_shared(func: &MirFunc, plan: &EmitPlan) -> Result<(Vec<u8>, u8), Lower
     use std::collections::{BTreeSet, HashSet};
     let n = func.types.len();
     let slot = |v: ValueId| plan.need_slot.get(v.index()).copied().unwrap_or(false);
-    let fused: HashSet<ValueId> = func.blocks.iter().filter_map(|b| super::emit::term_cmp_dest(func, b)).collect();
+    let fused: HashSet<ValueId> = plan.cmp_dests.iter().flatten().copied().collect();
     // The slotted words reading `v` reads: `v` itself, or the operands of
     // the tree (or fused compare) it is emitted as at its consumer.
     fn reads(func: &MirFunc, plan: &EmitPlan, fused: &HashSet<ValueId>, v: ValueId, out: &mut Vec<ValueId>) {
@@ -2401,7 +2409,7 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
                     "JumpIfMatch + phi moves (keep fuse-IL)".into(),
                 ));
             }
-            if super::emit::miss_chain_tos(func, block.id).is_none() {
+            if super::emit::miss_chain_tos(func, &plan.preds[block.id.index()], block.id).is_none() {
                 emit_stack(out, *scrutinee, func, plan, regs, pool, loc)?;
             }
             out.push(IlOp::Jump {
