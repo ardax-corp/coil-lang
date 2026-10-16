@@ -7339,7 +7339,18 @@ impl Compiler {
         if self.functions.contains_key("main") {
             let mut roots = vec!["main".to_string()];
             if let Some(keep) = &self.keep_fns_in {
-                roots.extend(self.fns_defined_in(keep));
+                // A body nothing calls that direct MIR does not lower (a
+                // shared generic one a clone stands in for, as a derived
+                // `Eq for Box<T>`'s `ne`) stays unrooted: kept, it would
+                // be a stack-lowered body (#1192).
+                let no_mir: HashSet<&str> = self
+                    .bytecode
+                    .funcs()
+                    .iter()
+                    .filter(|f| f.hir_mir.is_none() && f.hir_mir_why.is_some())
+                    .map(|f| f.name.as_str())
+                    .collect();
+                roots.extend(self.fns_defined_in(keep).into_iter().filter(|name| !no_mir.contains(name.as_str())));
             }
             let (_dropped, shrinks) = crate::il::prune_unused_functions(
                 &mut self.bytecode,

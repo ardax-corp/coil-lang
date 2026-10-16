@@ -2093,6 +2093,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A coverage compile does not keep a never-called body direct MIR
+    /// cannot lower (the shared `Eq for Box<T: Eq>` `ne`, which a clone
+    /// stands in for, as for `#[derive(Eq)]`): kept, the compile panicked
+    /// with a stack-lowered body (#1192).
+    #[test]
+    fn keep_fns_in_skips_unlowered_shared_bodies() {
+        let src = "class Box<T> {\n    pub item: T,\n}\n\nimpl Eq for Box<T: Eq> {\n    fn eq(Box<T> a, Box<T> b) -> bool {\n        return a.item == b.item;\n    }\n\n    fn ne(Box<T> a, Box<T> b) -> bool {\n        return !(a == b);\n    }\n}\n\nfn main() {\n    let a = new Box(1);\n    let b = new Box(2);\n    let c = a != b;\n}\n";
+        let dir = std::env::temp_dir().join(format!("coil_keep_shared_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("keep_shared.hy");
+        std::fs::write(&file, src).unwrap();
+        let mut p = Pipeline::new();
+        p.set_keep_fns_in(Some(Arc::new(|path: &str| path.ends_with("keep_shared.hy"))));
+        let compiled = p.compile_src_from_file(file.to_str().unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(compiled.is_ok(), "{:?}", compiled.err());
+    }
+
     /// Cloneable in-memory writer so tests can inspect sink output.
     #[derive(Clone, Default)]
     struct SharedBuf {
@@ -2351,7 +2369,7 @@ fn main() {
 }
 "#,
         );
-        assert!(compiled.is_ok());
+        assert!(compiled.is_ok(), "{:?}", compiled.err());
         assert!(!pipeline.had_errors());
     }
 
