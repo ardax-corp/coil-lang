@@ -389,6 +389,7 @@ impl Checker {
         }));
         self.fn_has_rest.insert(name.to_string(), has_rest);
         self.fn_tuple_rest.insert(name.to_string(), has_tuple_rest);
+        let mut declared_send_ty = false;
         let (ret_ty, yield_slot, send_slot) = if is_coro {
             let yield_ty = Ty::Var(self.counter.fresh());
             let send_ty = Ty::Var(self.counter.fresh());
@@ -396,12 +397,22 @@ impl Checker {
             // return slot so annotation mismatches are diagnosed.
             if let Some(r) = returns {
                 let declared = self.parse_type_name(r);
+                // `-> coroutine<Y, S>` spells the whole handle type;
+                // a bare `-> T` is the yield type.
+                let (declared_yield, declared_send) = match Self::coroutine_parts(&declared) {
+                    Some((y, s)) => (y, Some(s)),
+                    None => (declared, None),
+                };
                 self.unify(
                     &yield_ty,
-                    &declared,
+                    &declared_yield,
                     &r.0.into_range(),
                     "async fn return type",
                 );
+                if let Some(s) = declared_send {
+                    self.unify(&send_ty, &s, &r.0.into_range(), "async fn send type");
+                    declared_send_ty = true;
+                }
             }
             let coro = self.coroutine_type(yield_ty.clone(), send_ty.clone());
             (coro, Some(yield_ty), Some(send_ty))
@@ -471,7 +482,8 @@ impl Checker {
         let prev_yield = self.current_yield_ty.take();
         let prev_send = self.current_send_ty.take();
         let prev_yield_receives = self.yield_receives_used;
-        self.yield_receives_used = false;
+        // A declared send type is kept even when no `yield` result is used.
+        self.yield_receives_used = declared_send_ty;
         if let Some(yield_ty) = yield_slot {
             self.current_yield_ty = Some(yield_ty);
         }

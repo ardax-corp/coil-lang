@@ -2168,6 +2168,16 @@ impl Checker {
         )
     }
 
+    /// The yield and send types of a `coroutine<Y, S>` annotation.
+    pub(crate) fn coroutine_parts(ty: &Ty) -> Option<(Ty, Ty)> {
+        match ty {
+            Ty::App(head, args) if args.len() == 2 && matches!(head.as_ref(), Ty::Con(n) if n == "coroutine") => {
+                Some((args[0].clone(), args[1].clone()))
+            }
+            _ => None,
+        }
+    }
+
     /// Consume the next pre-order id for `node` and resolve it to the node's
     /// own id. Writing facts under the raw counter id lands them on another
     /// node once the counter drifts (it typed `lcm`'s int `a` as the float
@@ -10893,6 +10903,28 @@ impl Checker {
             return self.expand_generic_alias(&def, &arg_tys);
         }
 
+        // `coroutine<Y>` (send type `unit`) / `coroutine<Y, S>`: the type a
+        // `gen fn` returns, unless a user type takes the name.
+        if name == "coroutine"
+            && self.resolve_class_key(name).is_none()
+            && !self.generics.generic_type_ctors.contains_key(name)
+        {
+            let mut arg_tys = arg_tys;
+            match arg_tys.len() {
+                1 => arg_tys.push(unit_ty()),
+                2 => {}
+                n => {
+                    self.messages.push(Message::error(
+                        ErrorCode::GenericTypeError,
+                        format!("Type constructor `coroutine` expects 1 or 2 type arguments, got {n}"),
+                        range,
+                    ));
+                    arg_tys.resize_with(2, || Ty::Var(self.counter.fresh()));
+                }
+            }
+            return self.coroutine_type(arg_tys[0].clone(), arg_tys[1].clone());
+        }
+
         let ctor = self
             .resolve_class_key(name)
             .unwrap_or_else(|| name.to_string());
@@ -14624,8 +14656,12 @@ impl Checker {
         // A `gen fn` returns its coroutine, as `infer_function_expr` types it:
         // `-> T` is the yield / return slot.
         let ret_ty = if is_coro {
-            let send_ty = Ty::Var(self.counter.fresh());
-            self.coroutine_type(ret_ty, send_ty)
+            if Self::coroutine_parts(&ret_ty).is_some() {
+                ret_ty
+            } else {
+                let send_ty = Ty::Var(self.counter.fresh());
+                self.coroutine_type(ret_ty, send_ty)
+            }
         } else {
             ret_ty
         };
