@@ -119,9 +119,8 @@ fn weak<T>(T value) -> Weak<T> {}
 /// # use tests::assert;
 /// fn make() -> Weak<Vec<int>> {
 ///     let v = Vec::from([1, 2, 3]);
-///     let w = weak(v);
-///     v = Vec::new(); // drop the last strong reference
-///     return w;
+///     // `v`, the only strong reference, ends with this call.
+///     return weak(v);
 /// }
 ///
 /// fn main() {

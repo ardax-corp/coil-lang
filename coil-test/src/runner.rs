@@ -14,6 +14,7 @@ use compiler::{HostGrants, OptLevel, Pipeline};
 use machine::Machine;
 use machine::reactor::{Reactor, TestCase, TestHandle, TestReport};
 use machine::thread::ThreadSpawnContext;
+use parser::doc_examples::{self, ExampleMode};
 use reporting::{ErrorCode, ReportConfig, ReportFormat};
 
 use crate::coverage::{Coverage, CoverageOptions, ProgramLines, project_filter, test_fn_ranges};
@@ -57,6 +58,22 @@ pub struct TestOptions {
     pub extra_roots: Vec<PathBuf>,
     /// Text, `--json` events, or nothing.
     pub report: Report,
+    /// Run the examples in `///` docs (`--no-doc-tests`, `--doc-tests-only`).
+    pub doc_tests: DocTests,
+}
+
+/// Whether a run includes doc-tests (the code examples in `///` comments).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DocTests {
+    /// Test files' cases, then the examples in the test files and in the
+    /// project sources they import (the default).
+    #[default]
+    On,
+    /// No doc-tests (`--no-doc-tests`; `coil mutate`).
+    Off,
+    /// Only the examples of every file under the test root; the files
+    /// themselves are parsed, not compiled (`--doc-tests-only`).
+    Only,
 }
 
 pub(crate) fn writer_for(format: ReportFormat) -> Box<dyn Write + Send> {
@@ -228,8 +245,27 @@ struct Run<'a> {
     options: &'a TestOptions,
     reactor: &'a Arc<Reactor>,
     coverage: Option<&'a Mutex<Coverage>>,
-    /// Project sources with contract tests, found while compiling tests.
-    sources: Mutex<BTreeSet<PathBuf>>,
+    /// Project sources found while compiling tests.
+    sources: Discovered,
+}
+
+/// Project sources (under the current directory, outside the test root and
+/// `.deps/`) the test files import, found while compiling them.
+#[derive(Default)]
+pub(crate) struct Discovered {
+    /// Sources with functions that get contract tests.
+    contracts: Mutex<BTreeSet<PathBuf>>,
+    /// Sources with code examples in their `///` docs.
+    docs: Mutex<BTreeSet<PathBuf>>,
+}
+
+/// One file to report: compile it (its cases, or its contract tests when it
+/// is a project source) and/or run the examples in its docs.
+#[derive(Debug, Clone)]
+struct Target {
+    path: PathBuf,
+    compile: bool,
+    docs: bool,
 }
 
 /// A case's verdict, or the handle to wait on for it.
@@ -243,6 +279,15 @@ struct PendingCase {
     name: String,
     state: CaseState,
     output: Arc<Mutex<Vec<u8>>>,
+    kind: CaseKind,
+}
+
+/// A file's own case, or one of its doc examples.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CaseKind {
+    Test,
+    /// A doc example; `should_panic` passes only when it panics.
+    Doc { should_panic: bool },
 }
 
 /// A file as the runner reports it. Files print in start order, so output
@@ -323,7 +368,7 @@ fn finish_file(run: &Run<'_>, file: PendingFile, result: &mut SuiteResult) -> us
         }
     }
     let mut case_events = Vec::new();
-    let single_case = file.cases.len() == 1;
+    let single_case = file.cases.iter().filter(|c| c.kind == CaseKind::Test).count() == 1;
     for case in file.cases {
         let TestReport {
             passed: report_ok,
@@ -336,10 +381,16 @@ fn finish_file(run: &Run<'_>, file: PendingFile, result: &mut SuiteResult) -> us
             CaseState::Done(report) => report,
         };
         let mut ok = report_ok && !timed_out;
+        let mut reason = reason;
+        if case.kind == (CaseKind::Doc { should_panic: true }) && !timed_out {
+            ok = !report_ok;
+            reason = report_ok.then(|| "example did not panic (`should_panic`)".to_string());
+        }
         let output = std::mem::take(&mut *case.output.lock().unwrap_or_else(|e| e.into_inner()));
         // A `// Output:` header checks a passing case's prints; it names
         // one program, so a file with `test` blocks cannot use it.
-        let reason = match &file.expected_output {
+        let expected_output = file.expected_output.as_ref().filter(|_| case.kind == CaseKind::Test);
+        let reason = match expected_output {
             Some(_) if ok && !single_case => {
                 ok = false;
                 Some("`// Output:` needs a file whose only case is `fn main()`".to_string())
@@ -508,7 +559,7 @@ pub(crate) fn compile_test_file(
     path: &Path,
     diagnostics: Option<&Captured>,
     overlays: &[(PathBuf, String)],
-    sources: Option<&Mutex<BTreeSet<PathBuf>>>,
+    sources: Option<&Discovered>,
 ) -> Compiled {
     // A project source outside the test root runs only its generated
     // contract tests: not its `main`, not its own `test` blocks.
@@ -520,29 +571,14 @@ pub(crate) fn compile_test_file(
     // A rejection's diagnostics are kept apart: the case checks their error
     // codes against the file's `// Expected:` header instead of printing them.
     let rejection = Captured::default();
-    let mut pipeline = match diagnostics {
-        Some(d) if !expect_compile_fail => {
-            Pipeline::with_reporter(config.clone(), Box::new(d.clone()))
-        }
-        _ if expect_compile_fail => {
-            Pipeline::with_reporter(config.clone(), Box::new(rejection.clone()))
-        }
-        _ => Pipeline::with_reporter(config.clone(), Box::new(std::io::sink())),
+    let reporter: Box<dyn Write + Send> = match diagnostics {
+        Some(d) if !expect_compile_fail => Box::new(d.clone()),
+        _ if expect_compile_fail => Box::new(rejection.clone()),
+        _ => Box::new(std::io::sink()),
     };
+    let mut pipeline = run_pipeline(config, options, reporter);
     pipeline.set_include_tests(true);
-    pipeline.set_opt_level(options.opt_level);
-    pipeline.set_contracts(options.contracts.unwrap_or(compiler::ContractLevel::All));
     pipeline.set_contract_runs(options.contract_runs);
-    pipeline.set_host_grants(options.grants.clone());
-    // Same search path CI passes with `--root`: examples and a sibling
-    // coil-stdlib checkout, when those directories exist.
-    let mut roots = options.extra_roots.clone();
-    for extra in compiler::Pipeline::workspace_language_extra_roots() {
-        if extra.is_dir() && !roots.contains(&extra) {
-            roots.push(extra);
-        }
-    }
-    bind_cli_roots(&mut pipeline, roots);
     if let Some(cov) = &options.coverage {
         // Keep never-called project functions so they report as uncovered.
         pipeline.set_keep_fns_in(Some(project_filter(canonical(&cov.project_root))));
@@ -562,7 +598,11 @@ pub(crate) fn compile_test_file(
         cases.retain(|(name, _)| name.starts_with(compiler::CONTRACT_CASE_PREFIX));
     } else if let Some(sources) = sources {
         let found = project_sources(options, pipeline.contract_sources());
-        sources.lock().unwrap_or_else(|e| e.into_inner()).extend(found);
+        lock(&sources.contracts).extend(found);
+        if options.doc_tests == DocTests::On {
+            let found = project_sources(options, pipeline.discovered_files());
+            lock(&sources.docs).extend(found.into_iter().filter(|f| has_examples(f)));
+        }
     }
     options.order.order_cases(&options.root, path, &mut cases);
     let _ = pipeline.finish_reporting();
@@ -595,10 +635,10 @@ pub(crate) fn compile_test_file(
     if contract_source && cases.is_empty() {
         return Compiled::Nothing;
     }
-    let strings = pipeline.strings().to_vec();
     let main = pipeline.main_offset();
 
     if cases.is_empty() && main.is_none() {
+        let strings = pipeline.strings().to_vec();
         // No cases and no `main` entry: run the program from the top, as
         // `coil <file>` would, on this thread.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -617,6 +657,64 @@ pub(crate) fn compile_test_file(
         return Compiled::Decided(ok, (!ok).then(|| format!("> Test \"{display}\" failed")));
     }
 
+    let Some((ctx, init_ip, debug)) = wire_program(pipeline, bytecode, constants, path, reactor) else {
+        let m = format!("> Test \"{display}\" failed (no thread program)");
+        return Compiled::Decided(false, Some(m));
+    };
+
+    // A file without cases runs `main` once as a single case. An `Err` that
+    // reaches the end of `main` panics (#1353), so a panic is what fails it.
+    let (cases, expect_ok_result) = if cases.is_empty() {
+        (vec![(display, main.unwrap_or(0))], false)
+    } else {
+        (cases, true)
+    };
+    Compiled::Ready(Box::new(Prepared {
+        ctx,
+        cases,
+        init_ip,
+        expect_ok_result,
+        debug,
+    }))
+}
+
+/// A pipeline set up as the run asks: `-O`, contracts, grants and the
+/// `--root` search path. Diagnostics go to `reporter`.
+fn run_pipeline(config: &ReportConfig, options: &TestOptions, reporter: Box<dyn Write + Send>) -> Pipeline {
+    let mut pipeline = Pipeline::with_reporter(config.clone(), reporter);
+    pipeline.set_opt_level(options.opt_level);
+    pipeline.set_contracts(options.contracts.unwrap_or(compiler::ContractLevel::All));
+    pipeline.set_host_grants(options.grants.clone());
+    // Same search path CI passes with `--root`: examples and a sibling
+    // coil-stdlib checkout, when those directories exist.
+    bind_cli_roots(&mut pipeline, search_roots(options));
+    pipeline
+}
+
+/// `--root` directories plus this repo's examples and a sibling coil-stdlib
+/// checkout, when those exist.
+fn search_roots(options: &TestOptions) -> Vec<PathBuf> {
+    let mut roots = options.extra_roots.clone();
+    for extra in compiler::Pipeline::workspace_language_extra_roots() {
+        if extra.is_dir() && !roots.contains(&extra) {
+            roots.push(extra);
+        }
+    }
+    roots
+}
+
+/// Wire a compiled program for test jobs: the thread context every case
+/// starts from, where static init starts (when it must stop before `main`),
+/// and the debug info. `None` when the program has no thread context.
+fn wire_program(
+    pipeline: Pipeline,
+    bytecode: Vec<Byte>,
+    constants: Vec<u64>,
+    path: &Path,
+    reactor: &Arc<Reactor>,
+) -> Option<(ThreadSpawnContext, Option<u32>, ProgramDebug)> {
+    let strings = pipeline.strings().to_vec();
+    let main = pipeline.main_offset();
     // Stop the static-init prologue before it jumps into `main`; each job
     // runs it on a fresh VM, then calls its case.
     let mut code = bytecode;
@@ -636,25 +734,11 @@ pub(crate) fn compile_test_file(
         root.thread_spawn_context()
     };
     drop(pipeline);
-    let Some(ctx) = ctx else {
-        let m = format!("> Test \"{display}\" failed (no thread program)");
-        return Compiled::Decided(false, Some(m));
-    };
+    Some((ctx?, init_ip, debug))
+}
 
-    // A file without cases runs `main` once as a single opaque case, where
-    // only a panic fails (an uncaught `raise` from `main` is an `Err` return).
-    let (cases, expect_ok_result) = if cases.is_empty() {
-        (vec![(display, main.unwrap_or(0))], false)
-    } else {
-        (cases, true)
-    };
-    Compiled::Ready(Box::new(Prepared {
-        ctx,
-        cases,
-        init_ip,
-        expect_ok_result,
-        debug,
-    }))
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// True when `path` is not under the test root: a project source compiled
@@ -677,8 +761,30 @@ fn project_sources(options: &TestOptions, found: &[PathBuf]) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Compile one file, then decide it or start its cases.
-fn start_file(run: &Run<'_>, dispatch: Dispatch, path: &Path) -> PendingFile {
+/// Compile one file, then decide it or start its cases; then start its
+/// doc examples.
+fn start_file(run: &Run<'_>, dispatch: Dispatch, target: &Target) -> PendingFile {
+    let path = target.path.as_path();
+    let mut file = if target.compile {
+        compile_and_start(run, dispatch, path)
+    } else {
+        PendingFile {
+            path: path.to_path_buf(),
+            display: path.display().to_string(),
+            diagnostics: Captured::default(),
+            verdict: None,
+            cases: Vec::new(),
+            lines: None,
+            expected_output: None,
+        }
+    };
+    if target.docs && !is_compile_fail(path) {
+        file.cases.extend(doc_cases(run, dispatch, path, !target.compile));
+    }
+    file
+}
+
+fn compile_and_start(run: &Run<'_>, dispatch: Dispatch, path: &Path) -> PendingFile {
     let diagnostics = Captured::default();
     let compiled = compile_test_file(
         run.config,
@@ -720,18 +826,8 @@ fn start_file(run: &Run<'_>, dispatch: Dispatch, path: &Path) -> PendingFile {
         .iter()
         .map(|(name, entry)| {
             let case = prepared.case(*entry, run.coverage.is_some(), None);
-            let output = Arc::new(Mutex::new(Vec::new()));
-            let print = Arc::clone(&output);
             let ctx = prepared.ctx.clone();
-            let state = match dispatch {
-                Dispatch::Pool => CaseState::Running(run.reactor.submit_test(ctx, case, print)),
-                Dispatch::Inline => CaseState::Done(run.reactor.run_test_here(ctx, case, print)),
-            };
-            PendingCase {
-                name: name.clone(),
-                state,
-                output,
-            }
+            start_case(run, dispatch, name.clone(), ctx, case, CaseKind::Test)
         })
         .collect::<Vec<_>>();
     let expected_output = std::fs::read_to_string(path)
@@ -746,6 +842,184 @@ fn start_file(run: &Run<'_>, dispatch: Dispatch, path: &Path) -> PendingFile {
         lines,
         expected_output,
     }
+}
+
+/// Queue (or run) one case, capturing its output.
+fn start_case(
+    run: &Run<'_>,
+    dispatch: Dispatch,
+    name: String,
+    ctx: ThreadSpawnContext,
+    case: TestCase,
+    kind: CaseKind,
+) -> PendingCase {
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let print = Arc::clone(&output);
+    let state = match dispatch {
+        Dispatch::Pool => CaseState::Running(run.reactor.submit_test(ctx, case, print)),
+        Dispatch::Inline => CaseState::Done(run.reactor.run_test_here(ctx, case, print)),
+    };
+    PendingCase {
+        name,
+        state,
+        output,
+        kind,
+    }
+}
+
+/// A case decided without running anything.
+fn decided_case(name: String, passed: bool, reason: Option<String>, output: Vec<u8>, kind: CaseKind) -> PendingCase {
+    PendingCase {
+        name,
+        state: CaseState::Done(TestReport {
+            passed,
+            reason,
+            hits: None,
+            steps: 0,
+            timed_out: false,
+        }),
+        output: Arc::new(Mutex::new(output)),
+        kind,
+    }
+}
+
+/// `path` with `/` between its components on every OS, so doc-test names
+/// are the same on Windows as elsewhere.
+fn slash_path(path: &Path) -> String {
+    let display = path.display().to_string();
+    if cfg!(windows) { display.replace('\\', "/") } else { display }
+}
+
+/// True when `path` has a fenced block in its text (a cheap check before
+/// parsing it for doc examples).
+fn has_examples(path: &Path) -> bool {
+    std::fs::read_to_string(path).is_ok_and(|src| src.contains("```"))
+}
+
+/// One doc-test per coil example in the `///` docs of `path`, each compiled
+/// as its own program with the run's roots and grants, then started. A file
+/// that does not parse yields no doc-tests (its compile reports the error)
+/// unless it is not compiled (`report_parse_error`).
+fn doc_cases(run: &Run<'_>, dispatch: Dispatch, path: &Path, report_parse_error: bool) -> Vec<PendingCase> {
+    let Ok(source) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    if !source.contains("```") {
+        return Vec::new();
+    }
+    let display = slash_path(path);
+    let ast = match parser::Pratt::default().parse(&source) {
+        Ok(ast) => ast,
+        Err(e) if report_parse_error => {
+            let name = format!("doc: {display}");
+            let reason = format!("cannot read its doc examples: {e:?}");
+            return vec![decided_case(name, false, Some(reason), Vec::new(), CaseKind::Doc { should_panic: false })];
+        }
+        Err(_) => return Vec::new(),
+    };
+    let module = module_path(run.options, path);
+    let mut found = Vec::new();
+    for item in doc_examples::documented_items(&ast) {
+        for example in doc_examples::examples(item.docs) {
+            if example.mode == ExampleMode::Ignore {
+                continue;
+            }
+            let line = doc_examples::line_of(&source, item.docs[example.fence]).unwrap_or(0);
+            let item_path = if module.is_empty() {
+                item.path.clone()
+            } else {
+                format!("{module}::{}", item.path)
+            };
+            let name = format!("doc: {item_path} ({display}:{line})");
+            found.push((name, line, example.mode, example.program()));
+        }
+    }
+    run.options.order.order_cases(&run.options.root, path, &mut found);
+    found
+        .into_iter()
+        .map(|(name, line, mode, program)| start_doc_case(run, dispatch, path, name, line, mode, program))
+        .collect()
+}
+
+/// Compile one doc example as its own program next to the file it documents
+/// (so relative paths and `--root` imports resolve the same), then start it.
+fn start_doc_case(
+    run: &Run<'_>,
+    dispatch: Dispatch,
+    path: &Path,
+    name: String,
+    line: usize,
+    mode: ExampleMode,
+    program: String,
+) -> PendingCase {
+    let kind = CaseKind::Doc {
+        should_panic: mode == ExampleMode::ShouldPanic,
+    };
+    // A program that did not get to run fails even under `should_panic`.
+    let kind_failed = CaseKind::Doc { should_panic: false };
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("doc");
+    let entry = path.with_file_name(format!("{stem}__doc_{line}.hy"));
+    let diagnostics = Captured::default();
+    let mut pipeline = run_pipeline(run.config, run.options, Box::new(diagnostics.clone()));
+    pipeline.set_file_text(entry.clone(), program);
+    let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        pipeline.compile_src_from_file(&entry.display().to_string())
+    }));
+    let _ = pipeline.finish_reporting();
+    let (bytecode, constants) = match compiled {
+        Ok(Ok(ok)) => ok,
+        Ok(Err(_)) => {
+            let why = "example does not compile".to_string();
+            return decided_case(name, false, Some(why), diagnostics.take(), kind_failed);
+        }
+        Err(_) => {
+            let why = "compiler panicked on the example".to_string();
+            return decided_case(name, false, Some(why), diagnostics.take(), kind_failed);
+        }
+    };
+    if mode == ExampleMode::NoRun {
+        return decided_case(name, true, None, Vec::new(), kind);
+    }
+    let Some(main) = pipeline.main_offset() else {
+        let why = "example has no `main` to run".to_string();
+        return decided_case(name, false, Some(why), Vec::new(), kind_failed);
+    };
+    let Some((ctx, init_ip, _debug)) = wire_program(pipeline, bytecode, constants, &entry, run.reactor) else {
+        let why = "no thread program".to_string();
+        return decided_case(name, false, Some(why), Vec::new(), kind_failed);
+    };
+    // An `Err` that reaches the end of `main` panics (#1353), so a failed
+    // `assert!` in the example fails it.
+    let case = TestCase {
+        entry: main,
+        init_ip,
+        expect_ok_result: false,
+        coverage: false,
+        step_budget: None,
+    };
+    start_case(run, dispatch, name, ctx, case, kind)
+}
+
+/// The module path of `path` for doc-test names: its path without `.hy`
+/// under the deepest of the test root, the `--root` directories and `src`
+/// that holds it (`src/io/sync.hy` → `io::sync`).
+fn module_path(options: &TestOptions, path: &Path) -> String {
+    let file = canonical(path);
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let mut roots = vec![options.root.clone(), cwd.join("src")];
+    roots.extend(options.extra_roots.iter().map(|r| cwd.join(r)));
+    let rel = roots
+        .iter()
+        .map(|r| canonical(r))
+        .filter(|r| file.starts_with(r))
+        .max_by_key(|r| r.components().count())
+        .and_then(|r| file.strip_prefix(r).ok().map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from(path.file_name().unwrap_or_default()));
+    let rel = rel.with_extension("");
+    rel.components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("::")
 }
 
 /// Run the harness over `options.root` without exiting.
@@ -784,31 +1058,44 @@ pub fn run_test_suite(config: ReportConfig, options: &TestOptions) -> Result<Sui
         options,
         reactor: &reactor,
         coverage: coverage.as_ref(),
-        sources: Mutex::new(BTreeSet::new()),
+        sources: Discovered::default(),
     };
-    let mut result = if jobs == 1 {
-        run_serial(&run, &files)
-    } else {
-        run_parallel(&run, &files, jobs)
-    };
-    // Then the contract tests of the project sources the tests compiled.
-    let mut sources: Vec<PathBuf> =
-        std::mem::take(&mut *run.sources.lock().unwrap_or_else(|e| e.into_inner())).into_iter().collect();
+    let targets: Vec<Target> = files
+        .into_iter()
+        .map(|path| Target {
+            path,
+            compile: options.doc_tests != DocTests::Only,
+            docs: options.doc_tests != DocTests::Off,
+        })
+        .collect();
+    let mut result = run_targets(&run, &targets, jobs);
+    // Then the contract tests and doc examples of the project sources the
+    // tests compiled.
+    let contracts = std::mem::take(&mut *lock(&run.sources.contracts));
+    let docs = std::mem::take(&mut *lock(&run.sources.docs));
     let stopped = run.options.fail_fast && result.failed != 0;
-    if !sources.is_empty() && !stopped {
-        options.order.order_files(&mut sources);
+    if !(contracts.is_empty() && docs.is_empty()) && !stopped {
         if options.report == Report::Human {
-            eprintln!(
-                "contracts of {} project file{}",
-                sources.len(),
-                if sources.len() == 1 { "" } else { "s" }
-            );
+            for (what, set) in [("contracts", &contracts), ("doc-tests", &docs)] {
+                if !set.is_empty() {
+                    eprintln!(
+                        "{what} of {} project file{}",
+                        set.len(),
+                        if set.len() == 1 { "" } else { "s" }
+                    );
+                }
+            }
         }
-        let more = if jobs == 1 {
-            run_serial(&run, &sources)
-        } else {
-            run_parallel(&run, &sources, jobs)
-        };
+        let mut sources: Vec<Target> = contracts
+            .union(&docs)
+            .map(|path| Target {
+                path: path.clone(),
+                compile: contracts.contains(path),
+                docs: docs.contains(path),
+            })
+            .collect();
+        options.order.order_files(&mut sources);
+        let more = run_targets(&run, &sources, jobs);
         result.passed += more.passed;
         result.failed += more.failed;
         result.files_run.extend(more.files_run);
@@ -819,13 +1106,21 @@ pub fn run_test_suite(config: ReportConfig, options: &TestOptions) -> Result<Sui
     Ok(result)
 }
 
+fn run_targets(run: &Run<'_>, targets: &[Target], jobs: usize) -> SuiteResult {
+    if jobs == 1 {
+        run_serial(run, targets)
+    } else {
+        run_parallel(run, targets, jobs)
+    }
+}
+
 /// `--jobs 1`: compile and run each file on this thread, one at a time. No
 /// pool worker starts unless a case spawns threads.
-fn run_serial(run: &Run<'_>, files: &[PathBuf]) -> SuiteResult {
+fn run_serial(run: &Run<'_>, files: &[Target]) -> SuiteResult {
     let mut result = SuiteResult::default();
-    for path in files {
-        result.files_run.push(path.clone());
-        let file = start_file(run, Dispatch::Inline, path);
+    for target in files {
+        result.files_run.push(target.path.clone());
+        let file = start_file(run, Dispatch::Inline, target);
         let failed = finish_file(run, file, &mut result);
         if failed != 0 && run.options.fail_fast {
             break;
@@ -836,7 +1131,7 @@ fn run_serial(run: &Run<'_>, files: &[PathBuf]) -> SuiteResult {
 
 /// Compile threads claim files in order and queue their cases on the pool;
 /// this thread reports files in order, helping run cases while it waits.
-fn run_parallel(run: &Run<'_>, files: &[PathBuf], jobs: usize) -> SuiteResult {
+fn run_parallel(run: &Run<'_>, files: &[Target], jobs: usize) -> SuiteResult {
     use std::sync::Condvar;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
@@ -889,7 +1184,7 @@ fn run_parallel(run: &Run<'_>, files: &[PathBuf], jobs: usize) -> SuiteResult {
         for (index, file) in rx.iter() {
             ready.insert(index, file);
             while let Some(file) = ready.remove(&next) {
-                result.files_run.push(files[next].clone());
+                result.files_run.push(files[next].path.clone());
                 let failed = finish_file(run, file, &mut result);
                 next += 1;
                 if failed != 0 && run.options.fail_fast {
