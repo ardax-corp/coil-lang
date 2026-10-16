@@ -435,12 +435,16 @@ pub fn stack_arrays(body: &HirBody, checker: &Checker) -> StackArrays {
             }
         }
     }
-    // A function element stays in the array object: its closure word has
-    // no slot type.
+    // A function or coroutine element stays in the array object: its
+    // closure or handle word has no slot type (#1331).
+    let no_slot = |e: &Ty| {
+        let e = crate::typechecking::ty::strip_readonly(e);
+        matches!(e, Ty::Fun(..)) || Checker::coroutine_parts(e).is_some()
+    };
     cands.retain(|&local, _| {
         !body.local(LocalId(local)).ty.as_ref().is_some_and(|t| match crate::typechecking::ty::strip_readonly(&apply_ty_prune(checker.subst(), t)) {
-            Ty::Array { element, .. } => matches!(crate::typechecking::ty::strip_readonly(element), Ty::Fun(..)),
-            t => crate::typechecking::ty::vec_element_ty(t).is_some_and(|e| matches!(crate::typechecking::ty::strip_readonly(e), Ty::Fun(..))),
+            Ty::Array { element, .. } => no_slot(element),
+            t => crate::typechecking::ty::vec_element_ty(t).is_some_and(no_slot),
         })
     });
     // Stores into a local: `dst = value`.
