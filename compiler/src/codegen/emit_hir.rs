@@ -1201,6 +1201,11 @@ impl Compiler {
                                 matches!(crate::hir::layout::of_resolved(checker, &apply_ty_prune(checker.subst(), t)), crate::hir::layout::Layout::Pair(_))
                                     .then_some(crate::mir::MirTy::HeapRef)
                             })
+                            // Any other tuple is a heap tuple object (#1170).
+                            .or_else(|| {
+                                matches!(apply_ty_prune(checker.subst(), t), Ty::Tuple(ref items) if !items.is_empty())
+                                    .then_some(crate::mir::MirTy::HeapRef)
+                            })
                     })
                     .collect();
                 sroa.insert(local.0, tys.ok_or("scalar-replaced field type")?);
@@ -1250,8 +1255,11 @@ impl Compiler {
         // A field's word, a two-word value (a pair) held boxed.
         let record_word = |t: &Ty| {
             field_word(t).or_else(|| {
-                matches!(crate::hir::layout::of_resolved(checker, &apply_ty_prune(checker.subst(), t)), crate::hir::layout::Layout::Pair(_))
-                    .then_some(crate::mir::MirTy::HeapRef)
+                let t = apply_ty_prune(checker.subst(), t);
+                // A heap tuple is its object's word (#1170).
+                (matches!(crate::hir::layout::of_resolved(checker, &t), crate::hir::layout::Layout::Pair(_))
+                    || matches!(t, Ty::Tuple(ref items) if !items.is_empty()))
+                .then_some(crate::mir::MirTy::HeapRef)
             })
         };
         let mut boxed_niches = HashMap::new();
@@ -1276,7 +1284,7 @@ impl Compiler {
                     let at = self
                         .hir_class_ty_args_at(base_ty, &fty)
                         .or_else(|| self.hir_clone_self_field_at(base_ty, &fty, e.ty.as_ref()?))?;
-                    field_word(&at)
+                    record_word(&at)
                 })
                 && e.ty.as_ref().and_then(record_word) == Some(w)
             {
@@ -1377,6 +1385,11 @@ impl Compiler {
                             word(t).or_else(|| scalar_enum(t)).or_else(|| {
                                 (crate::hir::layout::of_resolved(checker, &apply_ty_prune(checker.subst(), t)) != crate::hir::layout::Layout::Word
                                     && crate::typechecking::value_layout::value_layout(checker, t) == ValueLayout::Boxed)
+                                    .then_some(crate::mir::MirTy::HeapRef)
+                            })
+                            // A heap tuple is its object's word (#1170).
+                            .or_else(|| {
+                                matches!(apply_ty_prune(checker.subst(), t), Ty::Tuple(ref items) if !items.is_empty())
                                     .then_some(crate::mir::MirTy::HeapRef)
                             })
                         };
