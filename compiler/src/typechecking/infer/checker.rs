@@ -17427,6 +17427,15 @@ impl Checker {
         }
     }
 
+    /// As [`Self::resolve_class_key`], also for this module's own enums:
+    /// the key an instance head names (`Show__m::Mode__show`, #1223).
+    pub fn resolve_instance_head_key(&self, name: &str) -> Option<String> {
+        self.resolve_class_key(name).or_else(|| {
+            let qualified = self.qualify_module_name(name);
+            (qualified != name && self.enums.contains_key(&qualified)).then_some(qualified)
+        })
+    }
+
     fn class_member_fqn(&self, owner: &str, member: &str) -> String {
         let owner = self
             .resolve_class_key(owner)

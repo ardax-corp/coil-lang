@@ -5330,12 +5330,12 @@ impl Compiler {
                     "bool" => Ty::Con("bool".into()),
                     "byte" => Ty::Con("byte".into()),
                     "void" => Ty::Con("unit".into()),
-                    // Same class key the checker's instance head uses, so an
-                    // imported class names `Trait__module::Class__method`.
+                    // Same class or enum key the checker's instance head
+                    // uses, so an imported type names `Trait__module::Type__method`.
                     _ if !self.checker.generics().generic_type_ctors.contains_key(*name) => {
                         Ty::Con(
                             self.checker
-                                .resolve_class_key(name)
+                                .resolve_instance_head_key(name)
                                 .unwrap_or_else(|| name.to_string()),
                         )
                     }
@@ -5346,7 +5346,7 @@ impl Compiler {
                 let head = match name.to_ascii_lowercase().as_str() {
                     "option" => Ty::Con(common::BUILTIN_OPTION_ENUM.into()),
                     "result" => Ty::Con(common::BUILTIN_RESULT_ENUM.into()),
-                    _ => Ty::Con(name.to_string()),
+                    _ => Ty::Con(self.checker.resolve_instance_head_key(name).unwrap_or_else(|| name.to_string())),
                 };
                 let arg_tys: Vec<Ty> = args
                     .iter()
