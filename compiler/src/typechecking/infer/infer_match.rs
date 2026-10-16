@@ -266,7 +266,10 @@ impl Checker {
                             bare_key = key;
                             &bare_key
                         }
-                        _ => return expected_ty.clone(),
+                        _ => {
+                            self.bind_unchecked_payload(payload);
+                            return expected_ty.clone();
+                        }
                     }
                 } else {
                     enum_name
@@ -295,6 +298,7 @@ impl Checker {
                             ),
                             pattern_range.clone(),
                         ));
+                        self.bind_unchecked_payload(payload);
                         return expected_ty.clone();
                     }
                 };
@@ -313,6 +317,7 @@ impl Checker {
                         ),
                         pattern_range.clone(),
                     ));
+                    self.bind_unchecked_payload(payload);
                     return expected_ty.clone();
                 }
                 let _arity = self
@@ -340,6 +345,7 @@ impl Checker {
                         _ => (false, false),
                     };
                 if !shape_matches {
+                    self.bind_unchecked_payload(payload);
                     if same_shape_with_wrong_arity {
                         return self.error_with_help(
                             ErrorCode::GenericTypeError,
@@ -398,6 +404,7 @@ impl Checker {
                             std::collections::HashMap::with_capacity(fields.len());
                         for pf in fields {
                             if pattern_site.insert(pf.name, &pf.pattern).is_some() {
+                                self.bind_unchecked_payload(payload);
                                 return self.error_with_help(
                                     ErrorCode::DuplicateField,
                                     format!(
@@ -412,10 +419,16 @@ impl Checker {
                         let EnumVariantPayloadTy::Record(decl_fields) = &expected_payload else {
                             unreachable!()
                         };
-                        for (decl_name, decl_ty) in decl_fields.iter() {
+                        for (i, (decl_name, decl_ty)) in decl_fields.iter().enumerate() {
                             let sub_pat = match pattern_site.get(decl_name.as_str()) {
                                 Some(p) => *p,
                                 None => {
+                                    // Fields not checked yet still bind.
+                                    for pf in fields {
+                                        if !decl_fields[..i].iter().any(|(dn, _)| dn == pf.name) {
+                                            self.bind_unchecked_field(pf);
+                                        }
+                                    }
                                     return self.error_with_help(
                                         ErrorCode::MissingField,
                                         format!(
@@ -467,6 +480,53 @@ impl Checker {
                 // arm as unreachable.)
                 expected_ty.clone()
             }
+        }
+    }
+
+    /// Declare every name a constructor pattern's `payload` binds with a
+    /// fresh type, for a pattern that failed to check (#1394): its arm
+    /// body still sees them, so their uses add no E0100 to the real error.
+    fn bind_unchecked_payload(&mut self, payload: &parser::ast::PatternPayload) {
+        use parser::ast::PatternPayload;
+        match payload {
+            PatternPayload::Unit => {}
+            PatternPayload::Tuple(parts) => {
+                for part in parts {
+                    self.bind_unchecked(part, true);
+                }
+            }
+            PatternPayload::Record(fields) => {
+                for field in fields {
+                    self.bind_unchecked_field(field);
+                }
+            }
+        }
+    }
+
+    /// [`Self::bind_unchecked_payload`] for one record field; shorthand
+    /// `{ w }` always binds.
+    fn bind_unchecked_field(&mut self, field: &parser::ast::PatternField) {
+        let shorthand = matches!(field.pattern.1, Pattern::Binding { name } if name == field.name);
+        self.bind_unchecked(&field.pattern, !shorthand);
+    }
+
+    /// [`Self::bind_unchecked_payload`] for one sub-pattern. A bare unit
+    /// case (`None`) binds nothing, by the rule of [`Self::resolve_bare_pattern`].
+    fn bind_unchecked(&mut self, pattern: &PatternOutput, bare_unit: bool) {
+        let (span, pat) = pattern;
+        match pat {
+            Pattern::Binding { name } => {
+                let is_case = bare_unit
+                    && span.start != span.end
+                    && name.starts_with(|c: char| c.is_ascii_uppercase())
+                    && !self.enums_declaring_variant(name).is_empty();
+                if !is_case {
+                    let ty = Ty::Var(self.counter.fresh());
+                    self.env.insert_top(name.to_string(), Scheme::mono(ty));
+                }
+            }
+            Pattern::Constructor { payload, .. } => self.bind_unchecked_payload(payload),
+            Pattern::Wildcard | Pattern::Default | Pattern::Integer(_) => {}
         }
     }
 
