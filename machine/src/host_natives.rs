@@ -1197,8 +1197,12 @@ mod tests {
             Some(common::RESULT_UNIT_PROBE_NATIVE)
         );
         assert_eq!(
-            names.last().map(String::as_str),
+            names.get(names.len() - 2).map(String::as_str),
             Some(common::FFI_READ_INTS_NATIVE)
+        );
+        assert_eq!(
+            names.last().map(String::as_str),
+            Some(common::VALUES_EQ_SHAPED_NATIVE)
         );
         assert_eq!(attach, 119);
     }
@@ -1506,6 +1510,10 @@ mod tests {
             registrations.get(end + 24).map(|(n, _)| n.as_str()),
             Some(common::FFI_READ_INTS_NATIVE)
         );
-        assert_eq!(registrations.len(), end + 25);
+        assert_eq!(
+            registrations.get(end + 25).map(|(n, _)| n.as_str()),
+            Some(common::VALUES_EQ_SHAPED_NATIVE)
+        );
+        assert_eq!(registrations.len(), end + 26);
     }
 }
