@@ -227,51 +227,10 @@ impl ConvoyPlan {
 
 fn fused_cmp_dests(func: &MirFunc) -> Vec<bool> {
     let mut fused = vec![false; func.types.len()];
-    for block in &func.blocks {
-        let Some(Terminator::Br { cond, .. }) = &block.term else {
-            continue;
-        };
-        let dest = block.insts.iter().find_map(|inst| match inst {
-            MirInst::Cmp { dest, .. } if dest == cond => Some(*dest),
-            _ => None,
-        });
-        let Some(dest) = dest else {
-            continue;
-        };
-        if cmp_used_outside_term(func, dest, block.id) {
-            continue;
-        }
-        fused[dest.index()] = true;
+    for d in super::emit::term_cmp_dests(func).into_iter().flatten() {
+        fused[d.index()] = true;
     }
     fused
-}
-
-fn cmp_used_outside_term(func: &MirFunc, dest: ValueId, home: BlockId) -> bool {
-    for b in &func.blocks {
-        for inst in &b.insts {
-            if inst.operands().contains(&dest) {
-                return true;
-            }
-        }
-        match &b.term {
-            Some(Terminator::Br { cond, .. }) if *cond == dest && b.id != home => return true,
-            Some(Terminator::Return { lo, hi }) => {
-                if lo.is_some_and(|v| v == dest) || hi.is_some_and(|v| v == dest) {
-                    return true;
-                }
-            }
-            Some(Terminator::JumpIfMatch {
-                scrutinee,
-                payloads,
-                ..
-            })
-                if (*scrutinee == dest || payloads.contains(&dest)) => {
-                    return true;
-                }
-            _ => {}
-        }
-    }
-    false
 }
 
 fn term_uses(term: &Terminator) -> Vec<ValueId> {
