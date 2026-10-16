@@ -2336,3 +2336,176 @@ impl<'expr> Expression<'expr> {
         }
     }
 }
+
+/// Move every span in `node` and below `delta` bytes later: node spans and
+/// the ones [`Expression::for_each_child_mut`] does not reach (patterns,
+/// contracts, effects, `where` arguments).
+pub fn shift_spans(node: &mut Output<'_>, delta: usize) {
+    shift_span(&mut node.0, delta);
+    node.1.shift_own_spans(delta);
+    node.1.for_each_child_mut(&mut |child| shift_spans(child, delta));
+}
+
+fn shift_span(span: &mut SimpleSpan, delta: usize) {
+    *span = SimpleSpan::from(span.start + delta..span.end + delta);
+}
+
+fn shift_pattern(pattern: &mut PatternOutput<'_>, delta: usize) {
+    shift_span(&mut pattern.0, delta);
+    if let Pattern::Constructor { payload, .. } = &mut pattern.1 {
+        match payload {
+            PatternPayload::Unit => {}
+            PatternPayload::Tuple(parts) => parts.iter_mut().for_each(|p| shift_pattern(p, delta)),
+            PatternPayload::Record(fields) => fields.iter_mut().for_each(|f| shift_pattern(&mut f.pattern, delta)),
+        }
+    }
+}
+
+fn shift_contracts(contracts: &mut [Contract<'_>], delta: usize) {
+    for c in contracts {
+        shift_span(&mut c.span, delta);
+        shift_spans(&mut c.expr, delta);
+    }
+}
+
+fn shift_where(constraints: &mut [WhereConstraint<'_>], delta: usize) {
+    for c in constraints {
+        c.args.iter_mut().for_each(|a| shift_spans(a, delta));
+    }
+}
+
+impl Expression<'_> {
+    /// [`shift_spans`] for what is not a child node. No `_` arm: a new
+    /// variant with a span outside its child nodes must shift it here.
+    fn shift_own_spans(&mut self, delta: usize) {
+        use Expression as E;
+        match self {
+            E::AttrDecl { where_constraints, .. } => shift_where(where_constraints, delta),
+            E::Function { where_constraints, effects, contracts, .. } => {
+                shift_where(where_constraints, delta);
+                if let Some(effects) = effects {
+                    shift_span(&mut effects.span, delta);
+                }
+                shift_contracts(contracts, delta);
+            }
+            E::Loop { contracts, .. } => shift_contracts(contracts, delta),
+            E::Class { invariants, .. } => shift_contracts(invariants, delta),
+            E::IfLet { then_arm, else_arm, .. } => {
+                shift_pattern(&mut then_arm.pattern, delta);
+                shift_pattern(&mut else_arm.pattern, delta);
+            }
+            E::WhileLet { then_arm, on_miss, .. } => {
+                shift_pattern(&mut then_arm.pattern, delta);
+                shift_pattern(&mut on_miss.pattern, delta);
+            }
+            E::Match { arms, .. } => arms.iter_mut().for_each(|arm| shift_pattern(&mut arm.pattern, delta)),
+            E::Noop(..)
+            | E::Integer(..)
+            | E::Float(..)
+            | E::String(..)
+            | E::Bool(..)
+            | E::Module(..)
+            | E::Argument { .. }
+            | E::Spread(..)
+            | E::TypeFnSig { .. }
+            | E::DeriveDecl { .. }
+            | E::FnMacroDecl { .. }
+            | E::MacroCall { .. }
+            | E::Quote { .. }
+            | E::Identifier(..)
+            | E::Type(..)
+            | E::TypeApp { .. }
+            | E::TypeProjection { .. }
+            | E::TypeFun(..)
+            | E::Return(..)
+            | E::ImplicitReturn(..)
+            | E::Raise(..)
+            | E::Panic(..)
+            | E::Yield(..)
+            | E::YieldFrom(..)
+            | E::Resume(..)
+            | E::Try(..)
+            | E::Coalesce(..)
+            | E::Cast(..)
+            | E::TypeOf(..)
+            | E::OptionalAccess(..)
+            | E::Negate(..)
+            | E::Not(..)
+            | E::LogicalNot(..)
+            | E::Positive(..)
+            | E::Default(..)
+            | E::CompoundAssign(..)
+            | E::Adjust { .. }
+            | E::Add(..)
+            | E::Sub(..)
+            | E::Mul(..)
+            | E::Div(..)
+            | E::Mod(..)
+            | E::Pow(..)
+            | E::Shl(..)
+            | E::Shr(..)
+            | E::Xor(..)
+            | E::And(..)
+            | E::BitAnd(..)
+            | E::Or(..)
+            | E::BitOr(..)
+            | E::Eq(..)
+            | E::Neq(..)
+            | E::Leq(..)
+            | E::Geq(..)
+            | E::Le(..)
+            | E::Gt(..)
+            | E::Range { .. }
+            | E::List(..)
+            | E::Array(..)
+            | E::Expr(..)
+            | E::Group(..)
+            | E::ExprStatement(..)
+            | E::Statement(..)
+            | E::Fragment(..)
+            | E::Block(..)
+            | E::Program(..)
+            | E::Defer { .. }
+            | E::Assignment(..)
+            | E::Tuple(..)
+            | E::Dict(..)
+            | E::Index(..)
+            | E::Readonly(..)
+            | E::QualifiedAccess { .. }
+            | E::StaticDecl { .. }
+            | E::Dload(..)
+            | E::Done(..)
+            | E::Declare(..)
+            | E::Invoke(..)
+            | E::Use { .. }
+            | E::ExternBlock { .. }
+            | E::Branch(..)
+            | E::If(..)
+            | E::Call { .. }
+            | E::NamedArg(..)
+            | E::Break
+            | E::Continue
+            | E::Variable(..)
+            | E::Constant(..)
+            | E::LetDestructure { .. }
+            | E::Implementation { .. }
+            | E::Field { .. }
+            | E::Method(..)
+            | E::Member(..)
+            | E::Access(..)
+            | E::Instantiate(..)
+            | E::TypeAlias { .. }
+            | E::TestCase { .. }
+            | E::EnumDecl { .. }
+            | E::ExternStruct(..)
+            | E::EnumVariant { .. }
+            | E::Construct { .. }
+            | E::Forall { .. }
+            | E::TypeClass { .. }
+            | E::TypeClassImpl { .. }
+            | E::AssocTypeDecl { .. }
+            | E::AssocTypeDef { .. }
+            | E::Lambda { .. } => {}
+        }
+    }
+}
