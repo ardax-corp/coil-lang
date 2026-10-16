@@ -14,7 +14,7 @@ use crate::mutate::MutateOptions;
 use crate::mutate::job::Isolation;
 use crate::mutate::sites::Operator;
 use crate::order::{Order, fresh_seed, parse_seed};
-use crate::runner::{Report, TestOptions};
+use crate::runner::{DocTests, Report, TestOptions};
 
 /// Default test root when no path is given.
 pub const TESTS_DIR: &str = "tests";
@@ -51,7 +51,12 @@ with an error code their header declares (`// Expected: E0209 — why`).\n\
 \n\
 `--seed N` shuffles files and cases (decimal or 0x hex; default: random,\n\
 or $COIL_TEST_SEED; the header prints the seed). `--no-shuffle` keeps\n\
-sorted path order and source order."
+sorted path order and source order.\n\
+\n\
+Code examples in `///` docs run as doc-tests (`doc: path::item (file:line)`):\n\
+those of the test files and of the project sources they import. A fence\n\
+opened with ``` or ```coil is an example (```text is not); `ignore`,\n\
+`no_run` and `should_panic` tags apply. `--no-doc-tests` skips them."
 )]
 struct TestCli {
     #[command(flatten)]
@@ -93,6 +98,13 @@ struct TestCli {
     /// NDJSON events on stdout (start, file, summary, error)
     #[arg(long)]
     json: bool,
+    /// Do not run the code examples in `///` docs
+    #[arg(long, conflicts_with = "doc_tests_only")]
+    no_doc_tests: bool,
+    /// Only run the code examples in the `///` docs of every file under PATH
+    /// (the files are parsed, not compiled)
+    #[arg(long)]
+    doc_tests_only: bool,
     /// Test root (default: ./tests)
     #[arg(value_name = "PATH")]
     path: Option<String>,
@@ -210,6 +222,13 @@ fn parse_test(args: &[String]) -> Result<Parsed, String> {
         coverage_out: cli.coverage_out,
         per_test_out: cli.coverage_per_test,
         contract_runs: cli.contract_runs,
+        doc_tests: if cli.no_doc_tests {
+            DocTests::Off
+        } else if cli.doc_tests_only {
+            DocTests::Only
+        } else {
+            DocTests::On
+        },
     })?;
     Ok(Parsed::Run(config, test))
 }
@@ -241,6 +260,8 @@ fn parse_mutate(expanded: &[String], original: &[String]) -> Result<Parsed, Stri
         coverage_out: None,
         per_test_out: None,
         contract_runs: cli.contract_runs,
+        // Mutants are scored against test cases; doc examples are not run.
+        doc_tests: DocTests::Off,
     })?;
     let forwarded = original.get(2..).unwrap_or(&[]).to_vec();
     let operators = match cli.operators {
@@ -283,6 +304,7 @@ struct RunParts {
     coverage_out: Option<PathBuf>,
     per_test_out: Option<PathBuf>,
     contract_runs: u32,
+    doc_tests: DocTests,
 }
 
 fn assemble(parts: RunParts) -> Result<(ReportConfig, Box<TestOptions>), String> {
@@ -326,6 +348,7 @@ fn assemble(parts: RunParts) -> Result<(ReportConfig, Box<TestOptions>), String>
             } else {
                 Report::Human
             },
+            doc_tests: parts.doc_tests,
         }),
     ))
 }
