@@ -52,3 +52,42 @@ test("the new value of a reassigned local stays alive") {
     assert!(!gone(w));
     assert!(v.len() == 3);
 }
+
+test("a local rebound in a loop drops its value from before the loop") {
+    let v = Vec::from([1, 2, 3]);
+    let w = weak(v);
+    let i = 0;
+    while i < 2 {
+        v = Vec::from([i]);
+        i = i + 1;
+    }
+    collect();
+    assert!(gone(w));
+    assert!(v.len() == 1);
+}
+
+test("each loop rebind drops the previous value") {
+    let v = Vec::from([1, 2, 3]);
+    let first = weak(v);
+    let i = 0;
+    let ok = true;
+    while i < 3 {
+        let old = weak(v);
+        v = Vec::from([i]);
+        collect();
+        ok = ok && gone(old);
+        i = i + 1;
+    }
+    assert!(ok && gone(first));
+    assert!(v.len() == 1);
+}
+
+test("a rebind on one branch drops the old value") {
+    let v = Vec::from([1, 2, 3]);
+    let w = weak(v);
+    if v.len() == 3 {
+        v = Vec::new();
+    }
+    collect();
+    assert!(gone(w));
+}

@@ -58,6 +58,7 @@ pub fn emit_lir_with_aliases(
     let plan = plan;
     let regs = coalesce_latch_overwrite(func, regs, &plan.need_slot);
     let cleared = super::emit::cleared_words(func, &regs, &plan.need_slot);
+    let entry_clears = super::emit::entry_clears(func, &regs, &plan.need_slot);
     let max_reg = plan
         .need_slot
         .iter()
@@ -172,6 +173,7 @@ pub fn emit_lir_with_aliases(
             reserved: &reserved,
             pool,
             loc: term_loc,
+            clears: entry_clears.get(&block.id).map(Vec::as_slice).unwrap_or(&[]),
         })?;
     }
     Ok(out)
@@ -2232,6 +2234,8 @@ struct EmitTermArgs<'args> {
     reserved: &'args std::collections::HashSet<u32>,
     pool: &'args mut Vec<u64>,
     loc: DebugLoc,
+    /// Registers zeroed after a `Jump`'s φ copies (`emit::entry_clears`).
+    clears: &'args [u8],
 }
 
 /// The call `block` ends with when it is a tail call: its result is what
@@ -2258,6 +2262,7 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
         reserved,
         pool,
         loc,
+        clears,
     } = args;
 
     let Some(term) = &block.term else {
@@ -2266,6 +2271,9 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
     match term {
         Terminator::Jump { dest } => {
             emit_phi_moves(out, func, block.id, *dest, regs, scratch, loc);
+            for &r in clears {
+                super::emit::push_clear_word(out, r);
+            }
             if !is_fallthrough(func, block.id, *dest) {
                 out.push(IlOp::Jump {
                     kind: IlJumpKind::Unconditional,
