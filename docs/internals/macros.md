@@ -167,11 +167,14 @@ discover_all → expand_user_macros → (discover newly used modules) → typech
    module whose `CachedAst::macro_decls` declares it; a built-in derive name
    that is not imported resolves to the embedded `derive` module (which only
    the expansion program imports, so it is never compiled into the user's
-   program). A use in macro output also resolves to its provider's own
-   macros, so `quote expr { square!(…) }` needs no import where it lands.
+   program). A use in macro output (`PendingMacro::from_provider`) that the
+   file it lands in does not import resolves to its provider's own macros,
+   then to the macros the provider imports with its own top-level `use`, so
+   `quote expr { square!(…) }` needs no import where it lands (#1407).
    Nothing found: "Cannot derive unknown or non-derivable trait" /
-   "Unknown attribute" / "unknown macro `name!`". A module using its own
-   macro is a staging error.
+   "Unknown attribute" / "unknown macro `name!`" (for a call in macro output
+   the help names the provider to declare or import it in). A module using
+   its own macro is a staging error.
 3. **Encode** each call's input as one string (`macros::encode::Wire`):
    length-prefixed fields (`<len>:<bytes>`, lists as a count then their
    items) in the order the model's constructors take them, then the
