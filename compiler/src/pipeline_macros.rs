@@ -173,9 +173,12 @@ impl Pipeline {
             return false;
         }
         let results = self.run_expansions(&jobs);
+        // Calls in expression / statement position are replaced in one walk
+        // per file once every output is parsed.
+        let mut replacements: HashMap<PathBuf, CallReplacements> = HashMap::new();
         for (job, result) in jobs.iter().zip(results) {
             let msgs = match result {
-                Ok(text) => self.splice(job, &text),
+                Ok(text) => self.splice(job, &text, &mut replacements),
                 Err(err) => vec![Message::error(
                     ErrorCode::GenericTypeError,
                     format!("{} `{}` failed: {err}", job.decl.kind.describe(), job.decl.name),
@@ -184,6 +187,11 @@ impl Pipeline {
             };
             if let Some(cached) = self.ast_cache.get_mut(&job.file) {
                 cached.push_expand_messages(msgs);
+            }
+        }
+        for (file, mut calls) in replacements {
+            if let Some(ast) = self.ast_cache.get_mut(&file).and_then(|c| c.ast_mut()) {
+                replace_calls(ast, &mut calls);
             }
         }
         // Generated code may `use` modules nothing else imported.
@@ -675,10 +683,11 @@ impl Pipeline {
             .collect()
     }
 
-    /// Parse one macro's output and put it into the file's AST.
-    fn splice(&mut self, job: &Job, text: &str) -> Vec<Message> {
+    /// Parse one macro's output and put it into the file's AST (a call in
+    /// expression or statement position: into `replacements`).
+    fn splice(&mut self, job: &Job, text: &str, replacements: &mut HashMap<PathBuf, CallReplacements>) -> Vec<Message> {
         if matches!(job.pending.position, CallPosition::Expr | CallPosition::Stmt) {
-            return self.splice_call(job, text);
+            return self.splice_call(job, text, replacements);
         }
         let mut messages = Vec::new();
         let module = self.namespace_for(&job.file);
@@ -811,8 +820,8 @@ impl Pipeline {
 
     /// Splice a call's output in expression or statement position. The
     /// output parses inside a function (`return (…);` for an expression, the
-    /// body for statements) and replaces the call.
-    fn splice_call(&mut self, job: &Job, text: &str) -> Vec<Message> {
+    /// body for statements) and goes into `replacements`, to replace the call.
+    fn splice_call(&mut self, job: &Job, text: &str, replacements: &mut HashMap<PathBuf, CallReplacements>) -> Vec<Message> {
         let mut messages = Vec::new();
         let module = self.namespace_for(&job.file);
         let stmt = job.pending.position == CallPosition::Stmt;
@@ -892,8 +901,12 @@ impl Pipeline {
             }
             Replacement::Expr(value)
         };
-        let mut replacement = Some(replacement);
-        replace_call(ast, job.pending.target, &mut replacement);
+        let calls = replacements.entry(job.file.clone()).or_default();
+        // A second output for one call replaces what the first put there.
+        if calls.contains_key(&job.pending.target) {
+            replace_calls(ast, calls);
+        }
+        calls.insert(job.pending.target, replacement);
         messages
     }
 
@@ -957,31 +970,43 @@ fn function_body(program: Expression<'_>) -> Option<Vec<Output<'_>>> {
     }
 }
 
-/// Replace the `name!(…)` call at `target` (the expression, or the whole
-/// `name!(…);` statement in its block).
-fn replace_call<'a>(node: &mut Output<'a>, target: parser::SimpleSpan, replacement: &mut Option<Replacement<'a>>) {
-    if replacement.is_none() {
+/// Outputs of a file's calls by the call's span.
+type CallReplacements = HashMap<parser::SimpleSpan, Replacement<'static>>;
+
+/// Replace each `name!(…)` call in `calls` (the expression, or the whole
+/// `name!(…);` statement in its block), the first in tree order. Each is
+/// taken out of `calls` when it lands. A replaced call's subtree is not
+/// searched: the calls in it went with it.
+fn replace_calls<'a>(node: &mut Output<'a>, calls: &mut HashMap<parser::SimpleSpan, Replacement<'a>>) {
+    if calls.is_empty() {
         return;
     }
-    if node.0 == target && matches!(node.1.as_ref(), Expression::MacroCall { .. }) {
-        if matches!(replacement, Some(Replacement::Expr(_))) {
-            let Some(Replacement::Expr(mut value)) = replacement.take() else { unreachable!() };
-            value.0 = target;
-            *node = value;
-        }
-        return;
-    }
-    if matches!(replacement, Some(Replacement::Stmts(_)))
-        && let Expression::Block(items) = node.1.as_mut()
-        && let Some(at) = items
-            .iter()
-            .position(|i| crate::attrs::statement_call(i).is_some_and(|c| c.0 == target))
+    if matches!(node.1.as_ref(), Expression::MacroCall { .. })
+        && matches!(calls.get(&node.0), Some(Replacement::Expr(_)))
     {
-        let Some(Replacement::Stmts(stmts)) = replacement.take() else { unreachable!() };
-        items.splice(at..=at, stmts);
+        let Some(Replacement::Expr(mut value)) = calls.remove(&node.0) else { unreachable!() };
+        value.0 = node.0;
+        *node = value;
         return;
     }
-    node.1.for_each_child_mut(&mut |c| replace_call(c, target, replacement));
+    if let Expression::Block(items) = node.1.as_mut() {
+        let mut at = 0;
+        while at < items.len() {
+            let target = crate::attrs::statement_call(&items[at]).map(|c| c.0);
+            if let Some(target) = target
+                && matches!(calls.get(&target), Some(Replacement::Stmts(_)))
+            {
+                let Some(Replacement::Stmts(stmts)) = calls.remove(&target) else { unreachable!() };
+                let n = stmts.len();
+                items.splice(at..=at, stmts);
+                // The output's own calls run next round.
+                at += n;
+                continue;
+            }
+            at += 1;
+        }
+    }
+    node.1.for_each_child_mut(&mut |c| replace_calls(c, calls));
 }
 
 /// Every `name!(…)` call under `node` by its span; the first in tree order
