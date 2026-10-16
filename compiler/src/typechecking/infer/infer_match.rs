@@ -41,6 +41,7 @@ impl Checker {
             );
         }
 
+        let mut pattern_failed = false;
         for arm in arms {
             self.push_scope();
 
@@ -57,6 +58,7 @@ impl Checker {
                 );
                 self.messages.push(msg);
             }
+            let msgs_before = self.messages.len();
             let pat_ty = self.infer_pattern(&arm.pattern.1, &resolved_scrutinee, &pattern_range);
 
             // Narrow an Identifier scrutinee to the matched variant so
@@ -119,6 +121,9 @@ impl Checker {
                 "match pattern against scrutinee",
             );
 
+            // A pattern that failed to check has no coherent coverage
+            // shape; skip the exhaustiveness pass for this match.
+            pattern_failed |= self.messages[msgs_before..].iter().any(|m| matches!(m.kind(), reporting::MessageKind::ERROR));
             let arm_cov = self.arm_coverage(&arm.pattern.1, &pattern_range);
             coverage.push(arm_cov);
 
@@ -151,11 +156,13 @@ impl Checker {
         self.current_match_lhs = prev;
 
         // Post-pass exhaustiveness re-applies the current subst to scrutinee_ty.
-        self.pending_exhaustive.push(PendingExhaustive {
-            scrutinee_ty: resolved_scrutinee,
-            arms: coverage,
-            match_range: range,
-        });
+        if !pattern_failed {
+            self.pending_exhaustive.push(PendingExhaustive {
+                scrutinee_ty: resolved_scrutinee,
+                arms: coverage,
+                match_range: range,
+            });
+        }
 
         result_ty
     }
