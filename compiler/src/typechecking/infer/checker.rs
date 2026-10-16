@@ -4054,9 +4054,8 @@ impl Checker {
                 // target is a *static-length* array and the
                 // index is a literal integer.
                 if let ArrayLength::Static(n) = length
-                    && let Expression::Integer(idx) = index_expr.1.as_ref()
+                    && let Some(i) = Self::literal_index(index_expr)
                 {
-                    let i = *idx;
                     if i < 0 || (i as usize) >= *n {
                         let _ = self.error_with_help(
                             ErrorCode::IndexOutOfBounds,
@@ -4076,8 +4075,7 @@ impl Checker {
             }
             Ty::Tuple(tys) => {
                 // Tuple index: constant OOB diagnostic; dynamic OOB → fresh ty (runtime -1).
-                if let Expression::Integer(idx) = index_expr.1.as_ref() {
-                    let i = *idx;
+                if let Some(i) = Self::literal_index(index_expr) {
                     if i < 0 || (i as usize) >= tys.len() {
                         let _ = self.error_with_help(
                             ErrorCode::IndexOutOfBounds,
@@ -4112,6 +4110,18 @@ impl Checker {
                 );
                 Ty::Var(self.counter.fresh())
             }
+        }
+    }
+
+    /// A literal index, negative ones included (`a[-1]`, #1173).
+    fn literal_index(index_expr: &Output) -> Option<i64> {
+        match index_expr.1.as_ref() {
+            Expression::Integer(i) => Some(*i),
+            Expression::Negate(inner) => match inner.1.as_ref() {
+                Expression::Integer(i) => i.checked_neg(),
+                _ => None,
+            },
+            _ => None,
         }
     }
 
