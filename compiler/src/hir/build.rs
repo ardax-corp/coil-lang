@@ -1265,18 +1265,20 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 let id = self.node_id(node);
                 let overload = id.and_then(|i| self.sidecar.overload(i)).map(|o| o.candidate_id);
                 let def = id.and_then(|i| self.sidecar.def_id(i));
-                let args = match fields {
+                let mut args = match fields {
                     EnumConstructPayload::Tuple(items) => self.exprs(b, items),
                     _ => Vec::new(),
                 };
-                self.emit(
+                let ahead = self.named_args_in_source_order(b, span_of(node), &mut args);
+                let call = self.emit(
                     b,
                     node,
                     HirKind::Call {
                         callee: Callee::Named { name: format!("{enum_name}::{variant_name}"), def, overload },
                         args,
                     },
-                )
+                );
+                self.after(b, span_of(node), ahead, call)
             }
             // `Class::field` of a class `static`: a static read.
             E::Construct {
@@ -1799,10 +1801,23 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 self.after(b, span_of(node), stmts, call)
             }
             E::Access(recv, method) => {
-                let recv = self.expr(b, recv);
+                let mut recv = self.expr(b, recv);
+                let mut args = self.exprs(b, args);
+                let mut stmts = self.named_args_in_source_order(b, span_of(node), &mut args);
+                // The receiver still runs first: one that is not a plain
+                // read goes into a temp ahead of the argument temps.
+                if !stmts.is_empty() && !Self::place(b, recv) {
+                    let span = span_of(node);
+                    let ty = self.ty_at(b, recv);
+                    let t = b.temp("recv", ty.clone());
+                    let init = self.synth(b, span, HirKind::Let { local: t, init: Some(recv) }, Some(coil_ty::unit()));
+                    stmts.insert(0, init);
+                    recv = self.synth(b, span, HirKind::Local(t), ty);
+                }
                 let mut all = vec![recv];
-                all.extend(self.exprs(b, args));
-                self.emit(b, node, HirKind::Call { callee: Callee::Method { name: method.to_string() }, args: all })
+                all.extend(args);
+                let call = self.emit(b, node, HirKind::Call { callee: Callee::Method { name: method.to_string() }, args: all });
+                self.after(b, span_of(node), stmts, call)
             }
             _ => {
                 let callee = self.expr(b, name);
@@ -1919,6 +1934,16 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             }
         }
         stmts
+    }
+
+    /// A read of a local, a global or a field of one: a method receiver
+    /// that names its object rather than computing it.
+    fn place(b: &BodyBuilder, a: HirId) -> bool {
+        match &b.body.exprs[a.0 as usize].kind {
+            HirKind::Local(_) | HirKind::Global { .. } => true,
+            HirKind::Field { base, .. } => Self::place(b, *base),
+            _ => false,
+        }
     }
 
     /// `call` run after `stmts` (the source-order argument temps).

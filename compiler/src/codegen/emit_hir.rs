@@ -2052,6 +2052,40 @@ impl Compiler {
                 }
                 continue;
             }
+            // `recv.m(b: 2, a: 1)` (#1380): named arguments into parameter
+            // order after the receiver.
+            if let HirKind::Call { callee: Callee::Method { name }, args } = &body.exprs[i].kind
+                && args.iter().any(|&a| matches!(body.expr(a).kind, HirKind::Named { .. }))
+            {
+                let names = self.hir_method_param_names(body, HirId(i as u32), name, args)?;
+                let args = args.clone();
+                let b = out.get_or_insert_with(|| body.clone());
+                let mut slots: Vec<Option<HirId>> = vec![None; names.len()];
+                let mut next = 0usize;
+                for &arg in &args[1..] {
+                    let (k, value) = match &b.expr(arg).kind {
+                        HirKind::Named { name, value } => (names.iter().position(|p| p == name).ok_or("call-argument")?, *value),
+                        HirKind::Spread(_) => return Err("call-argument"),
+                        _ => {
+                            while next < slots.len() && slots[next].is_some() {
+                                next += 1;
+                            }
+                            (next, arg)
+                        }
+                    };
+                    let slot = slots.get_mut(k).ok_or("call-argument")?;
+                    if slot.is_some() {
+                        return Err("call-argument");
+                    }
+                    *slot = Some(value);
+                }
+                let mut ordered = vec![args[0]];
+                ordered.extend(slots.into_iter().collect::<Option<Vec<_>>>().ok_or("call-argument")?);
+                if let HirKind::Call { args, .. } = &mut b.exprs[i].kind {
+                    *args = ordered;
+                }
+                continue;
+            }
             let HirKind::Call { callee: Callee::Named { name, .. }, args } = &body.exprs[i].kind else {
                 continue;
             };
@@ -2063,7 +2097,10 @@ impl Compiler {
             if !shaped && !rest {
                 continue;
             }
-            if name.contains("::") {
+            // `C::s(b: 2, a: 1)`: a class's static method shapes as a free
+            // function does (#1380); other qualified names do not yet.
+            let static_method = name.rsplit_once("::").is_some_and(|(owner, _)| self.checker.has_impl(owner));
+            if name.contains("::") && !static_method {
                 return Err("call-argument");
             }
             let mut key = self.resolve_free_fn(name);
@@ -2213,6 +2250,34 @@ impl Compiler {
             }
         }
         Ok(out)
+    }
+
+    /// The declared parameter names (after `self`) of the inherent method
+    /// `recv.method(..)` calls, as the typechecker matched named arguments
+    /// against them; the overload it picked for an overloaded method.
+    fn hir_method_param_names(&self, body: &HirBody, call: HirId, method: &str, args: &[HirId]) -> Result<Vec<String>, &'static str> {
+        let recv = *args.first().ok_or("method-receiver")?;
+        let recv_ty = Self::hir_ty(body, recv).ok_or("method-receiver")?;
+        let recv_ty = crate::typechecking::ty::peel_constructor_refinement(apply_ty_prune(self.checker.subst(), recv_ty));
+        let owner = Checker::class_name_of_ty(&recv_ty).ok_or("call-argument")?;
+        let fqn = format!("{owner}::{method}");
+        if self.checker.is_overloaded(&fqn) {
+            let e = body.expr(call);
+            let (_, is_rest, id) = self.sidecar_overload(e.node, e.span.0, e.span.1).ok_or("call-argument")?;
+            let cand = self
+                .checker
+                .overload_candidates(&fqn)
+                .and_then(|cands| cands.iter().find(|c| c.id == id))
+                .ok_or("call-argument")?;
+            if is_rest || cand.is_rest {
+                return Err("call-argument");
+            }
+            return Ok(cand.param_names.clone());
+        }
+        if self.checker.fn_has_rest(&fqn) {
+            return Err("call-argument");
+        }
+        self.checker.fn_param_names(&fqn).map(<[String]>::to_vec).ok_or("call-argument")
     }
 
     /// `args` with each spread flattened: a literal's items in place (when

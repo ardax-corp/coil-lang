@@ -938,8 +938,11 @@ impl<'s> Formatter<'s> {
                     }
                 } else {
                     self.fmt_type(ty.as_ref().expect("fixed param"));
-                    self.push_str(" ");
-                    self.push_str(name);
+                    // Unnamed `fn(int) -> R` type parameter.
+                    if !name.is_empty() {
+                        self.push_str(" ");
+                        self.push_str(name);
+                    }
                 }
             }
 
@@ -1182,7 +1185,20 @@ impl<'s> Formatter<'s> {
                 }
             }
             Expression::TypeFun(arg, ret) => {
+                // `->` is right-associative and a `fn(..) -> R` return
+                // swallows a trailing arrow, so a function-typed domain
+                // keeps its parens: `(int -> int) -> int`.
+                let group = matches!(
+                    arg.1.as_ref(),
+                    Expression::TypeFun(..) | Expression::TypeFnSig { .. } | Expression::Forall { .. }
+                );
+                if group {
+                    self.push_str("(");
+                }
                 self.fmt_output(arg);
+                if group {
+                    self.push_str(")");
+                }
                 self.push_str(" -> ");
                 self.fmt_output(ret);
             }
