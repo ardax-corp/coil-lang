@@ -267,7 +267,14 @@ impl Checker {
         let ret_slot = Ty::Var(self.counter.fresh());
         let prev_ret = self.current_return_ty.replace(ret_slot.clone());
         let prev_in_test = std::mem::replace(&mut self.in_test_case, false);
+        // The enclosing body's `Result` / `Option` mode (a test case's
+        // `Result<unit, string>`) is not the lambda's: its `raise` / `?`
+        // type the lambda itself.
+        let prev_result_mode = self.fn_result_mode.take();
+        let prev_option_mode = self.fn_option_mode.take();
         let body_ty = self.infer(body);
+        self.fn_result_mode = prev_result_mode;
+        self.fn_option_mode = prev_option_mode;
         self.in_test_case = prev_in_test;
         self.unify(&ret_slot, &body_ty, &range, "lambda body");
         self.current_return_ty = prev_ret;
