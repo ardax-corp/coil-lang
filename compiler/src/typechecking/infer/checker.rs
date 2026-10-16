@@ -4055,18 +4055,17 @@ impl Checker {
                 // index is a literal integer.
                 if let ArrayLength::Static(n) = length
                     && let Some(i) = Self::literal_index(index_expr)
+                    && (i < 0 || (i as usize) >= *n)
                 {
-                    if i < 0 || (i as usize) >= *n {
-                        let _ = self.error_with_help(
-                            ErrorCode::IndexOutOfBounds,
-                            format!("array index {} out of bounds for array of length {}", i, n),
-                            range.clone(),
-                            Some(format!(
-                                "indices are valid in [0..{}); the array has length {}",
-                                n, n
-                            )),
-                        );
-                    }
+                    let _ = self.error_with_help(
+                        ErrorCode::IndexOutOfBounds,
+                        format!("array index {} out of bounds for array of length {}", i, n),
+                        range.clone(),
+                        Some(format!(
+                            "indices are valid in [0..{}); the array has length {}",
+                            n, n
+                        )),
+                    );
                 }
                 (**element).clone()
             }
