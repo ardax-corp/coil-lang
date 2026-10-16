@@ -92,6 +92,7 @@ impl Checker {
             virtual_modules: VirtualModules::new(),
             scope_bindings: HashMap::new(),
             disk_imports: HashSet::new(),
+            unresolved_imports: HashMap::new(),
             def_interner,
             schemes_by_def: HashMap::new(),
             local_defs: HashMap::new(),
@@ -1640,6 +1641,7 @@ impl Checker {
         // Implicit `use prelude::*; use prelude::ops::*;`, FFI stays out.
         self.inject_prelude_scope();
         self.disk_imports.clear();
+        self.unresolved_imports.clear();
         self.local_defs.clear();
         self.def_ids_by_node.clear();
         self.frame_local.clear();
@@ -4501,6 +4503,9 @@ impl Checker {
             );
         }
 
+        if let Some(ty) = self.unresolved_import_use(name, &range) {
+            return ty;
+        }
         self.record_ident_binding(name, &range);
         let scheme = self.env.lookup(name).cloned();
         match scheme {
@@ -5316,6 +5321,9 @@ impl Checker {
                 FfiBuiltin::Declare => self.infer_ffi_declare(arg_slice, range),
                 FfiBuiltin::Invoke => self.infer_ffi_invoke(arg_slice, range),
             };
+        }
+        if let Some(ty) = self.unresolved_import_use(&ident, &range) {
+            return ty;
         }
         if matches!(ident.as_str(), "dload" | "declare" | "invoke") {
             return self.error_with_help(
@@ -18803,6 +18811,31 @@ impl Checker {
         self.macro_imports = names;
     }
 
+    /// A value use of `name` bound by a `use` of something the module does
+    /// not define as a value (#1338): the error, else `None`.
+    fn unresolved_import_use(&mut self, name: &str, range: &Range<usize>) -> Option<Ty> {
+        let (fqn, var) = self.unresolved_imports.get(name)?.clone();
+        // Still the placeholder, still unsolved, and nothing defined since.
+        let bound = self.env.lookup(name).is_some_and(|s| s.bounds.is_empty() && s.ty == Ty::Var(var));
+        if !bound
+            || apply_ty_prune(&self.subst, &Ty::Var(var)) != Ty::Var(var)
+            || self.env.lookup(&fqn).is_some()
+            // A directory's one-item file: `use dir::item` names `dir::item::item`.
+            || fqn.rsplit_once("::").is_some_and(|(_, item)| self.env.lookup(&format!("{fqn}::{item}")).is_some())
+            || self.module_consts.contains_key(&fqn)
+            || !matches!(self.resolve_bare_constructor(name), BareCtor::None)
+        {
+            return None;
+        }
+        let (module, item) = fqn.rsplit_once("::").unwrap_or(("", fqn.as_str()));
+        Some(self.error_with_help(
+            ErrorCode::UnknownValue,
+            format!("Cannot find value `{item}` in module `{module}`"),
+            range.clone(),
+            Some(format!("`use {fqn}` imports nothing `{module}` defines as a value; check the name")),
+        ))
+    }
+
     fn reexport_module_item(&mut self, fqn: &str, local: &str) {
         if let Some(scheme) = self.env.lookup(fqn).cloned() {
             self.env.insert_top(local.to_string(), scheme);
@@ -18810,10 +18843,9 @@ impl Checker {
             self.env.insert_top(local.to_string(), Scheme::mono(ty));
             self.insert_const_binding(local.to_string());
         } else if self.env.lookup(local).is_none() && !self.macro_imports.contains(local) {
-            self.env.insert_top(
-                local.to_string(),
-                Scheme::mono(Ty::Var(self.counter.fresh())),
-            );
+            let var = self.counter.fresh();
+            self.env.insert_top(local.to_string(), Scheme::mono(Ty::Var(var)));
+            self.unresolved_imports.insert(local.to_string(), (fqn.to_string(), var));
         }
         // Only the exact defining FQN, never a `::{local}` suffix heuristic
         // (another module's generic with the same short name would mis-tag).

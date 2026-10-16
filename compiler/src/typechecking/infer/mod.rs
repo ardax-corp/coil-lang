@@ -197,6 +197,10 @@ pub struct Checker {
     /// Like virtual imports and module-visible named `fn`s, these are
     /// file-level globals — not lambda/defer captures — and must be rebound
     /// after `take_and_isolate`.
+    /// `use m::x` whose `x` was no value of `m` when the `use` ran: the
+    /// local, its FQN and the placeholder variable it is bound to. A value
+    /// use of it is an error unless `m::x` turned out to be a value (#1338).
+    unresolved_imports: HashMap<String, (String, TyVarId)>,
     disk_imports: HashSet<String>,
 
     /// Interned module / def identities. Persists across multi-file
