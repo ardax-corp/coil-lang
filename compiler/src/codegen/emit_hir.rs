@@ -2740,6 +2740,11 @@ impl Compiler {
             // `let r = a..b` or a copy of an unboxed range local, as
             // `expr_unboxed_range_kind`.
             let range = match &hir.expr(init).kind {
+                // A range over an open `T` is one word, its object (#1230).
+                HirKind::Make {
+                    kind: MakeKind::Range { .. },
+                    ..
+                } if hir.expr(init).ty.as_ref().is_some_and(|t| lower::is_open_range(&apply_ty_prune(self.checker.subst(), t))) => None,
                 HirKind::Make {
                     kind: MakeKind::Range { inclusive },
                     ..
