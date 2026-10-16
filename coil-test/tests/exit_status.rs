@@ -128,7 +128,7 @@ fn exit_from_main_passes_on_zero_and_fails_otherwise() {
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
         root.join("a_zero.hy"),
-        "use env::exit;\n\nfn main() {\n    println(\"before\");\n    exit(0);\n}\n",
+        "use env::exit;\n\nfn main() {\n    let _ = 1;\n    exit(0);\n}\n",
     )
     .unwrap();
     std::fs::write(
