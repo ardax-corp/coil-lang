@@ -6697,10 +6697,18 @@ impl Compiler {
         }
         self.hir_mir_why = None;
         self.hir_mir = self.hir_lower_mir(&flat, &mut emit, None);
+        // A lambda with a `defer` gets its cleanup pad, as a function does,
+        // so a cancelled task's unwinder runs it (#1194).
+        let prev_defers = std::mem::replace(&mut self.hir_defers, flat.exprs.iter().any(|e| matches!(e.kind, HirKind::Defer { .. })));
+        let pinned = self.finish_fn_defers(&name);
+        self.hir_defers = prev_defers;
         let arity = (ncap + body.params.len()) as u32;
         self.fn_arities.insert(name.clone(), (arity, false));
         self.bytecode.record_func_with_sp(name.clone(), Some(label), start, self.bytecode.len(), arity);
         self.attach_hir_mir();
+        if pinned {
+            self.bytecode.set_last_func_pinned();
+        }
         self.record_unboxed_class_fields();
         self.hir_mir_ctx = prev_ctx;
         self.hir_mir_unbox = prev_unbox;
