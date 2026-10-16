@@ -344,12 +344,47 @@ pub(super) fn cleared_words(func: &MirFunc, regs: &[u8], need_slot: &[bool]) -> 
                 && !fused_reads.contains(value)
                 && !func.params.contains(value)
                 && !live[b][k].iter().any(|v| slot(v) && regs[v.index()] == regs[value.index()])
+                && !copied_over_first(func, block, k, regs, regs[value.index()], &slot)
             {
                 out.insert(*dest);
             }
         }
     }
     out
+}
+
+/// The block's edge copy rewrites register `reg` after instruction `k` with
+/// no collection possible in between, so a zero there is dead: a loop local
+/// rebound in the body, whose header φ shares `reg` (#1402).
+fn copied_over_first(
+    func: &MirFunc,
+    block: &super::func::MirBlock,
+    k: usize,
+    regs: &[u8],
+    reg: u8,
+    slot: &impl Fn(&ValueId) -> bool,
+) -> bool {
+    let Some(Terminator::Jump { dest: succ }) = block.term else {
+        return false;
+    };
+    // Ops that cannot collect, nor trap (a trap may unwind into a cleanup
+    // pad that collects).
+    let quiet = |inst: &MirInst| {
+        (!super::gc::collects(inst) || matches!(inst, MirInst::ClearWord { .. } | MirInst::KeepAlive { .. })) && !inst.may_trap(func)
+    };
+    if !block.insts[k + 1..].iter().all(quiet) {
+        return false;
+    }
+    func.block(succ)
+        .insts
+        .iter()
+        .map_while(|inst| match inst {
+            MirInst::Phi { dest, args, .. } => Some((dest, args)),
+            _ => None,
+        })
+        .any(|(dest, args)| {
+            slot(dest) && regs[dest.index()] == reg && args.iter().any(|&(p, src)| p == block.id && regs[src.index()] != reg)
+        })
 }
 
 /// `CONST 0; STORE reg`, as HIR emission's clearing store: opaque, so
@@ -567,7 +602,10 @@ fn latch_overwrite_ok(
             seen_def = true;
             continue;
         }
-        if seen_def && inst.operands().contains(&dest) {
+        // A rebind's `ClearWord` of the old value reads no word: once
+        // aliased, `cleared_words` sees the live latch value in the shared
+        // register and skips the zero.
+        if seen_def && !matches!(inst, MirInst::ClearWord { .. }) && inst.operands().contains(&dest) {
             return false;
         }
     }
