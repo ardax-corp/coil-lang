@@ -2106,10 +2106,10 @@ impl Compiler {
             if has_rest && !pack {
                 return Err("call-argument");
             }
-            // Named arguments filling a prefix of the parameters are a
-            // partial application of that prefix.
+            // Named arguments leaving holes are a partial application of
+            // the filled parameters (its mask is the checker's fill mask).
             let filled = slots.iter().take_while(|s| s.is_some()).count();
-            if filled < fixed_count && (has_rest || slots[filled..].iter().any(Option::is_some)) {
+            if filled < fixed_count && has_rest {
                 return Err("call-argument");
             }
             let mut new_args = slots.into_iter().flatten().collect::<Vec<_>>();
@@ -2148,8 +2148,13 @@ impl Compiler {
                 }
                 &HirKind::Local(local) => {
                     let ty = b.expr(inner).ty.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t));
-                    let Some(Ty::Tuple(elems)) = ty else {
-                        return Err("call-argument");
+                    // A tuple's fields, or a fixed array's elements, by index.
+                    let (elems, kind) = match ty {
+                        Some(Ty::Tuple(elems)) => (elems, crate::hir::IndexKind::Tuple),
+                        Some(Ty::Array { element, length: crate::typechecking::ty::ArrayLength::Static(n) }) => {
+                            (vec![*element; n], crate::hir::IndexKind::Array)
+                        }
+                        _ => return Err("call-argument"),
                     };
                     let span = b.expr(inner).span;
                     let tuple_ty = b.expr(inner).ty.clone();
@@ -2165,7 +2170,7 @@ impl Compiler {
                         flat.push(Self::hir_push(
                             b,
                             &self.checker,
-                            HirKind::Index { base, index, kind: crate::hir::IndexKind::Tuple },
+                            HirKind::Index { base, index, kind },
                             Some(elem),
                             span,
                         ));
@@ -2872,10 +2877,11 @@ impl Compiler {
             None if !rest && fixed > 0 && argc < fixed => (1u32 << argc).wrapping_sub(1),
             None => return Ok(None),
         };
-        // Only a prefix filled positionally, of a plain function taking
-        // and returning words.
+        // The filled parameters (a prefix, or any by name), of a plain
+        // function taking and returning words.
         if rest
-            || mask != (1u32 << argc).wrapping_sub(1)
+            || mask.count_ones() as usize != argc
+            || (fixed < 32 && mask >> fixed != 0)
             || self.checker.is_generic_fn(lookup)
             || self.coroutine_fns.contains(key)
             || self.two_word_return_kind(lookup).is_some()
@@ -2889,7 +2895,7 @@ impl Compiler {
             return Err("callee-partial");
         }
         let mut params = Vec::with_capacity(argc);
-        for ty in &param_tys[..argc] {
+        for ty in param_tys.iter().enumerate().filter(|&(i, _)| mask & (1 << i) != 0).map(|(_, ty)| ty) {
             match lower::classify(&self.checker, ty) {
                 Some(ValueClass::Enum) | None => return Err("callee-partial"),
                 Some(class) if lower::is_word(class) => params.push(self.value_layout(ty)),
@@ -5152,15 +5158,31 @@ impl Compiler {
             return None;
         }
         let expr = hir.expr(id);
-        let resolved = self.resolve_free_fn(name);
+        let mut resolved = self.resolve_free_fn(name);
         let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
+        // An overloaded name the checker resolved by the expected function
+        // type (`let g: int -> string = show;`): that candidate's entry.
+        let picked = self.sidecar_overload(expr.node, expr.span.0, expr.span.1);
+        if let Some((arity, rest, cand)) = picked
+            && self.checker.is_overloaded(&resolved)
+        {
+            let generic = self
+                .checker
+                .overload_candidates(&resolved)
+                .and_then(|cands| cands.iter().find(|c| c.id == cand))
+                .is_none_or(|c| !c.scheme.bounds.is_empty() || !c.scheme.constraints.is_empty());
+            if generic {
+                return None;
+            }
+            resolved = overload_fn_key(&resolved, arity, rest, cand);
+        } else if self.checker.is_overloaded(&resolved) || picked.is_some() {
+            return None;
+        }
         if !matches!(lower::classify(&self.checker, &ty), Some(ValueClass::Opaque))
             || !matches!(crate::typechecking::ty::strip_readonly(&ty), Ty::Fun(..))
-            || self.checker.is_generic_fn(&resolved)
-            || self.checker.is_overloaded(&resolved)
+            || self.checker.is_generic_fn(strip_overload_key(&resolved))
             || self.lookup_slot(name).is_some()
             || self.checker.bare_construct_at(expr.span.0, expr.span.1).is_some()
-            || self.sidecar_overload(expr.node, expr.span.0, expr.span.1).is_some()
         {
             return None;
         }

@@ -180,19 +180,6 @@ impl Checker {
     /// range). It is used to anchor pattern-related diagnostics
     /// (`unknown constructor`, `wrong arity`) so ariadne points at
     /// the offending pattern instead of byte 0 of the source.
-    /// The enum a scrutinee type names, if it is a known enum.
-    fn scrutinee_enum_name(&self, ty: &Ty) -> Option<String> {
-        match apply_ty_prune(&self.subst, ty) {
-            Ty::Sum { name, .. } | Ty::Con(name) => Some(name),
-            Ty::App(con, _) => match *con {
-                Ty::Con(name) => Some(name),
-                _ => None,
-            },
-            Ty::Constructor { owner, .. } => self.scrutinee_enum_name(&owner),
-            _ => None,
-        }
-    }
-
     pub(super) fn infer_pattern(
         &mut self,
         pattern: &Pattern,
@@ -252,15 +239,19 @@ impl Checker {
                         return expected_ty.clone();
                     }
                 };
-                // A pattern of one enum against a scrutinee of another
-                // (`Option::None` on a `Result`) is a type mismatch.
-                if let Some(scrut_enum) = self.scrutinee_enum_name(expected_ty)
-                    && scrut_enum != enum_str
-                    && self.enum_tags.contains_key(&scrut_enum)
+                // A constructor from another enum can never match. Generic
+                // enums get this from the unify in `poly_or_registry_payload`;
+                // plain enums carry no type args, so compare the names.
+                if !self.is_poly_enum(&enum_str)
+                    && let Some(found) = self.scrutinee_enum_key(expected_ty)
+                    && found != enum_str
                 {
                     self.messages.push(Message::error(
                         ErrorCode::TypeMismatch,
-                        format!("Type mismatch: expected `{scrut_enum}`, found `{enum_str}`"),
+                        format!(
+                            "Type mismatch: expected {}, found {} (pattern `{}::{}`)",
+                            found, enum_str, enum_str, variant_str
+                        ),
                         pattern_range.clone(),
                     ));
                     return expected_ty.clone();
@@ -416,5 +407,22 @@ impl Checker {
                 expected_ty.clone()
             }
         }
+    }
+
+    /// The registry key of the enum a scrutinee type names, if it names one.
+    fn scrutinee_enum_key(&self, ty: &Ty) -> Option<String> {
+        let name = match apply_ty_prune(&self.subst, ty) {
+            Ty::Con(n) | Ty::Sum { name: n, .. } => n,
+            Ty::App(head, _) => match *head {
+                Ty::Con(n) => n,
+                _ => return None,
+            },
+            Ty::Constructor { owner, .. } => match *owner {
+                Ty::Sum { name, .. } => name,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        self.enum_tags.contains_key(&name).then_some(name)
     }
 }
