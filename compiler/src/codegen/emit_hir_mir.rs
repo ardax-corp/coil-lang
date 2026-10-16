@@ -1331,7 +1331,22 @@ impl Compiler {
                 };
                 dicts
             }
-            None => Vec::new(),
+            // A `forall T: Show. …` parameter: its own constraints at the
+            // call's types (#1188).
+            None => match Self::hir_forall_param_ty(hir, &self.checker, f) {
+                Some(Ty::Forall { constraints, body, .. }) if !constraints.is_empty() => {
+                    let code = self.hir_mir_once(|this| {
+                        let mut code = CodeBuf::new();
+                        this.emit_dicts_for_signature(&mut code, &body, &constraints, &arg_tys, call_ty.as_ref());
+                        code
+                    });
+                    let Some(dicts) = self.hir_mir_dict_program(&code) else {
+                        return;
+                    };
+                    dicts
+                }
+                _ => Vec::new(),
+            },
         };
         let unbox = match &source {
             Some(source) => self.generic_return_depends_on_type_param(source),
