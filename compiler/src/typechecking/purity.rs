@@ -1178,6 +1178,45 @@ fn main() { return; }
         assert!(pure.contains("shadow"));
     }
 
+    // #1394: a bare unit case in a pattern (`Red`) binds nothing, so it does
+    // not shadow a same-named static; an uppercase name no enum declares
+    // (`N`) still binds, as in the checker.
+    #[test]
+    fn bare_unit_case_pattern_is_not_a_binder() {
+        let ast = parse_ast(
+            r#"
+static let Red: int = 0;
+static let N: int = 0;
+enum Color {
+    Red,
+    Green,
+}
+fn case_arm(Color c) -> int {
+    return match c {
+        Red => Red,
+        default => 1,
+    };
+}
+fn none_arm(Option<int> o) -> int {
+    return match o {
+        None => N,
+        Some(v) => v,
+    };
+}
+fn binding_arm(int x) -> int {
+    return match x {
+        N => N + 1,
+    };
+}
+fn main() { return; }
+"#,
+        );
+        let pure = analyze_pure_fns(&ast);
+        assert!(!pure.contains("case_arm"), "`Red` reads the static: {pure:?}");
+        assert!(!pure.contains("none_arm"), "`N` reads the static: {pure:?}");
+        assert!(pure.contains("binding_arm"), "`N` binds the scrutinee: {pure:?}");
+    }
+
     #[test]
     fn fib_is_recursive_pure() {
         let set = pure_set(

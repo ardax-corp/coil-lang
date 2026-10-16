@@ -347,6 +347,25 @@ mod tests {
         assert_eq!(occurrences_at(src, "k", 0), ["1:k", "2:k", "2:k"]);
     }
 
+    // #1394: a bare unit case (`None`, `Red`) in a pattern is not a local,
+    // matching the checker; an uppercase name no enum declares still binds.
+    #[test]
+    fn bare_unit_cases_are_not_locals() {
+        let src = "enum Color {\n    Red,\n    Green,\n}\nfn f(Option<Color> o) -> int {\n    let n = match o {\n        None => 0,\n        Some(Red) => 1,\n        Some(Other) => { let _ = Other; return 2; },\n    };\n    return n;\n}\n";
+        let none = src.find("None").unwrap();
+        assert!(binding_at(src, none).is_none(), "`None` is a case");
+        let red = src.find("Red)").unwrap();
+        assert!(binding_at(src, red).is_none(), "`Red` is a case");
+        assert_eq!(occurrences_at(src, "Other", 0), ["8:Other", "8:Other"]);
+    }
+
+    // Record shorthand `{ Red }` always binds, even when `Red` names a case.
+    #[test]
+    fn record_shorthand_binds_a_case_name() {
+        let src = "enum Color {\n    Red,\n}\nenum Box {\n    Item { Red: int },\n}\nfn f(Box b) -> int {\n    return match b {\n        Item { Red } => Red,\n    };\n}\n";
+        assert_eq!(occurrences_at(src, "Red }", 0), ["8:Red", "8:Red"]);
+    }
+
     #[test]
     fn globals_are_not_locals() {
         let src = "fn helper() -> int { return 1; }\nfn main() {\n    let _ = helper();\n}\n";

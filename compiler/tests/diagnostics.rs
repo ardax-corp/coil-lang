@@ -349,3 +349,65 @@ fn main() {
             .collect::<Vec<_>>()
     );
 }
+
+// #1394: an unknown constructor pattern reports E0211 once; the names it
+// binds are still declared, so their uses in the arm do not add E0100.
+#[test]
+fn unknown_constructor_pattern_bindings_do_not_cascade() {
+    let msgs = check_messages(
+        r#"
+enum Color {
+    Red,
+    Green,
+}
+
+fn bare(int n) -> int {
+    return match n {
+        Nope(v) => v + 1,
+        default => 0,
+    };
+}
+
+fn bare_record(int n) -> int {
+    return match n {
+        Nope { a, b: c } => a + c,
+        default => 0,
+    };
+}
+
+fn qualified(Color c) -> int {
+    return match c {
+        Color::Blue(w) => w,
+        Nowhere::Gone { x } => x,
+        default => 0,
+    };
+}
+
+fn nested(Option<int> o) -> int {
+    return match o {
+        Option::Some(Nope(inner)) => inner,
+        default => 0,
+    };
+}
+
+fn main() {
+    let r = bare(1) + bare_record(2) + qualified(Color::Red) + nested(Option::None);
+}
+"#,
+    );
+    let unknown: Vec<_> = msgs
+        .iter()
+        .filter(|m| m.code() == Some(ErrorCode::UnknownConstructorPattern))
+        .collect();
+    assert_eq!(
+        unknown.len(),
+        5,
+        "one E0211 per unknown constructor: {:?}",
+        msgs.iter().map(|m| (m.code(), m.message())).collect::<Vec<_>>()
+    );
+    assert!(
+        !msgs.iter().any(|m| m.code() == Some(ErrorCode::UnknownValue)),
+        "bindings inside an unknown constructor must not cascade into E0100: {:?}",
+        msgs.iter().map(|m| (m.code(), m.message())).collect::<Vec<_>>()
+    );
+}

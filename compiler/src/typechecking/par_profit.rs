@@ -1950,6 +1950,33 @@ fn main() { return; }
         );
     }
 
+    /// #1394: a bare unit case arm (`None`) is a constructor pattern, not
+    /// an irrefutable binding, so a fork inside it is opaque.
+    #[test]
+    fn bare_unit_case_arm_is_opaque() {
+        let sites = sites_of(
+            r#"
+fn pick(int n) -> Option<int> {
+    if n <= 1 { return Option::Some(n); }
+    return Option::None;
+}
+fn fibm(int n) -> int {
+    return match pick(n) {
+        None => fibm(n - 1) + fibm(n - 2),
+        Some(v) => v,
+    };
+}
+fn main() { return; }
+"#,
+        );
+        let fibm = sites.get("fibm").expect("fibm fork site");
+        assert!(
+            fibm.guards.iter().any(|g| matches!(g, ParGuard::Opaque)),
+            "a `None` arm is refutable: {:?}",
+            fibm.guards
+        );
+    }
+
     #[test]
     fn worker_names_are_per_site_not_per_arg() {
         assert_eq!(par_worker_name("fib"), "__coil_par_fib");
