@@ -20,8 +20,16 @@ on:
 # and publishes, then only the newest waiting main build runs (GitHub keeps one
 # pending run per group). Cancelling the running build for every newer commit
 # starves edge whenever main moves faster than the build takes.
+#
+# Only runs that will build join the group. Every finished main CI run (also
+# the cancelled and failed ones) starts an Edge run that skips its build; if
+# those shared the group, each would replace the pending real build.
 concurrency:
-  group: edge
+  group: >-
+    ${{ (github.event_name == 'workflow_dispatch' ||
+         (github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.event == 'push'))
+        && 'edge' || format('edge-skip-{0}', github.run_id) }}
   cancel-in-progress: false
 
 permissions:
