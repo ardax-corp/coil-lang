@@ -11293,6 +11293,11 @@ impl Checker {
     }
 
     /// Whether `fn_name`'s Result Ok payload is itself a Result (nested).
+    /// The result-mode key of the lambda whose source starts at `start`.
+    pub fn lambda_mode_key(start: usize) -> String {
+        format!("<lambda@{start}>")
+    }
+
     pub fn fn_result_ok_is_result(&self, fn_name: &str) -> bool {
         self.result_mode_ok_is_result.contains(fn_name)
     }
