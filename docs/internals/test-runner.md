@@ -36,6 +36,25 @@ lives in the `coil-host` crate, shared by `coil` and `coil-test`.
 | a file with `test("…") { … }` / `#[test] fn` cases | each case is a reactor job: static init, then the case; it fails on `panic` or an `Err` return |
 | a file without cases | `main` runs once as a single opaque case |
 | a function with `requires` / `ensures` (in a test file, or in a project source a test file imports) | a generated `contract: f` case calls it with random arguments (`--contract-runs N`, default 100, 0 off); see [contracts](contracts.md#generated-tests) |
+| a code example in the `///` docs of a test file, or of a project source a test file imports | a `doc: module::item (file:line)` case compiles and runs it as its own program; see [doc-tests](#doc-tests) |
+
+### `env::exit` in a case
+
+Every case runs inside the harness process, so `env::exit` (granted with
+`--allow-exit`) must not exit it: an `exit(0)` would end the run early with
+status 0 and green CI (#1401). `run_test_suite` calls
+`machine::env::trap_exit(true)`; from then on the `env_exit` native records
+its code on the thread and raises a VM panic
+(`env::exit(N) ends only this job under the test harness`), so the job's
+`defer`s run and the harness goes on with the next case.
+
+| Where `exit(N)` runs | Verdict |
+|----------------------|---------|
+| a `test` case (or its static init) | fails, whatever `N`: the rest of the body never ran |
+| a case-less file's `main` | passes when `N == 0` (a program's clean end), fails otherwise |
+| a `thread::spawn` job the case started | that job panics on its own VM (its join fails); the case sees only the failed join |
+
+A test that needs a real exit status runs the program as a subprocess.
 
 Outside `coil test` (`coil --include-tests tests/foo.hy`), a test file
 with no `main` gets one that runs every case in one VM, prints
@@ -52,6 +71,58 @@ not `string`, and any `Option`, lower in `emit_test_try`. That function
 returns ``Err("`?` got Err(<shown>)")`` or ``Err("`?` got None")`` instead
 of unifying with the case's error type. Helper functions and lambdas
 inside a case keep the ordinary `?` rules (`in_test_case` is reset).
+
+## Doc-tests
+
+The code examples in `///` comments run as test cases in the same run and
+report (`--no-doc-tests` turns them off), the way `cargo test` runs Rust
+doc-tests. The rules are `parser::doc_examples`, which the language server's
+hover also uses:
+
+- A fence opened with ```` ``` ```` or ```` ```coil ```` is an example; other
+  languages (```` ```text ````) are not. Tags, comma-separated: `ignore` (not
+  compiled, not reported), `no_run` (compiled only), `should_panic` (passes
+  only when the program panics).
+- `# ` lines (and a lone `#`) are hidden on hover but run.
+- `use` lines are hoisted; an example without `fn main` is wrapped in
+  `fn main() { … }`. The wrapper's error type is inferred from the body, so
+  an example cannot mix `?` on an `IoError` with `assert!` (a `string`):
+  `match` instead, or write the example's own `fn main`.
+- An example passes when it compiles and runs without a panic. An `Err`
+  reaching the end of `main` (a failed `assert!`, an uncaught `raise`)
+  panics (#1353), so it fails the example too.
+
+**Which docs.** Every documented function, method, class, field, enum,
+variant, trait, trait method, type alias and macro of each test file (not
+`compile_fail/` ones), then, after the suite (with the contract tests), of
+every project source a test file imports: under the current directory,
+outside the test root and `.deps/`. Dependencies under `--root` elsewhere
+(a coil-stdlib checkout) are not doc-tested; run their examples with
+`--doc-tests-only <dir>`.
+
+**Naming.** `doc: <module>::<item> (<file>:<line>)`, the line of the opening
+fence. The module path is the file's path under the deepest of the test
+root, the `--root` directories and `src` that holds it (`src/io/sync.hy`
+→ `io::sync::println`). The cases are part of their file's `file` event under
+`--json` and are shuffled with the seed like `test` cases.
+
+**Isolation.** Each example compiles as its own program, with the run's
+roots, grants and `-O`, as an in-memory file next to the one it documents
+(`<stem>__doc_<line>.hy`, the name in its diagnostics and panic locations),
+and runs as a reactor job like a file's `main`. A compile error fails the
+case with the diagnostics as its output. Doc-tests are not counted for
+`--coverage` and `coil mutate` does not run them.
+
+**`--doc-tests-only [PATH]`** parses every file under PATH for examples
+without compiling it. CI runs the builtin doc stubs this way, since no test
+file imports them:
+
+```bash
+coil test --doc-tests-only -A --root .deps/coil-stdlib/src compiler/src/builtin_docs
+```
+
+An example that ends the process (`env::exit`) must be `no_run`: cases run
+inside the harness process.
 
 ## Order
 
@@ -300,7 +371,8 @@ serialized to `.hyc`, so test-only data never touches the archive format.
 
 | File | Role |
 |------|------|
-| `coil-test/src/args.rs` | argv (`--fail-fast`, `--seed`, `--no-shuffle`, `-j`, `--show-output`, `--coverage*`, `-O`, `--root`, host grants, `--log-*`; `mutate` flags) |
+| `coil-test/src/args.rs` | argv (`--fail-fast`, `--seed`, `--no-shuffle`, `-j`, `--show-output`, `--coverage*`, `--no-doc-tests`, `--doc-tests-only`, `-O`, `--root`, host grants, `--log-*`; `mutate` flags) |
+| `parser/src/doc_examples.rs` | doc example rules: fences, hidden lines, the doc-test program, documented items |
 | `coil-test/src/order.rs` | seeded file / case order |
 | `machine/src/reactor.rs` | `TestJob` (incl. `step_budget`), `submit_test` / `run_test_here`, `TestHandle` |
 | `coil-test/src/coverage.rs` | PC → line maps, summing, lcov / summary / per-test JSON |
