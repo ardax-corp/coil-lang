@@ -244,6 +244,7 @@ impl Checker {
 
         // File-level imports and module-visible named `fn`s are globals,
         // not closure captures. Rebind after isolating the env.
+        let prev_statics = std::mem::take(&mut self.lambda_rebound_statics);
         let import_rebinds = self.snapshot_file_level_imports(&mut uncaptured, range.clone());
 
         let const_caps: Vec<bool> = cap_bindings.iter().map(|(n, _)| self.env.is_const(n)).collect();
@@ -281,6 +282,7 @@ impl Checker {
         self.fn_option_mode = prev_option_mode;
         self.current_return_ty = prev_ret;
         self.lambda_uncaptured_outer = prev_uncaptured;
+        self.lambda_rebound_statics = prev_statics;
         self.env.restore_frames(saved_frames);
 
         let ret = apply_ty_prune(&self.subst, &ret_slot);

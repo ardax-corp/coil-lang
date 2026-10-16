@@ -234,6 +234,7 @@ impl Checker {
             current_typeclass: None,
             registering_overloadable_fn: false,
             lambda_uncaptured_outer: None,
+            lambda_rebound_statics: HashSet::new(),
             partial_fills_by_span: std::collections::HashMap::new(),
             partial_filled_tys_by_span: std::collections::HashMap::new(),
             current_assoc_projections: None,
@@ -3126,6 +3127,7 @@ impl Checker {
                     uncaptured.remove(n);
                 }
 
+                let prev_statics = std::mem::take(&mut self.lambda_rebound_statics);
                 let import_rebinds =
                     self.snapshot_file_level_imports(&mut uncaptured, range.clone());
 
@@ -3142,6 +3144,7 @@ impl Checker {
                 }
                 let _ = self.infer(body);
                 self.lambda_uncaptured_outer = prev_uncaptured;
+                self.lambda_rebound_statics = prev_statics;
                 self.env.restore_frames(saved_frames);
                 unit_ty()
             }
@@ -5858,22 +5861,27 @@ impl Checker {
     /// Top-level / module-visible named `fn`s (and `extern` decls) rebind like
     /// imports. A later local that shadows the name stays a capture.
     fn snapshot_named_fns(
-        &self,
+        &mut self,
         uncaptured: &mut HashSet<String>,
         rebinds: &mut Vec<(String, Scheme)>,
     ) {
-        let names: Vec<String> = self
+        let names: Vec<(String, bool)> = self
             .local_defs
             .iter()
             .filter_map(|(name, &id)| {
                 let kind = self.def_interner.info(id)?.kind;
-                matches!(kind, DefKind::Fn | DefKind::Ffi).then(|| name.clone())
+                // A `static let` is a bare module name too (#1177).
+                matches!(kind, DefKind::Fn | DefKind::Ffi | DefKind::Static).then(|| (name.clone(), kind == DefKind::Static))
             })
             .collect();
-        for name in names {
+        for (name, is_static) in names {
             let Some(env_scheme) = self.env.lookup(&name).cloned() else {
                 continue;
             };
+            // A local of the same name shadows the static: a capture.
+            if is_static && self.env.lookup_frame(&name) != self.static_decl_frames.get(&self.qualify_module_name(&name)).copied() {
+                continue;
+            }
             if let Some(&id) = self.local_defs.get(&name)
                 && let Some(def_scheme) = self.schemes_by_def.get(&id)
                 && env_scheme != *def_scheme
@@ -5881,6 +5889,9 @@ impl Checker {
                 continue;
             }
             uncaptured.remove(&name);
+            if is_static {
+                self.lambda_rebound_statics.insert(name.clone());
+            }
             rebinds.push((name, env_scheme));
         }
     }
@@ -17330,7 +17341,9 @@ impl Checker {
         };
         let frame = if self.lambda_uncaptured_outer.is_some() {
             if frame == 0
-                && (self.disk_imports.contains(name) || self.scope_bindings.contains_key(name))
+                && (self.disk_imports.contains(name)
+                    || self.scope_bindings.contains_key(name)
+                    || self.lambda_rebound_statics.contains(name))
             {
                 return;
             }
