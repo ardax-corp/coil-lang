@@ -74,6 +74,13 @@ fn intern_items(
             let id = interner.intern(module, DefKind::Static, name);
             local_defs.entry((*name).to_string()).or_insert(id);
         }
+        // A module-level `const NAME = …;` (its binder of the pair).
+        Expression::Constant(name, _) => {
+            if let Expression::Identifier(n) = name.1.as_ref() {
+                let id = interner.intern(module, DefKind::Const, n);
+                local_defs.entry((*n).to_string()).or_insert(id);
+            }
+        }
         Expression::ExternBlock { declarations, .. } => {
             for decl in declarations {
                 let id = interner.intern(module, DefKind::Ffi, decl.name);

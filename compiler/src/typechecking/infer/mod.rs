@@ -582,6 +582,8 @@ pub struct Checker {
     /// Inside a `test("…") { … }` body (not a nested function or lambda):
     /// `?` there may unwrap any showable error or an `Option` (#628).
     in_test_case: bool,
+    /// Module-level `const`s of other modules, by `module::NAME` (#1207).
+    module_consts: HashMap<String, Ty>,
     /// Local names this module's `use`s import that name a macro of the
     /// providing module: no value binding is made up for them (#1203).
     macro_imports: HashSet<String>,

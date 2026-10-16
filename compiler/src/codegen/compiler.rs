@@ -6403,6 +6403,9 @@ impl Compiler {
                     let name = self.resolve_variable(name);
                     match crate::const_fold::eval_expr(rhs, self.const_env()) {
                         Some(val) => {
+                            if !self.namespace.is_empty() {
+                                self.module_const_values.insert(format!("{}::{name}", self.namespace), val.clone());
+                            }
                             self.const_env_mut().insert(name, val);
                         }
                         None => {
