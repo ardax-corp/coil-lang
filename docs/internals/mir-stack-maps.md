@@ -131,6 +131,27 @@ and relocate mapped slots on collect.
   With them flagship `.hyc` and every other `examples/perf` program are
   byte-identical to #1402; `gc_frag` loses one dead loop-entry zero
   (336 → 346 ms median, within noise). `tests/memory/gc_weak_after_join.hy`.
+- **Copy sources drop the value too** (#1411). A cast copies its word into
+  a register of its own (`Option::Some(x)` is a cast of `x`), and so does a
+  φ, so after a rebind the registers the old value was copied from still
+  root it until rewritten: in a loop, the previous trip's object until the
+  next allocation. `source_clears` zeroes, beside each `ClearWord`, the
+  cleared value's copy sources (casts and φ incomings, transitively, not
+  past a live value) that no live value shares and that a collection can
+  still scan before they are rewritten. Inside a loop it follows a φ only
+  along in-loop forward edges, so a loop-entry value (which `entry_clears`
+  zeroes once) or a back edge's is not zeroed on every trip. A loop whose
+  join resets an `Option` on one arm and wraps a fresh object on the other
+  (`gc_int_vec`) rebinds it right after the join, where the new value is
+  live and the walk stops, so `entry_clears` also zeroes, on each forward edge into a rebound join, the
+  copy sources of the other forward edges' values; the zeros land on the
+  reset arm only. On `examples/perf` only `gc_int_vec` and `gc_shrink`
+  change (two zeros on the arm taken once in 64 trips); flagship `.hyc` and
+  every other program are byte-identical to #1409. Medians of 11,
+  interleaved runs: `gc_int_vec` 272–289 → 267–285 ms (3 runs each),
+  `gc_shrink` 435–485 → 443–477 ms (6 runs each), within the run-to-run
+  spread.
+  `tests/memory/gc_weak_some_in_loop.hy`.
 - **Collection budget.** After a sweep the next threshold is
   `live × 4` when more than half the heap survived (a growing live set) and
   `live × 2` otherwise, never below the initial 1 MB budget.
