@@ -115,8 +115,14 @@ impl Pipeline {
                 .unwrap_or_default();
             let mut errors = Vec::new();
             let mut file_jobs = Vec::new();
+            let cached = self.ast_cache.get(file);
+            // Includes earlier rounds' generated code (its spans point past the file).
+            let report = cached.map(|c| c.report_source()).unwrap_or_default();
+            // Calls looked up by span, one walk for the whole round.
+            let calls = cached.and_then(|c| c.ast()).map(index_calls).unwrap_or_default();
             for p in pending {
-                match self.resolve_macro(file, &p) {
+                let call = calls.get(&p.target).copied();
+                match self.resolve_macro(file, &p, call) {
                     Ok((provider, decl, provider_module)) => {
                         if &provider == file {
                             errors.push(Message::error(
@@ -141,7 +147,7 @@ impl Pipeline {
                             ));
                             continue;
                         }
-                        match self.encode_input(file, &module, &p, &decl) {
+                        match self.encode_input(file, &module, &p, &decl, &report, call) {
                             Ok(input) => file_jobs.push(Job {
                                 file: file.clone(),
                                 pending: p,
@@ -167,9 +173,12 @@ impl Pipeline {
             return false;
         }
         let results = self.run_expansions(&jobs);
+        // Calls in expression / statement position are replaced in one walk
+        // per file once every output is parsed.
+        let mut replacements: HashMap<PathBuf, CallReplacements> = HashMap::new();
         for (job, result) in jobs.iter().zip(results) {
             let msgs = match result {
-                Ok(text) => self.splice(job, &text),
+                Ok(text) => self.splice(job, &text, &mut replacements),
                 Err(err) => vec![Message::error(
                     ErrorCode::GenericTypeError,
                     format!("{} `{}` failed: {err}", job.decl.kind.describe(), job.decl.name),
@@ -178,6 +187,11 @@ impl Pipeline {
             };
             if let Some(cached) = self.ast_cache.get_mut(&job.file) {
                 cached.push_expand_messages(msgs);
+            }
+        }
+        for (file, mut calls) in replacements {
+            if let Some(ast) = self.ast_cache.get_mut(&file).and_then(|c| c.ast_mut()) {
+                replace_calls(ast, &mut calls);
             }
         }
         // Generated code may `use` modules nothing else imported.
@@ -221,7 +235,8 @@ impl Pipeline {
         })
     }
 
-    /// Find the module providing `p` through `file`'s `use` items.
+    /// Find the module providing `p` through `file`'s `use` items. `call`
+    /// is the `name!(…)` node at `p.target`, if any.
     ///
     /// `Err(None)`: nothing in scope provides it.
     #[allow(clippy::type_complexity)]
@@ -229,13 +244,14 @@ impl Pipeline {
         &self,
         file: &Path,
         p: &PendingMacro,
+        call: Option<&Output<'_>>,
     ) -> Result<(PathBuf, MacroDecl, String), Option<Message>> {
         let Some(ast) = self.ast_cache.get(file).and_then(|c| c.ast()) else {
             return Err(None);
         };
         // A function-style macro may be overloaded by arity: the call's
         // argument count picks the declaration.
-        let argc = match find_call(ast, p.target).map(|c| c.1.as_ref()) {
+        let argc = match call.map(|c| c.1.as_ref()) {
             Some(Expression::MacroCall { args, .. }) if p.kind == MacroKind::Function => Some(args.len()),
             _ => None,
         };
@@ -320,15 +336,21 @@ impl Pipeline {
     }
 
     /// The macro call's input: the declaration, then its attribute
-    /// arguments in parameter order.
-    fn encode_input(&self, file: &Path, module: &str, p: &PendingMacro, decl: &MacroDecl) -> Result<String, Message> {
+    /// arguments in parameter order. `source` is the file's report text,
+    /// `call` the `name!(…)` node at `p.target`.
+    fn encode_input(
+        &self,
+        file: &Path,
+        module: &str,
+        p: &PendingMacro,
+        decl: &MacroDecl,
+        source: &str,
+        call: Option<&Output<'_>>,
+    ) -> Result<String, Message> {
         let cached = self.ast_cache.get(file).expect("pending macros come from a cached file");
-        // Includes earlier rounds' generated code (its spans point past the file).
-        let report = cached.report_source();
-        let source = report.as_str();
         let ast = cached.ast().expect("parsed");
         if decl.input == MacroInput::Exprs {
-            return encode_call(ast, source, p, decl);
+            return encode_call(call, source, p, decl);
         }
         let Some(node) = find_target(ast, p) else {
             return Err(Message::error(
@@ -661,10 +683,11 @@ impl Pipeline {
             .collect()
     }
 
-    /// Parse one macro's output and put it into the file's AST.
-    fn splice(&mut self, job: &Job, text: &str) -> Vec<Message> {
+    /// Parse one macro's output and put it into the file's AST (a call in
+    /// expression or statement position: into `replacements`).
+    fn splice(&mut self, job: &Job, text: &str, replacements: &mut HashMap<PathBuf, CallReplacements>) -> Vec<Message> {
         if matches!(job.pending.position, CallPosition::Expr | CallPosition::Stmt) {
-            return self.splice_call(job, text);
+            return self.splice_call(job, text, replacements);
         }
         let mut messages = Vec::new();
         let module = self.namespace_for(&job.file);
@@ -797,8 +820,8 @@ impl Pipeline {
 
     /// Splice a call's output in expression or statement position. The
     /// output parses inside a function (`return (…);` for an expression, the
-    /// body for statements) and replaces the call.
-    fn splice_call(&mut self, job: &Job, text: &str) -> Vec<Message> {
+    /// body for statements) and goes into `replacements`, to replace the call.
+    fn splice_call(&mut self, job: &Job, text: &str, replacements: &mut HashMap<PathBuf, CallReplacements>) -> Vec<Message> {
         let mut messages = Vec::new();
         let module = self.namespace_for(&job.file);
         let stmt = job.pending.position == CallPosition::Stmt;
@@ -878,8 +901,12 @@ impl Pipeline {
             }
             Replacement::Expr(value)
         };
-        let mut replacement = Some(replacement);
-        replace_call(ast, job.pending.target, &mut replacement);
+        let calls = replacements.entry(job.file.clone()).or_default();
+        // A second output for one call replaces what the first put there.
+        if calls.contains_key(&job.pending.target) {
+            replace_calls(ast, calls);
+        }
+        calls.insert(job.pending.target, replacement);
         messages
     }
 
@@ -943,45 +970,57 @@ fn function_body(program: Expression<'_>) -> Option<Vec<Output<'_>>> {
     }
 }
 
-/// Replace the `name!(…)` call at `target` (the expression, or the whole
-/// `name!(…);` statement in its block).
-fn replace_call<'a>(node: &mut Output<'a>, target: parser::SimpleSpan, replacement: &mut Option<Replacement<'a>>) {
-    if replacement.is_none() {
+/// Outputs of a file's calls by the call's span.
+type CallReplacements = HashMap<parser::SimpleSpan, Replacement<'static>>;
+
+/// Replace each `name!(…)` call in `calls` (the expression, or the whole
+/// `name!(…);` statement in its block), the first in tree order. Each is
+/// taken out of `calls` when it lands. A replaced call's subtree is not
+/// searched: the calls in it went with it.
+fn replace_calls<'a>(node: &mut Output<'a>, calls: &mut HashMap<parser::SimpleSpan, Replacement<'a>>) {
+    if calls.is_empty() {
         return;
     }
-    if node.0 == target && matches!(node.1.as_ref(), Expression::MacroCall { .. }) {
-        if matches!(replacement, Some(Replacement::Expr(_))) {
-            let Some(Replacement::Expr(mut value)) = replacement.take() else { unreachable!() };
-            value.0 = target;
-            *node = value;
-        }
-        return;
-    }
-    if matches!(replacement, Some(Replacement::Stmts(_)))
-        && let Expression::Block(items) = node.1.as_mut()
-        && let Some(at) = items
-            .iter()
-            .position(|i| crate::attrs::statement_call(i).is_some_and(|c| c.0 == target))
+    if matches!(node.1.as_ref(), Expression::MacroCall { .. })
+        && matches!(calls.get(&node.0), Some(Replacement::Expr(_)))
     {
-        let Some(Replacement::Stmts(stmts)) = replacement.take() else { unreachable!() };
-        items.splice(at..=at, stmts);
+        let Some(Replacement::Expr(mut value)) = calls.remove(&node.0) else { unreachable!() };
+        value.0 = node.0;
+        *node = value;
         return;
     }
-    node.1.for_each_child_mut(&mut |c| replace_call(c, target, replacement));
+    if let Expression::Block(items) = node.1.as_mut() {
+        let mut at = 0;
+        while at < items.len() {
+            let target = crate::attrs::statement_call(&items[at]).map(|c| c.0);
+            if let Some(target) = target
+                && matches!(calls.get(&target), Some(Replacement::Stmts(_)))
+            {
+                let Some(Replacement::Stmts(stmts)) = calls.remove(&target) else { unreachable!() };
+                let n = stmts.len();
+                items.splice(at..=at, stmts);
+                // The output's own calls run next round.
+                at += n;
+                continue;
+            }
+            at += 1;
+        }
+    }
+    node.1.for_each_child_mut(&mut |c| replace_calls(c, calls));
 }
 
-/// The `name!(…)` call at `target`.
-fn find_call<'b, 'a>(node: &'b Output<'a>, target: parser::SimpleSpan) -> Option<&'b Output<'a>> {
-    if node.0 == target && matches!(node.1.as_ref(), Expression::MacroCall { .. }) {
-        return Some(node);
-    }
-    let mut found = None;
-    node.1.for_each_child(&mut |c| {
-        if found.is_none() {
-            found = find_call(c, target);
+/// Every `name!(…)` call under `node` by its span; the first in tree order
+/// when two share one.
+fn index_calls<'b, 'a>(node: &'b Output<'a>) -> HashMap<parser::SimpleSpan, &'b Output<'a>> {
+    fn walk<'b, 'a>(node: &'b Output<'a>, out: &mut HashMap<parser::SimpleSpan, &'b Output<'a>>) {
+        if matches!(node.1.as_ref(), Expression::MacroCall { .. }) {
+            out.entry(node.0).or_insert(node);
         }
-    });
-    found
+        node.1.for_each_child(&mut |c| walk(c, out));
+    }
+    let mut out = HashMap::new();
+    walk(node, &mut out);
+    out
 }
 
 /// The declaration of `name` in `decls` that `p` uses. Overloads of a
@@ -1013,13 +1052,13 @@ fn pick_decl(decls: &[MacroDecl], p: &PendingMacro, name: &str, argc: Option<usi
 
 /// A function-style macro's input: each `Expr` parameter's argument, then
 /// the rest (count, items) for a last `Vec<Expr>` parameter.
-fn encode_call(ast: &Output<'_>, source: &str, p: &PendingMacro, decl: &MacroDecl) -> Result<String, Message> {
+fn encode_call(call: Option<&Output<'_>>, source: &str, p: &PendingMacro, decl: &MacroDecl) -> Result<String, Message> {
     let err = |text: String| Message::error(ErrorCode::GenericTypeError, text, p.range.clone());
-    let Some(call) = find_call(ast, p.target) else {
+    let Some(call) = call else {
         return Err(err(format!("macro `{}!` call not found", p.name)));
     };
     let Expression::MacroCall { args, .. } = call.1.as_ref() else {
-        unreachable!("find_call returns calls");
+        unreachable!("index_calls holds calls");
     };
     if let Some(bad) = args
         .iter()
