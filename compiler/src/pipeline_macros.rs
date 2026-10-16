@@ -159,7 +159,22 @@ impl Pipeline {
                             Err(msg) => errors.push(msg),
                         }
                     }
-                    Err(None) => errors.push(crate::attrs::unresolved_macro_message(&p)),
+                    Err(None) => {
+                        let mut msg = crate::attrs::unresolved_macro_message(&p);
+                        // A call in macro output resolves where it lands and
+                        // in the provider that wrote it.
+                        if p.kind == MacroKind::Function
+                            && let Some(provider) = &p.from_provider
+                        {
+                            msg.with_help(format!(
+                                "`{}!` is called by macro output from `{}`; declare a `macro {}` there or import one with `use`",
+                                p.name,
+                                self.namespace_for(provider),
+                                p.name
+                            ));
+                        }
+                        errors.push(msg);
+                    }
                     Err(Some(msg)) => errors.push(msg),
                 }
             }
