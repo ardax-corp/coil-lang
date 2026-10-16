@@ -151,6 +151,7 @@ impl Checker {
             fn_has_rest: std::collections::HashMap::new(),
             fn_tuple_rest: std::collections::HashMap::new(),
             variadic: Default::default(),
+            variadic_exports: Default::default(),
             current_tuple_pack: None,
             spread_call_arity: HashMap::new(),
             spread_expanded_bases: std::collections::HashSet::new(),
@@ -5199,6 +5200,10 @@ impl Checker {
         // A `... xs` template calls its copy for this call's pack (#1281).
         if self.is_variadic_template(&ident) {
             return self.infer_variadic_call(&ident, raw_args, id, range);
+        }
+        // … and one imported from another module, its copy made there (#1386).
+        if let Some(fqn) = self.foreign_variadic_template(&ident) {
+            return self.infer_foreign_variadic_call(&ident, &fqn, raw_args, id, range);
         }
 
         if ident == "len" {
