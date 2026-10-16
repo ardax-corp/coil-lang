@@ -435,18 +435,34 @@ pub(super) fn entry_clears(func: &MirFunc, regs: &[u8], need_slot: &[bool]) -> H
     }
     // A constant (a `None` niche, null), or a cast of one, roots nothing.
     let mut consts: HashSet<ValueId> = HashSet::new();
+    let mut casts: HashMap<ValueId, ValueId> = HashMap::new();
     for inst in func.blocks.iter().flat_map(|b| &b.insts) {
         match inst {
             MirInst::Const { dest, .. } => {
                 consts.insert(*dest);
             }
-            MirInst::Cast { dest, src, .. } if consts.contains(src) => {
-                consts.insert(*dest);
+            MirInst::Cast { dest, src, .. } => {
+                if consts.contains(src) {
+                    consts.insert(*dest);
+                }
+                casts.insert(*dest, *src);
             }
             _ => {}
         }
     }
     let slot = |v: ValueId| need_slot.get(v.index()).copied().unwrap_or(false) && v.index() < regs.len();
+    // A cast (an `Option::Some` wrap) of a word another register holds:
+    // zeroing this register alone would leave the word rooted there.
+    let held_elsewhere = |v: ValueId| {
+        let mut cur = v;
+        while let Some(&s) = casts.get(&cur) {
+            if slot(s) && regs[s.index()] != regs[v.index()] {
+                return true;
+            }
+            cur = s;
+        }
+        false
+    };
     // Loop headers and joins: every block that opens with a φ of a rebound value.
     let headers: Vec<&super::func::MirBlock> = func
         .blocks
@@ -493,6 +509,8 @@ pub(super) fn entry_clears(func: &MirFunc, regs: &[u8], need_slot: &[bool]) -> H
                         && !func.params.contains(&src)
                         && !taken(r)
                         && !out.get(&p).is_some_and(|rs| rs.contains(&r))
+                        && !held_elsewhere(src)
+                        && collects_before_rewrite(func, h.id, r, regs, &slot)
                     {
                         out.entry(p).or_default().push(r);
                     }
@@ -501,6 +519,47 @@ pub(super) fn entry_clears(func: &MirFunc, regs: &[u8], need_slot: &[bool]) -> H
         }
     }
     out
+}
+
+/// Whether a collection can run, from the top of block `from`, while
+/// register `reg` still holds what an edge left in it: on some path an op
+/// that may collect (or, in a body with a cleanup pad, trap) comes before
+/// an op that rewrites `reg` or the frame's exit. Otherwise a zero of `reg`
+/// there is dead (a hot loop's join that allocates nothing).
+fn collects_before_rewrite(func: &MirFunc, from: BlockId, reg: u8, regs: &[u8], slot: &impl Fn(ValueId) -> bool) -> bool {
+    let quiet = |inst: &MirInst| {
+        (!super::gc::collects(inst) || matches!(inst, MirInst::ClearWord { .. } | MirInst::KeepAlive { .. }))
+            && (func.cleanup.is_none() || !inst.may_trap(func))
+    };
+    let mut seen: HashSet<BlockId> = HashSet::new();
+    let mut work = vec![from];
+    while let Some(b) = work.pop() {
+        if !seen.insert(b) {
+            continue;
+        }
+        let block = func.block(b);
+        let mut rewritten = false;
+        for inst in &block.insts {
+            if inst.is_phi() {
+                continue;
+            }
+            if !quiet(inst) {
+                return true;
+            }
+            let d = inst.dest();
+            if slot(d) && regs[d.index()] == reg {
+                rewritten = true;
+                break;
+            }
+        }
+        if !rewritten {
+            match &block.term {
+                Some(term) => work.extend(term.succs()),
+                None => return true,
+            }
+        }
+    }
+    false
 }
 
 /// `CONST 0; STORE reg`, as HIR emission's clearing store: opaque, so
