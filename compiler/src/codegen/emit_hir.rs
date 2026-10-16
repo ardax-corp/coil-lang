@@ -1443,14 +1443,16 @@ impl Compiler {
         let push_key = format!("{}::push", common::BUILTIN_VEC_TYPE);
         let pushes = emit.plan.calls.iter().filter(|(_, c)| c.key == push_key).map(|(&i, _)| i).collect();
         // Host natives taking plain words and returning one (a niche word
-        // comes back as the layout asks; no pair conversion at the edge).
+        // comes back as the layout asks; no pair conversion at the edge),
+        // and `gc::root` / `gc::weak` taking any word.
         let hosts = emit
             .plan
             .calls
             .iter()
             .filter_map(|(&i, c)| match c.builtin {
                 Some(HirBuiltin::Host(native))
-                    if c.pair.is_none() && c.params.iter().all(|&p| p == ValueLayout::Boxed) =>
+                    if c.pair.is_none()
+                        && (c.params.iter().all(|&p| p == ValueLayout::Boxed) || self.hir_generic_host(native)) =>
                 {
                     // A two-word enum result is unboxed at the edge, one
                     // `JumpIfMatch` per variant: each variant's tag and arity.
@@ -4479,6 +4481,17 @@ impl Compiler {
             ranges: Vec::new(),
             mono_of: None,
         })
+    }
+
+    /// Whether host native `native` takes a bare type parameter (`gc::root`
+    /// and `gc::weak`'s `T`): it keeps any argument word as it comes, a
+    /// niche word too, the one an `Option<T>` payload holds and
+    /// `get` / `upgrade` hand back (#1414).
+    fn hir_generic_host(&self, native: usize) -> bool {
+        use crate::typechecking::GcBuiltin;
+        [GcBuiltin::Root, GcBuiltin::Weak]
+            .iter()
+            .any(|k| self.native_id(k.native_name()) == Some(native))
     }
 
     /// The callee's ABI from its signature. With `open`, a signature type

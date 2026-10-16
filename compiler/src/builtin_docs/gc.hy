@@ -93,7 +93,8 @@ fn unroot<T>(Root<T> pin) -> Option<T> {}
 /// Makes a handle to `value` that does not keep it alive.
 ///
 /// Values that are not heap objects (`int`, `bool`, `float`, ...) are never
-/// collected, so their `Weak` always upgrades.
+/// collected, so their `Weak` always upgrades. `value` can be of any type:
+/// a `weak` of an `Option` or a `Result` refers to the heap object it holds.
 ///
 /// # Examples
 ///
