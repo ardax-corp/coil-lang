@@ -11,12 +11,12 @@ impl Foo {
         return f.v + 1;
     }
 
-    pub fn add3(self, int a, int b, int c) -> int {
+    pub fn add3(int a, int b, int c) -> int {
         return self.v * 1000 + a * 100 + b * 10 + c;
     }
 
-    pub fn label(self, string head) -> string {
-        return head + "#" + "{self.v}";
+    pub fn label(string head) -> string {
+        return string::format("%s#%i", head, self.v);
     }
 }
 
@@ -42,7 +42,7 @@ test("a prefix of a method's arguments") {
 }
 
 test("the receiver is captured when the call is made") {
-    let mut f = new Foo(5);
+    let f = new Foo(5);
     let tag = f.label();
     f = new Foo(6);
     assert!(tag("x") == "x#5");
