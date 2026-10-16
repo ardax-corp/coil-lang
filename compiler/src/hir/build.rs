@@ -65,7 +65,11 @@ pub fn build_module<'a>(checker: &Checker, sidecar: &TypedSidecar, module_path: 
         top.body.root = Some(root);
         let body = top.finish();
         module.bodies.insert(0, body);
-        // Lambdas name their body by index; the top body now comes first.
+        // Lambdas and trait instance methods name their body by index;
+        // the top body now comes first.
+        for index in module.instance_fns.values_mut() {
+            *index += 1;
+        }
         for body in &mut module.bodies {
             for expr in &mut body.exprs {
                 if let HirKind::Lambda { body } = &mut expr.kind {
