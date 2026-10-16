@@ -2868,7 +2868,15 @@ impl Checker {
                 let flat_explicit_result = self.fn_result_mode.as_ref().is_some_and(|(ok, _)| {
                     result_ok_err(ok).is_none() && Self::expr_is_explicit_result_construct(e)
                 });
-                if flat_explicit_result {
+                // Ok payload itself a `Result` (#1300): `Err(..)` and an
+                // `Ok` of an explicit `Result` construct are the whole value.
+                let nested_ok = self
+                    .fn_result_mode
+                    .as_ref()
+                    .map(|(ok, _)| result_depth(&apply_ty_prune(&self.subst, ok)))
+                    .filter(|&d| d > 0);
+                let nested_whole_construct = nested_ok.is_some() && Self::expr_is_nested_whole_result_construct(e);
+                if flat_explicit_result || nested_whole_construct {
                     if let Some((ok, err)) = self.fn_result_mode.clone() {
                         self.current_expected = Some(result_ty(ok, err));
                     }
@@ -2877,7 +2885,13 @@ impl Checker {
                 }
                 let ty = self.infer(e);
                 self.current_expected = prev_expected;
-                if flat_explicit_result {
+                let nested_whole = nested_ok.is_some_and(|d| {
+                    nested_whole_construct || result_depth(&apply_ty_prune(&self.subst, &ty)) > d
+                });
+                if nested_whole {
+                    self.whole_result_returns.insert((e.0.start, e.0.end));
+                }
+                if flat_explicit_result || nested_whole {
                     if let Some((ok, err)) = self.fn_result_mode.clone() {
                         let full = result_ty(ok, err);
                         self.coerce_or_unify(
@@ -9320,6 +9334,26 @@ impl Checker {
                     Expression::Raise(_)
                 )
             }
+            _ => false,
+        }
+    }
+
+    /// In a function whose Ok payload is a `Result`: `Result::Err(..)`, or
+    /// `Result::Ok(..)` of an explicit `Result` construct, built at the
+    /// function's own type (#1300).
+    fn expr_is_nested_whole_result_construct(node: &Output) -> bool {
+        let node = unwrap_expr_wrappers(node);
+        match node.1.as_ref() {
+            Expression::Construct {
+                enum_name,
+                variant_name,
+                fields,
+            } if *enum_name == common::BUILTIN_RESULT_ENUM || enum_name.ends_with("::Result") => match *variant_name {
+                "Err" => true,
+                "Ok" => matches!(fields, parser::ast::EnumConstructPayload::Tuple(a) if a.len() == 1 && Self::expr_is_explicit_result_construct(&a[0])),
+                _ => false,
+            },
+            Expression::Fragment(items) if items.len() == 1 => Self::expr_is_nested_whole_result_construct(&items[0]),
             _ => false,
         }
     }
@@ -19062,3 +19096,11 @@ impl Checker {
 #[cfg(test)]
 #[path = "infer.tests.rs"]
 mod tests;
+
+/// How many `Result` layers `ty` nests through its Ok payloads.
+fn result_depth(ty: &Ty) -> usize {
+    match result_ok_err(ty) {
+        Some((ok, _)) => 1 + result_depth(&ok),
+        None => 0,
+    }
+}
