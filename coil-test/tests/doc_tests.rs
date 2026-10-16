@@ -3,9 +3,13 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// A fresh directory per call: the tests run in parallel in one process,
+/// and Windows clocks are too coarse to tell their start times apart.
 fn unique_tmp(label: &str) -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     std::env::temp_dir().join(format!(
-        "coil_doc_tests_{label}_{}_{}",
+        "coil_doc_tests_{label}_{}_{n}_{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
