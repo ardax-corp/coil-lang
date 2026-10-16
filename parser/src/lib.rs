@@ -171,6 +171,7 @@ macro_rules! output {
 
 pub mod ast;
 pub mod comments;
+pub mod doc_examples;
 pub mod fmt;
 
 pub use ast::item_docs;
