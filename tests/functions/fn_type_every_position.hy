@@ -3,6 +3,7 @@
 use tests::assert;
 
 type IntFn = fn(int x) -> int;
+
 type BinFn = fn(int, int) -> int;
 
 class Holder {
@@ -18,8 +19,12 @@ fn apply_unnamed(fn(int) -> int f, int v) -> int {
     return f(v);
 }
 
-fn apply_paren((fn(int x) -> int) f, int v) -> int {
-    return f(v);
+fn feed((int -> int) -> int run) -> int {
+    return run(fn (int x) => x + 1);
+}
+
+fn feed_sig((fn(int) -> int) -> int run) -> int {
+    return run(fn (int x) => x * 2);
 }
 
 fn apply_arrow(int -> int f, int v) -> int {
@@ -39,13 +44,14 @@ fn twice(fn(fn(int) -> int g, int v) -> int run, int v) -> int {
 }
 
 fn mk(int k) -> fn(int x) -> int {
-    return fn (int y) => y + k;
+    return fn (int y) use (k) => y + k;
 }
 
 test("fn type as a parameter type") {
     assert!(apply(fn (int x) => x + 1, 4) == 5);
     assert!(apply_unnamed(fn (int x) => x * 3, 4) == 12);
-    assert!(apply_paren(fn (int x) => x - 1, 4) == 3);
+    assert!(feed(fn (int -> int g) => g(41)) == 42);
+    assert!(feed_sig(fn (fn(int) -> int g) => g(21)) == 42);
     assert!(apply_arrow(fn (int x) => x + 10, 4) == 14);
     assert!(apply(mk(5), 1) == 6);
     assert!(twice(apply, 21) == 42);
@@ -68,5 +74,6 @@ test("fn type in let annotations and generic args") {
 
 test("fn type as a class field type") {
     let h = new Holder(fn (int x) => x + 7, 3);
-    assert!(h.op(h.base) == 10);
+    let op = h.op;
+    assert!(op(h.base) == 10);
 }
