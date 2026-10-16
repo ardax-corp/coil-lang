@@ -1,13 +1,21 @@
 //! Compile-time execution of user macros on the coil VM.
 //!
 //! [`VmMacroHost`] implements [`compiler::macros::MacroHost`]: each expansion
-//! entry runs on a fresh [`Machine`] with only pure host natives wired (see
+//! entry runs on a [`Machine`] with only pure host natives wired (see
 //! [`compiler::macros::native_allowed_at_compile_time`]) and a step budget,
 //! so a macro cannot touch the outside world or hang the build.
+//!
+//! Each thread keeps one VM per expansion program, with the natives and the
+//! program loaded once (#1008). After a call that returns, the VM is reset
+//! like a reused reactor worker ([`Machine::reset_isolate_heap`]: statics,
+//! frames and heap back to their initial state), so every call starts as
+//! on a fresh VM. A call that panics, runs out of budget or aborts drops the
+//! VM; the next call builds a new one.
 
-use std::sync::{Arc, Mutex};
+use std::cell::RefCell;
+use std::sync::{Arc, Mutex, OnceLock};
 
-use common::Value;
+use common::{Byte, Value};
 use compiler::macros::{CompiledExpansion, MACRO_STEP_BUDGET, MacroHost, native_allowed_at_compile_time};
 use machine::{FfiError, HostClosureFn, Machine, NativeFn, Object};
 
@@ -28,17 +36,63 @@ pub fn install() {
 
 impl MacroHost for VmMacroHost {
     fn run(&self, program: &CompiledExpansion, calls: &[(u32, String)]) -> Vec<Result<String, String>> {
-        let natives = sandbox_natives();
         calls
             .iter()
-            .map(|(entry, input)| run_entry(program, &natives, *entry, input))
+            .map(|(entry, input)| run_entry(program, *entry, input))
             .collect()
     }
 }
 
+/// A thread's VM for one expansion program. Holding the bytecode `Arc`
+/// keeps the program alive, so its address never names another one.
+struct WarmVm {
+    program: Arc<Vec<Byte>>,
+    vm: Box<Machine<256>>,
+}
+
+thread_local! {
+    static WARM: RefCell<Vec<WarmVm>> = const { RefCell::new(Vec::new()) };
+}
+
+/// This thread's VM for `program`, or a new one with it loaded.
+fn take_vm(program: &CompiledExpansion) -> Box<Machine<256>> {
+    let warm = WARM.with(|warm| {
+        let mut warm = warm.borrow_mut();
+        let at = warm.iter().position(|w| Arc::ptr_eq(&w.program, &program.bytecode))?;
+        Some(warm.swap_remove(at).vm)
+    });
+    warm.unwrap_or_else(|| new_vm(program))
+}
+
+fn keep_vm(program: &CompiledExpansion, vm: Box<Machine<256>>) {
+    WARM.with(|warm| {
+        warm.borrow_mut().push(WarmVm { program: program.bytecode.clone(), vm });
+    });
+}
+
+fn new_vm(program: &CompiledExpansion) -> Box<Machine<256>> {
+    let mut vm = Box::new(Machine::<256>::with_operand_capacity(program.operand_stack_slots as usize));
+    for native in sandbox_natives() {
+        vm.register_native(native.clone());
+    }
+    vm.set_program_debug(program.program_debug.clone());
+    vm.init_static_slots(program.static_slot_count);
+    vm.load_shared_program(
+        program.bytecode.clone(),
+        program.constants.clone(),
+        program.strings.clone(),
+    );
+    vm
+}
+
 /// Standard host table with every impure native replaced by a stub that
-/// fails the macro. Ids stay in ABI order.
-fn sandbox_natives() -> Vec<Arc<dyn NativeFn>> {
+/// fails the macro. Ids stay in ABI order. Built once per process.
+fn sandbox_natives() -> &'static [Arc<dyn NativeFn>] {
+    static NATIVES: OnceLock<Vec<Arc<dyn NativeFn>>> = OnceLock::new();
+    NATIVES.get_or_init(build_sandbox_natives)
+}
+
+fn build_sandbox_natives() -> Vec<Arc<dyn NativeFn>> {
     let mut names = Vec::new();
     let natives = machine::build_standard_host_natives(|name, _| names.push(name.to_string()));
     natives
@@ -73,24 +127,25 @@ impl std::io::Write for Captured {
     }
 }
 
-fn run_entry(
-    program: &CompiledExpansion,
-    natives: &[Arc<dyn NativeFn>],
-    entry: u32,
-    input: &str,
-) -> Result<String, String> {
+fn run_entry(program: &CompiledExpansion, entry: u32, input: &str) -> Result<String, String> {
+    let mut vm = take_vm(program);
     let captured = Captured::default();
     // `with_output` installs a thread-local redirect pointing into the VM;
     // put the caller's back before the VM is dropped.
     let outer = machine::io::set_output_redirect(None);
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut vm = Machine::<256>::with_operand_capacity(program.operand_stack_slots as usize);
         let _ = vm.with_output(captured.clone());
-        let result = run_on(&mut vm, program, natives, entry, input);
+        let result = call_entry(&mut vm, entry, input);
         let _ = vm.restore_output();
         result
     }));
     machine::io::set_output_redirect(outer);
+    // Only a call that returned leaves the VM between frames; any other
+    // outcome drops it.
+    if matches!(outcome, Ok(Ok(_))) {
+        vm.reset_isolate_heap();
+        keep_vm(program, vm);
+    }
     let printed = String::from_utf8_lossy(&captured.0.lock().expect("capture lock")).trim().to_string();
     match outcome {
         Ok(Ok(text)) => Ok(text),
@@ -108,23 +163,7 @@ fn run_entry(
     }
 }
 
-fn run_on(
-    vm: &mut Machine<256>,
-    program: &CompiledExpansion,
-    natives: &[Arc<dyn NativeFn>],
-    entry: u32,
-    input: &str,
-) -> Result<String, String> {
-    for native in natives {
-        vm.register_native(native.clone());
-    }
-    vm.set_program_debug(program.program_debug.clone());
-    vm.init_static_slots(program.static_slot_count);
-    vm.load_shared_program(
-        program.bytecode.clone(),
-        program.constants.clone(),
-        program.strings.clone(),
-    );
+fn call_entry(vm: &mut Machine<256>, entry: u32, input: &str) -> Result<String, String> {
     vm.set_step_budget(Some(MACRO_STEP_BUDGET));
     let input = vm.heap_mut().intern(input.to_string());
     let arg = Value::from(input.as_ptr() as *mut u8 as u64);

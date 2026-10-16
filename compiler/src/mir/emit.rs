@@ -86,25 +86,28 @@ pub fn emit_dense(
         ));
     }
 
+    let cmp_dests = term_cmp_dests(func);
+    let all_preds = func.preds();
     for block in &func.blocks {
+        let preds = &all_preds[block.id.index()];
         if block.id != func.entry {
             out.push(IlOp::Label(block_lab[block.id.index()]));
         }
         let mut stacked: Vec<ValueId> = Vec::new();
         let mut starts: Vec<(usize, ValueId)> = Vec::new();
         let loc = func.term_loc(block.id);
-        seed_jim_taken_stack(&mut out, &mut stacked, func, block.id, &plan, &regs, loc);
-        if let Some(s) = miss_chain_tos(func, block.id) {
+        seed_jim_taken_stack(&mut out, &mut stacked, func, block.id, preds, &plan, &regs, loc);
+        if let Some(s) = miss_chain_tos(func, preds, block.id) {
             // The next arm's test peeks the scrutinee the miss left.
             stacked.push(s);
-        } else if missed_scrutinee_unused(func, block.id) {
+        } else if missed_scrutinee_unused(func, preds, block.id) {
             out.push(IlOp::Pop { loc });
         }
         for inst in &block.insts {
             if inst.is_phi() {
                 continue;
             }
-            if term_cmp_dest(func, block).is_some_and(|d| {
+            if cmp_dests[block.id.index()].is_some_and(|d| {
                 matches!(inst, MirInst::Cmp { dest, .. } if *dest == d)
             }) {
                 continue;
@@ -324,10 +327,11 @@ pub(super) fn cleared_words(func: &MirFunc, regs: &[u8], need_slot: &[bool]) -> 
         return out;
     }
     let live = super::gc::liveness_after(func);
+    let cmp_dests = term_cmp_dests(func);
     for (b, block) in func.blocks.iter().enumerate() {
         // A compare fused into the branch is emitted at the terminator,
         // after any clear in the block: keep the words it reads.
-        let fused_reads: Vec<ValueId> = term_cmp_dest(func, block)
+        let fused_reads: Vec<ValueId> = cmp_dests[b]
             .and_then(|d| block.insts.iter().find(|i| i.dest() == d))
             .map(|i| i.operands())
             .unwrap_or_default();
@@ -580,42 +584,46 @@ fn latch_overwrite_ok(
 }
 
 
-pub(super) fn term_cmp_dest(func: &MirFunc, block: &super::func::MirBlock) -> Option<ValueId> {
-    let Terminator::Br { cond, .. } = block.term.as_ref()? else {
-        return None;
-    };
-    let dest = block.insts.iter().find_map(|inst| match inst {
-        MirInst::Cmp { dest, .. } if dest == cond => Some(*dest),
-        _ => None,
-    })?;
-    if cmp_used_outside_term(func, dest, block.id) {
-        return None;
-    }
-    Some(dest)
-}
-
-fn cmp_used_outside_term(func: &MirFunc, dest: ValueId, home: BlockId) -> bool {
+/// Each block's compare its `Br` branches on, by block index, when nothing
+/// else reads it (it is emitted fused into the branch). One pass over the
+/// function: a scan per block made emit quadratic in its size (#1393).
+pub(super) fn term_cmp_dests(func: &MirFunc) -> Vec<Option<ValueId>> {
+    let mut read: HashSet<ValueId> = HashSet::new();
+    let mut branch_on: HashMap<ValueId, Vec<BlockId>> = HashMap::new();
     for b in &func.blocks {
         for inst in &b.insts {
-            if inst.operands().contains(&dest) {
-                return true;
-            }
+            read.extend(inst.operands());
         }
         match &b.term {
-            Some(Terminator::Br { cond, .. }) if *cond == dest && b.id != home => return true,
-            Some(Terminator::Return { lo, hi }) => {
-                if lo.is_some_and(|v| v == dest) || hi.is_some_and(|v| v == dest) {
-                    return true;
-                }
+            Some(Terminator::Br { cond, .. }) => branch_on.entry(*cond).or_default().push(b.id),
+            Some(Terminator::Return { lo, hi }) => read.extend(lo.iter().chain(hi.iter()).copied()),
+            Some(Terminator::JumpIfMatch { scrutinee, payloads, .. }) => {
+                read.insert(*scrutinee);
+                read.extend(payloads.iter().copied());
             }
-            Some(Terminator::JumpIfMatch { scrutinee, payloads, .. })
-                if (*scrutinee == dest || payloads.contains(&dest)) => {
-                    return true;
-                }
             _ => {}
         }
     }
-    false
+    func.blocks
+        .iter()
+        .map(|b| {
+            let dest = block_cmp_dest(b)?;
+            let elsewhere = read.contains(&dest)
+                || branch_on.get(&dest).is_some_and(|bs| bs.iter().any(|&o| o != b.id));
+            (!elsewhere).then_some(dest)
+        })
+        .collect()
+}
+
+/// The `Cmp` of `block` its `Br` branches on.
+fn block_cmp_dest(block: &super::func::MirBlock) -> Option<ValueId> {
+    let Terminator::Br { cond, .. } = block.term.as_ref()? else {
+        return None;
+    };
+    block.insts.iter().find_map(|inst| match inst {
+        MirInst::Cmp { dest, .. } if dest == cond => Some(*dest),
+        _ => None,
+    })
 }
 
 pub(super) struct EmitBrCondArgs<'args> {
@@ -1929,16 +1937,18 @@ fn is_jim_term_payload(func: &MirFunc, dest: ValueId) -> bool {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn seed_jim_taken_stack(
     out: &mut Vec<IlOp>,
     stacked: &mut Vec<ValueId>,
     func: &MirFunc,
     block: BlockId,
+    preds: &[BlockId],
     plan: &ConvoyPlan,
     regs: &[u8],
     loc: DebugLoc,
 ) {
-    for pred in &func.preds()[block.index()] {
+    for pred in preds {
         let Some(Terminator::JumpIfMatch {
             taken,
             payloads,
@@ -1972,7 +1982,11 @@ fn seed_jim_taken_stack(
 /// Every pred reaches `block` as the miss edge of a `JumpIfMatch` on
 /// `scrutinee`, which peeks and so leaves it on top of the stack.
 pub(super) fn scrutinee_left_by_miss(func: &MirFunc, block: BlockId, scrutinee: ValueId) -> bool {
-    let preds = &func.preds()[block.index()];
+    left_by_miss(func, &func.preds_of(block), block, scrutinee)
+}
+
+/// [`scrutinee_left_by_miss`], given `block`'s preds.
+fn left_by_miss(func: &MirFunc, preds: &[BlockId], block: BlockId, scrutinee: ValueId) -> bool {
     !preds.is_empty()
         && preds.iter().all(|p| {
             matches!(
@@ -1988,8 +2002,8 @@ pub(super) fn scrutinee_left_by_miss(func: &MirFunc, block: BlockId, scrutinee: 
 /// arm, or a later arm's test that pushes the scrutinee again), and can run
 /// again in the frame: the leftover is popped, or every pass grows the
 /// stack.
-pub(super) fn missed_scrutinee_unused(func: &MirFunc, block: BlockId) -> bool {
-    missed_scrutinee(func, block).is_some_and(|s| last_arm_payloads(func, block, s).is_empty()) && on_cycle(func, block)
+pub(super) fn missed_scrutinee_unused(func: &MirFunc, preds: &[BlockId], block: BlockId) -> bool {
+    missed_scrutinee(func, preds, block).is_some_and(|s| last_arm_payloads(func, block, s).is_empty()) && on_cycle(func, block)
 }
 
 /// `block` can run again in the same frame. Off a cycle, the word a miss
@@ -2011,14 +2025,14 @@ fn on_cycle(func: &MirFunc, block: BlockId) -> bool {
 
 /// The boxed scrutinee every pred of `block` leaves on the stack by
 /// missing a `JumpIfMatch` on it.
-fn missed_scrutinee(func: &MirFunc, block: BlockId) -> Option<ValueId> {
-    let &pred = func.preds()[block.index()].first()?;
+fn missed_scrutinee(func: &MirFunc, preds: &[BlockId], block: BlockId) -> Option<ValueId> {
+    let &pred = preds.first()?;
     let Some(Terminator::JumpIfMatch { scrutinee, not_taken, .. }) = &func.block(pred).term else {
         return None;
     };
     (*not_taken == block
         && !matches!(func.ty(*scrutinee), MirTy::NicheOpt | MirTy::NicheRes)
-        && scrutinee_left_by_miss(func, block, *scrutinee))
+        && left_by_miss(func, preds, block, *scrutinee))
     .then_some(*scrutinee)
 }
 
@@ -2026,8 +2040,8 @@ fn missed_scrutinee(func: &MirFunc, block: BlockId) -> Option<ValueId> {
 /// instruction but that test's own payloads): the scrutinee the miss left
 /// on the stack is the one it tests, as HIR emission's chained
 /// `JumpIfMatch`.
-pub(super) fn miss_chain_tos(func: &MirFunc, block: BlockId) -> Option<ValueId> {
-    let s = missed_scrutinee(func, block)?;
+pub(super) fn miss_chain_tos(func: &MirFunc, preds: &[BlockId], block: BlockId) -> Option<ValueId> {
+    let s = missed_scrutinee(func, preds, block)?;
     let b = func.block(block);
     let Some(Terminator::JumpIfMatch { scrutinee, payloads, .. }) = &b.term else {
         return None;

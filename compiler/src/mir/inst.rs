@@ -1007,6 +1007,18 @@ pub enum Terminator {
 }
 
 impl Terminator {
+    /// Whether `block` is a successor (as [`Self::succs`], without
+    /// allocating).
+    pub fn targets(&self, block: BlockId) -> bool {
+        match *self {
+            Self::Jump { dest } => dest == block,
+            Self::Br { taken, not_taken, .. } | Self::JumpIfMatch { taken, not_taken, .. } => {
+                taken == block || not_taken == block
+            }
+            Self::Return { .. } | Self::Unreachable => false,
+        }
+    }
+
     pub fn succs(&self) -> Vec<BlockId> {
         match *self {
             Self::Jump { dest } => vec![dest],

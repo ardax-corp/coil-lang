@@ -2577,6 +2577,8 @@ impl Checker {
                 let ret_ty = self.infer(ret);
                 Ty::Fun(Box::new(arg_ty), Box::new(ret_ty))
             }
+            // `fn(T x) -> R` reached as a value (a `type` alias target, #1389).
+            Expression::TypeFnSig { params, ret } => self.parse_fn_sig_type(params, ret),
 
             Expression::Noop(_)
             | Expression::Break

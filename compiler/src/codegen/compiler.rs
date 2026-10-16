@@ -84,15 +84,18 @@ impl Compiler {
         foreign: &[crate::variadic::ForeignTemplate<'compiler>],
     ) -> Vec<(SimpleSpan, Box<Expression<'compiler>>)> {
         self.checker.set_current_module(module);
+        // A module trait named like a rebound builtin gets its own key.
+        let shadowing = crate::shadow_traits::rename(ast);
         // Checks, adding a copy of each `... xs` function per call shape.
         let mut checked = crate::variadic::check_with_instances(&mut self.checker, ast, foreign);
         let messages = self.checker.take_messages();
         let failed = messages.iter().any(|m| *m.kind() == reporting::MessageKind::ERROR);
-        if checked.instances.is_empty() && checked.copies.is_empty() {
+        if checked.instances.is_empty() && checked.copies.is_empty() && shadowing.is_empty() {
             self.messages.extend(messages);
         } else {
             self.messages.extend(messages.iter().map(|m| {
-                crate::variadic::remap_message(m, &checked.instances, &checked.copies)
+                let m = crate::variadic::remap_message(m, &checked.instances, &checked.copies);
+                if shadowing.is_empty() { m } else { crate::shadow_traits::display_names(&m, &shadowing) }
             }));
         }
         if !checked.copies.is_empty() && !failed {

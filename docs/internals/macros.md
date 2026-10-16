@@ -276,7 +276,12 @@ error is the only one reported.
 
 `MacroHost` (`compiler::macros`) keeps the compiler free of `machine`; binaries
 call `comptime::install()` at startup and pipelines pick it up. `VmMacroHost`
-runs each entry on a fresh `Machine`:
+keeps one `Machine` per compiled expansion program per thread (#1008). The
+natives, statics and program are loaded once; each call resets the step
+budget and calls the entry, and a call that returns normally ends with
+`Machine::reset_isolate_heap` so the next one starts from a clean heap. A call
+that panics, errors or runs out of steps drops the machine, and the next call
+builds a fresh one. The sandboxed native table is built once per process.
 
 - The host natives are the standard table in ABI order, with every native that
   isn't pure (IO, fs, network, env, clocks, threads, streams) replaced by a
@@ -290,6 +295,13 @@ runs each entry on a fresh `Machine`:
 
 Module statics of providers are not initialised (the expansion program has no
 `main`), so macros should not depend on them.
+
+Perf (#1008, release build, 2026-10-16): compiling one file with N
+`assert!(x == 1);` calls went from 271 ms to 207 ms at N = 100 (median of 7),
+about 0.6 ms saved per call. At N = 400 the build is about 1.25 s either way:
+there the time goes to codegen of the one large `main` (`mir::gc::fill_live_roots`
+and `stackmap::encode_draft_regs`, about 55% of instructions), and macro
+expansion is 17%.
 
 ## Built-in derives
 

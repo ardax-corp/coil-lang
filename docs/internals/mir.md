@@ -402,6 +402,21 @@ before lowering; the reconstruct rematerializes `pair_int_churn`). Callers
 (`match f()`, `?`, I/O) stay on fuse-IL.
 Hit bench: `examples/perf/result_int_churn.hy`.
 
+Emit is linear in a body's size (#1393): each block's fused compare
+(`term_cmp_dests`) and preds are computed once per function, and the GC
+root pass computes the defined-SSA set once, not per allocation. Release
+build, 2026-10-16, one `main` of N `if x == k { s = s + "a"; }`:
+
+| N | before | after |
+|---|---|---|
+| 200 | 202 ms | 74 ms |
+| 1600 | 10.8 s | 0.62 s |
+
+N `assert!(x == 1);` (macro expansion included): 400 went 1.14 s → 0.39 s,
+1600 went 15.2 s → 2.0 s. What remains superlinear there is macro
+expansion (each generated snippet is parsed behind padding as long as all
+earlier ones, and each call is looked up by a walk of the whole AST).
+
 Host Option / `Result<(),E>` / heap-heap Result still pack once at
 `HostInvoke` (`host_enum`). MIR does not add a second pack.
 

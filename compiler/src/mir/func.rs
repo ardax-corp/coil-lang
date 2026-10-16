@@ -244,6 +244,16 @@ impl MirFunc {
         &mut self.blocks[id.index()]
     }
 
+    /// The predecessors of one block (as [`Self::preds`] lists them),
+    /// without building every block's list.
+    pub fn preds_of(&self, block: BlockId) -> Vec<BlockId> {
+        self.blocks
+            .iter()
+            .filter(|b| b.term.as_ref().is_some_and(|t| t.targets(block)))
+            .map(|b| b.id)
+            .collect()
+    }
+
     pub fn preds(&self) -> Vec<Vec<BlockId>> {
         let n = self.blocks.len();
         let mut preds = vec![Vec::new(); n];
