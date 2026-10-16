@@ -41,6 +41,8 @@ mod infer_class;
 mod infer_fn;
 #[path = "infer_match.rs"]
 mod infer_match;
+#[path = "variadic.rs"]
+pub(super) mod variadic;
 
 /// Max native recursion depth for [`Checker::infer`]. Chosen well under what
 /// a debug-build stack of a few MiB can hold even with `infer_inner`'s
@@ -144,6 +146,7 @@ impl Checker {
             module_frame: 0,
             fn_has_rest: std::collections::HashMap::new(),
             fn_tuple_rest: std::collections::HashMap::new(),
+            variadic: Default::default(),
             current_tuple_pack: None,
             spread_call_arity: HashMap::new(),
             spread_expanded_bases: std::collections::HashSet::new(),
@@ -1683,6 +1686,7 @@ impl Checker {
             self.messages.extend(msgs);
         }
         self.check_duplicate_classes(ast);
+        self.collect_variadic_templates(ast);
         self.pre_collect_free_function_param_names(ast);
         self.pre_register_inherent_methods(ast);
         self.pre_register_typeclass_impls(ast);
@@ -5185,6 +5189,11 @@ impl Checker {
         let has_named = raw_args
             .iter()
             .any(|a| matches!(a.1.as_ref(), Expression::NamedArg(..)));
+
+        // A `... xs` template calls its copy for this call's pack (#1281).
+        if self.is_variadic_template(&ident) {
+            return self.infer_variadic_call(&ident, raw_args, id, range);
+        }
 
         if ident == "len" {
             if has_named {
@@ -14937,15 +14946,15 @@ impl Checker {
             });
         }
 
+        let instance_pack = self.variadic_instance_pack(name);
         let arg_tys: Vec<Ty> = if let Expression::Fragment(children) = args.1.as_ref() {
             children
                 .iter()
-                .filter_map(|c| {
-                    if let Expression::Argument { ty: Some(ty), .. } = c.1.as_ref() {
-                        Some(self.parse_type_name(ty))
-                    } else {
-                        None
-                    }
+                .filter_map(|c| match c.1.as_ref() {
+                    Expression::Argument { ty: Some(ty), .. } => Some(self.parse_type_name(ty)),
+                    // A `... xs` instance's pack is known up front (#1281).
+                    Expression::Argument { ty: None, is_rest: true, .. } => instance_pack.clone(),
+                    _ => None,
                 })
                 .collect()
         } else {

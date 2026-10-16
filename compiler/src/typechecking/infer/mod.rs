@@ -172,6 +172,7 @@ struct GenericAliasDef {
 
 /// The typechecker. Owns the environment, the fresh-variable counter, the
 /// running substitution, and the accumulated diagnostic messages.
+#[derive(Clone)]
 pub struct Checker {
     env: Env,
     counter: TyVarCounter,
@@ -358,6 +359,9 @@ pub struct Checker {
     /// When the last parameter is bare `... name`, trailing args pack into a
     /// heterogeneous tuple instead of `[T]`.
     fn_tuple_rest: std::collections::HashMap<String, bool>,
+
+    /// Variadic `... xs` templates and their per-pack instances (#1281).
+    variadic: checker::variadic::VariadicState,
 
     /// Shared tuple-pack type for the current function's bare `...args` param
     /// and any `fn(...args) -> R` parameter types in its signature.
