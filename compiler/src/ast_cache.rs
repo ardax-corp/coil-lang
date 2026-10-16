@@ -17,6 +17,8 @@ use crate::macros::{MacroDecl, PendingMacro};
 /// `'static` strings leaked by attr expand). Field order drops `ast` first.
 pub struct CachedAst {
     ast: Option<Output<'static>>,
+    /// The file's `... xs` templates, for importers' copies (#1386).
+    variadic_templates: Vec<crate::variadic::ForeignTemplate<'static>>,
     /// Macro output parsed into `ast`: each is padded so its spans sit past
     /// the end of `source` (and of earlier snippets). Dropped after `ast`.
     generated: Vec<Pin<Box<str>>>,
@@ -42,6 +44,7 @@ impl CachedAst {
                 let ast = unsafe { extend_ast_lifetime(ast) };
                 Self {
                     ast: Some(ast),
+                    variadic_templates: Vec::new(),
                     generated: Vec::new(),
                     generated_text: String::new(),
                     macro_decls: Vec::new(),
@@ -55,6 +58,7 @@ impl CachedAst {
             }
             Err(parse_error) => Self {
                 ast: None,
+                variadic_templates: Vec::new(),
                 generated: Vec::new(),
                 generated_text: String::new(),
                 macro_decls: Vec::new(),
@@ -82,6 +86,14 @@ impl CachedAst {
 
     pub fn checked(&self) -> bool {
         self.checked
+    }
+
+    pub fn variadic_templates(&self) -> &[crate::variadic::ForeignTemplate<'static>] {
+        &self.variadic_templates
+    }
+
+    pub fn set_variadic_templates(&mut self, templates: Vec<crate::variadic::ForeignTemplate<'static>>) {
+        self.variadic_templates = templates;
     }
 
     pub fn mark_checked(&mut self) {

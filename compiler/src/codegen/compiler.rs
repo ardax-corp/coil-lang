@@ -71,17 +71,51 @@ impl Compiler {
         module: &str,
         ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
     ) {
+        let _ = self.typecheck_module_with(module, ast, &[]);
+    }
+
+    /// [`Self::typecheck_module`], where calls of `foreign` (other modules'
+    /// `... xs` templates) get copies made and compiled in those modules
+    /// (#1386). Returns this module's templates, as declared.
+    pub fn typecheck_module_with<'compiler>(
+        &mut self,
+        module: &str,
+        ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
+        foreign: &[crate::variadic::ForeignTemplate<'compiler>],
+    ) -> Vec<(SimpleSpan, Box<Expression<'compiler>>)> {
         self.checker.set_current_module(module);
         // Checks, adding a copy of each `... xs` function per call shape.
-        let instances = crate::variadic::check_with_instances(&mut self.checker, ast);
-        self.typed_sidecar = self.checker.typed_sidecar();
+        let mut checked = crate::variadic::check_with_instances(&mut self.checker, ast, foreign);
         let messages = self.checker.take_messages();
-        if instances.is_empty() {
+        let failed = messages.iter().any(|m| *m.kind() == reporting::MessageKind::ERROR);
+        if checked.instances.is_empty() && checked.copies.is_empty() {
             self.messages.extend(messages);
         } else {
-            self.messages
-                .extend(messages.iter().map(|m| crate::variadic::remap_message(m, &instances)));
+            self.messages.extend(messages.iter().map(|m| {
+                crate::variadic::remap_message(m, &checked.instances, &checked.copies)
+            }));
         }
+        if !checked.copies.is_empty() && !failed {
+            // Compile each copy in its module, then go back to this module's
+            // checked state for its own codegen.
+            let saved = self.checker.clone();
+            for copy in &mut checked.copies {
+                let _ = self.checker.check_variadic_copy(
+                    &copy.module,
+                    &copy.ast,
+                    &copy.name,
+                    &copy.template,
+                    copy.pack.clone(),
+                );
+                let _ = self.checker.take_messages();
+                let copy_module = copy.module.clone();
+                self.compile_prepared_module(&copy_module, &mut copy.ast);
+            }
+            self.checker = saved;
+            self.checker.set_current_module(module);
+        }
+        self.typed_sidecar = self.checker.typed_sidecar();
+        checked.templates
     }
 
     /// Take attribute-expansion diagnostics (and any macro left unresolved).
