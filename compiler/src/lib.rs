@@ -29,6 +29,7 @@ mod monomorphize;
 mod pipeline;
 mod project_index;
 mod strip_tests;
+mod variadic;
 pub mod symbols;
 mod typechecking;
 pub mod verify;

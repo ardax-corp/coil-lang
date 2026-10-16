@@ -4453,9 +4453,10 @@ impl Compiler {
             // arity not yet recorded, so read it from the signature as the
             // AST call does. Its two-word return kind comes from the
             // signature too, so it agrees with the definition.
+            // A rest pack is one more argument, as above.
             None if key == lookup
                 && self.fn_entry_labels.contains_key(&key)
-                && !self.checker.fn_has_rest(&lookup)
+                && (!self.checker.fn_has_rest(&lookup) || (self_layout.is_none() && !open))
                 && self
                     .checker
                     .fn_param_names(&lookup)

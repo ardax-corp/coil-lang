@@ -323,6 +323,10 @@ impl Checker {
                 Some("add a block `{ … }` or declare FFI with `extern \"lib\" { fn …; }`".into()),
             );
         };
+        // A `... xs` template's body is checked per instance (#1281).
+        if method_owner.is_none() && self.is_variadic_template(name) {
+            return Ty::Var(self.counter.fresh());
+        }
         // Set up type parameter environment.
         let is_generic = !type_params.is_empty();
         let mut param_vars: Vec<TyVarId> = Vec::new();
@@ -371,7 +375,11 @@ impl Checker {
         } else {
             None
         };
-        self.current_tuple_pack = Self::tuple_pack_ty_for_args(args, &mut self.counter);
+        self.current_tuple_pack = match method_owner {
+            None => self.variadic_instance_pack(name),
+            Some(_) => None,
+        }
+        .or_else(|| Self::tuple_pack_ty_for_args(args, &mut self.counter));
         let arg_tys = self.parse_arg_list(args);
         self.current_tuple_pack = None;
         // Record declaration-order param names for named call-site args.
