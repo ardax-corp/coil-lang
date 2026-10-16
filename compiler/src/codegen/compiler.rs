@@ -69,12 +69,19 @@ impl Compiler {
     pub fn typecheck_module<'compiler>(
         &mut self,
         module: &str,
-        ast: &(SimpleSpan, Box<Expression<'compiler>>),
+        ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
     ) {
         self.checker.set_current_module(module);
-        let _ = self.checker.check_program(ast);
+        // Checks, adding a copy of each `... xs` function per call shape.
+        let instances = crate::variadic::check_with_instances(&mut self.checker, ast);
         self.typed_sidecar = self.checker.typed_sidecar();
-        self.messages.extend(self.checker.take_messages());
+        let messages = self.checker.take_messages();
+        if instances.is_empty() {
+            self.messages.extend(messages);
+        } else {
+            self.messages
+                .extend(messages.iter().map(|m| crate::variadic::remap_message(m, &instances)));
+        }
     }
 
     /// Take attribute-expansion diagnostics (and any macro left unresolved).
