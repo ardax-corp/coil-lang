@@ -4912,6 +4912,13 @@ impl Compiler {
             self.mono_type_param_tys.push(type_param_tys);
             self.mono_var_tys.push(var_tys);
 
+            // The clone replays the source's ids from its parameters, as an
+            // instance clone does: the cursor it leaves behind would run the
+            // walk past the module's ids for the items after (#1190).
+            let prev_idx = self.emit_idx;
+            if let Some(id) = self.checker.id_table().id_of_output(args) {
+                self.emit_idx = id.0 as usize;
+            }
             let mut a = self.do_compile(args);
             self.bytecode.append(&mut a);
             self.emit_sidecar_array_pins(args);
@@ -4954,6 +4961,7 @@ impl Compiler {
             self.mono_codegen_var_types.pop();
             self.mono_type_param_tys.pop();
             self.mono_var_tys.pop();
+            self.emit_idx = prev_idx;
             self.compiling_result_mode = prev_result_mode;
             self.compiling_result_ok_is_result = prev_result_ok_is_result;
             self.compiling_mono_clone = prev_mono_clone;
