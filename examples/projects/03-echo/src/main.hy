@@ -86,9 +86,16 @@ fn run_echo() -> Result<string, IoError> {
     );
     close(listener)?;
     return match r {
-        Result::Ok(true) => Result::Ok("ok"),
+        Result::Ok(ok) => Result::Ok(verdict(ok)),
         default => Result::Ok("bad"),
     };
+}
+
+fn verdict(bool ok) -> string {
+    if ok {
+        return "ok";
+    }
+    return "bad";
 }
 
 fn main() {
