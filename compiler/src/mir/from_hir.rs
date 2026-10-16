@@ -2749,6 +2749,7 @@ impl Lower<'_> {
                     .and_then(|t| self.inp.word(t))
                     .filter(|_| open.is_none())
                     .or_else(|| (boxed || open.is_some()).then_some(MirTy::HeapRef))
+                    .or_else(|| self.expr_ty(*place).is_some_and(is_heap_tuple).then_some(MirTy::HeapRef))
                     .ok_or("field type")?;
                 // A two-word value is stored boxed, as the slot's `new` did;
                 // so is an open niche field's.
@@ -2887,6 +2888,8 @@ impl Lower<'_> {
                     .expr_ty(id)
                     .and_then(|t| self.inp.word(t))
                     .or_else(|| self.boxed_slot_field(id).then_some(MirTy::HeapRef))
+                    // A heap tuple field's slot holds the tuple object (#1170).
+                    .or_else(|| self.expr_ty(id).is_some_and(is_heap_tuple).then_some(MirTy::HeapRef))
                     .ok_or("field type")?;
                 if let Some((obj, index)) = self.boxed_field(id, slot)? {
                     return Ok(Val::V(self.b.ins_heap_field_load(obj, None, index, ty).map_err(mir)?));
