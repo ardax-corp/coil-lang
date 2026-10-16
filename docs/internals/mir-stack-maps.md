@@ -115,6 +115,22 @@ and relocate mapped slots on collect.
   `gc_frag` 303–353 → 326–341 ms, `gc_rebuild` 705–800 → 687–697 ms,
   `gc_churn` 144–147 → 149–151 ms, run-to-run spread larger than the gaps).
   `tests/memory/gc_weak_after_reassign.hy`.
+- **Join copies drop the branch value** (#1409). An `if`/`else` that
+  assigns a heap local on both arms meets in a φ; each arm's edge copy
+  that is not coalesced leaves the arm's value in its own register, so a
+  rebind after the join (a `ClearWord` of the φ) zeroed only the φ's word.
+  `entry_clears` covers every forward `Jump` into a block whose φ is
+  rebound, directly or through a nested join's φ copied into it, not only
+  loop headers. A zero is skipped when no op that may collect (or trap, in
+  a body with a cleanup pad) runs before the register is rewritten or the
+  frame exits, and when the word is a cast (`Option::Some`) of a value
+  another register still holds, since zeroing one copy cannot unroot it.
+  Without those two skips `gc_churn`, `gc_frag`, `gc_int_vec`,
+  `gc_rebuild` and `gc_shrink` gained a zero in their hot loop and ran
+  5–15% slower (medians of 11, e.g. `gc_int_vec` 268–277 → 315–333 ms).
+  With them flagship `.hyc` and every other `examples/perf` program are
+  byte-identical to #1402; `gc_frag` loses one dead loop-entry zero
+  (336 → 346 ms median, within noise). `tests/memory/gc_weak_after_join.hy`.
 - **Collection budget.** After a sweep the next threshold is
   `live × 4` when more than half the heap survived (a growing live set) and
   `live × 2` otherwise, never below the initial 1 MB budget.
