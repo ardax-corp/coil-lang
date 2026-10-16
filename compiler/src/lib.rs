@@ -28,6 +28,7 @@ mod module_roots;
 mod monomorphize;
 mod pipeline;
 mod project_index;
+mod shadow_traits;
 mod strip_tests;
 pub mod symbols;
 mod typechecking;

@@ -69,12 +69,20 @@ impl Compiler {
     pub fn typecheck_module<'compiler>(
         &mut self,
         module: &str,
-        ast: &(SimpleSpan, Box<Expression<'compiler>>),
+        ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
     ) {
         self.checker.set_current_module(module);
+        // A module trait named like a rebound builtin gets its own key.
+        let shadowing = crate::shadow_traits::rename(ast);
         let _ = self.checker.check_program(ast);
         self.typed_sidecar = self.checker.typed_sidecar();
-        self.messages.extend(self.checker.take_messages());
+        let messages = self.checker.take_messages();
+        if shadowing.is_empty() {
+            self.messages.extend(messages);
+        } else {
+            self.messages
+                .extend(messages.iter().map(|m| crate::shadow_traits::display_names(m, &shadowing)));
+        }
     }
 
     /// Take attribute-expansion diagnostics (and any macro left unresolved).
