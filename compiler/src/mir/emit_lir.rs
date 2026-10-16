@@ -332,8 +332,19 @@ impl EmitPlan {
                     if inst.is_phi() || fused[inst.dest().index()] || matches!(inst, MirInst::KeepAlive { .. }) {
                         continue;
                     }
+                    // A barrier emits only its paired allocation's word: any
+                    // other root it names is read nowhere, so it keeps its
+                    // slot and its own instruction runs where it stands
+                    // (a dead `codes.push(x)` result, #1381).
+                    let paired = match inst {
+                        MirInst::GcBarrier { dest, .. } => Some(super::emit::paired_alloc_dest(func, *dest)),
+                        _ => None,
+                    };
                     // Operands of stored bins can still be tree (i % 10 → BinSlotImm).
                     for v in inst.operands() {
+                        if paired.is_some_and(|p| p != Some(v)) {
+                            continue;
+                        }
                         changed |= mark_tree(MarkTreeArgs {
                             v,
                             use_block: block.id,
