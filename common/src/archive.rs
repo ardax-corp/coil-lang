@@ -134,10 +134,12 @@ pub const ARCHIVE_MAJOR: u16 = 4;
 ///      in place. Older runtimes would decode the tag as `Int`.
 /// 38 — `EQF` / `NEQF`: IEEE `float` equality (coil-lang#1077). Older
 ///      runtimes do not know the opcodes.
+/// 39 — HostInvoke `values_eq_shaped` (id 161): `==` on an aggregate
+///      with `float` leaves compares them by IEEE (coil-lang#1253).
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.
-pub const ARCHIVE_MINOR: u16 = 38;
+pub const ARCHIVE_MINOR: u16 = 39;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);

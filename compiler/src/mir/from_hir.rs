@@ -2541,7 +2541,7 @@ impl Lower<'_> {
             HirKind::Bin { lhs, rhs, .. } if self.inp.calls.contains_key(&id.0) => self.call(id, &[*lhs, *rhs]),
             HirKind::Un { operand, .. } if self.inp.calls.contains_key(&id.0) => self.call(id, &[*operand]),
             HirKind::Bin { lhs, rhs, .. } if let Some(call) = self.inp.op_calls.get(&id.0) => self.op_call(id, *lhs, *rhs, &call.clone()),
-            HirKind::Bin { op: BinOp::Overloaded(sym), lhs, rhs } if self.inp.op_prims.contains(&id.0) => self.op_prim(sym, *lhs, *rhs),
+            HirKind::Bin { op: BinOp::Overloaded(sym), lhs, rhs } if self.inp.op_prims.contains(&id.0) => self.op_prim(id, sym, *lhs, *rhs),
             HirKind::Bin { op, lhs, rhs } => self.bin(id, *op, *lhs, *rhs),
             HirKind::Call { args, .. } if let Some(f) = self.inp.fn_values.get(&id.0) => self.partial(id, &f.clone(), args),
             HirKind::Call { args, .. } if let (Some(&fixed), [arg]) = (self.inp.lens.get(&id.0), args.as_slice()) => self.len(*arg, fixed),
@@ -3555,7 +3555,7 @@ impl Lower<'_> {
             if self.b.value_ty(l) != MirTy::HeapRef || self.b.value_ty(r) != MirTy::HeapRef {
                 return Err("operator operand type".into());
             }
-            return Ok(Val::V(self.b.ins_str_eq(l, r, op == BinOp::Ne).map_err(mir)?));
+            return self.structural_eq(id, l, r, op == BinOp::Ne);
         }
         if let Some(out) = self.bitop_identity(id, op, lhs, rhs) {
             return out;
@@ -3612,6 +3612,20 @@ impl Lower<'_> {
             (None, None) => unreachable!("refused above"),
         };
         Ok(Val::V(out.map_err(mir)?))
+    }
+
+    /// `==` / `!=` of two heap words: the VM's structural `EQ`, or, when
+    /// their type has `float` leaves, `values_eq_shaped` with the shape
+    /// emission planned, so those compare by IEEE (#1253).
+    fn structural_eq(&mut self, id: HirId, l: ValueId, r: ValueId, ne: bool) -> Result<Val, Refusal> {
+        let Some(&shape) = self.inp.strings.get(&id.0) else {
+            return Ok(Val::V(self.b.ins_str_eq(l, r, ne).map_err(mir)?));
+        };
+        let shape = self.b.ins_string(shape).map_err(mir)?;
+        let eq = self.b.ins_host_invoke(common::VALUES_EQ_SHAPED_ID, vec![l, r, shape]).map_err(mir)?;
+        let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+        let cmp = if ne { MirCmpOp::Eq } else { MirCmpOp::Ne };
+        Ok(Val::V(self.b.ins_cmp(cmp, eq, zero).map_err(mir)?))
     }
 
     /// Strength reduction: `x / 2^n` as `x >> n` when
@@ -4453,14 +4467,14 @@ impl Lower<'_> {
     /// `lhs op rhs` on a user type with no instance, as HIR emission's raw
     /// opcode: `==` / `!=` of two heap words (the VM's structural `EQ`), or
     /// a number-backed scalar enum's backing words.
-    fn op_prim(&mut self, sym: &str, lhs: HirId, rhs: HirId) -> Result<Val, Refusal> {
+    fn op_prim(&mut self, id: HirId, sym: &str, lhs: HirId, rhs: HirId) -> Result<Val, Refusal> {
         // A two-word operand compares boxed, as emission pushes it.
         let (Some(l), Some(r)) = (self.word_or_boxed(lhs)?, self.word_or_boxed(rhs)?) else {
             return Ok(Val::Never);
         };
         let (lt, rt) = (self.b.value_ty(l), self.b.value_ty(r));
         if lt == MirTy::HeapRef && rt == MirTy::HeapRef && matches!(sym, "==" | "!=") {
-            return Ok(Val::V(self.b.ins_str_eq(l, r, sym == "!=").map_err(mir)?));
+            return self.structural_eq(id, l, r, sym == "!=");
         }
         // Niche `Option` / `Result` words compare as HIR emission pushes
         // them: each boxed to its `ObjEnum`, then the VM's structural `EQ`.

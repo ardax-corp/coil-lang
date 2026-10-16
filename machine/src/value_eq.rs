@@ -145,6 +145,69 @@ fn values_eq_rec(
     }
 }
 
+/// The static shape of an aggregate whose leaves include `float`s, as the
+/// compiler encodes it for [`values_eq_shaped`]: `f` a float word, `w` any
+/// other value (compared by [`values_eq`]), `a` then the element shape of
+/// an array or `Vec`, `t` then a count digit and each element's shape of a
+/// tuple.
+enum Shape {
+    Float,
+    Word,
+    Array(Box<Shape>),
+    Tuple(Vec<Shape>),
+}
+
+fn parse_shape(bytes: &[u8], pos: &mut usize) -> Option<Shape> {
+    let c = *bytes.get(*pos)?;
+    *pos += 1;
+    Some(match c {
+        b'f' => Shape::Float,
+        b'w' => Shape::Word,
+        b'a' => Shape::Array(Box::new(parse_shape(bytes, pos)?)),
+        b't' => {
+            let n = bytes.get(*pos)?.checked_sub(b'0')?;
+            *pos += 1;
+            Shape::Tuple((0..n).map(|_| parse_shape(bytes, pos)).collect::<Option<_>>()?)
+        }
+        _ => return None,
+    })
+}
+
+/// `==` on values of a static type whose `float` leaves compare by IEEE
+/// 754 (`NaN != NaN`, `0.0 == -0.0`), as scalar `float` `==` does; every
+/// other part compares as [`values_eq`] (coil-lang#1253). An unreadable
+/// shape compares as [`values_eq`].
+pub fn values_eq_shaped(heap: &Heap, a: Value, b: Value, shape: &[u8]) -> bool {
+    let mut pos = 0;
+    match parse_shape(shape, &mut pos) {
+        Some(parsed) if pos == shape.len() => shaped_eq(heap, a, b, &parsed),
+        _ => values_eq(heap, a, b),
+    }
+}
+
+fn shaped_eq(heap: &Heap, a: Value, b: Value, shape: &Shape) -> bool {
+    match shape {
+        Shape::Float => f64::from_bits(a.raw() as u64) == f64::from_bits(b.raw() as u64),
+        Shape::Word => values_eq(heap, a, b),
+        Shape::Array(elem) => match (heap.find_object_by_addr(a.raw() as u64), heap.find_object_by_addr(b.raw() as u64)) {
+            (Some(Object::Array(ga)), Some(Object::Array(gb))) => {
+                let (ea, eb) = (ga.as_ref(), gb.as_ref());
+                ea.len() == eb.len() && ea.iter().zip(eb.iter()).all(|(x, y)| shaped_eq(heap, x, y, elem))
+            }
+            _ => values_eq(heap, a, b),
+        },
+        Shape::Tuple(items) => match (heap.find_object_by_addr(a.raw() as u64), heap.find_object_by_addr(b.raw() as u64)) {
+            (Some(Object::Tuple(ga)), Some(Object::Tuple(gb))) => {
+                let (ea, eb) = (ga.as_ref().elements(), gb.as_ref().elements());
+                ea.len() == items.len()
+                    && eb.len() == items.len()
+                    && ea.iter().zip(eb.iter()).zip(items).all(|((x, y), s)| shaped_eq(heap, *x, *y, s))
+            }
+            _ => values_eq(heap, a, b),
+        },
+    }
+}
+
 fn members_eq(
     heap: &Heap,
     a: &Member,
