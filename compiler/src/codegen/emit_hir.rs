@@ -2063,7 +2063,8 @@ impl Compiler {
             if !shaped && !rest {
                 continue;
             }
-            if name.contains("::") {
+            // Another module's `... xs` copy is called by its qualified name (#1386).
+            if name.contains("::") && !self.checker.fn_tuple_rest(name) {
                 return Err("call-argument");
             }
             let mut key = self.resolve_free_fn(name);
@@ -2108,7 +2109,12 @@ impl Compiler {
                     .to_vec();
                 let has_rest = self.checker.fn_has_rest(&lookup) || self.checker.fn_has_rest(name);
                 let rest_ty = if has_rest {
-                    Some(self.checker.fn_param_tys(&lookup).and_then(|tys| tys.last().cloned()).ok_or("call-argument")?)
+                    match self.checker.fn_param_tys(&lookup).and_then(|tys| tys.last().cloned()) {
+                        Some(ty) => Some(ty),
+                        // A tuple pack's type comes from its items below.
+                        None if tuple_rest => Some(Ty::Tuple(Vec::new())),
+                        None => return Err("call-argument"),
+                    }
                 } else {
                     None
                 };
