@@ -9379,14 +9379,22 @@ impl Checker {
         range: &Range<usize>,
     ) {
         let (expected_body, expected_constraints) = self.skolemize_forall_ty(expected);
-        let (candidate, candidate_constraints) = match arg_expr.and_then(identifier_name) {
+        let (candidate, mut candidate_constraints) = match arg_expr.and_then(identifier_name) {
             Some(name) => match self.env.lookup(name).cloned() {
                 Some(scheme) => self.instantiate_scheme(&scheme),
                 None => (inferred_arg.clone(), Vec::new()),
             },
             None => (inferred_arg.clone(), Vec::new()),
         };
-        let candidate = apply_ty_prune(&self.subst, &candidate);
+        let mut candidate = apply_ty_prune(&self.subst, &candidate);
+        // A rank-n parameter passed on (`app(f, x)` with `f` itself a
+        // `forall`): instantiate its binder like a generic's scheme (#1189).
+        while let Ty::Forall { .. } = crate::typechecking::ty::strip_readonly(&candidate) {
+            let forall = crate::typechecking::ty::strip_readonly(&candidate).clone();
+            let (body, constraints) = self.instantiate_forall_ty(&forall);
+            candidate_constraints.extend(constraints);
+            candidate = apply_ty_prune(&self.subst, &body);
+        }
 
         let local = match unify_with(&Subst::empty(), &candidate, &expected_body) {
             Ok(s) => s,
