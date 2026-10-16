@@ -438,6 +438,13 @@ impl Checker {
         // bare name — so `use thread::{send}` is not shadowed by
         // `impl Foo { fn send(...) { send(...) } }`.
         let alpha = self.counter.fresh();
+        // A declared signature types the body's own recursive calls up
+        // front (#1191): `let r = f(rest); r.push(..)` needs `r`'s type
+        // before the post-body unify below would give it.
+        if !is_coro && returns.is_some() {
+            let declared = Self::seal_nullary_fun_ty(fun_ty.clone(), arg_tys.len(), self_ty.is_some());
+            self.unify(&Ty::Var(alpha), &declared, range, "function type");
+        }
 
         // Result/Option mode from an annotated return type. Bare
         // `return v` unifies against the Ok / payload slot; the
