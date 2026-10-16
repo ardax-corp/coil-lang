@@ -1379,6 +1379,11 @@ impl Compiler {
                                     && crate::typechecking::value_layout::value_layout(checker, t) == ValueLayout::Boxed)
                                     .then_some(crate::mir::MirTy::HeapRef)
                             })
+                            // A boxed user enum (a case of two or more
+                            // payload fields) is one heap word already (#1167).
+                            .or_else(|| {
+                                field_word(t).filter(|_| crate::typechecking::value_layout::value_layout(checker, t) == ValueLayout::Boxed)
+                            })
                         };
                         // A generic class's field at the made type's
                         // arguments (`new Box(1)`: `T` is `int`).
