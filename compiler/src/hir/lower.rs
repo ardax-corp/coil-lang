@@ -1276,10 +1276,16 @@ pub fn unrolled_range(hir: &HirBody, iterable: HirId, body: HirId, inclusive: bo
     } else {
         e.saturating_sub(*s)
     };
-    if !(0..=8).contains(&count) || has_own_jump(hir, body) || has_lambda(hir, body) {
+    if !(0..=8).contains(&count) || has_own_jump(hir, body) || has_lambda(hir, body) || has_defer(hir, body) {
         return None;
     }
     Some((*s, count as u32))
+}
+
+/// Each copy of a `defer` is its own site that every later exit checks,
+/// so repeating one grows the exits with the square of the copies.
+fn has_defer(hir: &HirBody, id: HirId) -> bool {
+    matches!(hir.expr(id).kind, HirKind::Defer { .. }) || children(hir, id).into_iter().any(|k| has_defer(hir, k))
 }
 
 fn has_own_jump(hir: &HirBody, id: HirId) -> bool {
