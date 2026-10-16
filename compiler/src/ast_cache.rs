@@ -19,8 +19,8 @@ pub struct CachedAst {
     ast: Option<Output<'static>>,
     /// The file's `... xs` templates, for importers' copies (#1386).
     variadic_templates: Vec<crate::variadic::ForeignTemplate<'static>>,
-    /// Macro output parsed into `ast`: each is padded so its spans sit past
-    /// the end of `source` (and of earlier snippets). Dropped after `ast`.
+    /// Macro output parsed into `ast`, its spans moved past the end of
+    /// `source` (and of earlier snippets). Dropped after `ast`.
     generated: Vec<Pin<Box<str>>>,
     /// `"\n" + snippet` for each generated snippet, in order.
     generated_text: String,
@@ -180,16 +180,16 @@ impl CachedAst {
         snippet: &str,
     ) -> Result<(Output<'static>, std::ops::Range<usize>), Message> {
         let offset = self.source.len() + self.generated_text.len() + 1;
-        let padded: Pin<Box<str>> =
-            Pin::from(format!("{}{snippet}", " ".repeat(offset)).into_boxed_str());
+        let text: Pin<Box<str>> = Pin::from(Box::<str>::from(snippet));
         self.generated_text.push('\n');
         self.generated_text.push_str(snippet);
         let range = offset..offset + snippet.len();
-        let parsed = Pratt::default().parse(&padded);
-        // SAFETY: the padded text is pinned in `generated` for as long as the
-        // cache entry lives, and `ast` (which takes these nodes) drops first.
+        // Spans start at `offset`, as if the snippet followed the text so far.
+        let parsed = Pratt::default().parse_at(&text, offset);
+        // SAFETY: the text is pinned in `generated` for as long as the cache
+        // entry lives, and `ast` (which takes these nodes) drops first.
         let parsed = parsed.map(|ast| unsafe { extend_ast_lifetime(ast) });
-        self.generated.push(padded);
+        self.generated.push(text);
         parsed.map(|ast| (ast, range))
     }
 }

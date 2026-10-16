@@ -459,6 +459,14 @@ fn push_wiring(
             })));
             continue;
         }
+        if name == "env_exit" {
+            out.push(Arc::new(HostClosureFn::new(sig, move |heap, args| {
+                crate::env::try_host_exit(heap, args)
+                    .map(Some)
+                    .map_err(FfiError::Panic)
+            })));
+            continue;
+        }
         out.push(Arc::new(HostClosureFn::new(sig, move |heap, args| {
             Ok(Some(host(heap, args)))
         })));

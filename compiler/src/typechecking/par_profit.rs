@@ -18,6 +18,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use parser::ast::{EnumConstructPayload, Expression, Output, Pattern};
 
+use super::bare_cases::BareCases;
+
 /// Expression IPA grain floor.
 ///
 /// Unit is fork-tree nodes `W`, not fib(n). Default [`DEFAULT_EXPR_GRAIN`]
@@ -392,7 +394,7 @@ pub fn analyze_par_fork_sites(
     pure_fns: &HashSet<String>,
 ) -> HashMap<String, ParForkSite> {
     let mut out = HashMap::new();
-    collect_sites(ast, pure_fns, &mut out);
+    collect_sites(ast, pure_fns, &BareCases::of(ast), &mut out);
     out
 }
 
@@ -445,6 +447,8 @@ struct FnCtx<'a> {
     param_int_like: Vec<bool>,
     /// Pure callees allowed as fork arms (includes the enclosing fn when pure).
     pure_fns: &'a HashSet<String>,
+    /// Bare unit cases (`None`, `Red`): an arm naming one is refutable.
+    cases: &'a BareCases,
 }
 
 impl FnCtx<'_> {
@@ -460,40 +464,41 @@ impl FnCtx<'_> {
 fn collect_sites(
     ast: &Output<'_>,
     pure_fns: &HashSet<String>,
+    cases: &BareCases,
     out: &mut HashMap<String, ParForkSite>,
 ) {
     match ast.1.as_ref() {
         Expression::Program(items) | Expression::Block(items) | Expression::Fragment(items) => {
             for item in items {
-                collect_sites(item, pure_fns, out);
+                collect_sites(item, pure_fns, cases, out);
             }
         }
-        Expression::Module(_, body) => collect_sites(body, pure_fns, out),
+        Expression::Module(_, body) => collect_sites(body, pure_fns, cases, out),
         Expression::Statement(inner)
         | Expression::Expr(inner)
         | Expression::ExprStatement(inner)
-        | Expression::Group(inner) => collect_sites(inner, pure_fns, out),
+        | Expression::Group(inner) => collect_sites(inner, pure_fns, cases, out),
         Expression::Function {
             name,
             args,
             body: Some(body),
             ..
         } if pure_fns.contains(*name) => {
-            if let Some(site) = detect_fork_site(name, args, body, pure_fns) {
+            if let Some(site) = detect_fork_site(name, args, body, pure_fns, cases) {
                 out.insert((*name).to_string(), site);
             }
-            collect_sites(body, pure_fns, out);
+            collect_sites(body, pure_fns, cases, out);
         }
         Expression::Function {
             body: Some(body), ..
-        } => collect_sites(body, pure_fns, out),
+        } => collect_sites(body, pure_fns, cases, out),
         Expression::Implementation { methods, .. } => {
             for m in methods {
-                collect_sites(m, pure_fns, out);
+                collect_sites(m, pure_fns, cases, out);
             }
         }
         Expression::Method(_, inner) | Expression::Member(inner) => {
-            collect_sites(inner, pure_fns, out);
+            collect_sites(inner, pure_fns, cases, out);
         }
         _ => {}
     }
@@ -504,6 +509,7 @@ fn detect_fork_site(
     args: &Output<'_>,
     body: &Output<'_>,
     pure_fns: &HashSet<String>,
+    cases: &BareCases,
 ) -> Option<ParForkSite> {
     let (param_names, param_int_like) = fn_params(args)?;
     let ctx = FnCtx {
@@ -511,6 +517,7 @@ fn detect_fork_site(
         param_names,
         param_int_like,
         pure_fns,
+        cases,
     };
     let mut scan = Scan {
         ctx: &ctx,
@@ -707,6 +714,10 @@ impl Scan<'_> {
                 self.walk(scrutinee, on_return);
                 for arm in arms {
                     match &arm.pattern.1 {
+                        // A bare unit case (`None`, #1394) is a constructor.
+                        Pattern::Binding { name } if self.ctx.cases.is_case(name, arm.pattern.0) => {
+                            self.walk_guarded(&arm.body, on_return, ParGuard::Opaque);
+                        }
                         Pattern::Wildcard
                         | Pattern::Default
                         | Pattern::Binding { .. }
@@ -1946,6 +1957,33 @@ fn main() { return; }
         assert!(
             !fibm.guards.iter().any(|g| matches!(g, ParGuard::Opaque)),
             "irrefutable match arm must not opaque the fork: {:?}",
+            fibm.guards
+        );
+    }
+
+    /// #1394: a bare unit case arm (`None`) is a constructor pattern, not
+    /// an irrefutable binding, so a fork inside it is opaque.
+    #[test]
+    fn bare_unit_case_arm_is_opaque() {
+        let sites = sites_of(
+            r#"
+fn pick(int n) -> Option<int> {
+    if n <= 1 { return Option::Some(n); }
+    return Option::None;
+}
+fn fibm(int n) -> int {
+    return match pick(n) {
+        None => fibm(n - 1) + fibm(n - 2),
+        Some(v) => v,
+    };
+}
+fn main() { return; }
+"#,
+        );
+        let fibm = sites.get("fibm").expect("fibm fork site");
+        assert!(
+            fibm.guards.iter().any(|g| matches!(g, ParGuard::Opaque)),
+            "a `None` arm is refutable: {:?}",
             fibm.guards
         );
     }

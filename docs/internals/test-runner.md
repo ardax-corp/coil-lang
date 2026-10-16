@@ -37,6 +37,24 @@ lives in the `coil-host` crate, shared by `coil` and `coil-test`.
 | a file without cases | `main` runs once as a single opaque case |
 | a function with `requires` / `ensures` (in a test file, or in a project source a test file imports) | a generated `contract: f` case calls it with random arguments (`--contract-runs N`, default 100, 0 off); see [contracts](contracts.md#generated-tests) |
 
+### `env::exit` in a case
+
+Every case runs inside the harness process, so `env::exit` (granted with
+`--allow-exit`) must not exit it: an `exit(0)` would end the run early with
+status 0 and green CI (#1401). `run_test_suite` calls
+`machine::env::trap_exit(true)`; from then on the `env_exit` native records
+its code on the thread and raises a VM panic
+(`env::exit(N) ends only this job under the test harness`), so the job's
+`defer`s run and the harness goes on with the next case.
+
+| Where `exit(N)` runs | Verdict |
+|----------------------|---------|
+| a `test` case (or its static init) | fails, whatever `N`: the rest of the body never ran |
+| a case-less file's `main` | passes when `N == 0` (a program's clean end), fails otherwise |
+| a `thread::spawn` job the case started | that job panics on its own VM (its join fails); the case sees only the failed join |
+
+A test that needs a real exit status runs the program as a subprocess.
+
 Outside `coil test` (`coil --include-tests tests/foo.hy`), a test file
 with no `main` gets one that runs every case in one VM, prints
 `> Test "<name>" failed` for each `Err`, and panics with `tests failed` if
