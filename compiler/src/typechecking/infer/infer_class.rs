@@ -1021,6 +1021,24 @@ impl Checker {
                             &method.0.into_range(),
                         );
                     }
+                    // An inherent method's receiver is implicit: a `Node self`
+                    // parameter is a second argument shadowing it (#1324).
+                    if !*is_static
+                        && what.is_empty()
+                        && let Expression::Fragment(params) = args.1.as_ref()
+                        && let Some(first) = params.first()
+                        && matches!(first.1.as_ref(), Expression::Argument { name: "self", .. })
+                    {
+                        let mut msg = Message::error(
+                            ErrorCode::VariableRedeclaration,
+                            format!("`{name}` declares a `self` parameter, but an inherent method's receiver is implicit"),
+                            first.0.into_range(),
+                        );
+                        msg.with_help(format!(
+                            "drop this parameter and use `self` (a `{owner}`) in the body; only trait methods spell out `T self`"
+                        ));
+                        self.messages.push(msg);
+                    }
                     let self_ty = if *is_static { None } else { Some(&owner_ty) };
                     // Impl type params stay in the outer impl frame so `self`
                     // and method annotations share the same variables; the
