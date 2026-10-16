@@ -66,6 +66,9 @@ pub enum ErrorCode {
     ByteWrap,
     /// A shift count known at compile time is outside `0..=63`.
     ShiftCountOutOfRange,
+    /// A type-only `let x: T;` of a non-scalar type read where it may not
+    /// have been assigned yet.
+    UnassignedLocal,
 
     DuplicateEnum,
     DuplicateConstructor,
@@ -172,6 +175,7 @@ impl ErrorCode {
             Self::Deprecated => "E0129",
             Self::ByteWrap => "E0130",
             Self::ShiftCountOutOfRange => "E0131",
+            Self::UnassignedLocal => "E0132",
             Self::DuplicateEnum => "E0200",
             Self::DuplicateConstructor => "E0201",
             Self::UnknownEnum => "E0202",
@@ -260,6 +264,7 @@ impl ErrorCode {
             Self::Deprecated => "deprecated function",
             Self::ByteWrap => "byte arithmetic wraps",
             Self::ShiftCountOutOfRange => "shift count out of range",
+            Self::UnassignedLocal => "local read before it is assigned",
             Self::DuplicateEnum => "duplicate enum",
             Self::DuplicateConstructor => "duplicate constructor",
             Self::UnknownEnum => "unknown enum",
@@ -356,6 +361,7 @@ mod tests {
             | Deprecated
             | ByteWrap
             | ShiftCountOutOfRange
+            | UnassignedLocal
             | DuplicateEnum
             | DuplicateConstructor
             | UnknownEnum
@@ -434,6 +440,7 @@ mod tests {
             Deprecated,
             ByteWrap,
             ShiftCountOutOfRange,
+            UnassignedLocal,
             DuplicateEnum,
             DuplicateConstructor,
             UnknownEnum,

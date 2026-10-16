@@ -1002,6 +1002,126 @@ pub fn stray_jumps(module: &super::HirModule, body: &HirBody) -> Vec<(HirId, boo
     out
 }
 
+/// Reads of a type-only `let x: T;` local of a non-scalar type that may run
+/// before the local is assigned (#1273). A scalar starts at zero; any other
+/// word starts as a null placeholder that must never be read. Every path to
+/// a read must assign the local first; an assignment in a loop body counts
+/// only inside that body.
+pub fn unassigned_reads(module: &super::HirModule, body: &HirBody) -> Vec<HirId> {
+    use std::collections::BTreeSet;
+    type Set = BTreeSet<u32>;
+    struct Flow<'a> {
+        module: &'a super::HirModule,
+        body: &'a HirBody,
+        out: Vec<HirId>,
+    }
+    impl Flow<'_> {
+        fn read(&mut self, at: HirId, local: LocalId, s: &Set) {
+            if s.contains(&local.0) && !self.out.contains(&at) {
+                self.out.push(at);
+            }
+        }
+        fn seq(&mut self, ids: &[HirId], s: Set) -> Option<Set> {
+            ids.iter().try_fold(s, |s, &k| self.flow(k, s))
+        }
+        /// The locals still unassigned after `id`; `None` when it never
+        /// completes (a `return`, `break` or `continue` on every path).
+        fn flow(&mut self, id: HirId, s: Set) -> Option<Set> {
+            let join = |a: Option<Set>, b: Option<Set>| match (a, b) {
+                (Some(a), Some(b)) => Some(a.union(&b).copied().collect()),
+                (a, b) => a.or(b),
+            };
+            match &self.body.expr(id).kind {
+                HirKind::Local(l) => {
+                    self.read(id, *l, &s);
+                    Some(s)
+                }
+                HirKind::Let { local, init: None } => {
+                    let mut s = s;
+                    let scalar = self.body.local(*local).ty.as_ref().and_then(primitive).is_some_and(|p| {
+                        matches!(p, coil_ty::INT | coil_ty::FLOAT | coil_ty::BOOL | coil_ty::BYTE)
+                    });
+                    if !scalar {
+                        s.insert(local.0);
+                    }
+                    Some(s)
+                }
+                HirKind::Assign { place, value } if matches!(self.body.expr(*place).kind, HirKind::Local(_)) => {
+                    let HirKind::Local(l) = self.body.expr(*place).kind else { unreachable!() };
+                    let mut s = self.flow(*value, s)?;
+                    s.remove(&l.0);
+                    Some(s)
+                }
+                HirKind::If { cond, then, els } => {
+                    let s = self.flow(*cond, s)?;
+                    let a = self.flow(*then, s.clone());
+                    let b = match els {
+                        Some(e) => self.flow(*e, s),
+                        None => Some(s),
+                    };
+                    join(a, b)
+                }
+                HirKind::Logic { lhs, rhs, .. } => {
+                    let s = self.flow(*lhs, s)?;
+                    let r = self.flow(*rhs, s.clone());
+                    join(Some(s), r)
+                }
+                HirKind::Match { scrutinee, arms } => {
+                    let s = self.flow(*scrutinee, s)?;
+                    let mut out = None;
+                    for arm in arms {
+                        let a = self.flow(arm.body, s.clone());
+                        out = join(out, a);
+                    }
+                    out
+                }
+                HirKind::Loop { body: b } => {
+                    let _ = self.flow(*b, s.clone());
+                    Some(s)
+                }
+                HirKind::ForIn { iterable, body: b, .. } => {
+                    let s = self.flow(*iterable, s)?;
+                    let _ = self.flow(*b, s.clone());
+                    Some(s)
+                }
+                HirKind::Break | HirKind::Continue => None,
+                HirKind::Return(v) => {
+                    if let Some(v) = v {
+                        self.flow(*v, s)?;
+                    }
+                    None
+                }
+                // A capture reads the local when the closure is made.
+                HirKind::Lambda { body: lam } => {
+                    for &(outer, _) in &self.module.bodies[*lam].captures {
+                        self.read(id, outer, &s);
+                    }
+                    Some(s)
+                }
+                HirKind::Defer { captures, .. } => {
+                    for l in captures.iter().flatten() {
+                        self.read(id, *l, &s);
+                    }
+                    Some(s)
+                }
+                HirKind::Builtin { op: Builtin::Panic, args } => {
+                    self.seq(args, s)?;
+                    None
+                }
+                _ => {
+                    let kids = children(self.body, id);
+                    self.seq(&kids, s)
+                }
+            }
+        }
+    }
+    let mut flow = Flow { module, body, out: Vec::new() };
+    if let Some(root) = body.root {
+        let _ = flow.flow(root, BTreeSet::new());
+    }
+    flow.out
+}
+
 /// Every node of `id`'s subtree, `id` first.
 pub(crate) fn visit(body: &HirBody, id: HirId, f: &mut impl FnMut(&super::HirExpr)) {
     f(body.expr(id));
@@ -2882,6 +3002,13 @@ impl Walk<'_> {
             // A type-only `let x: T;` of a scalar starts at zero.
             HirKind::Let { local, init: None } => match body.local(*local).ty.as_ref().and_then(primitive) {
                 Some(coil_ty::INT | coil_ty::FLOAT | coil_ty::BOOL | coil_ty::BYTE) if depth == 0 => Ok(()),
+                // Any other one-word type starts as a null placeholder that
+                // `unassigned_reads` proves is never read (#1273).
+                _ if depth == 0
+                    && body.local(*local).ty.as_ref().and_then(|ty| classify(self.checker, ty)).is_some_and(|c| is_word(c) && c != ValueClass::Enum) =>
+                {
+                    Ok(())
+                }
                 _ => Err("uninitialized-let"),
             },
             HirKind::Clear(_) => Ok(()),

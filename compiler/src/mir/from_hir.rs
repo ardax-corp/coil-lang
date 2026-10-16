@@ -1901,6 +1901,12 @@ impl Lower<'_> {
             MirTy::I64 => MirConst::I64(0),
             MirTy::F64 => MirConst::F64(0),
             MirTy::Bool => MirConst::Bool(false),
+            // A heap word's null: never read (`unassigned_reads`), and
+            // skipped by the collector.
+            ty if MirCastKind::Word.allows(MirTy::I64, ty) => {
+                let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+                return self.b.ins_cast(MirCastKind::Word, ty, zero).map_err(mir);
+            }
             _ => return Err("pair word type".into()),
         };
         self.b.ins_const(c).map_err(mir)
