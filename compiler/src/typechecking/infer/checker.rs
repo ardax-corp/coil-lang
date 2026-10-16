@@ -6588,11 +6588,21 @@ impl Checker {
             .generics
             .find_instance(class, std::slice::from_ref(&lookup))
             .is_some()
-            || self
-                .generics
-                .find_generic_instance(class, std::slice::from_ref(&lookup))
-                .is_some()
         {
+            return;
+        }
+        if self
+            .generics
+            .find_generic_instance(class, std::slice::from_ref(&lookup))
+            .is_some()
+        {
+            // A bounded generic instance (`Lt for Box<T: Ord + Eq>`) needs
+            // its context at the operand's arguments (#1186).
+            if let Ok(Some(instance)) =
+                self.find_unique_instance(class, std::slice::from_ref(&lookup), range)
+            {
+                self.check_instance_context(&instance, range, 0);
+            }
             return;
         }
         let op = match method {
