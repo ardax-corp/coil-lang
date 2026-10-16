@@ -538,6 +538,17 @@ pub fn option_inner(ty: &Ty) -> Option<Ty> {
     }
 }
 
+/// A user enum value's type by its name: a variant's constructor type
+/// (`Dir::Down(3)`) and the structural sum are both `Con("Dir")`, as an
+/// annotation names it. Other types are returned as they are.
+pub fn nominal_enum(ty: Ty) -> Ty {
+    match ty {
+        Ty::Constructor { owner, .. } => nominal_enum(*owner),
+        Ty::Sum { name, .. } if !common::is_builtin_option_enum(&name) && !common::is_builtin_result_enum(&name) => Ty::Con(name),
+        other => other,
+    }
+}
+
 /// Extract `(T, E)` from `Result<T, E>`.
 pub fn result_ok_err(ty: &Ty) -> Option<(Ty, Ty)> {
     match ty {
