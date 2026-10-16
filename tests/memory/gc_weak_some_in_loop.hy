@@ -77,6 +77,42 @@ test("the last object a churn loop wrapped is dropped after the loop") {
     assert!(gone(w));
 }
 
+test("a Some made on either arm is dropped when the Option is rebound") {
+    let junk: Option<Node> = Option::None;
+    let i = 0;
+    let ok = true;
+    while i < 4 {
+        if i % 2 == 0 {
+            junk = Option::Some(new Node(i, Option::None));
+        } else {
+            junk = Option::Some(new Node(-i, Option::None));
+        }
+        let w = weak_of(junk);
+        junk = Option::None;
+        collect();
+        ok = ok && gone(w);
+        i = i + 1;
+    }
+    assert!(ok);
+}
+
+test("a Some from a loop's last trip is dropped after the loop") {
+    let junk: Option<Node> = Option::None;
+    let i = 0;
+    while i < 3 {
+        if i % 2 == 0 {
+            junk = Option::Some(new Node(i, Option::None));
+        } else {
+            junk = Option::Some(new Node(-i, junk));
+        }
+        i = i + 1;
+    }
+    let w = weak_of(junk);
+    junk = Option::None;
+    collect();
+    assert!(gone(w));
+}
+
 test("the object stays alive while the Option still holds it") {
     let junk: Option<Node> = Option::None;
     let i = 0;

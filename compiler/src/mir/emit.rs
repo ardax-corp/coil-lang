@@ -52,6 +52,7 @@ pub fn emit_dense(
     let regs = coalesce_latch_overwrite(func, regs, &plan.need_slot);
     let cleared = cleared_words(func, &regs, &plan.need_slot);
     let entry_clears = entry_clears(func, &regs, &plan.need_slot);
+    let source_clears = source_clears(func, &regs, &plan.need_slot);
     let gather = gather_window(func, entry_label);
     let mut max_slot = plan
         .need_slot
@@ -121,6 +122,9 @@ pub fn emit_dense(
             if let MirInst::ClearWord { dest, value } = inst {
                 if cleared.contains(dest) {
                     push_clear_word(&mut out, regs[value.index()]);
+                }
+                for &r in source_clears.get(dest).map(Vec::as_slice).unwrap_or(&[]) {
+                    push_clear_word(&mut out, r);
                 }
                 continue;
             }
@@ -527,19 +531,33 @@ pub(super) fn entry_clears(func: &MirFunc, regs: &[u8], need_slot: &[bool]) -> H
 /// an op that rewrites `reg` or the frame's exit. Otherwise a zero of `reg`
 /// there is dead (a hot loop's join that allocates nothing).
 fn collects_before_rewrite(func: &MirFunc, from: BlockId, reg: u8, regs: &[u8], slot: &impl Fn(ValueId) -> bool) -> bool {
+    collects_before_rewrite_at(func, from, 0, reg, regs, slot)
+}
+
+/// [`collects_before_rewrite`] from instruction `start` of block `from`.
+fn collects_before_rewrite_at(
+    func: &MirFunc,
+    from: BlockId,
+    start: usize,
+    reg: u8,
+    regs: &[u8],
+    slot: &impl Fn(ValueId) -> bool,
+) -> bool {
     let quiet = |inst: &MirInst| {
         (!super::gc::collects(inst) || matches!(inst, MirInst::ClearWord { .. } | MirInst::KeepAlive { .. }))
             && (func.cleanup.is_none() || !inst.may_trap(func))
     };
     let mut seen: HashSet<BlockId> = HashSet::new();
-    let mut work = vec![from];
-    while let Some(b) = work.pop() {
-        if !seen.insert(b) {
+    // The first visit of `from` starts at `start`; a path back to it
+    // scans it whole.
+    let mut work = vec![(from, start)];
+    while let Some((b, skip)) = work.pop() {
+        if skip == 0 && !seen.insert(b) {
             continue;
         }
         let block = func.block(b);
         let mut rewritten = false;
-        for inst in &block.insts {
+        for inst in block.insts.iter().skip(skip) {
             if inst.is_phi() {
                 continue;
             }
@@ -554,12 +572,206 @@ fn collects_before_rewrite(func: &MirFunc, from: BlockId, reg: u8, regs: &[u8], 
         }
         if !rewritten {
             match &block.term {
-                Some(term) => work.extend(term.succs()),
+                Some(term) => work.extend(term.succs().into_iter().map(|s| (s, 0))),
                 None => return true,
             }
         }
     }
     false
+}
+
+/// Where a value's word was copied from: a cast's source (an
+/// `Option::Some` wrap) and a φ's incoming values, transitively. Each keeps
+/// the word in its own register after its last use, so once the value is
+/// rebound they still root it until rewritten (#1411).
+pub(super) struct CopySources<'f> {
+    /// Casts and φs, with the block that defines them.
+    defs: HashMap<ValueId, (BlockId, &'f MirInst)>,
+    /// Constants and casts of them (a `None` niche): they root nothing.
+    consts: HashSet<ValueId>,
+}
+
+impl<'f> CopySources<'f> {
+    pub(super) fn new(func: &'f MirFunc) -> Self {
+        let mut defs = HashMap::new();
+        let mut consts = HashSet::new();
+        for (b, inst) in func.blocks.iter().flat_map(|b| b.insts.iter().map(move |i| (b.id, i))) {
+            match inst {
+                MirInst::Const { dest, .. } => {
+                    consts.insert(*dest);
+                }
+                MirInst::Cast { dest, src, .. } => {
+                    if consts.contains(src) {
+                        consts.insert(*dest);
+                    }
+                    defs.insert(*dest, (b, inst));
+                }
+                MirInst::Phi { dest, .. } => {
+                    defs.insert(*dest, (b, inst));
+                }
+                _ => {}
+            }
+        }
+        Self { defs, consts }
+    }
+
+    /// The copy sources of `v` that may hold a heap word, not following
+    /// past a `stop` value (a live value: its own sources may hold its
+    /// current word). `v` itself is not listed.
+    pub(super) fn of(&self, func: &MirFunc, v: ValueId, stop: impl Fn(ValueId) -> bool) -> Vec<ValueId> {
+        self.of_along(func, v, stop, |_, _| true)
+    }
+
+    /// [`Self::of`], following a φ's incoming value only along the edges
+    /// (φ block, predecessor) that `edge` accepts.
+    pub(super) fn of_along(
+        &self,
+        func: &MirFunc,
+        v: ValueId,
+        stop: impl Fn(ValueId) -> bool,
+        edge: impl Fn(BlockId, BlockId) -> bool,
+    ) -> Vec<ValueId> {
+        let mut seen: HashSet<ValueId> = HashSet::from([v]);
+        let mut out = Vec::new();
+        let mut work = vec![v];
+        while let Some(x) = work.pop() {
+            let srcs: Vec<ValueId> = match self.defs.get(&x) {
+                Some((_, MirInst::Cast { src, .. })) => vec![*src],
+                Some((h, MirInst::Phi { args, .. })) => args.iter().filter(|&&(p, _)| edge(*h, p)).map(|&(_, a)| a).collect(),
+                _ => continue,
+            };
+            for s in srcs {
+                if self.consts.contains(&s) || !func.ty(s).is_heap_word() || stop(s) || !seen.insert(s) {
+                    continue;
+                }
+                out.push(s);
+                work.push(s);
+            }
+        }
+        out
+    }
+}
+
+/// Each block's strongly connected component of the CFG when it lies on a
+/// cycle (a loop), `None` otherwise. Kosaraju, iterative: linear in the
+/// function.
+fn cycle_components(func: &MirFunc) -> Vec<Option<usize>> {
+    let n = func.blocks.len();
+    let succs = |b: usize| -> Vec<usize> {
+        func.blocks[b].term.as_ref().map(Terminator::succs).unwrap_or_default().into_iter().map(|s| s.index()).filter(|&s| s < n).collect()
+    };
+    let mut preds: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for b in 0..n {
+        for s in succs(b) {
+            preds[s].push(b);
+        }
+    }
+    // Finish order of a forward DFS.
+    let mut seen = vec![false; n];
+    let mut order = Vec::with_capacity(n);
+    for root in 0..n {
+        if seen[root] {
+            continue;
+        }
+        seen[root] = true;
+        let mut stack = vec![(root, succs(root), 0usize)];
+        while let Some((b, ss, i)) = stack.last_mut() {
+            if let Some(&s) = ss.get(*i) {
+                *i += 1;
+                if !seen[s] {
+                    seen[s] = true;
+                    let next = succs(s);
+                    stack.push((s, next, 0));
+                }
+            } else {
+                order.push(*b);
+                stack.pop();
+            }
+        }
+    }
+    // Components on the reversed graph, in reverse finish order.
+    let mut comp: Vec<Option<usize>> = vec![None; n];
+    let mut size: Vec<usize> = Vec::new();
+    for &root in order.iter().rev() {
+        if comp[root].is_some() {
+            continue;
+        }
+        let c = size.len();
+        size.push(0);
+        comp[root] = Some(c);
+        let mut work = vec![root];
+        while let Some(b) = work.pop() {
+            size[c] += 1;
+            for &p in &preds[b] {
+                if comp[p].is_none() {
+                    comp[p] = Some(c);
+                    work.push(p);
+                }
+            }
+        }
+    }
+    (0..n)
+        .map(|b| comp[b].filter(|&c| size[c] > 1 || succs(b).contains(&b)))
+        .collect()
+}
+
+/// Registers to zero beside each `ClearWord` (by its token), whether or not
+/// the cleared value's own register is zeroed: the cleared value's copy
+/// sources ([`CopySources`]) that no live value shares, and that a
+/// collection may still scan before they are rewritten. Without them a
+/// rebound `Option` keeps its object rooted through the register the `Some`
+/// was cast from (#1411).
+pub(super) fn source_clears(func: &MirFunc, regs: &[u8], need_slot: &[bool]) -> HashMap<ValueId, Vec<u8>> {
+    let mut out: HashMap<ValueId, Vec<u8>> = HashMap::new();
+    if !func.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(i, MirInst::ClearWord { .. }))) {
+        return out;
+    }
+    let sources = CopySources::new(func);
+    let live = super::gc::liveness_after(func);
+    let cmp_dests = term_cmp_dests(func);
+    let comps = cycle_components(func);
+    let slot = |v: ValueId| need_slot.get(v.index()).copied().unwrap_or(false) && v.index() < regs.len();
+    for (b, block) in func.blocks.iter().enumerate() {
+        // A compare fused into the branch is emitted at the terminator.
+        let fused_reads: Vec<ValueId> = cmp_dests[b]
+            .and_then(|d| block.insts.iter().find(|i| i.dest() == d))
+            .map(|i| i.operands())
+            .unwrap_or_default();
+        for (k, inst) in block.insts.iter().enumerate() {
+            let MirInst::ClearWord { dest, value } = inst else {
+                continue;
+            };
+            let live = &live[b][k];
+            let held = |r: u8| live.iter().any(|v| slot(*v) && regs[v.index()] == r);
+            // In a loop, a φ's value from outside it (left by the loop
+            // entry, which `entry_clears` zeroes once) or from a back edge
+            // (the previous trip's: zeroed at the join it last crossed)
+            // is not cleared again on every trip; a join inside the loop
+            // still is.
+            let cycle = comps[b];
+            let edge = |h: BlockId, p: BlockId| cycle.is_none() || (comps[p.index()] == cycle && p.index() < h.index());
+            let mut rs: Vec<u8> = Vec::new();
+            for s in sources.of_along(func, *value, |x| live.contains(&x), edge) {
+                if !slot(s) || func.params.contains(&s) || fused_reads.contains(&s) {
+                    continue;
+                }
+                let r = regs[s.index()];
+                if (slot(*value) && r == regs[value.index()])
+                    || rs.contains(&r)
+                    || held(r)
+                    || copied_over_first(func, block, k, regs, r, &|v: &ValueId| slot(*v))
+                    || !collects_before_rewrite_at(func, block.id, k + 1, r, regs, &slot)
+                {
+                    continue;
+                }
+                rs.push(r);
+            }
+            if !rs.is_empty() {
+                out.insert(*dest, rs);
+            }
+        }
+    }
+    out
 }
 
 /// `CONST 0; STORE reg`, as HIR emission's clearing store: opaque, so

@@ -59,6 +59,7 @@ pub fn emit_lir_with_aliases(
     let regs = coalesce_latch_overwrite(func, regs, &plan.need_slot);
     let cleared = super::emit::cleared_words(func, &regs, &plan.need_slot);
     let entry_clears = super::emit::entry_clears(func, &regs, &plan.need_slot);
+    let source_clears = super::emit::source_clears(func, &regs, &plan.need_slot);
     let max_reg = plan
         .need_slot
         .iter()
@@ -137,6 +138,9 @@ pub fn emit_lir_with_aliases(
             if let MirInst::ClearWord { dest, value } = inst {
                 if cleared.contains(dest) {
                     super::emit::push_clear_word(&mut out, regs[value.index()]);
+                }
+                for &r in source_clears.get(dest).map(Vec::as_slice).unwrap_or(&[]) {
+                    super::emit::push_clear_word(&mut out, r);
                 }
                 continue;
             }
@@ -530,6 +534,7 @@ fn reads_memory(inst: &MirInst) -> bool {
 /// past a memory op between: a read past a write (`let s = o.f; o.f = x;
 /// return s;`) or a write past either. Such an operand keeps its slot.
 fn keep_memory_order(func: &MirFunc, tree: &mut [bool], fused: &[bool]) {
+    let sources = super::emit::CopySources::new(func);
     for block in &func.blocks {
         let insts = &block.insts;
         let at: HashMap<ValueId, usize> = insts.iter().enumerate().map(|(k, i)| (i.dest(), k)).collect();
@@ -565,14 +570,17 @@ fn keep_memory_order(func: &MirFunc, tree: &mut [bool], fused: &[bool]) {
             // A clear zeroes its value's slot where it stands, so an
             // inline user from before the clear must not be emitted after
             // it (`let j = join(s); clear s; return j` would read the
-            // zeroed slot): that user keeps its slot.
+            // zeroed slot): that user keeps its slot. The same holds for
+            // the slots of the value's copy sources (`emit::source_clears`).
             let stale = order.iter().enumerate().find_map(|(i, &c)| {
                 let MirInst::ClearWord { value, .. } = &insts[c] else {
                     return None;
                 };
+                let mut zeroed = sources.of(func, *value, |_| false);
+                zeroed.push(*value);
                 order[i + 1..]
                     .iter()
-                    .find(|&&k| k < c && insts[k].operands().contains(value))
+                    .find(|&&k| k < c && insts[k].operands().iter().any(|o| zeroed.contains(o)))
                     .map(|&k| insts[k].dest())
             });
             if let Some(v) = stale
