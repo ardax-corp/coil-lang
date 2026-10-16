@@ -193,14 +193,17 @@ pub struct Checker {
     /// `use` of virtual exports. Reset + re-injected each `check_program`.
     scope_bindings: HashMap<String, BuiltinExport>,
 
-    /// Local names bound by disk-module `use` (e.g. `io::sync::write_all`).
-    /// Like virtual imports and module-visible named `fn`s, these are
-    /// file-level globals — not lambda/defer captures — and must be rebound
-    /// after `take_and_isolate`.
     /// `use m::x` whose `x` was no value of `m` when the `use` ran: the
     /// local, its FQN and the placeholder variable it is bound to. A value
     /// use of it is an error unless `m::x` turned out to be a value (#1338).
     unresolved_imports: HashMap<String, (String, TyVarId)>,
+    /// Local name -> FQN of every `use` in the current file. A second `use`
+    /// binding the same local to another item is an error (#1354).
+    import_locals: HashMap<String, String>,
+    /// Local names bound by disk-module `use` (e.g. `io::sync::write_all`).
+    /// Like virtual imports and module-visible named `fn`s, these are
+    /// file-level globals — not lambda/defer captures — and must be rebound
+    /// after `take_and_isolate`.
     disk_imports: HashSet<String>,
 
     /// Interned module / def identities. Persists across multi-file

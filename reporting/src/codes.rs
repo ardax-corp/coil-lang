@@ -69,6 +69,8 @@ pub enum ErrorCode {
     /// A type-only `let x: T;` of a non-scalar type read where it may not
     /// have been assigned yet.
     UnassignedLocal,
+    /// Two `use` imports bind the same local name to different items.
+    DuplicateImport,
 
     DuplicateEnum,
     DuplicateConstructor,
@@ -176,6 +178,7 @@ impl ErrorCode {
             Self::ByteWrap => "E0130",
             Self::ShiftCountOutOfRange => "E0131",
             Self::UnassignedLocal => "E0132",
+            Self::DuplicateImport => "E0133",
             Self::DuplicateEnum => "E0200",
             Self::DuplicateConstructor => "E0201",
             Self::UnknownEnum => "E0202",
@@ -265,6 +268,7 @@ impl ErrorCode {
             Self::ByteWrap => "byte arithmetic wraps",
             Self::ShiftCountOutOfRange => "shift count out of range",
             Self::UnassignedLocal => "local read before it is assigned",
+            Self::DuplicateImport => "local name imported twice",
             Self::DuplicateEnum => "duplicate enum",
             Self::DuplicateConstructor => "duplicate constructor",
             Self::UnknownEnum => "unknown enum",
@@ -362,6 +366,7 @@ mod tests {
             | ByteWrap
             | ShiftCountOutOfRange
             | UnassignedLocal
+            | DuplicateImport
             | DuplicateEnum
             | DuplicateConstructor
             | UnknownEnum
@@ -441,6 +446,7 @@ mod tests {
             ByteWrap,
             ShiftCountOutOfRange,
             UnassignedLocal,
+            DuplicateImport,
             DuplicateEnum,
             DuplicateConstructor,
             UnknownEnum,
