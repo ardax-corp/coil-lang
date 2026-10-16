@@ -198,6 +198,8 @@ impl Checker {
             c_structs: Vec::new(),
             callback_sigs: Vec::new(),
             ffi_fn_ret_tys: HashMap::new(),
+            ffi_fn_ret_owner: HashMap::new(),
+            ffi_prescan_fn: None,
             ffi_fn_variadic: HashMap::new(),
             ffi_fn_nfixed: HashMap::new(),
             ffi_fn_arg_tags: HashMap::new(),
@@ -1544,6 +1546,8 @@ impl Checker {
         self.c_structs.clear();
         self.callback_sigs.clear();
         self.ffi_fn_ret_tys.clear();
+        self.ffi_fn_ret_owner.clear();
+        self.ffi_prescan_fn = None;
         self.ffi_fn_variadic.clear();
         self.ffi_fn_nfixed.clear();
         self.ffi_fn_arg_tags.clear();
@@ -11653,6 +11657,21 @@ impl Checker {
         format!("{class}::{field}")
     }
 
+    /// The function a `declare` binding being recorded or read belongs to.
+    fn ffi_binding_fn(&self) -> Option<String> {
+        self.current_function.clone().or_else(|| self.ffi_prescan_fn.clone())
+    }
+
+    /// Whether the `let name = declare(..)` recorded under `name` is the
+    /// binding `name` means here: one recorded in this function (or
+    /// outside any), not another function's same-named local (#1233).
+    fn ffi_local_binding_here(&self, name: &str) -> bool {
+        match (self.ffi_fn_ret_owner.get(name), self.ffi_binding_fn()) {
+            (Some(Some(owner)), Some(here)) => *owner == here,
+            _ => true,
+        }
+    }
+
     fn ffi_param_invoke_key(fn_name: &str, param: &str) -> String {
         format!("{fn_name}::{param}")
     }
@@ -11709,6 +11728,7 @@ impl Checker {
             self.ffi_fn_nfixed_by_field.insert(key.clone(), nfixed);
             self.ffi_fn_arg_tags_by_field.insert(key, arg_tags);
         } else {
+            self.ffi_fn_ret_owner.insert(key.clone(), self.ffi_binding_fn());
             self.ffi_fn_ret_tys.insert(key.clone(), ret);
             self.ffi_fn_variadic.insert(key.clone(), variadic);
             self.ffi_fn_nfixed.insert(key.clone(), nfixed);
@@ -11731,7 +11751,7 @@ impl Checker {
     fn ffi_invoke_fn_id_metadata(&self, expr: &Output) -> Option<(Ty, bool, usize)> {
         match expr.1.as_ref() {
             Expression::Identifier(name) => {
-                if let Some(ty) = self.ffi_fn_ret_tys.get(*name) {
+                if let Some(ty) = self.ffi_fn_ret_tys.get(*name).filter(|_| self.ffi_local_binding_here(name)) {
                     let variadic = self.ffi_fn_variadic.get(*name).copied().unwrap_or(false);
                     let nfixed = self.ffi_fn_nfixed.get(*name).copied().unwrap_or(0);
                     return Some((ty.clone(), variadic, nfixed));
@@ -11765,7 +11785,7 @@ impl Checker {
     fn ffi_invoke_arg_tags(&self, expr: &Output) -> Option<Vec<u32>> {
         match expr.1.as_ref() {
             Expression::Identifier(name) => {
-                if let Some(tys) = self.ffi_fn_arg_tags.get(*name) {
+                if let Some(tys) = self.ffi_fn_arg_tags.get(*name).filter(|_| self.ffi_local_binding_here(name)) {
                     return Some(tys.clone());
                 }
                 if let Some(fn_name) = &self.current_function {
@@ -11789,7 +11809,7 @@ impl Checker {
         local_class_scopes: &[HashMap<String, String>],
     ) -> Option<Vec<u32>> {
         match expr.1.as_ref() {
-            Expression::Identifier(name) => self.ffi_fn_arg_tags.get(*name).cloned(),
+            Expression::Identifier(name) => self.ffi_fn_arg_tags.get(*name).filter(|_| self.ffi_local_binding_here(name)).cloned(),
             Expression::Access(receiver, field) => {
                 let class = match receiver.1.as_ref() {
                     Expression::Identifier("self") => self.impl_owner.clone()?,
@@ -11840,6 +11860,7 @@ impl Checker {
                         .get(&key)
                         .cloned()
                         .unwrap_or_default();
+                    self.ffi_fn_ret_owner.insert(name.to_string(), self.ffi_binding_fn());
                     self.ffi_fn_ret_tys.insert(name.to_string(), ret);
                     self.ffi_fn_variadic.insert(name.to_string(), variadic);
                     self.ffi_fn_nfixed.insert(name.to_string(), nfixed);
@@ -11888,7 +11909,7 @@ impl Checker {
     ) -> Option<(Ty, bool, usize)> {
         match expr.1.as_ref() {
             Expression::Identifier(name) => {
-                if let Some(ty) = self.ffi_fn_ret_tys.get(*name) {
+                if let Some(ty) = self.ffi_fn_ret_tys.get(*name).filter(|_| self.ffi_local_binding_here(name)) {
                     let variadic = self.ffi_fn_variadic.get(*name).copied().unwrap_or(false);
                     let nfixed = self.ffi_fn_nfixed.get(*name).copied().unwrap_or(0);
                     return Some((ty.clone(), variadic, nfixed));
@@ -14047,7 +14068,8 @@ impl Checker {
                 }
                 self.impl_owner = prev_owner;
             }
-            Expression::Function { args, body, .. } => {
+            Expression::Function { name, args, body, .. } => {
+                let prev_fn = self.ffi_prescan_fn.replace(name.to_string());
                 let mut scope = HashMap::new();
                 if let Expression::Fragment(children) = args.1.as_ref() {
                     for child in children {
@@ -14067,6 +14089,7 @@ impl Checker {
                     self.pre_pass_ffi_invoke_param_flow_walk(body, local_class_scopes);
                 }
                 local_class_scopes.pop();
+                self.ffi_prescan_fn = prev_fn;
             }
             Expression::Call { name, args } => {
                 if let Expression::Identifier(fn_name) = name.1.as_ref() {
