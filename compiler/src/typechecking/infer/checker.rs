@@ -93,6 +93,7 @@ impl Checker {
             scope_bindings: HashMap::new(),
             disk_imports: HashSet::new(),
             unresolved_imports: HashMap::new(),
+            import_locals: HashMap::new(),
             def_interner,
             schemes_by_def: HashMap::new(),
             local_defs: HashMap::new(),
@@ -1642,6 +1643,7 @@ impl Checker {
         self.inject_prelude_scope();
         self.disk_imports.clear();
         self.unresolved_imports.clear();
+        self.import_locals.clear();
         self.local_defs.clear();
         self.def_ids_by_node.clear();
         self.frame_local.clear();
@@ -3767,6 +3769,28 @@ impl Checker {
                     mod_label
                 )),
             );
+        }
+        // `use m::{a, b as a}` (#1354): one local name, two items.
+        let local = alias.as_deref().unwrap_or(name);
+        let fqn = if module_ns.is_empty() {
+            name.to_string()
+        } else {
+            format!("{module_ns}::{name}")
+        };
+        match self.import_locals.get(local) {
+            Some(prev) if *prev != fqn => {
+                let prev = prev.clone();
+                return self.error_with_help(
+                    ErrorCode::DuplicateImport,
+                    format!("`{local}` is imported twice: as `{prev}` and as `{fqn}`"),
+                    range,
+                    Some(format!("import one of them under another name, e.g. `use {module_ns}::{{{name} as other}}`")),
+                );
+            }
+            Some(_) => {}
+            None => {
+                self.import_locals.insert(local.to_string(), fqn);
+            }
         }
         if self.apply_virtual_use(path, name, alias.as_deref()) {
             // Bind FFI callables into the value env so Call sites
