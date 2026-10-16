@@ -1300,7 +1300,12 @@ impl<'a> Display for Expression<'a> {
                         Some(t) => write!(f, "{}... {}", t.1, name),
                     }
                 } else {
-                    write!(f, "{} {}", ty.as_ref().expect("fixed param").1, name)
+                    let ty = &ty.as_ref().expect("fixed param").1;
+                    if name.is_empty() {
+                        write!(f, "{}", ty)
+                    } else {
+                        write!(f, "{} {}", ty, name)
+                    }
                 }
             }
             Self::Spread(inner) => write!(f, "...{}", inner.1),
@@ -1631,7 +1636,12 @@ impl<'a> Display for Expression<'a> {
                     write!(f, "{}::{}<{}>", owner, name, args_s)
                 }
             }
-            Self::TypeFun(arg, ret) => write!(f, "{} -> {}", arg.1, ret.1),
+            Self::TypeFun(arg, ret) => match arg.1.as_ref() {
+                Self::TypeFun(..) | Self::TypeFnSig { .. } | Self::Forall { .. } => {
+                    write!(f, "({}) -> {}", arg.1, ret.1)
+                }
+                _ => write!(f, "{} -> {}", arg.1, ret.1),
+            },
             Self::AssocTypeDecl { name, type_params } => {
                 write!(f, "type {}{};", name, fmt_type_params(type_params))
             }
