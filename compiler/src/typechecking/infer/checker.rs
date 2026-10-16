@@ -15563,6 +15563,16 @@ impl Checker {
         let tag = match tags.get(&variant_str) {
             Some(t) => *t,
             None => {
+                // `E::make()`: an inherent `static fn` on the enum.
+                if let Some(ty) = self.try_infer_static_method_call(
+                    &enum_str,
+                    variant_name,
+                    fields,
+                    range.clone(),
+                    call_id,
+                ) {
+                    return ty;
+                }
                 // `MyEnum::from_val(v)`: a static trait method on an enum.
                 if let Some(ty) = self.try_infer_trait_static_call(
                     enum_name,
@@ -17841,7 +17851,10 @@ impl Checker {
     }
 
     fn class_owner_from_ty(&self, ty: &Ty) -> Option<String> {
-        Self::class_name_of_ty(ty)
+        // A constructor expression (`E::A.tag()`) is typed as the variant;
+        // its inherent methods are the enum's.
+        let ty = crate::typechecking::ty::peel_constructor_refinement(strip_readonly(ty).clone());
+        Self::class_name_of_ty(&ty)
             .filter(|n| self.classes.contains_key(*n))
             .map(|n| n.to_string())
     }
