@@ -3567,7 +3567,17 @@ impl<'pratt> Pratt<'pratt> {
                     })
                     .padded_by(trivia())
                     .map_with(|n, e| (e.span(), Pattern::Integer(n))),
-                text::ident().padded_by(trivia()).map_with(|name, e| {
+                text::ident().padded_by(trivia()).validate(|name: &str, e, emitter| {
+                    // `true` / `false` would bind a variable that matches
+                    // anything (#1160); patterns take no bool literals.
+                    if name == "true" || name == "false" {
+                        emitter.emit(Rich::custom(
+                            e.span(),
+                            format!("`{name}` is not a pattern: patterns take no bool literals; use `if` / `else` on a bool"),
+                        ));
+                    }
+                    name
+                }).map_with(|name, e| {
                     let pat = if name == "default" {
                         Pattern::Default
                     } else {

@@ -27,6 +27,13 @@ fn size(Result<Result<int, IoError>, TaskError> r) -> int {
     };
 }
 
+fn verdict(bool ok) -> string {
+    if ok {
+        return "ok";
+    }
+    return "failed";
+}
+
 fn main() {
     let r = scope(
         fn (Scope s) {
@@ -36,7 +43,7 @@ fn main() {
         },
     );
     let text = match r {
-        Result::Ok(true) => "ok",
+        Result::Ok(ok) => verdict(ok),
         default => "failed",
     };
     write_all(stdout(), to_bytes(text));
