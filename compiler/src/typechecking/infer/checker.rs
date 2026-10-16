@@ -2168,7 +2168,7 @@ impl Checker {
     /// node once the counter drifts (it typed `lcm`'s int `a` as the float
     /// param of a later function in coil-stdlib `num.hy`).
     fn next_walk_id(&mut self, node: &Output) -> NodeId {
-        let seq_id = self.ids.ids()[self.next_id_idx];
+        let seq_id = self.ids.ids().get(self.next_id_idx).copied();
         self.next_id_idx += 1;
         self.ids.resolve_walk_id(node, seq_id)
     }
@@ -2189,7 +2189,10 @@ impl Checker {
 
         // Key facts by the node's own id; the pre-order counter drifts when a
         // rule skips or revisits children (see `IdTable::walk_id`).
-        let seq_id = self.ids.ids()[self.next_id_idx];
+        // Synthetic nodes (a spread's per-item `Index`) consume pre-order
+        // ids too, so the counter can run past the table: those resolve by
+        // pointer or mint a synthetic id.
+        let seq_id = self.ids.ids().get(self.next_id_idx).copied();
         self.next_id_idx += 1;
         let id = self.ids.resolve_walk_id(expr, seq_id);
         self.maybe_attach_def_id(id, expr);
@@ -4838,7 +4841,9 @@ impl Checker {
         if let Expression::Identifier(callee) = name.1.as_ref()
             && let Some(arg_list) = args.as_deref()
                 && arg_list.len() == 1
-                    && let Expression::Spread(pack) = arg_list[0].1.as_ref() {
+                    && let Expression::Spread(pack) = arg_list[0].1.as_ref()
+                    // A rest parameter packs the spread's items instead.
+                    && !self.fn_has_rest.get(*callee).copied().unwrap_or(false) {
                         if self.next_id_idx < self.ids.ids().len() {
                             self.next_id_idx += 1;
                         }

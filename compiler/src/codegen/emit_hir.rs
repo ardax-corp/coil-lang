@@ -2148,8 +2148,13 @@ impl Compiler {
                 }
                 &HirKind::Local(local) => {
                     let ty = b.expr(inner).ty.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t));
-                    let Some(Ty::Tuple(elems)) = ty else {
-                        return Err("call-argument");
+                    // A tuple's fields, or a fixed array's elements, by index.
+                    let (elems, kind) = match ty {
+                        Some(Ty::Tuple(elems)) => (elems, crate::hir::IndexKind::Tuple),
+                        Some(Ty::Array { element, length: crate::typechecking::ty::ArrayLength::Static(n) }) => {
+                            (vec![*element; n], crate::hir::IndexKind::Array)
+                        }
+                        _ => return Err("call-argument"),
                     };
                     let span = b.expr(inner).span;
                     let tuple_ty = b.expr(inner).ty.clone();
@@ -2165,7 +2170,7 @@ impl Compiler {
                         flat.push(Self::hir_push(
                             b,
                             &self.checker,
-                            HirKind::Index { base, index, kind: crate::hir::IndexKind::Tuple },
+                            HirKind::Index { base, index, kind },
                             Some(elem),
                             span,
                         ));
