@@ -2459,7 +2459,10 @@ impl Walk<'_> {
                 if !indirect_callee(body, self.checker, *f) && !polyfn_callee(body, self.checker, *f) {
                     return Err("callee-value");
                 }
-                self.word(id)?;
+                // A `()` result is the word `CallIndirect` leaves, dropped (#1214).
+                if !is_unit_value(body, self.checker, id) {
+                    self.word(id)?;
+                }
                 self.args(args, depth, false)?;
                 self.value(*f, depth + args.len() as u32)
             }
