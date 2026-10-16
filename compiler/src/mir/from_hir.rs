@@ -3424,6 +3424,7 @@ impl Lower<'_> {
 
     /// With `last`, the loop leaves once the counter reaches it, before the
     /// step.
+    #[allow(clippy::too_many_arguments)]
     fn counted_body(&mut self, body: HirId, head: BlockId, exit: BlockId, counter: LocalId, ty: MirTy, one: MirConst, last: Option<ValueId>) -> Result<Val, Refusal> {
         let step = lower::has_own_continue(self.hir, body).then(|| self.b.create_block());
         self.loops.push(Loop {
