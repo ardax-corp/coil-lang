@@ -1654,7 +1654,9 @@ pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
         return false;
     }
     match info.kind {
-        LocalKind::Param => true,
+        // A captured monomorphic function value is its closure word, as
+        // the enclosing body's own call through it would be.
+        LocalKind::Param | LocalKind::Capture => true,
         LocalKind::Let => body.exprs.iter().any(|e| match &e.kind {
             // A named function read as a value is `MakeFn` (codegen refuses
             // a generic one, whose `MakePolyFn` calls differently).
