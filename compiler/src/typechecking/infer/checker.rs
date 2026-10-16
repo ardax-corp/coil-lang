@@ -145,6 +145,8 @@ impl Checker {
             current_tuple_pack: None,
             spread_call_arity: HashMap::new(),
             spread_expanded_bases: std::collections::HashSet::new(),
+            vec_rest_spread: false,
+            vec_rest_spreads: std::collections::HashSet::new(),
             overload_sets: std::collections::HashMap::new(),
             selected_overloads_by_span: std::collections::HashMap::new(),
             selected_overloads: std::collections::HashMap::new(),
@@ -1489,6 +1491,7 @@ impl Checker {
         self.current_tuple_pack = None;
         self.spread_call_arity.clear();
         self.spread_expanded_bases.clear();
+        self.vec_rest_spreads.clear();
         // Keep module-qualified overloads across files; drop bare keys so they do not leak.
         self.overload_sets.retain(|k, _| k.contains("::"));
         // Declaration/call span tables are per-module.
@@ -13014,7 +13017,7 @@ impl Checker {
     /// tuple/array types. Returns a flat argument list for arity checking.
     pub fn flatten_spread_call_args<'a>(&mut self, args: &[Output<'a>]) -> Vec<Output<'a>> {
         let mut out = Vec::new();
-        for arg in args {
+        for (k, arg) in args.iter().enumerate() {
             if let Expression::Spread(inner) = arg.1.as_ref() {
                 // Consume the `Spread` node's pre-walk ID (call sites flatten
                 // instead of inferring `Expression::Spread` directly).
@@ -13050,12 +13053,20 @@ impl Checker {
                             );
                         }
                     }
+                    // The last argument fills a `T... xs` rest whole.
+                    ref vec if vec_element_ty(vec).is_some() && self.vec_rest_spread && k + 1 == args.len() => {
+                        self.vec_rest_spreads.insert((inner.0.start, inner.0.end));
+                        out.push(inner.clone());
+                    }
                     ref vec if vec_element_ty(vec).is_some() => {
                         let _ = self.error_with_help(
                             ErrorCode::GenericTypeError,
                             "cannot spread dynamic-length array".to_string(),
                             arg.0.into_range(),
-                            Some("use a tuple or a fixed-length array `[T; N]` at the spread site".to_string()),
+                            Some(
+                                "a `Vec` spread can only be the last argument, filling a `T... xs` rest parameter; use a tuple or a fixed-length array `[T; N]` for fixed parameters"
+                                    .to_string(),
+                            ),
                         );
                     }
                     _ => {
@@ -13159,12 +13170,15 @@ impl Checker {
         args: &'a [Output<'a>],
         range: &Range<usize>,
     ) -> (Vec<Ty>, Vec<Output<'a>>) {
+        let has_rest = self.fn_has_rest.get(fn_name).copied().unwrap_or(false);
+        self.vec_rest_spread =
+            has_rest && !self.fn_tuple_rest.get(fn_name).copied().unwrap_or(false);
         let flat_args: Vec<Output<'a>> = self.flatten_spread_call_args(args);
+        self.vec_rest_spread = false;
         let args = flat_args.as_slice();
         let has_named = args
             .iter()
             .any(|a| matches!(a.1.as_ref(), Expression::NamedArg(..)));
-        let has_rest = self.fn_has_rest.get(fn_name).copied().unwrap_or(false);
 
         if !has_named && !has_rest {
             let mut tys = Vec::with_capacity(args.len());
@@ -13219,6 +13233,8 @@ impl Checker {
 
         let mut slots: Vec<Option<(Ty, Output)>> = vec![None; fixed_count];
         let mut rest_elems: Vec<(Ty, Output)> = Vec::new();
+        // A `...vec` that is the whole rest pack.
+        let mut rest_whole: Option<(Ty, Output)> = None;
         let mut next_pos = 0usize;
         let mut seen_named = false;
 
@@ -13291,7 +13307,21 @@ impl Checker {
                     while next_pos < fixed_count && slots[next_pos].is_some() {
                         next_pos += 1;
                     }
-                    if next_pos < fixed_count {
+                    if next_pos < fixed_count
+                        && self.vec_rest_spreads.contains(&(arg.0.start, arg.0.end))
+                    {
+                        let _ = self.error_with_help(
+                            ErrorCode::GenericTypeError,
+                            "cannot spread dynamic-length array".to_string(),
+                            arg.0.into_range(),
+                            Some(
+                                "a `Vec` spread fills only the `T... xs` rest parameter; pass the fixed arguments before it"
+                                    .to_string(),
+                            ),
+                        );
+                        slots[next_pos] = Some((Ty::Var(self.counter.fresh()), arg.clone()));
+                        next_pos += 1;
+                    } else if next_pos < fixed_count {
                         if seen_named {
                             let mut msg = Message::error(
                                 ErrorCode::GenericTypeError,
@@ -13308,6 +13338,20 @@ impl Checker {
                             self.messages.push(msg);
                         }
                         slots[next_pos] = Some((ty, arg.clone()));
+                        next_pos += 1;
+                    } else if has_rest
+                        && self.vec_rest_spreads.contains(&(arg.0.start, arg.0.end))
+                    {
+                        if rest_elems.is_empty() {
+                            rest_whole = Some((ty, arg.clone()));
+                        } else {
+                            let _ = self.error_with_help(
+                                ErrorCode::GenericTypeError,
+                                "cannot spread a `Vec` after other rest arguments".to_string(),
+                                arg.0.into_range(),
+                                Some("a `Vec` spread fills the whole rest parameter on its own".to_string()),
+                            );
+                        }
                         next_pos += 1;
                     } else if has_rest {
                         // Trailing positionals after fixed (and after named
@@ -13422,7 +13466,11 @@ impl Checker {
         }
         let _ = saw_hole; // used for clarity in the None branch
 
-        if pack_rest {
+        if pack_rest && let Some((ty, e)) = rest_whole {
+            // `f(...vec)`: the `Vec` itself is the rest pack.
+            tys.push(ty);
+            exprs.push(e);
+        } else if pack_rest {
             let tuple_rest = self.fn_tuple_rest.get(fn_name).copied().unwrap_or(false);
             if tuple_rest {
                 let elem_tys: Vec<Ty> = rest_elems

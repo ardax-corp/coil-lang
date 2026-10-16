@@ -362,6 +362,13 @@ pub struct Checker {
     /// Tuple bases expanded by [`flatten_spread_call_args`] (by span).
     spread_expanded_bases: std::collections::HashSet<(usize, usize)>,
 
+    /// Whether the call being flattened takes a `T... xs` rest, which a
+    /// trailing `...vec` fills whole.
+    vec_rest_spread: bool,
+
+    /// `Vec`s spread whole into a rest parameter (by span).
+    vec_rest_spreads: std::collections::HashSet<(usize, usize)>,
+
     /// All overload candidates for each function name.
     ///
     /// Populated at the end of each `infer_function` call.  When a name has
