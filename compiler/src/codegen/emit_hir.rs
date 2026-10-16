@@ -572,6 +572,27 @@ impl Compiler {
             }
         }
         let hir = staged.as_ref().unwrap_or(hir);
+        // A type-only `let x: T;` of a non-scalar type read before it is
+        // assigned is the program's error (#1273).
+        let unassigned = lower::unassigned_reads(&module, hir);
+        if !unassigned.is_empty() {
+            for at in unassigned {
+                let (start, end) = hir.expr(at).span;
+                let name = match hir.expr(at).kind {
+                    HirKind::Local(l) => hir.local(l).name.clone(),
+                    _ => "a captured local".to_string(),
+                };
+                let mut message = Message::error(
+                    ErrorCode::UnassignedLocal,
+                    format!("`{name}` may be read before it is assigned"),
+                    start..end,
+                );
+                message.with_help("assign it on every path before this read, or give the `let` a value".to_string());
+                self.messages.push(message);
+            }
+            self.hir_module = Some(module);
+            return true;
+        }
         // A `break` / `continue` outside every loop is the program's error;
         // nothing else of the body is emitted.
         let stray = lower::stray_jumps(&module, hir);
