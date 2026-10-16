@@ -2419,8 +2419,10 @@ impl<'s> Formatter<'s> {
             self.push_str(&flat);
             return;
         }
-        self.push_str(enum_name);
-        self.push_str("::");
+        if !enum_name.is_empty() {
+            self.push_str(enum_name);
+            self.push_str("::");
+        }
         self.push_str(variant_name);
         self.push_str(if open == b'{' { " {" } else { "(" });
         if let Some(open_at) = open_at {

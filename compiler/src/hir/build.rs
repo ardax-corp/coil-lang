@@ -19,7 +19,7 @@ use std::collections::HashMap;
 
 use parser::ast::{
     AdjustOp, AssignOp, Contract, ContractKind, EnumConstructPayload, Expression, LetPattern, MatchArm,
-    Output, Pattern,
+    Output, Pattern, PatternOutput,
     PatternPayload,
 };
 
@@ -2269,7 +2269,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         let mut out = Vec::with_capacity(arms.len());
         for arm in arms {
             b.scopes.push(HashMap::new());
-            let pat = self.pattern(b, &arm.pattern.1, sty.as_ref());
+            let pat = self.pattern(b, &arm.pattern, sty.as_ref());
             let body = self.expr(b, &arm.body);
             b.scopes.pop();
             out.push(HirArm { pat, body });
@@ -2438,8 +2438,11 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         }
     }
 
-    fn pattern(&mut self, b: &mut BodyBuilder, pat: &Pattern<'_>, scrut_ty: Option<&Ty>) -> HirPat {
-        match pat {
+    fn pattern(&mut self, b: &mut BodyBuilder, pat: &PatternOutput<'_>, scrut_ty: Option<&Ty>) -> HirPat {
+        // Bare constructor patterns (`Some(v)`, `None`, #1352) take the
+        // enum the checker resolved them to.
+        let checker = self.checker;
+        match checker.resolved_pattern(pat).as_ref() {
             Pattern::Wildcard | Pattern::Default => HirPat::Wild,
             Pattern::Binding { name } => HirPat::Bind(b.local(name, scrut_ty.cloned(), LocalKind::Pattern)),
             Pattern::Integer(n) => HirPat::Int(*n),
@@ -2451,7 +2454,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                         items
                             .iter()
                             .enumerate()
-                            .map(|(i, (_, p))| {
+                            .map(|(i, p)| {
                                 let ty = field_tys.get(i).cloned();
                                 self.pattern(b, p, ty.as_ref())
                             })
@@ -2471,7 +2474,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                                     .map(|(i, (name, _))| match fields.iter().find(|f| f.name == name.as_str()) {
                                         Some(f) => {
                                             let ty = field_tys.get(i).cloned();
-                                            self.pattern(b, &f.pattern.1, ty.as_ref())
+                                            self.pattern(b, &f.pattern, ty.as_ref())
                                         }
                                         None => HirPat::Wild,
                                     })
@@ -2481,7 +2484,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                             HirPatFields::Record(
                                 fields
                                     .iter()
-                                    .map(|f| (f.name.to_string(), self.pattern(b, &f.pattern.1, None)))
+                                    .map(|f| (f.name.to_string(), self.pattern(b, &f.pattern, None)))
                                     .collect(),
                             )
                         }

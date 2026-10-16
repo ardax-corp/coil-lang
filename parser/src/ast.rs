@@ -1010,8 +1010,15 @@ impl<'a> Display for Pattern<'a> {
                 variant_name,
                 payload,
             } => {
-                write!(f, "{}::{}", enum_name, variant_name)?;
+                // A bare pattern (`Some(v)`, #1352) has no enum prefix; its
+                // empty `()` stays, since a bare `Name` alone is a binding.
+                if enum_name.is_empty() {
+                    write!(f, "{}", variant_name)?;
+                } else {
+                    write!(f, "{}::{}", enum_name, variant_name)?;
+                }
                 match payload {
+                    PatternPayload::Unit if enum_name.is_empty() => write!(f, "()"),
                     PatternPayload::Unit => Ok(()),
                     PatternPayload::Tuple(parts) => {
                         if !parts.is_empty() {

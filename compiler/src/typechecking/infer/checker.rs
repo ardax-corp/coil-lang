@@ -1,7 +1,11 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 
-use parser::ast::{Expression, ExternFunction, FieldModifier, Output, Pattern, Visibility};
+use parser::ast::{
+    Expression, ExternFunction, FieldModifier, Output, Pattern, PatternOutput, PatternPayload,
+    Visibility,
+};
 use reporting::{ErrorCode, Label, Message};
 
 use crate::typechecking::def_id::{DefId, DefKind};
@@ -196,6 +200,7 @@ impl Checker {
             enum_arities: BTreeMap::new(),
             enum_scalar: BTreeMap::new(),
             bare_constructs_by_span: HashMap::new(),
+            bare_patterns_by_span: HashMap::new(),
             pending_exhaustive: Vec::new(),
             async_functions: std::collections::HashSet::new(),
             async_depth: 0,
@@ -1579,6 +1584,7 @@ impl Checker {
         self.enum_arities.retain(|k, _| k.contains("::"));
         self.enum_scalar.retain(|k, _| k.contains("::"));
         self.bare_constructs_by_span.clear();
+        self.bare_patterns_by_span.clear();
         self.c_structs.clear();
         self.callback_sigs.clear();
         self.ffi_fn_ret_tys.clear();
@@ -16748,9 +16754,8 @@ impl Checker {
     /// Shape of one pattern for match usefulness: a literal stays a
     /// literal, a constructor carries its whole payload in declaration
     /// order (omitted record fields are `Any`).
-    fn coverage_tree(&self, pattern: &Pattern) -> CoverageTree {
-        use parser::ast::PatternPayload;
-        match pattern {
+    fn coverage_tree(&self, pattern: &PatternOutput) -> CoverageTree {
+        match self.resolved_pattern(pattern).as_ref() {
             Pattern::Wildcard | Pattern::Default | Pattern::Binding { .. } => CoverageTree::Any,
             Pattern::Integer(n) => CoverageTree::Int(*n),
             Pattern::Constructor {
@@ -16781,7 +16786,7 @@ impl Checker {
                         .map(|i| {
                             parts
                                 .get(i)
-                                .map_or(CoverageTree::Any, |p| self.coverage_tree(&p.1))
+                                .map_or(CoverageTree::Any, |p| self.coverage_tree(p))
                         })
                         .collect(),
                     PatternPayload::Record(given) => decl
@@ -16790,7 +16795,7 @@ impl Checker {
                             given
                                 .iter()
                                 .find(|f| f.name == name.as_str())
-                                .map_or(CoverageTree::Any, |f| self.coverage_tree(&f.pattern.1))
+                                .map_or(CoverageTree::Any, |f| self.coverage_tree(&f.pattern))
                         })
                         .collect(),
                 };
@@ -16805,8 +16810,9 @@ impl Checker {
 
     /// Capture per-arm coverage info for the deferred
     /// exhaustiveness check.
-    fn arm_coverage(&self, pattern: &Pattern, range: &Range<usize>) -> ArmCoverage {
-        let (is_catchall, is_keyword_catchall) = match pattern {
+    fn arm_coverage(&self, pattern: &PatternOutput, range: &Range<usize>) -> ArmCoverage {
+        // A bare unit case (`None`) is a constructor, not a catch-all.
+        let (is_catchall, is_keyword_catchall) = match self.resolved_pattern(pattern).as_ref() {
             Pattern::Default => (true, true),
             Pattern::Binding { .. } => (true, false),
             // Whole-arm `_` is rejected at the match site; it closes nothing.
@@ -17354,6 +17360,43 @@ impl Checker {
     /// Bare constructor sugar resolved at this span (`Some(x)` → `Option::Some`).
     pub fn bare_construct_at(&self, start: usize, end: usize) -> Option<&(String, String)> {
         self.bare_constructs_by_span.get(&(start, end))
+    }
+
+    /// Enum a bare constructor pattern at this span resolved to (#1352):
+    /// `Some(v)` → `Option`, a unit case `Red` → its enum. `None` for a
+    /// qualified pattern or a bare name that stayed a binding.
+    pub fn bare_pattern_at(&self, start: usize, end: usize) -> Option<&str> {
+        self.bare_patterns_by_span.get(&(start, end)).map(String::as_str)
+    }
+
+    /// `pattern` with a bare constructor (`Some(v)`, `None`, #1352) spelled
+    /// as the qualified pattern the checker resolved it to. Sub-patterns
+    /// keep their spans, so nested bare patterns resolve in turn.
+    pub fn resolved_pattern<'p>(&'p self, pattern: &'p PatternOutput<'p>) -> Cow<'p, Pattern<'p>> {
+        let (span, pat) = pattern;
+        match pat {
+            Pattern::Constructor {
+                enum_name: "",
+                variant_name,
+                payload,
+            } => match self.bare_pattern_at(span.start, span.end) {
+                Some(enum_name) => Cow::Owned(Pattern::Constructor {
+                    enum_name,
+                    variant_name,
+                    payload: payload.clone(),
+                }),
+                None => Cow::Borrowed(pat),
+            },
+            Pattern::Binding { name } => match self.bare_pattern_at(span.start, span.end) {
+                Some(enum_name) => Cow::Owned(Pattern::Constructor {
+                    enum_name,
+                    variant_name: name,
+                    payload: PatternPayload::Unit,
+                }),
+                None => Cow::Borrowed(pat),
+            },
+            _ => Cow::Borrowed(pat),
+        }
     }
 
     /// True when `enum_name` is a scalar-backed enum (unboxed simple value).

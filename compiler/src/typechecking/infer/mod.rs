@@ -507,6 +507,10 @@ pub struct Checker {
     /// Bare `Some`/`Ok`/`Red` (Call or Identifier) resolved to `Enum::Case`.
     bare_constructs_by_span: HashMap<(usize, usize), (String, String)>,
 
+    /// Bare constructor patterns (`Some(v)`, `None`, `Red`) resolved to their
+    /// enum's registry key, by pattern span (#1352).
+    bare_patterns_by_span: HashMap<(usize, usize), String>,
+
     /// Match exhaustiveness checks deferred until substitution is closed.
     pending_exhaustive: Vec<PendingExhaustive>,
 

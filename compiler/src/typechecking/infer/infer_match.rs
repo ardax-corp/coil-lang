@@ -2,13 +2,23 @@
 
 use std::ops::Range;
 
-use parser::ast::{Expression, MatchArm, Output, Pattern};
+use parser::ast::{Expression, MatchArm, Output, Pattern, PatternOutput};
 use reporting::ErrorCode;
 
 use crate::typechecking::subst::apply_ty_prune;
 use crate::typechecking::ty::{Ty, int};
 
 use super::*;
+
+/// How a bare name in a pattern resolved (#1352).
+enum BarePattern {
+    /// A case of this enum (registry key).
+    Ctor(String),
+    /// Not a case: the name binds the scrutinee.
+    Binding,
+    /// Ambiguous or unknown; the error is already reported.
+    Failed,
+}
 
 impl Checker {
     pub(super) fn infer_match(
@@ -59,18 +69,19 @@ impl Checker {
                 self.messages.push(msg);
             }
             let msgs_before = self.messages.len();
-            let pat_ty = self.infer_pattern(&arm.pattern.1, &resolved_scrutinee, &pattern_range);
+            let pat_ty = self.infer_pattern(&arm.pattern, &resolved_scrutinee, &pattern_range);
 
             // Narrow an Identifier scrutinee to the matched variant so
             // `p.0` / `p.field` inside the arm use tagged field lookup
             // (tuple indices are shared across variants otherwise).
             let mut refined_scrut: Option<(String, Option<Ty>)> = None;
+            let arm_pattern = self.resolved_pattern(&arm.pattern);
             if let Expression::Identifier(scrut_name) = scrutinee.1.as_ref()
                 && let Pattern::Constructor {
                     enum_name,
                     variant_name,
                     ..
-                } = &arm.pattern.1
+                } = arm_pattern.as_ref()
                 && let Some(tag) = self
                     .enum_tags
                     .get(*enum_name)
@@ -124,7 +135,7 @@ impl Checker {
             // A pattern that failed to check has no coherent coverage
             // shape; skip the exhaustiveness pass for this match.
             pattern_failed |= self.messages[msgs_before..].iter().any(|m| matches!(m.kind(), reporting::MessageKind::ERROR));
-            let arm_cov = self.arm_coverage(&arm.pattern.1, &pattern_range);
+            let arm_cov = self.arm_coverage(&arm.pattern, &pattern_range);
             coverage.push(arm_cov);
 
             let body_ty = self.infer(&arm.body);
@@ -182,11 +193,46 @@ impl Checker {
     /// the offending pattern instead of byte 0 of the source.
     pub(super) fn infer_pattern(
         &mut self,
-        pattern: &Pattern,
+        pattern: &PatternOutput,
         expected_ty: &Ty,
         pattern_range: &Range<usize>,
     ) -> Ty {
+        self.infer_pattern_at(pattern, expected_ty, pattern_range, true)
+    }
+
+    /// [`Self::infer_pattern`]; `bare_unit` is false for a record field's
+    /// shorthand (`Rect { w }`), which always binds.
+    fn infer_pattern_at(
+        &mut self,
+        pattern: &PatternOutput,
+        expected_ty: &Ty,
+        pattern_range: &Range<usize>,
+        bare_unit: bool,
+    ) -> Ty {
         use parser::ast::PatternPayload;
+        let span = pattern.0;
+        // A bare unit case (`None`, `Red`, #1352) is checked as the
+        // qualified constructor pattern it names; any other name binds.
+        let unit_key;
+        let unit_pattern;
+        let pattern = match &pattern.1 {
+            Pattern::Binding { name } if bare_unit => {
+                match self.resolve_bare_pattern(name, span, expected_ty, true, pattern_range) {
+                    BarePattern::Ctor(key) => {
+                        unit_key = key;
+                        unit_pattern = Pattern::Constructor {
+                            enum_name: &unit_key,
+                            variant_name: name,
+                            payload: PatternPayload::Unit,
+                        };
+                        &unit_pattern
+                    }
+                    BarePattern::Failed => return expected_ty.clone(),
+                    BarePattern::Binding => &pattern.1,
+                }
+            }
+            other => other,
+        };
         match pattern {
             Pattern::Wildcard => expected_ty.clone(),
             Pattern::Default => expected_ty.clone(),
@@ -212,6 +258,19 @@ impl Checker {
                 variant_name,
                 payload,
             } => {
+                // Bare `Some(v)` / `Rect { w, h }` (#1352) name no enum.
+                let bare_key;
+                let enum_name: &str = if enum_name.is_empty() {
+                    match self.resolve_bare_pattern(variant_name, span, expected_ty, false, pattern_range) {
+                        BarePattern::Ctor(key) => {
+                            bare_key = key;
+                            &bare_key
+                        }
+                        _ => return expected_ty.clone(),
+                    }
+                } else {
+                    enum_name
+                };
                 // 1. Look up the variant's tag in the registry.
                 let enum_str = self
                     .resolve_enum_key(enum_name)
@@ -326,7 +385,7 @@ impl Checker {
                     PatternPayload::Tuple(parts) => {
                         let expected_tys = expected_payload.field_types();
                         for (sub_pat, expected_ty) in parts.iter().zip(expected_tys.iter()) {
-                            let _ = self.infer_pattern(&sub_pat.1, expected_ty, pattern_range);
+                            let _ = self.infer_pattern(sub_pat, expected_ty, pattern_range);
                         }
                     }
                     PatternPayload::Record(fields) => {
@@ -335,10 +394,10 @@ impl Checker {
                         // order. Each declared field must be
                         // present exactly once; the codegen binds
                         // in slot order (= declaration order).
-                        let mut pattern_site: std::collections::HashMap<&str, &Pattern> =
+                        let mut pattern_site: std::collections::HashMap<&str, &PatternOutput> =
                             std::collections::HashMap::with_capacity(fields.len());
                         for pf in fields {
-                            if pattern_site.insert(pf.name, &pf.pattern.1).is_some() {
+                            if pattern_site.insert(pf.name, &pf.pattern).is_some() {
                                 return self.error_with_help(
                                     ErrorCode::DuplicateField,
                                     format!(
@@ -371,7 +430,9 @@ impl Checker {
                                     );
                                 }
                             };
-                            let _ = self.infer_pattern(sub_pat, decl_ty, pattern_range);
+                            // Shorthand `{ w }` always binds `w`.
+                            let shorthand = matches!(sub_pat.1, Pattern::Binding { name } if name == decl_name.as_str());
+                            let _ = self.infer_pattern_at(sub_pat, decl_ty, pattern_range, !shorthand);
                         }
                         // Check for unknown field names.
                         for pf in fields {
@@ -407,6 +468,53 @@ impl Checker {
                 expected_ty.clone()
             }
         }
+    }
+
+    /// Resolve a bare case name in a pattern (#1352). The scrutinee's own
+    /// enum wins when it declares the case; otherwise the name must be a
+    /// case of exactly one enum in scope, as for a bare constructor
+    /// expression. A bare name with no payload (`unit`) is a case only when
+    /// it starts with an uppercase letter and some enum declares it;
+    /// anything else stays a binding.
+    fn resolve_bare_pattern(
+        &mut self,
+        variant: &str,
+        span: parser::SimpleSpan,
+        expected_ty: &Ty,
+        unit: bool,
+        pattern_range: &Range<usize>,
+    ) -> BarePattern {
+        // Synthetic patterns carry an empty span; they never use the sugar.
+        if unit && (span.start == span.end || !variant.starts_with(|c: char| c.is_ascii_uppercase())) {
+            return BarePattern::Binding;
+        }
+        let from_scrutinee = self.scrutinee_enum_key(expected_ty).filter(|key| {
+            self.enum_tags
+                .get(key)
+                .is_some_and(|tags| tags.contains_key(variant))
+        });
+        let enum_key = match from_scrutinee {
+            Some(key) => key,
+            None => match self.resolve_bare_constructor(variant) {
+                BareCtor::Unique(enum_name) => self.resolve_enum_key(&enum_name).unwrap_or(enum_name),
+                BareCtor::Ambiguous(enums) => {
+                    self.ambiguous_bare_constructor(variant, &enums, pattern_range.clone());
+                    return BarePattern::Failed;
+                }
+                BareCtor::None if unit => return BarePattern::Binding,
+                BareCtor::None => {
+                    self.messages.push(Message::error(
+                        ErrorCode::UnknownConstructorPattern,
+                        format!("Pattern references unknown constructor `{}`", variant),
+                        pattern_range.clone(),
+                    ));
+                    return BarePattern::Failed;
+                }
+            },
+        };
+        self.bare_patterns_by_span
+            .insert((span.start, span.end), enum_key.clone());
+        BarePattern::Ctor(enum_key)
     }
 
     /// The registry key of the enum a scrutinee type names, if it names one.
