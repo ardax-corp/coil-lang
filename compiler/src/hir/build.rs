@@ -2436,6 +2436,9 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
     fn lambda(&mut self, b: &mut BodyBuilder, node: &Output<'_>, args: &Output<'_>, body: &Output<'_>) -> HirId {
         let name = format!("{}::<lambda@{}>", b.body.name, node.0.start);
         let mut inner = BodyBuilder::new(&name, BodyKind::Lambda, span_of(node));
+        let mode_key = Checker::lambda_mode_key(node.0.start);
+        inner.body.result_mode = self.checker.fn_is_result_mode(&mode_key);
+        inner.ok_is_result = self.checker.fn_result_ok_is_result(&mode_key);
         inner.outer = b.outer.clone();
         inner.outer.extend(b.scopes.iter().cloned());
         let fn_ty = self.ty_of(node);

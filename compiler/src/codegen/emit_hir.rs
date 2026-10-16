@@ -2313,7 +2313,7 @@ impl Compiler {
             }
             let lam = &module.bodies[body];
             lam.root.ok_or("lambda")?;
-            if lam.is_coro || lam.result_mode {
+            if lam.is_coro {
                 return Err("lambda-body");
             }
             // Captures are plain one-word locals of this body.
