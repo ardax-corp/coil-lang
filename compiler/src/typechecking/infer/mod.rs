@@ -630,6 +630,10 @@ pub struct Checker {
     /// instead of a generic "Cannot find value".
     lambda_uncaptured_outer: Option<std::collections::HashSet<String>>,
 
+    /// When inside a lambda body: module `static let`s rebound as bare
+    /// names (#1177). A read of one is the static, not a capture.
+    lambda_rebound_statics: std::collections::HashSet<String>,
+
     /// Call sites that under-applied a fixed-arity (or rest) function and
     /// produced a residual `Fun` / partial. Value is the bitmask of filled
     /// fixed-parameter slots (bit i ⇒ param i bound). Used by codegen for
