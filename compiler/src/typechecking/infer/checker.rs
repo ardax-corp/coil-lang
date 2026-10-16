@@ -17036,17 +17036,18 @@ impl Checker {
             );
             return;
         }
-        if let Some(inner) = self.fn_option_mode.clone() {
-            self.unify(&inner, inner_ty, range, "option payload");
+        // `None` carries no payload: the operand's `Option<T>` need not
+        // share the function's `T` (#1165).
+        let _ = inner_ty;
+        if self.fn_option_mode.is_some() {
             return;
         }
         if let Some(ret) = self.current_return_ty.clone() {
             let resolved = apply_ty_prune(&self.subst, &ret);
             if is_option_ty(&resolved) {
                 if let Some(existing) = option_inner(&resolved) {
-                    self.unify(&existing, inner_ty, range, "option payload");
+                    self.fn_option_mode = Some(existing);
                 }
-                self.fn_option_mode = Some(inner_ty.clone());
                 return;
             }
             if is_result_ty(&resolved) {
@@ -17057,9 +17058,10 @@ impl Checker {
                 );
                 return;
             }
-            let opt = option_ty(inner_ty.clone());
+            let payload = Ty::Var(self.counter.fresh());
+            let opt = option_ty(payload.clone());
             self.unify(&ret, &opt, range, "option return type");
-            self.fn_option_mode = Some(inner_ty.clone());
+            self.fn_option_mode = Some(payload);
         } else {
             self.error(
                 ErrorCode::InvalidTry,
