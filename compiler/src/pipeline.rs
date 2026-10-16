@@ -1238,8 +1238,10 @@ impl Pipeline {
         if self.ast_cache.get(file).is_some_and(|c| c.checked()) {
             return true;
         }
+        let macro_imports = self.macro_import_names(file);
         let _ = self.compiler_lazy_mut();
         let compiler = self.compiler.get_mut().expect("compiler initialized");
+        compiler.checker_mut().set_macro_imports(macro_imports);
         let cached = self.ast_cache.get_mut(file).expect("filled");
         if strip_tests && let Some(ast) = cached.ast_mut() {
             crate::strip_tests::strip_test_declarations(ast);

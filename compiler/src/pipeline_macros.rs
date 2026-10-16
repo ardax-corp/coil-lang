@@ -484,6 +484,26 @@ impl Pipeline {
         results
     }
 
+    /// Local names `file` imports with `use` that name a macro of the
+    /// providing module (a macro is not a value: #1203).
+    pub(super) fn macro_import_names(&self, file: &Path) -> std::collections::HashSet<String> {
+        let mut out = std::collections::HashSet::new();
+        let Some(ast) = self.ast_cache.get(file).and_then(|c| c.ast()) else {
+            return out;
+        };
+        for (path, name, alias) in top_level_uses(ast) {
+            let provider = crate::macros::embedded_use(&path, &name)
+                .map(|(file, _)| file)
+                .or_else(|| resolve_use_in_roots(&self.roots, &self.project_root, &path, &name));
+            if let Some(provider) = provider
+                && self.provider_decls(&provider).iter().any(|d| d.name == name)
+            {
+                out.insert(alias.unwrap_or(name));
+            }
+        }
+        out
+    }
+
     /// Every macro a provider module declares (all of them, so the compiled
     /// program serves any call into it).
     fn provider_decls(&self, file: &Path) -> Vec<MacroDecl> {
