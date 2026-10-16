@@ -1551,6 +1551,7 @@ impl Compiler {
             heap_fields,
             boxed_niches,
             niche_args: &tables.niche_args,
+            unit_result_args: &tables.unit_result_args,
             existential_packs: tables.existential_packs,
             packs: &tables.packs,
             record_fields,
@@ -2001,10 +2002,10 @@ impl Compiler {
                 key = format!("{}::{}", self.namespace, key);
             }
             let lookup = strip_overload_key(&key).to_string();
-            // A heterogeneous `... name` pack stays on the AST.
+            // A bare `... name` packs its arguments into a tuple.
             let tuple_rest = self.checker.fn_tuple_rest(&lookup) || self.checker.fn_tuple_rest(name);
             let generic = self.checker.is_generic_fn(&lookup);
-            if tuple_rest || (generic && shaped) {
+            if generic && shaped {
                 return Err("call-argument");
             }
             // An overloaded name shapes by the overload the checker picked.
@@ -2090,9 +2091,20 @@ impl Compiler {
                 }
                 next += 1;
             }
-            // A generic pack's type is its items' one ground type.
+            // A generic pack's type is its items' one ground type; a
+            // tuple pack's is its items' types in order.
             let rest_ty = match rest_ty {
                 _ if whole_rest.is_some() => None,
+                Some(_) if tuple_rest => {
+                    let items: Option<Vec<Ty>> = rest
+                        .iter()
+                        .map(|&r| b.expr(r).ty.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t)))
+                        .collect();
+                    match items {
+                        Some(items) if items.iter().all(crate::hir::layout::ty_is_closed) => Some(Ty::Tuple(items)),
+                        _ => return Err("call-argument"),
+                    }
+                }
                 Some(declared) if generic => {
                     let item = rest.first().and_then(|&r| b.expr(r).ty.clone()).map(|t| apply_ty_prune(self.checker.subst(), &t));
                     let same = |t: &Ty| rest.iter().all(|&r| b.expr(r).ty.as_ref().map(|u| apply_ty_prune(self.checker.subst(), u)).as_ref() == Some(t));
@@ -2123,7 +2135,7 @@ impl Compiler {
                 new_args.push(inner);
             } else if pack {
                 let span = (call_span.1, call_span.1);
-                let kind = MakeKind::Array;
+                let kind = if tuple_rest { MakeKind::Tuple } else { MakeKind::Array };
                 new_args.push(Self::hir_push(b, &self.checker, HirKind::Make { kind, args: rest }, rest_ty, span));
             }
             if let HirKind::Call { args, .. } = &mut b.exprs[i].kind {
@@ -4363,6 +4375,17 @@ impl Compiler {
                 params.push(layout);
                 param_tys[1..].to_vec()
             }
+            // A method returning a function (#1007): as below, the peel
+            // took the returned function's params too.
+            Some(layout)
+                if let Some(n) = self.checker.fn_param_names(&lookup).map(<[String]>::len)
+                    && (n == explicit || n == argc)
+                    && param_tys.len() > n =>
+            {
+                params.push(layout);
+                returned = param_tys.split_off(n);
+                if n == argc { param_tys[1..].to_vec() } else { param_tys }
+            }
             None if param_tys.len() == argc => param_tys,
             // `fn mk(..) -> fn(..) -> T`: the scheme's curried peel also took
             // the returned function's params; they belong to the result.
@@ -4938,6 +4961,9 @@ impl Compiler {
             _ if from == to => true,
             (Rep::Pair(_), Rep::Word(L::Boxed)) | (Rep::Word(L::Boxed), Rep::Pair(_)) => true,
             (Rep::Word(_), Rep::Word(L::Boxed)) | (Rep::Word(L::Boxed), Rep::Word(_)) => true,
+            // `Result<(), E>` into a `Result<unit, E>` slot (#1085): MIR's
+            // `fit` rewrites the `()` tuple `Ok` to `0`.
+            (Rep::Word(L::NicheResult), Rep::Word(L::NicheUnitResult)) => true,
             _ => false,
         }
     }
@@ -5071,18 +5097,9 @@ impl Compiler {
         {
             return u32::try_from(items.len()).ok().map(Some);
         }
-        if !is_len
-            || !matches!(
-                hir.expr(*arg).kind,
-                HirKind::Local(_)
-                    | HirKind::Call { .. }
-                    | HirKind::Field { .. }
-                    | HirKind::Index { .. }
-                    | HirKind::Global { .. }
-                    | HirKind::Lit(Lit::Str(_))
-                    | HirKind::Builtin { op: Builtin::Unbox { .. }, .. }
-            )
-        {
+        // Any operand kind: `?`, a `const` local, a concatenation, …
+        // (#1071, #1147); the type decides below.
+        if !is_len {
             return None;
         }
         // A string literal folds to its byte length, with the escapes
@@ -6138,6 +6155,8 @@ impl Compiler {
                 let want = self.hir_local_rep(hir, emit, *local);
                 self.hir_check_value(hir, emit, *init, &want)
             }
+            // A type-only scalar `let x: T;`: zero until assigned.
+            HirKind::Let { init: None, .. } => Ok(()),
             HirKind::LetPat { pat, init } => {
                 self.hir_check_let_pat(hir, pat)?;
                 if self.hir_product_let(hir, emit, pat, *init).is_some() {

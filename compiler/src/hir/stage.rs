@@ -18,6 +18,9 @@ pub fn stage(body: &HirBody, target: HirId) -> Option<HirBody> {
     if body.expr(target).flags.contains(HirFlags::ADJUST) {
         return split_adjust(body, target);
     }
+    if matches!(body.expr(target).kind, HirKind::Assign { .. }) {
+        return split_assign(body, target);
+    }
     let (block, at) = match statement_of(body, target) {
         Ok(found) => found,
         // An operand with an effect runs first: staging it, in place, keeps
@@ -89,11 +92,19 @@ fn split_adjust(body: &HirBody, target: HirId) -> Option<HirBody> {
     let HirKind::Assign { place, value } = body.expr(target).kind else {
         return None;
     };
-    let HirKind::Bin { op, rhs: one, .. } = body.expr(value).kind else {
+    let HirKind::Bin { op, lhs, rhs: one } = body.expr(value).kind else {
         return None;
     };
     if !repeatable(body, place) {
-        return None;
+        // An index with an effect or a trap (`++xs[i + 1]`) runs once into
+        // a temp first, in its own order, then the place repeats (#1100).
+        // The value's read of the place is its own subtree: its index
+        // reads the same temp.
+        let index = impure_index(body, place)?;
+        let twin = counterpart(body, place, lhs, index)?;
+        let mut staged = stage(body, index)?;
+        staged.exprs[twin.0 as usize].kind = staged.expr(index).kind.clone();
+        return split_adjust(&staged, target);
     }
     let (block, at) = statement_of(body, target).ok()?;
     let prefix = body.expr(target).flags.contains(HirFlags::PREFIX);
@@ -148,6 +159,58 @@ fn split_adjust(body: &HirBody, target: HirId) -> Option<HirBody> {
     Some(b)
 }
 
+/// An assignment value `p = e` (or `p op= e`, built as `p = p op e`) as
+/// statements ahead of its own: `let t = e; p = t;`, then `t` where the
+/// assignment was. A plain assignment runs its value before its place
+/// anyway; a compound one reads the place in `e` too, so its operands must
+/// be pure.
+fn split_assign(body: &HirBody, target: HirId) -> Option<HirBody> {
+    let HirKind::Assign { place, value } = body.expr(target).kind else {
+        return None;
+    };
+    if body.expr(target).flags.contains(HirFlags::COMPOUND) && !repeatable(body, place) {
+        return None;
+    }
+    let (block, at) = match statement_of(body, target) {
+        Ok(found) => found,
+        Err(Some(first)) => return split_assign(&stage(body, first)?, target),
+        Err(None) => return None,
+    };
+    let mut b = body.clone();
+    let node = b.expr(target).clone();
+    let ty = b.expr(value).ty.clone().or_else(|| node.ty.clone());
+    let temp = LocalId(b.locals.len() as u32);
+    b.locals.push(HirLocal {
+        name: format!("__assign{}", temp.0),
+        ty: ty.clone(),
+        kind: LocalKind::Temp,
+        captured: false,
+    });
+    let bind = push_let(&mut b, temp, value, node.span);
+    let read = HirExpr {
+        kind: HirKind::Local(temp),
+        flags: HirFlags::default(),
+        node: None,
+        ..b.expr(value).clone()
+    };
+    let read = push(&mut b, read);
+    let mut store = node.clone();
+    store.kind = HirKind::Assign { place, value: read };
+    store.flags = HirFlags::default();
+    store.node = None;
+    let store = push(&mut b, store);
+    let e = &mut b.exprs[target.0 as usize];
+    e.kind = HirKind::Local(temp);
+    e.ty = ty;
+    e.node = None;
+    e.flags = HirFlags::default();
+    let HirKind::Block { stmts, .. } = &mut b.exprs[block].kind else {
+        unreachable!()
+    };
+    stmts.splice(at..at, [bind, store]);
+    Some(b)
+}
+
 /// A place whose operands can be read twice: a global, a local, or a
 /// field or element of one, at a local or literal index.
 fn repeatable(body: &HirBody, place: HirId) -> bool {
@@ -156,6 +219,31 @@ fn repeatable(body: &HirBody, place: HirId) -> bool {
         HirKind::Field { base, .. } => repeatable(body, *base),
         HirKind::Index { base, index, .. } => repeatable(body, *base) && pure(body, *index),
         _ => false,
+    }
+}
+
+/// The outermost index of `place` that is not a pure read.
+fn impure_index(body: &HirBody, place: HirId) -> Option<HirId> {
+    match &body.expr(place).kind {
+        HirKind::Field { base, .. } => impure_index(body, *base),
+        HirKind::Index { base, index, .. } if !pure(body, *index) => Some(*index),
+        HirKind::Index { base, .. } => impure_index(body, *base),
+        _ => None,
+    }
+}
+
+/// The node of `other`, a copy of `place`'s tree, at `at`'s position in
+/// `place`.
+fn counterpart(body: &HirBody, place: HirId, other: HirId, at: HirId) -> Option<HirId> {
+    if place == at {
+        return Some(other);
+    }
+    match (&body.expr(place).kind, &body.expr(other).kind) {
+        (HirKind::Field { base: a, .. }, HirKind::Field { base: b, .. }) => counterpart(body, *a, *b, at),
+        (HirKind::Index { base: a, index: i, .. }, HirKind::Index { base: b, index: j, .. }) => {
+            counterpart(body, *i, *j, at).or_else(|| counterpart(body, *a, *b, at))
+        }
+        _ => None,
     }
 }
 
@@ -251,6 +339,11 @@ fn reaches(body: &HirBody, e: HirId, target: HirId) -> Result<bool, Option<HirId
         HirKind::Index { base, index, .. } => seq(&[*base, *index]),
         HirKind::Make { args, .. } => seq(args),
         HirKind::Un { operand: x, .. } | HirKind::Cast { value: x } | HirKind::Field { base: x, .. } => reaches(body, *x, target),
+        // `x++` on a place: the place's operands run first, then the store.
+        HirKind::Assign { place, .. } if body.expr(e).flags.contains(HirFlags::ADJUST) => match reaches(body, *place, target)? {
+            true => Ok(true),
+            false => Err(None),
+        },
         HirKind::Match { scrutinee: x, .. } | HirKind::If { cond: x, .. } => match reaches(body, *x, target)? {
             true => Ok(true),
             false => Err(None),

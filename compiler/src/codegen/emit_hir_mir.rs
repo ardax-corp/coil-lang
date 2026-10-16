@@ -112,6 +112,9 @@ pub(super) struct HirMirTables {
     /// parameter ([`Compiler::hir_niche_arg`]): boxed to their enum
     /// object, by argument.
     pub(super) niche_args: HashMap<u32, ValueLayout>,
+    /// `Result<(), E>` call arguments a `Result<unit, E>` parameter takes
+    /// (#1085): MIR rewrites the niche word, by argument.
+    pub(super) unit_result_args: std::collections::HashSet<u32>,
     /// `block_on(h)` calls: the `wait_ready`
     /// native run between resumes, if the program has one, by call.
     pub(super) block_ons: HashMap<u32, Option<u16>>,
@@ -370,8 +373,8 @@ impl Compiler {
         }
         let walk = |k: HirId, value: bool, defer: bool, bound: &mut HashSet<u32>| self.hir_mir_bound(hir, emit, k, value, defer, bound);
         match &hir.expr(id).kind {
-            HirKind::Let { local, init } => {
-                if !defer && init.is_some() && !lower::is_unit_local(hir, &self.checker, *local) {
+            HirKind::Let { local, .. } => {
+                if !defer && !lower::is_unit_local(hir, &self.checker, *local) {
                     bound.insert(local.0);
                 }
             }
@@ -1259,6 +1262,13 @@ impl Compiler {
                     {
                         t.niche_args.insert(arg.0, layout);
                     }
+                }
+            }
+            for (&arg, &param) in args.iter().zip(&call.params) {
+                if param == ValueLayout::NicheUnitResult
+                    && self.hir_natural(hir, emit, arg) == Some(Rep::Word(ValueLayout::NicheResult))
+                {
+                    t.unit_result_args.insert(arg.0);
                 }
             }
             let adapt = self.hir_mir_adapters(hir, call.generic.as_deref(), args);

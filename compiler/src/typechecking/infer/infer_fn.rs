@@ -246,11 +246,15 @@ impl Checker {
         // not closure captures. Rebind after isolating the env.
         let import_rebinds = self.snapshot_file_level_imports(&mut uncaptured, range.clone());
 
+        let const_caps: Vec<bool> = cap_bindings.iter().map(|(n, _)| self.env.is_const(n)).collect();
         let saved_frames = self.env.take_and_isolate();
         let prev_uncaptured = self.lambda_uncaptured_outer.replace(uncaptured);
         self.rebind_file_level_imports(import_rebinds);
-        for (n, ty) in &cap_bindings {
+        for ((n, ty), is_const) in cap_bindings.iter().zip(const_caps) {
             self.env.insert_top(n.clone(), Scheme::mono(ty.clone()));
+            if is_const {
+                self.env.mark_top_const(n);
+            }
             self.record_codegen_var_type(n.clone(), ty.clone());
         }
         for (n, ty) in &arg_tys {

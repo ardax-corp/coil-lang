@@ -107,7 +107,7 @@ fn len_of_a_call_or_index_is_in_the_subset() {
     let src = "fn f() -> int { return len([1, 2]); }";
     assert_eq!(refusal_of(src, "f"), None);
     let src = "fn f(string a) -> int { return len(a + \"x\"); }";
-    assert_eq!(refusal_of(src, "f"), Some("len-argument"));
+    assert_eq!(refusal_of(src, "f"), None);
 }
 
 #[test]

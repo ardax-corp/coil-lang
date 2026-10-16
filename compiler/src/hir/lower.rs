@@ -696,13 +696,9 @@ impl Walk<'_> {
                 kind: MakeKind::Array | MakeKind::Tuple | MakeKind::Record(_),
                 ..
             } => Ok(()),
-            HirKind::Call { .. }
-            | HirKind::Field { .. }
-            | HirKind::Index { .. }
-            | HirKind::Global { .. }
-            | HirKind::Builtin { op: Builtin::Unbox { .. }, .. }
-                if structural =>
-            {
+            // Any other operand (a call, a `?`, a `const` local, a string
+            // concatenation, …) is evaluated, then measured (#1071, #1147).
+            _ if structural => {
                 self.word(arg)?;
                 self.value(arg, depth)
             }
@@ -1280,10 +1276,16 @@ pub fn unrolled_range(hir: &HirBody, iterable: HirId, body: HirId, inclusive: bo
     } else {
         e.saturating_sub(*s)
     };
-    if !(0..=8).contains(&count) || has_own_jump(hir, body) || has_lambda(hir, body) {
+    if !(0..=8).contains(&count) || has_own_jump(hir, body) || has_lambda(hir, body) || has_defer(hir, body) {
         return None;
     }
     Some((*s, count as u32))
+}
+
+/// Each copy of a `defer` is its own site that every later exit checks,
+/// so repeating one grows the exits with the square of the copies.
+fn has_defer(hir: &HirBody, id: HirId) -> bool {
+    matches!(hir.expr(id).kind, HirKind::Defer { .. }) || children(hir, id).into_iter().any(|k| has_defer(hir, k))
 }
 
 fn has_own_jump(hir: &HirBody, id: HirId) -> bool {
@@ -1372,7 +1374,7 @@ pub fn ffi_variadic_tags(body: &HirBody, checker: &Checker, call: HirId, items: 
 }
 
 /// Depth refusals [`refusal_at`] names an operand for.
-const STAGED: &[&str] = &["stack-select-depth", "adjust-value", "range-depth"];
+const STAGED: &[&str] = &["stack-select-depth", "adjust-value", "assign-value", "range-depth"];
 
 /// Why `body` is outside the lowered subset, or `None` when it is inside.
 pub fn refusal(body: &HirBody, checker: &Checker) -> Option<&'static str> {
@@ -1664,8 +1666,24 @@ pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
                 // may return a `PolyFn`, called with boxed args).
                 HirKind::Call {
                     callee: Callee::Named { name, .. },
-                    ..
-                } => !checker.is_generic_fn(name) && !checker.is_overloaded(name),
+                    args,
+                } => !checker.is_overloaded(name) && (!checker.is_generic_fn(name) || generic_passes_closure(body, checker, name, args)),
+                // A ground method's returned closure (#1007): not a bound or
+                // existential dictionary call, and not a generic method.
+                HirKind::Call {
+                    callee: Callee::Method { name },
+                    args,
+                } => {
+                    let (start, end) = body.expr(*init).span;
+                    let owner = args
+                        .first()
+                        .and_then(|r| body.expr(*r).ty.as_ref())
+                        .map(|t| apply_ty_prune(checker.subst(), t));
+                    matches!(owner.as_ref().map(strip_readonly), Some(Ty::Con(owner))
+                        if checker.has_method(owner, name) && !checker.is_generic_fn(&format!("{owner}::{name}")))
+                        && checker.bound_method_call_for_span(start, end).is_none()
+                        && checker.existential_method_call_for_span(start, end).is_none()
+                }
                 HirKind::Global { .. } | HirKind::Lambda { .. } => true,
                 _ => false,
             },
@@ -1673,6 +1691,20 @@ pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
         }),
         _ => false,
     }
+}
+
+/// A generic call whose result is one of its arguments as is (#1010): the
+/// scheme returns a bare type variable, so the closure that comes back is
+/// the caller's own plain closure. A generic function read as an argument
+/// could come back as a `PolyFn`, so that stays refused.
+fn generic_passes_closure(body: &HirBody, checker: &Checker, name: &str, args: &[HirId]) -> bool {
+    checker.fn_param_tys(name).is_some_and(|p| p.len() == args.len())
+        && matches!(checker.fn_return_ty(name), Some(Ty::Var(_)))
+        && !args.iter().any(|a| match &body.expr(*a).kind {
+            HirKind::Global { name, .. } => checker.is_generic_fn(name),
+            HirKind::Local(_) => polyfn_callee(body, checker, *a),
+            _ => false,
+        })
 }
 
 /// A match of an `int` on integer literals, or of a scalar-backed enum on
@@ -2638,6 +2670,12 @@ impl Walk<'_> {
                     _ => Err("assign"),
                 }
             }
+            // `x = e` / `x op= e` as a value splits into `let t = e; x = t;`
+            // ahead of its statement, leaving `t`.
+            HirKind::Assign { .. } => {
+                self.stage_at = Some(id);
+                Err("assign-value")
+            }
             _ => Err(kind_name(&body.expr(id).kind)),
         }
     }
@@ -2777,7 +2815,11 @@ impl Walk<'_> {
                 self.word(*init)?;
                 self.value(*init, depth)
             }
-            HirKind::Let { init: None, .. } => Err("uninitialized-let"),
+            // A type-only `let x: T;` of a scalar starts at zero.
+            HirKind::Let { local, init: None } => match body.local(*local).ty.as_ref().and_then(primitive) {
+                Some(coil_ty::INT | coil_ty::FLOAT | coil_ty::BOOL | coil_ty::BYTE) if depth == 0 => Ok(()),
+                _ => Err("uninitialized-let"),
+            },
             HirKind::Clear(_) => Ok(()),
             // `let (a, b) = t` / `let { x } = r`: the value to a temp, then
             // each name read from it (`Index` / `GetField`).
@@ -3023,7 +3065,8 @@ impl Walk<'_> {
                     let Some(local) = cap else {
                         return Err("defer-capture");
                     };
-                    if !matches!(body.local(*local).kind, LocalKind::Let | LocalKind::Param)
+                    // A lambda's own capture is a frame slot too (#1137).
+                    if !matches!(body.local(*local).kind, LocalKind::Let | LocalKind::Param | LocalKind::Capture)
                         || is_unit_local(body, self.checker, *local)
                         || self.stack.contains_key(&local.0)
                     {

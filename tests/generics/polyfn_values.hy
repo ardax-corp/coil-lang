@@ -57,3 +57,38 @@ test("returned PolyFn with captured evidence") {
     let c = capture(0);
     assert!(c(3) == 30);
 }
+
+trait Convert<A, B> {
+    fn cast(A x) -> B {}
+}
+
+impl Convert<int> for int {
+    pub fn cast(int x) -> int {
+        return x;
+    }
+}
+
+fn convert_fn<A, B>(A x) -> B where Convert<A, B> {
+    return cast(x);
+}
+
+fn capture_convert<A, B>(A _wa, B _wb) where Convert<A, B> {
+    return convert_fn;
+}
+
+fn fib(int n) -> int {
+    if n <= 2 {
+        return 1;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+
+test("returned multi-parameter PolyFn keeps its evidence") {
+    let f = capture_convert(0, 0);
+    assert!(f(42) == 42);
+}
+
+test("PolyFn value applied to a recursive call") {
+    let f = id;
+    assert!(f(fib(6)) == 8);
+}
