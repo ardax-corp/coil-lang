@@ -883,6 +883,13 @@ fn decided_case(name: String, passed: bool, reason: Option<String>, output: Vec<
     }
 }
 
+/// `path` with `/` between its components on every OS, so doc-test names
+/// are the same on Windows as elsewhere.
+fn slash_path(path: &Path) -> String {
+    let display = path.display().to_string();
+    if cfg!(windows) { display.replace('\\', "/") } else { display }
+}
+
 /// True when `path` has a fenced block in its text (a cheap check before
 /// parsing it for doc examples).
 fn has_examples(path: &Path) -> bool {
@@ -900,7 +907,7 @@ fn doc_cases(run: &Run<'_>, dispatch: Dispatch, path: &Path, report_parse_error:
     if !source.contains("```") {
         return Vec::new();
     }
-    let display = path.display().to_string();
+    let display = slash_path(path);
     let ast = match parser::Pratt::default().parse(&source) {
         Ok(ast) => ast,
         Err(e) if report_parse_error => {
