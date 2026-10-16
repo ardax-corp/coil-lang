@@ -1265,18 +1265,20 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 let id = self.node_id(node);
                 let overload = id.and_then(|i| self.sidecar.overload(i)).map(|o| o.candidate_id);
                 let def = id.and_then(|i| self.sidecar.def_id(i));
-                let args = match fields {
+                let mut args = match fields {
                     EnumConstructPayload::Tuple(items) => self.exprs(b, items),
                     _ => Vec::new(),
                 };
-                self.emit(
+                let ahead = self.named_args_in_source_order(b, span_of(node), &mut args);
+                let call = self.emit(
                     b,
                     node,
                     HirKind::Call {
                         callee: Callee::Named { name: format!("{enum_name}::{variant_name}"), def, overload },
                         args,
                     },
-                )
+                );
+                self.after(b, span_of(node), ahead, call)
             }
             // `Class::field` of a class `static`: a static read.
             E::Construct {

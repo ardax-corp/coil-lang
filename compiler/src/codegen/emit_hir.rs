@@ -2097,7 +2097,10 @@ impl Compiler {
             if !shaped && !rest {
                 continue;
             }
-            if name.contains("::") {
+            // `C::s(b: 2, a: 1)`: a class's static method shapes as a free
+            // function does (#1380); other qualified names do not yet.
+            let static_method = name.rsplit_once("::").is_some_and(|(owner, _)| self.checker.has_impl(owner));
+            if name.contains("::") && !static_method {
                 return Err("call-argument");
             }
             let mut key = self.resolve_free_fn(name);
