@@ -5168,7 +5168,17 @@ impl Lower<'_> {
             return Err("push value type".into());
         }
         let out = self.b.ins_array_push(arr, v).map_err(mir)?;
-        self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)?;
+        let out = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)?;
+        // The pushed array, as the safepoint gives it, is the local's value
+        // from here on: a loop's φ for it then takes this word on the latch
+        // rather than merging only with itself (#1295).
+        if let HirKind::Local(local) = self.hir.expr(recv).kind
+            && self.local_ty(local).ok() == Some(MirTy::HeapRef)
+        {
+            let slot = self.slot(local)?;
+            self.keep_pin(local)?;
+            self.b.def_local(slot, out).map_err(mir)?;
+        }
         Ok(Val::Unit)
     }
 
