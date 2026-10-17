@@ -98,6 +98,9 @@ pub struct Pipeline {
     overlays: HashMap<PathBuf, String>,
     /// Parsed + expanded AST per file (discover / compile / typecheck).
     ast_cache: crate::ast_cache::AstCache,
+    /// The file each compiled program came from, by its program number
+    /// (foreign clones compile from its AST).
+    program_files: HashMap<usize, PathBuf>,
     /// When true, harness tests are compiled into the program (see `--include-tests`).
     include_tests: bool,
     /// Calls per generated contract test case; 0 generates none.
@@ -708,6 +711,7 @@ impl Pipeline {
             source_cache: Vec::new(),
             overlays: HashMap::new(),
             ast_cache: crate::ast_cache::AstCache::default(),
+            program_files: HashMap::new(),
             include_tests: false,
             contract_runs: 0,
             contract_sources: Vec::new(),
@@ -1409,7 +1413,22 @@ impl Pipeline {
                 .expect("parse_expand_check_file filled cache");
             compiler.set_source_text(cached.source());
             let ast = cached.ast_mut().expect("parsed");
-            compiler.compile_prepared_module(namespace.as_str(), ast)
+            let bytecode = compiler.compile_prepared_module(namespace.as_str(), ast);
+            self.program_files.insert(compiler.program_seq(), file.clone());
+            // Clones of earlier modules' methods this one asked for, each
+            // compiled from its module's AST.
+            let asts: Vec<_> = compiler
+                .foreign_clone_programs()
+                .into_iter()
+                .filter_map(|seq| {
+                    let ast = self.ast_cache.get(self.program_files.get(&seq)?)?.ast()?;
+                    Some((seq, ast))
+                })
+                .collect();
+            if !compiler.foreign_clone_programs().is_empty() {
+                compiler.emit_foreign_clones(&asts);
+            }
+            bytecode
         };
 
         self.bytecode.extend(bytecode);

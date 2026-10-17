@@ -1655,6 +1655,15 @@ impl Compiler {
     fn emit_instance_clones(&mut self, children: &[Output<'_>]) {
         while let Some(req) = self.inst_clone_queue.pop_front() {
             let src = self.inst_clone_srcs[&req.src].clone();
+            // Another module's method: compiled later under that module's
+            // context ([`Self::emit_foreign_clones`]).
+            if src.program != self.program_seq && self.module_ctxs.contains_key(&src.program) {
+                self.foreign_clone_queue.push(req.clone());
+                if src.method_of.is_none() {
+                    self.emit_dict_adapter_thunk(&src.class, &src.method, &req.lookup, &req.name);
+                }
+                continue;
+            }
             let vars = self.inst_clone_vars(&src.head, &req.lookup).unwrap_or_default();
             let method = (src.program == self.program_seq)
                 .then(|| src.emit_idx.zip(self.find_impl_method_fn(children, &req.src)))
@@ -1793,6 +1802,154 @@ impl Compiler {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Programs whose methods a finished module queued clones of
+    /// ([`Self::emit_foreign_clones`] compiles them).
+    pub fn foreign_clone_programs(&self) -> Vec<usize> {
+        let mut seqs: Vec<usize> = self
+            .foreign_clone_queue
+            .iter()
+            .filter_map(|req| self.inst_clone_srcs.get(&req.src).map(|s| s.program))
+            .collect();
+        seqs.sort_unstable();
+        seqs.dedup();
+        seqs
+    }
+
+    /// The program number of the module compiled last.
+    pub fn program_seq(&self) -> usize {
+        self.program_seq
+    }
+
+    /// Compile the queued clones of other modules' methods, each from its
+    /// method's AST in `asts` (by program) under the context its module
+    /// was compiled in ([`ModuleCtx`]): in its own layouts, with no boxing
+    /// or dictionaries, as a clone in its own module is. A clone whose
+    /// module's AST is missing is the thunk calling the shared body.
+    pub fn emit_foreign_clones(&mut self, asts: &[(usize, &Output<'_>)]) {
+        while !self.foreign_clone_queue.is_empty() {
+            let queue = std::mem::take(&mut self.foreign_clone_queue);
+            let mut by_program: Vec<(usize, Vec<InstClone>)> = Vec::new();
+            for req in queue {
+                let seq = self.inst_clone_srcs[&req.src].program;
+                match by_program.iter_mut().find(|(s, _)| *s == seq) {
+                    Some((_, reqs)) => reqs.push(req),
+                    None => by_program.push((seq, vec![req])),
+                }
+            }
+            for (seq, reqs) in by_program {
+                let children = asts.iter().find(|(s, _)| *s == seq).and_then(|(_, ast)| match ast.1.as_ref() {
+                    Expression::Program(children) => Some(children),
+                    _ => None,
+                });
+                let (Some(children), Some(mut ctx)) = (children, self.module_ctxs.remove(&seq)) else {
+                    for req in reqs {
+                        let src = self.inst_clone_srcs[&req.src].clone();
+                        self.emit_instance_clone_thunk(&src, &req);
+                    }
+                    continue;
+                };
+                let messages = self.messages.len();
+                self.swap_module_ctx(&mut ctx, true);
+                self.inst_clone_queue.extend(reqs);
+                self.emit_instance_clones(children);
+                self.swap_module_ctx(&mut ctx, false);
+                self.module_ctxs.insert(seq, ctx);
+                // Its module already reported on this code: keep only errors.
+                let mut i = messages;
+                while i < self.messages.len() {
+                    if *self.messages[i].kind() == reporting::MessageKind::ERROR {
+                        i += 1;
+                    } else {
+                        self.messages.remove(i);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Clones of other modules' methods no module context is left for:
+    /// the thunks calling their shared bodies.
+    fn emit_foreign_clone_thunks(&mut self) {
+        for req in std::mem::take(&mut self.foreign_clone_queue) {
+            let src = self.inst_clone_srcs[&req.src].clone();
+            self.emit_instance_clone_thunk(&src, &req);
+        }
+    }
+
+    /// Module `module`'s compile context, as its compile ends, kept for
+    /// clones of its methods that later modules ask for. Its HIR moves
+    /// (the next module builds its own).
+    fn take_module_ctx(&mut self, module: &str) -> ModuleCtx {
+        let mut checker = Box::new(self.checker.clone());
+        checker.take_messages();
+        ModuleCtx {
+            checker,
+            program_seq: self.program_seq,
+            namespace: module.to_string(),
+            aliases: self.aliases.clone(),
+            typed_sidecar: self.typed_sidecar.clone(),
+            hir_fns: self.hir_fns.clone(),
+            hir_fn_names: self.hir_fn_names.clone(),
+            hir_module: self.hir_module.take(),
+            const_env_stack: self.const_env_stack.clone(),
+            static_const_values: self.static_const_values.clone(),
+            fn_bytecode_spans: self.fn_bytecode_spans.clone(),
+            mono_plan: self.mono_plan.clone(),
+            mono_offsets: self.mono_offsets.clone(),
+            mono_names: self.mono_names.clone(),
+            pure_fns: self.pure_fns.clone(),
+            steady_fns: self.steady_fns.clone(),
+            alloc_steady: self.alloc_steady,
+            recursive_fns: self.recursive_fns.clone(),
+            recursive_pure: self.recursive_pure.clone(),
+            par_shapes: self.par_shapes.clone(),
+            par_workers: self.par_workers.clone(),
+            loop_par_sites: self.loop_par_sites.clone(),
+            operand_stack_slots: self.operand_stack_slots,
+            current_source_file: self.current_source_file.clone(),
+            source_text: self.source_text.clone(),
+            source_base: self.source_base,
+        }
+    }
+
+    /// Swap `ctx` with this compiler's module context. Entering (`enter`),
+    /// `ctx`'s checker takes the program-wide state (substitution, type
+    /// variable counter, static slots) first; leaving, it hands it back.
+    fn swap_module_ctx(&mut self, ctx: &mut ModuleCtx, enter: bool) {
+        if enter {
+            ctx.checker.swap_program_state(&mut self.checker);
+        }
+        std::mem::swap(&mut self.checker, &mut *ctx.checker);
+        std::mem::swap(&mut self.program_seq, &mut ctx.program_seq);
+        std::mem::swap(&mut self.namespace, &mut ctx.namespace);
+        std::mem::swap(&mut self.aliases, &mut ctx.aliases);
+        std::mem::swap(&mut self.typed_sidecar, &mut ctx.typed_sidecar);
+        std::mem::swap(&mut self.hir_fns, &mut ctx.hir_fns);
+        std::mem::swap(&mut self.hir_fn_names, &mut ctx.hir_fn_names);
+        std::mem::swap(&mut self.hir_module, &mut ctx.hir_module);
+        std::mem::swap(&mut self.const_env_stack, &mut ctx.const_env_stack);
+        std::mem::swap(&mut self.static_const_values, &mut ctx.static_const_values);
+        std::mem::swap(&mut self.fn_bytecode_spans, &mut ctx.fn_bytecode_spans);
+        std::mem::swap(&mut self.mono_plan, &mut ctx.mono_plan);
+        std::mem::swap(&mut self.mono_offsets, &mut ctx.mono_offsets);
+        std::mem::swap(&mut self.mono_names, &mut ctx.mono_names);
+        std::mem::swap(&mut self.pure_fns, &mut ctx.pure_fns);
+        std::mem::swap(&mut self.steady_fns, &mut ctx.steady_fns);
+        std::mem::swap(&mut self.alloc_steady, &mut ctx.alloc_steady);
+        std::mem::swap(&mut self.recursive_fns, &mut ctx.recursive_fns);
+        std::mem::swap(&mut self.recursive_pure, &mut ctx.recursive_pure);
+        std::mem::swap(&mut self.par_shapes, &mut ctx.par_shapes);
+        std::mem::swap(&mut self.par_workers, &mut ctx.par_workers);
+        std::mem::swap(&mut self.loop_par_sites, &mut ctx.loop_par_sites);
+        std::mem::swap(&mut self.operand_stack_slots, &mut ctx.operand_stack_slots);
+        std::mem::swap(&mut self.current_source_file, &mut ctx.current_source_file);
+        std::mem::swap(&mut self.source_text, &mut ctx.source_text);
+        std::mem::swap(&mut self.source_base, &mut ctx.source_base);
+        if !enter {
+            self.checker.swap_program_state(&mut ctx.checker);
         }
     }
 
@@ -7023,6 +7180,8 @@ impl Compiler {
         ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
         prepared: bool,
     ) {
+        // No context left to compile an earlier module's queued clones in.
+        self.emit_foreign_clone_thunks();
         let ns = self.namespace.clone();
         self.namespace = module.to_string();
 
@@ -7181,6 +7340,12 @@ impl Compiler {
         self.bytecode.append(&mut program);
         self.emit_used_builtin_show_thunks();
         self.pad_debug_locs();
+        // Kept while this module holds methods a later module may clone.
+        let seq = self.program_seq;
+        if self.inst_clone_srcs.values().any(|s| s.program == seq && s.emit_idx.is_some()) {
+            let ctx = self.take_module_ctx(module);
+            self.module_ctxs.insert(seq, ctx);
+        }
     }
 
     /// Emit the reserved `Show` thunks of the builtin error enums that this
@@ -7253,6 +7418,7 @@ impl Compiler {
     /// Called once after multi-file linking by the pipeline, or at the end
     /// of single-file [`compile`] so unit tests observe fused output.
     pub fn finalize_bytecode(&mut self) {
+        self.emit_foreign_clone_thunks();
         #[cfg(any(test, feature = "dissect"))]
         let _ = self.finalize_bytecode_inner(false);
         #[cfg(not(any(test, feature = "dissect")))]
