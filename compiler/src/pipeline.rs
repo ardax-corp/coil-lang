@@ -1415,19 +1415,7 @@ impl Pipeline {
             let ast = cached.ast_mut().expect("parsed");
             let bytecode = compiler.compile_prepared_module(namespace.as_str(), ast);
             self.program_files.insert(compiler.program_seq(), file.clone());
-            // Clones of earlier modules' methods this one asked for, each
-            // compiled from its module's AST.
-            let asts: Vec<_> = compiler
-                .foreign_clone_programs()
-                .into_iter()
-                .filter_map(|seq| {
-                    let ast = self.ast_cache.get(self.program_files.get(&seq)?)?.ast()?;
-                    Some((seq, ast))
-                })
-                .collect();
-            if !compiler.foreign_clone_programs().is_empty() {
-                compiler.emit_foreign_clones(&asts);
-            }
+            self.emit_foreign_clones();
             bytecode
         };
 
@@ -1443,6 +1431,23 @@ impl Pipeline {
         if self.had_errors() {
             self.failed = true;
         }
+    }
+
+    /// Compile the clones of earlier modules' methods the module just
+    /// compiled asked for, each from its module's AST.
+    fn emit_foreign_clones(&mut self) {
+        let Some(compiler) = self.compiler.get_mut() else {
+            return;
+        };
+        let seqs = compiler.foreign_clone_programs();
+        if seqs.is_empty() {
+            return;
+        }
+        let asts: Vec<_> = seqs
+            .into_iter()
+            .filter_map(|seq| Some((seq, self.ast_cache.get(self.program_files.get(&seq)?)?.ast()?)))
+            .collect();
+        compiler.emit_foreign_clones(&asts);
     }
 
     pub fn compile(mut self, filename: String, output: String) {
@@ -1598,6 +1603,7 @@ impl Pipeline {
         self.compiler_lazy_mut().set_source_file(path);
         self.compiler_lazy_mut().set_source_text(src);
         self.compiler_lazy_mut().compile_module("", &mut ast);
+        self.emit_foreign_clones();
 
         // Register source and drain typecheck / codegen diagnostics via the sink.
         let file_id = self.sink.register_source(path, src);
