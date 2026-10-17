@@ -3458,7 +3458,15 @@ impl Compiler {
         };
         let mut arg_tys = Vec::with_capacity(args.len());
         for &arg in args {
-            let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, arg)?);
+            let mut ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, arg)?);
+            // `self` in a clone, at the clone's types (`hir_generic_abi`).
+            if arg_tys.is_empty()
+                && let Ty::Con(name) = &ty
+                && let Some(self_ty) = self.hir_clone_self_ty()
+                && matches!(&self_ty, Ty::App(head, _) if matches!(head.as_ref(), Ty::Con(n) if n == name))
+            {
+                ty = self_ty;
+            }
             if !crate::hir::layout::ty_is_closed(&ty) || matches!(ty, Ty::Fun(..)) {
                 return None;
             }
@@ -3618,8 +3626,11 @@ impl Compiler {
             return Err("callee-overload");
         }
         // Dictionaries a generic body forwards reach only a generic
-        // method's shared body ([`Self::hir_generic_abi`]).
-        let forwards = self.forwarded_dicts_hint(node.node, start, end).is_some_and(|d| !d.is_empty());
+        // method's shared body ([`Self::hir_generic_abi`]). A clone has
+        // none to forward: its calls are ground call sites.
+        let forwards = self
+            .forwarded_dicts_hint(node.node, start, end)
+            .is_some_and(|d| !d.is_empty() && !self.hir_clone_drops_forwarded(&d));
         if overload.is_some() && forwards {
             return Err("callee-overload");
         }
@@ -4689,7 +4700,10 @@ impl Compiler {
             cur = r;
         }
         let node = hir.expr(call);
-        let forwarded = self.forwarded_dicts_hint(node.node, node.span.0, node.span.1).unwrap_or_default();
+        let mut forwarded = self.forwarded_dicts_hint(node.node, node.span.0, node.span.1).unwrap_or_default();
+        if self.hir_clone_drops_forwarded(&forwarded) {
+            forwarded.clear();
+        }
         // A function argument (`map(xs, fn (int x) => ..)`) is one closure
         // word whose own types are ground. A body forwarding its
         // dictionaries also passes its own bare type parameters, already
@@ -4751,6 +4765,20 @@ impl Compiler {
             Self::bind_scheme_vars(param, ty, &mut vars);
         }
         Self::bind_scheme_vars(cur, &ret_ty, &mut vars);
+        // In a clone, `self` is typed by its class alone (`HashMap`): its
+        // type arguments are the clone's (`HashMap<int, int>`), which ground
+        // a sibling method's class parameters (`self.grow()`).
+        if self.compiling_mono_clone
+            && receivers > 0
+            && let Some(self_ty) = self.hir_clone_self_ty()
+            && params.len() == args.len()
+            && let Some(Ty::Con(name)) = Self::hir_ty(hir, args[0]).map(|t| apply_ty_prune(self.checker.subst(), t))
+            && matches!(&self_ty, Ty::App(head, _) if matches!(head.as_ref(), Ty::Con(n) if *n == name))
+        {
+            Self::bind_scheme_vars(&params[0], &self_ty, &mut vars);
+            // The call site's dictionaries are looked up by its types.
+            arg_tys[0] = self_ty;
+        }
         for constraint in &scheme.constraints {
             // An open goal is served by a forwarded dictionary.
             let lookup_tys = match Self::resolve_constraint_lookup(constraint, &vars, &self.checker) {
@@ -4787,6 +4815,27 @@ impl Compiler {
             unbox,
             forwarded,
         })
+    }
+
+    /// A clone has no dictionaries to forward: its types are ground, so a
+    /// call its generic body forwards `forwarded` from takes ground
+    /// dictionaries like any ground call site.
+    fn hir_clone_drops_forwarded(&self, forwarded: &[usize]) -> bool {
+        self.compiling_mono_clone && forwarded.iter().all(|i| self.lookup_slot(&format!("__dict{i}")).is_none())
+    }
+
+    /// The receiver type of the method clone being compiled, at its
+    /// ground type arguments.
+    fn hir_clone_self_ty(&self) -> Option<Ty> {
+        let (src, req) = self.inst_clone_fallback.as_ref()?;
+        let m = src.method_of.as_ref()?;
+        if m.is_static {
+            return None;
+        }
+        let param = self.checker.fn_param_tys(&req.src)?.into_iter().next()?;
+        let vars = self.mono_var_tys.last()?;
+        let ty = Self::apply_ty_var_map(&apply_ty_prune(self.checker.subst(), &param), vars);
+        crate::hir::layout::ty_is_closed(&ty).then_some(ty)
     }
 
     /// For a callee parameter `A1 -> .. -> R` given the ground function
