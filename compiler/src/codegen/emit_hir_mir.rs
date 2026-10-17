@@ -1579,17 +1579,17 @@ impl Compiler {
                 HirDictOp::Null | HirDictOp::Load(_) | HirDictOp::Interned { .. } => stack.push((i, false)),
             }
         }
-        let il: Vec<IlOp> = dicts.ops().to_vec();
+        let n_ops = dicts.ops().len();
         let loc = common::DebugLoc::default();
         // Built apart and appended, so `append` rewrites its method
         // pointers to entries like it does for `dicts`.
         let mut out = CodeBuf::new();
         for (k, &(start, ground)) in stack.iter().enumerate() {
-            let end = stack.get(k + 1).map_or(il.len(), |e| e.0);
+            let end = stack.get(k + 1).map_or(n_ops, |e| e.0);
             let built_tuple = matches!(ops[end - 1], HirDictOp::Tuple(_));
             if !(ground && built_tuple) {
-                for op in &il[start..end] {
-                    out.push_op(op.clone());
+                for i in start..end {
+                    out.push_op_of(&dicts, i);
                 }
                 continue;
             }
@@ -1606,8 +1606,8 @@ impl Compiler {
                 hint: Default::default(),
             });
             out.push_pop();
-            for op in &il[start..end] {
-                out.push_op(op.clone());
+            for i in start..end {
+                out.push_op_of(&dicts, i);
             }
             out.push_op(IlOp::Dup { loc });
             out.push(Byte::new(Instruction::StoreStatic).with_operand_u32(slot));
