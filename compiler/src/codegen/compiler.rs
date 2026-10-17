@@ -622,6 +622,7 @@ impl Compiler {
                     self.reserve_function_entry(key);
                     if body.is_some() {
                         self.reserve_mono_entries(&qualified, type_params, name);
+                        self.note_fn_clone_src(&qualified, child);
                     }
                 }
                 Expression::Implementation {
@@ -1497,6 +1498,51 @@ impl Compiler {
                 trait_params: None,
                 method_of: Some(super::MethodCloneSrc {
                     is_static: *is_static,
+                    free: false,
+                    names,
+                }),
+            },
+        );
+    }
+
+    /// Record generic free function `qualified` as a clone source: called
+    /// from another module at ground types, it is cloned there as a static
+    /// method of its type parameters ([`Self::emit_foreign_clones`]).
+    fn note_fn_clone_src(&mut self, qualified: &str, function: &Output) {
+        let Expression::Function {
+            name,
+            type_params,
+            is_coro: false,
+            args,
+            ..
+        } = function.1.as_ref()
+        else {
+            return;
+        };
+        if type_params.is_empty() || self.checker.is_overloaded(qualified) || self.checker.is_overloaded(name) || fn_arity_from_args(args).1 {
+            return;
+        }
+        let names: Vec<String> = type_params.iter().map(|p| p.name.to_string()).collect();
+        let Some(vars) = self
+            .checker
+            .fn_type_param_vars(qualified, names.len())
+            .or_else(|| self.checker.fn_type_param_vars(name, names.len()))
+        else {
+            return;
+        };
+        self.inst_clone_srcs.insert(
+            qualified.to_string(),
+            InstCloneSrc {
+                class: self.namespace.clone(),
+                method: name.to_string(),
+                span: (function.0.start, function.0.end),
+                head: vars.into_iter().map(Ty::Var).collect(),
+                emit_idx: None,
+                program: self.program_seq,
+                trait_params: None,
+                method_of: Some(super::MethodCloneSrc {
+                    is_static: true,
+                    free: true,
                     names,
                 }),
             },
@@ -1749,6 +1795,15 @@ impl Compiler {
     /// fqn is `fqn`.
     fn find_impl_method_fn<'a, 'b>(&self, children: &'b [Output<'a>], fqn: &str) -> Option<(&'b Output<'a>, &'b [Output<'a>])> {
         children.iter().find_map(|child| {
+            // A free generic function ([`Self::note_fn_clone_src`]).
+            if let Expression::Function { name, .. } = child.1.as_ref() {
+                let qualified = if self.namespace.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{}::{}", self.namespace, name)
+                };
+                return (qualified == fqn).then_some((child, &[][..]));
+            }
             if let Expression::TypeClass { name, methods, .. } = child.1.as_ref() {
                 return methods.iter().find_map(|m| match m.1.as_ref() {
                     Expression::Function { name: method, .. }
@@ -6414,6 +6469,14 @@ impl Compiler {
                     qualified.clone()
                 };
             let _ = self.bind_function_entry(table_key.clone());
+            // A clone replays the ids from the function's own node, as its
+            // `compile_function_output_with_name` walk takes them.
+            if let Some(id) = self.checker.id_table().id_of_output(ast)
+                && let Some(src) = self.inst_clone_srcs.get_mut(&qualified)
+                && src.program == self.program_seq
+            {
+                src.emit_idx = Some(id.0 as usize);
+            }
             self.fn_arities
                 .insert(table_key.clone(), (fixed_arity as u32, has_rest));
             // Overloads share the unmangled FQN; do not mirror arity

@@ -975,6 +975,9 @@ impl ModuleCtx {
 #[derive(Clone)]
 pub(crate) struct MethodCloneSrc {
     is_static: bool,
+    /// A free generic function: cloned for calls from other modules and
+    /// from other clones; its own module's calls take its mono clones.
+    free: bool,
     /// The type parameter names the head's variables stand for, in order.
     names: Vec<String>,
 }
