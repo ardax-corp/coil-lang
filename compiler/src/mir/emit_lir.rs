@@ -247,6 +247,10 @@ struct EmitPlan {
     preds: Vec<Vec<BlockId>>,
     /// Frame word of home 0 ([`MirFunc::homes`]).
     home_base: u8,
+    /// A host / FFI / indirect call result left on the stack for the
+    /// block's `JumpIfMatch` instead of a store and reload
+    /// ([`stack_scrutinees`]).
+    stack_scrutinee: Vec<bool>,
 }
 
 impl EmitPlan {
@@ -438,13 +442,22 @@ impl EmitPlan {
             }
         }
 
+        let preds = func.preds();
+        let stack_scrutinee = stack_scrutinees(func, &preds, &def);
+        for (i, on_stack) in stack_scrutinee.iter().enumerate() {
+            if *on_stack {
+                need_slot[i] = false;
+            }
+        }
+
         Self {
             tree,
             need_slot,
             def,
             cmp_dests,
-            preds: func.preds(),
+            preds,
             home_base: 0,
+            stack_scrutinee,
         }
     }
 
@@ -452,6 +465,61 @@ impl EmitPlan {
     fn home_slot(&self, home: u16) -> u32 {
         u32::from(self.home_base) + u32::from(home)
     }
+}
+
+/// Effectful call results (`HostInvoke`, `Ffi`, `CallIndirect`) that only
+/// feed their block's `JumpIfMatch`: `x?` on a host call. Such a word goes
+/// straight from the call to the match, with no `STORE n; LOAD n` of a slot
+/// nothing else reads. A miss leaves it on the stack, so its other uses may
+/// only be payload reads in a block reached by that miss alone, made before
+/// anything else runs there (the stack word is not in the frame's maps).
+fn stack_scrutinees(func: &MirFunc, preds: &[Vec<BlockId>], def: &[Option<(BlockId, usize)>]) -> Vec<bool> {
+    let mut out = vec![false; func.types.len()];
+    if func.debug_keep {
+        return out;
+    }
+    for block in &func.blocks {
+        let Some(Terminator::JumpIfMatch { scrutinee: s, payloads, .. }) = &block.term else {
+            continue;
+        };
+        let Some((db, k)) = def.get(s.index()).copied().flatten() else {
+            continue;
+        };
+        if db != block.id
+            || !matches!(
+                block.insts[k],
+                MirInst::HostInvoke { .. } | MirInst::Ffi { .. } | MirInst::CallIndirect { .. }
+            )
+            || super::emit::miss_chain_tos(func, &preds[block.id.index()], block.id).is_some()
+        {
+            continue;
+        }
+        // Only the match's own payloads may follow the call in its block.
+        let tail_ok = block.insts[k + 1..].iter().all(|i| {
+            matches!(i, MirInst::MatchPayload { dest, scrutinee: src, .. } if src == s && payloads.contains(dest))
+        });
+        let uses_ok = func.blocks.iter().filter(|b| b.id != block.id).all(|b| {
+            let term_uses = b.term.as_ref().is_some_and(|t| term_values(t).contains(s));
+            let mut seen_other = false;
+            let mut ok = !term_uses;
+            for inst in b.insts.iter().filter(|i| !i.is_phi() || i.operands().contains(s)) {
+                match inst {
+                    MirInst::MatchPayload { scrutinee: src, .. } if src == s => {
+                        ok &= !seen_other && super::emit::scrutinee_left_by_miss(func, b.id, *s);
+                    }
+                    other => {
+                        ok &= !other.operands().contains(s);
+                        seen_other = true;
+                    }
+                }
+            }
+            ok
+        });
+        if tail_ok && uses_ok {
+            out[s.index()] = true;
+        }
+    }
+    out
 }
 
 /// Frame word of `func`'s home 0: its cleanup pad's function's, or past
@@ -1410,10 +1478,12 @@ fn emit_stored(
                 layout: *layout,
                 loc,
             });
-            out.push(IlOp::StorePop {
-                slot: u32::from(regs[dest.index()]),
-                loc,
-            });
+            if !plan.stack_scrutinee[dest.index()] {
+                out.push(IlOp::StorePop {
+                    slot: u32::from(regs[dest.index()]),
+                    loc,
+                });
+            }
         }
         MirInst::Ffi { dest, op, operand, args } => {
             // As HIR emission: the operands in order, then the opcode.
@@ -1421,10 +1491,12 @@ fn emit_stored(
                 emit_stack(out, *a, func, plan, regs, pool, loc)?;
             }
             out.push(IlOp::from_plain_byte(Byte::new(op.instruction()).with_operand_u32(*operand), loc));
-            out.push(IlOp::StorePop {
-                slot: u32::from(regs[dest.index()]),
-                loc,
-            });
+            if !plan.stack_scrutinee[dest.index()] {
+                out.push(IlOp::StorePop {
+                    slot: u32::from(regs[dest.index()]),
+                    loc,
+                });
+            }
         }
         MirInst::CallIndirect { dest, callee, args, dicts } => {
             // The arguments, then the function value on top.
@@ -1433,10 +1505,12 @@ fn emit_stored(
             }
             let operand = super::emit::call_indirect_operand(args.len(), *dicts);
             out.push(IlOp::from_plain_byte(Byte::new(Instruction::CallIndirect).with_operand_u32(operand), loc));
-            out.push(IlOp::StorePop {
-                slot: u32::from(regs[dest.index()]),
-                loc,
-            });
+            if !plan.stack_scrutinee[dest.index()] {
+                out.push(IlOp::StorePop {
+                    slot: u32::from(regs[dest.index()]),
+                    loc,
+                });
+            }
         }
         MirInst::Call {
             dest,
@@ -2425,7 +2499,9 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
                     "JumpIfMatch + phi moves (keep fuse-IL)".into(),
                 ));
             }
-            if super::emit::miss_chain_tos(func, &plan.preds[block.id.index()], block.id).is_none() {
+            if super::emit::miss_chain_tos(func, &plan.preds[block.id.index()], block.id).is_none()
+                && !plan.stack_scrutinee[scrutinee.index()]
+            {
                 emit_stack(out, *scrutinee, func, plan, regs, pool, loc)?;
             }
             out.push(IlOp::Jump {

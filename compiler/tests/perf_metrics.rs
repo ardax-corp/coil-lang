@@ -1836,3 +1836,22 @@ fn mir_weighted_census() {
         println!("{:6.2}%  {name}  [dense: {dr}] [lir: {lr}]", pct(n));
     }
 }
+
+/// `x?` on a host call keeps the boxed Result on the stack for the match:
+/// no `STORE n; LOAD n` of a slot that nothing else reads.
+#[test]
+fn host_result_match_has_no_dead_spill() {
+    let (bc, _, _, _, pipeline) = compile("examples/perf/host_try.hy");
+    let syms = pipeline.program_debug().fn_symbols;
+    let (start, end) = fn_pc_range(&syms, "main", bc.len());
+    let ops: Vec<_> = bc[start..end].iter().map(|b| *b.bytecode()).collect();
+    assert!(
+        ops.windows(2).any(|w| w == [Instruction::HostInvoke, Instruction::JumpIfMatch]),
+        "host result should feed JumpIfMatch directly; ops={ops:?}"
+    );
+    assert!(
+        !ops.windows(4).any(|w| w
+            == [Instruction::HostInvoke, Instruction::STORE, Instruction::LOAD, Instruction::JumpIfMatch]),
+        "dead STORE/LOAD between HostInvoke and JumpIfMatch; ops={ops:?}"
+    );
+}
