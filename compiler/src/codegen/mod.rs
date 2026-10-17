@@ -504,6 +504,9 @@ pub struct Compiler {
     /// Ground instance methods that take their arguments raw (their
     /// `$dict` adapter unboxes for dictionary callers).
     raw_instance_methods: HashSet<String>,
+    /// Ground dictionary programs built once into a static slot
+    /// ([`Compiler::intern_dict_ops`]), by their ops.
+    interned_dicts: HashMap<Vec<crate::mir::HirDictOp>, u32>,
     /// Set by a call site that passes raw arguments, right before it emits
     /// the entry of a [`Self::raw_instance_methods`] method; any other call
     /// goes through the adapter.
@@ -776,6 +779,7 @@ impl Default for Compiler {
             mono_type_param_tys: Vec::new(),
             pending_instance_ctx: None,
             raw_instance_methods: HashSet::new(),
+            interned_dicts: HashMap::new(),
             raw_instance_call: false,
             inst_clone_srcs: HashMap::new(),
             inst_clones: HashMap::new(),

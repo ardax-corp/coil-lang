@@ -118,7 +118,7 @@ pub struct HirBoundCall {
 /// One step of building instance dictionaries, as HIR emission pushes
 /// them (`emit_instance_dict`): a stack program whose words left are the
 /// dictionaries.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum HirDictOp {
     /// `CodePtr` of a method's entry.
     Code(Label),
@@ -131,6 +131,9 @@ pub enum HirDictOp {
     /// `Load` of frame slot `n`, one of the body's own dictionary
     /// parameters: a dictionary it forwards.
     Load(u32),
+    /// A ground dictionary: `ops` (only `Code` and `Tuple`) build it once
+    /// into static `slot`; later runs load it from there.
+    Interned { slot: u32, ops: Vec<HirDictOp> },
 }
 
 /// How a user iterator's `next` returns `Option<Item>`, as HIR emission
@@ -4093,9 +4096,34 @@ impl Lower<'_> {
                     let boxed = self.b.ins_alloc(MirAllocKind::Boxed { tag }, vec![v]).map_err(mir)?;
                     stack.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![boxed]).map_err(mir)?);
                 }
+                HirDictOp::Interned { slot, ref ops } => stack.push(self.interned_dict(slot, ops)?),
             }
         }
         Ok(stack)
+    }
+
+    /// Ground dictionary `ops` held in static `slot`: built and stored on
+    /// the first run in this VM (a worker's statics start zeroed), loaded
+    /// after that.
+    fn interned_dict(&mut self, slot: u32, ops: &[HirDictOp]) -> Result<ValueId, Refusal> {
+        let have = self.b.ins_load_static(slot, MirTy::HeapRef).map_err(mir)?;
+        let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+        let unset = self.b.ins_cmp(MirCmpOp::Eq, have, zero).map_err(mir)?;
+        let build = self.b.create_block();
+        let loaded = self.b.create_block();
+        let join = self.b.create_block();
+        self.b.branch(unset, build, loaded).map_err(mir)?;
+        self.switch(build);
+        let [built] = self.dict_program(Vec::new(), ops)?[..] else {
+            return Err("interned dictionary arity".into());
+        };
+        self.b.ins_store_static(slot, built).map_err(mir)?;
+        let built_from = self.cur;
+        self.jump(join)?;
+        self.switch(loaded);
+        self.jump(join)?;
+        self.switch(join);
+        self.b.ins_stack_phi(vec![(built_from, built), (loaded, have)]).map_err(mir)
     }
 
     /// An auto-par call as HIR emission left it: the fork-join worker on
