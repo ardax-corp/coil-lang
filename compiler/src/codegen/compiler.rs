@@ -1817,7 +1817,7 @@ impl Compiler {
             if self.emit_instance_dict(&mut dict, &src.class, &req.lookup) {
                 arity += 1;
             }
-            self.bytecode.append(&mut dict);
+            self.append_dicts_interned(dict);
         }
         if !self.emit_named_entry_on_module(&req.src, arity, crate::il::EntryKind::Call) {
             self.missing_call_target(&req.src, 0..0);
