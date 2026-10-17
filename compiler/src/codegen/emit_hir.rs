@@ -4924,7 +4924,7 @@ impl Compiler {
             "planned dictionaries for `{}`",
             generic.lookup
         );
-        self.bytecode.append(&mut dicts);
+        self.append_dicts_interned(dicts);
         (forwarded + n) as u32
     }
 

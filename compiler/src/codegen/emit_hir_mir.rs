@@ -1482,9 +1482,156 @@ impl Compiler {
             || self.hir_mir_ctx.iter().any(|&(s, own, _)| s == slot && own < sp)
     }
 
+    /// [`Self::hir_mir_dict_ops_of`], with every ground dictionary built
+    /// once ([`Self::intern_dict_ops`]).
+    fn hir_mir_dict_program(&mut self, code: &CodeBuf) -> Option<Vec<crate::mir::HirDictOp>> {
+        let ops = self.hir_mir_dict_ops_of(code)?;
+        Some(self.intern_dict_ops(ops))
+    }
+
+    /// A dictionary made only of method pointers and such dictionaries is
+    /// the same value at every run: build it once into a static slot
+    /// instead of a tuple per call. Each maximal one becomes
+    /// [`crate::mir::HirDictOp::Interned`].
+    fn intern_dict_ops(&mut self, ops: Vec<crate::mir::HirDictOp>) -> Vec<crate::mir::HirDictOp> {
+        use crate::mir::HirDictOp;
+        // Per stack word: the index in `out` where its ops start, and
+        // whether it is ground.
+        let mut stack: Vec<(usize, bool)> = Vec::new();
+        let mut out: Vec<HirDictOp> = Vec::with_capacity(ops.len());
+        for op in ops {
+            match op {
+                HirDictOp::Code(_) => {
+                    stack.push((out.len(), true));
+                    out.push(op);
+                }
+                HirDictOp::Tuple(n) => {
+                    let Some(at) = stack.len().checked_sub(n as usize) else {
+                        out.push(op);
+                        continue;
+                    };
+                    let elems = stack.split_off(at);
+                    let start = elems.first().map_or(out.len(), |e| e.0);
+                    if elems.iter().all(|e| e.1) {
+                        let mut flat = Vec::new();
+                        for o in out.drain(start..) {
+                            match o {
+                                HirDictOp::Interned { ops, .. } => flat.extend(ops),
+                                other => flat.push(other),
+                            }
+                        }
+                        flat.push(HirDictOp::Tuple(n));
+                        let slot = self.interned_dict_slot(flat.clone());
+                        out.push(HirDictOp::Interned { slot, ops: flat });
+                        stack.push((start, true));
+                    } else {
+                        out.push(op);
+                        stack.push((start, false));
+                    }
+                }
+                HirDictOp::Box(_) => {
+                    let start = stack.pop().map_or(out.len(), |e| e.0);
+                    out.push(op);
+                    stack.push((start, false));
+                }
+                HirDictOp::Null | HirDictOp::Load(_) | HirDictOp::Interned { .. } => {
+                    stack.push((out.len(), false));
+                    out.push(op);
+                }
+            }
+        }
+        out
+    }
+
+    /// Append dictionary code `dicts` to the body. Each ground dictionary
+    /// in it (method pointers and such dictionaries only) is built once
+    /// into a static slot ([`Self::intern_dict_ops`]) and loaded after
+    /// that: `LoadStatic; Dup; Const 0; EQ; JumpIfFalse have; Pop; build;
+    /// Dup; StoreStatic; have:`.
+    pub(crate) fn append_dicts_interned(&mut self, mut dicts: CodeBuf) {
+        use crate::mir::HirDictOp;
+        let Some(ops) = self.hir_mir_dict_ops_of(&dicts) else {
+            self.bytecode.append(&mut dicts);
+            return;
+        };
+        if ops.len() != dicts.ops().len() {
+            self.bytecode.append(&mut dicts);
+            return;
+        }
+        // Each word the program leaves: its op range and whether it is ground.
+        let mut stack: Vec<(usize, bool)> = Vec::new();
+        for (i, op) in ops.iter().enumerate() {
+            match op {
+                HirDictOp::Code(_) => stack.push((i, true)),
+                HirDictOp::Tuple(n) => {
+                    let Some(at) = stack.len().checked_sub(*n as usize) else {
+                        self.bytecode.append(&mut dicts);
+                        return;
+                    };
+                    let elems = stack.split_off(at);
+                    let start = elems.first().map_or(i, |e| e.0);
+                    stack.push((start, elems.iter().all(|e| e.1)));
+                }
+                HirDictOp::Box(_) => {
+                    let start = stack.pop().map_or(i, |e| e.0);
+                    stack.push((start, false));
+                }
+                HirDictOp::Null | HirDictOp::Load(_) | HirDictOp::Interned { .. } => stack.push((i, false)),
+            }
+        }
+        let n_ops = dicts.ops().len();
+        let loc = common::DebugLoc::default();
+        // Built apart and appended, so `append` rewrites its method
+        // pointers to entries like it does for `dicts`.
+        let mut out = CodeBuf::new();
+        for (k, &(start, ground)) in stack.iter().enumerate() {
+            let end = stack.get(k + 1).map_or(n_ops, |e| e.0);
+            let built_tuple = matches!(ops[end - 1], HirDictOp::Tuple(_));
+            if !(ground && built_tuple) {
+                for i in start..end {
+                    out.push_op_of(&dicts, i);
+                }
+                continue;
+            }
+            let slot = self.interned_dict_slot(ops[start..end].to_vec());
+            let have = out.fresh_label();
+            out.push(Byte::new(Instruction::LoadStatic).with_operand_u32(slot));
+            out.push_op(IlOp::Dup { loc });
+            out.push_const(0);
+            out.push(Byte::new(Instruction::EQ));
+            out.push_op(IlOp::Jump {
+                kind: crate::il::IlJumpKind::JumpIfFalse,
+                target: have,
+                loc,
+                hint: Default::default(),
+            });
+            out.push_pop();
+            for i in start..end {
+                out.push_op_of(&dicts, i);
+            }
+            out.push_op(IlOp::Dup { loc });
+            out.push(Byte::new(Instruction::StoreStatic).with_operand_u32(slot));
+            out.bind_label(have);
+        }
+        self.bytecode.append(&mut out);
+    }
+
+    /// The static slot that holds ground dictionary program `flat`.
+    fn interned_dict_slot(&mut self, flat: Vec<crate::mir::HirDictOp>) -> u32 {
+        if let Some(&slot) = self.interned_dicts.get(&flat) {
+            return slot;
+        }
+        let next = self.interned_dicts.len();
+        let slot = self
+            .checker
+            .alloc_synthetic_static_slot(format!("__dict${next}"), crate::typechecking::ty::int());
+        self.interned_dicts.insert(flat, slot);
+        slot
+    }
+
     /// Dictionary code emission put in `code` as a [`crate::mir::HirDictOp`]
     /// program, when every step is one.
-    fn hir_mir_dict_program(&self, code: &CodeBuf) -> Option<Vec<crate::mir::HirDictOp>> {
+    fn hir_mir_dict_ops_of(&self, code: &CodeBuf) -> Option<Vec<crate::mir::HirDictOp>> {
         use crate::mir::HirDictOp;
         code.ops()
             .iter()
@@ -1708,7 +1855,7 @@ impl Compiler {
     fn hir_mir_probe_unplanned(&mut self, f: impl FnOnce(&mut Self, &mut CodeBuf)) -> bool {
         let mut code = CodeBuf::new();
         self.hir_mir_once(|this| f(this, &mut code));
-        self.hir_mir_code_reads_dicts(&code) && self.hir_mir_dict_program(&code).is_none()
+        self.hir_mir_code_reads_dicts(&code) && self.hir_mir_dict_ops_of(&code).is_none()
     }
 
     /// Whether `code` loads one of the frame's dictionaries.

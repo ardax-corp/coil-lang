@@ -282,6 +282,15 @@ impl CodeBuf {
     /// Emit an `Entry` to `label`, a label of the (root) buffer this one will
     /// be appended into. Unlike a local label it survives [`Self::append`],
     /// so a forward CALL can stay in its expression's buffer (in order).
+    /// Push `src`'s op at raw index `i`, keeping it a root entry (a
+    /// label `append` does not remap) when it is one there.
+    pub fn push_op_of(&mut self, src: &CodeBuf, i: usize) {
+        if src.root_entries.contains(&i) {
+            self.root_entries.push(self.il.ops().len());
+        }
+        self.push_op(src.il.ops()[i].clone());
+    }
+
     pub fn emit_root_entry(
         &mut self,
         kind: super::EntryKind,

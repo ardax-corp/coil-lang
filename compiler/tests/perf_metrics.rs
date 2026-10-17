@@ -1855,3 +1855,17 @@ fn host_result_match_has_no_dead_spill() {
         "dead STORE/LOAD between HostInvoke and JumpIfMatch; ops={ops:?}"
     );
 }
+
+/// A generic call's ground dictionary (method pointers only) is built once
+/// into a static and loaded after that, not made as a tuple on every call.
+#[test]
+fn ground_dictionary_is_built_once() {
+    let (bc, _, _, _, pipeline) = compile("examples/perf/dict_once.hy");
+    let syms = pipeline.program_debug().fn_symbols;
+    let (start, end) = fn_pc_range(&syms, "main", bc.len());
+    let ops: Vec<_> = bc[start..end].iter().map(|b| *b.bytecode()).collect();
+    assert!(
+        ops.contains(&Instruction::LoadStatic) && ops.contains(&Instruction::StoreStatic),
+        "the dictionary for `larger` should live in a static; ops={ops:?}"
+    );
+}

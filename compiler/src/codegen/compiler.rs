@@ -308,7 +308,9 @@ impl Compiler {
     /// run at `setup_entry_offset`; otherwise jump straight to `main`, or,
     /// with no `main`, to the prologue's `HALT` (there is nothing to run).
     pub fn prologue_jmp_target(&self) -> u32 {
-        if self.static_slot_count() > 0
+        // Interned dictionaries start zeroed and are built on first use:
+        // they need no setup.
+        if self.static_slot_count() > self.interned_dicts.len() as u32
             || self.has_extern_block()
             || self.checker.classes_with_drop().next().is_some()
         {
@@ -1817,7 +1819,7 @@ impl Compiler {
             if self.emit_instance_dict(&mut dict, &src.class, &req.lookup) {
                 arity += 1;
             }
-            self.bytecode.append(&mut dict);
+            self.append_dicts_interned(dict);
         }
         if !self.emit_named_entry_on_module(&req.src, arity, crate::il::EntryKind::Call) {
             self.missing_call_target(&req.src, 0..0);
