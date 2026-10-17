@@ -2943,7 +2943,7 @@ impl Compiler {
         // Dictionaries a generic body forwards reach a generic callee's
         // shared body ([`Self::hir_generic_abi`]); a mono clone or a plain
         // function takes none, as on the AST.
-        let forwards = self.forwarded_dicts_hint(node.node, start, end).is_some_and(|d| !d.is_empty());
+        let forwards = self.forwarded_dicts_hint(node.node, start, end).is_some_and(|d| !d.is_empty() && !self.hir_clone_drops_forwarded(&d));
         if !forwards && let Some(call) = self.hir_ground_ufcs(hir, call, name)? {
             return Ok(call);
         }
@@ -3446,6 +3446,11 @@ impl Compiler {
     /// caps are reached.
     fn hir_method_clone(&self, hir: &HirBody, call: HirId, key: &str, lookup: &str, shared: &HirCall) -> Option<HirCall> {
         let src = self.inst_clone_srcs.get(key).filter(|s| s.method_of.is_some())?;
+        // A free function's own module calls its mono clones; a clone of
+        // another module's function or of a method clones it too.
+        if src.method_of.as_ref().is_some_and(|m| m.free) && src.program == self.program_seq && self.inst_clone_fallback.is_none() {
+            return None;
+        }
         if shared.pair.is_some()
             || shared.instance.is_some()
             || shared.generic.as_ref().is_some_and(|g| !g.forwarded.is_empty() || g.adapt.iter().any(Option::is_some))

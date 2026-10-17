@@ -44,7 +44,7 @@ Instance methods keep the explicit receiver parameter every trait method has (`f
 - **Method prologue.** A bounded instance's method takes the instance dictionary as its trailing argument (`__dict0`) and unpacks the context into `__dict1..` (`pending_instance_ctx` in `compile_function_output_with_name`).
 - **Direct calls.** Every direct call to an instance method (receiver, function-style, `Owner::m`, mono clone, operator) passes the dictionary when the target is a default body or a bounded instance (`emit_call_instance_dict`). If the dictionary cannot be built there, that is a compile error, not a call without one.
 - **Open goals.** A goal that still mentions a type variable is served from scope (`resolve_open_dict_goal`): inside a bounded instance, its own dictionary (`__dict0`, for recursion such as `Tree<T>`) or a context slot; inside a generic function, its bound's `__dictN` (scheme order); in a mono clone, the goal at the clone's concrete types (`mono_var_tys`). A goal like `Describe<Pair<T, int>>` goes through the generic `Pair` instance and resolves its context from scope. An open goal never falls back to a concrete instance.
-- **Allocation.** Building a bounded instance's dictionary allocates one tuple per level at each use. Interning dictionaries for ground goals is a possible follow-up if a hit bench shows it matters.
+- **Allocation.** A ground dictionary is built once into a static ([generic-specialization.md](generic-specialization.md)); an open goal's dictionary is still built at each use.
 
 ## Derives (#552)
 
@@ -63,5 +63,5 @@ by the expected type. Generic instances are found by the superclass check, the
 - **Superclass contexts.** `impl Ord for Box<T: Ord>` still needs its own
   superclass instances (`Lt<Box<T>>`, …) declared, as for concrete instances;
   the derive declares them.
-- **Dictionary allocation.** A bounded instance's dictionary is built at each
-  use; interning ground dictionaries is a follow-up if a hit bench shows it.
+- **Dictionary allocation.** A dictionary for an open goal is still built at
+  each use; ground ones are interned (#1417).

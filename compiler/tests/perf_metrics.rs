@@ -1858,14 +1858,48 @@ fn host_result_match_has_no_dead_spill() {
 
 /// A generic call's ground dictionary (method pointers only) is built once
 /// into a static and loaded after that, not made as a tuple on every call.
+/// (At a type the callee's module does not know, the call goes through a
+/// thunk to the shared body, which takes the dictionary.)
 #[test]
 fn ground_dictionary_is_built_once() {
     let (bc, _, _, _, pipeline) = compile("examples/perf/dict_once.hy");
     let syms = pipeline.program_debug().fn_symbols;
-    let (start, end) = fn_pc_range(&syms, "main", bc.len());
+    let (start, end) = fn_pc_range(&syms, "dict_lib::larger$inst$Score", bc.len());
     let ops: Vec<_> = bc[start..end].iter().map(|b| *b.bytecode()).collect();
     assert!(
         ops.contains(&Instruction::LoadStatic) && ops.contains(&Instruction::StoreStatic),
         "the dictionary for `larger` should live in a static; ops={ops:?}"
     );
+}
+
+/// A ground call to another module's generic class method runs a clone
+/// compiled from that module's body at the call's types: no boxed
+/// arguments, no dictionaries, no calls through them.
+#[test]
+fn foreign_method_clone_is_specialized() {
+    let (bc, _, _, _, pipeline) = compile("examples/perf/foreign_clone.hy");
+    let syms = pipeline.program_debug().fn_symbols;
+    for name in ["dict_lib::Tally::add$inst$int", "dict_lib::Tally::find$inst$int"] {
+        let (start, end) = fn_pc_range(&syms, name, bc.len());
+        let ops: Vec<_> = bc[start..end].iter().map(|b| *b.bytecode()).collect();
+        for op in [Instruction::BoxValue, Instruction::MakeTuple, Instruction::CallIndirect] {
+            assert!(!ops.contains(&op), "{name} should not box or take dictionaries; ops={ops:?}");
+        }
+    }
+}
+
+/// A ground call to another module's generic free function runs a clone
+/// compiled from that module's body, and the generic function it calls is
+/// cloned too: no boxed arguments, no dictionaries.
+#[test]
+fn foreign_fn_clone_is_specialized() {
+    let (bc, _, _, _, pipeline) = compile("examples/perf/foreign_fn_clone.hy");
+    let syms = pipeline.program_debug().fn_symbols;
+    for name in ["dict_lib::largest$inst$int", "dict_lib::larger$inst$int"] {
+        let (start, end) = fn_pc_range(&syms, name, bc.len());
+        let ops: Vec<_> = bc[start..end].iter().map(|b| *b.bytecode()).collect();
+        for op in [Instruction::BoxValue, Instruction::MakeTuple, Instruction::CallIndirect] {
+            assert!(!ops.contains(&op), "{name} should not box or take dictionaries; ops={ops:?}");
+        }
+    }
 }

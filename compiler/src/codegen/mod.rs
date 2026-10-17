@@ -521,6 +521,11 @@ pub struct Compiler {
     /// Programs compiled so far: a clone is compiled from its source's
     /// AST only within the program that holds it.
     program_seq: usize,
+    /// Each finished module's compile context, by program, while it holds
+    /// methods a later module may clone ([`Compiler::emit_foreign_clones`]).
+    module_ctxs: HashMap<usize, ModuleCtx>,
+    /// Clones of another program's methods, compiled under its context.
+    foreign_clone_queue: Vec<InstClone>,
     /// Set while a clone compiles: the thunk body it falls back to.
     inst_clone_fallback: Option<(InstCloneSrc, InstClone)>,
     /// Entry labels minted at program start for the clones' entries.
@@ -784,6 +789,8 @@ impl Default for Compiler {
             inst_clone_srcs: HashMap::new(),
             inst_clones: HashMap::new(),
             inst_clone_queue: Default::default(),
+            module_ctxs: HashMap::new(),
+            foreign_clone_queue: Vec::new(),
             program_seq: 0,
             inst_clone_fallback: None,
             inst_clone_labels: Vec::new(),
@@ -912,10 +919,65 @@ pub(crate) struct InstCloneSrc {
     method_of: Option<MethodCloneSrc>,
 }
 
+/// The per-module state a function body compiles under, kept from the
+/// end of its module's compile so a later module can clone its methods.
+pub(crate) struct ModuleCtx {
+    checker: Box<Checker>,
+    program_seq: usize,
+    namespace: String,
+    aliases: HashMap<String, String>,
+    typed_sidecar: crate::typechecking::TypedSidecar,
+    hir_fns: HashMap<(usize, usize), usize>,
+    hir_fn_names: HashMap<String, Option<usize>>,
+    hir_module: Option<crate::hir::HirModule>,
+    const_env_stack: Vec<HashMap<String, ConstValue>>,
+    static_const_values: HashMap<String, ConstValue>,
+    fn_bytecode_spans: HashMap<String, (usize, usize)>,
+    mono_plan: MonoPlan,
+    mono_offsets: HashMap<MonoKey, usize>,
+    mono_names: HashMap<MonoKey, String>,
+    pure_fns: HashSet<String>,
+    steady_fns: HashSet<String>,
+    alloc_steady: bool,
+    recursive_fns: HashSet<String>,
+    recursive_pure: HashSet<String>,
+    par_shapes: HashMap<String, crate::typechecking::ParForkSite>,
+    par_workers: HashSet<String>,
+    loop_par_sites: crate::typechecking::LoopParSites,
+    operand_stack_slots: u32,
+    current_source_file: Option<std::path::PathBuf>,
+    source_text: String,
+    source_base: (usize, usize),
+}
+
+impl ModuleCtx {
+    /// Whether the clone types `tys` mean the same in this module.
+    fn knows_tys(&self, tys: &[Ty]) -> bool {
+        Compiler::knows_tys_in(&self.checker, tys)
+    }
+
+    /// Whether the generic method body at `span` can be cloned without
+    /// changing the layout of values it shares with the unspecialized
+    /// methods: none of its types is an enum over its type parameters.
+    fn layout_safe(&self, span: (usize, usize)) -> bool {
+        let (Some(module), Some(&index)) = (self.hir_module.as_ref(), self.hir_fns.get(&span)) else {
+            return false;
+        };
+        let body = &module.bodies[index];
+        let enum_over_var = |t: &Option<Ty>| t.as_ref().is_some_and(|t| Compiler::has_enum_over_var(&self.checker, t));
+        !enum_over_var(&body.ret)
+            && !body.locals.iter().any(|l| enum_over_var(&l.ty))
+            && !body.exprs.iter().any(|e| enum_over_var(&e.ty))
+    }
+}
+
 /// What an inherent method clone source adds to [`InstCloneSrc`].
 #[derive(Clone)]
 pub(crate) struct MethodCloneSrc {
     is_static: bool,
+    /// A free generic function: cloned for calls from other modules and
+    /// from other clones; its own module's calls take its mono clones.
+    free: bool,
     /// The type parameter names the head's variables stand for, in order.
     names: Vec<String>,
 }

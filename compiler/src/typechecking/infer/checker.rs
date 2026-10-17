@@ -18052,6 +18052,18 @@ impl Checker {
         format!("{}::{}", owner, member)
     }
 
+    /// Swap the state the whole program shares (substitution, type
+    /// variable counter, static slots) with `other`: a checker kept from an
+    /// earlier module compiles under it ([`crate::codegen`] foreign clones).
+    pub fn swap_program_state(&mut self, other: &mut Checker) {
+        std::mem::swap(&mut self.subst, &mut other.subst);
+        std::mem::swap(&mut self.counter, &mut other.counter);
+        std::mem::swap(&mut self.static_slots, &mut other.static_slots);
+        std::mem::swap(&mut self.next_static_slot, &mut other.next_static_slot);
+        std::mem::swap(&mut self.synthetic_statics, &mut other.synthetic_statics);
+        std::mem::swap(&mut self.static_slot_types, &mut other.static_slot_types);
+    }
+
     /// Allocate a synthetic static slot (e.g. `extern` library / fn-id handles).
     ///
     /// Reuses an existing index when `fqn` was already allocated. Unlike

@@ -98,6 +98,9 @@ pub struct Pipeline {
     overlays: HashMap<PathBuf, String>,
     /// Parsed + expanded AST per file (discover / compile / typecheck).
     ast_cache: crate::ast_cache::AstCache,
+    /// The file each compiled program came from, by its program number
+    /// (foreign clones compile from its AST).
+    program_files: HashMap<usize, PathBuf>,
     /// When true, harness tests are compiled into the program (see `--include-tests`).
     include_tests: bool,
     /// Calls per generated contract test case; 0 generates none.
@@ -708,6 +711,7 @@ impl Pipeline {
             source_cache: Vec::new(),
             overlays: HashMap::new(),
             ast_cache: crate::ast_cache::AstCache::default(),
+            program_files: HashMap::new(),
             include_tests: false,
             contract_runs: 0,
             contract_sources: Vec::new(),
@@ -1409,7 +1413,10 @@ impl Pipeline {
                 .expect("parse_expand_check_file filled cache");
             compiler.set_source_text(cached.source());
             let ast = cached.ast_mut().expect("parsed");
-            compiler.compile_prepared_module(namespace.as_str(), ast)
+            let bytecode = compiler.compile_prepared_module(namespace.as_str(), ast);
+            self.program_files.insert(compiler.program_seq(), file.clone());
+            self.emit_foreign_clones();
+            bytecode
         };
 
         self.bytecode.extend(bytecode);
@@ -1424,6 +1431,23 @@ impl Pipeline {
         if self.had_errors() {
             self.failed = true;
         }
+    }
+
+    /// Compile the clones of earlier modules' methods the module just
+    /// compiled asked for, each from its module's AST.
+    fn emit_foreign_clones(&mut self) {
+        let Some(compiler) = self.compiler.get_mut() else {
+            return;
+        };
+        let seqs = compiler.foreign_clone_programs();
+        if seqs.is_empty() {
+            return;
+        }
+        let asts: Vec<_> = seqs
+            .into_iter()
+            .filter_map(|seq| Some((seq, self.ast_cache.get(self.program_files.get(&seq)?)?.ast()?)))
+            .collect();
+        compiler.emit_foreign_clones(&asts);
     }
 
     pub fn compile(mut self, filename: String, output: String) {
@@ -1579,6 +1603,7 @@ impl Pipeline {
         self.compiler_lazy_mut().set_source_file(path);
         self.compiler_lazy_mut().set_source_text(src);
         self.compiler_lazy_mut().compile_module("", &mut ast);
+        self.emit_foreign_clones();
 
         // Register source and drain typecheck / codegen diagnostics via the sink.
         let file_id = self.sink.register_source(path, src);
