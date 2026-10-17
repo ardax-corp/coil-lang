@@ -1,11 +1,22 @@
-// A bounded generic function in another module: callers reach its shared
-// body with trait dictionaries (examples/perf/dict_once.hy).
+// A bounded generic function in another module: a caller at a type this
+// module does not know reaches its shared body with trait dictionaries
+// (examples/perf/dict_once.hy).
 
 fn larger<T: Ord>(T a, T b) -> T {
     if a > b {
         return a;
     }
     return b;
+}
+
+// A bounded generic function calling another: a caller's ground call gets
+// per-type clones of both, compiled here (examples/perf/foreign_fn_clone.hy).
+fn largest<T: Ord>(Vec<T> xs, T start) -> T {
+    let best = start;
+    for x in xs {
+        best = larger(best, x);
+    }
+    return best;
 }
 
 // A bounded generic class in another module: a caller's ground calls get
