@@ -1657,7 +1657,12 @@ impl Compiler {
             let src = self.inst_clone_srcs[&req.src].clone();
             // Another module's method: compiled later under that module's
             // context ([`Self::emit_foreign_clones`]).
-            if src.program != self.program_seq && self.module_ctxs.contains_key(&src.program) {
+            if src.program != self.program_seq
+                && self
+                    .module_ctxs
+                    .get(&src.program)
+                    .is_some_and(|ctx| ctx.knows_tys(&req.lookup) && ctx.layout_safe(src.span))
+            {
                 self.foreign_clone_queue.push(req.clone());
                 if src.method_of.is_none() {
                     self.emit_dict_adapter_thunk(&src.class, &src.method, &req.lookup, &req.name);
@@ -1802,6 +1807,42 @@ impl Compiler {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Whether every type in `tys` means the same in this module as where
+    /// it is used: built from scalars and types this module already knew
+    /// (a type declared in a later module is not in its checker).
+    pub(crate) fn knows_tys_in(checker: &Checker, tys: &[Ty]) -> bool {
+        use crate::typechecking::ty;
+        tys.iter().all(|t| match t {
+            Ty::Con(name) => {
+                [ty::INT, ty::FLOAT, ty::BOOL, ty::STRING, ty::BYTE, "char"].contains(&name.as_str())
+                    || checker.has_impl(name)
+                    || checker.enum_variants(name).is_some()
+            }
+            Ty::App(head, args) => {
+                Self::knows_tys_in(checker, std::slice::from_ref(head.as_ref())) && Self::knows_tys_in(checker, args)
+            }
+            _ => false,
+        })
+    }
+
+    /// Whether a type in the generic body at `span` is an enum over the
+    /// type parameters (`Option<T>`): a clone gives it its own layout,
+    /// which the shared methods reading the same fields do not expect.
+    pub(crate) fn has_enum_over_var(checker: &Checker, ty: &Ty) -> bool {
+        match ty {
+            Ty::App(head, args) => {
+                (matches!(head.as_ref(), Ty::Con(name) if checker.enum_variants(name).is_some())
+                    && args.iter().any(Self::ty_has_var))
+                    || args.iter().any(|a| Self::has_enum_over_var(checker, a))
+            }
+            Ty::Fun(a, b) => Self::has_enum_over_var(checker, a) || Self::has_enum_over_var(checker, b),
+            Ty::Tuple(items) => items.iter().any(|t| Self::has_enum_over_var(checker, t)),
+            Ty::List(inner) | Ty::Readonly(inner) => Self::has_enum_over_var(checker, inner),
+            Ty::Array { element, .. } => Self::has_enum_over_var(checker, element),
+            _ => false,
         }
     }
 

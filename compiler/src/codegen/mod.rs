@@ -950,6 +950,27 @@ pub(crate) struct ModuleCtx {
     source_base: (usize, usize),
 }
 
+impl ModuleCtx {
+    /// Whether the clone types `tys` mean the same in this module.
+    fn knows_tys(&self, tys: &[Ty]) -> bool {
+        Compiler::knows_tys_in(&self.checker, tys)
+    }
+
+    /// Whether the generic method body at `span` can be cloned without
+    /// changing the layout of values it shares with the unspecialized
+    /// methods: none of its types is an enum over its type parameters.
+    fn layout_safe(&self, span: (usize, usize)) -> bool {
+        let (Some(module), Some(&index)) = (self.hir_module.as_ref(), self.hir_fns.get(&span)) else {
+            return false;
+        };
+        let body = &module.bodies[index];
+        let enum_over_var = |t: &Option<Ty>| t.as_ref().is_some_and(|t| Compiler::has_enum_over_var(&self.checker, t));
+        !enum_over_var(&body.ret)
+            && !body.locals.iter().any(|l| enum_over_var(&l.ty))
+            && !body.exprs.iter().any(|e| enum_over_var(&e.ty))
+    }
+}
+
 /// What an inherent method clone source adds to [`InstCloneSrc`].
 #[derive(Clone)]
 pub(crate) struct MethodCloneSrc {
