@@ -1869,3 +1869,19 @@ fn ground_dictionary_is_built_once() {
         "the dictionary for `larger` should live in a static; ops={ops:?}"
     );
 }
+
+/// A ground call to another module's generic class method runs a clone
+/// compiled from that module's body at the call's types: no boxed
+/// arguments, no dictionaries, no calls through them.
+#[test]
+fn foreign_method_clone_is_specialized() {
+    let (bc, _, _, _, pipeline) = compile("examples/perf/foreign_clone.hy");
+    let syms = pipeline.program_debug().fn_symbols;
+    for name in ["dict_lib::Tally::add$inst$int", "dict_lib::Tally::find$inst$int"] {
+        let (start, end) = fn_pc_range(&syms, name, bc.len());
+        let ops: Vec<_> = bc[start..end].iter().map(|b| *b.bytecode()).collect();
+        for op in [Instruction::BoxValue, Instruction::MakeTuple, Instruction::CallIndirect] {
+            assert!(!ops.contains(&op), "{name} should not box or take dictionaries; ops={ops:?}");
+        }
+    }
+}
