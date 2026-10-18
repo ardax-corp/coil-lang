@@ -9,7 +9,7 @@ use crate::Value;
 
 #[repr(u8)]
 #[derive(Default, Copy, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
-#[cfg_attr(debug_assertions, derive(Debug))]
+#[cfg_attr(any(debug_assertions, feature = "debug-fmt"), derive(Debug))]
 #[rkyv(compare(PartialEq), derive(Clone), derive(Copy))]
 pub enum Instruction {
     // Special
@@ -1865,30 +1865,30 @@ impl ArchivedByte {
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "debug-fmt"))]
 use std::fmt::Debug;
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "debug-fmt"))]
 impl Debug for Byte {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}({:?})", self.bytecode, self.operands)
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "debug-fmt"))]
 impl std::fmt::Display for Instruction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", *self as u8)
     }
 }
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "debug-fmt"))]
 impl Debug for ArchivedByte {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}({:?})", self.bytecode as u8, self.operands)
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "debug-fmt"))]
 impl std::fmt::Display for ArchivedInstruction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", *self as u8)
