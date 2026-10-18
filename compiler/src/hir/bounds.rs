@@ -7,7 +7,7 @@
 //! its length while the loop runs (no append, no call that may resize).
 //! Those sites get [`HirFlags::IN_BOUNDS`], which lowering turns into an
 //! unchecked index. The checker proves the same on source code; this pass
-//! sees the shapes inlining and licm leave.
+//! sees the shapes inlining and unrolling leave.
 
 use std::collections::{HashMap, HashSet};
 

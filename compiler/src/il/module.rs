@@ -1507,8 +1507,6 @@ mod tests {
     fn seek_promote_opts() -> OptimizeOptions {
         OptimizeOptions {
             algebraic: false,
-            local_cse: false,
-            licm: false,
             loop_bounds: false,
             sink_return: false,
             loop_unroll: false,

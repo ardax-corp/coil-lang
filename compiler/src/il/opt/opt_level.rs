@@ -101,8 +101,6 @@ impl fmt::Display for OptLevel {
 fn all_off() -> OptimizeOptions {
     OptimizeOptions {
         algebraic: false,
-        local_cse: false,
-        licm: false,
         loop_bounds: false,
         sink_return: false,
         loop_unroll: false,
@@ -118,17 +116,15 @@ fn all_off() -> OptimizeOptions {
 fn base_knobs(level: OptLevel) -> OptimizeOptions {
     let mut o = all_off();
     // Gate HIR passes in `emit_hir`, not IL table rows: constant folding (at
-    // every level), scalar replacement (enum / tuple SROA), local CSE,
-    // loop-invariant code motion, counted-loop bounds proofs and full unroll
-    // of short counted loops (not at Size: it grows code).
+    // every level), scalar replacement (enum / tuple SROA), counted-loop
+    // bounds proofs and full unroll of short counted loops (not at Size: it
+    // grows code). MIR CSE and LICM have no switch.
     o.algebraic = true;
     let standard = matches!(
         level,
         OptLevel::Standard | OptLevel::Aggressive | OptLevel::Size
     );
     o.escape_analysis = standard;
-    o.local_cse = standard;
-    o.licm = standard;
     o.loop_bounds = standard;
     o.loop_unroll = matches!(level, OptLevel::Standard | OptLevel::Aggressive);
     // Return in each branch of a returned `match` (not at Size: a two-word
@@ -149,8 +145,6 @@ impl Default for OptimizeOptions {
 fn flag_vec(o: &OptimizeOptions) -> Vec<bool> {
     vec![
         o.algebraic,
-        o.local_cse,
-        o.licm,
         o.loop_bounds,
         o.sink_return,
         o.loop_unroll,
@@ -210,14 +204,13 @@ mod tests {
         assert!(o.algebraic);
         assert!(!o.escape_analysis);
         assert!(!o.loop_unroll);
-        assert!(!o.local_cse);
     }
 
     #[test]
     fn basic_folds_only() {
         let o = OptLevel::Basic.options();
         assert!(o.algebraic);
-        assert!(!o.licm && !o.escape_analysis);
+        assert!(!o.loop_bounds && !o.escape_analysis);
     }
 
     #[test]

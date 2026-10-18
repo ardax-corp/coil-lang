@@ -75,7 +75,7 @@ known-finite only — see [mir.md](mir.md#p11--mir-float-pipeline-coi-285)):
 - Codegen: `new Class(args).field` scalar replacement (no temp instance).
 - Operand order: `hir::fold` puts an `int` literal on the right (the stack-IL `canon` pass was removed 2026-10).
 
-LICM (`hir::licm`) hoists invariant expression chains, nested loops included.
+LICM (`mir::licm`, dense and LIR bodies) hoists invariant expression chains, nested loops included; trapping ops and pure calls move behind a copy of the loop test.
 There is no integer `i * c` strength reduction any more: the stack-IL pass was
 removed 2026-10, and MIR IV strength reduction is float-only because int
 overflow traps ([int-overflow.md](int-overflow.md)).
@@ -99,11 +99,11 @@ titles can oversell.
 |------|-------------|--------------------------------------------|
 | **Opt levels** | `-O0`…`-O3`, `-Os`, `-Og` via CLI / `Pipeline::set_opt_level` | `None ⊂ Basic ⊂ Standard ⊂ Aggressive`. `Size` drops unroll + `sink_return`; `Debug` = HIR constant folding only (no scalar replacement, unroll or inlining). |
 | **try flatten** (codegen, [#307](https://github.com/ardax-corp/coil-lang/pull/307)) | Two-slot Result/Option `?` shares a fail epilogue; `return e?` / `return Ok(e?)` forwards the pair | Not an IL pass. Hit: `examples/perf/result_try_churn.hy`. |
-| **`local_cse`** (`hir/cse.rs`; stack-IL [#317](https://github.com/ardax-corp/coil-lang/pull/317) moved to HIR 2026-10) | Intra-block CSE on HIR: a repeated pure operator / cast / field / element / pure-call value reads the `let` local holding it | Killed by writes to the locals it reads, its holder, or (heap reads) the heap. Hit: `cse_index_recompute`, `cse_cast_recompute`. |
-| **`licm`** (`hir/licm.rs`; stack-IL [#315](https://github.com/ardax-corp/coil-lang/pull/315) moved to HIR 2026-10) | Hoists invariant expressions out of loops on HIR | Hit: `licm_nested_chains`. Stack-IL `strength_reduce` (`iv_mul_sr`) was removed 2026-10 (no bench effect). |
+| **CSE** (`mir/cse.rs`; stack-IL [#317](https://github.com/ardax-corp/coil-lang/pull/317) moved to HIR, then `hir::cse` folded into MIR 2026-10) | SSA numbering on MIR: a repeated pure operator / cast, and in one block a repeated field / element / length / pure-call read, reads the first value | Heap reads are killed by a store, an append or a call that may write the heap or resize. LIR bodies keep each literal (`cse_lir`). Hit: `cse_index_recompute`, `cse_cast_recompute`. |
+| **LICM** (`mir/licm.rs`; stack-IL [#315](https://github.com/ardax-corp/coil-lang/pull/315) moved to HIR, then `hir::licm` folded into MIR 2026-10) | Hoists invariant values out of natural loops on MIR; a trapping op, checked element read or pure call moves only behind a copy of the loop test, and only when it runs on every iteration | Hit: `licm_nested_chains`, `licm_lir_pure_call`. Stack-IL `strength_reduce` (`iv_mul_sr`) was removed 2026-10 (no bench effect). |
 | **Removed 2026-10** | Stack-IL `copy_prop`, `dest_prop`, `mem_fwd` + `dead_store`, `instcombine`, `strength_reduce`, `invariant_store_elim`, `tos_carry`, `return_convoy`, `bin_join_convoy`, `multi_op_join_convoy`, `invert_guard_branch`, `slot_promote_tell`, `ssa_gvn`, `cfg_gvn`, IL `escape_analysis` | Measurement showed no bench effect. MIR InstCombine / DestProp / IV SR / GVN are separate and stay. The `escape_analysis` option now only gates HIR enum / tuple scalar replacement. |
 | **sibling / self `TailCall`** (codegen, [#316](https://github.com/ardax-corp/coil-lang/pull/316)) | Existing `TailCall` for cycle-only siblings (even/odd) and self-recursion; matching one- or two-word ABI | No InstCombine Call;Return peep. Hit: `tail_sibling`. Tail-only mutual depth is 1. |
-| **`loop_bounds`** (`hir/bounds.rs` + `len(a)` hoisting in `hir/licm.rs`; stack-IL pass removed 2026-10) | Length invariance; proven counted / stride / fill-bounded sites flag `IN_BOUNDS` and lower to `IndexUnchecked` / `StoreIndexUnchecked`. Sidecar `index_facts` extend Unchecked/pin to helpers and for-in | **`LEQ`/`GEQ` headers are not length proofs** (COI-85 / COI-98). Unproven, host, FFI, yield, growing-array, alias-push and resizing-call loops stay checked. |
+| **`loop_bounds`** (`hir/bounds.rs` + `len(a)` hoisting in `mir/licm.rs`; stack-IL pass removed 2026-10) | Length invariance; proven counted / stride / fill-bounded sites flag `IN_BOUNDS` and lower to `IndexUnchecked` / `StoreIndexUnchecked`. Sidecar `index_facts` extend Unchecked/pin to helpers and for-in | **`LEQ`/`GEQ` headers are not length proofs** (COI-85 / COI-98). Unproven, host, FFI, yield, growing-array, alias-push and resizing-call loops stay checked. |
 | **`loop_unroll`** (`hir/unroll.rs`; stack-IL pass removed 2026-10) | Full unroll of counted loops, trip ≤ 8, after inlining; each copy reads the counter as a literal, then `hir::fold` folds the copies (merging `x = x + a; x = x + b`) | Calls, exits, closures and inner loops that do not unroll themselves refuse; nests flatten over up to 3 rounds; ≤ 512 added nodes per loop. `LEQ` accepted for **trip count** only — separate from bounds Index proofs (COI-98). |
 | **`*Jmpt`** | fuse-select emits fused `*Jmpt` twins (the IL `JMPF; JMP` → `JMPT` invert was removed 2026-10) | Loop headers stay `*Jmpf` (COI-87). |
 | ~~`seek_back_edge`~~ | `Seek` latch to expose in-loop self-stores when header becomes `Known` | **Removed**: the residual `Seek` blocked MIR dense (`vec_scan` 2.5×, `mir_dense_float` 2.1×, `s2d_inloop_pack` 1.65× slower at `-O3`). |
@@ -226,7 +226,7 @@ same length-invariance proof (strict `<` / `>` headers only).
 `LEQ` / `GEQ` are **not** length / in-bounds proofs (COI-85 / COI-98). Dynamic
 indices and unproven stride steps keep checked `Index` / `StoreIndex`.
 
-The stack-IL `il::bounds.rs` (removed 2026-10; now `hir::bounds` plus `len(a)` hoisting in `hir::licm`) proved **length invariance** per natural loop instead of
+The stack-IL `il::bounds.rs` (removed 2026-10; now `hir::bounds` plus `len(a)` hoisting in `mir::licm`) proved **length invariance** per natural loop instead of
 relying on per-index runtime tests alone. `StoreIndex` overwrites an element in
 place, so a loop that writes `a[i]` still has an invariant `len(a)`; `ArrayPush`,
 an impure call, a host native or any unmodelled op refuses the region. Two invariant
