@@ -1,13 +1,15 @@
 //! Constant folding and algebraic identities.
 //!
-//! Operators on literals become literals (`int` and `float` only, and an
-//! `int` result only when it fits 32 bits, the inline `Const` range),
+//! Operators on literals become literals (`int` and `float` only; an `int`
+//! op that would trap at run time stays, so the trap still happens),
 //! `x + 0`, `x * 1`, `x | 0` and friends become `x`, `x * 0` becomes `0`
 //! when `x` is a plain read, `x ** 2` becomes `x * x`, `(x + 1) + 2` becomes
 //! `x + 3` (and so do `x = x + 1; x = x + 2;` in a row), `x = x` goes, a
 //! `match` on a constructor takes its arm, `2 * x` becomes `x * 2` (and
 //! `1 < x` becomes `x > 1`), `!!b` becomes `b`, and `if` on a literal keeps
 //! only the branch it takes. Folds run bottom-up, so they cascade.
+
+use common::int_arith;
 
 use super::lower::children;
 use super::{BinOp, HirBody, HirExpr, HirId, HirKind, HirPat, HirPatFields, Lit, MakeKind, UnOp};
@@ -108,7 +110,7 @@ fn rewrite(body: &HirBody, id: HirId) -> Option<HirKind> {
             _ => None,
         },
         HirKind::Un { op: UnOp::Neg, operand } if named(e.ty.as_ref()?, "int") => match body.expr(*operand).kind {
-            HirKind::Lit(Lit::Int(a)) => fits(a.checked_neg()?).map(|v| HirKind::Lit(Lit::Int(v))),
+            HirKind::Lit(Lit::Int(a)) => int_arith::neg(a).ok().map(|v| HirKind::Lit(Lit::Int(v))),
             _ => None,
         },
         HirKind::Logic { and, lhs, rhs } => match body.expr(*lhs).kind {
@@ -228,7 +230,7 @@ fn regroup(body: &mut HirBody, id: HirId) -> Option<HirKind> {
     if (a < 0) != (b < 0) || body.expr(x).ty != body.expr(id).ty {
         return None;
     }
-    let sum = fits(a.checked_add(b)?)?;
+    let sum = a.checked_add(b)?;
     // `inner` belongs to the `x + a` this replaces, so it can take the sum.
     let e = &mut body.exprs[inner.0 as usize];
     e.kind = HirKind::Lit(Lit::Int(sum));
@@ -247,7 +249,7 @@ fn merge_steps(body: &mut HirBody, id: HirId, hits: &mut usize) {
         if let (Some((x, a, lit_a)), Some((y, b, _))) = (step(body, stmts[k]), step(body, stmts[k + 1]))
             && x == y
             && (a < 0) == (b < 0)
-            && let Some(sum) = a.checked_add(b).and_then(fits)
+            && let Some(sum) = a.checked_add(b)
         {
             let e = &mut body.exprs[lit_a.0 as usize];
             e.kind = HirKind::Lit(Lit::Int(sum));
@@ -362,23 +364,25 @@ fn constant(op: BinOp, a: &Lit, b: &Lit, t: &Ty) -> Option<Lit> {
             if !named(t, "int") {
                 return None;
             }
+            // A trap (overflow, division by zero, a bad shift count or
+            // exponent) does not fold: the op stays and traps at run time.
             let r = match op {
-                BinOp::IntAdd => a.checked_add(b)?,
-                BinOp::IntSub => a.checked_sub(b)?,
-                BinOp::IntMul => a.checked_mul(b)?,
-                BinOp::IntDiv if b != 0 => a.checked_div(b)?,
+                BinOp::IntAdd => int_arith::add(a, b),
+                BinOp::IntSub => int_arith::sub(a, b),
+                BinOp::IntMul => int_arith::mul(a, b),
+                BinOp::IntDiv => int_arith::div(a, b),
                 // An index lowers `i % n` as a Euclidean rem; the two agree
                 // only on non-negative operands.
-                BinOp::IntRem if a >= 0 && b > 0 => a % b,
-                BinOp::BitAnd => a & b,
-                BinOp::BitOr => a | b,
-                BinOp::BitXor => a ^ b,
-                BinOp::Shl if (0..32).contains(&b) => a.checked_shl(b as u32)?,
-                BinOp::Shr if (0..64).contains(&b) => a >> b,
-                BinOp::IntPow if (0..32).contains(&b) => a.checked_pow(b as u32)?,
+                BinOp::IntRem if a >= 0 && b > 0 => int_arith::rem(a, b),
+                BinOp::BitAnd => Ok(a & b),
+                BinOp::BitOr => Ok(a | b),
+                BinOp::BitXor => Ok(a ^ b),
+                BinOp::Shl => int_arith::shl(a, b),
+                BinOp::Shr => int_arith::shr(a, b),
+                BinOp::IntPow => int_arith::pow(a, b),
                 _ => return None,
             };
-            fits(r).map(Lit::Int)
+            r.ok().map(Lit::Int)
         }
         (Lit::Float(a), Lit::Float(b)) => {
             let (a, b) = (*a, *b);
@@ -412,11 +416,6 @@ fn constant(op: BinOp, a: &Lit, b: &Lit, t: &Ty) -> Option<Lit> {
         })),
         _ => None,
     }
-}
-
-/// An `int` literal the stack IL encodes inline.
-fn fits(v: i64) -> Option<i64> {
-    i32::try_from(v).ok().map(i64::from)
 }
 
 fn named(t: &Ty, name: &str) -> bool {

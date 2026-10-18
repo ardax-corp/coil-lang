@@ -103,9 +103,6 @@ pub(super) struct HirMirTables {
     /// Some code emission writes for this body reads one of the frame's
     /// dictionaries (`__dictN`) ([`Compiler::hir_mir_dict_reads`]).
     pub(super) reads_dicts: bool,
-    /// The niche word of each `Result` variant made at a niche layout
-    /// other than its own type's ([`Compiler::hir_mir_make_niches`]).
-    pub(super) make_niches: HashMap<u32, crate::mir::MirTy>,
     /// The key of each field a record `let` pattern binds (`None`: a
     /// wildcard), by `let`: MIR pushes each as a string.
     pub(super) record_pats: HashMap<u32, Vec<Option<u32>>>,
@@ -113,9 +110,6 @@ pub(super) struct HirMirTables {
     /// parameter ([`Compiler::hir_niche_arg`]): boxed to their enum
     /// object, by argument.
     pub(super) niche_args: HashMap<u32, ValueLayout>,
-    /// `Result<(), E>` call arguments a `Result<unit, E>` parameter takes
-    /// (#1085): MIR rewrites the niche word, by argument.
-    pub(super) unit_result_args: std::collections::HashSet<u32>,
     /// `block_on(h)` calls: the `wait_ready`
     /// native run between resumes, if the program has one, by call.
     pub(super) block_ons: HashMap<u32, Option<u16>>,
@@ -154,7 +148,6 @@ impl Compiler {
         self.hir_mir_intern_keys(hir);
         if let Some(root) = hir.root {
             self.hir_mir_walk(hir, emit, root, &mut tables);
-            self.hir_mir_make_niches(hir, emit, root, None, &mut tables.make_niches);
         }
         tables.frame = self.hir_mir_frame(hir, emit);
         // As `lower_hir_body`'s prologue unboxes them.
@@ -207,105 +200,6 @@ impl Compiler {
             if let Some(crate::typechecking::ty::ScalarBacking::String(s)) = self.checker.scalar_for(&enum_name, &variant).cloned() {
                 self.intern_string(unescape_coil_string(&s));
             }
-        }
-    }
-
-    /// Record the `Result` variants under `id` that emission makes at a
-    /// niche layout other than their own type's. `hir_check_make` builds
-    /// a make at the layout its context wants, and a `Result::Ok(())` is
-    /// typed `Result<(), E>` (a `NicheResult`, `Ok` the `()` tuple) even
-    /// where a `Result<unit, E>` (a `NicheUnitResult`, `Ok` the zero word)
-    /// is wanted: returned from a `-> Result<unit, E>` body, or as the
-    /// value of an inlined call. The wanted layout reaches a value as
-    /// `hir_check_value` passes it: a `return`'s value is wanted as the
-    /// body returns it, a block's tail, an `if`'s arms and a `match`'s
-    /// arms as their parent is; any other value at its own type's layout.
-    fn hir_mir_make_niches(&self, hir: &HirBody, emit: &HirEmit, id: HirId, want: Option<ValueLayout>, out: &mut HashMap<u32, crate::mir::MirTy>) {
-        use ValueLayout as L;
-        if emit.plan.par_loops.contains_key(&id.0) {
-            return;
-        }
-        let own = Self::hir_ty(hir, id).map(|t| self.value_layout(t));
-        let want = want.or(own);
-        let kind = &hir.expr(id).kind;
-        if let HirKind::Make {
-            kind: MakeKind::Variant { enum_name, .. },
-            ..
-        } = kind
-            && common::is_builtin_result_enum(enum_name)
-        {
-            match (own, want) {
-                (Some(L::NicheResult), Some(L::NicheUnitResult)) => {
-                    out.insert(id.0, crate::mir::MirTy::NicheOpt);
-                }
-                (Some(L::NicheUnitResult), Some(L::NicheResult)) => {
-                    out.insert(id.0, crate::mir::MirTy::NicheRes);
-                }
-                _ => {}
-            }
-        }
-        let forwards: Vec<HirId> = match kind {
-            HirKind::Block { tail: Some(tail), .. } => vec![*tail],
-            HirKind::If { then, els: Some(els), .. } => vec![*then, *els],
-            HirKind::Match { arms, .. } => arms.iter().map(|a| a.body).collect(),
-            _ => Vec::new(),
-        };
-        // A stack array's literal init: each item into its own slot, in
-        // the element's layout.
-        let stack_init = match kind {
-            HirKind::Let { local, init: Some(init) } => Some((*local, *init)),
-            HirKind::Assign { place, value } => match hir.expr(*place).kind {
-                HirKind::Local(local) => Some((local, *value)),
-                _ => None,
-            },
-            _ => None,
-        }
-        .filter(|(local, _)| emit.plan.stacks.contains_key(&local.0));
-        for k in lower::children(hir, id) {
-            if let Some((local, init)) = stack_init
-                && k == init
-                && let HirKind::Make { args, .. } = &hir.expr(init).kind
-            {
-                let Rep::Word(elem) = self.hir_stack_rep(hir, local) else {
-                    unreachable!("stack array elements are one word")
-                };
-                for &item in args {
-                    self.hir_mir_make_niches(hir, emit, item, Some(elem), out);
-                }
-                continue;
-            }
-            let want = match kind {
-                HirKind::Return(_) => match emit.plan.ret {
-                    Rep::Word(l) => Some(l),
-                    Rep::Pair(_) => None,
-                },
-                _ if forwards.contains(&k) => want,
-                // An argument as `hir_check_value` wants it: in its
-                // parameter's layout (a `Vec` element argument at the
-                // element's niche).
-                HirKind::Call { callee, args }
-                    if !matches!(callee, Callee::Value(_))
-                        && !emit.plan.lens.contains_key(&id.0)
-                        && let Some(call) = emit.plan.calls.get(&id.0)
-                        && call.builtin.is_none()
-                        && let Some(i) = args.iter().position(|&a| a == k)
-                        && i < call.params.len() =>
-                {
-                    match Self::hir_arg_rep(call, i) {
-                        Rep::Word(l) => Some(l),
-                        Rep::Pair(_) => None,
-                    }
-                }
-                // A value stored by index, at the element slot's niche.
-                HirKind::Assign { place, value } if *value == k && let HirKind::Index { base, .. } = hir.expr(*place).kind => {
-                    match self.hir_index_store_rep(hir, emit, *place, base) {
-                        Some(Rep::Word(l)) => Some(l),
-                        _ => None,
-                    }
-                }
-                _ => None,
-            };
-            self.hir_mir_make_niches(hir, emit, k, want, out);
         }
     }
 
@@ -1276,13 +1170,6 @@ impl Compiler {
                     {
                         t.niche_args.insert(arg.0, layout);
                     }
-                }
-            }
-            for (&arg, &param) in args.iter().zip(&call.params) {
-                if param == ValueLayout::NicheUnitResult
-                    && self.hir_natural(hir, emit, arg) == Some(Rep::Word(ValueLayout::NicheResult))
-                {
-                    t.unit_result_args.insert(arg.0);
                 }
             }
             let adapt = self.hir_mir_adapters(hir, call.generic.as_deref(), args);

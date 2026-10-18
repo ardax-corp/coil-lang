@@ -602,8 +602,12 @@ pub fn is_result_ty(ty: &Ty) -> bool {
     }
 }
 
-/// Build the `(T1, T2, ..., Tn)` heterogeneous tuple type.
+/// Build the `(T1, T2, ..., Tn)` heterogeneous tuple type. The empty
+/// tuple `()` is the `unit` type: one type, one layout.
 pub fn tuple(tys: Vec<Ty>) -> Ty {
+    if tys.is_empty() {
+        return unit();
+    }
     Ty::Tuple(tys)
 }
 
