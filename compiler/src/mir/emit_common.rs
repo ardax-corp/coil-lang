@@ -1,6 +1,7 @@
-//! Helpers shared by the dense ([`super::emit`]) and LIR
-//! ([`super::emit_lir`]) emitters. One copy here, so a fix lands in both
-//! tiers.
+//! Helpers shared by the dense (`emit.rs`) and LIR (`emit_lir.rs`)
+//! emitters, the dense call convoy plan and saxpy packs. One copy here,
+//! so a fix lands in every tier. Tier-specific pieces (register moves,
+//! the `Br` condition, last-arm unpack) stay in each emitter.
 
 use common::{DebugLoc, Instruction};
 
