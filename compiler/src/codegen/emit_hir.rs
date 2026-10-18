@@ -562,7 +562,8 @@ impl Compiler {
             Ok(Some(shaped)) => shaped,
             _ => hir,
         };
-        // An operand that only lowers with nothing below it moves to a temp.
+        // An assignment or adjust used as a value splits into statements
+        // ahead of its own.
         let mut staged: Option<crate::hir::HirBody> = None;
         while let Some((_, Some(at))) = lower::refusal_at(staged.as_ref().unwrap_or(hir), &self.checker) {
             match crate::hir::stage::stage(staged.as_ref().unwrap_or(hir), at) {
@@ -4424,7 +4425,7 @@ impl Compiler {
                 let ty = Self::hir_ty(hir, arg).ok_or("callee-signature")?;
                 if specs.get(i) == Some(&'v') {
                     let ty = apply_ty_prune(self.checker.subst(), ty);
-                    // A tuple or record shows through temps at depth zero
+                    // A tuple or record shows field by field
                     // ([`lower::shows_through_temps`]).
                     if !crate::hir::layout::ty_is_closed(&ty) && self.hir_bound_show(hir, arg).is_none() && !self.hir_generic_show(&ty) {
                         return Err("format-show");
