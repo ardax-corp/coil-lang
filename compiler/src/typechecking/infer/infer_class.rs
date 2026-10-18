@@ -1124,7 +1124,7 @@ impl Checker {
                     } else {
                         Scheme::poly(all_vars, all_constraints.clone(), fun_ty.clone())
                     };
-                    // Env lookup feeds `emit_call_site_dicts` at method CALL.
+                    // Env lookup feeds `plan_call_site_dicts` at method CALL.
                     self.env.insert_top(fqn.clone(), scheme.clone());
                     if !all_constraints.is_empty() {
                         let dict_n = all_constraints.len();

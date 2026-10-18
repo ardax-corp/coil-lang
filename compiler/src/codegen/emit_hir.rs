@@ -4970,14 +4970,14 @@ impl Compiler {
                 forwarded += 1;
             }
         }
-        let mut dicts = CodeBuf::new();
-        let n = self.emit_call_site_dicts(&mut dicts, &generic.lookup, &generic.arg_tys, Some(&generic.ret_ty));
+        let mut dicts = Vec::new();
+        let n = self.plan_call_site_dicts(&mut dicts, &generic.lookup, &generic.arg_tys, Some(&generic.ret_ty));
         debug_assert!(
             !generic.forwarded.is_empty() || n == generic.dicts,
             "planned dictionaries for `{}`",
             generic.lookup
         );
-        self.append_dicts_interned(dicts);
+        self.append_dicts_interned(&dicts);
         (forwarded + n) as u32
     }
 

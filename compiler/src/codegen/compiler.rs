@@ -2088,11 +2088,11 @@ impl Compiler {
         }
         let mut arity = n;
         if self.instance_call_takes_dict(&src.class, &src.method, &req.src) {
-            let mut dict = CodeBuf::new();
-            if self.emit_instance_dict(&mut dict, &src.class, &req.lookup) {
+            let mut dict = Vec::new();
+            if self.plan_instance_dict(&mut dict, &src.class, &req.lookup) {
                 arity += 1;
             }
-            self.append_dicts_interned(dict);
+            self.append_dicts_interned(&dict);
         }
         if !self.emit_named_entry_on_module(&req.src, arity, crate::il::EntryKind::Call) {
             self.missing_call_target(&req.src, 0..0);
@@ -2747,7 +2747,7 @@ impl Compiler {
 
     /// Structurally bind scheme pattern variables to concrete call-site types.
     ///
-    /// Used by [`emit_call_site_dicts`] so `F<A>` against `Option<int>` records
+    /// Used by `plan_call_site_dicts` so `F<A>` against `Option<int>` records
     /// both `F = Option` and `A = int` (Phase 5).
     pub(crate) fn bind_scheme_vars(
         pattern: &Ty,
@@ -3001,20 +3001,6 @@ impl Compiler {
         } else {
             self.fn_entry_labels.get(name).map(|&label| DictStep::CodeLabel(label))
         }
-    }
-
-    fn emit_instance_dict(&mut self, bytecode: &mut CodeBuf, class: &str, lookup: &[Ty]) -> bool {
-        let mut steps = Vec::new();
-        let r = self.plan_instance_dict(&mut steps, class, lookup);
-        Self::emit_dict_steps(bytecode, &steps);
-        r
-    }
-
-    fn emit_call_site_dicts(&mut self, bytecode: &mut CodeBuf, fn_name: &str, arg_tys: &[Ty], ret_ty: Option<&Ty>) -> usize {
-        let mut steps = Vec::new();
-        let r = self.plan_call_site_dicts(&mut steps, fn_name, arg_tys, ret_ty);
-        Self::emit_dict_steps(bytecode, &steps);
-        r
     }
 
     /// Emit dictionary plan `steps` into `dest`.

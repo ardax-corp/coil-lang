@@ -17,9 +17,10 @@ It is built lazily because worker VMs start with zeroed statics.
 
 - MIR bodies: `intern_dict_ops` (`codegen/emit_hir_mir.rs`) replaces each
   maximal ground `Tuple` subtree with `HirDictOp::Interned`.
-- IL thunks: `append_dicts_interned` builds the same pattern in a fragment
-  `CodeBuf` and `append`s it, so its `CodePtr`s are rewritten to entries;
-  `push_op_of` keeps root-entry marks when copying ops.
+- IL thunks: `append_dicts_interned` emits the same pattern from the
+  dictionary plan into a fragment `CodeBuf` and `append`s it, so its
+  `CodePtr`s are rewritten to entries; a reserved entry is emitted as a
+  root entry, which `append` keeps.
 - These statics need no setup, so `prologue_jmp_target` does not count them.
 
 Test: `perf_metrics::ground_dictionary_is_built_once`.
