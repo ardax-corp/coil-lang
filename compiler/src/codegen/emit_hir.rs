@@ -2753,11 +2753,6 @@ impl Compiler {
             }
         }
         self.plan_hir_local_layouts(hir, &mut emit)?;
-        // Calls above stack-array boxes do not stage, so a `format` that
-        // shows through temps could run above live operands.
-        if !emit.plan.box_at.is_empty() && hir.exprs.iter().any(|e| lower::shows_through_temps(hir, &self.checker, e)) {
-            return Err("format-show");
-        }
         let defers = hir.exprs.iter().any(|e| matches!(e.kind, HirKind::Defer { .. }));
         let tail = |value: HirId| {
             emit.plan.calls.get(&value.0).is_some_and(|call| {
@@ -4501,8 +4496,7 @@ impl Compiler {
                 let ty = Self::hir_ty(hir, arg).ok_or("callee-signature")?;
                 if specs.get(i) == Some(&'v') {
                     let ty = apply_ty_prune(self.checker.subst(), ty);
-                    // A tuple or record shows field by field
-                    // ([`lower::shows_through_temps`]).
+                    // A tuple or record shows field by field.
                     if !crate::hir::layout::ty_is_closed(&ty) && self.hir_bound_show(hir, arg).is_none() && !self.hir_generic_show(&ty) {
                         return Err("format-show");
                     }
