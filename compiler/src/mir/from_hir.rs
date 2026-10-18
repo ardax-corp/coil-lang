@@ -1745,20 +1745,12 @@ impl Lower<'_> {
     /// A niche `Option` / `Result` word boxed to its `ObjEnum`, as HIR
     /// emission's `emit_niche_option_to_boxed` and siblings.
     fn box_niche(&mut self, layout: ValueLayout, w: ValueId) -> Result<ValueId, Refusal> {
-        self.box_niche_as(layout, w, false)
-    }
-
-    /// [`Self::box_niche`]; with `unit_ok`, a `Result<unit, E>` whose `Ok`
-    /// boxes with the `0` payload a unit-`Result` niche boxes with, whatever
-    /// niche its word is in (#1193).
-    fn box_niche_as(&mut self, layout: ValueLayout, w: ValueId, unit_ok: bool) -> Result<ValueId, Refusal> {
         if !matches!(self.b.value_ty(w), MirTy::NicheOpt | MirTy::NicheRes) {
             return Err("boxed niche return".into());
         }
         // A word made from a known variant boxes as that variant.
         if let Some(&(second, payload)) = self.known_niche.get(&w) {
             let payload = match payload {
-                Some(_) if unit_ok && !second => Some(self.b.ins_const(MirConst::I64(0)).map_err(mir)?),
                 Some(p) => Some(self.fit(p, MirTy::HeapRef)?),
                 None if layout == ValueLayout::NicheUnitResult && !second => Some(self.b.ins_const(MirConst::I64(0)).map_err(mir)?),
                 None => None,
@@ -1784,7 +1776,6 @@ impl Lower<'_> {
         let first = match layout {
             ValueLayout::NicheOption => self.make_enum(0, None)?,
             ValueLayout::NicheUnitResult => self.make_enum(0, Some(zero))?,
-            _ if unit_ok => self.make_enum(0, Some(zero))?,
             _ => {
                 let p = self.b.ins_cast(MirCastKind::Word, MirTy::HeapRef, w).map_err(mir)?;
                 self.make_enum(0, Some(p))?
@@ -4502,19 +4493,9 @@ impl Lower<'_> {
         }
         // Niche `Option` / `Result` words compare as HIR emission pushes
         // them: each boxed to its `ObjEnum`, then the VM's structural `EQ`.
-        // Each word boxes by its own layout: a `Result<unit, E>` call
-        // result is a unit-`Result` niche, a literal `Result::Ok(())` a
-        // `Result` one (#1193).
-        let niche = |t: MirTy| matches!(t, MirTy::NicheOpt | MirTy::NicheRes);
-        if niche(lt) && niche(rt) && matches!(sym, "==" | "!=") {
-            let unit_ok = |this: &Self, id: HirId| {
-                this.expr_ty(id)
-                    .and_then(|t| crate::typechecking::ty::result_ok_err(strip_readonly(t)))
-                    .is_some_and(|(ok, _)| matches!(ok, Ty::Con(ref n) if n == crate::typechecking::ty::UNIT) || matches!(ok, Ty::Tuple(ref t) if t.is_empty()))
-            };
-            let (lu, ru) = (unit_ok(self, lhs), unit_ok(self, rhs));
-            let l = self.box_niche_as(self.niche_layout(lhs, lt)?, l, lu)?;
-            let r = self.box_niche_as(self.niche_layout(rhs, rt)?, r, ru)?;
+        if lt == rt && matches!(lt, MirTy::NicheOpt | MirTy::NicheRes) && matches!(sym, "==" | "!=") {
+            let l = self.box_niche(self.niche_layout(lhs, lt)?, l)?;
+            let r = self.box_niche(self.niche_layout(rhs, rt)?, r)?;
             return Ok(Val::V(self.b.ins_str_eq(l, r, sym == "!=").map_err(mir)?));
         }
         // A `bool`-backed scalar enum's words compare as their `0` / `1`.
