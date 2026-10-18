@@ -341,6 +341,11 @@ pub enum Builtin {
     /// `TagArrayKind kind` of an array word, which it leaves (compiler-made
     /// bodies only: the stamped `Vec` constructors).
     TagArrayKind { kind: u8 },
+    /// The same `Option` / `Result` value in its node type's layout, from
+    /// its operand type's (compiler-made bodies only: a thunk between a
+    /// dictionary's boxed enum and a method's niche word). A niche word
+    /// boxes to its enum object; an enum object becomes its niche word.
+    Relayout,
 }
 
 #[derive(Debug, Clone, PartialEq)]

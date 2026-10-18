@@ -2769,6 +2769,14 @@ impl Checker {
                 let pruned = apply_ty_prune(&self.subst, &t);
                 match pruned {
                     Ty::Con(name) if name == "bool" || name == "int" => boolean(),
+                    // Not known yet (a call to a `fn` checked later, or to a
+                    // `... xs` function typed per call shape): `!` makes it a
+                    // `bool`, as `if` does (#1429, #1435). A type parameter
+                    // stands for any type, so it stays an error.
+                    Ty::Var(v) if !self.is_type_param_var(v) => {
+                        self.unify(&t, &boolean(), &e.0.into_range(), "operand of `!`");
+                        boolean()
+                    }
                     _ => {
                         let _ = self.error_with_help(
                             ErrorCode::GenericTypeError,
