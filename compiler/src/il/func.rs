@@ -19,9 +19,6 @@ pub struct IlFunc {
     /// Stack height at body entry (args + `self` + dict slots). SP analysis for
     /// per-func opts must start here — locals and the operand stack share memory.
     pub entry_sp: u32,
-    /// Non-escaping unboxed class field ranges `(base, n)` from the
-    /// local_escape sidecar (I3). Empty when the body has no such locals.
-    pub unboxed_fields: Vec<(u32, u32)>,
     /// Keep the body as emitted: no per-body opts, no dense / LIR tier. A
     /// `defer` cleanup pad reads frame slots by number and is reached only
     /// by the VM unwinder, so no pass may renumber slots or relabel it.
@@ -57,7 +54,6 @@ impl IlFunc {
             code_start,
             code_end,
             entry_sp,
-            unboxed_fields: Vec::new(),
             pinned: false,
             hir_mir: None,
             hir_mir_why: None,

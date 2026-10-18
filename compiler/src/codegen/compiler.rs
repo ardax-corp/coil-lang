@@ -950,21 +950,6 @@ impl Compiler {
             .map(|(_, _, kind)| kind.as_str())
     }
 
-    /// Snapshot local_escape unbox ranges onto the last recorded `IlFunc` (I3).
-    fn record_unboxed_class_fields(&mut self) {
-        if self.context.unboxed_class_locals.is_empty() {
-            return;
-        }
-        let fields: Vec<(u32, u32)> = self
-            .context
-            .unboxed_class_locals
-            .iter()
-            .filter(|(name, _)| !self.context.unboxed_class_box.contains_key(*name))
-            .map(|(_, (base, n, _))| (*base, *n as u32))
-            .collect();
-        self.bytecode.set_last_func_unboxed_fields(fields);
-    }
-
     fn alloc_unboxed_enum_slots(&mut self, name: &str, enum_name: &str) -> (u32, u32) {
         let payload = self.alloc_binding_slot(name);
         let tag_name = format!("__unbox_tag_{name}");
@@ -3465,7 +3450,6 @@ impl Compiler {
             self.bytecode
                 .record_func_with_sp(worker_name, entry, body_start, body_end, 0);
             self.attach_hir_mir();
-            self.record_unboxed_class_fields();
             self.flush_hir_par_tail();
         } else {
             self.functions.remove(&worker_name);
@@ -4358,7 +4342,6 @@ impl Compiler {
         self.bytecode
             .record_func_with_sp(name.to_string(), entry, body_start, body_end, entry_sp);
         self.attach_hir_mir();
-        self.record_unboxed_class_fields();
         self.current_function_table_key = prev_key;
         self.context.variables = prev_vars;
     }
@@ -4910,7 +4893,6 @@ impl Compiler {
         if pinned {
             self.bytecode.set_last_func_pinned();
         }
-        self.record_unboxed_class_fields();
         self.flush_hir_par_tail();
 
         self.compiling_result_mode = prev_result_mode;
@@ -6270,7 +6252,6 @@ impl Compiler {
         self.bytecode
             .record_func_with_sp("main".to_string(), entry, body_start, body_end, 0);
         self.attach_hir_mir();
-        self.record_unboxed_class_fields();
         self.flush_hir_par_tail();
         self.current_function_table_key = prev_fn_table_key;
         self.context.variables = prev_vars;
@@ -6611,7 +6592,6 @@ impl Compiler {
             if pinned {
                 self.bytecode.set_last_func_pinned();
             }
-            self.record_unboxed_class_fields();
             self.flush_hir_par_tail();
             self.context.variables = prev_fn_vars;
             self.context.stack_array_locals = prev_stack_arrays;
@@ -7220,7 +7200,6 @@ impl Compiler {
                 if pinned {
                     self.bytecode.set_last_func_pinned();
                 }
-                self.record_unboxed_class_fields();
                 self.flush_hir_par_tail();
 
                 self.compiling_result_mode = prev_result_mode;
