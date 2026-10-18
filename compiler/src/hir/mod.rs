@@ -309,8 +309,6 @@ pub enum MakeKind {
     Tuple,
     /// `[a, b]`.
     Array,
-    /// List literal.
-    List,
     Record(Vec<String>),
     Range { inclusive: bool },
 }

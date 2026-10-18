@@ -262,7 +262,6 @@ impl Printer<'_> {
                     MakeKind::Class(name) => format!("make class {name}"),
                     MakeKind::Tuple => "make tuple".to_string(),
                     MakeKind::Array => "make array".to_string(),
-                    MakeKind::List => "make list".to_string(),
                     MakeKind::Record(names) => format!("make record {{{}}}", names.join(", ")),
                     MakeKind::Range { inclusive } => {
                         format!("make range{}", if inclusive { " inclusive" } else { "" })

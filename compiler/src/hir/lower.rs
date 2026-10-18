@@ -3358,7 +3358,6 @@ fn kind_name(kind: &HirKind) -> &'static str {
         HirKind::Make { kind, .. } => match kind {
             MakeKind::Range { .. } => "make-range",
             MakeKind::Record(_) => "make-record",
-            MakeKind::List => "make-list",
             MakeKind::Tuple => "make-unit",
             _ => "make",
         },
