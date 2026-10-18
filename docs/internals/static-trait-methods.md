@@ -45,7 +45,7 @@ Runnable example: `examples/static_trait_method.hy`. Tests: `tests/traits/static
 - **Concrete `Owner::m(args)`:** the discharged instance is in `call_site_dicts`; `emit_trait_static_call` emits the arguments (boxed / layout-converted per `trait_method_boundary_sig`, staged when an operand may clobber the operand stack) and a direct `CALL` to the instance FQN, plus the instance dictionary only when the target is the trait's default body.
 - **`T::m(args)` in a shared body:** dictionary slot, `Index`, `CallIndirect` with the trailing dictionary (no receiver).
 - **`T::m(args)` in a mono clone:** `mono_type_param_tys` maps `T` to its concrete type, so the clone calls that instance directly. The argument-typed lookup cannot see a return-only `T`.
-- **Generic function returning `T`:** `emit_call_site_dicts` binds scheme variables from the call's result type; `bind_scheme_vars` also matches `Result<T, E>` / `Option<T>` sums structurally.
+- **Generic function returning `T`:** `plan_call_site_dicts` binds scheme variables from the call's result type; `bind_scheme_vars` also matches `Result<T, E>` / `Option<T>` sums structurally.
 - A `Construct`-shaped static call is a call, not a variant: `ctor_unbox_ty`, `expr_is_construct_of`, `expr_may_clobber_operand_stack` check `tag_for` first.
 
 ## Library

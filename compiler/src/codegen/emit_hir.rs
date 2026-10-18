@@ -4958,14 +4958,14 @@ impl Compiler {
                 forwarded += 1;
             }
         }
-        let mut dicts = CodeBuf::new();
-        let n = self.emit_call_site_dicts(&mut dicts, &generic.lookup, &generic.arg_tys, Some(&generic.ret_ty));
+        let mut dicts = Vec::new();
+        let n = self.plan_call_site_dicts(&mut dicts, &generic.lookup, &generic.arg_tys, Some(&generic.ret_ty));
         debug_assert!(
             !generic.forwarded.is_empty() || n == generic.dicts,
             "planned dictionaries for `{}`",
             generic.lookup
         );
-        self.append_dicts_interned(dicts);
+        self.append_dicts_interned(&dicts);
         (forwarded + n) as u32
     }
 
@@ -6919,7 +6919,6 @@ impl Compiler {
         if pinned {
             self.bytecode.set_last_func_pinned();
         }
-        self.record_unboxed_class_fields();
         self.hir_mir_ctx = prev_ctx;
         self.hir_mir_unbox = prev_unbox;
         self.field_key_slots = prev_keys;
@@ -7298,7 +7297,6 @@ impl Compiler {
         self.hir_mir = self.hir_lower_mir(w, &mut emit, None);
         self.bytecode.record_func_with_sp(name.clone(), Some(label), entry, self.bytecode.len(), arity);
         self.attach_hir_mir();
-        self.record_unboxed_class_fields();
         self.par_frame_exit(frame);
         // A parallel loop inside the worker moved out of it too.
         if !emit.par_tail.is_empty() {

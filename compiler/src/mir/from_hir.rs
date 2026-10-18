@@ -115,9 +115,9 @@ pub struct HirBoundCall {
     pub method: u32,
 }
 
-/// One step of building instance dictionaries, as HIR emission pushes
-/// them (`emit_instance_dict`): a stack program whose words left are the
-/// dictionaries.
+/// One step of building instance dictionaries, as codegen plans them
+/// (`DictStep`, `plan_instance_dict`): a stack program whose words left
+/// are the dictionaries.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum HirDictOp {
     /// `CodePtr` of a method's entry.
@@ -493,7 +493,7 @@ pub struct HirMirInput<'a> {
     /// parameter: boxed to their enum object, by argument.
     pub niche_args: &'a HashMap<u32, ValueLayout>,
     /// HIR emission packs some value of the body as a bare-class
-    /// existential (`emit_existential_pack_recipe`) that `packs` has no
+    /// existential (`plan_existential_pack`) that `packs` has no
     /// program for.
     pub existential_packs: bool,
     /// Values HIR emission packs as a bare-class existential, by

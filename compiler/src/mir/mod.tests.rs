@@ -4770,7 +4770,8 @@ bb0:
     let f = parse_func(text).expect(text);
     f.verify().unwrap();
     let labels = super::specialize::BodyLabels { first: Some(Label(0)), head: vec![Label(0)] };
-    let lir = super::fuse_fallback(&labels, "show", &[], &f).expect("LIR takes an argless format body");
+    let draft = super::fuse_fallback(&labels, "show", &[], &f);
+    let lir = draft.ops().expect("LIR takes an argless format body");
     assert!(lir.iter().any(|op| matches!(op, IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::FORMAT)));
 }
 
@@ -4791,6 +4792,40 @@ bb0:
     let f = parse_func(text).expect(text);
     f.verify().unwrap();
     let labels = super::specialize::BodyLabels { first: Some(Label(0)), head: vec![Label(0)] };
-    let lir = super::fuse_fallback(&labels, "add", &[], &f).expect("LIR takes a boxed fused body");
+    let draft = super::fuse_fallback(&labels, "add", &[], &f);
+    let lir = draft.ops().expect("LIR takes a boxed fused body");
     assert_eq!(lir.iter().filter(|op| matches!(op, IlOp::BoxValue { .. })).count(), 2);
+}
+
+/// The LIR tier reuses the dense gates' LIR of a body (N10): against a pool
+/// that grew since, it gives the ops and pool a fresh lowering would.
+#[test]
+fn lir_reuse_matches_fresh_lowering() {
+    let text = "func @k(v0: i64) -> i64 {
+bb0:
+    v1 = iconst.i64 -7
+    v2 = iadd v0, v1
+    v3 = iconst.i64 -9
+    v4 = iadd v2, v3
+    return v4
+}";
+    let f = parse_func(text).expect(text);
+    f.verify().unwrap();
+    let labels = super::specialize::BodyLabels { first: Some(Label(0)), head: vec![Label(0)] };
+    // Other bodies interned 42 and then -9 after the draft: the draft's -9
+    // (its pool index 1) must move to index 2.
+    let grown = vec![1u64, 42, (-9i64) as u64];
+    let draft = super::fuse_fallback(&labels, "k", &grown[..1], &f);
+    assert!(draft.ops().is_some(), "LIR takes the body");
+    let mut fresh_pool = grown.clone();
+    let mut fresh_side = super::BodySidecar::default();
+    let fresh = super::lower_abi_body_reusing(None, &labels, "k", &mut fresh_pool, Some(&f), &mut fresh_side);
+    let mut kept_pool = grown;
+    let mut kept_side = super::BodySidecar::default();
+    let kept = super::lower_abi_body_reusing(Some(draft), &labels, "k", &mut kept_pool, Some(&f), &mut kept_side);
+    assert!(kept == fresh, "reused LIR differs from a fresh lowering");
+    assert_eq!(kept_pool, fresh_pool);
+    assert_eq!(kept_pool, vec![1, 42, (-9i64) as u64]);
+    let kept = kept.expect("LIR takes the body");
+    assert!(kept.iter().any(|op| matches!(op, IlOp::ConstPool { idx: 2, .. })));
 }

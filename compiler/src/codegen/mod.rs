@@ -11,7 +11,7 @@ use reporting::Label as DiagLabel;
 
 use crate::block_builder::{BlockBuilder, JumpKind as BbJumpKind, Label as BbLabel};
 use crate::const_fold::ConstValue;
-use crate::il::{CodeBuf, EmitBuf, EntryKind, FuseHint, IlOp, Label as IlLabel};
+use crate::il::{CodeBuf, EmitBuf, FuseHint, IlOp, Label as IlLabel};
 use crate::monomorphize::{MonoKey, MonoPlan};
 use crate::typechecking::{Checker, Ty};
 use parser::{
@@ -233,10 +233,6 @@ struct Context {
 
     /// Frame-local / two-slot ObjEnum: name → (payload_slot, tag_slot, enum_name).
     unboxed_enum_locals: HashMap<String, (u32, u32, String)>,
-    /// Named `new C` field-SROA: name → (base_slot, nfields, class_name).
-    unboxed_class_locals: HashMap<String, (u32, usize, String)>,
-    /// First identity use of an unboxed class → heap slot (Q2 box-once).
-    unboxed_class_box: HashMap<String, u32>,
 
     prev: Option<Box<Self>>,
 }

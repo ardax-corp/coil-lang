@@ -237,8 +237,7 @@ fn specialize_side(
         .flat_map(|b| b.insts.iter())
         .filter(|i| matches!(i, crate::mir::MirInst::StoreIndex { .. }))
         .count();
-    // Heap writes and reads the source holds: the MIR the fuse IL comes
-    // from.
+    // Heap writes and reads the source holds: the MIR its LIR comes from.
     let (src_stores, src_index) = (count_mir(from_hir, is_mir_store_index), count_mir(from_hir, is_mir_index));
     if src_stores > 0 && stores_ssa == 0 {
         return refuse_dense("store index dropped in SSA");
@@ -289,8 +288,8 @@ fn specialize_side(
     // Native in-loop Make* / ArrayPush amortize prologue Seek (A2 / B6).
     // Boxed leftover reconstruct is already refused above.
     let loop_tax = facts.has_loop && !select_cfg;
-    // Both compares are against the code that runs if dense refuses: a
-    // fused body with no fuse IL from MIR has nothing to lose to.
+    // Both compares are against the code that runs if dense refuses (its
+    // LIR): a body the LIR tier refuses has nothing to lose to.
     let Some(ops) = fallback else {
         return Some((out, abi));
     };
@@ -514,17 +513,107 @@ pub fn try_lower_abi_body_side(
     lir_tail(labels, name, pool, has_alloc, func, side)
 }
 
-/// The stack ops the LIR tier would emit from a body's MIR: what runs if
-/// dense refuses it, for the dense gates to compare against. Leaves
-/// `pool`, the MIR capture and the refusal census as they were.
-pub fn fuse_fallback(labels: &BodyLabels, name: &str, pool: &[u64], func: &crate::mir::MirFunc) -> Option<Vec<IlOp>> {
-    let captured = MIR_CAPTURE.with(|c| c.borrow_mut().take());
-    let mut pool = pool.to_vec();
-    let mut side = BodySidecar::default();
-    let out = try_lower_abi_body_side(labels, name, &mut pool, Some(func), &mut side);
-    MIR_CAPTURE.with(|c| *c.borrow_mut() = captured);
+/// A body's LIR, lowered once from its MIR by [`fuse_fallback`] and kept
+/// for [`lower_abi_body_reusing`], with what that lowering left behind.
+pub struct LirDraft {
+    /// The LIR (`None`: the LIR tier refused the body).
+    out: Option<Vec<IlOp>>,
+    /// Length of the pool it was lowered against.
+    base: usize,
+    /// The constants it added to that pool, in the order it added them.
+    added: Vec<u64>,
+    side: BodySidecar,
+    /// Its MIR capture (`None`: not capturing).
+    captured: Option<CapturedMir>,
+    refusal: Option<String>,
+}
+
+impl LirDraft {
+    /// The stack ops the LIR tier would emit: what runs if dense refuses
+    /// the body, for the dense gates to compare against.
+    pub fn ops(&self) -> Option<&[IlOp]> {
+        self.out.as_deref()
+    }
+}
+
+/// Lower a body's MIR to LIR against a copy of `pool`: what runs if dense
+/// refuses it. Leaves `pool` and the MIR capture as they were and the
+/// refusal census empty; [`lower_abi_body_reusing`] keeps the result.
+pub fn fuse_fallback(labels: &BodyLabels, name: &str, pool: &[u64], func: &crate::mir::MirFunc) -> LirDraft {
+    let outer = MIR_CAPTURE.with(|c| {
+        let mut c = c.borrow_mut();
+        let outer = c.take();
+        if outer.is_some() {
+            *c = Some(Vec::new());
+        }
+        outer
+    });
     LIR_REFUSAL.with(|c| c.borrow_mut().take());
-    out
+    let mut grown = pool.to_vec();
+    let mut side = BodySidecar::default();
+    let out = try_lower_abi_body_side(labels, name, &mut grown, Some(func), &mut side);
+    let captured = MIR_CAPTURE.with(|c| std::mem::replace(&mut *c.borrow_mut(), outer));
+    let refusal = LIR_REFUSAL.with(|c| c.borrow_mut().take());
+    LirDraft {
+        out,
+        base: pool.len(),
+        added: grown.split_off(pool.len()),
+        side,
+        captured,
+        refusal,
+    }
+}
+
+/// [`try_lower_abi_body_side`] of the body `draft` was lowered from,
+/// against `pool`, reusing `draft` instead of lowering again. The module
+/// pool only grows (every writer interns), so `pool` still starts with the
+/// pool the draft saw: a constant found there keeps its index, and
+/// interning the constants it added, in order, gives each the index a
+/// fresh lowering would and grows `pool` the same way. Lowers afresh
+/// when there is no draft (or the pool could overflow an index).
+pub fn lower_abi_body_reusing(
+    draft: Option<LirDraft>,
+    labels: &BodyLabels,
+    name: &str,
+    pool: &mut Vec<u64>,
+    from_hir: Option<&crate::mir::MirFunc>,
+    side: &mut BodySidecar,
+) -> Option<Vec<IlOp>> {
+    let fits = |d: &LirDraft| pool.len() >= d.base && u32::try_from(pool.len() + d.added.len()).is_ok();
+    let Some(draft) = draft.filter(fits) else {
+        return try_lower_abi_body_side(labels, name, pool, from_hir, side);
+    };
+    let at: Vec<u32> = draft
+        .added
+        .iter()
+        .map(|&bits| {
+            let i = pool.iter().position(|&x| x == bits).unwrap_or_else(|| {
+                pool.push(bits);
+                pool.len() - 1
+            });
+            i as u32
+        })
+        .collect();
+    if let Some(list) = draft.captured {
+        MIR_CAPTURE.with(|c| {
+            if let Some(capture) = c.borrow_mut().as_mut() {
+                capture.extend(list);
+            }
+        });
+    }
+    if let Some(why) = draft.refusal {
+        LIR_REFUSAL.with(|c| *c.borrow_mut() = Some(why));
+    }
+    *side = draft.side;
+    let mut out = draft.out?;
+    for op in &mut out {
+        if let IlOp::ConstPool { idx, .. } = op
+            && let Some(k) = (*idx as usize).checked_sub(draft.base)
+        {
+            *idx = at[k];
+        }
+    }
+    Some(out)
 }
 
 /// Emit the LIR tier's stack IL from `func`.

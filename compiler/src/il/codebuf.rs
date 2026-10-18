@@ -282,15 +282,6 @@ impl CodeBuf {
     /// Emit an `Entry` to `label`, a label of the (root) buffer this one will
     /// be appended into. Unlike a local label it survives [`Self::append`],
     /// so a forward CALL can stay in its expression's buffer (in order).
-    /// Push `src`'s op at raw index `i`, keeping it a root entry (a
-    /// label `append` does not remap) when it is one there.
-    pub fn push_op_of(&mut self, src: &CodeBuf, i: usize) {
-        if src.root_entries.contains(&i) {
-            self.root_entries.push(self.il.ops().len());
-        }
-        self.push_op(src.il.ops()[i].clone());
-    }
-
     pub fn emit_root_entry(
         &mut self,
         kind: super::EntryKind,
@@ -336,13 +327,6 @@ impl CodeBuf {
         self.funcs.push(IlFunc::with_entry_sp(
             name, entry, code_start, code_end, entry_sp,
         ));
-    }
-
-    /// Attach I3 unboxed class field ranges to the last recorded function.
-    pub fn set_last_func_unboxed_fields(&mut self, fields: Vec<(u32, u32)>) {
-        if let Some(f) = self.funcs.last_mut() {
-            f.unboxed_fields = fields;
-        }
     }
 
     /// Attach the MIR lowered from HIR to the last recorded function.
