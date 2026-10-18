@@ -4829,3 +4829,48 @@ bb0:
     let kept = kept.expect("LIR takes the body");
     assert!(kept.iter().any(|op| matches!(op, IlOp::ConstPool { idx: 2, .. })));
 }
+
+/// A `()` parameter holds the empty tuple object: its entry slot is a
+/// must-pointer in the precise frame map, as a tuple's `()` item is a
+/// pointer word (#1465).
+#[test]
+fn unit_param_slot_is_a_must_pointer() {
+    let src = r#"
+use string::format;
+fn shows(unit u) -> bool {
+    return format("%v", u) == "()";
+}
+fn keep(unit u, int n) -> bool {
+    let s = format("%i", n);
+    return shows(u) && len(s) > 0;
+}
+fn main() {
+    let _ = keep((), 3);
+}
+"#;
+    let mut p = crate::Pipeline::new();
+    p.bind_workspace_language_roots();
+    p.set_hir_inline(false);
+    let (bc, constants) = p.compile_src(src).expect("compile unit param");
+    let symbols = p.program_debug().fn_symbols;
+    let keep = symbols.iter().position(|s| s.name == "keep").expect("keep symbol");
+    let start = symbols[keep].entry_pc;
+    let row = p
+        .precise_frames()
+        .iter()
+        .find(|m| m.entry_pc == start)
+        .expect("keep has a precise frame map");
+    let param: Vec<u16> = row
+        .at_pc
+        .iter()
+        .flat_map(|s| s.slots.iter().copied())
+        .filter(|&s| common::precise_slot_index(s) == 0)
+        .collect();
+    assert!(!param.is_empty(), "the unit parameter is live across the allocation: {row:?}");
+    assert!(
+        param.iter().all(|&s| common::precise_slot_must(s)),
+        "the unit parameter slot is a must-pointer: {row:?}"
+    );
+    let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+    vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+}
