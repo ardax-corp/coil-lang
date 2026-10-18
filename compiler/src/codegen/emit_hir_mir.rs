@@ -1248,14 +1248,18 @@ impl Compiler {
         }
         let tail = emit.plan.tail_calls.contains(&id.0);
         let coro = !tail && self.coroutine_fns.contains(&call.key);
-        self.raw_instance_call = false;
+        // A compiler-made body's call as it planned it: the dictionaries
+        // it passes, and a raw method's own entry.
+        let synth = self.hir_synth_calls.is_some().then(|| self.hir_synth_callees.get(&call.key).cloned()).flatten();
+        self.raw_instance_call = synth.as_ref().is_some_and(|s| s.raw);
         let target = self.named_entry_target(&call.key, true);
         // A shared generic's call is plain, its dictionaries built as
         // `hir_push_dicts` builds them (none forwarded through a slot).
-        let dicts = match call.generic.as_deref() {
-            None => Some(Vec::new()),
-            Some(g) if self.hir_generic_boxing(hir, emit, args, &call.params) => self.hir_mir_dict_ops(g),
-            Some(_) => None,
+        let dicts = match (call.generic.as_deref(), synth) {
+            (None, Some(synth)) => self.hir_mir_dict_program(&synth.dicts),
+            (None, None) => Some(Vec::new()),
+            (Some(g), _) if self.hir_generic_boxing(hir, emit, args, &call.params) => self.hir_mir_dict_ops(g),
+            (Some(_), _) => None,
         };
         // Bare type parameter arguments boxed and result unboxed, as
         // `emit_box_if_needed` / `emit_unbox_if_needed` tag them.

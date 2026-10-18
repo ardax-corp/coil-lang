@@ -587,6 +587,9 @@ pub struct Compiler {
     /// worker itself), with their parameter and result layouts.
     /// `None` for any other body.
     hir_synth_calls: Option<HashMap<String, (Vec<crate::typechecking::value_layout::ValueLayout>, crate::typechecking::value_layout::ValueLayout)>>,
+    /// While a compiler-made body lowers: how it calls a callee past its
+    /// arguments, by name.
+    hir_synth_callees: HashMap<String, compiler::SynthCallee>,
     /// Counted loops whose iterations are independent arms, by loop span.
     loop_par_sites: crate::typechecking::LoopParSites,
     /// Chunk workers emitted so far, for `__coil_par_loop_*` naming.
@@ -803,6 +806,7 @@ impl Default for Compiler {
             par_shapes: HashMap::new(),
             par_workers: HashSet::new(),
             hir_synth_calls: None,
+            hir_synth_callees: HashMap::new(),
             loop_par_sites: crate::typechecking::LoopParSites::new(),
             loop_par_helpers: 0,
             loop_par_forks: 0,

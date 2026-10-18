@@ -47,6 +47,15 @@ enum OpenDictGoal {
     Concrete(Vec<Ty>),
 }
 
+/// A call a compiler-made body ([`crate::hir::synth`]) makes, past its
+/// arguments: the dictionaries it passes after them, and whether it calls
+/// a raw instance method's own entry rather than its `$dict` adapter.
+#[derive(Clone, Default)]
+pub(super) struct SynthCallee {
+    pub dicts: Vec<DictStep>,
+    pub raw: bool,
+}
+
 /// One step of building trait dictionaries, a stack program over words:
 /// the plan `Compiler::plan_instance_dict` and its callers make. Direct MIR
 /// runs it as a [`crate::mir::HirDictOp`] program
@@ -2057,32 +2066,56 @@ impl Compiler {
     /// A clone that is not compiled from its method: the arguments as they
     /// came, the instance's dictionary, then the shared entry.
     fn emit_instance_clone_thunk(&mut self, src: &InstCloneSrc, req: &InstClone) {
-        self.bind_function_entry(req.name.clone());
-        self.emit_instance_clone_call_shared(src, req);
-    }
-
-    /// The body of [`Self::emit_instance_clone_thunk`] after its entry.
-    fn emit_instance_clone_call_shared(&mut self, src: &InstCloneSrc, req: &InstClone) {
         if src.method_of.is_some() {
+            self.bind_function_entry(req.name.clone());
             self.emit_method_clone_call_shared(&req.name);
             return;
         }
-        let n = self.instance_method_unbox_tys(&src.class, &src.method, &req.lookup).len() as u32;
-        for slot in 0..n {
-            self.bytecode.push_load(slot);
-        }
-        let mut arity = n;
+        self.emit_instance_clone_call_shared(src, req);
+    }
+
+    /// [`Self::emit_instance_clone_thunk`] of a trait instance's method,
+    /// built as HIR: each argument read in the shared method's own types
+    /// (its type variables' words moved as they are), passed to it with the
+    /// instance's dictionary, its result returned as it comes.
+    fn emit_instance_clone_call_shared(&mut self, src: &InstCloneSrc, req: &InstClone) {
+        use crate::hir::LocalKind;
+        use crate::hir::synth::Synth;
+        let n = self.instance_method_unbox_tys(&src.class, &src.method, &req.lookup).len();
+        // A default body has no signature of its own: the trait's, over
+        // its type variables.
+        let (params, ret) = match (self.checker.fn_param_tys(&req.src), self.checker.fn_return_ty(&req.src)) {
+            (Some(params), Some(ret)) => (params, ret),
+            _ => match self.checker.typeclass_method_scheme(&src.class, &src.method) {
+                Some(scheme) => Self::fun_param_and_ret_tys(&scheme.ty),
+                None => {
+                    self.bind_function_entry(req.name.clone());
+                    self.missing_call_target(&req.src, 0..0);
+                    return;
+                }
+            },
+        };
+        debug_assert_eq!(params.len(), n, "instance clone `{}` arity", req.name);
+        let mut dict = Vec::new();
         if self.instance_call_takes_dict(&src.class, &src.method, &req.src) {
-            let mut dict = Vec::new();
-            if self.plan_instance_dict(&mut dict, &src.class, &req.lookup) {
-                arity += 1;
-            }
-            self.append_dicts_interned(&dict);
+            self.plan_instance_dict(&mut dict, &src.class, &req.lookup);
         }
-        if !self.emit_named_entry_on_module(&req.src, arity, crate::il::EntryKind::Call) {
-            self.missing_call_target(&req.src, 0..0);
-        }
-        self.bytecode.push_return();
+        let layouts = params.iter().map(|t| self.value_layout(t)).collect();
+        let calls = HashMap::from([(req.src.clone(), (layouts, self.value_layout(&ret)))]);
+        let mut b = Synth::new(&self.checker, &req.name, ret.clone());
+        // A generic body's words: a type variable's moves as it is.
+        b.body.is_generic = params.iter().chain([&ret]).any(Self::ty_has_var);
+        let locals: Vec<_> = params.iter().enumerate().map(|(i, t)| b.local(&format!("arg{i}"), t.clone(), LocalKind::Param)).collect();
+        let args = locals.into_iter().map(|l| b.read(l)).collect();
+        let call = b.call(&req.src, args, ret);
+        let ret = b.ret(call);
+        let root = b.block(vec![ret], None, crate::typechecking::ty::never());
+        let hir = b.finish(root);
+        self.hir_synth_callees.insert(req.src.clone(), SynthCallee { dicts: dict, raw: false });
+        // Its callers pass the instance's dictionary after the arguments;
+        // it builds its own.
+        self.emit_synth_fn(&req.name, &hir, calls, true);
+        self.hir_synth_callees.clear();
     }
 
     /// Dictionary entry for a concrete instance method whose trait signature
