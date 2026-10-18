@@ -6760,9 +6760,25 @@ impl Compiler {
         if [&site.begin_local, &site.end_local].into_iter().flatten().any(|n| !heads.contains_key(n)) {
             return None;
         }
+        // An iteration that never reads its index computes what every
+        // other one does: MIR LICM moves that ahead of the loop, leaving
+        // nothing to split across workers.
+        let index = bind.or_else(|| outer.get(&site.index).copied());
+        if index.is_some_and(|ix| !Self::hir_reads_index(hir, body, ix)) {
+            return None;
+        }
         // Only the number of live captures matters to the natives.
         let natives = self.par_loop_natives(site.live_captures.len())?;
         Some(HirParSiteLocals { site, outer, heads, natives })
+    }
+
+    /// Whether `id` reads local `ix` other than in its own step (`ix = ix + 1`).
+    fn hir_reads_index(hir: &HirBody, id: HirId, ix: LocalId) -> bool {
+        match &hir.expr(id).kind {
+            HirKind::Local(l) => *l == ix,
+            HirKind::Assign { place, .. } if matches!(hir.expr(*place).kind, HirKind::Local(l) if l == ix) => false,
+            _ => lower::children(hir, id).into_iter().any(|k| Self::hir_reads_index(hir, k, ix)),
+        }
     }
 
     /// Parallel loop `id` moved into its own fork-join function, emitted
