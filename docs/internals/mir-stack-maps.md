@@ -25,35 +25,21 @@ and relocate mapped slots on collect.
   refs (params, prior allocs, niche words). `GcBarrier` dest is a token,
   not a second object. IL slots that held those values are recorded when
   the builder snapshotted `current_def` (`LiveRootSet.slots`).
-- [`try_build_draft`](../../compiler/src/mir/stackmap.rs) lifts allocating
-  fuse-IL leftovers (`allow_alloc`) and encodes S2a slots per alloc site.
-  After fuse/PC assign, [`bind_drafts`](../../compiler/src/mir/stackmap.rs)
-  attaches [`FrameStackMap`](../../common/src/stack_map.rs) rows to those
-  bodies. Compile-and-run and `.hyc` / embed load (archive **minor 14+**)
-  install them on the VM via `wire_thread_program_with_maps`. Older
-  envelopes load with empty maps and stay conservative-stack GC.
-- Dense specialize / MIR→LIR **may cross alloc** when
-  [`has_real_maps`](../../compiler/src/mir/stackmap.rs) is true (S2c /
-  [COI-307](https://linear.app/ardax/issue/COI-307/s2c-specialize-lir-across-alloc-when-maps-exist)).
-  S2d ([COI-314](https://linear.app/ardax/issue/COI-314/s2d-map-backed-looping-alloc-further-alloc-opts))
-  lets **preheader** `Make*` + index loops take dense when maps exist.
-  S2e ([COI-316](https://linear.app/ardax/issue/COI-316)) drops per-residual
-  `Seek` restore after stack residuals.   S2l
-  ([COI-322](https://linear.app/ardax/issue/COI-322)) tries mapped
-  **in-loop** `Make*` dense after SROA/LICM and keeps it only when the
-  reconstruct is Make*-free inside loops (LOAD/STORE boxing still loses;
-  [s2d-inloop-make-tax.md](s2d-inloop-make-tax.md)). Compare-only leftovers
-  may take LIR. Draft lift keeps inferred param types (not forced `heapref`)
-  and snapshots the stack-IL map **before** dense replace so `DenseBin`
-  bodies still bind. Post-loop-only `return [x]` after a counted loop stays
-  fuse-IL so invert+fuse (COI-87) remains.   Unmapped allocating bodies stay
-  fuse-IL. B6 maps `ArrayPush` and lets map lift type one-word `CALL` so
-  CALL+alloc drafts bind (no silent refuse). S3b heap-index takes dense unpinned residuals; S2e leaves tell
-  at the StorePop frame high-water (prologue `Seek` only). Dense+match
-  stays I2 LIR.
+- Every allocating body's frame map is drawn from its own MIR (lowered
+  from HIR): `mir_maps_ok` checks the map is complete, and dense / LIR emit
+  across an alloc only then. After fuse/PC assign,
+  [`bind_drafts`](../../compiler/src/mir/stackmap.rs) attaches
+  [`FrameStackMap`](../../common/src/stack_map.rs) rows to those bodies.
+  Compile-and-run and `.hyc` / embed load (archive **minor 14+**) install
+  them on the VM via `wire_thread_program_with_maps`. Older envelopes load
+  with empty maps and stay conservative-stack GC. (Before M5 the drafts were
+  lifted from stack IL by `try_build_draft`, and unmapped allocating bodies
+  stayed stack-lowered; both are gone.)
+- Mapped **preheader** and **in-loop** `Make*` may take dense (S2d / S2l,
+  [s2d-inloop-make-tax.md](s2d-inloop-make-tax.md)); dense keeps such a body
+  only when it wins the cost gate against the body's LIR form.
 - The interpreter GC walks VM frames. Mapped slots are extra roots and are
-  rewritten if a live object address changes. Unmapped alloc bodies stay
-  fuse-IL + conservative stack scan. Cranelift (P5) stays parked.
+  rewritten if a live object address changes. Cranelift (P5) stays parked.
 - **Precise frames** (archive **minor 21**). A
   [`PreciseFrameMap`](../../common/src/stack_map.rs) describes a body's
   frame completely where it applies: `any_pc` (valid at every PC) or

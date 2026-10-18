@@ -33,7 +33,7 @@ source-level MIR stepping rewrite.
   `coil debug`) and `-Og` / `OptLevel::Debug` still take every body
   from its MIR. `-Og` otherwise runs only the HIR constant fold
   (no inlining, scalar replacement or unroll). Stops stay on
-  the reconstruct (fuse-IL, LIR, or dense).
+  the emitted bytecode (LIR or dense).
 
 ## Doctrine
 
