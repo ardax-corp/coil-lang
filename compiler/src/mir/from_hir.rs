@@ -2342,10 +2342,8 @@ impl Lower<'_> {
             return Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?));
         }
         // A numeric range: its typed object, start and end its fields.
-        if let Some(kind) = crate::typechecking::return_layout::two_word_range_kind(ty) {
-            use crate::typechecking::return_layout as rl;
-            let inclusive = rl::range_kind_inclusive(kind).ok_or("box pair type")?;
-            let type_id = rl::range_heap_type_id(inclusive);
+        if let Some(crate::hir::layout::PairKind::Range { inclusive }) = crate::typechecking::return_layout::two_word_range_kind(ty) {
+            let type_id = crate::typechecking::return_layout::range_heap_type_id(inclusive);
             let obj = self.b.ins_alloc(MirAllocKind::Object { type_id, nfields: 2 }, Vec::new()).map_err(mir)?;
             let obj = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?;
             self.b.ins_heap_field_store(obj, lo, None, Some(0)).map_err(mir)?;
