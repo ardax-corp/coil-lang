@@ -28,16 +28,6 @@ impl BlockBuilder {
         il.emit_jump(kind, target);
     }
 
-    pub fn emit_jump_to_hinted(
-        &mut self,
-        target: Label,
-        kind: JumpKind,
-        hint: crate::il::FuseHint,
-        il: &mut IlBuilder,
-    ) {
-        il.emit_jump_hinted(kind, target, common::DebugLoc::unknown(), hint);
-    }
-
     /// Bind `label` at the current IL position (next emitting op).
     pub fn bind_label(&mut self, label: Label, il: &mut IlBuilder) {
         il.bind_label(label);

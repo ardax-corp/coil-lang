@@ -92,13 +92,17 @@ struct HirCall {
 pub(crate) struct MethodClonePlan {
     src: String,
     lookup: Vec<Ty>,
-    /// The clone's parameter and result layouts.
+    /// The clone's parameter and result layouts, and their types.
     params: Vec<ValueLayout>,
     ret: ValueLayout,
-    /// The shared body's entry and ABI.
+    param_tys: Vec<Ty>,
+    ret_ty: Ty,
+    /// The shared body's entry and ABI, and its open types.
     shared: String,
     shared_params: Vec<ValueLayout>,
     shared_ret: ValueLayout,
+    shared_tys: Vec<Ty>,
+    shared_ret_ty: Ty,
     generic: Option<HirGeneric>,
 }
 
@@ -134,8 +138,6 @@ struct HirGeneric {
     /// Ground argument types (receiver first) and result type.
     arg_tys: Vec<Ty>,
     ret_ty: Ty,
-    /// How many dictionaries the call appends.
-    dicts: usize,
     /// The result type to `UnboxValue` (a bare type parameter result).
     unbox: Option<Ty>,
     /// Per argument: a ground closure passed where the callee takes a
@@ -2898,15 +2900,26 @@ impl Compiler {
         name: &str,
         argc: usize,
     ) -> Result<HirCall, &'static str> {
+        // A compiler-made body's call of a host native by its name.
+        if self.hir_synth_calls.is_some()
+            && self.hir_synth_callees.get(name).is_some_and(|c| c.host)
+            && let Some(id) = self.native_id(name)
+        {
+            return self.hir_builtin_abi(hir, call, HirBuiltin::Host(id));
+        }
         // A compiler-made body's call of a function the checker has no
         // signature for.
         if let Some((params, ret)) = self.hir_synth_calls.as_ref().and_then(|calls| calls.get(name)) {
             if params.len() != argc {
                 return Err("callee-arity");
             }
+            let pair = self.hir_synth_callees.get(name).and_then(|c| c.pair.clone());
+            if pair.as_deref().is_some_and(|k| !self.hir_pair_kind(k)) {
+                return Err("callee-pair");
+            }
             return Ok(HirCall {
                 key: name.to_string(),
-                pair: None,
+                pair,
                 params: params.clone(),
                 ret: *ret,
                 method: false,
@@ -3509,12 +3522,14 @@ impl Compiler {
                 && !matches!(crate::hir::layout::of_resolved(&self.checker, ty), crate::hir::layout::Layout::Pair(_))
         };
         let mut params = Vec::with_capacity(param_tys.len());
+        let mut own_tys = Vec::with_capacity(param_tys.len());
         for param in &param_tys {
             let ty = at(param);
             if !one(&ty) {
                 return None;
             }
             params.push(self.value_layout(&ty));
+            own_tys.push(ty);
         }
         let ret = at(&ret_ty);
         // A generic `Option` / `Result` result is returned in its own
@@ -3543,9 +3558,13 @@ impl Compiler {
             lookup: lookup_tys,
             params: params.clone(),
             ret: ret_layout,
+            param_tys: own_tys,
+            ret_ty: if boundary { ret_ty.clone() } else { ret },
             shared: shared.key.clone(),
             shared_params: shared.params.clone(),
             shared_ret: shared.ret,
+            shared_tys: param_tys,
+            shared_ret_ty: ret_ty,
             generic: shared.generic.as_deref().cloned(),
         });
         Some(HirCall {
@@ -3573,32 +3592,61 @@ impl Compiler {
         debug_assert_eq!(made.as_deref(), Some(key), "planned method clone `{key}`");
     }
 
-    /// The body of an inherent method clone that does not lower: its
-    /// arguments in the shared body's layouts (a bare type parameter
-    /// boxed), the call site's dictionaries, the shared call, and its result
-    /// back in the clone's layout.
-    pub(super) fn emit_method_clone_call_shared(&mut self, name: &str) {
+    /// The body of an inherent method clone that does not lower, built as
+    /// HIR: its arguments in the shared body's layouts (`Relayout`, a bare
+    /// type parameter boxed), the call site's dictionaries, the shared
+    /// call, and its result back in the clone's layout (unboxed,
+    /// `Relayout`). Its words are a generic body's: a converted one is read
+    /// in the shared body's open type, or as a plain word.
+    pub(super) fn emit_method_clone_thunk(&mut self, name: &str) {
+        use crate::hir::LocalKind;
+        use crate::hir::synth::Synth;
+        use crate::typechecking::ty::int;
         let plan = self.method_clone_plans.borrow().get(name).cloned().expect("a planned method clone");
-        for (slot, (&own, &shared)) in plan.params.iter().zip(&plan.shared_params).enumerate() {
-            self.bytecode.push_load(slot as u32);
-            if own != shared {
-                Self::emit_layout_convert(&mut self.bytecode, own, shared);
+        let tag = |ty: Option<&Ty>| ty.and_then(Self::ty_to_value_tag).map(|t| t as u32);
+        let mut dicts = Vec::new();
+        if let Some(g) = &plan.generic {
+            self.plan_call_site_dicts(&mut dicts, &g.lookup, &g.arg_tys, Some(&g.ret_ty));
+        }
+        let mut b = Synth::new(&self.checker, name, plan.ret_ty.clone());
+        let mut args = Vec::with_capacity(plan.params.len());
+        for (slot, own_ty) in plan.param_tys.iter().enumerate() {
+            let local = b.local(&format!("arg{slot}"), own_ty.clone(), LocalKind::Param);
+            let mut arg = b.read(local);
+            let boxed = tag(plan.generic.as_ref().and_then(|g| g.boxed.get(slot)?.as_ref()));
+            let shared_ty = plan.shared_tys[slot].clone();
+            if plan.params[slot] != plan.shared_params[slot] {
+                let ty = if boxed.is_some() { int() } else { shared_ty.clone() };
+                arg = b.builtin(Builtin::Relayout, vec![arg], ty);
             }
-            if let Some(Some(ty)) = plan.generic.as_ref().and_then(|g| g.boxed.get(slot)) {
-                Self::emit_box_if_needed(&mut self.bytecode, ty);
+            if let Some(tag) = boxed {
+                arg = b.builtin(Builtin::Box { tag }, vec![arg], shared_ty);
             }
+            args.push(arg);
         }
-        let dicts = plan.generic.as_ref().map_or(0, |g| self.hir_push_dicts(g));
-        if !self.emit_named_entry_on_module(&plan.shared, plan.params.len() as u32 + dicts, crate::il::EntryKind::Call) {
-            self.missing_call_target(&plan.shared, 0..0);
+        let unbox = plan.generic.as_ref().and_then(|g| g.unbox.clone());
+        let convert = plan.shared_ret != plan.ret;
+        let call_ty = match &unbox {
+            Some(_) => int(),
+            None if convert => plan.shared_ret_ty.clone(),
+            None => plan.ret_ty.clone(),
+        };
+        let mut value = b.call(&plan.shared, args, call_ty);
+        if let Some(tag) = tag(unbox.as_ref()) {
+            let ty = if convert { int() } else { plan.ret_ty.clone() };
+            value = b.builtin(Builtin::Unbox { tag }, vec![value], ty);
         }
-        if let Some(ty) = plan.generic.as_ref().and_then(|g| g.unbox.as_ref()) {
-            Self::emit_unbox_if_needed(&mut self.bytecode, ty);
+        if convert {
+            value = b.builtin(Builtin::Relayout, vec![value], plan.ret_ty.clone());
         }
-        if plan.shared_ret != plan.ret {
-            Self::emit_layout_convert(&mut self.bytecode, plan.shared_ret, plan.ret);
-        }
-        self.bytecode.push_return();
+        let ret = b.ret(value);
+        let root = b.block(vec![ret], None, crate::typechecking::ty::never());
+        let mut hir = b.finish(root);
+        hir.is_generic = true;
+        let calls = HashMap::from([(plan.shared.clone(), (plan.shared_params.clone(), plan.shared_ret))]);
+        self.hir_synth_callees.insert(plan.shared.clone(), compiler::SynthCallee { dicts, ..compiler::SynthCallee::default() });
+        self.emit_synth_fn(name, &hir, calls, true);
+        self.hir_synth_callees.clear();
     }
 
     /// The table key and ABI of `recv.method(args)` (`args[0]` is the
@@ -4832,7 +4880,6 @@ impl Compiler {
             adapt,
             arg_tys,
             ret_ty,
-            dicts: scheme.constraints.len(),
             unbox,
             forwarded,
         })
@@ -4975,27 +5022,6 @@ impl Compiler {
     /// An enum whose word is the heap object (no pointer niche).
     fn hir_boxed_enum_word(&self, ty: &Ty) -> bool {
         self.value_layout(ty) == ValueLayout::Boxed
-    }
-
-    /// Push `generic`'s dictionaries after the arguments; their count.
-    fn hir_push_dicts(&mut self, generic: &HirGeneric) -> u32 {
-        // The enclosing body's own first, then the call site's, as the AST.
-        let mut forwarded = 0;
-        for &i in &generic.forwarded {
-            if let Some(slot) = self.lookup_slot(&format!("__dict{i}")) {
-                self.bytecode.push_load(slot);
-                forwarded += 1;
-            }
-        }
-        let mut dicts = Vec::new();
-        let n = self.plan_call_site_dicts(&mut dicts, &generic.lookup, &generic.arg_tys, Some(&generic.ret_ty));
-        debug_assert!(
-            !generic.forwarded.is_empty() || n == generic.dicts,
-            "planned dictionaries for `{}`",
-            generic.lookup
-        );
-        self.append_dicts_interned(&dicts);
-        (forwarded + n) as u32
     }
 
     /// `return f(..)` may jump instead of call, under the rules
@@ -5286,7 +5312,7 @@ impl Compiler {
                 args,
             } => self.hir_natural(hir, emit, args[0]),
             HirKind::Builtin { op: Builtin::TypeOf, .. } => Some(BOXED),
-            HirKind::Builtin { op: Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::TagArrayKind { .. }, .. } => {
+            HirKind::Builtin { op: Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::TagArrayKind { .. } | Builtin::Relayout, .. } => {
                 Some(Rep::Word(Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |ty| self.value_layout(ty))))
             }
             // A value `match` (`x ?? y`) yields each arm at the layout asked
@@ -6048,7 +6074,7 @@ impl Compiler {
                 self.hir_typeof(hir, args[0]).ok_or("typeof-type")?;
             }
             HirKind::Builtin {
-                op: Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::TagArrayKind { .. },
+                op: Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::TagArrayKind { .. } | Builtin::Relayout,
                 args,
             } => self.hir_check_value(hir, emit, args[0], &BOXED)?,
             HirKind::Call { args, .. } => {

@@ -1745,8 +1745,13 @@ impl Lower<'_> {
         }
     }
 
-    /// A niche `Option` / `Result` word boxed to its `ObjEnum`, as HIR
-    /// emission's `emit_niche_option_to_boxed` and siblings.
+    /// The MIR type of a one-word value of `ty`: its [`HirMirInput::word`],
+    /// or the heap object an enum or tuple with no such word moves as.
+    fn word_or_object(&self, ty: &Ty) -> Option<MirTy> {
+        self.inp.word(ty).or_else(|| ((self.inp.boxed_view)(ty, None).is_some() || is_heap_tuple(ty)).then_some(MirTy::HeapRef))
+    }
+
+    /// A niche `Option` / `Result` word boxed to its `ObjEnum`.
     fn box_niche(&mut self, layout: ValueLayout, w: ValueId) -> Result<ValueId, Refusal> {
         if !matches!(self.b.value_ty(w), MirTy::NicheOpt | MirTy::NicheRes) {
             return Err("boxed niche return".into());
@@ -2339,8 +2344,7 @@ impl Lower<'_> {
             let obj = self.b.ins_alloc(MirAllocKind::Tuple, vec![lo, hi]).map_err(mir)?;
             return Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?));
         }
-        // A numeric range: its typed object, start and end its fields, as
-        // HIR emission's `emit_box_range_slots`.
+        // A numeric range: its typed object, start and end its fields.
         if let Some(kind) = crate::typechecking::return_layout::two_word_range_kind(ty) {
             use crate::typechecking::return_layout as rl;
             let inclusive = rl::range_kind_inclusive(kind).ok_or("box pair type")?;
@@ -2608,7 +2612,7 @@ impl Lower<'_> {
             HirKind::Builtin { op: Builtin::Readonly, args } if let [inner] = args.as_slice() => self.value(*inner),
             // A dictionary entry's argument, unboxed (compiler-made bodies).
             HirKind::Builtin { op: Builtin::Unbox { tag }, args } if let [inner] = args.as_slice() => {
-                let ty = self.expr_ty(id).and_then(|t| self.inp.word(t)).ok_or("unbox type")?;
+                let ty = self.expr_ty(id).and_then(|t| self.word_or_object(t)).ok_or("unbox type")?;
                 let Some(src) = self.word(*inner)? else {
                     return Ok(Val::Never);
                 };
@@ -2638,6 +2642,28 @@ impl Lower<'_> {
                     return Ok(Val::Never);
                 };
                 Ok(Val::V(self.b.ins_tag_array_kind(v, *kind).map_err(mir)?))
+            }
+            // An `Option` / `Result` in another layout (compiler-made
+            // bodies): a niche word boxed, or an enum object's niche word.
+            HirKind::Builtin { op: Builtin::Relayout, args } if let [inner] = args.as_slice() => {
+                let to = self.expr_ty(id).and_then(|t| self.word_or_object(t)).ok_or("relayout type")?;
+                let Some(v) = self.word(*inner)? else {
+                    return Ok(Val::Never);
+                };
+                // The enum object may be read as a plain word (`i64`).
+                match (self.b.value_ty(v), to) {
+                    (from, to) if from == to => Ok(Val::V(v)),
+                    (from @ (MirTy::NicheOpt | MirTy::NicheRes), MirTy::HeapRef | MirTy::I64) => {
+                        let layout = self.niche_layout(*inner, from)?;
+                        let obj = self.box_niche(layout, v)?;
+                        Ok(Val::V(self.fit(obj, to)?))
+                    }
+                    (MirTy::HeapRef | MirTy::I64, MirTy::NicheOpt | MirTy::NicheRes) => {
+                        let obj = self.fit(v, MirTy::HeapRef)?;
+                        self.unbox_niche(obj, to)
+                    }
+                    _ => Err("relayout".into()),
+                }
             }
             // A primitive's text (compiler-made bodies).
             HirKind::Builtin { op: Builtin::Stringify, args } if let [inner] = args.as_slice() => {
@@ -5117,8 +5143,7 @@ impl Lower<'_> {
         Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?))
     }
 
-    /// A two-word enum value boxed to one word, as HIR emission's
-    /// `emit_box_slots_to_enum`: the tag tested against each variant's but
+    /// A two-word enum value boxed to one word: the tag tested against each variant's but
     /// the last, then that variant made from the payload word.
     fn box_pair(&mut self, ty: &Ty, lo: ValueId, tag: ValueId) -> Result<Val, Refusal> {
         let (name, variants) = (self.inp.pair_variants)(ty).ok_or("box pair type")?;

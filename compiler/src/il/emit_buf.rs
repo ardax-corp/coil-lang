@@ -1,6 +1,6 @@
 //! Production emit sink: [`CodeBuf`] (and `&mut impl EmitBuf` helpers).
 
-use common::{Byte, Instruction};
+use common::Byte;
 
 use super::CodeBuf;
 
@@ -14,8 +14,6 @@ pub trait EmitBuf {
     }
 
     fn push_make_enum(&mut self, tag: u16, arity: u16);
-    fn push_box_value(&mut self, tag: u32);
-    fn push_seek(&mut self, slot: u32);
     fn push_string(&mut self, idx: u32);
 }
 
@@ -26,14 +24,6 @@ impl EmitBuf for CodeBuf {
 
     fn push_make_enum(&mut self, tag: u16, arity: u16) {
         CodeBuf::push_make_enum(self, tag, arity);
-    }
-
-    fn push_box_value(&mut self, tag: u32) {
-        CodeBuf::push_box_value(self, tag);
-    }
-
-    fn push_seek(&mut self, slot: u32) {
-        self.push(Byte::new(Instruction::Seek).with_operand_u32(slot));
     }
 
     fn push_string(&mut self, idx: u32) {
@@ -51,8 +41,6 @@ mod tests {
     fn codebuf_emit_buf_trait_lifts_used_ops() {
         let mut buf = CodeBuf::new();
         EmitBuf::push_make_enum(&mut buf, 7, 1);
-        EmitBuf::push_box_value(&mut buf, 3);
-        EmitBuf::push_seek(&mut buf, 4);
         EmitBuf::push_string(&mut buf, 11);
         let ops = buf.ops();
         assert!(matches!(
@@ -63,12 +51,7 @@ mod tests {
                 ..
             }
         ));
-        assert!(matches!(ops[1], IlOp::BoxValue { tag: 3, .. }));
-        assert!(matches!(
-            ops[2],
-            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Seek && byte.operand_u32() == 4
-        ));
-        assert!(matches!(ops[3], IlOp::String { idx: 11, .. }));
+        assert!(matches!(ops[1], IlOp::String { idx: 11, .. }));
     }
 
     #[test]
