@@ -47,6 +47,27 @@ enum OpenDictGoal {
     Concrete(Vec<Ty>),
 }
 
+/// One step of building trait dictionaries, a stack program over words:
+/// the plan `Compiler::plan_instance_dict` and its callers make. Direct MIR
+/// runs it as a [`crate::mir::HirDictOp`] program
+/// (`Compiler::hir_dict_ops`); an IL thunk emits it
+/// (`Compiler::append_dicts_interned`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum DictStep {
+    /// A method's code pointer: an entry already emitted, by offset.
+    CodeAt(u32),
+    /// A method's code pointer: a reserved entry, by label.
+    CodeLabel(crate::il::Label),
+    /// A dictionary in a `__dictN` slot of the frame.
+    Load(u32),
+    /// An unresolved `PolyFn` dictionary (`CONST 0`).
+    Null,
+    /// A tuple of the top `n` words.
+    Tuple(u32),
+    /// The top word boxed with this value tag.
+    Box(u32),
+}
+
 impl Compiler {
     /// Expose inferred state to language tooling after a module is checked.
     pub fn checker(&self) -> &crate::typechecking::Checker {
@@ -2052,11 +2073,11 @@ impl Compiler {
         }
         let mut arity = n;
         if self.instance_call_takes_dict(&src.class, &src.method, &req.src) {
-            let mut dict = CodeBuf::new();
-            if self.emit_instance_dict(&mut dict, &src.class, &req.lookup) {
+            let mut dict = Vec::new();
+            if self.plan_instance_dict(&mut dict, &src.class, &req.lookup) {
                 arity += 1;
             }
-            self.append_dicts_interned(dict);
+            self.append_dicts_interned(&dict);
         }
         if !self.emit_named_entry_on_module(&req.src, arity, crate::il::EntryKind::Call) {
             self.missing_call_target(&req.src, 0..0);
@@ -2711,7 +2732,7 @@ impl Compiler {
 
     /// Structurally bind scheme pattern variables to concrete call-site types.
     ///
-    /// Used by [`emit_call_site_dicts`] so `F<A>` against `Option<int>` records
+    /// Used by `plan_call_site_dicts` so `F<A>` against `Option<int>` records
     /// both `F = Option` and `A = int` (Phase 5).
     pub(crate) fn bind_scheme_vars(
         pattern: &Ty,
@@ -2825,16 +2846,17 @@ impl Compiler {
         }
     }
 
-    /// Emit one instance dictionary (`CodePtr`s + `MakeTuple`) for a
-    /// trait constraint whose type arguments have already been resolved
-    /// to concrete lookup types. Returns `true` when a dict was pushed.
+    /// Plan one instance dictionary (code pointers, then a tuple of them)
+    /// into `out` for a trait constraint whose type arguments have already
+    /// been resolved to concrete lookup types. Returns `true` when it
+    /// leaves a dictionary.
     ///
     /// Layout (Phase 5): subclass methods first, then each superclass’s
     /// methods in declaration order (flattened). Superclass slots are filled
     /// from the matching superclass instance for the same type arguments.
-    fn emit_instance_dict(
+    fn plan_instance_dict(
         &mut self,
-        bytecode: &mut CodeBuf,
+        out: &mut Vec<DictStep>,
         class: &str,
         lookup: &[crate::typechecking::Ty],
     ) -> bool {
@@ -2845,11 +2867,11 @@ impl Compiler {
         if open {
             match self.resolve_open_dict_goal(class, lookup) {
                 Some(OpenDictGoal::Slot(slot)) => {
-                    bytecode.push_load(slot);
+                    out.push(DictStep::Load(slot));
                     return true;
                 }
                 Some(OpenDictGoal::Concrete(tys)) => {
-                    return self.emit_instance_dict(bytecode, class, &tys);
+                    return self.plan_instance_dict(out, class, &tys);
                 }
                 // `Show<Box<T>>`: a generic instance whose context is
                 // resolved from scope below. A bare `Show<T>` has no instance.
@@ -2935,18 +2957,55 @@ impl Compiler {
                 .collect()
         };
         for name in &fqns {
-            if !self.emit_named_entry(bytecode, name, 0, crate::il::EntryKind::CodePtr) {
+            let Some(code) = self.dict_code_step(name) else {
                 self.missing_call_target(name, diag_range.clone());
                 return false;
-            }
+            };
+            out.push(code);
         }
         for (ctx_class, ctx_args) in &context {
-            if !self.emit_instance_dict(bytecode, ctx_class, ctx_args) {
+            if !self.plan_instance_dict(out, ctx_class, ctx_args) {
                 return false;
             }
         }
-        bytecode.push_make_tuple((fqns.len() + context.len()) as u32);
+        out.push(DictStep::Tuple((fqns.len() + context.len()) as u32));
         true
+    }
+
+    /// The code pointer step to method `name`, resolved as a `CodePtr`
+    /// entry is (a two-word result is refused, a raw method goes through
+    /// its adapter). `None`: no entry.
+    fn dict_code_step(&mut self, name: &str) -> Option<DictStep> {
+        if !self.deny_two_word_address_of(name, 0..0) {
+            return None;
+        }
+        let adapter = self.raw_instance_redirect(name);
+        let name = adapter.as_deref().unwrap_or(name);
+        if let Some(&offset) = self.functions.get(name) {
+            Some(DictStep::CodeAt(offset as u32))
+        } else {
+            self.fn_entry_labels.get(name).map(|&label| DictStep::CodeLabel(label))
+        }
+    }
+
+    /// Emit dictionary plan `steps` into `dest`.
+    pub(super) fn emit_dict_steps(dest: &mut CodeBuf, steps: &[DictStep]) {
+        for &step in steps {
+            Self::emit_dict_step(dest, step);
+        }
+    }
+
+    /// Emit one dictionary step into `dest` (a code pointer to a reserved
+    /// entry as a root entry, which `CodeBuf::append` keeps).
+    pub(super) fn emit_dict_step(dest: &mut CodeBuf, step: DictStep) {
+        match step {
+            DictStep::CodeAt(offset) => dest.push(Self::packed_entry_byte_ret(crate::il::EntryKind::CodePtr, 0, offset, 1)),
+            DictStep::CodeLabel(label) => dest.emit_root_entry(crate::il::EntryKind::CodePtr, 0, label, 1),
+            DictStep::Load(slot) => dest.push_load(slot),
+            DictStep::Null => dest.push_const(0),
+            DictStep::Tuple(n) => dest.push_make_tuple(n),
+            DictStep::Box(tag) => dest.push_box_value(tag),
+        }
     }
 
     /// Dictionary for an open goal: the current bounded instance method's own
@@ -3071,13 +3130,13 @@ impl Compiler {
         Some((class_def.flattened_methods(self.checker.generics()).len(), n))
     }
 
-    /// Push the trailing dictionary for a direct call to instance method
+    /// Plan the trailing dictionary for a direct call to instance method
     /// `target = (class, method, fqn)` when it takes one. A bounded instance
     /// whose context cannot be built here is a compile error, not a
     /// dictionary-less call that fails at runtime.
-    fn emit_call_instance_dict(
+    fn plan_call_instance_dict(
         &mut self,
-        bytecode: &mut CodeBuf,
+        out: &mut Vec<DictStep>,
         target: (&str, &str, &str),
         lookup: &[Ty],
         range: std::ops::Range<usize>,
@@ -3086,7 +3145,7 @@ impl Compiler {
         if !self.instance_call_takes_dict(class, method, fqn) {
             return false;
         }
-        if self.emit_instance_dict(bytecode, class, lookup) {
+        if self.plan_instance_dict(out, class, lookup) {
             return true;
         }
         if self.instance_context_len(fqn) > 0 {
@@ -3123,14 +3182,18 @@ impl Compiler {
             .map_or(0, |inst| inst.context.len())
     }
 
-    fn emit_existential_pack_recipe(
+    /// A value packed as a bare-class existential: run on the value's
+    /// word, it boxes it and pairs it with its instance's dictionary.
+    fn plan_existential_pack(
         &mut self,
-        bytecode: &mut CodeBuf,
+        out: &mut Vec<DictStep>,
         pack: &crate::typechecking::infer::ExistentialPack,
     ) {
-        Self::emit_box_if_needed(bytecode, &pack.value_ty);
-        if self.emit_instance_dict(bytecode, &pack.class, std::slice::from_ref(&pack.value_ty)) {
-            bytecode.push_make_tuple(2);
+        if let Some(tag) = Self::ty_to_value_tag(&pack.value_ty) {
+            out.push(DictStep::Box(tag as u32));
+        }
+        if self.plan_instance_dict(out, &pack.class, std::slice::from_ref(&pack.value_ty)) {
+            out.push(DictStep::Tuple(2));
         }
     }
 
@@ -3225,7 +3288,7 @@ impl Compiler {
         Some(lookup)
     }
 
-    /// Emit dictionary tuples for a non-monomorphized generic call site.
+    /// Plan dictionary tuples for a non-monomorphized generic call site.
     ///
     /// Convention: after value args, one `MakeTuple` per typeclass
     /// constraint. Compiler-provided and source-provided instances use the
@@ -3238,10 +3301,10 @@ impl Compiler {
     /// types (not `NodeId`), because the pre-walk / infer ID table can be
     /// misaligned inside function bodies.
     ///
-    /// Returns the number of dict tuples pushed (used to bump CALL arity).
-    fn emit_call_site_dicts(
+    /// Returns the number of dict tuples planned (used to bump CALL arity).
+    fn plan_call_site_dicts(
         &mut self,
-        bytecode: &mut CodeBuf,
+        out: &mut Vec<DictStep>,
         fn_name: &str,
         arg_tys: &[crate::typechecking::Ty],
         ret_ty: Option<&crate::typechecking::Ty>,
@@ -3249,15 +3312,15 @@ impl Compiler {
         let Some(scheme) = self.checker.env().lookup(fn_name).cloned() else {
             return 0;
         };
-        self.emit_dicts_for_signature(bytecode, &scheme.ty, &scheme.constraints, arg_tys, ret_ty)
+        self.plan_dicts_for_signature(out, &scheme.ty, &scheme.constraints, arg_tys, ret_ty)
     }
 
     /// The instance dictionaries for `constraints` at a call of a function
     /// typed `fun_ty` on `arg_tys` (and returning `ret_ty`): a generic's
     /// scheme, or a `forall T: Show. T -> string` parameter's body (#1188).
-    pub(crate) fn emit_dicts_for_signature(
+    fn plan_dicts_for_signature(
         &mut self,
-        bytecode: &mut CodeBuf,
+        out: &mut Vec<DictStep>,
         fun_ty: &crate::typechecking::Ty,
         constraints: &[crate::typechecking::ty::Constraint],
         arg_tys: &[crate::typechecking::Ty],
@@ -3301,14 +3364,14 @@ impl Compiler {
             else {
                 continue;
             };
-            if self.emit_instance_dict(bytecode, &constraint.class, &lookup) {
+            if self.plan_instance_dict(out, &constraint.class, &lookup) {
                 dict_count += 1;
             }
         }
         dict_count
     }
 
-    /// Phase 4: push dictionary evidence for every constraint slot when a
+    /// Phase 4: plan dictionary evidence for every constraint slot when a
     /// generic function escapes into a `PolyFn` value.
     ///
     /// Slot fill order per constraint index:
@@ -3317,11 +3380,11 @@ impl Compiler {
     /// 3. null sentinel (`CONST 0` → `None` in `MakePolyFnCapture`) when
     ///    evidence is truly unavailable (e.g. top-level `let f = show`)
     ///
-    /// Returns the dict arity (number of stack slots pushed). Caller always
+    /// Returns the dict arity (number of words planned). Caller always
     /// emits `MakePolyFnCapture` when this is non-zero.
-    fn emit_polyfn_escape_dicts(
+    fn plan_polyfn_escape_dicts(
         &mut self,
-        bytecode: &mut CodeBuf,
+        out: &mut Vec<DictStep>,
         fn_name: &str,
         escape_ty: Option<&crate::typechecking::Ty>,
     ) -> usize {
@@ -3341,7 +3404,7 @@ impl Compiler {
 
         for dict_index in 0..dict_arity {
             if let Some(slot) = self.lookup_slot(&format!("__dict{}", dict_index)) {
-                bytecode.push_load(slot);
+                out.push(DictStep::Load(slot));
                 continue;
             }
 
@@ -3349,12 +3412,12 @@ impl Compiler {
                 let constraint = s.constraints.get(dict_index)?;
                 let lookup =
                     Self::resolve_constraint_lookup(constraint, &var_to_ty, &self.checker)?;
-                self.emit_instance_dict(bytecode, &constraint.class, &lookup)
+                self.plan_instance_dict(out, &constraint.class, &lookup)
                     .then_some(())
             });
             if synthesized.is_none() {
                 // Unresolved sentinel, CallIndirect fills from app evidence.
-                bytecode.push_const(0);
+                out.push(DictStep::Null);
             }
         }
         dict_arity
