@@ -530,10 +530,6 @@ pub struct HirMirInput<'a> {
     /// Fixed array locals copied as they are bound or assigned to another
     /// local: the `vec_from_array` native, by value.
     pub array_copies: &'a HashMap<u32, u16>,
-    /// `Result` variants made at a niche word other than their own
-    /// type's, as their context wants it: `Ok(())` (typed `Result<(), E>`)
-    /// returned as a `Result<unit, E>` is its zero word.
-    pub make_niches: &'a HashMap<u32, MirTy>,
     /// Element-wise array and tuple operators, by expression.
     pub aggregates: HashMap<u32, crate::typechecking::AggregateArithInfo>,
     /// Record literals whose every field holds the word its type says:
@@ -3067,7 +3063,7 @@ impl Lower<'_> {
             HirKind::Make {
                 kind: MakeKind::Variant { variant, .. },
                 args,
-            } if let Some(niche) = self.inp.make_niches.get(&id.0).copied().or_else(|| self.expr_ty(id).and_then(|t| (self.inp.niche)(t))) => {
+            } if let Some(niche) = self.expr_ty(id).and_then(|t| (self.inp.niche)(t)) => {
                 self.make_niche(variant, args, niche)
             }
             HirKind::Make {
