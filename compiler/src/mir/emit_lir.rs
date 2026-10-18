@@ -16,7 +16,9 @@ use super::emit::{
     coalesce_latch_overwrite, emit_cond_jumps, foreign_targets, il_for_alloc, is_fallthrough,
     max_label_hint, paired_alloc_dest, restore_block_op_locs, take_label,
 };
-use super::emit_common::{is_jim_term_payload, last_arm_payloads, phi_moves};
+use super::emit_common::{
+    is_jim_term_payload, last_arm_payloads, phi_moves, stack_bin_op, stack_cmp_op,
+};
 use super::func::MirFunc;
 use super::inst::{
     BlockId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp,
@@ -1167,7 +1169,7 @@ fn emit_stored(
         } => {
             emit_bin(EmitBinArgs {
                 out,
-                op: stack_bin(*op, *ty)?,
+                op: stack_bin_op(*op, *ty)?,
                 lhs: *lhs,
                 rhs: *rhs,
                 func,
@@ -1191,7 +1193,7 @@ fn emit_stored(
             emit_stack(out, *lhs, func, plan, regs, pool, loc)?;
             emit_stack(out, *rhs, func, plan, regs, pool, loc)?;
             out.push(IlOp::Bin {
-                op: stack_cmp(*op, *ty)?,
+                op: stack_cmp_op(*op, *ty)?,
                 loc,
             });
             out.push(IlOp::StorePop {
@@ -1750,7 +1752,7 @@ fn emit_hi_after_lo(args: EmitHiAfterLoArgs<'_>) -> Result<(), LowerError> {
         out.push(IlOp::Dup { loc });
         emit_stack(out, *rhs, func, plan, regs, pool, loc)?;
         out.push(IlOp::Bin {
-            op: stack_bin(*op, *ty)?,
+            op: stack_bin_op(*op, *ty)?,
             loc,
         });
         return Ok(());
@@ -1862,7 +1864,7 @@ fn emit_stack(
             op, ty, lhs, rhs, ..
         } => emit_bin(EmitBinArgs {
             out,
-            op: stack_bin(*op, *ty)?,
+            op: stack_bin_op(*op, *ty)?,
             lhs: *lhs,
             rhs: *rhs,
             func,
@@ -1875,7 +1877,7 @@ fn emit_stack(
             op, ty, lhs, rhs, ..
         } => emit_bin(EmitBinArgs {
             out,
-            op: stack_cmp(*op, *ty)?,
+            op: stack_cmp_op(*op, *ty)?,
             lhs: *lhs,
             rhs: *rhs,
             func,
@@ -2510,7 +2512,7 @@ fn emit_br_cond(args: EmitBrCondArgs<'_>) -> Result<(), LowerError> {
         }
         return emit_bin(EmitBinArgs {
             out,
-            op: stack_cmp(*op, *ty)?,
+            op: stack_cmp_op(*op, *ty)?,
             lhs: *lhs,
             rhs: *rhs,
             func,
@@ -2587,43 +2589,4 @@ fn intern_pool(pool: &mut Vec<u64>, bits: u64) -> Result<u32, LowerError> {
     let i = pool.len();
     pool.push(bits);
     u32::try_from(i).map_err(|_| LowerError::Refused("const pool full".into()))
-}
-
-fn stack_bin(op: MirBinOp, ty: MirTy) -> Result<Instruction, LowerError> {
-    Ok(match (op, ty.is_float()) {
-        (MirBinOp::Add, false) => Instruction::ADD,
-        (MirBinOp::Add, true) => Instruction::ADDF,
-        (MirBinOp::Sub, false) => Instruction::SUB,
-        (MirBinOp::Sub, true) => Instruction::SUBF,
-        (MirBinOp::Mul, false) => Instruction::MUL,
-        (MirBinOp::Mul, true) => Instruction::MULF,
-        (MirBinOp::Div, false) => Instruction::DIV,
-        (MirBinOp::Div, true) => Instruction::DIVF,
-        (MirBinOp::Rem, false) => Instruction::MOD,
-        (MirBinOp::Rem, true) => Instruction::MODF,
-        (MirBinOp::BitAnd, _) => Instruction::BITAND,
-        (MirBinOp::BitOr, _) => Instruction::BITOR,
-        (MirBinOp::Xor, _) => Instruction::XOR,
-        (MirBinOp::Shl, _) => Instruction::SHL,
-        (MirBinOp::Shr, _) => Instruction::SHR,
-        (MirBinOp::Pow, true) => Instruction::PowF,
-        (MirBinOp::Pow, false) => Instruction::Pow,
-    })
-}
-
-fn stack_cmp(op: MirCmpOp, ty: MirTy) -> Result<Instruction, LowerError> {
-    Ok(match (op, ty.is_float()) {
-        (MirCmpOp::Lt, false) => Instruction::LE,
-        (MirCmpOp::Le, false) => Instruction::LEQ,
-        (MirCmpOp::Gt, false) => Instruction::GT,
-        (MirCmpOp::Ge, false) => Instruction::GEQ,
-        (MirCmpOp::Eq, false) => Instruction::EQ,
-        (MirCmpOp::Ne, false) => Instruction::NEQ,
-        (MirCmpOp::Lt, true) => Instruction::LEF,
-        (MirCmpOp::Le, true) => Instruction::LEQF,
-        (MirCmpOp::Gt, true) => Instruction::GTF,
-        (MirCmpOp::Ge, true) => Instruction::GEQF,
-        (MirCmpOp::Eq, true) => Instruction::EQF,
-        (MirCmpOp::Ne, true) => Instruction::NEQF,
-    })
 }

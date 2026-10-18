@@ -8,7 +8,9 @@ use crate::il::{IlJumpKind, IlOp, Label};
 
 use super::call_convoy::{is_tail_call_inst, ConvoyPlan};
 use super::destprop::sink_phi_incomings;
-use super::emit_common::{is_jim_term_payload, last_arm_payloads, phi_moves};
+use super::emit_common::{
+    is_jim_term_payload, last_arm_payloads, phi_moves, stack_bin_op, stack_cmp_op,
+};
 use super::func::MirFunc;
 use super::inst::{
     BlockId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp,
@@ -1172,23 +1174,6 @@ pub(super) fn emit_br_cond(args: EmitBrCondArgs<'_>) -> Result<(), LowerError> {
         regs,
         pool,
         loc,
-    })
-}
-
-fn stack_cmp_op(op: MirCmpOp, ty: MirTy) -> Result<Instruction, LowerError> {
-    Ok(match (op, ty.is_float()) {
-        (MirCmpOp::Lt, false) => Instruction::LE,
-        (MirCmpOp::Le, false) => Instruction::LEQ,
-        (MirCmpOp::Gt, false) => Instruction::GT,
-        (MirCmpOp::Ge, false) => Instruction::GEQ,
-        (MirCmpOp::Eq, false) => Instruction::EQ,
-        (MirCmpOp::Ne, false) => Instruction::NEQ,
-        (MirCmpOp::Lt, true) => Instruction::LEF,
-        (MirCmpOp::Le, true) => Instruction::LEQF,
-        (MirCmpOp::Gt, true) => Instruction::GTF,
-        (MirCmpOp::Ge, true) => Instruction::GEQF,
-        (MirCmpOp::Eq, true) => Instruction::EQF,
-        (MirCmpOp::Ne, true) => Instruction::NEQF,
     })
 }
 
@@ -3079,28 +3064,6 @@ fn tree_i16(func: &MirFunc, plan: &ConvoyPlan, v: ValueId) -> Option<i16> {
         _ => return None,
     };
     i16::try_from(n).ok()
-}
-
-fn stack_bin_op(op: MirBinOp, ty: MirTy) -> Result<Instruction, LowerError> {
-    Ok(match (op, ty.is_float()) {
-        (MirBinOp::Add, false) => Instruction::ADD,
-        (MirBinOp::Add, true) => Instruction::ADDF,
-        (MirBinOp::Sub, false) => Instruction::SUB,
-        (MirBinOp::Sub, true) => Instruction::SUBF,
-        (MirBinOp::Mul, false) => Instruction::MUL,
-        (MirBinOp::Mul, true) => Instruction::MULF,
-        (MirBinOp::Div, false) => Instruction::DIV,
-        (MirBinOp::Div, true) => Instruction::DIVF,
-        (MirBinOp::Rem, false) => Instruction::MOD,
-        (MirBinOp::Rem, true) => Instruction::MODF,
-        (MirBinOp::BitAnd, _) => Instruction::BITAND,
-        (MirBinOp::BitOr, _) => Instruction::BITOR,
-        (MirBinOp::Xor, _) => Instruction::XOR,
-        (MirBinOp::Shl, _) => Instruction::SHL,
-        (MirBinOp::Shr, _) => Instruction::SHR,
-        (MirBinOp::Pow, true) => Instruction::PowF,
-        (MirBinOp::Pow, false) => Instruction::Pow,
-    })
 }
 
 fn push_stack_const(
