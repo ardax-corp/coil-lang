@@ -39,3 +39,48 @@ pub(super) fn last_arm_payloads(func: &MirFunc, block: BlockId, scrutinee: Value
     }
     group
 }
+
+/// The register moves the phis of `succ` need on the edge from `pred`,
+/// sequentialized with `scratch`.
+pub(super) fn phi_moves(
+    func: &MirFunc,
+    pred: BlockId,
+    succ: BlockId,
+    regs: &[u8],
+    scratch: u8,
+) -> Vec<(u8, u8)> {
+    let mut moves = Vec::new();
+    for inst in &func.block(succ).insts {
+        let MirInst::Phi { dest, args, .. } = inst else {
+            break;
+        };
+        if let Some((_, src)) = args.iter().find(|(b, _)| *b == pred) {
+            let d = regs[dest.index()];
+            let s = regs[src.index()];
+            if d != s {
+                moves.push((d, s));
+            }
+        }
+    }
+    resolve_parallel(moves, scratch)
+}
+
+/// Sequentialize parallel copies with one scratch (cycle break).
+fn resolve_parallel(mut moves: Vec<(u8, u8)>, scratch: u8) -> Vec<(u8, u8)> {
+    let mut out = Vec::new();
+    while !moves.is_empty() {
+        if let Some(i) = moves.iter().position(|(d, _)| !moves.iter().any(|(_, s)| s == d)) {
+            out.push(moves.remove(i));
+            continue;
+        }
+        let (d0, s0) = moves.remove(0);
+        out.push((scratch, d0));
+        out.push((d0, s0));
+        for (_, s) in moves.iter_mut() {
+            if *s == d0 {
+                *s = scratch;
+            }
+        }
+    }
+    out
+}

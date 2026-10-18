@@ -16,7 +16,7 @@ use super::emit::{
     coalesce_latch_overwrite, emit_cond_jumps, foreign_targets, il_for_alloc, is_fallthrough,
     max_label_hint, paired_alloc_dest, restore_block_op_locs, take_label,
 };
-use super::emit_common::{is_jim_term_payload, last_arm_payloads};
+use super::emit_common::{is_jim_term_payload, last_arm_payloads, phi_moves};
 use super::func::MirFunc;
 use super::inst::{
     BlockId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp,
@@ -2535,48 +2535,6 @@ fn emit_phi_moves(
     for (d, s) in phi_moves(func, pred, succ, regs, scratch) {
         push_move(out, d, s, loc);
     }
-}
-
-fn phi_moves(
-    func: &MirFunc,
-    pred: BlockId,
-    succ: BlockId,
-    regs: &[u8],
-    scratch: u8,
-) -> Vec<(u8, u8)> {
-    let mut moves = Vec::new();
-    for inst in &func.block(succ).insts {
-        let MirInst::Phi { dest, args, .. } = inst else {
-            break;
-        };
-        if let Some((_, src)) = args.iter().find(|(b, _)| *b == pred) {
-            let d = regs[dest.index()];
-            let s = regs[src.index()];
-            if d != s {
-                moves.push((d, s));
-            }
-        }
-    }
-    resolve_parallel(moves, scratch)
-}
-
-fn resolve_parallel(mut moves: Vec<(u8, u8)>, scratch: u8) -> Vec<(u8, u8)> {
-    let mut out = Vec::new();
-    while !moves.is_empty() {
-        if let Some(i) = moves.iter().position(|(d, _)| !moves.iter().any(|(_, s)| s == d)) {
-            out.push(moves.remove(i));
-            continue;
-        }
-        let (d0, s0) = moves.remove(0);
-        out.push((scratch, d0));
-        out.push((d0, s0));
-        for (_, s) in moves.iter_mut() {
-            if *s == d0 {
-                *s = scratch;
-            }
-        }
-    }
-    out
 }
 
 fn push_move(out: &mut Vec<IlOp>, dest: u8, src: u8, loc: DebugLoc) {
