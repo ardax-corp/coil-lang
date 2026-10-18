@@ -46,7 +46,7 @@ mod ty;
 
 pub use abi::DenseCallMap;
 pub use builder::{MirBuilder, MirError};
-pub use cse::{cse, gvn};
+pub use cse::{cse, cse_lir, gvn};
 pub use destprop::destprop;
 #[cfg(test)]
 pub use emit_lir::emit_lir;
