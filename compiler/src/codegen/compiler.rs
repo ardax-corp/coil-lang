@@ -7665,24 +7665,34 @@ impl Compiler {
         }
 
         // Drop unused function bodies (eager builtin thunks, unreferenced user
-        // fns) before IL opts / lower. Skip when there is no `main` so snippet
-        // / unit-test compiles keep their bodies.
-        if self.functions.contains_key("main") {
-            let mut roots = vec!["main".to_string()];
-            if let Some(keep) = &self.keep_fns_in {
-                // A body nothing calls that direct MIR does not lower (a
-                // shared generic one a clone stands in for, as a derived
-                // `Eq for Box<T>`'s `ne`) stays unrooted: kept, it would
-                // be a stack-lowered body (#1192).
-                let no_mir: HashSet<&str> = self
-                    .bytecode
-                    .funcs()
-                    .iter()
-                    .filter(|f| f.hir_mir.is_none() && f.hir_mir_why.is_some())
-                    .map(|f| f.name.as_str())
-                    .collect();
-                roots.extend(self.fns_defined_in(keep).into_iter().filter(|name| !no_mir.contains(name.as_str())));
-            }
+        // fns) before IL opts / lower. Without a `main`, snippet / unit-test
+        // compiles keep their bodies, except the ones below.
+        //
+        // A body direct MIR does not lower (a shared generic one a clone
+        // stands in for, as a derived `Eq for Box<T>`'s `ne`, or one that
+        // builds a `T`-dependent payload) is never a root: kept with nothing
+        // calling it, it would be a stack-lowered body (#1192, #1424).
+        let no_mir: HashSet<String> = self
+            .bytecode
+            .funcs()
+            .iter()
+            .filter(|f| f.hir_mir.is_none() && f.hir_mir_why.is_some())
+            .map(|f| f.name.clone())
+            .collect();
+        let has_main = self.functions.contains_key("main");
+        if has_main || !no_mir.is_empty() {
+            let roots = if has_main {
+                let mut roots = vec!["main".to_string()];
+                if let Some(keep) = &self.keep_fns_in {
+                    roots.extend(self.fns_defined_in(keep).into_iter().filter(|name| !no_mir.contains(name)));
+                }
+                roots
+            } else {
+                let mut roots: Vec<String> =
+                    self.functions.keys().filter(|name| !no_mir.contains(*name)).cloned().collect();
+                roots.sort();
+                roots
+            };
             let (_dropped, shrinks) = crate::il::prune_unused_functions(
                 &mut self.bytecode,
                 crate::il::TreeshakeInput {
