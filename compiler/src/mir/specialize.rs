@@ -396,11 +396,12 @@ fn count_make_enum(ops: &[IlOp]) -> usize {
 fn count_store_index(ops: &[IlOp]) -> usize {
     ops.iter()
         .filter(|op| match op {
-            IlOp::StoreIndexPin { .. } | IlOp::StoreIndexPinUnchecked { .. } => true,
             IlOp::Byte { byte, .. } => matches!(
                 *byte.bytecode(),
                 Instruction::StoreIndex
                     | Instruction::StoreIndexUnchecked
+                    | Instruction::StoreIndexPin
+                    | Instruction::StoreIndexPinUnchecked
                     | Instruction::DenseStoreIndex
             ),
             _ => false,
@@ -411,13 +412,11 @@ fn count_store_index(ops: &[IlOp]) -> usize {
 fn count_index(ops: &[IlOp]) -> usize {
     ops.iter()
         .filter(|op| match op {
-            IlOp::Index { .. }
-            | IlOp::IndexUnchecked { .. }
-            | IlOp::IndexPin { .. }
-            | IlOp::IndexPinUnchecked { .. } => true,
+            IlOp::Index { .. } | IlOp::IndexUnchecked { .. } => true,
             IlOp::Byte { byte, .. } => matches!(
                 *byte.bytecode(),
-                Instruction::Index | Instruction::IndexUnchecked | Instruction::DenseIndex
+                Instruction::Index | Instruction::IndexUnchecked | Instruction::IndexPin
+                    | Instruction::IndexPinUnchecked | Instruction::DenseIndex
                     | Instruction::DenseIndexJmpf
             ),
             _ => false,

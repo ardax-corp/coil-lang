@@ -66,8 +66,6 @@ pub fn stack_delta(op: &IlOp) -> Option<i32> {
         IlOp::LogNot { .. } => Some(0),
         IlOp::StorePop { .. } | IlOp::Pop { .. } | IlOp::ArrayPin { .. } => Some(-1),
         IlOp::Index { .. } | IlOp::IndexUnchecked { .. } => Some(-1),
-        IlOp::IndexPin { .. } | IlOp::IndexPinUnchecked { .. } => Some(0),
-        IlOp::StoreIndexPin { .. } | IlOp::StoreIndexPinUnchecked { .. } => Some(-1),
         IlOp::MakeTuple { arity, .. } | IlOp::MakeArray { arity, .. } => Some(1 - *arity as i32),
         IlOp::MakeEnum { arity, .. } => Some(1 - *arity as i32),
         IlOp::BoxValue { .. } | IlOp::UnboxValue { .. } | IlOp::LoadField { .. } => Some(0),
