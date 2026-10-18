@@ -936,6 +936,16 @@ impl Generics {
             context: Vec::new(),
         });
 
+        // `()` equals `()` (#1450).
+        self.instances.push(InstanceDef {
+            class: "Eq".into(),
+            defined_module: PRELUDE_OPS_MODULE.into(),
+            range: 0..0,
+            args: vec![unit()],
+            method_fqns: make_fqns("Eq", "unit", &["eq", "ne"]),
+            assoc_tys: HashMap::new(),
+            context: Vec::new(),
+        });
         self.instances.push(InstanceDef {
             class: "Show".into(),
             defined_module: PRELUDE_OPS_MODULE.into(),

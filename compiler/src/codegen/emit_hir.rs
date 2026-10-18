@@ -2415,6 +2415,17 @@ impl Compiler {
                 rhs,
             } = exprs[i].kind
             {
+                // `==` / `!=` over `()` (`T = unit`) is its literal once both
+                // sides have run, as the builder folds a ground one (#1450).
+                let unit = |id: crate::hir::HirId| exprs[id.0 as usize].ty.as_ref().is_some_and(crate::hir::layout::is_unit);
+                if matches!(sym, "==" | "!=") && unit(lhs) && unit(rhs) {
+                    let value = crate::hir::HirId(exprs.len() as u32);
+                    let mut lit = crate::hir::HirExpr { kind: HirKind::Lit(crate::hir::Lit::Bool(sym == "==")), ..exprs[i].clone() };
+                    lit.node = None;
+                    exprs.push(lit);
+                    exprs[i].kind = HirKind::Block { stmts: vec![lhs, rhs], tail: Some(value) };
+                    continue;
+                }
                 let op = crate::hir::build::resolve_bin(sym, exprs[lhs.0 as usize].ty.as_ref(), exprs[rhs.0 as usize].ty.as_ref());
                 exprs[i].kind = HirKind::Bin { op, lhs, rhs };
             }
@@ -3413,6 +3424,12 @@ impl Compiler {
             let ty = at(param);
             match lower::classify(&self.checker, &ty) {
                 Some(class) if lower::is_word(class) => {}
+                // A `()` parameter (`T = unit`) takes the empty tuple
+                // object, as a plain call's (#1086, #1450).
+                Some(ValueClass::Unit) => {
+                    params.push(ValueLayout::Boxed);
+                    continue;
+                }
                 _ => return Err("callee-signature"),
             }
             params.push(self.value_layout(&ty));

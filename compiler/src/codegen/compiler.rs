@@ -3978,6 +3978,15 @@ impl Compiler {
                 self.emit_builtin_entry(&fqn, &params, boolean.clone(), None, |b, a| b.bin(op, a[0], a[1], boolean.clone()));
             }
         }
+        // `()` is always `()` (#1450): its operands, taken as the `Show`
+        // thunk takes a unit, are never read.
+        let params = [(int.clone(), tag_of(ValueTag::Unit)), (int.clone(), tag_of(ValueTag::Unit))];
+        for (method, equal) in [("eq", true), ("ne", false)] {
+            let fqn = Generics::builtin_instance_fqn("Eq", "unit", method);
+            self.emit_builtin_entry(&fqn, &params, boolean.clone(), None, |b, _| {
+                b.push(HirKind::Lit(Lit::Bool(equal)), boolean.clone())
+            });
+        }
 
         // Show thunks: accept a boxed, raw or heap-string argument at slot 0,
         // ignore the trailing dictionary, and return an ObjString via STRINGIFY.
