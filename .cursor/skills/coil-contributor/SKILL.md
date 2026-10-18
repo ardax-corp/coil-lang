@@ -9,7 +9,7 @@ description: >-
 
 # coil contributor
 
-coil is a Rust workspace: parse → HM typecheck → HIR (inlining + optimization passes) → stack IL lowering → MIR tiers / fuse-select → `.hyc` archive → VM.
+coil is a Rust workspace: parse → HM typecheck → HIR (inlining + optimization passes) → MIR for every body → dense or LIR stack ops → fuse-select → `.hyc` archive → VM.
 
 Read [AGENTS.md](AGENTS.md) for user preferences and global invariants — this skill covers **where to change code** and **verification**.
 
@@ -19,7 +19,7 @@ Read [AGENTS.md](AGENTS.md) for user preferences and global invariants — this 
 coil/
 ├── common/       # Instruction opcodes, Value, archive (ARCHIVE_VERSION)
 ├── parser/       # Pratt parser, AST
-├── compiler/     # HM typechecker, HIR (compiler/src/hir/), stack IL (compiler/src/il/), MIR, pipeline
+├── compiler/     # HM typechecker, HIR (compiler/src/hir/), MIR (compiler/src/mir/), stack-op encoding (compiler/src/il/), pipeline
 ├── machine/      # VM, heap/GC, FFI, host natives (HostInvoke)
 ├── coil-simd/    # Stable std::arch SIMD kernels (packed LA, bytes)
 ├── src/main.rs   # CLI: run, compile, test, debug, dissect
@@ -37,13 +37,13 @@ Pipeline detail: [docs/internals/pipeline.md](docs/internals/pipeline.md).
 | Syntax / grammar | `parser/` |
 | Types / diagnostics | `compiler/src/typechecking/` |
 | Optimizations | HIR passes in `compiler/src/hir/` (no IL optimization passes remain) |
-| Codegen | `compiler/src/codegen/` (`emit_hir.rs`), `compiler/src/il/` |
+| Codegen | `compiler/src/codegen/` (`emit_hir.rs` plan), `compiler/src/mir/` (`from_hir.rs`, `emit.rs`, `emit_lir.rs`), `compiler/src/il/` |
 | Opcodes / VM handlers | `common/` (Instruction), `machine/src/vm.rs` |
 | Archive format | `common/src/archive.rs` |
 | Host natives / virtual modules | `compiler/` (resolve), `machine/` (HostInvoke) |
 | CLI | `src/main.rs` |
 
-Single compilation path: HIR lowering in `compiler/src/codegen/emit_hir.rs` (the AST codegen was removed 2026-10) — no register VM.
+Single compilation path: HIR → MIR (`compiler/src/mir/from_hir.rs`, planned by `compiler/src/codegen/emit_hir.rs`) → dense or LIR. The AST codegen (2026-10) and HIR → stack-IL lowering (M5, 2026-10-15) are gone; a body MIR cannot take is an internal error.
 
 ## Hard invariants (never skip)
 
@@ -58,7 +58,7 @@ Single compilation path: HIR lowering in `compiler/src/codegen/emit_hir.rs` (the
 
 `STORE` vs deprecated `StorePop`: compiler emits `STORE` only. Match bindings skip store (value already in slot via `UNPACK`/`JUMP_IF_MATCH`) but codegen must reserve those slots in `variables` so arm-body temps cannot clobber them.
 
-Stack IL: symbolic labels until `finalize_bytecode` → single `il::lower` after concat (not per-function lower). See [reference.md](reference.md) and `docs/internals/pipeline.md`.
+Stack IL: what dense / LIR emit from MIR, with symbolic labels until `finalize_bytecode` → single `il::lower` after concat (not per-function lower). See [reference.md](reference.md) and `docs/internals/pipeline.md`.
 
 ## Verification checklist
 
@@ -86,7 +86,7 @@ rm -f out.hyc && cargo run --release -- examples/fib.hy   # expect 2178309 (defa
 1. Draft plan for large language changes (do not edit attached plan files during impl).
 2. Parser + AST if syntax changes.
 3. Typechecker — new types/constraints/diagnostics (`E####` in coil-website `src/content/docs/references/error-codes.md`).
-4. Codegen — `BlockBuilder` / `IlBuilder`; new optimizations go in HIR passes, not the stack IL.
+4. Codegen — HIR lowering to MIR (`mir/from_hir.rs`); new optimizations go in HIR or MIR passes, never on the stack IL.
 5. VM only if new opcode (rare) or runtime behavior.
 6. coil-website `src/content/docs/` (manual/references; routes `/docs/…`) + example in `examples/` or `tests/`.
 7. Bump archive **minor** for additive bytecode; bump **major** if bytecode/tag/opcode incompatible.

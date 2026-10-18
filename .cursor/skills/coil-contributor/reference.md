@@ -10,8 +10,9 @@
 | `compiler/src/codegen/` | Codegen driver (`Compiler`, `finalize_bytecode`, `do_compile`) |
 | `compiler/src/lib.rs` | Crate root: re-exports, `#[macro_use] mod codegen` |
 | `compiler/src/hir/` | HIR build, typed inliner, optimization passes (fold, cse, licm, bounds, unroll, sroa, sink_return) |
-| `compiler/src/codegen/emit_hir.rs` | HIR → stack IL lowering |
-| `compiler/src/il/` | IL ops, MIR lift, lower, fuse-select (no optimization passes) |
+| `compiler/src/codegen/emit_hir.rs` | Per-body layout / dictionary / call plan handed to MIR lowering (emits no instructions) |
+| `compiler/src/mir/` | `from_hir` (HIR → SSA for every body), MIR passes, dense emit, LIR emit (`emit_lir`) |
+| `compiler/src/il/` | IL ops, tier selection per body (`module.rs`), lower, fuse-select (no optimization passes) |
 | `compiler/src/typechecking/infer/` | HM `Checker` (`mod.rs` types + `checker.rs` impl) |
 | `parser/src/` | Pratt parser |
 | `machine/src/packed_la.rs` | LA ops via HostInvoke (no LA opcodes); uses `coil-simd` |
@@ -20,7 +21,7 @@
 ## Codegen / VM invariants
 
 - **`STORE`**: pops TOS into slot(s); `cursor = max(cursor, slot + 1)`. Match bindings skip store (`UNPACK` / `JUMP_IF_MATCH`). `StorePop` is deprecated alias — compiler never emits. Packed multi-slot `LOAD`/`STORE`: `[31:24]=n` (1..=3), three slot bytes; `n==0` → wide single slot in low 24 bits.
-- **Stack IL**: symbolic labels until `finalize_bytecode` → per-body MIR tiers + **single** `il::lower` after concat.
+- **Stack IL**: the encoding of what dense / LIR emit from MIR; symbolic labels until `finalize_bytecode` → per-body tier pick + **single** `il::lower` after concat.
 - **Type aliases**: scoped; same-frame duplicates are errors; inner may shadow outer.
 - Packed LA (`dot`/`matmul`/`Matrix`) → `HostInvoke` in `machine/src/packed_la.rs` (no LA opcodes); kernels go through `coil-simd`.
 
