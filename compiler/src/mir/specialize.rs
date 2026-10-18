@@ -200,7 +200,7 @@ fn specialize_side(
     // S2k: last-arm writes must survive; Seek size is a cost, not a cap.
     // B7 / C1: sibling / mutual TailCall and self multi-word CALL/RETURN
     // may lift (stack-arg protocol, reserved callee entry labels). N>2
-    // still refuses at infer/lower (`MAX_MODELED_RET_WORDS`).
+    // still refuses at infer/lower.
     let select_cfg = fallback.is_some_and(has_sroa_select_cfg);
     let facts = super::gates::GateFacts::of(from_hir);
     let has_alloc = facts.has_alloc;

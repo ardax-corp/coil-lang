@@ -45,11 +45,6 @@ pub fn is_alloc_inst(inst: Instruction) -> bool {
     )
 }
 
-/// IL that is an alloc / GC safepoint (I5 / Q9 R3). Unmapped bodies still refuse.
-pub fn refuses_alloc(op: &IlOp) -> bool {
-    refuse_reason(op).is_some()
-}
-
 /// Inventory label: `heap/aggregate` for Make*, `heap/alloc` for InitTyped.
 pub fn refuse_reason(op: &IlOp) -> Option<&'static str> {
     match op {
@@ -419,7 +414,7 @@ mod tests {
             }),
             Some("heap/alloc")
         );
-        assert!(!refuses_alloc(&IlOp::Const { imm: 1, loc }));
+        assert_eq!(refuse_reason(&IlOp::Const { imm: 1, loc }), None);
         assert_eq!(
             refuse_reason(&IlOp::byte(Byte::new(Instruction::ArrayPush))),
             Some("heap/grow")
@@ -434,9 +429,12 @@ mod tests {
             )),
             Some("heap/format")
         );
-        assert!(!refuses_alloc(&IlOp::byte(
-            Byte::new(Instruction::FORMAT).with_operand_u32(0)
-        )));
+        assert_eq!(
+            refuse_reason(&IlOp::byte(
+                Byte::new(Instruction::FORMAT).with_operand_u32(0)
+            )),
+            None
+        );
         assert_eq!(
             refuse_reason(&IlOp::byte(Byte::new(Instruction::STRINGIFY))),
             Some("heap/format")

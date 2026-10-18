@@ -80,13 +80,6 @@ pub fn host_spec(id: u16) -> Option<HostSpec> {
     })
 }
 
-pub fn host_spec_by_name(name: &str) -> Option<HostSpec> {
-    HOST_NATIVES
-        .iter()
-        .find(|n| n.name == name)
-        .and_then(|n| host_spec(n.id))
-}
-
 /// Type a HostInvoke for SSA (I6). W4 keeps precise float/heap specs;
 /// other natives are `i64` Value words. `None` if the id is unknown or
 /// arity is too wide for a word edge.
@@ -170,14 +163,6 @@ pub fn host_result_ok(id: u16, expected: MirTy, actual: MirTy) -> bool {
         || (packed_la(id) && matches!(actual, MirTy::I64 | MirTy::F64 | MirTy::HeapRef))
 }
 
-/// Q9 R2 string-bytes HostInvoke (`from_bytes` / `to_bytes`).
-pub fn is_i4_bytes_host(id: u16) -> bool {
-    matches!(
-        HOST_NATIVES.get(id as usize).map(|n| n.name),
-        Some("from_bytes" | "to_bytes")
-    )
-}
-
 /// S3 / Q9 R2: any I6-typed host may sit in a dense body (box at the edge).
 pub fn dense_host_ok(id: u16) -> bool {
     host_edge_spec(id).is_some()
@@ -201,18 +186,25 @@ pub fn host_edge_spec_by_name(name: &str) -> Option<HostSpec> {
         .and_then(|n| host_edge_spec(n.id))
 }
 
-/// Documented W4 set: packed LA **87–91**, frozen math **102–110**,
-/// M1 math **125–135**, `simd_axpy_reduce` **136**.
-pub fn allowlisted_host_ids() -> impl Iterator<Item = u16> {
-    (PACKED_DOT_ID..=PACKED_VEC_ARITH_ID)
-        .chain(MATH_SIN_ID..=MATH_POW_ID)
-        .chain(MATH_ATAN_ID..=MATH_TANH_ID)
-        .chain(std::iter::once(SIMD_AXPY_REDUCE_ID))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Documented W4 set: packed LA **87–91**, frozen math **102–110**,
+    /// M1 math **125–135**, `simd_axpy_reduce` **136**.
+    fn allowlisted_host_ids() -> impl Iterator<Item = u16> {
+        (PACKED_DOT_ID..=PACKED_VEC_ARITH_ID)
+            .chain(MATH_SIN_ID..=MATH_POW_ID)
+            .chain(MATH_ATAN_ID..=MATH_TANH_ID)
+            .chain(std::iter::once(SIMD_AXPY_REDUCE_ID))
+    }
+
+    fn host_spec_by_name(name: &str) -> Option<HostSpec> {
+        HOST_NATIVES
+            .iter()
+            .find(|n| n.name == name)
+            .and_then(|n| host_spec(n.id))
+    }
 
     #[test]
     fn allowlist_matches_host_natives() {
@@ -240,8 +232,6 @@ mod tests {
         let to = host_edge_spec_by_name("to_bytes").expect("to_bytes I6");
         assert!(dense_host_ok(from.id));
         assert!(dense_host_ok(to.id));
-        assert!(is_i4_bytes_host(from.id));
-        assert!(is_i4_bytes_host(to.id));
         assert!(dense_host_layout_ok(common::HOST_ENUM_LAYOUT_BOXED as u8));
         assert!(dense_host_layout_ok(
             common::HOST_ENUM_LAYOUT_RESULT_NICHE as u8
