@@ -17,8 +17,8 @@ use super::layout::MirLayout;
 ///                         Value (⊤)
 ///          /        /       |        \
 ///        I64      F64     Bool   NicheOpt / NicheRes
-///         |        |                  \   /
-///        I32      F32                HeapRef
+///                                     \   /
+///                                    HeapRef
 ///                    \
 ///                  Bottom (⊥)
 /// ```
@@ -28,9 +28,7 @@ use super::layout::MirLayout;
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum MirTy {
     Bottom,
-    I32,
     I64,
-    F32,
     F64,
     Bool,
     /// Aligned GC heap pointer (class / `string` / tuple / list / boxed enum).
@@ -47,16 +45,16 @@ impl MirTy {
     pub const TOP: Self = Self::Value;
 
     pub fn is_int(self) -> bool {
-        matches!(self, Self::I32 | Self::I64)
+        matches!(self, Self::I64)
     }
 
     pub fn is_float(self) -> bool {
-        matches!(self, Self::F32 | Self::F64)
+        matches!(self, Self::F64)
     }
 
-    /// Dense / numeric SSA lane (`i32`/`i64`/`f32`/`f64`/`bool`).
+    /// Dense / numeric SSA lane (`i64`/`f64`/`bool`).
     pub fn is_numeric(self) -> bool {
-        matches!(self, Self::I32 | Self::I64 | Self::F32 | Self::F64 | Self::Bool)
+        matches!(self, Self::I64 | Self::F64 | Self::Bool)
     }
 
     /// One-word dense / CALL lane: numeric, heap pointer, or niche word (Q8).
@@ -95,8 +93,6 @@ impl MirTy {
             return self;
         }
         match (self, other) {
-            (I32, I64) | (I64, I32) => I64,
-            (F32, F64) | (F64, F32) => F64,
             (HeapRef, HeapRef) => HeapRef,
             // An aligned heap pointer is a valid `Some` / `Ok` niche word.
             (NicheOpt, NicheOpt) | (HeapRef, NicheOpt) | (NicheOpt, HeapRef) => NicheOpt,
@@ -121,8 +117,6 @@ impl MirTy {
             return Bottom;
         }
         match (self, other) {
-            (I32, I64) | (I64, I32) => I32,
-            (F32, F64) | (F64, F32) => F32,
             (HeapRef, NicheOpt | NicheRes) | (NicheOpt | NicheRes, HeapRef) => HeapRef,
             _ => Bottom,
         }
@@ -136,9 +130,7 @@ impl MirTy {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Bottom => "bottom",
-            Self::I32 => "i32",
             Self::I64 => "i64",
-            Self::F32 => "f32",
             Self::F64 => "f64",
             Self::Bool => "bool",
             Self::HeapRef => "heapref",
@@ -151,9 +143,7 @@ impl MirTy {
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "bottom" => Self::Bottom,
-            "i32" => Self::I32,
             "i64" => Self::I64,
-            "f32" => Self::F32,
             "f64" => Self::F64,
             "bool" => Self::Bool,
             "heapref" => Self::HeapRef,
@@ -210,25 +200,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lattice_int_widens() {
-        assert_eq!(MirTy::I32.join(MirTy::I64), MirTy::I64);
-        assert_eq!(MirTy::I64.meet(MirTy::I32), MirTy::I32);
-        assert!(MirTy::I32.le(MirTy::I64));
-        assert!(!MirTy::I64.le(MirTy::I32));
-    }
-
-    #[test]
-    fn lattice_float_widens() {
-        assert_eq!(MirTy::F32.join(MirTy::F64), MirTy::F64);
-        assert_eq!(MirTy::F64.meet(MirTy::F32), MirTy::F32);
-        assert!(MirTy::F32.le(MirTy::F64));
-    }
-
-    #[test]
     fn lattice_cross_family_is_value() {
         assert_eq!(MirTy::TOP, MirTy::Value);
         assert_eq!(MirTy::I64.join(MirTy::F64), MirTy::Value);
-        assert_eq!(MirTy::I32.join(MirTy::Bool), MirTy::Value);
+        assert_eq!(MirTy::I64.join(MirTy::Bool), MirTy::Value);
         assert_eq!(MirTy::I64.meet(MirTy::F64), MirTy::Bottom);
         assert!(MirTy::I64.le(MirTy::Value));
         assert!(MirTy::Bottom.le(MirTy::Bool));

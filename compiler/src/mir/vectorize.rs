@@ -2082,10 +2082,6 @@ fn as_const_i64(func: &MirFunc, v: ValueId) -> Option<i64> {
             c: MirConst::I64(n),
             ..
         } => Some(*n),
-        MirInst::Const {
-            c: MirConst::I32(n),
-            ..
-        } => Some(i64::from(*n)),
         _ => None,
     }
 }

@@ -1,6 +1,6 @@
 //! Typed dense call/return ABI (COI-291 M1).
 //!
-//! Dense bodies keep `i32` / `i64` / `f32` / `f64` / `bool` in frame slots.
+//! Dense bodies keep `i64` / `f64` / `bool` in frame slots.
 //! A dense→dense `CALL` uses the same one-word Value layout the VM already
 //! uses at CALL/RETURN — bits are typed slots, not boxed heap objects.
 //!

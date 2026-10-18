@@ -177,7 +177,7 @@ fn specialize_side(
     side: &mut BodySidecar,
 ) -> Option<(Vec<IlOp>, DenseAbi)> {
     // Nested / multi-header numeric loops are eligible (flagship mandelbrot).
-    // Infer requires float +/−/×/÷, counted i64 +/−/×/÷/%, or i32. A
+    // Infer requires float +/−/×/÷, or counted i64 +/−/×/÷/%. A
     // back-edge or a straight-line numeric body may lift; keep/refuse is
     // the cost gate vs fuse-IL (A3). S3/S3b: one-word CALL (dense map or
     // open), I6 HostInvoke including Q9 R2 `from_bytes` / `to_bytes`, heap

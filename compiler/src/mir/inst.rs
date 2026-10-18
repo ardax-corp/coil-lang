@@ -41,10 +41,8 @@ pub struct LocalId(pub u32);
 /// Typed immediate.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum MirConst {
-    I32(i32),
     I64(i64),
     /// IEEE bits (Eq/Hash-friendly).
-    F32(u32),
     F64(u64),
     Bool(bool),
 }
@@ -52,17 +50,10 @@ pub enum MirConst {
 impl MirConst {
     pub fn ty(self) -> MirTy {
         match self {
-            Self::I32(_) => MirTy::I32,
             Self::I64(_) => MirTy::I64,
-            Self::F32(_) => MirTy::F32,
             Self::F64(_) => MirTy::F64,
             Self::Bool(_) => MirTy::Bool,
         }
-    }
-
-    #[allow(dead_code)]
-    pub fn f32(v: f32) -> Self {
-        Self::F32(v.to_bits())
     }
 
     pub fn f64(v: f64) -> Self {
@@ -73,7 +64,6 @@ impl MirConst {
     pub fn as_f64(self) -> Option<f64> {
         match self {
             Self::F64(b) => Some(f64::from_bits(b)),
-            Self::F32(b) => Some(f32::from_bits(b) as f64),
             _ => None,
         }
     }
@@ -85,9 +75,7 @@ impl std::hash::Hash for MirConst {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         std::mem::discriminant(self).hash(state);
         match *self {
-            Self::I32(v) => v.hash(state),
             Self::I64(v) => v.hash(state),
-            Self::F32(v) => v.hash(state),
             Self::F64(v) => v.hash(state),
             Self::Bool(v) => v.hash(state),
         }
@@ -227,8 +215,6 @@ pub enum MirUnaryOp {
 pub enum MirCastKind {
     /// `CastIntToFloat` — signed int to IEEE float of matching width or widen.
     IntToFloat,
-    /// `i32` → `i64`.
-    Sext,
     /// `CastFloatToInt` — `f64` → `i64`, truncating toward zero.
     FloatToInt,
     /// The same word retyped: a heap pointer or the `i64` zero (`None` /
@@ -244,7 +230,6 @@ impl MirCastKind {
     pub fn allows(self, from: MirTy, to: MirTy) -> bool {
         match self {
             Self::IntToFloat => from.is_int() && to.is_float(),
-            Self::Sext => from == MirTy::I32 && to == MirTy::I64,
             Self::FloatToInt => from == MirTy::F64 && to == MirTy::I64,
             Self::Word => {
                 let niche = |t: MirTy| matches!(t, MirTy::NicheOpt | MirTy::NicheRes);
@@ -1063,13 +1048,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn f32_const_roundtrips_through_f64_view() {
-        let c = MirConst::f32(1.5);
-        assert_eq!(c.ty(), MirTy::F32);
-        assert_eq!(c.as_f64(), Some(1.5));
+    fn f64_const_roundtrips_through_f64_view() {
         assert_eq!(MirConst::f64(-2.25).as_f64(), Some(-2.25));
         assert_eq!(MirConst::f64(-2.25).ty(), MirTy::F64);
-        assert_eq!(MirConst::I32(1).as_f64(), None);
+        assert_eq!(MirConst::I64(1).as_f64(), None);
         assert_eq!(MirConst::Bool(true).as_f64(), None);
     }
 }
