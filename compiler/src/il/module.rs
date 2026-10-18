@@ -326,8 +326,9 @@ impl IlModule {
         let labels: Vec<crate::mir::BodyLabels> =
             self.funcs.iter().map(|b| crate::mir::BodyLabels::of(&b.ops)).collect();
         // Per body, once: the LIR its MIR emits (what runs if dense
-        // refuses), `None` when the LIR tier refuses it.
-        let mut fuse_fallbacks: Vec<Option<Option<Vec<IlOp>>>> = vec![None; self.funcs.len()];
+        // refuses), `None` when it has no MIR. The LIR tier below keeps it.
+        let mut fuse_fallbacks: Vec<Option<Option<crate::mir::LirDraft>>> =
+            std::iter::repeat_with(|| None).take(self.funcs.len()).collect();
         while !pending.is_empty() {
             let mut next = Vec::new();
             let mut progressed = false;
@@ -336,10 +337,10 @@ impl IlModule {
                 let mut side = crate::mir::BodySidecar::default();
                 let fallback = fuse_fallbacks[i].get_or_insert_with(|| {
                     let func = body.meta.hir_mir.as_deref()?;
-                    crate::mir::fuse_fallback(&labels[i], &body.meta.name, pool, func)
+                    Some(crate::mir::fuse_fallback(&labels[i], &body.meta.name, pool, func))
                 });
                 if let Some((dense, abi)) = crate::mir::try_specialize_body_side(
-                    fallback.as_deref(),
+                    fallback.as_ref().and_then(crate::mir::LirDraft::ops),
                     &labels[i],
                     &body.meta.name,
                     pool,
@@ -395,7 +396,9 @@ impl IlModule {
         for i in pending.iter().copied().chain(padded.iter().copied()) {
             let body = &mut self.funcs[i];
             let mut side = crate::mir::BodySidecar::default();
-            if let Some(lir) = crate::mir::try_lower_abi_body_side(
+            // A pending body's LIR was lowered once for the dense gates.
+            if let Some(lir) = crate::mir::lower_abi_body_reusing(
+                fuse_fallbacks[i].take().flatten(),
                 &labels[i],
                 &body.meta.name,
                 pool,
