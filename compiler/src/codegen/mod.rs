@@ -369,9 +369,6 @@ pub struct Compiler {
     /// (`STRING` materialized once at entry, then `LOAD`).
     field_key_slots: HashMap<String, u32>,
 
-    /// Frame slots with a live `ArrayPin` (sidecar-proven helpers / for-in).
-    pinned_array_slots: HashSet<u32>,
-
     /// Count of expression values currently live on the operand stack
     /// *above* interned locals (e.g. a `HostInvoke` native-id `CONST`
     /// pushed before argument codegen). `alloc_temp_slot` must allocate
@@ -733,7 +730,6 @@ impl Default for Compiler {
             coroutine_fns: std::collections::HashSet::new(),
             temp_counter: 0,
             field_key_slots: HashMap::new(),
-            pinned_array_slots: HashSet::new(),
             expr_depth: 0,
             precise_frame_fns: HashSet::new(),
             precise_frames: Vec::new(),

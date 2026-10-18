@@ -933,7 +933,6 @@ impl Compiler {
             };
             self.bytecode.push_load(slot);
             self.bytecode.push_array_pin(slot);
-            self.pinned_array_slots.insert(slot);
         }
     }
 
@@ -4823,7 +4822,6 @@ impl Compiler {
         let prev_unboxed_enum = std::mem::take(&mut self.context.unboxed_enum_locals);
         let prev_unboxed_class = std::mem::take(&mut self.context.unboxed_class_locals);
         let prev_unboxed_class_box = std::mem::take(&mut self.context.unboxed_class_box);
-        let prev_pins = std::mem::take(&mut self.pinned_array_slots);
         let prev_polyfn_vars = std::mem::take(&mut self.polyfn_vars);
         let prev_polyfn_sources = std::mem::take(&mut self.polyfn_sources);
         let prev_fn_table_key = self.current_function_table_key.take();
@@ -4922,7 +4920,6 @@ impl Compiler {
         self.context.unboxed_enum_locals = prev_unboxed_enum;
         self.context.unboxed_class_locals = prev_unboxed_class;
         self.context.unboxed_class_box = prev_unboxed_class_box;
-        self.pinned_array_slots = prev_pins;
         self.polyfn_vars = prev_polyfn_vars;
         self.polyfn_sources = prev_polyfn_sources;
         self.current_function_table_key = prev_fn_table_key;
@@ -5213,7 +5210,6 @@ impl Compiler {
             let prev_result_mode = self.compiling_result_mode;
             let prev_result_ok_is_result = self.compiling_result_ok_is_result;
             let prev_mono_clone = self.compiling_mono_clone;
-            let prev_pins = std::mem::take(&mut self.pinned_array_slots);
             let prev_fn_qualified = self.current_function_qualified.take();
             let prev_fn_table_key = self.current_function_table_key.take();
             self.context.variables = Interner::default();
@@ -5282,7 +5278,6 @@ impl Compiler {
             self.compiling_mono_clone = prev_mono_clone;
             self.current_function_qualified = prev_fn_qualified;
             self.current_function_table_key = prev_fn_table_key;
-            self.pinned_array_slots = prev_pins;
             self.field_key_slots = prev_field_keys;
             self.context.variables = prev_fn_vars;
             self.polyfn_vars = prev_fn_polyfn_vars;
@@ -5829,7 +5824,6 @@ impl Compiler {
         let prev_unboxed_class_box = std::mem::take(&mut self.context.unboxed_class_box);
         let prev_polyfn_vars = std::mem::take(&mut self.polyfn_vars);
         let prev_polyfn_sources = std::mem::take(&mut self.polyfn_sources);
-        let prev_pins = std::mem::take(&mut self.pinned_array_slots);
         let prev_field_keys = std::mem::take(&mut self.field_key_slots);
         let prev_fn_qualified = self.current_function_qualified.replace(name.clone());
         let prev_fn_table_key = self.current_function_table_key.replace(name.clone());
@@ -5860,7 +5854,6 @@ impl Compiler {
         self.current_function_table_key = prev_fn_table_key;
         self.current_function_qualified = prev_fn_qualified;
         self.field_key_slots = prev_field_keys;
-        self.pinned_array_slots = prev_pins;
         self.polyfn_sources = prev_polyfn_sources;
         self.polyfn_vars = prev_polyfn_vars;
         self.context.unboxed_class_box = prev_unboxed_class_box;
@@ -6494,7 +6487,6 @@ impl Compiler {
             let prev_unboxed_class_box = std::mem::take(&mut self.context.unboxed_class_box);
             let prev_fn_polyfn_vars = std::mem::take(&mut self.polyfn_vars);
             let prev_fn_polyfn_sources = std::mem::take(&mut self.polyfn_sources);
-            let prev_pins = std::mem::take(&mut self.pinned_array_slots);
             let prev_fn_qualified = self.current_function_qualified.take();
             let prev_fn_table_key = self.current_function_table_key.take();
             let prev_fn_table_key_was_none = prev_fn_table_key.is_none();
@@ -6629,7 +6621,6 @@ impl Compiler {
             self.context.unboxed_class_box = prev_unboxed_class_box;
             self.polyfn_vars = prev_fn_polyfn_vars;
             self.polyfn_sources = prev_fn_polyfn_sources;
-            self.pinned_array_slots = prev_pins;
 
             self.emit_mono_specializations_for_function(
                 &qualified,
