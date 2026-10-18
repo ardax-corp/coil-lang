@@ -1146,7 +1146,7 @@ fn ty_has_var(ty: &Ty) -> bool {
         Ty::Fun(a, b) => ty_has_var(a) || ty_has_var(b),
         Ty::App(h, args) => ty_has_var(h) || args.iter().any(ty_has_var),
         Ty::Tuple(items) => items.iter().any(ty_has_var),
-        Ty::List(inner) | Ty::Readonly(inner) => ty_has_var(inner),
+        Ty::Readonly(inner) => ty_has_var(inner),
         Ty::Array { element, .. } => ty_has_var(element),
         Ty::Constructor { owner, .. } => ty_has_var(owner),
         _ => false,

@@ -1,40 +1,18 @@
-//! Numeric MIR: type lattice + SSA builder (P0), dense emit (P1), CSE (P2),
-//! Result/Option MIR→LIR (P3 / COI-270), LICM (P6 / COI-280),
-//! InstCombine (P7 / COI-281), DestProp (P8 / COI-282),
-//! IV strength reduction (P9 / COI-283), cross-block GVN/PRE (P10 / COI-284),
-//! conservative float peeps (P11 / COI-285), saxpy-reduce HostInvoke
-//! packs (P12 / COI-286), compiler-only `V*` SIMD (COI-310), I1 heap/niche `MirTy` names (COI-293), and
-//! I2 match / `JumpIfMatch` on niche, two-slot, and boxed-overlap payloads
-//! (COI-294 / COI-302), and
-//! I3 field load/store on non-escaping unboxed class locals (COI-295), and
-//! I4 / Q9 string / format SSA (COI-296 / COI-332) as a delivery ladder, and
-//! I5 alloc / GC-barrier edges (COI-300) with S2a live-root
-//! sidecar (COI-305) and S2b slot / frame maps (COI-306),
-//! I6 HostInvoke / CALL effect edges from the purity sidecar (COI-297), and
-//! I7 debugger / deopt boundaries on MIR edges (COI-299), and
-//! I8 broadened MIR emit entry (COI-298).
+//! MIR: typed SSA for every function body, lowered from HIR
+//! ([`lower_from_hir`]), and its two emitters: dense 3-address bytecode
+//! ([`emit`]) and LIR stack ops ([`emit_lir`]). Passes: CSE (P2), LICM
+//! (P6), InstCombine (P7) with float peeps (P11), DestProp (P8), IV
+//! strength reduction (P9), cross-block GVN/PRE (P10), saxpy-reduce
+//! HostInvoke packs (P12), compiler-only `V*` SIMD (COI-310), and SROA.
 //!
-//! Specialized numeric loops lower to dense 3-address opcodes. Leftover
-//! bodies that [`entry`] accepts lift through MIR→LIR (`RETURN` width 1 or
-//! 2). Dense / LIR `CALL` uses the one-word or two-slot typed ABI
-//! ([`abi`]; COI-291 / B3 / C1). SSA models dest + `dest_hi`; N>2 refuses
-//! at that cap (same field, extra dests later).
-//! Typed HostInvoke still boxes at the host edge. Escaping / heap-backed
-//! named class locals stay on [`crate::il`]. `FORMAT` / `STRING` /
-//! `STRINGIFY` / `PRINT` may enter MIR→LIR (I4 / Q9 R1); dense infer
-//! still refuses those table ops. `FORMAT` / `STRINGIFY` take I5-style
-//! maps (Q9 R3). `from_bytes` / `to_bytes` are I6 dense
-//! HostInvoke (Q9 R2). Allocating bodies may
-//! lower to `Alloc` + `GcBarrier` SSA with live-heap `roots`; dense / LIR
-//! emit across alloc only when S2b maps exist (S2c), including mapped
-//! preheader `Make*` (S2d), Seek-less residuals (S2e), and S2f SROA /
-//! StoreIndex-array reuse. Impure HostInvoke / CALL are SSA barriers
-//! (I6); LICM hoist uses purity bits. Debugger-attached / `-Og` still
-//! specialize (B8); explicit `Deopt` is skipped at emit. I8 entry is lift + cost gate after LIR
-//! reconstruct walls. Q6 counted `for`, Q7 one-word rec `CALL`, and Q8
-//! niche / two-slot `Br` are hygiene (lift, then cost) — not checklist
-//! refuses.
-#![cfg_attr(not(test), allow(dead_code, unused_imports))]
+//! Dense and LIR `CALL` use the one-word or two-slot typed ABI ([`abi`];
+//! COI-291 / B3 / C1). SSA models dest + `dest_hi`; N>2 return words
+//! refuse. Typed HostInvoke boxes at the host edge. Allocating bodies
+//! carry `Alloc` + `GcBarrier` with live-heap `roots` and frame maps built
+//! from the SSA ([`stackmap`]). Impure HostInvoke / CALL are SSA barriers
+//! (I6); LICM hoist uses purity bits. Debugger-attached / `-Og` builds use
+//! the same tiers; explicit `Deopt` is skipped at emit. History of each
+//! piece: `docs/internals/mir.md`.
 
 mod abi;
 mod builder;
@@ -69,20 +47,25 @@ pub use abi::DenseCallMap;
 pub use builder::{MirBuilder, MirError};
 pub use cse::{cse, gvn};
 pub use destprop::destprop;
+#[cfg(test)]
 pub use emit_lir::emit_lir;
+#[cfg(test)]
 pub use entry::LirRefuse;
 pub use from_hir::{lower_body as lower_from_hir, opaque_heap as opaque_heap_ty, scalar as scalar_mir_ty, word as word_mir_ty, HirBoundCall, HirCallSite, HirDictOp, HirFfi, HirFfiOperand, HirFnValue, HirIterLoop, HirPolyCall, HirIterNext, HirMirInput, HirOpCall, HirParBound, HirParFork, HirParIndex, HirParLoop, HirShow, ScalarLit};
-pub use func::{MirBlock, MirFunc};
+pub use func::MirFunc;
+#[cfg(test)]
+pub use func::MirBlock;
 pub use specialize::{capture_pinned_mir, start_mir_capture, take_mir_capture};
 pub use deopt::DraftDeoptMap;
 pub use stackmap::{bind_drafts, is_alloc_opcode, DraftFrameMap};
-pub use inst::{
-    BlockId, LocalId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst,
-    MirFfiOp, MirGcKind, MirInst, MirUnaryOp, Terminator, ValueId,
-};
+pub use inst::{MirAllocKind, MirBinOp, MirConst, MirFfiOp, MirInst, ValueId};
+#[cfg(test)]
+pub use inst::{BlockId, LocalId, MirCastKind, MirCmpOp, MirGcKind, MirUnaryOp, Terminator};
 pub use instcombine::instcombine;
+#[cfg(test)]
 pub use layout::MirLayout;
 pub use licm::licm;
+#[cfg(test)]
 pub use error::LowerError;
 pub use specialize::{
     fuse_fallback, take_dense_refusal, take_lir_refusal, try_lower_abi_body_side,
@@ -90,6 +73,7 @@ pub use specialize::{
 };
 pub use sroa::sroa;
 pub use strength::strength_reduce;
+#[cfg(test)]
 pub use text::{ParseError, parse_func};
 pub use ty::MirTy;
 
@@ -98,6 +82,7 @@ pub use ty::MirTy;
 /// Corresponds to the inner `while iter < max_iter` in
 /// `examples/perf/mandelbrot.hy` (`zr`/`zi`/`cr`/`ci` are `f64`, `iter` is
 /// language `int` → `i64`). No classes.
+#[cfg(test)]
 pub fn mandelbrot_inner_loop() -> Result<MirFunc, MirError> {
     let mut b = MirBuilder::new("mandel_inner");
     let zr0 = b.add_param(MirTy::F64)?;

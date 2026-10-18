@@ -4,10 +4,10 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 
 | Document | Contents |
 |----------|----------|
-| [Pipeline](pipeline.md) | Parse → typecheck → HIR (inline, optimize) → stack IL / MIR lowering → archive → execute |
+| [Pipeline](pipeline.md) | Parse → typecheck → HIR (inline, optimize) → MIR for every body → dense or LIR bytecode → archive → execute |
 | [Macros](macros.md) | User `derive` / attribute macros: `macro` model, `quote`, compile-time VM stage, hygiene, sandbox |
-| [Numeric MIR](mir.md) | COI-267/268: SSA sidecar + dense numeric bytecode (Value ABI at edges) |
-| [MIR language islands](mir-islands.md) | COI-292 I0: islands vs full-MIR rewrite; I1–I8 ladder; I8 IL→MIR entry; I4 FORMAT/string **reopened** under Q9 (delivery ladder); A/B rules |
+| [Numeric MIR](mir.md) | MIR: every body lowers from HIR to SSA; dense and LIR tiers; pass history (P1–P12, I1–I8) |
+| [MIR language islands](mir-islands.md) | Historical: COI-292 I0–I8 ladder that grew MIR coverage before every body went through MIR (M4/M5, 2026-10) |
 | [Int overflow](int-overflow.md) | Int `+ - * / % **` and negation give the exact result or panic; where the VM, folds, optimizations, auto-par, SIMD and packed kernels keep that |
 | [Language quirks](language-quirks.md) | Locked Q1–Q9 (2026-09-10): `[T; N]` box-once, class field-SROA, grow type error, defined `i % N`, panic vs raise, roadmap Q6–Q9 |
 | [Q6 iterator protocol](q6-iterator-protocol.md) | Counted desugar for `for` (array / literal range / B5 locals / C2 param+returned Range / C2b heap-field + user `Iterator::next` + dict + coro) |
@@ -15,11 +15,11 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [Static trait methods](static-trait-methods.md) | #524: `static fn` in traits, `Owner::m` / `T::m` calls, return-type-directed bound resolution, per-field `#[derive(Default)]` |
 | [Generic instances](generic-instances.md) | #550 / #551 / #552: `impl Trait for Box<T>` and `Box<T: Bound>`, instance contexts, context dictionaries, open-goal dictionary resolution, derives on generic types |
 | [Per-type clones](generic-specialization.md) | #1417 / #1419: ground dictionaries built once into statics; per-type clones of other modules' generic methods and free functions (`ModuleCtx`); allocation numbers |
-| [Opt generalization](opt-generalization.md) | COI-333 A0: MIR default + one object story + dense-native + cost gate; A4 measurement; **B0** audit + **B1** Q6–Q8 entry hygiene |
-| [Denser MIR leftovers](mir-dense-leftovers.md) | Post A0–C3 kick list (D0 `nsieve` keep; D1 class maps; D2 dense field; D3 boxed multi-payload match; Q9 `main` fuse) |
+| [Opt generalization](opt-generalization.md) | Historical: COI-333 A0: MIR default + one object story + dense-native + cost gate; A4 measurement; **B0** audit + **B1** Q6–Q8 entry hygiene |
+| [Denser MIR leftovers](mir-dense-leftovers.md) | Historical: post A0–C3 kick list (D0 `nsieve` keep; D1 class maps; D2 dense field; D3 boxed multi-payload match; Q9 `main` fuse) |
 | [MIR deopt / debugger](mir-deopt.md) | COI-299 I7: stop/deopt edges; VM debugger stays source of truth |
-| [Specialize refuse](specialize-refuse.md) | Hard walls vs Q6–Q9 ladders / cost gate; B1–B9; C1 self two-slot CALL; **S8** fusion not gated on specialize keep |
-| [IL lowering](../../compiler/src/il/opt/README.md) | No IL optimization passes remain (removed 2026-10): where each former pass went in HIR, `sp` vs `tell`, fuse-select contract |
+| [Specialize refuse](specialize-refuse.md) | Historical: hard walls vs Q6–Q9 ladders / cost gate; B1–B9; C1 self two-slot CALL; **S8** fusion not gated on specialize keep |
+| [IL lowering](../../compiler/src/il/opt/README.md) | No IL optimization passes remain (removed 2026-10): where each former pass went, `sp` vs `tell`, fuse-select contract |
 | [Limitations](limitations.md) | Known gaps, workarounds, and tracking |
 | [Optimization roadmap](optimization-roadmap.md) | AOT/JIT plan; landed opts (#304–#318); hit-bench prove rule; PGO removed (#301). Extra benches: `gc_churn`, Option/Result churn, `iv_mul_sr` / `licm_nested_chains` / `tail_sibling` / `cse_*` / `dest_prop_field_alias` |
 | [VM dispatch alignment](dispatch-alignment.md) | Why `coil` and `coil-embed` ran the same code at different speeds; `-align-loops=64` (not enabled); PGO + BOLT tried |
@@ -38,9 +38,10 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [Stack bounds](stack-bounds.md) | Operand stack sizing, run-time growth, and the optional `#[max_depth]` |
 | [Collections VM split](collections-vm-split.md) | Userland collections vs VM primitives |
 | [Debug line table](debug-info.md) | `source_files` / `debug_locs` in `.hyc` |
-| [Superinstruction candidates](superinstructions-candidates.md) | [COI-378](https://linear.app/ardax/issue/COI-378) S0: fused-op inventory, S1–S8 refine notes, extras that do not need specialize-keep |
+| [Superinstruction candidates](superinstructions-candidates.md) | Historical: [COI-378](https://linear.app/ardax/issue/COI-378) S0: fused-op inventory, S1–S8 refine notes, extras that do not need specialize-keep |
 | [Opcodes](opcodes.md) | Selected bytecode ops behind builtins |
 | [Dissect](dissect.md) | `coil dissect` — in-memory bytecode / IL / AST dump |
+| [Array pins](array-pin.md) | Array-handle pins: only the prologue `ArrayPin` is still emitted; `IndexPin*` / `StoreIndexPin*` are retired |
 | [Debugger](debugger.md) | `coil debug` — GDB-style REPL / batch debugger |
 | [Test runner](test-runner.md) | `coil test` — `coil-test` helper: discovery, `compile_fail/`, seeded order, reactor jobs (`-j`), line coverage (`--coverage`, lcov); `coil mutate` mutation testing |
 | [Formatter](fmt.md) | `coil fmt` — AST pretty-printer for `.hy` |
@@ -54,7 +55,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | Crate | Role |
 |-------|------|
 | `parser` | Pratt parser and AST |
-| `compiler` | HM typechecker, HIR (optimizations, lowering to stack IL), numeric MIR, pipeline |
+| `compiler` | HM typechecker, HIR (optimizations, layout plan), MIR (HIR → SSA, dense and LIR emit), stack-op encoding, pipeline |
 | `machine` | VM, heap/GC, FFI (libffi), host natives |
 | `common` | Opcodes, values, archive format |
 | `coil-simd` | Stable SIMD helpers (`std::arch`) for numeric / byte kernels |

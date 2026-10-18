@@ -22,9 +22,6 @@ use super::ty::MirTy;
 const F64_PLUS_ZERO: u64 = 0.0_f64.to_bits();
 const F64_PLUS_ONE: u64 = 1.0_f64.to_bits();
 const F64_PLUS_TWO: u64 = 2.0_f64.to_bits();
-const F32_PLUS_ZERO: u32 = 0.0_f32.to_bits();
-const F32_PLUS_ONE: u32 = 1.0_f32.to_bits();
-const F32_PLUS_TWO: u32 = 2.0_f32.to_bits();
 
 /// Cheap typed rewrites. Returns how many instructions were rewritten.
 pub fn instcombine(func: &mut MirFunc) -> usize {
@@ -283,12 +280,10 @@ fn finite_fold(
     }
     let plus_zero = match ty {
         MirTy::F64 => MirConst::F64(F64_PLUS_ZERO),
-        MirTy::F32 => MirConst::F32(F32_PLUS_ZERO),
         _ => return None,
     };
     let plus_one = match ty {
         MirTy::F64 => MirConst::F64(F64_PLUS_ONE),
-        MirTy::F32 => MirConst::F32(F32_PLUS_ONE),
         _ => return None,
     };
     match op {
@@ -339,7 +334,6 @@ fn strength_mul_neg1(
 fn is_minus_one(ty: MirTy, c: Option<MirConst>) -> bool {
     match (ty, c) {
         (MirTy::F64, Some(MirConst::F64(b))) => b == (-1.0_f64).to_bits(),
-        (MirTy::F32, Some(MirConst::F32(b))) => b == (-1.0_f32).to_bits(),
         _ => false,
     }
 }
@@ -360,20 +354,6 @@ fn exact_recip(c: MirConst) -> Option<MirConst> {
                 return None;
             }
             Some(MirConst::F64(r.to_bits()))
-        }
-        MirConst::F32(bits) => {
-            let x = f32::from_bits(bits);
-            if !x.is_finite() || x == 0.0 {
-                return None;
-            }
-            if bits & ((1u32 << 23) - 1) != 0 {
-                return None;
-            }
-            let r = 1.0 / x;
-            if !r.is_finite() {
-                return None;
-            }
-            Some(MirConst::F32(r.to_bits()))
         }
         _ => None,
     }
@@ -428,9 +408,6 @@ fn known_finite(func: &MirFunc, consts: &HashMap<ValueId, MirConst>) -> HashSet<
             MirConst::F64(b) if f64::from_bits(b).is_finite() => {
                 finite.insert(v);
             }
-            MirConst::F32(b) if f32::from_bits(b).is_finite() => {
-                finite.insert(v);
-            }
             _ => {}
         }
     }
@@ -473,9 +450,6 @@ fn known_nonzero(consts: &HashMap<ValueId, MirConst>) -> HashSet<ValueId> {
     for (&v, &c) in consts {
         match c {
             MirConst::F64(b) if f64::from_bits(b) != 0.0 => {
-                out.insert(v);
-            }
-            MirConst::F32(b) if f32::from_bits(b) != 0.0 => {
                 out.insert(v);
             }
             _ => {}
@@ -541,10 +515,10 @@ fn zeroing(
         return None;
     }
     match op {
-        MirBinOp::Sub if lhs == rhs => Some(int_zero(ty)),
-        MirBinOp::Mul if is_int_zero(ty, lc) || is_int_zero(ty, rc) => Some(int_zero(ty)),
-        MirBinOp::BitAnd if is_int_zero(ty, lc) || is_int_zero(ty, rc) => Some(int_zero(ty)),
-        MirBinOp::Rem if is_plus_one(ty, rc) => Some(int_zero(ty)),
+        MirBinOp::Sub if lhs == rhs => Some(MirConst::I64(0)),
+        MirBinOp::Mul if is_int_zero(ty, lc) || is_int_zero(ty, rc) => Some(MirConst::I64(0)),
+        MirBinOp::BitAnd if is_int_zero(ty, lc) || is_int_zero(ty, rc) => Some(MirConst::I64(0)),
+        MirBinOp::Rem if is_plus_one(ty, rc) => Some(MirConst::I64(0)),
         _ => None,
     }
 }
@@ -582,50 +556,34 @@ fn strength_mul2(
 
 fn is_plus_zero(ty: MirTy, c: Option<MirConst>) -> bool {
     match (ty, c) {
-        (MirTy::I32, Some(MirConst::I32(0))) | (MirTy::I64, Some(MirConst::I64(0))) => true,
+        (MirTy::I64, Some(MirConst::I64(0))) => true,
         (MirTy::F64, Some(MirConst::F64(b))) => b == F64_PLUS_ZERO,
-        (MirTy::F32, Some(MirConst::F32(b))) => b == F32_PLUS_ZERO,
         _ => false,
     }
 }
 
 fn is_plus_one(ty: MirTy, c: Option<MirConst>) -> bool {
     match (ty, c) {
-        (MirTy::I32, Some(MirConst::I32(1))) | (MirTy::I64, Some(MirConst::I64(1))) => true,
+        (MirTy::I64, Some(MirConst::I64(1))) => true,
         (MirTy::F64, Some(MirConst::F64(b))) => b == F64_PLUS_ONE,
-        (MirTy::F32, Some(MirConst::F32(b))) => b == F32_PLUS_ONE,
         _ => false,
     }
 }
 
 fn is_plus_two(ty: MirTy, c: Option<MirConst>) -> bool {
     match (ty, c) {
-        (MirTy::I32, Some(MirConst::I32(2))) | (MirTy::I64, Some(MirConst::I64(2))) => true,
+        (MirTy::I64, Some(MirConst::I64(2))) => true,
         (MirTy::F64, Some(MirConst::F64(b))) => b == F64_PLUS_TWO,
-        (MirTy::F32, Some(MirConst::F32(b))) => b == F32_PLUS_TWO,
         _ => false,
     }
 }
 
 fn is_int_zero(ty: MirTy, c: Option<MirConst>) -> bool {
-    matches!(
-        (ty, c),
-        (MirTy::I32, Some(MirConst::I32(0))) | (MirTy::I64, Some(MirConst::I64(0)))
-    )
+    matches!((ty, c), (MirTy::I64, Some(MirConst::I64(0))))
 }
 
 fn is_int_minus_one(ty: MirTy, c: Option<MirConst>) -> bool {
-    matches!(
-        (ty, c),
-        (MirTy::I32, Some(MirConst::I32(-1))) | (MirTy::I64, Some(MirConst::I64(-1)))
-    )
-}
-
-fn int_zero(ty: MirTy) -> MirConst {
-    match ty {
-        MirTy::I32 => MirConst::I32(0),
-        _ => MirConst::I64(0),
-    }
+    matches!((ty, c), (MirTy::I64, Some(MirConst::I64(-1))))
 }
 
 fn eval_bin(op: MirBinOp, ty: MirTy, a: MirConst, b: MirConst) -> Option<MirConst> {
@@ -636,23 +594,11 @@ fn eval_bin(op: MirBinOp, ty: MirTy, a: MirConst, b: MirConst) -> Option<MirCons
             };
             Some(MirConst::I64(eval_i64(op, x, y)?))
         }
-        MirTy::I32 => {
-            let (MirConst::I32(x), MirConst::I32(y)) = (a, b) else {
-                return None;
-            };
-            Some(MirConst::I32(eval_i32(op, x, y)?))
-        }
         MirTy::F64 => {
             let (MirConst::F64(x), MirConst::F64(y)) = (a, b) else {
                 return None;
             };
             Some(MirConst::F64(eval_f64(op, x, y)?))
-        }
-        MirTy::F32 => {
-            let (MirConst::F32(x), MirConst::F32(y)) = (a, b) else {
-                return None;
-            };
-            Some(MirConst::F32(eval_f32(op, x, y)?))
         }
         _ => None,
     }
@@ -677,22 +623,6 @@ fn eval_i64(op: MirBinOp, a: i64, b: i64) -> Option<i64> {
     })
 }
 
-fn eval_i32(op: MirBinOp, a: i32, b: i32) -> Option<i32> {
-    Some(match op {
-        MirBinOp::Add => a.checked_add(b)?,
-        MirBinOp::Sub => a.checked_sub(b)?,
-        MirBinOp::Mul => a.checked_mul(b)?,
-        MirBinOp::Div => a.checked_div(b)?,
-        MirBinOp::Rem if b != 0 => a.wrapping_rem(b),
-        MirBinOp::BitAnd => a & b,
-        MirBinOp::BitOr => a | b,
-        MirBinOp::Xor => a ^ b,
-        MirBinOp::Shl if (0..32).contains(&b) => a.wrapping_shl(b as u32),
-        MirBinOp::Shr if (0..32).contains(&b) => a.wrapping_shr(b as u32),
-        _ => return None,
-    })
-}
-
 fn eval_f64(op: MirBinOp, a_bits: u64, b_bits: u64) -> Option<u64> {
     let a = f64::from_bits(a_bits);
     let b = f64::from_bits(b_bits);
@@ -707,29 +637,11 @@ fn eval_f64(op: MirBinOp, a_bits: u64, b_bits: u64) -> Option<u64> {
     Some(r.to_bits())
 }
 
-fn eval_f32(op: MirBinOp, a_bits: u32, b_bits: u32) -> Option<u32> {
-    let a = f32::from_bits(a_bits);
-    let b = f32::from_bits(b_bits);
-    let r = match op {
-        MirBinOp::Add => a + b,
-        MirBinOp::Sub => a - b,
-        MirBinOp::Mul => a * b,
-        MirBinOp::Div if b != 0.0 => a / b,
-        MirBinOp::Rem if b != 0.0 => a % b,
-        _ => return None,
-    };
-    Some(r.to_bits())
-}
-
 fn eval_cmp(op: MirCmpOp, ty: MirTy, a: MirConst, b: MirConst) -> Option<bool> {
     match (ty, a, b) {
         (MirTy::I64, MirConst::I64(x), MirConst::I64(y)) => Some(cmp_ord(op, x, y)),
-        (MirTy::I32, MirConst::I32(x), MirConst::I32(y)) => Some(cmp_ord(op, x, y)),
         (MirTy::F64, MirConst::F64(x), MirConst::F64(y)) => {
             cmp_float(op, f64::from_bits(x), f64::from_bits(y))
-        }
-        (MirTy::F32, MirConst::F32(x), MirConst::F32(y)) => {
-            cmp_float(op, f32::from_bits(x), f32::from_bits(y))
         }
         _ => None,
     }
@@ -762,9 +674,7 @@ fn cmp_float<T: PartialOrd>(op: MirCmpOp, a: T, b: T) -> Option<bool> {
 fn eval_neg(c: MirConst) -> Option<MirConst> {
     Some(match c {
         MirConst::I64(v) => MirConst::I64(v.checked_neg()?),
-        MirConst::I32(v) => MirConst::I32(v.checked_neg()?),
         MirConst::F64(b) => MirConst::F64((-f64::from_bits(b)).to_bits()),
-        MirConst::F32(b) => MirConst::F32((-f32::from_bits(b)).to_bits()),
         MirConst::Bool(_) => return None,
     })
 }
@@ -774,13 +684,6 @@ fn eval_cast(kind: MirCastKind, to: MirTy, c: MirConst) -> Option<MirConst> {
         (MirCastKind::IntToFloat, MirTy::F64, MirConst::I64(v)) => {
             Some(MirConst::f64(v as f64))
         }
-        (MirCastKind::IntToFloat, MirTy::F64, MirConst::I32(v)) => {
-            Some(MirConst::f64(v as f64))
-        }
-        (MirCastKind::IntToFloat, MirTy::F32, MirConst::I32(v)) => {
-            Some(MirConst::f32(v as f32))
-        }
-        (MirCastKind::Sext, MirTy::I64, MirConst::I32(v)) => Some(MirConst::I64(i64::from(v))),
         (MirCastKind::FloatToInt, MirTy::I64, MirConst::F64(b)) => {
             Some(MirConst::I64(f64::from_bits(b) as i64))
         }
@@ -862,21 +765,6 @@ mod tests {
         b.switch_to_block(body);
         let p = b.ins_binop(MirBinOp::Mul, x, two).unwrap();
         b.set_ret_ty(MirTy::F64);
-        b.ret(Some(p)).unwrap();
-        let mut f = b.finish().unwrap();
-        assert!(instcombine(&mut f) >= 1);
-        f.verify().unwrap();
-        assert_eq!(count_bin(&f, MirBinOp::Mul), 0);
-        assert_eq!(count_bin(&f, MirBinOp::Add), 1);
-    }
-
-    #[test]
-    fn i32_mul2_is_add() {
-        let mut b = MirBuilder::new("sr");
-        let x = b.add_param(MirTy::I32).unwrap();
-        let two = b.ins_const(MirConst::I32(2)).unwrap();
-        let p = b.ins_binop(MirBinOp::Mul, two, x).unwrap();
-        b.set_ret_ty(MirTy::I32);
         b.ret(Some(p)).unwrap();
         let mut f = b.finish().unwrap();
         assert!(instcombine(&mut f) >= 1);

@@ -1,9 +1,9 @@
 //! Optimization options, levels and stats.
 //!
 //! No optimization pass runs on the stack IL any more (the last ones went
-//! in 2026-10): the HIR passes and HIR lowering do that work, and the stack
-//! IL only lifts to MIR and fuse-selects in `lower_optimized`. See
-//! `README.md` in this directory.
+//! in 2026-10): the HIR and MIR passes do that work, and the stack IL MIR
+//! emits is only fuse-selected in `lower_optimized`. See `README.md` in
+//! this directory.
 
 use super::op::IlOp;
 

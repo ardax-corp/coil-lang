@@ -82,6 +82,7 @@ pub fn encode_draft_regs(func: &MirFunc, regs: &[u8], need_slot: &[bool]) -> Opt
 /// slot that also holds a non-heap word at some point is left to the
 /// precise frame map, so no scalar is read as a handle. A body that keeps
 /// no heap word in a slot gets an empty map.
+#[cfg(test)]
 pub fn encode_draft_slots(func: &MirFunc) -> DraftFrameMap {
     // A body whose `i64` words may be a type variable's object lists its
     // word slots too: the collector skips one that holds no object.

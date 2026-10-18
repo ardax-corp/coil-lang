@@ -102,31 +102,6 @@ pub(crate) fn eval_cmp<H: HeapView>(op: u8, lhs: Value, rhs: Value, heap: &H) ->
     }
 }
 
-#[inline(always)]
-pub(crate) fn eval_f64_bin(op: u8, lhs: f64, rhs: f64) -> f64 {
-    match Instruction::from(op) {
-        Instruction::ADDF => lhs + rhs,
-        Instruction::SUBF => lhs - rhs,
-        Instruction::MULF => lhs * rhs,
-        Instruction::DIVF => lhs / rhs,
-        Instruction::MODF => lhs % rhs,
-        _ => f64::NAN,
-    }
-}
-
-#[inline(always)]
-pub(crate) fn eval_f64_cmp(op: u8, lhs: f64, rhs: f64) -> bool {
-    match Instruction::from(op) {
-        Instruction::LEF => lhs < rhs,
-        Instruction::LEQF => lhs <= rhs,
-        Instruction::EQF => lhs == rhs,
-        Instruction::NEQF => lhs != rhs,
-        Instruction::GTF => lhs > rhs,
-        Instruction::GEQF => lhs >= rhs,
-        _ => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,17 +130,6 @@ mod tests {
         assert_eq!(eval_bin(Instruction::MUL as u8, max, max, &heap), Err(IntTrap::Overflow));
         assert_eq!(eval_bin(Instruction::DIV as u8, one, zero, &heap), Err(IntTrap::DivByZero));
         assert_eq!(eval_bin(Instruction::Pow as u8, one, Value::from(-1i64), &heap), Err(IntTrap::NegativeExponent));
-    }
-
-    #[test]
-    fn fused_f64_covers_mandelbrot_ops() {
-        assert_eq!(eval_f64_bin(Instruction::ADDF as u8, 1.5, 2.25), 3.75);
-        assert_eq!(eval_f64_bin(Instruction::MULF as u8, 2.0, 3.0), 6.0);
-        assert!(eval_f64_cmp(Instruction::GTF as u8, 5.0, 4.0));
-        assert!(!eval_f64_cmp(Instruction::LEQF as u8, 5.0, 4.0));
-        let unknown = Instruction::HALT as u8;
-        assert!(eval_f64_bin(unknown, 1.0, 1.0).is_nan());
-        assert!(!eval_f64_cmp(unknown, 1.0, 1.0));
     }
 
     #[test]

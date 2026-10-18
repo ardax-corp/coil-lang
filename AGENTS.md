@@ -1,6 +1,6 @@
 # coil — AGENTS
 
-coil: statically typed `.hy` → typecheck → HIR (optimizations) → stack IL lowering / numeric MIR → `.hyc` archive → custom VM.
+coil: statically typed `.hy` → typecheck → HIR (optimizations) → MIR (every body) → dense or LIR bytecode → `.hyc` archive → custom VM.
 
 | Need | Read |
 |------|------|

@@ -50,8 +50,7 @@ pub enum PairKind {
     Enum(String),
 }
 
-// `of`, `words` and `is_niche` are the HIR builder's (phase 1); only tests
-// call them until then.
+// `words` and `is_niche` only have test callers.
 #[allow(dead_code)]
 impl Layout {
     /// Words on a direct `CALL`/`RETURN`.
@@ -150,8 +149,7 @@ pub(crate) fn is_unit(ty: &Ty) -> bool {
 }
 
 /// A closed, non-scalar, non-FFI/builtin user enum whose every variant has
-/// payload arity `<= 1`, the same shape
-/// [`crate::typechecking::local_escape`] unboxes into frame slots.
+/// payload arity `<= 1`, the shape frame-slot unboxing uses.
 fn unary_user_enum_name<'a>(checker: &Checker, ty: &'a Ty) -> Option<&'a str> {
     let name = enum_name(ty)?;
     if common::is_builtin_option_enum(name)
@@ -259,7 +257,6 @@ pub fn niche_heap_only(checker: &Checker, ty: &Ty) -> bool {
         {
             false
         }
-        Ty::List(inner) => ty_is_closed(inner),
         Ty::Tuple(items) => items.iter().all(ty_is_closed),
         Ty::Record { fields } => fields.iter().all(|(_, field)| ty_is_closed(field)),
         Ty::Sum { variants, .. } => variants
@@ -274,7 +271,7 @@ pub fn ty_is_closed(ty: &Ty) -> bool {
     let ty = strip_readonly(ty);
     match ty {
         Ty::Var(_) | Ty::Fun(_, _) | Ty::Existential { .. } | Ty::Forall { .. } => false,
-        Ty::List(inner) | Ty::Constructor { owner: inner, .. } => ty_is_closed(inner),
+        Ty::Constructor { owner: inner, .. } => ty_is_closed(inner),
         Ty::App(_, args) => args.iter().all(ty_is_closed),
         Ty::Tuple(items) => items.iter().all(ty_is_closed),
         Ty::Record { fields } => fields.iter().all(|(_, f)| ty_is_closed(f)),
@@ -298,7 +295,6 @@ pub fn bind_params(ty: &Ty, params: &[String], args: &[Ty]) -> Ty {
         },
         Ty::App(head, items) => Ty::App(Box::new(bind(head)), items.iter().map(bind).collect()),
         Ty::Fun(a, b) => Ty::Fun(Box::new(bind(a)), Box::new(bind(b))),
-        Ty::List(inner) => Ty::List(Box::new(bind(inner))),
         Ty::Readonly(inner) => Ty::Readonly(Box::new(bind(inner))),
         Ty::Tuple(items) => Ty::Tuple(items.iter().map(bind).collect()),
         Ty::Array { element, length } => Ty::Array {

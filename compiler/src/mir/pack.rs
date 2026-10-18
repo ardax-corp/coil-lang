@@ -375,7 +375,6 @@ fn as_const(func: &MirFunc, v: ValueId) -> Option<MirConst> {
 fn as_const_i64(func: &MirFunc, v: ValueId) -> Option<i64> {
     match as_const(func, v)? {
         MirConst::I64(n) => Some(n),
-        MirConst::I32(n) => Some(i64::from(n)),
         _ => None,
     }
 }

@@ -578,7 +578,7 @@ impl<'m> Enc<'m> {
                     }
                     // A new instance: its fields are what the constructor set.
                     MakeKind::Class(_) => V::Obj(self.new_obj()),
-                    MakeKind::Array | MakeKind::List if matches!(ty.map(shape), Some(Shape::Seq)) => {
+                    MakeKind::Array if matches!(ty.map(shape), Some(Shape::Seq)) => {
                         let mut data = self.declare(ARR, "a");
                         for (i, v) in vals.iter().enumerate() {
                             match v {
@@ -1484,7 +1484,7 @@ fn shape(ty: &Ty) -> Shape {
                 _ => Shape::Other,
             }
         }
-        Ty::List(e) | Ty::Array { element: e, .. } => match shape(e) {
+        Ty::Array { element: e, .. } => match shape(e) {
             Shape::Int | Shape::Byte => Shape::Seq,
             _ => Shape::Other,
         },

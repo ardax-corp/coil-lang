@@ -15,7 +15,6 @@ pub mod id;
 pub mod index_facts;
 pub mod infer;
 pub mod kind;
-pub mod local_escape;
 pub mod loop_par;
 pub mod par_hint;
 pub mod par_profit;

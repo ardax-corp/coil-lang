@@ -41,10 +41,8 @@ pub struct LocalId(pub u32);
 /// Typed immediate.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum MirConst {
-    I32(i32),
     I64(i64),
     /// IEEE bits (Eq/Hash-friendly).
-    F32(u32),
     F64(u64),
     Bool(bool),
 }
@@ -52,17 +50,10 @@ pub enum MirConst {
 impl MirConst {
     pub fn ty(self) -> MirTy {
         match self {
-            Self::I32(_) => MirTy::I32,
             Self::I64(_) => MirTy::I64,
-            Self::F32(_) => MirTy::F32,
             Self::F64(_) => MirTy::F64,
             Self::Bool(_) => MirTy::Bool,
         }
-    }
-
-    #[allow(dead_code)]
-    pub fn f32(v: f32) -> Self {
-        Self::F32(v.to_bits())
     }
 
     pub fn f64(v: f64) -> Self {
@@ -73,7 +64,6 @@ impl MirConst {
     pub fn as_f64(self) -> Option<f64> {
         match self {
             Self::F64(b) => Some(f64::from_bits(b)),
-            Self::F32(b) => Some(f32::from_bits(b) as f64),
             _ => None,
         }
     }
@@ -85,9 +75,7 @@ impl std::hash::Hash for MirConst {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         std::mem::discriminant(self).hash(state);
         match *self {
-            Self::I32(v) => v.hash(state),
             Self::I64(v) => v.hash(state),
-            Self::F32(v) => v.hash(state),
             Self::F64(v) => v.hash(state),
             Self::Bool(v) => v.hash(state),
         }
@@ -134,6 +122,7 @@ impl MirBinOp {
         }
     }
 
+    #[cfg(test)]
     pub fn parse(s: &str) -> Option<(Self, bool)> {
         Some(match s {
             "iadd" => (Self::Add, false),
@@ -198,6 +187,7 @@ impl MirCmpOp {
         }
     }
 
+    #[cfg(test)]
     pub fn parse(s: &str) -> Option<(Self, bool)> {
         Some(match s {
             "icmp.slt" => (Self::Lt, false),
@@ -227,8 +217,6 @@ pub enum MirUnaryOp {
 pub enum MirCastKind {
     /// `CastIntToFloat` — signed int to IEEE float of matching width or widen.
     IntToFloat,
-    /// `i32` → `i64`.
-    Sext,
     /// `CastFloatToInt` — `f64` → `i64`, truncating toward zero.
     FloatToInt,
     /// The same word retyped: a heap pointer or the `i64` zero (`None` /
@@ -244,7 +232,6 @@ impl MirCastKind {
     pub fn allows(self, from: MirTy, to: MirTy) -> bool {
         match self {
             Self::IntToFloat => from.is_int() && to.is_float(),
-            Self::Sext => from == MirTy::I32 && to == MirTy::I64,
             Self::FloatToInt => from == MirTy::F64 && to == MirTy::I64,
             Self::Word => {
                 let niche = |t: MirTy| matches!(t, MirTy::NicheOpt | MirTy::NicheRes);
@@ -345,22 +332,6 @@ pub enum MirInst {
     MatchPayload {
         dest: ValueId,
         scrutinee: ValueId,
-        index: u32,
-    },
-    /// Field of a non-escaping unboxed class (I3). `object` is the SSA
-    /// value of slot `base + index` from the local-escape unbox map.
-    FieldLoad {
-        dest: ValueId,
-        object: ValueId,
-        base: u32,
-        index: u32,
-    },
-    /// Store into an unboxed class field slot (ctor / rebind / S2j
-    /// non-escaping `p.x = …`). Escaping named locals stay fuse-IL.
-    FieldStore {
-        dest: ValueId,
-        src: ValueId,
-        base: u32,
         index: u32,
     },
     /// Heap `GetField` / `LoadField` on an escaping object (D1 maps).
@@ -505,7 +476,8 @@ pub enum MirInst {
     },
     /// Debugger stop / deopt boundary (I7). Dest is a `bool` token.
     /// Sidecar only — emit skips this inst. Names the edge a later
-    /// native tier must leave or pause at.
+    /// native tier must leave or pause at. Only tests build one today.
+    #[cfg_attr(not(test), allow(dead_code))]
     Deopt {
         dest: ValueId,
         kind: MirDeoptKind,
@@ -687,21 +659,19 @@ impl MirAllocKind {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum MirGcKind {
     Safepoint,
-    Write,
 }
 
 impl MirGcKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Safepoint => "safepoint",
-            Self::Write => "write",
         }
     }
 
+    #[cfg(test)]
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "safepoint" => Self::Safepoint,
-            "write" => Self::Write,
             _ => return None,
         })
     }
@@ -747,8 +717,6 @@ impl MirInst {
             | Self::Call { dest, .. }
             | Self::CallIndirect { dest, .. }
             | Self::MatchPayload { dest, .. }
-            | Self::FieldLoad { dest, .. }
-            | Self::FieldStore { dest, .. }
             | Self::HeapFieldLoad { dest, .. }
             | Self::HeapFieldStore { dest, .. }
             | Self::Index { dest, .. }
@@ -820,8 +788,6 @@ impl MirInst {
             Self::HostInvoke { args, .. } | Self::Ffi { args, .. } | Self::Call { args, .. } => args.clone(),
             Self::CallIndirect { callee, args, .. } => args.iter().copied().chain([*callee]).collect(),
             Self::MatchPayload { scrutinee, .. } => vec![*scrutinee],
-            Self::FieldLoad { object, .. } => vec![*object],
-            Self::FieldStore { src, .. } => vec![*src],
             Self::HeapFieldLoad {
                 object, name, ..
             } => {
@@ -900,8 +866,6 @@ impl MirInst {
                 *callee = map(*callee);
             }
             Self::MatchPayload { scrutinee, .. } => *scrutinee = map(*scrutinee),
-            Self::FieldLoad { object, .. } => *object = map(*object),
-            Self::FieldStore { src, .. } => *src = map(*src),
             Self::HeapFieldLoad {
                 object, name, ..
             } => {
@@ -1063,13 +1027,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn f32_const_roundtrips_through_f64_view() {
-        let c = MirConst::f32(1.5);
-        assert_eq!(c.ty(), MirTy::F32);
-        assert_eq!(c.as_f64(), Some(1.5));
+    fn f64_const_roundtrips_through_f64_view() {
         assert_eq!(MirConst::f64(-2.25).as_f64(), Some(-2.25));
         assert_eq!(MirConst::f64(-2.25).ty(), MirTy::F64);
-        assert_eq!(MirConst::I32(1).as_f64(), None);
+        assert_eq!(MirConst::I64(1).as_f64(), None);
         assert_eq!(MirConst::Bool(true).as_f64(), None);
     }
 }

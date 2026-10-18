@@ -20,7 +20,7 @@ use crate::typechecking::ty::{ArrayLength, array, array_fixed, tuple as tuple_ty
 use crate::typechecking::ty::{AssocProjection, Constraint, Scheme};
 use crate::typechecking::ty::{
     EnumVariantPayloadTy, RANGE, RANGE_INCLUSIVE, Ty, TyVarId, boolean, float, ftv_ty, int,
-    is_option_ty, is_result_ty, list, never, option_app_ty, option_inner, option_ty, range_app,
+    is_option_ty, is_result_ty, never, option_app_ty, option_inner, option_ty, range_app,
     range_inclusive_ty, range_ty, readonly_ty, result_app_ty, result_ok_err, result_ty,
     schemaize_payload, schemaize_ty, string, strip_readonly, subst_payload_params, subst_ty_params,
     unit as unit_ty, vec_app_ty, vec_element_ty,
@@ -105,8 +105,6 @@ impl Checker {
             local_defs: HashMap::new(),
             module_locals: HashMap::new(),
             def_ids_by_node: HashMap::new(),
-            frame_local: HashSet::new(),
-            frame_local_last_use: HashSet::new(),
             fn_value_escaped: HashSet::new(),
             in_bounds_index: HashSet::new(),
             nonneg_expr: HashSet::new(),
@@ -1474,7 +1472,6 @@ impl Checker {
             }
             Ty::Fun(_, _) => false,
             Ty::Array { element, .. } => self.is_thread_sendable_ty(element),
-            Ty::List(inner) => self.is_thread_sendable_ty(inner),
             Ty::Readonly(inner) => self.is_thread_sendable_ty(inner),
             Ty::Tuple(elems) => elems.iter().all(|t| self.is_thread_sendable_ty(t)),
             Ty::Record { fields } => fields.iter().all(|(_, t)| self.is_thread_sendable_ty(t)),
@@ -1656,8 +1653,6 @@ impl Checker {
         self.import_locals.clear();
         self.local_defs.clear();
         self.def_ids_by_node.clear();
-        self.frame_local.clear();
-        self.frame_local_last_use.clear();
         self.in_bounds_index.clear();
         self.nonneg_expr.clear();
         self.pin_array.clear();
@@ -1743,7 +1738,6 @@ impl Checker {
             self.messages.push(msg);
         }
 
-        crate::typechecking::local_escape::analyze_local_escape(self, ast);
         crate::typechecking::purity::record_fn_effects(self, ast);
         crate::typechecking::index_facts::analyze_index_facts(self, ast);
         crate::typechecking::fn_value_escape::analyze_fn_value_escape(self, ast);
@@ -1939,7 +1933,7 @@ impl Checker {
             Ty::App(ctor, args) => {
                 Self::ty_contains_open_var(ctor) || args.iter().any(Self::ty_contains_open_var)
             }
-            Ty::List(inner) | Ty::Array { element: inner, .. } => Self::ty_contains_open_var(inner),
+            Ty::Array { element: inner, .. } => Self::ty_contains_open_var(inner),
             Ty::Tuple(elems) => elems.iter().any(Self::ty_contains_open_var),
             Ty::Record { fields } => fields.iter().any(|(_, t)| Self::ty_contains_open_var(t)),
             Ty::Constructor { owner, .. } => Self::ty_contains_open_var(owner),
@@ -2095,7 +2089,6 @@ impl Checker {
             Ty::Con(name) => self.bare_constructor_kind(name).unwrap_or(Kind::Type),
             Ty::App(..)
             | Ty::Fun(..)
-            | Ty::List(..)
             | Ty::Sum { .. }
             | Ty::Constructor { .. }
             | Ty::Tuple(_)
@@ -3281,7 +3274,6 @@ impl Checker {
                 }
                 apply_ty_prune(&self.subst, &y_var)
             }
-            Expression::List(elements) => self.infer_list(elements, range),
 
             Expression::Default(_) => self
                 .current_match_lhs
@@ -5917,7 +5909,7 @@ impl Checker {
                     Self::collect_ty_vars(i, out);
                 }
             }
-            Ty::List(inner) | Ty::Readonly(inner) => Self::collect_ty_vars(inner, out),
+            Ty::Readonly(inner) => Self::collect_ty_vars(inner, out),
             Ty::Array { element, .. } => Self::collect_ty_vars(element, out),
             Ty::Record { fields } => {
                 for (_, t) in fields {
@@ -5935,7 +5927,7 @@ impl Checker {
             Ty::Fun(a, b) => Self::ty_mentions_var(a) || Self::ty_mentions_var(b),
             Ty::App(h, args) => Self::ty_mentions_var(h) || args.iter().any(Self::ty_mentions_var),
             Ty::Tuple(items) => items.iter().any(Self::ty_mentions_var),
-            Ty::List(inner) | Ty::Readonly(inner) => Self::ty_mentions_var(inner),
+            Ty::Readonly(inner) => Self::ty_mentions_var(inner),
             Ty::Array { element, .. } => Self::ty_mentions_var(element),
             Ty::Record { fields } => fields.iter().any(|(_, t)| Self::ty_mentions_var(t)),
             Ty::Constructor { owner, .. } => Self::ty_mentions_var(owner),
@@ -7626,18 +7618,6 @@ impl Checker {
             }
         }
         result_ty
-    }
-
-    fn infer_list(&mut self, elements: &[Output], _range: Range<usize>) -> Ty {
-        if elements.is_empty() {
-            return list(Ty::Var(self.counter.fresh()));
-        }
-        let first_ty = self.infer(&elements[0]);
-        for elem in &elements[1..] {
-            let t = self.infer(elem);
-            self.unify(&first_ty, &t, &elem.0.into_range(), "list element");
-        }
-        list(first_ty)
     }
 
     /// `len(x)`, prelude sugar for `x.len()` (structural ArrayLen / Length).
@@ -11046,8 +11026,7 @@ impl Checker {
             Ty::App(head, _) => self.nominal_head_from_ty(head.as_ref()),
             Ty::Sum { name, .. } => Some(name),
             Ty::Constructor { owner, .. } => self.nominal_head_from_ty(owner.as_ref()),
-            Ty::List(_)
-            | Ty::Array { .. }
+            Ty::Array { .. }
             | Ty::Tuple(_)
             | Ty::Record { .. }
             | Ty::Existential { .. }
@@ -14723,7 +14702,6 @@ impl Checker {
                 self.pre_pass_ffi_invoke_param_flow_walk(expr, local_class_scopes);
             }
             Expression::Tuple(items)
-            | Expression::List(items)
             | Expression::Declare(items)
             | Expression::Invoke(items) => {
                 for item in items {
@@ -15649,7 +15627,6 @@ impl Checker {
             Expression::Block(cs)
             | Expression::Program(cs)
             | Expression::Fragment(cs)
-            | Expression::List(cs)
             | Expression::Declare(cs)
             | Expression::Invoke(cs) => {
                 for c in cs {

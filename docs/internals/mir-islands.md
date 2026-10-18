@@ -1,4 +1,7 @@
 # MIR language islands (COI-292 I0)
+# MIR language islands (COI-292 I0)
+
+> **Status: historical.** This ladder grew MIR coverage while stack IL was still the production lowering. Since M4 and M5 (2026-10) every body lowers from HIR to MIR and emits dense or LIR; there is no IL→MIR lift, no fuse-IL tier and no stack-lowering fallback. Today's pipeline: [pipeline.md](pipeline.md) and [mir.md](mir.md).
 
 MIR is a **typed SSA sidecar** that grows **island by island**. It is not a
 wholesale rewrite of the compiler, and it is not a second semantic language

@@ -1,4 +1,7 @@
 # Dense specialize refuse inventory
+# Dense specialize refuse inventory
+
+> **Status: historical.** Written when `try_specialize_body` lifted stack IL to MIR. Today the dense tier starts from the body's MIR (lowered from HIR) and is kept when its cost beats that body's LIR form; refused bodies run LIR, not fuse-IL. Today's pipeline: [pipeline.md](pipeline.md).
 
 `try_specialize_body` runs on the stack IL as HIR lowering emitted it (no IL optimization passes remain). Infer + SSA lower + dense emit
 (or P12 saxpy-reduce) replace a whole function. Leftovers try IL→MIR→LIR.

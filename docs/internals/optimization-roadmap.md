@@ -109,7 +109,7 @@ titles can oversell.
 | ~~`seek_back_edge`~~ | `Seek` latch to expose in-loop self-stores when header becomes `Known` | **Removed**: the residual `Seek` blocked MIR dense (`vec_scan` 2.5×, `mir_dense_float` 2.1×, `s2d_inloop_pack` 1.65× slower at `-O3`). |
 | ~~`iterative_optimization`~~ | Fixpoint re-runs of the IL pipeline | **Removed** (COI-130): re-running miscompiled `loops.hy` / `licm_invariants.hy`. |
 | **`collect_stats`** | Body tiers and HIR lowering / inlining counters to stderr / JSON | **Default off** (`--opt-stats`, COI-131). |
-| **Branch layout / block reorder** | Heuristic: HIR lowering lays early exits out after the body (`CodeBuf::move_exits_to_end`); the stack-IL passes were removed 2026-10 | Default **on** (COI-128 / COI-129). |
+| **Branch layout / block reorder** | Heuristic: MIR block layout puts early exits after the body (`HirPlan::cold_ok`); the stack-IL passes were removed 2026-10 | Default **on** (COI-128 / COI-129). |
 
 Inlining (the HIR typed inliner) and direct `new Class(args).field` scalar
 replacement live in **HIR / codegen**, not `il/opt`; the caller-side predicate

@@ -117,7 +117,7 @@ slot-select; the cold arm is heap `Index` / `StoreIndex` (S2h). Other
 `MakeArray` values stay heap. Growing `ArrayPush` dest and
 private uses after an escape stay heap; grow on `[T; N]` is a **type error**
 (Q3). Indexing `i % N` is Euclidean into `0..N` (Q4). Named class locals
-are a **separate** codegen / `local_escape` path (S2j / Q2 box-once).
+are a **separate** HIR-lowering path (S2j / Q2 box-once).
 Deliberately refused here:
 
 | Refused | Why |
@@ -125,7 +125,7 @@ Deliberately refused here:
 | Arity > 32 | Hard cap |
 | Growing `ArrayPush` dest / private use after escape | Slots have no object identity; Q3 grow on `[T; N]` is a type error |
 | Unproven `xs[k]` as a raw slot | Slots have no OOB; S2h uses heap Index/StoreIndex or a proven/weaker bound |
-| Named class locals (this path) | Class SROA lives in `local_escape` / codegen (COI-320 / Q2) |
+| Named class locals (this path) | Class SROA lives in HIR lowering (COI-320 / Q2) |
 
 **Copy / destination propagation.** The stack-IL `copy_prop` and `dest_prop`
 passes were removed 2026-10 (measurement showed no bench effect).

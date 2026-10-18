@@ -1,4 +1,7 @@
 # Array pins
+# Array pins
+
+> **Status: partly retired.** Since MIR emits every body (M5, 2026-10-15), only `ArrayPin` is still emitted: a function's prologue pins the array parameters the checker proved length-stable (`pin_params`, `emit_sidecar_array_pins` in `codegen/compiler.rs`), and the VM's per-frame pin table backs the dense `DenseIndex` cache. Nothing emits `IndexPin*` / `StoreIndexPin*` any more; MIR indexes with `Index` / `IndexUnchecked`. Those four opcodes and their VM handlers stay only so older archives load, until the next archive major. The notes below are the historical design record.
 
 [#192](https://github.com/ardax-corp/coil-lang/pull/192) already shipped the
 handle [COI-198](https://linear.app/ardax/issue/COI-198) asked for. Proven

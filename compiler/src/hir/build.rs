@@ -104,7 +104,7 @@ fn proved_bounds(module: &mut HirModule) {
                 let vec = body.exprs[base.0 as usize].ty.as_ref().is_some_and(|t| {
                     matches!(
                         crate::typechecking::ty::strip_readonly(t),
-                        Ty::List(_) | Ty::Array { .. }
+                        Ty::Array { .. }
                     ) || matches!(t, Ty::App(head, _) if matches!(head.as_ref(), Ty::Con(n) if n == "Vec" || n.ends_with("::Vec")))
                 });
                 if vec {
@@ -395,12 +395,6 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         self.stamp(b, hir);
         if let Some(id) = id {
             let flags = &mut b.body.exprs[hir.0 as usize].flags;
-            if self.sidecar.is_frame_local(id) {
-                flags.insert(HirFlags::FRAME_LOCAL);
-            }
-            if self.sidecar.is_frame_local_last_use(id) {
-                flags.insert(HirFlags::LAST_USE);
-            }
             if self.sidecar.is_in_bounds_index(id) {
                 flags.insert(HirFlags::IN_BOUNDS);
             }
@@ -1055,7 +1049,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                     .or_else(|| self.ty_of(item));
                 // `T... xs` declares the pack's element.
                 let declared = match (&ty, *is_rest) {
-                    (Some(Ty::List(elem) | Ty::Array { element: elem, .. }), true) => Some(elem.as_ref()),
+                    (Some(Ty::Array { element: elem, .. }), true) => Some(elem.as_ref()),
                     (_, true) => None,
                     (ty, false) => ty.as_ref(),
                 };
@@ -1237,10 +1231,6 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             E::Range { start, end, inclusive } => {
                 let args = vec![self.expr(b, start), self.expr(b, end)];
                 self.emit(b, node, HirKind::Make { kind: MakeKind::Range { inclusive: *inclusive }, args })
-            }
-            E::List(items) => {
-                let args = self.exprs(b, items);
-                self.emit(b, node, HirKind::Make { kind: MakeKind::List, args })
             }
             E::Array(items) => {
                 let args = self.exprs(b, items);
@@ -2692,7 +2682,7 @@ fn index_kind(ty: Option<&Ty>) -> IndexKind {
     }
     match ty.map(strip_readonly) {
         Some(Ty::Con(n)) if n == coil_ty::STRING => IndexKind::String,
-        Some(Ty::List(_) | Ty::Array { .. }) => IndexKind::Array,
+        Some(Ty::Array { .. }) => IndexKind::Array,
         Some(Ty::App(head, _)) if matches!(head.as_ref(), Ty::Con(n) if n == common::BUILTIN_VEC_TYPE) => {
             IndexKind::Array
         }

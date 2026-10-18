@@ -73,7 +73,7 @@ construction (finalizer / layout).
 Compiler (S2j [COI-320](https://linear.app/ardax/issue/COI-320) + Q2
 [COI-324](https://linear.app/ardax/issue/COI-324)): codegen binds eligible
 `new C` to field slots and `emit_escape_unboxed_class` boxes once.
-`local_escape` `frame_local` remains the never-escaped I3 fact.
+HIR lowering decides which locals never escape (the checker's `local_escape` sidecar was removed as unused).
 
 **[COI-84](https://linear.app/ardax/issue/COI-84) non-goal is superseded
 for this narrow case.** COI-84 closed as “named locals stay allocated”

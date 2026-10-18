@@ -63,7 +63,6 @@ impl DebugTy {
                 other => DebugTy::Other(other.to_string()),
             },
             Ty::Readonly(inner) => next(inner),
-            Ty::List(elem) => DebugTy::Array(Box::new(next(elem))),
             Ty::Array { element, .. } => DebugTy::Array(Box::new(next(element))),
             Ty::Tuple(items) => DebugTy::Tuple(items.iter().map(next).collect()),
             Ty::App(con, args) => match con.as_ref() {

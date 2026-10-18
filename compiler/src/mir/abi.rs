@@ -1,6 +1,6 @@
 //! Typed dense call/return ABI (COI-291 M1).
 //!
-//! Dense bodies keep `i32` / `i64` / `f32` / `f64` / `bool` in frame slots.
+//! Dense bodies keep `i64` / `f64` / `bool` in frame slots.
 //! A dense→dense `CALL` uses the same one-word Value layout the VM already
 //! uses at CALL/RETURN — bits are typed slots, not boxed heap objects.
 //!
@@ -9,7 +9,7 @@
 //! | Edge | Words | Slots / stack |
 //! |------|-------|----------------|
 //! | Args | `arity` | callee slots `0..arity` (same bits as caller `LOAD`s) |
-//! | Return | 1..=[`MAX_MODELED_RET_WORDS`] | TOS after `RETURN`; caller `STORE`s dests |
+//! | Return | 1..=2 | TOS after `RETURN`; caller `STORE`s dests |
 //! | Niche Option/Result | 1 | Q8 word lane (match reconstructs as `Br`) |
 //! | Multi-word return | 2 | `[payload, tag]` / `[a, b]` (B3 / C1; cost gate vs fuse) |
 //!
@@ -29,17 +29,6 @@ use std::collections::HashMap;
 use super::func::MirFunc;
 use super::layout::MirLayout;
 use super::ty::MirTy;
-
-/// Direct `CALL`/`RETURN` width SSA can reconstruct (dest + optional `dest_hi`).
-/// VM encoding today is `CALL` bit 31 / `RETURN` operand 2. Raise this only
-/// with extra dests and archive encoding.
-pub const MAX_MODELED_RET_WORDS: u32 = 2;
-
-/// `1..=MAX_MODELED_RET_WORDS` — infer/lower refuse anything else.
-#[inline]
-pub fn ret_words_ok(ret_words: u32) -> bool {
-    (1..=MAX_MODELED_RET_WORDS).contains(&ret_words)
-}
 
 /// Extra TOS words besides the first return (`ret_words >= 2`).
 #[inline]
@@ -154,15 +143,10 @@ mod tests {
 
     #[test]
     fn modeled_ret_width_is_one_or_two() {
-        assert!(ret_words_ok(1));
-        assert!(ret_words_ok(2));
-        assert!(!ret_words_ok(0));
-        assert!(!ret_words_ok(3));
         assert!(!is_multi_word_ret(1));
         assert!(is_multi_word_ret(2));
         assert!(is_multi_word_ret(3));
         assert_eq!(ret_words_from_hi(None::<u8>), 1);
         assert_eq!(ret_words_from_hi(Some(0u8)), 2);
-        assert_eq!(MAX_MODELED_RET_WORDS, 2);
     }
 }

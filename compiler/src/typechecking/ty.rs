@@ -27,7 +27,6 @@ pub enum Ty {
     Con(String),
     Fun(Box<Ty>, Box<Ty>),
     App(Box<Ty>, Vec<Ty>),
-    List(Box<Ty>),
     Sum {
         name: String,
         variants: Vec<(String, EnumVariantPayloadTy)>,
@@ -603,11 +602,6 @@ pub fn is_result_ty(ty: &Ty) -> bool {
     }
 }
 
-/// Build the `List<t>` type.
-pub fn list(inner: Ty) -> Ty {
-    Ty::List(Box::new(inner))
-}
-
 /// Build the `(T1, T2, ..., Tn)` heterogeneous tuple type.
 pub fn tuple(tys: Vec<Ty>) -> Ty {
     Ty::Tuple(tys)
@@ -680,7 +674,6 @@ pub fn subst_ty_params(ty: &Ty, params: &std::collections::HashMap<String, Ty>) 
             Box::new(subst_ty_params(con, params)),
             args.iter().map(|a| subst_ty_params(a, params)).collect(),
         ),
-        Ty::List(inner) => Ty::List(Box::new(subst_ty_params(inner, params))),
         Ty::Sum { name, variants } => Ty::Sum {
             name: name.clone(),
             variants: variants
@@ -755,7 +748,6 @@ pub fn schemaize_ty(ty: &Ty, var_to_name: &std::collections::HashMap<TyVarId, St
             Box::new(schemaize_ty(con, var_to_name)),
             args.iter().map(|a| schemaize_ty(a, var_to_name)).collect(),
         ),
-        Ty::List(inner) => Ty::List(Box::new(schemaize_ty(inner, var_to_name))),
         Ty::Sum { name, variants } => Ty::Sum {
             name: name.clone(),
             variants: variants
@@ -834,9 +826,6 @@ fn go(ty: &Ty, acc: &mut HashSet<TyVarId>) {
             for a in args {
                 go(a, acc);
             }
-        }
-        Ty::List(inner) => {
-            go(inner, acc);
         }
         // Recursive enum payloads use Ty::Con(name) (isorecursive encoding).
         Ty::Sum { variants, .. } => {
@@ -926,8 +915,8 @@ mod tests {
     }
 
     #[test]
-    fn ftv_of_list_walks_inner() {
-        let ty = list(v(3));
+    fn ftv_of_array_walks_inner() {
+        let ty = array(v(3));
         assert_eq!(ftv_ty(&ty), HashSet::from([TyVarId(3)]));
     }
 

@@ -218,10 +218,6 @@ pub struct Checker {
     module_locals: HashMap<ModuleId, HashMap<String, DefId>>,
     /// Sidecar: pre-walk [`NodeId`] → interned def (reset each `check_program`).
     def_ids_by_node: HashMap<NodeId, DefId>,
-    /// NodeIds whose ObjEnum / small-class value never leaves this frame.
-    pub(crate) frame_local: HashSet<NodeId>,
-    /// Identifier / construct nodes that are the last in-frame use of a local.
-    pub(crate) frame_local_last_use: HashSet<NodeId>,
     /// Names that appear as a function *value* in this module — not just
     /// as a direct `Call` target. Package-wide proof is the pipeline seed
     /// on [`crate::Compiler`]; this set is the per-file snapshot.
@@ -642,7 +638,6 @@ pub struct Checker {
     /// Generics registry: typeclasses, instances, generic type ctors.
     generics: crate::typechecking::generics::Generics,
     /// Generic function names registered during typechecking.
-    /// Used by codegen to decide between DynAdd vs regular ADD.
     pub generic_fns: HashSet<String>,
     /// Number of *user-defined* trait dict slots expected by each
     /// generic function.  Built-in classes (Num, Ord, Eq, Show) are

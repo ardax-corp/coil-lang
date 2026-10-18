@@ -633,7 +633,7 @@ impl Scan<'_> {
             Expression::Program(items) | Expression::Block(items) | Expression::Fragment(items) => {
                 self.walk_block(items, on_return);
             }
-            Expression::List(items) | Expression::Array(items) | Expression::Tuple(items) => {
+            Expression::Array(items) | Expression::Tuple(items) => {
                 for item in items {
                     self.walk(item, on_return);
                 }
@@ -787,7 +787,6 @@ fn contains_return(ast: &Output<'_>) -> bool {
         Expression::Program(items)
         | Expression::Block(items)
         | Expression::Fragment(items)
-        | Expression::List(items)
         | Expression::Array(items)
         | Expression::Tuple(items)
         | Expression::If(items) => any(items),
@@ -1189,7 +1188,6 @@ fn collect_const_calls(
         Expression::Program(items)
         | Expression::Block(items)
         | Expression::Fragment(items)
-        | Expression::List(items)
         | Expression::Array(items)
         | Expression::Tuple(items)
         | Expression::If(items) => {

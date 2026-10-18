@@ -161,7 +161,7 @@ fn find_inductions(
         let MirInst::Phi { dest, ty, args } = inst else {
             break;
         };
-        if !ty.is_int() && *ty != MirTy::F64 && *ty != MirTy::F32 {
+        if !ty.is_int() && *ty != MirTy::F64 {
             continue;
         }
         let mut step: Option<ValueId> = None;
@@ -377,20 +377,6 @@ fn coerce_to(func: &mut MirFunc, pre: BlockId, v: ValueId, ty: MirTy) -> Option<
         );
         return Some(dest);
     }
-    if ty == MirTy::I64 && from == MirTy::I32 {
-        let dest = alloc(func, ty);
-        insert_before_term(
-            func,
-            pre,
-            MirInst::Cast {
-                dest,
-                kind: MirCastKind::Sext,
-                to: ty,
-                src: v,
-            },
-        );
-        return Some(dest);
-    }
     None
 }
 
@@ -406,11 +392,7 @@ fn insert_before_term(func: &mut MirFunc, bid: BlockId, inst: MirInst) {
 
 fn cast_const(c: MirConst, to: MirTy) -> Option<MirConst> {
     match (c, to) {
-        (MirConst::I32(v), MirTy::F64) => Some(MirConst::f64(f64::from(v))),
         (MirConst::I64(v), MirTy::F64) => Some(MirConst::f64(v as f64)),
-        (MirConst::I32(v), MirTy::F32) => Some(MirConst::f32(v as f32)),
-        (MirConst::I64(v), MirTy::F32) => Some(MirConst::f32(v as f32)),
-        (MirConst::I32(v), MirTy::I64) => Some(MirConst::I64(i64::from(v))),
         (c, t) if c.ty() == t => Some(c),
         _ => None,
     }
@@ -459,13 +441,9 @@ fn const_of(func: &MirFunc, v: ValueId) -> Option<MirConst> {
 
 fn is_integer_valued(c: MirConst) -> bool {
     match c {
-        MirConst::I32(_) | MirConst::I64(_) => true,
+        MirConst::I64(_) => true,
         MirConst::F64(b) => {
             let f = f64::from_bits(b);
-            f.is_finite() && f.fract() == 0.0
-        }
-        MirConst::F32(b) => {
-            let f = f32::from_bits(b);
             f.is_finite() && f.fract() == 0.0
         }
         MirConst::Bool(_) => false,
@@ -474,27 +452,23 @@ fn is_integer_valued(c: MirConst) -> bool {
 
 fn is_one_const(func: &MirFunc, v: ValueId) -> bool {
     match const_of(func, v) {
-        Some(MirConst::I64(1) | MirConst::I32(1)) => true,
+        Some(MirConst::I64(1)) => true,
         Some(MirConst::F64(b)) => b == 1.0f64.to_bits(),
-        Some(MirConst::F32(b)) => b == 1.0f32.to_bits(),
         _ => false,
     }
 }
 
 fn is_zero_const(func: &MirFunc, v: ValueId) -> bool {
     match const_of(func, v) {
-        Some(MirConst::I64(0) | MirConst::I32(0)) => true,
+        Some(MirConst::I64(0)) => true,
         Some(MirConst::F64(b)) => b == 0.0f64.to_bits(),
-        Some(MirConst::F32(b)) => b == 0.0f32.to_bits(),
         _ => false,
     }
 }
 
 fn zero_const(ty: MirTy) -> MirConst {
     match ty {
-        MirTy::I32 => MirConst::I32(0),
         MirTy::I64 => MirConst::I64(0),
-        MirTy::F32 => MirConst::f32(0.0),
         MirTy::F64 => MirConst::f64(0.0),
         _ => MirConst::I64(0),
     }
@@ -503,12 +477,8 @@ fn zero_const(ty: MirTy) -> MirConst {
 fn fold_mul(ty: MirTy, a: MirConst, b: MirConst) -> Option<MirConst> {
     match (ty, a, b) {
         (MirTy::I64, MirConst::I64(x), MirConst::I64(y)) => Some(MirConst::I64(x.checked_mul(y)?)),
-        (MirTy::I32, MirConst::I32(x), MirConst::I32(y)) => Some(MirConst::I32(x.checked_mul(y)?)),
         (MirTy::F64, MirConst::F64(x), MirConst::F64(y)) => {
             Some(MirConst::f64(f64::from_bits(x) * f64::from_bits(y)))
-        }
-        (MirTy::F32, MirConst::F32(x), MirConst::F32(y)) => {
-            Some(MirConst::f32(f32::from_bits(x) * f32::from_bits(y)))
         }
         _ => None,
     }

@@ -7,7 +7,9 @@
 //! `CALL`/`RETURN`; heap niches are one `Value` word.
 
 use crate::hir::layout::Layout;
+#[cfg(test)]
 use crate::typechecking::infer::Checker;
+#[cfg(test)]
 use crate::typechecking::ty::Ty;
 
 /// How a Result/Option (or arity-2 immediate product) crosses a call edge.
@@ -28,6 +30,7 @@ pub enum MirLayout {
 }
 
 impl MirLayout {
+    #[cfg(test)]
     pub fn words(self) -> u8 {
         match self {
             Self::TwoSlot => 2,
@@ -35,11 +38,13 @@ impl MirLayout {
         }
     }
 
+    #[cfg(test)]
     /// One-word heap/niche ABI (I1). Two-slot is a pair, not this.
     pub fn is_heap_word(self) -> bool {
         matches!(self, Self::HeapNiche)
     }
 
+    #[cfg(test)]
     /// The MIR view of [`crate::hir::layout::of_resolved`]. Codegen pins
     /// user payload enum pairs from the same query.
     pub fn from_coil_ty(checker: &Checker, ty: &Ty) -> Self {

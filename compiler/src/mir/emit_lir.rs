@@ -574,7 +574,6 @@ fn writes_memory(inst: &MirInst) -> bool {
     matches!(
         inst,
         MirInst::HeapFieldStore { .. }
-            | MirInst::FieldStore { .. }
             | MirInst::StoreIndex { .. }
             | MirInst::ArrayPush { .. }
             | MirInst::Call { .. }
@@ -594,7 +593,7 @@ fn writes_memory(inst: &MirInst) -> bool {
 fn reads_memory(inst: &MirInst) -> bool {
     matches!(
         inst,
-        MirInst::HeapFieldLoad { .. } | MirInst::FieldLoad { .. } | MirInst::Index { .. } | MirInst::ArrayLen { .. } | MirInst::DoneCoro { .. } | MirInst::LoadStatic { .. } | MirInst::HomeLoad { .. }
+        MirInst::HeapFieldLoad { .. } | MirInst::Index { .. } | MirInst::ArrayLen { .. } | MirInst::DoneCoro { .. } | MirInst::LoadStatic { .. } | MirInst::HomeLoad { .. }
     )
 }
 
@@ -1097,7 +1096,7 @@ fn is_low_bit(func: &MirFunc, plan: &EmitPlan, v: ValueId) -> bool {
             plan.def[m.index()].is_some_and(|(b, i)| {
                 matches!(
                     &func.block(b).insts[i],
-                    MirInst::Const { c: MirConst::I64(1) | MirConst::I32(1), .. }
+                    MirInst::Const { c: MirConst::I64(1), .. }
                 )
             })
         }),
@@ -1115,7 +1114,6 @@ fn tree_i16(func: &MirFunc, plan: &EmitPlan, v: ValueId) -> Option<i16> {
     };
     let n = match *c {
         MirConst::I64(x) => x,
-        MirConst::I32(x) => i64::from(x),
         MirConst::Bool(x) => i64::from(x),
         _ => return None,
     };
@@ -1254,13 +1252,6 @@ fn emit_stored(
             });
         }
         MirInst::Phi { .. } | MirInst::MatchPayload { .. } => {}
-        MirInst::FieldLoad { dest, object, .. } => {
-            emit_stack(out, *object, func, plan, regs, pool, loc)?;
-            out.push(IlOp::StorePop {
-                slot: u32::from(regs[dest.index()]),
-                loc,
-            });
-        }
         MirInst::HeapFieldLoad {
             dest,
             object,
@@ -1303,29 +1294,6 @@ fn emit_stored(
                 loc,
             })?;
             if plan.need_slot[dest.index()] {
-                out.push(IlOp::StorePop {
-                    slot: u32::from(regs[dest.index()]),
-                    loc,
-                });
-            }
-        }
-        MirInst::FieldStore {
-            dest,
-            src,
-            base,
-            index,
-            ..
-        } => {
-            emit_stack(out, *src, func, plan, regs, pool, loc)?;
-            out.push(IlOp::StorePop {
-                slot: *base + *index,
-                loc,
-            });
-            if plan.need_slot[dest.index()] {
-                out.push(IlOp::Load {
-                    slot: *base + *index,
-                    loc,
-                });
                 out.push(IlOp::StorePop {
                     slot: u32::from(regs[dest.index()]),
                     loc,
@@ -2152,7 +2120,6 @@ fn emit_stack(
                 }
             Ok(())
         }
-        MirInst::FieldLoad { object, .. } => emit_stack(out, *object, func, plan, regs, pool, loc),
         MirInst::HeapFieldLoad {
             object,
             name,
@@ -2187,7 +2154,6 @@ fn emit_stack(
             pool,
             loc,
         }),
-        MirInst::FieldStore { src, .. } => emit_stack(out, *src, func, plan, regs, pool, loc),
         MirInst::Alloc { kind, elems, kinds, .. } => {
             emit_alloc_stack(EmitAllocStackArgs {
                 out,
@@ -2298,7 +2264,6 @@ fn push_cast(out: &mut Vec<IlOp>, kind: MirCastKind, loc: DebugLoc) -> Result<()
             out.push(IlOp::from_plain_byte(Byte::new(Instruction::CastFloatToInt), loc));
             Ok(())
         }
-        MirCastKind::Sext => Err(LowerError::Refused("lir sext".into())),
         // The same word, retyped.
         MirCastKind::Word => Ok(()),
     }
@@ -2676,24 +2641,12 @@ fn push_const(
             let idx = intern_pool(pool, v as u64)?;
             out.push(IlOp::ConstPool { idx, loc });
         }
-        MirConst::I32(v) => {
-            if v >= 0 {
-                out.push(IlOp::Const { imm: v, loc });
-            } else {
-                let idx = intern_pool(pool, v as i64 as u64)?;
-                out.push(IlOp::ConstPool { idx, loc });
-            }
-        }
         MirConst::Bool(v) => out.push(IlOp::Const {
             imm: i32::from(v),
             loc,
         }),
         MirConst::F64(bits) => {
             let idx = intern_pool(pool, bits)?;
-            out.push(IlOp::ConstPool { idx, loc });
-        }
-        MirConst::F32(bits) => {
-            let idx = intern_pool(pool, u64::from(bits))?;
             out.push(IlOp::ConstPool { idx, loc });
         }
     }

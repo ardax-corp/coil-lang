@@ -730,7 +730,7 @@ impl BodyFacts {
                 HirKind::Let { local, init: Some(init) } if body.local(*local).kind == LocalKind::Let => {
                     match &body.expr(*init).kind {
                         HirKind::Make {
-                            kind: MakeKind::Array | MakeKind::List | MakeKind::Tuple | MakeKind::Class(_) | MakeKind::Record(_),
+                            kind: MakeKind::Array | MakeKind::Tuple | MakeKind::Class(_) | MakeKind::Record(_),
                             ..
                         } => {
                             fresh.insert(*local);

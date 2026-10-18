@@ -161,14 +161,14 @@ impl MirBuilder {
     fn is_const_one(&self, v: ValueId) -> bool {
         let v = self.resolve(v);
         self.func.blocks.iter().flat_map(|b| b.insts.iter()).any(|i| {
-            matches!(i, MirInst::Const { dest, c: MirConst::I64(1) | MirConst::I32(1) } if *dest == v)
+            matches!(i, MirInst::Const { dest, c: MirConst::I64(1) } if *dest == v)
         })
     }
 
     fn is_int_const(&self, v: ValueId) -> bool {
         let v = self.resolve(v);
         self.func.blocks.iter().flat_map(|b| b.insts.iter()).any(|i| {
-            matches!(i, MirInst::Const { dest, c: MirConst::I64(_) | MirConst::I32(_) } if *dest == v)
+            matches!(i, MirInst::Const { dest, c: MirConst::I64(_) } if *dest == v)
         })
     }
 

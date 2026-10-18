@@ -738,25 +738,12 @@ impl<const S: usize> Machine<S> {
 
                 }
                 Instruction::BinSlotSlotConstJmpt => {
-                    let (bin_op, a, desc_idx) = opcode.bin_slot_slot_const_jmpf_parts();
-                    promise!(desc_idx < constants.len());
-                    let packed = unsafe { *constants.get_unchecked(desc_idx) };
-                    let (b, cmp_op, float_idx, target) =
-                        RawByte::unpack_bin_slot_slot_const_jmpf_desc(packed);
-                    let b = b as usize;
-                    promise!(float_idx < constants.len());
-                    promise!(sp + a < stack_cap);
-                    promise!(sp + b < stack_cap);
-                    let va = self.stack[sp + a].as_float();
-                    let vb = self.stack[sp + b].as_float();
-                    let mag = crate::fused::eval_f64_bin(bin_op, va, vb);
-                    let rhs =
-                        Value::from(unsafe { *constants.get_unchecked(float_idx) }).as_float();
-                    let taken = crate::fused::eval_f64_cmp(cmp_op, mag, rhs);
-                    if taken == matches!(*bc, Instruction::BinSlotSlotConstJmpt) {
-                        charge_step!(target < ip);
-                        set_jump_target(&mut ip, target, code);
-                    }
+                    *ip_out = ip;
+                    *sp_out = sp;
+                    return dispatch::RestFlow::Done(self.runtime_panic(
+                        "retired opcode BinSlotSlotConstJmpt",
+                        ip.saturating_sub(1),
+                    ));
                 }
                 Instruction::HALT => {
                     if let Some(out) = self.output.as_mut() {
@@ -1644,140 +1631,14 @@ impl<const S: usize> Machine<S> {
                 | Instruction::DynSub
                 | Instruction::DynMul
                 | Instruction::DynDiv
-                | Instruction::DynMod => {
-                    /// Classify a value into (ValueTag, payload-Value).
-                    /// Uses `Heap::find_object_by_addr` (mapped slot + header kind).
-                    fn classify_dyn(v: Value, heap: &Heap) -> (ValueTag, Value) {
-                        let addr = v.raw() as u64;
-                        if v.raw().is_null() {
-                            return (ValueTag::Int, v);
-                        }
-                        if let Some(obj) = heap.find_object_by_addr(addr) {
-                            return match obj {
-                                Object::Boxed(gc) => {
-                                    let b = gc.as_ref();
-                                    let tag = ValueTag::from_u16(b.tag).unwrap_or(ValueTag::Int);
-                                    let inner = match &b.payload {
-                                        Member::Value(iv) => *iv,
-                                        Member::Object(o) => Value::from(o.addr()),
-                                    };
-                                    (tag, inner)
-                                }
-                                Object::String(_) => (ValueTag::String, v),
-                                _ => (ValueTag::Int, v),
-                            };
-                        }
-                        (ValueTag::Int, v)
-                    }
-
-                    let b_val = self.stack.pop();
-                    let a_val = self.stack.pop();
-                    let (a_tag, a_inner) = classify_dyn(a_val, &self.heap);
-                    let (b_tag, b_inner) = classify_dyn(b_val, &self.heap);
-
-                    let bc_instr = opcode.bytecode();
-                    let result: Value = match (a_tag, b_tag) {
-                        (ValueTag::Float, _) | (_, ValueTag::Float) => {
-                            let af = a_inner.as_float();
-                            let bf = b_inner.as_float();
-                            let r = match bc_instr {
-                                Instruction::DynAdd => af + bf,
-                                Instruction::DynSub => af - bf,
-                                Instruction::DynMul => af * bf,
-                                Instruction::DynDiv => af / bf,
-                                Instruction::DynMod => af % bf,
-                                _ => unreachable!(),
-                            };
-                            Value::from(r)
-                        }
-                        (ValueTag::String, ValueTag::String)
-                            if matches!(bc_instr, Instruction::DynAdd) =>
-                        {
-                            // Root before any GC (same as FORMAT/STRING).
-                            self.push_concat(a_inner, b_inner, ip);
-                            *ip_out = ip;
+                | Instruction::DynMod
+                | Instruction::DynCmp
+                | Instruction::DynEq
+                | Instruction::DynNe
+                | Instruction::DynPrint => {
+                    *ip_out = ip;
                     *sp_out = sp;
-                    return dispatch::RestFlow::Continue;
-                        }
-                        _ => {
-                            let ai = a_inner.as_int();
-                            let bi = b_inner.as_int();
-                            let r = match bc_instr {
-                                Instruction::DynAdd => int_arith::add(ai, bi),
-                                Instruction::DynSub => int_arith::sub(ai, bi),
-                                Instruction::DynMul => int_arith::mul(ai, bi),
-                                Instruction::DynDiv => int_arith::div(ai, bi),
-                                Instruction::DynMod => int_arith::rem(ai, bi),
-                                _ => unreachable!(),
-                            };
-                            match r {
-                                Ok(r) => Value::from(r),
-                                Err(t) => int_trap!(t),
-                            }
-                        }
-                    };
-                    self.stack.push(result);
-                }
-                Instruction::DynCmp => {
-                    fn classify_int_dyn(v: Value, heap: &Heap) -> i64 {
-                        let addr = v.raw() as u64;
-                        if v.raw().is_null() {
-                            return v.as_int();
-                        }
-                        if let Some(Object::Boxed(gc)) = heap.find_object_by_addr(addr) {
-                            return match &gc.as_ref().payload {
-                                Member::Value(iv) => iv.as_int(),
-                                Member::Object(_) => 0,
-                            };
-                        }
-                        v.as_int()
-                    }
-                    let kind = opcode.operand_u32() & 0xFF;
-                    let b_val = self.stack.pop();
-                    let a_val = self.stack.pop();
-                    let ai = classify_int_dyn(a_val, &self.heap);
-                    let bi = classify_int_dyn(b_val, &self.heap);
-                    let result = match kind {
-                        0 => ai < bi,  // Le
-                        1 => ai <= bi, // Leq
-                        2 => ai > bi,  // Gt
-                        3 => ai >= bi, // Geq
-                        _ => false,
-                    };
-                    self.stack.push(Value::from(result));
-                }
-                Instruction::DynEq | Instruction::DynNe => {
-                    fn unbox_dyn(v: Value, heap: &Heap) -> Value {
-                        let addr = v.raw() as u64;
-                        if v.raw().is_null() {
-                            return v;
-                        }
-                        if let Some(Object::Boxed(gc)) = heap.find_object_by_addr(addr) {
-                            return match &gc.as_ref().payload {
-                                Member::Value(iv) => *iv,
-                                Member::Object(o) => Value::from(o.addr()),
-                            };
-                        }
-                        v
-                    }
-                    let b_val = unbox_dyn(self.stack.pop(), &self.heap);
-                    let a_val = unbox_dyn(self.stack.pop(), &self.heap);
-                    let eq = crate::value_eq::values_eq(&self.heap, a_val, b_val);
-                    let result = if matches!(opcode.bytecode(), Instruction::DynEq) {
-                        eq
-                    } else {
-                        !eq
-                    };
-                    self.stack.push(Value::from(result));
-                }
-                Instruction::DynPrint => {
-                    let v = self.stack.pop();
-                    let text = Self::stringify_value(&self.heap, v);
-                    if let Some(out) = self.output.as_mut() {
-                        let _ = write!(out, "{text}");
-                    } else {
-                        print!("{text}");
-                    }
+                    return dispatch::RestFlow::Done(self.runtime_panic("retired opcode Dyn*", ip.saturating_sub(1)));
                 }
                 _ => {
                     *ip_out = ip;

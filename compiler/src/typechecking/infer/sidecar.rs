@@ -33,10 +33,6 @@ pub struct TypedSidecar {
     dicts: HashMap<NodeId, Vec<InstanceDef>>,
     for_in: HashMap<NodeId, ForInInfo>,
     ffi_tags: HashMap<DefId, Vec<u32>>,
-    /// ObjEnum / small class values proven never to leave this frame.
-    frame_local: HashSet<NodeId>,
-    /// Last in-frame use of a frame-local (drop payload/tag after this node).
-    frame_local_last_use: HashSet<NodeId>,
     /// Index expressions proven `0 <= i < len(arr)` with stable length.
     in_bounds_index: HashSet<NodeId>,
     /// Dividend / index nodes proven `>= 0` (Q4: skip Euclidean rem fixup).
@@ -87,20 +83,6 @@ impl TypedSidecar {
 
     pub fn tys(&self) -> &HashMap<NodeId, Ty> {
         &self.tys
-    }
-
-    /// True when `id` is a non-escaping in-frame ObjEnum / small class.
-    pub fn is_frame_local(&self, id: NodeId) -> bool {
-        self.frame_local.contains(&id)
-    }
-
-    pub fn frame_local_ids(&self) -> &HashSet<NodeId> {
-        &self.frame_local
-    }
-
-    /// True when `id` is the last in-frame use of a frame-local value.
-    pub fn is_frame_local_last_use(&self, id: NodeId) -> bool {
-        self.frame_local_last_use.contains(&id)
     }
 
     /// True when `id` is an `arr[i]` proven in-bounds with a stable length.
@@ -227,8 +209,6 @@ impl Checker {
             dicts: self.call_site_dicts.clone(),
             for_in: self.for_in_infos.clone(),
             ffi_tags,
-            frame_local: self.frame_local.clone(),
-            frame_local_last_use: self.frame_local_last_use.clone(),
             in_bounds_index: self.in_bounds_index.clone(),
             nonneg_expr: self.nonneg_expr.clone(),
             pin_array: self.pin_array.clone(),

@@ -717,7 +717,6 @@ fn contains_var(ty: &Ty) -> bool {
         Ty::Var(_) => true,
         Ty::Fun(a, b) => contains_var(a) || contains_var(b),
         Ty::App(head, args) => contains_var(head) || args.iter().any(contains_var),
-        Ty::List(inner) => contains_var(inner),
         Ty::Sum { variants, .. } => variants.iter().any(|(_, payload)| match payload {
             crate::typechecking::ty::EnumVariantPayloadTy::Unit => false,
             crate::typechecking::ty::EnumVariantPayloadTy::Tuple(items) => {
@@ -816,7 +815,6 @@ where
         Expression::Program(items)
         | Expression::Block(items)
         | Expression::Fragment(items)
-        | Expression::List(items)
         | Expression::Tuple(items)
         | Expression::Array(items)
         | Expression::Declare(items)

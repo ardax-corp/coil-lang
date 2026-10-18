@@ -1,18 +1,17 @@
-//! HIR lowering: function bodies inside [`crate::hir::lower`]'s subset are
-//! emitted from HIR instead of the AST walk.
+//! HIR body planning for MIR lowering.
 //!
-//! [`Compiler::compile_function_decl_into`] keeps the prologue, slots for
-//! parameters, the fall-through return and function records; only the body
-//! walk is replaced. Every check runs before the first emit, so a refused
-//! body falls back to the AST codegen with nothing to roll back.
+//! Every function body inside [`crate::hir::lower`]'s subset is planned
+//! here and lowered to MIR by `mir::lower_from_hir`; a refused body is an
+//! internal error (there is no AST codegen or stack lowering to fall back
+//! to). [`Compiler::compile_function_decl_into`] keeps the prologue, slots
+//! for parameters and function records; the body itself is a placeholder
+//! that binds the labels MIR emission replaces.
 //!
-//! Each value is emitted in a [`Rep`]: one word in its type's one-word
-//! layout (immediate, heap pointer, boxed `ObjEnum` or pointer niche), or
-//! the `[payload, tag]` pair a two-word `CALL` / `RETURN` carries. A
-//! consumer names the representation it needs; constructors and `match`
-//! build it directly, other producers convert at the edge. The plan walk
-//! ([`Compiler::hir_check_value`]) and the emit walk follow the same rules,
-//! so a body the plan accepts always emits.
+//! The plan walk ([`Compiler::hir_check_value`]) decides each value's
+//! [`Rep`]: one word in its type's one-word layout (immediate, heap pointer,
+//! boxed `ObjEnum` or pointer niche), or the `[payload, tag]` pair a
+//! two-word `CALL` / `RETURN` carries, and records the layout, dictionary
+//! and call tables `from_hir` reads.
 
 use super::*;
 use crate::hir::lower::{self, ValueClass};
@@ -1638,7 +1637,7 @@ impl Compiler {
             Ty::Con(n) => checker.class_has_drop(n) || checker.enum_has_drop(n),
             Ty::App(h, args) => Self::finalized(checker, h) || args.iter().any(|a| Self::finalized(checker, a)),
             Ty::Tuple(items) => items.iter().any(|t| Self::finalized(checker, t)),
-            Ty::List(inner) | Ty::Readonly(inner) => Self::finalized(checker, inner),
+            Ty::Readonly(inner) => Self::finalized(checker, inner),
             Ty::Array { element, .. } => Self::finalized(checker, element),
             Ty::Sum { name, .. } => checker.enum_has_drop(name),
             _ => false,
@@ -7462,7 +7461,6 @@ fn open_params(ty: &Ty, params: &[String]) -> Ty {
         },
         Ty::App(head, args) => Ty::App(Box::new(open(head)), args.iter().map(open).collect()),
         Ty::Fun(a, b) => Ty::Fun(Box::new(open(a)), Box::new(open(b))),
-        Ty::List(inner) => Ty::List(Box::new(open(inner))),
         Ty::Readonly(inner) => Ty::Readonly(Box::new(open(inner))),
         Ty::Tuple(items) => Ty::Tuple(items.iter().map(open).collect()),
         Ty::Array { element, length } => Ty::Array {
@@ -7484,7 +7482,6 @@ fn close_params(ty: &Ty, args: &[Ty]) -> Option<Ty> {
         Ty::Var(crate::typechecking::ty::TyVarId(v)) if *v > u32::MAX - 64 => args.get((u32::MAX - v) as usize)?.clone(),
         Ty::App(head, items) => Ty::App(Box::new(close(head)?), items.iter().map(close).collect::<Option<_>>()?),
         Ty::Fun(a, b) => Ty::Fun(Box::new(close(a)?), Box::new(close(b)?)),
-        Ty::List(inner) => Ty::List(Box::new(close(inner)?)),
         Ty::Readonly(inner) => Ty::Readonly(Box::new(close(inner)?)),
         Ty::Tuple(items) => Ty::Tuple(items.iter().map(close).collect::<Option<_>>()?),
         Ty::Array { element, length } => Ty::Array {

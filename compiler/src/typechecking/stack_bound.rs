@@ -482,7 +482,6 @@ fn walk_self_calls<'a>(ast: &'a Output<'a>, fn_name: &str, out: &mut Vec<&'a [Ou
         Expression::Program(items)
         | Expression::Block(items)
         | Expression::Fragment(items)
-        | Expression::List(items)
         | Expression::Array(items)
         | Expression::Tuple(items)
         | Expression::If(items) => {

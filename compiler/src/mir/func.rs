@@ -177,6 +177,7 @@ impl MirFunc {
             .unwrap_or_else(DebugLoc::unknown)
     }
 
+    #[cfg(test)]
     pub fn live_roots_at(&self, at: ValueId) -> Option<&LiveRootSet> {
         self.gc_roots.iter().find(|s| s.at == at)
     }
@@ -185,6 +186,7 @@ impl MirFunc {
         self.types.get(v.index()).copied().unwrap_or(MirTy::Bottom)
     }
 
+    #[cfg(test)]
     /// True when any HostInvoke is impure (I6).
     pub fn has_impure_host(&self) -> bool {
         self.blocks.iter().any(|b| {
@@ -682,35 +684,6 @@ impl MirFunc {
                 }
                 if !self.ty(*dest).is_specialized() {
                     return Err(format!("{dest} MatchPayload dest type"));
-                }
-            }
-            MirInst::FieldLoad {
-                dest,
-                object,
-                index,
-                ..
-            } => {
-                if !self.ty(*object).is_specialized() {
-                    return Err(format!("{dest} FieldLoad object type"));
-                }
-                if self.ty(*dest) != self.ty(*object) {
-                    return Err(format!("{dest} FieldLoad dest type"));
-                }
-                if *index > 32 {
-                    return Err(format!("{dest} FieldLoad index"));
-                }
-            }
-            MirInst::FieldStore {
-                dest, src, index, ..
-            } => {
-                if !self.ty(*src).is_specialized() {
-                    return Err(format!("{dest} FieldStore src type"));
-                }
-                if self.ty(*dest) != self.ty(*src) {
-                    return Err(format!("{dest} FieldStore dest type"));
-                }
-                if *index > 32 {
-                    return Err(format!("{dest} FieldStore index"));
                 }
             }
             MirInst::HeapFieldLoad {

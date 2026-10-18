@@ -1,5 +1,5 @@
-//! Try to replace a numeric IL body with dense MIR bytecode, or lift
-//! an eligible leftover body through MIR→LIR (I8).
+//! Emit a body's MIR (lowered from HIR) as dense bytecode when that wins,
+//! else as LIR stack ops.
 
 use common::Instruction;
 
@@ -133,7 +133,7 @@ fn is_mir_index(i: &crate::mir::MirInst) -> bool {
 /// not reuse that id or concat lands calls on a loop header.
 ///
 /// Dense-specialize one body from `from_hir` (MIR lowered from HIR):
-/// dense IL plus its ABI when it beats `ops` (fuse-IL).
+/// dense IL plus its ABI when it beats `fallback`, the body's LIR form.
 ///
 /// CSE → LICM → CSE → InstCombine (incl. P11 float peeps) → DestProp → SR → CSE → GVN/PRE,
 /// then saxpy-reduce HostInvoke (P12) or dense emit (W4 allowlisted
@@ -177,7 +177,7 @@ fn specialize_side(
     side: &mut BodySidecar,
 ) -> Option<(Vec<IlOp>, DenseAbi)> {
     // Nested / multi-header numeric loops are eligible (flagship mandelbrot).
-    // Infer requires float +/−/×/÷, counted i64 +/−/×/÷/%, or i32. A
+    // Infer requires float +/−/×/÷, or counted i64 +/−/×/÷/%. A
     // back-edge or a straight-line numeric body may lift; keep/refuse is
     // the cost gate vs fuse-IL (A3). S3/S3b: one-word CALL (dense map or
     // open), I6 HostInvoke including Q9 R2 `from_bytes` / `to_bytes`, heap
@@ -200,7 +200,7 @@ fn specialize_side(
     // S2k: last-arm writes must survive; Seek size is a cost, not a cap.
     // B7 / C1: sibling / mutual TailCall and self multi-word CALL/RETURN
     // may lift (stack-arg protocol, reserved callee entry labels). N>2
-    // still refuses at infer/lower (`MAX_MODELED_RET_WORDS`).
+    // still refuses at infer/lower.
     let select_cfg = fallback.is_some_and(has_sroa_select_cfg);
     let facts = super::gates::GateFacts::of(from_hir);
     let has_alloc = facts.has_alloc;
@@ -218,7 +218,7 @@ fn specialize_side(
         return refuse_dense("call ABI");
     }
     let mut func = from_hir.clone();
-    // Stack-IL CSE refuses DIVF; number it on SSA before dense emit.
+    // HIR CSE refuses DIVF; number it on SSA before dense emit.
     crate::mir::cse(&mut func);
     crate::mir::licm(&mut func);
     crate::mir::cse(&mut func);
@@ -396,11 +396,12 @@ fn count_make_enum(ops: &[IlOp]) -> usize {
 fn count_store_index(ops: &[IlOp]) -> usize {
     ops.iter()
         .filter(|op| match op {
-            IlOp::StoreIndexPin { .. } | IlOp::StoreIndexPinUnchecked { .. } => true,
             IlOp::Byte { byte, .. } => matches!(
                 *byte.bytecode(),
                 Instruction::StoreIndex
                     | Instruction::StoreIndexUnchecked
+                    | Instruction::StoreIndexPin
+                    | Instruction::StoreIndexPinUnchecked
                     | Instruction::DenseStoreIndex
             ),
             _ => false,
@@ -411,13 +412,11 @@ fn count_store_index(ops: &[IlOp]) -> usize {
 fn count_index(ops: &[IlOp]) -> usize {
     ops.iter()
         .filter(|op| match op {
-            IlOp::Index { .. }
-            | IlOp::IndexUnchecked { .. }
-            | IlOp::IndexPin { .. }
-            | IlOp::IndexPinUnchecked { .. } => true,
+            IlOp::Index { .. } | IlOp::IndexUnchecked { .. } => true,
             IlOp::Byte { byte, .. } => matches!(
                 *byte.bytecode(),
-                Instruction::Index | Instruction::IndexUnchecked | Instruction::DenseIndex
+                Instruction::Index | Instruction::IndexUnchecked | Instruction::IndexPin
+                    | Instruction::IndexPinUnchecked | Instruction::DenseIndex
                     | Instruction::DenseIndexJmpf
             ),
             _ => false,
@@ -475,13 +474,9 @@ fn emit_cost(ops: &[IlOp]) -> usize {
         .sum()
 }
 
-/// MIR→LIR for a body dense specialize misses (I8): `from_hir` (MIR
-/// lowered from HIR) emitted as stack IL with `emit_lir` keeping
-/// single-use values on the stack. Keep/refuse is the LIR cost gate in
-/// `IlModule`, not a feature floor.
-///
-/// The body reads its walls off its MIR, and its LIR is the fuse IL
-/// itself: there is no other stack IL to compare against.
+/// MIR→LIR for a body dense does not keep: `from_hir` (MIR lowered from
+/// HIR) emitted as stack ops with `emit_lir` keeping single-use values on
+/// the stack. The body reads its walls off its MIR.
 pub fn try_lower_abi_body_side(
     labels: &BodyLabels,
     name: &str,
@@ -519,8 +514,8 @@ pub fn try_lower_abi_body_side(
     lir_tail(labels, name, pool, has_alloc, func, side)
 }
 
-/// The fuse IL the LIR tier would emit from a fused body's MIR: what runs
-/// if dense refuses it, for the dense gates to compare against. Leaves
+/// The stack ops the LIR tier would emit from a body's MIR: what runs if
+/// dense refuses it, for the dense gates to compare against. Leaves
 /// `pool`, the MIR capture and the refusal census as they were.
 pub fn fuse_fallback(labels: &BodyLabels, name: &str, pool: &[u64], func: &crate::mir::MirFunc) -> Option<Vec<IlOp>> {
     let captured = MIR_CAPTURE.with(|c| c.borrow_mut().take());

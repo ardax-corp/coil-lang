@@ -499,8 +499,6 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         | MirInst::Call { .. }
         | MirInst::CallIndirect { .. }
         | MirInst::MatchPayload { .. }
-        | MirInst::FieldLoad { .. }
-        | MirInst::FieldStore { .. }
         | MirInst::HeapFieldLoad { .. }
         | MirInst::HeapFieldStore { .. }
         | MirInst::Index { .. }

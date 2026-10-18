@@ -3,7 +3,7 @@
 //! The dense / LIR gates ask whether a body allocates, where its loops are
 //! and which reconstruct walls it holds. Every body takes its stack IL
 //! from MIR, so the gates read them here. The questions match their
-//! stack-IL forms ([`super::gc::refuses_alloc`], `loop_ranges`)
+//! stack-IL forms ([`super::gc::refuse_reason`], `loop_ranges`)
 //! instruction for instruction.
 
 use std::collections::HashSet;
@@ -16,7 +16,7 @@ use super::licm::natural_loops;
 /// What the tier gates ask of a body.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct GateFacts {
-    /// An allocation or GC safepoint ([`super::gc::refuses_alloc`]).
+    /// An allocation or GC safepoint ([`super::gc::refuse_reason`]).
     pub has_alloc: bool,
     /// The body has a loop.
     pub has_loop: bool,
@@ -27,7 +27,7 @@ pub struct GateFacts {
     pub post_loop_alloc_return: bool,
 }
 
-/// The MIR form of [`super::gc::refuses_alloc`]: `Make*` / `InitTyped` /
+/// The MIR form of [`super::gc::refuse_reason`]: `Make*` / `InitTyped` /
 /// `MakeDict` / `DictEntries` / `MakeCoro`, `ArrayPush`, `STRINGIFY`, and
 /// `FORMAT` with arguments. `BoxValue` / `MakeFn` / `MakePolyFn` are not.
 pub fn refuses_alloc(inst: &MirInst) -> bool {

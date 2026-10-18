@@ -1,35 +1,39 @@
-# Numeric MIR (COI-267 / COI-268) and Result/Option LIR (COI-270)
+# MIR
 
-Typed SSA sidecar for a **numeric subset**, **dense bytecode** for
-specialized float/i32 loops (P1), MIR CSE (P2), and **MIR→LIR** for
-shipped Result/Option layouts (P3).
-
-**Language islands (I0+)** expand this sidecar beyond pure numeric — they
-are not a full-MIR rewrite. Doctrine, I1–I8 ladder, refuse map, and A/B
-rules: [mir-islands.md](mir-islands.md) (COI-292). IL stays lowering +
-fuse-select ([pipeline.md](pipeline.md)).
+Every function body lowers from HIR to typed SSA (MIR) and is emitted from
+it in one of two tiers: **dense** 3-address bytecode, or **LIR**, the VM's
+stack ops written from the SSA. Since M4 and M5 (2026-10) there is no
+stack-IL lift, no fuse-IL tier and no stack-lowering fallback; a body MIR
+cannot take is an internal error. The P*, W*, I* and S* sections below are
+the history of how MIR coverage grew to every body; their notes about
+"fuse-IL" describe the stack-lowered bodies that no longer exist.
 
 ## Where it lives
 
-`compiler/src/mir/` — not inside `il/`. Fuse-IL stays the production lowerer
-for non-specialized functions. Dense emit replaces a whole function body
-before stack-IL opts when the body qualifies. Two-slot leaf helpers replace
-the body with stack IL (`emit_lir`) after the same opts when the reconstruct
-is no larger than the opted fuse-IL (single-use return/cmp values stay on
-the stack).
+`compiler/src/mir/`. Per body, in order:
+
+1. `codegen/emit_hir.rs` plans the body (layouts, dictionaries, call
+   targets) and `mir::lower_from_hir` (`from_hir.rs`) lowers HIR plus that
+   plan to SSA, with GC roots and frame maps.
+2. `IlModule::optimize_and_flatten` (`il/module.rs`) tries **dense** leaf
+   first: MIR passes, then dense emit, kept when its cost beats the body's
+   LIR form and every callee it `CALL`s is dense.
+3. Otherwise the body takes **LIR**: SROA (allocating bodies) or CSE, then
+   `emit_lir`. A `defer` body takes LIR with its cleanup pad.
+4. All bodies are concatenated and lowered once by `il::lower`
+   (fuse-select, PCs, encode).
 
 | Piece | Role |
 |-------|------|
-| `MirTy` | Lattice: `bottom ⊑ {i32⊑i64, f32⊑f64, bool, heap-ref, niche Option/Result} ⊑ value`. I1 names heap/niche words; dense still uses numeric lanes only ([mir-islands.md](mir-islands.md)). |
+| `MirTy` | Lattice: `bottom ⊑ {i64, f64, bool, heap-ref, niche Option/Result} ⊑ value` |
 | `MirLayout` | Call-edge ABI: `word` / `twoslot` / `heap_niche` |
-| `MirBuilder` | Braun SSA (locals = IL slots, explicit φ) |
-| `lower_from_hir` | HIR body → SSA. Both MIR tiers start here; since M4 there is no stack-IL lift for them |
-| `try_lower_numeric` | Pre-fuse `IlOp` → SSA, only to draw S2b stack maps for allocating fuse-IL bodies (`try_build_draft`) until M5 |
-| `try_specialize_body_side` | MIR from HIR + MIR CSE/GVN + MIR LICM + MIR InstCombine (P11 float peeps) + DestProp + IV SR + saxpy-reduce HostInvoke (P12) or dense emit (HostInvoke box/unbox; cost gate vs fuse) |
-| `try_lower_abi_body_side` | MIR from HIR + SROA/CSE + LIR emit when there is no hard refuse; `IlModule` keeps it only if cost ≤ fuse |
-| `mir::cse` | Same-block GVN (includes `DIVF`/`DIV`); used on dense and LIR leafs |
-| `mir::gvn` | Dominator GVN + fully-anticipated fork PRE; dense specialize only (not ABI LIR) |
-| `mir::licm` | Natural-loop hoist of invariant Const/arith/cmp/cast (float `Div` ok; int `Div`/`Rem` stay) |
+| `MirBuilder` | Braun SSA (locals = frame slots, explicit φ) |
+| `lower_from_hir` | HIR body → SSA, for every body |
+| `try_specialize_body_side` | MIR CSE/GVN + LICM + InstCombine (P11 float peeps) + DestProp + IV SR + saxpy-reduce HostInvoke (P12) or dense emit (HostInvoke box/unbox; cost gate vs the body's LIR form) |
+| `try_lower_abi_body_side` | SROA or CSE + LIR emit (`emit_lir`) |
+| `mir::cse` | Same-block GVN (includes `DIVF`/`DIV`); used on dense and LIR |
+| `mir::gvn` | Dominator GVN + fully-anticipated fork PRE; dense only |
+| `mir::licm` | Natural-loop hoist of invariant Const/arith/cmp/cast (float `Div` ok; int `Div`/`Rem` stay); dense only, so LIR bodies get only HIR LICM |
 | text form | Print / parse for round-trip tests |
 
 Language `int` / `float` / `bool` map to `i64` / `f64` / `bool`. I1
@@ -45,8 +49,8 @@ lowers niche / two-slot / boxed-overlap match (`LogNot` / tag `Br` /
 two-slot match as dense register `Br` (cost gate vs LIR/fuse). Boxed
 `JumpIfMatch` stays MIR→LIR.
 I3 ([COI-295](https://linear.app/ardax/issue/COI-295/i3-non-escaping-class-fields-in-mir))
-lowers field load/store on **non-escaping** named class locals the
-local_escape sidecar already unboxed into consecutive slots
+lowers field load/store on **non-escaping** named class locals that
+lowering unboxed into consecutive slots
 (`FieldLoad` / `FieldStore`). Escaping / heap-backed named locals
 (`InitTyped` / `GetField` / `LoadField`) stay fuse-IL. Dense emit
 refuses the new field ops.
@@ -80,16 +84,15 @@ widens dense coverage: one-word `CALL` beyond the dense map, and I6
 HostInvoke including Q9 R2 `from_bytes` / `to_bytes`. Heap-index / `StoreIndex` take dense after V* miss (S3b): unpinned
 `Index` / `StoreIndex` / `ArrayLen`. Residual `StorePop` leaves tell at
 the prologue frame high-water; S2e does not emit a per-residual `Seek`.
-Pin opcodes stay fuse-IL / proven stack-IL only — pin keys do not
-survive the dense prologue `Seek`.
+Only the prologue `ArrayPin` is still emitted; `IndexPin*` / `StoreIndexPin*` are not ([array-pin.md](array-pin.md)).
 Boxed dense+match stays I2 LIR (JumpIfMatch stack protocol vs dense regs).
 Niche / two-slot match may dense (**Q8**).
 Stack-map note: [mir-stack-maps.md](mir-stack-maps.md).
 
 ## P1 — dense exec (COI-268)
 
-Eligible numeric loops (float `+`/`-`/`*`/`/`, counted i64 `+`/`-`/`*`/`/`/`%`,
-or `i32`; one or more back-edges) and cost-gated straight-line bodies emit:
+Eligible numeric loops (float `+`/`-`/`*`/`/`, counted i64 `+`/`-`/`*`/`/`/`%`;
+one or more back-edges) and cost-gated straight-line bodies emit:
 
 - `DenseBin` / `DenseConst` / `DenseMove` / `DenseUnary` / `DenseCast`
 - `Seek` to the typed slot high-water mark
@@ -116,7 +119,7 @@ After SSA lower, **GVN** runs on the numeric function before dense emit
 tree and adds fully-anticipated fork PRE. HIR CSE (`hir::cse`) only sees
 source-level expressions within a block; this pass also numbers values
 lowering introduces and `DIV`/`MOD`/`DIVF`/`MODF` across blocks.
-Non-MIR (fuse-IL) bodies get only the HIR CSE / LICM (the stack-IL passes,
+LIR bodies get MIR CSE but only the HIR LICM (the stack-IL passes,
 InstCombine included, were removed 2026-10). Hit
 benches: `examples/perf/mir_cse_divf.hy`, `mir_gvn_divf.hy`.
 
@@ -187,7 +190,7 @@ matches (no inner host). Hit bench: `examples/perf/mir_dense_host.hy`.
 One-word ABI ([`compiler/src/mir/abi.rs`](../../compiler/src/mir/abi.rs)):
 
 - **Args:** `arity` Value words in callee slots `0..arity` (same bits as
-  typed dense slots — `i32`/`i64`/`f32`/`f64`/`bool`).
+  typed dense slots — `i64`/`f64`/`bool`).
 - **Return:** one word on TOS (`RETURN` width 1). Caller `STORE`s it.
 - **Two-slot / niche:** helper two-slot is **B3**; sibling / mutual
   `TailCall` is **B7**; self two-slot `CALL` / `RETURN` is **C1**.
@@ -211,7 +214,7 @@ Hit bench: `examples/perf/mir_dense_call.hy`.
 
 ## P7 — MIR InstCombine (COI-281)
 
-After LICM + a second CSE, **typed peeps** run on dense SSA (`f64` / `i32` /
+After LICM + a second CSE, **typed peeps** run on dense SSA (`f64` /
 `i64`). HIR folding (`hir::fold`) only sees literal operands in the source
 tree; this pass folds binop results too.
 
@@ -348,7 +351,7 @@ Prove: `scan` in `examples/perf/vec_scan.hy`; saxpy store in
 
 ## P3 — multi-word / niche as MIR→LIR (COI-270)
 
-LIR here is the existing **fuse-IL / stack IL**, not a new ISA. Review Board
+LIR here is the VM's stack ops, not a new ISA. Review Board
 kept host-edge pack/unpack; this cut does **not** revive pair/niche opcodes
 or a nursery.
 
@@ -377,29 +380,23 @@ product word, `hi` = tag / second word). One-word niche / boxed / scalar
 returns keep `hi = None`. Numeric ops stay `MirTy::{I64,F64,Bool}`; the
 layout sits on `MirFunc::ret_layout`.
 
-`try_lower_numeric` accepts `ret_words` in `1..=MAX_MODELED_RET_WORDS`
-(payload then tag on the IL stack when width is 2). Dense infer accepts
-that shape (B3 / C1); keep/refuse is the cost gate. N>2 refuses.
+A function returns up to two words (`MAX_MODELED_RET_WORDS`). Dense
+accepts that shape (B3 / C1); keep/refuse is the cost gate. N>2 refuses.
 
 ### LIR emit
 
-`emit_lir` writes stack IL only:
+`emit_lir` writes stack ops only:
 
 - `Seek` + slot `LOAD`/`STORE` / `BinSlotSlot` / fused cmp+`JMPF`
 - `RETURN` width 2 for `TwoSlot`, width 1 for `Word` / `HeapNiche`
 - niche bits as existing `BITAND` / `BITOR` / `CONST 0` / `LogNot`
 - no `MakeEnum`, no `ReturnPair` / `PairToHeap` / niche ISA tombstones
 
-`try_lower_abi_body` + `emit_lir` implement that mapping (eligible IL →
-SSA → fuse-IL). I8 widens eligibility to any leftover body without an
-I4–I7 refuse (`compiler/src/mir/entry.rs`). Production replace is **ON**
-after stack-IL opts: `emit_lir` keeps single-use return/cmp values on the
-stack and `DUP`s a TOS that is also the first word of `k, k+1`. Int
-`slot ⊕ imm` bins emit `BinSlotImm` so pre-fuse cost matches opted
-fuse-IL. A body is kept only when emitting cost does not grow.
-Stack-IL opts are **not** re-run on the reconstruct (CSE and LICM run on HIR
-before lowering; the reconstruct rematerializes `pair_int_churn`). Callers
-(`match f()`, `?`, I/O) stay on fuse-IL.
+`try_lower_abi_body_side` + `emit_lir` implement that mapping for every
+body dense does not keep. `emit_lir` keeps single-use return/cmp values on
+the stack and `DUP`s a TOS that is also the first word of `k, k+1`. Int
+`slot ⊕ imm` bins emit `BinSlotImm`. CSE and LICM run on HIR before
+lowering; LIR adds MIR SROA or CSE only.
 Hit bench: `examples/perf/result_int_churn.hy`.
 
 Emit is linear in a body's size (#1393): each block's fused compare

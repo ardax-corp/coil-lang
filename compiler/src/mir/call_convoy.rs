@@ -490,7 +490,7 @@ fn rematerialize_const(func: &MirFunc, def: &Option<(BlockId, usize)>) -> bool {
     matches!(
         func.block(bid).insts.get(idx),
         Some(MirInst::Const {
-            c: MirConst::I64(_) | MirConst::I32(_) | MirConst::Bool(_),
+            c: MirConst::I64(_) | MirConst::Bool(_),
             ..
         })
     )
@@ -502,7 +502,6 @@ fn const_fits_i16(func: &MirFunc, def: &Option<(BlockId, usize)>) -> bool {
     };
     let n = match func.block(bid).insts.get(idx) {
         Some(MirInst::Const { c: MirConst::I64(x), .. }) => *x,
-        Some(MirInst::Const { c: MirConst::I32(x), .. }) => i64::from(*x),
         Some(MirInst::Const { c: MirConst::Bool(x), .. }) => i64::from(*x),
         _ => return false,
     };

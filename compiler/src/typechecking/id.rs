@@ -284,7 +284,6 @@ pub fn walk_children<'n, 's>(node: &'n Output<'s>, visit: &mut dyn FnMut(&'n Out
         Expression::Block(cs)
         | Expression::Program(cs)
         | Expression::Fragment(cs)
-        | Expression::List(cs)
         | Expression::Declare(cs)
         | Expression::Invoke(cs) => {
             for c in cs {

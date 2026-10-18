@@ -1455,7 +1455,6 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
         } => {
             let k = match kind {
                 MirCastKind::IntToFloat => dense::CAST_I2F,
-                MirCastKind::Sext => dense::CAST_SEXT,
                 MirCastKind::FloatToInt => dense::CAST_F2I,
                 // The same word: a move, or nothing in place.
                 MirCastKind::Word => {
@@ -1688,11 +1687,6 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
             if d != s {
                 out.push(move_op(d, s));
             }
-        }
-        MirInst::FieldLoad { .. } | MirInst::FieldStore { .. } => {
-            return Err(LowerError::Refused(
-                "dense emit refuses unboxed FieldLoad/FieldStore (I3 is MIR→LIR)".into(),
-            ));
         }
         MirInst::HeapFieldLoad {
             dest,
@@ -2202,37 +2196,10 @@ pub(super) fn emit_const(
                 )))
             }
         }
-        MirConst::I32(v) => {
-            if let Ok(imm) = i16::try_from(v) {
-                Ok(byte(Byte::new(Instruction::DenseConst).with_dense_const(
-                    dense::TY_I32,
-                    dest,
-                    imm as u16,
-                    false,
-                )))
-            } else {
-                let idx = intern_pool(pool, v as u64)?;
-                Ok(byte(Byte::new(Instruction::DenseConst).with_dense_const(
-                    dense::TY_I32,
-                    dest,
-                    idx,
-                    true,
-                )))
-            }
-        }
         MirConst::F64(bits) => {
             let idx = intern_pool(pool, bits)?;
             Ok(byte(Byte::new(Instruction::DenseConst).with_dense_const(
                 dense::TY_F64,
-                dest,
-                idx,
-                true,
-            )))
-        }
-        MirConst::F32(bits) => {
-            let idx = intern_pool(pool, u64::from(bits))?;
-            Ok(byte(Byte::new(Instruction::DenseConst).with_dense_const(
-                dense::TY_F32,
                 dest,
                 idx,
                 true,
@@ -2710,16 +2677,6 @@ fn bin_kind(op: MirBinOp, ty: MirTy) -> Result<u8, LowerError> {
         (MirBinOp::Mul, MirTy::F64) => dense::FMUL64,
         (MirBinOp::Div, MirTy::F64) => dense::FDIV64,
         (MirBinOp::Rem, MirTy::F64) => dense::FREM64,
-        (MirBinOp::Add, MirTy::I32) => dense::IADD32,
-        (MirBinOp::Sub, MirTy::I32) => dense::ISUB32,
-        (MirBinOp::Mul, MirTy::I32) => dense::IMUL32,
-        (MirBinOp::Div, MirTy::I32) => dense::IDIV32,
-        (MirBinOp::Rem, MirTy::I32) => dense::IREM32,
-        (MirBinOp::Add, MirTy::F32) => dense::FADD32,
-        (MirBinOp::Sub, MirTy::F32) => dense::FSUB32,
-        (MirBinOp::Mul, MirTy::F32) => dense::FMUL32,
-        (MirBinOp::Div, MirTy::F32) => dense::FDIV32,
-        (MirBinOp::Rem, MirTy::F32) => dense::FREM32,
         _ => return Err(LowerError::Refused(format!("dense bin {op:?} {ty}"))),
     })
 }
@@ -2736,8 +2693,6 @@ fn cmp_kind(op: MirCmpOp, ty: MirTy) -> Result<u8, LowerError> {
     let lane = match ty {
         MirTy::I64 | MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes => dense::CMP_I64,
         MirTy::F64 => dense::CMP_F64,
-        MirTy::I32 => dense::CMP_I32,
-        MirTy::F32 => dense::CMP_F32,
         _ => return Err(LowerError::Refused(format!("dense cmp {ty}"))),
     };
     Ok(dense::pack_cmp(lane, pred))
@@ -3196,7 +3151,6 @@ fn tree_i16(func: &MirFunc, plan: &ConvoyPlan, v: ValueId) -> Option<i16> {
     };
     let n = match *c {
         MirConst::I64(x) => x,
-        MirConst::I32(x) => i64::from(x),
         MirConst::Bool(x) => i64::from(x),
         _ => return None,
     };
@@ -3241,24 +3195,12 @@ fn push_stack_const(
             let idx = u32::from(intern_pool(pool, v as u64)?);
             out.push(IlOp::ConstPool { idx, loc });
         }
-        MirConst::I32(v) => {
-            if v >= 0 {
-                out.push(IlOp::Const { imm: v, loc });
-            } else {
-                let idx = u32::from(intern_pool(pool, v as i64 as u64)?);
-                out.push(IlOp::ConstPool { idx, loc });
-            }
-        }
         MirConst::Bool(v) => out.push(IlOp::Const {
             imm: i32::from(v),
             loc,
         }),
         MirConst::F64(bits) => {
             let idx = u32::from(intern_pool(pool, bits)?);
-            out.push(IlOp::ConstPool { idx, loc });
-        }
-        MirConst::F32(bits) => {
-            let idx = u32::from(intern_pool(pool, u64::from(bits))?);
             out.push(IlOp::ConstPool { idx, loc });
         }
     }
@@ -3287,7 +3229,7 @@ fn emit_dense_push(
 /// `common::WORD_*` of a heap word of this MIR type.
 fn mir_word_kind(ty: MirTy) -> u8 {
     match ty {
-        MirTy::I32 | MirTy::I64 | MirTy::F32 | MirTy::F64 | MirTy::Bool => common::WORD_SCALAR,
+        MirTy::I64 | MirTy::F64 | MirTy::Bool => common::WORD_SCALAR,
         MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes => common::WORD_POINTER,
         MirTy::Value | MirTy::Bottom => common::WORD_UNKNOWN,
     }

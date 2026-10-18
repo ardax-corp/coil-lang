@@ -147,7 +147,7 @@ source you wrote.
   coverage collector) is attached, so a `coil` built with the `debugger`
   feature through workspace unification still has no per-instruction check.
 - **I7 / B8:** `coil debug` sets `Pipeline::set_debugger_attached(true)`.
-  Stops remain on reconstructed bytecode (fuse-IL, LIR, or dense).
+  Stops remain on emitted bytecode (LIR or dense).
   Function breakpoints and `stepi` work on specialized bodies; with a
   debugger attached the VM checks every instruction (no dense streaks run
   past a breakpoint). **MIR `Deopt` metadata is unused** by `coil-debug` /

@@ -261,17 +261,6 @@ pub const PROLOGUE_HALT_OFFSET: usize = 2;
 /// (not its scrutinee).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct ReprCtx {
-    /// Force ground pointer-niche `Option` expressions back to heap enums
-    /// while using legacy pattern lowering or an unknown boundary.
-    pub(super) force_heap_option: bool,
-    /// Force a contextually typed `Option::None` / `Option::Some` onto the
-    /// pointer-niche path when its constructor node has no standalone type.
-    pub(super) force_niche_option: bool,
-    /// Force heap-heap `Result` expressions back to `ObjEnum` for boxed match.
-    pub(super) force_heap_result: bool,
-    /// Force `Result::Ok` / `Result::Err` onto the pointer-niche path when
-    /// the constructor node has no standalone type.
-    pub(super) force_niche_result: bool,
     /// When > 0, frame-local ObjEnum construct/load emits `[payload, tag]`
     /// in locals / on the stack instead of `MakeEnum`, and a two-word
     /// `CALL` leaves its pair unboxed.
@@ -281,10 +270,6 @@ pub(super) struct ReprCtx {
 impl ReprCtx {
     fn union(self, other: Self) -> Self {
         Self {
-            force_heap_option: self.force_heap_option || other.force_heap_option,
-            force_niche_option: self.force_niche_option || other.force_niche_option,
-            force_heap_result: self.force_heap_result || other.force_heap_result,
-            force_niche_result: self.force_niche_result || other.force_niche_result,
             unbox_enum_context: self.unbox_enum_context.max(other.unbox_enum_context),
         }
     }
@@ -383,9 +368,6 @@ pub struct Compiler {
     /// Function-local cache of field-name string keys used ≥2 times
     /// (`STRING` materialized once at entry, then `LOAD`).
     field_key_slots: HashMap<String, u32>,
-
-    /// Frame slots with a live `ArrayPin` (sidecar-proven helpers / for-in).
-    pinned_array_slots: HashSet<u32>,
 
     /// Count of expression values currently live on the operand stack
     /// *above* interned locals (e.g. a `HostInvoke` native-id `CONST`
@@ -748,7 +730,6 @@ impl Default for Compiler {
             coroutine_fns: std::collections::HashSet::new(),
             temp_counter: 0,
             field_key_slots: HashMap::new(),
-            pinned_array_slots: HashSet::new(),
             expr_depth: 0,
             precise_frame_fns: HashSet::new(),
             precise_frames: Vec::new(),
