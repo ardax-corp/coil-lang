@@ -9979,6 +9979,24 @@ impl Checker {
                     }
                     continue;
                 }
+                // Inside a generic body, a goal on a type parameter whose
+                // other arguments are still open (`Wrap<T, β>`) is the
+                // given bound `where Wrap<T, string>`: pin `β` from it and
+                // forward that dictionary. Searching instances instead would
+                // bind `T` itself (#1442).
+                if let Some(dict_index) = self.improve_from_given(&needed) {
+                    if let Some(call_id) = call_id {
+                        self.call_site_forward_dicts
+                            .entry(call_id)
+                            .or_default()
+                            .push(dict_index);
+                        self.call_site_forward_dicts_by_span
+                        .entry((range.start, range.end))
+                        .or_default()
+                            .push(dict_index);
+                    }
+                    continue;
+                }
                 // Partially open (e.g. `Convert<int, β>`): unify against
                 // registered instances so free args get pinned by the match.
                 match self.find_unique_instance(&c.class, &resolved_args, range) {
@@ -10319,6 +10337,69 @@ impl Checker {
                 .typeclass(ac_class)
                 .is_some_and(|def| def.has_superclass(&needed.class, &self.generics))
         })
+    }
+
+    /// A partially open goal that mentions an enclosing type parameter
+    /// (`Wrap<T, β>`) and unifies with exactly one active bound of its
+    /// class (`where Wrap<T, string>`) without rebinding any type parameter
+    /// is that bound: adopt the unifier (pinning `β := string`) and return
+    /// the bound's dictionary index. `None` leaves the goal to instance
+    /// search (#1442).
+    fn improve_from_given(&mut self, needed: &Constraint) -> Option<usize> {
+        let rigid: Vec<(TyVarId, Ty)> = self
+            .type_params_in_scope
+            .iter()
+            .flat_map(|frame| frame.values())
+            .map(|&v| (v, apply_ty_prune(&self.subst, &Ty::Var(v))))
+            .collect();
+        let needed_args: Vec<Ty> = needed
+            .args
+            .iter()
+            .map(|a| apply_ty_prune(&self.subst, a))
+            .collect();
+        let mentions_rigid = needed_args.iter().any(|a| {
+            crate::typechecking::subst::ftv(a)
+                .into_iter()
+                .any(|v| rigid.iter().any(|(_, r)| *r == Ty::Var(v)))
+        });
+        if !mentions_rigid {
+            return None;
+        }
+        let mut found: Option<(usize, Subst)> = None;
+        for (index, ac) in self.active_constraints.iter().enumerate() {
+            let ac_class = self
+                .abstract_constraint_binding(&ac.class)
+                .unwrap_or(ac.class.as_str());
+            if ac_class != needed.class || ac.args.len() != needed_args.len() {
+                continue;
+            }
+            let mut local = self.subst.clone();
+            let ok = ac.args.iter().zip(needed_args.iter()).all(|(have, need)| {
+                match unify_with(&local, need, have) {
+                    Ok(s) => {
+                        local = s;
+                        true
+                    }
+                    Err(_) => false,
+                }
+            });
+            // A type parameter stands for any type: the bound may only pin
+            // inference variables, never a parameter.
+            let keeps_rigid = ok
+                && rigid
+                    .iter()
+                    .all(|(v, before)| apply_ty_prune(&local, &Ty::Var(*v)) == *before);
+            if !keeps_rigid {
+                continue;
+            }
+            if found.is_some() {
+                return None;
+            }
+            found = Some((index, local));
+        }
+        let (index, local) = found?;
+        self.absorb(&local);
+        Some(index)
     }
 
     fn abstract_constraint_binding(&self, name: &str) -> Option<&str> {
