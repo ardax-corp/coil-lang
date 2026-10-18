@@ -2684,13 +2684,18 @@ impl Lower<'_> {
                 let Some(v) = self.word(*inner)? else {
                     return Ok(Val::Never);
                 };
+                // The enum object may be read as a plain word (`i64`).
                 match (self.b.value_ty(v), to) {
                     (from, to) if from == to => Ok(Val::V(v)),
-                    (from @ (MirTy::NicheOpt | MirTy::NicheRes), MirTy::HeapRef) => {
+                    (from @ (MirTy::NicheOpt | MirTy::NicheRes), MirTy::HeapRef | MirTy::I64) => {
                         let layout = self.niche_layout(*inner, from)?;
-                        Ok(Val::V(self.box_niche(layout, v)?))
+                        let obj = self.box_niche(layout, v)?;
+                        Ok(Val::V(self.fit(obj, to)?))
                     }
-                    (MirTy::HeapRef, MirTy::NicheOpt | MirTy::NicheRes) => self.unbox_niche(v, to),
+                    (MirTy::HeapRef | MirTy::I64, MirTy::NicheOpt | MirTy::NicheRes) => {
+                        let obj = self.fit(v, MirTy::HeapRef)?;
+                        self.unbox_niche(obj, to)
+                    }
                     _ => Err("relayout".into()),
                 }
             }

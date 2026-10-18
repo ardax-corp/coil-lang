@@ -2069,8 +2069,7 @@ impl Compiler {
     /// came, the instance's dictionary, then the shared entry.
     fn emit_instance_clone_thunk(&mut self, src: &InstCloneSrc, req: &InstClone) {
         if src.method_of.is_some() {
-            self.bind_function_entry(req.name.clone());
-            self.emit_method_clone_call_shared(&req.name);
+            self.emit_method_clone_thunk(&req.name);
             return;
         }
         self.emit_instance_clone_call_shared(src, req);
@@ -3387,7 +3386,7 @@ impl Compiler {
     /// misaligned inside function bodies.
     ///
     /// Returns the number of dict tuples planned (used to bump CALL arity).
-    fn plan_call_site_dicts(
+    pub(super) fn plan_call_site_dicts(
         &mut self,
         out: &mut Vec<DictStep>,
         fn_name: &str,
@@ -4462,7 +4461,7 @@ impl Compiler {
     /// `name`, its own function record, lowered like any other body (HIR
     /// lowering, then direct MIR). `calls` are its callees the checker has
     /// no signature for. A body that does not plan is reported.
-    fn emit_synth_fn(
+    pub(super) fn emit_synth_fn(
         &mut self,
         name: &str,
         hir: &crate::hir::HirBody,
