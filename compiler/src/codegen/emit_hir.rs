@@ -4457,6 +4457,12 @@ impl Compiler {
             let ty = Self::hir_ty(hir, arg).ok_or("callee-signature")?;
             match lower::classify(&self.checker, ty) {
                 Some(class) if lower::is_word(class) => {}
+                // A `()` argument passes the empty tuple object, as to a
+                // plain call (#1428).
+                Some(ValueClass::Unit) => {
+                    params.push(ValueLayout::Boxed);
+                    continue;
+                }
                 _ => return Err("callee-signature"),
             }
             // A `%v` argument stays in its own layout: `Show` boxes it as

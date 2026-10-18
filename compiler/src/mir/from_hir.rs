@@ -5576,7 +5576,8 @@ impl Lower<'_> {
             match self.value(arg)? {
                 Val::V(v) => words.push(v),
                 Val::Never => return Ok(Val::Never),
-                Val::Unit => return Err("unit operand".into()),
+                // `weak(())`: the empty tuple object.
+                Val::Unit => words.push(self.unit_object()?),
                 Val::Pair(lo, hi) => {
                     let ty = self.expr_ty(arg).ok_or("host argument type")?.clone();
                     match self.box_pair_val(&ty, lo, hi)? {
