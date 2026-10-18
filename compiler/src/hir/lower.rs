@@ -15,15 +15,9 @@
 //! with no AST codegen left, a refused body is an internal error
 //! (`OptimizeOptions::require_mir`).
 //!
-//! The operand-depth rule below dates from stack emission, where the VM
-//! shared one stack between locals and operands and a store to a new slot
-//! was only safe with no operand live below it. MIR keeps values in
-//! registers, so the rule may refuse bodies it could take. [`refusal`]
-//! also tracks how many operands each node sits on and refuses bindings,
-//! assignments, jumps, slot-binding matches and staged variant builds that
-//! are not at operand depth zero. A binary operator whose right side calls,
-//! matches or builds a variant stages its left side through a temp, so
-//! that right side runs at depth zero.
+//! MIR keeps values in registers, so where a node sits among its siblings
+//! does not matter: a binding, assignment, jump, match or build lowers
+//! inside any operand.
 
 use super::{BinOp, BodyKind, Builtin, Callee, HirArm, HirBody, HirFlags, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId, LocalKind, MakeKind, UnOp};
 use std::collections::HashMap;
@@ -683,31 +677,25 @@ fn writes_field_of(body: &HirBody, local: LocalId) -> bool {
 /// `len(x)` / `x.len()` of a plain local: `ArrayLen`, or a constant for a
 /// fixed-size type.
 impl Walk<'_> {
-    /// A `Vec` method: `push` is inlined as `ArrayPush` (its value staged
-    /// with the receiver when it may clobber); the others are `CALL`s to
-    /// the builtin thunks. `pop` / `remove` are `HostInvoke`s when the call's
-    /// `Option` is niche-packed (codegen refuses the boxed form).
-    fn vec_method(&mut self, name: &str, args: &[HirId], depth: u32) -> Check {
+    /// A `Vec` method: `push` is inlined as `ArrayPush`; the others are
+    /// `CALL`s to the builtin thunks. `pop` / `remove` are `HostInvoke`s
+    /// when the call's `Option` is niche-packed (codegen refuses the boxed
+    /// form).
+    fn vec_method(&mut self, name: &str, args: &[HirId]) -> Check {
         match (name, args) {
             ("push", [recv, value]) => {
-                let staged = push_stages(self.body, &self.stack, *value);
-                if staged && depth != 0 {
-                    return Err("staged-push");
-                }
-                self.value(*recv, depth)?;
+                self.value(*recv)?;
                 self.word(*value)?;
-                self.value(*value, if staged { 0 } else { depth + 1 })
+                self.value(*value)
             }
-            ("len" | "capacity" | "clear", [_]) | ("reserve", [_, _]) | ("insert", [_, _, _]) => {
-                self.args(args, depth, depth == 0)
+            ("len" | "capacity" | "clear", [_]) | ("reserve", [_, _]) | ("insert", [_, _, _]) | ("pop", [_]) | ("remove", [_, _]) => {
+                self.args(args)
             }
-            // The host native's id goes under the arguments.
-            ("pop", [_]) | ("remove", [_, _]) => self.args(args, depth + 1, false),
             _ => Err("vec-method"),
         }
     }
 
-    fn len(&mut self, arg: HirId, depth: u32) -> Check {
+    fn len(&mut self, arg: HirId) -> Check {
         let structural = self
             .ty(arg)
             .is_some_and(|t| crate::typechecking::infer::Checker::is_structural_len_ty_for_codegen(&apply_ty_prune(self.checker.subst(), t)));
@@ -727,7 +715,7 @@ impl Walk<'_> {
             // concatenation, …) is evaluated, then measured (#1071, #1147).
             _ if structural => {
                 self.word(arg)?;
-                self.value(arg, depth)
+                self.value(arg)
             }
             _ => Err("len-argument"),
         }
@@ -880,58 +868,15 @@ pub fn aggregate_packed(info: &AggregateArithInfo) -> Option<usize> {
     (8..=u16::MAX as usize).contains(&len).then_some(len)
 }
 
-/// A `Vec` push stages its receiver and value through temps when the value
-/// may clobber or is a boxed variant make that stages its own arguments
-/// (more than one, not all literals or locals).
-pub fn push_stages(body: &HirBody, stack: &HashMap<u32, usize>, value: HirId) -> bool {
-    clobbers(body, stack, value)
-        || matches!(&body.expr(value).kind, HirKind::Make { kind: MakeKind::Variant { .. }, args }
-            if args.len() > 1 && !args.iter().all(|&a| matches!(body.expr(a).kind, HirKind::Lit(_) | HirKind::Local(_))))
-}
-
-/// Whether a call at `depth` stages its arguments through temps: at the
-/// top of the stack, when one of them builds an object or applies an
-/// operator through temps (a user type's instance, an aggregate), or one
-/// after the first holds a `match` (`?`, `??`), which binds slots with no
-/// operand below it.
-pub fn stages_args(body: &HirBody, checker: &Checker, args: &[HirId], depth: u32) -> bool {
-    depth == 0
-        && args.iter().enumerate().any(|(i, &arg)| {
-            let mut found = false;
-            visit(body, arg, &mut |e| {
-                found |= matches!(
-                    &e.kind,
-                    HirKind::Make { kind: MakeKind::Class(_), .. } | HirKind::Bin { op: BinOp::Overloaded(_), .. }
-                ) || (i != 0 && matches!(&e.kind, HirKind::Match { .. }))
-                    || shows_through_temps(body, checker, e)
-                    || staged_make(body, e);
-            });
-            found
-        })
-}
-
-/// Whether a call at the top of the stack stages its arguments because one
-/// after the first holds a clobbering index read ([`staged_read`]), which
-/// a live argument would sit under (the AST stages every argument when
-/// one may clobber).
-pub fn index_stages(body: &HirBody, stack: &HashMap<u32, usize>, args: &[HirId], depth: u32) -> bool {
-    depth == 0
-        && args.iter().skip(1).any(|&arg| {
-            let mut found = false;
-            visit(body, arg, &mut |e| found |= staged_read(body, stack, e));
-            found
-        })
-}
-
-/// A trait method call on an existential pack that is not a local: the
-/// pack goes to a temp, which needs an empty operand stack below it (a
-/// local pack is just loaded once per use).
-pub fn existential_staged(body: &HirBody, checker: &Checker, id: HirId) -> bool {
-    let e = body.expr(id);
-    let HirKind::Call { args, .. } = &e.kind else {
-        return false;
-    };
-    existential_hint(body, checker, id) && !args.first().is_some_and(|&a| matches!(body.expr(a).kind, HirKind::Local(_)))
+/// Whether an argument after the first holds a clobbering index read
+/// ([`staged_read`]), which a live argument would sit under (the AST
+/// stages every argument when one may clobber).
+pub fn index_stages(body: &HirBody, stack: &HashMap<u32, usize>, args: &[HirId]) -> bool {
+    args.iter().skip(1).any(|&arg| {
+        let mut found = false;
+        visit(body, arg, &mut |e| found |= staged_read(body, stack, e));
+        found
+    })
 }
 
 /// Whether the checker recorded the call at `id` as a trait method on an
@@ -942,24 +887,8 @@ pub fn existential_hint(body: &HirBody, checker: &Checker, id: HirId) -> bool {
         || checker.existential_method_call_span(e.span.0, e.span.1).is_some()
 }
 
-/// A variant make whose several arguments are not all literals or locals:
-/// it stages them through temps in source order, which need an empty
-/// operand stack below them.
-pub fn staged_make(body: &HirBody, e: &super::HirExpr) -> bool {
-    let HirKind::Make {
-        kind: MakeKind::Variant { .. },
-        args,
-    } = &e.kind
-    else {
-        return false;
-    };
-    args.len() > 1 && !args.iter().all(|&a| matches!(body.expr(a).kind, HirKind::Lit(_) | HirKind::Local(_)))
-}
-
 /// Whether `e` is a `format` call with a tuple or record argument: `%v`
-/// shows it field by field through temps, which need an empty operand
-/// stack below them, so the call stages its arguments and runs at depth
-/// zero (the AST stages around every call).
+/// shows it field by field.
 pub fn shows_through_temps(body: &HirBody, checker: &Checker, e: &super::HirExpr) -> bool {
     use crate::typechecking::StringBuiltin;
     let HirKind::Call {
@@ -1476,16 +1405,6 @@ pub fn assigns_local(hir: &HirBody, body: HirId, local: LocalId) -> bool {
     found
 }
 
-/// Whether `id` is a `block_on(h)` call (the prelude's, not a user `fn`).
-pub fn block_on(body: &HirBody, checker: &Checker, id: HirId) -> bool {
-    matches!(
-        &body.expr(id).kind,
-        HirKind::Call { callee: Callee::Named { name, .. }, args }
-            if args.len() == 1
-                && checker.prelude_fn_in_scope(name) == Some(crate::typechecking::PreludeFn::BlockOn)
-    )
-}
-
 /// Whether the fn id `f` (a local, or a class field a `declare` was stored
 /// in) names a variadic `declare`.
 pub fn ffi_fn_variadic(body: &HirBody, checker: &Checker, f: HirId) -> bool {
@@ -1526,7 +1445,7 @@ pub fn ffi_variadic_tags(body: &HirBody, checker: &Checker, call: HirId, items: 
 }
 
 /// Depth refusals [`refusal_at`] names an operand for.
-const STAGED: &[&str] = &["assign-index", "stack-select-depth", "adjust-value", "assign-value", "range-depth", "existential-depth", "operator-depth", "nested-let"];
+const STAGED: &[&str] = &["assign-index", "adjust-value", "assign-value"];
 
 /// Why `body` is outside the lowered subset, or `None` when it is inside.
 pub fn refusal(body: &HirBody, checker: &Checker) -> Option<&'static str> {
@@ -1563,16 +1482,13 @@ pub fn refusal_at(body: &HirBody, checker: &Checker) -> Option<(&'static str, Op
         stack: HashMap::new(),
         box_at: HashMap::new(),
         class_boxed: std::collections::HashSet::new(),
-        class_box_at: std::collections::HashSet::new(),
         stage_at: None,
     };
-    let boxes = class_boxes(body, checker);
-    walk.class_box_at = boxes.keys().copied().collect();
-    walk.class_boxed = boxes.into_values().flatten().collect();
+    walk.class_boxed = class_boxes(body, checker).into_values().flatten().collect();
     let stacks = stack_arrays(body, checker);
     walk.stack = stacks.len;
     walk.box_at = stacks.box_at;
-    walk.effect(root, 0)
+    walk.effect(root)
         .err()
         .map(|reason| (reason, walk.stage_at.filter(|_| STAGED.contains(&reason))))
 }
@@ -1964,8 +1880,8 @@ pub fn nested_pattern(pat: &HirPat) -> Result<(), &'static str> {
 }
 
 /// Whether some arm binds a local the arm body reads from a slot (any
-/// binding besides an identity arm's). Those matches lower with the
-/// payload in frame slots, so they must start at operand depth zero.
+/// binding besides an identity arm's): those matches lower with the
+/// payload in frame slots.
 pub fn match_needs_slots(body: &HirBody, arms: &[HirArm]) -> bool {
     arms.iter().any(|arm| {
         if is_identity_arm(body, arm) {
@@ -1976,42 +1892,6 @@ pub fn match_needs_slots(body: &HirBody, arms: &[HirArm]) -> bool {
             pat => arm_fields(body, pat).is_ok_and(|f| f.iter().any(Option::is_some)),
         }
     })
-}
-
-/// A binary operator at depth zero stages its left operand through a temp
-/// when the right one calls, matches or builds a variant, so the right one
-/// runs with no operand below it (as the AST codegen does): it can then
-/// inline, bind payload slots and stage args.
-pub fn stages_rhs(body: &HirBody, stack: &HashMap<u32, usize>, rhs: HirId) -> bool {
-    match &body.expr(rhs).kind {
-        HirKind::Call { .. } | HirKind::Match { .. } | HirKind::Make { .. } => true,
-        // Through field and index reads, as `expr_may_clobber_operand_stack`.
-        HirKind::Index { base, index, .. } => {
-            stack_select(body, stack, body.expr(rhs)) || stages_rhs(body, stack, *base) || stages_rhs(body, stack, *index)
-        }
-        HirKind::Field { base, .. } => stages_rhs(body, stack, *base),
-        // An operator on a user type or aggregate stages through temps.
-        HirKind::Bin {
-            op: BinOp::Overloaded(_), ..
-        } => true,
-        HirKind::Bin { lhs, rhs, .. } | HirKind::Logic { lhs, rhs, .. } => {
-            stages_rhs(body, stack, *lhs) || stages_rhs(body, stack, *rhs)
-        }
-        HirKind::Un { operand, .. } | HirKind::Cast { value: operand } => stages_rhs(body, stack, *operand),
-        _ => false,
-    }
-}
-
-/// String `a + b` at depth zero stages both operands through temps when
-/// either holds a `match` (`?`, `??`) or a clobbering index read
-/// ([`staged_read`]): it then runs with no operand below it, as the AST
-/// does (`arg_emits_on_self_bytecode`).
-pub fn concat_stages(body: &HirBody, stack: &HashMap<u32, usize>, lhs: HirId, rhs: HirId) -> bool {
-    let mut found = false;
-    for id in [lhs, rhs] {
-        visit(body, id, &mut |e| found |= matches!(e.kind, HirKind::Match { .. }) || staged_read(body, stack, e));
-    }
-    found
 }
 
 /// `v[i]` with an index that may clobber (`v[f(j)]`): it stages base and
@@ -2036,10 +1916,6 @@ pub fn stack_select(body: &HirBody, stack: &HashMap<u32, usize>, e: &super::HirE
     !matches!(body.expr(index).kind, HirKind::Lit(Lit::Int(i)) if (0..n as i64).contains(&i))
 }
 
-fn rhs_depth(body: &HirBody, stack: &HashMap<u32, usize>, rhs: HirId, depth: u32) -> u32 {
-    if depth == 0 && stages_rhs(body, stack, rhs) { 0 } else { depth + 1 }
-}
-
 type Check = Result<(), &'static str>;
 
 struct Walk<'b> {
@@ -2048,14 +1924,12 @@ struct Walk<'b> {
     loops: u32,
     /// Frame-slot stack arrays: local to length.
     stack: HashMap<u32, usize>,
-    /// The operand a depth refusal names: staged into a temp, it lowers.
+    /// The operand a [`STAGED`] refusal names: staged into a temp, it lowers.
     stage_at: Option<HirId>,
     /// Block statements an escaping stack array is boxed before.
     box_at: HashMap<u32, Vec<u32>>,
     /// Frame-slot class locals boxed at their escape ([`class_boxes`]).
     class_boxed: std::collections::HashSet<u32>,
-    /// The statements (or block tails) [`class_boxes`] boxes before.
-    class_box_at: std::collections::HashSet<u32>,
 }
 
 impl Walk<'_> {
@@ -2093,21 +1967,18 @@ impl Walk<'_> {
     /// operands to temps, then each element (literal items and stack-array
     /// slots read directly) with the results so far below it, then
     /// `MakeTuple` / `MakeArray`; or the packed `HostInvoke`.
-    fn aggregate_arith(&mut self, id: HirId, lhs: HirId, rhs: Option<HirId>, depth: u32) -> Check {
+    fn aggregate_arith(&mut self, id: HirId, lhs: HirId, rhs: Option<HirId>) -> Check {
         use crate::typechecking::{AggregateArithKind as K, ScalarSide};
         let info = aggregate_info(self.checker, self.body, id).ok_or("operator-elementwise")?;
-        if depth != 0 {
-            return Err("operator-depth");
-        }
         self.word(id)?;
         let operands: Vec<HirId> = std::iter::once(lhs).chain(rhs).collect();
         if aggregate_packed(&info).is_some() {
             if !matches!(info.kind, K::NegTuple { .. } | K::NegArray { .. }) && rhs.is_none() {
                 return Err("operator-elementwise");
             }
-            for (i, &operand) in operands.iter().enumerate() {
+            for &operand in &operands {
                 self.word(operand)?;
-                self.value(operand, 1 + i as u32)?;
+                self.value(operand)?;
             }
             return Ok(());
         }
@@ -2124,7 +1995,7 @@ impl Walk<'_> {
                         return Err("operator-elementwise");
                     }
                     self.word(operand)?;
-                    self.value(operand, 0)?;
+                    self.value(operand)?;
                 }
                 Ok(())
             }
@@ -2133,8 +2004,8 @@ impl Walk<'_> {
                 self.aggregate_src(lhs)?;
                 self.aggregate_src(rhs)?;
                 for i in 0..length {
-                    self.aggregate_elem(lhs, i, i as u32)?;
-                    self.aggregate_elem(rhs, i, i as u32 + 1)?;
+                    self.aggregate_elem(lhs, i)?;
+                    self.aggregate_elem(rhs, i)?;
                 }
                 Ok(())
             }
@@ -2146,37 +2017,36 @@ impl Walk<'_> {
                 };
                 self.aggregate_src(vec)?;
                 self.scalar(scalar)?;
-                self.value(scalar, 0)?;
-                let first = u32::from(matches!(scalar_on, ScalarSide::Left));
+                self.value(scalar)?;
                 for i in 0..n {
-                    self.aggregate_elem(vec, i, i as u32 + first)?;
+                    self.aggregate_elem(vec, i)?;
                 }
                 Ok(())
             }
             K::NegArray { length: Some(n), .. } => {
                 self.aggregate_src(lhs)?;
                 for i in 0..n {
-                    self.aggregate_elem(lhs, i, i as u32)?;
+                    self.aggregate_elem(lhs, i)?;
                 }
                 Ok(())
             }
         }
     }
 
-    /// A heap operand runs at depth zero into a temp; a direct one later.
+    /// A heap operand runs first into a temp; a direct one later.
     fn aggregate_src(&mut self, id: HirId) -> Check {
         match aggregate_src(self.body, &self.stack, id) {
             Some(_) => Ok(()),
             None => {
                 self.word(id)?;
-                self.value(id, 0)
+                self.value(id)
             }
         }
     }
 
-    /// Element `i` of `src`, pushed on `depth` results: a literal item must
-    /// not store into frame slots (the AST compiles it in place).
-    fn aggregate_elem(&mut self, src: HirId, i: usize, depth: u32) -> Check {
+    /// Element `i` of `src`: a literal item must not store into frame
+    /// slots (the AST compiles it in place).
+    fn aggregate_elem(&mut self, src: HirId, i: usize) -> Check {
         match aggregate_src(self.body, &self.stack, src) {
             Some(AggregateSrc::Items(items)) => {
                 let &item = items.get(i).ok_or("operator-elementwise")?;
@@ -2184,7 +2054,7 @@ impl Walk<'_> {
                     return Err("operator-elementwise");
                 }
                 self.scalar(item)?;
-                self.value(item, depth)
+                self.value(item)
             }
             Some(AggregateSrc::Slots(local)) if i < self.stack[&local.0] => Ok(()),
             Some(AggregateSrc::Slots(_)) => Err("operator-elementwise"),
@@ -2215,17 +2085,11 @@ impl Walk<'_> {
         }
     }
 
-    /// `items[i]` at `depth`, each pushed on the ones before it, or every
-    /// item staged through a temp when a later one may clobber (as the
-    /// AST's `emit_literal_items`).
-    fn items(&mut self, items: &[HirId], depth: u32) -> Check {
-        let staged = items.len() >= 2 && items[1..].iter().any(|&i| clobbers(self.body, &self.stack, i));
-        if staged && depth != 0 {
-            return Err("staged-literal");
-        }
-        for (i, &item) in items.iter().enumerate() {
+    /// Each of `items`, in order.
+    fn items(&mut self, items: &[HirId]) -> Check {
+        for &item in items {
             self.word(item)?;
-            self.value(item, if staged { 0 } else { depth + i as u32 })?;
+            self.value(item)?;
         }
         Ok(())
     }
@@ -2259,14 +2123,12 @@ impl Walk<'_> {
         }
     }
 
-    /// Call arguments: plain values (no `name:` or `...`), each staged at
-    /// depth zero when `staged`, else pushed on the ones before it.
     /// `dload(path)`, `declare(lib, name, (T, ..), R)` or
     /// `invoke(lib, f, (a, ..))`, as the AST's `emit_ffi_declare` /
     /// `emit_ffi_invoke`: the value operands in order, a signature's tags
     /// as constants, the argument tuple packed. A variadic `declare` takes
     /// a `bool` literal fifth; a variadic `invoke` passes its arguments' tags.
-    fn ffi_call(&mut self, id: HirId, kind: crate::typechecking::FfiBuiltin, args: &[HirId], depth: u32) -> Check {
+    fn ffi_call(&mut self, id: HirId, kind: crate::typechecking::FfiBuiltin, args: &[HirId]) -> Check {
         use crate::typechecking::FfiBuiltin;
         let body = self.body;
         if self.class(id).is_none() {
@@ -2275,7 +2137,7 @@ impl Walk<'_> {
         match kind {
             FfiBuiltin::Dload => {
                 let [path] = args else { return Err("callee-arity") };
-                self.args(&[*path], depth, false)
+                self.args(&[*path])
             }
             FfiBuiltin::Declare => {
                 let (lib, name, sig, ret) = match args {
@@ -2289,7 +2151,7 @@ impl Walk<'_> {
                 if items.iter().chain([ret]).any(|&t| ffi_tag(body, self.checker, t).is_none()) {
                     return Err("ffi-signature");
                 }
-                self.args(&[*lib, *name], depth, false)
+                self.args(&[*lib, *name])
             }
             FfiBuiltin::Invoke => {
                 let [lib, f, values] = args else { return Err("callee-arity") };
@@ -2301,13 +2163,13 @@ impl Walk<'_> {
                 {
                     return Err("callee-variadic");
                 }
-                self.args(&[*lib, *f], depth, false)?;
+                self.args(&[*lib, *f])?;
                 // A function named as an argument is its code pointer
                 // (codegen checks the name is one).
                 let values: Vec<HirId> = items.iter().copied().filter(|&a| !matches!(body.expr(a).kind, HirKind::Global { .. })).collect();
-                for (i, &a) in items.iter().enumerate() {
+                for &a in items {
                     if values.contains(&a) {
-                        self.args(&[a], depth + 2 + i as u32, false)?;
+                        self.args(&[a])?;
                     }
                 }
                 Ok(())
@@ -2315,8 +2177,9 @@ impl Walk<'_> {
         }
     }
 
-    fn args(&mut self, args: &[HirId], depth: u32, staged: bool) -> Check {
-        for (i, &arg) in args.iter().enumerate() {
+    /// Call arguments: plain values (no `name:` or `...`).
+    fn args(&mut self, args: &[HirId]) -> Check {
+        for &arg in args {
             if matches!(
                 self.body.expr(arg).kind,
                 HirKind::Named { .. } | HirKind::Spread(_)
@@ -2326,46 +2189,18 @@ impl Walk<'_> {
             // A `()` argument runs for its effect; the call passes the
             // empty tuple object (#1086).
             if is_unit_value(self.body, self.checker, arg) {
-                self.effect(arg, if staged { 0 } else { depth + i as u32 })?;
+                self.effect(arg)?;
                 continue;
             }
             self.word(arg)?;
-            self.value(arg, if staged { 0 } else { depth + i as u32 })?;
+            self.value(arg)?;
         }
         Ok(())
     }
 
-    /// `id` pushes its value on top of `depth` live operands.
-    fn value(&mut self, id: HirId, depth: u32) -> Check {
-        let r = self.value_kind(id, depth);
-        // A call taking a range above live operands runs into a temp
-        // ahead of its statement, where nothing is below it.
-        if r == Err("range-depth")
-            && depth != 0
-            && self.stage_at.is_none()
-            && matches!(self.body.expr(id).kind, HirKind::Call { .. })
-            && !self.ty(id).is_some_and(is_range_pair)
-        {
-            self.stage_at = Some(id);
-        }
-        // A call whose arguments stage through temps (an existential
-        // pack among them), or a user type's operator above live operands
-        // (`x + -y` in a generic body), runs into a temp ahead of its
-        // statement.
-        if matches!(r, Err("existential-depth" | "operator-depth")) && depth != 0 && self.stage_at.is_none() {
-            self.stage_at = Some(id);
-        }
-        r
-    }
-
-    fn value_kind(&mut self, id: HirId, depth: u32) -> Check {
+    /// `id` for its value.
+    fn value(&mut self, id: HirId) -> Check {
         let body = self.body;
-        // A numeric range moves as `[start, end]` or a boxed object; the
-        // re-encodings between them stage through temps, so a range value
-        // runs with no operand below it.
-        if depth != 0 && self.ty(id).is_some_and(is_range_pair) {
-            return Err("range-depth");
-        }
         match &body.expr(id).kind {
             HirKind::Lit(Lit::Int(_) | Lit::Float(_) | Lit::Bool(_)) => self.scalar(id),
             HirKind::Lit(Lit::Str(raw)) => {
@@ -2390,63 +2225,48 @@ impl Walk<'_> {
             // the packed kernel's id under the operands, or each operand
             // to a temp (codegen picks, as for the builtin calls).
             HirKind::Bin { lhs, rhs, .. } if linear_algebra(self.checker, body, id) => {
-                if depth != 0 {
-                    return Err("operator-depth");
-                }
                 self.word(id)?;
-                for (i, &operand) in [*lhs, *rhs].iter().enumerate() {
+                for operand in [*lhs, *rhs] {
                     self.word(operand)?;
-                    self.value(operand, 1 + i as u32)?;
+                    self.value(operand)?;
                 }
                 Ok(())
             }
             HirKind::Un { operand, .. } if linear_algebra(self.checker, body, id) => {
-                if depth != 0 {
-                    return Err("operator-depth");
-                }
                 self.word(id)?;
                 self.word(*operand)?;
-                self.value(*operand, 1)
+                self.value(*operand)
             }
             HirKind::Bin { op, lhs, rhs } => {
                 // A user type's operator: a call of its trait instance, or
                 // (`==` / `!=` without one) the VM's structural `EQ` /
                 // `NEQ`; the codegen plan picks (`Compiler::hir_operator`).
-                // Either stages through temps, so it runs at depth zero.
                 if let BinOp::Overloaded(sym) = op {
                     // `==` / `!=` on arrays compare structurally (`EQ`), as
                     // the AST; other operators on them are element-wise.
                     if !matches!(*sym, "==" | "!=") && (self.elementwise(*lhs) || self.elementwise(*rhs)) {
-                        return self.aggregate_arith(id, *lhs, Some(*rhs), depth);
+                        return self.aggregate_arith(id, *lhs, Some(*rhs));
                     }
                     if !matches!(*sym, "==" | "!=" | "<" | ">" | "<=" | ">=")
                         && crate::typechecking::generics::Generics::operator_trait(sym).is_none()
                     {
                         return Err("operator");
                     }
-                    if depth != 0 {
-                        return Err("operator-depth");
-                    }
                     self.word(*lhs)?;
                     self.word(*rhs)?;
-                    self.value(*lhs, 0)?;
-                    return self.value(*rhs, rhs_depth(body, &self.stack, *rhs, 0));
+                    self.value(*lhs)?;
+                    return self.value(*rhs);
                 }
-                // `a + b` is `FORMAT "%s%s"` over both (the format string
-                // sits under them); `==` / `!=` compare strings with `EQ`.
+                // `a + b` is `FORMAT "%s%s"` over both; `==` / `!=` compare
+                // strings with `EQ`.
                 let string = |id: HirId| matches!(self.ty(id).map(strip_readonly), Some(Ty::Con(n)) if n == coil_ty::STRING);
                 let concat = matches!(op, BinOp::StrConcat);
                 if concat || (matches!(op, BinOp::Eq | BinOp::Ne) && string(*lhs)) {
                     if !string(*lhs) || !string(*rhs) {
                         return Err("operand-type");
                     }
-                    if concat && depth == 0 && concat_stages(body, &self.stack, *lhs, *rhs) {
-                        self.value(*lhs, 0)?;
-                        return self.value(*rhs, 0);
-                    }
-                    let base = depth + u32::from(concat);
-                    self.value(*lhs, base)?;
-                    return self.value(*rhs, rhs_depth(body, &self.stack, *rhs, base));
+                    self.value(*lhs)?;
+                    return self.value(*rhs);
                 }
                 self.scalar(*lhs)?;
                 self.scalar(*rhs)?;
@@ -2454,43 +2274,35 @@ impl Walk<'_> {
                 if !shift && self.ty(*lhs) != self.ty(*rhs) {
                     return Err("mixed-operands");
                 }
-                self.value(*lhs, depth)?;
-                self.value(*rhs, rhs_depth(body, &self.stack, *rhs, depth))
+                self.value(*lhs)?;
+                self.value(*rhs)
             }
             HirKind::Logic { lhs, rhs, .. } => {
                 self.scalar(*lhs)?;
                 self.scalar(*rhs)?;
-                self.value(*lhs, depth)?;
-                if logic_eager(body, *rhs) {
-                    self.value(*rhs, rhs_depth(body, &self.stack, *rhs, depth))
-                } else {
-                    // Short-circuit: the jump consumes `lhs` before `rhs` runs.
-                    self.value(*rhs, depth)
-                }
+                self.value(*lhs)?;
+                self.value(*rhs)
             }
             HirKind::Un { op: UnOp::Neg, operand } if self.elementwise(*operand) => {
-                self.aggregate_arith(id, *operand, None, depth)
+                self.aggregate_arith(id, *operand, None)
             }
             // A type parameter's word in a shared body: its `Neg` / `BitNot`
             // dictionary call (`Compiler::hir_operator_at`).
             HirKind::Un { op: UnOp::Neg | UnOp::BitNot, operand } if matches!(self.ty(*operand).map(strip_readonly), Some(Ty::Var(_))) => {
                 self.word(*operand)?;
-                self.value(*operand, depth)
+                self.value(*operand)
             }
             // A user type's `-v` / `~v`: a call of its `Neg` / `BitNot`
-            // instance, staged through a temp as the binary operators are.
+            // instance.
             HirKind::Un { op: UnOp::Neg | UnOp::BitNot, operand }
                 if self.ty(*operand).is_some_and(|t| user_operand(self.checker, t)) =>
             {
-                if depth != 0 {
-                    return Err("operator-depth");
-                }
                 self.word(*operand)?;
-                self.value(*operand, 0)
+                self.value(*operand)
             }
             HirKind::Un { operand, .. } => {
                 self.scalar(*operand)?;
-                self.value(*operand, depth)
+                self.value(*operand)
             }
             // Between scalars: one cast opcode (none for a same-type cast).
             // `"ab" as Vec<byte>`: the literal is already its bytes.
@@ -2508,11 +2320,11 @@ impl Walk<'_> {
                     && self.ty(*value).is_some_and(is_byte_array)
                     && self.ty(id).is_some_and(|t| is_byte_array(t) || is_byte_vec(t)) =>
             {
-                self.value(*value, depth)
+                self.value(*value)
             }
             // `v as Vec<byte>` of a `Vec<byte>`: the same array object.
             HirKind::Cast { value } if self.ty(*value).is_some_and(is_byte_vec) && self.ty(id).is_some_and(is_byte_vec) => {
-                self.value(*value, depth)
+                self.value(*value)
             }
             HirKind::Cast { value } => {
                 let from = self.ty(*value).and_then(primitive).ok_or("cast")?;
@@ -2520,17 +2332,17 @@ impl Walk<'_> {
                 if from != to && cast_opcode(from, to).is_none() {
                     return Err("cast");
                 }
-                self.value(*value, depth)
+                self.value(*value)
             }
             HirKind::Call {
                 callee: Callee::Named { name, .. },
                 args,
-            } if name == "len" && args.len() == 1 && !user_len(body, self.checker, args[0]) => self.len(args[0], depth),
+            } if name == "len" && args.len() == 1 && !user_len(body, self.checker, args[0]) => self.len(args[0]),
             HirKind::Call {
                 callee: Callee::Method { name },
                 args,
-            } if name == "len" && args.len() == 1 && structural_len(body, self.checker, args[0]) => self.len(args[0], depth),
-            HirKind::Call { callee, args } if let Some(kind) = ffi_builtin(self.checker, callee) => self.ffi_call(id, kind, args, depth),
+            } if name == "len" && args.len() == 1 && structural_len(body, self.checker, args[0]) => self.len(args[0]),
+            HirKind::Call { callee, args } if let Some(kind) = ffi_builtin(self.checker, callee) => self.ffi_call(id, kind, args),
             HirKind::Call {
                 callee: Callee::Named { .. },
                 args,
@@ -2538,31 +2350,14 @@ impl Walk<'_> {
                 if self.class(id).is_none() {
                     return Err("call-type");
                 }
-                // A `new` argument leaves its object in a temp on top of the
-                // stack, so every argument stages through a temp, as the AST
-                // does when one may clobber the operand stack.
-                if depth != 0 && existential_staged(body, self.checker, id) {
-                    return Err("existential-depth");
-                }
-                let shows = shows_through_temps(body, self.checker, body.expr(id));
-                if shows && depth != 0 {
-                    return Err("format-show");
-                }
-                // `block_on(h)` drives `h` through two temps, which a live
-                // operand would sit under.
-                if depth != 0 && block_on(body, self.checker, id) {
-                    return Err("block-on-depth");
-                }
                 // An existential or linear-algebra call keeps its operands
                 // on the stack, so a clobbering index read stays refused.
-                let indexed = index_stages(body, &self.stack, args, depth);
-                if indexed && (linear_algebra(self.checker, body, id) || existential_hint(body, self.checker, id)) {
+                if index_stages(body, &self.stack, args) && (linear_algebra(self.checker, body, id) || existential_hint(body, self.checker, id)) {
                     return Err("staged-index");
                 }
-                self.args(args, depth, shows || indexed || stages_args(body, self.checker, args, depth))
+                self.args(args)
             }
-            // `recv.m(args)` stages the receiver and each argument through
-            // temps at depth zero, as the AST codegen does.
+            // `recv.m(args)`.
             HirKind::Call {
                 callee: Callee::Method { name },
                 args,
@@ -2570,12 +2365,9 @@ impl Walk<'_> {
                 if self.class(id).is_none() {
                     return Err("call-type");
                 }
-                if depth != 0 && existential_staged(body, self.checker, id) {
-                    return Err("existential-depth");
-                }
                 let recv = *args.first().ok_or("method-receiver")?;
                 if is_vec(body, self.checker, recv) {
-                    return self.vec_method(name, args, depth);
+                    return self.vec_method(name, args);
                 }
                 // Any one-word receiver may name a ground trait instance's
                 // method; codegen resolves inherent methods on objects only.
@@ -2585,10 +2377,10 @@ impl Walk<'_> {
                     self.word(recv).map_err(|_| "receiver-type")?;
                 }
                 if unit_recv {
-                    self.effect(recv, depth)?;
-                    return self.args(&args[1..], depth + 1, depth == 0);
+                    self.effect(recv)?;
+                    return self.args(&args[1..]);
                 }
-                self.args(args, depth, depth == 0)
+                self.args(args)
             }
             // `f(args)` through a function-value local: the args, the
             // function word, then `CallIndirect`, as the AST does.
@@ -2603,8 +2395,8 @@ impl Walk<'_> {
                 if !is_unit_value(body, self.checker, id) {
                     self.word(id)?;
                 }
-                self.args(args, depth, false)?;
-                self.value(*f, depth + args.len() as u32)
+                self.args(args)?;
+                self.value(*f)
             }
             // `s[i]`: the `string_byte_at` native id, then string and
             // index above it (codegen checks the byte against `-1`).
@@ -2616,8 +2408,8 @@ impl Walk<'_> {
                 self.word(id)?;
                 self.word(*base)?;
                 self.scalar(*index)?;
-                self.value(*base, depth + 1)?;
-                self.value(*index, depth + 2)
+                self.value(*base)?;
+                self.value(*index)
             }
             HirKind::Index { base, index, kind } => {
                 if !matches!(kind, IndexKind::Array | IndexKind::Tuple) {
@@ -2626,34 +2418,22 @@ impl Walk<'_> {
                 self.word(id)?;
                 self.aggregate(*base)?;
                 self.scalar(*index)?;
+                // A slot `LOAD`, or a select over the slots.
                 if self.stack_base(*base) {
-                    // A slot `LOAD`, or the index to a temp and a select,
-                    // which runs with no operand below it.
-                    if depth != 0 && stack_select(body, &self.stack, body.expr(id)) {
-                        self.stage_at = Some(id);
-                        return Err("stack-select-depth");
-                    }
-                    // Once boxed: the box, then the index above it.
-                    self.value(*index, depth + 1)?;
-                    return self.value(*index, depth);
+                    return self.value(*index);
                 }
                 if matches!(body.expr(*base).kind, HirKind::Make { .. }) {
                     return Err("index-of-literal");
                 }
-                // A clobbering index stages base and index through temps.
-                let staged = clobbers(body, &self.stack, *index);
-                if staged && depth != 0 {
-                    return Err("staged-index");
-                }
-                self.value(*base, depth)?;
-                self.value(*index, if staged { 0 } else { depth + 1 })
+                self.value(*base)?;
+                self.value(*index)
             }
             HirKind::Make {
                 kind: MakeKind::Tuple | MakeKind::Array,
                 args,
             } if !args.is_empty() || matches!(&body.expr(id).kind, HirKind::Make { kind: MakeKind::Array, .. }) => {
                 self.word(id)?;
-                self.items(args, depth)
+                self.items(args)
             }
             HirKind::Field { base, .. } => {
                 self.word(id)?;
@@ -2662,13 +2442,7 @@ impl Walk<'_> {
                 if self.class(*base) != Some(ValueClass::Enum) {
                     self.object(*base)?;
                 }
-                // `new C(..).f` stages each argument through a temp and
-                // reads the field's (codegen), or builds the object, which
-                // runs at depth zero either way.
-                if depth != 0 && matches!(body.expr(*base).kind, HirKind::Make { .. }) {
-                    return Err("field-of-new");
-                }
-                self.value(*base, depth)
+                self.value(*base)
             }
             // `{a: x, b: y}`: each value then its name, then `MakeDict`.
             HirKind::Make {
@@ -2676,9 +2450,9 @@ impl Walk<'_> {
                 args,
             } => {
                 self.word(id)?;
-                for (i, &arg) in args.iter().enumerate() {
+                for &arg in args {
                     self.word(arg)?;
-                    self.value(arg, depth + 2 * i as u32)?;
+                    self.value(arg)?;
                 }
                 Ok(())
             }
@@ -2691,8 +2465,8 @@ impl Walk<'_> {
                 let [lo, hi] = <[HirId; 2]>::try_from(args.as_slice()).map_err(|_| "make-range")?;
                 self.word(lo)?;
                 self.word(hi)?;
-                self.value(lo, depth)?;
-                self.value(hi, depth + 1)
+                self.value(lo)?;
+                self.value(hi)
             }
             HirKind::Make {
                 kind: MakeKind::Range { .. },
@@ -2704,23 +2478,19 @@ impl Walk<'_> {
                 let [lo, hi] = <[HirId; 2]>::try_from(args.as_slice()).map_err(|_| "make-range")?;
                 self.scalar(lo)?;
                 self.scalar(hi)?;
-                self.value(lo, 0)?;
-                self.value(hi, 1)
+                self.value(lo)?;
+                self.value(hi)
             }
             HirKind::Make {
                 kind: MakeKind::Class(_),
                 args,
             } => {
-                // The object stays in a temp that must be the top of stack.
-                if depth != 0 {
-                    return Err("nested-new");
-                }
                 // A generic class's instance is built like any object, its
                 // type-parameter fields boxed.
                 if !self.shared_receiver(id) {
                     self.object(id)?;
                 }
-                self.args(args, 0, true)
+                self.args(args)
             }
             HirKind::Make {
                 kind: MakeKind::Variant { enum_name, variant, .. },
@@ -2733,30 +2503,23 @@ impl Walk<'_> {
                 if self.class(id) != Some(ValueClass::Enum) {
                     return Err("make-type");
                 }
-                // A boxed make stages complex args through temps in source
-                // order; those `STORE`s need no operands below them.
-                let staged = staged_make(body, body.expr(id));
-                if depth != 0 && staged {
-                    return Err("staged-make");
-                }
-                for (i, &arg) in args.iter().enumerate() {
+                for &arg in args {
                     // `Ok(())`: the emitter checks the layout carries it.
                     if is_unit_make(body, arg) {
                         continue;
                     }
                     // `Ok(check(x)?)`: a `()` payload runs for its effect
                     // (codegen takes it into a niche unit `Result` only).
-                    if depth == 0 && args.len() == 1 && is_unit_value(body, self.checker, arg) {
-                        self.effect(arg, 0)?;
+                    if args.len() == 1 && is_unit_value(body, self.checker, arg) {
+                        self.effect(arg)?;
                         continue;
                     }
                     self.word(arg)?;
-                    // Staged args each run at depth zero into a temp.
-                    self.value(arg, if staged { 0 } else { depth + i as u32 })?;
+                    self.value(arg)?;
                 }
                 Ok(())
             }
-            HirKind::Match { scrutinee, arms } => self.match_(id, *scrutinee, arms, depth, true),
+            HirKind::Match { scrutinee, arms } => self.match_(id, *scrutinee, arms, true),
             HirKind::If {
                 cond,
                 then,
@@ -2764,51 +2527,39 @@ impl Walk<'_> {
             } => {
                 self.word(id)?;
                 self.scalar(*cond)?;
-                self.value(*cond, depth)?;
-                self.value(*then, depth)?;
-                self.value(*els, depth)
+                self.value(*cond)?;
+                self.value(*then)?;
+                self.value(*els)
             }
             HirKind::Block {
                 stmts,
                 tail: Some(tail),
             } => {
-                // A block binding temps (named arguments read in source
-                // order, #1365) above live operands runs into a temp ahead
-                // of its statement, where its `let`s sit at the top.
-                if depth != 0 && self.stage_at.is_none() && stmts.iter().any(|&s| matches!(body.expr(s).kind, HirKind::Let { .. })) {
-                    self.stage_at = Some(id);
-                    return Err("nested-let");
-                }
                 for &s in stmts {
-                    self.effect(s, depth)?;
+                    self.effect(s)?;
                 }
                 // An escape boxes before a statement, not a value.
                 if self.box_at.contains_key(&tail.0) {
                     return Err("stack-escape-tail");
                 }
-                // A class local boxes before a value tail as before a
-                // statement: through a temp, so only on an empty stack.
-                if self.class_box_at.contains(&tail.0) && depth != 0 {
-                    return Err("class-escape-tail");
-                }
-                self.value(*tail, depth)
+                self.value(*tail)
             }
             // `yield v` / `yield from h`: the operand, then `YieldCoro` /
             // `YieldFromCoro`; its value is the word the next resume sends.
             HirKind::Yield { value, .. } => {
                 self.word(id)?;
                 self.word(*value)?;
-                self.value(*value, depth)
+                self.value(*value)
             }
             // `resume h [with v]`: the sent value, the handle, `ResumeCoro`.
             HirKind::Resume { handle, value } => {
                 self.word(id)?;
                 if let Some(v) = value {
                     self.word(*v)?;
-                    self.value(*v, depth)?;
+                    self.value(*v)?;
                 }
                 self.word(*handle)?;
-                self.value(*handle, depth + u32::from(value.is_some()))
+                self.value(*handle)
             }
             // `readonly e`: `e`'s value.
             HirKind::Builtin {
@@ -2818,7 +2569,7 @@ impl Walk<'_> {
                 let [inner] = args.as_slice() else {
                     return Err("builtin");
                 };
-                self.value(*inner, depth)
+                self.value(*inner)
             }
             // `UnboxValue` / `BoxValue` / `STRINGIFY` of a dictionary-entry
             // word: the word, then the op.
@@ -2830,7 +2581,7 @@ impl Walk<'_> {
                     return Err("builtin");
                 };
                 self.word(id)?;
-                self.value(*inner, depth)
+                self.value(*inner)
             }
             // `typeof e`: a string constant; `e` is not evaluated.
             HirKind::Builtin {
@@ -2846,7 +2597,7 @@ impl Walk<'_> {
                     return Err("builtin");
                 };
                 self.word(*handle)?;
-                self.value(*handle, depth)
+                self.value(*handle)
             }
             // Leaves control flow, so it never pushes on the fall-through path.
             HirKind::Break
@@ -2854,7 +2605,7 @@ impl Walk<'_> {
             | HirKind::Return(_)
             | HirKind::Builtin {
                 op: Builtin::Panic, ..
-            } => self.effect(id, depth),
+            } => self.effect(id),
             // `x++` / `--x` on an int or float local: one `INC` / `DEC`,
             // which leaves the old or new value, as the AST.
             HirKind::Assign { place, .. } if body.expr(id).flags.contains(HirFlags::ADJUST) => {
@@ -2883,7 +2634,6 @@ impl Walk<'_> {
         id: HirId,
         scrutinee: HirId,
         arms: &[HirArm],
-        depth: u32,
         value: bool,
     ) -> Check {
         if arms.is_empty() {
@@ -2891,80 +2641,45 @@ impl Walk<'_> {
         }
         if has_nested_test(arms) {
             // Arm by arm, with the scrutinee and the payloads an arm opens
-            // in frame slots: only on an empty operand stack.
+            // in frame slots.
             if self.class(scrutinee) != Some(ValueClass::Enum) {
                 return Err("match-type");
-            }
-            if value {
-                self.word(id)?;
-            }
-            if depth != 0 {
-                return Err("nested-match");
             }
             for arm in arms {
                 nested_pattern(&arm.pat)?;
             }
-            self.value(scrutinee, 0)?;
+        } else if !is_scalar_match(self.checker, self.body, scrutinee, arms) {
+            if self.class(scrutinee) != Some(ValueClass::Enum) {
+                return Err("match-type");
+            }
             for arm in arms {
-                if value {
-                    self.value(arm.body, 0)?;
-                } else {
-                    self.effect(arm.body, 0)?;
-                }
+                arm_fields(self.body, &arm.pat)?;
             }
-            return Ok(());
-        }
-        if is_scalar_match(self.checker, self.body, scrutinee, arms) {
-            if value {
-                self.word(id)?;
-            }
-            // A binding arm stores the scrutinee into a fresh slot.
-            if depth != 0 && arms.iter().any(|a| matches!(a.pat, HirPat::Bind(_))) {
-                return Err("nested-match");
-            }
-            self.value(scrutinee, depth)?;
-            for arm in arms {
-                if value {
-                    self.value(arm.body, depth)?;
-                } else {
-                    self.effect(arm.body, depth)?;
-                }
-            }
-            return Ok(());
-        }
-        if self.class(scrutinee) != Some(ValueClass::Enum) {
-            return Err("match-type");
         }
         if value {
             self.word(id)?;
         }
-        for arm in arms {
-            arm_fields(self.body, &arm.pat)?;
-        }
-        if depth != 0 && match_needs_slots(self.body, arms) {
-            return Err("nested-match");
-        }
-        self.value(scrutinee, depth)?;
+        self.value(scrutinee)?;
         for arm in arms {
             if value {
-                self.value(arm.body, depth)?;
+                self.value(arm.body)?;
             } else {
-                self.effect(arm.body, depth)?;
+                self.effect(arm.body)?;
             }
         }
         Ok(())
     }
 
-    /// `id` runs for its effect and leaves the operand stack as it found it.
-    fn effect(&mut self, id: HirId, depth: u32) -> Check {
+    /// `id` for its effect.
+    fn effect(&mut self, id: HirId) -> Check {
         let body = self.body;
         match &body.expr(id).kind {
             HirKind::Block { stmts, tail } => {
                 for &s in stmts {
-                    self.effect(s, depth)?;
+                    self.effect(s)?;
                 }
                 match tail {
-                    Some(t) => self.effect(*t, depth),
+                    Some(t) => self.effect(*t),
                     None => Ok(()),
                 }
             }
@@ -2972,11 +2687,8 @@ impl Walk<'_> {
                 local,
                 init: Some(init),
             } => {
-                if depth != 0 {
-                    return Err("nested-let");
-                }
                 if is_unit_local(body, self.checker, *local) {
-                    return self.effect(*init, depth);
+                    return self.effect(*init);
                 }
                 // `let a = [..]` keeps the elements in frame slots in the AST;
                 // only one that is never more than indexed lowers.
@@ -2987,7 +2699,7 @@ impl Walk<'_> {
                     };
                     for &arg in args {
                         self.word(arg)?;
-                        self.value(arg, 0)?;
+                        self.value(arg)?;
                     }
                     return Ok(());
                 }
@@ -3008,18 +2720,17 @@ impl Walk<'_> {
                         unreachable!()
                     };
                     self.object(*init)?;
-                    return self.args(args, 0, true);
+                    return self.args(args);
                 }
                 self.word(*init)?;
-                self.value(*init, depth)
+                self.value(*init)
             }
             // A type-only `let x: T;` of a scalar starts at zero.
             HirKind::Let { local, init: None } => match body.local(*local).ty.as_ref().and_then(primitive) {
-                Some(coil_ty::INT | coil_ty::FLOAT | coil_ty::BOOL | coil_ty::BYTE) if depth == 0 => Ok(()),
+                Some(coil_ty::INT | coil_ty::FLOAT | coil_ty::BOOL | coil_ty::BYTE) => Ok(()),
                 // Any other one-word type starts as a null placeholder that
                 // `unassigned_reads` proves is never read (#1273).
-                _ if depth == 0
-                    && body.local(*local).ty.as_ref().and_then(|ty| classify(self.checker, ty)).is_some_and(|c| is_word(c) && c != ValueClass::Enum) =>
+                _ if body.local(*local).ty.as_ref().and_then(|ty| classify(self.checker, ty)).is_some_and(|c| is_word(c) && c != ValueClass::Enum) =>
                 {
                     Ok(())
                 }
@@ -3029,19 +2740,13 @@ impl Walk<'_> {
             // `let (a, b) = t` / `let { x } = r`: the value to a temp, then
             // each name read from it (`Index` / `GetField`).
             HirKind::LetPat { pat, init } => {
-                if depth != 0 {
-                    return Err("nested-let");
-                }
                 if !let_pat_shape(pat) {
                     return Err("let-pattern");
                 }
                 self.word(*init)?;
-                self.value(*init, 0)
+                self.value(*init)
             }
             HirKind::Assign { place, value } => {
-                if depth != 0 {
-                    return Err("nested-assign");
-                }
                 let compound = body.expr(id).flags.contains(HirFlags::COMPOUND);
                 match &body.expr(*place).kind {
                     // A stack array's slots: the source's, or each item.
@@ -3049,7 +2754,7 @@ impl Walk<'_> {
                         HirKind::Make { args, .. } => {
                             for &arg in args {
                                 self.word(arg)?;
-                                self.value(arg, 0)?;
+                                self.value(arg)?;
                             }
                             Ok(())
                         }
@@ -3057,7 +2762,7 @@ impl Walk<'_> {
                     },
                     HirKind::Local(_) => {
                         self.word(*value)?;
-                        self.value(*value, depth)
+                        self.value(*value)
                     }
                     // `base.f = v`: the value, then the base on top of it.
                     HirKind::Field { base, .. } => {
@@ -3067,8 +2772,8 @@ impl Walk<'_> {
                         self.word(*place)?;
                         self.object(*base)?;
                         self.word(*value)?;
-                        self.value(*value, depth)?;
-                        self.value(*base, depth + 1)
+                        self.value(*value)?;
+                        self.value(*base)
                     }
                     // `base[i] = v`: the value to a temp, then base and index.
                     HirKind::Index { base, index, kind } => {
@@ -3085,43 +2790,33 @@ impl Walk<'_> {
                         self.aggregate(*base)?;
                         self.scalar(*index)?;
                         self.word(*value)?;
-                        self.value(*value, 0)?;
-                        if self.stack_base(*base) {
-                            // The value to a temp, then the index (above
-                            // the box once boxed).
-                            self.value(*index, 1)?;
-                            return self.value(*index, 0);
+                        self.value(*value)?;
+                        if !self.stack_base(*base) {
+                            self.value(*base)?;
                         }
-                        // Codegen stages base and index through temps unless
-                        // the index is a local or an int literal.
-                        let bare = matches!(body.expr(*index).kind, HirKind::Local(_) | HirKind::Lit(Lit::Int(_)));
-                        self.value(*base, 0)?;
-                        self.value(*index, u32::from(bare))
+                        self.value(*index)
                     }
                     // `STATIC = v`: the value, then `StoreStatic`.
                     HirKind::Global { .. } => {
                         self.word(*place)?;
                         self.word(*value)?;
-                        self.value(*value, 0)
+                        self.value(*value)
                     }
                     _ => Err("assign-place"),
                 }
             }
             HirKind::If { cond, then, els } => {
                 self.scalar(*cond)?;
-                self.value(*cond, depth)?;
-                self.effect(*then, depth)?;
+                self.value(*cond)?;
+                self.effect(*then)?;
                 match els {
-                    Some(e) => self.effect(*e, depth),
+                    Some(e) => self.effect(*e),
                     None => Ok(()),
                 }
             }
             HirKind::Loop { body: inner } => {
-                if depth != 0 {
-                    return Err("nested-loop");
-                }
                 self.loops += 1;
-                let r = self.effect(*inner, depth);
+                let r = self.effect(*inner);
                 self.loops -= 1;
                 r
             }
@@ -3131,9 +2826,6 @@ impl Walk<'_> {
                 body: inner,
                 kind,
             } => {
-                if depth != 0 {
-                    return Err("nested-loop");
-                }
                 // A destructuring pattern binds from each array element.
                 let array = matches!(
                     kind,
@@ -3156,20 +2848,20 @@ impl Walk<'_> {
                             if !self.ty(*iterable).is_some_and(is_range_pair) {
                                 return Err("for-in-range");
                             }
-                            self.value(*iterable, 0)?;
+                            self.value(*iterable)?;
                             self.loops += 1;
-                            let r = self.effect(*inner, depth);
+                            let r = self.effect(*inner);
                             self.loops -= 1;
                             return r;
                         };
                         for &a in &args {
                             self.scalar(a)?;
-                            self.value(a, 0)?;
+                            self.value(a)?;
                         }
                     }
                     Some(ForInKind::Array) => {
                         self.aggregate(*iterable)?;
-                        self.value(*iterable, 0)?;
+                        self.value(*iterable)?;
                     }
                     // Its elements to an array, then the array loop.
                     Some(ForInKind::Tuple { .. }) => {
@@ -3177,17 +2869,17 @@ impl Walk<'_> {
                             return Err("for-in-tuple");
                         }
                         self.word(*iterable)?;
-                        self.value(*iterable, 0)?;
+                        self.value(*iterable)?;
                     }
                     // `ResumeCoro` / `DoneCoro` on the handle in a temp.
                     Some(ForInKind::Coroutine) => {
                         self.word(*iterable)?;
-                        self.value(*iterable, 0)?;
+                        self.value(*iterable)?;
                     }
                     // `DictEntries`, then the array loop over `(key, value)`.
                     Some(ForInKind::Dict) => {
                         self.word(*iterable)?;
-                        self.value(*iterable, 0)?;
+                        self.value(*iterable)?;
                     }
                     // A user `into_iter` returning an array, dict or numeric
                     // range: the iterable as is, the `CALL`, then that loop.
@@ -3205,17 +2897,17 @@ impl Walk<'_> {
                             return Err("for-in-custom");
                         }
                         self.word(*iterable)?;
-                        self.value(*iterable, 0)?;
+                        self.value(*iterable)?;
                     }
                     _ => return Err("for-in"),
                 }
                 self.loops += 1;
-                let r = self.effect(*inner, depth);
+                let r = self.effect(*inner);
                 self.loops -= 1;
                 r
             }
             HirKind::Break | HirKind::Continue => {
-                if depth != 0 || self.loops == 0 {
+                if self.loops == 0 {
                     return Err("jump");
                 }
                 Ok(())
@@ -3229,46 +2921,35 @@ impl Walk<'_> {
                     return Err("builtin");
                 };
                 self.word(*msg)?;
-                self.value(*msg, depth)
+                self.value(*msg)
             }
             // `panic msg`: the message, then `Panic`.
             HirKind::Builtin {
                 op: Builtin::Panic,
                 args,
             } => {
-                if depth != 0 {
-                    return Err("nested-panic");
-                }
                 // A second argument (a literal) marks a failed `requires`.
                 let (&[msg] | &[msg, _]) = args.as_slice() else {
                     return Err("builtin");
                 };
                 self.word(msg)?;
-                self.value(msg, 0)
+                self.value(msg)
             }
-            HirKind::Return(value) => {
-                if depth != 0 {
-                    return Err("nested-return");
-                }
-                match returned_value(body, *value) {
-                    Some(v) if is_unit_value(body, self.checker, v) => self.effect(v, 0),
-                    Some(v) => {
-                        if self.class(v).is_none() {
-                            return Err("return-type");
-                        }
-                        self.value(v, depth)
+            HirKind::Return(value) => match returned_value(body, *value) {
+                Some(v) if is_unit_value(body, self.checker, v) => self.effect(v),
+                Some(v) => {
+                    if self.class(v).is_none() {
+                        return Err("return-type");
                     }
-                    None => Ok(()),
+                    self.value(v)
                 }
-            }
-            HirKind::Match { scrutinee, arms } => self.match_(id, *scrutinee, arms, depth, false),
+                None => Ok(()),
+            },
+            HirKind::Match { scrutinee, arms } => self.match_(id, *scrutinee, arms, false),
             // `defer`: a thunk each later `return` calls with the captures
             // (`let`s and parameters) as its frame. Control can only fall
             // out of its body.
             HirKind::Defer { captures, body: inner } => {
-                if depth != 0 {
-                    return Err("nested-defer");
-                }
                 for cap in captures {
                     let Some(local) = cap else {
                         return Err("defer-capture");
@@ -3296,7 +2977,7 @@ impl Walk<'_> {
                     return Err("defer-body");
                 }
                 let loops = std::mem::replace(&mut self.loops, 0);
-                let checked = self.effect(*inner, 0);
+                let checked = self.effect(*inner);
                 self.loops = loops;
                 checked
             }
@@ -3306,16 +2987,16 @@ impl Walk<'_> {
             HirKind::Resume { handle, value } if is_unit_value(body, self.checker, id) => {
                 if let Some(v) = value {
                     self.word(*v)?;
-                    self.value(*v, depth)?;
+                    self.value(*v)?;
                 }
                 self.word(*handle)?;
-                self.value(*handle, depth + u32::from(value.is_some()))
+                self.value(*handle)
             }
             // A statement `yield` leaves nothing: a send lands only where a
             // receiving `yield` takes it.
             HirKind::Yield { value, .. } => {
                 self.word(*value)?;
-                self.value(*value, depth)
+                self.value(*value)
             }
             // A `()` statement (a unit `match` arm, a nested item) does nothing.
             _ if is_unit_make(body, id) || matches!(body.expr(id).kind, HirKind::Lit(Lit::Unit)) => Ok(()),
@@ -3334,7 +3015,7 @@ impl Walk<'_> {
             | HirKind::Builtin {
                 op: Builtin::Done | Builtin::Readonly | Builtin::TypeOf | Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::TagArrayKind { .. } | Builtin::Relayout,
                 ..
-            } => self.value(id, depth),
+            } => self.value(id),
             other => Err(kind_name(other)),
         }
     }

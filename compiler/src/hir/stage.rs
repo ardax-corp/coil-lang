@@ -1,11 +1,12 @@
 //! Staging: move an operand the lowering cannot emit where it sits into a
 //! temp bound just before its statement.
 //!
-//! Some nodes only lower with nothing on the operand stack below them (a
-//! stack array select, for one). When such a node is an operand, staging
-//! rewrites `s(.. e ..)` to `let t = e; s(.. t ..)`, which keeps the
-//! evaluation order as long as every operand evaluated before `e` is a pure
-//! read, the same condition typed inlining hoists a call under.
+//! An assignment or `x++` used as a value lowers as statements ahead of
+//! its own, and so does an index with an effect in a compound assignment's
+//! place. Staging rewrites `s(.. e ..)` to `let t = e; s(.. t ..)`, which
+//! keeps the evaluation order as long as every operand evaluated before
+//! `e` is a pure read, the same condition typed inlining hoists a call
+//! under.
 
 use super::{BinOp, Callee, HirBody, HirExpr, HirFlags, HirId, HirKind, HirLocal, LocalId, LocalKind};
 use crate::typechecking::ty;
