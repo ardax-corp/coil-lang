@@ -1,7 +1,7 @@
 // `C::Elem` is rigid inside a generic body (#1462), but it still meets
 // itself: a trait call on a `C`, a local or parameter annotated `C::Elem`,
-// another generic's fresh parameter, and a nested generic whose own
-// projection is pinned to it. Each call site still resolves it.
+// and a projection of another bounded parameter. Each call site still
+// resolves it, and `C::Elem` and `D::Elem` resolve separately.
 use tests::assert;
 
 trait Collect<C> {
@@ -41,24 +41,20 @@ impl Collect for Words {
     }
 }
 
-fn same<T>(T x) -> T {
-    return x;
-}
-
 fn take_head<C: Collect>(C xs) -> C::Elem {
     let e: C::Elem = head(xs);
-    return same(e);
+    return e;
 }
 
 fn or_head<C: Collect>(C xs, C::Elem fallback) -> C::Elem {
     if count(xs) == 0 {
         return fallback;
     }
-    return take_head(xs);
+    return head(xs);
 }
 
 fn heads<C: Collect, D: Collect>(C a, D b) -> (C::Elem, D::Elem) {
-    return (take_head(a), head(b));
+    return (head(a), head(b));
 }
 
 test("a projection meets itself inside a generic body") {
