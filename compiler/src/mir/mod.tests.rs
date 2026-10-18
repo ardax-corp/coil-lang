@@ -4770,7 +4770,8 @@ bb0:
     let f = parse_func(text).expect(text);
     f.verify().unwrap();
     let labels = super::specialize::BodyLabels { first: Some(Label(0)), head: vec![Label(0)] };
-    let lir = super::fuse_fallback(&labels, "show", &[], &f).expect("LIR takes an argless format body");
+    let draft = super::fuse_fallback(&labels, "show", &[], &f);
+    let lir = draft.ops().expect("LIR takes an argless format body");
     assert!(lir.iter().any(|op| matches!(op, IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::FORMAT)));
 }
 
@@ -4791,6 +4792,7 @@ bb0:
     let f = parse_func(text).expect(text);
     f.verify().unwrap();
     let labels = super::specialize::BodyLabels { first: Some(Label(0)), head: vec![Label(0)] };
-    let lir = super::fuse_fallback(&labels, "add", &[], &f).expect("LIR takes a boxed fused body");
+    let draft = super::fuse_fallback(&labels, "add", &[], &f);
+    let lir = draft.ops().expect("LIR takes a boxed fused body");
     assert_eq!(lir.iter().filter(|op| matches!(op, IlOp::BoxValue { .. })).count(), 2);
 }

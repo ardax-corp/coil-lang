@@ -68,8 +68,8 @@ pub use licm::licm;
 #[cfg(test)]
 pub use error::LowerError;
 pub use specialize::{
-    fuse_fallback, take_dense_refusal, take_lir_refusal, try_lower_abi_body_side,
-    try_specialize_body_side, BodyLabels, BodySidecar,
+    fuse_fallback, lower_abi_body_reusing, take_dense_refusal, take_lir_refusal,
+    try_specialize_body_side, BodyLabels, BodySidecar, LirDraft,
 };
 pub use sroa::sroa;
 pub use strength::strength_reduce;
