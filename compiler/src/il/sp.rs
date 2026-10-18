@@ -273,8 +273,6 @@ pub(super) fn byte_stack_delta(insn: Instruction, byte: &common::Byte) -> Option
                 Some(-2)
             }
         }
-        // STRING pushes the ObjString; DATA is a stack-neutral archive tombstone.
-        Instruction::DATA => Some(0),
         // FORMAT n: pop n args + format string, push result (−n). n==0 is a no-op.
         Instruction::FORMAT => {
             let n = byte.operand_u32() as i32;
@@ -756,13 +754,6 @@ mod tests {
                 Byte::new(Instruction::MakeDict).with_operand_u32(0)
             )),
             Some(1)
-        );
-        // DATA is a legacy archive tombstone (net 0).
-        assert_eq!(
-            stack_delta(&IlOp::byte(
-                Byte::new(Instruction::DATA).with_operand_u32(b'a' as u32)
-            )),
-            Some(0)
         );
         let ops = vec![
             IlOp::byte(Byte::new(Instruction::STRING).with_operand_u32(1)),
