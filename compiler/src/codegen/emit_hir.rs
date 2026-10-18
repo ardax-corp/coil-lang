@@ -1593,7 +1593,6 @@ impl Compiler {
             heap_fields,
             boxed_niches,
             niche_args: &tables.niche_args,
-            unit_result_args: &tables.unit_result_args,
             existential_packs: tables.existential_packs,
             packs: &tables.packs,
             record_fields,
@@ -5239,9 +5238,6 @@ impl Compiler {
             _ if from == to => true,
             (Rep::Pair(_), Rep::Word(L::Boxed)) | (Rep::Word(L::Boxed), Rep::Pair(_)) => true,
             (Rep::Word(_), Rep::Word(L::Boxed)) | (Rep::Word(L::Boxed), Rep::Word(_)) => true,
-            // `Result<(), E>` into a `Result<unit, E>` slot (#1085): MIR's
-            // `fit` rewrites the `()` tuple `Ok` to `0`.
-            (Rep::Word(L::NicheResult), Rep::Word(L::NicheUnitResult)) => true,
             _ => false,
         }
     }
