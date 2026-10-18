@@ -349,15 +349,12 @@ impl IlBuilder {
         });
     }
 
-    /// Move `other`'s ops onto the end, remapping its labels to fresh ids —
-    /// except the `Entry` ops at `keep` (indices into `other`), which already
-    /// target labels of this namespace and keep their ids.
-    pub fn append(&mut self, other: &mut IlBuilder, keep: &[usize]) -> BTreeMap<u32, u32> {
+    /// Move `other`'s ops onto the end, remapping its labels to fresh ids.
+    pub fn append(&mut self, other: &mut IlBuilder) -> BTreeMap<u32, u32> {
         // Merge label id spaces: remap other's labels to fresh ids.
         if other.ops.is_empty() {
             return BTreeMap::new();
         }
-        let keep: std::collections::HashSet<usize> = keep.iter().copied().collect();
         let mut remap: BTreeMap<u32, u32> = BTreeMap::new();
         let mut map_label = |id: u32, me: &mut Self| -> u32 {
             *remap.entry(id).or_insert_with(|| {
@@ -366,14 +363,7 @@ impl IlBuilder {
                 n
             })
         };
-        for (i, op) in other.ops.drain(..).enumerate() {
-            if keep.contains(&i)
-                && let IlOp::Entry { target, .. } = &op
-            {
-                self.targeted.insert(target.0);
-                self.ops.push(op);
-                continue;
-            }
+        for op in other.ops.drain(..) {
             match op {
                 IlOp::Label(Label(id)) => {
                     let nid = map_label(id, self);
