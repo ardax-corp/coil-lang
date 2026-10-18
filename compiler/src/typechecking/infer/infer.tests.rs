@@ -2697,3 +2697,21 @@ impl rank::Rank for Card {
         "expected a Rank instance for Card"
     );
 }
+
+#[test]
+fn logical_not_on_type_param_help_names_the_param() {
+    // coil-lang#1447: the help named the internal variable (`found t61`).
+    let src = r#"
+fn negate<T>(T x) -> bool {
+    return !x;
+}
+"#;
+    let (c, _) = check(src);
+    let help = c
+        .messages()
+        .iter()
+        .find(|m| m.message().contains("Logical NOT"))
+        .and_then(|m| m.help().as_ref())
+        .expect("expected help on `!` reject");
+    assert!(help.starts_with("found `T`;"), "got {help:?}");
+}

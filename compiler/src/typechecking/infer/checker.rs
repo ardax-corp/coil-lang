@@ -2775,7 +2775,8 @@ impl Checker {
                             "Logical NOT requires a `bool` or `int` operand".to_string(),
                             e.0.into_range(),
                             Some(format!(
-                                "found `{pruned}`; use `~` for bitwise negation on integers"
+                                "found `{}`; use `~` for bitwise negation on integers",
+                                self.diag_ty(&pruned)
                             )),
                         );
                         boolean()
