@@ -237,8 +237,7 @@ fn specialize_side(
         .flat_map(|b| b.insts.iter())
         .filter(|i| matches!(i, crate::mir::MirInst::StoreIndex { .. }))
         .count();
-    // Heap writes and reads the source holds: the MIR the fuse IL comes
-    // from.
+    // Heap writes and reads the source holds: the MIR its LIR comes from.
     let (src_stores, src_index) = (count_mir(from_hir, is_mir_store_index), count_mir(from_hir, is_mir_index));
     if src_stores > 0 && stores_ssa == 0 {
         return refuse_dense("store index dropped in SSA");
@@ -289,8 +288,8 @@ fn specialize_side(
     // Native in-loop Make* / ArrayPush amortize prologue Seek (A2 / B6).
     // Boxed leftover reconstruct is already refused above.
     let loop_tax = facts.has_loop && !select_cfg;
-    // Both compares are against the code that runs if dense refuses: a
-    // fused body with no fuse IL from MIR has nothing to lose to.
+    // Both compares are against the code that runs if dense refuses (its
+    // LIR): a body the LIR tier refuses has nothing to lose to.
     let Some(ops) = fallback else {
         return Some((out, abi));
     };
