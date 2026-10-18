@@ -233,10 +233,6 @@ struct Context {
 
     /// Frame-local / two-slot ObjEnum: name → (payload_slot, tag_slot, enum_name).
     unboxed_enum_locals: HashMap<String, (u32, u32, String)>,
-    /// Named `new C` field-SROA: name → (base_slot, nfields, class_name).
-    unboxed_class_locals: HashMap<String, (u32, usize, String)>,
-    /// First identity use of an unboxed class → heap slot (Q2 box-once).
-    unboxed_class_box: HashMap<String, u32>,
 
     prev: Option<Box<Self>>,
 }
