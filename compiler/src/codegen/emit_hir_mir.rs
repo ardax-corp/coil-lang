@@ -9,6 +9,7 @@
 //! gives the same answer whether or not the body was emitted first.
 
 use super::*;
+use super::compiler::DictStep;
 
 /// How many value operands `dload` / `declare` / `invoke` read before
 /// the signature or argument tuple.
@@ -592,12 +593,12 @@ impl Compiler {
     fn hir_mir_note(&mut self, hir: &HirBody, emit: &HirEmit, id: HirId, t: &mut HirMirTables) -> Kids {
         // A value packed after it is built.
         if let Some(pack) = self.hir_existential_pack(hir, id) {
-            let code = self.hir_mir_once(|this| {
-                let mut code = CodeBuf::new();
-                this.emit_existential_pack_recipe(&mut code, &pack);
-                code
+            let steps = self.hir_mir_once(|this| {
+                let mut steps = Vec::new();
+                this.plan_existential_pack(&mut steps, &pack);
+                steps
             });
-            match self.hir_mir_dict_program(&code) {
+            match self.hir_mir_dict_program(&steps) {
                 Some(ops) => {
                     t.packs.insert(id.0, ops);
                 }
@@ -693,12 +694,12 @@ impl Compiler {
                         Some(crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::PolyFn { target }, captures: Vec::new(), dicts: Vec::new() })
                     } else {
                         let (name, ty) = (name.clone(), Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t)));
-                        let code = self.hir_mir_once(|this| {
-                            let mut code = CodeBuf::new();
-                            this.emit_polyfn_escape_dicts(&mut code, &name, ty.as_ref());
-                            code
+                        let steps = self.hir_mir_once(|this| {
+                            let mut steps = Vec::new();
+                            this.plan_polyfn_escape_dicts(&mut steps, &name, ty.as_ref());
+                            steps
                         });
-                        self.hir_mir_dict_program(&code)
+                        self.hir_mir_dict_program(&steps)
                             .map(|dicts| crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::PolyFnCapture { target }, captures: Vec::new(), dicts })
                     };
                     if let Some(value) = value {
@@ -1064,7 +1065,7 @@ impl Compiler {
         let fqn = self.instance_clone(&fqn, std::slice::from_ref(&lookup)).unwrap_or(fqn);
         let raw = self.raw_instance_methods.contains(&fqn);
         let span = hir.expr(id).span;
-        let dict = self.hir_mir_once(|this| this.emit_call_instance_dict(&mut CodeBuf::new(), (class, method, &fqn), std::slice::from_ref(&lookup), span.0..span.1));
+        let dict = self.hir_mir_once(|this| this.plan_call_instance_dict(&mut Vec::new(), (class, method, &fqn), std::slice::from_ref(&lookup), span.0..span.1));
         // A two-word result comes back as two words (or boxed after the call).
         let one_word = self.two_word_return_kind(&fqn).is_none();
         self.raw_instance_call = raw;
@@ -1111,12 +1112,12 @@ impl Compiler {
             let ground = inst.ground.as_ref().expect("ground call");
             let method = &ground.method;
             let key = self.instance_clone(&call.key, &inst.args).unwrap_or_else(|| call.key.clone());
-            let code = self.hir_mir_once(|this| {
-                let mut code = CodeBuf::new();
-                this.emit_call_instance_dict(&mut code, (&inst.class, method, &key), &inst.args, span.0..span.1);
-                code
+            let steps = self.hir_mir_once(|this| {
+                let mut steps = Vec::new();
+                this.plan_call_instance_dict(&mut steps, (&inst.class, method, &key), &inst.args, span.0..span.1);
+                steps
             });
-            let dicts = self.hir_mir_dict_program(&code);
+            let dicts = self.hir_mir_dict_program(&steps);
             let raw = self.raw_instance_methods.contains(&key);
             self.raw_instance_call = raw;
             let target = self.named_entry_target(&key, true);
@@ -1177,7 +1178,7 @@ impl Compiler {
                 .collect();
             let unbox = tag(call.generic.as_ref().and_then(|g| g.unbox.as_ref()));
             // The generic's dictionaries, then the instance's, as
-            // `hir_push_dicts` and `emit_instance_dict` push them.
+            // `hir_push_dicts` and `plan_instance_dict` build them.
             let mut dicts = match call.generic.as_deref() {
                 None => Some(Vec::new()),
                 Some(g) if self.hir_generic_boxing(hir, emit, args, &call.params) => self.hir_mir_dict_ops(g),
@@ -1186,13 +1187,13 @@ impl Compiler {
             if let Some(inst) = instance
                 && dicts.is_some()
             {
-                let code = self.hir_mir_once(|this| {
-                    let mut code = CodeBuf::new();
-                    this.emit_instance_dict(&mut code, &inst.class, &inst.args);
-                    code
+                let steps = self.hir_mir_once(|this| {
+                    let mut steps = Vec::new();
+                    this.plan_instance_dict(&mut steps, &inst.class, &inst.args);
+                    steps
                 });
                 let prev = dicts.take();
-                dicts = self.hir_mir_dict_program(&code).and_then(|ops| {
+                dicts = self.hir_mir_dict_program(&steps).and_then(|ops| {
                     prev.map(|mut d| {
                         d.extend(ops);
                         d
@@ -1330,12 +1331,12 @@ impl Compiler {
         // The call site's dictionaries, as emission pushes them.
         let dicts = match &source {
             Some(source) => {
-                let code = self.hir_mir_once(|this| {
-                    let mut code = CodeBuf::new();
-                    this.emit_call_site_dicts(&mut code, source, &arg_tys, call_ty.as_ref());
-                    code
+                let steps = self.hir_mir_once(|this| {
+                    let mut steps = Vec::new();
+                    this.plan_call_site_dicts(&mut steps, source, &arg_tys, call_ty.as_ref());
+                    steps
                 });
-                let Some(dicts) = self.hir_mir_dict_program(&code) else {
+                let Some(dicts) = self.hir_mir_dict_program(&steps) else {
                     return;
                 };
                 dicts
@@ -1344,12 +1345,12 @@ impl Compiler {
             // call's types (#1188).
             None => match Self::hir_forall_param_ty(hir, &self.checker, f) {
                 Some(Ty::Forall { constraints, body, .. }) if !constraints.is_empty() => {
-                    let code = self.hir_mir_once(|this| {
-                        let mut code = CodeBuf::new();
-                        this.emit_dicts_for_signature(&mut code, &body, &constraints, &arg_tys, call_ty.as_ref());
-                        code
+                    let steps = self.hir_mir_once(|this| {
+                        let mut steps = Vec::new();
+                        this.plan_dicts_for_signature(&mut steps, &body, &constraints, &arg_tys, call_ty.as_ref());
+                        steps
                     });
-                    let Some(dicts) = self.hir_mir_dict_program(&code) else {
+                    let Some(dicts) = self.hir_mir_dict_program(&steps) else {
                         return;
                     };
                     dicts
@@ -1461,12 +1462,12 @@ impl Compiler {
                 ops.push(crate::mir::HirDictOp::Load(slot));
             }
         }
-        let code = self.hir_mir_once(|this| {
-            let mut code = CodeBuf::new();
-            this.emit_call_site_dicts(&mut code, &generic.lookup, &generic.arg_tys, Some(&generic.ret_ty));
-            code
+        let steps = self.hir_mir_once(|this| {
+            let mut steps = Vec::new();
+            this.plan_call_site_dicts(&mut steps, &generic.lookup, &generic.arg_tys, Some(&generic.ret_ty));
+            steps
         });
-        ops.extend(self.hir_mir_dict_program(&code)?);
+        ops.extend(self.hir_mir_dict_program(&steps)?);
         Some(ops)
     }
 
@@ -1482,11 +1483,29 @@ impl Compiler {
             || self.hir_mir_ctx.iter().any(|&(s, own, _)| s == slot && own < sp)
     }
 
-    /// [`Self::hir_mir_dict_ops_of`], with every ground dictionary built
-    /// once ([`Self::intern_dict_ops`]).
-    fn hir_mir_dict_program(&mut self, code: &CodeBuf) -> Option<Vec<crate::mir::HirDictOp>> {
-        let ops = self.hir_mir_dict_ops_of(code)?;
+    /// [`Self::hir_dict_ops`], with every ground dictionary built once
+    /// ([`Self::intern_dict_ops`]).
+    fn hir_mir_dict_program(&mut self, steps: &[DictStep]) -> Option<Vec<crate::mir::HirDictOp>> {
+        let ops = self.hir_dict_ops(steps)?;
         Some(self.intern_dict_ops(ops))
+    }
+
+    /// Dictionary plan `steps` as a [`crate::mir::HirDictOp`] program,
+    /// when direct MIR has every step: a code pointer to an entry with a
+    /// label, and only this body's own dictionary parameters.
+    fn hir_dict_ops(&self, steps: &[DictStep]) -> Option<Vec<crate::mir::HirDictOp>> {
+        use crate::mir::HirDictOp;
+        steps
+            .iter()
+            .map(|&step| match step {
+                DictStep::CodeAt(offset) => self.bytecode.entry_label_for_offset(offset as usize).map(HirDictOp::Code),
+                DictStep::CodeLabel(label) => Some(HirDictOp::Code(label)),
+                DictStep::Load(slot) => self.hir_mir_dict_param(slot).then_some(HirDictOp::Load(slot)),
+                DictStep::Null => Some(HirDictOp::Null),
+                DictStep::Tuple(n) => Some(HirDictOp::Tuple(n)),
+                DictStep::Box(tag) => Some(HirDictOp::Box(tag)),
+            })
+            .collect()
     }
 
     /// A dictionary made only of method pointers and such dictionaries is
@@ -1677,7 +1696,7 @@ impl Compiler {
     fn hir_mir_dict_reads(&mut self, hir: &HirBody, emit: &HirEmit, id: HirId) -> bool {
         // A value packed after it is built.
         if let Some(pack) = self.hir_existential_pack(hir, id)
-            && self.hir_mir_probe_unplanned(|this, code| this.emit_existential_pack_recipe(code, &pack))
+            && self.hir_mir_probe_unplanned(|this, steps| this.plan_existential_pack(steps, &pack))
         {
             return true;
         }
@@ -1689,8 +1708,8 @@ impl Compiler {
                 Some(HirOp::Call { lookup, fqn, class, method }) => {
                     let lookup = lookup.clone();
                     let fqn = self.instance_clone(fqn, std::slice::from_ref(&lookup)).unwrap_or_else(|| fqn.clone());
-                    self.hir_mir_probe_dicts(|this, code| {
-                        this.emit_call_instance_dict(code, (class, method, &fqn), std::slice::from_ref(&lookup), span);
+                    self.hir_mir_probe_dicts(|this, steps| {
+                        this.plan_call_instance_dict(steps, (class, method, &fqn), std::slice::from_ref(&lookup), span);
                     })
                 }
                 _ => false,
@@ -1698,8 +1717,8 @@ impl Compiler {
             // A `PolyFn` value's escape dictionaries.
             HirKind::Global { .. } if let Some(name) = emit.plan.polyfns.get(&id.0) => {
                 let ty = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));
-                self.hir_mir_probe_unplanned(|this, code| {
-                    this.emit_polyfn_escape_dicts(code, name, ty.as_ref());
+                self.hir_mir_probe_unplanned(|this, steps| {
+                    this.plan_polyfn_escape_dicts(steps, name, ty.as_ref());
                 })
             }
             // A call through a `PolyFn` local: the call site's dictionaries
@@ -1710,8 +1729,8 @@ impl Compiler {
                 };
                 let arg_tys: Vec<Ty> = args.iter().filter_map(|&a| Self::hir_ty(hir, a)).map(|t| apply_ty_prune(self.checker.subst(), t)).collect();
                 let call_ty = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));
-                self.hir_mir_probe_unplanned(|this, code| {
-                    this.emit_call_site_dicts(code, &source, &arg_tys, call_ty.as_ref());
+                self.hir_mir_probe_unplanned(|this, steps| {
+                    this.plan_call_site_dicts(steps, &source, &arg_tys, call_ty.as_ref());
                 })
             }
             HirKind::Call { args, .. } if !emit.plan.lens.contains_key(&id.0) && let Some(call) = emit.plan.calls.get(&id.0) => {
@@ -1727,8 +1746,8 @@ impl Compiler {
                 if let Some(inst) = call.instance.as_ref().filter(|i| i.ground.is_some()) {
                     let method = &inst.ground.as_ref().expect("ground call").method;
                     let key = self.instance_clone(&call.key, &inst.args).unwrap_or_else(|| call.key.clone());
-                    return self.hir_mir_probe_unplanned(|this, code| {
-                        this.emit_call_instance_dict(code, (&inst.class, method, &key), &inst.args, span);
+                    return self.hir_mir_probe_unplanned(|this, steps| {
+                        this.plan_call_instance_dict(steps, (&inst.class, method, &key), &inst.args, span);
                     });
                 }
                 if !call.method && self.hir_par_call_plan(hir, &call.key, args).is_some() {
@@ -1751,8 +1770,8 @@ impl Compiler {
                     _ => call.key.clone(),
                 };
                 !self.raw_instance_methods.contains(&key)
-                    && self.hir_mir_probe_unplanned(|this, code| {
-                        this.emit_instance_dict(code, &inst.class, &inst.args);
+                    && self.hir_mir_probe_unplanned(|this, steps| {
+                        this.plan_instance_dict(steps, &inst.class, &inst.args);
                     })
             }
             _ => false,
@@ -1763,8 +1782,8 @@ impl Compiler {
     /// `generic`: one it forwards, or one of the call site's.
     fn hir_mir_generic_dict_reads(&mut self, generic: &HirGeneric) -> bool {
         generic.forwarded.iter().any(|&i| self.lookup_slot(&format!("__dict{i}")).is_some_and(|slot| !self.hir_mir_dict_param(slot)))
-            || self.hir_mir_probe_unplanned(|this, code| {
-                this.emit_call_site_dicts(code, &generic.lookup, &generic.arg_tys, Some(&generic.ret_ty));
+            || self.hir_mir_probe_unplanned(|this, steps| {
+                this.plan_call_site_dicts(steps, &generic.lookup, &generic.arg_tys, Some(&generic.ret_ty));
             })
     }
 
@@ -1833,37 +1852,34 @@ impl Compiler {
                     return false;
                 }
                 let fqn = self.instance_clone(&fqn, std::slice::from_ref(&lookup_ty)).unwrap_or(fqn);
-                self.hir_mir_probe_dicts(|this, code| {
-                    this.emit_call_instance_dict(code, ("Show", "show", &fqn), std::slice::from_ref(&lookup_ty), 0..0);
+                self.hir_mir_probe_dicts(|this, steps| {
+                    this.plan_call_instance_dict(steps, ("Show", "show", &fqn), std::slice::from_ref(&lookup_ty), 0..0);
                 })
             }
         }
     }
 
-    /// Run a dictionary helper of emission into a scratch buffer
-    /// ([`Self::hir_mir_once`]): whether its code reads a frame
-    /// dictionary. The code goes nowhere.
-    fn hir_mir_probe_dicts(&mut self, f: impl FnOnce(&mut Self, &mut CodeBuf)) -> bool {
-        let mut code = CodeBuf::new();
-        self.hir_mir_once(|this| f(this, &mut code));
-        self.hir_mir_code_reads_dicts(&code)
+    /// Plan a site's dictionaries ([`Self::hir_mir_once`]): whether the
+    /// plan reads a frame dictionary. The plan goes nowhere.
+    fn hir_mir_probe_dicts(&mut self, f: impl FnOnce(&mut Self, &mut Vec<DictStep>)) -> bool {
+        let mut steps = Vec::new();
+        self.hir_mir_once(|this| f(this, &mut steps));
+        self.hir_mir_steps_read_dicts(&steps)
     }
 
-    /// As [`Self::hir_mir_probe_dicts`], for a site whose plan builds its
-    /// dictionaries from a [`crate::mir::HirDictOp`] program: whether its
-    /// code reads a frame dictionary no program step stands for.
-    fn hir_mir_probe_unplanned(&mut self, f: impl FnOnce(&mut Self, &mut CodeBuf)) -> bool {
-        let mut code = CodeBuf::new();
-        self.hir_mir_once(|this| f(this, &mut code));
-        self.hir_mir_code_reads_dicts(&code) && self.hir_mir_dict_ops_of(&code).is_none()
+    /// As [`Self::hir_mir_probe_dicts`], for a site whose plan direct MIR
+    /// runs as a [`crate::mir::HirDictOp`] program: whether it reads a
+    /// frame dictionary no program step stands for.
+    fn hir_mir_probe_unplanned(&mut self, f: impl FnOnce(&mut Self, &mut Vec<DictStep>)) -> bool {
+        let mut steps = Vec::new();
+        self.hir_mir_once(|this| f(this, &mut steps));
+        self.hir_mir_steps_read_dicts(&steps) && self.hir_dict_ops(&steps).is_none()
     }
 
-    /// Whether `code` loads one of the frame's dictionaries.
-    fn hir_mir_code_reads_dicts(&self, code: &CodeBuf) -> bool {
+    /// Whether `steps` load one of the frame's dictionaries.
+    fn hir_mir_steps_read_dicts(&self, steps: &[DictStep]) -> bool {
         let dicts: HashSet<u32> = (0..).map_while(|i| self.lookup_slot(&format!("__dict{i}"))).collect();
-        code.ops().iter().filter_map(IlOp::as_encode_byte).any(|b| {
-            *b.bytecode() == Instruction::LOAD && (0..b.load_store_count()).any(|i| dicts.contains(&b.load_store_slot_at(i)))
-        })
+        steps.iter().any(|step| matches!(step, DictStep::Load(slot) if dicts.contains(slot)))
     }
 
     /// `f(self)`, an emission helper the walk asks for its decision, with
@@ -1962,7 +1978,7 @@ impl Compiler {
         // A non-raw `show` takes the value boxed (`BoxValue`).
         let boxed = if raw { None } else { Self::ty_to_value_tag(&lookup_ty).map(|tag| tag as u32) };
         // A dictionary argument: not a plain call. Its code goes nowhere.
-        let dict = self.hir_mir_once(|this| this.emit_call_instance_dict(&mut CodeBuf::new(), ("Show", "show", &fqn), std::slice::from_ref(&lookup_ty), 0..0));
+        let dict = self.hir_mir_once(|this| this.plan_call_instance_dict(&mut Vec::new(), ("Show", "show", &fqn), std::slice::from_ref(&lookup_ty), 0..0));
         if dict || self.two_word_return_kind(&fqn).is_some() {
             return None;
         }

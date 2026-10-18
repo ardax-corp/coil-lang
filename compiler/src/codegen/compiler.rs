@@ -3010,36 +3010,9 @@ impl Compiler {
         r
     }
 
-    fn emit_call_instance_dict(&mut self, bytecode: &mut CodeBuf, target: (&str, &str, &str), lookup: &[Ty], range: std::ops::Range<usize>) -> bool {
-        let mut steps = Vec::new();
-        let r = self.plan_call_instance_dict(&mut steps, target, lookup, range);
-        Self::emit_dict_steps(bytecode, &steps);
-        r
-    }
-
-    fn emit_existential_pack_recipe(&mut self, bytecode: &mut CodeBuf, pack: &crate::typechecking::infer::ExistentialPack) {
-        let mut steps = Vec::new();
-        self.plan_existential_pack(&mut steps, pack);
-        Self::emit_dict_steps(bytecode, &steps);
-    }
-
     fn emit_call_site_dicts(&mut self, bytecode: &mut CodeBuf, fn_name: &str, arg_tys: &[Ty], ret_ty: Option<&Ty>) -> usize {
         let mut steps = Vec::new();
         let r = self.plan_call_site_dicts(&mut steps, fn_name, arg_tys, ret_ty);
-        Self::emit_dict_steps(bytecode, &steps);
-        r
-    }
-
-    pub(crate) fn emit_dicts_for_signature(&mut self, bytecode: &mut CodeBuf, fun_ty: &Ty, constraints: &[crate::typechecking::ty::Constraint], arg_tys: &[Ty], ret_ty: Option<&Ty>) -> usize {
-        let mut steps = Vec::new();
-        let r = self.plan_dicts_for_signature(&mut steps, fun_ty, constraints, arg_tys, ret_ty);
-        Self::emit_dict_steps(bytecode, &steps);
-        r
-    }
-
-    fn emit_polyfn_escape_dicts(&mut self, bytecode: &mut CodeBuf, fn_name: &str, escape_ty: Option<&Ty>) -> usize {
-        let mut steps = Vec::new();
-        let r = self.plan_polyfn_escape_dicts(&mut steps, fn_name, escape_ty);
         Self::emit_dict_steps(bytecode, &steps);
         r
     }
