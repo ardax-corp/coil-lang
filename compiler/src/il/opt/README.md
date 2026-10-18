@@ -1,12 +1,13 @@
 # Optimization on the stack IL
 
 No optimization pass runs on the stack IL any more. The last ones were
-removed in 2026-10; their work moved to the HIR passes and to HIR lowering
-(`codegen/emit_hir.rs`), where the types, locals and control flow are still
-explicit. What is left of the stack IL is:
+removed in 2026-10; their work moved to the HIR passes and to MIR
+lowering, where the types, locals and control flow are still explicit.
+Since M5 (2026-10-15) the stack IL is only the encoding of what MIR emits:
 
-- **lift to MIR** (`IlModule::optimize_and_flatten`): each body tries dense
-  MIR, then MIR→LIR reconstruct, else stays fuse-IL;
+- **tier pick** (`IlModule::optimize_and_flatten`): each body's MIR (lowered
+  from HIR) emits dense when that wins, else LIR; there is no lift from
+  stack IL and no fuse-IL tier;
 - **fuse-select** (`il::lower::fuse_select`, below), once after the bodies
   are concatenated, then one PC assignment.
 
@@ -31,9 +32,9 @@ are identical. Skip only on a hit-bench wash or regression. See
 | full unroll of short counted loops | `hir::unroll` | `loop_unroll` (not at Size) |
 | escape analysis / scalar replacement | `hir::enum_sroa`, `hir::tuple_sroa` | `escape_analysis` |
 | `clone_shared_return` | `hir::sink_return`; lowering returns at a kept value `match`'s join (`hir_return_at_joins`) | `sink_return` (not at Size) |
-| `slot_promote`, `dead_store_at` | lowering reads one-word locals in place; `hir::fold` drops stores to locals nothing reads | — |
-| `stack_dce` | `CodeBuf::push_pop` drops a pure value pushed just before; `hir::fold` drops `x = x` | — |
-| `dead_block` | lowering emits no jump or closing return after an exit (`CodeBuf::ends_in_exit`); the MIR lift skips blocks nothing reaches | — |
+| `slot_promote`, `dead_store_at` | MIR keeps one-word locals in registers; `hir::fold` drops stores to locals nothing reads | — |
+| `stack_dce` | MIR emits no unused pure value; `hir::fold` drops `x = x` | — |
+| `dead_block` | MIR lowering builds no block nothing reaches | — |
 | `branch_optimization`, `block_reordering` | early exits laid out after the body (direct MIR's block layout, `HirPlan::cold_ok`) | `branch_optimization` |
 | `jump_thread` | an `if` ending a loop body jumps straight to the back edge (direct MIR's control flow) | — |
 
@@ -44,7 +45,7 @@ convoys, `invert_guard_branch`, `slot_promote_tell`, `ssa_gvn` and per-body
 `cfg_gvn`. MIR instcombine / strength reduction / GVN are separate.
 
 The HIR passes run in `emit_hir` after inlining: unroll, fold, cse, licm,
-bounds, sink_return.
+bounds, sink_return. MIR runs its own passes per tier ([mir.md](../../../../docs/internals/mir.md)).
 
 ## Cursor facts: `sp` vs `tell`
 
@@ -62,7 +63,7 @@ is often the correct answer (a raising loop header), not a gap.
 Hot-path ops are typed variants (`Load`, `Const`, `Bin`, `BinSlot*`, `*Return`,
 `HostInvoke`, …). `IlOp::Byte` is the long-tail escape hatch (FORMAT, FFI,
 `Seek`, some unaries still waiting on typed lift, packed forms, tests): an
-opaque barrier to fuse-select and the MIR lift unless decoded with
+opaque barrier to fuse-select unless decoded with
 `as_encode_byte()`. Absolute `JMP`/`JMPF`/`JMPT` as `Byte` is forbidden before
 fuse (`assert_no_residual_abs_jumps`).
 
