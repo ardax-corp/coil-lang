@@ -1761,8 +1761,7 @@ impl Lower<'_> {
         self.inp.word(ty).or_else(|| ((self.inp.boxed_view)(ty, None).is_some() || is_heap_tuple(ty)).then_some(MirTy::HeapRef))
     }
 
-    /// A niche `Option` / `Result` word boxed to its `ObjEnum`, as HIR
-    /// emission's `emit_niche_option_to_boxed` and siblings.
+    /// A niche `Option` / `Result` word boxed to its `ObjEnum`.
     fn box_niche(&mut self, layout: ValueLayout, w: ValueId) -> Result<ValueId, Refusal> {
         self.box_niche_as(layout, w, false)
     }
@@ -2377,8 +2376,7 @@ impl Lower<'_> {
             let obj = self.b.ins_alloc(MirAllocKind::Tuple, vec![lo, hi]).map_err(mir)?;
             return Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?));
         }
-        // A numeric range: its typed object, start and end its fields, as
-        // HIR emission's `emit_box_range_slots`.
+        // A numeric range: its typed object, start and end its fields.
         if let Some(kind) = crate::typechecking::return_layout::two_word_range_kind(ty) {
             use crate::typechecking::return_layout as rl;
             let inclusive = rl::range_kind_inclusive(kind).ok_or("box pair type")?;
@@ -5179,8 +5177,7 @@ impl Lower<'_> {
         Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?))
     }
 
-    /// A two-word enum value boxed to one word, as HIR emission's
-    /// `emit_box_slots_to_enum`: the tag tested against each variant's but
+    /// A two-word enum value boxed to one word: the tag tested against each variant's but
     /// the last, then that variant made from the payload word.
     fn box_pair(&mut self, ty: &Ty, lo: ValueId, tag: ValueId) -> Result<Val, Refusal> {
         let (name, variants) = (self.inp.pair_variants)(ty).ok_or("box pair type")?;

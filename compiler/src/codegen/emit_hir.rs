@@ -138,8 +138,6 @@ struct HirGeneric {
     /// Ground argument types (receiver first) and result type.
     arg_tys: Vec<Ty>,
     ret_ty: Ty,
-    /// How many dictionaries the call appends.
-    dicts: usize,
     /// The result type to `UnboxValue` (a bare type parameter result).
     unbox: Option<Ty>,
     /// Per argument: a ground closure passed where the callee takes a
@@ -4865,7 +4863,6 @@ impl Compiler {
             adapt,
             arg_tys,
             ret_ty,
-            dicts: scheme.constraints.len(),
             unbox,
             forwarded,
         })
@@ -5008,27 +5005,6 @@ impl Compiler {
     /// An enum whose word is the heap object (no pointer niche).
     fn hir_boxed_enum_word(&self, ty: &Ty) -> bool {
         self.value_layout(ty) == ValueLayout::Boxed
-    }
-
-    /// Push `generic`'s dictionaries after the arguments; their count.
-    fn hir_push_dicts(&mut self, generic: &HirGeneric) -> u32 {
-        // The enclosing body's own first, then the call site's, as the AST.
-        let mut forwarded = 0;
-        for &i in &generic.forwarded {
-            if let Some(slot) = self.lookup_slot(&format!("__dict{i}")) {
-                self.bytecode.push_load(slot);
-                forwarded += 1;
-            }
-        }
-        let mut dicts = Vec::new();
-        let n = self.plan_call_site_dicts(&mut dicts, &generic.lookup, &generic.arg_tys, Some(&generic.ret_ty));
-        debug_assert!(
-            !generic.forwarded.is_empty() || n == generic.dicts,
-            "planned dictionaries for `{}`",
-            generic.lookup
-        );
-        self.append_dicts_interned(&dicts);
-        (forwarded + n) as u32
     }
 
     /// `return f(..)` may jump instead of call, under the rules

@@ -316,13 +316,6 @@ impl IlBuilder {
         });
     }
 
-    pub fn push_box_value(&mut self, tag: u32) {
-        self.push_op(IlOp::BoxValue {
-            tag,
-            loc: DebugLoc::unknown(),
-        });
-    }
-
     pub fn push_unbox_value(&mut self, tag: u32) {
         self.push_op(IlOp::UnboxValue {
             tag,
@@ -333,13 +326,6 @@ impl IlBuilder {
     pub fn push_load_field(&mut self, index: u32) {
         self.push_op(IlOp::LoadField {
             index,
-            loc: DebugLoc::unknown(),
-        });
-    }
-
-    pub fn push_set_field_slot(&mut self, index: u32) {
-        self.push_op(IlOp::SetField {
-            index: Some(index),
             loc: DebugLoc::unknown(),
         });
     }

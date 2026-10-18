@@ -64,8 +64,7 @@ pub(super) struct SynthCallee {
 /// One step of building trait dictionaries, a stack program over words:
 /// the plan `Compiler::plan_instance_dict` and its callers make. Direct MIR
 /// runs it as a [`crate::mir::HirDictOp`] program
-/// (`Compiler::hir_dict_ops`); an IL thunk emits it
-/// (`Compiler::append_dicts_interned`).
+/// (`Compiler::hir_dict_ops`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum DictStep {
     /// A method's code pointer: an entry already emitted, by offset.
@@ -1116,30 +1115,6 @@ impl Compiler {
             }
             _ => None,
         }
-    }
-
-    fn emit_box_range_slots(
-        &mut self,
-        bytecode: &mut CodeBuf,
-        start_slot: u32,
-        end_slot: u32,
-        inclusive: bool,
-    ) {
-        let type_id = crate::typechecking::return_layout::range_heap_type_id(inclusive);
-        bytecode.push(
-            Byte::new(Instruction::InitTyped).with_operand_u32(common::pack_init_typed(type_id, 2)),
-        );
-        let tmp_inst = self.alloc_temp_slot();
-        bytecode.push_store_pop(tmp_inst);
-        bytecode.push_load(start_slot);
-        bytecode.push_load(tmp_inst);
-        bytecode.push_set_field_slot(0);
-        bytecode.push_pop();
-        bytecode.push_load(end_slot);
-        bytecode.push_load(tmp_inst);
-        bytecode.push_set_field_slot(1);
-        bytecode.push_pop();
-        bytecode.push_seek(tmp_inst + 1);
     }
 
     /// Extern setup is keyed by the declaration's short name (and, after
@@ -2320,36 +2295,6 @@ impl Compiler {
         })
     }
 
-    /// Boxed `ObjEnum` Result → pointer niche (`Err = ptr | 1`), or the
-    /// Option-shaped `Result<(), E>` (`Ok = 0`, `Err = ptr`) when `unit_ok`.
-    pub(super) fn emit_boxed_result_to_niche(bytecode: &mut CodeBuf, unit_ok: bool) {
-        let mut bb = BlockBuilder::new();
-        let ok = bb.fresh_label(bytecode.il_mut());
-        let err = bb.fresh_label(bytecode.il_mut());
-        let end = bb.fresh_label(bytecode.il_mut());
-        bb.emit_jump_to(
-            ok,
-            BbJumpKind::JumpIfMatch { tag: 0, arity: 1 },
-            bytecode.il_mut(),
-        );
-        bb.emit_jump_to(
-            err,
-            BbJumpKind::JumpIfMatch { tag: 1, arity: 1 },
-            bytecode.il_mut(),
-        );
-        bb.bind_label(err, bytecode.il_mut());
-        if !unit_ok {
-            Self::push_result_err_bit(bytecode);
-        }
-        bb.emit_jump_to(end, BbJumpKind::Unconditional, bytecode.il_mut());
-        bb.bind_label(ok, bytecode.il_mut());
-        if unit_ok {
-            bytecode.push_pop();
-            bytecode.push_const(0);
-        }
-        bb.bind_label(end, bytecode.il_mut());
-    }
-
     /// Unwrap a `Result` on top of the stack: on `Ok`, leave the payload;
     /// on `Err(ffi::Error)`, panic with the error's `message` string.
     /// Used by `extern` lowering so failed `dload`/`declare`/`invoke`
@@ -3075,26 +3020,6 @@ impl Compiler {
         }
     }
 
-    /// Emit dictionary plan `steps` into `dest`.
-    pub(super) fn emit_dict_steps(dest: &mut CodeBuf, steps: &[DictStep]) {
-        for &step in steps {
-            Self::emit_dict_step(dest, step);
-        }
-    }
-
-    /// Emit one dictionary step into `dest` (a code pointer to a reserved
-    /// entry as a root entry, which `CodeBuf::append` keeps).
-    pub(super) fn emit_dict_step(dest: &mut CodeBuf, step: DictStep) {
-        match step {
-            DictStep::CodeAt(offset) => dest.push(Self::packed_entry_byte_ret(crate::il::EntryKind::CodePtr, 0, offset, 1)),
-            DictStep::CodeLabel(label) => dest.emit_root_entry(crate::il::EntryKind::CodePtr, 0, label, 1),
-            DictStep::Load(slot) => dest.push_load(slot),
-            DictStep::Null => dest.push_const(0),
-            DictStep::Tuple(n) => dest.push_make_tuple(n),
-            DictStep::Box(tag) => dest.push_box_value(tag),
-        }
-    }
-
     /// Dictionary for an open goal: the current bounded instance method's own
     /// dictionary (`__dict0`) or one of its context dictionaries
     /// (`__dict{i+1}`), the current generic function's bound (`__dictN`, in
@@ -3296,26 +3221,6 @@ impl Compiler {
             || crate::typechecking::ty::result_ok_err(&ty).is_some();
         (is_enum && !crate::typechecking::subst::ftv(&ty).is_empty())
             .then(|| self.value_layout(&ty))
-    }
-
-    /// Convert the enum value on TOS between two layouts of the same
-    /// `Option` / `Result` type (niche ↔ boxed; niche ↔ niche via boxed).
-    pub(super) fn emit_layout_convert(bytecode: &mut CodeBuf, from: ValueLayout, to: ValueLayout) {
-        if from == to {
-            return;
-        }
-        match from {
-            ValueLayout::NicheOption => Self::emit_niche_option_to_boxed(bytecode),
-            ValueLayout::NicheResult => Self::emit_niche_result_to_boxed(bytecode),
-            ValueLayout::NicheUnitResult => Self::emit_unit_result_niche_to_boxed(bytecode),
-            ValueLayout::Boxed => {}
-        }
-        match to {
-            ValueLayout::NicheOption => Self::emit_boxed_option_to_niche(bytecode),
-            ValueLayout::NicheResult => Self::emit_boxed_result_to_niche(bytecode, false),
-            ValueLayout::NicheUnitResult => Self::emit_boxed_result_to_niche(bytecode, true),
-            ValueLayout::Boxed => {}
-        }
     }
 
     /// Parameter types and return type of a (possibly generic) scheme type.
@@ -4709,89 +4614,6 @@ impl Compiler {
             && matches!(method, "fd" | "attach" | "park")
     }
 
-    /// Box the `[payload, tag]` pair (tag on top) left by a direct two-word
-    /// `CALL` into an `ObjEnum`, using `STORE` / `LOAD` / `EQ` / `JMPF` /
-    /// `MakeEnum`, one branch per declared variant besides the last, which
-    /// needs no compare. Called when a two-word result escapes into a boxed
-    /// consumer (`CallIndirect`, unsure, host/FFI).
-    fn emit_box_pair_to_enum(
-        checker: &Checker,
-        bytecode: &mut CodeBuf,
-        enum_name: &str,
-        tag_slot: u32,
-        payload_slot: u32,
-    ) {
-        bytecode.push_store_pop(tag_slot);
-        bytecode.push_store_pop(payload_slot);
-        Self::emit_box_slots_to_enum(checker, bytecode, enum_name, tag_slot, payload_slot);
-    }
-
-    /// Same cascade as [`Self::emit_box_pair_to_enum`] when the pair already
-    /// lives in `payload_slot` / `tag_slot`.
-    fn emit_box_slots_to_enum(
-        checker: &Checker,
-        bytecode: &mut CodeBuf,
-        enum_name: &str,
-        tag_slot: u32,
-        payload_slot: u32,
-    ) {
-        if crate::typechecking::return_layout::is_two_word_product_kind(enum_name) {
-            bytecode.push_load(payload_slot);
-            bytecode.push_load(tag_slot);
-            bytecode.push_make_tuple(2);
-            return;
-        }
-        let Some(mut variants) = checker.enum_variants(enum_name).filter(|v| !v.is_empty()) else {
-            bytecode.push_make_enum(0, 0);
-            return;
-        };
-        let last = variants.pop().expect("checked non-empty");
-        let mut bb = BlockBuilder::new();
-        let end = bb.fresh_label(bytecode.il_mut());
-        for (_, tag, payload) in &variants {
-            let miss = bb.fresh_label(bytecode.il_mut());
-            bytecode.push_load(tag_slot);
-            bytecode.push_const(*tag as i32);
-            bytecode.push(Byte::new(Instruction::EQ));
-            bb.emit_jump_to_hinted(
-                miss,
-                BbJumpKind::JumpIfFalse,
-                FuseHint::nofuse_value_under_jmp(),
-                bytecode.il_mut(),
-            );
-            if !payload.is_empty() {
-                bytecode.push_load(payload_slot);
-            }
-            bytecode.push_make_enum(*tag as u16, payload.len() as u16);
-            bb.emit_jump_to(end, BbJumpKind::Unconditional, bytecode.il_mut());
-            bb.bind_label(miss, bytecode.il_mut());
-        }
-        let (_, last_tag, last_payload) = &last;
-        if !last_payload.is_empty() {
-            bytecode.push_load(payload_slot);
-        }
-        bytecode.push_make_enum(*last_tag as u16, last_payload.len() as u16);
-        bb.bind_label(end, bytecode.il_mut());
-    }
-
-    /// Box the `[payload, tag]` pair left by a direct two-word `CALL` into
-    /// an `ObjEnum` (allocates the two temp slots, then delegates to
-    /// [`Self::emit_box_pair_to_enum`]).
-    fn emit_box_pair_after_call(&mut self, bytecode: &mut CodeBuf, enum_name: &str) {
-        // After two-slot CALL, count `[payload, tag]` so `alloc_temp_slot` cannot alias (STORE clobber).
-        self.expr_depth += 2;
-        let tag_slot = self.alloc_temp_slot();
-        let payload_slot = self.alloc_temp_slot();
-        self.expr_depth -= 2;
-        if let Some(inc) = crate::typechecking::return_layout::range_kind_inclusive(enum_name) {
-            bytecode.push_store_pop(tag_slot);
-            bytecode.push_store_pop(payload_slot);
-            self.emit_box_range_slots(bytecode, payload_slot, tag_slot, inc);
-            return;
-        }
-        Self::emit_box_pair_to_enum(&self.checker, bytecode, enum_name, tag_slot, payload_slot);
-    }
-
     /// Return type of the function whose body is being compiled.
     fn compiling_fn_return_ty(&self) -> Option<crate::typechecking::Ty> {
         let qualified = self.current_function_qualified.as_deref();
@@ -4892,15 +4714,6 @@ impl Compiler {
             }
         }
         false
-    }
-
-    /// Emit a `BoxValue` instruction for a concrete `Ty` at a generic
-    /// call argument boundary (concrete→generic).  Does nothing when the
-    /// type is already open (Ty::Var), or if a tag cannot be determined.
-    fn emit_box_if_needed(bytecode: &mut impl EmitBuf, ty: &crate::typechecking::Ty) {
-        if let Some(tag) = Self::ty_to_value_tag(ty) {
-            bytecode.push_box_value(tag as u32);
-        }
     }
 
     /// Emit an `UnboxValue` instruction for a concrete `Ty` at a generic
@@ -6085,98 +5898,6 @@ impl Compiler {
     fn return_layout(&self) -> ValueLayout {
         self.compiling_fn_return_ty()
             .map_or(ValueLayout::Boxed, |ty| self.value_layout(&ty))
-    }
-
-    /// `DUP; LogNot`, TOS becomes “is None” for a pointer-niche Option (`0`).
-    ///
-    /// `CONST 0; EQ; JMPT` currently joins into `ConstReturnImm 0` and drops
-    /// the Some payload (`optional_text`). LogNot is the same zero test;
-    /// dense `UNARY_NOT` must use that truthiness, not `as_bool`.
-    fn push_niche_eq_zero(bytecode: &mut CodeBuf) {
-        bytecode.push(Byte::new(Instruction::DUPLICATE));
-        bytecode.push(Byte::new(Instruction::LogNot));
-    }
-
-    /// Boxed `ObjEnum` Option → pointer niche (`0` / payload) via JumpIfMatch.
-    fn emit_boxed_option_to_niche(bytecode: &mut CodeBuf) {
-        let mut bb = BlockBuilder::new();
-        let some = bb.fresh_label(bytecode.il_mut());
-        let end = bb.fresh_label(bytecode.il_mut());
-        bb.emit_jump_to(
-            some,
-            BbJumpKind::JumpIfMatch { tag: 1, arity: 1 },
-            bytecode.il_mut(),
-        );
-        bytecode.push_pop();
-        bytecode.push_const(0);
-        bb.emit_jump_to(end, BbJumpKind::Unconditional, bytecode.il_mut());
-        bb.bind_label(some, bytecode.il_mut());
-        bb.bind_label(end, bytecode.il_mut());
-    }
-
-    /// Pointer-niche Option → boxed `ObjEnum` via EQ-0 / JMP / MakeEnum.
-    fn emit_niche_option_to_boxed(bytecode: &mut CodeBuf) {
-        let mut bb = BlockBuilder::new();
-        let none = bb.fresh_label(bytecode.il_mut());
-        let end = bb.fresh_label(bytecode.il_mut());
-        Self::push_niche_eq_zero(bytecode);
-        bb.emit_jump_to(none, BbJumpKind::JumpIfTrue, bytecode.il_mut());
-        bytecode.push_make_enum(1, 1);
-        bb.emit_jump_to(end, BbJumpKind::Unconditional, bytecode.il_mut());
-        bb.bind_label(none, bytecode.il_mut());
-        bytecode.push_pop();
-        bytecode.push_make_enum(0, 0);
-        bb.bind_label(end, bytecode.il_mut());
-    }
-
-    /// `CONST 1; BITOR`, set the Result `Err` discriminant on a heap pointer.
-    fn push_result_err_bit(bytecode: &mut CodeBuf) {
-        bytecode.push_const(1);
-        bytecode.push(Byte::new(Instruction::BITOR));
-    }
-
-    /// `CONST 1; XOR`, clear bit 0 on an `Err` payload (bit is known set).
-    fn push_result_untag(bytecode: &mut CodeBuf) {
-        bytecode.push_const(1);
-        bytecode.push(Byte::new(Instruction::XOR));
-    }
-
-    /// `DUP; CONST 1; BITAND`, TOS becomes the Result `Err` bit.
-    fn push_result_is_err(bytecode: &mut CodeBuf) {
-        bytecode.push(Byte::new(Instruction::DUPLICATE));
-        bytecode.push_const(1);
-        bytecode.push(Byte::new(Instruction::BITAND));
-    }
-
-    /// Option-shaped `Result<(), E>` → boxed `ObjEnum`.
-    fn emit_unit_result_niche_to_boxed(bytecode: &mut CodeBuf) {
-        let mut bb = BlockBuilder::new();
-        let err = bb.fresh_label(bytecode.il_mut());
-        let end = bb.fresh_label(bytecode.il_mut());
-        Self::push_niche_eq_zero(bytecode);
-        bb.emit_jump_to(err, BbJumpKind::JumpIfFalse, bytecode.il_mut());
-        bytecode.push_pop();
-        bytecode.push_const(0);
-        bytecode.push_make_enum(0, 1);
-        bb.emit_jump_to(end, BbJumpKind::Unconditional, bytecode.il_mut());
-        bb.bind_label(err, bytecode.il_mut());
-        bytecode.push_make_enum(1, 1);
-        bb.bind_label(end, bytecode.il_mut());
-    }
-
-    /// Pointer-niche Result → boxed `ObjEnum` via the Err bit / MakeEnum.
-    fn emit_niche_result_to_boxed(bytecode: &mut CodeBuf) {
-        let mut bb = BlockBuilder::new();
-        let err = bb.fresh_label(bytecode.il_mut());
-        let end = bb.fresh_label(bytecode.il_mut());
-        Self::push_result_is_err(bytecode);
-        bb.emit_jump_to(err, BbJumpKind::JumpIfTrue, bytecode.il_mut());
-        bytecode.push_make_enum(0, 1);
-        bb.emit_jump_to(end, BbJumpKind::Unconditional, bytecode.il_mut());
-        bb.bind_label(err, bytecode.il_mut());
-        Self::push_result_untag(bytecode);
-        bytecode.push_make_enum(1, 1);
-        bb.bind_label(end, bytecode.il_mut());
     }
 
     /// Wrap the top-of-stack value as `Ok(v)` (Result) or `Some(v)` (Option).

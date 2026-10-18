@@ -148,11 +148,6 @@ impl CodeBuf {
         self.il.push_make_enum(tag, arity);
     }
 
-    pub fn push_box_value(&mut self, tag: u32) {
-        self.invalidate_lowered();
-        self.il.push_box_value(tag);
-    }
-
     pub fn push_unbox_value(&mut self, tag: u32) {
         self.invalidate_lowered();
         self.il.push_unbox_value(tag);
@@ -161,11 +156,6 @@ impl CodeBuf {
     pub fn push_load_field(&mut self, index: u32) {
         self.invalidate_lowered();
         self.il.push_load_field(index);
-    }
-
-    pub fn push_set_field_slot(&mut self, index: u32) {
-        self.invalidate_lowered();
-        self.il.push_set_field_slot(index);
     }
 
     pub fn push_host_invoke(&mut self, arity: u32) {
