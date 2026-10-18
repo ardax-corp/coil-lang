@@ -8,6 +8,7 @@ use crate::il::{IlJumpKind, IlOp, Label};
 
 use super::call_convoy::{is_tail_call_inst, ConvoyPlan};
 use super::destprop::sink_phi_incomings;
+use super::emit_common::{is_jim_term_payload, last_arm_payloads};
 use super::func::MirFunc;
 use super::inst::{
     BlockId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp,
@@ -2363,15 +2364,6 @@ fn emit_dense_jump_if_match(args: EmitDenseJumpIfMatchArgs<'_>) -> Result<(), Lo
     Ok(())
 }
 
-fn is_jim_term_payload(func: &MirFunc, dest: ValueId) -> bool {
-    func.blocks.iter().any(|b| {
-        matches!(
-            &b.term,
-            Some(Terminator::JumpIfMatch { payloads, .. }) if payloads.contains(&dest)
-        )
-    })
-}
-
 #[allow(clippy::too_many_arguments)]
 fn seed_jim_taken_stack(
     out: &mut Vec<IlOp>,
@@ -2486,29 +2478,6 @@ pub(super) fn miss_chain_tos(func: &MirFunc, preds: &[BlockId], block: BlockId) 
             i.is_phi() || matches!(i, MirInst::MatchPayload { dest, scrutinee: src, .. } if *src == s && payloads.contains(dest))
         }))
     .then_some(s)
-}
-
-fn last_arm_payloads(func: &MirFunc, block: BlockId, scrutinee: ValueId) -> Vec<ValueId> {
-    let mut group = Vec::new();
-    for inst in &func.block(block).insts {
-        let MirInst::MatchPayload {
-            dest,
-            scrutinee: src,
-            index,
-        } = inst
-        else {
-            continue;
-        };
-        if *src != scrutinee || is_jim_term_payload(func, *dest) {
-            continue;
-        }
-        let i = *index as usize;
-        if group.len() <= i {
-            group.resize(i + 1, *dest);
-        }
-        group[i] = *dest;
-    }
-    group
 }
 
 struct EmitBoxedLastArmUnpackArgs<'args> {

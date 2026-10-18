@@ -16,6 +16,7 @@ use super::emit::{
     coalesce_latch_overwrite, emit_cond_jumps, foreign_targets, il_for_alloc, is_fallthrough,
     max_label_hint, paired_alloc_dest, restore_block_op_locs, take_label,
 };
+use super::emit_common::{is_jim_term_payload, last_arm_payloads};
 use super::func::MirFunc;
 use super::inst::{
     BlockId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp,
@@ -754,15 +755,6 @@ fn term_values(term: &Terminator) -> Vec<ValueId> {
 
 /// `JumpIfMatch` leaves the scrutinee (miss) or payloads (taken) on the
 /// stack. Store live payload slots; miss keeps TOS for the next match.
-fn is_jim_term_payload(func: &MirFunc, dest: ValueId) -> bool {
-    func.blocks.iter().any(|b| {
-        matches!(
-            &b.term,
-            Some(Terminator::JumpIfMatch { payloads, .. }) if payloads.contains(&dest)
-        )
-    })
-}
-
 fn consume_match_tos(
     out: &mut Vec<IlOp>,
     func: &MirFunc,
@@ -795,29 +787,6 @@ fn consume_match_tos(
             }
         }
     }
-}
-
-fn last_arm_payloads(func: &MirFunc, block: BlockId, scrutinee: ValueId) -> Vec<ValueId> {
-    let mut group = Vec::new();
-    for inst in &func.block(block).insts {
-        let MirInst::MatchPayload {
-            dest,
-            scrutinee: src,
-            index,
-        } = inst
-        else {
-            continue;
-        };
-        if *src != scrutinee || is_jim_term_payload(func, *dest) {
-            continue;
-        }
-        let i = *index as usize;
-        if group.len() <= i {
-            group.resize(i + 1, *dest);
-        }
-        group[i] = *dest;
-    }
-    group
 }
 
 struct EmitLastArmUnpackArgs<'args> {

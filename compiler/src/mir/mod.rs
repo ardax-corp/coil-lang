@@ -23,6 +23,7 @@ mod deopt;
 mod entry;
 mod effects;
 mod emit;
+mod emit_common;
 mod error;
 mod gc;
 mod gates;
