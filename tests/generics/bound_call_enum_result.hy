@@ -91,6 +91,26 @@ fn write_all<T: Write>(T s, Vec<byte> b) -> int {
     };
 }
 
+fn go_two<T: Sink>(T s) -> int {
+    return go(s, 2);
+}
+
+fn look_two<T: Sink>(T s) -> int {
+    return look(s, 2);
+}
+
+fn round_ok<T: Sink>(T s) -> int {
+    return round(s, Result::Ok(5));
+}
+
+fn write_empty<T: Write>(T s) -> int {
+    return write_all(s, to_bytes(""));
+}
+
+fn apply<A, B>(fn(A) -> B f, A a) -> B {
+    return f(a);
+}
+
 test("bound calls returning a ground enum") {
     assert!(go(1, 2) == 3);
     assert!(go(new Cell(4), 5) == 20);
@@ -104,6 +124,18 @@ test("bound calls returning a ground enum") {
     assert!(round(2, Result::Err(5)) == 1003);
     assert!(round(new Cell(3), Result::Ok(5)) == 1015);
     assert!(round(new Cell(3), Result::Err(8)) == 8);
+}
+
+test("the shared bodies, through function values") {
+    let c = new Cell(4);
+    assert!(apply(go_two, 1) == 3);
+    assert!(apply(go_two, c) == 8);
+    assert!(apply(look_two, 5) == 10);
+    let f = look_two;
+    assert!(f(c) == 2);
+    assert!(apply(round_ok, 2) == 7);
+    assert!(apply(round_ok, c) == 1020);
+    assert!(apply(write_empty, stdout()) == 0);
 }
 
 test("builtin Write through a bound") {
