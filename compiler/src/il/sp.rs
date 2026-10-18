@@ -1,58 +1,14 @@
-//! Operand-height (SP) analysis over IL ops.
+//! Per-op operand-height deltas over IL ops.
 //!
 //! This is **not** the shared buffer cursor: [`super::tell`] tracks `tell`,
-//! which `STORE` floors to `slot + 1` even when height is lower. `sp` only
-//! counts eval-stack values. Nested `CALL`/`MakeCoro` reset height to 1
-//! (return value only), not `before + (1 - arity)`.
-//!
-//! [`stack_delta`] feeds [`super::tell`]; the whole-buffer height analysis
-//! only backs tests now (it checks the split from tell). Do not substitute
-//! tell here — a STORE floor is not height (COI-81).
+//! which `STORE` floors to `slot + 1` even when height is lower.
+//! [`stack_delta`] only counts eval-stack values; it feeds [`super::tell`] and
+//! `coil dissect`'s operand-depth column. Do not substitute tell here — a
+//! STORE floor is not height (COI-81).
 
 use common::Instruction;
 
 use super::op::{EntryKind, IlJumpKind, IlOp};
-#[cfg(test)]
-use super::op::Label;
-
-/// Stack height relative to analysis entry (usually 0 at `ops[0]`).
-#[cfg(test)]
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum Sp {
-    Known(i32),
-    Unknown,
-}
-
-#[cfg(test)]
-impl Sp {
-    pub fn known(self) -> Option<i32> {
-        match self {
-            Sp::Known(v) => Some(v),
-            Sp::Unknown => None,
-        }
-    }
-
-    fn apply(self, delta: Option<i32>) -> Sp {
-        match (self, delta) {
-            (Sp::Known(h), Some(d)) => Sp::Known(h + d),
-            _ => Sp::Unknown,
-        }
-    }
-}
-
-/// Per-op SP-in (height before the op at that index).
-#[cfg(test)]
-#[derive(Clone, Debug)]
-pub struct SpInfo {
-    pub sp_in: Vec<Sp>,
-}
-
-#[cfg(test)]
-impl SpInfo {
-    pub fn sp_before(&self, idx: usize) -> Sp {
-        self.sp_in.get(idx).copied().unwrap_or(Sp::Unknown)
-    }
-}
 
 /// Net stack delta for `op`, or `None` if the effect is unknown / fail-closed.
 pub fn stack_delta(op: &IlOp) -> Option<i32> {
@@ -291,213 +247,14 @@ pub(super) fn byte_stack_delta(insn: Instruction, byte: &common::Byte) -> Option
     }
 }
 
-
-/// When `op` is a nested direct call, the VM return resets tell to
-/// `frame_base + ret_words` (`1` boxed word, or `2` for a known ≤2-word
-/// direct `CALL`; `MakeCoro` is always `1`).
-#[cfg(test)]
-fn nested_call_return_words(op: &IlOp) -> Option<i32> {
-    match op {
-        IlOp::Entry {
-            kind: EntryKind::Call,
-            ret_words,
-            ..
-        } => Some(*ret_words as i32),
-        IlOp::Entry {
-            kind: EntryKind::MakeCoro,
-            ..
-        } => Some(1),
-        _ => match op.as_plain_byte() {
-            Some(b) if *b.bytecode() == Instruction::CALL => Some(b.call_ret_words() as i32),
-            Some(b) if *b.bytecode() == Instruction::MakeCoro => Some(1),
-            _ => None,
-        },
-    }
-}
-
-/// Compute SP-in for each op. Entry SP is 0 at index 0; unknown effects poison.
-#[cfg(test)]
-pub fn analyze(ops: &[IlOp]) -> SpInfo {
-    analyze_at(ops, 0)
-}
-
-/// Like [`analyze`], but seed height at `entry_sp` (function arity / frame base).
-///
-/// Per-function bodies begin with args already on the shared locals/operand
-/// stack; starting at 0 understates height and lets a store-forwarding rewrite emit `Dup;Store`
-/// that aliases a local with TOS.
-#[cfg(test)]
-pub fn analyze_at(ops: &[IlOp], entry_sp: i32) -> SpInfo {
-    let n = ops.len();
-    let mut sp_in: Vec<Option<Sp>> = vec![None; n];
-    if n == 0 {
-        return SpInfo { sp_in: Vec::new() };
-    }
-    sp_in[0] = Some(Sp::Known(entry_sp));
-
-    let mut label_at: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
-    for (i, op) in ops.iter().enumerate() {
-        if let IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) = op {
-            label_at.insert(*id, i);
-        }
-    }
-
-    fn meet_into(slot: &mut Option<Sp>, incoming: Sp) -> bool {
-        let next = match *slot {
-            None => incoming,
-            Some(Sp::Unknown) => Sp::Unknown,
-            Some(Sp::Known(a)) => match incoming {
-                Sp::Known(b) if a == b => Sp::Known(a),
-                _ => Sp::Unknown,
-            },
-        };
-        if *slot != Some(next) {
-            *slot = Some(next);
-            true
-        } else {
-            false
-        }
-    }
-
-    for _ in 0..n.saturating_mul(2).max(8) {
-        let mut changed = false;
-        // `None` = no fall-through edge into the next index.
-        let mut fall_sp: Option<Sp> = Some(Sp::Known(entry_sp));
-        for i in 0..n {
-            if i > 0
-                && let Some(edge) = fall_sp
-            {
-                changed |= meet_into(&mut sp_in[i], edge);
-            }
-
-            let op = &ops[i];
-            let before = sp_in[i].unwrap_or(Sp::Unknown);
-            // Nested CALL/MakeCoro return seeks to frame_base and pushes one
-            // result → relative height is always 1, not `before + (1 - arity)`.
-            // Modeling the arithmetic delta lets a forwarding rewrite emit Dup;Store that
-            // later operand pops destroy (http parse_url / bytes_slice hang).
-            let after = if let Some(ret_words) = nested_call_return_words(op) {
-                Sp::Known(ret_words)
-            } else {
-                before.apply(stack_delta(op))
-            };
-
-            if let IlOp::Jump { kind, target, .. } = op {
-                if let Some(&t) = label_at.get(&target.0) {
-                    let edge_sp = match kind {
-                        IlJumpKind::Unconditional => before.apply(Some(0)),
-                        IlJumpKind::JumpIfFalse | IlJumpKind::JumpIfTrue => before.apply(Some(-1)),
-                        IlJumpKind::JumpIfMatch { .. } => before.apply(Some(-1)),
-                    };
-                    changed |= meet_into(&mut sp_in[t], edge_sp);
-                }
-                fall_sp = match kind {
-                    IlJumpKind::Unconditional => None,
-                    _ => Some(after),
-                };
-            } else if op.is_terminator() {
-                fall_sp = None;
-            } else if matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)) {
-                fall_sp = Some(before);
-            } else {
-                fall_sp = Some(after);
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-
-    SpInfo {
-        sp_in: sp_in
-            .into_iter()
-            .map(|s| s.unwrap_or(Sp::Unknown))
-            .collect(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::il::op::Label;
     use common::DebugLoc;
 
     fn loc() -> DebugLoc {
         DebugLoc::unknown()
-    }
-
-    #[test]
-    fn straight_line_known_heights() {
-        let ops = vec![
-            IlOp::Const { imm: 1, loc: loc() },
-            IlOp::Const { imm: 2, loc: loc() },
-            IlOp::Bin {
-                op: Instruction::ADD,
-                loc: loc(),
-            },
-            IlOp::Return { loc: loc(), ret_words: 1},
-        ];
-        let info = analyze(&ops);
-        assert_eq!(info.sp_before(0), Sp::Known(0));
-        assert_eq!(info.sp_before(1), Sp::Known(1));
-        assert_eq!(info.sp_before(2), Sp::Known(2));
-        assert_eq!(info.sp_before(3), Sp::Known(1));
-    }
-
-    #[test]
-    fn diamond_agreeing_heights() {
-        // CONST 0; JMPF Lelse; CONST 1; JMP Ljoin; Label Lelse; CONST 2; Label Ljoin; RETURN
-        let ops = vec![
-            IlOp::Const { imm: 0, loc: loc() },
-            IlOp::Jump {
-                kind: IlJumpKind::JumpIfFalse,
-                target: Label(1),
-                loc: loc(),
-                hint: Default::default(),
-            },
-            IlOp::Const { imm: 1, loc: loc() },
-            IlOp::Jump {
-                kind: IlJumpKind::Unconditional,
-                target: Label(2),
-                loc: loc(),
-                hint: Default::default(),
-            },
-            IlOp::Label(Label(1)),
-            IlOp::Const { imm: 2, loc: loc() },
-            IlOp::Label(Label(2)),
-            IlOp::Return { loc: loc(), ret_words: 1},
-        ];
-        let info = analyze(&ops);
-        // After JMPF, SP is 0 on both arms; each CONST → 1 at join.
-        assert_eq!(info.sp_before(6), Sp::Known(1)); // Label join
-        assert_eq!(info.sp_before(7), Sp::Known(1)); // RETURN
-    }
-
-    #[test]
-    fn diamond_mismatched_heights_unknown_at_join() {
-        // Then-arm pushes two consts; else pushes one — join SP disagrees.
-        let ops = vec![
-            IlOp::Const { imm: 0, loc: loc() },
-            IlOp::Jump {
-                kind: IlJumpKind::JumpIfFalse,
-                target: Label(1),
-                loc: loc(),
-                hint: Default::default(),
-            },
-            IlOp::Const { imm: 1, loc: loc() },
-            IlOp::Const { imm: 3, loc: loc() },
-            IlOp::Jump {
-                kind: IlJumpKind::Unconditional,
-                target: Label(2),
-                loc: loc(),
-                hint: Default::default(),
-            },
-            IlOp::Label(Label(1)),
-            IlOp::Const { imm: 2, loc: loc() },
-            IlOp::Label(Label(2)),
-            IlOp::Return { loc: loc(), ret_words: 1},
-        ];
-        let info = analyze(&ops);
-        assert_eq!(info.sp_before(7), Sp::Unknown);
     }
 
     #[test]
@@ -509,20 +266,6 @@ mod tests {
         assert_eq!(stack_delta(&format1), Some(-1));
         assert_eq!(stack_delta(&format0), Some(0));
         assert_eq!(stack_delta(&stringify), Some(0));
-
-        // FORMAT 1: args+fmt on stack → result; SP stays Known through PRINT.
-        let ops = vec![
-            IlOp::Const { imm: 1, loc: loc() },
-            IlOp::byte(Byte::new(Instruction::STRING).with_operand_u32(0)),
-            IlOp::byte(Byte::new(Instruction::FORMAT).with_operand_u32(1)),
-            IlOp::Print { loc: loc() },
-            IlOp::Return { loc: loc(), ret_words: 1},
-        ];
-        let info = analyze(&ops);
-        assert_eq!(info.sp_before(0), Sp::Known(0));
-        assert_eq!(info.sp_before(2), Sp::Known(2));
-        assert_eq!(info.sp_before(3), Sp::Known(1));
-        assert_eq!(info.sp_before(4), Sp::Known(0));
     }
 
     #[test]
@@ -640,19 +383,11 @@ mod tests {
     /// `CONST; STORE 5` height is 0, not 6 — that floor is `il::tell`.
     #[test]
     fn store_does_not_raise_operand_height() {
-        let ops = vec![
-            IlOp::Const { imm: 1, loc: loc() },
-            IlOp::StorePop {
-                slot: 5,
-                loc: loc(),
-            },
-            IlOp::Return { loc: loc(), ret_words: 1},
-        ];
-        let info = analyze(&ops);
-        assert_eq!(info.sp_before(0), Sp::Known(0));
-        assert_eq!(info.sp_before(1), Sp::Known(1));
-        assert_eq!(info.sp_before(2), Sp::Known(0));
-        assert_eq!(stack_delta(&ops[1]), Some(-1));
+        let store = IlOp::StorePop {
+            slot: 5,
+            loc: loc(),
+        };
+        assert_eq!(stack_delta(&store), Some(-1));
     }
 
     #[test]
@@ -755,13 +490,12 @@ mod tests {
             )),
             Some(1)
         );
-        let ops = vec![
-            IlOp::byte(Byte::new(Instruction::STRING).with_operand_u32(1)),
-            IlOp::Return { loc: loc(), ret_words: 1},
-        ];
-        let info = analyze(&ops);
-        assert_eq!(info.sp_before(0), Sp::Known(0));
-        assert_eq!(info.sp_before(1), Sp::Known(1));
+        assert_eq!(
+            stack_delta(&IlOp::byte(
+                Byte::new(Instruction::STRING).with_operand_u32(1)
+            )),
+            Some(1)
+        );
     }
 
     #[test]
@@ -775,87 +509,5 @@ mod tests {
             stack_delta(&IlOp::byte(Byte::new(Instruction::GetField))),
             Some(-1)
         );
-    }
-
-    #[test]
-    fn call_entry_resets_height_to_one() {
-        // Nested CALL returns with tell = frame_base + 1 regardless of arity
-        // / pre-call height (VM seeks then pushes the result).
-        let ops = vec![
-            IlOp::Const { imm: 1, loc: loc() },
-            IlOp::Const { imm: 2, loc: loc() },
-            IlOp::Entry {
-                kind: EntryKind::Call,
-                arity: 2,
-                target: Label(0),
-                loc: loc(), ret_words: 1,},
-            IlOp::Return { loc: loc(), ret_words: 1},
-        ];
-        let info = analyze(&ops);
-        assert_eq!(info.sp_before(2), Sp::Known(2));
-        assert_eq!(info.sp_before(3), Sp::Known(1));
-    }
-
-    /// COI-81: `MakeCoro` shares Call's absolute height reset (not relative delta).
-    #[test]
-    fn make_coro_resets_height_to_one_like_call() {
-        let ops = vec![
-            IlOp::Const { imm: 1, loc: loc() },
-            IlOp::Const { imm: 2, loc: loc() },
-            IlOp::Const { imm: 3, loc: loc() },
-            IlOp::Entry {
-                kind: EntryKind::MakeCoro,
-                arity: 0,
-                target: Label(0),
-                loc: loc(), ret_words: 1,},
-            IlOp::Return { loc: loc(), ret_words: 1},
-        ];
-        let info = analyze(&ops);
-        assert_eq!(info.sp_before(3), Sp::Known(3));
-        assert_eq!(info.sp_before(4), Sp::Known(1));
-        assert_ne!(
-            info.sp_before(4).known(),
-            Some(4),
-            "relative 1-arity would leave height 4"
-        );
-    }
-
-    #[test]
-    fn call_with_high_pre_height_still_returns_at_one() {
-        // Arithmetic delta would be 1 - 0 = pre_height; absolute reset to 1.
-        let ops = vec![
-            IlOp::Const { imm: 1, loc: loc() },
-            IlOp::Const { imm: 2, loc: loc() },
-            IlOp::Const { imm: 3, loc: loc() },
-            IlOp::Entry {
-                kind: EntryKind::Call,
-                arity: 0,
-                target: Label(0),
-                loc: loc(), ret_words: 1,},
-            IlOp::Return { loc: loc(), ret_words: 1},
-        ];
-        let info = analyze(&ops);
-        assert_eq!(info.sp_before(3), Sp::Known(3));
-        assert_eq!(info.sp_before(4), Sp::Known(1));
-    }
-
-    #[test]
-    fn tail_call_cuts_fall_through() {
-        // TailCall is a terminator with unknown delta — no fall-through SP edge.
-        let ops = vec![
-            IlOp::Const { imm: 1, loc: loc() },
-            IlOp::Entry {
-                kind: EntryKind::TailCall,
-                arity: 1,
-                target: Label(0),
-                loc: loc(), ret_words: 1,},
-            IlOp::Label(Label(0)),
-            IlOp::Return { loc: loc(), ret_words: 1},
-        ];
-        let info = analyze(&ops);
-        assert_eq!(info.sp_before(1), Sp::Known(1));
-        // Entry edges are not jump edges; label after TailCall has no SP meet.
-        assert_eq!(info.sp_before(2), Sp::Unknown);
-        assert_eq!(info.sp_before(3), Sp::Unknown);
     }
 }
