@@ -6,7 +6,9 @@
 //! `HeapRef`, and niche Option/Result words). Two-slot CALL/RETURN may
 //! dense or LIR (B3 / C1); keep/refuse is the cost gate.
 
+#[cfg(test)]
 use crate::typechecking::infer::Checker;
+#[cfg(test)]
 use crate::typechecking::{Ty, ty as coil_ty, ty::is_option_ty};
 
 use super::layout::MirLayout;
@@ -42,6 +44,7 @@ pub enum MirTy {
 }
 
 impl MirTy {
+    #[cfg(test)]
     pub const TOP: Self = Self::Value;
 
     pub fn is_int(self) -> bool {
@@ -102,6 +105,7 @@ impl MirTy {
     }
 
     /// Greatest lower bound.
+    #[cfg(test)]
     pub fn meet(self, other: Self) -> Self {
         use MirTy::*;
         if self == other {
@@ -140,6 +144,7 @@ impl MirTy {
         }
     }
 
+    #[cfg(test)]
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "bottom" => Self::Bottom,
@@ -156,6 +161,7 @@ impl MirTy {
         })
     }
 
+    #[cfg(test)]
     /// Map a coil HM monotype onto the lattice.
     ///
     /// Immediate `int`/`float`/`bool`/`byte` are numeric lanes. Ground heap

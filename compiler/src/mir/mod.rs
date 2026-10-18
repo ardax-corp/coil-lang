@@ -13,7 +13,6 @@
 //! (I6); LICM hoist uses purity bits. Debugger-attached / `-Og` builds use
 //! the same tiers; explicit `Deopt` is skipped at emit. History of each
 //! piece: `docs/internals/mir.md`.
-#![cfg_attr(not(test), allow(dead_code, unused_imports))]
 
 mod abi;
 mod builder;
@@ -48,20 +47,25 @@ pub use abi::DenseCallMap;
 pub use builder::{MirBuilder, MirError};
 pub use cse::{cse, gvn};
 pub use destprop::destprop;
+#[cfg(test)]
 pub use emit_lir::emit_lir;
+#[cfg(test)]
 pub use entry::LirRefuse;
 pub use from_hir::{lower_body as lower_from_hir, opaque_heap as opaque_heap_ty, scalar as scalar_mir_ty, word as word_mir_ty, HirBoundCall, HirCallSite, HirDictOp, HirFfi, HirFfiOperand, HirFnValue, HirIterLoop, HirPolyCall, HirIterNext, HirMirInput, HirOpCall, HirParBound, HirParFork, HirParIndex, HirParLoop, HirShow, ScalarLit};
-pub use func::{MirBlock, MirFunc};
+pub use func::MirFunc;
+#[cfg(test)]
+pub use func::MirBlock;
 pub use specialize::{capture_pinned_mir, start_mir_capture, take_mir_capture};
 pub use deopt::DraftDeoptMap;
 pub use stackmap::{bind_drafts, is_alloc_opcode, DraftFrameMap};
-pub use inst::{
-    BlockId, LocalId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst,
-    MirFfiOp, MirGcKind, MirInst, MirUnaryOp, Terminator, ValueId,
-};
+pub use inst::{MirAllocKind, MirBinOp, MirConst, MirFfiOp, MirInst, ValueId};
+#[cfg(test)]
+pub use inst::{BlockId, LocalId, MirCastKind, MirCmpOp, MirGcKind, MirUnaryOp, Terminator};
 pub use instcombine::instcombine;
+#[cfg(test)]
 pub use layout::MirLayout;
 pub use licm::licm;
+#[cfg(test)]
 pub use error::LowerError;
 pub use specialize::{
     fuse_fallback, take_dense_refusal, take_lir_refusal, try_lower_abi_body_side,
@@ -69,6 +73,7 @@ pub use specialize::{
 };
 pub use sroa::sroa;
 pub use strength::strength_reduce;
+#[cfg(test)]
 pub use text::{ParseError, parse_func};
 pub use ty::MirTy;
 
@@ -77,6 +82,7 @@ pub use ty::MirTy;
 /// Corresponds to the inner `while iter < max_iter` in
 /// `examples/perf/mandelbrot.hy` (`zr`/`zi`/`cr`/`ci` are `f64`, `iter` is
 /// language `int` → `i64`). No classes.
+#[cfg(test)]
 pub fn mandelbrot_inner_loop() -> Result<MirFunc, MirError> {
     let mut b = MirBuilder::new("mandel_inner");
     let zr0 = b.add_param(MirTy::F64)?;

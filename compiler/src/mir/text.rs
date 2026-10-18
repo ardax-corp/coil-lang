@@ -1,10 +1,9 @@
 //! Print / parse a small CLIF-like text form for round-trip tests.
 
 use super::func::{MirBlock, MirFunc};
-use super::inst::{
-    BlockId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirDeoptKind, MirGcKind,
-    MirInst, MirUnaryOp, Terminator, ValueId,
-};
+use super::inst::{MirAllocKind, MirCastKind, MirConst, MirInst, MirUnaryOp, Terminator};
+#[cfg(test)]
+use super::inst::{BlockId, MirBinOp, MirCmpOp, MirDeoptKind, MirGcKind, ValueId};
 use super::ty::MirTy;
 
 impl std::fmt::Display for MirFunc {
@@ -191,18 +190,6 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             scrutinee,
             index,
         } => write!(f, "{dest} = matchpayload {scrutinee}, {index}"),
-        MirInst::FieldLoad {
-            dest,
-            object,
-            base,
-            index,
-        } => write!(f, "{dest} = fieldload {object}, {base}, {index}"),
-        MirInst::FieldStore {
-            dest,
-            src,
-            base,
-            index,
-        } => write!(f, "{dest} = fieldstore {src}, {base}, {index}"),
         MirInst::HeapFieldLoad {
             dest,
             object,
@@ -361,28 +348,34 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError(pub String);
 
+#[cfg(test)]
 impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
 }
 
+#[cfg(test)]
 impl std::error::Error for ParseError {}
 
 /// Parse one [`MirFunc`] from the text form [`MirFunc`] prints.
+#[cfg(test)]
 pub fn parse_func(src: &str) -> Result<MirFunc, ParseError> {
     let mut p = Parser::new(src);
     p.parse_func()
 }
 
+#[cfg(test)]
 struct Parser<'a> {
     s: &'a str,
     i: usize,
 }
 
+#[cfg(test)]
 impl<'a> Parser<'a> {
     fn new(s: &'a str) -> Self {
         Self { s, i: 0 }
@@ -537,8 +530,6 @@ impl<'a> Parser<'a> {
         }
         if op == "lnot"
             || op == "matchpayload"
-            || op == "fieldload"
-            || op == "fieldstore"
             || op == "heapgetfield"
             || op == "heaploadfield"
             || op == "heapsetfield"
@@ -614,26 +605,6 @@ impl<'a> Parser<'a> {
                     index: Some(index),
                 });
             }
-            let object = self.value()?;
-            self.expect(',')?;
-            let base = self.uint()? as u32;
-            self.expect(',')?;
-            let index = self.uint()? as u32;
-            ensure_ty(types, dest, peek_ty(types, object));
-            if op == "fieldload" {
-                return Ok(MirInst::FieldLoad {
-                    dest,
-                    object,
-                    base,
-                    index,
-                });
-            }
-            return Ok(MirInst::FieldStore {
-                dest,
-                src: object,
-                base,
-                index,
-            });
         }
         if op == "index" || op == "index.u" {
             let array = self.value()?;
@@ -1281,6 +1252,7 @@ impl<'a> Parser<'a> {
     }
 }
 
+#[cfg(test)]
 fn ensure_ty(types: &mut Vec<MirTy>, v: ValueId, ty: MirTy) {
     if v.index() >= types.len() {
         types.resize(v.index() + 1, MirTy::Bottom);
@@ -1290,6 +1262,7 @@ fn ensure_ty(types: &mut Vec<MirTy>, v: ValueId, ty: MirTy) {
     }
 }
 
+#[cfg(test)]
 fn peek_ty(types: &[MirTy], v: ValueId) -> MirTy {
     types.get(v.index()).copied().unwrap_or(MirTy::Bottom)
 }

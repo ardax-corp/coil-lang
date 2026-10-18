@@ -574,7 +574,6 @@ fn writes_memory(inst: &MirInst) -> bool {
     matches!(
         inst,
         MirInst::HeapFieldStore { .. }
-            | MirInst::FieldStore { .. }
             | MirInst::StoreIndex { .. }
             | MirInst::ArrayPush { .. }
             | MirInst::Call { .. }
@@ -594,7 +593,7 @@ fn writes_memory(inst: &MirInst) -> bool {
 fn reads_memory(inst: &MirInst) -> bool {
     matches!(
         inst,
-        MirInst::HeapFieldLoad { .. } | MirInst::FieldLoad { .. } | MirInst::Index { .. } | MirInst::ArrayLen { .. } | MirInst::DoneCoro { .. } | MirInst::LoadStatic { .. } | MirInst::HomeLoad { .. }
+        MirInst::HeapFieldLoad { .. } | MirInst::Index { .. } | MirInst::ArrayLen { .. } | MirInst::DoneCoro { .. } | MirInst::LoadStatic { .. } | MirInst::HomeLoad { .. }
     )
 }
 
@@ -1253,13 +1252,6 @@ fn emit_stored(
             });
         }
         MirInst::Phi { .. } | MirInst::MatchPayload { .. } => {}
-        MirInst::FieldLoad { dest, object, .. } => {
-            emit_stack(out, *object, func, plan, regs, pool, loc)?;
-            out.push(IlOp::StorePop {
-                slot: u32::from(regs[dest.index()]),
-                loc,
-            });
-        }
         MirInst::HeapFieldLoad {
             dest,
             object,
@@ -1302,29 +1294,6 @@ fn emit_stored(
                 loc,
             })?;
             if plan.need_slot[dest.index()] {
-                out.push(IlOp::StorePop {
-                    slot: u32::from(regs[dest.index()]),
-                    loc,
-                });
-            }
-        }
-        MirInst::FieldStore {
-            dest,
-            src,
-            base,
-            index,
-            ..
-        } => {
-            emit_stack(out, *src, func, plan, regs, pool, loc)?;
-            out.push(IlOp::StorePop {
-                slot: *base + *index,
-                loc,
-            });
-            if plan.need_slot[dest.index()] {
-                out.push(IlOp::Load {
-                    slot: *base + *index,
-                    loc,
-                });
                 out.push(IlOp::StorePop {
                     slot: u32::from(regs[dest.index()]),
                     loc,
@@ -2151,7 +2120,6 @@ fn emit_stack(
                 }
             Ok(())
         }
-        MirInst::FieldLoad { object, .. } => emit_stack(out, *object, func, plan, regs, pool, loc),
         MirInst::HeapFieldLoad {
             object,
             name,
@@ -2186,7 +2154,6 @@ fn emit_stack(
             pool,
             loc,
         }),
-        MirInst::FieldStore { src, .. } => emit_stack(out, *src, func, plan, regs, pool, loc),
         MirInst::Alloc { kind, elems, kinds, .. } => {
             emit_alloc_stack(EmitAllocStackArgs {
                 out,

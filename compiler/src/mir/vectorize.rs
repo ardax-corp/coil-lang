@@ -1886,8 +1886,6 @@ fn region_has_barrier(func: &MirFunc, blocks: &[BlockId]) -> bool {
                         | MirInst::HostInvoke { .. }
                         | MirInst::Ffi { .. }
                         | MirInst::MatchPayload { .. }
-                        | MirInst::FieldLoad { .. }
-                        | MirInst::FieldStore { .. }
                         | MirInst::HeapFieldLoad { .. }
                         | MirInst::HeapFieldStore { .. }
                         | MirInst::String { .. }

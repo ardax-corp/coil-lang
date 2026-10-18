@@ -1688,11 +1688,6 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
                 out.push(move_op(d, s));
             }
         }
-        MirInst::FieldLoad { .. } | MirInst::FieldStore { .. } => {
-            return Err(LowerError::Refused(
-                "dense emit refuses unboxed FieldLoad/FieldStore (I3 is MIR→LIR)".into(),
-            ));
-        }
         MirInst::HeapFieldLoad {
             dest,
             object,

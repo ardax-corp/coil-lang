@@ -66,7 +66,6 @@ impl MirInst {
             | Self::Alloc { .. }
             | Self::GcBarrier { .. }
             | Self::Deopt { .. }
-            | Self::FieldStore { .. }
             | Self::HeapFieldStore { .. }
             | Self::StoreIndex { .. }
             | Self::StoreStatic { .. }

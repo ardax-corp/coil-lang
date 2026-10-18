@@ -122,6 +122,7 @@ impl MirBinOp {
         }
     }
 
+    #[cfg(test)]
     pub fn parse(s: &str) -> Option<(Self, bool)> {
         Some(match s {
             "iadd" => (Self::Add, false),
@@ -186,6 +187,7 @@ impl MirCmpOp {
         }
     }
 
+    #[cfg(test)]
     pub fn parse(s: &str) -> Option<(Self, bool)> {
         Some(match s {
             "icmp.slt" => (Self::Lt, false),
@@ -332,22 +334,6 @@ pub enum MirInst {
         scrutinee: ValueId,
         index: u32,
     },
-    /// Field of a non-escaping unboxed class (I3). `object` is the SSA
-    /// value of slot `base + index` from the local-escape unbox map.
-    FieldLoad {
-        dest: ValueId,
-        object: ValueId,
-        base: u32,
-        index: u32,
-    },
-    /// Store into an unboxed class field slot (ctor / rebind / S2j
-    /// non-escaping `p.x = …`). Escaping named locals stay fuse-IL.
-    FieldStore {
-        dest: ValueId,
-        src: ValueId,
-        base: u32,
-        index: u32,
-    },
     /// Heap `GetField` / `LoadField` on an escaping object (D1 maps).
     /// `object` is [`MirTy::HeapRef`]. Dest is the field word (not SROA).
     /// `name` is the string key for `GetField`; `LoadField` uses `index`.
@@ -490,7 +476,8 @@ pub enum MirInst {
     },
     /// Debugger stop / deopt boundary (I7). Dest is a `bool` token.
     /// Sidecar only — emit skips this inst. Names the edge a later
-    /// native tier must leave or pause at.
+    /// native tier must leave or pause at. Only tests build one today.
+    #[cfg_attr(not(test), allow(dead_code))]
     Deopt {
         dest: ValueId,
         kind: MirDeoptKind,
@@ -672,21 +659,19 @@ impl MirAllocKind {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum MirGcKind {
     Safepoint,
-    Write,
 }
 
 impl MirGcKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Safepoint => "safepoint",
-            Self::Write => "write",
         }
     }
 
+    #[cfg(test)]
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "safepoint" => Self::Safepoint,
-            "write" => Self::Write,
             _ => return None,
         })
     }
@@ -732,8 +717,6 @@ impl MirInst {
             | Self::Call { dest, .. }
             | Self::CallIndirect { dest, .. }
             | Self::MatchPayload { dest, .. }
-            | Self::FieldLoad { dest, .. }
-            | Self::FieldStore { dest, .. }
             | Self::HeapFieldLoad { dest, .. }
             | Self::HeapFieldStore { dest, .. }
             | Self::Index { dest, .. }
@@ -805,8 +788,6 @@ impl MirInst {
             Self::HostInvoke { args, .. } | Self::Ffi { args, .. } | Self::Call { args, .. } => args.clone(),
             Self::CallIndirect { callee, args, .. } => args.iter().copied().chain([*callee]).collect(),
             Self::MatchPayload { scrutinee, .. } => vec![*scrutinee],
-            Self::FieldLoad { object, .. } => vec![*object],
-            Self::FieldStore { src, .. } => vec![*src],
             Self::HeapFieldLoad {
                 object, name, ..
             } => {
@@ -885,8 +866,6 @@ impl MirInst {
                 *callee = map(*callee);
             }
             Self::MatchPayload { scrutinee, .. } => *scrutinee = map(*scrutinee),
-            Self::FieldLoad { object, .. } => *object = map(*object),
-            Self::FieldStore { src, .. } => *src = map(*src),
             Self::HeapFieldLoad {
                 object, name, ..
             } => {
