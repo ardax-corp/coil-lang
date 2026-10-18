@@ -77,6 +77,9 @@ pub(crate) enum DropOwner {
 /// Saved bare-name state; see [`Checker::shield_bare_names`].
 pub(super) struct BareNameShield {
     modes: Vec<(String, bool, bool)>,
+    /// Whether each key (bare and `module::name`) was in `generic_fns` and
+    /// `generics.generic_fns`.
+    generic: Vec<(String, bool, bool)>,
     env: Vec<(String, usize)>,
     defs: Vec<(DefId, Option<Scheme>)>,
 }
@@ -11730,6 +11733,7 @@ impl Checker {
 
     /// Everything inferring a trait signature or instance method as a
     /// function records under its bare method name: result-mode flags, the
+    /// generic-fn mark of a method with its own type parameters (#1467), the
     /// env binding, and (when a free fn of that name exists) that fn's DefId
     /// scheme. The name belongs to the free fn, or to nobody, so a
     /// function-style call `method(x)` resolves through the trait instead of
@@ -11741,8 +11745,13 @@ impl Checker {
     ) -> BareNameShield {
         let names: Vec<&str> = names.into_iter().collect();
         let mark = self.env.top().map_or(0, |f| f.len());
+        let modes = self.snapshot_result_modes(names.iter().copied());
         BareNameShield {
-            modes: self.snapshot_result_modes(names.iter().copied()),
+            generic: modes
+                .iter()
+                .map(|(k, _, _)| (k.clone(), self.generic_fns.contains(k), self.generics.generic_fns.contains(k)))
+                .collect(),
+            modes,
             env: names.iter().map(|n| (n.to_string(), mark)).collect(),
             defs: names
                 .iter()
@@ -11767,6 +11776,15 @@ impl Checker {
     /// Restore what [`Self::shield_bare_names`] captured.
     pub(super) fn unshield_bare_names(&mut self, shield: BareNameShield) {
         self.restore_result_modes(shield.modes);
+        for (key, local, shared) in shield.generic {
+            for (set, was) in [(&mut self.generic_fns, local), (&mut self.generics.generic_fns, shared)] {
+                if was {
+                    set.insert(key.clone());
+                } else {
+                    set.remove(&key);
+                }
+            }
+        }
         if let Some(top) = self.env.top_mut() {
             for (name, mark) in &shield.env {
                 top.drop_since(name, *mark);
