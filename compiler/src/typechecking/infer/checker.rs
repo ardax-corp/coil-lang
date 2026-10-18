@@ -14385,6 +14385,7 @@ impl Checker {
             let Expression::Function {
                 name,
                 is_static,
+                type_params: method_type_params,
                 args,
                 returns,
                 where_constraints,
@@ -14394,6 +14395,30 @@ impl Checker {
             else {
                 continue;
             };
+            // The method's own `<V>` parse as type variables, quantified
+            // after the impl's, as `infer_impl` orders them (#1461).
+            let method_pushed = self.push_type_params_for_type_parsing(method_type_params);
+            let mut vars = param_vars.clone();
+            let mut constraints = impl_constraints.clone();
+            if method_pushed {
+                let frame = self
+                    .type_params_in_scope
+                    .last()
+                    .expect("type-param frame just pushed");
+                let method_vars: Vec<TyVarId> = method_type_params
+                    .iter()
+                    .map(|tp| *frame.get(tp.name).expect("type param registered in frame"))
+                    .collect();
+                for (tp, var) in method_type_params.iter().zip(method_vars.iter()) {
+                    for bound in &tp.bounds {
+                        constraints.push(Constraint {
+                            class: self.canonical_trait_name(bound),
+                            args: vec![Ty::Var(*var)],
+                        });
+                    }
+                }
+                vars.extend(method_vars);
+            }
             self.current_tuple_pack = Self::tuple_pack_ty_for_args(args, &mut self.counter);
             let arg_tys = self.parse_arg_list(args);
             self.current_tuple_pack = None;
@@ -14422,7 +14447,6 @@ impl Checker {
             if !*is_static {
                 fun_ty = Ty::Fun(Box::new(owner_ty.clone()), Box::new(fun_ty));
             }
-            let mut constraints = impl_constraints.clone();
             for wc in where_constraints {
                 let args: Vec<Ty> = wc.args.iter().map(|a| self.parse_type_name(a)).collect();
                 constraints.push(Constraint {
@@ -14430,10 +14454,11 @@ impl Checker {
                     args,
                 });
             }
-            let scheme = if param_vars.is_empty() {
+            self.pop_type_params_for_type_parsing(method_pushed);
+            let scheme = if vars.is_empty() {
                 Scheme::mono(fun_ty)
             } else {
-                Scheme::poly(param_vars.clone(), constraints.clone(), fun_ty)
+                Scheme::poly(vars, constraints.clone(), fun_ty)
             };
             self.env.insert_top(fqn.clone(), scheme.clone());
             self.methods
