@@ -115,9 +115,9 @@ pub struct HirBoundCall {
     pub method: u32,
 }
 
-/// One step of building instance dictionaries, as HIR emission pushes
-/// them (`plan_instance_dict`): a stack program whose words left are the
-/// dictionaries.
+/// One step of building instance dictionaries, as codegen plans them
+/// (`DictStep`, `plan_instance_dict`): a stack program whose words left
+/// are the dictionaries.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum HirDictOp {
     /// `CodePtr` of a method's entry.
