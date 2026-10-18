@@ -91,6 +91,20 @@ fn resolve_parallel(mut moves: Vec<(u8, u8)>, scratch: u8) -> Vec<(u8, u8)> {
     out
 }
 
+/// The `Const` at `def` as an `i16` immediate (`Bool` as 0 / 1).
+pub(super) fn const_i16(func: &MirFunc, def: Option<(BlockId, usize)>) -> Option<i16> {
+    let (bid, idx) = def?;
+    let MirInst::Const { c, .. } = &func.block(bid).insts[idx] else {
+        return None;
+    };
+    let n = match *c {
+        MirConst::I64(x) => x,
+        MirConst::Bool(x) => i64::from(x),
+        _ => return None,
+    };
+    i16::try_from(n).ok()
+}
+
 /// Index of `bits` in the const pool, appending it when absent. `T` is
 /// the tier's pool index width (dense `u16`, LIR and packs `u32`); an
 /// index that does not fit refuses and leaves the pool as it was.

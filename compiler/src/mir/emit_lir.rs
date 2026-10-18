@@ -17,7 +17,8 @@ use super::emit::{
     max_label_hint, paired_alloc_dest, restore_block_op_locs, take_label,
 };
 use super::emit_common::{
-    is_jim_term_payload, last_arm_payloads, phi_moves, push_const, stack_bin_op, stack_cmp_op,
+    const_i16, is_jim_term_payload, last_arm_payloads, phi_moves, push_const, stack_bin_op,
+    stack_cmp_op,
 };
 use super::func::MirFunc;
 use super::inst::{
@@ -1075,20 +1076,12 @@ fn is_low_bit(func: &MirFunc, plan: &EmitPlan, v: ValueId) -> bool {
     }
 }
 
+/// `v` as an `i16` immediate, when it is an inline-tree `Const`.
 fn tree_i16(func: &MirFunc, plan: &EmitPlan, v: ValueId) -> Option<i16> {
     if !plan.tree[v.index()] {
         return None;
     }
-    let (bid, idx) = plan.def[v.index()]?;
-    let MirInst::Const { c, .. } = &func.block(bid).insts[idx] else {
-        return None;
-    };
-    let n = match *c {
-        MirConst::I64(x) => x,
-        MirConst::Bool(x) => i64::from(x),
-        _ => return None,
-    };
-    i16::try_from(n).ok()
+    const_i16(func, plan.def[v.index()])
 }
 
 struct EmitBinArgs<'args> {

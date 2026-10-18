@@ -9,8 +9,8 @@ use crate::il::{IlJumpKind, IlOp, Label};
 use super::call_convoy::{is_tail_call_inst, ConvoyPlan};
 use super::destprop::sink_phi_incomings;
 use super::emit_common::{
-    intern_pool, is_jim_term_payload, last_arm_payloads, phi_moves, push_const, stack_bin_op,
-    stack_cmp_op,
+    const_i16, intern_pool, is_jim_term_payload, last_arm_payloads, phi_moves, push_const,
+    stack_bin_op, stack_cmp_op,
 };
 use super::func::MirFunc;
 use super::inst::{
@@ -3042,17 +3042,10 @@ fn emit_stack_bin(args: EmitStackBinArgs<'_>) -> Result<(), LowerError> {
     Ok(())
 }
 
+/// `v` as an `i16` immediate. Every `Const` qualifies here: the convoy
+/// plan has no inline-tree set to gate on (LIR's `tree_i16` does).
 fn tree_i16(func: &MirFunc, plan: &ConvoyPlan, v: ValueId) -> Option<i16> {
-    let (bid, idx) = plan.def[v.index()]?;
-    let MirInst::Const { c, .. } = &func.block(bid).insts[idx] else {
-        return None;
-    };
-    let n = match *c {
-        MirConst::I64(x) => x,
-        MirConst::Bool(x) => i64::from(x),
-        _ => return None,
-    };
-    i16::try_from(n).ok()
+    const_i16(func, plan.def[v.index()])
 }
 
 fn emit_dense_push(
