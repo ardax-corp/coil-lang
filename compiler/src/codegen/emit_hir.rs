@@ -738,20 +738,6 @@ impl Compiler {
         let plan = plan.and_then(|emit| hir_bisect(&hir.name).then_some(emit).ok_or("bisect"));
         let lowered = match plan {
             Ok(mut emit) => {
-                // A shared generic body keeps a type parameter's values as
-                // raw words: the call boxed them (`hir_generic_abi`), and a
-                // boxed word stored into a field or container would reach a
-                // ground reader as the box (#802).
-                if self.hir_shared_generic() {
-                    for &param in &hir.params {
-                        if self.hir_open_ty(hir.local(param).ty.as_ref()) {
-                            let slot = Self::hir_slot(&emit, param);
-                            self.bytecode.push_load(slot);
-                            self.bytecode.push_unbox_value(common::UNBOX_ANY_TAG);
-                            self.bytecode.push_store_pop(slot);
-                        }
-                    }
-                }
                 if let Some(root) = hir.root {
                     // Early exits are laid out after the body.
                     emit.plan.cold_ok = self.opt_options.branch_optimization && !self.debugger_attached && !hir.is_coro;
@@ -765,7 +751,9 @@ impl Compiler {
                 // A shared generic body takes its dictionaries as trailing
                 // parameters: direct MIR lowers it when its code reads them
                 // only as it plans (`HirMirTables::reads_dicts`), its open
-                // parameters unboxed as the prologue above unboxes them.
+                // parameters unboxed on entry (the call boxed them, and a
+                // boxed word stored into a field or container would reach
+                // a ground reader as the box, #802).
                 let shared = self.hir_shared_generic();
                 self.hir_mir = if !shared {
                     self.hir_lower_mir(hir, &mut emit, None)
@@ -4917,22 +4905,14 @@ impl Compiler {
 
     /// The adapter function [`Self::hir_fn_adapter`] reserved `label` for:
     /// its frame the wrapped function (the capture), then the arguments.
-    /// Its direct MIR is built here, as it has no HIR.
+    /// Its direct MIR is built here, as it has no HIR; the stack IL only
+    /// keeps its function record non-empty.
     fn hir_fn_adapter_fn(&mut self, label: IlLabel, unbox: &[Option<Ty>]) {
         self.loop_par_helpers += 1;
         let name = format!("__coil_fn_adapter_{}", self.loop_par_helpers);
         let start = self.bytecode.len();
         self.fn_entry_labels.insert(name.clone(), label);
         self.bind_function_entry(name.clone());
-        for (i, ty) in unbox.iter().enumerate() {
-            self.bytecode.push_load(1 + i as u32);
-            if let Some(ty) = ty {
-                Self::emit_unbox_if_needed(&mut self.bytecode, ty);
-            }
-        }
-        self.bytecode.push_load(0);
-        self.bytecode
-            .push(Byte::new(Instruction::CallIndirect).with_operand_u32(unbox.len() as u32));
         self.bytecode.push_return();
         let arity = 1 + unbox.len() as u32;
         self.fn_arities.insert(name.clone(), (arity, false));
@@ -6592,10 +6572,6 @@ impl Compiler {
 
     // ---- emit ----
 
-    fn hir_slot(emit: &HirEmit, local: LocalId) -> u32 {
-        emit.slots[local.0 as usize].expect("HIR local read before its let")
-    }
-
     /// Whether the body being lowered is a generic one's shared body (it
     /// takes dictionaries; a mono clone takes none).
     pub(super) fn hir_shared_generic(&self) -> bool {
@@ -6908,14 +6884,10 @@ impl Compiler {
             let pname = body.local(param).name.clone();
             self.record_debug_param(&pname, slot);
         }
+        // Direct MIR unboxes the parameters a generic callee boxed.
         for (ty, &slot) in unbox.iter().flatten().zip(&slots[ncap..]) {
-            if let Some(ty) = ty {
-                self.bytecode.push_load(slot);
-                Self::emit_unbox_if_needed(&mut self.bytecode, ty);
-                self.bytecode.push_store_pop(slot);
-                if let Some(tag) = Self::ty_to_value_tag(ty) {
-                    self.hir_mir_unbox.push((slot, tag as u32));
-                }
+            if let Some(tag) = ty.as_ref().and_then(Self::ty_to_value_tag) {
+                self.hir_mir_unbox.push((slot, tag as u32));
             }
         }
         let root = body.root.expect("planned lambda body");
