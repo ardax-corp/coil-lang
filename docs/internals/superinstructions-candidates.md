@@ -1,5 +1,7 @@
 # Superinstruction / fusion candidates ([COI-378](https://linear.app/ardax/issue/COI-378) S0)
 
+> **Status: historical.** Inventory taken when fuse-IL (stack lowering) was the majority path. Today fusion happens in `il::lower` fuse-select over what dense and LIR emit, in the LIR emitter, and in a few VM peeks; there are no fuse-IL peephole passes. Today's pipeline: [pipeline.md](pipeline.md).
+
 Docs-only inventory for Linear project
 [Superinstructions](https://linear.app/ardax/project/superinstructions-54baee2beca8).
 Tip `cf7a193c` (`main`). No compiler or VM behavior change.

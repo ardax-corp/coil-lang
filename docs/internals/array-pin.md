@@ -1,4 +1,7 @@
 # Array pins
+# Array pins
+
+> **Status: retired.** Since MIR emits every body (M5, 2026-10-15), no compiler path emits `ArrayPin` / `IndexPin*` / `StoreIndexPin*`, and the checker no longer computes pin facts. The five opcodes and their VM handlers stay only so older archives load; they go with the next archive major. MIR emits plain `Index` / `IndexUnchecked`, and dense bodies keep their own array-handle cache. The notes below are the historical design record.
 
 [#192](https://github.com/ardax-corp/coil-lang/pull/192) already shipped the
 handle [COI-198](https://linear.app/ardax/issue/COI-198) asked for. Proven

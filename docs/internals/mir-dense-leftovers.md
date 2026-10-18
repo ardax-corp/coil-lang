@@ -1,4 +1,7 @@
 # Denser MIR leftovers (post A0–C3)
+# Denser MIR leftovers (post A0–C3)
+
+> **Status: historical.** Ranked before every body went through MIR (M4/M5, 2026-10). "Fuse-IL" below means the stack-lowered bodies that no longer exist; a body dense refuses now runs LIR. Today's pipeline: [pipeline.md](pipeline.md).
 
 Ranked leftovers after A0–B9 / Q1–Q9 / C1–C3. **Not** tree-shake, IPA
 shapes, or BB layout — those are a separate surface
