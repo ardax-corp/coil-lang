@@ -10113,6 +10113,89 @@ impl Checker {
         }
     }
 
+    /// The type parameter a generic fn's projection was declared on (`C`
+    /// for `C::Elem`), or None for a trait method's own projection.
+    fn declared_projection_owner(&self, projection: &AssocProjection) -> Option<TyVarId> {
+        let rep = |v: TyVarId| match apply_ty_prune(&self.subst, &Ty::Var(v)) {
+            Ty::Var(r) => r,
+            _ => v,
+        };
+        self.open_assoc_projections
+            .iter()
+            .find(|((_, name, _), (pvar, _))| *name == projection.name && rep(*pvar) == rep(projection.var))
+            .map(|((owner, _, _), _)| *owner)
+    }
+
+    /// A call whose projection's owner is one of the enclosing generic's
+    /// type parameters (`head(xs)` with `xs: C`, `C: Collect`) returns that
+    /// parameter's own rigid `C::Elem`, not a free variable any type could
+    /// fill (#1462). The owner is the generic callee's own parameter that
+    /// declared the projection, or a trait method's sole constraint argument.
+    fn link_param_projections(
+        &mut self,
+        class: &str,
+        constraints: &[Constraint],
+        scheme: &Scheme,
+        mapping: &HashMap<TyVarId, TyVarId>,
+        range: &Range<usize>,
+    ) {
+        use crate::typechecking::env::substitute_vars;
+        let rep = |this: &Self, v: TyVarId| match apply_ty_prune(&this.subst, &Ty::Var(v)) {
+            Ty::Var(r) => r,
+            _ => v,
+        };
+        for projection in &scheme.assoc_projections {
+            let Some(&fresh) = mapping.get(&projection.var) else {
+                continue;
+            };
+            let owner = match self.declared_projection_owner(projection) {
+                Some(owner) => match mapping.get(&owner) {
+                    Some(&mapped) => Ty::Var(mapped),
+                    None => continue,
+                },
+                None => {
+                    let mut owners = constraints.iter().filter(|c| {
+                        (class.is_empty() || c.class == class)
+                            && c.args.len() == 1
+                            && self
+                                .generics
+                                .typeclass(&c.class)
+                                .is_some_and(|cdef| cdef.assoc_type(&projection.name).is_some())
+                    });
+                    match (owners.next(), owners.next()) {
+                        (Some(c), None) => c.args[0].clone(),
+                        _ => continue,
+                    }
+                }
+            };
+            let Ty::Var(owner) = apply_ty_prune(&self.subst, &owner) else {
+                continue;
+            };
+            let param = self
+                .type_params_in_scope
+                .iter()
+                .rev()
+                .flat_map(|frame| frame.values().copied())
+                .find(|&p| rep(self, p) == owner);
+            let Some(param) = param else {
+                continue;
+            };
+            let args: Vec<Ty> = projection
+                .args
+                .iter()
+                .map(|a| apply_ty_prune(&self.subst, &substitute_vars(a, mapping)))
+                .collect();
+            if let Some(rigid) = self.open_param_projection(param, &projection.name, &args, range) {
+                self.unify(
+                    &Ty::Var(fresh),
+                    &Ty::Var(rigid),
+                    range,
+                    &format!("associated type `{}`", projection.name),
+                );
+            }
+        }
+    }
+
     /// After discharging constraints for a trait method call, pin
     /// freshened associated-type variables from the scheme mapping.
     fn pin_assoc_after_discharge(
@@ -10123,6 +10206,9 @@ impl Checker {
         mapping: &HashMap<TyVarId, TyVarId>,
         range: &Range<usize>,
     ) {
+        if let Some(scheme) = scheme {
+            self.link_param_projections(class, constraints, scheme, mapping, range);
+        }
         for c in constraints {
             if !class.is_empty() && c.class != class {
                 continue;
@@ -10139,7 +10225,7 @@ impl Checker {
             }
             if let Ok(Some(instance)) = self.find_unique_instance(&c.class, &resolved_args, range) {
                 if let Some(scheme) = scheme {
-                    self.pin_assoc_vars_from_mapping(&c.class, &instance, scheme, mapping, range);
+                    self.pin_assoc_vars_from_mapping(&c.class, &instance, &resolved_args, scheme, mapping, range);
                 }
                 self.pin_assoc_types_for_instance(&c.class, &instance, scheme, range);
             }
@@ -11297,6 +11383,134 @@ impl Checker {
         }
     }
 
+    /// The open projection variable for `assoc` on type parameter
+    /// `owner_var` (`T::Elem` under `T: Collect`): one variable per owner,
+    /// name and arguments, rigid in the generic body (#1462). None when no
+    /// active bound on `owner_var` declares `assoc`.
+    fn open_param_projection(
+        &mut self,
+        owner_var: TyVarId,
+        assoc: &str,
+        args: &[Ty],
+        range: &Range<usize>,
+    ) -> Option<TyVarId> {
+        // Find an active constraint on this var whose class declares `assoc`.
+        let mut matching_decl: Option<(String, AssocTypeDecl)> = None;
+        for c in &self.active_constraints {
+            let covers = c.args.iter().any(
+                |a| matches!(apply_ty_prune(&self.subst, a), Ty::Var(v) if v == owner_var),
+            );
+            if !covers {
+                continue;
+            }
+            if let Some(cdef) = self.generics.typeclass(&c.class) {
+                if let Some(decl) = cdef.assoc_type(assoc) {
+                    matching_decl = Some((c.class.clone(), decl.clone()));
+                    break;
+                }
+                // Superclass assoc types (rare; check flattened supers).
+                for super_name in &cdef.superclasses {
+                    if let Some(sdef) = self.generics.typeclass(super_name)
+                        && let Some(decl) = sdef.assoc_type(assoc) {
+                            matching_decl = Some((super_name.clone(), decl.clone()));
+                            break;
+                        }
+                }
+                if matching_decl.is_some() {
+                    break;
+                }
+            }
+        }
+        if let Some((class_name, decl)) = matching_decl {
+            self.validate_assoc_projection_args(&class_name, &decl, args, range);
+            let key = (owner_var, assoc.to_string(), self.projection_arg_key(args));
+            if let Some(&(existing, _)) = self.open_assoc_projections.get(&key) {
+                self.record_current_assoc_projection(existing, assoc, args);
+                return Some(existing);
+            }
+            let fresh = self.counter.fresh();
+            self.set_var_kind(fresh, Kind::Type);
+            self.open_assoc_projections
+                .insert(key, (fresh, args.to_vec()));
+            self.record_current_assoc_projection(fresh, assoc, args);
+            return Some(fresh);
+        }
+        None
+    }
+
+    /// A projection on one of a generic's own type parameters (`C::Elem`
+    /// under `C: Collect`) is rigid in its body, like the parameter: it may
+    /// equal only itself until a call site or mono clone picks the instance.
+    /// One unified with a concrete type, another type parameter or another
+    /// projection (`return "s"` from `-> C::Elem`) is reported (#1462).
+    pub(super) fn reject_bound_projections(&mut self, params: &[(String, TyVarId)], range: &Range<usize>) {
+        let rep = |this: &Self, v: TyVarId| match apply_ty_prune(&this.subst, &Ty::Var(v)) {
+            Ty::Var(r) => Some(r),
+            _ => None,
+        };
+        let pretty_args = |this: &Self, args: &[Ty]| {
+            if args.is_empty() {
+                return String::new();
+            }
+            let args: Vec<String> = args
+                .iter()
+                .map(|a| crate::typechecking::pretty::format_ty_for_diag(&this.subst, a))
+                .collect();
+            format!("<{}>", args.join(", "))
+        };
+        // Every rigid variable in scope, by its representative: type
+        // parameters (this generic's and any enclosing one's) and their
+        // projections.
+        let mut rigid: Vec<(TyVarId, String)> = Vec::new();
+        for (name, p) in params
+            .iter()
+            .cloned()
+            .chain(self.type_params_in_scope.iter().flat_map(|f| f.iter().map(|(n, v)| (n.clone(), *v))))
+        {
+            if let Some(r) = rep(self, p) {
+                rigid.push((r, name));
+            }
+        }
+        let mut projections: Vec<(TyVarId, String)> = Vec::new();
+        for ((owner, assoc, _), (pvar, args)) in &self.open_assoc_projections {
+            let Some((_, owner_name)) = rigid.iter().find(|(r, _)| rep(self, *owner) == Some(*r)) else {
+                continue;
+            };
+            projections.push((*pvar, format!("{owner_name}::{assoc}{}", pretty_args(self, args))));
+        }
+        projections.sort_by_key(|(pvar, _)| *pvar);
+        let mut errors = Vec::new();
+        for (i, (pvar, shown)) in projections.iter().enumerate() {
+            let owned = self.open_assoc_projections.iter().any(|((owner, _, _), (v, _))| {
+                v == pvar && params.iter().any(|(_, p)| rep(self, *p) == rep(self, *owner))
+            });
+            if !owned {
+                continue;
+            }
+            let used_as = match apply_ty_prune(&self.subst, &Ty::Var(*pvar)) {
+                Ty::Var(q) => {
+                    let other_param = rigid.iter().find(|(r, _)| *r == q).map(|(_, n)| n.clone());
+                    // Of two projections unified together, the later reports.
+                    let other_projection = projections[..i]
+                        .iter()
+                        .find(|(v, s)| rep(self, *v) == Some(q) && s != shown)
+                        .map(|(_, s)| s.clone());
+                    match other_param.or(other_projection) {
+                        Some(other) => other,
+                        None => continue,
+                    }
+                }
+                bound => crate::typechecking::pretty::format_ty_for_diag(&self.subst, &bound),
+            };
+            errors.push(format!(
+                "Associated type `{shown}` is used as `{used_as}`; it stands for whatever type the instance picks"
+            ));
+        }
+        for msg in errors {
+            self.messages.push(Message::error(ErrorCode::GenericTypeError, msg, range.clone()));
+        }
+    }
+
     /// Resolve `Owner::Assoc` in a type annotation (Phase 6).
     ///
     /// - Inside `trait Owner { … }`, `Owner::Elem` / bare scope lookup
@@ -11346,60 +11560,25 @@ impl Checker {
         }
 
         // 2. Type parameter owner: `T::Elem` with `T: Collect`.
-        for frame in self.type_params_in_scope.iter().rev() {
-            if let Some(&owner_var) = frame.get(owner) {
-                // Find an active constraint on this var whose class declares `assoc`.
-                let mut matching_decl: Option<(String, AssocTypeDecl)> = None;
-                for c in &self.active_constraints {
-                    let covers = c.args.iter().any(
-                        |a| matches!(apply_ty_prune(&self.subst, a), Ty::Var(v) if v == owner_var),
-                    );
-                    if !covers {
-                        continue;
-                    }
-                    if let Some(cdef) = self.generics.typeclass(&c.class) {
-                        if let Some(decl) = cdef.assoc_type(assoc) {
-                            matching_decl = Some((c.class.clone(), decl.clone()));
-                            break;
-                        }
-                        // Superclass assoc types (rare; check flattened supers).
-                        for super_name in &cdef.superclasses {
-                            if let Some(sdef) = self.generics.typeclass(super_name)
-                                && let Some(decl) = sdef.assoc_type(assoc) {
-                                    matching_decl = Some((super_name.clone(), decl.clone()));
-                                    break;
-                                }
-                        }
-                        if matching_decl.is_some() {
-                            break;
-                        }
-                    }
-                }
-                if let Some((class_name, decl)) = matching_decl {
-                    self.validate_assoc_projection_args(&class_name, &decl, args, range);
-                    let key = (owner_var, assoc.to_string(), self.projection_arg_key(args));
-                    if let Some(&(existing, _)) = self.open_assoc_projections.get(&key) {
-                        self.record_current_assoc_projection(existing, assoc, args);
-                        return Ty::Var(existing);
-                    }
-                    let fresh = self.counter.fresh();
-                    self.set_var_kind(fresh, Kind::Type);
-                    self.open_assoc_projections
-                        .insert(key, (fresh, args.to_vec()));
-                    self.record_current_assoc_projection(fresh, assoc, args);
-                    return Ty::Var(fresh);
-                }
-                self.messages.push(Message::error(
-                    ErrorCode::GenericTypeError,
-                    format!(
-                        "Cannot project associated type `{}` from `{}` \
-                         (no in-scope trait bound declares it)",
-                        assoc, owner
-                    ),
-                    range.clone(),
-                ));
-                return Ty::Var(self.counter.fresh());
+        let owner_var = self
+            .type_params_in_scope
+            .iter()
+            .rev()
+            .find_map(|frame| frame.get(owner).copied());
+        if let Some(owner_var) = owner_var {
+            if let Some(var) = self.open_param_projection(owner_var, assoc, args, range) {
+                return Ty::Var(var);
             }
+            self.messages.push(Message::error(
+                ErrorCode::GenericTypeError,
+                format!(
+                    "Cannot project associated type `{}` from `{}` \
+                     (no in-scope trait bound declares it)",
+                    assoc, owner
+                ),
+                range.clone(),
+            ));
+            return Ty::Var(self.counter.fresh());
         }
 
         // 3. Class-name owner outside definition: ground-only unique instance.
@@ -11606,6 +11785,7 @@ impl Checker {
         &mut self,
         class: &str,
         instance: &InstanceDef,
+        instance_args: &[Ty],
         scheme: &Scheme,
         mapping: &HashMap<TyVarId, TyVarId>,
         range: &Range<usize>,
@@ -11619,6 +11799,15 @@ impl Checker {
             .iter()
             .filter_map(|projection| {
                 let &fresh = mapping.get(&projection.var)?;
+                // A generic fn's `C::Elem` and `D::Elem` each take their own
+                // owner's instance, not every `Collect` instance the call
+                // discharges (#1462).
+                if let Some(owner) = self.declared_projection_owner(projection) {
+                    let owner_ty = apply_ty_prune(&self.subst, &Ty::Var(*mapping.get(&owner)?));
+                    if instance_args != std::slice::from_ref(&owner_ty) {
+                        return None;
+                    }
+                }
                 let value = instance.assoc_tys.get(&projection.name)?;
                 let args = projection
                     .args
