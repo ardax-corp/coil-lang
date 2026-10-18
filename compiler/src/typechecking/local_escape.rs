@@ -291,7 +291,7 @@ fn scan_uses(
                 scan_uses(_checker, a, cands, escaped, nested_fn);
             }
         }
-        Expression::Array(items) | Expression::Tuple(items) | Expression::List(items) => {
+        Expression::Array(items) | Expression::Tuple(items) => {
             for item in items {
                 poison_idents(item, cands, escaped);
                 scan_uses(_checker, item, cands, escaped, nested_fn);
@@ -695,7 +695,6 @@ fn walk_children(ast: &Output<'_>, f: &mut dyn FnMut(&Output<'_>)) {
         Expression::Program(items)
         | Expression::Block(items)
         | Expression::Fragment(items)
-        | Expression::List(items)
         | Expression::Array(items)
         | Expression::Tuple(items)
         | Expression::If(items) => {

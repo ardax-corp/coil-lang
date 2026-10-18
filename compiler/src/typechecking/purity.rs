@@ -617,7 +617,6 @@ fn collect_nested_fns(ast: &Output<'_>, facts: &mut HashMap<String, FnFacts>, ca
         Expression::Program(items)
         | Expression::Block(items)
         | Expression::Fragment(items)
-        | Expression::List(items)
         | Expression::Array(items)
         | Expression::Tuple(items) => {
             for item in items {
@@ -768,7 +767,6 @@ fn walk_body(ast: &Output<'_>, facts: &mut FnFacts) {
         Expression::Program(items)
         | Expression::Block(items)
         | Expression::Fragment(items)
-        | Expression::List(items)
         | Expression::Array(items)
         | Expression::Tuple(items) => {
             for item in items {
@@ -992,7 +990,6 @@ fn fresh_lets(ast: &Output<'_>, out: &mut HashSet<String>) {
         && matches!(
             peel(init).1.as_ref(),
             Expression::Array(_)
-                | Expression::List(_)
                 | Expression::Tuple(_)
                 | Expression::Dict(_)
                 | Expression::Instantiate(_, _)

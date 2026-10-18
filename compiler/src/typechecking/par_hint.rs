@@ -267,7 +267,6 @@ fn walk_escapes(
         Expression::Program(items)
         | Expression::Block(items)
         | Expression::Fragment(items)
-        | Expression::List(items)
         | Expression::Array(items)
         | Expression::Tuple(items)
         | Expression::If(items) => {
@@ -677,7 +676,6 @@ fn find_covering_lock(
         Expression::Program(items)
         | Expression::Block(items)
         | Expression::Fragment(items)
-        | Expression::List(items)
         | Expression::Array(items)
         | Expression::Tuple(items)
         | Expression::If(items) => {
@@ -763,7 +761,6 @@ fn contains_call_bag(ast: &Output<'_>, user_fns: &HashSet<String>) -> bool {
         Expression::Program(items)
         | Expression::Block(items)
         | Expression::Fragment(items)
-        | Expression::List(items)
         | Expression::Array(items)
         | Expression::Tuple(items)
         | Expression::If(items) => items.iter().any(|i| contains_call_bag(i, user_fns)),

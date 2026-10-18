@@ -414,7 +414,6 @@ pub enum Expression<'expr> {
         inclusive: bool,
     },
 
-    List(Vec<Output<'expr>>),
     Array(Vec<Output<'expr>>),
     Expr(Output<'expr>),
     Group(Output<'expr>),
@@ -1979,8 +1978,7 @@ impl<'expr> Expression<'expr> {
                 f(start);
                 f(end);
             }
-            E::List(items)
-            | E::Array(items)
+            E::Array(items)
             | E::Fragment(items)
             | E::Block(items)
             | E::Program(items)
@@ -2220,8 +2218,7 @@ impl<'expr> Expression<'expr> {
                 f(start);
                 f(end);
             }
-            E::List(items)
-            | E::Array(items)
+            E::Array(items)
             | E::Fragment(items)
             | E::Block(items)
             | E::Program(items)
@@ -2466,7 +2463,6 @@ impl Expression<'_> {
             | E::Le(..)
             | E::Gt(..)
             | E::Range { .. }
-            | E::List(..)
             | E::Array(..)
             | E::Expr(..)
             | E::Group(..)

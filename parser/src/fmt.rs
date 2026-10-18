@@ -876,7 +876,7 @@ impl<'s> Formatter<'s> {
                 self.fmt_output(&items[1]);
                 self.push_str("]");
             }
-            Expression::List(items) | Expression::Array(items) => {
+            Expression::Array(items) => {
                 self.fmt_delimited_outputs("[", "]", items, false);
             }
             Expression::Tuple(items) => {
@@ -2778,7 +2778,6 @@ fn is_atom(expr: &Expression<'_>) -> bool {
             | Expression::Index(..)
             | Expression::QualifiedAccess { .. }
             | Expression::Group(_)
-            | Expression::List(_)
             | Expression::Array(_)
             | Expression::Tuple(_)
     )

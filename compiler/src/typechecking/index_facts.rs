@@ -144,7 +144,7 @@ fn collect_fn_shapes(
 fn param_list(checker: &Checker, args: &Output<'_>) -> Vec<(String, NodeId, bool)> {
     let mut out = Vec::new();
     let kids: &[Output<'_>] = match args.1.as_ref() {
-        Expression::Fragment(xs) | Expression::List(xs) => xs,
+        Expression::Fragment(xs) => xs,
         Expression::Argument { .. } => {
             if let Some(p) = one_param(checker, args) {
                 out.push(p);
@@ -311,8 +311,7 @@ fn walk_tree(
     match ast.1.as_ref() {
         Expression::Program(items)
         | Expression::Block(items)
-        | Expression::Fragment(items)
-        | Expression::List(items) => {
+        | Expression::Fragment(items) => {
             for item in items {
                 walk_tree(checker, item, pure, env, calls);
             }
@@ -945,7 +944,6 @@ fn walk_children(ast: &Output<'_>, f: &mut dyn FnMut(&Output<'_>)) {
         Expression::Program(items)
         | Expression::Block(items)
         | Expression::Fragment(items)
-        | Expression::List(items)
         | Expression::Array(items)
         | Expression::Tuple(items)
         | Expression::If(items) => {

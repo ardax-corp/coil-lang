@@ -816,7 +816,6 @@ where
         Expression::Program(items)
         | Expression::Block(items)
         | Expression::Fragment(items)
-        | Expression::List(items)
         | Expression::Tuple(items)
         | Expression::Array(items)
         | Expression::Declare(items)

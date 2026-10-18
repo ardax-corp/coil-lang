@@ -913,7 +913,7 @@ impl Compiler {
 
     fn emit_sidecar_array_pins(&mut self, args: &Output<'_>) {
         let kids: Vec<&Output<'_>> = match args.1.as_ref() {
-            Expression::Fragment(xs) | Expression::List(xs) => xs.iter().collect(),
+            Expression::Fragment(xs) => xs.iter().collect(),
             Expression::Argument { .. } => vec![args],
             _ => return,
         };
@@ -2388,8 +2388,7 @@ impl Compiler {
                     }
                 }
             }
-            Expression::List(items)
-            | Expression::Tuple(items)
+            Expression::Tuple(items)
             | Expression::Array(items)
             | Expression::Declare(items)
             | Expression::Invoke(items) => items.iter().any(|i| Self::walk_expr_calls(i, pred)),
@@ -5523,7 +5522,7 @@ impl Compiler {
                 Self::count_field_key_uses(start, counts);
                 Self::count_field_key_uses(end, counts);
             }
-            List(v) | Array(v) | Fragment(v) | Block(v) | Program(v) | Tuple(v) | If(v)
+            Array(v) | Fragment(v) | Block(v) | Program(v) | Tuple(v) | If(v)
             | Declare(v) | Invoke(v) => {
                 for c in v {
                     Self::count_field_key_uses(c, counts);

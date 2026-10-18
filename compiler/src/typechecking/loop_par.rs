@@ -974,7 +974,6 @@ fn collect_assigned(ast: &Output<'_>, out: &mut HashSet<String>) {
         Expression::Program(items)
         | Expression::Block(items)
         | Expression::Fragment(items)
-        | Expression::List(items)
         | Expression::Array(items)
         | Expression::Tuple(items)
         | Expression::If(items) => {

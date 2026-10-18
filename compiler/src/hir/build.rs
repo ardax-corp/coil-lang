@@ -1238,10 +1238,6 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 let args = vec![self.expr(b, start), self.expr(b, end)];
                 self.emit(b, node, HirKind::Make { kind: MakeKind::Range { inclusive: *inclusive }, args })
             }
-            E::List(items) => {
-                let args = self.exprs(b, items);
-                self.emit(b, node, HirKind::Make { kind: MakeKind::List, args })
-            }
             E::Array(items) => {
                 let args = self.exprs(b, items);
                 self.emit(b, node, HirKind::Make { kind: MakeKind::Array, args })

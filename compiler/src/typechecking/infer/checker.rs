@@ -20,7 +20,7 @@ use crate::typechecking::ty::{ArrayLength, array, array_fixed, tuple as tuple_ty
 use crate::typechecking::ty::{AssocProjection, Constraint, Scheme};
 use crate::typechecking::ty::{
     EnumVariantPayloadTy, RANGE, RANGE_INCLUSIVE, Ty, TyVarId, boolean, float, ftv_ty, int,
-    is_option_ty, is_result_ty, list, never, option_app_ty, option_inner, option_ty, range_app,
+    is_option_ty, is_result_ty, never, option_app_ty, option_inner, option_ty, range_app,
     range_inclusive_ty, range_ty, readonly_ty, result_app_ty, result_ok_err, result_ty,
     schemaize_payload, schemaize_ty, string, strip_readonly, subst_payload_params, subst_ty_params,
     unit as unit_ty, vec_app_ty, vec_element_ty,
@@ -3281,7 +3281,6 @@ impl Checker {
                 }
                 apply_ty_prune(&self.subst, &y_var)
             }
-            Expression::List(elements) => self.infer_list(elements, range),
 
             Expression::Default(_) => self
                 .current_match_lhs
@@ -7626,18 +7625,6 @@ impl Checker {
             }
         }
         result_ty
-    }
-
-    fn infer_list(&mut self, elements: &[Output], _range: Range<usize>) -> Ty {
-        if elements.is_empty() {
-            return list(Ty::Var(self.counter.fresh()));
-        }
-        let first_ty = self.infer(&elements[0]);
-        for elem in &elements[1..] {
-            let t = self.infer(elem);
-            self.unify(&first_ty, &t, &elem.0.into_range(), "list element");
-        }
-        list(first_ty)
     }
 
     /// `len(x)`, prelude sugar for `x.len()` (structural ArrayLen / Length).
@@ -14723,7 +14710,6 @@ impl Checker {
                 self.pre_pass_ffi_invoke_param_flow_walk(expr, local_class_scopes);
             }
             Expression::Tuple(items)
-            | Expression::List(items)
             | Expression::Declare(items)
             | Expression::Invoke(items) => {
                 for item in items {
@@ -15649,7 +15635,6 @@ impl Checker {
             Expression::Block(cs)
             | Expression::Program(cs)
             | Expression::Fragment(cs)
-            | Expression::List(cs)
             | Expression::Declare(cs)
             | Expression::Invoke(cs) => {
                 for c in cs {
