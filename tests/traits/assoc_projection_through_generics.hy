@@ -1,5 +1,6 @@
 // A generic body passes its `C::Elem` value on to another generic, or
-// returns another generic's `C::Elem` result, and both lower (#1469).
+// returns another generic's `C::Elem` result, and both lower, with the
+// clone keyed by a variant's constructor type (`Option::Some(7)`) (#1469).
 use tests::assert;
 
 trait Collect<C> {
@@ -32,6 +33,10 @@ fn outer<C: Collect>(C xs) -> C::Elem {
     return take_head(xs);
 }
 
+fn twice<C: Collect>(C xs) -> C::Elem {
+    return outer(xs);
+}
+
 fn pass_direct<C: Collect>(C xs) -> C::Elem {
     return same(head(xs));
 }
@@ -45,4 +50,5 @@ test("a generic passes its projection value to another generic") {
 test("a generic returns another generic's projection result") {
     assert!(outer(Option::Some(7)) + 1 == 8);
     assert!(outer(Option::None) == 0);
+    assert!(twice(Option::Some(5)) == 5);
 }
