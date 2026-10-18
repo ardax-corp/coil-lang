@@ -34,5 +34,5 @@ pub use lower::Lowered;
 #[cfg(test)]
 pub use lower::{lower, try_lower};
 pub use module::IlModule;
-pub use op::{EntryKind, FuseHint, IlJumpKind, IlOp, Label};
+pub use op::{EntryKind, IlJumpKind, IlOp, Label};
 pub use treeshake::{TreeshakeInput, prune_unused_functions, reachable_functions};
