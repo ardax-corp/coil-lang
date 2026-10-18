@@ -105,8 +105,6 @@ impl Checker {
             local_defs: HashMap::new(),
             module_locals: HashMap::new(),
             def_ids_by_node: HashMap::new(),
-            frame_local: HashSet::new(),
-            frame_local_last_use: HashSet::new(),
             fn_value_escaped: HashSet::new(),
             in_bounds_index: HashSet::new(),
             nonneg_expr: HashSet::new(),
@@ -1655,8 +1653,6 @@ impl Checker {
         self.import_locals.clear();
         self.local_defs.clear();
         self.def_ids_by_node.clear();
-        self.frame_local.clear();
-        self.frame_local_last_use.clear();
         self.in_bounds_index.clear();
         self.nonneg_expr.clear();
         self.pin_array.clear();
@@ -1742,7 +1738,6 @@ impl Checker {
             self.messages.push(msg);
         }
 
-        crate::typechecking::local_escape::analyze_local_escape(self, ast);
         crate::typechecking::purity::record_fn_effects(self, ast);
         crate::typechecking::index_facts::analyze_index_facts(self, ast);
         crate::typechecking::fn_value_escape::analyze_fn_value_escape(self, ast);

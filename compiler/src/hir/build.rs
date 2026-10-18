@@ -395,12 +395,6 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         self.stamp(b, hir);
         if let Some(id) = id {
             let flags = &mut b.body.exprs[hir.0 as usize].flags;
-            if self.sidecar.is_frame_local(id) {
-                flags.insert(HirFlags::FRAME_LOCAL);
-            }
-            if self.sidecar.is_frame_local_last_use(id) {
-                flags.insert(HirFlags::LAST_USE);
-            }
             if self.sidecar.is_in_bounds_index(id) {
                 flags.insert(HirFlags::IN_BOUNDS);
             }

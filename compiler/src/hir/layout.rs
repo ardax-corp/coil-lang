@@ -149,8 +149,7 @@ pub(crate) fn is_unit(ty: &Ty) -> bool {
 }
 
 /// A closed, non-scalar, non-FFI/builtin user enum whose every variant has
-/// payload arity `<= 1`, the same shape
-/// [`crate::typechecking::local_escape`] unboxes into frame slots.
+/// payload arity `<= 1`, the shape frame-slot unboxing uses.
 fn unary_user_enum_name<'a>(checker: &Checker, ty: &'a Ty) -> Option<&'a str> {
     let name = enum_name(ty)?;
     if common::is_builtin_option_enum(name)
