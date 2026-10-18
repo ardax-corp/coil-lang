@@ -338,13 +338,6 @@ impl CodeBuf {
         ));
     }
 
-    /// Attach I3 unboxed class field ranges to the last recorded function.
-    pub fn set_last_func_unboxed_fields(&mut self, fields: Vec<(u32, u32)>) {
-        if let Some(f) = self.funcs.last_mut() {
-            f.unboxed_fields = fields;
-        }
-    }
-
     /// Attach the MIR lowered from HIR to the last recorded function.
     pub fn set_last_func_hir_mir(&mut self, func: crate::mir::MirFunc) {
         if let Some(f) = self.funcs.last_mut() {

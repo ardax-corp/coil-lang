@@ -950,21 +950,6 @@ impl Compiler {
             .map(|(_, _, kind)| kind.as_str())
     }
 
-    /// Snapshot local_escape unbox ranges onto the last recorded `IlFunc` (I3).
-    fn record_unboxed_class_fields(&mut self) {
-        if self.context.unboxed_class_locals.is_empty() {
-            return;
-        }
-        let fields: Vec<(u32, u32)> = self
-            .context
-            .unboxed_class_locals
-            .iter()
-            .filter(|(name, _)| !self.context.unboxed_class_box.contains_key(*name))
-            .map(|(_, (base, n, _))| (*base, *n as u32))
-            .collect();
-        self.bytecode.set_last_func_unboxed_fields(fields);
-    }
-
     fn alloc_unboxed_enum_slots(&mut self, name: &str, enum_name: &str) -> (u32, u32) {
         let payload = self.alloc_binding_slot(name);
         let tag_name = format!("__unbox_tag_{name}");
@@ -3465,7 +3450,6 @@ impl Compiler {
             self.bytecode
                 .record_func_with_sp(worker_name, entry, body_start, body_end, 0);
             self.attach_hir_mir();
-            self.record_unboxed_class_fields();
             self.flush_hir_par_tail();
         } else {
             self.functions.remove(&worker_name);
@@ -4358,7 +4342,6 @@ impl Compiler {
         self.bytecode
             .record_func_with_sp(name.to_string(), entry, body_start, body_end, entry_sp);
         self.attach_hir_mir();
-        self.record_unboxed_class_fields();
         self.current_function_table_key = prev_key;
         self.context.variables = prev_vars;
     }
@@ -4820,8 +4803,6 @@ impl Compiler {
 
         let prev_vars = std::mem::take(&mut self.context.variables);
         let prev_unboxed_enum = std::mem::take(&mut self.context.unboxed_enum_locals);
-        let prev_unboxed_class = std::mem::take(&mut self.context.unboxed_class_locals);
-        let prev_unboxed_class_box = std::mem::take(&mut self.context.unboxed_class_box);
         let prev_polyfn_vars = std::mem::take(&mut self.polyfn_vars);
         let prev_polyfn_sources = std::mem::take(&mut self.polyfn_sources);
         let prev_fn_table_key = self.current_function_table_key.take();
@@ -4910,7 +4891,6 @@ impl Compiler {
         if pinned {
             self.bytecode.set_last_func_pinned();
         }
-        self.record_unboxed_class_fields();
         self.flush_hir_par_tail();
 
         self.compiling_result_mode = prev_result_mode;
@@ -4918,8 +4898,6 @@ impl Compiler {
         self.compiling_two_word_enum = prev_two_word_enum;
         self.context.variables = prev_vars;
         self.context.unboxed_enum_locals = prev_unboxed_enum;
-        self.context.unboxed_class_locals = prev_unboxed_class;
-        self.context.unboxed_class_box = prev_unboxed_class_box;
         self.polyfn_vars = prev_polyfn_vars;
         self.polyfn_sources = prev_polyfn_sources;
         self.current_function_table_key = prev_fn_table_key;
@@ -5820,8 +5798,6 @@ impl Compiler {
         let prev_stack_arrays = std::mem::take(&mut self.context.stack_array_locals);
         let prev_stack_boxes = std::mem::take(&mut self.context.stack_array_box);
         let prev_unboxed_enum = std::mem::take(&mut self.context.unboxed_enum_locals);
-        let prev_unboxed_class = std::mem::take(&mut self.context.unboxed_class_locals);
-        let prev_unboxed_class_box = std::mem::take(&mut self.context.unboxed_class_box);
         let prev_polyfn_vars = std::mem::take(&mut self.polyfn_vars);
         let prev_polyfn_sources = std::mem::take(&mut self.polyfn_sources);
         let prev_field_keys = std::mem::take(&mut self.field_key_slots);
@@ -5856,8 +5832,6 @@ impl Compiler {
         self.field_key_slots = prev_field_keys;
         self.polyfn_sources = prev_polyfn_sources;
         self.polyfn_vars = prev_polyfn_vars;
-        self.context.unboxed_class_box = prev_unboxed_class_box;
-        self.context.unboxed_class_locals = prev_unboxed_class;
         self.context.unboxed_enum_locals = prev_unboxed_enum;
         self.context.stack_array_box = prev_stack_boxes;
         self.context.stack_array_locals = prev_stack_arrays;
@@ -6270,7 +6244,6 @@ impl Compiler {
         self.bytecode
             .record_func_with_sp("main".to_string(), entry, body_start, body_end, 0);
         self.attach_hir_mir();
-        self.record_unboxed_class_fields();
         self.flush_hir_par_tail();
         self.current_function_table_key = prev_fn_table_key;
         self.context.variables = prev_vars;
@@ -6483,8 +6456,6 @@ impl Compiler {
             let prev_stack_arrays = std::mem::take(&mut self.context.stack_array_locals);
             let prev_stack_boxes = std::mem::take(&mut self.context.stack_array_box);
             let prev_unboxed_enum = std::mem::take(&mut self.context.unboxed_enum_locals);
-            let prev_unboxed_class = std::mem::take(&mut self.context.unboxed_class_locals);
-            let prev_unboxed_class_box = std::mem::take(&mut self.context.unboxed_class_box);
             let prev_fn_polyfn_vars = std::mem::take(&mut self.polyfn_vars);
             let prev_fn_polyfn_sources = std::mem::take(&mut self.polyfn_sources);
             let prev_fn_qualified = self.current_function_qualified.take();
@@ -6504,8 +6475,6 @@ impl Compiler {
             self.context.stack_array_locals.clear();
             self.context.stack_array_box.clear();
             self.context.unboxed_enum_locals.clear();
-            self.context.unboxed_class_locals.clear();
-            self.context.unboxed_class_box.clear();
             self.expr_depth = 0;
             let saved_debug_scope = self.debug_scope_enter(body.0.start as u32, body.0.end as u32);
             if self.compiling_method {
@@ -6611,14 +6580,11 @@ impl Compiler {
             if pinned {
                 self.bytecode.set_last_func_pinned();
             }
-            self.record_unboxed_class_fields();
             self.flush_hir_par_tail();
             self.context.variables = prev_fn_vars;
             self.context.stack_array_locals = prev_stack_arrays;
             self.context.stack_array_box = prev_stack_boxes;
             self.context.unboxed_enum_locals = prev_unboxed_enum;
-            self.context.unboxed_class_locals = prev_unboxed_class;
-            self.context.unboxed_class_box = prev_unboxed_class_box;
             self.polyfn_vars = prev_fn_polyfn_vars;
             self.polyfn_sources = prev_fn_polyfn_sources;
 
@@ -7169,16 +7135,12 @@ impl Compiler {
                 let prev_stack_arrays = std::mem::take(&mut self.context.stack_array_locals);
                 let prev_stack_boxes = std::mem::take(&mut self.context.stack_array_box);
                 let prev_unboxed_enum = std::mem::take(&mut self.context.unboxed_enum_locals);
-                let prev_unboxed_class = std::mem::take(&mut self.context.unboxed_class_locals);
-                let prev_unboxed_class_box = std::mem::take(&mut self.context.unboxed_class_box);
                 let prev_fn_polyfn_vars = std::mem::take(&mut self.polyfn_vars);
                 let prev_fn_polyfn_sources = std::mem::take(&mut self.polyfn_sources);
                 self.context.variables = Interner::default();
                 self.context.stack_array_locals.clear();
                 self.context.stack_array_box.clear();
                 self.context.unboxed_enum_locals.clear();
-                self.context.unboxed_class_locals.clear();
-                self.context.unboxed_class_box.clear();
 
                 let prev_result_mode = self.compiling_result_mode;
                 let prev_result_ok_is_result = self.compiling_result_ok_is_result;
@@ -7220,7 +7182,6 @@ impl Compiler {
                 if pinned {
                     self.bytecode.set_last_func_pinned();
                 }
-                self.record_unboxed_class_fields();
                 self.flush_hir_par_tail();
 
                 self.compiling_result_mode = prev_result_mode;
@@ -7231,8 +7192,6 @@ impl Compiler {
                 self.context.stack_array_locals = prev_stack_arrays;
                 self.context.stack_array_box = prev_stack_boxes;
                 self.context.unboxed_enum_locals = prev_unboxed_enum;
-                self.context.unboxed_class_locals = prev_unboxed_class;
-                self.context.unboxed_class_box = prev_unboxed_class_box;
                 self.polyfn_vars = prev_fn_polyfn_vars;
                 self.polyfn_sources = prev_fn_polyfn_sources;
             }
