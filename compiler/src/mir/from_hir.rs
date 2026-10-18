@@ -1755,6 +1755,12 @@ impl Lower<'_> {
         }
     }
 
+    /// The MIR type of a one-word value of `ty`: its [`HirMirInput::word`],
+    /// or the heap object an enum or tuple with no such word moves as.
+    fn word_or_object(&self, ty: &Ty) -> Option<MirTy> {
+        self.inp.word(ty).or_else(|| ((self.inp.boxed_view)(ty, None).is_some() || is_heap_tuple(ty)).then_some(MirTy::HeapRef))
+    }
+
     /// A niche `Option` / `Result` word boxed to its `ObjEnum`, as HIR
     /// emission's `emit_niche_option_to_boxed` and siblings.
     fn box_niche(&mut self, layout: ValueLayout, w: ValueId) -> Result<ValueId, Refusal> {
@@ -2640,7 +2646,7 @@ impl Lower<'_> {
             HirKind::Builtin { op: Builtin::Readonly, args } if let [inner] = args.as_slice() => self.value(*inner),
             // A dictionary entry's argument, unboxed (compiler-made bodies).
             HirKind::Builtin { op: Builtin::Unbox { tag }, args } if let [inner] = args.as_slice() => {
-                let ty = self.expr_ty(id).and_then(|t| self.inp.word(t)).ok_or("unbox type")?;
+                let ty = self.expr_ty(id).and_then(|t| self.word_or_object(t)).ok_or("unbox type")?;
                 let Some(src) = self.word(*inner)? else {
                     return Ok(Val::Never);
                 };
@@ -2670,6 +2676,23 @@ impl Lower<'_> {
                     return Ok(Val::Never);
                 };
                 Ok(Val::V(self.b.ins_tag_array_kind(v, *kind).map_err(mir)?))
+            }
+            // An `Option` / `Result` in another layout (compiler-made
+            // bodies): a niche word boxed, or an enum object's niche word.
+            HirKind::Builtin { op: Builtin::Relayout, args } if let [inner] = args.as_slice() => {
+                let to = self.expr_ty(id).and_then(|t| self.word_or_object(t)).ok_or("relayout type")?;
+                let Some(v) = self.word(*inner)? else {
+                    return Ok(Val::Never);
+                };
+                match (self.b.value_ty(v), to) {
+                    (from, to) if from == to => Ok(Val::V(v)),
+                    (from @ (MirTy::NicheOpt | MirTy::NicheRes), MirTy::HeapRef) => {
+                        let layout = self.niche_layout(*inner, from)?;
+                        Ok(Val::V(self.box_niche(layout, v)?))
+                    }
+                    (MirTy::HeapRef, MirTy::NicheOpt | MirTy::NicheRes) => self.unbox_niche(v, to),
+                    _ => Err("relayout".into()),
+                }
             }
             // A primitive's text (compiler-made bodies).
             HirKind::Builtin { op: Builtin::Stringify, args } if let [inner] = args.as_slice() => {

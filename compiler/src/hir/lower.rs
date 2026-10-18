@@ -777,7 +777,7 @@ pub fn clobbers(body: &HirBody, stack: &HashMap<u32, usize>, id: HirId) -> bool 
         ) || matches!(
             // Boxing ops of compiler-made bodies keep the stack as it is.
             &e.kind,
-            HirKind::Builtin { op, .. } if !matches!(op, Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::TagArrayKind { .. })
+            HirKind::Builtin { op, .. } if !matches!(op, Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::TagArrayKind { .. } | Builtin::Relayout)
         );
     });
     found
@@ -2823,7 +2823,7 @@ impl Walk<'_> {
             // `UnboxValue` / `BoxValue` / `STRINGIFY` of a dictionary-entry
             // word: the word, then the op.
             HirKind::Builtin {
-                op: Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::TagArrayKind { .. },
+                op: Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::TagArrayKind { .. } | Builtin::Relayout,
                 args,
             } => {
                 let [inner] = args.as_slice() else {
@@ -3332,7 +3332,7 @@ impl Walk<'_> {
             | HirKind::Resume { .. }
             | HirKind::Lambda { .. }
             | HirKind::Builtin {
-                op: Builtin::Done | Builtin::Readonly | Builtin::TypeOf | Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::TagArrayKind { .. },
+                op: Builtin::Done | Builtin::Readonly | Builtin::TypeOf | Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::TagArrayKind { .. } | Builtin::Relayout,
                 ..
             } => self.value(id, depth),
             other => Err(kind_name(other)),

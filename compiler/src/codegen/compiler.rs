@@ -54,6 +54,8 @@ enum OpenDictGoal {
 pub(super) struct SynthCallee {
     pub dicts: Vec<DictStep>,
     pub raw: bool,
+    /// The two-word kind the callee returns as `[payload, tag]`.
+    pub pair: Option<String>,
 }
 
 /// One step of building trait dictionaries, a stack program over words:
@@ -2103,15 +2105,14 @@ impl Compiler {
         let layouts = params.iter().map(|t| self.value_layout(t)).collect();
         let calls = HashMap::from([(req.src.clone(), (layouts, self.value_layout(&ret)))]);
         let mut b = Synth::new(&self.checker, &req.name, ret.clone());
-        // A generic body's words: a type variable's moves as it is.
-        b.body.is_generic = params.iter().chain([&ret]).any(Self::ty_has_var);
         let locals: Vec<_> = params.iter().enumerate().map(|(i, t)| b.local(&format!("arg{i}"), t.clone(), LocalKind::Param)).collect();
         let args = locals.into_iter().map(|l| b.read(l)).collect();
         let call = b.call(&req.src, args, ret);
         let ret = b.ret(call);
         let root = b.block(vec![ret], None, crate::typechecking::ty::never());
-        let hir = b.finish(root);
-        self.hir_synth_callees.insert(req.src.clone(), SynthCallee { dicts: dict, raw: false });
+        let hir = Self::synth_generic(b.finish(root));
+        let pair = self.two_word_return_kind(&req.src);
+        self.hir_synth_callees.insert(req.src.clone(), SynthCallee { dicts: dict, raw: false, pair });
         // Its callers pass the instance's dictionary after the arguments;
         // it builds its own.
         self.emit_synth_fn(&req.name, &hir, calls, true);
@@ -2128,7 +2129,13 @@ impl Compiler {
     /// A method that takes its arguments raw ([`Self::instance_method_raw`])
     /// always has one: it also unboxes the bare type-parameter arguments
     /// (every caller but a raw call site reaches the method through it).
+    ///
+    /// Built as HIR ([`crate::hir::synth`]): a converted argument is read in
+    /// the trait's open type and `Relayout` to the instance's, the result
+    /// back; an unboxed one is read in its own type and `Unbox`ed.
     fn emit_dict_adapter_thunk(&mut self, class: &str, method: &str, inst_args: &[Ty], fqn: &str) {
+        use crate::hir::synth::Synth;
+        use crate::hir::{Builtin, LocalKind};
         let raw = self.raw_instance_methods.contains(fqn);
         let sig = self.trait_method_boundary_sig(class, method, inst_args, false);
         if sig.is_none() && !raw {
@@ -2138,38 +2145,83 @@ impl Compiler {
         if self.functions.contains_key(&adapter) {
             return;
         }
-        self.bind_function_entry(adapter);
+        let Some(scheme) = self.checker.typeclass_method_scheme(class, method) else {
+            self.bind_function_entry(adapter);
+            self.missing_call_target(fqn, 0..0);
+            return;
+        };
+        // The trait's types (`open`, as a dictionary passes the words) and
+        // the instance's (as the method takes them).
+        let mut inst = crate::typechecking::subst::Subst::empty();
+        for (bound, ty) in scheme.bounds.iter().zip(inst_args) {
+            inst.insert(*bound, ty.clone());
+        }
+        let (open, open_ret) = Self::fun_param_and_ret_tys(&scheme.ty);
         let unbox = if raw {
             self.instance_method_unbox_tys(class, method, inst_args)
         } else {
             Vec::new()
         };
-        let nparams = sig.as_ref().map_or(unbox.len(), |s| s.params.len()) as u32;
-        for slot in 0..nparams as usize {
-            self.bytecode.push_load(slot as u32);
-            if let Some(target) = sig.as_ref().and_then(|s| s.params.get(slot).copied().flatten()) {
-                Self::emit_layout_convert(&mut self.bytecode, ValueLayout::Boxed, target);
-            }
-            if let Some(ty) = unbox.get(slot).cloned().flatten() {
-                Self::emit_unbox_if_needed(&mut self.bytecode, &ty);
-            }
+        let nparams = sig.as_ref().map_or(unbox.len(), |s| s.params.len());
+        let ret = crate::typechecking::subst::apply_ty(&inst, &open_ret);
+        // Its result, boxed back from the layout the method returns it in.
+        let ret_from = sig.as_ref().and_then(|s| s.ret).filter(|&l| l != ValueLayout::Boxed);
+        let body_ret = if ret_from.is_some() { open_ret } else { ret.clone() };
+        let mut b = Synth::new(&self.checker, &adapter, body_ret.clone());
+        let mut args = Vec::with_capacity(nparams + 1);
+        for slot in 0..nparams {
+            let open = open.get(slot).cloned().unwrap_or_else(crate::typechecking::ty::int);
+            let own = crate::typechecking::subst::apply_ty(&inst, &open);
+            let target = sig.as_ref().and_then(|s| s.params.get(slot).copied().flatten()).filter(|&l| l != ValueLayout::Boxed);
+            let tag = unbox.get(slot).cloned().flatten().and_then(|ty| Some((Self::ty_to_value_tag(&ty)? as u32, ty)));
+            // A dictionary passes an `Option` / `Result` boxed, and a bare
+            // type parameter's word boxed: each as the method takes it.
+            let arg = if target.is_some() {
+                let local = b.local(&format!("arg{slot}"), open.clone(), LocalKind::Param);
+                let word = b.read(local);
+                b.builtin(Builtin::Relayout, vec![word], own)
+            } else if let Some((tag, ty)) = tag {
+                // A `()` moves as the word it is.
+                let ty = if tag == ValueTag::Unit as u32 { crate::typechecking::ty::int() } else { ty };
+                let local = b.local(&format!("arg{slot}"), ty.clone(), LocalKind::Param);
+                let word = b.read(local);
+                b.builtin(Builtin::Unbox { tag }, vec![word], ty)
+            } else {
+                let local = b.local(&format!("arg{slot}"), own, LocalKind::Param);
+                b.read(local)
+            };
+            args.push(arg);
         }
         // A raw method has no context and is no default body: it never
         // reads its dictionary, and a redirected direct call passes none.
-        let arity = if raw {
-            nparams
-        } else {
-            self.bytecode.push_load(nparams); // trailing dictionary
-            nparams + 1
-        };
-        self.raw_instance_call = raw;
-        if !self.emit_named_entry_on_module(fqn, arity, crate::il::EntryKind::Call) {
-            self.missing_call_target(fqn, 0..0);
+        // Any other takes the trailing one, a heap word it only moves.
+        if !raw {
+            let local = b.local("dict", crate::typechecking::ty::array(crate::typechecking::ty::int()), LocalKind::Param);
+            args.push(b.read(local));
         }
-        if let Some(from) = sig.and_then(|s| s.ret) {
-            Self::emit_layout_convert(&mut self.bytecode, from, ValueLayout::Boxed);
+        let params = args.iter().map(|&a| self.value_layout(b.body.expr(a).ty.as_ref().expect("typed"))).collect();
+        let calls = HashMap::from([(fqn.to_string(), (params, self.value_layout(&ret)))]);
+        let mut value = b.call(fqn, args, ret);
+        if ret_from.is_some() {
+            value = b.builtin(Builtin::Relayout, vec![value], body_ret);
         }
-        self.bytecode.push_return();
+        let ret = b.ret(value);
+        let root = b.block(vec![ret], None, crate::typechecking::ty::never());
+        let hir = Self::synth_generic(b.finish(root));
+        let pair = self.two_word_return_kind(fqn);
+        self.hir_synth_callees.insert(fqn.to_string(), SynthCallee { dicts: Vec::new(), raw, pair });
+        // No `CALL` names it: dictionaries hold it.
+        self.emit_synth_fn(&adapter, &hir, calls, true);
+        self.hir_synth_callees.clear();
+    }
+
+    /// Compiler-made body `hir` marked generic when a type variable's word
+    /// passes through it (a dictionary's boxed argument, a shared body's
+    /// open parameter): its words are a generic body's, moved as they are
+    /// and rooted while live.
+    fn synth_generic(mut hir: crate::hir::HirBody) -> crate::hir::HirBody {
+        hir.is_generic = hir.locals.iter().filter_map(|l| l.ty.as_ref()).chain(hir.ret.as_ref()).any(Self::ty_has_var);
+        hir
     }
 
     /// Default trait bodies reach siblings through their trailing dictionary;
