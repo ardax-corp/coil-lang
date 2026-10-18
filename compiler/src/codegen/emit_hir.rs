@@ -1099,6 +1099,8 @@ impl Compiler {
         // A finalizer object's local is pinned (`HirMirInput::pinned`) so
         // it lives as long as its frame slot would.
         let checker = &self.checker;
+        let pure_fns = &self.pure_fns;
+        let steady_fns = &self.steady_fns;
         let string_indices = &self.string_indices;
         let is_class = move |t: &Ty| {
             let t = apply_ty_prune(checker.subst(), t);
@@ -1526,6 +1528,9 @@ impl Compiler {
             unbox_any: &tables.unbox_any,
             open_params: &tables.open_params,
             lens: &emit.plan.lens,
+            alloc_steady: self.alloc_steady,
+            pure_fn: Box::new(move |n: &str| crate::il::pure_call::name_in(pure_fns, n)),
+            steady_fn: Box::new(move |n: &str| crate::il::pure_call::name_in(steady_fns, n)),
             box_at: &emit.plan.box_at,
             is_class: Box::new(is_class),
             scalar_enum: Box::new(scalar_enum),
