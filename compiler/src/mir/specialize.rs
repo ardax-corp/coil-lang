@@ -220,7 +220,7 @@ fn specialize_side(
     let mut func = from_hir.clone();
     // HIR CSE refuses DIVF; number it on SSA before dense emit.
     crate::mir::cse(&mut func);
-    crate::mir::licm(&mut func);
+    crate::mir::licm(&mut func, true);
     crate::mir::cse(&mut func);
     crate::mir::instcombine(&mut func);
     crate::mir::destprop(&mut func);
