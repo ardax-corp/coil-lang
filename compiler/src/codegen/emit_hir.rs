@@ -6751,11 +6751,14 @@ impl Compiler {
         if [&site.begin_local, &site.end_local].into_iter().flatten().any(|n| !heads.contains_key(n)) {
             return None;
         }
-        // An iteration that never reads its index computes what every
-        // other one does: MIR LICM moves that ahead of the loop, leaving
-        // nothing to split across workers.
+        // An iteration that never reads its index and computes something
+        // from captures alone repeats that work each time: MIR LICM moves
+        // it ahead of the loop, leaving nothing to split across workers.
+        // A bare fold over captures (`acc = acc + k`) still splits.
         let index = bind.or_else(|| outer.get(&site.index).copied());
-        if index.is_some_and(|ix| !Self::hir_reads_index(hir, body, ix)) {
+        let acc = outer.get(&site.acc).copied();
+        let varies = |l: LocalId| Some(l) == index || Some(l) == acc || !bound(l);
+        if index.is_some_and(|ix| !Self::hir_reads_index(hir, body, ix)) && Self::hir_invariant_work(hir, body, &varies) {
             return None;
         }
         // Only the number of live captures matters to the natives.
@@ -6770,6 +6773,39 @@ impl Compiler {
             HirKind::Assign { place, .. } if matches!(hir.expr(*place).kind, HirKind::Local(l) if l == ix) => false,
             _ => lower::children(hir, id).into_iter().any(|k| Self::hir_reads_index(hir, k, ix)),
         }
+    }
+
+    /// Whether `id` holds a computation (an operator, cast, read or call)
+    /// that reads no local `varies` admits and writes nothing: work the
+    /// same in every iteration.
+    fn hir_invariant_work(hir: &HirBody, id: HirId, varies: &dyn Fn(LocalId) -> bool) -> bool {
+        let computes = matches!(
+            hir.expr(id).kind,
+            HirKind::Bin { .. }
+                | HirKind::Logic { .. }
+                | HirKind::Un { .. }
+                | HirKind::Cast { .. }
+                | HirKind::Call { .. }
+                | HirKind::Field { .. }
+                | HirKind::Index { .. }
+        );
+        if !computes {
+            return lower::children(hir, id).into_iter().any(|k| Self::hir_invariant_work(hir, k, varies));
+        }
+        let mut moves = true;
+        lower::visit(hir, id, &mut |x| match x.kind {
+            HirKind::Local(l) => moves &= !varies(l),
+            HirKind::Let { .. }
+            | HirKind::LetPat { .. }
+            | HirKind::Assign { .. }
+            | HirKind::Append { .. }
+            | HirKind::Clear(_)
+            | HirKind::Loop { .. }
+            | HirKind::Break
+            | HirKind::Continue => moves = false,
+            _ => {}
+        });
+        moves || lower::children(hir, id).into_iter().any(|k| Self::hir_invariant_work(hir, k, varies))
     }
 
     /// Parallel loop `id` moved into its own fork-join function, emitted
