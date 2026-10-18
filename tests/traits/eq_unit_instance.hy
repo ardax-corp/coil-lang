@@ -1,6 +1,7 @@
 // `unit` has a builtin `Eq` instance, as the other primitives do: `()`
 // meets an `Eq` bound, called directly (a monomorphic clone) and through
-// a shared generic body's dictionary (a `PolyFn` value) (#1450).
+// a shared generic body's dictionary (a `PolyFn` value) (#1450). `Show`
+// and `Hash` bounds take a `()` through a `PolyFn` value too.
 use tests::assert;
 
 fn same<T: Eq>(T a, T b) -> bool {
@@ -28,6 +29,14 @@ fn counted<T: Eq>(T a, T b) -> int {
     return n;
 }
 
+fn shown<T: Show>(T a) -> string {
+    return show(a);
+}
+
+fn hashed<T: Hash>(T a) -> int {
+    return a.hash();
+}
+
 fn unit_fn() {}
 
 test("unit meets an Eq bound in a direct call") {
@@ -51,4 +60,12 @@ test("ground eq and ne on unit") {
     assert!(().eq(()));
     assert!(!().ne(()));
     assert!(() == ());
+}
+
+test("unit meets Show and Hash bounds through a shared body") {
+    let s = shown;
+    let h = hashed;
+    assert!(s(()) == "()", s(()));
+    assert!(shown(()) == "()", shown(()));
+    assert!(h(()) == hashed(()));
 }
