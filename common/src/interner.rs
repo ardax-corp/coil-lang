@@ -50,7 +50,7 @@ impl<T: Default + Hash + Eq + Clone> Interner<T> {
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "debug-fmt"))]
 impl<T: std::fmt::Debug + Default + Eq> std::fmt::Debug for Interner<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}", self.hash)

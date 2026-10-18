@@ -30,15 +30,17 @@ impl<const S: usize> Machine<S> {
                 return dispatch::RestFlow::Done(self.runtime_panic($trap.message(), ip.saturating_sub(1)));
             }};
         }
-        macro_rules! int_bin {
-            ($f:path) => {{
+        // A plain binary op: [`crate::fused::eval_bin`] with a constant op,
+        // so the stack handlers and the fused ops share one table.
+        macro_rules! bin {
+            ($op:ident) => {{
                 let top = self.stack.tell();
                 promise!(top >= 2);
-                let rhs = self.stack[top - 1].as_int();
-                let lhs = self.stack[top - 2].as_int();
-                match $f(lhs, rhs) {
+                let rhs = self.stack[top - 1];
+                let lhs = self.stack[top - 2];
+                match crate::fused::eval_bin(common::Instruction::$op as u8, lhs, rhs, &self.heap) {
                     Ok(r) => {
-                        self.stack[top - 2].replace(r as _);
+                        self.stack[top - 2] = r;
                         self.stack.seek(top - 1);
                     }
                     Err(t) => int_trap!(t),
@@ -151,61 +153,37 @@ impl<const S: usize> Machine<S> {
                     let bits = self.stack[idx].raw() as u64;
                     self.stack[idx].replace((bits ^ (1u64 << 63)) as _);
                 }
-                Instruction::AND => binary!(self.stack, &&, as_bool),
-                Instruction::OR => binary!(self.stack, ||, as_bool),
-                Instruction::ADD => int_bin!(int_arith::add),
-                Instruction::SUB => int_bin!(int_arith::sub),
-                Instruction::MUL => int_bin!(int_arith::mul),
-                Instruction::DIV => int_bin!(int_arith::div),
-                Instruction::MOD => int_bin!(int_arith::rem),
-                Instruction::LE => binary!(self.stack, <, as_int),
-                Instruction::LEQ => binary!(self.stack, <=, as_int),
-                Instruction::GT => binary!(self.stack, >, as_int),
-                Instruction::GEQ => binary!(self.stack, >=, as_int),
-                Instruction::EQ => {
-                    let sp = self.stack.tell();
-                    promise!(sp >= 2);
-                    let rhs = self.stack[sp - 1];
-                    let lhs = self.stack[sp - 2];
-                    let eq = crate::value_eq::values_eq(&self.heap, lhs, rhs);
-                    self.stack[sp - 2].replace(eq as _);
-                    self.stack.seek(sp - 1);
-                }
-                Instruction::NEQ => {
-                    let sp = self.stack.tell();
-                    promise!(sp >= 2);
-                    let rhs = self.stack[sp - 1];
-                    let lhs = self.stack[sp - 2];
-                    let eq = crate::value_eq::values_eq(&self.heap, lhs, rhs);
-                    self.stack[sp - 2].replace((!eq) as _);
-                    self.stack.seek(sp - 1);
-                }
-                Instruction::ADDF => binary!(self.stack, +, as_float, to_bits),
-                Instruction::SUBF => binary!(self.stack, -, as_float, to_bits),
-                Instruction::MULF => binary!(self.stack, *, as_float, to_bits),
-                Instruction::DIVF => binary!(self.stack, /, as_float, to_bits),
-                Instruction::MODF => binary!(self.stack, %, as_float, to_bits),
-                Instruction::SHL => int_bin!(int_arith::shl),
-                Instruction::SHR => int_bin!(int_arith::shr),
-                Instruction::XOR => binary!(self.stack, ^, as_int),
-                Instruction::BITAND => binary!(self.stack, &, as_int),
-                Instruction::BITOR => binary!(self.stack, |, as_int),
-                Instruction::Pow => int_bin!(int_arith::pow),
-                Instruction::PowF => {
-                    let sp = self.stack.tell();
-                    promise!(sp >= 2);
-                    let rhs = self.stack[sp - 1].as_float();
-                    let lhs = self.stack[sp - 2].as_float();
-                    let result = lhs.powf(rhs);
-                    self.stack[sp - 2].replace(result.to_bits() as _);
-                    self.stack.seek(sp - 1);
-                }
-                Instruction::LEF => binary!(self.stack, <, as_float),
-                Instruction::LEQF => binary!(self.stack, <=, as_float),
-                Instruction::EQF => binary!(self.stack, ==, as_float),
-                Instruction::NEQF => binary!(self.stack, !=, as_float),
-                Instruction::GTF => binary!(self.stack, >, as_float),
-                Instruction::GEQF => binary!(self.stack, >=, as_float),
+                Instruction::AND => bin!(AND),
+                Instruction::OR => bin!(OR),
+                Instruction::ADD => bin!(ADD),
+                Instruction::SUB => bin!(SUB),
+                Instruction::MUL => bin!(MUL),
+                Instruction::DIV => bin!(DIV),
+                Instruction::MOD => bin!(MOD),
+                Instruction::LE => bin!(LE),
+                Instruction::LEQ => bin!(LEQ),
+                Instruction::GT => bin!(GT),
+                Instruction::GEQ => bin!(GEQ),
+                Instruction::EQ => bin!(EQ),
+                Instruction::NEQ => bin!(NEQ),
+                Instruction::ADDF => bin!(ADDF),
+                Instruction::SUBF => bin!(SUBF),
+                Instruction::MULF => bin!(MULF),
+                Instruction::DIVF => bin!(DIVF),
+                Instruction::MODF => bin!(MODF),
+                Instruction::SHL => bin!(SHL),
+                Instruction::SHR => bin!(SHR),
+                Instruction::XOR => bin!(XOR),
+                Instruction::BITAND => bin!(BITAND),
+                Instruction::BITOR => bin!(BITOR),
+                Instruction::Pow => bin!(Pow),
+                Instruction::PowF => bin!(PowF),
+                Instruction::LEF => bin!(LEF),
+                Instruction::LEQF => bin!(LEQF),
+                Instruction::EQF => bin!(EQF),
+                Instruction::NEQF => bin!(NEQF),
+                Instruction::GTF => bin!(GTF),
+                Instruction::GEQF => bin!(GEQF),
                 Instruction::FORMAT => {
                     let params_count = opcode.operand_u32();
                     if params_count != 0 {

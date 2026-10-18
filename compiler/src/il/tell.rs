@@ -11,8 +11,9 @@
 //! Both halves are under the differential gate in `compiler/tests/cursor_model.rs`:
 //! `tell_cursor_model_matches_vm` diffs bytecode predictions against
 //! `machine::cursor_trace`, and `tell_symbolic_il_matches_bytecode` diffs
-//! post-opt IL tell against bytecode tell via lower's `pre_to_post` map. The
-//! symbolic-IL path still feeds cursor-safe pre-lower optimizations.
+//! post-opt IL tell against bytecode tell via lower's `pre_to_post` map, so a
+//! lowering or fusion that changes a body's cursor effect fails the gate. No
+//! compiler pass consumes these predictions; the gate is the only user.
 //!
 //! Direct `CALL` / `Entry{Call}` is unary (`push 1`) unless the fall-through is
 //! `PairToHeap`: codegen emits that pair immediately after a `ReturnPair`
@@ -85,28 +86,6 @@ pub struct TellInfo {
 impl TellInfo {
     pub fn tell_before(&self, pc: usize) -> Tell {
         self.tell_in.get(pc).copied().unwrap_or(Tell::Unknown)
-    }
-
-    /// Share of instructions the analysis resolved (diagnostics / tests).
-    pub fn coverage(&self) -> f64 {
-        if self.tell_in.is_empty() {
-            return 1.0;
-        }
-        let known = self.tell_in.iter().filter(|t| t.known().is_some()).count();
-        known as f64 / self.tell_in.len() as f64
-    }
-
-    /// True when deleting a one-value producer followed by `STORE slot` keeps
-    /// the shared cursor unchanged at the pair's continuation.
-    pub fn can_remove_one_value_store(&self, producer_idx: usize, slot: u32) -> bool {
-        let Some(before) = self.tell_before(producer_idx).known() else {
-            return false;
-        };
-        let after_store = apply(
-            Tell::Known(before.saturating_add(1)),
-            Effect::DeltaThenFloor(-1, slot.saturating_add(1)),
-        );
-        after_store == Some(Tell::Known(before))
     }
 }
 
@@ -733,7 +712,7 @@ mod tests {
         assert_eq!(cursors(&code), vec![Some(0), Some(1), Some(6)]);
     }
 
-    /// COI-81: after `CONST; STORE 5` with height 1, tell is 6 and sp is 0.
+    /// COI-81: after `CONST; STORE 5` operand height is 0 but tell is 6.
     /// Same ops, different quantities — do not unify.
     #[test]
     fn store_floor_is_not_operand_height() {
@@ -744,18 +723,13 @@ mod tests {
             IlOp::Return { loc, ret_words: 1},
         ];
         let tell = analyze_il_at(&ops, 0);
-        let sp = crate::il::sp::analyze(&ops);
         assert_eq!(tell.tell_before(1).known(), Some(1));
         assert_eq!(tell.tell_before(2).known(), Some(6));
-        assert_eq!(sp.sp_before(1), crate::il::sp::Sp::Known(1));
-        assert_eq!(sp.sp_before(2), crate::il::sp::Sp::Known(0));
     }
 
-    /// STORE floor persists across `CALL 0` (`tell` 6 then `+1` → 7). Nested
-    /// CALL still resets operand height to 1. Using either number for the
-    /// other pass is a hang or a silent clobber.
+    /// STORE floor persists across `CALL 0` (`tell` 6 then `+1` → 7).
     #[test]
-    fn store_floor_then_call_leaves_tell_above_sp() {
+    fn store_floor_persists_across_call() {
         let loc = common::DebugLoc::unknown();
         let ops = vec![
             IlOp::Const { imm: 1, loc },
@@ -768,18 +742,14 @@ mod tests {
             IlOp::Return { loc, ret_words: 1},
         ];
         let tell = analyze_il_at(&ops, 0);
-        let sp = crate::il::sp::analyze(&ops);
         assert_eq!(tell.tell_before(2).known(), Some(6));
         assert_eq!(tell.tell_before(3).known(), Some(7));
-        assert_eq!(sp.sp_before(2), crate::il::sp::Sp::Known(0));
-        assert_eq!(sp.sp_before(3), crate::il::sp::Sp::Known(1));
     }
 
-    /// Discriminator: leftover height + STORE floor. Relative `sp` would be
-    /// `3 + 1 = 4` after `CALL 0`; absolute reset is 1. Tell stays relative
-    /// (`9 + 1 = 10`). Same Call, two different arithmetic models.
+    /// Leftover height + STORE floor: tell after `CALL 0` stays relative to
+    /// the cursor (`9 + 1 = 10`), not reset to the return value.
     #[test]
-    fn store_floor_then_call_with_leftover_height_splits_relative_vs_absolute() {
+    fn call_after_store_floor_is_relative_to_the_cursor() {
         let loc = common::DebugLoc::unknown();
         let ops = vec![
             IlOp::Const { imm: 1, loc },
@@ -795,21 +765,13 @@ mod tests {
             IlOp::Return { loc, ret_words: 1},
         ];
         let tell = analyze_il_at(&ops, 0);
-        let sp = crate::il::sp::analyze(&ops);
         assert_eq!(tell.tell_before(5).known(), Some(9));
         assert_eq!(tell.tell_before(6).known(), Some(10));
-        assert_eq!(sp.sp_before(5), crate::il::sp::Sp::Known(3));
-        assert_eq!(sp.sp_before(6), crate::il::sp::Sp::Known(1));
-        assert_ne!(
-            sp.sp_before(6).known(),
-            Some(4),
-            "must not apply tell's relative 1-arity to operand height"
-        );
     }
 
-    /// `MakeCoro` shares Call's tell delta and SP absolute reset after a STORE floor.
+    /// `MakeCoro` shares Call's tell delta after a STORE floor.
     #[test]
-    fn store_floor_then_make_coro_leaves_tell_above_sp() {
+    fn store_floor_persists_across_make_coro() {
         let loc = common::DebugLoc::unknown();
         let ops = vec![
             IlOp::Const { imm: 1, loc },
@@ -822,16 +784,13 @@ mod tests {
             IlOp::Return { loc, ret_words: 1},
         ];
         let tell = analyze_il_at(&ops, 0);
-        let sp = crate::il::sp::analyze(&ops);
         assert_eq!(tell.tell_before(2).known(), Some(6));
         assert_eq!(tell.tell_before(3).known(), Some(7));
-        assert_eq!(sp.sp_before(2), crate::il::sp::Sp::Known(0));
-        assert_eq!(sp.sp_before(3), crate::il::sp::Sp::Known(1));
     }
 
-    /// `Seek` re-anchors tell but fails closed for `sp` — another non-unifiable pair.
+    /// `Seek` re-anchors symbolic-IL tell (operand height stays unknown).
     #[test]
-    fn seek_sets_tell_but_poisons_operand_height() {
+    fn symbolic_il_seek_sets_the_cursor() {
         use common::{Byte, Instruction};
         let loc = common::DebugLoc::unknown();
         let ops = vec![
@@ -841,11 +800,8 @@ mod tests {
             IlOp::Return { loc, ret_words: 1},
         ];
         let tell = analyze_il_at(&ops, 0);
-        let sp = crate::il::sp::analyze(&ops);
         assert_eq!(tell.tell_before(2).known(), Some(2));
         assert_eq!(tell.tell_before(3).known(), Some(4));
-        assert_eq!(sp.sp_before(2), crate::il::sp::Sp::Known(2));
-        assert_eq!(sp.sp_before(3), crate::il::sp::Sp::Unknown);
     }
 
     #[test]
@@ -907,22 +863,6 @@ mod tests {
         let info = analyze_at(&code, &[], 0, 3);
         assert_eq!(info.tell_before(0).known(), Some(3));
         assert_eq!(info.tell_before(1).known(), Some(4));
-    }
-
-    #[test]
-    fn symbolic_il_store_pair_proof_requires_existing_cursor_floor() {
-        let loc = common::DebugLoc::unknown();
-        let ops = vec![
-            IlOp::Const { imm: 1, loc },
-            IlOp::StorePop { slot: 5, loc },
-            IlOp::Return { loc, ret_words: 1},
-        ];
-
-        let low = analyze_il_at(&ops, 0);
-        assert!(!low.can_remove_one_value_store(0, 5));
-
-        let high = analyze_il_at(&ops, 6);
-        assert!(high.can_remove_one_value_store(0, 5));
     }
 
     /// Symbolic JMPF joins both edges with the same post-pop cursor.

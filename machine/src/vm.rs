@@ -222,33 +222,6 @@ pub fn intern_str_count() -> u64 {
     0
 }
 
-macro_rules! binary {
-    ($stack: expr, $op:tt, $from: ident, $to: ident) => {
-        {
-            let sp = $stack.tell();
-            promise!(sp >= 2);
-            let rhs_idx = sp - 1;
-            let lhs_idx = sp - 2;
-            let rhs = $stack[rhs_idx].$from();
-            let lhs = $stack[lhs_idx].$from();
-            $stack[lhs_idx].replace((lhs $op rhs).$to());
-            $stack.seek(lhs_idx + 1);
-        }
-    };
-    ($stack: expr, $op:tt, $from: ident) => {
-        {
-            let sp = $stack.tell();
-            promise!(sp >= 2);
-            let rhs_idx = sp - 1;
-            let lhs_idx = sp - 2;
-            let rhs = $stack[rhs_idx].$from();
-            let lhs = $stack[lhs_idx].$from();
-            $stack[lhs_idx].replace((lhs $op rhs) as _);
-            $stack.seek(lhs_idx + 1);
-        }
-    };
-}
-
 macro_rules! unary {
     ($stack: expr, $op: tt, $from: ident, $to: ident) => {
         {

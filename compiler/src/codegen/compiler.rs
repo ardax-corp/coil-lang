@@ -47,11 +47,24 @@ enum OpenDictGoal {
     Concrete(Vec<Ty>),
 }
 
+/// A call a compiler-made body ([`crate::hir::synth`]) makes, past its
+/// arguments: the dictionaries it passes after them, and whether it calls
+/// a raw instance method's own entry rather than its `$dict` adapter.
+#[derive(Clone, Default)]
+pub(super) struct SynthCallee {
+    pub dicts: Vec<DictStep>,
+    pub raw: bool,
+    /// The two-word kind the callee returns as `[payload, tag]`.
+    pub pair: Option<String>,
+    /// A host native by its registered name, whatever the name resolves
+    /// to in the module being compiled.
+    pub host: bool,
+}
+
 /// One step of building trait dictionaries, a stack program over words:
 /// the plan `Compiler::plan_instance_dict` and its callers make. Direct MIR
 /// runs it as a [`crate::mir::HirDictOp`] program
-/// (`Compiler::hir_dict_ops`); an IL thunk emits it
-/// (`Compiler::append_dicts_interned`).
+/// (`Compiler::hir_dict_ops`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum DictStep {
     /// A method's code pointer: an entry already emitted, by offset.
@@ -1095,30 +1108,6 @@ impl Compiler {
         }
     }
 
-    fn emit_box_range_slots(
-        &mut self,
-        bytecode: &mut CodeBuf,
-        start_slot: u32,
-        end_slot: u32,
-        inclusive: bool,
-    ) {
-        let type_id = crate::typechecking::return_layout::range_heap_type_id(inclusive);
-        bytecode.push(
-            Byte::new(Instruction::InitTyped).with_operand_u32(common::pack_init_typed(type_id, 2)),
-        );
-        let tmp_inst = self.alloc_temp_slot();
-        bytecode.push_store_pop(tmp_inst);
-        bytecode.push_load(start_slot);
-        bytecode.push_load(tmp_inst);
-        bytecode.push_set_field_slot(0);
-        bytecode.push_pop();
-        bytecode.push_load(end_slot);
-        bytecode.push_load(tmp_inst);
-        bytecode.push_set_field_slot(1);
-        bytecode.push_pop();
-        bytecode.push_seek(tmp_inst + 1);
-    }
-
     /// Extern setup is keyed by the declaration's short name (and, after
     /// B3, sometimes the module FQN). Call meaning is FQN via DefId.
     fn lookup_extern_runtime(&self, n: &str) -> Option<(u32, u32)> {
@@ -2048,32 +2037,54 @@ impl Compiler {
     /// A clone that is not compiled from its method: the arguments as they
     /// came, the instance's dictionary, then the shared entry.
     fn emit_instance_clone_thunk(&mut self, src: &InstCloneSrc, req: &InstClone) {
-        self.bind_function_entry(req.name.clone());
+        if src.method_of.is_some() {
+            self.emit_method_clone_thunk(&req.name);
+            return;
+        }
         self.emit_instance_clone_call_shared(src, req);
     }
 
-    /// The body of [`Self::emit_instance_clone_thunk`] after its entry.
+    /// [`Self::emit_instance_clone_thunk`] of a trait instance's method,
+    /// built as HIR: each argument read in the shared method's own types
+    /// (its type variables' words moved as they are), passed to it with the
+    /// instance's dictionary, its result returned as it comes.
     fn emit_instance_clone_call_shared(&mut self, src: &InstCloneSrc, req: &InstClone) {
-        if src.method_of.is_some() {
-            self.emit_method_clone_call_shared(&req.name);
-            return;
-        }
-        let n = self.instance_method_unbox_tys(&src.class, &src.method, &req.lookup).len() as u32;
-        for slot in 0..n {
-            self.bytecode.push_load(slot);
-        }
-        let mut arity = n;
+        use crate::hir::LocalKind;
+        use crate::hir::synth::Synth;
+        let n = self.instance_method_unbox_tys(&src.class, &src.method, &req.lookup).len();
+        // A default body has no signature of its own: the trait's, over
+        // its type variables.
+        let (params, ret) = match (self.checker.fn_param_tys(&req.src), self.checker.fn_return_ty(&req.src)) {
+            (Some(params), Some(ret)) => (params, ret),
+            _ => match self.checker.typeclass_method_scheme(&src.class, &src.method) {
+                Some(scheme) => Self::fun_param_and_ret_tys(&scheme.ty),
+                None => {
+                    self.bind_function_entry(req.name.clone());
+                    self.missing_call_target(&req.src, 0..0);
+                    return;
+                }
+            },
+        };
+        debug_assert_eq!(params.len(), n, "instance clone `{}` arity", req.name);
+        let mut dict = Vec::new();
         if self.instance_call_takes_dict(&src.class, &src.method, &req.src) {
-            let mut dict = Vec::new();
-            if self.plan_instance_dict(&mut dict, &src.class, &req.lookup) {
-                arity += 1;
-            }
-            self.append_dicts_interned(&dict);
+            self.plan_instance_dict(&mut dict, &src.class, &req.lookup);
         }
-        if !self.emit_named_entry_on_module(&req.src, arity, crate::il::EntryKind::Call) {
-            self.missing_call_target(&req.src, 0..0);
-        }
-        self.bytecode.push_return();
+        let layouts = params.iter().map(|t| self.value_layout(t)).collect();
+        let calls = HashMap::from([(req.src.clone(), (layouts, self.value_layout(&ret)))]);
+        let mut b = Synth::new(&self.checker, &req.name, ret.clone());
+        let locals: Vec<_> = params.iter().enumerate().map(|(i, t)| b.local(&format!("arg{i}"), t.clone(), LocalKind::Param)).collect();
+        let args = locals.into_iter().map(|l| b.read(l)).collect();
+        let call = b.call(&req.src, args, ret);
+        let ret = b.ret(call);
+        let root = b.block(vec![ret], None, crate::typechecking::ty::never());
+        let hir = Self::synth_generic(b.finish(root));
+        let pair = self.two_word_return_kind(&req.src);
+        self.hir_synth_callees.insert(req.src.clone(), SynthCallee { dicts: dict, pair, ..SynthCallee::default() });
+        // Its callers pass the instance's dictionary after the arguments;
+        // it builds its own.
+        self.emit_synth_fn(&req.name, &hir, calls, true);
+        self.hir_synth_callees.clear();
     }
 
     /// Dictionary entry for a concrete instance method whose trait signature
@@ -2086,7 +2097,13 @@ impl Compiler {
     /// A method that takes its arguments raw ([`Self::instance_method_raw`])
     /// always has one: it also unboxes the bare type-parameter arguments
     /// (every caller but a raw call site reaches the method through it).
+    ///
+    /// Built as HIR ([`crate::hir::synth`]): a converted argument is read in
+    /// the trait's open type and `Relayout` to the instance's, the result
+    /// back; an unboxed one is read in its own type and `Unbox`ed.
     fn emit_dict_adapter_thunk(&mut self, class: &str, method: &str, inst_args: &[Ty], fqn: &str) {
+        use crate::hir::synth::Synth;
+        use crate::hir::{Builtin, LocalKind};
         let raw = self.raw_instance_methods.contains(fqn);
         let sig = self.trait_method_boundary_sig(class, method, inst_args, false);
         if sig.is_none() && !raw {
@@ -2096,38 +2113,83 @@ impl Compiler {
         if self.functions.contains_key(&adapter) {
             return;
         }
-        self.bind_function_entry(adapter);
+        let Some(scheme) = self.checker.typeclass_method_scheme(class, method) else {
+            self.bind_function_entry(adapter);
+            self.missing_call_target(fqn, 0..0);
+            return;
+        };
+        // The trait's types (`open`, as a dictionary passes the words) and
+        // the instance's (as the method takes them).
+        let mut inst = crate::typechecking::subst::Subst::empty();
+        for (bound, ty) in scheme.bounds.iter().zip(inst_args) {
+            inst.insert(*bound, ty.clone());
+        }
+        let (open, open_ret) = Self::fun_param_and_ret_tys(&scheme.ty);
         let unbox = if raw {
             self.instance_method_unbox_tys(class, method, inst_args)
         } else {
             Vec::new()
         };
-        let nparams = sig.as_ref().map_or(unbox.len(), |s| s.params.len()) as u32;
-        for slot in 0..nparams as usize {
-            self.bytecode.push_load(slot as u32);
-            if let Some(target) = sig.as_ref().and_then(|s| s.params.get(slot).copied().flatten()) {
-                Self::emit_layout_convert(&mut self.bytecode, ValueLayout::Boxed, target);
-            }
-            if let Some(ty) = unbox.get(slot).cloned().flatten() {
-                Self::emit_unbox_if_needed(&mut self.bytecode, &ty);
-            }
+        let nparams = sig.as_ref().map_or(unbox.len(), |s| s.params.len());
+        let ret = crate::typechecking::subst::apply_ty(&inst, &open_ret);
+        // Its result, boxed back from the layout the method returns it in.
+        let ret_from = sig.as_ref().and_then(|s| s.ret).filter(|&l| l != ValueLayout::Boxed);
+        let body_ret = if ret_from.is_some() { open_ret } else { ret.clone() };
+        let mut b = Synth::new(&self.checker, &adapter, body_ret.clone());
+        let mut args = Vec::with_capacity(nparams + 1);
+        for slot in 0..nparams {
+            let open = open.get(slot).cloned().unwrap_or_else(crate::typechecking::ty::int);
+            let own = crate::typechecking::subst::apply_ty(&inst, &open);
+            let target = sig.as_ref().and_then(|s| s.params.get(slot).copied().flatten()).filter(|&l| l != ValueLayout::Boxed);
+            let tag = unbox.get(slot).cloned().flatten().and_then(|ty| Some((Self::ty_to_value_tag(&ty)? as u32, ty)));
+            // A dictionary passes an `Option` / `Result` boxed, and a bare
+            // type parameter's word boxed: each as the method takes it.
+            let arg = if target.is_some() {
+                let local = b.local(&format!("arg{slot}"), open.clone(), LocalKind::Param);
+                let word = b.read(local);
+                b.builtin(Builtin::Relayout, vec![word], own)
+            } else if let Some((tag, ty)) = tag {
+                // A `()` moves as the word it is.
+                let ty = if tag == ValueTag::Unit as u32 { crate::typechecking::ty::int() } else { ty };
+                let local = b.local(&format!("arg{slot}"), ty.clone(), LocalKind::Param);
+                let word = b.read(local);
+                b.builtin(Builtin::Unbox { tag }, vec![word], ty)
+            } else {
+                let local = b.local(&format!("arg{slot}"), own, LocalKind::Param);
+                b.read(local)
+            };
+            args.push(arg);
         }
         // A raw method has no context and is no default body: it never
         // reads its dictionary, and a redirected direct call passes none.
-        let arity = if raw {
-            nparams
-        } else {
-            self.bytecode.push_load(nparams); // trailing dictionary
-            nparams + 1
-        };
-        self.raw_instance_call = raw;
-        if !self.emit_named_entry_on_module(fqn, arity, crate::il::EntryKind::Call) {
-            self.missing_call_target(fqn, 0..0);
+        // Any other takes the trailing one, a heap word it only moves.
+        if !raw {
+            let local = b.local("dict", crate::typechecking::ty::array(crate::typechecking::ty::int()), LocalKind::Param);
+            args.push(b.read(local));
         }
-        if let Some(from) = sig.and_then(|s| s.ret) {
-            Self::emit_layout_convert(&mut self.bytecode, from, ValueLayout::Boxed);
+        let params = args.iter().map(|&a| self.value_layout(b.body.expr(a).ty.as_ref().expect("typed"))).collect();
+        let calls = HashMap::from([(fqn.to_string(), (params, self.value_layout(&ret)))]);
+        let mut value = b.call(fqn, args, ret);
+        if ret_from.is_some() {
+            value = b.builtin(Builtin::Relayout, vec![value], body_ret);
         }
-        self.bytecode.push_return();
+        let ret = b.ret(value);
+        let root = b.block(vec![ret], None, crate::typechecking::ty::never());
+        let hir = Self::synth_generic(b.finish(root));
+        let pair = self.two_word_return_kind(fqn);
+        self.hir_synth_callees.insert(fqn.to_string(), SynthCallee { raw, pair, ..SynthCallee::default() });
+        // No `CALL` names it: dictionaries hold it.
+        self.emit_synth_fn(&adapter, &hir, calls, true);
+        self.hir_synth_callees.clear();
+    }
+
+    /// Compiler-made body `hir` marked generic when a type variable's word
+    /// passes through it (a dictionary's boxed argument, a shared body's
+    /// open parameter): its words are a generic body's, moved as they are
+    /// and rooted while live.
+    fn synth_generic(mut hir: crate::hir::HirBody) -> crate::hir::HirBody {
+        hir.is_generic = hir.locals.iter().filter_map(|l| l.ty.as_ref()).chain(hir.ret.as_ref()).any(Self::ty_has_var);
+        hir
     }
 
     /// Default trait bodies reach siblings through their trailing dictionary;
@@ -2222,36 +2284,6 @@ impl Compiler {
                 .strip_prefix("string::")
                 .and_then(crate::typechecking::StringBuiltin::from_name)
         })
-    }
-
-    /// Boxed `ObjEnum` Result → pointer niche (`Err = ptr | 1`), or the
-    /// Option-shaped `Result<(), E>` (`Ok = 0`, `Err = ptr`) when `unit_ok`.
-    pub(super) fn emit_boxed_result_to_niche(bytecode: &mut CodeBuf, unit_ok: bool) {
-        let mut bb = BlockBuilder::new();
-        let ok = bb.fresh_label(bytecode.il_mut());
-        let err = bb.fresh_label(bytecode.il_mut());
-        let end = bb.fresh_label(bytecode.il_mut());
-        bb.emit_jump_to(
-            ok,
-            BbJumpKind::JumpIfMatch { tag: 0, arity: 1 },
-            bytecode.il_mut(),
-        );
-        bb.emit_jump_to(
-            err,
-            BbJumpKind::JumpIfMatch { tag: 1, arity: 1 },
-            bytecode.il_mut(),
-        );
-        bb.bind_label(err, bytecode.il_mut());
-        if !unit_ok {
-            Self::push_result_err_bit(bytecode);
-        }
-        bb.emit_jump_to(end, BbJumpKind::Unconditional, bytecode.il_mut());
-        bb.bind_label(ok, bytecode.il_mut());
-        if unit_ok {
-            bytecode.push_pop();
-            bytecode.push_const(0);
-        }
-        bb.bind_label(end, bytecode.il_mut());
     }
 
     /// Unwrap a `Result` on top of the stack: on `Ok`, leave the payload;
@@ -2979,26 +3011,6 @@ impl Compiler {
         }
     }
 
-    /// Emit dictionary plan `steps` into `dest`.
-    pub(super) fn emit_dict_steps(dest: &mut CodeBuf, steps: &[DictStep]) {
-        for &step in steps {
-            Self::emit_dict_step(dest, step);
-        }
-    }
-
-    /// Emit one dictionary step into `dest` (a code pointer to a reserved
-    /// entry as a root entry, which `CodeBuf::append` keeps).
-    pub(super) fn emit_dict_step(dest: &mut CodeBuf, step: DictStep) {
-        match step {
-            DictStep::CodeAt(offset) => dest.push(Self::packed_entry_byte_ret(crate::il::EntryKind::CodePtr, 0, offset, 1)),
-            DictStep::CodeLabel(label) => dest.emit_root_entry(crate::il::EntryKind::CodePtr, 0, label, 1),
-            DictStep::Load(slot) => dest.push_load(slot),
-            DictStep::Null => dest.push_const(0),
-            DictStep::Tuple(n) => dest.push_make_tuple(n),
-            DictStep::Box(tag) => dest.push_box_value(tag),
-        }
-    }
-
     /// Dictionary for an open goal: the current bounded instance method's own
     /// dictionary (`__dict0`) or one of its context dictionaries
     /// (`__dict{i+1}`), the current generic function's bound (`__dictN`, in
@@ -3202,26 +3214,6 @@ impl Compiler {
             .then(|| self.value_layout(&ty))
     }
 
-    /// Convert the enum value on TOS between two layouts of the same
-    /// `Option` / `Result` type (niche ↔ boxed; niche ↔ niche via boxed).
-    pub(super) fn emit_layout_convert(bytecode: &mut CodeBuf, from: ValueLayout, to: ValueLayout) {
-        if from == to {
-            return;
-        }
-        match from {
-            ValueLayout::NicheOption => Self::emit_niche_option_to_boxed(bytecode),
-            ValueLayout::NicheResult => Self::emit_niche_result_to_boxed(bytecode),
-            ValueLayout::NicheUnitResult => Self::emit_unit_result_niche_to_boxed(bytecode),
-            ValueLayout::Boxed => {}
-        }
-        match to {
-            ValueLayout::NicheOption => Self::emit_boxed_option_to_niche(bytecode),
-            ValueLayout::NicheResult => Self::emit_boxed_result_to_niche(bytecode, false),
-            ValueLayout::NicheUnitResult => Self::emit_boxed_result_to_niche(bytecode, true),
-            ValueLayout::Boxed => {}
-        }
-    }
-
     /// Parameter types and return type of a (possibly generic) scheme type.
     pub(super) fn fun_param_and_ret_tys(ty: &Ty) -> (Vec<Ty>, Ty) {
         let mut params = Vec::new();
@@ -3293,7 +3285,7 @@ impl Compiler {
     /// misaligned inside function bodies.
     ///
     /// Returns the number of dict tuples planned (used to bump CALL arity).
-    fn plan_call_site_dicts(
+    pub(super) fn plan_call_site_dicts(
         &mut self,
         out: &mut Vec<DictStep>,
         fn_name: &str,
@@ -3869,9 +3861,10 @@ impl Compiler {
 
     /// Emit the bodies of the compiler-provided primitive instances, each
     /// built as HIR ([`crate::hir::synth::builtin_entry`]) and lowered like
-    /// any other body. The stream `Read` / `Write` entries stay stack IL:
-    /// their natives' registry names (`read`, `write`) can be shadowed by a
-    /// user function of the same name, which a named HIR call would reach.
+    /// any other body. The stream `Read` / `Write` entries call their
+    /// natives by registry name (`read`, `write`) as host natives
+    /// ([`SynthCallee::host`]): a user function of the same name in the
+    /// module being compiled does not shadow them.
     ///
     /// Shared generic bodies receive boxed type-parameter values, so numeric
     /// thunks unbox their two arguments and re-box a type-parameter result.
@@ -4085,27 +4078,21 @@ impl Compiler {
             }
         }
 
-        // Stream Read/Write → same HostInvoke as free `read`/`write`; unbox dict-ABI args first.
-        for (class, method, native_name, arity) in [
-            ("Read", "read", "read", 2u32),
-            ("Write", "write", "write", 2u32),
-        ] {
+        // `Stream` `Read` / `Write`: the free `read` / `write`'s native on
+        // the unboxed stream and buffer. The natives are named as callees
+        // the body reaches whatever this module calls `read` / `write`.
+        let io_err = Ty::Con(common::BUILTIN_IO_ERROR_ENUM.into());
+        let bytes = coil_ty::vec_app_ty(coil_ty::byte());
+        for (class, method, ok) in [("Read", "read", coil_ty::option_app_ty(int.clone())), ("Write", "write", int.clone())] {
             let fqn = Generics::builtin_instance_fqn(class, "Stream", method);
-            if self.functions.contains_key(&fqn) {
+            if self.native_id(method).is_none() {
                 continue;
             }
-            let Some(native_id) = self.native_id(native_name) else {
-                continue;
-            };
-            self.bind_function_entry(fqn);
-            self.bytecode
-                .push(Byte::new(Instruction::CONST).with_value_u32(native_id as u32));
-            self.bytecode.push_load(0);
-            self.bytecode.push_unbox_value(ValueTag::Instance as u32);
-            self.bytecode.push_load(1);
-            self.bytecode.push_unbox_value(ValueTag::Array as u32);
-            self.bytecode.push_host_invoke(arity);
-            self.bytecode.push_return();
+            let params = [(coil_ty::stream_ty(), tag_of(ValueTag::Instance)), (bytes.clone(), tag_of(ValueTag::Array))];
+            let ret = coil_ty::result_app_ty(ok, io_err.clone());
+            self.hir_synth_callees.insert(method.to_string(), SynthCallee { host: true, ..SynthCallee::default() });
+            self.emit_builtin_entry(&fqn, &params, ret.clone(), None, |b, a| b.call(method, a, ret));
+            self.hir_synth_callees.clear();
         }
 
         // `into`: the unboxed word cast, boxed again when its tag changes.
@@ -4368,7 +4355,7 @@ impl Compiler {
     /// `name`, its own function record, lowered like any other body (HIR
     /// lowering, then direct MIR). `calls` are its callees the checker has
     /// no signature for. A body that does not plan is reported.
-    fn emit_synth_fn(
+    pub(super) fn emit_synth_fn(
         &mut self,
         name: &str,
         hir: &crate::hir::HirBody,
@@ -4618,89 +4605,6 @@ impl Compiler {
             && matches!(method, "fd" | "attach" | "park")
     }
 
-    /// Box the `[payload, tag]` pair (tag on top) left by a direct two-word
-    /// `CALL` into an `ObjEnum`, using `STORE` / `LOAD` / `EQ` / `JMPF` /
-    /// `MakeEnum`, one branch per declared variant besides the last, which
-    /// needs no compare. Called when a two-word result escapes into a boxed
-    /// consumer (`CallIndirect`, unsure, host/FFI).
-    fn emit_box_pair_to_enum(
-        checker: &Checker,
-        bytecode: &mut CodeBuf,
-        enum_name: &str,
-        tag_slot: u32,
-        payload_slot: u32,
-    ) {
-        bytecode.push_store_pop(tag_slot);
-        bytecode.push_store_pop(payload_slot);
-        Self::emit_box_slots_to_enum(checker, bytecode, enum_name, tag_slot, payload_slot);
-    }
-
-    /// Same cascade as [`Self::emit_box_pair_to_enum`] when the pair already
-    /// lives in `payload_slot` / `tag_slot`.
-    fn emit_box_slots_to_enum(
-        checker: &Checker,
-        bytecode: &mut CodeBuf,
-        enum_name: &str,
-        tag_slot: u32,
-        payload_slot: u32,
-    ) {
-        if crate::typechecking::return_layout::is_two_word_product_kind(enum_name) {
-            bytecode.push_load(payload_slot);
-            bytecode.push_load(tag_slot);
-            bytecode.push_make_tuple(2);
-            return;
-        }
-        let Some(mut variants) = checker.enum_variants(enum_name).filter(|v| !v.is_empty()) else {
-            bytecode.push_make_enum(0, 0);
-            return;
-        };
-        let last = variants.pop().expect("checked non-empty");
-        let mut bb = BlockBuilder::new();
-        let end = bb.fresh_label(bytecode.il_mut());
-        for (_, tag, payload) in &variants {
-            let miss = bb.fresh_label(bytecode.il_mut());
-            bytecode.push_load(tag_slot);
-            bytecode.push_const(*tag as i32);
-            bytecode.push(Byte::new(Instruction::EQ));
-            bb.emit_jump_to_hinted(
-                miss,
-                BbJumpKind::JumpIfFalse,
-                FuseHint::nofuse_value_under_jmp(),
-                bytecode.il_mut(),
-            );
-            if !payload.is_empty() {
-                bytecode.push_load(payload_slot);
-            }
-            bytecode.push_make_enum(*tag as u16, payload.len() as u16);
-            bb.emit_jump_to(end, BbJumpKind::Unconditional, bytecode.il_mut());
-            bb.bind_label(miss, bytecode.il_mut());
-        }
-        let (_, last_tag, last_payload) = &last;
-        if !last_payload.is_empty() {
-            bytecode.push_load(payload_slot);
-        }
-        bytecode.push_make_enum(*last_tag as u16, last_payload.len() as u16);
-        bb.bind_label(end, bytecode.il_mut());
-    }
-
-    /// Box the `[payload, tag]` pair left by a direct two-word `CALL` into
-    /// an `ObjEnum` (allocates the two temp slots, then delegates to
-    /// [`Self::emit_box_pair_to_enum`]).
-    fn emit_box_pair_after_call(&mut self, bytecode: &mut CodeBuf, enum_name: &str) {
-        // After two-slot CALL, count `[payload, tag]` so `alloc_temp_slot` cannot alias (STORE clobber).
-        self.expr_depth += 2;
-        let tag_slot = self.alloc_temp_slot();
-        let payload_slot = self.alloc_temp_slot();
-        self.expr_depth -= 2;
-        if let Some(inc) = crate::typechecking::return_layout::range_kind_inclusive(enum_name) {
-            bytecode.push_store_pop(tag_slot);
-            bytecode.push_store_pop(payload_slot);
-            self.emit_box_range_slots(bytecode, payload_slot, tag_slot, inc);
-            return;
-        }
-        Self::emit_box_pair_to_enum(&self.checker, bytecode, enum_name, tag_slot, payload_slot);
-    }
-
     /// Return type of the function whose body is being compiled.
     fn compiling_fn_return_ty(&self) -> Option<crate::typechecking::Ty> {
         let qualified = self.current_function_qualified.as_deref();
@@ -4801,15 +4705,6 @@ impl Compiler {
             }
         }
         false
-    }
-
-    /// Emit a `BoxValue` instruction for a concrete `Ty` at a generic
-    /// call argument boundary (concrete→generic).  Does nothing when the
-    /// type is already open (Ty::Var), or if a tag cannot be determined.
-    fn emit_box_if_needed(bytecode: &mut impl EmitBuf, ty: &crate::typechecking::Ty) {
-        if let Some(tag) = Self::ty_to_value_tag(ty) {
-            bytecode.push_box_value(tag as u32);
-        }
     }
 
     /// Emit an `UnboxValue` instruction for a concrete `Ty` at a generic
@@ -5996,98 +5891,6 @@ impl Compiler {
             .map_or(ValueLayout::Boxed, |ty| self.value_layout(&ty))
     }
 
-    /// `DUP; LogNot`, TOS becomes “is None” for a pointer-niche Option (`0`).
-    ///
-    /// `CONST 0; EQ; JMPT` currently joins into `ConstReturnImm 0` and drops
-    /// the Some payload (`optional_text`). LogNot is the same zero test;
-    /// dense `UNARY_NOT` must use that truthiness, not `as_bool`.
-    fn push_niche_eq_zero(bytecode: &mut CodeBuf) {
-        bytecode.push(Byte::new(Instruction::DUPLICATE));
-        bytecode.push(Byte::new(Instruction::LogNot));
-    }
-
-    /// Boxed `ObjEnum` Option → pointer niche (`0` / payload) via JumpIfMatch.
-    fn emit_boxed_option_to_niche(bytecode: &mut CodeBuf) {
-        let mut bb = BlockBuilder::new();
-        let some = bb.fresh_label(bytecode.il_mut());
-        let end = bb.fresh_label(bytecode.il_mut());
-        bb.emit_jump_to(
-            some,
-            BbJumpKind::JumpIfMatch { tag: 1, arity: 1 },
-            bytecode.il_mut(),
-        );
-        bytecode.push_pop();
-        bytecode.push_const(0);
-        bb.emit_jump_to(end, BbJumpKind::Unconditional, bytecode.il_mut());
-        bb.bind_label(some, bytecode.il_mut());
-        bb.bind_label(end, bytecode.il_mut());
-    }
-
-    /// Pointer-niche Option → boxed `ObjEnum` via EQ-0 / JMP / MakeEnum.
-    fn emit_niche_option_to_boxed(bytecode: &mut CodeBuf) {
-        let mut bb = BlockBuilder::new();
-        let none = bb.fresh_label(bytecode.il_mut());
-        let end = bb.fresh_label(bytecode.il_mut());
-        Self::push_niche_eq_zero(bytecode);
-        bb.emit_jump_to(none, BbJumpKind::JumpIfTrue, bytecode.il_mut());
-        bytecode.push_make_enum(1, 1);
-        bb.emit_jump_to(end, BbJumpKind::Unconditional, bytecode.il_mut());
-        bb.bind_label(none, bytecode.il_mut());
-        bytecode.push_pop();
-        bytecode.push_make_enum(0, 0);
-        bb.bind_label(end, bytecode.il_mut());
-    }
-
-    /// `CONST 1; BITOR`, set the Result `Err` discriminant on a heap pointer.
-    fn push_result_err_bit(bytecode: &mut CodeBuf) {
-        bytecode.push_const(1);
-        bytecode.push(Byte::new(Instruction::BITOR));
-    }
-
-    /// `CONST 1; XOR`, clear bit 0 on an `Err` payload (bit is known set).
-    fn push_result_untag(bytecode: &mut CodeBuf) {
-        bytecode.push_const(1);
-        bytecode.push(Byte::new(Instruction::XOR));
-    }
-
-    /// `DUP; CONST 1; BITAND`, TOS becomes the Result `Err` bit.
-    fn push_result_is_err(bytecode: &mut CodeBuf) {
-        bytecode.push(Byte::new(Instruction::DUPLICATE));
-        bytecode.push_const(1);
-        bytecode.push(Byte::new(Instruction::BITAND));
-    }
-
-    /// Option-shaped `Result<(), E>` → boxed `ObjEnum`.
-    fn emit_unit_result_niche_to_boxed(bytecode: &mut CodeBuf) {
-        let mut bb = BlockBuilder::new();
-        let err = bb.fresh_label(bytecode.il_mut());
-        let end = bb.fresh_label(bytecode.il_mut());
-        Self::push_niche_eq_zero(bytecode);
-        bb.emit_jump_to(err, BbJumpKind::JumpIfFalse, bytecode.il_mut());
-        bytecode.push_pop();
-        bytecode.push_const(0);
-        bytecode.push_make_enum(0, 1);
-        bb.emit_jump_to(end, BbJumpKind::Unconditional, bytecode.il_mut());
-        bb.bind_label(err, bytecode.il_mut());
-        bytecode.push_make_enum(1, 1);
-        bb.bind_label(end, bytecode.il_mut());
-    }
-
-    /// Pointer-niche Result → boxed `ObjEnum` via the Err bit / MakeEnum.
-    fn emit_niche_result_to_boxed(bytecode: &mut CodeBuf) {
-        let mut bb = BlockBuilder::new();
-        let err = bb.fresh_label(bytecode.il_mut());
-        let end = bb.fresh_label(bytecode.il_mut());
-        Self::push_result_is_err(bytecode);
-        bb.emit_jump_to(err, BbJumpKind::JumpIfTrue, bytecode.il_mut());
-        bytecode.push_make_enum(0, 1);
-        bb.emit_jump_to(end, BbJumpKind::Unconditional, bytecode.il_mut());
-        bb.bind_label(err, bytecode.il_mut());
-        Self::push_result_untag(bytecode);
-        bytecode.push_make_enum(1, 1);
-        bb.bind_label(end, bytecode.il_mut());
-    }
-
     /// Wrap the top-of-stack value as `Ok(v)` (Result) or `Some(v)` (Option).
     fn emit_ok_or_some_wrap(bytecode: &mut impl EmitBuf, is_option: bool) {
         let tag = if is_option { 1u16 } else { 0u16 }; // Some=1, Ok=0
@@ -6316,36 +6119,9 @@ impl Compiler {
             ));
             std::panic::panic_any(super::CodegenRecursionLimitExceeded);
         }
-        let outer = self.repr;
-        let prev_here = std::mem::replace(&mut self.repr_here, outer);
-        if !Self::forwards_repr(ast) {
-            self.repr = ReprCtx::default();
-        }
         let result = self.do_compile_inner(ast);
-        self.repr = outer;
-        self.repr_here = prev_here;
         self.codegen_depth -= 1;
         result
-    }
-
-    /// Nodes whose value *is* a child's value, so a [`ReprCtx`] request on
-    /// them reaches that child. `Block` forwards to its tail and `Match` to
-    /// its arm bodies only (the `Block` arm of `do_compile_inner`,
-    /// `compile_match_expr`); every other node's operands start clean.
-    fn forwards_repr(ast: &Output<'_>) -> bool {
-        match ast.1.as_ref() {
-            Expression::Group(_) | Expression::Expr(_) | Expression::Block(_) => true,
-            Expression::Fragment(items) => items.len() == 1,
-            Expression::Match { .. } => true,
-            _ => false,
-        }
-    }
-
-    /// The [`ReprCtx`] that applies to the node being compiled: what it was
-    /// entered with, plus anything its own lowering raised for a direct emit
-    /// (for-in `next` CALL, `?` on a pair).
-    pub(super) fn repr_now(&self) -> ReprCtx {
-        self.repr_here.union(self.repr)
     }
 
     /// Named `fn` declaration: emit the body, register the entry and debug info.
@@ -7301,8 +7077,6 @@ impl Compiler {
         self.static_const_values.clear();
         self.current_function_qualified = None;
         self.current_function_table_key = None;
-        self.repr = ReprCtx::default();
-        self.repr_here = ReprCtx::default();
         self.compiling_two_word_enum = None;
         // Peel/unroll must not see other modules' bodies (label/CFG mix-up).
         self.fn_bytecode_spans.clear();
@@ -7656,24 +7430,34 @@ impl Compiler {
         }
 
         // Drop unused function bodies (eager builtin thunks, unreferenced user
-        // fns) before IL opts / lower. Skip when there is no `main` so snippet
-        // / unit-test compiles keep their bodies.
-        if self.functions.contains_key("main") {
-            let mut roots = vec!["main".to_string()];
-            if let Some(keep) = &self.keep_fns_in {
-                // A body nothing calls that direct MIR does not lower (a
-                // shared generic one a clone stands in for, as a derived
-                // `Eq for Box<T>`'s `ne`) stays unrooted: kept, it would
-                // be a stack-lowered body (#1192).
-                let no_mir: HashSet<&str> = self
-                    .bytecode
-                    .funcs()
-                    .iter()
-                    .filter(|f| f.hir_mir.is_none() && f.hir_mir_why.is_some())
-                    .map(|f| f.name.as_str())
-                    .collect();
-                roots.extend(self.fns_defined_in(keep).into_iter().filter(|name| !no_mir.contains(name.as_str())));
-            }
+        // fns) before IL opts / lower. Without a `main`, snippet / unit-test
+        // compiles keep their bodies, except the ones below.
+        //
+        // A body direct MIR does not lower (a shared generic one a clone
+        // stands in for, as a derived `Eq for Box<T>`'s `ne`, or one that
+        // builds a `T`-dependent payload) is never a root: kept with nothing
+        // calling it, it would be a stack-lowered body (#1192, #1424).
+        let no_mir: HashSet<String> = self
+            .bytecode
+            .funcs()
+            .iter()
+            .filter(|f| f.hir_mir.is_none() && f.hir_mir_why.is_some())
+            .map(|f| f.name.clone())
+            .collect();
+        let has_main = self.functions.contains_key("main");
+        if has_main || !no_mir.is_empty() {
+            let roots = if has_main {
+                let mut roots = vec!["main".to_string()];
+                if let Some(keep) = &self.keep_fns_in {
+                    roots.extend(self.fns_defined_in(keep).into_iter().filter(|name| !no_mir.contains(name)));
+                }
+                roots
+            } else {
+                let mut roots: Vec<String> =
+                    self.functions.keys().filter(|name| !no_mir.contains(*name)).cloned().collect();
+                roots.sort();
+                roots
+            };
             let (_dropped, shrinks) = crate::il::prune_unused_functions(
                 &mut self.bytecode,
                 crate::il::TreeshakeInput {
