@@ -97,6 +97,22 @@ fn an_int_literal_moves_to_the_right() {
 }
 
 #[test]
+fn int_literals_fold_to_any_64_bit_result() {
+    let f = |e: &str| folded_return(&format!("fn f() -> int {{ return {e}; }}"));
+    assert_eq!(f("2147483647 + 1"), "Lit(Int(2147483648))");
+    assert_eq!(f("4000000 * 4000000"), "Lit(Int(16000000000000))");
+    assert_eq!(f("1 << 63"), "Lit(Int(-9223372036854775808))");
+    assert_eq!(f("2 ** 62"), "Lit(Int(4611686018427387904))");
+    assert_eq!(f("9223372036854775806 + 1"), "Lit(Int(9223372036854775807))");
+    // An op that would trap stays, so it traps at run time.
+    assert_eq!(f("9223372036854775807 + 1"), "lit IntAdd lit");
+    assert_eq!(f("4294967296 * 4294967296"), "lit IntMul lit");
+    assert_eq!(f("2 ** 63"), "lit IntPow lit");
+    assert_eq!(f("1 << 64"), "lit Shl lit");
+    assert_eq!(f("1 / 0"), "lit IntDiv lit");
+}
+
+#[test]
 fn stores_to_a_local_nothing_reads_go() {
     // `j` is only ever stored; `y` is read.
     assert_eq!(assigns_left("fn f(int x) -> int { let j = 0; j = x; j = 3; let y = x; y = 4; return y; }"), 1);
