@@ -8,6 +8,7 @@ use common::{DebugLoc, SIMD_AXPY_REDUCE_ID};
 
 use crate::il::{IlOp, Label};
 
+use super::emit_common::intern_pool;
 use super::func::MirFunc;
 use super::inst::{
     BlockId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, Terminator, ValueId,
@@ -320,7 +321,7 @@ fn emit_host(
 fn emit_value(func: &MirFunc, v: PackVal, pool: &mut Vec<u64>, loc: DebugLoc) -> Option<IlOp> {
     match v {
         PackVal::F64(f) => {
-            let idx = intern_pool(pool, f.to_bits())?;
+            let idx = intern_pool(pool, f.to_bits()).ok()?;
             Some(IlOp::ConstPool { idx, loc })
         }
         PackVal::Ssa(id) => {
@@ -333,25 +334,13 @@ fn emit_value(func: &MirFunc, v: PackVal, pool: &mut Vec<u64>, loc: DebugLoc) ->
                     Some(IlOp::Const { imm, loc })
                 }
                 MirConst::F64(bits) => {
-                    let idx = intern_pool(pool, bits)?;
+                    let idx = intern_pool(pool, bits).ok()?;
                     Some(IlOp::ConstPool { idx, loc })
                 }
                 _ => None,
             }
         }
     }
-}
-
-fn intern_pool(pool: &mut Vec<u64>, bits: u64) -> Option<u32> {
-    if let Some(i) = pool.iter().position(|&x| x == bits) {
-        return u32::try_from(i).ok();
-    }
-    let i = pool.len();
-    if i > u32::MAX as usize {
-        return None;
-    }
-    pool.push(bits);
-    Some(i as u32)
 }
 
 fn def(func: &MirFunc, v: ValueId) -> Option<&MirInst> {

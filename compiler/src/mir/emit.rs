@@ -8,6 +8,10 @@ use crate::il::{IlJumpKind, IlOp, Label};
 
 use super::call_convoy::{is_tail_call_inst, ConvoyPlan};
 use super::destprop::sink_phi_incomings;
+use super::emit_common::{
+    const_i16, intern_pool, is_jim_term_payload, last_arm_payloads, phi_moves, push_const,
+    stack_bin_op, stack_cmp_op,
+};
 use super::func::MirFunc;
 use super::inst::{
     BlockId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp,
@@ -1174,23 +1178,6 @@ pub(super) fn emit_br_cond(args: EmitBrCondArgs<'_>) -> Result<(), LowerError> {
     })
 }
 
-fn stack_cmp_op(op: MirCmpOp, ty: MirTy) -> Result<Instruction, LowerError> {
-    Ok(match (op, ty.is_float()) {
-        (MirCmpOp::Lt, false) => Instruction::LE,
-        (MirCmpOp::Le, false) => Instruction::LEQ,
-        (MirCmpOp::Gt, false) => Instruction::GT,
-        (MirCmpOp::Ge, false) => Instruction::GEQ,
-        (MirCmpOp::Eq, false) => Instruction::EQ,
-        (MirCmpOp::Ne, false) => Instruction::NEQ,
-        (MirCmpOp::Lt, true) => Instruction::LEF,
-        (MirCmpOp::Le, true) => Instruction::LEQF,
-        (MirCmpOp::Gt, true) => Instruction::GTF,
-        (MirCmpOp::Ge, true) => Instruction::GEQF,
-        (MirCmpOp::Eq, true) => Instruction::EQF,
-        (MirCmpOp::Ne, true) => Instruction::NEQF,
-    })
-}
-
 pub(super) fn emit_cond_jumps(
     out: &mut Vec<IlOp>,
     func: &MirFunc,
@@ -2121,51 +2108,6 @@ fn emit_phi_moves(
     }
 }
 
-fn phi_moves(
-    func: &MirFunc,
-    pred: BlockId,
-    succ: BlockId,
-    regs: &[u8],
-    scratch: u8,
-) -> Vec<(u8, u8)> {
-    let mut moves = Vec::new();
-    for inst in &func.block(succ).insts {
-        let MirInst::Phi { dest, args, .. } = inst else {
-            break;
-        };
-        if let Some((_, src)) = args.iter().find(|(b, _)| *b == pred) {
-            let d = regs[dest.index()];
-            let s = regs[src.index()];
-            if d != s {
-                moves.push((d, s));
-            }
-        }
-    }
-    resolve_parallel(moves, scratch)
-}
-
-/// Sequentialize parallel copies with one scratch (cycle break).
-fn resolve_parallel(mut moves: Vec<(u8, u8)>, scratch: u8) -> Vec<(u8, u8)> {
-    let mut out = Vec::new();
-    while !moves.is_empty() {
-        if let Some(i) = moves.iter().position(|(d, _)| {
-            !moves.iter().any(|(_, s)| s == d)
-        }) {
-            out.push(moves.remove(i));
-            continue;
-        }
-        let (d0, s0) = moves.remove(0);
-        out.push((scratch, d0));
-        out.push((d0, s0));
-        for (_, s) in moves.iter_mut() {
-            if *s == d0 {
-                *s = scratch;
-            }
-        }
-    }
-    out
-}
-
 fn move_op(dest: u8, src: u8) -> IlOp {
     IlOp::byte(Byte::new(Instruction::DenseMove).with_dense_move(dest, src))
 }
@@ -2212,18 +2154,6 @@ pub(super) fn emit_const(
             false,
         ))),
     }
-}
-
-fn intern_pool(pool: &mut Vec<u64>, bits: u64) -> Result<u16, LowerError> {
-    if let Some(i) = pool.iter().position(|&x| x == bits) {
-        return u16::try_from(i).map_err(|_| LowerError::Refused("pool idx".into()));
-    }
-    let i = pool.len();
-    if i > u16::MAX as usize {
-        return Err(LowerError::Refused("const pool full".into()));
-    }
-    pool.push(bits);
-    Ok(i as u16)
 }
 
 struct EmitDenseJumpIfMatchArgs<'args> {
@@ -2363,15 +2293,6 @@ fn emit_dense_jump_if_match(args: EmitDenseJumpIfMatchArgs<'_>) -> Result<(), Lo
     Ok(())
 }
 
-fn is_jim_term_payload(func: &MirFunc, dest: ValueId) -> bool {
-    func.blocks.iter().any(|b| {
-        matches!(
-            &b.term,
-            Some(Terminator::JumpIfMatch { payloads, .. }) if payloads.contains(&dest)
-        )
-    })
-}
-
 #[allow(clippy::too_many_arguments)]
 fn seed_jim_taken_stack(
     out: &mut Vec<IlOp>,
@@ -2486,29 +2407,6 @@ pub(super) fn miss_chain_tos(func: &MirFunc, preds: &[BlockId], block: BlockId) 
             i.is_phi() || matches!(i, MirInst::MatchPayload { dest, scrutinee: src, .. } if *src == s && payloads.contains(dest))
         }))
     .then_some(s)
-}
-
-fn last_arm_payloads(func: &MirFunc, block: BlockId, scrutinee: ValueId) -> Vec<ValueId> {
-    let mut group = Vec::new();
-    for inst in &func.block(block).insts {
-        let MirInst::MatchPayload {
-            dest,
-            scrutinee: src,
-            index,
-        } = inst
-        else {
-            continue;
-        };
-        if *src != scrutinee || is_jim_term_payload(func, *dest) {
-            continue;
-        }
-        let i = *index as usize;
-        if group.len() <= i {
-            group.resize(i + 1, *dest);
-        }
-        group[i] = *dest;
-    }
-    group
 }
 
 struct EmitBoxedLastArmUnpackArgs<'args> {
@@ -3018,7 +2916,7 @@ fn emit_stack_value(args: EmitStackValueArgs<'_>) -> Result<(), LowerError> {
     };
     match &func.block(bid).insts[idx] {
         MirInst::Const { c, .. } => {
-            push_stack_const(out, *c, pool, loc)?;
+            push_const::<u16>(out, *c, pool, loc)?;
             stacked.push(v);
             Ok(())
         }
@@ -3144,67 +3042,10 @@ fn emit_stack_bin(args: EmitStackBinArgs<'_>) -> Result<(), LowerError> {
     Ok(())
 }
 
+/// `v` as an `i16` immediate. Every `Const` qualifies here: the convoy
+/// plan has no inline-tree set to gate on (LIR's `tree_i16` does).
 fn tree_i16(func: &MirFunc, plan: &ConvoyPlan, v: ValueId) -> Option<i16> {
-    let (bid, idx) = plan.def[v.index()]?;
-    let MirInst::Const { c, .. } = &func.block(bid).insts[idx] else {
-        return None;
-    };
-    let n = match *c {
-        MirConst::I64(x) => x,
-        MirConst::Bool(x) => i64::from(x),
-        _ => return None,
-    };
-    i16::try_from(n).ok()
-}
-
-fn stack_bin_op(op: MirBinOp, ty: MirTy) -> Result<Instruction, LowerError> {
-    Ok(match (op, ty.is_float()) {
-        (MirBinOp::Add, false) => Instruction::ADD,
-        (MirBinOp::Add, true) => Instruction::ADDF,
-        (MirBinOp::Sub, false) => Instruction::SUB,
-        (MirBinOp::Sub, true) => Instruction::SUBF,
-        (MirBinOp::Mul, false) => Instruction::MUL,
-        (MirBinOp::Mul, true) => Instruction::MULF,
-        (MirBinOp::Div, false) => Instruction::DIV,
-        (MirBinOp::Div, true) => Instruction::DIVF,
-        (MirBinOp::Rem, false) => Instruction::MOD,
-        (MirBinOp::Rem, true) => Instruction::MODF,
-        (MirBinOp::BitAnd, _) => Instruction::BITAND,
-        (MirBinOp::BitOr, _) => Instruction::BITOR,
-        (MirBinOp::Xor, _) => Instruction::XOR,
-        (MirBinOp::Shl, _) => Instruction::SHL,
-        (MirBinOp::Shr, _) => Instruction::SHR,
-        (MirBinOp::Pow, true) => Instruction::PowF,
-        (MirBinOp::Pow, false) => Instruction::Pow,
-    })
-}
-
-fn push_stack_const(
-    out: &mut Vec<IlOp>,
-    c: MirConst,
-    pool: &mut Vec<u64>,
-    loc: DebugLoc,
-) -> Result<(), LowerError> {
-    match c {
-        MirConst::I64(v) => {
-            if let Ok(imm) = i32::try_from(v)
-                && imm >= 0 {
-                    out.push(IlOp::Const { imm, loc });
-                    return Ok(());
-                }
-            let idx = u32::from(intern_pool(pool, v as u64)?);
-            out.push(IlOp::ConstPool { idx, loc });
-        }
-        MirConst::Bool(v) => out.push(IlOp::Const {
-            imm: i32::from(v),
-            loc,
-        }),
-        MirConst::F64(bits) => {
-            let idx = u32::from(intern_pool(pool, bits)?);
-            out.push(IlOp::ConstPool { idx, loc });
-        }
-    }
-    Ok(())
+    const_i16(func, plan.def[v.index()])
 }
 
 fn emit_dense_push(

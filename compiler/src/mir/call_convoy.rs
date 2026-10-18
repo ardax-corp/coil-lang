@@ -8,6 +8,7 @@
 
 use crate::il::Label;
 
+use super::emit_common::term_uses;
 use super::func::MirFunc;
 use super::inst::{BlockId, MirConst, MirInst, Terminator, ValueId};
 
@@ -235,23 +236,6 @@ fn fused_cmp_dests(func: &MirFunc) -> Vec<bool> {
         fused[d.index()] = true;
     }
     fused
-}
-
-fn term_uses(term: &Terminator) -> Vec<ValueId> {
-    match term {
-        Terminator::Br { cond, .. } => vec![*cond],
-        Terminator::JumpIfMatch {
-            scrutinee,
-            payloads,
-            ..
-        } => {
-            let mut v = vec![*scrutinee];
-            v.extend(payloads.iter().copied());
-            v
-        }
-        Terminator::Return { lo, hi } => lo.iter().chain(hi.iter()).copied().collect(),
-        Terminator::Jump { .. } | Terminator::Unreachable => Vec::new(),
-    }
 }
 
 fn is_self_call_inst(inst: &MirInst, entry: Option<Label>) -> bool {
