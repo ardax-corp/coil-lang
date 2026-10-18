@@ -1,5 +1,6 @@
 //! Stack VM, managed heap, and FFI runtime for coil bytecode.
 
+mod arith;
 pub mod char_ord;
 pub mod clock;
 #[cfg(any(test, feature = "debugger"))]
