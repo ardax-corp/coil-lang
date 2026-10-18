@@ -2715,3 +2715,21 @@ fn negate<T>(T x) -> bool {
         .expect("expected help on `!` reject");
     assert!(help.starts_with("found `T`;"), "got {help:?}");
 }
+
+#[test]
+fn not_iterable_type_param_message_names_the_param() {
+    // coil-lang#1447: diagnostics show a type parameter by its source name,
+    // never as the internal variable (`t61`).
+    let src = r#"
+fn walk<T>(T x) {
+    for y in x { }
+}
+"#;
+    let (c, _) = check(src);
+    let msg = c
+        .messages()
+        .iter()
+        .find(|m| m.message().contains("is not iterable"))
+        .expect("expected a not-iterable reject");
+    assert_eq!(msg.message(), "type `T` is not iterable");
+}

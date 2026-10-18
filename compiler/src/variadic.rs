@@ -260,7 +260,7 @@ pub fn remap_message(msg: &Message, instances: &[Instance], copies: &[ForeignCop
         }
         let mut help = copies
             .get(index)
-            .map(|c| format!("in `{}` called with `{}`", c.template_fqn(), c.pack))
+            .map(|c| format!("in `{}` called with `{}`", c.template_fqn(), diag_pack(&c.pack)))
             .unwrap_or_default();
         if let Some(h) = msg.help() {
             help = if help.is_empty() { h.to_string() } else { format!("{h}\n{help}") };
@@ -288,7 +288,7 @@ pub fn remap_message(msg: &Message, instances: &[Instance], copies: &[ForeignCop
         out.set_code(code);
     }
     let mut help = match instances.get(index) {
-        Some(inst) => format!("in `{}` called with `{}`", inst.template, inst.pack),
+        Some(inst) => format!("in `{}` called with `{}`", inst.template, diag_pack(&inst.pack)),
         None => String::new(),
     };
     if let Some(h) = msg.help() {
@@ -302,6 +302,11 @@ pub fn remap_message(msg: &Message, instances: &[Instance], copies: &[ForeignCop
 
 /// Append a clone of top-level `fn template` named `name`, its spans moved
 /// by `base`. False when the module has no such function.
+/// A copy's pack as a diagnostic shows it (never a raw `t61`).
+fn diag_pack(pack: &Ty) -> String {
+    crate::format_ty_for_diag(&Default::default(), pack)
+}
+
 fn add_instance<'a>(ast: &mut Output<'a>, template: &str, name: &str, base: usize) -> bool {
     let Expression::Program(children) = ast.1.as_mut() else {
         return false;

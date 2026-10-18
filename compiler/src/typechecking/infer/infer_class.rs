@@ -317,7 +317,10 @@ impl Checker {
             ErrorCode::TypeMismatch,
             format!(
                 "method `{}` in instance of `{}` has type `{}`, but the trait declares `{}`",
-                mname, class, have_ty, want_ty
+                mname,
+                class,
+                self.diag_ty(&have_ty),
+                self.diag_ty(&want_ty)
             ),
             range.clone(),
         ));
@@ -770,11 +773,7 @@ impl Checker {
                 }
             }
             for super_name in &missing_supers {
-                let args_pretty = arg_tys
-                    .iter()
-                    .map(|ty| ty.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let args_pretty = self.diag_tys(&arg_tys.iter().collect::<Vec<_>>()).join(", ");
                 self.messages.push(Message::error(
                     ErrorCode::GenericTypeError,
                     format!(
@@ -824,11 +823,7 @@ impl Checker {
                     format!(
                         "Instance of `{}` for `{}` is missing {} {}",
                         class,
-                        arg_tys
-                            .iter()
-                            .map(|ty| ty.to_string())
-                            .collect::<Vec<_>>()
-                            .join(", "),
+                        self.diag_tys(&arg_tys.iter().collect::<Vec<_>>()).join(", "),
                         noun,
                         names
                     ),
@@ -853,11 +848,7 @@ impl Checker {
                     format!(
                         "Instance of `{}` for `{}` is missing {} {}",
                         class,
-                        arg_tys
-                            .iter()
-                            .map(|ty| ty.to_string())
-                            .collect::<Vec<_>>()
-                            .join(", "),
+                        self.diag_tys(&arg_tys.iter().collect::<Vec<_>>()).join(", "),
                         noun,
                         methods
                     ),
