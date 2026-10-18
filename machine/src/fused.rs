@@ -6,9 +6,10 @@
 //! These helpers are `#[inline(always)]` matches so LLVM can emit a jump table
 //! of straight-line arms without a second call.
 
-use common::int_arith::{self, IntTrap};
+use common::int_arith::IntTrap;
 use common::{Instruction, Value};
 
+use crate::arith::{self, Cmp, FloatOp, IntOp};
 use crate::{Heap, HeapSlot};
 
 /// Heap pointer for fused ops. `HeapSlot::get` branches on the steal borrow;
@@ -39,65 +40,75 @@ fn eq_values<H: HeapView>(heap: &H, lhs: Value, rhs: Value) -> bool {
 }
 
 /// A fused binary op; an int op that overflows or divides by zero traps.
+/// The semantics live in [`crate::arith`]; this maps the packed op. The
+/// plain stack handlers call it too, with a constant op.
 #[inline(always)]
 pub(crate) fn eval_bin<H: HeapView>(op: u8, lhs: Value, rhs: Value, heap: &H) -> Result<Value, IntTrap> {
-    let int = |r: int_arith::IntResult| r.map(Value::from);
+    let int = |op| arith::int(op, lhs.as_int(), rhs.as_int()).map(Value::from);
+    let float = |op| Value::from(arith::float(op, lhs.as_float(), rhs.as_float()));
+    let icmp = |c| Value::from(arith::cmp(c, lhs.as_int(), rhs.as_int()) as i64);
+    let fcmp = |c| Value::from(arith::cmp(c, lhs.as_float(), rhs.as_float()) as i64);
     Ok(match Instruction::from(op) {
-        Instruction::ADD => return int(int_arith::add(lhs.as_int(), rhs.as_int())),
-        Instruction::SUB => return int(int_arith::sub(lhs.as_int(), rhs.as_int())),
-        Instruction::MUL => return int(int_arith::mul(lhs.as_int(), rhs.as_int())),
-        Instruction::DIV => return int(int_arith::div(lhs.as_int(), rhs.as_int())),
-        Instruction::MOD => return int(int_arith::rem(lhs.as_int(), rhs.as_int())),
-        Instruction::Pow => return int(int_arith::pow(lhs.as_int(), rhs.as_int())),
-        Instruction::BITAND => Value::from(lhs.as_int() & rhs.as_int()),
-        Instruction::BITOR => Value::from(lhs.as_int() | rhs.as_int()),
-        Instruction::SHL => return int(int_arith::shl(lhs.as_int(), rhs.as_int())),
-        Instruction::SHR => return int(int_arith::shr(lhs.as_int(), rhs.as_int())),
-        Instruction::XOR => Value::from(lhs.as_int() ^ rhs.as_int()),
-        Instruction::AND => Value::from(lhs.as_bool() && rhs.as_bool()),
-        Instruction::OR => Value::from(lhs.as_bool() || rhs.as_bool()),
-        Instruction::LE => Value::from((lhs.as_int() < rhs.as_int()) as i64),
-        Instruction::LEQ => Value::from((lhs.as_int() <= rhs.as_int()) as i64),
-        Instruction::GT => Value::from((lhs.as_int() > rhs.as_int()) as i64),
-        Instruction::GEQ => Value::from((lhs.as_int() >= rhs.as_int()) as i64),
+        Instruction::ADD => return int(IntOp::Add),
+        Instruction::SUB => return int(IntOp::Sub),
+        Instruction::MUL => return int(IntOp::Mul),
+        Instruction::DIV => return int(IntOp::Div),
+        Instruction::MOD => return int(IntOp::Rem),
+        Instruction::Pow => return int(IntOp::Pow),
+        Instruction::BITAND => return int(IntOp::BitAnd),
+        Instruction::BITOR => return int(IntOp::BitOr),
+        Instruction::SHL => return int(IntOp::Shl),
+        Instruction::SHR => return int(IntOp::Shr),
+        Instruction::XOR => return int(IntOp::Xor),
+        Instruction::AND => Value::from(arith::and(lhs, rhs)),
+        Instruction::OR => Value::from(arith::or(lhs, rhs)),
+        Instruction::LE => icmp(Cmp::Lt),
+        Instruction::LEQ => icmp(Cmp::Le),
+        Instruction::GT => icmp(Cmp::Gt),
+        Instruction::GEQ => icmp(Cmp::Ge),
         Instruction::EQ => Value::from(eq_values(heap, lhs, rhs) as i64),
         Instruction::NEQ => Value::from((!eq_values(heap, lhs, rhs)) as i64),
-        Instruction::ADDF => Value::from(lhs.as_float() + rhs.as_float()),
-        Instruction::SUBF => Value::from(lhs.as_float() - rhs.as_float()),
-        Instruction::MULF => Value::from(lhs.as_float() * rhs.as_float()),
-        Instruction::DIVF => Value::from(lhs.as_float() / rhs.as_float()),
-        Instruction::MODF => Value::from(lhs.as_float() % rhs.as_float()),
-        Instruction::LEF => Value::from((lhs.as_float() < rhs.as_float()) as i64),
-        Instruction::LEQF => Value::from((lhs.as_float() <= rhs.as_float()) as i64),
-        Instruction::EQF => Value::from((lhs.as_float() == rhs.as_float()) as i64),
-        Instruction::NEQF => Value::from((lhs.as_float() != rhs.as_float()) as i64),
-        Instruction::GTF => Value::from((lhs.as_float() > rhs.as_float()) as i64),
-        Instruction::GEQF => Value::from((lhs.as_float() >= rhs.as_float()) as i64),
-        Instruction::PowF => Value::from(lhs.as_float().powf(rhs.as_float())),
+        Instruction::ADDF => float(FloatOp::Add),
+        Instruction::SUBF => float(FloatOp::Sub),
+        Instruction::MULF => float(FloatOp::Mul),
+        Instruction::DIVF => float(FloatOp::Div),
+        Instruction::MODF => float(FloatOp::Rem),
+        Instruction::LEF => fcmp(Cmp::Lt),
+        Instruction::LEQF => fcmp(Cmp::Le),
+        Instruction::EQF => fcmp(Cmp::Eq),
+        Instruction::NEQF => fcmp(Cmp::Ne),
+        Instruction::GTF => fcmp(Cmp::Gt),
+        Instruction::GEQF => fcmp(Cmp::Ge),
+        Instruction::PowF => float(FloatOp::Pow),
         _ => Value::default(),
     })
 }
 
+/// A fused compare-branch condition: the same ops as [`eval_bin`], read as
+/// a `bool` word.
 #[inline(always)]
 pub(crate) fn eval_cmp<H: HeapView>(op: u8, lhs: Value, rhs: Value, heap: &H) -> bool {
+    let icmp = |c| arith::cmp(c, lhs.as_int(), rhs.as_int());
+    let fcmp = |c| arith::cmp(c, lhs.as_float(), rhs.as_float());
+    let bits = |op| arith::int(op, lhs.as_int(), rhs.as_int()).is_ok_and(|r| Value::from(r).as_bool());
     match Instruction::from(op) {
-        Instruction::LE => lhs.as_int() < rhs.as_int(),
-        Instruction::LEQ => lhs.as_int() <= rhs.as_int(),
-        Instruction::GT => lhs.as_int() > rhs.as_int(),
-        Instruction::GEQ => lhs.as_int() >= rhs.as_int(),
+        Instruction::LE => icmp(Cmp::Lt),
+        Instruction::LEQ => icmp(Cmp::Le),
+        Instruction::GT => icmp(Cmp::Gt),
+        Instruction::GEQ => icmp(Cmp::Ge),
         Instruction::EQ => eq_values(heap, lhs, rhs),
         Instruction::NEQ => !eq_values(heap, lhs, rhs),
-        Instruction::LEF => lhs.as_float() < rhs.as_float(),
-        Instruction::LEQF => lhs.as_float() <= rhs.as_float(),
-        Instruction::EQF => lhs.as_float() == rhs.as_float(),
-        Instruction::NEQF => lhs.as_float() != rhs.as_float(),
-        Instruction::GTF => lhs.as_float() > rhs.as_float(),
-        Instruction::GEQF => lhs.as_float() >= rhs.as_float(),
-        Instruction::AND => lhs.as_bool() && rhs.as_bool(),
-        Instruction::OR => lhs.as_bool() || rhs.as_bool(),
-        Instruction::BITAND => Value::from(lhs.as_int() & rhs.as_int()).as_bool(),
-        Instruction::BITOR => Value::from(lhs.as_int() | rhs.as_int()).as_bool(),
-        Instruction::XOR => Value::from(lhs.as_int() ^ rhs.as_int()).as_bool(),
+        Instruction::LEF => fcmp(Cmp::Lt),
+        Instruction::LEQF => fcmp(Cmp::Le),
+        Instruction::EQF => fcmp(Cmp::Eq),
+        Instruction::NEQF => fcmp(Cmp::Ne),
+        Instruction::GTF => fcmp(Cmp::Gt),
+        Instruction::GEQF => fcmp(Cmp::Ge),
+        Instruction::AND => arith::and(lhs, rhs),
+        Instruction::OR => arith::or(lhs, rhs),
+        Instruction::BITAND => bits(IntOp::BitAnd),
+        Instruction::BITOR => bits(IntOp::BitOr),
+        Instruction::XOR => bits(IntOp::Xor),
         _ => false,
     }
 }
