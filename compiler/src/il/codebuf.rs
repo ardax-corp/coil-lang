@@ -20,10 +20,6 @@ pub struct CodeBuf {
     funcs: Vec<IlFunc>,
     /// IL opt preset used at [`Self::lower_in_place`].
     opt_options: super::opt::OptimizeOptions,
-    /// Op indices of `Entry`s that target a label of the buffer this one is
-    /// appended into (a function whose entry is reserved but not yet bound):
-    /// [`Self::append`] keeps their ids instead of remapping them.
-    root_entries: Vec<usize>,
 }
 
 impl CodeBuf {
@@ -111,20 +107,18 @@ impl CodeBuf {
             self.il.ops().last(),
             Some(IlOp::Const { .. } | IlOp::ConstPool { .. } | IlOp::String { .. } | IlOp::Load { .. })
         );
-        if !pure || self.marked_after(self.il.raw_len() - 1) {
+        if !pure || self.marked_after() {
             return false;
         }
         self.il.pop_last();
         true
     }
 
-    /// Whether a root entry, function entry or function span starts at or
-    /// after op `raw`, the last code op pushed: code after it is not the
-    /// same straight line.
-    fn marked_after(&self, raw: usize) -> bool {
+    /// Whether a function entry or function span starts at or after the
+    /// last code op pushed: code after it is not the same straight line.
+    fn marked_after(&self) -> bool {
         let pc = self.il.code_len() - 1;
-        self.root_entries.iter().any(|&i| i >= raw)
-            || self.entry_at_offset.keys().any(|&p| p >= pc)
+        self.entry_at_offset.keys().any(|&p| p >= pc)
             || self.funcs.iter().any(|f| f.code_end > pc)
     }
 
@@ -148,11 +142,6 @@ impl CodeBuf {
         self.il.push_make_enum(tag, arity);
     }
 
-    pub fn push_box_value(&mut self, tag: u32) {
-        self.invalidate_lowered();
-        self.il.push_box_value(tag);
-    }
-
     pub fn push_unbox_value(&mut self, tag: u32) {
         self.invalidate_lowered();
         self.il.push_unbox_value(tag);
@@ -161,11 +150,6 @@ impl CodeBuf {
     pub fn push_load_field(&mut self, index: u32) {
         self.invalidate_lowered();
         self.il.push_load_field(index);
-    }
-
-    pub fn push_set_field_slot(&mut self, index: u32) {
-        self.invalidate_lowered();
-        self.il.push_set_field_slot(index);
     }
 
     pub fn push_host_invoke(&mut self, arity: u32) {
@@ -222,10 +206,7 @@ impl CodeBuf {
         }
         self.invalidate_lowered();
         let base = self.len();
-        let base_ops = self.il.ops().len();
-        let keep = std::mem::take(&mut other.root_entries);
-        let remap = self.il.append(&mut other.il, &keep);
-        self.root_entries.extend(keep.into_iter().map(|i| i + base_ops));
+        let remap = self.il.append(&mut other.il);
         for (pc, label) in other.entry_at_offset.drain() {
             let nid = remap.get(&label.0).copied().unwrap_or(label.0);
             self.entry_at_offset.insert(pc + base, Label(nid));
@@ -279,24 +260,7 @@ impl CodeBuf {
         self.len() == 0
     }
 
-    /// Emit an `Entry` to `label`, a label of the (root) buffer this one will
-    /// be appended into. Unlike a local label it survives [`Self::append`],
-    /// so a forward CALL can stay in its expression's buffer (in order).
-    pub fn emit_root_entry(
-        &mut self,
-        kind: super::EntryKind,
-        arity: u32,
-        label: Label,
-        ret_words: u32,
-    ) {
-        self.invalidate_lowered();
-        self.root_entries.push(self.il.ops().len());
-        self.il
-            .emit_entry_ret_at(kind, arity, label, DebugLoc::unknown(), ret_words);
-    }
-
     pub fn clear(&mut self) {
-        self.root_entries.clear();
         self.il.clear();
         self.lowered = None;
         self.lowered_locs = None;
@@ -685,33 +649,6 @@ mod tests {
         assert!(matches!(ops[0], IlOp::Const { imm: 1, .. }));
         assert!(matches!(ops[1], IlOp::Const { imm: 9, .. }));
         assert!(matches!(ops[2], IlOp::Load { slot: 0, .. }));
-        assert!(matches!(ops[3], IlOp::Const { imm: 2, .. }));
-    }
-
-    /// A forward CALL built in a nested buffer keeps its root entry label
-    /// through two appends, while the buffer's own labels are remapped.
-    #[test]
-    fn root_entry_survives_nested_appends() {
-        let mut root = CodeBuf::new();
-        let entry = root.fresh_label(); // reserved: body emitted later
-        let mut outer = CodeBuf::new();
-        outer.push_const(1);
-        let mut inner = CodeBuf::new();
-        let local = inner.fresh_label();
-        inner.emit_root_entry(crate::il::EntryKind::Call, 0, entry, 1);
-        inner.il_mut().bind_label(local);
-        outer.append(&mut inner);
-        outer.push_const(2);
-        root.append(&mut outer);
-        root.bind_reserved_entry(entry);
-        let ops = root.ops();
-        assert!(matches!(ops[0], IlOp::Const { imm: 1, .. }));
-        assert!(
-            matches!(ops[1], IlOp::Entry { target, .. } if target == entry),
-            "CALL must stay in order and keep the root entry: {:?}",
-            ops.iter().map(std::mem::discriminant).collect::<Vec<_>>()
-        );
-        assert!(matches!(ops[2], IlOp::Label(l) if l != entry));
         assert!(matches!(ops[3], IlOp::Const { imm: 2, .. }));
     }
 
