@@ -14836,22 +14836,50 @@ impl Checker {
     /// concrete type (`idx < xs[0]` with `idx: int`, `xs: Vec<T>`) would
     /// silently make every use of `T` that type (#801). Reports each such
     /// parameter not already in `reported`, and adds it there.
+    ///
+    /// Two distinct parameters are just as rigid against each other (#1457):
+    /// `T` bound to `U`, a sibling or one of an enclosing scope's (still in
+    /// `type_params_in_scope`), is reported too. An enclosing parameter bound
+    /// to one of `params` is caught here, while `params` are still known by
+    /// name; the enclosing scope's own check only sees it bound to a variable.
     pub(super) fn reject_bound_type_params(
         &mut self,
         params: &[(String, TyVarId)],
         reported: &mut Vec<TyVarId>,
         range: &Range<usize>,
     ) {
-        for (name, p) in params {
+        let outer: Vec<(String, TyVarId)> = self
+            .type_params_in_scope
+            .iter()
+            .flat_map(|frame| frame.iter().map(|(n, v)| (n.clone(), *v)))
+            .filter(|(_, v)| !params.iter().any(|(_, p)| p == v))
+            .collect();
+        let rigid_name = |q: TyVarId| {
+            params.iter().chain(outer.iter()).find(|(_, v)| *v == q).map(|(n, _)| n.clone())
+        };
+        let own: Vec<TyVarId> = params.iter().map(|(_, p)| *p).collect();
+        let checked = params.iter().map(|named| (named, true)).chain(outer.iter().map(|named| (named, false)));
+        let mut errors = Vec::new();
+        for ((name, p), is_own) in checked {
             if reported.contains(p) {
                 continue;
             }
             let bound = apply_ty_prune(&self.subst, &Ty::Var(*p));
-            if matches!(bound, Ty::Var(_)) {
-                continue;
-            }
+            let pretty = match bound {
+                Ty::Var(q) if q == *p => continue,
+                Ty::Var(q) => match rigid_name(q) {
+                    // An enclosing parameter bound to another enclosing one
+                    // is its own scope's to report.
+                    Some(other) if is_own || own.contains(&q) => other,
+                    _ => continue,
+                },
+                _ if !is_own => continue,
+                _ => crate::typechecking::pretty::format_ty_for_diag(&self.subst, &bound),
+            };
             reported.push(*p);
-            let pretty = crate::typechecking::pretty::format_ty_for_diag(&self.subst, &bound);
+            errors.push((name.clone(), pretty));
+        }
+        for (name, pretty) in errors {
             self.messages.push(Message::error(
                 ErrorCode::GenericTypeError,
                 format!("Type parameter `{name}` is used as `{pretty}`; a type parameter stands for any type"),
