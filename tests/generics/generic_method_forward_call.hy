@@ -1,10 +1,15 @@
 // An impl method calls a generic method declared after it in the same impl:
 // the forward stub's signature reads the later method's own `<V>` as a type
 // variable, not as a concrete type `V` (#1461).
+use string::format;
 use tests::assert;
 
 class Cell<T> {
     pub v: T,
+}
+
+fn early<U>(U x) -> U {
+    return Cell::s_same(x);
 }
 
 impl Cell<T> {
@@ -29,7 +34,7 @@ impl Cell<T> {
     }
 
     pub fn show_it<V: Show>(V y) -> string {
-        return "{y}";
+        return format("%v", y);
     }
 }
 
@@ -55,6 +60,8 @@ test("generic impl method calls a later generic method") {
     assert!(Cell::s_echo("s") == "s");
     assert!(c.shown(7) == "7");
     assert!(c.shown("w") == "w");
+    assert!(early(8) == 8);
+    assert!(early("e") == "e");
 }
 
 test("non-generic impl method calls a later generic method") {
