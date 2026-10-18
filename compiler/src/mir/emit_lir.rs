@@ -53,7 +53,7 @@ pub fn emit_lir_with_aliases(
 ) -> Result<Vec<IlOp>, LowerError> {
     if func.has_mapped_gc_edge() && !across_alloc {
         return Err(LowerError::Refused(
-            "MIR→LIR refuses Alloc/GcBarrier without S2b maps (S2c)".into(),
+            "MIR→LIR refuses Alloc/GcBarrier without GC maps (S2c)".into(),
         ));
     }
     let mut plan = EmitPlan::new(func);
@@ -187,45 +187,17 @@ pub fn emit_lir_with_aliases(
     Ok(out)
 }
 
-pub(super) type LirSidecars = (
-    std::collections::HashMap<u32, u32>,
-    super::deopt::DraftDeoptMap,
-    Option<super::stackmap::DraftFrameMap>,
-);
+pub(super) type LirSidecars = (std::collections::HashMap<u32, u32>, super::deopt::DraftDeoptMap);
 
-/// Debug slot remap, deopt map and (for a body with GC edges) the stack map
-/// of `func`, in the frame registers LIR emission assigns.
+/// Debug slot remap and deopt map of `func`, in the frame registers LIR
+/// emission assigns.
 pub(super) fn lir_sidecars(func: &MirFunc) -> LirSidecars {
     let mut plan = EmitPlan::new(func);
-    let (regs, scratch) = assign_needed(func, &mut plan).unwrap_or_else(|_| (Vec::new(), 0));
+    let (regs, _) = assign_needed(func, &mut plan).unwrap_or_else(|_| (Vec::new(), 0));
     let regs = coalesce_latch_overwrite(func, regs, &plan.need_slot);
-    let mut stack_map = if func.has_mapped_gc_edge() && !regs.is_empty() {
-        super::stackmap::encode_draft_regs(func, &regs, &plan.need_slot)
-    } else {
-        None
-    };
-    // A heap home holds its `defer` capture to the end of the body, past
-    // the capture's own last use: every site roots it.
-    if let (Some(map), Ok(base)) = (stack_map.as_mut(), home_base(func, scratch)) {
-        let heap = func.homes.iter().enumerate().filter(|(_, ty)| ty.is_heap_word());
-        for (k, _) in heap {
-            let slot = u16::from(base) + k as u16;
-            for site in &mut map.sites {
-                if !site.contains(&slot) {
-                    site.push(slot);
-                    site.sort_unstable();
-                }
-            }
-            if !map.frame_slots.contains(&slot) {
-                map.frame_slots.push(slot);
-                map.frame_slots.sort_unstable();
-            }
-        }
-    }
     (
         super::deopt::debug_slot_remap(func, &regs, &plan.need_slot),
         super::deopt::encode_draft(func, &regs, &plan.need_slot),
-        stack_map,
     )
 }
 

@@ -215,11 +215,6 @@ impl Compiler {
         &self.debug_locs
     }
 
-    /// S2b slot / frame maps (empty when no allocating body lifted).
-    pub fn stack_maps(&self) -> &[common::FrameStackMap] {
-        &self.stack_maps
-    }
-
     /// `defer` cleanup ranges for the VM unwinder.
     pub fn cleanup_ranges(&self) -> &[common::CleanupRange] {
         &self.cleanup_ranges
@@ -227,10 +222,6 @@ impl Compiler {
 
     pub fn precise_frames(&self) -> &[common::PreciseFrameMap] {
         &self.precise_frames
-    }
-
-    pub fn stack_map_drafts(&self) -> &[crate::mir::DraftFrameMap] {
-        &self.stack_map_drafts
     }
 
     /// I7 / C3 deopt resume drafts (empty when no specialized body).
@@ -7890,7 +7881,6 @@ impl Compiler {
             .iter()
             .map(|(n, pc)| (n.clone(), *pc as u32))
             .collect();
-        self.stack_map_drafts = lowered.stack_map_drafts.clone();
         self.deopt_map_drafts = lowered.deopt_map_drafts.clone();
         apply_debug_slot_remaps(&mut self.fn_debug_locals, &lowered.debug_slot_remaps);
         for (fn_name, vars) in self.fn_debug_vars.iter_mut() {
@@ -7921,22 +7911,6 @@ impl Compiler {
                 }
             }
         }
-        self.stack_maps = crate::mir::bind_drafts(
-            &lowered.stack_map_drafts,
-            self.bytecode.as_slice(),
-            &entries,
-        );
-        // A draft whose sites do not match the body's alloc opcodes binds to
-        // nothing; the census reports it apart from a bound map.
-        let unbound: Vec<&str> = lowered
-            .stack_map_drafts
-            .iter()
-            .filter(|d| {
-                !entries.iter().any(|(n, pc)| *n == d.name && self.stack_maps.iter().any(|m| m.entry_pc == *pc))
-            })
-            .map(|d| d.name.as_str())
-            .collect();
-        crate::il::opt::note_unbound_maps(&unbound);
         let fn_kinds = self.fn_word_kinds(&entries, &entry_sps);
         self.precise_frames = super::precise_frames::bind_precise_frames(
             &self.precise_frame_fns,

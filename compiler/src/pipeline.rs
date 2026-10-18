@@ -264,7 +264,7 @@ impl Pipeline {
             static_slot_count: self.static_slot_count(),
             debug: self.program_debug(),
             operand_stack_slots: self.operand_stack_slots(),
-            stack_maps: self.stack_maps().to_vec(),
+            stack_maps: Vec::new(),
             precise_frames: self.precise_frames().to_vec(),
             class_word_kinds: self.class_word_kinds(),
             static_word_kinds: self.static_word_kinds(),
@@ -1509,7 +1509,7 @@ impl Pipeline {
             fn_symbols: debug.fn_symbols,
             struct_layouts: self.archived_struct_layouts(),
             operand_stack_slots: self.operand_stack_slots(),
-            stack_maps: self.stack_maps().to_vec(),
+            stack_maps: Vec::new(),
             precise_frames: self.precise_frames().to_vec(),
             class_word_kinds: self.class_word_kinds(),
             static_word_kinds: self.static_word_kinds(),
@@ -2010,11 +2010,6 @@ impl Pipeline {
         }
     }
 
-    /// S2b maps from the last compile (in-memory; not required on `.hyc` load).
-    pub fn stack_maps(&self) -> &[common::FrameStackMap] {
-        self.compiler_lazy().stack_maps()
-    }
-
     pub fn precise_frames(&self) -> &[common::PreciseFrameMap] {
         self.compiler_lazy().precise_frames()
     }
@@ -2323,7 +2318,7 @@ fn main() {
             fn_symbols: debug.fn_symbols,
             struct_layouts: pipeline.archived_struct_layouts(),
             operand_stack_slots: pipeline.operand_stack_slots(),
-            stack_maps: pipeline.stack_maps().to_vec(),
+            stack_maps: Vec::new(),
             precise_frames: pipeline.precise_frames().to_vec(),
             class_word_kinds: pipeline.class_word_kinds(),
             static_word_kinds: pipeline.static_word_kinds(),
@@ -2338,7 +2333,7 @@ fn main() {
     }
 
     #[test]
-    fn mapped_pair_archive_round_trip_persists_s2b_maps() {
+    fn mapped_pair_archive_round_trip_persists_frame_maps() {
         use common::{ARCHIVE_VERSION, ArchivedProgram, decode_archived_program};
         use rkyv::rancor::Error;
 
@@ -2354,8 +2349,8 @@ fn main() {
 "#;
         let (bytecode, constants) = pipeline.compile_src(src).expect("compile");
         assert!(
-            !pipeline.stack_maps().is_empty(),
-            "pair() should emit S2b maps"
+            !pipeline.precise_frames().is_empty(),
+            "pair() should emit precise frame maps"
         );
         let debug = pipeline.program_debug();
         let program = ArchivedProgram {
@@ -2369,7 +2364,7 @@ fn main() {
             fn_symbols: debug.fn_symbols,
             struct_layouts: pipeline.archived_struct_layouts(),
             operand_stack_slots: pipeline.operand_stack_slots(),
-            stack_maps: pipeline.stack_maps().to_vec(),
+            stack_maps: Vec::new(),
             precise_frames: pipeline.precise_frames().to_vec(),
             class_word_kinds: pipeline.class_word_kinds(),
             static_word_kinds: pipeline.static_word_kinds(),
@@ -2380,8 +2375,8 @@ fn main() {
         let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
         assert!(decoded.stack_maps_persisted);
         assert_eq!(
-            decoded.program.stack_maps.as_slice(),
-            pipeline.stack_maps()
+            decoded.program.precise_frames.as_slice(),
+            pipeline.precise_frames()
         );
     }
 

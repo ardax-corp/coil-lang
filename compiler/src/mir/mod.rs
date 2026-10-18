@@ -8,8 +8,8 @@
 //! Dense and LIR `CALL` use the one-word or two-slot typed ABI ([`abi`];
 //! COI-291 / B3 / C1). SSA models dest + `dest_hi`; N>2 return words
 //! refuse. Typed HostInvoke boxes at the host edge. Allocating bodies
-//! carry `Alloc` + `GcBarrier` with live-heap `roots` and frame maps built
-//! from the SSA ([`stackmap`]). Impure HostInvoke / CALL are SSA barriers
+//! carry `Alloc` + `GcBarrier` with live-heap `roots`; their GC frame maps
+//! are the precise maps of their final bytecode ([`stackmap`]). Impure HostInvoke / CALL are SSA barriers
 //! (I6); LICM hoist uses purity bits. Debugger-attached / `-Og` builds use
 //! the same tiers; explicit `Deopt` is skipped at emit. History of each
 //! piece: `docs/internals/mir.md`.
@@ -58,7 +58,7 @@ pub use func::MirFunc;
 pub use func::MirBlock;
 pub use specialize::{capture_pinned_mir, start_mir_capture, take_mir_capture};
 pub use deopt::DraftDeoptMap;
-pub use stackmap::{bind_drafts, is_alloc_opcode, DraftFrameMap};
+pub use stackmap::is_alloc_opcode;
 pub use inst::{MirAllocKind, MirBinOp, MirConst, MirFfiOp, MirInst, ValueId};
 #[cfg(test)]
 pub use inst::{BlockId, LocalId, MirCastKind, MirCmpOp, MirGcKind, MirUnaryOp, Terminator};
