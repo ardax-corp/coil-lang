@@ -9,7 +9,7 @@ use crate::il::{IlJumpKind, IlOp, Label};
 use super::call_convoy::{is_tail_call_inst, ConvoyPlan};
 use super::destprop::sink_phi_incomings;
 use super::emit_common::{
-    is_jim_term_payload, last_arm_payloads, phi_moves, stack_bin_op, stack_cmp_op,
+    intern_pool, is_jim_term_payload, last_arm_payloads, phi_moves, stack_bin_op, stack_cmp_op,
 };
 use super::func::MirFunc;
 use super::inst::{
@@ -2155,18 +2155,6 @@ pub(super) fn emit_const(
     }
 }
 
-fn intern_pool(pool: &mut Vec<u64>, bits: u64) -> Result<u16, LowerError> {
-    if let Some(i) = pool.iter().position(|&x| x == bits) {
-        return u16::try_from(i).map_err(|_| LowerError::Refused("pool idx".into()));
-    }
-    let i = pool.len();
-    if i > u16::MAX as usize {
-        return Err(LowerError::Refused("const pool full".into()));
-    }
-    pool.push(bits);
-    Ok(i as u16)
-}
-
 struct EmitDenseJumpIfMatchArgs<'args> {
     out: &'args mut Vec<IlOp>,
     stacked: &'args mut Vec<ValueId>,
@@ -3079,7 +3067,7 @@ fn push_stack_const(
                     out.push(IlOp::Const { imm, loc });
                     return Ok(());
                 }
-            let idx = u32::from(intern_pool(pool, v as u64)?);
+            let idx = u32::from(intern_pool::<u16>(pool, v as u64)?);
             out.push(IlOp::ConstPool { idx, loc });
         }
         MirConst::Bool(v) => out.push(IlOp::Const {
@@ -3087,7 +3075,7 @@ fn push_stack_const(
             loc,
         }),
         MirConst::F64(bits) => {
-            let idx = u32::from(intern_pool(pool, bits)?);
+            let idx = u32::from(intern_pool::<u16>(pool, bits)?);
             out.push(IlOp::ConstPool { idx, loc });
         }
     }

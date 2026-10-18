@@ -17,7 +17,7 @@ use super::emit::{
     max_label_hint, paired_alloc_dest, restore_block_op_locs, take_label,
 };
 use super::emit_common::{
-    is_jim_term_payload, last_arm_payloads, phi_moves, stack_bin_op, stack_cmp_op,
+    intern_pool, is_jim_term_payload, last_arm_payloads, phi_moves, stack_bin_op, stack_cmp_op,
 };
 use super::func::MirFunc;
 use super::inst::{
@@ -2580,13 +2580,4 @@ fn push_const(
         }
     }
     Ok(())
-}
-
-fn intern_pool(pool: &mut Vec<u64>, bits: u64) -> Result<u32, LowerError> {
-    if let Some(i) = pool.iter().position(|&x| x == bits) {
-        return u32::try_from(i).map_err(|_| LowerError::Refused("pool idx".into()));
-    }
-    let i = pool.len();
-    pool.push(bits);
-    u32::try_from(i).map_err(|_| LowerError::Refused("const pool full".into()))
 }

@@ -89,6 +89,18 @@ fn resolve_parallel(mut moves: Vec<(u8, u8)>, scratch: u8) -> Vec<(u8, u8)> {
     out
 }
 
+/// Index of `bits` in the const pool, appending it when absent. `T` is
+/// the tier's pool index width (dense `u16`, LIR and packs `u32`); an
+/// index that does not fit refuses and leaves the pool as it was.
+pub(super) fn intern_pool<T: TryFrom<usize>>(pool: &mut Vec<u64>, bits: u64) -> Result<T, LowerError> {
+    if let Some(i) = pool.iter().position(|&x| x == bits) {
+        return T::try_from(i).map_err(|_| LowerError::Refused("pool idx".into()));
+    }
+    let i = T::try_from(pool.len()).map_err(|_| LowerError::Refused("const pool full".into()))?;
+    pool.push(bits);
+    Ok(i)
+}
+
 /// The stack opcode for a MIR binary op on `ty`.
 pub(super) fn stack_bin_op(op: MirBinOp, ty: MirTy) -> Result<Instruction, LowerError> {
     Ok(match (op, ty.is_float()) {
