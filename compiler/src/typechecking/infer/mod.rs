@@ -638,7 +638,6 @@ pub struct Checker {
     /// Generics registry: typeclasses, instances, generic type ctors.
     generics: crate::typechecking::generics::Generics,
     /// Generic function names registered during typechecking.
-    /// Used by codegen to decide between DynAdd vs regular ADD.
     pub generic_fns: HashSet<String>,
     /// Number of *user-defined* trait dict slots expected by each
     /// generic function.  Built-in classes (Num, Ord, Eq, Show) are

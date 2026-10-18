@@ -84,7 +84,7 @@ widens dense coverage: one-word `CALL` beyond the dense map, and I6
 HostInvoke including Q9 R2 `from_bytes` / `to_bytes`. Heap-index / `StoreIndex` take dense after V* miss (S3b): unpinned
 `Index` / `StoreIndex` / `ArrayLen`. Residual `StorePop` leaves tell at
 the prologue frame high-water; S2e does not emit a per-residual `Seek`.
-Pin opcodes are no longer emitted ([array-pin.md](array-pin.md)).
+Only the prologue `ArrayPin` is still emitted; `IndexPin*` / `StoreIndexPin*` are not ([array-pin.md](array-pin.md)).
 Boxed dense+match stays I2 LIR (JumpIfMatch stack protocol vs dense regs).
 Niche / two-slot match may dense (**Q8**).
 Stack-map note: [mir-stack-maps.md](mir-stack-maps.md).

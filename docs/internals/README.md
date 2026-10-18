@@ -41,7 +41,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [Superinstruction candidates](superinstructions-candidates.md) | Historical: [COI-378](https://linear.app/ardax/issue/COI-378) S0: fused-op inventory, S1–S8 refine notes, extras that do not need specialize-keep |
 | [Opcodes](opcodes.md) | Selected bytecode ops behind builtins |
 | [Dissect](dissect.md) | `coil dissect` — in-memory bytecode / IL / AST dump |
-| [Array pins](array-pin.md) | Historical: the `ArrayPin` / `IndexPin` handle cache (no longer emitted) |
+| [Array pins](array-pin.md) | Array-handle pins: only the prologue `ArrayPin` is still emitted; `IndexPin*` / `StoreIndexPin*` are retired |
 | [Debugger](debugger.md) | `coil debug` — GDB-style REPL / batch debugger |
 | [Test runner](test-runner.md) | `coil test` — `coil-test` helper: discovery, `compile_fail/`, seeded order, reactor jobs (`-j`), line coverage (`--coverage`, lcov); `coil mutate` mutation testing |
 | [Formatter](fmt.md) | `coil fmt` — AST pretty-printer for `.hy` |
