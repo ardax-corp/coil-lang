@@ -510,22 +510,26 @@ impl Compiler {
             t.unbox_any.insert(id.0);
         }
         // A bound type parameter's operator or method through one of this
-        // body's dictionary parameters.
+        // body's dictionary parameters; a call's ground niche `Option` /
+        // `Result` result the adapter returns boxed converts to its own
+        // layout after the call.
         let bound = match &e.kind {
             HirKind::Bin { .. } | HirKind::Un { .. } => match emit.plan.ops.get(&id.0) {
-                Some(&HirOp::Bound { dict, method }) => Some((dict, method)),
+                Some(&HirOp::Bound { dict, method }) => Some((dict, method, false)),
                 _ => None,
             },
-            HirKind::Call { .. } if !emit.plan.lens.contains_key(&id.0) => match emit.plan.calls.get(&id.0).and_then(|c| c.builtin) {
-                Some(HirBuiltin::Bound { dict, method }) => Some((dict, method)),
+            HirKind::Call { .. } if !emit.plan.lens.contains_key(&id.0) => match emit.plan.calls.get(&id.0) {
+                Some(call @ HirCall { builtin: Some(HirBuiltin::Bound { dict, method }), .. }) => {
+                    Some((*dict, *method, self.hir_ret_shape(hir, id, &Self::hir_call_rep(call)) == Some(true)))
+                }
                 _ => None,
             },
             _ => None,
         };
-        if let Some((dict, method)) = bound
+        if let Some((dict, method, boxed_ret)) = bound
             && self.hir_mir_dict_param(dict)
         {
-            t.bound_calls.insert(id.0, crate::mir::HirBoundCall { dict, method });
+            t.bound_calls.insert(id.0, crate::mir::HirBoundCall { dict, method, boxed_ret });
         }
         if let HirKind::Call { .. } = e.kind
             && !emit.plan.lens.contains_key(&id.0)
