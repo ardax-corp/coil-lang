@@ -1,6 +1,7 @@
 // Operators on literals fold, identities keep their operand, and an `if`
-// on a literal keeps the branch it takes. Nothing that has an effect or
-// does not fit the inline constant range is folded away.
+// on a literal keeps the branch it takes. Nothing that has an effect is
+// folded away. Folds past 32 bits and that would overflow are in
+// `constant_fold_wide.hy`.
 use tests::assert;
 
 static let calls: int = 0;
@@ -21,14 +22,6 @@ fn identities(int x) -> int {
 
 fn zero_with_effect() -> int {
     return bump(5) * 0;
-}
-
-fn wide() -> int {
-    return 2147483647 + 1;
-}
-
-fn wide_product() -> int {
-    return 4000000 * 4000000;
 }
 
 fn steps(int x) -> int {
@@ -80,11 +73,6 @@ test("a call times zero still runs") {
     calls = 0;
     assert!(zero_with_effect() == 0);
     assert!(calls == 1);
-}
-
-test("results past 32 bits are computed at run time") {
-    assert!(wide() == 2147483648);
-    assert!(wide_product() == 16000000000000);
 }
 
 test("constant steps add once") {
