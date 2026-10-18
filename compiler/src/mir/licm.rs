@@ -281,6 +281,25 @@ fn hoist_loop(func: &mut MirFunc, lp: &LoopInfo, dense: bool) -> usize {
             .collect()
     };
     invariant.extend(literals.keys().copied());
+    // A compare or unary op on what the loop reads as is stays when only
+    // branches test it: it fuses with them.
+    let reads = invariant.clone();
+    let mut tested: HashSet<ValueId> = HashSet::new();
+    let mut read_elsewhere: HashSet<ValueId> = HashSet::new();
+    for b in &func.blocks {
+        b.insts.iter().for_each(|i| read_elsewhere.extend(i.operands()));
+        match &b.term {
+            Some(Terminator::Br { cond, .. }) => {
+                tested.insert(*cond);
+            }
+            Some(Terminator::JumpIfMatch { scrutinee, payloads, .. }) => {
+                read_elsewhere.insert(*scrutinee);
+                read_elsewhere.extend(payloads);
+            }
+            Some(Terminator::Return { lo, hi }) => read_elsewhere.extend(lo.iter().chain(hi)),
+            Some(Terminator::Jump { .. } | Terminator::Unreachable) | None => {}
+        }
+    }
 
     // Values that move behind the guard, and everything that reads one.
     let mut guarded: HashSet<ValueId> = HashSet::new();
@@ -300,6 +319,13 @@ fn hoist_loop(func: &mut MirFunc, lp: &LoopInfo, dense: bool) -> usize {
                 };
                 let ops = inst.operands();
                 if !ops.iter().all(|o| invariant.contains(o)) {
+                    continue;
+                }
+                if matches!(inst, MirInst::Cmp { .. } | MirInst::Unary { .. })
+                    && ops.iter().all(|o| reads.contains(o))
+                    && tested.contains(&inst.dest())
+                    && !read_elsewhere.contains(&inst.dest())
+                {
                     continue;
                 }
                 let behind = ops.iter().any(|o| guarded.contains(o));
