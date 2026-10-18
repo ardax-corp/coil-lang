@@ -4,36 +4,6 @@ use super::*;
 
 impl Compiler {
 
-    pub(super) fn emit_named_entry(
-        &mut self,
-        dest: &mut CodeBuf,
-        name: &str,
-        arity: u32,
-        kind: crate::il::EntryKind,
-    ) -> bool {
-        match kind {
-            crate::il::EntryKind::Call => {
-                let two_word = self.two_word_return_kind(name);
-                let ret_words = if two_word.is_some() { 2 } else { 1 };
-                let ok = self.emit_named_entry_ret(dest, name, arity, kind, ret_words);
-                if ok
-                    && !self.repr_now().unboxing()
-                    && let Some(enum_name) = two_word
-                {
-                    self.emit_box_pair_after_call(dest, &enum_name);
-                }
-                ok
-            }
-            crate::il::EntryKind::CodePtr | crate::il::EntryKind::MakePolyFn => {
-                if !self.deny_two_word_address_of(name, 0..0) {
-                    return false;
-                }
-                self.emit_named_entry_ret(dest, name, arity, kind, 1)
-            }
-            _ => self.emit_named_entry_ret(dest, name, arity, kind, 1),
-        }
-    }
-
     /// `true` when `name`'s two-word classification is safe to ignore here
     /// (i.e. it stays one word, the common case). `false` when `name`
     /// returns a known two-word layout: this call site takes its address
@@ -69,37 +39,8 @@ impl Compiler {
         false
     }
 
-    /// Same as [`Self::emit_named_entry`] with an explicit `CALL` return
-    /// width (`1` or `2` words). Non-`Call` kinds ignore `ret_words`.
-    pub(super) fn emit_named_entry_ret(
-        &mut self,
-        dest: &mut CodeBuf,
-        name: &str,
-        arity: u32,
-        kind: crate::il::EntryKind,
-        ret_words: u32,
-    ) -> bool {
-        let adapter = self.raw_instance_redirect(name);
-        let name = adapter.as_deref().unwrap_or(name);
-        if let Some(&offset) = self.functions.get(name) {
-            dest.push(Self::packed_entry_byte_ret(
-                kind,
-                arity,
-                offset as u32,
-                ret_words,
-            ));
-            true
-        } else if let Some(label) = self.fn_entry_labels.get(name).copied() {
-            // Reserved entry (body later): keep the CALL in `dest` so it stays
-            // in order with the enclosing expression's staged operands.
-            dest.emit_root_entry(kind, arity, label, ret_words);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Same as [`Self::emit_named_entry`] onto the module buffer.
+    /// Emit a `CALL` (or another entry kind) to function `name` onto the
+    /// module buffer.
     pub(super) fn emit_named_entry_on_module(
         &mut self,
         name: &str,
@@ -167,8 +108,8 @@ impl Compiler {
         }
     }
 
-    /// The entry label a `CALL` of `name` reaches, as
-    /// [`Self::emit_named_entry_ret`] (or, `on_module`,
+    /// The entry label a `CALL` of `name` reaches, as a staged buffer's
+    /// `CALL` (or, `on_module`,
     /// [`Self::emit_named_entry_on_module_ret`]) emits it, with that
     /// call's side effects but without emitting it: `None` when the `CALL`
     /// would not be an entry op (no such function, or a body whose offset
@@ -190,7 +131,7 @@ impl Compiler {
     /// The adapter an entry of raw instance method `name` goes through
     /// unless the call site said it passes raw arguments
     /// ([`Self::raw_instance_call`], taken here).
-    fn raw_instance_redirect(&mut self, name: &str) -> Option<String> {
+    pub(super) fn raw_instance_redirect(&mut self, name: &str) -> Option<String> {
         let raw_call = std::mem::take(&mut self.raw_instance_call);
         (!raw_call && self.raw_instance_methods.contains(name)).then(|| Self::dict_adapter_name(name))
     }
