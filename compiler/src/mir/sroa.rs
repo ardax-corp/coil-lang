@@ -1,7 +1,7 @@
 //! S2f / Q1: reuse the StoreIndex array instead of rematerializing `Alloc`.
 //!
-//! Stack-IL / codegen already SROAs non-escaping `[T; N]` locals. Dense /
-//! leftover reconstruct can still emit a second `Alloc` of the same elems
+//! HIR lowering already keeps non-escaping `[T; N]` locals in slots. Dense /
+//! LIR emit can still see a second `Alloc` of the same elems
 //! after `StoreIndex` (dest is the stored *value*). VM mutates in place, so
 //! later `Index` must read that object — not a fresh `[0, 0, 0]`.
 

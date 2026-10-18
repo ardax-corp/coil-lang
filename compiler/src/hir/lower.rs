@@ -1,4 +1,4 @@
-//! Which HIR bodies the lowering in `codegen/emit_hir.rs` takes.
+//! Which HIR bodies MIR lowering takes (planned in `codegen/emit_hir.rs`).
 //!
 //! Phase 2 lowers the core: scalar literals and locals, primitive-lane
 //! operators, direct calls, `if`, loops, `break` / `continue` and `return`.
@@ -11,16 +11,19 @@
 //! tuples, arrays and `Vec`; then `byte` scalars (on the int lane, one-byte
 //! string literals included) and casts between scalars; then each mono
 //! clone of a generic function, at its instance's types. Any other node, type
-//! or body shape keeps the AST codegen for the whole function,
-//! and the reason it was refused is counted in `--opt-stats`.
+//! or body shape is refused, and the reason is counted in `--opt-stats`;
+//! with no AST codegen left, a refused body is an internal error
+//! (`OptimizeOptions::require_mir`).
 //!
-//! The VM shares one stack between locals and operands, so a store to a new
-//! slot is only safe with no operand live below it. [`refusal`] therefore
+//! The operand-depth rule below dates from stack emission, where the VM
+//! shared one stack between locals and operands and a store to a new slot
+//! was only safe with no operand live below it. MIR keeps values in
+//! registers, so the rule may refuse bodies it could take. [`refusal`]
 //! also tracks how many operands each node sits on and refuses bindings,
 //! assignments, jumps, slot-binding matches and staged variant builds that
 //! are not at operand depth zero. A binary operator whose right side calls,
-//! matches or builds a variant stages its left side through a temp (as the
-//! AST codegen does), so that right side runs at depth zero.
+//! matches or builds a variant stages its left side through a temp, so
+//! that right side runs at depth zero.
 
 use super::{BinOp, BodyKind, Builtin, Callee, HirArm, HirBody, HirFlags, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId, LocalKind, MakeKind, UnOp};
 use std::collections::HashMap;

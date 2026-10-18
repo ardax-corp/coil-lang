@@ -1,7 +1,7 @@
 //! Constant folding and algebraic identities.
 //!
 //! Operators on literals become literals (`int` and `float` only, and an
-//! `int` result only when it fits 32 bits, as the stack IL encodes it),
+//! `int` result only when it fits 32 bits, the inline `Const` range),
 //! `x + 0`, `x * 1`, `x | 0` and friends become `x`, `x * 0` becomes `0`
 //! when `x` is a plain read, `x ** 2` becomes `x * x`, `(x + 1) + 2` becomes
 //! `x + 3` (and so do `x = x + 1; x = x + 2;` in a row), `x = x` goes, a

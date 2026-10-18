@@ -50,8 +50,7 @@ pub enum PairKind {
     Enum(String),
 }
 
-// `of`, `words` and `is_niche` are the HIR builder's (phase 1); only tests
-// call them until then.
+// `words` and `is_niche` only have test callers.
 #[allow(dead_code)]
 impl Layout {
     /// Words on a direct `CALL`/`RETURN`.

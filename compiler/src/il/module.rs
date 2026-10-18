@@ -2,8 +2,9 @@
 //!
 //! Cheap split of one [`super::CodeBuf`] — not a second IL language.
 //! Codegen keeps a flat [`super::CodeBuf`] stream. At lower time the buffer is
-//! split into owned function bodies (plus prologue / glue / epilogue), opts
-//! run per body, then the stream is concatenated for a single fuse/PC lower.
+//! split into owned function bodies (plus prologue / glue / epilogue), each
+//! body's MIR emits dense or LIR in place of its placeholder, then the
+//! stream is concatenated for a single fuse/PC lower.
 
 use std::collections::{HashMap, HashSet};
 
@@ -304,12 +305,11 @@ impl IlModule {
         }
 
         // Leaf-first: a caller may take dense once every callee it CALLs is dense.
-        // Leftovers then try MIR→LIR (MIR lowered from HIR); fuse-IL if a
-        // LIR reconstruct wall (`lir_refuse_direct`) hits.
+        // Every other body takes LIR from its MIR (lowered from HIR).
         self.stack_map_drafts.clear();
         self.needs_frame_extent.clear();
         let mut dense_calls = crate::mir::DenseCallMap::new();
-        // Pinned bodies stay fuse-IL as emitted.
+        // Pinned (`defer`) bodies try LIR below, with their cleanup pad.
         let mut pending: Vec<usize> = (0..self.funcs.len())
             .filter(|&i| !self.funcs[i].meta.pinned)
             .collect();
@@ -321,11 +321,11 @@ impl IlModule {
         // Maps of dense and LIR bodies, built from their MIR.
         let mut mir_maps = HashMap::<String, crate::mir::DraftFrameMap>::new();
         // Every body takes its stack IL from its MIR, so its tier gates
-        // read that MIR and the fuse IL emitted from it (N1b): of
+        // read that MIR and the LIR emitted from it (N1b): of
         // emit_hir's stack IL only the labels it binds.
         let labels: Vec<crate::mir::BodyLabels> =
             self.funcs.iter().map(|b| crate::mir::BodyLabels::of(&b.ops)).collect();
-        // Per body, once: the fuse IL its MIR emits (what runs if dense
+        // Per body, once: the LIR its MIR emits (what runs if dense
         // refuses), `None` when the LIR tier refuses it.
         let mut fuse_fallbacks: Vec<Option<Option<Vec<IlOp>>>> = vec![None; self.funcs.len()];
         while !pending.is_empty() {
@@ -569,15 +569,6 @@ pub(crate) fn prove_trailing_if_end_after_next_body_replace() {
     buf.lower_in_place(&mut Vec::new());
 }
 
-/// Emitting-op cost for MIR→LIR replace: refuse a reconstruct that grew
-/// the body (naive slot spill). Labels are free. `Seek` / `StorePop` are
-/// expensive so leftover lets keep fuse-IL (ConstReturnImm).
-/// Keep a MIR→LIR reconstruct when it is no costlier than the opted fuse-IL
-/// (+ match slack). Costs weight loop bodies (×8 per nesting level) so a
-/// smaller hot loop can win against a larger cold tail — a flat count kept
-/// fuse-IL on churn `main`s whose LIR loop was faster. Weighting needs both
-/// sides to expose the same loops; otherwise compare flat counts.
-/// A weighted tie is settled by the flat count.
 /// Drop `JMP L` when `L` is the next label: it is a fall-through. Passes that
 /// turn stack words into slots misread the words such a jump carries (an
 /// `Unpack` payload went to the wrong slots, #771).
