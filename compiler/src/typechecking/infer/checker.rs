@@ -13916,8 +13916,10 @@ impl Checker {
                     .iter()
                     .map(|(t, _)| apply_ty_prune(&self.subst, t))
                     .collect();
+                // An empty pack stays the empty tuple, as emission
+                // types it; a `()` value is `unit` (`ty::tuple`).
                 let rest_ty = if elem_tys.is_empty() {
-                    tuple_ty(vec![])
+                    Ty::Tuple(Vec::new())
                 } else {
                     tuple_ty(elem_tys)
                 };

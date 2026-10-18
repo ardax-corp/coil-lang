@@ -1,7 +1,7 @@
-Function f() -> enum Result { Ok(()), Err(string) } [niche Result] result-mode
+Function f() -> enum Result { Ok(unit), Err(string) } [niche unit Result] result-mode
   block : unit
     let x%0: int : unit
       lit 1 : int {nonneg}
     return : never
-      make Result::Ok#0 : enum Result { Ok(()), Err(string) } [niche Result]
-        lit () : ()
+      make Result::Ok#0 : enum Result { Ok(unit), Err(string) } [niche unit Result]
+        lit () : unit

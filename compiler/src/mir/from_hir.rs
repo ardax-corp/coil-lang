@@ -492,9 +492,6 @@ pub struct HirMirInput<'a> {
     /// Call arguments of a niche layout a shared generic takes in a boxed
     /// parameter: boxed to their enum object, by argument.
     pub niche_args: &'a HashMap<u32, ValueLayout>,
-    /// Call arguments of type `Result<(), E>` passed in a `Result<unit, E>`
-    /// parameter: their niche word rewritten by [`Self::fit`] (#1085).
-    pub unit_result_args: &'a std::collections::HashSet<u32>,
     /// HIR emission packs some value of the body as a bare-class
     /// existential (`plan_existential_pack`) that `packs` has no
     /// program for.
@@ -530,10 +527,6 @@ pub struct HirMirInput<'a> {
     /// Fixed array locals copied as they are bound or assigned to another
     /// local: the `vec_from_array` native, by value.
     pub array_copies: &'a HashMap<u32, u16>,
-    /// `Result` variants made at a niche word other than their own
-    /// type's, as their context wants it: `Ok(())` (typed `Result<(), E>`)
-    /// returned as a `Result<unit, E>` is its zero word.
-    pub make_niches: &'a HashMap<u32, MirTy>,
     /// Element-wise array and tuple operators, by expression.
     pub aggregates: HashMap<u32, crate::typechecking::AggregateArithInfo>,
     /// Record literals whose every field holds the word its type says:
@@ -1705,15 +1698,9 @@ impl Lower<'_> {
             }
             // A unit body's tail value (a call kept for its effect) is dropped.
             (Val::V(_) | Val::Pair(..), _) if self.unit_ret => self.ret_unit(),
-            // A niche word of the other niche layout has other bits: only a
-            // `Result<(), E>` word converts, to a `Result<unit, E>` (#1085).
+            // A niche word of the other niche layout has other bits.
             (Val::V(v), None) if self.b.func().ret_ty.is_some_and(|t| is_niche(t) && is_niche(self.b.value_ty(v)) && t != self.b.value_ty(v)) => {
-                let t = self.b.func().ret_ty.ok_or("return value")?;
-                if (self.b.value_ty(v), t) != (MirTy::NicheRes, MirTy::NicheOpt) {
-                    return Err("return niche word".into());
-                }
-                let w = self.fit(v, t)?;
-                self.ret_word(w)
+                Err("return niche word".into())
             }
             (Val::V(v), None) if !self.unit_ret => self.ret_word(v),
             // A two-word value the function returns boxed.
@@ -1758,20 +1745,12 @@ impl Lower<'_> {
     /// A niche `Option` / `Result` word boxed to its `ObjEnum`, as HIR
     /// emission's `emit_niche_option_to_boxed` and siblings.
     fn box_niche(&mut self, layout: ValueLayout, w: ValueId) -> Result<ValueId, Refusal> {
-        self.box_niche_as(layout, w, false)
-    }
-
-    /// [`Self::box_niche`]; with `unit_ok`, a `Result<unit, E>` whose `Ok`
-    /// boxes with the `0` payload a unit-`Result` niche boxes with, whatever
-    /// niche its word is in (#1193).
-    fn box_niche_as(&mut self, layout: ValueLayout, w: ValueId, unit_ok: bool) -> Result<ValueId, Refusal> {
         if !matches!(self.b.value_ty(w), MirTy::NicheOpt | MirTy::NicheRes) {
             return Err("boxed niche return".into());
         }
         // A word made from a known variant boxes as that variant.
         if let Some(&(second, payload)) = self.known_niche.get(&w) {
             let payload = match payload {
-                Some(_) if unit_ok && !second => Some(self.b.ins_const(MirConst::I64(0)).map_err(mir)?),
                 Some(p) => Some(self.fit(p, MirTy::HeapRef)?),
                 None if layout == ValueLayout::NicheUnitResult && !second => Some(self.b.ins_const(MirConst::I64(0)).map_err(mir)?),
                 None => None,
@@ -1797,7 +1776,6 @@ impl Lower<'_> {
         let first = match layout {
             ValueLayout::NicheOption => self.make_enum(0, None)?,
             ValueLayout::NicheUnitResult => self.make_enum(0, Some(zero))?,
-            _ if unit_ok => self.make_enum(0, Some(zero))?,
             _ => {
                 let p = self.b.ins_cast(MirCastKind::Word, MirTy::HeapRef, w).map_err(mir)?;
                 self.make_enum(0, Some(p))?
@@ -1875,22 +1853,9 @@ impl Lower<'_> {
     /// `v` as a word of type `ty`: itself, or the same word retyped (a heap
     /// payload moves through a pair as an opaque `i64`).
     fn fit(&mut self, v: ValueId, ty: MirTy) -> Result<ValueId, Refusal> {
-        // A `Result<(), E>` word (`NicheRes`: `Ok` is the `()` tuple, `Err`
-        // its payload with the low bit set) as a `Result<unit, E>` one
-        // (`NicheOpt`: `Ok` is `0`, `Err` the payload) (#1085): an `Err`
-        // keeps its payload, an `Ok` becomes `0`.
-        if self.b.value_ty(v) == MirTy::NicheRes && ty == MirTy::NicheOpt {
-            let w = self.b.ins_cast(MirCastKind::Word, MirTy::I64, v).map_err(mir)?;
-            let one = self.b.ins_const(MirConst::I64(1)).map_err(mir)?;
-            let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
-            let bit = self.b.ins_binop(MirBinOp::BitAnd, w, one).map_err(mir)?;
-            let mask = self.b.ins_binop(MirBinOp::Sub, zero, bit).map_err(mir)?;
-            let payload = self.b.ins_binop(MirBinOp::Xor, w, one).map_err(mir)?;
-            let out = self.b.ins_binop(MirBinOp::BitAnd, payload, mask).map_err(mir)?;
-            return self.b.ins_cast(MirCastKind::Word, MirTy::NicheOpt, out).map_err(mir);
-        }
-        // Otherwise the two niche words differ in their bits (`Ok(())` is
-        // `0` in one and the `()` tuple in the other): never one as the other.
+        // The two niche words differ in their bits (an `Option`'s `None`
+        // is `0`, a niche `Result`'s `Err` has the low bit set): never one
+        // as the other.
         if is_niche(self.b.value_ty(v)) && is_niche(ty) && self.b.value_ty(v) != ty {
             return Err(format!("word {} as {ty}", self.b.value_ty(v)));
         }
@@ -3067,7 +3032,7 @@ impl Lower<'_> {
             HirKind::Make {
                 kind: MakeKind::Variant { variant, .. },
                 args,
-            } if let Some(niche) = self.inp.make_niches.get(&id.0).copied().or_else(|| self.expr_ty(id).and_then(|t| (self.inp.niche)(t))) => {
+            } if let Some(niche) = self.expr_ty(id).and_then(|t| (self.inp.niche)(t)) => {
                 self.make_niche(variant, args, niche)
             }
             HirKind::Make {
@@ -3991,7 +3956,6 @@ impl Lower<'_> {
             }
             match (self.value(arg)?, pair) {
                 (Val::Never, _) => return Ok(Val::Never),
-                (Val::V(v), false) if self.inp.unit_result_args.contains(&arg.0) => words.push(self.fit(v, MirTy::NicheOpt)?),
                 (Val::V(v), false) if boxed && self.b.value_ty(v) != MirTy::HeapRef => return Err("call argument boxed".into()),
                 // A bare type parameter of a shared generic: the word boxed
                 // to its tag, as HIR emission's `BoxValue`.
@@ -4529,19 +4493,9 @@ impl Lower<'_> {
         }
         // Niche `Option` / `Result` words compare as HIR emission pushes
         // them: each boxed to its `ObjEnum`, then the VM's structural `EQ`.
-        // Each word boxes by its own layout: a `Result<unit, E>` call
-        // result is a unit-`Result` niche, a literal `Result::Ok(())` a
-        // `Result` one (#1193).
-        let niche = |t: MirTy| matches!(t, MirTy::NicheOpt | MirTy::NicheRes);
-        if niche(lt) && niche(rt) && matches!(sym, "==" | "!=") {
-            let unit_ok = |this: &Self, id: HirId| {
-                this.expr_ty(id)
-                    .and_then(|t| crate::typechecking::ty::result_ok_err(strip_readonly(t)))
-                    .is_some_and(|(ok, _)| matches!(ok, Ty::Con(ref n) if n == crate::typechecking::ty::UNIT) || matches!(ok, Ty::Tuple(ref t) if t.is_empty()))
-            };
-            let (lu, ru) = (unit_ok(self, lhs), unit_ok(self, rhs));
-            let l = self.box_niche_as(self.niche_layout(lhs, lt)?, l, lu)?;
-            let r = self.box_niche_as(self.niche_layout(rhs, rt)?, r, ru)?;
+        if lt == rt && matches!(lt, MirTy::NicheOpt | MirTy::NicheRes) && matches!(sym, "==" | "!=") {
+            let l = self.box_niche(self.niche_layout(lhs, lt)?, l)?;
+            let r = self.box_niche(self.niche_layout(rhs, rt)?, r)?;
             return Ok(Val::V(self.b.ins_str_eq(l, r, sym == "!=").map_err(mir)?));
         }
         // A `bool`-backed scalar enum's words compare as their `0` / `1`.
@@ -6680,13 +6634,9 @@ impl Lower<'_> {
                 if !self.effect(*arg)? {
                     return Ok(Val::Never);
                 }
+                // A `Result<unit, E>` is a zero niche, never a `Result` one.
                 if niche == MirTy::NicheRes {
-                    // `Ok(())` carries the empty tuple object (`MakeTuple 0`).
-                    let obj = self.b.ins_alloc(MirAllocKind::Tuple, Vec::new()).map_err(mir)?;
-                    let obj = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?;
-                    let w = self.b.ins_cast(MirCastKind::Word, niche, obj).map_err(mir)?;
-                    self.known_niche.insert(w, (false, Some(obj)));
-                    return Ok(Val::V(w));
+                    return Err("unit payload in a Result niche".into());
                 }
                 return zero(self);
             }

@@ -99,8 +99,8 @@ pub(crate) fn niche_of(checker: &Checker, ty: &Ty) -> Layout {
     }
     if let Some((ok, err)) = result_ok_err(ty) {
         let err_heap = niche_heap_only(checker, &err);
-        // Only the `unit` constructor: `Result<Tuple([]), E>` is a
-        // heap-heap `NicheResult` whose `Ok` is the immortal `()` tuple.
+        // `()` is the `unit` type ([`crate::typechecking::ty::tuple`]),
+        // so every `Result<(), E>` with a heap `E` is this one layout.
         if matches!(strip_readonly(&ok), Ty::Con(n) if n == UNIT) && err_heap {
             return Layout::NicheUnitResult;
         }
