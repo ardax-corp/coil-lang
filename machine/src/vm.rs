@@ -2345,19 +2345,6 @@ impl<const S: usize> Machine<S> {
         self.maybe_gc_after_alloc(ip);
     }
 
-    /// Push `a + b` for two heap strings (`DynAdd`).
-    fn push_concat(&mut self, a: Value, b: Value, ip: usize) {
-        let tail = match Self::find_object_by_addr(&self.heap, b.raw() as u64) {
-            Some(Object::String(gb)) => gb,
-            _ => {
-                let joined = Self::object_string_value(&self.heap, &a)
-                    + &Self::object_string_value(&self.heap, &b);
-                return self.push_new_string(joined, ip);
-            }
-        };
-        self.push_concat_str(a, tail.as_ref().data.as_str(), ip);
-    }
-
     /// Push `head + tail`, appending in place when `head` ends at its
     /// buffer's tail ([`crate::memory::StrData::concat`]).
     fn push_concat_str(&mut self, head: Value, tail: &str, ip: usize) {

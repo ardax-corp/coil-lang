@@ -630,7 +630,12 @@
     /// still find the field stored under the program literal.
     #[test]
     fn concat_built_key_finds_literal_field() {
-        let strings = vec!["key".to_owned(), "k".to_owned(), "ey".to_owned()];
+        let strings = vec![
+            "key".to_owned(),
+            "k".to_owned(),
+            "ey".to_owned(),
+            "%s%s".to_owned(),
+        ];
         let code = vec![
             const_int(1),
             Byte::new(Instruction::STRING).with_operand_u32(0),
@@ -642,9 +647,10 @@
             Byte::new(Instruction::SetField),
             Byte::new(Instruction::POP),
             load(0),
+            Byte::new(Instruction::STRING).with_operand_u32(3),
             Byte::new(Instruction::STRING).with_operand_u32(1),
             Byte::new(Instruction::STRING).with_operand_u32(2),
-            Byte::new(Instruction::DynAdd),
+            Byte::new(Instruction::FORMAT).with_operand_u32(2),
             Byte::new(Instruction::GetField),
             Byte::new(Instruction::HALT),
         ];
@@ -2238,44 +2244,6 @@
         assert_eq!(s, expect);
     }
 
-    /// DynAdd string concat also goes through `push_new_string` (and
-    /// `continue`s the dispatch loop). Root-after-intern is required here too.
-    #[test]
-    fn dyn_add_strings_survives_gc_triggered_at_intern() {
-        let mut vm = Machine::<16>::default();
-        vm.heap_mut().set_gc_threshold_for_test(0);
-        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
-        vm.with_output(TestOutputBuf(Arc::clone(&buf)));
-
-        let n = 68;
-        let mut strings = vec!["x".to_string()];
-        for i in 0..n {
-            strings.push(format!("p{i}"));
-        }
-        let mut bytecode: Vec<Byte> = Vec::new();
-        bytecode.push(Byte::new(Instruction::STRING).with_operand_u32(0));
-        bytecode.push(Byte::new(Instruction::STORE).with_load_store_slot(0));
-        for i in 0..n {
-            bytecode.push(Byte::new(Instruction::LOAD).with_load_store_slot(0));
-            bytecode.push(Byte::new(Instruction::STRING).with_operand_u32((1 + i) as u32));
-            bytecode.push(Byte::new(Instruction::DynAdd));
-            bytecode.push(Byte::new(Instruction::STORE).with_load_store_slot(0));
-        }
-        bytecode.push(Byte::new(Instruction::LOAD).with_load_store_slot(0));
-        bytecode.push(Byte::new(Instruction::PRINT));
-        bytecode.push(Byte::new(Instruction::HALT));
-
-        vm.run_with_pool(&bytecode, &[], &strings, 0);
-        assert!(!vm.panicked());
-        let _ = vm.restore_output();
-        let s = String::from_utf8(take_test_output(buf)).expect("utf-8");
-        let mut expect = String::from("x");
-        for i in 0..n {
-            expect.push_str(&format!("p{i}"));
-        }
-        assert_eq!(s, expect);
-    }
-
     /// STRINGIFY shares `push_new_string`, GC at intern must not sweep
     /// the fresh display string before it is stacked.
     #[test]
@@ -3748,6 +3716,25 @@
     }
 
     #[test]
+    fn retired_dyn_ops_panic() {
+        for op in [
+            Instruction::DynAdd,
+            Instruction::DynSub,
+            Instruction::DynMul,
+            Instruction::DynDiv,
+            Instruction::DynMod,
+            Instruction::DynCmp,
+            Instruction::DynEq,
+            Instruction::DynNe,
+            Instruction::DynPrint,
+        ] {
+            let mut vm = Machine::<16>::default();
+            vm.run(&[const_int(1), const_int(2), Byte::new(op), Byte::new(Instruction::HALT)]);
+            assert!(vm.panicked());
+        }
+    }
+
+    #[test]
     fn retired_float_chain_store_panics() {
         let mut vm = Machine::<16>::default();
         vm.run(&[
@@ -3904,48 +3891,6 @@
             addr.raw() as u64 != 0,
             "MakePolyFn should push a non-null heap pointer"
         );
-    }
-
-    /// `DynAdd` with two boxed integers yields their sum as an unboxed int.
-    #[test]
-    fn dyn_add_ints() {
-        let int_tag: u32 = 0; // ValueTag::Int
-        let mut vm = Machine::<8>::default();
-        vm.run(&[
-            const_int(10),
-            Byte::new(Instruction::BoxValue).with_operand_u32(int_tag),
-            const_int(32),
-            Byte::new(Instruction::BoxValue).with_operand_u32(int_tag),
-            Byte::new(Instruction::DynAdd),
-            Byte::new(Instruction::HALT),
-        ]);
-        // DynAdd on two Int-tagged boxed values returns an unboxed int.
-        assert_eq!(vm.pop().as_int(), 42);
-    }
-
-    /// `DynAdd` with two boxed floats yields their sum as an unboxed float.
-    #[test]
-    fn dyn_add_floats() {
-        let float_tag: u32 = 1; // ValueTag::Float
-        let pool = [1.5f64.to_bits(), 2.5f64.to_bits()];
-        let mut vm = Machine::<8>::default();
-        vm.run_with_pool(
-            &[
-                // push 1.5 (pool[0])
-                Byte::new(Instruction::CONST).with_operand_u32(Byte::POOL_FLAG),
-                Byte::new(Instruction::BoxValue).with_operand_u32(float_tag),
-                // push 2.5 (pool[1])
-                Byte::new(Instruction::CONST).with_operand_u32(1 | Byte::POOL_FLAG),
-                Byte::new(Instruction::BoxValue).with_operand_u32(float_tag),
-                Byte::new(Instruction::DynAdd),
-                Byte::new(Instruction::HALT),
-            ],
-            &pool,
-            &[],
-            0,
-        );
-        // 1.5 + 2.5 = 4.0
-        assert_eq!(vm.pop().as_float(), 4.0);
     }
 
     /// `MakePolyFnCapture` + `CallIndirect` injects captured dictionaries when
@@ -5270,64 +5215,19 @@
         assert!(vm.panicked());
     }
 
-    /// BinSlotSlotConstJmpt: ADDF(slots) > pool float, jump when true (escape break).
+    /// Retired BinSlotSlotConstJmpt panics if executed.
     #[test]
-    fn bin_slot_slot_const_jmpt_addf_gtf() {
-        let four = 4.0f64.to_bits();
-        let three = 3.0f64.to_bits();
-        let one = 1.0f64.to_bits();
-        let two = 2.0f64.to_bits();
-        // 3.0+1.0=4.0; 4.0 > 4.0 is false → fall through → push 1
-        let desc_fall =
-            common::Byte::pack_bin_slot_slot_const_jmpf_desc(1, Instruction::GTF as u8, 2, 7);
+    fn retired_bin_slot_slot_const_jmpt_panics() {
         let mut vm = Machine::<16>::default();
-        vm.run_with_pool(
-            &[
-                Byte::new(Instruction::CONST).with_operand_u32(Byte::POOL_FLAG),
-                Byte::new(Instruction::STORE).with_operand_u32(0),
-                Byte::new(Instruction::CONST).with_operand_u32(Byte::POOL_FLAG | 1),
-                Byte::new(Instruction::STORE).with_operand_u32(1),
-                Byte::new(Instruction::BinSlotSlotConstJmpt).with_bin_slot_slot_const_jmpf(
-                    Instruction::ADDF as u8,
-                    0,
-                    3,
-                ),
-                const_int(1),
-                Byte::new(Instruction::HALT),
-                const_int(0),
-                Byte::new(Instruction::HALT),
-            ],
-            &[three, one, four, desc_fall],
-            &[],
-            0,
-        );
-        assert_eq!(vm.pop().as_int(), 1);
-
-        // 3.0+2.0=5.0; 5.0 > 4.0 → jump → push 0
-        let desc_jump =
-            common::Byte::pack_bin_slot_slot_const_jmpf_desc(1, Instruction::GTF as u8, 2, 7);
-        let mut vm = Machine::<16>::default();
-        vm.run_with_pool(
-            &[
-                Byte::new(Instruction::CONST).with_operand_u32(Byte::POOL_FLAG),
-                Byte::new(Instruction::STORE).with_operand_u32(0),
-                Byte::new(Instruction::CONST).with_operand_u32(Byte::POOL_FLAG | 1),
-                Byte::new(Instruction::STORE).with_operand_u32(1),
-                Byte::new(Instruction::BinSlotSlotConstJmpt).with_bin_slot_slot_const_jmpf(
-                    Instruction::ADDF as u8,
-                    0,
-                    3,
-                ),
-                const_int(1),
-                Byte::new(Instruction::HALT),
-                const_int(0),
-                Byte::new(Instruction::HALT),
-            ],
-            &[three, two, four, desc_jump],
-            &[],
-            0,
-        );
-        assert_eq!(vm.pop().as_int(), 0);
+        vm.run(&[
+            Byte::new(Instruction::BinSlotSlotConstJmpt).with_bin_slot_slot_const_jmpf(
+                Instruction::ADDF as u8,
+                0,
+                0,
+            ),
+            Byte::new(Instruction::HALT),
+        ]);
+        assert!(vm.panicked());
     }
 
     /// Packed LOAD/STORE n=2 preserves push/pop order (n=3 is covered separately).
