@@ -1,5 +1,7 @@
-// FFI: byte buffers handed to zlib. `crc32` reads a 64 KiB `Vec<byte>`
-// (`ConstBytes`) and `uncompress` writes one (`Bytes`), 20,000 times each.
+// FFI: byte buffers handed to zlib. A 1 MiB `Vec<byte>` goes to `crc32`
+// (`ConstBytes`) whole 200 times and for its first 4 KiB 20,000 times, and
+// `uncompress` (`Bytes`) writes 4 KiB into a 1 MiB `Vec<byte>` 20,000 times:
+// what the native touches is small next to what a copy would move.
 //
 // Run: coil --allow-dload z --dload-trusted z examples/perf/ffi_bytes.hy
 use ffi::declare;
@@ -12,6 +14,16 @@ use ffi::types::Ptr;
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};
+
+fn filled(int n, int step) -> Vec<byte> {
+    let out: Vec<byte> = Vec::with_capacity(n);
+    let i = 0;
+    while i < n {
+        out.push(((i * step + i / 256) % 251) as byte);
+        i = i + 1;
+    }
+    return out;
+}
 
 fn main() {
     let lib = match dload("z") {
@@ -33,37 +45,35 @@ fn main() {
         Result::Ok(i) => i,
         Result::Err(e) => panic e.message,
     };
-    let n = 65536;
-    let data: Vec<byte> = Vec::with_capacity(n);
-    let i = 0;
-    while i < n {
-        data.push(((i * 7 + i / 256) % 251) as byte);
-        i = i + 1;
-    }
-    let packed: Vec<byte> = Vec::with_capacity(n + 1024);
-    i = 0;
-    while i < n + 1024 {
-        packed.push(0 as byte);
-        i = i + 1;
-    }
-    let packed_len = [n + 1024];
-    let _ = invoke(lib, compress, (packed, packed_len, data, n));
-    let out: Vec<byte> = Vec::with_capacity(n);
-    i = 0;
-    while i < n {
-        out.push(0 as byte);
-        i = i + 1;
-    }
+    let big = 1048576;
+    let small = 4096;
+    let data = filled(big, 7);
     let crc = 0;
     let round = 0;
-    while round < 20000 {
-        crc = match invoke(lib, crc32, (crc, data, n)) {
+    while round < 200 {
+        crc = match invoke(lib, crc32, (crc, data, big)) {
             Result::Ok(c) => c,
             Result::Err(e) => panic e.message,
         };
-        let out_len = [n];
+        round = round + 1;
+    }
+    round = 0;
+    while round < 20000 {
+        crc = match invoke(lib, crc32, (crc, data, small)) {
+            Result::Ok(c) => c,
+            Result::Err(e) => panic e.message,
+        };
+        round = round + 1;
+    }
+    let packed = filled(small + 512, 0);
+    let packed_len = [small + 512];
+    let _ = invoke(lib, compress, (packed, packed_len, filled(small, 3), small));
+    let out = filled(big, 0);
+    round = 0;
+    while round < 20000 {
+        let out_len = [small];
         let _ = invoke(lib, uncompress, (out, out_len, packed, packed_len[0]));
         round = round + 1;
     }
-    write_all(stdout(), to_bytes(format("crc=%i out[4097]=%i\n", crc, out[4097] as int)));
+    write_all(stdout(), to_bytes(format("crc=%i out[4095]=%i\n", crc, out[4095] as int)));
 }
