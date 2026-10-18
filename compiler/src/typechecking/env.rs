@@ -340,7 +340,6 @@ pub(crate) fn substitute_vars(ty: &Ty, mapping: &HashMap<TyVarId, TyVarId>) -> T
             Box::new(substitute_vars(c, mapping)),
             args.iter().map(|t| substitute_vars(t, mapping)).collect(),
         ),
-        Ty::List(inner) => Ty::List(Box::new(substitute_vars(inner, mapping))),
         Ty::Sum { name, variants } => Ty::Sum {
             name: name.clone(),
             variants: variants

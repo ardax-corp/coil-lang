@@ -219,7 +219,7 @@ fn params_closed(ty: &Ty) -> bool {
     match strip_readonly(ty) {
         Ty::Var(_) => true,
         Ty::Fun(_, _) | Ty::Existential { .. } | Ty::Forall { .. } => false,
-        Ty::List(inner) | Ty::Constructor { owner: inner, .. } => params_closed(inner),
+        Ty::Constructor { owner: inner, .. } => params_closed(inner),
         Ty::App(_, args) => args.iter().all(params_closed),
         Ty::Tuple(items) => items.iter().all(params_closed),
         Ty::Record { fields } => fields.iter().all(|(_, f)| params_closed(f)),
@@ -2084,7 +2084,7 @@ impl Walk<'_> {
     fn elementwise(&self, id: HirId) -> bool {
         matches!(
             self.ty(id).map(strip_readonly),
-            Some(Ty::Tuple(_) | Ty::Array { .. } | Ty::List(_))
+            Some(Ty::Tuple(_) | Ty::Array { .. })
         ) || self.class(id) == Some(ValueClass::Aggregate)
     }
 

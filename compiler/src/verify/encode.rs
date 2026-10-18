@@ -1484,7 +1484,7 @@ fn shape(ty: &Ty) -> Shape {
                 _ => Shape::Other,
             }
         }
-        Ty::List(e) | Ty::Array { element: e, .. } => match shape(e) {
+        Ty::Array { element: e, .. } => match shape(e) {
             Shape::Int | Shape::Byte => Shape::Seq,
             _ => Shape::Other,
         },

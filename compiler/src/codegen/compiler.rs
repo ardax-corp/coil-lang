@@ -1895,7 +1895,7 @@ impl Compiler {
             }
             Ty::Fun(a, b) => Self::has_enum_over_var(checker, a) || Self::has_enum_over_var(checker, b),
             Ty::Tuple(items) => items.iter().any(|t| Self::has_enum_over_var(checker, t)),
-            Ty::List(inner) | Ty::Readonly(inner) => Self::has_enum_over_var(checker, inner),
+            Ty::Readonly(inner) => Self::has_enum_over_var(checker, inner),
             Ty::Array { element, .. } => Self::has_enum_over_var(checker, element),
             _ => false,
         }
@@ -3061,7 +3061,7 @@ impl Compiler {
             Ty::Fun(a, b) => Self::ty_has_var(a) || Self::ty_has_var(b),
             Ty::App(h, args) => Self::ty_has_var(h) || args.iter().any(Self::ty_has_var),
             Ty::Tuple(items) => items.iter().any(Self::ty_has_var),
-            Ty::List(inner) | Ty::Readonly(inner) => Self::ty_has_var(inner),
+            Ty::Readonly(inner) => Self::ty_has_var(inner),
             Ty::Array { element, .. } => Self::ty_has_var(element),
             Ty::Constructor { owner, .. } => Self::ty_has_var(owner),
             _ => false,

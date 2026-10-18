@@ -92,7 +92,7 @@ pub fn word_kind(checker: &Checker, ty: &Ty) -> u8 {
     }
     // A `Vec<T>` / `[T]` / `[T; N]` word is always an array object, whatever
     // `T` is (a fixed array stored as a word is materialized on the heap).
-    if matches!(ty, Ty::List(_) | Ty::Array { .. })
+    if matches!(ty, Ty::Array { .. })
         || matches!(ty, Ty::App(head, _) if matches!(head.as_ref(), Ty::Con(n) if n == common::BUILTIN_VEC_TYPE))
     {
         return common::WORD_POINTER;
@@ -121,7 +121,6 @@ pub fn array_elem_stamp(checker: &Checker, elem: &Ty) -> u8 {
 pub fn vec_elem_ty(checker: &Checker, ty: &Ty) -> Option<Ty> {
     let ty = apply_ty_prune(checker.subst(), ty);
     match strip_readonly(&ty) {
-        Ty::List(inner) => Some(inner.as_ref().clone()),
         Ty::App(head, args)
             if args.len() == 1
                 && matches!(head.as_ref(), Ty::Con(n) if n == common::BUILTIN_VEC_TYPE) =>
@@ -135,7 +134,7 @@ pub fn vec_elem_ty(checker: &Checker, ty: &Ty) -> Option<Ty> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::typechecking::ty::{int, option_ty, result_ty, string, unit};
+    use crate::typechecking::ty::{array, int, option_ty, result_ty, string, unit};
 
     #[test]
     fn layouts_follow_payload_heapness() {
@@ -170,7 +169,7 @@ mod tests {
         assert_eq!(kind(option_ty(int())), common::WORD_UNKNOWN);
         assert_eq!(kind(Ty::Con("T".into())), common::WORD_UNKNOWN);
         // Arrays are objects whatever their element type.
-        assert_eq!(kind(Ty::List(Box::new(Ty::Var(crate::typechecking::ty::TyVarId(0))))), common::WORD_POINTER);
+        assert_eq!(kind(array(Ty::Var(crate::typechecking::ty::TyVarId(0)))), common::WORD_POINTER);
     }
 
     #[test]

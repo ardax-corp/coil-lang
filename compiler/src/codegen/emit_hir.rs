@@ -1637,7 +1637,7 @@ impl Compiler {
             Ty::Con(n) => checker.class_has_drop(n) || checker.enum_has_drop(n),
             Ty::App(h, args) => Self::finalized(checker, h) || args.iter().any(|a| Self::finalized(checker, a)),
             Ty::Tuple(items) => items.iter().any(|t| Self::finalized(checker, t)),
-            Ty::List(inner) | Ty::Readonly(inner) => Self::finalized(checker, inner),
+            Ty::Readonly(inner) => Self::finalized(checker, inner),
             Ty::Array { element, .. } => Self::finalized(checker, element),
             Ty::Sum { name, .. } => checker.enum_has_drop(name),
             _ => false,
@@ -7461,7 +7461,6 @@ fn open_params(ty: &Ty, params: &[String]) -> Ty {
         },
         Ty::App(head, args) => Ty::App(Box::new(open(head)), args.iter().map(open).collect()),
         Ty::Fun(a, b) => Ty::Fun(Box::new(open(a)), Box::new(open(b))),
-        Ty::List(inner) => Ty::List(Box::new(open(inner))),
         Ty::Readonly(inner) => Ty::Readonly(Box::new(open(inner))),
         Ty::Tuple(items) => Ty::Tuple(items.iter().map(open).collect()),
         Ty::Array { element, length } => Ty::Array {
@@ -7483,7 +7482,6 @@ fn close_params(ty: &Ty, args: &[Ty]) -> Option<Ty> {
         Ty::Var(crate::typechecking::ty::TyVarId(v)) if *v > u32::MAX - 64 => args.get((u32::MAX - v) as usize)?.clone(),
         Ty::App(head, items) => Ty::App(Box::new(close(head)?), items.iter().map(close).collect::<Option<_>>()?),
         Ty::Fun(a, b) => Ty::Fun(Box::new(close(a)?), Box::new(close(b)?)),
-        Ty::List(inner) => Ty::List(Box::new(close(inner)?)),
         Ty::Readonly(inner) => Ty::Readonly(Box::new(close(inner)?)),
         Ty::Tuple(items) => Ty::Tuple(items.iter().map(close).collect::<Option<_>>()?),
         Ty::Array { element, length } => Ty::Array {

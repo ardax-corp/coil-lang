@@ -1474,7 +1474,6 @@ impl Checker {
             }
             Ty::Fun(_, _) => false,
             Ty::Array { element, .. } => self.is_thread_sendable_ty(element),
-            Ty::List(inner) => self.is_thread_sendable_ty(inner),
             Ty::Readonly(inner) => self.is_thread_sendable_ty(inner),
             Ty::Tuple(elems) => elems.iter().all(|t| self.is_thread_sendable_ty(t)),
             Ty::Record { fields } => fields.iter().all(|(_, t)| self.is_thread_sendable_ty(t)),
@@ -1939,7 +1938,7 @@ impl Checker {
             Ty::App(ctor, args) => {
                 Self::ty_contains_open_var(ctor) || args.iter().any(Self::ty_contains_open_var)
             }
-            Ty::List(inner) | Ty::Array { element: inner, .. } => Self::ty_contains_open_var(inner),
+            Ty::Array { element: inner, .. } => Self::ty_contains_open_var(inner),
             Ty::Tuple(elems) => elems.iter().any(Self::ty_contains_open_var),
             Ty::Record { fields } => fields.iter().any(|(_, t)| Self::ty_contains_open_var(t)),
             Ty::Constructor { owner, .. } => Self::ty_contains_open_var(owner),
@@ -2095,7 +2094,6 @@ impl Checker {
             Ty::Con(name) => self.bare_constructor_kind(name).unwrap_or(Kind::Type),
             Ty::App(..)
             | Ty::Fun(..)
-            | Ty::List(..)
             | Ty::Sum { .. }
             | Ty::Constructor { .. }
             | Ty::Tuple(_)
@@ -5916,7 +5914,7 @@ impl Checker {
                     Self::collect_ty_vars(i, out);
                 }
             }
-            Ty::List(inner) | Ty::Readonly(inner) => Self::collect_ty_vars(inner, out),
+            Ty::Readonly(inner) => Self::collect_ty_vars(inner, out),
             Ty::Array { element, .. } => Self::collect_ty_vars(element, out),
             Ty::Record { fields } => {
                 for (_, t) in fields {
@@ -5934,7 +5932,7 @@ impl Checker {
             Ty::Fun(a, b) => Self::ty_mentions_var(a) || Self::ty_mentions_var(b),
             Ty::App(h, args) => Self::ty_mentions_var(h) || args.iter().any(Self::ty_mentions_var),
             Ty::Tuple(items) => items.iter().any(Self::ty_mentions_var),
-            Ty::List(inner) | Ty::Readonly(inner) => Self::ty_mentions_var(inner),
+            Ty::Readonly(inner) => Self::ty_mentions_var(inner),
             Ty::Array { element, .. } => Self::ty_mentions_var(element),
             Ty::Record { fields } => fields.iter().any(|(_, t)| Self::ty_mentions_var(t)),
             Ty::Constructor { owner, .. } => Self::ty_mentions_var(owner),
@@ -11033,8 +11031,7 @@ impl Checker {
             Ty::App(head, _) => self.nominal_head_from_ty(head.as_ref()),
             Ty::Sum { name, .. } => Some(name),
             Ty::Constructor { owner, .. } => self.nominal_head_from_ty(owner.as_ref()),
-            Ty::List(_)
-            | Ty::Array { .. }
+            Ty::Array { .. }
             | Ty::Tuple(_)
             | Ty::Record { .. }
             | Ty::Existential { .. }

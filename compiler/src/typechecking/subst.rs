@@ -177,7 +177,6 @@ pub fn apply_ty(subst: &Subst, ty: &Ty) -> Ty {
             Box::new(apply_ty(subst, c)),
             args.iter().map(|t| apply_ty(subst, t)).collect(),
         ),
-        Ty::List(inner) => Ty::List(Box::new(apply_ty(subst, inner))),
         Ty::Sum { name, variants } => Ty::Sum {
             name: name.clone(),
             variants: variants
@@ -324,7 +323,7 @@ pub fn ftv(ty: &Ty) -> HashSet<TyVarId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::typechecking::ty::{float, int, list, string};
+    use crate::typechecking::ty::{array, float, int, string};
 
     fn v(i: u32) -> Ty {
         Ty::Var(TyVarId(i))
@@ -371,9 +370,9 @@ mod tests {
     }
 
     #[test]
-    fn apply_recurses_through_list() {
+    fn apply_recurses_through_array() {
         let s = Subst::singleton(TyVarId(0), int());
-        assert_eq!(apply_ty(&s, &list(v(0))), list(int()));
+        assert_eq!(apply_ty(&s, &array(v(0))), array(int()));
     }
 
     #[test]

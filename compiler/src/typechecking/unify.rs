@@ -184,7 +184,6 @@ pub fn unify_with(subst: &Subst, t1: &Ty, t2: &Ty) -> Result<Subst, UnifyError> 
         }
 
         // List types: unify the element type.
-        (Ty::List(a), Ty::List(b)) => unify_with(subst, a.as_ref(), b.as_ref()),
 
         // Type applications: must have the same constructor and matching
         // arity; then unify args pairwise.
@@ -545,7 +544,7 @@ mod tests {
     use super::*;
     use crate::typechecking::subst::apply_ty_prune;
     use crate::typechecking::ty::{
-        EnumVariantPayloadTy, array, array_fixed, boolean, float, int, list, string,
+        EnumVariantPayloadTy, array, array_fixed, boolean, float, int, string,
     };
 
     fn v(i: u32) -> Ty {
@@ -620,8 +619,8 @@ mod tests {
     }
 
     #[test]
-    fn unify_list_with_non_list_is_mismatch() {
-        let err = unify(&list(int()), &int()).unwrap_err();
+    fn unify_array_with_non_array_is_mismatch() {
+        let err = unify(&array(int()), &int()).unwrap_err();
         assert!(matches!(err, UnifyError::Mismatch { .. }));
     }
 
@@ -663,9 +662,9 @@ mod tests {
     }
 
     #[test]
-    fn occurs_check_rejects_var_inside_list() {
-        // α = List<α>
-        let err = unify(&v(0), &list(v(0))).unwrap_err();
+    fn occurs_check_rejects_var_inside_array() {
+        // α = [α]
+        let err = unify(&v(0), &array(v(0))).unwrap_err();
         assert!(matches!(err, UnifyError::Occurs { .. }));
     }
 
@@ -692,8 +691,8 @@ mod tests {
     }
 
     #[test]
-    fn unify_list_decomposes() {
-        let s = unify(&list(v(0)), &list(int())).unwrap();
+    fn unify_array_decomposes() {
+        let s = unify(&array(v(0)), &array(int())).unwrap();
         assert_eq!(apply_ty(&s, &v(0)), int());
     }
 

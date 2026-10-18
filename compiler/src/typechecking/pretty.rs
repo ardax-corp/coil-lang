@@ -90,10 +90,6 @@ fn format_ty_fqn_inner(ty: &Ty, nominal_modules: &HashMap<String, String>) -> Op
                 .join(", ");
             Some(format!("{}<{}>", head, inner))
         }
-        Ty::List(inner) => Some(format!(
-            "[{}]",
-            format_ty_fqn_inner(inner, nominal_modules)?
-        )),
         Ty::Sum { name, variants } => {
             let head = qualify_nominal(name, nominal_modules);
             if name == common::BUILTIN_OPTION_ENUM {
@@ -226,7 +222,6 @@ fn format_ty_renamed(ty: &Ty, rename: &mut HashMap<TyVarId, String>, next: &mut 
                 format!("{}<{}>", head, inner)
             }
         }
-        Ty::List(inner) => format!("[{}]", format_ty_renamed(inner, rename, next)),
         // A builtin `Option` / `Result` construct carries its structural
         // sum: print it as written (`Result<int, a>`).
         Ty::Sum { name, variants } if common::is_poly_builtin_enum(name) => {
@@ -413,7 +408,6 @@ impl fmt::Display for Ty {
                     write!(f, "{}<{}>", c, inner)
                 }
             }
-            Ty::List(inner) => write!(f, "[{}]", inner),
             Ty::Sum { name, variants } => {
                 write!(f, "enum {} {{ ", name)?;
                 for (i, (vname, payload)) in variants.iter().enumerate() {
@@ -540,7 +534,7 @@ impl fmt::Display for Scheme {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::typechecking::ty::{TyVarId, float, int, list, option_ty, string};
+    use crate::typechecking::ty::{TyVarId, float, int, option_ty, string};
 
     #[test]
     fn display_var() {
@@ -580,11 +574,6 @@ mod tests {
     fn display_app_with_args() {
         let ty = Ty::App(Box::new(Ty::Con("Foo".into())), vec![int(), string()]);
         assert_eq!(format!("{}", ty), "Foo<int, string>");
-    }
-
-    #[test]
-    fn display_list() {
-        assert_eq!(format!("{}", list(int())), "[int]");
     }
 
     #[test]
