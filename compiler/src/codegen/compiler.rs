@@ -56,6 +56,9 @@ pub(super) struct SynthCallee {
     pub raw: bool,
     /// The two-word kind the callee returns as `[payload, tag]`.
     pub pair: Option<String>,
+    /// A host native by its registered name, whatever the name resolves
+    /// to in the module being compiled.
+    pub host: bool,
 }
 
 /// One step of building trait dictionaries, a stack program over words:
@@ -2111,7 +2114,7 @@ impl Compiler {
         let root = b.block(vec![ret], None, crate::typechecking::ty::never());
         let hir = Self::synth_generic(b.finish(root));
         let pair = self.two_word_return_kind(&req.src);
-        self.hir_synth_callees.insert(req.src.clone(), SynthCallee { dicts: dict, raw: false, pair });
+        self.hir_synth_callees.insert(req.src.clone(), SynthCallee { dicts: dict, pair, ..SynthCallee::default() });
         // Its callers pass the instance's dictionary after the arguments;
         // it builds its own.
         self.emit_synth_fn(&req.name, &hir, calls, true);
@@ -2208,7 +2211,7 @@ impl Compiler {
         let root = b.block(vec![ret], None, crate::typechecking::ty::never());
         let hir = Self::synth_generic(b.finish(root));
         let pair = self.two_word_return_kind(fqn);
-        self.hir_synth_callees.insert(fqn.to_string(), SynthCallee { dicts: Vec::new(), raw, pair });
+        self.hir_synth_callees.insert(fqn.to_string(), SynthCallee { raw, pair, ..SynthCallee::default() });
         // No `CALL` names it: dictionaries hold it.
         self.emit_synth_fn(&adapter, &hir, calls, true);
         self.hir_synth_callees.clear();
@@ -3962,9 +3965,10 @@ impl Compiler {
 
     /// Emit the bodies of the compiler-provided primitive instances, each
     /// built as HIR ([`crate::hir::synth::builtin_entry`]) and lowered like
-    /// any other body. The stream `Read` / `Write` entries stay stack IL:
-    /// their natives' registry names (`read`, `write`) can be shadowed by a
-    /// user function of the same name, which a named HIR call would reach.
+    /// any other body. The stream `Read` / `Write` entries call their
+    /// natives by registry name (`read`, `write`) as host natives
+    /// ([`SynthCallee::host`]): a user function of the same name in the
+    /// module being compiled does not shadow them.
     ///
     /// Shared generic bodies receive boxed type-parameter values, so numeric
     /// thunks unbox their two arguments and re-box a type-parameter result.
@@ -4178,27 +4182,21 @@ impl Compiler {
             }
         }
 
-        // Stream Read/Write → same HostInvoke as free `read`/`write`; unbox dict-ABI args first.
-        for (class, method, native_name, arity) in [
-            ("Read", "read", "read", 2u32),
-            ("Write", "write", "write", 2u32),
-        ] {
+        // `Stream` `Read` / `Write`: the free `read` / `write`'s native on
+        // the unboxed stream and buffer. The natives are named as callees
+        // the body reaches whatever this module calls `read` / `write`.
+        let io_err = Ty::Con(common::BUILTIN_IO_ERROR_ENUM.into());
+        let bytes = coil_ty::vec_app_ty(coil_ty::byte());
+        for (class, method, ok) in [("Read", "read", coil_ty::option_app_ty(int.clone())), ("Write", "write", int.clone())] {
             let fqn = Generics::builtin_instance_fqn(class, "Stream", method);
-            if self.functions.contains_key(&fqn) {
+            if self.native_id(method).is_none() {
                 continue;
             }
-            let Some(native_id) = self.native_id(native_name) else {
-                continue;
-            };
-            self.bind_function_entry(fqn);
-            self.bytecode
-                .push(Byte::new(Instruction::CONST).with_value_u32(native_id as u32));
-            self.bytecode.push_load(0);
-            self.bytecode.push_unbox_value(ValueTag::Instance as u32);
-            self.bytecode.push_load(1);
-            self.bytecode.push_unbox_value(ValueTag::Array as u32);
-            self.bytecode.push_host_invoke(arity);
-            self.bytecode.push_return();
+            let params = [(coil_ty::stream_ty(), tag_of(ValueTag::Instance)), (bytes.clone(), tag_of(ValueTag::Array))];
+            let ret = coil_ty::result_app_ty(ok, io_err.clone());
+            self.hir_synth_callees.insert(method.to_string(), SynthCallee { host: true, ..SynthCallee::default() });
+            self.emit_builtin_entry(&fqn, &params, ret.clone(), None, |b, a| b.call(method, a, ret));
+            self.hir_synth_callees.clear();
         }
 
         // `into`: the unboxed word cast, boxed again when its tag changes.
