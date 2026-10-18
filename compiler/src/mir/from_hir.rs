@@ -6634,13 +6634,9 @@ impl Lower<'_> {
                 if !self.effect(*arg)? {
                     return Ok(Val::Never);
                 }
+                // A `Result<unit, E>` is a zero niche, never a `Result` one.
                 if niche == MirTy::NicheRes {
-                    // `Ok(())` carries the empty tuple object (`MakeTuple 0`).
-                    let obj = self.b.ins_alloc(MirAllocKind::Tuple, Vec::new()).map_err(mir)?;
-                    let obj = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?;
-                    let w = self.b.ins_cast(MirCastKind::Word, niche, obj).map_err(mir)?;
-                    self.known_niche.insert(w, (false, Some(obj)));
-                    return Ok(Val::V(w));
+                    return Err("unit payload in a Result niche".into());
                 }
                 return zero(self);
             }
