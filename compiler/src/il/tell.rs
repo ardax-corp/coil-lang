@@ -11,8 +11,9 @@
 //! Both halves are under the differential gate in `compiler/tests/cursor_model.rs`:
 //! `tell_cursor_model_matches_vm` diffs bytecode predictions against
 //! `machine::cursor_trace`, and `tell_symbolic_il_matches_bytecode` diffs
-//! post-opt IL tell against bytecode tell via lower's `pre_to_post` map. The
-//! symbolic-IL path still feeds cursor-safe pre-lower optimizations.
+//! post-opt IL tell against bytecode tell via lower's `pre_to_post` map, so a
+//! lowering or fusion that changes a body's cursor effect fails the gate. No
+//! compiler pass consumes these predictions; the gate is the only user.
 //!
 //! Direct `CALL` / `Entry{Call}` is unary (`push 1`) unless the fall-through is
 //! `PairToHeap`: codegen emits that pair immediately after a `ReturnPair`
@@ -85,28 +86,6 @@ pub struct TellInfo {
 impl TellInfo {
     pub fn tell_before(&self, pc: usize) -> Tell {
         self.tell_in.get(pc).copied().unwrap_or(Tell::Unknown)
-    }
-
-    /// Share of instructions the analysis resolved (diagnostics / tests).
-    pub fn coverage(&self) -> f64 {
-        if self.tell_in.is_empty() {
-            return 1.0;
-        }
-        let known = self.tell_in.iter().filter(|t| t.known().is_some()).count();
-        known as f64 / self.tell_in.len() as f64
-    }
-
-    /// True when deleting a one-value producer followed by `STORE slot` keeps
-    /// the shared cursor unchanged at the pair's continuation.
-    pub fn can_remove_one_value_store(&self, producer_idx: usize, slot: u32) -> bool {
-        let Some(before) = self.tell_before(producer_idx).known() else {
-            return false;
-        };
-        let after_store = apply(
-            Tell::Known(before.saturating_add(1)),
-            Effect::DeltaThenFloor(-1, slot.saturating_add(1)),
-        );
-        after_store == Some(Tell::Known(before))
     }
 }
 
@@ -884,22 +863,6 @@ mod tests {
         let info = analyze_at(&code, &[], 0, 3);
         assert_eq!(info.tell_before(0).known(), Some(3));
         assert_eq!(info.tell_before(1).known(), Some(4));
-    }
-
-    #[test]
-    fn symbolic_il_store_pair_proof_requires_existing_cursor_floor() {
-        let loc = common::DebugLoc::unknown();
-        let ops = vec![
-            IlOp::Const { imm: 1, loc },
-            IlOp::StorePop { slot: 5, loc },
-            IlOp::Return { loc, ret_words: 1},
-        ];
-
-        let low = analyze_il_at(&ops, 0);
-        assert!(!low.can_remove_one_value_store(0, 5));
-
-        let high = analyze_il_at(&ops, 6);
-        assert!(high.can_remove_one_value_store(0, 5));
     }
 
     /// Symbolic JMPF joins both edges with the same post-pop cursor.
