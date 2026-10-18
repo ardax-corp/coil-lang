@@ -28,3 +28,26 @@ test("a vec of tuples with unit elements") {
     assert!(n == 2);
     assert!(u == ());
 }
+
+fn take(unit u) -> int {
+    return 7;
+}
+
+fn mk(int n) -> ((), int, ()) {
+    return ((), n, ());
+}
+
+test("a unit element is read, returned and iterated") {
+    let pair = ((), 1);
+    assert!(pair[0] == ());
+    assert!(take(pair[0]) == 7);
+    let (a, b, c) = mk(3);
+    assert!(b == 3);
+    assert!(a == c);
+    let v: Vec<((), int)> = [((), 1), ((), 2)];
+    let s = 0;
+    for (u, n) in v {
+        s = s + n;
+    }
+    assert!(s == 3);
+}
