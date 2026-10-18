@@ -3,26 +3,31 @@
 use common::int_arith::{self, IntTrap};
 use common::{Value, dense};
 
+use crate::arith::{self, Cmp, FloatOp, IntOp};
+
 /// A dense binary op; an int op that overflows or divides by zero traps.
+/// The 64-bit lanes are [`crate::arith`], as on every other VM path.
 #[inline(always)]
 pub fn eval_bin(kind: u8, a: Value, b: Value) -> Result<Value, IntTrap> {
-    let i64_op = |f: fn(i64, i64) -> int_arith::IntResult| f(a.as_int(), b.as_int()).map(Value::from);
+    let i64_op = |op| arith::int(op, a.as_int(), b.as_int()).map(Value::from);
+    let f64_op = |op| Value::from(arith::float(op, a.as_float(), b.as_float()));
     Ok(match kind {
-        dense::IADD64 => return i64_op(int_arith::add),
-        dense::ISUB64 => return i64_op(int_arith::sub),
-        dense::IMUL64 => return i64_op(int_arith::mul),
-        dense::IDIV64 => return i64_op(int_arith::div),
-        dense::IREM64 => return i64_op(int_arith::rem),
-        dense::IAND64 => Value::from(a.as_int() & b.as_int()),
-        dense::IOR64 => Value::from(a.as_int() | b.as_int()),
-        dense::IXOR64 => Value::from(a.as_int() ^ b.as_int()),
-        dense::ISHL64 => return i64_op(int_arith::shl),
-        dense::ISHR64 => return i64_op(int_arith::shr),
-        dense::FADD64 => Value::from(a.as_float() + b.as_float()),
-        dense::FSUB64 => Value::from(a.as_float() - b.as_float()),
-        dense::FMUL64 => Value::from(a.as_float() * b.as_float()),
-        dense::FDIV64 => Value::from(a.as_float() / b.as_float()),
-        dense::FREM64 => Value::from(a.as_float() % b.as_float()),
+        dense::IADD64 => return i64_op(IntOp::Add),
+        dense::ISUB64 => return i64_op(IntOp::Sub),
+        dense::IMUL64 => return i64_op(IntOp::Mul),
+        dense::IDIV64 => return i64_op(IntOp::Div),
+        dense::IREM64 => return i64_op(IntOp::Rem),
+        dense::IAND64 => return i64_op(IntOp::BitAnd),
+        dense::IOR64 => return i64_op(IntOp::BitOr),
+        dense::IXOR64 => return i64_op(IntOp::Xor),
+        dense::ISHL64 => return i64_op(IntOp::Shl),
+        dense::ISHR64 => return i64_op(IntOp::Shr),
+        dense::FADD64 => f64_op(FloatOp::Add),
+        dense::FSUB64 => f64_op(FloatOp::Sub),
+        dense::FMUL64 => f64_op(FloatOp::Mul),
+        dense::FDIV64 => f64_op(FloatOp::Div),
+        dense::FREM64 => f64_op(FloatOp::Rem),
+        // The 32-bit lanes are wire ISA (minor 6); no compiler emits them.
         dense::IADD32 => return i32_bin(a, b, i32::checked_add),
         dense::ISUB32 => return i32_bin(a, b, i32::checked_sub),
         dense::IMUL32 => return i32_bin(a, b, i32::checked_mul),
@@ -60,44 +65,34 @@ fn f32_bin(a: Value, b: Value, f: fn(f32, f32) -> f32) -> Value {
 #[inline(always)]
 pub fn eval_cmp(kind: u8, a: Value, b: Value) -> Value {
     let (lane, pred) = dense::unpack_cmp(kind);
+    let Some(c) = cmp_pred(pred) else {
+        return Value::from(false);
+    };
     let flag = match lane {
-        dense::CMP_I64 => icmp(a.as_int(), b.as_int(), pred),
-        dense::CMP_F64 => fcmp(a.as_float(), b.as_float(), pred),
-        dense::CMP_I32 => icmp(i64::from(a.as_int() as i32), i64::from(b.as_int() as i32), pred),
+        dense::CMP_I64 => arith::cmp(c, a.as_int(), b.as_int()),
+        dense::CMP_F64 => arith::cmp(c, a.as_float(), b.as_float()),
+        dense::CMP_I32 => arith::cmp(c, a.as_int() as i32, b.as_int() as i32),
         dense::CMP_F32 => {
             let x = f32::from_bits(a.as_int() as u32);
             let y = f32::from_bits(b.as_int() as u32);
-            fcmp(x as f64, y as f64, pred)
+            arith::cmp(c, x, y)
         }
         _ => false,
     };
     Value::from(flag)
 }
 
-#[inline]
-fn icmp(a: i64, b: i64, pred: u8) -> bool {
-    match pred {
-        dense::CMP_LT => a < b,
-        dense::CMP_LE => a <= b,
-        dense::CMP_GT => a > b,
-        dense::CMP_GE => a >= b,
-        dense::CMP_EQ => a == b,
-        dense::CMP_NE => a != b,
-        _ => false,
-    }
-}
-
-#[inline]
-fn fcmp(a: f64, b: f64, pred: u8) -> bool {
-    match pred {
-        dense::CMP_LT => a < b,
-        dense::CMP_LE => a <= b,
-        dense::CMP_GE => a >= b,
-        dense::CMP_GT => a > b,
-        dense::CMP_EQ => a == b,
-        dense::CMP_NE => a != b,
-        _ => false,
-    }
+#[inline(always)]
+fn cmp_pred(pred: u8) -> Option<Cmp> {
+    Some(match pred {
+        dense::CMP_LT => Cmp::Lt,
+        dense::CMP_LE => Cmp::Le,
+        dense::CMP_GT => Cmp::Gt,
+        dense::CMP_GE => Cmp::Ge,
+        dense::CMP_EQ => Cmp::Eq,
+        dense::CMP_NE => Cmp::Ne,
+        _ => return None,
+    })
 }
 
 /// A dense unary op; negating `int::MIN` traps.

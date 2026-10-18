@@ -4024,24 +4024,50 @@ impl Compiler {
         if args.len() != hint.arity || (method && !hint.has_receiver) {
             return Err("callee-trait");
         }
-        // Words pass as the AST compiles them; a ground enum's layout may
-        // differ from the instance's, an open one is the shared layout the
-        // dictionary's adapter speaks.
-        let word = |id: HirId| {
+        // The trait's own signature: a ground enum it names with no type
+        // variable passes in that type's layout on both sides (the instance
+        // entry's own); one naming a variable passes in the shared (boxed)
+        // layout the dictionary's adapter speaks (#1433).
+        let member = name.rsplit(['.', ':']).next().unwrap_or(name);
+        let sig = self
+            .checker
+            .typeclass_method_scheme(&hint.class, member)
+            .map(|scheme| Self::fun_param_and_ret_tys(&scheme.ty))
+            .filter(|(params, _)| params.len() == args.len());
+        // Words pass as the AST compiles them; an open enum is the shared
+        // layout the dictionary's adapter speaks.
+        let word = |id: HirId, declared: Option<&Ty>| {
             let ty = Self::hir_ty(hir, id).ok_or("callee-signature")?;
             match lower::classify(&self.checker, ty) {
                 Some(ValueClass::Enum) if !crate::hir::layout::ty_is_closed(&apply_ty_prune(self.checker.subst(), ty)) => {
                     Ok(self.value_layout(ty))
                 }
-                Some(ValueClass::Enum) | None => Err("callee-trait"),
+                Some(ValueClass::Enum) => match declared {
+                    Some(d) if crate::typechecking::subst::ftv(d).is_empty() => Ok(self.value_layout(ty)),
+                    Some(_) => Ok(ValueLayout::Boxed),
+                    None => Err("callee-trait"),
+                },
+                None => Err("callee-trait"),
                 Some(_) => Ok(self.value_layout(ty)),
             }
         };
         let Some(dict) = self.lookup_slot(&format!("__dict{}", hint.dict_index)) else {
             return self.hir_ground_bound_call(hir, call, name, &hint).map(Some);
         };
-        let params = args.iter().map(|&arg| word(arg)).collect::<Result<Vec<_>, _>>()?;
-        let ret = word(call)?;
+        let params = args
+            .iter()
+            .enumerate()
+            .map(|(i, &arg)| {
+                let layout = word(arg, sig.as_ref().map(|(p, _)| &p[i]))?;
+                // A niche argument the adapter takes boxed is not converted
+                // on the way in.
+                match Self::hir_ty(hir, arg) {
+                    Some(ty) if layout != self.value_layout(ty) => Err("callee-trait"),
+                    _ => Ok(layout),
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let ret = word(call, sig.as_ref().map(|(_, r)| r))?;
         Ok(Some(HirCall {
             key: String::new(),
             pair: None,
@@ -4254,30 +4280,32 @@ impl Compiler {
                 Some(_) => Ok(self.value_layout(ty)),
             }
         };
+        // A niche enum is the instance entry's own word when its declared
+        // type there lays out the same.
+        let own_niche = |id: HirId, declared: Option<Ty>| {
+            let ty = Self::hir_ty(hir, id).ok_or("callee-signature")?;
+            let layout = self.value_layout(ty);
+            let declared = declared.ok_or("callee-trait")?;
+            if !(layout.is_niche_option() || layout.is_niche_result())
+                || Self::ty_has_var(&declared)
+                || self.value_layout(&declared) != layout
+            {
+                return Err("callee-trait");
+            }
+            Ok(layout)
+        };
+        let declared_params = self.checker.fn_param_tys(fqn);
         let params = args
             .iter()
             .enumerate()
             .map(|(i, &arg)| match sig.and_then(|s| s.params.get(i).copied().flatten()) {
                 Some(layout) => Ok(layout),
-                None => word(arg),
+                None => word(arg).or_else(|_| own_niche(arg, declared_params.as_ref().and_then(|p| p.get(i).cloned()))),
             })
             .collect::<Result<Vec<_>, _>>()?;
-        // A niche enum result is the instance entry's own return word when
-        // its declared return type lays out the same.
         let ret = match sig.and_then(|s| s.ret).map_or_else(|| word(call), Ok) {
             Ok(ret) => ret,
-            Err(_) => {
-                let ty = Self::hir_ty(hir, call).ok_or("callee-signature")?;
-                let layout = self.value_layout(ty);
-                let declared = self.checker.fn_return_ty(fqn).ok_or("callee-trait")?;
-                if !(layout.is_niche_option() || layout.is_niche_result())
-                    || Self::ty_has_var(&declared)
-                    || self.value_layout(&declared) != layout
-                {
-                    return Err("callee-trait");
-                }
-                layout
-            }
+            Err(_) => own_niche(call, self.checker.fn_return_ty(fqn))?,
         };
         Ok((params, ret))
     }

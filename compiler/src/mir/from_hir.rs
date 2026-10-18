@@ -113,6 +113,9 @@ pub struct HirBoundCall {
     pub dict: u32,
     /// The method's slot in the dictionary.
     pub method: u32,
+    /// The result is a ground niche `Option` / `Result` the dictionary's
+    /// adapter returns boxed (the trait types it with a type variable).
+    pub boxed_ret: bool,
 }
 
 /// One step of building instance dictionaries, as codegen plans them
@@ -4297,13 +4300,19 @@ impl Lower<'_> {
     /// heap word.
     fn bound_call(&mut self, id: HirId, args: &[HirId], bound: HirBoundCall) -> Result<Val, Refusal> {
         self.raw_host = false;
-        if self.inp.pair_tys.contains_key(&id.0) {
+        let ty = self.expr_ty(id).ok_or("call type")?;
+        // A two-word value comes back boxed, as the adapter's one-word ABI
+        // returns it: the word, unboxed where a pair is read.
+        let boxed_pair = self.inp.pair_tys.contains_key(&id.0);
+        if boxed_pair && (self.inp.boxed_view)(ty, None).is_none() {
             return Err("bound call pair".into());
         }
-        let ty = self.expr_ty(id).ok_or("call type")?;
         let unit = is_unit(ty);
+        let niche = if bound.boxed_ret { Some(self.inp.word(ty).ok_or("call type")?) } else { None };
         let ret = if unit {
             MirTy::I64
+        } else if niche.is_some() || boxed_pair {
+            MirTy::HeapRef
         } else {
             // An enum of no pair or niche layout comes back as its boxed
             // object (an open `Result<T, E>`, the instance's shared layout).
@@ -4324,6 +4333,9 @@ impl Lower<'_> {
         let slot = self.b.ins_const(MirConst::I64(i64::from(bound.method))).map_err(mir)?;
         let callee = self.b.ins_index(dict, slot, MirTy::I64, false).map_err(mir)?;
         let dest = self.at_expr(id, |l| l.b.ins_call_indirect(callee, words, ret).map_err(mir))?;
+        if let Some(want) = niche {
+            return self.unbox_niche(dest, want);
+        }
         Ok(if unit { Val::Unit } else { Val::V(dest) })
     }
 
