@@ -4019,16 +4019,33 @@ impl Compiler {
     /// A bound method call in a mono clone: `T` is concrete here, so the
     /// instance is looked up from the ground argument types and called
     /// directly, as `try_emit_ground_bound_method_nodes`.
-    /// The instance types of trait `class`'s method call `call` with no
-    /// arguments: its `n` trait parameters bound by the method's result type
-    /// against the call's (ground) type.
-    fn hir_bound_call_result_lookup(&self, hir: &HirBody, call: HirId, class: &str, method: &str, n: usize) -> Option<Vec<Ty>> {
+    /// The instance types of trait `class`'s method call `call` when its
+    /// leading arguments do not name them: its `n` trait parameters bound by
+    /// the method's result type against the call's (ground) type, then by
+    /// its parameter types against `args` (`fn wrap(A x, int b) -> B` binds
+    /// `B` from the result and `A` from `x`, #1442).
+    fn hir_bound_call_result_lookup(
+        &self,
+        hir: &HirBody,
+        call: HirId,
+        args: &[HirId],
+        class: &str,
+        method: &str,
+        n: usize,
+    ) -> Option<Vec<Ty>> {
         let scheme = self.checker.typeclass_method_scheme(class, method)?;
         let vars = scheme.bounds.get(..n)?;
-        let (_, ret) = Self::fun_param_and_ret_tys(&scheme.ty);
+        let (params, ret) = Self::fun_param_and_ret_tys(&scheme.ty);
         let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, call)?);
         let mut map = HashMap::new();
         Self::bind_scheme_vars(&ret, &ty, &mut map);
+        if params.len() == args.len() {
+            for (param, &arg) in params.iter().zip(args) {
+                if let Some(arg_ty) = Self::hir_ty(hir, arg) {
+                    Self::bind_scheme_vars(param, &apply_ty_prune(self.checker.subst(), arg_ty), &mut map);
+                }
+            }
+        }
         vars.iter()
             .map(|v| map.get(v).filter(|t| crate::hir::layout::ty_is_closed(t)).map(Self::show_lookup_ty_for_instance))
             .collect()
@@ -4083,7 +4100,7 @@ impl Compiler {
             // No argument names the instance (`default()`): the method's
             // signature against the call's result type does.
             let lookup = self
-                .hir_bound_call_result_lookup(hir, call, &hint.class, method, class_def.type_params.len())
+                .hir_bound_call_result_lookup(hir, call, args, &hint.class, method, class_def.type_params.len())
                 .ok_or("callee-trait")?;
             (lookup, &[])
         } else {
