@@ -91,6 +91,25 @@ fn resolve_parallel(mut moves: Vec<(u8, u8)>, scratch: u8) -> Vec<(u8, u8)> {
     out
 }
 
+/// The values `term` reads, counting the payloads a `JumpIfMatch` leaves
+/// on the stack.
+pub(super) fn term_uses(term: &Terminator) -> Vec<ValueId> {
+    match term {
+        Terminator::Br { cond, .. } => vec![*cond],
+        Terminator::JumpIfMatch {
+            scrutinee,
+            payloads,
+            ..
+        } => {
+            let mut v = vec![*scrutinee];
+            v.extend(payloads.iter().copied());
+            v
+        }
+        Terminator::Return { lo, hi } => lo.iter().chain(hi.iter()).copied().collect(),
+        Terminator::Jump { .. } | Terminator::Unreachable => Vec::new(),
+    }
+}
+
 /// The `Const` at `def` as an `i16` immediate (`Bool` as 0 / 1).
 pub(super) fn const_i16(func: &MirFunc, def: Option<(BlockId, usize)>) -> Option<i16> {
     let (bid, idx) = def?;

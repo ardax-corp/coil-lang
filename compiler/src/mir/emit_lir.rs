@@ -18,7 +18,7 @@ use super::emit::{
 };
 use super::emit_common::{
     const_i16, is_jim_term_payload, last_arm_payloads, phi_moves, push_const, stack_bin_op,
-    stack_cmp_op,
+    stack_cmp_op, term_uses,
 };
 use super::func::MirFunc;
 use super::inst::{
@@ -293,7 +293,7 @@ impl EmitPlan {
                 }
             }
             if let Some(term) = &block.term {
-                for v in term_values(term) {
+                for v in term_uses(term) {
                     uses[v.index()] += 1;
                 }
             }
@@ -503,9 +503,9 @@ fn stack_scrutinees(func: &MirFunc, preds: &[Vec<BlockId>], def: &[Option<(Block
             matches!(i, MirInst::MatchPayload { dest, scrutinee: src, .. } if src == s && payloads.contains(dest))
         });
         let uses_ok = func.blocks.iter().filter(|b| b.id != block.id).all(|b| {
-            let term_uses = b.term.as_ref().is_some_and(|t| term_values(t).contains(s));
+            let in_term = b.term.as_ref().is_some_and(|t| term_uses(t).contains(s));
             let mut seen_other = false;
-            let mut ok = !term_uses;
+            let mut ok = !in_term;
             for inst in b.insts.iter().filter(|i| !i.is_phi() || i.operands().contains(s)) {
                 match inst {
                     MirInst::MatchPayload { scrutinee: src, .. } if src == s => {
@@ -634,7 +634,7 @@ fn keep_memory_order(func: &MirFunc, tree: &mut [bool], fused: &[bool]) {
                 order.push(k);
             }
             if let Some(term) = &block.term {
-                for v in term_values(term) {
+                for v in term_uses(term) {
                     visit(v, &at, insts, &is_inline, &mut order);
                 }
             }
@@ -713,7 +713,7 @@ fn keep_payload_first(func: &MirFunc, tree: &mut [bool], fused: &[bool]) {
                 .iter()
                 .filter(|i| !i.is_phi() && !matches!(i, MirInst::MatchPayload { .. }) && !is_inline(i.dest()))
                 .map(|i| i.operands())
-                .chain(block.term.as_ref().map(term_values));
+                .chain(block.term.as_ref().map(term_uses));
             for operands in tops {
                 let mut seq = Vec::new();
                 for op in operands {
@@ -737,23 +737,6 @@ fn fused_cmp_dests(func: &MirFunc, cmp_dests: &[Option<ValueId>]) -> Vec<bool> {
         fused[d.index()] = true;
     }
     fused
-}
-
-fn term_values(term: &Terminator) -> Vec<ValueId> {
-    match term {
-        Terminator::Br { cond, .. } => vec![*cond],
-        Terminator::JumpIfMatch {
-            scrutinee,
-            payloads,
-            ..
-        } => {
-            let mut v = vec![*scrutinee];
-            v.extend(payloads.iter().copied());
-            v
-        }
-        Terminator::Return { lo, hi } => lo.iter().chain(hi.iter()).copied().collect(),
-        _ => Vec::new(),
-    }
 }
 
 /// `JumpIfMatch` leaves the scrutinee (miss) or payloads (taken) on the
@@ -943,7 +926,7 @@ fn assign_shared(func: &MirFunc, plan: &EmitPlan) -> Result<(Vec<u8>, u8), Lower
                 Terminator::JumpIfMatch { scrutinee, payloads, .. } => {
                     (payloads.iter().copied().filter(|&v| slot(v)).collect(), vec![*scrutinee])
                 }
-                other => (Vec::new(), term_values(other)),
+                other => (Vec::new(), term_uses(other)),
             };
             let mut uses = Vec::new();
             for v in used {
