@@ -9,7 +9,8 @@ use crate::il::{IlJumpKind, IlOp, Label};
 use super::call_convoy::{is_tail_call_inst, ConvoyPlan};
 use super::destprop::sink_phi_incomings;
 use super::emit_common::{
-    intern_pool, is_jim_term_payload, last_arm_payloads, phi_moves, stack_bin_op, stack_cmp_op,
+    intern_pool, is_jim_term_payload, last_arm_payloads, phi_moves, push_const, stack_bin_op,
+    stack_cmp_op,
 };
 use super::func::MirFunc;
 use super::inst::{
@@ -2915,7 +2916,7 @@ fn emit_stack_value(args: EmitStackValueArgs<'_>) -> Result<(), LowerError> {
     };
     match &func.block(bid).insts[idx] {
         MirInst::Const { c, .. } => {
-            push_stack_const(out, *c, pool, loc)?;
+            push_const::<u16>(out, *c, pool, loc)?;
             stacked.push(v);
             Ok(())
         }
@@ -3052,34 +3053,6 @@ fn tree_i16(func: &MirFunc, plan: &ConvoyPlan, v: ValueId) -> Option<i16> {
         _ => return None,
     };
     i16::try_from(n).ok()
-}
-
-fn push_stack_const(
-    out: &mut Vec<IlOp>,
-    c: MirConst,
-    pool: &mut Vec<u64>,
-    loc: DebugLoc,
-) -> Result<(), LowerError> {
-    match c {
-        MirConst::I64(v) => {
-            if let Ok(imm) = i32::try_from(v)
-                && imm >= 0 {
-                    out.push(IlOp::Const { imm, loc });
-                    return Ok(());
-                }
-            let idx = u32::from(intern_pool::<u16>(pool, v as u64)?);
-            out.push(IlOp::ConstPool { idx, loc });
-        }
-        MirConst::Bool(v) => out.push(IlOp::Const {
-            imm: i32::from(v),
-            loc,
-        }),
-        MirConst::F64(bits) => {
-            let idx = u32::from(intern_pool::<u16>(pool, bits)?);
-            out.push(IlOp::ConstPool { idx, loc });
-        }
-    }
-    Ok(())
 }
 
 fn emit_dense_push(

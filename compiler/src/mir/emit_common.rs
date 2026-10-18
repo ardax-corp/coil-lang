@@ -2,11 +2,13 @@
 //! ([`super::emit_lir`]) emitters. One copy here, so a fix lands in both
 //! tiers.
 
-use common::Instruction;
+use common::{DebugLoc, Instruction};
+
+use crate::il::IlOp;
 
 use super::error::LowerError;
 use super::func::MirFunc;
-use super::inst::{BlockId, MirBinOp, MirCmpOp, MirInst, Terminator, ValueId};
+use super::inst::{BlockId, MirBinOp, MirCmpOp, MirConst, MirInst, Terminator, ValueId};
 use super::ty::MirTy;
 
 /// `dest` is a payload a `JumpIfMatch` leaves on the stack when taken.
@@ -99,6 +101,37 @@ pub(super) fn intern_pool<T: TryFrom<usize>>(pool: &mut Vec<u64>, bits: u64) -> 
     let i = T::try_from(pool.len()).map_err(|_| LowerError::Refused("const pool full".into()))?;
     pool.push(bits);
     Ok(i)
+}
+
+/// Push the constant `c` on the stack: an inline `Const` when it fits,
+/// else a `ConstPool` load through a `T`-wide [`intern_pool`] index.
+pub(super) fn push_const<T: TryFrom<usize> + Into<u32>>(
+    out: &mut Vec<IlOp>,
+    c: MirConst,
+    pool: &mut Vec<u64>,
+    loc: DebugLoc,
+) -> Result<(), LowerError> {
+    match c {
+        MirConst::I64(v) => {
+            // Inline CONST uses bit 31 as POOL_FLAG; negatives must go through the pool.
+            if let Ok(imm) = i32::try_from(v)
+                && imm >= 0 {
+                    out.push(IlOp::Const { imm, loc });
+                    return Ok(());
+                }
+            let idx = intern_pool::<T>(pool, v as u64)?.into();
+            out.push(IlOp::ConstPool { idx, loc });
+        }
+        MirConst::Bool(v) => out.push(IlOp::Const {
+            imm: i32::from(v),
+            loc,
+        }),
+        MirConst::F64(bits) => {
+            let idx = intern_pool::<T>(pool, bits)?.into();
+            out.push(IlOp::ConstPool { idx, loc });
+        }
+    }
+    Ok(())
 }
 
 /// The stack opcode for a MIR binary op on `ty`.

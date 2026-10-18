@@ -17,7 +17,7 @@ use super::emit::{
     max_label_hint, paired_alloc_dest, restore_block_op_locs, take_label,
 };
 use super::emit_common::{
-    intern_pool, is_jim_term_payload, last_arm_payloads, phi_moves, stack_bin_op, stack_cmp_op,
+    is_jim_term_payload, last_arm_payloads, phi_moves, push_const, stack_bin_op, stack_cmp_op,
 };
 use super::func::MirFunc;
 use super::inst::{
@@ -1154,7 +1154,7 @@ fn emit_stored(
 ) -> Result<(), LowerError> {
     match inst {
         MirInst::Const { dest, c } => {
-            push_const(out, *c, pool, loc)?;
+            push_const::<u32>(out, *c, pool, loc)?;
             out.push(IlOp::StorePop {
                 slot: u32::from(regs[dest.index()]),
                 loc,
@@ -1859,7 +1859,7 @@ fn emit_stack(
     let keeps_own = inst.may_trap(func) || matches!(inst, MirInst::Call { .. });
     let loc = if own.is_known() && keeps_own { own } else { loc };
     match inst {
-        MirInst::Const { c, .. } => push_const(out, *c, pool, loc),
+        MirInst::Const { c, .. } => push_const::<u32>(out, *c, pool, loc),
         MirInst::Bin {
             op, ty, lhs, rhs, ..
         } => emit_bin(EmitBinArgs {
@@ -2551,33 +2551,4 @@ fn push_move(out: &mut Vec<IlOp>, dest: u8, src: u8, loc: DebugLoc) {
         slot: u32::from(dest),
         loc,
     });
-}
-
-fn push_const(
-    out: &mut Vec<IlOp>,
-    c: MirConst,
-    pool: &mut Vec<u64>,
-    loc: DebugLoc,
-) -> Result<(), LowerError> {
-    match c {
-        MirConst::I64(v) => {
-            // Inline CONST uses bit 31 as POOL_FLAG; negatives must go through the pool.
-            if let Ok(imm) = i32::try_from(v)
-                && imm >= 0 {
-                    out.push(IlOp::Const { imm, loc });
-                    return Ok(());
-                }
-            let idx = intern_pool(pool, v as u64)?;
-            out.push(IlOp::ConstPool { idx, loc });
-        }
-        MirConst::Bool(v) => out.push(IlOp::Const {
-            imm: i32::from(v),
-            loc,
-        }),
-        MirConst::F64(bits) => {
-            let idx = intern_pool(pool, bits)?;
-            out.push(IlOp::ConstPool { idx, loc });
-        }
-    }
-    Ok(())
 }
