@@ -246,35 +246,6 @@ pub const PROLOGUE_BYTECODE_LEN: usize = 3;
 /// setup (if any) has run, instead of falling into its first function.
 pub const PROLOGUE_HALT_OFFSET: usize = 2;
 
-/// How one expression should represent the enum value it builds or loads,
-/// when its consumer needs something other than the value's own layout.
-///
-/// Scoped to a single node: [`Compiler::do_compile`] hands the requested
-/// context to the node it compiles (`repr_here`) and resets it for that
-/// node's operands, so a call argument, payload, or operand never inherits
-/// its parent's request. Only value-forwarding nodes pass it on: `Group` /
-/// `Expr` / one-item `Fragment`, a block's tail, and a match's arm bodies
-/// (not its scrutinee).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) struct ReprCtx {
-    /// When > 0, frame-local ObjEnum construct/load emits `[payload, tag]`
-    /// in locals / on the stack instead of `MakeEnum`, and a two-word
-    /// `CALL` leaves its pair unboxed.
-    pub(super) unbox_enum_context: u32,
-}
-
-impl ReprCtx {
-    fn union(self, other: Self) -> Self {
-        Self {
-            unbox_enum_context: self.unbox_enum_context.max(other.unbox_enum_context),
-        }
-    }
-
-    pub(super) fn unboxing(self) -> bool {
-        self.unbox_enum_context > 0
-    }
-}
-
 /// Target-side layouts at a trait-method call across a generic boundary;
 /// see [`Compiler::trait_method_boundary_sig`].
 pub(super) struct BoundarySig {
@@ -418,13 +389,6 @@ pub struct Compiler {
     /// When result-mode Ok payload is itself `Result`, keep Ok-wrapping
     /// explicit `return Result::Ok(…)` (nested Result payload case).
     compiling_result_ok_is_result: bool,
-
-    /// Enum representation requested for the expression being compiled;
-    /// see [`ReprCtx`]. Raise it right before compiling that expression.
-    repr: ReprCtx,
-    /// The [`ReprCtx`] the node now inside [`Compiler::do_compile`] was
-    /// entered with. Its operands see [`ReprCtx::default`] instead.
-    repr_here: ReprCtx,
 
     /// Kind when the function whose body is being compiled uses the
     /// two-slot `CALL`/`RETURN` ABI (`[payload, tag]` or product `[a, b]`).
@@ -742,8 +706,6 @@ impl Default for Compiler {
             compiling_mono_clone: false,
             compiling_result_mode: false,
             compiling_result_ok_is_result: false,
-            repr: ReprCtx::default(),
-            repr_here: ReprCtx::default(),
             compiling_two_word_enum: None,
             pair_return_kinds: std::cell::RefCell::new(HashMap::new()),
             generic_fn_value_refusal: std::cell::RefCell::new(None),

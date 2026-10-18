@@ -6128,36 +6128,9 @@ impl Compiler {
             ));
             std::panic::panic_any(super::CodegenRecursionLimitExceeded);
         }
-        let outer = self.repr;
-        let prev_here = std::mem::replace(&mut self.repr_here, outer);
-        if !Self::forwards_repr(ast) {
-            self.repr = ReprCtx::default();
-        }
         let result = self.do_compile_inner(ast);
-        self.repr = outer;
-        self.repr_here = prev_here;
         self.codegen_depth -= 1;
         result
-    }
-
-    /// Nodes whose value *is* a child's value, so a [`ReprCtx`] request on
-    /// them reaches that child. `Block` forwards to its tail and `Match` to
-    /// its arm bodies only (the `Block` arm of `do_compile_inner`,
-    /// `compile_match_expr`); every other node's operands start clean.
-    fn forwards_repr(ast: &Output<'_>) -> bool {
-        match ast.1.as_ref() {
-            Expression::Group(_) | Expression::Expr(_) | Expression::Block(_) => true,
-            Expression::Fragment(items) => items.len() == 1,
-            Expression::Match { .. } => true,
-            _ => false,
-        }
-    }
-
-    /// The [`ReprCtx`] that applies to the node being compiled: what it was
-    /// entered with, plus anything its own lowering raised for a direct emit
-    /// (for-in `next` CALL, `?` on a pair).
-    pub(super) fn repr_now(&self) -> ReprCtx {
-        self.repr_here.union(self.repr)
     }
 
     /// Named `fn` declaration: emit the body, register the entry and debug info.
@@ -7113,8 +7086,6 @@ impl Compiler {
         self.static_const_values.clear();
         self.current_function_qualified = None;
         self.current_function_table_key = None;
-        self.repr = ReprCtx::default();
-        self.repr_here = ReprCtx::default();
         self.compiling_two_word_enum = None;
         // Peel/unroll must not see other modules' bodies (label/CFG mix-up).
         self.fn_bytecode_spans.clear();
