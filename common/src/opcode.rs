@@ -458,7 +458,8 @@ pub enum Instruction {
     DenseMakeK,
     /// Stamp the element word kind (operand, `WORD_*`) on the array at TOS:
     /// every element the program stores has that static kind. Stack-neutral;
-    /// never allocates. Archive **minor 27**.
+    /// never allocates. Archive **minor 27**. No longer emitted (arrays get
+    /// their kind from [`Self::MakeArrayK`]); runs for older archives.
     TagArrayKind,
     /// [`Self::MakeArray`] plus the element word kind: `[17:16]` kind
     /// (`WORD_*`; only pointer is kept), `[15:0]` arity. Archive **minor 28**.

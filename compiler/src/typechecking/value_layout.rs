@@ -101,7 +101,7 @@ pub fn word_kind(checker: &Checker, ty: &Ty) -> u8 {
 }
 
 /// Element kind an array of `elem` is stamped with at construction
-/// (`TagArrayKind` / `MakeArrayK`): `WORD_POINTER` for ground heap words,
+/// (`MakeArrayK`): `WORD_POINTER` for ground heap words,
 /// `WORD_BYTE` for `byte` / `bool` (the runtime packs those one byte per
 /// element), else `WORD_UNKNOWN` (no stamp).
 pub fn array_elem_stamp(checker: &Checker, elem: &Ty) -> u8 {

@@ -338,8 +338,10 @@ pub enum Builtin {
     /// `STRINGIFY` of a word (compiler-made bodies only: a primitive's
     /// `Show::show`), reading a float or bool by its box's tag.
     Stringify,
-    /// `TagArrayKind kind` of an array word, which it leaves (compiler-made
-    /// bodies only: the stamped `Vec` constructors).
+    /// No longer built: a `Vec` constructor's array is made with its element
+    /// kind (`MakeArrayK`). Kept only while open changes to `emit_hir`'s
+    /// builtin layout arms still name it; remove it with those arms.
+    #[allow(dead_code)]
     TagArrayKind { kind: u8 },
 }
 

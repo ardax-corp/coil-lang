@@ -2628,14 +2628,6 @@ impl Lower<'_> {
                 }
                 Ok(Val::V(self.b.ins_cast(MirCastKind::Word, ty, boxed).map_err(mir)?))
             }
-            // An array's element kind stamped (compiler-made bodies): the
-            // same array.
-            HirKind::Builtin { op: Builtin::TagArrayKind { kind }, args } if let [inner] = args.as_slice() => {
-                let Some(v) = self.word(*inner)? else {
-                    return Ok(Val::Never);
-                };
-                Ok(Val::V(self.b.ins_tag_array_kind(v, *kind).map_err(mir)?))
-            }
             // A primitive's text (compiler-made bodies).
             HirKind::Builtin { op: Builtin::Stringify, args } if let [inner] = args.as_slice() => {
                 let Some(v) = self.word(*inner)? else {

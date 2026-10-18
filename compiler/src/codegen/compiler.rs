@@ -4260,35 +4260,39 @@ impl Compiler {
         host(self, "from", "vec_from_array", &[coil_ty::array(int.clone())], &vec);
 
         // Constructors for a ground pointer element type (`Vec<Node>`) or a
-        // byte / bool one: the same bodies, then `TagArrayKind` so marking
-        // treats the elements as precise references, or the runtime packs
-        // them one byte each. Call sites pick them by static type.
-        for (stamp, (name, native)) in [common::WORD_POINTER, common::WORD_BYTE]
-            .into_iter()
-            .flat_map(|stamp| {
-                [("new", None), ("with_capacity", Some("vec_with_capacity")), ("from", Some("vec_from_array"))]
-                    .map(|ctor| (stamp, ctor))
-            })
-        {
-            let Some(fqn) = Self::stamped_vec_ctor_name(name, stamp) else {
-                continue;
-            };
-            if native.is_some_and(|n| self.native_id(n).is_none()) {
-                continue;
+        // byte / bool one: the empty array is made with that element kind
+        // (`MakeArrayK`), so marking treats the elements as precise
+        // references, or the runtime packs them one byte each. Call sites
+        // pick them by static type. `Vec::from` needs no twin: the copy keeps
+        // the source array's storage and kind.
+        for stamp in [common::WORD_POINTER, common::WORD_BYTE] {
+            // An element type the stamp is read off (`array_elem_stamp`).
+            let elem = if stamp == common::WORD_BYTE { coil_ty::byte() } else { coil_ty::string() };
+            let made_ty = coil_ty::vec_app_ty(elem);
+            if let Some(fqn) = Self::stamped_vec_ctor_name("new", stamp) {
+                let made_ty = made_ty.clone();
+                self.emit_builtin_method(&fqn, &[], vec.clone(), |b, _| {
+                    b.push(HirKind::Make { kind: MakeKind::Array, args: Vec::new() }, made_ty)
+                });
             }
-            let params: Vec<(Ty, Option<u32>)> = match name {
-                "with_capacity" => vec![(int.clone(), None)],
-                "from" => vec![(coil_ty::array(int.clone()), None)],
-                _ => Vec::new(),
-            };
-            let vec_ty = vec.clone();
-            self.emit_builtin_method(&fqn, &params, vec.clone(), |b, a| {
-                let made = match native {
-                    Some(native) => b.call(native, a, vec_ty.clone()),
-                    None => b.push(HirKind::Make { kind: MakeKind::Array, args: Vec::new() }, vec_ty.clone()),
-                };
-                b.builtin(crate::hir::Builtin::TagArrayKind { kind: stamp }, vec![made], vec_ty)
-            });
+            // `with_capacity(n)`: the empty array, then `reserve(n)`.
+            if let Some(fqn) = Self::stamped_vec_ctor_name("with_capacity", stamp)
+                && self.native_id("vec_reserve").is_some()
+            {
+                let vec_ty = vec.clone();
+                let made_ty = made_ty.clone();
+                self.emit_builtin_method(&fqn, &[(int.clone(), None)], vec.clone(), |b, a| {
+                    let out = b.local("out", made_ty.clone(), crate::hir::LocalKind::Let);
+                    let empty = b.push(HirKind::Make { kind: MakeKind::Array, args: Vec::new() }, made_ty);
+                    let init = b.let_(out, empty);
+                    let o = b.read(out);
+                    let mut args = vec![o];
+                    args.extend(a);
+                    let reserve = b.call("vec_reserve", args, int.clone());
+                    let o = b.read(out);
+                    b.block(vec![init, reserve], Some(o), vec_ty)
+                });
+            }
         }
 
         // fn push(x): inlined `ArrayPush` (`v.push(x)` on the `Vec`, which

@@ -524,7 +524,6 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         | MirInst::Format { .. }
         | MirInst::Stringify { .. }
         | MirInst::Unbox { .. }
-        | MirInst::TagArrayKind { .. }
         | MirInst::StrEq { .. } => {
             return None
         }
