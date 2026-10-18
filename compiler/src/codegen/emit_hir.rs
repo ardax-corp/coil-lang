@@ -3822,17 +3822,7 @@ impl Compiler {
             .cloned()
             .ok_or("method-unknown")?;
         let layout = |id: HirId| Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |t| self.value_layout(t));
-        // An element argument (`push`'s value) is built at the receiver's
-        // element niche ([`Self::hir_niche_slot`]).
-        let elem = args.first().and_then(|&recv| self.hir_elem_layout(hir, recv));
-        let params: Vec<ValueLayout> = args
-            .iter()
-            .enumerate()
-            .map(|(i, &a)| match elem {
-                Some(slot) if i > 0 => Self::hir_niche_slot(layout(a), slot),
-                _ => layout(a),
-            })
-            .collect();
+        let params: Vec<ValueLayout> = args.iter().map(|&a| layout(a)).collect();
         // `pop` / `remove` returning a niche `Option` call the host natives
         // directly, as `compile_call_expr` does; a boxed `Option` is the
         // thunk's own result, and any other layout stays AST.
@@ -5089,40 +5079,6 @@ impl Compiler {
         match call.ranges.get(i).cloned().flatten() {
             Some(kind) => Rep::Pair(kind),
             None => Rep::Word(call.params[i]),
-        }
-    }
-
-    /// The layout a value of layout `own` is stored at in a slot of
-    /// layout `slot`: the slot's when the two are the two niche results.
-    /// `Result::Ok(())` is typed `Result<(), E>` (a `NicheResult`, `Ok` the
-    /// `()` tuple) even where it lands in a `Result<unit, E>` slot (a
-    /// `NicheUnitResult`, `Ok` the zero word), and the reverse.
-    fn hir_niche_slot(own: ValueLayout, slot: ValueLayout) -> ValueLayout {
-        use ValueLayout as L;
-        match (own, slot) {
-            (L::NicheResult, L::NicheUnitResult) | (L::NicheUnitResult, L::NicheResult) => slot,
-            _ => own,
-        }
-    }
-
-    /// The layout of the elements of `base`, a `Vec` or array.
-    fn hir_elem_layout(&self, hir: &HirBody, base: HirId) -> Option<ValueLayout> {
-        let ty = Self::hir_ty(hir, base)?;
-        crate::typechecking::value_layout::vec_elem_ty(&self.checker, ty).map(|elem| self.value_layout(&elem))
-    }
-
-    /// The representation the value stored by `place = value` is built
-    /// at, for an index `place` of `base`: the place's, at the element
-    /// slot's niche ([`Self::hir_niche_slot`]). The place takes the
-    /// stored value's type, so an `Ok(())` place is a `Result<(), E>`
-    /// even in a `Vec<Result<unit, E>>`.
-    fn hir_index_store_rep(&self, hir: &HirBody, emit: &HirEmit, place: HirId, base: HirId) -> Option<Rep> {
-        match self.hir_natural(hir, emit, place)? {
-            Rep::Word(own) => Some(Rep::Word(match self.hir_elem_layout(hir, base) {
-                Some(slot) => Self::hir_niche_slot(own, slot),
-                None => own,
-            })),
-            pair => Some(pair),
         }
     }
 
@@ -6485,7 +6441,7 @@ impl Compiler {
                     self.hir_check_value(hir, emit, *base, &base_rep)
                 }
                 HirKind::Index { base, index, .. } => {
-                    let want = self.hir_index_store_rep(hir, emit, *place, *base).ok_or("value-shape")?;
+                    let want = self.hir_natural(hir, emit, *place).ok_or("value-shape")?;
                     self.hir_check_value(hir, emit, *value, &want)?;
                     if Self::hir_is_stack(hir, emit, *base) {
                         return self.hir_check_value(hir, emit, *index, &BOXED);
