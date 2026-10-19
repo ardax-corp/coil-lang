@@ -1443,9 +1443,14 @@ impl<const S: usize> Machine<S> {
 
                     // Merge captured evidence over the application dictionaries
                     // in place: slot `k` is the captured dictionary, else the
-                    // `k`-th application dictionary.
+                    // `k`-th application dictionary. A `PolyFn` callee takes
+                    // exactly its captured slots, none for a `MakePolyFn` of an
+                    // unbounded function: application dictionaries a `forall`
+                    // constraint passes beyond them are dropped, so the callee
+                    // frame opens at its declared height (its precise map
+                    // assumes it, #1530). A raw code pointer takes them all.
                     let dicts_base = self.stack.tell() - app_dict_arity;
-                    let dict_arity = if captured.is_empty() { app_dict_arity } else { captured.len() };
+                    let dict_arity = if fn_obj.is_some() { captured.len() } else { app_dict_arity };
                     if self.frames.len() >= crate::MAX_CALL_FRAMES
                         || !self.reserve_operand_from(dicts_base + dict_arity)
                     {
@@ -1455,7 +1460,7 @@ impl<const S: usize> Machine<S> {
                             self.runtime_panic(STACK_OVERFLOW, ip.saturating_sub(1)),
                         );
                     }
-                    if !captured.is_empty() {
+                    if fn_obj.is_some() {
                         self.stack.seek(dicts_base);
                         for (k, slot) in captured.iter().enumerate() {
                             let dict = match slot {
