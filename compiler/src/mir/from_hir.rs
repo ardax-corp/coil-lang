@@ -520,9 +520,6 @@ pub struct HirMirInput<'a> {
     pub record_fields: HashMap<u32, (u32, MirTy)>,
     /// `matrix(data)` calls: the data itself.
     pub matrix_wraps: &'a HashSet<u32>,
-    /// `block_on(h)` calls: the `wait_ready` native run between resumes,
-    /// if any.
-    pub block_ons: &'a HashMap<u32, Option<u16>>,
     /// `new C(args).f` reads whose object is never built: each argument
     /// runs in order and `f`'s word is the value, by field read.
     pub field_news: &'a HashSet<u32>,
@@ -2533,7 +2530,6 @@ impl Lower<'_> {
             HirKind::Call { args, .. } if let (Some(&fixed), [arg]) = (self.inp.lens.get(&id.0), args.as_slice()) => self.len(*arg, fixed),
             HirKind::Call { args, .. } if self.inp.pushes.contains(&id.0) => self.push(args),
             HirKind::Call { args, .. } if self.inp.matrix_wraps.contains(&id.0) && args.len() == 1 => self.value(args[0]),
-            HirKind::Call { args, .. } if let (Some(&wait), [handle]) = (self.inp.block_ons.get(&id.0), args.as_slice()) => self.block_on(id, *handle, wait),
             HirKind::Call { args, .. } if let Some(&idx) = self.inp.formats.get(&id.0) => self.format(id, idx, args.get(1..).unwrap_or_default()),
             HirKind::Call { args, .. } if self.inp.hosts.contains_key(&id.0) => self.host(id, args),
             HirKind::Call { .. } if let Some(site) = self.inp.ffis.get(&id.0) => self.ffi(id, &site.clone()),
@@ -4612,42 +4608,6 @@ impl Lower<'_> {
             return Ok(Val::Never);
         };
         let out = self.b.ins_resume_coro(h, send, dest_ty).map_err(mir)?;
-        match pair {
-            _ if unit => Ok(Val::Unit),
-            Some((lo_ty, hi_ty)) => self.unbox_word(&ty, out, lo_ty, hi_ty),
-            None => Ok(Val::V(out)),
-        }
-    }
-
-    /// `block_on(h)`: `h` resumed until it is done, running `wait` (the
-    /// `wait_ready` native) between resumes, then its last resumed word.
-    fn block_on(&mut self, id: HirId, handle: HirId, wait: Option<u16>) -> Result<Val, Refusal> {
-        let ty = self.expr_ty(id).ok_or("block_on type")?.clone();
-        let unit = is_unit(&ty);
-        // A two-word value moves through the coroutine boxed.
-        let pair = self.inp.pair_tys.get(&id.0).copied();
-        let dest_ty = match pair {
-            _ if unit => MirTy::I64,
-            Some(_) => MirTy::HeapRef,
-            None => self.inp.word(&ty).ok_or("block_on type")?,
-        };
-        let Some(h) = self.word(handle)? else {
-            return Ok(Val::Never);
-        };
-        let head = self.b.create_block();
-        let again = self.b.create_block();
-        let exit = self.b.create_block();
-        self.jump(head)?;
-        self.switch(head);
-        let out = self.at_expr(id, |l| l.b.ins_resume_coro(h, None, dest_ty).map_err(mir))?;
-        let done = self.b.ins_done_coro(h).map_err(mir)?;
-        self.b.branch(done, exit, again).map_err(mir)?;
-        self.switch(again);
-        if let Some(native) = wait {
-            self.b.ins_host_invoke(native, Vec::new()).map_err(mir)?;
-        }
-        self.jump(head)?;
-        self.switch(exit);
         match pair {
             _ if unit => Ok(Val::Unit),
             Some((lo_ty, hi_ty)) => self.unbox_word(&ty, out, lo_ty, hi_ty),
