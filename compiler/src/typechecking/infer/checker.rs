@@ -3839,6 +3839,7 @@ impl Checker {
         } else {
             format!("{module_ns}::{name}")
         };
+        self.drop_prelude_fn(&local);
         // Prefer the defining module's real scheme (incl. generics with
         // bounds) over a dummy Var so call sites get dict-passing ABI.
         self.reexport_module_item(&fqn, &local);
@@ -13370,6 +13371,10 @@ impl Checker {
                 }
         let param_tys = self.parse_arg_list(params);
         let ret_ty = self.parse_type_name(ret);
+        // `fn() -> R` takes `unit`, like `fn () => e` and nullary fn decls (#1525).
+        if param_tys.is_empty() {
+            return Ty::Fun(Box::new(unit_ty()), Box::new(ret_ty));
+        }
         let mut fun_ty = ret_ty;
         for (_, arg_ty) in param_tys.iter().rev() {
             fun_ty = Ty::Fun(Box::new(arg_ty.clone()), Box::new(fun_ty));
@@ -14857,7 +14862,11 @@ impl Checker {
             }
             Expression::Use { path, name, alias }
                 if name != "*" => {
-                    let _ = self.apply_virtual_use(path, name, alias.as_deref());
+                    let local = alias.as_deref().unwrap_or(name);
+                    if !self.apply_virtual_use(path, name, alias.as_deref()) {
+                        // A disk import shadows the prelude fn (#1488).
+                        self.drop_prelude_fn(local);
+                    }
                 }
             _ => {}
         }
@@ -15390,6 +15399,14 @@ impl Checker {
 
     /// Forward-declare module-level `fn` signatures after `push_scope` so
     /// `impl` methods can call helpers defined later in the file.
+    /// Unbind the prelude function `local` (`sin`, `diff`, ...) so a
+    /// same-named file fn or disk import (`use m::sin`) wins (#1488).
+    fn drop_prelude_fn(&mut self, local: &str) {
+        if matches!(self.scope_bindings.get(local), Some(BuiltinExport::Fn { .. })) {
+            self.scope_bindings.remove(local);
+        }
+    }
+
     fn pre_register_free_functions(&mut self, ast: &Output) {
         let children = match ast.1.as_ref() {
             Expression::Program(c) | Expression::Fragment(c) | Expression::Block(c) => c.as_slice(),
@@ -15407,9 +15424,7 @@ impl Checker {
             } = child.1.as_ref()
             {
                 // A file's own `fn diff` shadows the prelude `diff`.
-                if matches!(self.scope_bindings.get(*name), Some(BuiltinExport::Fn { .. })) {
-                    self.scope_bindings.remove(*name);
-                }
+                self.drop_prelude_fn(name);
                 self.stub_free_function_signature(
                     name,
                     type_params,
