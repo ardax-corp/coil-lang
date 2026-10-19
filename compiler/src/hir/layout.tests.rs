@@ -1,6 +1,6 @@
 use super::*;
 use crate::mir::MirLayout;
-use crate::typechecking::return_layout::two_word_return_enum;
+use crate::typechecking::return_layout::two_word_kind;
 use crate::typechecking::ty::{TyVarId, int, option_ty, range_ty, result_ty, string, unit};
 use crate::typechecking::value_layout::{ValueLayout, value_layout};
 
@@ -101,7 +101,7 @@ fn views_agree_with_the_layout() {
     for ty in tys {
         let layout = of(&c, &ty);
         assert_eq!(
-            two_word_return_enum(&c, &ty).is_some(),
+            two_word_kind(&c, &ty).is_some(),
             layout.words() == 2,
             "{ty:?}"
         );
@@ -115,14 +115,13 @@ fn views_agree_with_the_layout() {
 }
 
 #[test]
-fn pair_kinds_keep_their_names() {
-    use crate::typechecking::return_layout::{TWO_WORD_PRODUCT_KIND, TWO_WORD_RANGE_KIND};
+fn pair_kinds_name_their_enums() {
     let c = checked(SRC);
-    let name = |ty: Ty| two_word_return_enum(&c, &ty);
+    let name = |ty: Ty| two_word_kind(&c, &ty).and_then(|k| k.enum_name().map(str::to_string));
     assert_eq!(name(option_ty(int())).as_deref(), Some(common::BUILTIN_OPTION_ENUM));
     assert_eq!(name(result_ty(int(), int())).as_deref(), Some(common::BUILTIN_RESULT_ENUM));
-    assert_eq!(name(Ty::Tuple(vec![int(), int()])).as_deref(), Some(TWO_WORD_PRODUCT_KIND));
-    assert_eq!(name(range_ty(int())).as_deref(), Some(TWO_WORD_RANGE_KIND));
+    assert_eq!(name(Ty::Tuple(vec![int(), int()])), None);
+    assert_eq!(name(range_ty(int())), None);
     assert_eq!(name(con("Cell")).as_deref(), Some("Cell"));
 }
 
