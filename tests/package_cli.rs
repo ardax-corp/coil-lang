@@ -458,3 +458,61 @@ fn main() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `coil package` defaults to `-g1` (names and lines, no byte spans):
+/// smaller than `-g2` with the same backtrace. `-g0` keeps nothing
+/// (coil-lang#1491).
+#[test]
+fn package_debug_levels() {
+    let bin = std::env::var("CARGO_BIN_EXE_coil")
+        .expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
+    let embed = build_matching_coil_embed();
+    let dir = std::env::temp_dir().join(format!("coil_pack_debug_level_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("panic.hy"),
+        "fn inner(int x) -> int {
+    if x > 2 {
+        panic(\"boom: x too large\");
+    }
+    return x;
+}
+
+fn main() {
+    let v: Vec<int> = [1, 2, 3];
+    let i = inner(v[2]);
+}
+",
+    )
+    .unwrap();
+    let full = "panic: boom: x too large at panic.hy:3:8
+  in inner at panic.hy:3:8
+  in main at panic.hy:10:12";
+    let bare = "panic: boom: x too large
+  in <unknown>
+  ... repeated 1 more times";
+    let mut sizes = Vec::new();
+    for (tag, flag, want) in [("default", None, full), ("g2", Some("-g2"), full), ("g1", Some("-g1"), full), ("g0", Some("-g0"), bare)] {
+        let out = dir.join(format!("panic_{tag}{}", std::env::consts::EXE_SUFFIX));
+        let mut package = Command::new(&bin);
+        package.current_dir(&dir).args(["package", "-O", "0"]);
+        for root in compiler::Pipeline::workspace_language_extra_roots() {
+            package.arg("--root").arg(root);
+        }
+        package.args(flag);
+        package.arg("panic.hy").arg("-o").arg(&out).arg("--runner").arg(&embed);
+        assert!(package.status().expect("spawn coil package").success(), "{tag}: package failed");
+        sizes.push(std::fs::metadata(&out).unwrap().len());
+
+        let mut cmd = Command::new(&out);
+        cmd.current_dir(&dir).env("COIL_BACKTRACE", "1");
+        let run = run_command_with_timeout(cmd, 30);
+        assert!(!run.status.success(), "{tag}: expected a panic");
+        assert_eq!(String::from_utf8_lossy(&run.stderr).trim_end(), want, "{tag}");
+    }
+    let [default, g2, g1, g0] = sizes[..] else { unreachable!() };
+    assert_eq!(default, g1, "package defaults to -g1");
+    assert!(g0 < g1 && g1 < g2, "sizes -g0 {g0}, -g1 {g1}, -g2 {g2}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
