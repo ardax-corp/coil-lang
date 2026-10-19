@@ -59,6 +59,9 @@ pub(super) struct SynthCallee {
     /// A host native by its registered name, whatever the name resolves
     /// to in the module being compiled.
     pub host: bool,
+    /// The `format` builtin, whatever the name resolves to in the module
+    /// being compiled.
+    pub format: bool,
 }
 
 /// One step of building trait dictionaries, a stack program over words:
@@ -4031,6 +4034,24 @@ impl Compiler {
             });
         }
 
+        // Show thunks for ground tuples (#1451): reserved here, raw (the
+        // tuple's own word) with a `$dict` adapter, as the string thunk;
+        // emitted by `emit_tuple_show_thunks` once the module's own `Show`
+        // entries exist, so `%v` of an item calls them.
+        let tuples: Vec<Ty> = self.checker.generics().tuple_show_tys().cloned().collect();
+        for ty in tuples {
+            let fqn = Generics::builtin_instance_fqn("Show", &ty.to_string(), "show");
+            if self.functions.contains_key(&fqn) {
+                continue;
+            }
+            self.note_raw_builtin_thunk(&fqn);
+            self.reserve_function_entry(Self::dict_adapter_name(&fqn));
+            self.reserve_function_entry(fqn.clone());
+            if !self.tuple_show_thunks.iter().any(|(f, _)| *f == fqn) {
+                self.tuple_show_thunks.push((fqn, ty));
+            }
+        }
+
         // Show thunks for the builtin error enums: reserved here, emitted by
         // `emit_used_builtin_show_thunks` once a call uses one.
         for (enum_name, variants) in Generics::BUILTIN_SHOW_ENUMS {
@@ -7238,6 +7259,7 @@ impl Compiler {
 
         self.bytecode.append(&mut program);
         self.emit_used_builtin_show_thunks();
+        self.emit_tuple_show_thunks();
         self.pad_debug_locs();
         // Kept while this module holds methods a later module may clone.
         let seq = self.program_seq;
@@ -7271,6 +7293,36 @@ impl Compiler {
             let hir = crate::hir::synth::builtin_enum_show(&self.checker, &fqn, enum_name, variants);
             self.emit_synth_fn(&fqn, &hir, HashMap::new(), true);
         }
+        skip.bind_label(after, self.bytecode.il_mut());
+    }
+
+    /// Emit the reserved `Show` thunks of ground tuples (#1451) behind a
+    /// jump, as [`Self::emit_used_builtin_show_thunks`]: each is
+    /// `format("%v", t)` over its argument, the raw entry taking the tuple's
+    /// word and its `$dict` adapter the boxed one.
+    fn emit_tuple_show_thunks(&mut self) {
+        let due: Vec<_> = std::mem::take(&mut self.tuple_show_thunks)
+            .into_iter()
+            .filter(|(fqn, _)| !self.functions.contains_key(fqn))
+            .collect();
+        if due.is_empty() {
+            return;
+        }
+        let string = crate::typechecking::ty::string();
+        let mut skip = BlockBuilder::new();
+        let after = skip.fresh_label(self.bytecode.il_mut());
+        skip.emit_jump_to(after, BbJumpKind::Unconditional, self.bytecode.il_mut());
+        self.hir_synth_callees.insert("format".to_string(), SynthCallee { format: true, ..SynthCallee::default() });
+        for (fqn, ty) in due {
+            let adapter = Self::dict_adapter_name(&fqn);
+            for (name, tag) in [(fqn, None), (adapter, Some(ValueTag::Tuple as u32))] {
+                self.emit_builtin_entry(&name, &[(ty.clone(), tag)], string.clone(), None, |b, a| {
+                    let fmt = b.str("%v");
+                    b.call("format", vec![fmt, a[0]], string.clone())
+                });
+            }
+        }
+        self.hir_synth_callees.clear();
         skip.bind_label(after, self.bytecode.il_mut());
     }
 

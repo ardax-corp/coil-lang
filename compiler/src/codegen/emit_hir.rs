@@ -2918,6 +2918,10 @@ impl Compiler {
         {
             return self.hir_builtin_abi(hir, call, HirBuiltin::Host(id));
         }
+        // A compiler-made body's `format` (a tuple's `Show` thunk).
+        if self.hir_synth_calls.is_some() && self.hir_synth_callees.get(name).is_some_and(|c| c.format) {
+            return self.hir_builtin_abi(hir, call, HirBuiltin::Format);
+        }
         // A compiler-made body's call of a function the checker has no
         // signature for.
         if let Some((params, ret)) = self.hir_synth_calls.as_ref().and_then(|calls| calls.get(name)) {
