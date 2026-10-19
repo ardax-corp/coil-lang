@@ -13488,6 +13488,10 @@ impl Checker {
                 }
         let param_tys = self.parse_arg_list(params);
         let ret_ty = self.parse_type_name(ret);
+        // `fn() -> R` takes `unit`, like `fn () => e` and nullary fn decls (#1525).
+        if param_tys.is_empty() {
+            return Ty::Fun(Box::new(unit_ty()), Box::new(ret_ty));
+        }
         let mut fun_ty = ret_ty;
         for (_, arg_ty) in param_tys.iter().rev() {
             fun_ty = Ty::Fun(Box::new(arg_ty.clone()), Box::new(fun_ty));
