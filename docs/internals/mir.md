@@ -54,6 +54,19 @@ lowering unboxed into consecutive slots
 (`FieldLoad` / `FieldStore`). Escaping / heap-backed named locals
 (`InitTyped` / `GetField` / `LoadField`) stay fuse-IL. Dense emit
 refuses the new field ops.
+**Records** (`{x: 1, y: 2}`) are slotted objects like classes: the
+literal is `InitTyped` (or `DenseMakeObject`) and each field a slot, its
+fields sorted by name, so `{y: 9, x: 8}` and `{x: 8, y: 9}` share one
+layout. `emit_hir.rs` plans a field's slot (`record_fields`, `records`,
+`record_pats`) and `Checker::record_type_id` gives each shape (names and
+word kinds) a type id with precise `ClassWordKinds`. Reads and writes are
+`HeapFieldLoad` / `HeapFieldStore` (`DenseFieldLoad` / `DenseFieldStore`):
+CSE and LICM treat them as any class field. The host's records
+(`io::fs::metadata`, FFI `extern struct` returns) use the same layout.
+Nothing emits keyed `MakeDict` / `GetField` any more. A 10M-iteration
+`p.x` / `p.y` read-write loop (`--release`): 4.34 s keyed, 1.29 s
+slotted. A class local in the same loop takes 0.40 s: its fields go to
+frame slots (I3), which records do not yet.
 I4 / Q9 ([COI-296](https://linear.app/ardax/issue/COI-296/i4-string-format-mir-subset-or-refuse),
 [COI-332](https://linear.app/ardax/issue/COI-332))
 names `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` as SSA (R1) and
