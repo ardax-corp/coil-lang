@@ -205,6 +205,7 @@ impl Checker {
             enum_scalar: BTreeMap::new(),
             bare_constructs_by_span: HashMap::new(),
             bare_patterns_by_span: HashMap::new(),
+            bare_cases_by_module: HashMap::new(),
             pending_exhaustive: Vec::new(),
             async_functions: std::collections::HashSet::new(),
             async_depth: 0,
@@ -1682,6 +1683,8 @@ impl Checker {
         );
         self.module_locals
             .insert(self.current_module_id, self.local_defs.clone());
+        self.bare_cases_by_module
+            .insert(self.current_module_id, Default::default());
 
         // Imported type aliases first: any signature may name one (#1208).
         self.import_type_aliases(ast);
@@ -17732,6 +17735,29 @@ impl Checker {
     /// qualified pattern or a bare name that stayed a binding.
     pub fn bare_pattern_at(&self, start: usize, end: usize) -> Option<&str> {
         self.bare_patterns_by_span.get(&(start, end)).map(String::as_str)
+    }
+
+    /// Bare unit case patterns (`None`, `Red`) of the module being checked.
+    pub fn bare_cases(&self) -> &crate::typechecking::bare_cases::BareCases {
+        self.bare_cases_of(self.current_module_id)
+    }
+
+    /// Bare unit case patterns of `module` (none when it was not checked).
+    pub fn bare_cases_of(
+        &self,
+        module: crate::typechecking::def_id::ModuleId,
+    ) -> &crate::typechecking::bare_cases::BareCases {
+        self.bare_cases_by_module
+            .get(&module)
+            .unwrap_or_else(|| crate::typechecking::bare_cases::BareCases::none())
+    }
+
+    /// Record that the bare pattern name at `span` is a unit case.
+    pub(super) fn record_bare_case(&mut self, span: parser::SimpleSpan) {
+        self.bare_cases_by_module
+            .entry(self.current_module_id)
+            .or_default()
+            .insert(span);
     }
 
     /// `pattern` with a bare constructor (`Some(v)`, `None`, #1352) spelled

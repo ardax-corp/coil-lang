@@ -111,13 +111,16 @@ impl ParEscapeHint {
 /// Uses the same fork-shape detector as F0–F2, but with **all** user `fn`s as
 /// candidate arms. Pure functions that already IPA are skipped. Panic / yield
 /// impurity without a lockable resource is skipped.
-pub fn analyze_par_escape_hints(ast: &Output<'_>) -> Vec<ParEscapeHint> {
-    let effects = analyze_fn_effects(ast);
+pub fn analyze_par_escape_hints(
+    ast: &Output<'_>,
+    cases: &super::bare_cases::BareCases,
+) -> Vec<ParEscapeHint> {
+    let effects = analyze_fn_effects(ast, cases);
     let user_fns: HashSet<String> = effects.keys().cloned().collect();
     if user_fns.is_empty() {
         return Vec::new();
     }
-    let sites = analyze_par_fork_sites(ast, &user_fns);
+    let sites = analyze_par_fork_sites(ast, &user_fns, cases);
     let mut bodies = HashMap::new();
     collect_fn_bodies(ast, &mut bodies);
 
@@ -890,6 +893,7 @@ fn peel<'a>(expr: &'a Output<'a>) -> &'a Output<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::typechecking::bare_cases::BareCases;
     use parser::Pratt;
 
     fn parse(src: &'static str) -> parser::ast::Output<'static> {
@@ -914,7 +918,7 @@ fn rec(int n) -> int {
 fn main() { return; }
 "#,
         );
-        let hints = analyze_par_escape_hints(&ast);
+        let hints = analyze_par_escape_hints(&ast, BareCases::none());
         let rec = hints.iter().find(|h| h.fn_name == "rec").expect("rec hint");
         assert!(!rec.covering_lock);
         assert!(
@@ -944,7 +948,7 @@ fn rec(Mutex m, int n) -> int {
 fn main() { return; }
 "#,
         );
-        let hints = analyze_par_escape_hints(&ast);
+        let hints = analyze_par_escape_hints(&ast, BareCases::none());
         let rec = hints.iter().find(|h| h.fn_name == "rec").expect("rec hint");
         assert!(rec.covering_lock, "{hints:?}");
         assert!(
@@ -974,7 +978,7 @@ fn rec(int n) -> int {
 fn main() { return; }
 "#,
         );
-        let rec = analyze_par_escape_hints(&ast)
+        let rec = analyze_par_escape_hints(&ast, BareCases::none())
             .into_iter()
             .find(|h| h.fn_name == "rec")
             .expect("rec hint");
@@ -1004,7 +1008,7 @@ fn rec(int n) -> int {
 fn main() { return; }
 "#,
         );
-        let rec = analyze_par_escape_hints(&ast)
+        let rec = analyze_par_escape_hints(&ast, BareCases::none())
             .into_iter()
             .find(|h| h.fn_name == "rec")
             .expect("rec hint");
@@ -1033,7 +1037,7 @@ fn rec(int n) -> int {
 fn main() { return; }
 "#,
         );
-        let rec = analyze_par_escape_hints(&ast)
+        let rec = analyze_par_escape_hints(&ast, BareCases::none())
             .into_iter()
             .find(|h| h.fn_name == "rec")
             .expect("rec hint");
@@ -1071,7 +1075,7 @@ fn rec(Vec<int> a, int n) -> int {
 fn main() { return; }
 "#,
         );
-        let rec = analyze_par_escape_hints(&ast)
+        let rec = analyze_par_escape_hints(&ast, BareCases::none())
             .into_iter()
             .find(|h| h.fn_name == "rec")
             .expect("rec hint");
@@ -1101,7 +1105,7 @@ fn rec(int n) -> int {
 fn main() { return; }
 "#,
         );
-        let rec = analyze_par_escape_hints(&ast)
+        let rec = analyze_par_escape_hints(&ast, BareCases::none())
             .into_iter()
             .find(|h| h.fn_name == "rec")
             .expect("rec hint");
@@ -1171,7 +1175,7 @@ fn rec(int n) -> int {
 fn main() { return; }
 "#,
         );
-        let rec = analyze_par_escape_hints(&ast)
+        let rec = analyze_par_escape_hints(&ast, BareCases::none())
             .into_iter()
             .find(|h| h.fn_name == "rec")
             .expect("rec hint");
@@ -1193,7 +1197,7 @@ fn fib(int n) -> int {
 fn main() { return; }
 "#,
         );
-        let hints = analyze_par_escape_hints(&ast);
+        let hints = analyze_par_escape_hints(&ast, BareCases::none());
         assert!(hints.is_empty(), "pure IPA must not hint: {hints:?}");
     }
 
@@ -1208,7 +1212,7 @@ fn rec(int n) -> int {
 fn main() { return; }
 "#,
         );
-        let hints = analyze_par_escape_hints(&ast);
+        let hints = analyze_par_escape_hints(&ast, BareCases::none());
         assert!(hints.is_empty(), "panic is not lockable: {hints:?}");
     }
 }
