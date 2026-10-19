@@ -3472,14 +3472,15 @@ impl Compiler {
         if !self.checker.fn_has_rest(lookup)
             && let Some(n) = self.mono_plan.specializations_for_fn(key).next().map(|spec| spec.key.subst.len())
             && let Some(vars) = self.checker.fn_type_param_vars(lookup, n)
-            && let Some(params) = self.hir_mono_param_tys(lookup, arg_tys.len())
+            // A returned closure's parameters are the result's (#1590).
+            && let Some((params, ret)) = self.checker.fn_call_sig(lookup, arg_tys.len())
             && params.len() == arg_tys.len()
         {
             let mut map = HashMap::new();
             for (param, arg) in params.iter().zip(&arg_tys) {
                 Self::bind_scheme_vars(param, arg, &mut map);
             }
-            if let (Some(ret), Some(ty)) = (self.checker.fn_return_ty(lookup), Self::hir_ty(hir, call)) {
+            if let Some(ty) = Self::hir_ty(hir, call) {
                 Self::bind_scheme_vars(&ret, &apply_ty_prune(self.checker.subst(), ty), &mut map);
             }
             // A type argument still open (a generic caller): no clone.
