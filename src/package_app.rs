@@ -28,10 +28,15 @@ fn compile_program_archive_bytes(
     let debug = pipeline.program_debug();
     // Cleanup ranges are behaviour (panics run `defer`s), not debug info.
     let cleanup_ranges = debug.cleanup.clone();
-    let (source_files, debug_locs, debug_lines) = if strip_debug {
-        (Vec::new(), Vec::new(), Vec::new())
+    let (source_files, debug_locs, debug_lines, fn_symbols) = if strip_debug {
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new())
     } else {
-        (debug.source_files, debug.debug_locs, debug.debug_lines)
+        (
+            debug.source_files,
+            debug.debug_locs,
+            debug.debug_lines,
+            debug.fn_symbols,
+        )
     };
     let program = ArchivedProgram {
         version: ARCHIVE_VERSION,
@@ -41,7 +46,7 @@ fn compile_program_archive_bytes(
         bytecode,
         source_files,
         debug_locs,
-        fn_symbols: Vec::new(),
+        fn_symbols,
         struct_layouts: pipeline.archived_struct_layouts(),
         operand_stack_slots: pipeline.operand_stack_slots(),
         stack_maps: Vec::new(),

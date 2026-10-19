@@ -7406,6 +7406,7 @@ impl Compiler {
             return;
         }
         let string = crate::typechecking::ty::string();
+        let int = crate::typechecking::ty::int();
         let mut skip = BlockBuilder::new();
         let after = skip.fresh_label(self.bytecode.il_mut());
         skip.emit_jump_to(after, BbJumpKind::Unconditional, self.bytecode.il_mut());
@@ -7438,6 +7439,16 @@ impl Compiler {
                         })
                     }
                     ("hash", _) => self.emit_structural_hash(&name, &ty, tag),
+                    // The structural length read, as `x.len()` (#1536).
+                    ("len", _) => self.emit_builtin_entry(&name, &[(ty.clone(), tag)], int.clone(), None, |b, a| {
+                        b.push(
+                            crate::hir::HirKind::Call {
+                                callee: crate::hir::Callee::Method { name: "len".to_string() },
+                                args: vec![a[0]],
+                            },
+                            int.clone(),
+                        )
+                    }),
                     _ => {}
                 }
             }
