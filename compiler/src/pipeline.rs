@@ -3184,7 +3184,7 @@ fn scan_sum(Vec<int> b) -> int {
     }
     return acc;
 }
-async fn scan_yield(Vec<int> b) {
+gen fn scan_yield(Vec<int> b) {
     let j = 0;
     while j < len(b) {
         yield b[j];

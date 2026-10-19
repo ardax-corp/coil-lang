@@ -11,12 +11,6 @@ impl Show for Clicks {
     }
 }
 
-impl String for Clicks {
-    fn to_string(Clicks __str_Clicks) -> string {
-        return "Clicks";
-    }
-}
-
 impl Clicks {
     pub fn bump() -> int {
         self.n += 1;

@@ -2909,12 +2909,7 @@ mod tests {
     }
 
     #[test]
-    fn async_fn_is_rewritten_to_gen_fn() {
-        let src = "async fn count() {\n    yield 1;\n}\n";
-        assert_eq!(
-            format_source(src).expect("formats"),
-            "gen fn count() {\n    yield 1;\n}\n"
-        );
+    fn gen_fn_round_trips() {
         round_trip("gen fn count() {\n    yield 1;\n}\n");
     }
 

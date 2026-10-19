@@ -152,6 +152,10 @@ pub fn unresolved_macro_message(p: &PendingMacro) -> Message {
                 format!("Cannot derive unknown or non-derivable trait `{}`", p.name),
                 p.range.clone(),
             );
+            if p.name == "String" {
+                msg.with_help("the `String` derive was removed: derive `Show` and call `show()`".to_string());
+                return msg;
+            }
             msg.with_help(format!(
                 "built-in derives are: {}; or import a `derive {}` with `use`",
                 crate::macros::PRELUDE_DERIVES.join(", "),
@@ -536,7 +540,7 @@ fn expand_derives<'a>(args: ExpandDerivesArgs<'_, 'a>) -> Vec<Output<'a>> {
     for &trait_name in derives {
         pending.push(pending_derive(trait_name, span));
     }
-    // The type-name `Show` / `String` defaults are for non-generic types.
+    // The type-name `Show` default is for non-generic types.
     if generic {
         return Vec::new();
     }
@@ -545,7 +549,7 @@ fn expand_derives<'a>(args: ExpandDerivesArgs<'_, 'a>) -> Vec<Output<'a>> {
     out
 }
 
-/// Auto-generate FQN-only `Show`/`String` when neither derive nor an explicit
+/// Auto-generate FQN-only `Show` when neither derive nor an explicit
 /// `impl` covers the type. Bodies return the type name as a string literal
 /// (same display as `typeof self` for non-generic types).
     ///
@@ -566,13 +570,6 @@ fn push_default_display_impls<'a>(
             out.push(synth_show_scalar_enum(span, name, backing));
         } else {
             out.push(synth_show_type_name(span, name));
-        }
-    }
-    if !derives.contains(&"String") && !has_explicit_impl(decls, "String", name) {
-        if let Some(backing) = scalar_backing {
-            out.push(synth_string_scalar_enum(span, name, backing));
-        } else {
-            out.push(synth_string_type_name(span, name));
         }
     }
 }
@@ -613,19 +610,6 @@ fn synth_show_type_name<'a>(span: SimpleSpan, name: &'a str) -> Output<'a> {
         block_return(span, body),
     );
     typeclass_impl(span, "Show", name, vec![show_m])
-}
-
-fn synth_string_type_name<'a>(span: SimpleSpan, name: &'a str) -> Output<'a> {
-    let p = leak(format!("__str_{}", name));
-    let body = str_lit(span, name);
-    let m = method_fn(
-        span,
-        "to_string",
-        vec![arg(span, name, p)],
-        "string",
-        block_return(span, body),
-    );
-    typeclass_impl(span, "String", name, vec![m])
 }
 
 fn pending_derive(trait_name: &str, span: SimpleSpan) -> PendingMacro {
@@ -824,32 +808,6 @@ fn synth_show_scalar_enum<'a>(
     );
     typeclass_impl(span, "Show", enum_name, vec![m])
 }
-
-fn synth_string_scalar_enum<'a>(
-    span: SimpleSpan,
-    enum_name: &'a str,
-    backing: &'a str,
-) -> Output<'a> {
-    let p = leak(format!("__str_{enum_name}"));
-    let n = leak(format!("__str_n_{enum_name}"));
-    let body = block_lets_return(
-        span,
-        vec![let_bind(span, backing, n, ident(span, p))],
-        ufcs_nullary(span, ident(span, n), "show"),
-    );
-    let m = method_fn(
-        span,
-        "to_string",
-        vec![arg(span, enum_name, p)],
-        "string",
-        body,
-    );
-    typeclass_impl(span, "String", enum_name, vec![m])
-}
-
-
-
-
 
 #[cfg(test)]
 #[path = "attrs.tests.rs"]
