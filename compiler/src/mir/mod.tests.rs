@@ -4911,3 +4911,51 @@ fn lir_clears_work_about_linear_in_unreachable_blocks() {
     // Linear is ~8x.
     assert!(large <= 24 * small.max(1), "800 arms scanned {large} blocks, 100 scanned {small}");
 }
+
+/// `n` arms that rebind a heap word (`s = s + "a"`) into a chain of joins,
+/// each taken or not on `v0`: `if x == k { s = s + "a"; }` (#1502).
+fn reachable_rebind_arms(n: usize) -> String {
+    let mut text = String::from("func @main(v0: bool) -> i64 {\nbb0:\n    v1 = string 0\n    brif v0, bb1, bb2\n");
+    let mut s = 1;
+    let mut v = 1;
+    let mut prev = 0;
+    for i in 0..n {
+        let (arm, join) = (2 * i + 1, 2 * i + 2);
+        let (a, b, c, d, e, phi) = (v + 1, v + 2, v + 3, v + 4, v + 5, v + 6);
+        v += 6;
+        text.push_str(&format!(
+            "bb{arm}:\n    v{a} = string 1\n    v{b} = string 2\n    v{c} = format v{a}, v{s}, v{b}\n    v{d} = gcbarrier.safepoint v{c}, v{s}\n    v{e} = clearword v{s}\n    jump bb{join}\n"
+        ));
+        text.push_str(&format!("bb{join}:\n    v{phi} = phi.heapref [bb{prev}: v{s}, bb{arm}: v{d}]\n"));
+        if i + 1 < n {
+            text.push_str(&format!("    brif v0, bb{}, bb{}\n", join + 1, join + 2));
+        } else {
+            text.push_str(&format!("    v{} = iconst.i64 0\n    return v{}\n", v + 1, v + 1));
+        }
+        s = phi;
+        prev = join;
+    }
+    text.push('}');
+    text
+}
+
+/// #1502: LIR emission's walks of copy sources grow about linearly with a
+/// chain of joins that rebind a heap word. Each join's clears, each
+/// `ClearWord`'s, and the memory-order check each followed the φ chain
+/// back to its start: ~n² values.
+#[test]
+fn lir_copy_sources_about_linear_over_rebinding_joins() {
+    let steps = |n: usize| {
+        let text = reachable_rebind_arms(n);
+        let f = parse_func(&text).expect(&text);
+        f.verify().unwrap();
+        emit::COPY_SOURCE_STEPS.with(|c| c.set(0));
+        let mut pool = Vec::new();
+        emit_lir(&f, Some(Label(0)), &mut pool, true).expect("LIR emits");
+        emit::COPY_SOURCE_STEPS.with(|c| c.get())
+    };
+    let small = steps(100);
+    let large = steps(800);
+    // Linear is ~8x.
+    assert!(large <= 24 * small.max(1), "800 arms stepped {large} values, 100 stepped {small}");
+}

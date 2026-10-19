@@ -681,6 +681,12 @@ impl<'f> RewriteScan<'f> {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Values [`CopySources`] stepped through, for the work bound of #1502.
+    pub(super) static COPY_SOURCE_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Where a value's word was copied from: a cast's source (an
 /// `Option::Some` wrap) and a φ's incoming values, transitively. Each keeps
 /// the word in its own register after its last use, so once the value is
@@ -736,6 +742,8 @@ impl<'f> CopySources<'f> {
         let mut out = Vec::new();
         let mut work = vec![v];
         while let Some(x) = work.pop() {
+            #[cfg(test)]
+            COPY_SOURCE_STEPS.with(|c| c.set(c.get() + 1));
             let srcs: Vec<ValueId> = match self.defs.get(&x) {
                 Some((_, MirInst::Cast { src, .. })) => vec![*src],
                 Some((h, MirInst::Phi { args, .. })) => args.iter().filter(|&&(p, _)| edge(*h, p)).map(|&(_, a)| a).collect(),
