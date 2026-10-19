@@ -9557,6 +9557,27 @@ impl Checker {
                 return;
             }
         };
+        // The argument's own type variables that the `forall` signature
+        // grounds (`B` at `[int; 3]` in `forall T: Show. T -> [int; 3] -> int`)
+        // are bound at the argument too, so the `PolyFn` value captures
+        // those bounds' dictionaries; the skolems' come from each call
+        // (#1542).
+        if arg_expr.and_then(identifier_name).is_some()
+            && let Ok(s) = unify_with(&self.subst, inferred_arg, &candidate)
+        {
+            self.absorb(&s);
+            let skolem_free = |t: &Ty| !t.to_string().contains("$forall");
+            for v in ftv_ty(&candidate) {
+                let bound = apply_ty_prune(&local, &Ty::Var(v));
+                if bound != Ty::Var(v)
+                    && ftv_ty(&bound).is_empty()
+                    && skolem_free(&bound)
+                    && let Ok(s) = unify_with(&self.subst, &Ty::Var(v), &bound)
+                {
+                    self.absorb(&s);
+                }
+            }
+        }
 
         for constraint in candidate_constraints {
             let resolved_args: Vec<Ty> = constraint
@@ -9607,9 +9628,11 @@ impl Checker {
             } else {
                 let lookup = self.instance_lookup_args(&constraint.class, &resolved_args);
                 self.ensure_structural_instance(&constraint.class, &lookup);
+                // A generic instance meets it too (`Sz for Box<T>` at
+                // `Box<$forall1>`, a fixed array the shared `[T]`'s, #1542).
                 if self
                     .generics
-                    .find_instance(&constraint.class, &lookup)
+                    .find_instance_relaxed(&constraint.class, &lookup)
                     .is_none()
                 {
                     let pretty = self.diag_tys(&resolved_args.iter().collect::<Vec<_>>()).join(", ");
@@ -10181,6 +10204,11 @@ impl Checker {
     /// already is (`string` has a builtin one). An array's is `[T]`'s, read
     /// at run time, so `[T; 2]` and `[T; 3]` share it (a fixed length
     /// matches the dynamic one).
+    ///
+    /// One with an open element (`Vec<E>`, `(A, B)`, `[E]` in a generic
+    /// body) has the shape's: a generic instance over fresh variables
+    /// (`Length<Vec<a>>`), whose `len` reads the same length whatever the
+    /// elements are (#1542). A ground goal keeps its own.
     fn ensure_structural_length(&mut self, ty: &Ty) {
         let ty = show_lookup_ty(&apply_ty_prune(&self.subst, ty));
         let ty = match strip_readonly(&ty) {
@@ -10188,13 +10216,46 @@ impl Checker {
             Ty::Con(_) => return,
             other => other.clone(),
         };
-        if !Self::is_structural_len_ty(&ty)
-            || Self::ty_mentions_var(&ty)
-            || self.generics.find_unifying_instance("Length", std::slice::from_ref(&ty)).is_some()
-        {
+        if !Self::is_structural_len_ty(&ty) {
             return;
         }
-        self.generics.register_structural_instance("Length", ty);
+        // A `forall` parameter's skolem (`[$forall1; 3]`) is as open.
+        let skolem = |t: &Ty| matches!(t, Ty::Con(n) if n.starts_with("$forall"));
+        let elements: Vec<&Ty> = match &ty {
+            Ty::Array { element, .. } => vec![element.as_ref()],
+            Ty::Tuple(items) => items.iter().collect(),
+            Ty::Record { fields } => fields.iter().map(|(_, t)| t).collect(),
+            Ty::App(_, args) => args.iter().collect(),
+            _ => Vec::new(),
+        };
+        if !ftv_ty(&ty).is_empty() || elements.into_iter().any(skolem) {
+            let shape = match &ty {
+                Ty::Array { .. } => array(Ty::Var(self.counter.fresh())),
+                Ty::Tuple(items) => Ty::Tuple(items.iter().map(|_| Ty::Var(self.counter.fresh())).collect()),
+                Ty::Record { fields } => Ty::Record {
+                    fields: fields.iter().map(|(name, _)| (name.clone(), Ty::Var(self.counter.fresh()))).collect(),
+                },
+                Ty::App(head, args) if args.len() == 1 => Ty::App(head.clone(), vec![Ty::Var(self.counter.fresh())]),
+                _ => return,
+            };
+            let registered = self.generics.instances.iter().any(|inst| {
+                inst.class == "Length"
+                    && Generics::is_structural_shape(inst)
+                    && Generics::instances_unify("Length", std::slice::from_ref(&ty), inst)
+            });
+            if !registered {
+                self.generics.register_structural_instance("Length", shape);
+            }
+            return;
+        }
+        let met = self
+            .generics
+            .find_unifying_instances("Length", std::slice::from_ref(&ty))
+            .into_iter()
+            .any(|inst| !Generics::is_structural_shape(inst));
+        if !met {
+            self.generics.register_structural_instance("Length", ty);
+        }
     }
 
     /// (open vars in `wanted` may be bound by the match). Ambiguous matches
@@ -10250,6 +10311,7 @@ impl Checker {
                 }
             }
             if ok {
+                let shape = generic && Generics::is_structural_shape(&inst);
                 // A generic instance is recorded at this goal's types
                 // (`Show for Box<T>` as `Show<Box<int>>`, context
                 // `Show<int>`), so codegen builds dictionaries for the goal,
@@ -10265,7 +10327,7 @@ impl Checker {
                         })
                         .collect();
                 }
-                if generic && Generics::is_structural_tuple(&inst) {
+                if shape || (generic && Generics::is_structural_tuple(&inst)) {
                     structural.push((inst, local));
                 } else {
                     matches.push((inst, local));
@@ -10273,7 +10335,8 @@ impl Checker {
             }
         }
         // A goal another instance meets does not take the arity-wide tuple
-        // instance (#1479): a ground tuple has its own.
+        // instance (#1479) or a shape's (`Length<Vec<a>>`, #1542): a ground
+        // tuple has its own.
         if matches.is_empty() {
             matches = structural;
         }

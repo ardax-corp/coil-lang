@@ -5066,10 +5066,19 @@ impl Compiler {
         // A tuple with an open item, in a shared body, is one boxed object
         // whose dictionary the call builds (#1479).
         let open_tuple = |ty: &Ty| shared && matches!(ty, Ty::Tuple(_)) && !crate::hir::layout::ty_is_closed(ty);
+        // So is an instance of a generic class, a `Vec`, an array or a
+        // record built from the body's type parameters (`Box<E>`, #1542):
+        // one heap word, whose dictionary a generic instance serves.
+        let open_object = |ty: &Ty| shared && self.hir_open_heap_word(ty);
         let ground = |id: HirId| {
             let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
-            (crate::hir::layout::ty_is_closed(&ty) || ground_fun(&ty) || open(&ty) || open_tuple(&ty) || self.hir_open_enum_word(&ty))
-                .then_some(ty)
+            (crate::hir::layout::ty_is_closed(&ty)
+                || ground_fun(&ty)
+                || open(&ty)
+                || open_tuple(&ty)
+                || open_object(&ty)
+                || self.hir_open_enum_word(&ty))
+            .then_some(ty)
         };
         let explicit = args.len() - receivers;
         let skip = params.len().saturating_sub(explicit);
@@ -5161,7 +5170,8 @@ impl Compiler {
             arg_tys[0] = self_ty;
         }
         for constraint in &scheme.constraints {
-            // A goal open inside a tuple is built from the frame's.
+            // A goal open inside a type (`(int, T)`, `Box<T>`) is built
+            // from its generic instance and the frame's dictionaries.
             if self.open_structural_lookup(constraint, &vars).is_some() {
                 continue;
             }
@@ -5773,6 +5783,26 @@ impl Compiler {
             && matches!(crate::typechecking::ty::strip_readonly(ty), Ty::App(..) | Ty::Sum { .. } | Ty::Constructor { .. })
             && lower::classify(&self.checker, ty) == Some(ValueClass::Enum)
             && self.hir_boxed_enum_word(ty)
+    }
+
+    /// A generic class instance, `Vec`, array or record type that still
+    /// mentions a type parameter (`Box<E>`, `Vec<E>`, `[E]`): one heap
+    /// pointer word whatever the parameter is, so it boxes to a type
+    /// parameter by its tag alone (#1542).
+    fn hir_open_heap_word(&self, ty: &Ty) -> bool {
+        let ty = crate::typechecking::ty::strip_readonly(ty);
+        if crate::hir::layout::ty_is_closed(ty) {
+            return false;
+        }
+        match ty {
+            Ty::Array { .. } | Ty::Record { .. } => true,
+            Ty::App(head, _) => match head.as_ref() {
+                Ty::Con(n) if n == common::BUILTIN_VEC_TYPE => true,
+                Ty::Con(n) => self.checker.is_class(n),
+                _ => false,
+            },
+            _ => false,
+        }
     }
 
     /// `return f(..)` may jump instead of call, under the rules
