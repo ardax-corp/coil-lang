@@ -5,11 +5,11 @@ use tests::assert;
 
 test("a while whose condition reads the pushed vector") {
     let v: Vec<int> = [1];
-    while len(v) < 5 {
-        v.push(v[len(v) - 1] * 2);
+    while v.len() < 5 {
+        v.push(v[v.len() - 1] * 2);
     }
     assert!(v[4] == 16);
-    assert!(len(v) == 5);
+    assert!(v.len() == 5);
 }
 
 test("a push on one branch of a loop body") {
@@ -21,7 +21,7 @@ test("a push on one branch of a loop body") {
         }
         i += 1;
     }
-    assert!(len(v) == 4);
+    assert!(v.len() == 4);
     assert!(v[3] == 9);
 }
 
@@ -31,16 +31,16 @@ test("pushes in nested loops") {
         for b in 0..a {
             v.push(a * 10 + b);
         }
-        v.push(len(v));
+        v.push(v.len());
     }
-    assert!(len(v) == 6);
+    assert!(v.len() == 6);
     assert!(v[5] == 5);
 }
 
 test("a vector of strings grown until a length") {
     let words: Vec<string> = ["a"];
-    while len(words) < 4 {
-        words.push(words[len(words) - 1] + "a");
+    while words.len() < 4 {
+        words.push(words[words.len() - 1] + "a");
     }
     assert!(words[3] == "aaaa");
 }

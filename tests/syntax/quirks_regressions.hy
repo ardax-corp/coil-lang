@@ -3,7 +3,7 @@ use string::{format, to_bytes};
 
 fn find_opt(Vec<byte> hay, Vec<byte> needle) -> Option<int> {
     let i = 0;
-    while i < len(hay) {
+    while i < hay.len() {
         if hay[i] == needle[0] {
             return Option::Some(i);
         }

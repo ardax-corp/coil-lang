@@ -25,12 +25,12 @@ fn name(Light l) -> string {
 
 test("trailing commas") {
     let xs = [1, 2, 3];
-    assert!(len(xs) == 3);
+    assert!(xs.len() == 3);
     assert!(add(1, 2) == 3);
     assert!(name(Light::Green) == "green");
     assert!(new Cell(4).v == 4);
     let t = (1, 2);
-    assert!(len(t) == 2);
+    assert!(t.len() == 2);
 }
 
 test("empty and nested blocks") {

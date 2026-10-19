@@ -26,7 +26,7 @@ fn half(float y) -> float {
 
 test("lambdas over int, string and float") {
     assert!(apply_to(21, fn (int y) => y * 2) == 42);
-    assert!(apply_to("abc", fn (string s) => len(s)) == 3);
+    assert!(apply_to("abc", fn (string s) => s.len()) == 3);
     assert!(apply_to(5.0, half) == 2.5);
 }
 

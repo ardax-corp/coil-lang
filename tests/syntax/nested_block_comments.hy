@@ -35,9 +35,9 @@ test("comments inside expressions") {
     /* times */
     assert!(y == 8);
     let s = "/* not a comment */";
-    assert!(len(s) == 19);
+    assert!(s.len() == 19);
     let t = "// not a comment either";
-    assert!(len(t) == 23);
+    assert!(t.len() == 23);
 }
 
 test("division next to a comment") {

@@ -11,12 +11,12 @@ class Cmd {
 }
 
 fn bytes_eq(Vec<byte> a, Vec<byte> b) -> int {
-    if len(a) != len(b) {
+    if a.len() != b.len() {
         return 0;
     }
     let i = 0;
     let ok = 1;
-    while i < len(a) {
+    while i < a.len() {
         if a[i] != b[i] {
             ok = 0;
         }

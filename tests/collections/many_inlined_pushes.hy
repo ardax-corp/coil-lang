@@ -144,7 +144,7 @@ test("many inlined pushes") {
     let codes: Vec<int> = [];
     let lens: Vec<int> = [];
     huff_fill(codes, lens);
-    assert!(len(codes) == 130);
+    assert!(codes.len() == 130);
     assert!(codes[129] == 906);
     assert!(lens[129] == 10);
 }

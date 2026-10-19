@@ -10,7 +10,7 @@ fn check(int x) -> Result<int, string> {
 fn name_len(Result<string, string> r) -> Result<int, string> {
     match r {
         Result::Ok(s) => {
-            return Result::Ok(len(s));
+            return Result::Ok(s.len());
         },
         Result::Err(e) => {
             return Result::Err(e);
@@ -32,7 +32,7 @@ fn first_word(Result<string, string> r) -> Result<string, string> {
 fn score(Result<int, string> r) -> int {
     return match r {
         Result::Ok(v) => v,
-        Result::Err(e) => 0 - len(e),
+        Result::Err(e) => 0 - e.len(),
     };
 }
 

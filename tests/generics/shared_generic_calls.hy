@@ -63,5 +63,5 @@ test("map and filter with lambdas") {
     assert!(ys[0] == 10 && ys[2] == 30);
     let names = map(xs, fn (int x) => "n" + "!");
     assert!(names[1] == "n!");
-    assert!(len(filter(xs, fn (int x) => x > 1)) == 2);
+    assert!(filter(xs, fn (int x) => x > 1).len() == 2);
 }

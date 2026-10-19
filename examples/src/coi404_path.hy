@@ -19,7 +19,7 @@ impl Path {
     }
 
     pub fn join_empty(Path other) -> Result<Path, IoError> {
-        if len(other.raw) == 0 {
+        if other.raw.len() == 0 {
             return new Path(self.raw);
         }
         return new Path(self.raw);

@@ -3,7 +3,7 @@
 use tests::assert;
 
 fn total(int... xs) -> int {
-    return len(xs);
+    return xs.len();
 }
 
 fn sum(int... xs) -> int {
@@ -41,7 +41,7 @@ test("tuple spread into a rest") {
 }
 
 fn joined(string sep, string... parts) -> int {
-    return len(parts);
+    return parts.len();
 }
 
 test("tuple spread fills the fixed parameter, then the rest") {

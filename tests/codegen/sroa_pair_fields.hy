@@ -45,7 +45,7 @@ fn run(int n) -> int {
 }
 
 test("two-word enum fields of a frame-slot class local") {
-    // i = 0, 2: Done(i) + i * 10; i = 1, 3: Ready + 1; plus len("job").
+    // i = 0, 2: Done(i) + i * 10; i = 1, 3: Ready + 1; plus "job".len().
     assert!(run(4) == 0 + 0 + 1 + 2 + 20 + 1 + 3);
     assert!(run(0) == 3);
     // Long enough that a word left on the stack per pass would overrun it:

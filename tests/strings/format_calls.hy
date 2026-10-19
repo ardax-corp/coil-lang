@@ -15,7 +15,7 @@ fn tally(int n) -> int {
     let total = 0;
     let i = 0;
     while i < n {
-        total = total + len(format("%i", i));
+        total = total + format("%i", i).len();
         i = i + 1;
     }
     return total;
@@ -23,6 +23,6 @@ fn tally(int n) -> int {
 
 test("format in direct MIR") {
     assert!(show(42) == "n=42");
-    assert!(len(mixed(1, 2.5, "a")) > 0);
+    assert!(mixed(1, 2.5, "a").len() > 0);
     assert!(tally(12) == 14);
 }

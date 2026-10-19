@@ -8,7 +8,7 @@ fn f(int x) -> int {
 }
 
 fn f(int x, int y, int... xs) -> int {
-    return x + y + len(xs);
+    return x + y + xs.len();
 }
 
 fn greet(string name) -> string {

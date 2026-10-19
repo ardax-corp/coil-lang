@@ -9,18 +9,18 @@ fn bump(int a) -> int {
 }
 
 fn count(... xs) -> int {
-    return bump(len(xs)) - 1;
+    return bump(xs.len()) - 1;
 }
 
 fn labelled(string label, ... xs) -> int {
-    return len(label) * 10 + len(xs);
+    return label.len() * 10 + xs.len();
 }
 
 fn total(... xs) -> int {
-    if len(xs) == 0 {
+    if xs.len() == 0 {
         return 0;
     }
-    return new Box(len(xs)).v + count(xs[0]);
+    return new Box(xs.len()).v + count(xs[0]);
 }
 
 fn own() -> int {

@@ -17,7 +17,7 @@ fn nested(int v) -> int {
 fn pairs_total() -> int {
     let total = 0;
     for (i, s) in [(1, "a"), (2, "bb"), (3, "ccc")] {
-        total = total + i * len(s);
+        total = total + i * s.len();
     }
     return total;
 }

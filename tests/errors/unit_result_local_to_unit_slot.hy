@@ -31,7 +31,7 @@ test("let-bound Ok(()) pushed into Vec<Result<unit, string>>") {
     v.push(r);
     let e = Result::Err("bad");
     v.push(e);
-    assert!(len(v) == 2);
+    assert!(v.len() == 2);
     assert!(take(v[0]));
     assert!(!take(v[1]));
 }

@@ -17,14 +17,14 @@ fn empty_board() -> Vec<Task> {
 }
 
 fn add_task(Vec<Task> board, string title) {
-    let id = len(board);
+    let id = board.len();
     let t = new Task(id, title, 0);
     board.push(t);
     return board;
 }
 
 fn advance_task(Vec<Task> board, int id) -> Task {
-    let n = len(board) - 1;
+    let n = board.len() - 1;
     if id < 1 {
         panic "bad id";
     }
@@ -45,7 +45,7 @@ fn advance_task(Vec<Task> board, int id) -> Task {
 fn count_done(Vec<Task> board) -> int {
     let n = 0;
     let i = 1;
-    while i < len(board) {
+    while i < board.len() {
         let t = board[i];
         if t.status == 2 {
             n = n + 1;
@@ -56,7 +56,7 @@ fn count_done(Vec<Task> board) -> int {
 }
 
 fn board_len(Vec<Task> board) -> int {
-    return len(board) - 1;
+    return board.len() - 1;
 }
 
 fn status_name(int s) -> string {

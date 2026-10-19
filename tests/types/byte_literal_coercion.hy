@@ -35,7 +35,7 @@ test("array and Vec elements") {
     assert!(widen(fixed[2]) == 255);
     let v: Vec<byte> = [0, 10, 20];
     v.push(30);
-    assert!(len(v) == 4);
+    assert!(v.len() == 4);
     assert!(widen(v[3]) == 30);
 }
 

@@ -41,7 +41,7 @@ fn pair_right_of<T: PairOps>(T x) -> int {
 }
 
 fn len_of<T: Length>(T x) -> int {
-    return len(x);
+    return x.len();
 }
 
 test("user trait at a ground type") {

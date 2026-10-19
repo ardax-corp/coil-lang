@@ -17,7 +17,7 @@ fn build(int n) -> Vec<(int, int)> {
 fn weigh(Vec<(int, int)> pairs) -> int {
     let total = 0;
     let i = 0;
-    while i < len(pairs) {
+    while i < pairs.len() {
         let p = pairs[i];
         total = total + p[0] - p[1];
         i = i + 1;

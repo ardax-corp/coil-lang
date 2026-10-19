@@ -25,5 +25,5 @@ fn main() {
         Result::Ok(buf) => buf,
         Result::Err(_) => Vec::from([z]),
     };
-    write_all(stdout(), to_bytes(format("%i", len(got))));
+    write_all(stdout(), to_bytes(format("%i", got.len())));
 }

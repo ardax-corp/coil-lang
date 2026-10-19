@@ -4,7 +4,7 @@ use tests::assert;
 fn scan(Vec<int> v) -> int {
     let acc = 0;
     let i = 0;
-    while i < len(v) {
+    while i < v.len() {
         acc = acc + v[i];
         i = i + 1;
     }
@@ -14,7 +14,7 @@ fn scan(Vec<int> v) -> int {
 fn fscan(Vec<float> v) -> float {
     let acc = 0.0;
     let i = 0;
-    while i < len(v) {
+    while i < v.len() {
         acc = acc + v[i];
         i = i + 1;
     }
@@ -23,7 +23,7 @@ fn fscan(Vec<float> v) -> float {
 
 fn axpy(float a, Vec<float> x, Vec<float> y) -> float {
     let i = 0;
-    while i < len(x) {
+    while i < x.len() {
         y[i] = a * x[i] + y[i];
         i = i + 1;
     }

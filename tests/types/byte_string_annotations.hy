@@ -15,7 +15,7 @@ fn write_bytes() {
 test("Vec<byte> from a string literal") {
     let b: Vec<byte> = "Hi";
     assert!((typeof b) == "prelude::Vec<byte>");
-    assert!(len(b) == 2);
+    assert!(b.len() == 2);
     assert!(b[0] == "H");
 }
 
@@ -37,7 +37,7 @@ test("byte from a one-byte string and an in-range int") {
 test("a string literal cast to Vec<byte>") {
     let b = "hi" as Vec<byte>;
     assert!((typeof b) == "prelude::Vec<byte>");
-    assert!(len(b) == 2);
+    assert!(b.len() == 2);
 }
 
 test("byte has a Show instance") {

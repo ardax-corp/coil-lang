@@ -4,11 +4,11 @@ use tests::assert;
 
 test("len of literal") {
     let a = [1, 2, 3, 4];
-    assert!(len(a) == 4);
+    assert!(a.len() == 4);
 }
 
 test("nested array index") {
     let a = [[1, 2], [3, 4]];
     assert!(a[0][1] == 2);
-    assert!(len(a) == 2);
+    assert!(a.len() == 2);
 }

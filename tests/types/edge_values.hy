@@ -43,7 +43,7 @@ test("empty string ops") {
 test("single element aggregates") {
     let a = [42];
     assert!(a[0] == 42);
-    assert!(len(a) == 1);
+    assert!(a.len() == 1);
     let t = (99,);
     assert!(t[0] == 99);
 }

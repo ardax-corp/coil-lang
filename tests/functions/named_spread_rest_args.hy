@@ -10,7 +10,7 @@ fn diff(int a, int b) -> int {
 fn sum(int... xs) -> int {
     let total = 0;
     let i = 0;
-    while i < len(xs) {
+    while i < xs.len() {
         total = total + xs[i];
         i = i + 1;
     }

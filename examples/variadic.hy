@@ -7,7 +7,7 @@ use io::sync::write_all;
 use string::{format, to_bytes};
 
 fn sum(int... xs) -> int {
-    let n = len(xs);
+    let n = xs.len();
     let total = 0;
     let i = 0;
     while i < n {
@@ -19,7 +19,7 @@ fn sum(int... xs) -> int {
 
 fn greet(string name, string... extras) -> string {
     let out = name;
-    let n = len(extras);
+    let n = extras.len();
     let i = 0;
     while i < n {
         out = out + extras[i];

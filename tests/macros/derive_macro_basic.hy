@@ -34,7 +34,7 @@ fn triple(int x) -> int {
 
 test("derive generates a static method with helper attributes") {
     let names = Config::field_names();
-    assert!(len(names) == 2);
+    assert!(names.len() == 2);
     assert!(names[0] == "server-port");
     assert!(names[1] == "name");
 }

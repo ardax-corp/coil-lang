@@ -6,7 +6,7 @@ fn first(string s) -> string {
 }
 
 fn spread(string s) -> int {
-    return (s[len(s) - 1] as int) - (s[0] as int);
+    return (s[s.len() - 1] as int) - (s[0] as int);
 }
 
 test("index under an operand") {

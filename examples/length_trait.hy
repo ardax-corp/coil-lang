@@ -22,12 +22,12 @@ impl Length for Pair {
 }
 
 fn sized<T: Length>(T x) -> int {
-    return len(x);
+    return x.len();
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i\n", len("foo"))));
-    write_all(stdout(), to_bytes(format("%i\n", len(new Pair(1, 2)))));
+    write_all(stdout(), to_bytes(format("%i\n", "foo".len())));
+    write_all(stdout(), to_bytes(format("%i\n", (new Pair(1, 2)).len())));
     write_all(
         stdout(),
         to_bytes(format("%i\n", sized("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"))),

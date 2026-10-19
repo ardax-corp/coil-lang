@@ -7,7 +7,7 @@ test("empty Vec push then index") {
     arr.push(4);
     arr.push(1);
     arr.push(4);
-    assert!(len(arr) == 3);
+    assert!(arr.len() == 3);
     assert!(arr[0] == 4);
     assert!(arr[1] == 1);
     assert!(arr[2] == 4);
@@ -17,6 +17,6 @@ test("empty Vec push then index") {
         i = i + 1;
     }
     assert!(arr[0] == 4);
-    assert!(len(arr) == 83);
+    assert!(arr.len() == 83);
     assert!(arr[82] == 79);
 }

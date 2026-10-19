@@ -6,7 +6,7 @@ fn same_item(int x) -> int {
     let a: Vec<int> = [x];
     let b: Vec<int> = [x];
     a.push(3);
-    return len(b);
+    return b.len();
 }
 
 fn fill(Vec<int> codes, Vec<int> lens) {
@@ -19,8 +19,8 @@ test("two empty literals") {
     let a: Vec<int> = [];
     let b: Vec<int> = [];
     a.push(1);
-    assert!(len(a) == 1);
-    assert!(len(b) == 0);
+    assert!(a.len() == 1);
+    assert!(b.len() == 0);
 }
 
 test("two literals of the same local") {
@@ -40,7 +40,7 @@ test("two empty vectors filled through a helper") {
     let codes: Vec<int> = [];
     let lens: Vec<int> = [];
     fill(codes, lens);
-    assert!(len(codes) == 2);
-    assert!(len(lens) == 1);
+    assert!(codes.len() == 2);
+    assert!(lens.len() == 1);
     assert!(lens[0] == 2);
 }

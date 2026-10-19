@@ -252,7 +252,7 @@ fn draw(Vec<TypeRef> tys, string prefix) -> string {
 fn drawn(Vec<string> names, string prefix) -> string {
     let out = "";
     let i = 0;
-    while i < len(names) {
+    while i < names.len() {
         if i > 0 {
             out += ", ";
         }
@@ -315,7 +315,7 @@ derive Arbitrary(TypeDecl t) -> Code {
         let leaf = 0;
         let found = false;
         let i = 0;
-        while i < len(vs) {
+        while i < vs.len() {
             if !found && !vs[i].is_tuple() && !vs[i].is_record() {
                 leaf = i;
                 found = true;
@@ -323,10 +323,10 @@ derive Arbitrary(TypeDecl t) -> Code {
             i += 1;
         }
         let leaf_text = string::format("%i", leaf);
-        body = "let __arb_k = __arb_g.below(" + string::format("%i", len(vs)) + ");\n" +
+        body = "let __arb_k = __arb_g.below(" + string::format("%i", vs.len()) + ");\n" +
                "if __arb_g.deep() {\n__arb_k = " + leaf_text + ";\n}\n__arb_g.enter();\n";
         i = 0;
-        while i < len(vs) {
+        while i < vs.len() {
             let v = vs[i];
             if i != leaf {
                 body += "if __arb_k == " + string::format("%i", i) + " {\n" +

@@ -41,5 +41,5 @@ test("stdlib map and filter") {
     xs.push(3);
     let ys = map(xs, fn (int x) => x * 10);
     assert!(ys[2] == 30);
-    assert!(len(filter(xs, fn (int x) => x > 1)) == 2);
+    assert!(filter(xs, fn (int x) => x > 1).len() == 2);
 }

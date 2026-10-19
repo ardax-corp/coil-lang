@@ -51,7 +51,7 @@ fn tree(int k) -> Tree {
 
 test("push of computed variants") {
     let shapes = build(4);
-    assert!(len(shapes) == 4);
+    assert!(shapes.len() == 4);
     assert!(perimeter(shapes[0]) == 3);
     assert!(perimeter(shapes[1]) == 1 + 2 + 3 + 1);
     assert!(perimeter(shapes[2]) == 2 + 3 + 4);

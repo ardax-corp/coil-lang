@@ -19,7 +19,7 @@ impl Enc {
 
     pub fn encode_into(int n) -> Result<int, string> {
         let bytes = self.encode(n)?;
-        return len(bytes);
+        return bytes.len();
     }
 
     pub fn encode_first(int n) -> Result<byte, string> {
@@ -29,7 +29,7 @@ impl Enc {
 
     pub fn encode_into_fail(int n) -> Result<int, string> {
         let bytes = self.encode_fail(n)?;
-        return len(bytes);
+        return bytes.len();
     }
 }
 
@@ -41,7 +41,7 @@ fn free_encode(int n) -> Result<Vec<byte>, string> {
 
 fn free_encode_into(int n) -> Result<int, string> {
     let bytes = free_encode(n)?;
-    return len(bytes);
+    return bytes.len();
 }
 
 test("nested method try preserves Ok payload length") {
@@ -141,7 +141,7 @@ class EncFwd {}
 impl EncFwd {
     pub fn encode_into(int n) -> Result<int, string> {
         let bytes = self.encode(n)?;
-        return len(bytes);
+        return bytes.len();
     }
 
     pub fn encode(int n) -> Result<Vec<byte>, string> {

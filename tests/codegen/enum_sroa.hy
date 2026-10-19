@@ -42,7 +42,7 @@ fn wide(int i) -> int {
     let w = Wide::Four(id(i), id(i + 1), id(i + 2), id(i + 3));
     return match w {
         Wide::Four(a, b, c, d) => a * 1000 + b * 100 + c * 10 + d,
-        Wide::Label(t) => len(t),
+        Wide::Label(t) => t.len(),
     };
 }
 

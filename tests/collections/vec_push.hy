@@ -16,30 +16,30 @@ fn fill(int n) -> Vec<int> {
 fn grow(Vec<float> v, int k) -> float {
     let i = 0;
     while i < k {
-        v.push(v[len(v) - 1] * 0.5);
+        v.push(v[v.len() - 1] * 0.5);
         i = i + 1;
     }
-    return v[len(v) - 1];
+    return v[v.len() - 1];
 }
 
 fn both(Vec<int> a, Vec<int> b) -> int {
     let i = 0;
     while i < 5 {
-        a.push(len(b));
+        a.push(b.len());
         b.push(a[i] + 1);
         i = i + 1;
     }
-    return len(a) * 100 + b[len(b) - 1];
+    return a.len() * 100 + b[b.len() - 1];
 }
 
 test("Vec push in direct MIR") {
     let v = fill(1000);
-    assert!(len(v) == 1000);
+    assert!(v.len() == 1000);
     assert!(v[999] == 998001);
     let f: Vec<float> = Vec::new();
     f.push(64.0);
     assert!(grow(f, 6) == 1.0);
-    assert!(len(f) == 7);
+    assert!(f.len() == 7);
     let a: Vec<int> = Vec::new();
     let b: Vec<int> = Vec::new();
     b.push(7);

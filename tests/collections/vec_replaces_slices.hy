@@ -18,15 +18,15 @@ test("Vec param takes an array literal and indexes at runtime") {
 
 test("Vec<byte> from a string literal") {
     let buf: Vec<byte> = "ok";
-    assert!(len(buf) == 2);
+    assert!(buf.len() == 2);
 }
 
 test("fixed array keeps static length") {
     let xs: [int; 2] = [1, 2];
-    assert!(len(xs) == 2);
+    assert!(xs.len() == 2);
 }
 
 test("fn return of an empty Vec") {
     let row = empty_row();
-    assert!(len(row) == 0);
+    assert!(row.len() == 0);
 }

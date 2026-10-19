@@ -24,5 +24,5 @@ fn main() {
     );
 
     let back = to_bytes("hi");
-    write_all(stdout(), to_bytes(format("%i", len(back))));
+    write_all(stdout(), to_bytes(format("%i", back.len())));
 }

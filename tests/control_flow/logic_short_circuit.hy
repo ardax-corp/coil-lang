@@ -36,7 +36,7 @@ fn or_in_let(Log log, int i) -> bool {
 }
 
 fn guarded_index(Vec<int> v) -> bool {
-    return len(v) > 0 && v[0] == 5;
+    return v.len() > 0 && v[0] == 5;
 }
 
 fn guarded_div(int d) -> bool {

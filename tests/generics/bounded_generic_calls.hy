@@ -15,7 +15,7 @@ impl Weigh for int {
 
 impl Weigh for string {
     pub fn weight(string x) -> int {
-        return len(x);
+        return x.len();
     }
 }
 
@@ -29,7 +29,7 @@ fn heavier<T: Weigh>(T a, T b) -> T {
 fn total<T: Weigh>(Vec<T> xs) -> int {
     let sum = 0;
     let i = 0;
-    while i < len(xs) {
+    while i < xs.len() {
         sum = sum + xs[i].weight();
         i = i + 1;
     }
@@ -47,7 +47,7 @@ impl Bag<T: Weigh> {
     }
 
     pub fn first_or(T fallback) -> T {
-        if len(self.items) == 0 {
+        if self.items.len() == 0 {
             return fallback;
         }
         return self.items[0];
@@ -68,7 +68,7 @@ fn longest(string a, string b) -> string {
 fn fill(Bag<string> bag) -> int {
     let w = bag.add("abc");
     let first = bag.first_or("zz");
-    return w + len(first);
+    return w + first.len();
 }
 
 test("bounded generic calls lower with dictionaries") {

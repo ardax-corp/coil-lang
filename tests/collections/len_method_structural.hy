@@ -9,7 +9,7 @@ fn count(Vec<int> xs) -> int {
 test("fixed array len method") {
     let xs = [1, 2, 3];
     assert!(xs.len() == 3);
-    assert!(xs.len() == len(xs));
+    assert!(xs.len() == xs.len());
 }
 
 test("array parameter len method") {

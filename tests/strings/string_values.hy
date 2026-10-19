@@ -24,7 +24,7 @@ fn count_ok(int n) -> int {
     let i = 0;
     while i < n {
         let s = label(200 + i % 3);
-        if len(s) == 2 {
+        if s.len() == 2 {
             hits = hits + 1;
         }
         i = i + 1;

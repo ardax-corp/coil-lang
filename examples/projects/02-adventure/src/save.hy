@@ -31,7 +31,7 @@ fn encode_save(int room, int has_key) -> Vec<byte> {
 }
 
 fn decode_save(Vec<byte> got) -> SaveData {
-    if len(got) < 2 {
+    if got.len() < 2 {
         panic "save too short";
     }
     let one: byte = 1;

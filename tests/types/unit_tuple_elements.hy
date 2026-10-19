@@ -23,7 +23,7 @@ test("a tuple with a unit element is passed") {
 
 test("a vec of tuples with unit elements") {
     let v: Vec<((), int)> = [((), 1), ((), 2)];
-    assert!(len(v) == 2);
+    assert!(v.len() == 2);
     let (u, n) = v[1];
     assert!(n == 2);
     assert!(u == ());

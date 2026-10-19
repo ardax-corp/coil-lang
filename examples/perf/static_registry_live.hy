@@ -32,7 +32,7 @@ fn fill(int n) {
 fn thin() {
     let kept: Vec<Node> = Vec::new();
     let j = 0;
-    while j < len(nodes) {
+    while j < nodes.len() {
         if j % 2 == 0 {
             kept.push(nodes[j]);
         }
@@ -58,7 +58,7 @@ fn main() {
             junk = junk + t.v - t.v + 1;
         }
         let i = 0;
-        while i < len(nodes) {
+        while i < nodes.len() {
             total = total + nodes[i].v % 7;
             i = i + 1;
         }

@@ -17,16 +17,16 @@ impl Counter {
 
 test("field reads and len") {
     let xs = readonly [3, 4, 5];
-    assert!(len(xs) == 3);
+    assert!(xs.len() == 3);
     let c = readonly new Counter(7);
     assert!(c.n == 7);
 }
 
 test("rebinding a readonly variable") {
     let a = readonly [1];
-    assert!(len(a) == 1);
+    assert!(a.len() == 1);
     a = readonly [2];
-    assert!(len(a) == 1);
+    assert!(a.len() == 1);
     let c = readonly new Counter(1);
     c = readonly new Counter(5);
     assert!(c.n == 5);

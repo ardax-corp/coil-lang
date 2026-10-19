@@ -13,7 +13,7 @@ fn eval_a(int i, int j) -> float {
 }
 
 fn times_a(Vec<float> v, Vec<float> out) {
-    let n = len(v);
+    let n = v.len();
     let i = 0;
     while i < n {
         let s = 0.0;
@@ -28,7 +28,7 @@ fn times_a(Vec<float> v, Vec<float> out) {
 }
 
 fn times_at(Vec<float> v, Vec<float> out) {
-    let n = len(v);
+    let n = v.len();
     let i = 0;
     while i < n {
         let s = 0.0;

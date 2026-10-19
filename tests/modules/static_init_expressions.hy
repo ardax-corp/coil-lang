@@ -60,7 +60,7 @@ test("static initializers lowered to direct MIR") {
     assert!(pair.a == 9);
     assert!(pair.b == 78);
     assert!(area == 3136);
-    assert!(len(primes) == 5);
+    assert!(primes.len() == 5);
     assert!(primes[4] == 11);
     assert!(greeting == "static init");
     let b = match maybe {

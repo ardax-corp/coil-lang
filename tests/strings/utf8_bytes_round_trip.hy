@@ -5,17 +5,17 @@ use string::{to_bytes, from_bytes};
 
 test("len counts bytes") {
     let s = "héllo";
-    assert!(len(s) == 6);
+    assert!(s.len() == 6);
     let e = "";
-    assert!(len(e) == 0);
+    assert!(e.len() == 0);
     let j = "日本";
-    assert!(len(j) == 6);
+    assert!(j.len() == 6);
 }
 
 test("to_bytes then from_bytes") {
     let s = "héllo 日本";
     let bs = to_bytes(s);
-    assert!(bs.len() == len(s));
+    assert!(bs.len() == s.len());
     assert!((bs[1] as int) == 195);
     let back = from_bytes(bs)?;
     assert!(back == s);

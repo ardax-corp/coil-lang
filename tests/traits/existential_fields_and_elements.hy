@@ -31,7 +31,7 @@ class Labeled {
 fn all(Vec<Show> xs) -> int {
     let n = 0;
     for x in xs {
-        n = n + len(show(x));
+        n = n + show(x).len();
     }
     return n;
 }

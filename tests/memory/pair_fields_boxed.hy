@@ -20,7 +20,7 @@ test("record fields hold pairs boxed") {
 
 test("class fields hold pairs boxed") {
     let h = new Holder(pair(2), 0..3);
-    let acc = len(h.p);
+    let acc = h.p.len();
     for x in h.r {
         acc = acc + x;
     }

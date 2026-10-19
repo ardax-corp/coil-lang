@@ -4,7 +4,7 @@ use tests::assert;
 
 fn f(Option<string> s) -> Option<int> {
     let v = s?;
-    return Option::Some(len(v));
+    return Option::Some(v.len());
 }
 
 fn flat(Option<Option<int>> b) -> Option<int> {

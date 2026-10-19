@@ -65,7 +65,7 @@ fn print_help() {
 }
 
 fn handle_line(Player p, Vec<byte> line, string save_path) -> int {
-    if len(line) == 0 {
+    if line.len() == 0 {
         return 1;
     }
     let c = parse_line(line);
@@ -174,7 +174,7 @@ fn main() {
     let i = 0;
     let running = 1;
     while running == 1 {
-        if i >= len(raw) {
+        if i >= raw.len() {
             write_all(stdout(), to_bytes("Bye."));
             running = 0;
         }
@@ -183,7 +183,7 @@ fn main() {
             line.push(z);
             let collecting = 1;
             while collecting == 1 {
-                if i >= len(raw) {
+                if i >= raw.len() {
                     collecting = 0;
                 }
                 if collecting == 1 {
@@ -200,11 +200,11 @@ fn main() {
                 }
             }
             write_all(stdout(), to_bytes("> "));
-            if len(line) > 1 {
+            if line.len() > 1 {
                 let out: Vec<byte> = Vec::new();
                 out.push(line[1]);
                 let j = 2;
-                while j < len(line) {
+                while j < line.len() {
                     out.push(line[j]);
                     j = j + 1;
                 }
