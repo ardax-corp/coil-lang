@@ -2150,12 +2150,12 @@ impl<'s> Formatter<'s> {
     fn fmt_member_or_call_atom(&mut self, expr: &Expression<'_>) {
         match expr {
             Expression::Access(receiver, field) => {
-                self.fmt_output(receiver);
+                self.fmt_dot_receiver(receiver.1.as_ref());
                 self.push_str(".");
                 self.push_str(field);
             }
             Expression::OptionalAccess(receiver, field) => {
-                self.fmt_output(receiver);
+                self.fmt_dot_receiver(receiver.1.as_ref());
                 self.push_str("?.");
                 self.push_str(field);
             }
@@ -2164,6 +2164,18 @@ impl<'s> Formatter<'s> {
                 self.fmt_delimited_outputs("(", ")", args.as_deref().unwrap_or(&[]), false);
             }
             other => self.fmt_expression(other),
+        }
+    }
+
+    /// The receiver of a `.` / `?.`. A postfix `?` there is wrapped in
+    /// parens: `r?.len()` would read as optional access (#1540).
+    fn fmt_dot_receiver(&mut self, expr: &Expression<'_>) {
+        if ends_in_try(expr) {
+            self.push_str("(");
+            self.fmt_expression(expr);
+            self.push_str(")");
+        } else {
+            self.fmt_expression(expr);
         }
     }
 
@@ -2178,23 +2190,17 @@ impl<'s> Formatter<'s> {
             return;
         }
 
-        let mut can_break = match &parts[0] {
-            ChainPart::Root(expr) => {
-                self.fmt_expression(expr);
-                space_may_follow(expr)
-            }
+        // The parser takes a line break before `.` / `?.` after any
+        // receiver (#1540), so every part may start a line.
+        match &parts[0] {
+            ChainPart::Root(expr) => self.fmt_dot_receiver(expr),
             ChainPart::Field { .. } => unreachable!("member chain must start with root"),
-        };
+        }
         self.with_indent(|f| {
             for part in &parts[1..] {
-                if can_break {
-                    f.newline();
-                    f.write_indent();
-                }
+                f.newline();
+                f.write_indent();
                 f.emit_chain_field(part);
-                // A call ends in `)`, which the parser pads; a bare `.field`
-                // takes no space before the next `.`.
-                can_break = matches!(part, ChainPart::Field { call_args: Some(_), .. });
             }
         });
     }
@@ -2225,7 +2231,7 @@ impl<'s> Formatter<'s> {
             ChainPart::Root(expr) => {
                 let was = self.flat;
                 self.flat = true;
-                self.fmt_expression(expr);
+                self.fmt_dot_receiver(expr);
                 self.flat = was;
             }
             ChainPart::Field { .. } => unreachable!("member chain must start with root"),
@@ -2627,26 +2633,13 @@ fn collect_member_chain<'a>(expr: &'a Expression<'a>) -> Option<Vec<ChainPart<'a
     Some(rev)
 }
 
-/// Whether the parser accepts a space (or line break) between `expr` as
-/// printed and a `.` after it. A string or number literal, a `.field`, or a
-/// postfix `?` takes no space before `.`: `"a"\n.len()` does not parse
-/// (#1505). Unlisted shapes stay glued to their first `.part`, which is
-/// always valid.
-fn space_may_follow(expr: &Expression<'_>) -> bool {
+/// Whether `expr` prints ending in a postfix `?`, which would fuse with a
+/// following `.` into `?.` (#1540).
+fn ends_in_try(expr: &Expression<'_>) -> bool {
     match expr {
-        Expression::Identifier(_)
-        | Expression::Bool(_)
-        | Expression::Call { .. }
-        | Expression::MacroCall { .. }
-        | Expression::Index(..)
-        | Expression::QualifiedAccess { .. }
-        | Expression::Array(_) => true,
-        Expression::Expr(inner) => space_may_follow(inner.1.as_ref()),
-        // `fmt_expression` drops parens around an atom.
-        Expression::Group(g) => {
-            let inner = strip_groups(g).1.as_ref();
-            !is_atom(inner) || space_may_follow(inner)
-        }
+        Expression::Try(_) => true,
+        Expression::Expr(inner) => ends_in_try(inner.1.as_ref()),
+        // A `Group` keeps its parens: `x?` is not an atom.
         _ => false,
     }
 }
@@ -3445,5 +3438,45 @@ fn main() { return; }
             let once = format_source(&src).unwrap_or_else(|e| panic!("{src}: {e:?}"));
             assert_eq!(format_source(&once).unwrap(), once);
         }
+    }
+
+    /// How many `Try`, `Access` and `OptionalAccess` nodes `src` parses to.
+    /// Parens only add `Group` nodes, so equal counts mean the same reading.
+    fn shape(src: &str) -> [usize; 3] {
+        let ast = Pratt::default()
+            .parse(src)
+            .unwrap_or_else(|e| panic!("{src}: {e:?}"));
+        let text = format!("{:?}", ast.1);
+        ["Try(", " Access(", "OptionalAccess("].map(|k| {
+            text.match_indices(k).count()
+                + usize::from(k == " Access(") * text.match_indices("(Access(").count()
+        })
+    }
+
+    #[test]
+    fn member_after_try_keeps_its_meaning() {
+        // #1540: `r? .len()` is `(r?).len()`; printing it as `r?.len()`
+        // would turn it into optional access.
+        let chain = ".show().len()".repeat(7);
+        for body in [
+            "r? .len()".to_string(),
+            "r?\n        .len()".to_string(),
+            "r? .text".to_string(),
+            "r? .text.len()".to_string(),
+            format!("r? .text{chain}"),
+            format!("r? {chain}"),
+        ] {
+            let src = format!("fn main() {{\n    let n = {body};\n}}\n");
+            let once = format_source(&src).unwrap_or_else(|e| panic!("{src}: {e:?}"));
+            assert_eq!(shape(&once), shape(&src), "meaning changed:\n{src}\n=>\n{once}");
+            assert!(once.contains("(r?)"), "{once}");
+            stable(&once);
+        }
+        // Unbroken `?.` is optional access and stays as written.
+        stable("fn main() {\n    let n = r?.text;\n}\n");
+        let src = format!("fn main() {{\n    let n = r?{chain};\n}}\n");
+        let once = format_source(&src).unwrap();
+        assert_eq!(shape(&once), shape(&src), "meaning changed:\n{once}");
+        assert!(!once.contains("(r?)"), "{once}");
     }
 }

@@ -1169,12 +1169,13 @@ pub(crate) fn pure_base(body: &HirBody, id: HirId) -> bool {
     }
 }
 
-/// A field store's base that only reads: `x`, `x.f`, or `x[i]` of such a
-/// base with a [`pure_index`] (`xs[0].b`). The AST pushes it above the
-/// value, and a compound store builds it twice.
+/// A field store's base that only reads: `x`, a static `G`, `x.f`, or
+/// `x[i]` of such a base with a [`pure_index`] (`xs[0].b`). The AST pushes
+/// it above the value, and a compound store builds it twice.
 fn read_base(body: &HirBody, id: HirId) -> bool {
     match &body.expr(id).kind {
-        HirKind::Local(_) => true,
+        // A static's load reads its slot, as a local's does (#1557).
+        HirKind::Local(_) | HirKind::Global { .. } => true,
         HirKind::Field { base, .. } => read_base(body, *base),
         HirKind::Index {
             base,
@@ -2748,10 +2749,13 @@ impl Walk<'_> {
                 // unboxed class local); an escaping one is an object from the
                 // start, unless its fields are written first: the AST stores
                 // those into slots and builds the object once, at the escape
-                // ([`class_boxes`]).
+                // ([`class_boxes`]). A reassigned one is an object from the
+                // start: after `q = p` its field writes must reach `p`'s
+                // object (#1556).
                 if sroa_class(body, self.checker, *init).is_some()
                     && !only_field_base(body, *local)
                     && writes_field_of(body, *local)
+                    && !reassigned(body, *local)
                     && !self.class_boxed.contains(&local.0)
                 {
                     return Err("class-escape");

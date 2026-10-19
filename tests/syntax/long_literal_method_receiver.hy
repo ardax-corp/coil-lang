@@ -1,7 +1,7 @@
 // A method called on a string or number literal whose line runs past the
-// width limit. `coil fmt` must not break the line between the literal and
-// its `.method()`, nor between a field and the `.` after it: the parser
-// takes no space there (#1505).
+// width limit. `coil fmt` may break the line before the `.method()` after a
+// literal or a field: the parser takes a line break before `.` after any
+// receiver (#1505, #1540).
 
 use tests::assert;
 
@@ -11,15 +11,18 @@ class Holder {
 
 test("a long string literal as a method receiver") {
     let t = "a";
-    let b = t.len() == "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx".len();
+    let b = t.len() == "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        .len();
     assert!(!b);
     assert!(
-        t.len() + 89 == "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx".len(),
+        t.len() + 89 == "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+            .len(),
     );
 }
 
 test("a number literal starts a chain that does not fit") {
-    let s = 1234567.show()
+    let s = 1234567
+        .show()
         .len()
         .show()
         .len()
@@ -33,7 +36,8 @@ test("a number literal starts a chain that does not fit") {
         .len()
         .show();
     assert!(s == "1");
-    let f = 12345.5.show()
+    let f = 12345.5
+        .show()
         .len()
         .show()
         .len()

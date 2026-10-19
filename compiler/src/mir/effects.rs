@@ -91,10 +91,20 @@ impl MirInst {
         }
     }
 
-    /// May change a heap word an element or field read sees: a store, or
-    /// code that may store.
-    pub fn writes_heap(&self, calls: &CallFacts) -> bool {
-        self.runs_effects(calls) || matches!(self, Self::StoreIndex { .. } | Self::HeapFieldStore { .. })
+    /// May change a word an [`MirInst::Index`] reads: an element store, or
+    /// code that may store. The VM's element ops (`StoreIndex`, its pin
+    /// and dense forms) write only `Object::Array` slots, and field ops
+    /// (`SetField`, `DenseFieldStore`) only `Object::Instance` slots, so
+    /// neither kind of store changes what a read of the other sees (#1559).
+    pub fn writes_elements(&self, calls: &CallFacts) -> bool {
+        self.runs_effects(calls) || matches!(self, Self::StoreIndex { .. })
+    }
+
+    /// May change a word a [`MirInst::HeapFieldLoad`] reads (an instance
+    /// slot or an enum payload word): a field store, or code that may
+    /// store. See [`Self::writes_elements`].
+    pub fn writes_fields(&self, calls: &CallFacts) -> bool {
+        self.runs_effects(calls) || matches!(self, Self::HeapFieldStore { .. })
     }
 
     /// May change an array's length: an append, code that may append (a
