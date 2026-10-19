@@ -88,6 +88,7 @@ fn parse_args(args: &[String]) -> Result<Option<Parsed>, String> {
 }
 
 fn main() {
+    coil_build_id::check_parent("coil-debug");
     comptime::install();
     let raw: Vec<String> = std::env::args().collect();
     match parse_args(&raw) {

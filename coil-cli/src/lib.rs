@@ -292,7 +292,11 @@ pub fn dispatch_helper_as(sub: &str, helper: &str, leading: &[&str]) -> ! {
         .map(|a| (*a).to_string())
         .chain(std::env::args().skip(2))
         .collect();
-    let status = Command::new(&helper).args(&args).status();
+    let mut command = Command::new(&helper);
+    command.args(&args);
+    // The helper refuses to run when built from other sources (#1598).
+    coil_build_id::mark_helper(&mut command, &exe);
+    let status = command.status();
     match status {
         Ok(s) if s.code().is_none() => {
             // Killed by a signal (a crash in native code, or the OOM killer):

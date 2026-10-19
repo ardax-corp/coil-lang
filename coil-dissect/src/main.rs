@@ -124,6 +124,7 @@ fn parse_args(args: &[String]) -> Result<Option<(ReportConfig, DissectArgs)>, St
 }
 
 fn main() {
+    coil_build_id::check_parent("coil-dissect");
     comptime::install();
     let raw: Vec<String> = std::env::args().collect();
     match parse_args(&raw) {
