@@ -4299,13 +4299,15 @@ fn main() {
 #[test]
 fn aggregate_float_negate_uses_negf_not_int_neg() {
     // Regression: float aggregate unary `-` must not emit int `NEG`
-    // (which bit-twiddles a float as i64). Float path is `NEGF`.
+    // (which bit-twiddles a float as i64). Float path is `NEGF`. The
+    // elements are read from a static: literals fold at compile time.
     use common::Instruction;
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
+static let half: float = 1.5;
 fn main() {
-    let d = -(1.5, 2.0);
+    let d = -(half, half + 0.5);
     write(stdout(), to_bytes(format("%f,%f", d[0], d[1])));
 }
 "#;
