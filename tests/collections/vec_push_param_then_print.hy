@@ -21,5 +21,5 @@ fn main() {
     let d: Vec<int> = [5];
     let s: Vec<string> = [];
     push2(d, s, 7);
-    io::sync::println(format("%i %i %i", len(c), d[0], d[1]));
+    io::sync::println(format("%i %i %i", c.len(), d[0], d[1]));
 }

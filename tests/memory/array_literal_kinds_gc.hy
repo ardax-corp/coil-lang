@@ -24,7 +24,7 @@ test("node literals survive collections") {
     collect();
     let total = 0;
     let i = 0;
-    while i < len(nodes) {
+    while i < nodes.len() {
         total = total + nodes[i].v;
         i = i + 1;
     }
@@ -38,7 +38,7 @@ test("option, nested and string literals") {
     collect();
     let total = 0;
     let i = 0;
-    while i < len(holes) {
+    while i < holes.len() {
         total = total + match holes[i] {
             Option::Some(n) => n.v,
             Option::None => 0,
@@ -47,5 +47,5 @@ test("option, nested and string literals") {
     }
     assert!(total == 12);
     assert!(rows[0][1].v + rows[1][0].v == 5);
-    assert!(len(words[2]) == 3);
+    assert!(words[2].len() == 3);
 }

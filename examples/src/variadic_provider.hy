@@ -29,7 +29,7 @@ fn twice(string a) -> string {
 }
 
 fn count(... xs) -> int {
-    return len(xs);
+    return xs.len();
 }
 
 fn summary(int a, string b) -> int {

@@ -27,7 +27,7 @@ fn build(int n) -> Vec<Cell> {
 fn weigh(Vec<Cell> cells) -> int {
     let total = 0;
     let i = 0;
-    while i < len(cells) {
+    while i < cells.len() {
         let c = cells[i];
         total = total + c.weight - c.id;
         total = total + match c.left {

@@ -38,7 +38,7 @@ fn proves_every_clause_that_holds() {
     assert!(out.contains("8 proved, 0 failed, 0 not proved"), "{out}");
     assert!(out.contains("1 of 1 index bounds checks proved"), "{out}");
     assert!(out.contains("proved   count_up: invariant i >= 0 && i <= n"), "{out}");
-    assert!(out.contains("proved   push_then_last: call to last: requires len(v) > 0"), "{out}");
+    assert!(out.contains("proved   push_then_last: call to last: requires v.len() > 0"), "{out}");
 }
 
 #[test]

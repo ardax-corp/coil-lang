@@ -3,21 +3,21 @@
 use tests::assert;
 
 fn count(int... xs) -> int {
-    return len(xs);
+    return xs.len();
 }
 
 test("len of literals") {
-    assert!(len("") == 0);
-    assert!(len("abcd") == 4);
-    assert!(len([1, 2, 3, 4]) == 4);
-    assert!((typeof len("")) == "int");
+    assert!("".len() == 0);
+    assert!("abcd".len() == 4);
+    assert!([1, 2, 3, 4].len() == 4);
+    assert!((typeof "".len()) == "int");
 }
 
 test("fixed arrays keep their length") {
     let xs: [int; 3] = [1, 2, 3];
     assert!((typeof xs) == "[int; 3]");
     let z: [int; 0] = [];
-    assert!(len(z) == 0);
+    assert!(z.len() == 0);
 }
 
 test("a rest parameter's length") {

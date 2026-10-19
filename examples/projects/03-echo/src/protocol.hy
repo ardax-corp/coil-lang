@@ -2,7 +2,7 @@
 // Frame layout: [nbytes:byte][payload…] (payload capped at 5 for the demo).
 
 fn frame_len(Vec<byte> frame) -> int {
-    if len(frame) < 1 {
+    if frame.len() < 1 {
         return 0;
     }
     let b = frame[0];
@@ -30,7 +30,7 @@ fn frame_len(Vec<byte> frame) -> int {
 }
 
 fn encode_frame(Vec<byte> body) -> Vec<byte> {
-    let n = len(body);
+    let n = body.len();
     let nb: byte = 0;
     if n == 1 {
         nb = 1;
@@ -61,10 +61,10 @@ fn encode_frame(Vec<byte> body) -> Vec<byte> {
 
 fn payload_eq(Vec<byte> frame, Vec<byte> expect) -> int {
     let n = frame_len(frame);
-    if n != len(expect) {
+    if n != expect.len() {
         return 0;
     }
-    if len(frame) < n + 1 {
+    if frame.len() < n + 1 {
         return 0;
     }
     let i = 0;

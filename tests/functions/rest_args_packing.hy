@@ -12,13 +12,13 @@ fn sum(int... xs) -> int {
 }
 
 fn count(string... xs) -> int {
-    return len(xs);
+    return xs.len();
 }
 
 fn joined(string sep, string... parts) -> string {
     let out = "";
     let i = 0;
-    while i < len(parts) {
+    while i < parts.len() {
         if i > 0 {
             out = out + sep;
         }

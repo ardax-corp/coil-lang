@@ -6,7 +6,7 @@ use string::{format, to_bytes};
 
 fn axpy(float a, Vec<float> x, Vec<float> y) -> float {
     let i = 0;
-    while i < len(x) {
+    while i < x.len() {
         y[i] = a * x[i] + y[i];
         i = i + 1;
     }
@@ -16,7 +16,7 @@ fn axpy(float a, Vec<float> x, Vec<float> y) -> float {
 fn checksum(Vec<float> y) -> float {
     let s = 0.0;
     let i = 0;
-    while i < len(y) {
+    while i < y.len() {
         s = s + y[i];
         i = i + 1;
     }

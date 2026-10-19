@@ -93,7 +93,7 @@ fn fill(int n) -> int {
     }
     let s = 0;
     let j = 0;
-    while j < len(items) {
+    while j < items.len() {
         s = s + items[j];
         j = j + 1;
     }
@@ -135,7 +135,7 @@ test("heap statics: a class object and a Vec") {
     assert!(acc_sum(2) == 8);
     assert!(fill(4) == 18);
     assert!(fill(1) == 18);
-    assert!(len(items) == 5);
+    assert!(items.len() == 5);
 }
 
 fn remember(int n) -> int {

@@ -27,7 +27,7 @@ test("byte vectors round-trip every value") {
     collect();
     let sum = 0;
     i = 0;
-    while i < len(v) {
+    while i < v.len() {
         sum = sum + v[i] as int;
         i = i + 1;
     }
@@ -36,7 +36,7 @@ test("byte vectors round-trip every value") {
     assert!(v[3] as int == 250);
     v.insert(0, 7 as byte);
     assert!(v[0] as int == 7 && v[4] as int == 250);
-    assert!(len(v) == 257);
+    assert!(v.len() == 257);
 }
 
 test("literal, with_capacity and from") {
@@ -44,7 +44,7 @@ test("literal, with_capacity and from") {
     assert!(lit[2] as int == 255);
     let cap: Vec<byte> = Vec::with_capacity(4);
     cap.push(9 as byte);
-    assert!(len(cap) == 1 && cap[0] as int == 9);
+    assert!(cap.len() == 1 && cap[0] as int == 9);
     let fixed = [1 as byte, 2 as byte, 255 as byte];
     let copy: Vec<byte> = Vec::from(fixed);
     copy[0] = 100 as byte;
@@ -68,7 +68,7 @@ test("bool vectors") {
     }
     let count = 0;
     i = 0;
-    while i < len(flags) {
+    while i < flags.len() {
         if flags[i] {
             count = count + 1;
         }
@@ -82,11 +82,11 @@ test("bool vectors") {
 test("generic bodies read and write packed vectors") {
     let v: Vec<byte> = Vec::new();
     push_all(v, 42 as byte, 5);
-    assert!(len(v) == 5 && v[4] as int == 42);
+    assert!(v.len() == 5 && v[4] as int == 42);
     assert!(first(v) as int == 42);
     let b: Vec<bool> = [false, true];
     push_all(b, true, 2);
-    assert!(len(b) == 4 && b[3] && !first(b));
+    assert!(b.len() == 4 && b[3] && !first(b));
 }
 
 test("a byte vector costs about a byte per element") {

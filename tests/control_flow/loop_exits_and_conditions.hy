@@ -14,7 +14,7 @@ fn find(Vec<Vec<int>> rows, int want) -> (int, int) {
     let r = 0;
     for row in rows {
         let c = 0;
-        while c < len(row) {
+        while c < row.len() {
             if row[c] == want {
                 return (r, c);
             }
@@ -39,7 +39,7 @@ test("short-circuit in a while condition") {
     calls = 0;
     let xs = [5, 6, 7];
     let i = 0;
-    while i < len(xs) && xs[i] != 7 {
+    while i < xs.len() && xs[i] != 7 {
         i = i + 1;
     }
     assert!(i == 2);
@@ -85,8 +85,8 @@ test("return from nested loops") {
 
 test("a while whose body changes the condition's inputs") {
     let v: Vec<int> = [1];
-    while len(v) < 5 {
-        v.push(v[len(v) - 1] * 2);
+    while v.len() < 5 {
+        v.push(v[v.len() - 1] * 2);
     }
     assert!(v[4] == 16);
 }

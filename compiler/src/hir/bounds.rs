@@ -1,7 +1,7 @@
 //! In-bounds proofs for counted loops.
 //!
-//! In `while i < len(a) { … i = i + 1 }` (or a bound `n` from
-//! `let n = len(a)` just before the loop) and `for i in 0..len(a)`, an
+//! In `while i < a.len() { … i = i + 1 }` (or a bound `n` from
+//! `let n = a.len()` just before the loop) and `for i in 0..a.len()`, an
 //! `a[i]` reached before anything writes `i` in the iteration is in
 //! bounds: `i` starts at a non-negative literal, only grows, and `a` keeps
 //! its length while the loop runs (no append, no call that may resize).
@@ -42,8 +42,8 @@ struct Cx<'a, S> {
 /// What the statements before a loop establish.
 #[derive(Default, Clone)]
 struct Facts {
-    /// `n` holds `len(a)`, or `a` was filled with `n` elements from empty
-    /// (so `len(a) == n` whenever `n > 0`).
+    /// `n` holds `a.len()`, or `a` was filled with `n` elements from empty
+    /// (so `a.len() == n` whenever `n > 0`).
     len_of: HashMap<LocalId, LocalId>,
     /// The local holds `0`.
     zero: HashSet<LocalId>,
@@ -51,7 +51,7 @@ struct Facts {
     empty: HashSet<LocalId>,
     /// The local holds a non-negative value.
     nonneg: HashSet<LocalId>,
-    /// The local holds a value in `0..len(a)` for some array, or a small
+    /// The local holds a value in `0..a.len()` for some array, or a small
     /// non-negative literal: adding two of them cannot overflow.
     small: HashSet<LocalId>,
 }
@@ -166,7 +166,7 @@ impl<S: Fn(&str) -> bool> Cx<'_, S> {
     fn bound_array(&self, bound: HirId, facts: &Facts) -> Option<LocalId> {
         let body = self.body;
         match &body.expr(bound).kind {
-            HirKind::Call { callee: Callee::Named { name, .. } | Callee::Method { name }, args } if name == "len" && length_of(body, args) => match body.expr(args[0]).kind {
+            HirKind::Call { callee: Callee::Method { name }, args } if name == "len" && length_of(body, args) => match body.expr(args[0]).kind {
                 HirKind::Local(a) if !body.local(a).captured => Some(a),
                 _ => None,
             },
@@ -180,7 +180,7 @@ impl<S: Fn(&str) -> bool> Cx<'_, S> {
     }
 
     /// Every write to `i` in the loop is `i = i + k` with `k` a positive
-    /// literal or a small local the loop does not write: `i < len(a)` at
+    /// literal or a small local the loop does not write: `i < a.len()` at
     /// the test, so the sum cannot overflow.
     fn only_grows(&self, loop_body: HirId, i: LocalId, facts: &Facts, w: &Writes) -> bool {
         let body = self.body;
@@ -281,7 +281,7 @@ impl<S: Fn(&str) -> bool> Cx<'_, S> {
             HirKind::Make { kind: MakeKind::Array, args } if args.is_empty() => {
                 facts.empty.insert(local);
             }
-            HirKind::Call { callee: Callee::Named { name, .. } | Callee::Method { name }, args } if name == "len" && length_of(body, args) => {
+            HirKind::Call { callee: Callee::Method { name }, args } if name == "len" && length_of(body, args) => {
                 if let HirKind::Local(a) = body.expr(args[0]).kind
                     && a != local
                 {
@@ -362,9 +362,7 @@ impl<S: Fn(&str) -> bool> Cx<'_, S> {
             }
             HirKind::Append { .. } | HirKind::Yield { .. } | HirKind::Resume { .. } => w.steady = false,
             HirKind::Clear(ls) => w.locals.extend(ls),
-            HirKind::Call { callee: Callee::Named { name, .. }, args } => {
-                w.steady &= (name == "len" || name == "capacity") && length_of(body, args) || (self.steady)(name);
-            }
+            HirKind::Call { callee: Callee::Named { name, .. }, .. } => w.steady &= (self.steady)(name),
             HirKind::Call { callee: Callee::Method { name }, args } if name == "len" && length_of(body, args) => {}
             HirKind::Call { .. } => w.steady = false,
             HirKind::Builtin { op, .. } => {

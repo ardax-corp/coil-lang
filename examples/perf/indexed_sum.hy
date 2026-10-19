@@ -1,4 +1,4 @@
-// CPU: counted loop with `len(arr)` bound — ArrayLen should hoist once.
+// CPU: counted loop with `arr.len()` bound — ArrayLen should hoist once.
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};
@@ -6,7 +6,7 @@ use string::{format, to_bytes};
 fn sum(Vec<int> arr) -> int {
     let i = 0;
     let s = 0;
-    while i < len(arr) {
+    while i < arr.len() {
         s = s + arr[i];
         i = i + 1;
     }

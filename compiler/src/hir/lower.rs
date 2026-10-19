@@ -344,14 +344,14 @@ fn any_id(body: &HirBody, id: HirId, f: &impl Fn(HirId) -> bool) -> bool {
 /// takes part in a copy or such a store never escapes.
 pub fn stack_arrays(body: &HirBody, checker: &Checker) -> StackArrays {
     use std::collections::HashSet;
-    // `len(a)` of a fixed-length array folds to a constant (`hir_len_call`),
-    // so its argument reads no slots.
+    // `a.len()` of a fixed-length array folds to a constant (`hir_len_call`),
+    // so its receiver reads no slots.
     let folded_len: HashSet<u32> = body
         .exprs
         .iter()
         .filter_map(|e| match &e.kind {
             HirKind::Call {
-                callee: Callee::Named { name, .. } | Callee::Method { name },
+                callee: Callee::Method { name },
                 args,
             } if name == "len" && args.len() == 1 => Some(args[0]),
             _ => None,
@@ -682,8 +682,8 @@ fn writes_field_of(body: &HirBody, local: LocalId) -> bool {
     })
 }
 
-/// `len(x)` / `x.len()` of a plain local: `ArrayLen`, or a constant for a
-/// fixed-size type.
+/// `x.len()` of a plain local: `ArrayLen`, or a constant for a fixed-size
+/// type.
 impl Walk<'_> {
     /// A `Vec` method: `push` is inlined as `ArrayPush`; the others are
     /// `CALL`s to the builtin thunks. `pop` / `remove` are `HostInvoke`s
@@ -738,19 +738,10 @@ pub fn is_vec(body: &HirBody, checker: &Checker, id: HirId) -> bool {
         .is_some_and(|t| coil_ty::vec_element_ty(&apply_ty_prune(checker.subst(), t)).is_some())
 }
 
-/// Whether `len(x)` dispatches to a user `Length` instance: `x` has a
-/// known type that is not structural, so it is a plain call.
-pub fn user_len(body: &HirBody, checker: &Checker, arg: HirId) -> bool {
-    body.expr(arg).ty.as_ref().is_some_and(|t| {
-        let t = apply_ty_prune(checker.subst(), t);
-        // A bare type parameter's `len` is its `Length` dictionary call.
-        (super::layout::ty_is_closed(&t) || matches!(t, Ty::Var(_))) && !Checker::is_structural_len_ty_for_codegen(&t)
-    })
-}
-
 /// Whether `x.len()` is the structural length read: `x` an array, tuple,
 /// record, string or `Vec` (`ArrayLen`, or a constant for a fixed-size
-/// type), as `len(x)` of the same receiver.
+/// type). The one HIR form of a length read; any other `len` is a method
+/// call (a user `Length` instance or a bound).
 pub fn structural_len(body: &HirBody, checker: &Checker, recv: HirId) -> bool {
     body.expr(recv)
         .ty
@@ -2339,10 +2330,6 @@ impl Walk<'_> {
                 }
                 self.value(*value)
             }
-            HirKind::Call {
-                callee: Callee::Named { name, .. },
-                args,
-            } if name == "len" && args.len() == 1 && !user_len(body, self.checker, args[0]) => self.len(args[0]),
             HirKind::Call {
                 callee: Callee::Method { name },
                 args,

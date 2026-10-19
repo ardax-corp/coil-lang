@@ -48,5 +48,5 @@ test("tuple local holding an enum") {
 
 test("enum with the default Show inside a tuple") {
     let s = format("%v", (Opaque::Two(3), 0));
-    assert!(len(s) > 0, s);
+    assert!(s.len() > 0, s);
 }

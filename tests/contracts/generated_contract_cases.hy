@@ -33,8 +33,8 @@ fn clamp(int x, int lo, int hi) -> int
 }
 
 fn total(Vec<int> xs) -> int
-    requires len(xs) <= 1000
-    ensures len(xs) > 0 || result == 0
+    requires xs.len() <= 1000
+    ensures xs.len() > 0 || result == 0
 {
     let s = 0;
     for x in xs {
@@ -64,7 +64,7 @@ fn either(bool a, bool b) -> bool
 fn width(string s) -> int
     ensures result >= 0
 {
-    return len(s);
+    return s.len();
 }
 
 fn span_end(Span s) -> int

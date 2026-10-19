@@ -68,7 +68,7 @@ fn count_sum(int n) -> int {
 fn word_chars(int n) -> int {
     let total = 0;
     for w in new Words(n) {
-        total += len(w);
+        total += w.len();
     }
     return total;
 }

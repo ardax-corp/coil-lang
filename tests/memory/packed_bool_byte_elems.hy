@@ -34,7 +34,7 @@ fn sieve(int n) -> int {
 fn bytes_sum() -> int {
     let v = "az\n" as Vec<byte>;
     let a = "ok" as [byte; 2];
-    return (v[0] as int) + (v[1] as int) + (v[2] as int) + (a[1] as int) + len(v) * 1000;
+    return (v[0] as int) + (v[1] as int) + (v[2] as int) + (a[1] as int) + v.len() * 1000;
 }
 
 test("bool vector sieve") {

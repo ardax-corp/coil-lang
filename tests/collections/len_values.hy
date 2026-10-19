@@ -16,15 +16,15 @@ fn make(int n) -> Vec<int> {
 }
 
 fn count(Bag b) -> int {
-    return len(b.items) + len(b.pair);
+    return b.items.len() + b.pair.len();
 }
 
 fn rows(Vec<Vec<int>> grid, int i) -> int {
-    return len(grid[i]);
+    return grid[i].len();
 }
 
 fn made(int n) -> int {
-    return len(make(n)) + make(n + 1).len();
+    return make(n).len() + make(n + 1).len();
 }
 
 test("len of calls, fields and indexes lowers") {

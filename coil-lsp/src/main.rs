@@ -4644,7 +4644,6 @@ mod tests {
         for name in ["int", "float", "bool", "byte", "string", "unit"] {
             check(name.to_owned(), docs.primitive(name));
         }
-        check("prelude::len".into(), docs.item("prelude", "len"));
         for word in coil_keywords().iter().chain(highlight_keywords()) {
             if docs.keyword(word).is_none_or(str::is_empty) {
                 missing.push(format!("keyword `{word}`"));

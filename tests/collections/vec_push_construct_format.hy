@@ -11,5 +11,5 @@ test("push enum construct with format args keeps len") {
     let rows = Vec::new();
     rows.push(Row::Pair(format("a=%s", "1"), format("b=%s", "2")));
     rows.push(Row::Pair(format("c=%s", "3"), format("d=%s", "4")));
-    assert!(len(rows) == 2);
+    assert!(rows.len() == 2);
 }

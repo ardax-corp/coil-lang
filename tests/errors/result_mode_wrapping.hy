@@ -55,7 +55,7 @@ fn first_negative(Vec<int> xs) {
             raise x;
         }
     }
-    return len(xs);
+    return xs.len();
 }
 
 test("plain returns are wrapped in Ok") {

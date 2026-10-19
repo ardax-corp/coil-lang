@@ -17,7 +17,7 @@ fn slurp(string path) -> Result<int, IoError> {
     wait_readable(s)?;
     let bytes = read_to_end(s)?;
     close(s)?;
-    return Result::Ok(len(bytes));
+    return Result::Ok(bytes.len());
 }
 
 fn size(Result<Result<int, IoError>, TaskError> r) -> int {

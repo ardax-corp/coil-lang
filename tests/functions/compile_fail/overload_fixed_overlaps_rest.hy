@@ -4,7 +4,7 @@ fn f(int x) -> int {
 }
 
 fn f(int x, int... xs) -> int {
-    return x + len(xs);
+    return x + xs.len();
 }
 
 fn main() {

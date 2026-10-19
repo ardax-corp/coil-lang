@@ -107,8 +107,8 @@ pub fn eval_expr<'a>(
     }
 }
 
-/// Fold `x.len()` (or `len(x)`) when the operand's length is known from a
-/// literal shape or a const string binding.
+/// Fold `x.len()` when the operand's length is known from a literal shape or
+/// a const string binding.
 fn eval_len_call<'a>(
     name: &Output<'a>,
     args: Option<&[Output<'a>]>,
@@ -116,7 +116,6 @@ fn eval_len_call<'a>(
 ) -> Option<ConstValue> {
     match (name.1.as_ref(), args.unwrap_or(&[])) {
         (Expression::Access(recv, "len"), []) => eval_len_operand(recv, env),
-        (Expression::Identifier("len"), [arg]) => eval_len_operand(arg, env),
         _ => None,
     }
 }
@@ -405,11 +404,8 @@ mod tests {
             (
                 SimpleSpan::from(0..8),
                 Box::new(Expression::Call {
-                    name: (
-                        SimpleSpan::from(0..3),
-                        Box::new(Expression::Identifier("len")),
-                    ),
-                    args: Some(vec![arg]),
+                    name: (SimpleSpan::from(0..6), Box::new(Expression::Access(arg, "len"))),
+                    args: Some(vec![]),
                 }),
             )
         };
@@ -452,11 +448,8 @@ mod tests {
             (
                 SimpleSpan::from(0..8),
                 Box::new(Expression::Call {
-                    name: (
-                        SimpleSpan::from(0..3),
-                        Box::new(Expression::Identifier("len")),
-                    ),
-                    args: Some(vec![arg]),
+                    name: (SimpleSpan::from(0..6), Box::new(Expression::Access(arg, "len"))),
+                    args: Some(vec![]),
                 }),
             )
         };

@@ -6,7 +6,7 @@ use tests::assert;
 fn sum_while(Vec<int> a) -> int {
     let s = 0;
     let i = 0;
-    while i < len(a) {
+    while i < a.len() {
         s = s + a[i];
         a[i] = 0;
         i = i + 1;
@@ -16,7 +16,7 @@ fn sum_while(Vec<int> a) -> int {
 
 fn sum_range(Vec<int> a) -> int {
     let s = 0;
-    for i in 0..len(a) {
+    for i in 0..a.len() {
         s = s + a[i] * 2;
     }
     return s;
@@ -25,9 +25,9 @@ fn sum_range(Vec<int> a) -> int {
 fn after_bump(Vec<int> a) -> int {
     let s = 0;
     let i = 0;
-    while i < len(a) {
+    while i < a.len() {
         i = i + 1;
-        if i < len(a) {
+        if i < a.len() {
             s = s + a[i];
         }
     }
@@ -51,7 +51,7 @@ fn filled(int n) -> int {
 }
 
 fn bound_let(Vec<int> a) -> int {
-    let n = len(a);
+    let n = a.len();
     let s = 0;
     let i = 0;
     while i < n {

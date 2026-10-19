@@ -33,7 +33,7 @@ pub struct TypedSidecar {
     dicts: HashMap<NodeId, Vec<InstanceDef>>,
     for_in: HashMap<NodeId, ForInInfo>,
     ffi_tags: HashMap<DefId, Vec<u32>>,
-    /// Index expressions proven `0 <= i < len(arr)` with stable length.
+    /// Index expressions proven `0 <= i < arr.len()` with stable length.
     in_bounds_index: HashSet<NodeId>,
     /// Dividend / index nodes proven `>= 0` (Q4: skip Euclidean rem fixup).
     nonneg_expr: HashSet<NodeId>,

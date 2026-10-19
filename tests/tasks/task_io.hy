@@ -63,7 +63,7 @@ fn accept_one(Stream listener) -> Stream {
 
 fn body_len(Stream c) -> int {
     let n = match read_to_end(c) {
-        Result::Ok(b) => len(b),
+        Result::Ok(b) => b.len(),
         Result::Err(_) => -1,
     };
     let _ = close(c);

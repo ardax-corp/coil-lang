@@ -112,7 +112,7 @@ fn trapping_overflow_assumes_the_result_fits() {
 #[test]
 fn a_vec_parameter_is_a_length_and_its_items() {
     let all = checks(
-        "fn first(Vec<int> v) -> int requires len(v) > 0 { return v[0]; }
+        "fn first(Vec<int> v) -> int requires v.len() > 0 { return v[0]; }
          fn grow(Vec<int> v) -> int { v.push(1); return first(v); }",
     );
     let grow = named(&all, "grow");

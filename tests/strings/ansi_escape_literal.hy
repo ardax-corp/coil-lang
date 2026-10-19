@@ -6,7 +6,7 @@ use string::to_bytes;
 test("an ANSI colour sequence") {
     let s = "\e[31mred\e[0m";
     let b = to_bytes(s);
-    assert!(len(b) == 12);
+    assert!(b.len() == 12);
     assert!(b[0] == (27 as byte));
     assert!(b[8] == (27 as byte));
     assert!(s == "\x1b[31mred\x1b[0m");

@@ -1,6 +1,6 @@
 //! Length / in-bounds sidecar facts for `IndexUnchecked` / `ArrayPin`.
 //!
-//! Fail-closed: facts are `0 <= i < len(arr)` plus length stability. Yield,
+//! Fail-closed: facts are `0 <= i < arr.len()` plus length stability. Yield,
 //! `ArrayPush`, and calls that may change a length refuse (see
 //! [`crate::typechecking::purity::LengthStability`]; impure calls that only
 //! write fields, elements or output keep the facts). Callers may transfer
@@ -23,7 +23,7 @@ type FnParamShape = (String, Vec<ParamSlot>);
 struct Env {
     /// Names proven `>= 0` (init from a non-negative const or `++`/`+= k>0`).
     nonneg: HashSet<String>,
-    /// `(index, array)` pairs with `index < len(array)` in this region.
+    /// `(index, array)` pairs with `index < array.len()` in this region.
     lt_len: HashSet<(String, String)>,
     /// Length of this array (or all arrays, if `*`) is no longer stable.
     len_poison: HashSet<String>,
@@ -220,18 +220,10 @@ fn ident_name(expr: &Output<'_>) -> Option<String> {
     }
 }
 
-/// `len(a)` or `a.len()`.
+/// `a.len()`.
 fn len_of_array(expr: &Output<'_>) -> Option<String> {
     match peel(expr).1.as_ref() {
-        Expression::Call { name, args } => match peel(name).1.as_ref() {
-            Expression::Identifier(n) if *n == "len" => {
-                let args = args.as_ref()?;
-                if args.len() == 1 {
-                    ident_name(&args[0])
-                } else {
-                    None
-                }
-            }
+        Expression::Call { name, .. } => match peel(name).1.as_ref() {
             Expression::Access(recv, field) if *field == "len" => ident_name(recv),
             _ => None,
         },
@@ -1083,7 +1075,7 @@ fn main() -> int {
     }
     let acc = 0;
     let j = 0;
-    while j < len(b) {
+    while j < b.len() {
         acc = acc + b[j];
         j = j + 1;
     }
@@ -1093,7 +1085,7 @@ fn main() -> int {
         let s = sidecar(src);
         assert!(
             !s.in_bounds_index_ids().is_empty(),
-            "b[j] under j < len(b) should be in-bounds"
+            "b[j] under j < b.len() should be in-bounds"
         );
     }
 
@@ -1102,7 +1094,7 @@ fn main() -> int {
         let src = r#"
 gen fn scan(Vec<int> b) {
     let j = 0;
-    while j < len(b) {
+    while j < b.len() {
         yield b[j];
         j = j + 1;
     }
@@ -1143,7 +1135,7 @@ fn main() -> int {
     }
     let acc = 0;
     let j = 0;
-    while j < len(b) {
+    while j < b.len() {
         acc = acc + at(b, j);
         j = j + 1;
     }

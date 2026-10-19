@@ -10,7 +10,7 @@ fn id_str(string s) -> string {
 fn main() {
     let t = (1, 2, 3);
     let d = { a: 1, b: 2 };
-    write(stdout(), to_bytes(format("%i\n", len(id_str("ab")))));
-    write(stdout(), to_bytes(format("%i\n", len(t))));
-    write(stdout(), to_bytes(format("%i\n", len(d))));
+    write(stdout(), to_bytes(format("%i\n", id_str("ab").len())));
+    write(stdout(), to_bytes(format("%i\n", t.len())));
+    write(stdout(), to_bytes(format("%i\n", d.len())));
 }

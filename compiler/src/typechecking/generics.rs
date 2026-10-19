@@ -617,7 +617,7 @@ impl Generics {
             },
         );
 
-        // `len(x)` resolves through this trait for custom types; arrays,
+        // `x.len()` resolves through this trait for custom types; arrays,
         // tuples, and dicts keep a structural fast path in the checker.
         self.typeclasses.insert(
             "Length".into(),

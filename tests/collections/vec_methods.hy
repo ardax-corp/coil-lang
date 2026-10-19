@@ -97,7 +97,7 @@ test("fixed local escapes to callee") {
 
 test("empty fixed zero") {
     let z: [int; 0] = [];
-    assert!(len(z) == 0);
+    assert!(z.len() == 0);
 }
 
 test("rest pack is vec") {

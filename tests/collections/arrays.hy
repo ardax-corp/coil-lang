@@ -39,14 +39,14 @@ test("compound index assign") {
 
 test("len of literal") {
     let a = [1, 2, 3, 4];
-    assert!(len(a) == 4);
+    assert!(a.len() == 4);
 }
 
 test("push grows vec") {
     let a = Vec::from([1]);
     a.push(2);
     a.push(3);
-    assert!(len(a) == 3);
+    assert!(a.len() == 3);
     assert!(a[0] == 1);
     assert!(a[1] == 2);
     assert!(a[2] == 3);
@@ -56,7 +56,7 @@ test("empty then push") {
     let a: Vec<int> = Vec::new();
     a.push(7);
     a.push(8);
-    assert!(len(a) == 2);
+    assert!(a.len() == 2);
     assert!(a[0] == 7);
     assert!(a[1] == 8);
 }

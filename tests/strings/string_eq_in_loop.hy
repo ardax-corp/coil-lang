@@ -27,7 +27,7 @@ fn count_hits(int n) -> int {
 fn pick(Vec<string> rows, string key) -> string {
     let v = "";
     let i = 0;
-    while i < len(rows) {
+    while i < rows.len() {
         if word(0) == "o" && format("%s", rows[i]) == key {
             v = rows[i];
         }

@@ -24,17 +24,17 @@ impl Path {
         slash.push("/");
         let mid = Vec::new();
         let i = 0;
-        while i < len(a) {
+        while i < a.len() {
             mid.push(a[i]);
             i = i + 1;
         }
         let j = 0;
-        while j < len(slash) {
+        while j < slash.len() {
             mid.push(slash[j]);
             j = j + 1;
         }
         let k = 0;
-        while k < len(b) {
+        while k < b.len() {
             mid.push(b[k]);
             k = k + 1;
         }
@@ -56,7 +56,7 @@ fn to_lower(string s) -> Result<string, string> {
     let b = to_bytes(s);
     let out: Vec<byte> = Vec::new();
     let i = 0;
-    while i < len(b) {
+    while i < b.len() {
         out.push(b[i]);
         i = i + 1;
     }
@@ -68,8 +68,8 @@ fn replace_two(string s) -> Result<string, string> {
     let b = to_bytes(s);
     let out: Vec<byte> = Vec::new();
     let i = 0;
-    while i < len(b) {
-        if i + 2 < len(b) && b[i] == "t" && b[i + 1] == "w" && b[i + 2] == "o" {
+    while i < b.len() {
+        if i + 2 < b.len() && b[i] == "t" && b[i + 1] == "w" && b[i + 2] == "o" {
             out.push("2");
             i = i + 3;
         } else {

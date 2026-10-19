@@ -45,5 +45,5 @@ test("results compose") {
     let inner = format("<%i>", 1);
     let outer = format("[%s|%s]", inner, inner);
     assert!(outer == "[<1>|<1>]");
-    assert!(len(outer) == 9);
+    assert!(outer.len() == 9);
 }

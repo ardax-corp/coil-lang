@@ -6,8 +6,8 @@ use io::{stdout, write};
 use string::{format, to_bytes};
 
 fn find_bytes(Vec<byte> hay, Vec<byte> needle) -> int {
-    let hn = len(hay);
-    let nn = len(needle);
+    let hn = hay.len();
+    let nn = needle.len();
     if nn == 0 {
         return 0;
     }
@@ -36,7 +36,7 @@ fn bytes_slice(Vec<byte> src, int start, int end) -> Vec<byte> {
     let out: Vec<byte> = Vec::new();
     let i = start;
     while i < end {
-        if i < len(src) {
+        if i < src.len() {
             out.push(src[i]);
         }
         i = i + 1;
@@ -53,9 +53,9 @@ fn parse_url(string s) -> int {
     }
     let scheme_b = bytes_slice(b, 0, sep_at);
     let rest_start = sep_at + 3;
-    let host_end = len(b);
+    let host_end = b.len();
     let host_b = bytes_slice(b, rest_start, host_end);
-    return len(scheme_b) + len(host_b);
+    return scheme_b.len() + host_b.len();
 }
 
 fn main() {

@@ -5,7 +5,7 @@ use string::to_bytes;
 fn count(string s, byte b) -> int {
     let n = 0;
     let i = 0;
-    while i < len(s) {
+    while i < s.len() {
         if s[i] == b {
             n = n + 1;
         }
@@ -31,14 +31,14 @@ test("index is by byte, not by char") {
     assert!((s[1] as int) == 195);
     assert!((s[2] as int) == 169);
     assert!(s[3] == "l");
-    assert!(len(s) == 6);
+    assert!(s.len() == 6);
 }
 
 test("index matches to_bytes") {
     let s = "coil";
     let bs = to_bytes(s);
     let i = 0;
-    while i < len(s) {
+    while i < s.len() {
         assert!(s[i] == bs[i]);
         i = i + 1;
     }

@@ -44,7 +44,7 @@ fn ident<T>(T x) -> T {
 
 fn find(Vec<Tagged> xs, int want) -> Option<Tagged> {
     let i = 0;
-    while i < len(xs) {
+    while i < xs.len() {
         if xs[i].num() == want {
             return Option::Some(xs[i]);
         }
@@ -78,7 +78,7 @@ test("impl enum as parameters and generic values") {
 test("impl enum in containers and Option") {
     let xs: Vec<Tagged> = [make(1), make(-1), make(3)];
     xs.push(make(5));
-    assert!(len(xs) == 4 && xs[3].num() == 5 && xs[1].num() == -1);
+    assert!(xs.len() == 4 && xs[3].num() == 5 && xs[1].num() == -1);
     let hit = find(xs, 3);
     assert!(
         match hit {

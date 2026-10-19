@@ -1,4 +1,4 @@
-// `x.len()` reads a length wherever `len(x)` does: in a module `const`, in a
+// `x.len()` reads a structural length in a module `const`, in a
 // contract clause, and on a `Vec` in a loop bound.
 use tests::assert;
 

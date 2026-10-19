@@ -42,7 +42,7 @@ fn score(Shape s) -> int {
     return match s {
         Shape::Dot => 0,
         Shape::Line(n) => n,
-        Shape::Rect(w, h, label) => w + len(label) + (h as int),
+        Shape::Rect(w, h, label) => w + label.len() + (h as int),
     };
 }
 

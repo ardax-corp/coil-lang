@@ -37,7 +37,7 @@ const MAP: &str = "
 fn map<T, U>(Vec<T> xs, T -> U f) -> Vec<U> {
     let out: Vec<U> = Vec::new();
     let i = 0;
-    while i < len(xs) {
+    while i < xs.len() {
         out.push(f(xs[i]));
         i = i + 1;
     }

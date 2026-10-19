@@ -3,7 +3,7 @@
 use tests::assert;
 
 fn count(string... xs) -> int {
-    return len(xs);
+    return xs.len();
 }
 
 fn total(int... xs) -> int {

@@ -6,7 +6,7 @@ use macro_probe::{fn_info, body_text, flags};
 
 #[fn_info]
 fn add(int a, string b) -> int {
-    return a + len(b);
+    return a + b.len();
 }
 
 #[fn_info]

@@ -3,7 +3,7 @@
 use tests::assert;
 
 fn gfind<T>(Vec<T> xs, int at) -> Option<T> {
-    if at < len(xs) {
+    if at < xs.len() {
         let s: Option<T> = Option::Some(xs[at]);
         return s;
     }

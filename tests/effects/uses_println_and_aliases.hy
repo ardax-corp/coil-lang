@@ -23,7 +23,7 @@ fn emit_aliased(string s) uses {write, suspend} {
 }
 
 fn byte_len(string s) -> int uses {} {
-    return len(tb(s));
+    return tb(s).len();
 }
 
 test("println callers declare write and suspend") {
