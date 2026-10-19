@@ -155,6 +155,7 @@ impl Checker {
                 type_params: method_params,
                 args,
                 returns,
+                where_constraints,
                 ..
             } = method.1.as_ref()
             {
@@ -194,6 +195,27 @@ impl Checker {
                 let fun_ty = arg_tys.iter().rev().fold(ret_ty, |ret, (_, arg)| {
                     Ty::Fun(Box::new(arg.clone()), Box::new(ret))
                 });
+                // The method's own bounds (`fn third<W: Show>`) follow the
+                // trait's constraint: a call passes their dictionaries after
+                // the instance's, in this order (#1471). The body reports a
+                // bad bound when it is inferred.
+                let reported = self.messages.len();
+                let mut own_constraints = Vec::new();
+                for (mp, var) in method_params.iter().zip(&method_vars) {
+                    for bound in &mp.bounds {
+                        if let Some(c) = self.constraint_from_bound(bound, Ty::Var(*var), &method.0.into_range()) {
+                            own_constraints.push(c);
+                        }
+                    }
+                }
+                for wc in where_constraints {
+                    let args: Vec<Ty> = wc.args.iter().map(|a| self.parse_type_name(a)).collect();
+                    own_constraints.push(Constraint {
+                        class: self.canonical_trait_name(wc.class),
+                        args,
+                    });
+                }
+                self.messages.truncate(reported);
                 if pushed_method {
                     self.type_params_in_scope.pop();
                 }
@@ -203,12 +225,14 @@ impl Checker {
                 let mut all_kinds = class_kinds.clone();
                 all_kinds.extend(method_kinds);
                 all_kinds.extend(std::iter::repeat_n(Kind::Type, assoc_projections.len()));
+                let mut constraints = class_constraints.clone();
+                constraints.extend(own_constraints);
                 self.typeclass_method_schemes.insert(
                     (name.to_string(), method_name.to_string()),
                     Scheme::poly_with_kinds_and_assoc(
                         all_bounds,
                         all_kinds,
-                        class_constraints.clone(),
+                        constraints,
                         assoc_projections,
                         fun_ty,
                     ),
@@ -519,6 +543,10 @@ impl Checker {
         // Inside a bounded instance the trait's own dictionary is slot 0 (as
         // in a default body) and the context dictionaries follow, so
         // `self.item.show()` under `T: Show` dispatches through `__dict1`.
+        // A method's own bounds (`fn third<W: Show>`) come after those. In
+        // an instance with no context slot 0 still holds the instance's own
+        // dictionary, which nothing in its methods dispatches through: a
+        // placeholder no goal matches keeps their own bounds from 1 (#1471).
         let prev_active_len = self.active_constraints.len();
         if !context.is_empty() {
             self.active_constraints.push(Constraint {
@@ -526,6 +554,11 @@ impl Checker {
                 args: arg_tys.clone(),
             });
             self.active_constraints.extend(context.iter().cloned());
+        } else {
+            self.active_constraints.push(Constraint {
+                class: OWN_DICT_PLACEHOLDER.to_string(),
+                args: Vec::new(),
+            });
         }
         for m in methods {
             match m.1.as_ref() {

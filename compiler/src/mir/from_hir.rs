@@ -106,7 +106,7 @@ pub struct HirCallSite {
 /// generic body, as HIR emission's `HirBuiltin::Bound` / `HirOp::Bound`:
 /// each operand's word, the dictionary, then the code pointer in its
 /// method slot through `CallIndirect`.
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct HirBoundCall {
     /// Frame slot of the dictionary: one of the body's dictionary
     /// parameters.
@@ -116,6 +116,9 @@ pub struct HirBoundCall {
     /// The result is a ground niche `Option` / `Result` the dictionary's
     /// adapter returns boxed (the trait types it with a type variable).
     pub boxed_ret: bool,
+    /// The dictionaries of the method's own bounds (`fn third<W: Show>`),
+    /// passed after the bound's (#1471).
+    pub dicts: Vec<HirDictOp>,
 }
 
 /// One step of building instance dictionaries, as codegen plans them
@@ -2518,8 +2521,8 @@ impl Lower<'_> {
             HirKind::Bin { lhs, rhs, .. } if let Some(info) = self.inp.aggregates.get(&id.0) => self.aggregate(id, &info.clone(), *lhs, Some(*rhs)),
             HirKind::Un { operand, .. } if let Some(info) = self.inp.aggregates.get(&id.0) => self.aggregate(id, &info.clone(), *operand, None),
             // A bound type parameter's operator: its dictionary method.
-            HirKind::Bin { lhs, rhs, .. } if let Some(&bound) = self.inp.bound_calls.get(&id.0) => self.bound_call(id, &[*lhs, *rhs], bound),
-            HirKind::Un { operand, .. } if let Some(&bound) = self.inp.bound_calls.get(&id.0) => self.bound_call(id, &[*operand], bound),
+            HirKind::Bin { lhs, rhs, .. } if let Some(bound) = self.inp.bound_calls.get(&id.0) => self.bound_call(id, &[*lhs, *rhs], bound),
+            HirKind::Un { operand, .. } if let Some(bound) = self.inp.bound_calls.get(&id.0) => self.bound_call(id, &[*operand], bound),
             // An operator on an instance taking its operands raw: a plain call.
             HirKind::Bin { lhs, rhs, .. } if self.inp.calls.contains_key(&id.0) => self.call(id, &[*lhs, *rhs]),
             HirKind::Un { operand, .. } if self.inp.calls.contains_key(&id.0) => self.call(id, &[*operand]),
@@ -2537,7 +2540,7 @@ impl Lower<'_> {
             HirKind::Call { callee: Callee::Value(f), args } if self.inp.value_calls.contains(&id.0) => self.call_value(id, *f, args),
             HirKind::Call { callee: Callee::Value(f), args } if let Some(p) = self.inp.poly_calls.get(&id.0) => self.call_poly(id, *f, args, &p.clone()),
             HirKind::Call { args, .. } if let Some(fork) = self.inp.par_forks.get(&id.0) => self.par_fork(id, args, &fork.clone()),
-            HirKind::Call { args, .. } if let Some(&bound) = self.inp.bound_calls.get(&id.0) => self.bound_call(id, args, bound),
+            HirKind::Call { args, .. } if let Some(bound) = self.inp.bound_calls.get(&id.0) => self.bound_call(id, args, bound),
             HirKind::Call { args, .. } if let Some(&slot) = self.inp.existential_calls.get(&id.0) => self.existential_call(id, args, slot),
             HirKind::Call { args, .. } => self.call(id, args),
             HirKind::Resume { handle, value } => self.resume(id, *handle, *value),
@@ -4300,10 +4303,11 @@ impl Lower<'_> {
 
     /// A trait method or operator on a bound type parameter, as HIR
     /// emission's `HirBuiltin::Bound` / `HirOp::Bound`: each operand's one
-    /// word, then the dictionary parameter, then the code pointer in its
+    /// word, then the dictionary parameter (and the method's own bounds'
+    /// dictionaries), then the code pointer in its
     /// method slot through `CallIndirect`. A code pointer is an `i64`, no
     /// heap word.
-    fn bound_call(&mut self, id: HirId, args: &[HirId], bound: HirBoundCall) -> Result<Val, Refusal> {
+    fn bound_call(&mut self, id: HirId, args: &[HirId], bound: &HirBoundCall) -> Result<Val, Refusal> {
         self.raw_host = false;
         let ty = self.expr_ty(id).ok_or("call type")?;
         // A two-word value comes back boxed, as the adapter's one-word ABI
@@ -4335,6 +4339,7 @@ impl Lower<'_> {
         }
         let dict = *self.dict_params.get(&bound.dict).ok_or("dictionary parameter")?;
         words.push(dict);
+        words.extend(self.dict_values(&bound.dicts)?);
         let slot = self.b.ins_const(MirConst::I64(i64::from(bound.method))).map_err(mir)?;
         let callee = self.b.ins_index(dict, slot, MirTy::I64, false).map_err(mir)?;
         let dest = self.at_expr(id, |l| l.b.ins_call_indirect(callee, words, ret).map_err(mir))?;
