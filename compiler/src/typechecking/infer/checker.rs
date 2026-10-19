@@ -10280,28 +10280,32 @@ impl Checker {
         }
     }
 
-    /// A ground tuple or anonymous record whose items are shown as `%v`
-    /// shows them has a structural `Show` instance (#1451, #1479),
-    /// registered the first time a goal asks for it.
+    /// A ground tuple, anonymous record or fixed array whose items are shown
+    /// as `%v` shows them has a structural `Show` instance (#1451, #1479),
+    /// registered the first time a goal asks for it, with the instances of
+    /// its structural items (`%v` of the tuple shows an array item through
+    /// the array's).
     fn ensure_structural_instance(&mut self, class: &str, wanted: &[Ty]) {
         let [ty] = wanted else { return };
         if class != "Show" {
             return;
         }
         let ty = apply_ty_prune(&self.subst, ty);
-        let structural = match &ty {
-            Ty::Tuple(items) => !items.is_empty(),
-            Ty::Record { fields } => !fields.is_empty(),
-            _ => false,
+        let items: Vec<Ty> = match &ty {
+            Ty::Tuple(items) if !items.is_empty() => items.clone(),
+            Ty::Record { fields } if !fields.is_empty() => fields.iter().map(|(_, t)| t.clone()).collect(),
+            Ty::Array { element, .. } => vec![(**element).clone()],
+            _ => return,
         };
-        if !structural
-            || Self::ty_mentions_var(&ty)
-            || !self.is_showable_for_format(&ty)
-            || self.generics.has_instance(class, &ty)
-        {
+        if Self::ty_mentions_var(&ty) || !self.is_showable_for_format(&ty) {
             return;
         }
-        self.generics.register_structural_instance(class, ty);
+        for item in &items {
+            self.ensure_structural_instance(class, std::slice::from_ref(item));
+        }
+        if !self.generics.has_instance(class, &ty) {
+            self.generics.register_structural_instance(class, ty);
+        }
     }
 
     /// (open vars in `wanted` may be bound by the match). Ambiguous matches
@@ -17558,6 +17562,7 @@ impl Checker {
                     }
                 }
                 other => {
+                    self.ensure_structural_instance("Show", std::slice::from_ref(other));
                     if !self.is_showable_for_format(other) {
                         let mut msg = Message::error(
                             ErrorCode::FormatSpecifierMismatch,
@@ -17705,6 +17710,8 @@ impl Checker {
             Ty::Record { fields } => fields
                 .iter()
                 .all(|(_, field_ty)| self.is_showable_for_format(field_ty)),
+            // A fixed array's structural instance (#1479).
+            Ty::Array { element, .. } => self.is_showable_for_format(&element),
             other => {
                 let lookup = show_lookup_ty(&other);
                 self.generics.has_instance("Show", &lookup)

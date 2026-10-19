@@ -1134,8 +1134,8 @@ impl Generics {
         self.register_nominal_type("ArrayIter", PRELUDE_MODULE);
     }
 
-    /// Register the structural instance of `class` for the ground tuple or
-    /// record `ty` (#1451, #1479): `Show` as `%v` shows it. The checker adds
+    /// Register the structural instance of `class` for the ground tuple,
+    /// record or array `ty` (#1451, #1479): `Show` as `%v` shows it. The checker adds
     /// one the first time a goal asks for it
     /// (`Checker::ensure_structural_instance`); codegen emits its thunks
     /// ([`Self::structural_instances`]).
@@ -1163,7 +1163,7 @@ impl Generics {
             .iter()
             .filter(|inst| inst.range == (0..0) && inst.defined_module == PRELUDE_OPS_MODULE)
             .filter_map(|inst| match inst.args.as_slice() {
-                [ty @ (Ty::Tuple(_) | Ty::Record { .. })] => Some((inst.class.as_str(), ty)),
+                [ty @ (Ty::Tuple(_) | Ty::Record { .. } | Ty::Array { .. })] => Some((inst.class.as_str(), ty)),
                 _ => None,
             })
     }

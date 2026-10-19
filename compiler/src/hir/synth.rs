@@ -249,3 +249,33 @@ pub fn builtin_entry(
     let root = b.block(vec![ret], None, coil_ty::never());
     b.finish(root)
 }
+
+/// `Show::show` of a fixed array `array` of `element`s (#1479):
+/// `[a, b, c]`, each element as `format("%v", x)` shows it. The caller maps
+/// `format` to the builtin.
+pub fn array_show(b: &mut Synth, array: HirId, element: Ty) -> HirId {
+    let string = coil_ty::string();
+    let out = b.local("out", string.clone(), LocalKind::Let);
+    let sep = b.local("sep", string.clone(), LocalKind::Let);
+    let x = b.local("x", element, LocalKind::Pattern);
+    let open = b.str("[");
+    let init_out = b.let_(out, open);
+    let empty = b.str("");
+    let init_sep = b.let_(sep, empty);
+    let (o, s) = (b.read(out), b.read(sep));
+    let joined = b.bin(BinOp::StrConcat, o, s, string.clone());
+    let fmt = b.str("%v");
+    let v = b.read(x);
+    let item = b.call("format", vec![fmt, v], string.clone());
+    let joined = b.bin(BinOp::StrConcat, joined, item, string.clone());
+    let append = b.assign(out, joined);
+    let comma = b.str(", ");
+    let next_sep = b.assign(sep, comma);
+    let body = b.block(vec![append, next_sep], None, coil_ty::unit());
+    let kind = Some(crate::typechecking::infer::ForInKind::Array);
+    let each = b.push(HirKind::ForIn { pat: HirPat::Bind(x), iterable: array, body, kind }, coil_ty::unit());
+    let o = b.read(out);
+    let close = b.str("]");
+    let shown = b.bin(BinOp::StrConcat, o, close, string.clone());
+    b.block(vec![init_out, init_sep, each], Some(shown), string)
+}

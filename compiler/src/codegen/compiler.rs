@@ -4033,7 +4033,7 @@ impl Compiler {
             });
         }
 
-        // Structural thunks of ground tuples and records (#1451, #1479):
+        // Structural thunks of ground tuples, records and arrays (#1451, #1479):
         // reserved here, raw (the value's own word) with a `$dict` adapter,
         // as the string thunk; emitted by `emit_structural_thunks` once the
         // module's own instance entries exist, so an item's are called.
@@ -7290,11 +7290,11 @@ impl Compiler {
         skip.bind_label(after, self.bytecode.il_mut());
     }
 
-    /// Emit the reserved structural thunks of ground tuples and records
-    /// (#1451, #1479) behind a jump, as
+    /// Emit the reserved structural thunks of ground tuples, records and
+    /// arrays (#1451, #1479) behind a jump, as
     /// [`Self::emit_used_builtin_show_thunks`]: the raw entry takes the
     /// value's word and its `$dict` adapter the boxed one. `show` is
-    /// `format("%v", v)` over its argument.
+    /// `format("%v", v)` over its argument, an array's its elements'.
     fn emit_structural_thunks(&mut self) {
         let due: Vec<_> = std::mem::take(&mut self.structural_thunks)
             .into_iter()
@@ -7314,8 +7314,14 @@ impl Compiler {
             };
             let adapter = Self::dict_adapter_name(&fqn);
             for (name, tag) in [(fqn, None), (adapter, Some(tag as u32))] {
-                match method.as_str() {
-                    "show" => self.emit_builtin_entry(&name, &[(ty.clone(), tag)], string.clone(), None, |b, a| {
+                match (method.as_str(), &ty) {
+                    ("show", Ty::Array { element, .. }) => {
+                        let element = (**element).clone();
+                        self.emit_builtin_entry(&name, &[(ty.clone(), tag)], string.clone(), None, |b, a| {
+                            crate::hir::synth::array_show(b, a[0], element)
+                        })
+                    }
+                    ("show", _) => self.emit_builtin_entry(&name, &[(ty.clone(), tag)], string.clone(), None, |b, a| {
                         let fmt = b.str("%v");
                         b.call("format", vec![fmt, a[0]], string.clone())
                     }),
