@@ -32,7 +32,7 @@ fn requires_and_ensures_parse_in_order() {
 
 #[test]
 fn contracts_follow_where_and_uses() {
-    let got = contracts_of("fn f<T>(T x) -> T where Num<T> uses {read} requires x > 0 { return x; }");
+    let got = contracts_of("fn f<T: Num>(T x) -> T uses {read} requires x > 0 { return x; }");
     assert_eq!(got, vec![(ContractKind::Requires, "x > 0".into(), None)]);
     let got = contracts_of("fn f(Vec<int> xs) ensures match result { Option::Some(i) => xs[i] > 0, Option::None => true } { }");
     assert_eq!(got.len(), 1);

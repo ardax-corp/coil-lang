@@ -765,6 +765,7 @@ impl Checker {
                             self_ty: None,
                             is_coro,
                             method_owner: None,
+                            impl_params: &[],
                             is_static_method: false,
                             contracts: super::infer_fn::decl_contracts(m),
                         });
@@ -1161,6 +1162,7 @@ impl Checker {
                         self_ty,
                         is_coro: *is_coro,
                         method_owner: Some(&owner_key),
+                        impl_params: type_params,
                         is_static_method: *is_static,
                         contracts: super::infer_fn::decl_contracts(method),
                     });

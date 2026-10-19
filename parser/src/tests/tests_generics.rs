@@ -181,7 +181,8 @@
         }
     }
 
-    /// Unary `where Num<T>` parses alongside binder bounds remaining empty.
+    /// Unary `where Num<T>` parses alongside binder bounds remaining empty;
+    /// the checker rejects every unary `where` (`T: Num` instead).
     #[test]
     fn fn_with_unary_where_clause_parses() {
         match decl_ast!("fn g<T>(T x) -> T where Num<T> {}") {

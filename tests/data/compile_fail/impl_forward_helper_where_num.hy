@@ -1,4 +1,4 @@
-// Expected: E0119 — the later helper `twice` has `where Num<T>`; `string` has no
+// Expected: E0119 — the later helper `twice` has `T: Num`; `string` has no
 // `Num` instance.
 class Foo {
     pub v: string,
@@ -10,7 +10,7 @@ impl Foo {
     }
 }
 
-fn twice<T>(T n) -> T where Num<T> {
+fn twice<T: Num>(T n) -> T {
     return n;
 }
 
