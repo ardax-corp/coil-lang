@@ -94,4 +94,8 @@ test("Option and Result meet a Show bound through a shared body") {
     assert!(s(find(5)) == "Some(5)", s(find(5)));
     assert!(m(find(0)) == "None", m(find(0)));
     assert!(s(half(8)) == "Ok(4)", s(half(8)));
+    let p: Option<string> = Some("x");
+    assert!(s(p) == "Some(x)", s(p));
+    let r: Result<(), string> = Err("e");
+    assert!(m(r) == "Err(e)", m(r));
 }
