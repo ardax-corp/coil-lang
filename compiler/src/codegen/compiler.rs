@@ -7321,12 +7321,13 @@ impl Compiler {
         crate::verify::capture_module(&self.checker, &self.typed_sidecar, module, ast);
         self.build_hir_for_lowering(module, ast);
         // Recursion depth / `#[max_depth]`, independent of auto-par.
-        let stack_bound = crate::typechecking::analyze_stack_bounds(ast);
+        let bare_cases = self.checker.bare_cases().clone();
+        let stack_bound = crate::typechecking::analyze_stack_bounds(ast, &bare_cases);
         self.messages.extend(stack_bound.messages);
         self.operand_stack_slots = stack_bound.operand_slots_needed;
-        self.recursive_fns = crate::typechecking::analyze_recursive_fns(ast);
+        self.recursive_fns = crate::typechecking::analyze_recursive_fns(ast, &bare_cases);
         self.recursive_pure = if self.auto_par && auto_par_enabled() {
-            crate::typechecking::analyze_recursive_pure(ast)
+            crate::typechecking::analyze_recursive_pure(ast, &bare_cases)
         } else {
             HashSet::new()
         };
@@ -7343,7 +7344,7 @@ impl Compiler {
             if effects::effects_capture_active() {
                 let explained = (self.auto_par && auto_par_enabled()).then(|| {
                     let all: HashSet<String> = self.pure_fns.union(&pure).cloned().collect();
-                    effects::auto_par_explanations(ast, hir, module, &fx, &all)
+                    effects::auto_par_explanations(ast, hir, module, &fx, &all, &bare_cases)
                 });
                 effects::capture(hir, &fx, explained);
             }
@@ -7355,10 +7356,10 @@ impl Compiler {
         if self.auto_par && auto_par_enabled() {
             // IPA sites on any pure function (self-recursion or helper arms).
             let pure = &self.pure_fns;
-            self.par_shapes = crate::typechecking::analyze_par_fork_sites(ast, pure);
+            self.par_shapes = crate::typechecking::analyze_par_fork_sites(ast, pure, &bare_cases);
             self.par_workers = crate::typechecking::collect_par_worker_fns(ast, &self.par_shapes);
             self.loop_par_sites = crate::typechecking::analyze_loop_par_sites(ast, &self.pure_fns);
-            for hint in crate::typechecking::analyze_par_escape_hints(ast) {
+            for hint in crate::typechecking::analyze_par_escape_hints(ast, &bare_cases) {
                 let mut msg =
                     Message::info(ErrorCode::ParLockHint, hint.message(), hint.span.clone());
                 msg.with_help(hint.help());
