@@ -419,12 +419,13 @@ pub(super) fn entry_clears(func: &MirFunc, regs: &[u8], need_slot: &[bool]) -> H
             _ => None,
         }))
         .collect();
+    let phi_dests: HashSet<ValueId> = all_phis.iter().map(|(d, _)| *d).collect();
     loop {
         let before = rebound.len();
         for (dest, args) in &all_phis {
             if rebound.contains(dest) {
                 for &(_, src) in args.iter() {
-                    if all_phis.iter().any(|(d, _)| *d == src) {
+                    if phi_dests.contains(&src) {
                         rebound.insert(src);
                     }
                 }
@@ -480,6 +481,7 @@ pub(super) fn entry_clears(func: &MirFunc, regs: &[u8], need_slot: &[bool]) -> H
     }
     let live = super::gc::liveness_after(func);
     let sources = CopySources::new(func);
+    let below = SourceRegs::new(func, &sources, regs, &slot);
     let mut scan = RewriteScan::new(func, regs, &slot);
     for h in headers {
         let phis: Vec<(ValueId, &Vec<(BlockId, ValueId)>)> = h
@@ -528,31 +530,42 @@ pub(super) fn entry_clears(func: &MirFunc, regs: &[u8], need_slot: &[bool]) -> H
                 if !rebound.contains(dest) || !slot(*dest) {
                     continue;
                 }
-                let own: Vec<u8> = args
-                    .iter()
-                    .filter(|&&(q, _)| q == p)
-                    .flat_map(|&(_, src)| std::iter::once(src).chain(sources.of(func, src, |_| false)))
-                    .filter(|&v| slot(v))
-                    .map(|v| regs[v.index()])
-                    .collect();
+                let mut own = RegSet::default();
+                for &(_, src) in args.iter().filter(|&&(q, _)| q == p) {
+                    if slot(src) {
+                        own.insert(regs[src.index()]);
+                    }
+                    own.union(below.of(src));
+                }
                 // Whether a register is zeroed here or not depends on the
                 // register alone: a long chain of sources is asked once
-                // per register (#1493).
-                let mut asked = [false; 256];
+                // per register (#1493), and walked only as far as it still
+                // holds a register not asked (#1502).
+                let mut asked = RegSet::default();
+                let reg = |v: ValueId| (slot(v) && !func.params.contains(&v)).then(|| regs[v.index()]);
                 // A back edge's sources are not written yet on loop entry.
                 for &(q, src) in args.iter() {
                     if q == p || q.index() >= h.id.index() || consts.contains(&src) || !func.ty(src).is_heap_word() {
                         continue;
                     }
-                    for v in std::iter::once(src).chain(sources.of(func, src, |x| live_in.contains(&x))) {
-                        if !slot(v) || func.params.contains(&v) {
-                            continue;
-                        }
-                        let r = regs[v.index()];
-                        if std::mem::replace(&mut asked[usize::from(r)], true) {
-                            continue;
-                        }
-                        if !own.contains(&r)
+                    let mut new = Vec::new();
+                    if let Some(r) = reg(src)
+                        && asked.insert(r)
+                    {
+                        new.push(src);
+                    }
+                    let mut new: Vec<u8> = new.iter().map(|v| regs[v.index()]).collect();
+                    match below.first(src, live_in) {
+                        Some(first) => new.extend(first.iter().copied().filter(|&r| asked.insert(r))),
+                        None => new.extend(
+                            sources
+                                .new_regs_along(func, src, |x| live_in.contains(&x), |_, _| true, &below, reg, &mut asked)
+                                .iter()
+                                .map(|v| regs[v.index()]),
+                        ),
+                    }
+                    for r in new {
+                        if !own.contains(r)
                             && !taken(r)
                             && !out.get(&p).is_some_and(|rs| rs.contains(&r))
                             && scan.from(h.id, 0, r)
@@ -681,6 +694,12 @@ impl<'f> RewriteScan<'f> {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Values [`CopySources`] stepped through, for the work bound of #1502.
+    pub(super) static COPY_SOURCE_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Where a value's word was copied from: a cast's source (an
 /// `Option::Some` wrap) and a φ's incoming values, transitively. Each keeps
 /// the word in its own register after its last use, so once the value is
@@ -736,6 +755,8 @@ impl<'f> CopySources<'f> {
         let mut out = Vec::new();
         let mut work = vec![v];
         while let Some(x) = work.pop() {
+            #[cfg(test)]
+            COPY_SOURCE_STEPS.with(|c| c.set(c.get() + 1));
             let srcs: Vec<ValueId> = match self.defs.get(&x) {
                 Some((_, MirInst::Cast { src, .. })) => vec![*src],
                 Some((h, MirInst::Phi { args, .. })) => args.iter().filter(|&&(p, _)| edge(*h, p)).map(|&(_, a)| a).collect(),
@@ -750,6 +771,214 @@ impl<'f> CopySources<'f> {
             }
         }
         out
+    }
+}
+
+impl CopySources<'_> {
+    /// A value's direct copy sources that [`Self::of_along`] may step to
+    /// (whatever `stop` and `edge` say): no constant, only heap words.
+    fn direct<'a>(&'a self, func: &'a MirFunc, x: ValueId) -> impl Iterator<Item = (Option<(BlockId, BlockId)>, ValueId)> + 'a {
+        let (cast, phi) = match self.defs.get(&x) {
+            Some((_, MirInst::Cast { src, .. })) => (Some(*src), None),
+            Some((h, MirInst::Phi { args, .. })) => (None, Some((*h, args))),
+            _ => (None, None),
+        };
+        cast.map(|s| (None, s))
+            .into_iter()
+            .chain(phi.into_iter().flat_map(|(h, args)| args.iter().map(move |&(p, a)| (Some((h, p)), a))))
+            .filter(|&(_, s)| !self.consts.contains(&s) && func.ty(s).is_heap_word())
+    }
+
+    /// The copy sources of `v` ([`Self::of_along`]) that `reg` gives a
+    /// register not in `asked`: the first of each such register in the
+    /// order [`Self::of_along`] lists them, each marked asked. A source
+    /// whose own sources hold only asked registers ([`SourceRegs`]) is not
+    /// followed: nothing past it is new. A chain of n joins is then walked
+    /// about as far as its registers differ, not back to its start: once
+    /// per join, the full walks were ~n² (#1502).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new_regs_along(
+        &self,
+        func: &MirFunc,
+        v: ValueId,
+        stop: impl Fn(ValueId) -> bool,
+        edge: impl Fn(BlockId, BlockId) -> bool,
+        below: &SourceRegs,
+        reg: impl Fn(ValueId) -> Option<u8>,
+        asked: &mut RegSet,
+    ) -> Vec<ValueId> {
+        let mut seen: HashSet<ValueId> = HashSet::from([v]);
+        let mut out = Vec::new();
+        let mut work = vec![v];
+        while let Some(x) = work.pop() {
+            #[cfg(test)]
+            COPY_SOURCE_STEPS.with(|c| c.set(c.get() + 1));
+            if asked.contains_all(below.of(x)) {
+                continue;
+            }
+            let srcs: Vec<ValueId> = self.direct(func, x).filter(|&(e, _)| e.is_none_or(|(h, p)| edge(h, p))).map(|(_, s)| s).collect();
+            for s in srcs {
+                if stop(s) || !seen.insert(s) {
+                    continue;
+                }
+                if let Some(r) = reg(s)
+                    && asked.insert(r)
+                {
+                    out.push(s);
+                }
+                work.push(s);
+            }
+        }
+        out
+    }
+}
+
+/// A set of frame registers.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct RegSet([u64; 4]);
+
+impl RegSet {
+    /// Adds `r`; whether it was new.
+    pub(super) fn insert(&mut self, r: u8) -> bool {
+        let (w, bit) = (usize::from(r) / 64, 1u64 << (r % 64));
+        let new = self.0[w] & bit == 0;
+        self.0[w] |= bit;
+        new
+    }
+
+    pub(super) fn contains(&self, r: u8) -> bool {
+        self.0[usize::from(r) / 64] & (1u64 << (r % 64)) != 0
+    }
+
+    pub(super) fn union(&mut self, other: &RegSet) {
+        for (a, b) in self.0.iter_mut().zip(other.0) {
+            *a |= b;
+        }
+    }
+
+    fn contains_all(&self, other: &RegSet) -> bool {
+        self.0.iter().zip(other.0).all(|(a, b)| b & !a == 0)
+    }
+}
+
+/// Per value, the registers of all its copy sources ([`CopySources`]) that
+/// have a slot, along every edge and past every value: what any walk of
+/// its sources can meet, at most. And, where the sources form no cycle,
+/// the registers [`CopySources::new_regs_along`] meets first, in its order,
+/// so a walk past no live source and along every edge need not run: a
+/// chain of joins holding a register only at its start (the first `s`)
+/// was walked to that start from every join (#1502).
+pub(super) struct SourceRegs {
+    below: Vec<RegSet>,
+    /// Where each value is defined (block, then op): a source defined
+    /// before its user all the way down forms no cycle.
+    pos: Vec<(u32, u32)>,
+    /// Whether a value is some copy's source: only such a value, live,
+    /// stops a walk.
+    is_source: Vec<bool>,
+    /// The registers a walk from a value meets first, in walk order
+    /// (sources past params only); `None` past a cycle.
+    first: Vec<Option<Vec<u8>>>,
+}
+
+impl SourceRegs {
+    pub(super) fn new(func: &MirFunc, sources: &CopySources<'_>, regs: &[u8], slot: &impl Fn(ValueId) -> bool) -> Self {
+        let n = func.types.len();
+        let mut sets = vec![RegSet::default(); n];
+        let mut users: Vec<Vec<ValueId>> = vec![Vec::new(); n];
+        let mut is_source = vec![false; n];
+        let mut work = Vec::new();
+        for &x in sources.defs.keys() {
+            for (_, s) in sources.direct(func, x) {
+                if s.index() < n {
+                    users[s.index()].push(x);
+                    is_source[s.index()] = true;
+                }
+                if slot(s) {
+                    sets[x.index()].insert(regs[s.index()]);
+                }
+            }
+            work.push(x);
+        }
+        // Each set only grows, by at most 256 registers: a loop's φs
+        // settle in a few rounds.
+        while let Some(x) = work.pop() {
+            let from = sets[x.index()];
+            for &u in &users[x.index()] {
+                let before = sets[u.index()];
+                sets[u.index()].union(&from);
+                if sets[u.index()] != before {
+                    work.push(u);
+                }
+            }
+        }
+        let mut pos = vec![(0, 0); n];
+        let mut order = Vec::new();
+        for (b, block) in func.blocks.iter().enumerate() {
+            for (k, inst) in block.insts.iter().enumerate() {
+                let d = inst.dest();
+                if d.index() < n {
+                    pos[d.index()] = (b as u32 + 1, k as u32);
+                    if sources.defs.contains_key(&d) {
+                        order.push(d);
+                    }
+                }
+            }
+        }
+        let mut params = vec![false; n];
+        for p in &func.params {
+            if p.index() < n {
+                params[p.index()] = true;
+            }
+        }
+        let reg = |v: ValueId| (slot(v) && !params[v.index()]).then(|| regs[v.index()]);
+        // In definition order, sources first. The walk pops the last
+        // source pushed first and walks all past it before the next, so
+        // its first registers are its sources' own, then each source's
+        // first registers from the last to the first.
+        let mut first: Vec<Option<Vec<u8>>> = vec![None; n];
+        for x in order {
+            let srcs: Vec<ValueId> = sources.direct(func, x).map(|(_, s)| s).filter(|s| s.index() < n).collect();
+            let acyclic = srcs.iter().all(|s| pos[s.index()] < pos[x.index()] && (!sources.defs.contains_key(s) || first[s.index()].is_some()));
+            if !acyclic {
+                continue;
+            }
+            let mut met = RegSet::default();
+            let mut out = Vec::new();
+            for &s in &srcs {
+                if let Some(r) = reg(s)
+                    && met.insert(r)
+                {
+                    out.push(r);
+                }
+            }
+            for s in srcs.iter().rev() {
+                for &r in first[s.index()].as_deref().unwrap_or(&[]) {
+                    if met.insert(r) {
+                        out.push(r);
+                    }
+                }
+            }
+            first[x.index()] = Some(out);
+        }
+        Self { below: sets, pos, is_source, first }
+    }
+
+    pub(super) fn of(&self, v: ValueId) -> &RegSet {
+        static NONE: RegSet = RegSet([0; 4]);
+        self.below.get(v.index()).unwrap_or(&NONE)
+    }
+
+    /// The registers [`CopySources::new_regs_along`] meets first from `v`
+    /// along every edge, stopping at `live` and reporting every source
+    /// with a slot that is no param, in its order: `None` when that takes
+    /// the walk (a cycle, or a live source defined before `v` that may
+    /// stop it).
+    pub(super) fn first(&self, v: ValueId, live: &HashSet<ValueId>) -> Option<&[u8]> {
+        let firsts = self.first.get(v.index())?.as_deref()?;
+        let at = self.pos[v.index()];
+        let stops = live.iter().any(|l| self.is_source.get(l.index()).copied().unwrap_or(false) && self.pos[l.index()] < at);
+        (!stops).then_some(firsts)
     }
 }
 
@@ -832,6 +1061,7 @@ pub(super) fn source_clears(func: &MirFunc, regs: &[u8], need_slot: &[bool]) -> 
     let cmp_dests = term_cmp_dests(func);
     let comps = cycle_components(func);
     let slot = |v: ValueId| need_slot.get(v.index()).copied().unwrap_or(false) && v.index() < regs.len();
+    let below = SourceRegs::new(func, &sources, regs, &slot);
     let mut scan = RewriteScan::new(func, regs, &slot);
     for (b, block) in func.blocks.iter().enumerate() {
         // A compare fused into the branch is emitted at the terminator.
@@ -853,16 +1083,25 @@ pub(super) fn source_clears(func: &MirFunc, regs: &[u8], need_slot: &[bool]) -> 
             let cycle = comps[b];
             let edge = |h: BlockId, p: BlockId| cycle.is_none() || (comps[p.index()] == cycle && p.index() < h.index());
             let mut rs: Vec<u8> = Vec::new();
-            // Each register is asked once, however long the chain (#1493).
-            let mut asked = [false; 256];
-            for s in sources.of_along(func, *value, |x| live.contains(&x), edge) {
-                if !slot(s) || func.params.contains(&s) || fused_reads.contains(&s) {
-                    continue;
-                }
-                let r = regs[s.index()];
-                if std::mem::replace(&mut asked[usize::from(r)], true) {
-                    continue;
-                }
+            // Each register is asked once, however long the chain (#1493),
+            // and the chain is walked only while it holds a register not
+            // asked yet (#1502).
+            let mut asked = RegSet::default();
+            let reg = |s: ValueId| (slot(s) && !func.params.contains(&s) && !fused_reads.contains(&s)).then(|| regs[s.index()]);
+            // Outside a loop, and with no heap word fused into the branch,
+            // the walk's registers are known.
+            let known = (cycle.is_none() && fused_reads.iter().all(|v| !func.ty(*v).is_heap_word()))
+                .then(|| below.first(*value, live))
+                .flatten();
+            let met: Vec<u8> = match known {
+                Some(first) => first.iter().copied().filter(|&r| asked.insert(r)).collect(),
+                None => sources
+                    .new_regs_along(func, *value, |x| live.contains(&x), edge, &below, reg, &mut asked)
+                    .iter()
+                    .map(|s| regs[s.index()])
+                    .collect(),
+            };
+            for r in met {
                 if (slot(*value) && r == regs[value.index()])
                     || rs.contains(&r)
                     || held(r)
@@ -3385,4 +3624,30 @@ pub(super) fn paired_alloc_dest(func: &MirFunc, barrier: ValueId) -> Option<Valu
         }
     }
     None
+}
+
+/// [`paired_alloc_dest`] of every barrier, by its dest, in one pass: a
+/// body asking once per barrier scanned the whole body each time (#1502).
+pub(super) fn paired_alloc_dests(func: &MirFunc) -> HashMap<ValueId, ValueId> {
+    let mut out = HashMap::new();
+    for block in &func.blocks {
+        let mut pending = None;
+        for inst in &block.insts {
+            match inst {
+                MirInst::Alloc { dest, .. }
+                | MirInst::ArrayPush { dest, .. }
+                | MirInst::Format { dest, .. }
+                | MirInst::Stringify { dest, .. } => pending = Some(*dest),
+                MirInst::GcBarrier { dest, .. } => {
+                    // The first barrier of a dest is the one the scan finds.
+                    if let Some(obj) = pending {
+                        out.entry(*dest).or_insert(obj);
+                    }
+                    pending = None;
+                }
+                _ => pending = None,
+            }
+        }
+    }
+    out
 }

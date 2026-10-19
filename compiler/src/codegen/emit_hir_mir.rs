@@ -110,9 +110,6 @@ pub(super) struct HirMirTables {
     /// parameter ([`Compiler::hir_niche_arg`]): boxed to their enum
     /// object, by argument.
     pub(super) niche_args: HashMap<u32, ValueLayout>,
-    /// `block_on(h)` calls: the `wait_ready`
-    /// native run between resumes, if the program has one, by call.
-    pub(super) block_ons: HashMap<u32, Option<u16>>,
     /// `new C(args).f` reads emission elides the object of
     /// ([`Compiler::hir_field_of_new`]): each argument runs in order and
     /// `f`'s is the value, by field read.
@@ -773,10 +770,6 @@ impl Compiler {
                     }
                     return Kids::None;
                 }
-            }
-            HirKind::Call { .. } if emit.plan.calls.get(&id.0).is_some_and(|c| matches!(c.builtin, Some(HirBuiltin::BlockOn))) => {
-                let wait = self.native_id("wait_ready").and_then(|n| u16::try_from(n).ok());
-                t.block_ons.insert(id.0, wait);
             }
             HirKind::Call { .. } if emit.plan.calls.get(&id.0).is_some_and(|c| matches!(c.builtin, Some(HirBuiltin::Matrix))) => {
                 t.matrix_wraps.insert(id.0);

@@ -533,7 +533,7 @@ fn export_effects(export: &BuiltinExport) -> Option<EffectFlags> {
         }
         BuiltinExport::Fn { kind } => match kind.math_native_name() {
             Some(registry) => row(registry),
-            // `ord`, `char`, `block_on`, matrix helpers: compiled inline or
+            // `ord`, `char`, matrix helpers: compiled inline or
             // in userland, not a host row.
             None => UNKNOWN_CALLEE,
         },
