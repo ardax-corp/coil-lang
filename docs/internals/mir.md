@@ -483,10 +483,57 @@ asked; at 800 they share four.) Release build, 2026-10-19, `main` of N
 | 400 | 0.63 s | 0.22 s | |
 | 800 | 3.87 s | 0.70–0.83 s | 0.33 s |
 
-`entry_clears` went 3.48 s → 0.13 s at 800. What remains superlinear walks
-copy sources (`CopySources::of`) back through the whole φ chain, once per
-join in `entry_clears` and once per `ClearWord` in `source_clears` and
+`entry_clears` went 3.48 s → 0.13 s at 800. What remained superlinear
+walked copy sources (`CopySources::of`) back through the whole φ chain, once
+per join in `entry_clears` and once per `ClearWord` in `source_clears` and
 `keep_memory_order` (~60 ms each at 800): ~n² values, reachable arms or not.
+
+Those walks are linear now (#1502). A clear only cares which registers a
+walk meets first, and in what order, so `SourceRegs` answers that once per
+value in definition order (a value's sources' registers, then each
+source's own answer, last source first, as the walk's stack pops them)
+wherever the sources form no cycle. A walk still runs in a loop, past a
+heap word fused into a branch, or when a live value defined earlier may
+stop it, and then it stops following a source once every register past
+it has been asked. `keep_memory_order` walks a clear's sources only when
+an op from before the clear is emitted after it. `EmitPlan::new` runs once
+per body (the sidecars and the cleanup pad's frame read emission's own
+plan, `LirFrame`), and a barrier's paired allocation is found from one
+pass over the body, not by a scan of the body per barrier. The emitted
+code is unchanged: 1,532 corpus archives (`-O0` and the default level)
+compile byte-identical. The unit test
+`lir_copy_sources_about_linear_over_rebinding_joins` counts the values
+the walks step through over `N` reachable arms:
+
+| N | steps before | steps after |
+|---|---|---|
+| 100 | 29,900 | 2 |
+| 800 | 1,919,200 | 2 |
+
+(Pruning the walk alone took that to 19,801 and 6,389: the first `s`'s
+register is held nowhere else, so every walk still ran to the chain's
+start. `SourceRegs` itself is one pass in definition order, each value's
+list at most one entry per register.)
+
+LIR emission alone (`emit_lir` plus its sidecars, release, the same MIR
+chain):
+
+| N | before | after |
+|---|---|---|
+| 400 | 68 ms | 9 ms |
+| 800 | 273 ms | 22 ms |
+| 1600 | 1,059 ms | 44 ms |
+| 3200 | 4,669 ms | 181 ms |
+
+A whole `coil compile` of `fn f(int x) -> string` with N
+`if x == k { s = s + "a"; }` (release, 2026-10-19, best of 3, two runs)
+went 0.31–0.32 s → 0.22–0.25 s at 400, 0.79–0.94 s → 0.55–0.58 s at 800,
+and 2.72–2.87 s → 1.55–1.61 s at 1600.
+LIR emission is ~13% of that compile at 1600; what stays superlinear there
+is `licm::dominators` (dominator sets per block, ~43% at 1600, #1518), and
+parsing, `precise_frames` and HIR id hashing. While such a body still has a
+register per value (below ~127 arms) its clears are themselves quadratic
+code (#1519).
 
 Host Option / `Result<(),E>` / heap-heap Result still pack once at
 `HostInvoke` (`host_enum`). MIR does not add a second pack.

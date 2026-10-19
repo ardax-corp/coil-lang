@@ -183,9 +183,6 @@ enum HirBuiltin {
     LinAlg,
     /// `matrix(data)`: the data itself, a zero-cost wrap.
     Matrix,
-    /// `block_on(h)`: `h` resumed until done, waiting on batched IO between
-    /// resumes, then its last resumed word, as the AST's `emit_block_on`.
-    BlockOn,
     /// A trait method on a bare-class existential (`show(x)`): the pack to
     /// a temp, its value, its dictionary, the method's code pointer from
     /// the dictionary, then `CallIndirect`, as `emit_existential_method_call`.
@@ -1622,7 +1619,6 @@ impl Compiler {
             records,
             record_pats,
             matrix_wraps: &tables.matrix_wraps,
-            block_ons: &tables.block_ons,
             field_news: &tables.field_news,
             linalgs: &tables.linalgs,
             array_copies: &tables.array_copies,
@@ -4041,7 +4037,6 @@ impl Compiler {
         if let Some(kind) = self.checker.prelude_fn_in_scope(name) {
             return Some(match kind {
                 PreludeFn::Matrix => Ok(HirBuiltin::Matrix),
-                PreludeFn::BlockOn => Ok(HirBuiltin::BlockOn),
                 PreludeFn::Dot | PreludeFn::MatMul | PreludeFn::Cross | PreludeFn::Intersect | PreludeFn::Diff => {
                     Ok(HirBuiltin::LinAlg)
                 }
@@ -4634,14 +4629,8 @@ impl Compiler {
         let HirKind::Call { args, .. } = &hir.expr(call).kind else {
             return Err("callee");
         };
-        if matches!(builtin, HirBuiltin::Matrix | HirBuiltin::BlockOn) && args.len() != 1 {
+        if matches!(builtin, HirBuiltin::Matrix) && args.len() != 1 {
             return Err("callee-arity");
-        }
-        // The resumed word moves as it is (as `Resume`).
-        if matches!(builtin, HirBuiltin::BlockOn)
-            && !Self::hir_ty(hir, call).is_some_and(|t| self.value_layout(t) == ValueLayout::Boxed)
-        {
-            return Err("resume-layout");
         }
         if matches!(builtin, HirBuiltin::LinAlg) {
             let info = self.hir_linear_algebra(hir, call).ok_or("callee-builtin")?;
