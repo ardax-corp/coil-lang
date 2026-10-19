@@ -3,6 +3,7 @@
 use tests::assert;
 
 const WORD = "abcd".len();
+
 const ROW = [1, 2, 3].len();
 
 fn byte_at(string s, int i) -> int
