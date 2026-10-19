@@ -4946,7 +4946,17 @@ impl Compiler {
             // `fn mk(..) -> fn(..) -> T`: the scheme's curried peel also took
             // the returned function's params; they belong to the result.
             None if param_tys.len() > argc
-                && self.checker.fn_param_names(&lookup).is_some_and(|names| names.len() == argc) =>
+                && self
+                    .checker
+                    .fn_param_names(&lookup)
+                    .map(<[String]>::len)
+                    // A module-qualified function's names are keyed bare:
+                    // its recorded arity says where its own params end.
+                    .or_else(|| match self.fn_arities.get(&key).or_else(|| self.fn_arities.get(&lookup)) {
+                        Some(&(fixed, false)) => Some(fixed as usize),
+                        _ => None,
+                    })
+                    .is_some_and(|n| n == argc) =>
             {
                 returned = param_tys.split_off(argc);
                 param_tys
