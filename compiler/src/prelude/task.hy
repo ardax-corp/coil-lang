@@ -289,3 +289,15 @@ fn blocking_with<A, T>(A -> T work, A arg) -> Result<T, ThreadError> {
     let t = thread_spawn(work, arg)?;
     return thread_join(t);
 }
+
+// Resume `handle` until it is done and return its completion value (the
+// `return`); values it yields along the way are discarded. Deprecated:
+// call the work directly, or run concurrent work as a task (`scope` and
+// `join`).
+fn block_on<Y>(coroutine<Y> handle) -> Y {
+    let value = resume handle;
+    while !done(handle) {
+        value = resume handle;
+    }
+    return value;
+}
