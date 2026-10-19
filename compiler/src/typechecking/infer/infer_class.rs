@@ -749,6 +749,7 @@ impl Checker {
                         // scheme / flags under its FQN, then restore.
                         let shield = self.shield_bare_names([mname]);
                         self.clear_bare_result_modes(&shield);
+                        let outer_method = self.current_instance_method.replace(mname.to_string());
                         self.infer_function(super::infer_fn::InferFunctionArgs {
                             name: mname,
                             type_params: mparams,
@@ -763,6 +764,7 @@ impl Checker {
                             is_static_method: false,
                             contracts: super::infer_fn::decl_contracts(m),
                         });
+                        self.current_instance_method = outer_method;
                         self.record_instance_method_under_fqn(mname, &fqn);
                         self.check_instance_method_signature(
                             class,
