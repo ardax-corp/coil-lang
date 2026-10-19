@@ -17,7 +17,7 @@ fn read(int x) -> int {
 }
 
 fn write(string s) -> int {
-    return len(s);
+    return s.len();
 }
 
 fn close(int a, int b) -> int {

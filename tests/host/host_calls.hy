@@ -17,7 +17,7 @@ fn hyp(float a, float b) -> float {
 fn put_all(Stream s, Vec<byte> buf) -> int {
     let offset = 0;
     let calls = 0;
-    while offset < len(buf) {
+    while offset < buf.len() {
         match write_from(s, buf, offset) {
             Result::Ok(n) => {
                 offset = offset + n;

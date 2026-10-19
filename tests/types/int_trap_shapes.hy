@@ -67,7 +67,7 @@ fn while_triple() -> int {
 fn scan(Vec<int> v) -> int {
     let acc = 0;
     let i = 0;
-    while i < len(v) {
+    while i < v.len() {
         acc = acc + v[i];
         i = i + 1;
     }
@@ -76,7 +76,7 @@ fn scan(Vec<int> v) -> int {
 
 fn scale(int k, Vec<int> x, Vec<int> y) -> int {
     let i = 0;
-    while i < len(x) {
+    while i < x.len() {
         y[i] = k * x[i];
         i = i + 1;
     }

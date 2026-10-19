@@ -1,6 +1,6 @@
 // Expected: E0119 — rest parameters are positional-only.
 fn head(int a, int... xs) -> int {
-    return a + len(xs);
+    return a + xs.len();
 }
 
 fn main() {

@@ -8,7 +8,7 @@ static let log: string = "";
 
 fn note(string s) -> int {
     log = log + s;
-    return len(log);
+    return log.len();
 }
 
 fn value_then_defer() -> int {

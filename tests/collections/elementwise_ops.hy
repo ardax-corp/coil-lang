@@ -57,7 +57,7 @@ test("tuples and dynamic arrays") {
     let n = -(4, 5);
     assert!(n[0] == -4 && n[1] == -5);
     let d = neg_dyn([1, 2, 3]);
-    assert!(len(d) == 3 && d[2] == -3);
+    assert!(d.len() == 3 && d[2] == -3);
     let k = scale_dyn([1, 2, 3], 4);
-    assert!(len(k) == 3 && k[0] == 4 && k[2] == 12);
+    assert!(k.len() == 3 && k[0] == 4 && k[2] == 12);
 }

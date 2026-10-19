@@ -18,13 +18,13 @@ test("escaped quote string literal as byte") {
 
 test("string literal coerces to byte vec") {
     let a = "Hi" as Vec<byte>;
-    assert!(len(a) == 2);
+    assert!(a.len() == 2);
     assert!((a[0] as int) == 72);
     assert!((a[1] as int) == 105);
     let b: [byte; 3] = "ab\n";
-    assert!(len(b) == 3);
+    assert!(b.len() == 3);
     let c = "xy" as Vec<byte>;
-    assert!(len(c) == 2);
+    assert!(c.len() == 2);
     let d = "ok" as [byte; 2];
     assert!((d[0] as int) == 111);
 }

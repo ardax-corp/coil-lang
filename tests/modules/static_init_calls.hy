@@ -25,7 +25,7 @@ static let f: int = fib(15);
 
 static let fwd: int = later(4);
 
-static let base: int = len(xs) + 3;
+static let base: int = xs.len() + 3;
 
 static let names: Option<Vec<string>> = Option::Some(Vec::new());
 
@@ -46,11 +46,11 @@ test("static initializers with calls") {
     assert!(base == 3);
     xs.push(f);
     seeded.push(k);
-    assert!(len(xs) == 1);
+    assert!(xs.len() == 1);
     assert!(xs[0] == 610);
     assert!(seeded[0] == 7);
     let m = match names {
-        Option::Some(v) => len(v),
+        Option::Some(v) => v.len(),
         Option::None => -1,
     };
     assert!(m == 0);

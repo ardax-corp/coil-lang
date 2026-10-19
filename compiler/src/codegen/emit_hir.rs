@@ -445,8 +445,7 @@ impl Compiler {
                     args,
                 } => {
                     let (start, end) = e.span;
-                    if name == "len"
-                        || self.hir_builtin(name).is_some()
+                    if self.hir_builtin(name).is_some()
                         || self.checker.is_overloaded(name)
                         || self.checker.bare_construct_at(start, end).is_some()
                         || self.sidecar_overload(e.node, start, end).is_some()
@@ -2967,8 +2966,7 @@ impl Compiler {
         }
         let node = hir.expr(call);
         let (start, end) = node.span;
-        let user_len = name == "len" && matches!(&node.kind, HirKind::Call { args, .. } if args.len() == 1 && lower::user_len(hir, &self.checker, args[0]));
-        if (name == "len" && !user_len) || self.checker.bare_construct_at(start, end).is_some() {
+        if self.checker.bare_construct_at(start, end).is_some() {
             return Err("callee-builtin");
         }
         if let Some(builtin) = self.hir_builtin(name) {
@@ -5615,7 +5613,7 @@ impl Compiler {
         }
     }
 
-    /// `len(x)` / structural `x.len()` the plan admitted: `Some(Some(n))`
+    /// A structural `x.len()` the plan admitted: `Some(Some(n))`
     /// for a fixed-size type, `Some(None)` for `ArrayLen`.
     fn hir_len_call(&self, hir: &HirBody, id: HirId) -> Option<Option<u32>> {
         let HirKind::Call { callee, args } = &hir.expr(id).kind else {
@@ -5624,11 +5622,7 @@ impl Compiler {
         let [arg] = args.as_slice() else {
             return None;
         };
-        let is_len = match callee {
-            Callee::Named { name, .. } => name == "len" && !lower::user_len(hir, &self.checker, *arg),
-            Callee::Method { name } => name == "len" && lower::structural_len(hir, &self.checker, *arg),
-            Callee::Value(_) => false,
-        };
+        let is_len = matches!(callee, Callee::Method { name } if name == "len") && lower::structural_len(hir, &self.checker, *arg);
         if is_len
             && let HirKind::Make {
                 kind: MakeKind::Array | MakeKind::Tuple | MakeKind::Record(_),

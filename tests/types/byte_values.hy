@@ -6,7 +6,7 @@ use tests::assert;
 fn upper(Vec<byte> buf) -> Vec<byte> {
     let out: Vec<byte> = Vec::new();
     let i = 0;
-    while i < len(buf) {
+    while i < buf.len() {
         let c = buf[i];
         if c >= "a" && c <= "z" {
             let up = (c as int) - 32;
@@ -45,7 +45,7 @@ test("bytes in direct MIR") {
     assert!(u[0] == "H");
     assert!(u[5] == ",");
     assert!(u[7] == "W");
-    assert!(len(u) == 12);
+    assert!(u.len() == 12);
     assert!(wrap(300) == 44045);
     assert!(wrap(-1) == 255000);
     assert!(digits("a1b2c3" as Vec<byte>) == 123);

@@ -197,7 +197,7 @@ fn is_symlink(string path) -> Result<bool, IoError> {}
 ///     Result::Err(_) => Vec::new(),
 /// };
 /// let _ = remove_dir_all(dir);
-/// assert!(len(names) == 2);
+/// assert!(names.len() == 2);
 /// assert!(names[0] == "a.txt" && names[1] == "b.txt");
 /// ```
 fn list_dir(string path) -> Result<Vec<string>, IoError> {}

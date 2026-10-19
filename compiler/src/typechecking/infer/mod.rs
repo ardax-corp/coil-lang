@@ -227,7 +227,7 @@ pub struct Checker {
     /// as a direct `Call` target. Package-wide proof is the pipeline seed
     /// on [`crate::Compiler`]; this set is the per-file snapshot.
     pub(crate) fn_value_escaped: HashSet<String>,
-    /// `arr[i]` nodes proven `0 <= i < len(arr)` with a stable length.
+    /// `arr[i]` nodes proven `0 <= i < arr.len()` with a stable length.
     pub(crate) in_bounds_index: HashSet<NodeId>,
     /// Expressions proven `>= 0` at the use site (Q4 skip Euclidean rem).
     pub(crate) nonneg_expr: HashSet<NodeId>,

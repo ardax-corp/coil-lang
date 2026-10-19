@@ -12,7 +12,7 @@ fn dbl(int x) -> int {
 
 test("empty vec of functions") {
     let fs: Vec<int -> int> = [];
-    assert!(len(fs) == 0);
+    assert!(fs.len() == 0);
 }
 
 test("vec of functions, called by index") {

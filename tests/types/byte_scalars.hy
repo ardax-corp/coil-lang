@@ -16,7 +16,7 @@ fn hex_val(byte c) -> int {
 fn shout(Vec<byte> buf) -> Vec<byte> {
     let out: Vec<byte> = Vec::new();
     let i = 0;
-    while i < len(buf) {
+    while i < buf.len() {
         let c = buf[i];
         if c >= "a" && c <= "z" {
             let upper = (c as int) - 32;
@@ -57,7 +57,7 @@ test("byte literals and casts") {
 
 test("byte buffers") {
     let up = shout(to_bytes("hi there"));
-    assert!(len(up) == 8);
+    assert!(up.len() == 8);
     assert!(up[0] as int == 72);
     assert!(up[2] as int == 32);
 }

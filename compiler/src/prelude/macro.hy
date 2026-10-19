@@ -30,7 +30,7 @@ impl Code {
 fn join(Vec<Code> xs, string sep) -> string {
     let out = "";
     let i = 0;
-    while i < len(xs) {
+    while i < xs.len() {
         if i > 0 {
             out += sep;
         }
@@ -173,12 +173,12 @@ class Attr {
 impl Attr {
     /// The attribute as written: `#[name(key = "v", 2)]`.
     pub fn src() -> string {
-        if len(self.args) == 0 {
+        if self.args.len() == 0 {
             return "#[" + self.name + "]";
         }
         let out = "#[" + self.name + "(";
         let i = 0;
-        while i < len(self.args) {
+        while i < self.args.len() {
             let a = self.args[i];
             if i > 0 {
                 out += ", ";
@@ -220,7 +220,7 @@ impl Attr {
 /// Index of the attribute called `name`, or `-1`.
 fn attr_index(Vec<Attr> attrs, string name) -> int {
     let i = 0;
-    while i < len(attrs) {
+    while i < attrs.len() {
         if attrs[i].name == name {
             return i;
         }
@@ -289,9 +289,9 @@ impl Variant {
     /// Number of payload values (0 for a unit variant).
     pub fn arity() -> int {
         if self.shape == "tuple" {
-            return len(self.tuple);
+            return self.tuple.len();
         }
-        return len(self.fields);
+        return self.fields.len();
     }
 
     pub fn has_attr(string name) -> bool {
@@ -329,12 +329,12 @@ impl TypeDecl {
     /// The type as written in a signature: `Name`, or `Name<T, U>` for a
     /// generic type.
     pub fn self_type() -> Code {
-        if len(self.generics) == 0 {
+        if self.generics.len() == 0 {
             return new Code(self.name.str());
         }
         let out = self.name.str() + "<";
         let i = 0;
-        while i < len(self.generics) {
+        while i < self.generics.len() {
             if i > 0 {
                 out += ", ";
             }
@@ -349,12 +349,12 @@ impl TypeDecl {
     /// `bound` (`"Show"`, `"Ord + Eq"`). Write `impl ${trait} for
     /// ${t.impl_head("Show")}` so a derive covers generic types too.
     pub fn impl_head(string bound) -> Code {
-        if len(self.generics) == 0 {
+        if self.generics.len() == 0 {
             return new Code(self.name.str());
         }
         let out = self.name.str() + "<";
         let i = 0;
-        while i < len(self.generics) {
+        while i < self.generics.len() {
             if i > 0 {
                 out += ", ";
             }
@@ -436,7 +436,7 @@ impl FnDecl {
     pub fn signature(string name) -> string {
         let out = name + "(";
         let i = 0;
-        while i < len(self.params) {
+        while i < self.params.len() {
             if i > 0 {
                 out += ", ";
             }
@@ -493,7 +493,7 @@ impl FnDecl {
     pub fn uses_clause() -> string {
         let out = "uses {";
         let i = 0;
-        while i < len(self.effects) {
+        while i < self.effects.len() {
             if i > 0 {
                 out += ", ";
             }
@@ -517,7 +517,7 @@ impl FnDecl {
     pub fn arg_names() -> string {
         let out = "";
         let i = 0;
-        while i < len(self.params) {
+        while i < self.params.len() {
             if i > 0 {
                 out += ", ";
             }
@@ -583,11 +583,11 @@ impl Reader {
         let n = 0;
         let i = 0;
         let negative = false;
-        if len(digits) > 0 && digits[0] == 45 as byte {
+        if digits.len() > 0 && digits[0] == 45 as byte {
             negative = true;
             i = 1;
         }
-        while i < len(digits) {
+        while i < digits.len() {
             n = n * 10 + (digits[i] as int - 48);
             i += 1;
         }

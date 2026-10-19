@@ -6,7 +6,7 @@ use task::blocking_with;
 use thread::ThreadError;
 
 fn size(string name) -> int {
-    return len(name);
+    return name.len();
 }
 
 fn greet(string name) -> string {

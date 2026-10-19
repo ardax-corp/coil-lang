@@ -31,14 +31,14 @@ impl Collect for Words {
     type Elem = string;
 
     pub fn head(Words w) -> string {
-        if len(w.items) == 0 {
+        if w.items.len() == 0 {
             return "";
         }
         return w.items[0];
     }
 
     pub fn count(Words w) -> int {
-        return len(w.items);
+        return w.items.len();
     }
 }
 

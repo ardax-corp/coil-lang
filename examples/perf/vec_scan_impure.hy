@@ -1,5 +1,5 @@
-// CPU: `while i < len(v) { f(v[i]) }` where `f` is impure but cannot resize
-// an array — it only writes a field. `len(v)` stays invariant across the CALL,
+// CPU: `while i < v.len() { f(v[i]) }` where `f` is impure but cannot resize
+// an array — it only writes a field. `v.len()` stays invariant across the CALL,
 // so it hoists and `v[i]` unchecks, as for a pure helper (vec_scan_pure.hy).
 use io::stdout;
 use io::sync::write_all;
@@ -26,17 +26,17 @@ fn absorb(Tally t, int x) -> int {
 
 fn fill(Vec<int> v) -> int {
     let i = 0;
-    while i < len(v) {
+    while i < v.len() {
         v[i] = i;
         i = i + 1;
     }
-    return len(v);
+    return v.len();
 }
 
 fn scan(Tally t, Vec<int> v) -> int {
     let acc = 0;
     let i = 0;
-    while i < len(v) {
+    while i < v.len() {
         acc = acc + absorb(t, v[i]);
         i = i + 1;
     }

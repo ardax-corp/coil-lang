@@ -547,8 +547,6 @@ impl Checker {
     /// Parameter names for builtins that support named arguments at call sites.
     fn register_builtin_call_sigs(&mut self) {
         self.fn_param_names
-            .insert("len".into(), vec!["value".into()]);
-        self.fn_param_names
             .insert("string::format".into(), vec!["fmt".into(), "args".into()]);
         self.fn_param_names
             .insert("string::from_bytes".into(), vec!["bytes".into()]);
@@ -4684,7 +4682,7 @@ impl Checker {
         let recv_ty = self.infer(recv);
         let resolved = apply_ty_prune(&self.subst, &recv_ty);
         // `x.len()` on arrays, tuples, records and strings is the structural
-        // `len(x)` (canonical spelling; `Vec` has its own method).
+        // length read (`Vec` types through its own `len` method).
         if *method == "len"
             && method_args.is_empty()
             && Self::is_structural_len_ty(&resolved)
@@ -5214,12 +5212,17 @@ impl Checker {
             return self.infer_foreign_variadic_call(&ident, &fqn, raw_args, id, range);
         }
 
-        if ident == "len" {
-            if has_named {
-                let (tys, reordered) = self.infer_and_reorder_call_args("len", raw_args, &range);
-                return self.infer_len_call_from_tys(&tys, &reordered, id, range);
+        // The free `len(x)` was removed: a length is the method `x.len()`.
+        if ident == "len" && self.lookup_fn_scheme(&ident).is_none() {
+            for arg in raw_args {
+                let _ = self.infer(arg);
             }
-            return self.infer_len_call(args.as_deref(), id, range);
+            return self.error_with_help(
+                ErrorCode::UnknownFunction,
+                "there is no free function `len`; a length is the method `x.len()`".to_string(),
+                range,
+                Some("write `x.len()` instead of `len(x)`".to_string()),
+            );
         }
         if let Some(kind) = self.string_fn_for_call(&ident) {
             let arg_slice = if has_named {
@@ -7649,67 +7652,6 @@ impl Checker {
         result_ty
     }
 
-    /// `len(x)`, prelude sugar for `x.len()` (structural ArrayLen / Length).
-    fn infer_len_call(
-        &mut self,
-        args: Option<&[Output]>,
-        id: Option<NodeId>,
-        range: Range<usize>,
-    ) -> Ty {
-        let args = args.unwrap_or(&[]);
-        if args.len() != 1 {
-            for arg in args {
-                let _ = self.infer(arg);
-            }
-            return self.error_with_help(
-                ErrorCode::ConstructorArity,
-                format!("len expects 1 argument, got {}", args.len()),
-                range,
-                Some("use `value.len()`".to_string()),
-            );
-        }
-
-        let target_ty = self.infer(&args[0]);
-        self.finish_len_call(target_ty, args, id, range)
-    }
-
-    /// Named-arg path: arguments were already inferred during reorder.
-    fn infer_len_call_from_tys(
-        &mut self,
-        tys: &[Ty],
-        args: &[Output],
-        id: Option<NodeId>,
-        range: Range<usize>,
-    ) -> Ty {
-        if tys.len() != 1 || args.len() != 1 {
-            return self.error_with_help(
-                ErrorCode::ConstructorArity,
-                format!("len expects 1 argument, got {}", args.len()),
-                range,
-                Some("use `value.len()`".to_string()),
-            );
-        }
-        self.finish_len_call(tys[0].clone(), args, id, range)
-    }
-
-    fn finish_len_call(
-        &mut self,
-        target_ty: Ty,
-        args: &[Output],
-        id: Option<NodeId>,
-        range: Range<usize>,
-    ) -> Ty {
-        let resolved = apply_ty_prune(&self.subst, &target_ty);
-        if Self::is_structural_len_ty(&resolved) {
-            return int();
-        }
-        // Open vars: prefer Length (custom / generic) over forcing an array.
-        if matches!(&resolved, Ty::Var(_)) {
-            return self.infer_length_method_call(&target_ty, args, id, range);
-        }
-        self.infer_length_method_call(&target_ty, args, id, range)
-    }
-
     fn is_structural_len_ty(ty: &Ty) -> bool {
         match strip_readonly(ty) {
             Ty::Array { .. } | Ty::Tuple(_) | Ty::Record { .. } => true,
@@ -7723,91 +7665,6 @@ impl Checker {
     /// Codegen helper: same structural `len` shapes as typechecking.
     pub fn is_structural_len_ty_for_codegen(ty: &Ty) -> bool {
         Self::is_structural_len_ty(ty)
-    }
-
-    /// Resolve `len(x)` via the `Length` typeclass (bound or ground instance).
-    fn infer_length_method_call(
-        &mut self,
-        target_ty: &Ty,
-        args: &[Output],
-        id: Option<NodeId>,
-        range: Range<usize>,
-    ) -> Ty {
-        let resolved = apply_ty_prune(&self.subst, target_ty);
-        let receiver_var = Self::constraint_var_of_ty(&resolved);
-        let candidates = self.bound_method_candidates("len", receiver_var);
-        if !candidates.is_empty()
-            && let Some((dict_index, dict_class, class, method_slot, scheme)) =
-                self.select_bound_method(candidates, "len", &range)
-            {
-                self.bind_matching_abstract_constraints(receiver_var, &dict_class);
-                let (fun_ty, constraints, mapping) = self.instantiate_scheme_mapped(&scheme);
-                let hint = BoundMethodCall {
-                    dict_index,
-                    method_slot,
-                    arity: 1,
-                    has_receiver: false,
-                    class: class.clone(),
-                };
-                if let Some(call_id) = id {
-                    self.bound_method_calls.insert(call_id, hint.clone());
-                }
-                self.bound_method_calls_by_span
-                    .insert((range.start, range.end), hint);
-                let arg_tys = vec![target_ty.clone()];
-                let result = self.apply_function(
-                    Some(&format!("{}::len", class)),
-                    &fun_ty,
-                    &arg_tys,
-                    Some(args),
-                    id,
-                    range.clone(),
-                );
-                if !constraints.is_empty() {
-                    self.discharge_constraints(id, &constraints, &range);
-                    self.pin_assoc_after_discharge(
-                        &class,
-                        &constraints,
-                        Some(&scheme),
-                        &mapping,
-                        &range,
-                    );
-                }
-                return result;
-            }
-
-        let Some(scheme) = self
-            .typeclass_method_schemes
-            .get(&("Length".to_string(), "len".to_string()))
-            .cloned()
-        else {
-            return self.error_with_help(
-                ErrorCode::GenericTypeError,
-                format!(
-                    "`len` requires a `Length` instance, found `{}`",
-                    self.diag_ty(&resolved)
-                ),
-                args[0].0.into_range(),
-                Some("implement `impl Length for T { fn len(T x) -> int { ... } }`".to_string()),
-            );
-        };
-
-        let (fun_ty, constraints, mapping) = self.instantiate_scheme_mapped(&scheme);
-        let arg_tys = vec![target_ty.clone()];
-        let result = self.apply_function(
-            Some("Length::len"),
-            &fun_ty,
-            &arg_tys,
-            Some(args),
-            id,
-            range.clone(),
-        );
-        if !constraints.is_empty() {
-            self.discharge_constraints(id, &constraints, &range);
-            self.pin_assoc_after_discharge("Length", &constraints, Some(&scheme), &mapping, &range);
-        }
-        // If discharge failed (no instance), a diagnostic is already recorded.
-        apply_ty_prune(&self.subst, &result)
     }
 
     /// Warn that `name` is deprecated; `help` names the replacement.

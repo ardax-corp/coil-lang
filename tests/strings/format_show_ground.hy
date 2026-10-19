@@ -35,7 +35,7 @@ test("user, derived and builtin Show") {
 }
 
 test("Show inside a call's arguments") {
-    assert!(len(format("%v-%v", true, Shape::Circle(1))) == 21);
+    assert!(format("%v-%v", true, Shape::Circle(1)).len() == 21);
 }
 
 test("Show through a generic mono instance") {

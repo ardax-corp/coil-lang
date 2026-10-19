@@ -42,8 +42,8 @@ test("static roots survive collections") {
         Option::None => -1,
     };
     assert!(first == 9);
-    assert!(len(nodes) == 510);
+    assert!(nodes.len() == 510);
     assert!(nodes[499].v == 499);
     assert!(count == 510);
-    assert!(len(label) == 6);
+    assert!(label.len() == 6);
 }

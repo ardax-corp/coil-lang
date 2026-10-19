@@ -24,7 +24,7 @@ derive Inspect(TypeDecl t) -> Code attrs(probe) {
     text += " self=" + t.self_type().src();
     for f in t.fields() {
         text += " | " + f.name.str() + ":" + f.ty.str() + " head=" + f.ty.head() + " args=" +
-                len(f.ty.args()).show();
+                f.ty.args().len().show();
         text += " pub=" + yes_no(f.is_pub) + " label=" + f.attr_str("probe", "label", "-");
     }
     for v in t.variants() {
@@ -184,7 +184,7 @@ macro kinds(Vec<Expr> xs) -> Code {
 
 /// `count_args!(…)`: how many arguments the call had.
 macro count_args(Vec<Expr> xs) -> Code {
-    return lit_int(len(xs));
+    return lit_int(xs.len());
 }
 
 /// `list_of!(Name, T)`: `type Name = Vec<T>;`, built with `quote type`.

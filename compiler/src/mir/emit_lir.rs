@@ -95,9 +95,10 @@ pub(super) fn emit_lir_framed(
     plan.home_base = home_base(func, scratch)?;
     let plan = plan;
     let regs = coalesce_latch_overwrite(func, regs, &plan.need_slot);
-    let cleared = super::emit::cleared_words(func, &regs, &plan.need_slot);
-    let entry_clears = super::emit::entry_clears(func, &regs, &plan.need_slot);
-    let source_clears = super::emit::source_clears(func, &regs, &plan.need_slot);
+    let mut cleared = super::emit::cleared_words(func, &regs, &plan.need_slot);
+    let mut entry_clears = super::emit::entry_clears(func, &regs, &plan.need_slot);
+    let mut source_clears = super::emit::source_clears(func, &regs, &plan.need_slot);
+    super::emit::prune_clears(func, &regs, &plan.need_slot, &mut cleared, &mut entry_clears, &mut source_clears);
     let max_reg = plan
         .need_slot
         .iter()
@@ -215,7 +216,7 @@ pub(super) fn emit_lir_framed(
             reserved: &reserved,
             pool,
             loc: term_loc,
-            clears: entry_clears.get(&block.id).map(Vec::as_slice).unwrap_or(&[]),
+            clears: &entry_clears,
         })?;
     }
     let home_frame = (plan.home_base, (u32::from(max_reg) + 1).max(plan.home_slot(0) + func.homes.len() as u32));
@@ -2258,8 +2259,8 @@ struct EmitTermArgs<'args> {
     reserved: &'args std::collections::HashSet<u32>,
     pool: &'args mut Vec<u64>,
     loc: DebugLoc,
-    /// Registers zeroed after a `Jump`'s φ copies (`emit::entry_clears`).
-    clears: &'args [u8],
+    /// Registers zeroed after an edge's φ copies (`emit::entry_clears`).
+    clears: &'args HashMap<(BlockId, BlockId), Vec<u8>>,
 }
 
 /// The call `block` ends with when it is a tail call: its result is what
@@ -2292,10 +2293,11 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
     let Some(term) = &block.term else {
         return Err(LowerError::Refused("missing terminator".into()));
     };
+    let clears = |to: BlockId| clears.get(&(block.id, to)).map(Vec::as_slice).unwrap_or(&[]);
     match term {
         Terminator::Jump { dest } => {
             emit_phi_moves(out, func, block.id, *dest, regs, scratch, loc);
-            for &r in clears {
+            for &r in clears(*dest) {
                 super::emit::push_clear_word(out, r);
             }
             if !is_fallthrough(func, block.id, *dest) {
@@ -2324,9 +2326,11 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
                 pool,
                 loc,
             })?;
-            if t_moves.is_empty() && f_moves.is_empty() {
+            let (t_clears, f_clears) = (clears(*taken), clears(*not_taken));
+            let (t_edge, f_edge) = (!t_moves.is_empty() || !t_clears.is_empty(), !f_moves.is_empty() || !f_clears.is_empty());
+            if !t_edge && !f_edge {
                 emit_cond_jumps(out, func, block.id, *taken, *not_taken, block_lab, loc);
-            } else if f_moves.is_empty() {
+            } else if !f_edge {
                 // Only the taken edge moves: branch straight to `not_taken`.
                 out.push(IlOp::Jump {
                     kind: IlJumpKind::JumpIfFalse,
@@ -2336,6 +2340,9 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
                 });
                 for (d, s) in t_moves {
                     push_move(out, d, s, loc);
+                }
+                for &r in t_clears {
+                    super::emit::push_clear_word(out, r);
                 }
                 if !is_fallthrough(func, block.id, *taken) {
                     out.push(IlOp::Jump {
@@ -2360,6 +2367,9 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
                 for (d, s) in t_moves {
                     push_move(out, d, s, loc);
                 }
+                for &r in t_clears {
+                    super::emit::push_clear_word(out, r);
+                }
                 out.push(IlOp::Jump {
                     kind: IlJumpKind::Unconditional,
                     target: block_lab[taken.index()],
@@ -2369,6 +2379,9 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
                 out.push(IlOp::Label(f_lab));
                 for (d, s) in f_moves {
                     push_move(out, d, s, loc);
+                }
+                for &r in f_clears {
+                    super::emit::push_clear_word(out, r);
                 }
                 if !is_fallthrough(func, block.id, *not_taken) {
                     out.push(IlOp::Jump {

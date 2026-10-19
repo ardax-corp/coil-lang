@@ -50,8 +50,8 @@ fn total(Vec<Option<Leaf>> xs) -> int {
 
 fn swap_ends(Vec<Option<Leaf>> xs) {
     let first = xs[0];
-    xs[0] = xs[len(xs) - 1];
-    xs[len(xs) - 1] = first;
+    xs[0] = xs[xs.len() - 1];
+    xs[xs.len() - 1] = first;
 }
 
 fn picked(int k) -> int {
@@ -78,7 +78,7 @@ fn oks(int a, int b) -> int {
 test("push, index and loop over niche option elements") {
     let xs = filled(10);
     collect();
-    assert!(len(xs) == 10);
+    assert!(xs.len() == 10);
     assert!(total(xs) == 25);
     assert!(value(xs[3]) == 3);
     assert!(value(xs[4]) == 0);

@@ -5,7 +5,7 @@
 use tests::assert;
 
 fn count(... xs) -> int {
-    return len(xs);
+    return xs.len();
 }
 
 fn first(... xs) {
@@ -19,7 +19,7 @@ fn second(int skip, ... xs) {
 fn sum(... xs) -> int {
     let total = 0;
     let i = 0;
-    while i < len(xs) {
+    while i < xs.len() {
         total += xs[i];
         i += 1;
     }
@@ -31,7 +31,7 @@ fn never_called(... xs) -> int {
 }
 
 fn label(string head, ... xs) -> string {
-    return head + xs[len(xs) - 1];
+    return head + xs[xs.len() - 1];
 }
 
 fn forward(... xs) -> int {

@@ -25,7 +25,7 @@ test("named function receives an unboxed int") {
 }
 
 test("string, float and nested calls") {
-    assert!(apply_to("ab", fn (string s) => len(s)) == 2);
+    assert!(apply_to("ab", fn (string s) => s.len()) == 2);
     assert!(apply_to(2.5, fn (float y) => y * 2.0) == 5.0);
     assert!(apply_to(3, fn (int y) => format("%i", y)) == "3");
     assert!(twice(5, fn (int y) => y + 1) == 7);

@@ -7,7 +7,7 @@ use string::{format, to_bytes};
 
 fn paint(Vec<int> a, int step) -> int {
     let k = 0;
-    while k < len(a) {
+    while k < a.len() {
         a[k] = a[k] + 1;
         k = k + step;
     }

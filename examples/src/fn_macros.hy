@@ -18,7 +18,7 @@ macro check(Expr cond) -> Code {
 
 /// `sum!(a, b, …)`: the sum of every argument (`0` for none).
 macro sum(Vec<Expr> xs) -> Code {
-    if len(xs) == 0 {
+    if xs.len() == 0 {
         return raw("0");
     }
     let parts: Vec<Code> = Vec::new();
@@ -87,5 +87,5 @@ macro count() -> Code {
 }
 
 macro count(Expr first, Vec<Expr> rest) -> Code {
-    return lit_int(1 + len(rest));
+    return lit_int(1 + rest.len());
 }

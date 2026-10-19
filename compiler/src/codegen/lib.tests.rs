@@ -2670,7 +2670,7 @@ fn main() {
 fn record_construct_one_field_emits_correct_bytecode() {
     use common::Instruction;
     let (bc, _pool) =
-        compile_src_boxed_locals("enum E { Foo { x: int } } fn main() { let v: Vec<E> = Vec::new(); v.push(E::Foo { x: 1 }); return len(v); }");
+        compile_src_boxed_locals("enum E { Foo { x: int } } fn main() { let v: Vec<E> = Vec::new(); v.push(E::Foo { x: 1 }); return v.len(); }");
 
     // Find the MAKE_ENUM. Its operand is tag (upper 16) and
     // arity (lower 16).
@@ -3631,7 +3631,7 @@ fn vec_push_and_len_emit_array_opcodes() {
         "fn main() { \
 let a = Vec::from([1, 2]); \
 a.push(3); \
-let n = len(a); \
+let n = a.len(); \
 if n != 3 { panic \"len\"; } \
 }",
     );
@@ -3648,7 +3648,7 @@ if n != 3 { panic \"len\"; } \
             b.bytecode(),
             Instruction::ArrayLen | Instruction::DenseArrayLen
         )),
-        "expected `len(a)` to emit ArrayLen or DenseArrayLen"
+        "expected `a.len()` to emit ArrayLen or DenseArrayLen"
     );
     assert!(
         bc.iter().any(|b| matches!(b.bytecode(), Instruction::CALL)),
@@ -4952,7 +4952,7 @@ fn index_with_len_minus_one_stashes_receiver_before_staged_index() {
         r#"
 fn main() {
     let ab = [97, 47];
-    let last = ab[len(ab) - 1];
+    let last = ab[ab.len() - 1];
 }
 "#,
     );
@@ -4968,7 +4968,7 @@ fn main() {
     });
     assert!(
         has_index || dense_or_sroa,
-        "expected Index, DenseIndex, or SROA/select for ab[len(ab)-1]; ops={ops:?}"
+        "expected Index, DenseIndex, or SROA/select for ab[ab.len()-1]; ops={ops:?}"
     );
     // Fuse-IL staging must not leave the receiver under STORE high-water.
     if let Some(idx_at) = bc
@@ -4991,7 +4991,7 @@ fn len_of_string_literal_folds_without_array_len() {
     run_src_ok(
         r#"
 fn main() {
-    let n = len("abc");
+    let n = "abc".len();
     if n != 3 { panic "len"; }
 }
 "#,
@@ -5009,7 +5009,7 @@ impl Length for Box {
     fn len(Box b) -> int { return 7; }
 }
 fn main() {
-    return len(new Box(0));
+    return (new Box(0)).len();
 }
 "#,
     );
@@ -5043,14 +5043,14 @@ fn len_of_array_literal_folds_without_extra_array_len() {
     let (bc, _pool) = compile_src(
         r#"
 fn main() {
-    let n = len([10, 20, 30]);
+    let n = [10, 20, 30].len();
 }
 "#,
     );
     assert!(
         bc.iter()
             .any(|b| matches!(b.bytecode(), Instruction::CONST)),
-        "expected folded CONST for len([10, 20, 30]); ops={:?}",
+        "expected folded CONST for [10, 20, 30].len(); ops={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
     );
 }
@@ -5059,8 +5059,8 @@ fn main() {
 fn len_of_dict_and_tuple_literals_fold_to_const() {
     use common::Instruction;
     for src in [
-        r#"fn main() { let n = len({ a: 1, b: 2 }); }"#,
-        r#"fn main() { let n = len((1, 2, 3)); }"#,
+        r#"fn main() { let n = ({ a: 1, b: 2 }).len(); }"#,
+        r#"fn main() { let n = (1, 2, 3).len(); }"#,
     ] {
         let (bc, _pool) = compile_src(src);
         assert!(
@@ -5079,14 +5079,14 @@ fn len_of_runtime_binding_keeps_array_len_path() {
         r#"
 fn main() {
     let s = "abc";
-    let n = len(s);
+    let n = s.len();
 }
 "#,
     );
     assert!(
         bc.iter()
             .any(|b| matches!(b.bytecode(), Instruction::ArrayLen)),
-        "runtime len(s) should use ArrayLen; ops={:?}",
+        "runtime s.len() should use ArrayLen; ops={:?}",
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
     );
 }
@@ -5834,7 +5834,7 @@ fn length_bound_ground_call_uses_dictionary_not_mono() {
     use common::Instruction;
     // The clone would inline; the test pins its `CALL`.
     let (bc, _pool) = compile_src_tuned(
-        "fn n<T: Length>(T x) -> int { return len(x); } \
+        "fn n<T: Length>(T x) -> int { return x.len(); } \
              fn main() { return n(\"ab\"); }",
         |c| c.set_hir_inline(false),
     );
@@ -6359,7 +6359,7 @@ fn rest_call_emits_make_array_before_call() {
     use common::Instruction;
     let (bc, _pool) = compile_src_heap_calls(
         r#"
-fn sum(int... xs) -> int { return len(xs); }
+fn sum(int... xs) -> int { return xs.len(); }
 fn main() {
     let n = sum(1, 2, 3);
 }
@@ -6400,7 +6400,7 @@ fn rest_empty_call_emits_make_array_zero() {
     use common::Instruction;
     let (bc, _pool) = compile_src(
         r#"
-fn sum(int... xs) -> int { return len(xs); }
+fn sum(int... xs) -> int { return xs.len(); }
 fn main() {
     let n = sum();
 }
@@ -7060,7 +7060,7 @@ fn diamond_inline_failure_does_not_emit_jmp_to_pc_zero() {
     );
 }
 
-/// `bytes_slice`-shaped loop: `while i < end` with nested `i < len(src)` and
+/// `bytes_slice`-shaped loop: `while i < end` with nested `i < src.len()` and
 /// `out.push(src[i])` must exit past the back-edge (BinSlotSlotJmpf pool target).
 #[test]
 fn bytes_slice_while_exit_targets_past_back_edge() {
@@ -7074,7 +7074,7 @@ fn bytes_slice(Vec<byte> src, int start, int end) -> Vec<byte> {
     let out: Vec<byte> = Vec::new();
     let i = start;
     while i < end {
-        if i < len(src) {
+        if i < src.len() {
             out.push(src[i]);
         }
         i = i + 1;
@@ -7084,7 +7084,7 @@ fn bytes_slice(Vec<byte> src, int start, int end) -> Vec<byte> {
 fn main() {
     let b = to_bytes("abcd");
     let s = bytes_slice(b, 0, 4);
-    write(stdout(), to_bytes(format("%i", len(s))));
+    write(stdout(), to_bytes(format("%i", s.len())));
 }
 "#,
     );
@@ -7095,7 +7095,7 @@ fn main() {
         .map(|(i, _)| i)
         .max()
         .expect("back-edge JMP");
-    // Inner `if i < len(src)` may also fuse to BinSlotSlotJmpf and jump to
+    // Inner `if i < src.len()` may also fuse to BinSlotSlotJmpf and jump to
     // the increment (still inside the loop). Only the while-exit must land
     // past the back-edge JMP.
     let mut saw_while_exit = false;
@@ -7967,7 +7967,7 @@ impl Enc {
     }
     pub fn encode_into(int n) -> Result<int, string> {
         let bytes = self.encode(n)?;
-        return len(bytes);
+        return bytes.len();
     }
 }
 fn main() {
@@ -8010,7 +8010,7 @@ class EncFwd {}
 impl EncFwd {
     pub fn encode_into(int n) -> Result<int, string> {
         let bytes = self.encode(n)?;
-        return len(bytes);
+        return bytes.len();
     }
     pub fn encode(int n) -> Result<Vec<byte>, string> {
         let out: Vec<byte> = Vec::new();

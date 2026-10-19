@@ -17,7 +17,7 @@ gen fn slurp(string path) -> Result<int, IoError> {
     wait_readable(s)?;
     let bytes = read_to_end(s)?;
     close(s)?;
-    return len(bytes);
+    return bytes.len();
 }
 
 fn main() {

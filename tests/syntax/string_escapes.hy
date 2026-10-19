@@ -8,7 +8,7 @@ fn byte_at(string s, int i) -> int {
 }
 
 fn nbytes(string s) -> int {
-    return len(to_bytes(s));
+    return to_bytes(s).len();
 }
 
 test("single-character escapes") {

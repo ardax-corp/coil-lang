@@ -11,7 +11,7 @@
 //!
 //! A slice (`slice_bytes`) of a `Shared` string is a view `[start, start +
 //! len)` into the same buffer instead of a copy, so `rest = slice(rest, i,
-//! len(rest))` loops are linear. A view only pins a buffer at most
+//! rest.len())` loops are linear. A view only pins a buffer at most
 //! [`VIEW_RETAIN_MAX`] times its own length; smaller slices are copied.
 //!
 //! Soundness: bytes below `used` are never written again, and every string

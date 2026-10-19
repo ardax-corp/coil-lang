@@ -54,7 +54,7 @@ test("the argument's inferred type picks the overload") {
     assert!(kind(n) == "i4");
     assert!(kind(s) == "sab");
     assert!(kind(n > 3) == "T");
-    assert!(kind(len("abc")) == "i3");
+    assert!(kind("abc".len()) == "i3");
 }
 
 test("overloads with different return types") {

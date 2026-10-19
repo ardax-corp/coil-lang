@@ -19,7 +19,7 @@ fn row(int i) -> [Cell; 3] {
 fn weigh(Vec<[Cell; 3]> rows) -> int {
     let total = 0;
     let i = 0;
-    while i < len(rows) {
+    while i < rows.len() {
         let r = rows[i];
         total = total + r[0].weight + r[1].weight + r[2].id % 7;
         i = i + 1;
@@ -38,7 +38,7 @@ fn thinned() -> Vec<[Cell; 3]> {
     }
     let kept: Vec<[Cell; 3]> = Vec::new();
     let j = 0;
-    while j < len(rows) {
+    while j < rows.len() {
         if j % 2 == 0 {
             kept.push(rows[j]);
         }

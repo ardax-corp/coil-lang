@@ -11,7 +11,7 @@ fn fib(int n) -> int {
 
 fn first_over(Vec<int> xs, int lim) -> int {
     let i = 0;
-    while i < len(xs) {
+    while i < xs.len() {
         if xs[i] > lim {
             return i;
         }

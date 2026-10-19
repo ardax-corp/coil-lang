@@ -39,5 +39,5 @@ test("invoke's error message") {
         Result::Ok(_) => "",
         Result::Err(e) => e.message,
     };
-    assert!(len(msg) > 0);
+    assert!(msg.len() > 0);
 }

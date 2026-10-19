@@ -75,7 +75,7 @@ test("call index assignment as a value runs the value first") {
     let v = a[step(log, 2, 2)] = step(log, 1, 7);
     assert!(v == 7);
     assert!(a[2] == 7);
-    assert!(len(log) == 2);
+    assert!(log.len() == 2);
     assert!(log[0] == 1);
     assert!(log[1] == 2);
 }

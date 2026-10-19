@@ -446,7 +446,7 @@ pub struct HirMirInput<'a> {
     /// Parameters typed a bare type parameter of a shared generic body:
     /// its prologue unboxes each (`UNBOX_ANY_TAG`), as the caller boxed it.
     pub open_params: &'a [HirLocal],
-    /// `len(x)` calls: a fixed size, or `None` for the array's length.
+    /// `x.len()` calls: a fixed size, or `None` for the array's length.
     pub lens: &'a HashMap<u32, Option<u32>>,
     /// Whether a function, by its HIR callee name, is pure: it writes no
     /// heap and does no I/O (it may trap or allocate).
@@ -5820,7 +5820,7 @@ impl Lower<'_> {
         self.join_arms(out)
     }
 
-    /// `len(x)`: a fixed size (a local or literal is not read; any other
+    /// `x.len()`: a fixed size (a local or literal is not read; any other
     /// operand is evaluated and dropped), or the heap array's length.
     fn len(&mut self, arg: HirId, fixed: Option<u32>) -> Result<Val, Refusal> {
         if let Some(n) = fixed {

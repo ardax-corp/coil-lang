@@ -26,7 +26,7 @@ fn chain(int n) -> Vec<Node> {
 fn sum(Vec<Node> nodes) -> int {
     let total = 0;
     let i = 0;
-    while i < len(nodes) {
+    while i < nodes.len() {
         total = total + nodes[i].v;
         i = i + 1;
     }
@@ -61,7 +61,7 @@ test("vec of options keeps holes and payloads") {
     collect();
     let total = 0;
     let j = 0;
-    while j < len(slots) {
+    while j < slots.len() {
         total = total + match slots[j] {
             Option::Some(n) => n.v,
             Option::None => 0,
@@ -82,10 +82,10 @@ test("nested and literal-backed vecs") {
     collect();
     let total = 0;
     let k = 0;
-    while k < len(rows) {
-        total = total + len(rows[k]);
+    while k < rows.len() {
+        total = total + rows[k].len();
         k = k + 1;
     }
     assert!(total == 55);
-    assert!(len(words[2]) == 3);
+    assert!(words[2].len() == 3);
 }

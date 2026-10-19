@@ -30,7 +30,7 @@ fn match_key(Slot slot, string key) -> int {
 fn count_eq(Vec<string> xs, string key) -> int {
     let n = 0;
     let i = 0;
-    while i < len(xs) {
+    while i < xs.len() {
         let hit = xs[i] == key;
         if hit {
             n = n + 1;

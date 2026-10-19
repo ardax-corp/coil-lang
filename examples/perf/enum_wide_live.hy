@@ -26,7 +26,7 @@ fn build(int n) -> Vec<Shape> {
 fn perimeter(Vec<Shape> shapes) -> int {
     let total = 0;
     let i = 0;
-    while i < len(shapes) {
+    while i < shapes.len() {
         total = total + match shapes[i] {
             Shape::Tri(a, b, c) => a + b + c,
             Shape::Quad(a, b, c, d) => a + b + c + d,

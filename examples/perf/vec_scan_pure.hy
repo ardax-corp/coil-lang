@@ -1,5 +1,5 @@
-// CPU: `while i < len(v) { f(v[i]) }` with a non-inlined pure helper — COI-99.
-// `len(v)` is invariant across the CALL, so it hoists; `v[i]` may uncheck.
+// CPU: `while i < v.len() { f(v[i]) }` with a non-inlined pure helper — COI-99.
+// `v.len()` is invariant across the CALL, so it hoists; `v[i]` may uncheck.
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};
@@ -16,17 +16,17 @@ fn absorb(int x) -> int {
 
 fn fill(Vec<int> v) -> int {
     let i = 0;
-    while i < len(v) {
+    while i < v.len() {
         v[i] = i;
         i = i + 1;
     }
-    return len(v);
+    return v.len();
 }
 
 fn scan(Vec<int> v) -> int {
     let acc = 0;
     let i = 0;
-    while i < len(v) {
+    while i < v.len() {
         acc = acc + absorb(v[i]);
         i = i + 1;
     }

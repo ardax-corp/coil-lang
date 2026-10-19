@@ -749,11 +749,11 @@ fn pipeline_vectorizes_stride1_iota_store() {
     let src = r#"
 fn fill(Vec<int> v) -> int {
     let i = 0;
-    while i < len(v) {
+    while i < v.len() {
         v[i] = i;
         i = i + 1;
     }
-    return len(v);
+    return v.len();
 }
 fn main() {
     let v: Vec<int> = Vec::from([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
@@ -843,7 +843,7 @@ fn pipeline_vectorizes_stride1_reduce() {
 fn scan(Vec<int> v) -> int {
     let acc = 0;
     let i = 0;
-    while i < len(v) {
+    while i < v.len() {
         acc = acc + v[i];
         i = i + 1;
     }
@@ -888,7 +888,7 @@ fn sum_i(int n) -> int {
 fn sum_from(Vec<int> v, int start) -> int {
     let s = 0;
     let i = start;
-    while i < len(v) {
+    while i < v.len() {
         s = s + v[i];
         i = i + 1;
     }
@@ -897,7 +897,7 @@ fn sum_from(Vec<int> v, int start) -> int {
 fn sum_next(Vec<int> v) -> int {
     let s = 0;
     let i = 0;
-    while i < len(v) - 1 {
+    while i < v.len() - 1 {
         s = s + v[i + 1];
         i = i + 1;
     }
@@ -907,7 +907,7 @@ fn id(int n) -> int {
     return n;
 }
 fn sum_after_call(Vec<int> v) -> int {
-    let n = id(len(v));
+    let n = id(v.len());
     let s = 0;
     let i = 0;
     while i < n {
@@ -960,7 +960,7 @@ fn pipeline_vectorizes_mul_reduce_and_loop_chain() {
 fn product(Vec<int> v) -> int {
     let s = 1;
     let i = 0;
-    while i < len(v) {
+    while i < v.len() {
         s = s * v[i];
         i = i + 1;
     }
@@ -968,13 +968,13 @@ fn product(Vec<int> v) -> int {
 }
 fn fill_then_sum(Vec<int> v) -> int {
     let i = 0;
-    while i < len(v) {
+    while i < v.len() {
         v[i] = i + 1;
         i = i + 1;
     }
     let s = 0;
     let j = 0;
-    while j < len(v) {
+    while j < v.len() {
         s = s + v[j];
         j = j + 1;
     }
@@ -1026,7 +1026,7 @@ fn pipeline_vectorizes_conservative_fma_store() {
     let src = r#"
 fn axpy(float a, Vec<float> x, Vec<float> y) -> float {
     let i = 0;
-    while i < len(x) {
+    while i < x.len() {
         y[i] = a * x[i] + y[i];
         i = i + 1;
     }
@@ -2484,11 +2484,11 @@ fn s3_vec_scan_fill_takes_v0_simd() {
     let src = r#"
 fn fill(Vec<int> v) -> int {
     let i = 0;
-    while i < len(v) {
+    while i < v.len() {
         v[i] = i;
         i = i + 1;
     }
-    return len(v);
+    return v.len();
 }
 fn main() {
     let v: Vec<int> = Vec::from([1, 2, 3]);
@@ -2531,7 +2531,7 @@ fn s3_index_loop_takes_dense() {
 fn sum(Vec<int> arr) -> int {
     let i = 0;
     let s = 0;
-    while i < len(arr) {
+    while i < arr.len() {
         s = s + arr[i];
         i = i + 1;
     }
@@ -2591,7 +2591,7 @@ fn index_loop_specializes_without_heap_prescan() {
 fn sum(Vec<int> arr) -> int {
     let i = 0;
     let s = 0;
-    while i < len(arr) {
+    while i < arr.len() {
         s = s + arr[i];
         i = i + 1;
     }
@@ -2637,7 +2637,7 @@ fn main() {
 fn s3b_reverse_index_takes_dense_and_checksums() {
     let src = r#"
 fn sum(Vec<int> arr) -> int {
-    let n = len(arr);
+    let n = arr.len();
     let i = 0;
     let s = 0;
     while i < n {
@@ -2701,7 +2701,7 @@ fn eval_a(int i, int j) -> float {
     return 1.0 / (t as float);
 }
 fn times_a(Vec<float> v, Vec<float> out) -> float {
-    let n = len(v);
+    let n = v.len();
     let i = 0;
     while i < n {
         let s = 0.0;
@@ -4830,7 +4830,7 @@ fn shows(unit u) -> bool {
 }
 fn keep(unit u, int n) -> bool {
     let s = format("%i", n);
-    return shows(u) && len(s) > 0;
+    return shows(u) && s.len() > 0;
 }
 fn main() {
     let _ = keep((), 3);
@@ -4958,4 +4958,33 @@ fn lir_copy_sources_about_linear_over_rebinding_joins() {
     let large = steps(800);
     // Linear is ~8x.
     assert!(large <= 24 * small.max(1), "800 arms stepped {large} values, 100 stepped {small}");
+}
+
+/// `CONST 0; STORE` pairs in LIR: the GC clears ([`emit::push_clear_word`]).
+fn lir_clear_words(ops: &[IlOp]) -> usize {
+    ops.windows(2)
+        .filter(|w| {
+            matches!(w[0], IlOp::Const { imm: 0, .. })
+                && matches!(&w[1], IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::STORE)
+        })
+        .count()
+}
+
+/// #1519: a chain of joins that rebind a heap word zeroes about a constant
+/// number of registers per join. Each taken arm zeroed every register an
+/// earlier value of the chain lived in, twice: ~n² clears.
+#[test]
+fn lir_clears_about_linear_over_rebinding_joins() {
+    let clears = |n: usize| {
+        let text = reachable_rebind_arms(n);
+        let f = parse_func(&text).expect(&text);
+        f.verify().unwrap();
+        let mut pool = Vec::new();
+        lir_clear_words(&emit_lir(&f, Some(Label(0)), &mut pool, true).expect("LIR emits"))
+    };
+    let small = clears(25);
+    let large = clears(100);
+    assert!(small > 0, "the arms clear the rebound word");
+    // Linear is ~4x.
+    assert!(large <= 8 * small, "100 arms cleared {large} words, 25 cleared {small}");
 }

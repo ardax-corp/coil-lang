@@ -10,7 +10,7 @@ enum Wrap {
 }
 
 fn width(int pad, Vec<byte> bytes) -> int {
-    return pad + len(bytes);
+    return pad + bytes.len();
 }
 
 fn shown(Wrap w) -> int {

@@ -26,7 +26,7 @@ impl Store<T: Eq> {
     }
 
     pub fn size() -> int {
-        return len(self.items);
+        return self.items.len();
     }
 }
 

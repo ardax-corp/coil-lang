@@ -15,5 +15,5 @@ fn main() {
     let rows = Vec::new();
     rows.push(Row::Pair(format("a=%s", "1"), format("b=%s", "2")));
     rows.push(Row::Pair(format("c=%s", "3"), format("d=%s", "4")));
-    let _ = write_all(stdout(), to_bytes(format("%i", len(rows))));
+    let _ = write_all(stdout(), to_bytes(format("%i", rows.len())));
 }

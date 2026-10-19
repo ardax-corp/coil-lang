@@ -991,9 +991,6 @@ impl Cx<'_> {
     fn call(&self, w: &mut Walk<'_>, at: HirId, callee: &Callee, args: &[HirId]) {
         let body = &self.module.bodies[w.index];
         match callee {
-            // The host table keeps `len` unknown for any receiver; a
-            // length read has no effect.
-            Callee::Named { name, .. } if name == "len" && args.len() == 1 => {}
             Callee::Named { name, def, .. } => {
                 let mut s = self.named(w, name, *def);
                 let callee = self.local_body(name, *def);

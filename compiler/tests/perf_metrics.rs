@@ -505,7 +505,7 @@ fn perf_indexed_sum_hoists_array_len_once() {
     let n = bc[start..end].iter().filter(|b| is_len(b)).count();
     assert_eq!(
         n, 1,
-        "sum should hoist ArrayLen out of the while i < len(arr) loop (got {n})"
+        "sum should hoist ArrayLen out of the while i < arr.len() loop (got {n})"
     );
     // ArrayLen must not sit on the back-edge cycle: find the loop JMP and
     // ensure its target PC is at-or-after the sole ArrayLen (preheader).
@@ -1532,7 +1532,7 @@ fn aot_p2_nsieve_index_shape_inventory() {
     );
 }
 
-/// P2: `while i < len(v)` keeps its `Index` / `StoreIndex` bounds checks, but the
+/// P2: `while i < v.len()` keeps its `Index` / `StoreIndex` bounds checks, but the
 /// invariant `LOAD v; ArrayLen; STORE t` triple codegen leaves in the header
 /// moves to the preheader — including in `fill`, where the loop writes elements.
 #[test]
@@ -1549,7 +1549,7 @@ fn aot_p2_len_loop_hoists_invariant_array_len() {
         eprintln!("[P2] vec_scan::{name} array_len={total} in_loop={in_loop}");
         assert_eq!(
             in_loop, 0,
-            "{name} must not recompute len(v) every iteration"
+            "{name} must not recompute v.len() every iteration"
         );
         assert_eq!(
             count_index_reads_in(&bc, start, end),
@@ -1576,8 +1576,8 @@ fn aot_p2_vec_scan_dispatch_regression() {
     );
 }
 
-/// COI-99: `while i < len(v) { f(v[i]) }` with a non-inlined pure `f` hoists
-/// `len(v)` and rewrites the index. `absorb` must remain a CALL.
+/// COI-99: `while i < v.len() { f(v[i]) }` with a non-inlined pure `f` hoists
+/// `v.len()` and rewrites the index. `absorb` must remain a CALL.
 #[test]
 fn aot_p2_vec_scan_pure_helper_hoists_and_unchecks() {
     let (bc, pool, strings, statics, pipeline) = compile("examples/perf/vec_scan_pure.hy");
@@ -1587,7 +1587,7 @@ fn aot_p2_vec_scan_pure_helper_hoists_and_unchecks() {
     assert_eq!(
         count_opcodes_in(&bc, inner_start, inner_end, Instruction::ArrayLen),
         0,
-        "scan must not recompute len(v) every iteration"
+        "scan must not recompute v.len() every iteration"
     );
     assert_eq!(
         count_opcodes_in(&bc, start, end, Instruction::Index),
@@ -1615,7 +1615,7 @@ fn aot_p2_vec_scan_pure_helper_hoists_and_unchecks() {
     );
 }
 
-/// Impure helper that only writes a field: `len(v)` still hoists and `v[i]`
+/// Impure helper that only writes a field: `v.len()` still hoists and `v[i]`
 /// still unchecks, like the pure helper above (length-stable calls).
 #[test]
 fn aot_p2_vec_scan_impure_field_helper_hoists_and_unchecks() {
@@ -1627,7 +1627,7 @@ fn aot_p2_vec_scan_impure_field_helper_hoists_and_unchecks() {
         count_opcodes_in(&bc, inner_start, inner_end, Instruction::ArrayLen)
             + count_opcodes_in(&bc, inner_start, inner_end, Instruction::DenseArrayLen),
         0,
-        "scan must not recompute len(v) every iteration"
+        "scan must not recompute v.len() every iteration"
     );
     let unchecked = count_opcodes_in(&bc, start, end, Instruction::IndexUnchecked)
         + count_opcodes_in(&bc, start, end, Instruction::IndexPinUnchecked)

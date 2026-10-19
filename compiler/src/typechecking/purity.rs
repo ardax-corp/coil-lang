@@ -1732,7 +1732,7 @@ fn via(Vec<int> v) -> int {
     return grow(v);
 }
 fn size(Vec<int> v) -> int {
-    return len(v);
+    return v.len();
 }
 fn main() { return; }
 "#,

@@ -52,7 +52,7 @@ test("while let drains a Vec") {
         total = total * 10 + x;
     }
     assert!(total == 4321);
-    assert!(len(v) == 0);
+    assert!(v.len() == 0);
 }
 
 test("while let stops at the first non-matching value") {
@@ -62,5 +62,5 @@ test("while let stops at the first non-matching value") {
         seen = seen + 1;
     }
     assert!(seen == 1);
-    assert!(len(v) == 2);
+    assert!(v.len() == 2);
 }

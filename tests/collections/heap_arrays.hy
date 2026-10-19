@@ -25,7 +25,7 @@ fn odd_sum(Vec<int> xs) -> int {
 
 fn scale(Vec<float> xs, float k) {
     let i = 0;
-    while i < len(xs) {
+    while i < xs.len() {
         xs[i] = xs[i] * k + 1.0;
         i = i + 1;
     }
@@ -45,13 +45,13 @@ fn mean(Vec<float> v) -> float {
     for x in v {
         s = s + x;
     }
-    return s / (len(v) as float);
+    return s / (v.len() as float);
 }
 
 fn copy_then_write([int; 3] a) -> int {
     let b = a;
     b[0] = b[0] + 100;
-    return a[0] * 1000 + b[0] + len(b);
+    return a[0] * 1000 + b[0] + b.len();
 }
 
 test("heap arrays and Vecs in direct MIR") {

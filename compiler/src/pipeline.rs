@@ -3057,7 +3057,7 @@ fn main() -> int {
     }
     let acc = 0;
     let j = 0;
-    while j < len(b) {
+    while j < b.len() {
         acc = acc + absorb(b[j]);
         j = j + 1;
     }
@@ -3095,7 +3095,7 @@ fn main() -> int {
         });
         assert!(
             unchecked >= 1 || bc_index,
-            "b[j] should be proven under j < len(b) (unchecked or DenseIndex)"
+            "b[j] should be proven under j < b.len() (unchecked or DenseIndex)"
         );
         let calls = bytecode
             .iter()
@@ -3122,7 +3122,7 @@ fn main() {
         i = i + 1;
     }
     let j = 0;
-    while j < len(b) {
+    while j < b.len() {
         grow(b, b[j]);
         j = j + 1;
     }
@@ -3178,7 +3178,7 @@ fn main() {
 fn scan_sum(Vec<int> b) -> int {
     let acc = 0;
     let j = 0;
-    while j < len(b) {
+    while j < b.len() {
         acc = acc + b[j];
         j = j + 1;
     }
@@ -3186,7 +3186,7 @@ fn scan_sum(Vec<int> b) -> int {
 }
 gen fn scan_yield(Vec<int> b) {
     let j = 0;
-    while j < len(b) {
+    while j < b.len() {
         yield b[j];
         j = j + 1;
     }
@@ -3377,7 +3377,7 @@ fn main() -> int {
     }
     let acc = 0;
     let j = 0;
-    while j < len(b) {
+    while j < b.len() {
         acc = acc + at(b, j);
         j = j + 1;
     }
@@ -3472,7 +3472,7 @@ fn main() -> int {
     }
     let acc = 0;
     let j = 0;
-    while j < len(b) {
+    while j < b.len() {
         acc = acc + b[j];
         j = j + 2;
     }
@@ -3509,7 +3509,7 @@ fn main() -> int {
         i = i + 1;
     }
     let j = 0;
-    while j < len(b) {
+    while j < b.len() {
         grow(b, b[j]);
         j = j + 1;
     }

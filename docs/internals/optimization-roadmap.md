@@ -103,7 +103,7 @@ titles can oversell.
 | **LICM** (`mir/licm.rs`; stack-IL [#315](https://github.com/ardax-corp/coil-lang/pull/315) moved to HIR, then `hir::licm` folded into MIR 2026-10) | Hoists invariant values out of natural loops on MIR; a trapping op, checked element read or pure call moves only behind a copy of the loop test, and only when it runs on every iteration | Hit: `licm_nested_chains`, `licm_lir_pure_call`. Stack-IL `strength_reduce` (`iv_mul_sr`) was removed 2026-10 (no bench effect). |
 | **Removed 2026-10** | Stack-IL `copy_prop`, `dest_prop`, `mem_fwd` + `dead_store`, `instcombine`, `strength_reduce`, `invariant_store_elim`, `tos_carry`, `return_convoy`, `bin_join_convoy`, `multi_op_join_convoy`, `invert_guard_branch`, `slot_promote_tell`, `ssa_gvn`, `cfg_gvn`, IL `escape_analysis` | Measurement showed no bench effect. MIR InstCombine / DestProp / IV SR / GVN are separate and stay. The `escape_analysis` option now only gates HIR enum / tuple scalar replacement. |
 | **sibling / self `TailCall`** (codegen, [#316](https://github.com/ardax-corp/coil-lang/pull/316)) | Existing `TailCall` for cycle-only siblings (even/odd) and self-recursion; matching one- or two-word ABI | No InstCombine Call;Return peep. Hit: `tail_sibling`. Tail-only mutual depth is 1. |
-| **`loop_bounds`** (`hir/bounds.rs` + `len(a)` hoisting in `mir/licm.rs`; stack-IL pass removed 2026-10) | Length invariance; proven counted / stride / fill-bounded sites flag `IN_BOUNDS` and lower to `IndexUnchecked` / `StoreIndexUnchecked`. Sidecar `index_facts` extend Unchecked/pin to helpers and for-in | **`LEQ`/`GEQ` headers are not length proofs** (COI-85 / COI-98). Unproven, host, FFI, yield, growing-array, alias-push and resizing-call loops stay checked. |
+| **`loop_bounds`** (`hir/bounds.rs` + `a.len()` hoisting in `mir/licm.rs`; stack-IL pass removed 2026-10) | Length invariance; proven counted / stride / fill-bounded sites flag `IN_BOUNDS` and lower to `IndexUnchecked` / `StoreIndexUnchecked`. Sidecar `index_facts` extend Unchecked/pin to helpers and for-in | **`LEQ`/`GEQ` headers are not length proofs** (COI-85 / COI-98). Unproven, host, FFI, yield, growing-array, alias-push and resizing-call loops stay checked. |
 | **`loop_unroll`** (`hir/unroll.rs`; stack-IL pass removed 2026-10) | Full unroll of counted loops, trip ≤ 8, after inlining; each copy reads the counter as a literal, then `hir::fold` folds the copies (merging `x = x + a; x = x + b`) | Calls, exits, closures and inner loops that do not unroll themselves refuse; nests flatten over up to 3 rounds; ≤ 512 added nodes per loop. `LEQ` accepted for **trip count** only — separate from bounds Index proofs (COI-98). |
 | **`*Jmpt`** | fuse-select emits fused `*Jmpt` twins (the IL `JMPF; JMP` → `JMPT` invert was removed 2026-10) | Loop headers stay `*Jmpf` (COI-87). |
 | ~~`seek_back_edge`~~ | `Seek` latch to expose in-loop self-stores when header becomes `Known` | **Removed**: the residual `Seek` blocked MIR dense (`vec_scan` 2.5×, `mir_dense_float` 2.1×, `s2d_inloop_pack` 1.65× slower at `-O3`). |
@@ -220,21 +220,21 @@ Priority: high (first slice landed; unchecked opcodes + stride induction follow-
 Proven counted-loop sites rewrite to `IndexUnchecked` / `StoreIndexUnchecked`
 (archive minor 12). Eligible loops then pin the array and rewrite to
 `IndexPinUnchecked` / `StoreIndexPinUnchecked` (archive minor 13) so the VM
-skips per-index `find_object_by_addr`. Unit `+1` loops (`while i < len(a)`) and
+skips per-index `find_object_by_addr`. Unit `+1` loops (`while i < a.len()`) and
 invariant stride loops (`k = k + p` with positive invariant `p`) share the
 same length-invariance proof (strict `<` / `>` headers only).
 `LEQ` / `GEQ` are **not** length / in-bounds proofs (COI-85 / COI-98). Dynamic
 indices and unproven stride steps keep checked `Index` / `StoreIndex`.
 
-The stack-IL `il::bounds.rs` (removed 2026-10; now `hir::bounds` plus `len(a)` hoisting in `mir::licm`) proved **length invariance** per natural loop instead of
+The stack-IL `il::bounds.rs` (removed 2026-10; now `hir::bounds` plus `a.len()` hoisting in `mir::licm`) proved **length invariance** per natural loop instead of
 relying on per-index runtime tests alone. `StoreIndex` overwrites an element in
-place, so a loop that writes `a[i]` still has an invariant `len(a)`; `ArrayPush`,
+place, so a loop that writes `a[i]` still has an invariant `a.len()`; `ArrayPush`,
 an impure call, a host native or any unmodelled op refuses the region. Two invariant
 materializations move to the preheader on that proof — the `LOAD a; ArrayLen;
-STORE t` triple codegen leaves in the header of `while i < len(a)`, and the
+STORE t` triple codegen leaves in the header of `while i < a.len()`, and the
 `CONST imm; STORE t` pair that materializes a constant addressing operand in
 `a[i] = 0`. `nsieve`'s sieve loop went from 8 words per iteration to 6 (545.6k
-→ 469.9k dispatches); `examples/perf/vec_scan.hy`, the `while i < len(v)`
+→ 469.9k dispatches); `examples/perf/vec_scan.hy`, the `while i < v.len()`
 scan/fill shape, from 6.58M to 5.01M. Safety comes from the cursor: the
 preheader store floors it at `t + 1`, and every in-loop stack height staying at
 or above the header's proves no in-loop push can reach `t`.

@@ -47,7 +47,7 @@ test("a NUL byte in a name is InvalidInput") {
 
 test("cwd is an existing directory") {
     let dir = cwd()?;
-    assert!(len(dir) > 0);
+    assert!(dir.len() > 0);
     assert!(exists(dir)? && is_dir(dir)?);
 }
 

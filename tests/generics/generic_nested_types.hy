@@ -15,11 +15,11 @@ fn somes<T>(Vec<Option<T>> xs) -> Vec<T> {
 }
 
 fn split_first<T>(Vec<T> xs) -> Option<(T, Vec<T>)> {
-    if len(xs) == 0 {
+    if xs.len() == 0 {
         return Option::None;
     }
     let rest: Vec<T> = Vec::new();
-    for i in 1..len(xs) {
+    for i in 1..xs.len() {
         rest.push(xs[i]);
     }
     return Option::Some((xs[0], rest));
@@ -37,7 +37,7 @@ fn length<T>(Vec<T> xs) -> int {
 
 fn count_all<T>(Option<Vec<T>> o) -> int {
     return match o {
-        Option::Some(v) => len(v),
+        Option::Some(v) => v.len(),
         Option::None => 0,
     };
 }
@@ -45,7 +45,7 @@ fn count_all<T>(Option<Vec<T>> o) -> int {
 test("Vec of Option") {
     let xs: Vec<Option<int>> = Vec::from([Option::Some(1), Option::None, Option::Some(3)]);
     let ys = somes(xs);
-    assert!(len(ys) == 2 && ys[0] == 1 && ys[1] == 3);
+    assert!(ys.len() == 2 && ys[0] == 1 && ys[1] == 3);
     let ss: Vec<Option<string>> = Vec::from([Option::None, Option::Some("a")]);
     assert!(somes(ss)[0] == "a");
 }
@@ -53,7 +53,7 @@ test("Vec of Option") {
 test("a tuple with a Vec inside an Option") {
     let xs: Vec<int> = Vec::from([5, 6, 7]);
     let (h, rest) = split_first(xs) ?? (0, Vec::new());
-    assert!(h == 5 && len(rest) == 2);
+    assert!(h == 5 && rest.len() == 2);
     let none: Vec<string> = Vec::new();
     assert!(count_all(Option::Some(none)) == 0);
 }

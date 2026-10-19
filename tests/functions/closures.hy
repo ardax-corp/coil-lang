@@ -81,7 +81,7 @@ fn many(int n) -> int {
     let acc = 0;
     let tag = "k";
     for i in 0..n {
-        let f = fn (int x) use (i, tag) => x + i + len(tag);
+        let f = fn (int x) use (i, tag) => x + i + tag.len();
         if i % 64 == 0 {
             collect();
         }

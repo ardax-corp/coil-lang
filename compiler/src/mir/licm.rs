@@ -61,7 +61,7 @@ pub(super) fn natural_loops(func: &MirFunc) -> Vec<LoopInfo> {
         return Vec::new();
     }
     let preds = func.preds();
-    let dom = dominators(func, &preds);
+    let dom = Dominators::new(func, &preds);
     let mut by_header: Vec<HashSet<BlockId>> = vec![HashSet::new(); n];
     for b in &func.blocks {
         let Some(term) = &b.term else {
@@ -71,7 +71,7 @@ pub(super) fn natural_loops(func: &MirFunc) -> Vec<LoopInfo> {
             if s.index() >= n {
                 continue;
             }
-            if !dom[b.id.index()].contains(&s) {
+            if !dom.dominates(s, b.id) {
                 continue;
             }
             let body = loop_body(&preds, b.id, s);
@@ -98,36 +98,171 @@ pub(super) fn natural_loops(func: &MirFunc) -> Vec<LoopInfo> {
         .collect()
 }
 
-pub(super) fn dominators(func: &MirFunc, preds: &[Vec<BlockId>]) -> Vec<HashSet<BlockId>> {
-    let n = func.blocks.len();
-    let all: HashSet<BlockId> = (0..n).map(|i| BlockId(i as u32)).collect();
-    let mut dom = vec![all; n];
-    let entry = func.entry.index();
-    dom[entry] = HashSet::from([func.entry]);
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for b in &func.blocks {
-            if b.id == func.entry {
-                continue;
+#[cfg(test)]
+thread_local! {
+    /// Steps the dominator computation took, for the bound of #1518.
+    static DOM_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Dominance over a body's blocks, from its immediate-dominator tree
+/// (Cooper, Harvey and Kennedy, "A Simple, Fast Dominance Algorithm").
+///
+/// The roots are the entry and every other block nothing branches to; a
+/// block no root reaches (a cycle nothing enters) is dominated by every
+/// block. That is the largest solution of `dom(b) = {b} ∪ ⋂ dom(preds)`,
+/// which the set-per-block fixpoint this replaced computed (#1518).
+pub(super) struct Dominators {
+    /// Each block's parent in the tree; `None` for a root and for a block
+    /// no root reaches.
+    idom: Vec<Option<BlockId>>,
+    /// Each block's span in a preorder walk of the tree: `d` dominates `b`
+    /// when `b`'s span lies inside `d`'s. `(0, 0)` when no root reaches it.
+    span: Vec<(u32, u32)>,
+    /// Whether a root reaches the block.
+    reached: Vec<bool>,
+}
+
+impl Dominators {
+    pub(super) fn new(func: &MirFunc, preds: &[Vec<BlockId>]) -> Self {
+        let n = func.blocks.len();
+        if n == 0 {
+            return Dominators { idom: Vec::new(), span: Vec::new(), reached: Vec::new() };
+        }
+        // Node `n` is a virtual root above the entry and every block
+        // nothing branches to.
+        let root = n;
+        let succs = |b: usize| -> Vec<usize> {
+            if b == root {
+                let mut out = vec![func.entry.index()];
+                out.extend((0..n).filter(|&i| i != func.entry.index() && preds[i].is_empty()));
+                out
+            } else {
+                func.blocks[b]
+                    .term
+                    .as_ref()
+                    .map(|t| t.succs().into_iter().map(|s| s.index()).filter(|&s| s < n).collect())
+                    .unwrap_or_default()
             }
-            let mut d: Option<HashSet<BlockId>> = None;
-            for p in &preds[b.id.index()] {
-                let pd = &dom[p.index()];
-                d = Some(match d {
-                    None => pd.clone(),
-                    Some(acc) => acc.intersection(pd).copied().collect(),
-                });
+        };
+        let preds_of = |b: usize| -> Vec<usize> {
+            if b == func.entry.index() || preds[b].is_empty() {
+                vec![root]
+            } else {
+                preds[b].iter().map(|p| p.index()).collect()
             }
-            let mut d = d.unwrap_or_default();
-            d.insert(b.id);
-            if d != dom[b.id.index()] {
-                dom[b.id.index()] = d;
-                changed = true;
+        };
+
+        // Postorder numbers from an iterative depth-first walk.
+        const UNSEEN: usize = usize::MAX;
+        let mut post_num = vec![UNSEEN; n + 1];
+        let mut order = Vec::with_capacity(n + 1);
+        let mut seen = vec![false; n + 1];
+        let mut stack = vec![(root, succs(root), 0usize)];
+        seen[root] = true;
+        while let Some((b, ss, i)) = stack.last_mut() {
+            if let Some(&s) = ss.get(*i) {
+                *i += 1;
+                if !seen[s] {
+                    seen[s] = true;
+                    let next = succs(s);
+                    stack.push((s, next, 0));
+                }
+            } else {
+                post_num[*b] = order.len();
+                order.push(*b);
+                stack.pop();
             }
         }
+
+        let mut idom = vec![UNSEEN; n + 1];
+        idom[root] = root;
+        let intersect = |idom: &[usize], mut a: usize, mut b: usize| {
+            while a != b {
+                #[cfg(test)]
+                DOM_STEPS.with(|c| c.set(c.get() + 1));
+                while post_num[a] < post_num[b] {
+                    a = idom[a];
+                }
+                while post_num[b] < post_num[a] {
+                    b = idom[b];
+                }
+            }
+            a
+        };
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for &b in order.iter().rev() {
+                if b == root {
+                    continue;
+                }
+                let mut new = UNSEEN;
+                for p in preds_of(b) {
+                    #[cfg(test)]
+                    DOM_STEPS.with(|c| c.set(c.get() + 1));
+                    if idom[p] == UNSEEN {
+                        continue;
+                    }
+                    new = if new == UNSEEN { p } else { intersect(&idom, p, new) };
+                }
+                if idom[b] != new {
+                    idom[b] = new;
+                    changed = true;
+                }
+            }
+        }
+
+        // Preorder spans over the tree.
+        let mut children = vec![Vec::new(); n + 1];
+        for b in 0..n {
+            if idom[b] != UNSEEN {
+                children[idom[b]].push(b);
+            }
+        }
+        let mut span = vec![(0u32, 0u32); n + 1];
+        let mut clock = 0u32;
+        let mut stack = vec![(root, 0usize)];
+        span[root].0 = clock;
+        while let Some((b, i)) = stack.last_mut() {
+            if let Some(&c) = children[*b].get(*i) {
+                *i += 1;
+                clock += 1;
+                span[c].0 = clock;
+                stack.push((c, 0));
+            } else {
+                span[*b].1 = clock;
+                stack.pop();
+            }
+        }
+        span.truncate(n);
+        Dominators {
+            idom: (0..n)
+                .map(|b| (idom[b] != UNSEEN && idom[b] != root).then(|| BlockId(idom[b] as u32)))
+                .collect(),
+            span,
+            reached: (0..n).map(|b| idom[b] != UNSEEN).collect(),
+        }
     }
-    dom
+
+    /// Whether every path from a root to `b` passes through `d`; a block
+    /// dominates itself.
+    pub(super) fn dominates(&self, d: BlockId, b: BlockId) -> bool {
+        if !self.reached[b.index()] {
+            return true;
+        }
+        if !self.reached[d.index()] {
+            return false;
+        }
+        let (ds, de) = self.span[d.index()];
+        let (bs, be) = self.span[b.index()];
+        ds <= bs && be <= de
+    }
+
+    /// The closest block that dominates `b` other than `b` itself; `None`
+    /// for a root and for a block no root reaches.
+    pub(super) fn idom(&self, b: BlockId) -> Option<BlockId> {
+        self.idom[b.index()]
+    }
 }
 
 fn loop_body(preds: &[Vec<BlockId>], latch: BlockId, header: BlockId) -> HashSet<BlockId> {
@@ -1264,5 +1399,114 @@ bb3:
         f.verify().unwrap();
         assert_eq!(fadds(&f), 2);
         assert_eq!(in_loop(&f, |i| matches!(i, MirInst::Const { .. })), 0);
+    }
+
+    /// `n` diamonds in a row, each `if v0 { .. }` joining before the next:
+    /// the shape a run of `if x == k { s = s + "a"; }` lowers to (#1518).
+    fn join_chain(n: usize) -> String {
+        let mut text = String::from("func @f(v0: bool) -> i64 {\nbb0:\n    brif v0, bb1, bb2\n");
+        for i in 0..n {
+            let (arm, join) = (2 * i + 1, 2 * i + 2);
+            text.push_str(&format!("bb{arm}:\n    jump bb{join}\n"));
+            text.push_str(&format!("bb{join}:\n"));
+            if i + 1 < n {
+                text.push_str(&format!("    brif v0, bb{}, bb{}\n", join + 1, join + 2));
+            } else {
+                text.push_str("    v1 = iconst.i64 0\n    return v1\n");
+            }
+        }
+        text.push('}');
+        text
+    }
+
+    /// #1518: finding loops costs about linear work over a chain of joins.
+    /// Each block kept the set of every block that dominates it, so each
+    /// join's set held every join before it: a chain 8x longer took ~64x.
+    #[test]
+    fn natural_loops_about_linear_over_join_chain() {
+        let steps = |n: usize| {
+            let text = join_chain(n);
+            let f = crate::mir::parse_func(&text).expect(&text);
+            f.verify().unwrap();
+            DOM_STEPS.with(|c| c.set(0));
+            assert!(natural_loops(&f).is_empty());
+            DOM_STEPS.with(|c| c.get())
+        };
+        let small = steps(100);
+        let large = steps(800);
+        // Linear is ~8x.
+        assert!(large <= 24 * small.max(1), "800 joins stepped {large}, 100 stepped {small}");
+    }
+
+    /// The set-per-block fixpoint `Dominators` replaced: `dom[b]` holds
+    /// every block that dominates `b`.
+    fn dominator_sets(func: &MirFunc) -> Vec<HashSet<BlockId>> {
+        let preds = func.preds();
+        let n = func.blocks.len();
+        let all: HashSet<BlockId> = (0..n).map(|i| BlockId(i as u32)).collect();
+        let mut dom = vec![all; n];
+        dom[func.entry.index()] = HashSet::from([func.entry]);
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for b in &func.blocks {
+                if b.id == func.entry {
+                    continue;
+                }
+                let mut d: Option<HashSet<BlockId>> = None;
+                for p in &preds[b.id.index()] {
+                    let pd = &dom[p.index()];
+                    d = Some(match d {
+                        None => pd.clone(),
+                        Some(acc) => acc.intersection(pd).copied().collect(),
+                    });
+                }
+                let mut d = d.unwrap_or_default();
+                d.insert(b.id);
+                if d != dom[b.id.index()] {
+                    dom[b.id.index()] = d;
+                    changed = true;
+                }
+            }
+        }
+        dom
+    }
+
+    /// `Dominators` answers as the set fixpoint did, on loops, joins,
+    /// blocks nothing branches to, and a cycle nothing enters.
+    #[test]
+    fn dominators_match_set_fixpoint() {
+        let bodies = [
+            // A loop with a join inside and a second exit.
+            "bb0:\n    jump bb1\nbb1:\n    brif v0, bb2, bb5\nbb2:\n    brif v0, bb3, bb4\nbb3:\n    jump bb4\nbb4:\n    brif v0, bb1, bb5\nbb5:\n    v1 = iconst.i64 0\n    return v1",
+            // Nested loops sharing a latch path; the entry is branched to.
+            "bb0:\n    brif v0, bb1, bb4\nbb1:\n    brif v0, bb2, bb0\nbb2:\n    brif v0, bb1, bb3\nbb3:\n    jump bb1\nbb4:\n    v1 = iconst.i64 0\n    return v1",
+            // An irreducible pair, a block nothing branches to that feeds
+            // a join, and a cycle nothing enters.
+            "bb0:\n    brif v0, bb1, bb2\nbb1:\n    brif v0, bb2, bb3\nbb2:\n    brif v0, bb1, bb3\nbb3:\n    v1 = iconst.i64 0\n    return v1\nbb4:\n    jump bb3\nbb5:\n    jump bb6\nbb6:\n    brif v0, bb5, bb3\nbb7:\n    jump bb8\nbb8:\n    jump bb9\nbb9:\n    brif v0, bb8, bb4",
+        ];
+        for body in bodies.iter().map(|b| format!("func @f(v0: bool) -> i64 {{\n{b}\n}}")).chain([join_chain(5)]) {
+            let f = crate::mir::parse_func(&body).expect(&body);
+            let sets = dominator_sets(&f);
+            let dom = Dominators::new(&f, &f.preds());
+            let n = f.blocks.len();
+            for b in 0..n {
+                let b = BlockId(b as u32);
+                for d in 0..n {
+                    let d = BlockId(d as u32);
+                    assert_eq!(dom.dominates(d, b), sets[b.index()].contains(&d), "{d:?} dom {b:?} in\n{body}");
+                }
+                let reached = sets[b.index()].len() < n || n == 1;
+                if reached {
+                    // The closest strict dominator has the most dominators.
+                    let want = sets[b.index()]
+                        .iter()
+                        .copied()
+                        .filter(|d| *d != b)
+                        .max_by_key(|d| sets[d.index()].len());
+                    assert_eq!(dom.idom(b), want, "idom of {b:?} in\n{body}");
+                }
+            }
+        }
     }
 }

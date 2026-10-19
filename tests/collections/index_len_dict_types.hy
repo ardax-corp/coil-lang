@@ -20,7 +20,7 @@ fn head(Vec<int> arr) -> int {
 }
 
 fn size_of<T: Length>(T x) -> int {
-    return len(x);
+    return x.len();
 }
 
 test("constant and runtime indexes in bounds") {
@@ -38,11 +38,11 @@ test("a Vec index has no static bound") {
 }
 
 test("len is an int and typeof a string") {
-    assert!((typeof len([0, 1])) == "int");
-    assert!(len([0, 1]) == 2);
-    assert!((typeof len("foo")) == "int");
-    assert!((typeof len((1, 2, 3))) == "int");
-    assert!((typeof len({ a: 1, b: 2 })) == "int");
+    assert!((typeof [0, 1].len()) == "int");
+    assert!([0, 1].len() == 2);
+    assert!((typeof "foo".len()) == "int");
+    assert!((typeof (1, 2, 3).len()) == "int");
+    assert!((typeof ({ a: 1, b: 2 }).len()) == "int");
     assert!((typeof (typeof 1)) == "string");
     assert!((typeof (typeof "hi")) == "string");
     assert!((typeof (typeof (1, 2))) == "string");

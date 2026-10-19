@@ -27,7 +27,7 @@ fn rotate<T>(int n, T a, T b, T c) -> T {
 }
 
 fn pick_last<T>(Vec<T> xs, T a, T b) -> T {
-    if len(xs) > 2 {
+    if xs.len() > 2 {
         return a;
     }
     return b;

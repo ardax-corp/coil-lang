@@ -27,12 +27,12 @@ test("branching from a shared prefix keeps both strings") {
 
 test("loop growth past several buffers") {
     let s = grow("", 1000);
-    assert!(len(s) == 1000);
+    assert!(s.len() == 1000);
     let t = grow(s, 5);
-    assert!(len(t) == 1005);
-    assert!(len(s) == 1000);
+    assert!(t.len() == 1005);
+    assert!(s.len() == 1000);
     let u = s + "y";
-    assert!(len(u) == 1001);
+    assert!(u.len() == 1001);
     assert!(t != u);
 }
 
