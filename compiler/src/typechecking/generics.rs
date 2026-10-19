@@ -683,22 +683,6 @@ impl Generics {
             },
         );
         self.typeclasses.insert(
-            "String".into(),
-            TypeClassDef {
-                name: "String".into(),
-                defined_module: PRELUDE_MODULE.into(),
-                type_params: vec!["T".into()],
-                param_kinds: vec![Kind::Type],
-                superclasses: vec![],
-                assoc_types: vec![],
-                methods: vec![TypeClassMethodDef {
-                    name: "to_string".into(),
-                    has_default: false,
-                    is_static: false,
-                }],
-            },
-        );
-        self.typeclasses.insert(
             "Sensitive".into(),
             TypeClassDef {
                 name: "Sensitive".into(),
@@ -1336,7 +1320,6 @@ mod tests {
             "Default",
             "Hash",
             "Send",
-            "String",
             "Sensitive",
         ] {
             assert!(
@@ -1345,7 +1328,7 @@ mod tests {
             );
         }
         assert_eq!(g.typeclass("Default").unwrap().methods[0].name, "default");
-        assert_eq!(g.typeclass("String").unwrap().methods[0].name, "to_string");
+        assert!(g.typeclass("String").is_none(), "`String` was folded into `Show`");
         assert!(g.typeclass("Send").unwrap().methods.is_empty());
     }
 

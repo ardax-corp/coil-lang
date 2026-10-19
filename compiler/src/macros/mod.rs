@@ -53,7 +53,6 @@ pub const PRELUDE_DERIVES: &[&str] = &[
     "Ord",
     "Default",
     "Hash",
-    "String",
     "Send",
     "Sensitive",
 ];
