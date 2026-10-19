@@ -991,9 +991,6 @@ impl Cx<'_> {
     fn call(&self, w: &mut Walk<'_>, at: HirId, callee: &Callee, args: &[HirId]) {
         let body = &self.module.bodies[w.index];
         match callee {
-            // The host table keeps `len` unknown for any receiver; a
-            // length read has no effect.
-            Callee::Named { name, .. } if name == "len" && args.len() == 1 => {}
             Callee::Named { name, def, .. } => {
                 let mut s = self.named(w, name, *def);
                 let callee = self.local_body(name, *def);
@@ -1005,8 +1002,12 @@ impl Cx<'_> {
             Callee::Method { name } => {
                 let Some(&recv) = args.first() else { return };
                 let recv_ty = body.expr(recv).ty.as_ref();
+                // The structural length read has no effect.
+                if name == "len" && args.len() == 1 && recv_ty.is_some_and(Checker::is_structural_len_ty_for_codegen) {
+                    return;
+                }
                 if is_vec(recv_ty) {
-                    if matches!(name.as_str(), "len" | "capacity") {
+                    if name == "capacity" {
                         return;
                     }
                     if VEC_MUTATORS.contains(&name.as_str()) {

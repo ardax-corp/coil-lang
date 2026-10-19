@@ -3,7 +3,7 @@
 //! A free `fn f(…, ... xs)` whose rest parameter has no type is a template:
 //! each call packs its own trailing arguments into a tuple, and the body is
 //! checked and compiled once per distinct pack type, as an instance with the
-//! pack fixed (`xs[0]`, `len(xs)` and `xs[i]` then type like on any tuple).
+//! pack fixed (`xs[0]`, `xs.len()` and `xs[i]` then type like on any tuple).
 //!
 //! The template's own body is never checked. A call whose pack has no
 //! instance yet asks for one ([`VariadicState::pending`]); the module is then

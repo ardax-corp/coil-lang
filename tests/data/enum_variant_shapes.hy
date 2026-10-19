@@ -14,7 +14,7 @@ fn area(Shape s) -> int {
         Shape::Dot => 0,
         Shape::Circle(r) => 3 * r * r,
         Shape::Rect(w, h) => w * h,
-        Shape::Named { label, size } => len(label) + size,
+        Shape::Named { label, size } => label.len() + size,
     };
 }
 

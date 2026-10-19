@@ -5,7 +5,7 @@ use tests::assert;
 fn digits(string s) -> int {
     let n = 0;
     let i = 0;
-    while i < len(s) {
+    while i < s.len() {
         let c = s[i] as int;
         if c >= 48 && c <= 57 {
             n = n * 10 + (c - 48);
@@ -16,7 +16,7 @@ fn digits(string s) -> int {
 }
 
 fn last(string s) -> int {
-    return s[len(s) - 1] as int;
+    return s[s.len() - 1] as int;
 }
 
 test("string bytes by index") {

@@ -19,13 +19,13 @@ test("empty string is the identity") {
     assert!("" + s == s);
     assert!("" + "" == "");
     let both = "" + "";
-    assert!(len(both) == 0);
+    assert!(both.len() == 0);
 }
 
 test("plus-assign accumulates in a loop") {
     assert!(repeat("ab", 3) == "ababab");
     assert!(repeat("x", 0) == "");
-    assert!(len(repeat("é", 4)) == 8);
+    assert!(repeat("é", 4).len() == 8);
 }
 
 test("concatenation is associative and not commutative") {

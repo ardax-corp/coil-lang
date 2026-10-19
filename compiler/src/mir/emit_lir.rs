@@ -14,7 +14,7 @@ use crate::il::{IlJumpKind, IlOp, Label};
 
 use super::emit::{
     coalesce_latch_overwrite, emit_cond_jumps, foreign_targets, il_for_alloc, is_fallthrough,
-    max_label_hint, paired_alloc_dest, restore_block_op_locs, take_label,
+    max_label_hint, restore_block_op_locs, take_label,
 };
 use super::emit_common::{
     const_i16, is_jim_term_payload, last_arm_payloads, phi_moves, push_const, stack_bin_op,
@@ -51,6 +51,40 @@ pub fn emit_lir_with_aliases(
     pool: &mut Vec<u64>,
     across_alloc: bool,
 ) -> Result<Vec<IlOp>, LowerError> {
+    emit_lir_framed(func, entry_label, aliases, pool, across_alloc).map(|(out, _)| out)
+}
+
+/// The frame LIR emission gave a body: what its sidecars and its cleanup
+/// pad read, without planning the body again (#1502).
+pub(super) struct LirFrame {
+    regs: Vec<u8>,
+    need_slot: Vec<bool>,
+    /// `(home 0's word, frame words)` ([`lir_home_frame`]).
+    home_frame: (u8, u32),
+}
+
+impl LirFrame {
+    /// [`lir_sidecars`] of the body this frame is of.
+    pub(super) fn sidecars(&self, func: &MirFunc) -> LirSidecars {
+        (
+            super::deopt::debug_slot_remap(func, &self.regs, &self.need_slot),
+            super::deopt::encode_draft(func, &self.regs, &self.need_slot),
+        )
+    }
+
+    pub(super) fn home_frame(&self) -> (u8, u32) {
+        self.home_frame
+    }
+}
+
+/// [`emit_lir_with_aliases`], with the frame it gave the body.
+pub(super) fn emit_lir_framed(
+    func: &MirFunc,
+    entry_label: Option<Label>,
+    aliases: &[Label],
+    pool: &mut Vec<u64>,
+    across_alloc: bool,
+) -> Result<(Vec<IlOp>, LirFrame), LowerError> {
     if func.has_mapped_gc_edge() && !across_alloc {
         return Err(LowerError::Refused(
             "MIR→LIR refuses Alloc/GcBarrier without GC maps (S2c)".into(),
@@ -61,9 +95,10 @@ pub fn emit_lir_with_aliases(
     plan.home_base = home_base(func, scratch)?;
     let plan = plan;
     let regs = coalesce_latch_overwrite(func, regs, &plan.need_slot);
-    let cleared = super::emit::cleared_words(func, &regs, &plan.need_slot);
-    let entry_clears = super::emit::entry_clears(func, &regs, &plan.need_slot);
-    let source_clears = super::emit::source_clears(func, &regs, &plan.need_slot);
+    let mut cleared = super::emit::cleared_words(func, &regs, &plan.need_slot);
+    let mut entry_clears = super::emit::entry_clears(func, &regs, &plan.need_slot);
+    let mut source_clears = super::emit::source_clears(func, &regs, &plan.need_slot);
+    super::emit::prune_clears(func, &regs, &plan.need_slot, &mut cleared, &mut entry_clears, &mut source_clears);
     let max_reg = plan
         .need_slot
         .iter()
@@ -181,10 +216,12 @@ pub fn emit_lir_with_aliases(
             reserved: &reserved,
             pool,
             loc: term_loc,
-            clears: entry_clears.get(&block.id).map(Vec::as_slice).unwrap_or(&[]),
+            clears: &entry_clears,
         })?;
     }
-    Ok(out)
+    let home_frame = (plan.home_base, (u32::from(max_reg) + 1).max(plan.home_slot(0) + func.homes.len() as u32));
+    let EmitPlan { need_slot, .. } = plan;
+    Ok((out, LirFrame { regs, need_slot, home_frame }))
 }
 
 pub(super) type LirSidecars = (std::collections::HashMap<u32, u32>, super::deopt::DraftDeoptMap);
@@ -202,7 +239,9 @@ pub(super) fn lir_sidecars(func: &MirFunc) -> LirSidecars {
 }
 
 /// The frame `func`'s LIR keeps its homes past: `(home 0's word, frame
-/// words)`, `None` when emission would refuse it.
+/// words)`, `None` when emission would refuse it. Emission answers it too
+/// ([`LirFrame::home_frame`]).
+#[cfg(test)]
 pub(super) fn lir_home_frame(func: &MirFunc) -> Option<(u8, u32)> {
     let mut plan = EmitPlan::new(func);
     let (regs, scratch) = assign_needed(func, &mut plan).ok()?;
@@ -227,6 +266,8 @@ struct EmitPlan {
     /// block's `JumpIfMatch` instead of a store and reload
     /// ([`stack_scrutinees`]).
     stack_scrutinee: Vec<bool>,
+    /// Each barrier's paired allocation ([`super::emit::paired_alloc_dests`]).
+    paired: HashMap<ValueId, ValueId>,
 }
 
 impl EmitPlan {
@@ -282,6 +323,7 @@ impl EmitPlan {
         }
         let cmp_dests = super::emit::term_cmp_dests(func);
         let fused = fused_cmp_dests(func, &cmp_dests);
+        let paired = super::emit::paired_alloc_dests(func);
         let mut tree = vec![false; n];
         let mut changed = true;
         while changed {
@@ -331,7 +373,7 @@ impl EmitPlan {
                     // slot and its own instruction runs where it stands
                     // (a dead `codes.push(x)` result, #1381).
                     let paired = match inst {
-                        MirInst::GcBarrier { dest, .. } => Some(super::emit::paired_alloc_dest(func, *dest)),
+                        MirInst::GcBarrier { dest, .. } => Some(paired.get(dest).copied()),
                         _ => None,
                     };
                     // Operands of stored bins can still be tree (i % 10 → BinSlotImm).
@@ -434,6 +476,7 @@ impl EmitPlan {
             preds,
             home_base: 0,
             stack_scrutinee,
+            paired,
         }
     }
 
@@ -581,6 +624,8 @@ fn keep_memory_order(func: &MirFunc, tree: &mut [bool], fused: &[bool]) {
     for block in &func.blocks {
         let insts = &block.insts;
         let at: HashMap<ValueId, usize> = insts.iter().enumerate().map(|(k, i)| (i.dest(), k)).collect();
+        // Each clear's zeroed values, once walked.
+        let mut walked: HashMap<usize, Vec<ValueId>> = HashMap::new();
         loop {
             let inline = |v: ValueId, tree: &[bool]| tree[v.index()] || fused[v.index()];
             // Instruction indices in the order emission reaches them.
@@ -615,12 +660,25 @@ fn keep_memory_order(func: &MirFunc, tree: &mut [bool], fused: &[bool]) {
             // it (`let j = join(s); clear s; return j` would read the
             // zeroed slot): that user keeps its slot. The same holds for
             // the slots of the value's copy sources (`emit::source_clears`).
+            // Only a clear with an earlier op emitted after it walks its
+            // value's sources: a chain of joins walked each clear's back to
+            // its start (#1502).
+            let mut later_min = vec![usize::MAX; order.len() + 1];
+            for i in (0..order.len()).rev() {
+                later_min[i] = later_min[i + 1].min(order[i]);
+            }
             let stale = order.iter().enumerate().find_map(|(i, &c)| {
                 let MirInst::ClearWord { value, .. } = &insts[c] else {
                     return None;
                 };
-                let mut zeroed = sources.of(func, *value, |_| false);
-                zeroed.push(*value);
+                if later_min[i + 1] >= c {
+                    return None;
+                }
+                let zeroed = walked.entry(c).or_insert_with(|| {
+                    let mut zeroed = sources.of(func, *value, |_| false);
+                    zeroed.push(*value);
+                    zeroed
+                });
                 order[i + 1..]
                     .iter()
                     .find(|&&k| k < c && insts[k].operands().iter().any(|o| zeroed.contains(o)))
@@ -1456,7 +1514,7 @@ fn emit_stored(
             }
         }
         MirInst::GcBarrier { dest, .. } => {
-            if let Some(obj) = paired_alloc_dest(func, *dest) {
+            if let Some(&obj) = plan.paired.get(dest) {
                 emit_stack(out, obj, func, plan, regs, pool, loc)?;
                 out.push(IlOp::StorePop {
                     slot: u32::from(regs[dest.index()]),
@@ -2093,7 +2151,7 @@ fn emit_stack(
             })
         }
         MirInst::GcBarrier { dest, .. } => {
-            if let Some(obj) = paired_alloc_dest(func, *dest) {
+            if let Some(&obj) = plan.paired.get(dest) {
                 emit_stack(out, obj, func, plan, regs, pool, loc)
             } else if plan.need_slot[dest.index()] {
                 out.push(IlOp::Load {
@@ -2201,8 +2259,8 @@ struct EmitTermArgs<'args> {
     reserved: &'args std::collections::HashSet<u32>,
     pool: &'args mut Vec<u64>,
     loc: DebugLoc,
-    /// Registers zeroed after a `Jump`'s φ copies (`emit::entry_clears`).
-    clears: &'args [u8],
+    /// Registers zeroed after an edge's φ copies (`emit::entry_clears`).
+    clears: &'args HashMap<(BlockId, BlockId), Vec<u8>>,
 }
 
 /// The call `block` ends with when it is a tail call: its result is what
@@ -2235,10 +2293,11 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
     let Some(term) = &block.term else {
         return Err(LowerError::Refused("missing terminator".into()));
     };
+    let clears = |to: BlockId| clears.get(&(block.id, to)).map(Vec::as_slice).unwrap_or(&[]);
     match term {
         Terminator::Jump { dest } => {
             emit_phi_moves(out, func, block.id, *dest, regs, scratch, loc);
-            for &r in clears {
+            for &r in clears(*dest) {
                 super::emit::push_clear_word(out, r);
             }
             if !is_fallthrough(func, block.id, *dest) {
@@ -2267,9 +2326,11 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
                 pool,
                 loc,
             })?;
-            if t_moves.is_empty() && f_moves.is_empty() {
+            let (t_clears, f_clears) = (clears(*taken), clears(*not_taken));
+            let (t_edge, f_edge) = (!t_moves.is_empty() || !t_clears.is_empty(), !f_moves.is_empty() || !f_clears.is_empty());
+            if !t_edge && !f_edge {
                 emit_cond_jumps(out, func, block.id, *taken, *not_taken, block_lab, loc);
-            } else if f_moves.is_empty() {
+            } else if !f_edge {
                 // Only the taken edge moves: branch straight to `not_taken`.
                 out.push(IlOp::Jump {
                     kind: IlJumpKind::JumpIfFalse,
@@ -2279,6 +2340,9 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
                 });
                 for (d, s) in t_moves {
                     push_move(out, d, s, loc);
+                }
+                for &r in t_clears {
+                    super::emit::push_clear_word(out, r);
                 }
                 if !is_fallthrough(func, block.id, *taken) {
                     out.push(IlOp::Jump {
@@ -2303,6 +2367,9 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
                 for (d, s) in t_moves {
                     push_move(out, d, s, loc);
                 }
+                for &r in t_clears {
+                    super::emit::push_clear_word(out, r);
+                }
                 out.push(IlOp::Jump {
                     kind: IlJumpKind::Unconditional,
                     target: block_lab[taken.index()],
@@ -2312,6 +2379,9 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
                 out.push(IlOp::Label(f_lab));
                 for (d, s) in f_moves {
                     push_move(out, d, s, loc);
+                }
+                for &r in f_clears {
+                    super::emit::push_clear_word(out, r);
                 }
                 if !is_fallthrough(func, block.id, *not_taken) {
                     out.push(IlOp::Jump {

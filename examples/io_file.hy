@@ -22,7 +22,7 @@ fn read_len(string path) {
     let s = open(path, "r")?;
     let buf = read_to_end(s)?;
     close(s)?;
-    return len(buf);
+    return buf.len();
 }
 
 fn run(string path, Vec<byte> data) {

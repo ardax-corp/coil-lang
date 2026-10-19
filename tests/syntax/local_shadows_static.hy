@@ -27,7 +27,7 @@ fn fill(Vec<int> xs) -> int {
     xs.push(1);
     xs.push(2);
     xs[0] = 9;
-    return len(xs) + xs[0];
+    return xs.len() + xs[0];
 }
 
 fn get() -> int {
@@ -48,7 +48,7 @@ test("parameter reads and writes") {
 test("collection parameter") {
     let v: Vec<int> = Vec::new();
     assert!(fill(v) == 11);
-    assert!(len(xs) == 0);
+    assert!(xs.len() == 0);
 }
 
 test("let, match, and loop bindings") {

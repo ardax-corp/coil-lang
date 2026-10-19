@@ -24,7 +24,7 @@ test("lambda sees a static's later value") {
 }
 
 test("lambda reads a string static") {
-    let h = fn () => len(NAME);
+    let h = fn () => NAME.len();
     assert!(h() == 4);
 }
 

@@ -12,7 +12,7 @@ test("call index runs after the value") {
     let a = Vec::from([0, 0, 0]);
     a[step(log, 2, 2)] = step(log, 1, 7);
     assert!(a[2] == 7);
-    assert!(len(log) == 2);
+    assert!(log.len() == 2);
     assert!(log[0] == 1);
     assert!(log[1] == 2);
 }

@@ -24,8 +24,8 @@ test("suffix views read the right bytes") {
     let s = long_text() + "END";
     let rest = s;
     let n = 0;
-    while len(rest) > 3 {
-        rest = cut(rest, 2, len(rest));
+    while rest.len() > 3 {
+        rest = cut(rest, 2, rest.len());
         n = n + 1;
     }
     assert!(n == 200);
@@ -37,7 +37,7 @@ test("a view compares by content") {
     let v = cut(s, 100, 400);
     let copy = long_text();
     assert!(v == cut(copy, 100, 400));
-    assert!(len(v) == 300);
+    assert!(v.len() == 300);
 }
 
 test("appending to a view leaves the source alone") {
@@ -46,9 +46,9 @@ test("appending to a view leaves the source alone") {
     let grown = tail + "!";
     let head = cut(s, 0, 100);
     let other = head + "?";
-    assert!(len(s) == 400);
+    assert!(s.len() == 400);
     assert!(byte_at(s, 399) == 98);
-    assert!(len(grown) == 101);
+    assert!(grown.len() == 101);
     assert!(byte_at(grown, 100) == 33);
     assert!(byte_at(other, 100) == 63);
     assert!(cut(s, 100, 101) == "a");
@@ -62,5 +62,5 @@ test("views keep UTF-8 boundaries") {
         i = i + 1;
     }
     assert!(cut(s, 1, 150) == "<err>");
-    assert!(len(cut(s, 2, 200)) == 198);
+    assert!(cut(s, 2, 200).len() == 198);
 }

@@ -42,7 +42,7 @@ test("homogeneous dict yields name and value") {
     let names = 0;
     for e in d {
         total = total + e[1];
-        names = names + len(e[0]);
+        names = names + e[0].len();
     }
     assert!(total == 6);
     assert!(names == 3);

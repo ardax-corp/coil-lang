@@ -9,14 +9,14 @@ fn same(string a, string b) -> bool {
 test("string as bytes") {
     let s = "hey";
     let b = to_bytes(s);
-    assert!(len(b) == 3);
+    assert!(b.len() == 3);
     assert!((b[0] as int) == 104);
     assert!(b == to_bytes("hey"));
 }
 
 test("literal as Vec<byte>") {
     let b = "a\n" as Vec<byte>;
-    assert!(len(b) == 2);
+    assert!(b.len() == 2);
     assert!((b[1] as int) == 10);
 }
 

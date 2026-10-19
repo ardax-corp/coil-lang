@@ -1,6 +1,7 @@
-// `block_on(h)` resumes `h` until it is done and gives its last resumed
-// word: direct MIR lowers the loop as HIR emission does, for int, string
-// and float results and a body that yields first.
+// `task::block_on(h)` resumes `h` until it is done and gives its last
+// resumed word, for int, string and float results and a body that yields
+// first.
+use task::block_on;
 use tests::assert;
 
 gen fn three() -> int {

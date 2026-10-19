@@ -30,9 +30,9 @@ fn clamp_twice(int x) -> int
 }
 
 fn last(Vec<int> v) -> int
-    requires len(v) > 0
+    requires v.len() > 0
 {
-    return v[len(v) - 1];
+    return v[v.len() - 1];
 }
 
 fn push_then_last(Vec<int> v, int x) -> int {

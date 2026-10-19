@@ -22,7 +22,7 @@ class Hello {
 
 impl Handler for Hello {
     fn handle(Hello self, Req req, int extra) -> Resp {
-        return new Resp(self.base + len(req.path) * req.weight + extra);
+        return new Resp(self.base + req.path.len() * req.weight + extra);
     }
 }
 

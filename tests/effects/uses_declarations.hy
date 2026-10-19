@@ -54,7 +54,7 @@ trait Measure<T> {
 
 impl Measure for string {
     fn measure(string s) -> int {
-        return len(s);
+        return s.len();
     }
 }
 
@@ -85,7 +85,7 @@ test("functions run under their declarations") {
     assert!(c.v == 7);
     let xs: Vec<int> = Vec::new();
     fill(xs, 3);
-    assert!(len(xs) == 3);
+    assert!(xs.len() == 3);
     assert!(generous(1) == 2);
     assert!(longer("abc", "de") == 3);
     emit_all("");

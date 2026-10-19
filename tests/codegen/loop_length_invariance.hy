@@ -1,5 +1,5 @@
 // Loop length proofs across impure calls: a callee that only writes fields or
-// elements keeps `len(v)` invariant; one that pushes must not.
+// elements keeps `v.len()` invariant; one that pushes must not.
 use tests::assert;
 
 class Tally {
@@ -32,14 +32,14 @@ fn poke(Vec<int> v, int i) -> int {
 }
 
 fn grow(Vec<int> v) -> int {
-    if len(v) < 10 {
-        v.push(len(v));
+    if v.len() < 10 {
+        v.push(v.len());
     }
     return 0;
 }
 
 fn shrink(Vec<int> v) -> int {
-    if len(v) > 2 {
+    if v.len() > 2 {
         v.pop();
     }
     return 0;
@@ -50,7 +50,7 @@ test("field-writing callee keeps the scan") {
     let t = tally();
     let s = 0;
     let i = 0;
-    while i < len(v) {
+    while i < v.len() {
         s = s + count(t, v[i]);
         i = i + 1;
     }
@@ -61,7 +61,7 @@ test("field-writing callee keeps the scan") {
 test("element-writing callee keeps the scan") {
     let v = seq(1, 3);
     let i = 0;
-    while i < len(v) {
+    while i < v.len() {
         poke(v, i);
         i = i + 1;
     }
@@ -72,19 +72,19 @@ test("element-writing callee keeps the scan") {
 test("pushing callee is seen by the loop bound") {
     let v = seq(0, 1);
     let i = 0;
-    while i < len(v) {
+    while i < v.len() {
         grow(v);
         i = i + 1;
     }
     assert!(i == 10);
-    assert!(len(v) == 10);
+    assert!(v.len() == 10);
 }
 
 test("popping callee is seen by the loop bound") {
     let v = seq(5, 5);
     let s = 0;
     let i = 0;
-    while i < len(v) {
+    while i < v.len() {
         s = s + v[i];
         shrink(v);
         i = i + 1;

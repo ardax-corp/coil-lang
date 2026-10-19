@@ -4,7 +4,7 @@
 // derived instance applies to `Box<X>` whenever `X` has the trait.
 use tests::assert;
 
-#[derive(Show, Eq, Ord, Hash, String, Default)]
+#[derive(Show, Eq, Ord, Hash, Default)]
 class Box<T> {
     pub item: T,
 }
@@ -30,9 +30,9 @@ fn same<T: Eq>(T a, T b) -> bool {
     return a == b;
 }
 
-test("Show / String") {
+test("Show") {
     assert!(new Box(3).show() == "Box { item: 3 }");
-    assert!(new Box("s").to_string() == "Box { item: s }");
+    assert!(new Box("s").show() == "Box { item: s }");
     assert!(new Box(new Box(1)).show() == "Box { item: Box { item: 1 } }");
     assert!(new Pair(1, "x").show() == "Pair { a: 1, b: x }");
 }

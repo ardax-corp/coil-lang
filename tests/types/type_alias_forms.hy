@@ -42,7 +42,7 @@ test("nested and generic aliases") {
     assert!(g[1][0] == 3);
     let b: Bytes = Vec::new();
     b.push(7);
-    assert!(len(b) == 1);
+    assert!(b.len() == 1);
 }
 
 test("inner block shadows an alias") {

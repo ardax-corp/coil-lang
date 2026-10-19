@@ -25,7 +25,7 @@ fn static_len_ignores_later_test_shadowing_same_name() {
 static let want: int = 4;
 test("len of literal") {
     let a = [1, 2, 3, 4];
-    if len(a) != want { raise "bad len"; }
+    if a.len() != want { raise "bad len"; }
 }
 test("nested array index") {
     let a = [[1, 2], [3, 4]];
@@ -36,26 +36,26 @@ test("nested array index") {
     let f0 = c.get_function("__zs_test_0").expect("__zs_test_0");
     let f1 = c.get_function("__zs_test_1").expect("__zs_test_1");
     let body = &bc[f0..f1];
-    // `a`'s stores are dead and `len(a)` const-folds to CONST 4 without
+    // `a`'s stores are dead and `a.len()` const-folds to CONST 4 without
     // boxing `a`. A later test reuses name `a` with outer length 2 — that
     // must not poison this fold.
     assert!(
         !body
             .iter()
             .any(|b| matches!(*b.bytecode(), Instruction::MakeArray)),
-        "len(a) of a stack array must not box it"
+        "a.len() of a stack array must not box it"
     );
     let folded = body
         .iter()
         .find(|b| matches!(*b.bytecode(), Instruction::CONST))
-        .expect("len(a) folds to a constant");
+        .expect("a.len() folds to a constant");
     assert_eq!(
         folded.operand_u32(),
         4,
-        "len(a) must const-fold to 4, not to the later nested outer len"
+        "a.len() must const-fold to 4, not to the later nested outer len"
     );
     assert!(
         !body.iter().any(|b| matches!(*b.bytecode(), Instruction::ArrayLen)),
-        "len(a) of a stack array must not read a length at run time"
+        "a.len() of a stack array must not read a length at run time"
     );
 }

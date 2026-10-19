@@ -4,7 +4,7 @@ use io::{stdout, write};
 use string::{format, to_bytes};
 
 fn f(int a, int... xs) -> int {
-    return a + len(xs);
+    return a + xs.len();
 }
 
 fn main() {

@@ -30,7 +30,7 @@ test("operators as arguments") {
     assert!(pick(7, c == new Cell(42)) == 7);
     assert!(pick(7, c == new Cell(1)) == 0);
     assert!(format("%z,%z", Color::Red == Color::Red, Color::Red == Color::Blue) == "true,false");
-    assert!(len(to_bytes(format("%z", c == new Cell(42)))) == 4);
+    assert!(to_bytes(format("%z", c == new Cell(42))).len() == 4);
     assert!(both(new Cell(1), new Cell(1), new Cell(2), new Cell(2)));
     assert!(!both(new Cell(1), new Cell(1), new Cell(2), new Cell(3)));
 }

@@ -122,7 +122,7 @@ fn stored() -> string {
     if h.b == Result::Ok(()) {
         both = both + 1;
     }
-    return format("%i %i %i %i", ok, len(vu) - ok, okt, both);
+    return format("%i %i %i %i", ok, vu.len() - ok, okt, both);
 }
 
 fn generic() -> string {

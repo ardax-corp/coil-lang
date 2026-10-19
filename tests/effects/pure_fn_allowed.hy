@@ -71,7 +71,7 @@ fn outcome(unit -> int body) -> string {
 
 test("building and changing its own objects") {
     let v = squares(4);
-    assert!(len(v) == 4);
+    assert!(v.len() == 4);
     assert!(v[3] == 9);
     let p = new Pt(1, 2);
     let q = moved(p, 5);

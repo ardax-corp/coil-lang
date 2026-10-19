@@ -93,7 +93,7 @@ fn local_port(Stream s) -> Result<int, IoError> {}
 ///
 /// Returns `(n, host, port)`: the number of bytes written to `buf[0..n]`
 /// and the sender's IP address (IPv6 without brackets) and port. A
-/// datagram longer than `len(buf)` is cut to fit; the rest is lost.
+/// datagram longer than `buf.len()` is cut to fit; the rest is lost.
 /// Returns `Err(IoError::WouldBlock)` when no datagram is waiting; then
 /// call `wait_readable(s)` and retry, or use `io::sync::recv_from_wait`.
 /// An empty `buf` returns `(0, "", 0)` at once.

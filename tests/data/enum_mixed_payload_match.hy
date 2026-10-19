@@ -9,7 +9,7 @@ enum Pair {
 
 fn describe(Pair p) -> int {
     return match p {
-        Pair::Both(n, s) => n + len(s),
+        Pair::Both(n, s) => n + s.len(),
     };
 }
 

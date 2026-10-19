@@ -6,7 +6,7 @@ use tests::assert;
 fn sum_arr(Vec<int> xs) -> int {
     let total = 0;
     let i = 0;
-    while i < len(xs) {
+    while i < xs.len() {
         total = total + xs[i];
         i = i + 1;
     }
@@ -41,7 +41,7 @@ fn heap_arr(int a) -> Vec<int> {
 fn nested(int a) -> int {
     let t = make_tuple(a);
     let xs = heap_arr(a);
-    return t[0] + t[2] + xs[1] + len(xs);
+    return t[0] + t[2] + xs[1] + xs.len();
 }
 
 fn staged(Vec<int> xs, int a) -> int {
@@ -65,7 +65,7 @@ fn total(Vec<int> v) -> int {
         s = s + v[i];
         i = i + 1;
     }
-    return s + len(v);
+    return s + v.len();
 }
 
 fn vec_ops(int n) -> int {

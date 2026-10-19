@@ -15,7 +15,7 @@ impl Size for int {
 
 impl Size for string {
     fn size(string self) -> int {
-        return len(self);
+        return self.len();
     }
 }
 
@@ -35,7 +35,7 @@ impl Total for Duo<T: Size> {
         while i < 3 {
             // Allocates: the context dictionary stays live across it.
             let label = "#" + i.show();
-            n += d.a.size() + d.b.size() + len(label);
+            n += d.a.size() + d.b.size() + label.len();
             i += 1;
         }
         return n;

@@ -17,7 +17,7 @@ fn sum_i(int n) -> int {
 fn sum_from(Vec<int> v, int start) -> int {
     let s = 0;
     let i = start;
-    while i < len(v) {
+    while i < v.len() {
         s = s + v[i];
         i = i + 1;
     }
@@ -27,7 +27,7 @@ fn sum_from(Vec<int> v, int start) -> int {
 fn sum_next(Vec<int> v) -> int {
     let s = 0;
     let i = 0;
-    while i < len(v) - 1 {
+    while i < v.len() - 1 {
         s = s + v[i + 1];
         i = i + 1;
     }

@@ -2164,10 +2164,10 @@ fn builtin_description(module: &str, name: &str, export: &BuiltinExport) -> Stri
         ("io", "await_writable") => "Old name of `wait_writable`.".into(),
         ("io", "drive") => "Polls async IO waiters once; returns newly-ready count.".into(),
         ("io", "wait_ready") => "Blocks until any registered async IO waiter is ready; returns newly-ready count.".into(),
-        ("io", "from_bytes") | ("string", "from_bytes") => {
+        ("string", "from_bytes") => {
             "Decodes UTF-8 bytes into a string.".into()
         }
-        ("io", "to_bytes") | ("string", "to_bytes") => {
+        ("string", "to_bytes") => {
             "Encodes a string as UTF-8 bytes.".into()
         }
         ("string", "format") => {
@@ -2201,9 +2201,6 @@ fn builtin_description(module: &str, name: &str, export: &BuiltinExport) -> Stri
         ("prelude::math", "log10") => "Base-10 logarithm of a float.".into(),
         ("prelude::math", "log2") => "Base-2 logarithm of a float.".into(),
         ("prelude::math", "cbrt") => "Cube root of a float.".into(),
-        ("prelude::math", "rem") => {
-            "Float remainder (`f64::rem` / C `fmod`); sign follows the dividend.".into()
-        }
         ("prelude::math", "sinh") => "Hyperbolic sine of a float.".into(),
         ("prelude::math", "cosh") => "Hyperbolic cosine of a float.".into(),
         ("prelude::math", "tanh") => "Hyperbolic tangent of a float.".into(),
@@ -4102,7 +4099,7 @@ fn is_valid_identifier(name: &str) -> bool {
 fn coil_keywords() -> &'static [&'static str] {
     &[
         "fn", "let", "const", "class", "enum", "type", "if", "else", "for", "while", "in",
-        "match", "return", "true", "false", "use", "mod", "pub", "static", "async", "defer",
+        "match", "return", "true", "false", "use", "mod", "pub", "static", "defer",
         "raise", "panic", "yield", "break", "continue", "where", "impl", "trait", "extern", "as",
         "readonly", "new", "default", "typeof", "resume", "with", "done", "attr", "struct",
         "test", "forall", "from",
@@ -4647,7 +4644,6 @@ mod tests {
         for name in ["int", "float", "bool", "byte", "string", "unit"] {
             check(name.to_owned(), docs.primitive(name));
         }
-        check("prelude::len".into(), docs.item("prelude", "len"));
         for word in coil_keywords().iter().chain(highlight_keywords()) {
             if docs.keyword(word).is_none_or(str::is_empty) {
                 missing.push(format!("keyword `{word}`"));
@@ -5331,7 +5327,7 @@ fn main() { return; }
 
     #[test]
     fn semantic_tokens_mark_yield_from_keyword_but_not_bare_from() {
-        let with_yield = "async fn f() { yield from inner(); }\n";
+        let with_yield = "gen fn f() { yield from inner(); }\n";
         let bare = "fn main() { let x = from; return; }\n";
         let yield_tokens = semantic_tokens(with_yield, None, None);
         let bare_tokens = semantic_tokens(bare, None, None);

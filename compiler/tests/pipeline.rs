@@ -3985,7 +3985,7 @@ fn keep([int; 3] xs) -> [int; 3] {
     let junk = [1, 2, 3];
     collect();
     let r = xs;
-    if len(xs) > 5 {
+    if xs.len() > 5 {
         r = junk;
     }
     return r;

@@ -31,7 +31,7 @@
   `fmt::Buf` are amortized linear. Typed `+` lowers to `FORMAT "%s%s"`, so
   `FORMAT` with a leading `%s` takes the same path.
 - `slice_bytes` of 64 bytes or more is a view `[start, start + len)` into a
-  `Shared` buffer instead of a copy, so `rest = slice(rest, i, len(rest))`
+  `Shared` buffer instead of a copy, so `rest = slice(rest, i, rest.len())`
   loops are linear. A view may pin at most 8x its own length; a shorter or
   far smaller slice is copied (into an exact-size shared buffer, so slices
   of it are views). Views are charged no buffer bytes: the strings that grew
@@ -50,16 +50,16 @@ let s = format("%s-%i", name, n);
 ```
 
 - `string::format` is a compiler intrinsic (same rules as old `format` / `print` specs).
-- `io::{from_bytes,to_bytes}` remain aliases of the string natives for one cycle.
+- The `io::{from_bytes,to_bytes}` aliases of the string natives were removed; `use io::{from_bytes}` is an error naming `string::`.
 - Byte-offset helpers read the string in place (HostInvoke **139–143**,
   archive minor 31; `machine/src/str_bytes.rs`). Offsets are bytes, as
-  `len(s)` is.
+  `s.len()` is.
 
   | Function | Result |
   |---|---|
   | `byte_at(s, i) -> int` | Byte at `i`, or `-1` out of range |
   | `s[i] -> byte` | Byte at `i`; panics out of range (lowers to `byte_at`) |
-  | `slice_bytes(s, start, end) -> Result<string, IoError>` | Offsets clamp to `[0, len(s)]`; `Err` inside a UTF-8 sequence |
+  | `slice_bytes(s, start, end) -> Result<string, IoError>` | Offsets clamp to `[0, s.len()]`; `Err` inside a UTF-8 sequence |
   | `find_from(hay, needle, start) -> int` | First offset `>= start`, or `-1` |
   | `rfind(hay, needle) -> int` | Last offset, or `-1` |
   | `match_at(s, needle, at) -> bool` | `needle` occurs at `at` |

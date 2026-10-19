@@ -6,7 +6,7 @@ use io::sync::write_all;
 use string::{format, to_bytes};
 
 fn fill_ones(Vec<int> flags) -> int {
-    let n = len(flags);
+    let n = flags.len();
     let i = 0;
     while i < n {
         flags[i] = 1;

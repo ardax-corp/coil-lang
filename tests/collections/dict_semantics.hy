@@ -41,7 +41,7 @@ test("show sorts fields") {
 
 test("len and iteration") {
     let d = { a: 1, b: 2, c: 3 };
-    assert!(len(d) == 3);
+    assert!(d.len() == 3);
     let sum = 0;
     let weighted = 0;
     for (k, v) in d {

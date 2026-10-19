@@ -86,7 +86,7 @@ fn pick(Result<Node, string> r) -> int {
             return n.v;
         },
         Result::Err(e) => {
-            return -len(e);
+            return -e.len();
         },
     }
 }

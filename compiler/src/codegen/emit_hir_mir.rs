@@ -110,9 +110,6 @@ pub(super) struct HirMirTables {
     /// parameter ([`Compiler::hir_niche_arg`]): boxed to their enum
     /// object, by argument.
     pub(super) niche_args: HashMap<u32, ValueLayout>,
-    /// `block_on(h)` calls: the `wait_ready`
-    /// native run between resumes, if the program has one, by call.
-    pub(super) block_ons: HashMap<u32, Option<u16>>,
     /// `new C(args).f` reads emission elides the object of
     /// ([`Compiler::hir_field_of_new`]): each argument runs in order and
     /// `f`'s is the value, by field read.
@@ -774,10 +771,6 @@ impl Compiler {
                     return Kids::None;
                 }
             }
-            HirKind::Call { .. } if emit.plan.calls.get(&id.0).is_some_and(|c| matches!(c.builtin, Some(HirBuiltin::BlockOn))) => {
-                let wait = self.native_id("wait_ready").and_then(|n| u16::try_from(n).ok());
-                t.block_ons.insert(id.0, wait);
-            }
             HirKind::Call { .. } if emit.plan.calls.get(&id.0).is_some_and(|c| matches!(c.builtin, Some(HirBuiltin::Matrix))) => {
                 t.matrix_wraps.insert(id.0);
             }
@@ -1230,9 +1223,15 @@ impl Compiler {
         let mut arg_tys = Vec::with_capacity(args.len());
         for (i, &arg) in args.iter().enumerate() {
             // Emission passes the boxed-layout word: the MIR word only when
-            // that is the argument's own.
-            if self.hir_natural(hir, emit, arg) != Some(Rep::Word(ValueLayout::Boxed)) {
-                return;
+            // that is the argument's own, or, where a bare type parameter
+            // takes it boxed, a two-word value's or niche enum's object
+            // (#1479).
+            match self.hir_natural(hir, emit, arg) {
+                Some(Rep::Word(ValueLayout::Boxed)) => {}
+                // (An inlined call's block has no natural rep: its value's
+                // words are taken as MIR lowers them.)
+                Some(Rep::Pair(_) | Rep::Word(_)) | None if bare[i] => {}
+                _ => return,
             }
             let Some(ty) = Self::hir_ty(hir, arg) else {
                 return;
@@ -1802,6 +1801,11 @@ impl Compiler {
                 }
                 let fmt = self.intern_string(unescape_coil_string(&Self::record_show_format(fields)));
                 return Some(crate::mir::HirShow::Record { fmt, fields: shown });
+            }
+            // An arity-wide tuple thunk's item: its own dictionary (#1479).
+            Ty::Var(v) if let Some(&n) = self.synth_show_dicts.get(v) => {
+                let dict = self.lookup_slot(&format!("__dict{n}"))?;
+                return Some(crate::mir::HirShow::Bound { dict, method: 0 });
             }
             _ => {}
         }

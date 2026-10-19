@@ -3,7 +3,7 @@
 //!
 //! They read the string in place. `text::*` helpers used to go through
 //! `to_bytes`, which copies every byte into an 8-byte `Value` on each call.
-//! Offsets are byte offsets, as in `bytes::*`; `len(s)` is the byte length.
+//! Offsets are byte offsets, as in `bytes::*`; `s.len()` is the byte length.
 
 use common::Value;
 
@@ -59,7 +59,7 @@ pub fn string_byte_at(heap: &mut Heap, args: &[Value]) -> Value {
 }
 
 /// `slice_bytes(s, start, end) -> Result<string, IoError>`. Offsets clamp to
-/// `[0, len(s)]` (and `end` to at least `start`); `Err(InvalidInput)` when an
+/// `[0, s.len()]` (and `end` to at least `start`); `Err(InvalidInput)` when an
 /// offset falls inside a UTF-8 sequence.
 pub fn string_slice_bytes(heap: &mut Heap, args: &[Value]) -> Value {
     let (start, end) = (args[1].as_int(), args[2].as_int());
@@ -92,7 +92,7 @@ pub fn string_find_from(heap: &mut Heap, args: &[Value]) -> Value {
 }
 
 /// `rfind(hay, needle) -> int`: last offset of `needle`, or `-1`. An empty
-/// needle matches at `len(hay)`.
+/// needle matches at `hay.len()`.
 pub fn string_rfind(heap: &mut Heap, args: &[Value]) -> Value {
     let at = with_str(heap, args[0], |hay| {
         with_str(heap, args[1], |needle| {

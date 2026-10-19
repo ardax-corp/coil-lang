@@ -7,7 +7,7 @@ test("escapes decode to single bytes") {
     let q = "\"";
     let bs = "\\";
     let nl = "\n";
-    assert!(len(q) == 1 && len(bs) == 1 && len(nl) == 1);
+    assert!(q.len() == 1 && bs.len() == 1 && nl.len() == 1);
     assert!((to_bytes(q)[0] as int) == 34);
     assert!((to_bytes(bs)[0] as int) == 92);
     assert!((to_bytes(nl)[0] as int) == 10);
@@ -23,6 +23,6 @@ test("escapes inside format") {
     assert!(format("[%s]", "a\"b") == "[a\"b]");
     let s = format("%s\n%s", "a", "b");
     let t = s;
-    assert!(len(t) == 3);
+    assert!(t.len() == 3);
     assert!(t[1] == "\n");
 }

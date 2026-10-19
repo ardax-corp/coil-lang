@@ -4,7 +4,7 @@
 use tests::assert;
 
 fn first<T>(Vec<T> xs, T fallback) -> T {
-    if len(xs) == 0 {
+    if xs.len() == 0 {
         return fallback;
     }
     return xs[0];
@@ -20,7 +20,7 @@ fn pick<T>(bool c, T a, T b) -> T {
 fn count_over<T>(Vec<T> xs, int min) -> int {
     let n = 0;
     let i = 0;
-    while i < len(xs) {
+    while i < xs.len() {
         if i >= min {
             n = n + 1;
         }

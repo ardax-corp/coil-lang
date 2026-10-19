@@ -14,7 +14,7 @@ fn items(int n) -> Result<Vec<int>, string> {
 }
 
 fn count(int n) -> Result<int, string> {
-    return Ok(len(items(n)?));
+    return Ok((items(n)?).len());
 }
 
 fn count_method(int n) -> Result<int, string> {
@@ -30,14 +30,14 @@ test("len of a Result ? operand") {
 
 test("len of a local const") {
     const s = "abc";
-    assert!(len(s) == 3);
+    assert!(s.len() == 3);
     assert!(s.len() == 3);
 }
 
 test("len of a string concatenation") {
     let s = "a";
-    assert!(len(s + "b") == 2);
-    assert!(len("a" + "b") == 2);
+    assert!((s + "b").len() == 2);
+    assert!(("a" + "b").len() == 2);
     assert!(("a" + "bc").len() == 3);
-    assert!(len("" + "") == 0);
+    assert!(("" + "").len() == 0);
 }

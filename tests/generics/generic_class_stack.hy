@@ -12,7 +12,7 @@ impl Stack<T> {
     }
 
     pub fn push(T v) {
-        if self.n < len(self.items) {
+        if self.n < self.items.len() {
             self.items[self.n] = v;
         } else {
             self.items.push(v);

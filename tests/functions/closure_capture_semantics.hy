@@ -47,11 +47,11 @@ test("a captured Vec is shared") {
     let v: Vec<int> = [];
     let add = fn (int x) use (v) {
         v.push(x);
-        return len(v);
+        return v.len();
     };
     add(1);
     assert!(add(2) == 2);
-    assert!(len(v) == 2);
+    assert!(v.len() == 2);
     assert!(v[1] == 2);
 }
 

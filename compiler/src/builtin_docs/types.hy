@@ -128,7 +128,7 @@ class byte {}
 /// Literals are written in double quotes, with escapes `\\`, `\"`, `\n`,
 /// `\r`, `\t`, `\0`, `\e`, `\xHH` and `\u{HEX}`. `+` and `+=` concatenate two
 /// strings (adding a non-string is a type error). `==` compares contents;
-/// strings are not ordered. `len(s)` counts UTF-8 bytes, not characters.
+/// strings are not ordered. `s.len()` counts UTF-8 bytes, not characters.
 ///
 /// A string is not cast with `as`: use `string::to_bytes` for its bytes and
 /// `string::format` to build strings from other values. A one-byte string
@@ -139,7 +139,7 @@ class byte {}
 /// ```
 /// # use tests::assert;
 /// let s = "héllo";
-/// assert!(len(s) == 6);
+/// assert!(s.len() == 6);
 /// let greeting = "hi" + ", " + "there";
 /// greeting += "!";
 /// assert!(greeting == "hi, there!");

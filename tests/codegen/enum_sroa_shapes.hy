@@ -72,7 +72,7 @@ fn looped(int n) -> int {
         }
         total = total + match r {
             Result::Ok(v) => v,
-            Result::Err(e) => len(e),
+            Result::Err(e) => e.len(),
         };
         i = i + 1;
     }

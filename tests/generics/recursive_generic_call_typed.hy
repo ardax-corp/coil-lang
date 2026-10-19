@@ -6,11 +6,11 @@ use string::{format, to_bytes};
 // Output: 3 2 1 3
 
 fn reversed<T>(Vec<T> xs) -> Vec<T> {
-    if len(xs) == 0 {
+    if xs.len() == 0 {
         return xs;
     }
     let rest: Vec<T> = Vec::new();
-    for i in 1..len(xs) {
+    for i in 1..xs.len() {
         rest.push(xs[i]);
     }
     let r = reversed(rest);

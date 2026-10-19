@@ -1,5 +1,5 @@
-// Built-in derives: `Show`, `Eq`, `Ord`, `Hash`, `String`, `Default`, `Send`
-// and `Sensitive`. Always in scope (module `derive`); the compiler
+// Built-in derives: `Show`, `Eq`, `Ord`, `Hash`, `Default`, `Send` and
+// `Sensitive`. Always in scope (module `derive`); the compiler
 // runs them like any user derive.
 //
 // Generated code matches what the former Rust expansion built: payloads are
@@ -35,7 +35,7 @@ fn pattern(TypeDecl t, Variant v, string bind) -> string {
     if v.is_tuple() {
         let parts = "";
         let i = 0;
-        while i < len(names) {
+        while i < names.len() {
             if i > 0 {
                 parts += ", ";
             }
@@ -51,7 +51,7 @@ fn pattern(TypeDecl t, Variant v, string bind) -> string {
     if v.is_record() {
         let parts = "";
         let i = 0;
-        while i < len(names) {
+        while i < names.len() {
             if i > 0 {
                 parts += ", ";
             }
@@ -96,7 +96,7 @@ fn show_format(TypeDecl t, string p) -> string {
         let specs = "";
         let args = "";
         let i = 0;
-        while i < len(names) {
+        while i < names.len() {
             if i > 0 {
                 specs += ", ";
             }
@@ -142,37 +142,14 @@ derive Show(TypeDecl t) -> Code {
     };
 }
 
-/// `impl String`: same text as `Show`.
-derive String(TypeDecl t) -> Code {
-    let p = "__str_" + t.name.str();
-    if t.repr != "" {
-        let n = "__str_n_" + t.name.str();
-        return quote items {
-            impl String for ${t.impl_head("Show")} {
-                fn to_string(${t.self_type()} ${raw(p)}) -> string {
-                    let ${raw(n)}: ${raw(t.repr)} = ${raw(p)};
-                    return ${raw(n)}.show();
-                }
-            }
-        };
-    }
-    return quote items {
-        impl String for ${t.impl_head("Show")} {
-            fn to_string(${t.self_type()} ${raw(p)}) -> string {
-                ${raw(show_format(t, p))}
-            }
-        }
-    };
-}
-
 // `(a.x == b.x) && (a.y == b.y)`, or `true` with no fields.
 fn eq_fields(Vec<string> names, string a, string b, bool tuple) -> string {
-    if len(names) == 0 {
+    if names.len() == 0 {
         return "true";
     }
     let out = "";
     let i = 0;
-    while i < len(names) {
+    while i < names.len() {
         let l = a + "." + names[i];
         let r = b + "." + names[i];
         if tuple {
@@ -234,7 +211,7 @@ fn ord_chain(Vec<string> ls, Vec<string> rs, string op, bool eq_result) -> strin
     if eq_result {
         acc = "true";
     }
-    let i = len(ls) - 1;
+    let i = ls.len() - 1;
     while i >= 0 {
         acc = "((" + ls[i] + " " + op + " " + rs[i] + ") || ((" + ls[i] + " == " + rs[i] + ") && " +
               acc + "))";
@@ -276,10 +253,10 @@ fn ord_impl(
         let arms = "";
         let vs = t.variants();
         let i = 0;
-        while i < len(vs) {
+        while i < vs.len() {
             let inner = "";
             let j = 0;
-            while j < len(vs) {
+            while j < vs.len() {
                 let value = "";
                 if j == i {
                     let names = payload_names(vs[i]);
@@ -409,7 +386,7 @@ derive Default(TypeDecl t) -> Code {
             i += 1;
         }
         value = "new " + t.name.str() + "(" + args + ")";
-    } else if len(t.variants()) == 0 {
+    } else if t.variants().len() == 0 {
         value = "0";
     } else {
         let v = t.variants()[0];
@@ -417,7 +394,7 @@ derive Default(TypeDecl t) -> Code {
         if v.is_tuple() {
             let args = "";
             let i = 0;
-            while i < len(v.tuple) {
+            while i < v.tuple.len() {
                 if i > 0 {
                     args += ", ";
                 }
@@ -428,7 +405,7 @@ derive Default(TypeDecl t) -> Code {
         } else if v.is_record() {
             let args = "";
             let i = 0;
-            while i < len(v.fields) {
+            while i < v.fields.len() {
                 if i > 0 {
                     args += ", ";
                 }

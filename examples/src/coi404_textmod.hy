@@ -15,7 +15,7 @@ fn to_lower(string s) -> Result<string, string> {
     let i = 0;
     let a_up: byte = "A";
     let z_up: byte = "Z";
-    while i < len(b) {
+    while i < b.len() {
         let c = b[i];
         if c >= a_up {
             if c <= z_up {
@@ -37,7 +37,7 @@ fn replace_mark(string s) -> Result<string, string> {
     let b = to_bytes(s);
     let out: Vec<byte> = Vec::new();
     let i = 0;
-    while i < len(b) {
+    while i < b.len() {
         out.push(b[i]);
         i = i + 1;
     }

@@ -8,7 +8,7 @@ fn churn(int n) -> int {
     let i = 0;
     while i < n {
         let s = format("%i-%s", i, "xyzzy");
-        total = total + len(s);
+        total = total + s.len();
         i = i + 1;
     }
     return total;

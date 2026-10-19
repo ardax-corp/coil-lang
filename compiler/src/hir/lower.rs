@@ -75,10 +75,11 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
         Ty::Constructor { owner, .. } => classify_in(checker, owner, seen),
         // A `()` item is stored as the empty tuple object (#1427).
         Ty::Tuple(items) if !items.is_empty() => aggregate(checker, items.iter(), true, seen),
-        // A record: one dict word, its fields read and written by name.
+        // A record: one dict word, its fields read and written by name. A
+        // `()` field is stored as the empty tuple object, as a tuple's.
         Ty::Record { fields } if !fields.is_empty() => fields
             .iter()
-            .all(|(_, f)| classify_in(checker, f, seen).is_some_and(is_word))
+            .all(|(_, f)| classify_in(checker, f, seen).is_some_and(|class| is_word(class) || class == ValueClass::Unit))
             .then_some(ValueClass::Opaque),
         Ty::Array { element, .. } => aggregate(checker, std::iter::once(element.as_ref()), false, seen),
         // A bare-class existential (`Show x`): one `[value, dictionary]`
@@ -178,6 +179,15 @@ pub fn poly_fun(ty: &Ty) -> bool {
 /// The result may also be a closed enum: a call through the function
 /// returns a one-word enum as that word, any other boxed.
 fn fun_words(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> bool {
+    fun_words_in(checker, ty, seen, false)
+}
+
+/// [`fun_words`], with `open_enum` also taking an `Option` / `Result`
+/// whose type variable nothing pinned (`Ok(2)`'s error type): one boxed
+/// word, no niche or pair (#1520). Only a closure literal's own type may:
+/// its body and its calls see the one open type, where a parameter's
+/// caller may pass a closure returning the pinned enum's pair.
+fn fun_words_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>, open_enum: bool) -> bool {
     // A bare type parameter (a shared generic body's own `T -> U`
     // parameter) is one boxed word too.
     let plain = |t: &Ty, seen: &mut Vec<String>| {
@@ -192,10 +202,21 @@ fn fun_words(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> bool {
         Ty::Fun(param, ret) => {
             let unit = |t: &Ty| super::layout::is_unit(strip_readonly(t));
             let closed_enum = |t: &Ty, seen: &mut Vec<String>| {
-                super::layout::ty_is_closed(t) && classify_in(checker, t, seen) == Some(ValueClass::Enum)
+                (super::layout::ty_is_closed(t) || open_enum && super::layout::of(checker, t) == super::layout::Layout::Word)
+                    && classify_in(checker, t, seen) == Some(ValueClass::Enum)
+            };
+            // A closure literal's tuple of type parameters (a shared generic
+            // body's `fn () use (x) => (x, x)`) is its one heap tuple word:
+            // an open tuple is never a pair (#1524).
+            let open_tuple = |t: &Ty, seen: &mut Vec<String>| {
+                open_enum
+                    && matches!(strip_readonly(t), Ty::Tuple(_))
+                    && !super::layout::ty_is_closed(t)
+                    && params_closed(t)
+                    && classify_in(checker, t, seen) == Some(ValueClass::Aggregate)
             };
             (unit(param) || plain(param, seen) || closed_enum(param, seen))
-                && (unit(ret) || plain(ret, seen) || closed_enum(ret, seen))
+                && (unit(ret) || plain(ret, seen) || closed_enum(ret, seen) || open_tuple(ret, seen))
         }
         _ => false,
     }
@@ -333,14 +354,14 @@ fn any_id(body: &HirBody, id: HirId, f: &impl Fn(HirId) -> bool) -> bool {
 /// takes part in a copy or such a store never escapes.
 pub fn stack_arrays(body: &HirBody, checker: &Checker) -> StackArrays {
     use std::collections::HashSet;
-    // `len(a)` of a fixed-length array folds to a constant (`hir_len_call`),
-    // so its argument reads no slots.
+    // `a.len()` of a fixed-length array folds to a constant (`hir_len_call`),
+    // so its receiver reads no slots.
     let folded_len: HashSet<u32> = body
         .exprs
         .iter()
         .filter_map(|e| match &e.kind {
             HirKind::Call {
-                callee: Callee::Named { name, .. } | Callee::Method { name },
+                callee: Callee::Method { name },
                 args,
             } if name == "len" && args.len() == 1 => Some(args[0]),
             _ => None,
@@ -671,8 +692,8 @@ fn writes_field_of(body: &HirBody, local: LocalId) -> bool {
     })
 }
 
-/// `len(x)` / `x.len()` of a plain local: `ArrayLen`, or a constant for a
-/// fixed-size type.
+/// `x.len()` of a plain local: `ArrayLen`, or a constant for a fixed-size
+/// type.
 impl Walk<'_> {
     /// A `Vec` method: `push` is inlined as `ArrayPush`; the others are
     /// `CALL`s to the builtin thunks. `pop` / `remove` are `HostInvoke`s
@@ -685,7 +706,7 @@ impl Walk<'_> {
                 self.word(*value)?;
                 self.value(*value)
             }
-            ("len" | "capacity" | "clear", [_]) | ("reserve", [_, _]) | ("insert", [_, _, _]) | ("pop", [_]) | ("remove", [_, _]) => {
+            ("capacity" | "clear", [_]) | ("reserve", [_, _]) | ("insert", [_, _, _]) | ("pop", [_]) | ("remove", [_, _]) => {
                 self.args(args)
             }
             _ => Err("vec-method"),
@@ -727,22 +748,15 @@ pub fn is_vec(body: &HirBody, checker: &Checker, id: HirId) -> bool {
         .is_some_and(|t| coil_ty::vec_element_ty(&apply_ty_prune(checker.subst(), t)).is_some())
 }
 
-/// Whether `len(x)` dispatches to a user `Length` instance: `x` has a
-/// known type that is not structural, so it is a plain call.
-pub fn user_len(body: &HirBody, checker: &Checker, arg: HirId) -> bool {
-    body.expr(arg).ty.as_ref().is_some_and(|t| {
-        let t = apply_ty_prune(checker.subst(), t);
-        // A bare type parameter's `len` is its `Length` dictionary call.
-        (super::layout::ty_is_closed(&t) || matches!(t, Ty::Var(_))) && !Checker::is_structural_len_ty_for_codegen(&t)
-    })
-}
-
-/// Whether `x.len()` is the structural `len(x)` (not a `Vec` method).
+/// Whether `x.len()` is the structural length read: `x` an array, tuple,
+/// record, string or `Vec` (`ArrayLen`, or a constant for a fixed-size
+/// type). The one HIR form of a length read; any other `len` is a method
+/// call (a user `Length` instance or a bound).
 pub fn structural_len(body: &HirBody, checker: &Checker, recv: HirId) -> bool {
-    body.expr(recv).ty.as_ref().is_some_and(|t| {
-        let t = apply_ty_prune(checker.subst(), t);
-        Checker::is_structural_len_ty_for_codegen(&t) && coil_ty::vec_element_ty(&t).is_none()
-    })
+    body.expr(recv)
+        .ty
+        .as_ref()
+        .is_some_and(|t| Checker::is_structural_len_ty_for_codegen(&apply_ty_prune(checker.subst(), t)))
 }
 
 /// Whether evaluating `id` may store into frame slots (the AST's
@@ -1655,8 +1669,11 @@ pub fn polyfn_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
         // A generic function's returned function the checker saw open at
         // the binding is a `PolyFn` too (`let f = capture_show(0)`),
         // whatever the local settles to (`maybe_record_polyfn_binding`).
+        // A closure literal is never one, though its type may keep a
+        // variable nothing pinned (`fn () => Ok(2)`'s error type, #1520):
+        // it is `MakeFn`'s plain closure word.
         LocalKind::Let => {
-            poly_fun(t)
+            poly_fun(t) && !let_init_is_lambda(body, local)
                 || matches!(strip_readonly(t), Ty::Fun(..))
                     && body.exprs.iter().any(|e| match &e.kind {
                         HirKind::Let { local: l, init: Some(init) } if *l == local => {
@@ -1672,6 +1689,14 @@ pub fn polyfn_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
         && !body.exprs.iter().any(|e| {
             matches!(&e.kind, HirKind::Assign { place, .. } if matches!(body.expr(*place).kind, HirKind::Local(l) if l == local))
         })
+}
+
+/// A `let` bound to a closure literal (`let f = fn () => ..`).
+fn let_init_is_lambda(body: &HirBody, local: LocalId) -> bool {
+    body.exprs.iter().any(|e| {
+        matches!(&e.kind, HirKind::Let { local: l, init: Some(init) }
+            if *l == local && matches!(body.expr(*init).kind, HirKind::Lambda { .. }))
+    })
 }
 
 pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
@@ -1692,7 +1717,8 @@ pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
         .as_ref()
         .is_some_and(|t| {
             let t = apply_ty_prune(checker.subst(), t);
-            matches!(strip_readonly(&t), Ty::Fun(..)) && fun_words(checker, &t, &mut Vec::new())
+            matches!(strip_readonly(&t), Ty::Fun(..))
+                && fun_words_in(checker, &t, &mut Vec::new(), info.kind == LocalKind::Let && let_init_is_lambda(body, local))
         })
     {
         return false;
@@ -2315,10 +2341,6 @@ impl Walk<'_> {
                 self.value(*value)
             }
             HirKind::Call {
-                callee: Callee::Named { name, .. },
-                args,
-            } if name == "len" && args.len() == 1 && !user_len(body, self.checker, args[0]) => self.len(args[0]),
-            HirKind::Call {
                 callee: Callee::Method { name },
                 args,
             } if name == "len" && args.len() == 1 && structural_len(body, self.checker, args[0]) => self.len(args[0]),
@@ -2420,7 +2442,10 @@ impl Walk<'_> {
                 self.items(args)
             }
             HirKind::Field { base, .. } => {
-                self.word(id)?;
+                // A record's `()` field is read for the base's effects only.
+                if !(self.record(*base) && is_unit_value(body, self.checker, id)) {
+                    self.word(id)?;
+                }
                 // A record variant's field reads `LoadField` on the boxed
                 // enum (codegen checks the field resolves).
                 if self.class(*base) != Some(ValueClass::Enum) {
@@ -2435,6 +2460,12 @@ impl Walk<'_> {
             } => {
                 self.word(id)?;
                 for &arg in args {
+                    // A `()` value runs for its effect; the record stores
+                    // the empty tuple object.
+                    if is_unit_value(body, self.checker, arg) {
+                        self.effect(arg)?;
+                        continue;
+                    }
                     self.word(arg)?;
                     self.value(arg)?;
                 }
@@ -2752,6 +2783,13 @@ impl Walk<'_> {
                     HirKind::Field { base, .. } => {
                         if !read_base(body, *base) {
                             return Err("assign-base");
+                        }
+                        // A record's `()` field stores the empty tuple
+                        // object once the value has run (#1510).
+                        if self.record(*base) && is_unit_value(body, self.checker, *value) {
+                            self.object(*base)?;
+                            self.effect(*value)?;
+                            return self.value(*base);
                         }
                         self.word(*place)?;
                         self.object(*base)?;

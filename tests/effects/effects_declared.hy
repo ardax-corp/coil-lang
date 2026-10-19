@@ -42,7 +42,7 @@ pure fn nth([int; 3] v, int i) -> int {
 }
 
 pure fn bytes_of(string s) -> int {
-    return len(to_bytes(s));
+    return to_bytes(s).len();
 }
 
 fn apply(int -> int f, int x) -> int uses {} {

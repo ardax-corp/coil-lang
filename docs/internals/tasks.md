@@ -205,6 +205,9 @@ functions); a partial application is not sendable.
 - No detached tasks, no preemption.
 - `task::timeout` reads its task through the natives instead of `join`
   (coil-lang#786), and spawns its timer from a plain `gen fn` (coil-lang#787).
-- `block_on`, `io::drive` and `io::wait_ready` still run but no longer
-  multiplex. Calling them warns `E0129` (deprecated) and points at
-  `task::scope`. Example: [`examples/task_files.hy`](../../examples/task_files.hy).
+- `io::drive` and `io::wait_ready` still run but no longer multiplex.
+  Calling them warns `E0129` (deprecated) and points at `task::scope`.
+  Example: [`examples/task_files.hy`](../../examples/task_files.hy).
+- `task::block_on(h)` is plain library code in `task.hy`: it resumes `h`
+  until `done(h)` and returns the completion value. It is not a prelude
+  builtin; a bare `block_on` without `use task::block_on;` is `E0101`.

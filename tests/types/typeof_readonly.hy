@@ -17,7 +17,7 @@ fn bump() -> int {
 
 test("readonly values read through") {
     let xs = readonly [4, 5, 6];
-    assert!(len(xs) == 3);
+    assert!(xs.len() == 3);
     let p = readonly new Point(1, 2);
     assert!(p.x + p.y == 3);
 }
@@ -29,15 +29,15 @@ test("typeof names the static type") {
     assert!(a == "int");
     assert!(b == "string");
     assert!(format("%s", typeof (1, 2)) == "(int, int)");
-    assert!(len(c) > 0);
+    assert!(c.len() > 0);
 }
 
 test("typeof and literal len do not evaluate") {
     hits = 0;
     let t = typeof bump();
     assert!(t == "int");
-    assert!(len([bump(), bump()]) == 2);
-    assert!(len((bump(), 1, 2)) == 3);
-    assert!(len({ a: bump(), b: 2 }) == 2);
+    assert!([bump(), bump()].len() == 2);
+    assert!((bump(), 1, 2).len() == 3);
+    assert!(({ a: bump(), b: 2 }).len() == 2);
     assert!(hits == 0);
 }

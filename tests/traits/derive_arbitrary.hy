@@ -71,15 +71,15 @@ test("collections grow with the size") {
     let g = Gen::new(11);
     g.resize(0);
     let empty: Vec<int> = any(g);
-    assert!(len(empty) == 0);
+    assert!(empty.len() == 0);
     g.resize(30);
     let longest = 0;
     let i = 0;
     while i < 50 {
         let b: Bag = any(g);
-        assert!(len(b.names) <= 30);
-        if len(b.names) > longest {
-            longest = len(b.names);
+        assert!(b.names.len() <= 30);
+        if b.names.len() > longest {
+            longest = b.names.len();
         }
         i += 1;
     }
@@ -137,7 +137,7 @@ test("strings are valid text") {
     while i < 50 {
         let s: string = any(g);
         let b: byte = any(g);
-        assert!(len(s) <= 40);
+        assert!(s.len() <= 40);
         i += 1;
     }
 }

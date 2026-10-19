@@ -216,7 +216,7 @@ fn churn(int n) -> int {
         keep = format("%i-%i", i, n);
         i = i + 1;
     }
-    return len(keep);
+    return keep.len();
 }
 
 fn main() {

@@ -20,7 +20,7 @@ impl Point {
 
 fn main() {
     let xs = readonly [1, 2, 3];
-    write_all(stdout(), to_bytes(format("%i", len(xs))));
+    write_all(stdout(), to_bytes(format("%i", xs.len())));
     let p = readonly new Point(1, 2);
     p.shift();
     write_all(stdout(), to_bytes(format("%i", p.x)));

@@ -749,11 +749,11 @@ fn pipeline_vectorizes_stride1_iota_store() {
     let src = r#"
 fn fill(Vec<int> v) -> int {
     let i = 0;
-    while i < len(v) {
+    while i < v.len() {
         v[i] = i;
         i = i + 1;
     }
-    return len(v);
+    return v.len();
 }
 fn main() {
     let v: Vec<int> = Vec::from([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
@@ -843,7 +843,7 @@ fn pipeline_vectorizes_stride1_reduce() {
 fn scan(Vec<int> v) -> int {
     let acc = 0;
     let i = 0;
-    while i < len(v) {
+    while i < v.len() {
         acc = acc + v[i];
         i = i + 1;
     }
@@ -888,7 +888,7 @@ fn sum_i(int n) -> int {
 fn sum_from(Vec<int> v, int start) -> int {
     let s = 0;
     let i = start;
-    while i < len(v) {
+    while i < v.len() {
         s = s + v[i];
         i = i + 1;
     }
@@ -897,7 +897,7 @@ fn sum_from(Vec<int> v, int start) -> int {
 fn sum_next(Vec<int> v) -> int {
     let s = 0;
     let i = 0;
-    while i < len(v) - 1 {
+    while i < v.len() - 1 {
         s = s + v[i + 1];
         i = i + 1;
     }
@@ -907,7 +907,7 @@ fn id(int n) -> int {
     return n;
 }
 fn sum_after_call(Vec<int> v) -> int {
-    let n = id(len(v));
+    let n = id(v.len());
     let s = 0;
     let i = 0;
     while i < n {
@@ -960,7 +960,7 @@ fn pipeline_vectorizes_mul_reduce_and_loop_chain() {
 fn product(Vec<int> v) -> int {
     let s = 1;
     let i = 0;
-    while i < len(v) {
+    while i < v.len() {
         s = s * v[i];
         i = i + 1;
     }
@@ -968,13 +968,13 @@ fn product(Vec<int> v) -> int {
 }
 fn fill_then_sum(Vec<int> v) -> int {
     let i = 0;
-    while i < len(v) {
+    while i < v.len() {
         v[i] = i + 1;
         i = i + 1;
     }
     let s = 0;
     let j = 0;
-    while j < len(v) {
+    while j < v.len() {
         s = s + v[j];
         j = j + 1;
     }
@@ -1026,7 +1026,7 @@ fn pipeline_vectorizes_conservative_fma_store() {
     let src = r#"
 fn axpy(float a, Vec<float> x, Vec<float> y) -> float {
     let i = 0;
-    while i < len(x) {
+    while i < x.len() {
         y[i] = a * x[i] + y[i];
         i = i + 1;
     }
@@ -2484,11 +2484,11 @@ fn s3_vec_scan_fill_takes_v0_simd() {
     let src = r#"
 fn fill(Vec<int> v) -> int {
     let i = 0;
-    while i < len(v) {
+    while i < v.len() {
         v[i] = i;
         i = i + 1;
     }
-    return len(v);
+    return v.len();
 }
 fn main() {
     let v: Vec<int> = Vec::from([1, 2, 3]);
@@ -2531,7 +2531,7 @@ fn s3_index_loop_takes_dense() {
 fn sum(Vec<int> arr) -> int {
     let i = 0;
     let s = 0;
-    while i < len(arr) {
+    while i < arr.len() {
         s = s + arr[i];
         i = i + 1;
     }
@@ -2591,7 +2591,7 @@ fn index_loop_specializes_without_heap_prescan() {
 fn sum(Vec<int> arr) -> int {
     let i = 0;
     let s = 0;
-    while i < len(arr) {
+    while i < arr.len() {
         s = s + arr[i];
         i = i + 1;
     }
@@ -2637,7 +2637,7 @@ fn main() {
 fn s3b_reverse_index_takes_dense_and_checksums() {
     let src = r#"
 fn sum(Vec<int> arr) -> int {
-    let n = len(arr);
+    let n = arr.len();
     let i = 0;
     let s = 0;
     while i < n {
@@ -2701,7 +2701,7 @@ fn eval_a(int i, int j) -> float {
     return 1.0 / (t as float);
 }
 fn times_a(Vec<float> v, Vec<float> out) -> float {
-    let n = len(v);
+    let n = v.len();
     let i = 0;
     while i < n {
         let s = 0.0;
@@ -4405,7 +4405,7 @@ fn main() {
 #[test]
 fn q6_for_in_coro_sum_takes_dense_or_lir() {
     let src = r#"
-async fn gen() {
+gen fn gen() {
     let i = 0;
     while i < 5 {
         yield i;
@@ -4830,7 +4830,7 @@ fn shows(unit u) -> bool {
 }
 fn keep(unit u, int n) -> bool {
     let s = format("%i", n);
-    return shows(u) && len(s) > 0;
+    return shows(u) && s.len() > 0;
 }
 fn main() {
     let _ = keep((), 3);
@@ -4861,4 +4861,130 @@ fn main() {
     );
     let mut vm = machine::Machine::<64>::with_operand_capacity(64);
     vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+}
+
+/// `n` arms that rebind a heap word (`s = s + "a"`) into a chain of joins,
+/// none of them reached: what a folded `if x == i` leaves when nothing
+/// drops the dead arms (#1493).
+fn unreachable_rebind_arms(n: usize) -> String {
+    let mut text = String::from("func @main() -> i64 {\nbb0:\n    v1 = string 0\n    jump bb2\n");
+    let mut s = 1;
+    let mut v = 1;
+    let mut prev = 0;
+    for i in 0..n {
+        let (arm, join) = (2 * i + 1, 2 * i + 2);
+        let (a, b, c, d, e, phi) = (v + 1, v + 2, v + 3, v + 4, v + 5, v + 6);
+        v += 6;
+        text.push_str(&format!(
+            "bb{arm}:\n    v{a} = string 1\n    v{b} = string 2\n    v{c} = format v{a}, v{s}, v{b}\n    v{d} = gcbarrier.safepoint v{c}, v{s}\n    v{e} = clearword v{s}\n    jump bb{join}\n"
+        ));
+        text.push_str(&format!("bb{join}:\n    v{phi} = phi.heapref [bb{prev}: v{s}, bb{arm}: v{d}]\n"));
+        if i + 1 < n {
+            text.push_str(&format!("    jump bb{}\n", join + 2));
+        } else {
+            text.push_str(&format!("    v{} = iconst.i64 0\n    return v{}\n", v + 1, v + 1));
+        }
+        s = phi;
+        prev = join;
+    }
+    text.push('}');
+    text
+}
+
+/// #1493: LIR emission's work grows about linearly with the blocks nothing
+/// reaches. Each join's GC clears asked whether a collection comes before
+/// each register's rewrite by walking every later block, once per copy
+/// source of the join's φ: a body 8x longer took ~60x the scans.
+#[test]
+fn lir_clears_work_about_linear_in_unreachable_blocks() {
+    let scans = |n: usize| {
+        let text = unreachable_rebind_arms(n);
+        let f = parse_func(&text).expect(&text);
+        f.verify().unwrap();
+        emit::REWRITE_SCANS.with(|c| c.set(0));
+        let mut pool = Vec::new();
+        emit_lir(&f, Some(Label(0)), &mut pool, true).expect("LIR emits");
+        emit::REWRITE_SCANS.with(|c| c.get())
+    };
+    let small = scans(100);
+    let large = scans(800);
+    // Linear is ~8x.
+    assert!(large <= 24 * small.max(1), "800 arms scanned {large} blocks, 100 scanned {small}");
+}
+
+/// `n` arms that rebind a heap word (`s = s + "a"`) into a chain of joins,
+/// each taken or not on `v0`: `if x == k { s = s + "a"; }` (#1502).
+fn reachable_rebind_arms(n: usize) -> String {
+    let mut text = String::from("func @main(v0: bool) -> i64 {\nbb0:\n    v1 = string 0\n    brif v0, bb1, bb2\n");
+    let mut s = 1;
+    let mut v = 1;
+    let mut prev = 0;
+    for i in 0..n {
+        let (arm, join) = (2 * i + 1, 2 * i + 2);
+        let (a, b, c, d, e, phi) = (v + 1, v + 2, v + 3, v + 4, v + 5, v + 6);
+        v += 6;
+        text.push_str(&format!(
+            "bb{arm}:\n    v{a} = string 1\n    v{b} = string 2\n    v{c} = format v{a}, v{s}, v{b}\n    v{d} = gcbarrier.safepoint v{c}, v{s}\n    v{e} = clearword v{s}\n    jump bb{join}\n"
+        ));
+        text.push_str(&format!("bb{join}:\n    v{phi} = phi.heapref [bb{prev}: v{s}, bb{arm}: v{d}]\n"));
+        if i + 1 < n {
+            text.push_str(&format!("    brif v0, bb{}, bb{}\n", join + 1, join + 2));
+        } else {
+            text.push_str(&format!("    v{} = iconst.i64 0\n    return v{}\n", v + 1, v + 1));
+        }
+        s = phi;
+        prev = join;
+    }
+    text.push('}');
+    text
+}
+
+/// #1502: LIR emission's walks of copy sources grow about linearly with a
+/// chain of joins that rebind a heap word. Each join's clears, each
+/// `ClearWord`'s, and the memory-order check each followed the φ chain
+/// back to its start: ~n² values.
+#[test]
+fn lir_copy_sources_about_linear_over_rebinding_joins() {
+    let steps = |n: usize| {
+        let text = reachable_rebind_arms(n);
+        let f = parse_func(&text).expect(&text);
+        f.verify().unwrap();
+        emit::COPY_SOURCE_STEPS.with(|c| c.set(0));
+        let mut pool = Vec::new();
+        emit_lir(&f, Some(Label(0)), &mut pool, true).expect("LIR emits");
+        emit::COPY_SOURCE_STEPS.with(|c| c.get())
+    };
+    let small = steps(100);
+    let large = steps(800);
+    // Linear is ~8x.
+    assert!(large <= 24 * small.max(1), "800 arms stepped {large} values, 100 stepped {small}");
+}
+
+/// `CONST 0; STORE` pairs in LIR: the GC clears ([`emit::push_clear_word`]).
+fn lir_clear_words(ops: &[IlOp]) -> usize {
+    ops.windows(2)
+        .filter(|w| {
+            matches!(w[0], IlOp::Const { imm: 0, .. })
+                && matches!(&w[1], IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::STORE)
+        })
+        .count()
+}
+
+/// #1519: a chain of joins that rebind a heap word zeroes about a constant
+/// number of registers per join. Each taken arm zeroed every register an
+/// earlier value of the chain lived in, twice: ~n² clears.
+#[test]
+fn lir_clears_about_linear_over_rebinding_joins() {
+    let clears = |n: usize| {
+        let text = reachable_rebind_arms(n);
+        let f = parse_func(&text).expect(&text);
+        f.verify().unwrap();
+        let mut pool = Vec::new();
+        lir_clear_words(&emit_lir(&f, Some(Label(0)), &mut pool, true).expect("LIR emits"))
+    };
+    let small = clears(25);
+    let large = clears(100);
+    assert!(small > 0, "the arms clear the rebound word");
+    // Linear is ~4x.
+    assert!(large <= 8 * small, "100 arms cleared {large} words, 25 cleared {small}");
 }

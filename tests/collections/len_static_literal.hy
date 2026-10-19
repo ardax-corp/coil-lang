@@ -11,13 +11,13 @@ fn fill(int n) {
 }
 
 test("len of a string literal") {
-    assert!(len("foo") == 3);
-    assert!(len("") == 0);
-    assert!(len("a\tb\n") == 4);
+    assert!("foo".len() == 3);
+    assert!("".len() == 0);
+    assert!("a\tb\n".len() == 4);
 }
 
 test("len of a static vec") {
-    let before = len(items);
+    let before = items.len();
     fill(5);
-    assert!(len(items) == before + 5);
+    assert!(items.len() == before + 5);
 }

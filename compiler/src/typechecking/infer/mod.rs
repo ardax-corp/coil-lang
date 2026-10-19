@@ -227,7 +227,7 @@ pub struct Checker {
     /// as a direct `Call` target. Package-wide proof is the pipeline seed
     /// on [`crate::Compiler`]; this set is the per-file snapshot.
     pub(crate) fn_value_escaped: HashSet<String>,
-    /// `arr[i]` nodes proven `0 <= i < len(arr)` with a stable length.
+    /// `arr[i]` nodes proven `0 <= i < arr.len()` with a stable length.
     pub(crate) in_bounds_index: HashSet<NodeId>,
     /// Expressions proven `>= 0` at the use site (Q4 skip Euclidean rem).
     pub(crate) nonneg_expr: HashSet<NodeId>,
@@ -517,19 +517,19 @@ pub struct Checker {
     /// Match exhaustiveness checks deferred until substitution is closed.
     pending_exhaustive: Vec<PendingExhaustive>,
 
-    /// Names of `async fn` declarations (for codegen).
+    /// Names of `gen fn` declarations (for codegen).
     async_functions: std::collections::HashSet<String>,
 
-    /// Nesting depth inside `async fn` bodies (for `yield` validation).
+    /// Nesting depth inside `gen fn` bodies (for `yield` validation).
     async_depth: usize,
 
-    /// Yield value type for the enclosing `async fn`, if any.
+    /// Yield value type for the enclosing `gen fn`, if any.
     current_yield_ty: Option<Ty>,
 
-    /// Send/resume-in value type for the enclosing `async fn`, if any.
+    /// Send/resume-in value type for the enclosing `gen fn`, if any.
     current_send_ty: Option<Ty>,
 
-    /// True when the enclosing `async fn` uses `let x = yield …`.
+    /// True when the enclosing `gen fn` uses `let x = yield …`.
     yield_receives_used: bool,
 
     /// C-layout struct declarations for FFI (`extern struct`).
@@ -815,6 +815,9 @@ fn build_record_field_hint(
 /// Normalize a runtime value type to the head used in `impl Show for T`
 /// registration (`Ty::Con("Point")` rather than `Sum` / `Constructor`).
 fn show_lookup_ty(ty: &Ty) -> Ty {
+    if let Some(app) = crate::typechecking::ty::builtin_enum_app(ty) {
+        return app;
+    }
     match ty {
         Ty::Sum { name, .. } => Ty::Con(name.clone()),
         Ty::Constructor { owner, .. } => show_lookup_ty(owner),

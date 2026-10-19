@@ -2,8 +2,8 @@
 
 /// Returns the byte at byte offset `i` of `s`, or `-1` when `i` is out of range.
 ///
-/// Offsets count UTF-8 bytes, not characters, and `len(s)` is the byte
-/// length. The result is `0..=255` for any offset in `0..len(s)`.
+/// Offsets count UTF-8 bytes, not characters, and `s.len()` is the byte
+/// length. The result is `0..=255` for any offset in `0..s.len()`.
 ///
 /// # Examples
 ///
@@ -18,7 +18,7 @@ fn byte_at(string s, int i) -> int {}
 
 /// Returns the byte offset of the first `needle` in `hay` at or after `start`, or `-1`.
 ///
-/// `start` is clamped to `0..=len(hay)`. An empty `needle` matches at the
+/// `start` is clamped to `0..=hay.len()`. An empty `needle` matches at the
 /// clamped `start`. Offsets are byte offsets.
 ///
 /// # Examples
@@ -89,7 +89,7 @@ fn from_bytes(Vec<byte> bytes) -> Result<string, IoError> {}
 /// Returns whether `needle` occurs in `s` starting exactly at byte offset `at`.
 ///
 /// `false` when `at` is negative or the match would run past the end.
-/// An empty `needle` matches at any offset in `0..=len(s)`.
+/// An empty `needle` matches at any offset in `0..=s.len()`.
 ///
 /// # Examples
 ///
@@ -104,7 +104,7 @@ fn match_at(string s, string needle, int at) -> bool {}
 
 /// Returns the byte offset of the last `needle` in `hay`, or `-1`.
 ///
-/// An empty `needle` matches at `len(hay)`.
+/// An empty `needle` matches at `hay.len()`.
 ///
 /// # Examples
 ///
@@ -119,7 +119,7 @@ fn rfind(string hay, string needle) -> int {}
 
 /// Returns the part of `s` between byte offsets `start` (inclusive) and `end` (exclusive).
 ///
-/// Offsets are clamped to `0..=len(s)`, and `end` to at least `start`, so
+/// Offsets are clamped to `0..=s.len()`, and `end` to at least `start`, so
 /// out-of-range offsets give a shorter (possibly empty) string rather than
 /// an error. Returns `Err(IoError::InvalidInput)` when an offset falls
 /// inside a multi-byte UTF-8 character.
@@ -150,7 +150,7 @@ fn slice_bytes(string s, int start, int end) -> Result<string, IoError> {}
 
 /// Encodes `s` as UTF-8 into a new `Vec<byte>`.
 ///
-/// Always succeeds; the result has `len(s)` bytes. Use it to pass text to
+/// Always succeeds; the result has `s.len()` bytes. Use it to pass text to
 /// `io::write` and the other byte-based IO functions.
 ///
 /// # Examples
@@ -159,7 +159,7 @@ fn slice_bytes(string s, int start, int end) -> Result<string, IoError> {}
 /// use string::{to_bytes};
 /// # use tests::assert;
 /// let b = to_bytes("Hi");
-/// assert!(len(b) == 2);
+/// assert!(b.len() == 2);
 /// assert!(b[0] == 72 as byte && b[1] == 105 as byte);
 /// ```
 fn to_bytes(string s) -> Vec<byte> {}

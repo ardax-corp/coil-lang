@@ -15,7 +15,7 @@ fn h(int x) -> int {
 }
 
 fn f(string s) -> int {
-    return len(s);
+    return s.len();
 }
 
 test("overload declared after its caller") {

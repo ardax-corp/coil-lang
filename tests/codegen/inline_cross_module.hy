@@ -10,7 +10,7 @@ fn words(string s) -> int {
     let n = 0;
     let i = 0;
     let inside = false;
-    while i < len(s) {
+    while i < s.len() {
         let c = s[i];
         if is_alnum(c) {
             if !inside {

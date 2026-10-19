@@ -12,14 +12,14 @@ test("group is the inner value") {
 test("one-tuple needs a trailing comma") {
     let t = (5,);
     assert!(t[0] == 5);
-    assert!(len(t) == 1);
+    assert!(t.len() == 1);
     let u = ("x",);
     assert!(u[0] == "x");
 }
 
 test("tuples of several elements") {
     let p = (1, "two", 3.0, true);
-    assert!(len(p) == 4);
+    assert!(p.len() == 4);
     assert!(p[1] == "two");
     assert!(p[3]);
     let nested = ((1, 2), (3,));

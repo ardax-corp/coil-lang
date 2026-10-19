@@ -38,7 +38,13 @@ fn main() {
     let _ = write_all(
         stdout(),
         to_bytes(
-            format("lines=%i pkgs=%i names=%i n0=%s", len(lines), len(pkgs), len(names), names[0]),
+            format(
+                "lines=%i pkgs=%i names=%i n0=%s",
+                lines.len(),
+                pkgs.len(),
+                names.len(),
+                names[0],
+            ),
         ),
     );
 }

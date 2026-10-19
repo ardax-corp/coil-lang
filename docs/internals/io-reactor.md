@@ -18,7 +18,7 @@ Host streams store a [`NativeHandle`](../../machine/src/io_handle.rs) (`File` / 
 | L0 `read` / `write` / `accept` | Always non-blocking; `WouldBlock` when not ready |
 | `wait_readable` / `wait_writable` (old names `await_readable` / `await_writable` still work) | Inside a `task::scope` with other tasks: suspend the **task** and run others ([tasks](tasks.md)). Otherwise: park the VM (`PendingIoWait`) until ready, inside a generator too (a generator never yields because of IO) |
 | `drive()` / `wait_ready()` | **Deprecated** (warning `E0129`). Leftovers from manual multiplexing; nothing registers waiters for them any more. Use `task::scope` |
-| **`block_on(coro)`** (prelude) | **Deprecated** (warning `E0129`). Resume until `done`. IO inside parks as above |
+| **`task::block_on(coro)`** | Library function in `task`: resume until `done`. IO inside parks as above. Prefer tasks |
 | Userland `io::sync::{write_all, …}` | Coil loops over L0 + `wait_readable` / `wait_writable` ([coil-stdlib IO](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/io.md)), so they work unchanged in and out of tasks |
 
 Concurrent IO uses tasks:
@@ -104,7 +104,9 @@ COI-37 / COI-209 / COI-215 stub reservations as live for these ids.
 
 M1 math (**125–135**, archive minor 5): `atan`, `atan2`, `asin`, `acos`,
 `log10`, `log2`, `cbrt`, `rem`, `sinh`, `cosh`, `tanh`. Frozen `sin` … `pow`
-stay **102–110**. Named `PI` / `E` / `TAU` live on coil-stdlib
+stay **102–110**. `math_pow` (**110**) and `math_rem` (**132**) keep their rows
+but no surface name reaches them: `prelude::math::{pow, rem}` were removed in
+favour of the `**` and `%` operators. Named `PI` / `E` / `TAU` live on coil-stdlib
 [`num`](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/modules.md)
 (`static const`, not HostInvoke). Package process/WebSocket/collections APIs
 belong in those package READMEs — this page only names host ids the VM owns.

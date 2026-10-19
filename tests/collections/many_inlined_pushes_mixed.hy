@@ -618,8 +618,8 @@ test("hundreds of inlined calls") {
     let names: Vec<string> = [];
     let t = fill(codes, names);
     assert!(t == 44850);
-    assert!(len(codes) == 300);
-    assert!(len(names) == 300);
+    assert!(codes.len() == 300);
+    assert!(names.len() == 300);
     assert!(codes[299] == 299);
     assert!(names[299] == "x");
 }

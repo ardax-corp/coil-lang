@@ -137,6 +137,33 @@ element or field reads move only out of loops that cannot resize or
 write the heap (`effects::may_resize` / `writes_heap`). A second CSE run
 merges hoisted consts. Hit bench: `examples/perf/mir_licm_divf.hy`.
 
+Loops and GVN/PRE ask dominance of `licm::Dominators` (#1518): the
+immediate-dominator tree (Cooper, Harvey and Kennedy, over reverse
+postorder), with each query answered from the tree's preorder spans.
+The roots are the entry and every block nothing branches to; a block no
+root reaches is dominated by every block, as the set fixpoint it
+replaced had it. That fixpoint kept every block's full dominator set, so
+a chain of `n` joins held ~n²/2 elements, and `loop_opts` built it for
+every body, loop or not. The unit test
+`natural_loops_about_linear_over_join_chain` counts the steps over `n`
+diamonds in a row:
+
+| n | steps before (set elements) | steps after (preds + intersect) |
+|---|---|---|
+| 100 | 30,500 | 802 |
+| 800 | 1,924,000 | 6,402 |
+
+`coil compile`, release, 2026-10-19, `f(int x)` of N
+`if x == k { s = s + "a"; }` (main, without #1502's LIR emission fix):
+
+| N | Ir before | Ir after | wall before | wall after |
+|---|---|---|---|---|
+| 800 | 4,671 M | 3,946 M | 0.76 s | 0.74 s |
+| 1600 | 15,409 M | 12,431 M | 2.66 s | 2.36 s |
+
+The 725 M and 2,979 M saved match what callgrind put in
+`licm::dominators` (#1518's table); emitted archives are byte-identical.
+
 Specialize no longer refuses multi-header bodies: nested numeric loops
 (including flagship `mandelbrot`) can emit `DenseBin` when infer + lower
 succeed. Straight-line bodies lift and keep only when emit cost ≤ fuse-IL
@@ -454,6 +481,126 @@ N `assert!(x == 1);` (macro expansion included): 400 went 1.14 s → 0.39 s,
 1600 went 15.2 s → 2.0 s. What remains superlinear there is macro
 expansion (each generated snippet is parsed behind padding as long as all
 earlier ones, and each call is looked up by a walk of the whole AST).
+
+Blocks nothing reaches (#1493) cost emission no more than live ones. The GC
+clears (`entry_clears`, `source_clears`) ask whether a collection can run
+before a register is rewritten (`RewriteScan`); each question used to walk
+every block reachable from its join, once per copy source of the join's φ.
+A chain of joins whose rebinding arms are dead (a folded `if x == k` with
+nothing dropping the arms, as #1434's LIR folding left before `tidy`) has
+no collection on the live path, so every walk ran to the end: ~n³ block
+scans. Now the answer is one backward pass over the CFG per register asked,
+and each register is asked once per join however long its chain of copy
+sources. Register sharing (`assign_shared`, which the issue first blamed)
+was never the cost: 3 ms at N = 800. The unit test
+`lir_clears_work_about_linear_in_unreachable_blocks` counts scans over
+`N` dead arms:
+
+| N | scans before | scans after |
+|---|---|---|
+| 100 | 696,498 | 89,496 |
+| 800 | 43,548,198 | 4,803 |
+
+(At 100 every value still has its own register, so more registers are
+asked; at 800 they share four.) Release build, 2026-10-19, `main` of N
+`if x == k { s = s + "a"; }` with #1434's folding and no `tidy`:
+
+| N | before | after | with `tidy` |
+|---|---|---|---|
+| 400 | 0.63 s | 0.22 s | |
+| 800 | 3.87 s | 0.70–0.83 s | 0.33 s |
+
+`entry_clears` went 3.48 s → 0.13 s at 800. What remained superlinear
+walked copy sources (`CopySources::of`) back through the whole φ chain, once
+per join in `entry_clears` and once per `ClearWord` in `source_clears` and
+`keep_memory_order` (~60 ms each at 800): ~n² values, reachable arms or not.
+
+Those walks are linear now (#1502). A clear only cares which registers a
+walk meets first, and in what order, so `SourceRegs` answers that once per
+value in definition order (a value's sources' registers, then each
+source's own answer, last source first, as the walk's stack pops them)
+wherever the sources form no cycle. A walk still runs in a loop, past a
+heap word fused into a branch, or when a live value defined earlier may
+stop it, and then it stops following a source once every register past
+it has been asked. `keep_memory_order` walks a clear's sources only when
+an op from before the clear is emitted after it. `EmitPlan::new` runs once
+per body (the sidecars and the cleanup pad's frame read emission's own
+plan, `LirFrame`), and a barrier's paired allocation is found from one
+pass over the body, not by a scan of the body per barrier. The emitted
+code is unchanged: 1,532 corpus archives (`-O0` and the default level)
+compile byte-identical. The unit test
+`lir_copy_sources_about_linear_over_rebinding_joins` counts the values
+the walks step through over `N` reachable arms:
+
+| N | steps before | steps after |
+|---|---|---|
+| 100 | 29,900 | 2 |
+| 800 | 1,919,200 | 2 |
+
+(Pruning the walk alone took that to 19,801 and 6,389: the first `s`'s
+register is held nowhere else, so every walk still ran to the chain's
+start. `SourceRegs` itself is one pass in definition order, each value's
+list at most one entry per register.)
+
+LIR emission alone (`emit_lir` plus its sidecars, release, the same MIR
+chain):
+
+| N | before | after |
+|---|---|---|
+| 400 | 68 ms | 9 ms |
+| 800 | 273 ms | 22 ms |
+| 1600 | 1,059 ms | 44 ms |
+| 3200 | 4,669 ms | 181 ms |
+
+A whole `coil compile` of `fn f(int x) -> string` with N
+`if x == k { s = s + "a"; }` (release, 2026-10-19, best of 3, two runs)
+went 0.31–0.32 s → 0.22–0.25 s at 400, 0.79–0.94 s → 0.55–0.58 s at 800,
+and 2.72–2.87 s → 1.55–1.61 s at 1600.
+LIR emission is ~13% of that compile at 1600; what stays superlinear there
+is `licm::dominators` (dominator sets per block, ~43% at 1600, #1518), and
+parsing, `precise_frames` and HIR id hashing. While such a body still has a
+register per value (below ~127 arms) its clears were themselves quadratic
+code (#1519).
+
+They are linear now (#1519). Each taken arm zeroed every register an
+earlier value of the chain lived in, twice: once beside its `ClearWord`
+(`source_clears`) and again past the edge's φ copies (`entry_clears`).
+`prune_clears` runs a forward dataflow, after the three clear plans, of
+the registers that may hold a word this frame wrote since its entry, and
+drops a clear of a register that holds none on any path in: zeroed by an
+earlier clear with no write after, or never written. (The precise frame
+maps count a word the frame never wrote as no root, as they do a zero, so
+neither changes what a collection scans.) Writes count wherever emission
+may put them: a block's defined registers at its top and again before its
+terminator, besides where each op stands; an edge's φs and match payloads
+before its clears; parameters and words no op defines are never zero. That
+alone left each arm zeroing every earlier join's register (the path that
+skipped the arms after it still held the old word there): `n²/2`. So a
+branch edge into a rebound join now zeroes its own copy's source, as a
+jump edge did: a skipped arm leaves its join's previous register zero once,
+on the edge, and later arms need no clear of it. The unit test
+`lir_clears_about_linear_over_rebinding_joins` counts `CONST 0; STORE`
+pairs over `N` reachable arms:
+
+| N | before | dataflow only | with branch-edge clears |
+|---|---|---|---|
+| 25 | 1,177 | 325 | 73 |
+| 100 | 19,702 | 5,050 | 298 |
+
+`fn f(int x) -> string` with N `if x == k { s = s + "a"; }`,
+`coil dissect --fn f` (release, 2026-10-19):
+
+| N | frame words | ops in `f` before | after | clears before | after |
+|---|---|---|---|---|---|
+| 25 | 52 | 2,659 | 451 | 1,177 | 73 |
+| 50 | 102 | 10,309 | 901 | 4,852 | 148 |
+| 100 | 202 | 40,609 | 1,801 | 19,702 | 298 |
+| 200 | 5 | 4,793 | 4,793 | 994 | 994 |
+
+(At 200 the registers are shared and the code was already linear.) A path
+now zeroes each register at most once: an arm zeroes the join's register it
+read, and its own result after the copy; a skipped arm costs one clear on
+its branch edge, which no arm paid before.
 
 Host Option / `Result<(),E>` / heap-heap Result still pack once at
 `HostInvoke` (`host_enum`). MIR does not add a second pack.

@@ -19,5 +19,5 @@ fn repeat(string s, int n) -> string {
 test("string concat in direct MIR") {
     assert!(greet("coil") == "hello, coil!");
     assert!(repeat("ab", 3) == "ababab");
-    assert!(len(repeat("x", 0)) == 0);
+    assert!(repeat("x", 0).len() == 0);
 }

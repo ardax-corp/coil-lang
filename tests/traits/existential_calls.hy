@@ -62,7 +62,7 @@ test("an existential local across a loop") {
     let total = 0;
     let i = 0;
     while i < 20 {
-        total += len(g.greet("abc", 2));
+        total += g.greet("abc", 2).len();
         i += 1;
     }
     assert!(total == 20 * 16);
