@@ -32,3 +32,12 @@ test("a record with a unit field is destructured") {
     assert!(a == 4);
     assert!(u == ());
 }
+
+test("a record's unit field is assigned") {
+    let r = { a: 1, u: () };
+    r.u = mark();
+    r.a = 5;
+    assert!(format("%v", r) == "{ a: 5, u: () }");
+    let v = [{ a: 1, u: () }, { a: 2, u: mark() }];
+    assert!(v[1].a == 2);
+}
