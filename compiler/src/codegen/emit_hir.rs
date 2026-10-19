@@ -681,37 +681,28 @@ impl Compiler {
             }
             plan => plan,
         };
-        // Short counted loops unroll, constants fold, a repeated pure expression reads the local that
-        // holds its first value, loop-invariant expressions move in front of
-        // their loops, and counted-loop index sites are proven in bounds,
-        // when the rewritten body plans.
+        // Short counted loops unroll, constants fold and counted-loop index
+        // sites are proven in bounds, when the rewritten body plans. CSE and
+        // loop-invariant motion run on MIR (`mir::cse`, `mir::licm`).
         let plan = match plan {
             Ok(emit)
                 if (self.opt_options.loop_unroll
                     || self.opt_options.algebraic
-                    || self.opt_options.local_cse || self.opt_options.licm || self.opt_options.loop_bounds
+                    || self.opt_options.loop_bounds
                     || self.opt_options.sink_return)
                     && !self.debugger_attached
                     && !hir.is_coro =>
             {
                 let body = inlined.as_ref().unwrap_or(hir);
-                let pure = |n: &str| crate::il::pure_call::name_in(&self.pure_fns, n);
                 let steady = |n: &str| crate::il::pure_call::name_in(&self.steady_fns, n);
-                // A finalizer that can resize runs at any allocation: no
-                // length is steady then.
-                let lengths = self.alloc_steady.then_some(&steady as &dyn Fn(&str) -> bool);
                 let unrolled = self.opt_options.loop_unroll.then(|| crate::hir::unroll::unroll(body, self.opt_options.loop_unroll_factor)).flatten();
                 let body_u = unrolled.as_ref().unwrap_or(body);
                 let folded = self.opt_options.algebraic.then(|| crate::hir::fold::fold(body_u)).flatten();
                 let body_f = folded.as_ref().unwrap_or(body_u);
-                let cse = self.opt_options.local_cse.then(|| crate::hir::cse::eliminate(body_f, pure)).flatten();
-                let body_c = cse.as_ref().unwrap_or(body_f);
-                let licm = self.opt_options.licm.then(|| crate::hir::licm::hoist(body_c, pure, lengths)).flatten();
-                let body_l = licm.as_ref().unwrap_or(body_c);
-                let bounds = (self.opt_options.loop_bounds && self.alloc_steady).then(|| crate::hir::bounds::prove(body_l, steady)).flatten();
-                let body_b = bounds.as_ref().unwrap_or(body_l);
+                let bounds = (self.opt_options.loop_bounds && self.alloc_steady).then(|| crate::hir::bounds::prove(body_f, steady)).flatten();
+                let body_b = bounds.as_ref().unwrap_or(body_f);
                 let sunk = self.opt_options.sink_return.then(|| crate::hir::sink_return::sink(body_b)).flatten();
-                match sunk.or(bounds).or(licm).or(cse).or(folded).or(unrolled) {
+                match sunk.or(bounds).or(folded).or(unrolled) {
                     Some(next) => match lower::refusal(&next, &self.checker)
                         .map_or_else(|| self.plan_hir_body(&next), Err)
                         .and_then(|mut e| self.plan_hir_lambdas(&module, &next, &mut e).map(|()| e))
@@ -1102,6 +1093,8 @@ impl Compiler {
         // A finalizer object's local is pinned (`HirMirInput::pinned`) so
         // it lives as long as its frame slot would.
         let checker = &self.checker;
+        let pure_fns = &self.pure_fns;
+        let steady_fns = &self.steady_fns;
         let string_indices = &self.string_indices;
         let is_class = move |t: &Ty| {
             let t = apply_ty_prune(checker.subst(), t);
@@ -1529,6 +1522,9 @@ impl Compiler {
             unbox_any: &tables.unbox_any,
             open_params: &tables.open_params,
             lens: &emit.plan.lens,
+            alloc_steady: self.alloc_steady,
+            pure_fn: Box::new(move |n: &str| crate::il::pure_call::name_in(pure_fns, n)),
+            steady_fn: Box::new(move |n: &str| crate::il::pure_call::name_in(steady_fns, n)),
             box_at: &emit.plan.box_at,
             is_class: Box::new(is_class),
             scalar_enum: Box::new(scalar_enum),
@@ -6863,9 +6859,61 @@ impl Compiler {
         if [&site.begin_local, &site.end_local].into_iter().flatten().any(|n| !heads.contains_key(n)) {
             return None;
         }
+        // An iteration that never reads its index and computes something
+        // from captures alone repeats that work each time: MIR LICM moves
+        // it ahead of the loop, leaving nothing to split across workers.
+        // A bare fold over captures (`acc = acc + k`) still splits.
+        let index = bind.or_else(|| outer.get(&site.index).copied());
+        let acc = outer.get(&site.acc).copied();
+        let varies = |l: LocalId| Some(l) == index || Some(l) == acc || !bound(l);
+        if index.is_some_and(|ix| !Self::hir_reads_index(hir, body, ix)) && Self::hir_invariant_work(hir, body, &varies) {
+            return None;
+        }
         // Only the number of live captures matters to the natives.
         let natives = self.par_loop_natives(site.live_captures.len())?;
         Some(HirParSiteLocals { site, outer, heads, natives })
+    }
+
+    /// Whether `id` reads local `ix` other than in its own step (`ix = ix + 1`).
+    fn hir_reads_index(hir: &HirBody, id: HirId, ix: LocalId) -> bool {
+        match &hir.expr(id).kind {
+            HirKind::Local(l) => *l == ix,
+            HirKind::Assign { place, .. } if matches!(hir.expr(*place).kind, HirKind::Local(l) if l == ix) => false,
+            _ => lower::children(hir, id).into_iter().any(|k| Self::hir_reads_index(hir, k, ix)),
+        }
+    }
+
+    /// Whether `id` holds a computation (an operator, cast, read or call)
+    /// that reads no local `varies` admits and writes nothing: work the
+    /// same in every iteration.
+    fn hir_invariant_work(hir: &HirBody, id: HirId, varies: &dyn Fn(LocalId) -> bool) -> bool {
+        let computes = matches!(
+            hir.expr(id).kind,
+            HirKind::Bin { .. }
+                | HirKind::Logic { .. }
+                | HirKind::Un { .. }
+                | HirKind::Cast { .. }
+                | HirKind::Call { .. }
+                | HirKind::Field { .. }
+                | HirKind::Index { .. }
+        );
+        if !computes {
+            return lower::children(hir, id).into_iter().any(|k| Self::hir_invariant_work(hir, k, varies));
+        }
+        let mut moves = true;
+        lower::visit(hir, id, &mut |x| match x.kind {
+            HirKind::Local(l) => moves &= !varies(l),
+            HirKind::Let { .. }
+            | HirKind::LetPat { .. }
+            | HirKind::Assign { .. }
+            | HirKind::Append { .. }
+            | HirKind::Clear(_)
+            | HirKind::Loop { .. }
+            | HirKind::Break
+            | HirKind::Continue => moves = false,
+            _ => {}
+        });
+        moves || lower::children(hir, id).into_iter().any(|k| Self::hir_invariant_work(hir, k, varies))
     }
 
     /// Parallel loop `id` moved into its own fork-join function, emitted
