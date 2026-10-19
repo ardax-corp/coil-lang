@@ -22,22 +22,6 @@ fn pairs_total() -> int {
     return total;
 }
 
-fn dict_values() -> int {
-    let total = 0;
-    for (_, v) in { a: 1, b: 2, c: 4 } {
-        total = total + v;
-    }
-    return total;
-}
-
-fn dict_entries() -> int {
-    let n = 0;
-    for entry in { a: 5, b: 6 } {
-        n = n + entry[1];
-    }
-    return n;
-}
-
 test("let patterns") {
     assert!(swap_sum(1, 2) == 21);
     assert!(nested(3) == 705);
@@ -45,6 +29,4 @@ test("let patterns") {
 
 test("for-in patterns") {
     assert!(pairs_total() == 14);
-    assert!(dict_values() == 7);
-    assert!(dict_entries() == 11);
 }

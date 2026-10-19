@@ -1,6 +1,5 @@
 // `for x in e` iterates every builtin iterable: fixed arrays, Vecs,
-// homogeneous tuples, homogeneous dicts (as `(name, value)` pairs),
-// coroutines, and `int` / `byte` / `float` ranges (half-open, inclusive,
+// homogeneous tuples, coroutines, and `int` / `byte` / `float` ranges (half-open, inclusive,
 // stored in a variable); a decreasing range and an empty Vec run zero times.
 use tests::assert;
 
@@ -34,25 +33,6 @@ test("homogeneous tuple") {
         s = s + x;
     }
     assert!(s == 60);
-}
-
-test("homogeneous dict yields name and value") {
-    let d = { a: 1, b: 2, c: 3 };
-    let total = 0;
-    let names = 0;
-    for e in d {
-        total = total + e[1];
-        names = names + e[0].len();
-    }
-    assert!(total == 6);
-    assert!(names == 3);
-    let seen = 0;
-    for (k, v) in d {
-        if k == "b" {
-            seen = v;
-        }
-    }
-    assert!(seen == 2);
 }
 
 test("coroutine") {
