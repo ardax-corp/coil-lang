@@ -8,6 +8,7 @@ name = "coil-verify"
 path = "src/main.rs"
 
 [dependencies]
+coil-build-id = { path = "../coil-build-id" }
 compiler = { path = "../compiler", default-features = false }
 reporting = { path = "../reporting" }
 coil-args = { path = "../coil-args" }

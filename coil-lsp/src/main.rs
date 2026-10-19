@@ -144,6 +144,7 @@ fn parse_options(
 }
 
 fn main() {
+    coil_build_id::check_parent("coil-lsp");
     comptime::install();
     let cwd = std::env::current_dir().unwrap_or_default();
     let options = match parse_options(std::env::args().skip(1), &cwd) {
