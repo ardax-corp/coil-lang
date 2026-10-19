@@ -214,6 +214,9 @@ struct HirLambda {
     /// Its code's entry label, reserved when planned: the entry of the
     /// function its body is emitted as.
     label: IlLabel,
+    /// The enclosing shared generic body's dictionaries it captures after
+    /// its own captures (#1526): each one's name and the enclosing slot.
+    dicts: Vec<(String, u32)>,
 }
 
 /// An anonymous `fn` whose body is emitted as a function of its own once
@@ -225,6 +228,8 @@ pub(in crate::codegen) struct HirLambdaTail {
     /// Parameters to `UnboxValue` on entry: a lambda literal passed where
     /// a generic callee boxes its arguments (#699).
     unbox: Option<Vec<Option<Ty>>>,
+    /// The dictionaries it captures ([`HirLambda::dicts`]).
+    dicts: Vec<(String, u32)>,
 }
 
 /// What planning decided for one body: the representation of each value,
@@ -878,13 +883,14 @@ impl Compiler {
         self.queue_hir_lambdas(hir, emit);
         Self::queue_hir_par_loops(emit);
         let emit = &*emit;
-        self.hir_mir_dict_sp = entry_words;
+        // A lambda's captured dictionaries sit below its parameters.
+        self.hir_mir_dict_sp = entry_words.or(self.hir_lambda_dicts.filter(|&(_, n)| n > 0).map(|(at, n)| at + n));
         let tables = self.hir_mir_tables(hir, emit);
         self.hir_mir_dict_sp = None;
         // A shared generic body's dictionaries are trailing parameters
         // direct MIR reads only through dictionary programs: a body whose
         // code reads one any other way stays on the stack lowering.
-        if entry_words.is_some() && tables.reads_dicts {
+        if (entry_words.is_some() || self.hir_lambda_dicts.is_some_and(|(_, n)| n > 0)) && tables.reads_dicts {
             self.hir_mir_why = Some("converted or shared generic entry".into());
             return None;
         }
@@ -946,7 +952,13 @@ impl Compiler {
         for id in ids {
             let lam = emit.plan.lambdas.get_mut(&id).expect("planned lambda");
             if let Some(code) = lam.emit.take() {
-                let tail = HirLambdaTail { body: lam.body.clone(), emit: code, label: lam.label, unbox: unbox.remove(&id) };
+                let tail = HirLambdaTail {
+                    body: lam.body.clone(),
+                    emit: code,
+                    label: lam.label,
+                    unbox: unbox.remove(&id),
+                    dicts: lam.dicts.clone(),
+                };
                 self.hir_lambda_tail.push(tail);
             }
         }
@@ -1643,6 +1655,7 @@ impl Compiler {
             cold_ok: emit.plan.cold_ok,
             file,
             entry_words,
+            lambda_dicts: self.hir_lambda_dicts.filter(|&(_, n)| n > 0),
             opaque_vars,
             debugger: self.debugger_attached,
             coverage: self.keep_fns_in.is_some(),
@@ -2547,13 +2560,28 @@ impl Compiler {
                 }
                 return Err(reason);
             }
+            // A shared generic body's dictionaries (`__dictN`), captured
+            // after its own captures so its bound operators, `%v` and
+            // forwarded calls read them as the body's do (#1526).
+            let dicts: Vec<(String, u32)> = if self.compiling_mono_clone {
+                Vec::new()
+            } else {
+                (0..)
+                    .map_while(|i| {
+                        let name = format!("__dict{i}");
+                        self.lookup_slot(&name).map(|slot| (name, slot))
+                    })
+                    .collect()
+            };
             let prev_vars = std::mem::take(&mut self.context.variables);
             let prev_two_word = self.compiling_two_word_enum.take();
-            Self::hir_lambda_frame(&mut self.context.variables, lam);
+            Self::hir_lambda_frame(&mut self.context.variables, lam, &dicts);
+            let prev_dicts = self.hir_lambda_dicts.replace((lam.captures.len() as u32, dicts.len() as u32));
             // Lambdas inside it are planned in its frame.
             let plan = self
                 .plan_hir_body_ret(lam, ret)
                 .and_then(|mut plan| self.plan_hir_lambdas(module, lam, &mut plan).map(|()| plan));
+            self.hir_lambda_dicts = prev_dicts;
             self.context.variables = prev_vars;
             self.compiling_two_word_enum = prev_two_word;
             let mut plan = plan?;
@@ -2563,15 +2591,20 @@ impl Compiler {
                 plan.plan.params.insert(inner.0, (slot as u32, None));
             }
             let label = self.bytecode.fresh_label();
-            emit.plan.lambdas.insert(i as u32, Box::new(HirLambda { body: lam.clone(), emit: Some(plan), label }));
+            emit.plan.lambdas.insert(i as u32, Box::new(HirLambda { body: lam.clone(), emit: Some(plan), label, dicts }));
         }
         Ok(())
     }
 
-    /// A lambda's frame: each capture's name, then each parameter's.
-    fn hir_lambda_frame(vars: &mut Interner<String>, lam: &HirBody) -> Vec<u32> {
-        let names = lam.captures.iter().map(|&(_, inner)| inner).chain(lam.params.iter().copied());
-        names.map(|local| vars.intern(lam.local(local).name.clone()) as u32).collect()
+    /// A lambda's frame: each capture's name, each captured dictionary's,
+    /// then each parameter's. The slots of the captures and parameters.
+    fn hir_lambda_frame(vars: &mut Interner<String>, lam: &HirBody, dicts: &[(String, u32)]) -> Vec<u32> {
+        let mut slots: Vec<u32> = lam.captures.iter().map(|&(_, inner)| vars.intern(lam.local(inner).name.clone()) as u32).collect();
+        for (name, _) in dicts {
+            vars.intern(name.clone());
+        }
+        slots.extend(lam.params.iter().map(|&p| vars.intern(lam.local(p).name.clone()) as u32));
+        slots
     }
 
     /// How the function being compiled returns `hir`'s result.
@@ -6923,7 +6956,7 @@ impl Compiler {
     /// Whether the body being lowered is a generic one's shared body (it
     /// takes dictionaries; a mono clone takes none).
     pub(super) fn hir_shared_generic(&self) -> bool {
-        !self.compiling_mono_clone && self.lookup_slot("__dict0").is_some()
+        !self.compiling_mono_clone && self.hir_lambda_dicts.is_none() && self.lookup_slot("__dict0").is_some()
     }
 
     /// How a call's result sits against its own (instance) type's layout,
@@ -7261,7 +7294,7 @@ impl Compiler {
     }
 
     fn hir_lambda_fn(&mut self, lam: HirLambdaTail) {
-        let HirLambdaTail { body, mut emit, label, unbox } = lam;
+        let HirLambdaTail { body, mut emit, label, unbox, dicts } = lam;
         // A lambda spliced into several bodies is a function per copy.
         let mut name = body.name.clone();
         let mut k = 1;
@@ -7278,8 +7311,9 @@ impl Compiler {
         let start = self.bytecode.len();
         self.fn_entry_labels.insert(name.clone(), label);
         self.bind_function_entry(name.clone());
-        let slots = Self::hir_lambda_frame(&mut self.context.variables, &body);
+        let slots = Self::hir_lambda_frame(&mut self.context.variables, &body, &dicts);
         let ncap = body.captures.len();
+        let prev_dicts = self.hir_lambda_dicts.replace((ncap as u32, dicts.len() as u32));
         for (&param, &slot) in body.params.iter().zip(&slots[ncap..]) {
             let pname = body.local(param).name.clone();
             self.record_debug_param(&pname, slot);
@@ -7306,12 +7340,13 @@ impl Compiler {
         }
         self.hir_mir_why = None;
         self.hir_mir = self.hir_lower_mir(&flat, &mut emit, None);
+        self.hir_lambda_dicts = prev_dicts;
         // A lambda with a `defer` gets its cleanup pad, as a function does,
         // so a cancelled task's unwinder runs it (#1194).
         let prev_defers = std::mem::replace(&mut self.hir_defers, flat.exprs.iter().any(|e| matches!(e.kind, HirKind::Defer { .. })));
         let pinned = self.finish_fn_defers(&name);
         self.hir_defers = prev_defers;
-        let arity = (ncap + body.params.len()) as u32;
+        let arity = (ncap + dicts.len() + body.params.len()) as u32;
         self.fn_arities.insert(name.clone(), (arity, false));
         self.bytecode.record_func_with_sp(name.clone(), Some(label), start, self.bytecode.len(), arity);
         self.attach_hir_mir();
