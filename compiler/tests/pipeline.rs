@@ -4106,6 +4106,8 @@ fn main() {
         static_word_kinds: pipeline.static_word_kinds(),
         debug_lines: Vec::new(),
         cleanup_ranges: Vec::new(),
+        line_table: Vec::new(),
+        span_table: Vec::new(),
     };
     let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
     let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
@@ -4824,6 +4826,8 @@ fn main() {
         static_word_kinds: pipeline.static_word_kinds(),
         debug_lines: Vec::new(),
         cleanup_ranges: Vec::new(),
+        line_table: Vec::new(),
+        span_table: Vec::new(),
     };
     let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
     let archived =

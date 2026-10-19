@@ -3520,6 +3520,7 @@
             fn_symbols: Vec::new(),
             debug_lines: vec![DebugLine { line: 7, column: 2 }, DebugLine { line: 9, column: 1 }],
             cleanup: Vec::new(),
+            table: Default::default(),
         });
         assert_eq!(vm.debug_pc_line(0), Some((0, 7)));
         assert_eq!(vm.debug_pc_line(1), Some((1, 9)));
@@ -3550,6 +3551,7 @@
             fn_symbols: Vec::new(),
             debug_lines: Vec::new(),
             cleanup: Vec::new(),
+            table: Default::default(),
         });
         assert_eq!(vm.debug_pc_line(0), Some((0, 2)));
         assert_eq!(vm.resolve_pc_location(0).map(|(_, l, c)| (l, c)), Some((2, 4)));
@@ -3579,6 +3581,7 @@
             ],
             debug_lines: vec![],
             cleanup: Vec::new(),
+            table: Default::default(),
         });
         vm.run(&[
             make_coro(0, 9),

@@ -4,7 +4,8 @@ use std::path::PathBuf;
 
 use clap::{Command, CommandFactory, Parser};
 use coil_args::{
-    HostGrantFlags, LogFlags, OptLevelFlags, RootFlags, expand_o_shorts, parse_with,
+    DebugLevelFlags, HostGrantFlags, LogFlags, OptLevelFlags, RootFlags, expand_o_shorts,
+    parse_with,
     print_command_help,
 };
 use reporting::ReportConfig;
@@ -63,6 +64,8 @@ struct TestCli {
     log: LogFlags,
     #[command(flatten)]
     opt: OptLevelFlags,
+    #[command(flatten)]
+    debug: DebugLevelFlags,
     #[command(flatten)]
     grants: HostGrantFlags,
     #[command(flatten)]
@@ -209,6 +212,7 @@ fn parse_test(args: &[String]) -> Result<Parsed, String> {
     let (config, test) = assemble(RunParts {
         log: cli.log,
         opt: cli.opt,
+        debug: cli.debug.level(),
         grants: cli.grants,
         roots: cli.roots,
         seed: cli.seed,
@@ -247,6 +251,7 @@ fn parse_mutate(expanded: &[String], original: &[String]) -> Result<Parsed, Stri
     let (config, test) = assemble(RunParts {
         log: cli.log,
         opt: cli.opt,
+        debug: None,
         grants: cli.grants,
         roots: cli.roots,
         seed: cli.seed,
@@ -291,6 +296,7 @@ fn parse_mutate(expanded: &[String], original: &[String]) -> Result<Parsed, Stri
 struct RunParts {
     log: LogFlags,
     opt: OptLevelFlags,
+    debug: Option<compiler::DebugLevel>,
     grants: HostGrantFlags,
     roots: RootFlags,
     seed: Option<u64>,
@@ -313,6 +319,10 @@ fn assemble(parts: RunParts) -> Result<(ReportConfig, Box<TestOptions>), String>
     }
     let config = ReportConfig::from_cli_flags(parts.log.log_json, parts.log.log_lsp)
         .map_err(|e| e.to_string())?;
+    let coverage = parts.coverage || parts.coverage_out.is_some() || parts.per_test_out.is_some();
+    if coverage && parts.debug.is_some_and(|l| l != compiler::DebugLevel::Full) {
+        return Err("coverage needs byte spans: drop -g0 / -g1 (or pass -g2)".into());
+    }
     let env_seed = std::env::var(SEED_ENV).ok();
     let order = resolve_order(
         parts.seed,
@@ -339,6 +349,7 @@ fn assemble(parts: RunParts) -> Result<(ReportConfig, Box<TestOptions>), String>
                 project_root: std::env::current_dir().unwrap_or_default(),
             }),
             opt_level: parts.opt.level(),
+            debug_level: parts.debug,
             contracts: parts.opt.contracts,
             contract_runs: parts.contract_runs,
             grants: parts.grants.into_grants(),
