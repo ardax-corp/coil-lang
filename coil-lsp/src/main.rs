@@ -2164,10 +2164,10 @@ fn builtin_description(module: &str, name: &str, export: &BuiltinExport) -> Stri
         ("io", "await_writable") => "Old name of `wait_writable`.".into(),
         ("io", "drive") => "Polls async IO waiters once; returns newly-ready count.".into(),
         ("io", "wait_ready") => "Blocks until any registered async IO waiter is ready; returns newly-ready count.".into(),
-        ("io", "from_bytes") | ("string", "from_bytes") => {
+        ("string", "from_bytes") => {
             "Decodes UTF-8 bytes into a string.".into()
         }
-        ("io", "to_bytes") | ("string", "to_bytes") => {
+        ("string", "to_bytes") => {
             "Encodes a string as UTF-8 bytes.".into()
         }
         ("string", "format") => {
