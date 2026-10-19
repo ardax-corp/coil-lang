@@ -1765,9 +1765,18 @@ pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
 /// indirect callee, or a function's or ground method's returned closure.
 fn returned_closure(body: &HirBody, checker: &Checker, call: HirId) -> bool {
     match &body.expr(call).kind {
+        // A `PolyFn` call's at a ground function type: codegen adapts the
+        // shared body's closure to it (#1589).
         HirKind::Call {
             callee: Callee::Value(g), ..
-        } => indirect_callee(body, checker, *g),
+        } => {
+            indirect_callee(body, checker, *g)
+                || polyfn_callee(body, checker, *g)
+                    && body.expr(call).ty.as_ref().is_some_and(|t| {
+                        let t = apply_ty_prune(checker.subst(), t);
+                        mono_fun(checker, &t, &mut Vec::new())
+                    })
+        }
         // A non-generic function's returned closure. A generic one's at a
         // ground function type is a plain closure too (#1527): a mono
         // clone's, or the shared body's wrapped in an adapter to that type
