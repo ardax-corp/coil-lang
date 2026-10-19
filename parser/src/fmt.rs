@@ -3446,4 +3446,44 @@ fn main() { return; }
             assert_eq!(format_source(&once).unwrap(), once);
         }
     }
+
+    /// How many `Try`, `Access` and `OptionalAccess` nodes `src` parses to.
+    /// Parens only add `Group` nodes, so equal counts mean the same reading.
+    fn shape(src: &str) -> [usize; 3] {
+        let ast = Pratt::default()
+            .parse(src)
+            .unwrap_or_else(|e| panic!("{src}: {e:?}"));
+        let text = format!("{:?}", ast.1);
+        ["Try(", " Access(", "OptionalAccess("].map(|k| {
+            text.match_indices(k).count()
+                + usize::from(k == " Access(") * text.match_indices("(Access(").count()
+        })
+    }
+
+    #[test]
+    fn member_after_try_keeps_its_meaning() {
+        // #1540: `r? .len()` is `(r?).len()`; printing it as `r?.len()`
+        // would turn it into optional access.
+        let chain = ".show().len()".repeat(7);
+        for body in [
+            "r? .len()".to_string(),
+            "r?\n        .len()".to_string(),
+            "r? .text".to_string(),
+            "r? .text.len()".to_string(),
+            format!("r? .text{chain}"),
+            format!("r? {chain}"),
+        ] {
+            let src = format!("fn main() {{\n    let n = {body};\n}}\n");
+            let once = format_source(&src).unwrap_or_else(|e| panic!("{src}: {e:?}"));
+            assert_eq!(shape(&once), shape(&src), "meaning changed:\n{src}\n=>\n{once}");
+            assert!(once.contains("(r?)"), "{once}");
+            stable(&once);
+        }
+        // Unbroken `?.` is optional access and stays as written.
+        stable("fn main() {\n    let n = r?.text;\n}\n");
+        let src = format!("fn main() {{\n    let n = r?{chain};\n}}\n");
+        let once = format_source(&src).unwrap();
+        assert_eq!(shape(&once), shape(&src), "meaning changed:\n{once}");
+        assert!(!once.contains("(r?)"), "{once}");
+    }
 }
