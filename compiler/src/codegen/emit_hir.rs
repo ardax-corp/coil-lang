@@ -2503,11 +2503,16 @@ impl Compiler {
             let HirKind::Lambda { body } = expr.kind else {
                 continue;
             };
-            // A clone's lambdas keep the generic body's types.
-            if self.compiling_mono_clone {
-                return Err("lambda-mono");
-            }
-            let lam = &module.bodies[body];
+            // A clone's lambda lowers at the clone's type arguments, as the
+            // clone's own body does (#1524).
+            let instance = self
+                .compiling_mono_clone
+                .then(|| self.mono_var_tys.last().map(|map| self.hir_instance(&module.bodies[body], map)));
+            let lam = match &instance {
+                Some(Some(inst)) => inst,
+                Some(None) => return Err("lambda-mono"),
+                None => &module.bodies[body],
+            };
             lam.root.ok_or("lambda")?;
             if lam.is_coro {
                 return Err("lambda-body");
