@@ -72,12 +72,6 @@ impl Hash for Pt {
     }
 }
 
-impl String for Pt {
-    fn to_string(Pt __str_Pt) -> string {
-        return string::format("Pt { x: %v, y: %v }", __str_Pt.x, __str_Pt.y);
-    }
-}
-
 impl Send for Pt {
 }
 
@@ -137,12 +131,6 @@ impl Default for Unit {
 impl Hash for Unit {
     fn hash(Unit __hash_Unit) -> int {
         return 0;
-    }
-}
-
-impl String for Unit {
-    fn to_string(Unit __str_Unit) -> string {
-        return string::format("Unit {  }");
     }
 }
 
@@ -383,21 +371,6 @@ impl Hash for Sh {
     }
 }
 
-impl String for Sh {
-    fn to_string(Sh __str_Sh) -> string {
-        return match __str_Sh {
-            Sh::Dot => string::format("Sh::Dot"),
-            Sh::Circle(s_p0) => string::format("Sh::Circle(%v)", s_p0),
-            Sh::Pair(s_p0, s_p1) => string::format("Sh::Pair(%v, %v)", s_p0, s_p1),
-            Sh::Rect { w: _, h: _ } => string::format(
-                "Sh::Rect { w: %v, h: %v }",
-                __str_Sh.w,
-                __str_Sh.h,
-            ),
-        };
-    }
-}
-
 impl Send for Sh {
 }
 
@@ -431,12 +404,6 @@ impl Eq for Holder {
     }
     fn ne(Holder __eq_a_Holder, Holder __eq_b_Holder) -> bool {
         return !(__eq_a_Holder == __eq_b_Holder);
-    }
-}
-
-impl String for Holder {
-    fn to_string(Holder __str_Holder) -> string {
-        return "Holder";
     }
 }
 
@@ -502,13 +469,6 @@ impl Hash for Status {
     fn hash(Status __hash_Status) -> int {
         let __hash_n_Status: int = __hash_Status;
         return __hash_n_Status.hash();
-    }
-}
-
-impl String for Status {
-    fn to_string(Status __str_Status) -> string {
-        let __str_n_Status: int = __str_Status;
-        return __str_n_Status.show();
     }
 }
 
@@ -624,20 +584,10 @@ impl Hash for Mode {
     }
 }
 
-impl String for Mode {
-    fn to_string(Mode __str_Mode) -> string {
-        let __str_n_Mode: string = __str_Mode;
-        return __str_n_Mode.show();
-    }
-}
-
-test("class Show / String / Eq") {
+test("class Show / Eq") {
     let p = new Pt(1, 2);
     if true != (p.show() == "Pt { x: 1, y: 2 }") {
         raise p.show();
-    }
-    if true != (p.to_string() == "Pt { x: 1, y: 2 }") {
-        raise p.to_string();
     }
     if true != (format("%v", p) == "Pt { x: 1, y: 2 }") {
         raise format("%v", p);
@@ -678,7 +628,7 @@ test("class Ord / Hash") {
     }
 }
 
-test("enum Show / String") {
+test("enum Show") {
     if true != (Sh::Dot.show() == "Sh::Dot") {
         raise "Assertion: 'Sh::Dot.show() == \"Sh::Dot\"' failed";
     }
@@ -688,8 +638,8 @@ test("enum Show / String") {
     if true != (Sh::Pair(1, 2).show() == "Sh::Pair(1, 2)") {
         raise Sh::Pair(1, 2).show();
     }
-    if true != (Sh::Rect { w: 1, h: 2 }.to_string() == "Sh::Rect { w: 1, h: 2 }") {
-        raise "Assertion: 'Sh::Rect { w: 1, h: 2 }.to_string() == \"Sh::Rect { w: 1, h: 2 }\"' failed";
+    if true != (Sh::Rect { w: 1, h: 2 }.show() == "Sh::Rect { w: 1, h: 2 }") {
+        raise "Assertion: 'Sh::Rect { w: 1, h: 2 }.show() == \"Sh::Rect { w: 1, h: 2 }\"' failed";
     }
 }
 
@@ -739,8 +689,8 @@ test("scalar enums use their backing") {
     if true != (Status::Ok.show() == "200") {
         raise "Assertion: 'Status::Ok.show() == \"200\"' failed";
     }
-    if true != (Status::NotFound.to_string() == "404") {
-        raise "Assertion: 'Status::NotFound.to_string() == \"404\"' failed";
+    if true != (Status::NotFound.show() == "404") {
+        raise "Assertion: 'Status::NotFound.show() == \"404\"' failed";
     }
     if true != (Status::Ok == Status::Ok) {
         raise "Assertion: 'Status::Ok == Status::Ok' failed";

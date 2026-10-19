@@ -666,7 +666,7 @@ pub enum Expression<'expr> {
         methods: Vec<Output<'expr>>,
     },
 
-    /// `impl Num<int> { … }` or `impl Show for Point { … }` — trait instance.
+    /// `impl Num for int { … }` / `impl Show for Point { … }` — trait instance.
     ///
     /// For the `impl Trait<A, B> for T` form, `args` is `[T, A, B]` (Self first).
     TypeClassImpl {

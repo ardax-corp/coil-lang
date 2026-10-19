@@ -2561,8 +2561,7 @@ fn match_jmp_to_end_placeholders_are_patched_to_end_label() {
 fn nested_match_in_loop_emits_expected_opcodes() {
     use common::Instruction;
     let (bc, _pool) = compile_src(
-        "fn consume(Option<int> x) -> int { \
- let i = 0; \
+        "fn consume(Option<int> x, int i) -> int { \
  while (i < 3) { \
  return match x { \
  Option::None() => 0, \
@@ -2571,7 +2570,7 @@ fn nested_match_in_loop_emits_expected_opcodes() {
  } \
  return 0; \
  } \
- fn main() { let _g = consume; let _ = consume(Option::Some(0)); }",
+ fn main() { let _g = consume; let _ = consume(Option::Some(0), 0); }",
     );
 
     let exit_branch_count = loop_exit_branch_count(&bc);
@@ -7018,8 +7017,12 @@ fn cast_as_int_emits_cast_opcode() {
     use common::Instruction;
     let (bc, _) = compile_src(
         r#"
+fn to_int(float x) -> int {
+    return x as int;
+}
 fn main() {
-    return (3.5 as int);
+    let _g = to_int;
+    return to_int(3.5);
 }
 "#,
     );

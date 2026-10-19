@@ -32,15 +32,15 @@
     }
 
     #[test]
-    fn default_show_string_use_type_name_when_no_derive() {
+    fn default_show_uses_type_name_when_no_derive() {
         let (_exp, decls) = expand_src("class Point { pub x: int, pub y: int } fn main() {}");
         assert!(
             impl_method_names(&decls, "Show").contains(&"show".to_string()),
             "expected default Show::show"
         );
         assert!(
-            impl_method_names(&decls, "String").contains(&"to_string".to_string()),
-            "expected default String::to_string"
+            impl_method_names(&decls, "String").is_empty(),
+            "no default `String` impl: `Show` is the one display trait"
         );
         let show_dbg = decls
             .iter()

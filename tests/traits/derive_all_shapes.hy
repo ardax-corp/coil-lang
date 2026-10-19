@@ -3,16 +3,16 @@
 use tests::assert;
 use string::format;
 
-#[derive(Show, Eq, Ord, Default, Hash, String, Send, Sensitive)]
+#[derive(Show, Eq, Ord, Default, Hash, Send, Sensitive)]
 class Pt {
     pub x: int,
     pub y: int,
 }
 
-#[derive(Show, Eq, Ord, Default, Hash, String)]
+#[derive(Show, Eq, Ord, Default, Hash)]
 class Unit {}
 
-#[derive(Show, Eq, Ord, Default, Hash, String, Send)]
+#[derive(Show, Eq, Ord, Default, Hash, Send)]
 enum Sh {
     Dot,
     Circle(int),
@@ -27,23 +27,22 @@ enum Holder {
     B(bool),
 }
 
-#[derive(Show, Eq, Ord, Hash, String, Default)]
+#[derive(Show, Eq, Ord, Hash, Default)]
 enum Status {
     Ok = 200,
     NotFound = 404,
 }
 
 #[repr(string)]
-#[derive(Show, Eq, Ord, Hash, String)]
+#[derive(Show, Eq, Ord, Hash)]
 enum Mode {
     Read = "r",
     Write = "w",
 }
 
-test("class Show / String / Eq") {
+test("class Show / Eq") {
     let p = new Pt(1, 2);
     assert!(p.show() == "Pt { x: 1, y: 2 }", p.show());
-    assert!(p.to_string() == "Pt { x: 1, y: 2 }", p.to_string());
     assert!(format("%v", p) == "Pt { x: 1, y: 2 }", format("%v", p));
     assert!(p == new Pt(1, 2), "eq");
     assert!(p != new Pt(1, 3), "ne");
@@ -63,11 +62,11 @@ test("class Ord / Hash") {
     assert!(new Pt(0 - big - 1, big).hash() != new Pt(big, big).hash());
 }
 
-test("enum Show / String") {
+test("enum Show") {
     assert!(Sh::Dot.show() == "Sh::Dot");
     assert!(Sh::Circle(3).show() == "Sh::Circle(3)", Sh::Circle(3).show());
     assert!(Sh::Pair(1, 2).show() == "Sh::Pair(1, 2)", Sh::Pair(1, 2).show());
-    assert!(Sh::Rect { w: 1, h: 2 }.to_string() == "Sh::Rect { w: 1, h: 2 }");
+    assert!(Sh::Rect { w: 1, h: 2 }.show() == "Sh::Rect { w: 1, h: 2 }");
 }
 
 test("enum Eq / Ord") {
@@ -90,7 +89,7 @@ test("enum Hash") {
 
 test("scalar enums use their backing") {
     assert!(Status::Ok.show() == "200");
-    assert!(Status::NotFound.to_string() == "404");
+    assert!(Status::NotFound.show() == "404");
     assert!(Status::Ok == Status::Ok);
     assert!(Status::Ok < Status::NotFound);
     assert!(Status::Ok.hash() == 200.hash());

@@ -515,6 +515,10 @@ Methods have an implicit `self`; `pub` makes them callable from outside the
 type, and `static fn` declares one that is called on the type. An inherent
 `fn drop()` is a finalizer the garbage collector runs once.
 
+A generic type's inherent impl declares its parameters, `impl Cell<T> { … }`
+(bounds as `impl Cell<T: Eq>`). `impl Show<Foo> { … }` is an error: a trait
+instance is always written `impl Show for Foo`.
+
 ```coil
 class Celsius {
     pub deg: float,

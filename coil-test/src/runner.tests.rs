@@ -329,6 +329,53 @@ fn coverage_reports_project_lines() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// A line whose code constant folding would erase (`255 as byte` only
+/// reaches the return as a constant) still counts as covered: a coverage
+/// compile keeps each line's code, in a LIR body (`top`) and in a body
+/// with the arithmetic dense pays for (`topd`, #1494).
+#[test]
+fn coverage_keeps_a_line_folding_would_erase() {
+    let root = std::fs::canonicalize(std::env::temp_dir())
+        .unwrap()
+        .join(format!("coil_test_coverage_fold_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("tests")).unwrap();
+    std::fs::write(
+        root.join("src/bytesx.hy"),
+        "fn top(int k) -> int {\n    let bytes = [k as byte, 255 as byte];\n    return bytes[1] as int;\n}\n\nfn topd(int k) -> int {\n    let bytes = [k as byte, 255 as byte];\n    return (bytes[1] as int) * 3 + 1;\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("tests/top.hy"),
+        "use bytesx::{top, topd};\n\ntest(\"top\") {\n    if !(top(1) == 255) { raise \"assertion failed\"; }\n    if !(topd(1) == 766) { raise \"assertion failed\"; }\n}\n",
+    )
+    .unwrap();
+    let opts = TestOptions {
+        extra_roots: vec![root.join("src")],
+        coverage: Some(CoverageOptions {
+            lcov_out: root.join("unused.info"),
+            per_test_out: None,
+            project_root: root.clone(),
+        }),
+        ..options(&root.join("tests"), false)
+    };
+    let result = run_test_suite(ReportConfig::default(), &opts).expect("suite runs");
+    assert_eq!((result.passed, result.failed), (1, 0));
+    let lcov = result.coverage.expect("coverage collected").lcov();
+    // Hits count per instruction run: covered is any nonzero count.
+    let hits = |line: u32| {
+        lcov.lines()
+            .find_map(|l| l.strip_prefix(&format!("DA:{line},")))
+            .and_then(|n| n.parse::<u64>().ok())
+    };
+    assert!(hits(2).is_some_and(|n| n > 0), "the `let` line is covered: {lcov}");
+    assert!(hits(3).is_some_and(|n| n > 0), "the `return` line is covered: {lcov}");
+    assert!(hits(7).is_some_and(|n| n > 0), "`topd`'s `let` line is covered: {lcov}");
+    assert!(hits(8).is_some_and(|n| n > 0), "`topd`'s `return` line is covered: {lcov}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn suite_exit_code_is_nonzero_iff_any_case_failed() {
     assert_eq!(suite_exit_code(0), 0);
