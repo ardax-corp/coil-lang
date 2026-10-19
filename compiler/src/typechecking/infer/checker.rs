@@ -14833,8 +14833,10 @@ impl Checker {
             }
             Expression::Use { path, name, alias }
                 if name != "*" => {
+                    let local = alias.as_deref().unwrap_or(name);
                     if !self.apply_virtual_use(path, name, alias.as_deref()) {
-                        self.drop_prelude_fn(alias.as_deref().unwrap_or(name));
+                        // A disk import shadows the prelude fn (#1488).
+                        self.drop_prelude_fn(local);
                     }
                 }
             _ => {}
