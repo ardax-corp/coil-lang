@@ -103,9 +103,12 @@ pub(super) struct HirMirTables {
     /// Some code emission writes for this body reads one of the frame's
     /// dictionaries (`__dictN`) ([`Compiler::hir_mir_dict_reads`]).
     pub(super) reads_dicts: bool,
-    /// The key of each field a record `let` pattern binds (`None`: a
-    /// wildcard), by `let`: MIR pushes each as a string.
-    pub(super) record_pats: HashMap<u32, Vec<Option<u32>>>,
+    /// The `InitTyped` type id of each record literal's slotted object
+    /// ([`Checker::record_type_id`]), by literal.
+    pub(super) record_types: HashMap<u32, u32>,
+    /// Each field name of a `for (k, v) in record` loop's record, in slot
+    /// (name) order, interned: the loop's `(name, value)` items.
+    pub(super) record_iters: HashMap<u32, Vec<u32>>,
     /// Shared generic call arguments of a niche layout passed in a boxed
     /// parameter ([`Compiler::hir_niche_arg`]): boxed to their enum
     /// object, by argument.
@@ -155,8 +158,7 @@ impl Compiler {
     }
 
     /// Intern the strings direct MIR reads by name that `hir`'s code
-    /// pushes: record keys (a record literal's, a field read or written by
-    /// name) and the backing string of each string-backed scalar enum
+    /// pushes: the backing string of each string-backed scalar enum
     /// variant it makes or matches.
     fn hir_mir_intern_keys(&mut self, hir: &HirBody) {
         let mut variants: Vec<(String, String)> = Vec::new();
@@ -177,15 +179,7 @@ impl Compiler {
         }
         for e in &hir.exprs {
             match &e.kind {
-                HirKind::Make { kind: MakeKind::Record(names), .. } => {
-                    for name in names {
-                        self.intern_string(name);
-                    }
-                }
-                HirKind::Field { base, name } if matches!(self.hir_field(hir, *base, name), Some((FieldAt::Name, _))) => {
-                    self.intern_string(name);
-                }
-                HirKind::Make { kind: MakeKind::Variant { enum_name, variant, .. }, .. } => {
+                    HirKind::Make { kind: MakeKind::Variant { enum_name, variant, .. }, .. } => {
                     variants.push((enum_name.clone(), variant.clone()));
                 }
                 HirKind::Match { arms, .. } => arms.iter().for_each(|a| pat_variants(&a.pat, &mut variants)),
@@ -638,18 +632,12 @@ impl Compiler {
             {
                 t.array_copies.insert(value.0, native);
             }
-            // `let { a, b } = r`: each bound field read by its key.
-            HirKind::LetPat { pat: HirPat::Record(parts), .. } => {
-                let keys = parts
-                    .iter()
-                    .map(|(name, part)| match part {
-                        HirPat::Wild => Some(None),
-                        HirPat::Bind(_) => Some(Some(self.intern_string(name))),
-                        _ => None,
-                    })
-                    .collect::<Option<Vec<_>>>();
-                if let Some(keys) = keys {
-                    t.record_pats.insert(id.0, keys);
+            // `{a: x, b: y}`: a slotted object of its shape's type id.
+            HirKind::Make { kind: MakeKind::Record(_), .. } => {
+                let ty = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));
+                if let Some(Ty::Record { fields }) = ty.as_ref().map(crate::typechecking::ty::strip_readonly) {
+                    let type_id = self.checker.record_type_id(fields);
+                    t.record_types.insert(id.0, type_id);
                 }
             }
             HirKind::Bin { op: BinOp::StrConcat, .. } => {
@@ -817,7 +805,19 @@ impl Compiler {
                 iterable,
                 kind: Some(kind),
                 ..
-            } => self.hir_mir_for_in(hir, id, pat, *iterable, kind, t),
+            } => {
+                // `for (k, v) in r`: its `(name, value)` items, names first.
+                if let ForInKind::Dict = kind
+                    && let Some(Ty::Record { fields }) =
+                        Self::hir_ty(hir, *iterable).map(|t| apply_ty_prune(self.checker.subst(), t)).as_ref().map(crate::typechecking::ty::strip_readonly)
+                {
+                    let mut names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
+                    names.sort_unstable();
+                    let keys = names.into_iter().map(|n| self.intern_string(n)).collect();
+                    t.record_iters.insert(id.0, keys);
+                }
+                self.hir_mir_for_in(hir, id, pat, *iterable, kind, t)
+            }
             HirKind::Index {
                 base,
                 index,
@@ -1888,12 +1888,14 @@ impl Compiler {
                 return Some(crate::mir::HirShow::Tuple { fmt, items });
             }
             Ty::Record { fields } => {
+                // In slot order: the fields sorted by name.
+                let mut fields = fields.clone();
+                fields.sort_by(|a, b| a.0.cmp(&b.0));
                 let mut shown = Vec::with_capacity(fields.len());
-                for (name, t) in fields {
-                    let key = self.intern_string(name);
-                    shown.push((key, t.clone(), self.hir_show_ty(t)?));
+                for (slot, (_, t)) in fields.iter().enumerate() {
+                    shown.push((slot as u32, t.clone(), self.hir_show_ty(t)?));
                 }
-                let fmt = self.intern_string(unescape_coil_string(&Self::record_show_format(fields)));
+                let fmt = self.intern_string(unescape_coil_string(&Self::record_show_format(&fields)));
                 return Some(crate::mir::HirShow::Record { fmt, fields: shown });
             }
             // An arity-wide tuple thunk's item: its own dictionary (#1479).

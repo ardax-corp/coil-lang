@@ -38,12 +38,12 @@ const BOXED: Rep = Rep::Word(ValueLayout::Boxed);
 /// Typed inlining rounds: the calls a round splices in inline in the next.
 const HIR_INLINE_ROUNDS: usize = 3;
 
-/// Where a field lives: a class slot (`LoadField` / `SetField` slot form)
-/// or a record key (`GetField` / `SetField` by name).
+/// Where a field lives: a class slot or a record's (`LoadField` /
+/// `SetField` slot form). A record's slots are its fields sorted by name.
 #[derive(Clone, Copy)]
 enum FieldAt {
     Slot(u32),
-    Name,
+    Record(u32),
 }
 
 impl Rep {
@@ -1413,34 +1413,32 @@ impl Compiler {
                 boxed_niches.insert(i as u32, layout);
             }
         }
-        // Record (dict) fields by key, and record literals, whose words are
-        // the ones their types name. Emission interned every key.
-        let key = |n: &str| self.string_indices.get(n).copied();
+        // Record fields by slot (the fields sorted by name), and record
+        // literals, whose words are the ones their types name.
         let mut record_fields = HashMap::new();
         let mut records = HashMap::new();
         let mut record_pats = HashMap::new();
+        let mut record_iters = HashMap::new();
         for (i, e) in hir.exprs.iter().enumerate() {
             match &e.kind {
                 HirKind::Field { base, name }
-                    if let Some((FieldAt::Name, fty)) = self.hir_field(hir, *base, name)
+                    if let Some((FieldAt::Record(slot), fty)) = self.hir_field(hir, *base, name)
                         && let Some(w) = record_word(&fty)
-                        && e.ty.as_ref().and_then(record_word) == Some(w)
-                        && let Some(k) = key(name) =>
+                        && e.ty.as_ref().and_then(record_word) == Some(w) =>
                 {
-                    record_fields.insert(i as u32, (k, w));
+                    record_fields.insert(i as u32, (slot, w));
                 }
                 // A `()` field holds the empty tuple object (#1510).
                 HirKind::Field { base, name }
-                    if let Some((FieldAt::Name, fty)) = self.hir_field(hir, *base, name)
-                        && crate::hir::layout::is_unit(&apply_ty_prune(checker.subst(), &fty))
-                        && let Some(k) = key(name) =>
+                    if let Some((FieldAt::Record(slot), fty)) = self.hir_field(hir, *base, name)
+                        && crate::hir::layout::is_unit(&apply_ty_prune(checker.subst(), &fty)) =>
                 {
-                    record_fields.insert(i as u32, (k, crate::mir::MirTy::HeapRef));
+                    record_fields.insert(i as u32, (slot, crate::mir::MirTy::HeapRef));
                 }
                 HirKind::Make {
                     kind: MakeKind::Record(names),
                     args,
-                } => {
+                } if let Some(&type_id) = tables.record_types.get(&(i as u32)) => {
                     let ty = e.ty.as_ref().map(|t| apply_ty_prune(checker.subst(), t));
                     let Some(Ty::Record { fields }) = ty.as_ref().map(crate::typechecking::ty::strip_readonly) else {
                         continue;
@@ -1450,45 +1448,61 @@ impl Compiler {
                         .zip(args)
                         .map(|(n, &arg)| {
                             let (_, fty) = fields.iter().find(|(f, _)| f == n)?;
+                            let slot = fields.iter().filter(|(f, _)| f < n).count() as u32;
                             // A `()` field holds the empty tuple object (#1510).
                             if crate::hir::layout::is_unit(&apply_ty_prune(checker.subst(), fty)) {
-                                return Some((key(n)?, crate::mir::MirTy::HeapRef));
+                                return Some((slot, crate::mir::MirTy::HeapRef));
                             }
                             let w = record_word(fty)?;
-                            (Self::hir_ty(hir, arg).and_then(record_word) == Some(w)).then_some((key(n)?, w))
+                            (Self::hir_ty(hir, arg).and_then(record_word) == Some(w)).then_some((slot, w))
                         })
                         .collect::<Option<Vec<_>>>();
                     if let Some(words) = words {
-                        records.insert(i as u32, words);
+                        records.insert(i as u32, (type_id, words));
                     }
                 }
-                // A record `let` pattern: each bound field's key and the
-                // word its type names, which the bound local holds.
+                // A record `let` pattern that binds only locals and
+                // wildcards: each bound field's slot and the word its type
+                // names, which the bound local holds.
                 HirKind::LetPat {
                     pat: HirPat::Record(parts),
                     init,
-                } if let Some(keys) = tables.record_pats.get(&(i as u32)) => {
+                } => {
                     let ty = Self::hir_ty(hir, *init).map(|t| apply_ty_prune(checker.subst(), t));
                     let Some(Ty::Record { fields }) = ty.as_ref().map(crate::typechecking::ty::strip_readonly) else {
                         continue;
                     };
                     let words = parts
                         .iter()
-                        .zip(keys)
-                        .map(|((n, _), key)| match key {
-                            None => Some(None),
-                            Some(k) => {
+                        .map(|(n, part)| match part {
+                            HirPat::Wild => Some(None),
+                            HirPat::Bind(_) => {
                                 let (_, fty) = fields.iter().find(|(f, _)| f == n)?;
                                 // A `()` binding has no slot (#1510).
                                 if crate::hir::layout::is_unit(&apply_ty_prune(checker.subst(), fty)) {
                                     return Some(None);
                                 }
-                                Some(Some((*k, record_word(fty)?)))
+                                let slot = fields.iter().filter(|(f, _)| f < n).count() as u32;
+                                Some(Some((slot, record_word(fty)?)))
                             }
+                            _ => None,
                         })
                         .collect::<Option<Vec<_>>>();
                     if let Some(words) = words {
                         record_pats.insert(i as u32, words);
+                    }
+                }
+                // `for (k, v) in r`: each slot's interned name and word.
+                HirKind::ForIn { iterable, .. } if let Some(names) = tables.record_iters.get(&(i as u32)) => {
+                    let ty = Self::hir_ty(hir, *iterable).map(|t| apply_ty_prune(checker.subst(), t));
+                    let Some(Ty::Record { fields }) = ty.as_ref().map(crate::typechecking::ty::strip_readonly) else {
+                        continue;
+                    };
+                    let mut fields = fields.clone();
+                    fields.sort_by(|a, b| a.0.cmp(&b.0));
+                    let words = fields.iter().zip(names).map(|((_, fty), &name)| Some((name, record_word(fty)?))).collect::<Option<Vec<_>>>();
+                    if let Some(words) = words {
+                        record_iters.insert(i as u32, words);
                     }
                 }
                 _ => {}
@@ -1712,6 +1726,7 @@ impl Compiler {
             record_fields,
             records,
             record_pats,
+            record_iters,
             matrix_wraps: &tables.matrix_wraps,
             field_news: &tables.field_news,
             linalgs: &tables.linalgs,
@@ -6673,11 +6688,12 @@ impl Compiler {
     /// Slot index and declared type of field `name` of the object `base`.
     fn hir_field(&self, hir: &HirBody, base: HirId, name: &str) -> Option<(FieldAt, Ty)> {
         let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, base)?);
-        // A record's fields go by name, each one boxed word as the AST's
-        // `MakeDict` stores it.
+        // A record's field is its slot among the fields sorted by name,
+        // each one boxed word.
         if let Ty::Record { fields } = crate::typechecking::ty::strip_readonly(&ty) {
             let (_, fty) = fields.iter().find(|(n, _)| n == name)?;
-            return (self.value_layout(fty) == ValueLayout::Boxed).then(|| (FieldAt::Name, fty.clone()));
+            let slot = fields.iter().filter(|(n, _)| n.as_str() < name).count() as u32;
+            return (self.value_layout(fty) == ValueLayout::Boxed).then(|| (FieldAt::Record(slot), fty.clone()));
         }
         if let Some(found) = self.hir_variant_field(&ty, name) {
             return Some(found);

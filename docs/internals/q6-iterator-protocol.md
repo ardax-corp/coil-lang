@@ -47,9 +47,10 @@ type level). Runtime lowering:
    `LoadField` 0/1 and uses the same counted latch. Bare `for x in r` on
    a live-in param pair can DestProp-peel back onto entry slots.
 5. **Tuple** — temp array, then (1).
-6. **Dict** — `DictEntries` then the array counted latch (1). Items are
-   `(string, V)` pairs (keys at `[0]`, values at `[1]`; that is the
-   entries surface). `for (k, v) in d` is the same lowering plus let-pattern
+6. **Record** — an array of `(name, value)` tuples built from the
+   record's slots at the loop (names are compile-time strings, in name
+   order), then the array counted latch (1). Items are `(string, V)` pairs
+   (keys at `[0]`, values at `[1]`; that is the entries surface). `for (k, v) in d` is the same lowering plus let-pattern
    binds (`k`/`v` instead of `p[0]`/`p[1]`). Homogeneous values only. User
    `into_iter` that returns a dict uses the same path.
 7. **User `Iterator::next`** (C2b rung 2) keeps

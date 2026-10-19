@@ -176,8 +176,24 @@ pub const RANGE_HEAP_TYPE_ID: u32 = 0xFFFE;
 /// Heap `RangeInclusive` `InitTyped` id. Inclusive lives in the type, not a slot.
 pub const RANGE_INCLUSIVE_HEAP_TYPE_ID: u32 = 0xFFFD;
 
-/// `Some(slot)` when `type_id` is a slotted numeric Range and `name` is `start`/`end`.
+/// `io::fs::metadata`'s record, built by the host. Records are slotted
+/// objects whose slots are their fields sorted by name.
+pub const FS_METADATA_TYPE_ID: u32 = 0xFFFC;
+
+/// An `extern struct` value an FFI call returns: a record, its slots the
+/// struct's fields sorted by name.
+pub const FFI_STRUCT_TYPE_ID: u32 = 0xFFFB;
+
+/// The fields of `io::fs::metadata`'s record in slot (name) order.
+pub const FS_METADATA_FIELDS: [&str; 5] = ["is_dir", "is_file", "is_symlink", "modified_unix", "size"];
+
+/// `Some(slot)` when `type_id` is a slotted numeric Range and `name` is
+/// `start`/`end`, or the host's `fs::metadata` record and `name` one of its
+/// fields (a named read of a host-built slotted object).
 pub fn range_heap_field_slot(type_id: u32, name: &str) -> Option<usize> {
+    if type_id == FS_METADATA_TYPE_ID {
+        return FS_METADATA_FIELDS.iter().position(|f| *f == name);
+    }
     if type_id != RANGE_HEAP_TYPE_ID && type_id != RANGE_INCLUSIVE_HEAP_TYPE_ID {
         return None;
     }
@@ -212,5 +228,13 @@ mod tests {
         );
         assert_eq!(range_heap_field_slot(1, "start"), None);
         assert_eq!(range_heap_field_slot(RANGE_HEAP_TYPE_ID, "inclusive"), None);
+    }
+
+    #[test]
+    fn fs_metadata_slots_are_sorted_names() {
+        let mut sorted = FS_METADATA_FIELDS;
+        sorted.sort_unstable();
+        assert_eq!(sorted, FS_METADATA_FIELDS);
+        assert_eq!(range_heap_field_slot(FS_METADATA_TYPE_ID, "size"), Some(4));
     }
 }
