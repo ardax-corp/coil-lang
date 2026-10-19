@@ -73,13 +73,14 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
             Some(ValueClass::Opaque)
         }
         Ty::Constructor { owner, .. } => classify_in(checker, owner, seen),
-        Ty::Tuple(items) if !items.is_empty() => aggregate(checker, items.iter(), seen),
+        // A `()` item is stored as the empty tuple object (#1427).
+        Ty::Tuple(items) if !items.is_empty() => aggregate(checker, items.iter(), true, seen),
         // A record: one dict word, its fields read and written by name.
         Ty::Record { fields } if !fields.is_empty() => fields
             .iter()
             .all(|(_, f)| classify_in(checker, f, seen).is_some_and(is_word))
             .then_some(ValueClass::Opaque),
-        Ty::Array { element, .. } => aggregate(checker, std::iter::once(element.as_ref()), seen),
+        Ty::Array { element, .. } => aggregate(checker, std::iter::once(element.as_ref()), false, seen),
         // A bare-class existential (`Show x`): one `[value, dictionary]`
         // tuple word, only moved and called through its dictionary.
         Ty::Existential { .. } => Some(ValueClass::Opaque),
@@ -88,7 +89,7 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
             classify_in(checker, crate::typechecking::aggregate_arith::unwrap_matrix_ty(ty)?, seen)
         }
         Ty::App(..) if coil_ty::vec_element_ty(ty).is_some() => {
-            aggregate(checker, coil_ty::vec_element_ty(ty).into_iter(), seen)
+            aggregate(checker, coil_ty::vec_element_ty(ty).into_iter(), false, seen)
         }
         // A higher-kinded parameter's instance (`F<A>` in a shared body):
         // the instance's one word, only moved and passed to its dictionary.
@@ -227,11 +228,13 @@ fn params_closed(ty: &Ty) -> bool {
 }
 
 /// A tuple, array or `Vec` whose element types are closed but for type
-/// parameters (elements are classified where they are read).
-fn aggregate<'t>(checker: &Checker, mut items: impl Iterator<Item = &'t Ty>, seen: &mut Vec<String>) -> Option<ValueClass> {
+/// parameters (elements are classified where they are read). With `unit`,
+/// an item may be `()`.
+fn aggregate<'t>(checker: &Checker, mut items: impl Iterator<Item = &'t Ty>, unit: bool, seen: &mut Vec<String>) -> Option<ValueClass> {
     items
         .all(|t| {
-            (params_closed(t) || is_existential(t) || mono_fun(checker, t, seen)) && classify_in(checker, t, seen).is_none_or(is_word)
+            (params_closed(t) || is_existential(t) || mono_fun(checker, t, seen))
+                && classify_in(checker, t, seen).is_none_or(|class| is_word(class) || unit && class == ValueClass::Unit)
         })
         .then_some(ValueClass::Aggregate)
 }
@@ -885,28 +888,6 @@ pub fn existential_hint(body: &HirBody, checker: &Checker, id: HirId) -> bool {
     let e = body.expr(id);
     e.node.and_then(|n| checker.existential_method_call_at(n)).is_some()
         || checker.existential_method_call_span(e.span.0, e.span.1).is_some()
-}
-
-/// Whether `e` is a `format` call with a tuple or record argument: `%v`
-/// shows it field by field.
-pub fn shows_through_temps(body: &HirBody, checker: &Checker, e: &super::HirExpr) -> bool {
-    use crate::typechecking::StringBuiltin;
-    let HirKind::Call {
-        callee: Callee::Named { name, .. },
-        args,
-    } = &e.kind
-    else {
-        return false;
-    };
-    let format = checker
-        .string_fn_in_scope(name)
-        .or_else(|| name.strip_prefix("string::").and_then(StringBuiltin::from_name));
-    matches!(format, Some(StringBuiltin::Format))
-        && args.iter().skip(1).any(|&a| {
-            body.expr(a).ty.as_ref().is_some_and(|t| {
-                matches!(strip_readonly(&apply_ty_prune(checker.subst(), t)), Ty::Tuple(_) | Ty::Record { .. })
-            })
-        })
 }
 
 /// Each `break` / `continue` outside every loop of `body` and of the
@@ -2088,6 +2069,12 @@ impl Walk<'_> {
     /// Each of `items`, in order.
     fn items(&mut self, items: &[HirId]) -> Check {
         for &item in items {
+            // A `()` item runs for its effect; the tuple stores the empty
+            // tuple object (#1427).
+            if is_unit_value(self.body, self.checker, item) {
+                self.effect(item)?;
+                continue;
+            }
             self.word(item)?;
             self.value(item)?;
         }
@@ -2415,7 +2402,11 @@ impl Walk<'_> {
                 if !matches!(kind, IndexKind::Array | IndexKind::Tuple) {
                     return Err("index-kind");
                 }
-                self.word(id)?;
+                // A tuple's `()` item is read for the base's and index's
+                // effects only (#1427).
+                if !(*kind == IndexKind::Tuple && is_unit_value(body, self.checker, id)) {
+                    self.word(id)?;
+                }
                 self.aggregate(*base)?;
                 self.scalar(*index)?;
                 // A slot `LOAD`, or a select over the slots.

@@ -2753,11 +2753,6 @@ impl Compiler {
             }
         }
         self.plan_hir_local_layouts(hir, &mut emit)?;
-        // Calls above stack-array boxes do not stage, so a `format` that
-        // shows through temps could run above live operands.
-        if !emit.plan.box_at.is_empty() && hir.exprs.iter().any(|e| lower::shows_through_temps(hir, &self.checker, e)) {
-            return Err("format-show");
-        }
         let defers = hir.exprs.iter().any(|e| matches!(e.kind, HirKind::Defer { .. }));
         let tail = |value: HirId| {
             emit.plan.calls.get(&value.0).is_some_and(|call| {
@@ -4093,16 +4088,33 @@ impl Compiler {
     /// A bound method call in a mono clone: `T` is concrete here, so the
     /// instance is looked up from the ground argument types and called
     /// directly, as `try_emit_ground_bound_method_nodes`.
-    /// The instance types of trait `class`'s method call `call` with no
-    /// arguments: its `n` trait parameters bound by the method's result type
-    /// against the call's (ground) type.
-    fn hir_bound_call_result_lookup(&self, hir: &HirBody, call: HirId, class: &str, method: &str, n: usize) -> Option<Vec<Ty>> {
+    /// The instance types of trait `class`'s method call `call` when its
+    /// leading arguments do not name them: its `n` trait parameters bound by
+    /// the method's result type against the call's (ground) type, then by
+    /// its parameter types against `args` (`fn wrap(A x, int b) -> B` binds
+    /// `B` from the result and `A` from `x`, #1442).
+    fn hir_bound_call_result_lookup(
+        &self,
+        hir: &HirBody,
+        call: HirId,
+        args: &[HirId],
+        class: &str,
+        method: &str,
+        n: usize,
+    ) -> Option<Vec<Ty>> {
         let scheme = self.checker.typeclass_method_scheme(class, method)?;
         let vars = scheme.bounds.get(..n)?;
-        let (_, ret) = Self::fun_param_and_ret_tys(&scheme.ty);
+        let (params, ret) = Self::fun_param_and_ret_tys(&scheme.ty);
         let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, call)?);
         let mut map = HashMap::new();
         Self::bind_scheme_vars(&ret, &ty, &mut map);
+        if params.len() == args.len() {
+            for (param, &arg) in params.iter().zip(args) {
+                if let Some(arg_ty) = Self::hir_ty(hir, arg) {
+                    Self::bind_scheme_vars(param, &apply_ty_prune(self.checker.subst(), arg_ty), &mut map);
+                }
+            }
+        }
         vars.iter()
             .map(|v| map.get(v).filter(|t| crate::hir::layout::ty_is_closed(t)).map(Self::show_lookup_ty_for_instance))
             .collect()
@@ -4157,7 +4169,7 @@ impl Compiler {
             // No argument names the instance (`default()`): the method's
             // signature against the call's result type does.
             let lookup = self
-                .hir_bound_call_result_lookup(hir, call, &hint.class, method, class_def.type_params.len())
+                .hir_bound_call_result_lookup(hir, call, args, &hint.class, method, class_def.type_params.len())
                 .ok_or("callee-trait")?;
             (lookup, &[])
         } else {
@@ -4501,8 +4513,7 @@ impl Compiler {
                 let ty = Self::hir_ty(hir, arg).ok_or("callee-signature")?;
                 if specs.get(i) == Some(&'v') {
                     let ty = apply_ty_prune(self.checker.subst(), ty);
-                    // A tuple or record shows field by field
-                    // ([`lower::shows_through_temps`]).
+                    // A tuple or record shows field by field.
                     if !crate::hir::layout::ty_is_closed(&ty) && self.hir_bound_show(hir, arg).is_none() && !self.hir_generic_show(&ty) {
                         return Err("format-show");
                     }
@@ -4534,6 +4545,12 @@ impl Compiler {
             let ty = Self::hir_ty(hir, arg).ok_or("callee-signature")?;
             match lower::classify(&self.checker, ty) {
                 Some(class) if lower::is_word(class) => {}
+                // A `()` argument passes the empty tuple object, as to a
+                // plain call (#1428).
+                Some(ValueClass::Unit) => {
+                    params.push(ValueLayout::Boxed);
+                    continue;
+                }
                 _ => return Err("callee-signature"),
             }
             // A `%v` argument stays in its own layout: `Show` boxes it as
@@ -4778,12 +4795,14 @@ impl Compiler {
         // dictionaries also passes its own bare type parameters, already
         // boxed words.
         // A shared generic body (no dictionaries to forward) passes its own
-        // bare type parameters the same way (#915).
+        // bare type parameters the same way (#915), a method's own ones
+        // (`fn third<W>(W w)` in an impl) included (#1467).
         let shared = !self.compiling_mono_clone
-            && self
-                .current_function_table_key
-                .as_deref()
-                .is_some_and(|k| self.checker.is_generic_fn(strip_overload_key(k)));
+            && (hir.is_generic
+                || self
+                    .current_function_table_key
+                    .as_deref()
+                    .is_some_and(|k| self.checker.is_generic_fn(strip_overload_key(k))));
         let open = |ty: &Ty| (shared || !forwarded.is_empty()) && matches!(ty, Ty::Var(_));
         let ground = |id: HirId| {
             let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
