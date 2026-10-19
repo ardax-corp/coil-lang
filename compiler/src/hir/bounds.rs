@@ -366,7 +366,7 @@ impl<S: Fn(&str) -> bool> Cx<'_, S> {
             HirKind::Call { callee: Callee::Method { name }, args } if name == "len" && length_of(body, args) => {}
             HirKind::Call { .. } => w.steady = false,
             HirKind::Builtin { op, .. } => {
-                w.steady &= matches!(op, super::Builtin::Panic | super::Builtin::TypeOf | super::Builtin::Readonly | super::Builtin::Default);
+                w.steady &= matches!(op, super::Builtin::Panic | super::Builtin::TypeOf | super::Builtin::Default);
             }
             _ => {}
         });

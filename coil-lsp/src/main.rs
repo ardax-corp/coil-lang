@@ -1286,9 +1286,17 @@ fn identifier_locations(
     let Some(name) = identifier_name(document, position) else {
         return Vec::new();
     };
+    // Bare unit cases (`None`, `Red`) in patterns, as the last typecheck
+    // of `path` resolved them; an untyped file has none.
+    let bare_cases = |path: &Path| match &state.project_index {
+        Some(project) => project.bare_cases_for_file(path),
+        None => compiler::BareCases::none(),
+    };
     // Function locals resolve through lexical scopes, never by name.
+    let document_path = uri_path(uri).unwrap_or_default();
     if let Some(offset) = position_to_byte(&document.text, position)
-        && let Some(binding) = compiler::binding_at(&document.text, offset)
+        && let Some(binding) =
+            compiler::binding_at(&document.text, offset, bare_cases(&document_path))
     {
         return binding
             .occurrences()
@@ -1317,7 +1325,7 @@ fn identifier_locations(
 
     let mut visit_index = |path: &Path, source: &str, index: &SymbolIndex| {
         // A local that happens to share the global's name is not a use of it.
-        let local_starts: HashSet<usize> = compiler::local_bindings(source)
+        let local_starts: HashSet<usize> = compiler::local_bindings(source, bare_cases(path))
             .iter()
             .filter(|binding| binding.name == name)
             .flat_map(|binding| binding.occurrences().map(|r| r.start).collect::<Vec<_>>())
@@ -5501,6 +5509,37 @@ fn main() { return f(1); }
         assert!(
             diagnostics.iter().any(|d| d.message.contains("bool") || d.message.contains("int")),
             "expected unsaved type error, got {diagnostics:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A bare unit case of an imported enum (`On`) in a pattern is a case,
+    /// as the checker reads it, not a local binding of the arm.
+    #[test]
+    fn bare_imported_case_in_pattern_is_not_a_local() {
+        let dir = std::env::temp_dir().join(format!(
+            "coil-lsp-bare-case-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        write_hy_project(
+            &dir,
+            &[
+                ("lib.hy", "enum Switch {\n    On,\n    Off,\n}\n"),
+                (
+                    "main.hy",
+                    "use lib::Switch;\nfn f(Switch s) -> int {\n    return match s {\n        On => 1,\n        Off => 2,\n    };\n}\nfn main() { let _ = f(Switch::On); return; }\n",
+                ),
+            ],
+        );
+        let (state, uris) = open_state(&dir, &[("main.hy", None)]);
+        let main = std::fs::read_to_string(dir.join("main.hy")).unwrap();
+        let offset = main.find("On =>").expect("arm");
+        let locations =
+            identifier_locations(&state, &uris["main.hy"], byte_position(&main, offset), true);
+        assert!(
+            !(locations.len() == 1 && locations[0].uri == uris["main.hy"]),
+            "`On` resolved as a local binding of its arm: {locations:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -1417,7 +1417,9 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             E::TypeOf(inner) => self.builtin(b, node, Builtin::TypeOf, std::slice::from_ref(inner)),
             E::Dload(inner) => self.builtin(b, node, Builtin::Dload, std::slice::from_ref(inner)),
             E::Done(inner) => self.builtin(b, node, Builtin::Done, std::slice::from_ref(inner)),
-            E::Readonly(inner) => self.builtin(b, node, Builtin::Readonly, std::slice::from_ref(inner)),
+            // `readonly` lives on the type only; the HIR sees the value, so
+            // the passes that match an initializer's shape still see it.
+            E::Readonly(inner) => self.expr(b, inner),
             E::Declare(args) => self.builtin(b, node, Builtin::Declare, args),
             E::Invoke(args) => self.builtin(b, node, Builtin::Invoke, args),
             E::Default(_) => self.builtin(b, node, Builtin::Default, &[]),
@@ -1762,9 +1764,13 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             arrows += 1;
             ty = ret;
         }
+        // A generic result (`fn id<T>(T x) -> T`) covers the rest when the
+        // call instantiates it at a function type: the checker took them.
+        let open_result =
+            matches!(strip_readonly(ty), Ty::Var(v) if candidate.scheme.bounds.contains(v)) && arrows >= declared;
         if args.len() <= declared
             || candidate.is_rest
-            || arrows < args.len()
+            || (arrows < args.len() && !open_result)
             || args.iter().any(|&a| matches!(b.body.exprs[a.0 as usize].kind, HirKind::Named { .. } | HirKind::Spread(_)))
         {
             return call;
@@ -1827,7 +1833,16 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                         args,
                     },
                 );
-                let call = self.split_over_application(b, call, &[n]);
+                // An imported function's candidate is keyed by the module
+                // its def names (`use m::adder` registers `m::adder`).
+                let interner = self.checker.def_interner();
+                let declared = def
+                    .or_else(|| self.checker.def_id_of(n))
+                    .and_then(|d| interner.info(d))
+                    .and_then(|info| Some((interner.module_path(info.module)?, info.name.as_str())))
+                    .and_then(|(module, short)| (!module.is_empty()).then(|| format!("{module}::{short}")));
+                let keys: Vec<&str> = declared.as_deref().into_iter().chain([*n]).collect();
+                let call = self.split_over_application(b, call, &keys);
                 self.after(b, span_of(node), stmts, call)
             }
             E::QualifiedAccess { owner, member } => {

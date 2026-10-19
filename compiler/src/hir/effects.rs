@@ -317,6 +317,7 @@ pub(crate) fn auto_par_explanations(
     module_path: &str,
     fx: &ModuleEffects<'_>,
     pure: &HashSet<String>,
+    cases: &crate::typechecking::bare_cases::BareCases,
 ) -> Vec<String> {
     use crate::typechecking::{analyze_loop_par_sites, analyze_par_fork_sites};
     let mut all = pure.clone();
@@ -354,8 +355,8 @@ pub(crate) fn auto_par_explanations(
             reasons.join("; ")
         ));
     }
-    let actual = analyze_par_fork_sites(ast, pure);
-    let mut blocked: Vec<String> = analyze_par_fork_sites(ast, &all)
+    let actual = analyze_par_fork_sites(ast, pure, cases);
+    let mut blocked: Vec<String> = analyze_par_fork_sites(ast, &all, cases)
         .into_keys()
         .filter(|name| !actual.contains_key(name))
         .collect();
@@ -961,7 +962,7 @@ impl Cx<'_> {
                 Builtin::Declare | Builtin::Invoke | Builtin::Dload => {
                     self.note(w, id, EffectFlags::FFI | EffectFlags::RESIZE, || "calls foreign code".into())
                 }
-                Builtin::TypeOf | Builtin::Done | Builtin::Readonly | Builtin::Default | Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::Relayout => {}
+                Builtin::TypeOf | Builtin::Done | Builtin::Default | Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::Relayout => {}
                 Builtin::Print => self.note(w, id, EffectFlags::WRITE, || "prints".into()),
             },
             // Workers of a parallel region have no statics, and another

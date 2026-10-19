@@ -2155,6 +2155,18 @@ impl Compiler {
                 let local = b.local(&format!("arg{slot}"), open.clone(), LocalKind::Param);
                 let word = b.read(local);
                 b.builtin(Builtin::Relayout, vec![word], own)
+            } else if let Some((tag, ty)) = &tag
+                && *tag == ValueTag::Instance as u32
+                && matches!(self.value_layout(ty), ValueLayout::NicheOption | ValueLayout::NicheResult | ValueLayout::NicheUnitResult)
+            {
+                // A niche `Option` / `Result` comes as its enum object,
+                // boxed: unboxed, read as a plain word, to its niche word
+                // (#1580), as `emit_builtin_enum_show`'s adapter.
+                let int = crate::typechecking::ty::int();
+                let local = b.local(&format!("arg{slot}"), int.clone(), LocalKind::Param);
+                let word = b.read(local);
+                let obj = b.builtin(Builtin::Unbox { tag: *tag }, vec![word], int);
+                b.builtin(Builtin::Relayout, vec![obj], ty.clone())
             } else if let Some((tag, ty)) = tag {
                 // A `()` moves as the word it is.
                 let ty = if tag == ValueTag::Unit as u32 { crate::typechecking::ty::int() } else { ty };
@@ -2900,6 +2912,22 @@ impl Compiler {
         class: &str,
         lookup: &[crate::typechecking::Ty],
     ) -> bool {
+        // A built-in enum's sum or constructor type (`Some(e)`'s, in a mono
+        // clone) as its `App` spelling, which a generic instance's head
+        // binds its context's variables against (#1580).
+        let spelled: Vec<Ty>;
+        let lookup = if lookup.iter().any(|t| !matches!(t, Ty::App(..)) && crate::typechecking::ty::builtin_enum_app(t).is_some()) {
+            spelled = lookup
+                .iter()
+                .map(|t| match t {
+                    Ty::App(..) => t.clone(),
+                    _ => crate::typechecking::ty::builtin_enum_app(t).unwrap_or_else(|| t.clone()),
+                })
+                .collect();
+            &spelled[..]
+        } else {
+            lookup
+        };
         // An open goal (`Show<Tree<T>>`, `Show<T>`) is served by a dictionary
         // in scope, or by the mono clone's concrete types; looking it up
         // would match an arbitrary instance (#551).
@@ -7321,12 +7349,13 @@ impl Compiler {
         crate::verify::capture_module(&self.checker, &self.typed_sidecar, module, ast);
         self.build_hir_for_lowering(module, ast);
         // Recursion depth / `#[max_depth]`, independent of auto-par.
-        let stack_bound = crate::typechecking::analyze_stack_bounds(ast);
+        let bare_cases = self.checker.bare_cases().clone();
+        let stack_bound = crate::typechecking::analyze_stack_bounds(ast, &bare_cases);
         self.messages.extend(stack_bound.messages);
         self.operand_stack_slots = stack_bound.operand_slots_needed;
-        self.recursive_fns = crate::typechecking::analyze_recursive_fns(ast);
+        self.recursive_fns = crate::typechecking::analyze_recursive_fns(ast, &bare_cases);
         self.recursive_pure = if self.auto_par && auto_par_enabled() {
-            crate::typechecking::analyze_recursive_pure(ast)
+            crate::typechecking::analyze_recursive_pure(ast, &bare_cases)
         } else {
             HashSet::new()
         };
@@ -7343,7 +7372,7 @@ impl Compiler {
             if effects::effects_capture_active() {
                 let explained = (self.auto_par && auto_par_enabled()).then(|| {
                     let all: HashSet<String> = self.pure_fns.union(&pure).cloned().collect();
-                    effects::auto_par_explanations(ast, hir, module, &fx, &all)
+                    effects::auto_par_explanations(ast, hir, module, &fx, &all, &bare_cases)
                 });
                 effects::capture(hir, &fx, explained);
             }
@@ -7355,10 +7384,10 @@ impl Compiler {
         if self.auto_par && auto_par_enabled() {
             // IPA sites on any pure function (self-recursion or helper arms).
             let pure = &self.pure_fns;
-            self.par_shapes = crate::typechecking::analyze_par_fork_sites(ast, pure);
+            self.par_shapes = crate::typechecking::analyze_par_fork_sites(ast, pure, &bare_cases);
             self.par_workers = crate::typechecking::collect_par_worker_fns(ast, &self.par_shapes);
             self.loop_par_sites = crate::typechecking::analyze_loop_par_sites(ast, &self.pure_fns);
-            for hint in crate::typechecking::analyze_par_escape_hints(ast) {
+            for hint in crate::typechecking::analyze_par_escape_hints(ast, &bare_cases) {
                 let mut msg =
                     Message::info(ErrorCode::ParLockHint, hint.message(), hint.span.clone());
                 msg.with_help(hint.help());

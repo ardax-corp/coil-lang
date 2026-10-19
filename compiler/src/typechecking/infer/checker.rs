@@ -205,6 +205,7 @@ impl Checker {
             enum_scalar: BTreeMap::new(),
             bare_constructs_by_span: HashMap::new(),
             bare_patterns_by_span: HashMap::new(),
+            bare_cases_by_module: HashMap::new(),
             pending_exhaustive: Vec::new(),
             async_functions: std::collections::HashSet::new(),
             async_depth: 0,
@@ -1682,6 +1683,8 @@ impl Checker {
         );
         self.module_locals
             .insert(self.current_module_id, self.local_defs.clone());
+        self.bare_cases_by_module
+            .insert(self.current_module_id, Default::default());
 
         // Imported type aliases first: any signature may name one (#1208).
         self.import_type_aliases(ast);
@@ -12352,6 +12355,26 @@ impl Checker {
         Some(params)
     }
 
+    /// `fn_name`'s formals and result for a call of `argc` arguments: a
+    /// returned function's parameters, which the curried peel flattens onto
+    /// the function's own (`fn flip<A, B>(A a) -> B -> (B, A)`), curried
+    /// back onto the result (#1590). A function of no parameters is typed
+    /// `unit -> R`, which is none.
+    pub fn fn_call_sig(&self, fn_name: &str, argc: usize) -> Option<(Vec<Ty>, Ty)> {
+        let mut params = self.fn_param_tys(fn_name)?;
+        let mut ret = self.fn_return_ty(fn_name)?;
+        let named = self.fn_param_names(fn_name).map(<[String]>::len);
+        if argc == 0 && named.is_none_or(|n| n == 0) && params.first().is_some_and(|p| matches!(p, Ty::Con(unit) if unit == "unit")) {
+            params.remove(0);
+        }
+        if params.len() > argc && named == Some(argc) {
+            for extra in params.split_off(argc).into_iter().rev() {
+                ret = Ty::Fun(Box::new(extra), Box::new(ret));
+            }
+        }
+        Some((params, ret))
+    }
+
     //  Native registration
 
     /// Register a native (built-in) function with the type system.
@@ -17823,6 +17846,29 @@ impl Checker {
     /// qualified pattern or a bare name that stayed a binding.
     pub fn bare_pattern_at(&self, start: usize, end: usize) -> Option<&str> {
         self.bare_patterns_by_span.get(&(start, end)).map(String::as_str)
+    }
+
+    /// Bare unit case patterns (`None`, `Red`) of the module being checked.
+    pub fn bare_cases(&self) -> &crate::typechecking::bare_cases::BareCases {
+        self.bare_cases_of(self.current_module_id)
+    }
+
+    /// Bare unit case patterns of `module` (none when it was not checked).
+    pub fn bare_cases_of(
+        &self,
+        module: crate::typechecking::def_id::ModuleId,
+    ) -> &crate::typechecking::bare_cases::BareCases {
+        self.bare_cases_by_module
+            .get(&module)
+            .unwrap_or_else(|| crate::typechecking::bare_cases::BareCases::none())
+    }
+
+    /// Record that the bare pattern name at `span` is a unit case.
+    pub(super) fn record_bare_case(&mut self, span: parser::SimpleSpan) {
+        self.bare_cases_by_module
+            .entry(self.current_module_id)
+            .or_default()
+            .insert(span);
     }
 
     /// `pattern` with a bare constructor (`Some(v)`, `None`, #1352) spelled

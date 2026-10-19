@@ -130,6 +130,7 @@ fn weak_suite_end_to_end() {
             show_output: false,
             coverage: None,
             opt_level: OptLevel::Standard,
+            debug_level: None,
             contracts: None,
             contract_runs: 0,
             grants: HostGrants::deny_all(),
