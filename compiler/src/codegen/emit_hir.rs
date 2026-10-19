@@ -164,6 +164,11 @@ struct HirGeneric {
     /// is wrapped in so it is called at the call's ground type (`None`
     /// when it already is), or why it cannot be (#1532).
     ret_adapt: Result<Option<HirClosureAdapt>, &'static str>,
+    /// A result holding a bare type parameter's value inside an `Option`,
+    /// `Result` or tuple: how its items are unboxed so it is read at the
+    /// call's ground type (`None` when none is boxed), or why they cannot
+    /// be (#1549).
+    ret_items: Result<Option<crate::mir::HirRetItems>, &'static str>,
 }
 
 /// The adapter a closure a shared generic body returns is wrapped in
@@ -1264,6 +1269,12 @@ impl Compiler {
                     // word, as `new` stores it; an enum with a niche layout
                     // (`Option<int>`) holds its niche word, not a heap one.
                     .map(|t| {
+                        // A field open in a class parameter holds the word
+                        // of its type at the made type's arguments, not an
+                        // opaque parameter word (#1553).
+                        if let Some(w) = made.and_then(|m| self.hir_param_field_at(m, t)).and_then(|at| word(&at)) {
+                            return Some(w);
+                        }
                         word(t)
                             .or_else(|| scalar_enum(t))
                             // An existential field holds its pack's heap word.
@@ -1353,7 +1364,13 @@ impl Compiler {
                     }
                 })
                 && let Some((FieldAt::Slot(idx), fty)) = self.hir_field(hir, *base, name)
-                && let Some(w) = record_word(&fty).or_else(|| {
+                && let Some(w) = Self::hir_ty(hir, *base)
+                    // `T` at the receiver's arguments, not an opaque
+                    // parameter word (`Box<Box<E>>`'s `v`, #1553).
+                    .and_then(|b| self.hir_param_field_at(b, &fty))
+                    .and_then(|at| record_word(&at))
+                    .or_else(|| record_word(&fty))
+                    .or_else(|| {
                     // A generic class's field (`item: T`) at a ground
                     // receiver (`Box<int>`): its slot holds the boxed-layout
                     // word of the field's type there.
@@ -1493,7 +1510,14 @@ impl Compiler {
                         };
                         // A generic class's field at the made type's
                         // arguments (`new Box(1)`: `T` is `int`).
-                        stored(t).or_else(|| stored(&self.hir_class_ty_args_at(Self::hir_ty(hir, HirId(i))?, t)?)).or_else(|| {
+                        // A field open in a class parameter at the made
+                        // type's arguments, not an opaque parameter word
+                        // (#1553).
+                        let made = Self::hir_ty(hir, HirId(i));
+                        if let Some(w) = made.and_then(|m| self.hir_param_field_at(m, t)).and_then(|at| stored(&at)) {
+                            return Some(w);
+                        }
+                        stored(t).or_else(|| stored(&self.hir_class_ty_args_at(made?, t)?)).or_else(|| {
                             // An enum field open in a class parameter, made
                             // at a still open type (a shared generic body's
                             // `Option::None`): its boxed enum object.
@@ -2896,8 +2920,8 @@ impl Compiler {
     /// the call's ground closure (#1532): refused rather than read in the
     /// shared body's layout.
     fn hir_ret_adapt_check(call: &HirCall) -> Check {
-        match call.generic.as_ref().filter(|_| !call.mono).map(|g| &g.ret_adapt) {
-            Some(Err(why)) => Err(why),
+        match call.generic.as_ref().filter(|_| !call.mono).map(|g| (&g.ret_adapt, &g.ret_items)) {
+            Some((Err(why), _) | (_, Err(why))) => Err(why),
             _ => Ok(()),
         }
     }
@@ -5210,6 +5234,17 @@ impl Compiler {
             adapt.push(params.get(skip + i).and_then(|p| self.hir_fn_arg_unbox(p, ty, &scheme.bounds, &open)));
         }
         let ret_adapt = self.hir_closure_adapt(cur, &ret_ty, &scheme.bounds, receivers);
+        // A bare type parameter the call boxes, whose ground value the
+        // shared body may hold boxed inside its result (#1549).
+        let mut boxed_vars = HashMap::new();
+        for (i, b) in boxed[receivers..].iter().enumerate() {
+            if let (Some(ty), Some(Ty::Var(v))) = (b, params.get(skip + i))
+                && Self::ty_to_value_tag(ty).is_some()
+            {
+                boxed_vars.insert(*v, ty.clone());
+            }
+        }
+        let ret_items = self.hir_ret_items(cur, &params, &vars, &boxed_vars, receivers);
         Ok(HirGeneric {
             lookup: lookup.to_string(),
             boxed,
@@ -5219,7 +5254,126 @@ impl Compiler {
             unbox,
             forwarded,
             ret_adapt,
+            ret_items,
         })
+    }
+
+    /// How the items of a shared generic body's result `cur` (an `Option`,
+    /// `Result`, user enum or tuple) that hold a bare type parameter's
+    /// value the call boxed (`boxed`, by variable, its ground type) are
+    /// unboxed at the call (#1549): the shared body keeps that value boxed
+    /// inside the object. `None` when no item holds one. Refused where an
+    /// item holds it deeper (`Option<(T, int)>`, `Vec<T>`), the variable is
+    /// also nested in a parameter (the body's values of it are then not
+    /// all boxed), or for a ground type no word reads back.
+    fn hir_ret_items(
+        &self,
+        cur: &Ty,
+        params: &[Ty],
+        vars: &HashMap<crate::typechecking::ty::TyVarId, Ty>,
+        boxed: &HashMap<crate::typechecking::ty::TyVarId, Ty>,
+        receivers: usize,
+    ) -> Result<Option<crate::mir::HirRetItems>, &'static str> {
+        use crate::mir::{HirRetItem, HirRetItems};
+        use crate::typechecking::ty::{ftv_ty, strip_readonly};
+        let needy = |t: &Ty| ftv_ty(t).iter().any(|v| boxed.contains_key(v));
+        if matches!(cur, Ty::Var(_) | Ty::Fun(..)) || !needy(cur) {
+            return Ok(None);
+        }
+        // A method's shared body keeps its values as raw words (#802).
+        if receivers > 0 {
+            return Ok(None);
+        }
+        if params.iter().any(|p| !matches!(p, Ty::Var(_)) && needy(p)) {
+            return Err("callee-generic");
+        }
+        let ground = |t: &Ty| apply_ty_prune(self.checker.subst(), &Self::apply_ty_var_map(t, vars));
+        // Each item, typed in the callee: unboxed where it is a boxed
+        // variable, else kept as the word its ground type is.
+        let item = |t: &Ty| -> Result<(HirRetItem, u8), &'static str> {
+            let unbox = matches!(t, Ty::Var(v) if boxed.contains_key(v));
+            if !unbox && needy(t) {
+                return Err("callee-generic");
+            }
+            let g = ground(t);
+            let ty = self.hir_ret_item_word(&g)?;
+            if unbox && !(ty == crate::mir::MirTy::HeapRef || ty.is_numeric() || ty == crate::mir::MirTy::Bool) {
+                return Err("callee-generic");
+            }
+            let kind = if crate::hir::layout::is_unit(&g) {
+                common::WORD_POINTER
+            } else {
+                crate::typechecking::value_layout::word_kind(&self.checker, &g)
+            };
+            Ok((HirRetItem { ty, unbox }, kind))
+        };
+        let pack = |items: Vec<(HirRetItem, u8)>| {
+            let kinds = common::pack_word_kinds(items.iter().map(|&(_, k)| k));
+            (items.into_iter().map(|(i, _)| i).collect::<Vec<_>>(), kinds)
+        };
+        if let Ty::Tuple(items) = strip_readonly(cur) {
+            let (items, kinds) = pack(items.iter().map(item).collect::<Result<Vec<_>, _>>()?);
+            return Ok(Some(HirRetItems::Tuple { items, kinds }));
+        }
+        let app = crate::typechecking::ty::builtin_enum_app(cur).unwrap_or_else(|| cur.clone());
+        let Ty::App(head, args) = strip_readonly(&app) else {
+            return Err("callee-generic");
+        };
+        let Ty::Con(name) = head.as_ref() else {
+            return Err("callee-generic");
+        };
+        let (Some(decl), Some(names)) = (self.checker.enum_variants(name), self.checker.type_ctor_params(name)) else {
+            return Err("callee-generic");
+        };
+        if names.len() != args.len() || self.checker.enum_has_drop(name) {
+            return Err("callee-generic");
+        }
+        let mut variants = Vec::new();
+        for (_, tag, payload) in decl {
+            // A payload typed by the enum's parameter is the call's
+            // argument for it; any other names no parameter.
+            let tys = payload
+                .iter()
+                .map(|p| match p {
+                    Ty::Con(n) if let Some(i) = names.iter().position(|m| m == n) => Ok(args[i].clone()),
+                    p if Self::ty_names_con(p, names) => Err("callee-generic"),
+                    p => Ok(p.clone()),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if !tys.iter().any(&needy) {
+                continue;
+            }
+            let (items, kinds) = pack(tys.iter().map(item).collect::<Result<Vec<_>, _>>()?);
+            variants.push((tag, items, kinds));
+        }
+        Ok((!variants.is_empty()).then_some(HirRetItems::Enum { variants }))
+    }
+
+    /// Whether `ty` names one of the type constructor parameters `names`.
+    fn ty_names_con(ty: &Ty, names: &[String]) -> bool {
+        match ty {
+            Ty::Con(n) => names.contains(n),
+            Ty::App(h, args) => Self::ty_names_con(h, names) || args.iter().any(|a| Self::ty_names_con(a, names)),
+            Ty::Tuple(items) => items.iter().any(|a| Self::ty_names_con(a, names)),
+            Ty::Fun(a, r) => Self::ty_names_con(a, names) || Self::ty_names_con(r, names),
+            Ty::Array { element, .. } | Ty::Readonly(element) => Self::ty_names_con(element, names),
+            Ty::Record { fields } => fields.iter().any(|(_, t)| Self::ty_names_con(t, names)),
+            Ty::Var(_) | Ty::Never | Ty::Existential { .. } => false,
+            // A structural sum or a constructor: told apart no further.
+            _ => true,
+        }
+    }
+
+    /// The MIR word of an item of ground type `ty` inside a tuple or enum
+    /// object: a `()` is the empty tuple object, a scalar enum its tag.
+    fn hir_ret_item_word(&self, ty: &Ty) -> Result<crate::mir::MirTy, &'static str> {
+        if crate::hir::layout::is_unit(ty) {
+            return Ok(crate::mir::MirTy::HeapRef);
+        }
+        if crate::hir::layout::is_scalar_enum_ty(&self.checker, ty) {
+            return Ok(crate::mir::MirTy::I64);
+        }
+        self.hir_adapt_word_ty(ty)
     }
 
     /// Whether the frame holds dictionary `i` as the checker numbered it
@@ -6549,6 +6703,26 @@ impl Compiler {
         };
         let at = close_params(fty, args)?;
         (!Self::ty_has_var(&at) && self.value_layout(&at) == ValueLayout::Boxed).then_some(at)
+    }
+
+    /// Field type `fty`, a bare class parameter, at made type `ty` when a
+    /// shared generic body must not take it for an opaque parameter word:
+    /// a ground type stored as it is ([`Self::hir_class_ty_args_at`]:
+    /// `new Box("s")`), or a class still open in a type variable (`new
+    /// Box(new Box(e))`), whose slot holds that object's heap word (#1553).
+    fn hir_param_field_at(&self, ty: &Ty, fty: &Ty) -> Option<Ty> {
+        if !matches!(crate::typechecking::ty::strip_readonly(fty), Ty::Var(_)) {
+            return None;
+        }
+        let made = apply_ty_prune(self.checker.subst(), ty);
+        let Ty::App(_, args) = crate::typechecking::ty::strip_readonly(&made) else {
+            return None;
+        };
+        let at = apply_ty_prune(self.checker.subst(), &close_params(fty, args)?);
+        if !Self::ty_has_var(&at) {
+            return self.hir_class_ty_args_at(ty, fty);
+        }
+        self.checker.ty_is_class(&at).then_some(at)
     }
 
     /// `new C(..)`'s class, instance field count and declared field types,
