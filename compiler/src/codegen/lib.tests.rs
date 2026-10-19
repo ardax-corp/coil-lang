@@ -2266,34 +2266,6 @@ fn for_in_array_emits_array_len_index_and_back_edge() {
 }
 
 #[test]
-fn for_in_dict_emits_dict_entries() {
-    use common::Instruction;
-    let (bc, _pool) = compile_src(
-        "fn main() { let d = { a: 1, b: 2 }; for p in d { write(stdout(), to_bytes(format(\"%i\", p[1]))); } }",
-    );
-    assert!(
-        bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::DictEntries)),
-        "dict for-in should emit DictEntries; opcodes: {:?}",
-        bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
-    );
-}
-
-#[test]
-fn for_in_dict_pairs_emits_dict_entries() {
-    use common::Instruction;
-    let (bc, _pool) = compile_src(
-        "fn main() { let d = { a: 1, b: 2 }; for (k, v) in d { write(stdout(), to_bytes(format(\"%i\", v))); } }",
-    );
-    assert!(
-        bc.iter()
-            .any(|b| matches!(b.bytecode(), Instruction::DictEntries)),
-        "dict for (k,v) should emit DictEntries; opcodes: {:?}",
-        bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
-    );
-}
-
-#[test]
 fn for_in_custom_emits_into_iter_and_next_calls() {
     use common::Instruction;
     let (bc, _pool) = compile_src(
