@@ -25,9 +25,20 @@ const F64_PLUS_TWO: u64 = 2.0_f64.to_bits();
 
 /// Cheap typed rewrites. Returns how many instructions were rewritten.
 pub fn instcombine(func: &mut MirFunc) -> usize {
+    combine(func, true)
+}
+
+/// [`instcombine`] without its strength rewrites, for a LIR body: constant
+/// folds, identities and constant branches only. There `x * 2` is one op
+/// with an immediate, and `x + x` would read `x` from a slot twice.
+pub fn instcombine_lir(func: &mut MirFunc) -> usize {
+    combine(func, false)
+}
+
+fn combine(func: &mut MirFunc, strength: bool) -> usize {
     let mut total = 0;
     for _ in 0..8 {
-        let n = instcombine_once(func);
+        let n = instcombine_once(func, strength);
         if n == 0 {
             break;
         }
@@ -39,7 +50,7 @@ pub fn instcombine(func: &mut MirFunc) -> usize {
     total
 }
 
-fn instcombine_once(func: &mut MirFunc) -> usize {
+fn instcombine_once(func: &mut MirFunc, strength: bool) -> usize {
     let mut subst: HashMap<ValueId, ValueId> = HashMap::new();
     let mut hits = 0usize;
     let mut drop: HashSet<ValueId> = HashSet::new();
@@ -52,7 +63,9 @@ fn instcombine_once(func: &mut MirFunc) -> usize {
             }
         }
     }
-    hits += exact_recip_divs(func, &mut consts);
+    if strength {
+        hits += exact_recip_divs(func, &mut consts);
+    }
 
     let finite = known_finite(func, &consts);
     let nonzero = known_nonzero(&consts);
@@ -68,7 +81,7 @@ fn instcombine_once(func: &mut MirFunc) -> usize {
                 consts.insert(dest, c);
                 continue;
             }
-            match fold_inst(inst, &consts, &finite, &nonzero, &neg_of) {
+            match fold_inst(inst, &consts, &finite, &nonzero, &neg_of, strength) {
                 Fold::Subst(keep) => {
                     let dest = inst.dest();
                     subst.insert(dest, keep);
@@ -149,6 +162,7 @@ fn fold_inst(
     finite: &HashSet<ValueId>,
     nonzero: &HashSet<ValueId>,
     neg_of: &HashMap<ValueId, ValueId>,
+    strength: bool,
 ) -> Fold {
     match inst {
         MirInst::Bin {
@@ -166,6 +180,7 @@ fn fold_inst(
             finite,
             nonzero,
             neg_of,
+            strength,
             inst,
         }),
         MirInst::Cmp {
@@ -225,6 +240,7 @@ struct FoldBinArgs<'args> {
     finite: &'args HashSet<ValueId>,
     nonzero: &'args HashSet<ValueId>,
     neg_of: &'args HashMap<ValueId, ValueId>,
+    strength: bool,
     inst: &'args mut MirInst,
 }
 
@@ -238,6 +254,7 @@ fn fold_bin(args: FoldBinArgs<'_>) -> Fold {
         finite,
         nonzero,
         neg_of,
+        strength,
         inst,
     } = args;
 
@@ -255,6 +272,9 @@ fn fold_bin(args: FoldBinArgs<'_>) -> Fold {
     }
     if let Some(c) = finite_fold(op, ty, lhs, rhs, finite, nonzero, neg_of) {
         return Fold::ToConst(c);
+    }
+    if !strength {
+        return Fold::None;
     }
     if strength_mul2(op, ty, lhs, rhs, lc, rc, inst) {
         return Fold::Rewrite;

@@ -933,6 +933,74 @@ impl Checker {
         unit_ty()
     }
 
+    /// `impl Show<Foo> { … }` names a trait where an inherent impl names a
+    /// type: trait instances are written `impl Show for Foo`. A type of the
+    /// same name wins (`class Show` may have an inherent impl).
+    fn reject_impl_on_trait(
+        &mut self,
+        owner: &str,
+        type_params: &[parser::ast::TypeParam<'_>],
+        range: &Range<usize>,
+    ) -> bool {
+        let owner_key = self.qualify_module_name(owner);
+        if self.classes.contains_key(&owner_key)
+            || self.enums.contains_key(&owner_key)
+            || self.generics.typeclass(self.impl_trait_key(owner)).is_none()
+        {
+            return false;
+        }
+        let fix = match type_params {
+            [] => format!("impl {} for Type", owner),
+            [head] => format!("impl {} for {}", owner, head.name),
+            [head, rest @ ..] => {
+                let rest: Vec<&str> = rest.iter().map(|tp| tp.name).collect();
+                format!("impl {}<{}> for {}", owner, rest.join(", "), head.name)
+            }
+        };
+        let mut msg = Message::error(
+            ErrorCode::GenericTypeError,
+            format!("`{}` is a trait; trait instances are written `impl Trait for Type`", owner),
+            range.clone(),
+        );
+        msg.with_help(format!("write `{}`", fix));
+        self.messages.push(msg);
+        true
+    }
+
+    /// `impl Cell<int> { … }`: the `<…>` of an inherent impl declares type
+    /// parameters, so a name that is already a type is a mistake rather
+    /// than a parameter shadowing it.
+    fn reject_concrete_impl_param(
+        &mut self,
+        owner: &str,
+        type_params: &[parser::ast::TypeParam<'_>],
+        range: &Range<usize>,
+    ) -> bool {
+        const PRIMITIVES: &[&str] = &["int", "float", "string", "bool", "void", "unit", "byte"];
+        let Some(tp) = type_params.iter().find(|tp| {
+            let key = self.qualify_module_name(tp.name);
+            PRIMITIVES.contains(&tp.name)
+                || self.classes.contains_key(&key)
+                || self.enums.contains_key(&key)
+        }) else {
+            return false;
+        };
+        let params: Vec<String> = (0..type_params.len())
+            .map(|i| if type_params.len() == 1 { "T".to_string() } else { format!("T{}", i + 1) })
+            .collect();
+        let mut msg = Message::error(
+            ErrorCode::GenericTypeError,
+            format!(
+                "`{}` is a type; the `<…>` of an inherent `impl {}` declares type parameters",
+                tp.name, owner
+            ),
+            range.clone(),
+        );
+        msg.with_help(format!("write `impl {}<{}>`", owner, params.join(", ")));
+        self.messages.push(msg);
+        true
+    }
+
     #[inline(never)]
     pub(super) fn infer_impl(
         &mut self,
@@ -942,6 +1010,11 @@ impl Checker {
         methods: &[Output],
         range: &Range<usize>,
     ) {
+        if self.reject_impl_on_trait(owner, type_params, range)
+            || self.reject_concrete_impl_param(owner, type_params, range)
+        {
+            return;
+        }
         let pushed = self.push_type_params_for_type_parsing(type_params);
         let owner_key = self.qualify_module_name(owner);
 
