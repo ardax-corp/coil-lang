@@ -4801,12 +4801,14 @@ impl Compiler {
         // dictionaries also passes its own bare type parameters, already
         // boxed words.
         // A shared generic body (no dictionaries to forward) passes its own
-        // bare type parameters the same way (#915).
+        // bare type parameters the same way (#915), a method's own ones
+        // (`fn third<W>(W w)` in an impl) included (#1467).
         let shared = !self.compiling_mono_clone
-            && self
-                .current_function_table_key
-                .as_deref()
-                .is_some_and(|k| self.checker.is_generic_fn(strip_overload_key(k)));
+            && (hir.is_generic
+                || self
+                    .current_function_table_key
+                    .as_deref()
+                    .is_some_and(|k| self.checker.is_generic_fn(strip_overload_key(k))));
         let open = |ty: &Ty| (shared || !forwarded.is_empty()) && matches!(ty, Ty::Var(_));
         let ground = |id: HirId| {
             let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
