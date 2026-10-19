@@ -139,7 +139,7 @@ test("a closure returns a captured type parameter value") {
     assert!(hold(true));
     assert!(hold(new Cell(6)).v == 6);
     let v = hold([1, 2, 3]);
-    assert!(len(v) == 3);
+    assert!(v.len() == 3);
     assert!(v[2] == 3);
     let r: Result<int, string> = hold(Err("bad"));
     let m = match r {
