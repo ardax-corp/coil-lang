@@ -2906,7 +2906,24 @@ impl Compiler {
     /// Layout (Phase 5): subclass methods first, then each superclass’s
     /// methods in declaration order (flattened). Superclass slots are filled
     /// from the matching superclass instance for the same type arguments.
+    ///
+    /// On `false`, `out` is as it was: a dictionary is planned whole or not
+    /// at all, never as method pointers without their context (#1596).
     fn plan_instance_dict(
+        &mut self,
+        out: &mut Vec<DictStep>,
+        class: &str,
+        lookup: &[crate::typechecking::Ty],
+    ) -> bool {
+        let start = out.len();
+        let planned = self.plan_instance_dict_steps(out, class, lookup);
+        if !planned {
+            out.truncate(start);
+        }
+        planned
+    }
+
+    fn plan_instance_dict_steps(
         &mut self,
         out: &mut Vec<DictStep>,
         class: &str,
@@ -3038,8 +3055,16 @@ impl Compiler {
             };
             out.push(code);
         }
+        // The instance is found and its methods planned: a context goal it
+        // cannot build is a compile error (a context-less dictionary would
+        // be read past at run time, #1580), reported once at the innermost
+        // goal that fails.
         for (ctx_class, ctx_args) in &context {
+            let reported = self.messages.len();
             if !self.plan_instance_dict(out, ctx_class, ctx_args) {
+                if self.messages.len() == reported {
+                    self.missing_context_dict(ctx_class, ctx_args, diag_range.clone());
+                }
                 return false;
             }
         }
@@ -3226,10 +3251,11 @@ impl Compiler {
         if !self.instance_call_takes_dict(class, method, fqn) {
             return false;
         }
+        let reported = self.messages.len();
         if self.plan_instance_dict(out, class, lookup) {
             return true;
         }
-        if self.instance_context_len(fqn) > 0 {
+        if self.instance_context_len(fqn) > 0 && self.messages.len() == reported {
             self.missing_context_dict(class, lookup, range);
         }
         false
