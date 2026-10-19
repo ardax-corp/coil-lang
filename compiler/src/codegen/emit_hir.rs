@@ -7673,7 +7673,8 @@ impl Compiler {
             .and_then(|n| self.checker.existential_pack_at(n))
             .or_else(|| self.checker.existential_pack_span(e.span.0, e.span.1))?;
         let subst = self.checker.subst();
-        let ty = crate::typechecking::ty::nominal_enum(apply_ty_prune(subst, e.ty.as_ref()?));
+        // `readonly` has no runtime form: a `readonly P` packs as a `P` (#1558).
+        let ty = crate::typechecking::ty::nominal_enum(crate::typechecking::ty::strip_readonly(&apply_ty_prune(subst, e.ty.as_ref()?)).clone());
         (ty == crate::typechecking::ty::nominal_enum(apply_ty_prune(subst, &pack.value_ty))).then(|| pack.clone())
     }
 
