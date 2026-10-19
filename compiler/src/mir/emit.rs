@@ -568,6 +568,13 @@ fn collects_before_rewrite(func: &MirFunc, from: BlockId, reg: u8, regs: &[u8], 
     collects_before_rewrite_at(func, from, 0, reg, regs, slot)
 }
 
+/// Blocks scanned answering [`collects_before_rewrite`] queries, for the
+/// work bound of #1493.
+#[cfg(test)]
+thread_local! {
+    pub(super) static REWRITE_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// [`collects_before_rewrite`] from instruction `start` of block `from`.
 fn collects_before_rewrite_at(
     func: &MirFunc,
@@ -590,6 +597,8 @@ fn collects_before_rewrite_at(
             continue;
         }
         let block = func.block(b);
+        #[cfg(test)]
+        REWRITE_SCANS.with(|c| c.set(c.get() + 1));
         let mut rewritten = false;
         for inst in block.insts.iter().skip(skip) {
             if inst.is_phi() {
