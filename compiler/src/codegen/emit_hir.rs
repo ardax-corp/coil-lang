@@ -5786,6 +5786,35 @@ impl Compiler {
         matches!(ty, Ty::Forall { .. }).then_some(ty)
     }
 
+    /// Whether a `PolyFn` local's callee has a type parameter nested in its
+    /// signature (a parameter or the result that is not a bare type
+    /// parameter but holds one): from the source function's scheme, else
+    /// the local's own un-instantiated type.
+    fn hir_polyfn_nested(&self, hir: &HirBody, emit: &HirEmit, f: HirId) -> bool {
+        if let Some(source) = self.hir_polyfn_source(hir, emit, f) {
+            return self.checker.generic_fn_value_nested(&source);
+        }
+        let HirKind::Local(local) = hir.expr(f).kind else {
+            return false;
+        };
+        let Some(ty) = hir.local(local).ty.as_ref() else {
+            return false;
+        };
+        let mut ty = apply_ty_prune(self.checker.subst(), ty);
+        while let Ty::Forall { body, .. } = ty {
+            ty = *body;
+        }
+        let mut parts = Vec::new();
+        while let Ty::Fun(p, ret) = ty {
+            parts.push(*p);
+            ty = *ret;
+        }
+        parts.push(ty);
+        parts
+            .iter()
+            .any(|t| !matches!(t, Ty::Var(_)) && !crate::typechecking::ty::ftv_ty(t).is_empty())
+    }
+
     /// Whether a `PolyFn` local's own type returns a bare type parameter
     /// (boxed at run time), as `local_polyfn_call_needs_unbox`.
     fn hir_polyfn_returns_var(hir: &HirBody, checker: &crate::typechecking::infer::Checker, f: HirId) -> bool {
@@ -6264,13 +6293,18 @@ impl Compiler {
                 args,
             } => {
                 // A `PolyFn` call: no dictionary forwarded from a generic
-                // frame, and an enum result stays on the AST (it comes back
-                // as the shared path's object).
+                // frame, and no type parameter nested in the callee's
+                // signature (its shared body would box `T` inside the
+                // `Option` or tuple it returns: E0127, #916). An enum result
+                // is the call's word, or its object (#1515).
                 if lower::polyfn_callee(hir, &self.checker, *f) {
                     let e = hir.expr(id);
                     let forwarded = self.forwarded_dicts_hint(e.node, e.span.0, e.span.1).is_some_and(|d| !d.is_empty());
                     let ty = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));
-                    if forwarded || ty.as_ref().is_none_or(|t| lower::classify(&self.checker, t) == Some(ValueClass::Enum) || !crate::hir::layout::ty_is_closed(t)) {
+                    if forwarded
+                        || self.hir_polyfn_nested(hir, emit, *f)
+                        || ty.as_ref().is_none_or(|t| !crate::hir::layout::ty_is_closed(t))
+                    {
                         return Err("callee-value");
                     }
                 }
