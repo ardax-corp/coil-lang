@@ -4303,7 +4303,7 @@ impl Compiler {
             let ty = Self::hir_ty(hir, id).ok_or("callee-signature")?;
             let layout = self.value_layout(ty);
             let declared = declared.ok_or("callee-trait")?;
-            if !(layout.is_niche_option() || layout.is_niche_result())
+            if !(layout.is_niche_option() || layout.is_niche_result() || layout.is_niche_unit_result())
                 || Self::ty_has_var(&declared)
                 || self.value_layout(&declared) != layout
             {
@@ -4311,7 +4311,8 @@ impl Compiler {
             }
             Ok(layout)
         };
-        let declared_params = self.checker.fn_param_tys(fqn);
+        // A structural thunk (#1479) has no checker signature: its own.
+        let declared_params = self.checker.fn_param_tys(fqn).or_else(|| self.structural_thunk_params.get(fqn).cloned());
         let params = args
             .iter()
             .enumerate()

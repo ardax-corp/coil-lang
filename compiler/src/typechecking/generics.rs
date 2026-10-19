@@ -1135,7 +1135,7 @@ impl Generics {
     }
 
     /// Register the structural instance of `class` for the ground tuple,
-    /// record or array `ty` (#1451, #1479): `Show` as `%v` shows it, `Eq`
+    /// record, array, `Option` or `Result` `ty` (#1451, #1479): `Show` as `%v` shows it, `Eq`
     /// as `==` compares it, `Hash` combining its items'. The checker adds
     /// one the first time a goal asks for it
     /// (`Checker::ensure_structural_instance`); codegen emits its thunks
@@ -1167,6 +1167,11 @@ impl Generics {
             .filter(|inst| inst.range == (0..0) && inst.defined_module == PRELUDE_OPS_MODULE)
             .filter_map(|inst| match inst.args.as_slice() {
                 [ty @ (Ty::Tuple(_) | Ty::Record { .. } | Ty::Array { .. })] => Some((inst.class.as_str(), ty)),
+                [ty @ Ty::App(head, _)]
+                    if matches!(head.as_ref(), Ty::Con(n) if n == common::BUILTIN_OPTION_ENUM || n == common::BUILTIN_RESULT_ENUM) =>
+                {
+                    Some((inst.class.as_str(), ty))
+                }
                 _ => None,
             })
     }

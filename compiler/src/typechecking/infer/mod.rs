@@ -805,6 +805,9 @@ fn build_record_field_hint(
 /// Normalize a runtime value type to the head used in `impl Show<T>`
 /// registration (`Ty::Con("Point")` rather than `Sum` / `Constructor`).
 fn show_lookup_ty(ty: &Ty) -> Ty {
+    if let Some(app) = crate::typechecking::ty::builtin_enum_app(ty) {
+        return app;
+    }
     match ty {
         Ty::Sum { name, .. } => Ty::Con(name.clone()),
         Ty::Constructor { owner, .. } => show_lookup_ty(owner),

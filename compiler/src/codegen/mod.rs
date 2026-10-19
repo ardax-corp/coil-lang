@@ -274,6 +274,9 @@ pub struct Compiler {
     /// (`(fqn, method, type)`, #1451, #1479), emitted after the module's
     /// own functions.
     structural_thunks: Vec<(String, String, Ty)>,
+    /// Parameter types of each reserved structural thunk's raw entry, which
+    /// the checker has no signature for.
+    structural_thunk_params: HashMap<String, Vec<Ty>>,
     /// Fixed arity + rest flag per function table key. Survives multi-file
     /// `check_program` clears of `Checker::fn_param_names`, so `MakeFn` for
     /// imported names (e.g. `spawn(run_jobs, …)` after `use pool::worker::run_jobs`)
@@ -680,6 +683,7 @@ impl Default for Compiler {
             builtin_show_thunks: Vec::new(),
             builtin_show_used: HashSet::new(),
             structural_thunks: Vec::new(),
+            structural_thunk_params: HashMap::new(),
             fn_arities: HashMap::with_capacity(32),
             module_items: std::collections::HashMap::default(),
             native: HashMap::default(),

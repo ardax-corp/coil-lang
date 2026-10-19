@@ -2727,6 +2727,10 @@ impl Compiler {
     }
 
     pub(super) fn show_lookup_ty_for_instance(ty: &Ty) -> Ty {
+        // `Option` / `Result` keep their type arguments (#1479).
+        if let Some(app) = crate::typechecking::ty::builtin_enum_app(ty) {
+            return app;
+        }
         match ty {
             Ty::Sum { name, .. } => Ty::Con(name.clone()),
             Ty::Constructor { owner, .. } => Self::show_lookup_ty_for_instance(owner),
@@ -4052,6 +4056,8 @@ impl Compiler {
                 self.note_raw_builtin_thunk(&fqn);
                 self.reserve_function_entry(Self::dict_adapter_name(&fqn));
                 self.reserve_function_entry(fqn.clone());
+                let arity = if matches!(method.as_str(), "eq" | "ne") { 2 } else { 1 };
+                self.structural_thunk_params.insert(fqn.clone(), vec![ty.clone(); arity]);
                 if !self.structural_thunks.iter().any(|(f, ..)| *f == fqn) {
                     self.structural_thunks.push((fqn, method, ty.clone()));
                 }
@@ -7322,6 +7328,7 @@ impl Compiler {
                             crate::hir::synth::array_show(b, a[0], element)
                         })
                     }
+                    ("show", Ty::App(..)) => self.emit_builtin_enum_show(&name, &ty, tag.is_some()),
                     ("show", _) => self.emit_builtin_entry(&name, &[(ty.clone(), tag)], string.clone(), None, |b, a| {
                         let fmt = b.str("%v");
                         b.call("format", vec![fmt, a[0]], string.clone())
@@ -7341,6 +7348,71 @@ impl Compiler {
         }
         self.hir_synth_callees.clear();
         skip.bind_label(after, self.bytecode.il_mut());
+    }
+
+    /// The `Show` thunk `name` of a ground `Option` / `Result` `ty`
+    /// (#1479): `Some(x)` / `None` / `Ok(x)` / `Err(e)`, the payload as
+    /// `format("%v", x)` shows it. The `$dict` adapter (`adapter`) takes the
+    /// enum as a dictionary passes it, boxed: unboxed, then moved to the
+    /// type's own layout when that is a niche.
+    fn emit_builtin_enum_show(&mut self, name: &str, ty: &Ty, adapter: bool) {
+        use crate::hir::synth::Synth;
+        use crate::hir::{Builtin, HirPat, HirPatFields, LocalKind};
+        let string = crate::typechecking::ty::string();
+        let (enum_name, variants): (&str, Vec<(&str, Ty)>) = match crate::typechecking::ty::option_inner(ty) {
+            Some(inner) => (common::BUILTIN_OPTION_ENUM, vec![("Some", inner)]),
+            None => match crate::typechecking::ty::result_ok_err(ty) {
+                Some((ok, err)) => (common::BUILTIN_RESULT_ENUM, vec![("Ok", ok), ("Err", err)]),
+                None => return,
+            },
+        };
+        let niche = self.value_layout(ty) != ValueLayout::Boxed;
+        let mut b = Synth::new(&self.checker, name, string.clone());
+        let value = if adapter {
+            let tag = ValueTag::Instance as u32;
+            if niche {
+                // The enum object, read as a plain word, to its niche word.
+                let int = crate::typechecking::ty::int();
+                let arg = b.local("arg0", int.clone(), LocalKind::Param);
+                let word = b.read(arg);
+                let obj = b.builtin(Builtin::Unbox { tag }, vec![word], int);
+                b.builtin(Builtin::Relayout, vec![obj], ty.clone())
+            } else {
+                let arg = b.local("arg0", ty.clone(), LocalKind::Param);
+                let word = b.read(arg);
+                b.builtin(Builtin::Unbox { tag }, vec![word], ty.clone())
+            }
+        } else {
+            let arg = b.local("arg0", ty.clone(), LocalKind::Param);
+            b.read(arg)
+        };
+        let mut arms = Vec::with_capacity(variants.len() + 1);
+        for (variant, payload) in &variants {
+            let x = b.local("x", payload.clone(), LocalKind::Pattern);
+            let pat = HirPat::Variant {
+                enum_name: enum_name.to_string(),
+                variant: (*variant).to_string(),
+                tag: self.checker.tag_for(enum_name, variant),
+                fields: HirPatFields::Tuple(vec![HirPat::Bind(x)]),
+            };
+            let fmt = b.str(&format!("{variant}(%v)"));
+            let v = b.read(x);
+            arms.push((pat, b.call("format", vec![fmt, v], string.clone())));
+        }
+        if enum_name == common::BUILTIN_OPTION_ENUM {
+            let pat = HirPat::Variant {
+                enum_name: enum_name.to_string(),
+                variant: "None".to_string(),
+                tag: self.checker.tag_for(enum_name, "None"),
+                fields: HirPatFields::Unit,
+            };
+            arms.push((pat, b.str("None")));
+        }
+        let shown = b.match_(value, arms, string);
+        let ret = b.ret(shown);
+        let root = b.block(vec![ret], None, crate::typechecking::ty::never());
+        let hir = b.finish(root);
+        self.emit_synth_fn(name, &hir, HashMap::new(), true);
     }
 
     /// The `Hash` thunk `name` of a ground tuple or array `ty` (#1479): its

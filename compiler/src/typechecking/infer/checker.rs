@@ -10284,18 +10284,26 @@ impl Checker {
     /// instance (#1451, #1479), registered the first time a goal asks for
     /// it, with the instances of its structural items (`%v` of a tuple
     /// shows an array item through the array's): `Show` when `%v` shows
-    /// its items, and for a tuple or array, `Eq` when its items have `Eq`
+    /// its items (so has a ground `Option` / `Result`), and for a tuple or
+    /// array, `Eq` when its items have `Eq`
     /// and `Hash` when they have a ground `Hash` (its thunk calls theirs).
     fn ensure_structural_instance(&mut self, class: &str, wanted: &[Ty]) {
         let [ty] = wanted else { return };
         if !matches!(class, "Show" | "Eq" | "Hash") {
             return;
         }
-        let ty = apply_ty_prune(&self.subst, ty);
+        let ty = show_lookup_ty(&apply_ty_prune(&self.subst, ty));
         let items: Vec<Ty> = match &ty {
             Ty::Tuple(items) if !items.is_empty() => items.clone(),
             Ty::Record { fields } if !fields.is_empty() && class == "Show" => fields.iter().map(|(_, t)| t.clone()).collect(),
             Ty::Array { element, .. } => vec![(**element).clone()],
+            // `Option` / `Result` show their payload (#1479).
+            Ty::App(head, args)
+                if class == "Show"
+                    && matches!(head.as_ref(), Ty::Con(n) if n == common::BUILTIN_OPTION_ENUM || n == common::BUILTIN_RESULT_ENUM) =>
+            {
+                args.clone()
+            }
             _ => return,
         };
         if Self::ty_mentions_var(&ty) || self.generics.has_instance(class, &ty) {
@@ -10305,7 +10313,7 @@ impl Checker {
             self.ensure_structural_instance(class, std::slice::from_ref(item));
         }
         let items_ok = match class {
-            "Show" => self.is_showable_for_format(&ty),
+            "Show" => items.iter().all(|item| self.is_showable_for_format(item)),
             "Eq" => items.iter().all(|item| {
                 let lookup = show_lookup_ty(&apply_ty_prune(&self.subst, item));
                 self.generics.has_instance(class, &lookup)
