@@ -225,7 +225,7 @@ mod tests {
             .ins_gc_barrier(MirGcKind::Safepoint, vec![obj])
             .unwrap();
         let _st = b
-            .ins_heap_field_store(live, val, None, Some(0))
+            .ins_heap_field_store(live, val, 0)
             .unwrap();
         b.set_ret_ty(MirTy::I64);
         b.ret(Some(val)).unwrap();

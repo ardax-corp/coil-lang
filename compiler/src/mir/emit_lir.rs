@@ -1248,13 +1248,11 @@ fn emit_stored(
         MirInst::HeapFieldLoad {
             dest,
             object,
-            name,
             index,
         } => {
             emit_heap_field_load(EmitHeapFieldLoadArgs {
                 out,
                 object: *object,
-                name: *name,
                 index: *index,
                 func,
                 plan,
@@ -1271,14 +1269,12 @@ fn emit_stored(
             dest,
             object,
             value,
-            name,
             index,
         } => {
             emit_heap_field_store(EmitHeapFieldStoreArgs {
                 out,
                 object: *object,
                 value: *value,
-                name: *name,
                 index: *index,
                 func,
                 plan,
@@ -1775,7 +1771,6 @@ fn emit_hi_after_lo(args: EmitHiAfterLoArgs<'_>) -> Result<(), LowerError> {
 struct EmitHeapFieldLoadArgs<'args> {
     out: &'args mut Vec<IlOp>,
     object: ValueId,
-    name: Option<ValueId>,
     index: u32,
     func: &'args MirFunc,
     plan: &'args EmitPlan,
@@ -1788,7 +1783,6 @@ fn emit_heap_field_load(args: EmitHeapFieldLoadArgs<'_>) -> Result<(), LowerErro
     let EmitHeapFieldLoadArgs {
         out,
         object,
-        name,
         index,
         func,
         plan,
@@ -1798,12 +1792,7 @@ fn emit_heap_field_load(args: EmitHeapFieldLoadArgs<'_>) -> Result<(), LowerErro
     } = args;
 
     emit_stack(out, object, func, plan, regs, pool, loc)?;
-    if let Some(n) = name {
-        emit_stack(out, n, func, plan, regs, pool, loc)?;
-        out.push(IlOp::GetField { loc });
-    } else {
-        out.push(IlOp::LoadField { index, loc });
-    }
+    out.push(IlOp::LoadField { index, loc });
     Ok(())
 }
 
@@ -1811,8 +1800,7 @@ struct EmitHeapFieldStoreArgs<'args> {
     out: &'args mut Vec<IlOp>,
     object: ValueId,
     value: ValueId,
-    name: Option<ValueId>,
-    index: Option<u32>,
+    index: u32,
     func: &'args MirFunc,
     plan: &'args EmitPlan,
     regs: &'args [u8],
@@ -1825,7 +1813,6 @@ fn emit_heap_field_store(args: EmitHeapFieldStoreArgs<'_>) -> Result<(), LowerEr
         out,
         object,
         value,
-        name,
         index,
         func,
         plan,
@@ -1836,12 +1823,7 @@ fn emit_heap_field_store(args: EmitHeapFieldStoreArgs<'_>) -> Result<(), LowerEr
 
     emit_stack(out, value, func, plan, regs, pool, loc)?;
     emit_stack(out, object, func, plan, regs, pool, loc)?;
-    if let Some(n) = name {
-        emit_stack(out, n, func, plan, regs, pool, loc)?;
-        out.push(IlOp::SetField { index: None, loc });
-    } else {
-        out.push(IlOp::SetField { index, loc });
-    }
+    out.push(IlOp::SetField { index: Some(index), loc });
     Ok(())
 }
 
@@ -2105,13 +2087,11 @@ fn emit_stack(
         }
         MirInst::HeapFieldLoad {
             object,
-            name,
             index,
             ..
         } => emit_heap_field_load(EmitHeapFieldLoadArgs {
             out,
             object: *object,
-            name: *name,
             index: *index,
             func,
             plan,
@@ -2122,14 +2102,12 @@ fn emit_stack(
         MirInst::HeapFieldStore {
             object,
             value,
-            name,
             index,
             ..
         } => emit_heap_field_store(EmitHeapFieldStoreArgs {
             out,
             object: *object,
             value: *value,
-            name: *name,
             index: *index,
             func,
             plan,

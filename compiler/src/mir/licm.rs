@@ -750,7 +750,7 @@ fn motion(
         // in bounds where it is.
         MirInst::Index { .. } => (!fx.elements && !fx.lengths).then_some(Motion::Traps),
         MirInst::ArrayLen { .. } => free(!fx.lengths),
-        MirInst::HeapFieldLoad { name: None, .. } => free(!fx.fields),
+        MirInst::HeapFieldLoad { .. } => free(!fx.fields),
         MirInst::Call { dest, args, .. } if func.pure_calls.contains(dest) => {
             let reads_heap = args.iter().any(|a| super::cse::reads_heap(func.ty(*a)));
             (!reads_heap || !fx.heap() && !fx.lengths).then_some(Motion::Traps)
