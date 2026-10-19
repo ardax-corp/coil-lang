@@ -48,7 +48,7 @@ Runtimes that predate `WORD_BYTE` ignore the stamp, so no archive bump.
 
 ## Byte paths
 
-`io::to_bytes`, `read_to_end` and stream reads build or fill packed arrays
+`string::to_bytes`, `read_to_end` and stream reads build or fill packed arrays
 with one copy; writes and `from_bytes` take `to_byte_vec` (one copy when
 packed). FFI `Bytes` (tag 15) and `ConstBytes` (tag 16, read-only) share
 one path (`byte_arg_from_value` in `machine/src/ffi/call.rs`): a `string`
