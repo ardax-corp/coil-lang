@@ -9129,3 +9129,32 @@ fn hir_pair_local_built_in_place_is_not_boxed() {
         "an Option local built in place stays in two slots"
     );
 }
+
+/// A dictionary whose context dictionary cannot be planned (`Name<float>`
+/// for `impl Name for Option<T: Name>` with no `Name for float`) leaves
+/// no steps and is a compile error, not a half-built dictionary of the
+/// method pointers alone (#1596).
+#[test]
+fn instance_dict_without_its_context_is_refused_whole() {
+    let src = "trait Name<T> { fn name(T x) -> string {} }
+impl Name for int { fn name(int x) -> string { return \"int\"; } }
+impl Name for Option<T: Name> {
+    fn name(Option<T> o) -> string { return match o { Some(v) => \"some \" + v.name(), None => \"none\" }; }
+}
+fn named<T: Name>(T x) -> string { return x.name(); }
+fn g<E: Name>(E e) -> string { return named(Some(e)); }
+fn take(fn(int) -> string f) -> string { return f(3); }
+fn main() { let _ = named(Some(1)); let _ = take(g); }";
+    let (_, mut compiler) = compile_src_compiler(src, |_| {});
+    assert!(compiler.messages.is_empty(), "{:?}", compiler.messages);
+    let option = |t: &str| Ty::App(Box::new(Ty::Con(common::BUILTIN_OPTION_ENUM.into())), vec![Ty::Con(t.into())]);
+    let mut steps = Vec::new();
+    // The shared entries (the program's instance clones are emitted).
+    compiler.inst_clone_srcs.clear();
+    assert!(compiler.plan_instance_dict(&mut steps, "Name", &[option("int")]), "{:?}", compiler.messages);
+    assert!(!steps.is_empty());
+    let mut steps = vec![DictStep::Null];
+    assert!(!compiler.plan_instance_dict(&mut steps, "Name", &[option("float")]));
+    assert!(matches!(steps[..], [DictStep::Null]), "no partial dictionary: {steps:?}");
+    assert!(!compiler.messages.is_empty(), "a dictionary missing its context is a compile error");
+}
