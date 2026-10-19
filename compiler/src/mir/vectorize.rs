@@ -37,10 +37,25 @@ pub fn try_vectorize(
         return Some(chained);
     }
     if let Some(spec) = match_store_loop(func) {
+        if !straight_outside(func, [spec.header, spec.body], spec.exit) {
+            return None;
+        }
         return emit_vectorized(func, &spec, entry_label, pool, label_hi);
     }
     let spec = match_reduce_loop(func)?;
+    if !straight_outside(func, [spec.header, spec.body], spec.exit) {
+        return None;
+    }
     emit_reduced(func, &spec, entry_label, pool, label_hi)
+}
+
+/// The blocks outside the loop and its exit run straight through: the
+/// single-loop emitters lay their instructions out in a row (a guarded
+/// preheader's branch and φ would be lost).
+fn straight_outside(func: &MirFunc, lp: [BlockId; 2], exit: BlockId) -> bool {
+    func.blocks.iter().filter(|b| !lp.contains(&b.id) && b.id != exit).all(|b| {
+        matches!(b.term, Some(Terminator::Jump { .. })) && !b.insts.iter().any(MirInst::is_phi)
+    })
 }
 
 enum ChainPiece {

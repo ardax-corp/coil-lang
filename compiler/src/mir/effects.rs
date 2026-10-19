@@ -6,7 +6,27 @@
 
 use crate::typechecking::purity::EffectFlags;
 
-use super::inst::MirInst;
+use std::collections::HashSet;
+
+use super::inst::{MirInst, ValueId};
+
+/// What a body's calls may do: [`MirFunc::pure_calls`],
+/// [`MirFunc::steady_calls`], [`MirFunc::lengths_steady`].
+///
+/// [`MirFunc::pure_calls`]: super::func::MirFunc::pure_calls
+/// [`MirFunc::steady_calls`]: super::func::MirFunc::steady_calls
+/// [`MirFunc::lengths_steady`]: super::func::MirFunc::lengths_steady
+pub struct CallFacts<'a> {
+    pub pure: &'a HashSet<ValueId>,
+    pub steady: &'a HashSet<ValueId>,
+    pub lengths_steady: bool,
+}
+
+impl super::func::MirFunc {
+    pub fn call_facts(&self) -> CallFacts<'_> {
+        CallFacts { pure: &self.pure_calls, steady: &self.steady_calls, lengths_steady: self.lengths_steady }
+    }
+}
 
 /// Sidecar effect bits for HostInvoke native `id`.
 pub fn host_effects(id: u16) -> EffectFlags {
@@ -51,6 +71,40 @@ impl MirInst {
             Self::Unary { op: MirUnaryOp::Neg, src, .. } => func.ty(*src) == MirTy::I64,
             Self::Index { unchecked, .. } => !unchecked,
             _ => false,
+        }
+    }
+
+    /// Code that may run user code with effects: an impure call or
+    /// native, a coroutine step, an append, a `Show` format.
+    fn runs_effects(&self, calls: &CallFacts) -> bool {
+        match self {
+            Self::Call { dest, .. } => !calls.pure.contains(dest),
+            Self::HostInvoke { native_id, .. } => !host_is_pure(*native_id),
+            Self::CallIndirect { .. }
+            | Self::Ffi { .. }
+            | Self::Yield { .. }
+            | Self::ResumeCoro { .. }
+            | Self::ArrayPush { .. }
+            | Self::Format { .. }
+            | Self::Stringify { .. } => true,
+            _ => false,
+        }
+    }
+
+    /// May change a heap word an element or field read sees: a store, or
+    /// code that may store.
+    pub fn writes_heap(&self, calls: &CallFacts) -> bool {
+        self.runs_effects(calls) || matches!(self, Self::StoreIndex { .. } | Self::HeapFieldStore { .. })
+    }
+
+    /// May change an array's length: an append, code that may append (a
+    /// call of a function that is neither pure nor steady), or, when
+    /// lengths are not steady, an allocation a finalizer may run at.
+    pub fn may_resize(&self, calls: &CallFacts) -> bool {
+        match self {
+            Self::Call { dest, .. } => !calls.lengths_steady || !calls.pure.contains(dest) && !calls.steady.contains(dest),
+            Self::Alloc { .. } | Self::GcBarrier { .. } => !calls.lengths_steady,
+            _ => self.runs_effects(calls),
         }
     }
 

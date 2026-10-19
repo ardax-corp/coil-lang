@@ -604,7 +604,7 @@ impl Checker {
                             })
                             .unwrap_or(false));
                 if !allow_fallthrough {
-                    let ret_s = crate::typechecking::pretty::format_ty_for_diag(&self.subst, &ret);
+                    let ret_s = self.diag_ty(&ret);
                     let mut message = Message::error(
                         ErrorCode::ReturnMismatch,
                         format!(

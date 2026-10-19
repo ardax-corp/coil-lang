@@ -936,6 +936,16 @@ impl Generics {
             context: Vec::new(),
         });
 
+        // `()` equals `()` (#1450).
+        self.instances.push(InstanceDef {
+            class: "Eq".into(),
+            defined_module: PRELUDE_OPS_MODULE.into(),
+            range: 0..0,
+            args: vec![unit()],
+            method_fqns: make_fqns("Eq", "unit", &["eq", "ne"]),
+            assoc_tys: HashMap::new(),
+            context: Vec::new(),
+        });
         self.instances.push(InstanceDef {
             class: "Show".into(),
             defined_module: PRELUDE_OPS_MODULE.into(),
@@ -1125,6 +1135,34 @@ impl Generics {
     }
 
     /// Whether `class` is satisfied for `ty` (builtin or registered instance).
+    /// Register the structural `Show` instance of the ground tuple `ty`,
+    /// shown as `%v` shows it (#1451). The checker adds one the first time
+    /// a goal asks for it (`Checker::ensure_tuple_show_instance`); codegen
+    /// emits its thunk ([`Self::tuple_show_tys`]).
+    pub fn register_tuple_show(&mut self, ty: Ty) {
+        let fqn = Self::builtin_instance_fqn("Show", &ty.to_string(), "show");
+        self.instances.push(InstanceDef {
+            class: "Show".into(),
+            defined_module: PRELUDE_OPS_MODULE.into(),
+            range: 0..0,
+            args: vec![ty],
+            method_fqns: HashMap::from([("show".to_string(), fqn)]),
+            assoc_tys: HashMap::new(),
+            context: Vec::new(),
+        });
+    }
+
+    /// The tuple types [`Self::register_tuple_show`] gave a `Show` instance.
+    pub fn tuple_show_tys(&self) -> impl Iterator<Item = &Ty> {
+        self.instances
+            .iter()
+            .filter(|inst| inst.class == "Show" && inst.range == (0..0) && inst.defined_module == PRELUDE_OPS_MODULE)
+            .filter_map(|inst| match inst.args.as_slice() {
+                [ty @ Ty::Tuple(_)] => Some(ty),
+                _ => None,
+            })
+    }
+
     pub fn has_instance(&self, class: &str, ty: &Ty) -> bool {
         self.find_instance(class, std::slice::from_ref(ty))
             .is_some()

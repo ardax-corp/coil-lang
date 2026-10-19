@@ -122,11 +122,6 @@ impl CodeBuf {
             || self.funcs.iter().any(|f| f.code_end > pc)
     }
 
-    pub fn push_index(&mut self) {
-        self.invalidate_lowered();
-        self.il.push_index();
-    }
-
     pub fn push_array_pin(&mut self, slot: u32) {
         self.invalidate_lowered();
         self.il.push_array_pin(slot);
@@ -140,11 +135,6 @@ impl CodeBuf {
     pub fn push_make_enum(&mut self, tag: u16, arity: u16) {
         self.invalidate_lowered();
         self.il.push_make_enum(tag, arity);
-    }
-
-    pub fn push_unbox_value(&mut self, tag: u32) {
-        self.invalidate_lowered();
-        self.il.push_unbox_value(tag);
     }
 
     pub fn push_load_field(&mut self, index: u32) {
