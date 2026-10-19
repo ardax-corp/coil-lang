@@ -1418,7 +1418,6 @@ impl Compiler {
         let mut record_fields = HashMap::new();
         let mut records = HashMap::new();
         let mut record_pats = HashMap::new();
-        let mut record_iters = HashMap::new();
         for (i, e) in hir.exprs.iter().enumerate() {
             match &e.kind {
                 HirKind::Field { base, name }
@@ -1490,19 +1489,6 @@ impl Compiler {
                         .collect::<Option<Vec<_>>>();
                     if let Some(words) = words {
                         record_pats.insert(i as u32, words);
-                    }
-                }
-                // `for (k, v) in r`: each slot's interned name and word.
-                HirKind::ForIn { iterable, .. } if let Some(names) = tables.record_iters.get(&(i as u32)) => {
-                    let ty = Self::hir_ty(hir, *iterable).map(|t| apply_ty_prune(checker.subst(), t));
-                    let Some(Ty::Record { fields }) = ty.as_ref().map(crate::typechecking::ty::strip_readonly) else {
-                        continue;
-                    };
-                    let mut fields = fields.clone();
-                    fields.sort_by(|a, b| a.0.cmp(&b.0));
-                    let words = fields.iter().zip(names).map(|((_, fty), &name)| Some((name, record_word(fty)?))).collect::<Option<Vec<_>>>();
-                    if let Some(words) = words {
-                        record_iters.insert(i as u32, words);
                     }
                 }
                 _ => {}
@@ -1726,7 +1712,6 @@ impl Compiler {
             record_fields,
             records,
             record_pats,
-            record_iters,
             matrix_wraps: &tables.matrix_wraps,
             field_news: &tables.field_news,
             linalgs: &tables.linalgs,

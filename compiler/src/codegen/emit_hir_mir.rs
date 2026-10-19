@@ -106,9 +106,6 @@ pub(super) struct HirMirTables {
     /// The `InitTyped` type id of each record literal's slotted object
     /// ([`Checker::record_type_id`]), by literal.
     pub(super) record_types: HashMap<u32, u32>,
-    /// Each field name of a `for (k, v) in record` loop's record, in slot
-    /// (name) order, interned: the loop's `(name, value)` items.
-    pub(super) record_iters: HashMap<u32, Vec<u32>>,
     /// Shared generic call arguments of a niche layout passed in a boxed
     /// parameter ([`Compiler::hir_niche_arg`]): boxed to their enum
     /// object, by argument.
@@ -805,19 +802,7 @@ impl Compiler {
                 iterable,
                 kind: Some(kind),
                 ..
-            } => {
-                // `for (k, v) in r`: its `(name, value)` items, names first.
-                if let ForInKind::Dict = kind
-                    && let Some(Ty::Record { fields }) =
-                        Self::hir_ty(hir, *iterable).map(|t| apply_ty_prune(self.checker.subst(), t)).as_ref().map(crate::typechecking::ty::strip_readonly)
-                {
-                    let mut names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
-                    names.sort_unstable();
-                    let keys = names.into_iter().map(|n| self.intern_string(n)).collect();
-                    t.record_iters.insert(id.0, keys);
-                }
-                self.hir_mir_for_in(hir, id, pat, *iterable, kind, t)
-            }
+            } => self.hir_mir_for_in(hir, id, pat, *iterable, kind, t),
             HirKind::Index {
                 base,
                 index,
