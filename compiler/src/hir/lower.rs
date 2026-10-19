@@ -685,7 +685,7 @@ impl Walk<'_> {
                 self.word(*value)?;
                 self.value(*value)
             }
-            ("len" | "capacity" | "clear", [_]) | ("reserve", [_, _]) | ("insert", [_, _, _]) | ("pop", [_]) | ("remove", [_, _]) => {
+            ("capacity" | "clear", [_]) | ("reserve", [_, _]) | ("insert", [_, _, _]) | ("pop", [_]) | ("remove", [_, _]) => {
                 self.args(args)
             }
             _ => Err("vec-method"),
@@ -737,12 +737,14 @@ pub fn user_len(body: &HirBody, checker: &Checker, arg: HirId) -> bool {
     })
 }
 
-/// Whether `x.len()` is the structural `len(x)` (not a `Vec` method).
+/// Whether `x.len()` is the structural length read: `x` an array, tuple,
+/// record, string or `Vec` (`ArrayLen`, or a constant for a fixed-size
+/// type), as `len(x)` of the same receiver.
 pub fn structural_len(body: &HirBody, checker: &Checker, recv: HirId) -> bool {
-    body.expr(recv).ty.as_ref().is_some_and(|t| {
-        let t = apply_ty_prune(checker.subst(), t);
-        Checker::is_structural_len_ty_for_codegen(&t) && coil_ty::vec_element_ty(&t).is_none()
-    })
+    body.expr(recv)
+        .ty
+        .as_ref()
+        .is_some_and(|t| Checker::is_structural_len_ty_for_codegen(&apply_ty_prune(checker.subst(), t)))
 }
 
 /// Whether evaluating `id` may store into frame slots (the AST's
