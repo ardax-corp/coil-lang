@@ -532,8 +532,48 @@ and 2.72–2.87 s → 1.55–1.61 s at 1600.
 LIR emission is ~13% of that compile at 1600; what stays superlinear there
 is `licm::dominators` (dominator sets per block, ~43% at 1600, #1518), and
 parsing, `precise_frames` and HIR id hashing. While such a body still has a
-register per value (below ~127 arms) its clears are themselves quadratic
+register per value (below ~127 arms) its clears were themselves quadratic
 code (#1519).
+
+They are linear now (#1519). Each taken arm zeroed every register an
+earlier value of the chain lived in, twice: once beside its `ClearWord`
+(`source_clears`) and again past the edge's φ copies (`entry_clears`).
+`prune_clears` runs a forward dataflow, after the three clear plans, of
+the registers that may hold a word this frame wrote since its entry, and
+drops a clear of a register that holds none on any path in: zeroed by an
+earlier clear with no write after, or never written. (The precise frame
+maps count a word the frame never wrote as no root, as they do a zero, so
+neither changes what a collection scans.) Writes count wherever emission
+may put them: a block's defined registers at its top and again before its
+terminator, besides where each op stands; an edge's φs and match payloads
+before its clears; parameters and words no op defines are never zero. That
+alone left each arm zeroing every earlier join's register (the path that
+skipped the arms after it still held the old word there): `n²/2`. So a
+branch edge into a rebound join now zeroes its own copy's source, as a
+jump edge did: a skipped arm leaves its join's previous register zero once,
+on the edge, and later arms need no clear of it. The unit test
+`lir_clears_about_linear_over_rebinding_joins` counts `CONST 0; STORE`
+pairs over `N` reachable arms:
+
+| N | before | dataflow only | with branch-edge clears |
+|---|---|---|---|
+| 25 | 1,177 | 325 | 73 |
+| 100 | 19,702 | 5,050 | 298 |
+
+`fn f(int x) -> string` with N `if x == k { s = s + "a"; }`,
+`coil dissect --fn f` (release, 2026-10-19):
+
+| N | frame words | ops in `f` before | after | clears before | after |
+|---|---|---|---|---|---|
+| 25 | 52 | 2,659 | 451 | 1,177 | 73 |
+| 50 | 102 | 10,309 | 901 | 4,852 | 148 |
+| 100 | 202 | 40,609 | 1,801 | 19,702 | 298 |
+| 200 | 5 | 4,793 | 4,793 | 994 | 994 |
+
+(At 200 the registers are shared and the code was already linear.) A path
+now zeroes each register at most once: an arm zeroes the join's register it
+read, and its own result after the copy; a skipped arm costs one clear on
+its branch edge, which no arm paid before.
 
 Host Option / `Result<(),E>` / heap-heap Result still pack once at
 `HostInvoke` (`host_enum`). MIR does not add a second pack.
