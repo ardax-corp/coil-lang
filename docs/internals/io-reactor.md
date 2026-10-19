@@ -104,7 +104,9 @@ COI-37 / COI-209 / COI-215 stub reservations as live for these ids.
 
 M1 math (**125–135**, archive minor 5): `atan`, `atan2`, `asin`, `acos`,
 `log10`, `log2`, `cbrt`, `rem`, `sinh`, `cosh`, `tanh`. Frozen `sin` … `pow`
-stay **102–110**. Named `PI` / `E` / `TAU` live on coil-stdlib
+stay **102–110**. `math_pow` (**110**) and `math_rem` (**132**) keep their rows
+but no surface name reaches them: `prelude::math::{pow, rem}` were removed in
+favour of the `**` and `%` operators. Named `PI` / `E` / `TAU` live on coil-stdlib
 [`num`](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/modules.md)
 (`static const`, not HostInvoke). Package process/WebSocket/collections APIs
 belong in those package READMEs — this page only names host ids the VM owns.

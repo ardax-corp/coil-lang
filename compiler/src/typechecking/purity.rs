@@ -1497,7 +1497,7 @@ fn main() { return; }
     fn classify_host_name_math_is_pure_clocks_and_io_are_not() {
         assert!(classify_host_name("sin").is_pure());
         assert!(classify_host_name("math_sin").is_pure());
-        assert!(classify_host_name("math::pow").is_pure());
+        assert!(classify_host_name("math::sqrt").is_pure());
         assert!(classify_host_name("packed_dot").is_pure());
         assert!(classify_host_name("simd_axpy_reduce").is_pure());
         assert!(classify_host_name("mono_nanos").contains(EffectFlags::HOST));
