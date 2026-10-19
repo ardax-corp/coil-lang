@@ -53,7 +53,7 @@ pub fn emit_lir_with_aliases(
 ) -> Result<Vec<IlOp>, LowerError> {
     if func.has_mapped_gc_edge() && !across_alloc {
         return Err(LowerError::Refused(
-            "MIR→LIR refuses Alloc/GcBarrier without S2b maps (S2c)".into(),
+            "MIR→LIR refuses Alloc/GcBarrier without GC maps (S2c)".into(),
         ));
     }
     let mut plan = EmitPlan::new(func);
@@ -187,45 +187,17 @@ pub fn emit_lir_with_aliases(
     Ok(out)
 }
 
-pub(super) type LirSidecars = (
-    std::collections::HashMap<u32, u32>,
-    super::deopt::DraftDeoptMap,
-    Option<super::stackmap::DraftFrameMap>,
-);
+pub(super) type LirSidecars = (std::collections::HashMap<u32, u32>, super::deopt::DraftDeoptMap);
 
-/// Debug slot remap, deopt map and (for a body with GC edges) the stack map
-/// of `func`, in the frame registers LIR emission assigns.
+/// Debug slot remap and deopt map of `func`, in the frame registers LIR
+/// emission assigns.
 pub(super) fn lir_sidecars(func: &MirFunc) -> LirSidecars {
     let mut plan = EmitPlan::new(func);
-    let (regs, scratch) = assign_needed(func, &mut plan).unwrap_or_else(|_| (Vec::new(), 0));
+    let (regs, _) = assign_needed(func, &mut plan).unwrap_or_else(|_| (Vec::new(), 0));
     let regs = coalesce_latch_overwrite(func, regs, &plan.need_slot);
-    let mut stack_map = if func.has_mapped_gc_edge() && !regs.is_empty() {
-        super::stackmap::encode_draft_regs(func, &regs, &plan.need_slot)
-    } else {
-        None
-    };
-    // A heap home holds its `defer` capture to the end of the body, past
-    // the capture's own last use: every site roots it.
-    if let (Some(map), Ok(base)) = (stack_map.as_mut(), home_base(func, scratch)) {
-        let heap = func.homes.iter().enumerate().filter(|(_, ty)| ty.is_heap_word());
-        for (k, _) in heap {
-            let slot = u16::from(base) + k as u16;
-            for site in &mut map.sites {
-                if !site.contains(&slot) {
-                    site.push(slot);
-                    site.sort_unstable();
-                }
-            }
-            if !map.frame_slots.contains(&slot) {
-                map.frame_slots.push(slot);
-                map.frame_slots.sort_unstable();
-            }
-        }
-    }
     (
         super::deopt::debug_slot_remap(func, &regs, &plan.need_slot),
         super::deopt::encode_draft(func, &regs, &plan.need_slot),
-        stack_map,
     )
 }
 
@@ -660,15 +632,31 @@ fn keep_memory_order(func: &MirFunc, tree: &mut [bool], fused: &[bool]) {
                 tree[v.index()] = false;
                 continue;
             }
-            let mem: Vec<usize> = order.into_iter().filter(|&k| reads_memory(&insts[k]) || writes_memory(&insts[k])).collect();
+            // An op that can trap counts as a read: a write it is delayed
+            // past would run before the panic (#856).
+            let mem: Vec<usize> = order
+                .into_iter()
+                .filter(|&k| reads_memory(&insts[k]) || writes_memory(&insts[k]) || insts[k].may_trap(func))
+                .collect();
             // A later-defined op emitted first means an earlier one was
             // delayed past it.
-            let late = mem.iter().enumerate().find_map(|(i, &a)| {
-                mem[i + 1..]
-                    .iter()
-                    .find(|&&b| b < a && (writes_memory(&insts[a]) || writes_memory(&insts[b])))
-                    .map(|&b| insts[b].dest())
-            });
+            // The first `a` with such a `b` after it, found from suffix
+            // minima so a long block stays linear.
+            let writes: Vec<bool> = mem.iter().map(|&k| writes_memory(&insts[k])).collect();
+            let mut min_any = vec![usize::MAX; mem.len() + 1];
+            let mut min_write = vec![usize::MAX; mem.len() + 1];
+            for i in (0..mem.len()).rev() {
+                min_any[i] = min_any[i + 1].min(mem[i]);
+                min_write[i] = if writes[i] { min_write[i + 1].min(mem[i]) } else { min_write[i + 1] };
+            }
+            let late = (0..mem.len())
+                .find(|&i| min_write[i + 1] < mem[i] || (writes[i] && min_any[i + 1] < mem[i]))
+                .and_then(|i| {
+                    let a = mem[i];
+                    (i + 1..mem.len())
+                        .find(|&j| mem[j] < a && (writes[i] || writes[j]))
+                        .map(|j| insts[mem[j]].dest())
+                });
             match late {
                 Some(v) if tree[v.index()] => tree[v.index()] = false,
                 _ => break,

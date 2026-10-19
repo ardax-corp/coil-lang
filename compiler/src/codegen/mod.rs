@@ -11,6 +11,7 @@ use reporting::Label as DiagLabel;
 
 use crate::block_builder::{BlockBuilder, JumpKind as BbJumpKind, Label as BbLabel};
 use crate::const_fold::ConstValue;
+use crate::hir::layout::PairKind;
 use crate::il::{CodeBuf, EmitBuf, IlOp, Label as IlLabel};
 use crate::monomorphize::{MonoKey, MonoPlan};
 use crate::typechecking::{Checker, Ty};
@@ -231,8 +232,8 @@ struct Context {
     /// First whole-object escape of a stack array in this frame → box slot (Q1).
     stack_array_box: HashMap<String, u32>,
 
-    /// Frame-local / two-slot ObjEnum: name → (payload_slot, tag_slot, enum_name).
-    unboxed_enum_locals: HashMap<String, (u32, u32, String)>,
+    /// Frame-local / two-slot ObjEnum: name → (payload_slot, tag_slot, kind).
+    unboxed_enum_locals: HashMap<String, (u32, u32, PairKind)>,
 
     prev: Option<Box<Self>>,
 }
@@ -269,6 +270,9 @@ pub struct Compiler {
     /// would otherwise land in every archive's string table).
     builtin_show_thunks: Vec<(String, &'static str, &'static [&'static str])>,
     builtin_show_used: HashSet<String>,
+    /// Reserved `Show` thunks of ground tuples (#1451), emitted after the
+    /// module's own functions.
+    tuple_show_thunks: Vec<(String, Ty)>,
     /// Fixed arity + rest flag per function table key. Survives multi-file
     /// `check_program` clears of `Checker::fn_param_names`, so `MakeFn` for
     /// imported names (e.g. `spawn(run_jobs, …)` after `use pool::worker::run_jobs`)
@@ -318,7 +322,7 @@ pub struct Compiler {
     /// name codegen looks a function up by. The type env fills in as bodies
     /// are compiled, so an unmemoized query can answer differently for a
     /// body and for a later caller, see [`Compiler::two_word_return_kind`].
-    pair_return_kinds: std::cell::RefCell<HashMap<String, Option<String>>>,
+    pair_return_kinds: std::cell::RefCell<HashMap<String, Option<PairKind>>>,
     /// The generic function value (name, span) a body's HIR plan refused
     /// with `generic-fn-value`; reported as E0127 instead of E0801 (#916).
     generic_fn_value_refusal: std::cell::RefCell<Option<(String, (usize, usize))>>,
@@ -394,7 +398,7 @@ pub struct Compiler {
     /// two-slot `CALL`/`RETURN` ABI (`[payload, tag]` or product `[a, b]`).
     /// `None` while boxed / niche / unbounded `T`. See
     /// [`Compiler::two_word_return_kind`].
-    compiling_two_word_enum: Option<String>,
+    compiling_two_word_enum: Option<PairKind>,
 
     /// Harness metadata: `(description, bytecode offset)` for each
     /// top-level `test("…") { … }` case, in source order.
@@ -585,10 +589,6 @@ pub struct Compiler {
     retain_cursor_il: bool,
     /// Snapshot filled by finalize when [`Self::retain_cursor_il`] is set.
     cursor_il: Option<crate::il::tell::CursorIlSnap>,
-    /// S2b interpreter maps (empty when no alloc body lifted).
-    stack_maps: Vec<common::FrameStackMap>,
-    /// Drafts before PC bind (tests / diagnostics).
-    stack_map_drafts: Vec<crate::mir::DraftFrameMap>,
     deopt_map_drafts: Vec<crate::mir::DraftDeoptMap>,
 
     /// Why the last [`Self::try_lower_hir_function`] did not lower its body.
@@ -674,6 +674,7 @@ impl Default for Compiler {
             fn_entry_labels: HashMap::with_capacity(32),
             builtin_show_thunks: Vec::new(),
             builtin_show_used: HashSet::new(),
+            tuple_show_thunks: Vec::new(),
             fn_arities: HashMap::with_capacity(32),
             module_items: std::collections::HashMap::default(),
             native: HashMap::default(),
@@ -782,8 +783,6 @@ impl Default for Compiler {
             inline_cost: inline_cost::InlineCostOptions::default(),
             retain_cursor_il: false,
             cursor_il: None,
-            stack_maps: Vec::new(),
-            stack_map_drafts: Vec::new(),
             deopt_map_drafts: Vec::new(),
             hir_refusal: None,
             hir_module: None,

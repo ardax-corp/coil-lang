@@ -3,7 +3,7 @@
 //! [`value_layout`] is the one-word view of [`crate::hir::layout::of`]. It decides the one-word encoding of a value (boxed `ObjEnum`
 //! or a pointer niche). Codegen, `HostInvoke` packing and FFI repacking all
 //! ask here so producers and consumers cannot disagree. The two-word direct
-//! `CALL`/`RETURN` width is [`super::return_layout::two_word_return_enum`].
+//! `CALL`/`RETURN` width is [`super::return_layout::two_word_kind`].
 
 use super::infer::Checker;
 use super::subst::apply_ty_prune;

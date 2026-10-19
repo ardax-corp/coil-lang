@@ -1911,12 +1911,22 @@ fn main() {
 }
 "#;
     let mut p = crate::Pipeline::new();
-    let _ = p.compile_src(src).expect("compile fill");
+    let (bc, _) = p.compile_src(src).expect("compile fill");
     assert!(
-        p.stack_maps().iter().any(|m| !m.safepoints.is_empty()),
-        "B6 Vec.push should bind grow maps: {:?}",
-        p.stack_maps()
+        !precise_safepoints(&p, &bc, super::stackmap::is_alloc_opcode).is_empty(),
+        "B6 Vec.push should map its grow safepoints: {:?}",
+        p.precise_frames()
     );
+}
+
+/// Precise frame rows (pc, slots) at the bytecode ops `at` selects.
+fn precise_safepoints(p: &crate::Pipeline, bc: &[common::Byte], at: impl Fn(Instruction) -> bool) -> Vec<(u32, Vec<usize>)> {
+    p.precise_frames()
+        .iter()
+        .flat_map(|m| &m.at_pc)
+        .filter(|s| bc.get(s.pc as usize).is_some_and(|b| at(*b.bytecode())))
+        .map(|s| (s.pc, s.slots.iter().map(|&w| common::precise_slot_index(w)).collect()))
+        .collect()
 }
 
 #[test]
@@ -1936,11 +1946,11 @@ fn main() {
 }
 "#;
     let mut p = crate::Pipeline::new();
-    let _ = p.compile_src(src).expect("compile wrap");
+    let (bc, _) = p.compile_src(src).expect("compile wrap");
     assert!(
-        p.stack_maps().iter().any(|m| !m.safepoints.is_empty()),
-        "B6 CALL+MakeArray should bind maps: {:?}",
-        p.stack_maps()
+        !precise_safepoints(&p, &bc, super::stackmap::is_alloc_opcode).is_empty(),
+        "B6 CALL+MakeArray should map its safepoints: {:?}",
+        p.precise_frames()
     );
 }
 
@@ -2210,9 +2220,9 @@ fn main() {
     let mut p = crate::Pipeline::new();
     let (bc, constants) = p.compile_src(src).expect("compile pair");
     assert!(
-        !p.stack_maps().is_empty(),
-        "mapped pair/main should emit S2b maps: {:?}",
-        p.stack_maps()
+        !precise_safepoints(&p, &bc, super::stackmap::is_alloc_opcode).is_empty(),
+        "mapped pair/main should map their safepoints: {:?}",
+        p.precise_frames()
     );
     let symbols = p.program_debug().fn_symbols;
     let pair = symbols
@@ -3100,13 +3110,11 @@ fn main() {
             .collect::<Vec<_>>()
     );
     assert!(
-        p.stack_maps().iter().any(|m| m.safepoints.iter().any(|s| {
-            hot_bc
-                .get((s.pc as usize).saturating_sub(start))
-                .is_some_and(|b| *b.bytecode() == Instruction::FORMAT)
-        })),
-        "R3 binds FORMAT safepoints: {:?}",
-        p.stack_maps()
+        precise_safepoints(&p, &bc, |i| i == Instruction::FORMAT)
+            .iter()
+            .any(|&(pc, _)| (start..end).contains(&(pc as usize))),
+        "R3 maps FORMAT safepoints: {:?}",
+        p.precise_frames()
     );
     let mut vm = machine::Machine::<64>::with_operand_capacity(64);
     vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
@@ -3131,16 +3139,11 @@ fn main() {
     let mut p = crate::Pipeline::new();
     let (bc, constants) = p.compile_src(src).expect("compile mapped format");
     assert!(
-        p.stack_maps().iter().any(|m| {
-            m.safepoints.iter().any(|s| {
-                s.slots.contains(&0) && {
-                    let i = s.pc as usize;
-                    i < bc.len() && *bc[i].bytecode() == Instruction::FORMAT
-                }
-            })
-        }),
+        precise_safepoints(&p, &bc, |i| i == Instruction::FORMAT)
+            .iter()
+            .any(|(_, slots)| slots.contains(&0)),
         "live string slot 0 must be rooted at FORMAT: {:?}",
-        p.stack_maps()
+        p.precise_frames()
     );
     let mut vm = machine::Machine::<64>::with_operand_capacity(64);
     vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
@@ -3387,9 +3390,9 @@ fn main() {
     p.set_hir_inline(false);
     let (bc, constants) = p.compile_src(src).expect("compile field_hot board");
     assert!(
-        p.stack_maps().iter().any(|m| !m.safepoints.is_empty()),
-        "D2 field_hot InitTyped should bind maps: {:?}",
-        p.stack_maps()
+        !precise_safepoints(&p, &bc, super::stackmap::is_alloc_opcode).is_empty(),
+        "D2 field_hot InitTyped should map its safepoints: {:?}",
+        p.precise_frames()
     );
     let symbols = p.program_debug().fn_symbols;
     for name in ["hot", "Point::sum"] {
@@ -4574,11 +4577,10 @@ bb2:
     );
 }
 
-/// MIR lowered from HIR maps its own allocations: one site per allocation,
-/// each covering the parameters and the frame register of every heap value
-/// live across one, and the count matches the alloc opcodes LIR emits.
+/// Direct MIR may emit across its allocations only when each is followed by
+/// its `GcBarrier`.
 #[test]
-fn direct_mir_stack_map_from_regs() {
+fn direct_mir_maps_ok_pairs_barriers() {
     let text = "func @keep(v0: heapref, v1: i64) -> i64 {
 bb0:
     v2 = alloc.array v1, v1
@@ -4595,18 +4597,6 @@ bb0:
     let f = parse_func(text).expect(text);
     f.verify().unwrap();
     assert!(super::stackmap::mir_maps_ok(&f));
-    let (_, _, map) = super::emit_lir::lir_sidecars(&f);
-    let map = map.expect("allocating body has a map");
-    assert_eq!(map.sites.len(), 2);
-    assert!(map.frame_slots.contains(&0), "param slot: {map:?}");
-    assert!(map.frame_slots.len() >= 2, "array held across the second alloc: {map:?}");
-    let mut pool = Vec::new();
-    let lir = emit_lir(&f, Some(Label(0)), &mut pool, true).expect("mapped LIR");
-    let allocs = lir
-        .iter()
-        .filter(|op| matches!(op, IlOp::MakeArray { .. }) || matches!(op, IlOp::Byte { byte, .. } if super::stackmap::is_alloc_opcode(*byte.bytecode())))
-        .count();
-    assert_eq!(allocs, map.sites.len());
 
     // An allocation whose barrier does not follow it is not mapped.
     let unpaired = "func @loose(v0: i64) -> heapref {
@@ -4711,9 +4701,9 @@ bb2:
     assert!(!matches!(lir[unpack + 1], IlOp::StorePop { .. }), "the payload stays on the stack");
 }
 
-/// A function value (`MakeFn`) is the only allocation: no allocation the
-/// stack maps describe (`refuses_alloc`), so MIR→LIR emits the body with
-/// no map, as its fuse IL runs (an auto-par fork that spawns a closure).
+/// A function value (`MakeFn`) is the only allocation: no allocation
+/// `refuses_alloc` names, so MIR→LIR emits the body as its fuse IL runs (an
+/// auto-par fork that spawns a closure).
 #[test]
 fn lir_emits_fn_value_alloc_without_maps() {
     let text = "func @fork(v0: i64) -> i64 {
@@ -4729,8 +4719,6 @@ bb0:
     let mut pool = Vec::new();
     let lir = emit_lir(&f, Some(Label(0)), &mut pool, false).expect("LIR emits a MakeFn body");
     assert!(lir.iter().any(|op| matches!(op, IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::MakeFn)));
-    let (_, _, map) = super::emit_lir::lir_sidecars(&f);
-    assert!(map.is_none(), "no mapped allocation, no map");
 }
 
 /// A `defer` flag or capture's home sits past every register and the
@@ -4828,4 +4816,49 @@ bb0:
     assert_eq!(kept_pool, vec![1, 42, (-9i64) as u64]);
     let kept = kept.expect("LIR takes the body");
     assert!(kept.iter().any(|op| matches!(op, IlOp::ConstPool { idx: 2, .. })));
+}
+
+/// A `()` parameter holds the empty tuple object: its entry slot is a
+/// must-pointer in the precise frame map, as a tuple's `()` item is a
+/// pointer word (#1465).
+#[test]
+fn unit_param_slot_is_a_must_pointer() {
+    let src = r#"
+use string::format;
+fn shows(unit u) -> bool {
+    return format("%v", u) == "()";
+}
+fn keep(unit u, int n) -> bool {
+    let s = format("%i", n);
+    return shows(u) && len(s) > 0;
+}
+fn main() {
+    let _ = keep((), 3);
+}
+"#;
+    let mut p = crate::Pipeline::new();
+    p.bind_workspace_language_roots();
+    p.set_hir_inline(false);
+    let (bc, constants) = p.compile_src(src).expect("compile unit param");
+    let symbols = p.program_debug().fn_symbols;
+    let keep = symbols.iter().position(|s| s.name == "keep").expect("keep symbol");
+    let start = symbols[keep].entry_pc;
+    let row = p
+        .precise_frames()
+        .iter()
+        .find(|m| m.entry_pc == start)
+        .expect("keep has a precise frame map");
+    let param: Vec<u16> = row
+        .at_pc
+        .iter()
+        .flat_map(|s| s.slots.iter().copied())
+        .filter(|&s| common::precise_slot_index(s) == 0)
+        .collect();
+    assert!(!param.is_empty(), "the unit parameter is live across the allocation: {row:?}");
+    assert!(
+        param.iter().all(|&s| common::precise_slot_must(s)),
+        "the unit parameter slot is a must-pointer: {row:?}"
+    );
+    let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+    vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
 }

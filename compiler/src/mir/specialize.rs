@@ -19,9 +19,6 @@ pub struct BodySidecar {
     /// Allocating dense body: its registers may sit past the cursor, so its
     /// frame needs a decoded extent (see `precise_frames`).
     pub needs_frame_extent: bool,
-    /// GC map of a dense or LIR body, built from its MIR (lowered from HIR)
-    /// in the frame registers emission assigns.
-    pub stack_map: Option<super::stackmap::DraftFrameMap>,
     /// A LIR body's unwind cleanup pad, emitted after it: its label and the
     /// frame words it reads ([`super::MirFunc::cleanup`]).
     pub cleanup_pad: Option<(Label, u32)>,
@@ -187,8 +184,8 @@ fn specialize_side(
     // counted `for` is i64 + index.
     // Q8: niche / two-slot match may dense when the reconstruct beats
     // fuse-IL. D3: boxed JumpIfMatch / multi-payload Unpack may dense
-    // (stack JIM + per-index MatchPayload; cost gate). Alloc / InitTyped without
-    // S2b maps take dense with a frame extent (minor 22). S2d: mapped *preheader*
+    // (stack JIM + per-index MatchPayload; cost gate). Alloc / InitTyped
+    // take dense with a frame extent (minor 22). S2d: mapped *preheader*
     // Make* + index loop may take dense. A2: Index / Make* / ArrayLen /
     // StoreIndex emit dense-native. D2: heap LoadField / GetField /
     // SetField emit DenseField*; Object Alloc is DenseMakeObject.
@@ -209,7 +206,8 @@ fn specialize_side(
         return refuse_dense("post-loop alloc return");
     }
     // Registers may sit past the cursor at a safepoint, and generic host
-    // results are heap words typed `i64` that S2b maps miss: cover the frame.
+    // results are heap words typed `i64`: a conservatively scanned frame
+    // covers the whole extent.
     side.needs_frame_extent = has_alloc;
     if !has_numeric_arith(from_hir) {
         return refuse_dense("no numeric arith");
@@ -218,10 +216,7 @@ fn specialize_side(
         return refuse_dense("call ABI");
     }
     let mut func = from_hir.clone();
-    // HIR CSE refuses DIVF; number it on SSA before dense emit.
-    crate::mir::cse(&mut func);
-    crate::mir::licm(&mut func);
-    crate::mir::cse(&mut func);
+    loop_opts(&mut func, true);
     crate::mir::instcombine(&mut func);
     crate::mir::destprop(&mut func);
     crate::mir::strength_reduce(&mut func);
@@ -249,13 +244,9 @@ fn specialize_side(
     let entry = official_entry.or(labels.first);
     let named_hi = super::gates::max_named_label(from_hir).max(labels.head.iter().map(|&Label(id)| id).max().unwrap_or(0));
     let label_hi = named_hi.max(official_entry.map(|Label(id)| id).unwrap_or(0));
-    let (remap, deopt, stack_map) = super::emit::dense_sidecars(&func, entry);
+    let (remap, deopt) = super::emit::dense_sidecars(&func, entry);
     side.debug_slot_remap = remap;
     side.deopt = Some(deopt);
-    side.stack_map = stack_map.map(|mut map| {
-        map.name = name.to_string();
-        map
-    });
     if let Some(packed) = super::pack::try_axpy_pack(&func, entry, pool) {
         return Some((packed, abi));
     }
@@ -484,7 +475,7 @@ pub fn try_lower_abi_body_side(
     side: &mut BodySidecar,
 ) -> Option<Vec<IlOp>> {
     // I8: any inferable unfused body, not only two-slot / match / field accidents.
-    // S2c: allocating leftovers need a real S2b draft; else fuse-IL.
+    // S2c: allocating leftovers need every allocation followed by its barrier.
     // S2d: mapped in-loop / preheader Make* may reconstruct; post-loop-only
     // `return [x]` stays fuse-IL so invert+fuse (COI-87) remains.
     // An argless `FORMAT` is no `refuses_alloc` site but still a mapped
@@ -505,12 +496,28 @@ pub fn try_lower_abi_body_side(
         return refuse(format!("lir wall {wall:?}"));
     }
     let mut func = direct.clone();
+    // A debugger reads the locals where the source keeps them, and a
+    // coroutine's frame lives across its yields: both keep their code.
+    let yields = func.blocks.iter().flat_map(|b| &b.insts).any(|i| matches!(i, crate::mir::MirInst::Yield { .. }));
+    if !func.debug_keep && !yields {
+        loop_opts(&mut func, false);
+    }
     if has_alloc {
         crate::mir::sroa(&mut func);
-    } else {
-        crate::mir::cse(&mut func);
     }
     lir_tail(labels, name, pool, has_alloc, func, side)
+}
+
+/// The scalar passes both tiers run first: local CSE, trivial-φ copy
+/// forwarding (a loop-carried copy of an invariant reads as invariant),
+/// loop-invariant code motion, then CSE again over what moved together.
+/// `dense`: the body emits dense ([`crate::mir::licm`]).
+fn loop_opts(func: &mut crate::mir::MirFunc, dense: bool) {
+    let cse = if dense { crate::mir::cse } else { crate::mir::cse_lir };
+    cse(func);
+    crate::mir::destprop(func);
+    crate::mir::licm(func, dense);
+    cse(func);
 }
 
 /// A body's LIR, lowered once from its MIR by [`fuse_fallback`] and kept
@@ -630,44 +637,19 @@ fn lir_tail(
     let entry = labels.first;
     // Every label leading the body binds the entry; a self call may name any.
     let aliases: Vec<Label> = labels.head.iter().copied().filter(|&l| Some(l) != entry).collect();
-    let (remap, deopt, mut stack_map) = super::emit_lir::lir_sidecars(&func);
+    let (remap, deopt) = super::emit_lir::lir_sidecars(&func);
     side.debug_slot_remap = remap;
     side.deopt = Some(deopt);
-    // SROA may have taken every allocation out; then there is nothing to map.
-    if func.has_mapped_gc_edge() {
-        let Some(map) = stack_map.take() else {
-            return refuse("no MIR stack map");
-        };
-        let mut map = map;
-        map.name = name.to_string();
-        side.stack_map = Some(map);
-    }
     capture_mir(name, "lir", &func);
     let mut out = match super::emit_lir::emit_lir_with_aliases(&func, entry, &aliases, pool, has_alloc) {
         Ok(o) => o,
         Err(e) => return refuse(format!("emit: {e}")),
     };
     if let Some(pad) = func.cleanup.as_deref() {
-        let (label, frame, ops, pad_map) = match emit_cleanup_pad(&func, pad, &out, pool) {
+        let (label, frame, ops) = match emit_cleanup_pad(&func, pad, &out, pool) {
             Ok(p) => p,
             Err(why) => return refuse(why),
         };
-        // The pad's allocation sites follow the body's: its map's sites
-        // continue the body's (a body with none starts a map).
-        if let Some(pad_map) = pad_map {
-            if side.stack_map.is_none() && func.has_gc_edge() {
-                return refuse("cleanup pad map");
-            }
-            let map = side.stack_map.get_or_insert_with(|| super::stackmap::DraftFrameMap {
-                name: name.to_string(),
-                sites: Vec::new(),
-                frame_slots: Vec::new(),
-            });
-            map.sites.extend(pad_map.sites);
-            map.frame_slots.extend(pad_map.frame_slots);
-            map.frame_slots.sort_unstable();
-            map.frame_slots.dedup();
-        }
         out.extend(ops);
         side.cleanup_pad = Some((label, frame));
     }
@@ -676,16 +658,13 @@ fn lir_tail(
 
 /// The LIR of `func`'s cleanup `pad`, to follow `body` (`func`'s LIR): its
 /// label (past every label `body` names), the frame words of `func` it
-/// reads, its ops, and the stack map of its allocation sites (its heap
-/// registers and the heap homes it reads, in the shared frame). Its own
-/// registers sit past that frame.
-#[allow(clippy::type_complexity)]
+/// reads, and its ops. Its own registers sit past that frame.
 fn emit_cleanup_pad(
     func: &crate::mir::MirFunc,
     pad: &crate::mir::MirFunc,
     body: &[IlOp],
     pool: &mut Vec<u64>,
-) -> Result<(Label, u32, Vec<IlOp>, Option<super::stackmap::DraftFrameMap>), String> {
+) -> Result<(Label, u32, Vec<IlOp>), String> {
     let (base, frame) = super::emit_lir::lir_home_frame(func).ok_or("cleanup pad frame")?;
     let mut pad = pad.clone();
     pad.home_base = Some(base);
@@ -707,14 +686,8 @@ fn emit_cleanup_pad(
         .unwrap_or(0);
     let label = Label(top + 1);
     let mapped = pad.has_mapped_gc_edge();
-    let map = if mapped {
-        let (_, _, map) = super::emit_lir::lir_sidecars(&pad);
-        Some(map.ok_or("cleanup pad map")?)
-    } else {
-        None
-    };
     let ops = super::emit_lir::emit_lir(&pad, Some(label), pool, mapped).map_err(|e| format!("cleanup pad: {e}"))?;
-    Ok((label, frame, ops, map))
+    Ok((label, frame, ops))
 }
 
 /// S2f computed-index slot-select: several EQ/JMPF arms into one join.
@@ -766,8 +739,7 @@ fn fused_eq_jmp(byte: &common::Byte) -> bool {
 }
 
 /// Make* / InitTyped between a loop header and its back-edge.
-/// Preheader alloc plus an index loop is not this — S2d may specialize those
-/// when S2b maps exist.
+/// Preheader alloc plus an index loop is not this — S2d may specialize those.
 fn has_alloc_inside_loop(ops: &[IlOp]) -> bool {
     let loops = loop_ranges(ops);
     if loops.is_empty() {
