@@ -2729,6 +2729,10 @@ impl Compiler {
     }
 
     pub(super) fn show_lookup_ty_for_instance(ty: &Ty) -> Ty {
+        // `Option` / `Result` keep their type arguments (#1479).
+        if let Some(app) = crate::typechecking::ty::builtin_enum_app(ty) {
+            return app;
+        }
         match ty {
             Ty::Sum { name, .. } => Ty::Con(name.clone()),
             Ty::Constructor { owner, .. } => Self::show_lookup_ty_for_instance(owner),
@@ -2916,8 +2920,15 @@ impl Compiler {
             }
         }
         let (fqns, diag_range) = {
-            let Some(instance) = self.checker.generics().find_instance_relaxed(class, lookup)
-            else {
+            // An open goal looks among the generic instances first: a ground
+            // one its variables unify with is never its instance.
+            let instance = if open {
+                let generics = self.checker.generics();
+                generics.find_generic_instance(class, lookup).or_else(|| generics.find_instance_relaxed(class, lookup))
+            } else {
+                self.checker.generics().find_instance_relaxed(class, lookup)
+            };
+            let Some(instance) = instance else {
                 return false;
             };
             // An open goal may only select a generic instance (a concrete one
@@ -3378,6 +3389,14 @@ impl Compiler {
             let Some(lookup) =
                 Self::resolve_constraint_lookup(constraint, &var_to_ty, &self.checker)
             else {
+                // A goal open inside a type (`Show<(int, T)>`) is built here
+                // from the frame's dictionaries (#1479); a bare type
+                // parameter's is forwarded.
+                if let Some(lookup) = self.open_structural_lookup(constraint, &var_to_ty)
+                    && self.plan_instance_dict(out, &constraint.class, &lookup)
+                {
+                    dict_count += 1;
+                }
                 continue;
             };
             if self.plan_instance_dict(out, &constraint.class, &lookup) {
@@ -3385,6 +3404,31 @@ impl Compiler {
             }
         }
         dict_count
+    }
+
+    /// `constraint`'s arguments through `var_to_ty` when they are open only
+    /// inside a tuple (`(int, T)`, #1479): the goal the arity-wide tuple
+    /// instance serves, its items' dictionaries from the frame. `None` for
+    /// a ground goal, an unbound variable or a bare type parameter.
+    pub(super) fn open_structural_lookup(
+        &self,
+        constraint: &crate::typechecking::ty::Constraint,
+        var_to_ty: &HashMap<crate::typechecking::ty::TyVarId, Ty>,
+    ) -> Option<Vec<Ty>> {
+        let subst = self.checker.subst();
+        let lookup: Vec<Ty> = constraint
+            .args
+            .iter()
+            .map(|arg| match arg {
+                Ty::Var(v) => var_to_ty.get(v).map(|t| crate::typechecking::subst::apply_ty_prune(subst, t)),
+                other => Some(crate::typechecking::subst::apply_ty_prune(subst, other)),
+            })
+            .collect::<Option<_>>()?;
+        lookup
+            .iter()
+            .all(|t| matches!(t, Ty::Tuple(_)) && Self::ty_has_var(t))
+            .then_some(lookup)
+            .filter(|l| self.checker.generics().find_generic_instance(&constraint.class, l).is_some())
     }
 
     /// Phase 4: plan dictionary evidence for every constraint slot when a
@@ -4055,22 +4099,44 @@ impl Compiler {
             });
         }
 
-        // Show thunks for ground tuples (#1451): reserved here, raw (the
-        // tuple's own word) with a `$dict` adapter, as the string thunk;
-        // emitted by `emit_tuple_show_thunks` once the module's own `Show`
-        // entries exist, so `%v` of an item calls them.
-        let tuples: Vec<Ty> = self.checker.generics().tuple_show_tys().cloned().collect();
-        for ty in tuples {
-            let fqn = Generics::builtin_instance_fqn("Show", &ty.to_string(), "show");
-            if self.functions.contains_key(&fqn) {
+        // Structural thunks of ground tuples, records and arrays (#1451, #1479):
+        // reserved here, raw (the value's own word) with a `$dict` adapter,
+        // as the string thunk; emitted by `emit_structural_thunks` once the
+        // module's own instance entries exist, so an item's are called.
+        let structural: Vec<(String, Ty)> =
+            self.checker.generics().structural_instances().map(|(class, ty)| (class.to_string(), ty.clone())).collect();
+        for (class, ty) in structural {
+            let Some(class_def) = self.checker.generics().typeclass(&class) else {
+                continue;
+            };
+            let methods: Vec<String> = class_def.methods.iter().map(|m| m.name.clone()).collect();
+            for method in methods {
+                let fqn = Generics::builtin_instance_fqn(&class, &ty.to_string(), &method);
+                if self.functions.contains_key(&fqn) {
+                    continue;
+                }
+                self.note_raw_builtin_thunk(&fqn);
+                self.reserve_function_entry(Self::dict_adapter_name(&fqn));
+                self.reserve_function_entry(fqn.clone());
+                let arity = if matches!(method.as_str(), "eq" | "ne") { 2 } else { 1 };
+                self.structural_thunk_params.insert(fqn.clone(), vec![ty.clone(); arity]);
+                if !self.structural_thunks.iter().any(|(f, ..)| *f == fqn) {
+                    self.structural_thunks.push((fqn, method, ty.clone()));
+                }
+            }
+        }
+
+        // The arity-wide tuple instances' thunks (#1479): one entry each,
+        // taking the boxed tuple and the instance dictionary, whose context
+        // holds each item's dictionary.
+        let tuples: Vec<(String, usize)> =
+            self.checker.generics().structural_tuples().map(|(_, arity, fqn)| (fqn.to_string(), arity)).collect();
+        for (fqn, arity) in tuples {
+            if self.functions.contains_key(&fqn) || self.structural_tuple_thunks.iter().any(|(f, _)| *f == fqn) {
                 continue;
             }
-            self.note_raw_builtin_thunk(&fqn);
-            self.reserve_function_entry(Self::dict_adapter_name(&fqn));
             self.reserve_function_entry(fqn.clone());
-            if !self.tuple_show_thunks.iter().any(|(f, _)| *f == fqn) {
-                self.tuple_show_thunks.push((fqn, ty));
-            }
+            self.structural_tuple_thunks.push((fqn, arity));
         }
 
         // Show thunks for the builtin error enums: reserved here, emitted by
@@ -7285,7 +7351,7 @@ impl Compiler {
 
         self.bytecode.append(&mut program);
         self.emit_used_builtin_show_thunks();
-        self.emit_tuple_show_thunks();
+        self.emit_structural_thunks();
         self.pad_debug_locs();
         // Kept while this module holds methods a later module may clone.
         let seq = self.program_seq;
@@ -7322,16 +7388,21 @@ impl Compiler {
         skip.bind_label(after, self.bytecode.il_mut());
     }
 
-    /// Emit the reserved `Show` thunks of ground tuples (#1451) behind a
-    /// jump, as [`Self::emit_used_builtin_show_thunks`]: each is
-    /// `format("%v", t)` over its argument, the raw entry taking the tuple's
-    /// word and its `$dict` adapter the boxed one.
-    fn emit_tuple_show_thunks(&mut self) {
-        let due: Vec<_> = std::mem::take(&mut self.tuple_show_thunks)
+    /// Emit the reserved structural thunks of ground tuples, records and
+    /// arrays (#1451, #1479) behind a jump, as
+    /// [`Self::emit_used_builtin_show_thunks`]: the raw entry takes the
+    /// value's word and its `$dict` adapter the boxed one. `show` is
+    /// `format("%v", v)` over its argument, an array's its elements'.
+    fn emit_structural_thunks(&mut self) {
+        let due: Vec<_> = std::mem::take(&mut self.structural_thunks)
+            .into_iter()
+            .filter(|(fqn, ..)| !self.functions.contains_key(fqn))
+            .collect();
+        let tuples: Vec<_> = std::mem::take(&mut self.structural_tuple_thunks)
             .into_iter()
             .filter(|(fqn, _)| !self.functions.contains_key(fqn))
             .collect();
-        if due.is_empty() {
+        if due.is_empty() && tuples.is_empty() {
             return;
         }
         let string = crate::typechecking::ty::string();
@@ -7339,17 +7410,197 @@ impl Compiler {
         let after = skip.fresh_label(self.bytecode.il_mut());
         skip.emit_jump_to(after, BbJumpKind::Unconditional, self.bytecode.il_mut());
         self.hir_synth_callees.insert("format".to_string(), SynthCallee { format: true, ..SynthCallee::default() });
-        for (fqn, ty) in due {
+        for (fqn, method, ty) in due {
+            let Some(tag) = Self::ty_to_value_tag(&ty) else {
+                continue;
+            };
             let adapter = Self::dict_adapter_name(&fqn);
-            for (name, tag) in [(fqn, None), (adapter, Some(ValueTag::Tuple as u32))] {
-                self.emit_builtin_entry(&name, &[(ty.clone(), tag)], string.clone(), None, |b, a| {
-                    let fmt = b.str("%v");
-                    b.call("format", vec![fmt, a[0]], string.clone())
-                });
+            let boolean = crate::typechecking::ty::boolean();
+            for (name, tag) in [(fqn, None), (adapter, Some(tag as u32))] {
+                match (method.as_str(), &ty) {
+                    ("show", Ty::Array { element, .. }) => {
+                        let element = (**element).clone();
+                        self.emit_builtin_entry(&name, &[(ty.clone(), tag)], string.clone(), None, |b, a| {
+                            crate::hir::synth::array_show(b, a[0], element)
+                        })
+                    }
+                    ("show", Ty::App(..)) => self.emit_builtin_enum_show(&name, &ty, tag.is_some()),
+                    ("show", _) => self.emit_builtin_entry(&name, &[(ty.clone(), tag)], string.clone(), None, |b, a| {
+                        let fmt = b.str("%v");
+                        b.call("format", vec![fmt, a[0]], string.clone())
+                    }),
+                    // `==` / `!=` as the operator compares the type today.
+                    ("eq" | "ne", _) => {
+                        let sym = if method == "eq" { "==" } else { "!=" };
+                        let params = [(ty.clone(), tag), (ty.clone(), tag)];
+                        self.emit_builtin_entry(&name, &params, boolean.clone(), None, |b, a| {
+                            b.bin(crate::hir::BinOp::Overloaded(sym), a[0], a[1], boolean.clone())
+                        })
+                    }
+                    ("hash", _) => self.emit_structural_hash(&name, &ty, tag),
+                    _ => {}
+                }
             }
+        }
+        for (fqn, arity) in tuples {
+            self.emit_structural_tuple_show(&fqn, arity);
         }
         self.hir_synth_callees.clear();
         skip.bind_label(after, self.bytecode.il_mut());
+    }
+
+    /// The `Show` thunk of the tuples of `arity` with open items (#1479):
+    /// `format("%v", t)` over the tuple (unboxed: every caller passes it
+    /// boxed, as a dictionary does), each item shown through its
+    /// own dictionary, which the instance dictionary (`__dict0`) holds after
+    /// its method: the entry reads them into `__dict1..` as a bounded
+    /// instance method's does.
+    fn emit_structural_tuple_show(&mut self, fqn: &str, arity: usize) {
+        use crate::hir::LocalKind;
+        let string = crate::typechecking::ty::string();
+        // The instance head's own variables.
+        let Some(ty) = self
+            .checker
+            .generics()
+            .instances
+            .iter()
+            .find(|inst| inst.method_fqns.get("show").is_some_and(|f| f == fqn))
+            .and_then(|inst| inst.args.first().cloned())
+        else {
+            return;
+        };
+        let vars: Vec<crate::typechecking::ty::TyVarId> = match &ty {
+            Ty::Tuple(items) => items.iter().filter_map(|t| if let Ty::Var(v) = t { Some(*v) } else { None }).collect(),
+            _ => return,
+        };
+        if vars.len() != arity {
+            return;
+        }
+        let mut b = crate::hir::synth::Synth::new(&self.checker, fqn, string.clone());
+        // The tuple comes boxed, as a dictionary passes it.
+        let arg = b.local("arg0", ty.clone(), LocalKind::Param);
+        let word = b.read(arg);
+        let t = b.builtin(crate::hir::Builtin::Unbox { tag: ValueTag::Tuple as u32 }, vec![word], ty);
+        let fmt = b.str("%v");
+        let shown = b.call("format", vec![fmt, t], string);
+        let ret = b.ret(shown);
+        let root = b.block(vec![ret], None, crate::typechecking::ty::never());
+        let hir = Self::synth_generic(b.finish(root));
+        // `__dict0` follows the parameter; `__dict{i + 1}` is item `i`'s.
+        let base = self
+            .checker
+            .generics()
+            .typeclass("Show")
+            .map_or(1, |class| class.flattened_methods(self.checker.generics()).len());
+        self.synth_entry_dicts = Some((base, arity));
+        self.synth_show_dicts = vars.into_iter().enumerate().map(|(i, v)| (v, i + 1)).collect();
+        self.emit_synth_fn(fqn, &hir, HashMap::new(), true);
+        self.synth_entry_dicts = None;
+        self.synth_show_dicts.clear();
+    }
+
+    /// The `Show` thunk `name` of a ground `Option` / `Result` `ty`
+    /// (#1479): `Some(x)` / `None` / `Ok(x)` / `Err(e)`, the payload as
+    /// `format("%v", x)` shows it. The `$dict` adapter (`adapter`) takes the
+    /// enum as a dictionary passes it, boxed: unboxed, then moved to the
+    /// type's own layout when that is a niche.
+    fn emit_builtin_enum_show(&mut self, name: &str, ty: &Ty, adapter: bool) {
+        use crate::hir::synth::Synth;
+        use crate::hir::{Builtin, HirPat, HirPatFields, LocalKind};
+        let string = crate::typechecking::ty::string();
+        let (enum_name, variants): (&str, Vec<(&str, Ty)>) = match crate::typechecking::ty::option_inner(ty) {
+            Some(inner) => (common::BUILTIN_OPTION_ENUM, vec![("Some", inner)]),
+            None => match crate::typechecking::ty::result_ok_err(ty) {
+                Some((ok, err)) => (common::BUILTIN_RESULT_ENUM, vec![("Ok", ok), ("Err", err)]),
+                None => return,
+            },
+        };
+        let niche = self.value_layout(ty) != ValueLayout::Boxed;
+        let mut b = Synth::new(&self.checker, name, string.clone());
+        let value = if adapter {
+            let tag = ValueTag::Instance as u32;
+            if niche {
+                // The enum object, read as a plain word, to its niche word.
+                let int = crate::typechecking::ty::int();
+                let arg = b.local("arg0", int.clone(), LocalKind::Param);
+                let word = b.read(arg);
+                let obj = b.builtin(Builtin::Unbox { tag }, vec![word], int);
+                b.builtin(Builtin::Relayout, vec![obj], ty.clone())
+            } else {
+                let arg = b.local("arg0", ty.clone(), LocalKind::Param);
+                let word = b.read(arg);
+                b.builtin(Builtin::Unbox { tag }, vec![word], ty.clone())
+            }
+        } else {
+            let arg = b.local("arg0", ty.clone(), LocalKind::Param);
+            b.read(arg)
+        };
+        let mut arms = Vec::with_capacity(variants.len() + 1);
+        for (variant, payload) in &variants {
+            let x = b.local("x", payload.clone(), LocalKind::Pattern);
+            let pat = HirPat::Variant {
+                enum_name: enum_name.to_string(),
+                variant: (*variant).to_string(),
+                tag: self.checker.tag_for(enum_name, variant),
+                fields: HirPatFields::Tuple(vec![HirPat::Bind(x)]),
+            };
+            let fmt = b.str(&format!("{variant}(%v)"));
+            let v = b.read(x);
+            arms.push((pat, b.call("format", vec![fmt, v], string.clone())));
+        }
+        if enum_name == common::BUILTIN_OPTION_ENUM {
+            let pat = HirPat::Variant {
+                enum_name: enum_name.to_string(),
+                variant: "None".to_string(),
+                tag: self.checker.tag_for(enum_name, "None"),
+                fields: HirPatFields::Unit,
+            };
+            arms.push((pat, b.str("None")));
+        }
+        let shown = b.match_(value, arms, string);
+        let ret = b.ret(shown);
+        let root = b.block(vec![ret], None, crate::typechecking::ty::never());
+        let hir = b.finish(root);
+        self.emit_synth_fn(name, &hir, HashMap::new(), true);
+    }
+
+    /// The `Hash` thunk `name` of a ground tuple or array `ty` (#1479): its
+    /// items' hashes combined as a derived `Hash` combines fields, each
+    /// through the item type's own ground instance (a `()` item hashes to
+    /// `0`).
+    fn emit_structural_hash(&mut self, name: &str, ty: &Ty, tag: Option<u32>) {
+        let items: Vec<Ty> = match ty {
+            Ty::Tuple(items) => items.clone(),
+            Ty::Array { element, .. } => vec![(**element).clone()],
+            _ => return,
+        };
+        let mut calls = HashMap::new();
+        let mut targets = Vec::with_capacity(items.len());
+        for item in &items {
+            if crate::hir::layout::is_unit(item) {
+                targets.push(None);
+                continue;
+            }
+            let lookup = Self::show_lookup_ty_for_instance(item);
+            let Some(fqn) = self
+                .checker
+                .generics()
+                .find_instance("Hash", std::slice::from_ref(&lookup))
+                .filter(|inst| inst.context.is_empty())
+                .and_then(|inst| inst.method_fqns.get("hash").cloned())
+            else {
+                return;
+            };
+            let raw = self.raw_instance_methods.contains(&fqn);
+            self.hir_synth_callees.insert(fqn.clone(), SynthCallee { raw, ..SynthCallee::default() });
+            calls.insert(fqn.clone(), (vec![self.value_layout(item)], ValueLayout::Boxed));
+            targets.push(Some(fqn));
+        }
+        let int = crate::typechecking::ty::int();
+        let hir = crate::hir::synth::builtin_entry(&self.checker, name, &[(ty.clone(), tag)], int.clone(), None, |b, a| {
+            crate::hir::synth::structural_hash(b, a[0], &items, &targets)
+        });
+        self.emit_synth_fn(name, &hir, calls, true);
     }
 
     /// Register `type_id → drop PC` via internal `gc_register_finalizer`.

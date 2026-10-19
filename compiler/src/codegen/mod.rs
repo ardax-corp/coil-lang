@@ -270,9 +270,23 @@ pub struct Compiler {
     /// would otherwise land in every archive's string table).
     builtin_show_thunks: Vec<(String, &'static str, &'static [&'static str])>,
     builtin_show_used: HashSet<String>,
-    /// Reserved `Show` thunks of ground tuples (#1451), emitted after the
-    /// module's own functions.
-    tuple_show_thunks: Vec<(String, Ty)>,
+    /// Reserved structural instance thunks of ground tuples and records
+    /// (`(fqn, method, type)`, #1451, #1479), emitted after the module's
+    /// own functions.
+    structural_thunks: Vec<(String, String, Ty)>,
+    /// Parameter types of each reserved structural thunk's raw entry, which
+    /// the checker has no signature for.
+    structural_thunk_params: HashMap<String, Vec<Ty>>,
+    /// Reserved thunks of the arity-wide tuple instances (`(fqn, arity)`,
+    /// #1479).
+    structural_tuple_thunks: Vec<(String, usize)>,
+    /// A compiler-made body being lowered as a bounded instance method:
+    /// `(first context slot in its dictionary, context count)`; its frame
+    /// takes `__dict0` after the parameters and `__dict1..` from it (#1479).
+    synth_entry_dicts: Option<(usize, usize)>,
+    /// In that body, each open item type's `__dictN` (by `N`), which `%v`
+    /// shows it through.
+    synth_show_dicts: HashMap<crate::typechecking::ty::TyVarId, usize>,
     /// Fixed arity + rest flag per function table key. Survives multi-file
     /// `check_program` clears of `Checker::fn_param_names`, so `MakeFn` for
     /// imported names (e.g. `spawn(run_jobs, …)` after `use pool::worker::run_jobs`)
@@ -679,7 +693,11 @@ impl Default for Compiler {
             fn_entry_labels: HashMap::with_capacity(32),
             builtin_show_thunks: Vec::new(),
             builtin_show_used: HashSet::new(),
-            tuple_show_thunks: Vec::new(),
+            structural_thunks: Vec::new(),
+            structural_thunk_params: HashMap::new(),
+            structural_tuple_thunks: Vec::new(),
+            synth_entry_dicts: None,
+            synth_show_dicts: HashMap::new(),
             fn_arities: HashMap::with_capacity(32),
             module_items: std::collections::HashMap::default(),
             native: HashMap::default(),

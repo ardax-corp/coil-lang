@@ -4461,8 +4461,19 @@ impl Lower<'_> {
                 words.push(v);
                 continue;
             }
-            let Some(v) = self.word(arg)? else {
+            // A two-word value goes as its object, as a plain call passes
+            // it to a shared body (#1479).
+            let v = if self.inp.pair_tys.contains_key(&arg.0) { self.boxed_word(arg)? } else { self.word(arg)? };
+            let Some(v) = v else {
                 return Ok(Val::Never);
+            };
+            // A niche enum goes to a bare type parameter as its object.
+            let v = match self.b.value_ty(v) {
+                from @ (MirTy::NicheOpt | MirTy::NicheRes) if tag.is_some() => {
+                    let layout = self.niche_layout(arg, from)?;
+                    self.box_niche(layout, v)?
+                }
+                _ => v,
             };
             let v = match tag {
                 Some(tag) => {
