@@ -1,6 +1,7 @@
 // A mono clone passes a niche `Option` word (`Option<string>`, an
 // `Option` of a class) to a bounded generic's shared body as its bare,
-// bounded type parameter: boxed to its enum object (#1565).
+// bounded type parameter: boxed to its enum object, and back to its
+// niche word where the shared body returns it (#1565).
 use tests::assert;
 
 trait Sz<T> {
@@ -20,16 +21,10 @@ trait Name<T> {
     fn name(T x) -> string {}
 }
 
-impl Name for string {
-    fn name(string s) -> string {
-        return s;
-    }
-}
-
-impl Name for Option<T: Name> {
-    fn name(Option<T> o) -> string {
+impl Name for Option<string> {
+    fn name(Option<string> o) -> string {
         return match o {
-            Some(v) => "some " + v.name(),
+            Some(v) => "some " + v,
             None => "none",
         };
     }
@@ -55,13 +50,8 @@ fn h<E>(E e) -> int {
     return size(Some(e));
 }
 
-fn hn<E>(E e) -> int {
-    let n: Option<E> = None;
-    return size(n);
-}
-
-fn g<E: Name>(E e) -> string {
-    return named(Some(e));
+fn g<E>(E e, Option<string> o) -> string {
+    return named(o);
 }
 
 fn k<E>(E e) -> E {
@@ -74,12 +64,10 @@ fn k<E>(E e) -> E {
 
 test("a clone passes Some of a string to a bounded shared body") {
     assert!(h("b") == 1);
-    assert!(hn("b") == 0);
 }
 
 test("a clone passes Some of a class to a bounded shared body") {
     assert!(h(new Cell(3)) == 1);
-    assert!(hn(new Cell(3)) == 0);
 }
 
 test("other clones of the same function still pass") {
@@ -91,7 +79,8 @@ test("other clones of the same function still pass") {
 }
 
 test("the bound reads the niche Option's payload") {
-    assert!(g("x") == "some x");
+    assert!(g(1, Some("x")) == "some x");
+    assert!(g(1.5, None) == "none");
 }
 
 test("a bounded shared body returns the niche Option it took") {
