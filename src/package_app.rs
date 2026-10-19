@@ -19,43 +19,33 @@ use sha2::{Digest, Sha256};
 
 use crate::fail_and_exit;
 
-fn compile_program_archive_bytes(
-    pipeline: &mut Pipeline,
-    filename: &str,
-    strip_debug: bool,
-) -> Result<Vec<u8>, ()> {
+/// Compile `filename` to archive bytes at the pipeline's `-g` level
+/// (`coil package` defaults to `-g1`; `--strip-debug` is `-g0`).
+fn compile_program_archive_bytes(pipeline: &mut Pipeline, filename: &str) -> Result<Vec<u8>, ()> {
     let (bytecode, constants) = pipeline.compile_src_from_file(filename).map_err(|_| ())?;
-    let debug = pipeline.program_debug();
-    // Cleanup ranges are behaviour (panics run `defer`s), not debug info.
-    let cleanup_ranges = debug.cleanup.clone();
-    let (source_files, debug_locs, debug_lines, fn_symbols) = if strip_debug {
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new())
-    } else {
-        (
-            debug.source_files,
-            debug.debug_locs,
-            debug.debug_lines,
-            debug.fn_symbols,
-        )
-    };
-    let program = ArchivedProgram {
+    let mut program = ArchivedProgram {
         version: ARCHIVE_VERSION,
         static_slot_count: pipeline.static_slot_count(),
         constants,
         strings: pipeline.strings().to_vec(),
         bytecode,
-        source_files,
-        debug_locs,
-        fn_symbols,
+        source_files: Vec::new(),
+        debug_locs: Vec::new(),
+        fn_symbols: Vec::new(),
         struct_layouts: pipeline.archived_struct_layouts(),
         operand_stack_slots: pipeline.operand_stack_slots(),
         stack_maps: Vec::new(),
         precise_frames: pipeline.precise_frames().to_vec(),
         class_word_kinds: pipeline.class_word_kinds(),
         static_word_kinds: pipeline.static_word_kinds(),
-        debug_lines,
-        cleanup_ranges,
+        debug_lines: Vec::new(),
+        cleanup_ranges: Vec::new(),
+        line_table: Vec::new(),
+        span_table: Vec::new(),
     };
+    // Cleanup ranges are behaviour (panics run `defer`s), not debug info:
+    // `set_debug` keeps them at every level.
+    program.set_debug(pipeline.program_debug_full(), pipeline.debug_level());
     rkyv::to_bytes::<Error>(&program)
         .map(|b| b.as_slice().to_vec())
         .map_err(|_| ())
@@ -266,9 +256,8 @@ pub fn cmd_package(
     runner: Option<&Path>,
     natives: &[FfiNative],
     check_native: bool,
-    strip_debug: bool,
 ) {
-    let archive_bytes = match compile_program_archive_bytes(pipeline, filename, strip_debug) {
+    let archive_bytes = match compile_program_archive_bytes(pipeline, filename) {
         Ok(b) => b,
         Err(()) => {
             let _ = pipeline.finish_reporting();
@@ -436,6 +425,8 @@ mod tests {
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
             cleanup_ranges: Vec::new(),
+            line_table: Vec::new(),
+            span_table: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&too_new).unwrap();
         assert!(matches!(
@@ -460,6 +451,8 @@ mod tests {
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
             cleanup_ranges: Vec::new(),
+            line_table: Vec::new(),
+            span_table: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&other_minor).unwrap();
         assert!(matches!(
@@ -487,6 +480,8 @@ mod tests {
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
             cleanup_ranges: Vec::new(),
+            line_table: Vec::new(),
+            span_table: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).unwrap();
         let mut prefixed = vec![0u8; 1];

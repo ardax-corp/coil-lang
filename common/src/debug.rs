@@ -92,6 +92,9 @@ pub struct ProgramDebug {
     pub debug_lines: Vec<DebugLine>,
     /// `defer` cleanup ranges (minor 33+); empty means panics run no `defer`.
     pub cleanup: Vec<CleanupRange>,
+    /// Run-length locations (archive minor 40+, or a program compiled below
+    /// `-g2`). Used when [`Self::debug_locs`] is empty.
+    pub table: crate::LineTable,
 }
 
 impl ProgramDebug {
@@ -102,6 +105,64 @@ impl ProgramDebug {
             fn_symbols: Vec::new(),
             debug_lines: Vec::new(),
             cleanup: Vec::new(),
+            table: crate::LineTable::default(),
+        }
+    }
+
+    /// Byte span recorded for `pc`: from the dense table when there is one,
+    /// else from the run table (`-g2` only).
+    pub fn loc_at(&self, pc: usize) -> Option<DebugLoc> {
+        if !self.debug_locs.is_empty() {
+            return self.debug_locs.get(pc).copied().filter(|l| l.is_known());
+        }
+        self.table.span_at(pc)
+    }
+
+    /// File index and line/column recorded for `pc`, without reading any
+    /// source (archives before minor 30 recorded none: see [`Self::loc_at`]).
+    pub fn file_line_at(&self, pc: usize) -> Option<(u32, DebugLine)> {
+        if !self.debug_locs.is_empty() {
+            let loc = self.loc_at(pc)?;
+            return self.line_at(pc).map(|line| (loc.file, line));
+        }
+        self.table.line_at(pc)
+    }
+
+    /// Whether any location is recorded (dense or runs).
+    pub fn has_locations(&self) -> bool {
+        !self.debug_locs.is_empty() || !self.table.is_empty()
+    }
+
+    /// The run table for these locations, with byte spans when `spans`.
+    pub fn line_table(&self, spans: bool) -> crate::LineTable {
+        if self.debug_locs.is_empty() {
+            let table = self.table.clone();
+            return if spans { table } else { table.without_spans() };
+        }
+        crate::LineTable::from_dense(&self.debug_locs, &self.debug_lines, spans)
+    }
+
+    /// Keep only what `level` records: `-g2` everything, `-g1` function
+    /// names and line runs, `-g0` nothing but the cleanup ranges (they are
+    /// behaviour, not debug info).
+    pub fn with_level(self, level: crate::DebugLevel) -> Self {
+        match level {
+            crate::DebugLevel::Full => self,
+            crate::DebugLevel::Lines => {
+                let table = self.line_table(false);
+                Self {
+                    source_files: self.source_files,
+                    debug_locs: Vec::new(),
+                    fn_symbols: self.fn_symbols,
+                    debug_lines: Vec::new(),
+                    cleanup: self.cleanup,
+                    table,
+                }
+            }
+            crate::DebugLevel::None => Self {
+                cleanup: self.cleanup,
+                ..Self::default()
+            },
         }
     }
 

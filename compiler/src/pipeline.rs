@@ -123,6 +123,8 @@ pub struct Pipeline {
     opt_level: crate::OptLevel,
     /// `--contracts`; `None` derives it from the opt level.
     contracts: Option<crate::ContractLevel>,
+    /// `-g0` / `-g1` / `-g2`; `None` derives it from the opt level.
+    debug_level: Option<common::DebugLevel>,
     /// I7: `coil debug` sets this; B8 does not disable MIR specialize.
     debugger_attached: bool,
     /// Collect IL opt counters for `--opt-stats` (COI-131).
@@ -723,6 +725,7 @@ impl Pipeline {
             host_grants: HostGrants::deny_all(),
             opt_level: crate::OptLevel::Standard,
             contracts: None,
+            debug_level: None,
             debugger_attached: false,
             collect_opt_stats: false,
             compiler: std::cell::OnceCell::new(),
@@ -1507,25 +1510,29 @@ impl Pipeline {
         // Wrap the bytecode in the versioned `ArchivedProgram` envelope
         // so that older `.hyc` files can be rejected at load time via
         // `version` mismatch (see `Pipeline::run`).
-        let debug = self.program_debug();
-        let program = ArchivedProgram {
+        let debug = self.program_debug_full();
+        let level = self.debug_level();
+        let mut program = ArchivedProgram {
             version: ARCHIVE_VERSION,
             static_slot_count: self.compiler_lazy().static_slot_count(),
             constants: self.compiler_lazy().constants().to_vec(),
             strings: self.compiler_lazy().strings().to_vec(),
-            source_files: debug.source_files,
-            debug_locs: debug.debug_locs,
-            fn_symbols: debug.fn_symbols,
+            source_files: Vec::new(),
+            debug_locs: Vec::new(),
+            fn_symbols: Vec::new(),
             struct_layouts: self.archived_struct_layouts(),
             operand_stack_slots: self.operand_stack_slots(),
             stack_maps: Vec::new(),
             precise_frames: self.precise_frames().to_vec(),
             class_word_kinds: self.class_word_kinds(),
             static_word_kinds: self.static_word_kinds(),
-            debug_lines: debug.debug_lines,
-            cleanup_ranges: debug.cleanup,
+            debug_lines: Vec::new(),
+            cleanup_ranges: Vec::new(),
+            line_table: Vec::new(),
+            span_table: Vec::new(),
             bytecode: self.bytecode,
         };
+        program.set_debug(debug, level);
 
         let mut out = File::create(output).expect("Unable to open output file");
         let _ = out
@@ -1800,7 +1807,8 @@ impl Pipeline {
         }
 
         let functions = self.compiler_lazy_mut().function_symbols();
-        let debug = self.program_debug();
+        // The listing interleaves source whatever `-g` the archive would keep.
+        let debug = self.program_debug_full();
         let (classes, enums) = self.compiler_lazy().debug_type_tables();
         let il_post = self.compiler_lazy_mut().take_post_il_snapshot();
         Ok(crate::DissectArtifacts {
@@ -1972,13 +1980,32 @@ impl Pipeline {
         self.compiler_lazy().main_offset()
     }
 
+    /// `-g` level: the one set, else `-g1` at `-Os` and `-g2` otherwise.
+    pub fn debug_level(&self) -> common::DebugLevel {
+        self.debug_level.unwrap_or(match self.opt_level {
+            crate::OptLevel::Size => common::DebugLevel::Lines,
+            _ => common::DebugLevel::Full,
+        })
+    }
+
+    pub fn set_debug_level(&mut self, level: common::DebugLevel) {
+        self.debug_level = Some(level);
+    }
+
+    /// Debug info at [`Self::debug_level`] (what archives and runs keep).
     pub fn program_debug(&self) -> ProgramDebug {
+        self.program_debug_full().with_level(self.debug_level())
+    }
+
+    /// Every location the compiler recorded, dense, whatever the `-g` level.
+    pub fn program_debug_full(&self) -> ProgramDebug {
         let mut debug = ProgramDebug {
             source_files: self.compiler_lazy().source_files_list(),
             debug_locs: self.compiler_lazy().debug_locs().to_vec(),
             fn_symbols: self.compiler_lazy().fn_debug_symbols(),
             debug_lines: Vec::new(),
             cleanup: self.compiler_lazy().cleanup_ranges().to_vec(),
+            table: Default::default(),
         };
         self.remap_generated_debug_locs(&mut debug);
         // Lines are resolved now, while the sources exist, so archives and
@@ -2065,18 +2092,16 @@ impl Pipeline {
         }
 
         let program = decoded.program;
+        let debug = ProgramDebug {
+            fn_symbols: self.compiler_lazy().fn_debug_symbols(),
+            ..program.debug_bundle()
+        };
         Ok((
             program.bytecode,
             program.constants,
             program.strings,
             program.static_slot_count,
-            ProgramDebug {
-                source_files: program.source_files,
-                debug_locs: program.debug_locs,
-                fn_symbols: self.compiler_lazy().fn_debug_symbols(),
-                debug_lines: program.debug_lines,
-                cleanup: program.cleanup_ranges,
-            },
+            debug,
         ))
     }
 }
@@ -2333,6 +2358,8 @@ fn main() {
             static_word_kinds: pipeline.static_word_kinds(),
             debug_lines: Vec::new(),
             cleanup_ranges: Vec::new(),
+            line_table: Vec::new(),
+            span_table: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
@@ -2379,6 +2406,8 @@ fn main() {
             static_word_kinds: pipeline.static_word_kinds(),
             debug_lines: Vec::new(),
             cleanup_ranges: Vec::new(),
+            line_table: Vec::new(),
+            span_table: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let decoded = decode_archived_program(bytes.as_slice()).expect("decode");

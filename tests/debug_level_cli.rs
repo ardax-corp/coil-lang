@@ -61,6 +61,7 @@ fn run_archive(bin: &str, dir: &Path, hyc: &Path) -> String {
     String::from_utf8_lossy(&out.stderr).trim_end().to_string()
 }
 
+/// At `-O0` (no inlining) every frame is on the stack.
 const FULL: &str = "panic: boom: x too large at panic.hy:3:8
   in inner at panic.hy:3:8
   in outer at panic.hy:9:11
@@ -78,9 +79,23 @@ fn hyc_panic_output_at_each_debug_level() {
         let g1 = compile(&bin, &dir, &format!("O{opt}_g1"), &["-O", opt, "-g1"]);
         let g0 = compile(&bin, &dir, &format!("O{opt}_g0"), &["-O", opt, "-g0"]);
         let default = compile(&bin, &dir, &format!("O{opt}"), &["-O", opt]);
-        assert_eq!(run_archive(&bin, &dir, &g2), FULL, "-O{opt} -g2");
-        assert_eq!(run_archive(&bin, &dir, &g1), FULL, "-O{opt} -g1");
-        assert_eq!(run_archive(&bin, &dir, &g0), BARE, "-O{opt} -g0");
+        let (full, lines, bare) = (
+            run_archive(&bin, &dir, &g2),
+            run_archive(&bin, &dir, &g1),
+            run_archive(&bin, &dir, &g0),
+        );
+        if opt == "0" {
+            assert_eq!(full, FULL, "-O0 -g2");
+            assert_eq!(bare, BARE, "-O0 -g0");
+        } else {
+            // `outer` is inlined: fewer frames, same shape.
+            assert!(full.starts_with("panic: boom: x too large at panic.hy:3:8\n  in inner at panic.hy:3:8\n"), "{full}");
+            assert!(full.contains("in main at panic.hy:"), "{full}");
+            assert!(bare.starts_with("panic: boom: x too large\n  in <unknown>"), "{bare}");
+            assert!(!bare.contains(" at "), "{bare}");
+        }
+        // `-g1` drops only the byte spans: the panic reads the same.
+        assert_eq!(lines, full, "-O{opt} -g1");
         // `coil compile` defaults to `-g2`.
         let size = |p: &Path| std::fs::metadata(p).unwrap().len();
         assert_eq!(size(&default), size(&g2), "-O{opt}: default is -g2");
@@ -98,7 +113,8 @@ fn strip_debug_is_g0_and_size_defaults_to_g1() {
     let os = compile(&bin, &dir, "Os", &["-Os"]);
     let os_g1 = compile(&bin, &dir, "Os_g1", &["-Os", "-g1"]);
     assert_eq!(std::fs::read(&os).unwrap(), std::fs::read(&os_g1).unwrap(), "-Os defaults to -g1");
-    assert_eq!(run_archive(&bin, &dir, &os), FULL);
+    let out = run_archive(&bin, &dir, &os);
+    assert!(out.contains("in inner at panic.hy:3:8"), "{out}");
 
     let mut cmd = coil(&bin);
     cmd.current_dir(&dir).args(["compile", "--strip-debug", "-g2", "panic.hy"]);
@@ -112,7 +128,7 @@ fn default_run_takes_a_debug_level() {
     let (bin, dir) = setup("run");
     for (flag, want) in [("-g2", FULL), ("-g1", FULL), ("-g0", BARE)] {
         let mut cmd = coil(&bin);
-        cmd.current_dir(&dir).arg(flag);
+        cmd.current_dir(&dir).args(["-O", "0", flag]);
         with_roots(&mut cmd);
         let out = cmd.arg("panic.hy").output().expect("coil run");
         assert!(!out.status.success(), "{flag}: expected a panic");

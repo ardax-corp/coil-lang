@@ -49,6 +49,8 @@ pub struct TestOptions {
     /// Line coverage (`--coverage`); `None` = off.
     pub coverage: Option<CoverageOptions>,
     pub opt_level: OptLevel,
+    /// `-g`; `None` is `-g2` (`-g1` at `-Os`), and `-g2` with coverage.
+    pub debug_level: Option<compiler::DebugLevel>,
     /// `--contracts`; tests check every clause unless told otherwise.
     pub contracts: Option<compiler::ContractLevel>,
     /// `--contract-runs`: calls per generated contract test (0: none).
@@ -683,6 +685,12 @@ pub(crate) fn compile_test_file(
 fn run_pipeline(config: &ReportConfig, options: &TestOptions, reporter: Box<dyn Write + Send>) -> Pipeline {
     let mut pipeline = Pipeline::with_reporter(config.clone(), reporter);
     pipeline.set_opt_level(options.opt_level);
+    if let Some(level) = options.debug_level {
+        pipeline.set_debug_level(level);
+    } else if options.coverage.is_some() {
+        // Coverage maps hits through byte spans.
+        pipeline.set_debug_level(compiler::DebugLevel::Full);
+    }
     pipeline.set_contracts(options.contracts.unwrap_or(compiler::ContractLevel::All));
     pipeline.set_host_grants(options.grants.clone());
     // Same search path CI passes with `--root`: examples and a sibling

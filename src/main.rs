@@ -68,26 +68,27 @@ fn compile_to_archive(pipeline: &mut Pipeline, filename: &str, output: &str) {
         }
     };
 
-    let debug = pipeline.program_debug();
-
-    let program = ArchivedProgram {
+    let mut program = ArchivedProgram {
         version: ARCHIVE_VERSION,
         static_slot_count: pipeline.static_slot_count(),
         constants,
         strings: pipeline.strings().to_vec(),
         bytecode,
-        source_files: debug.source_files,
-        debug_locs: debug.debug_locs,
-        fn_symbols: debug.fn_symbols,
+        source_files: Vec::new(),
+        debug_locs: Vec::new(),
+        fn_symbols: Vec::new(),
         struct_layouts: pipeline.archived_struct_layouts(),
         operand_stack_slots: pipeline.operand_stack_slots(),
         stack_maps: Vec::new(),
         precise_frames: pipeline.precise_frames().to_vec(),
         class_word_kinds: pipeline.class_word_kinds(),
         static_word_kinds: pipeline.static_word_kinds(),
-        debug_lines: debug.debug_lines,
-        cleanup_ranges: debug.cleanup,
+        debug_lines: Vec::new(),
+        cleanup_ranges: Vec::new(),
+        line_table: Vec::new(),
+        span_table: Vec::new(),
     };
+    program.set_debug(pipeline.program_debug_full(), pipeline.debug_level());
 
     let bytes = match rkyv::to_bytes::<Error>(&program) {
         Ok(b) => b,
@@ -265,7 +266,9 @@ fn cmd_build_and_run(
 
     let strings = pipeline.strings().to_vec();
     let static_slots = pipeline.static_slot_count();
-    let debug = pipeline.program_debug();
+    // Staleness reads every source path, whatever `-g` drops from the run.
+    let full = pipeline.program_debug_full();
+    let debug = full.clone().with_level(pipeline.debug_level());
 
     if let Err(e) = pipeline.finish_reporting() {
         pipeline.emit_spanless_warning(
@@ -275,7 +278,7 @@ fn cmd_build_and_run(
         let _ = pipeline.finish_reporting();
     }
 
-    maybe_warn_stale_default_out(pipeline, filename, &debug);
+    maybe_warn_stale_default_out(pipeline, filename, &full);
     let entry = ffi_entry_path(Path::new(filename));
     let panicked = execute_pipeline(ExecutePipelineArgs {
         pipeline,
@@ -471,6 +474,11 @@ fn main() {
                 pipeline.set_include_tests(true);
             }
             pipeline.set_opt_level(cli.opt_level);
+            if let Some(level) = cli.debug_level {
+                pipeline.set_debug_level(level);
+            } else if matches!(command, Command::Package { .. }) {
+                pipeline.set_debug_level(common::DebugLevel::Lines);
+            }
             if let Some(level) = cli.contracts {
                 pipeline.set_contracts(level);
             }
@@ -510,7 +518,8 @@ fn main() {
                     runner,
                     natives,
                     check_native,
-                    strip_debug,
+                    // Folded into `cli.debug_level` (`-g0`).
+                    strip_debug: _,
                 } => {
                     cmd_package(
                         &mut pipeline,
@@ -519,7 +528,6 @@ fn main() {
                         runner.as_deref(),
                         &natives,
                         check_native,
-                        strip_debug,
                     );
                     print_opt_stats(cli.opt_stats, cli.opt_stats_json);
                 }
@@ -597,6 +605,8 @@ mod tests {
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
             cleanup_ranges: Vec::new(),
+            line_table: Vec::new(),
+            span_table: Vec::new(),
         })
         .unwrap();
         std::fs::write(&stale, bytes.as_slice()).unwrap();
@@ -626,6 +636,8 @@ mod tests {
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
             cleanup_ranges: Vec::new(),
+            line_table: Vec::new(),
+            span_table: Vec::new(),
         };
         let ok_bytes = rkyv::to_bytes::<Error>(&ok_prog).unwrap();
         std::fs::write(&ok_path, ok_bytes.as_slice()).unwrap();
@@ -667,6 +679,7 @@ mod tests {
             fn_symbols: Vec::new(),
             debug_lines: Vec::new(),
             cleanup: Vec::new(),
+            table: Default::default(),
         };
         // Running b.hy against an archive built from a.hy must rebuild.
         assert!(archive_is_stale(
@@ -705,6 +718,7 @@ mod tests {
             fn_symbols: Vec::new(),
             debug_lines: Vec::new(),
             cleanup: Vec::new(),
+            table: Default::default(),
         };
         assert!(archive_is_stale(
             entry.to_str().unwrap(),
@@ -728,6 +742,7 @@ mod tests {
             fn_symbols: Vec::new(),
             debug_lines: Vec::new(),
             cleanup: Vec::new(),
+            table: Default::default(),
         };
         // Entry not newer than archive → fresh via the empty-list branch.
         assert!(!archive_is_stale(
@@ -763,6 +778,7 @@ mod tests {
             fn_symbols: Vec::new(),
             debug_lines: Vec::new(),
             cleanup: Vec::new(),
+            table: Default::default(),
         };
         assert!(
             archive_is_stale(entry.to_str().unwrap(), arch.to_str().unwrap(), &debug),
@@ -793,6 +809,7 @@ mod tests {
             fn_symbols: Vec::new(),
             debug_lines: Vec::new(),
             cleanup: Vec::new(),
+            table: Default::default(),
         };
         let a = arch.to_str().unwrap();
         assert!(!recorded_sources_newer(a, &debug), "fresh archive");
