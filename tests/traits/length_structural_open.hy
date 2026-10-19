@@ -32,10 +32,14 @@ test("an open Vec, array, tuple or record meets a Length bound") {
     assert!(record_size(2.5) == 2);
 }
 
+fn ground_size<T: Length>(T x) -> int {
+    return x.len();
+}
+
 test("ground goals keep their own instances") {
-    assert!(size(Vec::from([1, 2, 3])) == 3);
-    assert!(size([1, 2]) == 2);
-    assert!(size((1, "a")) == 2);
+    assert!(ground_size(Vec::from([1, 2, 3])) == 3);
+    assert!(ground_size([1, 2]) == 2);
+    assert!(ground_size((1, "a")) == 2);
 }
 
 test("through a shared body") {
