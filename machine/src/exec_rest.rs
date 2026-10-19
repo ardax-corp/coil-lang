@@ -1631,7 +1631,12 @@ impl<const S: usize> Machine<S> {
                     }
                 }
             }
-            None => (raw.as_int() as usize, &[][..]),
+            // A raw code offset. Anything else (another object, an
+            // out-of-range integer) is a compiler bug: fail loudly rather
+            // than jump into the weeds (#1570). One compare, off the
+            // function-object path.
+            None if (raw.as_int() as u64) < code.len() as u64 => (raw.as_int() as usize, &[][..]),
+            None => return (ip, dispatch::RestFlow::Done(self.bad_call_target(raw, ip))),
         };
 
         // Merge captured evidence over the application dictionaries
@@ -1703,6 +1708,23 @@ impl<const S: usize> Machine<S> {
         self.over_apply_frames += 1;
         self.return_bookkeeping = true;
         Some(crate::vm::OVER_APPLY_IP + extras.len())
+    }
+
+    /// `CallIndirect` of a word that is neither a function object nor a
+    /// code offset: an internal error, reported as a VM panic.
+    #[cold]
+    #[inline(never)]
+    fn bad_call_target(&mut self, raw: Value, ip: usize) -> bool {
+        let what = if self.heap.find_object_by_addr(raw.raw() as u64).is_some() {
+            "a heap object that is not a function"
+        } else {
+            "not a code offset"
+        };
+        let message = format!(
+            "internal error: CallIndirect target {:#x} is {what} (compiler bug)",
+            raw.raw() as u64
+        );
+        self.runtime_panic(&message, ip.saturating_sub(1))
     }
 
     /// `CallIndirect` on a monomorphic [`ObjFn`]: the stack holds

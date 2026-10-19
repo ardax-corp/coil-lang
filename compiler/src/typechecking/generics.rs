@@ -1191,6 +1191,17 @@ impl Generics {
             && matches!(inst.args.as_slice(), [Ty::Tuple(_)])
     }
 
+    /// Whether `inst` is a structural instance for a shape with open
+    /// elements (`Length<Vec<a>>`, `Length<(a, b)>`, #1542): registered by
+    /// [`Self::register_structural_instance`] over fresh variables, with
+    /// no context. A goal another instance meets does not take it.
+    pub fn is_structural_shape(inst: &InstanceDef) -> bool {
+        inst.range == (0..0)
+            && inst.defined_module == PRELUDE_OPS_MODULE
+            && inst.context.is_empty()
+            && inst.args.iter().any(|a| !super::ty::ftv_ty(a).is_empty())
+    }
+
     /// `(class, arity, method fqn)` of each instance
     /// [`Self::register_structural_tuple`] registered.
     pub fn structural_tuples(&self) -> impl Iterator<Item = (&str, usize, &str)> {
@@ -1244,6 +1255,8 @@ fn ty_has_var(ty: &Ty) -> bool {
         Ty::Readonly(inner) => ty_has_var(inner),
         Ty::Array { element, .. } => ty_has_var(element),
         Ty::Constructor { owner, .. } => ty_has_var(owner),
+        // A record shape's (`Length<{ x: a }>`, #1542).
+        Ty::Record { fields } => fields.iter().any(|(_, t)| ty_has_var(t)),
         _ => false,
     }
 }

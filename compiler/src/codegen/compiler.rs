@@ -2903,7 +2903,7 @@ impl Compiler {
         // An open goal (`Show<Tree<T>>`, `Show<T>`) is served by a dictionary
         // in scope, or by the mono clone's concrete types; looking it up
         // would match an arbitrary instance (#551).
-        let open = lookup.iter().any(Self::ty_has_var);
+        let open = lookup.iter().any(Self::ty_is_open);
         if open {
             match self.resolve_open_dict_goal(class, lookup) {
                 Some(OpenDictGoal::Slot(slot)) => {
@@ -2933,7 +2933,7 @@ impl Compiler {
             };
             // An open goal may only select a generic instance (a concrete one
             // would be an arbitrary pick among the heads that unify).
-            if open && !instance.args.iter().any(Self::ty_has_var) {
+            if open && !instance.args.iter().any(Self::ty_is_open) {
                 return false;
             }
             let Some(class_def) = self.checker.generics().typeclass(&instance.class) else {
@@ -3045,7 +3045,7 @@ impl Compiler {
         let args: Vec<Ty> = args.iter().map(|a| apply_ty_prune(subst, a)).collect();
         if let Some(vars) = self.mono_var_tys.last() {
             let concrete: Vec<Ty> = args.iter().map(|a| Self::apply_ty_var_map(a, vars)).collect();
-            if !concrete.iter().any(Self::ty_has_var) {
+            if !concrete.iter().any(Self::ty_is_open) {
                 return Some(OpenDictGoal::Concrete(concrete));
             }
         }
@@ -3123,6 +3123,12 @@ impl Compiler {
             }
         }
         out
+    }
+
+    /// Whether `ty` mentions a type variable anywhere, a record field's or
+    /// an enum payload's too ([`Self::ty_has_var`] looks at fewer shapes).
+    fn ty_is_open(ty: &Ty) -> bool {
+        !crate::typechecking::ty::ftv_ty(ty).is_empty()
     }
 
     fn ty_has_var(ty: &Ty) -> bool {
@@ -3407,9 +3413,10 @@ impl Compiler {
     }
 
     /// `constraint`'s arguments through `var_to_ty` when they are open only
-    /// inside a tuple (`(int, T)`, #1479): the goal the arity-wide tuple
-    /// instance serves, its items' dictionaries from the frame. `None` for
-    /// a ground goal, an unbound variable or a bare type parameter.
+    /// inside a type (`(int, T)`, #1479; `Box<T>`, #1542): the goal a
+    /// generic instance serves (the arity-wide tuple one, `impl Sz for
+    /// Box<T>`), its context dictionaries from the frame. `None` for a
+    /// ground goal, an unbound variable or a bare type parameter.
     pub(super) fn open_structural_lookup(
         &self,
         constraint: &crate::typechecking::ty::Constraint,
@@ -3423,12 +3430,48 @@ impl Compiler {
                 Ty::Var(v) => var_to_ty.get(v).map(|t| crate::typechecking::subst::apply_ty_prune(subst, t)),
                 other => Some(crate::typechecking::subst::apply_ty_prune(subst, other)),
             })
+            // `Some(e)`'s `Option<E>` is looked up as the instance head
+            // (`Option<T>`), not as its variant's sum.
+            .map(|t| t.map(|t| Self::show_lookup_ty_for_instance(&t)))
             .collect::<Option<_>>()?;
         lookup
             .iter()
-            .all(|t| matches!(t, Ty::Tuple(_)) && Self::ty_has_var(t))
+            .all(|t| {
+                !matches!(t, Ty::Var(_))
+                    && !matches!(t, Ty::App(head, _) if matches!(head.as_ref(), Ty::Var(_)))
+                    && Self::ty_is_open(t)
+            })
             .then_some(lookup)
-            .filter(|l| self.checker.generics().find_generic_instance(&constraint.class, l).is_some())
+            .filter(|l| self.open_instance_dict_ok(&constraint.class, l, 0))
+    }
+
+    /// Whether [`Self::plan_instance_dict`] builds open goal `class<lookup>`
+    /// here: a generic instance serves it and each of its context goals is
+    /// ground with an instance, a frame dictionary, or open the same way.
+    fn open_instance_dict_ok(&self, class: &str, lookup: &[Ty], depth: usize) -> bool {
+        if depth > 16 {
+            return false;
+        }
+        if self.resolve_open_dict_goal(class, lookup).is_some() {
+            return true;
+        }
+        let Some(instance) = self.checker.generics().find_generic_instance(class, lookup) else {
+            return false;
+        };
+        let mut vars = HashMap::new();
+        for (have, want) in instance.args.iter().zip(lookup) {
+            Self::bind_scheme_vars(have, want, &mut vars);
+        }
+        instance.context.iter().all(|c| {
+            let args: Vec<Ty> = c.args.iter().map(|a| Self::apply_ty_var_map(a, &vars)).collect();
+            if !args.iter().any(Self::ty_is_open) {
+                return self.checker.generics().find_instance_relaxed(&c.class, &args).is_some();
+            }
+            if args.iter().any(|t| matches!(t, Ty::Var(_))) {
+                return self.resolve_open_dict_goal(&c.class, &args).is_some();
+            }
+            self.open_instance_dict_ok(&c.class, &args, depth + 1)
+        })
     }
 
     /// Phase 4: plan dictionary evidence for every constraint slot when a
@@ -4119,7 +4162,8 @@ impl Compiler {
                 self.reserve_function_entry(Self::dict_adapter_name(&fqn));
                 self.reserve_function_entry(fqn.clone());
                 let arity = if matches!(method.as_str(), "eq" | "ne") { 2 } else { 1 };
-                self.structural_thunk_params.insert(fqn.clone(), vec![ty.clone(); arity]);
+                let param = if method == "len" { Self::structural_shape_at_int(&ty) } else { ty.clone() };
+                self.structural_thunk_params.insert(fqn.clone(), vec![param; arity]);
                 if !self.structural_thunks.iter().any(|(f, ..)| *f == fqn) {
                     self.structural_thunks.push((fqn, method, ty.clone()));
                 }
@@ -5169,6 +5213,9 @@ impl Compiler {
             },
             Ty::Forall { body, .. } => Self::apply_ty_var_map(body, map),
             Ty::Readonly(inner) => Ty::Readonly(Box::new(Self::apply_ty_var_map(inner, map))),
+            Ty::Record { fields } => Ty::Record {
+                fields: fields.iter().map(|(n, t)| (n.clone(), Self::apply_ty_var_map(t, map))).collect(),
+            },
             other => other.clone(),
         }
     }
@@ -7274,12 +7321,13 @@ impl Compiler {
         crate::verify::capture_module(&self.checker, &self.typed_sidecar, module, ast);
         self.build_hir_for_lowering(module, ast);
         // Recursion depth / `#[max_depth]`, independent of auto-par.
-        let stack_bound = crate::typechecking::analyze_stack_bounds(ast);
+        let bare_cases = self.checker.bare_cases().clone();
+        let stack_bound = crate::typechecking::analyze_stack_bounds(ast, &bare_cases);
         self.messages.extend(stack_bound.messages);
         self.operand_stack_slots = stack_bound.operand_slots_needed;
-        self.recursive_fns = crate::typechecking::analyze_recursive_fns(ast);
+        self.recursive_fns = crate::typechecking::analyze_recursive_fns(ast, &bare_cases);
         self.recursive_pure = if self.auto_par && auto_par_enabled() {
-            crate::typechecking::analyze_recursive_pure(ast)
+            crate::typechecking::analyze_recursive_pure(ast, &bare_cases)
         } else {
             HashSet::new()
         };
@@ -7296,7 +7344,7 @@ impl Compiler {
             if effects::effects_capture_active() {
                 let explained = (self.auto_par && auto_par_enabled()).then(|| {
                     let all: HashSet<String> = self.pure_fns.union(&pure).cloned().collect();
-                    effects::auto_par_explanations(ast, hir, module, &fx, &all)
+                    effects::auto_par_explanations(ast, hir, module, &fx, &all, &bare_cases)
                 });
                 effects::capture(hir, &fx, explained);
             }
@@ -7308,10 +7356,10 @@ impl Compiler {
         if self.auto_par && auto_par_enabled() {
             // IPA sites on any pure function (self-recursion or helper arms).
             let pure = &self.pure_fns;
-            self.par_shapes = crate::typechecking::analyze_par_fork_sites(ast, pure);
+            self.par_shapes = crate::typechecking::analyze_par_fork_sites(ast, pure, &bare_cases);
             self.par_workers = crate::typechecking::collect_par_worker_fns(ast, &self.par_shapes);
             self.loop_par_sites = crate::typechecking::analyze_loop_par_sites(ast, &self.pure_fns);
-            for hint in crate::typechecking::analyze_par_escape_hints(ast) {
+            for hint in crate::typechecking::analyze_par_escape_hints(ast, &bare_cases) {
                 let mut msg =
                     Message::info(ErrorCode::ParLockHint, hint.message(), hint.span.clone());
                 msg.with_help(hint.help());
@@ -7440,7 +7488,9 @@ impl Compiler {
                     }
                     ("hash", _) => self.emit_structural_hash(&name, &ty, tag),
                     // The structural length read, as `x.len()` (#1536).
-                    ("len", _) => self.emit_builtin_entry(&name, &[(ty.clone(), tag)], int.clone(), None, |b, a| {
+                    // A shape's (`Vec<a>`, #1542) reads it at any element
+                    // type: its entry takes the shape at `int`.
+                    ("len", _) => self.emit_builtin_entry(&name, &[(Self::structural_shape_at_int(&ty), tag)], int.clone(), None, |b, a| {
                         b.push(
                             crate::hir::HirKind::Call {
                                 callee: crate::hir::Callee::Method { name: "len".to_string() },
@@ -7458,6 +7508,24 @@ impl Compiler {
         }
         self.hir_synth_callees.clear();
         skip.bind_label(after, self.bytecode.il_mut());
+    }
+
+    /// Structural `Length` shape `ty` (`Vec<a>`, `(a, b)`, #1542) with its
+    /// element variables at `int`: the same heap word, read the same way.
+    fn structural_shape_at_int(ty: &Ty) -> Ty {
+        match ty {
+            Ty::Var(_) => crate::typechecking::ty::int(),
+            Ty::Tuple(items) => Ty::Tuple(items.iter().map(Self::structural_shape_at_int).collect()),
+            Ty::Record { fields } => Ty::Record {
+                fields: fields.iter().map(|(n, t)| (n.clone(), Self::structural_shape_at_int(t))).collect(),
+            },
+            Ty::Array { element, length } => Ty::Array {
+                element: Box::new(Self::structural_shape_at_int(element)),
+                length: *length,
+            },
+            Ty::App(head, args) => Ty::App(head.clone(), args.iter().map(Self::structural_shape_at_int).collect()),
+            other => other.clone(),
+        }
     }
 
     /// The `Show` thunk of the tuples of `arity` with open items (#1479):

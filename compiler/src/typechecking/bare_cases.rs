@@ -1,41 +1,39 @@
-//! Bare unit cases in patterns (`None`, `Red`, #1352) for passes that run
-//! without the checker (#1394).
+//! Bare unit cases in patterns (`None`, `Red`, #1352) for passes that walk
+//! the AST after the checker (#1394).
 //!
-//! The checker reads a bare name with no payload as a case when it starts
-//! with an uppercase letter and some enum in scope declares it; anything
-//! else binds. Without the checker, "in scope" is approximated by every
-//! `enum` declared in the AST at hand plus the prelude `Option` / `Result`
-//! cases. Enums imported from another module are not visible here, so a
-//! bare case of one still reads as a binding.
+//! The checker decides whether a bare pattern name with no payload is a
+//! case or a binding (it is a case when it starts with an uppercase letter
+//! and the scrutinee's enum or some enum in scope, local or imported,
+//! declares it) and records each case by span; see
+//! [`Checker::bare_cases`](crate::typechecking::infer::Checker::bare_cases).
+//! This is that record: later passes read it instead of deciding again.
 
 use std::collections::HashSet;
+use std::sync::LazyLock;
 
-use parser::ast::{Expression, Output, Pattern, PatternField, PatternOutput, PatternPayload};
+use parser::ast::{Pattern, PatternOutput, PatternPayload};
 
-/// Prelude cases usable bare without any `enum` in the AST.
-const PRELUDE_CASES: &[&str] = &["Some", "None", "Ok", "Err"];
-
-/// Case names a bare pattern can refer to (see the module docs).
+/// Spans of the bare pattern names the checker resolved to unit cases.
 #[derive(Debug, Default, Clone)]
 pub struct BareCases {
-    names: HashSet<String>,
+    spans: HashSet<(usize, usize)>,
 }
 
 impl BareCases {
-    /// Every case declared by an `enum` in `ast`, plus the prelude cases.
-    pub fn of(ast: &Output<'_>) -> Self {
-        let mut names: HashSet<String> = PRELUDE_CASES.iter().map(|n| (*n).to_string()).collect();
-        collect_cases(ast, &mut names);
-        Self { names }
+    /// No cases: every bare pattern name binds (a module the checker has
+    /// not seen).
+    pub fn none() -> &'static Self {
+        static NONE: LazyLock<BareCases> = LazyLock::new(BareCases::default);
+        &NONE
     }
 
-    /// True when the bare pattern name `name` at `span` is a case, not a
-    /// binding. Synthetic patterns (empty span) always bind, as in the
-    /// checker.
-    pub fn is_case(&self, name: &str, span: parser::SimpleSpan) -> bool {
-        span.start != span.end
-            && name.starts_with(|c: char| c.is_ascii_uppercase())
-            && self.names.contains(name)
+    pub(crate) fn insert(&mut self, span: parser::SimpleSpan) {
+        self.spans.insert((span.start, span.end));
+    }
+
+    /// True when the bare pattern name at `span` is a case, not a binding.
+    pub fn is_case(&self, span: parser::SimpleSpan) -> bool {
+        self.spans.contains(&(span.start, span.end))
     }
 
     /// Call `f` with each name `pattern` binds and the span of the
@@ -45,19 +43,10 @@ impl BareCases {
         pattern: &PatternOutput<'s>,
         f: &mut dyn FnMut(&'s str, parser::SimpleSpan),
     ) {
-        self.binders_at(pattern, true, f);
-    }
-
-    fn binders_at<'s>(
-        &self,
-        pattern: &PatternOutput<'s>,
-        bare_unit: bool,
-        f: &mut dyn FnMut(&'s str, parser::SimpleSpan),
-    ) {
         let (span, pat) = pattern;
         match pat {
             Pattern::Binding { name } => {
-                if !(bare_unit && self.is_case(name, *span)) {
+                if !self.is_case(*span) {
                     f(name, *span);
                 }
             }
@@ -65,44 +54,36 @@ impl BareCases {
                 PatternPayload::Unit => {}
                 PatternPayload::Tuple(items) => {
                     for item in items {
-                        self.binders_at(item, true, f);
+                        self.each_binder(item, f);
                     }
                 }
                 PatternPayload::Record(fields) => {
                     for field in fields {
-                        self.binders_at(&field.pattern, !is_shorthand(field), f);
+                        self.each_binder(&field.pattern, f);
                     }
                 }
             },
             Pattern::Wildcard | Pattern::Default | Pattern::Integer(_) => {}
         }
     }
-}
 
-/// Record shorthand `{ w }` always binds `w`, even when `w` names a case.
-fn is_shorthand(field: &PatternField<'_>) -> bool {
-    matches!(field.pattern.1, Pattern::Binding { name } if name == field.name)
-}
-
-fn collect_cases(ast: &Output<'_>, out: &mut HashSet<String>) {
-    if let Expression::EnumDecl { variants, .. } = ast.1.as_ref() {
-        for variant in variants {
-            if let Expression::EnumVariant { name, .. } = variant.1.as_ref() {
-                out.insert((*name).to_string());
-            }
-        }
-        return;
+    /// The cases the checker records for `ast` checked as a whole program.
+    #[cfg(test)]
+    pub(crate) fn checked(ast: &parser::ast::Output<'_>) -> Self {
+        let mut checker = crate::typechecking::infer::Checker::new();
+        let _ = checker.check_program(ast);
+        checker.bare_cases().clone()
     }
-    ast.1.for_each_child(&mut |child| collect_cases(child, out));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use parser::ast::{Expression, Output};
 
     fn binders(src: &'static str) -> Vec<&'static str> {
         let ast = parser::Pratt::default().parse(src).expect("parse");
-        let cases = BareCases::of(&ast);
+        let cases = BareCases::checked(&ast);
         let mut out = Vec::new();
         let mut arms = Vec::new();
         collect_arms(&ast, &mut arms);
@@ -134,7 +115,7 @@ mod tests {
 
     #[test]
     fn synthetic_patterns_always_bind() {
-        let cases = BareCases::of(&parser::Pratt::default().parse("fn main() {}\n").expect("parse"));
+        let cases = BareCases::checked(&parser::Pratt::default().parse("fn main() {}\n").expect("parse"));
         let pattern = parser::ast::spanned_pattern(Pattern::Binding { name: "None" });
         let mut out = Vec::new();
         cases.each_binder(&pattern, &mut |name, _| out.push(name));
