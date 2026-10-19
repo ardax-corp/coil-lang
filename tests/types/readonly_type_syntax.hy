@@ -92,7 +92,7 @@ test("readonly class fields") {
 }
 
 test("readonly Vec parameter takes a plain Vec") {
-    let ps = [new Point(1, 0, new Inner(0)), new Point(2, 0, new Inner(0))];
+    let ps: Vec<Point> = [new Point(1, 0, new Inner(0)), new Point(2, 0, new Inner(0))];
     assert!(sum_xs(ps) == 3);
 }
 
@@ -134,7 +134,7 @@ test("typeof shows readonly types") {
     let q: readonly Point = p;
     assert!((typeof q) == "readonly Point");
     let ps: Vec<readonly Point> = [];
-    assert!((typeof ps) == "Vec<readonly Point>");
+    assert!((typeof ps) == "prelude::Vec<readonly Point>");
     let n: readonly int = 3;
     assert!((typeof n) == "int");
 }

@@ -8,6 +8,6 @@ fn keep(Vec<readonly Point> ps) -> int {
 }
 
 fn main() {
-    let ps = [new Point(1)];
+    let ps: Vec<Point> = [new Point(1)];
     keep(ps);
 }
