@@ -38,7 +38,7 @@ fn is_nan(float x) -> bool {
     return !(x < 0.0) && !(x >= 0.0);
 }
 
-test("prelude math inverse trig logs rem and hyperbolics") {
+test("prelude math inverse trig logs float % and hyperbolics") {
     let pi = 3.141592653589793;
     assert!(approx(atan(1.0), pi / 4.0, epsilon()));
     assert!(approx(atan2(0.0, 0.0 - 1.0), pi, epsilon()));
@@ -48,8 +48,8 @@ test("prelude math inverse trig logs rem and hyperbolics") {
     assert!(approx(log2(8.0), 3.0, epsilon()));
     assert!(approx(cbrt(27.0), 3.0, epsilon()));
     assert!(approx(cbrt(0.0 - 27.0), 0.0 - 3.0, epsilon()));
-    assert!(approx(rem(5.5, 2.0), 1.5, epsilon()));
-    assert!(approx(rem(0.0 - 5.5, 2.0), 0.0 - 1.5, epsilon()));
+    assert!(approx(5.5 % 2.0, 1.5, epsilon()));
+    assert!(approx((0.0 - 5.5) % 2.0, 0.0 - 1.5, epsilon()));
     assert!(approx(sinh(0.0), 0.0, epsilon()));
     assert!(approx(cosh(0.0), 1.0, epsilon()));
     assert!(approx(tanh(0.0), 0.0, epsilon()));
@@ -66,12 +66,12 @@ test("atan2 covers all quadrants and axes") {
     assert!(approx(atan2(0.0, 1.0), 0.0, epsilon()));
 }
 
-test("rem sign follows the dividend") {
-    assert!(approx(rem(5.5, 2.0), 1.5, epsilon()));
-    assert!(approx(rem(5.5, 0.0 - 2.0), 1.5, epsilon()));
-    assert!(approx(rem(0.0 - 5.5, 2.0), 0.0 - 1.5, epsilon()));
-    assert!(approx(rem(0.0 - 5.5, 0.0 - 2.0), 0.0 - 1.5, epsilon()));
-    assert!(approx(rem(4.0, 2.0), 0.0, epsilon()));
+test("float % sign follows the dividend") {
+    assert!(approx(5.5 % 2.0, 1.5, epsilon()));
+    assert!(approx(5.5 % (0.0 - 2.0), 1.5, epsilon()));
+    assert!(approx((0.0 - 5.5) % 2.0, 0.0 - 1.5, epsilon()));
+    assert!(approx((0.0 - 5.5) % (0.0 - 2.0), 0.0 - 1.5, epsilon()));
+    assert!(approx(4.0 % 2.0, 0.0, epsilon()));
 }
 
 test("prelude math preserves IEEE exceptional values") {
@@ -91,7 +91,7 @@ test("m1 math IEEE nan and inf edges") {
     assert!(is_nan(acos(0.0 - 2.0)));
     assert!(is_nan(log10(0.0 - 1.0)));
     assert!(is_nan(log2(0.0 - 1.0)));
-    assert!(is_nan(rem(1.0, 0.0)));
+    assert!(is_nan(1.0 % 0.0));
     assert!(log10(0.0) < 0.0 - 1000000.0);
     assert!(log2(0.0) < 0.0 - 1000000.0);
     assert!(sinh(1000.0) > 1000000.0);

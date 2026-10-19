@@ -555,8 +555,6 @@ impl Checker {
         self.fn_param_names
             .insert("string::to_bytes".into(), vec!["s".into()]);
         self.fn_param_names
-            .insert("block_on".into(), vec!["handle".into()]);
-        self.fn_param_names
             .insert("dload".into(), vec!["path".into()]);
         self.fn_param_names.insert(
             "declare".into(),
@@ -5293,7 +5291,6 @@ impl Checker {
             if has_named {
                 let (_, reordered) = self.infer_and_reorder_call_args(&ident, raw_args, &range);
                 return match kind {
-                    PreludeFn::BlockOn => self.infer_block_on(&reordered, range),
                     PreludeFn::Dot => self.infer_dot(&reordered, id, range),
                     PreludeFn::MatMul => self.infer_matmul(&reordered, id, range),
                     PreludeFn::Cross => self.infer_cross(&reordered, id, range),
@@ -5312,7 +5309,6 @@ impl Checker {
                     | PreludeFn::Ceil
                     | PreludeFn::Exp
                     | PreludeFn::Ln
-                    | PreludeFn::Pow
                     | PreludeFn::Atan
                     | PreludeFn::Atan2
                     | PreludeFn::Asin
@@ -5320,7 +5316,6 @@ impl Checker {
                     | PreludeFn::Log10
                     | PreludeFn::Log2
                     | PreludeFn::Cbrt
-                    | PreludeFn::Rem
                     | PreludeFn::Sinh
                     | PreludeFn::Cosh
                     | PreludeFn::Tanh => self.infer_math(kind, &reordered, range),
@@ -5328,7 +5323,6 @@ impl Checker {
             }
             let arg_slice = args.as_deref().unwrap_or(&[]);
             return match kind {
-                PreludeFn::BlockOn => self.infer_block_on(arg_slice, range),
                 PreludeFn::Dot => self.infer_dot(arg_slice, id, range),
                 PreludeFn::MatMul => self.infer_matmul(arg_slice, id, range),
                 PreludeFn::Cross => self.infer_cross(arg_slice, id, range),
@@ -5347,7 +5341,6 @@ impl Checker {
                 | PreludeFn::Ceil
                 | PreludeFn::Exp
                 | PreludeFn::Ln
-                | PreludeFn::Pow
                 | PreludeFn::Atan
                 | PreludeFn::Atan2
                 | PreludeFn::Asin
@@ -5355,7 +5348,6 @@ impl Checker {
                 | PreludeFn::Log10
                 | PreludeFn::Log2
                 | PreludeFn::Cbrt
-                | PreludeFn::Rem
                 | PreludeFn::Sinh
                 | PreludeFn::Cosh
                 | PreludeFn::Tanh => self.infer_math(kind, arg_slice, range),
@@ -5784,10 +5776,13 @@ impl Checker {
                 (fun_ty, constraints, mapping, Some(s))
             }
             None => {
-                return self.error(
+                // The prelude `block_on` moved to the `task` module.
+                let help = (ident == "block_on").then(|| "`block_on` is in the `task` module now: add `use task::block_on;`".to_string());
+                return self.error_with_help(
                     ErrorCode::UnknownFunction,
                     format!("Cannot find function `{}`", ident),
                     range,
+                    help,
                 );
             }
         };
@@ -7815,7 +7810,6 @@ impl Checker {
         apply_ty_prune(&self.subst, &result)
     }
 
-    /// `block_on(coro)`, drive `coroutine<Y>` / `coroutine<Y, unit>` to completion → `Y`.
     /// Warn that `name` is deprecated; `help` names the replacement.
     fn warn_deprecated(&mut self, name: &str, help: &str, range: Range<usize>) {
         let mut msg = Message::warn(
@@ -7825,39 +7819,6 @@ impl Checker {
         );
         msg.with_help(help.to_string());
         self.messages.push(msg);
-    }
-
-    fn infer_block_on(&mut self, args: &[Output], range: Range<usize>) -> Ty {
-        self.warn_deprecated(
-            "block_on",
-            "call the generator's work directly, or run it as a task with `task::scope` and `join`",
-            range.clone(),
-        );
-        if args.len() != 1 {
-            for arg in args {
-                let _ = self.infer(arg);
-            }
-            return self.error_with_help(
-                ErrorCode::ConstructorArity,
-                format!("block_on expects 1 argument, got {}", args.len()),
-                range,
-                Some("use `block_on(async_fn_call())`".to_string()),
-            );
-        }
-        let handle_ty = self.infer(&args[0]);
-        let y_var = Ty::Var(self.counter.fresh());
-        let s_var = Ty::Var(self.counter.fresh());
-        let coro_ty = self.coroutine_type(y_var.clone(), s_var.clone());
-        self.unify(
-            &handle_ty,
-            &coro_ty,
-            &args[0].0.into_range(),
-            "block_on argument",
-        );
-        // Prefer unit send; free send vars unify with unit.
-        let unit = unit_ty();
-        let _ = self.unify(&s_var, &unit, &range, "block_on coroutine send type");
-        apply_ty_prune(&self.subst, &y_var)
     }
 
     fn primitive_cast_name(ty: &Ty) -> Option<&'static str> {
@@ -7936,9 +7897,7 @@ impl Checker {
                 let _ = self.infer(arg);
             }
             let hint = match kind {
-                PreludeFn::Pow => "base, exponent",
                 PreludeFn::Atan2 => "y, x",
-                PreludeFn::Rem => "x, y",
                 _ => "x",
             };
             return self.error_with_help(

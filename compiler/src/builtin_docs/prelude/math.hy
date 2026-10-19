@@ -100,24 +100,6 @@ fn exp(float x) -> float {}
 /// ```
 fn ln(float x) -> float {}
 
-/// Returns `base` raised to the power `exponent`.
-///
-/// Unlike the other functions here, `pow` is not auto-imported, so a bare
-/// `pow` can refer to the stdlib `num::pow` (which also has an `int`
-/// overload). Import this float-only version with
-/// `use prelude::math::{pow};`. The `**` operator also raises `float` and
-/// `int` values to a power.
-///
-/// # Examples
-///
-/// ```
-/// use prelude::math::{pow};
-/// # use tests::assert;
-/// assert!(pow(2.0, 10.0) == 1024.0);
-/// assert!(pow(9.0, 0.5) == 3.0);
-/// ```
-fn pow(float base, float exponent) -> float {}
-
 /// Returns the arctangent of `x`, in radians in `-pi/2..=pi/2`.
 ///
 /// # Examples
@@ -203,20 +185,6 @@ fn log2(float x) -> float {}
 /// assert!(cbrt(-8.0) == -2.0);
 /// ```
 fn cbrt(float x) -> float {}
-
-/// Returns the floating-point remainder of `x / y`.
-///
-/// The result has the sign of `x` and a magnitude less than `|y|`, like C
-/// `fmod` (not IEEE `remainder`). It matches `x % y` on floats.
-///
-/// # Examples
-///
-/// ```
-/// # use tests::assert;
-/// assert!(rem(7.5, 2.0) == 1.5);
-/// assert!(rem(-7.5, 2.0) == -1.5);
-/// ```
-fn rem(float x, float y) -> float {}
 
 /// Returns the hyperbolic sine of `x`.
 ///
