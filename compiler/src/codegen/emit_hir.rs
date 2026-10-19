@@ -4209,9 +4209,11 @@ impl Compiler {
                 return self.hir_ground_direct(hir, call, inst.class.clone(), lookup, fqn.clone(), member);
             }
         }
-        // `len` may be structural.
+        // A structural `x.len()` (string, array, `Vec`, …) lowers as a length
+        // before it is a call, so a `len` here names a user `impl Length`
+        // and is looked up like any other method (#1504).
         let method = name.rsplit_once('.').map_or(name, |(_, m)| m);
-        if name.contains("::") || method == "len" {
+        if name.contains("::") {
             return Err("callee-trait");
         }
         let arg_tys = args
