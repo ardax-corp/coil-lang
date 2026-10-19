@@ -4957,7 +4957,8 @@ impl Compiler {
         let open_tuple = |ty: &Ty| shared && matches!(ty, Ty::Tuple(_)) && !crate::hir::layout::ty_is_closed(ty);
         let ground = |id: HirId| {
             let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
-            (crate::hir::layout::ty_is_closed(&ty) || ground_fun(&ty) || open(&ty) || open_tuple(&ty)).then_some(ty)
+            (crate::hir::layout::ty_is_closed(&ty) || ground_fun(&ty) || open(&ty) || open_tuple(&ty) || self.hir_open_enum_word(&ty))
+                .then_some(ty)
         };
         let explicit = args.len() - receivers;
         let skip = params.len().saturating_sub(explicit);
@@ -5004,6 +5005,15 @@ impl Compiler {
             Self::bind_scheme_vars(param, ty, &mut vars);
         }
         Self::bind_scheme_vars(cur, &ret_ty, &mut vars);
+        // An open enum instance passes as its own word only where the
+        // signature names its type parameter bare: nested (`Option<T>`), the
+        // shared body would hold it boxed inside the object (#1517).
+        let nested = |v: &crate::typechecking::ty::TyVarId| {
+            params.iter().chain([cur]).any(|t| !matches!(t, Ty::Var(_)) && crate::typechecking::ty::ftv_ty(t).contains(v))
+        };
+        if vars.iter().any(|(v, ty)| !crate::hir::layout::ty_is_closed(ty) && self.hir_open_enum_word(ty) && nested(v)) {
+            return Err("callee-generic");
+        }
         // In a clone, `self` is typed by its class alone (`HashMap`): its
         // type arguments are the clone's (`HashMap<int, int>`), which ground
         // a sibling method's class parameters (`self.grow()`).
@@ -5258,6 +5268,18 @@ impl Compiler {
     /// An enum whose word is the heap object (no pointer niche).
     fn hir_boxed_enum_word(&self, ty: &Ty) -> bool {
         self.value_layout(ty) == ValueLayout::Boxed
+    }
+
+    /// An enum with a type variable nothing pinned (`Ok(9)`'s error type,
+    /// `None`'s payload): its layout is the boxed `ObjEnum` word whatever the
+    /// variable would be (an open type takes no niche or pair), as a plain
+    /// `let r = Ok(9);` keeps it, so it boxes and unboxes as a type
+    /// parameter like a ground boxed enum (#1517).
+    fn hir_open_enum_word(&self, ty: &Ty) -> bool {
+        !crate::hir::layout::ty_is_closed(ty)
+            && matches!(crate::typechecking::ty::strip_readonly(ty), Ty::App(..) | Ty::Sum { .. } | Ty::Constructor { .. })
+            && lower::classify(&self.checker, ty) == Some(ValueClass::Enum)
+            && self.hir_boxed_enum_word(ty)
     }
 
     /// `return f(..)` may jump instead of call, under the rules
@@ -6292,7 +6314,7 @@ impl Compiler {
                     let ty = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));
                     if forwarded
                         || self.hir_polyfn_nested(hir, emit, *f)
-                        || ty.as_ref().is_none_or(|t| !crate::hir::layout::ty_is_closed(t))
+                        || ty.as_ref().is_none_or(|t| !crate::hir::layout::ty_is_closed(t) && !self.hir_open_enum_word(t))
                     {
                         return Err("callee-value");
                     }
