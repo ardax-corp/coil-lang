@@ -268,7 +268,7 @@ pub fn emit_dense(
             reserved: &reserved,
             pool,
             loc: func.term_loc(block.id),
-            clears: entry_clears.get(&block.id).map(Vec::as_slice).unwrap_or(&[]),
+            clears: &entry_clears,
         })?;
     }
     coalesce_dense_moves(&mut out);
@@ -391,14 +391,17 @@ fn copied_over_first(
         })
 }
 
-/// Registers to zero after the φ copies of each forward `Jump` (by
-/// predecessor block): a heap word copied into a φ that is later rebound
+/// Registers to zero after the φ copies of each forward edge (by
+/// predecessor and target): a heap word copied into a φ that is later rebound
 /// (a `ClearWord` of the φ, or of a φ it flows into) and nothing reads past
 /// the edge. The copy carries the value on; its source register would keep
 /// rooting it after the rebind: a loop header's entry copy (#1402), or a
-/// branch's copy into an `if`/`else` join (#1409). Never on a back edge.
-pub(super) fn entry_clears(func: &MirFunc, regs: &[u8], need_slot: &[bool]) -> HashMap<BlockId, Vec<u8>> {
-    let mut out: HashMap<BlockId, Vec<u8>> = HashMap::new();
+/// branch's copy into an `if`/`else` join (#1409), or a skipped arm's
+/// branch copy into the join after it (#1519: zeroed there once, a chain's
+/// earlier registers need no zero again at each later arm). Never on a back
+/// edge.
+pub(super) fn entry_clears(func: &MirFunc, regs: &[u8], need_slot: &[bool]) -> HashMap<(BlockId, BlockId), Vec<u8>> {
+    let mut out: HashMap<(BlockId, BlockId), Vec<u8>> = HashMap::new();
     let mut rebound: HashSet<ValueId> = func
         .blocks
         .iter()
@@ -500,9 +503,14 @@ pub(super) fn entry_clears(func: &MirFunc, regs: &[u8], need_slot: &[bool]) -> H
         };
         let preds: HashSet<BlockId> = phis.iter().flat_map(|(_, a)| a.iter().map(|(p, _)| *p)).collect();
         for p in preds {
-            if p.index() >= h.id.index() || !matches!(func.block(p).term, Some(Terminator::Jump { dest }) if dest == h.id) {
+            // A branch whose one edge reaches the header zeroes its own
+            // copies' sources on that edge.
+            let jump = matches!(func.block(p).term, Some(Terminator::Jump { dest }) if dest == h.id);
+            let br = matches!(func.block(p).term, Some(Terminator::Br { taken, not_taken, .. }) if (taken == h.id) != (not_taken == h.id));
+            if p.index() >= h.id.index() || !(jump || br) {
                 continue;
             }
+            let e = (p, h.id);
             for (dest, args) in &phis {
                 for &(q, src) in args.iter() {
                     let r = regs[src.index()];
@@ -514,13 +522,16 @@ pub(super) fn entry_clears(func: &MirFunc, regs: &[u8], need_slot: &[bool]) -> H
                         && func.ty(src).is_heap_word()
                         && !func.params.contains(&src)
                         && !taken(r)
-                        && !out.get(&p).is_some_and(|rs| rs.contains(&r))
+                        && !out.get(&e).is_some_and(|rs| rs.contains(&r))
                         && !held_elsewhere(src)
                         && scan.from(h.id, 0, r)
                     {
-                        out.entry(p).or_default().push(r);
+                        out.entry(e).or_default().push(r);
                     }
                 }
+            }
+            if !jump {
+                continue;
             }
             // The registers another forward predecessor's copy came from
             // still hold what that edge carried last (#1411): in a loop
@@ -568,10 +579,10 @@ pub(super) fn entry_clears(func: &MirFunc, regs: &[u8], need_slot: &[bool]) -> H
                     for r in new {
                         if !own.contains(r)
                             && !taken(r)
-                            && !out.get(&p).is_some_and(|rs| rs.contains(&r))
+                            && !out.get(&e).is_some_and(|rs| rs.contains(&r))
                             && scan.from(h.id, 0, r)
                         {
-                            out.entry(p).or_default().push(r);
+                            out.entry(e).or_default().push(r);
                         }
                     }
                 }
@@ -1145,7 +1156,7 @@ pub(super) fn prune_clears(
     regs: &[u8],
     need_slot: &[bool],
     cleared: &mut HashSet<ValueId>,
-    entry: &mut HashMap<BlockId, Vec<u8>>,
+    entry: &mut HashMap<(BlockId, BlockId), Vec<u8>>,
     source: &mut HashMap<ValueId, Vec<u8>>,
 ) {
     if cleared.is_empty() && entry.is_empty() && source.is_empty() {
@@ -1230,11 +1241,9 @@ pub(super) fn prune_clears(
                 if s.index() < nb {
                     out.union(&edge_writes[s.index()]);
                 }
-                if let Terminator::Jump { dest } = term {
-                    for &r in entry.get(&block.id).map(Vec::as_slice).unwrap_or(&[]) {
-                        keep(Clear::Edge(block.id, *dest), r, out.contains(r));
-                        out.remove(r);
-                    }
+                for &r in entry.get(&(block.id, s)).map(Vec::as_slice).unwrap_or(&[]) {
+                    keep(Clear::Edge(block.id, s), r, out.contains(r));
+                    out.remove(r);
                 }
                 out.union(&wild);
                 (s, out)
@@ -1279,7 +1288,7 @@ pub(super) fn prune_clears(
     // nothing reaches keeps its clears.
     let mut drop_own: HashSet<ValueId> = HashSet::new();
     let mut keep_source: HashMap<ValueId, Vec<u8>> = HashMap::new();
-    let mut keep_edge: HashMap<BlockId, Vec<u8>> = HashMap::new();
+    let mut keep_edge: HashMap<(BlockId, BlockId), Vec<u8>> = HashMap::new();
     for (b, dirty) in at.iter().enumerate() {
         let Some(dirty) = *dirty else { continue };
         run(b, dirty, &mut |c, r, held| match c {
@@ -1294,8 +1303,8 @@ pub(super) fn prune_clears(
                     rs.push(r);
                 }
             }
-            Clear::Edge(p, _) => {
-                let rs = keep_edge.entry(p).or_default();
+            Clear::Edge(p, s) => {
+                let rs = keep_edge.entry((p, s)).or_default();
                 if held {
                     rs.push(r);
                 }
@@ -1310,11 +1319,11 @@ pub(super) fn prune_clears(
             source.insert(t, rs);
         }
     }
-    for (p, rs) in keep_edge {
+    for (e, rs) in keep_edge {
         if rs.is_empty() {
-            entry.remove(&p);
+            entry.remove(&e);
         } else {
-            entry.insert(p, rs);
+            entry.insert(e, rs);
         }
     }
 }
@@ -2403,8 +2412,8 @@ struct EmitTermArgs<'args> {
     reserved: &'args HashSet<u32>,
     pool: &'args mut Vec<u64>,
     loc: DebugLoc,
-    /// Registers zeroed after a `Jump`'s φ copies ([`entry_clears`]).
-    clears: &'args [u8],
+    /// Registers zeroed after an edge's φ copies ([`entry_clears`]).
+    clears: &'args HashMap<(BlockId, BlockId), Vec<u8>>,
 }
 
 fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
@@ -2427,10 +2436,11 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
     let Some(term) = &block.term else {
         return Err(LowerError::Refused("missing terminator".into()));
     };
+    let clears = |to: BlockId| clears.get(&(block.id, to)).map(Vec::as_slice).unwrap_or(&[]);
     match term {
         Terminator::Jump { dest } => {
             emit_phi_moves(out, func, block.id, *dest, regs, scratch);
-            for &r in clears {
+            for &r in clears(*dest) {
                 push_clear_word(out, r);
             }
             if !is_fallthrough(func, block.id, *dest) {
@@ -2459,7 +2469,8 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
                 pool,
                 loc,
             })?;
-            if t_moves.is_empty() && f_moves.is_empty() {
+            let (t_clears, f_clears) = (clears(*taken), clears(*not_taken));
+            if t_moves.is_empty() && f_moves.is_empty() && t_clears.is_empty() && f_clears.is_empty() {
                 emit_cond_jumps(
                     out,
                     func,
@@ -2480,6 +2491,9 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
                 for (d, s) in t_moves {
                     out.push(move_op(d, s));
                 }
+                for &r in t_clears {
+                    push_clear_word(out, r);
+                }
                 // f_lab is the next op; taken must JMP or true fallthrough
                 // lands on the false phi moves (encode_frame if-chain).
                 out.push(IlOp::Jump {
@@ -2491,6 +2505,9 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
                 out.push(IlOp::Label(f_lab));
                 for (d, s) in f_moves {
                     out.push(move_op(d, s));
+                }
+                for &r in f_clears {
+                    push_clear_word(out, r);
                 }
                 out.push(IlOp::Jump {
                     kind: IlJumpKind::Unconditional,
