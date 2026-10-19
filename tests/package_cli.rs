@@ -401,3 +401,60 @@ fn main() {
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// A packaged binary keeps `fn_symbols` so its backtraces name functions;
+/// `--strip-debug` drops them along with the line table (coil-lang#1490).
+#[test]
+fn package_backtrace_names_functions_unless_stripped() {
+    let bin = std::env::var("CARGO_BIN_EXE_coil")
+        .expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
+    let embed = build_matching_coil_embed();
+    let dir = std::env::temp_dir().join(format!("coil_pack_backtrace_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("panic.hy");
+    std::fs::write(
+        &entry,
+        "fn inner(int x) -> int {
+    if x > 2 {
+        panic(\"boom: x too large\");
+    }
+    return x;
+}
+
+fn main() {
+    let v: Vec<int> = [1, 2, 3];
+    let i = inner(v[2]);
+}
+",
+    )
+    .unwrap();
+    for strip in [false, true] {
+        let out = dir.join(format!("panic_{strip}{}", std::env::consts::EXE_SUFFIX));
+        let mut package = Command::new(&bin);
+        package.args(["package", "-O", "0"]);
+        for root in compiler::Pipeline::workspace_language_extra_roots() {
+            package.arg("--root").arg(root);
+        }
+        if strip {
+            package.arg("--strip-debug");
+        }
+        package.arg(&entry).arg("-o").arg(&out).arg("--runner").arg(&embed);
+        assert!(package.status().expect("spawn coil package").success(), "package failed");
+
+        let mut cmd = Command::new(&out);
+        cmd.env("COIL_BACKTRACE", "1");
+        let run = run_command_with_timeout(cmd, 30);
+        assert!(!run.status.success(), "strip={strip}: expected a panic");
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        assert!(stderr.contains("boom: x too large"), "strip={strip}: {stderr}");
+        if strip {
+            assert!(!stderr.contains("in inner"), "strip-debug kept names: {stderr}");
+        } else {
+            assert!(stderr.contains("in inner at"), "{stderr}");
+            assert!(stderr.contains("in main at"), "{stderr}");
+            assert!(!stderr.contains("<unknown>"), "{stderr}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

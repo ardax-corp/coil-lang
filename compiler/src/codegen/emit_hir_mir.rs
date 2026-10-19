@@ -581,9 +581,12 @@ impl Compiler {
                 // reserved when it was planned.
                 if let Some(lam) = emit.plan.lambdas.get(&id.0) {
                     let target = lam.label;
-                    let operand = make_fn_operand(lam.body.captures.len() as u32, 0, lam.body.params.len() as u32, false);
+                    // Its captured dictionaries follow its captures (#1526).
+                    let words = (lam.body.captures.len() + lam.dicts.len()) as u32;
+                    let operand = make_fn_operand(words, 0, lam.body.params.len() as u32, false);
                     let captures = lam.body.captures.iter().map(|&(outer, _)| outer).collect();
-                    t.fn_values.insert(id.0, crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand, mask: 0 }, captures, dicts: Vec::new() });
+                    let dicts = lam.dicts.iter().map(|&(_, slot)| crate::mir::HirDictOp::Load(slot)).collect();
+                    t.fn_values.insert(id.0, crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand, mask: 0 }, captures, dicts });
                 }
             }
             // A generic function's `MakePolyFn`, or with bounds its
@@ -1554,6 +1557,10 @@ impl Compiler {
                 }
                 _ => false,
             },
+            // A closure's captured dictionaries (#1526).
+            HirKind::Lambda { .. } if let Some(lam) = emit.plan.lambdas.get(&id.0) => {
+                lam.dicts.iter().any(|&(_, slot)| !self.hir_mir_dict_param(slot))
+            }
             // A `PolyFn` value's escape dictionaries.
             HirKind::Global { .. } if let Some(name) = emit.plan.polyfns.get(&id.0) => {
                 let ty = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));

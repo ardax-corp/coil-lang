@@ -565,6 +565,9 @@ pub struct HirMirInput<'a> {
     /// Frame words at entry when trailing dictionary parameters follow
     /// the body's own (a shared generic instance): each is one heap word.
     pub entry_words: Option<u32>,
+    /// A lambda's captured dictionaries (#1526): `(first slot, count)`,
+    /// each one heap word after its own captures, before its parameters.
+    pub lambda_dicts: Option<(u32, u32)>,
     /// A generic body's type parameter values are opaque words it only
     /// moves (a raw scalar or a box, as the caller passed it).
     pub opaque_vars: bool,
@@ -957,7 +960,18 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
     b.allow_host_edges = true;
     b.set_ret_ty(ret_ty);
     let mut next = 0;
+    let mut dict_params = HashMap::new();
+    let mut lambda_dicts = inp.lambda_dicts;
     for &param in &hir.params {
+        if let Some((at, n)) = lambda_dicts
+            && at == next
+        {
+            for slot in at..at + n {
+                dict_params.insert(slot, b.add_param(MirTy::HeapRef).map_err(mir)?);
+            }
+            next += n;
+            lambda_dicts = None;
+        }
         if inp.slots.get(param.0 as usize).copied().flatten() != Some(next) {
             return Err("param slot".into());
         }
@@ -982,7 +996,14 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
             next += 1;
         }
     }
-    let mut dict_params = HashMap::new();
+    if let Some((at, n)) = lambda_dicts {
+        if at != next {
+            return Err("lambda dictionary slot".into());
+        }
+        for slot in at..at + n {
+            dict_params.insert(slot, b.add_param(MirTy::HeapRef).map_err(mir)?);
+        }
+    }
     if let Some(entry) = inp.entry_words {
         if entry < next {
             return Err("param slot".into());
