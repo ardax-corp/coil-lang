@@ -4428,13 +4428,17 @@ impl Lower<'_> {
     /// function returns a bare type parameter.
     fn call_poly(&mut self, id: HirId, f: HirId, args: &[HirId], p: &HirPolyCall) -> Result<Val, Refusal> {
         self.raw_host = false;
-        if self.inp.pair_tys.contains_key(&id.0) || p.boxes.len() != args.len() {
+        if p.boxes.len() != args.len() {
             return Err("polyfn call shape".into());
         }
         let ty = self.expr_ty(id).ok_or("call type")?;
         let unit = is_unit(ty);
+        // A two-word result comes back as its object, unboxed where a pair
+        // is read; a heap tuple is its object (#1511).
         let word = if unit {
             MirTy::I64
+        } else if self.inp.pair_tys.contains_key(&id.0) || is_heap_tuple(ty) {
+            MirTy::HeapRef
         } else {
             self.inp.word(ty).ok_or_else(|| format!("call value type {}", ty_kind(ty)))?
         };
