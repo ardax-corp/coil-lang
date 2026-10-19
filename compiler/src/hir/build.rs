@@ -1753,6 +1753,52 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         id
     }
 
+    /// `f(a, b)` on a named `f` declaring fewer parameters than it is given,
+    /// as a curried `fn f(A a) -> B -> C` (its type `A -> B -> C` takes
+    /// both): call `f` with the ones it declares, then the function it
+    /// returns with the rest, as a closure does at run time (#1550). `keys`
+    /// are the names `f`'s declaration may be registered under.
+    fn split_over_application(&self, b: &mut BodyBuilder, call: HirId, keys: &[&str]) -> HirId {
+        let HirKind::Call { callee: callee @ Callee::Named { .. }, args } = &b.body.exprs[call.0 as usize].kind else {
+            return call;
+        };
+        // The declaration's own candidate, so its parameter count and its
+        // scheme agree: a builtin's or a method's names may share the key.
+        let Some([candidate]) = keys.iter().find_map(|k| self.checker.overload_candidates(k)) else {
+            return call;
+        };
+        let declared = candidate.fixed_arity;
+        let mut arrows = 0;
+        let mut ty = &candidate.scheme.ty;
+        while let Ty::Fun(_, ret) = strip_readonly(ty) {
+            arrows += 1;
+            ty = ret;
+        }
+        if args.len() <= declared
+            || candidate.is_rest
+            || arrows < args.len()
+            || args.iter().any(|&a| matches!(b.body.exprs[a.0 as usize].kind, HirKind::Named { .. } | HirKind::Spread(_)))
+        {
+            return call;
+        }
+        let (callee, args) = (callee.clone(), args.clone());
+        let (taken, rest) = args.split_at(declared);
+        let Some(ty) = self.ty_at(b, call) else { return call };
+        let Some(inner_ty) = rest
+            .iter()
+            .rev()
+            .try_fold(ty.clone(), |acc, &a| Some(Ty::Fun(Box::new(self.ty_at(b, a)?), Box::new(acc))))
+        else {
+            return call;
+        };
+        let expr = &mut b.body.exprs[call.0 as usize];
+        expr.kind = HirKind::Call { callee, args: taken.to_vec() };
+        expr.ty = Some(inner_ty);
+        self.stamp(b, call);
+        let span = b.body.exprs[call.0 as usize].span;
+        self.synth(b, span, HirKind::Call { callee: Callee::Value(call), args: rest.to_vec() }, Some(ty))
+    }
+
     fn call(&mut self, b: &mut BodyBuilder, node: &Output<'_>, name: &Output<'_>, args: &[Output<'_>]) -> HirId {
         use Expression as E;
         if let Some(&local) = b.olds.get(&(std::ptr::from_ref(node) as usize)) {
@@ -1793,6 +1839,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                         args,
                     },
                 );
+                let call = self.split_over_application(b, call, &[n]);
                 self.after(b, span_of(node), stmts, call)
             }
             E::QualifiedAccess { .. } if self.checker.qualified_trait_call_at(node.0.start, node.0.end).is_some() => {
@@ -1816,6 +1863,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                         args,
                     },
                 );
+                let call = self.split_over_application(b, call, &[&format!("{owner}::{member}"), member]);
                 self.after(b, span_of(node), stmts, call)
             }
             E::Access(recv, method) => {
