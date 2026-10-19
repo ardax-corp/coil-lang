@@ -18506,8 +18506,10 @@ impl Checker {
         if let Some(&id) = self.record_type_ids.get(&key) {
             return id;
         }
-        let id = self.next_class_type_id;
-        self.next_class_type_id = self.next_class_type_id.saturating_add(1).max(1);
+        // Records take ids from their own range, so the VM can tell one
+        // from a class instance (#1618).
+        let id = common::RECORD_TYPE_ID_BASE + self.record_type_ids.len() as u32;
+        assert!(id < common::RECORD_TYPE_ID_END, "more distinct record types than record type ids");
         self.record_type_ids.insert(key, id);
         id
     }
