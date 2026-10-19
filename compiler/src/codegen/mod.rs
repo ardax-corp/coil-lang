@@ -592,6 +592,11 @@ pub struct Compiler {
     /// and those still to emit after the current body.
     hir_fn_adapters: HashMap<Vec<Option<u32>>, crate::il::Label>,
     hir_adapter_tail: Vec<(crate::il::Label, Vec<Option<crate::typechecking::Ty>>)>,
+    /// Adapters of closures shared generic bodies return
+    /// ([`Compiler::hir_closure_adapter`]) by shape, and the ones to emit
+    /// after the body (#1532).
+    hir_closure_adapters: HashMap<compiler::emit_hir::HirClosureAdapt, crate::il::Label>,
+    hir_closure_adapter_tail: Vec<(crate::il::Label, compiler::emit_hir::HirClosureAdapt)>,
     /// When false, skip auto fork-join even if `COIL_AUTO_PAR` is on.
     auto_par: bool,
 
@@ -805,6 +810,8 @@ impl Default for Compiler {
             hir_lambda_tail: Vec::new(),
             hir_fn_adapters: HashMap::new(),
             hir_adapter_tail: Vec::new(),
+            hir_closure_adapters: HashMap::new(),
+            hir_closure_adapter_tail: Vec::new(),
             auto_par: true,
             operand_stack_slots: crate::typechecking::DEFAULT_OPERAND_STACK_SLOTS,
             opt_options: crate::il::opt::OptimizeOptions::default(),
