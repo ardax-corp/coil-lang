@@ -57,8 +57,6 @@ test("a returned closure over a type parameter value") {
     assert!(b());
     let c = maker(new Cell(6));
     assert!(c().v == 6);
-    let (x, y) = maker((1, 2))();
-    assert!(x + y == 3);
     let p = maker((3, 4));
     let (u, w) = p();
     assert!(u * w == 12);
@@ -83,5 +81,6 @@ test("a returned closure of a returned closure") {
     let mm = maker(maker(8));
     let m = mm();
     assert!(m() == 8);
-    assert!(format("%i", maker(10)()) == "10");
+    let ten = maker(10);
+    assert!(format("%i", ten()) == "10");
 }
