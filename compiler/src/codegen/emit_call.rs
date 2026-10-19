@@ -16,13 +16,14 @@ impl Compiler {
         name: &str,
         range: std::ops::Range<usize>,
     ) -> bool {
-        let Some(enum_name) = self.two_word_return_kind(name) else {
+        let Some(kind) = self.two_word_return_kind(name) else {
             return true;
         };
-        let layout = if crate::typechecking::return_layout::is_two_word_product_kind(&enum_name) {
-            "(T, T)".to_string()
-        } else {
-            enum_name
+        let layout = match &kind {
+            PairKind::Product => "(T, T)",
+            PairKind::Range { inclusive: false } => "__range",
+            PairKind::Range { inclusive: true } => "__range_inc",
+            _ => kind.enum_name().unwrap_or_default(),
         };
         let mut message = Message::error(
             ErrorCode::CodegenError,

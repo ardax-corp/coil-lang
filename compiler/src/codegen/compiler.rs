@@ -55,7 +55,7 @@ pub(super) struct SynthCallee {
     pub dicts: Vec<DictStep>,
     pub raw: bool,
     /// The two-word kind the callee returns as `[payload, tag]`.
-    pub pair: Option<String>,
+    pub pair: Option<PairKind>,
     /// A host native by its registered name, whatever the name resolves
     /// to in the module being compiled.
     pub host: bool,
@@ -977,20 +977,20 @@ impl Compiler {
             .map(|(payload, tag, _)| (*payload, *tag))
     }
 
-    fn unboxed_enum_kind(&self, name: &str) -> Option<&str> {
+    fn unboxed_enum_kind(&self, name: &str) -> Option<&PairKind> {
         self.context
             .unboxed_enum_locals
             .get(name)
-            .map(|(_, _, kind)| kind.as_str())
+            .map(|(_, _, kind)| kind)
     }
 
-    fn alloc_unboxed_enum_slots(&mut self, name: &str, enum_name: &str) -> (u32, u32) {
+    fn alloc_unboxed_enum_slots(&mut self, name: &str, kind: &PairKind) -> (u32, u32) {
         let payload = self.alloc_binding_slot(name);
         let tag_name = format!("__unbox_tag_{name}");
         let tag = self.context.variables.intern(tag_name) as u32;
         self.context
             .unboxed_enum_locals
-            .insert(name.to_string(), (payload, tag, enum_name.to_string()));
+            .insert(name.to_string(), (payload, tag, kind.clone()));
         (payload, tag)
     }
 
@@ -1031,9 +1031,9 @@ impl Compiler {
 
     /// The two-word kind a parameter of type `ty` of `callee` takes, if any
     /// (see [`Self::callee_has_unboxed_range_params`]).
-    pub(super) fn param_pair_kind(&self, callee: &str, ty: &Ty) -> Option<String> {
+    pub(super) fn param_pair_kind(&self, callee: &str, ty: &Ty) -> Option<PairKind> {
         if let Some(kind) = crate::typechecking::return_layout::two_word_range_kind(ty) {
-            return Some(kind.to_string());
+            return Some(kind);
         }
         let lookup = strip_overload_key(callee);
         if self.checker.is_overloaded(lookup)
@@ -1045,13 +1045,13 @@ impl Compiler {
         }
         // A boxed tuple splits into `[a, b]` through a temp slot, which is
         // unsafe above live operands, so products stay one boxed word.
-        crate::typechecking::return_layout::two_word_return_enum(&self.checker, ty)
-            .filter(|kind| self.hir_pair_kind(kind) && !crate::typechecking::return_layout::is_two_word_product_kind(kind))
+        crate::typechecking::return_layout::two_word_kind(&self.checker, ty)
+            .filter(|kind| self.hir_pair_kind(kind) && *kind != PairKind::Product)
     }
 
     /// Per parameter of `callee`, the two-word kind it takes (empty when it
     /// takes none).
-    pub(super) fn callee_param_pairs(&self, callee: &str) -> Vec<Option<String>> {
+    pub(super) fn callee_param_pairs(&self, callee: &str) -> Vec<Option<PairKind>> {
         if !self.callee_has_unboxed_range_params(callee) {
             return Vec::new();
         }
@@ -1076,7 +1076,7 @@ impl Compiler {
             .map(str::to_string)
     }
 
-    fn argument_unboxed_range_kind(&self, arg: &Output<'_>) -> Option<String> {
+    fn argument_unboxed_range_kind(&self, arg: &Output<'_>) -> Option<PairKind> {
         let key = self.current_fn_pair_key()?;
         // By position, from the same signature every caller reads.
         if let Expression::Argument { name, .. } = arg.1.as_ref()
@@ -1091,7 +1091,7 @@ impl Compiler {
         }
         if let Some(ty) = self.sidecar_ty_of(arg)
             && let Some(kind) = crate::typechecking::return_layout::two_word_range_kind(&ty) {
-                return Some(kind.to_string());
+                return Some(kind);
             }
         let Expression::Argument { ty: Some(ty), .. } = arg.1.as_ref() else {
             return None;
@@ -1110,8 +1110,7 @@ impl Compiler {
                             | Expression::Identifier("int" | "byte" | "float")
                     )
                 });
-                numeric
-                    .then(|| crate::typechecking::return_layout::range_kind(inclusive).to_string())
+                numeric.then_some(PairKind::Range { inclusive })
             }
             _ => None,
         }
@@ -4510,7 +4509,7 @@ impl Compiler {
     /// numeric `Range` / `RangeInclusive` are `[start, end]`.
     /// Niched heap `Option<T>` / heap-heap `Result<T, E>`, unbounded `T`,
     /// mixed-heap / wider products, and coroutines stay `None`.
-    fn two_word_return_kind(&self, name: &str) -> Option<String> {
+    fn two_word_return_kind(&self, name: &str) -> Option<PairKind> {
         if let Some(cached) = self.pair_return_kinds.borrow().get(name) {
             return cached.clone();
         }
@@ -4524,13 +4523,13 @@ impl Compiler {
     /// Pin a verdict so later queries cannot disagree with it. Definition sites
     /// use this for shapes only they can see (a coroutine body never returns a
     /// pair, however its return type reads).
-    fn pin_two_word_return_kind(&self, name: &str, kind: Option<String>) {
+    fn pin_two_word_return_kind(&self, name: &str, kind: Option<PairKind>) {
         self.pair_return_kinds
             .borrow_mut()
             .insert(name.to_string(), kind);
     }
 
-    fn compute_two_word_return_kind(&self, name: &str) -> Option<String> {
+    fn compute_two_word_return_kind(&self, name: &str) -> Option<PairKind> {
         if self.coroutine_fns.contains(name) {
             return None;
         }
@@ -4554,7 +4553,7 @@ impl Compiler {
             .checker
             .fn_return_ty(name)
             .or_else(|| self.checker.fn_return_ty(lookup))?;
-        crate::typechecking::return_layout::two_word_return_enum(&self.checker, &ty)
+        crate::typechecking::return_layout::two_word_kind(&self.checker, &ty)
     }
 
     /// Trait methods live under `Class__Type__method` FQNs that `env` lookup
@@ -4581,7 +4580,7 @@ impl Compiler {
         let Some(ty) = ty else {
             return;
         };
-        let kind = crate::typechecking::return_layout::two_word_return_enum(&self.checker, &ty);
+        let kind = crate::typechecking::return_layout::two_word_kind(&self.checker, &ty);
         self.pin_two_word_return_kind(fqn, kind);
     }
 
