@@ -1315,7 +1315,16 @@ impl<'a> Display for Expression<'a> {
                 }
             }
             Self::Spread(inner) => write!(f, "...{}", inner.1),
-            Self::TypeFnSig { params, ret } => write!(f, "fn{} -> {}", params.1, ret.1),
+            // `fn(int x, string) -> R`; an empty list stays `fn() -> R` (#1525).
+            Self::TypeFnSig { params, ret } => match params.1.as_ref() {
+                Self::Fragment(items) => write!(
+                    f,
+                    "fn({}) -> {}",
+                    items.iter().map(|p| p.1.to_string()).collect::<Vec<_>>().join(", "),
+                    ret.1
+                ),
+                other => write!(f, "fn({}) -> {}", other, ret.1),
+            },
             Self::DeriveDecl {
                 docs,
                 name,
