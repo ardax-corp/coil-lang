@@ -4455,6 +4455,16 @@ impl Compiler {
         if forwards && self.trait_method_own_bounds(&class, method).is_empty() {
             return Ok(None);
         }
+        // A generic instance's head (`impl Id for Option<T>`) at an open
+        // argument (`Id::id(o)`, `o: Option<E>`): called as the method call
+        // `o.id()` is (#1609). A structural tuple's has its own call.
+        if inst_args.iter().any(Self::ty_has_var)
+            && !self.checker.generics().structural_tuples().any(|(_, _, f)| f == fqn)
+            && let HirKind::Call { args, .. } = &node.kind
+            && !args.is_empty()
+        {
+            return self.resolve_hir_instance_method(hir, call, method, args, false);
+        }
         self.hir_ground_direct(hir, call, class, inst_args, fqn, method).map(Some)
     }
 
