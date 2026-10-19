@@ -1619,6 +1619,7 @@ impl Compiler {
             entry_words,
             opaque_vars,
             debugger: self.debugger_attached,
+            coverage: self.keep_fns_in.is_some(),
             ret_boxed_niche,
         })
     }

@@ -1,7 +1,7 @@
 //! Typeclass and instance registry for userland generics.
 //!
 //! Stores the shapes of typeclasses (`Num<T>`, `Eq<T>`, …) and
-//! registered implementations (`impl Num<int>`, `impl Num<float>`, …).
+//! registered implementations (`impl Num for int`, `impl Num for float`, …).
 //! The [`Checker`](super::infer::Checker) owns one `Generics` value and
 //! delegates type-class resolution to it.
 
@@ -182,13 +182,13 @@ impl TypeClassDef {
 
 /// One registered typeclass instance (concrete type → implementation mapping).
 ///
-/// E.g. `impl Num<int> { fn add(…) { … } }` is stored as:
+/// E.g. `impl Num for int { fn add(…) { … } }` is stored as:
 /// ```text
 /// InstanceDef { class: "Num", args: [int()],
 ///     method_fqns: { "add" → "Num__int__add" } }
 /// ```
 ///
-/// Associated types: `impl Collect<Option<int>> { type Elem<A> = A; … }`
+/// Associated types: `impl Collect for Option<int> { type Elem<A> = A; … }`
 /// stores `assoc_tys: { "Elem" → AssocTypeValue { … } }`.
 #[derive(Debug, Clone)]
 pub struct InstanceDef {
@@ -294,7 +294,7 @@ impl Generics {
     }
 
     /// Find an instance whose args unify with `args` (e.g. `Option::Some(42)`'s
-    /// Constructor type against `impl Collect<Option<int>>`). Does not mutate
+    /// Constructor type against `impl Collect for Option<int>`). Does not mutate
     /// any global substitution.
     pub fn find_unifying_instances(&self, class: &str, args: &[Ty]) -> Vec<&InstanceDef> {
         self.instances

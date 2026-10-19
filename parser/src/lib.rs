@@ -2919,8 +2919,8 @@ impl<'pratt> Pratt<'pratt> {
         stmt: T,
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
     {
-        const PRIMITIVES: &[&str] = &["int", "float", "string", "bool", "void", "unit", "byte"];
-
+        // The checker rejects a trait owner (`impl Show<Foo>`): trait
+        // instances are `impl Trait for Type`.
         keyword!("impl")
             .ignore_then(text::ident())
             .then(self.type_param_list())
@@ -2930,23 +2930,7 @@ impl<'pratt> Pratt<'pratt> {
                     .collect::<Vec<_>>()
                     .delimited_by(op!("{"), op!("}")),
             )
-            .validate(|((name, type_params), methods), e, emitter| {
-                let looks_like_type_param = |p: &TypeParam<'_>| -> bool {
-                    if PRIMITIVES.contains(&p.name) {
-                        return false;
-                    }
-                    if !p.bounds.is_empty() {
-                        return true;
-                    }
-                    let mut chars = p.name.chars();
-                    matches!(chars.next(), Some(c) if c.is_uppercase()) && chars.next().is_none()
-                };
-                if type_params.iter().any(|p| !looks_like_type_param(p)) {
-                    emitter.emit(Rich::custom(
-                        e.span(),
-                        "trait instances use `impl Trait for Type`",
-                    ));
-                }
+            .map_with(|((name, type_params), methods), e| {
                 (
                     e.span(),
                     Box::new(Expression::Implementation {

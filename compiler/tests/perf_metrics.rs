@@ -1900,3 +1900,43 @@ fn foreign_fn_clone_is_specialized() {
         }
     }
 }
+
+/// A bitwise op or shift, bare or fused with its operand reads or its return.
+fn is_bit_op(b: &Byte) -> bool {
+    let bit = |op: u8| {
+        [Instruction::BITAND, Instruction::BITOR, Instruction::XOR, Instruction::SHL, Instruction::SHR]
+            .iter()
+            .any(|&i| i as u8 == op)
+    };
+    match *b.bytecode() {
+        Instruction::BITAND | Instruction::BITOR | Instruction::XOR | Instruction::SHL | Instruction::SHR => true,
+        Instruction::BinReturn => bit(b.bin_return_op()),
+        Instruction::BinSlotImm => bit(b.bin_slot_imm_parts().0),
+        Instruction::BinSlotSlot => bit(b.bin_slot_slot_parts().0),
+        Instruction::BinSlotImmStore => bit(b.bin_slot_imm_store_parts().0),
+        Instruction::BinSlotSlotStore => bit(b.bin_slot_slot_store_parts().0),
+        _ => false,
+    }
+}
+
+/// #1434: a body whose only arithmetic is bitwise ops and shifts takes LIR
+/// without a dense attempt; MIR constant folding still runs on it, so the
+/// constants that meet once `mask(-1)` inlines fold at compile time.
+#[test]
+fn lir_body_folds_constants_after_inlining() {
+    let (bc, constants, _, _, pipeline) = compile("examples/perf/mir_lir_fold.hy");
+    let syms = pipeline.program_debug().fn_symbols;
+    let (start, end) = fn_pc_range(&syms, "check", bc.len());
+    let ops: Vec<_> = bc[start..end].iter().map(|b| *b.bytecode()).collect();
+    assert!(
+        !bc[start..end].iter().any(is_bit_op),
+        "`check` computes `mask(-1) >> 16` from constants alone, so no bit op should run; ops={ops:?}"
+    );
+    // `mix` keeps its shifts of `x`, but `mask(-1)` and every shift of it fold.
+    let (start, end) = fn_pc_range(&syms, "mix", bc.len());
+    let minus_one = bc[start..end]
+        .iter()
+        .filter(|b| *b.bytecode() == Instruction::CONST && b.constant(&constants) == u64::MAX)
+        .count();
+    assert_eq!(minus_one, 0, "`mask(-1)` should fold in `mix`, leaving no -1 to mask");
+}

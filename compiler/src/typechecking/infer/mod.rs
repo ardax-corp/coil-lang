@@ -812,7 +812,7 @@ fn build_record_field_hint(
     }
 }
 
-/// Normalize a runtime value type to the head used in `impl Show<T>`
+/// Normalize a runtime value type to the head used in `impl Show for T`
 /// registration (`Ty::Con("Point")` rather than `Sum` / `Constructor`).
 fn show_lookup_ty(ty: &Ty) -> Ty {
     match ty {

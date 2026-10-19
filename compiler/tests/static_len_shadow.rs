@@ -19,10 +19,13 @@ fn compile_tests(src: &str) -> (Compiler, Vec<common::Byte>) {
 /// for earlier tests (span-cached ident types, not flat name map).
 #[test]
 fn static_len_ignores_later_test_shadowing_same_name() {
+    // `want` is a static so the comparison stays for run time: with a
+    // literal 4, MIR folds the whole check away.
     let src = r#"
+static let want: int = 4;
 test("len of literal") {
     let a = [1, 2, 3, 4];
-    if a.len() != 4 { raise "bad len"; }
+    if a.len() != want { raise "bad len"; }
 }
 test("nested array index") {
     let a = [[1, 2], [3, 4]];
