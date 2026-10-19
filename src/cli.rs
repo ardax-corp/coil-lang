@@ -207,7 +207,7 @@ enum RawCommand {
         /// Fail if required shared libraries are missing
         #[arg(long)]
         check_native: bool,
-        /// Omit debug line table from the embedded archive
+        /// Omit debug info (line table and function names) from the embedded archive
         #[arg(long)]
         strip_debug: bool,
         /// Entry `.hy` file
