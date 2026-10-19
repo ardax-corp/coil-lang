@@ -4745,17 +4745,6 @@ impl Compiler {
         false
     }
 
-    /// Emit an `UnboxValue` instruction for a concrete `Ty` at a generic
-    /// call return boundary (generic→concrete).  Does nothing when the
-    /// type is open (`Ty::Var`), the caller can't know the tag at compile
-    /// time in that case (the boxed value stays boxed).
-    fn emit_unbox_if_needed(bytecode: &mut CodeBuf, ty: &crate::typechecking::Ty) {
-        if let Some(tag) = Self::ty_to_value_tag(ty) {
-            // UnboxValue operand: [15:0] = ValueTag as u16.
-            bytecode.push_unbox_value(tag as u32);
-        }
-    }
-
     fn compile_function_output_with_name<'compiler>(
         &mut self,
         method: &Output<'compiler>,
@@ -4828,17 +4817,15 @@ impl Compiler {
         for (slot, ty) in argument_unbox_tys.iter().enumerate() {
             if let Some(tag) = ty.as_ref().and_then(Self::ty_to_value_tag) {
                 self.hir_entry_unbox.push((slot as u32, tag as u32));
-                self.bytecode.push_load(slot as u32);
-                self.bytecode.push_unbox_value(tag as u32);
-                self.bytecode.push_store_pop(slot as u32);
             }
         }
         for dict_idx in 0..dict_arity {
             self.context.variables.intern(format!("__dict{}", dict_idx));
         }
         let entry_sp = self.context.variables.len() as u32;
-        // Direct MIR unboxes the arguments the prologue unboxes
-        // (`hir_entry_unbox`).
+        // Direct MIR unboxes the boxed arguments on entry
+        // (`hir_entry_unbox`) and loads the context dictionaries
+        // (`hir_entry_ctx`).
         self.hir_entry_sp = Some(entry_sp);
         // Bounded generic instance method: `__dict0` is the instance's own
         // dictionary, whose tail holds the context dictionaries.
@@ -4848,10 +4835,6 @@ impl Compiler {
             for i in 0..n {
                 let slot = self.context.variables.intern(format!("__dict{}", i + 1)) as u32;
                 self.hir_entry_ctx.push((slot, own, (base + i) as u32));
-                self.bytecode.push_load(own);
-                self.bytecode.push_const((base + i) as i32);
-                self.bytecode.push_index();
-                self.bytecode.push_store_pop(slot);
             }
         }
         self.begin_fn_defers();

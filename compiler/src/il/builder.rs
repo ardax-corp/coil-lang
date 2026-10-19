@@ -276,12 +276,6 @@ impl IlBuilder {
         });
     }
 
-    pub fn push_index(&mut self) {
-        self.push_op(IlOp::Index {
-            loc: DebugLoc::unknown(),
-        });
-    }
-
     pub fn push_array_pin(&mut self, slot: u32) {
         self.push_op(IlOp::ArrayPin {
             slot,
@@ -312,13 +306,6 @@ impl IlBuilder {
             kinds,
             tag,
             arity,
-            loc: DebugLoc::unknown(),
-        });
-    }
-
-    pub fn push_unbox_value(&mut self, tag: u32) {
-        self.push_op(IlOp::UnboxValue {
-            tag,
             loc: DebugLoc::unknown(),
         });
     }
