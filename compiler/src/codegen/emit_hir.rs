@@ -6656,11 +6656,12 @@ impl Compiler {
     fn hir_field(&self, hir: &HirBody, base: HirId, name: &str) -> Option<(FieldAt, Ty)> {
         let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, base)?);
         // A record's field is its slot among the fields sorted by name,
-        // each one boxed word.
+        // each one word: a niche `Option` / `Result` its niche word, as a
+        // tuple item (#1613).
         if let Ty::Record { fields } = crate::typechecking::ty::strip_readonly(&ty) {
             let (_, fty) = fields.iter().find(|(n, _)| n == name)?;
             let slot = fields.iter().filter(|(n, _)| n.as_str() < name).count() as u32;
-            return (self.value_layout(fty) == ValueLayout::Boxed).then(|| (FieldAt::Record(slot), fty.clone()));
+            return Some((FieldAt::Record(slot), fty.clone()));
         }
         if let Some(found) = self.hir_variant_field(&ty, name) {
             return Some(found);
@@ -7207,12 +7208,12 @@ impl Compiler {
                 kind: MakeKind::Record(_),
                 args,
             } => {
+                // Each field in its own type's layout: a niche `Option` /
+                // `Result` is stored as its niche word, as a tuple item
+                // (#1613).
                 for &item in args {
                     let ty = Self::hir_ty(hir, item).ok_or("value-type")?;
-                    if self.value_layout(ty) != ValueLayout::Boxed {
-                        return Err("record-field-layout");
-                    }
-                    self.hir_check_value(hir, emit, item, &BOXED)?;
+                    self.hir_check_value(hir, emit, item, &Rep::Word(self.value_layout(ty)))?;
                 }
             }
             HirKind::Make {
@@ -7558,7 +7559,13 @@ impl Compiler {
             // A type-only scalar `let x: T;`: zero until assigned.
             HirKind::Let { init: None, .. } => Ok(()),
             HirKind::LetPat { pat, init } => {
-                self.hir_check_let_pat(hir, pat)?;
+                match pat {
+                    // `let { a, b } = r`: each binding takes its slot's word
+                    // as the field's type names it, a niche `Option` /
+                    // `Result` its niche word (#1613).
+                    HirPat::Record(parts) if parts.iter().all(|(_, p)| matches!(p, HirPat::Wild | HirPat::Bind(_))) => {}
+                    _ => self.hir_check_let_pat(hir, pat)?,
+                }
                 if self.hir_product_let(hir, emit, pat, *init).is_some() {
                     let want = self.hir_natural(hir, emit, *init).ok_or("value-shape")?;
                     return self.hir_check_value(hir, emit, *init, &want);
@@ -7619,7 +7626,13 @@ impl Compiler {
                 self.hir_check_effect(hir, emit, *body)
             }
             HirKind::ForIn { pat, iterable, body, kind } => {
-                if !matches!(pat, HirPat::Bind(_)) {
+                // `for (k, v) in r` over a record: `v` takes each slot's
+                // word in its `(name, value)` item, a niche `Option` /
+                // `Result` its niche word (#1613).
+                let record_items = matches!(pat, HirPat::Tuple(ps) if ps.iter().all(|p| matches!(p, HirPat::Wild | HirPat::Bind(_))))
+                    && Self::hir_ty(hir, *iterable)
+                        .is_some_and(|t| matches!(crate::typechecking::ty::strip_readonly(&apply_ty_prune(self.checker.subst(), t)), Ty::Record { .. }));
+                if !matches!(pat, HirPat::Bind(_)) && !record_items {
                     self.hir_check_let_pat(hir, pat)?;
                 }
                 // The resumed word is stored as it comes back.

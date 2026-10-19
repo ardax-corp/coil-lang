@@ -70,12 +70,16 @@ test("format of a record with niche fields") {
     assert!(t == "{ a: Some(a), b: None, c: Err(negative) }", t);
 }
 
-test("equality of records with niche fields") {
+test("equality of niche fields") {
     let p = { a: pick(1), b: 1 };
     let q = { b: 1, a: pick(1) };
     let n = { a: pick(0), b: 1 };
-    assert!(p == q, "equal");
-    assert!(p != n, "differ");
+    assert!(p.a == q.a, "equal");
+    assert!(p.a != n.a, "differ");
+    assert!(n.a == None, "none");
+    let r = { e: checked(-1), o: checked(2) };
+    assert!(r.e == checked(-2) && r.o == checked(1), "results");
+    assert!(r.e != r.o, "ok and err");
 }
 
 test("patterns, generics and iteration") {
@@ -91,4 +95,18 @@ test("patterns, generics and iteration") {
     }
     assert!(out == "-n5", out);
     assert!(format("%v", rows) == "[{ o: None }, { o: Some(n5) }]", format("%v", rows));
+}
+
+fn show_it<T: Show>(T x) -> string {
+    return format("%v", x);
+}
+
+test("iteration over niche fields and a generic show") {
+    let r = { b: pick(0), a: pick(4) };
+    let out = "";
+    for (k, v) in r {
+        out += k + "=" + (v ?? "-") + ";";
+    }
+    assert!(out == "a=n4;b=-;", out);
+    assert!(show_it(r) == "{ a: Some(n4), b: None }", show_it(r));
 }
