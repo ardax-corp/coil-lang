@@ -4468,6 +4468,7 @@ impl Compiler {
                 })),
                 ranges: Vec::new(),
                 mono_of: None,
+                own_dicts: Vec::new(),
             });
         }
         if inst_args.iter().any(Self::ty_has_var) || self.two_word_return_kind(&fqn).is_some() {
