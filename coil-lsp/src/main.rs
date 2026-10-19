@@ -2201,9 +2201,6 @@ fn builtin_description(module: &str, name: &str, export: &BuiltinExport) -> Stri
         ("prelude::math", "log10") => "Base-10 logarithm of a float.".into(),
         ("prelude::math", "log2") => "Base-2 logarithm of a float.".into(),
         ("prelude::math", "cbrt") => "Cube root of a float.".into(),
-        ("prelude::math", "rem") => {
-            "Float remainder (`f64::rem` / C `fmod`); sign follows the dividend.".into()
-        }
         ("prelude::math", "sinh") => "Hyperbolic sine of a float.".into(),
         ("prelude::math", "cosh") => "Hyperbolic cosine of a float.".into(),
         ("prelude::math", "tanh") => "Hyperbolic tangent of a float.".into(),
