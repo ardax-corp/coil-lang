@@ -209,6 +209,12 @@ fn specialize_side(
     // results are heap words typed `i64`: a conservatively scanned frame
     // covers the whole extent.
     side.needs_frame_extent = has_alloc;
+    // A coverage compile counts a line by the code it emits; dense's MIR
+    // passes fold a line's constants into the next one (#1494). LIR keeps
+    // each line's code there (`keep_lines`).
+    if from_hir.keep_lines {
+        return refuse_dense("coverage");
+    }
     if !has_numeric_arith(from_hir) {
         return refuse_dense("no numeric arith");
     }

@@ -66,7 +66,8 @@ pub struct MirFunc {
     /// a frame word of its own, never an inline operand.
     pub debug_keep: bool,
     /// A coverage compile counts a line covered when code it emits runs:
-    /// LIR keeps the code of each line instead of folding it away.
+    /// the body takes LIR, and LIR keeps the code of each line instead of
+    /// folding it away.
     pub keep_lines: bool,
     /// Implicit + explicit leave / stop sites (I7 / C3). Not archive-encoded.
     pub deopt_sites: Vec<DeoptSite>,
