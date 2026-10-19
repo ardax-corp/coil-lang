@@ -581,6 +581,8 @@ fn keep_memory_order(func: &MirFunc, tree: &mut [bool], fused: &[bool]) {
     for block in &func.blocks {
         let insts = &block.insts;
         let at: HashMap<ValueId, usize> = insts.iter().enumerate().map(|(k, i)| (i.dest(), k)).collect();
+        // Each clear's zeroed values, once walked.
+        let mut walked: HashMap<usize, Vec<ValueId>> = HashMap::new();
         loop {
             let inline = |v: ValueId, tree: &[bool]| tree[v.index()] || fused[v.index()];
             // Instruction indices in the order emission reaches them.
@@ -615,12 +617,25 @@ fn keep_memory_order(func: &MirFunc, tree: &mut [bool], fused: &[bool]) {
             // it (`let j = join(s); clear s; return j` would read the
             // zeroed slot): that user keeps its slot. The same holds for
             // the slots of the value's copy sources (`emit::source_clears`).
+            // Only a clear with an earlier op emitted after it walks its
+            // value's sources: a chain of joins walked each clear's back to
+            // its start (#1502).
+            let mut later_min = vec![usize::MAX; order.len() + 1];
+            for i in (0..order.len()).rev() {
+                later_min[i] = later_min[i + 1].min(order[i]);
+            }
             let stale = order.iter().enumerate().find_map(|(i, &c)| {
                 let MirInst::ClearWord { value, .. } = &insts[c] else {
                     return None;
                 };
-                let mut zeroed = sources.of(func, *value, |_| false);
-                zeroed.push(*value);
+                if later_min[i + 1] >= c {
+                    return None;
+                }
+                let zeroed = walked.entry(c).or_insert_with(|| {
+                    let mut zeroed = sources.of(func, *value, |_| false);
+                    zeroed.push(*value);
+                    zeroed
+                });
                 order[i + 1..]
                     .iter()
                     .find(|&&k| k < c && insts[k].operands().iter().any(|o| zeroed.contains(o)))
