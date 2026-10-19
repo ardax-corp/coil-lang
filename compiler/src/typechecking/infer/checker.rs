@@ -119,6 +119,7 @@ impl Checker {
             for_in_pin_spans: HashSet::new(),
             fn_effects: HashMap::new(),
             program_fn_effects: HashMap::new(),
+            program_fn_params: HashMap::new(),
             program_method_effects: HashMap::new(),
             pure_fn_names: HashSet::new(),
             length_stability: Default::default(),
@@ -8606,6 +8607,9 @@ impl Checker {
         call_id: Option<NodeId>,
         range: Range<usize>,
     ) -> Ty {
+        if let Some(name) = name {
+            self.record_under_application(name, arg_tys.len(), &range);
+        }
         let mut current = fun_ty.clone();
         // Nullary `f()` calls apply the implicit `unit` parameter (see
         // `seal_nullary_fun_ty` on function declarations).
@@ -8724,6 +8728,53 @@ impl Checker {
             }
         }
         current
+    }
+
+    /// A call of the function or method `name` with fewer arguments than
+    /// its fixed parameters (counting a method's receiver) is a partial
+    /// application over the given prefix (#1231, #1361): record its fill
+    /// mask, as named holes record theirs, so codegen does not decide it
+    /// again. Rest, overloaded and extern functions never under-apply.
+    fn record_under_application(&mut self, name: &str, argc: usize, range: &Range<usize>) {
+        let key = (range.start, range.end);
+        if self.partial_fills_by_span.contains_key(&key)
+            || self.fn_has_rest(name)
+            || self.is_overloaded(name)
+            || self.extern_fns.contains(name)
+        {
+            return;
+        }
+        let receiver = name.rsplit_once("::").is_some_and(|(owner, method)| {
+            self.methods.get(owner).is_some_and(|m| m.contains_key(method))
+                && !self.static_methods.get(owner).is_some_and(|s| s.contains(method))
+        });
+        let declared = match self.fn_param_names.get(name) {
+            Some(params) => (params.len(), false),
+            None => match self.program_fn_params_of(name) {
+                Some(declared) => declared,
+                None => return,
+            },
+        };
+        if declared.1 {
+            return;
+        }
+        let fixed = declared.0 + usize::from(receiver);
+        if argc < fixed && fixed <= 64 {
+            let mask = 1u32.checked_shl(argc as u32).map_or(u32::MAX, |bit| bit - 1);
+            self.partial_fills_by_span.insert(key, mask);
+        }
+    }
+
+    /// [`Self::program_fn_params`] of `name` as written at a call: a
+    /// qualified name as it is, a bare one through its `use`.
+    fn program_fn_params_of(&self, name: &str) -> Option<(usize, bool)> {
+        if let Some(&declared) = self.program_fn_params.get(name) {
+            return Some(declared);
+        }
+        let info = self.def_interner.info(self.def_id_of(name)?)?;
+        let module = self.def_interner.module_path(info.module)?;
+        let key = if module.is_empty() { info.name.clone() } else { format!("{module}::{}", info.name) };
+        self.program_fn_params.get(&key).copied()
     }
 
     /// The `(Vec element, array element)` pair when an extern `Vec<T>`
