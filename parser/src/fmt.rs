@@ -3430,12 +3430,16 @@ fn main() { return; }
         // #1505: no space is allowed between a literal (or a `.field`) and
         // the `.` after it, so a chain must not break there.
         let long = "x".repeat(110);
+        let chain = ".show().len()".repeat(7);
         for line in [
             format!("    let b = t.len() == \"{long}\".len();"),
             format!("    assert!(t.len() == \"{long}\".len());"),
-            format!("    let n = some_rather_long_name_for_a_value_here.len() + 0 == 1234567.show().len();"),
-            format!("    let n = holder_with_long_name.field_with_a_rather_long_name.len() + holder.field_name.len();"),
-            format!("    let n = a.long_field_name_one.long_field_name_two.long_field_name_three.long_field_name_four;"),
+            format!("    let n = 1234567{chain};"),
+            format!("    let n = 12345.5{chain};"),
+            format!("    let n = (\"a\"){chain};"),
+            format!("    let n = x?{chain};"),
+            format!("    let n = holder.field_with_a_rather_long_name{chain};"),
+            format!("    let n = a.long_field_name_one.long_field_name_two.long_field_name_three.f{chain};"),
         ] {
             let src = format!("fn main() {{\n{line}\n}}\n");
             let once = format_source(&src).unwrap_or_else(|e| panic!("{src}: {e:?}"));
