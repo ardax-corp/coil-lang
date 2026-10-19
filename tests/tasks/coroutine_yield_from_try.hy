@@ -1,5 +1,6 @@
 // Coroutine bodies lower through HIR: statement and receiving `yield`,
 // `yield from`, `?` inside a gen fn, and `block_on`.
+use task::{block_on};
 use tests::assert;
 
 gen fn count(int n) {

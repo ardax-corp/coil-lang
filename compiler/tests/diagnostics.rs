@@ -313,15 +313,37 @@ fn main() {
 }
 
 #[test]
-fn block_on_drive_wait_ready_warn_deprecated() {
+fn bare_block_on_names_task_import() {
     let msgs = check_messages(
         r#"
-use io::{drive, wait_ready};
 gen fn one() -> int {
     return 1;
 }
 fn main() {
     let _ = block_on(one());
+}
+"#,
+    );
+    assert!(
+        msgs.iter().any(|m| {
+            m.code() == Some(ErrorCode::UnknownFunction)
+                && m.help()
+                    .as_ref()
+                    .is_some_and(|h| h.contains("use task::{block_on};"))
+        }),
+        "expected E0101 naming `use task::{{block_on}};`, got: {:?}",
+        msgs.iter()
+            .map(|m| (m.code(), m.message(), m.help()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn drive_wait_ready_warn_deprecated() {
+    let msgs = check_messages(
+        r#"
+use io::{drive, wait_ready};
+fn main() {
     let _ = drive();
     let _ = wait_ready();
 }
@@ -332,7 +354,7 @@ fn main() {
         .filter(|m| m.code() == Some(ErrorCode::Deprecated))
         .map(|m| m.message().to_string())
         .collect();
-    for name in ["block_on", "drive", "wait_ready"] {
+    for name in ["drive", "wait_ready"] {
         assert!(
             deprecated.iter().any(|m| m.contains(&format!("`{name}`"))),
             "expected Deprecated (E0129) for {name}, got: {:?}",
