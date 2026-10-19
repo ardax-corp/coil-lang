@@ -6,12 +6,12 @@ use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};
 
-#[derive(Hash, Show, String)]
+#[derive(Hash, Show)]
 enum Inner {
     A(int),
 }
 
-#[derive(Hash, Show, String)]
+#[derive(Hash, Show)]
 enum Outer {
     Wrap(Inner),
     Label { name: string, flag: bool },
