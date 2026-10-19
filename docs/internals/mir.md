@@ -134,8 +134,30 @@ float div / cmp / unary / cast into a preheader. A trapping op (int
 pure call that runs on every iteration moves behind a copy of the loop
 test instead, so a loop that never runs never traps. Lengths and
 element or field reads move only out of loops that cannot resize or
-write the heap (`effects::may_resize` / `writes_heap`). A second CSE run
+write that kind of heap word (`effects::may_resize` / `writes_elements` /
+`writes_fields`). A second CSE run
 merges hoisted consts. Hit bench: `examples/perf/mir_licm_divf.hy`.
+
+The heap summary has two kinds (#1559): elements (`StoreIndex`, which
+the VM applies only to `Object::Array`) and fields (`HeapFieldStore`,
+only `Object::Instance`; `HeapFieldLoad` reads instance slots and enum
+payloads, `Index` arrays and tuples). An element store therefore keeps
+no field read in its loop, and a field store no element read; CSE kills
+a `Field` key only on a field store and an `Index` key only on an
+element store. A store still kills every read of its own kind, whatever
+object it names, so aliases stay sound; calls, natives and appends that
+may run effects count as both. The `apply` loop of
+`examples/perf/licm_field_past_element_store.hy`
+(`out[i] = xs[i] * c.scale + c.bias`) now loads both fields in the
+preheader. With both fields
+invariant the loop also takes the vectorizer (`VLoad` / `VFma` /
+`VStore`). `COIL_AUTO_PAR=0 coil compile`, release, 2026-10-19, 11
+interleaved runs (100 calls over 100,000 elements, setup included):
+
+| | median | min |
+|---|---|---|
+| before | 0.837 s | 0.756 s |
+| after | 0.208 s | 0.151 s |
 
 Loops and GVN/PRE ask dominance of `licm::Dominators` (#1518): the
 immediate-dominator tree (Cooper, Harvey and Kennedy, over reverse
