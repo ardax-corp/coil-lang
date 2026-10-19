@@ -257,6 +257,7 @@ impl Checker {
             lambda_uncaptured_outer: None,
             lambda_rebound_statics: HashSet::new(),
             partial_fills_by_span: std::collections::HashMap::new(),
+            named_arg_slots_by_span: std::collections::HashMap::new(),
             partial_filled_tys_by_span: std::collections::HashMap::new(),
             current_assoc_projections: None,
             open_assoc_projections: HashMap::new(),
@@ -1541,6 +1542,7 @@ impl Checker {
         self.selected_overloads.clear();
         self.overload_decl_by_span.clear();
         self.partial_fills_by_span.clear();
+        self.named_arg_slots_by_span.clear();
         self.partial_filled_tys_by_span.clear();
         self.lambda_uncaptured_outer = None;
         self.call_site_dicts.clear();
@@ -3970,6 +3972,9 @@ impl Checker {
         let mut filled = vec![false; names.len()];
         let mut next = 0usize;
         let mut seen_named = false;
+        let key = (range.start, range.end);
+        let errors_before = self.messages.len();
+        let mut arg_slots = Vec::with_capacity(provided.len());
         for arg in provided {
             let arg_range = arg.0.into_range();
             let (slot, value) = match arg.1.as_ref() {
@@ -4016,6 +4021,7 @@ impl Checker {
                 }
             };
             let aty = self.infer(arg);
+            arg_slots.extend(slot);
             match slot {
                 Some(k) => {
                     filled[k] = true;
@@ -4039,6 +4045,12 @@ impl Checker {
                 format!("Constructor `{class_name}` is missing field {}", missing.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ")),
                 range,
                 Some("pass one argument per class field".to_string()),
+            );
+        }
+        if self.no_errors_since(errors_before) {
+            self.named_arg_slots_by_span.insert(
+                key,
+                NamedArgSlots { slots: arg_slots, params: names.len(), rest: false },
             );
         }
         apply_ty_prune(&self.subst, &result_ty)
@@ -4725,6 +4737,7 @@ impl Checker {
                 }
                 let fqn = format!("{}::{}", owner, method);
                 let user_argc = method_args.len();
+                let mut candidate = None;
                 let scheme = if self.is_overloaded(&fqn) {
                     let prelim_tys: Vec<Ty> = method_args
                         .iter()
@@ -4745,7 +4758,9 @@ impl Checker {
                                 &range,
                                 (c.fixed_arity, c.is_rest, c.id),
                             );
-                            c.scheme
+                            let scheme = c.scheme.clone();
+                            candidate = Some(c);
+                            scheme
                         }
                         OverloadSelect::Ambiguous => {
                             return self.error_with_help(
@@ -4780,8 +4795,11 @@ impl Checker {
                 };
                 let (fun_ty, constraints, _mapping) = self.instantiate_scheme_mapped(&scheme);
                 let mut arg_tys = vec![recv_ty];
-                let (tys, ordered_exprs) =
-                    self.infer_and_reorder_call_args(&fqn, method_args, &range);
+                // Named arguments match the picked overload's parameters.
+                let (tys, ordered_exprs) = match &candidate {
+                    Some(c) => self.infer_and_reorder_call_args_with_candidate(&fqn, c, method_args, &range),
+                    None => self.infer_and_reorder_call_args(&fqn, method_args, &range),
+                };
                 arg_tys.extend(tys);
                 // Align exprs with `[self, …args]` for coerce_or_unify
                 // (byte / string literal coercion on method args).
@@ -13779,6 +13797,17 @@ impl Checker {
         self.overload_decl_by_span.get(&(start, end)).copied()
     }
 
+    /// No error was reported after the first `before` messages.
+    fn no_errors_since(&self, before: usize) -> bool {
+        self.messages.iter().skip(before).all(|m| *m.kind() != reporting::MessageKind::ERROR)
+    }
+
+    /// Where the arguments of the call or `new` at this span go, when some
+    /// are named (see [`NamedArgSlots`]).
+    pub fn named_arg_slots(&self, start: usize, end: usize) -> Option<&NamedArgSlots> {
+        self.named_arg_slots_by_span.get(&(start, end))
+    }
+
     /// Fill bitmask for a partial-application call site, if any.
     pub fn partial_fill_at(&self, start: usize, end: usize) -> Option<u32> {
         self.partial_fills_by_span.get(&(start, end)).copied()
@@ -14008,6 +14037,8 @@ impl Checker {
         let mut rest_whole: Option<(Ty, Output)> = None;
         let mut next_pos = 0usize;
         let mut seen_named = false;
+        let errors_before = self.messages.len();
+        let mut arg_slots = Vec::with_capacity(args.len());
 
         for arg in args {
             match arg.1.as_ref() {
@@ -14048,6 +14079,7 @@ impl Checker {
                                 ));
                             } else {
                                 slots[idx] = Some((ty, value));
+                                arg_slots.push(idx);
                             }
                         }
                         None => {
@@ -14109,12 +14141,14 @@ impl Checker {
                             self.messages.push(msg);
                         }
                         slots[next_pos] = Some((ty, arg.clone()));
+                        arg_slots.push(next_pos);
                         next_pos += 1;
                     } else if has_rest
                         && self.vec_rest_spreads.contains(&(arg.0.start, arg.0.end))
                     {
                         if rest_elems.is_empty() {
                             rest_whole = Some((ty, arg.clone()));
+                            arg_slots.push(fixed_count);
                         } else {
                             let _ = self.error_with_help(
                                 ErrorCode::GenericTypeError,
@@ -14128,6 +14162,7 @@ impl Checker {
                         // Trailing positionals after fixed (and after named
                         // fixed args) pack into the rest array.
                         rest_elems.push((ty, arg.clone()));
+                        arg_slots.push(fixed_count);
                         next_pos += 1;
                     } else if seen_named {
                         let mut msg = Message::error(
@@ -14151,6 +14186,13 @@ impl Checker {
                     }
                 }
             }
+        }
+
+        if has_named && arg_slots.len() == args.len() && self.no_errors_since(errors_before) {
+            self.named_arg_slots_by_span.insert(
+                (range.start, range.end),
+                NamedArgSlots { slots: arg_slots, params: fixed_count, rest: has_rest },
+            );
         }
 
         // Positional-only under-application of fixed params: do not

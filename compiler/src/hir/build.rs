@@ -1987,7 +1987,9 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
     }
 
     /// Named arguments run in the order they are written (#1365): the
-    /// call shapes them into parameter or field order later, so each
+    /// call shapes them into the parameter or field order the checker
+    /// matched ([`NamedArgSlots`](crate::typechecking::infer::NamedArgSlots))
+    /// later, so when that order differs from the source order each
     /// argument that is not a literal is read into a temp first, in source
     /// order. Returns the `let`s to run ahead of the call.
     fn named_args_in_source_order(&mut self, b: &mut BodyBuilder, span: Span, args: &mut [HirId]) -> Vec<HirId> {
@@ -2010,6 +2012,10 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             || args.iter().any(|&a| matches!(b.body.exprs[a.0 as usize].kind, HirKind::Spread(_)))
             || args.iter().filter(|&&a| !lit(b, value(b, a))).count() < 2
             || args.iter().all(|&a| pure(b, a))
+            || self
+                .checker
+                .named_arg_slots(span.0, span.1)
+                .is_some_and(|record| record.slots.is_sorted())
         {
             return Vec::new();
         }
