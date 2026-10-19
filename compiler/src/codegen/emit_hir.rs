@@ -6308,6 +6308,14 @@ impl Compiler {
                 callee: Callee::Value(f),
                 args,
             } => {
+                // A closure a generic call returned: a mono clone's, not
+                // the shared body's (#1527; its boxed ABI, #1532).
+                if !lower::polyfn_callee(hir, &self.checker, *f)
+                    && let Some(init) = lower::generic_returned_closure(hir, &self.checker, *f)
+                    && !emit.plan.calls.get(&init.0).is_some_and(|call| call.mono)
+                {
+                    return Err("callee-value");
+                }
                 // A `PolyFn` call: no dictionary forwarded from a generic
                 // frame, and no type parameter nested in the callee's
                 // signature (its shared body would box `T` inside the
