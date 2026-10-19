@@ -84,7 +84,7 @@ pub struct HirCallSite {
     pub pair_args: Vec<bool>,
     /// Whether the result is two words.
     pub pair_ret: bool,
-    /// A `gen fn` / `async fn` call: `MakeCoro`, its result the handle.
+    /// A `gen fn` call: `MakeCoro`, its result the handle.
     pub coro: bool,
     /// The result is a niche `Option` / `Result` the callee returns boxed.
     pub boxed_ret: bool,
