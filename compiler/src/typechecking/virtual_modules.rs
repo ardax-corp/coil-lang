@@ -97,8 +97,6 @@ pub enum PreludeFn {
     Char,
     /// First code unit of a `string` as `Result<byte, string>`.
     Ord,
-    /// Drive a coroutine to completion: `block_on(coro) -> Y`.
-    BlockOn,
     Sin,
     Cos,
     Tan,
@@ -130,7 +128,6 @@ impl PreludeFn {
             Self::Diff => "diff",
             Self::Char => "char",
             Self::Ord => "ord",
-            Self::BlockOn => "block_on",
             Self::Sin => "sin",
             Self::Cos => "cos",
             Self::Tan => "tan",
@@ -162,7 +159,6 @@ impl PreludeFn {
             "diff" => Some(Self::Diff),
             "char" => Some(Self::Char),
             "ord" => Some(Self::Ord),
-            "block_on" => Some(Self::BlockOn),
             "sin" => Some(Self::Sin),
             "cos" => Some(Self::Cos),
             "tan" => Some(Self::Tan),
@@ -755,9 +751,6 @@ impl VirtualModules {
                 },
                 BuiltinExport::Fn {
                     kind: PreludeFn::Char,
-                },
-                BuiltinExport::Fn {
-                    kind: PreludeFn::BlockOn,
                 },
             ],
         );
