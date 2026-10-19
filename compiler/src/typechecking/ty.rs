@@ -642,8 +642,10 @@ pub fn strip_readonly(ty: &Ty) -> &Ty {
 }
 
 /// Whether a `const` binding should emit a shallow-immutability warning.
+/// A `readonly` value is frozen all the way down (#1552).
 pub fn is_shallow_const_mutable(ty: &Ty) -> bool {
-    match strip_readonly(ty) {
+    match ty {
+        Ty::Readonly(_) => false,
         Ty::Array { .. } | Ty::Record { .. } => true,
         Ty::Con(name) => {
             name != "int"
