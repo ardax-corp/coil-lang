@@ -12141,7 +12141,9 @@ impl Checker {
     /// arguments: each projection variable of `scheme` whose owner `vars`
     /// binds to a type with a ground instance, mapped to that instance's
     /// associated type (#1187). The declaration's projection stays open, so
-    /// each clone resolves its own.
+    /// each clone resolves its own. The owner may be a variant's
+    /// constructor type (a clone keyed by `Option::Some(7)`'s type), which
+    /// unifies with the instance's head rather than equalling it (#1469).
     pub fn mono_assoc_projection_tys(
         &self,
         scheme: &Scheme,
@@ -12175,7 +12177,7 @@ impl Checker {
                 }
                 let Some(value) = self
                     .generics
-                    .find_instance(&c.class, std::slice::from_ref(owner_ty))
+                    .find_instance_relaxed(&c.class, std::slice::from_ref(owner_ty))
                     .and_then(|inst| inst.assoc_tys.get(assoc))
                 else {
                     continue;
