@@ -745,16 +745,23 @@ fn main() {
 Adds trait constraints to a generic function: `where Trait<A, B>`.
 
 It comes after the return type and is needed for constraints with several
-type parameters; single-parameter bounds are usually written inline as
-`T: Num`.
+type parameters. A single-parameter bound on the function's own parameter is
+written inline as `T: Num`; `where Num<T>` there is an error. A method can
+still use `where Num<T>` to bound a parameter of its `impl`.
 
 ```coil
 fn convert<A, B>(A x) -> B where Into<A, B> {
     return into(x);
 }
 
-fn double<T>(T x) -> T where Num<T> {
-    return x + x;
+class Cell<T> {
+    pub v: T,
+}
+
+impl Cell<T> {
+    pub fn doubled() -> T where Num<T> {
+        return self.v + self.v;
+    }
 }
 ```
 

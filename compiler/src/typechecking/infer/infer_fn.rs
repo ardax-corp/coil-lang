@@ -293,6 +293,42 @@ impl Checker {
         Self::seal_nullary_fun_ty(fun_ty, arg_tys.len(), false)
     }
 
+    /// A single-parameter bound on the function's own type parameter is
+    /// written inline, `T: Num`; `where Num<T>` is kept for multi-parameter
+    /// traits and for a method bounding its impl's parameter, which it
+    /// cannot rebind.
+    fn reject_unary_where_on_own_param(
+        &mut self,
+        wc: &parser::ast::WhereConstraint<'_>,
+        type_params: &[TypeParam<'_>],
+    ) {
+        let [arg] = wc.args.as_slice() else {
+            return;
+        };
+        let Expression::Type(name) = arg.1.as_ref() else {
+            return;
+        };
+        let Some(tp) = type_params.iter().find(|tp| tp.name == *name) else {
+            return;
+        };
+        let mut bounds: Vec<&str> = tp.bounds.to_vec();
+        bounds.push(wc.class);
+        let mut msg = Message::error(
+            ErrorCode::GenericTypeError,
+            format!(
+                "a single-parameter bound is written `{}: {}`, not `where {}<{}>`",
+                name, wc.class, wc.class, name
+            ),
+            arg.0.into_range(),
+        );
+        msg.with_help(format!(
+            "drop it from `where` and bound the parameter: `<{}: {}>`",
+            name,
+            bounds.join(" + ")
+        ));
+        self.messages.push(msg);
+    }
+
     pub(super) fn infer_function(&mut self, args: InferFunctionArgs<'_>) -> Ty {
         let InferFunctionArgs {
             name,
@@ -356,6 +392,7 @@ impl Checker {
         }
         // `where Class<T1, T2>` constraints (parsed after returns).
         for wc in where_constraints {
+            self.reject_unary_where_on_own_param(wc, type_params);
             let args: Vec<Ty> = wc.args.iter().map(|a| self.parse_type_name(a)).collect();
             param_constraints.push(Constraint {
                 class: self.canonical_trait_name(wc.class),
