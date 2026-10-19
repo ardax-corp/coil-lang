@@ -4497,15 +4497,26 @@ impl Compiler {
             }
         };
         // A niche enum is the instance entry's own word when its declared
-        // type there lays out the same.
-        let own_niche = |id: HirId, declared: Option<Ty>| {
+        // type there lays out the same. A generic instance's shared entry
+        // declares an argument open (`impl Sz for Option<T>`), as its boxed
+        // enum object, which the call passes; the instance's clone at the
+        // call's types, which direct MIR calls instead, takes the niche
+        // word (#1579).
+        let own_niche = |id: HirId, declared: Option<Ty>, arg: bool| {
             let ty = Self::hir_ty(hir, id).ok_or("callee-signature")?;
             let layout = self.value_layout(ty);
             let declared = declared.ok_or("callee-trait")?;
-            if !(layout.is_niche_option() || layout.is_niche_result() || layout.is_niche_unit_result())
-                || Self::ty_has_var(&declared)
-                || self.value_layout(&declared) != layout
-            {
+            if !(layout.is_niche_option() || layout.is_niche_result() || layout.is_niche_unit_result()) {
+                return Err("callee-trait");
+            }
+            if Self::ty_has_var(&declared) {
+                return if arg && self.value_layout(&declared) == ValueLayout::Boxed {
+                    Ok(ValueLayout::Boxed)
+                } else {
+                    Err("callee-trait")
+                };
+            }
+            if self.value_layout(&declared) != layout {
                 return Err("callee-trait");
             }
             Ok(layout)
@@ -4517,12 +4528,12 @@ impl Compiler {
             .enumerate()
             .map(|(i, &arg)| match sig.and_then(|s| s.params.get(i).copied().flatten()) {
                 Some(layout) => Ok(layout),
-                None => word(arg).or_else(|_| own_niche(arg, declared_params.as_ref().and_then(|p| p.get(i).cloned()))),
+                None => word(arg).or_else(|_| own_niche(arg, declared_params.as_ref().and_then(|p| p.get(i).cloned()), true)),
             })
             .collect::<Result<Vec<_>, _>>()?;
         let ret = match sig.and_then(|s| s.ret).map_or_else(|| word(call), Ok) {
             Ok(ret) => ret,
-            Err(_) => own_niche(call, self.checker.fn_return_ty(fqn))?,
+            Err(_) => own_niche(call, self.checker.fn_return_ty(fqn), false)?,
         };
         Ok((params, ret))
     }
