@@ -5775,12 +5775,10 @@ impl Checker {
                 (fun_ty, constraints, mapping, Some(s))
             }
             None => {
-                let help = VirtualModules::removed_prelude_fn(&ident).map(str::to_string);
-                return self.error_with_help(
+                return self.error(
                     ErrorCode::UnknownFunction,
                     format!("Cannot find function `{}`", ident),
                     range,
-                    help,
                 );
             }
         };

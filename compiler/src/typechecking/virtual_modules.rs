@@ -1086,15 +1086,6 @@ impl VirtualModules {
 
     /// True when this `use` targets a virtual module (concrete or glob).
     ///
-    /// Help for a call to a removed prelude function (`rem` was auto-imported).
-    pub fn removed_prelude_fn(name: &str) -> Option<&'static str> {
-        match name {
-            "pow" => Some(REMOVED_POW_HELP),
-            "rem" => Some(REMOVED_REM_HELP),
-            _ => None,
-        }
-    }
-
     /// A name a virtual module no longer exports: the help naming its
     /// replacement, for the `use` that still imports it.
     pub fn removed_item(path: &[String], name: &str) -> Option<&'static str> {
