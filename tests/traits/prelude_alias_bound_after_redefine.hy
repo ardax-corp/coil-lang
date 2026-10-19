@@ -1,7 +1,7 @@
 // #1345: after `use prelude::ops::Eq as PreludeEq;` a module's own `trait Eq`
 // and the builtin both stay usable: the alias still names the builtin as a
-// bound, and the short name is the module's trait in bounds, `where`
-// clauses and impls.
+// bound, and the short name is the module's trait in bounds (on functions
+// and impl blocks) and impls.
 use tests::assert;
 use prelude::ops::Eq as PreludeEq;
 
@@ -32,8 +32,8 @@ class Pair<T> {
     pub b: T,
 }
 
-impl Pair<T> {
-    pub fn where_same() -> bool where Eq<T> {
+impl Pair<T: Eq> {
+    pub fn block_same() -> bool {
         return self.a.same(self.b);
     }
 }
@@ -46,7 +46,7 @@ test("the alias is still the builtin bound") {
 test("the short name is the module's trait") {
     assert!(all_same(new Coin(1), new Coin(1)));
     assert!(!all_same(new Coin(1), new Coin(2)));
-    assert!(new Pair(new Coin(3), new Coin(3)).where_same());
+    assert!(new Pair(new Coin(3), new Coin(3)).block_same());
 }
 
 test("builtin == next to the module's trait") {

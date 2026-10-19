@@ -1,6 +1,6 @@
 // #1209: `use prelude::ops::Eq as PreludeEq;` names the builtin `Eq`, so the
-// alias works as a generic bound (and in a method's `where` clause on its
-// impl's parameter).
+// alias works as a generic bound, on a function or on an impl block's
+// parameter.
 use tests::assert;
 use prelude::ops::{Eq as PreludeEq, Ord as Ordered};
 
@@ -13,8 +13,8 @@ class Pair<T> {
     pub b: T,
 }
 
-impl Pair<T> {
-    pub fn smaller() -> T where Ordered<T> {
+impl Pair<T: Ordered> {
+    pub fn smaller() -> T {
         if self.a < self.b {
             return self.a;
         }
@@ -27,6 +27,6 @@ test("an aliased builtin trait is a bound") {
     assert!(!both_equal("a", "b"));
 }
 
-test("an aliased builtin trait in a where clause") {
+test("an aliased builtin trait bounds an impl block") {
     assert!(new Pair(4, 2).smaller() == 2);
 }

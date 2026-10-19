@@ -1,7 +1,7 @@
 // Method-level type parameters with trait bounds on inherent `impl`
 // methods: the bound is in scope in the body and dispatched from the call
-// site, for instance, static and multi-parameter forms (#523). A method's
-// `where` clause bounds its impl's parameter.
+// site, for instance, static and multi-parameter forms (#523). A bound on
+// the impl's parameter goes on a separate bounded impl block.
 use tests::assert;
 
 class Val {
@@ -64,8 +64,8 @@ class Holder<T> {
     pub v: T,
 }
 
-impl Holder<T> {
-    pub fn tagged() -> int where Tag<T> {
+impl Holder<T: Tag> {
+    pub fn tagged() -> int {
         return self.v.tag();
     }
 }
@@ -95,7 +95,7 @@ test("two method type params with bounds") {
     assert!(new Codec(0).both(new Point(0), new Point(0), new Val(4)) == 104);
 }
 
-test("where clause on a method bounds the impl's parameter") {
+test("a bounded impl block bounds the impl's parameter") {
     assert!(new Holder(new Point(1)).tagged() == 100);
 }
 
