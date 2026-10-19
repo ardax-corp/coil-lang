@@ -602,15 +602,13 @@ fn bind_from_signature(
     checker: &Checker,
     ty_of: &dyn Fn(&Output) -> Option<Ty>,
 ) {
-    let (Some(vars), Some(params), Some(ret)) = (
+    // A returned closure's parameters are the result's (#1590).
+    let (Some(vars), Some((params, ret))) = (
         checker.fn_type_param_vars(fn_name, subst.len()),
-        checker.fn_param_tys(fn_name),
-        checker.fn_return_ty(fn_name),
+        checker.fn_call_sig(fn_name, args.len()),
     ) else {
         return;
     };
-    // A function of no parameters is typed `unit -> T`.
-    let params = if args.is_empty() && params == [Ty::Con("unit".into())] { Vec::new() } else { params };
     if params.len() != args.len() {
         return;
     }
