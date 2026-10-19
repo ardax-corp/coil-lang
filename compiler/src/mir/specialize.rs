@@ -647,16 +647,22 @@ fn lir_tail(
     let entry = labels.first;
     // Every label leading the body binds the entry; a self call may name any.
     let aliases: Vec<Label> = labels.head.iter().copied().filter(|&l| Some(l) != entry).collect();
-    let (remap, deopt) = super::emit_lir::lir_sidecars(&func);
+    capture_mir(name, "lir", &func);
+    // Emission plans the frame once; the sidecars read it (#1502).
+    let (mut out, lir_frame) = match super::emit_lir::emit_lir_framed(&func, entry, &aliases, pool, has_alloc) {
+        Ok(o) => o,
+        Err(e) => {
+            let (remap, deopt) = super::emit_lir::lir_sidecars(&func);
+            side.debug_slot_remap = remap;
+            side.deopt = Some(deopt);
+            return refuse(format!("emit: {e}"));
+        }
+    };
+    let (remap, deopt) = lir_frame.sidecars(&func);
     side.debug_slot_remap = remap;
     side.deopt = Some(deopt);
-    capture_mir(name, "lir", &func);
-    let mut out = match super::emit_lir::emit_lir_with_aliases(&func, entry, &aliases, pool, has_alloc) {
-        Ok(o) => o,
-        Err(e) => return refuse(format!("emit: {e}")),
-    };
     if let Some(pad) = func.cleanup.as_deref() {
-        let (label, frame, ops) = match emit_cleanup_pad(&func, pad, &out, pool) {
+        let (label, frame, ops) = match emit_cleanup_pad(lir_frame.home_frame(), pad, &out, pool) {
             Ok(p) => p,
             Err(why) => return refuse(why),
         };
@@ -670,12 +676,11 @@ fn lir_tail(
 /// label (past every label `body` names), the frame words of `func` it
 /// reads, and its ops. Its own registers sit past that frame.
 fn emit_cleanup_pad(
-    func: &crate::mir::MirFunc,
+    (base, frame): (u8, u32),
     pad: &crate::mir::MirFunc,
     body: &[IlOp],
     pool: &mut Vec<u64>,
 ) -> Result<(Label, u32, Vec<IlOp>), String> {
-    let (base, frame) = super::emit_lir::lir_home_frame(func).ok_or("cleanup pad frame")?;
     let mut pad = pad.clone();
     pad.home_base = Some(base);
     let words: Vec<crate::mir::ValueId> = (0..frame)

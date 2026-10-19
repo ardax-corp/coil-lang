@@ -51,6 +51,40 @@ pub fn emit_lir_with_aliases(
     pool: &mut Vec<u64>,
     across_alloc: bool,
 ) -> Result<Vec<IlOp>, LowerError> {
+    emit_lir_framed(func, entry_label, aliases, pool, across_alloc).map(|(out, _)| out)
+}
+
+/// The frame LIR emission gave a body: what its sidecars and its cleanup
+/// pad read, without planning the body again (#1502).
+pub(super) struct LirFrame {
+    regs: Vec<u8>,
+    need_slot: Vec<bool>,
+    /// `(home 0's word, frame words)` ([`lir_home_frame`]).
+    home_frame: (u8, u32),
+}
+
+impl LirFrame {
+    /// [`lir_sidecars`] of the body this frame is of.
+    pub(super) fn sidecars(&self, func: &MirFunc) -> LirSidecars {
+        (
+            super::deopt::debug_slot_remap(func, &self.regs, &self.need_slot),
+            super::deopt::encode_draft(func, &self.regs, &self.need_slot),
+        )
+    }
+
+    pub(super) fn home_frame(&self) -> (u8, u32) {
+        self.home_frame
+    }
+}
+
+/// [`emit_lir_with_aliases`], with the frame it gave the body.
+pub(super) fn emit_lir_framed(
+    func: &MirFunc,
+    entry_label: Option<Label>,
+    aliases: &[Label],
+    pool: &mut Vec<u64>,
+    across_alloc: bool,
+) -> Result<(Vec<IlOp>, LirFrame), LowerError> {
     if func.has_mapped_gc_edge() && !across_alloc {
         return Err(LowerError::Refused(
             "MIR→LIR refuses Alloc/GcBarrier without GC maps (S2c)".into(),
@@ -184,7 +218,9 @@ pub fn emit_lir_with_aliases(
             clears: entry_clears.get(&block.id).map(Vec::as_slice).unwrap_or(&[]),
         })?;
     }
-    Ok(out)
+    let home_frame = (plan.home_base, (u32::from(max_reg) + 1).max(plan.home_slot(0) + func.homes.len() as u32));
+    let EmitPlan { need_slot, .. } = plan;
+    Ok((out, LirFrame { regs, need_slot, home_frame }))
 }
 
 pub(super) type LirSidecars = (std::collections::HashMap<u32, u32>, super::deopt::DraftDeoptMap);
@@ -202,7 +238,9 @@ pub(super) fn lir_sidecars(func: &MirFunc) -> LirSidecars {
 }
 
 /// The frame `func`'s LIR keeps its homes past: `(home 0's word, frame
-/// words)`, `None` when emission would refuse it.
+/// words)`, `None` when emission would refuse it. Emission answers it too
+/// ([`LirFrame::home_frame`]).
+#[cfg(test)]
 pub(super) fn lir_home_frame(func: &MirFunc) -> Option<(u8, u32)> {
     let mut plan = EmitPlan::new(func);
     let (regs, scratch) = assign_needed(func, &mut plan).ok()?;
