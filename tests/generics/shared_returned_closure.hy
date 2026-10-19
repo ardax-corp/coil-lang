@@ -59,6 +59,71 @@ fn scaled<T>(T x, int n) -> T -> int {
     return fn (T v) use (m) => m;
 }
 
+fn shown<T: Show>(T x) -> T -> string {
+    return fn (T v) use (x) => format("%v/%v", x, v);
+}
+
+fn app<V>(V -> V f, V v) -> V {
+    return f(v);
+}
+
+fn relay<U>(U u) -> U {
+    return app(ident(u), u);
+}
+
+fn ground_in<U>(U u) -> int {
+    let k = konst(3);
+    return k(4);
+}
+
+impl Show for A {
+    pub fn show(A self) -> string {
+        return "A";
+    }
+}
+
+impl Show for B {
+    pub fn show(B self) -> string {
+        return "B";
+    }
+}
+
+impl Show for C {
+    pub fn show(C self) -> string {
+        return "C";
+    }
+}
+
+impl Show for D {
+    pub fn show(D self) -> string {
+        return "D";
+    }
+}
+
+impl Show for E {
+    pub fn show(E self) -> string {
+        return "E";
+    }
+}
+
+impl Show for F {
+    pub fn show(F self) -> string {
+        return "F";
+    }
+}
+
+impl Show for G {
+    pub fn show(G self) -> string {
+        return "G";
+    }
+}
+
+impl Show for H {
+    pub fn show(H self) -> string {
+        return "H";
+    }
+}
+
 fn at_k(int -> int f) -> int {
     return f(6);
 }
@@ -127,6 +192,30 @@ fn fill() {
     let sf = scaled(new F(1), 1);
     let sg = scaled(new G(1), 1);
     let sh = scaled(new H(1), 1);
+    let wa = shown(new A(1));
+    let wb = shown(new B(1));
+    let wc = shown(new C(1));
+    let wd = shown(new D(1));
+    let we = shown(new E(1));
+    let wf = shown(new F(1));
+    let wg = shown(new G(1));
+    let wh = shown(new H(1));
+    let ra = relay(new A(1));
+    let rb = relay(new B(1));
+    let rc = relay(new C(1));
+    let rd = relay(new D(1));
+    let re = relay(new E(1));
+    let rf = relay(new F(1));
+    let rg = relay(new G(1));
+    let rh = relay(new H(1));
+    let ga = ground_in(new A(1));
+    let gb = ground_in(new B(1));
+    let gc = ground_in(new C(1));
+    let gd = ground_in(new D(1));
+    let ge = ground_in(new E(1));
+    let gf = ground_in(new F(1));
+    let gg = ground_in(new G(1));
+    let gh = ground_in(new H(1));
 }
 
 test("a shared body's closure through a function parameter") {
@@ -174,4 +263,46 @@ test("a shared body's closure called in place") {
     assert!(ident("a")("b") == "b");
     assert!(maker(2.5)() == 2.5);
     assert!(scaled(true, 3)(false) == 6);
+}
+
+test("a shared body's closure using a bound, from another shared body") {
+    fill();
+    let s = shown(5);
+    assert!(s(6) == "5/6");
+    let t = shown("x");
+    assert!(t("y") == "x/y");
+    assert!(relay(5) == 5);
+    assert!(relay("r") == "r");
+    assert!(relay(new Cell(3)).v == 3);
+    assert!(ground_in(1.5) == 3);
+    assert!(ground_in("z") == 3);
+}
+
+test("a shared body's closure stored, nested, over an enum or a range") {
+    fill();
+    let fs = [konst(1), ident(2), konst(3)];
+    assert!(fs[0](9) + fs[1](9) + fs[2](9) == 13);
+    let mm = maker(maker(8));
+    let m = mm();
+    assert!(m() == 8);
+    let io = ident(Some("a"));
+    assert!(match io(None) {
+        Some(v) => false,
+        None => true,
+    });
+    assert!(match io(Some("b")) {
+        Some(v) => v == "b",
+        None => false,
+    });
+    let oi = ident(Some(4));
+    assert!(match oi(Some(5)) {
+        Some(v) => v == 5,
+        None => false,
+    });
+    let r = maker(1..4);
+    let n = 0;
+    for i in r() {
+        n = n + i;
+    }
+    assert!(n == 6);
 }
