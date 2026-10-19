@@ -1414,67 +1414,10 @@ impl<const S: usize> Machine<S> {
                     charge_step!(true);
                     promise!(self.stack.tell() > value_arity + app_dict_arity);
                     let raw = self.stack.pop();
-
-                    // One probe: a function object, or a raw code pointer.
-                    let fn_obj = if raw.raw().is_null() {
-                        None
-                    } else {
-                        match self.heap.find_object_by_addr(raw.raw() as u64) {
-                            Some(Object::Fn(gc)) => Some(gc),
-                            _ => None,
-                        }
-                    };
-                    let (target, captured) = match &fn_obj {
-                        Some(gc) => {
-                            let base = gc.as_ref();
-                            match &base.dicts {
-                                Some(dicts) => (base.entry as usize, dicts.as_slice()),
-                                None => {
-                                    let (next, flow) =
-                                        self.call_fn_object(base, value_arity, app_dict_arity, ip, &mut sp, code);
-                                    *ip_out = next;
-                                    *sp_out = sp;
-                                    return flow;
-                                }
-                            }
-                        }
-                        None => (raw.as_int() as usize, &[][..]),
-                    };
-
-                    // Merge captured evidence over the application dictionaries
-                    // in place: slot `k` is the captured dictionary, else the
-                    // `k`-th application dictionary. A `PolyFn` callee takes
-                    // exactly its captured slots, none for a `MakePolyFn` of an
-                    // unbounded function: application dictionaries a `forall`
-                    // constraint passes beyond them are dropped, so the callee
-                    // frame opens at its declared height (its precise map
-                    // assumes it, #1530). A raw code pointer takes them all.
-                    let dicts_base = self.stack.tell() - app_dict_arity;
-                    let dict_arity = if fn_obj.is_some() { captured.len() } else { app_dict_arity };
-                    if self.frames.len() >= crate::MAX_CALL_FRAMES
-                        || !self.reserve_operand_from(dicts_base + dict_arity)
-                    {
-                        *ip_out = ip;
-                        *sp_out = sp;
-                        return dispatch::RestFlow::Done(
-                            self.runtime_panic(STACK_OVERFLOW, ip.saturating_sub(1)),
-                        );
-                    }
-                    if fn_obj.is_some() {
-                        self.stack.seek(dicts_base);
-                        for (k, slot) in captured.iter().enumerate() {
-                            let dict = match slot {
-                                Some(Member::Value(v)) => *v,
-                                Some(Member::Object(o)) => Value::from(o.addr()),
-                                None if k < app_dict_arity => self.stack.buffer()[dicts_base + k],
-                                None => Value::default(),
-                            };
-                            self.stack.push(dict);
-                        }
-                    }
-
-                    let callee_sp = self.stack.tell() - (value_arity + dict_arity);
-                    ip = self.enter_frame(callee_sp, target, ip, &mut sp, code);
+                    let (next, flow) = self.call_indirect(raw, value_arity, app_dict_arity, ip, &mut sp, code);
+                    *ip_out = next;
+                    *sp_out = sp;
+                    return flow;
                 }
                 Instruction::MakeFn => {
                     // Stack (bottom → TOS):
@@ -1636,6 +1579,72 @@ impl<const S: usize> Machine<S> {
 }
 
 impl<const S: usize> Machine<S> {
+    /// `CallIndirect` of the function word `raw`, the stack holding
+    /// `[value_args..., app_dicts...]`; the call returns to `ip`. Returns the
+    /// next `ip` and how dispatch continues.
+    fn call_indirect(
+        &mut self,
+        raw: Value,
+        value_arity: usize,
+        app_dict_arity: usize,
+        ip: usize,
+        sp: &mut usize,
+        code: &[Byte],
+    ) -> (usize, dispatch::RestFlow) {
+        // One probe: a function object, or a raw code pointer.
+        let fn_obj = if raw.raw().is_null() {
+            None
+        } else {
+            match self.heap.find_object_by_addr(raw.raw() as u64) {
+                Some(Object::Fn(gc)) => Some(gc),
+                _ => None,
+            }
+        };
+        let (target, captured) = match &fn_obj {
+            Some(gc) => {
+                let base = gc.as_ref();
+                match &base.dicts {
+                    Some(dicts) => (base.entry as usize, dicts.as_slice()),
+                    None => {
+                        return self.call_fn_object(base, value_arity, app_dict_arity, ip, sp, code);
+                    }
+                }
+            }
+            None => (raw.as_int() as usize, &[][..]),
+        };
+
+        // Merge captured evidence over the application dictionaries
+        // in place: slot `k` is the captured dictionary, else the
+        // `k`-th application dictionary. A `PolyFn` callee takes
+        // exactly its captured slots, none for a `MakePolyFn` of an
+        // unbounded function: application dictionaries a `forall`
+        // constraint passes beyond them are dropped, so the callee
+        // frame opens at its declared height (its precise map
+        // assumes it, #1530). A raw code pointer takes them all.
+        let dicts_base = self.stack.tell() - app_dict_arity;
+        let dict_arity = if fn_obj.is_some() { captured.len() } else { app_dict_arity };
+        if self.frames.len() >= crate::MAX_CALL_FRAMES
+            || !self.reserve_operand_from(dicts_base + dict_arity)
+        {
+            return (ip, dispatch::RestFlow::Done(self.runtime_panic(STACK_OVERFLOW, ip.saturating_sub(1))));
+        }
+        if fn_obj.is_some() {
+            self.stack.seek(dicts_base);
+            for (k, slot) in captured.iter().enumerate() {
+                let dict = match slot {
+                    Some(Member::Value(v)) => *v,
+                    Some(Member::Object(o)) => Value::from(o.addr()),
+                    None if k < app_dict_arity => self.stack.buffer()[dicts_base + k],
+                    None => Value::default(),
+                };
+                self.stack.push(dict);
+            }
+        }
+
+        let callee_sp = self.stack.tell() - (value_arity + dict_arity);
+        (self.enter_frame(callee_sp, target, ip, sp, code), dispatch::RestFlow::Continue)
+    }
+
     /// `CallIndirect` on a monomorphic [`ObjFn`]: the stack holds
     /// `[value_args..., app_dicts...]` (the target already popped). An exact
     /// call reuses the arguments in place under the captures; otherwise the
@@ -1738,7 +1747,8 @@ impl<const S: usize> Machine<S> {
         }
 
         // Fixed slots complete. Rest extras → array (including an empty rest
-        // when `is_rest` and no extras); extras to a fixed fn are dropped.
+        // when `is_rest` and no extras); extras to a fixed fn are applied to
+        // its result (below).
         let mut call_args = captured_args;
         if is_rest {
             let rest_val = if remaining_new.len() == 1
@@ -1756,10 +1766,29 @@ impl<const S: usize> Machine<S> {
             call_args.push(rest_val);
         }
 
-        if self.frames.len() >= crate::MAX_CALL_FRAMES
-            || !self.reserve_operand_words(n_captures + call_args.len())
+        // Over-application (#1550): more arguments than a fixed function
+        // takes, as `f(a, b)` on a curried `fn (a) => fn (b) => ..` of type
+        // `A -> B -> C`. The function runs on the ones it takes and its
+        // result is called with the rest, which wait on the stack in a stub
+        // frame that resumes at an over-apply mark (`finish_over_apply`).
+        let extras = if is_rest { &[][..] } else { remaining_new };
+        let stub = usize::from(!extras.is_empty());
+        if self.frames.len() + stub >= crate::MAX_CALL_FRAMES
+            || !self.reserve_operand_words(extras.len() + n_captures + call_args.len())
         {
             return (ip, dispatch::RestFlow::Done(self.runtime_panic(STACK_OVERFLOW, ip.saturating_sub(1))));
+        }
+        let mut return_ip = ip;
+        if !extras.is_empty() {
+            let stub_sp = self.stack.tell();
+            for a in extras {
+                self.stack.push(*a);
+            }
+            self.frames.get_mut().seek(ip);
+            self.frames.setup_current_and_advance(|frame| frame.set(stub_sp));
+            self.over_apply_frames += 1;
+            self.return_bookkeeping = true;
+            return_ip = crate::vm::OVER_APPLY_IP + extras.len();
         }
         // Frame: [captures..., params...]
         for c in &base.captures {
@@ -1769,7 +1798,7 @@ impl<const S: usize> Machine<S> {
             self.stack.push(*a);
         }
         let callee_sp = self.stack.tell() - (n_captures + call_args.len());
-        (self.enter_frame(callee_sp, entry as usize, ip, sp, code), dispatch::RestFlow::Continue)
+        (self.enter_frame(callee_sp, entry as usize, return_ip, sp, code), dispatch::RestFlow::Continue)
     }
 
     /// Push a call frame whose words start at `callee_sp`, returning to `ip`,

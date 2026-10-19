@@ -100,6 +100,35 @@ pub struct HirCallSite {
     /// function value with boxed arguments: `MakeFn` of the adapter's
     /// entry (the label, then the operand) over the value (empty: none).
     pub adapt: Vec<Option<(Label, u32)>>,
+    /// The closure result's adapter, where a shared generic body returns
+    /// it in its boxed ABI: `MakeFn` of the adapter's entry (the label,
+    /// then the operand) over the result (#1532).
+    pub ret_adapt: Option<(Label, u32)>,
+    /// The result's items a shared generic body holds boxed (a bare type
+    /// parameter's value inside the `Option` or tuple it returns),
+    /// unboxed into a rebuilt object (#1549).
+    pub ret_items: Option<HirRetItems>,
+}
+
+/// How a shared generic body's result object is rebuilt with the items
+/// holding its bare type parameters' values unboxed (#1549): the shared
+/// body keeps such a value boxed inside the object, a ground caller reads
+/// the item in its own layout.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HirRetItems {
+    /// A tuple: each item, and the rebuilt tuple's word kinds.
+    Tuple { items: Vec<HirRetItem>, kinds: u8 },
+    /// An enum: each variant to rebuild (its tag, payload items and word
+    /// kinds); any other variant is kept as it is.
+    Enum { variants: Vec<(u32, Vec<HirRetItem>, u8)> },
+}
+
+/// One item of a [`HirRetItems`] object: its ground word, and whether the
+/// shared body holds it boxed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HirRetItem {
+    pub ty: MirTy,
+    pub unbox: bool,
 }
 
 /// A trait method or operator on a bound type parameter in a shared
@@ -4074,7 +4103,7 @@ impl Lower<'_> {
         let (dest, dest_hi) = self.at_expr(id, |l| l.b.ins_call(site.target, words, &abi).map_err(mir))?;
         // A planned tail call: its callee may take this frame when the
         // call's result is what the body returns.
-        if self.inp.tail_calls.contains(&id.0) && site.unbox.is_none() && niche.is_none() {
+        if self.inp.tail_calls.contains(&id.0) && site.unbox.is_none() && niche.is_none() && site.ret_items.is_none() {
             self.b.allow_tail_call(site.target);
         }
         if let HirKind::Call { callee: Callee::Named { name, .. }, .. } = &self.hir.expr(id).kind {
@@ -4092,6 +4121,27 @@ impl Lower<'_> {
                 self.b.mark_steady_call(dest);
             }
         }
+        // A shared generic body's object holding its type parameters'
+        // values boxed, rebuilt with them unboxed (#1549).
+        let dest = match &site.ret_items {
+            Some(items) if site.unbox.is_none() && site.ret_adapt.is_none() && dest_hi.is_none() && self.b.value_ty(dest) == MirTy::HeapRef => {
+                match self.at_expr(id, |l| l.unbox_ret_items(dest, items))? {
+                    Val::V(v) => v,
+                    _ => return Err("call result items".into()),
+                }
+            }
+            Some(_) => return Err("call result items".into()),
+            None => dest,
+        };
+        // A shared generic body's closure, adapted to the call's ground
+        // type (#1532).
+        if let Some((target, operand)) = site.ret_adapt {
+            if site.unbox.is_some() || niche.is_some() || dest_hi.is_some() || ret != MirTy::HeapRef {
+                return Err("call result adapter".into());
+            }
+            let f = self.at_expr(id, |l| l.b.ins_alloc(MirAllocKind::Fn { target, operand, mask: 0 }, vec![dest]).map_err(mir))?;
+            return Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![f]).map_err(mir)?));
+        }
         // A bare type parameter result comes back boxed.
         if let Some(tag) = site.unbox {
             return Ok(Val::V(self.b.ins_unbox(dest, tag, ret).map_err(mir)?));
@@ -4104,6 +4154,52 @@ impl Lower<'_> {
             None if unit => Val::Unit,
             None => Val::V(dest),
         })
+    }
+
+    /// Shared generic body result `obj` rebuilt with the items `items`
+    /// marks unboxed ([`HirRetItems`], #1549).
+    fn unbox_ret_items(&mut self, obj: ValueId, items: &HirRetItems) -> Result<Val, Refusal> {
+        let any = common::UNBOX_ANY_TAG;
+        let item = |l: &mut Self, it: &HirRetItem, v: ValueId| -> Result<ValueId, Refusal> {
+            if it.unbox { l.b.ins_unbox(v, any, it.ty).map_err(mir) } else { Ok(v) }
+        };
+        let read_ty = |it: &HirRetItem| if it.unbox { MirTy::HeapRef } else { it.ty };
+        match items {
+            HirRetItems::Tuple { items, kinds } => {
+                let mut words = Vec::with_capacity(items.len());
+                for (i, it) in items.iter().enumerate() {
+                    let at = self.b.ins_const(MirConst::I64(i as i64)).map_err(mir)?;
+                    let v = self.b.ins_index(obj, at, read_ty(it), false).map_err(mir)?;
+                    words.push(item(self, it, v)?);
+                }
+                let t = self.b.ins_alloc_kinds(MirAllocKind::Tuple, words, *kinds).map_err(mir)?;
+                Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![t]).map_err(mir)?))
+            }
+            HirRetItems::Enum { variants } => {
+                let mut arms = Vec::with_capacity(variants.len() + 1);
+                for (tag, items, kinds) in variants {
+                    let payload = items
+                        .iter()
+                        .enumerate()
+                        .map(|(i, it)| self.b.ins_match_payload(obj, i as u32, read_ty(it)))
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(mir)?;
+                    let (hit, miss) = (self.b.create_block(), self.b.create_block());
+                    self.b.jump_if_match(obj, *tag, payload.clone(), hit, miss).map_err(mir)?;
+                    self.switch(hit);
+                    let mut words = Vec::with_capacity(items.len());
+                    for (it, &v) in items.iter().zip(&payload) {
+                        words.push(item(self, it, v)?);
+                    }
+                    let e = self.b.ins_alloc_kinds(MirAllocKind::Enum { tag: *tag }, words, *kinds).map_err(mir)?;
+                    let e = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![e]).map_err(mir)?;
+                    arms.push((self.cur, Val::V(e)));
+                    self.switch(miss);
+                }
+                arms.push((self.cur, Val::V(obj)));
+                self.join_arms(arms)
+            }
+        }
     }
 
     /// The words of instance dictionary program `ops`: each method's
