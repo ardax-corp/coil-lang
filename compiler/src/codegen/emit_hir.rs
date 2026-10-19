@@ -6248,13 +6248,13 @@ impl Compiler {
                 args,
             } => {
                 // A `PolyFn` call: no dictionary forwarded from a generic
-                // frame, and an enum result stays on the AST (it comes back
-                // as the shared path's object).
+                // frame. An enum result is the call's word, or its object
+                // (#1515).
                 if lower::polyfn_callee(hir, &self.checker, *f) {
                     let e = hir.expr(id);
                     let forwarded = self.forwarded_dicts_hint(e.node, e.span.0, e.span.1).is_some_and(|d| !d.is_empty());
                     let ty = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));
-                    if forwarded || ty.as_ref().is_none_or(|t| lower::classify(&self.checker, t) == Some(ValueClass::Enum) || !crate::hir::layout::ty_is_closed(t)) {
+                    if forwarded || ty.as_ref().is_none_or(|t| !crate::hir::layout::ty_is_closed(t)) {
                         return Err("callee-value");
                     }
                 }
