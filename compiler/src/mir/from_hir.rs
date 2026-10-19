@@ -4418,7 +4418,11 @@ impl Lower<'_> {
         self.raw_host = false;
         let ty = self.expr_ty(id).ok_or("call type")?;
         let unit = is_unit(ty);
-        let ret = if self.inp.pair_tys.contains_key(&id.0) {
+        // An enum of no pair or niche layout (an open `Result<int, E>`
+        // a closure literal returns, #1520) is its object, as `call_poly`.
+        let ret = if self.inp.pair_tys.contains_key(&id.0)
+            || (!unit && self.inp.word(ty).is_none() && (self.inp.boxed_view)(ty, None).is_some())
+        {
             MirTy::HeapRef
         } else if unit {
             MirTy::I64

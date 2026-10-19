@@ -179,6 +179,15 @@ pub fn poly_fun(ty: &Ty) -> bool {
 /// The result may also be a closed enum: a call through the function
 /// returns a one-word enum as that word, any other boxed.
 fn fun_words(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> bool {
+    fun_words_in(checker, ty, seen, false)
+}
+
+/// [`fun_words`], with `open_enum` also taking an `Option` / `Result`
+/// whose type variable nothing pinned (`Ok(2)`'s error type): one boxed
+/// word, no niche or pair (#1520). Only a closure literal's own type may:
+/// its body and its calls see the one open type, where a parameter's
+/// caller may pass a closure returning the pinned enum's pair.
+fn fun_words_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>, open_enum: bool) -> bool {
     // A bare type parameter (a shared generic body's own `T -> U`
     // parameter) is one boxed word too.
     let plain = |t: &Ty, seen: &mut Vec<String>| {
@@ -193,7 +202,8 @@ fn fun_words(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> bool {
         Ty::Fun(param, ret) => {
             let unit = |t: &Ty| super::layout::is_unit(strip_readonly(t));
             let closed_enum = |t: &Ty, seen: &mut Vec<String>| {
-                super::layout::ty_is_closed(t) && classify_in(checker, t, seen) == Some(ValueClass::Enum)
+                (super::layout::ty_is_closed(t) || open_enum && super::layout::of(checker, t) == super::layout::Layout::Word)
+                    && classify_in(checker, t, seen) == Some(ValueClass::Enum)
             };
             (unit(param) || plain(param, seen) || closed_enum(param, seen))
                 && (unit(ret) || plain(ret, seen) || closed_enum(ret, seen))
@@ -1658,8 +1668,11 @@ pub fn polyfn_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
         // A generic function's returned function the checker saw open at
         // the binding is a `PolyFn` too (`let f = capture_show(0)`),
         // whatever the local settles to (`maybe_record_polyfn_binding`).
+        // A closure literal is never one, though its type may keep a
+        // variable nothing pinned (`fn () => Ok(2)`'s error type, #1520):
+        // it is `MakeFn`'s plain closure word.
         LocalKind::Let => {
-            poly_fun(t)
+            poly_fun(t) && !let_init_is_lambda(body, local)
                 || matches!(strip_readonly(t), Ty::Fun(..))
                     && body.exprs.iter().any(|e| match &e.kind {
                         HirKind::Let { local: l, init: Some(init) } if *l == local => {
@@ -1675,6 +1688,14 @@ pub fn polyfn_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
         && !body.exprs.iter().any(|e| {
             matches!(&e.kind, HirKind::Assign { place, .. } if matches!(body.expr(*place).kind, HirKind::Local(l) if l == local))
         })
+}
+
+/// A `let` bound to a closure literal (`let f = fn () => ..`).
+fn let_init_is_lambda(body: &HirBody, local: LocalId) -> bool {
+    body.exprs.iter().any(|e| {
+        matches!(&e.kind, HirKind::Let { local: l, init: Some(init) }
+            if *l == local && matches!(body.expr(*init).kind, HirKind::Lambda { .. }))
+    })
 }
 
 pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
@@ -1695,7 +1716,8 @@ pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
         .as_ref()
         .is_some_and(|t| {
             let t = apply_ty_prune(checker.subst(), t);
-            matches!(strip_readonly(&t), Ty::Fun(..)) && fun_words(checker, &t, &mut Vec::new())
+            matches!(strip_readonly(&t), Ty::Fun(..))
+                && fun_words_in(checker, &t, &mut Vec::new(), info.kind == LocalKind::Let && let_init_is_lambda(body, local))
         })
     {
         return false;
