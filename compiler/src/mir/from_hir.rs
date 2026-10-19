@@ -4973,6 +4973,15 @@ impl Lower<'_> {
             // A type parameter's item in a shared body: the opaque word as
             // stored, as an array's (#1143).
             .or_else(|| (self.inp.opaque_vars && is_var(ty)).then_some(MirTy::I64))
+            // A two-word item (an `Option<int>`, a range) rides boxed (#1486).
+            .or_else(|| self.boxed_pair_item(ty).then_some(MirTy::HeapRef))
+    }
+
+    /// Whether a tuple item of type `ty` is a two-word value held as its
+    /// box, as `word_or_boxed` stores it.
+    fn boxed_pair_item(&self, ty: &Ty) -> bool {
+        self.inp.word(ty).is_none()
+            && ((self.inp.boxed_view)(ty, None).is_some() || crate::typechecking::return_layout::two_word_range_kind(ty).is_some())
     }
 
     fn heap_array(&self, id: HirId) -> bool {
@@ -5861,7 +5870,8 @@ impl Lower<'_> {
                         HirPat::Bind(l) if self.unit_local(*l) => {}
                         HirPat::Bind(l) => {
                             let ty = self.hir.local(*l).ty.as_ref().and_then(|t| self.tuple_item(t)).ok_or("for in pattern type")?;
-                            if self.local_ty(*l)? != ty {
+                            // A pair local takes its item's box, unboxed (#1486).
+                            if self.pair_local(*l).is_none() && self.local_ty(*l)? != ty {
                                 return Err("for in pattern type".into());
                             }
                             out.push((*l, ty));
@@ -5930,8 +5940,12 @@ impl Lower<'_> {
                         let (l, ty) = parts.next().ok_or("for in pattern")?;
                         let c = self.b.ins_const(MirConst::I64(k as i64)).map_err(mir)?;
                         let v = self.b.ins_index(item, c, ty, false).map_err(mir)?;
-                        let slot = self.slot(l)?;
-                        self.b.def_local(slot, v).map_err(mir)?;
+                        if self.pair_local(l).is_some() {
+                            self.bind_item(l, v, None)?;
+                        } else {
+                            let slot = self.slot(l)?;
+                            self.b.def_local(slot, v).map_err(mir)?;
+                        }
                     }
                 }
             }
@@ -6105,7 +6119,7 @@ impl Lower<'_> {
             HirPat::Wild => Ok(()),
             // A `()` local has no slot (#1427).
             HirPat::Bind(local) if self.unit_local(*local) => Ok(()),
-            HirPat::Bind(local) => self.bind(*local, v),
+            HirPat::Bind(local) => self.bind_item(*local, v, ty),
             HirPat::Tuple(items) => {
                 let Some(Ty::Tuple(tys)) = ty.map(strip_readonly) else {
                     return Err("let pattern".into());
@@ -6126,6 +6140,26 @@ impl Lower<'_> {
             }
             _ => Err("let pattern".into()),
         }
+    }
+
+    /// Bind `local` to the item `v` of type `ty` read from a tuple or
+    /// array: a pair local's box unboxed to its two words (#1486).
+    fn bind_item(&mut self, local: HirLocal, v: ValueId, ty: Option<&Ty>) -> Result<(), Refusal> {
+        let Some((lo, hi, lo_ty, hi_ty)) = self.pair_local(local) else {
+            return self.bind(local, v);
+        };
+        if self.b.value_ty(v) != MirTy::HeapRef {
+            return Err("binding type".into());
+        }
+        let ty = ty.or(self.hir.local(local).ty.as_ref()).ok_or("local type")?.clone();
+        let Val::Pair(a, b) = self.unbox_word(&ty, v, lo_ty, hi_ty)? else {
+            return Err("binding type".into());
+        };
+        if self.b.value_ty(a) != lo_ty || self.b.value_ty(b) != hi_ty {
+            return Err("binding type".into());
+        }
+        self.b.def_local(lo, a).map_err(mir)?;
+        self.b.def_local(hi, b).map_err(mir)
     }
 
     fn bind(&mut self, local: HirLocal, v: ValueId) -> Result<(), Refusal> {
