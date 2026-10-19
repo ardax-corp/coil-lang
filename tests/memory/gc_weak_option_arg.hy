@@ -52,14 +52,29 @@ test("weak of a None Option<Node> upgrades to None") {
     assert!(v == 0);
 }
 
+fn same(Option<Node> o) -> Option<Node> {
+    return o;
+}
+
 test("weak of a call returning Option<Node>") {
-    let w = weak(some_node(5));
+    // A weak never keeps its referent alive, so the node needs a strong
+    // reference until the upgrade: with `weak(some_node(5))` nothing holds
+    // it, and a collection before `upgrade` rightly clears the weak (at -O0
+    // the call's result goes to `weak` on the operand stack; the default
+    // level only kept it by inlining it into a local) (#1481). `x` holds
+    // it, and the argument is still a call.
+    let x = some_node(5);
+    let w = weak(same(x));
     let v = match upgrade(w) {
         Option::Some(Option::Some(n)) => n.v,
         Option::Some(Option::None) => -1,
         Option::None => -2,
     };
     assert!(v == 5);
+    assert!(match x {
+        Option::Some(n) => n.v == 5,
+        Option::None => false,
+    });
 }
 
 test("root of an Option<Node> local, get and unroot") {
