@@ -71,7 +71,7 @@ fn decode_archive(buffer: &[u8]) -> Result<LoadedArchive, LoadErr> {
         debug: ProgramDebug {
             source_files: program.source_files,
             debug_locs: program.debug_locs,
-            fn_symbols: Vec::new(),
+            fn_symbols: program.fn_symbols,
             debug_lines: program.debug_lines,
             cleanup: program.cleanup_ranges,
         },
