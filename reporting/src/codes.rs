@@ -57,8 +57,8 @@ pub enum ErrorCode {
     /// Generic `fn` taken as a value when a type parameter is nested in its
     /// signature (`Vec<T>`, `Option<T>`, tuples, classes). Not supported yet:
     /// call it directly or wrap it in a lambda at a concrete type. Also a
-    /// curried generic `fn` held as a polymorphic value and called with more
-    /// arguments than it declares.
+    /// non-curried generic `fn` held as a polymorphic value and called with
+    /// more arguments than it declares (its result at a function type).
     UnsupportedGenericFnValue,
     /// Private field or inherent method used outside its type's `impl`.
     PrivateMember,

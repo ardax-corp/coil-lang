@@ -186,7 +186,8 @@ pub enum Instruction {
     BoxValue,
     /// UnboxValue: [15:0] expected ValueTag; pop Boxed → push payload or leave default on mismatch
     UnboxValue,
-    /// MakePolyFn: [31:0] entry offset; push a generic `ObjFn`
+    /// MakePolyFn: [31:0] entry offset; push a generic `ObjFn` (its declared
+    /// parameter count unrecorded, as `MakePolyFnCapture`'s 0)
     MakePolyFn,
     /// DynAdd / DynSub / DynMul / DynDiv / DynMod — pop b, a (boxed or immediate); push result
     DynAdd,
@@ -210,8 +211,13 @@ pub enum Instruction {
     CodePtr,
     /// MakePolyFnCapture: stack `[captured dictionaries..., CodePtr entry]` →
     /// a generic `ObjFn`. `operands[7:0]` is the number of dictionary slots in
-    /// declaration order. A null (`0`) slot is stored as unresolved (`None`)
-    /// and filled at `CallIndirect` from application evidence.
+    /// declaration order, `operands[15:8]` the declared parameter count (0:
+    /// unrecorded: a call through the value given more arguments passes
+    /// them all to the body; else the rest go to its result, #1589). A
+    /// curried generic function's value is this with no dictionaries. Older
+    /// VMs ignore the count. A null (`0`) slot is stored as
+    /// unresolved (`None`) and filled at `CallIndirect` from application
+    /// evidence.
     MakePolyFnCapture,
 
     /// Panic: pop string message, write `panic: <msg>` to output, abort the VM.

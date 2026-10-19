@@ -571,7 +571,7 @@ impl Compiler {
                 at.0..at.1,
             );
             msg.with_help(format!(
-                "call `{name}` by name with every argument instead: a polymorphic function value does not record how many parameters it declares"
+                "call `{name}` by name with every argument instead: this polymorphic function value does not record how many parameters it declares"
             ));
             self.messages.push(msg);
             return;
@@ -6485,6 +6485,59 @@ impl Compiler {
         })
     }
 
+    /// The closure a call `id` through `PolyFn` local `f` given `n`
+    /// arguments returns, as the generic function's shared body returns it
+    /// in its boxed ABI (#1589): `None` when the call's result is no
+    /// function, else the adapter to the call's ground type (`Ok(None)`:
+    /// it needs none), or why it has none.
+    fn hir_polyfn_ret_adapt(
+        &self,
+        hir: &HirBody,
+        emit: &HirEmit,
+        id: HirId,
+        f: HirId,
+        n: usize,
+    ) -> Option<Result<Option<HirClosureAdapt>, &'static str>> {
+        let ground = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
+        if !matches!(crate::typechecking::ty::strip_readonly(&ground), Ty::Fun(..)) {
+            return None;
+        }
+        let (scheme_ty, bounds) = match self.hir_polyfn_source(hir, emit, f) {
+            Some(source) => match self.checker.env().lookup(&source) {
+                Some(scheme) => (scheme.ty.clone(), scheme.bounds.clone()),
+                None => return Some(Err("callee-value")),
+            },
+            None => match Self::hir_forall_param_ty(hir, &self.checker, f) {
+                Some(Ty::Forall { bounds, body, .. }) => (*body, bounds),
+                _ => return Some(Err("callee-value")),
+            },
+        };
+        let mut cur = &scheme_ty;
+        for _ in 0..n {
+            let Ty::Fun(_, ret) = cur else {
+                return Some(Err("callee-value"));
+            };
+            cur = ret;
+        }
+        Some(self.hir_closure_adapt(cur, &ground, &bounds, 0))
+    }
+
+    /// The declared parameter count generic function `name`'s value records
+    /// (#1589): a constrained one's (`MakePolyFnCapture` carries it anyway)
+    /// or a curried one's (`fn konst<T>(T a) -> T -> T`, its value then
+    /// `MakePolyFnCapture` of no dictionaries); `None` for another's
+    /// (`MakePolyFn`), and for a rest function's.
+    pub(super) fn polyfn_params(&self, name: &str) -> Option<u32> {
+        let Some(&(arity, false)) = self.fn_arities.get(name) else {
+            return None;
+        };
+        if arity == 0 || arity >= 0x100 {
+            return None;
+        }
+        let curried = self.checker.fn_param_tys(name).is_some_and(|p| p.len() > arity as usize);
+        (curried || self.checker.dict_arity_for(name) > 0).then_some(arity)
+    }
+
     /// A `PolyFn` local's own type when it is a `forall` (a rank-n parameter).
     fn hir_forall_param_ty(hir: &HirBody, checker: &crate::typechecking::infer::Checker, f: HirId) -> Option<Ty> {
         let HirKind::Local(local) = hir.expr(f).kind else {
@@ -7025,14 +7078,17 @@ impl Compiler {
                 // frame, and no type parameter nested in the callee's
                 // signature (its shared body would box `T` inside the
                 // `Option` or tuple it returns: E0127, #916). An enum result
-                // is the call's word, or its object (#1515).
+                // is the call's word, or its object (#1515). A closure
+                // result is adapted to the call's ground type (#1589).
                 if lower::polyfn_callee(hir, &self.checker, *f) {
                     let e = hir.expr(id);
-                    // A curried generic function's `PolyFn` called with more
-                    // arguments than it declares: a `PolyFn` does not record
-                    // its arity, so the call cannot hand the rest to the
-                    // function it returns (#1569).
+                    // A generic function's `PolyFn` that records no arity
+                    // (`MakePolyFn`, `polyfn_params`) called with more
+                    // arguments than it declares, as `id`'s at a function
+                    // type: the call cannot hand the rest to its result
+                    // (#1569). A curried one's records it (#1589).
                     if let Some(source) = self.hir_polyfn_source(hir, emit, *f)
+                        && self.polyfn_params(&source).is_none()
                         && let Some([candidate]) = self.checker.overload_candidates(&source)
                         && !candidate.is_rest
                         && candidate.fixed_arity < args.len()
@@ -7042,9 +7098,12 @@ impl Compiler {
                     }
                     let forwarded = self.forwarded_dicts_hint(e.node, e.span.0, e.span.1).is_some_and(|d| !d.is_empty());
                     let ty = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));
+                    let closure = self.hir_polyfn_ret_adapt(hir, emit, id, *f, args.len());
                     if forwarded
                         || self.hir_polyfn_nested(hir, emit, *f)
-                        || ty.as_ref().is_none_or(|t| !crate::hir::layout::ty_is_closed(t) && !self.hir_open_enum_word(t))
+                        || closure.as_ref().is_some_and(Result::is_err)
+                        || closure.is_none()
+                            && ty.as_ref().is_none_or(|t| !crate::hir::layout::ty_is_closed(t) && !self.hir_open_enum_word(t))
                     {
                         return Err("callee-value");
                     }

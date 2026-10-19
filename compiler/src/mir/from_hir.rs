@@ -216,6 +216,9 @@ pub struct HirPolyCall {
     pub boxes: Vec<Option<u32>>,
     pub dicts: Vec<HirDictOp>,
     pub unbox: Option<u32>,
+    /// The closure result's adapter from the shared body's boxed ABI, as
+    /// [`HirCallSite::ret_adapt`] (#1589).
+    pub ret_adapt: Option<(Label, u32)>,
 }
 
 /// A user operator HIR emission lowered to its trait instance method's
@@ -4666,6 +4669,13 @@ impl Lower<'_> {
             Some(tag) => self.b.ins_unbox(dest, tag, word).map_err(mir)?,
             None => dest,
         };
+        if let Some((target, operand)) = p.ret_adapt {
+            if p.unbox.is_some() || ret != MirTy::HeapRef {
+                return Err("call result adapter".into());
+            }
+            let f = self.at_expr(id, |l| l.b.ins_alloc(MirAllocKind::Fn { target, operand, mask: 0 }, vec![dest]).map_err(mir))?;
+            return Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![f]).map_err(mir)?));
+        }
         Ok(if unit { Val::Unit } else { Val::V(dest) })
     }
 
