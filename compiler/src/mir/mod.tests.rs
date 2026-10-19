@@ -4862,3 +4862,52 @@ fn main() {
     let mut vm = machine::Machine::<64>::with_operand_capacity(64);
     vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
 }
+
+/// `n` arms that rebind a heap word (`s = s + "a"`) into a chain of joins,
+/// none of them reached: what a folded `if x == i` leaves when nothing
+/// drops the dead arms (#1493).
+fn unreachable_rebind_arms(n: usize) -> String {
+    let mut text = String::from("func @main() -> i64 {\nbb0:\n    v1 = string 0\n    jump bb2\n");
+    let mut s = 1;
+    let mut v = 1;
+    let mut prev = 0;
+    for i in 0..n {
+        let (arm, join) = (2 * i + 1, 2 * i + 2);
+        let (a, b, c, d, e, phi) = (v + 1, v + 2, v + 3, v + 4, v + 5, v + 6);
+        v += 6;
+        text.push_str(&format!(
+            "bb{arm}:\n    v{a} = string 1\n    v{b} = string 2\n    v{c} = format v{a}, v{s}, v{b}\n    v{d} = gcbarrier.safepoint v{c}, v{s}\n    v{e} = clearword v{s}\n    jump bb{join}\n"
+        ));
+        text.push_str(&format!("bb{join}:\n    v{phi} = phi.heapref [bb{prev}: v{s}, bb{arm}: v{d}]\n"));
+        if i + 1 < n {
+            text.push_str(&format!("    jump bb{}\n", join + 2));
+        } else {
+            text.push_str(&format!("    v{} = iconst.i64 0\n    return v{}\n", v + 1, v + 1));
+        }
+        s = phi;
+        prev = join;
+    }
+    text.push('}');
+    text
+}
+
+/// #1493: LIR emission's work grows about linearly with the blocks nothing
+/// reaches. Each join's GC clears asked whether a collection comes before
+/// each register's rewrite by walking every later block, once per copy
+/// source of the join's φ: a body 8x longer took ~60x the scans.
+#[test]
+fn lir_clears_work_about_linear_in_unreachable_blocks() {
+    let scans = |n: usize| {
+        let text = unreachable_rebind_arms(n);
+        let f = parse_func(&text).expect(&text);
+        f.verify().unwrap();
+        emit::REWRITE_SCANS.with(|c| c.set(0));
+        let mut pool = Vec::new();
+        emit_lir(&f, Some(Label(0)), &mut pool, true).expect("LIR emits");
+        emit::REWRITE_SCANS.with(|c| c.get())
+    };
+    let small = scans(100);
+    let large = scans(800);
+    // Linear is ~8x.
+    assert!(large <= 24 * small.max(1), "800 arms scanned {large} blocks, 100 scanned {small}");
+}

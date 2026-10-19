@@ -455,6 +455,39 @@ N `assert!(x == 1);` (macro expansion included): 400 went 1.14 s → 0.39 s,
 expansion (each generated snippet is parsed behind padding as long as all
 earlier ones, and each call is looked up by a walk of the whole AST).
 
+Blocks nothing reaches (#1493) cost emission no more than live ones. The GC
+clears (`entry_clears`, `source_clears`) ask whether a collection can run
+before a register is rewritten (`RewriteScan`); each question used to walk
+every block reachable from its join, once per copy source of the join's φ.
+A chain of joins whose rebinding arms are dead (a folded `if x == k` with
+nothing dropping the arms, as #1434's LIR folding left before `tidy`) has
+no collection on the live path, so every walk ran to the end: ~n³ block
+scans. Now the answer is one backward pass over the CFG per register asked,
+and each register is asked once per join however long its chain of copy
+sources. Register sharing (`assign_shared`, which the issue first blamed)
+was never the cost: 3 ms at N = 800. The unit test
+`lir_clears_work_about_linear_in_unreachable_blocks` counts scans over
+`N` dead arms:
+
+| N | scans before | scans after |
+|---|---|---|
+| 100 | 696,498 | 89,496 |
+| 800 | 43,548,198 | 4,803 |
+
+(At 100 every value still has its own register, so more registers are
+asked; at 800 they share four.) Release build, 2026-10-19, `main` of N
+`if x == k { s = s + "a"; }` with #1434's folding and no `tidy`:
+
+| N | before | after | with `tidy` |
+|---|---|---|---|
+| 400 | 0.63 s | 0.22 s | |
+| 800 | 3.87 s | 0.70–0.83 s | 0.33 s |
+
+`entry_clears` went 3.48 s → 0.13 s at 800. What remains superlinear walks
+copy sources (`CopySources::of`) back through the whole φ chain, once per
+join in `entry_clears` and once per `ClearWord` in `source_clears` and
+`keep_memory_order` (~60 ms each at 800): ~n² values, reachable arms or not.
+
 Host Option / `Result<(),E>` / heap-heap Result still pack once at
 `HostInvoke` (`host_enum`). MIR does not add a second pack.
 
