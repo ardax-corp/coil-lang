@@ -35,6 +35,9 @@ pub(super) struct InferFunctionArgs<'a> {
     pub is_coro: bool,
     /// Inherent `impl` method owner. Bare `name` must not shadow imports.
     pub method_owner: Option<&'a str>,
+    /// An inherent method's `impl` parameters (`impl Cell<T>`), for the
+    /// fix-it of a `where` bound on one of them.
+    pub impl_params: &'a [TypeParam<'a>],
     pub is_static_method: bool,
     /// `requires` / `ensures` clauses, typed after the body.
     pub contracts: &'a [Contract<'a>],
@@ -108,6 +111,7 @@ impl Checker {
             self_ty: None,
             is_coro,
             method_owner: None,
+            impl_params: &[],
             is_static_method: false,
             contracts,
         });
@@ -293,6 +297,72 @@ impl Checker {
         Self::seal_nullary_fun_ty(fun_ty, arg_tys.len(), false)
     }
 
+    /// A single-parameter bound is written on the parameter it bounds:
+    /// `T: Num` on the function's own parameter, or a bounded impl block
+    /// (`impl Cell<T: Num> { … }`) for an impl's parameter. `where` is for
+    /// multi-parameter traits only.
+    fn reject_unary_where(
+        &mut self,
+        wc: &parser::ast::WhereConstraint<'_>,
+        name: &str,
+        type_params: &[TypeParam<'_>],
+        method_owner: Option<&str>,
+        impl_params: &[TypeParam<'_>],
+    ) {
+        let [arg] = wc.args.as_slice() else {
+            return;
+        };
+        let class = wc.class;
+        let arg_name = match arg.1.as_ref() {
+            Expression::Type(n) => Some(*n),
+            _ => None,
+        };
+        let with_bound = |tp: &TypeParam<'_>| {
+            let mut bounds: Vec<&str> = tp.bounds.to_vec();
+            bounds.push(class);
+            format!("{}: {}", tp.name, bounds.join(" + "))
+        };
+        let own = arg_name.and_then(|n| type_params.iter().find(|tp| tp.name == n));
+        let outer = arg_name.and_then(|n| impl_params.iter().find(|tp| tp.name == n));
+        let help = match (own, outer, method_owner) {
+            (Some(tp), _, _) => format!("drop it from `where` and bound the parameter: `<{}>`", with_bound(tp)),
+            (None, Some(tp), Some(owner)) => {
+                let head: Vec<String> = impl_params
+                    .iter()
+                    .map(|p| {
+                        if p.name == tp.name {
+                            with_bound(p)
+                        } else if p.bounds.is_empty() {
+                            p.name.to_string()
+                        } else {
+                            format!("{}: {}", p.name, p.bounds.join(" + "))
+                        }
+                    })
+                    .collect();
+                let owner = owner.rsplit("::").next().unwrap_or(owner);
+                format!(
+                    "move `{}` into a separate bounded impl block: `impl {}<{}> {{ … }}`",
+                    name,
+                    owner,
+                    head.join(", ")
+                )
+            }
+            _ => "bound a type parameter instead: `T: Trait` in the function's or the impl's parameter list"
+                .to_string(),
+        };
+        let mut msg = Message::error(
+            ErrorCode::GenericTypeError,
+            format!(
+                "`where` is for multi-parameter traits; a single-parameter bound is written on the parameter, not `where {}<{}>`",
+                class,
+                arg_name.unwrap_or("…")
+            ),
+            arg.0.into_range(),
+        );
+        msg.with_help(help);
+        self.messages.push(msg);
+    }
+
     pub(super) fn infer_function(&mut self, args: InferFunctionArgs<'_>) -> Ty {
         let InferFunctionArgs {
             name,
@@ -305,6 +375,7 @@ impl Checker {
             self_ty,
             is_coro,
             method_owner,
+            impl_params,
             is_static_method,
             contracts,
         } = args;
@@ -356,6 +427,7 @@ impl Checker {
         }
         // `where Class<T1, T2>` constraints (parsed after returns).
         for wc in where_constraints {
+            self.reject_unary_where(wc, name, type_params, method_owner, impl_params);
             let args: Vec<Ty> = wc.args.iter().map(|a| self.parse_type_name(a)).collect();
             param_constraints.push(Constraint {
                 class: self.canonical_trait_name(wc.class),

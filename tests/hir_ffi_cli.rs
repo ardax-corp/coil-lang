@@ -294,5 +294,55 @@ fn main() {
     )
     .unwrap();
     check(&bin, &tmp, &globals);
+
+    // A class's `ptr` field is a one-word scalar slot: `new` stores it, a
+    // method and `drop` read it, and an assignment replaces it (#1507).
+    let ptr_field = tmp.join("ptr_field.hy");
+    std::fs::write(
+        &ptr_field,
+        r#"
+extern "sum" {
+    fn get_doubler() -> ptr;
+    fn apply_cb(ptr cb, int x) -> int;
+}
+
+class H {
+    pub handle: ptr,
+    live: bool,
+}
+
+impl H {
+    pub fn run(int x) -> int {
+        if self.live {
+            return apply_cb(self.handle, x);
+        }
+        return 0;
+    }
+
+    fn drop() {
+        if self.live {
+            if apply_cb(self.handle, 4) != 8 {
+                panic "drop read a bad handle";
+            }
+            self.live = false;
+        }
+    }
+}
+
+fn main() {
+    let h = new H(get_doubler(), true);
+    if h.run(21) != 42 {
+        panic "ptr field read failed";
+    }
+    h.handle = get_doubler();
+    let p = h.handle;
+    if apply_cb(p, 5) != 10 || h.run(6) != 12 {
+        panic "ptr field write failed";
+    }
+}
+"#,
+    )
+    .unwrap();
+    check(&bin, &tmp, &ptr_field);
     let _ = std::fs::remove_dir_all(&tmp);
 }
