@@ -52,16 +52,16 @@ pub use destprop::destprop;
 pub use emit_lir::emit_lir;
 #[cfg(test)]
 pub use entry::LirRefuse;
-pub use from_hir::{lower_body as lower_from_hir, opaque_heap as opaque_heap_ty, scalar as scalar_mir_ty, word as word_mir_ty, HirBoundCall, HirCallSite, HirDictOp, HirFfi, HirFfiOperand, HirFnValue, HirIterLoop, HirPolyCall, HirIterNext, HirMirInput, HirOpCall, HirParBound, HirParFork, HirParIndex, HirParLoop, HirShow, ScalarLit};
+pub use from_hir::{lower_body as lower_from_hir, opaque_heap as opaque_heap_ty, scalar as scalar_mir_ty, word as word_mir_ty, HirBoundCall, HirCallSite, HirDictOp, HirFfi, HirFfiOperand, HirFnValue, HirIterLoop, HirPolyCall, HirIterNext, HirRetItem, HirRetItems, HirMirInput, HirOpCall, HirParBound, HirParFork, HirParIndex, HirParLoop, HirShow, ScalarLit};
 pub use func::MirFunc;
 #[cfg(test)]
 pub use func::MirBlock;
 pub use specialize::{capture_pinned_mir, start_mir_capture, take_mir_capture};
 pub use deopt::DraftDeoptMap;
 pub use stackmap::is_alloc_opcode;
-pub use inst::{MirAllocKind, MirBinOp, MirConst, MirFfiOp, MirInst, ValueId};
+pub use inst::{MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirFfiOp, MirGcKind, MirInst, ValueId};
 #[cfg(test)]
-pub use inst::{BlockId, LocalId, MirCastKind, MirCmpOp, MirGcKind, MirUnaryOp, Terminator};
+pub use inst::{BlockId, LocalId, MirUnaryOp, Terminator};
 pub use instcombine::{instcombine, instcombine_lir};
 #[cfg(test)]
 pub use layout::MirLayout;

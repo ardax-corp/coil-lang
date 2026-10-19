@@ -160,6 +160,47 @@ struct HirGeneric {
     /// The enclosing body's dictionaries (`__dictN`) the call forwards
     /// ahead of its own, as `forwarded_dicts_at` lists them.
     forwarded: Vec<usize>,
+    /// A closure result over the callee's type parameters: the adapter it
+    /// is wrapped in so it is called at the call's ground type (`None`
+    /// when it already is), or why it cannot be (#1532).
+    ret_adapt: Result<Option<HirClosureAdapt>, &'static str>,
+    /// A result holding a bare type parameter's value inside an `Option`,
+    /// `Result` or tuple: how its items are unboxed so it is read at the
+    /// call's ground type (`None` when none is boxed), or why they cannot
+    /// be (#1549).
+    ret_items: Result<Option<crate::mir::HirRetItems>, &'static str>,
+}
+
+/// The adapter a closure a shared generic body returns is wrapped in
+/// (#1532): the shared body's closure takes and returns its bare type
+/// parameter values boxed, a caller at the ground type passes and reads
+/// them in their own layouts. Each argument is converted to the shared
+/// body's word, the closure called, and its result converted back.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct HirClosureAdapt {
+    args: Vec<HirAdaptWord>,
+    ret: HirAdaptWord,
+}
+
+/// One word crossing a [`HirClosureAdapt`]: its ground MIR type and how
+/// it converts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct HirAdaptWord {
+    ty: crate::mir::MirTy,
+    conv: HirAdaptConv,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum HirAdaptConv {
+    /// The same word on both sides.
+    Same,
+    /// A bare type parameter's value: `BoxValue` of this tag on the way
+    /// in, `UnboxValue` on the way out.
+    Box(u32),
+    /// A bare type parameter's niche `Option` word: its enum object, boxed
+    /// (`Instance`) on the way in; unboxed and back to the niche word on
+    /// the way out.
+    NicheOption,
 }
 
 /// Builtin calls the lowering emits inline, as `compile_call_expr` does.
@@ -2810,6 +2851,7 @@ impl Compiler {
             } = &expr.kind
             {
                 let call = self.resolve_hir_callee(hir, HirId(i as u32), name, args.len())?;
+                Self::hir_ret_adapt_check(&call)?;
                 emit.plan.calls.insert(i as u32, call);
             }
             if let HirKind::Call {
@@ -2818,6 +2860,7 @@ impl Compiler {
             } = &expr.kind
             {
                 let call = self.resolve_hir_method(hir, HirId(i as u32), name, args)?;
+                Self::hir_ret_adapt_check(&call)?;
                 emit.plan.calls.insert(i as u32, call);
             }
         }
@@ -2852,6 +2895,16 @@ impl Compiler {
             self.hir_check_effect(hir, &emit, root)?;
         }
         Ok(emit)
+    }
+
+    /// A shared generic body's call whose closure result no adapter makes
+    /// the call's ground closure (#1532): refused rather than read in the
+    /// shared body's layout.
+    fn hir_ret_adapt_check(call: &HirCall) -> Check {
+        match call.generic.as_ref().filter(|_| !call.mono).map(|g| (&g.ret_adapt, &g.ret_items)) {
+            Some((Err(why), _) | (_, Err(why))) => Err(why),
+            _ => Ok(()),
+        }
     }
 
     /// How each local of `hir` is held, decided once before emission:
@@ -4971,6 +5024,21 @@ impl Compiler {
             params.push(p.as_ref().clone());
             cur = r;
         }
+        let mut cur = cur.clone();
+        // A returned function's parameters are flattened onto the callee's
+        // own (`fn konst<T>(T x) -> T -> T`): curry them back onto the
+        // result, so each argument meets its own parameter (#1532). A
+        // function of no parameters is typed `unit -> R`.
+        if receivers == 0
+            && let Some(named) = self.checker.fn_param_names(lookup).map(<[String]>::len)
+            && named == args.len()
+            && params.len() > named.max(1)
+        {
+            for extra in params.split_off(named.max(1)).into_iter().rev() {
+                cur = Ty::Fun(Box::new(extra), Box::new(cur));
+            }
+        }
+        let cur = &cur;
         let node = hir.expr(call);
         let mut forwarded = self.forwarded_dicts_hint(node.node, node.span.0, node.span.1).unwrap_or_default();
         if self.hir_clone_drops_forwarded(&forwarded) {
@@ -4996,13 +5064,32 @@ impl Compiler {
         // A tuple with an open item, in a shared body, is one boxed object
         // whose dictionary the call builds (#1479).
         let open_tuple = |ty: &Ty| shared && matches!(ty, Ty::Tuple(_)) && !crate::hir::layout::ty_is_closed(ty);
+        // So is an instance of a generic class, a `Vec`, an array or a
+        // record built from the body's type parameters (`Box<E>`, #1542):
+        // one heap word, whose dictionary a generic instance serves.
+        let open_object = |ty: &Ty| shared && self.hir_open_heap_word(ty);
         let ground = |id: HirId| {
             let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
-            (crate::hir::layout::ty_is_closed(&ty) || ground_fun(&ty) || open(&ty) || open_tuple(&ty) || self.hir_open_enum_word(&ty))
-                .then_some(ty)
+            (crate::hir::layout::ty_is_closed(&ty)
+                || ground_fun(&ty)
+                || open(&ty)
+                || open_tuple(&ty)
+                || open_object(&ty)
+                || self.hir_open_enum_word(&ty))
+            .then_some(ty)
         };
         let explicit = args.len() - receivers;
         let skip = params.len().saturating_sub(explicit);
+        // Only a bare type parameter result comes back boxed; a returned
+        // closure's parameters and result are each its own word.
+        let ret_boxed = self.generic_return_is_boxed(lookup) && matches!(cur, Ty::Var(_));
+        let mut ret_parts = Vec::new();
+        let mut part = cur;
+        while let Ty::Fun(p, r) = part {
+            ret_parts.push(p.as_ref());
+            part = r;
+        }
+        ret_parts.push(part);
         // A type the call never boxes or unboxes passes as the word its
         // expression already is, even with a variable nothing pinned
         // (`HashMap::new()` never given a value).
@@ -5020,8 +5107,13 @@ impl Compiler {
             arg_tys.push(ty.ok_or("callee-generic")?);
         }
         let ret_ty = ground(call)
-            .or_else(|| (!self.generic_return_is_boxed(lookup)).then(|| loose(call)).flatten())
+            .or_else(|| (!ret_boxed).then(|| loose(call)).flatten())
             .ok_or("callee-generic")?;
+        // A type parameter no bound reads and the signature names only bare.
+        let moved_only = |v: &crate::typechecking::ty::TyVarId| {
+            !scheme.constraints.iter().any(|c| c.args.iter().any(|t| crate::typechecking::ty::ftv_ty(t).contains(v)))
+                && !params.iter().chain(ret_parts.iter().copied()).any(|t| !matches!(t, Ty::Var(_)) && crate::typechecking::ty::ftv_ty(t).contains(v))
+        };
         let mut boxed = vec![None; receivers];
         for (i, ty) in arg_tys[receivers..].iter().enumerate() {
             let bare = params
@@ -5033,8 +5125,14 @@ impl Compiler {
             }
             // Immediates, plain objects and heap enums box to a tagged
             // word (`BoxValue Instance` for an enum); a niche or pair enum
-            // word does not.
-            if lower::classify(&self.checker, ty) == Some(ValueClass::Enum) && !self.hir_boxed_enum_word(ty) {
+            // word does not, but for a niche `Option` the body only moves
+            // (no bound, never held inside another value): its enum object
+            // boxes, which a closure's adapter reads back (#1532).
+            if lower::classify(&self.checker, ty) == Some(ValueClass::Enum)
+                && !self.hir_boxed_enum_word(ty)
+                && !(self.value_layout(ty) == ValueLayout::NicheOption
+                    && params.get(skip + i).is_some_and(|p| matches!(p, Ty::Var(v) if moved_only(v))))
+            {
                 return Err("callee-generic");
             }
             boxed.push(Some(ty.clone()));
@@ -5050,7 +5148,7 @@ impl Compiler {
         // signature names its type parameter bare: nested (`Option<T>`), the
         // shared body would hold it boxed inside the object (#1517).
         let nested = |v: &crate::typechecking::ty::TyVarId| {
-            params.iter().chain([cur]).any(|t| !matches!(t, Ty::Var(_)) && crate::typechecking::ty::ftv_ty(t).contains(v))
+            params.iter().chain(ret_parts.iter().copied()).any(|t| !matches!(t, Ty::Var(_)) && crate::typechecking::ty::ftv_ty(t).contains(v))
         };
         if vars.iter().any(|(v, ty)| !crate::hir::layout::ty_is_closed(ty) && self.hir_open_enum_word(ty) && nested(v)) {
             return Err("callee-generic");
@@ -5070,7 +5168,8 @@ impl Compiler {
             arg_tys[0] = self_ty;
         }
         for constraint in &scheme.constraints {
-            // A goal open inside a tuple is built from the frame's.
+            // A goal open inside a type (`(int, T)`, `Box<T>`) is built
+            // from its generic instance and the frame's dictionaries.
             if self.open_structural_lookup(constraint, &vars).is_some() {
                 continue;
             }
@@ -5088,7 +5187,7 @@ impl Compiler {
                 return Err("callee-trait");
             }
         }
-        let unbox = (self.generic_return_is_boxed(lookup) && !open(&ret_ty)).then(|| ret_ty.clone());
+        let unbox = (ret_boxed && !open(&ret_ty)).then(|| ret_ty.clone());
         if unbox.is_some()
             && lower::classify(&self.checker, &ret_ty) == Some(ValueClass::Enum)
             && !self.hir_boxed_enum_word(&ret_ty)
@@ -5099,6 +5198,18 @@ impl Compiler {
         for (i, ty) in arg_tys[receivers..].iter().enumerate() {
             adapt.push(params.get(skip + i).and_then(|p| self.hir_fn_arg_unbox(p, ty, &scheme.bounds, &open)));
         }
+        let ret_adapt = self.hir_closure_adapt(cur, &ret_ty, &scheme.bounds, receivers);
+        // A bare type parameter the call boxes, whose ground value the
+        // shared body may hold boxed inside its result (#1549).
+        let mut boxed_vars = HashMap::new();
+        for (i, b) in boxed[receivers..].iter().enumerate() {
+            if let (Some(ty), Some(Ty::Var(v))) = (b, params.get(skip + i))
+                && Self::ty_to_value_tag(ty).is_some()
+            {
+                boxed_vars.insert(*v, ty.clone());
+            }
+        }
+        let ret_items = self.hir_ret_items(cur, &params, &vars, &boxed_vars, receivers);
         Ok(HirGeneric {
             lookup: lookup.to_string(),
             boxed,
@@ -5107,7 +5218,127 @@ impl Compiler {
             ret_ty,
             unbox,
             forwarded,
+            ret_adapt,
+            ret_items,
         })
+    }
+
+    /// How the items of a shared generic body's result `cur` (an `Option`,
+    /// `Result`, user enum or tuple) that hold a bare type parameter's
+    /// value the call boxed (`boxed`, by variable, its ground type) are
+    /// unboxed at the call (#1549): the shared body keeps that value boxed
+    /// inside the object. `None` when no item holds one. Refused where an
+    /// item holds it deeper (`Option<(T, int)>`, `Vec<T>`), the variable is
+    /// also nested in a parameter (the body's values of it are then not
+    /// all boxed), or for a ground type no word reads back.
+    fn hir_ret_items(
+        &self,
+        cur: &Ty,
+        params: &[Ty],
+        vars: &HashMap<crate::typechecking::ty::TyVarId, Ty>,
+        boxed: &HashMap<crate::typechecking::ty::TyVarId, Ty>,
+        receivers: usize,
+    ) -> Result<Option<crate::mir::HirRetItems>, &'static str> {
+        use crate::mir::{HirRetItem, HirRetItems};
+        use crate::typechecking::ty::{ftv_ty, strip_readonly};
+        let needy = |t: &Ty| ftv_ty(t).iter().any(|v| boxed.contains_key(v));
+        if matches!(cur, Ty::Var(_) | Ty::Fun(..)) || !needy(cur) {
+            return Ok(None);
+        }
+        // A method's shared body keeps its values as raw words (#802).
+        if receivers > 0 {
+            return Ok(None);
+        }
+        if params.iter().any(|p| !matches!(p, Ty::Var(_)) && needy(p)) {
+            return Err("callee-generic");
+        }
+        let ground = |t: &Ty| apply_ty_prune(self.checker.subst(), &Self::apply_ty_var_map(t, vars));
+        // Each item, typed in the callee: unboxed where it is a boxed
+        // variable, else kept as the word its ground type is.
+        let item = |t: &Ty| -> Result<(HirRetItem, u8), &'static str> {
+            let unbox = matches!(t, Ty::Var(v) if boxed.contains_key(v));
+            if !unbox && needy(t) {
+                return Err("callee-generic");
+            }
+            let g = ground(t);
+            let ty = self.hir_ret_item_word(&g)?;
+            if unbox && !(ty == crate::mir::MirTy::HeapRef || ty.is_numeric() || ty == crate::mir::MirTy::Bool) {
+                return Err("callee-generic");
+            }
+            let kind = if crate::hir::layout::is_unit(&g) {
+                common::WORD_POINTER
+            } else {
+                crate::typechecking::value_layout::word_kind(&self.checker, &g)
+            };
+            Ok((HirRetItem { ty, unbox }, kind))
+        };
+        let pack = |items: Vec<(HirRetItem, u8)>| {
+            let kinds = common::pack_word_kinds(items.iter().map(|&(_, k)| k));
+            (items.into_iter().map(|(i, _)| i).collect::<Vec<_>>(), kinds)
+        };
+        if let Ty::Tuple(items) = strip_readonly(cur) {
+            let (items, kinds) = pack(items.iter().map(item).collect::<Result<Vec<_>, _>>()?);
+            return Ok(Some(HirRetItems::Tuple { items, kinds }));
+        }
+        let app = crate::typechecking::ty::builtin_enum_app(cur).unwrap_or_else(|| cur.clone());
+        let Ty::App(head, args) = strip_readonly(&app) else {
+            return Err("callee-generic");
+        };
+        let Ty::Con(name) = head.as_ref() else {
+            return Err("callee-generic");
+        };
+        let (Some(decl), Some(names)) = (self.checker.enum_variants(name), self.checker.type_ctor_params(name)) else {
+            return Err("callee-generic");
+        };
+        if names.len() != args.len() || self.checker.enum_has_drop(name) {
+            return Err("callee-generic");
+        }
+        let mut variants = Vec::new();
+        for (_, tag, payload) in decl {
+            // A payload typed by the enum's parameter is the call's
+            // argument for it; any other names no parameter.
+            let tys = payload
+                .iter()
+                .map(|p| match p {
+                    Ty::Con(n) if let Some(i) = names.iter().position(|m| m == n) => Ok(args[i].clone()),
+                    p if Self::ty_names_con(p, names) => Err("callee-generic"),
+                    p => Ok(p.clone()),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if !tys.iter().any(&needy) {
+                continue;
+            }
+            let (items, kinds) = pack(tys.iter().map(item).collect::<Result<Vec<_>, _>>()?);
+            variants.push((tag, items, kinds));
+        }
+        Ok((!variants.is_empty()).then_some(HirRetItems::Enum { variants }))
+    }
+
+    /// Whether `ty` names one of the type constructor parameters `names`.
+    fn ty_names_con(ty: &Ty, names: &[String]) -> bool {
+        match ty {
+            Ty::Con(n) => names.contains(n),
+            Ty::App(h, args) => Self::ty_names_con(h, names) || args.iter().any(|a| Self::ty_names_con(a, names)),
+            Ty::Tuple(items) => items.iter().any(|a| Self::ty_names_con(a, names)),
+            Ty::Fun(a, r) => Self::ty_names_con(a, names) || Self::ty_names_con(r, names),
+            Ty::Array { element, .. } | Ty::Readonly(element) => Self::ty_names_con(element, names),
+            Ty::Record { fields } => fields.iter().any(|(_, t)| Self::ty_names_con(t, names)),
+            Ty::Var(_) | Ty::Never | Ty::Existential { .. } => false,
+            // A structural sum or a constructor: told apart no further.
+            _ => true,
+        }
+    }
+
+    /// The MIR word of an item of ground type `ty` inside a tuple or enum
+    /// object: a `()` is the empty tuple object, a scalar enum its tag.
+    fn hir_ret_item_word(&self, ty: &Ty) -> Result<crate::mir::MirTy, &'static str> {
+        if crate::hir::layout::is_unit(ty) {
+            return Ok(crate::mir::MirTy::HeapRef);
+        }
+        if crate::hir::layout::is_scalar_enum_ty(&self.checker, ty) {
+            return Ok(crate::mir::MirTy::I64);
+        }
+        self.hir_adapt_word_ty(ty)
     }
 
     /// Whether the frame holds dictionary `i` as the checker numbered it
@@ -5215,6 +5446,129 @@ impl Compiler {
         unbox.iter().any(Option::is_some).then_some(unbox)
     }
 
+    /// The adapter the closure a shared generic body returns needs at the
+    /// call's ground type `ground`, for the callee's result `cur` (#1532):
+    /// `None` when the closure already is the ground one (no bare type
+    /// parameter of the callee in its signature changes layout). Refused
+    /// where a nested one would ([`Self::hir_adapt_conv`]), for a method
+    /// (its result's parameters are not told apart from its own), and for
+    /// a closure of several parameters (it may be curried: its arity is
+    /// not its type's).
+    fn hir_closure_adapt(
+        &self,
+        cur: &Ty,
+        ground: &Ty,
+        bounds: &[crate::typechecking::ty::TyVarId],
+        receivers: usize,
+    ) -> Result<Option<HirClosureAdapt>, &'static str> {
+        use crate::typechecking::ty::strip_readonly;
+        let quantified = |t: &Ty| crate::typechecking::ty::ftv_ty(t).iter().any(|v| bounds.contains(v));
+        if !matches!(cur, Ty::Fun(..)) || !quantified(cur) {
+            return Ok(None);
+        }
+        if receivers > 0 {
+            return Err("callee-generic");
+        }
+        let mut parts = Vec::new();
+        let (mut p, mut g) = (cur, apply_ty_prune(self.checker.subst(), ground));
+        while let Ty::Fun(pa, pr) = p {
+            let Ty::Fun(ga, gr) = strip_readonly(&g).clone() else {
+                return Err("callee-generic");
+            };
+            parts.push((pa.as_ref(), apply_ty_prune(self.checker.subst(), &ga)));
+            g = apply_ty_prune(self.checker.subst(), &gr);
+            p = pr;
+        }
+        // `unit -> R`: a closure of no parameters.
+        if let [(s, g)] = parts.as_slice()
+            && crate::hir::layout::is_unit(g)
+            && !quantified(s)
+        {
+            parts.clear();
+        }
+        let ret = self.hir_adapt_conv(p, &g, bounds)?;
+        let convs = parts.iter().map(|(s, g)| self.hir_adapt_conv(s, g, bounds)).collect::<Result<Vec<_>, _>>()?;
+        if convs.iter().chain([&ret]).all(|c| *c == HirAdaptConv::Same) {
+            return Ok(None);
+        }
+        if parts.len() > 1 {
+            return Err("callee-generic");
+        }
+        let word = |g: &Ty, conv: HirAdaptConv| self.hir_adapt_word_ty(g).map(|ty| HirAdaptWord { ty, conv });
+        let args = parts.iter().zip(convs).map(|((_, g), conv)| word(g, conv)).collect::<Result<Vec<_>, _>>()?;
+        Ok(Some(HirClosureAdapt { args, ret: word(&g, ret)? }))
+    }
+
+    /// How one word of a shared body's closure, typed `scheme` in the
+    /// callee and `ground` at the call, converts (#1532): a bare type
+    /// parameter's value boxes as the call boxes an argument, an open one
+    /// or a function stays the word it is. A type parameter nested in an
+    /// `Option`, tuple or container is held as the shared body keeps it,
+    /// which a ground reader cannot take unless it is open or a function.
+    fn hir_adapt_conv(&self, scheme: &Ty, ground: &Ty, bounds: &[crate::typechecking::ty::TyVarId]) -> Result<HirAdaptConv, &'static str> {
+        use crate::typechecking::ty::strip_readonly;
+        let as_is = |t: &Ty| matches!(strip_readonly(t), Ty::Var(_) | Ty::Fun(..) | Ty::Forall { .. });
+        let quantified: Vec<_> = crate::typechecking::ty::ftv_ty(scheme).into_iter().filter(|v| bounds.contains(v)).collect();
+        if quantified.is_empty() {
+            return Ok(HirAdaptConv::Same);
+        }
+        if !matches!(scheme, Ty::Var(_)) {
+            let mut vars = HashMap::new();
+            Self::bind_scheme_vars(scheme, ground, &mut vars);
+            return quantified
+                .iter()
+                .all(|v| vars.get(v).is_some_and(|t| as_is(&apply_ty_prune(self.checker.subst(), t))))
+                .then_some(HirAdaptConv::Same)
+                .ok_or("callee-generic");
+        }
+        if as_is(ground) {
+            return Ok(HirAdaptConv::Same);
+        }
+        if crate::hir::layout::is_unit(ground) || crate::hir::layout::is_scalar_enum_ty(&self.checker, ground) {
+            return Err("callee-generic");
+        }
+        // A two-word value crosses a closure call as its object.
+        if self.hir_adapt_two_words(ground) {
+            return Self::ty_to_value_tag(ground).map(|tag| HirAdaptConv::Box(tag as u32)).ok_or("callee-generic");
+        }
+        match self.value_layout(ground) {
+            ValueLayout::NicheOption => Ok(HirAdaptConv::NicheOption),
+            ValueLayout::Boxed => Self::ty_to_value_tag(ground).map(|tag| HirAdaptConv::Box(tag as u32)).ok_or("callee-generic"),
+            _ => Err("callee-generic"),
+        }
+    }
+
+    /// A value of two words where it is held (a range, a pair enum).
+    fn hir_adapt_two_words(&self, ty: &Ty) -> bool {
+        crate::typechecking::return_layout::two_word_kind(&self.checker, ty).is_some()
+            || crate::typechecking::return_layout::two_word_range_kind(ty).is_some()
+    }
+
+    /// The MIR word type of a value of ground type `ty` crossing a closure
+    /// adapter: a scalar, a niche word, an open value's opaque word, or a
+    /// heap word.
+    fn hir_adapt_word_ty(&self, ty: &Ty) -> Result<crate::mir::MirTy, &'static str> {
+        use crate::mir::MirTy;
+        if let Some(word) = crate::mir::scalar_mir_ty(ty) {
+            return Ok(word);
+        }
+        if matches!(crate::typechecking::ty::strip_readonly(ty), Ty::Var(_)) || crate::hir::layout::is_unit(ty) {
+            return Ok(MirTy::I64);
+        }
+        if crate::hir::layout::is_scalar_enum_ty(&self.checker, ty) {
+            return Err("callee-generic");
+        }
+        // A two-word value crosses a closure call as its object.
+        if self.hir_adapt_two_words(ty) {
+            return Ok(MirTy::HeapRef);
+        }
+        Ok(match self.value_layout(ty) {
+            ValueLayout::NicheOption | ValueLayout::NicheUnitResult => MirTy::NicheOpt,
+            ValueLayout::NicheResult => MirTy::NicheRes,
+            ValueLayout::Boxed => MirTy::HeapRef,
+        })
+    }
+
     /// The entry of the function that unboxes the arguments `unbox` marks
     /// and calls the function value it captures, and its `MakeFn` operand
     /// (one capture). One per shape, emitted after the body being compiled
@@ -5229,6 +5583,112 @@ impl Compiler {
         self.hir_fn_adapters.insert(tags, label);
         self.hir_adapter_tail.push((label, unbox.to_vec()));
         (label, operand)
+    }
+
+    /// The entry of the function adapting a closure a shared generic body
+    /// returned to its ground type ([`HirClosureAdapt`]), and its `MakeFn`
+    /// operand (one capture, the closure). One per shape, emitted after
+    /// the body being compiled ([`Self::flush_hir_lambdas`]).
+    pub(super) fn hir_closure_adapter(&mut self, adapt: &HirClosureAdapt) -> (IlLabel, u32) {
+        let operand = make_fn_operand(1, 0, adapt.args.len() as u32, false);
+        if let Some(&label) = self.hir_closure_adapters.get(adapt) {
+            return (label, operand);
+        }
+        let label = self.bytecode.fresh_label();
+        self.hir_closure_adapters.insert(adapt.clone(), label);
+        self.hir_closure_adapter_tail.push((label, adapt.clone()));
+        (label, operand)
+    }
+
+    /// The adapter function [`Self::hir_closure_adapter`] reserved `label`
+    /// for: its frame the wrapped closure (the capture), then the
+    /// arguments. Its code is its direct MIR, as a [`Self::hir_fn_adapter_fn`]'s.
+    fn hir_closure_adapter_fn(&mut self, label: IlLabel, adapt: &HirClosureAdapt) {
+        self.loop_par_helpers += 1;
+        let name = format!("__coil_closure_adapter_{}", self.loop_par_helpers);
+        let start = self.bytecode.len();
+        self.fn_entry_labels.insert(name.clone(), label);
+        self.bind_function_entry(name.clone());
+        self.bytecode.push_return();
+        let arity = 1 + adapt.args.len() as u32;
+        self.fn_arities.insert(name.clone(), (arity, false));
+        self.bytecode.record_func_with_sp(name.clone(), Some(label), start, self.bytecode.len(), arity);
+        match Self::closure_adapter_mir(&name, adapt) {
+            Ok(func) => self.bytecode.set_last_func_hir_mir(func),
+            Err(why) => self.bytecode.set_last_func_hir_mir_why(why),
+        }
+    }
+
+    /// [`Self::hir_closure_adapter_fn`]'s direct MIR: each argument boxed
+    /// where the shared body takes it boxed (a niche `Option` as its enum
+    /// object first), the closure called, and its result unboxed (a niche
+    /// `Option` back to its niche word).
+    fn closure_adapter_mir(name: &str, adapt: &HirClosureAdapt) -> Result<crate::mir::MirFunc, String> {
+        use crate::mir::{MirAllocKind, MirCastKind, MirCmpOp, MirConst, MirGcKind, MirTy};
+        let err = |e: crate::mir::MirError| format!("mir: {e}");
+        let mut b = crate::mir::MirBuilder::new(name.to_string());
+        b.set_ret_ty(adapt.ret.ty);
+        let f = b.add_param(MirTy::HeapRef).map_err(err)?;
+        let params = adapt.args.iter().map(|w| b.add_param(w.ty)).collect::<Result<Vec<_>, _>>().map_err(err)?;
+        let boxed = |b: &mut crate::mir::MirBuilder, tag: u32, v| {
+            let obj = b.ins_alloc(MirAllocKind::Boxed { tag }, vec![v])?;
+            b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj])
+        };
+        let make_enum = |b: &mut crate::mir::MirBuilder, tag: u32, payload: Vec<_>| {
+            let obj = b.ins_alloc(MirAllocKind::Enum { tag }, payload)?;
+            b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj])
+        };
+        let mut args = Vec::with_capacity(params.len());
+        for (w, p) in adapt.args.iter().zip(params) {
+            args.push(match w.conv {
+                HirAdaptConv::Same => p,
+                HirAdaptConv::Box(tag) => boxed(&mut b, tag, p).map_err(err)?,
+                // `None` is the zero word, `Some(p)` the payload's.
+                HirAdaptConv::NicheOption => {
+                    let zero = b.ins_const(MirConst::I64(0)).map_err(err)?;
+                    let some = b.ins_cmp(MirCmpOp::Ne, p, zero).map_err(err)?;
+                    let (hit, fall, join) = (b.create_block(), b.create_block(), b.create_block());
+                    b.branch(some, hit, fall).map_err(err)?;
+                    b.switch_to_block(fall);
+                    let none = make_enum(&mut b, 0, Vec::new()).map_err(err)?;
+                    b.jump(join).map_err(err)?;
+                    b.switch_to_block(hit);
+                    let payload = b.ins_cast(MirCastKind::Word, MirTy::HeapRef, p).map_err(err)?;
+                    let some = make_enum(&mut b, 1, vec![payload]).map_err(err)?;
+                    b.jump(join).map_err(err)?;
+                    b.switch_to_block(join);
+                    let obj = b.ins_stack_phi(vec![(fall, none), (hit, some)]).map_err(err)?;
+                    boxed(&mut b, ValueTag::Instance as u32, obj).map_err(err)?
+                }
+            });
+        }
+        let any = common::UNBOX_ANY_TAG;
+        match adapt.ret.conv {
+            HirAdaptConv::Same => {
+                let r = b.ins_call_indirect(f, args, adapt.ret.ty).map_err(err)?;
+                b.ret(Some(r)).map_err(err)?;
+            }
+            HirAdaptConv::Box(_) => {
+                let r = b.ins_call_indirect(f, args, MirTy::HeapRef).map_err(err)?;
+                let v = b.ins_unbox(r, any, adapt.ret.ty).map_err(err)?;
+                b.ret(Some(v)).map_err(err)?;
+            }
+            HirAdaptConv::NicheOption => {
+                let r = b.ins_call_indirect(f, args, MirTy::HeapRef).map_err(err)?;
+                let obj = b.ins_unbox(r, any, MirTy::HeapRef).map_err(err)?;
+                let (hit, miss) = (b.create_block(), b.create_block());
+                let p = b.ins_match_payload(obj, 0, MirTy::HeapRef).map_err(err)?;
+                b.jump_if_match(obj, 1, vec![p], hit, miss).map_err(err)?;
+                b.switch_to_block(hit);
+                let w = b.ins_cast(MirCastKind::Word, MirTy::NicheOpt, p).map_err(err)?;
+                b.ret(Some(w)).map_err(err)?;
+                b.switch_to_block(miss);
+                let zero = b.ins_const(MirConst::I64(0)).map_err(err)?;
+                let w = b.ins_cast(MirCastKind::Word, MirTy::NicheOpt, zero).map_err(err)?;
+                b.ret(Some(w)).map_err(err)?;
+            }
+        }
+        b.finish().map_err(err)
     }
 
     /// The adapter function [`Self::hir_fn_adapter`] reserved `label` for:
@@ -5321,6 +5781,26 @@ impl Compiler {
             && matches!(crate::typechecking::ty::strip_readonly(ty), Ty::App(..) | Ty::Sum { .. } | Ty::Constructor { .. })
             && lower::classify(&self.checker, ty) == Some(ValueClass::Enum)
             && self.hir_boxed_enum_word(ty)
+    }
+
+    /// A generic class instance, `Vec`, array or record type that still
+    /// mentions a type parameter (`Box<E>`, `Vec<E>`, `[E]`): one heap
+    /// pointer word whatever the parameter is, so it boxes to a type
+    /// parameter by its tag alone (#1542).
+    fn hir_open_heap_word(&self, ty: &Ty) -> bool {
+        let ty = crate::typechecking::ty::strip_readonly(ty);
+        if crate::hir::layout::ty_is_closed(ty) {
+            return false;
+        }
+        match ty {
+            Ty::Array { .. } | Ty::Record { .. } => true,
+            Ty::App(head, _) => match head.as_ref() {
+                Ty::Con(n) if n == common::BUILTIN_VEC_TYPE => true,
+                Ty::Con(n) => self.checker.is_class(n),
+                _ => false,
+            },
+            _ => false,
+        }
     }
 
     /// `return f(..)` may jump instead of call, under the rules
@@ -6340,14 +6820,6 @@ impl Compiler {
                 callee: Callee::Value(f),
                 args,
             } => {
-                // A closure a generic call returned: a mono clone's, not
-                // the shared body's (#1527; its boxed ABI, #1532).
-                if !lower::polyfn_callee(hir, &self.checker, *f)
-                    && let Some(init) = lower::generic_returned_closure(hir, &self.checker, *f)
-                    && !emit.plan.calls.get(&init.0).is_some_and(|call| call.mono)
-                {
-                    return Err("callee-value");
-                }
                 // A `PolyFn` call: no dictionary forwarded from a generic
                 // frame, and no type parameter nested in the callee's
                 // signature (its shared body would box `T` inside the
@@ -7280,17 +7752,21 @@ impl Compiler {
     /// first slots, then the parameters. Its direct MIR takes the captures
     /// as its first parameters. Lambdas inside one follow it.
     pub(super) fn flush_hir_lambdas(&mut self) {
-        while !self.hir_lambda_tail.is_empty() || !self.hir_adapter_tail.is_empty() {
+        while !self.hir_lambda_tail.is_empty() || !self.hir_adapter_tail.is_empty() || !self.hir_closure_adapter_tail.is_empty() {
             for lam in std::mem::take(&mut self.hir_lambda_tail) {
                 self.hir_lambda_fn(lam);
             }
             for (label, unbox) in std::mem::take(&mut self.hir_adapter_tail) {
                 self.hir_fn_adapter_fn(label, &unbox);
             }
+            for (label, adapt) in std::mem::take(&mut self.hir_closure_adapter_tail) {
+                self.hir_closure_adapter_fn(label, &adapt);
+            }
         }
         // A later body's adapters are its own: its labels may live in
         // another buffer.
         self.hir_fn_adapters.clear();
+        self.hir_closure_adapters.clear();
     }
 
     fn hir_lambda_fn(&mut self, lam: HirLambdaTail) {
