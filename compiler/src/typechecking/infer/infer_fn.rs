@@ -401,7 +401,7 @@ impl Checker {
         let (ret_ty, yield_slot, send_slot) = if is_coro {
             let yield_ty = Ty::Var(self.counter.fresh());
             let send_ty = Ty::Var(self.counter.fresh());
-            // Honor `async fn -> T`: unify declared T with the yield/
+            // Honor `gen fn -> T`: unify declared T with the yield/
             // return slot so annotation mismatches are diagnosed.
             if let Some(r) = returns {
                 let declared = self.parse_type_name(r);
@@ -415,10 +415,10 @@ impl Checker {
                     &yield_ty,
                     &declared_yield,
                     &r.0.into_range(),
-                    "async fn return type",
+                    "gen fn return type",
                 );
                 if let Some(s) = declared_send {
-                    self.unify(&send_ty, &s, &r.0.into_range(), "async fn send type");
+                    self.unify(&send_ty, &s, &r.0.into_range(), "gen fn send type");
                     declared_send_ty = true;
                 }
             }

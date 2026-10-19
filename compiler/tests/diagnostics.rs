@@ -39,7 +39,7 @@ fn bare_expr_probe_src(trimmed: &str) -> Option<String> {
     }
     const STMT_PREFIXES: &[&str] = &[
         "let ", "use ", "class ", "enum ", "trait ", "impl ", "test(", "fn ", "if ", "while ",
-        "for ", "return ", "async ", "match ", "defer ",
+        "for ", "return ", "gen ", "match ", "defer ",
     ];
     if STMT_PREFIXES.iter().any(|p| expr.starts_with(p)) {
         return None;
@@ -310,6 +310,24 @@ fn main() {
             .map(|m| (m.code(), m.message()))
             .collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn removed_string_trait_points_at_show() {
+    for (src, needle) in [
+        ("class P { pub x: int }\nimpl String for P { fn to_string(P p) -> string { return \"p\"; } }\nfn main() {}\n", "implement `Show`"),
+        ("class P { pub x: int }\nfn main() { let _ = new P(1).to_string(); }\n", "call `show()`"),
+        ("enum C { R }\nfn main() { let _ = C::R.to_string(); }\n", "call `show()`"),
+    ] {
+        let msgs = check_messages(src);
+        assert!(
+            msgs.iter().any(|m| m.help().as_ref().is_some_and(|h| h.contains(needle))),
+            "expected help containing {needle:?} for {src:?}, got: {:?}",
+            msgs.iter()
+                .map(|m| (m.code(), m.message(), m.help()))
+                .collect::<Vec<_>>()
+        );
+    }
 }
 
 #[test]

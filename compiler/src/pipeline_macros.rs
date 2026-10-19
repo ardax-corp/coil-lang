@@ -828,7 +828,7 @@ impl Pipeline {
                 let Some(at) = children.iter().position(|c| c.0 == job.pending.target) else {
                     return messages;
                 };
-                // The replaced type's default `Show` / `String` impls go with
+                // The replaced type's default `Show` impl goes with
                 // it; generated declarations got their own during expansion.
                 if let Some(type_name) = decl_name(&children[at]).map(str::to_string) {
                     children.retain(|c| !is_default_display_impl(c, &type_name));
@@ -1189,7 +1189,7 @@ fn decl_name<'a>(node: &Output<'a>) -> Option<&'a str> {
     }
 }
 
-/// `impl Show for T` / `impl String for T` in `items`.
+/// `impl Show for T` (any `impl C for T`) in `items`.
 fn impl_heads(items: &[Output<'_>]) -> Vec<(String, String)> {
     items
         .iter()
@@ -1202,11 +1202,11 @@ fn impl_heads(items: &[Output<'_>]) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The compiler's type-name `impl Show` / `impl String` for `type_name`.
+/// The compiler's type-name `impl Show` for `type_name`.
 fn is_default_display_impl(node: &Output<'_>, type_name: &str) -> bool {
     match node.1.as_ref() {
         Expression::TypeClassImpl { class, args, .. } if is_synthetic(node.0) => {
-            (*class == "Show" || *class == "String")
+            *class == "Show"
                 && args.first().is_some_and(|a| a.1.to_string() == type_name)
         }
         _ => false,
@@ -1214,7 +1214,7 @@ fn is_default_display_impl(node: &Output<'_>, type_name: &str) -> bool {
 }
 
 /// A derive that writes `impl Show for T` replaces the compiler's type-name
-/// default for `T` (same for `String`).
+/// default for `T`.
 fn drop_default_display_impls(children: &mut Vec<Output<'_>>, type_name: &str, generated: &[Output<'_>]) {
     let heads = impl_heads(generated);
     children.retain(|c| {

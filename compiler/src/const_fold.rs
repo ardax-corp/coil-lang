@@ -107,21 +107,18 @@ pub fn eval_expr<'a>(
     }
 }
 
-/// Fold `len(...)` when the operand's length is known from a literal shape
-/// or a const string binding.
+/// Fold `x.len()` (or `len(x)`) when the operand's length is known from a
+/// literal shape or a const string binding.
 fn eval_len_call<'a>(
     name: &Output<'a>,
     args: Option<&[Output<'a>]>,
     env: &HashMap<String, ConstValue>,
 ) -> Option<ConstValue> {
-    let Expression::Identifier("len") = name.1.as_ref() else {
-        return None;
-    };
-    let args = args?;
-    if args.len() != 1 {
-        return None;
+    match (name.1.as_ref(), args.unwrap_or(&[])) {
+        (Expression::Access(recv, "len"), []) => eval_len_operand(recv, env),
+        (Expression::Identifier("len"), [arg]) => eval_len_operand(arg, env),
+        _ => None,
     }
-    eval_len_operand(&args[0], env)
 }
 
 fn eval_len_operand<'a>(ast: &Output<'a>, env: &HashMap<String, ConstValue>) -> Option<ConstValue> {
