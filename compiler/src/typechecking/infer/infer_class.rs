@@ -1016,6 +1016,18 @@ impl Checker {
         {
             return;
         }
+        if Self::is_lang_enum_key(owner) && self.current_module != crate::macros::CORE_MODULE {
+            let mut msg = Message::error(
+                ErrorCode::GenericTypeError,
+                format!("Cannot add inherent methods to the prelude enum `{owner}`"),
+                range.clone(),
+            );
+            msg.with_help(format!(
+                "`{owner}`'s methods live in the core prelude; declare a trait and implement it for `{owner}` instead"
+            ));
+            self.messages.push(msg);
+            return;
+        }
         let pushed = self.push_type_params_for_type_parsing(type_params);
         let owner_key = self.qualify_module_name(owner);
 

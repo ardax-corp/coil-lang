@@ -15,7 +15,7 @@ use reporting::{ErrorCode, Message};
 
 use crate::macros::{CallPosition, MacroDecl, MacroKind, PendingMacro};
 
-const KNOWN_ATTRS: &[&str] = &["derive", "ffi", "test", "max_depth", "repr"];
+const KNOWN_ATTRS: &[&str] = &["derive", "ffi", "test", "max_depth", "repr", "lang"];
 
 /// Result of attribute expansion before typechecking.
 #[derive(Default, Clone)]
@@ -262,6 +262,13 @@ fn validate_attrs<'x, 'a>(
                 span.into_range(),
             ));
         }
+        if attr.name == "lang" && target != "enum" {
+            messages.push(Message::error(
+                ErrorCode::GenericTypeError,
+                format!("Attribute `lang` is not valid on {}", target),
+                span.into_range(),
+            ));
+        }
         if attr.name == "repr" && target != "enum" {
             messages.push(Message::error(
                 ErrorCode::GenericTypeError,
@@ -309,6 +316,15 @@ fn disc_lit_kind(expr: &Expression<'_>) -> Option<&'static str> {
         Expression::Bool(_) => Some("bool"),
         _ => None,
     }
+}
+
+/// The lang item an enum declares with `#[lang(name)]` (`option`,
+/// `result`): the core prelude's hook for the enums the compiler builds on.
+pub(crate) fn lang_item<'a>(attrs: &[Attribute<'a>]) -> Option<&'a str> {
+    attrs.iter().find_map(|attr| match &attr.args {
+        AttrArgs::Idents(ids) if attr.name == "lang" && ids.len() == 1 => Some(ids[0]),
+        _ => None,
+    })
 }
 
 /// Backing type when every case is a unit `= lit` (inferred or `#[repr]`).

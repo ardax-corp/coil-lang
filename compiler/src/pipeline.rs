@@ -982,6 +982,17 @@ impl Pipeline {
         }
     }
 
+    /// Every module depends on the embedded `core` prelude (`Option`,
+    /// `Result` and their methods).
+    fn enqueue_core(&mut self, from: &Path) {
+        let core = crate::macros::core_module_path();
+        if from == core {
+            return;
+        }
+        self.record_module_dep(from, &core);
+        self.enqueue_file(core);
+    }
+
     /// Record that `from` `use`s/`mod`s `on` (compile `on` first).
     fn record_module_dep(&mut self, from: &Path, on: &Path) {
         if from == on {
@@ -1354,6 +1365,7 @@ impl Pipeline {
                 // sink, not `ast_cache`. The pointer stays valid for this call.
                 self.enqueue_uses(&file, &src, unsafe { &*ptr });
             }
+            self.enqueue_core(&file);
             // Only stop when every worklist entry has been
             // scanned. Length-stable checks alone are wrong:
             // scanning the first of two deps (`use a::*; use
@@ -1608,6 +1620,7 @@ impl Pipeline {
         // before compiling the in-memory entry, same dependency order as
         // `compile_src_from_file`, without requiring a temp file.
         self.enqueue_uses(path, src, &ast);
+        self.enqueue_core(path);
         self.discover_all();
         self.expand_user_macros();
         self.seed_fn_value_escapes(Some(&ast));

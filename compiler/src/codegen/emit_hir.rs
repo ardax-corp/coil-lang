@@ -3903,7 +3903,10 @@ impl Compiler {
         // A user enum's word is its heap object, passed as a class's is.
         let receiver = match lower::classify(&self.checker, &recv_ty) {
             Some(ValueClass::Object) => true,
-            Some(ValueClass::Enum) => self.hir_boxed_enum_word(&recv_ty) && self.checker.has_impl(owner),
+            // A niche `Option` / `Result` boxes to the shared body's `self`.
+            Some(ValueClass::Enum) => {
+                (self.hir_boxed_enum_word(&recv_ty) || self.hir_niche_word(&recv_ty)) && self.checker.has_impl(owner)
+            }
             _ => false,
         };
         if !shared && !receiver {
