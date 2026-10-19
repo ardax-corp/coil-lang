@@ -1,8 +1,9 @@
-//! Interpreter slot / frame maps (S2b / COI-306).
+//! Interpreter GC frame maps.
 //!
-//! Encoded from S2a live-root sidecars. Archive minor 14+ stores maps on
-//! `.hyc` / embed. Older envelopes load with empty maps (conservative stack
-//! GC), matching pre-E1 `execute_archived_program`.
+//! [`PreciseFrameMap`] (archive minor 21+) is the one map the compiler
+//! emits. [`FrameStackMap`] (S2b / COI-306, minor 14+) was encoded from
+//! S2a live-root sidecars; the compiler no longer emits it, and the VM reads
+//! it only from older archives that carry it.
 
 use rkyv::{Archive, Deserialize, Serialize};
 

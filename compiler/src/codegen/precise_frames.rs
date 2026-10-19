@@ -17,7 +17,7 @@ use common::{Byte, Instruction, PreciseFrameMap, SlotMap};
 
 /// Frame rows for the bodies in `entries`: precise heap slots when a body can
 /// be described, and a frame extent for `needs_extent` bodies (allocating
-/// dense code without S2b maps, whose registers may sit past the cursor).
+/// dense code, whose registers may sit past the cursor).
 /// Without a decodable extent such a frame is scanned to the end of the stack.
 /// Word kinds (`common::WORD_*`) of a function's parameters (entry slots,
 /// in order) and of its one-word return, from its checked signature.

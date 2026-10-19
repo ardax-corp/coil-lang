@@ -69,7 +69,9 @@ names `Alloc` (`MakeArray` / `MakeTuple` / `MakeEnum` / `InitTyped`) and
 ([COI-305](https://linear.app/ardax/issue/COI-305/s2a-live-root-sidecar-at-mir-gcbarrier-alloc))
 fills live-heap `roots` (and IL slots when snapshotted). S2b
 ([COI-306](https://linear.app/ardax/issue/COI-306/s2b-slot-frame-stack-maps-for-interpreter-gc))
-encodes those slots as interpreter frame maps. S2c
+encoded those slots as interpreter frame maps (no longer emitted: precise
+frame maps of the final bytecode cover every body,
+[mir-stack-maps.md](mir-stack-maps.md)). S2c
 ([COI-307](https://linear.app/ardax/issue/COI-307/s2c-specialize-lir-across-alloc-when-maps-exist))
 lets infer / specialize / `emit_lir` cross alloc **only** when those
 maps exist. S2d
