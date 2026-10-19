@@ -12,7 +12,7 @@ one of:
 
 - a pointer-kind word: a class field (`ClassWordKinds`), a payload / tuple
   word (`…K` construction kinds), or an element of a pointer-kind array
-  (`TagArrayKind`);
+  (`MakeArrayK`);
 - a `Member::Object` (dict tables, boxes, roots, poly-fn dictionaries);
 - a masked coroutine slot;
 - a must-pointer frame slot (`PRECISE_SLOT_MUST`).

@@ -1,5 +1,5 @@
 // `Vec<P>` built by `Vec::new` / `with_capacity` / `from` with a ground heap
-// element type carries a pointer element kind (`TagArrayKind`): marking
+// element type carries a pointer element kind (`MakeArrayK`): marking
 // treats the elements as precise references. Collections in between must
 // keep every element (and `None` / `0` holes) intact.
 use tests::assert;

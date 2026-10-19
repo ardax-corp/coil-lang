@@ -2397,10 +2397,11 @@ impl ExactSizeIterator for ArrayIter<'_> {}
 pub struct ObjArray {
     data: ArrayData,
     may_hold_refs: bool,
-    /// Element word kind (`common::WORD_*`) stamped by a typed constructor
-    /// (`TagArrayKind`). Only `WORD_POINTER` is ever kept: each element is
-    /// `0` or an object address, so marking treats them as precise
-    /// references. `WORD_BYTE` packs the storage instead of being kept.
+    /// Element word kind (`common::WORD_*`) the array was made with
+    /// (`MakeArrayK`, or a copy of such an array). Only `WORD_POINTER` is
+    /// ever kept: each element is `0` or an object address, so marking
+    /// treats them as precise references. `WORD_BYTE` packs the storage
+    /// instead of being kept.
     elem_kind: u8,
     /// Storage bytes the heap has counted for this array (see
     /// [`Self::take_resize`]). [`GcSized::size`] reports this, not the live
@@ -2550,12 +2551,16 @@ impl ObjArray {
         }
     }
 
-    /// A fresh array with a copy of these elements in the same storage.
+    /// A fresh array with a copy of these elements in the same storage and
+    /// with the same element kind (the same words, so a pointer kind still
+    /// holds).
     pub fn copy(&self) -> Self {
-        match &self.data {
+        let mut copy = match &self.data {
             ArrayData::Words(w) => Self::new(w.clone()),
             ArrayData::Bytes(b) => Self::from_bytes(b.clone()),
-        }
+        };
+        copy.elem_kind = self.elem_kind;
+        copy
     }
 
     /// Copy of the elements as words.
@@ -4896,6 +4901,14 @@ mod tests {
         assert_eq!(ints(&c), vec![5, 6]);
         assert_eq!(a.to_vec(), words(&[5, 6]));
         assert_eq!(a.slice_to_vec(1, 2), words(&[6]));
+    }
+
+    #[test]
+    fn copy_keeps_the_pointer_kind() {
+        let mut a = ObjArray::new(words(&[0]));
+        a.set_elem_kind(common::WORD_POINTER);
+        assert_eq!(a.copy().elem_kind(), common::WORD_POINTER);
+        assert_eq!(ObjArray::new(words(&[0])).copy().elem_kind(), common::WORD_UNKNOWN);
     }
 
     #[test]

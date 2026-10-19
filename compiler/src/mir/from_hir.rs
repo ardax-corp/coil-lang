@@ -2627,14 +2627,6 @@ impl Lower<'_> {
                 }
                 Ok(Val::V(self.b.ins_cast(MirCastKind::Word, ty, boxed).map_err(mir)?))
             }
-            // An array's element kind stamped (compiler-made bodies): the
-            // same array.
-            HirKind::Builtin { op: Builtin::TagArrayKind { kind }, args } if let [inner] = args.as_slice() => {
-                let Some(v) = self.word(*inner)? else {
-                    return Ok(Val::Never);
-                };
-                Ok(Val::V(self.b.ins_tag_array_kind(v, *kind).map_err(mir)?))
-            }
             // An `Option` / `Result` in another layout (compiler-made
             // bodies): a niche word boxed, or an enum object's niche word.
             HirKind::Builtin { op: Builtin::Relayout, args } if let [inner] = args.as_slice() => {
