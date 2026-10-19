@@ -1940,3 +1940,89 @@ fn lir_body_folds_constants_after_inlining() {
         .count();
     assert_eq!(minus_one, 0, "`mask(-1)` should fold in `mix`, leaving no -1 to mask");
 }
+
+/// Compiles `src` (no file) at `level`.
+fn compile_src_at(src: &str, level: compiler::OptLevel) -> (Vec<Byte>, Pipeline) {
+    let mut pipeline = Pipeline::new();
+    pipeline.set_opt_level(level);
+    pipeline.bind_workspace_language_roots();
+    let (bytecode, _) = pipeline
+        .compile_src(src)
+        .unwrap_or_else(|_| panic!("compile failed:\n{src}"));
+    (bytecode, pipeline)
+}
+
+/// A program with `readonly` values that only reads and calls methods
+/// through them.
+const READONLY_SEAL: &str = "
+class Point {
+    pub x: int,
+    pub y: int,
+}
+
+impl Point {
+    pub fn shift() {
+        self.x = self.x + 1;
+    }
+}
+
+fn step(int i) -> int {
+    let p = readonly new Point(i, i + 1);
+    let k = readonly [1, 2, 3];
+    return p.x + p.y + k[i % 3];
+}
+
+fn main() {
+    let xs = readonly [1, 2, 3];
+    let p = readonly new Point(1, 2);
+    p.shift();
+    let acc = xs.len() + p.x + p.y;
+    for i in 0..10 {
+        acc = acc + step(i);
+    }
+    if acc < 0 {
+        panic(\"negative\");
+    }
+}
+";
+
+/// #1554: `readonly` is a type-checking qualifier only, so a program
+/// compiles to the same bytecode with or without it, at every level.
+#[test]
+fn readonly_compiles_to_the_same_bytecode_as_plain() {
+    let plain = READONLY_SEAL.replace("readonly ", "");
+    for level in [compiler::OptLevel::None, compiler::OptLevel::Standard] {
+        let (ro, _) = compile_src_at(READONLY_SEAL, level);
+        let (pl, _) = compile_src_at(&plain, level);
+        let ops = |bc: &[Byte]| bc.iter().map(|b| *b.bytecode()).collect::<Vec<_>>();
+        assert!(
+            ro == pl,
+            "{level:?}: `readonly` changed the bytecode\nreadonly: {:?}\nplain:    {:?}",
+            ops(&ro),
+            ops(&pl)
+        );
+    }
+}
+
+/// #1555: a generic function called with a `T` and with a `readonly T`
+/// gets one instance, not one per qualifier.
+#[test]
+fn readonly_argument_shares_the_generic_instance() {
+    let src = "
+class P { pub x: int, }
+fn getx<T>(T a, int k) -> int { return k; }
+fn main() {
+    let a = new P(1);
+    let b = readonly new P(2);
+    let s = getx(a, 1) + getx(b, 2);
+}
+";
+    let (_, pipeline) = compile_src_at(src, compiler::OptLevel::None);
+    let syms = pipeline.program_debug().fn_symbols;
+    let clones: Vec<&str> = syms
+        .iter()
+        .map(|s| s.name.as_str())
+        .filter(|n| n.starts_with("getx$mono"))
+        .collect();
+    assert_eq!(clones.len(), 1, "`getx` should have one instance: {clones:?}");
+}

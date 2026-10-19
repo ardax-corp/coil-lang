@@ -509,6 +509,9 @@ pub struct Checker {
 
     /// Bare `Some`/`Ok`/`Red` (Call or Identifier) resolved to `Enum::Case`.
     bare_constructs_by_span: HashMap<(usize, usize), (String, String)>,
+    /// `Trait::method(args)` resolved as the free call `method(args)`
+    /// limited to `Trait`: span → the callee name lowering gives it.
+    qualified_trait_calls_by_span: HashMap<(usize, usize), String>,
 
     /// Bare constructor patterns (`Some(v)`, `None`, `Red`) resolved to their
     /// enum's registry key, by pattern span (#1352).
