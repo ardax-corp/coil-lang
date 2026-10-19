@@ -95,9 +95,10 @@ pub(super) fn emit_lir_framed(
     plan.home_base = home_base(func, scratch)?;
     let plan = plan;
     let regs = coalesce_latch_overwrite(func, regs, &plan.need_slot);
-    let cleared = super::emit::cleared_words(func, &regs, &plan.need_slot);
-    let entry_clears = super::emit::entry_clears(func, &regs, &plan.need_slot);
-    let source_clears = super::emit::source_clears(func, &regs, &plan.need_slot);
+    let mut cleared = super::emit::cleared_words(func, &regs, &plan.need_slot);
+    let mut entry_clears = super::emit::entry_clears(func, &regs, &plan.need_slot);
+    let mut source_clears = super::emit::source_clears(func, &regs, &plan.need_slot);
+    super::emit::prune_clears(func, &regs, &plan.need_slot, &mut cleared, &mut entry_clears, &mut source_clears);
     let max_reg = plan
         .need_slot
         .iter()

@@ -54,9 +54,10 @@ pub fn emit_dense(
     let plan = ConvoyPlan::new(func, entry_label);
     let (regs, scratch) = assign_regs(func, &plan.need_slot)?;
     let regs = coalesce_latch_overwrite(func, regs, &plan.need_slot);
-    let cleared = cleared_words(func, &regs, &plan.need_slot);
-    let entry_clears = entry_clears(func, &regs, &plan.need_slot);
-    let source_clears = source_clears(func, &regs, &plan.need_slot);
+    let mut cleared = cleared_words(func, &regs, &plan.need_slot);
+    let mut entry_clears = entry_clears(func, &regs, &plan.need_slot);
+    let mut source_clears = source_clears(func, &regs, &plan.need_slot);
+    prune_clears(func, &regs, &plan.need_slot, &mut cleared, &mut entry_clears, &mut source_clears);
     let gather = gather_window(func, entry_label);
     let mut max_slot = plan
         .need_slot
@@ -856,6 +857,10 @@ impl RegSet {
         }
     }
 
+    pub(super) fn remove(&mut self, r: u8) {
+        self.0[usize::from(r) / 64] &= !(1u64 << (r % 64));
+    }
+
     fn contains_all(&self, other: &RegSet) -> bool {
         self.0.iter().zip(other.0).all(|(a, b)| b & !a == 0)
     }
@@ -1118,6 +1123,209 @@ pub(super) fn source_clears(func: &MirFunc, regs: &[u8], need_slot: &[bool]) -> 
         }
     }
     out
+}
+
+/// Drops the GC clears that zero a register no path into them leaves
+/// holding a word this frame wrote since its entry: one an earlier clear
+/// on every path zeroed with no write after, or one no path wrote (#1519).
+/// Neither holds a root a clear could drop: the precise frame maps count a
+/// word this frame never wrote as no root, as they do a zero. A chain of
+/// joins re-zeroed, at each taken arm, every register an earlier value of
+/// the chain lived in, twice (beside its `ClearWord`, and again past the
+/// edge's φ copies).
+///
+/// A forward dataflow over the blocks of the registers that may hold such
+/// a word. Writes count where emission may put them: every register a
+/// block's ops define is taken as written at its top and again before its
+/// terminator, besides where the op stands; an edge writes its φs and its
+/// target's match payloads before its clears; a word with a register that
+/// no op defines (a terminator's payload) is never taken as zeroed.
+pub(super) fn prune_clears(
+    func: &MirFunc,
+    regs: &[u8],
+    need_slot: &[bool],
+    cleared: &mut HashSet<ValueId>,
+    entry: &mut HashMap<BlockId, Vec<u8>>,
+    source: &mut HashMap<ValueId, Vec<u8>>,
+) {
+    if cleared.is_empty() && entry.is_empty() && source.is_empty() {
+        return;
+    }
+    let slot = |v: ValueId| need_slot.get(v.index()).copied().unwrap_or(false) && v.index() < regs.len();
+    let nb = func.blocks.len();
+    // Registers each block's ops (not its φs) define, and those of its φs
+    // and match payloads an edge into it writes.
+    let mut defs = vec![RegSet::default(); nb];
+    let mut edge_writes = vec![RegSet::default(); nb];
+    let mut defined = vec![false; regs.len()];
+    for (b, block) in func.blocks.iter().enumerate() {
+        for inst in &block.insts {
+            for d in inst.dests() {
+                if d.index() < defined.len() {
+                    defined[d.index()] = true;
+                }
+                if !slot(d) {
+                    continue;
+                }
+                if inst.is_phi() || matches!(inst, MirInst::MatchPayload { .. }) {
+                    edge_writes[b].insert(regs[d.index()]);
+                }
+                if !inst.is_phi() {
+                    defs[b].insert(regs[d.index()]);
+                }
+            }
+        }
+    }
+    // Parameters arrive holding words; a word no op defines may be written
+    // anywhere.
+    let mut wild = RegSet::default();
+    for p in &func.params {
+        if slot(*p) {
+            wild.insert(regs[p.index()]);
+        }
+    }
+    for (i, d) in defined.iter().enumerate() {
+        if !d && slot(ValueId(i as u32)) {
+            wild.insert(regs[i]);
+        }
+    }
+    // Runs `block` from `dirty`; `keep` hears each clear's register and
+    // whether it may hold a word there. Returns what each edge leaves.
+    let run = |b: usize, mut dirty: RegSet, keep: &mut dyn FnMut(Clear, u8, bool)| -> Vec<(BlockId, RegSet)> {
+        let block = &func.blocks[b];
+        dirty.union(&defs[b]);
+        dirty.union(&wild);
+        for inst in &block.insts {
+            if inst.is_phi() {
+                continue;
+            }
+            if let MirInst::ClearWord { dest, value } = inst {
+                if cleared.contains(dest) && slot(*value) {
+                    let r = regs[value.index()];
+                    keep(Clear::Own(*dest), r, dirty.contains(r));
+                    dirty.remove(r);
+                }
+                for &r in source.get(dest).map(Vec::as_slice).unwrap_or(&[]) {
+                    keep(Clear::Source(*dest), r, dirty.contains(r));
+                    dirty.remove(r);
+                }
+                dirty.union(&wild);
+                continue;
+            }
+            for d in inst.dests() {
+                if slot(d) {
+                    dirty.insert(regs[d.index()]);
+                }
+            }
+        }
+        dirty.union(&defs[b]);
+        let Some(term) = &block.term else {
+            return Vec::new();
+        };
+        let succs = term.succs();
+        succs
+            .iter()
+            .map(|&s| {
+                let mut out = dirty;
+                if s.index() < nb {
+                    out.union(&edge_writes[s.index()]);
+                }
+                if let Terminator::Jump { dest } = term {
+                    for &r in entry.get(&block.id).map(Vec::as_slice).unwrap_or(&[]) {
+                        keep(Clear::Edge(block.id, *dest), r, out.contains(r));
+                        out.remove(r);
+                    }
+                }
+                out.union(&wild);
+                (s, out)
+            })
+            .collect()
+    };
+    // Fixpoint: the registers that may hold a word at each block's top.
+    let mut at: Vec<Option<RegSet>> = vec![None; nb];
+    if func.entry.index() >= nb {
+        return;
+    }
+    at[func.entry.index()] = Some(wild);
+    let mut work = vec![func.entry.index()];
+    let mut queued = vec![false; nb];
+    queued[func.entry.index()] = true;
+    while let Some(b) = work.pop() {
+        queued[b] = false;
+        let Some(dirty) = at[b] else { continue };
+        for (s, out) in run(b, dirty, &mut |_, _, _| {}) {
+            let s = s.index();
+            if s >= nb {
+                continue;
+            }
+            let next = match at[s] {
+                Some(mut cur) => {
+                    if cur.contains_all(&out) {
+                        continue;
+                    }
+                    cur.union(&out);
+                    cur
+                }
+                None => out,
+            };
+            at[s] = Some(next);
+            if !queued[s] {
+                queued[s] = true;
+                work.push(s);
+            }
+        }
+    }
+    // A clear is dropped where its register holds no such word; a block
+    // nothing reaches keeps its clears.
+    let mut drop_own: HashSet<ValueId> = HashSet::new();
+    let mut keep_source: HashMap<ValueId, Vec<u8>> = HashMap::new();
+    let mut keep_edge: HashMap<BlockId, Vec<u8>> = HashMap::new();
+    for (b, dirty) in at.iter().enumerate() {
+        let Some(dirty) = *dirty else { continue };
+        run(b, dirty, &mut |c, r, held| match c {
+            Clear::Own(t) => {
+                if !held {
+                    drop_own.insert(t);
+                }
+            }
+            Clear::Source(t) => {
+                let rs = keep_source.entry(t).or_default();
+                if held {
+                    rs.push(r);
+                }
+            }
+            Clear::Edge(p, _) => {
+                let rs = keep_edge.entry(p).or_default();
+                if held {
+                    rs.push(r);
+                }
+            }
+        });
+    }
+    cleared.retain(|t| !drop_own.contains(t));
+    for (t, rs) in keep_source {
+        if rs.is_empty() {
+            source.remove(&t);
+        } else {
+            source.insert(t, rs);
+        }
+    }
+    for (p, rs) in keep_edge {
+        if rs.is_empty() {
+            entry.remove(&p);
+        } else {
+            entry.insert(p, rs);
+        }
+    }
+}
+
+/// A clear [`prune_clears`] weighs: a `ClearWord`'s own register, one of
+/// its copy sources', or one past an edge's φ copies.
+#[derive(Clone, Copy)]
+enum Clear {
+    Own(ValueId),
+    Source(ValueId),
+    Edge(BlockId, BlockId),
 }
 
 /// `CONST 0; STORE reg`, as HIR emission's clearing store: opaque, so
