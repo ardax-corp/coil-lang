@@ -162,6 +162,21 @@ fn shallow_const_on_record_emits_warning() {
     );
 }
 
+/// #1552: `readonly` is deep, so `const` + `readonly` is fully frozen and
+/// the shallow-const warning would be wrong.
+#[test]
+fn const_readonly_does_not_warn_shallow() {
+    let msgs = check_messages(
+        r#"class P { pub x: int, }
+fn main() { const a = readonly [1, 2, 3]; const p = readonly new P(1); }"#,
+    );
+    assert!(
+        !msgs.iter().any(|m| m.message().contains("still mutable")),
+        "`const x = readonly …` should not warn, got: {:?}",
+        msgs.iter().map(|m| m.message()).collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn matmul_dims_over_packed_u8_limit_warns() {
     // Inner dim 256 > u8::MAX. Nested fixed-length type annotations are not
