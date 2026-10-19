@@ -1246,6 +1246,25 @@ impl<'pratt> Pratt<'pratt> {
         }
     }
 
+    /// `gen` before `fn`. The removed spelling `async fn` is still parsed so
+    /// the error can name `gen fn`.
+    fn gen_kw(
+        &self,
+    ) -> impl Parser<'pratt, &'pratt str, Option<&'pratt str>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
+    {
+        keyword!("gen")
+            .or(text::keyword("async")
+                .validate(|w, e, emitter| {
+                    emitter.emit(Rich::custom(
+                        e.span(),
+                        "`async fn` was removed; write `gen fn` to declare a generator function",
+                    ));
+                    w
+                })
+                .padded_by(trivia()))
+            .or_not()
+    }
+
     /// `pure` before `fn` (a contextual word): its span.
     fn pure_kw(
         &self,
@@ -1259,15 +1278,14 @@ impl<'pratt> Pratt<'pratt> {
             .or_not()
     }
 
-    /// Parses the function *signature* (`gen? static? fn Name<T>(args) -> ret where …`;
-    /// `async` is the old spelling of `gen`)
+    /// Parses the function *signature* (`gen? static? fn Name<T>(args) -> ret where …`)
     /// without consuming the body block.
     fn func_sig(
         &self,
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
     {
         self.docs_prefix()
-            .then(keyword!("gen").or(keyword!("async")).or_not())
+            .then(self.gen_kw())
             .then(keyword!("static").or_not())
             .then(self.pure_kw())
             .then(keyword!("fn"))
@@ -1541,7 +1559,7 @@ impl<'pratt> Pratt<'pratt> {
             })
     }
 
-    /// `#[…] gen? static? fn …` (or the old `async`) without a leading `///` prefix (docs applied by callers).
+    /// `#[…] gen? static? fn …` without a leading `///` prefix (docs applied by callers).
     fn func_after_docs<
         T: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
             + Clone
@@ -1552,7 +1570,7 @@ impl<'pratt> Pratt<'pratt> {
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
     {
         self.attr_list()
-            .then(keyword!("gen").or(keyword!("async")).or_not())
+            .then(self.gen_kw())
             .then(keyword!("static").or_not())
             .then(self.pure_kw())
             .then(keyword!("fn"))
