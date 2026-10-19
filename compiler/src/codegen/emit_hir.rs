@@ -5598,10 +5598,6 @@ impl Compiler {
             } => Some(Rep::Word(
                 Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |ty| self.value_layout(ty)),
             )),
-            HirKind::Builtin {
-                op: Builtin::Readonly,
-                args,
-            } => self.hir_natural(hir, emit, args[0]),
             HirKind::Builtin { op: Builtin::TypeOf, .. } => Some(BOXED),
             HirKind::Builtin { op: Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::Relayout, .. } => {
                 Some(Rep::Word(Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |ty| self.value_layout(ty))))
@@ -6391,11 +6387,6 @@ impl Compiler {
                 op: Builtin::Done,
                 args,
             } => self.hir_check_value(hir, emit, args[0], &BOXED)?,
-            // `readonly e` is `e`'s value.
-            HirKind::Builtin {
-                op: Builtin::Readonly,
-                args,
-            } => return self.hir_check_value(hir, emit, args[0], want),
             HirKind::Builtin {
                 op: Builtin::TypeOf,
                 args,

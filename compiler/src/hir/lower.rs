@@ -2646,16 +2646,6 @@ impl Walk<'_> {
                 self.word(*handle)?;
                 self.value(*handle)
             }
-            // `readonly e`: `e`'s value.
-            HirKind::Builtin {
-                op: Builtin::Readonly,
-                args,
-            } => {
-                let [inner] = args.as_slice() else {
-                    return Err("builtin");
-                };
-                self.value(*inner)
-            }
             // `UnboxValue` / `BoxValue` / `STRINGIFY` of a dictionary-entry
             // word: the word, then the op.
             HirKind::Builtin {
@@ -3105,7 +3095,7 @@ impl Walk<'_> {
             | HirKind::Resume { .. }
             | HirKind::Lambda { .. }
             | HirKind::Builtin {
-                op: Builtin::Done | Builtin::Readonly | Builtin::TypeOf | Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::Relayout,
+                op: Builtin::Done | Builtin::TypeOf | Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::Relayout,
                 ..
             } => self.value(id),
             other => Err(kind_name(other)),
