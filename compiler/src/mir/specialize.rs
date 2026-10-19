@@ -628,8 +628,13 @@ fn lir_tail(
 ) -> Option<Vec<IlOp>> {
     // Constants that only meet in MIR (after inlining, copy forwarding)
     // fold as they do on dense, whether or not the body has the arithmetic
-    // dense pays for (#1434). Like `hir::fold`, at every level.
-    crate::mir::instcombine_lir(&mut func);
+    // dense pays for (#1434). Like `hir::fold`, at every level. A folded
+    // branch leaves blocks nothing reaches: drop them, as lowering does
+    // (emit_lir's liveness is slow over them).
+    if crate::mir::instcombine_lir(&mut func) > 0 {
+        let order: Vec<_> = func.blocks.iter().map(|b| b.id).collect();
+        super::from_hir::tidy(&mut func, &order);
+    }
     super::deopt::fill_deopt_maps(&mut func);
     let entry = labels.first;
     // Every label leading the body binds the entry; a self call may name any.

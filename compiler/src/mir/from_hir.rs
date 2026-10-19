@@ -1259,7 +1259,7 @@ fn prune(func: &mut MirFunc, spec: &HashSet<ValueId>) {
 /// Thread jumps through empty blocks (but not into a φ block from a
 /// branch), then lay the blocks out in `order`, dropping the ones nothing
 /// reaches.
-fn tidy(func: &mut MirFunc, order: &[BlockId]) {
+pub(super) fn tidy(func: &mut MirFunc, order: &[BlockId]) {
     // A branch whose arms are both empty and end alike (a jump to one block
     // with the same φ values from each, or the same return) goes the same
     // way either way: jump to one arm.
