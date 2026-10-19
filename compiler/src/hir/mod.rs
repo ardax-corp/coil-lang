@@ -336,11 +336,6 @@ pub enum Builtin {
     /// `STRINGIFY` of a word (compiler-made bodies only: a primitive's
     /// `Show::show`), reading a float or bool by its box's tag.
     Stringify,
-    /// No longer built: a `Vec` constructor's array is made with its element
-    /// kind (`MakeArrayK`). Kept only while open changes to `emit_hir`'s
-    /// builtin layout arms still name it; remove it with those arms.
-    #[allow(dead_code)]
-    TagArrayKind { kind: u8 },
     /// The same `Option` / `Result` value in its node type's layout, from
     /// its operand type's (compiler-made bodies only: a thunk between a
     /// dictionary's boxed enum and a method's niche word). A niche word
