@@ -51,3 +51,42 @@
         assert_eq!(out, src);
         assert_eq!(crate::fmt::format_source(&out).expect("reformat"), out);
     }
+
+    fn fn_sig_texts(expr: &Expression<'_>, out: &mut Vec<String>) {
+        if matches!(expr, Expression::TypeFnSig { .. }) {
+            out.push(expr.to_string());
+        }
+        expr.for_each_child(&mut |c: &Output<'_>| fn_sig_texts(c.1.as_ref(), out));
+    }
+
+    #[test]
+    fn nullary_fn_type_parses_in_every_type_position() {
+        let positions = [
+            "type Thunk = fn() -> int;",
+            "fn at(fn() -> int f) -> int { return f(); }",
+            "fn mk() -> fn() -> int { return fn () => 1; }",
+            "class Lazy { make: fn() -> int, }",
+            "fn main() { let g: fn() -> int = fn () => 2; }",
+            "fn main() { let fs: Vec<fn() -> int> = []; }",
+        ];
+        for src in positions {
+            assert_eq!(fn_sigs_in(src), 1, "expected one fn type in `{src}`");
+        }
+    }
+
+    #[test]
+    fn nullary_fn_types_format_round_trip() {
+        let src = "type T = fn() -> int;\n\nfn at(fn() -> int f, fn(fn() -> int g) -> int run) -> fn() -> int {\n    return f;\n}\n";
+        let out = crate::fmt::format_source(src).expect("format");
+        assert_eq!(out, src);
+        assert_eq!(crate::fmt::format_source(&out).expect("reformat"), out);
+    }
+
+    #[test]
+    fn fn_types_display_with_their_parameter_list() {
+        let src = "fn f(fn() -> int a, fn(int, string) -> int b, fn(int x) -> int c) -> int { return 0; }";
+        let ast = Pratt::default().parse(src).unwrap_or_else(|e| panic!("parse failed: {e:?}"));
+        let mut texts = Vec::new();
+        fn_sig_texts(ast.1.as_ref(), &mut texts);
+        assert_eq!(texts, ["fn() -> int", "fn(int, string) -> int", "fn(int x) -> int"]);
+    }
