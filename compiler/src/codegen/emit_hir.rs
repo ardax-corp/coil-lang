@@ -3472,11 +3472,13 @@ impl Compiler {
         let at = |ty: &Ty| Self::apply_ty_var_map(ty, &map);
         // A generic `Option` / `Result` result is boxed even in a clone: the
         // open type's layout (`generic_enum_layout`), converted from after
-        // the call.
+        // the call. A user enum (`Slot<T>`) has no open layout of its own:
+        // the clone builds it at its ground types (#1567).
         let enum_boundary = |generic: &Ty, concrete: &Ty| {
             !matches!(generic, Ty::Var(_))
                 && !crate::hir::layout::ty_is_closed(generic)
                 && lower::classify(&self.checker, concrete) == Some(ValueClass::Enum)
+                && self.generic_enum_layout(generic).is_some()
         };
         // Arguments pass in the clone's own layout at its types: the clone
         // converts nothing on entry.
@@ -3508,7 +3510,7 @@ impl Compiler {
             return Err("callee-signature");
         }
         let ret_layout = if enum_boundary(&ret_ty, &ret) {
-            self.generic_enum_layout(&ret_ty).ok_or("callee-signature")?
+            self.generic_enum_layout(&ret_ty).expect("checked by `enum_boundary`")
         } else {
             self.value_layout(&ret)
         };
