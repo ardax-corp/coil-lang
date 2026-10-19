@@ -88,6 +88,7 @@ struct Tally {
 }
 
 fn main() {
+    coil_build_id::check_parent("coil-verify");
     comptime::install();
     let raw: Vec<String> = std::env::args().collect();
     let cli = match parse_with::<VerifyCli>(command(), &raw) {

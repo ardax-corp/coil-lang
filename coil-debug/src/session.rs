@@ -1233,6 +1233,7 @@ mod tests {
             fn_symbols: Vec::new(),
             debug_lines: Vec::new(),
             cleanup: Vec::new(),
+            table: Default::default(),
         };
         let ret_off = text.find("return").unwrap() as u32;
         debug.debug_locs[3] = DebugLoc {
@@ -1258,6 +1259,7 @@ mod tests {
             fn_symbols: Vec::new(),
             debug_lines: Vec::new(),
             cleanup: Vec::new(),
+            table: Default::default(),
         };
         let ret_off = text.find("return").unwrap() as u32;
         debug.debug_locs[2] = DebugLoc {

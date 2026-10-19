@@ -1104,13 +1104,14 @@ fn peel<'a>(expr: &'a Output<'a>) -> &'a Output<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::typechecking::bare_cases::BareCases;
     use crate::typechecking::purity::analyze_pure_fns;
     use parser::Pratt;
 
     fn sites_of(src: &str) -> Vec<LoopParSite> {
         let owned = Box::leak(src.to_string().into_boxed_str());
         let ast = Pratt::default().parse(owned).expect("parse");
-        let pure = analyze_pure_fns(&ast);
+        let pure = analyze_pure_fns(&ast, BareCases::none());
         let mut sites: Vec<LoopParSite> =
             analyze_loop_par_sites(&ast, &pure).into_values().collect();
         sites.sort_by_key(|a| a.begin);

@@ -92,18 +92,23 @@ fn test_subcommand_requires_and_forwards_to_coil_test() {
     let _ = std::fs::remove_dir_all(&cwd);
 
     // Beside the real helper, unknown flags reach `coil-test` and are rejected there.
+    // Build even when present: a helper left from other sources is one
+    // `coil` refuses to run (#1598), and cargo makes a fresh one a no-op.
     let helper = coil_cli::sibling_bin(&coil_bin(), "coil-test");
-    if !helper.is_file() {
-        let status = Command::new("cargo")
-            .args(["build", "-q", "-p", "coil-test"])
-            .status()
-            .expect("spawn cargo build -p coil-test");
-        assert!(
-            status.success() && helper.is_file(),
-            "coil-test missing at {}",
-            helper.display()
-        );
-    }
+    let release: &[&str] = match coil_bin().parent().and_then(Path::file_name) {
+        Some(dir) if dir == "release" => &["--release"],
+        _ => &[],
+    };
+    let status = Command::new("cargo")
+        .args(["build", "-q", "-p", "coil-test"])
+        .args(release)
+        .status()
+        .expect("spawn cargo build -p coil-test");
+    assert!(
+        status.success() && helper.is_file(),
+        "coil-test missing at {}",
+        helper.display()
+    );
     let out = Command::new(coil_bin())
         .args(["test", "--definitely-not-a-flag"])
         .output()

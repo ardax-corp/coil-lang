@@ -10,11 +10,11 @@ fn coil_bin() -> String {
 fn ensure_coil_dissect() {
     let coil = PathBuf::from(coil_bin());
     let helper = coil_cli::sibling_bin(&coil, "coil-dissect");
-    if helper.is_file() {
-        return;
-    }
+    // Build even when present: a helper left from other sources is one
+    // `coil` refuses to run (#1598), and cargo makes a fresh one a no-op.
     let status = Command::new("cargo")
         .args(["build", "-q", "-p", "coil-dissect"])
+        .args(release_flag(&coil))
         .status()
         .expect("spawn cargo build -p coil-dissect");
     assert!(
@@ -360,4 +360,12 @@ fn dissect_vec_pop_returns_the_native_option_on_mir() {
     assert!(body.contains("HostInvoke"), "{stdout}");
     assert!(!body.contains("MakeEnum"), "Vec::pop rebuilds the Option: {stdout}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `--release` when `coil` is a release build, so the helper matches it.
+fn release_flag(coil: &std::path::Path) -> &'static [&'static str] {
+    match coil.parent().and_then(std::path::Path::file_name) {
+        Some(dir) if dir == "release" => &["--release"],
+        _ => &[],
+    }
 }

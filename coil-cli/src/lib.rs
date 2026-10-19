@@ -63,18 +63,13 @@ fn decode_archive(buffer: &[u8]) -> Result<LoadedArchive, LoadErr> {
         ArchiveDecodeError::Invalid(e) => LoadErr::Invalid(e),
     })?;
     let program = decoded.program;
+    let debug = program.debug_bundle();
     Ok(LoadedArchive {
         bytecode: program.bytecode,
         constants: program.constants,
         strings: program.strings,
         static_slots: program.static_slot_count,
-        debug: ProgramDebug {
-            source_files: program.source_files,
-            debug_locs: program.debug_locs,
-            fn_symbols: program.fn_symbols,
-            debug_lines: program.debug_lines,
-            cleanup: program.cleanup_ranges,
-        },
+        debug,
         struct_layouts: program.struct_layouts,
         operand_stack_slots: decoded
             .operand_stack_slots_persisted
@@ -297,7 +292,11 @@ pub fn dispatch_helper_as(sub: &str, helper: &str, leading: &[&str]) -> ! {
         .map(|a| (*a).to_string())
         .chain(std::env::args().skip(2))
         .collect();
-    let status = Command::new(&helper).args(&args).status();
+    let mut command = Command::new(&helper);
+    command.args(&args);
+    // The helper refuses to run when built from other sources (#1598).
+    coil_build_id::mark_helper(&mut command, &exe);
+    let status = command.status();
     match status {
         Ok(s) if s.code().is_none() => {
             // Killed by a signal (a crash in native code, or the OOM killer):
@@ -492,6 +491,8 @@ mod tests {
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
             cleanup_ranges: Vec::new(),
+            line_table: Vec::new(),
+            span_table: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).unwrap();
         let loaded = load_archive_bytes(bytes.as_slice()).expect("load");

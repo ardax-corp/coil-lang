@@ -320,7 +320,6 @@ pub enum Builtin {
     Done,
     Declare,
     Invoke,
-    Readonly,
     Default,
     /// `PRINT` of a string (compiler-made bodies only: the test-runner
     /// `main`).

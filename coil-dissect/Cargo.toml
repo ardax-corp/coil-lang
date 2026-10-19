@@ -8,6 +8,7 @@ name = "coil-dissect"
 path = "src/main.rs"
 
 [dependencies]
+coil-build-id = { path = "../coil-build-id" }
 comptime = { path = "../comptime" }
 common = { path = "../common" }
 parser = { path = "../parser" }

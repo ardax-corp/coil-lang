@@ -509,10 +509,18 @@ pub struct Checker {
 
     /// Bare `Some`/`Ok`/`Red` (Call or Identifier) resolved to `Enum::Case`.
     bare_constructs_by_span: HashMap<(usize, usize), (String, String)>,
+    /// `Trait::method(args)` resolved as the free call `method(args)`
+    /// limited to `Trait`: span → the callee name lowering gives it.
+    qualified_trait_calls_by_span: HashMap<(usize, usize), String>,
 
     /// Bare constructor patterns (`Some(v)`, `None`, `Red`) resolved to their
     /// enum's registry key, by pattern span (#1352).
     bare_patterns_by_span: HashMap<(usize, usize), String>,
+
+    /// Bare unit case patterns (`None`, `Red`) of each checked module, by
+    /// span: the one record of which bare pattern names are cases rather
+    /// than bindings, for passes that walk the AST after the checker (#1394).
+    bare_cases_by_module: HashMap<ModuleId, crate::typechecking::bare_cases::BareCases>,
 
     /// Match exhaustiveness checks deferred until substitution is closed.
     pending_exhaustive: Vec<PendingExhaustive>,
@@ -682,6 +690,11 @@ pub struct Checker {
     /// `MakeFn` partials (positional and named holes).
     pub partial_fills_by_span: std::collections::HashMap<(usize, usize), u32>,
 
+    /// Calls and constructors with named arguments, by span: where each
+    /// argument goes. The one place named arguments are matched to
+    /// parameters or fields; later stages read this instead.
+    named_arg_slots_by_span: std::collections::HashMap<(usize, usize), NamedArgSlots>,
+
     /// Per-slot types for [`partial_fills_by_span`] entries (slot index, ty).
     /// Needed when named holes are non-prefix (`add(b: 2)`) so typing does
     /// not feed args into `apply_function` in the wrong order.
@@ -761,6 +774,19 @@ mod coverage;
 mod sidecar;
 use coverage::CoverageTree;
 pub use sidecar::{SelectedOverload, TypedSidecar};
+
+/// How the checker matched a call's arguments (spreads flattened) to the
+/// callee's parameters, or a `new C(..)`'s to the class fields, when some
+/// are named: `slots[i]` is the parameter (field) index argument `i` fills,
+/// or `params` when it goes into the rest pack.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NamedArgSlots {
+    pub slots: Vec<usize>,
+    /// Fixed parameters (or fields) of the callee.
+    pub params: usize,
+    /// The callee ends in a rest parameter.
+    pub rest: bool,
+}
 
 /// Human-readable name of a payload shape, used in
 /// typecheck-error messages.

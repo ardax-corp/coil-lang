@@ -15,6 +15,7 @@ pub(crate) mod mir;
 pub use il::opt::{BodyTier, OptStats, last_opt_stats};
 pub use il::tell;
 pub use il::OptLevel;
+pub use common::DebugLevel;
 pub use hir::effects::{
     EffectsCapture, describe_fns, effect_declaration_errors, start_effects_capture, take_effects_capture,
 };
@@ -63,4 +64,5 @@ pub use typechecking::{
 
 pub use codegen::{Compiler, PROLOGUE_BYTECODE_LEN, unescape_coil_string};
 pub use local_scopes::{binding_at, local_bindings, local_bindings_in, LocalBinding};
+pub use typechecking::bare_cases::BareCases;
 pub use symbols::{RefSite, SymbolDef, SymbolIndex, SymbolKind};

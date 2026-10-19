@@ -340,6 +340,10 @@ pub struct Compiler {
     /// The generic function value (name, span) a body's HIR plan refused
     /// with `generic-fn-value`; reported as E0127 instead of E0801 (#916).
     generic_fn_value_refusal: std::cell::RefCell<Option<(String, (usize, usize))>>,
+    /// The curried generic function (name, call span) a body's call through
+    /// a `PolyFn` local gave more arguments than it declares; reported as
+    /// E0127 instead of E0801 (#1569).
+    polyfn_over_application: std::cell::RefCell<Option<(String, (usize, usize))>>,
 
     /// Whole-program names used as function *values* (`Some` after the
     /// pipeline seeds every AST in the compile). `None` means "sidecar
@@ -742,6 +746,7 @@ impl Default for Compiler {
             compiling_two_word_enum: None,
             pair_return_kinds: std::cell::RefCell::new(HashMap::new()),
             generic_fn_value_refusal: std::cell::RefCell::new(None),
+            polyfn_over_application: std::cell::RefCell::new(None),
             fn_value_escaped_program: None,
             test_cases: Vec::new(),
             user_main_defined: false,
