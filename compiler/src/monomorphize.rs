@@ -1021,10 +1021,6 @@ where
                 f(arg);
             }
         }
-        Expression::TypeFun(arg, ret) => {
-            f(arg);
-            f(ret);
-        }
         Expression::Class { fields, .. } => {
             for field in fields {
                 f(field);
@@ -1111,7 +1107,7 @@ where
         }
         Expression::NamedArg(_, value) => f(value),
         Expression::Spread(inner) => f(inner),
-        Expression::TypeFnSig { params, ret } => {
+        Expression::TypeFn { params, ret, .. } => {
             f(params);
             f(ret);
         }

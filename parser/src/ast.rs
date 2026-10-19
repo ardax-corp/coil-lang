@@ -149,6 +149,16 @@ impl<'a> Display for WhereConstraint<'a> {
 }
 
 /// Compound assignment operator (`+=`, `-=`, …).
+/// How a function type is written ([`Expression::TypeFn`]). Both spell the
+/// same type; the formatter and tools print it back the way it was written.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FnTypeSpelling {
+    /// `A -> B`.
+    Arrow,
+    /// `fn(T x) -> R`.
+    Fn,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AssignOp {
     Add,
@@ -287,10 +297,14 @@ pub enum Expression<'expr> {
     /// Call-site spread: `f(...expr)`.
     Spread(Output<'expr>),
 
-    /// Function type in annotations: `fn(T x, ...args) -> R`.
-    TypeFnSig {
+    /// Function type in annotations, either spelling (`spelling` keeps
+    /// which, for the formatter): `A -> B`, where `params` is the one
+    /// parameter type, or `fn(T x, ...args) -> R`, where `params` is a
+    /// `Fragment` of `Argument`s whose names are documentation only.
+    TypeFn {
         params: Output<'expr>,
         ret: Output<'expr>,
+        spelling: FnTypeSpelling,
     },
 
     /// User-defined attribute declaration.
@@ -353,8 +367,6 @@ pub enum Expression<'expr> {
         name: &'expr str,
         args: Vec<Output<'expr>>,
     },
-    /// Function type annotation `A -> B`.
-    TypeFun(Output<'expr>, Output<'expr>),
     Return(Output<'expr>),
     ImplicitReturn(Output<'expr>),
     /// `raise expr` — early-return `Err(expr)` from a Result-mode function.
@@ -1316,7 +1328,11 @@ impl<'a> Display for Expression<'a> {
             }
             Self::Spread(inner) => write!(f, "...{}", inner.1),
             // `fn(int x, string) -> R`; an empty list stays `fn() -> R` (#1525).
-            Self::TypeFnSig { params, ret } => match params.1.as_ref() {
+            Self::TypeFn { params, ret, spelling: FnTypeSpelling::Arrow } => match params.1.as_ref() {
+                Self::TypeFn { .. } | Self::Forall { .. } => write!(f, "({}) -> {}", params.1, ret.1),
+                _ => write!(f, "{} -> {}", params.1, ret.1),
+            },
+            Self::TypeFn { params, ret, spelling: FnTypeSpelling::Fn } => match params.1.as_ref() {
                 Self::Fragment(items) => write!(
                     f,
                     "fn({}) -> {}",
@@ -1651,12 +1667,6 @@ impl<'a> Display for Expression<'a> {
                     write!(f, "{}::{}<{}>", owner, name, args_s)
                 }
             }
-            Self::TypeFun(arg, ret) => match arg.1.as_ref() {
-                Self::TypeFun(..) | Self::TypeFnSig { .. } | Self::Forall { .. } => {
-                    write!(f, "({}) -> {}", arg.1, ret.1)
-                }
-                _ => write!(f, "{} -> {}", arg.1, ret.1),
-            },
             Self::AssocTypeDecl { name, type_params } => {
                 write!(f, "type {}{};", name, fmt_type_params(type_params))
             }
@@ -1920,7 +1930,7 @@ impl<'expr> Expression<'expr> {
                     f(ty);
                 }
             }
-            E::TypeFnSig { params, ret } => {
+            E::TypeFn { params, ret, .. } => {
                 f(params);
                 f(ret);
             }
@@ -1949,8 +1959,7 @@ impl<'expr> Expression<'expr> {
             E::TypeApp { args, .. } | E::TypeProjection { args, .. } | E::MacroCall { args, .. } => {
                 args.iter().for_each(f)
             }
-            E::TypeFun(a, b)
-            | E::Coalesce(a, b)
+            E::Coalesce(a, b)
             | E::Cast(a, b)
             | E::Add(a, b)
             | E::Sub(a, b)
@@ -2160,7 +2169,7 @@ impl<'expr> Expression<'expr> {
                     f(ty);
                 }
             }
-            E::TypeFnSig { params, ret } => {
+            E::TypeFn { params, ret, .. } => {
                 f(params);
                 f(ret);
             }
@@ -2189,8 +2198,7 @@ impl<'expr> Expression<'expr> {
             E::TypeApp { args, .. } | E::TypeProjection { args, .. } | E::MacroCall { args, .. } => {
                 args.iter_mut().for_each(f)
             }
-            E::TypeFun(a, b)
-            | E::Coalesce(a, b)
+            E::Coalesce(a, b)
             | E::Cast(a, b)
             | E::Add(a, b)
             | E::Sub(a, b)
@@ -2423,7 +2431,7 @@ impl Expression<'_> {
             | E::Module(..)
             | E::Argument { .. }
             | E::Spread(..)
-            | E::TypeFnSig { .. }
+            | E::TypeFn { .. }
             | E::DeriveDecl { .. }
             | E::FnMacroDecl { .. }
             | E::MacroCall { .. }
@@ -2432,7 +2440,6 @@ impl Expression<'_> {
             | E::Type(..)
             | E::TypeApp { .. }
             | E::TypeProjection { .. }
-            | E::TypeFun(..)
             | E::Return(..)
             | E::ImplicitReturn(..)
             | E::Raise(..)

@@ -284,7 +284,6 @@ impl SymbolIndex {
                 }
                 Expression::Coalesce(a, b)
                 | Expression::Cast(a, b)
-                | Expression::TypeFun(a, b)
                 | Expression::CompoundAssign(a, _, b)
                 | Expression::Add(a, b)
                 | Expression::Sub(a, b)
@@ -336,7 +335,7 @@ impl SymbolIndex {
                         visit_output(index, file, source, ty);
                     }
                 }
-                Expression::TypeFnSig { params, ret } => {
+                Expression::TypeFn { params, ret, .. } => {
                     visit_output(index, file, source, params);
                     visit_output(index, file, source, ret);
                 }

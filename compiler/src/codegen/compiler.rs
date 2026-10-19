@@ -5739,7 +5739,7 @@ impl Compiler {
             | Geq(a, b)
             | Le(a, b)
             | Gt(a, b)
-            | TypeFun(a, b) => {
+            | TypeFn { params: a, ret: b, .. } => {
                 Self::count_field_key_uses(a, counts);
                 Self::count_field_key_uses(b, counts);
             }
@@ -6972,8 +6972,7 @@ impl Compiler {
                 // bytecode.push(Byte::new(Instruction::LOAD)
             }
             Expression::Type(_)
-            | Expression::TypeFun(_, _)
-            | Expression::TypeFnSig { .. }
+            | Expression::TypeFn { .. }
             | Expression::Forall { .. } => {
                 // Type metadata only; NodeId consumed for pre-walk lockstep.
             }
