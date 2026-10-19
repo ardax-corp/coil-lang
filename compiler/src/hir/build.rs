@@ -1417,7 +1417,9 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             E::TypeOf(inner) => self.builtin(b, node, Builtin::TypeOf, std::slice::from_ref(inner)),
             E::Dload(inner) => self.builtin(b, node, Builtin::Dload, std::slice::from_ref(inner)),
             E::Done(inner) => self.builtin(b, node, Builtin::Done, std::slice::from_ref(inner)),
-            E::Readonly(inner) => self.builtin(b, node, Builtin::Readonly, std::slice::from_ref(inner)),
+            // `readonly` lives on the type only; the HIR sees the value, so
+            // the passes that match an initializer's shape still see it.
+            E::Readonly(inner) => self.expr(b, inner),
             E::Declare(args) => self.builtin(b, node, Builtin::Declare, args),
             E::Invoke(args) => self.builtin(b, node, Builtin::Invoke, args),
             E::Default(_) => self.builtin(b, node, Builtin::Default, &[]),

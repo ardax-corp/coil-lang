@@ -2650,7 +2650,6 @@ impl Lower<'_> {
                 })
             }
             // `readonly e`: `e`'s value.
-            HirKind::Builtin { op: Builtin::Readonly, args } if let [inner] = args.as_slice() => self.value(*inner),
             // A dictionary entry's argument, unboxed (compiler-made bodies).
             HirKind::Builtin { op: Builtin::Unbox { tag }, args } if let [inner] = args.as_slice() => {
                 let ty = self.expr_ty(id).and_then(|t| self.word_or_object(t)).ok_or("unbox type")?;
