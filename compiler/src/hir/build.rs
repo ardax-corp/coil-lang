@@ -444,6 +444,12 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         b.body.exprs[id.0 as usize].ty.clone()
     }
 
+    /// Whether `id` is a `()` value.
+    fn unit_at(&self, b: &BodyBuilder, id: HirId) -> bool {
+        self.ty_at(b, id)
+            .is_some_and(|t| layout::is_unit(&crate::typechecking::subst::apply_ty_prune(self.checker.subst(), &t)))
+    }
+
     fn unsupported(&self, b: &mut BodyBuilder, node: &Output<'_>, what: &'static str) -> HirId {
         self.emit(b, node, HirKind::Unsupported(what))
     }
@@ -1572,6 +1578,13 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
     fn binary(&mut self, b: &mut BodyBuilder, node: &Output<'_>, l: &Output<'_>, r: &Output<'_>, op: &'static str) -> HirId {
         let lhs = self.expr(b, l);
         let rhs = self.expr(b, r);
+        // `()` has one value: `==` is `true` and `!=` is `false`, once both
+        // sides have run for their effects (#1426).
+        if matches!(op, "==" | "!=") && self.unit_at(b, lhs) && self.unit_at(b, rhs) {
+            let span = span_of(node);
+            let value = self.synth(b, span, HirKind::Lit(Lit::Bool(op == "==")), Some(coil_ty::boolean()));
+            return self.emit_ty(b, node, HirKind::Block { stmts: vec![lhs, rhs], tail: Some(value) }, Some(coil_ty::boolean()));
+        }
         let op = resolve_bin(op, self.ty_at(b, lhs).as_ref(), self.ty_at(b, rhs).as_ref());
         let ty = self.ty_of(node).or_else(|| match op {
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => Some(coil_ty::boolean()),

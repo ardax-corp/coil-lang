@@ -510,22 +510,26 @@ impl Compiler {
             t.unbox_any.insert(id.0);
         }
         // A bound type parameter's operator or method through one of this
-        // body's dictionary parameters.
+        // body's dictionary parameters; a call's ground niche `Option` /
+        // `Result` result the adapter returns boxed converts to its own
+        // layout after the call.
         let bound = match &e.kind {
             HirKind::Bin { .. } | HirKind::Un { .. } => match emit.plan.ops.get(&id.0) {
-                Some(&HirOp::Bound { dict, method }) => Some((dict, method)),
+                Some(&HirOp::Bound { dict, method }) => Some((dict, method, false)),
                 _ => None,
             },
-            HirKind::Call { .. } if !emit.plan.lens.contains_key(&id.0) => match emit.plan.calls.get(&id.0).and_then(|c| c.builtin) {
-                Some(HirBuiltin::Bound { dict, method }) => Some((dict, method)),
+            HirKind::Call { .. } if !emit.plan.lens.contains_key(&id.0) => match emit.plan.calls.get(&id.0) {
+                Some(call @ HirCall { builtin: Some(HirBuiltin::Bound { dict, method }), .. }) => {
+                    Some((*dict, *method, self.hir_ret_shape(hir, id, &Self::hir_call_rep(call)) == Some(true)))
+                }
                 _ => None,
             },
             _ => None,
         };
-        if let Some((dict, method)) = bound
+        if let Some((dict, method, boxed_ret)) = bound
             && self.hir_mir_dict_param(dict)
         {
-            t.bound_calls.insert(id.0, crate::mir::HirBoundCall { dict, method });
+            t.bound_calls.insert(id.0, crate::mir::HirBoundCall { dict, method, boxed_ret });
         }
         if let HirKind::Call { .. } = e.kind
             && !emit.plan.lens.contains_key(&id.0)
@@ -1072,7 +1076,7 @@ impl Compiler {
                 .collect();
             let unbox = tag(call.generic.as_ref().and_then(|g| g.unbox.as_ref()));
             // The generic's dictionaries, then the instance's, as
-            // `hir_push_dicts` and `plan_instance_dict` build them.
+            // `plan_call_site_dicts` and `plan_instance_dict` plan them.
             let mut dicts = match call.generic.as_deref() {
                 None => Some(Vec::new()),
                 Some(g) if self.hir_generic_boxing(hir, emit, args, &call.params) => self.hir_mir_dict_ops(g),
@@ -1142,17 +1146,21 @@ impl Compiler {
         }
         let tail = emit.plan.tail_calls.contains(&id.0);
         let coro = !tail && self.coroutine_fns.contains(&call.key);
-        self.raw_instance_call = false;
+        // A compiler-made body's call as it planned it: the dictionaries
+        // it passes, and a raw method's own entry.
+        let synth = self.hir_synth_calls.is_some().then(|| self.hir_synth_callees.get(&call.key).cloned()).flatten();
+        self.raw_instance_call = synth.as_ref().is_some_and(|s| s.raw);
         let target = self.named_entry_target(&call.key, true);
-        // A shared generic's call is plain, its dictionaries built as
-        // `hir_push_dicts` builds them (none forwarded through a slot).
-        let dicts = match call.generic.as_deref() {
-            None => Some(Vec::new()),
-            Some(g) if self.hir_generic_boxing(hir, emit, args, &call.params) => self.hir_mir_dict_ops(g),
-            Some(_) => None,
+        // A shared generic's call is plain, its dictionaries the ones
+        // `plan_call_site_dicts` plans (none forwarded through a slot).
+        let dicts = match (call.generic.as_deref(), synth) {
+            (None, Some(synth)) => self.hir_mir_dict_program(&synth.dicts),
+            (None, None) => Some(Vec::new()),
+            (Some(g), _) if self.hir_generic_boxing(hir, emit, args, &call.params) => self.hir_mir_dict_ops(g),
+            (Some(_), _) => None,
         };
-        // Bare type parameter arguments boxed and result unboxed, as
-        // `emit_box_if_needed` / `emit_unbox_if_needed` tag them.
+        // Bare type parameter arguments boxed and result unboxed, tagged
+        // by `ty_to_value_tag`.
         let tag = |ty: &Option<Ty>| ty.as_ref().and_then(Self::ty_to_value_tag).map(|t| t as u32);
         let (boxes, unbox) = call.generic.as_deref().map_or((Vec::new(), None), |g| (g.boxed.iter().map(tag).collect(), tag(&g.unbox)));
         if let Some(dicts) = dicts.filter(|d| (d.is_empty() && unbox.is_none()) || !tail)
@@ -1323,8 +1331,7 @@ impl Compiler {
 
     /// Whether direct MIR passes argument `id` in `param` as HIR emission
     /// does: its own word in that layout, or a numeric range's two words
-    /// boxed to its typed object (MIR's `box_pair_val`, as
-    /// `emit_box_range_slots`).
+    /// boxed to its typed object (MIR's `box_pair_val`).
     fn hir_arg_word(&self, hir: &HirBody, emit: &HirEmit, id: HirId, param: ValueLayout) -> bool {
         self.hir_natural(hir, emit, id) == Some(Rep::Word(param))
             || (param == ValueLayout::Boxed
@@ -1334,11 +1341,11 @@ impl Compiler {
                 }))
     }
 
-    /// The dictionaries [`Self::hir_push_dicts`] pushes for `generic`, as
-    /// a program of the steps emission takes: the ones it forwards from
-    /// this body's dictionary parameters, then the call site's. `None`
-    /// when one is forwarded from another frame slot, or a step is not
-    /// one of [`crate::mir::HirDictOp`].
+    /// The dictionaries a call of `generic` passes, as a program of the
+    /// steps: the ones it forwards from this body's dictionary
+    /// parameters, then the call site's. `None` when one is forwarded
+    /// from another frame slot, or a step is not one of
+    /// [`crate::mir::HirDictOp`].
     fn hir_mir_dict_ops(&mut self, generic: &HirGeneric) -> Option<Vec<crate::mir::HirDictOp>> {
         let mut ops = Vec::new();
         for &i in &generic.forwarded {
@@ -1447,75 +1454,6 @@ impl Compiler {
             }
         }
         out
-    }
-
-    /// Append dictionary plan `steps` to the body. Each ground dictionary
-    /// in it (method pointers and such dictionaries only) is built once
-    /// into a static slot ([`Self::intern_dict_ops`]) and loaded after
-    /// that: `LoadStatic; Dup; Const 0; EQ; JumpIfFalse have; Pop; build;
-    /// Dup; StoreStatic; have:`.
-    pub(in crate::codegen) fn append_dicts_interned(&mut self, steps: &[DictStep]) {
-        use crate::mir::HirDictOp;
-        let Some(ops) = self.hir_dict_ops(steps) else {
-            let mut dicts = CodeBuf::new();
-            Self::emit_dict_steps(&mut dicts, steps);
-            self.bytecode.append(&mut dicts);
-            return;
-        };
-        // Each word the program leaves: its op range and whether it is ground.
-        let mut stack: Vec<(usize, bool)> = Vec::new();
-        for (i, op) in ops.iter().enumerate() {
-            match op {
-                HirDictOp::Code(_) => stack.push((i, true)),
-                HirDictOp::Tuple(n) => {
-                    let Some(at) = stack.len().checked_sub(*n as usize) else {
-                        let mut dicts = CodeBuf::new();
-                        Self::emit_dict_steps(&mut dicts, steps);
-                        self.bytecode.append(&mut dicts);
-                        return;
-                    };
-                    let elems = stack.split_off(at);
-                    let start = elems.first().map_or(i, |e| e.0);
-                    stack.push((start, elems.iter().all(|e| e.1)));
-                }
-                HirDictOp::Box(_) => {
-                    let start = stack.pop().map_or(i, |e| e.0);
-                    stack.push((start, false));
-                }
-                HirDictOp::Null | HirDictOp::Load(_) | HirDictOp::Interned { .. } => stack.push((i, false)),
-            }
-        }
-        let n_ops = steps.len();
-        let loc = common::DebugLoc::default();
-        // Built apart and appended, so `append` rewrites its method
-        // pointers to entries (a reserved one stays a root entry).
-        let mut out = CodeBuf::new();
-        for (k, &(start, ground)) in stack.iter().enumerate() {
-            let end = stack.get(k + 1).map_or(n_ops, |e| e.0);
-            let built_tuple = matches!(ops[end - 1], HirDictOp::Tuple(_));
-            if !(ground && built_tuple) {
-                Self::emit_dict_steps(&mut out, &steps[start..end]);
-                continue;
-            }
-            let slot = self.interned_dict_slot(ops[start..end].to_vec());
-            let have = out.fresh_label();
-            out.push(Byte::new(Instruction::LoadStatic).with_operand_u32(slot));
-            out.push_op(IlOp::Dup { loc });
-            out.push_const(0);
-            out.push(Byte::new(Instruction::EQ));
-            out.push_op(IlOp::Jump {
-                kind: crate::il::IlJumpKind::JumpIfFalse,
-                target: have,
-                loc,
-                hint: Default::default(),
-            });
-            out.push_pop();
-            Self::emit_dict_steps(&mut out, &steps[start..end]);
-            out.push_op(IlOp::Dup { loc });
-            out.push(Byte::new(Instruction::StoreStatic).with_operand_u32(slot));
-            out.bind_label(have);
-        }
-        self.bytecode.append(&mut out);
     }
 
     /// The static slot that holds ground dictionary program `flat`.
@@ -1634,8 +1572,7 @@ impl Compiler {
         }
     }
 
-    /// Whether [`Self::hir_push_dicts`] reads a frame dictionary for
-    /// `generic`: one it forwards, or one of the call site's.
+    /// Whether a call of `generic` reads a frame dictionary: one it forwards, or one of the call site's.
     fn hir_mir_generic_dict_reads(&mut self, generic: &HirGeneric) -> bool {
         generic.forwarded.iter().any(|&i| self.lookup_slot(&format!("__dict{i}")).is_some_and(|slot| !self.hir_mir_dict_param(slot)))
             || self.hir_mir_probe_unplanned(|this, steps| {

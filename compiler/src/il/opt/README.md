@@ -51,7 +51,7 @@ bounds, sink_return. MIR runs its own passes per tier ([mir.md](../../../../docs
 
 | Analysis | Module | Quantity |
 |----------|--------|----------|
-| **`sp`** | [`crate::il::sp`] | Eval-stack *height* (`stack_delta` feeds `tell`; the whole-buffer analysis backs tests only). Nested `CALL`/`MakeCoro` reset to 1 (return value). `STORE` does **not** floor height. |
+| **`sp`** | [`crate::il::sp`] | Per-op eval-stack *height* delta (`stack_delta`, feeds `tell` and `coil dissect`). `STORE` does **not** floor height. |
 | **`tell`** | [`crate::il::tell`] | Shared operand/local *cursor*. `STORE` raises the cursor to `slot + 1` even when height is lower. |
 
 Do not substitute one for the other (COI-81). Height is a per-op delta; the
