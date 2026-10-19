@@ -65,9 +65,13 @@ fn cse_with(func: &mut MirFunc, literals: bool) -> usize {
                 }
                 continue;
             }
-            let (heap, lengths) = (inst.writes_heap(&calls), inst.may_resize(&calls));
-            if heap || lengths {
-                reads.retain(|k, _| !k.killed_by(heap, lengths, &ty));
+            let writes = Writes {
+                elements: inst.writes_elements(&calls),
+                fields: inst.writes_fields(&calls),
+                lengths: inst.may_resize(&calls),
+            };
+            if writes.elements || writes.fields || writes.lengths {
+                reads.retain(|k, _| !k.killed_by(&writes, &ty));
             }
         }
         if let Some(term) = &mut block.term {
@@ -92,12 +96,22 @@ enum ReadKey {
     Call { target: crate::il::Label, args: Vec<ValueId> },
 }
 
+/// What one instruction may change, for [`ReadKey::killed_by`].
+struct Writes {
+    elements: bool,
+    fields: bool,
+    lengths: bool,
+}
+
 impl ReadKey {
-    fn killed_by(&self, heap: bool, lengths: bool, ty: &impl Fn(ValueId) -> MirTy) -> bool {
+    /// An element store does not change a field, nor a field store an
+    /// element (#1559).
+    fn killed_by(&self, w: &Writes, ty: &impl Fn(ValueId) -> MirTy) -> bool {
         match self {
-            Self::Index { .. } | Self::Field { .. } => heap,
-            Self::Len { .. } => lengths,
-            Self::Call { args, .. } => (heap || lengths) && args.iter().any(|&a| reads_heap(ty(a))),
+            Self::Index { .. } => w.elements,
+            Self::Field { .. } => w.fields,
+            Self::Len { .. } => w.lengths,
+            Self::Call { args, .. } => (w.elements || w.fields || w.lengths) && args.iter().any(|&a| reads_heap(ty(a))),
         }
     }
 }
@@ -817,6 +831,25 @@ mod tests {
         cse(&mut f);
         f.verify().unwrap();
         assert_eq!(count(&f, |i| matches!(i, MirInst::Index { .. })), 2);
+    }
+
+    #[test]
+    fn element_store_does_not_kill_field_reads() {
+        let mut f = parse("    v2 = heaploadfield v0, 0\n    v5 = storeindex v0, v1, v1\n    v3 = heaploadfield v0, 0\n    v4 = iadd v2, v3\n    return v4");
+        assert_eq!(cse(&mut f), 1);
+        f.verify().unwrap();
+        assert_eq!(count(&f, |i| matches!(i, MirInst::HeapFieldLoad { .. })), 1);
+    }
+
+    #[test]
+    fn field_store_kills_field_reads_not_element_reads() {
+        let mut f = parse(
+            "    v2 = heaploadfield v0, 0\n    v6 = index v0, v1\n    v5 = heapsetfield.slot v0, v1, 0\n    v3 = heaploadfield v0, 0\n    v7 = index v0, v1\n    v4 = iadd v2, v3\n    v8 = iadd v4, v6\n    v9 = iadd v8, v7\n    return v9",
+        );
+        assert_eq!(cse(&mut f), 1);
+        f.verify().unwrap();
+        assert_eq!(count(&f, |i| matches!(i, MirInst::HeapFieldLoad { .. })), 2);
+        assert_eq!(count(&f, |i| matches!(i, MirInst::Index { .. })), 1);
     }
 
     #[test]
