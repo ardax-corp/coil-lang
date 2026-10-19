@@ -10,12 +10,12 @@ fn coil_bin() -> String {
 fn ensure_helper(name: &str) {
     let coil = PathBuf::from(coil_bin());
     let helper = coil_cli::sibling_bin(&coil, name);
-    if helper.is_file() {
-        return;
-    }
+    // Build even when present: a helper left from other sources is one
+    // `coil` refuses to run (#1598), and cargo makes a fresh one a no-op.
     let pkg = name; // coil-debug / coil-dissect package names match binary names
     let status = Command::new("cargo")
         .args(["build", "-q", "-p", pkg])
+        .args(release_flag(&coil))
         .status()
         .unwrap_or_else(|e| panic!("spawn cargo build -p {pkg}: {e}"));
     assert!(
@@ -421,5 +421,13 @@ fn debug_locals_bound_by_match_arms() {
         let seen = value_of(name);
         assert!(!seen.is_empty(), "`{name}` listed: {stdout}");
         assert!(seen.iter().all(|v| v == want || v == "<optimized out>"), "{name} = {seen:?}\n{stdout}");
+    }
+}
+
+/// `--release` when `coil` is a release build, so the helper matches it.
+fn release_flag(coil: &std::path::Path) -> &'static [&'static str] {
+    match coil.parent().and_then(std::path::Path::file_name) {
+        Some(dir) if dir == "release" => &["--release"],
+        _ => &[],
     }
 }

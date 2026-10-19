@@ -51,4 +51,5 @@ Pre-installed: `poop`, `valgrind`, `heaptrack`, `hyperfine`, `lua` (`.cursor/Doc
 
 ## Learned Workspace Facts
 
+- Trait methods have three call spellings: `x.m()`, `m(x)` and `Trait::m(x)`. The qualified one is the function form limited to that trait (it disambiguates same-named methods) and lowers to the same call (`infer_qualified_trait_call`, `qualified_trait_call_at`; see `docs/internals/static-trait-methods.md`).
 - Regularity target: one ground-call convention, panic on OOB (not `-1` / no-op); `a[i]` stays type `T`. `Option`/`Result` use niche / two-slot / boxed by shape (COI-92); arity-2 immediate products use two-slot `[a, b]` on direct `CALL`/`RETURN` (#302). Fuse opcodes are debt — rewrite existing ops rather than growing bench-shaped fuses.

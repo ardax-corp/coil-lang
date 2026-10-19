@@ -115,7 +115,7 @@ pub struct HirCallSite {
 /// holding its bare type parameters' values unboxed (#1549): the shared
 /// body keeps such a value boxed inside the object, a ground caller reads
 /// the item in its own layout.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum HirRetItems {
     /// A tuple: each item, and the rebuilt tuple's word kinds.
     Tuple { items: Vec<HirRetItem>, kinds: u8 },
@@ -126,7 +126,7 @@ pub enum HirRetItems {
 
 /// One item of a [`HirRetItems`] object: its ground word, and whether the
 /// shared body holds it boxed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct HirRetItem {
     pub ty: MirTy,
     pub unbox: bool,
@@ -2655,7 +2655,6 @@ impl Lower<'_> {
                 })
             }
             // `readonly e`: `e`'s value.
-            HirKind::Builtin { op: Builtin::Readonly, args } if let [inner] = args.as_slice() => self.value(*inner),
             // A dictionary entry's argument, unboxed (compiler-made bodies).
             HirKind::Builtin { op: Builtin::Unbox { tag }, args } if let [inner] = args.as_slice() => {
                 let ty = self.expr_ty(id).and_then(|t| self.word_or_object(t)).ok_or("unbox type")?;
