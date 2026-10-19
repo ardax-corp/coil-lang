@@ -21,19 +21,21 @@ fn text_len(Holder h) -> Result<int, string> {
 
 fn shown_text_length_measured_twice_over(Holder h) -> Result<string, string> {
     let result_holding_the_text: Result<string, string> = Result::Ok(h.text);
-    return Result::Ok((result_holding_the_text?)
-        .len()
-        .show()
-        .len()
-        .show()
-        .len()
-        .show()
-        .len()
-        .show()
-        .len()
-        .show()
-        .len()
-        .show());
+    return Result::Ok(
+        (result_holding_the_text?)
+            .len()
+            .show()
+            .len()
+            .show()
+            .len()
+            .show()
+            .len()
+            .show()
+            .len()
+            .show()
+            .len()
+            .show(),
+    );
 }
 
 test("string literal receiver") {
