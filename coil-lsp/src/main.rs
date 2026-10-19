@@ -5505,6 +5505,37 @@ fn main() { return f(1); }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A bare unit case of an imported enum (`On`) in a pattern is a case,
+    /// as the checker reads it, not a local binding of the arm.
+    #[test]
+    fn bare_imported_case_in_pattern_is_not_a_local() {
+        let dir = std::env::temp_dir().join(format!(
+            "coil-lsp-bare-case-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        write_hy_project(
+            &dir,
+            &[
+                ("lib.hy", "enum Switch {\n    On,\n    Off,\n}\n"),
+                (
+                    "main.hy",
+                    "use lib::Switch;\nfn f(Switch s) -> int {\n    return match s {\n        On => 1,\n        Off => 2,\n    };\n}\nfn main() { let _ = f(Switch::On); return; }\n",
+                ),
+            ],
+        );
+        let (state, uris) = open_state(&dir, &[("main.hy", None)]);
+        let main = std::fs::read_to_string(dir.join("main.hy")).unwrap();
+        let offset = main.find("On =>").expect("arm");
+        let locations =
+            identifier_locations(&state, &uris["main.hy"], byte_position(&main, offset), true);
+        assert!(
+            !(locations.len() == 1 && locations[0].uri == uris["main.hy"]),
+            "`On` resolved as a local binding of its arm: {locations:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn rename_skips_comments_and_strings() {
         let source = "// helper leftover\nfn helper() { return; }\nfn main() { let s = \"helper\"; helper(); return; }\n";
