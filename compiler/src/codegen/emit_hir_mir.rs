@@ -1021,7 +1021,13 @@ impl Compiler {
         if let Some(inst) = call.instance.as_ref().filter(|i| i.ground.is_some()) {
             let ground = inst.ground.as_ref().expect("ground call");
             let method = &ground.method;
-            let key = self.instance_clone(&call.key, &inst.args).unwrap_or_else(|| call.key.clone());
+            // A niche result the shared entry returns as its enum object
+            // (`fn id(T x) -> T` at `Option<T>`, #1595): direct MIR calls
+            // that entry, as emission does, and moves it to the niche word.
+            let key = match self.hir_ret_shape(hir, id, &natural) {
+                Some(true) => call.key.clone(),
+                _ => self.instance_clone(&call.key, &inst.args).unwrap_or_else(|| call.key.clone()),
+            };
             let steps = self.hir_mir_once(|this| {
                 let mut steps = Vec::new();
                 this.plan_call_instance_dict(&mut steps, (&inst.class, method, &key), &inst.args, span.0..span.1);
@@ -1648,7 +1654,11 @@ impl Compiler {
                 }
                 if let Some(inst) = call.instance.as_ref().filter(|i| i.ground.is_some()) {
                     let method = &inst.ground.as_ref().expect("ground call").method;
-                    let key = self.instance_clone(&call.key, &inst.args).unwrap_or_else(|| call.key.clone());
+                    // The entry [`Self::hir_mir_call`] calls (#1595).
+                    let key = match self.hir_ret_shape(hir, id, &Self::hir_call_rep(call)) {
+                        Some(true) => call.key.clone(),
+                        _ => self.instance_clone(&call.key, &inst.args).unwrap_or_else(|| call.key.clone()),
+                    };
                     return self.hir_mir_probe_unplanned(|this, steps| {
                         this.plan_call_instance_dict(steps, (&inst.class, method, &key), &inst.args, span);
                     });
