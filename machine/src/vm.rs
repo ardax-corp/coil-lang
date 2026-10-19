@@ -442,6 +442,13 @@ pub(crate) const STEP_BUDGET_EXHAUSTED: &str =
 /// Call depths [`Machine::rearm_call_window`] reserves ahead of the current one.
 const CALL_WINDOW: usize = 32;
 
+/// Resume ip of an over-apply stub frame, plus the count of arguments
+/// waiting in it (#1550): a closure called with more arguments than it
+/// takes returns into the stub, and `finish_over_apply` calls the result
+/// with the rest. Past every code offset and every `u32` PC, so frame-map
+/// and symbol lookups find nothing at it.
+const OVER_APPLY_IP: usize = 1 << 40;
+
 pub struct Machine<const S: usize> {
     heap: crate::memory::HeapSlot,
     stack: Stack<Value>,
@@ -489,6 +496,10 @@ pub struct Machine<const S: usize> {
     /// overwrite the outer depth.
     nested_frame_depths: Vec<usize>,
     nested_return: Option<Value>,
+    /// Over-apply stub frames entered and not yet finished (`OVER_APPLY_IP`).
+    /// A panic that unwinds one leaves the count high, which only keeps
+    /// `return_bookkeeping` on.
+    over_apply_frames: usize,
     /// Set when `execute` pauses before a native FFI call that may reenter the VM.
     pending_ffi: Option<PendingFfiInvoke>,
     /// Arguments of the native FFI calls in flight (nested when a callback
@@ -626,6 +637,7 @@ impl<const S: usize> Machine<S> {
             return_bookkeeping: false,
             nested_frame_depths: Vec::new(),
             nested_return: None,
+            over_apply_frames: 0,
             pending_ffi: None,
             ffi_arg_roots: Vec::new(),
             pending_io: None,
@@ -997,6 +1009,7 @@ impl<const S: usize> Machine<S> {
         self.nested_frame_depths.clear();
         self.nested_return = None;
         self.resume_stack.clear();
+        self.over_apply_frames = 0;
         self.return_bookkeeping = !self.frame_pins.is_empty();
         self.statics.clear();
         if let Some(dbg) = self.debug.as_mut() {
@@ -1158,6 +1171,10 @@ impl<const S: usize> Machine<S> {
         };
         for frame_idx in (0..self.frames.len()).rev() {
             let ip = self.frames[frame_idx].tell();
+            // An over-apply stub runs no code of its own.
+            if ip >= OVER_APPLY_IP {
+                continue;
+            }
             // A caller's saved ip is its return address: name the call.
             let ip = if frame_idx + 1 == self.frames.len() { ip } else { ip.saturating_sub(1) };
             // The bootstrap frame (prologue `CALL main`) is not user code.
@@ -2663,20 +2680,28 @@ impl<const S: usize> Machine<S> {
         });
     }
 
+    /// Resume the caller after a `RETURN` pushed its value. `Some(paused)`
+    /// when `execute` must stop instead, with what it returns: the VM
+    /// panicked doing so (an over-apply call overflowing the stack).
     #[inline(always)]
-    fn after_return(&mut self, ip: &mut usize, sp: &mut usize) {
+    #[must_use]
+    fn after_return(&mut self, ip: &mut usize, sp: &mut usize) -> Option<bool> {
         let caller = self.frames.get_mut();
         *ip = caller.tell();
         *sp = caller.get();
         // Coroutine resume bookkeeping is cold for ordinary calls (fib).
         if unlikely(self.return_bookkeeping) {
-            self.after_return_bookkeeping(ip, sp);
+            return self.after_return_bookkeeping(ip, sp);
         }
+        None
     }
 
     #[cold]
     #[inline(never)]
-    fn after_return_bookkeeping(&mut self, ip: &mut usize, sp: &mut usize) {
+    fn after_return_bookkeeping(&mut self, ip: &mut usize, sp: &mut usize) -> Option<bool> {
+        if *ip >= OVER_APPLY_IP {
+            return self.finish_over_apply(ip, sp);
+        }
         if !self.resume_stack.is_empty()
             && let Some(ctx) = self.resume_stack.last().copied()
             && self.frames.len() <= ctx.frame_depth
@@ -2703,8 +2728,38 @@ impl<const S: usize> Machine<S> {
             }
         }
         self.return_bookkeeping = self.nested_depth > 0
+            || self.over_apply_frames > 0
             || !self.resume_stack.is_empty()
             || !self.frame_pins.is_empty();
+        None
+    }
+
+    /// A closure called with more arguments than it takes returned into its
+    /// over-apply stub frame (`call_fn_object`): the stack holds
+    /// `[rest_args..., result]`. Drop the stub and call `result(rest_args)`
+    /// in its place, returning where the original call returns.
+    fn finish_over_apply(&mut self, ip: &mut usize, sp: &mut usize) -> Option<bool> {
+        let extras = *ip - OVER_APPLY_IP;
+        let target = self.stack.pop();
+        self.over_apply_frames -= 1;
+        let _ = self.pop_call_frame();
+        let caller = self.frames.get();
+        let return_ip = caller.tell();
+        *sp = caller.get();
+        let code: &[Byte] = unsafe {
+            std::slice::from_raw_parts(self.program_code.as_ptr().cast(), self.program_code.len())
+        };
+        let (next, flow) = self.call_indirect(target, extras, 0, return_ip, sp, code);
+        *ip = next;
+        let stop = match flow {
+            dispatch::RestFlow::Continue => None,
+            dispatch::RestFlow::Done(paused) => Some(paused),
+        };
+        self.return_bookkeeping = self.nested_depth > 0
+            || self.over_apply_frames > 0
+            || !self.resume_stack.is_empty()
+            || !self.frame_pins.is_empty();
+        stop
     }
 
     /// A `yield from` delegate returned: its delegator continues after the
@@ -2997,6 +3052,7 @@ impl<const S: usize> Machine<S> {
         self.statics.fill(Value::default());
         self.program_string_cache.fill(Value::default());
         self.nested_depth = 0;
+        self.over_apply_frames = 0;
         self.return_bookkeeping = false;
         self.nested_frame_depths.clear();
         self.nested_return = None;
@@ -3041,6 +3097,7 @@ impl<const S: usize> Machine<S> {
         self.stack.seek(0);
         self.resume_stack.clear();
         self.nested_depth = 0;
+        self.over_apply_frames = 0;
         self.return_bookkeeping = false;
         self.nested_frame_depths.clear();
         self.nested_return = None;
@@ -3519,8 +3576,10 @@ impl<const S: usize> Machine<S> {
         self.stack.seek(saved_sp);
         self.nested_depth -= 1;
         let _ = self.nested_frame_depths.pop();
-        self.return_bookkeeping =
-            self.nested_depth > 0 || !self.resume_stack.is_empty() || !self.frame_pins.is_empty();
+        self.return_bookkeeping = self.nested_depth > 0
+            || self.over_apply_frames > 0
+            || !self.resume_stack.is_empty()
+            || !self.frame_pins.is_empty();
         self.nested_return.take().unwrap_or_default()
     }
 
@@ -3869,7 +3928,9 @@ impl<const S: usize> Machine<S> {
                         self.stack.seek(return_sp);
                         self.stack.push(payload);
                         self.stack.push(tag);
-                        self.after_return(&mut ip, &mut sp);
+                        if let Some(paused) = self.after_return(&mut ip, &mut sp) {
+                            return paused;
+                        }
                     } else {
                         let ret_val = self.stack.pop();
                         if self.capture_nested_return(ret_val) {
@@ -3878,7 +3939,9 @@ impl<const S: usize> Machine<S> {
                         let return_sp = self.pop_call_frame();
                         self.stack.seek(return_sp);
                         self.stack.push(ret_val);
-                        self.after_return(&mut ip, &mut sp);
+                        if let Some(paused) = self.after_return(&mut ip, &mut sp) {
+                            return paused;
+                        }
                     }
                 }
                 // (same shape as `BinSlotSlot`) to avoid two temp pushes.
@@ -3974,7 +4037,9 @@ impl<const S: usize> Machine<S> {
                     let return_sp = self.pop_call_frame();
                     self.stack.seek(return_sp);
                     self.stack.push(ret_val);
-                    self.after_return(&mut ip, &mut sp);
+                    if let Some(paused) = self.after_return(&mut ip, &mut sp) {
+                        return paused;
+                    }
                 }
                 Instruction::ConstReturnImm => {
                     let ret_val = Value::from(opcode.operand_u32() as i32 as i64 as u64);
@@ -3984,7 +4049,9 @@ impl<const S: usize> Machine<S> {
                     let return_sp = self.pop_call_frame();
                     self.stack.seek(return_sp);
                     self.stack.push(ret_val);
-                    self.after_return(&mut ip, &mut sp);
+                    if let Some(paused) = self.after_return(&mut ip, &mut sp) {
+                        return paused;
+                    }
                 }
                 Instruction::BinReturn => {
                     // Compute result without leaving an intermediate TOS;
@@ -4003,7 +4070,9 @@ impl<const S: usize> Machine<S> {
                     let return_sp = self.pop_call_frame();
                     self.stack.seek(return_sp);
                     self.stack.push(ret_val);
-                    self.after_return(&mut ip, &mut sp);
+                    if let Some(paused) = self.after_return(&mut ip, &mut sp) {
+                        return paused;
+                    }
                 }
                 Instruction::MakeEnumReturn | Instruction::MakeEnumReturnK => {
                     self.push_make_enum(opcode, ip);
@@ -4014,7 +4083,9 @@ impl<const S: usize> Machine<S> {
                     let return_sp = self.pop_call_frame();
                     self.stack.seek(return_sp);
                     self.stack.push(ret_val);
-                    self.after_return(&mut ip, &mut sp);
+                    if let Some(paused) = self.after_return(&mut ip, &mut sp) {
+                        return paused;
+                    }
                 }
                 Instruction::DenseBin | Instruction::DenseBin2 => {
                     if let Err(t) = dispatch::dense_bin(&mut self.stack, sp, opcode, stack_cap) {
