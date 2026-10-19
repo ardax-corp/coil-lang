@@ -4786,6 +4786,9 @@ impl Compiler {
         if self.hir_clone_drops_forwarded(&forwarded) {
             forwarded.clear();
         }
+        if forwarded.iter().any(|&i| !self.hir_frame_dict(i)) {
+            return Err("callee-trait");
+        }
         // A function argument (`map(xs, fn (int x) => ..)`) is one closure
         // word whose own types are ground. A body forwarding its
         // dictionaries also passes its own bare type parameters, already
@@ -4898,6 +4901,24 @@ impl Compiler {
             unbox,
             forwarded,
         })
+    }
+
+    /// Whether the frame holds dictionary `i` as the checker numbered it
+    /// for a call forwarding it. A trait method's own bounded type
+    /// parameters (`fn third<W: Show>`) have no dictionary in its frame
+    /// yet: a default body numbers them after the trait's own `__dict0`
+    /// and an instance method after its context ones, past every slot,
+    /// while a context-free instance method numbers them from 0, where its
+    /// `__dict0`, when it has one, is the instance's own (#1471).
+    fn hir_frame_dict(&self, i: usize) -> bool {
+        self.lookup_slot(&format!("__dict{i}")).is_some()
+            && !self.current_function_table_key.as_deref().is_some_and(|key| {
+                self.checker
+                    .generics()
+                    .instances
+                    .iter()
+                    .any(|inst| inst.context.is_empty() && inst.method_fqns.values().any(|f| f == key))
+            })
     }
 
     /// A clone has no dictionaries to forward: its types are ground, so a
