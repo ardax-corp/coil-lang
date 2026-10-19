@@ -6243,8 +6243,10 @@ impl Compiler {
         let unit_arg = |i: usize| lower::is_unit_make(hir, args[i]);
         let unit_value = |i: usize| !unit_arg(i) && lower::is_unit_value(hir, &self.checker, args[i]);
         let word_arg = |i: usize| -> Check {
-            // A boxed `Ok(())` carries the empty tuple, as in the AST.
-            if unit_arg(i) && !(result && variant == "Ok" && *want == Rep::Word(ValueLayout::Boxed)) {
+            // A boxed `()` payload is the empty tuple object, as in the AST
+            // (`Ok(())`, `Some(())`, #1449).
+            let boxed = *want == Rep::Word(ValueLayout::Boxed);
+            if unit_arg(i) && !boxed {
                 return Err("unit-payload");
             }
             // The implicit `Ok(())` closing a boxed result-mode body: a zero
@@ -6252,8 +6254,10 @@ impl Compiler {
             if matches!(hir.expr(args[i]).kind, HirKind::Lit(Lit::Unit)) && result && variant == "Ok" && *want == Rep::Word(ValueLayout::Boxed) {
                 return Ok(());
             }
+            // `Some(f())` of a `()`-typed `f()`: its effect, then the empty
+            // tuple object.
             if unit_value(i) {
-                return Err("unit-payload");
+                return if boxed { self.hir_check_effect(hir, emit, args[i]) } else { Err("unit-payload") };
             }
             self.hir_check_value(hir, emit, args[i], &Rep::Word(self.value_layout(&payload[i])))
         };

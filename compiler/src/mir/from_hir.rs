@@ -5126,10 +5126,13 @@ impl Lower<'_> {
         let drop_type = if args.is_empty() { None } else { (self.inp.enum_drop)(enum_name) };
         let mut words = Vec::with_capacity(args.len());
         for (&arg, t) in args.iter().zip(tys) {
-            // A `()` payload is the empty tuple object.
-            if lower::is_unit_make(self.hir, arg) {
-                let obj = self.b.ins_alloc(MirAllocKind::Tuple, Vec::new()).map_err(mir)?;
-                words.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?);
+            // A `()` payload is the empty tuple object, after a `()`-typed
+            // value's effect (`Some(f())`, #1449).
+            if lower::is_unit_make(self.hir, arg) || is_unit(t) {
+                if !self.effect(arg)? {
+                    return Ok(Val::Never);
+                }
+                words.push(self.unit_object()?);
                 continue;
             }
             let want = self
@@ -5152,7 +5155,7 @@ impl Lower<'_> {
         // Declaration-order payload kinds, as HIR emission's `MakeEnumK`; a
         // `()` payload is the empty tuple object, a pointer.
         let kinds = common::pack_word_kinds(args.iter().zip(tys).map(|(&a, t)| {
-            if lower::is_unit_make(self.hir, a) {
+            if lower::is_unit_make(self.hir, a) || is_unit(t) {
                 common::WORD_POINTER
             } else {
                 (self.inp.word_kind)(t)

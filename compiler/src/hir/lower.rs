@@ -123,23 +123,17 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
             if args.len() != if option { 1 } else { 2 } {
                 return None;
             }
-            for (i, arg) in args.iter().enumerate() {
-                match classify_in(checker, arg, seen)? {
-                    // `Ok(())` is the only unit payload.
-                    ValueClass::Unit if !(result && i == 0) => return None,
-                    _ => {}
-                }
+            // A `()` payload is the empty tuple object (#1449).
+            for arg in args {
+                classify_in(checker, arg, seen)?;
             }
             params_closed(ty).then_some(ValueClass::Enum)
         }
         Ty::Sum { name, variants } => {
             if common::is_builtin_option_enum(name) || common::is_builtin_result_enum(name) {
-                for (variant, payload) in variants {
+                for (_, payload) in variants {
                     for field in payload.field_types() {
-                        match classify_in(checker, field, seen)? {
-                            ValueClass::Unit if variant != "Ok" => return None,
-                            _ => {}
-                        }
+                        classify_in(checker, field, seen)?;
                     }
                 }
                 return params_closed(ty).then_some(ValueClass::Enum);
@@ -1221,8 +1215,7 @@ fn user_enum(checker: &Checker, name: &str, seen: &mut Vec<String>) -> Option<Va
     seen.push(name.to_string());
     let ok = variants.iter().all(|(_, _, payload)| {
         payload.iter().all(|field| {
-            super::layout::ty_is_closed(field)
-                && classify_in(checker, field, seen).is_some_and(is_word)
+            super::layout::ty_is_closed(field) && classify_in(checker, field, seen).is_some()
         })
     });
     seen.pop();
@@ -1265,7 +1258,7 @@ fn generic_user_enum(checker: &Checker, name: &str, args: &[Ty], seen: &mut Vec<
         generic_enum_payload(checker, name, variant, args).is_some_and(|payload| {
             payload
                 .iter()
-                .all(|field| params_closed(field) && classify_in(checker, field, seen).is_some_and(is_word))
+                .all(|field| params_closed(field) && classify_in(checker, field, seen).is_some())
         })
     });
     seen.pop();
