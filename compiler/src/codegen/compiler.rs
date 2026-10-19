@@ -2155,6 +2155,18 @@ impl Compiler {
                 let local = b.local(&format!("arg{slot}"), open.clone(), LocalKind::Param);
                 let word = b.read(local);
                 b.builtin(Builtin::Relayout, vec![word], own)
+            } else if let Some((tag, ty)) = &tag
+                && *tag == ValueTag::Instance as u32
+                && matches!(self.value_layout(ty), ValueLayout::NicheOption | ValueLayout::NicheResult | ValueLayout::NicheUnitResult)
+            {
+                // A niche `Option` / `Result` comes as its enum object,
+                // boxed: unboxed, read as a plain word, to its niche word
+                // (#1580), as `emit_builtin_enum_show`'s adapter.
+                let int = crate::typechecking::ty::int();
+                let local = b.local(&format!("arg{slot}"), int.clone(), LocalKind::Param);
+                let word = b.read(local);
+                let obj = b.builtin(Builtin::Unbox { tag: *tag }, vec![word], int);
+                b.builtin(Builtin::Relayout, vec![obj], ty.clone())
             } else if let Some((tag, ty)) = tag {
                 // A `()` moves as the word it is.
                 let ty = if tag == ValueTag::Unit as u32 { crate::typechecking::ty::int() } else { ty };
@@ -2900,6 +2912,22 @@ impl Compiler {
         class: &str,
         lookup: &[crate::typechecking::Ty],
     ) -> bool {
+        // A built-in enum's sum or constructor type (`Some(e)`'s, in a mono
+        // clone) as its `App` spelling, which a generic instance's head
+        // binds its context's variables against (#1580).
+        let spelled: Vec<Ty>;
+        let lookup = if lookup.iter().any(|t| !matches!(t, Ty::App(..)) && crate::typechecking::ty::builtin_enum_app(t).is_some()) {
+            spelled = lookup
+                .iter()
+                .map(|t| match t {
+                    Ty::App(..) => t.clone(),
+                    _ => crate::typechecking::ty::builtin_enum_app(t).unwrap_or_else(|| t.clone()),
+                })
+                .collect();
+            &spelled[..]
+        } else {
+            lookup
+        };
         // An open goal (`Show<Tree<T>>`, `Show<T>`) is served by a dictionary
         // in scope, or by the mono clone's concrete types; looking it up
         // would match an arbitrary instance (#551).

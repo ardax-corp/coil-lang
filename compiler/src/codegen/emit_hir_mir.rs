@@ -1009,7 +1009,6 @@ impl Compiler {
         }
         let natural = Self::hir_call_rep(call);
         let span = hir.expr(id).span;
-        let natural_args = |this: &Self, params: &[ValueLayout]| args.iter().zip(params).all(|(&a, &p)| this.hir_arg_passes(hir, emit, a, p));
         if let Some(inst) = call.instance.as_ref().filter(|i| i.ground.is_some()) {
             let ground = inst.ground.as_ref().expect("ground call");
             let method = &ground.method;
@@ -1038,12 +1037,28 @@ impl Compiler {
                 .iter()
                 .zip(&boxes)
                 .all(|(&a, b)| b.is_none() || !matches!(self.hir_natural(hir, emit, a), Some(Rep::Pair(_))));
+            // A niche word a generic instance's shared entry takes as its
+            // enum object (#1579); its clone at the call's types takes the
+            // niche word itself.
+            let clone = key != call.key;
+            let niches: Vec<Option<ValueLayout>> = args
+                .iter()
+                .zip(&call.params)
+                .map(|(&a, &p)| (!self.hir_arg_passes(hir, emit, a, p)).then(|| self.hir_niche_arg(hir, emit, a, p)).flatten())
+                .collect();
             if let Some(dicts) = dicts
                 && unpaired
-                && natural_args(self, &call.params)
+                && args.iter().zip(&call.params).zip(&niches).all(|((&a, &p), n)| n.is_some() || self.hir_arg_passes(hir, emit, a, p))
                 && let Some(target) = target
                 && let Some(boxed_ret) = self.hir_ret_shape(hir, id, &natural)
             {
+                for (&arg, &layout) in args.iter().zip(&niches) {
+                    if let Some(layout) = layout
+                        && !clone
+                    {
+                        t.niche_args.insert(arg.0, layout);
+                    }
+                }
                 t.calls.insert(
                     id.0,
                     crate::mir::HirCallSite {
