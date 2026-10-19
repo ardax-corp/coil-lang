@@ -127,6 +127,11 @@ use crate::typechecking::virtual_modules::{BuiltinExport, VirtualModules};
 /// (captures, parameters, body locals): always deeper than any static.
 const LAMBDA_LOCAL_FRAME: usize = usize::MAX;
 
+/// The active constraint standing for a context-free instance's own
+/// dictionary (`__dict0`) while its methods are inferred: no trait has this
+/// name, so no goal is ever served by it (#1471).
+const OWN_DICT_PLACEHOLDER: &str = "$instance";
+
 /// One candidate in a compile-time overload set (arity and/or parameter types).
 ///
 /// Stored in [`Checker::overload_sets`] keyed by the function's simple

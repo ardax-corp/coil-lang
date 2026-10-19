@@ -80,6 +80,8 @@ pub(super) struct BareNameShield {
     /// Whether each key (bare and `module::name`) was in `generic_fns` and
     /// `generics.generic_fns`.
     generic: Vec<(String, bool, bool)>,
+    /// Each key's `fn_dict_arity` entry.
+    arity: Vec<(String, Option<usize>)>,
     env: Vec<(String, usize)>,
     defs: Vec<(DefId, Option<Scheme>)>,
 }
@@ -11733,7 +11735,8 @@ impl Checker {
 
     /// Everything inferring a trait signature or instance method as a
     /// function records under its bare method name: result-mode flags, the
-    /// generic-fn mark of a method with its own type parameters (#1467), the
+    /// generic-fn mark of a method with its own type parameters (#1467) and
+    /// the dictionary count of one with bounds (#1471), the
     /// env binding, and (when a free fn of that name exists) that fn's DefId
     /// scheme. The name belongs to the free fn, or to nobody, so a
     /// function-style call `method(x)` resolves through the trait instead of
@@ -11751,6 +11754,7 @@ impl Checker {
                 .iter()
                 .map(|(k, _, _)| (k.clone(), self.generic_fns.contains(k), self.generics.generic_fns.contains(k)))
                 .collect(),
+            arity: modes.iter().map(|(k, _, _)| (k.clone(), self.fn_dict_arity.get(k).copied())).collect(),
             modes,
             env: names.iter().map(|n| (n.to_string(), mark)).collect(),
             defs: names
@@ -11784,6 +11788,12 @@ impl Checker {
                     set.remove(&key);
                 }
             }
+        }
+        for (key, arity) in shield.arity {
+            match arity {
+                Some(n) => self.fn_dict_arity.insert(key, n),
+                None => self.fn_dict_arity.remove(&key),
+            };
         }
         if let Some(top) = self.env.top_mut() {
             for (name, mark) in &shield.env {
