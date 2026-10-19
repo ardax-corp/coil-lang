@@ -4325,22 +4325,11 @@ fn main() {
         .unwrap_or(bc.len());
     let body = &bc[start..end];
     let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
-    let dense = body.iter().any(|b| is_dense_bin_op(*b.bytecode()));
-    let mapped = body
-        .iter()
-        .any(|b| *b.bytecode() == Instruction::DictEntries);
-    assert!(
-        dense || mapped,
-        "C2b dict for-in should DenseBin or mapped DictEntries; opcodes={names:?}"
-    );
+    // A record's items are built from its slots: no keyed table.
     assert!(
         body.iter()
-            .any(|b| *b.bytecode() == Instruction::DictEntries),
-        "dict for-in keeps DictEntries; opcodes={names:?}"
-    );
-    assert!(
-        body.iter().all(|b| *b.bytecode() != Instruction::GetField),
-        "dict for-in helper must not GetField; opcodes={names:?}"
+            .all(|b| !matches!(*b.bytecode(), Instruction::GetField | Instruction::DictEntries)),
+        "dict for-in helper must not GetField / DictEntries; opcodes={names:?}"
     );
     let mut vm = machine::Machine::<64>::with_operand_capacity(64);
     p.wire_host_natives(&mut vm);
@@ -4379,22 +4368,11 @@ fn main() {
         .unwrap_or(bc.len());
     let body = &bc[start..end];
     let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
-    let dense = body.iter().any(|b| is_dense_bin_op(*b.bytecode()));
-    let mapped = body
-        .iter()
-        .any(|b| *b.bytecode() == Instruction::DictEntries);
-    assert!(
-        dense || mapped,
-        "C2b dict for (k,v) should DenseBin or mapped DictEntries; opcodes={names:?}"
-    );
+    // A record's items are built from its slots: no keyed table.
     assert!(
         body.iter()
-            .any(|b| *b.bytecode() == Instruction::DictEntries),
-        "dict for (k,v) keeps DictEntries; opcodes={names:?}"
-    );
-    assert!(
-        body.iter().all(|b| *b.bytecode() != Instruction::GetField),
-        "dict for (k,v) helper must not GetField; opcodes={names:?}"
+            .all(|b| !matches!(*b.bytecode(), Instruction::GetField | Instruction::DictEntries)),
+        "dict for (k,v) helper must not GetField / DictEntries; opcodes={names:?}"
     );
     let mut vm = machine::Machine::<64>::with_operand_capacity(64);
     p.wire_host_natives(&mut vm);
