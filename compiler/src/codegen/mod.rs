@@ -270,6 +270,9 @@ pub struct Compiler {
     /// would otherwise land in every archive's string table).
     builtin_show_thunks: Vec<(String, &'static str, &'static [&'static str])>,
     builtin_show_used: HashSet<String>,
+    /// Reserved `Show` thunks of ground tuples (#1451), emitted after the
+    /// module's own functions.
+    tuple_show_thunks: Vec<(String, Ty)>,
     /// Fixed arity + rest flag per function table key. Survives multi-file
     /// `check_program` clears of `Checker::fn_param_names`, so `MakeFn` for
     /// imported names (e.g. `spawn(run_jobs, …)` after `use pool::worker::run_jobs`)
@@ -675,6 +678,7 @@ impl Default for Compiler {
             fn_entry_labels: HashMap::with_capacity(32),
             builtin_show_thunks: Vec::new(),
             builtin_show_used: HashSet::new(),
+            tuple_show_thunks: Vec::new(),
             fn_arities: HashMap::with_capacity(32),
             module_items: std::collections::HashMap::default(),
             native: HashMap::default(),

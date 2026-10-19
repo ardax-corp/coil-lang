@@ -4449,6 +4449,27 @@ impl Lower<'_> {
         };
         let mut words = Vec::with_capacity(args.len());
         for (&arg, &tag) in args.iter().zip(&p.boxes) {
+            // A `()` runs for its effect: boxed to a bare type parameter
+            // as the word a dictionary adapter moves it as, else the empty
+            // tuple object a plain call passes (#1450).
+            if self.expr_ty(arg).is_some_and(|t| is_unit(t) && self.inp.word(t).is_none()) {
+                if !self.effect(arg)? {
+                    return Ok(Val::Never);
+                }
+                let v = match tag {
+                    Some(_) => self.b.ins_const(MirConst::I64(0)).map_err(mir)?,
+                    None => self.unit_object()?,
+                };
+                let v = match tag {
+                    Some(tag) => {
+                        let boxed = self.at_expr(arg, |l| l.b.ins_alloc(MirAllocKind::Boxed { tag }, vec![v]).map_err(mir))?;
+                        self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![boxed]).map_err(mir)?
+                    }
+                    None => v,
+                };
+                words.push(v);
+                continue;
+            }
             let Some(v) = self.word(arg)? else {
                 return Ok(Val::Never);
             };

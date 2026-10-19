@@ -9768,6 +9768,7 @@ impl Checker {
                 let _ = all_open;
             } else {
                 let lookup = self.instance_lookup_args(&constraint.class, &resolved_args);
+                self.ensure_tuple_show_instance(&constraint.class, &lookup);
                 if self
                     .generics
                     .find_instance(&constraint.class, &lookup)
@@ -10284,12 +10285,32 @@ impl Checker {
 
     /// (open vars in `wanted` may be bound by the match). Ambiguous matches
     /// are diagnosed instead of silently selecting declaration order.
+    /// A ground tuple whose items are shown as `%v` shows them has a
+    /// structural `Show` instance (#1451), registered the first time a goal
+    /// asks for it.
+    fn ensure_tuple_show_instance(&mut self, class: &str, wanted: &[Ty]) {
+        let [ty] = wanted else { return };
+        if class != "Show" {
+            return;
+        }
+        let ty = apply_ty_prune(&self.subst, ty);
+        if !matches!(&ty, Ty::Tuple(items) if !items.is_empty())
+            || Self::ty_mentions_var(&ty)
+            || !self.is_showable_for_format(&ty)
+            || self.generics.has_instance("Show", &ty)
+        {
+            return;
+        }
+        self.generics.register_tuple_show(ty);
+    }
+
     fn find_unique_instance(
         &mut self,
         class: &str,
         wanted: &[Ty],
         range: &Range<usize>,
     ) -> Result<Option<InstanceDef>, ()> {
+        self.ensure_tuple_show_instance(class, wanted);
         let wanted_lookup = self.instance_lookup_args(class, wanted);
         let candidates: Vec<_> = self
             .generics
