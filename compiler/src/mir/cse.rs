@@ -12,7 +12,7 @@ use super::func::MirFunc;
 use super::inst::{
     BlockId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp, ValueId,
 };
-use super::licm::dominators;
+use super::licm::Dominators;
 use super::ty::MirTy;
 
 /// Same-block value numbering. Returns how many instructions were removed.
@@ -150,8 +150,7 @@ fn gvn_dom(func: &mut MirFunc) -> usize {
         return 0;
     }
     let preds = func.preds();
-    let dom = dominators(func, &preds);
-    let idom = immediate_dominators(&dom, func.entry);
+    let dom = Dominators::new(func, &preds);
     let order = rpo(func);
     let defined_in = def_blocks(func);
 
@@ -159,7 +158,7 @@ fn gvn_dom(func: &mut MirFunc) -> usize {
     let mut avail_out: Vec<HashMap<ExprKey, ValueId>> = vec![HashMap::new(); n];
 
     for bid in order {
-        let mut avail = match idom[bid.index()] {
+        let mut avail = match dom.idom(bid) {
             Some(p) => avail_out[p.index()].clone(),
             None => HashMap::new(),
         };
@@ -203,7 +202,7 @@ fn pre_fully_anticipated(func: &mut MirFunc) -> usize {
         return 0;
     }
     let preds = func.preds();
-    let dom = dominators(func, &preds);
+    let dom = Dominators::new(func, &preds);
     let def_at = def_blocks(func);
     let forks: Vec<(BlockId, Vec<BlockId>)> = func
         .blocks
@@ -257,7 +256,7 @@ fn anticipated_in(
     func: &MirFunc,
     succ: BlockId,
     fork: BlockId,
-    dom: &[HashSet<BlockId>],
+    dom: &Dominators,
     def_at: &[Option<BlockId>],
 ) -> HashSet<ExprKey> {
     let mut out = HashSet::new();
@@ -284,13 +283,13 @@ fn anticipated_in(
 fn available_at(
     v: ValueId,
     at: BlockId,
-    dom: &[HashSet<BlockId>],
+    dom: &Dominators,
     def_at: &[Option<BlockId>],
 ) -> bool {
     let Some(db) = def_at.get(v.index()).and_then(|b| *b) else {
         return true;
     };
-    db == at || dom[at.index()].contains(&db)
+    db == at || dom.dominates(db, at)
 }
 
 fn def_blocks(func: &MirFunc) -> Vec<Option<BlockId>> {
@@ -394,22 +393,6 @@ fn apply_subst(func: &mut MirFunc, subst: &HashMap<ValueId, ValueId>) -> usize {
     }
     dce(func);
     removed.len()
-}
-
-fn immediate_dominators(dom: &[HashSet<BlockId>], entry: BlockId) -> Vec<Option<BlockId>> {
-    let n = dom.len();
-    let mut idom = vec![None; n];
-    for b in 0..n {
-        if BlockId(b as u32) == entry {
-            continue;
-        }
-        idom[b] = dom[b]
-            .iter()
-            .copied()
-            .filter(|d| d.index() != b)
-            .max_by_key(|d| dom[d.index()].len());
-    }
-    idom
 }
 
 fn rpo(func: &MirFunc) -> Vec<BlockId> {
