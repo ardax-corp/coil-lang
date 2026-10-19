@@ -3898,10 +3898,12 @@
         assert!(panicked, "code-end pointer: {out:?}");
         assert!(out.contains("internal error: CallIndirect target"), "{out:?}");
 
-        // A negative integer.
+        // A negative integer (`0 - 1`).
         let (panicked, _) = run_capturing_panic(&[
             const_int(42),
-            const_int(-1),
+            const_int(0),
+            const_int(1),
+            Byte::new(Instruction::SUB),
             Byte::new(Instruction::CallIndirect).with_operand_u32(1),
             Byte::new(Instruction::HALT),
         ]);
