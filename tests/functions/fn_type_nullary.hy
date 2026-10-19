@@ -24,8 +24,12 @@ fn konst(int k) -> fn() -> int {
     return fn () use (k) => k;
 }
 
-fn maker<T>(T x) -> fn() -> T {
-    return fn () use (x) => x;
+fn pass<T>(fn() -> T f) -> fn() -> T {
+    return f;
+}
+
+fn force<T>(fn() -> T f) -> T {
+    return f();
 }
 
 fn run_twice(fn(fn() -> int g) -> int run) -> int {
@@ -37,9 +41,9 @@ test("nullary fn type as a parameter and return type") {
     assert!(at_arrow(fn () => 2) == 2);
     assert!(at(konst(3)) == 3);
     assert!(at_arrow(konst(4)) == 4);
-    let m = maker("hi");
-    assert!(m() == "hi");
-    assert!(at(maker(5)) == 5);
+    assert!(force(pass(fn () => "hi")) == "hi");
+    assert!(force(fn () => "yo") == "yo");
+    assert!(at(pass(konst(5))) == 5);
     assert!(run_twice(fn (fn() -> int g) => g() * 2) == 42);
 }
 
