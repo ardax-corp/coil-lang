@@ -3862,6 +3862,66 @@
         assert_eq!(vm.pop().as_int(), 42);
     }
 
+    /// Runs `code` and returns whether it panicked, with its output.
+    fn run_capturing_panic(code: &[Byte]) -> (bool, String) {
+        let mut vm = Machine::<8>::default();
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        vm.with_output(TestOutputBuf(Arc::clone(&buf)));
+        vm.run(code);
+        let panicked = vm.panicked();
+        let _ = vm.restore_output();
+        let out = String::from_utf8(take_test_output(buf)).expect("output should be valid UTF-8");
+        (panicked, out)
+    }
+
+    /// `CallIndirect` on a word that is neither a function object nor a code
+    /// offset panics with an internal error instead of jumping (#1570).
+    #[test]
+    fn call_indirect_on_non_function_panics() {
+        // An integer past the end of the code.
+        let (panicked, out) = run_capturing_panic(&[
+            const_int(42),
+            const_int(1000),
+            Byte::new(Instruction::CallIndirect).with_operand_u32(1),
+            Byte::new(Instruction::HALT),
+        ]);
+        assert!(panicked, "out-of-range code pointer: {out:?}");
+        assert!(out.contains("internal error: CallIndirect target"), "{out:?}");
+
+        // The end of the code: a jump there would exit cleanly.
+        let (panicked, out) = run_capturing_panic(&[
+            const_int(42),
+            const_int(4),
+            Byte::new(Instruction::CallIndirect).with_operand_u32(1),
+            Byte::new(Instruction::HALT),
+        ]);
+        assert!(panicked, "code-end pointer: {out:?}");
+        assert!(out.contains("internal error: CallIndirect target"), "{out:?}");
+
+        // A negative integer (`0 - 1`).
+        let (panicked, _) = run_capturing_panic(&[
+            const_int(42),
+            const_int(0),
+            const_int(1),
+            Byte::new(Instruction::SUB),
+            Byte::new(Instruction::CallIndirect).with_operand_u32(1),
+            Byte::new(Instruction::HALT),
+        ]);
+        assert!(panicked, "negative code pointer");
+
+        // A heap object that is not a function (a tuple).
+        let (panicked, out) = run_capturing_panic(&[
+            const_int(42),
+            const_int(1),
+            const_int(2),
+            Byte::new(Instruction::MakeTuple).with_operand_u32(2),
+            Byte::new(Instruction::CallIndirect).with_operand_u32(1),
+            Byte::new(Instruction::HALT),
+        ]);
+        assert!(panicked, "tuple callee: {out:?}");
+        assert!(out.contains("internal error: CallIndirect target"), "{out:?}");
+    }
+
     /// `BoxValue` wraps a raw integer in an `Object::Boxed` heap cell;
     /// `UnboxValue` recovers the payload when tags match.
     #[test]
