@@ -334,23 +334,20 @@ pub enum MirInst {
         scrutinee: ValueId,
         index: u32,
     },
-    /// Heap `GetField` / `LoadField` on an escaping object (D1 maps).
+    /// Heap `LoadField` of slot `index` on an escaping object (D1 maps).
     /// `object` is [`MirTy::HeapRef`]. Dest is the field word (not SROA).
-    /// `name` is the string key for `GetField`; `LoadField` uses `index`.
     HeapFieldLoad {
         dest: ValueId,
         object: ValueId,
-        name: Option<ValueId>,
         index: u32,
     },
-    /// Heap `SetField`. Dest is the stored value (VM leaves it TOS).
-    /// Indexed slot form uses `index`; named form uses `name`.
+    /// Heap `SetField` of slot `index`. Dest is the stored value (VM
+    /// leaves it TOS).
     HeapFieldStore {
         dest: ValueId,
         object: ValueId,
         value: ValueId,
-        name: Option<ValueId>,
-        index: Option<u32>,
+        index: u32,
     },
     /// Heap index load (S3). `array` is `HeapRef`; `index` is `i64`.
     /// Reconstructs `Index` / `IndexUnchecked` (pin forms lower to the
@@ -593,10 +590,6 @@ pub enum MirAllocKind {
         tag: u32,
         type_id: u32,
     },
-    /// `MakeDict` — elems are interleaved value/name words (2 per field).
-    Dict,
-    /// `DictEntries`: dict heapref → array of `(string, V)` pairs (C2b).
-    DictEntries,
     /// `MakeCoro`: args → coroutine handle (C2b). Target is the async body.
     Coro {
         target: crate::il::Label,
@@ -636,8 +629,6 @@ impl MirAllocKind {
             Self::Object { .. } => "object",
             Self::Enum { .. } => "enum",
             Self::DropEnum { .. } => "dropenum",
-            Self::Dict => "dict",
-            Self::DictEntries => "dictentries",
             Self::Coro { .. } => "coro",
             Self::Boxed { .. } => "boxed",
             Self::Fn { .. } => "fn",
@@ -779,27 +770,8 @@ impl MirInst {
             Self::HostInvoke { args, .. } | Self::Ffi { args, .. } | Self::Call { args, .. } => args.clone(),
             Self::CallIndirect { callee, args, .. } => args.iter().copied().chain([*callee]).collect(),
             Self::MatchPayload { scrutinee, .. } => vec![*scrutinee],
-            Self::HeapFieldLoad {
-                object, name, ..
-            } => {
-                let mut v = vec![*object];
-                if let Some(n) = name {
-                    v.push(*n);
-                }
-                v
-            }
-            Self::HeapFieldStore {
-                object,
-                value,
-                name,
-                ..
-            } => {
-                let mut v = vec![*object, *value];
-                if let Some(n) = name {
-                    v.push(*n);
-                }
-                v
-            }
+            Self::HeapFieldLoad { object, .. } => vec![*object],
+            Self::HeapFieldStore { object, value, .. } => vec![*object, *value],
             Self::Index { array, index, .. } => vec![*array, *index],
             Self::StoreIndex {
                 array,
@@ -857,25 +829,10 @@ impl MirInst {
                 *callee = map(*callee);
             }
             Self::MatchPayload { scrutinee, .. } => *scrutinee = map(*scrutinee),
-            Self::HeapFieldLoad {
-                object, name, ..
-            } => {
-                *object = map(*object);
-                if let Some(n) = name {
-                    *n = map(*n);
-                }
-            }
-            Self::HeapFieldStore {
-                object,
-                value,
-                name,
-                ..
-            } => {
+            Self::HeapFieldLoad { object, .. } => *object = map(*object),
+            Self::HeapFieldStore { object, value, .. } => {
                 *object = map(*object);
                 *value = map(*value);
-                if let Some(n) = name {
-                    *n = map(*n);
-                }
             }
             Self::Index { array, index, .. } => {
                 *array = map(*array);

@@ -5,7 +5,7 @@ use std::ffi::{c_char, c_void, CStr};
 use common::Value;
 use libffi::middle::{Arg, Cif, CodePtr, Type};
 
-use crate::memory::{CStructLayout, FfiType, Heap, Member, ObjString, Object};
+use crate::memory::{CStructLayout, FfiType, Heap, ObjString, Object};
 
 use super::signature::{FfiError, FfiSignature};
 
@@ -195,11 +195,24 @@ impl Drop for FfiStringReset {
     }
 }
 
-fn instance_field(heap: &mut Heap, addr: u64, fname: &str) -> Result<Value, FfiError> {
+/// The slot of `layout`'s field `i` in a record: records are slotted
+/// objects whose slots are their fields sorted by name.
+fn struct_record_slot(layout: &CStructLayout, i: usize) -> usize {
+    let name = &layout.fields[i].0;
+    layout.fields.iter().filter(|(f, _)| f < name).count()
+}
+
+fn instance_field(heap: &mut Heap, addr: u64, layout: &CStructLayout, i: usize) -> Result<Value, FfiError> {
+    let fname = &layout.fields[i].0;
     let obj = heap
         .find_object_by_addr(addr)
         .ok_or_else(|| FfiError::Unsupported("struct value not found on heap".into()))?;
     match obj {
+        // A record: the field's slot.
+        Object::Instance(gc) if gc.as_ref().slot_len().is_some() => gc
+            .as_ref()
+            .slot(struct_record_slot(layout, i))
+            .ok_or_else(|| FfiError::Unsupported(format!("missing field `{fname}`"))),
         Object::Instance(gc) => {
             let key = heap.intern(fname.to_string());
             gc.as_ref()
@@ -274,12 +287,12 @@ fn pack_struct(
     out.clear();
     out.resize(layout.size, 0);
     let addr = value.raw() as u64;
-    for (i, (fname, fty)) in layout.fields.iter().enumerate() {
+    for (i, (_, fty)) in layout.fields.iter().enumerate() {
         let off = *layout
             .offsets
             .get(i)
             .ok_or_else(|| FfiError::Unsupported("struct layout missing field offset".into()))?;
-        let val = instance_field(heap, addr, fname)?;
+        let val = instance_field(heap, addr, layout, i)?;
         write_field_at(out, off, &val, *fty, heap, layouts)?;
     }
     Ok(())
@@ -356,19 +369,16 @@ fn unpack_struct(
     buf: &[u8],
 ) -> Result<Value, FfiError> {
     use crate::memory::ObjInstance;
-    let (obj, mut gc) = heap.alloc(ObjInstance::default(), Object::Instance);
-    for (i, (fname, fty)) in layout.fields.iter().enumerate() {
+    // A record: a slotted object, its slots the fields sorted by name.
+    let slots = vec![Value::default(); layout.fields.len()];
+    let (obj, mut gc) = heap.alloc(ObjInstance::with_slots(common::FFI_STRUCT_TYPE_ID, slots), Object::Instance);
+    for (i, (_, fty)) in layout.fields.iter().enumerate() {
         let off = *layout
             .offsets
             .get(i)
             .ok_or_else(|| FfiError::Unsupported("struct layout missing field offset".into()))?;
         let (val, _nbytes) = read_field_bytes(buf, off, *fty, heap, layouts)?;
-        let key = heap.intern(fname.clone());
-        let member = match heap.find_object_by_addr(val.raw() as u64) {
-            Some(o) => Member::Object(o),
-            None => Member::Value(val),
-        };
-        gc.as_mut().set(key, member);
+        gc.as_mut().set_slot(struct_record_slot(layout, i), val);
     }
     Ok(Value::from(obj.addr()))
 }
@@ -790,6 +800,7 @@ pub fn invoke_via_libffi(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memory::Member;
     use crate::ffi::FfiSignatureBuilder;
     use crate::ffi::library_candidates;
 
@@ -1370,8 +1381,9 @@ mod tests {
         CStructLayout::from_archive(&archived)
     }
 
-    fn instance_int(heap: &mut Heap, addr: u64, name: &str) -> i64 {
-        instance_field(heap, addr, name).unwrap().as_int()
+    fn instance_int(heap: &mut Heap, addr: u64, layout: &CStructLayout, name: &str) -> i64 {
+        let i = layout.fields.iter().position(|(f, _)| f == name).unwrap();
+        instance_field(heap, addr, layout, i).unwrap().as_int()
     }
 
     #[repr(C)]
@@ -1436,9 +1448,9 @@ mod tests {
         let unpacked =
             unpack_struct(&mut heap, &layout, std::slice::from_ref(&layout), &packed).unwrap();
         let uaddr = unpacked.raw() as u64;
-        assert_eq!(instance_int(&mut heap, uaddr, "a"), 1);
-        assert_eq!(instance_int(&mut heap, uaddr, "b"), 0x11223344);
-        assert_eq!(instance_int(&mut heap, uaddr, "c"), 7);
+        assert_eq!(instance_int(&mut heap, uaddr, &layout, "a"), 1);
+        assert_eq!(instance_int(&mut heap, uaddr, &layout, "b"), 0x11223344);
+        assert_eq!(instance_int(&mut heap, uaddr, &layout, "c"), 7);
 
         let layouts = vec![layout];
         let sig = FfiSignature::from_parts("check_padded", vec![FfiType::Struct(0)], FfiType::Int)

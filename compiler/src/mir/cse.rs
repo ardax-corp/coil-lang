@@ -113,7 +113,7 @@ fn read_key(inst: &MirInst, pure_calls: &HashSet<ValueId>, ty: &impl Fn(ValueId)
     }
     Some(match inst {
         MirInst::Index { array, index, .. } => ReadKey::Index { array: *array, index: *index },
-        MirInst::HeapFieldLoad { object, name: None, index, .. } => ReadKey::Field { object: *object, index: *index },
+        MirInst::HeapFieldLoad { object, index, .. } => ReadKey::Field { object: *object, index: *index },
         MirInst::ArrayLen { array, .. } => ReadKey::Len { array: *array },
         MirInst::Call { dest, target, args, dest_hi: None } if pure_calls.contains(dest) => ReadKey::Call { target: *target, args: args.clone() },
         _ => return None,

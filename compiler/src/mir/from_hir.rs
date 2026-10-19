@@ -73,6 +73,7 @@ pub enum HirShow {
     Tuple { fmt: u32, items: Vec<(Ty, HirShow)> },
     /// A record: each field read by key (string table index) and shown,
     /// then `FORMAT` of the record's format string on the texts.
+    /// A record's fields by slot (sorted by name).
     Record { fmt: u32, fields: Vec<(u32, Ty, HirShow)> },
 }
 
@@ -515,8 +516,8 @@ pub struct HirMirInput<'a> {
     pub packs: &'a HashMap<u32, Vec<HirDictOp>>,
     /// The `unwind_resume` native a `defer`'s cleanup pad ends in.
     pub unwind_native: Option<u16>,
-    /// Field reads and writes on records (dicts): the key's string table
-    /// index and the field's word type.
+    /// Field reads and writes on records: the field's slot (records are
+    /// slotted objects, their fields sorted by name) and word type.
     pub record_fields: HashMap<u32, (u32, MirTy)>,
     /// `matrix(data)` calls: the data itself.
     pub matrix_wraps: &'a HashSet<u32>,
@@ -540,12 +541,16 @@ pub struct HirMirInput<'a> {
     /// Element-wise array and tuple operators, by expression.
     pub aggregates: HashMap<u32, crate::typechecking::AggregateArithInfo>,
     /// Record literals whose every field holds the word its type says:
-    /// each field's key index and word type, in literal order.
-    pub records: HashMap<u32, Vec<(u32, MirTy)>>,
+    /// the shape's `InitTyped` type id, and each field's slot and word
+    /// type, in literal order.
+    pub records: HashMap<u32, (u32, Vec<(u32, MirTy)>)>,
     /// Record `let` patterns that bind only locals and wildcards: each
-    /// bound field's key index and word type (`None`: a wildcard), in
-    /// pattern order.
+    /// bound field's slot and word type (`None`: a wildcard), in pattern
+    /// order.
     pub record_pats: HashMap<u32, Vec<Option<(u32, MirTy)>>>,
+    /// `for (k, v) in r` loops over a record: each slot's name (a string
+    /// table index) and word type, in slot order.
+    pub record_iters: HashMap<u32, Vec<(u32, MirTy)>>,
     /// `Vec::push` calls HIR emission inlines.
     pub pushes: HashSet<u32>,
     /// Host native calls whose arguments and result are plain (boxed
@@ -1817,14 +1822,14 @@ impl Lower<'_> {
             let Some(obj) = self.boxed_word(base)? else {
                 return Ok(None);
             };
-            return Ok(Some(self.b.ins_heap_field_load(obj, None, slot, ty).map_err(mir)?));
+            return Ok(Some(self.b.ins_heap_field_load(obj, slot, ty).map_err(mir)?));
         }
         // So does a frame-slot class local's open niche field: its slot's box.
         if let Some(&slot) = self.inp.fields.get(&id.0)
             && self.open_slot_niche(id).is_some_and(|w| Ok(w) == niche_word(layout))
         {
             return Ok(Some(match self.boxed_field(id, slot)? {
-                Some((obj, index)) => self.b.ins_heap_field_load(obj, None, index, MirTy::HeapRef).map_err(mir)?,
+                Some((obj, index)) => self.b.ins_heap_field_load(obj, index, MirTy::HeapRef).map_err(mir)?,
                 None => self.b.use_local(LocalId(slot), MirTy::HeapRef).map_err(mir)?,
             }));
         }
@@ -2007,8 +2012,8 @@ impl Lower<'_> {
         }
         // A boxed numeric range: a typed object, start and end its fields.
         if crate::typechecking::return_layout::two_word_range_kind(ty).is_some() {
-            let lo = self.b.ins_heap_field_load(v, None, 0, lo_ty).map_err(mir)?;
-            let hi = self.b.ins_heap_field_load(v, None, 1, hi_ty).map_err(mir)?;
+            let lo = self.b.ins_heap_field_load(v, 0, lo_ty).map_err(mir)?;
+            let hi = self.b.ins_heap_field_load(v, 1, hi_ty).map_err(mir)?;
             return Ok(Val::Pair(lo, hi));
         }
         if hi_ty != MirTy::I64 {
@@ -2345,8 +2350,8 @@ impl Lower<'_> {
         let type_id = rl::range_heap_type_id(inclusive);
         let obj = self.b.ins_alloc(MirAllocKind::Object { type_id, nfields: 2 }, Vec::new()).map_err(mir)?;
         let obj = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?;
-        self.b.ins_heap_field_store(obj, lo, None, Some(0)).map_err(mir)?;
-        self.b.ins_heap_field_store(obj, hi, None, Some(1)).map_err(mir)?;
+        self.b.ins_heap_field_store(obj, lo, 0).map_err(mir)?;
+        self.b.ins_heap_field_store(obj, hi, 1).map_err(mir)?;
         Ok(Val::V(obj))
     }
 
@@ -2364,8 +2369,8 @@ impl Lower<'_> {
             let type_id = crate::typechecking::return_layout::range_heap_type_id(inclusive);
             let obj = self.b.ins_alloc(MirAllocKind::Object { type_id, nfields: 2 }, Vec::new()).map_err(mir)?;
             let obj = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?;
-            self.b.ins_heap_field_store(obj, lo, None, Some(0)).map_err(mir)?;
-            self.b.ins_heap_field_store(obj, hi, None, Some(1)).map_err(mir)?;
+            self.b.ins_heap_field_store(obj, lo, 0).map_err(mir)?;
+            self.b.ins_heap_field_store(obj, hi, 1).map_err(mir)?;
             return Ok(Val::V(obj));
         }
         self.box_pair(ty, lo, hi)
@@ -2834,7 +2839,7 @@ impl Lower<'_> {
                 }
                 match self.boxed_field(*place, slot)? {
                     Some((obj, index)) => {
-                        self.b.ins_heap_field_store(obj, v, None, Some(index)).map_err(mir)?;
+                        self.b.ins_heap_field_store(obj, v, index).map_err(mir)?;
                     }
                     None => self.b.def_local(LocalId(slot), v).map_err(mir)?,
                 }
@@ -2865,7 +2870,7 @@ impl Lower<'_> {
                 let Some(obj) = self.boxed_word(*base)? else {
                     return Ok(Val::Never);
                 };
-                let w = self.b.ins_heap_field_load(obj, None, slot, ty).map_err(mir)?;
+                let w = self.b.ins_heap_field_load(obj, slot, ty).map_err(mir)?;
                 match self.inp.boxed_niches.get(&id.0) {
                     Some(&layout) => self.unbox_niche(w, niche_word(layout)?),
                     None => Ok(Val::V(w)),
@@ -2891,7 +2896,7 @@ impl Lower<'_> {
                 let Some(obj) = self.word(base)? else {
                     return Ok(Val::Never);
                 };
-                self.b.ins_heap_field_store(obj, v, None, Some(slot)).map_err(mir)?;
+                self.b.ins_heap_field_store(obj, v, slot).map_err(mir)?;
                 Ok(Val::Unit)
             }
             // A record's `()` field: the record for its effects (#1510).
@@ -2901,21 +2906,19 @@ impl Lower<'_> {
                 }
                 Ok(Val::Unit)
             }
-            // A record's field by key: the object, then the key, as HIR
-            // emission's `GetField`.
-            HirKind::Field { base, .. } if let Some(&(key, ty)) = self.inp.record_fields.get(&id.0) => {
+            // A record's field: its slot.
+            HirKind::Field { base, .. } if let Some(&(slot, ty)) = self.inp.record_fields.get(&id.0) => {
                 let Some(obj) = self.word(*base)? else {
                     return Ok(Val::Never);
                 };
-                let key = self.b.ins_string(key).map_err(mir)?;
-                Ok(Val::V(self.b.ins_heap_field_load(obj, Some(key), 0, ty).map_err(mir)?))
+                Ok(Val::V(self.b.ins_heap_field_load(obj, slot, ty).map_err(mir)?))
             }
             HirKind::Assign { place, value }
                 if let HirKind::Field { base, .. } = self.hir.expr(*place).kind
-                    && let Some(&(key, ty)) = self.inp.record_fields.get(&place.0) =>
+                    && let Some(&(slot, ty)) = self.inp.record_fields.get(&place.0) =>
             {
-                // The value, the object, then the key, as `SetField`; a
-                // two-word value boxed, a `()` the empty tuple object (#1510).
+                // The value, then the object, as `SetField`; a two-word
+                // value boxed, a `()` the empty tuple object (#1510).
                 let v = if self.expr_ty(*value).is_some_and(is_unit) {
                     self.word_or_boxed(*value)?
                 } else if ty == MirTy::HeapRef {
@@ -2932,42 +2935,47 @@ impl Lower<'_> {
                 let Some(obj) = self.word(base)? else {
                     return Ok(Val::Never);
                 };
-                let key = self.b.ins_string(key).map_err(mir)?;
-                self.b.ins_heap_field_store(obj, v, Some(key), None).map_err(mir)?;
+                self.b.ins_heap_field_store(obj, v, slot).map_err(mir)?;
                 Ok(Val::Unit)
             }
-            HirKind::Make { kind: MakeKind::Record(_), args } if let Some(words) = self.inp.records.get(&id.0) => {
-                // Each value then its key, then `MakeDict`.
-                let words = words.clone();
-                let mut elems = Vec::with_capacity(2 * args.len());
-                for (&arg, (key, ty)) in args.iter().zip(words) {
+            HirKind::Make { kind: MakeKind::Record(_), args } if let Some((type_id, words)) = self.inp.records.get(&id.0) => {
+                // Each value in literal order, then the slotted object and
+                // each value to its slot (the fields sorted by name).
+                let (type_id, words) = (*type_id, words.clone());
+                let mut slots = vec![None; words.len()];
+                for (&arg, (slot, ty)) in args.iter().zip(words) {
                     // A `()` runs for its effect and is stored as the empty
                     // tuple object (#1510).
-                    if self.expr_ty(arg).is_some_and(is_unit) {
+                    let v = if self.expr_ty(arg).is_some_and(is_unit) {
                         if !self.effect(arg)? {
                             return Ok(Val::Never);
                         }
-                        elems.push(self.unit_object()?);
-                        elems.push(self.b.ins_string(key).map_err(mir)?);
-                        continue;
-                    }
-                    // A two-word value is stored boxed.
-                    let Some(v) = (if ty == MirTy::HeapRef { self.boxed_word(arg)? } else { self.word(arg)? }) else {
-                        return Ok(Val::Never);
+                        self.unit_object()?
+                    } else {
+                        // A two-word value is stored boxed.
+                        let Some(v) = (if ty == MirTy::HeapRef { self.boxed_word(arg)? } else { self.word(arg)? }) else {
+                            return Ok(Val::Never);
+                        };
+                        if self.b.value_ty(v) != ty {
+                            return Err("record field type".into());
+                        }
+                        v
                     };
-                    if self.b.value_ty(v) != ty {
-                        return Err("record field type".into());
-                    }
-                    elems.push(v);
-                    elems.push(self.b.ins_string(key).map_err(mir)?);
+                    *slots.get_mut(slot as usize).ok_or("record slot")? = Some(v);
                 }
-                let obj = self.b.ins_alloc(MirAllocKind::Dict, elems).map_err(mir)?;
-                Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?))
+                let slots = slots.into_iter().collect::<Option<Vec<_>>>().ok_or("record slot")?;
+                let nfields = slots.len() as u32;
+                let obj = self.b.ins_alloc(MirAllocKind::Object { type_id, nfields }, Vec::new()).map_err(mir)?;
+                let obj = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?;
+                for (slot, v) in slots.into_iter().enumerate() {
+                    self.b.ins_heap_field_store(obj, v, slot as u32).map_err(mir)?;
+                }
+                Ok(Val::V(obj))
             }
             // An open niche field's box, read back as its niche word.
             HirKind::Field { .. } if let Some(&slot) = self.inp.fields.get(&id.0) && let Some(niche) = self.open_slot_niche(id) => {
                 let obj = match self.boxed_field(id, slot)? {
-                    Some((obj, index)) => self.b.ins_heap_field_load(obj, None, index, MirTy::HeapRef).map_err(mir)?,
+                    Some((obj, index)) => self.b.ins_heap_field_load(obj, index, MirTy::HeapRef).map_err(mir)?,
                     None => self.b.use_local(LocalId(slot), MirTy::HeapRef).map_err(mir)?,
                 };
                 self.unbox_niche(obj, niche)
@@ -2981,7 +2989,7 @@ impl Lower<'_> {
                     .or_else(|| self.expr_ty(id).is_some_and(is_heap_tuple).then_some(MirTy::HeapRef))
                     .ok_or("field type")?;
                 if let Some((obj, index)) = self.boxed_field(id, slot)? {
-                    return Ok(Val::V(self.b.ins_heap_field_load(obj, None, index, ty).map_err(mir)?));
+                    return Ok(Val::V(self.b.ins_heap_field_load(obj, index, ty).map_err(mir)?));
                 }
                 Ok(Val::V(self.b.use_local(LocalId(slot), ty).map_err(mir)?))
             }
@@ -3062,8 +3070,8 @@ impl Lower<'_> {
                 self.bind_tuple_item(pat, obj, ty.as_ref())?;
                 Ok(Val::Unit)
             }
-            // `let { a, b } = r` of a record: each bound field read by its
-            // key (`GetField`).
+            // `let { a, b } = r` of a record: each bound field read from its
+            // slot.
             HirKind::LetPat { pat: HirPat::Record(parts), init } if let Some(words) = self.inp.record_pats.get(&id.0) => {
                 let Some(obj) = self.word(*init)? else {
                     return Ok(Val::Never);
@@ -3072,9 +3080,8 @@ impl Lower<'_> {
                     return Err("let pattern record".into());
                 }
                 for ((_, part), word) in parts.iter().zip(words) {
-                    if let (HirPat::Bind(local), Some((key, ty))) = (part, *word) {
-                        let key = self.b.ins_string(key).map_err(mir)?;
-                        let v = self.b.ins_heap_field_load(obj, Some(key), 0, ty).map_err(mir)?;
+                    if let (HirPat::Bind(local), Some((slot, ty))) = (part, *word) {
+                        let v = self.b.ins_heap_field_load(obj, slot, ty).map_err(mir)?;
                         self.bind(*local, v)?;
                     }
                 }
@@ -3827,7 +3834,7 @@ impl Lower<'_> {
                 let obj = self.b.ins_alloc(MirAllocKind::Object { type_id, nfields }, Vec::new()).map_err(mir)?;
                 let obj = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?;
                 for (i, v) in words.into_iter().enumerate() {
-                    self.b.ins_heap_field_store(obj, v, None, Some(i as u32)).map_err(mir)?;
+                    self.b.ins_heap_field_store(obj, v, i as u32).map_err(mir)?;
                 }
                 let slot = self.temp();
                 self.b.def_local(slot, obj).map_err(mir)?;
@@ -5147,7 +5154,7 @@ impl Lower<'_> {
         let obj = self.b.ins_alloc(MirAllocKind::Object { type_id, nfields }, Vec::new()).map_err(mir)?;
         let obj = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?;
         for (slot, v) in words.into_iter().enumerate() {
-            self.b.ins_heap_field_store(obj, v, None, Some(slot as u32)).map_err(mir)?;
+            self.b.ins_heap_field_store(obj, v, slot as u32).map_err(mir)?;
         }
         Ok(Val::V(obj))
     }
@@ -5369,10 +5376,8 @@ impl Lower<'_> {
                 .or_else(|| ((self.inp.niche)(ty).is_none() && (self.inp.boxed_view)(ty, None).is_some()).then_some(MirTy::HeapRef))
                 .ok_or("show item type")?;
             let w = match key {
-                Some(key) => {
-                    let key = self.b.ins_string(key).map_err(mir)?;
-                    self.at_expr(id, |l| l.b.ins_heap_field_load(v, Some(key), 0, ty_w).map_err(mir))?
-                }
+                // A record's slot.
+                Some(slot) => self.at_expr(id, |l| l.b.ins_heap_field_load(v, slot, ty_w).map_err(mir))?,
                 None => {
                     let k = self.b.ins_const(MirConst::I64(i as i64)).map_err(mir)?;
                     self.at_expr(id, |l| l.b.ins_index(v, k, ty_w, false).map_err(mir))?
@@ -5729,7 +5734,7 @@ impl Lower<'_> {
         self.switch(err);
         self.at_expr(id, |l| {
             let e = l.b.ins_match_payload(obj, 0, MirTy::HeapRef).map_err(mir)?;
-            let msg = l.b.ins_heap_field_load(e, None, 1, MirTy::HeapRef).map_err(mir)?;
+            let msg = l.b.ins_heap_field_load(e, 1, MirTy::HeapRef).map_err(mir)?;
             l.keep_pins()?;
             l.b.panic(msg).map_err(mir)
         })?;
@@ -5860,6 +5865,35 @@ impl Lower<'_> {
         Ok(Val::V(self.b.ins_array_len(arr).map_err(mir)?))
     }
 
+    /// `for (k, v) in r` over record `r` (`src`): the array of its
+    /// `(name, value)` items, one tuple per slot (the fields sorted by
+    /// name), each name a string constant.
+    fn record_entries(&mut self, id: HirId, src: ValueId) -> Result<ValueId, Refusal> {
+        let words = self.inp.record_iters.get(&id.0).cloned().ok_or("for in record")?;
+        let HirKind::ForIn { iterable, .. } = self.hir.expr(id).kind else {
+            return Err("for in record".into());
+        };
+        let mut fields = match self.expr_ty(iterable).map(strip_readonly) {
+            Some(Ty::Record { fields }) => fields.clone(),
+            _ => return Err("for in record".into()),
+        };
+        fields.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut items = Vec::with_capacity(words.len());
+        for (slot, ((name, w), (_, ty))) in words.into_iter().zip(&fields).enumerate() {
+            // The value rides in its tuple as the record holds it.
+            if is_unit(ty) || self.tuple_item(ty) != Some(w) {
+                return Err("for in record item".into());
+            }
+            let name = self.b.ins_string(name).map_err(mir)?;
+            let v = self.b.ins_heap_field_load(src, slot as u32, w).map_err(mir)?;
+            let kinds = common::pack_word_kinds([common::WORD_POINTER, (self.inp.word_kind)(ty)].into_iter());
+            let item = self.b.ins_alloc_kinds(MirAllocKind::Tuple, vec![name, v], kinds).map_err(mir)?;
+            items.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![item]).map_err(mir)?);
+        }
+        let arr = self.b.ins_alloc_kinds(MirAllocKind::Array, items, common::WORD_POINTER).map_err(mir)?;
+        Ok(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![arr]).map_err(mir)?)
+    }
+
     /// `for x in xs` over a heap array, as HIR emission lowers it: the
     /// length is read once, and the index steps after the body (or at a
     /// `continue`). A dict loops over its `(key, value)` entries array, a
@@ -5932,10 +5966,8 @@ impl Lower<'_> {
                 self.b.ins_call(target, vec![src], &abi).map_err(mir)?.0
             }
             (None, Items::Array) => src,
-            (None, Items::Dict) => {
-                let obj = self.b.ins_alloc(MirAllocKind::DictEntries, vec![src]).map_err(mir)?;
-                self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?
-            }
+            // A record's `(name, value)` items, built from its slots.
+            (None, Items::Dict) => self.record_entries(id, src)?,
             (None, Items::Tuple(arity)) => {
                 let mut words = Vec::with_capacity(arity);
                 for k in 0..arity {

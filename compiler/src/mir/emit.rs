@@ -2197,26 +2197,13 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
                 out.push(move_op(d, s));
             }
         }
-        MirInst::HeapFieldLoad {
-            dest,
-            object,
-            name,
-            index,
-        } => {
-            emit_dense_field_load(
-                out,
-                regs[dest.index()],
-                regs[object.index()],
-                name.map(|n| regs[n.index()]),
-                *index,
-                loc,
-            )?;
+        MirInst::HeapFieldLoad { dest, object, index } => {
+            emit_dense_field_load(out, regs[dest.index()], regs[object.index()], *index, loc)?;
         }
         MirInst::HeapFieldStore {
             dest,
             object,
             value,
-            name,
             index,
         } => {
             let d = regs[dest.index()];
@@ -2224,14 +2211,7 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
             if d != v {
                 out.push(move_op(d, v));
             }
-            emit_dense_field_store(
-                out,
-                d,
-                regs[object.index()],
-                name.map(|n| regs[n.index()]),
-                *index,
-                loc,
-            )?;
+            emit_dense_field_store(out, d, regs[object.index()], *index, loc)?;
         }
         MirInst::Alloc { dest, kind, elems, kinds: recorded } => {
             if !across_alloc {
@@ -3612,9 +3592,7 @@ fn dense_make_kind(kind: MirAllocKind) -> Result<Option<u8>, LowerError> {
             Ok(Some(packed as u8))
         }
         MirAllocKind::Object { .. } | MirAllocKind::DropEnum { .. } => Ok(None),
-        MirAllocKind::Dict
-        | MirAllocKind::DictEntries
-        | MirAllocKind::Coro { .. }
+        MirAllocKind::Coro { .. }
         | MirAllocKind::Boxed { .. }
         | MirAllocKind::Fn { .. }
         | MirAllocKind::PolyFn { .. }
@@ -3645,13 +3623,12 @@ fn emit_dense_field_load(
     out: &mut Vec<IlOp>,
     dest: u8,
     object: u8,
-    name: Option<u8>,
     index: u32,
     loc: DebugLoc,
 ) -> Result<(), LowerError> {
-    let (flags, c) = field_dense_c(name, Some(index))?;
+    let c = field_dense_c(index)?;
     out.push(IlOp::from_plain_byte(
-        Byte::new(Instruction::DenseFieldLoad).with_dense_abc(flags, dest, object, c),
+        Byte::new(Instruction::DenseFieldLoad).with_dense_abc(0, dest, object, c),
         loc,
     ));
     Ok(())
@@ -3661,25 +3638,21 @@ fn emit_dense_field_store(
     out: &mut Vec<IlOp>,
     dest: u8,
     object: u8,
-    name: Option<u8>,
-    index: Option<u32>,
+    index: u32,
     loc: DebugLoc,
 ) -> Result<(), LowerError> {
-    let (flags, c) = field_dense_c(name, index)?;
+    let c = field_dense_c(index)?;
     out.push(IlOp::from_plain_byte(
-        Byte::new(Instruction::DenseFieldStore).with_dense_abc(flags, dest, object, c),
+        Byte::new(Instruction::DenseFieldStore).with_dense_abc(0, dest, object, c),
         loc,
     ));
     Ok(())
 }
 
-fn field_dense_c(name: Option<u8>, index: Option<u32>) -> Result<(u8, u8), LowerError> {
-    if let Some(n) = name {
-        return Ok((dense::FIELD_NAMED, n));
-    }
-    let index = index.ok_or_else(|| LowerError::Refused("dense field index".into()))?;
-    let c = u8::try_from(index).map_err(|_| LowerError::Refused("dense field index".into()))?;
-    Ok((0, c))
+/// A dense field op's slot operand: one that fits a byte. The compiler
+/// emits only the slot form (no `FIELD_NAMED`).
+fn field_dense_c(index: u32) -> Result<u8, LowerError> {
+    u8::try_from(index).map_err(|_| LowerError::Refused("dense field index".into()))
 }
 
 /// A finalized enum made for its effect alone (`Conn::Open(fd);`): popped
@@ -3779,13 +3752,6 @@ fn il_for_alloc_op(kind: MirAllocKind, arity: u32, kinds: u8, loc: DebugLoc) -> 
             Byte::new(Instruction::InitTyped)
                 .with_operand_u32(common::pack_init_typed(type_id, nfields)),
         )),
-        MirAllocKind::Dict => {
-            let fields = arity / 2;
-            Ok(IlOp::byte(
-                Byte::new(Instruction::MakeDict).with_operand_u32(fields),
-            ))
-        }
-        MirAllocKind::DictEntries => Ok(IlOp::byte(Byte::new(Instruction::DictEntries))),
         MirAllocKind::Coro { target } => Ok(IlOp::Entry {
             kind: crate::il::EntryKind::MakeCoro,
             arity,
