@@ -50,7 +50,7 @@ let s = format("%s-%i", name, n);
 ```
 
 - `string::format` is a compiler intrinsic (same rules as old `format` / `print` specs).
-- `io::{from_bytes,to_bytes}` remain aliases of the string natives for one cycle.
+- The `io::{from_bytes,to_bytes}` aliases of the string natives were removed; `use io::{from_bytes}` is an error naming `string::`.
 - Byte-offset helpers read the string in place (HostInvoke **139–143**,
   archive minor 31; `machine/src/str_bytes.rs`). Offsets are bytes, as
   `len(s)` is.

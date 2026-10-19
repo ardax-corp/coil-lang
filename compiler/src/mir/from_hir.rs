@@ -4448,13 +4448,21 @@ impl Lower<'_> {
     /// function returns a bare type parameter.
     fn call_poly(&mut self, id: HirId, f: HirId, args: &[HirId], p: &HirPolyCall) -> Result<Val, Refusal> {
         self.raw_host = false;
-        if self.inp.pair_tys.contains_key(&id.0) || p.boxes.len() != args.len() {
+        if p.boxes.len() != args.len() {
             return Err("polyfn call shape".into());
         }
         let ty = self.expr_ty(id).ok_or("call type")?;
         let unit = is_unit(ty);
+        // A two-word result comes back as its object, unboxed where a pair
+        // is read; a heap tuple is its object (#1511), as is an enum of no
+        // pair or niche layout (#1515).
         let word = if unit {
             MirTy::I64
+        } else if self.inp.pair_tys.contains_key(&id.0)
+            || is_heap_tuple(ty)
+            || (self.inp.word(ty).is_none() && (self.inp.boxed_view)(ty, None).is_some())
+        {
+            MirTy::HeapRef
         } else {
             self.inp.word(ty).ok_or_else(|| format!("call value type {}", ty_kind(ty)))?
         };
@@ -4522,6 +4530,12 @@ impl Lower<'_> {
         let ret = if p.unbox.is_some() { MirTy::HeapRef } else { word };
         let dest = self.at_expr(id, |l| l.b.ins_call_indirect_dicts(callee, words, dicts, ret).map_err(mir))?;
         let dest = match p.unbox {
+            // A niche enum for a bare type parameter comes back boxed as
+            // its object (#1515).
+            Some(tag) if matches!(word, MirTy::NicheOpt | MirTy::NicheRes) => {
+                let obj = self.b.ins_unbox(dest, tag, MirTy::HeapRef).map_err(mir)?;
+                return self.unbox_niche(obj, word);
+            }
             Some(tag) => self.b.ins_unbox(dest, tag, word).map_err(mir)?,
             None => dest,
         };
