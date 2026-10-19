@@ -1163,6 +1163,9 @@ impl Compiler {
                         && crate::hir::layout::of_resolved(checker, &t) == crate::hir::layout::Layout::Word)
                         .then_some(crate::mir::MirTy::HeapRef)
                 })
+                // A foreign `ptr`: a raw address word, as a local holds it
+                // (#1507).
+                .or_else(|| (matches!(crate::typechecking::ty::strip_readonly(t), Ty::Con(n) if n == "ptr") && !is_class(t)).then_some(crate::mir::MirTy::I64))
         };
         // A scalar enum's backing word.
         let scalar_enum = move |t: &Ty| {
