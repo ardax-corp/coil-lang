@@ -190,6 +190,15 @@ jobs:
           CARGO_PROFILE_RELEASE_PANIC=unwind \
             cargo test --release -p compiler --test coi407_trailing_label -- --exact
 
+      - name: Release compiler lib tests build (#1455)
+        if: runner.os == 'Linux'
+        run: |
+          # Lib tests must compile without debug_assertions (cfg-gated Debug
+          # impls in `common`); build only, same profile as the step above.
+          CARGO_PROFILE_RELEASE_LTO=off CARGO_PROFILE_RELEASE_CODEGEN_UNITS=8 \
+          CARGO_PROFILE_RELEASE_PANIC=unwind \
+            cargo test --release -p compiler --lib --no-run
+
       - name: Release VM no_pool park/close (COI-410)
         if: runner.os == 'Linux'
         run: |

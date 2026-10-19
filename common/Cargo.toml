@@ -3,5 +3,11 @@ name = "common"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Debug/Display impls (Instruction, Byte, Value, Interner) in release builds.
+# Debug builds always have them; the compiler's dev-dependency turns this on so
+# `cargo test --release` compiles without adding them to release binaries (#1455).
+debug-fmt = []
+
 [dependencies]
 rkyv = "0.8.12"
