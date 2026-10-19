@@ -331,7 +331,8 @@ fn coverage_reports_project_lines() {
 
 /// A line whose code constant folding would erase (`255 as byte` only
 /// reaches the return as a constant) still counts as covered: a coverage
-/// compile keeps each line's code.
+/// compile keeps each line's code, in a LIR body (`top`) and in a body
+/// with the arithmetic dense pays for (`topd`, #1494).
 #[test]
 fn coverage_keeps_a_line_folding_would_erase() {
     let root = std::fs::canonicalize(std::env::temp_dir())
@@ -342,12 +343,12 @@ fn coverage_keeps_a_line_folding_would_erase() {
     std::fs::create_dir_all(root.join("tests")).unwrap();
     std::fs::write(
         root.join("src/bytesx.hy"),
-        "fn top(int k) -> int {\n    let bytes = [k as byte, 255 as byte];\n    return bytes[1] as int;\n}\n",
+        "fn top(int k) -> int {\n    let bytes = [k as byte, 255 as byte];\n    return bytes[1] as int;\n}\n\nfn topd(int k) -> int {\n    let bytes = [k as byte, 255 as byte];\n    return (bytes[1] as int) * 3 + 1;\n}\n",
     )
     .unwrap();
     std::fs::write(
         root.join("tests/top.hy"),
-        "use bytesx::{top};\n\ntest(\"top\") {\n    if !(top(1) == 255) { raise \"assertion failed\"; }\n}\n",
+        "use bytesx::{top, topd};\n\ntest(\"top\") {\n    if !(top(1) == 255) { raise \"assertion failed\"; }\n    if !(topd(1) == 766) { raise \"assertion failed\"; }\n}\n",
     )
     .unwrap();
     let opts = TestOptions {
@@ -370,6 +371,8 @@ fn coverage_keeps_a_line_folding_would_erase() {
     };
     assert!(hits(2).is_some_and(|n| n > 0), "the `let` line is covered: {lcov}");
     assert!(hits(3).is_some_and(|n| n > 0), "the `return` line is covered: {lcov}");
+    assert!(hits(7).is_some_and(|n| n > 0), "`topd`'s `let` line is covered: {lcov}");
+    assert!(hits(8).is_some_and(|n| n > 0), "`topd`'s `return` line is covered: {lcov}");
     let _ = std::fs::remove_dir_all(&root);
 }
 

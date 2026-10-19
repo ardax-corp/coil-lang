@@ -1,5 +1,5 @@
-// Expected: E0001 — `impl Show<int>` is not instance syntax; an instance is
-// written `impl Trait for Type`.
+// Expected: E0119 — `impl Show<int>` names a trait where an inherent impl
+// names a type; an instance is written `impl Show for int`.
 impl Show<int> {
     fn show(int x) -> string {
         return "";

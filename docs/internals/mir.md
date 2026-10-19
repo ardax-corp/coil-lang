@@ -251,8 +251,10 @@ writes (#856; `tests/codegen/overflow_trap_order_lir.hy`). A coverage
 compile (`Pipeline::set_keep_fns_in`) skips the LIR fold
 (`MirFunc::keep_lines`): coverage counts a line by the code it emits, and a
 line whose value folds into a later one would read as uncoverable, so
-`coil mutate` would skip its mutants. Dense bodies still run their MIR
-passes there, so a dense body can lose a line the same way (open).
+`coil mutate` would skip its mutants. For the same reason a coverage
+compile refuses dense (`dense: coverage`, #1494): its MIR passes fold a
+line's constants into the next line just the same, so every body takes
+LIR there. Coverage runs pay for that in speed, not in what they count.
 
 Hit bench `examples/perf/mir_lir_fold.hy` (`mix`: bit ops of `mask(-1)`
 called 2M times from a dense loop; release, `COIL_AUTO_PAR=0`, 15

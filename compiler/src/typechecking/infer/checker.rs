@@ -2510,15 +2510,6 @@ impl Checker {
                     Ty::Fun(Box::new(Ty::Var(var)), Box::new(int())),
                 ),
             );
-            let var = self.counter.fresh();
-            self.typeclass_method_schemes.insert(
-                ("String".to_string(), "to_string".to_string()),
-                Scheme::poly(
-                    vec![var],
-                    vec![Constraint::unary("String", var)],
-                    Ty::Fun(Box::new(Ty::Var(var)), Box::new(string())),
-                ),
-            );
         }
     }
 
@@ -5067,17 +5058,24 @@ impl Checker {
         }
 
         if let Some(owner) = class_owner {
-            return self.error(
+            let help = (*method == "to_string")
+                .then(|| "the `String` trait was removed: call `show()` (or `format(\"%v\", x)`)".to_string());
+            return self.error_with_help(
                 ErrorCode::UnknownFunction,
                 format!("Cannot find method `{}` on class `{}`", method, owner),
                 range,
+                help,
             );
         }
         self.error_with_help(
             ErrorCode::NotAFunction,
             format!("Cannot call method `{}` on non-class type", method),
             range,
-            Some("method calls require a class instance receiver".to_string()),
+            Some(if *method == "to_string" {
+                "the `String` trait was removed: call `show()` (or `format(\"%v\", x)`)".to_string()
+            } else {
+                "method calls require a class instance receiver".to_string()
+            }),
         )
     }
 
@@ -19576,7 +19574,6 @@ impl Checker {
                 | "Hash"
                 | "Default"
                 | "Send"
-                | "String"
                 | "Sensitive"
                 | "Iterator"
                 | "IntoIterator"

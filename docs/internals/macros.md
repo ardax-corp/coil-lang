@@ -4,7 +4,7 @@ Packages define `derive`s, attribute macros and function-style macros in coil.
 The compiler runs them in the VM at compile time, after parsing and before
 typechecking, and splices their output next to (derive) or in place of
 (attribute macro) the declaration, or in place of the `name!(…)` call.
-The built-in derives (`Show`, `Eq`, `Ord`, `Hash`, `String`, `Default`, `Send`,
+The built-in derives (`Show`, `Eq`, `Ord`, `Hash`, `Default`, `Send`,
 `Sensitive`) are derive macros too, in `compiler/src/prelude/derive.hy`.
 
 Code: `compiler/src/macros/` (lowering, input encoding, `MacroHost`),
@@ -160,8 +160,8 @@ discover_all → expand_user_macros → (discover newly used modules) → typech
 1. **Attribute expansion** (`attrs::expand_program_in`, per file, during
    discovery) lowers macro items and records every derive, each item's
    first attribute that is not built in (`derive`, `repr`, `max_depth`, …),
-   and every outermost `name!(…)` call, as a `PendingMacro`. It still adds the type-name `Show` / `String`
-   defaults. A field / variant attribute on a type with no derive is an
+   and every outermost `name!(…)` call, as a `PendingMacro`. It still adds the type-name `Show`
+   default. A field / variant attribute on a type with no derive is an
    error right away.
 2. **Resolve** each pending name through the file's top-level `use` items to a
    module whose `CachedAst::macro_decls` declares it; a built-in derive name
@@ -201,12 +201,12 @@ discover_all → expand_user_macros → (discover newly used modules) → typech
 6. **Splice.** `CachedAst::parse_generated` parses each output with
    `Pratt::parse_at`, so its spans sit after the end of the file (and of
    earlier snippets), as if it followed them in the text. Spans never collide with the file's own or with the synthetic
-   `0x4000_0000+` spans the `Show` / `String` defaults use. Macro uses in
+   `0x4000_0000+` spans the `Show` defaults use. Macro uses in
    generated code (stacked attributes, derives on a generated type) run in the
    next round, up to 16 rounds. Derive outputs keep the order the derives are
    listed in. A call's output is parsed for its position (below). A derive
    that writes `impl Show for T` replaces the compiler's default type-name
-   `Show` (same for `String`); an attribute macro that replaces a type drops
+   `Show`; an attribute macro that replaces a type drops
    the old type's defaults. A call's output replaces the call once every
    output of the round is parsed, in one walk of each file
    (`replace_calls`); calls are looked up by span from one index per file
@@ -329,7 +329,7 @@ expansion is 17%.
 ## Built-in derives
 
 `compiler/src/prelude/derive.hy` generates what the former Rust synthesizers
-built, as source: `Show` / `String` format fields (`Name { a: %v }`) or
+built, as source: `Show` formats fields (`Name { a: %v }`) or
 variants (`E::V(%v)`), `Eq` / `Ord` compare field-wise then by variant order
 (`Lt` / `Le` / `Gt` / `Ge` plus an empty `Ord`), `Hash` combines with
 `* 31 +` from the variant index, `Default` is a `static fn` that gives each
@@ -342,13 +342,16 @@ variants: their payloads are bound by the pattern (`E::V(s_p0)`) since the old
 `p.0` field access cannot be written in source.
 `comptime/tests/derive_golden.rs` pins the generated source.
 `Serialize` / `Deserialize` were removed (placeholders that cast fields to a
-byte); serializers belong in format packages as user derives.
+byte); serializers belong in format packages as user derives. The `String`
+trait (`to_string`, a second copy of `Show`) was removed too: `Show` is the
+one display trait, and `#[derive(String)]`, `impl String` and a missing
+`to_string` point at it.
 
 **Generic types (#552).** A derive on a generic type expands to a bounded
 instance (see [generic-instances.md](generic-instances.md)): every type
 parameter is bounded by the trait the body uses, `Show for Box<T: Show>`,
 `Ord` (and `Lt` / `Le` / `Gt` / `Ge`) for `Box<T: Ord + Eq>` since the chain
-compares with `<` and `==`, `String` by `Show` (it formats with `%v`).
+compares with `<` and `==`.
 `TypeDecl::impl_head(bound)` writes that head (`Name` or `Name<T: bound, …>`)
 and `TypeDecl::self_type()` the type in signatures (`Name` or `Name<T, …>`);
 user derives use the same two helpers (`impl ${trait} for

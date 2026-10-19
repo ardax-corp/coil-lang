@@ -9,7 +9,7 @@ Read when you need syntax detail beyond SKILL.md. User docs live in [coil-websit
 - `never` from `return`/`raise`/`panic` and proven-infinite loops absorbs in joins.
 - Path completeness: concrete non-unit returns need all paths to exit (`E0111`).
 - Casts: `expr as T` — see [casts](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/casts.md) (`/docs/references/casts`).
-- Scalar-backed enums stay a nominal type (`Status`). In expression position they implicitly coerce to the backing (`let n: int = Status::Ok`, `Status::Ok + 1`). Show/String of a scalar case is the backing (`Status::Ok` shows as `200`). No reverse coerce (`int` → `Status`) and no matching a raw `200` against a `Status` scrutinee.
+- Scalar-backed enums stay a nominal type (`Status`). In expression position they implicitly coerce to the backing (`let n: int = Status::Ok`, `Status::Ok + 1`). Show of a scalar case is the backing (`Status::Ok` shows as `200`). No reverse coerce (`int` → `Status`) and no matching a raw `200` against a `Status` scrutinee.
 - Payload enums are not heap-only: heap `Option<T>` / heap-heap `Result<T,E>` are pointer niches; `Option<int>` / immediate-Ok `Result` / arity-≤1 user payload enums use two-slot `[payload, tag]` on a *direct* `CALL`/`RETURN`. Arity-2 immediate products use `[a, b]` ([#302](https://github.com/ardax-corp/coil-lang/pull/302)). Nested, `CallIndirect`, and unsure consumers stay boxed `ObjEnum`.
 
 ## Expression forms
@@ -99,7 +99,7 @@ use `panic` so a `try`/`?` cannot swallow the failure (Q5).
 
 | Attribute | Target |
 |-----------|--------|
-| `#[derive(Show, Eq, Ord, Hash)]` | `enum`, `class` — composes with `#[repr(int)]` (etc.) on scalar-backed enums. Eq/Hash/Ord/Show/String use the backing word (`Status::Ok` shows as `200`). Traits that cannot be derived on a payload enum also fail on a scalar enum. |
+| `#[derive(Show, Eq, Ord, Hash)]` | `enum`, `class` — composes with `#[repr(int)]` (etc.) on scalar-backed enums. Eq/Hash/Ord/Show use the backing word (`Status::Ok` shows as `200`). Traits that cannot be derived on a payload enum also fail on a scalar enum. |
 | `#[repr(int)]` / `float` / `string` / `bool` | `enum` — scalar-backed cases (`Status::Ok = 200`); omitted when every case is the same simple literal type. Runtime is the unboxed literal; the type is still the enum and coerces to the backing in expression position |
 | Attribute macro `#[name(...)]` | `fn`, methods, `class`, `enum` — declared `attr name(FnDecl f, …) -> Code` / `attr name(TypeDecl t, …) -> Code` in another module; returns the code that replaces the item. Stacked ones apply outermost first |
 | User derive `#[derive(X)]` | `class`, `enum` — `derive X(TypeDecl t) -> Code attrs(helper)` in another module; `#[helper(...)]` on fields / variants |
