@@ -7313,6 +7313,7 @@ impl Compiler {
                 continue;
             };
             let adapter = Self::dict_adapter_name(&fqn);
+            let boolean = crate::typechecking::ty::boolean();
             for (name, tag) in [(fqn, None), (adapter, Some(tag as u32))] {
                 match (method.as_str(), &ty) {
                     ("show", Ty::Array { element, .. }) => {
@@ -7325,12 +7326,60 @@ impl Compiler {
                         let fmt = b.str("%v");
                         b.call("format", vec![fmt, a[0]], string.clone())
                     }),
+                    // `==` / `!=` as the operator compares the type today.
+                    ("eq" | "ne", _) => {
+                        let sym = if method == "eq" { "==" } else { "!=" };
+                        let params = [(ty.clone(), tag), (ty.clone(), tag)];
+                        self.emit_builtin_entry(&name, &params, boolean.clone(), None, |b, a| {
+                            b.bin(crate::hir::BinOp::Overloaded(sym), a[0], a[1], boolean.clone())
+                        })
+                    }
+                    ("hash", _) => self.emit_structural_hash(&name, &ty, tag),
                     _ => {}
                 }
             }
         }
         self.hir_synth_callees.clear();
         skip.bind_label(after, self.bytecode.il_mut());
+    }
+
+    /// The `Hash` thunk `name` of a ground tuple or array `ty` (#1479): its
+    /// items' hashes combined as a derived `Hash` combines fields, each
+    /// through the item type's own ground instance (a `()` item hashes to
+    /// `0`).
+    fn emit_structural_hash(&mut self, name: &str, ty: &Ty, tag: Option<u32>) {
+        let items: Vec<Ty> = match ty {
+            Ty::Tuple(items) => items.clone(),
+            Ty::Array { element, .. } => vec![(**element).clone()],
+            _ => return,
+        };
+        let mut calls = HashMap::new();
+        let mut targets = Vec::with_capacity(items.len());
+        for item in &items {
+            if crate::hir::layout::is_unit(item) {
+                targets.push(None);
+                continue;
+            }
+            let lookup = Self::show_lookup_ty_for_instance(item);
+            let Some(fqn) = self
+                .checker
+                .generics()
+                .find_instance("Hash", std::slice::from_ref(&lookup))
+                .filter(|inst| inst.context.is_empty())
+                .and_then(|inst| inst.method_fqns.get("hash").cloned())
+            else {
+                return;
+            };
+            let raw = self.raw_instance_methods.contains(&fqn);
+            self.hir_synth_callees.insert(fqn.clone(), SynthCallee { raw, ..SynthCallee::default() });
+            calls.insert(fqn.clone(), (vec![self.value_layout(item)], ValueLayout::Boxed));
+            targets.push(Some(fqn));
+        }
+        let int = crate::typechecking::ty::int();
+        let hir = crate::hir::synth::builtin_entry(&self.checker, name, &[(ty.clone(), tag)], int.clone(), None, |b, a| {
+            crate::hir::synth::structural_hash(b, a[0], &items, &targets)
+        });
+        self.emit_synth_fn(name, &hir, calls, true);
     }
 
     /// Register `type_id → drop PC` via internal `gc_register_finalizer`.

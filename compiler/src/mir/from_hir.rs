@@ -4461,7 +4461,10 @@ impl Lower<'_> {
                 words.push(v);
                 continue;
             }
-            let Some(v) = self.word(arg)? else {
+            // A two-word tuple goes as its tuple object, as a plain call
+            // passes it to a shared body (#1479).
+            let v = if self.inp.pair_tys.contains_key(&arg.0) { self.boxed_word(arg)? } else { self.word(arg)? };
+            let Some(v) = v else {
                 return Ok(Val::Never);
             };
             let v = match tag {

@@ -1135,13 +1135,16 @@ impl Generics {
     }
 
     /// Register the structural instance of `class` for the ground tuple,
-    /// record or array `ty` (#1451, #1479): `Show` as `%v` shows it. The checker adds
+    /// record or array `ty` (#1451, #1479): `Show` as `%v` shows it, `Eq`
+    /// as `==` compares it, `Hash` combining its items'. The checker adds
     /// one the first time a goal asks for it
     /// (`Checker::ensure_structural_instance`); codegen emits its thunks
     /// ([`Self::structural_instances`]).
     pub fn register_structural_instance(&mut self, class: &str, ty: Ty) {
         let methods: &[&str] = match class {
             "Show" => &["show"],
+            "Eq" => &["eq", "ne"],
+            "Hash" => &["hash"],
             _ => return,
         };
         let ty_str = ty.to_string();

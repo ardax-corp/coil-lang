@@ -10280,30 +10280,43 @@ impl Checker {
         }
     }
 
-    /// A ground tuple, anonymous record or fixed array whose items are shown
-    /// as `%v` shows them has a structural `Show` instance (#1451, #1479),
-    /// registered the first time a goal asks for it, with the instances of
-    /// its structural items (`%v` of the tuple shows an array item through
-    /// the array's).
+    /// A ground tuple, anonymous record or fixed array has a structural
+    /// instance (#1451, #1479), registered the first time a goal asks for
+    /// it, with the instances of its structural items (`%v` of a tuple
+    /// shows an array item through the array's): `Show` when `%v` shows
+    /// its items, and for a tuple or array, `Eq` when its items have `Eq`
+    /// and `Hash` when they have a ground `Hash` (its thunk calls theirs).
     fn ensure_structural_instance(&mut self, class: &str, wanted: &[Ty]) {
         let [ty] = wanted else { return };
-        if class != "Show" {
+        if !matches!(class, "Show" | "Eq" | "Hash") {
             return;
         }
         let ty = apply_ty_prune(&self.subst, ty);
         let items: Vec<Ty> = match &ty {
             Ty::Tuple(items) if !items.is_empty() => items.clone(),
-            Ty::Record { fields } if !fields.is_empty() => fields.iter().map(|(_, t)| t.clone()).collect(),
+            Ty::Record { fields } if !fields.is_empty() && class == "Show" => fields.iter().map(|(_, t)| t.clone()).collect(),
             Ty::Array { element, .. } => vec![(**element).clone()],
             _ => return,
         };
-        if Self::ty_mentions_var(&ty) || !self.is_showable_for_format(&ty) {
+        if Self::ty_mentions_var(&ty) || self.generics.has_instance(class, &ty) {
             return;
         }
         for item in &items {
             self.ensure_structural_instance(class, std::slice::from_ref(item));
         }
-        if !self.generics.has_instance(class, &ty) {
+        let items_ok = match class {
+            "Show" => self.is_showable_for_format(&ty),
+            "Eq" => items.iter().all(|item| {
+                let lookup = show_lookup_ty(&apply_ty_prune(&self.subst, item));
+                self.generics.has_instance(class, &lookup)
+                    || self.generics.find_generic_instance(class, std::slice::from_ref(&lookup)).is_some()
+            }),
+            _ => items.iter().all(|item| {
+                let lookup = show_lookup_ty(&apply_ty_prune(&self.subst, item));
+                self.generics.find_instance(class, std::slice::from_ref(&lookup)).is_some_and(|inst| inst.context.is_empty())
+            }),
+        };
+        if items_ok {
             self.generics.register_structural_instance(class, ty);
         }
     }
