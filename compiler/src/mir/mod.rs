@@ -62,7 +62,7 @@ pub use stackmap::{bind_drafts, is_alloc_opcode, DraftFrameMap};
 pub use inst::{MirAllocKind, MirBinOp, MirConst, MirFfiOp, MirInst, ValueId};
 #[cfg(test)]
 pub use inst::{BlockId, LocalId, MirCastKind, MirCmpOp, MirGcKind, MirUnaryOp, Terminator};
-pub use instcombine::instcombine;
+pub use instcombine::{instcombine, instcombine_lir};
 #[cfg(test)]
 pub use layout::MirLayout;
 pub use licm::licm;

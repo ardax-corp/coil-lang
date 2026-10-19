@@ -626,6 +626,10 @@ fn lir_tail(
     mut func: crate::mir::MirFunc,
     side: &mut BodySidecar,
 ) -> Option<Vec<IlOp>> {
+    // Constants that only meet in MIR (after inlining, copy forwarding)
+    // fold as they do on dense, whether or not the body has the arithmetic
+    // dense pays for (#1434). Like `hir::fold`, at every level.
+    crate::mir::instcombine_lir(&mut func);
     super::deopt::fill_deopt_maps(&mut func);
     let entry = labels.first;
     // Every label leading the body binds the entry; a self call may name any.
