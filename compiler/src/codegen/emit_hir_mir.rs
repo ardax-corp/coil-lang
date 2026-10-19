@@ -984,6 +984,7 @@ impl Compiler {
             adapt: Vec::new(),
             unbox: None,
             ret_adapt: None,
+            ret_items: None,
         };
         if raw {
             // Each operand's MIR word is the boxed-layout word the stack passes.
@@ -1056,6 +1057,7 @@ impl Compiler {
                         adapt: Vec::new(),
                         unbox: None,
                         ret_adapt: None,
+                        ret_items: None,
                     },
                 );
             }
@@ -1140,6 +1142,7 @@ impl Compiler {
                         adapt: self.hir_mir_adapters(hir, call.generic.as_deref(), args),
                         unbox,
                         ret_adapt: self.hir_mir_ret_adapter(call),
+                        ret_items: Self::hir_mir_ret_items(call),
                     },
                 );
             }
@@ -1181,7 +1184,7 @@ impl Compiler {
         // by `ty_to_value_tag`.
         let tag = |ty: &Option<Ty>| ty.as_ref().and_then(Self::ty_to_value_tag).map(|t| t as u32);
         let (boxes, unbox) = call.generic.as_deref().map_or((Vec::new(), None), |g| (g.boxed.iter().map(tag).collect(), tag(&g.unbox)));
-        if let Some(dicts) = dicts.filter(|d| (d.is_empty() && unbox.is_none()) || !tail)
+        if let Some(dicts) = dicts.filter(|d| (d.is_empty() && unbox.is_none() && Self::hir_mir_ret_items(call).is_none()) || !tail)
             && let Some(boxed_ret) = self.hir_ret_shape(hir, id, &natural)
             && let Some(target) = target
         {
@@ -1212,6 +1215,7 @@ impl Compiler {
                     unbox,
                     adapt,
                     ret_adapt: self.hir_mir_ret_adapter(call),
+                    ret_items: Self::hir_mir_ret_items(call),
                 },
             );
         }
@@ -1317,6 +1321,12 @@ impl Compiler {
     fn hir_mir_ret_adapter(&mut self, call: &HirCall) -> Option<(crate::il::Label, u32)> {
         let adapt = call.generic.as_ref().filter(|_| !call.mono)?.ret_adapt.as_ref().ok()?.as_ref()?;
         Some(self.hir_closure_adapter(adapt))
+    }
+
+    /// The items of a shared generic body's result object it holds boxed,
+    /// unboxed at the call (#1549).
+    fn hir_mir_ret_items(call: &HirCall) -> Option<crate::mir::HirRetItems> {
+        call.generic.as_ref().filter(|_| !call.mono)?.ret_items.clone().ok()?
     }
 
     /// Each argument's closure adapter: a function value the generic
