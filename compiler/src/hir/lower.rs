@@ -1770,9 +1770,8 @@ fn returned_closure(body: &HirBody, checker: &Checker, call: HirId) -> bool {
         } => indirect_callee(body, checker, *g),
         // A non-generic function's returned closure. A generic one's at a
         // ground function type is a plain closure too (#1527): a mono
-        // clone's (codegen refuses the shared body's,
-        // [`generic_returned_closure`]). One still open may be a `PolyFn`,
-        // called with boxed args.
+        // clone's, or the shared body's wrapped in an adapter to that type
+        // (#1532). One still open may be a `PolyFn`, called with boxed args.
         HirKind::Call {
             callee: Callee::Named { name, .. },
             args,
@@ -1803,49 +1802,6 @@ fn returned_closure(body: &HirBody, checker: &Checker, call: HirId) -> bool {
         }
         _ => false,
     }
-}
-
-/// The generic call a never-reassigned `let` callee `f` was bound from,
-/// or that `f` is, at a ground function type (#1527), not one passing its
-/// own argument back ([`generic_passes_closure`]), nor one whose type
-/// arguments are all
-/// function types (never cloned, and a closure word is the same in the
-/// shared body). Its closure is a mono clone's; codegen refuses one from
-/// the shared body (E0804's fallback), whose open parameters and results
-/// may be boxed.
-pub fn generic_returned_closure(body: &HirBody, checker: &Checker, f: HirId) -> Option<HirId> {
-    let call = match body.expr(f).kind {
-        // Called in place (#1533).
-        HirKind::Call { .. } => f,
-        HirKind::Local(local) if body.local(local).kind == LocalKind::Let => body.exprs.iter().find_map(|e| match e.kind {
-            HirKind::Let { local: l, init: Some(init) } if l == local => Some(init),
-            _ => None,
-        })?,
-        _ => return None,
-    };
-    let HirKind::Call {
-        callee: Callee::Named { name, .. },
-        args,
-    } = &body.expr(call).kind
-    else {
-        return None;
-    };
-    if !checker.is_generic_fn(name) || generic_passes_closure(body, checker, name, args) {
-        return None;
-    }
-    let params = checker.fn_param_tys(name).unwrap_or_default();
-    let open: Vec<HirId> = args
-        .iter()
-        .zip(&params)
-        .filter(|(_, p)| !crate::typechecking::subst::ftv(p).is_empty())
-        .map(|(&a, _)| a)
-        .collect();
-    let fun_args = args.len() <= params.len()
-        && !open.is_empty()
-        && open.iter().all(|&a| {
-            body.expr(a).ty.as_ref().is_some_and(|t| matches!(strip_readonly(&apply_ty_prune(checker.subst(), t)), Ty::Fun(..)))
-        });
-    (!fun_args).then_some(call)
 }
 
 /// A generic call whose result is one of its arguments as is (#1010): the
