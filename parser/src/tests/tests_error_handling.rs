@@ -135,3 +135,25 @@
         same_try!("a ?? b");
         same_try!("o?.f");
     }
+
+    /// `x? .y` is a member access on the `?` result (#1540); only the
+    /// unbroken `?.` digraph is optional access.
+    #[test]
+    fn spaced_dot_after_try_is_access_on_try() {
+        for src in ["x? .y", "x?\n    .y"] {
+            match unwrap_expr(parse_expr(src).as_ref()) {
+                Expression::Access(recv, field) => {
+                    assert_eq!(*field, "y");
+                    assert!(matches!(
+                        unwrap_expr(recv.1.as_ref()),
+                        Expression::Try(_)
+                    ));
+                }
+                other => panic!("{src:?}: expected Access(Try), got {:?}", other),
+            }
+        }
+        assert!(matches!(
+            unwrap_expr(parse_expr("x?.y").as_ref()),
+            Expression::OptionalAccess(..)
+        ));
+    }

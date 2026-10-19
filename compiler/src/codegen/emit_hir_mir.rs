@@ -983,6 +983,7 @@ impl Compiler {
             boxes: Vec::new(),
             adapt: Vec::new(),
             unbox: None,
+            ret_adapt: None,
         };
         if raw {
             // Each operand's MIR word is the boxed-layout word the stack passes.
@@ -1054,6 +1055,7 @@ impl Compiler {
                         boxes,
                         adapt: Vec::new(),
                         unbox: None,
+                        ret_adapt: None,
                     },
                 );
             }
@@ -1137,6 +1139,7 @@ impl Compiler {
                         boxes,
                         adapt: self.hir_mir_adapters(hir, call.generic.as_deref(), args),
                         unbox,
+                        ret_adapt: self.hir_mir_ret_adapter(call),
                     },
                 );
             }
@@ -1208,6 +1211,7 @@ impl Compiler {
                     boxes,
                     unbox,
                     adapt,
+                    ret_adapt: self.hir_mir_ret_adapter(call),
                 },
             );
         }
@@ -1305,6 +1309,14 @@ impl Compiler {
             }
         };
         (params.len() >= n).then(|| params[..n].iter().map(|p| matches!(p, Ty::Var(_))).collect())
+    }
+
+    /// The adapter a shared generic body's returned closure is wrapped in
+    /// at the call's ground type (#1532): `MakeFn` of its entry (the
+    /// label, then the operand) over the closure.
+    fn hir_mir_ret_adapter(&mut self, call: &HirCall) -> Option<(crate::il::Label, u32)> {
+        let adapt = call.generic.as_ref().filter(|_| !call.mono)?.ret_adapt.as_ref().ok()?.as_ref()?;
+        Some(self.hir_closure_adapter(adapt))
     }
 
     /// Each argument's closure adapter: a function value the generic

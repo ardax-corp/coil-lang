@@ -2706,3 +2706,87 @@
         let text = format!("{:?}", ast.1);
         assert!(!text.contains("ExprStatement"), "tail match must stay an expression: {text}");
     }
+
+    /// Strip the `Expr` wrappers the Pratt root adds.
+    fn peel<'a>(e: &Expression<'a>) -> Expression<'a> {
+        match e {
+            Expression::Expr((_, inner)) => peel(inner),
+            other => other.clone(),
+        }
+    }
+
+    fn parse_expr_ast(src: &str) -> Result<Expression<'_>, String> {
+        Pratt::default()
+            .expr()
+            .parse(src)
+            .into_result()
+            .map(|o| peel(&o.1))
+            .map_err(|e| format!("{e:?}"))
+    }
+
+    /// `.member` takes leading whitespace after every receiver (#1540), the
+    /// same as after an identifier.
+    #[test]
+    fn member_access_allows_whitespace_after_any_receiver() {
+        for (src, field) in [
+            ("\"abc\" .len", "len"),
+            ("\"abc\"\n    .len", "len"),
+            ("12 .show", "show"),
+            ("12\n.show", "show"),
+            ("2.5\n  .show", "show"),
+            ("h.text\n    .len", "len"),
+            ("h.inner .n", "n"),
+            ("t\n.len", "len"),
+            ("f() \n.len", "len"),
+            ("\"a\" /* c */ .len", "len"),
+            ("\"a\" // c\n .len", "len"),
+        ] {
+            match parse_expr_ast(src) {
+                Ok(Expression::Access(_, f)) => assert_eq!(f, field, "{src:?}"),
+                other => panic!("{src:?}: expected Access, got {other:?}"),
+            }
+        }
+        match parse_expr_ast("\"abc\"\n  .len()") {
+            Ok(Expression::Call { name, .. }) => {
+                assert!(matches!(peel(&name.1), Expression::Access(_, "len")))
+            }
+            other => panic!("expected Call, got {other:?}"),
+        }
+        match parse_expr_ast("o \n ?.f") {
+            Ok(Expression::OptionalAccess(_, "f")) => {}
+            other => panic!("expected OptionalAccess, got {other:?}"),
+        }
+    }
+
+    /// Padding the postfix `.` must not split floats or ranges: `.` is a
+    /// member access only when an identifier follows it.
+    #[test]
+    fn padded_member_access_keeps_floats_and_ranges() {
+        assert!(matches!(parse_expr_ast("1.5"), Ok(Expression::Float(f)) if f == 1.5));
+        assert!(matches!(parse_expr_ast("0.05"), Ok(Expression::Float(f)) if f == 0.05));
+        match parse_expr_ast("2.5.show") {
+            Ok(Expression::Access(recv, "show")) => {
+                assert!(matches!(peel(&recv.1), Expression::Float(f) if f == 2.5))
+            }
+            other => panic!("expected Access on a float, got {other:?}"),
+        }
+        for (src, inclusive) in [
+            ("0..10", false),
+            ("0 .. 10", false),
+            ("a ..b", false),
+            ("a\n..b", false),
+            ("1 ..=2", true),
+            ("x.y ..= z", true),
+            ("\"a\" .. \"b\"", false),
+        ] {
+            match parse_expr_ast(src) {
+                Ok(Expression::Range { inclusive: i, .. }) => assert_eq!(i, inclusive, "{src:?}"),
+                other => panic!("{src:?}: expected Range, got {other:?}"),
+            }
+        }
+        // A `.` followed by digits is never a member access or a float
+        // continuation once whitespace separates it from the number.
+        for src in ["1 .5", "x\n.5", "x .5", "1. 5"] {
+            assert!(parse_expr_ast(src).is_err(), "{src:?} must not parse");
+        }
+    }

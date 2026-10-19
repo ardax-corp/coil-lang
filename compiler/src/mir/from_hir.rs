@@ -100,6 +100,10 @@ pub struct HirCallSite {
     /// function value with boxed arguments: `MakeFn` of the adapter's
     /// entry (the label, then the operand) over the value (empty: none).
     pub adapt: Vec<Option<(Label, u32)>>,
+    /// The closure result's adapter, where a shared generic body returns
+    /// it in its boxed ABI: `MakeFn` of the adapter's entry (the label,
+    /// then the operand) over the result (#1532).
+    pub ret_adapt: Option<(Label, u32)>,
 }
 
 /// A trait method or operator on a bound type parameter in a shared
@@ -4092,6 +4096,15 @@ impl Lower<'_> {
             if (self.inp.steady_fn)(name) {
                 self.b.mark_steady_call(dest);
             }
+        }
+        // A shared generic body's closure, adapted to the call's ground
+        // type (#1532).
+        if let Some((target, operand)) = site.ret_adapt {
+            if site.unbox.is_some() || niche.is_some() || dest_hi.is_some() || ret != MirTy::HeapRef {
+                return Err("call result adapter".into());
+            }
+            let f = self.at_expr(id, |l| l.b.ins_alloc(MirAllocKind::Fn { target, operand, mask: 0 }, vec![dest]).map_err(mir))?;
+            return Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![f]).map_err(mir)?));
         }
         // A bare type parameter result comes back boxed; a niche one as
         // its boxed enum object (#1565).

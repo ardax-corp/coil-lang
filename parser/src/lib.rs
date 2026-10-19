@@ -809,14 +809,20 @@ impl<'pratt> Pratt<'pratt> {
                     },
                 ),
                 // `?.field` before bare `.` / `?` so the digraph wins.
+                //
+                // Both take leading trivia themselves (#1540): literals, a
+                // `.field` ident and postfix `?` leave trailing whitespace
+                // unconsumed, so `"abc"\n    .len()` must not depend on the
+                // receiver. Requiring an ident after `.` keeps floats
+                // (`1.5`, `1 .5` is an error) and ranges (`a ..b`) apart.
                 postfix(
                     Precedence::Primary as u16,
-                    just("?.").ignore_then(text::ident()),
+                    trivia().ignore_then(just("?.")).ignore_then(text::ident()),
                     |lhs, field, e| (e.span(), Box::new(Expression::OptionalAccess(lhs, field))),
                 ),
                 postfix(
                     Precedence::Primary as u16,
-                    just('.').ignore_then(text::ident()),
+                    trivia().ignore_then(just('.')).ignore_then(text::ident()),
                     |lhs, field, e| (e.span(), Box::new(Expression::Access(lhs, field))),
                 ),
                 // Postfix `?` must not steal the first `?` of `??`.
