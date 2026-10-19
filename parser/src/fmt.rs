@@ -2178,15 +2178,23 @@ impl<'s> Formatter<'s> {
             return;
         }
 
-        match &parts[0] {
-            ChainPart::Root(expr) => self.fmt_expression(expr),
+        let mut can_break = match &parts[0] {
+            ChainPart::Root(expr) => {
+                self.fmt_expression(expr);
+                space_may_follow(expr)
+            }
             ChainPart::Field { .. } => unreachable!("member chain must start with root"),
-        }
+        };
         self.with_indent(|f| {
             for part in &parts[1..] {
-                f.newline();
-                f.write_indent();
+                if can_break {
+                    f.newline();
+                    f.write_indent();
+                }
                 f.emit_chain_field(part);
+                // A call ends in `)`, which the parser pads; a bare `.field`
+                // takes no space before the next `.`.
+                can_break = matches!(part, ChainPart::Field { call_args: Some(_), .. });
             }
         });
     }
@@ -2617,6 +2625,30 @@ fn collect_member_chain<'a>(expr: &'a Expression<'a>) -> Option<Vec<ChainPart<'a
         return None;
     }
     Some(rev)
+}
+
+/// Whether the parser accepts a space (or line break) between `expr` as
+/// printed and a `.` after it. A string or number literal, a `.field`, or a
+/// postfix `?` takes no space before `.`: `"a"\n.len()` does not parse
+/// (#1505). Unlisted shapes stay glued to their first `.part`, which is
+/// always valid.
+fn space_may_follow(expr: &Expression<'_>) -> bool {
+    match expr {
+        Expression::Identifier(_)
+        | Expression::Bool(_)
+        | Expression::Call { .. }
+        | Expression::MacroCall { .. }
+        | Expression::Index(..)
+        | Expression::QualifiedAccess { .. }
+        | Expression::Array(_) => true,
+        Expression::Expr(inner) => space_may_follow(inner.1.as_ref()),
+        // `fmt_expression` drops parens around an atom.
+        Expression::Group(g) => {
+            let inner = strip_groups(g).1.as_ref();
+            !is_atom(inner) || space_may_follow(inner)
+        }
+        _ => false,
+    }
 }
 
 const PREC_POW: u8 = 13;
@@ -3391,5 +3423,27 @@ fn main() { return; }
         assert!(lines.len() < 10, "packed, not one per line:\n{formatted}");
         assert!(lines.iter().all(|l| l.len() <= MAX_WIDTH), "{formatted}");
         stable(&formatted);
+    }
+
+    #[test]
+    fn long_literal_receiver_keeps_its_method_on_the_same_line() {
+        // #1505: no space is allowed between a literal (or a `.field`) and
+        // the `.` after it, so a chain must not break there.
+        let long = "x".repeat(110);
+        let chain = ".show().len()".repeat(7);
+        for line in [
+            format!("    let b = t.len() == \"{long}\".len();"),
+            format!("    assert!(t.len() == \"{long}\".len());"),
+            format!("    let n = 1234567{chain};"),
+            format!("    let n = 12345.5{chain};"),
+            format!("    let n = (\"a\"){chain};"),
+            format!("    let n = x?{chain};"),
+            format!("    let n = holder.field_with_a_rather_long_name{chain};"),
+            format!("    let n = a.long_field_name_one.long_field_name_two.long_field_name_three.f{chain};"),
+        ] {
+            let src = format!("fn main() {{\n{line}\n}}\n");
+            let once = format_source(&src).unwrap_or_else(|e| panic!("{src}: {e:?}"));
+            assert_eq!(format_source(&once).unwrap(), once);
+        }
     }
 }
