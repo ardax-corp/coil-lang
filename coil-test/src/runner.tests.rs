@@ -329,6 +329,44 @@ fn coverage_reports_project_lines() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// A line whose code constant folding would erase (`255 as byte` only
+/// reaches the return as a constant) still counts as covered: a coverage
+/// compile keeps each line's code.
+#[test]
+fn coverage_keeps_a_line_folding_would_erase() {
+    let root = std::fs::canonicalize(std::env::temp_dir())
+        .unwrap()
+        .join(format!("coil_test_coverage_fold_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("tests")).unwrap();
+    std::fs::write(
+        root.join("src/bytesx.hy"),
+        "fn top(int k) -> int {\n    let bytes = [k as byte, 255 as byte];\n    return bytes[1] as int;\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("tests/top.hy"),
+        "use bytesx::{top};\n\ntest(\"top\") {\n    if !(top(1) == 255) { raise \"assertion failed\"; }\n}\n",
+    )
+    .unwrap();
+    let opts = TestOptions {
+        extra_roots: vec![root.join("src")],
+        coverage: Some(CoverageOptions {
+            lcov_out: root.join("unused.info"),
+            per_test_out: None,
+            project_root: root.clone(),
+        }),
+        ..options(&root.join("tests"), false)
+    };
+    let result = run_test_suite(ReportConfig::default(), &opts).expect("suite runs");
+    assert_eq!((result.passed, result.failed), (1, 0));
+    let lcov = result.coverage.expect("coverage collected").lcov();
+    assert!(lcov.contains("DA:2,1\n"), "the `let` line is covered: {lcov}");
+    assert!(lcov.contains("DA:3,1\n"), "the `return` line is covered: {lcov}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn suite_exit_code_is_nonzero_iff_any_case_failed() {
     assert_eq!(suite_exit_code(0), 0);
