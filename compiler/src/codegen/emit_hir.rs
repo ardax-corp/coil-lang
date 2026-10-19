@@ -494,6 +494,7 @@ impl Compiler {
                     if self.hir_builtin(name).is_some()
                         || self.checker.is_overloaded(name)
                         || self.checker.bare_construct_at(start, end).is_some()
+                        || self.checker.qualified_trait_call_at(start, end).is_some()
                         || self.sidecar_overload(e.node, start, end).is_some()
                         || self.checker.partial_fill_at(start, end).is_some()
                         || self.forwarded_dicts_hint(e.node, start, end).is_some()
@@ -2133,55 +2134,30 @@ impl Compiler {
                 }
                 continue;
             }
-            // `new C(y: 1, x: 2)` (#1074): named arguments into field order.
-            if let HirKind::Make { kind: MakeKind::Class(name), args } = &body.exprs[i].kind
+            // `new C(y: 1, x: 2)` (#1074) and `recv.m(b: 2, a: 1)` (#1380):
+            // named arguments into the field or parameter order the checker
+            // matched them to (after the receiver).
+            let receiver = match &body.exprs[i].kind {
+                HirKind::Make { kind: MakeKind::Class(_), args } => Some((0, args)),
+                HirKind::Call { callee: Callee::Method { .. }, args } => Some((1, args)),
+                _ => None,
+            };
+            if let Some((skip, args)) = receiver
                 && args.iter().any(|&a| matches!(body.expr(a).kind, HirKind::Named { .. }))
             {
-                let fields = self.hir_class_fields(&self.resolve_class_ident(name)).ok_or("call-argument")?;
+                let (start, end) = body.exprs[i].span;
+                let record = self.checker.named_arg_slots(start, end).ok_or("call-argument")?;
+                if record.rest || record.slots.len() + skip != args.len() {
+                    return Err("call-argument");
+                }
                 let args = args.clone();
                 let b = out.get_or_insert_with(|| body.clone());
-                let mut slots: Vec<Option<HirId>> = vec![None; fields.len()];
-                let mut next = 0usize;
-                for arg in args {
-                    let (k, value) = match &b.expr(arg).kind {
-                        HirKind::Named { name, value } => {
-                            (fields.iter().position(|(f, _)| f == name).ok_or("call-argument")?, *value)
-                        }
-                        _ => {
-                            while next < slots.len() && slots[next].is_some() {
-                                next += 1;
-                            }
-                            (next, arg)
-                        }
-                    };
-                    *slots.get_mut(k).ok_or("call-argument")? = Some(value);
-                }
-                let ordered = slots.into_iter().collect::<Option<Vec<_>>>().ok_or("call-argument")?;
-                if let HirKind::Make { args, .. } = &mut b.exprs[i].kind {
-                    *args = ordered;
-                }
-                continue;
-            }
-            // `recv.m(b: 2, a: 1)` (#1380): named arguments into parameter
-            // order after the receiver.
-            if let HirKind::Call { callee: Callee::Method { name }, args } = &body.exprs[i].kind
-                && args.iter().any(|&a| matches!(body.expr(a).kind, HirKind::Named { .. }))
-            {
-                let names = self.hir_method_param_names(body, HirId(i as u32), name, args)?;
-                let args = args.clone();
-                let b = out.get_or_insert_with(|| body.clone());
-                let mut slots: Vec<Option<HirId>> = vec![None; names.len()];
-                let mut next = 0usize;
-                for &arg in &args[1..] {
-                    let (k, value) = match &b.expr(arg).kind {
-                        HirKind::Named { name, value } => (names.iter().position(|p| p == name).ok_or("call-argument")?, *value),
+                let mut slots: Vec<Option<HirId>> = vec![None; record.params];
+                for (&arg, &k) in args[skip..].iter().zip(&record.slots) {
+                    let value = match &b.expr(arg).kind {
+                        HirKind::Named { value, .. } => *value,
                         HirKind::Spread(_) => return Err("call-argument"),
-                        _ => {
-                            while next < slots.len() && slots[next].is_some() {
-                                next += 1;
-                            }
-                            (next, arg)
-                        }
+                        _ => arg,
                     };
                     let slot = slots.get_mut(k).ok_or("call-argument")?;
                     if slot.is_some() {
@@ -2189,10 +2165,11 @@ impl Compiler {
                     }
                     *slot = Some(value);
                 }
-                let mut ordered = vec![args[0]];
+                let mut ordered = args[..skip].to_vec();
                 ordered.extend(slots.into_iter().collect::<Option<Vec<_>>>().ok_or("call-argument")?);
-                if let HirKind::Call { args, .. } = &mut b.exprs[i].kind {
-                    *args = ordered;
+                match &mut b.exprs[i].kind {
+                    HirKind::Make { args, .. } | HirKind::Call { args, .. } => *args = ordered,
+                    _ => unreachable!("matched above"),
                 }
                 continue;
             }
@@ -2286,19 +2263,29 @@ impl Compiler {
             let b = out.get_or_insert_with(|| body.clone());
             let flat = self.hir_flatten_spreads(b, &args)?;
             let fixed_count = if has_rest { names.len().saturating_sub(1) } else { names.len() };
-            let rest_name = has_rest.then(|| names[fixed_count].clone());
             let mut slots: Vec<Option<HirId>> = vec![None; fixed_count];
             let mut rest = Vec::new();
             let mut next = 0usize;
             let named = flat.iter().any(|&a| matches!(b.expr(a).kind, HirKind::Named { .. }));
-            for &arg in &flat {
-                if let HirKind::Named { name: param, value } = &b.expr(arg).kind {
-                    if rest_name.as_deref() == Some(param.as_str()) {
-                        rest.push(*value);
-                    } else if let Some(k) = names[..fixed_count].iter().position(|p| p == param) {
-                        slots[k] = Some(*value);
-                    } else {
-                        return Err("call-argument");
+            // Named arguments go where the checker matched them.
+            let record = if named {
+                let record = self.checker.named_arg_slots(call_span.0, call_span.1).ok_or("call-argument")?;
+                if record.slots.len() != flat.len() || record.params != fixed_count {
+                    return Err("call-argument");
+                }
+                Some(record)
+            } else {
+                None
+            };
+            for (j, &arg) in flat.iter().enumerate() {
+                if let Some(record) = record {
+                    let value = match &b.expr(arg).kind {
+                        HirKind::Named { value, .. } => *value,
+                        _ => arg,
+                    };
+                    match slots.get_mut(record.slots[j]) {
+                        Some(slot) => *slot = Some(value),
+                        None => rest.push(value),
                     }
                     continue;
                 }
@@ -2366,34 +2353,6 @@ impl Compiler {
             }
         }
         Ok(out)
-    }
-
-    /// The declared parameter names (after `self`) of the inherent method
-    /// `recv.method(..)` calls, as the typechecker matched named arguments
-    /// against them; the overload it picked for an overloaded method.
-    fn hir_method_param_names(&self, body: &HirBody, call: HirId, method: &str, args: &[HirId]) -> Result<Vec<String>, &'static str> {
-        let recv = *args.first().ok_or("method-receiver")?;
-        let recv_ty = Self::hir_ty(body, recv).ok_or("method-receiver")?;
-        let recv_ty = crate::typechecking::ty::peel_constructor_refinement(apply_ty_prune(self.checker.subst(), recv_ty));
-        let owner = Checker::class_name_of_ty(&recv_ty).ok_or("call-argument")?;
-        let fqn = format!("{owner}::{method}");
-        if self.checker.is_overloaded(&fqn) {
-            let e = body.expr(call);
-            let (_, is_rest, id) = self.sidecar_overload(e.node, e.span.0, e.span.1).ok_or("call-argument")?;
-            let cand = self
-                .checker
-                .overload_candidates(&fqn)
-                .and_then(|cands| cands.iter().find(|c| c.id == id))
-                .ok_or("call-argument")?;
-            if is_rest || cand.is_rest {
-                return Err("call-argument");
-            }
-            return Ok(cand.param_names.clone());
-        }
-        if self.checker.fn_has_rest(&fqn) {
-            return Err("call-argument");
-        }
-        self.checker.fn_param_names(&fqn).map(<[String]>::to_vec).ok_or("call-argument")
     }
 
     /// `args` with each spread flattened: a literal's items in place (when
@@ -4344,9 +4303,13 @@ impl Compiler {
         // before it is a call, so a `len` here names a user `impl Length`
         // and is looked up like any other method (#1504).
         let method = name.rsplit_once('.').map_or(name, |(_, m)| m);
-        if name.contains("::") {
-            return Err("callee-trait");
-        }
+        // `Trait::m(..)` whose bare `m` is taken (see `qualified_trait_call_at`).
+        let (start, end) = hir.expr(call).span;
+        let method = match name.rsplit_once("::") {
+            Some((_, member)) if self.checker.qualified_trait_call_at(start, end) == Some(name) => member,
+            Some(_) => return Err("callee-trait"),
+            None => method,
+        };
         let arg_tys = args
             .iter()
             .map(|&arg| Self::hir_ty(hir, arg).map(|t| apply_ty_prune(self.checker.subst(), t)))

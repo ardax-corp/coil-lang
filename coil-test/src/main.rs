@@ -9,6 +9,7 @@ use coil_test::mutate::job::{WORKER_ARG, worker_main};
 use coil_test::runner::cmd_test;
 
 fn main() {
+    coil_build_id::check_parent("coil-test");
     comptime::install();
     let raw: Vec<String> = std::env::args().collect();
     if raw.get(1).map(String::as_str) == Some(WORKER_ARG) {

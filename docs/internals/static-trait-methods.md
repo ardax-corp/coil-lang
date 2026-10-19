@@ -27,7 +27,8 @@ Runnable example: `examples/static_trait_method.hy`. Tests: `tests/traits/static
 - **Declaration:** `static fn name(params) -> R {}` in a `trait` body, the same spelling as an inherent static. An instance implements it with `pub static fn`. Static-ness must match the declaration (error: "method `m` in instance of `Tr` must be static … but it is an instance method", and the converse).
 - **Calls:** `Owner::name(args)`, where `Owner` is either
   - a concrete type with an instance (`Config::from_val(v)`, `int::from_val(v)`, `Dir::from_val(v)`), or
-  - a type parameter in scope whose bound declares `name` (`T::from_val(v)`).
+  - a type parameter in scope whose bound declares `name` (`T::from_val(v)`), or
+  - the trait itself (`FromVal::from_val(v)`), which resolves like the function form `from_val(v)` limited to that trait's method: the expected type (or the arguments) choose the instance. See "Trait-qualified calls" below.
 - **No bare `from_val(v)`** for static trait methods outside a trait's own default body (there the class constraint is active and the sibling call is the existing UFCS bound call). Nothing else selects an instance except the expected type, and a second spelling for the same call goes against the "one spelling per construct" rule.
 - An instance method called as `Owner::m(..)` is an error that points at `obj.m(..)`; a static method called on a value is an ordinary unknown-method error.
 
@@ -57,3 +58,11 @@ Runnable example: `examples/static_trait_method.hy`. Tests: `tests/traits/static
 
 - Generic owners (`Box<int>::from_val(v)`) wait on generic trait instances (#550 / #551).
 - Specialization keys are still argument types, so a generic call whose `T` is return-only uses the shared body plus dictionary (correct, not specialized).
+
+## Trait-qualified calls
+
+`Trait::m(args)` is the function-form call `m(args)` with only `Trait`'s `m` as a candidate, for instance and static methods alike. It names the trait, so two traits (or a trait and a free fn) sharing a method name are told apart; `m(args)` and `x.m()` keep working.
+
+- **Typechecking:** `qualified_call_trait` takes the owner as a trait only when it names no type parameter, class, enum or primitive (so `Type::assoc_fn`, `Enum::Variant` and `T::m` keep their meaning); `module::Trait` names a trait that module declares. `infer_qualified_trait_call` then runs the function form's steps restricted to the trait: a trait-object first argument, an active bound's dictionary (`bound_method_candidates` filtered to the trait), else the ground instance the argument and expected types discharge. Errors: an unknown owner is E0202, a method the trait does not declare is E0101, no instance (or more than one with nothing to choose) is E0119, and a type parameter without the trait's bound is E0119 naming the missing bound.
+- **Lowering:** the checker records the callee name in `qualified_trait_call_at`. It is the bare method, so the HIR call is the function form's own and the bytecode is identical (`coil dissect --fn`). When a free fn, local or builtin takes the bare name, it is `Trait::m` instead, which `hir_ground_ufcs` / `hir_ground_bound_call` send to the recorded instance as they do `T::m`.
+- Tests: `tests/traits/qualified_trait_calls.hy`, `tests/traits/compile_fail/qualified_trait_*.hy`.

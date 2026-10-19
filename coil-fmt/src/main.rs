@@ -112,6 +112,7 @@ fn format_one(path: &Path, check: bool) -> Result<bool, String> {
 }
 
 fn main() {
+    coil_build_id::check_parent("coil-fmt");
     let raw: Vec<String> = std::env::args().collect();
     let args = match parse_args(&raw) {
         Ok(Some(args)) => args,

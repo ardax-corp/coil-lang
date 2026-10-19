@@ -311,9 +311,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "coil-build-id"
+version = "0.1.0"
+
+[[package]]
 name = "coil-cli"
 version = "0.1.0"
 dependencies = [
+ "coil-build-id",
  "common",
  "machine",
  "rkyv",
@@ -325,6 +330,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "coil-args",
+ "coil-build-id",
  "coil-cli",
  "common",
  "compiler",
@@ -341,6 +347,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "coil-args",
+ "coil-build-id",
  "coil-cli",
  "common",
  "compiler",
@@ -361,6 +368,7 @@ name = "coil-fmt"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "coil-build-id",
  "parser",
  "reporting",
 ]
@@ -380,6 +388,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "coil-args",
+ "coil-build-id",
  "common",
  "compiler",
  "comptime",
@@ -403,6 +412,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "coil-args",
+ "coil-build-id",
  "coil-host",
  "common",
  "compiler",
@@ -418,6 +428,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "coil-args",
+ "coil-build-id",
  "compiler",
  "comptime",
  "reporting",
