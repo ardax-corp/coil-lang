@@ -1,5 +1,5 @@
-// Built-in derives: `Show`, `Eq`, `Ord`, `Hash`, `String`, `Default`, `Send`
-// and `Sensitive`. Always in scope (module `derive`); the compiler
+// Built-in derives: `Show`, `Eq`, `Ord`, `Hash`, `Default`, `Send` and
+// `Sensitive`. Always in scope (module `derive`); the compiler
 // runs them like any user derive.
 //
 // Generated code matches what the former Rust expansion built: payloads are
@@ -136,29 +136,6 @@ derive Show(TypeDecl t) -> Code {
     return quote items {
         impl Show for ${t.impl_head("Show")} {
             fn show(${t.self_type()} ${raw(p)}) -> string {
-                ${raw(show_format(t, p))}
-            }
-        }
-    };
-}
-
-/// `impl String`: same text as `Show`.
-derive String(TypeDecl t) -> Code {
-    let p = "__str_" + t.name.str();
-    if t.repr != "" {
-        let n = "__str_n_" + t.name.str();
-        return quote items {
-            impl String for ${t.impl_head("Show")} {
-                fn to_string(${t.self_type()} ${raw(p)}) -> string {
-                    let ${raw(n)}: ${raw(t.repr)} = ${raw(p)};
-                    return ${raw(n)}.show();
-                }
-            }
-        };
-    }
-    return quote items {
-        impl String for ${t.impl_head("Show")} {
-            fn to_string(${t.self_type()} ${raw(p)}) -> string {
                 ${raw(show_format(t, p))}
             }
         }

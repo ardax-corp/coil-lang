@@ -249,3 +249,90 @@ pub fn builtin_entry(
     let root = b.block(vec![ret], None, coil_ty::never());
     b.finish(root)
 }
+
+/// `Show::show` of a fixed array `array` of `element`s (#1479):
+/// `[a, b, c]`, each element as `format("%v", x)` shows it. The caller maps
+/// `format` to the builtin.
+pub fn array_show(b: &mut Synth, array: HirId, element: Ty) -> HirId {
+    let string = coil_ty::string();
+    let out = b.local("out", string.clone(), LocalKind::Let);
+    let sep = b.local("sep", string.clone(), LocalKind::Let);
+    let x = b.local("x", element, LocalKind::Pattern);
+    let open = b.str("[");
+    let init_out = b.let_(out, open);
+    let empty = b.str("");
+    let init_sep = b.let_(sep, empty);
+    let (o, s) = (b.read(out), b.read(sep));
+    let joined = b.bin(BinOp::StrConcat, o, s, string.clone());
+    let fmt = b.str("%v");
+    let v = b.read(x);
+    let item = b.call("format", vec![fmt, v], string.clone());
+    let joined = b.bin(BinOp::StrConcat, joined, item, string.clone());
+    let append = b.assign(out, joined);
+    let comma = b.str(", ");
+    let next_sep = b.assign(sep, comma);
+    let body = b.block(vec![append, next_sep], None, coil_ty::unit());
+    let kind = Some(crate::typechecking::infer::ForInKind::Array);
+    let each = b.push(HirKind::ForIn { pat: HirPat::Bind(x), iterable: array, body, kind }, coil_ty::unit());
+    let o = b.read(out);
+    let close = b.str("]");
+    let shown = b.bin(BinOp::StrConcat, o, close, string.clone());
+    b.block(vec![init_out, init_sep, each], Some(shown), string)
+}
+
+/// `Hash::hash` of a tuple (`items`, one per item) or array (`items` its
+/// element) `value` (#1479): `h = ((h & M) * 31) ^ hash(x)` over the items
+/// from `0`, as a derived `Hash` combines fields. `targets` names each
+/// item's `hash` entry (`None`: a `()` item, hashed as `0`).
+pub fn structural_hash(b: &mut Synth, value: HirId, items: &[Ty], targets: &[Option<String>]) -> HirId {
+    let int = coil_ty::int();
+    let acc = b.local("h", int.clone(), LocalKind::Let);
+    let zero = b.int(0);
+    let init = b.let_(acc, zero);
+    let step = |b: &mut Synth, item: Option<HirId>, target: &Option<String>| {
+        let h = match (item, target) {
+            (Some(item), Some(target)) => b.call(target, vec![item], int.clone()),
+            _ => b.int(0),
+        };
+        let cur = b.read(acc);
+        let mask = b.int(288230376151711743);
+        let low = b.bin(BinOp::BitAnd, cur, mask, int.clone());
+        let k = b.int(31);
+        let spread = b.bin(BinOp::IntMul, low, k, int.clone());
+        let mixed = b.bin(BinOp::BitXor, spread, h, int.clone());
+        b.assign(acc, mixed)
+    };
+    let mut stmts = vec![init];
+    match b.body.exprs[value.0 as usize].ty.clone() {
+        Some(Ty::Array { element, .. }) => {
+            let x = b.local("x", (*element).clone(), LocalKind::Pattern);
+            let v = b.read(x);
+            let body = step(b, Some(v), &targets[0]);
+            let body = b.block(vec![body], None, coil_ty::unit());
+            let kind = Some(crate::typechecking::infer::ForInKind::Array);
+            stmts.push(b.push(HirKind::ForIn { pat: HirPat::Bind(x), iterable: value, body, kind }, coil_ty::unit()));
+        }
+        _ => {
+            let mut pats = Vec::with_capacity(items.len());
+            let mut locals = Vec::with_capacity(items.len());
+            for (i, item) in items.iter().enumerate() {
+                if targets[i].is_none() {
+                    pats.push(HirPat::Wild);
+                    locals.push(None);
+                } else {
+                    let l = b.local(&format!("x{i}"), item.clone(), LocalKind::Pattern);
+                    pats.push(HirPat::Bind(l));
+                    locals.push(Some(l));
+                }
+            }
+            stmts.push(b.push(HirKind::LetPat { pat: HirPat::Tuple(pats), init: value }, coil_ty::unit()));
+            for (local, target) in locals.into_iter().zip(targets) {
+                let v = local.map(|l| b.read(l));
+                let s = step(b, v, target);
+                stmts.push(s);
+            }
+        }
+    }
+    let out = b.read(acc);
+    b.block(stmts, Some(out), int)
+}

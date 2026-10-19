@@ -183,9 +183,6 @@ enum HirBuiltin {
     LinAlg,
     /// `matrix(data)`: the data itself, a zero-cost wrap.
     Matrix,
-    /// `block_on(h)`: `h` resumed until done, waiting on batched IO between
-    /// resumes, then its last resumed word, as the AST's `emit_block_on`.
-    BlockOn,
     /// A trait method on a bare-class existential (`show(x)`): the pack to
     /// a temp, its value, its dictionary, the method's code pointer from
     /// the dictionary, then `CallIndirect`, as `emit_existential_method_call`.
@@ -822,6 +819,17 @@ impl Compiler {
         for &param in &hir.params {
             self.context.variables.intern(hir.local(param).name.clone());
         }
+        // A bounded instance method's dictionaries (#1479): its own after
+        // the parameters, the context read out of it on entry.
+        let entry_words = self.synth_entry_dicts.map(|(base, n)| {
+            let own = self.context.variables.intern("__dict0".to_string()) as u32;
+            let entry = self.context.variables.len() as u32;
+            for i in 0..n {
+                let slot = self.context.variables.intern(format!("__dict{}", i + 1)) as u32;
+                self.hir_mir_ctx.push((slot, own, (base + i) as u32));
+            }
+            entry
+        });
         let plan = lower::refusal(hir, &self.checker).map_or_else(|| self.plan_hir_body(hir), Err);
         let lowered = match plan {
             Ok(mut emit) => {
@@ -837,7 +845,7 @@ impl Compiler {
                     op.set_loc(DebugLoc::unknown());
                 }
                 self.hir_mir_why = None;
-                self.hir_mir = self.hir_lower_mir(hir, &mut emit, None);
+                self.hir_mir = self.hir_lower_mir(hir, &mut emit, entry_words);
                 self.expr_depth = 0;
                 true
             }
@@ -1333,6 +1341,14 @@ impl Compiler {
                 {
                     record_fields.insert(i as u32, (k, w));
                 }
+                // A `()` field holds the empty tuple object (#1510).
+                HirKind::Field { base, name }
+                    if let Some((FieldAt::Name, fty)) = self.hir_field(hir, *base, name)
+                        && crate::hir::layout::is_unit(&apply_ty_prune(checker.subst(), &fty))
+                        && let Some(k) = key(name) =>
+                {
+                    record_fields.insert(i as u32, (k, crate::mir::MirTy::HeapRef));
+                }
                 HirKind::Make {
                     kind: MakeKind::Record(names),
                     args,
@@ -1346,6 +1362,10 @@ impl Compiler {
                         .zip(args)
                         .map(|(n, &arg)| {
                             let (_, fty) = fields.iter().find(|(f, _)| f == n)?;
+                            // A `()` field holds the empty tuple object (#1510).
+                            if crate::hir::layout::is_unit(&apply_ty_prune(checker.subst(), fty)) {
+                                return Some((key(n)?, crate::mir::MirTy::HeapRef));
+                            }
                             let w = record_word(fty)?;
                             (Self::hir_ty(hir, arg).and_then(record_word) == Some(w)).then_some((key(n)?, w))
                         })
@@ -1371,6 +1391,10 @@ impl Compiler {
                             None => Some(None),
                             Some(k) => {
                                 let (_, fty) = fields.iter().find(|(f, _)| f == n)?;
+                                // A `()` binding has no slot (#1510).
+                                if crate::hir::layout::is_unit(&apply_ty_prune(checker.subst(), fty)) {
+                                    return Some(None);
+                                }
                                 Some(Some((*k, record_word(fty)?)))
                             }
                         })
@@ -1594,7 +1618,6 @@ impl Compiler {
             records,
             record_pats,
             matrix_wraps: &tables.matrix_wraps,
-            block_ons: &tables.block_ons,
             field_news: &tables.field_news,
             linalgs: &tables.linalgs,
             array_copies: &tables.array_copies,
@@ -3824,9 +3847,13 @@ impl Compiler {
         let node = hir.expr(call);
         let (start, end) = node.span;
         let known = |k: &str| self.functions.contains_key(k) || self.fn_entry_labels.contains_key(k);
-        let Some((class, inst_args, fqn)) = self
-            .sidecar_dicts(node.node, start, end)
-            .and_then(|dicts| dicts.first())
+        let dicts = self.sidecar_dicts(node.node, start, end).unwrap_or_default();
+        let picked = if node.node.is_none() {
+            self.hir_spliced_dict(hir, call, dicts)?
+        } else {
+            dicts.first()
+        };
+        let Some((class, inst_args, fqn)) = picked
             .and_then(|instance| {
                 let fqn = instance.method_fqns.get(method)?.clone();
                 known(&fqn).then(|| (instance.class.clone(), instance.args.clone(), fqn))
@@ -4008,7 +4035,6 @@ impl Compiler {
         if let Some(kind) = self.checker.prelude_fn_in_scope(name) {
             return Some(match kind {
                 PreludeFn::Matrix => Ok(HirBuiltin::Matrix),
-                PreludeFn::BlockOn => Ok(HirBuiltin::BlockOn),
                 PreludeFn::Dot | PreludeFn::MatMul | PreludeFn::Cross | PreludeFn::Intersect | PreludeFn::Diff => {
                     Ok(HirBuiltin::LinAlg)
                 }
@@ -4301,9 +4327,13 @@ impl Compiler {
             None if self.lookup_slot(name).is_some() || known(name) || self.checker.is_generic_fn(name) => return Ok(None),
             None => name,
         };
-        let Some((class, inst_args, fqn)) = self
-            .sidecar_dicts(node.node, start, end)
-            .and_then(|dicts| dicts.first())
+        let dicts = self.sidecar_dicts(node.node, start, end).unwrap_or_default();
+        let picked = if node.node.is_none() {
+            self.hir_spliced_dict(hir, call, dicts)?
+        } else {
+            dicts.first()
+        };
+        let Some((class, inst_args, fqn)) = picked
             .and_then(|instance| {
                 let fqn = instance.method_fqns.get(method)?.clone();
                 known(&fqn).then(|| (instance.class.clone(), instance.args.clone(), fqn))
@@ -4315,6 +4345,41 @@ impl Compiler {
             return Ok(None);
         }
         self.hir_ground_direct(hir, call, class, inst_args, fqn, method).map(Some)
+    }
+
+    /// The dictionary a call spliced from another body (an inlined mono
+    /// clone, its nodes on the call's span) takes from the facts on that
+    /// span: the clone's dictionaries, one per bound. The one this call
+    /// takes is the one its arguments name, not always the first
+    /// (`fn second<A: Show, B: Show>(A a, B b) { show(b) }`), and a tuple
+    /// built from a type parameter (`show((x, ()))`, #1479) takes none of
+    /// them: the call is refused rather than sent to the wrong instance.
+    fn hir_spliced_dict<'d>(
+        &self,
+        hir: &HirBody,
+        call: HirId,
+        dicts: &'d [crate::typechecking::generics::InstanceDef],
+    ) -> Result<Option<&'d crate::typechecking::generics::InstanceDef>, &'static str> {
+        let HirKind::Call { args, .. } = &hir.expr(call).kind else {
+            return Ok(dicts.first());
+        };
+        // Facts that cannot be checked against the arguments keep the
+        // first, as before.
+        if args.is_empty() || dicts.iter().any(|d| d.args.is_empty() || d.args.iter().any(Self::ty_has_var)) {
+            return Ok(dicts.first());
+        }
+        let lookup: Option<Vec<Ty>> = args
+            .iter()
+            .map(|&a| Self::hir_ty(hir, a).map(|t| Self::show_lookup_ty_for_instance(&apply_ty_prune(self.checker.subst(), t))))
+            .collect();
+        let Some(lookup) = lookup else {
+            return Ok(dicts.first());
+        };
+        match dicts.iter().find(|d| lookup.get(..d.args.len()).is_some_and(|l| l == d.args.as_slice())) {
+            Some(d) => Ok(Some(d)),
+            None if dicts.is_empty() => Ok(None),
+            None => Err("callee-trait"),
+        }
     }
 
     /// How a ground instance call passes its arguments and takes its result:
@@ -4346,7 +4411,7 @@ impl Compiler {
             let ty = Self::hir_ty(hir, id).ok_or("callee-signature")?;
             let layout = self.value_layout(ty);
             let declared = declared.ok_or("callee-trait")?;
-            if !(layout.is_niche_option() || layout.is_niche_result())
+            if !(layout.is_niche_option() || layout.is_niche_result() || layout.is_niche_unit_result())
                 || Self::ty_has_var(&declared)
                 || self.value_layout(&declared) != layout
             {
@@ -4354,7 +4419,8 @@ impl Compiler {
             }
             Ok(layout)
         };
-        let declared_params = self.checker.fn_param_tys(fqn);
+        // A structural thunk (#1479) has no checker signature: its own.
+        let declared_params = self.checker.fn_param_tys(fqn).or_else(|| self.structural_thunk_params.get(fqn).cloned());
         let params = args
             .iter()
             .enumerate()
@@ -4385,6 +4451,35 @@ impl Compiler {
         let HirKind::Call { args, .. } = &hir.expr(call).kind else {
             return Err("callee");
         };
+        // A tuple with an open item (#1479): its arity-wide instance, called
+        // as `t.show()` is, the receiver boxed and the dictionary built from
+        // the frame's.
+        if inst_args.iter().any(Self::ty_has_var)
+            && let [recv] = args.as_slice()
+            && self.checker.generics().structural_tuples().any(|(_, _, f)| f == fqn)
+        {
+            let recv_ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, *recv).ok_or("method-receiver")?);
+            let layout = |id: HirId| Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |t| self.value_layout(t));
+            return Ok(HirCall {
+                key: fqn,
+                pair: None,
+                params: vec![layout(*recv)],
+                ret: layout(call),
+                method: true,
+                mono: false,
+                builtin: None,
+                generic: None,
+                instance: Some(Box::new(HirInstanceCall {
+                    class,
+                    args: inst_args,
+                    recv_box: Some(Self::show_lookup_ty_for_instance(&recv_ty)),
+                    ground: None,
+                })),
+                ranges: Vec::new(),
+                mono_of: None,
+                own_dicts: Vec::new(),
+            });
+        }
         if inst_args.iter().any(Self::ty_has_var) || self.two_word_return_kind(&fqn).is_some() {
             return Err("callee-trait");
         }
@@ -4532,14 +4627,8 @@ impl Compiler {
         let HirKind::Call { args, .. } = &hir.expr(call).kind else {
             return Err("callee");
         };
-        if matches!(builtin, HirBuiltin::Matrix | HirBuiltin::BlockOn) && args.len() != 1 {
+        if matches!(builtin, HirBuiltin::Matrix) && args.len() != 1 {
             return Err("callee-arity");
-        }
-        // The resumed word moves as it is (as `Resume`).
-        if matches!(builtin, HirBuiltin::BlockOn)
-            && !Self::hir_ty(hir, call).is_some_and(|t| self.value_layout(t) == ValueLayout::Boxed)
-        {
-            return Err("resume-layout");
         }
         if matches!(builtin, HirBuiltin::LinAlg) {
             let info = self.hir_linear_algebra(hir, call).ok_or("callee-builtin")?;
@@ -4561,7 +4650,11 @@ impl Compiler {
                 if specs.get(i) == Some(&'v') {
                     let ty = apply_ty_prune(self.checker.subst(), ty);
                     // A tuple or record shows field by field.
-                    if !crate::hir::layout::ty_is_closed(&ty) && self.hir_bound_show(hir, arg).is_none() && !self.hir_generic_show(&ty) {
+                    if !crate::hir::layout::ty_is_closed(&ty)
+                        && self.hir_bound_show(hir, arg).is_none()
+                        && !self.hir_generic_show(&ty)
+                        && !self.synth_shows_items(&ty)
+                    {
                         return Err("format-show");
                     }
                     continue;
@@ -4655,7 +4748,7 @@ impl Compiler {
         if self.checker.is_generic_fn(&lookup) && !open {
             return Err("callee-generic");
         }
-        // An `async fn` call is `MakeCoro`: its result is the handle word
+        // An `gen fn` call is `MakeCoro`: its result is the handle word
         // (from a shared body, of the shared coroutine).
         let coro = self.coroutine_fns.contains(&key) || self.coroutine_fns.contains(&lookup);
         if coro && !self.coroutine_fns.contains(&key) {
@@ -4857,9 +4950,13 @@ impl Compiler {
                     .as_deref()
                     .is_some_and(|k| self.checker.is_generic_fn(strip_overload_key(k))));
         let open = |ty: &Ty| (shared || !forwarded.is_empty()) && matches!(ty, Ty::Var(_));
+        // A tuple with an open item, in a shared body, is one boxed object
+        // whose dictionary the call builds (#1479).
+        let open_tuple = |ty: &Ty| shared && matches!(ty, Ty::Tuple(_)) && !crate::hir::layout::ty_is_closed(ty);
         let ground = |id: HirId| {
             let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
-            (crate::hir::layout::ty_is_closed(&ty) || ground_fun(&ty) || open(&ty)).then_some(ty)
+            (crate::hir::layout::ty_is_closed(&ty) || ground_fun(&ty) || open(&ty) || open_tuple(&ty) || self.hir_open_enum_word(&ty))
+                .then_some(ty)
         };
         let explicit = args.len() - receivers;
         let skip = params.len().saturating_sub(explicit);
@@ -4906,6 +5003,15 @@ impl Compiler {
             Self::bind_scheme_vars(param, ty, &mut vars);
         }
         Self::bind_scheme_vars(cur, &ret_ty, &mut vars);
+        // An open enum instance passes as its own word only where the
+        // signature names its type parameter bare: nested (`Option<T>`), the
+        // shared body would hold it boxed inside the object (#1517).
+        let nested = |v: &crate::typechecking::ty::TyVarId| {
+            params.iter().chain([cur]).any(|t| !matches!(t, Ty::Var(_)) && crate::typechecking::ty::ftv_ty(t).contains(v))
+        };
+        if vars.iter().any(|(v, ty)| !crate::hir::layout::ty_is_closed(ty) && self.hir_open_enum_word(ty) && nested(v)) {
+            return Err("callee-generic");
+        }
         // In a clone, `self` is typed by its class alone (`HashMap`): its
         // type arguments are the clone's (`HashMap<int, int>`), which ground
         // a sibling method's class parameters (`self.grow()`).
@@ -4921,6 +5027,10 @@ impl Compiler {
             arg_tys[0] = self_ty;
         }
         for constraint in &scheme.constraints {
+            // A goal open inside a tuple is built from the frame's.
+            if self.open_structural_lookup(constraint, &vars).is_some() {
+                continue;
+            }
             // An open goal is served by a forwarded dictionary.
             let lookup_tys = match Self::resolve_constraint_lookup(constraint, &vars, &self.checker) {
                 None if !forwarded.is_empty() => continue,
@@ -5133,6 +5243,13 @@ impl Compiler {
         Some((dict, hint.method_slot as u32))
     }
 
+    /// An arity-wide tuple thunk's argument (#1479): a tuple whose open
+    /// items each have the thunk's dictionary.
+    fn synth_shows_items(&self, ty: &Ty) -> bool {
+        matches!(ty, Ty::Tuple(items) if !self.synth_show_dicts.is_empty()
+            && items.iter().all(|t| crate::hir::layout::ty_is_closed(t) || matches!(t, Ty::Var(v) if self.synth_show_dicts.contains_key(v))))
+    }
+
     /// An open type whose `Show` is a bounded generic instance
     /// (`Show for Tree<T: Show>` inside its own body): the instance's
     /// shared `show` with the frame's dictionaries, as the AST.
@@ -5149,6 +5266,18 @@ impl Compiler {
     /// An enum whose word is the heap object (no pointer niche).
     fn hir_boxed_enum_word(&self, ty: &Ty) -> bool {
         self.value_layout(ty) == ValueLayout::Boxed
+    }
+
+    /// An enum with a type variable nothing pinned (`Ok(9)`'s error type,
+    /// `None`'s payload): its layout is the boxed `ObjEnum` word whatever the
+    /// variable would be (an open type takes no niche or pair), as a plain
+    /// `let r = Ok(9);` keeps it, so it boxes and unboxes as a type
+    /// parameter like a ground boxed enum (#1517).
+    fn hir_open_enum_word(&self, ty: &Ty) -> bool {
+        !crate::hir::layout::ty_is_closed(ty)
+            && matches!(crate::typechecking::ty::strip_readonly(ty), Ty::App(..) | Ty::Sum { .. } | Ty::Constructor { .. })
+            && lower::classify(&self.checker, ty) == Some(ValueClass::Enum)
+            && self.hir_boxed_enum_word(ty)
     }
 
     /// `return f(..)` may jump instead of call, under the rules
@@ -5662,6 +5791,35 @@ impl Compiler {
         matches!(ty, Ty::Forall { .. }).then_some(ty)
     }
 
+    /// Whether a `PolyFn` local's callee has a type parameter nested in its
+    /// signature (a parameter or the result that is not a bare type
+    /// parameter but holds one): from the source function's scheme, else
+    /// the local's own un-instantiated type.
+    fn hir_polyfn_nested(&self, hir: &HirBody, emit: &HirEmit, f: HirId) -> bool {
+        if let Some(source) = self.hir_polyfn_source(hir, emit, f) {
+            return self.checker.generic_fn_value_nested(&source);
+        }
+        let HirKind::Local(local) = hir.expr(f).kind else {
+            return false;
+        };
+        let Some(ty) = hir.local(local).ty.as_ref() else {
+            return false;
+        };
+        let mut ty = apply_ty_prune(self.checker.subst(), ty);
+        while let Ty::Forall { body, .. } = ty {
+            ty = *body;
+        }
+        let mut parts = Vec::new();
+        while let Ty::Fun(p, ret) = ty {
+            parts.push(*p);
+            ty = *ret;
+        }
+        parts.push(ty);
+        parts
+            .iter()
+            .any(|t| !matches!(t, Ty::Var(_)) && !crate::typechecking::ty::ftv_ty(t).is_empty())
+    }
+
     /// Whether a `PolyFn` local's own type returns a bare type parameter
     /// (boxed at run time), as `local_polyfn_call_needs_unbox`.
     fn hir_polyfn_returns_var(hir: &HirBody, checker: &crate::typechecking::infer::Checker, f: HirId) -> bool {
@@ -6140,13 +6298,18 @@ impl Compiler {
                 args,
             } => {
                 // A `PolyFn` call: no dictionary forwarded from a generic
-                // frame, and an enum result stays on the AST (it comes back
-                // as the shared path's object).
+                // frame, and no type parameter nested in the callee's
+                // signature (its shared body would box `T` inside the
+                // `Option` or tuple it returns: E0127, #916). An enum result
+                // is the call's word, or its object (#1515).
                 if lower::polyfn_callee(hir, &self.checker, *f) {
                     let e = hir.expr(id);
                     let forwarded = self.forwarded_dicts_hint(e.node, e.span.0, e.span.1).is_some_and(|d| !d.is_empty());
                     let ty = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));
-                    if forwarded || ty.as_ref().is_none_or(|t| lower::classify(&self.checker, t) == Some(ValueClass::Enum) || !crate::hir::layout::ty_is_closed(t)) {
+                    if forwarded
+                        || self.hir_polyfn_nested(hir, emit, *f)
+                        || ty.as_ref().is_none_or(|t| !crate::hir::layout::ty_is_closed(t) && !self.hir_open_enum_word(t))
+                    {
                         return Err("callee-value");
                     }
                 }

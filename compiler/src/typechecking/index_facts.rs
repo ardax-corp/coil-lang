@@ -1092,7 +1092,7 @@ fn main() -> int {
     #[test]
     fn yield_loop_refuses_index_fact() {
         let src = r#"
-async fn scan(Vec<int> b) {
+gen fn scan(Vec<int> b) {
     let j = 0;
     while j < b.len() {
         yield b[j];

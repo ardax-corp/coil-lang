@@ -579,6 +579,23 @@ pub fn result_ok_err(ty: &Ty) -> Option<(Ty, Ty)> {
 }
 
 /// True when `ty` is (or owns) the built-in `Option` sum.
+/// `Option<T>` / `Result<T, E>` in any of its spellings (a `Sum`, a
+/// variant `Constructor`, the application) as the application, the type
+/// an instance lookup matches (#1479). `None` for any other type.
+pub fn builtin_enum_app(ty: &Ty) -> Option<Ty> {
+    let ty = match ty {
+        Ty::Constructor { owner, .. } => owner.as_ref(),
+        other => other,
+    };
+    if is_option_ty(ty) {
+        return option_inner(ty).map(option_app_ty);
+    }
+    if is_result_ty(ty) {
+        return result_ok_err(ty).map(|(ok, err)| result_app_ty(ok, err));
+    }
+    None
+}
+
 pub fn is_option_ty(ty: &Ty) -> bool {
     match ty {
         Ty::Sum { name, .. } | Ty::Con(name) => name == common::BUILTIN_OPTION_ENUM,

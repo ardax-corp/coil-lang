@@ -1373,7 +1373,7 @@
                 other => other,
             }
         }
-        match decl_ast!("async fn coro() { yield -1; }") {
+        match decl_ast!("gen fn coro() { yield -1; }") {
             Expression::Function { body, .. } => {
                 fn has_yield_negate(expr: &Expression<'_>) -> bool {
                     match expr {

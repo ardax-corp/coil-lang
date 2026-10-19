@@ -38,7 +38,7 @@ fn is_bare_expr_source(trimmed: &str) -> bool {
     }
     const STMT_PREFIXES: &[&str] = &[
         "let ", "use ", "class ", "enum ", "trait ", "impl ", "test(", "fn ", "if ", "while ",
-        "for ", "return ", "async ", "match ", "defer ",
+        "for ", "return ", "gen ", "match ", "defer ",
     ];
     !STMT_PREFIXES.iter().any(|p| trimmed.starts_with(p))
 }

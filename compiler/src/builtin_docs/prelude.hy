@@ -472,28 +472,3 @@ fn ord(string s) -> Result<byte, string> {}
 /// assert!(s == "B");
 /// ```
 fn char(byte b) -> Result<string, string> {}
-
-/// Resumes the coroutine `handle` until it completes and returns its completion value.
-///
-/// Values produced by `yield` along the way are discarded; the result is the
-/// value of the generator's `return`. The coroutine must not expect values
-/// sent in with `resume ... with`.
-///
-/// Deprecated: every call warns `E0129`. Call the work directly, or run
-/// concurrent work as a task (`task::scope` and `join`).
-///
-/// # Examples
-///
-/// ```
-/// # use tests::assert;
-/// gen fn steps() -> int {
-///     yield 1;
-///     yield 2;
-///     return 3;
-/// }
-///
-/// fn main() {
-///     assert!(block_on(steps()) == 3);
-/// }
-/// ```
-fn block_on<Y>(coroutine<Y> handle) -> Y {}

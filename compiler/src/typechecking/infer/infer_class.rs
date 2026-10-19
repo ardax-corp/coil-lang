@@ -409,11 +409,15 @@ impl Checker {
         // Verify class exists.
         let class_def = self.generics.typeclass(class).cloned();
         if class_def.is_none() {
-            self.messages.push(Message::error(
+            let mut msg = Message::error(
                 ErrorCode::GenericTypeError,
                 format!("Unknown trait `{}`", class),
                 range.clone(),
-            ));
+            );
+            if class == "String" {
+                msg.with_help("the `String` trait was removed: implement `Show` (`fn show(T x) -> string`)".to_string());
+            }
+            self.messages.push(msg);
         }
         if let Some(ref cdef) = class_def {
             self.validate_instance_head_kinds(cdef, &arg_tys, &range);

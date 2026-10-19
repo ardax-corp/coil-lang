@@ -1,4 +1,4 @@
-// Immediate-return async fn completes on first resume; `done` flips after.
+// Immediate-return gen fn completes on first resume; `done` flips after.
 // Output: false,true
 use io::{stdout, write};
 use string::{format, to_bytes};

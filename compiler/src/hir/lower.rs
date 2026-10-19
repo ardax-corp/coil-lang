@@ -75,10 +75,11 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
         Ty::Constructor { owner, .. } => classify_in(checker, owner, seen),
         // A `()` item is stored as the empty tuple object (#1427).
         Ty::Tuple(items) if !items.is_empty() => aggregate(checker, items.iter(), true, seen),
-        // A record: one dict word, its fields read and written by name.
+        // A record: one dict word, its fields read and written by name. A
+        // `()` field is stored as the empty tuple object, as a tuple's.
         Ty::Record { fields } if !fields.is_empty() => fields
             .iter()
-            .all(|(_, f)| classify_in(checker, f, seen).is_some_and(is_word))
+            .all(|(_, f)| classify_in(checker, f, seen).is_some_and(|class| is_word(class) || class == ValueClass::Unit))
             .then_some(ValueClass::Opaque),
         Ty::Array { element, .. } => aggregate(checker, std::iter::once(element.as_ref()), false, seen),
         // A bare-class existential (`Show x`): one `[value, dictionary]`
@@ -2409,7 +2410,10 @@ impl Walk<'_> {
                 self.items(args)
             }
             HirKind::Field { base, .. } => {
-                self.word(id)?;
+                // A record's `()` field is read for the base's effects only.
+                if !(self.record(*base) && is_unit_value(body, self.checker, id)) {
+                    self.word(id)?;
+                }
                 // A record variant's field reads `LoadField` on the boxed
                 // enum (codegen checks the field resolves).
                 if self.class(*base) != Some(ValueClass::Enum) {
@@ -2424,6 +2428,12 @@ impl Walk<'_> {
             } => {
                 self.word(id)?;
                 for &arg in args {
+                    // A `()` value runs for its effect; the record stores
+                    // the empty tuple object.
+                    if is_unit_value(body, self.checker, arg) {
+                        self.effect(arg)?;
+                        continue;
+                    }
                     self.word(arg)?;
                     self.value(arg)?;
                 }
@@ -2741,6 +2751,13 @@ impl Walk<'_> {
                     HirKind::Field { base, .. } => {
                         if !read_base(body, *base) {
                             return Err("assign-base");
+                        }
+                        // A record's `()` field stores the empty tuple
+                        // object once the value has run (#1510).
+                        if self.record(*base) && is_unit_value(body, self.checker, *value) {
+                            self.object(*base)?;
+                            self.effect(*value)?;
+                            return self.value(*base);
                         }
                         self.word(*place)?;
                         self.object(*base)?;

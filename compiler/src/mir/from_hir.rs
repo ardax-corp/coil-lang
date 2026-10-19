@@ -84,7 +84,7 @@ pub struct HirCallSite {
     pub pair_args: Vec<bool>,
     /// Whether the result is two words.
     pub pair_ret: bool,
-    /// A `gen fn` / `async fn` call: `MakeCoro`, its result the handle.
+    /// A `gen fn` call: `MakeCoro`, its result the handle.
     pub coro: bool,
     /// The result is a niche `Option` / `Result` the callee returns boxed.
     pub boxed_ret: bool,
@@ -520,9 +520,6 @@ pub struct HirMirInput<'a> {
     pub record_fields: HashMap<u32, (u32, MirTy)>,
     /// `matrix(data)` calls: the data itself.
     pub matrix_wraps: &'a HashSet<u32>,
-    /// `block_on(h)` calls: the `wait_ready` native run between resumes,
-    /// if any.
-    pub block_ons: &'a HashMap<u32, Option<u16>>,
     /// `new C(args).f` reads whose object is never built: each argument
     /// runs in order and `f`'s word is the value, by field read.
     pub field_news: &'a HashSet<u32>,
@@ -2536,7 +2533,6 @@ impl Lower<'_> {
             HirKind::Call { args, .. } if let (Some(&fixed), [arg]) = (self.inp.lens.get(&id.0), args.as_slice()) => self.len(*arg, fixed),
             HirKind::Call { args, .. } if self.inp.pushes.contains(&id.0) => self.push(args),
             HirKind::Call { args, .. } if self.inp.matrix_wraps.contains(&id.0) && args.len() == 1 => self.value(args[0]),
-            HirKind::Call { args, .. } if let (Some(&wait), [handle]) = (self.inp.block_ons.get(&id.0), args.as_slice()) => self.block_on(id, *handle, wait),
             HirKind::Call { args, .. } if let Some(&idx) = self.inp.formats.get(&id.0) => self.format(id, idx, args.get(1..).unwrap_or_default()),
             HirKind::Call { args, .. } if self.inp.hosts.contains_key(&id.0) => self.host(id, args),
             HirKind::Call { .. } if let Some(site) = self.inp.ffis.get(&id.0) => self.ffi(id, &site.clone()),
@@ -2877,6 +2873,13 @@ impl Lower<'_> {
                 self.b.ins_heap_field_store(obj, v, None, Some(slot)).map_err(mir)?;
                 Ok(Val::Unit)
             }
+            // A record's `()` field: the record for its effects (#1510).
+            HirKind::Field { base, .. } if self.expr_ty(id).is_some_and(is_unit) && self.expr_ty(*base).is_some_and(is_record) => {
+                if !self.effect(*base)? {
+                    return Ok(Val::Never);
+                }
+                Ok(Val::Unit)
+            }
             // A record's field by key: the object, then the key, as HIR
             // emission's `GetField`.
             HirKind::Field { base, .. } if let Some(&(key, ty)) = self.inp.record_fields.get(&id.0) => {
@@ -2891,8 +2894,15 @@ impl Lower<'_> {
                     && let Some(&(key, ty)) = self.inp.record_fields.get(&place.0) =>
             {
                 // The value, the object, then the key, as `SetField`; a
-                // two-word value boxed.
-                let Some(v) = (if ty == MirTy::HeapRef { self.boxed_word(*value)? } else { self.word(*value)? }) else {
+                // two-word value boxed, a `()` the empty tuple object (#1510).
+                let v = if self.expr_ty(*value).is_some_and(is_unit) {
+                    self.word_or_boxed(*value)?
+                } else if ty == MirTy::HeapRef {
+                    self.boxed_word(*value)?
+                } else {
+                    self.word(*value)?
+                };
+                let Some(v) = v else {
                     return Ok(Val::Never);
                 };
                 if self.b.value_ty(v) != ty {
@@ -2910,6 +2920,16 @@ impl Lower<'_> {
                 let words = words.clone();
                 let mut elems = Vec::with_capacity(2 * args.len());
                 for (&arg, (key, ty)) in args.iter().zip(words) {
+                    // A `()` runs for its effect and is stored as the empty
+                    // tuple object (#1510).
+                    if self.expr_ty(arg).is_some_and(is_unit) {
+                        if !self.effect(arg)? {
+                            return Ok(Val::Never);
+                        }
+                        elems.push(self.unit_object()?);
+                        elems.push(self.b.ins_string(key).map_err(mir)?);
+                        continue;
+                    }
                     // A two-word value is stored boxed.
                     let Some(v) = (if ty == MirTy::HeapRef { self.boxed_word(arg)? } else { self.word(arg)? }) else {
                         return Ok(Val::Never);
@@ -4428,13 +4448,21 @@ impl Lower<'_> {
     /// function returns a bare type parameter.
     fn call_poly(&mut self, id: HirId, f: HirId, args: &[HirId], p: &HirPolyCall) -> Result<Val, Refusal> {
         self.raw_host = false;
-        if self.inp.pair_tys.contains_key(&id.0) || p.boxes.len() != args.len() {
+        if p.boxes.len() != args.len() {
             return Err("polyfn call shape".into());
         }
         let ty = self.expr_ty(id).ok_or("call type")?;
         let unit = is_unit(ty);
+        // A two-word result comes back as its object, unboxed where a pair
+        // is read; a heap tuple is its object (#1511), as is an enum of no
+        // pair or niche layout (#1515).
         let word = if unit {
             MirTy::I64
+        } else if self.inp.pair_tys.contains_key(&id.0)
+            || is_heap_tuple(ty)
+            || (self.inp.word(ty).is_none() && (self.inp.boxed_view)(ty, None).is_some())
+        {
+            MirTy::HeapRef
         } else {
             self.inp.word(ty).ok_or_else(|| format!("call value type {}", ty_kind(ty)))?
         };
@@ -4461,8 +4489,19 @@ impl Lower<'_> {
                 words.push(v);
                 continue;
             }
-            let Some(v) = self.word(arg)? else {
+            // A two-word value goes as its object, as a plain call passes
+            // it to a shared body (#1479).
+            let v = if self.inp.pair_tys.contains_key(&arg.0) { self.boxed_word(arg)? } else { self.word(arg)? };
+            let Some(v) = v else {
                 return Ok(Val::Never);
+            };
+            // A niche enum goes to a bare type parameter as its object.
+            let v = match self.b.value_ty(v) {
+                from @ (MirTy::NicheOpt | MirTy::NicheRes) if tag.is_some() => {
+                    let layout = self.niche_layout(arg, from)?;
+                    self.box_niche(layout, v)?
+                }
+                _ => v,
             };
             let v = match tag {
                 Some(tag) => {
@@ -4491,6 +4530,12 @@ impl Lower<'_> {
         let ret = if p.unbox.is_some() { MirTy::HeapRef } else { word };
         let dest = self.at_expr(id, |l| l.b.ins_call_indirect_dicts(callee, words, dicts, ret).map_err(mir))?;
         let dest = match p.unbox {
+            // A niche enum for a bare type parameter comes back boxed as
+            // its object (#1515).
+            Some(tag) if matches!(word, MirTy::NicheOpt | MirTy::NicheRes) => {
+                let obj = self.b.ins_unbox(dest, tag, MirTy::HeapRef).map_err(mir)?;
+                return self.unbox_niche(obj, word);
+            }
             Some(tag) => self.b.ins_unbox(dest, tag, word).map_err(mir)?,
             None => dest,
         };
@@ -4615,42 +4660,6 @@ impl Lower<'_> {
             return Ok(Val::Never);
         };
         let out = self.b.ins_resume_coro(h, send, dest_ty).map_err(mir)?;
-        match pair {
-            _ if unit => Ok(Val::Unit),
-            Some((lo_ty, hi_ty)) => self.unbox_word(&ty, out, lo_ty, hi_ty),
-            None => Ok(Val::V(out)),
-        }
-    }
-
-    /// `block_on(h)`: `h` resumed until it is done, running `wait` (the
-    /// `wait_ready` native) between resumes, then its last resumed word.
-    fn block_on(&mut self, id: HirId, handle: HirId, wait: Option<u16>) -> Result<Val, Refusal> {
-        let ty = self.expr_ty(id).ok_or("block_on type")?.clone();
-        let unit = is_unit(&ty);
-        // A two-word value moves through the coroutine boxed.
-        let pair = self.inp.pair_tys.get(&id.0).copied();
-        let dest_ty = match pair {
-            _ if unit => MirTy::I64,
-            Some(_) => MirTy::HeapRef,
-            None => self.inp.word(&ty).ok_or("block_on type")?,
-        };
-        let Some(h) = self.word(handle)? else {
-            return Ok(Val::Never);
-        };
-        let head = self.b.create_block();
-        let again = self.b.create_block();
-        let exit = self.b.create_block();
-        self.jump(head)?;
-        self.switch(head);
-        let out = self.at_expr(id, |l| l.b.ins_resume_coro(h, None, dest_ty).map_err(mir))?;
-        let done = self.b.ins_done_coro(h).map_err(mir)?;
-        self.b.branch(done, exit, again).map_err(mir)?;
-        self.switch(again);
-        if let Some(native) = wait {
-            self.b.ins_host_invoke(native, Vec::new()).map_err(mir)?;
-        }
-        self.jump(head)?;
-        self.switch(exit);
         match pair {
             _ if unit => Ok(Val::Unit),
             Some((lo_ty, hi_ty)) => self.unbox_word(&ty, out, lo_ty, hi_ty),

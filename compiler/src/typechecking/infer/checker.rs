@@ -553,8 +553,6 @@ impl Checker {
         self.fn_param_names
             .insert("string::to_bytes".into(), vec!["s".into()]);
         self.fn_param_names
-            .insert("block_on".into(), vec!["handle".into()]);
-        self.fn_param_names
             .insert("dload".into(), vec!["path".into()]);
         self.fn_param_names.insert(
             "declare".into(),
@@ -2506,15 +2504,6 @@ impl Checker {
                     vec![var],
                     vec![Constraint::unary("Hash", var)],
                     Ty::Fun(Box::new(Ty::Var(var)), Box::new(int())),
-                ),
-            );
-            let var = self.counter.fresh();
-            self.typeclass_method_schemes.insert(
-                ("String".to_string(), "to_string".to_string()),
-                Scheme::poly(
-                    vec![var],
-                    vec![Constraint::unary("String", var)],
-                    Ty::Fun(Box::new(Ty::Var(var)), Box::new(string())),
                 ),
             );
         }
@@ -5065,17 +5054,24 @@ impl Checker {
         }
 
         if let Some(owner) = class_owner {
-            return self.error(
+            let help = (*method == "to_string")
+                .then(|| "the `String` trait was removed: call `show()` (or `format(\"%v\", x)`)".to_string());
+            return self.error_with_help(
                 ErrorCode::UnknownFunction,
                 format!("Cannot find method `{}` on class `{}`", method, owner),
                 range,
+                help,
             );
         }
         self.error_with_help(
             ErrorCode::NotAFunction,
             format!("Cannot call method `{}` on non-class type", method),
             range,
-            Some("method calls require a class instance receiver".to_string()),
+            Some(if *method == "to_string" {
+                "the `String` trait was removed: call `show()` (or `format(\"%v\", x)`)".to_string()
+            } else {
+                "method calls require a class instance receiver".to_string()
+            }),
         )
     }
 
@@ -5298,7 +5294,6 @@ impl Checker {
             if has_named {
                 let (_, reordered) = self.infer_and_reorder_call_args(&ident, raw_args, &range);
                 return match kind {
-                    PreludeFn::BlockOn => self.infer_block_on(&reordered, range),
                     PreludeFn::Dot => self.infer_dot(&reordered, id, range),
                     PreludeFn::MatMul => self.infer_matmul(&reordered, id, range),
                     PreludeFn::Cross => self.infer_cross(&reordered, id, range),
@@ -5317,7 +5312,6 @@ impl Checker {
                     | PreludeFn::Ceil
                     | PreludeFn::Exp
                     | PreludeFn::Ln
-                    | PreludeFn::Pow
                     | PreludeFn::Atan
                     | PreludeFn::Atan2
                     | PreludeFn::Asin
@@ -5325,7 +5319,6 @@ impl Checker {
                     | PreludeFn::Log10
                     | PreludeFn::Log2
                     | PreludeFn::Cbrt
-                    | PreludeFn::Rem
                     | PreludeFn::Sinh
                     | PreludeFn::Cosh
                     | PreludeFn::Tanh => self.infer_math(kind, &reordered, range),
@@ -5333,7 +5326,6 @@ impl Checker {
             }
             let arg_slice = args.as_deref().unwrap_or(&[]);
             return match kind {
-                PreludeFn::BlockOn => self.infer_block_on(arg_slice, range),
                 PreludeFn::Dot => self.infer_dot(arg_slice, id, range),
                 PreludeFn::MatMul => self.infer_matmul(arg_slice, id, range),
                 PreludeFn::Cross => self.infer_cross(arg_slice, id, range),
@@ -5352,7 +5344,6 @@ impl Checker {
                 | PreludeFn::Ceil
                 | PreludeFn::Exp
                 | PreludeFn::Ln
-                | PreludeFn::Pow
                 | PreludeFn::Atan
                 | PreludeFn::Atan2
                 | PreludeFn::Asin
@@ -5360,7 +5351,6 @@ impl Checker {
                 | PreludeFn::Log10
                 | PreludeFn::Log2
                 | PreludeFn::Cbrt
-                | PreludeFn::Rem
                 | PreludeFn::Sinh
                 | PreludeFn::Cosh
                 | PreludeFn::Tanh => self.infer_math(kind, arg_slice, range),
@@ -5665,7 +5655,14 @@ impl Checker {
                 .filter(|(_, _, owner, _, _)| !(shadowed && Self::is_builtin_class(owner)))
                 .collect::<Vec<_>>()
         };
-        let candidates = keep(self.bound_method_candidates(&ident, None));
+        // A tuple with an open item is not a bound's receiver: its instance
+        // is the arity-wide tuple one, selected below as a ground call's
+        // (#1479).
+        let open_tuple = arg_tys
+            .first()
+            .map(|ty| apply_ty_prune(&self.subst, ty))
+            .is_some_and(|ty| matches!(&ty, Ty::Tuple(_)) && Self::ty_mentions_var(&ty));
+        let candidates = if open_tuple { Vec::new() } else { keep(self.bound_method_candidates(&ident, None)) };
         if !candidates.is_empty() {
             let receiver_var = arg_tys
                 .first()
@@ -5782,10 +5779,13 @@ impl Checker {
                 (fun_ty, constraints, mapping, Some(s))
             }
             None => {
-                return self.error(
+                // The prelude `block_on` moved to the `task` module.
+                let help = (ident == "block_on").then(|| "`block_on` is in the `task` module now: add `use task::block_on;`".to_string());
+                return self.error_with_help(
                     ErrorCode::UnknownFunction,
                     format!("Cannot find function `{}`", ident),
                     range,
+                    help,
                 );
             }
         };
@@ -7667,7 +7667,6 @@ impl Checker {
         Self::is_structural_len_ty(ty)
     }
 
-    /// `block_on(coro)`, drive `coroutine<Y>` / `coroutine<Y, unit>` to completion → `Y`.
     /// Warn that `name` is deprecated; `help` names the replacement.
     fn warn_deprecated(&mut self, name: &str, help: &str, range: Range<usize>) {
         let mut msg = Message::warn(
@@ -7677,39 +7676,6 @@ impl Checker {
         );
         msg.with_help(help.to_string());
         self.messages.push(msg);
-    }
-
-    fn infer_block_on(&mut self, args: &[Output], range: Range<usize>) -> Ty {
-        self.warn_deprecated(
-            "block_on",
-            "call the generator's work directly, or run it as a task with `task::scope` and `join`",
-            range.clone(),
-        );
-        if args.len() != 1 {
-            for arg in args {
-                let _ = self.infer(arg);
-            }
-            return self.error_with_help(
-                ErrorCode::ConstructorArity,
-                format!("block_on expects 1 argument, got {}", args.len()),
-                range,
-                Some("use `block_on(async_fn_call())`".to_string()),
-            );
-        }
-        let handle_ty = self.infer(&args[0]);
-        let y_var = Ty::Var(self.counter.fresh());
-        let s_var = Ty::Var(self.counter.fresh());
-        let coro_ty = self.coroutine_type(y_var.clone(), s_var.clone());
-        self.unify(
-            &handle_ty,
-            &coro_ty,
-            &args[0].0.into_range(),
-            "block_on argument",
-        );
-        // Prefer unit send; free send vars unify with unit.
-        let unit = unit_ty();
-        let _ = self.unify(&s_var, &unit, &range, "block_on coroutine send type");
-        apply_ty_prune(&self.subst, &y_var)
     }
 
     fn primitive_cast_name(ty: &Ty) -> Option<&'static str> {
@@ -7788,9 +7754,7 @@ impl Checker {
                 let _ = self.infer(arg);
             }
             let hint = match kind {
-                PreludeFn::Pow => "base, exponent",
                 PreludeFn::Atan2 => "y, x",
-                PreludeFn::Rem => "x, y",
                 _ => "x",
             };
             return self.error_with_help(
@@ -9641,7 +9605,7 @@ impl Checker {
                 let _ = all_open;
             } else {
                 let lookup = self.instance_lookup_args(&constraint.class, &resolved_args);
-                self.ensure_tuple_show_instance(&constraint.class, &lookup);
+                self.ensure_structural_instance(&constraint.class, &lookup);
                 if self
                     .generics
                     .find_instance(&constraint.class, &lookup)
@@ -10151,34 +10115,71 @@ impl Checker {
         }
     }
 
-    /// (open vars in `wanted` may be bound by the match). Ambiguous matches
-    /// are diagnosed instead of silently selecting declaration order.
-    /// A ground tuple whose items are shown as `%v` shows them has a
-    /// structural `Show` instance (#1451), registered the first time a goal
-    /// asks for it.
-    fn ensure_tuple_show_instance(&mut self, class: &str, wanted: &[Ty]) {
+    /// A ground tuple, anonymous record or fixed array has a structural
+    /// instance (#1451, #1479), registered the first time a goal asks for
+    /// it, with the instances of its structural items (`%v` of a tuple
+    /// shows an array item through the array's): `Show` when `%v` shows
+    /// its items (so has a ground `Option` / `Result`), and for a tuple or
+    /// array, `Eq` when its items have `Eq`
+    /// and `Hash` when they have a ground `Hash` (its thunk calls theirs).
+    fn ensure_structural_instance(&mut self, class: &str, wanted: &[Ty]) {
         let [ty] = wanted else { return };
-        if class != "Show" {
+        if !matches!(class, "Show" | "Eq" | "Hash") {
             return;
         }
-        let ty = apply_ty_prune(&self.subst, ty);
-        if !matches!(&ty, Ty::Tuple(items) if !items.is_empty())
-            || Self::ty_mentions_var(&ty)
-            || !self.is_showable_for_format(&ty)
-            || self.generics.has_instance("Show", &ty)
-        {
+        let ty = show_lookup_ty(&apply_ty_prune(&self.subst, ty));
+        let items: Vec<Ty> = match &ty {
+            Ty::Tuple(items) if !items.is_empty() => items.clone(),
+            Ty::Record { fields } if !fields.is_empty() && class == "Show" => fields.iter().map(|(_, t)| t.clone()).collect(),
+            Ty::Array { element, .. } => vec![(**element).clone()],
+            // `Option` / `Result` show their payload (#1479).
+            Ty::App(head, args)
+                if class == "Show"
+                    && matches!(head.as_ref(), Ty::Con(n) if n == common::BUILTIN_OPTION_ENUM || n == common::BUILTIN_RESULT_ENUM) =>
+            {
+                args.clone()
+            }
+            _ => return,
+        };
+        // A tuple with an open item: the instance for its arity, with a
+        // context per item (#1479).
+        if class == "Show" && matches!(&ty, Ty::Tuple(_)) && Self::ty_mentions_var(&ty) {
+            let vars = items.iter().map(|_| self.counter.fresh()).collect();
+            self.generics.register_structural_tuple(class, vars);
             return;
         }
-        self.generics.register_tuple_show(ty);
+        if Self::ty_mentions_var(&ty) || self.generics.has_instance(class, &ty) {
+            return;
+        }
+        for item in &items {
+            self.ensure_structural_instance(class, std::slice::from_ref(item));
+        }
+        let items_ok = match class {
+            "Show" => items.iter().all(|item| self.is_showable_for_format(item)),
+            "Eq" => items.iter().all(|item| {
+                let lookup = show_lookup_ty(&apply_ty_prune(&self.subst, item));
+                self.generics.has_instance(class, &lookup)
+                    || self.generics.find_generic_instance(class, std::slice::from_ref(&lookup)).is_some()
+            }),
+            _ => items.iter().all(|item| {
+                let lookup = show_lookup_ty(&apply_ty_prune(&self.subst, item));
+                self.generics.find_instance(class, std::slice::from_ref(&lookup)).is_some_and(|inst| inst.context.is_empty())
+            }),
+        };
+        if items_ok {
+            self.generics.register_structural_instance(class, ty);
+        }
     }
 
+    /// (open vars in `wanted` may be bound by the match). Ambiguous matches
+    /// are diagnosed instead of silently selecting declaration order.
     fn find_unique_instance(
         &mut self,
         class: &str,
         wanted: &[Ty],
         range: &Range<usize>,
     ) -> Result<Option<InstanceDef>, ()> {
-        self.ensure_tuple_show_instance(class, wanted);
+        self.ensure_structural_instance(class, wanted);
         let wanted_lookup = self.instance_lookup_args(class, wanted);
         let candidates: Vec<_> = self
             .generics
@@ -10188,6 +10189,7 @@ impl Checker {
             .cloned()
             .collect();
         let mut matches: Vec<(InstanceDef, Subst)> = Vec::new();
+        let mut structural: Vec<(InstanceDef, Subst)> = Vec::new();
         for inst in candidates {
             let mut ok = true;
             let mut local = self.subst.clone();
@@ -10237,8 +10239,17 @@ impl Checker {
                         })
                         .collect();
                 }
-                matches.push((inst, local));
+                if generic && Generics::is_structural_tuple(&inst) {
+                    structural.push((inst, local));
+                } else {
+                    matches.push((inst, local));
+                }
             }
+        }
+        // A goal another instance meets does not take the arity-wide tuple
+        // instance (#1479): a ground tuple has its own.
+        if matches.is_empty() {
+            matches = structural;
         }
         match matches.len() {
             0 => Ok(None),
@@ -17490,6 +17501,7 @@ impl Checker {
                     }
                 }
                 other => {
+                    self.ensure_structural_instance("Show", std::slice::from_ref(other));
                     if !self.is_showable_for_format(other) {
                         let mut msg = Message::error(
                             ErrorCode::FormatSpecifierMismatch,
@@ -17637,6 +17649,8 @@ impl Checker {
             Ty::Record { fields } => fields
                 .iter()
                 .all(|(_, field_ty)| self.is_showable_for_format(field_ty)),
+            // A fixed array's structural instance (#1479).
+            Ty::Array { element, .. } => self.is_showable_for_format(&element),
             other => {
                 let lookup = show_lookup_ty(&other);
                 self.generics.has_instance("Show", &lookup)
@@ -19200,7 +19214,7 @@ impl Checker {
         }
     }
 
-    /// True if `name` was declared as `async fn`.
+    /// True if `name` was declared as `gen fn`.
     pub fn is_async_function(&self, name: &str) -> bool {
         self.async_functions.contains(name)
     }
@@ -19376,7 +19390,6 @@ impl Checker {
                 | "Hash"
                 | "Default"
                 | "Send"
-                | "String"
                 | "Sensitive"
                 | "Iterator"
                 | "IntoIterator"

@@ -584,41 +584,6 @@ fn drive() -> int {}
 /// ```
 fn wait_ready() -> int {}
 
-/// Decodes `bytes` as UTF-8 text.
-///
-/// Returns `Err(IoError::InvalidInput)` when `bytes` is not valid UTF-8.
-/// Same function as `string::from_bytes`.
-///
-/// # Examples
-///
-/// ```
-/// use io::{from_bytes};
-/// # use tests::assert;
-/// let hi = Vec::from([104 as byte, 105 as byte]);
-/// let text = match from_bytes(hi) {
-///     Result::Ok(s) => s,
-///     Result::Err(_) => "",
-/// };
-/// assert!(text == "hi");
-/// ```
-fn from_bytes(Vec<byte> bytes) -> Result<string, IoError> {}
-
-/// Encodes `s` as UTF-8 into a new `Vec<byte>`.
-///
-/// Always succeeds; the result has `s.len()` bytes. Same function as
-/// `string::to_bytes`.
-///
-/// # Examples
-///
-/// ```
-/// use io::{to_bytes};
-/// # use tests::assert;
-/// let b = to_bytes("hé");
-/// assert!(b.len() == 3);
-/// assert!(b[0] == 104 as byte);
-/// ```
-fn to_bytes(string s) -> Vec<byte> {}
-
 /// Returns `Ok(())` when `n >= 0` and `Err(IoError::InvalidInput)` otherwise.
 ///
 /// A small host function for testing how `Result<unit, IoError>` values
