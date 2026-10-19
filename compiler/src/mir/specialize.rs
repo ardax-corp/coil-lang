@@ -209,6 +209,12 @@ fn specialize_side(
     // results are heap words typed `i64`: a conservatively scanned frame
     // covers the whole extent.
     side.needs_frame_extent = has_alloc;
+    // A coverage compile counts a line by the code it emits; dense's MIR
+    // passes fold a line's constants into the next one (#1494). LIR keeps
+    // each line's code there (`keep_lines`).
+    if from_hir.keep_lines {
+        return refuse_dense("coverage");
+    }
     if !has_numeric_arith(from_hir) {
         return refuse_dense("no numeric arith");
     }
@@ -633,6 +639,16 @@ fn lir_tail(
     mut func: crate::mir::MirFunc,
     side: &mut BodySidecar,
 ) -> Option<Vec<IlOp>> {
+    // Constants that only meet in MIR (after inlining, copy forwarding)
+    // fold as they do on dense, whether or not the body has the arithmetic
+    // dense pays for (#1434). Like `hir::fold`, at every level. A folded
+    // branch leaves blocks nothing reaches: drop them, as lowering does
+    // (emit_lir's liveness is slow over them). A coverage compile keeps
+    // each line's code, so a line whose value folds still counts as run.
+    if !func.keep_lines && crate::mir::instcombine_lir(&mut func) > 0 {
+        let order: Vec<_> = func.blocks.iter().map(|b| b.id).collect();
+        super::from_hir::tidy(&mut func, &order);
+    }
     super::deopt::fill_deopt_maps(&mut func);
     let entry = labels.first;
     // Every label leading the body binds the entry; a self call may name any.

@@ -434,16 +434,16 @@ fn integer_arithmetic_emits_bytecode() {
 #[test]
 fn async_call_emits_make_coro_not_call() {
     use common::Instruction;
-    let (bc, _pool) = compile_src("async fn coro() { yield 1; } fn main() { let h = coro(); }");
+    let (bc, _pool) = compile_src("gen fn coro() { yield 1; } fn main() { let h = coro(); }");
     assert!(
         bc.iter()
             .any(|b| matches!(b.bytecode(), Instruction::MakeCoro)),
-        "expected MakeCoro for async fn call"
+        "expected MakeCoro for gen fn call"
     );
     assert!(
         !bc.iter()
             .any(|b| { matches!(b.bytecode(), Instruction::CALL) && b.call_parts().1 > 3 }),
-        "async fn call site should not use CALL"
+        "gen fn call site should not use CALL"
     );
 }
 
@@ -451,7 +451,7 @@ fn async_call_emits_make_coro_not_call() {
 fn yield_and_resume_emit_coroutine_opcodes() {
     use common::Instruction;
     let (bc, _pool) =
-        compile_src("async fn coro() { yield 1; } fn main() { let h = coro(); resume h; }");
+        compile_src("gen fn coro() { yield 1; } fn main() { let h = coro(); resume h; }");
     assert!(
         bc.iter()
             .any(|b| matches!(b.bytecode(), Instruction::YieldCoro)),
@@ -468,7 +468,7 @@ fn yield_and_resume_emit_coroutine_opcodes() {
 #[test]
 fn let_binding_yield_emits_yield_coro_then_store_pop() {
     use common::Instruction;
-    let (bc, _pool) = compile_src("async fn f() { let x = yield 1; }");
+    let (bc, _pool) = compile_src("gen fn f() { let x = yield 1; }");
     let yield_pos = bc
         .iter()
         .position(|b| matches!(b.bytecode(), Instruction::YieldCoro))
@@ -491,7 +491,7 @@ fn let_binding_yield_emits_yield_coro_then_store_pop() {
 fn resume_with_send_emits_has_send_operand() {
     use common::Instruction;
     let (bc, _pool) = compile_src(
-        "async fn echo() { let v = yield 0; yield v; } \
+        "gen fn echo() { let v = yield 0; yield v; } \
  fn main() { let h = echo(); resume h; resume h with 42; }",
     );
     assert!(
@@ -505,7 +505,7 @@ fn resume_with_send_emits_has_send_operand() {
 #[test]
 fn yield_from_emits_yield_from_coro() {
     use common::Instruction;
-    let (bc, _pool) = compile_src("async fn inner() { yield 1; } async fn f() { yield from inner(); }");
+    let (bc, _pool) = compile_src("gen fn inner() { yield 1; } gen fn f() { yield from inner(); }");
     assert!(
         bc.iter()
             .any(|b| matches!(b.bytecode(), Instruction::YieldFromCoro)),
@@ -525,7 +525,7 @@ fn yield_from_emits_yield_from_coro() {
 #[test]
 fn bare_yield_statement_does_not_emit_trailing_pop() {
     use common::Instruction;
-    let (bc, _pool) = compile_src("async fn f() { yield 1; yield 2; }");
+    let (bc, _pool) = compile_src("gen fn f() { yield 1; yield 2; }");
     let yield_positions: Vec<usize> = bc
         .iter()
         .enumerate()
@@ -658,7 +658,7 @@ fn main() {
 #[test]
 fn bare_yield_from_statement_does_not_emit_trailing_pop() {
     use common::Instruction;
-    let (bc, _pool) = compile_src("async fn inner() { yield 1; } async fn f() { yield from inner(); }");
+    let (bc, _pool) = compile_src("gen fn inner() { yield 1; } gen fn f() { yield from inner(); }");
     let pos = bc
         .iter()
         .position(|b| matches!(b.bytecode(), Instruction::YieldFromCoro))
@@ -2344,7 +2344,7 @@ fn main() { let c = new Counter(0, 3); for x in c { write(stdout(), to_bytes(for
 fn for_in_coro_emits_resume_done_and_back_edge() {
     use common::Instruction;
     let (bc, _pool) = compile_src(
-        "async fn counter() { yield 0; yield 1; return 99; } \
+        "gen fn counter() { yield 0; yield 1; return 99; } \
 fn main() { for x in counter() { write(stdout(), to_bytes(format(\"%i\", x))); } }",
     );
 
@@ -2382,7 +2382,7 @@ fn main() { for x in counter() { write(stdout(), to_bytes(format(\"%i\", x))); }
 fn for_in_coro_break_patches_exit_jump() {
     use common::Instruction;
     let (bc, _pool) = compile_src(
-        "async fn counter() { yield 0; yield 1; yield 2; } \
+        "gen fn counter() { yield 0; yield 1; yield 2; } \
 fn main() { for x in counter() { if x == 1 { break; } } }",
     );
     let jmp_targets: Vec<u32> = bc
@@ -2561,8 +2561,7 @@ fn match_jmp_to_end_placeholders_are_patched_to_end_label() {
 fn nested_match_in_loop_emits_expected_opcodes() {
     use common::Instruction;
     let (bc, _pool) = compile_src(
-        "fn consume(Option<int> x) -> int { \
- let i = 0; \
+        "fn consume(Option<int> x, int i) -> int { \
  while (i < 3) { \
  return match x { \
  Option::None() => 0, \
@@ -2571,7 +2570,7 @@ fn nested_match_in_loop_emits_expected_opcodes() {
  } \
  return 0; \
  } \
- fn main() { let _g = consume; let _ = consume(Option::Some(0)); }",
+ fn main() { let _g = consume; let _ = consume(Option::Some(0), 0); }",
     );
 
     let exit_branch_count = loop_exit_branch_count(&bc);
@@ -3604,12 +3603,12 @@ fn main() { write(stdout(), to_bytes(format(\"%i\", f(3)))); }",
     );
 }
 
-/// `async fn` self-resume path must not emit TailCall.
+/// `gen fn` self-resume path must not emit TailCall.
 #[test]
 fn async_fn_does_not_emit_tail_call() {
     use common::Instruction;
     let (bc, _pool) = compile_src(
-        "async fn tick(int n) { \
+        "gen fn tick(int n) { \
 if n <= 0 { return 0; } \
 yield n; \
 return tick(n - 1); \
@@ -7018,8 +7017,12 @@ fn cast_as_int_emits_cast_opcode() {
     use common::Instruction;
     let (bc, _) = compile_src(
         r#"
+fn to_int(float x) -> int {
+    return x as int;
+}
 fn main() {
-    return (3.5 as int);
+    let _g = to_int;
+    return to_int(3.5);
 }
 "#,
     );

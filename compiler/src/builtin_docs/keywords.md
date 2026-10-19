@@ -515,6 +515,10 @@ Methods have an implicit `self`; `pub` makes them callable from outside the
 type, and `static fn` declares one that is called on the type. An inherent
 `fn drop()` is a finalizer the garbage collector runs once.
 
+A generic type's inherent impl declares its parameters, `impl Cell<T> { … }`
+(bounds as `impl Cell<T: Eq>`). `impl Show<Foo> { … }` is an error: a trait
+instance is always written `impl Show for Foo`.
+
 ```coil
 class Celsius {
     pub deg: float,
@@ -658,17 +662,9 @@ fn main() {
 
 ## async
 
-The old spelling of `gen`: `async fn` declares a generator function.
-
-It is still accepted, and `coil fmt` rewrites it to `gen fn`. Coil has no
-`async` / `await`; concurrency uses the `task` module and threads.
-
-```coil
-gen fn numbers() {
-    yield 1;
-    yield 2;
-}
-```
+Removed. Generator functions are spelled `gen fn`; `async fn` is a parse
+error that names `gen fn`. Coil has no `async` / `await`; concurrency uses
+the `task` module and threads.
 
 ## yield
 

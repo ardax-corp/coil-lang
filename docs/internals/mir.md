@@ -19,7 +19,7 @@ the history of how MIR coverage grew to every body; their notes about
    first: MIR passes, then dense emit, kept when its cost beats the body's
    LIR form and every callee it `CALL`s is dense.
 3. Otherwise the body takes **LIR**: SROA (allocating bodies) or CSE, then
-   `emit_lir`. A `defer` body takes LIR with its cleanup pad.
+   InstCombine's folds (`instcombine_lir`), then `emit_lir`. A `defer` body takes LIR with its cleanup pad.
 4. All bodies are concatenated and lowered once by `il::lower`
    (fuse-select, PCs, encode).
 
@@ -236,6 +236,40 @@ Proving set (P11 float peeps live in the same pass):
 
 Hit bench: `examples/perf/mir_instcombine.hy`.
 
+**LIR bodies (#1434).** The dense attempt is gated on `has_numeric_arith`
+(`+ - * / %` only), so a body whose only arithmetic is bitwise ops or
+shifts never reached InstCombine: constants that meet only in MIR (after
+inlining, copy forwarding) were computed at run time. `lir_tail` now runs
+`instcombine_lir` on every LIR body, at every level like `hir::fold`: the
+constant folds, identities and constant branches, without the strength
+rewrites (`x * 2` is one op with an immediate on the stack machine; `x + x`
+reads `x` twice). When it changes the body, `from_hir::tidy` drops the
+blocks a folded branch leaves unreachable (emit_lir's liveness is slow
+over them: 800 dead blocks took 2.8 s). Folding puts literal operands on
+trapping ops, so emit_lir keeps a may-trap op in order against memory
+writes (#856; `tests/codegen/overflow_trap_order_lir.hy`). A coverage
+compile (`Pipeline::set_keep_fns_in`) skips the LIR fold
+(`MirFunc::keep_lines`): coverage counts a line by the code it emits, and a
+line whose value folds into a later one would read as uncoverable, so
+`coil mutate` would skip its mutants. For the same reason a coverage
+compile refuses dense (`dense: coverage`, #1494): its MIR passes fold a
+line's constants into the next line just the same, so every body takes
+LIR there. Coverage runs pay for that in speed, not in what they count.
+
+Hit bench `examples/perf/mir_lir_fold.hy` (`mix`: bit ops of `mask(-1)`
+called 2M times from a dense loop; release, `COIL_AUTO_PAR=0`, 15
+interleaved runs, 2026-10-19; auto-par on gives the same, the loop stays
+sequential):
+
+| | median | min | `.hyc` bytes |
+|---|---|---|---|
+| before (main 8ee3aae4) | 1.884 s | 1.699 s | 7084 |
+| after | 1.124 s | 0.944 s | 5804 |
+
+`check` in the issue's repro (`mask(-1) >> 16`) goes from
+`CONST; CONST; BITAND; CONST; BinReturn SHR` to one `ConstReturnImm 65535`.
+Guard: `lir_body_folds_constants_after_inlining` (perf_metrics).
+
 ## P8 — MIR DestProp / copy-forward (COI-282)
 
 After InstCombine, **trivial φ forwarding** runs on typed SSA. Braun already
@@ -420,6 +454,39 @@ N `assert!(x == 1);` (macro expansion included): 400 went 1.14 s → 0.39 s,
 1600 went 15.2 s → 2.0 s. What remains superlinear there is macro
 expansion (each generated snippet is parsed behind padding as long as all
 earlier ones, and each call is looked up by a walk of the whole AST).
+
+Blocks nothing reaches (#1493) cost emission no more than live ones. The GC
+clears (`entry_clears`, `source_clears`) ask whether a collection can run
+before a register is rewritten (`RewriteScan`); each question used to walk
+every block reachable from its join, once per copy source of the join's φ.
+A chain of joins whose rebinding arms are dead (a folded `if x == k` with
+nothing dropping the arms, as #1434's LIR folding left before `tidy`) has
+no collection on the live path, so every walk ran to the end: ~n³ block
+scans. Now the answer is one backward pass over the CFG per register asked,
+and each register is asked once per join however long its chain of copy
+sources. Register sharing (`assign_shared`, which the issue first blamed)
+was never the cost: 3 ms at N = 800. The unit test
+`lir_clears_work_about_linear_in_unreachable_blocks` counts scans over
+`N` dead arms:
+
+| N | scans before | scans after |
+|---|---|---|
+| 100 | 696,498 | 89,496 |
+| 800 | 43,548,198 | 4,803 |
+
+(At 100 every value still has its own register, so more registers are
+asked; at 800 they share four.) Release build, 2026-10-19, `main` of N
+`if x == k { s = s + "a"; }` with #1434's folding and no `tidy`:
+
+| N | before | after | with `tidy` |
+|---|---|---|---|
+| 400 | 0.63 s | 0.22 s | |
+| 800 | 3.87 s | 0.70–0.83 s | 0.33 s |
+
+`entry_clears` went 3.48 s → 0.13 s at 800. What remains superlinear walks
+copy sources (`CopySources::of`) back through the whole φ chain, once per
+join in `entry_clears` and once per `ClearWord` in `source_clears` and
+`keep_memory_order` (~60 ms each at 800): ~n² values, reachable arms or not.
 
 Host Option / `Result<(),E>` / heap-heap Result still pack once at
 `HostInvoke` (`host_enum`). MIR does not add a second pack.

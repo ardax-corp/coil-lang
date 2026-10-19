@@ -84,7 +84,7 @@ pub struct HirCallSite {
     pub pair_args: Vec<bool>,
     /// Whether the result is two words.
     pub pair_ret: bool,
-    /// A `gen fn` / `async fn` call: `MakeCoro`, its result the handle.
+    /// A `gen fn` call: `MakeCoro`, its result the handle.
     pub coro: bool,
     /// The result is a niche `Option` / `Result` the callee returns boxed.
     pub boxed_ret: bool,
@@ -573,6 +573,8 @@ pub struct HirMirInput<'a> {
     pub opaque_vars: bool,
     /// A debugger reads the body's locals from their frame words.
     pub debugger: bool,
+    /// A coverage compile: each source line keeps the code it emits.
+    pub coverage: bool,
     /// The niche layout of a result the body returns boxed (a test body's
     /// `Result`): each return builds the `ObjEnum`.
     pub ret_boxed_niche: Option<ValueLayout>,
@@ -1130,6 +1132,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         func.cleanup = Some(Box::new(cleanup));
     }
     func.debug_keep = inp.debugger;
+    func.keep_lines = inp.coverage;
     if inp.opaque_vars {
         opaque_moves_only(hir, inp)?;
         func.opaque_words = true;
@@ -1270,7 +1273,7 @@ fn prune(func: &mut MirFunc, spec: &HashSet<ValueId>) {
 /// Thread jumps through empty blocks (but not into a φ block from a
 /// branch), then lay the blocks out in `order`, dropping the ones nothing
 /// reaches.
-fn tidy(func: &mut MirFunc, order: &[BlockId]) {
+pub(super) fn tidy(func: &mut MirFunc, order: &[BlockId]) {
     // A branch whose arms are both empty and end alike (a jump to one block
     // with the same φ values from each, or the same return) goes the same
     // way either way: jump to one arm.
@@ -4458,8 +4461,19 @@ impl Lower<'_> {
                 words.push(v);
                 continue;
             }
-            let Some(v) = self.word(arg)? else {
+            // A two-word value goes as its object, as a plain call passes
+            // it to a shared body (#1479).
+            let v = if self.inp.pair_tys.contains_key(&arg.0) { self.boxed_word(arg)? } else { self.word(arg)? };
+            let Some(v) = v else {
                 return Ok(Val::Never);
+            };
+            // A niche enum goes to a bare type parameter as its object.
+            let v = match self.b.value_ty(v) {
+                from @ (MirTy::NicheOpt | MirTy::NicheRes) if tag.is_some() => {
+                    let layout = self.niche_layout(arg, from)?;
+                    self.box_niche(layout, v)?
+                }
+                _ => v,
             };
             let v = match tag {
                 Some(tag) => {

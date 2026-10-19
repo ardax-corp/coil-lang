@@ -1,7 +1,7 @@
 //! Typeclass and instance registry for userland generics.
 //!
 //! Stores the shapes of typeclasses (`Num<T>`, `Eq<T>`, …) and
-//! registered implementations (`impl Num<int>`, `impl Num<float>`, …).
+//! registered implementations (`impl Num for int`, `impl Num for float`, …).
 //! The [`Checker`](super::infer::Checker) owns one `Generics` value and
 //! delegates type-class resolution to it.
 
@@ -182,13 +182,13 @@ impl TypeClassDef {
 
 /// One registered typeclass instance (concrete type → implementation mapping).
 ///
-/// E.g. `impl Num<int> { fn add(…) { … } }` is stored as:
+/// E.g. `impl Num for int { fn add(…) { … } }` is stored as:
 /// ```text
 /// InstanceDef { class: "Num", args: [int()],
 ///     method_fqns: { "add" → "Num__int__add" } }
 /// ```
 ///
-/// Associated types: `impl Collect<Option<int>> { type Elem<A> = A; … }`
+/// Associated types: `impl Collect for Option<int> { type Elem<A> = A; … }`
 /// stores `assoc_tys: { "Elem" → AssocTypeValue { … } }`.
 #[derive(Debug, Clone)]
 pub struct InstanceDef {
@@ -294,7 +294,7 @@ impl Generics {
     }
 
     /// Find an instance whose args unify with `args` (e.g. `Option::Some(42)`'s
-    /// Constructor type against `impl Collect<Option<int>>`). Does not mutate
+    /// Constructor type against `impl Collect for Option<int>`). Does not mutate
     /// any global substitution.
     pub fn find_unifying_instances(&self, class: &str, args: &[Ty]) -> Vec<&InstanceDef> {
         self.instances
@@ -680,22 +680,6 @@ impl Generics {
                 superclasses: vec![],
                 assoc_types: vec![],
                 methods: vec![],
-            },
-        );
-        self.typeclasses.insert(
-            "String".into(),
-            TypeClassDef {
-                name: "String".into(),
-                defined_module: PRELUDE_MODULE.into(),
-                type_params: vec!["T".into()],
-                param_kinds: vec![Kind::Type],
-                superclasses: vec![],
-                assoc_types: vec![],
-                methods: vec![TypeClassMethodDef {
-                    name: "to_string".into(),
-                    has_default: false,
-                    is_static: false,
-                }],
             },
         );
         self.typeclasses.insert(
@@ -1134,35 +1118,105 @@ impl Generics {
         self.register_nominal_type("ArrayIter", PRELUDE_MODULE);
     }
 
-    /// Whether `class` is satisfied for `ty` (builtin or registered instance).
-    /// Register the structural `Show` instance of the ground tuple `ty`,
-    /// shown as `%v` shows it (#1451). The checker adds one the first time
-    /// a goal asks for it (`Checker::ensure_tuple_show_instance`); codegen
-    /// emits its thunk ([`Self::tuple_show_tys`]).
-    pub fn register_tuple_show(&mut self, ty: Ty) {
-        let fqn = Self::builtin_instance_fqn("Show", &ty.to_string(), "show");
+    /// Register the structural instance of `class` for the ground tuple,
+    /// record, array, `Option` or `Result` `ty` (#1451, #1479): `Show` as `%v` shows it, `Eq`
+    /// as `==` compares it, `Hash` combining its items'. The checker adds
+    /// one the first time a goal asks for it
+    /// (`Checker::ensure_structural_instance`); codegen emits its thunks
+    /// ([`Self::structural_instances`]).
+    pub fn register_structural_instance(&mut self, class: &str, ty: Ty) {
+        let methods: &[&str] = match class {
+            "Show" => &["show"],
+            "Eq" => &["eq", "ne"],
+            "Hash" => &["hash"],
+            _ => return,
+        };
+        let ty_str = ty.to_string();
         self.instances.push(InstanceDef {
-            class: "Show".into(),
+            class: class.into(),
             defined_module: PRELUDE_OPS_MODULE.into(),
             range: 0..0,
             args: vec![ty],
-            method_fqns: HashMap::from([("show".to_string(), fqn)]),
+            method_fqns: methods.iter().map(|m| (m.to_string(), Self::builtin_instance_fqn(class, &ty_str, m))).collect(),
             assoc_tys: HashMap::new(),
             context: Vec::new(),
         });
     }
 
-    /// The tuple types [`Self::register_tuple_show`] gave a `Show` instance.
-    pub fn tuple_show_tys(&self) -> impl Iterator<Item = &Ty> {
+    /// The method of `class`'s structural instance for tuples of `arity`
+    /// with open items (#1479): `Show__(_, _)__show`.
+    pub fn structural_tuple_fqn(class: &str, arity: usize, method: &str) -> String {
+        let items = vec!["_"; arity].join(", ");
+        let shape = if arity == 1 { format!("({items},)") } else { format!("({items})") };
+        Self::builtin_instance_fqn(class, &shape, method)
+    }
+
+    /// Register `class`'s structural instance for every tuple of `arity`
+    /// (#1479): head `(a, b, ..)` over the fresh variables `vars`, context
+    /// `class<a>`, `class<b>`, .. (one dictionary per item), so a tuple with
+    /// a type-parameter item meets the class inside a generic body. Its
+    /// thunk reads each item's dictionary from its own. A no-op when one is
+    /// registered.
+    pub fn register_structural_tuple(&mut self, class: &str, vars: Vec<TyVarId>) {
+        let fqn = Self::structural_tuple_fqn(class, vars.len(), "show");
+        if class != "Show" || self.instances.iter().any(|inst| inst.method_fqns.values().any(|f| *f == fqn)) {
+            return;
+        }
+        let items: Vec<Ty> = vars.iter().map(|v| Ty::Var(*v)).collect();
+        let context = items
+            .iter()
+            .map(|item| Constraint {
+                class: class.into(),
+                args: vec![item.clone()],
+            })
+            .collect();
+        self.instances.push(InstanceDef {
+            class: class.into(),
+            defined_module: PRELUDE_OPS_MODULE.into(),
+            range: 0..0,
+            args: vec![Ty::Tuple(items)],
+            method_fqns: HashMap::from([("show".to_string(), fqn)]),
+            assoc_tys: HashMap::new(),
+            context,
+        });
+    }
+
+    /// Whether `inst` is a structural instance for tuples with open items
+    /// ([`Self::register_structural_tuple`]).
+    pub fn is_structural_tuple(inst: &InstanceDef) -> bool {
+        inst.range == (0..0)
+            && inst.defined_module == PRELUDE_OPS_MODULE
+            && !inst.context.is_empty()
+            && matches!(inst.args.as_slice(), [Ty::Tuple(_)])
+    }
+
+    /// `(class, arity, method fqn)` of each instance
+    /// [`Self::register_structural_tuple`] registered.
+    pub fn structural_tuples(&self) -> impl Iterator<Item = (&str, usize, &str)> {
+        self.instances.iter().filter(|inst| Self::is_structural_tuple(inst)).filter_map(|inst| match inst.args.as_slice() {
+            [Ty::Tuple(items)] => Some((inst.class.as_str(), items.len(), inst.method_fqns.get("show")?.as_str())),
+            _ => None,
+        })
+    }
+
+    /// The `(class, type)` of each instance
+    /// [`Self::register_structural_instance`] registered.
+    pub fn structural_instances(&self) -> impl Iterator<Item = (&str, &Ty)> {
         self.instances
             .iter()
-            .filter(|inst| inst.class == "Show" && inst.range == (0..0) && inst.defined_module == PRELUDE_OPS_MODULE)
+            .filter(|inst| inst.range == (0..0) && inst.defined_module == PRELUDE_OPS_MODULE && inst.context.is_empty())
             .filter_map(|inst| match inst.args.as_slice() {
-                [ty @ Ty::Tuple(_)] => Some(ty),
+                [ty @ (Ty::Tuple(_) | Ty::Record { .. } | Ty::Array { .. })] => Some((inst.class.as_str(), ty)),
+                [ty @ Ty::App(head, _)]
+                    if matches!(head.as_ref(), Ty::Con(n) if n == common::BUILTIN_OPTION_ENUM || n == common::BUILTIN_RESULT_ENUM) =>
+                {
+                    Some((inst.class.as_str(), ty))
+                }
                 _ => None,
             })
     }
 
+    /// Whether `class` is satisfied for `ty` (builtin or registered instance).
     pub fn has_instance(&self, class: &str, ty: &Ty) -> bool {
         self.find_instance(class, std::slice::from_ref(ty))
             .is_some()
@@ -1336,7 +1390,6 @@ mod tests {
             "Default",
             "Hash",
             "Send",
-            "String",
             "Sensitive",
         ] {
             assert!(
@@ -1345,7 +1398,7 @@ mod tests {
             );
         }
         assert_eq!(g.typeclass("Default").unwrap().methods[0].name, "default");
-        assert_eq!(g.typeclass("String").unwrap().methods[0].name, "to_string");
+        assert!(g.typeclass("String").is_none(), "`String` was folded into `Show`");
         assert!(g.typeclass("Send").unwrap().methods.is_empty());
     }
 

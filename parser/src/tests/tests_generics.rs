@@ -370,16 +370,23 @@
         }
     }
 
+    /// `impl Num<int> { … }` parses as an inherent impl; the checker
+    /// rejects the trait owner and suggests `impl Num for int`.
     #[test]
-    fn typeclass_angle_form_is_rejected() {
-        let result = Pratt::default()
-            .declaration()
-            .parse("impl Num<int> { fn add(int a, int b) -> int {} }")
-            .into_result();
-        assert!(
-            result.is_err(),
-            "expected `impl Trait<Type>` to fail; use `impl Trait for Type`"
-        );
+    fn typeclass_angle_form_parses_as_inherent_impl() {
+        match decl_ast!("impl Num<int> { fn add(int a, int b) -> int {} }") {
+            Expression::Implementation { owner, .. } => assert_eq!(owner, "Num"),
+            other => panic!("expected Implementation, got {:?}", other),
+        }
+    }
+
+    /// Inherent impl parameters may be any identifier, as on `class Cell<Elem>`.
+    #[test]
+    fn inherent_impl_with_long_type_param_parses() {
+        match decl_ast!("impl Cell<Elem> { fn get() -> Elem {} }") {
+            Expression::Implementation { type_params, .. } => assert_eq!(type_params[0].name, "Elem"),
+            other => panic!("expected Implementation, got {:?}", other),
+        }
     }
 
 
@@ -1366,7 +1373,7 @@
                 other => other,
             }
         }
-        match decl_ast!("async fn coro() { yield -1; }") {
+        match decl_ast!("gen fn coro() { yield -1; }") {
             Expression::Function { body, .. } => {
                 fn has_yield_negate(expr: &Expression<'_>) -> bool {
                     match expr {
