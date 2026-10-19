@@ -10,6 +10,17 @@ fn checked(int n) -> Result<string, string> {
     return "ok";
 }
 
+fn pair<T>(T a) -> (T, int) {
+    return (a, 1);
+}
+
+fn opt(int n) -> Option<string> {
+    if n > 0 {
+        return Some("a");
+    }
+    return None;
+}
+
 test("a tuple with a Some of a string") {
     let s = format("%v", (Some("a"), 1));
     assert!(s == "(Some(a), 1)", s);
@@ -60,4 +71,11 @@ test("an array local of Options") {
     let v = [Some("a"), n];
     let s = format("%v", v);
     assert!(s == "[Some(a), None]", s);
+}
+
+test("a tuple made by a generic function") {
+    let s = format("%v %v", pair(opt(1)), pair(opt(0)));
+    assert!(s == "(Some(a), 1) (None, 1)", s);
+    let r = format("%v", (pair(opt(1)), opt(1)));
+    assert!(r == "((Some(a), 1), Some(a))", r);
 }
