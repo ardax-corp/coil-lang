@@ -14,7 +14,7 @@ use crate::il::{IlJumpKind, IlOp, Label};
 
 use super::emit::{
     coalesce_latch_overwrite, emit_cond_jumps, foreign_targets, il_for_alloc, is_fallthrough,
-    max_label_hint, paired_alloc_dest, restore_block_op_locs, take_label,
+    max_label_hint, restore_block_op_locs, take_label,
 };
 use super::emit_common::{
     const_i16, is_jim_term_payload, last_arm_payloads, phi_moves, push_const, stack_bin_op,
@@ -265,6 +265,8 @@ struct EmitPlan {
     /// block's `JumpIfMatch` instead of a store and reload
     /// ([`stack_scrutinees`]).
     stack_scrutinee: Vec<bool>,
+    /// Each barrier's paired allocation ([`super::emit::paired_alloc_dests`]).
+    paired: HashMap<ValueId, ValueId>,
 }
 
 impl EmitPlan {
@@ -320,6 +322,7 @@ impl EmitPlan {
         }
         let cmp_dests = super::emit::term_cmp_dests(func);
         let fused = fused_cmp_dests(func, &cmp_dests);
+        let paired = super::emit::paired_alloc_dests(func);
         let mut tree = vec![false; n];
         let mut changed = true;
         while changed {
@@ -369,7 +372,7 @@ impl EmitPlan {
                     // slot and its own instruction runs where it stands
                     // (a dead `codes.push(x)` result, #1381).
                     let paired = match inst {
-                        MirInst::GcBarrier { dest, .. } => Some(super::emit::paired_alloc_dest(func, *dest)),
+                        MirInst::GcBarrier { dest, .. } => Some(paired.get(dest).copied()),
                         _ => None,
                     };
                     // Operands of stored bins can still be tree (i % 10 → BinSlotImm).
@@ -472,6 +475,7 @@ impl EmitPlan {
             preds,
             home_base: 0,
             stack_scrutinee,
+            paired,
         }
     }
 
@@ -1509,7 +1513,7 @@ fn emit_stored(
             }
         }
         MirInst::GcBarrier { dest, .. } => {
-            if let Some(obj) = paired_alloc_dest(func, *dest) {
+            if let Some(&obj) = plan.paired.get(dest) {
                 emit_stack(out, obj, func, plan, regs, pool, loc)?;
                 out.push(IlOp::StorePop {
                     slot: u32::from(regs[dest.index()]),
@@ -2146,7 +2150,7 @@ fn emit_stack(
             })
         }
         MirInst::GcBarrier { dest, .. } => {
-            if let Some(obj) = paired_alloc_dest(func, *dest) {
+            if let Some(&obj) = plan.paired.get(dest) {
                 emit_stack(out, obj, func, plan, regs, pool, loc)
             } else if plan.need_slot[dest.index()] {
                 out.push(IlOp::Load {

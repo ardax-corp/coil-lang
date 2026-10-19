@@ -3625,3 +3625,29 @@ pub(super) fn paired_alloc_dest(func: &MirFunc, barrier: ValueId) -> Option<Valu
     }
     None
 }
+
+/// [`paired_alloc_dest`] of every barrier, by its dest, in one pass: a
+/// body asking once per barrier scanned the whole body each time (#1502).
+pub(super) fn paired_alloc_dests(func: &MirFunc) -> HashMap<ValueId, ValueId> {
+    let mut out = HashMap::new();
+    for block in &func.blocks {
+        let mut pending = None;
+        for inst in &block.insts {
+            match inst {
+                MirInst::Alloc { dest, .. }
+                | MirInst::ArrayPush { dest, .. }
+                | MirInst::Format { dest, .. }
+                | MirInst::Stringify { dest, .. } => pending = Some(*dest),
+                MirInst::GcBarrier { dest, .. } => {
+                    // The first barrier of a dest is the one the scan finds.
+                    if let Some(obj) = pending {
+                        out.entry(*dest).or_insert(obj);
+                    }
+                    pending = None;
+                }
+                _ => pending = None,
+            }
+        }
+    }
+    out
+}
