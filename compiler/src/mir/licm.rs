@@ -98,6 +98,12 @@ pub(super) fn natural_loops(func: &MirFunc) -> Vec<LoopInfo> {
         .collect()
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Work the dominator computation did, for the bound of #1518.
+    static DOM_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub(super) fn dominators(func: &MirFunc, preds: &[Vec<BlockId>]) -> Vec<HashSet<BlockId>> {
     let n = func.blocks.len();
     let all: HashSet<BlockId> = (0..n).map(|i| BlockId(i as u32)).collect();
@@ -114,6 +120,8 @@ pub(super) fn dominators(func: &MirFunc, preds: &[Vec<BlockId>]) -> Vec<HashSet<
             let mut d: Option<HashSet<BlockId>> = None;
             for p in &preds[b.id.index()] {
                 let pd = &dom[p.index()];
+                #[cfg(test)]
+                DOM_STEPS.with(|c| c.set(c.get() + pd.len()));
                 d = Some(match d {
                     None => pd.clone(),
                     Some(acc) => acc.intersection(pd).copied().collect(),
@@ -1264,5 +1272,42 @@ bb3:
         f.verify().unwrap();
         assert_eq!(fadds(&f), 2);
         assert_eq!(in_loop(&f, |i| matches!(i, MirInst::Const { .. })), 0);
+    }
+
+    /// `n` diamonds in a row, each `if v0 { .. }` joining before the next:
+    /// the shape a run of `if x == k { s = s + "a"; }` lowers to (#1518).
+    fn join_chain(n: usize) -> String {
+        let mut text = String::from("func @f(v0: bool) -> i64 {\nbb0:\n    brif v0, bb1, bb2\n");
+        for i in 0..n {
+            let (arm, join) = (2 * i + 1, 2 * i + 2);
+            text.push_str(&format!("bb{arm}:\n    jump bb{join}\n"));
+            text.push_str(&format!("bb{join}:\n"));
+            if i + 1 < n {
+                text.push_str(&format!("    brif v0, bb{}, bb{}\n", join + 1, join + 2));
+            } else {
+                text.push_str("    v1 = iconst.i64 0\n    return v1\n");
+            }
+        }
+        text.push('}');
+        text
+    }
+
+    /// #1518: finding loops costs about linear work over a chain of joins.
+    /// Each block kept the set of every block that dominates it, so each
+    /// join's set held every join before it: a chain 8x longer took ~64x.
+    #[test]
+    fn natural_loops_about_linear_over_join_chain() {
+        let steps = |n: usize| {
+            let text = join_chain(n);
+            let f = crate::mir::parse_func(&text).expect(&text);
+            f.verify().unwrap();
+            DOM_STEPS.with(|c| c.set(0));
+            assert!(natural_loops(&f).is_empty());
+            DOM_STEPS.with(|c| c.get())
+        };
+        let small = steps(100);
+        let large = steps(800);
+        // Linear is ~8x.
+        assert!(large <= 24 * small.max(1), "800 joins stepped {large}, 100 stepped {small}");
     }
 }
