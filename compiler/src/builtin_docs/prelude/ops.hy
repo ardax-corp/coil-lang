@@ -659,6 +659,7 @@ trait Show<T> {
 ///
 /// Arrays, `Vec`, strings (UTF-8 bytes), tuples and records (fields) have a
 /// structural length and need no instance; fixed sizes fold at compile time.
+/// They meet a `T: Length` bound too, `len` reading that same length.
 /// Implement `Length` to give your own type a length.
 ///
 /// # Examples

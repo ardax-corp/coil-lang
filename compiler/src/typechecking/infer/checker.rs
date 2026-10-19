@@ -10124,6 +10124,10 @@ impl Checker {
     /// and `Hash` when they have a ground `Hash` (its thunk calls theirs).
     fn ensure_structural_instance(&mut self, class: &str, wanted: &[Ty]) {
         let [ty] = wanted else { return };
+        if class == "Length" {
+            self.ensure_structural_length(ty);
+            return;
+        }
         if !matches!(class, "Show" | "Eq" | "Hash") {
             return;
         }
@@ -10169,6 +10173,27 @@ impl Checker {
         if items_ok {
             self.generics.register_structural_instance(class, ty);
         }
+    }
+
+    /// A ground `Vec`, array, tuple or record has a structural `Length`
+    /// instance (#1536), its `len` the structural length read `x.len()`
+    /// already is (`string` has a builtin one). An array's is `[T]`'s, read
+    /// at run time, so `[T; 2]` and `[T; 3]` share it (a fixed length
+    /// matches the dynamic one).
+    fn ensure_structural_length(&mut self, ty: &Ty) {
+        let ty = show_lookup_ty(&apply_ty_prune(&self.subst, ty));
+        let ty = match strip_readonly(&ty) {
+            Ty::Array { element, .. } => array((**element).clone()),
+            Ty::Con(_) => return,
+            other => other.clone(),
+        };
+        if !Self::is_structural_len_ty(&ty)
+            || Self::ty_mentions_var(&ty)
+            || self.generics.find_unifying_instance("Length", std::slice::from_ref(&ty)).is_some()
+        {
+            return;
+        }
+        self.generics.register_structural_instance("Length", ty);
     }
 
     /// (open vars in `wanted` may be bound by the match). Ambiguous matches

@@ -41,3 +41,12 @@ test("a Length bound through a shared body") {
     assert!(s((1, 2)) == 2);
     assert!(s("hello") == 5);
 }
+
+test("fixed and dynamic arrays share a Length instance") {
+    assert!(size([1, 2, 3]) == 3);
+    assert!(size([4, 5]) == 2);
+    assert!(twice([[1], [2]]) == 4);
+    assert!(size([6]) == 1);
+    let s = size;
+    assert!(s([1, 2, 3, 4, 5]) == 5);
+}
