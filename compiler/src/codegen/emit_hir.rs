@@ -494,6 +494,7 @@ impl Compiler {
                     if self.hir_builtin(name).is_some()
                         || self.checker.is_overloaded(name)
                         || self.checker.bare_construct_at(start, end).is_some()
+                        || self.checker.qualified_trait_call_at(start, end).is_some()
                         || self.sidecar_overload(e.node, start, end).is_some()
                         || self.checker.partial_fill_at(start, end).is_some()
                         || self.forwarded_dicts_hint(e.node, start, end).is_some()
@@ -4344,9 +4345,13 @@ impl Compiler {
         // before it is a call, so a `len` here names a user `impl Length`
         // and is looked up like any other method (#1504).
         let method = name.rsplit_once('.').map_or(name, |(_, m)| m);
-        if name.contains("::") {
-            return Err("callee-trait");
-        }
+        // `Trait::m(..)` whose bare `m` is taken (see `qualified_trait_call_at`).
+        let (start, end) = hir.expr(call).span;
+        let method = match name.rsplit_once("::") {
+            Some((_, member)) if self.checker.qualified_trait_call_at(start, end) == Some(name) => member,
+            Some(_) => return Err("callee-trait"),
+            None => method,
+        };
         let arg_tys = args
             .iter()
             .map(|&arg| Self::hir_ty(hir, arg).map(|t| apply_ty_prune(self.checker.subst(), t)))

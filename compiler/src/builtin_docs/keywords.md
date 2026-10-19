@@ -884,6 +884,12 @@ bodies, and a trait can declare associated types (`type Elem;`) and
 `static fn` constructors. Use it as a bound (`T: Area`) or as an
 existential parameter type.
 
+A trait method is called as a method (`x.area()`), as a function
+(`area(x)`), or qualified by its trait (`Area::area(x)`). The qualified
+form resolves like the function form but only considers that trait's
+method, so it picks between two traits (or a trait and a free function)
+that share a method name; it compiles to the same call.
+
 ```coil
 trait Area<T> {
     fn area(T x) -> int;
@@ -900,7 +906,7 @@ impl Area for Square {
 }
 
 fn total<T: Area>(T a, T b) -> int {
-    return area(a) + area(b);
+    return area(a) + Area::area(b);
 }
 ```
 
