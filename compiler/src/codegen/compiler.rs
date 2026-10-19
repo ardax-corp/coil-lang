@@ -2900,6 +2900,22 @@ impl Compiler {
         class: &str,
         lookup: &[crate::typechecking::Ty],
     ) -> bool {
+        // A built-in enum's sum or constructor type (`Some(e)`'s, in a mono
+        // clone) as its `App` spelling, which a generic instance's head
+        // binds its context's variables against (#1580).
+        let spelled: Vec<Ty>;
+        let lookup = if lookup.iter().any(|t| !matches!(t, Ty::App(..)) && crate::typechecking::ty::builtin_enum_app(t).is_some()) {
+            spelled = lookup
+                .iter()
+                .map(|t| match t {
+                    Ty::App(..) => t.clone(),
+                    _ => crate::typechecking::ty::builtin_enum_app(t).unwrap_or_else(|| t.clone()),
+                })
+                .collect();
+            &spelled[..]
+        } else {
+            lookup
+        };
         // An open goal (`Show<Tree<T>>`, `Show<T>`) is served by a dictionary
         // in scope, or by the mono clone's concrete types; looking it up
         // would match an arbitrary instance (#551).
