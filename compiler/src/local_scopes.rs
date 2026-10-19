@@ -32,21 +32,23 @@ impl LocalBinding {
     }
 }
 
-/// Every local binding in `source` (empty when it does not parse).
-pub fn local_bindings(source: &str) -> Vec<LocalBinding> {
+/// Every local binding in `source` (empty when it does not parse). `cases`
+/// are the bare unit case patterns the checker found in it
+/// ([`ProjectIndex::bare_cases_for_file`](crate::ProjectIndex::bare_cases_for_file)).
+pub fn local_bindings(source: &str, cases: &BareCases) -> Vec<LocalBinding> {
     let Ok(ast) = parser::Pratt::default().parse(source) else {
         return Vec::new();
     };
-    local_bindings_in(source, &ast)
+    local_bindings_in(source, &ast, cases)
 }
 
 /// Same as [`local_bindings`] for an already-parsed `ast` of `source`.
-pub fn local_bindings_in(source: &str, ast: &Output<'_>) -> Vec<LocalBinding> {
+pub fn local_bindings_in(source: &str, ast: &Output<'_>, cases: &BareCases) -> Vec<LocalBinding> {
     let mut resolver = Resolver {
         source,
         bindings: Vec::new(),
         scopes: Vec::new(),
-        cases: BareCases::of(ast),
+        cases,
     };
     resolver.walk(ast);
     for binding in &mut resolver.bindings {
@@ -57,8 +59,8 @@ pub fn local_bindings_in(source: &str, ast: &Output<'_>) -> Vec<LocalBinding> {
 }
 
 /// The binding whose declaration or use covers `offset`.
-pub fn binding_at(source: &str, offset: usize) -> Option<LocalBinding> {
-    local_bindings(source)
+pub fn binding_at(source: &str, offset: usize, cases: &BareCases) -> Option<LocalBinding> {
+    local_bindings(source, cases)
         .into_iter()
         .find(|binding| binding.contains(offset))
 }
@@ -71,15 +73,15 @@ enum Frame {
     Barrier,
 }
 
-struct Resolver<'s> {
+struct Resolver<'s, 'c> {
     source: &'s str,
     bindings: Vec<LocalBinding>,
     scopes: Vec<Frame>,
     /// Bare unit cases (`None`, `Red`): a pattern naming one binds nothing.
-    cases: BareCases,
+    cases: &'c BareCases,
 }
 
-impl<'s> Resolver<'s> {
+impl<'s> Resolver<'s, '_> {
     fn range_of(&self, name: &str, fallback: Range<usize>) -> Range<usize> {
         let base = self.source.as_ptr() as usize;
         let ptr = name.as_ptr() as usize;
@@ -288,6 +290,12 @@ impl<'s> Resolver<'s> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`binding_at`] with the cases the checker finds in `source`.
+    fn binding_at(source: &str, offset: usize) -> Option<LocalBinding> {
+        let ast = parser::Pratt::default().parse(source).expect("parse");
+        super::binding_at(source, offset, &BareCases::checked(&ast))
+    }
 
     fn occurrences_at(source: &str, needle: &str, nth: usize) -> Vec<&'static str> {
         let offset = source.match_indices(needle).nth(nth).unwrap().0;
