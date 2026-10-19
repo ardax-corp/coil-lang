@@ -5309,7 +5309,6 @@ impl Checker {
                     | PreludeFn::Ceil
                     | PreludeFn::Exp
                     | PreludeFn::Ln
-                    | PreludeFn::Pow
                     | PreludeFn::Atan
                     | PreludeFn::Atan2
                     | PreludeFn::Asin
@@ -5317,7 +5316,6 @@ impl Checker {
                     | PreludeFn::Log10
                     | PreludeFn::Log2
                     | PreludeFn::Cbrt
-                    | PreludeFn::Rem
                     | PreludeFn::Sinh
                     | PreludeFn::Cosh
                     | PreludeFn::Tanh => self.infer_math(kind, &reordered, range),
@@ -5343,7 +5341,6 @@ impl Checker {
                 | PreludeFn::Ceil
                 | PreludeFn::Exp
                 | PreludeFn::Ln
-                | PreludeFn::Pow
                 | PreludeFn::Atan
                 | PreludeFn::Atan2
                 | PreludeFn::Asin
@@ -5351,7 +5348,6 @@ impl Checker {
                 | PreludeFn::Log10
                 | PreludeFn::Log2
                 | PreludeFn::Cbrt
-                | PreludeFn::Rem
                 | PreludeFn::Sinh
                 | PreludeFn::Cosh
                 | PreludeFn::Tanh => self.infer_math(kind, arg_slice, range),
@@ -7901,9 +7897,7 @@ impl Checker {
                 let _ = self.infer(arg);
             }
             let hint = match kind {
-                PreludeFn::Pow => "base, exponent",
                 PreludeFn::Atan2 => "y, x",
-                PreludeFn::Rem => "x, y",
                 _ => "x",
             };
             return self.error_with_help(

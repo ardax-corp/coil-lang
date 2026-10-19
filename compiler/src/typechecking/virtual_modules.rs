@@ -105,7 +105,6 @@ pub enum PreludeFn {
     Ceil,
     Exp,
     Ln,
-    Pow,
     Atan,
     Atan2,
     Asin,
@@ -113,8 +112,6 @@ pub enum PreludeFn {
     Log10,
     Log2,
     Cbrt,
-    /// Float remainder (`f64::rem` / C `fmod`); not IEEE `remainder`.
-    Rem,
     Sinh,
     Cosh,
     Tanh,
@@ -139,7 +136,6 @@ impl PreludeFn {
             Self::Ceil => "ceil",
             Self::Exp => "exp",
             Self::Ln => "ln",
-            Self::Pow => "pow",
             Self::Atan => "atan",
             Self::Atan2 => "atan2",
             Self::Asin => "asin",
@@ -147,7 +143,6 @@ impl PreludeFn {
             Self::Log10 => "log10",
             Self::Log2 => "log2",
             Self::Cbrt => "cbrt",
-            Self::Rem => "rem",
             Self::Sinh => "sinh",
             Self::Cosh => "cosh",
             Self::Tanh => "tanh",
@@ -172,7 +167,6 @@ impl PreludeFn {
             "ceil" => Some(Self::Ceil),
             "exp" => Some(Self::Exp),
             "ln" => Some(Self::Ln),
-            "pow" => Some(Self::Pow),
             "atan" => Some(Self::Atan),
             "atan2" => Some(Self::Atan2),
             "asin" => Some(Self::Asin),
@@ -180,7 +174,6 @@ impl PreludeFn {
             "log10" => Some(Self::Log10),
             "log2" => Some(Self::Log2),
             "cbrt" => Some(Self::Cbrt),
-            "rem" => Some(Self::Rem),
             "sinh" => Some(Self::Sinh),
             "cosh" => Some(Self::Cosh),
             "tanh" => Some(Self::Tanh),
@@ -198,7 +191,6 @@ impl PreludeFn {
             Self::Ceil => Some("math_ceil"),
             Self::Exp => Some("math_exp"),
             Self::Ln => Some("math_ln"),
-            Self::Pow => Some("math_pow"),
             Self::Atan => Some("math_atan"),
             Self::Atan2 => Some("math_atan2"),
             Self::Asin => Some("math_asin"),
@@ -206,7 +198,6 @@ impl PreludeFn {
             Self::Log10 => Some("math_log10"),
             Self::Log2 => Some("math_log2"),
             Self::Cbrt => Some("math_cbrt"),
-            Self::Rem => Some("math_rem"),
             Self::Sinh => Some("math_sinh"),
             Self::Cosh => Some("math_cosh"),
             Self::Tanh => Some("math_tanh"),
@@ -214,15 +205,21 @@ impl PreludeFn {
         }
     }
 
-    /// Binary `float, float -> float` scalar math (`pow`, `atan2`, `rem`).
+    /// Binary `float, float -> float` scalar math (`atan2`).
     pub fn math_arity(self) -> Option<usize> {
         match self {
-            Self::Pow | Self::Atan2 | Self::Rem => Some(2),
+            Self::Atan2 => Some(2),
             kind if kind.math_native_name().is_some() => Some(1),
             _ => None,
         }
     }
 }
+
+/// `prelude::math::pow` was removed in favour of the `**` operator.
+const REMOVED_POW_HELP: &str =
+    "`prelude::math::pow` was removed: write `base ** exponent`, or `use num::{pow};` for a function";
+/// `prelude::math::rem` was removed in favour of the `%` operator.
+const REMOVED_REM_HELP: &str = "`prelude::math::rem` was removed: write `x % y` (the same `fmod` remainder)";
 
 /// IO host natives exported from virtual `io` / `io::net::*` modules.
 ///
@@ -865,9 +862,6 @@ impl VirtualModules {
                     kind: PreludeFn::Ln,
                 },
                 BuiltinExport::Fn {
-                    kind: PreludeFn::Pow,
-                },
-                BuiltinExport::Fn {
                     kind: PreludeFn::Atan,
                 },
                 BuiltinExport::Fn {
@@ -887,9 +881,6 @@ impl VirtualModules {
                 },
                 BuiltinExport::Fn {
                     kind: PreludeFn::Cbrt,
-                },
-                BuiltinExport::Fn {
-                    kind: PreludeFn::Rem,
                 },
                 BuiltinExport::Fn {
                     kind: PreludeFn::Sinh,
@@ -1094,6 +1085,8 @@ impl VirtualModules {
         match (path.join("::").as_str(), name) {
             ("io", "from_bytes") => Some("`from_bytes` is in the `string` module: `use string::{from_bytes};`"),
             ("io", "to_bytes") => Some("`to_bytes` is in the `string` module: `use string::{to_bytes};`"),
+            ("prelude::math", "pow") => Some(REMOVED_POW_HELP),
+            ("prelude::math", "rem") => Some(REMOVED_REM_HELP),
             _ => None,
         }
     }
@@ -1109,26 +1102,12 @@ impl VirtualModules {
 
     /// Exports injected into every file (implicit
     /// `use prelude::*; use prelude::ops::*; use prelude::math::*;`).
-    ///
-    /// `pow` stays on virtual `prelude::math` for an explicit import, but is
-    /// **not** auto-injected so userland `num::pow` overloads can own the bare name.
     pub fn prelude_exports(&self) -> Vec<BuiltinExport> {
         let mut out = Vec::new();
-        if let Some(e) = self.modules.get(PRELUDE_MODULE) {
-            out.extend(e.iter().cloned());
-        }
-        if let Some(e) = self.modules.get(PRELUDE_OPS_MODULE) {
-            out.extend(e.iter().cloned());
-        }
-        if let Some(e) = self.modules.get(PRELUDE_MATH_MODULE) {
-            out.extend(e.iter().filter(|&export| {
-                !matches!(
-                    export,
-                    BuiltinExport::Fn {
-                        kind: PreludeFn::Pow
-                    }
-                )
-            }).cloned());
+        for module in [PRELUDE_MODULE, PRELUDE_OPS_MODULE, PRELUDE_MATH_MODULE] {
+            if let Some(e) = self.modules.get(module) {
+                out.extend(e.iter().cloned());
+            }
         }
         out
     }
@@ -1215,7 +1194,6 @@ mod tests {
             PreludeFn::Log10,
             PreludeFn::Log2,
             PreludeFn::Cbrt,
-            PreludeFn::Rem,
             PreludeFn::Sinh,
             PreludeFn::Cosh,
             PreludeFn::Tanh,
@@ -1229,20 +1207,12 @@ mod tests {
             );
             assert!(kind.math_native_name().is_some());
         }
-        assert!(
-            !exports.iter().any(|e| matches!(
-                e,
-                BuiltinExport::Fn {
-                    kind: PreludeFn::Pow
-                }
-            )),
-            "pow must not be auto-injected (lives in userland num)"
-        );
-        assert!(
-            vm.resolve_item(&["prelude".to_string(), "math".to_string()], "pow",)
-                .is_some(),
-            "pow remains importable from prelude::math"
-        );
+        let math = ["prelude".to_string(), "math".to_string()];
+        for removed in ["pow", "rem"] {
+            assert!(PreludeFn::from_name(removed).is_none());
+            assert!(vm.resolve_item(&math, removed).is_none());
+            assert!(VirtualModules::removed_item(&math, removed).is_some());
+        }
         assert!(
             !exports
                 .iter()
