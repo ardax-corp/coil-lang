@@ -279,6 +279,9 @@ pub struct Checker {
     /// Compile-time type ids for class instances (`InitTyped`). Never 0.
     class_type_ids: std::collections::HashMap<String, u32>,
     next_class_type_id: u32,
+    /// Slotted record shapes (fields sorted by name, with their word
+    /// kinds): their `InitTyped` type id, from the class ids' counter.
+    record_type_ids: std::collections::HashMap<(Vec<String>, Vec<u8>), u32>,
     /// Classes that declared inherent `fn drop(self)`.
     classes_with_drop: std::collections::HashSet<String>,
     /// Subset of [`Self::classes_with_drop`] whose owner is an enum.

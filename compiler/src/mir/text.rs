@@ -190,26 +190,13 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             scrutinee,
             index,
         } => write!(f, "{dest} = matchpayload {scrutinee}, {index}"),
-        MirInst::HeapFieldLoad {
-            dest,
-            object,
-            name,
-            index,
-        } => match name {
-            Some(n) => write!(f, "{dest} = heapgetfield {object}, {n}"),
-            None => write!(f, "{dest} = heaploadfield {object}, {index}"),
-        },
+        MirInst::HeapFieldLoad { dest, object, index } => write!(f, "{dest} = heaploadfield {object}, {index}"),
         MirInst::HeapFieldStore {
             dest,
             object,
             value,
-            name,
             index,
-        } => match (name, index) {
-            (Some(n), _) => write!(f, "{dest} = heapsetfield {object}, {value}, {n}"),
-            (None, Some(i)) => write!(f, "{dest} = heapsetfield.slot {object}, {value}, {index}", index = i),
-            (None, None) => write!(f, "{dest} = heapsetfield.slot {object}, {value}, 0"),
-        },
+        } => write!(f, "{dest} = heapsetfield.slot {object}, {value}, {index}"),
         MirInst::Index {
             dest,
             array,
@@ -291,20 +278,11 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
                         write!(f, ", params {params}")?;
                     }
                 }
-                MirAllocKind::Array
-                | MirAllocKind::Tuple
-                | MirAllocKind::Dict
-                | MirAllocKind::DictEntries => {}
+                MirAllocKind::Array | MirAllocKind::Tuple => {}
             }
             for (i, e) in elems.iter().enumerate() {
                 if i == 0
-                    && matches!(
-                        kind,
-                        MirAllocKind::Array
-                            | MirAllocKind::Tuple
-                            | MirAllocKind::Dict
-                            | MirAllocKind::DictEntries
-                    )
+                    && matches!(kind, MirAllocKind::Array | MirAllocKind::Tuple)
                 {
                     write!(f, " {e}")?;
                 } else {
@@ -561,54 +539,25 @@ impl<'a> Parser<'a> {
                     index,
                 });
             }
-            if op == "heapgetfield" {
-                let object = self.value()?;
-                self.expect(',')?;
-                let name = self.value()?;
-                ensure_ty(types, dest, MirTy::I64);
-                return Ok(MirInst::HeapFieldLoad {
-                    dest,
-                    object,
-                    name: Some(name),
-                    index: 0,
-                });
-            }
             if op == "heaploadfield" {
                 let object = self.value()?;
                 self.expect(',')?;
                 let index = self.uint()? as u32;
                 ensure_ty(types, dest, MirTy::I64);
-                return Ok(MirInst::HeapFieldLoad {
-                    dest,
-                    object,
-                    name: None,
-                    index,
-                });
+                return Ok(MirInst::HeapFieldLoad { dest, object, index });
             }
-            if op == "heapsetfield" || op == "heapsetfield.slot" {
+            if op == "heapsetfield.slot" {
                 let object = self.value()?;
                 self.expect(',')?;
                 let value = self.value()?;
                 ensure_ty(types, dest, peek_ty(types, value));
-                if op == "heapsetfield" {
-                    self.expect(',')?;
-                    let name = self.value()?;
-                    return Ok(MirInst::HeapFieldStore {
-                        dest,
-                        object,
-                        value,
-                        name: Some(name),
-                        index: None,
-                    });
-                }
                 self.expect(',')?;
                 let index = self.uint()? as u32;
                 return Ok(MirInst::HeapFieldStore {
                     dest,
                     object,
                     value,
-                    name: None,
-                    index: Some(index),
+                    index,
                 });
             }
         }
@@ -879,8 +828,6 @@ impl<'a> Parser<'a> {
                     let type_id = self.uint()? as u32;
                     MirAllocKind::DropEnum { tag, type_id }
                 }
-                "dict" => MirAllocKind::Dict,
-                "dictentries" => MirAllocKind::DictEntries,
                 "coro" => MirAllocKind::Coro {
                     target: crate::il::Label(self.uint()? as u32),
                 },

@@ -646,11 +646,11 @@ impl MirBuilder {
         Ok(dest)
     }
 
-    /// Heap GetField / LoadField. `object` is heapref; dest is the field word.
+    /// Heap LoadField of slot `index`. `object` is heapref; dest is the
+    /// field word.
     pub fn ins_heap_field_load(
         &mut self,
         object: ValueId,
-        name: Option<ValueId>,
         index: u32,
         dest_ty: MirTy,
     ) -> Result<ValueId, MirError> {
@@ -663,27 +663,22 @@ impl MirBuilder {
         if !dest_ty.is_specialized() {
             return Err(MirError::msg(format!("HeapFieldLoad dest {dest_ty}")));
         }
-        if let Some(n) = name
-            && self.resolve_ty(n) != MirTy::HeapRef {
-                return Err(MirError::msg("HeapFieldLoad name"));
-            }
         let dest = self.alloc(dest_ty);
         self.push(MirInst::HeapFieldLoad {
             dest,
             object: self.resolve(object),
-            name: name.map(|n| self.resolve(n)),
             index,
         })?;
         Ok(dest)
     }
 
-    /// Heap SetField. Dest is the stored value (TOS after the op).
+    /// Heap SetField of slot `index`. Dest is the stored value (TOS after
+    /// the op).
     pub fn ins_heap_field_store(
         &mut self,
         object: ValueId,
         value: ValueId,
-        name: Option<ValueId>,
-        index: Option<u32>,
+        index: u32,
     ) -> Result<ValueId, MirError> {
         if !self.field_object_ok(object) {
             return Err(MirError::msg(format!(
@@ -695,17 +690,12 @@ impl MirBuilder {
         if !ty.is_specialized() {
             return Err(MirError::msg(format!("HeapFieldStore value {ty}")));
         }
-        if let Some(n) = name
-            && self.resolve_ty(n) != MirTy::HeapRef {
-                return Err(MirError::msg("HeapFieldStore name"));
-            }
         let dest = self.alloc(ty);
         let value = self.resolve(value);
         self.push(MirInst::HeapFieldStore {
             dest,
             object: self.resolve(object),
             value,
-            name: name.map(|n| self.resolve(n)),
             index,
         })?;
         Ok(dest)

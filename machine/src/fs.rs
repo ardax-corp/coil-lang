@@ -11,7 +11,7 @@ use crate::io::{
     IoErrorTag, alloc_io_error, alloc_result_err, alloc_result_ok, as_result_unit,
     as_result_value, value_as_string,
 };
-use crate::memory::{Heap, Member, ObjArray, ObjInstance, Object};
+use crate::memory::{Heap, ObjArray, ObjInstance, Object};
 
 fn io_err(e: std::io::Error) -> IoErrorTag {
     IoErrorTag::from_kind(e.kind())
@@ -38,17 +38,8 @@ fn alloc_string_array(heap: &mut Heap, names: Vec<String>) -> Value {
     Value::from(obj.addr())
 }
 
-fn set_field_int(inst: &mut ObjInstance, heap: &mut Heap, name: &str, v: i64) {
-    let key = heap.intern(name.to_string());
-    inst.set(key, Member::Value(Value::from(v)));
-}
-
-fn set_field_bool(inst: &mut ObjInstance, heap: &mut Heap, name: &str, v: bool) {
-    let key = heap.intern(name.to_string());
-    inst.set(key, Member::Value(Value::from(v)));
-}
-
-/// Build a metadata record: `size`, `is_file`, `is_dir`, `is_symlink`, `modified_unix`.
+/// Build a metadata record: a slotted object, its fields sorted by name
+/// (`common::FS_METADATA_FIELDS`), as the compiler lays records out.
 fn alloc_metadata_record(heap: &mut Heap, meta: &Metadata) -> Value {
     let modified_unix = meta
         .modified()
@@ -57,13 +48,14 @@ fn alloc_metadata_record(heap: &mut Heap, meta: &Metadata) -> Value {
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
-    let (obj, mut gc) = heap.alloc(ObjInstance::default(), Object::Instance);
-    let inst = gc.as_mut();
-    set_field_int(inst, heap, "size", meta.len() as i64);
-    set_field_bool(inst, heap, "is_file", meta.is_file());
-    set_field_bool(inst, heap, "is_dir", meta.is_dir());
-    set_field_bool(inst, heap, "is_symlink", meta.file_type().is_symlink());
-    set_field_int(inst, heap, "modified_unix", modified_unix);
+    let slots = vec![
+        Value::from(meta.is_dir()),
+        Value::from(meta.is_file()),
+        Value::from(meta.file_type().is_symlink()),
+        Value::from(modified_unix),
+        Value::from(meta.len() as i64),
+    ];
+    let (obj, _) = heap.alloc(ObjInstance::with_slots(common::FS_METADATA_TYPE_ID, slots), Object::Instance);
     Value::from(obj.addr())
 }
 
