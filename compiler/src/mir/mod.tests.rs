@@ -4887,7 +4887,7 @@ fn unreachable_rebind_arms(n: usize) -> String {
         s = phi;
         prev = join;
     }
-    text.push_str("}");
+    text.push('}');
     text
 }
 
