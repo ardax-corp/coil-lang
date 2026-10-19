@@ -33,7 +33,7 @@ fn the_proof_sits_next_to_the_file() {
 }
 
 const SRC: &str = "fn clamp(int x) -> int ensures result >= 0 { if x < 0 { return 0; } return x; }
-fn last(Vec<int> v) -> int requires len(v) > 0 { return v[len(v) - 1]; }";
+fn last(Vec<int> v) -> int requires v.len() > 0 { return v[v.len() - 1]; }";
 
 /// The entry module's HIR, built with `proof` applied.
 fn build(proof: impl FnOnce(&[FnCheck]) -> Proof) -> crate::hir::HirModule {
@@ -70,7 +70,7 @@ fn in_bounds(module: &crate::hir::HirModule, name: &str) -> bool {
 fn a_build_drops_the_proved_checks_and_keeps_requires() {
     let module = build(|checks| Proof::from_outcomes(checks, |_, _| Outcome::Proved));
     assert!(texts(&module, "clamp").iter().all(|t| !t.contains("ensures")), "{:?}", texts(&module, "clamp"));
-    assert!(texts(&module, "last").iter().any(|t| t.contains("requires len(v) > 0")));
+    assert!(texts(&module, "last").iter().any(|t| t.contains("requires v.len() > 0")));
     assert!(in_bounds(&module, "last"));
 }
 

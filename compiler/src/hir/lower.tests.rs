@@ -99,14 +99,14 @@ fn counted_for_in_is_in_the_subset() {
 
 #[test]
 fn len_of_a_call_or_index_is_in_the_subset() {
-    let src = "fn g() -> Vec<int> { let v: Vec<int> = []; return v; } fn f() -> int { return len(g()); }";
+    let src = "fn g() -> Vec<int> { let v: Vec<int> = []; return v; } fn f() -> int { return g().len(); }";
     assert_eq!(refusal_of(src, "f"), None);
-    let src = "fn f(Vec<Vec<int>> xs) -> int { return len(xs[0]); }";
+    let src = "fn f(Vec<Vec<int>> xs) -> int { return xs[0].len(); }";
     assert_eq!(refusal_of(src, "f"), None);
     // A literal folds to its item count, as the AST's `eval_len_operand`.
-    let src = "fn f() -> int { return len([1, 2]); }";
+    let src = "fn f() -> int { return [1, 2].len(); }";
     assert_eq!(refusal_of(src, "f"), None);
-    let src = "fn f(string a) -> int { return len(a + \"x\"); }";
+    let src = "fn f(string a) -> int { return (a + \"x\").len(); }";
     assert_eq!(refusal_of(src, "f"), None);
 }
 
