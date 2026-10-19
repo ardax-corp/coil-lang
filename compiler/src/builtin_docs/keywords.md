@@ -662,17 +662,9 @@ fn main() {
 
 ## async
 
-The old spelling of `gen`: `async fn` declares a generator function.
-
-It is still accepted, and `coil fmt` rewrites it to `gen fn`. Coil has no
-`async` / `await`; concurrency uses the `task` module and threads.
-
-```coil
-gen fn numbers() {
-    yield 1;
-    yield 2;
-}
-```
+Removed. Generator functions are spelled `gen fn`; `async fn` is a parse
+error that names `gen fn`. Coil has no `async` / `await`; concurrency uses
+the `task` module and threads.
 
 ## yield
 

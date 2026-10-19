@@ -84,7 +84,7 @@ pub struct HirCallSite {
     pub pair_args: Vec<bool>,
     /// Whether the result is two words.
     pub pair_ret: bool,
-    /// A `gen fn` / `async fn` call: `MakeCoro`, its result the handle.
+    /// A `gen fn` call: `MakeCoro`, its result the handle.
     pub coro: bool,
     /// The result is a niche `Option` / `Result` the callee returns boxed.
     pub boxed_ret: bool,
@@ -2877,6 +2877,13 @@ impl Lower<'_> {
                 self.b.ins_heap_field_store(obj, v, None, Some(slot)).map_err(mir)?;
                 Ok(Val::Unit)
             }
+            // A record's `()` field: the record for its effects (#1510).
+            HirKind::Field { base, .. } if self.expr_ty(id).is_some_and(is_unit) && self.expr_ty(*base).is_some_and(is_record) => {
+                if !self.effect(*base)? {
+                    return Ok(Val::Never);
+                }
+                Ok(Val::Unit)
+            }
             // A record's field by key: the object, then the key, as HIR
             // emission's `GetField`.
             HirKind::Field { base, .. } if let Some(&(key, ty)) = self.inp.record_fields.get(&id.0) => {
@@ -2891,8 +2898,15 @@ impl Lower<'_> {
                     && let Some(&(key, ty)) = self.inp.record_fields.get(&place.0) =>
             {
                 // The value, the object, then the key, as `SetField`; a
-                // two-word value boxed.
-                let Some(v) = (if ty == MirTy::HeapRef { self.boxed_word(*value)? } else { self.word(*value)? }) else {
+                // two-word value boxed, a `()` the empty tuple object (#1510).
+                let v = if self.expr_ty(*value).is_some_and(is_unit) {
+                    self.word_or_boxed(*value)?
+                } else if ty == MirTy::HeapRef {
+                    self.boxed_word(*value)?
+                } else {
+                    self.word(*value)?
+                };
+                let Some(v) = v else {
                     return Ok(Val::Never);
                 };
                 if self.b.value_ty(v) != ty {
@@ -2910,6 +2924,16 @@ impl Lower<'_> {
                 let words = words.clone();
                 let mut elems = Vec::with_capacity(2 * args.len());
                 for (&arg, (key, ty)) in args.iter().zip(words) {
+                    // A `()` runs for its effect and is stored as the empty
+                    // tuple object (#1510).
+                    if self.expr_ty(arg).is_some_and(is_unit) {
+                        if !self.effect(arg)? {
+                            return Ok(Val::Never);
+                        }
+                        elems.push(self.unit_object()?);
+                        elems.push(self.b.ins_string(key).map_err(mir)?);
+                        continue;
+                    }
                     // A two-word value is stored boxed.
                     let Some(v) = (if ty == MirTy::HeapRef { self.boxed_word(arg)? } else { self.word(arg)? }) else {
                         return Ok(Val::Never);

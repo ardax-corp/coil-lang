@@ -4102,7 +4102,7 @@ fn is_valid_identifier(name: &str) -> bool {
 fn coil_keywords() -> &'static [&'static str] {
     &[
         "fn", "let", "const", "class", "enum", "type", "if", "else", "for", "while", "in",
-        "match", "return", "true", "false", "use", "mod", "pub", "static", "async", "defer",
+        "match", "return", "true", "false", "use", "mod", "pub", "static", "defer",
         "raise", "panic", "yield", "break", "continue", "where", "impl", "trait", "extern", "as",
         "readonly", "new", "default", "typeof", "resume", "with", "done", "attr", "struct",
         "test", "forall", "from",
@@ -5331,7 +5331,7 @@ fn main() { return; }
 
     #[test]
     fn semantic_tokens_mark_yield_from_keyword_but_not_bare_from() {
-        let with_yield = "async fn f() { yield from inner(); }\n";
+        let with_yield = "gen fn f() { yield from inner(); }\n";
         let bare = "fn main() { let x = from; return; }\n";
         let yield_tokens = semantic_tokens(with_yield, None, None);
         let bare_tokens = semantic_tokens(bare, None, None);

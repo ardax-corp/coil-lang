@@ -1345,6 +1345,14 @@ impl Compiler {
                 {
                     record_fields.insert(i as u32, (k, w));
                 }
+                // A `()` field holds the empty tuple object (#1510).
+                HirKind::Field { base, name }
+                    if let Some((FieldAt::Name, fty)) = self.hir_field(hir, *base, name)
+                        && crate::hir::layout::is_unit(&apply_ty_prune(checker.subst(), &fty))
+                        && let Some(k) = key(name) =>
+                {
+                    record_fields.insert(i as u32, (k, crate::mir::MirTy::HeapRef));
+                }
                 HirKind::Make {
                     kind: MakeKind::Record(names),
                     args,
@@ -1358,6 +1366,10 @@ impl Compiler {
                         .zip(args)
                         .map(|(n, &arg)| {
                             let (_, fty) = fields.iter().find(|(f, _)| f == n)?;
+                            // A `()` field holds the empty tuple object (#1510).
+                            if crate::hir::layout::is_unit(&apply_ty_prune(checker.subst(), fty)) {
+                                return Some((key(n)?, crate::mir::MirTy::HeapRef));
+                            }
                             let w = record_word(fty)?;
                             (Self::hir_ty(hir, arg).and_then(record_word) == Some(w)).then_some((key(n)?, w))
                         })
@@ -1383,6 +1395,10 @@ impl Compiler {
                             None => Some(None),
                             Some(k) => {
                                 let (_, fty) = fields.iter().find(|(f, _)| f == n)?;
+                                // A `()` binding has no slot (#1510).
+                                if crate::hir::layout::is_unit(&apply_ty_prune(checker.subst(), fty)) {
+                                    return Some(None);
+                                }
                                 Some(Some((*k, record_word(fty)?)))
                             }
                         })
@@ -4745,7 +4761,7 @@ impl Compiler {
         if self.checker.is_generic_fn(&lookup) && !open {
             return Err("callee-generic");
         }
-        // An `async fn` call is `MakeCoro`: its result is the handle word
+        // An `gen fn` call is `MakeCoro`: its result is the handle word
         // (from a shared body, of the shared coroutine).
         let coro = self.coroutine_fns.contains(&key) || self.coroutine_fns.contains(&lookup);
         if coro && !self.coroutine_fns.contains(&key) {
