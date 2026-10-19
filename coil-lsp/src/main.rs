@@ -5809,4 +5809,122 @@ fn main() {
         assert_eq!(help.signatures[0].label, "add(int a, int b) -> int");
         assert_eq!(help.active_parameter, Some(1));
     }
+
+    const TRAIT_QUALIFIED_SRC: &str = "\
+trait Area<T> {
+    /// Area of a shape.
+    fn size(T s) -> int {}
+}
+trait Volume<T> {
+    /// Volume of a shape.
+    fn size(T s) -> int {}
+}
+class Sq { pub w: int, }
+impl Area for Sq { pub fn size(Sq s) -> int { return s.w; } }
+impl Volume for Sq { pub fn size(Sq s) -> int { return s.w * 2; } }
+fn main() { let a = Area::size(new Sq(1)); }
+";
+
+    fn trait_project(tag: &str, src: &str) -> (PathBuf, ServerState, HashMap<String, Uri>) {
+        let dir = std::env::temp_dir().join(format!("coil-lsp-trait-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        write_hy_project(&dir, &[("main.hy", src)]);
+        let (state, uris) = open_state(&dir, &[("main.hy", None)]);
+        (dir, state, uris)
+    }
+
+    fn location_text(src: &str, location: &Location) -> (usize, String) {
+        let start = position_to_byte(src, location.range.start).unwrap();
+        let end = position_to_byte(src, location.range.end).unwrap();
+        (start, src[start..end].to_owned())
+    }
+
+    #[test]
+    fn goto_definition_on_trait_name_in_qualified_call() {
+        let src = TRAIT_QUALIFIED_SRC;
+        let (dir, state, uris) = trait_project("owner", src);
+        let offset = src.find("Area::size(").unwrap();
+        let locations = goto_definitions(&state, &uris["main.hy"], byte_position(src, offset));
+        assert_eq!(locations.len(), 1, "{locations:?}");
+        let (start, text) = location_text(src, &locations[0]);
+        assert_eq!(text, "Area");
+        assert_eq!(start, src.find("trait Area").unwrap() + "trait ".len());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn goto_definition_on_trait_qualified_method_picks_that_trait() {
+        let src = TRAIT_QUALIFIED_SRC;
+        let (dir, state, uris) = trait_project("member", src);
+        let offset = src.find("Area::size(").unwrap() + "Area::".len();
+        let locations = goto_definitions(&state, &uris["main.hy"], byte_position(src, offset));
+        assert!(!locations.is_empty(), "no definition for Area::size");
+        let starts: Vec<usize> = locations.iter().map(|l| location_text(src, l).0).collect();
+        let area_decl = src.find("fn size(T s)").unwrap() + "fn ".len();
+        let volume_decl = src.rfind("fn size(T s)").unwrap() + "fn ".len();
+        let area_impl = src.find("impl Area for Sq { pub fn size").unwrap() + "impl Area for Sq { pub fn ".len();
+        let volume_impl = src.find("impl Volume for Sq { pub fn size").unwrap() + "impl Volume for Sq { pub fn ".len();
+        assert_eq!(starts[0], area_decl, "first location is Area's `fn size`: {locations:?}");
+        assert!(!starts.contains(&volume_decl), "Volume::size must not be offered: {locations:?}");
+        assert!(!starts.contains(&volume_impl), "Volume's impl must not be offered: {locations:?}");
+        assert!(starts.contains(&area_impl), "the checker's Area instance for Sq is offered: {locations:?}");
+        for location in &locations {
+            assert_eq!(location_text(src, location).1, "size");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hover_on_trait_qualified_method_shows_that_traits_docs() {
+        let src = TRAIT_QUALIFIED_SRC;
+        let (dir, mut state, uris) = trait_project("hover", src);
+        let offset = src.find("Area::size(").unwrap() + "Area::".len();
+        let hover = project_hover(&mut state, &uris["main.hy"], byte_position(src, offset)).expect("hover");
+        let HoverContents::Markup(markup) = hover.contents else { panic!("markup hover") };
+        assert!(markup.value.contains("Area of a shape."), "{}", markup.value);
+        assert!(!markup.value.contains("Volume of a shape."), "{}", markup.value);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hover_on_trait_name_shows_trait_header() {
+        let src = "\
+/// Things with an area.
+trait Area<T> { fn size(T s) -> int {} }
+class Sq { pub w: int, }
+impl Area for Sq { pub fn size(Sq s) -> int { return s.w; } }
+fn main() { let a = Area::size(new Sq(1)); }
+";
+        let (dir, mut state, uris) = trait_project("hover-owner", src);
+        let offset = src.find("Area::size(").unwrap();
+        let hover = project_hover(&mut state, &uris["main.hy"], byte_position(src, offset)).expect("hover");
+        let HoverContents::Markup(markup) = hover.contents else { panic!("markup hover") };
+        assert!(markup.value.contains("trait Area"), "{}", markup.value);
+        assert!(markup.value.contains("Things with an area."), "{}", markup.value);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn goto_definition_on_method_call_reaches_trait_instance_method() {
+        let src = "\
+trait Area<T> { fn size(T s) -> int {} }
+class Sq { pub w: int, }
+impl Area for Sq { pub fn size(Sq s) -> int { return s.w; } }
+fn main() {
+    let q = new Sq(3);
+    let a = q.size();
+}
+";
+        let dir = std::env::temp_dir().join(format!("coil-lsp-trait-dot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        write_hy_project(&dir, &[("main.hy", src)]);
+        let (mut state, uris) = open_state(&dir, &[("main.hy", None)]);
+        let offset = src.find("q.size()").unwrap() + "q.".len();
+        let location = member_definition(&mut state, &uris["main.hy"], byte_position(src, offset))
+            .expect("definition of q.size");
+        let (start, text) = location_text(src, &location);
+        assert_eq!(text, "size");
+        assert_eq!(start, src.find("pub fn size").unwrap() + "pub fn ".len());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

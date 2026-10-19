@@ -645,4 +645,55 @@ fn main() {
             "expected reference sites from recursive + main call"
         );
     }
+
+    const TRAITS: &str = "\
+trait Area<T> { fn size(T s) -> int {} }
+trait Volume<T> { fn size(T s) -> int {} }
+class Sq { pub w: int, }
+impl Area for Sq { pub fn size(Sq s) -> int { return s.w; } }
+impl Volume for Sq { pub fn size(Sq s) -> int { return s.w * 2; } }
+fn main() { let a = Area::size(new Sq(1)); }
+";
+
+    #[test]
+    fn indexes_traits_and_their_methods_by_trait() {
+        let idx = index(TRAITS);
+        let area = idx.definitions("Area");
+        assert_eq!(area.len(), 1);
+        assert_eq!(area[0].kind, SymbolKind::Trait);
+        assert_eq!(&TRAITS[area[0].name_range.clone()], "Area");
+
+        let area_size = idx.definitions("Area::size");
+        let volume_size = idx.definitions("Volume::size");
+        assert_eq!(area_size.len(), 1, "{area_size:?}");
+        assert_eq!(volume_size.len(), 1, "{volume_size:?}");
+        assert_eq!(area_size[0].kind, SymbolKind::Method);
+        assert_eq!(&TRAITS[area_size[0].name_range.clone()], "size");
+        assert_eq!(area_size[0].name_range.start, TRAITS.find("fn size").unwrap() + 3);
+        assert_eq!(volume_size[0].name_range.start, TRAITS.rfind("fn size(T").unwrap() + 3);
+        assert!(
+            idx.definitions("size").is_empty(),
+            "trait methods are not bare-name definitions"
+        );
+    }
+
+    #[test]
+    fn qualified_call_records_owner_and_member_sites() {
+        let idx = index(TRAITS);
+        let call = TRAITS.find("Area::size(").unwrap();
+        let owner = idx.references("Area");
+        assert!(
+            owner.iter().any(|site| site.range == (call..call + 4) && site.path == Some(PathPart::Owner)),
+            "expected the `Area` owner site, got {owner:?}"
+        );
+        let member = idx.references("Area::size");
+        assert_eq!(member.len(), 1, "{member:?}");
+        assert_eq!(member[0].range, call + 6..call + 10);
+        assert_eq!(member[0].path, Some(PathPart::Member));
+        assert!(idx.references("Volume::size").is_empty());
+        assert!(
+            idx.references("size").iter().all(|site| site.range != member[0].range),
+            "the member is not a bare `size` reference"
+        );
+    }
 }
