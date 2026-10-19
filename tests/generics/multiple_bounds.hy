@@ -19,7 +19,7 @@ fn label_max<T: Show + Ord>(T a, T b) -> string {
     return format("%v", b);
 }
 
-fn count_eq<T>(Vec<T> xs, T x) -> int where Eq<T> {
+fn count_eq<T: Eq>(Vec<T> xs, T x) -> int {
     let n = 0;
     for v in xs {
         if v == x {

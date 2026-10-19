@@ -1163,6 +1163,9 @@ impl Compiler {
                         && crate::hir::layout::of_resolved(checker, &t) == crate::hir::layout::Layout::Word)
                         .then_some(crate::mir::MirTy::HeapRef)
                 })
+                // A foreign `ptr`: a raw address word, as a local holds it
+                // (#1507).
+                .or_else(|| (matches!(crate::typechecking::ty::strip_readonly(t), Ty::Con(n) if n == "ptr") && !is_class(t)).then_some(crate::mir::MirTy::I64))
         };
         // A scalar enum's backing word.
         let scalar_enum = move |t: &Ty| {
@@ -4214,9 +4217,11 @@ impl Compiler {
                 return self.hir_ground_direct(hir, call, inst.class.clone(), lookup, fqn.clone(), member);
             }
         }
-        // `len` may be structural.
+        // A structural `x.len()` (string, array, `Vec`, …) lowers as a length
+        // before it is a call, so a `len` here names a user `impl Length`
+        // and is looked up like any other method (#1504).
         let method = name.rsplit_once('.').map_or(name, |(_, m)| m);
-        if name.contains("::") || method == "len" {
+        if name.contains("::") {
             return Err("callee-trait");
         }
         let arg_tys = args
@@ -6302,6 +6307,14 @@ impl Compiler {
                 callee: Callee::Value(f),
                 args,
             } => {
+                // A closure a generic call returned: a mono clone's, not
+                // the shared body's (#1527; its boxed ABI, #1532).
+                if !lower::polyfn_callee(hir, &self.checker, *f)
+                    && let Some(init) = lower::generic_returned_closure(hir, &self.checker, *f)
+                    && !emit.plan.calls.get(&init.0).is_some_and(|call| call.mono)
+                {
+                    return Err("callee-value");
+                }
                 // A `PolyFn` call: no dictionary forwarded from a generic
                 // frame, and no type parameter nested in the callee's
                 // signature (its shared body would box `T` inside the

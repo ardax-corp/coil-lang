@@ -58,7 +58,7 @@ impl Measure for string {
     }
 }
 
-fn longer<T>(T a, T b) -> int where Measure<T> uses {}
+fn longer<T: Measure>(T a, T b) -> int uses {}
     requires true
 {
     let m = measure(a);

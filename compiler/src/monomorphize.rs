@@ -433,6 +433,10 @@ fn collect_candidates(
                 value: sig.alias,
             });
         }
+        // A call in callee position (`maker(4)()`, #1533) is a call too.
+        if !matches!(name.1.as_ref(), Expression::Identifier(_)) {
+            collect_candidates(name, checker, ty_of, sigs, intern, out);
+        }
         if let Some(args) = args {
             for arg in args {
                 collect_candidates(arg, checker, ty_of, sigs, intern, out);
