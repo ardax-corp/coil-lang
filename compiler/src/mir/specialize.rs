@@ -216,10 +216,7 @@ fn specialize_side(
         return refuse_dense("call ABI");
     }
     let mut func = from_hir.clone();
-    // HIR CSE refuses DIVF; number it on SSA before dense emit.
-    crate::mir::cse(&mut func);
-    crate::mir::licm(&mut func);
-    crate::mir::cse(&mut func);
+    loop_opts(&mut func, true);
     crate::mir::instcombine(&mut func);
     crate::mir::destprop(&mut func);
     crate::mir::strength_reduce(&mut func);
@@ -499,12 +496,28 @@ pub fn try_lower_abi_body_side(
         return refuse(format!("lir wall {wall:?}"));
     }
     let mut func = direct.clone();
+    // A debugger reads the locals where the source keeps them, and a
+    // coroutine's frame lives across its yields: both keep their code.
+    let yields = func.blocks.iter().flat_map(|b| &b.insts).any(|i| matches!(i, crate::mir::MirInst::Yield { .. }));
+    if !func.debug_keep && !yields {
+        loop_opts(&mut func, false);
+    }
     if has_alloc {
         crate::mir::sroa(&mut func);
-    } else {
-        crate::mir::cse(&mut func);
     }
     lir_tail(labels, name, pool, has_alloc, func, side)
+}
+
+/// The scalar passes both tiers run first: local CSE, trivial-φ copy
+/// forwarding (a loop-carried copy of an invariant reads as invariant),
+/// loop-invariant code motion, then CSE again over what moved together.
+/// `dense`: the body emits dense ([`crate::mir::licm`]).
+fn loop_opts(func: &mut crate::mir::MirFunc, dense: bool) {
+    let cse = if dense { crate::mir::cse } else { crate::mir::cse_lir };
+    cse(func);
+    crate::mir::destprop(func);
+    crate::mir::licm(func, dense);
+    cse(func);
 }
 
 /// A body's LIR, lowered once from its MIR by [`fuse_fallback`] and kept

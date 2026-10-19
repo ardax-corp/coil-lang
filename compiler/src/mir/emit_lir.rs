@@ -632,15 +632,31 @@ fn keep_memory_order(func: &MirFunc, tree: &mut [bool], fused: &[bool]) {
                 tree[v.index()] = false;
                 continue;
             }
-            let mem: Vec<usize> = order.into_iter().filter(|&k| reads_memory(&insts[k]) || writes_memory(&insts[k])).collect();
+            // An op that can trap counts as a read: a write it is delayed
+            // past would run before the panic (#856).
+            let mem: Vec<usize> = order
+                .into_iter()
+                .filter(|&k| reads_memory(&insts[k]) || writes_memory(&insts[k]) || insts[k].may_trap(func))
+                .collect();
             // A later-defined op emitted first means an earlier one was
             // delayed past it.
-            let late = mem.iter().enumerate().find_map(|(i, &a)| {
-                mem[i + 1..]
-                    .iter()
-                    .find(|&&b| b < a && (writes_memory(&insts[a]) || writes_memory(&insts[b])))
-                    .map(|&b| insts[b].dest())
-            });
+            // The first `a` with such a `b` after it, found from suffix
+            // minima so a long block stays linear.
+            let writes: Vec<bool> = mem.iter().map(|&k| writes_memory(&insts[k])).collect();
+            let mut min_any = vec![usize::MAX; mem.len() + 1];
+            let mut min_write = vec![usize::MAX; mem.len() + 1];
+            for i in (0..mem.len()).rev() {
+                min_any[i] = min_any[i + 1].min(mem[i]);
+                min_write[i] = if writes[i] { min_write[i + 1].min(mem[i]) } else { min_write[i + 1] };
+            }
+            let late = (0..mem.len())
+                .find(|&i| min_write[i + 1] < mem[i] || (writes[i] && min_any[i + 1] < mem[i]))
+                .and_then(|i| {
+                    let a = mem[i];
+                    (i + 1..mem.len())
+                        .find(|&j| mem[j] < a && (writes[i] || writes[j]))
+                        .map(|j| insts[mem[j]].dest())
+                });
             match late {
                 Some(v) if tree[v.index()] => tree[v.index()] = false,
                 _ => break,

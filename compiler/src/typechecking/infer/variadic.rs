@@ -312,10 +312,11 @@ impl Checker {
     fn missing_variadic_copy(&mut self, ident: &str, pack: &Ty, range: Range<usize>) -> Ty {
         let message = if self.variadic.exhausted {
             format!(
-                "`{ident}` is called with too many different argument lists (no copy made for `{pack}`)"
+                "`{ident}` is called with too many different argument lists (no copy made for `{}`)",
+                self.diag_ty(pack)
             )
         } else {
-            format!("no copy of `{ident}` for `{pack}` yet")
+            format!("no copy of `{ident}` for `{}` yet", self.diag_ty(pack))
         };
         self.error_with_help(
             ErrorCode::GenericTypeError,

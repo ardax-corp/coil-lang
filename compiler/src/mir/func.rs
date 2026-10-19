@@ -92,6 +92,15 @@ pub struct MirFunc {
     /// Callees a call of this body may reach as a `TailCall` (planned tail
     /// calls of a `return`): a call to one whose result the block returns.
     pub tail_targets: HashSet<crate::il::Label>,
+    /// Calls of a pure function returning one scalar word: CSE and LICM
+    /// may treat them as operators that can trap.
+    pub pure_calls: HashSet<ValueId>,
+    /// Calls of a function that never resizes an array (it may write
+    /// elements and fields).
+    pub steady_calls: HashSet<ValueId>,
+    /// No code that runs at an allocation (a finalizer) resizes an array:
+    /// an allocation leaves every length as it was.
+    pub lengths_steady: bool,
 }
 
 impl MirFunc {
@@ -155,6 +164,9 @@ impl MirFunc {
             home_base: None,
             cleanup: None,
             tail_targets: HashSet::new(),
+            pure_calls: HashSet::new(),
+            steady_calls: HashSet::new(),
+            lengths_steady: true,
         }
     }
 
@@ -235,6 +247,44 @@ impl MirFunc {
         self.blocks
             .iter()
             .any(|b| b.insts.iter().any(MirInst::is_deopt_edge))
+    }
+
+    /// Lay the blocks out in `layout` order, numbered as they come; a
+    /// block not listed is dropped, with the φ incomings from it.
+    pub fn relayout(&mut self, layout: &[BlockId]) {
+        let mut new_id = vec![None; self.blocks.len()];
+        for (i, b) in layout.iter().enumerate() {
+            new_id[b.index()] = Some(BlockId(i as u32));
+        }
+        let map = |b: BlockId| new_id[b.index()].expect("block in the layout");
+        let mut old: Vec<Option<MirBlock>> = std::mem::take(&mut self.blocks).into_iter().map(Some).collect();
+        for &b in layout {
+            let mut block = old[b.index()].take().expect("each block once");
+            block.id = map(b);
+            for inst in &mut block.insts {
+                if let MirInst::Phi { args, .. } = inst {
+                    args.retain(|(from, _)| new_id[from.index()].is_some());
+                    for (from, _) in args.iter_mut() {
+                        *from = map(*from);
+                    }
+                    args.sort_by_key(|(from, _)| *from);
+                }
+            }
+            match &mut block.term {
+                Some(Terminator::Jump { dest }) => *dest = map(*dest),
+                Some(Terminator::Br { taken, not_taken, .. } | Terminator::JumpIfMatch { taken, not_taken, .. }) => {
+                    *taken = map(*taken);
+                    *not_taken = map(*not_taken);
+                }
+                _ => {}
+            }
+            self.blocks.push(block);
+        }
+        self.entry = map(self.entry);
+        self.term_locs = std::mem::take(&mut self.term_locs)
+            .into_iter()
+            .filter_map(|(b, loc)| Some((new_id.get(b.index()).copied().flatten()?, loc)))
+            .collect();
     }
 
     pub fn block(&self, id: BlockId) -> &MirBlock {
