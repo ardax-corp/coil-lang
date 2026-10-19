@@ -2921,11 +2921,12 @@ pub struct ObjFn {
 }
 
 impl ObjFn {
-    /// Generic function value at `entry` with captured evidence `dicts`.
-    pub fn poly(entry: u32, dicts: Vec<Option<Member>>) -> Self {
+    /// Generic function value at `entry` declaring `arity` parameters (0:
+    /// unrecorded) with captured evidence `dicts`.
+    pub fn poly(entry: u32, arity: u32, dicts: Vec<Option<Member>>) -> Self {
         Self {
             entry,
-            arity: 0,
+            arity,
             is_rest: false,
             filled_mask: 0,
             captured_args: Vec::new(),

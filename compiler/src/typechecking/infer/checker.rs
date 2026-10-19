@@ -4061,7 +4061,17 @@ impl Checker {
     fn infer_access_expr(&mut self, receiver: &Output, field: &str, range: Range<usize>) -> Ty {
         let receiver_ty = self.infer(receiver);
         let resolved = apply_ty_prune(&self.subst, &receiver_ty);
-        match strip_readonly(&resolved) {
+        let ty = self.access_field_of(&resolved, field, range);
+        // A field read through a `readonly` value is `readonly` too (#1552).
+        if matches!(resolved, Ty::Readonly(_)) {
+            self.readonly_view(ty)
+        } else {
+            ty
+        }
+    }
+
+    fn access_field_of(&mut self, resolved: &Ty, field: &str, range: Range<usize>) -> Ty {
+        match strip_readonly(resolved) {
             Ty::Sum { name, variants } => {
                 self.access_field_in_sum(name, variants, None, field, range)
             }
@@ -4287,7 +4297,9 @@ impl Checker {
         }
         let resolved = apply_ty_prune(&self.subst, &target_ty);
         // Reads see through `readonly` (#1073); `xs[i] = …` is rejected on
-        // the store path.
+        // the store path. An element read through it is `readonly` too
+        // (#1552).
+        let readonly = matches!(resolved, Ty::Readonly(_));
         let resolved = crate::typechecking::ty::strip_readonly(&resolved).clone();
         // Peel `Matrix<Data>` so `m[i][j]` indexes the nested rows.
         let resolved =
@@ -4315,10 +4327,12 @@ impl Checker {
                         )),
                     );
                 }
-                (**element).clone()
+                let element = (**element).clone();
+                if readonly { self.readonly_view(element) } else { element }
             }
             other if vec_element_ty(other).is_some() => {
-                vec_element_ty(other).expect("checked").clone()
+                let element = vec_element_ty(other).expect("checked").clone();
+                if readonly { self.readonly_view(element) } else { element }
             }
             Ty::Tuple(tys) => {
                 // Tuple index: constant OOB diagnostic; dynamic OOB → fresh ty (runtime -1).
@@ -4795,7 +4809,7 @@ impl Checker {
                         .expect("method present")
                 };
                 let (fun_ty, constraints, _mapping) = self.instantiate_scheme_mapped(&scheme);
-                let mut arg_tys = vec![recv_ty];
+                let mut arg_tys = vec![self.method_self_arg(&recv_ty)];
                 // Named arguments match the picked overload's parameters.
                 let (tys, ordered_exprs) = match &candidate {
                     Some(c) => self.infer_and_reorder_call_args_with_candidate(&fqn, c, method_args, &range),
@@ -4870,7 +4884,7 @@ impl Checker {
             {
                 self.bind_matching_abstract_constraints(Some(receiver_var), &dict_class);
                 let (fun_ty, constraints, mapping) = self.instantiate_scheme_mapped(&scheme);
-                let mut arg_tys = vec![recv_ty];
+                let mut arg_tys = vec![self.method_self_arg(&recv_ty)];
                 if let Some(a) = args {
                     for arg in a {
                         arg_tys.push(self.infer(arg));
@@ -5016,7 +5030,7 @@ impl Checker {
             };
             let _ = selected;
             let (fun_ty, constraints, _mapping) = self.instantiate_scheme_mapped(&scheme);
-            let mut arg_tys = vec![recv_ty];
+            let mut arg_tys = vec![self.method_self_arg(&recv_ty)];
             let mut arg_exprs = Vec::with_capacity(1 + method_args.len());
             arg_exprs.push(recv.clone());
             if self.fn_has_rest(&fqn) {
@@ -5048,7 +5062,7 @@ impl Checker {
         // `current_expected` when present (`let y: T = x.into()`).
         if let Some((class, scheme)) = self.ground_trait_method_for_receiver(method, &recv_ty) {
             let (fun_ty, constraints, mapping) = self.instantiate_scheme_mapped(&scheme);
-            let mut arg_tys = vec![recv_ty];
+            let mut arg_tys = vec![self.method_self_arg(&recv_ty)];
             if let Some(a) = args {
                 for arg in a {
                     arg_tys.push(self.infer(arg));
@@ -7430,7 +7444,9 @@ impl Checker {
                         Some("const fields are immutable after construction".to_string()),
                     );
                 }
-                match &resolved {
+                // A write through `readonly` was reported above; type the
+                // field all the same.
+                match strip_readonly(&resolved) {
                     Ty::Record { fields } => match fields.iter().find(|(n, _)| n == field) {
                         Some((_, fty)) => fty.clone(),
                         None => {
@@ -8988,6 +9004,18 @@ impl Checker {
     ) -> Ty {
         let expected = apply_ty_prune(&self.subst, expected);
         let actual = apply_ty_prune(&self.subst, actual);
+        if self.drops_readonly(&expected, &actual) {
+            let _ = self.error_with_help(
+                ErrorCode::InvalidAssignment,
+                format!(
+                    "Cannot use a `{}` where `{}` is expected ({context})",
+                    self.diag_ty(&actual),
+                    self.diag_ty(&expected)
+                ),
+                range.clone(),
+                Some("a `readonly` value converts only to a `readonly` type, so it cannot be mutated through the new name; keep and pass the mutable value instead".to_string()),
+            );
+        }
         // Integer literals may coerce to `byte` when in range 0..=255.
         if Self::is_byte_ty(&expected)
             && Self::is_int_ty(&actual)
@@ -18636,6 +18664,57 @@ impl Checker {
         }
     }
 
+    /// Whether a value of `ty` has state a write could change: a class,
+    /// `Vec`, array or record. Scalars, strings, tuples and enums do not
+    /// need `readonly` (#1552).
+    fn has_mutable_interior(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::Array { .. } | Ty::Record { .. } => true,
+            Ty::Con(name) => self.classes.contains_key(name),
+            Ty::App(head, _) => {
+                vec_element_ty(ty).is_some()
+                    || matches!(head.as_ref(), Ty::Con(name) if self.classes.contains_key(name))
+            }
+            _ => false,
+        }
+    }
+
+    /// `ty` read through a `readonly` value (a field, an element, a loop
+    /// variable): `readonly` too when it has a mutable interior, so the
+    /// seal is deep (#1552).
+    fn readonly_view(&self, ty: Ty) -> Ty {
+        let ty = apply_ty_prune(&self.subst, &ty);
+        if self.has_mutable_interior(&ty) { readonly_ty(ty) } else { ty }
+    }
+
+    /// Whether using `actual` where `expected` is wanted would drop a
+    /// `readonly`: `readonly P` as a plain `P`, or `Vec<readonly P>` as
+    /// `Vec<P>` (#1552). `T` converts to `readonly T`, never back.
+    fn drops_readonly(&self, expected: &Ty, actual: &Ty) -> bool {
+        match (expected, actual) {
+            (Ty::Readonly(_) | Ty::Var(_), _) => false,
+            (_, Ty::Readonly(_)) => self.has_mutable_interior(expected),
+            (Ty::App(_, exp), Ty::App(_, act)) | (Ty::Tuple(exp), Ty::Tuple(act)) => {
+                exp.len() == act.len() && exp.iter().zip(act).any(|(e, a)| self.drops_readonly(e, a))
+            }
+            (Ty::Array { element: exp, .. }, Ty::Array { element: act, .. }) => self.drops_readonly(exp, act),
+            (Ty::Record { fields: exp }, Ty::Record { fields: act }) => exp.iter().any(|(name, e)| {
+                act.iter()
+                    .find(|(n, _)| n == name)
+                    .is_some_and(|(_, a)| self.drops_readonly(e, a))
+            }),
+            _ => false,
+        }
+    }
+
+    /// The receiver as a method's `self` argument. A method may still
+    /// mutate a `readonly` receiver through `self` until calls are checked
+    /// against a per-parameter mutation summary (#1558), so `self` takes the
+    /// value without its `readonly`.
+    fn method_self_arg(&self, recv_ty: &Ty) -> Ty {
+        strip_readonly(&apply_ty_prune(&self.subst, recv_ty)).clone()
+    }
+
     fn check_readonly_external_mutation(&mut self, receiver_ty: &Ty, range: Range<usize>) {
         let pruned = apply_ty_prune(&self.subst, receiver_ty);
         if matches!(pruned, Ty::Readonly(_)) {
@@ -18832,8 +18911,12 @@ impl Checker {
     /// to trait instance lookup). Emits diagnostics for hetero tuple/dict.
     fn builtin_for_in_kind(&mut self, te: &Ty, range: &Range<usize>) -> Option<(Ty, ForInKind)> {
         match te {
-            // Iterating only reads, so it sees through `readonly` (#1073).
-            Ty::Readonly(inner) => self.builtin_for_in_kind(inner, range),
+            // Iterating only reads, so it sees through `readonly` (#1073);
+            // the loop variable is `readonly` too (#1552).
+            Ty::Readonly(inner) => {
+                let (item, kind) = self.builtin_for_in_kind(inner, range)?;
+                Some((self.readonly_view(item), kind))
+            }
             Ty::Array { element, .. } => Some((element.as_ref().clone(), ForInKind::Array)),
             other if vec_element_ty(other).is_some() => {
                 Some((vec_element_ty(other)?.clone(), ForInKind::Array))

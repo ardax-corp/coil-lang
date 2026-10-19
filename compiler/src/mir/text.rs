@@ -270,7 +270,14 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
                         write!(f, ", mask {mask}")?;
                     }
                 }
-                MirAllocKind::PolyFn { target } | MirAllocKind::PolyFnCapture { target } => write!(f, " {}", target.0)?,
+                MirAllocKind::PolyFn { target } => write!(f, " {}", target.0)?,
+                MirAllocKind::PolyFnCapture { target, params } => {
+                    write!(f, " {}", target.0)?;
+                    // Its declared parameter count (none: unrecorded).
+                    if params != 0 {
+                        write!(f, ", params {params}")?;
+                    }
+                }
                 MirAllocKind::Array | MirAllocKind::Tuple => {}
             }
             for (i, e) in elems.iter().enumerate() {
@@ -837,9 +844,11 @@ impl<'a> Parser<'a> {
                 "polyfn" => MirAllocKind::PolyFn {
                     target: crate::il::Label(self.uint()? as u32),
                 },
-                "polyfncap" => MirAllocKind::PolyFnCapture {
-                    target: crate::il::Label(self.uint()? as u32),
-                },
+                "polyfncap" => {
+                    let target = crate::il::Label(self.uint()? as u32);
+                    let params = if self.eat_str(", params ") { self.uint()? as u32 } else { 0 };
+                    MirAllocKind::PolyFnCapture { target, params }
+                }
                 _ => return Err(ParseError(format!("unknown alloc {kind_s}"))),
             };
             let mut elems = Vec::new();
@@ -1306,7 +1315,7 @@ bb3:
         let dict = b.ins_gc_barrier(MirGcKind::Safepoint, vec![dict]).unwrap();
         // A constrained generic's value over its dictionary, called with
         // the call site's.
-        let poly = b.ins_alloc(MirAllocKind::PolyFnCapture { target: crate::il::Label(12) }, vec![dict]).unwrap();
+        let poly = b.ins_alloc(MirAllocKind::PolyFnCapture { target: crate::il::Label(12), params: 0 }, vec![dict]).unwrap();
         let poly = b.ins_gc_barrier(MirGcKind::Safepoint, vec![poly]).unwrap();
         let _ = b.ins_call_indirect_dicts(poly, vec![x, dict], 1, MirTy::I64).unwrap();
         let y = b.ins_call_indirect(f, vec![x], MirTy::I64).unwrap();

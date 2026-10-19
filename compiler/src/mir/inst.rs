@@ -615,9 +615,12 @@ pub enum MirAllocKind {
     },
     /// `MakePolyFnCapture`: a generic function's value carrying its
     /// instance dictionaries, the elems (a `0` word for evidence the call
-    /// fills in); `CodePtr` of `target` is pushed after them.
+    /// fills in); `CodePtr` of `target` is pushed after them. `params` is
+    /// its declared parameter count (0: unrecorded), so a call given more
+    /// hands the rest to its result (#1589).
     PolyFnCapture {
         target: crate::il::Label,
+        params: u32,
     },
 }
 
