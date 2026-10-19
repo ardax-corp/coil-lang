@@ -6739,7 +6739,10 @@ impl Compiler {
         if !Self::ty_has_var(&at) {
             return self.hir_class_ty_args_at(ty, fty);
         }
-        self.checker.ty_is_class(&at).then_some(at)
+        // An `Option` / `Result` open in a type variable is a boxed enum
+        // object (`new Box(Option::Some(new Box(e)))`).
+        let open_enum = crate::typechecking::ty::is_option_ty(&at) || crate::typechecking::ty::is_result_ty(&at);
+        (open_enum || self.checker.ty_is_class(&at)).then_some(at)
     }
 
     /// `new C(..)`'s class, instance field count and declared field types,

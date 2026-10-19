@@ -365,6 +365,10 @@ pub fn unify_with(subst: &Subst, t1: &Ty, t2: &Ty) -> Result<Subst, UnifyError> 
         (Ty::Never, Ty::Never) => Ok(subst.clone()),
         (Ty::Never, _) | (_, Ty::Never) => Ok(subst.clone()),
 
+        // Two variables: bind the newer one, so an older variable (a
+        // declared type parameter) stays its class's representative and a
+        // scheme quantified over it still names it.
+        (Ty::Var(a), Ty::Var(b)) if a.0 < b.0 => bind_var(subst, b, Ty::Var(a)),
         // Type variable on either side: bind, with occurs check.
         (Ty::Var(v), t) => bind_var(subst, v, t),
         (t, Ty::Var(v)) => bind_var(subst, v, t),

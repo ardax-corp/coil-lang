@@ -16839,28 +16839,6 @@ impl Checker {
         enum_name: &str,
         variant_name: &str,
     ) -> (EnumVariantPayloadTy, Ty) {
-        if common::is_builtin_option_enum(enum_name) {
-            let t = Ty::Var(self.counter.fresh());
-            let owner = option_ty(t.clone());
-            let payload = if variant_name == "Some" {
-                EnumVariantPayloadTy::Tuple(vec![t])
-            } else {
-                EnumVariantPayloadTy::Unit
-            };
-            return (payload, owner);
-        }
-        if common::is_builtin_result_enum(enum_name) {
-            let t = Ty::Var(self.counter.fresh());
-            let e = Ty::Var(self.counter.fresh());
-            let owner = result_ty(t.clone(), e.clone());
-            let payload = if variant_name == "Ok" {
-                EnumVariantPayloadTy::Tuple(vec![t])
-            } else {
-                EnumVariantPayloadTy::Tuple(vec![e])
-            };
-            return (payload, owner);
-        }
-
         // User generic enum: freshen schema payloads (`Con(param)`).
         let params = self
             .generics
@@ -16938,12 +16916,6 @@ impl Checker {
 
     /// Build `Enum<α, …>` with a fresh type variable per type param.
     fn fresh_poly_app_ty(&mut self, enum_name: &str) -> Ty {
-        if common::is_builtin_option_enum(enum_name) {
-            return option_app_ty(Ty::Var(self.counter.fresh()));
-        }
-        if common::is_builtin_result_enum(enum_name) {
-            return result_app_ty(Ty::Var(self.counter.fresh()), Ty::Var(self.counter.fresh()));
-        }
         let params = self
             .generics
             .generic_type_ctors
