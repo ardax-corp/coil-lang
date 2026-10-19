@@ -2792,10 +2792,13 @@ impl Walk<'_> {
                 // unboxed class local); an escaping one is an object from the
                 // start, unless its fields are written first: the AST stores
                 // those into slots and builds the object once, at the escape
-                // ([`class_boxes`]).
+                // ([`class_boxes`]). A reassigned one is an object from the
+                // start: after `q = p` its field writes must reach `p`'s
+                // object (#1556).
                 if sroa_class(body, self.checker, *init).is_some()
                     && !only_field_base(body, *local)
                     && writes_field_of(body, *local)
+                    && !reassigned(body, *local)
                     && !self.class_boxed.contains(&local.0)
                 {
                     return Err("class-escape");
