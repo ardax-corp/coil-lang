@@ -937,6 +937,15 @@ impl Pipeline {
                 {
                     self.record_module_dep(parent_file, &file);
                     self.enqueue_file(file);
+                } else if let Some(help) = crate::typechecking::VirtualModules::removed_item(path, name) {
+                    let mut msg = Message::error(
+                        ErrorCode::UnknownFunction,
+                        format!("`{}` was removed", Self::format_use_path(path, name)),
+                        use_range,
+                    );
+                    msg.with_help(help.to_string());
+                    self.emit_message(parent_file, parent_src, &msg);
+                    self.failed = true;
                 } else {
                     self.emit_module_not_found(
                         parent_file,
