@@ -334,7 +334,8 @@ pub struct ArchivedProgram {
     pub struct_layouts: Vec<CStructLayout>,
     /// Compiler-analyzed operand-stack capacity (minor 13+).
     pub operand_stack_slots: u32,
-    /// S2b slot / frame maps (minor 14+). Empty means conservative stack GC.
+    /// S2b slot / frame maps (minor 14+). The compiler now writes none (its
+    /// precise frame maps cover every body); older archives' still load.
     pub stack_maps: Vec<crate::stack_map::FrameStackMap>,
     /// Complete frame maps (minor 21+); frames without one are scanned.
     pub precise_frames: Vec<crate::stack_map::PreciseFrameMap>,

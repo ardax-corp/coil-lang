@@ -31,8 +31,6 @@ pub struct Lowered {
     pub code_len: usize,
     /// Post-opt, pre-fuse ops when captured for the cursor_model gate.
     pub pre_fuse_ops: Option<Vec<IlOp>>,
-    /// S2b drafts (name + per-alloc slots) before PC bind.
-    pub stack_map_drafts: Vec<crate::mir::DraftFrameMap>,
     /// Payload arity of each `JumpIfMatch`, by PC (bytecode encodes only the tag).
     pub match_arities: HashMap<u32, u32>,
     pub deopt_map_drafts: Vec<crate::mir::DraftDeoptMap>,
@@ -175,7 +173,6 @@ pub(crate) fn lower_module_inner(
     let mut lowered = try_lower_optimized(&flat, pool)?;
     lowered.label_remap = label_remap;
     lowered.func_label_maps = func_label_maps;
-    lowered.stack_map_drafts = std::mem::take(&mut module.stack_map_drafts);
     lowered.deopt_map_drafts = std::mem::take(&mut module.deopt_map_drafts);
     lowered.needs_frame_extent = std::mem::take(&mut module.needs_frame_extent);
     lowered.debug_slot_remaps = std::mem::take(&mut module.debug_slot_remaps);
@@ -241,7 +238,6 @@ fn try_lower_optimized(ops: &[IlOp], pool: &mut Vec<u64>) -> Result<Lowered, IlE
         label_remap: HashMap::new(),
         func_label_maps: Vec::new(),
         pre_fuse_ops: None,
-        stack_map_drafts: Vec::new(),
         match_arities,
         deopt_map_drafts: Vec::new(),
         needs_frame_extent: Default::default(),

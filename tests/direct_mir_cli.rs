@@ -96,9 +96,9 @@ fn mir_direct_positive_tests_lower_every_body() {
             .expect("coil compile --opt-stats");
         let text = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
         assert!(out.status.success(), "{}: compile failed: {text}", file.display());
-        // `    name: tier (dense: …; lir: …; hir: …; map: …)`, one per body.
+        // `    name: tier (dense: …; lir: …; hir: …)`, one per body.
         for line in text.lines().filter(|l| l.starts_with("    ") && l.contains("; hir: ")) {
-            if !line.contains("; hir: lowered;") || line.contains(": fuse (") {
+            if !line.contains("; hir: lowered)") || line.contains(": fuse (") {
                 refused.push(format!("{}: {}", file.display(), line.trim()));
             }
         }

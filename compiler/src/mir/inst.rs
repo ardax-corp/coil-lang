@@ -454,7 +454,7 @@ pub enum MirInst {
     /// Heap allocation (I5). Dest is [`MirTy::HeapRef`]. Always a GC
     /// safepoint; pair with [`Self::GcBarrier`]. S2a records live heap
     /// words on the barrier and [`crate::mir::func::MirFunc::gc_roots`].
-    /// S2c may emit across this edge when S2b maps exist.
+    /// S2c may emit across this edge when every allocation has its barrier.
     Alloc {
         dest: ValueId,
         kind: MirAllocKind,

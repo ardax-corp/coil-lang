@@ -38,11 +38,9 @@ pub struct IlModule {
     /// CALL/CodePtr rewrite to `IlOp::Entry` happens at emit time on `CodeBuf`;
     /// this map is retained for diagnostics and future module-level remapping.
     pub entry_at_offset: HashMap<usize, Label>,
-    /// S2b drafts filled during [`Self::optimize_and_flatten`].
-    pub stack_map_drafts: Vec<crate::mir::DraftFrameMap>,
     /// I7 / C3 deopt resume drafts (compiler-internal; not archived).
     pub deopt_map_drafts: Vec<crate::mir::DraftDeoptMap>,
-    /// Dense bodies whose frames need a decoded extent (no S2b maps).
+    /// Allocating dense bodies, whose frames need a decoded extent.
     pub needs_frame_extent: HashSet<String>,
     /// Original IL slot → reconstruct slot after dense / LIR (named lets).
     pub debug_slot_remaps: HashMap<String, HashMap<u32, u32>>,
@@ -64,7 +62,6 @@ impl IlModule {
                 glue: Vec::new(),
                 epilogue: Vec::new(),
                 entry_at_offset: HashMap::new(),
-                stack_map_drafts: Vec::new(),
                 deopt_map_drafts: Vec::new(),
                 needs_frame_extent: HashSet::new(),
                 debug_slot_remaps: HashMap::new(),
@@ -306,7 +303,6 @@ impl IlModule {
 
         // Leaf-first: a caller may take dense once every callee it CALLs is dense.
         // Every other body takes LIR from its MIR (lowered from HIR).
-        self.stack_map_drafts.clear();
         self.needs_frame_extent.clear();
         let mut dense_calls = crate::mir::DenseCallMap::new();
         // Pinned (`defer`) bodies try LIR below, with their cleanup pad.
@@ -318,8 +314,6 @@ impl IlModule {
         let mut tier: Vec<&'static str> = vec!["fuse"; self.funcs.len()];
         let mut side_remaps = HashMap::<String, HashMap<u32, u32>>::new();
         let mut side_deopts = Vec::new();
-        // Maps of dense and LIR bodies, built from their MIR.
-        let mut mir_maps = HashMap::<String, crate::mir::DraftFrameMap>::new();
         // Every body takes its stack IL from its MIR, so its tier gates
         // read that MIR and the LIR emitted from it (N1b): of
         // emit_hir's stack IL only the labels it binds.
@@ -356,9 +350,6 @@ impl IlModule {
                     }
                     if side.needs_frame_extent {
                         self.needs_frame_extent.insert(body.meta.name.clone());
-                    }
-                    if let Some(map) = side.stack_map {
-                        mir_maps.insert(body.meta.name.clone(), map);
                     }
                     if let Some(crate::il::Label(id)) = body.meta.entry {
                         dense_calls.insert(id, abi.clone());
@@ -418,9 +409,6 @@ impl IlModule {
                     if let Some(deopt) = side.deopt {
                         side_deopts.push(deopt);
                     }
-                    if let Some(map) = side.stack_map {
-                        mir_maps.insert(body.meta.name.clone(), map);
-                    }
                     body.ops = lir;
                     tier[i] = "lir";
                     lir_kept += 1;
@@ -462,14 +450,6 @@ impl IlModule {
                 fell_back.join(", ")
             );
         }
-        // Dense and LIR bodies carry GC maps built from their MIR.
-        let mut map_from: Vec<&'static str> = vec!["-"; self.funcs.len()];
-        for (i, body) in self.funcs.iter().enumerate() {
-            if let Some(draft) = mir_maps.remove(&body.meta.name) {
-                self.stack_map_drafts.push(draft);
-                map_from[i] = "mir";
-            }
-        }
 
         if opts.collect_stats {
             // A pinned body LIR took counts in `lir_kept`, not `pinned`.
@@ -484,7 +464,6 @@ impl IlModule {
                         Some(_) => Some("lowered".to_string()),
                         None => body.meta.hir_mir_why.clone(),
                     },
-                    map: (map_from[i] != "-").then(|| map_from[i].to_string()),
                 });
             }
         }

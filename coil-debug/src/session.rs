@@ -298,7 +298,7 @@ impl DebugSession {
             static_slot_count: pipeline.static_slot_count(),
             debug: pipeline.program_debug(),
             operand_stack_slots: pipeline.operand_stack_slots(),
-            stack_maps: pipeline.stack_maps().to_vec(),
+            stack_maps: Vec::new(),
             precise_frames: pipeline.precise_frames().to_vec(),
             class_word_kinds: pipeline.class_word_kinds(),
             static_word_kinds: pipeline.static_word_kinds(),

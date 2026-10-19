@@ -447,6 +447,11 @@ pub struct Compiler {
     /// the first context dictionary in `__dict0` and how many there are.
     /// The method prologue unpacks them into `__dict1..` (#551).
     pending_instance_ctx: Option<(usize, usize)>,
+    /// Set while compiling a trait method with bounds of its own (`fn
+    /// third<W: Show>`): the frame index of the first one's dictionary and
+    /// how many there are. They are parameters after the instance's own
+    /// dictionary (`__dict0`), which the method then always takes (#1471).
+    pending_own_dicts: Option<(usize, usize)>,
     /// Ground instance methods that take their arguments raw (their
     /// `$dict` adapter unboxes for dictionary callers).
     raw_instance_methods: HashSet<String>,
@@ -589,10 +594,6 @@ pub struct Compiler {
     retain_cursor_il: bool,
     /// Snapshot filled by finalize when [`Self::retain_cursor_il`] is set.
     cursor_il: Option<crate::il::tell::CursorIlSnap>,
-    /// S2b interpreter maps (empty when no alloc body lifted).
-    stack_maps: Vec<common::FrameStackMap>,
-    /// Drafts before PC bind (tests / diagnostics).
-    stack_map_drafts: Vec<crate::mir::DraftFrameMap>,
     deopt_map_drafts: Vec<crate::mir::DraftDeoptMap>,
 
     /// Why the last [`Self::try_lower_hir_function`] did not lower its body.
@@ -730,6 +731,7 @@ impl Default for Compiler {
             mono_codegen_var_types: Vec::new(),
             mono_type_param_tys: Vec::new(),
             pending_instance_ctx: None,
+            pending_own_dicts: None,
             raw_instance_methods: HashSet::new(),
             interned_dicts: HashMap::new(),
             raw_instance_call: false,
@@ -787,8 +789,6 @@ impl Default for Compiler {
             inline_cost: inline_cost::InlineCostOptions::default(),
             retain_cursor_il: false,
             cursor_il: None,
-            stack_maps: Vec::new(),
-            stack_map_drafts: Vec::new(),
             deopt_map_drafts: Vec::new(),
             hir_refusal: None,
             hir_module: None,
