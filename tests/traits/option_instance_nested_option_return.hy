@@ -57,3 +57,25 @@ test("a PolyFn call returns a nested Option") {
     assert!(depth(f(Some("b"))) == 2);
     assert!(f(Some(2)) == Some(Some(2)));
 }
+
+trait Get<T> {
+    fn get(T x, int d) -> Option<int> {}
+}
+
+impl Get for Option<T> {
+    fn get(Option<T> o, int d) -> Option<int> {
+        return match o {
+            Some(_) => Some(d),
+            None => None,
+        };
+    }
+}
+
+test("a method call on a niche or two-word receiver of the shared entry") {
+    let s: Option<string> = Some("a");
+    assert!(s.get(4) == Some(4));
+    let n: Option<string> = None;
+    assert!(n.get(4) == None);
+    let i: Option<int> = Some(1);
+    assert!(i.get(5) == Some(5));
+}
