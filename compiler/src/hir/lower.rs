@@ -1169,12 +1169,13 @@ pub(crate) fn pure_base(body: &HirBody, id: HirId) -> bool {
     }
 }
 
-/// A field store's base that only reads: `x`, `x.f`, or `x[i]` of such a
-/// base with a [`pure_index`] (`xs[0].b`). The AST pushes it above the
-/// value, and a compound store builds it twice.
+/// A field store's base that only reads: `x`, a static `G`, `x.f`, or
+/// `x[i]` of such a base with a [`pure_index`] (`xs[0].b`). The AST pushes
+/// it above the value, and a compound store builds it twice.
 fn read_base(body: &HirBody, id: HirId) -> bool {
     match &body.expr(id).kind {
-        HirKind::Local(_) => true,
+        // A static's load reads its slot, as a local's does (#1557).
+        HirKind::Local(_) | HirKind::Global { .. } => true,
         HirKind::Field { base, .. } => read_base(body, *base),
         HirKind::Index {
             base,
