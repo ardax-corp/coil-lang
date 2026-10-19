@@ -2,8 +2,7 @@
 // function is a refutable constructor pattern for the auto-par pass too, as
 // it is for the checker: the fork inside `On` runs only when `On` matches.
 use tests::assert;
-use bare_case_provider::Switch;
-use bare_case_provider::mode;
+use bare_case_provider::{Switch, mode};
 
 fn fibs(int n) -> int {
     return match mode(n) {
