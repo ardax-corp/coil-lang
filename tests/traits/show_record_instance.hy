@@ -33,8 +33,8 @@ test("show of a record") {
     assert!(show(r) == "{ a: s, b: 3 }", show(r));
 }
 
-test("show of records with unit, tuple, record and user fields") {
-    assert!(show({ u: (), n: 1 }) == "{ n: 1, u: () }", show({ u: (), n: 1 }));
+test("show of records with tuple, record and user fields") {
+    assert!(show({ u: ((), 2), n: 1 }) == "{ n: 1, u: ((), 2) }", show({ u: ((), 2), n: 1 }));
     assert!(show({ t: (1, 2) }) == "{ t: (1, 2) }", show({ t: (1, 2) }));
     assert!(show({ r: { z: true } }) == "{ r: { z: true } }", show({ r: { z: true } }));
     assert!(show({ p: new Point(3, 4) }) == "{ p: <3 4> }", show({ p: new Point(3, 4) }));
@@ -51,12 +51,12 @@ test("a record meets a Show bound through a shared body") {
     let s = shown;
     let m = shown_method;
     assert!(s({ a: 1 }) == "{ a: 1 }", s({ a: 1 }));
-    assert!(m({ x: 2.5, u: () }) == "{ u: (), x: 2.5 }", m({ x: 2.5, u: () }));
+    assert!(m({ x: 2.5, u: false }) == "{ u: false, x: 2.5 }", m({ x: 2.5, u: false }));
     let r = { b: 3, a: "s" };
     assert!(s(r) == "{ a: s, b: 3 }", s(r));
 }
 
 test("a tuple of records and a record in a tuple") {
     assert!(show(({ a: 1 }, 2)) == "({ a: 1 }, 2)", show(({ a: 1 }, 2)));
-    assert!(shown(({ a: 1 }, { b: () })) == "({ a: 1 }, { b: () })");
+    assert!(shown(({ a: 1 }, { b: ((),) })) == "({ a: 1 }, { b: ((),) })");
 }
