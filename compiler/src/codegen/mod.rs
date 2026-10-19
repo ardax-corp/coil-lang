@@ -329,7 +329,7 @@ pub struct Compiler {
     strings: Vec<String>,
     string_indices: HashMap<String, u32>,
 
-    /// Qualified names of `async fn` declarations (emit `MakeCoro` at call sites).
+    /// Qualified names of `gen fn` declarations (emit `MakeCoro` at call sites).
     coroutine_fns: std::collections::HashSet<String>,
 
     /// Memoized two-word-return verdicts (enum name or boxed), keyed by the

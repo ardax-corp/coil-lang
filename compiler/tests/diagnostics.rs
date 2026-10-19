@@ -39,7 +39,7 @@ fn bare_expr_probe_src(trimmed: &str) -> Option<String> {
     }
     const STMT_PREFIXES: &[&str] = &[
         "let ", "use ", "class ", "enum ", "trait ", "impl ", "test(", "fn ", "if ", "while ",
-        "for ", "return ", "async ", "match ", "defer ",
+        "for ", "return ", "gen ", "match ", "defer ",
     ];
     if STMT_PREFIXES.iter().any(|p| expr.starts_with(p)) {
         return None;

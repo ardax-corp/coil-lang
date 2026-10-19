@@ -19398,7 +19398,7 @@ impl Checker {
         }
     }
 
-    /// True if `name` was declared as `async fn`.
+    /// True if `name` was declared as `gen fn`.
     pub fn is_async_function(&self, name: &str) -> bool {
         self.async_functions.contains(name)
     }

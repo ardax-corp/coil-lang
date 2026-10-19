@@ -4405,7 +4405,7 @@ fn main() {
 #[test]
 fn q6_for_in_coro_sum_takes_dense_or_lir() {
     let src = r#"
-async fn gen() {
+gen fn gen() {
     let i = 0;
     while i < 5 {
         yield i;
