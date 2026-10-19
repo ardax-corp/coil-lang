@@ -137,6 +137,33 @@ element or field reads move only out of loops that cannot resize or
 write the heap (`effects::may_resize` / `writes_heap`). A second CSE run
 merges hoisted consts. Hit bench: `examples/perf/mir_licm_divf.hy`.
 
+Loops and GVN/PRE ask dominance of `licm::Dominators` (#1518): the
+immediate-dominator tree (Cooper, Harvey and Kennedy, over reverse
+postorder), with each query answered from the tree's preorder spans.
+The roots are the entry and every block nothing branches to; a block no
+root reaches is dominated by every block, as the set fixpoint it
+replaced had it. That fixpoint kept every block's full dominator set, so
+a chain of `n` joins held ~n²/2 elements, and `loop_opts` built it for
+every body, loop or not. The unit test
+`natural_loops_about_linear_over_join_chain` counts the steps over `n`
+diamonds in a row:
+
+| n | steps before (set elements) | steps after (preds + intersect) |
+|---|---|---|
+| 100 | 30,500 | 802 |
+| 800 | 1,924,000 | 6,402 |
+
+`coil compile`, release, 2026-10-19, `f(int x)` of N
+`if x == k { s = s + "a"; }` (main, without #1502's LIR emission fix):
+
+| N | Ir before | Ir after | wall before | wall after |
+|---|---|---|---|---|
+| 800 | 4,671 M | 3,946 M | 0.76 s | 0.74 s |
+| 1600 | 15,409 M | 12,431 M | 2.66 s | 2.36 s |
+
+The 725 M and 2,979 M saved match what callgrind put in
+`licm::dominators` (#1518's table); emitted archives are byte-identical.
+
 Specialize no longer refuses multi-header bodies: nested numeric loops
 (including flagship `mandelbrot`) can emit `DenseBin` when infer + lower
 succeed. Straight-line bodies lift and keep only when emit cost ≤ fuse-IL
