@@ -360,9 +360,11 @@ jobs:
             # The memory corpus also at -O0: without inlining, a call's
             # result reaches its consumer on the operand stack instead of a
             # local, so the roots differ from the default level (#1481).
+            # Generics too: uninlined calls through `forall` parameters
+            # pass dictionaries the default level folds away (#1530).
             gc-stress)
               $run --harness harness-bin/gc-stress/coil-test -- $FLAGS
-              $run --harness harness-bin/gc-stress/coil-test memory -- -O 0 $FLAGS ;;
+              $run --harness harness-bin/gc-stress/coil-test memory generics -- -O 0 $FLAGS ;;
           esac
 
       # The examples in the builtin doc stubs (compiler/src/builtin_docs/),
