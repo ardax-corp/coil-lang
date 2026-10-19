@@ -1277,6 +1277,29 @@ mod tests {
     }
 
     #[test]
+    fn variant_constructor_args_share_the_enum_clone() {
+        // `Option::Some(1)`, a typed `Option::None` and an `Option<int>`
+        // value are one instantiation of `id`: one clone, keyed by the
+        // applied enum type, not the variant's constructor type (#1477).
+        let plan = plan(
+            "fn id<T>(T x) -> T { return x; } \
+             fn main() { \
+                 let a = id(Option::Some(1)); \
+                 let b: Option<int> = id(Option::None); \
+                 let x: Option<int> = Option::Some(2); \
+                 let c = id(x); \
+             }",
+        );
+        let ids: Vec<_> = plan.specializations_for_fn("id").collect();
+        assert_eq!(ids.len(), 1, "{:?}", ids.iter().map(|s| plan.ty(s.key.subst[0])).collect::<Vec<_>>());
+        assert_eq!(
+            plan.ty(ids[0].key.subst[0]),
+            Some(&Ty::App(Box::new(Ty::Con("Option".into())), vec![Ty::Con("int".into())]))
+        );
+        assert_eq!(plan.retargets.len(), 2);
+    }
+
+    #[test]
     fn rejects_conflicting_type_param_instantiation() {
         let plan = plan(
             "fn same<T: Eq>(T a, T b) -> T { return a; } \
