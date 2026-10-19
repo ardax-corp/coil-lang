@@ -744,7 +744,9 @@ impl MirFunc {
                 dest,
                 object,
                 name,
-                index,
+                // Any slot index: the dense form packs one that fits a
+                // byte, and the stack form takes a full word (#1498).
+                index: _,
             } => {
                 if self.ty(*object) != MirTy::HeapRef {
                     return Err(format!("{dest} HeapFieldLoad object type"));
@@ -756,16 +758,15 @@ impl MirFunc {
                     && self.ty(*n) != MirTy::HeapRef {
                         return Err(format!("{dest} HeapFieldLoad name type"));
                     }
-                if *index > 32 {
-                    return Err(format!("{dest} HeapFieldLoad index"));
-                }
             }
             MirInst::HeapFieldStore {
                 dest,
                 object,
                 value,
                 name,
-                index,
+                // Any slot index: the dense form packs one that fits a
+                // byte, and the stack form takes a full word (#1498).
+                index: _,
             } => {
                 if self.ty(*object) != MirTy::HeapRef {
                     return Err(format!("{dest} HeapFieldStore object type"));
@@ -780,9 +781,6 @@ impl MirFunc {
                     && self.ty(*n) != MirTy::HeapRef {
                         return Err(format!("{dest} HeapFieldStore name type"));
                     }
-                if index.is_some_and(|i| i > 32) {
-                    return Err(format!("{dest} HeapFieldStore index"));
-                }
             }
             MirInst::Alloc { dest, elems, .. } => {
                 if self.ty(*dest) != MirTy::HeapRef {
