@@ -286,7 +286,9 @@ fn decl_in(item: &Output<'_>, source: &str, name: &str, at: usize, top_level: bo
                 top_level: false,
             })
         }),
-        Expression::Implementation { methods, .. } | Expression::TypeClass { methods, .. } => {
+        Expression::Implementation { methods, .. }
+        | Expression::TypeClass { methods, .. }
+        | Expression::TypeClassImpl { methods, .. } => {
             methods.iter().find_map(|m| decl_in(m, source, name, at, false))
         }
         _ => None,

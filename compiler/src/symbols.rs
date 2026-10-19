@@ -18,6 +18,7 @@ pub enum SymbolKind {
     Namespace,
     Method,
     Macro,
+    Trait,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +39,19 @@ pub struct RefSite {
     pub range: Range<usize>,
     /// Bound [`DefId`] for this use, when resolve tables are present.
     pub def_id: Option<DefId>,
+    /// The segment of an `Owner::member` path this site is, if any.
+    pub path: Option<PathPart>,
+}
+
+/// A segment of an `Owner::member` path (`Area::size(x)`, `Color::Red`).
+///
+/// The owner site is named by the owner's last segment (`Area`); the
+/// member site by `Owner::member`, which is also the key the owner's
+/// members are defined under (trait methods, inherent `impl` methods).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathPart {
+    Owner,
+    Member,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -53,7 +67,7 @@ impl SymbolIndex {
         };
         let mut index = Self::default();
         index.collect_definitions(&file, source, &root);
-        index.collect_references(&file, &root);
+        index.collect_references(&file, source, &root);
         index
     }
 
@@ -92,6 +106,14 @@ impl SymbolIndex {
                 Expression::Use { name, alias, .. } => {
                     (alias.as_deref().unwrap_or(name), SymbolKind::Namespace)
                 }
+                Expression::TypeClass { name, methods, .. } => {
+                    self.collect_members(file, source, name, methods);
+                    (*name, SymbolKind::Trait)
+                }
+                Expression::Implementation { owner, methods, .. } => {
+                    self.collect_members(file, source, owner, methods);
+                    continue;
+                }
                 _ => continue,
             };
             let range = span.start..span.end;
@@ -115,20 +137,78 @@ impl SymbolIndex {
         }
     }
 
-    fn collect_references(&mut self, file: &PathBuf, expression: &Output<'_>) {
-        fn visit_output(index: &mut SymbolIndex, file: &PathBuf, output: &Output<'_>) {
-            visit(index, file, output.1.as_ref(), output.0.start..output.0.end);
+    /// Methods of a trait or inherent `impl`, keyed `Owner::method`.
+    fn collect_members(&mut self, file: &Path, source: &str, owner: &str, methods: &[Output<'_>]) {
+        for method in methods {
+            let range = method.0.start..method.0.end;
+            let inner = match method.1.as_ref() {
+                Expression::Method(_, inner) => inner.1.as_ref(),
+                other => other,
+            };
+            let Expression::Function { name, .. } = inner else {
+                continue;
+            };
+            let key = format!("{owner}::{name}");
+            let definition = SymbolDef {
+                name: key.clone(),
+                kind: SymbolKind::Method,
+                file: file.to_path_buf(),
+                name_range: name_range_in(source, name, &range, false),
+                range,
+                def_id: None,
+            };
+            self.definitions.entry(key).or_default().push(definition);
+        }
+    }
+
+    fn collect_references(&mut self, file: &PathBuf, source: &str, expression: &Output<'_>) {
+        fn visit_output(index: &mut SymbolIndex, file: &PathBuf, source: &str, output: &Output<'_>) {
+            visit(index, file, source, output.1.as_ref(), output.0.start..output.0.end);
         }
 
-        fn visit_outputs(index: &mut SymbolIndex, file: &PathBuf, outputs: &[Output<'_>]) {
+        fn visit_outputs(index: &mut SymbolIndex, file: &PathBuf, source: &str, outputs: &[Output<'_>]) {
             for output in outputs {
-                visit_output(index, file, output);
+                visit_output(index, file, source, output);
+            }
+        }
+
+        /// Owner and member sites of `owner::member` spanning `span`.
+        fn visit_path(
+            index: &mut SymbolIndex,
+            file: &Path,
+            source: &str,
+            owner: &str,
+            member: &str,
+            span: &Range<usize>,
+        ) {
+            let Some(member_range) = path_member_range(source, member, span) else {
+                return;
+            };
+            let leaf = owner.rsplit("::").next().unwrap_or(owner).trim();
+            let before = source[span.start..member_range.start].trim_end();
+            let Some(head) = before.strip_suffix("::").map(str::trim_end) else {
+                return;
+            };
+            if !leaf.is_empty() && head.ends_with(leaf) {
+                let end = span.start + head.len();
+                let mut push = |name: String, range: Range<usize>, part: PathPart| {
+                    index.references.entry(name.clone()).or_default().push(RefSite {
+                        name,
+                        file: file.to_path_buf(),
+                        range,
+                        def_id: None,
+                        path: Some(part),
+                    });
+                };
+                push(leaf.to_owned(), end - leaf.len()..end, PathPart::Owner);
+                push(format!("{leaf}::{member}"), member_range, PathPart::Member);
             }
         }
 
         fn visit(
             index: &mut SymbolIndex,
             file: &PathBuf,
+            source: &str,
             expression: &Expression<'_>,
             span: Range<usize>,
         ) {
@@ -143,6 +223,7 @@ impl SymbolIndex {
                             file: file.clone(),
                             range: span,
                             def_id: None,
+                            path: None,
                         });
                 }
                 Expression::Integer(_)
@@ -152,7 +233,6 @@ impl SymbolIndex {
                 | Expression::Type(_)
                 | Expression::TypeProjection { .. }
                 | Expression::Default(_)
-                | Expression::QualifiedAccess { .. }
                 | Expression::Use { .. }
                 | Expression::ExternBlock { .. }
                 | Expression::ExternStruct(_)
@@ -166,7 +246,7 @@ impl SymbolIndex {
                 | Expression::Tuple(items)
                 | Expression::If(items)
                 | Expression::Declare(items)
-                | Expression::Invoke(items) => visit_outputs(index, file, items),
+                | Expression::Invoke(items) => visit_outputs(index, file, source, items),
                 Expression::Noop(inner)
                 | Expression::Module(_, inner)
                 | Expression::Spread(inner)
@@ -195,11 +275,11 @@ impl SymbolIndex {
                 | Expression::Method(_, inner)
                 | Expression::NamedArg(_, inner)
                 | Expression::Branch(None, inner)
-                | Expression::Adjust { target: inner, .. } => visit_output(index, file, inner),
+                | Expression::Adjust { target: inner, .. } => visit_output(index, file, source, inner),
                 Expression::Resume(a, b) => {
-                    visit_output(index, file, a);
+                    visit_output(index, file, source, a);
                     if let Some(b) = b {
-                        visit_output(index, file, b);
+                        visit_output(index, file, source, b);
                     }
                 }
                 Expression::Coalesce(a, b)
@@ -227,40 +307,40 @@ impl SymbolIndex {
                 | Expression::Gt(a, b)
                 | Expression::Assignment(a, b)
                 | Expression::Branch(Some(a), b) => {
-                    visit_output(index, file, a);
-                    visit_output(index, file, b);
+                    visit_output(index, file, source, a);
+                    visit_output(index, file, source, b);
                 }
                 Expression::Range { start, end, .. } => {
-                    visit_output(index, file, start);
-                    visit_output(index, file, end);
+                    visit_output(index, file, source, start);
+                    visit_output(index, file, source, end);
                 }
                 Expression::Dict(fields) => {
                     for field in fields {
-                        visit_output(index, file, &field.value);
+                        visit_output(index, file, source, &field.value);
                     }
                 }
                 Expression::Index(target, index_expr) => {
-                    visit_output(index, file, target);
+                    visit_output(index, file, source, target);
                     if let Some(index_expr) = index_expr {
-                        visit_output(index, file, index_expr);
+                        visit_output(index, file, source, index_expr);
                     }
                 }
                 Expression::StaticDecl { ty, init, .. } => {
                     if let Some(ty) = ty {
-                        visit_output(index, file, ty);
+                        visit_output(index, file, source, ty);
                     }
-                    visit_output(index, file, init);
+                    visit_output(index, file, source, init);
                 }
                 Expression::Argument { ty, .. } => {
                     if let Some(ty) = ty {
-                        visit_output(index, file, ty);
+                        visit_output(index, file, source, ty);
                     }
                 }
                 Expression::TypeFnSig { params, ret } => {
-                    visit_output(index, file, params);
-                    visit_output(index, file, ret);
+                    visit_output(index, file, source, params);
+                    visit_output(index, file, source, ret);
                 }
-                Expression::TypeApp { args, .. } => visit_outputs(index, file, args),
+                Expression::TypeApp { args, .. } => visit_outputs(index, file, source, args),
                 Expression::MacroCall { name, args } => {
                     let start = span.start;
                     let end = (start + name.len()).min(span.end);
@@ -269,13 +349,14 @@ impl SymbolIndex {
                         file: file.clone(),
                         range: start..end,
                         def_id: None,
+                        path: None,
                     });
-                    visit_outputs(index, file, args);
+                    visit_outputs(index, file, source, args);
                 }
                 Expression::Quote { parts, .. } => {
                     for part in parts {
                         if let parser::ast::QuotePart::Splice(e) | parser::ast::QuotePart::Repeat { list: e, .. } = part {
-                            visit_output(index, file, e);
+                            visit_output(index, file, source, e);
                         }
                     }
                 }
@@ -297,28 +378,28 @@ impl SymbolIndex {
                     body,
                     ..
                 } => {
-                    visit_output(index, file, args);
+                    visit_output(index, file, source, args);
                     if let Some(returns) = returns {
-                        visit_output(index, file, returns);
+                        visit_output(index, file, source, returns);
                     }
-                    visit_output(index, file, body);
+                    visit_output(index, file, source, body);
                 }
                 Expression::Function { args, body, .. } => {
-                    visit_output(index, file, args);
+                    visit_output(index, file, source, args);
                     if let Some(body) = body {
-                        visit_output(index, file, body);
+                        visit_output(index, file, source, body);
                     }
                 }
                 Expression::Call { name, args } => {
-                    visit_output(index, file, name);
+                    visit_output(index, file, source, name);
                     if let Some(args) = args {
-                        visit_outputs(index, file, args);
+                        visit_outputs(index, file, source, args);
                     }
                 }
-                Expression::Defer { body, .. } => visit_output(index, file, body),
+                Expression::Defer { body, .. } => visit_output(index, file, source, body),
                 Expression::Lambda { args, body, .. } => {
-                    visit_output(index, file, args);
-                    visit_output(index, file, body);
+                    visit_output(index, file, source, args);
+                    visit_output(index, file, source, body);
                 }
                 Expression::Loop {
                     contracts: _,
@@ -328,73 +409,83 @@ impl SymbolIndex {
                     body,
                 } => {
                     if let Some(identifier) = identifier {
-                        visit_output(index, file, identifier);
+                        visit_output(index, file, source, identifier);
                     }
-                    visit_output(index, file, iterable);
-                    visit_output(index, file, body);
+                    visit_output(index, file, source, iterable);
+                    visit_output(index, file, source, body);
                 }
                 Expression::Variable(_, init) => {
                     if let Some(init) = init {
-                        visit_output(index, file, init);
+                        visit_output(index, file, source, init);
                     }
                 }
                 Expression::Constant(name, init) => {
-                    visit_output(index, file, name);
+                    visit_output(index, file, source, name);
                     if let Some(init) = init {
-                        visit_output(index, file, init);
+                        visit_output(index, file, source, init);
                     }
                 }
-                Expression::LetDestructure { rhs, .. } => visit_output(index, file, rhs),
-                Expression::Class { fields, .. } => visit_outputs(index, file, fields),
+                Expression::LetDestructure { rhs, .. } => visit_output(index, file, source, rhs),
+                Expression::Class { fields, .. } => visit_outputs(index, file, source, fields),
                 Expression::Implementation { methods, .. }
-                | Expression::TypeClass { methods, .. } => visit_outputs(index, file, methods),
+                | Expression::TypeClass { methods, .. } => visit_outputs(index, file, source, methods),
                 Expression::TypeClassImpl { args, methods, .. } => {
-                    visit_outputs(index, file, args);
-                    visit_outputs(index, file, methods);
+                    visit_outputs(index, file, source, args);
+                    visit_outputs(index, file, source, methods);
                 }
                 Expression::Field { name, ty, init, .. } => {
-                    visit_output(index, file, name);
-                    visit_output(index, file, ty);
+                    visit_output(index, file, source, name);
+                    visit_output(index, file, source, ty);
                     if let Some(init) = init {
-                        visit_output(index, file, init);
+                        visit_output(index, file, source, init);
                     }
                 }
                 Expression::Instantiate(name, args) => {
-                    visit_output(index, file, name);
+                    visit_output(index, file, source, name);
                     if let Some(args) = args {
-                        visit_outputs(index, file, args);
+                        visit_outputs(index, file, source, args);
                     }
                 }
                 Expression::TypeAlias { ty, .. } | Expression::Forall { ty, .. } => {
-                    visit_output(index, file, ty)
+                    visit_output(index, file, source, ty)
                 }
                 Expression::TestCase { name, body } => {
-                    visit_output(index, file, name);
-                    visit_output(index, file, body);
+                    visit_output(index, file, source, name);
+                    visit_output(index, file, source, body);
                 }
-                Expression::EnumDecl { variants, .. } => visit_outputs(index, file, variants),
+                Expression::EnumDecl { variants, .. } => visit_outputs(index, file, source, variants),
                 Expression::EnumVariant { payload, .. } => match payload {
                     EnumVariantPayload::Unit => {}
-                    EnumVariantPayload::Tuple(parts) => visit_outputs(index, file, parts),
+                    EnumVariantPayload::Tuple(parts) => visit_outputs(index, file, source, parts),
                     EnumVariantPayload::Record(fields) => {
                         for field in fields {
-                            visit_output(index, file, &field.value);
+                            visit_output(index, file, source, &field.value);
                         }
                     }
                 },
-                Expression::Construct { fields, .. } => match fields {
-                    EnumConstructPayload::Unit => {}
-                    EnumConstructPayload::Tuple(parts) => visit_outputs(index, file, parts),
-                    EnumConstructPayload::Record(fields) => {
-                        for field in fields {
-                            visit_output(index, file, &field.value);
+                Expression::QualifiedAccess { owner, member } => {
+                    visit_path(index, file, source, owner, member, &span)
+                }
+                Expression::Construct {
+                    enum_name,
+                    variant_name,
+                    fields,
+                } => {
+                    visit_path(index, file, source, enum_name, variant_name, &span);
+                    match fields {
+                        EnumConstructPayload::Unit => {}
+                        EnumConstructPayload::Tuple(parts) => visit_outputs(index, file, source, parts),
+                        EnumConstructPayload::Record(fields) => {
+                            for field in fields {
+                                visit_output(index, file, source, &field.value);
+                            }
                         }
                     }
-                },
+                }
                 Expression::Match { scrutinee, arms } => {
-                    visit_output(index, file, scrutinee);
+                    visit_output(index, file, source, scrutinee);
                     for arm in arms {
-                        visit_output(index, file, &arm.body);
+                        visit_output(index, file, source, &arm.body);
                     }
                 }
                 Expression::IfLet {
@@ -402,26 +493,27 @@ impl SymbolIndex {
                     then_arm,
                     else_arm,
                 } => {
-                    visit_output(index, file, scrutinee);
-                    visit_output(index, file, &then_arm.body);
-                    visit_output(index, file, &else_arm.body);
+                    visit_output(index, file, source, scrutinee);
+                    visit_output(index, file, source, &then_arm.body);
+                    visit_output(index, file, source, &else_arm.body);
                 }
                 Expression::WhileLet {
                     scrutinee,
                     then_arm,
                     on_miss,
                 } => {
-                    visit_output(index, file, scrutinee);
-                    visit_output(index, file, &then_arm.body);
-                    visit_output(index, file, &on_miss.body);
+                    visit_output(index, file, source, scrutinee);
+                    visit_output(index, file, source, &then_arm.body);
+                    visit_output(index, file, source, &on_miss.body);
                 }
-                Expression::AssocTypeDef { ty, .. } => visit_output(index, file, ty),
+                Expression::AssocTypeDef { ty, .. } => visit_output(index, file, source, ty),
             }
         }
 
         visit(
             self,
             file,
+            source,
             expression.1.as_ref(),
             expression.0.start..expression.0.end,
         );
@@ -475,6 +567,25 @@ fn name_range_in(source: &str, name: &str, item: &Range<usize>, prefer_last: boo
         }
         None => item.start..item.start.saturating_add(name.len()).min(item.end),
     }
+}
+
+/// Span of the path's last segment `member` inside `span`: the parser's
+/// slice when it points into `source`, else the last textual hit.
+fn path_member_range(source: &str, member: &str, span: &Range<usize>) -> Option<Range<usize>> {
+    if member.is_empty() {
+        return None;
+    }
+    if let Some(r) = slice_offset_in_source(source, member)
+        && r.start >= span.start
+        && r.end <= span.end
+    {
+        return Some(r);
+    }
+    let slice = source.get(span.clone())?;
+    // `Owner::member(args)`: the member precedes the payload.
+    let head = slice.find(['(', '{']).map_or(slice, |cut| &slice[..cut]);
+    let off = head.rfind(member)?;
+    Some(span.start + off..span.start + off + member.len())
 }
 
 fn slice_offset_in_source(source: &str, name: &str) -> Option<Range<usize>> {
