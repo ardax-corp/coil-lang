@@ -3407,9 +3407,10 @@ impl Compiler {
     }
 
     /// `constraint`'s arguments through `var_to_ty` when they are open only
-    /// inside a tuple (`(int, T)`, #1479): the goal the arity-wide tuple
-    /// instance serves, its items' dictionaries from the frame. `None` for
-    /// a ground goal, an unbound variable or a bare type parameter.
+    /// inside a type (`(int, T)`, #1479; `Box<T>`, #1542): the goal a
+    /// generic instance serves (the arity-wide tuple one, `impl Sz for
+    /// Box<T>`), its context dictionaries from the frame. `None` for a
+    /// ground goal, an unbound variable or a bare type parameter.
     pub(super) fn open_structural_lookup(
         &self,
         constraint: &crate::typechecking::ty::Constraint,
@@ -3423,12 +3424,48 @@ impl Compiler {
                 Ty::Var(v) => var_to_ty.get(v).map(|t| crate::typechecking::subst::apply_ty_prune(subst, t)),
                 other => Some(crate::typechecking::subst::apply_ty_prune(subst, other)),
             })
+            // `Some(e)`'s `Option<E>` is looked up as the instance head
+            // (`Option<T>`), not as its variant's sum.
+            .map(|t| t.map(|t| Self::show_lookup_ty_for_instance(&t)))
             .collect::<Option<_>>()?;
         lookup
             .iter()
-            .all(|t| matches!(t, Ty::Tuple(_)) && Self::ty_has_var(t))
+            .all(|t| {
+                !matches!(t, Ty::Var(_))
+                    && !matches!(t, Ty::App(head, _) if matches!(head.as_ref(), Ty::Var(_)))
+                    && Self::ty_has_var(t)
+            })
             .then_some(lookup)
-            .filter(|l| self.checker.generics().find_generic_instance(&constraint.class, l).is_some())
+            .filter(|l| self.open_instance_dict_ok(&constraint.class, l, 0))
+    }
+
+    /// Whether [`Self::plan_instance_dict`] builds open goal `class<lookup>`
+    /// here: a generic instance serves it and each of its context goals is
+    /// ground with an instance, a frame dictionary, or open the same way.
+    fn open_instance_dict_ok(&self, class: &str, lookup: &[Ty], depth: usize) -> bool {
+        if depth > 16 {
+            return false;
+        }
+        if self.resolve_open_dict_goal(class, lookup).is_some() {
+            return true;
+        }
+        let Some(instance) = self.checker.generics().find_generic_instance(class, lookup) else {
+            return false;
+        };
+        let mut vars = HashMap::new();
+        for (have, want) in instance.args.iter().zip(lookup) {
+            Self::bind_scheme_vars(have, want, &mut vars);
+        }
+        instance.context.iter().all(|c| {
+            let args: Vec<Ty> = c.args.iter().map(|a| Self::apply_ty_var_map(a, &vars)).collect();
+            if !args.iter().any(Self::ty_has_var) {
+                return self.checker.generics().find_instance_relaxed(&c.class, &args).is_some();
+            }
+            if args.iter().any(|t| matches!(t, Ty::Var(_))) {
+                return self.resolve_open_dict_goal(&c.class, &args).is_some();
+            }
+            self.open_instance_dict_ok(&c.class, &args, depth + 1)
+        })
     }
 
     /// Phase 4: plan dictionary evidence for every constraint slot when a
