@@ -56,6 +56,24 @@ fn apply(readonly Point -> int f, readonly Point p) -> int {
     return f(p);
 }
 
+fn first<T>(readonly Vec<T> xs) -> readonly T {
+    return xs[0];
+}
+
+fn pair(readonly (Point, int) t) -> int {
+    let (p, n) = t;
+    return p.x + n;
+}
+
+test("generic and tuple readonly parameters") {
+    let ps: Vec<Point> = [new Point(7, 0, new Inner(0))];
+    assert!(first(ps).x == 7);
+    let p = readonly new Point(1, 0, new Inner(0));
+    assert!(pair((p, 2)) == 3);
+    let f = fn (readonly Point q) => q.x + 1;
+    assert!(f(p) == 2);
+}
+
 test("a readonly value passes to a readonly parameter") {
     let p = readonly new Point(1, 2, new Inner(3));
     assert!(total(p) == 6);
