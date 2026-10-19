@@ -4946,6 +4946,7 @@ impl Compiler {
         entries: &[(String, u32)],
         entry_sps: &HashMap<String, u32>,
     ) -> HashMap<String, super::precise_frames::FnWordKinds> {
+        use crate::typechecking::subst::apply_ty_prune;
         use crate::typechecking::value_layout::word_kind;
         let mut out = HashMap::new();
         for (name, _) in entries {
@@ -4996,16 +4997,20 @@ impl Compiler {
                 let Ty::Fun(param, ret) = current else {
                     break;
                 };
-                params.push(word_kind(&self.checker, param));
+                // A `()` parameter holds the empty tuple object, a pointer,
+                // as a tuple's `()` item does (#1465).
+                params.push(if crate::hir::layout::is_unit(&apply_ty_prune(self.checker.subst(), param)) {
+                    common::WORD_POINTER
+                } else {
+                    word_kind(&self.checker, param)
+                });
                 current = ret;
             }
             if params.len() != declared.max(1) {
                 continue;
             }
             if declared == 0 {
-                if params != [common::WORD_SCALAR]
-                    || !matches!(&scheme.ty, Ty::Fun(p, _) if matches!(p.as_ref(), Ty::Con(n) if n == crate::typechecking::ty::UNIT))
-                {
+                if !matches!(&scheme.ty, Ty::Fun(p, _) if matches!(p.as_ref(), Ty::Con(n) if n == crate::typechecking::ty::UNIT)) {
                     continue;
                 }
                 params.clear();
