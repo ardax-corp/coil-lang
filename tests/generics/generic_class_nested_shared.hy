@@ -56,3 +56,27 @@ test("deeper nesting and field stores in a shared body") {
     assert!(d(1.5, 2.5) == 2.5);
     assert!(d("a", "b") == "b");
 }
+
+fn ground<E>(E e) -> Pair<float, string> {
+    let f = new Box(1.5);
+    let s = new Box(new Pair(new Box(e), "s"));
+    let inner = s.v;
+    return new Pair(f.v, inner.b);
+}
+
+fn optional<E>(E e) -> E {
+    let p = new Box(Option::Some(new Box(e)));
+    return match p.v {
+        Option::Some(b) => b.v,
+        Option::None => e,
+    };
+}
+
+test("ground and optional class arguments in a shared body") {
+    let g = ground;
+    assert!(g(1).a == 1.5);
+    assert!(g("t").b == "s");
+    let o = optional;
+    assert!(o(1.5) == 1.5);
+    assert!(o("o") == "o");
+}

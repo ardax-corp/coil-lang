@@ -1228,10 +1228,11 @@ impl Compiler {
                     // word, as `new` stores it; an enum with a niche layout
                     // (`Option<int>`) holds its niche word, not a heap one.
                     .map(|t| {
-                        // A field open in a class parameter made at a class
-                        // still open in a type variable holds its object.
-                        if made.is_some_and(|m| self.hir_open_class_field_at(m, t)) {
-                            return Some(crate::mir::MirTy::HeapRef);
+                        // A field open in a class parameter holds the word
+                        // of its type at the made type's arguments, not an
+                        // opaque parameter word (#1553).
+                        if let Some(w) = made.and_then(|m| self.hir_param_field_at(m, t)).and_then(|at| word(&at)) {
+                            return Some(w);
                         }
                         word(t)
                             .or_else(|| scalar_enum(t))
@@ -1323,10 +1324,10 @@ impl Compiler {
                 })
                 && let Some((FieldAt::Slot(idx), fty)) = self.hir_field(hir, *base, name)
                 && let Some(w) = Self::hir_ty(hir, *base)
-                    // `T` at a class still open in a type variable
-                    // (`Box<Box<E>>`'s `v`) holds that object (#1553).
-                    .is_some_and(|b| self.hir_open_class_field_at(b, &fty))
-                    .then_some(crate::mir::MirTy::HeapRef)
+                    // `T` at the receiver's arguments, not an opaque
+                    // parameter word (`Box<Box<E>>`'s `v`, #1553).
+                    .and_then(|b| self.hir_param_field_at(b, &fty))
+                    .and_then(|at| record_word(&at))
                     .or_else(|| record_word(&fty))
                     .or_else(|| {
                     // A generic class's field (`item: T`) at a ground
@@ -1448,11 +1449,6 @@ impl Compiler {
                             boxed_niches.insert(arg.0, layout);
                             return Some(crate::mir::MirTy::HeapRef);
                         }
-                        // ...and one made at a class still open in a type
-                        // variable holds its object (#1553).
-                        if Self::hir_ty(hir, HirId(i)).is_some_and(|m| self.hir_open_class_field_at(m, t)) {
-                            return Some(crate::mir::MirTy::HeapRef);
-                        }
                         // A two-word field value is stored boxed.
                         let stored = |t: &Ty| {
                             word(t).or_else(|| scalar_enum(t)).or_else(|| {
@@ -1473,7 +1469,14 @@ impl Compiler {
                         };
                         // A generic class's field at the made type's
                         // arguments (`new Box(1)`: `T` is `int`).
-                        stored(t).or_else(|| stored(&self.hir_class_ty_args_at(Self::hir_ty(hir, HirId(i))?, t)?)).or_else(|| {
+                        // A field open in a class parameter at the made
+                        // type's arguments, not an opaque parameter word
+                        // (#1553).
+                        let made = Self::hir_ty(hir, HirId(i));
+                        if let Some(w) = made.and_then(|m| self.hir_param_field_at(m, t)).and_then(|at| stored(&at)) {
+                            return Some(w);
+                        }
+                        stored(t).or_else(|| stored(&self.hir_class_ty_args_at(made?, t)?)).or_else(|| {
                             // An enum field open in a class parameter, made
                             // at a still open type (a shared generic body's
                             // `Option::None`): its boxed enum object.
@@ -6201,22 +6204,24 @@ impl Compiler {
         (!Self::ty_has_var(&at) && self.value_layout(&at) == ValueLayout::Boxed).then_some(at)
     }
 
-    /// Whether field type `fty`, a bare class parameter, names a class
-    /// object at made type `ty` still open in a type variable (a shared
-    /// generic body's `new Box(new Box(e))`): its slot holds that object's
-    /// heap word, not an opaque parameter word (#1553).
-    fn hir_open_class_field_at(&self, ty: &Ty, fty: &Ty) -> bool {
+    /// Field type `fty`, a bare class parameter, at made type `ty` when a
+    /// shared generic body must not take it for an opaque parameter word:
+    /// a ground type stored as it is ([`Self::hir_class_ty_args_at`]:
+    /// `new Box("s")`), or a class still open in a type variable (`new
+    /// Box(new Box(e))`), whose slot holds that object's heap word (#1553).
+    fn hir_param_field_at(&self, ty: &Ty, fty: &Ty) -> Option<Ty> {
         if !matches!(crate::typechecking::ty::strip_readonly(fty), Ty::Var(_)) {
-            return false;
+            return None;
         }
-        let ty = apply_ty_prune(self.checker.subst(), ty);
-        let Ty::App(_, args) = crate::typechecking::ty::strip_readonly(&ty) else {
-            return false;
+        let made = apply_ty_prune(self.checker.subst(), ty);
+        let Ty::App(_, args) = crate::typechecking::ty::strip_readonly(&made) else {
+            return None;
         };
-        close_params(fty, args).is_some_and(|at| {
-            let at = apply_ty_prune(self.checker.subst(), &at);
-            Self::ty_has_var(&at) && self.checker.ty_is_class(&at)
-        })
+        let at = apply_ty_prune(self.checker.subst(), &close_params(fty, args)?);
+        if !Self::ty_has_var(&at) {
+            return self.hir_class_ty_args_at(ty, fty);
+        }
+        self.checker.ty_is_class(&at).then_some(at)
     }
 
     /// `new C(..)`'s class, instance field count and declared field types,
