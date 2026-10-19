@@ -15,3 +15,8 @@ test("unimported prelude name stays the builtin") {
 test("imported fn shadows prelude diff") {
     assert!(diff(7, 2) == 5);
 }
+
+test("imported fn shadows prelude sin inside a lambda") {
+    let f = fn (float x) => sin(x);
+    assert!(f(0.0) == 100.0);
+}
