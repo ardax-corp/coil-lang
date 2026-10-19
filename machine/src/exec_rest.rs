@@ -1529,12 +1529,13 @@ impl<const S: usize> Machine<S> {
                 }
                 Instruction::MakePolyFn => {
                     let entry = opcode.operand_u32();
-                    let (object, _) = self.heap.alloc(ObjFn::poly(entry, Vec::new()), Object::Fn);
+                    let (object, _) = self.heap.alloc(ObjFn::poly(entry, 0, Vec::new()), Object::Fn);
                     self.stack.push(Value::from(object.addr()));
                     self.maybe_gc_after_alloc(ip);
                 }
                 Instruction::MakePolyFnCapture => {
                     let count = (opcode.operand_u32() & 0xFF) as usize;
+                    let arity = (opcode.operand_u32() >> 8) & 0xFF;
                     let entry = self.stack.pop().as_int() as u32;
                     let mut captured_dicts = vec![None; count];
                     for slot in (0..count).rev() {
@@ -1549,7 +1550,7 @@ impl<const S: usize> Machine<S> {
                             Some(Member::Value(value))
                         };
                     }
-                    let (object, _) = self.heap.alloc(ObjFn::poly(entry, captured_dicts), Object::Fn);
+                    let (object, _) = self.heap.alloc(ObjFn::poly(entry, arity, captured_dicts), Object::Fn);
                     self.stack.push(Value::from(object.addr()));
                     self.maybe_gc_after_alloc(ip);
                 }
@@ -1600,11 +1601,31 @@ impl<const S: usize> Machine<S> {
                 _ => None,
             }
         };
+        let mut value_arity = value_arity;
+        let mut return_ip = ip;
         let (target, captured) = match &fn_obj {
             Some(gc) => {
                 let base = gc.as_ref();
                 match &base.dicts {
-                    Some(dicts) => (base.entry as usize, dicts.as_slice()),
+                    Some(dicts) => {
+                        // A `PolyFn` given more arguments than it declares
+                        // (#1589): it runs on the ones it takes, and its
+                        // result is called with the rest, as a closure's
+                        // over-application (`call_fn_object`). An arity of 0
+                        // is unrecorded (an older archive): every argument
+                        // goes to the body.
+                        let arity = base.arity as usize;
+                        if arity > 0 && value_arity > arity {
+                            match self.split_poly_over_apply(arity, value_arity, app_dict_arity, ip) {
+                                Some(stub_ip) => return_ip = stub_ip,
+                                None => {
+                                    return (ip, dispatch::RestFlow::Done(self.runtime_panic(STACK_OVERFLOW, ip.saturating_sub(1))));
+                                }
+                            }
+                            value_arity = arity;
+                        }
+                        (base.entry as usize, dicts.as_slice())
+                    }
                     None => {
                         return self.call_fn_object(base, value_arity, app_dict_arity, ip, sp, code);
                     }
@@ -1647,7 +1668,46 @@ impl<const S: usize> Machine<S> {
         }
 
         let callee_sp = self.stack.tell() - (value_arity + dict_arity);
-        (self.enter_frame(callee_sp, target, ip, sp, code), dispatch::RestFlow::Continue)
+        (self.enter_frame(callee_sp, target, return_ip, sp, code), dispatch::RestFlow::Continue)
+    }
+
+    /// Over-application of a `PolyFn` declaring `arity` parameters, the
+    /// stack holding `[value_args(value_arity)..., app_dicts...]`: the
+    /// arguments past `arity` move into an over-apply stub frame under the
+    /// call's own `[args(arity)..., app_dicts...]`. Returns the ip the
+    /// callee returns to (the stub's), or `None` out of frames or stack.
+    #[cold]
+    #[inline(never)]
+    fn split_poly_over_apply(&mut self, arity: usize, value_arity: usize, app_dict_arity: usize, ip: usize) -> Option<usize> {
+        let base = self.stack.tell() - (value_arity + app_dict_arity);
+        let words = self.stack.buffer()[base..base + value_arity + app_dict_arity].to_vec();
+        let (args, rest) = words.split_at(arity);
+        let (extras, dicts) = rest.split_at(value_arity - arity);
+        self.stack.seek(base);
+        let stub_ip = self.push_over_apply_stub(extras, ip)?;
+        for w in args.iter().chain(dicts) {
+            self.stack.push(*w);
+        }
+        Some(stub_ip)
+    }
+
+    /// Push an over-apply stub frame holding `extras` (#1550), the caller's
+    /// frame resuming at `ip`: the function called next returns into it,
+    /// and `finish_over_apply` calls its result with `extras`. Returns the
+    /// stub's resume ip, or `None` out of frames or stack.
+    fn push_over_apply_stub(&mut self, extras: &[Value], ip: usize) -> Option<usize> {
+        if self.frames.len() + 1 >= crate::MAX_CALL_FRAMES || !self.reserve_operand_words(extras.len()) {
+            return None;
+        }
+        let stub_sp = self.stack.tell();
+        for a in extras {
+            self.stack.push(*a);
+        }
+        self.frames.get_mut().seek(ip);
+        self.frames.setup_current_and_advance(|frame| frame.set(stub_sp));
+        self.over_apply_frames += 1;
+        self.return_bookkeeping = true;
+        Some(crate::vm::OVER_APPLY_IP + extras.len())
     }
 
     /// `CallIndirect` of a word that is neither a function object nor a
@@ -1802,15 +1862,12 @@ impl<const S: usize> Machine<S> {
         }
         let mut return_ip = ip;
         if !extras.is_empty() {
-            let stub_sp = self.stack.tell();
-            for a in extras {
-                self.stack.push(*a);
+            match self.push_over_apply_stub(extras, ip) {
+                Some(stub_ip) => return_ip = stub_ip,
+                None => {
+                    return (ip, dispatch::RestFlow::Done(self.runtime_panic(STACK_OVERFLOW, ip.saturating_sub(1))));
+                }
             }
-            self.frames.get_mut().seek(ip);
-            self.frames.setup_current_and_advance(|frame| frame.set(stub_sp));
-            self.over_apply_frames += 1;
-            self.return_bookkeeping = true;
-            return_ip = crate::vm::OVER_APPLY_IP + extras.len();
         }
         // Frame: [captures..., params...]
         for c in &base.captures {

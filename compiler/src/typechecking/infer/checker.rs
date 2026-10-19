@@ -131,6 +131,7 @@ impl Checker {
             classes: std::collections::HashMap::new(),
             class_type_ids: std::collections::HashMap::new(),
             next_class_type_id: 1,
+            record_type_ids: std::collections::HashMap::new(),
             classes_with_drop: std::collections::HashSet::new(),
             enums_with_drop: std::collections::HashSet::new(),
             methods: std::collections::HashMap::new(),
@@ -18520,9 +18521,38 @@ impl Checker {
                     .collect();
                 Some(common::ClassWordKinds { type_id, kinds })
             })
+            .chain(self.record_type_ids.iter().map(|((_, kinds), &type_id)| common::ClassWordKinds { type_id, kinds: kinds.clone() }))
             .collect();
         rows.sort_by_key(|r| r.type_id);
         rows
+    }
+
+    /// The `InitTyped` type id of the slotted record `fields` (any order;
+    /// slots are the fields sorted by name). One id per field names and
+    /// word kinds, so a structural type's values share it. A `()` field
+    /// holds the shared empty tuple object: an unknown word.
+    pub fn record_type_id(&mut self, fields: &[(String, Ty)]) -> u32 {
+        let mut sorted: Vec<&(String, Ty)> = fields.iter().collect();
+        sorted.sort_by(|a, b| a.0.cmp(&b.0));
+        let kinds = sorted
+            .iter()
+            .map(|(_, ty)| {
+                let ty = crate::typechecking::subst::apply_ty_prune(self.subst(), ty);
+                if crate::hir::layout::is_unit(&ty) {
+                    common::WORD_UNKNOWN
+                } else {
+                    crate::typechecking::value_layout::word_kind(self, &ty)
+                }
+            })
+            .collect();
+        let key = (sorted.iter().map(|(n, _)| n.clone()).collect(), kinds);
+        if let Some(&id) = self.record_type_ids.get(&key) {
+            return id;
+        }
+        let id = self.next_class_type_id;
+        self.next_class_type_id = self.next_class_type_id.saturating_add(1).max(1);
+        self.record_type_ids.insert(key, id);
+        id
     }
 
     /// Word kind (`common::WORD_*`) of every static slot, by slot index, from

@@ -38,12 +38,12 @@ const BOXED: Rep = Rep::Word(ValueLayout::Boxed);
 /// Typed inlining rounds: the calls a round splices in inline in the next.
 const HIR_INLINE_ROUNDS: usize = 3;
 
-/// Where a field lives: a class slot (`LoadField` / `SetField` slot form)
-/// or a record key (`GetField` / `SetField` by name).
+/// Where a field lives: a class slot or a record's (`LoadField` /
+/// `SetField` slot form). A record's slots are its fields sorted by name.
 #[derive(Clone, Copy)]
 enum FieldAt {
     Slot(u32),
-    Name,
+    Record(u32),
 }
 
 impl Rep {
@@ -571,7 +571,7 @@ impl Compiler {
                 at.0..at.1,
             );
             msg.with_help(format!(
-                "call `{name}` by name with every argument instead: a polymorphic function value does not record how many parameters it declares"
+                "call `{name}` by name with every argument instead: this polymorphic function value does not record how many parameters it declares"
             ));
             self.messages.push(msg);
             return;
@@ -1413,34 +1413,32 @@ impl Compiler {
                 boxed_niches.insert(i as u32, layout);
             }
         }
-        // Record (dict) fields by key, and record literals, whose words are
-        // the ones their types name. Emission interned every key.
-        let key = |n: &str| self.string_indices.get(n).copied();
+        // Record fields by slot (the fields sorted by name), and record
+        // literals, whose words are the ones their types name.
         let mut record_fields = HashMap::new();
         let mut records = HashMap::new();
         let mut record_pats = HashMap::new();
+        let mut record_iters = HashMap::new();
         for (i, e) in hir.exprs.iter().enumerate() {
             match &e.kind {
                 HirKind::Field { base, name }
-                    if let Some((FieldAt::Name, fty)) = self.hir_field(hir, *base, name)
+                    if let Some((FieldAt::Record(slot), fty)) = self.hir_field(hir, *base, name)
                         && let Some(w) = record_word(&fty)
-                        && e.ty.as_ref().and_then(record_word) == Some(w)
-                        && let Some(k) = key(name) =>
+                        && e.ty.as_ref().and_then(record_word) == Some(w) =>
                 {
-                    record_fields.insert(i as u32, (k, w));
+                    record_fields.insert(i as u32, (slot, w));
                 }
                 // A `()` field holds the empty tuple object (#1510).
                 HirKind::Field { base, name }
-                    if let Some((FieldAt::Name, fty)) = self.hir_field(hir, *base, name)
-                        && crate::hir::layout::is_unit(&apply_ty_prune(checker.subst(), &fty))
-                        && let Some(k) = key(name) =>
+                    if let Some((FieldAt::Record(slot), fty)) = self.hir_field(hir, *base, name)
+                        && crate::hir::layout::is_unit(&apply_ty_prune(checker.subst(), &fty)) =>
                 {
-                    record_fields.insert(i as u32, (k, crate::mir::MirTy::HeapRef));
+                    record_fields.insert(i as u32, (slot, crate::mir::MirTy::HeapRef));
                 }
                 HirKind::Make {
                     kind: MakeKind::Record(names),
                     args,
-                } => {
+                } if let Some(&type_id) = tables.record_types.get(&(i as u32)) => {
                     let ty = e.ty.as_ref().map(|t| apply_ty_prune(checker.subst(), t));
                     let Some(Ty::Record { fields }) = ty.as_ref().map(crate::typechecking::ty::strip_readonly) else {
                         continue;
@@ -1450,45 +1448,61 @@ impl Compiler {
                         .zip(args)
                         .map(|(n, &arg)| {
                             let (_, fty) = fields.iter().find(|(f, _)| f == n)?;
+                            let slot = fields.iter().filter(|(f, _)| f < n).count() as u32;
                             // A `()` field holds the empty tuple object (#1510).
                             if crate::hir::layout::is_unit(&apply_ty_prune(checker.subst(), fty)) {
-                                return Some((key(n)?, crate::mir::MirTy::HeapRef));
+                                return Some((slot, crate::mir::MirTy::HeapRef));
                             }
                             let w = record_word(fty)?;
-                            (Self::hir_ty(hir, arg).and_then(record_word) == Some(w)).then_some((key(n)?, w))
+                            (Self::hir_ty(hir, arg).and_then(record_word) == Some(w)).then_some((slot, w))
                         })
                         .collect::<Option<Vec<_>>>();
                     if let Some(words) = words {
-                        records.insert(i as u32, words);
+                        records.insert(i as u32, (type_id, words));
                     }
                 }
-                // A record `let` pattern: each bound field's key and the
-                // word its type names, which the bound local holds.
+                // A record `let` pattern that binds only locals and
+                // wildcards: each bound field's slot and the word its type
+                // names, which the bound local holds.
                 HirKind::LetPat {
                     pat: HirPat::Record(parts),
                     init,
-                } if let Some(keys) = tables.record_pats.get(&(i as u32)) => {
+                } => {
                     let ty = Self::hir_ty(hir, *init).map(|t| apply_ty_prune(checker.subst(), t));
                     let Some(Ty::Record { fields }) = ty.as_ref().map(crate::typechecking::ty::strip_readonly) else {
                         continue;
                     };
                     let words = parts
                         .iter()
-                        .zip(keys)
-                        .map(|((n, _), key)| match key {
-                            None => Some(None),
-                            Some(k) => {
+                        .map(|(n, part)| match part {
+                            HirPat::Wild => Some(None),
+                            HirPat::Bind(_) => {
                                 let (_, fty) = fields.iter().find(|(f, _)| f == n)?;
                                 // A `()` binding has no slot (#1510).
                                 if crate::hir::layout::is_unit(&apply_ty_prune(checker.subst(), fty)) {
                                     return Some(None);
                                 }
-                                Some(Some((*k, record_word(fty)?)))
+                                let slot = fields.iter().filter(|(f, _)| f < n).count() as u32;
+                                Some(Some((slot, record_word(fty)?)))
                             }
+                            _ => None,
                         })
                         .collect::<Option<Vec<_>>>();
                     if let Some(words) = words {
                         record_pats.insert(i as u32, words);
+                    }
+                }
+                // `for (k, v) in r`: each slot's interned name and word.
+                HirKind::ForIn { iterable, .. } if let Some(names) = tables.record_iters.get(&(i as u32)) => {
+                    let ty = Self::hir_ty(hir, *iterable).map(|t| apply_ty_prune(checker.subst(), t));
+                    let Some(Ty::Record { fields }) = ty.as_ref().map(crate::typechecking::ty::strip_readonly) else {
+                        continue;
+                    };
+                    let mut fields = fields.clone();
+                    fields.sort_by(|a, b| a.0.cmp(&b.0));
+                    let words = fields.iter().zip(names).map(|((_, fty), &name)| Some((name, record_word(fty)?))).collect::<Option<Vec<_>>>();
+                    if let Some(words) = words {
+                        record_iters.insert(i as u32, words);
                     }
                 }
                 _ => {}
@@ -1712,6 +1726,7 @@ impl Compiler {
             record_fields,
             records,
             record_pats,
+            record_iters,
             matrix_wraps: &tables.matrix_wraps,
             field_news: &tables.field_news,
             linalgs: &tables.linalgs,
@@ -6485,6 +6500,61 @@ impl Compiler {
         })
     }
 
+    /// The closure a call `id` through `PolyFn` local `f` given `n`
+    /// arguments returns, as the generic function's shared body returns it
+    /// in its boxed ABI (#1589): `None` when the call's result is no
+    /// function, else the adapter to the call's ground type (`Ok(None)`:
+    /// it needs none), or why it has none.
+    fn hir_polyfn_ret_adapt(
+        &self,
+        hir: &HirBody,
+        emit: &HirEmit,
+        id: HirId,
+        f: HirId,
+        n: usize,
+    ) -> Option<Result<Option<HirClosureAdapt>, &'static str>> {
+        let ground = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
+        if !matches!(crate::typechecking::ty::strip_readonly(&ground), Ty::Fun(..)) {
+            return None;
+        }
+        let (scheme_ty, bounds) = match self.hir_polyfn_source(hir, emit, f) {
+            Some(source) => match self.checker.env().lookup(&source) {
+                Some(scheme) => (scheme.ty.clone(), scheme.bounds.clone()),
+                None => return Some(Err("callee-value")),
+            },
+            None => match Self::hir_forall_param_ty(hir, &self.checker, f) {
+                Some(Ty::Forall { bounds, body, .. }) => (*body, bounds),
+                _ => return Some(Err("callee-value")),
+            },
+        };
+        let mut cur = &scheme_ty;
+        let mut params = Vec::with_capacity(n);
+        for _ in 0..n {
+            let Ty::Fun(param, ret) = cur else {
+                return Some(Err("callee-value"));
+            };
+            params.push(param.as_ref().clone());
+            cur = ret;
+        }
+        Some(self.hir_closure_adapt(cur, &ground, &params, &bounds, 0))
+    }
+
+    /// The declared parameter count generic function `name`'s value records
+    /// (#1589): a constrained one's (`MakePolyFnCapture` carries it anyway)
+    /// or a curried one's (`fn konst<T>(T a) -> T -> T`, its value then
+    /// `MakePolyFnCapture` of no dictionaries); `None` for another's
+    /// (`MakePolyFn`), and for a rest function's.
+    pub(super) fn polyfn_params(&self, name: &str) -> Option<u32> {
+        let Some(&(arity, false)) = self.fn_arities.get(name) else {
+            return None;
+        };
+        if arity == 0 || arity >= 0x100 {
+            return None;
+        }
+        let curried = self.checker.fn_param_tys(name).is_some_and(|p| p.len() > arity as usize);
+        (curried || self.checker.dict_arity_for(name) > 0).then_some(arity)
+    }
+
     /// A `PolyFn` local's own type when it is a `forall` (a rank-n parameter).
     fn hir_forall_param_ty(hir: &HirBody, checker: &crate::typechecking::infer::Checker, f: HirId) -> Option<Ty> {
         let HirKind::Local(local) = hir.expr(f).kind else {
@@ -6585,11 +6655,12 @@ impl Compiler {
     /// Slot index and declared type of field `name` of the object `base`.
     fn hir_field(&self, hir: &HirBody, base: HirId, name: &str) -> Option<(FieldAt, Ty)> {
         let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, base)?);
-        // A record's fields go by name, each one boxed word as the AST's
-        // `MakeDict` stores it.
+        // A record's field is its slot among the fields sorted by name,
+        // each one boxed word.
         if let Ty::Record { fields } = crate::typechecking::ty::strip_readonly(&ty) {
             let (_, fty) = fields.iter().find(|(n, _)| n == name)?;
-            return (self.value_layout(fty) == ValueLayout::Boxed).then(|| (FieldAt::Name, fty.clone()));
+            let slot = fields.iter().filter(|(n, _)| n.as_str() < name).count() as u32;
+            return (self.value_layout(fty) == ValueLayout::Boxed).then(|| (FieldAt::Record(slot), fty.clone()));
         }
         if let Some(found) = self.hir_variant_field(&ty, name) {
             return Some(found);
@@ -7025,14 +7096,17 @@ impl Compiler {
                 // frame, and no type parameter nested in the callee's
                 // signature (its shared body would box `T` inside the
                 // `Option` or tuple it returns: E0127, #916). An enum result
-                // is the call's word, or its object (#1515).
+                // is the call's word, or its object (#1515). A closure
+                // result is adapted to the call's ground type (#1589).
                 if lower::polyfn_callee(hir, &self.checker, *f) {
                     let e = hir.expr(id);
-                    // A curried generic function's `PolyFn` called with more
-                    // arguments than it declares: a `PolyFn` does not record
-                    // its arity, so the call cannot hand the rest to the
-                    // function it returns (#1569).
+                    // A generic function's `PolyFn` that records no arity
+                    // (`MakePolyFn`, `polyfn_params`) called with more
+                    // arguments than it declares, as `id`'s at a function
+                    // type: the call cannot hand the rest to its result
+                    // (#1569). A curried one's records it (#1589).
                     if let Some(source) = self.hir_polyfn_source(hir, emit, *f)
+                        && self.polyfn_params(&source).is_none()
                         && let Some([candidate]) = self.checker.overload_candidates(&source)
                         && !candidate.is_rest
                         && candidate.fixed_arity < args.len()
@@ -7042,9 +7116,12 @@ impl Compiler {
                     }
                     let forwarded = self.forwarded_dicts_hint(e.node, e.span.0, e.span.1).is_some_and(|d| !d.is_empty());
                     let ty = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));
+                    let closure = self.hir_polyfn_ret_adapt(hir, emit, id, *f, args.len());
                     if forwarded
                         || self.hir_polyfn_nested(hir, emit, *f)
-                        || ty.as_ref().is_none_or(|t| !crate::hir::layout::ty_is_closed(t) && !self.hir_open_enum_word(t))
+                        || closure.as_ref().is_some_and(Result::is_err)
+                        || closure.is_none()
+                            && ty.as_ref().is_none_or(|t| !crate::hir::layout::ty_is_closed(t) && !self.hir_open_enum_word(t))
                     {
                         return Err("callee-value");
                     }

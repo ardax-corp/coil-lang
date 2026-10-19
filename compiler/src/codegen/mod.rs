@@ -340,9 +340,9 @@ pub struct Compiler {
     /// The generic function value (name, span) a body's HIR plan refused
     /// with `generic-fn-value`; reported as E0127 instead of E0801 (#916).
     generic_fn_value_refusal: std::cell::RefCell<Option<(String, (usize, usize))>>,
-    /// The curried generic function (name, call span) a body's call through
-    /// a `PolyFn` local gave more arguments than it declares; reported as
-    /// E0127 instead of E0801 (#1569).
+    /// The generic function (name, call span) a body's call through a
+    /// `PolyFn` local recording no arity gave more arguments than it
+    /// declares; reported as E0127 instead of E0801 (#1569, #1589).
     polyfn_over_application: std::cell::RefCell<Option<(String, (usize, usize))>>,
 
     /// Whole-program names used as function *values* (`Some` after the

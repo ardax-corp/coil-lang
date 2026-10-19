@@ -334,7 +334,9 @@ fn format_operands(
                 (o >> 24) & 1
             )
         }
-        Instruction::MakePolyFnCapture => format!("dicts={}", byte.operand_u32() & 0xFF),
+        Instruction::MakePolyFnCapture => {
+            format!("dicts={} params={}", byte.operand_u32() & 0xFF, (byte.operand_u32() >> 8) & 0xFF)
+        }
         Instruction::ResumeCoro => {
             format!("has_send={}", (byte.operand_u32() & 1) != 0)
         }
