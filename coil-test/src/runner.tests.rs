@@ -362,8 +362,14 @@ fn coverage_keeps_a_line_folding_would_erase() {
     let result = run_test_suite(ReportConfig::default(), &opts).expect("suite runs");
     assert_eq!((result.passed, result.failed), (1, 0));
     let lcov = result.coverage.expect("coverage collected").lcov();
-    assert!(lcov.contains("DA:2,1\n"), "the `let` line is covered: {lcov}");
-    assert!(lcov.contains("DA:3,1\n"), "the `return` line is covered: {lcov}");
+    // Hits count per instruction run: covered is any nonzero count.
+    let hits = |line: u32| {
+        lcov.lines()
+            .find_map(|l| l.strip_prefix(&format!("DA:{line},")))
+            .and_then(|n| n.parse::<u64>().ok())
+    };
+    assert!(hits(2).is_some_and(|n| n > 0), "the `let` line is covered: {lcov}");
+    assert!(hits(3).is_some_and(|n| n > 0), "the `return` line is covered: {lcov}");
     let _ = std::fs::remove_dir_all(&root);
 }
 

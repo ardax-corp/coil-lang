@@ -573,6 +573,8 @@ pub struct HirMirInput<'a> {
     pub opaque_vars: bool,
     /// A debugger reads the body's locals from their frame words.
     pub debugger: bool,
+    /// A coverage compile: each source line keeps the code it emits.
+    pub coverage: bool,
     /// The niche layout of a result the body returns boxed (a test body's
     /// `Result`): each return builds the `ObjEnum`.
     pub ret_boxed_niche: Option<ValueLayout>,
@@ -1130,6 +1132,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
         func.cleanup = Some(Box::new(cleanup));
     }
     func.debug_keep = inp.debugger;
+    func.keep_lines = inp.coverage;
     if inp.opaque_vars {
         opaque_moves_only(hir, inp)?;
         func.opaque_words = true;

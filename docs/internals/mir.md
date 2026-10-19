@@ -247,7 +247,12 @@ reads `x` twice). When it changes the body, `from_hir::tidy` drops the
 blocks a folded branch leaves unreachable (emit_lir's liveness is slow
 over them: 800 dead blocks took 2.8 s). Folding puts literal operands on
 trapping ops, so emit_lir keeps a may-trap op in order against memory
-writes (#856; `tests/codegen/overflow_trap_order_lir.hy`).
+writes (#856; `tests/codegen/overflow_trap_order_lir.hy`). A coverage
+compile (`Pipeline::set_keep_fns_in`) skips the LIR fold
+(`MirFunc::keep_lines`): coverage counts a line by the code it emits, and a
+line whose value folds into a later one would read as uncoverable, so
+`coil mutate` would skip its mutants. Dense bodies still run their MIR
+passes there, so a dense body can lose a line the same way (open).
 
 Hit bench `examples/perf/mir_lir_fold.hy` (`mix`: bit ops of `mask(-1)`
 called 2M times from a dense loop; release, `COIL_AUTO_PAR=0`, 15

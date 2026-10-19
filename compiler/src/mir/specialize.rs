@@ -637,8 +637,9 @@ fn lir_tail(
     // fold as they do on dense, whether or not the body has the arithmetic
     // dense pays for (#1434). Like `hir::fold`, at every level. A folded
     // branch leaves blocks nothing reaches: drop them, as lowering does
-    // (emit_lir's liveness is slow over them).
-    if crate::mir::instcombine_lir(&mut func) > 0 {
+    // (emit_lir's liveness is slow over them). A coverage compile keeps
+    // each line's code, so a line whose value folds still counts as run.
+    if !func.keep_lines && crate::mir::instcombine_lir(&mut func) > 0 {
         let order: Vec<_> = func.blocks.iter().map(|b| b.id).collect();
         super::from_hir::tidy(&mut func, &order);
     }
