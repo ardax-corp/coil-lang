@@ -35,7 +35,10 @@ impl PartialEq for TyInterner {
 impl Eq for TyInterner {}
 
 impl TyInterner {
+    /// Interns `ty` as its [`mono_key_ty`], so a variant's constructor
+    /// type and the enum's applied type are one key (#1477).
     pub fn intern(&mut self, ty: Ty) -> TyId {
+        let ty = mono_key_ty(&ty);
         if let Some(&id) = self.ids.get(&ty) {
             return id;
         }
@@ -47,6 +50,41 @@ impl TyInterner {
 
     pub fn get(&self, id: TyId) -> Option<&Ty> {
         self.tys.get(id.0 as usize)
+    }
+}
+
+/// The type a mono key names for `ty`: an enum value's type as its applied
+/// enum type, as an annotation spells it. A variant's constructor type
+/// (`Option::Some(1)`, `Pick::Zero`) is its owner's, and a structural sum
+/// is `Option<T>` / `Result<T, E>` for the builtins and the enum's name
+/// otherwise, so `f(Option::Some(1))`, `f(Option::None)` at `Option<int>`
+/// and `f(x)` with `Option<int> x` share one clone (#1477).
+pub fn mono_key_ty(ty: &Ty) -> Ty {
+    use crate::typechecking::ty::{option_app_ty, option_inner, result_app_ty, result_ok_err};
+    let rec = |items: &[Ty]| items.iter().map(mono_key_ty).collect::<Vec<_>>();
+    match ty {
+        Ty::Constructor { owner, .. } => mono_key_ty(owner),
+        Ty::Sum { name, .. } if common::is_builtin_option_enum(name) => match option_inner(ty) {
+            Some(inner) => option_app_ty(mono_key_ty(&inner)),
+            None => ty.clone(),
+        },
+        Ty::Sum { name, .. } if common::is_builtin_result_enum(name) => match result_ok_err(ty) {
+            Some((ok, err)) => result_app_ty(mono_key_ty(&ok), mono_key_ty(&err)),
+            None => ty.clone(),
+        },
+        Ty::Sum { name, .. } => Ty::Con(name.clone()),
+        Ty::App(head, args) => Ty::App(Box::new(mono_key_ty(head)), rec(args)),
+        Ty::Fun(a, b) => Ty::Fun(Box::new(mono_key_ty(a)), Box::new(mono_key_ty(b))),
+        Ty::Tuple(items) => Ty::Tuple(rec(items)),
+        Ty::Array { element, length } => Ty::Array {
+            element: Box::new(mono_key_ty(element)),
+            length: *length,
+        },
+        Ty::Record { fields } => Ty::Record {
+            fields: fields.iter().map(|(n, t)| (n.clone(), mono_key_ty(t))).collect(),
+        },
+        Ty::Readonly(inner) => Ty::Readonly(Box::new(mono_key_ty(inner))),
+        Ty::Var(_) | Ty::Con(_) | Ty::Existential { .. } | Ty::Forall { .. } | Ty::Never => ty.clone(),
     }
 }
 
@@ -108,7 +146,7 @@ impl MonoPlan {
                     .arg_types
                     .iter()
                     .zip(arg_types)
-                    .all(|(id, ty)| self.intern.get(*id) == Some(ty))
+                    .all(|(id, ty)| self.intern.get(*id) == Some(&mono_key_ty(ty)))
         })
     }
 
@@ -118,7 +156,7 @@ impl MonoPlan {
         self.specializations.iter().find(|spec| {
             spec.fn_name == fn_name
                 && spec.key.subst.len() == subst.len()
-                && spec.key.subst.iter().zip(subst).all(|(id, ty)| self.intern.get(*id) == Some(ty))
+                && spec.key.subst.iter().zip(subst).all(|(id, ty)| self.intern.get(*id) == Some(&mono_key_ty(ty)))
         })
     }
 
@@ -447,6 +485,9 @@ fn candidate_for_call(
     if sig.type_params.is_empty() {
         return None;
     }
+    // Argument and call types as keys name them, so `same(Option::Some(1),
+    // Option::None)` binds `T` once (#1477).
+    let ty_of = &|e: &Output| ty_of(e).map(|ty| mono_key_ty(&ty));
 
     // Ground calls specialize to a direct CALL. Dictionaries stay on the
     // shared generic body when a type argument is still a parameter.
@@ -1296,7 +1337,9 @@ mod tests {
             plan.ty(ids[0].key.subst[0]),
             Some(&Ty::App(Box::new(Ty::Con("Option".into())), vec![Ty::Con("int".into())]))
         );
-        assert_eq!(plan.retargets.len(), 2);
+        // All three calls go to that clone.
+        assert_eq!(plan.retargets.len(), 3);
+        assert!(plan.retargets.iter().all(|r| r.key == ids[0].key));
     }
 
     #[test]
