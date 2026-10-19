@@ -61,7 +61,7 @@ test("an Eq bound through a shared body") {
 }
 
 test("hash of tuples and arrays") {
-    assert!((1, 2).hash() == combine(1.hash(), 2.hash()), (1, 2).hash());
+    assert!((1, 2).hash() == combine(1.hash(), 2.hash()));
     assert!((1, 2).hash() == (1, 2).hash());
     assert!(("a", true, 3).hash() == combine(combine("a".hash(), true.hash()), 3.hash()));
     assert!([1, 2, 3].hash() == combine(combine(1.hash(), 2.hash()), 3.hash()));
