@@ -479,6 +479,11 @@ pub struct Compiler {
     /// the first context dictionary in `__dict0` and how many there are.
     /// The method prologue unpacks them into `__dict1..` (#551).
     pending_instance_ctx: Option<(usize, usize)>,
+    /// Set while compiling a trait method with bounds of its own (`fn
+    /// third<W: Show>`): the frame index of the first one's dictionary and
+    /// how many there are. They are parameters after the instance's own
+    /// dictionary (`__dict0`), which the method then always takes (#1471).
+    pending_own_dicts: Option<(usize, usize)>,
     /// Ground instance methods that take their arguments raw (their
     /// `$dict` adapter unboxes for dictionary callers).
     raw_instance_methods: HashSet<String>,
@@ -760,6 +765,7 @@ impl Default for Compiler {
             mono_codegen_var_types: Vec::new(),
             mono_type_param_tys: Vec::new(),
             pending_instance_ctx: None,
+            pending_own_dicts: None,
             raw_instance_methods: HashSet::new(),
             interned_dicts: HashMap::new(),
             raw_instance_call: false,

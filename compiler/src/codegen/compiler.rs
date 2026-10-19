@@ -1592,9 +1592,12 @@ impl Compiler {
         // layout and the shared entry's boxed one differ; keep the shared
         // entry there. (An inherent method's call site planned the clone's
         // own layouts.)
+        // A method with bounds of its own takes their dictionaries, which a
+        // clone (no dictionary) has no room for (#1471).
         if !inherent
             && (self.trait_method_boundary_sig(&class, &method, lookup, false).is_some()
-                || self.checker.typeclass_method_scheme(&class, &method).is_none())
+                || self.checker.typeclass_method_scheme(&class, &method).is_none()
+                || !self.trait_method_own_bounds(&class, &method).is_empty())
         {
             return None;
         }
@@ -1752,6 +1755,7 @@ impl Compiler {
                     let prev_idx = std::mem::replace(&mut self.emit_idx, idx);
                     let prev_mono = std::mem::replace(&mut self.compiling_mono_clone, true);
                     let prev_ctx = self.pending_instance_ctx.take();
+                    let prev_own = self.pending_own_dicts.take();
                     self.mono_codegen_var_types.push(HashMap::new());
                     self.mono_type_param_tys.push(names);
                     self.mono_var_tys.push(vars);
@@ -1769,6 +1773,7 @@ impl Compiler {
                     self.mono_type_param_tys.pop();
                     self.mono_codegen_var_types.pop();
                     self.pending_instance_ctx = prev_ctx;
+                    self.pending_own_dicts = prev_own;
                     self.compiling_mono_clone = prev_mono;
                     self.emit_idx = prev_idx;
                     if let Some((method, namespace, qualified)) = inherent {
@@ -2123,11 +2128,16 @@ impl Compiler {
         }
         // A raw method has no context and is no default body: it never
         // reads its dictionary, and a redirected direct call passes none.
+        // The dictionaries of the method's own bounds follow the trailing
+        // one (#1471; such a method is never raw).
         let arity = if raw {
             nparams
         } else {
-            self.bytecode.push_load(nparams); // trailing dictionary
-            nparams + 1
+            let own = self.trait_method_own_bounds(class, method).len() as u32;
+            for slot in nparams..=nparams + own {
+                self.bytecode.push_load(slot); // trailing dictionaries
+            }
+            nparams + 1 + own
         };
         self.raw_instance_call = raw;
         if !self.emit_named_entry_on_module(fqn, arity, crate::il::EntryKind::Call) {
@@ -3116,7 +3126,27 @@ impl Compiler {
     /// bounded generic instance's method reads its context dictionaries from
     /// it (#551).
     fn instance_call_takes_dict(&self, class: &str, method: &str, fqn: &str) -> bool {
-        Self::is_default_method_fqn(class, method, fqn) || self.instance_context_len(fqn) > 0
+        Self::is_default_method_fqn(class, method, fqn)
+            || self.instance_context_len(fqn) > 0
+            || !self.trait_method_own_bounds(class, method).is_empty()
+    }
+
+    /// The bounds trait method `class::method` declares on its own type
+    /// parameters (`fn third<W: Show>`), after the trait's constraint in its
+    /// scheme. A call passes their dictionaries after the instance's, which
+    /// it then always passes (#1471).
+    pub(super) fn trait_method_own_bounds(&self, class: &str, method: &str) -> Vec<crate::typechecking::ty::Constraint> {
+        self.checker
+            .typeclass_method_scheme(class, method)
+            .map_or_else(Vec::new, |scheme| scheme.constraints.iter().skip(1).cloned().collect())
+    }
+
+    /// `(first frame index, count)` of trait method `class::method`'s own
+    /// bounds' dictionaries when it has any: they follow the trait's own
+    /// dictionary and the instance's context ones (`base` of them in all).
+    fn own_dict_layout(&self, class: &str, method: &str, base: usize) -> Option<(usize, usize)> {
+        let n = self.trait_method_own_bounds(class, method).len();
+        (n > 0).then_some((base, n))
     }
 
     /// `(first context slot, context count)` in the dictionary of the
@@ -4841,6 +4871,7 @@ impl Compiler {
         source: Option<&str>,
     ) {
         let _method_id = self.next_emit_id();
+        let own_dicts = self.pending_own_dicts.take();
         let Expression::Function {
             docs: _,
             name,
@@ -4911,6 +4942,14 @@ impl Compiler {
         }
         for dict_idx in 0..dict_arity {
             self.context.variables.intern(format!("__dict{}", dict_idx));
+        }
+        // A trait method's own bounds: dictionary parameters after the
+        // instance's (#1471).
+        if let Some((base, n)) = own_dicts {
+            self.context.variables.intern("__dict0".to_string());
+            for i in 0..n {
+                self.context.variables.intern(format!("__dict{}", base + i));
+            }
         }
         let entry_sp = self.context.variables.len() as u32;
         // Direct MIR unboxes the arguments the prologue unboxes
@@ -6930,6 +6969,7 @@ impl Compiler {
                                         method_name,
                                     );
                                 self.note_inst_clone_compiled(&fqn);
+                                self.pending_own_dicts = self.own_dict_layout(name, method_name, 1);
                                 self.compile_function_output_with_name(method, fqn, &[], 1, None);
                             } else {
                                 self.consume_function_signature_output(method);
@@ -6980,6 +7020,7 @@ impl Compiler {
                             };
                             self.pin_trait_method_pair_return(class, method_name, &arg_tys, &fqn);
                             self.pending_instance_ctx = self.instance_ctx_layout(class, &fqn);
+                            self.pending_own_dicts = self.own_dict_layout(class, method_name, 1 + self.instance_context_len(&fqn));
                             self.note_inst_clone_compiled(&fqn);
                             self.compile_function_output_with_name(method, fqn.clone(), &unbox_tys, usize::from(!raw), None);
                             self.emit_dict_adapter_thunk(class, method_name, &arg_tys, &fqn);
@@ -7008,6 +7049,8 @@ impl Compiler {
                                     &fqn,
                                 );
                                 self.pending_instance_ctx = self.instance_ctx_layout(class, &fqn);
+                                self.pending_own_dicts =
+                                    self.own_dict_layout(class, method_name, 1 + self.instance_context_len(&fqn));
                                 self.note_inst_clone_compiled(&fqn);
                                 self.compile_function_output_with_name(
                                     body,

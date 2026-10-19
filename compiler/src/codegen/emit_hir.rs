@@ -83,6 +83,19 @@ struct HirCall {
     /// A mono clone call: the generic function's name and its type
     /// variables bound to this call's types, for typed inlining.
     mono_of: Option<Box<(String, HashMap<crate::typechecking::ty::TyVarId, Ty>)>>,
+    /// A trait method with bounds of its own (`fn third<W: Show>`): their
+    /// dictionaries, passed after the instance's (#1471).
+    own_dicts: Vec<HirOwnDict>,
+}
+
+/// A dictionary a call passes for one of a trait method's own bounds.
+#[derive(Clone)]
+pub(super) enum HirOwnDict {
+    /// One of the frame's dictionaries (`__dictN`), by slot: an open goal
+    /// the checker forwards.
+    Frame(u32),
+    /// A ground goal's instance dictionary.
+    Ground { class: String, lookup: Vec<Ty> },
 }
 
 /// A call of an inherent method's clone at ground type arguments
@@ -1782,6 +1795,7 @@ impl Compiler {
                 (call.mono && !instances.contains_key(&id.0), "mono"),
                 (call.generic.is_some(), "generic"),
                 (call.instance.as_ref().is_some_and(|i| i.args.iter().any(Self::ty_has_var)), "instance"),
+                (!call.own_dicts.is_empty(), "own-bounds"),
                 (!call.ranges.is_empty(), "ranges"),
                 (self.coroutine_fns.contains(&call.key), "coroutine"),
                 // An auto-parallel callee's call runs its split worker.
@@ -2916,6 +2930,7 @@ impl Compiler {
                 instance: None,
                 ranges: Vec::new(),
                 mono_of: None,
+                own_dicts: Vec::new(),
             });
         }
         let node = hir.expr(call);
@@ -2942,7 +2957,7 @@ impl Compiler {
         // shared body ([`Self::hir_generic_abi`]); a mono clone or a plain
         // function takes none, as on the AST.
         let forwards = self.forwarded_dicts_hint(node.node, start, end).is_some_and(|d| !d.is_empty() && !self.hir_clone_drops_forwarded(&d));
-        if !forwards && let Some(call) = self.hir_ground_ufcs(hir, call, name)? {
+        if let Some(call) = self.hir_ground_ufcs(hir, call, name, forwards)? {
             return Ok(call);
         }
         let overload = self.sidecar_overload(node.node, start, end);
@@ -3088,6 +3103,7 @@ impl Compiler {
             instance: None,
             ranges: Vec::new(),
             mono_of: None,
+            own_dicts: Vec::new(),
         }))
     }
 
@@ -3144,6 +3160,7 @@ impl Compiler {
             instance: None,
             ranges: Vec::new(),
             mono_of: None,
+            own_dicts: Vec::new(),
         }))
     }
 
@@ -3218,6 +3235,7 @@ impl Compiler {
             instance: None,
             ranges: Vec::new(),
             mono_of: None,
+            own_dicts: Vec::new(),
         })
     }
 
@@ -3274,6 +3292,7 @@ impl Compiler {
             instance: None,
             ranges: Vec::new(),
             mono_of: None,
+            own_dicts: Vec::new(),
         })
     }
 
@@ -3433,6 +3452,7 @@ impl Compiler {
             instance: None,
             ranges: Vec::new(),
             mono_of: Some(Box::new((lookup.to_string(), self.hir_mono_var_map(map)))),
+            own_dicts: Vec::new(),
         })
     }
 
@@ -3560,6 +3580,7 @@ impl Compiler {
             instance: None,
             ranges: Vec::new(),
             mono_of: None,
+            own_dicts: Vec::new(),
         })
     }
 
@@ -3637,7 +3658,7 @@ impl Compiler {
         if overload.is_some() && forwards {
             return Err("callee-overload");
         }
-        if !forwards && let Some(call) = self.resolve_hir_instance_method(hir, call, method, args)? {
+        if let Some(call) = self.resolve_hir_instance_method(hir, call, method, args, forwards)? {
             return Ok(call);
         }
         let recv = *args.first().ok_or("method-receiver")?;
@@ -3675,6 +3696,7 @@ impl Compiler {
                 instance: None,
                 ranges: Vec::new(),
                 mono_of: None,
+                own_dicts: Vec::new(),
             });
         }
         // A generic class's methods are one shared body (no mono clones):
@@ -3746,12 +3768,15 @@ impl Compiler {
     /// `recv.method(args)` the typechecker discharged to a ground trait
     /// instance (`call_dicts_at`), checked before inherent methods as in
     /// `compile_call_expr`.
+    /// The dictionaries a generic body forwards (`forwards`) reach only a
+    /// method with bounds of its own (#1471).
     fn resolve_hir_instance_method(
         &self,
         hir: &HirBody,
         call: HirId,
         method: &str,
         args: &[HirId],
+        forwards: bool,
     ) -> Result<Option<HirCall>, &'static str> {
         let node = hir.expr(call);
         let (start, end) = node.span;
@@ -3766,6 +3791,10 @@ impl Compiler {
         else {
             return Ok(None);
         };
+        if forwards && self.trait_method_own_bounds(&class, method).is_empty() {
+            return Ok(None);
+        }
+        let own_dicts = self.hir_own_dicts(hir, call, &class, method, args, 0)?;
         // A pair return has its own ABI. (An open goal resolves its
         // dictionary from scope when the call is emitted, as on the AST.)
         if self.two_word_return_kind(&fqn).is_some() {
@@ -3804,6 +3833,7 @@ impl Compiler {
             })),
             ranges: Vec::new(),
             mono_of: None,
+            own_dicts,
         }))
     }
 
@@ -3847,6 +3877,7 @@ impl Compiler {
                 instance: None,
                 ranges: Vec::new(),
                 mono_of: None,
+                own_dicts: Vec::new(),
             });
         }
         // An overload-keyed entry would be picked over the bare thunk.
@@ -3869,6 +3900,7 @@ impl Compiler {
             instance: None,
             ranges: Vec::new(),
             mono_of: None,
+            own_dicts: Vec::new(),
         })
     }
 
@@ -3904,6 +3936,7 @@ impl Compiler {
             instance: None,
             ranges: Vec::new(),
             mono_of: None,
+            own_dicts: Vec::new(),
         })
     }
 
@@ -3998,6 +4031,9 @@ impl Compiler {
         };
         let params = args.iter().map(|&arg| word(arg)).collect::<Result<Vec<_>, _>>()?;
         let ret = word(call)?;
+        // The checker forwards the bound's dictionary first.
+        let method_name = name.rsplit_once(['.', ':']).map_or(name, |(_, m)| m);
+        let own_dicts = self.hir_own_dicts(hir, call, &hint.class, method_name, args, 1)?;
         Ok(Some(HirCall {
             key: String::new(),
             pair: None,
@@ -4013,6 +4049,7 @@ impl Compiler {
             instance: None,
             ranges: Vec::new(),
             mono_of: None,
+            own_dicts,
         }))
     }
 
@@ -4120,6 +4157,7 @@ impl Compiler {
         let is_default = Self::is_default_method_fqn(&instance.class, method, &fqn);
         let sig = self.trait_method_boundary_sig(&instance.class, method, &lookup, is_default);
         let (params, ret) = self.hir_ground_words(hir, call, args, &fqn, sig.as_ref())?;
+        let own_dicts = self.hir_own_dicts(hir, call, &instance.class, method, args, 1)?;
         let unbox = self
             .instance_method_unbox_tys(&instance.class, method, &lookup)
             .into_iter()
@@ -4146,13 +4184,16 @@ impl Compiler {
             })),
             ranges: Vec::new(),
             mono_of: None,
+            own_dicts,
         })
     }
 
     /// A ground function-style trait call `m(x, ..)`: the typechecker
     /// discharged the instance into `sidecar_dicts` (only when no function or
     /// local has that name), called directly as `compile_call_expr` does.
-    fn hir_ground_ufcs(&self, hir: &HirBody, call: HirId, name: &str) -> Result<Option<HirCall>, &'static str> {
+    /// The dictionaries a generic body forwards (`forwards`) reach only a
+    /// method with bounds of its own (#1471).
+    fn hir_ground_ufcs(&self, hir: &HirBody, call: HirId, name: &str, forwards: bool) -> Result<Option<HirCall>, &'static str> {
         let node = hir.expr(call);
         let (start, end) = node.span;
         let known = |k: &str| self.functions.contains_key(k) || self.fn_entry_labels.contains_key(k);
@@ -4184,6 +4225,9 @@ impl Compiler {
         else {
             return Ok(None);
         };
+        if forwards && self.trait_method_own_bounds(&class, method).is_empty() {
+            return Ok(None);
+        }
         self.hir_ground_direct(hir, call, class, inst_args, fqn, method).map(Some)
     }
 
@@ -4262,6 +4306,7 @@ impl Compiler {
             return Err("callee-trait");
         }
         let (params, ret) = self.hir_ground_words(hir, call, args, &fqn, sig.as_ref())?;
+        let own_dicts = self.hir_own_dicts(hir, call, &class, method, args, 0)?;
         // Box the positions the instance entry unboxes, except heap words.
         let unbox = self.instance_method_unbox_tys(&class, method, &inst_args);
         let boxed = args
@@ -4294,6 +4339,7 @@ impl Compiler {
             })),
             ranges: Vec::new(),
             mono_of: None,
+            own_dicts,
         })
     }
 
@@ -4355,6 +4401,7 @@ impl Compiler {
             instance: None,
             ranges: Vec::new(),
             mono_of: None,
+            own_dicts: Vec::new(),
         })
     }
 
@@ -4484,6 +4531,7 @@ impl Compiler {
             instance: None,
             ranges: Vec::new(),
             mono_of: None,
+            own_dicts: Vec::new(),
         })
     }
 
@@ -4586,6 +4634,7 @@ impl Compiler {
                 instance: None,
                 ranges: Vec::new(),
                 mono_of: None,
+                own_dicts: Vec::new(),
             });
         }
         let mut param_tys = self.checker.fn_param_tys(&lookup).ok_or("callee-signature")?;
@@ -4671,6 +4720,7 @@ impl Compiler {
             instance: None,
             ranges,
             mono_of: None,
+            own_dicts: Vec::new(),
         })
     }
 
@@ -4816,21 +4866,66 @@ impl Compiler {
     }
 
     /// Whether the frame holds dictionary `i` as the checker numbered it
-    /// for a call forwarding it. A trait method's own bounded type
-    /// parameters (`fn third<W: Show>`) have no dictionary in its frame
-    /// yet: a default body numbers them after the trait's own `__dict0`
-    /// and an instance method after its context ones, past every slot,
-    /// while a context-free instance method numbers them from 0, where its
-    /// `__dict0`, when it has one, is the instance's own (#1471).
+    /// for a call forwarding it. A trait method numbers its own bounds
+    /// (`fn third<W: Show>`) after the trait's own dictionary and the
+    /// instance's context ones, and has them as parameters when the trait
+    /// declares them too (#1471); a bound only the instance declares has
+    /// none.
     fn hir_frame_dict(&self, i: usize) -> bool {
         self.lookup_slot(&format!("__dict{i}")).is_some()
-            && !self.current_function_table_key.as_deref().is_some_and(|key| {
-                self.checker
-                    .generics()
-                    .instances
-                    .iter()
-                    .any(|inst| inst.context.is_empty() && inst.method_fqns.values().any(|f| f == key))
+    }
+
+    /// The dictionaries call `call` (`args`, receiver first) passes for
+    /// trait method `class::method`'s own bounds, in their order: a ground
+    /// goal's instance dictionary, or for an open one the frame's
+    /// dictionary the checker forwards. The first `skip` it forwards serve
+    /// the trait's own goal (a call through a bound's dictionary) (#1471).
+    fn hir_own_dicts(
+        &self,
+        hir: &HirBody,
+        call: HirId,
+        class: &str,
+        method: &str,
+        args: &[HirId],
+        skip: usize,
+    ) -> Result<Vec<HirOwnDict>, &'static str> {
+        let bounds = self.trait_method_own_bounds(class, method);
+        if bounds.is_empty() {
+            return Ok(Vec::new());
+        }
+        let scheme = self.checker.typeclass_method_scheme(class, method).ok_or("callee-trait")?;
+        let (params, ret) = Self::fun_param_and_ret_tys(&scheme.ty);
+        if params.len() != args.len() {
+            return Err("callee-trait");
+        }
+        let subst = self.checker.subst();
+        let mut vars = HashMap::new();
+        for (param, &arg) in params.iter().zip(args) {
+            let ty = Self::hir_ty(hir, arg).ok_or("callee-signature")?;
+            Self::bind_scheme_vars(param, &apply_ty_prune(subst, ty), &mut vars);
+        }
+        if let Some(ty) = Self::hir_ty(hir, call) {
+            Self::bind_scheme_vars(&ret, &apply_ty_prune(subst, ty), &mut vars);
+        }
+        let node = hir.expr(call);
+        let mut forwarded = self
+            .forwarded_dicts_hint(node.node, node.span.0, node.span.1)
+            .unwrap_or_default()
+            .into_iter()
+            .skip(skip);
+        bounds
+            .iter()
+            .map(|c| match Self::resolve_constraint_lookup(c, &vars, &self.checker) {
+                Some(lookup) => {
+                    self.checker.generics().find_instance_relaxed(&c.class, &lookup).ok_or("callee-trait")?;
+                    Ok(HirOwnDict::Ground { class: c.class.clone(), lookup })
+                }
+                None => {
+                    let i = forwarded.next().ok_or("callee-trait")?;
+                    self.lookup_slot(&format!("__dict{i}")).map(HirOwnDict::Frame).ok_or("callee-trait")
+                }
             })
+            .collect()
     }
 
     /// A clone has no dictionaries to forward: its types are ground, so a

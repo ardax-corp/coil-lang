@@ -522,10 +522,16 @@ impl Compiler {
             },
             _ => None,
         };
+        // A trait method's own bounds' dictionaries follow the bound's.
+        let own = match &e.kind {
+            HirKind::Call { .. } => emit.plan.calls.get(&id.0).map(|c| c.own_dicts.clone()).unwrap_or_default(),
+            _ => Vec::new(),
+        };
         if let Some((dict, method)) = bound
             && self.hir_mir_dict_param(dict)
+            && let Some(dicts) = self.hir_mir_own_dicts(&own)
         {
-            t.bound_calls.insert(id.0, crate::mir::HirBoundCall { dict, method });
+            t.bound_calls.insert(id.0, crate::mir::HirBoundCall { dict, method, dicts });
         }
         if let HirKind::Call { .. } = e.kind
             && !emit.plan.lens.contains_key(&id.0)
@@ -1011,7 +1017,10 @@ impl Compiler {
                 this.plan_call_instance_dict(&mut steps, (&inst.class, method, &key), &inst.args, span.0..span.1);
                 steps
             });
-            let dicts = self.hir_mir_dict_program(&steps);
+            let dicts = self.hir_mir_dict_program(&steps).and_then(|mut d| {
+                d.extend(self.hir_mir_own_dicts(&call.own_dicts)?);
+                Some(d)
+            });
             let raw = self.raw_instance_methods.contains(&key);
             self.raw_instance_call = raw;
             let target = self.named_entry_target(&key, true);
@@ -1093,6 +1102,16 @@ impl Compiler {
                         d
                     })
                 });
+            }
+            // A trait method's own bounds' dictionaries follow the
+            // instance's (#1471).
+            if let Some(d) = dicts.as_mut()
+                && !call.own_dicts.is_empty()
+            {
+                match self.hir_mir_own_dicts(&call.own_dicts) {
+                    Some(own) => d.extend(own),
+                    None => dicts = None,
+                }
             }
             let coro = self.coroutine_fns.contains(&key);
             self.hir_request_method_clone(&key);
@@ -1358,6 +1377,34 @@ impl Compiler {
         Some(ops)
     }
 
+    /// The dictionaries a call passes for a trait method's own bounds, as
+    /// a program ([`super::HirOwnDict`]): `None` when
+    /// one is a frame dictionary that is no parameter, or a ground one has
+    /// no instance dictionary.
+    fn hir_mir_own_dicts(&mut self, own: &[super::HirOwnDict]) -> Option<Vec<crate::mir::HirDictOp>> {
+        if own.is_empty() {
+            return Some(Vec::new());
+        }
+        let mut steps = Vec::new();
+        for dict in own {
+            match dict {
+                super::HirOwnDict::Frame(slot) => {
+                    if !self.hir_mir_dict_param(*slot) {
+                        return None;
+                    }
+                    steps.push(DictStep::Load(*slot));
+                }
+                super::HirOwnDict::Ground { class, lookup } => {
+                    let (class, lookup) = (class.clone(), lookup.clone());
+                    if !self.hir_mir_once(|this| this.plan_instance_dict(&mut steps, &class, &lookup)) {
+                        return None;
+                    }
+                }
+            }
+        }
+        self.hir_mir_dict_program(&steps)
+    }
+
     /// Whether frame slot `slot` is one of this body's dictionary
     /// parameters (a `__dictN` below its entry words), which direct MIR
     /// reads as that parameter. An instance's context dictionaries the
@@ -1590,6 +1637,9 @@ impl Compiler {
                 })
             }
             HirKind::Call { args, .. } if !emit.plan.lens.contains_key(&id.0) && let Some(call) = emit.plan.calls.get(&id.0) => {
+                if call.own_dicts.iter().any(|d| matches!(d, super::HirOwnDict::Frame(slot) if !self.hir_mir_dict_param(*slot))) {
+                    return true;
+                }
                 match &call.builtin {
                     Some(HirBuiltin::Bound { dict, .. }) => return !self.hir_mir_dict_param(*dict),
                     Some(HirBuiltin::Format) => return self.hir_mir_format_dict_reads(hir, args),
