@@ -4959,3 +4959,32 @@ fn lir_copy_sources_about_linear_over_rebinding_joins() {
     // Linear is ~8x.
     assert!(large <= 24 * small.max(1), "800 arms stepped {large} values, 100 stepped {small}");
 }
+
+/// `CONST 0; STORE` pairs in LIR: the GC clears ([`emit::push_clear_word`]).
+fn lir_clear_words(ops: &[IlOp]) -> usize {
+    ops.windows(2)
+        .filter(|w| {
+            matches!(w[0], IlOp::Const { imm: 0, .. })
+                && matches!(&w[1], IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::STORE)
+        })
+        .count()
+}
+
+/// #1519: a chain of joins that rebind a heap word zeroes about a constant
+/// number of registers per join. Each taken arm zeroed every register an
+/// earlier value of the chain lived in, twice: ~n² clears.
+#[test]
+fn lir_clears_about_linear_over_rebinding_joins() {
+    let clears = |n: usize| {
+        let text = reachable_rebind_arms(n);
+        let f = parse_func(&text).expect(&text);
+        f.verify().unwrap();
+        let mut pool = Vec::new();
+        lir_clear_words(&emit_lir(&f, Some(Label(0)), &mut pool, true).expect("LIR emits"))
+    };
+    let small = clears(25);
+    let large = clears(100);
+    assert!(small > 0, "the arms clear the rebound word");
+    // Linear is ~4x.
+    assert!(large <= 8 * small, "100 arms cleared {large} words, 25 cleared {small}");
+}
