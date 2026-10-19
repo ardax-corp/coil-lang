@@ -329,9 +329,9 @@ fn main() {
             m.code() == Some(ErrorCode::UnknownFunction)
                 && m.help()
                     .as_ref()
-                    .is_some_and(|h| h.contains("use task::{block_on};"))
+                    .is_some_and(|h| h.contains("use task::block_on;"))
         }),
-        "expected E0101 naming `use task::{{block_on}};`, got: {:?}",
+        "expected E0101 naming `use task::block_on;`, got: {:?}",
         msgs.iter()
             .map(|m| (m.code(), m.message(), m.help()))
             .collect::<Vec<_>>()

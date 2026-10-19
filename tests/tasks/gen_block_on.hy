@@ -1,7 +1,7 @@
 // `task::block_on(h)` resumes `h` until it is done and gives its last
 // resumed word, for int, string and float results and a body that yields
 // first.
-use task::{block_on};
+use task::block_on;
 use tests::assert;
 
 gen fn three() -> int {

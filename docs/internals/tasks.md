@@ -210,4 +210,4 @@ functions); a partial application is not sendable.
   Example: [`examples/task_files.hy`](../../examples/task_files.hy).
 - `task::block_on(h)` is plain library code in `task.hy`: it resumes `h`
   until `done(h)` and returns the completion value. It is not a prelude
-  builtin; a bare `block_on` without `use task::{block_on};` is `E0101`.
+  builtin; a bare `block_on` without `use task::block_on;` is `E0101`.

@@ -5776,7 +5776,7 @@ impl Checker {
             }
             None => {
                 // The prelude `block_on` moved to the `task` module.
-                let help = (ident == "block_on").then(|| "`block_on` is in the `task` module now: add `use task::{block_on};`".to_string());
+                let help = (ident == "block_on").then(|| "`block_on` is in the `task` module now: add `use task::block_on;`".to_string());
                 return self.error_with_help(
                     ErrorCode::UnknownFunction,
                     format!("Cannot find function `{}`", ident),

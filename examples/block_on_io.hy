@@ -5,7 +5,7 @@
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};
-use task::{block_on};
+use task::block_on;
 
 gen fn greet() -> int {
     yield 1;
