@@ -656,6 +656,11 @@ pub struct Checker {
     /// Typeclass currently being defined (Phase 6 — bare/`Class::` assoc resolution).
     current_typeclass: Option<String>,
 
+    /// Bare name of the trait instance method whose body is being inferred.
+    /// Its recursion binding does not shadow a ground function-style trait
+    /// call: `third(4, w)` in `Pass for Box<T>`'s `third` is `int`'s (#1483).
+    current_instance_method: Option<String>,
+
     /// Set to `true` only when `infer_function` is called for a genuine
     /// top-level user function (not a trait prototype, typeclass impl method,
     /// or class impl method). Checked inside `infer_function` to decide

@@ -65,6 +65,9 @@ pub struct MirFunc {
     /// A debugger reads the body's locals: each `debug_slots` value keeps
     /// a frame word of its own, never an inline operand.
     pub debug_keep: bool,
+    /// A coverage compile counts a line covered when code it emits runs:
+    /// LIR keeps the code of each line instead of folding it away.
+    pub keep_lines: bool,
     /// Implicit + explicit leave / stop sites (I7 / C3). Not archive-encoded.
     pub deopt_sites: Vec<DeoptSite>,
     /// An `i64` may be a type variable's word, a raw scalar or a box: the
@@ -155,6 +158,7 @@ impl MirFunc {
             term_locs: HashMap::new(),
             debug_slots: HashMap::new(),
             debug_keep: false,
+            keep_lines: false,
             deopt_sites: Vec::new(),
             heap_slots: BTreeSet::new(),
             word_slots: BTreeSet::new(),
@@ -849,11 +853,6 @@ impl MirFunc {
                 }
                 if !self.ty(*src).is_specialized() {
                     return Err(format!("{dest} Stringify src type"));
-                }
-            }
-            MirInst::TagArrayKind { dest, src, .. } => {
-                if self.ty(*dest) != MirTy::HeapRef || self.ty(*src) != MirTy::HeapRef {
-                    return Err(format!("{dest} TagArrayKind type"));
                 }
             }
             MirInst::Unbox { dest, src, .. } => {
