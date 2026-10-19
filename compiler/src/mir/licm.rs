@@ -283,23 +283,34 @@ fn loop_body(preds: &[Vec<BlockId>], latch: BlockId, header: BlockId) -> HashSet
 
 /// What a loop may change while it runs.
 struct LoopEffects {
-    /// A store, an append, or code that may write: an impure call or
-    /// native, a coroutine step.
-    heap: bool,
+    /// An element store, an append, or code that may write: an impure
+    /// call or native, a coroutine step.
+    elements: bool,
+    /// A field store, or code that may write. An element store does not
+    /// change a field, nor a field store an element (#1559).
+    fields: bool,
     /// An append, or code that may append; with lengths not steady, any
     /// allocation too (a finalizer may resize).
     lengths: bool,
 }
 
+impl LoopEffects {
+    /// Any store: elements or fields.
+    fn heap(&self) -> bool {
+        self.elements || self.fields
+    }
+}
+
 fn loop_effects(func: &MirFunc, lp: &LoopInfo) -> LoopEffects {
-    let mut fx = LoopEffects { heap: false, lengths: false };
+    let mut fx = LoopEffects { elements: false, fields: false, lengths: false };
     let calls = func.call_facts();
     for b in &func.blocks {
         if !lp.blocks.contains(&b.id) {
             continue;
         }
         for inst in &b.insts {
-            fx.heap |= inst.writes_heap(&calls);
+            fx.elements |= inst.writes_elements(&calls);
+            fx.fields |= inst.writes_fields(&calls);
             fx.lengths |= inst.may_resize(&calls);
         }
     }
@@ -737,18 +748,18 @@ fn motion(
         MirInst::HostInvoke { native_id, .. } => free(super::effects::host_may_hoist(*native_id)),
         // A checked read traps out of bounds; an unchecked one was proven
         // in bounds where it is.
-        MirInst::Index { .. } => (!fx.heap && !fx.lengths).then_some(Motion::Traps),
+        MirInst::Index { .. } => (!fx.elements && !fx.lengths).then_some(Motion::Traps),
         MirInst::ArrayLen { .. } => free(!fx.lengths),
-        MirInst::HeapFieldLoad { .. } => free(!fx.heap),
+        MirInst::HeapFieldLoad { .. } => free(!fx.fields),
         MirInst::Call { dest, args, .. } if func.pure_calls.contains(dest) => {
             let reads_heap = args.iter().any(|a| super::cse::reads_heap(func.ty(*a)));
-            (!reads_heap || !fx.heap && !fx.lengths).then_some(Motion::Traps)
+            (!reads_heap || !fx.heap() && !fx.lengths).then_some(Motion::Traps)
         }
         MirInst::Alloc {
             kind: super::inst::MirAllocKind::Array | super::inst::MirAllocKind::Tuple,
             ..
         }
-        | MirInst::GcBarrier { .. } => free(dense && !fx.heap),
+        | MirInst::GcBarrier { .. } => free(dense && !fx.heap()),
         MirInst::String { .. } | MirInst::CodePtr { .. } => free(dense),
         _ => None,
     }
@@ -1349,6 +1360,48 @@ bb5:
         assert!(licm(&mut f, false) >= 1);
         f.verify().unwrap();
         assert_eq!(in_loop(&f, |i| matches!(i, MirInst::ArrayLen { .. })), 0);
+    }
+
+    #[test]
+    fn field_read_moves_past_element_stores() {
+        let mut f = counted(
+            "v0: i64, v1: heapref, v10: heapref",
+            "    v6 = heaploadfield v10, 0\n    v12 = storeindex v1, v4, v3",
+        );
+        assert!(licm(&mut f, true) >= 1);
+        f.verify().unwrap();
+        assert_eq!(in_loop(&f, |i| matches!(i, MirInst::HeapFieldLoad { .. })), 0);
+    }
+
+    #[test]
+    fn field_store_keeps_field_reads_in_the_loop() {
+        // `v1` may be `v10`.
+        let mut f = counted(
+            "v0: i64, v1: heapref, v10: heapref",
+            "    v6 = heaploadfield v10, 0\n    v12 = heapsetfield.slot v1, v4, 0",
+        );
+        licm(&mut f, true);
+        f.verify().unwrap();
+        assert_eq!(in_loop(&f, |i| matches!(i, MirInst::HeapFieldLoad { .. })), 1);
+    }
+
+    #[test]
+    fn element_read_moves_past_field_stores_not_element_stores() {
+        let mut f = counted(
+            "v0: i64, v1: heapref, v10: heapref",
+            "    v6 = index v1, v3\n    v12 = heapsetfield.slot v10, v4, 0",
+        );
+        assert!(licm(&mut f, true) >= 1);
+        f.verify().unwrap();
+        assert_eq!(in_loop(&f, |i| matches!(i, MirInst::Index { .. })), 0);
+        // `v10` may be `v1`.
+        let mut f = counted(
+            "v0: i64, v1: heapref, v10: heapref",
+            "    v6 = index v1, v3\n    v12 = storeindex v10, v4, v3",
+        );
+        licm(&mut f, true);
+        f.verify().unwrap();
+        assert_eq!(in_loop(&f, |i| matches!(i, MirInst::Index { .. })), 1);
     }
 
     #[test]
