@@ -27,8 +27,15 @@ fn all_same<T: Eq>(T a, T b) -> bool {
     return a.same(b);
 }
 
-fn where_same<T>(T a, T b) -> bool where Eq<T> {
-    return a.same(b);
+class Pair<T> {
+    pub a: T,
+    pub b: T,
+}
+
+impl Pair<T> {
+    pub fn where_same() -> bool where Eq<T> {
+        return self.a.same(self.b);
+    }
 }
 
 test("the alias is still the builtin bound") {
@@ -39,7 +46,7 @@ test("the alias is still the builtin bound") {
 test("the short name is the module's trait") {
     assert!(all_same(new Coin(1), new Coin(1)));
     assert!(!all_same(new Coin(1), new Coin(2)));
-    assert!(where_same(new Coin(3), new Coin(3)));
+    assert!(new Pair(new Coin(3), new Coin(3)).where_same());
 }
 
 test("builtin == next to the module's trait") {

@@ -25,11 +25,11 @@ fn pure_and_uses_parse() {
     assert_eq!(effects_of("fn f() uses {} { }").as_deref(), Some("uses {}"));
     assert_eq!(effects_of("fn f() { }"), None);
     assert_eq!(
-        effects_of("static pure fn f<T>(T x) -> T where Num<T> { return x; }").as_deref(),
+        effects_of("static pure fn f<T: Num>(T x) -> T { return x; }").as_deref(),
         Some("pure")
     );
     assert_eq!(
-        effects_of("fn f<T>(T x) -> T where Num<T> uses {mutate} { return x; }").as_deref(),
+        effects_of("fn f<T: Num>(T x) -> T uses {mutate} { return x; }").as_deref(),
         Some("uses {mutate}")
     );
 }
