@@ -250,7 +250,7 @@ fn set_nodelay(Stream s, bool enabled) -> Result<unit, IoError> {}
 ///     let server = accept_wait(listener)?;
 ///     shutdown(client, 1)?;
 ///     let rest = read_to_end(server)?;
-///     return len(rest);
+///     return rest.len();
 /// }
 ///
 /// fn main() {

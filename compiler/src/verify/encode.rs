@@ -1134,7 +1134,7 @@ impl<'m> Enc<'m> {
             vals.push(v);
         }
         match callee {
-            Callee::Named { name, .. } | Callee::Method { name } if name == "len" && vals.len() == 1 => {
+            Callee::Method { name } if name == "len" && vals.len() == 1 => {
                 if let V::Seq { len, .. } = &vals[0] {
                     return Some((V::Bv(len.clone()), st));
                 }

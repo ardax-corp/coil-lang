@@ -252,15 +252,12 @@ impl Vec<T> {
 
     /// Returns the number of elements in the vector.
     ///
-    /// The free function `len(v)` is equivalent.
-    ///
     /// # Examples
     ///
     /// ```
     /// # use tests::assert;
     /// let v: Vec<int> = [1, 2, 3];
     /// assert!(v.len() == 3);
-    /// assert!(len(v) == 3);
     /// ```
     pub fn len() -> int {}
 }
@@ -500,21 +497,3 @@ fn char(byte b) -> Result<string, string> {}
 /// }
 /// ```
 fn block_on<Y>(coroutine<Y> handle) -> Y {}
-
-/// Returns the length of `value` as an `int`.
-///
-/// Arrays, `Vec`, strings (length in UTF-8 bytes), tuples and records
-/// (number of fields) are measured structurally; fixed sizes fold at compile
-/// time. Any other type needs an `impl Length`. `len(x)` is the same as
-/// `x.len()`.
-///
-/// # Examples
-///
-/// ```
-/// # use tests::assert;
-/// assert!(len([1, 2, 3]) == 3);
-/// assert!(len("héllo") == 6);
-/// assert!(len((1, "a")) == 2);
-/// assert!(len({ x: 1, y: 2 }) == 2);
-/// ```
-fn len<T: Length>(T value) -> int {}

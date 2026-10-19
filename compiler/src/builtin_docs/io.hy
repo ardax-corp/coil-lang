@@ -330,7 +330,7 @@ fn stderr() -> Stream {}
 ///     Result::Err(_) => panic "open failed",
 /// };
 /// let size = match read_to_end(r) {
-///     Result::Ok(bytes) => len(bytes),
+///     Result::Ok(bytes) => bytes.len(),
 ///     Result::Err(_) => 0,
 /// };
 /// let _ = close(r);
@@ -366,7 +366,7 @@ fn close(Stream s) -> Result<unit, IoError> {}
 
 /// Reads bytes from `s` into the front of `buf` without waiting.
 ///
-/// Reads at most `len(buf)` bytes (the buffer's length, not its capacity),
+/// Reads at most `buf.len()` bytes (the buffer's length, not its capacity),
 /// overwriting `buf[0..n]`. Returns `Ok(Option::Some(n))` with the number of
 /// bytes read, `Ok(Option::None)` at end of file, and
 /// `Err(IoError::WouldBlock)` when no data is available yet; then call
@@ -412,7 +412,7 @@ fn read(Stream s, Vec<byte> buf) -> Result<Option<int>, IoError> {}
 
 /// Writes bytes from `buf` to `s` without waiting and returns how many were written.
 ///
-/// The count may be less than `len(buf)` when the OS accepts only part of
+/// The count may be less than `buf.len()` when the OS accepts only part of
 /// it, and `Err(IoError::WouldBlock)` means nothing could be written yet;
 /// call `wait_writable(s)` and retry. `io::sync::write_all` loops until
 /// everything is written. Writing to a closed stream returns
@@ -436,7 +436,7 @@ fn write(Stream s, Vec<byte> buf) -> Result<int, IoError> {}
 ///
 /// Like `write`, but starts at `offset` without copying the rest of the
 /// buffer, which suits a loop that resumes after a partial write.
-/// `offset == len(buf)` writes nothing and returns `Ok(0)`; a negative
+/// `offset == buf.len()` writes nothing and returns `Ok(0)`; a negative
 /// offset or one past the end returns `Err(IoError::InvalidInput)`.
 ///
 /// # Examples
@@ -605,7 +605,7 @@ fn from_bytes(Vec<byte> bytes) -> Result<string, IoError> {}
 
 /// Encodes `s` as UTF-8 into a new `Vec<byte>`.
 ///
-/// Always succeeds; the result has `len(s)` bytes. Same function as
+/// Always succeeds; the result has `s.len()` bytes. Same function as
 /// `string::to_bytes`.
 ///
 /// # Examples
@@ -614,7 +614,7 @@ fn from_bytes(Vec<byte> bytes) -> Result<string, IoError> {}
 /// use io::{to_bytes};
 /// # use tests::assert;
 /// let b = to_bytes("hé");
-/// assert!(len(b) == 3);
+/// assert!(b.len() == 3);
 /// assert!(b[0] == 104 as byte);
 /// ```
 fn to_bytes(string s) -> Vec<byte> {}

@@ -655,10 +655,11 @@ trait Show<T> {
     fn show(T value) -> string {}
 }
 
-/// A size query, used by `len(x)` and `x.len()`.
+/// A size query: `x.len()`.
 ///
-/// Arrays, `Vec`, strings, tuples and records have a structural length and
-/// need no instance. Implement `Length` to give your own type a length.
+/// Arrays, `Vec`, strings (UTF-8 bytes), tuples and records (fields) have a
+/// structural length and need no instance; fixed sizes fold at compile time.
+/// Implement `Length` to give your own type a length.
 ///
 /// # Examples
 ///
@@ -676,7 +677,6 @@ trait Show<T> {
 ///
 /// fn main() {
 ///     let t = new Team(Vec::from(["ana", "bo"]));
-///     assert!(len(t) == 2);
 ///     assert!(t.len() == 2);
 /// }
 /// ```
