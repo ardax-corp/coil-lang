@@ -19316,7 +19316,7 @@ impl Checker {
     }
 
     /// `Trait::method(args)`: the free call `method(args)` with only
-    /// `Trait`'s method as a candidate (#D9). It resolves through an active
+    /// `Trait`'s method as a candidate. It resolves through an active
     /// bound's dictionary, a trait object, or the ground instance the
     /// argument (or expected result) types select, and lowers to the same
     /// call as the free form. A free fn of the same name or another trait's
