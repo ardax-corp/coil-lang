@@ -1228,6 +1228,11 @@ impl Compiler {
                     // word, as `new` stores it; an enum with a niche layout
                     // (`Option<int>`) holds its niche word, not a heap one.
                     .map(|t| {
+                        // A field open in a class parameter made at a class
+                        // still open in a type variable holds its object.
+                        if made.is_some_and(|m| self.hir_open_class_field_at(m, t)) {
+                            return Some(crate::mir::MirTy::HeapRef);
+                        }
                         word(t)
                             .or_else(|| scalar_enum(t))
                             // An existential field holds its pack's heap word.
@@ -1317,7 +1322,13 @@ impl Compiler {
                     }
                 })
                 && let Some((FieldAt::Slot(idx), fty)) = self.hir_field(hir, *base, name)
-                && let Some(w) = record_word(&fty).or_else(|| {
+                && let Some(w) = Self::hir_ty(hir, *base)
+                    // `T` at a class still open in a type variable
+                    // (`Box<Box<E>>`'s `v`) holds that object (#1553).
+                    .is_some_and(|b| self.hir_open_class_field_at(b, &fty))
+                    .then_some(crate::mir::MirTy::HeapRef)
+                    .or_else(|| record_word(&fty))
+                    .or_else(|| {
                     // A generic class's field (`item: T`) at a ground
                     // receiver (`Box<int>`): its slot holds the boxed-layout
                     // word of the field's type there.
@@ -1435,6 +1446,11 @@ impl Compiler {
                         // argument boxed.
                         if let Some(layout) = Self::hir_ty(hir, arg).and_then(|at| open_niche(t, at)) {
                             boxed_niches.insert(arg.0, layout);
+                            return Some(crate::mir::MirTy::HeapRef);
+                        }
+                        // ...and one made at a class still open in a type
+                        // variable holds its object (#1553).
+                        if Self::hir_ty(hir, HirId(i)).is_some_and(|m| self.hir_open_class_field_at(m, t)) {
                             return Some(crate::mir::MirTy::HeapRef);
                         }
                         // A two-word field value is stored boxed.
@@ -6183,6 +6199,24 @@ impl Compiler {
         };
         let at = close_params(fty, args)?;
         (!Self::ty_has_var(&at) && self.value_layout(&at) == ValueLayout::Boxed).then_some(at)
+    }
+
+    /// Whether field type `fty`, a bare class parameter, names a class
+    /// object at made type `ty` still open in a type variable (a shared
+    /// generic body's `new Box(new Box(e))`): its slot holds that object's
+    /// heap word, not an opaque parameter word (#1553).
+    fn hir_open_class_field_at(&self, ty: &Ty, fty: &Ty) -> bool {
+        if !matches!(crate::typechecking::ty::strip_readonly(fty), Ty::Var(_)) {
+            return false;
+        }
+        let ty = apply_ty_prune(self.checker.subst(), ty);
+        let Ty::App(_, args) = crate::typechecking::ty::strip_readonly(&ty) else {
+            return false;
+        };
+        close_params(fty, args).is_some_and(|at| {
+            let at = apply_ty_prune(self.checker.subst(), &at);
+            Self::ty_has_var(&at) && self.checker.ty_is_class(&at)
+        })
     }
 
     /// `new C(..)`'s class, instance field count and declared field types,

@@ -39,3 +39,20 @@ test("nested generic class escaping a shared body") {
     assert!(w(2.5).v.v == 2.5);
     assert!(w("x").v.v == "x");
 }
+
+class Pair<A, B> {
+    pub a: A,
+    pub b: B,
+}
+
+fn deep<E>(E e, E f) -> E {
+    let p = new Pair(new Box(new Box(e)), new Pair(1, f));
+    p.a = new Box(new Box(p.b.b));
+    return p.a.v.v;
+}
+
+test("deeper nesting and field stores in a shared body") {
+    let d = deep;
+    assert!(d(1.5, 2.5) == 2.5);
+    assert!(d("a", "b") == "b");
+}
