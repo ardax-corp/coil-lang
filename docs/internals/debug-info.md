@@ -10,6 +10,7 @@ Compiled programs carry a **debug line table** inside the versioned
 |-------|---------|
 | `source_files` | Project-relative paths (stable indices) |
 | `debug_locs` | One entry per bytecode slot (same length as `bytecode` after finalize) |
+| `fn_symbols` | `(name, entry_pc)` per function, sorted by `entry_pc`; names backtrace frames |
 
 Each `DebugLoc` records:
 
@@ -21,6 +22,34 @@ Debug locs are attached to IL ops and carried through `il::lower` fuse-select
 the statement's span (`Compiler::fill_statement_locs` after each block
 statement); ops that already have a narrower location (a nested statement,
 `panic`, a call) keep it. Labels carry none.
+
+## Function symbols
+
+`coil compile` writes `fn_symbols` into the `.hyc`, and the loader
+(`coil_cli::load_archive_bytes`, shared by `coil run x.hyc`, packaged
+binaries and `coil dissect`) restores them into `ProgramDebug`, so a backtrace
+from an archive names its frames like one from source (`in inner at …`, not
+`in <unknown> at …`; coil-lang#1490). `coil package` keeps them too;
+`--strip-debug` drops them along with `source_files`, `debug_locs` and
+`debug_lines`. `fn_symbols` stays its own field, so a finer debug-info level
+(coil-lang#1491) can keep names while dropping the line table.
+
+Size: each entry is an rkyv `ArchivedString` (8 bytes, names of up to 8 bytes
+stored inline) plus a `u32` pc, so 12 bytes plus the name bytes past 8. The
+`.hyc` size did not change with #1490 (it already carried the symbols). The
+payload `coil package` embeds grew by:
+
+| Program (default `-O`) | Payload before | After | Growth |
+|------------------------|---------------:|------:|-------:|
+| `tests/testing/doc_tests.hy` | 22,496 B | 26,660 B | +4,164 B (+18.5%) |
+| `tests/traits/trait_method_bound_dispatch.hy` | 35,800 B | 36,332 B | +532 B (+1.5%) |
+| `tests/contracts/contract_failure_messages.hy` | 15,080 B | 15,484 B | +404 B (+2.7%) |
+| `examples/derive_show_eq.hy` | 13,652 B | 13,908 B | +256 B (+1.9%) |
+
+Most programs grow by 1–3%; `doc_tests.hy` is an outlier because it has many
+small functions with long qualified names. `--strip-debug` payloads are
+unchanged (e.g. `doc_tests.hy` 9,400 B). Against the ~1.4 MB `coil-embed`
+runner every packaged binary grows by well under 1%.
 
 ## Archive version
 
