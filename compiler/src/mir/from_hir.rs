@@ -5982,12 +5982,12 @@ impl Lower<'_> {
             }
             let name = self.b.ins_string(name).map_err(mir)?;
             let v = self.b.ins_heap_field_load(src, slot as u32, w).map_err(mir)?;
-            let kinds = common::pack_word_kinds([common::WORD_POINTER, (self.inp.word_kind)(ty)].into_iter());
+            let kinds = common::pack_word_kinds([common::WORD_POINTER, (self.inp.word_kind)(ty)]);
             let item = self.b.ins_alloc_kinds(MirAllocKind::Tuple, vec![name, v], kinds).map_err(mir)?;
             items.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![item]).map_err(mir)?);
         }
         let arr = self.b.ins_alloc_kinds(MirAllocKind::Array, items, common::WORD_POINTER).map_err(mir)?;
-        Ok(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![arr]).map_err(mir)?)
+        self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![arr]).map_err(mir)
     }
 
     /// `for x in xs` over a heap array, as HIR emission lowers it: the
