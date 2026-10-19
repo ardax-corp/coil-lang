@@ -890,28 +890,6 @@ pub fn existential_hint(body: &HirBody, checker: &Checker, id: HirId) -> bool {
         || checker.existential_method_call_span(e.span.0, e.span.1).is_some()
 }
 
-/// Whether `e` is a `format` call with a tuple or record argument: `%v`
-/// shows it field by field.
-pub fn shows_through_temps(body: &HirBody, checker: &Checker, e: &super::HirExpr) -> bool {
-    use crate::typechecking::StringBuiltin;
-    let HirKind::Call {
-        callee: Callee::Named { name, .. },
-        args,
-    } = &e.kind
-    else {
-        return false;
-    };
-    let format = checker
-        .string_fn_in_scope(name)
-        .or_else(|| name.strip_prefix("string::").and_then(StringBuiltin::from_name));
-    matches!(format, Some(StringBuiltin::Format))
-        && args.iter().skip(1).any(|&a| {
-            body.expr(a).ty.as_ref().is_some_and(|t| {
-                matches!(strip_readonly(&apply_ty_prune(checker.subst(), t)), Ty::Tuple(_) | Ty::Record { .. })
-            })
-        })
-}
-
 /// Each `break` / `continue` outside every loop of `body` and of the
 /// anonymous `fn`s in it (E0801), with whether it is a `break`.
 pub fn stray_jumps(module: &super::HirModule, body: &HirBody) -> Vec<(HirId, bool)> {

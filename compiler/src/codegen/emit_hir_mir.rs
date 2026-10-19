@@ -926,7 +926,7 @@ impl Compiler {
         // Pinned as emission pins it, so `next`'s `CALL` agrees.
         if let Some(item) = &item {
             let opt = crate::typechecking::ty::option_ty(item.clone());
-            let pair = crate::typechecking::return_layout::two_word_return_enum(&self.checker, &opt);
+            let pair = crate::typechecking::return_layout::two_word_kind(&self.checker, &opt);
             self.pin_two_word_return_kind(next_fqn, pair);
         }
         let two_slot = self.two_word_return_kind(next_fqn).is_some();

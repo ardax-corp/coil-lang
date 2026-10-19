@@ -77,6 +77,9 @@ pub(crate) enum DropOwner {
 /// Saved bare-name state; see [`Checker::shield_bare_names`].
 pub(super) struct BareNameShield {
     modes: Vec<(String, bool, bool)>,
+    /// Whether each key (bare and `module::name`) was in `generic_fns` and
+    /// `generics.generic_fns`.
+    generic: Vec<(String, bool, bool)>,
     env: Vec<(String, usize)>,
     defs: Vec<(DefId, Option<Scheme>)>,
 }
@@ -9987,6 +9990,24 @@ impl Checker {
                     }
                     continue;
                 }
+                // Inside a generic body, a goal on a type parameter whose
+                // other arguments are still open (`Wrap<T, β>`) is the
+                // given bound `where Wrap<T, string>`: pin `β` from it and
+                // forward that dictionary. Searching instances instead would
+                // bind `T` itself (#1442).
+                if let Some(dict_index) = self.improve_from_given(&needed) {
+                    if let Some(call_id) = call_id {
+                        self.call_site_forward_dicts
+                            .entry(call_id)
+                            .or_default()
+                            .push(dict_index);
+                        self.call_site_forward_dicts_by_span
+                        .entry((range.start, range.end))
+                        .or_default()
+                            .push(dict_index);
+                    }
+                    continue;
+                }
                 // Partially open (e.g. `Convert<int, β>`): unify against
                 // registered instances so free args get pinned by the match.
                 match self.find_unique_instance(&c.class, &resolved_args, range) {
@@ -10413,6 +10434,69 @@ impl Checker {
                 .typeclass(ac_class)
                 .is_some_and(|def| def.has_superclass(&needed.class, &self.generics))
         })
+    }
+
+    /// A partially open goal that mentions an enclosing type parameter
+    /// (`Wrap<T, β>`) and unifies with exactly one active bound of its
+    /// class (`where Wrap<T, string>`) without rebinding any type parameter
+    /// is that bound: adopt the unifier (pinning `β := string`) and return
+    /// the bound's dictionary index. `None` leaves the goal to instance
+    /// search (#1442).
+    fn improve_from_given(&mut self, needed: &Constraint) -> Option<usize> {
+        let rigid: Vec<(TyVarId, Ty)> = self
+            .type_params_in_scope
+            .iter()
+            .flat_map(|frame| frame.values())
+            .map(|&v| (v, apply_ty_prune(&self.subst, &Ty::Var(v))))
+            .collect();
+        let needed_args: Vec<Ty> = needed
+            .args
+            .iter()
+            .map(|a| apply_ty_prune(&self.subst, a))
+            .collect();
+        let mentions_rigid = needed_args.iter().any(|a| {
+            crate::typechecking::subst::ftv(a)
+                .into_iter()
+                .any(|v| rigid.iter().any(|(_, r)| *r == Ty::Var(v)))
+        });
+        if !mentions_rigid {
+            return None;
+        }
+        let mut found: Option<(usize, Subst)> = None;
+        for (index, ac) in self.active_constraints.iter().enumerate() {
+            let ac_class = self
+                .abstract_constraint_binding(&ac.class)
+                .unwrap_or(ac.class.as_str());
+            if ac_class != needed.class || ac.args.len() != needed_args.len() {
+                continue;
+            }
+            let mut local = self.subst.clone();
+            let ok = ac.args.iter().zip(needed_args.iter()).all(|(have, need)| {
+                match unify_with(&local, need, have) {
+                    Ok(s) => {
+                        local = s;
+                        true
+                    }
+                    Err(_) => false,
+                }
+            });
+            // A type parameter stands for any type: the bound may only pin
+            // inference variables, never a parameter.
+            let keeps_rigid = ok
+                && rigid
+                    .iter()
+                    .all(|(v, before)| apply_ty_prune(&local, &Ty::Var(*v)) == *before);
+            if !keeps_rigid {
+                continue;
+            }
+            if found.is_some() {
+                return None;
+            }
+            found = Some((index, local));
+        }
+        let (index, local) = found?;
+        self.absorb(&local);
+        Some(index)
     }
 
     fn abstract_constraint_binding(&self, name: &str) -> Option<&str> {
@@ -11927,6 +12011,7 @@ impl Checker {
 
     /// Everything inferring a trait signature or instance method as a
     /// function records under its bare method name: result-mode flags, the
+    /// generic-fn mark of a method with its own type parameters (#1467), the
     /// env binding, and (when a free fn of that name exists) that fn's DefId
     /// scheme. The name belongs to the free fn, or to nobody, so a
     /// function-style call `method(x)` resolves through the trait instead of
@@ -11938,8 +12023,13 @@ impl Checker {
     ) -> BareNameShield {
         let names: Vec<&str> = names.into_iter().collect();
         let mark = self.env.top().map_or(0, |f| f.len());
+        let modes = self.snapshot_result_modes(names.iter().copied());
         BareNameShield {
-            modes: self.snapshot_result_modes(names.iter().copied()),
+            generic: modes
+                .iter()
+                .map(|(k, _, _)| (k.clone(), self.generic_fns.contains(k), self.generics.generic_fns.contains(k)))
+                .collect(),
+            modes,
             env: names.iter().map(|n| (n.to_string(), mark)).collect(),
             defs: names
                 .iter()
@@ -11964,6 +12054,15 @@ impl Checker {
     /// Restore what [`Self::shield_bare_names`] captured.
     pub(super) fn unshield_bare_names(&mut self, shield: BareNameShield) {
         self.restore_result_modes(shield.modes);
+        for (key, local, shared) in shield.generic {
+            for (set, was) in [(&mut self.generic_fns, local), (&mut self.generics.generic_fns, shared)] {
+                if was {
+                    set.insert(key.clone());
+                } else {
+                    set.remove(&key);
+                }
+            }
+        }
         if let Some(top) = self.env.top_mut() {
             for (name, mark) in &shield.env {
                 top.drop_since(name, *mark);

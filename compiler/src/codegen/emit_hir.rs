@@ -29,9 +29,9 @@ mod emit_hir_mir;
 enum Rep {
     /// One word in its type's one-word layout.
     Word(ValueLayout),
-    /// `[payload, tag]` of the named unary enum (the direct `CALL` /
-    /// `RETURN` ABI of a two-word function).
-    Pair(String),
+    /// The two words of a [`PairKind`] (the direct `CALL` / `RETURN` ABI
+    /// of a two-word function).
+    Pair(PairKind),
 }
 
 const BOXED: Rep = Rep::Word(ValueLayout::Boxed);
@@ -58,8 +58,8 @@ impl Rep {
 /// A planned direct call.
 struct HirCall {
     key: String,
-    /// The callee returns `[payload, tag]` of this enum.
-    pair: Option<String>,
+    /// The callee returns the two words of this kind.
+    pair: Option<PairKind>,
     /// One-word layout of each parameter.
     params: Vec<ValueLayout>,
     /// One-word layout of the result (when not a pair).
@@ -79,7 +79,7 @@ struct HirCall {
     instance: Option<Box<HirInstanceCall>>,
     /// Per parameter of a free function taking numeric ranges unboxed: the
     /// `[start, end]` kind it takes as two words (empty when none does).
-    ranges: Vec<Option<String>>,
+    ranges: Vec<Option<PairKind>>,
     /// A mono clone call: the generic function's name and its type
     /// variables bound to this call's types, for typed inlining.
     mono_of: Option<Box<(String, HashMap<crate::typechecking::ty::TyVarId, Ty>)>>,
@@ -230,7 +230,7 @@ struct HirPlan {
     /// `let x = f(..)` of a two-word call that is never reassigned keeps
     /// `[payload, tag]` in two frame slots (the AST's unboxed enum local):
     /// local to its pair kind.
-    pair_locals: HashMap<u32, String>,
+    pair_locals: HashMap<u32, PairKind>,
     /// `let p = new C(..)` kept in frame slots (the AST's unboxed class
     /// local): local to its resolved class; field `i` is slot `slot + i`.
     sroa: HashMap<u32, String>,
@@ -1452,10 +1452,10 @@ impl Compiler {
                     // A two-word enum result is unboxed at the edge, one
                     // `JumpIfMatch` per variant: each variant's tag and arity.
                     let ty = Self::hir_ty(hir, HirId(i)).map(|t| apply_ty_prune(self.checker.subst(), t));
-                    let unbox = match ty.as_ref().and_then(|t| crate::typechecking::return_layout::two_word_return_enum(&self.checker, t)) {
+                    let unbox = match ty.as_ref().and_then(|t| crate::typechecking::return_layout::two_word_kind(&self.checker, t)) {
                         Some(kind) => Some(
                             self.checker
-                                .enum_variants(&kind)?
+                                .enum_variants(kind.enum_name()?)?
                                 .into_iter()
                                 .map(|(_, tag, payload)| (tag, payload.len() as u32))
                                 .collect::<Vec<_>>(),
@@ -1550,12 +1550,8 @@ impl Compiler {
                 checker.payload_tys_for(enum_name, variant).into_iter().map(|(name, _)| name).collect()
             }),
             pair_variants: Box::new(move |t: &Ty| {
-                use crate::typechecking::return_layout as rl;
                 let t = apply_ty_prune(checker.subst(), t);
-                let kind = rl::two_word_return_enum(checker, &t)?;
-                if rl::is_two_word_product_kind(&kind) || rl::is_range_kind(&kind) {
-                    return None;
-                }
+                let kind = crate::typechecking::return_layout::two_word_kind(checker, &t)?.enum_name()?.to_string();
                 let mut variants = Vec::new();
                 for (name, tag, _) in checker.enum_variants(&kind)? {
                     let payload = Self::payload_tys_of(checker, &t, &name)?;
@@ -2749,11 +2745,6 @@ impl Compiler {
             }
         }
         self.plan_hir_local_layouts(hir, &mut emit)?;
-        // Calls above stack-array boxes do not stage, so a `format` that
-        // shows through temps could run above live operands.
-        if !emit.plan.box_at.is_empty() && hir.exprs.iter().any(|e| lower::shows_through_temps(hir, &self.checker, e)) {
-            return Err("format-show");
-        }
         let defers = hir.exprs.iter().any(|e| matches!(e.kind, HirKind::Defer { .. }));
         let tail = |value: HirId| {
             emit.plan.calls.get(&value.0).is_some_and(|call| {
@@ -2805,7 +2796,7 @@ impl Compiler {
             let local = hir.local(param);
             // A two-word parameter (`argument_unboxed_range_kind`) holds
             // `[start, end]` / `[payload, tag]` in two slots.
-            if let Some(kind) = self.unboxed_enum_kind(&local.name).map(str::to_string) {
+            if let Some(kind) = self.unboxed_enum_kind(&local.name).cloned() {
                 let (start, end) = self.unboxed_enum_info(&local.name).ok_or("parameter-slot")?;
                 emit.slots[param.0 as usize] = Some(start);
                 emit.tag_slots.insert(param.0, end);
@@ -2869,12 +2860,12 @@ impl Compiler {
                 HirKind::Make {
                     kind: MakeKind::Range { inclusive },
                     ..
-                } => Some(crate::typechecking::return_layout::range_kind(*inclusive).to_string()),
+                } => Some(PairKind::Range { inclusive: *inclusive }),
                 HirKind::Local(from) => emit
                     .plan
                     .pair_locals
                     .get(&from.0)
-                    .filter(|k| crate::typechecking::return_layout::is_range_kind(k))
+                    .filter(|k| matches!(k, PairKind::Range { .. }))
                     .cloned(),
                 _ => None,
             };
@@ -2910,7 +2901,7 @@ impl Compiler {
                 return Err("callee-arity");
             }
             let pair = self.hir_synth_callees.get(name).and_then(|c| c.pair.clone());
-            if pair.as_deref().is_some_and(|k| !self.hir_pair_kind(k)) {
+            if pair.as_ref().is_some_and(|k| !self.hir_pair_kind(k)) {
                 return Err("callee-pair");
             }
             return Ok(HirCall {
@@ -4089,16 +4080,33 @@ impl Compiler {
     /// A bound method call in a mono clone: `T` is concrete here, so the
     /// instance is looked up from the ground argument types and called
     /// directly, as `try_emit_ground_bound_method_nodes`.
-    /// The instance types of trait `class`'s method call `call` with no
-    /// arguments: its `n` trait parameters bound by the method's result type
-    /// against the call's (ground) type.
-    fn hir_bound_call_result_lookup(&self, hir: &HirBody, call: HirId, class: &str, method: &str, n: usize) -> Option<Vec<Ty>> {
+    /// The instance types of trait `class`'s method call `call` when its
+    /// leading arguments do not name them: its `n` trait parameters bound by
+    /// the method's result type against the call's (ground) type, then by
+    /// its parameter types against `args` (`fn wrap(A x, int b) -> B` binds
+    /// `B` from the result and `A` from `x`, #1442).
+    fn hir_bound_call_result_lookup(
+        &self,
+        hir: &HirBody,
+        call: HirId,
+        args: &[HirId],
+        class: &str,
+        method: &str,
+        n: usize,
+    ) -> Option<Vec<Ty>> {
         let scheme = self.checker.typeclass_method_scheme(class, method)?;
         let vars = scheme.bounds.get(..n)?;
-        let (_, ret) = Self::fun_param_and_ret_tys(&scheme.ty);
+        let (params, ret) = Self::fun_param_and_ret_tys(&scheme.ty);
         let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, call)?);
         let mut map = HashMap::new();
         Self::bind_scheme_vars(&ret, &ty, &mut map);
+        if params.len() == args.len() {
+            for (param, &arg) in params.iter().zip(args) {
+                if let Some(arg_ty) = Self::hir_ty(hir, arg) {
+                    Self::bind_scheme_vars(param, &apply_ty_prune(self.checker.subst(), arg_ty), &mut map);
+                }
+            }
+        }
         vars.iter()
             .map(|v| map.get(v).filter(|t| crate::hir::layout::ty_is_closed(t)).map(Self::show_lookup_ty_for_instance))
             .collect()
@@ -4153,7 +4161,7 @@ impl Compiler {
             // No argument names the instance (`default()`): the method's
             // signature against the call's result type does.
             let lookup = self
-                .hir_bound_call_result_lookup(hir, call, &hint.class, method, class_def.type_params.len())
+                .hir_bound_call_result_lookup(hir, call, args, &hint.class, method, class_def.type_params.len())
                 .ok_or("callee-trait")?;
             (lookup, &[])
         } else {
@@ -4497,8 +4505,7 @@ impl Compiler {
                 let ty = Self::hir_ty(hir, arg).ok_or("callee-signature")?;
                 if specs.get(i) == Some(&'v') {
                     let ty = apply_ty_prune(self.checker.subst(), ty);
-                    // A tuple or record shows field by field
-                    // ([`lower::shows_through_temps`]).
+                    // A tuple or record shows field by field.
                     if !crate::hir::layout::ty_is_closed(&ty) && self.hir_bound_show(hir, arg).is_none() && !self.hir_generic_show(&ty) {
                         return Err("format-show");
                     }
@@ -4602,7 +4609,7 @@ impl Compiler {
         if !coro && pair != self.two_word_return_kind(&lookup) {
             return Err("callee-pair");
         }
-        if pair.as_deref().is_some_and(|k| !self.hir_pair_kind(k)) {
+        if pair.as_ref().is_some_and(|k| !self.hir_pair_kind(k)) {
             return Err("callee-pair");
         }
         let explicit = argc - usize::from(self_layout.is_some());
@@ -4780,12 +4787,14 @@ impl Compiler {
         // dictionaries also passes its own bare type parameters, already
         // boxed words.
         // A shared generic body (no dictionaries to forward) passes its own
-        // bare type parameters the same way (#915).
+        // bare type parameters the same way (#915), a method's own ones
+        // (`fn third<W>(W w)` in an impl) included (#1467).
         let shared = !self.compiling_mono_clone
-            && self
-                .current_function_table_key
-                .as_deref()
-                .is_some_and(|k| self.checker.is_generic_fn(strip_overload_key(k)));
+            && (hir.is_generic
+                || self
+                    .current_function_table_key
+                    .as_deref()
+                    .is_some_and(|k| self.checker.is_generic_fn(strip_overload_key(k))));
         let open = |ty: &Ty| (shared || !forwarded.is_empty()) && matches!(ty, Ty::Var(_));
         let ground = |id: HirId| {
             let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
@@ -5038,15 +5047,8 @@ impl Compiler {
 
     /// A two-word kind the lowering builds and matches: a numeric range,
     /// an arity-2 immediate product, or a declared enum.
-    pub(super) fn hir_pair_kind(&self, kind: &str) -> bool {
-        crate::typechecking::return_layout::is_range_kind(kind)
-            || Self::hir_product(kind)
-            || self.hir_pair_enum(kind)
-    }
-
-    /// `(a, b)` of immediates moved as `[a, b]`, second on top.
-    fn hir_product(kind: &str) -> bool {
-        crate::typechecking::return_layout::is_two_word_product_kind(kind)
+    pub(super) fn hir_pair_kind(&self, kind: &PairKind) -> bool {
+        matches!(kind, PairKind::Range { .. } | PairKind::Product) || self.hir_pair_enum(kind)
     }
 
     /// How an indexed or field-read base is pushed: a pair boxes into its
@@ -5064,7 +5066,7 @@ impl Compiler {
         let HirKind::Local(local) = hir.expr(base).kind else {
             return None;
         };
-        if !emit.plan.pair_locals.get(&local.0).is_some_and(|k| Self::hir_product(k)) {
+        if emit.plan.pair_locals.get(&local.0) != Some(&PairKind::Product) {
             return None;
         }
         match hir.expr(index).kind {
@@ -5082,7 +5084,7 @@ impl Compiler {
         let [a, b] = items.as_slice() else {
             return None;
         };
-        if !self.hir_natural(hir, emit, init).is_some_and(|r| matches!(&r, Rep::Pair(k) if Self::hir_product(k))) {
+        if self.hir_natural(hir, emit, init) != Some(Rep::Pair(PairKind::Product)) {
             return None;
         }
         let name = |p: &HirPat| match p {
@@ -5093,29 +5095,28 @@ impl Compiler {
         Some([name(a)?, name(b)?])
     }
 
-    fn hir_pair_enum(&self, kind: &str) -> bool {
-        !crate::typechecking::return_layout::is_two_word_product_kind(kind)
-            && crate::typechecking::return_layout::range_kind_inclusive(kind).is_none()
-            && self.checker.enum_variants(kind).is_some_and(|v| {
-                !v.is_empty() && v.iter().all(|(_, _, payload)| payload.len() <= 1)
-            })
+    /// `kind` is a `[payload, tag]` pair of an enum this module declares.
+    fn hir_pair_enum(&self, kind: &PairKind) -> bool {
+        kind.enum_name().and_then(|name| self.checker.enum_variants(name)).is_some_and(|v| {
+            !v.is_empty() && v.iter().all(|(_, _, payload)| payload.len() <= 1)
+        })
     }
 
     /// The pair kind of an unassigned enum local whose value is built in
     /// place: variants, `if` and block values of them, two-word calls and
     /// other such locals. It then lives in two slots, as a two-word call's
     /// result does, and a `match` on it reads the tag slot.
-    fn hir_pair_init(&self, hir: &HirBody, emit: &HirEmit, local: LocalId, init: HirId) -> Option<String> {
+    fn hir_pair_init(&self, hir: &HirBody, emit: &HirEmit, local: LocalId, init: HirId) -> Option<PairKind> {
         if !self.hir_pair_locals {
             return None;
         }
         let ty = hir.local(local).ty.as_ref()?;
-        let kind = crate::typechecking::return_layout::two_word_return_enum(&self.checker, ty)?;
+        let kind = crate::typechecking::return_layout::two_word_kind(&self.checker, ty)?;
         (self.hir_pair_enum(&kind) && self.hir_builds_pair(hir, emit, init, &kind)).then_some(kind)
     }
 
     /// `e` yields a `kind` pair with no boxing on any path.
-    fn hir_builds_pair(&self, hir: &HirBody, emit: &HirEmit, e: HirId, kind: &str) -> bool {
+    fn hir_builds_pair(&self, hir: &HirBody, emit: &HirEmit, e: HirId, kind: &PairKind) -> bool {
         match &hir.expr(e).kind {
             HirKind::Make {
                 kind: MakeKind::Variant { .. },
@@ -5125,8 +5126,8 @@ impl Compiler {
                 then, els: Some(els), ..
             } => self.hir_builds_pair(hir, emit, *then, kind) && self.hir_builds_pair(hir, emit, *els, kind),
             HirKind::Block { tail: Some(t), .. } => self.hir_builds_pair(hir, emit, *t, kind),
-            HirKind::Call { .. } => emit.plan.calls.get(&e.0).and_then(|c| c.pair.as_deref()) == Some(kind),
-            HirKind::Local(l) => emit.plan.pair_locals.get(&l.0).map(String::as_str) == Some(kind),
+            HirKind::Call { .. } => emit.plan.calls.get(&e.0).and_then(|c| c.pair.as_ref()) == Some(kind),
+            HirKind::Local(l) => emit.plan.pair_locals.get(&l.0) == Some(kind),
             _ => false,
         }
     }
@@ -6212,7 +6213,7 @@ impl Compiler {
             }
             return match want {
                 Rep::Word(ValueLayout::Boxed) => Ok(()),
-                Rep::Pair(kind) if crate::typechecking::return_layout::range_kind_inclusive(kind) == Some(*inclusive) => Ok(()),
+                Rep::Pair(PairKind::Range { inclusive: i }) if i == inclusive => Ok(()),
                 _ => Err("make-repr"),
             };
         }
@@ -6272,7 +6273,7 @@ impl Compiler {
             Rep::Word(L::NicheResult) if result => (0..args.len()).try_for_each(word_arg),
             Rep::Pair(kind) => {
                 let named = self.hir_enum_name(ty).ok_or("make-type")?;
-                if !Self::hir_same_enum(&named, kind) || args.len() > 1 {
+                if !kind.enum_name().is_some_and(|k| Self::hir_same_enum(&named, k)) || args.len() > 1 {
                     return Err("make-pair");
                 }
                 // `Ok(e)` of a `()`-typed `e`: `e` for its effect.
@@ -6412,7 +6413,7 @@ impl Compiler {
                         }
                     }
                     if let Rep::Pair(kind) = &dispatch
-                        && !Self::hir_same_enum(&scrut_enum, kind)
+                        && !kind.enum_name().is_some_and(|k| Self::hir_same_enum(&scrut_enum, k))
                     {
                         return Err("match-pair");
                     }
@@ -6571,7 +6572,7 @@ impl Compiler {
                     }
                     let want = match counted {
                         crate::typechecking::infer::ForInCounted::Range { inclusive, .. } => {
-                            Some(crate::typechecking::return_layout::range_kind(*inclusive).to_string())
+                            Some(PairKind::Range { inclusive: *inclusive })
                         }
                         _ => None,
                     };
@@ -6586,7 +6587,7 @@ impl Compiler {
                         }
                     }
                     (None, Some(ForInKind::Range { inclusive, .. })) => {
-                        let pair = Rep::Pair(crate::typechecking::return_layout::range_kind(*inclusive).to_string());
+                        let pair = Rep::Pair(PairKind::Range { inclusive: *inclusive });
                         self.hir_check_value(hir, emit, *iterable, &pair)?
                     }
                     (None, _) => self.hir_check_value(hir, emit, *iterable, &BOXED)?,
@@ -6673,8 +6674,8 @@ impl Compiler {
     /// The tag of an arm `V(x) => return V(x)` whose return rebuilds the
     /// scrutinee's own variant into a function result of the same pair
     /// kind and payload type, so the arm is the identity on the pair.
-    fn hir_rewrap_return_tag(&self, hir: &HirBody, emit: &HirEmit, ty: &Ty, kind: &str, arm: &HirArm) -> Option<u32> {
-        if emit.plan.ret != Rep::Pair(kind.to_string()) {
+    fn hir_rewrap_return_tag(&self, hir: &HirBody, emit: &HirEmit, ty: &Ty, kind: &PairKind, arm: &HirArm) -> Option<u32> {
+        if !matches!(&emit.plan.ret, Rep::Pair(k) if k == kind) {
             return None;
         }
         self.hir_rewrap_tag(hir, ty, arm)
