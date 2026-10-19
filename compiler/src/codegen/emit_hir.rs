@@ -5031,6 +5031,11 @@ impl Compiler {
         let ret_ty = ground(call)
             .or_else(|| (!self.generic_return_is_boxed(lookup)).then(|| loose(call)).flatten())
             .ok_or("callee-generic")?;
+        // A type parameter the signature names only bare (`T x`, `-> T`),
+        // never inside another type (`Option<T>`, `[T]`).
+        let only_bare = |v: &crate::typechecking::ty::TyVarId| {
+            !params.iter().chain([cur]).any(|t| !matches!(t, Ty::Var(_)) && crate::typechecking::ty::ftv_ty(t).contains(v))
+        };
         let mut boxed = vec![None; receivers];
         for (i, ty) in arg_tys[receivers..].iter().enumerate() {
             let bare = params
@@ -5041,9 +5046,15 @@ impl Compiler {
                 continue;
             }
             // Immediates, plain objects and heap enums box to a tagged
-            // word (`BoxValue Instance` for an enum); a niche or pair enum
-            // word does not.
-            if lower::classify(&self.checker, ty) == Some(ValueClass::Enum) && !self.hir_boxed_enum_word(ty) {
+            // word (`BoxValue Instance` for an enum); a pair enum word does
+            // not. A niche word boxes as its enum object, the open type's
+            // layout its bound's dictionary reads, where the parameter is
+            // only bare: inside another type the shared body would hold it
+            // in a slot the caller reads at its niche layout (#1565).
+            if lower::classify(&self.checker, ty) == Some(ValueClass::Enum)
+                && !self.hir_boxed_enum_word(ty)
+                && !(self.hir_niche_word(ty) && params.get(skip + i).is_some_and(|p| matches!(p, Ty::Var(v) if only_bare(v))))
+            {
                 return Err("callee-generic");
             }
             boxed.push(Some(ty.clone()));
@@ -5099,9 +5110,12 @@ impl Compiler {
             }
         }
         let unbox = (self.generic_return_is_boxed(lookup) && !open(&ret_ty)).then(|| ret_ty.clone());
+        // A niche result comes back as its boxed enum object, which the
+        // call unboxes to its niche word (#1565).
         if unbox.is_some()
             && lower::classify(&self.checker, &ret_ty) == Some(ValueClass::Enum)
             && !self.hir_boxed_enum_word(&ret_ty)
+            && !(self.hir_niche_word(&ret_ty) && matches!(cur, Ty::Var(v) if only_bare(v)))
         {
             return Err("callee-generic");
         }
@@ -5319,6 +5333,11 @@ impl Compiler {
     /// An enum whose word is the heap object (no pointer niche).
     fn hir_boxed_enum_word(&self, ty: &Ty) -> bool {
         self.value_layout(ty) == ValueLayout::Boxed
+    }
+
+    /// An `Option` or `Result` held as a niche word (`Option<string>`).
+    fn hir_niche_word(&self, ty: &Ty) -> bool {
+        matches!(self.value_layout(ty), ValueLayout::NicheOption | ValueLayout::NicheResult | ValueLayout::NicheUnitResult)
     }
 
     /// An enum with a type variable nothing pinned (`Ok(9)`'s error type,
