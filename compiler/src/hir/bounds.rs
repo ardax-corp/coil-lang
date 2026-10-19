@@ -166,7 +166,7 @@ impl<S: Fn(&str) -> bool> Cx<'_, S> {
     fn bound_array(&self, bound: HirId, facts: &Facts) -> Option<LocalId> {
         let body = self.body;
         match &body.expr(bound).kind {
-            HirKind::Call { callee: Callee::Named { name, .. }, args } if name == "len" && length_of(body, args) => match body.expr(args[0]).kind {
+            HirKind::Call { callee: Callee::Named { name, .. } | Callee::Method { name }, args } if name == "len" && length_of(body, args) => match body.expr(args[0]).kind {
                 HirKind::Local(a) if !body.local(a).captured => Some(a),
                 _ => None,
             },
@@ -281,7 +281,7 @@ impl<S: Fn(&str) -> bool> Cx<'_, S> {
             HirKind::Make { kind: MakeKind::Array, args } if args.is_empty() => {
                 facts.empty.insert(local);
             }
-            HirKind::Call { callee: Callee::Named { name, .. }, args } if name == "len" && length_of(body, args) => {
+            HirKind::Call { callee: Callee::Named { name, .. } | Callee::Method { name }, args } if name == "len" && length_of(body, args) => {
                 if let HirKind::Local(a) = body.expr(args[0]).kind
                     && a != local
                 {
@@ -365,6 +365,7 @@ impl<S: Fn(&str) -> bool> Cx<'_, S> {
             HirKind::Call { callee: Callee::Named { name, .. }, args } => {
                 w.steady &= (name == "len" || name == "capacity") && length_of(body, args) || (self.steady)(name);
             }
+            HirKind::Call { callee: Callee::Method { name }, args } if name == "len" && length_of(body, args) => {}
             HirKind::Call { .. } => w.steady = false,
             HirKind::Builtin { op, .. } => {
                 w.steady &= matches!(op, super::Builtin::Panic | super::Builtin::TypeOf | super::Builtin::Readonly | super::Builtin::Default);

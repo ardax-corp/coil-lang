@@ -1701,17 +1701,19 @@
         );
     }
 
-    /// `async fn` is the old spelling of `gen fn`.
+    /// `async fn` was the old spelling of `gen fn`; it is an error naming `gen fn`.
     #[test]
-    fn parse_async_fn_round_trips() {
-        let ast = decl_ast!("async fn coro() { yield 1; }");
-        match ast {
-            Expression::Function { name, is_coro, .. } => {
-                assert_eq!(name, "coro");
-                assert!(is_coro);
-            }
-            other => panic!("expected async Function, got {:?}", other),
-        }
+    fn async_fn_is_an_error_naming_gen_fn() {
+        let errs = Pratt::default()
+            .declaration()
+            .parse("async fn coro() { yield 1; }")
+            .into_result()
+            .expect_err("`async fn` should be rejected");
+        assert!(
+            errs.iter().any(|e| e.to_string().contains("write `gen fn`")),
+            "expected an error naming `gen fn`, got {:?}",
+            errs
+        );
     }
 
     #[test]
@@ -1745,7 +1747,7 @@
 
     #[test]
     fn parse_yield_statement() {
-        let src = "async fn coro() { yield 42; }";
+        let src = "gen fn coro() { yield 42; }";
         let result = Pratt::default().declaration().parse(src).into_result();
         let (_span, expr) = result.expect("yield statement should parse");
         fn expect_yield_42(expr: &Expression) {
@@ -1862,7 +1864,7 @@
 
     #[test]
     fn parse_let_binding_yield_round_trips() {
-        let ast = decl_ast!("async fn f() { let x = yield 1; }");
+        let ast = decl_ast!("gen fn f() { let x = yield 1; }");
         match ast {
             Expression::Function { body, .. } => {
                 match body.as_ref().expect("function body").1.as_ref() {

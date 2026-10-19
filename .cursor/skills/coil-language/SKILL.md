@@ -61,7 +61,7 @@ There is **no `print` statement** — use `io` + `string::format` / `to_bytes`.
 
 | Topic | Rule |
 |-------|------|
-| Functions | `fn name(T arg) -> R { … }`; `gen fn` for coroutines (`async fn` is the old spelling; `coil fmt` rewrites it) |
+| Functions | `fn name(T arg) -> R { … }`; `gen fn` for coroutines (`async fn` was removed and is an error) |
 | Variables | `let x = e;` / `const x = e;`; destructuring `let (a,b) = …`, `let { x } = …` |
 | Control | `if`/`else`, `if let P = e`, `while`, `while let P = e`, `for x in` / `for (k, v) in`, `break`/`continue` |
 | Types | Primitives `int` `float` `string` `bool` `byte`; fixed arrays `[T; N]`, growable `Vec<T>` (a bare `[T]` type is an error); tuples; dicts as anonymous records |

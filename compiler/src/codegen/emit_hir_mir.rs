@@ -1223,9 +1223,15 @@ impl Compiler {
         let mut arg_tys = Vec::with_capacity(args.len());
         for (i, &arg) in args.iter().enumerate() {
             // Emission passes the boxed-layout word: the MIR word only when
-            // that is the argument's own.
-            if self.hir_natural(hir, emit, arg) != Some(Rep::Word(ValueLayout::Boxed)) {
-                return;
+            // that is the argument's own, or, where a bare type parameter
+            // takes it boxed, a two-word value's or niche enum's object
+            // (#1479).
+            match self.hir_natural(hir, emit, arg) {
+                Some(Rep::Word(ValueLayout::Boxed)) => {}
+                // (An inlined call's block has no natural rep: its value's
+                // words are taken as MIR lowers them.)
+                Some(Rep::Pair(_) | Rep::Word(_)) | None if bare[i] => {}
+                _ => return,
             }
             let Some(ty) = Self::hir_ty(hir, arg) else {
                 return;
@@ -1795,6 +1801,11 @@ impl Compiler {
                 }
                 let fmt = self.intern_string(unescape_coil_string(&Self::record_show_format(fields)));
                 return Some(crate::mir::HirShow::Record { fmt, fields: shown });
+            }
+            // An arity-wide tuple thunk's item: its own dictionary (#1479).
+            Ty::Var(v) if let Some(&n) = self.synth_show_dicts.get(v) => {
+                let dict = self.lookup_slot(&format!("__dict{n}"))?;
+                return Some(crate::mir::HirShow::Bound { dict, method: 0 });
             }
             _ => {}
         }
