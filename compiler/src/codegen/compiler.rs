@@ -2141,7 +2141,19 @@ impl Compiler {
         let ret = crate::typechecking::subst::apply_ty(&inst, &open_ret);
         // Its result, boxed back from the layout the method returns it in.
         let ret_from = sig.as_ref().and_then(|s| s.ret).filter(|&l| l != ValueLayout::Boxed);
-        let body_ret = if ret_from.is_some() { open_ret } else { ret.clone() };
+        // A bare type parameter's niche `Option` / `Result` result goes
+        // back as its enum object, boxed, as the argument comes (#1595).
+        let ret_box = (raw && ret_from.is_none() && matches!(open_ret, Ty::Var(_)))
+            .then(|| Self::ty_to_value_tag(&ret))
+            .flatten()
+            .filter(|&tag| tag == ValueTag::Instance && self.value_layout(&ret) != ValueLayout::Boxed);
+        let body_ret = if ret_from.is_some() {
+            open_ret
+        } else if ret_box.is_some() {
+            crate::typechecking::ty::int()
+        } else {
+            ret.clone()
+        };
         let mut b = Synth::new(&self.checker, &adapter, body_ret.clone());
         let mut args = Vec::with_capacity(nparams + 1);
         for slot in 0..nparams {
@@ -2197,6 +2209,10 @@ impl Compiler {
         let mut value = b.call(fqn, args, ret);
         if ret_from.is_some() {
             value = b.builtin(Builtin::Relayout, vec![value], body_ret);
+        } else if let Some(tag) = ret_box {
+            let int = crate::typechecking::ty::int();
+            let obj = b.builtin(Builtin::Relayout, vec![value], int.clone());
+            value = b.builtin(Builtin::Box { tag: tag as u32 }, vec![obj], int);
         }
         let ret = b.ret(value);
         let root = b.block(vec![ret], None, crate::typechecking::ty::never());
@@ -3517,7 +3533,18 @@ impl Compiler {
             Self::bind_scheme_vars(have, want, &mut vars);
         }
         instance.context.iter().all(|c| {
-            let args: Vec<Ty> = c.args.iter().map(|a| Self::apply_ty_var_map(a, &vars)).collect();
+            // A nested built-in enum (`Some(Some(e))`'s inner `Option<E>`)
+            // is bound as its sum: looked up by its `App` spelling, as
+            // `plan_instance_dict` does (#1595).
+            let args: Vec<Ty> = c
+                .args
+                .iter()
+                .map(|a| Self::apply_ty_var_map(a, &vars))
+                .map(|t| match t {
+                    Ty::App(..) => t,
+                    _ => crate::typechecking::ty::builtin_enum_app(&t).unwrap_or(t),
+                })
+                .collect();
             if !args.iter().any(Self::ty_is_open) {
                 return self.checker.generics().find_instance_relaxed(&c.class, &args).is_some();
             }

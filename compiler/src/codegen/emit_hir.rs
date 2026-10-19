@@ -2716,6 +2716,17 @@ impl Compiler {
                 {
                     return Ok(Rep::Word(declared));
                 }
+                // A trait instance's clone returns in its own types' layout
+                // (a niche `Option<string>` where the method declares
+                // `Option<T>`), as its `$dict` adapter calls it (#1595).
+                if let Some(declared) = declared
+                    && self.compiling_mono_clone
+                    && self.inst_clone_fallback.as_ref().is_some_and(|(src, req)| {
+                        src.method_of.is_none() && self.current_function_table_key.as_deref() == Some(req.name.as_str())
+                    })
+                {
+                    return Ok(Rep::Word(declared));
+                }
                 if declared != Some(layout) && !boxed_test && !boundary {
                     return Err("return-layout");
                 }
@@ -4525,8 +4536,9 @@ impl Compiler {
         // declares an argument open (`impl Sz for Option<T>`), as its boxed
         // enum object, which the call passes; the instance's clone at the
         // call's types, which direct MIR calls instead, takes the niche
-        // word (#1579).
-        let own_niche = |id: HirId, declared: Option<Ty>, arg: bool| {
+        // word (#1579). An open result is the shared entry's enum object
+        // too (`fn id(T x) -> T` at `Option<T>`, #1595).
+        let own_niche = |id: HirId, declared: Option<Ty>| {
             let ty = Self::hir_ty(hir, id).ok_or("callee-signature")?;
             let layout = self.value_layout(ty);
             let declared = declared.ok_or("callee-trait")?;
@@ -4534,7 +4546,7 @@ impl Compiler {
                 return Err("callee-trait");
             }
             if Self::ty_has_var(&declared) {
-                return if arg && self.value_layout(&declared) == ValueLayout::Boxed {
+                return if self.value_layout(&declared) == ValueLayout::Boxed {
                     Ok(ValueLayout::Boxed)
                 } else {
                     Err("callee-trait")
@@ -4552,12 +4564,12 @@ impl Compiler {
             .enumerate()
             .map(|(i, &arg)| match sig.and_then(|s| s.params.get(i).copied().flatten()) {
                 Some(layout) => Ok(layout),
-                None => word(arg).or_else(|_| own_niche(arg, declared_params.as_ref().and_then(|p| p.get(i).cloned()), true)),
+                None => word(arg).or_else(|_| own_niche(arg, declared_params.as_ref().and_then(|p| p.get(i).cloned()))),
             })
             .collect::<Result<Vec<_>, _>>()?;
         let ret = match sig.and_then(|s| s.ret).map_or_else(|| word(call), Ok) {
             Ok(ret) => ret,
-            Err(_) => own_niche(call, self.checker.fn_return_ty(fqn), false)?,
+            Err(_) => own_niche(call, self.checker.fn_return_ty(fqn))?,
         };
         Ok((params, ret))
     }
