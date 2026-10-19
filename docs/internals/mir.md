@@ -19,7 +19,7 @@ the history of how MIR coverage grew to every body; their notes about
    first: MIR passes, then dense emit, kept when its cost beats the body's
    LIR form and every callee it `CALL`s is dense.
 3. Otherwise the body takes **LIR**: SROA (allocating bodies) or CSE, then
-   `emit_lir`. A `defer` body takes LIR with its cleanup pad.
+   InstCombine's folds (`instcombine_lir`), then `emit_lir`. A `defer` body takes LIR with its cleanup pad.
 4. All bodies are concatenated and lowered once by `il::lower`
    (fuse-select, PCs, encode).
 
@@ -69,7 +69,9 @@ names `Alloc` (`MakeArray` / `MakeTuple` / `MakeEnum` / `InitTyped`) and
 ([COI-305](https://linear.app/ardax/issue/COI-305/s2a-live-root-sidecar-at-mir-gcbarrier-alloc))
 fills live-heap `roots` (and IL slots when snapshotted). S2b
 ([COI-306](https://linear.app/ardax/issue/COI-306/s2b-slot-frame-stack-maps-for-interpreter-gc))
-encodes those slots as interpreter frame maps. S2c
+encoded those slots as interpreter frame maps (no longer emitted: precise
+frame maps of the final bytecode cover every body,
+[mir-stack-maps.md](mir-stack-maps.md)). S2c
 ([COI-307](https://linear.app/ardax/issue/COI-307/s2c-specialize-lir-across-alloc-when-maps-exist))
 lets infer / specialize / `emit_lir` cross alloc **only** when those
 maps exist. S2d
@@ -233,6 +235,38 @@ Proving set (P11 float peeps live in the same pass):
 - P11 float peeps (same pass): see below
 
 Hit bench: `examples/perf/mir_instcombine.hy`.
+
+**LIR bodies (#1434).** The dense attempt is gated on `has_numeric_arith`
+(`+ - * / %` only), so a body whose only arithmetic is bitwise ops or
+shifts never reached InstCombine: constants that meet only in MIR (after
+inlining, copy forwarding) were computed at run time. `lir_tail` now runs
+`instcombine_lir` on every LIR body, at every level like `hir::fold`: the
+constant folds, identities and constant branches, without the strength
+rewrites (`x * 2` is one op with an immediate on the stack machine; `x + x`
+reads `x` twice). When it changes the body, `from_hir::tidy` drops the
+blocks a folded branch leaves unreachable (emit_lir's liveness is slow
+over them: 800 dead blocks took 2.8 s). Folding puts literal operands on
+trapping ops, so emit_lir keeps a may-trap op in order against memory
+writes (#856; `tests/codegen/overflow_trap_order_lir.hy`). A coverage
+compile (`Pipeline::set_keep_fns_in`) skips the LIR fold
+(`MirFunc::keep_lines`): coverage counts a line by the code it emits, and a
+line whose value folds into a later one would read as uncoverable, so
+`coil mutate` would skip its mutants. Dense bodies still run their MIR
+passes there, so a dense body can lose a line the same way (open).
+
+Hit bench `examples/perf/mir_lir_fold.hy` (`mix`: bit ops of `mask(-1)`
+called 2M times from a dense loop; release, `COIL_AUTO_PAR=0`, 15
+interleaved runs, 2026-10-19; auto-par on gives the same, the loop stays
+sequential):
+
+| | median | min | `.hyc` bytes |
+|---|---|---|---|
+| before (main 8ee3aae4) | 1.884 s | 1.699 s | 7084 |
+| after | 1.124 s | 0.944 s | 5804 |
+
+`check` in the issue's repro (`mask(-1) >> 16`) goes from
+`CONST; CONST; BITAND; CONST; BinReturn SHR` to one `ConstReturnImm 65535`.
+Guard: `lir_body_folds_constants_after_inlining` (perf_metrics).
 
 ## P8 — MIR DestProp / copy-forward (COI-282)
 

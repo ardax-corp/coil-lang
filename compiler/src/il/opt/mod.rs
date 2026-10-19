@@ -100,7 +100,7 @@ pub(crate) use labels::{max_code_label, remap_label_space};
 pub use opt_level::OptLevel;
 pub(crate) use stats::{
     note_body_tier, note_body_tiers, note_fuse_reason, note_hir_fallback, note_hir_mir, note_hir_mir_kept,
-    note_hir_inline_refused, note_hir_inlined, note_hir_lowered, note_unbound_maps,
+    note_hir_inline_refused, note_hir_inlined, note_hir_lowered,
 };
 pub use stats::{BodyTier, OptStats, begin_opt_stats, last_opt_stats};
 

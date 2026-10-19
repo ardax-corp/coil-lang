@@ -100,7 +100,8 @@ pub const ARCHIVE_MAJOR: u16 = 4;
 ///      every listed slot stays "may hold a heap word".
 /// 27 — `TagArrayKind`: arrays built by typed `Vec` constructors carry an
 ///      element word kind. Older archives never emit it (elements stay
-///      ambiguous).
+///      ambiguous). No longer emitted: the constructors make the array with
+///      `MakeArrayK`; the VM still runs it for archives that have it.
 /// 28 — `MakeArrayK`: array literals of ground pointer elements carry the
 ///      pointer element kind. Older archives never emit it.
 /// 29 — [`ArchivedProgram::static_word_kinds`]: per static slot word kind.
@@ -179,7 +180,7 @@ pub const WORD_UNKNOWN: u8 = 0;
 pub const WORD_SCALAR: u8 = 1;
 /// `0` or a heap object address, possibly with bit 0 set (`Result` niche).
 pub const WORD_POINTER: u8 = 2;
-/// Array element kind only (`TagArrayKind` / `MakeArrayK`): every element is
+/// Array element kind only (`MakeArrayK`): every element is
 /// a `byte` or `bool`, so the runtime may store the array one byte per
 /// element. Runtimes that predate it ignore the stamp (elements stay words).
 pub const WORD_BYTE: u8 = 3;
@@ -333,7 +334,8 @@ pub struct ArchivedProgram {
     pub struct_layouts: Vec<CStructLayout>,
     /// Compiler-analyzed operand-stack capacity (minor 13+).
     pub operand_stack_slots: u32,
-    /// S2b slot / frame maps (minor 14+). Empty means conservative stack GC.
+    /// S2b slot / frame maps (minor 14+). The compiler now writes none (its
+    /// precise frame maps cover every body); older archives' still load.
     pub stack_maps: Vec<crate::stack_map::FrameStackMap>,
     /// Complete frame maps (minor 21+); frames without one are scanned.
     pub precise_frames: Vec<crate::stack_map::PreciseFrameMap>,

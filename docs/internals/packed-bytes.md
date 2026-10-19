@@ -31,14 +31,16 @@ must widen a packed array, never treat `words() == None` as "not an array":
 ## Construction stamp
 
 `common::WORD_BYTE` (3) is an array element kind next to `WORD_POINTER`.
-`TagArrayKind` / `MakeArrayK` with it packs the array (`set_elem_kind` →
-`pack`, which keeps words if any element does not fit).
+`MakeArrayK` with it packs the array (`set_elem_kind` → `pack`, which keeps
+words if any element does not fit). The legacy `TagArrayKind` (stamping an
+existing array; older archives only) does the same.
 
 - Array literals: `emit_hir` stamps `MakeArrayK` with
   `value_layout::array_elem_stamp` (byte / bool → `WORD_BYTE`).
-- `Vec::new` / `with_capacity` / `from`: `$bytes` thunk twins (next to the
-  `$ptr` ones) end in `TagArrayKind WORD_BYTE`; call sites pick them by static
-  type, in every tier (the MIR tiers call the same thunk).
+- `Vec::new` / `with_capacity`: `$bytes` thunk twins (next to the `$ptr`
+  ones) make the empty array with `MakeArrayK WORD_BYTE` (then `reserve`);
+  call sites pick them by static type, in every tier (the MIR tiers call the
+  same thunk). `Vec::from` copies its source's storage and kind.
 - Not stamped yet: array literals built directly in MIR (`MirAllocKind::Array`
   carries no element kind). They stay words.
 
@@ -47,13 +49,17 @@ Runtimes that predate `WORD_BYTE` ignore the stamp, so no archive bump.
 ## Byte paths
 
 `io::to_bytes`, `read_to_end` and stream reads build or fill packed arrays
-with one copy; writes, `from_bytes` and FFI `Bytes` (tag 15) take
-`to_byte_vec` (one copy when packed). FFI `Bytes` still copies into a
-separate buffer and back: handing C the array's own buffer is unsafe if a
-callback grows the array. FFI `ConstBytes` (tag 16) is the read-only form: a
-`Vec<byte>` is copied in once and never back, and a `string` is lent in
-place (its bytes never move or change; the VM roots in-flight FFI
-arguments until the call returns). Packed arrays cross threads and channels as
+with one copy; writes and `from_bytes` take `to_byte_vec` (one copy when
+packed). FFI `Bytes` (tag 15) and `ConstBytes` (tag 16, read-only) share
+one path (`byte_arg_from_value` in `machine/src/ffi/call.rs`): a `string`
+(`ConstBytes` only) is lent in place (its bytes never move or change; the
+VM roots in-flight FFI arguments until the call returns), and so is a packed
+array, when the VM has no callback closure (no coil code can run during the
+call to grow, unpack or free it) and no other argument of the call is the
+same array (so C sees no aliasing a copy would not have). Anything else (a
+word-stored array, a byte tuple, an empty array) is copied in, and a
+`Bytes` array copied back after the call; the array ends with the same
+bytes either way. Packed arrays cross threads and channels as
 `PortableValue::Bytes`.
 
 ## Measurements

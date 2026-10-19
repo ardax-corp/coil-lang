@@ -109,11 +109,13 @@ that evacuation rewrites. Generic and compiler-allocated statics (FFI
 library / fn-id handles) stay ambiguous. A static is one word, so this
 unpins at most its direct target.
 
-Arrays carry an element kind (archive minor 27). `Vec::new` /
-`with_capacity` / `from` calls whose static element type is a ground
-pointer (class, string, niche `Option` / `Result`, nested `Vec` or fixed
-array) call `Vec::{name}$ptr` thunks, which end in `TagArrayKind`. Array
-literals of such elements are built with `MakeArrayK` (archive minor 28).
+Arrays carry an element kind, set when the array is made. `Vec::new` /
+`with_capacity` calls whose static element type is a ground pointer
+(class, string, niche `Option` / `Result`, nested `Vec` or fixed array)
+call `Vec::{name}$ptr` thunks, which make the empty array with
+`MakeArrayK` (archive minor 28), as array literals of such elements are.
+`Vec::from` copies its source's storage and kind. (Archives of minor 27–39
+also stamp an existing array with `TagArrayKind`; the VM still runs it.)
 They cover literals the interpreter materializes, such as a returned or
 stored row; stack and dense arrays carry no kind. Marking then treats
 every element as `0` or an object: precise, no classification. Only the

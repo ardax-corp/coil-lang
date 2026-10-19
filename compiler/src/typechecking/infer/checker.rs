@@ -80,6 +80,8 @@ pub(super) struct BareNameShield {
     /// Whether each key (bare and `module::name`) was in `generic_fns` and
     /// `generics.generic_fns`.
     generic: Vec<(String, bool, bool)>,
+    /// Each key's `fn_dict_arity` entry.
+    arity: Vec<(String, Option<usize>)>,
     env: Vec<(String, usize)>,
     defs: Vec<(DefId, Option<Scheme>)>,
 }
@@ -248,6 +250,7 @@ impl Checker {
             generic_fns: HashSet::new(),
             fn_dict_arity: HashMap::new(),
             current_typeclass: None,
+            current_instance_method: None,
             registering_overloadable_fn: false,
             lambda_uncaptured_outer: None,
             lambda_rebound_statics: HashSet::new(),
@@ -5671,11 +5674,19 @@ impl Checker {
             let receiver_var = arg_tys
                 .first()
                 .and_then(|ty| Self::constraint_var_of_ty(&apply_ty_prune(&self.subst, ty)));
-            let candidates = keep(
-                receiver_var
-                    .map(|v| self.bound_method_candidates(&ident, Some(v)))
-                    .unwrap_or_else(|| self.bound_method_candidates(&ident, None)),
-            );
+            // With no variable first argument, a bound is only the callee
+            // when the arguments fit its type: `show(x)` on an `int` inside
+            // `fn f<W: Show>` is `int`'s instance, not `W`'s dictionary
+            // (#1483).
+            let candidates = match receiver_var {
+                Some(v) => keep(self.bound_method_candidates(&ident, Some(v))),
+                None => {
+                    let all = keep(self.bound_method_candidates(&ident, None));
+                    all.into_iter()
+                        .filter(|candidate| self.bound_candidate_fits_args(candidate, &arg_tys))
+                        .collect()
+                }
+            };
             if let Some((dict_index, dict_class, class, method_slot, scheme)) =
                 self.select_bound_method(candidates, &ident, &range)
             {
@@ -5729,8 +5740,11 @@ impl Checker {
         // Ground function-style trait call: `method(x, …)` with a concrete
         // first argument selects its instance like `x.method(…)` (the
         // discharged instance lands in `call_dicts_at` for codegen). A free fn
-        // or local of the same name wins.
-        if self.lookup_fn_scheme(&ident).is_none()
+        // or local of the same name wins; the recursion binding of the
+        // instance method being inferred does not (#1483).
+        let own_method = self.current_instance_method.as_deref() == Some(ident.as_str())
+            && !self.local_defs.contains_key(ident.as_str());
+        if (own_method || self.lookup_fn_scheme(&ident).is_none())
             && let Some(first) = arg_tys.first()
             && let Some((class, scheme)) = self.ground_trait_method_for_receiver(&ident, first)
         {
@@ -10766,6 +10780,64 @@ impl Checker {
             .collect()
     }
 
+    /// Whether a function-style call's arguments fit a bound candidate from
+    /// [`Self::bound_method_candidates`]: the method's own class constraint
+    /// is pinned to the active bound's arguments and each argument is
+    /// trial-unified with its parameter, with the type parameters of the
+    /// active bounds held rigid (`int` does not fit `W`, nor `Box<T>` an
+    /// `int`). Nothing is committed (#1483).
+    fn bound_candidate_fits_args(
+        &mut self,
+        candidate: &(usize, String, String, usize, Scheme),
+        arg_tys: &[Ty],
+    ) -> bool {
+        let (dict_index, _, owner, _, scheme) = candidate;
+        let Some(bound) = self.active_constraints.get(*dict_index) else {
+            return true;
+        };
+        let bound_args: Vec<Ty> = bound.args.iter().map(|a| apply_ty_prune(&self.subst, a)).collect();
+        let mut rigid: Vec<TyVarId> = self
+            .active_constraints
+            .iter()
+            .flat_map(|c| c.args.iter())
+            .flat_map(|a| ftv_ty(&apply_ty_prune(&self.subst, a)))
+            .collect();
+        rigid.sort_unstable();
+        rigid.dedup();
+        let (fun_ty, constraints, _kinds) = instantiate_with_kinds(scheme, &mut self.counter);
+        let Some(own) = constraints.iter().find(|c| &c.class == owner) else {
+            return true;
+        };
+        if own.args.len() != bound_args.len() {
+            return true;
+        }
+        let mut trial = self.subst.clone();
+        for (param, arg) in own.args.iter().zip(&bound_args) {
+            match unify_with(&trial, param, arg) {
+                Ok(s) => trial = s,
+                Err(_) => return false,
+            }
+        }
+        let mut fun = &fun_ty;
+        for arg in arg_tys {
+            let Ty::Fun(param, rest) = fun else {
+                break;
+            };
+            match unify_with(&trial, param, arg) {
+                Ok(s) => trial = s,
+                Err(_) => return false,
+            }
+            fun = rest;
+        }
+        // A rigid parameter may only meet itself or a flexible variable,
+        // and two of them must stay apart.
+        let mut images = HashSet::new();
+        rigid.iter().all(|v| match apply_ty_prune(&trial, &Ty::Var(*v)) {
+            Ty::Var(u) => (u == *v || !rigid.contains(&u)) && images.insert(u),
+            _ => false,
+        })
+    }
+
     fn existential_method_candidate(
         &self,
         class: &str,
@@ -12095,7 +12167,8 @@ impl Checker {
 
     /// Everything inferring a trait signature or instance method as a
     /// function records under its bare method name: result-mode flags, the
-    /// generic-fn mark of a method with its own type parameters (#1467), the
+    /// generic-fn mark of a method with its own type parameters (#1467) and
+    /// the dictionary count of one with bounds (#1471), the
     /// env binding, and (when a free fn of that name exists) that fn's DefId
     /// scheme. The name belongs to the free fn, or to nobody, so a
     /// function-style call `method(x)` resolves through the trait instead of
@@ -12113,6 +12186,7 @@ impl Checker {
                 .iter()
                 .map(|(k, _, _)| (k.clone(), self.generic_fns.contains(k), self.generics.generic_fns.contains(k)))
                 .collect(),
+            arity: modes.iter().map(|(k, _, _)| (k.clone(), self.fn_dict_arity.get(k).copied())).collect(),
             modes,
             env: names.iter().map(|n| (n.to_string(), mark)).collect(),
             defs: names
@@ -12146,6 +12220,12 @@ impl Checker {
                     set.remove(&key);
                 }
             }
+        }
+        for (key, arity) in shield.arity {
+            match arity {
+                Some(n) => self.fn_dict_arity.insert(key, n),
+                None => self.fn_dict_arity.remove(&key),
+            };
         }
         if let Some(top) = self.env.top_mut() {
             for (name, mark) in &shield.env {

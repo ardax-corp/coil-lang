@@ -42,7 +42,7 @@ fn check(bin: &str, tmp: &Path, src: &Path) {
     assert!(stats.status.success(), "compile failed: {stats_out}");
     let refused: Vec<&str> = stats_out
         .lines()
-        .filter(|l| l.starts_with("    ") && l.contains("; hir: ") && !l.contains("; hir: lowered;"))
+        .filter(|l| l.starts_with("    ") && l.contains("; hir: ") && !l.contains("; hir: lowered)"))
         .collect();
     assert!(refused.is_empty(), "FFI bodies refused direct MIR: {refused:#?}");
 

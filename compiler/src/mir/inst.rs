@@ -454,7 +454,7 @@ pub enum MirInst {
     /// Heap allocation (I5). Dest is [`MirTy::HeapRef`]. Always a GC
     /// safepoint; pair with [`Self::GcBarrier`]. S2a records live heap
     /// words on the barrier and [`crate::mir::func::MirFunc::gc_roots`].
-    /// S2c may emit across this edge when S2b maps exist.
+    /// S2c may emit across this edge when every allocation has its barrier.
     Alloc {
         dest: ValueId,
         kind: MirAllocKind,
@@ -529,14 +529,6 @@ pub enum MirInst {
         dest: ValueId,
         src: ValueId,
         tag: u32,
-    },
-    /// `TagArrayKind kind`: stamps the element kind of array `src` (a
-    /// precise-reference or packed-byte `Vec`); `dest` is the same array.
-    /// Writes the object, never allocates.
-    TagArrayKind {
-        dest: ValueId,
-        src: ValueId,
-        kind: u8,
     },
     /// String `==` (`!=` when `ne`): VM `EQ` / `NEQ`, which compare strings
     /// by content. Dest is `bool`; `lhs` / `rhs` are string
@@ -742,7 +734,6 @@ impl MirInst {
             | Self::Format { dest, .. }
             | Self::Stringify { dest, .. }
             | Self::Unbox { dest, .. }
-            | Self::TagArrayKind { dest, .. }
             | Self::StrEq { dest, .. } => dest,
         }
     }
@@ -832,7 +823,7 @@ impl MirInst {
             Self::Alloc { elems, .. } => elems.clone(),
             Self::GcBarrier { roots, .. } => roots.clone(),
             Self::Deopt { .. } | Self::String { .. } | Self::CodePtr { .. } => Vec::new(),
-            Self::Print { src, .. } | Self::Stringify { src, .. } | Self::Unbox { src, .. } | Self::TagArrayKind { src, .. } | Self::Panic { msg: src, .. } => vec![*src],
+            Self::Print { src, .. } | Self::Stringify { src, .. } | Self::Unbox { src, .. } | Self::Panic { msg: src, .. } => vec![*src],
             Self::Format { fmt, args, .. } => {
                 let mut v = vec![*fmt];
                 v.extend(args.iter().copied());
@@ -926,7 +917,7 @@ impl MirInst {
                 }
             }
             Self::Deopt { .. } | Self::String { .. } | Self::CodePtr { .. } => {}
-            Self::Print { src, .. } | Self::Stringify { src, .. } | Self::Unbox { src, .. } | Self::TagArrayKind { src, .. } | Self::Panic { msg: src, .. } => *src = map(*src),
+            Self::Print { src, .. } | Self::Stringify { src, .. } | Self::Unbox { src, .. } | Self::Panic { msg: src, .. } => *src = map(*src),
             Self::Format { fmt, args, .. } => {
                 *fmt = map(*fmt);
                 for v in args.iter_mut() {

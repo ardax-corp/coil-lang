@@ -142,15 +142,18 @@ class Struct {}
 
 /// FFI tag for a writable byte buffer (`uint8_t *`) made from a `Vec<byte>`.
 ///
-/// C gets a pointer to a copy of the bytes, and whatever it writes there is
-/// copied back into the `Vec` after the call. No NUL terminator is added, so
-/// pass the length separately. Argument only: as a return type it is
+/// Whatever C writes there ends up in the `Vec`: a packed `Vec<byte>` is lent
+/// in place, and otherwise (a coil callback exists, the same `Vec` is passed
+/// twice, or its elements are stored as words) C gets a copy that is copied
+/// back after the call. No NUL terminator is added, so pass the length
+/// separately. Argument only: as a return type it is
 /// `ErrorKind::Unsupported` (return a `Ptr` instead).
 class Bytes {}
 
 /// FFI tag for a read-only byte view (`const uint8_t *`) of a `string` or `Vec<byte>`.
 ///
-/// A string is lent in place without a copy; a `Vec<byte>` is copied in
-/// once and never copied back. No NUL terminator is added, so pass the
-/// length separately. Argument only.
+/// A string is lent in place without a copy, and so is a packed `Vec<byte>`
+/// under the same rules as `Bytes`; any other `Vec<byte>` is copied in once
+/// and never copied back. No NUL terminator is added, so pass the length
+/// separately. Argument only.
 class ConstBytes {}
