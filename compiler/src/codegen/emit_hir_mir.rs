@@ -594,8 +594,17 @@ impl Compiler {
             // `plan_polyfn_escape_dicts` plans.
             HirKind::Global { .. } if let Some(name) = emit.plan.polyfns.get(&id.0) => {
                 if let Some(target) = self.functions.get(name).and_then(|&entry| self.bytecode.entry_label_for_offset(entry)) {
+                    // Its declared parameters, so a call through the value
+                    // given more hands the rest to its result (#1589): a
+                    // curried one's value is `MakePolyFnCapture` of no
+                    // dictionaries.
+                    let params = self.polyfn_params(name);
                     let value = if self.checker.dict_arity_for(name) == 0 {
-                        Some(crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::PolyFn { target }, captures: Vec::new(), dicts: Vec::new() })
+                        let kind = match params {
+                            Some(params) => crate::mir::MirAllocKind::PolyFnCapture { target, params },
+                            None => crate::mir::MirAllocKind::PolyFn { target },
+                        };
+                        Some(crate::mir::HirFnValue { kind, captures: Vec::new(), dicts: Vec::new() })
                     } else {
                         let (name, ty) = (name.clone(), Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t)));
                         let steps = self.hir_mir_once(|this| {
@@ -604,7 +613,7 @@ impl Compiler {
                             steps
                         });
                         self.hir_mir_dict_program(&steps)
-                            .map(|dicts| crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::PolyFnCapture { target }, captures: Vec::new(), dicts })
+                            .map(|dicts| crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::PolyFnCapture { target, params: params.unwrap_or(0) }, captures: Vec::new(), dicts })
                     };
                     if let Some(value) = value {
                         t.fn_values.insert(id.0, value);
@@ -1307,8 +1316,15 @@ impl Compiler {
             Some(source) => self.generic_return_depends_on_type_param(source),
             None => Self::hir_polyfn_returns_var(hir, &self.checker, f),
         };
+        // A closure result, adapted from the shared body's boxed ABI to the
+        // call's ground type (#1589).
+        let (unbox, ret_adapt) = match self.hir_polyfn_ret_adapt(hir, emit, id, f, args.len()) {
+            None => (unbox, None),
+            Some(Ok(adapt)) => (false, adapt.map(|adapt| self.hir_closure_adapter(&adapt))),
+            Some(Err(_)) => return,
+        };
         let unbox = if unbox { call_ty.as_ref().and_then(Self::ty_to_value_tag).map(|tag| tag as u32) } else { None };
-        t.poly_calls.insert(id.0, crate::mir::HirPolyCall { boxes, dicts, unbox });
+        t.poly_calls.insert(id.0, crate::mir::HirPolyCall { boxes, dicts, unbox, ret_adapt });
     }
 
     /// Whether each of a `PolyFn` call's `n` parameters is a bare type
