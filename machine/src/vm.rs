@@ -3291,10 +3291,13 @@ impl<const S: usize> Machine<S> {
                             return;
                         }
                     };
+                    // No coil callback can run during the call without a
+                    // closure: packed byte arrays can be lent in place.
                     let mut ctx = crate::ffi::InvokeContext::new(
                         self.heap.get_mut() as *mut Heap,
                         &self.struct_layouts,
-                    );
+                    )
+                    .lending_arrays(self.ffi_closures.is_empty());
                     let mut closure_ptrs = Vec::new();
                     let roots_len = self.ffi_arg_roots.len();
                     self.ffi_arg_roots.extend_from_slice(&args);

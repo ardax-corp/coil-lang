@@ -18,6 +18,9 @@ pub struct InvokeContext {
     heap: *mut Heap,
     struct_layouts: *const CStructLayout,
     struct_layouts_len: usize,
+    /// Packed byte arrays may be lent to C in place (see
+    /// [`Self::lending_arrays`]).
+    lend_arrays: bool,
 }
 
 impl InvokeContext {
@@ -26,7 +29,17 @@ impl InvokeContext {
             heap,
             struct_layouts: struct_layouts.as_ptr(),
             struct_layouts_len: struct_layouts.len(),
+            lend_arrays: false,
         }
+    }
+
+    /// Lend packed `Bytes` / `ConstBytes` arrays to C in place instead of
+    /// copying them. Only sound when no coil code can run during the call
+    /// (no callback closure exists), since that code could grow, unpack or
+    /// free the array under C.
+    pub fn lending_arrays(mut self, lend: bool) -> Self {
+        self.lend_arrays = lend;
+        self
     }
 
     fn heap(&mut self) -> &mut Heap {
@@ -381,24 +394,61 @@ fn array_buffer_from_value(
     Ok((value.raw() as *mut c_void, None))
 }
 
-/// A `Vec<byte>` (or byte tuple) as a `uint8_t *` buffer, one byte per
-/// element. `Some(addr)` when the bytes should be copied back after the call.
-fn byte_buffer_from_value(
+/// Backing for an empty byte view, so C never gets a dangling pointer.
+static EMPTY_CONST_BYTES: [u8; 1] = [0];
+
+/// A byte argument as C sees it: a `Vec<byte>` (or byte tuple) as `Bytes`
+/// (`uint8_t *`, `writable`), or a `string` / `Vec<byte>` (or byte tuple) as
+/// `ConstBytes` (read-only `const uint8_t *`). No NUL terminator; the callee
+/// takes the length separately. `Some(addr)` when the bytes are a copy that
+/// goes back into that array after the call.
+///
+/// A string is lent in place: its bytes never move or change while the
+/// string lives (`memory::strbuf`), and the VM roots the call's arguments
+/// until it returns. A packed array is lent in place too when `lend` (no
+/// coil callback can run during the call, so nothing can grow, unpack or
+/// free it) and no other argument names the same array (so C sees no
+/// aliasing a copy would not have had): a `Bytes` callee then writes the
+/// array itself, which is what copying back gave. Anything else (a
+/// word-stored array, a tuple, an empty array) is copied in, and a
+/// `Bytes` array copied back, as before.
+fn byte_arg_from_value(
     heap: &Heap,
     value: &Value,
+    writable: bool,
+    lend: bool,
     bufs: &mut Vec<Vec<u8>>,
 ) -> Result<(*mut c_void, Option<u64>), FfiError> {
     let addr = value.raw() as u64;
-    let obj = heap.find_object_by_addr(addr);
-    let (mut buf, copy_back): (Vec<u8>, bool) = match &obj {
-        Some(Object::Array(gc)) => (gc.as_ref().to_byte_vec(), true),
+    if addr == 0 && !writable {
+        return Ok((EMPTY_CONST_BYTES.as_ptr() as *mut c_void, None));
+    }
+    let (mut buf, copy_back): (Vec<u8>, bool) = match heap.find_object_by_addr(addr) {
+        Some(Object::String(gc)) if !writable => {
+            let bytes = gc.as_ref().data.as_bytes();
+            if bytes.is_empty() {
+                return Ok((EMPTY_CONST_BYTES.as_ptr() as *mut c_void, None));
+            }
+            return Ok((bytes.as_ptr() as *mut c_void, None));
+        }
+        Some(Object::Array(mut gc)) => {
+            if lend
+                && let Some(bytes) = gc.as_mut().bytes_mut()
+                && !bytes.is_empty()
+            {
+                return Ok((bytes.as_mut_ptr() as *mut c_void, None));
+            }
+            (gc.as_ref().to_byte_vec(), writable)
+        }
         Some(Object::Tuple(gc)) => {
             (gc.as_ref().elements().iter().map(|v| v.as_int() as u8).collect(), false)
         }
         _ => {
-            return Err(FfiError::Unsupported(
-                "Bytes argument must be a Vec<byte>".into(),
-            ));
+            return Err(FfiError::Unsupported(if writable {
+                "Bytes argument must be a Vec<byte>".into()
+            } else {
+                "ConstBytes argument must be a string or Vec<byte>".into()
+            }));
         }
     };
     // Never hand C a dangling pointer for an empty buffer.
@@ -406,48 +456,6 @@ fn byte_buffer_from_value(
     let ptr = buf.as_mut_ptr() as *mut c_void;
     bufs.push(buf);
     Ok((ptr, copy_back.then_some(addr)))
-}
-
-/// Backing for an empty [`FfiType::ConstBytes`] view, so C never gets a
-/// dangling pointer.
-static EMPTY_CONST_BYTES: [u8; 1] = [0];
-
-/// A `string` or `Vec<byte>` (or byte tuple) as a read-only `const uint8_t *`
-/// with no NUL terminator; the callee takes the length separately.
-///
-/// A string is lent in place: its bytes never move or change while the string
-/// lives (`memory::strbuf`), and the VM roots the call's arguments until it
-/// returns. An array is copied once and never copied back: lending its own
-/// buffer is unsafe if a callback grows or unpacks it.
-fn const_byte_view_from_value(
-    heap: &Heap,
-    value: &Value,
-    bufs: &mut Vec<Vec<u8>>,
-) -> Result<*mut c_void, FfiError> {
-    let addr = value.raw() as u64;
-    if addr == 0 {
-        return Ok(EMPTY_CONST_BYTES.as_ptr() as *mut c_void);
-    }
-    let mut buf = match heap.find_object_by_addr(addr) {
-        Some(Object::String(gc)) => {
-            let bytes = gc.as_ref().data.as_bytes();
-            if bytes.is_empty() {
-                return Ok(EMPTY_CONST_BYTES.as_ptr() as *mut c_void);
-            }
-            return Ok(bytes.as_ptr() as *mut c_void);
-        }
-        Some(Object::Array(gc)) => gc.as_ref().to_byte_vec(),
-        Some(Object::Tuple(gc)) => gc.as_ref().elements().iter().map(|v| v.as_int() as u8).collect(),
-        _ => {
-            return Err(FfiError::Unsupported(
-                "ConstBytes argument must be a string or Vec<byte>".into(),
-            ));
-        }
-    };
-    buf.reserve(1);
-    let ptr = buf.as_mut_ptr() as *mut c_void;
-    bufs.push(buf);
-    Ok(ptr)
 }
 
 fn copy_byte_buffers_back(heap: &mut Heap, targets: &[(u64, usize)], bufs: &[Vec<u8>]) {
@@ -635,17 +643,16 @@ pub fn invoke_via_libffi(
                 slots.push(ArgSlot::Ptr(ptr_storage.len()));
                 ptr_storage.push(ptr);
             }
-            FfiType::Bytes => {
+            FfiType::Bytes | FfiType::ConstBytes => {
+                // Lent only when no other argument is the same word.
+                let lend = ctx.lend_arrays
+                    && args.iter().filter(|a| a.raw() == value.raw()).count() == 1;
+                let writable = matches!(ty, FfiType::Bytes);
                 let (ptr, heap_addr) =
-                    byte_buffer_from_value(ctx.heap(), value, &mut byte_buffers)?;
+                    byte_arg_from_value(ctx.heap(), value, writable, lend, &mut byte_buffers)?;
                 if let Some(addr) = heap_addr {
                     byte_copy_back.push((addr, byte_buffers.len() - 1));
                 }
-                slots.push(ArgSlot::Ptr(ptr_storage.len()));
-                ptr_storage.push(ptr);
-            }
-            FfiType::ConstBytes => {
-                let ptr = const_byte_view_from_value(ctx.heap(), value, &mut byte_buffers)?;
                 slots.push(ArgSlot::Ptr(ptr_storage.len()));
                 ptr_storage.push(ptr);
             }
@@ -949,6 +956,80 @@ mod tests {
         assert_eq!(ret.as_int(), 258);
         let after: Vec<i64> = gc.as_ref().iter().map(|v| v.as_int()).collect();
         assert_eq!(after, vec![1, 2, 255]);
+    }
+
+    /// Sums `n` bytes at `buf`, adds one to each, and records the pointer.
+    extern "C" fn bump_bytes(buf: *mut u8, n: i64) -> i64 {
+        CONST_BYTES_SEEN.set(buf as usize);
+        let bytes = unsafe { std::slice::from_raw_parts_mut(buf, n as usize) };
+        let sum = bytes.iter().map(|&b| i64::from(b)).sum();
+        for b in bytes.iter_mut() {
+            *b = b.wrapping_add(1);
+        }
+        sum
+    }
+
+    /// `f(arg, n)` with `f` taking `ty` then `Int`, lending arrays when `lend`.
+    fn byte_call(
+        heap: &mut Heap,
+        f: *mut c_void,
+        ty: FfiType,
+        args: &[Value],
+        lend: bool,
+    ) -> Result<Option<Value>, FfiError> {
+        let mut types = vec![ty; args.len() - 1];
+        types.push(FfiType::Int);
+        let sig = FfiSignature::from_parts("f", types, FfiType::Int).unwrap();
+        let mut prepared = prepare_cif(&sig, &[]).unwrap();
+        prepared.addr = CodePtr::from_ptr(f);
+        let mut ctx = InvokeContext::new(heap, &[]).lending_arrays(lend);
+        let mut closures = Vec::new();
+        invoke_via_libffi(&prepared, &sig, args, None, &mut ctx, &mut closures)
+    }
+
+    #[test]
+    fn packed_arrays_are_lent_in_place_when_allowed() {
+        use crate::memory::ObjArray;
+        let mut heap = Heap::default();
+        let (obj, gc) = heap.alloc(ObjArray::from_bytes(vec![1, 2, 255]), Object::Array);
+        let arr = Value::from(obj.addr());
+        let storage = || gc.as_ref().bytes().unwrap().as_ptr() as usize;
+        // `Bytes`: C writes the array itself.
+        let (bump, n) = (bump_bytes as *mut c_void, Value::from(3_i64));
+        let ret = byte_call(&mut heap, bump, FfiType::Bytes, &[arr, n], true);
+        assert_eq!(ret.unwrap().unwrap().as_int(), 258);
+        assert_eq!(CONST_BYTES_SEEN.get(), storage());
+        assert_eq!(gc.as_ref().bytes(), Some(&[2u8, 3, 0][..]));
+        // `ConstBytes`: lent read-only.
+        let sum = sum_const_bytes as *mut c_void;
+        let ret = byte_call(&mut heap, sum, FfiType::ConstBytes, &[arr, n], true);
+        assert_eq!(ret.unwrap().unwrap().as_int(), 5);
+        assert_eq!(CONST_BYTES_SEEN.get(), storage());
+    }
+
+    #[test]
+    fn arrays_are_copied_when_lending_is_off_or_aliased() {
+        use crate::memory::ObjArray;
+        extern "C" fn bump_first(dst: *mut u8, _src: *const u8, n: i64) -> i64 {
+            bump_bytes(dst, n)
+        }
+        let mut heap = Heap::default();
+        let (obj, gc) = heap.alloc(ObjArray::from_bytes(vec![1, 2]), Object::Array);
+        let arr = Value::from(obj.addr());
+        let storage = || gc.as_ref().bytes().unwrap().as_ptr() as usize;
+        // A callback could run: a copy, written back.
+        let (bump, n) = (bump_bytes as *mut c_void, Value::from(2_i64));
+        let ret = byte_call(&mut heap, bump, FfiType::Bytes, &[arr, n], false);
+        assert_eq!(ret.unwrap().unwrap().as_int(), 3);
+        assert_ne!(CONST_BYTES_SEEN.get(), storage());
+        assert_eq!(gc.as_ref().bytes(), Some(&[2u8, 3][..]));
+        // The same array twice: two copies, written back in argument order
+        // (the unchanged second one last), as before lending.
+        let bump = bump_first as *mut c_void;
+        let ret = byte_call(&mut heap, bump, FfiType::Bytes, &[arr, arr, n], true);
+        assert_eq!(ret.unwrap().unwrap().as_int(), 5);
+        assert_ne!(CONST_BYTES_SEEN.get(), storage());
+        assert_eq!(gc.as_ref().bytes(), Some(&[2u8, 3][..]));
     }
 
     #[test]
