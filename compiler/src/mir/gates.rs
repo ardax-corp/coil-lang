@@ -102,7 +102,7 @@ impl GateFacts {
 }
 
 /// The LIR walls of a body: neither a user call nor a `BoxValue` is one
-/// (the S2b map leaves the box to the precise frame map), only an
+/// (the precise frame map covers the box), only an
 /// allocation without maps (`maps_ok`).
 pub fn fuse_lir_wall(func: &MirFunc, maps_ok: bool) -> Option<LirRefuse> {
     let insts = || func.blocks.iter().flat_map(|b| b.insts.iter());

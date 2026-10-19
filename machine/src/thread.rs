@@ -156,7 +156,8 @@ pub struct ThreadProgram {
     pub debug: ProgramDebug,
     /// Operand-stack capacity for worker VMs running this program.
     pub operand_stack_slots: u32,
-    /// S2b slot / frame maps (empty when the archive had none).
+    /// S2b slot / frame maps of an older archive (empty when it had none, and
+    /// for every program compiled now).
     pub stack_maps: Vec<common::FrameStackMap>,
     /// Complete frame maps; frames without one keep the conservative scan.
     pub precise_frames: Arc<Vec<common::PreciseFrameMap>>,

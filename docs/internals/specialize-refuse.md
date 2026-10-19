@@ -30,7 +30,7 @@ rungs are **not** in this table — see ladders below and
 | Multi-payload `Unpack` / `JumpIfMatch` arity > 1 | dense or LIR when reconstruct ≤ fuse | **D3** ([COI-357](https://linear.app/ardax/issue/COI-357)) |
 | Native deopt resume maps | compiler sidecar (`DraftDeoptMap`); not archived; emit skips `Deopt` | **I7** / **C3** — maps exist; P5 resume leftover |
 | Incomplete deopt maps (stack-only / convoy TOS) | native must refuse | **C3** leftover |
-| Unmapped alloc / GC safepoint | dense with a frame extent (minor 22); LIR / fuse-IL still need an S2b draft | **B6** maps `ArrayPush` / CALL+`Make*`; **D1** maps InitTyped+field |
+| Unmapped alloc / GC safepoint | dense with a frame extent (minor 22); LIR needs every allocation followed by its `GcBarrier` (`mir_maps_ok`); precise frame maps cover both | **B6** maps `ArrayPush` / CALL+`Make*`; **D1** maps InitTyped+field |
 | Operand-stack value at a CFG edge (two-slot `?`, match join) | dense retries with stack φs; kept only if its fused, loop-weighted (×64) dispatch count beats fuse-IL **and** the MIR→LIR reconstruct | `fused_dispatch_cost`; static estimate, so a few bodies still lose ≤ 2% |
 | Residual `Byte` / `Pow` / `AND`/`OR` | fuse-IL | later island |
 | LIR one-word `CALL` / HostInvoke reconstruct | fuse-IL (dense may still emit) | I6 |

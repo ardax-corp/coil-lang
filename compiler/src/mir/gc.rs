@@ -10,7 +10,8 @@
 //! and Object `DenseMakeObject` (D2).
 //! [`fill_live_roots`] records live heap-word SSA values (and IL
 //! slots when the builder snapshotted them). Dense specialize and MIR→LIR
-//! sidecar. S2c may emit dense / LIR across alloc when S2b maps exist.
+//! sidecar. S2c may emit dense / LIR across alloc when every allocation
+//! has its barrier (`mir_maps_ok`).
 //!
 //! Stack-map roadmap: `docs/internals/mir-stack-maps.md`.
 

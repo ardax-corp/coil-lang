@@ -59,6 +59,9 @@ pub(super) struct SynthCallee {
     /// A host native by its registered name, whatever the name resolves
     /// to in the module being compiled.
     pub host: bool,
+    /// The `format` builtin, whatever the name resolves to in the module
+    /// being compiled.
+    pub format: bool,
 }
 
 /// One step of building trait dictionaries, a stack program over words:
@@ -228,11 +231,6 @@ impl Compiler {
         &self.debug_locs
     }
 
-    /// S2b slot / frame maps (empty when no allocating body lifted).
-    pub fn stack_maps(&self) -> &[common::FrameStackMap] {
-        &self.stack_maps
-    }
-
     /// `defer` cleanup ranges for the VM unwinder.
     pub fn cleanup_ranges(&self) -> &[common::CleanupRange] {
         &self.cleanup_ranges
@@ -240,10 +238,6 @@ impl Compiler {
 
     pub fn precise_frames(&self) -> &[common::PreciseFrameMap] {
         &self.precise_frames
-    }
-
-    pub fn stack_map_drafts(&self) -> &[crate::mir::DraftFrameMap] {
-        &self.stack_map_drafts
     }
 
     /// I7 / C3 deopt resume drafts (empty when no specialized body).
@@ -4008,6 +4002,15 @@ impl Compiler {
                 self.emit_builtin_entry(&fqn, &params, boolean.clone(), None, |b, a| b.bin(op, a[0], a[1], boolean.clone()));
             }
         }
+        // `()` is always `()` (#1450): its operands, taken as the `Show`
+        // thunk takes a unit, are never read.
+        let params = [(int.clone(), tag_of(ValueTag::Unit)), (int.clone(), tag_of(ValueTag::Unit))];
+        for (method, equal) in [("eq", true), ("ne", false)] {
+            let fqn = Generics::builtin_instance_fqn("Eq", "unit", method);
+            self.emit_builtin_entry(&fqn, &params, boolean.clone(), None, |b, _| {
+                b.push(HirKind::Lit(Lit::Bool(equal)), boolean.clone())
+            });
+        }
 
         // Show thunks: accept a boxed, raw or heap-string argument at slot 0,
         // ignore the trailing dictionary, and return an ObjString via STRINGIFY.
@@ -4050,6 +4053,24 @@ impl Compiler {
             self.emit_builtin_entry(&adapter, &[(word.clone(), tag.map(|t| t as u32))], string.clone(), None, |b, a| {
                 show(b, a[0], tag)
             });
+        }
+
+        // Show thunks for ground tuples (#1451): reserved here, raw (the
+        // tuple's own word) with a `$dict` adapter, as the string thunk;
+        // emitted by `emit_tuple_show_thunks` once the module's own `Show`
+        // entries exist, so `%v` of an item calls them.
+        let tuples: Vec<Ty> = self.checker.generics().tuple_show_tys().cloned().collect();
+        for ty in tuples {
+            let fqn = Generics::builtin_instance_fqn("Show", &ty.to_string(), "show");
+            if self.functions.contains_key(&fqn) {
+                continue;
+            }
+            self.note_raw_builtin_thunk(&fqn);
+            self.reserve_function_entry(Self::dict_adapter_name(&fqn));
+            self.reserve_function_entry(fqn.clone());
+            if !self.tuple_show_thunks.iter().any(|(f, _)| *f == fqn) {
+                self.tuple_show_thunks.push((fqn, ty));
+            }
         }
 
         // Show thunks for the builtin error enums: reserved here, emitted by
@@ -4746,17 +4767,6 @@ impl Compiler {
         false
     }
 
-    /// Emit an `UnboxValue` instruction for a concrete `Ty` at a generic
-    /// call return boundary (generic→concrete).  Does nothing when the
-    /// type is open (`Ty::Var`), the caller can't know the tag at compile
-    /// time in that case (the boxed value stays boxed).
-    fn emit_unbox_if_needed(bytecode: &mut CodeBuf, ty: &crate::typechecking::Ty) {
-        if let Some(tag) = Self::ty_to_value_tag(ty) {
-            // UnboxValue operand: [15:0] = ValueTag as u16.
-            bytecode.push_unbox_value(tag as u32);
-        }
-    }
-
     fn compile_function_output_with_name<'compiler>(
         &mut self,
         method: &Output<'compiler>,
@@ -4830,9 +4840,6 @@ impl Compiler {
         for (slot, ty) in argument_unbox_tys.iter().enumerate() {
             if let Some(tag) = ty.as_ref().and_then(Self::ty_to_value_tag) {
                 self.hir_entry_unbox.push((slot as u32, tag as u32));
-                self.bytecode.push_load(slot as u32);
-                self.bytecode.push_unbox_value(tag as u32);
-                self.bytecode.push_store_pop(slot as u32);
             }
         }
         for dict_idx in 0..dict_arity {
@@ -4847,8 +4854,9 @@ impl Compiler {
             }
         }
         let entry_sp = self.context.variables.len() as u32;
-        // Direct MIR unboxes the arguments the prologue unboxes
-        // (`hir_entry_unbox`).
+        // Direct MIR unboxes the boxed arguments on entry
+        // (`hir_entry_unbox`) and loads the context dictionaries
+        // (`hir_entry_ctx`).
         self.hir_entry_sp = Some(entry_sp);
         // Bounded generic instance method: `__dict0` is the instance's own
         // dictionary, whose tail holds the context dictionaries.
@@ -4858,10 +4866,6 @@ impl Compiler {
             for i in 0..n {
                 let slot = self.context.variables.intern(format!("__dict{}", i + 1)) as u32;
                 self.hir_entry_ctx.push((slot, own, (base + i) as u32));
-                self.bytecode.push_load(own);
-                self.bytecode.push_const((base + i) as i32);
-                self.bytecode.push_index();
-                self.bytecode.push_store_pop(slot);
             }
         }
         self.begin_fn_defers();
@@ -4956,6 +4960,7 @@ impl Compiler {
         entries: &[(String, u32)],
         entry_sps: &HashMap<String, u32>,
     ) -> HashMap<String, super::precise_frames::FnWordKinds> {
+        use crate::typechecking::subst::apply_ty_prune;
         use crate::typechecking::value_layout::word_kind;
         let mut out = HashMap::new();
         for (name, _) in entries {
@@ -5006,16 +5011,20 @@ impl Compiler {
                 let Ty::Fun(param, ret) = current else {
                     break;
                 };
-                params.push(word_kind(&self.checker, param));
+                // A `()` parameter holds the empty tuple object, a pointer,
+                // as a tuple's `()` item does (#1465).
+                params.push(if crate::hir::layout::is_unit(&apply_ty_prune(self.checker.subst(), param)) {
+                    common::WORD_POINTER
+                } else {
+                    word_kind(&self.checker, param)
+                });
                 current = ret;
             }
             if params.len() != declared.max(1) {
                 continue;
             }
             if declared == 0 {
-                if params != [common::WORD_SCALAR]
-                    || !matches!(&scheme.ty, Ty::Fun(p, _) if matches!(p.as_ref(), Ty::Con(n) if n == crate::typechecking::ty::UNIT))
-                {
+                if !matches!(&scheme.ty, Ty::Fun(p, _) if matches!(p.as_ref(), Ty::Con(n) if n == crate::typechecking::ty::UNIT)) {
                     continue;
                 }
                 params.clear();
@@ -7272,6 +7281,7 @@ impl Compiler {
 
         self.bytecode.append(&mut program);
         self.emit_used_builtin_show_thunks();
+        self.emit_tuple_show_thunks();
         self.pad_debug_locs();
         // Kept while this module holds methods a later module may clone.
         let seq = self.program_seq;
@@ -7305,6 +7315,36 @@ impl Compiler {
             let hir = crate::hir::synth::builtin_enum_show(&self.checker, &fqn, enum_name, variants);
             self.emit_synth_fn(&fqn, &hir, HashMap::new(), true);
         }
+        skip.bind_label(after, self.bytecode.il_mut());
+    }
+
+    /// Emit the reserved `Show` thunks of ground tuples (#1451) behind a
+    /// jump, as [`Self::emit_used_builtin_show_thunks`]: each is
+    /// `format("%v", t)` over its argument, the raw entry taking the tuple's
+    /// word and its `$dict` adapter the boxed one.
+    fn emit_tuple_show_thunks(&mut self) {
+        let due: Vec<_> = std::mem::take(&mut self.tuple_show_thunks)
+            .into_iter()
+            .filter(|(fqn, _)| !self.functions.contains_key(fqn))
+            .collect();
+        if due.is_empty() {
+            return;
+        }
+        let string = crate::typechecking::ty::string();
+        let mut skip = BlockBuilder::new();
+        let after = skip.fresh_label(self.bytecode.il_mut());
+        skip.emit_jump_to(after, BbJumpKind::Unconditional, self.bytecode.il_mut());
+        self.hir_synth_callees.insert("format".to_string(), SynthCallee { format: true, ..SynthCallee::default() });
+        for (fqn, ty) in due {
+            let adapter = Self::dict_adapter_name(&fqn);
+            for (name, tag) in [(fqn, None), (adapter, Some(ValueTag::Tuple as u32))] {
+                self.emit_builtin_entry(&name, &[(ty.clone(), tag)], string.clone(), None, |b, a| {
+                    let fmt = b.str("%v");
+                    b.call("format", vec![fmt, a[0]], string.clone())
+                });
+            }
+        }
+        self.hir_synth_callees.clear();
         skip.bind_label(after, self.bytecode.il_mut());
     }
 
@@ -7717,7 +7757,6 @@ impl Compiler {
             .iter()
             .map(|(n, pc)| (n.clone(), *pc as u32))
             .collect();
-        self.stack_map_drafts = lowered.stack_map_drafts.clone();
         self.deopt_map_drafts = lowered.deopt_map_drafts.clone();
         apply_debug_slot_remaps(&mut self.fn_debug_locals, &lowered.debug_slot_remaps);
         for (fn_name, vars) in self.fn_debug_vars.iter_mut() {
@@ -7748,22 +7787,6 @@ impl Compiler {
                 }
             }
         }
-        self.stack_maps = crate::mir::bind_drafts(
-            &lowered.stack_map_drafts,
-            self.bytecode.as_slice(),
-            &entries,
-        );
-        // A draft whose sites do not match the body's alloc opcodes binds to
-        // nothing; the census reports it apart from a bound map.
-        let unbound: Vec<&str> = lowered
-            .stack_map_drafts
-            .iter()
-            .filter(|d| {
-                !entries.iter().any(|(n, pc)| *n == d.name && self.stack_maps.iter().any(|m| m.entry_pc == *pc))
-            })
-            .map(|d| d.name.as_str())
-            .collect();
-        crate::il::opt::note_unbound_maps(&unbound);
         let fn_kinds = self.fn_word_kinds(&entries, &entry_sps);
         self.precise_frames = super::precise_frames::bind_precise_frames(
             &self.precise_frame_fns,

@@ -25,16 +25,22 @@ and relocate mapped slots on collect.
   refs (params, prior allocs, niche words). `GcBarrier` dest is a token,
   not a second object. IL slots that held those values are recorded when
   the builder snapshotted `current_def` (`LiveRootSet.slots`).
-- Every allocating body's frame map is drawn from its own MIR (lowered
-  from HIR): `mir_maps_ok` checks the map is complete, and dense / LIR emit
-  across an alloc only then. After fuse/PC assign,
-  [`bind_drafts`](../../compiler/src/mir/stackmap.rs) attaches
-  [`FrameStackMap`](../../common/src/stack_map.rs) rows to those bodies.
-  Compile-and-run and `.hyc` / embed load (archive **minor 14+**) install
-  them on the VM via `wire_thread_program_with_maps`. Older envelopes load
-  with empty maps and stay conservative-stack GC. (Before M5 the drafts were
-  lifted from stack IL by `try_build_draft`, and unmapped allocating bodies
-  stayed stack-lowered; both are gone.)
+- `mir_maps_ok` checks that every allocation in a body's MIR is followed by
+  its `GcBarrier`; dense / LIR emit across an alloc only then.
+- **One map kind: precise frame maps.** Until 2026-10 every dense / LIR body
+  also got an S2b [`FrameStackMap`](../../common/src/stack_map.rs) (archive
+  **minor 14+**), drafted from MIR live roots in the registers emission
+  assigns and bound to alloc PCs after fuse. The VM rooted its slots only
+  where the frame's precise map had them stored (#967), and a frame with no
+  trusted precise map is scanned anyway: a LIR body's `Seek`'d frame sits
+  below the cursor, and an allocating dense body's registers are within its
+  frame extent. So the S2b rows added no root (a `gc-stress` run of `tests/`
+  that reported every S2b slot not otherwise scanned found none), and the
+  compiler stopped emitting them. Archives still have the `stack_maps` field
+  (written empty); the VM still reads and roots S2b maps an older archive
+  carries. (Before M5 the drafts were lifted from stack IL by
+  `try_build_draft`, and unmapped allocating bodies stayed stack-lowered;
+  both are gone.)
 - Mapped **preheader** and **in-loop** `Make*` may take dense (S2d / S2l,
   [s2d-inloop-make-tax.md](s2d-inloop-make-tax.md)); dense keeps such a body
   only when it wins the cost gate against the body's LIR form.
@@ -75,8 +81,8 @@ and relocate mapped slots on collect.
   segment starts above, stays conservative. Worker VMs share the maps by
   `Arc`. The `gc-stress` feature collects at every allocation safepoint;
   CI runs the language harness (`coil-test`) with it.
-- **Frame extents** (archive **minor 22**). Allocating dense bodies no
-  longer need S2b maps: their registers can sit past the cursor, and
+- **Frame extents** (archive **minor 22**). Allocating dense bodies need
+  more than S2b maps: their registers can sit past the cursor, and
   generic host results are heap words typed `i64` that S2b maps miss. So
   every allocating dense body gets its frame extent (highest slot + 1,
   decoded from the final bytecode) in `PreciseFrameMap::frame_words`, and a
@@ -150,8 +156,10 @@ and relocate mapped slots on collect.
 2. ~~**Slot / frame maps**~~ — **S2b (this note).** Encode those roots
    for the interpreter (and later deopt) so a collect can update slots.
    Archive **minor 14** (COI-359 E1) persists maps for `.hyc` / embed.
-   Older same-major envelopes still load with empty maps. Shared-heap steal
-   (C0) **refuses** empty maps — isolate + `PortableValue` instead
+   Older same-major envelopes still load with empty maps. Superseded by
+   precise frame maps (minor 21+), which the compiler now emits alone.
+   Shared-heap steal (C0) **refuses** a program with no frame maps —
+   isolate + `PortableValue` instead
    ([shared-heap-sendability.md](shared-heap-sendability.md)).
 3. ~~**Specialize across GC**~~ — **S2c.** Mapped allocating bodies may
    take dense / LIR when otherwise eligible. Default remains refuse

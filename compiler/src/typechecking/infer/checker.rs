@@ -1330,7 +1330,7 @@ impl Checker {
             if !self.is_thread_sendable_ty(&ty) {
                 self.error_with_help(
                     ErrorCode::GenericTypeError,
-                    format!("spawn closure capture `{cap}` of type `{ty}` is not sendable across threads"),
+                    format!("spawn closure capture `{cap}` of type `{}` is not sendable across threads", self.diag_ty(&ty)),
                     range.clone(),
                     Some("a spawned closure's `use` captures are copied to the thread, so they must be sendable".to_string()),
                 );
@@ -1393,7 +1393,7 @@ impl Checker {
                         ErrorCode::GenericTypeError,
                         format!(
                             "spawn argument type `{}` is not sendable across threads",
-                            arg_resolved
+                            self.diag_ty(&arg_resolved)
                         ),
                         range.clone(),
                         Some(
@@ -2789,7 +2789,8 @@ impl Checker {
                             "Logical NOT requires a `bool` or `int` operand".to_string(),
                             e.0.into_range(),
                             Some(format!(
-                                "found `{pruned}`; use `~` for bitwise negation on integers"
+                                "found `{}`; use `~` for bitwise negation on integers",
+                                self.diag_ty(&pruned)
                             )),
                         );
                         boolean()
@@ -3028,7 +3029,7 @@ impl Checker {
                 } else {
                     self.error(
                         ErrorCode::InvalidTry,
-                        format!("`?` requires Option or Result, found `{}`", resolved),
+                        format!("`?` requires Option or Result, found `{}`", self.diag_ty(&resolved)),
                         range,
                     )
                 }
@@ -3079,7 +3080,7 @@ impl Checker {
                 } else {
                     return self.error(
                         ErrorCode::InvalidCoalesce,
-                        format!("`??` requires Option or Result, found `{}`", resolved),
+                        format!("`??` requires Option or Result, found `{}`", self.diag_ty(&resolved)),
                         range,
                     );
                 };
@@ -3107,7 +3108,7 @@ impl Checker {
                         ErrorCode::InvalidOptionalAccess,
                         format!(
                             "`?.` requires Option, found `{}`",
-                            crate::typechecking::pretty::format_ty_for_diag(&self.subst, &resolved)
+                            self.diag_ty(&resolved)
                         ),
                         range,
                     );
@@ -4116,7 +4117,7 @@ impl Checker {
                         field,
                         fields
                             .iter()
-                            .map(|(n, t)| format!("{}: {}", n, t))
+                            .map(|(n, t)| format!("{}: {}", n, self.diag_ty(t)))
                             .collect::<Vec<_>>()
                             .join(", ")
                     );
@@ -4271,7 +4272,7 @@ impl Checker {
                 Err(_) => {
                     let _ = self.error_with_help(
                         ErrorCode::TypeMismatch,
-                        format!("Type mismatch: an index must be `int`, found `{}`", index_ty_pruned),
+                        format!("Type mismatch: an index must be `int`, found `{}`", self.diag_ty(&index_ty_pruned)),
                         index_expr.0.into_range(),
                         Some("index with an `int` (or a `byte`)".to_string()),
                     );
@@ -4346,7 +4347,7 @@ impl Checker {
                     ErrorCode::CannotIndex,
                     "cannot index non-aggregate type".to_string(),
                     range.clone(),
-                    Some(format!("type `{}` does not support indexing", resolved)),
+                    Some(format!("type `{}` does not support indexing", self.diag_ty(&resolved))),
                 );
                 Ty::Var(self.counter.fresh())
             }
@@ -4403,10 +4404,13 @@ impl Checker {
                         Err(_) => {
                             let _ = self.error_with_help(
                                 ErrorCode::TypeMismatch,
-                                format!(
-                                    "array element type mismatch: expected `{}`, found `{}`",
-                                    prev_pruned, t_pruned
-                                ),
+                                {
+                                    let [want, have] = <[String; 2]>::try_from(
+                                        self.diag_tys(&[&prev_pruned, &t_pruned]),
+                                    )
+                                    .expect("two types");
+                                    format!("array element type mismatch: expected `{want}`, found `{have}`")
+                                },
                                 range.clone(),
                                 Some(
                                     "an array literal requires every element to have the same type"
@@ -4535,7 +4539,7 @@ impl Checker {
                 .collect();
             let expected_pretty = expected
                 .as_ref()
-                .map(|e| apply_ty_prune(&self.subst, e).to_string())
+                .map(|e| self.diag_ty(e))
                 .unwrap_or_else(|| "?".into());
             return self.error_with_help(
                 ErrorCode::TypeMismatch,
@@ -6384,7 +6388,7 @@ impl Checker {
         }
         let slice = std::slice::from_ref(&lookup);
         if self.generics.find_instance(class, slice).is_none() && self.generics.find_generic_instance(class, slice).is_none() {
-            let pretty = crate::typechecking::pretty::format_ty_for_diag(&self.subst, ty);
+            let pretty = self.diag_ty(ty);
             let mut m = Message::error(
                 ErrorCode::TypeMismatch,
                 format!("cannot apply unary `{sym}` to a value of type `{pretty}`"),
@@ -6402,7 +6406,7 @@ impl Checker {
         if !matches!(&lookup, Ty::Con(n) if matches!(n.as_str(), "bool" | "string" | "unit")) {
             return;
         }
-        let pretty = crate::typechecking::pretty::format_ty_for_diag(&self.subst, ty);
+        let pretty = self.diag_ty(ty);
         let mut m = Message::error(
             ErrorCode::TypeMismatch,
             format!("cannot apply unary `{sym}` to a value of type `{pretty}`"),
@@ -6593,7 +6597,7 @@ impl Checker {
                 } else {
                     let _ = self.error_with_help(
                         ErrorCode::GenericTypeError,
-                        format!("range bounds require `T: Ord`, found `{}`", other),
+                        format!("range bounds require `T: Ord`, found `{}`", self.diag_ty(other)),
                         range.clone(),
                         Some(
                             "both ends of `a..b` / `a..=b` must share a type that implements `Ord`"
@@ -6846,7 +6850,7 @@ impl Checker {
         {
             return;
         }
-        let pretty = crate::typechecking::pretty::format_ty_for_diag(&self.subst, ty);
+        let pretty = self.diag_ty(ty);
         let help = match (op, trait_name) {
             ("+", _) => "`+` takes `int` / `float` / `byte` operands, two strings, or a type with an `Add` instance".to_string(),
             (_, Some(class)) if bitwise => format!("`{op}` takes `int` / `byte` operands, or a type with a `{class}` instance"),
@@ -6906,7 +6910,7 @@ impl Checker {
             "gt" => ">",
             _ => ">=",
         };
-        let pretty = crate::typechecking::pretty::format_ty_for_diag(&self.subst, ty);
+        let pretty = self.diag_ty(ty);
         self.messages.push({
             let mut m = Message::error(
                 ErrorCode::TypeMismatch,
@@ -7101,7 +7105,7 @@ impl Checker {
                 ErrorCode::GenericTypeError,
                 format!(
                     "element type `{}` does not support `{}`",
-                    elem, op
+                    self.diag_ty(&elem), op
                 ),
                 range,
                 Some("element-wise arithmetic requires numeric elements (`int`, `float`, or a `Num`-bounded type parameter)".to_string()),
@@ -7228,7 +7232,7 @@ impl Checker {
             if !is_numeric_elem(&elem) {
                 return self.error_with_help(
                     ErrorCode::GenericTypeError,
-                    format!("element type `{}` does not support unary `-`", elem),
+                    format!("element type `{}` does not support unary `-`", self.diag_ty(&elem)),
                     range,
                     None,
                 );
@@ -7252,7 +7256,7 @@ impl Checker {
             if !is_numeric_elem(&elem) {
                 return self.error_with_help(
                     ErrorCode::GenericTypeError,
-                    format!("element type `{}` does not support unary `-`", elem),
+                    format!("element type `{}` does not support unary `-`", self.diag_ty(&elem)),
                     range,
                     None,
                 );
@@ -7781,7 +7785,7 @@ impl Checker {
                 ErrorCode::GenericTypeError,
                 format!(
                     "`len` requires a `Length` instance, found `{}`",
-                    crate::typechecking::pretty::format_ty_for_diag(&self.subst, &resolved)
+                    self.diag_ty(&resolved)
                 ),
                 args[0].0.into_range(),
                 Some("implement `impl Length for T { fn len(T x) -> int { ... } }`".to_string()),
@@ -7988,7 +7992,7 @@ impl Checker {
         let Some((le, ln, left_is_tuple)) = classify_vector(&lp) else {
             return self.error_with_help(
                 ErrorCode::GenericTypeError,
-                format!("dot expects a homogeneous numeric vector, found `{}`", lp),
+                format!("dot expects a homogeneous numeric vector, found `{}`", self.diag_ty(&lp)),
                 args[0].0.into_range(),
                 Some("use a tuple `(T,…,T)` or fixed-length `[T; N]`".to_string()),
             );
@@ -7996,7 +8000,7 @@ impl Checker {
         let Some((re, rn, right_is_tuple)) = classify_vector(&rp) else {
             return self.error_with_help(
                 ErrorCode::GenericTypeError,
-                format!("dot expects a homogeneous numeric vector, found `{}`", rp),
+                format!("dot expects a homogeneous numeric vector, found `{}`", self.diag_ty(&rp)),
                 args[1].0.into_range(),
                 Some("use a tuple `(T,…,T)` or fixed-length `[T; N]`".to_string()),
             );
@@ -8024,7 +8028,7 @@ impl Checker {
         if !is_numeric_elem(&elem) {
             return self.error_with_help(
                 ErrorCode::GenericTypeError,
-                format!("element type `{}` does not support `dot`", elem),
+                format!("element type `{}` does not support `dot`", self.diag_ty(&elem)),
                 range,
                 Some("dot requires numeric elements (`int`, `float`, or `byte`)".to_string()),
             );
@@ -8070,7 +8074,7 @@ impl Checker {
         let Some((le, ln, left_is_tuple)) = classify_vector(&lp) else {
             return self.error_with_help(
                 ErrorCode::GenericTypeError,
-                format!("cross expects a length-3 numeric vector, found `{}`", lp),
+                format!("cross expects a length-3 numeric vector, found `{}`", self.diag_ty(&lp)),
                 args[0].0.into_range(),
                 None,
             );
@@ -8078,7 +8082,7 @@ impl Checker {
         let Some((re, rn, right_is_tuple)) = classify_vector(&rp) else {
             return self.error_with_help(
                 ErrorCode::GenericTypeError,
-                format!("cross expects a length-3 numeric vector, found `{}`", rp),
+                format!("cross expects a length-3 numeric vector, found `{}`", self.diag_ty(&rp)),
                 args[1].0.into_range(),
                 None,
             );
@@ -8107,7 +8111,7 @@ impl Checker {
         if !is_numeric_elem(&elem) {
             return self.error_with_help(
                 ErrorCode::GenericTypeError,
-                format!("element type `{}` does not support `cross`", elem),
+                format!("element type `{}` does not support `cross`", self.diag_ty(&elem)),
                 range,
                 None,
             );
@@ -8192,7 +8196,7 @@ impl Checker {
                 ErrorCode::GenericTypeError,
                 format!(
                     "matmul expects a nested fixed-length matrix, found `{}`",
-                    lp
+                    self.diag_ty(&lp)
                 ),
                 args[0].0.into_range(),
                 Some(
@@ -8205,7 +8209,7 @@ impl Checker {
                 ErrorCode::GenericTypeError,
                 format!(
                     "matmul expects a nested fixed-length matrix, found `{}`",
-                    rp
+                    self.diag_ty(&rp)
                 ),
                 args[1].0.into_range(),
                 Some(
@@ -8237,7 +8241,7 @@ impl Checker {
         if !is_numeric_elem(&elem) {
             return self.error_with_help(
                 ErrorCode::GenericTypeError,
-                format!("element type `{}` does not support `matmul`", elem),
+                format!("element type `{}` does not support `matmul`", self.diag_ty(&elem)),
                 range,
                 None,
             );
@@ -8306,7 +8310,7 @@ impl Checker {
                 ErrorCode::GenericTypeError,
                 format!(
                     "`matrix` expects a nested fixed-length matrix, found `{}`",
-                    pruned
+                    self.diag_ty(&pruned)
                 ),
                 args[0].0.into_range(),
                 Some(
@@ -8317,7 +8321,7 @@ impl Checker {
         if !is_numeric_elem(&elem) {
             return self.error_with_help(
                 ErrorCode::GenericTypeError,
-                format!("element type `{}` does not support `matrix`", elem),
+                format!("element type `{}` does not support `matrix`", self.diag_ty(&elem)),
                 range,
                 Some("matrix elements must be numeric (`int`, `float`, or `byte`)".to_string()),
             );
@@ -8365,7 +8369,7 @@ impl Checker {
         let Some(ld) = unwrap_matrix_ty(&lp) else {
             return self.error_with_help(
                 ErrorCode::GenericTypeError,
-                format!("cannot apply `{}` between `{}` and `{}`", op, lp, rp),
+                format!("cannot apply `{}` between `{}` and `{}`", op, self.diag_ty(&lp), self.diag_ty(&rp)),
                 range,
                 Some("both operands of matrix arithmetic must be `Matrix` values".to_string()),
             );
@@ -8373,7 +8377,7 @@ impl Checker {
         let Some(rd) = unwrap_matrix_ty(&rp) else {
             return self.error_with_help(
                 ErrorCode::GenericTypeError,
-                format!("cannot apply `{}` between `{}` and `{}`", op, lp, rp),
+                format!("cannot apply `{}` between `{}` and `{}`", op, self.diag_ty(&lp), self.diag_ty(&rp)),
                 range,
                 Some("both operands of matrix arithmetic must be `Matrix` values".to_string()),
             );
@@ -8384,7 +8388,7 @@ impl Checker {
                 let Some((le, m, k1, outer_is_tuple, row_is_tuple)) = classify_matrix(ld) else {
                     return self.error_with_help(
                         ErrorCode::GenericTypeError,
-                        format!("invalid matrix layout `{}`", ld),
+                        format!("invalid matrix layout `{}`", self.diag_ty(ld)),
                         range.clone(),
                         None,
                     );
@@ -8392,7 +8396,7 @@ impl Checker {
                 let Some((re, k2, n, right_outer, right_row)) = classify_matrix(rd) else {
                     return self.error_with_help(
                         ErrorCode::GenericTypeError,
-                        format!("invalid matrix layout `{}`", rd),
+                        format!("invalid matrix layout `{}`", self.diag_ty(rd)),
                         range.clone(),
                         None,
                     );
@@ -8424,7 +8428,7 @@ impl Checker {
                 if !is_numeric_elem(&elem) {
                     return self.error_with_help(
                         ErrorCode::GenericTypeError,
-                        format!("element type `{}` does not support matrix `*`", elem),
+                        format!("element type `{}` does not support matrix `*`", self.diag_ty(&elem)),
                         range,
                         None,
                     );
@@ -8465,7 +8469,7 @@ impl Checker {
                 let Some((le, m, n, outer_is_tuple, row_is_tuple)) = classify_matrix(ld) else {
                     return self.error_with_help(
                         ErrorCode::GenericTypeError,
-                        format!("invalid matrix layout `{}`", ld),
+                        format!("invalid matrix layout `{}`", self.diag_ty(ld)),
                         range.clone(),
                         None,
                     );
@@ -8473,7 +8477,7 @@ impl Checker {
                 let Some((re, m2, n2, right_outer, right_row)) = classify_matrix(rd) else {
                     return self.error_with_help(
                         ErrorCode::GenericTypeError,
-                        format!("invalid matrix layout `{}`", rd),
+                        format!("invalid matrix layout `{}`", self.diag_ty(rd)),
                         range.clone(),
                         None,
                     );
@@ -8498,7 +8502,7 @@ impl Checker {
                 if !is_numeric_elem(&elem) {
                     return self.error_with_help(
                         ErrorCode::GenericTypeError,
-                        format!("element type `{}` does not support matrix `{}`", elem, op),
+                        format!("element type `{}` does not support matrix `{}`", self.diag_ty(&elem), op),
                         range,
                         None,
                     );
@@ -8588,7 +8592,7 @@ impl Checker {
             else {
                 return self.error_with_help(
                     ErrorCode::GenericTypeError,
-                    format!("invalid matrix layout `{matrix_ty}`"),
+                    format!("invalid matrix layout `{}`", self.diag_ty(matrix_ty)),
                     range,
                     None,
                 );
@@ -8596,7 +8600,7 @@ impl Checker {
             let Some((elem, m, n, outer_is_tuple, row_is_tuple)) = classify_matrix(data) else {
                 return self.error_with_help(
                     ErrorCode::GenericTypeError,
-                    format!("invalid matrix layout `{data}`"),
+                    format!("invalid matrix layout `{}`", self.diag_ty(data)),
                     range,
                     None,
                 );
@@ -8615,7 +8619,7 @@ impl Checker {
             if !is_numeric_elem(&elem) {
                 return self.error_with_help(
                     ErrorCode::GenericTypeError,
-                    format!("element type `{elem}` does not support matrix `{op}`"),
+                    format!("element type `{}` does not support matrix `{op}`", self.diag_ty(&elem)),
                     range,
                     None,
                 );
@@ -8635,7 +8639,7 @@ impl Checker {
         let Some((elem, m, n, outer_is_tuple, row_is_tuple, scalar_on)) = resolved else {
             return self.error_with_help(
                 ErrorCode::GenericTypeError,
-                format!("cannot apply `{op}` to `{lp}` and `{rp}`"),
+                format!("cannot apply `{op}` to `{}` and `{}`", self.diag_ty(&lp), self.diag_ty(&rp)),
                 range,
                 Some(
                     "both sides must be `Matrix`, or one side a scalar of the cell type"
@@ -8705,7 +8709,7 @@ impl Checker {
         if !is_numeric_elem(&elem) {
             let _ = self.error_with_help(
                 ErrorCode::GenericTypeError,
-                format!("element type `{elem}` does not support matrix `{op}`"),
+                format!("element type `{}` does not support matrix `{op}`", self.diag_ty(&elem)),
                 range.clone(),
                 None,
             );
@@ -8727,7 +8731,7 @@ impl Checker {
         let Some((elem, m, n, outer_is_tuple, row_is_tuple)) = classify_matrix(data) else {
             return self.error_with_help(
                 ErrorCode::GenericTypeError,
-                format!("invalid matrix layout `{}`", data),
+                format!("invalid matrix layout `{}`", self.diag_ty(data)),
                 range,
                 None,
             );
@@ -8735,7 +8739,7 @@ impl Checker {
         if !is_numeric_elem(&elem) {
             return self.error_with_help(
                 ErrorCode::GenericTypeError,
-                format!("element type `{}` does not support unary `-`", elem),
+                format!("element type `{}` does not support unary `-`", self.diag_ty(&elem)),
                 range,
                 None,
             );
@@ -8775,7 +8779,7 @@ impl Checker {
         let Some((elem, m, n, outer_is_tuple, row_is_tuple)) = classify_matrix(data) else {
             return self.error_with_help(
                 ErrorCode::GenericTypeError,
-                format!("invalid matrix layout `{data}`"),
+                format!("invalid matrix layout `{}`", self.diag_ty(data)),
                 range,
                 None,
             );
@@ -8783,7 +8787,7 @@ impl Checker {
         if !is_numeric_elem(&elem) || elem_is_float(&elem) {
             return self.error_with_help(
                 ErrorCode::GenericTypeError,
-                format!("bitwise `~` is not supported on `{elem}` matrix cells"),
+                format!("bitwise `~` is not supported on `{}` matrix cells", self.diag_ty(&elem)),
                 range,
                 Some("bitwise `~` requires `int` or `byte` cells".to_string()),
             );
@@ -8898,7 +8902,7 @@ impl Checker {
                     _ => {
                         // We've run out of function parameters, the call
                         // had more arguments than the function accepts.
-                        let actual = format!("{}", apply_ty_prune(&self.subst, &pruned));
+                        let actual = self.diag_ty(&pruned);
                         if i == 0 {
                             // Not a function at all (`let x = 5; x(1);`).
                             let what = name.map_or("this value".to_string(), |n| format!("`{n}`"));
@@ -9041,7 +9045,7 @@ impl Checker {
                     format!(
                         "variadic FFI argument #{} has non-marshallable type `{}`",
                         i + 1,
-                        apply_ty_prune(&self.subst, ty)
+                        self.diag_ty(ty)
                     ),
                     span.clone(),
                 );
@@ -9716,10 +9720,8 @@ impl Checker {
         let local = match unify_with(&Subst::empty(), &candidate, &expected_body) {
             Ok(s) => s,
             Err(_) => {
-                let expected_pretty =
-                    crate::typechecking::pretty::format_ty_for_diag(&self.subst, expected);
-                let found_pretty =
-                    crate::typechecking::pretty::format_ty_for_diag(&self.subst, &candidate);
+                let [expected_pretty, found_pretty] =
+                    <[String; 2]>::try_from(self.diag_tys(&[expected, &candidate])).expect("two types");
                 self.messages.push(Message::error(
                     ErrorCode::TypeMismatch,
                     format!(
@@ -9782,16 +9784,13 @@ impl Checker {
                 let _ = all_open;
             } else {
                 let lookup = self.instance_lookup_args(&constraint.class, &resolved_args);
+                self.ensure_tuple_show_instance(&constraint.class, &lookup);
                 if self
                     .generics
                     .find_instance(&constraint.class, &lookup)
                     .is_none()
                 {
-                    let pretty = resolved_args
-                        .iter()
-                        .map(|t| t.to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ");
+                    let pretty = self.diag_tys(&resolved_args.iter().collect::<Vec<_>>()).join(", ");
                     self.messages.push(Message::error(
                         ErrorCode::GenericTypeError,
                         format!("No instance for `{}<{}>`", constraint.class, pretty),
@@ -9881,8 +9880,8 @@ impl Checker {
                 apply_ty(&self.subst, t1)
             }
             Err(UnifyError::Mismatch { left, right }) => {
-                let left_s = crate::typechecking::pretty::format_ty_for_diag(&self.subst, &left);
-                let right_s = crate::typechecking::pretty::format_ty_for_diag(&self.subst, &right);
+                let [left_s, right_s] =
+                    <[String; 2]>::try_from(self.diag_tys(&[&left, &right])).expect("two types");
                 self.error_with_help(
                     ErrorCode::TypeMismatch,
                     format!("Type mismatch: expected `{}`, found `{}`", left_s, right_s),
@@ -9891,9 +9890,8 @@ impl Checker {
                 )
             }
             Err(UnifyError::Occurs { var, ty }) => {
-                let ty_s = crate::typechecking::pretty::format_ty_for_diag(&self.subst, &ty);
-                let var_s =
-                    crate::typechecking::pretty::format_ty_for_diag(&self.subst, &Ty::Var(var));
+                let [ty_s, var_s] = <[String; 2]>::try_from(self.diag_tys(&[&ty, &Ty::Var(var)]))
+                    .expect("two types");
                 self.error_with_help(
                     ErrorCode::InfiniteType,
                     format!("Cannot construct infinite type `{}`", ty_s),
@@ -10298,12 +10296,32 @@ impl Checker {
 
     /// (open vars in `wanted` may be bound by the match). Ambiguous matches
     /// are diagnosed instead of silently selecting declaration order.
+    /// A ground tuple whose items are shown as `%v` shows them has a
+    /// structural `Show` instance (#1451), registered the first time a goal
+    /// asks for it.
+    fn ensure_tuple_show_instance(&mut self, class: &str, wanted: &[Ty]) {
+        let [ty] = wanted else { return };
+        if class != "Show" {
+            return;
+        }
+        let ty = apply_ty_prune(&self.subst, ty);
+        if !matches!(&ty, Ty::Tuple(items) if !items.is_empty())
+            || Self::ty_mentions_var(&ty)
+            || !self.is_showable_for_format(&ty)
+            || self.generics.has_instance("Show", &ty)
+        {
+            return;
+        }
+        self.generics.register_tuple_show(ty);
+    }
+
     fn find_unique_instance(
         &mut self,
         class: &str,
         wanted: &[Ty],
         range: &Range<usize>,
     ) -> Result<Option<InstanceDef>, ()> {
+        self.ensure_tuple_show_instance(class, wanted);
         let wanted_lookup = self.instance_lookup_args(class, wanted);
         let candidates: Vec<_> = self
             .generics
@@ -11098,7 +11116,7 @@ impl Checker {
                         class_def.name,
                         expected_kind,
                         i + 1,
-                        ty
+                        self.diag_ty(ty)
                     ),
                     range.clone(),
                 ));
@@ -11207,13 +11225,25 @@ impl Checker {
 
     /// `ty` as a diagnostic shows it: type parameters in scope by name
     /// (`T`), other unknowns as `a`, `b`, …, builtin sums as `Result<T, E>`.
+    ///
+    /// Every type a diagnostic prints goes through here (or [`Self::diag_tys`]):
+    /// `Ty`'s `Display` shows raw variables (`t61`) and is for debug output.
     fn diag_ty(&self, ty: &Ty) -> String {
-        let names: HashMap<TyVarId, String> = self
-            .type_params_in_scope
+        crate::typechecking::pretty::format_ty_for_diag_named(&self.subst, ty, &self.type_param_names())
+    }
+
+    /// [`Self::diag_ty`] for several types in one message, sharing one naming
+    /// of the unknowns (`expected `a`, found `b``).
+    fn diag_tys(&self, tys: &[&Ty]) -> Vec<String> {
+        crate::typechecking::pretty::format_tys_for_diag_named(&self.subst, tys, &self.type_param_names())
+    }
+
+    /// The type parameters in scope, by their source name.
+    fn type_param_names(&self) -> HashMap<TyVarId, String> {
+        self.type_params_in_scope
             .iter()
             .flat_map(|frame| frame.iter().map(|(name, var)| (*var, name.clone())))
-            .collect();
-        crate::typechecking::pretty::format_ty_for_diag_named(&self.subst, ty, &names)
+            .collect()
     }
 
     fn instance_signature(&self, class: &str, args: &[Ty]) -> String {
@@ -12221,7 +12251,9 @@ impl Checker {
     /// arguments: each projection variable of `scheme` whose owner `vars`
     /// binds to a type with a ground instance, mapped to that instance's
     /// associated type (#1187). The declaration's projection stays open, so
-    /// each clone resolves its own.
+    /// each clone resolves its own. The owner may be a variant's
+    /// constructor type (a clone keyed by `Option::Some(7)`'s type), which
+    /// unifies with the instance's head rather than equalling it (#1469).
     pub fn mono_assoc_projection_tys(
         &self,
         scheme: &Scheme,
@@ -12255,7 +12287,7 @@ impl Checker {
                 }
                 let Some(value) = self
                     .generics
-                    .find_instance(&c.class, std::slice::from_ref(owner_ty))
+                    .find_instance_relaxed(&c.class, std::slice::from_ref(owner_ty))
                     .and_then(|inst| inst.assoc_tys.get(assoc))
                 else {
                     continue;
@@ -13417,11 +13449,12 @@ impl Checker {
     /// Human-readable overload signature for diagnostics: `(int, int)` or `(int…)+ (rest)`.
     fn overload_sig_label(c: &OverloadCandidate) -> String {
         let params = Self::fun_param_tys(&c.scheme.ty);
-        let sig = params
-            .iter()
-            .map(|t| t.to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
+        let sig = crate::typechecking::pretty::format_tys_for_diag_named(
+            &Subst::empty(),
+            &params.iter().collect::<Vec<_>>(),
+            &HashMap::new(),
+        )
+        .join(", ");
         if c.is_rest {
             format!("({})+ (rest)", sig)
         } else {
@@ -13887,7 +13920,7 @@ impl Checker {
                     _ => {
                         let _ = self.error_with_help(
                             ErrorCode::GenericTypeError,
-                            format!("cannot spread value of type `{}`", resolved),
+                            format!("cannot spread value of type `{}`", self.diag_ty(&resolved)),
                             arg.0.into_range(),
                             Some("spread requires a tuple or array value".to_string()),
                         );
@@ -14311,10 +14344,13 @@ impl Checker {
                             if unify_with(&self.subst, &prev_pruned, &t_pruned).is_err() {
                                 let _ = self.error_with_help(
                                 ErrorCode::TypeMismatch,
-                                format!(
-                                    "rest argument type mismatch: expected `{}`, found `{}`",
-                                    prev_pruned, t_pruned
-                                ),
+                                {
+                                    let [want, have] = <[String; 2]>::try_from(
+                                        self.diag_tys(&[&prev_pruned, &t_pruned]),
+                                    )
+                                    .expect("two types");
+                                    format!("rest argument type mismatch: expected `{want}`, found `{have}`")
+                                },
                                 range.clone(),
                                 Some(
                                     "all trailing rest arguments must share the same element type"
@@ -15275,7 +15311,7 @@ impl Checker {
                     _ => continue,
                 },
                 _ if !is_own => continue,
-                _ => crate::typechecking::pretty::format_ty_for_diag(&self.subst, &bound),
+                _ => self.diag_ty(&bound),
             };
             reported.push(*p);
             errors.push((name.clone(), pretty));
@@ -16651,7 +16687,7 @@ impl Checker {
                     if tys.len() == 1 =>
                 {
                     let wrapped =
-                        crate::typechecking::pretty::format_ty_for_diag(&self.subst, &tys[0]);
+                        self.diag_ty(&tys[0]);
                     format!(
                         "`{enum_str}::{variant_str}` is a tuple variant wrapping `{wrapped}`; \
                          construct with `{enum_str}::{variant_str}(value)`, or declare a record \
@@ -17066,7 +17102,7 @@ impl Checker {
                                 format!(
                                     "tuple pattern has {} elements, but value has type `{}`",
                                     parts.len(),
-                                    expected,
+                                    self.diag_ty(&expected),
                                 ),
                                 pattern_range.clone(),
                                 Some("adjust the pattern or the RHS tuple arity".to_string()),
@@ -17086,7 +17122,7 @@ impl Checker {
                     other => {
                         return self.error_with_help(
                             ErrorCode::GenericTypeError,
-                            format!("cannot destructure type `{}` with a tuple pattern", other,),
+                            format!("cannot destructure type `{}` with a tuple pattern", self.diag_ty(other)),
                             pattern_range.clone(),
                             Some("RHS must be a tuple".to_string()),
                         );
@@ -17125,7 +17161,7 @@ impl Checker {
                     other => {
                         return self.error_with_help(
                             ErrorCode::GenericTypeError,
-                            format!("cannot destructure type `{}` with a record pattern", other,),
+                            format!("cannot destructure type `{}` with a record pattern", self.diag_ty(other)),
                             pattern_range.clone(),
                             Some("RHS must be a record (dict)".to_string()),
                         );
@@ -17147,7 +17183,7 @@ impl Checker {
                     let Some((_, fty)) = decl_fields.iter().find(|(n, _)| n == pf.name) else {
                         return self.error_with_help(
                             ErrorCode::UnknownField,
-                            format!("Cannot find field `{}` on record `{}`", pf.name, expected,),
+                            format!("Cannot find field `{}` on record `{}`", pf.name, self.diag_ty(&expected)),
                             pattern_range.clone(),
                             Some(format!(
                                 "the record has fields: {}",
@@ -17629,7 +17665,8 @@ impl Checker {
                     ErrorCode::FormatSpecifierMismatch,
                     format!(
                         "Format specifier `%{}` cannot be used with an open type `{}`",
-                        spec, arg_ty
+                        spec,
+                        self.diag_ty(arg_ty)
                     ),
                     arg_range.clone(),
                 );
@@ -17696,7 +17733,9 @@ impl Checker {
                 ErrorCode::FormatSpecifierMismatch,
                 format!(
                     "Format specifier `%{}` requires {}, found {}",
-                    spec, expected, arg_ty
+                    spec,
+                    expected,
+                    self.diag_ty(arg_ty)
                 ),
                 arg_range.clone(),
             );
@@ -18523,7 +18562,8 @@ impl Checker {
                 ErrorCode::GenericTypeError,
                 format!(
                     "binding `{}` is constant, but the underlying value of type `{}` is still mutable",
-                    name, pruned
+                    name,
+                    self.diag_ty(&pruned)
                 ),
                 range,
             );
@@ -18683,12 +18723,12 @@ impl Checker {
                             ErrorCode::GenericTypeError,
                             format!(
                                 "type `{}` is IntoIterator but its IntoIter is not Iterator",
-                                te
+                                self.diag_ty(te)
                             ),
                             iterable_range.clone(),
                             Some(format!(
                                 "add `impl Iterator for {}` with matching `type Item`",
-                                into_iter_ty
+                                self.diag_ty(&into_iter_ty)
                             )),
                         );
                         None
@@ -18699,7 +18739,7 @@ impl Checker {
             Ok(None) => {
                 let _ = self.error_with_help(
                     ErrorCode::GenericTypeError,
-                    format!("type `{}` is not iterable", te),
+                    format!("type `{}` is not iterable", self.diag_ty(te)),
                     iterable_range.clone(),
                     Some(
                         "implement `IntoIterator` / `Iterator`, or use an array, homogeneous tuple/dict, range, or coroutine"
@@ -18861,7 +18901,9 @@ impl Checker {
                     ErrorCode::GenericTypeError,
                     format!(
                         "heterogeneous {}: element types `{}` and `{}` do not match",
-                        kind, first, other
+                        kind,
+                        self.diag_ty(&first),
+                        self.diag_ty(&other)
                     ),
                     range.clone(),
                     Some(format!("{} elements must all share one type", kind)),

@@ -694,37 +694,28 @@ impl Compiler {
             }
             plan => plan,
         };
-        // Short counted loops unroll, constants fold, a repeated pure expression reads the local that
-        // holds its first value, loop-invariant expressions move in front of
-        // their loops, and counted-loop index sites are proven in bounds,
-        // when the rewritten body plans.
+        // Short counted loops unroll, constants fold and counted-loop index
+        // sites are proven in bounds, when the rewritten body plans. CSE and
+        // loop-invariant motion run on MIR (`mir::cse`, `mir::licm`).
         let plan = match plan {
             Ok(emit)
                 if (self.opt_options.loop_unroll
                     || self.opt_options.algebraic
-                    || self.opt_options.local_cse || self.opt_options.licm || self.opt_options.loop_bounds
+                    || self.opt_options.loop_bounds
                     || self.opt_options.sink_return)
                     && !self.debugger_attached
                     && !hir.is_coro =>
             {
                 let body = inlined.as_ref().unwrap_or(hir);
-                let pure = |n: &str| crate::il::pure_call::name_in(&self.pure_fns, n);
                 let steady = |n: &str| crate::il::pure_call::name_in(&self.steady_fns, n);
-                // A finalizer that can resize runs at any allocation: no
-                // length is steady then.
-                let lengths = self.alloc_steady.then_some(&steady as &dyn Fn(&str) -> bool);
                 let unrolled = self.opt_options.loop_unroll.then(|| crate::hir::unroll::unroll(body, self.opt_options.loop_unroll_factor)).flatten();
                 let body_u = unrolled.as_ref().unwrap_or(body);
                 let folded = self.opt_options.algebraic.then(|| crate::hir::fold::fold(body_u)).flatten();
                 let body_f = folded.as_ref().unwrap_or(body_u);
-                let cse = self.opt_options.local_cse.then(|| crate::hir::cse::eliminate(body_f, pure)).flatten();
-                let body_c = cse.as_ref().unwrap_or(body_f);
-                let licm = self.opt_options.licm.then(|| crate::hir::licm::hoist(body_c, pure, lengths)).flatten();
-                let body_l = licm.as_ref().unwrap_or(body_c);
-                let bounds = (self.opt_options.loop_bounds && self.alloc_steady).then(|| crate::hir::bounds::prove(body_l, steady)).flatten();
-                let body_b = bounds.as_ref().unwrap_or(body_l);
+                let bounds = (self.opt_options.loop_bounds && self.alloc_steady).then(|| crate::hir::bounds::prove(body_f, steady)).flatten();
+                let body_b = bounds.as_ref().unwrap_or(body_f);
                 let sunk = self.opt_options.sink_return.then(|| crate::hir::sink_return::sink(body_b)).flatten();
-                match sunk.or(bounds).or(licm).or(cse).or(folded).or(unrolled) {
+                match sunk.or(bounds).or(folded).or(unrolled) {
                     Some(next) => match lower::refusal(&next, &self.checker)
                         .map_or_else(|| self.plan_hir_body(&next), Err)
                         .and_then(|mut e| self.plan_hir_lambdas(&module, &next, &mut e).map(|()| e))
@@ -751,20 +742,6 @@ impl Compiler {
         let plan = plan.and_then(|emit| hir_bisect(&hir.name).then_some(emit).ok_or("bisect"));
         let lowered = match plan {
             Ok(mut emit) => {
-                // A shared generic body keeps a type parameter's values as
-                // raw words: the call boxed them (`hir_generic_abi`), and a
-                // boxed word stored into a field or container would reach a
-                // ground reader as the box (#802).
-                if self.hir_shared_generic() {
-                    for &param in &hir.params {
-                        if self.hir_open_ty(hir.local(param).ty.as_ref()) {
-                            let slot = Self::hir_slot(&emit, param);
-                            self.bytecode.push_load(slot);
-                            self.bytecode.push_unbox_value(common::UNBOX_ANY_TAG);
-                            self.bytecode.push_store_pop(slot);
-                        }
-                    }
-                }
                 if let Some(root) = hir.root {
                     // Early exits are laid out after the body.
                     emit.plan.cold_ok = self.opt_options.branch_optimization && !self.debugger_attached && !hir.is_coro;
@@ -778,7 +755,9 @@ impl Compiler {
                 // A shared generic body takes its dictionaries as trailing
                 // parameters: direct MIR lowers it when its code reads them
                 // only as it plans (`HirMirTables::reads_dicts`), its open
-                // parameters unboxed as the prologue above unboxes them.
+                // parameters unboxed on entry (the call boxed them, and a
+                // boxed word stored into a field or container would reach
+                // a ground reader as the box, #802).
                 let shared = self.hir_shared_generic();
                 self.hir_mir = if !shared {
                     self.hir_lower_mir(hir, &mut emit, None)
@@ -1115,6 +1094,8 @@ impl Compiler {
         // A finalizer object's local is pinned (`HirMirInput::pinned`) so
         // it lives as long as its frame slot would.
         let checker = &self.checker;
+        let pure_fns = &self.pure_fns;
+        let steady_fns = &self.steady_fns;
         let string_indices = &self.string_indices;
         let is_class = move |t: &Ty| {
             let t = apply_ty_prune(checker.subst(), t);
@@ -1542,6 +1523,9 @@ impl Compiler {
             unbox_any: &tables.unbox_any,
             open_params: &tables.open_params,
             lens: &emit.plan.lens,
+            alloc_steady: self.alloc_steady,
+            pure_fn: Box::new(move |n: &str| crate::il::pure_call::name_in(pure_fns, n)),
+            steady_fn: Box::new(move |n: &str| crate::il::pure_call::name_in(steady_fns, n)),
             box_at: &emit.plan.box_at,
             is_class: Box::new(is_class),
             scalar_enum: Box::new(scalar_enum),
@@ -2425,6 +2409,17 @@ impl Compiler {
                 rhs,
             } = exprs[i].kind
             {
+                // `==` / `!=` over `()` (`T = unit`) is its literal once both
+                // sides have run, as the builder folds a ground one (#1450).
+                let unit = |id: crate::hir::HirId| exprs[id.0 as usize].ty.as_ref().is_some_and(crate::hir::layout::is_unit);
+                if matches!(sym, "==" | "!=") && unit(lhs) && unit(rhs) {
+                    let value = crate::hir::HirId(exprs.len() as u32);
+                    let mut lit = crate::hir::HirExpr { kind: HirKind::Lit(crate::hir::Lit::Bool(sym == "==")), ..exprs[i].clone() };
+                    lit.node = None;
+                    exprs.push(lit);
+                    exprs[i].kind = HirKind::Block { stmts: vec![lhs, rhs], tail: Some(value) };
+                    continue;
+                }
                 let op = crate::hir::build::resolve_bin(sym, exprs[lhs.0 as usize].ty.as_ref(), exprs[rhs.0 as usize].ty.as_ref());
                 exprs[i].kind = HirKind::Bin { op, lhs, rhs };
             }
@@ -2911,6 +2906,10 @@ impl Compiler {
             && let Some(id) = self.native_id(name)
         {
             return self.hir_builtin_abi(hir, call, HirBuiltin::Host(id));
+        }
+        // A compiler-made body's `format` (a tuple's `Show` thunk).
+        if self.hir_synth_calls.is_some() && self.hir_synth_callees.get(name).is_some_and(|c| c.format) {
+            return self.hir_builtin_abi(hir, call, HirBuiltin::Format);
         }
         // A compiler-made body's call of a function the checker has no
         // signature for.
@@ -3423,6 +3422,12 @@ impl Compiler {
             let ty = at(param);
             match lower::classify(&self.checker, &ty) {
                 Some(class) if lower::is_word(class) => {}
+                // A `()` parameter (`T = unit`) takes the empty tuple
+                // object, as a plain call's (#1086, #1450).
+                Some(ValueClass::Unit) => {
+                    params.push(ValueLayout::Boxed);
+                    continue;
+                }
                 _ => return Err("callee-signature"),
             }
             params.push(self.value_layout(&ty));
@@ -5076,22 +5081,14 @@ impl Compiler {
 
     /// The adapter function [`Self::hir_fn_adapter`] reserved `label` for:
     /// its frame the wrapped function (the capture), then the arguments.
-    /// Its direct MIR is built here, as it has no HIR.
+    /// Its direct MIR is built here, as it has no HIR; the stack IL only
+    /// keeps its function record non-empty.
     fn hir_fn_adapter_fn(&mut self, label: IlLabel, unbox: &[Option<Ty>]) {
         self.loop_par_helpers += 1;
         let name = format!("__coil_fn_adapter_{}", self.loop_par_helpers);
         let start = self.bytecode.len();
         self.fn_entry_labels.insert(name.clone(), label);
         self.bind_function_entry(name.clone());
-        for (i, ty) in unbox.iter().enumerate() {
-            self.bytecode.push_load(1 + i as u32);
-            if let Some(ty) = ty {
-                Self::emit_unbox_if_needed(&mut self.bytecode, ty);
-            }
-        }
-        self.bytecode.push_load(0);
-        self.bytecode
-            .push(Byte::new(Instruction::CallIndirect).with_operand_u32(unbox.len() as u32));
         self.bytecode.push_return();
         let arity = 1 + unbox.len() as u32;
         self.fn_arities.insert(name.clone(), (arity, false));
@@ -6360,8 +6357,10 @@ impl Compiler {
         let unit_arg = |i: usize| lower::is_unit_make(hir, args[i]);
         let unit_value = |i: usize| !unit_arg(i) && lower::is_unit_value(hir, &self.checker, args[i]);
         let word_arg = |i: usize| -> Check {
-            // A boxed `Ok(())` carries the empty tuple, as in the AST.
-            if unit_arg(i) && !(result && variant == "Ok" && *want == Rep::Word(ValueLayout::Boxed)) {
+            // A boxed `()` payload is the empty tuple object, as in the AST
+            // (`Ok(())`, `Some(())`, #1449).
+            let boxed = *want == Rep::Word(ValueLayout::Boxed);
+            if unit_arg(i) && !boxed {
                 return Err("unit-payload");
             }
             // The implicit `Ok(())` closing a boxed result-mode body: a zero
@@ -6369,8 +6368,10 @@ impl Compiler {
             if matches!(hir.expr(args[i]).kind, HirKind::Lit(Lit::Unit)) && result && variant == "Ok" && *want == Rep::Word(ValueLayout::Boxed) {
                 return Ok(());
             }
+            // `Some(f())` of a `()`-typed `f()`: its effect, then the empty
+            // tuple object.
             if unit_value(i) {
-                return Err("unit-payload");
+                return if boxed { self.hir_check_effect(hir, emit, args[i]) } else { Err("unit-payload") };
             }
             self.hir_check_value(hir, emit, args[i], &Rep::Word(self.value_layout(&payload[i])))
         };
@@ -6743,10 +6744,6 @@ impl Compiler {
 
     // ---- emit ----
 
-    fn hir_slot(emit: &HirEmit, local: LocalId) -> u32 {
-        emit.slots[local.0 as usize].expect("HIR local read before its let")
-    }
-
     /// Whether the body being lowered is a generic one's shared body (it
     /// takes dictionaries; a mono clone takes none).
     pub(super) fn hir_shared_generic(&self) -> bool {
@@ -6933,9 +6930,61 @@ impl Compiler {
         if [&site.begin_local, &site.end_local].into_iter().flatten().any(|n| !heads.contains_key(n)) {
             return None;
         }
+        // An iteration that never reads its index and computes something
+        // from captures alone repeats that work each time: MIR LICM moves
+        // it ahead of the loop, leaving nothing to split across workers.
+        // A bare fold over captures (`acc = acc + k`) still splits.
+        let index = bind.or_else(|| outer.get(&site.index).copied());
+        let acc = outer.get(&site.acc).copied();
+        let varies = |l: LocalId| Some(l) == index || Some(l) == acc || !bound(l);
+        if index.is_some_and(|ix| !Self::hir_reads_index(hir, body, ix)) && Self::hir_invariant_work(hir, body, &varies) {
+            return None;
+        }
         // Only the number of live captures matters to the natives.
         let natives = self.par_loop_natives(site.live_captures.len())?;
         Some(HirParSiteLocals { site, outer, heads, natives })
+    }
+
+    /// Whether `id` reads local `ix` other than in its own step (`ix = ix + 1`).
+    fn hir_reads_index(hir: &HirBody, id: HirId, ix: LocalId) -> bool {
+        match &hir.expr(id).kind {
+            HirKind::Local(l) => *l == ix,
+            HirKind::Assign { place, .. } if matches!(hir.expr(*place).kind, HirKind::Local(l) if l == ix) => false,
+            _ => lower::children(hir, id).into_iter().any(|k| Self::hir_reads_index(hir, k, ix)),
+        }
+    }
+
+    /// Whether `id` holds a computation (an operator, cast, read or call)
+    /// that reads no local `varies` admits and writes nothing: work the
+    /// same in every iteration.
+    fn hir_invariant_work(hir: &HirBody, id: HirId, varies: &dyn Fn(LocalId) -> bool) -> bool {
+        let computes = matches!(
+            hir.expr(id).kind,
+            HirKind::Bin { .. }
+                | HirKind::Logic { .. }
+                | HirKind::Un { .. }
+                | HirKind::Cast { .. }
+                | HirKind::Call { .. }
+                | HirKind::Field { .. }
+                | HirKind::Index { .. }
+        );
+        if !computes {
+            return lower::children(hir, id).into_iter().any(|k| Self::hir_invariant_work(hir, k, varies));
+        }
+        let mut moves = true;
+        lower::visit(hir, id, &mut |x| match x.kind {
+            HirKind::Local(l) => moves &= !varies(l),
+            HirKind::Let { .. }
+            | HirKind::LetPat { .. }
+            | HirKind::Assign { .. }
+            | HirKind::Append { .. }
+            | HirKind::Clear(_)
+            | HirKind::Loop { .. }
+            | HirKind::Break
+            | HirKind::Continue => moves = false,
+            _ => {}
+        });
+        moves || lower::children(hir, id).into_iter().any(|k| Self::hir_invariant_work(hir, k, varies))
     }
 
     /// Parallel loop `id` moved into its own fork-join function, emitted
@@ -7059,14 +7108,10 @@ impl Compiler {
             let pname = body.local(param).name.clone();
             self.record_debug_param(&pname, slot);
         }
+        // Direct MIR unboxes the parameters a generic callee boxed.
         for (ty, &slot) in unbox.iter().flatten().zip(&slots[ncap..]) {
-            if let Some(ty) = ty {
-                self.bytecode.push_load(slot);
-                Self::emit_unbox_if_needed(&mut self.bytecode, ty);
-                self.bytecode.push_store_pop(slot);
-                if let Some(tag) = Self::ty_to_value_tag(ty) {
-                    self.hir_mir_unbox.push((slot, tag as u32));
-                }
+            if let Some(tag) = ty.as_ref().and_then(Self::ty_to_value_tag) {
+                self.hir_mir_unbox.push((slot, tag as u32));
             }
         }
         let root = body.root.expect("planned lambda body");

@@ -1,6 +1,6 @@
 //! GVN / CSE on numeric MIR (COI-269 same-block, COI-284 cross-block).
 //!
-//! The stack-IL `local_cse` (now `hir::cse`) refused `DIV`/`MOD`/`DIVF`/`MODF`.
+//! The stack-IL `local_cse` (later `hir::cse`, folded in here) refused `DIV`/`MOD`/`DIVF`/`MODF`.
 //! After dense lower, those ops are ordinary SSA bins. Same-block numbering removes
 //! a second divide in one block (`mir_cse_divf`). Dominator availability plus
 //! fully-anticipated fork PRE share expressions across blocks
@@ -16,10 +16,29 @@ use super::licm::dominators;
 use super::ty::MirTy;
 
 /// Same-block value numbering. Returns how many instructions were removed.
+///
+/// Besides operators, a scalar read of the heap (an element, a field, a
+/// length) or a pure call's scalar reads the earlier one, until something
+/// between may write the heap (or resize, for a length).
 pub fn cse(func: &mut MirFunc) -> usize {
+    cse_with(func, true)
+}
+
+/// [`cse`] for a LIR body: a literal is an immediate operand there, cheaper
+/// than a register another use reads.
+pub fn cse_lir(func: &mut MirFunc) -> usize {
+    cse_with(func, false)
+}
+
+fn cse_with(func: &mut MirFunc, literals: bool) -> usize {
     let mut subst: HashMap<ValueId, ValueId> = HashMap::new();
+    let pure_calls = std::mem::take(&mut func.pure_calls);
+    let steady_calls = std::mem::take(&mut func.steady_calls);
+    let calls = super::effects::CallFacts { pure: &pure_calls, steady: &steady_calls, lengths_steady: func.lengths_steady };
+    let types = std::mem::take(&mut func.types);
     for block in &mut func.blocks {
         let mut avail: HashMap<ExprKey, ValueId> = HashMap::new();
+        let mut reads: HashMap<ReadKey, ValueId> = HashMap::new();
         for inst in &mut block.insts {
             inst.rewrite_values(|v| resolve(&subst, v));
             if inst.is_phi() {
@@ -27,21 +46,78 @@ pub fn cse(func: &mut MirFunc) -> usize {
             }
             let dest = inst.dest();
             if let Some(key) = expr_key(inst) {
+                if !literals && matches!(key, ExprKey::Const(_)) {
+                    continue;
+                }
                 if let Some(&prev) = avail.get(&key) {
                     subst.insert(dest, prev);
                 } else {
                     avail.insert(key, dest);
                 }
+                continue;
+            }
+            let ty = |v: ValueId| types.get(v.index()).copied().unwrap_or(MirTy::Value);
+            if let Some(key) = read_key(inst, &pure_calls, &ty) {
+                if let Some(&prev) = reads.get(&key) {
+                    subst.insert(dest, prev);
+                } else {
+                    reads.insert(key, dest);
+                }
+                continue;
+            }
+            let (heap, lengths) = (inst.writes_heap(&calls), inst.may_resize(&calls));
+            if heap || lengths {
+                reads.retain(|k, _| !k.killed_by(heap, lengths, &ty));
             }
         }
         if let Some(term) = &mut block.term {
             term.rewrite_values(|v| resolve(&subst, v));
         }
     }
+    func.pure_calls = pure_calls;
+    func.steady_calls = steady_calls;
+    func.types = types;
     if subst.is_empty() {
         return 0;
     }
     apply_subst(func, &subst)
+}
+
+/// A scalar heap read or pure call, for [`cse`].
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum ReadKey {
+    Index { array: ValueId, index: ValueId },
+    Field { object: ValueId, index: u32 },
+    Len { array: ValueId },
+    Call { target: crate::il::Label, args: Vec<ValueId> },
+}
+
+impl ReadKey {
+    fn killed_by(&self, heap: bool, lengths: bool, ty: &impl Fn(ValueId) -> MirTy) -> bool {
+        match self {
+            Self::Index { .. } | Self::Field { .. } => heap,
+            Self::Len { .. } => lengths,
+            Self::Call { args, .. } => (heap || lengths) && args.iter().any(|&a| reads_heap(ty(a))),
+        }
+    }
+}
+
+/// A word a callee may read the heap through.
+pub(super) fn reads_heap(ty: MirTy) -> bool {
+    ty.is_heap_word() || ty == MirTy::Value
+}
+
+fn read_key(inst: &MirInst, pure_calls: &HashSet<ValueId>, ty: &impl Fn(ValueId) -> MirTy) -> Option<ReadKey> {
+    if !ty(inst.dest()).is_numeric() {
+        return None;
+    }
+    Some(match inst {
+        MirInst::Index { array, index, .. } => ReadKey::Index { array: *array, index: *index },
+        MirInst::HeapFieldLoad { object, name: None, index, .. } => ReadKey::Field { object: *object, index: *index },
+        MirInst::ArrayLen { array, .. } => ReadKey::Len { array: *array },
+        MirInst::Call { dest, target, args, dest_hi: None } if pure_calls.contains(dest) => ReadKey::Call { target: *target, args: args.clone() },
+        _ => return None,
+    })
 }
 
 /// Dominator GVN plus fully-anticipated fork PRE (COI-284).
@@ -732,5 +808,57 @@ mod tests {
         assert_eq!(gvn(&mut f), 0);
         f.verify().unwrap();
         assert_eq!(count_bin(&f, MirBinOp::Div), 1);
+    }
+
+    fn count(func: &MirFunc, pred: impl Fn(&MirInst) -> bool) -> usize {
+        func.blocks.iter().flat_map(|b| &b.insts).filter(|i| pred(i)).count()
+    }
+
+    fn parse(body: &str) -> MirFunc {
+        let src = format!("func @f(v0: heapref, v1: i64) -> i64 {{\nbb0:\n{body}\n}}\n");
+        let f = crate::mir::parse_func(&src).expect(&src);
+        f.verify().unwrap();
+        f
+    }
+
+    #[test]
+    fn repeated_element_read_reads_the_first() {
+        let mut f = parse("    v2 = index v0, v1\n    v3 = index v0, v1\n    v4 = iadd v2, v3\n    return v4");
+        assert_eq!(cse(&mut f), 1);
+        f.verify().unwrap();
+        assert_eq!(count(&f, |i| matches!(i, MirInst::Index { .. })), 1);
+    }
+
+    #[test]
+    fn store_between_element_reads_keeps_both() {
+        let mut f = parse("    v2 = index v0, v1\n    v5 = storeindex v0, v1, v1\n    v3 = index v0, v1\n    v4 = iadd v2, v3\n    return v4");
+        cse(&mut f);
+        f.verify().unwrap();
+        assert_eq!(count(&f, |i| matches!(i, MirInst::Index { .. })), 2);
+    }
+
+    #[test]
+    fn pure_call_reads_the_first_until_the_heap_changes() {
+        let body = "    v2 = call.i64 7 v0\n    v3 = call.i64 7 v0\n    v5 = call.i64 9 v1\n    v6 = call.i64 7 v0\n    v4 = iadd v2, v3\n    v7 = iadd v4, v6\n    v8 = iadd v7, v5\n    return v8";
+        let calls = |f: &MirFunc| count(f, |i| matches!(i, MirInst::Call { .. }));
+        let mut f = parse(body);
+        f.pure_calls.extend([ValueId(2), ValueId(3), ValueId(6)]);
+        assert_eq!(cse(&mut f), 1);
+        f.verify().unwrap();
+        // The impure `call 9` may write what the pure one reads through `v0`.
+        assert_eq!(calls(&f), 3);
+        let mut f = parse(body);
+        assert_eq!(cse(&mut f), 0, "an impure call is never shared");
+        assert_eq!(calls(&f), 4);
+    }
+
+    #[test]
+    fn lir_cse_keeps_each_literal() {
+        let body = "    v2 = iconst.i64 3\n    v3 = iadd v1, v2\n    v4 = iconst.i64 3\n    v5 = iadd v3, v4\n    return v5";
+        let mut f = parse(body);
+        assert_eq!(cse_lir(&mut f), 0);
+        assert_eq!(count(&f, |i| matches!(i, MirInst::Const { .. })), 2);
+        let mut f = parse(body);
+        assert_eq!(cse(&mut f), 1);
     }
 }

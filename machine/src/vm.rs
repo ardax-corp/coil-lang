@@ -536,7 +536,9 @@ pub struct Machine<const S: usize> {
     reactor: std::sync::Arc<crate::reactor::Reactor>,
     /// IO readiness reactor (sync adapters + async waiters).
     io_reactor: std::sync::Arc<crate::io_reactor::IoReactor>,
-    /// S2b maps: live heap IL slots at alloc safepoints.
+    /// S2b maps: live heap IL slots at alloc safepoints. Only archives from
+    /// before precise maps covered every body carry them (the compiler no
+    /// longer emits any); empty for everything compiled now.
     stack_maps: Vec<common::FrameStackMap>,
     /// Complete frame maps (sorted by entry); see [`common::PreciseFrameMap`].
     precise_frames: Arc<Vec<common::PreciseFrameMap>>,
@@ -2012,6 +2014,9 @@ impl<const S: usize> Machine<S> {
         code.get(pc).map(|b| *b.bytecode())
     }
 
+    /// Extra roots from an older archive's S2b maps. New programs carry
+    /// none: their precise frame maps (and frame extents) cover every word
+    /// such a map listed.
     fn for_each_mapped_slot_index(&self, mut visit: impl FnMut(usize)) {
         if self.stack_maps.is_empty() {
             return;
@@ -3286,10 +3291,13 @@ impl<const S: usize> Machine<S> {
                             return;
                         }
                     };
+                    // No coil callback can run during the call without a
+                    // closure: packed byte arrays can be lent in place.
                     let mut ctx = crate::ffi::InvokeContext::new(
                         self.heap.get_mut() as *mut Heap,
                         &self.struct_layouts,
-                    );
+                    )
+                    .lending_arrays(self.ffi_closures.is_empty());
                     let mut closure_ptrs = Vec::new();
                     let roots_len = self.ffi_arg_roots.len();
                     self.ffi_arg_roots.extend_from_slice(&args);

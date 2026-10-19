@@ -88,6 +88,18 @@ impl MirBuilder {
         self.func.tail_targets.insert(target);
     }
 
+    /// `dest` is the result of a call to a pure function
+    /// ([`MirFunc::pure_calls`]).
+    pub fn mark_pure_call(&mut self, dest: ValueId) {
+        self.func.pure_calls.insert(dest);
+    }
+
+    /// `dest` is the result of a call to a function that never resizes an
+    /// array ([`MirFunc::steady_calls`]).
+    pub fn mark_steady_call(&mut self, dest: ValueId) {
+        self.func.steady_calls.insert(dest);
+    }
+
     pub fn entry(&self) -> BlockId {
         self.func.entry
     }

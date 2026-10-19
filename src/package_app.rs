@@ -44,7 +44,7 @@ fn compile_program_archive_bytes(
         fn_symbols: Vec::new(),
         struct_layouts: pipeline.archived_struct_layouts(),
         operand_stack_slots: pipeline.operand_stack_slots(),
-        stack_maps: pipeline.stack_maps().to_vec(),
+        stack_maps: Vec::new(),
         precise_frames: pipeline.precise_frames().to_vec(),
         class_word_kinds: pipeline.class_word_kinds(),
         static_word_kinds: pipeline.static_word_kinds(),
