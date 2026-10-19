@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use clap::{ArgMatches, Args, Command, FromArgMatches};
-use compiler::{ContractLevel, HostGrants, OptLevel};
+use compiler::{ContractLevel, DebugLevel, HostGrants, OptLevel};
 
 /// SARIF / LSP diagnostic stream (commands that report through the compiler).
 #[derive(Args, Clone, Debug, Default)]
@@ -53,6 +53,34 @@ fn parse_opt_level(s: &str) -> Result<OptLevel, String> {
         "invalid --opt-level (expected none|basic|standard|aggressive|size|debug or 0|1|2|3|s|g)"
             .into()
     })
+}
+
+/// `-g0` / `-g1` / `-g2` for commands that compile Coil source
+/// (coil-lang#1491). `--strip-debug` is `-g0`.
+#[derive(Args, Clone, Debug, Default)]
+pub struct DebugLevelFlags {
+    /// Debug info: 0 none, 1 function names and lines, 2 lines and byte
+    /// spans (default 2; 1 at -Os and for `coil package`)
+    #[arg(short = 'g', value_name = "LEVEL", value_parser = DebugLevel::parse)]
+    pub debug_level: Option<DebugLevel>,
+    /// Omit all debug info (line table, function names, source paths): -g0
+    #[arg(long, conflicts_with = "debug_level")]
+    pub strip_debug: bool,
+}
+
+impl DebugLevelFlags {
+    pub fn is_set(&self) -> bool {
+        self.debug_level.is_some() || self.strip_debug
+    }
+
+    /// The level asked for, if any (`None`: the command's default).
+    pub fn level(&self) -> Option<DebugLevel> {
+        if self.strip_debug {
+            Some(DebugLevel::None)
+        } else {
+            self.debug_level
+        }
+    }
 }
 
 /// Opt-stat dump (need a compile, not `run` / `test` / `debug`).

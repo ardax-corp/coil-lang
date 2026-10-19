@@ -100,13 +100,16 @@ struct RecMeasureShape {
 }
 
 /// Analyze recursion depth bounds; emit errors when `#[max_depth]` is required.
-pub fn analyze_stack_bounds(ast: &Output<'_>) -> StackBoundReport {
+pub fn analyze_stack_bounds(
+    ast: &Output<'_>,
+    cases: &super::bare_cases::BareCases,
+) -> StackBoundReport {
     let mut report = StackBoundReport {
         operand_slots_needed: DEFAULT_OPERAND_STACK_SLOTS,
         ..StackBoundReport::default()
     };
 
-    let recursive = analyze_recursive_fns(ast);
+    let recursive = analyze_recursive_fns(ast, cases);
     if recursive.is_empty() {
         return report;
     }
@@ -1529,6 +1532,7 @@ fn peel<'a>(expr: &'a Output<'a>) -> &'a Output<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::typechecking::bare_cases::BareCases;
     use parser::Pratt;
 
     #[test]
@@ -1569,7 +1573,7 @@ fn main() {
 }
 "#,
         );
-        let report = analyze_stack_bounds(&ast);
+        let report = analyze_stack_bounds(&ast, BareCases::none());
         assert!(
             report.messages.is_empty(),
             "unexpected errors: {:?}",
@@ -1598,7 +1602,7 @@ fn main() {
 }
 "#,
         );
-        let report = analyze_stack_bounds(&ast);
+        let report = analyze_stack_bounds(&ast, BareCases::none());
         assert!(report.messages.is_empty(), "{:?}", report.messages);
         let b = report.bounds.iter().find(|b| b.fn_name == "fib").unwrap();
         assert_eq!(b.max_frames, 31);
@@ -1619,7 +1623,7 @@ fn main() {
 }
 "#,
         );
-        let report = analyze_stack_bounds(&ast);
+        let report = analyze_stack_bounds(&ast, BareCases::none());
         assert!(report.messages.is_empty(), "{:?}", report.messages);
         let b = report.bounds.iter().find(|b| b.fn_name == "fib").unwrap();
         assert_eq!(b.source, BoundSource::Proven);
@@ -1641,7 +1645,7 @@ fn main() {
 }
 "#,
         );
-        let report = analyze_stack_bounds(&ast);
+        let report = analyze_stack_bounds(&ast, BareCases::none());
         assert_unbounded(&report, "fib");
     }
 
@@ -1661,7 +1665,7 @@ fn main() {
 }
 "#,
         );
-        let report = analyze_stack_bounds(&ast);
+        let report = analyze_stack_bounds(&ast, BareCases::none());
         assert!(report.messages.is_empty(), "{:?}", report.messages);
         let b = report.bounds.iter().find(|b| b.fn_name == "fib").unwrap();
         assert_eq!(b.max_frames, 64);
@@ -1685,7 +1689,7 @@ fn main() {
 }
 "#,
         );
-        let report = analyze_stack_bounds(&ast);
+        let report = analyze_stack_bounds(&ast, BareCases::none());
         assert!(report.messages.is_empty(), "{:?}", report.messages);
         let b = report.bounds.iter().find(|b| b.fn_name == "fib").unwrap();
         assert_eq!(b.source, BoundSource::Proven);
@@ -1710,7 +1714,7 @@ fn main() {
 }
 "#,
         );
-        let report = analyze_stack_bounds(&ast);
+        let report = analyze_stack_bounds(&ast, BareCases::none());
         assert!(report.messages.is_empty(), "{:?}", report.messages);
         let b = report.bounds.iter().find(|b| b.fn_name == "fib").unwrap();
         assert_eq!(b.source, BoundSource::Proven);
@@ -1732,7 +1736,7 @@ fn main() {
 }
 "#,
         );
-        let report = analyze_stack_bounds(&ast);
+        let report = analyze_stack_bounds(&ast, BareCases::none());
         assert!(report.messages.is_empty(), "{:?}", report.messages);
         let b = report.bounds.iter().find(|b| b.fn_name == "fib").unwrap();
         assert_eq!(b.source, BoundSource::Proven);
@@ -1756,7 +1760,7 @@ fn main() {
 }
 "#,
         );
-        let report = analyze_stack_bounds(&ast);
+        let report = analyze_stack_bounds(&ast, BareCases::none());
         assert_unbounded(&report, "fib");
     }
 
@@ -1776,7 +1780,7 @@ fn main() {
 }
 "#,
         );
-        let report = analyze_stack_bounds(&ast);
+        let report = analyze_stack_bounds(&ast, BareCases::none());
         assert_unbounded(&report, "fib");
     }
 
@@ -1796,7 +1800,7 @@ fn main() {
 }
 "#,
         );
-        let report = analyze_stack_bounds(&ast);
+        let report = analyze_stack_bounds(&ast, BareCases::none());
         assert_unbounded(&report, "fib");
 
         let ast = parse(
@@ -1813,7 +1817,7 @@ fn main() {
 }
 "#,
         );
-        let report = analyze_stack_bounds(&ast);
+        let report = analyze_stack_bounds(&ast, BareCases::none());
         assert_unbounded(&report, "fib");
     }
 
@@ -1832,7 +1836,7 @@ fn main() {
 }
 "#,
         );
-        let report = analyze_stack_bounds(&ast);
+        let report = analyze_stack_bounds(&ast, BareCases::none());
         assert!(report.messages.is_empty(), "{:?}", report.messages);
         let b = report.bounds.iter().find(|b| b.fn_name == "fib").unwrap();
         assert_eq!(b.source, BoundSource::Proven);
@@ -1853,7 +1857,7 @@ fn main() {
 }
 "#,
         );
-        let report = analyze_stack_bounds(&ast);
+        let report = analyze_stack_bounds(&ast, BareCases::none());
         assert!(report.messages.is_empty(), "{:?}", report.messages);
         let b = report.bounds.iter().find(|b| b.fn_name == "go").unwrap();
         assert_eq!(b.source, BoundSource::Proven);
@@ -1878,7 +1882,7 @@ fn main() {
 }
 "#,
         );
-        let report = analyze_stack_bounds(&ast);
+        let report = analyze_stack_bounds(&ast, BareCases::none());
         assert!(report.messages.is_empty(), "{:?}", report.messages);
         let b = report.bounds.iter().find(|b| b.fn_name == "f").unwrap();
         assert_eq!(b.source, BoundSource::Proven);
@@ -1900,7 +1904,7 @@ fn main() {
 }
 "#,
         );
-        let report = analyze_stack_bounds(&ast);
+        let report = analyze_stack_bounds(&ast, BareCases::none());
         assert!(report.messages.is_empty(), "{:?}", report.messages);
         let b = report
             .bounds
@@ -1925,7 +1929,7 @@ fn main() {
 }
 "#,
         );
-        let report = analyze_stack_bounds(&ast);
+        let report = analyze_stack_bounds(&ast, BareCases::none());
         assert!(report.messages.is_empty(), "{:?}", report.messages);
         assert_eq!(report.operand_slots_needed, 512);
         assert!(report.operand_slots_needed > DEFAULT_OPERAND_STACK_SLOTS);
@@ -1955,7 +1959,7 @@ fn main() {
 }
 "#,
         );
-        let report = analyze_stack_bounds(&ast);
+        let report = analyze_stack_bounds(&ast, BareCases::none());
         assert!(report.messages.is_empty(), "{:?}", report.messages);
         let b = report
             .bounds
@@ -1980,7 +1984,7 @@ fn main() {
 }
 "#,
         );
-        let report = analyze_stack_bounds(&ast);
+        let report = analyze_stack_bounds(&ast, BareCases::none());
         assert!(report.messages.is_empty(), "{:?}", report.messages);
         let b = report.bounds.iter().find(|b| b.fn_name == "dig").unwrap();
         assert_eq!(b.source, BoundSource::Proven);
@@ -2005,7 +2009,7 @@ fn main() {
 }
 "#,
         );
-        let report = analyze_stack_bounds(&ast);
+        let report = analyze_stack_bounds(&ast, BareCases::none());
         assert!(report.messages.is_empty(), "{:?}", report.messages);
         for name in ["even", "odd"] {
             let b = report.bounds.iter().find(|b| b.fn_name == name).unwrap();
@@ -2032,7 +2036,7 @@ fn main() {
 }
 "#,
         );
-        let report = analyze_stack_bounds(&ast);
+        let report = analyze_stack_bounds(&ast, BareCases::none());
         assert_unbounded(&report, "even");
     }
 
@@ -2056,7 +2060,7 @@ fn main() {
 }
 "#,
         );
-        let report = analyze_stack_bounds(&ast);
+        let report = analyze_stack_bounds(&ast, BareCases::none());
         assert!(report.messages.is_empty(), "{:?}", report.messages);
         assert!(report.bounds.iter().any(|b| {
             b.fn_name == "ping" && b.source == BoundSource::Attribute && b.max_frames == 8
@@ -2077,7 +2081,7 @@ fn main() {
 }
 "#,
         );
-        let report = analyze_stack_bounds(&ast);
+        let report = analyze_stack_bounds(&ast, BareCases::none());
         assert!(report.messages.is_empty(), "{:?}", report.messages);
         let b = report.bounds.iter().find(|b| b.fn_name == "fact").unwrap();
         assert_eq!(b.source, BoundSource::Proven);
@@ -2095,7 +2099,7 @@ fn f(int n) -> int {
 fn main() { let x = f(5); return; }
 "#,
         );
-        let lt_report = analyze_stack_bounds(&lt);
+        let lt_report = analyze_stack_bounds(&lt, BareCases::none());
         assert!(lt_report.messages.is_empty(), "{:?}", lt_report.messages);
         assert_eq!(
             lt_report
@@ -2116,7 +2120,7 @@ fn g(int n) -> int {
 fn main() { let x = g(4); return; }
 "#,
         );
-        let eq_report = analyze_stack_bounds(&eq);
+        let eq_report = analyze_stack_bounds(&eq, BareCases::none());
         assert!(eq_report.messages.is_empty(), "{:?}", eq_report.messages);
         assert_eq!(
             eq_report
@@ -2142,7 +2146,7 @@ fn main() {
 }
 "#,
         );
-        let report = analyze_stack_bounds(&ast);
+        let report = analyze_stack_bounds(&ast, BareCases::none());
         assert_unbounded(&report, "f");
     }
 
@@ -2159,7 +2163,7 @@ fn main() {
 }
 "#,
         );
-        let report = analyze_stack_bounds(&ast);
+        let report = analyze_stack_bounds(&ast, BareCases::none());
         assert_unbounded(&report, "boom");
     }
 
@@ -2179,7 +2183,7 @@ fn main() {
 }
 "#,
         );
-        let report = analyze_stack_bounds(&ast);
+        let report = analyze_stack_bounds(&ast, BareCases::none());
         assert!(
             report
                 .messages
@@ -2206,7 +2210,7 @@ fn main() {
 }
 "#,
         );
-        let report = analyze_stack_bounds(&ast);
+        let report = analyze_stack_bounds(&ast, BareCases::none());
         assert!(report.messages.is_empty(), "{:?}", report.messages);
         assert_eq!(report.operand_slots_needed, MAX_OPERAND_STACK_SLOTS);
     }
@@ -2226,7 +2230,7 @@ fn main() {
 }
 "#,
         );
-        let report = analyze_stack_bounds(&ast);
+        let report = analyze_stack_bounds(&ast, BareCases::none());
         assert!(report.messages.is_empty(), "{:?}", report.messages);
         let b = report.bounds.iter().find(|b| b.fn_name == "fib").unwrap();
         assert_eq!(b.max_frames, 20);
@@ -2248,7 +2252,7 @@ fn main() {
 }
 "#,
         );
-        let report = analyze_stack_bounds(&ast);
+        let report = analyze_stack_bounds(&ast, BareCases::none());
         assert!(report.messages.is_empty(), "{:?}", report.messages);
         let b = report.bounds.iter().find(|b| b.fn_name == "fib").unwrap();
         assert_eq!(b.max_frames, 9);
@@ -2271,7 +2275,7 @@ fn add(int a, int b) -> int { return a + b; }
 fn main() { let x = add(1, 2); return; }
 "#,
         );
-        let report = analyze_stack_bounds(&ast);
+        let report = analyze_stack_bounds(&ast, BareCases::none());
         assert!(report.messages.is_empty());
         assert!(report.bounds.is_empty());
         assert_eq!(report.operand_slots_needed, DEFAULT_OPERAND_STACK_SLOTS);

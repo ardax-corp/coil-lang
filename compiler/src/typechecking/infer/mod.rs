@@ -517,6 +517,11 @@ pub struct Checker {
     /// enum's registry key, by pattern span (#1352).
     bare_patterns_by_span: HashMap<(usize, usize), String>,
 
+    /// Bare unit case patterns (`None`, `Red`) of each checked module, by
+    /// span: the one record of which bare pattern names are cases rather
+    /// than bindings, for passes that walk the AST after the checker (#1394).
+    bare_cases_by_module: HashMap<ModuleId, crate::typechecking::bare_cases::BareCases>,
+
     /// Match exhaustiveness checks deferred until substitution is closed.
     pending_exhaustive: Vec<PendingExhaustive>,
 

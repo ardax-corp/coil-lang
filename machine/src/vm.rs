@@ -827,6 +827,12 @@ impl<const S: usize> Machine<S> {
 
     fn rebuild_pc_line_cache(&mut self) {
         self.pc_lines.clear();
+        // Run tables (archive minor 40+, `-g1`): lookups binary-search the
+        // runs, so there is no per-pc cache to build.
+        if self.program_debug.debug_locs.is_empty() {
+            self.pc_lines.shrink_to_fit();
+            return;
+        }
         self.pc_lines.reserve(self.program_debug.debug_locs.len());
         // Lines resolved at compile time (archive minor 30+): no file I/O,
         // so a packaged binary never depends on its sources (#580).
@@ -874,26 +880,24 @@ impl<const S: usize> Machine<S> {
         }
     }
 
-    /// `(line, column)` for the location at `pc`: recorded at compile time,
-    /// else read from the source file (older archives).
-    fn pc_line_column(&self, pc: usize, loc: &common::DebugLoc) -> Option<(u32, u32)> {
-        if let Some(line) = self.program_debug.line_at(pc) {
-            return Some((line.line, line.column));
+    /// `(file, line, column)` for the location at `pc`: recorded at compile
+    /// time (dense or run table), else read from the source file (archives
+    /// before minor 30).
+    fn pc_file_line_column(&self, pc: usize) -> Option<(u32, u32, u32)> {
+        if let Some((file, line)) = self.program_debug.file_line_at(pc) {
+            return Some((file, line.line, line.column));
         }
+        let loc = self.program_debug.loc_at(pc)?;
         let path = self.program_debug.source_files.get(loc.file as usize)?;
         let text = std::fs::read_to_string(self.resolve_source_path(path)).ok()?;
         let pos = byte_to_position(&text, loc.start_byte as usize);
-        Some((pos.line, pos.column))
+        Some((loc.file, pos.line, pos.column))
     }
 
     /// Resolve PC → `(path, line, column)` when debug locs are known.
     pub fn resolve_pc_location(&self, pc: usize) -> Option<(String, u32, u32)> {
-        let loc = self.program_debug.debug_locs.get(pc)?;
-        if !loc.is_known() {
-            return None;
-        }
-        let path = self.program_debug.source_files.get(loc.file as usize)?;
-        let (line, column) = self.pc_line_column(pc, loc)?;
+        let (file, line, column) = self.pc_file_line_column(pc)?;
+        let path = self.program_debug.source_files.get(file as usize)?;
         let resolved = self.resolve_source_path(path);
         Some((resolved.display().to_string(), line, column))
     }
@@ -986,8 +990,12 @@ impl<const S: usize> Machine<S> {
         &self.program_debug
     }
 
-    /// Cached `(file_index, line)` for a PC, if known.
+    /// `(file_index, line)` for a PC, if known: from the per-pc cache of a
+    /// dense table, else a binary search over the run table.
     pub fn debug_pc_line(&self, pc: usize) -> Option<(u32, u32)> {
+        if self.program_debug.debug_locs.is_empty() {
+            return self.program_debug.table.line_at(pc).map(|(file, l)| (file, l.line));
+        }
         self.pc_lines.get(pc).copied().flatten()
     }
 
@@ -1021,7 +1029,7 @@ impl<const S: usize> Machine<S> {
     #[cfg(any(test, feature = "debugger"))]
     fn debug_check_stop_at(&mut self, ip: usize) -> Option<StopReason> {
         let depth = self.frames.len();
-        let loc = self.pc_lines.get(ip).copied().flatten();
+        let loc = self.debug_pc_line(ip);
         self.debug.as_mut()?.check_stop(ip, depth, loc)
     }
 
@@ -1115,12 +1123,8 @@ impl<const S: usize> Machine<S> {
     }
 
     fn format_panic_location(&self, panic_insn_ip: usize) -> Option<String> {
-        let loc = self.program_debug.debug_locs.get(panic_insn_ip)?;
-        if !loc.is_known() {
-            return None;
-        }
-        let path = self.program_debug.source_files.get(loc.file as usize)?;
-        let (line, column) = self.pc_line_column(panic_insn_ip, loc)?;
+        let (file, line, column) = self.pc_file_line_column(panic_insn_ip)?;
+        let path = self.program_debug.source_files.get(file as usize)?;
         Some(format!("{}:{}:{}", path, line, column))
     }
 
@@ -1885,7 +1889,7 @@ impl<const S: usize> Machine<S> {
                     })
                     .map_or("?", |s| s.name.as_str());
                 let loc = pc
-                    .and_then(|pc| self.program_debug.debug_locs.get(pc))
+                    .and_then(|pc| self.program_debug.loc_at(pc))
                     .map_or(String::from("?"), |l| format!("{l:?}"));
                 if !(addr == 0 || heap.find_object_by_addr(addr).is_some()) {
                     let n = self.frames.len();

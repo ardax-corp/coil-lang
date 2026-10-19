@@ -21,6 +21,7 @@ fn options(root: &Path, fail_fast: bool) -> TestOptions {
         show_output: false,
         coverage: None,
         opt_level: OptLevel::Standard,
+        debug_level: None,
         contracts: None,
         contract_runs: 0,
         grants: HostGrants::deny_all(),

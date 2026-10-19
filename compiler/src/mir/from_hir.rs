@@ -4002,7 +4002,7 @@ impl Lower<'_> {
             None if self.inp.word(ty).is_none() && (self.inp.boxed_view)(ty, None).is_some() => (MirTy::HeapRef, None),
             _ => (self.inp.word(ty).ok_or_else(|| format!("call type {}", ty_kind(ty)))?, None),
         };
-        if site.unbox.is_some() && (site.boxed_ret || site.pair_ret || site.coro || unit || ret_hi.is_some()) {
+        if site.unbox.is_some() && (site.pair_ret || site.coro || unit || ret_hi.is_some()) {
             return Err("call unbox shape".into());
         }
         let mut words = Vec::with_capacity(args.len());
@@ -4150,8 +4150,13 @@ impl Lower<'_> {
             let f = self.at_expr(id, |l| l.b.ins_alloc(MirAllocKind::Fn { target, operand, mask: 0 }, vec![dest]).map_err(mir))?;
             return Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![f]).map_err(mir)?));
         }
-        // A bare type parameter result comes back boxed.
+        // A bare type parameter result comes back boxed; a niche one as
+        // its boxed enum object (#1565).
         if let Some(tag) = site.unbox {
+            if let Some(want) = niche {
+                let obj = self.b.ins_unbox(dest, tag, MirTy::HeapRef).map_err(mir)?;
+                return self.unbox_niche(obj, want);
+            }
             return Ok(Val::V(self.b.ins_unbox(dest, tag, ret).map_err(mir)?));
         }
         if let Some(want) = niche {
