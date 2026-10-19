@@ -13,8 +13,8 @@ use std::{
 use reporting::Message;
 
 use crate::{
-    default_module_roots, module_roots::namespace_of_in_roots, Checker, DefId, Pipeline, SymbolIndex,
-    SymbolKind,
+    default_module_roots, module_roots::namespace_of_in_roots, BareCases, Checker, DefId, ModuleId,
+    Pipeline, SymbolIndex, SymbolKind,
 };
 
 #[derive(Clone)]
@@ -167,6 +167,20 @@ impl ProjectIndex {
     }
 
     fn locals_for_file(&self, path: &Path) -> Option<HashMap<String, DefId>> {
+        let mid = self.module_id_of(path)?;
+        self.checker().module_locals(mid).cloned()
+    }
+
+    /// Bare unit case patterns (`None`, `Red`) the last typecheck found in
+    /// `path`; none when it was not typechecked.
+    pub fn bare_cases_for_file(&self, path: &Path) -> &BareCases {
+        match self.module_id_of(path) {
+            Some(mid) => self.checker().bare_cases_of(mid),
+            None => BareCases::none(),
+        }
+    }
+
+    fn module_id_of(&self, path: &Path) -> Option<ModuleId> {
         let ns = if self.pipeline.entry_file() == Some(path) {
             String::new()
         } else {
@@ -177,8 +191,7 @@ impl ProjectIndex {
             )
             .unwrap_or_default()
         };
-        let mid = self.checker().def_interner().module_id(&ns)?;
-        self.checker().module_locals(mid).cloned()
+        self.checker().def_interner().module_id(&ns)
     }
 
     fn location_of(&self, id: DefId) -> Option<(PathBuf, Range<usize>)> {

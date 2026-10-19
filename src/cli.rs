@@ -5,10 +5,10 @@ use std::process::exit;
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use coil_args::{
-    CompileProfileFlags, EntryFlag, HostGrantFlags, LogFlags, OptLevelFlags, RootFlags,
-    expand_o_shorts, merge_entry,
+    CompileProfileFlags, DebugLevelFlags, EntryFlag, HostGrantFlags, LogFlags, OptLevelFlags,
+    RootFlags, expand_o_shorts, merge_entry,
 };
-use compiler::{HostGrants, OptLevel};
+use compiler::{DebugLevel, HostGrants, OptLevel};
 use crate::package_app::{FfiNative, parse_ffi_native};
 
 pub(crate) const DEFAULT_OUT: &str = "out.hyc";
@@ -78,6 +78,8 @@ pub(crate) struct CliArgs {
     pub log_lsp: bool,
     pub include_tests: bool,
     pub opt_level: OptLevel,
+    /// `-g` / `--strip-debug`; `None` is the command's default.
+    pub debug_level: Option<DebugLevel>,
     pub contracts: Option<compiler::ContractLevel>,
     pub opt_stats: bool,
     pub opt_stats_json: bool,
@@ -108,6 +110,8 @@ struct RawCli {
     #[command(flatten)]
     opt: OptLevelFlags,
     #[command(flatten)]
+    debug: DebugLevelFlags,
+    #[command(flatten)]
     profile: CompileProfileFlags,
     #[command(flatten)]
     grants: HostGrantFlags,
@@ -133,6 +137,8 @@ enum RawCommand {
         log: LogFlags,
         #[command(flatten)]
         opt: OptLevelFlags,
+        #[command(flatten)]
+        debug: DebugLevelFlags,
         #[command(flatten)]
         profile: CompileProfileFlags,
         #[command(flatten)]
@@ -187,6 +193,8 @@ enum RawCommand {
         #[command(flatten)]
         opt: OptLevelFlags,
         #[command(flatten)]
+        debug: DebugLevelFlags,
+        #[command(flatten)]
         profile: CompileProfileFlags,
         #[command(flatten)]
         grants: HostGrantFlags,
@@ -207,9 +215,6 @@ enum RawCommand {
         /// Fail if required shared libraries are missing
         #[arg(long)]
         check_native: bool,
-        /// Omit debug info (line table and function names) from the embedded archive
-        #[arg(long)]
-        strip_debug: bool,
         /// Entry `.hy` file
         file: Option<String>,
     },
@@ -331,6 +336,7 @@ pub(crate) fn parse_args(args: &[String]) -> Result<CliArgs, String> {
             log_lsp: false,
             include_tests: false,
             opt_level: OptLevel::Standard,
+            debug_level: None,
             contracts: None,
             opt_stats: false,
             opt_stats_json: false,
@@ -388,6 +394,7 @@ fn cli_from(
         log_lsp: log.log_lsp,
         include_tests,
         opt_level: opt.opt_level.unwrap_or(OptLevel::Standard),
+        debug_level: None,
         contracts: opt.contracts,
         opt_stats: profile.opt_stats,
         opt_stats_json: profile.opt_stats_json,
@@ -408,6 +415,7 @@ impl RawCli {
     fn parent_run_flags_set(&self) -> bool {
         self.log.is_set()
             || self.opt.is_set()
+            || self.debug.is_set()
             || self.profile.is_set()
             || self.include_tests
             || self.file.is_some()
@@ -430,6 +438,7 @@ impl RawCli {
                     return Err("missing input file (pass a .hy file or `--entry`)".into());
                 }
                 CliArgs {
+                    debug_level: self.debug.level(),
                     ..cli_from(
                         Command::BuildAndRun { filename },
                         self.log,
@@ -494,6 +503,7 @@ impl RawCli {
             Some(RawCommand::Compile {
                 log,
                 opt,
+                debug,
                 profile,
                 grants,
                 roots,
@@ -508,6 +518,7 @@ impl RawCli {
                     return Err("compile requires an entry file".into());
                 }
                 CliArgs {
+                    debug_level: debug.level(),
                     ..cli_from(
                         Command::Compile {
                             filename,
@@ -538,6 +549,7 @@ impl RawCli {
             Some(RawCommand::Package {
                 log,
                 opt,
+                debug,
                 profile,
                 grants,
                 roots,
@@ -546,7 +558,6 @@ impl RawCli {
                 runner,
                 ffi_native,
                 check_native,
-                strip_debug,
                 file,
             }) => {
                 let filename = merge_entry(file, entry_flag.entry)?;
@@ -561,22 +572,25 @@ impl RawCli {
                         .unwrap_or("a.out")
                         .to_string()
                 });
-                cli_from(
-                    Command::Package {
-                        filename,
-                        output: out,
-                        runner,
-                        natives: ffi_native,
-                        check_native,
-                        strip_debug,
-                    },
-                    log,
-                    false,
-                    opt,
-                    profile,
-                    grants,
-                    roots.root,
-                )
+                CliArgs {
+                    debug_level: debug.level(),
+                    ..cli_from(
+                        Command::Package {
+                            filename,
+                            output: out,
+                            runner,
+                            natives: ffi_native,
+                            check_native,
+                            strip_debug: debug.strip_debug,
+                        },
+                        log,
+                        false,
+                        opt,
+                        profile,
+                        grants,
+                        roots.root,
+                    )
+                }
             }
             Some(RawCommand::Natives {
                 action: NativesAction::Dump {

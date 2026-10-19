@@ -389,12 +389,15 @@ fn eval_arg_form(form: &ArgForm, parent_args: &[i64]) -> Option<i64> {
 ///
 /// One site per function: the first profitable clear-path site found walking
 /// the body, preferring return-path sites without opaque guards.
+/// `cases` are the module's bare unit case patterns
+/// ([`Checker::bare_cases`](crate::typechecking::infer::Checker::bare_cases)).
 pub fn analyze_par_fork_sites(
     ast: &Output<'_>,
     pure_fns: &HashSet<String>,
+    cases: &BareCases,
 ) -> HashMap<String, ParForkSite> {
     let mut out = HashMap::new();
-    collect_sites(ast, pure_fns, &BareCases::of(ast), &mut out);
+    collect_sites(ast, pure_fns, cases, &mut out);
     out
 }
 
@@ -715,7 +718,7 @@ impl Scan<'_> {
                 for arm in arms {
                     match &arm.pattern.1 {
                         // A bare unit case (`None`, #1394) is a constructor.
-                        Pattern::Binding { name } if self.ctx.cases.is_case(name, arm.pattern.0) => {
+                        Pattern::Binding { .. } if self.ctx.cases.is_case(arm.pattern.0) => {
                             self.walk_guarded(&arm.body, on_return, ParGuard::Opaque);
                         }
                         Pattern::Wildcard
@@ -1355,8 +1358,9 @@ mod tests {
 
     fn sites_of(src: &str) -> HashMap<String, ParForkSite> {
         let ast = parse(src);
-        let pure = analyze_pure_fns(&ast);
-        analyze_par_fork_sites(&ast, &pure)
+        let cases = BareCases::checked(&ast);
+        let pure = analyze_pure_fns(&ast, &cases);
+        analyze_par_fork_sites(&ast, &pure, &cases)
     }
 
     fn arm_args(site: &ParForkSite, i: usize) -> &[ArgForm] {
@@ -1382,9 +1386,9 @@ fn main() {
 }
 "#,
         );
-        let pure = analyze_pure_fns(&ast);
+        let pure = analyze_pure_fns(&ast, BareCases::none());
         assert!(pure.contains("fib"));
-        let sites = analyze_par_fork_sites(&ast, &pure);
+        let sites = analyze_par_fork_sites(&ast, &pure, BareCases::none());
         let fib = sites.get("fib").expect("fib fork site");
         assert_eq!(fib.param_count, 1);
         assert_eq!(fib.combine, ParCombine::BinOp(ParBinOp::Add));
@@ -1582,8 +1586,8 @@ fn main() {
 }
 "#,
         );
-        let pure = analyze_pure_fns(&ast);
-        let sites = analyze_par_fork_sites(&ast, &pure);
+        let pure = analyze_pure_fns(&ast, BareCases::none());
+        let sites = analyze_par_fork_sites(&ast, &pure, BareCases::none());
         let demanded = collect_par_worker_fns(&ast, &sites);
         assert!(
             demanded.contains("fib"),
@@ -1606,8 +1610,8 @@ fn main() {
 }
 "#,
         );
-        let pure = analyze_pure_fns(&ast);
-        let sites = analyze_par_fork_sites(&ast, &pure);
+        let pure = analyze_pure_fns(&ast, BareCases::none());
+        let sites = analyze_par_fork_sites(&ast, &pure, BareCases::none());
         let demanded = collect_par_worker_fns(&ast, &sites);
         assert!(
             !demanded.contains("fib"),
@@ -1635,8 +1639,8 @@ fn main() {
 }
 "#,
         );
-        let pure = analyze_pure_fns(&ast);
-        let sites = analyze_par_fork_sites(&ast, &pure);
+        let pure = analyze_pure_fns(&ast, BareCases::none());
+        let sites = analyze_par_fork_sites(&ast, &pure, BareCases::none());
         let demanded = collect_par_worker_fns(&ast, &sites);
         assert!(
             demanded.contains("fib"),
@@ -1803,8 +1807,8 @@ fn main() {
 }
 "#,
         );
-        let pure = analyze_pure_fns(&ast);
-        let sites = analyze_par_fork_sites(&ast, &pure);
+        let pure = analyze_pure_fns(&ast, BareCases::none());
+        let sites = analyze_par_fork_sites(&ast, &pure, BareCases::none());
         let demanded = collect_par_worker_fns(&ast, &sites);
         assert!(
             demanded.contains("tak"),
@@ -1836,8 +1840,8 @@ fn main() {
 }
 "#,
         );
-        let pure = analyze_pure_fns(&ast);
-        let sites = analyze_par_fork_sites(&ast, &pure);
+        let pure = analyze_pure_fns(&ast, BareCases::none());
+        let sites = analyze_par_fork_sites(&ast, &pure, BareCases::none());
         let tak = sites.get("tak").expect("tak fork site");
         assert_eq!(
             tak.guards,
@@ -1870,8 +1874,8 @@ fn main() {
 }
 "#,
         );
-        let pure = analyze_pure_fns(&ast);
-        let sites = analyze_par_fork_sites(&ast, &pure);
+        let pure = analyze_pure_fns(&ast, BareCases::none());
+        let sites = analyze_par_fork_sites(&ast, &pure, BareCases::none());
         assert_eq!(
             sites.get("f").map(|s| s.guards.as_slice()),
             Some(&[ParGuard::Opaque][..])
