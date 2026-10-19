@@ -188,9 +188,11 @@ next mark — not required for C1 int reduce.
 
 ### Why maps are mandatory
 
-S2b maps persist on `.hyc` / embed (archive **minor 14**, E1). Shared-heap
-steal of heap pointers is allowed only when `ThreadProgram.stack_maps` is
-**non-empty and real** (`has_real_maps` / `wire_thread_program_with_maps`).
+Frame maps persist on `.hyc` / embed: S2b maps from archive **minor 14**
+(E1), precise frame maps from **minor 21**, the only kind the compiler emits
+now. Shared-heap steal of heap pointers is allowed only when the
+`ThreadProgram` has **real** maps of either kind (`program_has_real_maps` /
+`wire_thread_program_with_maps`).
 Layer A C1 **immediate-only** loop chunks may steal without maps because
 collect is forbidden in-epoch (abort instead). Pre-14 archives and unmapped
 **allocating** bodies stay **isolate**.
@@ -305,7 +307,7 @@ stolen jobs on one Heap.
 
 Eligibility (all must hold):
 
-1. `ThreadProgram` has real S2b maps (E1).
+1. `ThreadProgram` has real frame maps (E1; precise frame maps since minor 21).
 2. Body matches loop IPA independence / purity / int reduction **or**
    disjoint `out[i]` stores with stable length.
 3. Args are whitelist: induction bounds (immediates), frozen inputs,

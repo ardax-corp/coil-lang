@@ -20,6 +20,8 @@ stacker = "0.1.25"
 machine = { path = "../machine", optional = true, default-features = false, features = ["vm_profile"] }
 
 [dev-dependencies]
+# Lib tests format `Instruction`/`Byte` with Debug, also under `--release` (#1455).
+common = { path = "../common", features = ["debug-fmt"] }
 machine = { path = "../machine", default-features = false, features = ["vm_profile"] }
 # Integration tests run user and built-in derive macros on the VM.
 comptime = { path = "../comptime" }

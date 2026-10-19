@@ -190,6 +190,15 @@ jobs:
           CARGO_PROFILE_RELEASE_PANIC=unwind \
             cargo test --release -p compiler --test coi407_trailing_label -- --exact
 
+      - name: Release compiler lib tests build (#1455)
+        if: runner.os == 'Linux'
+        run: |
+          # Lib tests must compile without debug_assertions (cfg-gated Debug
+          # impls in `common`); build only, same profile as the step above.
+          CARGO_PROFILE_RELEASE_LTO=off CARGO_PROFILE_RELEASE_CODEGEN_UNITS=8 \
+          CARGO_PROFILE_RELEASE_PANIC=unwind \
+            cargo test --release -p compiler --lib --no-run
+
       - name: Release VM no_pool park/close (COI-410)
         if: runner.os == 'Linux'
         run: |
@@ -348,7 +357,12 @@ jobs:
               code_kb=$(( $(size -d harness-bin/coil-test | awk 'NR==2 {print $4}') / 1024 ))
               $run -j 1 --limit-as-kb $(( code_kb + 131072 )) -- $FLAGS ;;
             # Collect and evacuate at every allocation (precise-root soundness).
-            gc-stress) $run --harness harness-bin/gc-stress/coil-test -- $FLAGS ;;
+            # The memory corpus also at -O0: without inlining, a call's
+            # result reaches its consumer on the operand stack instead of a
+            # local, so the roots differ from the default level (#1481).
+            gc-stress)
+              $run --harness harness-bin/gc-stress/coil-test -- $FLAGS
+              $run --harness harness-bin/gc-stress/coil-test memory -- -O 0 $FLAGS ;;
           esac
 
       # The examples in the builtin doc stubs (compiler/src/builtin_docs/),

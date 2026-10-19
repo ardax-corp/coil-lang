@@ -33,7 +33,7 @@ the history of how MIR coverage grew to every body; their notes about
 | `try_lower_abi_body_side` | SROA or CSE + LIR emit (`emit_lir`) |
 | `mir::cse` | Same-block GVN (includes `DIVF`/`DIV`); used on dense and LIR |
 | `mir::gvn` | Dominator GVN + fully-anticipated fork PRE; dense only |
-| `mir::licm` | Natural-loop hoist of invariant Const/arith/cmp/cast (float `Div` ok; int `Div`/`Rem` stay); dense only, so LIR bodies get only HIR LICM |
+| `mir::licm` | Natural-loop hoist of invariant arith/cmp/cast/length/field reads; trapping ops (int `Div`/`Rem`/`Pow`, checked `Index`) and pure calls move behind a copy of the loop test; dense and LIR bodies (LIR keeps literals in the loop) |
 | text form | Print / parse for round-trip tests |
 
 Language `int` / `float` / `bool` map to `i64` / `f64` / `bool`. I1
@@ -69,7 +69,9 @@ names `Alloc` (`MakeArray` / `MakeTuple` / `MakeEnum` / `InitTyped`) and
 ([COI-305](https://linear.app/ardax/issue/COI-305/s2a-live-root-sidecar-at-mir-gcbarrier-alloc))
 fills live-heap `roots` (and IL slots when snapshotted). S2b
 ([COI-306](https://linear.app/ardax/issue/COI-306/s2b-slot-frame-stack-maps-for-interpreter-gc))
-encodes those slots as interpreter frame maps. S2c
+encoded those slots as interpreter frame maps (no longer emitted: precise
+frame maps of the final bytecode cover every body,
+[mir-stack-maps.md](mir-stack-maps.md)). S2c
 ([COI-307](https://linear.app/ardax/issue/COI-307/s2c-specialize-lir-across-alloc-when-maps-exist))
 lets infer / specialize / `emit_lir` cross alloc **only** when those
 maps exist. S2d
@@ -116,19 +118,24 @@ Float `+`/`-`/`/` loops specialize (COI-287 W1; hit `mir_dense_addf.hy` is
 
 After SSA lower, **GVN** runs on the numeric function before dense emit
 (and before P3 LIR emit). P2 numbered same-block; P10 walks the dominator
-tree and adds fully-anticipated fork PRE. HIR CSE (`hir::cse`) only sees
-source-level expressions within a block; this pass also numbers values
-lowering introduces and `DIV`/`MOD`/`DIVF`/`MODF` across blocks.
-LIR bodies get MIR CSE but only the HIR LICM (the stack-IL passes,
-InstCombine included, were removed 2026-10). Hit
+tree and adds fully-anticipated fork PRE. It is the only CSE (`hir::cse` was folded in
+2026-10): it numbers values lowering introduces, `DIV`/`MOD`/`DIVF`/`MODF`
+across blocks, and in one block repeated element / field / length /
+pure-call reads. LIR bodies run it as `cse_lir`, which keeps literals in
+place, plus MIR LICM (the stack-IL passes, InstCombine included, were
+removed 2026-10). Hit
 benches: `examples/perf/mir_cse_divf.hy`, `mir_gvn_divf.hy`.
 
 ## P6 — MIR LICM + widen specialize (COI-280)
 
 After CSE, **natural-loop LICM** hoists invariant Const / add/sub/mul /
-float div / cmp / unary / cast into a preheader. Integer `Div`/`Rem` stay
-in the loop so a skipped trip cannot trap. A second CSE run merges
-hoisted consts. Hit bench: `examples/perf/mir_licm_divf.hy`.
+float div / cmp / unary / cast into a preheader. A trapping op (int
+`Div`/`Rem`/`Pow`, overflow-checked int ops, a checked element read) or a
+pure call that runs on every iteration moves behind a copy of the loop
+test instead, so a loop that never runs never traps. Lengths and
+element or field reads move only out of loops that cannot resize or
+write the heap (`effects::may_resize` / `writes_heap`). A second CSE run
+merges hoisted consts. Hit bench: `examples/perf/mir_licm_divf.hy`.
 
 Specialize no longer refuses multi-header bodies: nested numeric loops
 (including flagship `mandelbrot`) can emit `DenseBin` when infer + lower
@@ -422,8 +429,8 @@ accepts that shape (B3 / C1); keep/refuse is the cost gate. N>2 refuses.
 `try_lower_abi_body_side` + `emit_lir` implement that mapping for every
 body dense does not keep. `emit_lir` keeps single-use return/cmp values on
 the stack and `DUP`s a TOS that is also the first word of `k, k+1`. Int
-`slot ⊕ imm` bins emit `BinSlotImm`. CSE and LICM run on HIR before
-lowering; LIR adds MIR SROA or CSE only.
+`slot ⊕ imm` bins emit `BinSlotImm`. LIR runs MIR CSE (`cse_lir`) and
+LICM, then SROA when the body allocates.
 Hit bench: `examples/perf/result_int_churn.hy`.
 
 Emit is linear in a body's size (#1393): each block's fused compare

@@ -1,9 +1,18 @@
-//! Loop-invariant code motion on numeric MIR (COI-280).
+//! Loop-invariant code motion on MIR (COI-280).
 //!
-//! Runs after SSA lower + local CSE, before dense emit. Hoists pure
-//! loop-invariant Const / arith / cmp / cast / unary into a preheader.
-//! Integer `Div` / `Rem` stay in the loop (zero-trip would trap). Float
-//! divide is IEEE and may hoist.
+//! Runs after SSA lower, local CSE and copy forwarding, on dense and LIR
+//! bodies alike. An instruction whose operands the loop does not define
+//! moves to a preheader when computing it early changes nothing: consts,
+//! float and bitwise arithmetic, compares, casts, pure host math, a field
+//! of an object nothing in the loop writes, the length of an array
+//! nothing in the loop resizes.
+//!
+//! An instruction that may trap (int arithmetic that can overflow, a
+//! division by a variable, an element read, a call of a pure function)
+//! moves only where the loop is sure to compute it: in the header ahead of
+//! anything observable, or in a block every iteration runs before it can
+//! leave, behind a copy of the header's cheap test so a loop that runs no
+//! iteration computes nothing. Float divide is IEEE and moves freely.
 
 use std::collections::HashSet;
 
@@ -11,8 +20,10 @@ use super::cse::dce;
 use super::func::MirFunc;
 use super::inst::{BlockId, MirBinOp, MirInst, Terminator, ValueId};
 
-/// Hoist loop-invariant numeric ops. Returns how many instructions moved.
-pub fn licm(func: &mut MirFunc) -> usize {
+/// Hoist loop-invariant instructions. Returns how many moved. `dense`: a
+/// literal and a heap value may move too; LIR keeps a literal where it is
+/// an immediate operand, and every heap word in place.
+pub fn licm(func: &mut MirFunc, dense: bool) -> usize {
     let mut total = 0;
     for _ in 0..func.blocks.len().saturating_mul(4).max(4) {
         let loops = natural_loops(func);
@@ -23,7 +34,7 @@ pub fn licm(func: &mut MirFunc) -> usize {
         let mut loops = loops;
         loops.sort_by_key(|lp| lp.blocks.len());
         for lp in loops {
-            progressed += hoist_loop(func, &lp);
+            progressed += hoist_loop(func, &lp, dense);
             if progressed > 0 {
                 break;
             }
@@ -135,36 +146,119 @@ fn loop_body(preds: &[Vec<BlockId>], latch: BlockId, header: BlockId) -> HashSet
     body
 }
 
-fn loop_mutates_heap_or_calls(func: &MirFunc, lp: &LoopInfo) -> bool {
+/// What a loop may change while it runs.
+struct LoopEffects {
+    /// A store, an append, or code that may write: an impure call or
+    /// native, a coroutine step.
+    heap: bool,
+    /// An append, or code that may append; with lengths not steady, any
+    /// allocation too (a finalizer may resize).
+    lengths: bool,
+}
+
+fn loop_effects(func: &MirFunc, lp: &LoopInfo) -> LoopEffects {
+    let mut fx = LoopEffects { heap: false, lengths: false };
+    let calls = func.call_facts();
     for b in &func.blocks {
         if !lp.blocks.contains(&b.id) {
             continue;
         }
         for inst in &b.insts {
-            if matches!(
-                inst,
-                MirInst::StoreIndex { .. }
-                    | MirInst::Call { .. }
-                    | MirInst::Yield { .. }
-                    | MirInst::CallIndirect { .. }
-                    // An FFI call copies array buffers back.
-                    | MirInst::Ffi { .. }
-                    | MirInst::HeapFieldStore { .. }
-            ) {
-                return true;
-            }
+            fx.heap |= inst.writes_heap(&calls);
+            fx.lengths |= inst.may_resize(&calls);
         }
     }
-    false
+    fx
 }
 
-fn loop_has_store_or_call(func: &MirFunc, lp: &LoopInfo) -> bool {
-    loop_mutates_heap_or_calls(func, lp)
+/// How an instruction may move ahead of its loop.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Motion {
+    /// Computing it early changes nothing.
+    Free,
+    /// It may trap: it moves only where the loop is sure to compute it.
+    Traps,
 }
 
-fn hoist_loop(func: &mut MirFunc, lp: &LoopInfo) -> usize {
-    let allow_index = !loop_mutates_heap_or_calls(func, lp);
-    let allow_alloc = !loop_has_store_or_call(func, lp);
+/// The loop's `while` test, copied in front of code that may trap: the
+/// header computes only cheap values and branches into the body or out.
+struct Guard {
+    /// The header's successor in the loop.
+    body: BlockId,
+    /// Whether the body runs when the condition holds.
+    when: bool,
+}
+
+fn guard_shape(func: &MirFunc, lp: &LoopInfo) -> Option<Guard> {
+    let header = func.block(lp.header);
+    let Some(Terminator::Br { taken, not_taken, .. }) = header.term else {
+        return None;
+    };
+    let body = match (lp.blocks.contains(&taken), lp.blocks.contains(&not_taken)) {
+        (true, false) => Guard { body: taken, when: true },
+        (false, true) => Guard { body: not_taken, when: false },
+        _ => return None,
+    };
+    let cheap = header.insts.iter().filter(|i| !i.is_phi()).all(|i| cheap_test(func, i));
+    (cheap && header.insts.len() <= 32).then_some(body)
+}
+
+/// An instruction worth computing twice that cannot trap.
+fn cheap_test(func: &MirFunc, inst: &MirInst) -> bool {
+    match inst {
+        MirInst::Const { .. } | MirInst::Cmp { .. } | MirInst::Cast { .. } | MirInst::ArrayLen { .. } => true,
+        MirInst::Bin { .. } | MirInst::Unary { .. } => !int_may_trap(func, inst) && !inst.may_trap(func),
+        _ => false,
+    }
+}
+
+/// Blocks every iteration that enters the body runs before it can leave
+/// the loop or reach the header again.
+fn every_iteration(func: &MirFunc, lp: &LoopInfo, body: BlockId) -> HashSet<BlockId> {
+    let mut every = HashSet::from([lp.header]);
+    for &x in &lp.blocks {
+        if x == lp.header {
+            continue;
+        }
+        // From the body's first block without passing `x`: may an
+        // iteration end?
+        let mut seen = HashSet::new();
+        let mut work = vec![body];
+        let mut escapes = false;
+        while let Some(b) = work.pop() {
+            if b == x || !seen.insert(b) {
+                continue;
+            }
+            let succs = match &func.block(b).term {
+                Some(t) => t.succs(),
+                None => Vec::new(),
+            };
+            if succs.is_empty() || succs.iter().any(|s| *s == lp.header || !lp.blocks.contains(s)) {
+                escapes = true;
+                break;
+            }
+            work.extend(succs);
+        }
+        if !escapes {
+            every.insert(x);
+        }
+    }
+    every
+}
+
+fn hoist_loop(func: &mut MirFunc, lp: &LoopInfo, dense: bool) -> usize {
+    let fx = loop_effects(func, lp);
+    let guard = guard_shape(func, lp);
+    let every = guard.as_ref().map(|g| every_iteration(func, lp, g.body)).unwrap_or_default();
+    let consts: std::collections::HashMap<ValueId, i64> = func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .filter_map(|i| match i {
+            MirInst::Const { dest, c: super::inst::MirConst::I64(k) } => Some((*dest, *k)),
+            _ => None,
+        })
+        .collect();
     let defined = values_defined_in(func, &lp.blocks);
     let mut invariant: HashSet<ValueId> = HashSet::new();
     for i in 0..func.types.len() {
@@ -173,8 +267,43 @@ fn hoist_loop(func: &mut MirFunc, lp: &LoopInfo) -> usize {
             invariant.insert(v);
         }
     }
+    // LIR keeps a literal in the loop (an immediate operand there); code
+    // that moves reads a copy of it.
+    let literals: std::collections::HashMap<ValueId, MirInst> = if dense {
+        std::collections::HashMap::new()
+    } else {
+        func.blocks
+            .iter()
+            .filter(|b| lp.blocks.contains(&b.id))
+            .flat_map(|b| &b.insts)
+            .filter(|i| matches!(i, MirInst::Const { .. }))
+            .map(|i| (i.dest(), i.clone()))
+            .collect()
+    };
+    invariant.extend(literals.keys().copied());
+    // A compare or unary op on what the loop reads as is stays when only
+    // branches test it: it fuses with them.
+    let reads = invariant.clone();
+    let mut tested: HashSet<ValueId> = HashSet::new();
+    let mut read_elsewhere: HashSet<ValueId> = HashSet::new();
+    for b in &func.blocks {
+        b.insts.iter().for_each(|i| read_elsewhere.extend(i.operands()));
+        match &b.term {
+            Some(Terminator::Br { cond, .. }) => {
+                tested.insert(*cond);
+            }
+            Some(Terminator::JumpIfMatch { scrutinee, payloads, .. }) => {
+                read_elsewhere.insert(*scrutinee);
+                read_elsewhere.extend(payloads);
+            }
+            Some(Terminator::Return { lo, hi }) => read_elsewhere.extend(lo.iter().chain(hi)),
+            Some(Terminator::Jump { .. } | Terminator::Unreachable) | None => {}
+        }
+    }
 
-    let mut todo: Vec<(BlockId, usize)> = Vec::new();
+    // Values that move behind the guard, and everything that reads one.
+    let mut guarded: HashSet<ValueId> = HashSet::new();
+    let mut todo: Vec<ValueId> = Vec::new();
     loop {
         let mut found = None;
         for b in &func.blocks {
@@ -182,17 +311,36 @@ fn hoist_loop(func: &mut MirFunc, lp: &LoopInfo) -> usize {
                 continue;
             }
             for (idx, inst) in b.insts.iter().enumerate() {
-                if inst.is_phi() || !hoistable(inst, allow_index, allow_alloc) {
-                    continue;
-                }
-                if int_may_trap(func, inst) && !(b.id == lp.header && nothing_observable_before(func, &b.insts[..idx])) {
-                    continue;
-                }
                 if invariant.contains(&inst.dest()) {
                     continue;
                 }
-                if inst.operands().iter().all(|o| invariant.contains(o)) {
-                    found = Some((b.id, idx));
+                let Some(motion) = motion(func, inst, &fx, &consts, dense) else {
+                    continue;
+                };
+                let ops = inst.operands();
+                if !ops.iter().all(|o| invariant.contains(o)) {
+                    continue;
+                }
+                if matches!(inst, MirInst::Cmp { .. } | MirInst::Unary { .. })
+                    && ops.iter().all(|o| reads.contains(o))
+                    && tested.contains(&inst.dest())
+                    && !read_elsewhere.contains(&inst.dest())
+                {
+                    continue;
+                }
+                let behind = ops.iter().any(|o| guarded.contains(o));
+                let numeric = func.ty(inst.dest()).is_numeric();
+                let place = match motion {
+                    // In the header, ahead of anything observable: the loop
+                    // computes it whenever it is entered.
+                    Motion::Traps if !behind && b.id == lp.header && nothing_observable_before(func, &b.insts[..idx]) => Some(false),
+                    Motion::Traps if numeric && guard.is_some() && every.contains(&b.id) => Some(true),
+                    Motion::Traps => None,
+                    Motion::Free if behind => numeric.then_some(true),
+                    Motion::Free => Some(false),
+                };
+                if let Some(g) = place {
+                    found = Some((inst.dest(), g));
                     break;
                 }
             }
@@ -200,47 +348,279 @@ fn hoist_loop(func: &mut MirFunc, lp: &LoopInfo) -> usize {
                 break;
             }
         }
-        let Some((bid, idx)) = found else {
+        let Some((dest, g)) = found else {
             break;
         };
-        invariant.insert(func.block(bid).insts[idx].dest());
-        todo.push((bid, idx));
+        invariant.insert(dest);
+        if g {
+            guarded.insert(dest);
+        }
+        todo.push(dest);
     }
     if todo.is_empty() {
         return 0;
     }
 
-    let dests: Vec<ValueId> = todo
-        .iter()
-        .map(|&(bid, idx)| func.block(bid).insts[idx].dest())
-        .collect();
+    let old_len = func.blocks.len();
     let pre = ensure_preheader(func, lp);
-    let mut moved = Vec::new();
-    for dest in dests {
+    let mut free = Vec::new();
+    let mut behind = Vec::new();
+    for dest in todo {
         for block in &mut func.blocks {
             if let Some(idx) = block.insts.iter().position(|i| i.dest() == dest) {
-                moved.push(block.insts.remove(idx));
+                let inst = block.insts.remove(idx);
+                if guarded.contains(&dest) {
+                    behind.push(inst);
+                } else {
+                    free.push(inst);
+                }
                 break;
             }
         }
     }
-    let n = moved.len();
-    let pre_block = func.block_mut(pre);
-    let insert_at = pre_block
-        .insts
-        .iter()
-        .position(|i| !i.is_phi())
-        .unwrap_or(pre_block.insts.len());
-    for (i, inst) in moved.into_iter().enumerate() {
-        pre_block.insts.insert(insert_at + i, inst);
+    let n = free.len() + behind.len();
+    let mut copies: std::collections::HashMap<ValueId, ValueId> = std::collections::HashMap::new();
+    let mut lits = Vec::new();
+    for inst in free.iter_mut().chain(behind.iter_mut()) {
+        inst.rewrite_values(|v| {
+            let Some(lit) = literals.get(&v) else {
+                return v;
+            };
+            *copies.entry(v).or_insert_with(|| {
+                let fresh = ValueId(func.types.len() as u32);
+                func.types.push(func.types[v.index()]);
+                let mut lit = lit.clone();
+                set_test_dest(&mut lit, fresh);
+                lits.push(lit);
+                fresh
+            })
+        });
+    }
+    // At the end: the preheader may itself define the operands.
+    func.block_mut(pre).insts.extend(lits.into_iter().chain(free));
+    if let (false, Some(guard)) = (behind.is_empty(), guard) {
+        guard_hoisted(func, lp.header, pre, &guard, behind);
+    }
+    // New blocks go after the preheader (a new one just ahead of the
+    // header), as the source order would have them: emission reads a back
+    // edge as one to an earlier block.
+    if func.blocks.len() > old_len {
+        let new: Vec<BlockId> = (old_len..func.blocks.len()).map(|i| BlockId(i as u32)).collect();
+        let at = if pre.index() >= old_len { lp.header } else { pre };
+        let mut layout = Vec::with_capacity(func.blocks.len());
+        for b in (0..old_len).map(|b| BlockId(b as u32)) {
+            if b == at && at == lp.header {
+                layout.extend(&new);
+            }
+            layout.push(b);
+            if b == at && at != lp.header {
+                layout.extend(&new);
+            }
+        }
+        func.relayout(&layout);
     }
     n
 }
 
-/// An int `+ - *` or negation, which traps on overflow (int `/` and `%`
-/// are never hoisted). Hoisting one is safe only when the loop runs it
-/// whenever it is entered and nothing observable runs before it: the
-/// header, after only phis and ops that cannot trap.
+/// `pre` (the preheader, ending in a jump to `header`) tests the loop's
+/// condition once; when the body would run, a new block computes
+/// `behind`; a join block then enters the loop, where each moved value is
+/// read through a φ (a dummy zero on the path where the loop runs no
+/// iteration and never reads it).
+fn guard_hoisted(func: &mut MirFunc, header: BlockId, pre: BlockId, guard: &Guard, behind: Vec<MirInst>) {
+    let then = BlockId(func.blocks.len() as u32);
+    let join = BlockId(then.0 + 1);
+    // The header's test on the values the loop is entered with.
+    let mut map: std::collections::HashMap<ValueId, ValueId> = std::collections::HashMap::new();
+    let mut copies = Vec::new();
+    for inst in func.block(header).insts.clone() {
+        match inst {
+            MirInst::Phi { dest, args, .. } => {
+                if let Some(&(_, v)) = args.iter().find(|(b, _)| *b == pre) {
+                    map.insert(dest, v);
+                }
+            }
+            mut copy => {
+                let old = copy.dest();
+                copy.rewrite_values(|v| map.get(&v).copied().unwrap_or(v));
+                let fresh = ValueId(func.types.len() as u32);
+                func.types.push(func.ty(old));
+                map.insert(old, fresh);
+                set_test_dest(&mut copy, fresh);
+                copies.push(copy);
+            }
+        }
+    }
+    let Some(Terminator::Br { cond, .. }) = func.block(header).term else {
+        unreachable!("guard_shape checked the header");
+    };
+    let test = map.get(&cond).copied().unwrap_or(cond);
+    // A dummy per type, and a φ per moved value read outside the moved code.
+    let mut read: HashSet<ValueId> = HashSet::new();
+    for block in &func.blocks {
+        for inst in &block.insts {
+            read.extend(inst.operands());
+        }
+        if let Some(term) = &block.term {
+            let mut term = term.clone();
+            term.rewrite_values(|v| {
+                read.insert(v);
+                v
+            });
+        }
+    }
+    read.extend(func.debug_slots.values().copied());
+    read.extend(func.slot_env.values().flatten().map(|&(_, v)| v));
+    let mut zeros: Vec<(super::ty::MirTy, ValueId)> = Vec::new();
+    let mut phis = Vec::new();
+    let mut rename: std::collections::HashMap<ValueId, ValueId> = std::collections::HashMap::new();
+    for inst in &behind {
+        let v = inst.dest();
+        if !read.contains(&v) {
+            continue;
+        }
+        let ty = func.ty(v);
+        let zero = match zeros.iter().find(|(t, _)| *t == ty) {
+            Some(&(_, z)) => z,
+            None => {
+                let z = ValueId(func.types.len() as u32);
+                func.types.push(ty);
+                let c = match ty {
+                    super::ty::MirTy::F64 => super::inst::MirConst::F64(0),
+                    super::ty::MirTy::Bool => super::inst::MirConst::Bool(false),
+                    _ => super::inst::MirConst::I64(0),
+                };
+                copies.push(MirInst::Const { dest: z, c });
+                zeros.push((ty, z));
+                z
+            }
+        };
+        let p = ValueId(func.types.len() as u32);
+        func.types.push(ty);
+        phis.push(MirInst::Phi { dest: p, ty, args: vec![(then, v), (pre, zero)] });
+        rename.insert(v, p);
+    }
+    let pre_block = func.block_mut(pre);
+    pre_block.insts.extend(copies);
+    pre_block.term = Some(if guard.when {
+        Terminator::Br { cond: test, taken: then, not_taken: join }
+    } else {
+        Terminator::Br { cond: test, taken: join, not_taken: then }
+    });
+    let mut then_block = super::func::MirBlock::new(then);
+    then_block.insts = behind;
+    then_block.term = Some(Terminator::Jump { dest: join });
+    let mut join_block = super::func::MirBlock::new(join);
+    join_block.insts = phis;
+    join_block.term = Some(Terminator::Jump { dest: header });
+    func.blocks.push(then_block);
+    func.blocks.push(join_block);
+    // The header is entered from the join now; every other read of a
+    // moved value reads its φ.
+    for block in &mut func.blocks {
+        if block.id == then || block.id == join {
+            continue;
+        }
+        for inst in &mut block.insts {
+            if let MirInst::Phi { args, .. } = inst
+                && block.id == header
+            {
+                for (b, _) in args.iter_mut() {
+                    if *b == pre {
+                        *b = join;
+                    }
+                }
+            }
+            inst.rewrite_values(|v| rename.get(&v).copied().unwrap_or(v));
+        }
+        if let Some(term) = &mut block.term {
+            term.rewrite_values(|v| rename.get(&v).copied().unwrap_or(v));
+        }
+    }
+    func.rewrite_debug_slots(|v| rename.get(&v).copied().unwrap_or(v));
+    for env in func.slot_env.values_mut() {
+        for (_, v) in env.iter_mut() {
+            *v = rename.get(v).copied().unwrap_or(*v);
+        }
+    }
+}
+
+/// Rename the value a [`cheap_test`] instruction defines.
+fn set_test_dest(inst: &mut MirInst, fresh: ValueId) {
+    match inst {
+        MirInst::Const { dest, .. }
+        | MirInst::Cmp { dest, .. }
+        | MirInst::Cast { dest, .. }
+        | MirInst::ArrayLen { dest, .. }
+        | MirInst::Bin { dest, .. }
+        | MirInst::Unary { dest, .. } => *dest = fresh,
+        _ => unreachable!("not a cheap test"),
+    }
+}
+
+/// How `inst` may move out of a loop with effects `fx`, or `None` when it
+/// stays. `dense`: as [`licm`] takes it.
+fn motion(
+    func: &MirFunc,
+    inst: &MirInst,
+    fx: &LoopEffects,
+    consts: &std::collections::HashMap<ValueId, i64>,
+    dense: bool,
+) -> Option<Motion> {
+    if !dense && (func.ty(inst.dest()).is_heap_word() || matches!(inst, MirInst::Const { .. })) {
+        return None;
+    }
+    let free = |ok: bool| ok.then_some(Motion::Free);
+    match inst {
+        MirInst::Phi { .. } => None,
+        // A division by a literal other than 0 and -1 cannot trap.
+        MirInst::Bin { op: MirBinOp::Div | MirBinOp::Rem, ty, rhs, .. } if ty.is_int() => {
+            Some(match consts.get(rhs) {
+                Some(&k) if k != 0 && k != -1 => Motion::Free,
+                _ => Motion::Traps,
+            })
+        }
+        MirInst::Bin { op: MirBinOp::Pow, ty, .. } if ty.is_int() => Some(Motion::Traps),
+        // On literals that do not overflow: nothing to trap.
+        &MirInst::Bin { op, ty, lhs, rhs, .. }
+            if ty.is_int()
+                && let (Some(&a), Some(&b)) = (consts.get(&lhs), consts.get(&rhs))
+                && match op {
+                    MirBinOp::Add => a.checked_add(b).is_some(),
+                    MirBinOp::Sub => a.checked_sub(b).is_some(),
+                    MirBinOp::Mul => a.checked_mul(b).is_some(),
+                    MirBinOp::Shl | MirBinOp::Shr => (0..64).contains(&b),
+                    _ => false,
+                } =>
+        {
+            Some(Motion::Free)
+        }
+        MirInst::Bin { .. } | MirInst::Unary { .. } if int_may_trap(func, inst) => Some(Motion::Traps),
+        MirInst::Const { .. } | MirInst::Bin { .. } | MirInst::Cmp { .. } | MirInst::Unary { .. } | MirInst::Cast { .. } => {
+            Some(Motion::Free)
+        }
+        MirInst::HostInvoke { native_id, .. } => free(super::effects::host_may_hoist(*native_id)),
+        // A checked read traps out of bounds; an unchecked one was proven
+        // in bounds where it is.
+        MirInst::Index { .. } => (!fx.heap && !fx.lengths).then_some(Motion::Traps),
+        MirInst::ArrayLen { .. } => free(!fx.lengths),
+        MirInst::HeapFieldLoad { name: None, .. } => free(!fx.heap),
+        MirInst::Call { dest, args, .. } if func.pure_calls.contains(dest) => {
+            let reads_heap = args.iter().any(|a| super::cse::reads_heap(func.ty(*a)));
+            (!reads_heap || !fx.heap && !fx.lengths).then_some(Motion::Traps)
+        }
+        MirInst::Alloc {
+            kind: super::inst::MirAllocKind::Array | super::inst::MirAllocKind::Tuple,
+            ..
+        }
+        | MirInst::GcBarrier { .. } => free(dense && !fx.heap),
+        MirInst::String { .. } | MirInst::CodePtr { .. } => free(dense),
+        _ => None,
+    }
+}
+
+/// An int `+ - *`, shift or negation, which traps on overflow or a bad
+/// shift count.
 pub(crate) fn int_may_trap(func: &MirFunc, inst: &MirInst) -> bool {
     match inst {
         // A shift traps on a count outside 0..=63 (#1076).
@@ -257,57 +637,6 @@ fn nothing_observable_before(func: &MirFunc, before: &[MirInst]) -> bool {
             || matches!(i, MirInst::Bin { ty, .. } if ty.is_float())
             || matches!(i, MirInst::Unary { .. }) && !int_may_trap(func, i)
     })
-}
-
-fn hoistable(inst: &MirInst, allow_index: bool, allow_alloc: bool) -> bool {
-    match inst {
-        MirInst::Phi { .. } => false,
-        MirInst::Bin {
-            op: MirBinOp::Div | MirBinOp::Rem | MirBinOp::Pow,
-            ty,
-            ..
-        } if !ty.is_float() => false,
-        MirInst::Const { .. }
-        | MirInst::Bin { .. }
-        | MirInst::Cmp { .. }
-        | MirInst::Unary { .. }
-        | MirInst::Cast { .. } => true,
-        MirInst::HostInvoke { native_id, .. } => super::effects::host_may_hoist(*native_id),
-        MirInst::Index { .. } => allow_index,
-        MirInst::ArrayLen { .. } => true,
-        MirInst::ResumeCoro { .. }
-        | MirInst::Yield { .. }
-        | MirInst::DoneCoro { .. }
-        | MirInst::LoadStatic { .. }
-        | MirInst::StoreStatic { .. }
-        | MirInst::HomeLoad { .. }
-        | MirInst::HomeStore { .. }
-        | MirInst::ClearWord { .. }
-        | MirInst::KeepAlive { .. } => false,
-        MirInst::Alloc {
-            kind: super::inst::MirAllocKind::Array | super::inst::MirAllocKind::Tuple,
-            ..
-        }
-        | MirInst::GcBarrier { .. } => allow_alloc,
-        MirInst::Call { .. }
-        | MirInst::CallIndirect { .. }
-        | MirInst::Ffi { .. }
-        | MirInst::MatchPayload { .. }
-        | MirInst::HeapFieldLoad { .. }
-        | MirInst::HeapFieldStore { .. }
-        | MirInst::StoreIndex { .. }
-        | MirInst::ArrayPush { .. }
-        | MirInst::Alloc { .. }
-        | MirInst::Deopt { .. }
-        | MirInst::Print { .. }
-        | MirInst::Panic { .. }
-        | MirInst::Format { .. }
-        | MirInst::Stringify { .. }
-        | MirInst::Unbox { .. }
-        | MirInst::TagArrayKind { .. }
-        | MirInst::StrEq { .. } => false,
-        MirInst::String { .. } | MirInst::CodePtr { .. } => true,
-    }
 }
 
 fn values_defined_in(func: &MirFunc, blocks: &HashSet<BlockId>) -> HashSet<ValueId> {
@@ -524,7 +853,7 @@ mod tests {
         assert_eq!(count_bin_in(&f, &before, MirBinOp::Div), 1);
         assert!(count_const_in(&f, &before) >= 1);
 
-        assert!(licm(&mut f) >= 1);
+        assert!(licm(&mut f, true) >= 1);
         f.verify().unwrap();
         let after = loop_blocks(&f);
         assert_eq!(
@@ -565,7 +894,7 @@ mod tests {
         b.set_ret_ty(MirTy::I64);
         b.ret(Some(i)).unwrap();
         let mut f = b.finish().unwrap();
-        licm(&mut f);
+        licm(&mut f, true);
         f.verify().unwrap();
         let lp = loop_blocks(&f);
         assert_eq!(count_bin_in(&f, &lp, MirBinOp::Mul), 1);
@@ -576,7 +905,7 @@ mod tests {
     /// An invariant int `**` may trap (overflow, a negative exponent), so
     /// it stays where the loop body reaches it, as `/` does.
     #[test]
-    fn does_not_hoist_invariant_int_pow() {
+    fn int_pow_moves_only_behind_the_loop_test() {
         let mut b = MirBuilder::new("ipow");
         let x = b.add_param(MirTy::I64).unwrap();
         let n = b.add_param(MirTy::I64).unwrap();
@@ -600,10 +929,15 @@ mod tests {
         b.set_ret_ty(MirTy::I64);
         b.ret(Some(i)).unwrap();
         let mut f = b.finish().unwrap();
-        licm(&mut f);
+        licm(&mut f, true);
         f.verify().unwrap();
         let lp = loop_blocks(&f);
-        assert_eq!(count_bin_in(&f, &lp, MirBinOp::Pow), 1);
+        assert_eq!(count_bin_in(&f, &lp, MirBinOp::Pow), 0);
+        // A negative exponent traps: not where a loop that runs no
+        // iteration would compute it.
+        let at = def_block(&f, |i| matches!(i, MirInst::Bin { op: MirBinOp::Pow, .. }));
+        assert_ne!(at, f.entry);
+        assert!(f.preds_of(at).iter().all(|&p| matches!(f.block(p).term, Some(Terminator::Br { .. }))));
     }
 
     #[test]
@@ -628,7 +962,7 @@ mod tests {
         b.set_ret_ty(MirTy::I64);
         b.ret(Some(n)).unwrap();
         let mut f = b.finish().unwrap();
-        licm(&mut f);
+        licm(&mut f, true);
         f.verify().unwrap();
         let header_cmps = f
             .block(header)
@@ -681,7 +1015,7 @@ mod tests {
         b.set_ret_ty(MirTy::F64);
         b.ret(Some(s_out)).unwrap();
         let mut f = b.finish().unwrap();
-        assert!(licm(&mut f) >= 1);
+        assert!(licm(&mut f, true) >= 1);
         f.verify().unwrap();
         let after = loop_blocks(&f);
         assert_eq!(
@@ -732,7 +1066,7 @@ mod tests {
             .iter()
             .flat_map(|bl| bl.insts.iter())
             .any(MirInst::is_effect_barrier));
-        licm(&mut f);
+        licm(&mut f, true);
         f.verify().unwrap();
         let after = loop_blocks(&f);
         assert_eq!(
@@ -740,5 +1074,195 @@ mod tests {
             1,
             "impure clock HostInvoke must stay in the loop"
         );
+    }
+
+    /// A counted loop `while v4 < v0 { s += <body>; v4 += 1 }` with
+    /// `body` spliced in (it defines `v6`, read by the sum).
+    fn counted(params: &str, body: &str) -> MirFunc {
+        let src = format!(
+            r#"
+func @f({params}) -> i64 {{
+bb0:
+    v2 = iconst.i64 0
+    v3 = iconst.i64 1
+    jump bb1
+bb1:
+    v4 = phi.i64 [bb0: v2, bb2: v8]
+    v5 = phi.i64 [bb0: v2, bb2: v7]
+    v9 = icmp.slt v4, v0
+    brif v9, bb2, bb3
+bb2:
+{body}
+    v7 = iadd v5, v6
+    v8 = iadd v4, v3
+    jump bb1
+bb3:
+    return v5
+}}
+"#
+        );
+        let f = crate::mir::parse_func(&src).expect(&src);
+        f.verify().unwrap();
+        f
+    }
+
+    fn in_loop(func: &MirFunc, pred: impl Fn(&MirInst) -> bool) -> usize {
+        let lp = loop_blocks(func);
+        func.blocks.iter().filter(|b| lp.contains(&b.id)).flat_map(|b| &b.insts).filter(|i| pred(i)).count()
+    }
+
+    /// The block holding the value `v`'s definition.
+    fn def_block(func: &MirFunc, pred: impl Fn(&MirInst) -> bool) -> BlockId {
+        func.blocks.iter().find(|b| b.insts.iter().any(&pred)).map(|b| b.id).expect("defined")
+    }
+
+    #[test]
+    fn pure_call_moves_behind_a_copy_of_the_loop_test() {
+        let mut f = counted("v0: i64, v1: i64", "    v6 = call.i64 7 v1");
+        f.pure_calls.insert(ValueId(6));
+        assert!(licm(&mut f, false) >= 1);
+        f.verify().unwrap();
+        let is_call = |i: &MirInst| matches!(i, MirInst::Call { .. });
+        assert_eq!(in_loop(&f, is_call), 0, "the pure call leaves the loop");
+        // A loop that runs no iteration never calls it: its block is the
+        // taken arm of the copied `v4 < v0` on the entry values.
+        let at = def_block(&f, is_call);
+        let preds = f.preds_of(at);
+        let [pre] = preds.as_slice() else { panic!("one way in: {f}") };
+        let Some(Terminator::Br { cond, taken, .. }) = f.block(*pre).term else { panic!("guarded: {f}") };
+        assert_eq!(taken, at);
+        assert!(f.block(*pre).insts.iter().any(|i| matches!(i, MirInst::Cmp { dest, lhs, rhs, .. } if *dest == cond && *lhs == ValueId(2) && *rhs == ValueId(0))));
+    }
+
+    #[test]
+    fn impure_call_stays() {
+        let mut f = counted("v0: i64, v1: i64", "    v6 = call.i64 7 v1");
+        licm(&mut f, false);
+        f.verify().unwrap();
+        assert_eq!(in_loop(&f, |i| matches!(i, MirInst::Call { .. })), 1);
+    }
+
+    #[test]
+    fn trapping_int_chain_moves_behind_the_loop_test() {
+        let mut f = counted("v0: i64, v1: i64", "    v10 = iconst.i64 3\n    v11 = imul v1, v10\n    v6 = iadd v11, v3");
+        assert!(licm(&mut f, true) >= 1);
+        f.verify().unwrap();
+        assert_eq!(in_loop(&f, |i| matches!(i, MirInst::Bin { op: MirBinOp::Mul, .. })), 0);
+        // The sum's own add and the step stay.
+        assert_eq!(in_loop(&f, |i| matches!(i, MirInst::Bin { op: MirBinOp::Add, .. })), 2);
+    }
+
+    #[test]
+    fn trapping_op_on_a_conditional_path_stays() {
+        let src = r#"
+func @f(v0: i64, v1: i64, v10: bool) -> i64 {
+bb0:
+    v2 = iconst.i64 0
+    v3 = iconst.i64 1
+    jump bb1
+bb1:
+    v4 = phi.i64 [bb0: v2, bb4: v8]
+    v5 = phi.i64 [bb0: v2, bb4: v7]
+    v9 = icmp.slt v4, v0
+    brif v9, bb2, bb5
+bb2:
+    brif v10, bb3, bb4
+bb3:
+    v6 = imul v1, v1
+    jump bb4
+bb4:
+    v11 = phi.i64 [bb2: v2, bb3: v6]
+    v7 = iadd v5, v11
+    v8 = iadd v4, v3
+    jump bb1
+bb5:
+    return v5
+}
+"#;
+        let mut f = crate::mir::parse_func(src).expect(src);
+        licm(&mut f, true);
+        f.verify().unwrap();
+        assert_eq!(in_loop(&f, |i| matches!(i, MirInst::Bin { op: MirBinOp::Mul, .. })), 1);
+    }
+
+    #[test]
+    fn checked_index_moves_only_behind_the_loop_test() {
+        let mut f = counted("v0: i64, v1: heapref", "    v6 = index v1, v3");
+        assert!(licm(&mut f, true) >= 1);
+        f.verify().unwrap();
+        let is_index = |i: &MirInst| matches!(i, MirInst::Index { .. });
+        assert_eq!(in_loop(&f, is_index), 0);
+        let at = def_block(&f, is_index);
+        assert_ne!(at, f.entry, "not ahead of a loop that may run no iteration");
+    }
+
+    #[test]
+    fn append_keeps_the_length_and_elements_in_the_loop() {
+        let mut f = counted(
+            "v0: i64, v1: heapref",
+            "    v12 = arraylen v1\n    v13 = index v1, v3\n    v14 = arraypush v1, v13\n    v6 = iadd v12, v13",
+        );
+        licm(&mut f, true);
+        f.verify().unwrap();
+        assert_eq!(in_loop(&f, |i| matches!(i, MirInst::ArrayLen { .. })), 1);
+        assert_eq!(in_loop(&f, |i| matches!(i, MirInst::Index { .. })), 1);
+    }
+
+    #[test]
+    fn length_moves_past_element_stores() {
+        let mut f = counted("v0: i64, v1: heapref", "    v6 = arraylen v1\n    v12 = storeindex v1, v4, v3");
+        assert!(licm(&mut f, false) >= 1);
+        f.verify().unwrap();
+        assert_eq!(in_loop(&f, |i| matches!(i, MirInst::ArrayLen { .. })), 0);
+    }
+
+    #[test]
+    fn hoisted_code_follows_the_preheaders_own_definitions() {
+        // `v1` is defined in the entry block, which is the preheader.
+        let src = r#"
+func @f(v0: i64) -> f64 {
+bb0:
+    v1 = fcvt.f64.i64 v0
+    v2 = iconst.i64 0
+    v3 = iconst.i64 1
+    v20 = fconst.f64 bits=0
+    jump bb1
+bb1:
+    v4 = phi.i64 [bb0: v2, bb2: v8]
+    v5 = phi.f64 [bb0: v20, bb2: v7]
+    v9 = icmp.slt v4, v0
+    brif v9, bb2, bb3
+bb2:
+    v6 = fmul v1, v1
+    v7 = fadd v5, v6
+    v8 = iadd v4, v3
+    jump bb1
+bb3:
+    return v5
+}
+"#;
+        let mut f = crate::mir::parse_func(src).expect(src);
+        assert!(licm(&mut f, true) >= 1);
+        f.verify().unwrap();
+        let entry = &f.block(f.entry).insts;
+        let at = |want: &dyn Fn(&MirInst) -> bool| entry.iter().position(want).expect("in the entry block");
+        assert!(at(&|i| matches!(i, MirInst::Cast { .. })) < at(&|i| matches!(i, MirInst::Bin { op: MirBinOp::Mul, .. })));
+    }
+
+    #[test]
+    fn lir_keeps_literals_in_the_loop() {
+        // `v10` feeds an invariant add (`v11`) and a variant one (`v13`).
+        let body = "    v10 = fconst.f64 bits=0\n    v11 = fadd v1, v10\n    v12 = fcvt.f64.i64 v4\n    v13 = fadd v12, v10\n    v14 = fadd v11, v13\n    v6 = ftrunc.i64.f64 v14";
+        let fadds = |f: &MirFunc| in_loop(f, |i| matches!(i, MirInst::Bin { op: MirBinOp::Add, ty, .. } if ty.is_float()));
+        let mut f = counted("v0: i64, v1: f64", body);
+        licm(&mut f, false);
+        f.verify().unwrap();
+        assert_eq!(fadds(&f), 2, "the invariant add moves");
+        assert_eq!(in_loop(&f, |i| matches!(i, MirInst::Const { .. })), 1, "an immediate operand stays");
+        let mut f = counted("v0: i64, v1: f64", body);
+        licm(&mut f, true);
+        f.verify().unwrap();
+        assert_eq!(fadds(&f), 2);
+        assert_eq!(in_loop(&f, |i| matches!(i, MirInst::Const { .. })), 0);
     }
 }

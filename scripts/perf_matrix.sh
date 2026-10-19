@@ -12,7 +12,7 @@ OUT_DIR="${OUT_DIR:-/tmp/coil_perf_matrix}"
 RUN_MASSIF="${RUN_MASSIF:-0}"
 
 CROSS_LANG=(mandelbrot tak nsieve binary_trees fib)
-AOT_ONLY=(numeric operators_loop match_sum option_result field_hot dict_hot array_mut match_enum_loop nbody dict_count for_in_sum for_in_range gc_churn option_int_churn result_int_churn result_heap_churn host_result_unit_churn result_try_churn pair_int_churn iv_mul_sr licm_nested_chains tail_sibling cse_index_recompute cse_cast_recompute dest_prop_field_alias nested_match int_match)
+AOT_ONLY=(numeric operators_loop match_sum option_result field_hot dict_hot array_mut match_enum_loop nbody dict_count for_in_sum for_in_range gc_churn option_int_churn result_int_churn result_heap_churn host_result_unit_churn result_try_churn pair_int_churn iv_mul_sr licm_nested_chains licm_lir_pure_call tail_sibling cse_index_recompute cse_cast_recompute dest_prop_field_alias nested_match int_match)
 declare -A EXPECTED=(
     [mandelbrot]=625885
     [tak]=7
@@ -40,6 +40,7 @@ declare -A EXPECTED=(
     [pair_int_churn]=200000000
     [iv_mul_sr]=31499989500000
     [licm_nested_chains]=64012000000
+    [licm_lir_pure_call]=157207000000
     [tail_sibling]=202500000
     [cse_index_recompute]=504000000
     [cse_cast_recompute]=1999998000000

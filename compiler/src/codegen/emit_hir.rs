@@ -29,9 +29,9 @@ mod emit_hir_mir;
 enum Rep {
     /// One word in its type's one-word layout.
     Word(ValueLayout),
-    /// `[payload, tag]` of the named unary enum (the direct `CALL` /
-    /// `RETURN` ABI of a two-word function).
-    Pair(String),
+    /// The two words of a [`PairKind`] (the direct `CALL` / `RETURN` ABI
+    /// of a two-word function).
+    Pair(PairKind),
 }
 
 const BOXED: Rep = Rep::Word(ValueLayout::Boxed);
@@ -58,8 +58,8 @@ impl Rep {
 /// A planned direct call.
 struct HirCall {
     key: String,
-    /// The callee returns `[payload, tag]` of this enum.
-    pair: Option<String>,
+    /// The callee returns the two words of this kind.
+    pair: Option<PairKind>,
     /// One-word layout of each parameter.
     params: Vec<ValueLayout>,
     /// One-word layout of the result (when not a pair).
@@ -79,10 +79,23 @@ struct HirCall {
     instance: Option<Box<HirInstanceCall>>,
     /// Per parameter of a free function taking numeric ranges unboxed: the
     /// `[start, end]` kind it takes as two words (empty when none does).
-    ranges: Vec<Option<String>>,
+    ranges: Vec<Option<PairKind>>,
     /// A mono clone call: the generic function's name and its type
     /// variables bound to this call's types, for typed inlining.
     mono_of: Option<Box<(String, HashMap<crate::typechecking::ty::TyVarId, Ty>)>>,
+    /// A trait method with bounds of its own (`fn third<W: Show>`): their
+    /// dictionaries, passed after the instance's (#1471).
+    own_dicts: Vec<HirOwnDict>,
+}
+
+/// A dictionary a call passes for one of a trait method's own bounds.
+#[derive(Clone)]
+pub(super) enum HirOwnDict {
+    /// One of the frame's dictionaries (`__dictN`), by slot: an open goal
+    /// the checker forwards.
+    Frame(u32),
+    /// A ground goal's instance dictionary.
+    Ground { class: String, lookup: Vec<Ty> },
 }
 
 /// A call of an inherent method's clone at ground type arguments
@@ -230,7 +243,7 @@ struct HirPlan {
     /// `let x = f(..)` of a two-word call that is never reassigned keeps
     /// `[payload, tag]` in two frame slots (the AST's unboxed enum local):
     /// local to its pair kind.
-    pair_locals: HashMap<u32, String>,
+    pair_locals: HashMap<u32, PairKind>,
     /// `let p = new C(..)` kept in frame slots (the AST's unboxed class
     /// local): local to its resolved class; field `i` is slot `slot + i`.
     sroa: HashMap<u32, String>,
@@ -681,37 +694,28 @@ impl Compiler {
             }
             plan => plan,
         };
-        // Short counted loops unroll, constants fold, a repeated pure expression reads the local that
-        // holds its first value, loop-invariant expressions move in front of
-        // their loops, and counted-loop index sites are proven in bounds,
-        // when the rewritten body plans.
+        // Short counted loops unroll, constants fold and counted-loop index
+        // sites are proven in bounds, when the rewritten body plans. CSE and
+        // loop-invariant motion run on MIR (`mir::cse`, `mir::licm`).
         let plan = match plan {
             Ok(emit)
                 if (self.opt_options.loop_unroll
                     || self.opt_options.algebraic
-                    || self.opt_options.local_cse || self.opt_options.licm || self.opt_options.loop_bounds
+                    || self.opt_options.loop_bounds
                     || self.opt_options.sink_return)
                     && !self.debugger_attached
                     && !hir.is_coro =>
             {
                 let body = inlined.as_ref().unwrap_or(hir);
-                let pure = |n: &str| crate::il::pure_call::name_in(&self.pure_fns, n);
                 let steady = |n: &str| crate::il::pure_call::name_in(&self.steady_fns, n);
-                // A finalizer that can resize runs at any allocation: no
-                // length is steady then.
-                let lengths = self.alloc_steady.then_some(&steady as &dyn Fn(&str) -> bool);
                 let unrolled = self.opt_options.loop_unroll.then(|| crate::hir::unroll::unroll(body, self.opt_options.loop_unroll_factor)).flatten();
                 let body_u = unrolled.as_ref().unwrap_or(body);
                 let folded = self.opt_options.algebraic.then(|| crate::hir::fold::fold(body_u)).flatten();
                 let body_f = folded.as_ref().unwrap_or(body_u);
-                let cse = self.opt_options.local_cse.then(|| crate::hir::cse::eliminate(body_f, pure)).flatten();
-                let body_c = cse.as_ref().unwrap_or(body_f);
-                let licm = self.opt_options.licm.then(|| crate::hir::licm::hoist(body_c, pure, lengths)).flatten();
-                let body_l = licm.as_ref().unwrap_or(body_c);
-                let bounds = (self.opt_options.loop_bounds && self.alloc_steady).then(|| crate::hir::bounds::prove(body_l, steady)).flatten();
-                let body_b = bounds.as_ref().unwrap_or(body_l);
+                let bounds = (self.opt_options.loop_bounds && self.alloc_steady).then(|| crate::hir::bounds::prove(body_f, steady)).flatten();
+                let body_b = bounds.as_ref().unwrap_or(body_f);
                 let sunk = self.opt_options.sink_return.then(|| crate::hir::sink_return::sink(body_b)).flatten();
-                match sunk.or(bounds).or(licm).or(cse).or(folded).or(unrolled) {
+                match sunk.or(bounds).or(folded).or(unrolled) {
                     Some(next) => match lower::refusal(&next, &self.checker)
                         .map_or_else(|| self.plan_hir_body(&next), Err)
                         .and_then(|mut e| self.plan_hir_lambdas(&module, &next, &mut e).map(|()| e))
@@ -738,20 +742,6 @@ impl Compiler {
         let plan = plan.and_then(|emit| hir_bisect(&hir.name).then_some(emit).ok_or("bisect"));
         let lowered = match plan {
             Ok(mut emit) => {
-                // A shared generic body keeps a type parameter's values as
-                // raw words: the call boxed them (`hir_generic_abi`), and a
-                // boxed word stored into a field or container would reach a
-                // ground reader as the box (#802).
-                if self.hir_shared_generic() {
-                    for &param in &hir.params {
-                        if self.hir_open_ty(hir.local(param).ty.as_ref()) {
-                            let slot = Self::hir_slot(&emit, param);
-                            self.bytecode.push_load(slot);
-                            self.bytecode.push_unbox_value(common::UNBOX_ANY_TAG);
-                            self.bytecode.push_store_pop(slot);
-                        }
-                    }
-                }
                 if let Some(root) = hir.root {
                     // Early exits are laid out after the body.
                     emit.plan.cold_ok = self.opt_options.branch_optimization && !self.debugger_attached && !hir.is_coro;
@@ -765,7 +755,9 @@ impl Compiler {
                 // A shared generic body takes its dictionaries as trailing
                 // parameters: direct MIR lowers it when its code reads them
                 // only as it plans (`HirMirTables::reads_dicts`), its open
-                // parameters unboxed as the prologue above unboxes them.
+                // parameters unboxed on entry (the call boxed them, and a
+                // boxed word stored into a field or container would reach
+                // a ground reader as the box, #802).
                 let shared = self.hir_shared_generic();
                 self.hir_mir = if !shared {
                     self.hir_lower_mir(hir, &mut emit, None)
@@ -1102,6 +1094,8 @@ impl Compiler {
         // A finalizer object's local is pinned (`HirMirInput::pinned`) so
         // it lives as long as its frame slot would.
         let checker = &self.checker;
+        let pure_fns = &self.pure_fns;
+        let steady_fns = &self.steady_fns;
         let string_indices = &self.string_indices;
         let is_class = move |t: &Ty| {
             let t = apply_ty_prune(checker.subst(), t);
@@ -1459,10 +1453,10 @@ impl Compiler {
                     // A two-word enum result is unboxed at the edge, one
                     // `JumpIfMatch` per variant: each variant's tag and arity.
                     let ty = Self::hir_ty(hir, HirId(i)).map(|t| apply_ty_prune(self.checker.subst(), t));
-                    let unbox = match ty.as_ref().and_then(|t| crate::typechecking::return_layout::two_word_return_enum(&self.checker, t)) {
+                    let unbox = match ty.as_ref().and_then(|t| crate::typechecking::return_layout::two_word_kind(&self.checker, t)) {
                         Some(kind) => Some(
                             self.checker
-                                .enum_variants(&kind)?
+                                .enum_variants(kind.enum_name()?)?
                                 .into_iter()
                                 .map(|(_, tag, payload)| (tag, payload.len() as u32))
                                 .collect::<Vec<_>>(),
@@ -1529,6 +1523,9 @@ impl Compiler {
             unbox_any: &tables.unbox_any,
             open_params: &tables.open_params,
             lens: &emit.plan.lens,
+            alloc_steady: self.alloc_steady,
+            pure_fn: Box::new(move |n: &str| crate::il::pure_call::name_in(pure_fns, n)),
+            steady_fn: Box::new(move |n: &str| crate::il::pure_call::name_in(steady_fns, n)),
             box_at: &emit.plan.box_at,
             is_class: Box::new(is_class),
             scalar_enum: Box::new(scalar_enum),
@@ -1554,12 +1551,8 @@ impl Compiler {
                 checker.payload_tys_for(enum_name, variant).into_iter().map(|(name, _)| name).collect()
             }),
             pair_variants: Box::new(move |t: &Ty| {
-                use crate::typechecking::return_layout as rl;
                 let t = apply_ty_prune(checker.subst(), t);
-                let kind = rl::two_word_return_enum(checker, &t)?;
-                if rl::is_two_word_product_kind(&kind) || rl::is_range_kind(&kind) {
-                    return None;
-                }
+                let kind = crate::typechecking::return_layout::two_word_kind(checker, &t)?.enum_name()?.to_string();
                 let mut variants = Vec::new();
                 for (name, tag, _) in checker.enum_variants(&kind)? {
                     let payload = Self::payload_tys_of(checker, &t, &name)?;
@@ -1784,6 +1777,7 @@ impl Compiler {
                 (call.mono && !instances.contains_key(&id.0), "mono"),
                 (call.generic.is_some(), "generic"),
                 (call.instance.as_ref().is_some_and(|i| i.args.iter().any(Self::ty_has_var)), "instance"),
+                (!call.own_dicts.is_empty(), "own-bounds"),
                 (!call.ranges.is_empty(), "ranges"),
                 (self.coroutine_fns.contains(&call.key), "coroutine"),
                 // An auto-parallel callee's call runs its split worker.
@@ -2415,6 +2409,17 @@ impl Compiler {
                 rhs,
             } = exprs[i].kind
             {
+                // `==` / `!=` over `()` (`T = unit`) is its literal once both
+                // sides have run, as the builder folds a ground one (#1450).
+                let unit = |id: crate::hir::HirId| exprs[id.0 as usize].ty.as_ref().is_some_and(crate::hir::layout::is_unit);
+                if matches!(sym, "==" | "!=") && unit(lhs) && unit(rhs) {
+                    let value = crate::hir::HirId(exprs.len() as u32);
+                    let mut lit = crate::hir::HirExpr { kind: HirKind::Lit(crate::hir::Lit::Bool(sym == "==")), ..exprs[i].clone() };
+                    lit.node = None;
+                    exprs.push(lit);
+                    exprs[i].kind = HirKind::Block { stmts: vec![lhs, rhs], tail: Some(value) };
+                    continue;
+                }
                 let op = crate::hir::build::resolve_bin(sym, exprs[lhs.0 as usize].ty.as_ref(), exprs[rhs.0 as usize].ty.as_ref());
                 exprs[i].kind = HirKind::Bin { op, lhs, rhs };
             }
@@ -2753,11 +2758,6 @@ impl Compiler {
             }
         }
         self.plan_hir_local_layouts(hir, &mut emit)?;
-        // Calls above stack-array boxes do not stage, so a `format` that
-        // shows through temps could run above live operands.
-        if !emit.plan.box_at.is_empty() && hir.exprs.iter().any(|e| lower::shows_through_temps(hir, &self.checker, e)) {
-            return Err("format-show");
-        }
         let defers = hir.exprs.iter().any(|e| matches!(e.kind, HirKind::Defer { .. }));
         let tail = |value: HirId| {
             emit.plan.calls.get(&value.0).is_some_and(|call| {
@@ -2809,7 +2809,7 @@ impl Compiler {
             let local = hir.local(param);
             // A two-word parameter (`argument_unboxed_range_kind`) holds
             // `[start, end]` / `[payload, tag]` in two slots.
-            if let Some(kind) = self.unboxed_enum_kind(&local.name).map(str::to_string) {
+            if let Some(kind) = self.unboxed_enum_kind(&local.name).cloned() {
                 let (start, end) = self.unboxed_enum_info(&local.name).ok_or("parameter-slot")?;
                 emit.slots[param.0 as usize] = Some(start);
                 emit.tag_slots.insert(param.0, end);
@@ -2873,12 +2873,12 @@ impl Compiler {
                 HirKind::Make {
                     kind: MakeKind::Range { inclusive },
                     ..
-                } => Some(crate::typechecking::return_layout::range_kind(*inclusive).to_string()),
+                } => Some(PairKind::Range { inclusive: *inclusive }),
                 HirKind::Local(from) => emit
                     .plan
                     .pair_locals
                     .get(&from.0)
-                    .filter(|k| crate::typechecking::return_layout::is_range_kind(k))
+                    .filter(|k| matches!(k, PairKind::Range { .. }))
                     .cloned(),
                 _ => None,
             };
@@ -2907,6 +2907,10 @@ impl Compiler {
         {
             return self.hir_builtin_abi(hir, call, HirBuiltin::Host(id));
         }
+        // A compiler-made body's `format` (a tuple's `Show` thunk).
+        if self.hir_synth_calls.is_some() && self.hir_synth_callees.get(name).is_some_and(|c| c.format) {
+            return self.hir_builtin_abi(hir, call, HirBuiltin::Format);
+        }
         // A compiler-made body's call of a function the checker has no
         // signature for.
         if let Some((params, ret)) = self.hir_synth_calls.as_ref().and_then(|calls| calls.get(name)) {
@@ -2914,7 +2918,7 @@ impl Compiler {
                 return Err("callee-arity");
             }
             let pair = self.hir_synth_callees.get(name).and_then(|c| c.pair.clone());
-            if pair.as_deref().is_some_and(|k| !self.hir_pair_kind(k)) {
+            if pair.as_ref().is_some_and(|k| !self.hir_pair_kind(k)) {
                 return Err("callee-pair");
             }
             return Ok(HirCall {
@@ -2929,6 +2933,7 @@ impl Compiler {
                 instance: None,
                 ranges: Vec::new(),
                 mono_of: None,
+                own_dicts: Vec::new(),
             });
         }
         let node = hir.expr(call);
@@ -2955,7 +2960,7 @@ impl Compiler {
         // shared body ([`Self::hir_generic_abi`]); a mono clone or a plain
         // function takes none, as on the AST.
         let forwards = self.forwarded_dicts_hint(node.node, start, end).is_some_and(|d| !d.is_empty() && !self.hir_clone_drops_forwarded(&d));
-        if !forwards && let Some(call) = self.hir_ground_ufcs(hir, call, name)? {
+        if let Some(call) = self.hir_ground_ufcs(hir, call, name, forwards)? {
             return Ok(call);
         }
         let overload = self.sidecar_overload(node.node, start, end);
@@ -3101,6 +3106,7 @@ impl Compiler {
             instance: None,
             ranges: Vec::new(),
             mono_of: None,
+            own_dicts: Vec::new(),
         }))
     }
 
@@ -3157,6 +3163,7 @@ impl Compiler {
             instance: None,
             ranges: Vec::new(),
             mono_of: None,
+            own_dicts: Vec::new(),
         }))
     }
 
@@ -3231,6 +3238,7 @@ impl Compiler {
             instance: None,
             ranges: Vec::new(),
             mono_of: None,
+            own_dicts: Vec::new(),
         })
     }
 
@@ -3287,6 +3295,7 @@ impl Compiler {
             instance: None,
             ranges: Vec::new(),
             mono_of: None,
+            own_dicts: Vec::new(),
         })
     }
 
@@ -3413,6 +3422,12 @@ impl Compiler {
             let ty = at(param);
             match lower::classify(&self.checker, &ty) {
                 Some(class) if lower::is_word(class) => {}
+                // A `()` parameter (`T = unit`) takes the empty tuple
+                // object, as a plain call's (#1086, #1450).
+                Some(ValueClass::Unit) => {
+                    params.push(ValueLayout::Boxed);
+                    continue;
+                }
                 _ => return Err("callee-signature"),
             }
             params.push(self.value_layout(&ty));
@@ -3446,6 +3461,7 @@ impl Compiler {
             instance: None,
             ranges: Vec::new(),
             mono_of: Some(Box::new((lookup.to_string(), self.hir_mono_var_map(map)))),
+            own_dicts: Vec::new(),
         })
     }
 
@@ -3579,6 +3595,7 @@ impl Compiler {
             instance: None,
             ranges: Vec::new(),
             mono_of: None,
+            own_dicts: Vec::new(),
         })
     }
 
@@ -3685,7 +3702,7 @@ impl Compiler {
         if overload.is_some() && forwards {
             return Err("callee-overload");
         }
-        if !forwards && let Some(call) = self.resolve_hir_instance_method(hir, call, method, args)? {
+        if let Some(call) = self.resolve_hir_instance_method(hir, call, method, args, forwards)? {
             return Ok(call);
         }
         let recv = *args.first().ok_or("method-receiver")?;
@@ -3723,6 +3740,7 @@ impl Compiler {
                 instance: None,
                 ranges: Vec::new(),
                 mono_of: None,
+                own_dicts: Vec::new(),
             });
         }
         // A generic class's methods are one shared body (no mono clones):
@@ -3794,12 +3812,15 @@ impl Compiler {
     /// `recv.method(args)` the typechecker discharged to a ground trait
     /// instance (`call_dicts_at`), checked before inherent methods as in
     /// `compile_call_expr`.
+    /// The dictionaries a generic body forwards (`forwards`) reach only a
+    /// method with bounds of its own (#1471).
     fn resolve_hir_instance_method(
         &self,
         hir: &HirBody,
         call: HirId,
         method: &str,
         args: &[HirId],
+        forwards: bool,
     ) -> Result<Option<HirCall>, &'static str> {
         let node = hir.expr(call);
         let (start, end) = node.span;
@@ -3814,6 +3835,10 @@ impl Compiler {
         else {
             return Ok(None);
         };
+        if forwards && self.trait_method_own_bounds(&class, method).is_empty() {
+            return Ok(None);
+        }
+        let own_dicts = self.hir_own_dicts(hir, call, &class, method, args, 0)?;
         // A pair return has its own ABI. (An open goal resolves its
         // dictionary from scope when the call is emitted, as on the AST.)
         if self.two_word_return_kind(&fqn).is_some() {
@@ -3852,6 +3877,7 @@ impl Compiler {
             })),
             ranges: Vec::new(),
             mono_of: None,
+            own_dicts,
         }))
     }
 
@@ -3895,6 +3921,7 @@ impl Compiler {
                 instance: None,
                 ranges: Vec::new(),
                 mono_of: None,
+                own_dicts: Vec::new(),
             });
         }
         // An overload-keyed entry would be picked over the bare thunk.
@@ -3917,6 +3944,7 @@ impl Compiler {
             instance: None,
             ranges: Vec::new(),
             mono_of: None,
+            own_dicts: Vec::new(),
         })
     }
 
@@ -3952,6 +3980,7 @@ impl Compiler {
             instance: None,
             ranges: Vec::new(),
             mono_of: None,
+            own_dicts: Vec::new(),
         })
     }
 
@@ -4072,6 +4101,9 @@ impl Compiler {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let ret = word(call, sig.as_ref().map(|(_, r)| r))?;
+        // The checker forwards the bound's dictionary first.
+        let method_name = name.rsplit_once(['.', ':']).map_or(name, |(_, m)| m);
+        let own_dicts = self.hir_own_dicts(hir, call, &hint.class, method_name, args, 1)?;
         Ok(Some(HirCall {
             key: String::new(),
             pair: None,
@@ -4087,6 +4119,7 @@ impl Compiler {
             instance: None,
             ranges: Vec::new(),
             mono_of: None,
+            own_dicts,
         }))
     }
 
@@ -4211,6 +4244,7 @@ impl Compiler {
         let is_default = Self::is_default_method_fqn(&instance.class, method, &fqn);
         let sig = self.trait_method_boundary_sig(&instance.class, method, &lookup, is_default);
         let (params, ret) = self.hir_ground_words(hir, call, args, &fqn, sig.as_ref())?;
+        let own_dicts = self.hir_own_dicts(hir, call, &instance.class, method, args, 1)?;
         let unbox = self
             .instance_method_unbox_tys(&instance.class, method, &lookup)
             .into_iter()
@@ -4237,13 +4271,16 @@ impl Compiler {
             })),
             ranges: Vec::new(),
             mono_of: None,
+            own_dicts,
         })
     }
 
     /// A ground function-style trait call `m(x, ..)`: the typechecker
     /// discharged the instance into `sidecar_dicts` (only when no function or
     /// local has that name), called directly as `compile_call_expr` does.
-    fn hir_ground_ufcs(&self, hir: &HirBody, call: HirId, name: &str) -> Result<Option<HirCall>, &'static str> {
+    /// The dictionaries a generic body forwards (`forwards`) reach only a
+    /// method with bounds of its own (#1471).
+    fn hir_ground_ufcs(&self, hir: &HirBody, call: HirId, name: &str, forwards: bool) -> Result<Option<HirCall>, &'static str> {
         let node = hir.expr(call);
         let (start, end) = node.span;
         let known = |k: &str| self.functions.contains_key(k) || self.fn_entry_labels.contains_key(k);
@@ -4275,6 +4312,9 @@ impl Compiler {
         else {
             return Ok(None);
         };
+        if forwards && self.trait_method_own_bounds(&class, method).is_empty() {
+            return Ok(None);
+        }
         self.hir_ground_direct(hir, call, class, inst_args, fqn, method).map(Some)
     }
 
@@ -4355,6 +4395,7 @@ impl Compiler {
             return Err("callee-trait");
         }
         let (params, ret) = self.hir_ground_words(hir, call, args, &fqn, sig.as_ref())?;
+        let own_dicts = self.hir_own_dicts(hir, call, &class, method, args, 0)?;
         // Box the positions the instance entry unboxes, except heap words.
         let unbox = self.instance_method_unbox_tys(&class, method, &inst_args);
         let boxed = args
@@ -4387,6 +4428,7 @@ impl Compiler {
             })),
             ranges: Vec::new(),
             mono_of: None,
+            own_dicts,
         })
     }
 
@@ -4448,6 +4490,7 @@ impl Compiler {
             instance: None,
             ranges: Vec::new(),
             mono_of: None,
+            own_dicts: Vec::new(),
         })
     }
 
@@ -4518,8 +4561,7 @@ impl Compiler {
                 let ty = Self::hir_ty(hir, arg).ok_or("callee-signature")?;
                 if specs.get(i) == Some(&'v') {
                     let ty = apply_ty_prune(self.checker.subst(), ty);
-                    // A tuple or record shows field by field
-                    // ([`lower::shows_through_temps`]).
+                    // A tuple or record shows field by field.
                     if !crate::hir::layout::ty_is_closed(&ty) && self.hir_bound_show(hir, arg).is_none() && !self.hir_generic_show(&ty) {
                         return Err("format-show");
                     }
@@ -4583,6 +4625,7 @@ impl Compiler {
             instance: None,
             ranges: Vec::new(),
             mono_of: None,
+            own_dicts: Vec::new(),
         })
     }
 
@@ -4623,7 +4666,7 @@ impl Compiler {
         if !coro && pair != self.two_word_return_kind(&lookup) {
             return Err("callee-pair");
         }
-        if pair.as_deref().is_some_and(|k| !self.hir_pair_kind(k)) {
+        if pair.as_ref().is_some_and(|k| !self.hir_pair_kind(k)) {
             return Err("callee-pair");
         }
         let explicit = argc - usize::from(self_layout.is_some());
@@ -4685,6 +4728,7 @@ impl Compiler {
                 instance: None,
                 ranges: Vec::new(),
                 mono_of: None,
+                own_dicts: Vec::new(),
             });
         }
         let mut param_tys = self.checker.fn_param_tys(&lookup).ok_or("callee-signature")?;
@@ -4770,6 +4814,7 @@ impl Compiler {
             instance: None,
             ranges,
             mono_of: None,
+            own_dicts: Vec::new(),
         })
     }
 
@@ -4796,17 +4841,22 @@ impl Compiler {
         if self.hir_clone_drops_forwarded(&forwarded) {
             forwarded.clear();
         }
+        if forwarded.iter().any(|&i| !self.hir_frame_dict(i)) {
+            return Err("callee-trait");
+        }
         // A function argument (`map(xs, fn (int x) => ..)`) is one closure
         // word whose own types are ground. A body forwarding its
         // dictionaries also passes its own bare type parameters, already
         // boxed words.
         // A shared generic body (no dictionaries to forward) passes its own
-        // bare type parameters the same way (#915).
+        // bare type parameters the same way (#915), a method's own ones
+        // (`fn third<W>(W w)` in an impl) included (#1467).
         let shared = !self.compiling_mono_clone
-            && self
-                .current_function_table_key
-                .as_deref()
-                .is_some_and(|k| self.checker.is_generic_fn(strip_overload_key(k)));
+            && (hir.is_generic
+                || self
+                    .current_function_table_key
+                    .as_deref()
+                    .is_some_and(|k| self.checker.is_generic_fn(strip_overload_key(k))));
         let open = |ty: &Ty| (shared || !forwarded.is_empty()) && matches!(ty, Ty::Var(_));
         let ground = |id: HirId| {
             let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
@@ -4908,6 +4958,69 @@ impl Compiler {
         })
     }
 
+    /// Whether the frame holds dictionary `i` as the checker numbered it
+    /// for a call forwarding it. A trait method numbers its own bounds
+    /// (`fn third<W: Show>`) after the trait's own dictionary and the
+    /// instance's context ones, and has them as parameters when the trait
+    /// declares them too (#1471); a bound only the instance declares has
+    /// none.
+    fn hir_frame_dict(&self, i: usize) -> bool {
+        self.lookup_slot(&format!("__dict{i}")).is_some()
+    }
+
+    /// The dictionaries call `call` (`args`, receiver first) passes for
+    /// trait method `class::method`'s own bounds, in their order: a ground
+    /// goal's instance dictionary, or for an open one the frame's
+    /// dictionary the checker forwards. The first `skip` it forwards serve
+    /// the trait's own goal (a call through a bound's dictionary) (#1471).
+    fn hir_own_dicts(
+        &self,
+        hir: &HirBody,
+        call: HirId,
+        class: &str,
+        method: &str,
+        args: &[HirId],
+        skip: usize,
+    ) -> Result<Vec<HirOwnDict>, &'static str> {
+        let bounds = self.trait_method_own_bounds(class, method);
+        if bounds.is_empty() {
+            return Ok(Vec::new());
+        }
+        let scheme = self.checker.typeclass_method_scheme(class, method).ok_or("callee-trait")?;
+        let (params, ret) = Self::fun_param_and_ret_tys(&scheme.ty);
+        if params.len() != args.len() {
+            return Err("callee-trait");
+        }
+        let subst = self.checker.subst();
+        let mut vars = HashMap::new();
+        for (param, &arg) in params.iter().zip(args) {
+            let ty = Self::hir_ty(hir, arg).ok_or("callee-signature")?;
+            Self::bind_scheme_vars(param, &apply_ty_prune(subst, ty), &mut vars);
+        }
+        if let Some(ty) = Self::hir_ty(hir, call) {
+            Self::bind_scheme_vars(&ret, &apply_ty_prune(subst, ty), &mut vars);
+        }
+        let node = hir.expr(call);
+        let mut forwarded = self
+            .forwarded_dicts_hint(node.node, node.span.0, node.span.1)
+            .unwrap_or_default()
+            .into_iter()
+            .skip(skip);
+        bounds
+            .iter()
+            .map(|c| match Self::resolve_constraint_lookup(c, &vars, &self.checker) {
+                Some(lookup) => {
+                    self.checker.generics().find_instance_relaxed(&c.class, &lookup).ok_or("callee-trait")?;
+                    Ok(HirOwnDict::Ground { class: c.class.clone(), lookup })
+                }
+                None => {
+                    let i = forwarded.next().ok_or("callee-trait")?;
+                    self.lookup_slot(&format!("__dict{i}")).map(HirOwnDict::Frame).ok_or("callee-trait")
+                }
+            })
+            .collect()
+    }
+
     /// A clone has no dictionaries to forward: its types are ground, so a
     /// call its generic body forwards `forwarded` from takes ground
     /// dictionaries like any ground call site.
@@ -4968,22 +5081,14 @@ impl Compiler {
 
     /// The adapter function [`Self::hir_fn_adapter`] reserved `label` for:
     /// its frame the wrapped function (the capture), then the arguments.
-    /// Its direct MIR is built here, as it has no HIR.
+    /// Its direct MIR is built here, as it has no HIR; the stack IL only
+    /// keeps its function record non-empty.
     fn hir_fn_adapter_fn(&mut self, label: IlLabel, unbox: &[Option<Ty>]) {
         self.loop_par_helpers += 1;
         let name = format!("__coil_fn_adapter_{}", self.loop_par_helpers);
         let start = self.bytecode.len();
         self.fn_entry_labels.insert(name.clone(), label);
         self.bind_function_entry(name.clone());
-        for (i, ty) in unbox.iter().enumerate() {
-            self.bytecode.push_load(1 + i as u32);
-            if let Some(ty) = ty {
-                Self::emit_unbox_if_needed(&mut self.bytecode, ty);
-            }
-        }
-        self.bytecode.push_load(0);
-        self.bytecode
-            .push(Byte::new(Instruction::CallIndirect).with_operand_u32(unbox.len() as u32));
         self.bytecode.push_return();
         let arity = 1 + unbox.len() as u32;
         self.fn_arities.insert(name.clone(), (arity, false));
@@ -5059,15 +5164,8 @@ impl Compiler {
 
     /// A two-word kind the lowering builds and matches: a numeric range,
     /// an arity-2 immediate product, or a declared enum.
-    pub(super) fn hir_pair_kind(&self, kind: &str) -> bool {
-        crate::typechecking::return_layout::is_range_kind(kind)
-            || Self::hir_product(kind)
-            || self.hir_pair_enum(kind)
-    }
-
-    /// `(a, b)` of immediates moved as `[a, b]`, second on top.
-    fn hir_product(kind: &str) -> bool {
-        crate::typechecking::return_layout::is_two_word_product_kind(kind)
+    pub(super) fn hir_pair_kind(&self, kind: &PairKind) -> bool {
+        matches!(kind, PairKind::Range { .. } | PairKind::Product) || self.hir_pair_enum(kind)
     }
 
     /// How an indexed or field-read base is pushed: a pair boxes into its
@@ -5085,7 +5183,7 @@ impl Compiler {
         let HirKind::Local(local) = hir.expr(base).kind else {
             return None;
         };
-        if !emit.plan.pair_locals.get(&local.0).is_some_and(|k| Self::hir_product(k)) {
+        if emit.plan.pair_locals.get(&local.0) != Some(&PairKind::Product) {
             return None;
         }
         match hir.expr(index).kind {
@@ -5103,7 +5201,7 @@ impl Compiler {
         let [a, b] = items.as_slice() else {
             return None;
         };
-        if !self.hir_natural(hir, emit, init).is_some_and(|r| matches!(&r, Rep::Pair(k) if Self::hir_product(k))) {
+        if self.hir_natural(hir, emit, init) != Some(Rep::Pair(PairKind::Product)) {
             return None;
         }
         let name = |p: &HirPat| match p {
@@ -5114,29 +5212,28 @@ impl Compiler {
         Some([name(a)?, name(b)?])
     }
 
-    fn hir_pair_enum(&self, kind: &str) -> bool {
-        !crate::typechecking::return_layout::is_two_word_product_kind(kind)
-            && crate::typechecking::return_layout::range_kind_inclusive(kind).is_none()
-            && self.checker.enum_variants(kind).is_some_and(|v| {
-                !v.is_empty() && v.iter().all(|(_, _, payload)| payload.len() <= 1)
-            })
+    /// `kind` is a `[payload, tag]` pair of an enum this module declares.
+    fn hir_pair_enum(&self, kind: &PairKind) -> bool {
+        kind.enum_name().and_then(|name| self.checker.enum_variants(name)).is_some_and(|v| {
+            !v.is_empty() && v.iter().all(|(_, _, payload)| payload.len() <= 1)
+        })
     }
 
     /// The pair kind of an unassigned enum local whose value is built in
     /// place: variants, `if` and block values of them, two-word calls and
     /// other such locals. It then lives in two slots, as a two-word call's
     /// result does, and a `match` on it reads the tag slot.
-    fn hir_pair_init(&self, hir: &HirBody, emit: &HirEmit, local: LocalId, init: HirId) -> Option<String> {
+    fn hir_pair_init(&self, hir: &HirBody, emit: &HirEmit, local: LocalId, init: HirId) -> Option<PairKind> {
         if !self.hir_pair_locals {
             return None;
         }
         let ty = hir.local(local).ty.as_ref()?;
-        let kind = crate::typechecking::return_layout::two_word_return_enum(&self.checker, ty)?;
+        let kind = crate::typechecking::return_layout::two_word_kind(&self.checker, ty)?;
         (self.hir_pair_enum(&kind) && self.hir_builds_pair(hir, emit, init, &kind)).then_some(kind)
     }
 
     /// `e` yields a `kind` pair with no boxing on any path.
-    fn hir_builds_pair(&self, hir: &HirBody, emit: &HirEmit, e: HirId, kind: &str) -> bool {
+    fn hir_builds_pair(&self, hir: &HirBody, emit: &HirEmit, e: HirId, kind: &PairKind) -> bool {
         match &hir.expr(e).kind {
             HirKind::Make {
                 kind: MakeKind::Variant { .. },
@@ -5146,8 +5243,8 @@ impl Compiler {
                 then, els: Some(els), ..
             } => self.hir_builds_pair(hir, emit, *then, kind) && self.hir_builds_pair(hir, emit, *els, kind),
             HirKind::Block { tail: Some(t), .. } => self.hir_builds_pair(hir, emit, *t, kind),
-            HirKind::Call { .. } => emit.plan.calls.get(&e.0).and_then(|c| c.pair.as_deref()) == Some(kind),
-            HirKind::Local(l) => emit.plan.pair_locals.get(&l.0).map(String::as_str) == Some(kind),
+            HirKind::Call { .. } => emit.plan.calls.get(&e.0).and_then(|c| c.pair.as_ref()) == Some(kind),
+            HirKind::Local(l) => emit.plan.pair_locals.get(&l.0) == Some(kind),
             _ => false,
         }
     }
@@ -6233,7 +6330,7 @@ impl Compiler {
             }
             return match want {
                 Rep::Word(ValueLayout::Boxed) => Ok(()),
-                Rep::Pair(kind) if crate::typechecking::return_layout::range_kind_inclusive(kind) == Some(*inclusive) => Ok(()),
+                Rep::Pair(PairKind::Range { inclusive: i }) if i == inclusive => Ok(()),
                 _ => Err("make-repr"),
             };
         }
@@ -6260,8 +6357,10 @@ impl Compiler {
         let unit_arg = |i: usize| lower::is_unit_make(hir, args[i]);
         let unit_value = |i: usize| !unit_arg(i) && lower::is_unit_value(hir, &self.checker, args[i]);
         let word_arg = |i: usize| -> Check {
-            // A boxed `Ok(())` carries the empty tuple, as in the AST.
-            if unit_arg(i) && !(result && variant == "Ok" && *want == Rep::Word(ValueLayout::Boxed)) {
+            // A boxed `()` payload is the empty tuple object, as in the AST
+            // (`Ok(())`, `Some(())`, #1449).
+            let boxed = *want == Rep::Word(ValueLayout::Boxed);
+            if unit_arg(i) && !boxed {
                 return Err("unit-payload");
             }
             // The implicit `Ok(())` closing a boxed result-mode body: a zero
@@ -6269,8 +6368,10 @@ impl Compiler {
             if matches!(hir.expr(args[i]).kind, HirKind::Lit(Lit::Unit)) && result && variant == "Ok" && *want == Rep::Word(ValueLayout::Boxed) {
                 return Ok(());
             }
+            // `Some(f())` of a `()`-typed `f()`: its effect, then the empty
+            // tuple object.
             if unit_value(i) {
-                return Err("unit-payload");
+                return if boxed { self.hir_check_effect(hir, emit, args[i]) } else { Err("unit-payload") };
             }
             self.hir_check_value(hir, emit, args[i], &Rep::Word(self.value_layout(&payload[i])))
         };
@@ -6293,7 +6394,7 @@ impl Compiler {
             Rep::Word(L::NicheResult) if result => (0..args.len()).try_for_each(word_arg),
             Rep::Pair(kind) => {
                 let named = self.hir_enum_name(ty).ok_or("make-type")?;
-                if !Self::hir_same_enum(&named, kind) || args.len() > 1 {
+                if !kind.enum_name().is_some_and(|k| Self::hir_same_enum(&named, k)) || args.len() > 1 {
                     return Err("make-pair");
                 }
                 // `Ok(e)` of a `()`-typed `e`: `e` for its effect.
@@ -6433,7 +6534,7 @@ impl Compiler {
                         }
                     }
                     if let Rep::Pair(kind) = &dispatch
-                        && !Self::hir_same_enum(&scrut_enum, kind)
+                        && !kind.enum_name().is_some_and(|k| Self::hir_same_enum(&scrut_enum, k))
                     {
                         return Err("match-pair");
                     }
@@ -6592,7 +6693,7 @@ impl Compiler {
                     }
                     let want = match counted {
                         crate::typechecking::infer::ForInCounted::Range { inclusive, .. } => {
-                            Some(crate::typechecking::return_layout::range_kind(*inclusive).to_string())
+                            Some(PairKind::Range { inclusive: *inclusive })
                         }
                         _ => None,
                     };
@@ -6607,7 +6708,7 @@ impl Compiler {
                         }
                     }
                     (None, Some(ForInKind::Range { inclusive, .. })) => {
-                        let pair = Rep::Pair(crate::typechecking::return_layout::range_kind(*inclusive).to_string());
+                        let pair = Rep::Pair(PairKind::Range { inclusive: *inclusive });
                         self.hir_check_value(hir, emit, *iterable, &pair)?
                     }
                     (None, _) => self.hir_check_value(hir, emit, *iterable, &BOXED)?,
@@ -6642,10 +6743,6 @@ impl Compiler {
     }
 
     // ---- emit ----
-
-    fn hir_slot(emit: &HirEmit, local: LocalId) -> u32 {
-        emit.slots[local.0 as usize].expect("HIR local read before its let")
-    }
 
     /// Whether the body being lowered is a generic one's shared body (it
     /// takes dictionaries; a mono clone takes none).
@@ -6694,8 +6791,8 @@ impl Compiler {
     /// The tag of an arm `V(x) => return V(x)` whose return rebuilds the
     /// scrutinee's own variant into a function result of the same pair
     /// kind and payload type, so the arm is the identity on the pair.
-    fn hir_rewrap_return_tag(&self, hir: &HirBody, emit: &HirEmit, ty: &Ty, kind: &str, arm: &HirArm) -> Option<u32> {
-        if emit.plan.ret != Rep::Pair(kind.to_string()) {
+    fn hir_rewrap_return_tag(&self, hir: &HirBody, emit: &HirEmit, ty: &Ty, kind: &PairKind, arm: &HirArm) -> Option<u32> {
+        if !matches!(&emit.plan.ret, Rep::Pair(k) if k == kind) {
             return None;
         }
         self.hir_rewrap_tag(hir, ty, arm)
@@ -6833,9 +6930,61 @@ impl Compiler {
         if [&site.begin_local, &site.end_local].into_iter().flatten().any(|n| !heads.contains_key(n)) {
             return None;
         }
+        // An iteration that never reads its index and computes something
+        // from captures alone repeats that work each time: MIR LICM moves
+        // it ahead of the loop, leaving nothing to split across workers.
+        // A bare fold over captures (`acc = acc + k`) still splits.
+        let index = bind.or_else(|| outer.get(&site.index).copied());
+        let acc = outer.get(&site.acc).copied();
+        let varies = |l: LocalId| Some(l) == index || Some(l) == acc || !bound(l);
+        if index.is_some_and(|ix| !Self::hir_reads_index(hir, body, ix)) && Self::hir_invariant_work(hir, body, &varies) {
+            return None;
+        }
         // Only the number of live captures matters to the natives.
         let natives = self.par_loop_natives(site.live_captures.len())?;
         Some(HirParSiteLocals { site, outer, heads, natives })
+    }
+
+    /// Whether `id` reads local `ix` other than in its own step (`ix = ix + 1`).
+    fn hir_reads_index(hir: &HirBody, id: HirId, ix: LocalId) -> bool {
+        match &hir.expr(id).kind {
+            HirKind::Local(l) => *l == ix,
+            HirKind::Assign { place, .. } if matches!(hir.expr(*place).kind, HirKind::Local(l) if l == ix) => false,
+            _ => lower::children(hir, id).into_iter().any(|k| Self::hir_reads_index(hir, k, ix)),
+        }
+    }
+
+    /// Whether `id` holds a computation (an operator, cast, read or call)
+    /// that reads no local `varies` admits and writes nothing: work the
+    /// same in every iteration.
+    fn hir_invariant_work(hir: &HirBody, id: HirId, varies: &dyn Fn(LocalId) -> bool) -> bool {
+        let computes = matches!(
+            hir.expr(id).kind,
+            HirKind::Bin { .. }
+                | HirKind::Logic { .. }
+                | HirKind::Un { .. }
+                | HirKind::Cast { .. }
+                | HirKind::Call { .. }
+                | HirKind::Field { .. }
+                | HirKind::Index { .. }
+        );
+        if !computes {
+            return lower::children(hir, id).into_iter().any(|k| Self::hir_invariant_work(hir, k, varies));
+        }
+        let mut moves = true;
+        lower::visit(hir, id, &mut |x| match x.kind {
+            HirKind::Local(l) => moves &= !varies(l),
+            HirKind::Let { .. }
+            | HirKind::LetPat { .. }
+            | HirKind::Assign { .. }
+            | HirKind::Append { .. }
+            | HirKind::Clear(_)
+            | HirKind::Loop { .. }
+            | HirKind::Break
+            | HirKind::Continue => moves = false,
+            _ => {}
+        });
+        moves || lower::children(hir, id).into_iter().any(|k| Self::hir_invariant_work(hir, k, varies))
     }
 
     /// Parallel loop `id` moved into its own fork-join function, emitted
@@ -6959,14 +7108,10 @@ impl Compiler {
             let pname = body.local(param).name.clone();
             self.record_debug_param(&pname, slot);
         }
+        // Direct MIR unboxes the parameters a generic callee boxed.
         for (ty, &slot) in unbox.iter().flatten().zip(&slots[ncap..]) {
-            if let Some(ty) = ty {
-                self.bytecode.push_load(slot);
-                Self::emit_unbox_if_needed(&mut self.bytecode, ty);
-                self.bytecode.push_store_pop(slot);
-                if let Some(tag) = Self::ty_to_value_tag(ty) {
-                    self.hir_mir_unbox.push((slot, tag as u32));
-                }
+            if let Some(tag) = ty.as_ref().and_then(Self::ty_to_value_tag) {
+                self.hir_mir_unbox.push((slot, tag as u32));
             }
         }
         let root = body.root.expect("planned lambda body");

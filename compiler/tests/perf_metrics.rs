@@ -461,12 +461,9 @@ fn perf_field_hot_reuses_repeated_string_keys() {
         count_opcodes(&bc, Instruction::DenseFieldLoad)
     );
     assert!(
-        pipeline
-            .stack_maps()
-            .iter()
-            .any(|m| !m.safepoints.is_empty()),
-        "D2 field_hot InitTyped should bind maps: {:?}",
-        pipeline.stack_maps()
+        pipeline.precise_frames().iter().any(|m| !m.at_pc.is_empty()),
+        "D2 field_hot InitTyped should have precise frame maps: {:?}",
+        pipeline.precise_frames()
     );
     let (start, end) = fn_pc_range(&syms, "hot", bc.len());
     assert!(

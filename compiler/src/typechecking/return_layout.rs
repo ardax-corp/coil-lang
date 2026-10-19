@@ -15,20 +15,6 @@ use super::infer::Checker;
 use super::ty::{Ty, range_app};
 use crate::hir::layout::{self, Layout, PairKind, is_immediate};
 
-/// Kind string for a two-slot arity-2 immediate product. Not a user enum;
-/// boxing uses `MakeTuple(2)` instead of the enum cascade.
-pub const TWO_WORD_PRODUCT_KIND: &str = "__product2";
-
-pub fn is_two_word_product_kind(kind: &str) -> bool {
-    kind == TWO_WORD_PRODUCT_KIND
-}
-
-/// Unboxed first-class `Range<T>` local: slots are `[start, end]`.
-pub const TWO_WORD_RANGE_KIND: &str = "__range";
-
-/// Unboxed first-class `RangeInclusive<T>` local: slots are `[start, end]`.
-pub const TWO_WORD_RANGE_INCLUSIVE_KIND: &str = "__range_inc";
-
 /// Heap `Range` `InitTyped` id. High so user class ids (from 1) stay put.
 pub const RANGE_HEAP_TYPE_ID: u32 = common::RANGE_HEAP_TYPE_ID;
 
@@ -44,56 +30,23 @@ pub fn range_heap_type_id(inclusive: bool) -> u32 {
     }
 }
 
-pub fn is_range_kind(kind: &str) -> bool {
-    kind == TWO_WORD_RANGE_KIND || kind == TWO_WORD_RANGE_INCLUSIVE_KIND
-}
-
-/// `Some(inclusive)` when `kind` is an unboxed range pair.
-pub fn range_kind_inclusive(kind: &str) -> Option<bool> {
-    if kind == TWO_WORD_RANGE_INCLUSIVE_KIND {
-        Some(true)
-    } else if kind == TWO_WORD_RANGE_KIND {
-        Some(false)
-    } else {
-        None
-    }
-}
-
-pub fn range_kind(inclusive: bool) -> &'static str {
-    if inclusive {
-        TWO_WORD_RANGE_INCLUSIVE_KIND
-    } else {
-        TWO_WORD_RANGE_KIND
-    }
-}
-
-/// `Some(kind)` when `ty` is a numeric `Range` / `RangeInclusive` two-slot pair.
-pub fn two_word_range_kind(ty: &Ty) -> Option<&'static str> {
+/// `Some(PairKind::Range { .. })` when `ty` is a numeric `Range` /
+/// `RangeInclusive` two-slot pair.
+pub fn two_word_range_kind(ty: &Ty) -> Option<PairKind> {
     let (elem, inclusive) = range_app(ty)?;
-    is_immediate(elem).then(|| range_kind(inclusive))
+    is_immediate(elem).then_some(PairKind::Range { inclusive })
 }
 
 /// `Some(kind)` when direct `CALL`/`RETURN` of a function returning `ty`
-/// can move two words instead of boxing. Enum kinds are the enum name
-/// (`[payload, tag]`); [`TWO_WORD_PRODUCT_KIND`] is an arity-2 immediate
-/// tuple (`[a, b]`). The kind is used when the pair must be boxed at a
-/// boundary that still needs one word (`CallIndirect`, FFI, coroutines).
+/// can move two words instead of boxing: `[payload, tag]` of an enum,
+/// `[a, b]` of an arity-2 immediate tuple, `[start, end]` of a numeric
+/// range. The kind is used when the pair must be boxed at a boundary that
+/// still needs one word (`CallIndirect`, FFI, coroutines).
 /// The two-slot view of [`crate::hir::layout::of_resolved`].
-pub fn two_word_return_enum(checker: &Checker, ty: &Ty) -> Option<String> {
+pub fn two_word_kind(checker: &Checker, ty: &Ty) -> Option<PairKind> {
     match layout::of_resolved(checker, ty) {
-        Layout::Pair(kind) => Some(pair_kind_name(kind)),
+        Layout::Pair(kind) => Some(kind),
         _ => None,
-    }
-}
-
-/// The `two_word_return_enum` kind string of a pair.
-pub fn pair_kind_name(kind: PairKind) -> String {
-    match kind {
-        PairKind::Option => common::BUILTIN_OPTION_ENUM.to_string(),
-        PairKind::Result => common::BUILTIN_RESULT_ENUM.to_string(),
-        PairKind::Product => TWO_WORD_PRODUCT_KIND.to_string(),
-        PairKind::Range { inclusive } => range_kind(inclusive).to_string(),
-        PairKind::Enum(name) => name,
     }
 }
 
@@ -111,8 +64,8 @@ mod tests {
         let c = checker();
         let ty = option_ty(Ty::Con(INT.into()));
         assert_eq!(
-            two_word_return_enum(&c, &ty),
-            Some(common::BUILTIN_OPTION_ENUM.to_string())
+            two_word_kind(&c, &ty),
+            Some(PairKind::Option)
         );
     }
 
@@ -120,7 +73,7 @@ mod tests {
     fn option_string_stays_one_word_niche() {
         let c = checker();
         let ty = option_ty(Ty::Con(STRING.into()));
-        assert_eq!(two_word_return_enum(&c, &ty), None);
+        assert_eq!(two_word_kind(&c, &ty), None);
     }
 
     #[test]
@@ -128,8 +81,8 @@ mod tests {
         let c = checker();
         let ty = result_ty(Ty::Con(INT.into()), Ty::Con(INT.into()));
         assert_eq!(
-            two_word_return_enum(&c, &ty),
-            Some(common::BUILTIN_RESULT_ENUM.to_string())
+            two_word_kind(&c, &ty),
+            Some(PairKind::Result)
         );
     }
 
@@ -138,8 +91,8 @@ mod tests {
         let c = checker();
         let ty = result_ty(Ty::Con(INT.into()), Ty::Con(STRING.into()));
         assert_eq!(
-            two_word_return_enum(&c, &ty),
-            Some(common::BUILTIN_RESULT_ENUM.to_string())
+            two_word_kind(&c, &ty),
+            Some(PairKind::Result)
         );
     }
 
@@ -149,8 +102,8 @@ mod tests {
         for unit in [Ty::Con(crate::typechecking::ty::UNIT.into()), Ty::Tuple(vec![])] {
             let ty = result_ty(unit, Ty::Con(INT.into()));
             assert_eq!(
-                two_word_return_enum(&c, &ty),
-                Some(common::BUILTIN_RESULT_ENUM.to_string())
+                two_word_kind(&c, &ty),
+                Some(PairKind::Result)
             );
         }
     }
@@ -159,7 +112,7 @@ mod tests {
     fn result_unit_string_stays_one_word_niche() {
         let c = checker();
         let ty = result_ty(Ty::Tuple(vec![]), Ty::Con(STRING.into()));
-        assert_eq!(two_word_return_enum(&c, &ty), None);
+        assert_eq!(two_word_kind(&c, &ty), None);
     }
 
     #[test]
@@ -167,27 +120,27 @@ mod tests {
         let c = checker();
         let s = Ty::Con(STRING.into());
         let ty = result_ty(s.clone(), s);
-        assert_eq!(two_word_return_enum(&c, &ty), None);
+        assert_eq!(two_word_kind(&c, &ty), None);
     }
 
     #[test]
     fn result_string_int_stays_boxed_ok_is_not_immediate() {
         let c = checker();
         let ty = result_ty(Ty::Con(STRING.into()), Ty::Con(INT.into()));
-        assert_eq!(two_word_return_enum(&c, &ty), None);
+        assert_eq!(two_word_kind(&c, &ty), None);
     }
 
     #[test]
     fn unbounded_option_is_not_two_word() {
         let c = checker();
         let ty = option_ty(Ty::Var(crate::typechecking::ty::TyVarId(0)));
-        assert_eq!(two_word_return_enum(&c, &ty), None);
+        assert_eq!(two_word_kind(&c, &ty), None);
     }
 
     #[test]
     fn plain_int_is_not_two_word() {
         let c = checker();
-        assert_eq!(two_word_return_enum(&c, &Ty::Con(INT.into())), None);
+        assert_eq!(two_word_kind(&c, &Ty::Con(INT.into())), None);
     }
 
     fn checked(src: &str) -> Checker {
@@ -212,8 +165,8 @@ fn cell(int n) -> Cell {
 "#;
         let c = checked(src);
         assert_eq!(
-            two_word_return_enum(&c, &Ty::Con("Cell".into())),
-            Some("Cell".to_string())
+            two_word_kind(&c, &Ty::Con("Cell".into())),
+            Some(PairKind::Enum("Cell".to_string()))
         );
 
         let src_reordered = r#"
@@ -227,8 +180,8 @@ fn cell(int n) -> Cell {
 "#;
         let c2 = checked(src_reordered);
         assert_eq!(
-            two_word_return_enum(&c2, &Ty::Con("Cell".into())),
-            Some("Cell".to_string())
+            two_word_kind(&c2, &Ty::Con("Cell".into())),
+            Some(PairKind::Enum("Cell".to_string()))
         );
     }
 
@@ -244,7 +197,7 @@ fn shape() -> Shape {
 }
 "#;
         let c = checked(src);
-        assert_eq!(two_word_return_enum(&c, &Ty::Con("Shape".into())), None);
+        assert_eq!(two_word_kind(&c, &Ty::Con("Shape".into())), None);
     }
 
     #[test]
@@ -252,8 +205,8 @@ fn shape() -> Shape {
         let c = checker();
         let ty = Ty::Tuple(vec![Ty::Con(INT.into()), Ty::Con(INT.into())]);
         assert_eq!(
-            two_word_return_enum(&c, &ty),
-            Some(TWO_WORD_PRODUCT_KIND.to_string())
+            two_word_kind(&c, &ty),
+            Some(PairKind::Product)
         );
     }
 
@@ -262,8 +215,8 @@ fn shape() -> Shape {
         let c = checker();
         let ty = Ty::Tuple(vec![Ty::Con(INT.into()), Ty::Con(FLOAT.into())]);
         assert_eq!(
-            two_word_return_enum(&c, &ty),
-            Some(TWO_WORD_PRODUCT_KIND.to_string())
+            two_word_kind(&c, &ty),
+            Some(PairKind::Product)
         );
     }
 
@@ -271,7 +224,7 @@ fn shape() -> Shape {
     fn mixed_heap_product_stays_boxed() {
         let c = checker();
         let ty = Ty::Tuple(vec![Ty::Con(INT.into()), Ty::Con(STRING.into())]);
-        assert_eq!(two_word_return_enum(&c, &ty), None);
+        assert_eq!(two_word_kind(&c, &ty), None);
     }
 
     #[test]
@@ -279,16 +232,11 @@ fn shape() -> Shape {
         let c = checker();
         let i = Ty::Con(INT.into());
         let ty = Ty::Tuple(vec![i.clone(), i.clone(), i]);
-        assert_eq!(two_word_return_enum(&c, &ty), None);
+        assert_eq!(two_word_kind(&c, &ty), None);
     }
 
     #[test]
-    fn range_kinds_round_trip_inclusive() {
-        assert!(is_range_kind(TWO_WORD_RANGE_KIND));
-        assert!(is_range_kind(TWO_WORD_RANGE_INCLUSIVE_KIND));
-        assert!(!is_range_kind(TWO_WORD_PRODUCT_KIND));
-        assert_eq!(range_kind_inclusive(range_kind(false)), Some(false));
-        assert_eq!(range_kind_inclusive(range_kind(true)), Some(true));
+    fn range_heap_type_ids_differ() {
         assert_ne!(range_heap_type_id(false), 0);
         assert_ne!(range_heap_type_id(true), 0);
         assert_ne!(range_heap_type_id(false), range_heap_type_id(true));
@@ -298,12 +246,12 @@ fn shape() -> Shape {
     fn numeric_range_is_two_word() {
         let c = checker();
         assert_eq!(
-            two_word_return_enum(&c, &range_ty(Ty::Con(INT.into()))),
-            Some(TWO_WORD_RANGE_KIND.to_string())
+            two_word_kind(&c, &range_ty(Ty::Con(INT.into()))),
+            Some(PairKind::Range { inclusive: false })
         );
         assert_eq!(
-            two_word_return_enum(&c, &range_inclusive_ty(Ty::Con(FLOAT.into()))),
-            Some(TWO_WORD_RANGE_INCLUSIVE_KIND.to_string())
+            two_word_kind(&c, &range_inclusive_ty(Ty::Con(FLOAT.into()))),
+            Some(PairKind::Range { inclusive: true })
         );
     }
 
@@ -311,7 +259,7 @@ fn shape() -> Shape {
     fn string_range_stays_boxed() {
         let c = checker();
         assert_eq!(
-            two_word_return_enum(&c, &range_ty(Ty::Con(STRING.into()))),
+            two_word_kind(&c, &range_ty(Ty::Con(STRING.into()))),
             None
         );
     }

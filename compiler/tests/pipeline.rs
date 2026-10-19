@@ -4100,7 +4100,7 @@ fn main() {
         fn_symbols: debug.fn_symbols,
         struct_layouts: pipeline.archived_struct_layouts(),
         operand_stack_slots: pipeline.operand_stack_slots(),
-        stack_maps: pipeline.stack_maps().to_vec(),
+        stack_maps: Vec::new(),
         precise_frames: pipeline.precise_frames().to_vec(),
         class_word_kinds: pipeline.class_word_kinds(),
         static_word_kinds: pipeline.static_word_kinds(),
@@ -4110,7 +4110,7 @@ fn main() {
     let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
     let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
     assert!(decoded.stack_maps_persisted);
-    assert_eq!(decoded.program.stack_maps.as_slice(), pipeline.stack_maps());
+    assert!(decoded.program.stack_maps.is_empty(), "new archives carry no S2b maps");
     assert_eq!(decoded.program.precise_frames.as_slice(), pipeline.precise_frames());
     assert!(
         !decoded.program.precise_frames.is_empty(),
@@ -4164,7 +4164,6 @@ fn main() {
 "#;
     let mut pipeline = test_pipeline();
     let (bytecode, constants) = pipeline.compile_src(src).expect("compile");
-    // Fuse-IL bodies carry no S2b map; precise frame maps root them.
     assert!(
         pipeline.precise_frames().iter().any(|m| !m.at_pc.is_empty()),
         "pair/main should have precise frame maps: {:?}",
@@ -4180,12 +4179,9 @@ fn b6_vec_push_maps_and_nsieve_checksum() {
     let mut pipeline = test_pipeline();
     let (bytecode, constants) = pipeline.compile_src(src).expect("compile nsieve");
     assert!(
-        pipeline
-            .stack_maps()
-            .iter()
-            .any(|m| !m.safepoints.is_empty()),
-        "B6 nsieve Vec.push should bind grow maps: {:?}",
-        pipeline.stack_maps()
+        pipeline.precise_frames().iter().any(|m| !m.at_pc.is_empty()),
+        "B6 nsieve Vec.push should have precise frame maps: {:?}",
+        pipeline.precise_frames()
     );
     let out = run_bytecode(bytecode, constants, &pipeline, None);
     assert_eq!(out, "1900");
@@ -4209,7 +4205,6 @@ fn main() {
 "#;
     let mut pipeline = test_pipeline();
     let (bytecode, constants) = pipeline.compile_src(src).expect("compile");
-    // Fuse-IL bodies carry no S2b map; precise frame maps root them.
     assert!(
         pipeline.precise_frames().iter().any(|m| !m.at_pc.is_empty()),
         "CALL+MakeArray should have precise frame maps: {:?}",
@@ -4823,7 +4818,7 @@ fn main() {
         fn_symbols: Vec::new(),
         struct_layouts: Vec::new(),
         operand_stack_slots: pipeline.operand_stack_slots(),
-        stack_maps: pipeline.stack_maps().to_vec(),
+        stack_maps: Vec::new(),
         precise_frames: pipeline.precise_frames().to_vec(),
         class_word_kinds: pipeline.class_word_kinds(),
         static_word_kinds: pipeline.static_word_kinds(),
