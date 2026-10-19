@@ -4092,7 +4092,7 @@ impl Compiler {
             &[(string.clone(), tag_of(ValueTag::String))],
             int.clone(),
             None,
-            |b, a| b.call("len", vec![a[0]], int.clone()),
+            |b, a| b.push(crate::hir::HirKind::Call { callee: crate::hir::Callee::Method { name: "len".to_string() }, args: vec![a[0]] }, int.clone()),
         );
 
         // Hash thunks: int/byte/bool identity after unbox; float via Value bits; string HostInvoke hash_string.
@@ -4342,7 +4342,7 @@ impl Compiler {
         });
         // fn len(): `ArrayLen`.
         self.emit_builtin_method(&format!("{owner}::len"), &[(vec.clone(), None)], int.clone(), |b, a| {
-            b.call("len", a, int.clone())
+            b.push(HirKind::Call { callee: crate::hir::Callee::Method { name: "len".to_string() }, args: a }, int.clone())
         });
         host(self, "capacity", "vec_capacity", std::slice::from_ref(&vec), &int);
         // A `()` native returns its own word, read as an `int`, as it was.
