@@ -625,6 +625,10 @@ pub struct Compiler {
     /// Frame words at entry of the body the direct MIR plan walk is
     /// planning: its dictionary parameters sit below it.
     hir_mir_dict_sp: Option<u32>,
+    /// The lambda being planned or emitted takes its enclosing shared
+    /// generic body's dictionaries as captures (#1526): `(first slot,
+    /// count)`, after its own captures. It is no shared body itself.
+    hir_lambda_dicts: Option<(u32, u32)>,
     /// A bounded generic instance method's context dictionaries, as its
     /// prologue loads them out of its own dictionary: each one's frame
     /// slot, the own dictionary's slot and the index there. Set by the
@@ -822,6 +826,7 @@ impl Default for Compiler {
             hir_defers: false,
             hir_entry_sp: None,
             hir_mir_dict_sp: None,
+            hir_lambda_dicts: None,
             hir_entry_ctx: Vec::new(),
             hir_mir_ctx: Vec::new(),
             hir_entry_unbox: Vec::new(),
