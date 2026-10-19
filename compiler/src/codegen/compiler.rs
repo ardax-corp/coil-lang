@@ -4033,21 +4033,28 @@ impl Compiler {
             });
         }
 
-        // Show thunks for ground tuples (#1451): reserved here, raw (the
-        // tuple's own word) with a `$dict` adapter, as the string thunk;
-        // emitted by `emit_tuple_show_thunks` once the module's own `Show`
-        // entries exist, so `%v` of an item calls them.
-        let tuples: Vec<Ty> = self.checker.generics().tuple_show_tys().cloned().collect();
-        for ty in tuples {
-            let fqn = Generics::builtin_instance_fqn("Show", &ty.to_string(), "show");
-            if self.functions.contains_key(&fqn) {
+        // Structural thunks of ground tuples and records (#1451, #1479):
+        // reserved here, raw (the value's own word) with a `$dict` adapter,
+        // as the string thunk; emitted by `emit_structural_thunks` once the
+        // module's own instance entries exist, so an item's are called.
+        let structural: Vec<(String, Ty)> =
+            self.checker.generics().structural_instances().map(|(class, ty)| (class.to_string(), ty.clone())).collect();
+        for (class, ty) in structural {
+            let Some(class_def) = self.checker.generics().typeclass(&class) else {
                 continue;
-            }
-            self.note_raw_builtin_thunk(&fqn);
-            self.reserve_function_entry(Self::dict_adapter_name(&fqn));
-            self.reserve_function_entry(fqn.clone());
-            if !self.tuple_show_thunks.iter().any(|(f, _)| *f == fqn) {
-                self.tuple_show_thunks.push((fqn, ty));
+            };
+            let methods: Vec<String> = class_def.methods.iter().map(|m| m.name.clone()).collect();
+            for method in methods {
+                let fqn = Generics::builtin_instance_fqn(&class, &ty.to_string(), &method);
+                if self.functions.contains_key(&fqn) {
+                    continue;
+                }
+                self.note_raw_builtin_thunk(&fqn);
+                self.reserve_function_entry(Self::dict_adapter_name(&fqn));
+                self.reserve_function_entry(fqn.clone());
+                if !self.structural_thunks.iter().any(|(f, ..)| *f == fqn) {
+                    self.structural_thunks.push((fqn, method, ty.clone()));
+                }
             }
         }
 
@@ -7246,7 +7253,7 @@ impl Compiler {
 
         self.bytecode.append(&mut program);
         self.emit_used_builtin_show_thunks();
-        self.emit_tuple_show_thunks();
+        self.emit_structural_thunks();
         self.pad_debug_locs();
         // Kept while this module holds methods a later module may clone.
         let seq = self.program_seq;
@@ -7283,14 +7290,15 @@ impl Compiler {
         skip.bind_label(after, self.bytecode.il_mut());
     }
 
-    /// Emit the reserved `Show` thunks of ground tuples (#1451) behind a
-    /// jump, as [`Self::emit_used_builtin_show_thunks`]: each is
-    /// `format("%v", t)` over its argument, the raw entry taking the tuple's
-    /// word and its `$dict` adapter the boxed one.
-    fn emit_tuple_show_thunks(&mut self) {
-        let due: Vec<_> = std::mem::take(&mut self.tuple_show_thunks)
+    /// Emit the reserved structural thunks of ground tuples and records
+    /// (#1451, #1479) behind a jump, as
+    /// [`Self::emit_used_builtin_show_thunks`]: the raw entry takes the
+    /// value's word and its `$dict` adapter the boxed one. `show` is
+    /// `format("%v", v)` over its argument.
+    fn emit_structural_thunks(&mut self) {
+        let due: Vec<_> = std::mem::take(&mut self.structural_thunks)
             .into_iter()
-            .filter(|(fqn, _)| !self.functions.contains_key(fqn))
+            .filter(|(fqn, ..)| !self.functions.contains_key(fqn))
             .collect();
         if due.is_empty() {
             return;
@@ -7300,13 +7308,19 @@ impl Compiler {
         let after = skip.fresh_label(self.bytecode.il_mut());
         skip.emit_jump_to(after, BbJumpKind::Unconditional, self.bytecode.il_mut());
         self.hir_synth_callees.insert("format".to_string(), SynthCallee { format: true, ..SynthCallee::default() });
-        for (fqn, ty) in due {
+        for (fqn, method, ty) in due {
+            let Some(tag) = Self::ty_to_value_tag(&ty) else {
+                continue;
+            };
             let adapter = Self::dict_adapter_name(&fqn);
-            for (name, tag) in [(fqn, None), (adapter, Some(ValueTag::Tuple as u32))] {
-                self.emit_builtin_entry(&name, &[(ty.clone(), tag)], string.clone(), None, |b, a| {
-                    let fmt = b.str("%v");
-                    b.call("format", vec![fmt, a[0]], string.clone())
-                });
+            for (name, tag) in [(fqn, None), (adapter, Some(tag as u32))] {
+                match method.as_str() {
+                    "show" => self.emit_builtin_entry(&name, &[(ty.clone(), tag)], string.clone(), None, |b, a| {
+                        let fmt = b.str("%v");
+                        b.call("format", vec![fmt, a[0]], string.clone())
+                    }),
+                    _ => {}
+                }
             }
         }
         self.hir_synth_callees.clear();

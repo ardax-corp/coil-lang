@@ -1134,35 +1134,41 @@ impl Generics {
         self.register_nominal_type("ArrayIter", PRELUDE_MODULE);
     }
 
-    /// Whether `class` is satisfied for `ty` (builtin or registered instance).
-    /// Register the structural `Show` instance of the ground tuple `ty`,
-    /// shown as `%v` shows it (#1451). The checker adds one the first time
-    /// a goal asks for it (`Checker::ensure_tuple_show_instance`); codegen
-    /// emits its thunk ([`Self::tuple_show_tys`]).
-    pub fn register_tuple_show(&mut self, ty: Ty) {
-        let fqn = Self::builtin_instance_fqn("Show", &ty.to_string(), "show");
+    /// Register the structural instance of `class` for the ground tuple or
+    /// record `ty` (#1451, #1479): `Show` as `%v` shows it. The checker adds
+    /// one the first time a goal asks for it
+    /// (`Checker::ensure_structural_instance`); codegen emits its thunks
+    /// ([`Self::structural_instances`]).
+    pub fn register_structural_instance(&mut self, class: &str, ty: Ty) {
+        let methods: &[&str] = match class {
+            "Show" => &["show"],
+            _ => return,
+        };
+        let ty_str = ty.to_string();
         self.instances.push(InstanceDef {
-            class: "Show".into(),
+            class: class.into(),
             defined_module: PRELUDE_OPS_MODULE.into(),
             range: 0..0,
             args: vec![ty],
-            method_fqns: HashMap::from([("show".to_string(), fqn)]),
+            method_fqns: methods.iter().map(|m| (m.to_string(), Self::builtin_instance_fqn(class, &ty_str, m))).collect(),
             assoc_tys: HashMap::new(),
             context: Vec::new(),
         });
     }
 
-    /// The tuple types [`Self::register_tuple_show`] gave a `Show` instance.
-    pub fn tuple_show_tys(&self) -> impl Iterator<Item = &Ty> {
+    /// The `(class, type)` of each instance
+    /// [`Self::register_structural_instance`] registered.
+    pub fn structural_instances(&self) -> impl Iterator<Item = (&str, &Ty)> {
         self.instances
             .iter()
-            .filter(|inst| inst.class == "Show" && inst.range == (0..0) && inst.defined_module == PRELUDE_OPS_MODULE)
+            .filter(|inst| inst.range == (0..0) && inst.defined_module == PRELUDE_OPS_MODULE)
             .filter_map(|inst| match inst.args.as_slice() {
-                [ty @ Ty::Tuple(_)] => Some(ty),
+                [ty @ (Ty::Tuple(_) | Ty::Record { .. })] => Some((inst.class.as_str(), ty)),
                 _ => None,
             })
     }
 
+    /// Whether `class` is satisfied for `ty` (builtin or registered instance).
     pub fn has_instance(&self, class: &str, ty: &Ty) -> bool {
         self.find_instance(class, std::slice::from_ref(ty))
             .is_some()
