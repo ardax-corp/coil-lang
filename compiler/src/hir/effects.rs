@@ -317,6 +317,7 @@ pub(crate) fn auto_par_explanations(
     module_path: &str,
     fx: &ModuleEffects<'_>,
     pure: &HashSet<String>,
+    cases: &crate::typechecking::bare_cases::BareCases,
 ) -> Vec<String> {
     use crate::typechecking::{analyze_loop_par_sites, analyze_par_fork_sites};
     let mut all = pure.clone();
@@ -354,8 +355,8 @@ pub(crate) fn auto_par_explanations(
             reasons.join("; ")
         ));
     }
-    let actual = analyze_par_fork_sites(ast, pure);
-    let mut blocked: Vec<String> = analyze_par_fork_sites(ast, &all)
+    let actual = analyze_par_fork_sites(ast, pure, cases);
+    let mut blocked: Vec<String> = analyze_par_fork_sites(ast, &all, cases)
         .into_keys()
         .filter(|name| !actual.contains_key(name))
         .collect();

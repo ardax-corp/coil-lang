@@ -520,7 +520,9 @@ impl Checker {
                     && span.start != span.end
                     && name.starts_with(|c: char| c.is_ascii_uppercase())
                     && !self.enums_declaring_variant(name).is_empty();
-                if !is_case {
+                if is_case {
+                    self.record_bare_case(*span);
+                } else {
                     let ty = Ty::Var(self.counter.fresh());
                     self.env.insert_top(name.to_string(), Scheme::mono(ty));
                 }
@@ -558,6 +560,9 @@ impl Checker {
             None => match self.resolve_bare_constructor(variant) {
                 BareCtor::Unique(enum_name) => self.resolve_enum_key(&enum_name).unwrap_or(enum_name),
                 BareCtor::Ambiguous(enums) => {
+                    if unit {
+                        self.record_bare_case(span);
+                    }
                     self.ambiguous_bare_constructor(variant, &enums, pattern_range.clone());
                     return BarePattern::Failed;
                 }
@@ -572,6 +577,9 @@ impl Checker {
                 }
             },
         };
+        if unit {
+            self.record_bare_case(span);
+        }
         self.bare_patterns_by_span
             .insert((span.start, span.end), enum_key.clone());
         BarePattern::Ctor(enum_key)

@@ -137,10 +137,15 @@ pub const ARCHIVE_MAJOR: u16 = 4;
 ///      runtimes do not know the opcodes.
 /// 39 — HostInvoke `values_eq_shaped` (id 161): `==` on an aggregate
 ///      with `float` leaves compares them by IEEE (coil-lang#1253).
+/// 40 — [`ArchivedProgram::line_table`] / [`ArchivedProgram::span_table`]:
+///      run-length, varint-encoded locations ([`crate::LineTable`]) replace
+///      the per-slot `debug_locs` / `debug_lines`, which new archives leave
+///      empty; `-g0` / `-g1` / `-g2` pick what is kept (coil-lang#1491).
+///      Older archives still load their dense tables.
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.
-pub const ARCHIVE_MINOR: u16 = 39;
+pub const ARCHIVE_MINOR: u16 = 40;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -349,6 +354,34 @@ pub struct ArchivedProgram {
     pub debug_lines: Vec<DebugLine>,
     /// `defer` cleanup ranges (minor 33+); empty means panics run no `defer`.
     pub cleanup_ranges: Vec<crate::debug::CleanupRange>,
+    /// Encoded line runs (minor 40+, [`crate::LineTable::encode_lines`]);
+    /// empty at `-g0`.
+    pub line_table: Vec<u8>,
+    /// Encoded byte-span runs (minor 40+, [`crate::LineTable::encode_spans`]);
+    /// written only at `-g2`.
+    pub span_table: Vec<u8>,
+}
+
+/// Minor 33–39 envelope (dense debug tables, no run tables).
+#[derive(Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
+#[rkyv(compare(PartialEq))]
+pub struct ArchivedProgramV39 {
+    pub version: u32,
+    pub static_slot_count: u32,
+    pub constants: Vec<u64>,
+    pub strings: Vec<String>,
+    pub bytecode: Vec<Byte>,
+    pub source_files: Vec<String>,
+    pub debug_locs: Vec<DebugLoc>,
+    pub fn_symbols: Vec<crate::debug::FnDebugSym>,
+    pub struct_layouts: Vec<CStructLayout>,
+    pub operand_stack_slots: u32,
+    pub stack_maps: Vec<crate::stack_map::FrameStackMap>,
+    pub precise_frames: Vec<crate::stack_map::PreciseFrameMap>,
+    pub class_word_kinds: Vec<ClassWordKinds>,
+    pub static_word_kinds: Vec<u8>,
+    pub debug_lines: Vec<DebugLine>,
+    pub cleanup_ranges: Vec<crate::debug::CleanupRange>,
 }
 
 /// Minor 30–32 envelope (no cleanup ranges).
@@ -541,6 +574,10 @@ pub const DEBUG_LINES_MINOR: u16 = 30;
 /// First minor that stores [`ArchivedProgram::cleanup_ranges`].
 pub const CLEANUP_RANGES_MINOR: u16 = 33;
 
+/// First minor that stores [`ArchivedProgram::line_table`] and
+/// [`ArchivedProgram::span_table`].
+pub const LINE_TABLE_MINOR: u16 = 40;
+
 pub use crate::opcode::Byte;
 
 impl ArchivedProgram {
@@ -551,6 +588,59 @@ impl ArchivedProgram {
             fn_symbols: self.fn_symbols.clone(),
             debug_lines: self.debug_lines.clone(),
             cleanup: self.cleanup_ranges.clone(),
+            // Validated by `decode_archived_program`; a table that does not
+            // decode records nothing.
+            table: self.decode_line_table().unwrap_or_default(),
+        }
+    }
+
+    /// The run tables, decoded against [`Self::source_files`].
+    pub fn decode_line_table(&self) -> Result<crate::LineTable, crate::LineTableError> {
+        let table =
+            crate::LineTable::decode(&self.line_table, &self.span_table, self.source_files.len())?;
+        if !table.is_empty() && table.len as usize != self.bytecode.len() {
+            return Err(crate::LineTableError("line table length differs from bytecode"));
+        }
+        Ok(table)
+    }
+
+    /// Fill the debug sections from `debug` at `level`: source paths,
+    /// function names and the encoded run tables. The dense per-slot tables
+    /// stay empty (minor 40+); cleanup ranges are always kept.
+    pub fn set_debug(&mut self, debug: ProgramDebug, level: crate::DebugLevel) {
+        let debug = debug.with_level(level);
+        let table = debug.line_table(level == crate::DebugLevel::Full);
+        self.line_table = table.encode_lines();
+        self.span_table = table.encode_spans();
+        self.source_files = debug.source_files;
+        self.fn_symbols = debug.fn_symbols;
+        self.cleanup_ranges = debug.cleanup;
+        self.debug_locs = Vec::new();
+        self.debug_lines = Vec::new();
+    }
+}
+
+impl ArchivedProgramV39 {
+    fn into_program(self) -> ArchivedProgram {
+        ArchivedProgram {
+            version: self.version,
+            static_slot_count: self.static_slot_count,
+            constants: self.constants,
+            strings: self.strings,
+            bytecode: self.bytecode,
+            source_files: self.source_files,
+            debug_locs: self.debug_locs,
+            fn_symbols: self.fn_symbols,
+            struct_layouts: self.struct_layouts,
+            operand_stack_slots: self.operand_stack_slots,
+            stack_maps: self.stack_maps,
+            precise_frames: self.precise_frames,
+            class_word_kinds: self.class_word_kinds,
+            static_word_kinds: self.static_word_kinds,
+            debug_lines: self.debug_lines,
+            cleanup_ranges: self.cleanup_ranges,
+            line_table: Vec::new(),
+            span_table: Vec::new(),
         }
     }
 }
@@ -574,6 +664,8 @@ impl ArchivedProgramV32 {
             static_word_kinds: self.static_word_kinds,
             debug_lines: self.debug_lines,
             cleanup_ranges: Vec::new(),
+            line_table: Vec::new(),
+            span_table: Vec::new(),
         }
     }
 }
@@ -597,6 +689,8 @@ impl ArchivedProgramV29 {
             static_word_kinds: self.static_word_kinds,
             debug_lines: Vec::new(),
             cleanup_ranges: Vec::new(),
+            line_table: Vec::new(),
+            span_table: Vec::new(),
         }
     }
 }
@@ -620,6 +714,8 @@ impl ArchivedProgramV12 {
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
             cleanup_ranges: Vec::new(),
+            line_table: Vec::new(),
+            span_table: Vec::new(),
         }
     }
 }
@@ -643,6 +739,8 @@ impl ArchivedProgramV21 {
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
             cleanup_ranges: Vec::new(),
+            line_table: Vec::new(),
+            span_table: Vec::new(),
         }
     }
 }
@@ -666,6 +764,8 @@ impl ArchivedProgramV28 {
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
             cleanup_ranges: Vec::new(),
+            line_table: Vec::new(),
+            span_table: Vec::new(),
         }
     }
 }
@@ -689,6 +789,8 @@ impl ArchivedProgramV23 {
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
             cleanup_ranges: Vec::new(),
+            line_table: Vec::new(),
+            span_table: Vec::new(),
         }
     }
 }
@@ -712,6 +814,8 @@ impl ArchivedProgramV20 {
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
             cleanup_ranges: Vec::new(),
+            line_table: Vec::new(),
+            span_table: Vec::new(),
         }
     }
 }
@@ -735,6 +839,8 @@ impl ArchivedProgramV13 {
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
             cleanup_ranges: Vec::new(),
+            line_table: Vec::new(),
+            span_table: Vec::new(),
         }
     }
 }
@@ -767,6 +873,8 @@ pub fn resolve_archive_operand_slots(persisted: Option<u32>, bytecode: &[Byte]) 
 pub fn decode_archived_program(buffer: &[u8]) -> Result<DecodedArchive, ArchiveDecodeError> {
     let decoded = decode_envelope(buffer)?;
     let p = &decoded.program;
+    p.decode_line_table()
+        .map_err(|_| ArchiveDecodeError::Corrupt)?;
     crate::verify_bytecode(
         &p.bytecode,
         &p.constants,
@@ -785,6 +893,9 @@ fn decode_envelope(buffer: &[u8]) -> Result<DecodedArchive, ArchiveDecodeError> 
     let current = rkyv::access::<ArchivedArchivedProgram, Error>(buffer)
         .ok()
         .and_then(|archived| rkyv::deserialize::<ArchivedProgram, Error>(archived).ok());
+    let v39 = rkyv::access::<ArchivedArchivedProgramV39, Error>(buffer)
+        .ok()
+        .and_then(|archived| rkyv::deserialize::<ArchivedProgramV39, Error>(archived).ok());
     let v32 = rkyv::access::<ArchivedArchivedProgramV32, Error>(buffer)
         .ok()
         .and_then(|archived| rkyv::deserialize::<ArchivedProgramV32, Error>(archived).ok());
@@ -812,7 +923,7 @@ fn decode_envelope(buffer: &[u8]) -> Result<DecodedArchive, ArchiveDecodeError> 
 
     if let Some(program) = current {
         if archive_version_compatible(program.version, ARCHIVE_VERSION)
-            && archive_minor(program.version) >= CLEANUP_RANGES_MINOR
+            && archive_minor(program.version) >= LINE_TABLE_MINOR
         {
             return Ok(DecodedArchive {
                 program,
@@ -822,6 +933,20 @@ fn decode_envelope(buffer: &[u8]) -> Result<DecodedArchive, ArchiveDecodeError> 
         }
         if !archive_version_compatible(program.version, ARCHIVE_VERSION) {
             return Err(ArchiveDecodeError::Version(program.version));
+        }
+    }
+    if let Some(old) = v39 {
+        if archive_version_compatible(old.version, ARCHIVE_VERSION)
+            && archive_minor(old.version) >= CLEANUP_RANGES_MINOR
+        {
+            return Ok(DecodedArchive {
+                program: old.into_program(),
+                operand_stack_slots_persisted: true,
+                stack_maps_persisted: true,
+            });
+        }
+        if !archive_version_compatible(old.version, ARCHIVE_VERSION) {
+            return Err(ArchiveDecodeError::Version(old.version));
         }
     }
     if let Some(old) = v32 {
@@ -985,6 +1110,8 @@ mod tests {
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
             cleanup_ranges: Vec::new(),
+            line_table: Vec::new(),
+            span_table: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let archived =
@@ -1018,6 +1145,8 @@ mod tests {
                 static_word_kinds,
                 debug_lines,
                 cleanup_ranges,
+                line_table,
+                span_table,
             } = p;
             let _ = (
                 version,
@@ -1036,6 +1165,8 @@ mod tests {
                 static_word_kinds,
                 debug_lines,
                 cleanup_ranges,
+                line_table,
+                span_table,
             );
         };
     }
@@ -1070,6 +1201,8 @@ mod tests {
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
             cleanup_ranges: Vec::new(),
+            line_table: Vec::new(),
+            span_table: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let archived =
@@ -1086,9 +1219,9 @@ mod tests {
     #[test]
     fn archive_version_matches_current_abi() {
         assert_eq!(ARCHIVE_MAJOR, 4);
-        assert_eq!(ARCHIVE_MINOR, 39);
-        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 39));
-        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.39");
+        assert_eq!(ARCHIVE_MINOR, 40);
+        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 40));
+        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.40");
     }
 
     #[test]
@@ -1183,6 +1316,8 @@ mod tests {
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
             cleanup_ranges: Vec::new(),
+            line_table: Vec::new(),
+            span_table: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let archived =
@@ -1215,6 +1350,8 @@ mod tests {
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
             cleanup_ranges: Vec::new(),
+            line_table: Vec::new(),
+            span_table: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
@@ -1292,6 +1429,8 @@ mod tests {
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
             cleanup_ranges: Vec::new(),
+            line_table: Vec::new(),
+            span_table: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
@@ -1327,6 +1466,8 @@ mod tests {
             static_word_kinds: Vec::new(),
             debug_lines: Vec::new(),
             cleanup_ranges: Vec::new(),
+            line_table: Vec::new(),
+            span_table: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
@@ -1407,6 +1548,8 @@ mod tests {
             static_word_kinds: vec![WORD_POINTER, WORD_SCALAR],
             debug_lines: Vec::new(),
             cleanup_ranges: Vec::new(),
+            line_table: Vec::new(),
+            span_table: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
@@ -1440,6 +1583,8 @@ mod tests {
             static_word_kinds: Vec::new(),
             debug_lines: vec![DebugLine { line: 3, column: 4 }, DebugLine::unknown()],
             cleanup_ranges: Vec::new(),
+            line_table: Vec::new(),
+            span_table: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
@@ -1584,5 +1729,169 @@ mod tests {
         assert_eq!(outer.offsets, vec![0, 8]);
         assert_eq!(outer.size, 16);
         assert_eq!(outer.align, 8);
+    }
+
+    /// Three slots: a known span on line 1, an unknown slot, and a span on
+    /// line 2 (`fn main() {` / `    halt`).
+    fn dense_debug() -> (Vec<DebugLoc>, Vec<DebugLine>) {
+        let locs = vec![
+            DebugLoc {
+                file: 0,
+                start_byte: 0,
+                end_byte: 2,
+            },
+            DebugLoc::unknown(),
+            DebugLoc {
+                file: 0,
+                start_byte: 16,
+                end_byte: 20,
+            },
+        ];
+        let lines = vec![
+            DebugLine { line: 1, column: 0 },
+            DebugLine::unknown(),
+            DebugLine { line: 2, column: 4 },
+        ];
+        (locs, lines)
+    }
+
+    fn three_halts() -> Vec<Byte> {
+        vec![Byte::new(Instruction::HALT); 3]
+    }
+
+    #[test]
+    fn minor_39_archive_still_decodes_its_dense_tables() {
+        let (locs, lines) = dense_debug();
+        let old = ArchivedProgramV39 {
+            version: pack_archive_version(ARCHIVE_MAJOR, 39),
+            static_slot_count: 0,
+            constants: vec![],
+            strings: vec![],
+            bytecode: three_halts(),
+            source_files: vec!["main.hy".into()],
+            debug_locs: locs.clone(),
+            fn_symbols: vec![crate::debug::FnDebugSym {
+                name: "main".into(),
+                entry_pc: 0,
+            }],
+            struct_layouts: Vec::new(),
+            operand_stack_slots: LEGACY_DEFAULT_OPERAND_STACK_SLOTS,
+            stack_maps: Vec::new(),
+            precise_frames: Vec::new(),
+            class_word_kinds: Vec::new(),
+            static_word_kinds: Vec::new(),
+            debug_lines: lines.clone(),
+            cleanup_ranges: vec![crate::debug::CleanupRange {
+                start_pc: 0,
+                end_pc: 3,
+                pad_pc: 2,
+                frame_words: 1,
+            }],
+        };
+        let bytes = rkyv::to_bytes::<Error>(&old).expect("serialize");
+        let decoded = decode_archived_program(bytes.as_slice()).expect("decode minor 39");
+        assert_eq!(archive_minor(decoded.program.version), 39);
+        let debug = decoded.program.debug_bundle();
+        assert!(debug.table.is_empty(), "no run table before minor 40");
+        assert_eq!(debug.debug_locs, locs);
+        assert_eq!(debug.cleanup.len(), 1);
+        assert_eq!(debug.fn_symbols[0].name, "main");
+        assert_eq!(debug.file_line_at(0), Some((0, lines[0])));
+        assert_eq!(debug.file_line_at(1), None);
+        assert_eq!(debug.file_line_at(2), Some((0, lines[2])));
+        assert_eq!(debug.loc_at(2), Some(locs[2]));
+    }
+
+    fn program_at(level: crate::DebugLevel) -> ArchivedProgram {
+        let (locs, lines) = dense_debug();
+        let mut program = ArchivedProgram {
+            version: ARCHIVE_VERSION,
+            static_slot_count: 0,
+            constants: vec![],
+            strings: vec![],
+            bytecode: three_halts(),
+            source_files: Vec::new(),
+            debug_locs: Vec::new(),
+            fn_symbols: Vec::new(),
+            struct_layouts: Vec::new(),
+            operand_stack_slots: LEGACY_DEFAULT_OPERAND_STACK_SLOTS,
+            stack_maps: Vec::new(),
+            precise_frames: Vec::new(),
+            class_word_kinds: Vec::new(),
+            static_word_kinds: Vec::new(),
+            debug_lines: Vec::new(),
+            cleanup_ranges: Vec::new(),
+            line_table: Vec::new(),
+            span_table: Vec::new(),
+        };
+        let debug = ProgramDebug {
+            source_files: vec!["main.hy".into()],
+            debug_locs: locs,
+            fn_symbols: vec![crate::debug::FnDebugSym {
+                name: "main".into(),
+                entry_pc: 0,
+            }],
+            debug_lines: lines,
+            cleanup: vec![crate::debug::CleanupRange {
+                start_pc: 0,
+                end_pc: 3,
+                pad_pc: 2,
+                frame_words: 1,
+            }],
+            table: Default::default(),
+        };
+        program.set_debug(debug, level);
+        program
+    }
+
+    fn round_trip(program: &ArchivedProgram) -> ProgramDebug {
+        let bytes = rkyv::to_bytes::<Error>(program).expect("serialize");
+        decode_archived_program(bytes.as_slice())
+            .expect("decode")
+            .program
+            .debug_bundle()
+    }
+
+    #[test]
+    fn debug_levels_round_trip_through_the_run_tables() {
+        let (locs, lines) = dense_debug();
+        let full = program_at(crate::DebugLevel::Full);
+        assert!(full.debug_locs.is_empty() && full.debug_lines.is_empty());
+        assert!(!full.line_table.is_empty() && !full.span_table.is_empty());
+        let debug = round_trip(&full);
+        for pc in 0..3 {
+            let want = locs[pc].is_known().then(|| (0, lines[pc]));
+            assert_eq!(debug.file_line_at(pc), want, "-g2 pc {pc}");
+            assert_eq!(debug.loc_at(pc), locs[pc].is_known().then_some(locs[pc]));
+        }
+        assert_eq!(debug.fn_symbols.len(), 1);
+
+        let lines_only = program_at(crate::DebugLevel::Lines);
+        assert!(lines_only.span_table.is_empty());
+        let debug = round_trip(&lines_only);
+        assert_eq!(debug.file_line_at(2), Some((0, lines[2])));
+        assert_eq!(debug.loc_at(2), None, "-g1 keeps no byte spans");
+        assert_eq!(debug.source_files, vec!["main.hy".to_string()]);
+        assert_eq!(debug.fn_symbols.len(), 1);
+
+        let none = program_at(crate::DebugLevel::None);
+        assert!(none.line_table.is_empty() && none.span_table.is_empty());
+        assert!(none.source_files.is_empty() && none.fn_symbols.is_empty());
+        assert_eq!(none.cleanup_ranges.len(), 1, "cleanup is behaviour, kept at -g0");
+        let debug = round_trip(&none);
+        assert!(!debug.has_locations());
+        assert_eq!(debug.cleanup.len(), 1);
+    }
+
+    #[test]
+    fn corrupt_line_table_is_rejected() {
+        let mut program = program_at(crate::DebugLevel::Lines);
+        // Point the line table at a file the archive does not list.
+        program.source_files.clear();
+        let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
+        assert!(matches!(
+            decode_archived_program(bytes.as_slice()),
+            Err(ArchiveDecodeError::Corrupt)
+        ));
     }
 }

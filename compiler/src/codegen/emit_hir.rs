@@ -557,6 +557,20 @@ impl Compiler {
             self.report_generic_fn_value(&value, at);
             return;
         }
+        if let Some((name, at)) = self.polyfn_over_application.take()
+            && reason == "polyfn-over-application"
+        {
+            let mut msg = Message::error(
+                ErrorCode::UnsupportedGenericFnValue,
+                format!("generic function `{name}` cannot be called through a value with more arguments than it declares"),
+                at.0..at.1,
+            );
+            msg.with_help(format!(
+                "call `{name}` by name with every argument instead: a polymorphic function value does not record how many parameters it declares"
+            ));
+            self.messages.push(msg);
+            return;
+        }
         // After a real error (a missing module, a type error) the body is
         // usually unlowerable because of it; this internal error is noise.
         if self.messages.iter().any(|m| *m.kind() == reporting::MessageKind::ERROR) {
@@ -579,6 +593,7 @@ impl Compiler {
     /// it ([`Self::report_unlowered`]).
     pub(super) fn try_lower_hir_function(&mut self, span: &SimpleSpan, body: &Output<'_>) -> bool {
         self.hir_refusal = None;
+        *self.polyfn_over_application.borrow_mut() = None;
         // Clones an earlier body planned but never called give back their room.
         self.planned_method_clones.borrow_mut().clear();
         let entry_sp = self.hir_entry_sp.take();
@@ -3544,11 +3559,13 @@ impl Compiler {
         let at = |ty: &Ty| Self::apply_ty_var_map(ty, &map);
         // A generic `Option` / `Result` result is boxed even in a clone: the
         // open type's layout (`generic_enum_layout`), converted from after
-        // the call.
+        // the call. A user enum (`Slot<T>`) has no open layout of its own:
+        // the clone builds it at its ground types (#1567).
         let enum_boundary = |generic: &Ty, concrete: &Ty| {
             !matches!(generic, Ty::Var(_))
                 && !crate::hir::layout::ty_is_closed(generic)
                 && lower::classify(&self.checker, concrete) == Some(ValueClass::Enum)
+                && self.generic_enum_layout(generic).is_some()
         };
         // Arguments pass in the clone's own layout at its types: the clone
         // converts nothing on entry.
@@ -3580,7 +3597,7 @@ impl Compiler {
             return Err("callee-signature");
         }
         let ret_layout = if enum_boundary(&ret_ty, &ret) {
-            self.generic_enum_layout(&ret_ty).ok_or("callee-signature")?
+            self.generic_enum_layout(&ret_ty).expect("checked by `enum_boundary`")
         } else {
             self.value_layout(&ret)
         };
@@ -4981,7 +4998,17 @@ impl Compiler {
             // `fn mk(..) -> fn(..) -> T`: the scheme's curried peel also took
             // the returned function's params; they belong to the result.
             None if param_tys.len() > argc
-                && self.checker.fn_param_names(&lookup).is_some_and(|names| names.len() == argc) =>
+                && self
+                    .checker
+                    .fn_param_names(&lookup)
+                    .map(<[String]>::len)
+                    // A module-qualified function's names are keyed bare:
+                    // its recorded arity says where its own params end.
+                    .or_else(|| match self.fn_arities.get(&key).or_else(|| self.fn_arities.get(&lookup)) {
+                        Some(&(fixed, false)) => Some(fixed as usize),
+                        _ => None,
+                    })
+                    .is_some_and(|n| n == argc) =>
             {
                 returned = param_tys.split_off(argc);
                 param_tys
@@ -6887,6 +6914,18 @@ impl Compiler {
                 // is the call's word, or its object (#1515).
                 if lower::polyfn_callee(hir, &self.checker, *f) {
                     let e = hir.expr(id);
+                    // A curried generic function's `PolyFn` called with more
+                    // arguments than it declares: a `PolyFn` does not record
+                    // its arity, so the call cannot hand the rest to the
+                    // function it returns (#1569).
+                    if let Some(source) = self.hir_polyfn_source(hir, emit, *f)
+                        && let Some([candidate]) = self.checker.overload_candidates(&source)
+                        && !candidate.is_rest
+                        && candidate.fixed_arity < args.len()
+                    {
+                        *self.polyfn_over_application.borrow_mut() = Some((source, e.span));
+                        return Err("polyfn-over-application");
+                    }
                     let forwarded = self.forwarded_dicts_hint(e.node, e.span.0, e.span.1).is_some_and(|d| !d.is_empty());
                     let ty = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));
                     if forwarded

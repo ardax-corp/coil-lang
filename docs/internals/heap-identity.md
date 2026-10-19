@@ -150,6 +150,25 @@ a parallel live-set: two sources of truth.
 
 `live_object_count` is a counter (alloc +1, sweep/dealloc −1), not a set size.
 
+### `CallIndirect` callee check
+
+`call_indirect` ([exec_rest.rs](../../machine/src/exec_rest.rs)) probes its
+target word once: an `Object::Fn` is a closure / partial / `PolyFn`; any other
+word is taken as a bytecode offset (`CodePtr`). Since #1570 that offset must be
+`< code.len()`, or the VM panics with `internal error: CallIndirect target ...
+is not a code offset` (or `... is a heap object that is not a function`). Before
+it, a bad word (always a compiler bug) was jumped to: `code.len()` or past it
+ended the program silently with status 0. The check is one compare on the
+code-pointer arm only (it makes `set_jump_target`'s `promise!` hold rather
+than assume it); the
+`ObjFn` arm is unchanged, and the message is built in a `#[cold]` helper.
+
+Measured on a loop of 2×10M indirect calls (named functions and a capturing
+closure, `COIL_AUTO_PAR=0`, release, 4 cores under load): wall time was noise
+(median 3.35 s → 3.47 s in one 10-run interleave, 3.83 s → 3.74 s in a
+20-run one); callgrind on the 2×500k version counted 1,411.1M → 1,407.6M
+instructions (−0.25%).
+
 ## Refuse
 
 - Moving GC / compacting / forwarding pointers.

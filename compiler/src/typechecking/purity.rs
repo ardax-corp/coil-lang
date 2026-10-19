@@ -204,9 +204,9 @@ fn fn_facts(args: &Output<'_>, body: &Output<'_>, cases: &BareCases) -> FnFacts 
 }
 
 /// Collect per-function callee sets (and local impurity) for call-graph analyses.
-fn collect_fn_facts(ast: &Output<'_>) -> HashMap<String, FnFacts> {
+fn collect_fn_facts(ast: &Output<'_>, cases: &BareCases) -> HashMap<String, FnFacts> {
     let mut facts: HashMap<String, FnFacts> = HashMap::new();
-    collect_fns(ast, &mut facts, false, &BareCases::of(ast));
+    collect_fns(ast, &mut facts, false, cases);
     settle_method_calls(&mut facts, &|_, _| None);
     settle_statics(&mut facts, ast);
     facts
@@ -217,9 +217,9 @@ fn collect_fn_facts(ast: &Output<'_>) -> HashMap<String, FnFacts> {
 /// Only **top-level / module** `fn`s are considered. Impl methods are skipped:
 /// an Identifier call equal to the method name usually resolves to an imported
 /// free function (`join(self.thread)`), not a self-call.
-pub fn analyze_recursive_fns(ast: &Output<'_>) -> HashSet<String> {
+pub fn analyze_recursive_fns(ast: &Output<'_>, cases: &BareCases) -> HashSet<String> {
     let mut facts: HashMap<String, FnFacts> = HashMap::new();
-    collect_toplevel_fns(ast, &mut facts, &BareCases::of(ast));
+    collect_toplevel_fns(ast, &mut facts, cases);
     let user_fns: HashSet<String> = facts.keys().cloned().collect();
     let mut in_cycle = HashSet::new();
 
@@ -314,8 +314,8 @@ fn collect_toplevel_fns(ast: &Output<'_>, facts: &mut HashMap<String, FnFacts>, 
 }
 
 /// Per-function effect flags after call-graph closure (unknown → impure).
-pub fn analyze_fn_effects(ast: &Output<'_>) -> HashMap<String, EffectFlags> {
-    let facts = collect_fn_facts(ast);
+pub fn analyze_fn_effects(ast: &Output<'_>, cases: &BareCases) -> HashMap<String, EffectFlags> {
+    let facts = collect_fn_facts(ast, cases);
     effect_closure(&facts)
 }
 
@@ -325,8 +325,8 @@ pub fn analyze_fn_effects(ast: &Output<'_>) -> HashMap<String, EffectFlags> {
 /// callers that only need "safe to evaluate on another thread" (loop IPA) can
 /// admit ordinary helpers such as `fn sq(int i) -> int { i * i }`.
 #[cfg(test)]
-pub fn analyze_pure_fns(ast: &Output<'_>) -> HashSet<String> {
-    analyze_fn_effects(ast)
+pub fn analyze_pure_fns(ast: &Output<'_>, cases: &BareCases) -> HashSet<String> {
+    analyze_fn_effects(ast, cases)
         .into_iter()
         .filter(|(_, flags)| flags.is_pure())
         .map(|(name, _)| name)
@@ -347,8 +347,12 @@ pub struct LengthStability {
 }
 
 /// True when some `fn drop()` in `ast` may change an array's length.
+///
+/// This runs before the checker, so every bare pattern name counts as a
+/// binding. Only a function or static that shares a unit case's name and is
+/// used in the same body could tell the difference.
 pub fn finalizers_may_resize(ast: &Output<'_>) -> bool {
-    finalizers_resize(&analyze_fn_effects(ast))
+    finalizers_resize(&analyze_fn_effects(ast, BareCases::none()))
 }
 
 fn finalizers_resize(effects: &HashMap<String, EffectFlags>) -> bool {
@@ -380,8 +384,8 @@ pub fn length_stability(
 }
 
 /// Analyze top-level / nested `fn` declarations and return self-recursive pure names.
-pub fn analyze_recursive_pure(ast: &Output<'_>) -> RecursivePureSet {
-    let facts = collect_fn_facts(ast);
+pub fn analyze_recursive_pure(ast: &Output<'_>, cases: &BareCases) -> RecursivePureSet {
+    let facts = collect_fn_facts(ast, cases);
     let impure = impure_closure(&facts);
     facts
         .iter()
@@ -1079,7 +1083,7 @@ pub fn record_fn_effects(checker: &mut super::infer::Checker, ast: &Output<'_>) 
             checker.program_fn_effects.get(&id).copied()
         };
         let mut facts = HashMap::new();
-        collect_fns(ast, &mut facts, true, &BareCases::of(ast));
+        collect_fns(ast, &mut facts, true, checker.bare_cases());
         let target = |span: (usize, usize), m: &str| {
             let owner = checker.class_owner_at_span(span)?;
             let local = owner
@@ -1142,7 +1146,7 @@ mod tests {
     fn pure_set(src: &str) -> RecursivePureSet {
         let owned = src.to_string();
         let ast = Pratt::default().parse(owned.as_str()).expect("parse");
-        analyze_recursive_pure(&ast)
+        analyze_recursive_pure(&ast, BareCases::none())
     }
 
     #[test]
@@ -1159,7 +1163,7 @@ fn shadow(int N) -> int { return N + 1; }
 fn main() { return; }
 "#,
         );
-        let pure = analyze_pure_fns(&ast);
+        let pure = analyze_pure_fns(&ast, BareCases::none());
         assert!(!pure.contains("reads"), "{pure:?}");
         assert!(!pure.contains("writes"));
         assert!(!pure.contains("bumps"));
@@ -1200,7 +1204,7 @@ fn binding_arm(int x) -> int {
 fn main() { return; }
 "#,
         );
-        let pure = analyze_pure_fns(&ast);
+        let pure = analyze_pure_fns(&ast, &BareCases::checked(&ast));
         assert!(!pure.contains("case_arm"), "`Red` reads the static: {pure:?}");
         assert!(!pure.contains("none_arm"), "`N` reads the static: {pure:?}");
         assert!(pure.contains("binding_arm"), "`N` binds the scrutinee: {pure:?}");
@@ -1235,7 +1239,7 @@ fn pong(int n) -> int { return ping(n); }
 fn main() { return; }
 "#,
         );
-        let rec = analyze_recursive_fns(&ast);
+        let rec = analyze_recursive_fns(&ast, BareCases::none());
         assert!(rec.contains("ping") && rec.contains("pong"), "{rec:?}");
         assert!(!rec.contains("main"));
     }
@@ -1257,7 +1261,7 @@ impl T {
 fn main() { return; }
 "#,
         );
-        let rec = analyze_recursive_fns(&ast);
+        let rec = analyze_recursive_fns(&ast, BareCases::none());
         assert!(
             !rec.contains("join"),
             "impl methods must be excluded from recursion SCC: {rec:?}"
@@ -1307,7 +1311,7 @@ fn relay(int n) -> int { return shout(n); }
 fn main() { return; }
 "#,
         );
-        let set = analyze_pure_fns(&ast);
+        let set = analyze_pure_fns(&ast, BareCases::none());
         assert!(set.contains("add"), "{set:?}");
         assert!(!set.contains("shout"), "{set:?}");
         assert!(!set.contains("relay"), "impurity propagates: {set:?}");
@@ -1365,7 +1369,7 @@ fn grow(Vec<int> a, int x) {
 fn main() { return; }
 "#,
         );
-        let set = analyze_pure_fns(&ast);
+        let set = analyze_pure_fns(&ast, BareCases::none());
         assert!(
             !set.contains("grow"),
             "ArrayPush through a helper must be impure: {set:?}"
@@ -1388,7 +1392,7 @@ fn absorb(int x) -> int {
 fn main() { return; }
 "#,
         );
-        let set = analyze_pure_fns(&ast);
+        let set = analyze_pure_fns(&ast, BareCases::none());
         assert!(
             set.contains("absorb"),
             "counted helper with no host/push must stay pure: {set:?}"
@@ -1518,7 +1522,7 @@ fn tick() -> int { return mono_nanos(); }
 fn main() { return; }
 "#,
         );
-        let set = analyze_pure_fns(&ast);
+        let set = analyze_pure_fns(&ast, BareCases::none());
         assert!(
             set.contains("wave"),
             "prelude math must not poison purity: {set:?}"
@@ -1687,13 +1691,13 @@ fn speak(Option<int> o) -> int {
 }
 fn main() { return; }
 "#,
-        ));
+        ), BareCases::none());
         assert!(!set.contains("speak"), "speak writes under if let: {set:?}");
     }
 
     fn stability(src: &str) -> LengthStability {
         let ast = parse_ast(src);
-        length_stability(&analyze_fn_effects(&ast), false)
+        length_stability(&analyze_fn_effects(&ast, BareCases::none()), false)
     }
 
     /// Field and element writes are impure but cannot change an array length.
@@ -1717,7 +1721,7 @@ fn main() { return; }
         assert!(st.alloc_stable);
         assert!(st.fns.contains("absorb"), "{:?}", st.fns);
         assert!(st.fns.contains("poke"), "{:?}", st.fns);
-        assert!(!analyze_pure_fns(&parse_ast(src)).contains("absorb"));
+        assert!(!analyze_pure_fns(&parse_ast(src), BareCases::none()).contains("absorb"));
     }
 
     #[test]
