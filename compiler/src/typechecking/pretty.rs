@@ -28,6 +28,20 @@ pub fn format_ty_for_diag_named(
     format_ty_renamed(&pruned, &mut rename, &mut next)
 }
 
+/// Like [`format_ty_for_diag_named`] for several types shown in one message:
+/// the unknowns share one naming, so two distinct ones never both print as `a`.
+pub fn format_tys_for_diag_named(
+    subst: &Subst,
+    tys: &[&Ty],
+    names: &HashMap<TyVarId, String>,
+) -> Vec<String> {
+    let mut rename = names.clone();
+    let mut next = 0u32;
+    tys.iter()
+        .map(|ty| format_ty_renamed(&apply_ty_prune(subst, ty), &mut rename, &mut next))
+        .collect()
+}
+
 /// Format a ground type as a fully-qualified name for `typeof`.
 ///
 /// Returns `None` when the type still contains free variables, `never`,
@@ -540,6 +554,14 @@ mod tests {
     fn display_var() {
         assert_eq!(format!("{}", Ty::Var(TyVarId(0))), "t0");
         assert_eq!(format!("{}", Ty::Var(TyVarId(42))), "t42");
+    }
+
+    #[test]
+    fn diag_types_in_one_message_share_one_naming() {
+        let names = HashMap::from([(TyVarId(7), "T".to_string())]);
+        let tys = [&Ty::Var(TyVarId(3)), &Ty::Var(TyVarId(7)), &Ty::Var(TyVarId(5))];
+        let shown = format_tys_for_diag_named(&Subst::empty(), &tys, &names);
+        assert_eq!(shown, ["a", "T", "b"]);
     }
 
     #[test]
