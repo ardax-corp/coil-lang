@@ -201,9 +201,9 @@
         assert_eq!(vm.pop().as_int(), 3);
     }
 
-    /// A `WORD_BYTE` stamp packs the array; the VM's index, store, push and
-    /// len ops see the same words, and a store that does not fit a byte
-    /// unpacks it.
+    /// A `WORD_BYTE` stamp packs the array (here the legacy `TagArrayKind`,
+    /// which older archives emit); the VM's index, store, push and len ops
+    /// see the same words, and a store that does not fit a byte unpacks it.
     #[test]
     fn byte_stamped_array_reads_and_writes_like_words() {
         let mut vm = Machine::<8>::default();

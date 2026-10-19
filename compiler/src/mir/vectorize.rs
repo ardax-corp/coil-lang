@@ -1916,7 +1916,6 @@ fn region_has_barrier(func: &MirFunc, blocks: &[BlockId]) -> bool {
                         | MirInst::Format { .. }
                         | MirInst::Stringify { .. }
                         | MirInst::Unbox { .. }
-                        | MirInst::TagArrayKind { .. }
                 )
         }) || matches!(block.term, Some(Terminator::JumpIfMatch { .. }))
     })
