@@ -97,8 +97,6 @@ pub enum PreludeFn {
     Char,
     /// First code unit of a `string` as `Result<byte, string>`.
     Ord,
-    /// Drive a coroutine to completion: `block_on(coro) -> Y`.
-    BlockOn,
     Sin,
     Cos,
     Tan,
@@ -133,7 +131,6 @@ impl PreludeFn {
             Self::Diff => "diff",
             Self::Char => "char",
             Self::Ord => "ord",
-            Self::BlockOn => "block_on",
             Self::Sin => "sin",
             Self::Cos => "cos",
             Self::Tan => "tan",
@@ -167,7 +164,6 @@ impl PreludeFn {
             "diff" => Some(Self::Diff),
             "char" => Some(Self::Char),
             "ord" => Some(Self::Ord),
-            "block_on" => Some(Self::BlockOn),
             "sin" => Some(Self::Sin),
             "cos" => Some(Self::Cos),
             "tan" => Some(Self::Tan),
@@ -255,9 +251,9 @@ pub enum IoBuiltin {
     Drive,
     /// Block until any registered async waiter is ready (`() -> int`).
     WaitReady,
-    /// Decode `[byte]` as UTF-8 → `Result<string, IoError>`.
+    /// Host row of `string::from_bytes` (decode `[byte]` as UTF-8); not an `io` export.
     FromBytes,
-    /// Encode `string` → `[byte]` (UTF-8).
+    /// Host row of `string::to_bytes` (encode `string` as UTF-8); not an `io` export.
     ToBytes,
     TcpConnect,
     TcpConnectTimeout,
@@ -363,7 +359,7 @@ impl IoBuiltin {
         }
     }
 
-    /// Core stream / file / text helpers on the top-level `io` module.
+    /// Core stream / file helpers on the top-level `io` module.
     pub fn core() -> &'static [IoBuiltin] {
         &[
             Self::Stdin,
@@ -380,8 +376,6 @@ impl IoBuiltin {
             Self::AwaitWritable,
             Self::Drive,
             Self::WaitReady,
-            Self::FromBytes,
-            Self::ToBytes,
             Self::StreamAttach,
             Self::StreamPark,
             Self::ResultUnitProbe,
@@ -457,7 +451,7 @@ impl IoBuiltin {
 /// String helpers exported from virtual `string`.
 ///
 /// `format` is a compiler intrinsic that lowers to [`common::Instruction::FORMAT`];
-/// byte conversion helpers reuse the same host-native registry entries as `io`.
+/// byte conversion helpers use the `from_bytes` / `to_bytes` host-native rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StringBuiltin {
     Format,
@@ -760,9 +754,6 @@ impl VirtualModules {
                 },
                 BuiltinExport::Fn {
                     kind: PreludeFn::Char,
-                },
-                BuiltinExport::Fn {
-                    kind: PreludeFn::BlockOn,
                 },
             ],
         );
@@ -1097,6 +1088,16 @@ impl VirtualModules {
 
     /// True when this `use` targets a virtual module (concrete or glob).
     ///
+    /// A name a virtual module no longer exports: the help naming its
+    /// replacement, for the `use` that still imports it.
+    pub fn removed_item(path: &[String], name: &str) -> Option<&'static str> {
+        match (path.join("::").as_str(), name) {
+            ("io", "from_bytes") => Some("`from_bytes` is in the `string` module: `use string::{from_bytes};`"),
+            ("io", "to_bytes") => Some("`to_bytes` is in the `string` module: `use string::{to_bytes};`"),
+            _ => None,
+        }
+    }
+
     /// Used by the pipeline to skip disk discovery.
     pub fn resolves_use(&self, path: &[String], name: &str) -> bool {
         if name == "*" {
@@ -1360,7 +1361,9 @@ mod tests {
         let vm = VirtualModules::new();
         let exports = vm.resolve_glob(&["io".into()]).expect("io");
         assert!(exports.iter().any(|e| e.short_name() == "open"));
-        assert!(exports.iter().any(|e| e.short_name() == "from_bytes"));
+        assert!(!exports.iter().any(|e| e.short_name() == "from_bytes"));
+        assert!(!exports.iter().any(|e| e.short_name() == "to_bytes"));
+        assert!(VirtualModules::removed_item(&["io".into()], "from_bytes").is_some_and(|h| h.contains("use string::{from_bytes};")));
         assert!(exports.iter().any(|e| e.short_name() == "await_readable"));
         assert!(exports.iter().any(|e| e.short_name() == "wait_readable"));
         assert!(exports.iter().any(|e| e.short_name() == "wait_writable"));
