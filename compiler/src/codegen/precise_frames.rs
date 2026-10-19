@@ -390,9 +390,8 @@ fn inbound_targets(bytecode: &[Byte], constants: &[u64]) -> Vec<(u32, u32)> {
             Instruction::CALL | Instruction::TailCall | Instruction::MakeCoro => {
                 Some(b.call_parts().1)
             }
-            Instruction::CodePtr | Instruction::MakePolyFn | Instruction::MakePolyFnCapture => {
-                Some(b.operand_u32() as usize)
-            }
+            // (`MakePolyFnCapture`'s entry is the `CodePtr` before it.)
+            Instruction::CodePtr | Instruction::MakePolyFn => Some(b.operand_u32() as usize),
             _ => jump_target(b, constants),
         };
         if let Some(to) = to {
@@ -1076,9 +1075,8 @@ fn entry_arity(
             Instruction::CALL | Instruction::TailCall | Instruction::MakeCoro => {
                 Some(b.call_parts().1)
             }
-            Instruction::CodePtr | Instruction::MakePolyFn | Instruction::MakePolyFnCapture => {
-                Some(b.operand_u32() as usize)
-            }
+            // (`MakePolyFnCapture`'s entry is the `CodePtr` before it.)
+            Instruction::CodePtr | Instruction::MakePolyFn => Some(b.operand_u32() as usize),
             _ => jump_target(b, constants),
         };
         if target != Some(entry) {

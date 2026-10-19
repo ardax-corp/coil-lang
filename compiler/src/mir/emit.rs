@@ -301,7 +301,7 @@ pub(super) fn foreign_targets(func: &MirFunc, entry_label: Option<Label>) -> Has
             MirInst::Call { target, .. }
             | MirInst::CodePtr { target, .. }
             | MirInst::Alloc {
-                kind: MirAllocKind::Coro { target } | MirAllocKind::Fn { target, .. } | MirAllocKind::PolyFn { target } | MirAllocKind::PolyFnCapture { target },
+                kind: MirAllocKind::Coro { target } | MirAllocKind::Fn { target, .. } | MirAllocKind::PolyFn { target } | MirAllocKind::PolyFnCapture { target, .. },
                 ..
             } if Some(*target) != entry_label => Some(target.0),
             _ => None,
@@ -3732,9 +3732,9 @@ pub(super) fn il_for_alloc(
         ]),
         // The dictionaries, then `CodePtr` and `MakePolyFnCapture`, as
         // HIR emission builds a constrained generic function's value.
-        MirAllocKind::PolyFnCapture { target } => Ok(vec![
+        MirAllocKind::PolyFnCapture { target, params } => Ok(vec![
             code_ptr_op(target, loc),
-            IlOp::from_plain_byte(Byte::new(Instruction::MakePolyFnCapture).with_operand_u32(arity), loc),
+            IlOp::from_plain_byte(Byte::new(Instruction::MakePolyFnCapture).with_operand_u32(arity | (params << 8)), loc),
         ]),
         MirAllocKind::PolyFn { target } => Ok(vec![IlOp::Entry {
             kind: crate::il::EntryKind::MakePolyFn,

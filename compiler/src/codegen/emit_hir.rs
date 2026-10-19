@@ -180,6 +180,10 @@ struct HirGeneric {
 pub(crate) struct HirClosureAdapt {
     args: Vec<HirAdaptWord>,
     ret: HirAdaptWord,
+    /// The result's items the shared body holds boxed (a type parameter's
+    /// value inside the `Option` or tuple the closure returns), unboxed
+    /// into a rebuilt object (#1593); `ret` is then `Same`.
+    ret_items: Option<crate::mir::HirRetItems>,
 }
 
 /// One word crossing a [`HirClosureAdapt`]: its ground MIR type and how
@@ -567,7 +571,7 @@ impl Compiler {
                 at.0..at.1,
             );
             msg.with_help(format!(
-                "call `{name}` by name with every argument instead: a polymorphic function value does not record how many parameters it declares"
+                "call `{name}` by name with every argument instead: this polymorphic function value does not record how many parameters it declares"
             ));
             self.messages.push(msg);
             return;
@@ -5236,7 +5240,7 @@ impl Compiler {
         for (i, ty) in arg_tys[receivers..].iter().enumerate() {
             adapt.push(params.get(skip + i).and_then(|p| self.hir_fn_arg_unbox(p, ty, &scheme.bounds, &open)));
         }
-        let ret_adapt = self.hir_closure_adapt(cur, &ret_ty, &scheme.bounds, receivers);
+        let ret_adapt = self.hir_closure_adapt(cur, &ret_ty, &params, &scheme.bounds, receivers);
         // A bare type parameter the call boxes, whose ground value the
         // shared body may hold boxed inside its result (#1549).
         let mut boxed_vars = HashMap::new();
@@ -5277,8 +5281,7 @@ impl Compiler {
         boxed: &HashMap<crate::typechecking::ty::TyVarId, Ty>,
         receivers: usize,
     ) -> Result<Option<crate::mir::HirRetItems>, &'static str> {
-        use crate::mir::{HirRetItem, HirRetItems};
-        use crate::typechecking::ty::{ftv_ty, strip_readonly};
+        use crate::typechecking::ty::ftv_ty;
         let needy = |t: &Ty| ftv_ty(t).iter().any(|v| boxed.contains_key(v));
         if matches!(cur, Ty::Var(_) | Ty::Fun(..)) || !needy(cur) {
             return Ok(None);
@@ -5290,6 +5293,23 @@ impl Compiler {
         if params.iter().any(|p| !matches!(p, Ty::Var(_)) && needy(p)) {
             return Err("callee-generic");
         }
+        self.hir_items_rebuild(cur, vars, boxed)
+    }
+
+    /// How the object `cur` (a tuple, or an enum the checker declares)
+    /// a shared body holds the boxed values of `boxed`'s variables in is
+    /// rebuilt in its ground layout (`vars` grounding the rest): each item
+    /// a boxed variable's value unboxed, any other kept as its word.
+    /// `None` when no item holds one; refused where one is held deeper.
+    fn hir_items_rebuild(
+        &self,
+        cur: &Ty,
+        vars: &HashMap<crate::typechecking::ty::TyVarId, Ty>,
+        boxed: &HashMap<crate::typechecking::ty::TyVarId, Ty>,
+    ) -> Result<Option<crate::mir::HirRetItems>, &'static str> {
+        use crate::mir::{HirRetItem, HirRetItems};
+        use crate::typechecking::ty::{ftv_ty, strip_readonly};
+        let needy = |t: &Ty| ftv_ty(t).iter().any(|v| boxed.contains_key(v));
         let ground = |t: &Ty| apply_ty_prune(self.checker.subst(), &Self::apply_ty_var_map(t, vars));
         // Each item, typed in the callee: unboxed where it is a boxed
         // variable, else kept as the word its ground type is.
@@ -5487,8 +5507,9 @@ impl Compiler {
     /// The adapter the closure a shared generic body returns needs at the
     /// call's ground type `ground`, for the callee's result `cur` (#1532):
     /// `None` when the closure already is the ground one (no bare type
-    /// parameter of the callee in its signature changes layout). Refused
-    /// where a nested one would ([`Self::hir_adapt_conv`]), for a method
+    /// parameter of the callee in its signature changes layout). A result
+    /// holding one inside an object is rebuilt ([`Self::hir_adapt_items`]).
+    /// Refused where a nested argument would ([`Self::hir_adapt_conv`]), for a method
     /// (its result's parameters are not told apart from its own), and for
     /// a closure of several parameters (it may be curried: its arity is
     /// not its type's).
@@ -5496,6 +5517,7 @@ impl Compiler {
         &self,
         cur: &Ty,
         ground: &Ty,
+        params: &[Ty],
         bounds: &[crate::typechecking::ty::TyVarId],
         receivers: usize,
     ) -> Result<Option<HirClosureAdapt>, &'static str> {
@@ -5524,9 +5546,14 @@ impl Compiler {
         {
             parts.clear();
         }
-        let ret = self.hir_adapt_conv(p, &g, bounds)?;
         let convs = parts.iter().map(|(s, g)| self.hir_adapt_conv(s, g, bounds)).collect::<Result<Vec<_>, _>>()?;
-        if convs.iter().chain([&ret]).all(|c| *c == HirAdaptConv::Same) {
+        // A result holding a type parameter inside an `Option` or tuple is
+        // rebuilt with its boxed values unboxed, as a direct call's (#1593).
+        let (ret, ret_items) = match self.hir_adapt_conv(p, &g, bounds) {
+            Err(why) if !matches!(p, Ty::Var(_)) => (HirAdaptConv::Same, Some(self.hir_adapt_items(p, &g, params, bounds).map_err(|_| why)?)),
+            conv => (conv?, None),
+        };
+        if ret_items.is_none() && convs.iter().chain([&ret]).all(|c| *c == HirAdaptConv::Same) {
             return Ok(None);
         }
         if parts.len() > 1 {
@@ -5534,7 +5561,43 @@ impl Compiler {
         }
         let word = |g: &Ty, conv: HirAdaptConv| self.hir_adapt_word_ty(g).map(|ty| HirAdaptWord { ty, conv });
         let args = parts.iter().zip(convs).map(|((_, g), conv)| word(g, conv)).collect::<Result<Vec<_>, _>>()?;
-        Ok(Some(HirClosureAdapt { args, ret: word(&g, ret)? }))
+        Ok(Some(HirClosureAdapt { args, ret: word(&g, ret)?, ret_items }))
+    }
+
+    /// How a shared body's closure result `scheme`, at ground type
+    /// `ground`, holding a quantified variable's value inside an object is
+    /// rebuilt (#1593). Each such variable a ground type the closure
+    /// boxes (the call boxes it as an argument, the adapter as one of the
+    /// closure's) is held boxed there; one held open or as a function is
+    /// its own word. Refused where the outer function's parameters nest
+    /// one (their values of it are not boxed), for a niche `Option` or
+    /// two-word value (boxed differently), or one held deeper.
+    fn hir_adapt_items(
+        &self,
+        scheme: &Ty,
+        ground: &Ty,
+        params: &[Ty],
+        bounds: &[crate::typechecking::ty::TyVarId],
+    ) -> Result<crate::mir::HirRetItems, &'static str> {
+        use crate::typechecking::ty::ftv_ty;
+        let mut vars = HashMap::new();
+        Self::bind_scheme_vars(scheme, ground, &mut vars);
+        let mut boxed = HashMap::new();
+        for v in ftv_ty(scheme).into_iter().filter(|v| bounds.contains(v)) {
+            let ty = apply_ty_prune(self.checker.subst(), vars.get(&v).ok_or("callee-generic")?);
+            match self.hir_adapt_conv(&Ty::Var(v), &ty, bounds)? {
+                HirAdaptConv::Same => {}
+                HirAdaptConv::Box(_) if !self.hir_adapt_two_words(&ty) => {
+                    boxed.insert(v, ty);
+                }
+                _ => return Err("callee-generic"),
+            }
+        }
+        let needy = |t: &Ty| ftv_ty(t).iter().any(|v| boxed.contains_key(v));
+        if params.iter().any(|p| !matches!(p, Ty::Var(_)) && needy(p)) {
+            return Err("callee-generic");
+        }
+        self.hir_items_rebuild(scheme, &vars, &boxed)?.ok_or("callee-generic")
     }
 
     /// How one word of a shared body's closure, typed `scheme` in the
@@ -5701,6 +5764,40 @@ impl Compiler {
             });
         }
         let any = common::UNBOX_ANY_TAG;
+        if let Some(items) = &adapt.ret_items {
+            let r = b.ins_call_indirect(f, args, MirTy::HeapRef).map_err(err)?;
+            let obj = Self::closure_adapter_items(&mut b, r, items)?;
+            match adapt.ret.ty {
+                MirTy::HeapRef => b.ret(Some(obj)).map_err(err)?,
+                // A niche word: `Some` / `Err` (tag 1) its payload's word,
+                // an `Err`'s with bit 0 set; `None` zero, `Ok` its payload.
+                want @ (MirTy::NicheOpt | MirTy::NicheRes) => {
+                    let (hit, miss) = (b.create_block(), b.create_block());
+                    let p = b.ins_match_payload(obj, 0, MirTy::HeapRef).map_err(err)?;
+                    b.jump_if_match(obj, 1, vec![p], hit, miss).map_err(err)?;
+                    b.switch_to_block(hit);
+                    let w = if want == MirTy::NicheRes {
+                        let word = b.ins_cast(MirCastKind::Word, MirTy::I64, p).map_err(err)?;
+                        let one = b.ins_const(MirConst::I64(1)).map_err(err)?;
+                        b.ins_binop(crate::mir::MirBinOp::BitOr, word, one).map_err(err)?
+                    } else {
+                        p
+                    };
+                    let w = b.ins_cast(MirCastKind::Word, want, w).map_err(err)?;
+                    b.ret(Some(w)).map_err(err)?;
+                    b.switch_to_block(miss);
+                    let w = if want == MirTy::NicheRes {
+                        b.ins_match_payload(obj, 0, MirTy::HeapRef).map_err(err)?
+                    } else {
+                        b.ins_const(MirConst::I64(0)).map_err(err)?
+                    };
+                    let w = b.ins_cast(MirCastKind::Word, want, w).map_err(err)?;
+                    b.ret(Some(w)).map_err(err)?;
+                }
+                _ => return Err("closure adapter result items".into()),
+            }
+            return b.finish().map_err(err);
+        }
         match adapt.ret.conv {
             HirAdaptConv::Same => {
                 let r = b.ins_call_indirect(f, args, adapt.ret.ty).map_err(err)?;
@@ -5727,6 +5824,63 @@ impl Compiler {
             }
         }
         b.finish().map_err(err)
+    }
+
+    /// Shared body object `obj` rebuilt with the items `items` marks
+    /// unboxed, as a direct call's ([`crate::mir::HirRetItems`], #1593).
+    fn closure_adapter_items(
+        b: &mut crate::mir::MirBuilder,
+        obj: crate::mir::ValueId,
+        items: &crate::mir::HirRetItems,
+    ) -> Result<crate::mir::ValueId, String> {
+        use crate::mir::{HirRetItem, HirRetItems, MirAllocKind, MirConst, MirGcKind, MirTy};
+        let err = |e: crate::mir::MirError| format!("mir: {e}");
+        let any = common::UNBOX_ANY_TAG;
+        let read_ty = |it: &HirRetItem| if it.unbox { MirTy::HeapRef } else { it.ty };
+        let item = |b: &mut crate::mir::MirBuilder, it: &HirRetItem, v| if it.unbox { b.ins_unbox(v, any, it.ty).map_err(err) } else { Ok(v) };
+        match items {
+            HirRetItems::Tuple { items, kinds } => {
+                let mut words = Vec::with_capacity(items.len());
+                for (i, it) in items.iter().enumerate() {
+                    let at = b.ins_const(MirConst::I64(i as i64)).map_err(err)?;
+                    let v = b.ins_index(obj, at, read_ty(it), false).map_err(err)?;
+                    words.push(item(b, it, v)?);
+                }
+                let t = b.ins_alloc_kinds(MirAllocKind::Tuple, words, *kinds).map_err(err)?;
+                b.ins_gc_barrier(MirGcKind::Safepoint, vec![t]).map_err(err)
+            }
+            HirRetItems::Enum { variants } => {
+                let join = b.create_block();
+                let mut arms = Vec::with_capacity(variants.len() + 1);
+                let mut last = None;
+                for (tag, items, kinds) in variants {
+                    let payload = items
+                        .iter()
+                        .enumerate()
+                        .map(|(i, it)| b.ins_match_payload(obj, i as u32, read_ty(it)))
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(err)?;
+                    let (hit, miss) = (b.create_block(), b.create_block());
+                    b.jump_if_match(obj, *tag, payload.clone(), hit, miss).map_err(err)?;
+                    b.switch_to_block(hit);
+                    let mut words = Vec::with_capacity(items.len());
+                    for (it, &v) in items.iter().zip(&payload) {
+                        words.push(item(b, it, v)?);
+                    }
+                    let e = b.ins_alloc_kinds(MirAllocKind::Enum { tag: *tag }, words, *kinds).map_err(err)?;
+                    let e = b.ins_gc_barrier(MirGcKind::Safepoint, vec![e]).map_err(err)?;
+                    b.jump(join).map_err(err)?;
+                    arms.push((hit, e));
+                    b.switch_to_block(miss);
+                    last = Some(miss);
+                }
+                let miss = last.ok_or("closure adapter: no variant to rebuild")?;
+                b.jump(join).map_err(err)?;
+                arms.push((miss, obj));
+                b.switch_to_block(join);
+                b.ins_stack_phi(arms).map_err(err)
+            }
+        }
     }
 
     /// The adapter function [`Self::hir_fn_adapter`] reserved `label` for:
@@ -6343,6 +6497,61 @@ impl Compiler {
         })
     }
 
+    /// The closure a call `id` through `PolyFn` local `f` given `n`
+    /// arguments returns, as the generic function's shared body returns it
+    /// in its boxed ABI (#1589): `None` when the call's result is no
+    /// function, else the adapter to the call's ground type (`Ok(None)`:
+    /// it needs none), or why it has none.
+    fn hir_polyfn_ret_adapt(
+        &self,
+        hir: &HirBody,
+        emit: &HirEmit,
+        id: HirId,
+        f: HirId,
+        n: usize,
+    ) -> Option<Result<Option<HirClosureAdapt>, &'static str>> {
+        let ground = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
+        if !matches!(crate::typechecking::ty::strip_readonly(&ground), Ty::Fun(..)) {
+            return None;
+        }
+        let (scheme_ty, bounds) = match self.hir_polyfn_source(hir, emit, f) {
+            Some(source) => match self.checker.env().lookup(&source) {
+                Some(scheme) => (scheme.ty.clone(), scheme.bounds.clone()),
+                None => return Some(Err("callee-value")),
+            },
+            None => match Self::hir_forall_param_ty(hir, &self.checker, f) {
+                Some(Ty::Forall { bounds, body, .. }) => (*body, bounds),
+                _ => return Some(Err("callee-value")),
+            },
+        };
+        let mut cur = &scheme_ty;
+        let mut params = Vec::with_capacity(n);
+        for _ in 0..n {
+            let Ty::Fun(param, ret) = cur else {
+                return Some(Err("callee-value"));
+            };
+            params.push(param.as_ref().clone());
+            cur = ret;
+        }
+        Some(self.hir_closure_adapt(cur, &ground, &params, &bounds, 0))
+    }
+
+    /// The declared parameter count generic function `name`'s value records
+    /// (#1589): a constrained one's (`MakePolyFnCapture` carries it anyway)
+    /// or a curried one's (`fn konst<T>(T a) -> T -> T`, its value then
+    /// `MakePolyFnCapture` of no dictionaries); `None` for another's
+    /// (`MakePolyFn`), and for a rest function's.
+    pub(super) fn polyfn_params(&self, name: &str) -> Option<u32> {
+        let Some(&(arity, false)) = self.fn_arities.get(name) else {
+            return None;
+        };
+        if arity == 0 || arity >= 0x100 {
+            return None;
+        }
+        let curried = self.checker.fn_param_tys(name).is_some_and(|p| p.len() > arity as usize);
+        (curried || self.checker.dict_arity_for(name) > 0).then_some(arity)
+    }
+
     /// A `PolyFn` local's own type when it is a `forall` (a rank-n parameter).
     fn hir_forall_param_ty(hir: &HirBody, checker: &crate::typechecking::infer::Checker, f: HirId) -> Option<Ty> {
         let HirKind::Local(local) = hir.expr(f).kind else {
@@ -6883,14 +7092,17 @@ impl Compiler {
                 // frame, and no type parameter nested in the callee's
                 // signature (its shared body would box `T` inside the
                 // `Option` or tuple it returns: E0127, #916). An enum result
-                // is the call's word, or its object (#1515).
+                // is the call's word, or its object (#1515). A closure
+                // result is adapted to the call's ground type (#1589).
                 if lower::polyfn_callee(hir, &self.checker, *f) {
                     let e = hir.expr(id);
-                    // A curried generic function's `PolyFn` called with more
-                    // arguments than it declares: a `PolyFn` does not record
-                    // its arity, so the call cannot hand the rest to the
-                    // function it returns (#1569).
+                    // A generic function's `PolyFn` that records no arity
+                    // (`MakePolyFn`, `polyfn_params`) called with more
+                    // arguments than it declares, as `id`'s at a function
+                    // type: the call cannot hand the rest to its result
+                    // (#1569). A curried one's records it (#1589).
                     if let Some(source) = self.hir_polyfn_source(hir, emit, *f)
+                        && self.polyfn_params(&source).is_none()
                         && let Some([candidate]) = self.checker.overload_candidates(&source)
                         && !candidate.is_rest
                         && candidate.fixed_arity < args.len()
@@ -6900,9 +7112,12 @@ impl Compiler {
                     }
                     let forwarded = self.forwarded_dicts_hint(e.node, e.span.0, e.span.1).is_some_and(|d| !d.is_empty());
                     let ty = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));
+                    let closure = self.hir_polyfn_ret_adapt(hir, emit, id, *f, args.len());
                     if forwarded
                         || self.hir_polyfn_nested(hir, emit, *f)
-                        || ty.as_ref().is_none_or(|t| !crate::hir::layout::ty_is_closed(t) && !self.hir_open_enum_word(t))
+                        || closure.as_ref().is_some_and(Result::is_err)
+                        || closure.is_none()
+                            && ty.as_ref().is_none_or(|t| !crate::hir::layout::ty_is_closed(t) && !self.hir_open_enum_word(t))
                     {
                         return Err("callee-value");
                     }
