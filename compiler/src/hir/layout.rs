@@ -6,7 +6,7 @@
 //!
 //! - [`crate::typechecking::value_layout::value_layout`] is the one-word
 //!   encoding (boxed or a pointer niche).
-//! - [`crate::typechecking::return_layout::two_word_return_enum`] is the
+//! - [`crate::typechecking::return_layout::two_word_kind`] is the
 //!   two-slot direct `CALL`/`RETURN` width.
 //! - [`crate::mir::MirLayout`] is the MIR ABI class.
 //!
@@ -48,6 +48,19 @@ pub enum PairKind {
     Range { inclusive: bool },
     /// A closed user enum whose variants carry at most one field: `[payload, tag]`.
     Enum(String),
+}
+
+impl PairKind {
+    /// The enum a `[payload, tag]` pair is a value of; `None` for a product
+    /// or a range.
+    pub fn enum_name(&self) -> Option<&str> {
+        match self {
+            Self::Option => Some(common::BUILTIN_OPTION_ENUM),
+            Self::Result => Some(common::BUILTIN_RESULT_ENUM),
+            Self::Enum(name) => Some(name),
+            Self::Product | Self::Range { .. } => None,
+        }
+    }
 }
 
 // `words` and `is_niche` only have test callers.

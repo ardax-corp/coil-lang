@@ -32,7 +32,7 @@ use crate::typechecking::ty::{strip_readonly, vec_element_ty, Ty};
 
 use super::abi::DenseAbi;
 use super::builder::{MirBuilder, MirError};
-use super::func::{MirBlock, MirFunc};
+use super::func::MirFunc;
 use super::inst::{BlockId, LocalId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirGcKind, MirInst, Terminator, ValueId};
 use super::ty::MirTy;
 
@@ -445,6 +445,13 @@ pub struct HirMirInput<'a> {
     pub open_params: &'a [HirLocal],
     /// `len(x)` calls: a fixed size, or `None` for the array's length.
     pub lens: &'a HashMap<u32, Option<u32>>,
+    /// Whether a function, by its HIR callee name, is pure: it writes no
+    /// heap and does no I/O (it may trap or allocate).
+    pub pure_fn: Box<dyn Fn(&str) -> bool + 'a>,
+    /// Whether a function, by its HIR callee name, never resizes an array.
+    pub steady_fn: Box<dyn Fn(&str) -> bool + 'a>,
+    /// No finalizer resizes an array ([`MirFunc::lengths_steady`]).
+    pub alloc_steady: bool,
     /// Statements before which frame-slot locals box (they escape there).
     pub box_at: &'a HashMap<u32, Vec<u32>>,
     /// Whether a type is a class: its value is a heap object.
@@ -1104,6 +1111,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
     let boxed: HashSet<u32> = lower.boxes.keys().copied().collect();
     let unpacked = inp.packs.keys().any(|k| !lower.packed.contains(k));
     let mut func = lower.b.finish().map_err(mir)?;
+    func.lengths_steady = inp.alloc_steady;
     // A capture read at a `return` some path reaches without passing its
     // `let` would be a live-in word.
     if func.params.len() != params {
@@ -1358,39 +1366,7 @@ fn tidy(func: &mut MirFunc, order: &[BlockId]) {
             layout.push(b.id);
         }
     }
-    let mut new_id = vec![None; func.blocks.len()];
-    for (i, b) in layout.iter().enumerate() {
-        new_id[b.index()] = Some(BlockId(i as u32));
-    }
-    let map = |b: BlockId| new_id[b.index()].expect("reachable block");
-    let mut old: Vec<Option<MirBlock>> = std::mem::take(&mut func.blocks).into_iter().map(Some).collect();
-    for &b in &layout {
-        let mut block = old[b.index()].take().expect("each block once");
-        block.id = map(b);
-        for inst in &mut block.insts {
-            if let MirInst::Phi { args, .. } = inst {
-                args.retain(|(from, _)| new_id[from.index()].is_some());
-                for (from, _) in args.iter_mut() {
-                    *from = map(*from);
-                }
-                args.sort_by_key(|(from, _)| *from);
-            }
-        }
-        match &mut block.term {
-            Some(Terminator::Jump { dest }) => *dest = map(*dest),
-            Some(Terminator::Br { taken, not_taken, .. } | Terminator::JumpIfMatch { taken, not_taken, .. }) => {
-                *taken = map(*taken);
-                *not_taken = map(*not_taken);
-            }
-            _ => {}
-        }
-        func.blocks.push(block);
-    }
-    func.entry = map(func.entry);
-    func.term_locs = std::mem::take(&mut func.term_locs)
-        .into_iter()
-        .filter_map(|(b, loc)| Some((new_id.get(b.index()).copied().flatten()?, loc)))
-        .collect();
+    func.relayout(&layout);
 }
 
 /// Point `term`'s edges to `from` at `to`.
@@ -1922,10 +1898,21 @@ impl Lower<'_> {
     /// `id`'s word, or its box when it is a two-word value.
     fn word_or_boxed(&mut self, id: HirId) -> Result<Option<ValueId>, Refusal> {
         if self.inp.pair_tys.contains_key(&id.0) {
-            self.boxed_word(id)
-        } else {
-            self.word(id)
+            return self.boxed_word(id);
         }
+        // A `()` is stored and passed as the empty tuple object (#1427).
+        match self.value(id)? {
+            Val::V(v) => Ok(Some(v)),
+            Val::Never => Ok(None),
+            Val::Unit => self.unit_object().map(Some),
+            Val::Pair(..) => Err("pair operand".into()),
+        }
+    }
+
+    /// The empty tuple object a `()` value is as a word.
+    fn unit_object(&mut self) -> Result<ValueId, Refusal> {
+        let obj = self.b.ins_alloc(MirAllocKind::Tuple, Vec::new()).map_err(mir)?;
+        self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)
     }
 
     /// `id`'s word, a two-word value boxed to one, as HIR emission's
@@ -2305,9 +2292,13 @@ impl Lower<'_> {
             };
             words.push(v);
         }
-        let kinds = common::pack_word_kinds(
-            args.iter().map(|&a| self.expr_ty(a).map_or(common::WORD_UNKNOWN, |t| (self.inp.word_kind)(t))),
-        );
+        // A `()` item is the empty tuple object, a pointer, as an enum's
+        // `()` payload (#1427).
+        let kinds = common::pack_word_kinds(args.iter().map(|&a| match self.expr_ty(a) {
+            Some(t) if is_unit(t) => common::WORD_POINTER,
+            Some(t) => (self.inp.word_kind)(t),
+            None => common::WORD_UNKNOWN,
+        }));
         let obj = self.b.ins_alloc_kinds(MirAllocKind::Tuple, words, kinds).map_err(mir)?;
         Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?))
     }
@@ -2345,10 +2336,8 @@ impl Lower<'_> {
             return Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?));
         }
         // A numeric range: its typed object, start and end its fields.
-        if let Some(kind) = crate::typechecking::return_layout::two_word_range_kind(ty) {
-            use crate::typechecking::return_layout as rl;
-            let inclusive = rl::range_kind_inclusive(kind).ok_or("box pair type")?;
-            let type_id = rl::range_heap_type_id(inclusive);
+        if let Some(crate::hir::layout::PairKind::Range { inclusive }) = crate::typechecking::return_layout::two_word_range_kind(ty) {
+            let type_id = crate::typechecking::return_layout::range_heap_type_id(inclusive);
             let obj = self.b.ins_alloc(MirAllocKind::Object { type_id, nfields: 2 }, Vec::new()).map_err(mir)?;
             let obj = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?;
             self.b.ins_heap_field_store(obj, lo, None, Some(0)).map_err(mir)?;
@@ -3957,8 +3946,7 @@ impl Lower<'_> {
                 if !self.effect(arg)? {
                     return Ok(Val::Never);
                 }
-                let obj = self.b.ins_alloc(MirAllocKind::Tuple, Vec::new()).map_err(mir)?;
-                words.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?);
+                words.push(self.unit_object()?);
                 continue;
             }
             if !pair && !boxed && self.expr_ty(arg).and_then(|t| self.inp.word(t)).is_none() {
@@ -4050,6 +4038,21 @@ impl Lower<'_> {
         // call's result is what the body returns.
         if self.inp.tail_calls.contains(&id.0) && site.unbox.is_none() && niche.is_none() {
             self.b.allow_tail_call(site.target);
+        }
+        if let HirKind::Call { callee: Callee::Named { name, .. }, .. } = &self.hir.expr(id).kind {
+            // A pure function's one scalar word: an operator that may trap.
+            if (self.inp.pure_fn)(name)
+                && site.unbox.is_none()
+                && site.dicts.is_empty()
+                && niche.is_none()
+                && dest_hi.is_none()
+                && ret.is_numeric()
+            {
+                self.b.mark_pure_call(dest);
+            }
+            if (self.inp.steady_fn)(name) {
+                self.b.mark_steady_call(dest);
+            }
         }
         // A bare type parameter result comes back boxed.
         if let Some(tag) = site.unbox {
@@ -4437,6 +4440,27 @@ impl Lower<'_> {
         };
         let mut words = Vec::with_capacity(args.len());
         for (&arg, &tag) in args.iter().zip(&p.boxes) {
+            // A `()` runs for its effect: boxed to a bare type parameter
+            // as the word a dictionary adapter moves it as, else the empty
+            // tuple object a plain call passes (#1450).
+            if self.expr_ty(arg).is_some_and(|t| is_unit(t) && self.inp.word(t).is_none()) {
+                if !self.effect(arg)? {
+                    return Ok(Val::Never);
+                }
+                let v = match tag {
+                    Some(_) => self.b.ins_const(MirConst::I64(0)).map_err(mir)?,
+                    None => self.unit_object()?,
+                };
+                let v = match tag {
+                    Some(tag) => {
+                        let boxed = self.at_expr(arg, |l| l.b.ins_alloc(MirAllocKind::Boxed { tag }, vec![v]).map_err(mir))?;
+                        self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![boxed]).map_err(mir)?
+                    }
+                    None => v,
+                };
+                words.push(v);
+                continue;
+            }
             let Some(v) = self.word(arg)? else {
                 return Ok(Val::Never);
             };
@@ -4943,6 +4967,8 @@ impl Lower<'_> {
     /// plain heap word.
     fn tuple_item(&self, ty: &Ty) -> Option<MirTy> {
         scalar(ty)
+            // A `()` item is the empty tuple object (#1427).
+            .or_else(|| is_unit(ty).then_some(MirTy::HeapRef))
             .or_else(|| self.inp.plain_heap(ty).then_some(MirTy::HeapRef))
             // A type parameter's item in a shared body: the opaque word as
             // stored, as an array's (#1143).
@@ -4956,6 +4982,13 @@ impl Lower<'_> {
     /// `xs[i]` on a heap array: the array, then the index, as HIR emission
     /// pushes them.
     fn heap_index(&mut self, id: HirId, base: HirId, index: HirId) -> Result<Val, Refusal> {
+        // A tuple's `()` item: the base and index for their effects (#1427).
+        if self.expr_ty(id).is_some_and(is_unit) {
+            if !self.effect(base)? || !self.effect(index)? {
+                return Ok(Val::Never);
+            }
+            return Ok(Val::Unit);
+        }
         let ty = match self.expr_ty(base) {
             // A tuple's field: a scalar.
             Some(t) if matches!(strip_readonly(t), Ty::Tuple(_)) => self.expr_ty(id).and_then(|t| self.tuple_item(t)),
@@ -5103,10 +5136,13 @@ impl Lower<'_> {
         let drop_type = if args.is_empty() { None } else { (self.inp.enum_drop)(enum_name) };
         let mut words = Vec::with_capacity(args.len());
         for (&arg, t) in args.iter().zip(tys) {
-            // A `()` payload is the empty tuple object.
-            if lower::is_unit_make(self.hir, arg) {
-                let obj = self.b.ins_alloc(MirAllocKind::Tuple, Vec::new()).map_err(mir)?;
-                words.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?);
+            // A `()` payload is the empty tuple object, after a `()`-typed
+            // value's effect (`Some(f())`, #1449).
+            if lower::is_unit_make(self.hir, arg) || is_unit(t) {
+                if !self.effect(arg)? {
+                    return Ok(Val::Never);
+                }
+                words.push(self.unit_object()?);
                 continue;
             }
             let want = self
@@ -5129,7 +5165,7 @@ impl Lower<'_> {
         // Declaration-order payload kinds, as HIR emission's `MakeEnumK`; a
         // `()` payload is the empty tuple object, a pointer.
         let kinds = common::pack_word_kinds(args.iter().zip(tys).map(|(&a, t)| {
-            if lower::is_unit_make(self.hir, a) {
+            if lower::is_unit_make(self.hir, a) || is_unit(t) {
                 common::WORD_POINTER
             } else {
                 (self.inp.word_kind)(t)
@@ -5594,7 +5630,8 @@ impl Lower<'_> {
             match self.value(arg)? {
                 Val::V(v) => words.push(v),
                 Val::Never => return Ok(Val::Never),
-                Val::Unit => return Err("unit operand".into()),
+                // `weak(())`: the empty tuple object.
+                Val::Unit => words.push(self.unit_object()?),
                 Val::Pair(lo, hi) => {
                     let ty = self.expr_ty(arg).ok_or("host argument type")?.clone();
                     match self.box_pair_val(&ty, lo, hi)? {
@@ -5819,7 +5856,9 @@ impl Lower<'_> {
                 let mut out = Vec::new();
                 for p in pats {
                     match p {
+                        // A `()` local has no slot (#1427).
                         HirPat::Wild => {}
+                        HirPat::Bind(l) if self.unit_local(*l) => {}
                         HirPat::Bind(l) => {
                             let ty = self.hir.local(*l).ty.as_ref().and_then(|t| self.tuple_item(t)).ok_or("for in pattern type")?;
                             if self.local_ty(*l)? != ty {
@@ -5885,7 +5924,9 @@ impl Lower<'_> {
             (HirPat::Tuple(pats), Some(parts)) => {
                 let mut parts = parts.into_iter();
                 for (k, p) in pats.iter().enumerate() {
-                    if let HirPat::Bind(_) = p {
+                    if let HirPat::Bind(l) = p
+                        && !self.unit_local(*l)
+                    {
                         let (l, ty) = parts.next().ok_or("for in pattern")?;
                         let c = self.b.ins_const(MirConst::I64(k as i64)).map_err(mir)?;
                         let v = self.b.ins_index(item, c, ty, false).map_err(mir)?;
@@ -6062,6 +6103,8 @@ impl Lower<'_> {
     fn bind_tuple_item(&mut self, pat: &HirPat, v: ValueId, ty: Option<&Ty>) -> Result<(), Refusal> {
         match pat {
             HirPat::Wild => Ok(()),
+            // A `()` local has no slot (#1427).
+            HirPat::Bind(local) if self.unit_local(*local) => Ok(()),
             HirPat::Bind(local) => self.bind(*local, v),
             HirPat::Tuple(items) => {
                 let Some(Ty::Tuple(tys)) = ty.map(strip_readonly) else {

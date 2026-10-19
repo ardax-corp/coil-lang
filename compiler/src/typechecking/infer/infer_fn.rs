@@ -604,7 +604,7 @@ impl Checker {
                             })
                             .unwrap_or(false));
                 if !allow_fallthrough {
-                    let ret_s = crate::typechecking::pretty::format_ty_for_diag(&self.subst, &ret);
+                    let ret_s = self.diag_ty(&ret);
                     let mut message = Message::error(
                         ErrorCode::ReturnMismatch,
                         format!(
@@ -739,6 +739,7 @@ impl Checker {
             let named: Vec<(String, TyVarId)> =
                 type_params.iter().map(|tp| tp.name.to_string()).zip(param_vars.iter().copied()).collect();
             self.reject_bound_type_params(&named, &mut Vec::new(), range);
+            self.reject_bound_projections(&named, range);
             let mut bounds = param_vars;
             bounds.extend(fn_assoc_projections.iter().map(|p| p.var));
             let mut kinds = param_kinds;

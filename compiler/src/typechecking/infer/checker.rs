@@ -77,6 +77,9 @@ pub(crate) enum DropOwner {
 /// Saved bare-name state; see [`Checker::shield_bare_names`].
 pub(super) struct BareNameShield {
     modes: Vec<(String, bool, bool)>,
+    /// Whether each key (bare and `module::name`) was in `generic_fns` and
+    /// `generics.generic_fns`.
+    generic: Vec<(String, bool, bool)>,
     env: Vec<(String, usize)>,
     defs: Vec<(DefId, Option<Scheme>)>,
 }
@@ -1324,7 +1327,7 @@ impl Checker {
             if !self.is_thread_sendable_ty(&ty) {
                 self.error_with_help(
                     ErrorCode::GenericTypeError,
-                    format!("spawn closure capture `{cap}` of type `{ty}` is not sendable across threads"),
+                    format!("spawn closure capture `{cap}` of type `{}` is not sendable across threads", self.diag_ty(&ty)),
                     range.clone(),
                     Some("a spawned closure's `use` captures are copied to the thread, so they must be sendable".to_string()),
                 );
@@ -1387,7 +1390,7 @@ impl Checker {
                         ErrorCode::GenericTypeError,
                         format!(
                             "spawn argument type `{}` is not sendable across threads",
-                            arg_resolved
+                            self.diag_ty(&arg_resolved)
                         ),
                         range.clone(),
                         Some(
@@ -2783,7 +2786,8 @@ impl Checker {
                             "Logical NOT requires a `bool` or `int` operand".to_string(),
                             e.0.into_range(),
                             Some(format!(
-                                "found `{pruned}`; use `~` for bitwise negation on integers"
+                                "found `{}`; use `~` for bitwise negation on integers",
+                                self.diag_ty(&pruned)
                             )),
                         );
                         boolean()
@@ -3022,7 +3026,7 @@ impl Checker {
                 } else {
                     self.error(
                         ErrorCode::InvalidTry,
-                        format!("`?` requires Option or Result, found `{}`", resolved),
+                        format!("`?` requires Option or Result, found `{}`", self.diag_ty(&resolved)),
                         range,
                     )
                 }
@@ -3073,7 +3077,7 @@ impl Checker {
                 } else {
                     return self.error(
                         ErrorCode::InvalidCoalesce,
-                        format!("`??` requires Option or Result, found `{}`", resolved),
+                        format!("`??` requires Option or Result, found `{}`", self.diag_ty(&resolved)),
                         range,
                     );
                 };
@@ -3101,7 +3105,7 @@ impl Checker {
                         ErrorCode::InvalidOptionalAccess,
                         format!(
                             "`?.` requires Option, found `{}`",
-                            crate::typechecking::pretty::format_ty_for_diag(&self.subst, &resolved)
+                            self.diag_ty(&resolved)
                         ),
                         range,
                     );
@@ -4110,7 +4114,7 @@ impl Checker {
                         field,
                         fields
                             .iter()
-                            .map(|(n, t)| format!("{}: {}", n, t))
+                            .map(|(n, t)| format!("{}: {}", n, self.diag_ty(t)))
                             .collect::<Vec<_>>()
                             .join(", ")
                     );
@@ -4265,7 +4269,7 @@ impl Checker {
                 Err(_) => {
                     let _ = self.error_with_help(
                         ErrorCode::TypeMismatch,
-                        format!("Type mismatch: an index must be `int`, found `{}`", index_ty_pruned),
+                        format!("Type mismatch: an index must be `int`, found `{}`", self.diag_ty(&index_ty_pruned)),
                         index_expr.0.into_range(),
                         Some("index with an `int` (or a `byte`)".to_string()),
                     );
@@ -4340,7 +4344,7 @@ impl Checker {
                     ErrorCode::CannotIndex,
                     "cannot index non-aggregate type".to_string(),
                     range.clone(),
-                    Some(format!("type `{}` does not support indexing", resolved)),
+                    Some(format!("type `{}` does not support indexing", self.diag_ty(&resolved))),
                 );
                 Ty::Var(self.counter.fresh())
             }
@@ -4397,10 +4401,13 @@ impl Checker {
                         Err(_) => {
                             let _ = self.error_with_help(
                                 ErrorCode::TypeMismatch,
-                                format!(
-                                    "array element type mismatch: expected `{}`, found `{}`",
-                                    prev_pruned, t_pruned
-                                ),
+                                {
+                                    let [want, have] = <[String; 2]>::try_from(
+                                        self.diag_tys(&[&prev_pruned, &t_pruned]),
+                                    )
+                                    .expect("two types");
+                                    format!("array element type mismatch: expected `{want}`, found `{have}`")
+                                },
                                 range.clone(),
                                 Some(
                                     "an array literal requires every element to have the same type"
@@ -4529,7 +4536,7 @@ impl Checker {
                 .collect();
             let expected_pretty = expected
                 .as_ref()
-                .map(|e| apply_ty_prune(&self.subst, e).to_string())
+                .map(|e| self.diag_ty(e))
                 .unwrap_or_else(|| "?".into());
             return self.error_with_help(
                 ErrorCode::TypeMismatch,
@@ -6367,7 +6374,7 @@ impl Checker {
         }
         let slice = std::slice::from_ref(&lookup);
         if self.generics.find_instance(class, slice).is_none() && self.generics.find_generic_instance(class, slice).is_none() {
-            let pretty = crate::typechecking::pretty::format_ty_for_diag(&self.subst, ty);
+            let pretty = self.diag_ty(ty);
             let mut m = Message::error(
                 ErrorCode::TypeMismatch,
                 format!("cannot apply unary `{sym}` to a value of type `{pretty}`"),
@@ -6385,7 +6392,7 @@ impl Checker {
         if !matches!(&lookup, Ty::Con(n) if matches!(n.as_str(), "bool" | "string" | "unit")) {
             return;
         }
-        let pretty = crate::typechecking::pretty::format_ty_for_diag(&self.subst, ty);
+        let pretty = self.diag_ty(ty);
         let mut m = Message::error(
             ErrorCode::TypeMismatch,
             format!("cannot apply unary `{sym}` to a value of type `{pretty}`"),
@@ -6576,7 +6583,7 @@ impl Checker {
                 } else {
                     let _ = self.error_with_help(
                         ErrorCode::GenericTypeError,
-                        format!("range bounds require `T: Ord`, found `{}`", other),
+                        format!("range bounds require `T: Ord`, found `{}`", self.diag_ty(other)),
                         range.clone(),
                         Some(
                             "both ends of `a..b` / `a..=b` must share a type that implements `Ord`"
@@ -6829,7 +6836,7 @@ impl Checker {
         {
             return;
         }
-        let pretty = crate::typechecking::pretty::format_ty_for_diag(&self.subst, ty);
+        let pretty = self.diag_ty(ty);
         let help = match (op, trait_name) {
             ("+", _) => "`+` takes `int` / `float` / `byte` operands, two strings, or a type with an `Add` instance".to_string(),
             (_, Some(class)) if bitwise => format!("`{op}` takes `int` / `byte` operands, or a type with a `{class}` instance"),
@@ -6889,7 +6896,7 @@ impl Checker {
             "gt" => ">",
             _ => ">=",
         };
-        let pretty = crate::typechecking::pretty::format_ty_for_diag(&self.subst, ty);
+        let pretty = self.diag_ty(ty);
         self.messages.push({
             let mut m = Message::error(
                 ErrorCode::TypeMismatch,
@@ -7084,7 +7091,7 @@ impl Checker {
                 ErrorCode::GenericTypeError,
                 format!(
                     "element type `{}` does not support `{}`",
-                    elem, op
+                    self.diag_ty(&elem), op
                 ),
                 range,
                 Some("element-wise arithmetic requires numeric elements (`int`, `float`, or a `Num`-bounded type parameter)".to_string()),
@@ -7211,7 +7218,7 @@ impl Checker {
             if !is_numeric_elem(&elem) {
                 return self.error_with_help(
                     ErrorCode::GenericTypeError,
-                    format!("element type `{}` does not support unary `-`", elem),
+                    format!("element type `{}` does not support unary `-`", self.diag_ty(&elem)),
                     range,
                     None,
                 );
@@ -7235,7 +7242,7 @@ impl Checker {
             if !is_numeric_elem(&elem) {
                 return self.error_with_help(
                     ErrorCode::GenericTypeError,
-                    format!("element type `{}` does not support unary `-`", elem),
+                    format!("element type `{}` does not support unary `-`", self.diag_ty(&elem)),
                     range,
                     None,
                 );
@@ -7764,7 +7771,7 @@ impl Checker {
                 ErrorCode::GenericTypeError,
                 format!(
                     "`len` requires a `Length` instance, found `{}`",
-                    crate::typechecking::pretty::format_ty_for_diag(&self.subst, &resolved)
+                    self.diag_ty(&resolved)
                 ),
                 args[0].0.into_range(),
                 Some("implement `impl Length for T { fn len(T x) -> int { ... } }`".to_string()),
@@ -7971,7 +7978,7 @@ impl Checker {
         let Some((le, ln, left_is_tuple)) = classify_vector(&lp) else {
             return self.error_with_help(
                 ErrorCode::GenericTypeError,
-                format!("dot expects a homogeneous numeric vector, found `{}`", lp),
+                format!("dot expects a homogeneous numeric vector, found `{}`", self.diag_ty(&lp)),
                 args[0].0.into_range(),
                 Some("use a tuple `(T,…,T)` or fixed-length `[T; N]`".to_string()),
             );
@@ -7979,7 +7986,7 @@ impl Checker {
         let Some((re, rn, right_is_tuple)) = classify_vector(&rp) else {
             return self.error_with_help(
                 ErrorCode::GenericTypeError,
-                format!("dot expects a homogeneous numeric vector, found `{}`", rp),
+                format!("dot expects a homogeneous numeric vector, found `{}`", self.diag_ty(&rp)),
                 args[1].0.into_range(),
                 Some("use a tuple `(T,…,T)` or fixed-length `[T; N]`".to_string()),
             );
@@ -8007,7 +8014,7 @@ impl Checker {
         if !is_numeric_elem(&elem) {
             return self.error_with_help(
                 ErrorCode::GenericTypeError,
-                format!("element type `{}` does not support `dot`", elem),
+                format!("element type `{}` does not support `dot`", self.diag_ty(&elem)),
                 range,
                 Some("dot requires numeric elements (`int`, `float`, or `byte`)".to_string()),
             );
@@ -8053,7 +8060,7 @@ impl Checker {
         let Some((le, ln, left_is_tuple)) = classify_vector(&lp) else {
             return self.error_with_help(
                 ErrorCode::GenericTypeError,
-                format!("cross expects a length-3 numeric vector, found `{}`", lp),
+                format!("cross expects a length-3 numeric vector, found `{}`", self.diag_ty(&lp)),
                 args[0].0.into_range(),
                 None,
             );
@@ -8061,7 +8068,7 @@ impl Checker {
         let Some((re, rn, right_is_tuple)) = classify_vector(&rp) else {
             return self.error_with_help(
                 ErrorCode::GenericTypeError,
-                format!("cross expects a length-3 numeric vector, found `{}`", rp),
+                format!("cross expects a length-3 numeric vector, found `{}`", self.diag_ty(&rp)),
                 args[1].0.into_range(),
                 None,
             );
@@ -8090,7 +8097,7 @@ impl Checker {
         if !is_numeric_elem(&elem) {
             return self.error_with_help(
                 ErrorCode::GenericTypeError,
-                format!("element type `{}` does not support `cross`", elem),
+                format!("element type `{}` does not support `cross`", self.diag_ty(&elem)),
                 range,
                 None,
             );
@@ -8175,7 +8182,7 @@ impl Checker {
                 ErrorCode::GenericTypeError,
                 format!(
                     "matmul expects a nested fixed-length matrix, found `{}`",
-                    lp
+                    self.diag_ty(&lp)
                 ),
                 args[0].0.into_range(),
                 Some(
@@ -8188,7 +8195,7 @@ impl Checker {
                 ErrorCode::GenericTypeError,
                 format!(
                     "matmul expects a nested fixed-length matrix, found `{}`",
-                    rp
+                    self.diag_ty(&rp)
                 ),
                 args[1].0.into_range(),
                 Some(
@@ -8220,7 +8227,7 @@ impl Checker {
         if !is_numeric_elem(&elem) {
             return self.error_with_help(
                 ErrorCode::GenericTypeError,
-                format!("element type `{}` does not support `matmul`", elem),
+                format!("element type `{}` does not support `matmul`", self.diag_ty(&elem)),
                 range,
                 None,
             );
@@ -8289,7 +8296,7 @@ impl Checker {
                 ErrorCode::GenericTypeError,
                 format!(
                     "`matrix` expects a nested fixed-length matrix, found `{}`",
-                    pruned
+                    self.diag_ty(&pruned)
                 ),
                 args[0].0.into_range(),
                 Some(
@@ -8300,7 +8307,7 @@ impl Checker {
         if !is_numeric_elem(&elem) {
             return self.error_with_help(
                 ErrorCode::GenericTypeError,
-                format!("element type `{}` does not support `matrix`", elem),
+                format!("element type `{}` does not support `matrix`", self.diag_ty(&elem)),
                 range,
                 Some("matrix elements must be numeric (`int`, `float`, or `byte`)".to_string()),
             );
@@ -8348,7 +8355,7 @@ impl Checker {
         let Some(ld) = unwrap_matrix_ty(&lp) else {
             return self.error_with_help(
                 ErrorCode::GenericTypeError,
-                format!("cannot apply `{}` between `{}` and `{}`", op, lp, rp),
+                format!("cannot apply `{}` between `{}` and `{}`", op, self.diag_ty(&lp), self.diag_ty(&rp)),
                 range,
                 Some("both operands of matrix arithmetic must be `Matrix` values".to_string()),
             );
@@ -8356,7 +8363,7 @@ impl Checker {
         let Some(rd) = unwrap_matrix_ty(&rp) else {
             return self.error_with_help(
                 ErrorCode::GenericTypeError,
-                format!("cannot apply `{}` between `{}` and `{}`", op, lp, rp),
+                format!("cannot apply `{}` between `{}` and `{}`", op, self.diag_ty(&lp), self.diag_ty(&rp)),
                 range,
                 Some("both operands of matrix arithmetic must be `Matrix` values".to_string()),
             );
@@ -8367,7 +8374,7 @@ impl Checker {
                 let Some((le, m, k1, outer_is_tuple, row_is_tuple)) = classify_matrix(ld) else {
                     return self.error_with_help(
                         ErrorCode::GenericTypeError,
-                        format!("invalid matrix layout `{}`", ld),
+                        format!("invalid matrix layout `{}`", self.diag_ty(ld)),
                         range.clone(),
                         None,
                     );
@@ -8375,7 +8382,7 @@ impl Checker {
                 let Some((re, k2, n, right_outer, right_row)) = classify_matrix(rd) else {
                     return self.error_with_help(
                         ErrorCode::GenericTypeError,
-                        format!("invalid matrix layout `{}`", rd),
+                        format!("invalid matrix layout `{}`", self.diag_ty(rd)),
                         range.clone(),
                         None,
                     );
@@ -8407,7 +8414,7 @@ impl Checker {
                 if !is_numeric_elem(&elem) {
                     return self.error_with_help(
                         ErrorCode::GenericTypeError,
-                        format!("element type `{}` does not support matrix `*`", elem),
+                        format!("element type `{}` does not support matrix `*`", self.diag_ty(&elem)),
                         range,
                         None,
                     );
@@ -8448,7 +8455,7 @@ impl Checker {
                 let Some((le, m, n, outer_is_tuple, row_is_tuple)) = classify_matrix(ld) else {
                     return self.error_with_help(
                         ErrorCode::GenericTypeError,
-                        format!("invalid matrix layout `{}`", ld),
+                        format!("invalid matrix layout `{}`", self.diag_ty(ld)),
                         range.clone(),
                         None,
                     );
@@ -8456,7 +8463,7 @@ impl Checker {
                 let Some((re, m2, n2, right_outer, right_row)) = classify_matrix(rd) else {
                     return self.error_with_help(
                         ErrorCode::GenericTypeError,
-                        format!("invalid matrix layout `{}`", rd),
+                        format!("invalid matrix layout `{}`", self.diag_ty(rd)),
                         range.clone(),
                         None,
                     );
@@ -8481,7 +8488,7 @@ impl Checker {
                 if !is_numeric_elem(&elem) {
                     return self.error_with_help(
                         ErrorCode::GenericTypeError,
-                        format!("element type `{}` does not support matrix `{}`", elem, op),
+                        format!("element type `{}` does not support matrix `{}`", self.diag_ty(&elem), op),
                         range,
                         None,
                     );
@@ -8571,7 +8578,7 @@ impl Checker {
             else {
                 return self.error_with_help(
                     ErrorCode::GenericTypeError,
-                    format!("invalid matrix layout `{matrix_ty}`"),
+                    format!("invalid matrix layout `{}`", self.diag_ty(matrix_ty)),
                     range,
                     None,
                 );
@@ -8579,7 +8586,7 @@ impl Checker {
             let Some((elem, m, n, outer_is_tuple, row_is_tuple)) = classify_matrix(data) else {
                 return self.error_with_help(
                     ErrorCode::GenericTypeError,
-                    format!("invalid matrix layout `{data}`"),
+                    format!("invalid matrix layout `{}`", self.diag_ty(data)),
                     range,
                     None,
                 );
@@ -8598,7 +8605,7 @@ impl Checker {
             if !is_numeric_elem(&elem) {
                 return self.error_with_help(
                     ErrorCode::GenericTypeError,
-                    format!("element type `{elem}` does not support matrix `{op}`"),
+                    format!("element type `{}` does not support matrix `{op}`", self.diag_ty(&elem)),
                     range,
                     None,
                 );
@@ -8618,7 +8625,7 @@ impl Checker {
         let Some((elem, m, n, outer_is_tuple, row_is_tuple, scalar_on)) = resolved else {
             return self.error_with_help(
                 ErrorCode::GenericTypeError,
-                format!("cannot apply `{op}` to `{lp}` and `{rp}`"),
+                format!("cannot apply `{op}` to `{}` and `{}`", self.diag_ty(&lp), self.diag_ty(&rp)),
                 range,
                 Some(
                     "both sides must be `Matrix`, or one side a scalar of the cell type"
@@ -8688,7 +8695,7 @@ impl Checker {
         if !is_numeric_elem(&elem) {
             let _ = self.error_with_help(
                 ErrorCode::GenericTypeError,
-                format!("element type `{elem}` does not support matrix `{op}`"),
+                format!("element type `{}` does not support matrix `{op}`", self.diag_ty(&elem)),
                 range.clone(),
                 None,
             );
@@ -8710,7 +8717,7 @@ impl Checker {
         let Some((elem, m, n, outer_is_tuple, row_is_tuple)) = classify_matrix(data) else {
             return self.error_with_help(
                 ErrorCode::GenericTypeError,
-                format!("invalid matrix layout `{}`", data),
+                format!("invalid matrix layout `{}`", self.diag_ty(data)),
                 range,
                 None,
             );
@@ -8718,7 +8725,7 @@ impl Checker {
         if !is_numeric_elem(&elem) {
             return self.error_with_help(
                 ErrorCode::GenericTypeError,
-                format!("element type `{}` does not support unary `-`", elem),
+                format!("element type `{}` does not support unary `-`", self.diag_ty(&elem)),
                 range,
                 None,
             );
@@ -8758,7 +8765,7 @@ impl Checker {
         let Some((elem, m, n, outer_is_tuple, row_is_tuple)) = classify_matrix(data) else {
             return self.error_with_help(
                 ErrorCode::GenericTypeError,
-                format!("invalid matrix layout `{data}`"),
+                format!("invalid matrix layout `{}`", self.diag_ty(data)),
                 range,
                 None,
             );
@@ -8766,7 +8773,7 @@ impl Checker {
         if !is_numeric_elem(&elem) || elem_is_float(&elem) {
             return self.error_with_help(
                 ErrorCode::GenericTypeError,
-                format!("bitwise `~` is not supported on `{elem}` matrix cells"),
+                format!("bitwise `~` is not supported on `{}` matrix cells", self.diag_ty(&elem)),
                 range,
                 Some("bitwise `~` requires `int` or `byte` cells".to_string()),
             );
@@ -8881,7 +8888,7 @@ impl Checker {
                     _ => {
                         // We've run out of function parameters, the call
                         // had more arguments than the function accepts.
-                        let actual = format!("{}", apply_ty_prune(&self.subst, &pruned));
+                        let actual = self.diag_ty(&pruned);
                         if i == 0 {
                             // Not a function at all (`let x = 5; x(1);`).
                             let what = name.map_or("this value".to_string(), |n| format!("`{n}`"));
@@ -9024,7 +9031,7 @@ impl Checker {
                     format!(
                         "variadic FFI argument #{} has non-marshallable type `{}`",
                         i + 1,
-                        apply_ty_prune(&self.subst, ty)
+                        self.diag_ty(ty)
                     ),
                     span.clone(),
                 );
@@ -9699,10 +9706,8 @@ impl Checker {
         let local = match unify_with(&Subst::empty(), &candidate, &expected_body) {
             Ok(s) => s,
             Err(_) => {
-                let expected_pretty =
-                    crate::typechecking::pretty::format_ty_for_diag(&self.subst, expected);
-                let found_pretty =
-                    crate::typechecking::pretty::format_ty_for_diag(&self.subst, &candidate);
+                let [expected_pretty, found_pretty] =
+                    <[String; 2]>::try_from(self.diag_tys(&[expected, &candidate])).expect("two types");
                 self.messages.push(Message::error(
                     ErrorCode::TypeMismatch,
                     format!(
@@ -9765,16 +9770,13 @@ impl Checker {
                 let _ = all_open;
             } else {
                 let lookup = self.instance_lookup_args(&constraint.class, &resolved_args);
+                self.ensure_tuple_show_instance(&constraint.class, &lookup);
                 if self
                     .generics
                     .find_instance(&constraint.class, &lookup)
                     .is_none()
                 {
-                    let pretty = resolved_args
-                        .iter()
-                        .map(|t| t.to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ");
+                    let pretty = self.diag_tys(&resolved_args.iter().collect::<Vec<_>>()).join(", ");
                     self.messages.push(Message::error(
                         ErrorCode::GenericTypeError,
                         format!("No instance for `{}<{}>`", constraint.class, pretty),
@@ -9864,8 +9866,8 @@ impl Checker {
                 apply_ty(&self.subst, t1)
             }
             Err(UnifyError::Mismatch { left, right }) => {
-                let left_s = crate::typechecking::pretty::format_ty_for_diag(&self.subst, &left);
-                let right_s = crate::typechecking::pretty::format_ty_for_diag(&self.subst, &right);
+                let [left_s, right_s] =
+                    <[String; 2]>::try_from(self.diag_tys(&[&left, &right])).expect("two types");
                 self.error_with_help(
                     ErrorCode::TypeMismatch,
                     format!("Type mismatch: expected `{}`, found `{}`", left_s, right_s),
@@ -9874,9 +9876,8 @@ impl Checker {
                 )
             }
             Err(UnifyError::Occurs { var, ty }) => {
-                let ty_s = crate::typechecking::pretty::format_ty_for_diag(&self.subst, &ty);
-                let var_s =
-                    crate::typechecking::pretty::format_ty_for_diag(&self.subst, &Ty::Var(var));
+                let [ty_s, var_s] = <[String; 2]>::try_from(self.diag_tys(&[&ty, &Ty::Var(var)]))
+                    .expect("two types");
                 self.error_with_help(
                     ErrorCode::InfiniteType,
                     format!("Cannot construct infinite type `{}`", ty_s),
@@ -9983,6 +9984,24 @@ impl Checker {
                         self.call_site_forward_dicts_by_span
                             .entry((range.start, range.end))
                             .or_default()
+                            .push(dict_index);
+                    }
+                    continue;
+                }
+                // Inside a generic body, a goal on a type parameter whose
+                // other arguments are still open (`Wrap<T, β>`) is the
+                // given bound `where Wrap<T, string>`: pin `β` from it and
+                // forward that dictionary. Searching instances instead would
+                // bind `T` itself (#1442).
+                if let Some(dict_index) = self.improve_from_given(&needed) {
+                    if let Some(call_id) = call_id {
+                        self.call_site_forward_dicts
+                            .entry(call_id)
+                            .or_default()
+                            .push(dict_index);
+                        self.call_site_forward_dicts_by_span
+                        .entry((range.start, range.end))
+                        .or_default()
                             .push(dict_index);
                     }
                     continue;
@@ -10113,6 +10132,89 @@ impl Checker {
         }
     }
 
+    /// The type parameter a generic fn's projection was declared on (`C`
+    /// for `C::Elem`), or None for a trait method's own projection.
+    fn declared_projection_owner(&self, projection: &AssocProjection) -> Option<TyVarId> {
+        let rep = |v: TyVarId| match apply_ty_prune(&self.subst, &Ty::Var(v)) {
+            Ty::Var(r) => r,
+            _ => v,
+        };
+        self.open_assoc_projections
+            .iter()
+            .find(|((_, name, _), (pvar, _))| *name == projection.name && rep(*pvar) == rep(projection.var))
+            .map(|((owner, _, _), _)| *owner)
+    }
+
+    /// A call whose projection's owner is one of the enclosing generic's
+    /// type parameters (`head(xs)` with `xs: C`, `C: Collect`) returns that
+    /// parameter's own rigid `C::Elem`, not a free variable any type could
+    /// fill (#1462). The owner is the generic callee's own parameter that
+    /// declared the projection, or a trait method's sole constraint argument.
+    fn link_param_projections(
+        &mut self,
+        class: &str,
+        constraints: &[Constraint],
+        scheme: &Scheme,
+        mapping: &HashMap<TyVarId, TyVarId>,
+        range: &Range<usize>,
+    ) {
+        use crate::typechecking::env::substitute_vars;
+        let rep = |this: &Self, v: TyVarId| match apply_ty_prune(&this.subst, &Ty::Var(v)) {
+            Ty::Var(r) => r,
+            _ => v,
+        };
+        for projection in &scheme.assoc_projections {
+            let Some(&fresh) = mapping.get(&projection.var) else {
+                continue;
+            };
+            let owner = match self.declared_projection_owner(projection) {
+                Some(owner) => match mapping.get(&owner) {
+                    Some(&mapped) => Ty::Var(mapped),
+                    None => continue,
+                },
+                None => {
+                    let mut owners = constraints.iter().filter(|c| {
+                        (class.is_empty() || c.class == class)
+                            && c.args.len() == 1
+                            && self
+                                .generics
+                                .typeclass(&c.class)
+                                .is_some_and(|cdef| cdef.assoc_type(&projection.name).is_some())
+                    });
+                    match (owners.next(), owners.next()) {
+                        (Some(c), None) => c.args[0].clone(),
+                        _ => continue,
+                    }
+                }
+            };
+            let Ty::Var(owner) = apply_ty_prune(&self.subst, &owner) else {
+                continue;
+            };
+            let param = self
+                .type_params_in_scope
+                .iter()
+                .rev()
+                .flat_map(|frame| frame.values().copied())
+                .find(|&p| rep(self, p) == owner);
+            let Some(param) = param else {
+                continue;
+            };
+            let args: Vec<Ty> = projection
+                .args
+                .iter()
+                .map(|a| apply_ty_prune(&self.subst, &substitute_vars(a, mapping)))
+                .collect();
+            if let Some(rigid) = self.open_param_projection(param, &projection.name, &args, range) {
+                self.unify(
+                    &Ty::Var(fresh),
+                    &Ty::Var(rigid),
+                    range,
+                    &format!("associated type `{}`", projection.name),
+                );
+            }
+        }
+    }
+
     /// After discharging constraints for a trait method call, pin
     /// freshened associated-type variables from the scheme mapping.
     fn pin_assoc_after_discharge(
@@ -10123,6 +10225,9 @@ impl Checker {
         mapping: &HashMap<TyVarId, TyVarId>,
         range: &Range<usize>,
     ) {
+        if let Some(scheme) = scheme {
+            self.link_param_projections(class, constraints, scheme, mapping, range);
+        }
         for c in constraints {
             if !class.is_empty() && c.class != class {
                 continue;
@@ -10139,7 +10244,7 @@ impl Checker {
             }
             if let Ok(Some(instance)) = self.find_unique_instance(&c.class, &resolved_args, range) {
                 if let Some(scheme) = scheme {
-                    self.pin_assoc_vars_from_mapping(&c.class, &instance, scheme, mapping, range);
+                    self.pin_assoc_vars_from_mapping(&c.class, &instance, &resolved_args, scheme, mapping, range);
                 }
                 self.pin_assoc_types_for_instance(&c.class, &instance, scheme, range);
             }
@@ -10177,12 +10282,32 @@ impl Checker {
 
     /// (open vars in `wanted` may be bound by the match). Ambiguous matches
     /// are diagnosed instead of silently selecting declaration order.
+    /// A ground tuple whose items are shown as `%v` shows them has a
+    /// structural `Show` instance (#1451), registered the first time a goal
+    /// asks for it.
+    fn ensure_tuple_show_instance(&mut self, class: &str, wanted: &[Ty]) {
+        let [ty] = wanted else { return };
+        if class != "Show" {
+            return;
+        }
+        let ty = apply_ty_prune(&self.subst, ty);
+        if !matches!(&ty, Ty::Tuple(items) if !items.is_empty())
+            || Self::ty_mentions_var(&ty)
+            || !self.is_showable_for_format(&ty)
+            || self.generics.has_instance("Show", &ty)
+        {
+            return;
+        }
+        self.generics.register_tuple_show(ty);
+    }
+
     fn find_unique_instance(
         &mut self,
         class: &str,
         wanted: &[Ty],
         range: &Range<usize>,
     ) -> Result<Option<InstanceDef>, ()> {
+        self.ensure_tuple_show_instance(class, wanted);
         let wanted_lookup = self.instance_lookup_args(class, wanted);
         let candidates: Vec<_> = self
             .generics
@@ -10327,6 +10452,69 @@ impl Checker {
                 .typeclass(ac_class)
                 .is_some_and(|def| def.has_superclass(&needed.class, &self.generics))
         })
+    }
+
+    /// A partially open goal that mentions an enclosing type parameter
+    /// (`Wrap<T, β>`) and unifies with exactly one active bound of its
+    /// class (`where Wrap<T, string>`) without rebinding any type parameter
+    /// is that bound: adopt the unifier (pinning `β := string`) and return
+    /// the bound's dictionary index. `None` leaves the goal to instance
+    /// search (#1442).
+    fn improve_from_given(&mut self, needed: &Constraint) -> Option<usize> {
+        let rigid: Vec<(TyVarId, Ty)> = self
+            .type_params_in_scope
+            .iter()
+            .flat_map(|frame| frame.values())
+            .map(|&v| (v, apply_ty_prune(&self.subst, &Ty::Var(v))))
+            .collect();
+        let needed_args: Vec<Ty> = needed
+            .args
+            .iter()
+            .map(|a| apply_ty_prune(&self.subst, a))
+            .collect();
+        let mentions_rigid = needed_args.iter().any(|a| {
+            crate::typechecking::subst::ftv(a)
+                .into_iter()
+                .any(|v| rigid.iter().any(|(_, r)| *r == Ty::Var(v)))
+        });
+        if !mentions_rigid {
+            return None;
+        }
+        let mut found: Option<(usize, Subst)> = None;
+        for (index, ac) in self.active_constraints.iter().enumerate() {
+            let ac_class = self
+                .abstract_constraint_binding(&ac.class)
+                .unwrap_or(ac.class.as_str());
+            if ac_class != needed.class || ac.args.len() != needed_args.len() {
+                continue;
+            }
+            let mut local = self.subst.clone();
+            let ok = ac.args.iter().zip(needed_args.iter()).all(|(have, need)| {
+                match unify_with(&local, need, have) {
+                    Ok(s) => {
+                        local = s;
+                        true
+                    }
+                    Err(_) => false,
+                }
+            });
+            // A type parameter stands for any type: the bound may only pin
+            // inference variables, never a parameter.
+            let keeps_rigid = ok
+                && rigid
+                    .iter()
+                    .all(|(v, before)| apply_ty_prune(&local, &Ty::Var(*v)) == *before);
+            if !keeps_rigid {
+                continue;
+            }
+            if found.is_some() {
+                return None;
+            }
+            found = Some((index, local));
+        }
+        let (index, local) = found?;
+        self.absorb(&local);
+        Some(index)
     }
 
     fn abstract_constraint_binding(&self, name: &str) -> Option<&str> {
@@ -10856,7 +11044,7 @@ impl Checker {
                         class_def.name,
                         expected_kind,
                         i + 1,
-                        ty
+                        self.diag_ty(ty)
                     ),
                     range.clone(),
                 ));
@@ -10965,13 +11153,25 @@ impl Checker {
 
     /// `ty` as a diagnostic shows it: type parameters in scope by name
     /// (`T`), other unknowns as `a`, `b`, …, builtin sums as `Result<T, E>`.
+    ///
+    /// Every type a diagnostic prints goes through here (or [`Self::diag_tys`]):
+    /// `Ty`'s `Display` shows raw variables (`t61`) and is for debug output.
     fn diag_ty(&self, ty: &Ty) -> String {
-        let names: HashMap<TyVarId, String> = self
-            .type_params_in_scope
+        crate::typechecking::pretty::format_ty_for_diag_named(&self.subst, ty, &self.type_param_names())
+    }
+
+    /// [`Self::diag_ty`] for several types in one message, sharing one naming
+    /// of the unknowns (`expected `a`, found `b``).
+    fn diag_tys(&self, tys: &[&Ty]) -> Vec<String> {
+        crate::typechecking::pretty::format_tys_for_diag_named(&self.subst, tys, &self.type_param_names())
+    }
+
+    /// The type parameters in scope, by their source name.
+    fn type_param_names(&self) -> HashMap<TyVarId, String> {
+        self.type_params_in_scope
             .iter()
             .flat_map(|frame| frame.iter().map(|(name, var)| (*var, name.clone())))
-            .collect();
-        crate::typechecking::pretty::format_ty_for_diag_named(&self.subst, ty, &names)
+            .collect()
     }
 
     fn instance_signature(&self, class: &str, args: &[Ty]) -> String {
@@ -11297,6 +11497,134 @@ impl Checker {
         }
     }
 
+    /// The open projection variable for `assoc` on type parameter
+    /// `owner_var` (`T::Elem` under `T: Collect`): one variable per owner,
+    /// name and arguments, rigid in the generic body (#1462). None when no
+    /// active bound on `owner_var` declares `assoc`.
+    fn open_param_projection(
+        &mut self,
+        owner_var: TyVarId,
+        assoc: &str,
+        args: &[Ty],
+        range: &Range<usize>,
+    ) -> Option<TyVarId> {
+        // Find an active constraint on this var whose class declares `assoc`.
+        let mut matching_decl: Option<(String, AssocTypeDecl)> = None;
+        for c in &self.active_constraints {
+            let covers = c.args.iter().any(
+                |a| matches!(apply_ty_prune(&self.subst, a), Ty::Var(v) if v == owner_var),
+            );
+            if !covers {
+                continue;
+            }
+            if let Some(cdef) = self.generics.typeclass(&c.class) {
+                if let Some(decl) = cdef.assoc_type(assoc) {
+                    matching_decl = Some((c.class.clone(), decl.clone()));
+                    break;
+                }
+                // Superclass assoc types (rare; check flattened supers).
+                for super_name in &cdef.superclasses {
+                    if let Some(sdef) = self.generics.typeclass(super_name)
+                        && let Some(decl) = sdef.assoc_type(assoc) {
+                            matching_decl = Some((super_name.clone(), decl.clone()));
+                            break;
+                        }
+                }
+                if matching_decl.is_some() {
+                    break;
+                }
+            }
+        }
+        if let Some((class_name, decl)) = matching_decl {
+            self.validate_assoc_projection_args(&class_name, &decl, args, range);
+            let key = (owner_var, assoc.to_string(), self.projection_arg_key(args));
+            if let Some(&(existing, _)) = self.open_assoc_projections.get(&key) {
+                self.record_current_assoc_projection(existing, assoc, args);
+                return Some(existing);
+            }
+            let fresh = self.counter.fresh();
+            self.set_var_kind(fresh, Kind::Type);
+            self.open_assoc_projections
+                .insert(key, (fresh, args.to_vec()));
+            self.record_current_assoc_projection(fresh, assoc, args);
+            return Some(fresh);
+        }
+        None
+    }
+
+    /// A projection on one of a generic's own type parameters (`C::Elem`
+    /// under `C: Collect`) is rigid in its body, like the parameter: it may
+    /// equal only itself until a call site or mono clone picks the instance.
+    /// One unified with a concrete type, another type parameter or another
+    /// projection (`return "s"` from `-> C::Elem`) is reported (#1462).
+    pub(super) fn reject_bound_projections(&mut self, params: &[(String, TyVarId)], range: &Range<usize>) {
+        let rep = |this: &Self, v: TyVarId| match apply_ty_prune(&this.subst, &Ty::Var(v)) {
+            Ty::Var(r) => Some(r),
+            _ => None,
+        };
+        let pretty_args = |this: &Self, args: &[Ty]| {
+            if args.is_empty() {
+                return String::new();
+            }
+            let args: Vec<String> = args
+                .iter()
+                .map(|a| crate::typechecking::pretty::format_ty_for_diag(&this.subst, a))
+                .collect();
+            format!("<{}>", args.join(", "))
+        };
+        // Every rigid variable in scope, by its representative: type
+        // parameters (this generic's and any enclosing one's) and their
+        // projections.
+        let mut rigid: Vec<(TyVarId, String)> = Vec::new();
+        for (name, p) in params
+            .iter()
+            .cloned()
+            .chain(self.type_params_in_scope.iter().flat_map(|f| f.iter().map(|(n, v)| (n.clone(), *v))))
+        {
+            if let Some(r) = rep(self, p) {
+                rigid.push((r, name));
+            }
+        }
+        let mut projections: Vec<(TyVarId, String)> = Vec::new();
+        for ((owner, assoc, _), (pvar, args)) in &self.open_assoc_projections {
+            let Some((_, owner_name)) = rigid.iter().find(|(r, _)| rep(self, *owner) == Some(*r)) else {
+                continue;
+            };
+            projections.push((*pvar, format!("{owner_name}::{assoc}{}", pretty_args(self, args))));
+        }
+        projections.sort_by_key(|(pvar, _)| *pvar);
+        let mut errors = Vec::new();
+        for (i, (pvar, shown)) in projections.iter().enumerate() {
+            let owned = self.open_assoc_projections.iter().any(|((owner, _, _), (v, _))| {
+                v == pvar && params.iter().any(|(_, p)| rep(self, *p) == rep(self, *owner))
+            });
+            if !owned {
+                continue;
+            }
+            let used_as = match apply_ty_prune(&self.subst, &Ty::Var(*pvar)) {
+                Ty::Var(q) => {
+                    let other_param = rigid.iter().find(|(r, _)| *r == q).map(|(_, n)| n.clone());
+                    // Of two projections unified together, the later reports.
+                    let other_projection = projections[..i]
+                        .iter()
+                        .find(|(v, s)| rep(self, *v) == Some(q) && s != shown)
+                        .map(|(_, s)| s.clone());
+                    match other_param.or(other_projection) {
+                        Some(other) => other,
+                        None => continue,
+                    }
+                }
+                bound => crate::typechecking::pretty::format_ty_for_diag(&self.subst, &bound),
+            };
+            errors.push(format!(
+                "Associated type `{shown}` is used as `{used_as}`; it stands for whatever type the instance picks"
+            ));
+        }
+        for msg in errors {
+            self.messages.push(Message::error(ErrorCode::GenericTypeError, msg, range.clone()));
+        }
+    }
+
     /// Resolve `Owner::Assoc` in a type annotation (Phase 6).
     ///
     /// - Inside `trait Owner { … }`, `Owner::Elem` / bare scope lookup
@@ -11346,60 +11674,25 @@ impl Checker {
         }
 
         // 2. Type parameter owner: `T::Elem` with `T: Collect`.
-        for frame in self.type_params_in_scope.iter().rev() {
-            if let Some(&owner_var) = frame.get(owner) {
-                // Find an active constraint on this var whose class declares `assoc`.
-                let mut matching_decl: Option<(String, AssocTypeDecl)> = None;
-                for c in &self.active_constraints {
-                    let covers = c.args.iter().any(
-                        |a| matches!(apply_ty_prune(&self.subst, a), Ty::Var(v) if v == owner_var),
-                    );
-                    if !covers {
-                        continue;
-                    }
-                    if let Some(cdef) = self.generics.typeclass(&c.class) {
-                        if let Some(decl) = cdef.assoc_type(assoc) {
-                            matching_decl = Some((c.class.clone(), decl.clone()));
-                            break;
-                        }
-                        // Superclass assoc types (rare; check flattened supers).
-                        for super_name in &cdef.superclasses {
-                            if let Some(sdef) = self.generics.typeclass(super_name)
-                                && let Some(decl) = sdef.assoc_type(assoc) {
-                                    matching_decl = Some((super_name.clone(), decl.clone()));
-                                    break;
-                                }
-                        }
-                        if matching_decl.is_some() {
-                            break;
-                        }
-                    }
-                }
-                if let Some((class_name, decl)) = matching_decl {
-                    self.validate_assoc_projection_args(&class_name, &decl, args, range);
-                    let key = (owner_var, assoc.to_string(), self.projection_arg_key(args));
-                    if let Some(&(existing, _)) = self.open_assoc_projections.get(&key) {
-                        self.record_current_assoc_projection(existing, assoc, args);
-                        return Ty::Var(existing);
-                    }
-                    let fresh = self.counter.fresh();
-                    self.set_var_kind(fresh, Kind::Type);
-                    self.open_assoc_projections
-                        .insert(key, (fresh, args.to_vec()));
-                    self.record_current_assoc_projection(fresh, assoc, args);
-                    return Ty::Var(fresh);
-                }
-                self.messages.push(Message::error(
-                    ErrorCode::GenericTypeError,
-                    format!(
-                        "Cannot project associated type `{}` from `{}` \
-                         (no in-scope trait bound declares it)",
-                        assoc, owner
-                    ),
-                    range.clone(),
-                ));
-                return Ty::Var(self.counter.fresh());
+        let owner_var = self
+            .type_params_in_scope
+            .iter()
+            .rev()
+            .find_map(|frame| frame.get(owner).copied());
+        if let Some(owner_var) = owner_var {
+            if let Some(var) = self.open_param_projection(owner_var, assoc, args, range) {
+                return Ty::Var(var);
             }
+            self.messages.push(Message::error(
+                ErrorCode::GenericTypeError,
+                format!(
+                    "Cannot project associated type `{}` from `{}` \
+                     (no in-scope trait bound declares it)",
+                    assoc, owner
+                ),
+                range.clone(),
+            ));
+            return Ty::Var(self.counter.fresh());
         }
 
         // 3. Class-name owner outside definition: ground-only unique instance.
@@ -11606,6 +11899,7 @@ impl Checker {
         &mut self,
         class: &str,
         instance: &InstanceDef,
+        instance_args: &[Ty],
         scheme: &Scheme,
         mapping: &HashMap<TyVarId, TyVarId>,
         range: &Range<usize>,
@@ -11619,6 +11913,15 @@ impl Checker {
             .iter()
             .filter_map(|projection| {
                 let &fresh = mapping.get(&projection.var)?;
+                // A generic fn's `C::Elem` and `D::Elem` each take their own
+                // owner's instance, not every `Collect` instance the call
+                // discharges (#1462).
+                if let Some(owner) = self.declared_projection_owner(projection) {
+                    let owner_ty = apply_ty_prune(&self.subst, &Ty::Var(*mapping.get(&owner)?));
+                    if instance_args != std::slice::from_ref(&owner_ty) {
+                        return None;
+                    }
+                }
                 let value = instance.assoc_tys.get(&projection.name)?;
                 let args = projection
                     .args
@@ -11738,6 +12041,7 @@ impl Checker {
 
     /// Everything inferring a trait signature or instance method as a
     /// function records under its bare method name: result-mode flags, the
+    /// generic-fn mark of a method with its own type parameters (#1467), the
     /// env binding, and (when a free fn of that name exists) that fn's DefId
     /// scheme. The name belongs to the free fn, or to nobody, so a
     /// function-style call `method(x)` resolves through the trait instead of
@@ -11749,8 +12053,13 @@ impl Checker {
     ) -> BareNameShield {
         let names: Vec<&str> = names.into_iter().collect();
         let mark = self.env.top().map_or(0, |f| f.len());
+        let modes = self.snapshot_result_modes(names.iter().copied());
         BareNameShield {
-            modes: self.snapshot_result_modes(names.iter().copied()),
+            generic: modes
+                .iter()
+                .map(|(k, _, _)| (k.clone(), self.generic_fns.contains(k), self.generics.generic_fns.contains(k)))
+                .collect(),
+            modes,
             env: names.iter().map(|n| (n.to_string(), mark)).collect(),
             defs: names
                 .iter()
@@ -11775,6 +12084,15 @@ impl Checker {
     /// Restore what [`Self::shield_bare_names`] captured.
     pub(super) fn unshield_bare_names(&mut self, shield: BareNameShield) {
         self.restore_result_modes(shield.modes);
+        for (key, local, shared) in shield.generic {
+            for (set, was) in [(&mut self.generic_fns, local), (&mut self.generics.generic_fns, shared)] {
+                if was {
+                    set.insert(key.clone());
+                } else {
+                    set.remove(&key);
+                }
+            }
+        }
         if let Some(top) = self.env.top_mut() {
             for (name, mark) in &shield.env {
                 top.drop_since(name, *mark);
@@ -11853,7 +12171,9 @@ impl Checker {
     /// arguments: each projection variable of `scheme` whose owner `vars`
     /// binds to a type with a ground instance, mapped to that instance's
     /// associated type (#1187). The declaration's projection stays open, so
-    /// each clone resolves its own.
+    /// each clone resolves its own. The owner may be a variant's
+    /// constructor type (a clone keyed by `Option::Some(7)`'s type), which
+    /// unifies with the instance's head rather than equalling it (#1469).
     pub fn mono_assoc_projection_tys(
         &self,
         scheme: &Scheme,
@@ -11887,7 +12207,7 @@ impl Checker {
                 }
                 let Some(value) = self
                     .generics
-                    .find_instance(&c.class, std::slice::from_ref(owner_ty))
+                    .find_instance_relaxed(&c.class, std::slice::from_ref(owner_ty))
                     .and_then(|inst| inst.assoc_tys.get(assoc))
                 else {
                     continue;
@@ -13049,11 +13369,12 @@ impl Checker {
     /// Human-readable overload signature for diagnostics: `(int, int)` or `(int…)+ (rest)`.
     fn overload_sig_label(c: &OverloadCandidate) -> String {
         let params = Self::fun_param_tys(&c.scheme.ty);
-        let sig = params
-            .iter()
-            .map(|t| t.to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
+        let sig = crate::typechecking::pretty::format_tys_for_diag_named(
+            &Subst::empty(),
+            &params.iter().collect::<Vec<_>>(),
+            &HashMap::new(),
+        )
+        .join(", ");
         if c.is_rest {
             format!("({})+ (rest)", sig)
         } else {
@@ -13519,7 +13840,7 @@ impl Checker {
                     _ => {
                         let _ = self.error_with_help(
                             ErrorCode::GenericTypeError,
-                            format!("cannot spread value of type `{}`", resolved),
+                            format!("cannot spread value of type `{}`", self.diag_ty(&resolved)),
                             arg.0.into_range(),
                             Some("spread requires a tuple or array value".to_string()),
                         );
@@ -13943,10 +14264,13 @@ impl Checker {
                             if unify_with(&self.subst, &prev_pruned, &t_pruned).is_err() {
                                 let _ = self.error_with_help(
                                 ErrorCode::TypeMismatch,
-                                format!(
-                                    "rest argument type mismatch: expected `{}`, found `{}`",
-                                    prev_pruned, t_pruned
-                                ),
+                                {
+                                    let [want, have] = <[String; 2]>::try_from(
+                                        self.diag_tys(&[&prev_pruned, &t_pruned]),
+                                    )
+                                    .expect("two types");
+                                    format!("rest argument type mismatch: expected `{want}`, found `{have}`")
+                                },
                                 range.clone(),
                                 Some(
                                     "all trailing rest arguments must share the same element type"
@@ -14393,6 +14717,7 @@ impl Checker {
             let Expression::Function {
                 name,
                 is_static,
+                type_params: method_type_params,
                 args,
                 returns,
                 where_constraints,
@@ -14402,6 +14727,30 @@ impl Checker {
             else {
                 continue;
             };
+            // The method's own `<V>` parse as type variables, quantified
+            // after the impl's, as `infer_impl` orders them (#1461).
+            let method_pushed = self.push_type_params_for_type_parsing(method_type_params);
+            let mut vars = param_vars.clone();
+            let mut constraints = impl_constraints.clone();
+            if method_pushed {
+                let frame = self
+                    .type_params_in_scope
+                    .last()
+                    .expect("type-param frame just pushed");
+                let method_vars: Vec<TyVarId> = method_type_params
+                    .iter()
+                    .map(|tp| *frame.get(tp.name).expect("type param registered in frame"))
+                    .collect();
+                for (tp, var) in method_type_params.iter().zip(method_vars.iter()) {
+                    for bound in &tp.bounds {
+                        constraints.push(Constraint {
+                            class: self.canonical_trait_name(bound),
+                            args: vec![Ty::Var(*var)],
+                        });
+                    }
+                }
+                vars.extend(method_vars);
+            }
             self.current_tuple_pack = Self::tuple_pack_ty_for_args(args, &mut self.counter);
             let arg_tys = self.parse_arg_list(args);
             self.current_tuple_pack = None;
@@ -14430,7 +14779,6 @@ impl Checker {
             if !*is_static {
                 fun_ty = Ty::Fun(Box::new(owner_ty.clone()), Box::new(fun_ty));
             }
-            let mut constraints = impl_constraints.clone();
             for wc in where_constraints {
                 let args: Vec<Ty> = wc.args.iter().map(|a| self.parse_type_name(a)).collect();
                 constraints.push(Constraint {
@@ -14438,10 +14786,11 @@ impl Checker {
                     args,
                 });
             }
-            let scheme = if param_vars.is_empty() {
+            self.pop_type_params_for_type_parsing(method_pushed);
+            let scheme = if vars.is_empty() {
                 Scheme::mono(fun_ty)
             } else {
-                Scheme::poly(param_vars.clone(), constraints.clone(), fun_ty)
+                Scheme::poly(vars, constraints.clone(), fun_ty)
             };
             self.env.insert_top(fqn.clone(), scheme.clone());
             self.methods
@@ -14844,22 +15193,50 @@ impl Checker {
     /// concrete type (`idx < xs[0]` with `idx: int`, `xs: Vec<T>`) would
     /// silently make every use of `T` that type (#801). Reports each such
     /// parameter not already in `reported`, and adds it there.
+    ///
+    /// Two distinct parameters are just as rigid against each other (#1457):
+    /// `T` bound to `U`, a sibling or one of an enclosing scope's (still in
+    /// `type_params_in_scope`), is reported too. An enclosing parameter bound
+    /// to one of `params` is caught here, while `params` are still known by
+    /// name; the enclosing scope's own check only sees it bound to a variable.
     pub(super) fn reject_bound_type_params(
         &mut self,
         params: &[(String, TyVarId)],
         reported: &mut Vec<TyVarId>,
         range: &Range<usize>,
     ) {
-        for (name, p) in params {
+        let outer: Vec<(String, TyVarId)> = self
+            .type_params_in_scope
+            .iter()
+            .flat_map(|frame| frame.iter().map(|(n, v)| (n.clone(), *v)))
+            .filter(|(_, v)| !params.iter().any(|(_, p)| p == v))
+            .collect();
+        let rigid_name = |q: TyVarId| {
+            params.iter().chain(outer.iter()).find(|(_, v)| *v == q).map(|(n, _)| n.clone())
+        };
+        let own: Vec<TyVarId> = params.iter().map(|(_, p)| *p).collect();
+        let checked = params.iter().map(|named| (named, true)).chain(outer.iter().map(|named| (named, false)));
+        let mut errors = Vec::new();
+        for ((name, p), is_own) in checked {
             if reported.contains(p) {
                 continue;
             }
             let bound = apply_ty_prune(&self.subst, &Ty::Var(*p));
-            if matches!(bound, Ty::Var(_)) {
-                continue;
-            }
+            let pretty = match bound {
+                Ty::Var(q) if q == *p => continue,
+                Ty::Var(q) => match rigid_name(q) {
+                    // An enclosing parameter bound to another enclosing one
+                    // is its own scope's to report.
+                    Some(other) if is_own || own.contains(&q) => other,
+                    _ => continue,
+                },
+                _ if !is_own => continue,
+                _ => self.diag_ty(&bound),
+            };
             reported.push(*p);
-            let pretty = crate::typechecking::pretty::format_ty_for_diag(&self.subst, &bound);
+            errors.push((name.clone(), pretty));
+        }
+        for (name, pretty) in errors {
             self.messages.push(Message::error(
                 ErrorCode::GenericTypeError,
                 format!("Type parameter `{name}` is used as `{pretty}`; a type parameter stands for any type"),
@@ -16230,7 +16607,7 @@ impl Checker {
                     if tys.len() == 1 =>
                 {
                     let wrapped =
-                        crate::typechecking::pretty::format_ty_for_diag(&self.subst, &tys[0]);
+                        self.diag_ty(&tys[0]);
                     format!(
                         "`{enum_str}::{variant_str}` is a tuple variant wrapping `{wrapped}`; \
                          construct with `{enum_str}::{variant_str}(value)`, or declare a record \
@@ -16645,7 +17022,7 @@ impl Checker {
                                 format!(
                                     "tuple pattern has {} elements, but value has type `{}`",
                                     parts.len(),
-                                    expected,
+                                    self.diag_ty(&expected),
                                 ),
                                 pattern_range.clone(),
                                 Some("adjust the pattern or the RHS tuple arity".to_string()),
@@ -16665,7 +17042,7 @@ impl Checker {
                     other => {
                         return self.error_with_help(
                             ErrorCode::GenericTypeError,
-                            format!("cannot destructure type `{}` with a tuple pattern", other,),
+                            format!("cannot destructure type `{}` with a tuple pattern", self.diag_ty(other)),
                             pattern_range.clone(),
                             Some("RHS must be a tuple".to_string()),
                         );
@@ -16704,7 +17081,7 @@ impl Checker {
                     other => {
                         return self.error_with_help(
                             ErrorCode::GenericTypeError,
-                            format!("cannot destructure type `{}` with a record pattern", other,),
+                            format!("cannot destructure type `{}` with a record pattern", self.diag_ty(other)),
                             pattern_range.clone(),
                             Some("RHS must be a record (dict)".to_string()),
                         );
@@ -16726,7 +17103,7 @@ impl Checker {
                     let Some((_, fty)) = decl_fields.iter().find(|(n, _)| n == pf.name) else {
                         return self.error_with_help(
                             ErrorCode::UnknownField,
-                            format!("Cannot find field `{}` on record `{}`", pf.name, expected,),
+                            format!("Cannot find field `{}` on record `{}`", pf.name, self.diag_ty(&expected)),
                             pattern_range.clone(),
                             Some(format!(
                                 "the record has fields: {}",
@@ -17208,7 +17585,8 @@ impl Checker {
                     ErrorCode::FormatSpecifierMismatch,
                     format!(
                         "Format specifier `%{}` cannot be used with an open type `{}`",
-                        spec, arg_ty
+                        spec,
+                        self.diag_ty(arg_ty)
                     ),
                     arg_range.clone(),
                 );
@@ -17275,7 +17653,9 @@ impl Checker {
                 ErrorCode::FormatSpecifierMismatch,
                 format!(
                     "Format specifier `%{}` requires {}, found {}",
-                    spec, expected, arg_ty
+                    spec,
+                    expected,
+                    self.diag_ty(arg_ty)
                 ),
                 arg_range.clone(),
             );
@@ -18102,7 +18482,8 @@ impl Checker {
                 ErrorCode::GenericTypeError,
                 format!(
                     "binding `{}` is constant, but the underlying value of type `{}` is still mutable",
-                    name, pruned
+                    name,
+                    self.diag_ty(&pruned)
                 ),
                 range,
             );
@@ -18262,12 +18643,12 @@ impl Checker {
                             ErrorCode::GenericTypeError,
                             format!(
                                 "type `{}` is IntoIterator but its IntoIter is not Iterator",
-                                te
+                                self.diag_ty(te)
                             ),
                             iterable_range.clone(),
                             Some(format!(
                                 "add `impl Iterator for {}` with matching `type Item`",
-                                into_iter_ty
+                                self.diag_ty(&into_iter_ty)
                             )),
                         );
                         None
@@ -18278,7 +18659,7 @@ impl Checker {
             Ok(None) => {
                 let _ = self.error_with_help(
                     ErrorCode::GenericTypeError,
-                    format!("type `{}` is not iterable", te),
+                    format!("type `{}` is not iterable", self.diag_ty(te)),
                     iterable_range.clone(),
                     Some(
                         "implement `IntoIterator` / `Iterator`, or use an array, homogeneous tuple/dict, range, or coroutine"
@@ -18440,7 +18821,9 @@ impl Checker {
                     ErrorCode::GenericTypeError,
                     format!(
                         "heterogeneous {}: element types `{}` and `{}` do not match",
-                        kind, first, other
+                        kind,
+                        self.diag_ty(&first),
+                        self.diag_ty(&other)
                     ),
                     range.clone(),
                     Some(format!("{} elements must all share one type", kind)),

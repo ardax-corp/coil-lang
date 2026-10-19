@@ -12,10 +12,6 @@ use super::op::IlOp;
 pub struct OptimizeOptions {
     /// Constant folding and algebraic identities in the HIR (`hir::fold`).
     pub algebraic: bool,
-    /// Local CSE in the HIR (`hir::cse`).
-    pub local_cse: bool,
-    /// Loop-invariant code motion in the HIR (`hir::licm`).
-    pub licm: bool,
     /// HIR counted-loop in-bounds proofs (`hir::bounds`).
     pub loop_bounds: bool,
     /// Return in each branch of a returned `match` / `if` in the HIR

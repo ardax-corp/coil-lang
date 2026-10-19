@@ -55,10 +55,13 @@ pub(super) struct SynthCallee {
     pub dicts: Vec<DictStep>,
     pub raw: bool,
     /// The two-word kind the callee returns as `[payload, tag]`.
-    pub pair: Option<String>,
+    pub pair: Option<PairKind>,
     /// A host native by its registered name, whatever the name resolves
     /// to in the module being compiled.
     pub host: bool,
+    /// The `format` builtin, whatever the name resolves to in the module
+    /// being compiled.
+    pub format: bool,
 }
 
 /// One step of building trait dictionaries, a stack program over words:
@@ -977,20 +980,20 @@ impl Compiler {
             .map(|(payload, tag, _)| (*payload, *tag))
     }
 
-    fn unboxed_enum_kind(&self, name: &str) -> Option<&str> {
+    fn unboxed_enum_kind(&self, name: &str) -> Option<&PairKind> {
         self.context
             .unboxed_enum_locals
             .get(name)
-            .map(|(_, _, kind)| kind.as_str())
+            .map(|(_, _, kind)| kind)
     }
 
-    fn alloc_unboxed_enum_slots(&mut self, name: &str, enum_name: &str) -> (u32, u32) {
+    fn alloc_unboxed_enum_slots(&mut self, name: &str, kind: &PairKind) -> (u32, u32) {
         let payload = self.alloc_binding_slot(name);
         let tag_name = format!("__unbox_tag_{name}");
         let tag = self.context.variables.intern(tag_name) as u32;
         self.context
             .unboxed_enum_locals
-            .insert(name.to_string(), (payload, tag, enum_name.to_string()));
+            .insert(name.to_string(), (payload, tag, kind.clone()));
         (payload, tag)
     }
 
@@ -1031,9 +1034,9 @@ impl Compiler {
 
     /// The two-word kind a parameter of type `ty` of `callee` takes, if any
     /// (see [`Self::callee_has_unboxed_range_params`]).
-    pub(super) fn param_pair_kind(&self, callee: &str, ty: &Ty) -> Option<String> {
+    pub(super) fn param_pair_kind(&self, callee: &str, ty: &Ty) -> Option<PairKind> {
         if let Some(kind) = crate::typechecking::return_layout::two_word_range_kind(ty) {
-            return Some(kind.to_string());
+            return Some(kind);
         }
         let lookup = strip_overload_key(callee);
         if self.checker.is_overloaded(lookup)
@@ -1045,13 +1048,13 @@ impl Compiler {
         }
         // A boxed tuple splits into `[a, b]` through a temp slot, which is
         // unsafe above live operands, so products stay one boxed word.
-        crate::typechecking::return_layout::two_word_return_enum(&self.checker, ty)
-            .filter(|kind| self.hir_pair_kind(kind) && !crate::typechecking::return_layout::is_two_word_product_kind(kind))
+        crate::typechecking::return_layout::two_word_kind(&self.checker, ty)
+            .filter(|kind| self.hir_pair_kind(kind) && *kind != PairKind::Product)
     }
 
     /// Per parameter of `callee`, the two-word kind it takes (empty when it
     /// takes none).
-    pub(super) fn callee_param_pairs(&self, callee: &str) -> Vec<Option<String>> {
+    pub(super) fn callee_param_pairs(&self, callee: &str) -> Vec<Option<PairKind>> {
         if !self.callee_has_unboxed_range_params(callee) {
             return Vec::new();
         }
@@ -1076,7 +1079,7 @@ impl Compiler {
             .map(str::to_string)
     }
 
-    fn argument_unboxed_range_kind(&self, arg: &Output<'_>) -> Option<String> {
+    fn argument_unboxed_range_kind(&self, arg: &Output<'_>) -> Option<PairKind> {
         let key = self.current_fn_pair_key()?;
         // By position, from the same signature every caller reads.
         if let Expression::Argument { name, .. } = arg.1.as_ref()
@@ -1091,7 +1094,7 @@ impl Compiler {
         }
         if let Some(ty) = self.sidecar_ty_of(arg)
             && let Some(kind) = crate::typechecking::return_layout::two_word_range_kind(&ty) {
-                return Some(kind.to_string());
+                return Some(kind);
             }
         let Expression::Argument { ty: Some(ty), .. } = arg.1.as_ref() else {
             return None;
@@ -1110,8 +1113,7 @@ impl Compiler {
                             | Expression::Identifier("int" | "byte" | "float")
                     )
                 });
-                numeric
-                    .then(|| crate::typechecking::return_layout::range_kind(inclusive).to_string())
+                numeric.then_some(PairKind::Range { inclusive })
             }
             _ => None,
         }
@@ -3978,6 +3980,15 @@ impl Compiler {
                 self.emit_builtin_entry(&fqn, &params, boolean.clone(), None, |b, a| b.bin(op, a[0], a[1], boolean.clone()));
             }
         }
+        // `()` is always `()` (#1450): its operands, taken as the `Show`
+        // thunk takes a unit, are never read.
+        let params = [(int.clone(), tag_of(ValueTag::Unit)), (int.clone(), tag_of(ValueTag::Unit))];
+        for (method, equal) in [("eq", true), ("ne", false)] {
+            let fqn = Generics::builtin_instance_fqn("Eq", "unit", method);
+            self.emit_builtin_entry(&fqn, &params, boolean.clone(), None, |b, _| {
+                b.push(HirKind::Lit(Lit::Bool(equal)), boolean.clone())
+            });
+        }
 
         // Show thunks: accept a boxed, raw or heap-string argument at slot 0,
         // ignore the trailing dictionary, and return an ObjString via STRINGIFY.
@@ -4020,6 +4031,24 @@ impl Compiler {
             self.emit_builtin_entry(&adapter, &[(word.clone(), tag.map(|t| t as u32))], string.clone(), None, |b, a| {
                 show(b, a[0], tag)
             });
+        }
+
+        // Show thunks for ground tuples (#1451): reserved here, raw (the
+        // tuple's own word) with a `$dict` adapter, as the string thunk;
+        // emitted by `emit_tuple_show_thunks` once the module's own `Show`
+        // entries exist, so `%v` of an item calls them.
+        let tuples: Vec<Ty> = self.checker.generics().tuple_show_tys().cloned().collect();
+        for ty in tuples {
+            let fqn = Generics::builtin_instance_fqn("Show", &ty.to_string(), "show");
+            if self.functions.contains_key(&fqn) {
+                continue;
+            }
+            self.note_raw_builtin_thunk(&fqn);
+            self.reserve_function_entry(Self::dict_adapter_name(&fqn));
+            self.reserve_function_entry(fqn.clone());
+            if !self.tuple_show_thunks.iter().any(|(f, _)| *f == fqn) {
+                self.tuple_show_thunks.push((fqn, ty));
+            }
         }
 
         // Show thunks for the builtin error enums: reserved here, emitted by
@@ -4510,7 +4539,7 @@ impl Compiler {
     /// numeric `Range` / `RangeInclusive` are `[start, end]`.
     /// Niched heap `Option<T>` / heap-heap `Result<T, E>`, unbounded `T`,
     /// mixed-heap / wider products, and coroutines stay `None`.
-    fn two_word_return_kind(&self, name: &str) -> Option<String> {
+    fn two_word_return_kind(&self, name: &str) -> Option<PairKind> {
         if let Some(cached) = self.pair_return_kinds.borrow().get(name) {
             return cached.clone();
         }
@@ -4524,13 +4553,13 @@ impl Compiler {
     /// Pin a verdict so later queries cannot disagree with it. Definition sites
     /// use this for shapes only they can see (a coroutine body never returns a
     /// pair, however its return type reads).
-    fn pin_two_word_return_kind(&self, name: &str, kind: Option<String>) {
+    fn pin_two_word_return_kind(&self, name: &str, kind: Option<PairKind>) {
         self.pair_return_kinds
             .borrow_mut()
             .insert(name.to_string(), kind);
     }
 
-    fn compute_two_word_return_kind(&self, name: &str) -> Option<String> {
+    fn compute_two_word_return_kind(&self, name: &str) -> Option<PairKind> {
         if self.coroutine_fns.contains(name) {
             return None;
         }
@@ -4554,7 +4583,7 @@ impl Compiler {
             .checker
             .fn_return_ty(name)
             .or_else(|| self.checker.fn_return_ty(lookup))?;
-        crate::typechecking::return_layout::two_word_return_enum(&self.checker, &ty)
+        crate::typechecking::return_layout::two_word_kind(&self.checker, &ty)
     }
 
     /// Trait methods live under `Class__Type__method` FQNs that `env` lookup
@@ -4581,7 +4610,7 @@ impl Compiler {
         let Some(ty) = ty else {
             return;
         };
-        let kind = crate::typechecking::return_layout::two_word_return_enum(&self.checker, &ty);
+        let kind = crate::typechecking::return_layout::two_word_kind(&self.checker, &ty);
         self.pin_two_word_return_kind(fqn, kind);
     }
 
@@ -4900,6 +4929,7 @@ impl Compiler {
         entries: &[(String, u32)],
         entry_sps: &HashMap<String, u32>,
     ) -> HashMap<String, super::precise_frames::FnWordKinds> {
+        use crate::typechecking::subst::apply_ty_prune;
         use crate::typechecking::value_layout::word_kind;
         let mut out = HashMap::new();
         for (name, _) in entries {
@@ -4950,16 +4980,20 @@ impl Compiler {
                 let Ty::Fun(param, ret) = current else {
                     break;
                 };
-                params.push(word_kind(&self.checker, param));
+                // A `()` parameter holds the empty tuple object, a pointer,
+                // as a tuple's `()` item does (#1465).
+                params.push(if crate::hir::layout::is_unit(&apply_ty_prune(self.checker.subst(), param)) {
+                    common::WORD_POINTER
+                } else {
+                    word_kind(&self.checker, param)
+                });
                 current = ret;
             }
             if params.len() != declared.max(1) {
                 continue;
             }
             if declared == 0 {
-                if params != [common::WORD_SCALAR]
-                    || !matches!(&scheme.ty, Ty::Fun(p, _) if matches!(p.as_ref(), Ty::Con(n) if n == crate::typechecking::ty::UNIT))
-                {
+                if !matches!(&scheme.ty, Ty::Fun(p, _) if matches!(p.as_ref(), Ty::Con(n) if n == crate::typechecking::ty::UNIT)) {
                     continue;
                 }
                 params.clear();
@@ -7212,6 +7246,7 @@ impl Compiler {
 
         self.bytecode.append(&mut program);
         self.emit_used_builtin_show_thunks();
+        self.emit_tuple_show_thunks();
         self.pad_debug_locs();
         // Kept while this module holds methods a later module may clone.
         let seq = self.program_seq;
@@ -7245,6 +7280,36 @@ impl Compiler {
             let hir = crate::hir::synth::builtin_enum_show(&self.checker, &fqn, enum_name, variants);
             self.emit_synth_fn(&fqn, &hir, HashMap::new(), true);
         }
+        skip.bind_label(after, self.bytecode.il_mut());
+    }
+
+    /// Emit the reserved `Show` thunks of ground tuples (#1451) behind a
+    /// jump, as [`Self::emit_used_builtin_show_thunks`]: each is
+    /// `format("%v", t)` over its argument, the raw entry taking the tuple's
+    /// word and its `$dict` adapter the boxed one.
+    fn emit_tuple_show_thunks(&mut self) {
+        let due: Vec<_> = std::mem::take(&mut self.tuple_show_thunks)
+            .into_iter()
+            .filter(|(fqn, _)| !self.functions.contains_key(fqn))
+            .collect();
+        if due.is_empty() {
+            return;
+        }
+        let string = crate::typechecking::ty::string();
+        let mut skip = BlockBuilder::new();
+        let after = skip.fresh_label(self.bytecode.il_mut());
+        skip.emit_jump_to(after, BbJumpKind::Unconditional, self.bytecode.il_mut());
+        self.hir_synth_callees.insert("format".to_string(), SynthCallee { format: true, ..SynthCallee::default() });
+        for (fqn, ty) in due {
+            let adapter = Self::dict_adapter_name(&fqn);
+            for (name, tag) in [(fqn, None), (adapter, Some(ValueTag::Tuple as u32))] {
+                self.emit_builtin_entry(&name, &[(ty.clone(), tag)], string.clone(), None, |b, a| {
+                    let fmt = b.str("%v");
+                    b.call("format", vec![fmt, a[0]], string.clone())
+                });
+            }
+        }
+        self.hir_synth_callees.clear();
         skip.bind_label(after, self.bytecode.il_mut());
     }
 

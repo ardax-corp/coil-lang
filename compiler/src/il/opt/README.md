@@ -26,8 +26,8 @@ are identical. Skip only on a hit-bench wash or regression. See
 | Former IL pass | Now | Flag |
 |----------------|-----|------|
 | constant folding, algebraic identities, `instcombine`, `canon` | `hir::fold` (an `int` literal goes right of a commutative op or a flipped compare) | `algebraic` (every level) |
-| local CSE / GVN | `hir::cse` | `local_cse` |
-| loop-invariant code motion | `hir::licm` | `licm` |
+| local CSE / GVN | `mir::cse` / `mir::gvn` (`hir::cse` folded in 2026-10) | — |
+| loop-invariant code motion | `mir::licm` (`hir::licm` folded in 2026-10) | — |
 | counted-loop bounds proofs | `hir::bounds` | `loop_bounds` |
 | full unroll of short counted loops | `hir::unroll` | `loop_unroll` (not at Size) |
 | escape analysis / scalar replacement | `hir::enum_sroa`, `hir::tuple_sroa` | `escape_analysis` |
