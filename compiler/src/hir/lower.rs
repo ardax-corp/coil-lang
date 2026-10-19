@@ -205,8 +205,18 @@ fn fun_words_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>, open_enum: b
                 (super::layout::ty_is_closed(t) || open_enum && super::layout::of(checker, t) == super::layout::Layout::Word)
                     && classify_in(checker, t, seen) == Some(ValueClass::Enum)
             };
+            // A closure literal's tuple of type parameters (a shared generic
+            // body's `fn () use (x) => (x, x)`) is its one heap tuple word:
+            // an open tuple is never a pair (#1524).
+            let open_tuple = |t: &Ty, seen: &mut Vec<String>| {
+                open_enum
+                    && matches!(strip_readonly(t), Ty::Tuple(_))
+                    && !super::layout::ty_is_closed(t)
+                    && params_closed(t)
+                    && classify_in(checker, t, seen) == Some(ValueClass::Aggregate)
+            };
             (unit(param) || plain(param, seen) || closed_enum(param, seen))
-                && (unit(ret) || plain(ret, seen) || closed_enum(ret, seen))
+                && (unit(ret) || plain(ret, seen) || closed_enum(ret, seen) || open_tuple(ret, seen))
         }
         _ => false,
     }
