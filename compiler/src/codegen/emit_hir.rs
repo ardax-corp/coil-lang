@@ -6528,13 +6528,15 @@ impl Compiler {
             },
         };
         let mut cur = &scheme_ty;
+        let mut params = Vec::with_capacity(n);
         for _ in 0..n {
-            let Ty::Fun(_, ret) = cur else {
+            let Ty::Fun(param, ret) = cur else {
                 return Some(Err("callee-value"));
             };
+            params.push(param.as_ref().clone());
             cur = ret;
         }
-        Some(self.hir_closure_adapt(cur, &ground, &bounds, 0))
+        Some(self.hir_closure_adapt(cur, &ground, &params, &bounds, 0))
     }
 
     /// The declared parameter count generic function `name`'s value records
