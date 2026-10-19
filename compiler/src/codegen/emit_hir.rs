@@ -3800,9 +3800,13 @@ impl Compiler {
         let node = hir.expr(call);
         let (start, end) = node.span;
         let known = |k: &str| self.functions.contains_key(k) || self.fn_entry_labels.contains_key(k);
-        let Some((class, inst_args, fqn)) = self
-            .sidecar_dicts(node.node, start, end)
-            .and_then(|dicts| dicts.first())
+        let dicts = self.sidecar_dicts(node.node, start, end).unwrap_or_default();
+        let picked = if node.node.is_none() {
+            self.hir_spliced_dict(hir, call, dicts)?
+        } else {
+            dicts.first()
+        };
+        let Some((class, inst_args, fqn)) = picked
             .and_then(|instance| {
                 let fqn = instance.method_fqns.get(method)?.clone();
                 known(&fqn).then(|| (instance.class.clone(), instance.args.clone(), fqn))
@@ -4261,9 +4265,13 @@ impl Compiler {
             None if self.lookup_slot(name).is_some() || known(name) || self.checker.is_generic_fn(name) => return Ok(None),
             None => name,
         };
-        let Some((class, inst_args, fqn)) = self
-            .sidecar_dicts(node.node, start, end)
-            .and_then(|dicts| dicts.first())
+        let dicts = self.sidecar_dicts(node.node, start, end).unwrap_or_default();
+        let picked = if node.node.is_none() {
+            self.hir_spliced_dict(hir, call, dicts)?
+        } else {
+            dicts.first()
+        };
+        let Some((class, inst_args, fqn)) = picked
             .and_then(|instance| {
                 let fqn = instance.method_fqns.get(method)?.clone();
                 known(&fqn).then(|| (instance.class.clone(), instance.args.clone(), fqn))
@@ -4272,6 +4280,41 @@ impl Compiler {
             return Ok(None);
         };
         self.hir_ground_direct(hir, call, class, inst_args, fqn, method).map(Some)
+    }
+
+    /// The dictionary a call spliced from another body (an inlined mono
+    /// clone, its nodes on the call's span) takes from the facts on that
+    /// span: the clone's dictionaries, one per bound. The one this call
+    /// takes is the one its arguments name, not always the first
+    /// (`fn second<A: Show, B: Show>(A a, B b) { show(b) }`, #1479); when
+    /// none matches, the call is refused rather than sent to the wrong
+    /// instance.
+    fn hir_spliced_dict<'d>(
+        &self,
+        hir: &HirBody,
+        call: HirId,
+        dicts: &'d [crate::typechecking::generics::InstanceDef],
+    ) -> Result<Option<&'d crate::typechecking::generics::InstanceDef>, &'static str> {
+        let HirKind::Call { args, .. } = &hir.expr(call).kind else {
+            return Ok(dicts.first());
+        };
+        // Facts that cannot be checked against the arguments keep the
+        // first, as before.
+        if args.is_empty() || dicts.iter().any(|d| d.args.is_empty() || d.args.iter().any(Self::ty_has_var)) {
+            return Ok(dicts.first());
+        }
+        let lookup: Option<Vec<Ty>> = args
+            .iter()
+            .map(|&a| Self::hir_ty(hir, a).map(|t| Self::show_lookup_ty_for_instance(&apply_ty_prune(self.checker.subst(), t))))
+            .collect();
+        let Some(lookup) = lookup else {
+            return Ok(dicts.first());
+        };
+        match dicts.iter().find(|d| lookup.get(..d.args.len()).is_some_and(|l| l == d.args.as_slice())) {
+            Some(d) => Ok(Some(d)),
+            None if dicts.is_empty() => Ok(None),
+            None => Err("callee-trait"),
+        }
     }
 
     /// How a ground instance call passes its arguments and takes its result:
