@@ -98,8 +98,10 @@ Seals an array literal or a new class instance against mutation from outside.
 
 `readonly [1, 2, 3]` and `readonly new Point(1, 2)` produce a `readonly T`
 value: field writes and index writes through it are compile errors, while the
-class's own methods can still change it through `self`. The variable itself
-can still be rebound.
+class's own methods can still change it through `self`. The seal is deep: a
+field, element or loop variable read through it is `readonly` too, and it
+cannot be passed, stored or returned where a plain `T` is expected. The
+variable itself can still be rebound.
 
 ```coil
 class Point {
