@@ -1759,6 +1759,11 @@ impl Compiler {
                 let fmt = self.intern_string(unescape_coil_string(&Self::record_show_format(fields)));
                 return Some(crate::mir::HirShow::Record { fmt, fields: shown });
             }
+            // An arity-wide tuple thunk's item: its own dictionary (#1479).
+            Ty::Var(v) if let Some(&n) = self.synth_show_dicts.get(v) => {
+                let dict = self.lookup_slot(&format!("__dict{n}"))?;
+                return Some(crate::mir::HirShow::Bound { dict, method: 0 });
+            }
             _ => {}
         }
         if self.value_layout(ty) != ValueLayout::Boxed {

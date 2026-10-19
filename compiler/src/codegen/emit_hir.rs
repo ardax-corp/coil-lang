@@ -810,6 +810,17 @@ impl Compiler {
         for &param in &hir.params {
             self.context.variables.intern(hir.local(param).name.clone());
         }
+        // A bounded instance method's dictionaries (#1479): its own after
+        // the parameters, the context read out of it on entry.
+        let entry_words = self.synth_entry_dicts.map(|(base, n)| {
+            let own = self.context.variables.intern("__dict0".to_string()) as u32;
+            let entry = self.context.variables.len() as u32;
+            for i in 0..n {
+                let slot = self.context.variables.intern(format!("__dict{}", i + 1)) as u32;
+                self.hir_mir_ctx.push((slot, own, (base + i) as u32));
+            }
+            entry
+        });
         let plan = lower::refusal(hir, &self.checker).map_or_else(|| self.plan_hir_body(hir), Err);
         let lowered = match plan {
             Ok(mut emit) => {
@@ -825,7 +836,7 @@ impl Compiler {
                     op.set_loc(DebugLoc::unknown());
                 }
                 self.hir_mir_why = None;
-                self.hir_mir = self.hir_lower_mir(hir, &mut emit, None);
+                self.hir_mir = self.hir_lower_mir(hir, &mut emit, entry_words);
                 self.expr_depth = 0;
                 true
             }
@@ -4286,9 +4297,9 @@ impl Compiler {
     /// clone, its nodes on the call's span) takes from the facts on that
     /// span: the clone's dictionaries, one per bound. The one this call
     /// takes is the one its arguments name, not always the first
-    /// (`fn second<A: Show, B: Show>(A a, B b) { show(b) }`, #1479); when
-    /// none matches, the call is refused rather than sent to the wrong
-    /// instance.
+    /// (`fn second<A: Show, B: Show>(A a, B b) { show(b) }`), and a tuple
+    /// built from a type parameter (`show((x, ()))`, #1479) takes none of
+    /// them: the call is refused rather than sent to the wrong instance.
     fn hir_spliced_dict<'d>(
         &self,
         hir: &HirBody,
@@ -4386,6 +4397,34 @@ impl Compiler {
         let HirKind::Call { args, .. } = &hir.expr(call).kind else {
             return Err("callee");
         };
+        // A tuple with an open item (#1479): its arity-wide instance, called
+        // as `t.show()` is, the receiver boxed and the dictionary built from
+        // the frame's.
+        if inst_args.iter().any(Self::ty_has_var)
+            && let [recv] = args.as_slice()
+            && self.checker.generics().structural_tuples().any(|(_, _, f)| f == fqn)
+        {
+            let recv_ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, *recv).ok_or("method-receiver")?);
+            let layout = |id: HirId| Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |t| self.value_layout(t));
+            return Ok(HirCall {
+                key: fqn,
+                pair: None,
+                params: vec![layout(*recv)],
+                ret: layout(call),
+                method: true,
+                mono: false,
+                builtin: None,
+                generic: None,
+                instance: Some(Box::new(HirInstanceCall {
+                    class,
+                    args: inst_args,
+                    recv_box: Some(Self::show_lookup_ty_for_instance(&recv_ty)),
+                    ground: None,
+                })),
+                ranges: Vec::new(),
+                mono_of: None,
+            });
+        }
         if inst_args.iter().any(Self::ty_has_var) || self.two_word_return_kind(&fqn).is_some() {
             return Err("callee-trait");
         }
@@ -4559,7 +4598,11 @@ impl Compiler {
                 if specs.get(i) == Some(&'v') {
                     let ty = apply_ty_prune(self.checker.subst(), ty);
                     // A tuple or record shows field by field.
-                    if !crate::hir::layout::ty_is_closed(&ty) && self.hir_bound_show(hir, arg).is_none() && !self.hir_generic_show(&ty) {
+                    if !crate::hir::layout::ty_is_closed(&ty)
+                        && self.hir_bound_show(hir, arg).is_none()
+                        && !self.hir_generic_show(&ty)
+                        && !self.synth_shows_items(&ty)
+                    {
                         return Err("format-show");
                     }
                     continue;
@@ -4852,9 +4895,12 @@ impl Compiler {
                     .as_deref()
                     .is_some_and(|k| self.checker.is_generic_fn(strip_overload_key(k))));
         let open = |ty: &Ty| (shared || !forwarded.is_empty()) && matches!(ty, Ty::Var(_));
+        // A tuple with an open item, in a shared body, is one boxed object
+        // whose dictionary the call builds (#1479).
+        let open_tuple = |ty: &Ty| shared && matches!(ty, Ty::Tuple(_)) && !crate::hir::layout::ty_is_closed(ty);
         let ground = |id: HirId| {
             let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
-            (crate::hir::layout::ty_is_closed(&ty) || ground_fun(&ty) || open(&ty)).then_some(ty)
+            (crate::hir::layout::ty_is_closed(&ty) || ground_fun(&ty) || open(&ty) || open_tuple(&ty)).then_some(ty)
         };
         let explicit = args.len() - receivers;
         let skip = params.len().saturating_sub(explicit);
@@ -4916,6 +4962,10 @@ impl Compiler {
             arg_tys[0] = self_ty;
         }
         for constraint in &scheme.constraints {
+            // A goal open inside a tuple is built from the frame's.
+            if self.open_structural_lookup(constraint, &vars).is_some() {
+                continue;
+            }
             // An open goal is served by a forwarded dictionary.
             let lookup_tys = match Self::resolve_constraint_lookup(constraint, &vars, &self.checker) {
                 None if !forwarded.is_empty() => continue,
@@ -5081,6 +5131,13 @@ impl Compiler {
         let hint = self.bound_display_hint(e.node, e.span.0, e.span.1)?;
         let dict = self.lookup_slot(&format!("__dict{}", hint.dict_index))?;
         Some((dict, hint.method_slot as u32))
+    }
+
+    /// An arity-wide tuple thunk's argument (#1479): a tuple whose open
+    /// items each have the thunk's dictionary.
+    fn synth_shows_items(&self, ty: &Ty) -> bool {
+        matches!(ty, Ty::Tuple(items) if !self.synth_show_dicts.is_empty()
+            && items.iter().all(|t| crate::hir::layout::ty_is_closed(t) || matches!(t, Ty::Var(v) if self.synth_show_dicts.contains_key(v))))
     }
 
     /// An open type whose `Show` is a bounded generic instance

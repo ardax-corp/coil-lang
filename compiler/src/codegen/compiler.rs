@@ -2918,8 +2918,15 @@ impl Compiler {
             }
         }
         let (fqns, diag_range) = {
-            let Some(instance) = self.checker.generics().find_instance_relaxed(class, lookup)
-            else {
+            // An open goal looks among the generic instances first: a ground
+            // one its variables unify with is never its instance.
+            let instance = if open {
+                let generics = self.checker.generics();
+                generics.find_generic_instance(class, lookup).or_else(|| generics.find_instance_relaxed(class, lookup))
+            } else {
+                self.checker.generics().find_instance_relaxed(class, lookup)
+            };
+            let Some(instance) = instance else {
                 return false;
             };
             // An open goal may only select a generic instance (a concrete one
@@ -3360,6 +3367,14 @@ impl Compiler {
             let Some(lookup) =
                 Self::resolve_constraint_lookup(constraint, &var_to_ty, &self.checker)
             else {
+                // A goal open inside a type (`Show<(int, T)>`) is built here
+                // from the frame's dictionaries (#1479); a bare type
+                // parameter's is forwarded.
+                if let Some(lookup) = self.open_structural_lookup(constraint, &var_to_ty)
+                    && self.plan_instance_dict(out, &constraint.class, &lookup)
+                {
+                    dict_count += 1;
+                }
                 continue;
             };
             if self.plan_instance_dict(out, &constraint.class, &lookup) {
@@ -3367,6 +3382,31 @@ impl Compiler {
             }
         }
         dict_count
+    }
+
+    /// `constraint`'s arguments through `var_to_ty` when they are open only
+    /// inside a tuple (`(int, T)`, #1479): the goal the arity-wide tuple
+    /// instance serves, its items' dictionaries from the frame. `None` for
+    /// a ground goal, an unbound variable or a bare type parameter.
+    pub(super) fn open_structural_lookup(
+        &self,
+        constraint: &crate::typechecking::ty::Constraint,
+        var_to_ty: &HashMap<crate::typechecking::ty::TyVarId, Ty>,
+    ) -> Option<Vec<Ty>> {
+        let subst = self.checker.subst();
+        let lookup: Vec<Ty> = constraint
+            .args
+            .iter()
+            .map(|arg| match arg {
+                Ty::Var(v) => var_to_ty.get(v).map(|t| crate::typechecking::subst::apply_ty_prune(subst, t)),
+                other => Some(crate::typechecking::subst::apply_ty_prune(subst, other)),
+            })
+            .collect::<Option<_>>()?;
+        lookup
+            .iter()
+            .all(|t| matches!(t, Ty::Tuple(_)) && Self::ty_has_var(t))
+            .then_some(lookup)
+            .filter(|l| self.checker.generics().find_generic_instance(&constraint.class, l).is_some())
     }
 
     /// Phase 4: plan dictionary evidence for every constraint slot when a
@@ -4062,6 +4102,19 @@ impl Compiler {
                     self.structural_thunks.push((fqn, method, ty.clone()));
                 }
             }
+        }
+
+        // The arity-wide tuple instances' thunks (#1479): one entry each,
+        // taking the boxed tuple and the instance dictionary, whose context
+        // holds each item's dictionary.
+        let tuples: Vec<(String, usize)> =
+            self.checker.generics().structural_tuples().map(|(_, arity, fqn)| (fqn.to_string(), arity)).collect();
+        for (fqn, arity) in tuples {
+            if self.functions.contains_key(&fqn) || self.structural_tuple_thunks.iter().any(|(f, _)| *f == fqn) {
+                continue;
+            }
+            self.reserve_function_entry(fqn.clone());
+            self.structural_tuple_thunks.push((fqn, arity));
         }
 
         // Show thunks for the builtin error enums: reserved here, emitted by
@@ -7306,7 +7359,11 @@ impl Compiler {
             .into_iter()
             .filter(|(fqn, ..)| !self.functions.contains_key(fqn))
             .collect();
-        if due.is_empty() {
+        let tuples: Vec<_> = std::mem::take(&mut self.structural_tuple_thunks)
+            .into_iter()
+            .filter(|(fqn, _)| !self.functions.contains_key(fqn))
+            .collect();
+        if due.is_empty() && tuples.is_empty() {
             return;
         }
         let string = crate::typechecking::ty::string();
@@ -7346,8 +7403,61 @@ impl Compiler {
                 }
             }
         }
+        for (fqn, arity) in tuples {
+            self.emit_structural_tuple_show(&fqn, arity);
+        }
         self.hir_synth_callees.clear();
         skip.bind_label(after, self.bytecode.il_mut());
+    }
+
+    /// The `Show` thunk of the tuples of `arity` with open items (#1479):
+    /// `format("%v", t)` over the tuple (unboxed: every caller passes it
+    /// boxed, as a dictionary does), each item shown through its
+    /// own dictionary, which the instance dictionary (`__dict0`) holds after
+    /// its method: the entry reads them into `__dict1..` as a bounded
+    /// instance method's does.
+    fn emit_structural_tuple_show(&mut self, fqn: &str, arity: usize) {
+        use crate::hir::LocalKind;
+        let string = crate::typechecking::ty::string();
+        // The instance head's own variables.
+        let Some(ty) = self
+            .checker
+            .generics()
+            .instances
+            .iter()
+            .find(|inst| inst.method_fqns.get("show").is_some_and(|f| f == fqn))
+            .and_then(|inst| inst.args.first().cloned())
+        else {
+            return;
+        };
+        let vars: Vec<crate::typechecking::ty::TyVarId> = match &ty {
+            Ty::Tuple(items) => items.iter().filter_map(|t| if let Ty::Var(v) = t { Some(*v) } else { None }).collect(),
+            _ => return,
+        };
+        if vars.len() != arity {
+            return;
+        }
+        let mut b = crate::hir::synth::Synth::new(&self.checker, fqn, string.clone());
+        // The tuple comes boxed, as a dictionary passes it.
+        let arg = b.local("arg0", ty.clone(), LocalKind::Param);
+        let word = b.read(arg);
+        let t = b.builtin(crate::hir::Builtin::Unbox { tag: ValueTag::Tuple as u32 }, vec![word], ty);
+        let fmt = b.str("%v");
+        let shown = b.call("format", vec![fmt, t], string);
+        let ret = b.ret(shown);
+        let root = b.block(vec![ret], None, crate::typechecking::ty::never());
+        let hir = Self::synth_generic(b.finish(root));
+        // `__dict0` follows the parameter; `__dict{i + 1}` is item `i`'s.
+        let base = self
+            .checker
+            .generics()
+            .typeclass("Show")
+            .map_or(1, |class| class.flattened_methods(self.checker.generics()).len());
+        self.synth_entry_dicts = Some((base, arity));
+        self.synth_show_dicts = vars.into_iter().enumerate().map(|(i, v)| (v, i + 1)).collect();
+        self.emit_synth_fn(fqn, &hir, HashMap::new(), true);
+        self.synth_entry_dicts = None;
+        self.synth_show_dicts.clear();
     }
 
     /// The `Show` thunk `name` of a ground `Option` / `Result` `ty`

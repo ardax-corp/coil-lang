@@ -1159,12 +1159,68 @@ impl Generics {
         });
     }
 
+    /// The method of `class`'s structural instance for tuples of `arity`
+    /// with open items (#1479): `Show__(_, _)__show`.
+    pub fn structural_tuple_fqn(class: &str, arity: usize, method: &str) -> String {
+        let items = vec!["_"; arity].join(", ");
+        let shape = if arity == 1 { format!("({items},)") } else { format!("({items})") };
+        Self::builtin_instance_fqn(class, &shape, method)
+    }
+
+    /// Register `class`'s structural instance for every tuple of `arity`
+    /// (#1479): head `(a, b, ..)` over the fresh variables `vars`, context
+    /// `class<a>`, `class<b>`, .. (one dictionary per item), so a tuple with
+    /// a type-parameter item meets the class inside a generic body. Its
+    /// thunk reads each item's dictionary from its own. A no-op when one is
+    /// registered.
+    pub fn register_structural_tuple(&mut self, class: &str, vars: Vec<TyVarId>) {
+        let fqn = Self::structural_tuple_fqn(class, vars.len(), "show");
+        if class != "Show" || self.instances.iter().any(|inst| inst.method_fqns.values().any(|f| *f == fqn)) {
+            return;
+        }
+        let items: Vec<Ty> = vars.iter().map(|v| Ty::Var(*v)).collect();
+        let context = items
+            .iter()
+            .map(|item| Constraint {
+                class: class.into(),
+                args: vec![item.clone()],
+            })
+            .collect();
+        self.instances.push(InstanceDef {
+            class: class.into(),
+            defined_module: PRELUDE_OPS_MODULE.into(),
+            range: 0..0,
+            args: vec![Ty::Tuple(items)],
+            method_fqns: HashMap::from([("show".to_string(), fqn)]),
+            assoc_tys: HashMap::new(),
+            context,
+        });
+    }
+
+    /// Whether `inst` is a structural instance for tuples with open items
+    /// ([`Self::register_structural_tuple`]).
+    pub fn is_structural_tuple(inst: &InstanceDef) -> bool {
+        inst.range == (0..0)
+            && inst.defined_module == PRELUDE_OPS_MODULE
+            && !inst.context.is_empty()
+            && matches!(inst.args.as_slice(), [Ty::Tuple(_)])
+    }
+
+    /// `(class, arity, method fqn)` of each instance
+    /// [`Self::register_structural_tuple`] registered.
+    pub fn structural_tuples(&self) -> impl Iterator<Item = (&str, usize, &str)> {
+        self.instances.iter().filter(|inst| Self::is_structural_tuple(inst)).filter_map(|inst| match inst.args.as_slice() {
+            [Ty::Tuple(items)] => Some((inst.class.as_str(), items.len(), inst.method_fqns.get("show")?.as_str())),
+            _ => None,
+        })
+    }
+
     /// The `(class, type)` of each instance
     /// [`Self::register_structural_instance`] registered.
     pub fn structural_instances(&self) -> impl Iterator<Item = (&str, &Ty)> {
         self.instances
             .iter()
-            .filter(|inst| inst.range == (0..0) && inst.defined_module == PRELUDE_OPS_MODULE)
+            .filter(|inst| inst.range == (0..0) && inst.defined_module == PRELUDE_OPS_MODULE && inst.context.is_empty())
             .filter_map(|inst| match inst.args.as_slice() {
                 [ty @ (Ty::Tuple(_) | Ty::Record { .. } | Ty::Array { .. })] => Some((inst.class.as_str(), ty)),
                 [ty @ Ty::App(head, _)]

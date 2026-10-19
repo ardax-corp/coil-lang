@@ -5659,7 +5659,14 @@ impl Checker {
                 .filter(|(_, _, owner, _, _)| !(shadowed && Self::is_builtin_class(owner)))
                 .collect::<Vec<_>>()
         };
-        let candidates = keep(self.bound_method_candidates(&ident, None));
+        // A tuple with an open item is not a bound's receiver: its instance
+        // is the arity-wide tuple one, selected below as a ground call's
+        // (#1479).
+        let open_tuple = arg_tys
+            .first()
+            .map(|ty| apply_ty_prune(&self.subst, ty))
+            .is_some_and(|ty| matches!(&ty, Ty::Tuple(_)) && Self::ty_mentions_var(&ty));
+        let candidates = if open_tuple { Vec::new() } else { keep(self.bound_method_candidates(&ident, None)) };
         if !candidates.is_empty() {
             let receiver_var = arg_tys
                 .first()
@@ -10306,6 +10313,13 @@ impl Checker {
             }
             _ => return,
         };
+        // A tuple with an open item: the instance for its arity, with a
+        // context per item (#1479).
+        if class == "Show" && matches!(&ty, Ty::Tuple(_)) && Self::ty_mentions_var(&ty) {
+            let vars = items.iter().map(|_| self.counter.fresh()).collect();
+            self.generics.register_structural_tuple(class, vars);
+            return;
+        }
         if Self::ty_mentions_var(&ty) || self.generics.has_instance(class, &ty) {
             return;
         }
@@ -10347,6 +10361,7 @@ impl Checker {
             .cloned()
             .collect();
         let mut matches: Vec<(InstanceDef, Subst)> = Vec::new();
+        let mut structural: Vec<(InstanceDef, Subst)> = Vec::new();
         for inst in candidates {
             let mut ok = true;
             let mut local = self.subst.clone();
@@ -10396,8 +10411,17 @@ impl Checker {
                         })
                         .collect();
                 }
-                matches.push((inst, local));
+                if generic && Generics::is_structural_tuple(&inst) {
+                    structural.push((inst, local));
+                } else {
+                    matches.push((inst, local));
+                }
             }
+        }
+        // A goal another instance meets does not take the arity-wide tuple
+        // instance (#1479): a ground tuple has its own.
+        if matches.is_empty() {
+            matches = structural;
         }
         match matches.len() {
             0 => Ok(None),
