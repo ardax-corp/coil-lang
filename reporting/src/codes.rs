@@ -73,6 +73,10 @@ pub enum ErrorCode {
     UnassignedLocal,
     /// Two `use` imports bind the same local name to different items.
     DuplicateImport,
+    /// A `const` initializer that cannot be evaluated at compile time: it
+    /// has effects, panics, runs out of budget, or its value holds a
+    /// function, handle or other value with no compile-time form.
+    ConstNotComputable,
 
     DuplicateEnum,
     DuplicateConstructor,
@@ -181,6 +185,7 @@ impl ErrorCode {
             Self::ShiftCountOutOfRange => "E0131",
             Self::UnassignedLocal => "E0132",
             Self::DuplicateImport => "E0133",
+            Self::ConstNotComputable => "E0134",
             Self::DuplicateEnum => "E0200",
             Self::DuplicateConstructor => "E0201",
             Self::UnknownEnum => "E0202",
@@ -271,6 +276,7 @@ impl ErrorCode {
             Self::ShiftCountOutOfRange => "shift count out of range",
             Self::UnassignedLocal => "local read before it is assigned",
             Self::DuplicateImport => "local name imported twice",
+            Self::ConstNotComputable => "const value cannot be computed at compile time",
             Self::DuplicateEnum => "duplicate enum",
             Self::DuplicateConstructor => "duplicate constructor",
             Self::UnknownEnum => "unknown enum",
@@ -369,6 +375,7 @@ mod tests {
             | ShiftCountOutOfRange
             | UnassignedLocal
             | DuplicateImport
+            | ConstNotComputable
             | DuplicateEnum
             | DuplicateConstructor
             | UnknownEnum
@@ -449,6 +456,7 @@ mod tests {
             ShiftCountOutOfRange,
             UnassignedLocal,
             DuplicateImport,
+            ConstNotComputable,
             DuplicateEnum,
             DuplicateConstructor,
             UnknownEnum,

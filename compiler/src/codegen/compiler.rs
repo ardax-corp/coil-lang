@@ -6876,9 +6876,20 @@ impl Compiler {
             Expression::Expr(child) | Expression::Statement(child) => {
                 bytecode.append(&mut self.do_compile(child))
             }
-            Expression::StaticDecl { name, init, .. } => {
+            Expression::StaticDecl { name, init, is_const, .. } => {
                 let fqn = self.qualify_static_fqn(name);
                 self.emit_static_initializer(&fqn, init);
+                if *is_const
+                    && let Some(slot) = self.checker.static_slot_index(&fqn)
+                {
+                    self.comptime_consts.push(super::ComptimeConst {
+                        fqn,
+                        slot,
+                        entry: None,
+                        file: self.current_source_file.clone(),
+                        span: ast.0.into_range(),
+                    });
+                }
             }
             Expression::Class {
                 docs: _,
@@ -7514,6 +7525,7 @@ impl Compiler {
                 });
                 effects::capture(hir, &fx, explained);
             }
+            self.messages.extend(const_effect_messages(&self.checker, hir, &fx));
             let mutations = fx.mutations();
             let summaries = fx.summaries;
             self.pure_fns.extend(pure);
@@ -8478,6 +8490,82 @@ impl Compiler {
     pub fn bytecode_vec(&self) -> Vec<Byte> {
         self.bytecode.clone_bytes()
     }
+
+    /// `const`s to compute at compile time, in setup order, with their
+    /// initializer entries. Call after finalize.
+    pub fn comptime_consts(&self) -> Vec<super::ComptimeConst> {
+        self.comptime_consts
+            .iter()
+            .map(|c| super::ComptimeConst {
+                entry: self
+                    .function_offset(&format!("{STATIC_INIT_FN_PREFIX}{}", c.fqn))
+                    .map(|o| o as u32),
+                ..c.clone()
+            })
+            .collect()
+    }
+
+    /// Replace the setup region's `CALL init; StoreStatic slot` for each of
+    /// `consts` (`(entry, slot)`) with one `RestoreSnapshot` of `snapshot`
+    /// (appended to the pool), at the first const's place, and `NOOP`s.
+    /// False, changing nothing, when a const's setup pair is not found.
+    pub fn apply_const_snapshot(&mut self, consts: &[(u32, u32)], snapshot: &[u64]) -> bool {
+        let Some(code) = self.bytecode.lowered_mut() else {
+            return false;
+        };
+        let mut sites = Vec::with_capacity(consts.len());
+        for &(entry, slot) in consts {
+            let found = code.windows(2).position(|w| {
+                *w[0].bytecode() == Instruction::CALL
+                    && w[0].call_parts().1 == entry as usize
+                    && *w[1].bytecode() == Instruction::StoreStatic
+                    && w[1].operand_u32() == slot
+            });
+            match found {
+                Some(at) => sites.push(at),
+                None => return false,
+            }
+        }
+        let Some(&first) = sites.iter().min() else {
+            return false;
+        };
+        let at = self.constants.len() as u32;
+        for &site in &sites {
+            code[site] = Byte::new(Instruction::NOOP);
+            code[site + 1] = Byte::new(Instruction::NOOP);
+        }
+        code[first] = Byte::new(Instruction::RestoreSnapshot).with_operand_u32(at);
+        self.constants.extend_from_slice(snapshot);
+        true
+    }
+}
+
+/// E0134 for each `const` whose initializer has effects: it is
+/// computed while compiling, where there is no outside world yet.
+fn const_effect_messages(checker: &crate::typechecking::infer::Checker, hir: &crate::hir::HirModule, fx: &crate::hir::effects::ModuleEffects) -> Vec<Message> {
+    let mut out = Vec::new();
+    for (i, body) in hir.bodies.iter().enumerate() {
+        if body.kind != crate::hir::BodyKind::Static {
+            continue;
+        }
+        let Some(name) = body.name.strip_suffix("$init") else { continue };
+        if !checker.is_const_static(name) {
+            continue;
+        }
+        let s = fx.summaries[i];
+        if s.visible.is_pure() && s.latent == 0 {
+            continue;
+        }
+        let short = name.rsplit("::").next().unwrap_or(name);
+        let mut msg = Message::error(
+            ErrorCode::ConstNotComputable,
+            format!("const `{short}` is computed while compiling, but its initializer is {}", fx.describe(i)),
+            body.span.0..body.span.1,
+        );
+        msg.with_help("a `const` cannot read or change anything outside the program; use `static let` to compute it when the program starts".to_string());
+        out.push(msg);
+    }
+    out
 }
 
 #[cfg(test)]

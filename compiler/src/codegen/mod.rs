@@ -398,6 +398,9 @@ pub struct Compiler {
 
     /// Global static initializers (spliced at `program_start_offset`). Same sink as `ffi_init`.
     static_init: CodeBuf,
+    /// `const`s whose initializer runs at compile time, in setup order
+    /// (comptime step 3).
+    comptime_consts: Vec<ComptimeConst>,
 
     /// `extern` dlopen/declare setup accumulated across modules, spliced into
     /// the prologue setup region at finalize (so imported-module `extern`
@@ -790,6 +793,7 @@ impl Default for Compiler {
             method_clone_plans: Default::default(),
             mono_var_tys: Vec::new(),
             static_init: CodeBuf::new(),
+            comptime_consts: Vec::new(),
             ffi_init: CodeBuf::new(),
             current_source_file: None,
             source_file_indices: std::collections::BTreeMap::new(),
@@ -1001,4 +1005,16 @@ pub(crate) struct GatedHostCall {
     pub caps: common::Caps,
     /// The native's name (`open`, `env_exec`).
     pub native: &'static str,
+}
+
+/// A `const` computed at compile time: its name, static slot, and where it
+/// is declared (for errors raised after codegen).
+#[derive(Debug, Clone)]
+pub struct ComptimeConst {
+    pub fqn: String,
+    pub slot: u32,
+    /// Entry of its initializer once finalized.
+    pub entry: Option<u32>,
+    pub file: Option<std::path::PathBuf>,
+    pub span: std::ops::Range<usize>,
 }

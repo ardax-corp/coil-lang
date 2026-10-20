@@ -1384,6 +1384,7 @@ impl SubProgram {
                 static_slot_count: sub.static_slot_count(),
                 operand_stack_slots: sub.operand_stack_slots(),
                 program_debug: sub.program_debug(),
+                class_word_kinds: sub.class_word_kinds(),
             },
             offsets,
         })

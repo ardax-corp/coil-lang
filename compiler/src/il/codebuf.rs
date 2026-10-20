@@ -524,6 +524,11 @@ impl CodeBuf {
         self.lowered.as_deref().unwrap_or(&[])
     }
 
+    /// The lowered bytes, for in-place patches that keep their length.
+    pub fn lowered_mut(&mut self) -> Option<&mut [Byte]> {
+        self.lowered.as_deref_mut()
+    }
+
     pub fn clone_bytes(&self) -> Vec<Byte> {
         self.lowered.clone().unwrap_or_default()
     }

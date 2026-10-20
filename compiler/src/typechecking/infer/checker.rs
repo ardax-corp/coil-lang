@@ -18563,6 +18563,13 @@ impl Checker {
         is_let(name) || is_let(&self.qualify_module_name(name))
     }
 
+    /// True for a `const` lifted to a static slot (its value is computed,
+    /// not folded), by its own or its module-qualified name.
+    pub(crate) fn is_const_static(&self, name: &str) -> bool {
+        let is_const = |fqn: &str| self.static_slots.get(fqn).is_some_and(|(_, is_const)| *is_const);
+        is_const(name) || is_const(&self.qualify_module_name(name))
+    }
+
     /// Static slot for a name in the current module namespace.
     pub fn static_slot_for_module_name(&self, name: &str) -> Option<u32> {
         self.static_slot_index(&self.qualify_module_name(name))
@@ -18675,6 +18682,18 @@ impl Checker {
     }
 
     /// Every class key with its `InitTyped` type id.
+    /// Name of field slot `index` of the class or record with `InitTyped`
+    /// id `type_id`.
+    pub fn typed_field_name(&self, type_id: u32, index: usize) -> Option<String> {
+        if let Some((key, _)) = self.class_type_ids.iter().find(|(_, id)| **id == type_id) {
+            return self.class_fields(key)?.get(index).map(|(name, _)| name.clone());
+        }
+        self.record_type_ids
+            .iter()
+            .find(|(_, id)| **id == type_id)
+            .and_then(|((names, _), _)| names.get(index).cloned())
+    }
+
     pub fn class_type_id_entries(&self) -> impl Iterator<Item = (&str, u32)> {
         self.class_type_ids.iter().map(|(k, id)| (k.as_str(), *id))
     }

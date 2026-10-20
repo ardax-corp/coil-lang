@@ -1517,6 +1517,10 @@ impl Pipeline {
         // runs IL opts, then a single lower (fuse-select + label → PC).
         // No post-lower peephole; production abs JMP is rejected in lower.
         self.compiler_lazy_mut().finalize_bytecode();
+        self.compute_consts(None);
+        if self.failed || self.had_errors() {
+            return;
+        }
         self.bytecode = self.compiler_lazy().bytecode_vec();
 
         // Patch the JMP at offset 1 to point to the
@@ -1664,6 +1668,7 @@ impl Pipeline {
             self.cursor_il = self.compiler_lazy_mut().take_cursor_il();
             self.compiler_lazy_mut().set_retain_cursor_il(false);
         }
+        self.compute_consts(Some((path, src)));
         let mut bytecode = self.compiler_lazy_mut().bytecode_vec();
 
         if let Some(byte) = bytecode.get_mut(1) {
@@ -1678,6 +1683,103 @@ impl Pipeline {
 
         self.debug_verify(&bytecode);
         Ok((bytecode, self.compiler_lazy_mut().constants().to_vec()))
+    }
+
+    /// Compute every `const` initializer on the compile-time VM and replace
+    /// its startup call with the computed value (`RestoreSnapshot`). A
+    /// failure is E0134 at the const. Without a macro host (no VM linked)
+    /// consts keep their startup initializers. `entry_src` is the text of an
+    /// in-memory entry, which has no file to read.
+    fn compute_consts(&mut self, entry_src: Option<(&Path, &str)>) {
+        let consts: Vec<_> = self
+            .compiler_lazy()
+            .comptime_consts()
+            .into_iter()
+            .filter(|c| c.entry.is_some())
+            .collect();
+        if consts.is_empty() {
+            return;
+        }
+        let Some(host) = self.macro_host.clone() else {
+            return;
+        };
+        let kinds = self.static_word_kinds();
+        let evals: Vec<crate::macros::ConstEval> = consts
+            .iter()
+            .map(|c| crate::macros::ConstEval {
+                entry: c.entry.unwrap_or_default(),
+                slot: c.slot,
+                kind: kinds.get(c.slot as usize).copied().unwrap_or(common::WORD_UNKNOWN),
+            })
+            .collect();
+        let program = crate::macros::CompiledExpansion {
+            bytecode: std::sync::Arc::new(self.compiler_lazy().bytecode_vec()),
+            constants: std::sync::Arc::new(self.compiler_lazy().constants().to_vec()),
+            strings: std::sync::Arc::new(self.compiler_lazy().strings().to_vec()),
+            static_slot_count: self.compiler_lazy().static_slot_count(),
+            operand_stack_slots: self.operand_stack_slots(),
+            program_debug: self.program_debug(),
+            class_word_kinds: self.class_word_kinds(),
+        };
+        let limits = self.host_grants.comptime;
+        match host.eval_consts(&program, &evals, &limits) {
+            Ok(snapshot) => {
+                let sites: Vec<(u32, u32)> = evals.iter().map(|e| (e.entry, e.slot)).collect();
+                let applied = self.compiler_lazy_mut().apply_const_snapshot(&sites, &snapshot.encode());
+                debug_assert!(applied, "const setup calls not found in the setup region");
+            }
+            Err(crate::macros::ConstEvalError::Failed { index, reason }) => {
+                let c = &consts[index];
+                let text = format!("const `{}` could not be computed while compiling: {reason}", short_name(&c.fqn));
+                self.emit_const_error(c, text, entry_src);
+            }
+            Err(crate::macros::ConstEvalError::Unsnapshottable(e)) => {
+                let c = &consts[e.root];
+                let at = self.snap_path_text(short_name(&c.fqn), &e.path);
+                let text = format!(
+                    "const `{}` cannot keep its value: `{at}` is {}, which exists only while a program runs",
+                    short_name(&c.fqn),
+                    e.what
+                );
+                self.emit_const_error(c, text, entry_src);
+            }
+        }
+    }
+
+    /// `NAME.field[3].0` for a snapshot path from const `NAME`.
+    fn snap_path_text(&self, name: &str, path: &[common::SnapStep]) -> String {
+        let mut out = name.to_string();
+        for step in path {
+            match *step {
+                common::SnapStep::Element(i) => out.push_str(&format!("[{i}]")),
+                common::SnapStep::TupleElement(i) => out.push_str(&format!(".{i}")),
+                common::SnapStep::Payload(i) => out.push_str(&format!(" (variant field {i})")),
+                common::SnapStep::Field { type_id, index } => {
+                    match self.compiler_lazy().checker().typed_field_name(type_id, index) {
+                        Some(f) => out.push_str(&format!(".{f}")),
+                        None => out.push_str(&format!(" (field {index})")),
+                    }
+                }
+                common::SnapStep::Boxed => {}
+            }
+        }
+        out
+    }
+
+    fn emit_const_error(&mut self, c: &crate::codegen::ComptimeConst, text: String, entry_src: Option<(&Path, &str)>) {
+        let mut msg = Message::error(ErrorCode::ConstNotComputable, text, c.span.clone());
+        msg.with_help("a `const` is computed while compiling; use `static let` to compute it when the program starts".to_string());
+        let source = c.file.as_deref().and_then(|file| {
+            let text = match entry_src {
+                Some((p, src)) if p == file => Some(src.to_string()),
+                _ => self.overlays.get(file).cloned().or_else(|| std::fs::read_to_string(file).ok()),
+            }?;
+            Some((file.to_path_buf(), text))
+        });
+        match source {
+            Some((file, text)) => self.emit_message(&file, &text, &msg),
+            None => self.emit_spanless_error(ErrorCode::ConstNotComputable, msg.message().to_string()),
+        }
     }
 
     /// Debug builds verify every compiled program the way archive load does,
@@ -1769,6 +1871,7 @@ impl Pipeline {
             self.cursor_il = self.compiler_lazy_mut().take_cursor_il();
             self.compiler_lazy_mut().set_retain_cursor_il(false);
         }
+        self.compute_consts(None);
         self.bytecode = self.compiler_lazy_mut().bytecode_vec();
 
         // Patch the JMP at offset 1.
@@ -1822,6 +1925,10 @@ impl Pipeline {
             self.compiler_lazy_mut().finalize_bytecode();
             None
         };
+        self.compute_consts(None);
+        if self.failed || self.had_errors() {
+            return Err(CompileFail);
+        }
         self.bytecode = self.compiler_lazy_mut().bytecode_vec();
 
         let jmp_target = self.compiler_lazy().prologue_jmp_target();
@@ -3680,4 +3787,9 @@ fn main() {
             "typecheck_project must reject #[ffi], got {errors:?}"
         );
     }
+}
+
+/// `C` of `module::C`.
+fn short_name(fqn: &str) -> &str {
+    fqn.rsplit("::").next().unwrap_or(fqn)
 }

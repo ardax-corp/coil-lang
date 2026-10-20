@@ -352,6 +352,9 @@ pub struct CompiledExpansion {
     pub static_slot_count: u32,
     pub operand_stack_slots: u32,
     pub program_debug: common::ProgramDebug,
+    /// Per-class field word kinds, so captured instances know which fields
+    /// are scalars.
+    pub class_word_kinds: Vec<common::ClassWordKinds>,
 }
 
 /// Runs a compiled expansion program. Implemented by the `comptime` crate on
@@ -366,6 +369,37 @@ pub trait MacroHost: Send + Sync {
         calls: &[(u32, String)],
         limits: &crate::ComptimeLimits,
     ) -> Vec<Result<String, String>>;
+
+    /// Compute `consts` in order on one compile-time VM of `program`: call
+    /// each initializer, store its value to its static slot (later
+    /// initializers may read earlier consts), then capture every value as
+    /// one snapshot, so values shared between consts stay shared. Each call
+    /// runs within `limits`.
+    fn eval_consts(
+        &self,
+        program: &CompiledExpansion,
+        consts: &[ConstEval],
+        limits: &crate::ComptimeLimits,
+    ) -> Result<common::HeapSnapshot, ConstEvalError>;
+}
+
+/// A `const` to compute at compile time: the entry of its initializer
+/// (`__static_init$NAME`), the static slot its value is stored to and that
+/// slot's word kind (`common::WORD_*`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConstEval {
+    pub entry: u32,
+    pub slot: u32,
+    pub kind: u8,
+}
+
+/// Why [`MacroHost::eval_consts`] gave no snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConstEvalError {
+    /// Initializer `index` panicked or ran out of budget; the reason.
+    Failed { index: usize, reason: String },
+    /// A value reached from a const has no compile-time form.
+    Unsnapshottable(common::SnapshotError),
 }
 
 static DEFAULT_HOST: std::sync::OnceLock<std::sync::Arc<dyn MacroHost>> = std::sync::OnceLock::new();

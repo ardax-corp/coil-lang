@@ -2575,6 +2575,22 @@ impl<const S: usize> Machine<S> {
         self.statics = vec![Value::default(); static_slots as usize];
     }
 
+    /// Static slot `slot`'s value (`None` past the slots).
+    pub fn static_value(&self, slot: u32) -> Option<Value> {
+        self.statics.get(slot as usize).copied()
+    }
+
+    /// Write static slot `slot`; false past the slots.
+    pub fn set_static(&mut self, slot: u32, value: Value) -> bool {
+        match self.statics.get_mut(slot as usize) {
+            Some(s) => {
+                *s = value;
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn heap_mut(&mut self) -> &mut Heap {
         self.heap.get_mut()
     }

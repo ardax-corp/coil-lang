@@ -3827,7 +3827,7 @@ pub use compact::{AddrMap, EvacPlan, Evacuation};
 
 #[path = "snapshot.rs"]
 mod snapshot;
-pub use snapshot::{SnapRoot, SnapStep, SnapshotError};
+pub use snapshot::SnapRoot;
 
 #[cfg(test)]
 mod tests {

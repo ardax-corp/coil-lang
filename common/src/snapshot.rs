@@ -76,6 +76,32 @@ pub struct HeapSnapshot {
     pub statics: Vec<(u32, SnapWord)>,
 }
 
+/// One step from a root to the value that could not be captured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapStep {
+    /// Array / `Vec` element.
+    Element(usize),
+    /// Tuple element.
+    TupleElement(usize),
+    /// Enum variant payload word.
+    Payload(usize),
+    /// Field slot `index` of an instance of class or record `type_id`.
+    Field { type_id: u32, index: usize },
+    /// The value inside a generic-runtime box.
+    Boxed,
+}
+
+/// A value reachable from a root that has no snapshot form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotError {
+    /// Index into the roots the snapshot was captured from.
+    pub root: usize,
+    /// Path from the root to the offending value.
+    pub path: Vec<SnapStep>,
+    /// What it is, as a phrase ("a function value").
+    pub what: &'static str,
+}
+
 /// Why encoded words are not a snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SnapshotDecodeError {
