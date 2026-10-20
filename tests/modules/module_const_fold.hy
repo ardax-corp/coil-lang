@@ -1,5 +1,5 @@
-// Module-level consts fold, including ones built from other consts, and a
-// value computed at startup is a `static const`.
+// Module-level consts fold, including ones built from other consts; one
+// that does not fold is computed once at startup (#1558).
 use tests::assert;
 
 const BASE = 40;
@@ -14,9 +14,9 @@ fn four() -> int {
     return 4;
 }
 
-static const STARTUP = four() + 1;
+const STARTUP = four() + 1;
 
-static const ITEMS = [1, 2, 3];
+const ITEMS = [1, 2, 3];
 
 test("module consts fold") {
     assert!(NEXT == 42);
@@ -24,7 +24,7 @@ test("module consts fold") {
     assert!(NAME == "coil");
 }
 
-test("static const computes at startup") {
+test("a const that does not fold computes at startup") {
     assert!(STARTUP == 5);
     assert!(ITEMS[2] == 3);
 }

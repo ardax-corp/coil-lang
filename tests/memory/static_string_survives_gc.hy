@@ -5,7 +5,12 @@ use io::stdout;
 use io::sync::write_all;
 use string::to_bytes;
 
-static const HELD = "across-gc";
+fn held() -> string {
+    return "across-" + "gc";
+}
+
+// Set once at startup: a static slot, not a folded literal.
+const HELD = held();
 
 fn main() {
     let _freed = collect();

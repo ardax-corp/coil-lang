@@ -1,5 +1,5 @@
 // A module's statics are one variable for the whole program, whichever
-// module reads or writes them; its functions, `static const`s, classes
+// module reads or writes them; its functions, consts, classes
 // (constructors, static and instance methods) and trait impls are usable from
 // the importer, by name or by qualified path.
 use tests::assert;
@@ -49,7 +49,7 @@ test("an imported static is the module's own variable") {
     assert!(count() == 42);
 }
 
-test("an imported static const") {
+test("an imported string const") {
     assert!(GREETING == "hello");
 }
 

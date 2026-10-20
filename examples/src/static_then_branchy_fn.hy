@@ -2,7 +2,7 @@
 // statics followed by a function whose body has branches, so its labels can
 // share ids with the static-init setup that is laid out right after it.
 
-static const RATIO = 3.141592653589793;
+const RATIO = 3.141592653589793;
 
 static let COUNT: int = 41;
 

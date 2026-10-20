@@ -9,7 +9,7 @@ fn add2(int n) -> int {
 
 static let n: int = 3;
 
-static const c: int = 5;
+const c: int = 5;
 
 static let xs: Vec<int> = Vec::new();
 

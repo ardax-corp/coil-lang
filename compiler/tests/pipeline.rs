@@ -4500,6 +4500,37 @@ fn language_default_features_are_empty() {
 
 
 
+/// #1558: `static const` still compiles for one release, with an E0129
+/// warning that says to write `const`; a `const` that does not fold has no
+/// warning.
+#[test]
+fn static_const_is_deprecated() {
+    let mut pipeline = test_pipeline();
+    let result = pipeline.compile_src(
+        r#"
+fn two() -> int {
+    return 2;
+}
+
+static const OLD = 7;
+const NEW = two();
+
+fn main() {
+    let n = OLD + NEW;
+}
+"#,
+    );
+    assert!(result.is_ok(), "static const is a warning, not an error");
+    let deprecated: Vec<_> = pipeline
+        .messages()
+        .iter()
+        .filter(|m| m.code() == Some(compiler::ErrorCode::Deprecated))
+        .collect();
+    assert_eq!(deprecated.len(), 1, "{deprecated:?}");
+    assert_eq!(*deprecated[0].kind(), reporting::MessageKind::WARNING);
+    assert!(deprecated[0].message().contains("static const"), "{deprecated:?}");
+}
+
 #[test]
 fn unreachable_after_return_is_warning() {
     let mut pipeline = test_pipeline();
