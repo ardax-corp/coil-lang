@@ -2127,6 +2127,53 @@ impl Compiler {
                 Some((id, self.hir_core_method_at(generic, hir, HirId(id))?))
             })
             .collect();
+        // Callees too big (or looping too long) to inline whose constant
+        // arguments fold them down to an inlinable body: that copy.
+        let specialized: HashMap<u32, crate::hir::HirBody> = emit
+            .plan
+            .calls
+            .iter()
+            .filter(|_| self.hir_inline_specialize)
+            .filter(|(_, call)| call.instance.is_none() && call.mono_of.is_none() && call.generic.is_none() && call.builtin.is_none())
+            .filter_map(|(&id, call)| {
+                let HirKind::Call { args, .. } = &hir.expr(HirId(id)).kind else {
+                    return None;
+                };
+                let consts: Vec<(usize, crate::hir::Lit)> = args
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(k, &a)| match &hir.expr(a).kind {
+                        HirKind::Lit(lit @ (crate::hir::Lit::Int(_) | crate::hir::Lit::Bool(_) | crate::hir::Lit::Float(_))) => {
+                            Some((k, lit.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                if consts.is_empty() {
+                    return None;
+                }
+                let index = self.hir_fn_body(&call.key)?;
+                let callee = &module.bodies[index];
+                if callee.kind != BodyKind::Function || callee.params.len() != args.len() {
+                    return None;
+                }
+                let base = folded.get(&index).unwrap_or(callee);
+                if inline::inlinable(base, budget).is_ok_and(|s| !s.looping()) {
+                    return None;
+                }
+                let bound = inline::bind_params(callee, &consts)?;
+                let unrolled = self.opt_options.loop_unroll.then(|| crate::hir::unroll::unroll(&bound, self.opt_options.loop_unroll_factor)).flatten();
+                let mut spec = unrolled.unwrap_or(bound);
+                if let Some(f) = crate::hir::fold::fold(&spec) {
+                    spec = f;
+                }
+                inline::blank_unreachable(&mut spec);
+                if inline::inlinable(&spec, budget).err() == Some("return") {
+                    spec = inline::single_exit(&spec)?;
+                }
+                inline::inlinable(&spec, budget).is_ok_and(|s| !s.looping()).then_some((id, spec))
+            })
+            .collect();
         // Calls of a local bound once to a lambda that captures nothing
         // (`let f = fn (x) => ..; f(v)`, as an inlined `map(f)` leaves
         // them), as the lambda's body.
@@ -2170,7 +2217,7 @@ impl Compiler {
             {
                 return Err(format!("call-kind {what}"));
             }
-            let callee = match core.or_else(|| instances.get(&id.0)) {
+            let callee = match core.or_else(|| instances.get(&id.0)).or_else(|| specialized.get(&id.0)) {
                 Some(inst) => inst,
                 None if call.instance.is_some() => {
                     let index = *module.instance_fns.get(&call.key).ok_or_else(|| format!("no instance body `{}`", call.key))?;
