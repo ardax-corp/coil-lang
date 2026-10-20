@@ -9188,3 +9188,12 @@ fn a_static_let_nothing_writes_reads_as_its_value() {
         assert!(loads >= 1, "{write}");
     }
 }
+
+#[test]
+fn a_small_callee_with_a_loop_inlines() {
+    // Its `while` (and the `break` in it) splice into `main` whole.
+    let src = "fn first_over(int n, int lim) -> int { let i = 0; while i < n { if i * i > lim { break; } i = i + 1; } return i; } \
+               fn main() { if first_over(100, 10) != 4 { panic \"first\"; } }";
+    let calls = compile_fn_body(src, "main").iter().filter(|b| matches!(b.bytecode(), common::Instruction::CALL)).count();
+    assert_eq!(calls, 0);
+}
