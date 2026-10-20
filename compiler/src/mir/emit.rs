@@ -59,6 +59,7 @@ pub fn emit_dense(
     let gathers = Gathers::new(func, &regs, &plan.need_slot, scratch, entry_label);
     let mut source_clears = source_clears(func, &regs, &plan.need_slot, &gathers);
     prune_clears(func, &regs, &plan.need_slot, &mut cleared, &mut entry_clears, &mut source_clears, &gathers.writes);
+    let arg_clears = arg_clears(func, &regs, &plan.need_slot, &gathers, |_| true);
     let gather = gather_window(func, entry_label);
     let mut max_slot = plan
         .need_slot
@@ -111,7 +112,12 @@ pub fn emit_dense(
         } else if missed_scrutinee_unused(func, preds, block.id) {
             out.push(IlOp::Pop { loc });
         }
+        // The zeros [`arg_clears`] puts after the op emitted last.
+        let mut after: &[u8] = &[];
         for inst in &block.insts {
+            for &r in std::mem::replace(&mut after, arg_clears.get(&inst.dest()).map(Vec::as_slice).unwrap_or(&[])) {
+                push_clear_word(&mut out, r);
+            }
             if inst.is_phi() {
                 continue;
             }
@@ -253,6 +259,9 @@ pub fn emit_dense(
                 across_alloc,
             })?;
             stacked.clear();
+        }
+        for &r in after {
+            push_clear_word(&mut out, r);
         }
         let end = out.len();
         restore_block_op_locs(&mut out, &starts, end, func);
@@ -1233,6 +1242,9 @@ pub(super) struct Gathers {
     /// The scratch registers each push writes, by block index and op
     /// index: before the op runs.
     pub(super) writes: Vec<(usize, usize, u8)>,
+    /// Per push (block index, op index), the scratch registers it gathers
+    /// words into and the word each takes.
+    by_push: HashMap<(usize, usize), Vec<(u8, ValueId)>>,
 }
 
 impl Gathers {
@@ -1278,6 +1290,10 @@ impl Gathers {
                         if !out.writes.contains(&(b, k, r)) {
                             out.writes.push((b, k, r));
                         }
+                        let ws = out.by_push.entry((b, k)).or_default();
+                        if !ws.contains(&(r, *w)) {
+                            ws.push((r, *w));
+                        }
                     }
                 }
             }
@@ -1288,6 +1304,89 @@ impl Gathers {
     fn of(&self, v: ValueId) -> &[u8] {
         self.by_value.get(&v).map(Vec::as_slice).unwrap_or(&[])
     }
+}
+
+/// Registers to zero right after a call, by the call's dest: those of a
+/// heap word it takes whose last use it is (a temporary passed straight
+/// to it, `weak(new Node(..))`), and the gather registers a dense call
+/// copied such a word into ([`Gathers`]). No `ClearWord` names a
+/// temporary, so without them the call's argument register kept the
+/// object rooted until rewritten (#1650). Only where a collection may
+/// come before the register is rewritten ([`RewriteScan`]), and never for
+/// a local's word ([`MirFunc::bound_words`]: the frame holds it until the
+/// local is rebound, as a `gc::Root` guard relies on), a parameter (the
+/// caller roots it), a constant, or a register a value live past the call
+/// shares. `in_place` tells the calls emitted where they stand (the LIR
+/// tier emits an expression tree's call inside its user: none is zeroed
+/// after).
+pub(super) fn arg_clears(
+    func: &MirFunc,
+    regs: &[u8],
+    need_slot: &[bool],
+    gathers: &Gathers,
+    in_place: impl Fn(ValueId) -> bool,
+) -> HashMap<ValueId, Vec<u8>> {
+    let mut out: HashMap<ValueId, Vec<u8>> = HashMap::new();
+    let is_call = |inst: &MirInst| matches!(inst, MirInst::Call { .. } | MirInst::HostInvoke { .. } | MirInst::CallIndirect { .. });
+    let slot = |v: ValueId| need_slot.get(v.index()).copied().unwrap_or(false) && v.index() < regs.len();
+    let candidate = |v: ValueId| slot(v) && func.ty(v).is_heap_word() && !func.params.contains(&v) && !func.bound_words.contains(&v);
+    let any = func.blocks.iter().any(|b| {
+        b.insts.iter().any(|i| is_call(i) && !is_tail_call_inst(func, b, i) && i.operands().into_iter().any(candidate))
+    });
+    if !any {
+        return out;
+    }
+    // A constant (a `None` niche, a pooled string), or a cast of one,
+    // roots nothing.
+    let mut consts: HashSet<ValueId> = HashSet::new();
+    for inst in func.blocks.iter().flat_map(|b| &b.insts) {
+        match inst {
+            MirInst::Const { dest, .. } => {
+                consts.insert(*dest);
+            }
+            MirInst::Cast { dest, src, .. } if consts.contains(src) => {
+                consts.insert(*dest);
+            }
+            _ => {}
+        }
+    }
+    let live = super::gc::liveness_after(func);
+    let cmp_dests = term_cmp_dests(func);
+    let mut scan = RewriteScan::new(func, regs, &slot, &gathers.writes);
+    for (b, block) in func.blocks.iter().enumerate() {
+        // A compare fused into the branch is emitted at the terminator.
+        let fused_reads: Vec<ValueId> = cmp_dests[b]
+            .and_then(|d| block.insts.iter().find(|i| i.dest() == d))
+            .map(|i| i.operands())
+            .unwrap_or_default();
+        for (k, inst) in block.insts.iter().enumerate() {
+            if !is_call(inst) || is_tail_call_inst(func, block, inst) || !in_place(inst.dest()) {
+                continue;
+            }
+            let dead = |v: ValueId| candidate(v) && !consts.contains(&v) && !live[b][k].contains(&v) && !fused_reads.contains(&v);
+            let mut words: Vec<(u8, ValueId)> = inst.operands().into_iter().filter(|&v| dead(v)).map(|v| (regs[v.index()], v)).collect();
+            for &(r, v) in gathers.by_push.get(&(b, k)).map(Vec::as_slice).unwrap_or(&[]) {
+                if dead(v) {
+                    words.push((r, v));
+                }
+            }
+            let mut zero: Vec<u8> = Vec::new();
+            for (r, _) in words {
+                if zero.contains(&r)
+                    || inst.dests().any(|d| slot(d) && regs[d.index()] == r)
+                    || live[b][k].iter().any(|&x| slot(x) && regs[x.index()] == r)
+                    || !scan.from(block.id, k + 1, r)
+                {
+                    continue;
+                }
+                zero.push(r);
+            }
+            if !zero.is_empty() {
+                out.insert(inst.dest(), zero);
+            }
+        }
+    }
+    out
 }
 
 /// Drops the GC clears that zero a register no path into them leaves

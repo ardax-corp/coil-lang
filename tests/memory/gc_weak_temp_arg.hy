@@ -69,3 +69,10 @@ test("a call's result stays alive while it is bound") {
     assert!(!gone(w));
     assert!(n.v == 5);
 }
+
+test("a local passed to a call stays alive after its last use") {
+    let n = new Node(6);
+    let w = weak(n);
+    collect();
+    assert!(!gone(w));
+}

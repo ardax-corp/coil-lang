@@ -169,11 +169,32 @@ and relocate mapped slots on collect.
   host: 521 → 539 ms (one zero), 573 → 636 ms (two zeros), 437 → 455 and
   436 → 476 ms with the helper inlined. The zero is `CONST 0; STORE`, two
   dispatches; a dense `DenseConst r, 0` would be one, for every dense
-  clear. Not covered: a temporary passed straight to a call
-  (`weak(new Node(..))`) has no clear at all, and a tuple a dense
-  `DenseIndex` read stays pinned in `frame_pins` (rooting its elements)
-  after its register is zeroed.
+  clear. Not covered here: a tuple a dense `DenseIndex` read stays
+  pinned in `frame_pins` (rooting its elements) after its register is
+  zeroed (#1651).
   `tests/memory/gc_weak_match_arg.hy`.
+- **A temporary passed to a call drops too** (#1650). A word passed
+  straight to a call (`weak(new Node(..))`) has no binding and so no
+  `ClearWord`; its register, and the gather register a dense call copied
+  it into, kept the object rooted until rewritten. `arg_clears` zeroes,
+  right after a call (`Call`, `HostInvoke`, `CallIndirect`, not a tail
+  call), the registers of the heap words it takes whose last use it is,
+  and their gather registers, in both tiers (LIR: only a call emitted
+  where it stands, not one inside an expression tree). Not for a local's
+  word: the builder records each word `def_local` bound and each φ that
+  merges a local (`MirFunc::bound_words`), and the frame keeps those
+  until the local is rebound or the function returns, as HIR emission's
+  slots do (a `gc::Root` held in a local guards its payload,
+  `tests/memory/gc_frame_maps_collect.hy`). Nor for a parameter, a
+  constant, a register a value live past the call shares, or where no
+  collection can come before the register is rewritten (`RewriteScan`).
+  Straight-line code with calls of temporaries grows by `CONST 0; STORE`
+  per such word (125 of the 223 `examples/*.hy` and `examples/perf/*.hy`
+  archives change, mostly in `main`'s output calls); a 3M-trip loop
+  passing `new Node(i)` to a recursive helper (two zeros a trip, the
+  argument and its gather register) ran 0.511 s against 0.512 s user,
+  medians of 15 interleaved runs on a loaded host.
+  `tests/memory/gc_weak_temp_arg.hy`.
 - **Collection budget.** After a sweep the next threshold is
   `live × 4` when more than half the heap survived (a growing live set) and
   `live × 2` otherwise, never below the initial 1 MB budget.

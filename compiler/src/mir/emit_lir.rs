@@ -99,6 +99,9 @@ pub(super) fn emit_lir_framed(
     let mut entry_clears = super::emit::entry_clears(func, &regs, &plan.need_slot);
     let mut source_clears = super::emit::source_clears(func, &regs, &plan.need_slot, &super::emit::Gathers::default());
     super::emit::prune_clears(func, &regs, &plan.need_slot, &mut cleared, &mut entry_clears, &mut source_clears, &[]);
+    let arg_clears = super::emit::arg_clears(func, &regs, &plan.need_slot, &super::emit::Gathers::default(), |d| {
+        !plan.tree[d.index()]
+    });
     let max_reg = plan
         .need_slot
         .iter()
@@ -201,6 +204,9 @@ pub(super) fn emit_lir_framed(
                 continue;
             }
             emit_stored(&mut out, inst, func, &plan, &regs, pool, loc)?;
+            for &r in arg_clears.get(&dest).map(Vec::as_slice).unwrap_or(&[]) {
+                super::emit::push_clear_word(&mut out, r);
+            }
         }
         let end = out.len();
         restore_block_op_locs(&mut out, &starts, end, func);
