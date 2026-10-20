@@ -184,6 +184,34 @@ pub const FS_METADATA_TYPE_ID: u32 = 0xFFFC;
 /// struct's fields sorted by name.
 pub const FFI_STRUCT_TYPE_ID: u32 = 0xFFFB;
 
+/// First `InitTyped` id of a structural record type. Records take ids
+/// from their own range, so the VM tells a record (`==` compares its
+/// slots) from a class instance (`==` is identity) by its id alone.
+pub const RECORD_TYPE_ID_BASE: u32 = 0x8000;
+
+/// End (exclusive) of the record id range; the reserved host ids sit
+/// above it.
+pub const RECORD_TYPE_ID_END: u32 = 0xFF00;
+
+/// Whether `type_id` names a record: a compiler-allocated record type or
+/// a host-built one (`fs::metadata`, an FFI struct return).
+pub fn is_record_type_id(type_id: u32) -> bool {
+    (RECORD_TYPE_ID_BASE..RECORD_TYPE_ID_END).contains(&type_id)
+        || type_id == FS_METADATA_TYPE_ID
+        || type_id == FFI_STRUCT_TYPE_ID
+}
+
+/// Index of `type_id`'s row in the VM's dense field word kinds table:
+/// class ids on even rows, record ids (from [`RECORD_TYPE_ID_BASE`]) on
+/// odd rows, so neither range leaves a gap.
+pub fn type_kinds_index(type_id: u32) -> usize {
+    if (RECORD_TYPE_ID_BASE..RECORD_TYPE_ID_END).contains(&type_id) {
+        (type_id - RECORD_TYPE_ID_BASE) as usize * 2 + 1
+    } else {
+        type_id as usize * 2
+    }
+}
+
 /// The fields of `io::fs::metadata`'s record in slot (name) order.
 pub const FS_METADATA_FIELDS: [&str; 5] = ["is_dir", "is_file", "is_symlink", "modified_unix", "size"];
 
@@ -207,6 +235,16 @@ pub fn range_heap_field_slot(type_id: u32, name: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn record_type_ids_are_told_from_class_ids() {
+        assert!(!is_record_type_id(1));
+        assert!(is_record_type_id(RECORD_TYPE_ID_BASE));
+        assert!(is_record_type_id(FS_METADATA_TYPE_ID));
+        assert!(!is_record_type_id(RANGE_HEAP_TYPE_ID));
+        assert_eq!(type_kinds_index(3), 6);
+        assert_eq!(type_kinds_index(RECORD_TYPE_ID_BASE + 2), 5);
+    }
 
     #[test]
     fn time_error_is_not_a_compiler_builtin() {

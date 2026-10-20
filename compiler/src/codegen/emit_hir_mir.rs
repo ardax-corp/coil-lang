@@ -1709,9 +1709,9 @@ impl Compiler {
     }
 
     /// The shape `values_eq_shaped` compares a value of `ty` by, when it
-    /// is an array, `Vec` or tuple with a `float` leaf (#1253): `f` a
-    /// float, `w` anything else, `a` an array's element shape, `t` a
-    /// tuple's count digit and element shapes.
+    /// is an array, `Vec`, tuple or record with a `float` leaf (#1253): `f`
+    /// a float, `w` anything else, `a` an array's element shape, `t` a
+    /// tuple's and `r` a record's count digit and part shapes.
     pub(super) fn eq_float_shape(&self, ty: &Ty) -> Option<String> {
         fn walk(ty: &Ty, out: &mut String) -> Option<()> {
             let ty = crate::typechecking::ty::strip_readonly(ty);
@@ -1729,6 +1729,16 @@ impl Compiler {
                 out.push(char::from(b'0' + n));
                 for item in items {
                     walk(item, out)?;
+                }
+            } else if let Ty::Record { fields } = ty {
+                // Slots are the fields sorted by name.
+                let n = u8::try_from(fields.len()).ok().filter(|&n| n <= 9)?;
+                let mut sorted: Vec<&(String, Ty)> = fields.iter().collect();
+                sorted.sort_by(|a, b| a.0.cmp(&b.0));
+                out.push('r');
+                out.push(char::from(b'0' + n));
+                for (_, field) in sorted {
+                    walk(field, out)?;
                 }
             } else {
                 out.push('w');

@@ -1102,7 +1102,7 @@ impl Heap {
     #[inline]
     pub fn class_field_kinds(&self, type_id: u32) -> &[u8] {
         self.class_kinds
-            .get(type_id as usize)
+            .get(common::type_kinds_index(type_id))
             .map_or(&[][..], |row| &row[..])
     }
 
