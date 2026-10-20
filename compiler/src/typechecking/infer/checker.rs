@@ -235,6 +235,7 @@ impl Checker {
             extern_fns: HashSet::new(),
             extern_variadic: HashSet::new(),
             extern_variadic_nfixed: HashMap::new(),
+            extern_const_bytes: HashMap::new(),
             variadic_call_arg_tags: HashMap::new(),
             fn_result_mode: None,
             in_test_case: false,
@@ -1609,6 +1610,7 @@ impl Checker {
         self.extern_fns.clear();
         self.extern_variadic.clear();
         self.extern_variadic_nfixed.clear();
+        self.extern_const_bytes.clear();
         self.ffi_exec_names.clear();
         self.variadic_call_arg_tags.clear();
         self.pending_exhaustive.clear();
@@ -3697,6 +3699,33 @@ impl Checker {
         target
     }
 
+    /// An `extern` parameter's type: a `Bytes` buffer is the `Vec<byte>`
+    /// the callee writes into, a `ConstBytes` view a `readonly Vec<byte>`
+    /// (or a `string`, see [`Self::extern_const_bytes_string`]), as `invoke`
+    /// passes them (#1665); any other type as written.
+    fn extern_param_ty(&mut self, t: &Output) -> Ty {
+        match self.ffi_type_tag_from_output(t).map(|(tag, _)| tag) {
+            Some(common::tag::BYTES) => crate::typechecking::ty::vec_app_ty(crate::typechecking::ty::byte()),
+            Some(common::tag::CONST_BYTES) => {
+                readonly_ty(crate::typechecking::ty::vec_app_ty(crate::typechecking::ty::byte()))
+            }
+            _ => self.parse_type_name(t),
+        }
+    }
+
+    /// A `string` passed to `extern` `name`'s `ConstBytes` parameter `index`
+    /// in a call with `argc` arguments: lent in place, no `Vec<byte>` needed.
+    fn extern_const_bytes_string(&self, name: Option<&str>, argc: usize, index: usize, arg: &Ty) -> bool {
+        let Some(params) = name.and_then(|n| self.extern_const_bytes.get(n)) else {
+            return false;
+        };
+        let arg = apply_ty_prune(&self.subst, arg);
+        matches!(strip_readonly(&arg), Ty::Con(n) if n == crate::typechecking::ty::STRING)
+            && params
+                .iter()
+                .any(|&(nfixed, variadic, i)| i == index && (nfixed == argc || (variadic && argc >= nfixed)))
+    }
+
     #[inline(never)]
     fn infer_extern_block(
         &mut self,
@@ -3713,7 +3742,7 @@ impl Checker {
                     .iter()
                     .filter_map(|item| {
                         if let Expression::Argument { ty, .. } = item.1.as_ref() {
-                            ty.as_ref().map(|t| self.parse_type_name(t))
+                            ty.as_ref().map(|t| self.extern_param_ty(t))
                         } else {
                             None
                         }
@@ -3723,6 +3752,22 @@ impl Checker {
                 Vec::new()
             };
             let nfixed = arg_tys.len();
+            if let Expression::Fragment(items) = decl.args.1.as_ref() {
+                let const_bytes: Vec<usize> = items
+                    .iter()
+                    .filter_map(|item| match item.1.as_ref() {
+                        Expression::Argument { ty: Some(t), .. } => Some(t),
+                        _ => None,
+                    })
+                    .enumerate()
+                    .filter(|(_, t)| self.ffi_type_tag_from_output(t).map(|(tag, _)| tag) == Some(common::tag::CONST_BYTES))
+                    .map(|(i, _)| i)
+                    .collect();
+                if !const_bytes.is_empty() {
+                    let entry = self.extern_const_bytes.entry(decl.name.to_string()).or_default();
+                    entry.extend(const_bytes.into_iter().map(|i| (nfixed, decl.variadic, i)));
+                }
+            }
             let ret_ty = decl
                 .returns
                 .as_ref()
@@ -8729,6 +8774,8 @@ impl Checker {
                                 arg_exprs.and_then(|args| args.get(i)),
                                 &range,
                             );
+                        } else if extern_call && self.extern_const_bytes_string(name, arg_tys.len(), i, arg) {
+                            // A `ConstBytes` view of a string's bytes (#1665).
                         } else if let Some(elem) = extern_call
                             .then(|| self.fixed_array_for_extern_vec(param.as_ref(), arg))
                             .flatten()
