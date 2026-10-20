@@ -3526,7 +3526,15 @@ impl Checker {
                 name,
                 ty,
                 init,
+                lifted,
             } => {
+                if *is_const && !*lifted {
+                    self.warn_deprecated(
+                        "static const",
+                        &format!("write `const {name} = …;`: a module `const` that does not fold is set once at startup; `coil fmt` rewrites it"),
+                        range.clone(),
+                    );
+                }
                 let fqn = self.qualify_module_name(name);
                 let declared = ty.as_ref().map(|t| self.parse_type_name(t));
                 let init_ty = self.infer(init);

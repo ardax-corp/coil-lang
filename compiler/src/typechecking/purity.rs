@@ -1171,6 +1171,23 @@ fn main() { return; }
         assert!(pure.contains("shadow"));
     }
 
+    /// A module `const` that does not fold is a slot nothing writes (#1558):
+    /// reading it keeps a function pure.
+    #[test]
+    fn startup_const_reads_are_pure() {
+        let owned = r#"
+fn two() -> int { return 2; }
+const K: int = two();
+fn konst(int x) -> int { return x * K; }
+fn main() { return; }
+"#
+        .to_string();
+        let mut ast = Pratt::default().parse(owned.as_str()).expect("parse");
+        crate::const_fold::lift_startup_consts(&mut ast);
+        let pure = analyze_pure_fns(&ast, BareCases::none());
+        assert!(pure.contains("konst"), "{pure:?}");
+    }
+
     // #1394: a bare unit case in a pattern (`Red`) binds nothing, so it does
     // not shadow a same-named static; an uppercase name no enum declares
     // (`N`) still binds, as in the checker.

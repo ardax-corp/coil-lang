@@ -1609,7 +1609,10 @@ impl Pipeline {
         let parser = Pratt::default();
         let path = Path::new("<input>");
         let mut ast = match parser.parse(src) {
-            Ok(ast) => ast,
+            Ok(mut ast) => {
+                crate::const_fold::lift_startup_consts(&mut ast);
+                ast
+            }
             Err(err) => {
                 self.emit_message(path, src, &err);
                 return Err(CompileFail);
