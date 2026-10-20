@@ -38,6 +38,44 @@ pub struct HostGrants {
     pub dload_pins: Vec<(String, String)>,
     /// Stems loaded without a hash check (`--dload-trusted`).
     pub dload_trusted: Vec<String>,
+    /// Limits for code the build runs at compile time (`--comptime-steps`,
+    /// `--comptime-mem`). Not a capability: [`Self::grant_all`] leaves it.
+    pub comptime: ComptimeLimits,
+}
+
+/// How far one compile-time evaluation (a macro call, and later a `const`
+/// initializer or `comptime` expression) may run before it fails the build.
+///
+/// These are the explicit tier's limits: code the user asked to run at
+/// compile time gets room to work, and running out is an error naming the
+/// flag to raise. Automatic folding uses the fixed, much smaller silent tier
+/// ([`Self::SILENT_CALL_STEPS`]) and gives up quietly instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ComptimeLimits {
+    /// Loop back-edges + calls (see `Machine::set_step_budget`).
+    pub steps: u64,
+    /// Heap bytes of live objects after a full collection.
+    pub heap_bytes: u64,
+}
+
+impl ComptimeLimits {
+    /// Default `--comptime-steps`: seconds of work.
+    pub const DEFAULT_STEPS: u64 = 1_000_000_000;
+    /// Default `--comptime-mem`, in MiB.
+    pub const DEFAULT_MEM_MIB: u64 = 1024;
+    /// Silent tier: steps for one automatically folded call.
+    pub const SILENT_CALL_STEPS: u64 = 1_000_000;
+    /// Silent tier: steps for all automatic folding in one module.
+    pub const SILENT_MODULE_STEPS: u64 = 20_000_000;
+}
+
+impl Default for ComptimeLimits {
+    fn default() -> Self {
+        Self {
+            steps: Self::DEFAULT_STEPS,
+            heap_bytes: Self::DEFAULT_MEM_MIB << 20,
+        }
+    }
 }
 
 impl HostGrants {

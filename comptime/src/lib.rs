@@ -2,8 +2,10 @@
 //!
 //! [`VmMacroHost`] implements [`compiler::macros::MacroHost`]: each expansion
 //! entry runs on a [`Machine`] with only pure host natives wired (see
-//! [`compiler::macros::native_allowed_at_compile_time`]) and a step budget,
-//! so a macro cannot touch the outside world or hang the build.
+//! [`compiler::macros::native_allowed_at_compile_time`]), a step budget and
+//! a heap cap ([`ComptimeLimits`], `--comptime-steps` / `--comptime-mem`),
+//! so a macro cannot touch the outside world, hang the build or exhaust its
+//! memory.
 //!
 //! Each thread keeps one VM per expansion program, with the natives and the
 //! program loaded once (#1008). After a call that returns, the VM is reset
@@ -16,7 +18,8 @@ use std::cell::RefCell;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use common::{Byte, Value};
-use compiler::macros::{CompiledExpansion, MACRO_STEP_BUDGET, MacroHost, native_allowed_at_compile_time};
+use compiler::ComptimeLimits;
+use compiler::macros::{CompiledExpansion, MacroHost, native_allowed_at_compile_time};
 use machine::{FfiError, HostClosureFn, Machine, NativeFn, Object};
 
 /// Runs macros in a sandboxed VM.
@@ -35,10 +38,15 @@ pub fn install() {
 }
 
 impl MacroHost for VmMacroHost {
-    fn run(&self, program: &CompiledExpansion, calls: &[(u32, String)]) -> Vec<Result<String, String>> {
+    fn run(
+        &self,
+        program: &CompiledExpansion,
+        calls: &[(u32, String)],
+        limits: &ComptimeLimits,
+    ) -> Vec<Result<String, String>> {
         calls
             .iter()
-            .map(|(entry, input)| run_entry(program, *entry, input))
+            .map(|(entry, input)| run_entry(program, *entry, input, limits))
             .collect()
     }
 }
@@ -127,7 +135,7 @@ impl std::io::Write for Captured {
     }
 }
 
-fn run_entry(program: &CompiledExpansion, entry: u32, input: &str) -> Result<String, String> {
+fn run_entry(program: &CompiledExpansion, entry: u32, input: &str, limits: &ComptimeLimits) -> Result<String, String> {
     let mut vm = take_vm(program);
     let captured = Captured::default();
     // `with_output` installs a thread-local redirect pointing into the VM;
@@ -135,7 +143,7 @@ fn run_entry(program: &CompiledExpansion, entry: u32, input: &str) -> Result<Str
     let outer = machine::io::set_output_redirect(None);
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _ = vm.with_output(captured.clone());
-        let result = call_entry(&mut vm, entry, input);
+        let result = call_entry(&mut vm, entry, input, limits);
         let _ = vm.restore_output();
         result
     }));
@@ -163,13 +171,25 @@ fn run_entry(program: &CompiledExpansion, entry: u32, input: &str) -> Result<Str
     }
 }
 
-fn call_entry(vm: &mut Machine<256>, entry: u32, input: &str) -> Result<String, String> {
-    vm.set_step_budget(Some(MACRO_STEP_BUDGET));
+fn call_entry(vm: &mut Machine<256>, entry: u32, input: &str, limits: &ComptimeLimits) -> Result<String, String> {
+    vm.set_step_budget(Some(limits.steps));
+    vm.set_heap_cap(Some(usize::try_from(limits.heap_bytes).unwrap_or(usize::MAX)));
     let input = vm.heap_mut().intern(input.to_string());
     let arg = Value::from(input.as_ptr() as *mut u8 as u64);
     let ret: Value = vm.call_function(entry, &[arg]);
     if vm.step_budget_exhausted() {
-        return Err("it ran too long (step budget exhausted; is there an infinite loop?)".to_string());
+        return Err(format!(
+            "it ran too long: {} steps (loop iterations + calls) is the limit; \
+             is there an infinite loop? Raise it with `--comptime-steps N`",
+            limits.steps
+        ));
+    }
+    if vm.heap_cap_exceeded() {
+        return Err(format!(
+            "it used too much memory: {} MiB of live objects is the limit; \
+             raise it with `--comptime-mem MIB`",
+            limits.heap_bytes >> 20
+        ));
     }
     if vm.panicked() {
         return Err(String::new());

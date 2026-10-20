@@ -132,6 +132,23 @@ pub fn declared_error_codes(src: &str) -> Vec<String> {
         .collect()
 }
 
+/// Grant and compile-time limit flags a file declares on the `// Flags:` line
+/// of its leading comment header (`// Flags: --comptime-steps 100000`), added
+/// to the run's own. `Ok(None)` when there is no such line.
+pub fn declared_flags(src: &str) -> Result<Option<coil_args::HostGrantFlags>, String> {
+    let Some(line) = src
+        .lines()
+        .take_while(|l| l.starts_with("//"))
+        .find_map(|l| l.strip_prefix("// Flags:"))
+    else {
+        return Ok(None);
+    };
+    let words: Vec<&str> = line.split_whitespace().collect();
+    coil_args::parse_grant_flags(&words)
+        .map(Some)
+        .map_err(|e| format!("bad `// Flags:` header: {e}"))
+}
+
 /// The stdout a `fn main()`-only file declares on the `// Output:` line of
 /// its leading comment header, unescaped (`\n`, `\t`, `\e`, `\\`), as
 /// `examples/` document theirs. `None` when there is no such line.
@@ -579,6 +596,23 @@ pub(crate) fn compile_test_file(
         _ => Box::new(std::io::sink()),
     };
     let mut pipeline = run_pipeline(config, options, reporter);
+    let header = overlays
+        .iter()
+        .find(|(file, _)| file == path)
+        .map(|(_, text)| text.clone())
+        .or_else(|| std::fs::read_to_string(path).ok());
+    match header.as_deref().map(declared_flags) {
+        Some(Ok(Some(flags))) => {
+            let mut grants = options.grants.clone();
+            flags.apply_to(&mut grants);
+            pipeline.set_host_grants(grants);
+        }
+        Some(Err(why)) => {
+            let m = format!("> Test \"{display}\" failed ({why})");
+            return Compiled::Decided(false, Some(m));
+        }
+        _ => {}
+    }
     pipeline.set_include_tests(true);
     pipeline.set_contract_runs(options.contract_runs);
     if let Some(cov) = &options.coverage {

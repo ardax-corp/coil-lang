@@ -675,11 +675,13 @@ impl Pipeline {
                     .chain(idx.iter().map(|&i| jobs[i].file.clone()))
                     .collect(),
                 overlays: self.overlays.clone(),
+                comptime: self.host_grants.comptime,
                 text,
                 entries,
                 provider: module.clone(),
             };
             let host = host.clone();
+            let limits = self.host_grants.comptime;
             // A nested compile plus a VM run is deeper than Windows' 1 MiB
             // main thread stack; continue on a fresh segment when little is left.
             let outs = stacker::maybe_grow(EXPANSION_RED_ZONE, EXPANSION_STACK, || {
@@ -696,7 +698,7 @@ impl Pipeline {
                         }
                     }
                 }
-                host.run(&program.expansion, &calls)
+                host.run(&program.expansion, &calls, &limits)
             });
             for (&i, out) in idx.iter().zip(outs) {
                 results[i] = Some(out);
@@ -1317,6 +1319,8 @@ struct SubProgram {
     host: std::sync::Arc<dyn crate::macros::MacroHost>,
     macro_stack: Vec<PathBuf>,
     overlays: HashMap<PathBuf, String>,
+    /// The parent's compile-time limits, for macros the sub-pipeline expands.
+    comptime: crate::ComptimeLimits,
     /// Source of `<coil>/expand.hy`.
     text: String,
     /// Macro function of `__coil_run_i`, by `i`.
@@ -1345,6 +1349,7 @@ impl SubProgram {
         // wires none), with the macro named; a provider can hold macros
         // the program never uses, so they are not checked here.
         sub.host_grants.grant_all();
+        sub.host_grants.comptime = self.comptime;
         let (bytecode, constants) = match sub.compile_src_from_file(entry.to_str().expect("utf-8 path")) {
             Ok(out) => out,
             Err(_) => {

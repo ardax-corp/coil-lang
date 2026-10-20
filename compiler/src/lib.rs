@@ -45,7 +45,7 @@ pub use dissect::{
     format_bytecode_section,
     format_il, format_symbol_index, matches_fn_pat,
 };
-pub use host_grants::HostGrants;
+pub use host_grants::{ComptimeLimits, HostGrants};
 pub use module_roots::{default_module_roots, resolve_use_in_roots};
 pub use pipeline::*;
 pub use project_index::ProjectIndex;
