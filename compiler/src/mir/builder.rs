@@ -88,6 +88,11 @@ impl MirBuilder {
         self.func.tail_targets.insert(target);
     }
 
+    /// `dest` reads a field no store changes ([`MirFunc::invariant_loads`]).
+    pub fn mark_invariant_load(&mut self, dest: ValueId) {
+        self.func.invariant_loads.insert(dest);
+    }
+
     /// `dest` is the result of a call to a pure function
     /// ([`MirFunc::pure_calls`]).
     pub fn mark_pure_call(&mut self, dest: ValueId) {
