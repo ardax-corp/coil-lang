@@ -1499,6 +1499,12 @@ impl Cx<'_> {
                 }
                 self.apply(w, at, name, s, callee, args);
                 let trait_decl = callee.is_none() && self.known_named(w, name, *def).is_none() && self.is_trait_method(name);
+                // `Trait::m(p)` on a concrete receiver runs its impl, whose
+                // body says what it mutates, as `p.m()` (#1647).
+                if trait_decl && let Some((mutates, impl_body)) = self.named_instance_mutates(w, name, args) {
+                    self.call_mutates(w, at, name, mutates, impl_body, Some(name), args, false);
+                    return;
+                }
                 self.call_mutates(w, at, name, s.mutates, callee, Some(name), args, trait_decl);
             }
             Callee::Method { name } => {
@@ -1787,6 +1793,28 @@ impl Cx<'_> {
             return true;
         }
         self.is_trait_method(name)
+    }
+
+    /// What trait method `name` (`m`, `Trait::m`) mutates when called on
+    /// `args`, from the impl body of its first argument's class, when that
+    /// is a class whose impl was seen.
+    fn named_instance_mutates(&self, w: &Walk<'_>, name: &str, args: &[HirId]) -> Option<(u64, Option<usize>)> {
+        let recv = *args.first()?;
+        let body = &self.module.bodies[w.index];
+        if matches!(body.expr(recv).kind, HirKind::Named { .. } | HirKind::Spread(_)) {
+            return None;
+        }
+        let owner = class_of(body.expr(recv).ty.as_ref())?;
+        match name.rsplit_once("::") {
+            Some((trait_name, method)) => self
+                .checker
+                .generics()
+                .typeclasses
+                .keys()
+                .filter(|t| short_name(t) == short_name(trait_name))
+                .find_map(|t| self.instance_mutates_of(w, t, owner, method)),
+            None => self.instance_mutates(w, owner, name),
+        }
     }
 
     /// Fold what the trait operator `lhs op rhs` mutates into `w`, as the
