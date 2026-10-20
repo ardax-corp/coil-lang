@@ -125,3 +125,54 @@ fn the_proof_file_lists_what_builds_may_drop() {
     assert!(proof.lines().any(|l| l.starts_with("bounds last\t")), "{proof}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn readonly_class_fields_survive_calls_and_loops() {
+    if !solver_ready() {
+        return;
+    }
+    let (code, out) = run("readonly.hy", &[]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("5 proved, 0 failed, 3 not proved"), "{out}");
+    // A field read only on one side of `&&` is still the same field after it.
+    assert!(out.contains("proved   span: ensures result >= 0"), "{out}");
+    assert!(out.contains("proved   width_after_note: ensures result >= 0"), "{out}");
+    assert!(out.contains("proved   span_after_note: call to span: requires r.lo >= 0 && r.lo <= r.hi"), "{out}");
+    assert!(out.contains("proved   fill: invariant r.lo <= i && i <= r.hi && k == i - r.lo"), "{out}");
+    assert!(out.contains("proved   fill: ensures result == r.hi - r.lo"), "{out}");
+}
+
+#[test]
+fn plain_class_fields_and_readonly_class_vectors_are_forgotten_at_a_call() {
+    if !solver_ready() {
+        return;
+    }
+    let (_, out) = run("readonly.hy", &[]);
+    assert!(out.contains("unknown  box_after_reset: ensures result >= 0"), "{out}");
+    assert!(out.contains("unknown  box_after_note: ensures result >= 0"), "{out}");
+    assert!(out.contains("unknown  items_after_note: ensures result > 0"), "{out}");
+}
+
+#[test]
+fn the_proof_file_drops_checks_over_readonly_class_fields() {
+    if !solver_ready() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("coil-verify-readonly-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    std::fs::copy(fixtures.join("readonly.hy"), dir.join("readonly.hy")).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_coil-verify"))
+        .current_dir(&dir)
+        .arg("readonly.hy")
+        .output()
+        .expect("run coil-verify");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(text.contains("wrote readonly.hy.proof: builds drop 4 proved checks"), "{text}");
+    let proof = std::fs::read_to_string(dir.join("readonly.hy.proof")).unwrap();
+    assert!(proof.contains("complete false"), "{proof}");
+    assert!(proof.contains("check fill\t"), "{proof}");
+    assert!(proof.contains("check width_after_note\t"), "{proof}");
+    assert!(!proof.contains("check box_after_note\t"), "{proof}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
