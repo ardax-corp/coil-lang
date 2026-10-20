@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use clap::{ArgMatches, Args, Command, FromArgMatches};
-use compiler::{ContractLevel, DebugLevel, HostGrants, OptLevel};
+use compiler::{ComptimeLimits, ContractLevel, DebugLevel, HostGrants, OptLevel};
 
 /// SARIF / LSP diagnostic stream (commands that report through the compiler).
 #[derive(Args, Clone, Debug, Default)]
@@ -152,6 +152,28 @@ pub struct HostGrantFlags {
     /// Load STEM's library without a hash check (repeatable)
     #[arg(long = "dload-trusted", value_name = "STEM", action = clap::ArgAction::Append)]
     pub dload_trusted: Vec<String>,
+    /// Most steps (loop iterations + calls) one compile-time evaluation may
+    /// run, such as a macro call (default 1000000000)
+    #[arg(long = "comptime-steps", value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
+    pub comptime_steps: Option<u64>,
+    /// Most memory, in MiB, one compile-time evaluation may keep live
+    /// (default 1024)
+    #[arg(long = "comptime-mem", value_name = "MIB", value_parser = clap::value_parser!(u64).range(1..=1 << 40))]
+    pub comptime_mem: Option<u64>,
+}
+
+/// Parse grant and compile-time limit flags from `words` (a test file's
+/// `// Flags:` header), as the command line would.
+pub fn parse_grant_flags(words: &[&str]) -> Result<HostGrantFlags, String> {
+    #[derive(clap::Parser)]
+    #[command(no_binary_name = true, disable_help_flag = true)]
+    struct Words {
+        #[command(flatten)]
+        grants: HostGrantFlags,
+    }
+    <Words as clap::Parser>::try_parse_from(words)
+        .map(|w| w.grants)
+        .map_err(|e| e.render().to_string().lines().next().unwrap_or("bad flags").to_string())
 }
 
 /// `STEM=SHA256` with a 64-digit hex digest.
@@ -183,6 +205,37 @@ impl HostGrantFlags {
             || !self.ffi_search_path.is_empty()
             || !self.dload_pin.is_empty()
             || !self.dload_trusted.is_empty()
+            || self.comptime_steps.is_some()
+            || self.comptime_mem.is_some()
+    }
+
+    /// Add these flags to `grants`: capabilities and lists add up, and a
+    /// limit given here replaces the one in `grants`.
+    pub fn apply_to(self, grants: &mut HostGrants) {
+        let limits = grants.comptime;
+        let steps = self.comptime_steps;
+        let mem = self.comptime_mem;
+        let extra = self.into_grants();
+        grants.allow_attach |= extra.allow_attach;
+        grants.allow_exec |= extra.allow_exec;
+        grants.allow_exit |= extra.allow_exit;
+        grants.allow_ffi_exec |= extra.allow_ffi_exec;
+        grants.allow_read |= extra.allow_read;
+        grants.allow_write |= extra.allow_write;
+        grants.allow_net |= extra.allow_net;
+        grants.allow_env |= extra.allow_env;
+        for stem in extra.allow_dload {
+            grants.grant_dload_allow(stem);
+        }
+        for path in extra.ffi_search_paths {
+            grants.add_ffi_search_path(path);
+        }
+        grants.dload_pins.extend(extra.dload_pins);
+        grants.dload_trusted.extend(extra.dload_trusted);
+        grants.comptime = ComptimeLimits {
+            steps: steps.unwrap_or(limits.steps),
+            heap_bytes: mem.map_or(limits.heap_bytes, |m| m << 20),
+        };
     }
 
     pub fn into_grants(self) -> HostGrants {
@@ -199,6 +252,10 @@ impl HostGrantFlags {
             ffi_search_paths: self.ffi_search_path,
             dload_pins: self.dload_pin,
             dload_trusted: self.dload_trusted,
+            comptime: ComptimeLimits {
+                steps: self.comptime_steps.unwrap_or(ComptimeLimits::DEFAULT_STEPS),
+                heap_bytes: self.comptime_mem.unwrap_or(ComptimeLimits::DEFAULT_MEM_MIB) << 20,
+            },
         };
         if self.allow_all {
             grants.grant_all();
