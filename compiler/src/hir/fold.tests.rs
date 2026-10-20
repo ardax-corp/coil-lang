@@ -133,3 +133,18 @@ fn a_local_bound_once_to_a_literal_folds_into_its_reads() {
     // A local written again keeps its reads.
     assert_eq!(folded_return("fn f(int x) -> int { let m = 1; if x > 0 { m = 2; } return m * 2; }"), "x IntMul lit");
 }
+
+#[test]
+fn a_match_on_a_local_bound_to_a_constructor_takes_its_arm() {
+    // An inlined callee's parameter is a `let` of the caller's constructor.
+    let m = |src: &str| matches_left(src);
+    assert_eq!(m("fn f(int i) -> int { let o = Option::Some(i); return match o { Option::Some(x) => x, Option::None => 0, }; }"), 0);
+    // A unit variant inside a constructor folds the nested match too.
+    let nested = "enum Color { Red, Green } \
+                  fn f() -> int { let o = Option::Some(Color::Green); \
+                  return match o { Option::Some(c) => match c { Color::Red => 1, Color::Green => 2, }, Option::None => 0, }; }";
+    assert_eq!(m(nested), 0);
+    // Written again, or bound to something else, it stays.
+    assert_eq!(m("fn f(int i) -> int { let o = Option::Some(i); o = Option::None; return match o { Option::Some(x) => x, Option::None => 0, }; }"), 1);
+    assert_eq!(m("fn f(int i) -> int { let o = Option::Some(i); i = 2; return match o { Option::Some(x) => x, Option::None => 0, }; }"), 1);
+}

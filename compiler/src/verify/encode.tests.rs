@@ -17,7 +17,7 @@ fn checks(src: &str) -> Vec<FnCheck> {
     crate::hir::set_contract_level(crate::hir::ContractLevel::All);
     let sidecar = checker.typed_sidecar();
     let module = crate::hir::build_module(&checker, &sidecar, "", &ast);
-    verify_module(&module)
+    verify_module(&module, &|n| checker.is_readonly_class(n))
 }
 
 fn named<'a>(checks: &'a [FnCheck], name: &str) -> &'a FnCheck {
