@@ -75,8 +75,11 @@ nothing collects during the epoch. A local table a worker builds lands in
 its own copy, which the job drops when it ends. An isolate job
 (`thread::spawn`) has its own heap, so it gets copies instead: at spawn each
 slot is copied out of the spawner's heap the way spawn arguments are
-(`copy_statics_out`, `Machine::load_copied_statics`, #1663). A slot holding
-a value that cannot cross threads (a stream, a cyclic graph) starts zeroed
+(`copy_statics_out`, `Machine::load_copied_statics`, #1663). A standard
+stream is reopened in the worker (`StaticSlot::StdStream`); any other stream
+becomes a `StreamKind::Unsent` placeholder that panics in every stream
+native (`UnsentStreamGuard`, #1684). A slot holding another value that
+cannot cross threads (a cyclic graph) starts zeroed
 ([shared-heap sendability](shared-heap-sendability.md)).
 
 ## Measurements

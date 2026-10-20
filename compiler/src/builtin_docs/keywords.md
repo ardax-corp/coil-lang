@@ -85,7 +85,10 @@ is a method called on the type (`Counter::fresh()`), never on a value.
 
 A thread started with `thread::spawn` gets a copy of every static as it was
 when it was spawned: constants read the same values there, and its writes
-to a `static let` stay in that thread.
+to a `static let` stay in that thread. A static holding `stdin()`,
+`stdout()` or `stderr()` is the same process stream in the thread; one
+holding a file or socket stream cannot cross threads, and using it there
+panics.
 
 ```coil
 static let hits = 0;
