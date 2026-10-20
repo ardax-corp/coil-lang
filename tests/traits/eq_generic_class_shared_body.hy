@@ -13,6 +13,12 @@ class Box<T> {
     pub v: T,
 }
 
+#[derive(Eq)]
+class Pair<A, B> {
+    pub a: A,
+    pub b: B,
+}
+
 fn box_same<T: Eq>(Box<T> a, Box<T> b) -> bool {
     return a == b;
 }
@@ -27,6 +33,19 @@ fn vec_box_same<T: Eq>(Vec<Box<T>> a, Vec<Box<T>> b) -> bool {
 
 fn opt_box_same<T: Eq>(Option<Box<T>> a, Option<Box<T>> b) -> bool {
     return a == b;
+}
+
+fn nested_same<T: Eq>(Vec<Box<Box<T>>> a, Vec<Box<Box<T>>> b) -> bool {
+    return a == b;
+}
+
+fn pair_same<A: Eq, B: Eq>((Pair<A, B>, A) a, (Pair<A, B>, A) b) -> bool {
+    return a == b;
+}
+
+fn in_lambda<T: Eq>(Vec<Box<T>> a, Vec<Box<T>> b) -> bool {
+    let f = fn () use (a, b) => a != b;
+    return f();
 }
 
 fn boxes(Vec<int> xs) -> Vec<Box<C>> {
@@ -64,4 +83,28 @@ test("Option of a generic class through a function value") {
     assert!(f(Some(new Box(new C(1))), Some(new Box(new C(1)))));
     assert!(!f(Some(new Box(new C(1))), Some(new Box(new C(2)))));
     assert!(!f(Some(new Box(new C(1))), None));
+}
+
+test("nested generic classes through a function value") {
+    let f = nested_same;
+    let a: Vec<Box<Box<C>>> = Vec::new();
+    a.push(new Box(new Box(new C(1))));
+    let b: Vec<Box<Box<C>>> = Vec::new();
+    b.push(new Box(new Box(new C(1))));
+    assert!(f(a, b));
+    b.push(new Box(new Box(new C(1))));
+    assert!(!f(a, b));
+}
+
+test("two-parameter generic class in a tuple") {
+    let f = pair_same;
+    assert!(f((new Pair(new C(1), "x"), new C(2)), (new Pair(new C(1), "x"), new C(2))));
+    assert!(!f((new Pair(new C(1), "x"), new C(2)), (new Pair(new C(1), "y"), new C(2))));
+    assert!(!f((new Pair(new C(1), "x"), new C(2)), (new Pair(new C(1), "x"), new C(3))));
+}
+
+test("Vec of a generic class in a lambda") {
+    let f = in_lambda;
+    assert!(!f(boxes([1]), boxes([1])));
+    assert!(f(boxes([1]), boxes([2])));
 }
