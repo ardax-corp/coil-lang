@@ -106,7 +106,13 @@ There is no generation or pin-token opcode. A pin dies when:
   register already held a different identity);
 - coroutine yield drops tables for unwound frames. Pins are not saved across
   yield; `ArrayPin` / the next `DenseIndex` after resume allocates again.
-- isolate / shared-stack reset clears the last-addr dense cache.
+- isolate / shared-stack reset clears the last-addr dense cache;
+- a collection finds a dense index's pin (not an `ArrayPin`'s) whose
+  register no longer holds the pinned object, because a clear zeroed it or
+  it was rewritten (`release_stale_pins`, run before each root walk that
+  marks). Such a pin is only a cache, and as a root it kept a tuple read by
+  a destructuring `let` and its elements alive until the frame returned
+  (#1651). The next index of the register looks the object up again.
 
 `CALL` / `CallIndirect` / `call_function` do not push a pin table. The caller's
 table (if any) stays keyed by its frame depth and is still a GC root.
@@ -144,8 +150,10 @@ roots.
 
 - `gc::Root` marks its payload while the `Root` object is reachable.
 - `gc::Weak` does not keep the referent alive; upgrade fails after sweep.
-- A frame pin keeps the array alive until the table entry is gone, even if the
-  local slot is later overwritten. That is extra liveness, not a use-after-free.
+- An `ArrayPin` keeps the array alive until the table entry is gone, even if
+  the local slot is later overwritten. That is extra liveness, not a
+  use-after-free. A dense index's pin lasts only while its register still
+  holds the object (#1651).
 - Resurrection from `fn drop()` ([COI-79](https://linear.app/ardax/issue/COI-79))
   is unchanged: drop still runs at most once; a pin that kept the object marked
   simply delays drop until the frame unwinds and a later collection sees it
