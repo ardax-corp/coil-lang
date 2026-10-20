@@ -385,6 +385,13 @@ while compiling, on the same host (`MacroHost::eval_consts`):
   const's place. The initializer bodies stay in the program.
 - Without a host (a pipeline built with no VM linked) consts keep their
   startup initializers.
+- A `static let` with a pure initializer is computed the same way, silently
+  (`ConstEval::silent`): within the silent tier
+  (`ComptimeLimits::SILENT_CALL_STEPS` each, `SILENT_MODULE_STEPS` for the
+  module), and one that panics, runs out or has no snapshot form keeps its
+  startup initializer. A failed call leaves the VM in an unknown state, so
+  the values computed so far move to a fresh VM through a snapshot. The
+  restored value is an ordinary heap object, so the static stays mutable.
 
 ## Not yet
 
