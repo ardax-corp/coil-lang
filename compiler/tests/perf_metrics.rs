@@ -1953,16 +1953,28 @@ fn compile_src_at(src: &str, level: compiler::OptLevel) -> (Vec<Byte>, Pipeline)
 }
 
 /// A program with `readonly` values that only reads and calls methods
-/// through them.
+/// through them: inherent methods, a trait method declared
+/// `readonly A self` (directly and through a trait object), and a match on
+/// a readonly `Option` payload.
 const READONLY_SEAL: &str = "
+trait Area<A> {
+    fn area(readonly A self) -> int {}
+}
+
 class Point {
     pub x: int,
     pub y: int,
 }
 
 impl Point {
-    pub fn shift() {
-        self.x = self.x + 1;
+    pub fn shifted() -> Point {
+        return new Point(self.x + 1, self.y);
+    }
+}
+
+impl Area for Point {
+    fn area(readonly Point self) -> int {
+        return self.x * self.y;
     }
 }
 
@@ -1975,8 +1987,16 @@ fn step(int i) -> int {
 fn main() {
     let xs = readonly [1, 2, 3];
     let p = readonly new Point(1, 2);
-    p.shift();
-    let acc = xs.len() + p.x + p.y;
+    let q = p.shifted();
+    let a: readonly Area = p;
+    let o = readonly Option::Some(q);
+    let acc = xs.len() + p.x + p.y + q.x + p.area() + a.area();
+    match o {
+        Option::Some(r) => {
+            acc = acc + r.y;
+        },
+        Option::None => {},
+    }
     for i in 0..10 {
         acc = acc + step(i);
     }

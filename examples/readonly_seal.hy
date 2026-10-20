@@ -1,7 +1,8 @@
-// `readonly` values: reads and `self` methods are allowed, outside mutation is
-// not.
+// `readonly` values: reads and methods that only read `self` are allowed;
+// writes, and methods that mutate `self`, are not. A method returns a new
+// value instead.
 //
-// Output: 322
+// Output: 312
 
 use io::stdout;
 use io::sync::write_all;
@@ -13,8 +14,8 @@ class Point {
 }
 
 impl Point {
-    pub fn shift() {
-        self.x = self.x + 1;
+    pub fn shifted() -> Point {
+        return new Point(self.x + 1, self.y);
     }
 }
 
@@ -22,7 +23,7 @@ fn main() {
     let xs = readonly [1, 2, 3];
     write_all(stdout(), to_bytes(format("%i", xs.len())));
     let p = readonly new Point(1, 2);
-    p.shift();
+    let q = p.shifted();
     write_all(stdout(), to_bytes(format("%i", p.x)));
-    write_all(stdout(), to_bytes(format("%i", p.y)));
+    write_all(stdout(), to_bytes(format("%i", q.x)));
 }
