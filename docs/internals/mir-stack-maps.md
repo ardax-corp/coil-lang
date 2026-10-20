@@ -169,9 +169,7 @@ and relocate mapped slots on collect.
   host: 521 → 539 ms (one zero), 573 → 636 ms (two zeros), 437 → 455 and
   436 → 476 ms with the helper inlined. The zero is `CONST 0; STORE`, two
   dispatches; a dense `DenseConst r, 0` would be one, for every dense
-  clear. Not covered here: a tuple a dense `DenseIndex` read stays
-  pinned in `frame_pins` (rooting its elements) after its register is
-  zeroed (#1651).
+  clear.
   `tests/memory/gc_weak_match_arg.hy`.
 - **A temporary passed to a call drops too** (#1650). A word passed
   straight to a call (`weak(new Node(..))`) has no binding and so no
