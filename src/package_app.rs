@@ -201,6 +201,7 @@ pub fn build_native_lock(
             size,
             requires: decl.requires.clone(),
             requires_hint: decl.requires_hint.clone(),
+            missing: false,
         });
     }
 
@@ -222,13 +223,32 @@ pub fn native_lock_from_ffi_natives(natives: &[FfiNative]) -> Result<NativeLock,
         }
         let filename = platform_shared_lib_filename(&decl.name);
         let lib_path = decl.path.join(&filename);
-        // The pin is the local file's hash, so the file must exist.
-        if !lib_path.is_file() {
-            return Err(format!(
-                "--ffi-native `{}`: expected library at `{}`",
-                decl.name,
-                lib_path.display()
-            ));
+        // The pin is the local file's hash. A file that is not there yet is
+        // listed as missing (no hash) so a downloader can fetch it; anything
+        // else at that path that is not a readable file is still an error.
+        match fs::metadata(&lib_path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                entries.push(NativeLockEntry {
+                    package: decl.package.clone(),
+                    version: decl.version.clone(),
+                    stem: decl.name.clone(),
+                    filename,
+                    sha256: String::new(),
+                    size: 0,
+                    requires: decl.requires.clone(),
+                    requires_hint: decl.requires_hint.clone(),
+                    missing: true,
+                });
+                continue;
+            }
+            Ok(meta) if meta.is_file() => {}
+            _ => {
+                return Err(format!(
+                    "--ffi-native `{}`: expected library at `{}`",
+                    decl.name,
+                    lib_path.display()
+                ));
+            }
         }
         let (sha256, size) = sha256_hex_file(&lib_path)?;
         entries.push(NativeLockEntry {
@@ -240,6 +260,7 @@ pub fn native_lock_from_ffi_natives(natives: &[FfiNative]) -> Result<NativeLock,
             size,
             requires: decl.requires.clone(),
             requires_hint: decl.requires_hint.clone(),
+            missing: false,
         });
     }
     Ok(NativeLock {
@@ -484,11 +505,13 @@ mod tests {
         let lock = lock.expect("a missing local file is listed, not an error");
         assert_eq!(lock.entries.len(), 2);
         let (h, g) = (&lock.entries[0], &lock.entries[1]);
+        assert!(!h.missing);
         assert_eq!(h.size, 3);
         assert_eq!(
             h.sha256,
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+        assert!(g.missing);
         assert_eq!((g.filename.as_str(), g.sha256.as_str(), g.size), (gone.as_str(), "", 0));
 
         let tsv = lock.to_tsv();
