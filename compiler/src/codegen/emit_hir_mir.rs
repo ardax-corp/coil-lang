@@ -1124,11 +1124,24 @@ impl Compiler {
             if let Some(dicts) = dicts
                 && let Some(boxed_ret) = self.hir_ret_shape(hir, id, &natural)
                 && args.iter().zip(&call.params).zip(&boxes).all(|((&a, &p), b)| {
-                    // A boxed argument goes from its own word.
-                    if b.is_some() { self.hir_arg_word(hir, emit, a, p) } else { self.hir_arg_passes(hir, emit, a, p) }
+                    // A boxed argument goes from its own word; a niche
+                    // `Option` / `Result` receiver of a shared body as its
+                    // enum object.
+                    if b.is_some() {
+                        self.hir_arg_word(hir, emit, a, p)
+                    } else {
+                        self.hir_arg_passes(hir, emit, a, p) || self.hir_niche_arg(hir, emit, a, p).is_some()
+                    }
                 })
                 && let Some(target) = target
             {
+                for (&arg, &param) in args.iter().zip(&call.params) {
+                    if !self.hir_arg_passes(hir, emit, arg, param)
+                        && let Some(layout) = self.hir_niche_arg(hir, emit, arg, param)
+                    {
+                        t.niche_args.insert(arg.0, layout);
+                    }
+                }
                 t.calls.insert(
                     id.0,
                     crate::mir::HirCallSite {

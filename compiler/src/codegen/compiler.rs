@@ -1462,11 +1462,12 @@ impl Compiler {
         else {
             return;
         };
-        let names: Vec<String> = match (impl_params.is_empty(), type_params.is_empty()) {
-            (false, true) => impl_params.iter().map(|p| p.name.to_string()).collect(),
-            (true, false) => type_params.iter().map(|p| p.name.to_string()).collect(),
-            _ => return,
-        };
+        // The class's parameters, then the method's own (`impl Option<T>`'s
+        // `fn map<U>`), as the scheme quantifies them.
+        let names: Vec<String> = impl_params.iter().chain(type_params).map(|p| p.name.to_string()).collect();
+        if names.is_empty() {
+            return;
+        }
         if self.checker.is_overloaded(fqn) || fn_arity_from_args(args).1 {
             return;
         }
@@ -1697,7 +1698,13 @@ impl Compiler {
                 && self
                     .module_ctxs
                     .get(&src.program)
-                    .is_some_and(|ctx| ctx.knows_tys(&req.lookup) && ctx.layout_safe(src.span))
+                    // A generic enum's method (`Option::map`) holds no fields
+                    // its shared methods read: its clone may give `Option<T>`
+                    // its own layout.
+                    .is_some_and(|ctx| {
+                        ctx.knows_tys(&req.lookup)
+                            && (ctx.layout_safe(src.span) || self.checker.enum_variants(&src.class).is_some())
+                    })
             {
                 self.foreign_clone_queue.push(req.clone());
                 if src.method_of.is_none() {

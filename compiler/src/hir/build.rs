@@ -696,6 +696,17 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             b.type_params.extend(params.iter().cloned());
         }
         let param_tys = sig.map(|(params, _)| params).or_else(|| default_sig.map(|(params, _)| params));
+        // A generic enum's `self` is the scheme's `E<T>` (`Option<T>`), so a
+        // clone at `T = string` holds it in that type's own layout.
+        if let Some(owner) = owner
+            && !is_static
+            && self.checker.enum_variants(owner).is_some()
+            && let Some(self_ty) = param_tys.as_ref().and_then(|tys| tys.first())
+            && matches!(self_ty, Ty::App(head, _) if matches!(head.as_ref(), Ty::Con(n) if n == owner))
+            && let Some(&this) = b.body.params.first()
+        {
+            b.body.locals[this.0 as usize].ty = Some(self_ty.clone());
+        }
         self.params(&mut b, args, param_tys.as_deref());
         if Self::pinned(&b, returns.as_ref(), b.body.ret.as_ref()) {
             b.body.pinned_param = true;
