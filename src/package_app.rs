@@ -461,6 +461,35 @@ mod tests {
         ));
     }
 
+    /// A `dload` path literal reduces to the stem the runtime gate uses, so
+    /// one `--ffi-native name=<stem>` row covers it (coil-lang#1656).
+    #[test]
+    fn build_native_lock_reduces_dload_path_to_stem() {
+        let dir = std::env::temp_dir().join(format!("coil_lock_stem_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let filename = platform_shared_lib_filename("tls");
+        fs::write(dir.join(&filename), b"not really a library").unwrap();
+        let natives = vec![parse_ffi_native(&format!(
+            "name=tls,version=1.0.0,path={}",
+            dir.display()
+        ))
+        .unwrap()];
+        let strings = vec![format!("./native/{filename}"), "tls".to_string()];
+        let bytecode = vec![
+            Byte::new(Instruction::STRING).with_operand_u32(0),
+            Byte::new(Instruction::FfiLoad),
+            Byte::new(Instruction::STRING).with_operand_u32(1),
+            Byte::new(Instruction::FfiLoad),
+        ];
+        let lock = build_native_lock(&natives, &bytecode, &strings);
+        let _ = fs::remove_dir_all(&dir);
+        let lock = lock.expect("the `tls` row covers `./native/libtls.so`");
+        assert_eq!(lock.entries.len(), 1, "one entry per stem: {:?}", lock.entries);
+        assert_eq!(lock.entries[0].stem, "tls");
+        assert_eq!(lock.entries[0].filename, filename);
+    }
+
     #[test]
     fn load_archive_bytes_accepts_unaligned_prefix() {
         let program = ArchivedProgram {
