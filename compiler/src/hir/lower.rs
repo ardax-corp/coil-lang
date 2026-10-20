@@ -3056,8 +3056,11 @@ impl Walk<'_> {
             }
             // A `()` statement (a unit `match` arm, a nested item) does nothing.
             _ if is_unit_make(body, id) || matches!(body.expr(id).kind, HirKind::Lit(Lit::Unit)) => Ok(()),
+            // A bare value as a body's root: an anonymous `fn`'s `=> e`
+            // that reads a `static` or an unfolded `const` (#1713).
             HirKind::Lit(_)
             | HirKind::Local(_)
+            | HirKind::Global { .. }
             | HirKind::Bin { .. }
             | HirKind::Logic { .. }
             | HirKind::Un { .. }

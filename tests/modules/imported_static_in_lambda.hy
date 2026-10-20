@@ -19,3 +19,11 @@ test("a folded const and a static in one lambda") {
     let f = fn (int n) => n + LIMIT + counter - counter;
     assert!(f(1) == 11);
 }
+
+static let seen: int = 7;
+
+test("this module's static read in a lambda") {
+    let f = fn () => seen;
+    seen += 1;
+    assert!(f() == 8);
+}
