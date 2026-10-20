@@ -605,6 +605,9 @@ impl Compiler {
         if lambda.exprs.iter().any(|e| matches!(e.kind, HirKind::Lambda { .. })) {
             return Err("lambda-in-lambda".to_string());
         }
+        if Self::observes_liveness(lambda) {
+            return Err("weak".to_string());
+        }
         let heap: Vec<LocalId> = (0..lambda.locals.len() as u32).map(LocalId).filter(|&l| !scalar(&lambda.local(l).ty)).collect();
         if !heap.is_empty() && !self.hir_inline_heap {
             return Err("heap local".to_string());
@@ -2263,6 +2266,9 @@ impl Compiler {
                 .any(|t| Self::finalized(&self.checker, &apply_ty_prune(self.checker.subst(), t)))
             {
                 return Err("drop-value".to_string());
+            }
+            if Self::observes_liveness(callee) {
+                return Err("weak".to_string());
             }
             // A `match` keeps its operand (and an arm its bindings) in the
             // caller's frame past the call, where an object in it would
@@ -6509,6 +6515,16 @@ impl Compiler {
             }
             _ => true,
         }
+    }
+
+    /// Whether `body` takes or upgrades a weak reference: what it observes
+    /// is whether its arguments are still reachable, which a call's frame
+    /// keeps them and a splice (its argument folded into the use) may not.
+    fn observes_liveness(body: &HirBody) -> bool {
+        body.exprs.iter().any(|e| {
+            matches!(&e.kind, HirKind::Call { callee: Callee::Named { name, .. }, .. }
+                if matches!(name.rsplit("::").next(), Some("weak" | "upgrade")))
+        })
     }
 
     /// Whether spliced `callee`'s heap locals `heap` may keep their last
