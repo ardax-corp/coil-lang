@@ -31,7 +31,8 @@ impl<const S: usize> Machine<S> {
     /// A panic at the top frame's saved ip may run `defer`s.
     #[inline]
     fn arm_unwind(&mut self, message: &str) {
-        self.unwind.armed = message != STACK_OVERFLOW && message != STEP_BUDGET_EXHAUSTED;
+        self.unwind.armed =
+            message != STACK_OVERFLOW && message != STEP_BUDGET_EXHAUSTED && message != HEAP_CAP_EXCEEDED;
         self.unwind.resumed = false;
     }
 
