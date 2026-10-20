@@ -1,5 +1,5 @@
 // `break` and `continue` work in a `for … in` over every iterable kind:
-// a Vec, a tuple, a dict, a coroutine and an inclusive range, and a byte
+// a Vec, a tuple, a coroutine and an inclusive range, and a byte
 // range that ends at 255 stops instead of wrapping.
 use tests::assert;
 
@@ -32,18 +32,6 @@ test("Vec and tuple") {
         t = t + x;
     }
     assert!(t == 4);
-}
-
-test("dict entries") {
-    let d = { a: 1, b: 20, c: 300 };
-    let s = 0;
-    for (k, v) in d {
-        if k == "b" {
-            continue;
-        }
-        s = s + v;
-    }
-    assert!(s == 301);
 }
 
 test("break out of an endless coroutine") {

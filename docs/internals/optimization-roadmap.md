@@ -179,7 +179,7 @@ every `examples/perf` function (2026-09) found no hot overlapping carry left.
 Residual slot copies near a back-edge are:
 
 - `acc = acc + f(…)` spill before a `CALL` (`LOAD acc; STORE tmp`) in auto-par
-  chunk workers (`mandelbrot_ipa`, `for_in_range`, `for_in_dict`, …) — two
+  chunk workers (`mandelbrot_ipa`, `for_in_range`, …) — two
   dispatches next to a `CALL` / `RETURN` into a much larger callee;
 - copies into never-read slots (`tail_sibling`, `gc_churn::build_list`), now
   dropped by the HIR fold where the value is a literal or local read;

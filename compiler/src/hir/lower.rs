@@ -2882,9 +2882,8 @@ impl Walk<'_> {
                     kind,
                     Some(
                         ForInKind::Array
-                            | ForInKind::Dict
                             | ForInKind::Custom {
-                                counted: Some(ForInCounted::Array | ForInCounted::Dict),
+                                counted: Some(ForInCounted::Array),
                                 ..
                             }
                     )
@@ -2927,15 +2926,10 @@ impl Walk<'_> {
                         self.word(*iterable)?;
                         self.value(*iterable)?;
                     }
-                    // `DictEntries`, then the array loop over `(key, value)`.
-                    Some(ForInKind::Dict) => {
-                        self.word(*iterable)?;
-                        self.value(*iterable)?;
-                    }
-                    // A user `into_iter` returning an array, dict or numeric
-                    // range: the iterable as is, the `CALL`, then that loop.
+                    // A user `into_iter` returning an array or numeric range:
+                    // the iterable as is, the `CALL`, then that loop.
                     Some(ForInKind::Custom {
-                        counted: Some(ForInCounted::Array | ForInCounted::Dict | ForInCounted::Range { .. }),
+                        counted: Some(ForInCounted::Array | ForInCounted::Range { .. }),
                         ..
                     })
                     // Or an iterator: `into_iter`, then `next` until `None`.

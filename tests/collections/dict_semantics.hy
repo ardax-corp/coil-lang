@@ -1,6 +1,6 @@
-// Dicts (anonymous records): structural typing regardless of field order,
-// shared on assignment, compound field updates, `%v` in name order, `len`,
-// `for (k, v)` iteration, and dicts inside arrays and Vecs.
+// Records: structural typing regardless of field order, shared on
+// assignment, compound field updates, `%v` in name order, `len`, and
+// records inside arrays and Vecs.
 use tests::assert;
 use string::format;
 
@@ -18,7 +18,7 @@ test("structural typing") {
     assert!(a.x == 8);
 }
 
-test("dicts are shared on assignment") {
+test("records are shared on assignment") {
     let a = { n: 1 };
     let b = a;
     b.n = 5;
@@ -39,19 +39,9 @@ test("show sorts fields") {
     assert!(format("%v", d) == "{ alpha: a, mid: (1, 2), zeta: 1 }", format("%v", d));
 }
 
-test("len and iteration") {
+test("len is the field count") {
     let d = { a: 1, b: 2, c: 3 };
     assert!(d.len() == 3);
-    let sum = 0;
-    let weighted = 0;
-    for (k, v) in d {
-        sum = sum + v;
-        if k == "c" {
-            weighted = weighted + v * 100;
-        }
-    }
-    assert!(sum == 6);
-    assert!(weighted == 300);
 }
 
 test("nested and in collections") {
