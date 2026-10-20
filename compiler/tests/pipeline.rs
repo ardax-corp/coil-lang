@@ -3736,6 +3736,8 @@ fn main() {
     assert_eq!(output, "5");
 
     let mut pipeline = test_pipeline();
+    // `take` inlined, `p` is scalar-replaced: keep the call.
+    pipeline.set_inline_max_cost(0);
     let (bytecode, _) = pipeline.compile_src(src).expect("named local class");
     let symbols = pipeline.program_debug().fn_symbols;
     let main = symbols

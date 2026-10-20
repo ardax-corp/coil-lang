@@ -4040,6 +4040,7 @@ fn main() {
     let mut pipeline = crate::Pipeline::new();
     // The callees are looked up by name: keep them calls.
     pipeline.compiler_mut().hir_inline_heap = false;
+    pipeline.set_inline_max_cost(0);
     let (bc, constants) = pipeline.compile_src(src).expect("compile");
     let pack_off = pipeline.compiler_mut().get_function("pack").expect("pack");
     let nested_off = pipeline
@@ -4361,6 +4362,7 @@ fn main() {
     let mut pipeline = crate::Pipeline::new();
     // The callees are looked up by name: keep them calls.
     pipeline.compiler_mut().hir_inline_heap = false;
+    pipeline.set_inline_max_cost(0);
     let (bc, constants) = pipeline.compile_src(src).expect("compile");
     let pack_off = pipeline.compiler_mut().get_function("pack").expect("pack");
     let nested_off = pipeline
@@ -5193,7 +5195,7 @@ fn access_chained_field_with_correct_field_index() {
 #[test]
 fn match_nested_record_in_tuple_binds_correctly() {
     use common::Instruction;
-    let (bc, _pool) = compile_src(
+    let (bc, _pool) = compile_src_no_inline(
         "enum Inner { I { v: int } } \
  fn pick(Result<Inner, int> r) -> int { \
  return match r { \
@@ -5229,7 +5231,7 @@ fn match_nested_record_in_tuple_binds_correctly() {
 #[test]
 fn match_nested_record_in_record_binds_correctly() {
     use common::Instruction;
-    let (bc, _pool) = compile_src(
+    let (bc, _pool) = compile_src_no_inline(
         "enum Inner { I { v: int } } \
  enum Wrap { Good { x: Inner }, Bad(string) } \
  fn pick(Wrap w) -> int { \
@@ -5263,7 +5265,7 @@ fn match_nested_record_in_record_binds_correctly() {
 #[test]
 fn match_depth_3_nested_records_bind_correctly() {
     use common::Instruction;
-    let (bc, _pool) = compile_src(
+    let (bc, _pool) = compile_src_no_inline(
         "enum W { W { v: int } } \
  enum Baz { Qux { a: W } } \
  enum Foo { Bar(Baz), Other } \
@@ -6490,7 +6492,7 @@ fn main() {
 #[test]
 fn lambda_named_fn_call_emits_call_with_empty_captures() {
     use common::Instruction;
-    let (bc, _) = compile_src(
+    let (bc, _) = compile_src_no_inline(
         r#"
 fn rec(int n) -> int { return n + 1; }
 fn main() {
@@ -7259,7 +7261,7 @@ fn main() {
             .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::MakeEnumK))
     };
     // A direct-only callee takes `[payload, tag]`: nothing boxes.
-    let (bc, _) = compile_src(src);
+    let (bc, _) = compile_src_no_inline(src);
     assert!(
         !boxes(&bc),
         "pair param must not box; opcodes={:?}",
@@ -7267,7 +7269,7 @@ fn main() {
     );
     // Taken as a value, `take` keeps the boxed ABI and the call boxes.
     let (bc, _) =
-        compile_src(&src.replace("let y = take(x);", "let y = take(x);\n    let _g = take;"));
+        compile_src_no_inline(&src.replace("let y = take(x);", "let y = take(x);\n    let _g = take;"));
     assert!(
         boxes(&bc),
         "escaped callee must box; opcodes={:?}",
@@ -8522,7 +8524,7 @@ fn main() {
 
 #[test]
 fn two_slot_bind_escape_boxes() {
-    let (bc, _) = compile_src(
+    let (bc, _) = compile_src_no_inline(
         r#"
 fn give() -> Option<int> {
     return Option::Some(1);

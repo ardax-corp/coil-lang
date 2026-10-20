@@ -543,6 +543,208 @@ impl Compiler {
         Some((key, out))
     }
 
+    /// The body of the lambda `local` of `hir` holds, as typed inlining
+    /// splices it at a call of `local`: `local` is bound once, by a `let`
+    /// of a lambda that captures nothing, and never reassigned.
+    fn hir_lambda_callee(&self, module: &crate::hir::HirModule, hir: &HirBody, local: LocalId) -> Option<HirBody> {
+        use crate::hir::BodyKind;
+        if hir.local(local).captured {
+            return None;
+        }
+        let mut inits = hir.exprs.iter().filter_map(|e| match &e.kind {
+            HirKind::Let { local: l, init } if *l == local => Some(*init),
+            HirKind::Assign { place, .. } if matches!(hir.expr(*place).kind, HirKind::Local(l) if l == local) => Some(None),
+            _ => None,
+        });
+        let (Some(Some(init)), None) = (inits.next(), inits.next()) else {
+            return None;
+        };
+        let HirKind::Lambda { body } = hir.expr(init).kind else {
+            return None;
+        };
+        let lambda = module.bodies.get(body)?;
+        if lambda.kind != BodyKind::Lambda || !lambda.captures.is_empty() || lambda.is_coro || lambda.result_mode {
+            return None;
+        }
+        // Its body, as a function body's block.
+        let mut out = lambda.clone();
+        let root = out.root?;
+        if !matches!(out.expr(root).kind, HirKind::Block { .. }) {
+            let id = HirId(out.exprs.len() as u32);
+            let mut block = out.expr(root).clone();
+            block.kind = HirKind::Block { stmts: Vec::new(), tail: Some(root) };
+            block.node = None;
+            out.exprs.push(block);
+            out.root = Some(id);
+        }
+        let ty = |t: &Option<Ty>| t.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t));
+        for e in &mut out.exprs {
+            e.ty = ty(&e.ty);
+        }
+        for l in &mut out.locals {
+            l.ty = ty(&l.ty);
+        }
+        out.ret = ty(&out.ret);
+        // A generic body's lambda (in a mono clone) has its open types.
+        let open = |t: &Option<Ty>| t.as_ref().is_none_or(Self::ty_has_var);
+        if out.exprs.iter().any(|e| open(&e.ty)) || out.locals.iter().any(|l| open(&l.ty)) || open(&out.ret) {
+            return None;
+        }
+        Some(out)
+    }
+
+    /// How the lambda body `lambda` splices at `call` in `hir`: scalar
+    /// locals and result, or heap ones cleared after the statement.
+    fn hir_lambda_shape(&self, hir: &HirBody, call: HirId, lambda: &HirBody, budget: usize) -> Result<crate::hir::inline::Shape, String> {
+        let scalar = |ty: &Option<Ty>| {
+            ty.as_ref().is_some_and(|t| {
+                matches!(lower::classify(&self.checker, t), Some(ValueClass::Scalar | ValueClass::Unit))
+                    || self.hir_inline_pair && immediate_pair(&crate::hir::layout::of(&self.checker, t))
+            })
+        };
+        if lambda.exprs.iter().any(|e| matches!(e.kind, HirKind::Lambda { .. })) {
+            return Err("lambda-in-lambda".to_string());
+        }
+        if Self::observes_liveness(lambda) {
+            return Err("weak".to_string());
+        }
+        let heap: Vec<LocalId> = (0..lambda.locals.len() as u32).map(LocalId).filter(|&l| !scalar(&lambda.local(l).ty)).collect();
+        if !heap.is_empty() && !self.hir_inline_heap {
+            return Err("heap local".to_string());
+        }
+        let inert = self.hir_loop_inert(lambda, &heap);
+        Ok(crate::hir::inline::inlinable(lambda, budget)?
+            .with_heap_result(!scalar(&hir.expr(call).ty))
+            .with_heap_locals(heap)
+            .with_loop_inert(inert))
+    }
+
+    /// A core `Option` / `Result` method as other modules splice it: its
+    /// types resolved (type parameters left open, for
+    /// [`Self::hir_core_method_at`]), no span-keyed node, and no call but
+    /// one through a parameter (`f(x)`).
+    fn hir_core_method_body(&self, body: &HirBody) -> Option<HirBody> {
+        use crate::hir::BodyKind;
+        if body.kind != BodyKind::Method || body.is_coro || !body.captures.is_empty() || body.result_mode {
+            return None;
+        }
+        if !matches!(body.name.strip_prefix("core::")?.split_once("::")?.0, "Option" | "Result") {
+            return None;
+        }
+        for e in &body.exprs {
+            match &e.kind {
+                HirKind::Call { callee: Callee::Value(v), .. }
+                    if matches!(body.expr(*v).kind, HirKind::Local(l) if body.params.contains(&l)) => {}
+                HirKind::Call { .. } | HirKind::Builtin { .. } | HirKind::Lambda { .. } | HirKind::Unsupported(_) => return None,
+                _ => {}
+            }
+        }
+        let ty = |t: &Option<Ty>| t.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t));
+        let mut out = body.clone();
+        for e in &mut out.exprs {
+            e.ty = ty(&e.ty);
+            e.node = None;
+        }
+        for l in &mut out.locals {
+            l.ty = ty(&l.ty);
+        }
+        out.ret = ty(&body.ret);
+        // An arm's call (`Some(f(v))`) inlines from a block's statements:
+        // each arm body that calls becomes a block's tail.
+        for i in 0..out.exprs.len() {
+            let HirKind::Match { arms, .. } = &out.exprs[i].kind else {
+                continue;
+            };
+            let calls: Vec<(usize, HirId)> = arms
+                .iter()
+                .enumerate()
+                .filter(|(_, a)| {
+                    !matches!(out.expr(a.body).kind, HirKind::Block { .. })
+                        && {
+                            let mut todo = vec![a.body];
+                            let mut hit = false;
+                            while let Some(c) = todo.pop() {
+                                hit |= matches!(out.expr(c).kind, HirKind::Call { .. });
+                                todo.extend(crate::hir::lower::children(&out, c));
+                            }
+                            hit
+                        }
+                })
+                .map(|(k, a)| (k, a.body))
+                .collect();
+            for (k, arm) in calls {
+                let id = HirId(out.exprs.len() as u32);
+                let mut block = out.expr(arm).clone();
+                block.kind = HirKind::Block { stmts: Vec::new(), tail: Some(arm) };
+                out.exprs.push(block);
+                if let HirKind::Match { arms, .. } = &mut out.exprs[i].kind {
+                    arms[k].body = id;
+                }
+            }
+        }
+        Some(out)
+    }
+
+    /// [`Self::hir_core_method_body`] `generic` at the types of the call
+    /// `call` in `hir`: its type parameters bound by its parameters' and
+    /// result's types against the call's.
+    fn hir_core_method_at(&self, generic: &HirBody, hir: &HirBody, call: HirId) -> Option<HirBody> {
+        use crate::typechecking::unify::unify_with;
+        let HirKind::Call { args, .. } = &hir.expr(call).kind else {
+            return None;
+        };
+        if args.len() != generic.params.len() {
+            return None;
+        }
+        let resolved = |t: &Option<Ty>| t.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t));
+        let mut subst = crate::typechecking::subst::Subst::empty();
+        let pairs = generic
+            .params
+            .iter()
+            .map(|&p| generic.local(p).ty.clone())
+            .zip(args.iter().map(|&a| resolved(&hir.expr(a).ty)))
+            .chain(std::iter::once((generic.ret.clone(), resolved(&hir.expr(call).ty))));
+        for (want, got) in pairs {
+            let (Some(want), Some(got)) = (want, got) else {
+                return None;
+            };
+            // A variant built for the call (`Option::Some(1)`) is its enum.
+            let got = match got {
+                Ty::Constructor { owner, .. } => *owner,
+                t => t,
+            };
+            subst = unify_with(&subst, &want, &got).ok()?;
+        }
+        let mut vars = HashSet::new();
+        for l in &generic.locals {
+            if let Some(t) = &l.ty {
+                vars.extend(crate::typechecking::subst::ftv(t));
+            }
+        }
+        let map: HashMap<_, _> = vars
+            .into_iter()
+            .map(|v| (v, apply_ty_prune(&subst, &Ty::Var(v))))
+            .collect();
+        // A closure parameter (`f: T -> U`) is closed once its parts are.
+        let mut inst = self.hir_instance(generic, &map);
+        let closed = |t: &Option<Ty>| t.as_ref().is_none_or(Self::closed_value_ty);
+        if !inst.locals.iter().all(|l| closed(&l.ty)) || !inst.exprs.iter().all(|e| closed(&e.ty)) || !closed(&inst.ret) {
+            return None;
+        }
+        inst.ret_layout = inst.ret.as_ref().map_or(crate::hir::layout::Layout::Word, |t| crate::hir::layout::of(&self.checker, t));
+        // Each value in its own layout at the instance's types, not the
+        // generic body's boxed one.
+        for e in &mut inst.exprs {
+            if let Some(t) = &e.ty {
+                e.layout = crate::hir::layout::of(&self.checker, t);
+            }
+        }
+        match crate::hir::inline::inlinable(&inst, usize::MAX) {
+            Err("return") => crate::hir::inline::single_exit(&inst),
+            _ => Some(inst),
+        }
+    }
+
     /// The body index of the function `key` names: an overload by its
     /// table key, any other by its name when that is unique.
     fn hir_fn_body(&self, key: &str) -> Option<usize> {
@@ -793,6 +995,14 @@ impl Compiler {
             }
             plan => plan,
         };
+        // Other modules splice core's `Option` / `Result` methods at their
+        // calls' types, as built (before this body's own rewrites).
+        if plan.is_ok()
+            && let Some(key) = hir.name.strip_prefix("core::")
+            && let Some(body) = self.hir_core_method_body(hir)
+        {
+            self.hir_core_methods.insert(key.to_string(), body);
+        }
         let hir = inlined.as_ref().unwrap_or(hir);
         // Another module may splice this body, as inlined here.
         if !self.namespace.is_empty()
@@ -1306,7 +1516,9 @@ impl Compiler {
                             // A two-word field's slot holds its box, as
                             // `new` stores it (`Rep::Word` of a boxed layout).
                             .or_else(|| {
-                                matches!(crate::hir::layout::of_resolved(checker, &apply_ty_prune(checker.subst(), t)), crate::hir::layout::Layout::Pair(_))
+                                // A class parameter's at the made type's arguments.
+                                let at = made.and_then(|m| self.hir_param_field_at(m, t)).unwrap_or_else(|| t.clone());
+                                matches!(crate::hir::layout::of_resolved(checker, &apply_ty_prune(checker.subst(), &at)), crate::hir::layout::Layout::Pair(_))
                                     .then_some(crate::mir::MirTy::HeapRef)
                             })
                             // Any other tuple is a heap tuple object (#1170).
@@ -1886,10 +2098,43 @@ impl Compiler {
                 }
             })
             .collect();
+        // Core prelude methods, as their generic body at the call's types.
+        let core_insts: HashMap<u32, crate::hir::HirBody> = emit
+            .plan
+            .calls
+            .iter()
+            .filter(|_| self.inline_cost.inline_across_modules)
+            .filter_map(|(&id, call)| {
+                let base = call.key.split("$inst$").next().unwrap_or(&call.key);
+                let generic = self.hir_core_methods.get(base)?;
+                Some((id, self.hir_core_method_at(generic, hir, HirId(id))?))
+            })
+            .collect();
+        // Calls of a local bound once to a lambda that captures nothing
+        // (`let f = fn (x) => ..; f(v)`, as an inlined `map(f)` leaves
+        // them), as the lambda's body.
+        let lambda_calls: HashMap<u32, crate::hir::HirBody> = hir
+            .exprs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| {
+                let HirKind::Call { callee: Callee::Value(v), .. } = &e.kind else {
+                    return None;
+                };
+                let HirKind::Local(l) = hir.expr(*v).kind else {
+                    return None;
+                };
+                Some((i as u32, self.hir_lambda_callee(module, hir, l)?))
+            })
+            .collect();
         let callee_for = |id: HirId| -> Result<(&crate::hir::HirBody, inline::Shape), String> {
+            if let Some(lambda) = lambda_calls.get(&id.0) {
+                return self.hir_lambda_shape(hir, id, lambda, budget).map(|shape| (lambda, shape));
+            }
             let Some(call) = emit.plan.calls.get(&id.0) else {
                 return Err("not-planned".to_string());
             };
+            let core = core_insts.get(&id.0);
             let kind = [
                 (call.builtin.is_some(), "builtin"),
                 (call.pair.is_some() && !self.hir_inline_pair, "pair"),
@@ -1897,15 +2142,17 @@ impl Compiler {
                 (call.generic.is_some(), "generic"),
                 (call.instance.as_ref().is_some_and(|i| i.args.iter().any(Self::ty_has_var)), "instance"),
                 (!call.own_dicts.is_empty(), "own-bounds"),
-                (!call.ranges.is_empty(), "ranges"),
+                (!call.ranges.is_empty() && !self.hir_inline_pair, "ranges"),
                 (self.coroutine_fns.contains(&call.key), "coroutine"),
                 // An auto-parallel callee's call runs its split worker.
                 (self.par_shapes.contains_key(Self::par_shape_key(&call.key)), "par"),
             ];
-            if let Some((_, what)) = kind.iter().find(|(hit, _)| *hit) {
+            if core.is_none()
+                && let Some((_, what)) = kind.iter().find(|(hit, _)| *hit)
+            {
                 return Err(format!("call-kind {what}"));
             }
-            let callee = match instances.get(&id.0) {
+            let callee = match core.or_else(|| instances.get(&id.0)) {
                 Some(inst) => inst,
                 None if call.instance.is_some() => {
                     let index = *module.instance_fns.get(&call.key).ok_or_else(|| format!("no instance body `{}`", call.key))?;
@@ -1959,7 +2206,7 @@ impl Compiler {
             if callee.name == hir.name
                 || callee.result_mode && !self.hir_inline_pair
                 || if call.instance.is_some() { shared(callee) } else { callee.name.contains(" for ") }
-                || home(callee) != here
+                || core.is_none() && home(callee) != here
                 || !matches!(callee.ret_layout, crate::hir::layout::Layout::Word)
                     && !callee.ret_layout.is_niche()
                     && !(self.hir_inline_pair && immediate_pair(&callee.ret_layout))
@@ -1993,7 +2240,8 @@ impl Compiler {
             if calls.iter().any(reaches_back) {
                 return Err("recursive".to_string());
             }
-            if callee.kind == BodyKind::Method
+            if core.is_none()
+                && callee.kind == BodyKind::Method
                 && let Some(owner) = callee.name.rsplit("::").nth(1)
                 && lower::is_generic_class(&self.checker, owner)
             {
@@ -2018,6 +2266,28 @@ impl Compiler {
                 .any(|t| Self::finalized(&self.checker, &apply_ty_prune(self.checker.subst(), t)))
             {
                 return Err("drop-value".to_string());
+            }
+            if Self::observes_liveness(callee) {
+                return Err("weak".to_string());
+            }
+            // A `match` keeps its operand (and an arm its bindings) in the
+            // caller's frame past the call, where an object in it would
+            // stay rooted until the frame slot is reused (#1625): keep the
+            // frame of a callee whose `match` holds one.
+            let holds = |t: &Option<Ty>| t.as_ref().is_none_or(|t| self.holds_object(t, 4));
+            let match_holds = callee.exprs.iter().any(|e| match &e.kind {
+                HirKind::Match { scrutinee, arms } => {
+                    holds(&callee.expr(*scrutinee).ty)
+                        || arms.iter().any(|a| {
+                            let mut hit = false;
+                            Self::hir_pat_locals(&a.pat, &mut |l| hit |= holds(&callee.local(l).ty));
+                            hit
+                        })
+                }
+                _ => false,
+            });
+            if match_holds {
+                return Err("match-holds-object".to_string());
             }
             // Spliced locals live on in the caller's frame, where a heap
             // value would stay reachable: those are cleared after the
@@ -2055,9 +2325,12 @@ impl Compiler {
                     return Err(format!("heap local `{}`", l.name));
                 }
             }
+            let inert = self.hir_loop_inert(callee, &heap);
             let shape = inline::inlinable(callee, budget)?
                 .with_heap_result(!scalar(&hir.expr(id).ty))
-                .with_heap_locals(heap);
+                .with_heap_locals(heap)
+                .with_loop_inert(inert)
+                .with_foreign(core.is_some());
             Ok((callee, shape))
         };
         let why = std::env::var_os("COIL_HIR_INLINE_WHY").is_some();
@@ -2082,10 +2355,25 @@ impl Compiler {
                 })
         };
         let opaque = |id: HirId| emit.plan.lens.contains_key(&id.0);
-        let (mut body, mut spliced) = inline::inline_calls(hir, callee_of, growth, true, opaque)?;
+        // A lambda local whose calls were all spliced is no longer built.
+        let lambdas: Vec<LocalId> = lambda_calls
+            .keys()
+            .filter_map(|&id| match &hir.expr(HirId(id)).kind {
+                HirKind::Call { callee: Callee::Value(v), .. } => match hir.expr(*v).kind {
+                    HirKind::Local(l) => Some(l),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        let unbuilt = |(mut b, s): (HirBody, Vec<_>)| {
+            Self::hir_drop_dead_lets(&mut b, &lambdas);
+            (b, s)
+        };
+        let (mut body, mut spliced) = inline::inline_calls(hir, callee_of, growth, true, opaque).map(unbuilt)?;
         // A call spliced in place may sit where its `let`s cannot lower:
         // then only the hoisted sites.
-        let hoisted = inline::inline_calls(hir, callee_of, growth, false, opaque);
+        let hoisted = inline::inline_calls(hir, callee_of, growth, false, opaque).map(unbuilt);
         let mut replanned = plan(self, &body);
         if replanned.is_err()
             && let Some((b, s)) = hoisted
@@ -2116,6 +2404,44 @@ impl Compiler {
                     eprintln!("hir inline refused `{}`: {reason}", hir.name);
                 }
                 None
+            }
+        }
+    }
+
+    /// Drop the `let` (and clears) of each of `locals` that `body` no
+    /// longer reads: a lambda whose every call was spliced.
+    fn hir_drop_dead_lets(body: &mut HirBody, locals: &[LocalId]) {
+        let Some(root) = body.root else {
+            return;
+        };
+        let mut read = HashSet::new();
+        let mut todo = vec![root];
+        while let Some(e) = todo.pop() {
+            match &body.expr(e).kind {
+                HirKind::Local(l) => {
+                    read.insert(*l);
+                }
+                // A clear and a `let` are not reads; a `let`'s init is.
+                HirKind::Clear(_) => continue,
+                _ => {}
+            }
+            todo.extend(crate::hir::lower::children(body, e));
+        }
+        for &l in locals {
+            if read.contains(&l) {
+                continue;
+            }
+            for e in &mut body.exprs {
+                match &mut e.kind {
+                    HirKind::Let { local, init: Some(_) } if *local == l => {
+                        e.kind = HirKind::Lit(Lit::Unit);
+                        e.ty = Some(crate::typechecking::ty::unit());
+                        e.layout = crate::hir::layout::Layout::Word;
+                        e.node = None;
+                    }
+                    HirKind::Clear(cleared) => cleared.retain(|&c| c != l),
+                    _ => {}
+                }
             }
         }
     }
@@ -6094,6 +6420,7 @@ impl Compiler {
             HirKind::If {
                 then, els: Some(els), ..
             } => self.hir_builds_pair(hir, emit, *then, kind) && self.hir_builds_pair(hir, emit, *els, kind),
+            HirKind::Match { arms, .. } => !arms.is_empty() && arms.iter().all(|a| self.hir_builds_pair(hir, emit, a.body, kind)),
             HirKind::Block { tail: Some(t), .. } => self.hir_builds_pair(hir, emit, *t, kind),
             HirKind::Call { .. } => emit.plan.calls.get(&e.0).and_then(|c| c.pair.as_ref()) == Some(kind),
             HirKind::Local(l) => emit.plan.pair_locals.get(&l.0) == Some(kind),
@@ -6161,6 +6488,90 @@ impl Compiler {
 
     /// Payload field types of `variant` in a value of type `ty`, in
     /// declaration order.
+    /// Whether a `ty` value can reach an object or aggregate (what a weak
+    /// reference or a finalizer observes), looking `depth` payloads deep.
+    fn holds_object(&self, ty: &Ty, depth: usize) -> bool {
+        let ty = apply_ty_prune(self.checker.subst(), ty);
+        match lower::classify(&self.checker, &ty) {
+            Some(ValueClass::Scalar | ValueClass::Unit | ValueClass::Opaque) => false,
+            Some(ValueClass::Enum) if depth > 0 => {
+                let head = match crate::typechecking::ty::strip_readonly(&ty) {
+                    Ty::Constructor { owner, .. } => match owner.as_ref() {
+                        Ty::App(h, _) => h.as_ref().clone(),
+                        o => o.clone(),
+                    },
+                    Ty::App(h, _) => h.as_ref().clone(),
+                    t => t.clone(),
+                };
+                let Ty::Con(name) = head else {
+                    return true;
+                };
+                let Some(variants) = self.checker.enum_variants(&name) else {
+                    return true;
+                };
+                variants.iter().any(|(v, _, _)| {
+                    Self::payload_tys_of(&self.checker, &ty, v).is_none_or(|ps| ps.iter().any(|p| self.holds_object(p, depth - 1)))
+                })
+            }
+            _ => true,
+        }
+    }
+
+    /// Whether `body` takes or upgrades a weak reference: what it observes
+    /// is whether its arguments are still reachable, which a call's frame
+    /// keeps them and a splice (its argument folded into the use) may not.
+    fn observes_liveness(body: &HirBody) -> bool {
+        body.exprs.iter().any(|e| {
+            matches!(&e.kind, HirKind::Call { callee: Callee::Named { name, .. }, .. }
+                if matches!(name.rsplit("::").next(), Some("weak" | "upgrade")))
+        })
+    }
+
+    /// Whether spliced `callee`'s heap locals `heap` may keep their last
+    /// value until rebound in a loop, as the loop's own locals do: each is
+    /// a string or a scalar (or an enum of those), which no finalizer
+    /// observes, and with no call in `callee` no weak reference to one is
+    /// taken there.
+    fn hir_loop_inert(&self, callee: &HirBody, heap: &[LocalId]) -> bool {
+        let inert = |t: &Option<Ty>| {
+            t.as_ref().is_some_and(|t| {
+                let t = apply_ty_prune(self.checker.subst(), t);
+                lower::primitive(&t) == Some("string") || !self.holds_object(&t, 0) || self.enum_of_strings(&t, 4)
+            })
+        };
+        !callee.exprs.iter().any(|e| matches!(e.kind, HirKind::Call { .. } | HirKind::Builtin { .. } | HirKind::Lambda { .. }))
+            && heap.iter().all(|&l| inert(&callee.local(l).ty))
+    }
+
+    /// An enum whose payloads are strings and scalars, `depth` deep.
+    fn enum_of_strings(&self, ty: &Ty, depth: usize) -> bool {
+        if depth == 0 || !matches!(lower::classify(&self.checker, ty), Some(ValueClass::Enum)) {
+            return false;
+        }
+        let head = match crate::typechecking::ty::strip_readonly(ty) {
+            Ty::Constructor { owner, .. } => match owner.as_ref() {
+                Ty::App(h, _) => h.as_ref().clone(),
+                o => o.clone(),
+            },
+            Ty::App(h, _) => h.as_ref().clone(),
+            t => t.clone(),
+        };
+        let Ty::Con(name) = head else {
+            return false;
+        };
+        let Some(variants) = self.checker.enum_variants(&name) else {
+            return false;
+        };
+        variants.iter().all(|(v, _, _)| {
+            Self::payload_tys_of(&self.checker, ty, v).is_some_and(|ps| {
+                ps.iter().all(|p| {
+                    let p = apply_ty_prune(self.checker.subst(), p);
+                    lower::primitive(&p) == Some("string") || !self.holds_object(&p, 0) || self.enum_of_strings(&p, depth - 1)
+                })
+            })
+        })
+    }
+
     fn hir_payload_tys(&self, ty: &Ty, variant: &str) -> Option<Vec<Ty>> {
         Self::payload_tys_of(&self.checker, &apply_ty_prune(self.checker.subst(), ty), variant)
     }

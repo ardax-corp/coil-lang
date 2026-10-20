@@ -213,8 +213,15 @@ fn rewrite(body: &mut HirBody, local: LocalId, fields: &[LocalId]) {
                     _ => {}
                 }
             }
+            // An inlined call's clear of the split local clears its elements.
             HirKind::Clear(xs) if xs.contains(&local) => {
-                body.exprs[i].kind = HirKind::Clear(xs.into_iter().filter(|&x| x != local).collect());
+                let mut out: Vec<LocalId> = xs.into_iter().filter(|&x| x != local).collect();
+                for &f in fields {
+                    if !out.contains(&f) {
+                        out.push(f);
+                    }
+                }
+                body.exprs[i].kind = HirKind::Clear(out);
             }
             _ => {}
         }

@@ -435,7 +435,7 @@ impl Compiler {
     }
 
     /// Each local `pat` binds.
-    fn hir_pat_locals(pat: &HirPat, f: &mut impl FnMut(LocalId)) {
+    pub(super) fn hir_pat_locals(pat: &HirPat, f: &mut impl FnMut(LocalId)) {
         match pat {
             HirPat::Bind(l) => f(*l),
             HirPat::Tuple(items) => items.iter().for_each(|p| Self::hir_pat_locals(p, f)),
