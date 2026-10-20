@@ -3825,6 +3825,10 @@ fn resident_kib() -> usize {
 mod compact;
 pub use compact::{AddrMap, EvacPlan, Evacuation};
 
+#[path = "snapshot.rs"]
+mod snapshot;
+pub use snapshot::{SnapRoot, SnapStep, SnapshotError};
+
 #[cfg(test)]
 mod tests {
     use super::*;
