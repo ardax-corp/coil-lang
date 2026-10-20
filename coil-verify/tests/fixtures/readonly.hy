@@ -82,6 +82,15 @@ fn box_after_note(Box b, Vec<int> out) -> int
     return b.n;
 }
 
+// A `readonly` view promises nothing: `b` may be `v`.
+fn view_after_reset(readonly Box v, Box b) -> int
+    requires v.n >= 0 && v.n < 1000
+    ensures result >= 0
+{
+    reset(b);
+    return v.n;
+}
+
 // The `items` slot never changes, but the vector it holds may be `out`.
 fn items_after_note(Buf b, Vec<int> out) -> int
     requires b.items.len() > 0

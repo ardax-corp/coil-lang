@@ -133,7 +133,7 @@ fn readonly_class_fields_survive_calls_and_loops() {
     }
     let (code, out) = run("readonly.hy", &[]);
     assert_eq!(code, 0, "{out}");
-    assert!(out.contains("5 proved, 0 failed, 3 not proved"), "{out}");
+    assert!(out.contains("5 proved, 0 failed, 4 not proved"), "{out}");
     // A field read only on one side of `&&` is still the same field after it.
     assert!(out.contains("proved   span: ensures result >= 0"), "{out}");
     assert!(out.contains("proved   width_after_note: ensures result >= 0"), "{out}");
@@ -143,13 +143,14 @@ fn readonly_class_fields_survive_calls_and_loops() {
 }
 
 #[test]
-fn plain_class_fields_and_readonly_class_vectors_are_forgotten_at_a_call() {
+fn plain_class_fields_readonly_views_and_held_vectors_are_forgotten_at_a_call() {
     if !solver_ready() {
         return;
     }
     let (_, out) = run("readonly.hy", &[]);
     assert!(out.contains("unknown  box_after_reset: ensures result >= 0"), "{out}");
     assert!(out.contains("unknown  box_after_note: ensures result >= 0"), "{out}");
+    assert!(out.contains("unknown  view_after_reset: ensures result >= 0"), "{out}");
     assert!(out.contains("unknown  items_after_note: ensures result > 0"), "{out}");
 }
 
