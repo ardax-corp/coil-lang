@@ -623,8 +623,17 @@ pub fn strip_readonly(ty: &Ty) -> &Ty {
     }
 }
 
+/// Whether `name` is a builtin opaque handle: an IO `Stream` or a
+/// `thread` handle. It has no fields, indices or `push` a write could go
+/// through; what it refers to changes only through its own host calls.
+pub fn is_opaque_handle(name: &str) -> bool {
+    [STREAM, THREAD, SENDER, RECEIVER, MUTEX, RWLOCK].contains(&name)
+}
+
 /// Whether a `const` binding should emit a shallow-immutability warning.
-/// A `readonly` value is frozen all the way down (#1552).
+/// A `readonly` value is frozen all the way down (#1552), and an opaque
+/// handle has nothing to mutate through (#1709). A GC `Root<T>` /
+/// `Weak<T>` handle warns as its target `T` does.
 pub fn is_shallow_const_mutable(ty: &Ty) -> bool {
     match ty {
         Ty::Readonly(_) => false,
@@ -636,8 +645,12 @@ pub fn is_shallow_const_mutable(ty: &Ty) -> bool {
                 && name != "bool"
                 && name != "byte"
                 && name != "unit"
+                && !is_opaque_handle(name)
         }
-        Ty::App(_, _) => true,
+        Ty::App(head, args) => match (head.as_ref(), args.as_slice()) {
+            (Ty::Con(n), [target]) if n == ROOT || n == WEAK => is_shallow_const_mutable(target),
+            _ => true,
+        },
         _ => false,
     }
 }
