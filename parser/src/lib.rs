@@ -560,6 +560,10 @@ impl<'pratt> Pratt<'pratt> {
                 keyword!("typeof")
                     .ignore_then(expr.clone())
                     .map_with(|inner, e| (e.span(), Box::new(Expression::TypeOf(inner)))),
+                // `comptime expr` — computed while compiling.
+                keyword!("comptime")
+                    .ignore_then(expr.clone())
+                    .map_with(|inner, e| (e.span(), Box::new(Expression::Comptime(inner)))),
                 // `(a, b, c)` — tuple atom. MUST come before
                 // `self.call(...)` (which expects a leading
                 // ident) AND before `self.ident()`.

@@ -258,6 +258,7 @@ impl SymbolIndex {
                 | Expression::YieldFrom(inner)
                 | Expression::Try(inner)
                 | Expression::TypeOf(inner)
+                | Expression::Comptime(inner)
                 | Expression::OptionalAccess(inner, _)
                 | Expression::Negate(inner)
                 | Expression::Not(inner)

@@ -794,6 +794,10 @@ impl<'s> Formatter<'s> {
                 self.push_str("typeof ");
                 self.fmt_output(inner);
             }
+            Expression::Comptime(inner) => {
+                self.push_str("comptime ");
+                self.fmt_output(inner);
+            }
 
             Expression::And(lhs, rhs) => self.fmt_logic_chain(expr, lhs, rhs, "&&"),
             Expression::Or(lhs, rhs) => self.fmt_logic_chain(expr, lhs, rhs, "||"),
