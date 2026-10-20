@@ -123,7 +123,65 @@ pub fn build_standard_host_natives(
         common::HOST_NATIVES.len(),
         "runtime host table length must match common::HOST_NATIVES"
     );
+    for native in &mut out {
+        if STREAM_FIRST_NATIVES.contains(&native.name()) {
+            *native = Arc::new(UnsentStreamGuard(Arc::clone(native)));
+        }
+    }
     out
+}
+
+/// Natives whose first argument is a `Stream`.
+const STREAM_FIRST_NATIVES: &[&str] = &[
+    "close",
+    "read",
+    "write",
+    "write_from",
+    "await_readable",
+    "await_writable",
+    "tcp_accept",
+    "tcp_peer_addr",
+    "tcp_local_addr",
+    "tcp_set_nodelay",
+    "tcp_shutdown",
+    "udp_send_to",
+    "udp_recv_from",
+    "udp_local_port",
+    STREAM_ATTACH_NATIVE,
+    STREAM_PARK_NATIVE,
+    STREAM_FD_NATIVE,
+];
+
+/// A stream native that panics when its stream is one a `thread::spawn`
+/// worker read from a static of its spawner but could not take, a file or
+/// socket (#1684): an `Err` there is easy to drop, and the write with it.
+struct UnsentStreamGuard(Arc<dyn NativeFn>);
+
+impl NativeFn for UnsentStreamGuard {
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+
+    fn signature(&self) -> &FfiSignature {
+        self.0.signature()
+    }
+
+    fn host_op(&self) -> HostOp {
+        self.0.host_op()
+    }
+
+    fn invoke(&self, heap: &mut crate::Heap, args: &[Value]) -> Result<Option<Value>, FfiError> {
+        if let Some(&stream) = args.first()
+            && crate::io::is_unsent_stream(heap, stream)
+        {
+            return Err(FfiError::Panic(format!(
+                "{}: {}",
+                self.0.name(),
+                crate::io::UNSENT_STREAM_PANIC
+            )));
+        }
+        self.0.invoke(heap, args)
+    }
 }
 
 pub use common::{
