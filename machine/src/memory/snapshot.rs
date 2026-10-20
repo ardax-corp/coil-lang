@@ -40,7 +40,7 @@ pub struct SnapshotError {
 
 /// A root to capture: the static slot it is stored to, its value, and the
 /// slot's word kind (`common::WORD_*`).
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct SnapRoot {
     pub slot: u32,
     pub value: Value,

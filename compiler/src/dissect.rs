@@ -305,6 +305,7 @@ fn format_operands(
             format!("tag={}", byte.operand_u32())
         }
         Instruction::TagEnumType => format!("type_id={}", byte.operand_u32()),
+        Instruction::RestoreSnapshot => format!("pool={}", byte.operand_u32()),
         Instruction::TagArrayKind => format!("kind={}", byte.operand_u32()),
         Instruction::MakeArrayK => format!("arity={} kind={}", byte.make_arity(), byte.operand_u32() >> 16),
         Instruction::CodePtr | Instruction::MakePolyFn => {

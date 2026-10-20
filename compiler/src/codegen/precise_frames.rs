@@ -227,7 +227,7 @@ pub(super) fn slot_extent(b: &Byte, constants: &[u64]) -> Option<usize> {
         | LoadField | ArrayPin | IndexPin | IndexPinUnchecked | StoreIndexPin
         | StoreIndexPinUnchecked | MakeFn | MakePolyFn | MakePolyFnCapture | MakeCoro
         | ResumeCoro | YieldCoro | YieldFromCoro | DoneCoro | LoadStatic | StoreStatic
-        | TagEnumType | TagArrayKind | MakeEnumK | MakeEnumReturnK | MakeTupleK => Some(0),
+        | TagEnumType | TagArrayKind | MakeEnumK | MakeEnumReturnK | MakeTupleK | RestoreSnapshot => Some(0),
         _ => None,
     }
 }
@@ -1258,6 +1258,8 @@ fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Opt
             st.pop()?;
         }
         LoadStatic => st.push(true)?,
+        // Writes statics only; no stack change and no safepoint.
+        RestoreSnapshot => {}
         // Bit ops build and strip the heap-heap niche tag (`Result::Err` is
         // `ptr | 1`, its payload `word ^ 1`), so their result may still name
         // an object when an operand did (#555). Every other op is a scalar.

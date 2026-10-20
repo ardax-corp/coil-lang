@@ -1487,6 +1487,28 @@ impl<const S: usize> Machine<S> {
                     self.stack.push(Value::from(object.addr()));
                     self.maybe_gc_after_alloc(ip);
                 }
+                Instruction::RestoreSnapshot => {
+                    let at = opcode.operand_u32() as usize;
+                    let snapshot = constants
+                        .get(at..)
+                        .ok_or(common::SnapshotDecodeError::Truncated)
+                        .and_then(common::HeapSnapshot::decode);
+                    let snapshot = match snapshot {
+                        Ok(s) if s.statics.iter().all(|(slot, _)| (*slot as usize) < self.statics.len()) => s,
+                        Ok(_) => {
+                            return dispatch::RestFlow::Done(
+                                self.runtime_panic("RestoreSnapshot: static slot out of range", ip.saturating_sub(1)),
+                            );
+                        }
+                        Err(e) => {
+                            let message = format!("RestoreSnapshot: {e}");
+                            return dispatch::RestFlow::Done(self.runtime_panic(&message, ip.saturating_sub(1)));
+                        }
+                    };
+                    for (slot, value) in self.heap.restore_snapshot(&snapshot) {
+                        self.statics[slot as usize] = value;
+                    }
+                }
                 Instruction::TagEnumType => {
                     // Payload variants only: unit variants are shared immortals.
                     let v = *self.stack.top();
