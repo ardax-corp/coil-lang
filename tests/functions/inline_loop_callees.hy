@@ -1,6 +1,6 @@
-// Callees with loops inline: a `break` / `continue` in a spliced loop
-// still names the callee's loop, a range local the callee binds stays two
-// numbers, and the callee's result is the loop's outcome.
+// Callees with short loops inline into a caller's loop: a `break` /
+// `continue` in a spliced loop still names the callee's loop, and the
+// callee's result is the loop's outcome. Long loops keep their call.
 use tests::assert;
 
 fn first_over(int n, int lim) -> int {
@@ -46,14 +46,20 @@ test("a break in an inlined loop leaves only that loop") {
     let total = 0;
     let k = 0;
     while k < 3 {
-        total = total + first_over(100, k * 10);
+        total = total + first_over(10, k * 10);
         k = k + 1;
     }
     assert!(total == 1 + 4 + 5);
 }
 
 test("a continue in an inlined for-in skips one step") {
-    assert!(sum_odd(10) == 25);
+    let t = 0;
+    let k = 0;
+    while k < 2 {
+        t = t + sum_odd(10);
+        k = k + 1;
+    }
+    assert!(t == 50);
     assert!(sum_odd(0) == 0);
 }
 

@@ -2759,6 +2759,8 @@ fn main() { sum(10); }
             std::fs::read_to_string(root.join("examples/perf/vec_scan.hy")).expect("read vec_scan");
         let mut pipeline = Pipeline::new();
         pipeline.bind_workspace_language_roots();
+        // `fill` and `scan` are called in a loop: inlined, their bodies go.
+        pipeline.set_inline_max_cost(0);
         let (bytecode, _) = pipeline.compile_src(&src).expect("compile vec_scan");
         let syms = pipeline.program_debug().fn_symbols;
         let end = bytecode.len();
@@ -2815,6 +2817,8 @@ fn main() { sum(10); }
             .unwrap();
         let mut pipeline = Pipeline::new();
         pipeline.bind_workspace_language_roots();
+        // `fill` is called in a loop: inlined, its body goes.
+        pipeline.set_inline_max_cost(0);
         let path = root.join("examples/perf/vec_scan.hy");
         let (bytecode, constants) = pipeline
             .compile_src_from_file(path.to_str().unwrap())
@@ -3442,6 +3446,8 @@ fn main() -> int {
 }
 "#;
         let mut pipeline = Pipeline::new();
+        // `at` is called in a loop: with inlining it would splice in.
+        pipeline.set_inline_max_cost(0);
         let (bytecode, _) = pipeline
             .compile_src(src)
             .expect("compile helper caller proof");

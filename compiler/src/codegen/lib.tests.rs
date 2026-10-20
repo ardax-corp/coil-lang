@@ -9191,9 +9191,21 @@ fn a_static_let_nothing_writes_reads_as_its_value() {
 
 #[test]
 fn a_small_callee_with_a_loop_inlines() {
-    // Its `while` (and the `break` in it) splice into `main` whole.
+    // Called in a loop with a short bound, its `while` (and the `break` in
+    // it) splice into `main` whole. (Called once, outside a loop, it keeps
+    // its call.)
     let src = "fn first_over(int n, int lim) -> int { let i = 0; while i < n { if i * i > lim { break; } i = i + 1; } return i; } \
-               fn main() { if first_over(100, 10) != 4 { panic \"first\"; } }";
+               fn main() { let t = 0; let k = 0; while k < 3 { t = t + first_over(10, k * 10); k = k + 1; } if t != 10 { panic \"first\"; } }";
     let calls = compile_fn_body(src, "main").iter().filter(|b| matches!(b.bytecode(), common::Instruction::CALL)).count();
     assert_eq!(calls, 0);
+}
+
+#[test]
+fn a_callee_with_a_long_loop_keeps_its_call() {
+    // A bound past `SHORT_TRIPS` (or not a literal) pays for the call many
+    // times over: the loop keeps its own body.
+    let src = "fn first_over(int n, int lim) -> int { let i = 0; while i < n { if i * i > lim { break; } i = i + 1; } return i; } \
+               fn main() { let t = 0; let k = 0; while k < 3 { t = t + first_over(100, k * 10); k = k + 1; } if t != 10 { panic \"first\"; } }";
+    let calls = compile_fn_body(src, "main").iter().filter(|b| matches!(b.bytecode(), common::Instruction::CALL)).count();
+    assert_eq!(calls, 1);
 }
