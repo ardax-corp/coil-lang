@@ -502,6 +502,10 @@ pub struct Checker {
     /// `const` class fields: class name → field names (immutable for everyone).
     const_class_fields: HashMap<String, HashSet<String>>,
 
+    /// `readonly class` keys: every instance is immutable after `new`, its
+    /// fields read `readonly` and `readonly C` is `C` (#1558).
+    readonly_classes: HashSet<String>,
+
     /// Owner class while typechecking an `impl` block (`self` exception for readonly).
     impl_owner: Option<String>,
 
