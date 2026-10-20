@@ -1577,10 +1577,12 @@ fn aot_p2_vec_scan_dispatch_regression() {
 }
 
 /// COI-99: `while i < v.len() { f(v[i]) }` with a non-inlined pure `f` hoists
-/// `v.len()` and rewrites the index. `absorb` must remain a CALL.
+/// `v.len()` and rewrites the index. `absorb` must remain a CALL, so this
+/// compiles with inlining off (its short loop inlines otherwise).
 #[test]
 fn aot_p2_vec_scan_pure_helper_hoists_and_unchecks() {
-    let (bc, pool, strings, statics, pipeline) = compile("examples/perf/vec_scan_pure.hy");
+    let (bc, pool, strings, statics, pipeline) =
+        compile_tuned("examples/perf/vec_scan_pure.hy", |p| p.set_inline_max_cost(0));
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "scan", bc.len());
     let (inner_start, inner_end) = innermost_loop_range(&bc, start, end);
@@ -1616,10 +1618,12 @@ fn aot_p2_vec_scan_pure_helper_hoists_and_unchecks() {
 }
 
 /// Impure helper that only writes a field: `v.len()` still hoists and `v[i]`
-/// still unchecks, like the pure helper above (length-stable calls).
+/// still unchecks, like the pure helper above (length-stable calls). Inlining
+/// is off so `absorb` stays a call.
 #[test]
 fn aot_p2_vec_scan_impure_field_helper_hoists_and_unchecks() {
-    let (bc, pool, strings, statics, pipeline) = compile("examples/perf/vec_scan_impure.hy");
+    let (bc, pool, strings, statics, pipeline) =
+        compile_tuned("examples/perf/vec_scan_impure.hy", |p| p.set_inline_max_cost(0));
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "scan", bc.len());
     let (inner_start, inner_end) = innermost_loop_range(&bc, start, end);
