@@ -38,7 +38,8 @@ impl CachedAst {
     pub fn parse(source: String) -> Self {
         let source = Pin::from(source.into_boxed_str());
         match Pratt::default().parse(&source) {
-            Ok(ast) => {
+            Ok(mut ast) => {
+                crate::const_fold::lift_startup_consts(&mut ast);
                 // SAFETY: `ast` borrows the pinned `Box<str>`. The pin is never
                 // moved out of this struct; `ast` is dropped first.
                 let ast = unsafe { extend_ast_lifetime(ast) };

@@ -3,7 +3,7 @@
 // (coil-lang#1271).
 use tests::assert;
 
-static const INT_MIN = 0 - 9223372036854775807 - 1;
+const INT_MIN = 0 - 9223372036854775807 - 1;
 
 trait Checked<S> {
     fn checked_div(S a, S b) -> Option<S> {}

@@ -185,6 +185,7 @@ impl Compiler {
         src: &'a str,
     ) -> Result<(SimpleSpan, Box<Expression<'a>>), reporting::Message> {
         let mut ast = parser::Pratt::default().parse(src)?;
+        crate::const_fold::lift_startup_consts(&mut ast);
         self.expand_and_check(module, &mut ast);
         Ok(ast)
     }
@@ -6830,7 +6831,7 @@ impl Compiler {
                                 span.into_range(),
                             );
                             m.push(DiagLabel::new(
-                                "use `static const` for a value computed at startup".to_string(),
+                                "not known at compile time".to_string(),
                                 rhs.0.into_range(),
                             ));
                             self.messages.push(m);

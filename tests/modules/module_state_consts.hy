@@ -1,5 +1,5 @@
 // #1207: another module's `const` reads imported or by path, and a
-// path-qualified `static const` reads like an imported one.
+// path-qualified `const` computed at startup reads like an imported one.
 use tests::assert;
 use mod_state::{LIMIT, GREETING, counter};
 
@@ -18,7 +18,7 @@ test("a const by its module path") {
     assert!(n + 1 == 11);
 }
 
-test("a static const by its module path") {
+test("a string const by its module path") {
     let s = mod_state::GREETING;
     assert!(s == "hello");
     assert!(GREETING == "hello");

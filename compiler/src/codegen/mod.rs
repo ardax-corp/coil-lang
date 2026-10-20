@@ -528,7 +528,7 @@ pub struct Compiler {
     /// Every module's module-level `const` values by `module::NAME`, kept
     /// across modules for importers (#1207).
     module_const_values: HashMap<String, ConstValue>,
-    /// Folded scalar initializers for module `static const` / `static` slots.
+    /// Folded scalar initializers for module `const` / `static` slots.
     static_const_values: HashMap<String, ConstValue>,
 
     /// Qualified name of the function currently being codegen'd (tail-call eligibility).

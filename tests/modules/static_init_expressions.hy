@@ -27,7 +27,7 @@ fn sum_to(int n) -> int {
     return s;
 }
 
-static const LIMIT: int = 12;
+const LIMIT: int = 12;
 
 static let scaled: int = LIMIT * 3 + square(4) - 1;
 

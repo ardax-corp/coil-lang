@@ -3,11 +3,16 @@
 
 const LIMIT = 10;
 
-static const GREETING = "hello";
+// Does not fold: set once at startup (#1558).
+const GREETING = greeting();
 
 static let counter: int = 0;
 
 static let names: Vec<string> = Vec::new();
+
+fn greeting() -> string {
+    return "hello";
+}
 
 fn bump() -> int {
     counter += 1;
