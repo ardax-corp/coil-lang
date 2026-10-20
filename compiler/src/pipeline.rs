@@ -129,6 +129,8 @@ pub struct Pipeline {
     debugger_attached: bool,
     /// Collect IL opt counters for `--opt-stats` (COI-131).
     collect_opt_stats: bool,
+    /// Off: no call is computed at compile time, whatever the level.
+    call_fold: bool,
     /// Built on first use. `coil run` never compiles, and `Compiler::default`
     /// (builtin typeclasses + Vec signatures) was ~28% of process startup.
     compiler: std::cell::OnceCell<Compiler>,
@@ -728,6 +730,7 @@ impl Pipeline {
             debug_level: None,
             debugger_attached: false,
             collect_opt_stats: false,
+            call_fold: true,
             compiler: std::cell::OnceCell::new(),
             pending_native_ids: Vec::new(),
             sink,
@@ -1688,7 +1691,9 @@ impl Pipeline {
     /// Compute every `const` and pure `static let` initializer on the
     /// compile-time VM and replace its startup call with the computed value
     /// (`RestoreSnapshot`). A const's failure is E0134 at the const; a
-    /// `static let` that fails keeps its startup initializer. Without a macro host (no VM linked)
+    /// `static let` that fails keeps its startup initializer. At `-O2` and
+    /// above, pure calls with constant arguments are computed too and
+    /// replaced with their values; one that fails stays a call. Without a macro host (no VM linked)
     /// consts keep their startup initializers. `entry_src` is the text of an
     /// in-memory entry, which has no file to read.
     fn compute_consts(&mut self, entry_src: Option<(&Path, &str)>) {
@@ -1698,7 +1703,8 @@ impl Pipeline {
             .into_iter()
             .filter(|c| c.entry.is_some())
             .collect();
-        if consts.is_empty() {
+        let sites = if self.call_fold && self.compiler_lazy().call_fold_on() { self.compiler_lazy().fold_sites() } else { Vec::new() };
+        if consts.is_empty() && sites.is_empty() {
             return;
         }
         let Some(host) = self.macro_host.clone() else {
@@ -1722,20 +1728,39 @@ impl Pipeline {
             operand_stack_slots: self.operand_stack_slots(),
             program_debug: self.program_debug(),
             class_word_kinds: self.class_word_kinds(),
+            static_word_kinds: std::sync::Arc::new(kinds.clone()),
         };
         let limits = self.host_grants.comptime;
-        match host.eval_consts(&program, &evals, &limits) {
+        // One evaluation per distinct call.
+        let mut folds: Vec<crate::macros::FoldCall> = Vec::new();
+        let mut index: HashMap<crate::macros::FoldCall, usize> = HashMap::new();
+        let site_calls: Vec<usize> = sites
+            .iter()
+            .map(|(_, _, call)| {
+                *index.entry(call.clone()).or_insert_with(|| {
+                    folds.push(call.clone());
+                    folds.len() - 1
+                })
+            })
+            .collect();
+        match host.eval_consts(&program, &evals, &folds, &limits) {
             Ok(outcome) => {
-                let sites: Vec<(u32, u32)> = evals
+                let folded: Vec<_> = sites
+                    .iter()
+                    .zip(&site_calls)
+                    .filter_map(|((pc, arity, _), &i)| Some((*pc, *arity, outcome.folded.get(i)?.clone()?)))
+                    .collect();
+                self.compiler_lazy_mut().apply_call_folds(&folded);
+                let const_sites: Vec<(u32, u32)> = evals
                     .iter()
                     .enumerate()
                     .filter(|(i, _)| !outcome.skipped.contains(i))
                     .map(|(_, e)| (e.entry, e.slot))
                     .collect();
-                if sites.is_empty() {
+                if const_sites.is_empty() {
                     return;
                 }
-                let applied = self.compiler_lazy_mut().apply_const_snapshot(&sites, &outcome.snapshot.encode());
+                let applied = self.compiler_lazy_mut().apply_const_snapshot(&const_sites, &outcome.snapshot.encode());
                 debug_assert!(applied, "const setup calls not found in the setup region");
             }
             Err(crate::macros::ConstEvalError::Failed { index, reason }) => {
@@ -2025,6 +2050,13 @@ impl Pipeline {
     }
 
     /// Select an IL optimization preset. Default is [`crate::OptLevel::Standard`].
+    /// Turn computing pure calls with constant arguments at compile time
+    /// off (or back on, at `-O2` and above). Tests of what such a call
+    /// compiles to turn it off.
+    pub fn set_call_fold(&mut self, on: bool) {
+        self.call_fold = on;
+    }
+
     pub fn set_opt_level(&mut self, level: crate::OptLevel) {
         self.opt_level = level;
         if self.compiler.get().is_some() {

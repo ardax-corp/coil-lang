@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use common::{Byte, Value};
 use compiler::ComptimeLimits;
-use compiler::macros::{CompiledExpansion, ConstEval, ConstEvalError, ConstEvalOutcome, MacroHost, native_allowed_at_compile_time};
+use compiler::macros::{CompiledExpansion, ConstEval, ConstEvalError, ConstEvalOutcome, FoldCall, FoldValue, MacroHost, native_allowed_at_compile_time};
 use machine::{FfiError, HostClosureFn, Machine, NativeFn, Object, SnapRoot};
 
 /// Runs macros in a sandboxed VM.
@@ -54,11 +54,14 @@ impl MacroHost for VmMacroHost {
         &self,
         program: &CompiledExpansion,
         consts: &[ConstEval],
+        folds: &[FoldCall],
         limits: &ComptimeLimits,
     ) -> Result<ConstEvalOutcome, ConstEvalError> {
         let captured = Captured::default();
         let outer = machine::io::set_output_redirect(None);
-        let result = eval_in(program, consts, limits, &captured);
+        let kinds = machine::swap_static_word_kinds(program.static_word_kinds.clone());
+        let result = eval_in(program, consts, folds, limits, &captured);
+        machine::swap_static_word_kinds(kinds);
         machine::io::set_output_redirect(outer);
         result
     }
@@ -83,11 +86,13 @@ fn snap_roots(vm: &Machine<256>, consts: &[ConstEval], done: &[usize]) -> Vec<Sn
 }
 
 /// Run each initializer and keep its value in its slot, then snapshot them
-/// all. A silent item that fails leaves the VM in an unknown state, so the
-/// values computed so far move to a new VM through a snapshot.
+/// all, then run the folds. A silent item or fold that fails leaves the VM
+/// in an unknown state, so the values computed so far move to a new VM
+/// through a snapshot.
 fn eval_in(
     program: &CompiledExpansion,
     consts: &[ConstEval],
+    folds: &[FoldCall],
     limits: &ComptimeLimits,
     captured: &Captured,
 ) -> Result<ConstEvalOutcome, ConstEvalError> {
@@ -139,10 +144,64 @@ fn eval_in(
             }
         }
     }
-    let snapshot = capture(&vm, consts, &mut done, &mut skipped);
-    let _ = vm.restore_output();
+    let snapshot = capture(&vm, consts, &mut done, &mut skipped)?;
     skipped.sort_unstable();
-    snapshot.map(|snapshot| ConstEvalOutcome { snapshot, skipped })
+    let mut folded = Vec::with_capacity(folds.len());
+    for f in folds {
+        if silent_left == 0 {
+            folded.push(None);
+            continue;
+        }
+        let item_limits = ComptimeLimits {
+            steps: ComptimeLimits::SILENT_CALL_STEPS.min(silent_left),
+            ..*limits
+        };
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let args: Vec<Value> = f
+                .args
+                .iter()
+                .map(|a| match a {
+                    FoldValue::Word(w) => Value::from(*w),
+                    FoldValue::Text(s) => {
+                        let s = vm.heap_mut().intern(s.clone());
+                        Value::from(s.as_ptr() as *mut u8 as u64)
+                    }
+                })
+                .collect();
+            let ret = call_limited(&mut vm, f.entry, &args, &item_limits)?;
+            if !f.text {
+                return Ok(FoldValue::Word(ret.raw() as u64));
+            }
+            match vm.heap().find_object_by_addr(ret.raw() as u64) {
+                Some(Object::String(s)) => Ok(FoldValue::Text(s.as_ref().data.to_string())),
+                _ => Err("it did not return a string".to_string()),
+            }
+        }));
+        silent_left = silent_left.saturating_sub(vm.steps_charged());
+        match outcome {
+            Ok(Ok(value)) => folded.push(Some(value)),
+            _ => {
+                folded.push(None);
+                let _ = vm.restore_output();
+                vm = restored_vm(program, &snapshot, captured);
+            }
+        }
+    }
+    let _ = vm.restore_output();
+    Ok(ConstEvalOutcome {
+        snapshot,
+        skipped,
+        folded,
+    })
+}
+
+/// A new VM whose statics hold `snapshot`'s values.
+fn restored_vm(program: &CompiledExpansion, snapshot: &common::HeapSnapshot, captured: &Captured) -> Box<Machine<256>> {
+    let mut vm = const_vm(program, captured);
+    for (slot, value) in vm.heap_mut().restore_snapshot(snapshot) {
+        vm.set_static(slot, value);
+    }
+    vm
 }
 
 /// Snapshot the `done` items' values; a silent item whose value has no
@@ -178,12 +237,7 @@ fn rebuild(
     let mut old = old;
     let _ = old.restore_output();
     drop(old);
-    let snapshot = snapshot?;
-    let mut vm = const_vm(program, captured);
-    for (slot, value) in vm.heap_mut().restore_snapshot(&snapshot) {
-        vm.set_static(slot, value);
-    }
-    Ok(vm)
+    Ok(restored_vm(program, &snapshot?, captured))
 }
 
 /// The failure text: the VM's own reason, else what the call printed.
@@ -287,12 +341,14 @@ fn run_entry(program: &CompiledExpansion, entry: u32, input: &str, limits: &Comp
     // `with_output` installs a thread-local redirect pointing into the VM;
     // put the caller's back before the VM is dropped.
     let outer = machine::io::set_output_redirect(None);
+    let kinds = machine::swap_static_word_kinds(program.static_word_kinds.clone());
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _ = vm.with_output(captured.clone());
         let result = call_entry(&mut vm, entry, input, limits);
         let _ = vm.restore_output();
         result
     }));
+    machine::swap_static_word_kinds(kinds);
     machine::io::set_output_redirect(outer);
     // Only a call that returned leaves the VM between frames; any other
     // outcome drops it.

@@ -355,6 +355,8 @@ pub struct CompiledExpansion {
     /// Per-class field word kinds, so captured instances know which fields
     /// are scalars.
     pub class_word_kinds: Vec<common::ClassWordKinds>,
+    /// Word kind of each static slot (`common::WORD_*`).
+    pub static_word_kinds: std::sync::Arc<Vec<u8>>,
 }
 
 /// Runs a compiled expansion program. Implemented by the `comptime` crate on
@@ -378,12 +380,33 @@ pub trait MacroHost: Send + Sync {
     /// ([`crate::ComptimeLimits::SILENT_CALL_STEPS`] each,
     /// [`crate::ComptimeLimits::SILENT_MODULE_STEPS`] for all of them) and,
     /// when it fails, is left out instead of failing the rest.
+    ///
+    /// Then, on the same VM (so a call can read the consts), each of
+    /// `folds` runs within the silent tier; one that fails is `None`.
     fn eval_consts(
         &self,
         program: &CompiledExpansion,
         consts: &[ConstEval],
+        folds: &[FoldCall],
         limits: &crate::ComptimeLimits,
     ) -> Result<ConstEvalOutcome, ConstEvalError>;
+}
+
+/// A word or a string: an argument or result of a call folded at compile
+/// time.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum FoldValue {
+    Word(u64),
+    Text(String),
+}
+
+/// A pure call with constant arguments to compute at compile time: its
+/// callee's entry, the arguments, and whether it returns a `string`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FoldCall {
+    pub entry: u32,
+    pub args: Vec<FoldValue>,
+    pub text: bool,
 }
 
 /// A value to compute at compile time: the entry of its initializer
@@ -398,12 +421,14 @@ pub struct ConstEval {
     pub silent: bool,
 }
 
-/// The computed values, and the silent items left out (indices into the
-/// request), which keep their startup initializers.
+/// The computed values, the silent items left out (indices into the
+/// request), which keep their startup initializers, and each fold's
+/// result.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ConstEvalOutcome {
     pub snapshot: common::HeapSnapshot,
     pub skipped: Vec<usize>,
+    pub folded: Vec<Option<FoldValue>>,
 }
 
 /// Why [`MacroHost::eval_consts`] gave no snapshot.
@@ -434,7 +459,7 @@ pub fn default_host() -> Option<std::sync::Arc<dyn MacroHost>> {
 pub fn native_allowed_at_compile_time(name: &str) -> bool {
     matches!(
         name,
-        "from_bytes" | "to_bytes" | "ord" | "char" | "hash_string" | "result_unit_probe" | "simd_axpy_reduce"
+        "from_bytes" | "to_bytes" | "ord" | "char" | "hash_string" | "result_unit_probe" | "simd_axpy_reduce" | "black_box"
     ) || ["math_", "vec_", "packed_", "gc_", "string_"]
         .iter()
         .any(|p| name.starts_with(p))

@@ -393,6 +393,40 @@ while compiling, on the same host (`MacroHost::eval_consts`):
   the values computed so far move to a fresh VM through a snapshot. The
   restored value is an ordinary heap object, so the static stays mutable.
 
+## Compile-time calls
+
+At `-O2` and above (`OptimizeOptions::call_fold`; `COIL_CALL_FOLD=0` or
+`Pipeline::set_call_fold(false)` turns it off) a pure call with constant
+arguments is computed while compiling, in the same `eval_consts` run as
+the consts (so the call can read them):
+
+- Candidates are functions whose HIR summary is pure (as for consts), not
+  generic, a coroutine, a closure or in result mode, returning `int`,
+  `float`, `bool`, `byte` or `string` (`Compiler::fold_bodies`, by bind
+  name in `fold_fns`).
+- After finalize, `Compiler::fold_sites` finds each one-word-result `CALL`
+  to a candidate whose arguments are the `CONST` / `STRING` words right
+  before it, with no branch landing among them
+  (`common::jump_targets`): on every path those words are its arguments.
+  A call to an auto-par worker computes the function it runs, without the
+  worker's depth argument.
+- Each distinct call runs once on the compile-time VM within the silent
+  tier (sharing its 20M-step pool with the silent static lets). One that
+  panics, runs out or returns a non-string where a string is expected
+  stays a call.
+- `apply_call_folds` turns the argument words into `NOOP`s and the `CALL`
+  into a `CONST` (a negative or wide word from the pool) or `STRING`, then
+  builds the precise frame maps again.
+- A program with any `fn drop()` folds no call and no silent static let:
+  their temporaries would finalize at compile time instead of when the
+  program runs.
+- The fold happens after the HIR / MIR passes, so a folded value does not
+  propagate further (`if is_even(4)` keeps its branch).
+
+`black_box(x)` (prelude, HostInvoke 162 with the `HOST` effect) returns `x`
+through a call the optimizer cannot see into; benchmarks use it to keep a
+call from being computed while compiling.
+
 ## Not yet
 
 - `comptime` expressions and blocks (stage 4 of the macro design) are not

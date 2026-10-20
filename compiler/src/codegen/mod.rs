@@ -376,6 +376,9 @@ pub struct Compiler {
     /// ([`Compiler::fn_is_heap_free`]); finalize binds them to precise maps.
     precise_frame_fns: HashSet<String>,
     precise_frames: Vec<common::PreciseFrameMap>,
+    /// What finalize built [`Self::precise_frames`] from besides the code,
+    /// to build them again after a compile-time patch of the code.
+    frame_inputs: Option<Box<FrameInputs>>,
 
     /// Native call-stack depth of [`Compiler::do_compile`]'s recursion,
     /// guarded against a fixed limit, see the analogous `infer_depth` on
@@ -404,6 +407,14 @@ pub struct Compiler {
     /// This module's `static let`s with pure initializers (HIR body names
     /// without `$init`), which are computed silently at compile time.
     pure_static_inits: HashSet<String>,
+    /// This module's functions whose calls with constant arguments may be
+    /// computed at compile time (HIR body name → returns a `string`).
+    fold_bodies: HashMap<String, bool>,
+    /// Every module's such functions, by bind name.
+    fold_fns: HashMap<String, bool>,
+    /// Auto-par worker → the function it computes (`__coil_par_fib` →
+    /// `fib`).
+    par_worker_of: HashMap<String, String>,
 
     /// `extern` dlopen/declare setup accumulated across modules, spliced into
     /// the prologue setup region at finalize (so imported-module `extern`
@@ -749,6 +760,7 @@ impl Default for Compiler {
             expr_depth: 0,
             precise_frame_fns: HashSet::new(),
             precise_frames: Vec::new(),
+            frame_inputs: None,
             codegen_depth: 0,
             loop_stack: Vec::new(),
             loop_bbs: Vec::new(),
@@ -798,6 +810,9 @@ impl Default for Compiler {
             static_init: CodeBuf::new(),
             comptime_consts: Vec::new(),
             pure_static_inits: HashSet::new(),
+            fold_bodies: HashMap::new(),
+            fold_fns: HashMap::new(),
+            par_worker_of: HashMap::new(),
             ffi_init: CodeBuf::new(),
             current_source_file: None,
             source_file_indices: std::collections::BTreeMap::new(),
@@ -1009,6 +1024,16 @@ pub(crate) struct GatedHostCall {
     pub caps: common::Caps,
     /// The native's name (`open`, `env_exec`).
     pub native: &'static str,
+}
+
+/// The inputs of [`precise_frames::bind_precise_frames`] other than the
+/// code and the constant pool.
+struct FrameInputs {
+    needs_extent: HashSet<String>,
+    match_arities: HashMap<u32, u32>,
+    entries: Vec<(String, u32)>,
+    entry_sps: HashMap<String, u32>,
+    fn_kinds: HashMap<String, precise_frames::FnWordKinds>,
 }
 
 /// A `const` (or, `silent`, a pure `static let`) computed at compile time:

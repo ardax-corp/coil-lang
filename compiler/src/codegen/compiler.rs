@@ -3759,6 +3759,7 @@ impl Compiler {
             c.bind_function_entry(bind);
         });
         if lowered {
+            self.par_worker_of.insert(worker_name.clone(), table_key.to_string());
             let body_end = self.bytecode.len();
             self.record_fn_span(worker_name.clone(), body_start, body_end);
             let entry = self.fn_entry_labels.get(&worker_name).copied();
@@ -7514,6 +7515,7 @@ impl Compiler {
         self.steady_fns = self.typed_sidecar.length_stability().fns.clone();
         self.alloc_steady = self.typed_sidecar.length_stability().alloc_stable;
         self.pure_static_inits.clear();
+        self.fold_bodies.clear();
         // E1: the HIR summaries also prove functions pure that call a
         // function parameter only with pure functions (`map(xs, fn ...)`).
         if let Some(hir) = self.hir_module.as_ref() {
@@ -7531,6 +7533,7 @@ impl Compiler {
             }
             self.messages.extend(const_effect_messages(&self.checker, hir, &fx));
             self.pure_static_inits = pure_static_inits(&self.checker, hir, &fx);
+            self.fold_bodies = fold_bodies(hir, &fx);
             let mutations = fx.mutations();
             let summaries = fx.summaries;
             self.pure_fns.extend(pure);
@@ -7579,6 +7582,12 @@ impl Compiler {
 
         let mut program = self.do_compile(ast);
         self.namespace = ns.to_string();
+        for (name, text) in std::mem::take(&mut self.fold_bodies) {
+            let qualified = self.qualify_static_fqn(&name);
+            if let Some(key) = [name, qualified].into_iter().find(|k| self.functions.contains_key(k)) {
+                self.fold_fns.insert(key, text);
+            }
+        }
 
         self.messages.extend(self.checker.take_messages());
 
@@ -8307,17 +8316,14 @@ impl Compiler {
             }
         }
         let fn_kinds = self.fn_word_kinds(&entries, &entry_sps);
-        self.precise_frames = super::precise_frames::bind_precise_frames(
-            &self.precise_frame_fns,
-            &lowered.needs_frame_extent,
-            self.bytecode.as_slice(),
-            &self.constants,
-            &lowered.match_arities,
-            &entries,
-            &entry_sps,
-            self.prologue_jmp_target(),
-            &fn_kinds,
-        );
+        self.frame_inputs = Some(Box::new(super::FrameInputs {
+            needs_extent: lowered.needs_frame_extent.clone(),
+            match_arities: lowered.match_arities.clone(),
+            entries,
+            entry_sps,
+            fn_kinds,
+        }));
+        self.bind_precise_frames();
 
         let dense_seek = self
             .bytecode
@@ -8497,10 +8503,14 @@ impl Compiler {
     }
 
     /// `const`s to compute at compile time, in setup order, with their
-    /// initializer entries. Call after finalize.
+    /// initializer entries. Call after finalize. A program with a `fn
+    /// drop()` computes no silent item: one dropped at compile time would
+    /// not run its finalizer when the program runs.
     pub fn comptime_consts(&self) -> Vec<super::ComptimeConst> {
+        let drops = self.checker.any_drop();
         self.comptime_consts
             .iter()
+            .filter(|c| !(c.silent && drops))
             .map(|c| super::ComptimeConst {
                 entry: self
                     .function_offset(&format!("{STATIC_INIT_FN_PREFIX}{}", c.fqn))
@@ -8508,6 +8518,125 @@ impl Compiler {
                 ..c.clone()
             })
             .collect()
+    }
+
+    /// Build [`Self::precise_frames`] from the finalized code: at finalize,
+    /// and again after a compile-time patch changes what a frame holds.
+    fn bind_precise_frames(&mut self) {
+        let Some(inputs) = self.frame_inputs.as_ref() else {
+            return;
+        };
+        self.precise_frames = super::precise_frames::bind_precise_frames(
+            &self.precise_frame_fns,
+            &inputs.needs_extent,
+            self.bytecode.as_slice(),
+            &self.constants,
+            &inputs.match_arities,
+            &inputs.entries,
+            &inputs.entry_sps,
+            self.prologue_jmp_target(),
+            &inputs.fn_kinds,
+        );
+    }
+
+    /// Whether [`Self::fold_sites`] are computed at this level.
+    pub fn call_fold_on(&self) -> bool {
+        self.opt_options.call_fold && !self.debugger_attached && std::env::var_os("COIL_CALL_FOLD").is_none_or(|v| v != "0")
+    }
+
+    /// Pure calls with constant arguments in the finalized code, as
+    /// `(pc of the CALL, its arity, the call)`: a `CALL` to a function
+    /// [`Self::fold_fns`] lists, one word back, whose arguments are the
+    /// `CONST` / `STRING` words right before it with no branch landing
+    /// among them (so they are its arguments on every path). A call to an
+    /// auto-par worker computes the function it runs (its last argument is
+    /// the worker's depth).
+    pub fn fold_sites(&self) -> Vec<(usize, usize, crate::macros::FoldCall)> {
+        use crate::macros::{FoldCall, FoldValue};
+        // A call computed at compile time drops its values there, so a
+        // program with a `fn drop()` would miss those finalizers.
+        if self.fold_fns.is_empty() || self.checker.any_drop() {
+            return Vec::new();
+        }
+        let mut entries: HashMap<usize, (usize, bool, bool)> = HashMap::new();
+        for (name, &text) in &self.fold_fns {
+            if let Some(entry) = self.function_offset(name) {
+                entries.insert(entry, (entry, text, false));
+            }
+        }
+        for (worker, func) in &self.par_worker_of {
+            if let (Some(w), Some(&text)) = (self.function_offset(worker), self.fold_fns.get(func))
+                && let Some(entry) = self.function_offset(func)
+            {
+                entries.insert(w, (entry, text, true));
+            }
+        }
+        let code = self.bytecode.as_slice();
+        let Some(targets) = common::jump_targets(code, &self.constants) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (pc, b) in code.iter().enumerate() {
+            if *b.bytecode() != Instruction::CALL || b.call_ret_words() != 1 {
+                continue;
+            }
+            let (arity, target) = b.call_parts();
+            let Some(&(entry, text, worker)) = entries.get(&target) else {
+                continue;
+            };
+            if arity > pc || (worker && arity == 0) || targets[pc + 1 - arity..=pc].iter().any(|&t| t) {
+                continue;
+            }
+            let args: Option<Vec<FoldValue>> = code[pc - arity..pc]
+                .iter()
+                .map(|w| match *w.bytecode() {
+                    Instruction::CONST => Some(FoldValue::Word(w.constant(&self.constants))),
+                    Instruction::STRING => self.strings.get(w.operand_u32() as usize).cloned().map(FoldValue::Text),
+                    _ => None,
+                })
+                .collect();
+            let Some(mut args) = args else { continue };
+            if worker {
+                args.pop();
+            }
+            out.push((pc, arity, FoldCall { entry: entry as u32, args, text }));
+        }
+        out
+    }
+
+    /// Replace each folded call (`(pc of the CALL, arity, value)`, from
+    /// [`Self::fold_sites`]) with its value: its argument words become
+    /// `NOOP`s and the `CALL` a `CONST` or `STRING`.
+    pub fn apply_call_folds(&mut self, folds: &[(usize, usize, crate::macros::FoldValue)]) {
+        use crate::macros::FoldValue;
+        let mut words = Vec::with_capacity(folds.len());
+        for (_, _, value) in folds {
+            let word = match value {
+                // An inline operand is non-negative: its top bit is the
+                // pool flag.
+                FoldValue::Word(w) => match i32::try_from(*w as i64) {
+                    Ok(small) if small >= 0 => Byte::new(Instruction::CONST).with_const_inline(small),
+                    _ => {
+                        self.constants.push(*w);
+                        Byte::new(Instruction::CONST).with_const_pool(self.constants.len() as u32 - 1)
+                    }
+                },
+                FoldValue::Text(s) => Byte::new(Instruction::STRING).with_operand_u32(self.intern_string(s)),
+            };
+            words.push(word);
+        }
+        let Some(code) = self.bytecode.lowered_mut() else {
+            return;
+        };
+        for ((pc, arity, _), word) in folds.iter().zip(words) {
+            for w in &mut code[pc - arity..*pc] {
+                *w = Byte::new(Instruction::NOOP);
+            }
+            code[*pc] = word;
+        }
+        // A folded `CALL` is no longer a safepoint, and its value is no
+        // call result.
+        self.bind_precise_frames();
     }
 
     /// Replace the setup region's `CALL init; StoreStatic slot` for each of
@@ -8571,6 +8700,33 @@ fn const_effect_messages(checker: &crate::typechecking::infer::Checker, hir: &cr
         out.push(msg);
     }
     out
+}
+
+/// Functions whose calls with constant arguments may be computed at compile
+/// time (comptime step 4): pure, not generic, a coroutine or a closure, and
+/// returning one word (`int`, `float`, `bool`, `byte`) or a `string` (→
+/// `true`), by HIR name.
+fn fold_bodies(hir: &crate::hir::HirModule, fx: &crate::hir::effects::ModuleEffects) -> HashMap<String, bool> {
+    use crate::typechecking::ty::{BOOL, BYTE, FLOAT, INT, STRING};
+    hir.bodies
+        .iter()
+        .zip(&fx.summaries)
+        .filter(|(body, s)| {
+            body.kind == crate::hir::BodyKind::Function
+                && !body.is_generic
+                && !body.is_coro
+                && !body.result_mode
+                && body.captures.is_empty()
+                && body.name != "main"
+                && s.visible.is_pure()
+                && s.latent == 0
+        })
+        .filter_map(|(body, _)| match body.ret.as_ref().map(crate::typechecking::ty::strip_readonly) {
+            Some(Ty::Con(n)) if [INT, FLOAT, BOOL, BYTE].contains(&n.as_str()) => Some((body.name.clone(), false)),
+            Some(Ty::Con(n)) if n == STRING => Some((body.name.clone(), true)),
+            _ => None,
+        })
+        .collect()
 }
 
 /// `static let`s whose initializer is pure, by HIR name: computed at

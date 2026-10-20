@@ -4492,7 +4492,7 @@ impl Compiler {
                 PreludeFn::Dot | PreludeFn::MatMul | PreludeFn::Cross | PreludeFn::Intersect | PreludeFn::Diff => {
                     Ok(HirBuiltin::LinAlg)
                 }
-                PreludeFn::Ord | PreludeFn::Char => host(Some(kind.as_str())),
+                PreludeFn::Ord | PreludeFn::Char | PreludeFn::BlackBox => host(Some(kind.as_str())),
                 _ => match kind.math_native_name() {
                     Some(native) => host(Some(native)),
                     None => Err("callee-builtin"),

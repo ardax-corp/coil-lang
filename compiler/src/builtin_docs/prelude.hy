@@ -473,3 +473,27 @@ fn ord(string s) -> Result<byte, string> {}
 /// assert!(s == "B");
 /// ```
 fn char(byte b) -> Result<string, string> {}
+
+/// Returns `x` unchanged, through a call the optimizer cannot see into.
+///
+/// Use it in benchmarks: at `-O2` and above a pure function called with
+/// constant arguments is computed while compiling, so `fib(30)` would time
+/// nothing. `fib(black_box(30))` runs the call. A function that calls
+/// `black_box` counts as reading host state, so it is never computed at
+/// compile time, hoisted out of a loop or run in parallel automatically.
+/// It takes a value of one word: not a tuple or a two-word `Result`.
+///
+/// # Examples
+///
+/// ```
+/// # use tests::assert;
+/// fn sq(int x) -> int {
+///     return x * x;
+/// }
+///
+/// fn main() {
+///     assert!(sq(black_box(7)) == 49);
+///     assert!(black_box("same") == "same");
+/// }
+/// ```
+fn black_box<T>(T x) -> T {}
