@@ -452,7 +452,8 @@ trait Integral<T: Num + Shl + Shr + BitAnd + BitOr + BitXor + BitNot> {
 ///
 /// `a == b` calls `eq(a, b)` and `a != b` calls `ne(a, b)` on a type with an
 /// `Eq` instance. The primitives have builtin instances (strings compare by
-/// content). Arrays and tuples compare structurally. Classes, enums and
+/// content). Arrays, `Vec`s and tuples compare structurally, and an element
+/// with an `Eq` instance (a class's too) compares with it. Classes, enums and
 /// records without an instance compare by identity. `#[derive(Eq)]`
 /// generates a field-by-field instance.
 ///
