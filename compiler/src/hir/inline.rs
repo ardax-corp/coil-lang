@@ -85,7 +85,7 @@ const CALL_COST: usize = 25;
 
 /// Whether `callee` can be inlined within `budget`, and how.
 pub fn inlinable(callee: &HirBody, budget: usize) -> Result<Shape, &'static str> {
-    if !matches!(callee.kind, BodyKind::Function | BodyKind::Method) {
+    if !matches!(callee.kind, BodyKind::Function | BodyKind::Method | BodyKind::Lambda) {
         return Err("kind");
     }
     // A Result-mode body's returns are explicit `Ok` / `Err` values.
@@ -531,10 +531,10 @@ impl Inliner<'_> {
         match &b.expr(e).kind {
             HirKind::Lit(_) | HirKind::Local(_) => Ok(()),
             HirKind::Call { .. } if (self.opaque)(e) => Err(()),
-            HirKind::Call {
-                callee: Callee::Named { .. } | Callee::Method { .. },
-                args,
-            } => {
+            HirKind::Call { callee, args }
+                if matches!(callee, Callee::Named { .. } | Callee::Method { .. })
+                    || matches!(callee, Callee::Value(v) if matches!(b.expr(*v).kind, HirKind::Local(_))) =>
+            {
                 // A call's own arguments are bound in order ahead of the
                 // spliced body, so they need not be pure; only a nested
                 // call past an impure argument cannot move.
@@ -600,10 +600,10 @@ impl Inliner<'_> {
         let scalar = |e: HirId| b.expr(e).ty.as_ref().and_then(super::lower::primitive).is_some();
         let at = |x: HirId, zero: bool| self.in_place_site(x, callee_of, zero);
         match &b.expr(s).kind {
-            HirKind::Call {
-                callee: Callee::Named { .. } | Callee::Method { .. },
-                args,
-            } if (s.0 as usize) < self.original
+            HirKind::Call { callee, args }
+                if (matches!(callee, Callee::Named { .. } | Callee::Method { .. })
+                    || matches!(callee, Callee::Value(v) if matches!(b.expr(*v).kind, HirKind::Local(_))))
+                    && (s.0 as usize) < self.original
                 && let Some((callee, shape)) = callee_of(s)
                 && callee.params.len() == args.len()
                 && (zero || self.expression_only(callee, &shape, args)) =>

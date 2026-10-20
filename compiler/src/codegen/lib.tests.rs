@@ -6490,7 +6490,7 @@ fn main() {
 #[test]
 fn lambda_named_fn_call_emits_call_with_empty_captures() {
     use common::Instruction;
-    let (bc, _) = compile_src(
+    let (bc, _) = compile_src_no_inline(
         r#"
 fn rec(int n) -> int { return n + 1; }
 fn main() {
