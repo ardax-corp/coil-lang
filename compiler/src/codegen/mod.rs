@@ -685,6 +685,10 @@ pub struct Compiler {
     /// with their calls named by key: callees another module's typed
     /// inlining may splice ([`Compiler::hir_portable_body`]).
     hir_portable: HashMap<String, crate::hir::HirBody>,
+    /// The core prelude's `Option` / `Result` method bodies, generic, as
+    /// another module's inliner instantiates them at a call's types
+    /// ([`Compiler::hir_core_method_body`]).
+    hir_core_methods: HashMap<String, crate::hir::HirBody>,
 }
 
 impl Default for Compiler {
@@ -853,6 +857,7 @@ impl Default for Compiler {
             ),
             hir_fn_names: HashMap::new(),
             hir_portable: HashMap::new(),
+            hir_core_methods: HashMap::new(),
         }
     }
 }

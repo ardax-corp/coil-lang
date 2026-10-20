@@ -543,6 +543,99 @@ impl Compiler {
         Some((key, out))
     }
 
+    /// A core `Option` / `Result` method as other modules splice it: its
+    /// types resolved (type parameters left open, for
+    /// [`Self::hir_core_method_at`]), no span-keyed node, and no call but
+    /// one through a parameter (`f(x)`).
+    fn hir_core_method_body(&self, body: &HirBody) -> Option<HirBody> {
+        use crate::hir::BodyKind;
+        if body.kind != BodyKind::Method || body.is_coro || !body.captures.is_empty() || body.result_mode {
+            return None;
+        }
+        if !matches!(body.name.strip_prefix("core::")?.split_once("::")?.0, "Option" | "Result") {
+            return None;
+        }
+        for e in &body.exprs {
+            match &e.kind {
+                HirKind::Call { callee: Callee::Value(v), .. }
+                    if matches!(body.expr(*v).kind, HirKind::Local(l) if body.params.contains(&l)) => {}
+                HirKind::Call { .. } | HirKind::Builtin { .. } | HirKind::Lambda { .. } | HirKind::Unsupported(_) => return None,
+                _ => {}
+            }
+        }
+        let ty = |t: &Option<Ty>| t.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t));
+        let mut out = body.clone();
+        for e in &mut out.exprs {
+            e.ty = ty(&e.ty);
+            e.node = None;
+        }
+        for l in &mut out.locals {
+            l.ty = ty(&l.ty);
+        }
+        out.ret = ty(&body.ret);
+        Some(out)
+    }
+
+    /// [`Self::hir_core_method_body`] `generic` at the types of the call
+    /// `call` in `hir`: its type parameters bound by its parameters' and
+    /// result's types against the call's.
+    fn hir_core_method_at(&self, generic: &HirBody, hir: &HirBody, call: HirId) -> Option<HirBody> {
+        use crate::typechecking::unify::unify_with;
+        let HirKind::Call { args, .. } = &hir.expr(call).kind else {
+            return None;
+        };
+        if args.len() != generic.params.len() {
+            return None;
+        }
+        let resolved = |t: &Option<Ty>| t.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t));
+        let mut subst = crate::typechecking::subst::Subst::empty();
+        let pairs = generic
+            .params
+            .iter()
+            .map(|&p| generic.local(p).ty.clone())
+            .zip(args.iter().map(|&a| resolved(&hir.expr(a).ty)))
+            .chain(std::iter::once((generic.ret.clone(), resolved(&hir.expr(call).ty))));
+        for (want, got) in pairs {
+            let (Some(want), Some(got)) = (want, got) else {
+                return None;
+            };
+            // A variant built for the call (`Option::Some(1)`) is its enum.
+            let got = match got {
+                Ty::Constructor { owner, .. } => *owner,
+                t => t,
+            };
+                subst = unify_with(&subst, &want, &got).ok()?;
+        }
+        let mut vars = HashSet::new();
+        for l in &generic.locals {
+            if let Some(t) = &l.ty {
+                vars.extend(crate::typechecking::subst::ftv(t));
+            }
+        }
+        let map: HashMap<_, _> = vars
+            .into_iter()
+            .map(|v| (v, apply_ty_prune(&subst, &Ty::Var(v))))
+            .collect();
+        // A closure parameter (`f: T -> U`) is closed once its parts are.
+        let mut inst = self.hir_instance(generic, &map);
+        let closed = |t: &Option<Ty>| t.as_ref().is_none_or(Self::closed_value_ty);
+        if !inst.locals.iter().all(|l| closed(&l.ty)) || !inst.exprs.iter().all(|e| closed(&e.ty)) || !closed(&inst.ret) {
+            return None;
+        }
+        inst.ret_layout = inst.ret.as_ref().map_or(crate::hir::layout::Layout::Word, |t| crate::hir::layout::of(&self.checker, t));
+        // Each value in its own layout at the instance's types, not the
+        // generic body's boxed one.
+        for e in &mut inst.exprs {
+            if let Some(t) = &e.ty {
+                e.layout = crate::hir::layout::of(&self.checker, t);
+            }
+        }
+        match crate::hir::inline::inlinable(&inst, usize::MAX) {
+            Err("return") => crate::hir::inline::single_exit(&inst),
+            _ => Some(inst),
+        }
+    }
+
     /// The body index of the function `key` names: an overload by its
     /// table key, any other by its name when that is unique.
     fn hir_fn_body(&self, key: &str) -> Option<usize> {
@@ -793,6 +886,14 @@ impl Compiler {
             }
             plan => plan,
         };
+        // Other modules splice core's `Option` / `Result` methods at their
+        // calls' types, as built (before this body's own rewrites).
+        if plan.is_ok()
+            && let Some(key) = hir.name.strip_prefix("core::")
+            && let Some(body) = self.hir_core_method_body(hir)
+        {
+            self.hir_core_methods.insert(key.to_string(), body);
+        }
         let hir = inlined.as_ref().unwrap_or(hir);
         // Another module may splice this body, as inlined here.
         if !self.namespace.is_empty()
@@ -1888,10 +1989,23 @@ impl Compiler {
                 }
             })
             .collect();
+        // Core prelude methods, as their generic body at the call's types.
+        let core_insts: HashMap<u32, crate::hir::HirBody> = emit
+            .plan
+            .calls
+            .iter()
+            .filter(|_| self.inline_cost.inline_across_modules)
+            .filter_map(|(&id, call)| {
+                let base = call.key.split("$inst$").next().unwrap_or(&call.key);
+                let generic = self.hir_core_methods.get(base)?;
+                Some((id, self.hir_core_method_at(generic, hir, HirId(id))?))
+            })
+            .collect();
         let callee_for = |id: HirId| -> Result<(&crate::hir::HirBody, inline::Shape), String> {
             let Some(call) = emit.plan.calls.get(&id.0) else {
                 return Err("not-planned".to_string());
             };
+            let core = core_insts.get(&id.0);
             let kind = [
                 (call.builtin.is_some(), "builtin"),
                 (call.pair.is_some() && !self.hir_inline_pair, "pair"),
@@ -1904,10 +2018,12 @@ impl Compiler {
                 // An auto-parallel callee's call runs its split worker.
                 (self.par_shapes.contains_key(Self::par_shape_key(&call.key)), "par"),
             ];
-            if let Some((_, what)) = kind.iter().find(|(hit, _)| *hit) {
+            if core.is_none()
+                && let Some((_, what)) = kind.iter().find(|(hit, _)| *hit)
+            {
                 return Err(format!("call-kind {what}"));
             }
-            let callee = match instances.get(&id.0) {
+            let callee = match core.or_else(|| instances.get(&id.0)) {
                 Some(inst) => inst,
                 None if call.instance.is_some() => {
                     let index = *module.instance_fns.get(&call.key).ok_or_else(|| format!("no instance body `{}`", call.key))?;
@@ -1961,7 +2077,7 @@ impl Compiler {
             if callee.name == hir.name
                 || callee.result_mode && !self.hir_inline_pair
                 || if call.instance.is_some() { shared(callee) } else { callee.name.contains(" for ") }
-                || home(callee) != here
+                || core.is_none() && home(callee) != here
                 || !matches!(callee.ret_layout, crate::hir::layout::Layout::Word)
                     && !callee.ret_layout.is_niche()
                     && !(self.hir_inline_pair && immediate_pair(&callee.ret_layout))
@@ -1995,7 +2111,8 @@ impl Compiler {
             if calls.iter().any(reaches_back) {
                 return Err("recursive".to_string());
             }
-            if callee.kind == BodyKind::Method
+            if core.is_none()
+                && callee.kind == BodyKind::Method
                 && let Some(owner) = callee.name.rsplit("::").nth(1)
                 && lower::is_generic_class(&self.checker, owner)
             {
@@ -2078,7 +2195,8 @@ impl Compiler {
             }
             let shape = inline::inlinable(callee, budget)?
                 .with_heap_result(!scalar(&hir.expr(id).ty))
-                .with_heap_locals(heap);
+                .with_heap_locals(heap)
+                .with_foreign(core.is_some());
             Ok((callee, shape))
         };
         let why = std::env::var_os("COIL_HIR_INLINE_WHY").is_some();
@@ -6115,6 +6233,7 @@ impl Compiler {
             HirKind::If {
                 then, els: Some(els), ..
             } => self.hir_builds_pair(hir, emit, *then, kind) && self.hir_builds_pair(hir, emit, *els, kind),
+            HirKind::Match { arms, .. } => !arms.is_empty() && arms.iter().all(|a| self.hir_builds_pair(hir, emit, a.body, kind)),
             HirKind::Block { tail: Some(t), .. } => self.hir_builds_pair(hir, emit, *t, kind),
             HirKind::Call { .. } => emit.plan.calls.get(&e.0).and_then(|c| c.pair.as_ref()) == Some(kind),
             HirKind::Local(l) => emit.plan.pair_locals.get(&l.0) == Some(kind),
