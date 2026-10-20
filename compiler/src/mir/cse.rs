@@ -57,7 +57,7 @@ fn cse_with(func: &mut MirFunc, literals: bool) -> usize {
                 continue;
             }
             let ty = |v: ValueId| types.get(v.index()).copied().unwrap_or(MirTy::Value);
-            if let Some(key) = read_key(inst, &pure_calls, &ty) {
+            if let Some(key) = read_key(inst, &pure_calls, &func.invariant_loads, &ty) {
                 if let Some(&prev) = reads.get(&key) {
                     subst.insert(dest, prev);
                 } else {
@@ -92,6 +92,8 @@ fn cse_with(func: &mut MirFunc, literals: bool) -> usize {
 enum ReadKey {
     Index { array: ValueId, index: ValueId },
     Field { object: ValueId, index: u32 },
+    /// A `readonly class` instance's field: no write changes it (#1560).
+    FixedField { object: ValueId, index: u32 },
     Len { array: ValueId },
     Call { target: crate::il::Label, args: Vec<ValueId> },
 }
@@ -110,6 +112,7 @@ impl ReadKey {
         match self {
             Self::Index { .. } => w.elements,
             Self::Field { .. } => w.fields,
+            Self::FixedField { .. } => false,
             Self::Len { .. } => w.lengths,
             Self::Call { args, .. } => (w.elements || w.fields || w.lengths) && args.iter().any(|&a| reads_heap(ty(a))),
         }
@@ -121,12 +124,20 @@ pub(super) fn reads_heap(ty: MirTy) -> bool {
     ty.is_heap_word() || ty == MirTy::Value
 }
 
-fn read_key(inst: &MirInst, pure_calls: &HashSet<ValueId>, ty: &impl Fn(ValueId) -> MirTy) -> Option<ReadKey> {
+fn read_key(
+    inst: &MirInst,
+    pure_calls: &HashSet<ValueId>,
+    invariant_loads: &HashSet<ValueId>,
+    ty: &impl Fn(ValueId) -> MirTy,
+) -> Option<ReadKey> {
     if !ty(inst.dest()).is_numeric() {
         return None;
     }
     Some(match inst {
         MirInst::Index { array, index, .. } => ReadKey::Index { array: *array, index: *index },
+        MirInst::HeapFieldLoad { dest, object, index } if invariant_loads.contains(dest) => {
+            ReadKey::FixedField { object: *object, index: *index }
+        }
         MirInst::HeapFieldLoad { object, index, .. } => ReadKey::Field { object: *object, index: *index },
         MirInst::ArrayLen { array, .. } => ReadKey::Len { array: *array },
         MirInst::Call { dest, target, args, dest_hi: None } if pure_calls.contains(dest) => ReadKey::Call { target: *target, args: args.clone() },
@@ -850,6 +861,17 @@ mod tests {
         f.verify().unwrap();
         assert_eq!(count(&f, |i| matches!(i, MirInst::HeapFieldLoad { .. })), 2);
         assert_eq!(count(&f, |i| matches!(i, MirInst::Index { .. })), 1);
+    }
+
+    #[test]
+    fn readonly_class_field_read_survives_field_stores() {
+        // #1560: the second read of a readonly class instance's field is
+        // the first, across a field store.
+        let mut f = parse("    v2 = heaploadfield v0, 0\n    v5 = heapsetfield.slot v0, v1, 1\n    v3 = heaploadfield v0, 0\n    v4 = iadd v2, v3\n    return v4");
+        f.invariant_loads.extend([ValueId(2), ValueId(3)]);
+        assert_eq!(cse(&mut f), 1);
+        f.verify().unwrap();
+        assert_eq!(count(&f, |i| matches!(i, MirInst::HeapFieldLoad { .. })), 1);
     }
 
     #[test]

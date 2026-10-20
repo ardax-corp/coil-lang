@@ -99,6 +99,10 @@ pub struct MirFunc {
     /// Calls of a pure function returning one scalar word: CSE and LICM
     /// may treat them as operators that can trap.
     pub pure_calls: HashSet<ValueId>,
+    /// `HeapFieldLoad`s of a `readonly class` instance's field: no store
+    /// or call changes the word, so LICM and CSE treat them as operators
+    /// on the object (#1560).
+    pub invariant_loads: HashSet<ValueId>,
     /// Calls of a function that never resizes an array (it may write
     /// elements and fields).
     pub steady_calls: HashSet<ValueId>,
@@ -170,6 +174,7 @@ impl MirFunc {
             cleanup: None,
             tail_targets: HashSet::new(),
             pure_calls: HashSet::new(),
+            invariant_loads: HashSet::new(),
             steady_calls: HashSet::new(),
             lengths_steady: true,
         }

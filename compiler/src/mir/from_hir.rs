@@ -530,6 +530,9 @@ pub struct HirMirInput<'a> {
     /// Field reads and writes on heap class objects: each field's slot and
     /// word type, when the field holds the word its type says.
     pub heap_fields: HashMap<u32, (u32, MirTy)>,
+    /// Field reads of a `readonly class` instance: no store ever changes
+    /// what they read (#1560).
+    pub invariant_fields: HashSet<u32>,
     /// Heap fields and `new` arguments whose slot holds a boxed enum
     /// object (a generic class's field open in a parameter) for a value
     /// whose own word is this niche layout: boxed on the way in, unboxed
@@ -2897,6 +2900,9 @@ impl Lower<'_> {
                     return Ok(Val::Never);
                 };
                 let w = self.b.ins_heap_field_load(obj, slot, ty).map_err(mir)?;
+                if self.inp.invariant_fields.contains(&id.0) {
+                    self.b.mark_invariant_load(w);
+                }
                 match self.inp.boxed_niches.get(&id.0) {
                     Some(&layout) => self.unbox_niche(w, niche_word(layout)?),
                     None => Ok(Val::V(w)),

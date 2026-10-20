@@ -1584,7 +1584,20 @@ impl Compiler {
         };
         let mut boxed_niches = HashMap::new();
         let mut heap_fields = HashMap::new();
+        // A `readonly class` instance's fields never change after `new`
+        // (#1560): their reads are invariant.
+        let readonly_class = |t: &Ty| match crate::typechecking::ty::strip_readonly(&apply_ty_prune(checker.subst(), t)) {
+            Ty::Con(n) => checker.is_readonly_class(n),
+            Ty::App(head, _) => matches!(head.as_ref(), Ty::Con(n) if checker.is_readonly_class(n)),
+            _ => false,
+        };
+        let mut invariant_fields = HashSet::new();
         for (i, e) in hir.exprs.iter().enumerate() {
+            if let HirKind::Field { base, .. } = &e.kind
+                && Self::hir_ty(hir, *base).is_some_and(readonly_class)
+            {
+                invariant_fields.insert(i as u32);
+            }
             if let HirKind::Field { base, name } = &e.kind
                 && !fields.contains_key(&(i as u32))
                 && Self::hir_ty(hir, *base).is_some_and(|t| {
@@ -1917,6 +1930,7 @@ impl Compiler {
                 }
             }),
             heap_fields,
+            invariant_fields,
             boxed_niches,
             niche_args: &tables.niche_args,
             existential_packs: tables.existential_packs,
