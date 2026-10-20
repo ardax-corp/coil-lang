@@ -2567,13 +2567,15 @@ impl Checker {
             // A bare type name (only valid as an annotation, but be
             // permissive).
             Expression::Type(name) => self.parse_type_name_str(name),
-            Expression::TypeFun(arg, ret) => {
-                let arg_ty = self.infer(arg);
+            // A function type reached as a value (a `type` alias target,
+            // #1389). `A -> B` infers its parts, so their pre-walk IDs are
+            // consumed; `fn(T x) -> R` parses as a signature type.
+            Expression::TypeFn { params, ret, spelling: parser::ast::FnTypeSpelling::Arrow } => {
+                let arg_ty = self.infer(params);
                 let ret_ty = self.infer(ret);
                 Ty::Fun(Box::new(arg_ty), Box::new(ret_ty))
             }
-            // `fn(T x) -> R` reached as a value (a `type` alias target, #1389).
-            Expression::TypeFnSig { params, ret } => self.parse_fn_sig_type(params, ret),
+            Expression::TypeFn { params, ret, .. } => self.parse_fn_type(params, ret),
 
             Expression::Noop(_)
             | Expression::Break
@@ -11387,11 +11389,7 @@ impl Checker {
                 let arg_tys: Vec<Ty> = args.iter().map(|a| self.parse_type_name(a)).collect();
                 self.resolve_type_projection(owner, name, &arg_tys, &ann.0.into_range())
             }
-            Expression::TypeFun(arg, ret) => Ty::Fun(
-                Box::new(self.parse_type_name(arg)),
-                Box::new(self.parse_type_name(ret)),
-            ),
-            Expression::TypeFnSig { params, ret } => self.parse_fn_sig_type(params, ret),
+            Expression::TypeFn { params, ret, .. } => self.parse_fn_type(params, ret),
             Expression::Forall { params, ty } => {
                 self.forall_type(params, |checker| checker.parse_type_name(ty))
             }
@@ -13523,10 +13521,16 @@ impl Checker {
     }
 
     /// Parse `fn(T x, ...args) -> R` function types.
-    fn parse_fn_sig_type(&mut self, params: &Output, ret: &Output) -> Ty {
+    /// The type a function type annotation names, either spelling: `A -> B`
+    /// (`params` is its one parameter type) or `fn(T x, …) -> R` (`params`
+    /// lists them; names are documentation only).
+    fn parse_fn_type(&mut self, params: &Output, ret: &Output) -> Ty {
+        let Expression::Fragment(children) = params.1.as_ref() else {
+            let param_ty = self.parse_type_name(params);
+            return Ty::Fun(Box::new(param_ty), Box::new(self.parse_type_name(ret)));
+        };
         // Sole bare `...args` in a fn type: opaque callable unified at spread calls.
-        if let Expression::Fragment(children) = params.1.as_ref()
-            && children.len() == 1
+        if children.len() == 1
                 && let Expression::Argument {
                     ty: None,
                     is_rest: true,
@@ -16135,11 +16139,6 @@ impl Checker {
                 }
             }
 
-            Expression::TypeFun(arg, ret) => {
-                self.pre_register_enums_walk(arg, errors);
-                self.pre_register_enums_walk(ret, errors);
-            }
-
             Expression::CompoundAssign(name, _, value) => {
                 self.pre_register_enums_walk(name, errors);
                 self.pre_register_enums_walk(value, errors);
@@ -16357,7 +16356,7 @@ impl Checker {
             }
             Expression::AssocTypeDef { ty, .. } => self.pre_register_enums_walk(ty, errors),
             Expression::Spread(inner) => self.pre_register_enums_walk(inner, errors),
-            Expression::TypeFnSig { params, ret } => {
+            Expression::TypeFn { params, ret, .. } => {
                 self.pre_register_enums_walk(params, errors);
                 self.pre_register_enums_walk(ret, errors);
             }

@@ -8,7 +8,7 @@
 
 use crate::ast::{
     AdjustOp, AssignOp, Attribute, QuotePart, EnumConstructPayload, EnumVariantPayload, Expression,
-    ExternFunction, ExternStructDecl, FieldModifier, LetPattern, Output, Pattern, PatternField,
+    ExternFunction, ExternStructDecl, FieldModifier, FnTypeSpelling, LetPattern, Output, Pattern, PatternField,
     PatternPayload, RecordFieldDecl,
     RecordFieldValue, TypeParam, Visibility, WhereConstraint,
 };
@@ -780,7 +780,7 @@ impl<'s> Formatter<'s> {
                 // its parens, `readonly (int -> int)`.
                 let fn_type = matches!(
                     inner.1.as_ref(),
-                    Expression::TypeFun(..) | Expression::Forall { .. }
+                    Expression::TypeFn { spelling: FnTypeSpelling::Arrow, .. } | Expression::Forall { .. }
                 );
                 if fn_type {
                     self.push_str("(");
@@ -1196,25 +1196,22 @@ impl<'s> Formatter<'s> {
                     self.fmt_delimited_outputs("<", ">", args, false);
                 }
             }
-            Expression::TypeFun(arg, ret) => {
+            Expression::TypeFn { params, ret, spelling: FnTypeSpelling::Arrow } => {
                 // `->` is right-associative and a `fn(..) -> R` return
                 // swallows a trailing arrow, so a function-typed domain
                 // keeps its parens: `(int -> int) -> int`.
-                let group = matches!(
-                    arg.1.as_ref(),
-                    Expression::TypeFun(..) | Expression::TypeFnSig { .. } | Expression::Forall { .. }
-                );
+                let group = matches!(params.1.as_ref(), Expression::TypeFn { .. } | Expression::Forall { .. });
                 if group {
                     self.push_str("(");
                 }
-                self.fmt_output(arg);
+                self.fmt_output(params);
                 if group {
                     self.push_str(")");
                 }
                 self.push_str(" -> ");
                 self.fmt_output(ret);
             }
-            Expression::TypeFnSig { params, ret } => {
+            Expression::TypeFn { params, ret, spelling: FnTypeSpelling::Fn } => {
                 self.push_str("fn");
                 self.fmt_paren_arg_list(params);
                 self.push_str(" -> ");

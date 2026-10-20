@@ -4,7 +4,7 @@
     use ast::Expression;
 
     fn count_fn_sigs(expr: &Expression<'_>) -> usize {
-        let mut n = usize::from(matches!(expr, Expression::TypeFnSig { .. }));
+        let mut n = usize::from(matches!(expr, Expression::TypeFn { spelling: ast::FnTypeSpelling::Fn, .. }));
         expr.for_each_child(&mut |c: &Output<'_>| n += count_fn_sigs(c.1.as_ref()));
         n
     }
@@ -44,6 +44,22 @@
         assert_eq!(fn_sigs_in(src), 0);
     }
 
+    fn arrows_in(expr: &Expression<'_>) -> usize {
+        let mut n = usize::from(matches!(expr, Expression::TypeFn { spelling: ast::FnTypeSpelling::Arrow, .. }));
+        expr.for_each_child(&mut |c: &Output<'_>| n += arrows_in(c.1.as_ref()));
+        n
+    }
+
+    /// Both spellings are one node; the arrow's `params` is its one
+    /// parameter type.
+    #[test]
+    fn both_spellings_are_one_node() {
+        let src = "fn apply(int -> int f, fn(int x) -> int g) -> int { return f(1); }";
+        let ast = Pratt::default().parse(src).expect("parse");
+        assert_eq!(arrows_in(ast.1.as_ref()), 1);
+        assert_eq!(count_fn_sigs(ast.1.as_ref()), 1);
+    }
+
     #[test]
     fn fn_types_format_round_trip() {
         let src = "type F = fn(int, string) -> int;\n\nfn apply(fn(int x) -> int f, (int -> int) -> int g) -> int {\n    return f(1);\n}\n";
@@ -53,7 +69,7 @@
     }
 
     fn fn_sig_texts(expr: &Expression<'_>, out: &mut Vec<String>) {
-        if matches!(expr, Expression::TypeFnSig { .. }) {
+        if matches!(expr, Expression::TypeFn { spelling: ast::FnTypeSpelling::Fn, .. }) {
             out.push(expr.to_string());
         }
         expr.for_each_child(&mut |c: &Output<'_>| fn_sig_texts(c.1.as_ref(), out));

@@ -4,7 +4,7 @@
 
 use ast::{
     AdjustOp, AssignOp, AttrArgs, AttrLit, Attribute, EnumConstructPayload, EnumVariantPayload,
-    Expression, FieldModifier, LetFieldPattern, LetPattern, MatchArm, Output, Pattern,
+    Expression, FieldModifier, FnTypeSpelling, LetFieldPattern, LetPattern, MatchArm, Output, Pattern,
     PatternField, PatternOutput, PatternPayload, QuoteKind, QuotePart, RecordFieldDecl,
     RecordFieldValue, TypeParam, Visibility,
 };
@@ -411,7 +411,7 @@ impl<'pratt> Pratt<'pratt> {
                 .ignore_then(self.fn_type_params(type_ann.clone()))
                 .then(op!("->").ignore_then(type_ann.clone()))
                 .map_with(|(params, ret), e| {
-                    (e.span(), Box::new(Expression::TypeFnSig { params, ret }))
+                    (e.span(), Box::new(Expression::TypeFn { params, ret, spelling: FnTypeSpelling::Fn }))
                 });
             // `readonly T` qualifies the atom it prefixes, so
             // `readonly P -> int` is `(readonly P) -> int`.
@@ -423,7 +423,10 @@ impl<'pratt> Pratt<'pratt> {
             choice((readonly_type, fn_sig_type, base_atom))
                 .then(op!("->").ignore_then(type_ann.clone()).or_not())
                 .map_with(|(lhs, rhs), e| match rhs {
-                    Some(rhs) => (e.span(), Box::new(Expression::TypeFun(lhs, rhs))),
+                    Some(ret) => (
+                        e.span(),
+                        Box::new(Expression::TypeFn { params: lhs, ret, spelling: FnTypeSpelling::Arrow }),
+                    ),
                     None => lhs,
                 })
         })

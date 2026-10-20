@@ -204,7 +204,6 @@ fn walk_children(ast: &Output<'_>, f: &mut dyn FnMut(&Output<'_>)) {
         | Expression::Coalesce(a, b)
         | Expression::Assignment(a, b)
         | Expression::CompoundAssign(a, _, b)
-        | Expression::TypeFun(a, b)
         | Expression::Range {
             start: a, end: b, ..
         } => {
@@ -290,7 +289,7 @@ fn walk_children(ast: &Output<'_>, f: &mut dyn FnMut(&Output<'_>)) {
             }
         }
         Expression::Argument { ty: Some(t), .. } => f(t),
-        Expression::TypeFnSig { params, ret } => {
+        Expression::TypeFn { params, ret, .. } => {
             f(params);
             f(ret);
         }

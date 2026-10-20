@@ -140,7 +140,7 @@ pub fn walk_children<'n, 's>(node: &'n Output<'s>, visit: &mut dyn FnMut(&'n Out
 
         Expression::Spread(inner) => visit(inner),
 
-        Expression::TypeFnSig { params, ret } => {
+        Expression::TypeFn { params, ret, .. } => {
             visit(params);
             visit(ret);
         }
@@ -207,10 +207,6 @@ pub fn walk_children<'n, 's>(node: &'n Output<'s>, visit: &mut dyn FnMut(&'n Out
             }
         }
 
-        Expression::TypeFun(arg, ret) => {
-            visit(arg);
-            visit(ret);
-        }
 
         Expression::Expr(e)
         | Expression::Group(e)
