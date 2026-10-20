@@ -94,14 +94,18 @@ fn main() {
 
 ## readonly
 
-Seals an array literal or a new class instance against mutation from outside.
+A read-only view of a value: nothing reachable through it can be changed.
 
-`readonly [1, 2, 3]` and `readonly new Point(1, 2)` produce a `readonly T`
-value: field writes and index writes through it are compile errors, while the
-class's own methods can still change it through `self`. The seal is deep: a
-field, element or loop variable read through it is `readonly` too, and it
-cannot be passed, stored or returned where a plain `T` is expected. The
-variable itself can still be rebound.
+`readonly T` is a type, written anywhere a type is: parameters, returns, `let`
+annotations, class fields and generic arguments (`Vec<readonly Point>`).
+`readonly e` views any expression read-only (`readonly [1, 2, 3]`,
+`readonly new Point(1, 2)`, `readonly p`). Field writes, index writes and
+`push`/`pop`/… through it are compile errors, while a class's own methods can
+still change it through `self`. The seal is deep: a field, element or loop
+variable read through it is `readonly` too. A `T` converts to `readonly T`,
+never back, and `Vec<T>` does not convert to `Vec<readonly T>`; a parameter
+that only reads takes `readonly Vec<T>`. `readonly` costs nothing at run time,
+and the variable itself can still be rebound.
 
 ```coil
 class Point {
@@ -109,10 +113,14 @@ class Point {
     pub y: int,
 }
 
+fn sum(readonly Point p) -> int {
+    return p.x + p.y; // reading is fine; `p.x = 5;` would not compile
+}
+
 fn main() {
     let xs = readonly [1, 2, 3];
-    let p = readonly new Point(1, 2);
-    let sum = p.x + p.y; // reading is fine; `p.x = 5;` would not compile
+    let p = new Point(1, 2);
+    let total = sum(p) + sum(readonly p);
 }
 ```
 

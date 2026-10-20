@@ -240,6 +240,11 @@ pub struct Checker {
     /// [`Self::fn_effects`] for every file checked so far (not reset per
     /// file), so calls into an already-checked module resolve by [`DefId`].
     pub(crate) program_fn_effects: HashMap<DefId, crate::typechecking::purity::EffectFlags>,
+    /// Fixed parameter count and rest flag of every function and method
+    /// checked so far, by module-qualified name (`m::f`, `m::C::f`; the
+    /// entry file's unqualified), so a call into an already-checked module
+    /// knows when it under-applies.
+    program_fn_params: HashMap<String, (usize, bool)>,
     /// Impl method effects for every file checked so far, keyed
     /// `module::Owner::method` (methods have no [`DefId`] of their own).
     pub(crate) program_method_effects: HashMap<String, crate::typechecking::purity::EffectFlags>,

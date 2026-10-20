@@ -5117,6 +5117,9 @@ impl Lower<'_> {
             .or_else(|| (self.inp.opaque_vars && is_var(ty)).then_some(MirTy::I64))
             // A two-word item (an `Option<int>`, a range) rides boxed (#1486).
             .or_else(|| self.boxed_pair_item(ty).then_some(MirTy::HeapRef))
+            // A niche `Option` / `Result` item is its niche word, as
+            // `make_tuple` stores it (#1614).
+            .or_else(|| (self.inp.niche)(ty))
     }
 
     /// Whether a tuple item of type `ty` is a two-word value held as its
@@ -5469,10 +5472,12 @@ impl Lower<'_> {
         let mut words = Vec::with_capacity(items.len());
         for (i, (key, ty, item)) in items.into_iter().enumerate() {
             // An enum item is held as its boxed object, the word its
-            // `show` takes (#1176); a niche word is not one.
+            // `show` takes (#1176); a niche `Option` / `Result` item is its
+            // niche word (`tuple_item`), which its raw `show` takes as it
+            // is (#1611).
             let ty_w = self
                 .tuple_item(ty)
-                .or_else(|| ((self.inp.niche)(ty).is_none() && (self.inp.boxed_view)(ty, None).is_some()).then_some(MirTy::HeapRef))
+                .or_else(|| (self.inp.boxed_view)(ty, None).is_some().then_some(MirTy::HeapRef))
                 .ok_or("show item type")?;
             let w = match key {
                 // A record's slot.

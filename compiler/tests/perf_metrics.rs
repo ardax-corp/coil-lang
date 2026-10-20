@@ -2004,6 +2004,66 @@ fn readonly_compiles_to_the_same_bytecode_as_plain() {
     }
 }
 
+/// Written `readonly` types (#1558): parameters, returns, fields, lets,
+/// generic arguments and `readonly e` on a variable.
+const READONLY_TYPES: &str = "
+class Point {
+    pub x: int,
+    pub y: int,
+}
+
+class Holder {
+    pub p: readonly Point,
+    pub ps: Vec<readonly Point>,
+}
+
+fn total(readonly Point p) -> int {
+    return p.x + p.y;
+}
+
+fn make(int i) -> readonly Point {
+    return new Point(i, i + 1);
+}
+
+fn sum(readonly Vec<int> xs) -> int {
+    let s = 0;
+    for x in xs {
+        s = s + x;
+    }
+    return s;
+}
+
+fn main() {
+    let xs: Vec<int> = [1, 2, 3];
+    let p = make(4);
+    let q: readonly Point = readonly p;
+    let h = new Holder(q, [q]);
+    h.ps.push(make(5));
+    let acc = total(q) + total(h.p) + sum(readonly xs) + h.ps[1].x;
+    if acc < 0 {
+        panic(\"negative\");
+    }
+}
+";
+
+/// #1558: written `readonly` types compile to the same bytecode as the
+/// program with every `readonly` removed.
+#[test]
+fn readonly_types_compile_to_the_same_bytecode_as_plain() {
+    let plain = READONLY_TYPES.replace("readonly ", "");
+    for level in [compiler::OptLevel::None, compiler::OptLevel::Standard] {
+        let (ro, _) = compile_src_at(READONLY_TYPES, level);
+        let (pl, _) = compile_src_at(&plain, level);
+        let ops = |bc: &[Byte]| bc.iter().map(|b| *b.bytecode()).collect::<Vec<_>>();
+        assert!(
+            ro == pl,
+            "{level:?}: `readonly` types changed the bytecode\nreadonly: {:?}\nplain:    {:?}",
+            ops(&ro),
+            ops(&pl)
+        );
+    }
+}
+
 /// #1555: a generic function called with a `T` and with a `readonly T`
 /// gets one instance, not one per qualifier.
 #[test]
