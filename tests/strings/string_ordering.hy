@@ -2,6 +2,18 @@
 // is `Ord`, so generic code bounded by `Ord` takes strings (stdlib#48).
 use tests::assert;
 
+#[derive(Eq, Ord)]
+class Name {
+    pub last: string,
+    pub first: string,
+}
+
+#[derive(Eq, Ord)]
+enum Key {
+    Word(string),
+    Num(int),
+}
+
 fn smaller<T: Ord>(T a, T b) -> T {
     if a < b {
         return a;
@@ -52,4 +64,11 @@ test("generic Ord bound") {
     assert!(smaller("pear", "fig") == "fig");
     assert!(ordered("a", "b"));
     assert!(!ordered("b", "a"));
+}
+
+test("derived Ord over string fields") {
+    assert!(new Name("b", "a") > new Name("a", "z"));
+    assert!(new Name("a", "a") < new Name("a", "b"));
+    assert!(Word("x") < Word("y"));
+    assert!(Word("zz") < Num(0));
 }

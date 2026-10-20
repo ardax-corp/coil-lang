@@ -6630,6 +6630,17 @@ impl Checker {
                 let _ = self.unify(elem, &int(), range, "range element type");
                 true
             }
+            // `string` is `Ord` (by bytes) but has no range: a range
+            // holds its bounds as scalar words.
+            other if Self::is_string_ty(other) => {
+                let _ = self.error_with_help(
+                    ErrorCode::GenericTypeError,
+                    "range bounds cannot be `string`".to_string(),
+                    range.clone(),
+                    Some("ranges take `int`, `byte`, `float` or another scalar `Ord` type".to_string()),
+                );
+                false
+            }
             other => {
                 if self.generics.has_instance("Ord", other) {
                     true
@@ -6894,7 +6905,7 @@ impl Checker {
             ("+", _) => "`+` takes `int` / `float` / `byte` operands, two strings, or a type with an `Add` instance".to_string(),
             (_, Some(class)) if bitwise => format!("`{op}` takes `int` / `byte` operands, or a type with a `{class}` instance"),
             (_, Some(class)) => format!(
-                "`{op}` takes `int` / `float` / `byte` operands, or a type with a `{class}` instance"
+                "`{op}` takes `int` / `float` / `byte` / `string` operands, or a type with a `{class}` instance"
             ),
             _ => format!("`{op}` takes `int` / `byte` operands"),
         };
@@ -6957,7 +6968,7 @@ impl Checker {
                 range.clone(),
             );
             m.with_help(format!(
-                "`{op}` takes `int` / `float` / `byte` operands, or a type with a `{class}` instance (`#[derive(Ord)]`)"
+                "`{op}` takes `int` / `float` / `byte` / `string` operands, or a type with a `{class}` instance (`#[derive(Ord)]`)"
             ));
             m
         });
