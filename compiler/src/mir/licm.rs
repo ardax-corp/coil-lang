@@ -50,6 +50,53 @@ pub fn licm(func: &mut MirFunc, dense: bool) -> usize {
     total
 }
 
+/// Mark the reads of arrays no code ever writes as invariant
+/// ([`MirFunc::invariant_loads`], #1561): a `LoadStatic` of one of
+/// `slots` (a module `const` table: its slot is set once at startup), the
+/// values already marked as such an array (a local table built once), a
+/// φ of only those, and every element read and length of one of them.
+pub fn mark_frozen_arrays(func: &mut MirFunc, slots: &HashSet<u32>) {
+    let mut frozen: HashSet<ValueId> = HashSet::new();
+    for inst in func.blocks.iter().flat_map(|b| &b.insts) {
+        match inst {
+            MirInst::LoadStatic { dest, slot } if slots.contains(slot) => {
+                frozen.insert(*dest);
+            }
+            MirInst::Phi { dest, .. } if func.invariant_loads.contains(dest) => {
+                frozen.insert(*dest);
+            }
+            _ => {}
+        }
+    }
+    if frozen.is_empty() {
+        return;
+    }
+    loop {
+        let mut grew = false;
+        for inst in func.blocks.iter().flat_map(|b| &b.insts) {
+            if let MirInst::Phi { dest, args, .. } = inst
+                && !frozen.contains(dest)
+                && args.iter().all(|(_, v)| v == dest || frozen.contains(v))
+            {
+                frozen.insert(*dest);
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    for inst in func.blocks.iter().flat_map(|b| &b.insts) {
+        match inst {
+            MirInst::Index { dest, array, .. } | MirInst::ArrayLen { dest, array } if frozen.contains(array) => {
+                func.invariant_loads.insert(*dest);
+            }
+            _ => {}
+        }
+    }
+    func.invariant_loads.extend(frozen);
+}
+
 pub(super) struct LoopInfo {
     pub header: BlockId,
     pub blocks: HashSet<BlockId>,
@@ -748,6 +795,12 @@ fn motion(
         MirInst::HostInvoke { native_id, .. } => free(super::effects::host_may_hoist(*native_id)),
         // A checked read traps out of bounds; an unchecked one was proven
         // in bounds where it is.
+        // An element or the length of an array nothing writes, and the
+        // slot of a module `const` table (#1561).
+        MirInst::Index { dest, .. } if func.invariant_loads.contains(dest) => Some(Motion::Traps),
+        MirInst::ArrayLen { dest, .. } | MirInst::LoadStatic { dest, .. } if func.invariant_loads.contains(dest) => {
+            Some(Motion::Free)
+        }
         MirInst::Index { .. } => (!fx.elements && !fx.lengths).then_some(Motion::Traps),
         MirInst::ArrayLen { .. } => free(!fx.lengths),
         // A readonly class's field never changes (#1560).

@@ -1193,6 +1193,10 @@ pub struct ThreadSpawnContext {
     pub dload_gate: crate::ffi::DloadGate,
     /// Parent's C struct layouts (pass-by-value FFI).
     pub struct_layouts: Arc<Vec<crate::CStructLayout>>,
+    /// The parent's static slots, raw: a shared-heap job reads the same
+    /// startup `const`s (#1561). Its words name the parent's heap, so an
+    /// isolate job never takes them.
+    pub statics: Arc<Vec<u64>>,
 }
 
 impl Clone for ThreadSpawnContext {
@@ -1209,6 +1213,7 @@ impl Clone for ThreadSpawnContext {
             ffi_search_paths: self.ffi_search_paths.clone(),
             dload_gate: self.dload_gate.clone(),
             struct_layouts: Arc::clone(&self.struct_layouts),
+            statics: Arc::clone(&self.statics),
         }
     }
 }
@@ -1278,6 +1283,7 @@ fn try_host_spawn_shared(heap: &mut Heap, args: &[Value]) -> Result<Value, Threa
     let live_threads = Arc::clone(&ctx.live_threads);
     let reactor = Arc::clone(&ctx.reactor);
     let state = Arc::new(JoinState::with_shared_epoch(Arc::clone(&epoch)));
+    let statics = Arc::clone(&ctx.statics);
     let mut job = crate::reactor::job_from_spawn_context(
         ctx,
         entry,
@@ -1285,6 +1291,7 @@ fn try_host_spawn_shared(heap: &mut Heap, args: &[Value]) -> Result<Value, Threa
         Arc::clone(&state),
     );
     job.epoch = Some(epoch);
+    job.statics = Some(statics);
     reactor.submit(job);
     register_live_thread(&live_threads, Arc::clone(&state));
     let (obj, _) = heap.alloc(ObjThread { state }, Object::Thread);

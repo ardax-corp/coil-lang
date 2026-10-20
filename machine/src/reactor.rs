@@ -58,6 +58,8 @@ pub struct Job {
     /// C struct layouts for pass-by-value FFI (ids are indices, so the
     /// worker VM takes the parent's list as is).
     pub struct_layouts: Arc<Vec<crate::CStructLayout>>,
+    /// A shared-heap job's copy of the spawning VM's statics (#1561).
+    pub statics: Option<Arc<Vec<u64>>>,
     /// Harness case (`coil-test`): run static init first, then report
     /// pass / fail instead of a spawn result.
     pub test: Option<TestJob>,
@@ -642,6 +644,7 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
         epoch,
         struct_layouts,
         test,
+        statics,
     } = job;
 
     // A joining root help-steals jobs onto its *own* thread, so the print
@@ -682,8 +685,11 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
             Arc::clone(&program.strings),
         );
         vm.set_struct_layouts(struct_layouts);
-        if !shared {
-            vm.init_static_slots(program.static_slot_count);
+        // A shared-heap job reads the spawner's statics (startup `const`s,
+        // tables built once); an isolate job starts them zeroed.
+        match statics.as_deref() {
+            Some(words) if shared => vm.load_shared_statics(words),
+            _ => vm.init_static_slots(program.static_slot_count),
         }
 
         let _guard = HostStateGuard::enter(vm);
@@ -723,6 +729,7 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
     reactor.inflight.fetch_sub(1, Ordering::SeqCst);
     reactor.notify();
     if shared {
+        vm.clear_statics();
         vm.unbind_shared_heap();
         vm.reset_shared_stack();
     } else {
@@ -914,6 +921,7 @@ pub fn job_from_spawn_context(
         epoch: None,
         struct_layouts: ctx.struct_layouts,
         test: None,
+        statics: None,
     }
 }
 
@@ -959,6 +967,7 @@ mod tests {
             epoch: None,
             struct_layouts: Arc::default(),
             test: None,
+            statics: None,
         };
         reactor.submit(job);
         state
@@ -990,6 +999,7 @@ mod tests {
             ffi_search_paths: Vec::new(),
             dload_gate: DloadGate::deny_all(),
             struct_layouts: Arc::default(),
+            statics: Arc::default(),
         }
     }
 
@@ -1226,6 +1236,7 @@ mod tests {
             epoch: None,
             struct_layouts: Arc::default(),
             test: None,
+            statics: None,
         };
         // Must not push onto owner's deque — job goes to `foreign`'s injector.
         assert!(

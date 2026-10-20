@@ -339,9 +339,9 @@ impl Compiler {
     /// run at `setup_entry_offset`; otherwise jump straight to `main`, or,
     /// with no `main`, to the prologue's `HALT` (there is nothing to run).
     pub fn prologue_jmp_target(&self) -> u32 {
-        // Interned dictionaries start zeroed and are built on first use:
-        // they need no setup.
-        if self.static_slot_count() > self.interned_dicts.len() as u32
+        // Interned dictionaries and local `const` tables start zeroed and
+        // are built on first use: they need no setup.
+        if self.static_slot_count() > (self.interned_dicts.len() + self.interned_tables.len()) as u32
             || self.has_extern_block()
             || self.checker.classes_with_drop().next().is_some()
         {
@@ -6077,6 +6077,43 @@ impl Compiler {
         format!("{}::{}", self.resolve_class_ident(owner), member)
     }
 
+    /// Record each module `const` (or `static const`) whose initializer
+    /// is a `readonly` array literal (#1561), ahead of the functions that
+    /// read it: its slot is never written after startup and its array
+    /// never changes. Elements fold against this module's consts, as
+    /// [`crate::const_fold::lift_startup_consts`] folds them.
+    fn register_frozen_tables(&mut self, children: &[Output]) {
+        let mut env = self.const_env().clone();
+        for child in children {
+            let mut node = child;
+            while let Expression::Statement(inner) | Expression::Expr(inner) = node.1.as_ref() {
+                node = inner;
+            }
+            match node.1.as_ref() {
+                Expression::Fragment(parts) => {
+                    if let [binder, rhs] = parts.as_slice()
+                        && let Expression::Constant(name, _) = binder.1.as_ref()
+                        && let Expression::Identifier(name) = name.1.as_ref()
+                        && let Some(v) = crate::const_fold::eval_expr(rhs, &env)
+                    {
+                        env.insert(name.to_string(), v);
+                    }
+                }
+                Expression::StaticDecl { is_const: true, name, init, .. } => {
+                    let Some(items) = crate::const_fold::readonly_array_items(init) else {
+                        continue;
+                    };
+                    let Some(slot) = self.checker.static_slot_index(&self.qualify_static_fqn(name)) else {
+                        continue;
+                    };
+                    let elems = items.iter().map(|e| crate::const_fold::eval_expr(e, &env)).collect();
+                    self.frozen_tables.insert(slot, elems);
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn emit_static_initializer(&mut self, fqn: &str, init: &Output) {
         let Some(slot) = self.checker.static_slot_index(fqn) else {
             return;
@@ -6809,6 +6846,7 @@ impl Compiler {
             Expression::Module(_, _body) => {}
             Expression::Program(children) => {
                 self.program_seq += 1;
+                self.register_frozen_tables(children);
                 self.reserve_program_callable_entries(children);
                 self.reserve_inst_clone_labels();
                 if Self::program_needs_phased_emit(children) {

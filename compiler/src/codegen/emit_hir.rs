@@ -980,12 +980,14 @@ impl Compiler {
                 let steady = |n: &str| crate::il::pure_call::name_in(&self.steady_fns, n);
                 let unrolled = self.opt_options.loop_unroll.then(|| crate::hir::unroll::unroll(body, self.opt_options.loop_unroll_factor)).flatten();
                 let body_u = unrolled.as_ref().unwrap_or(body);
-                let folded = self.opt_options.algebraic.then(|| crate::hir::fold::fold(body_u)).flatten();
-                let body_f = folded.as_ref().unwrap_or(body_u);
+                let tabled = self.opt_options.algebraic.then(|| self.hir_fold_tables(body_u)).flatten();
+                let body_t = tabled.as_ref().unwrap_or(body_u);
+                let folded = self.opt_options.algebraic.then(|| crate::hir::fold::fold(body_t)).flatten();
+                let body_f = folded.as_ref().unwrap_or(body_t);
                 let bounds = (self.opt_options.loop_bounds && self.alloc_steady).then(|| crate::hir::bounds::prove(body_f, steady)).flatten();
                 let body_b = bounds.as_ref().unwrap_or(body_f);
                 let sunk = self.opt_options.sink_return.then(|| crate::hir::sink_return::sink(body_b)).flatten();
-                match sunk.or(bounds).or(folded).or(unrolled) {
+                match sunk.or(bounds).or(folded).or(tabled).or(unrolled) {
                     Some(next) => match lower::refusal(&next, &self.checker)
                         .map_or_else(|| self.plan_hir_body(&next), Err)
                         .and_then(|mut e| self.plan_hir_lambdas(&module, &next, &mut e).map(|()| e))
@@ -1190,11 +1192,16 @@ impl Compiler {
         let why = if plan.par_inline {
             Err("parallel loop".to_string())
         } else {
-            self.hir_mir_input(hir, emit, &tables, file, entry_words)
-                .and_then(|inp| crate::mir::lower_from_hir(hir, &inp))
+            let frozen = self.hir_frozen_arrays(hir);
+            self.hir_mir_input(hir, emit, &tables, file, entry_words).and_then(|mut inp| {
+                inp.frozen_arrays = frozen;
+                crate::mir::lower_from_hir(hir, &inp)
+            })
         };
         match why {
-            Ok(func) => {
+            Ok(mut func) => {
+                let slots: HashSet<u32> = self.frozen_tables.keys().copied().collect();
+                crate::mir::mark_frozen_arrays(&mut func, &slots);
                 crate::il::opt::note_hir_mir(None);
                 self.hir_mir_debug_vars(hir, emit, &tables.frame);
                 Some(func)
@@ -1947,6 +1954,7 @@ impl Compiler {
             }),
             heap_fields,
             invariant_fields,
+            frozen_arrays: HashMap::new(),
             boxed_niches,
             niche_args: &tables.niche_args,
             existential_packs: tables.existential_packs,
@@ -7078,6 +7086,71 @@ impl Compiler {
         matches!(result, Ty::Var(_))
     }
 
+    /// Each function-local `const` table of literals in `hir` whose type is
+    /// `readonly` (#1561), by its array's `Make`: the static slot it is
+    /// built into once. Tables of the same literals share one. A table
+    /// inside a loop (a callee's, spliced into the caller's loop) keeps
+    /// its array, which LICM moves to the preheader of a dense loop.
+    fn hir_frozen_arrays(&mut self, hir: &HirBody) -> HashMap<u32, u32> {
+        let mut out = HashMap::new();
+        let sealed = crate::hir::tables::sealed_locals(hir, &|t| self.hir_ty_is_readonly(t));
+        let looped = crate::hir::tables::lets_in_loops(hir);
+        for i in 0..hir.exprs.len() {
+            let id = HirId(i as u32);
+            if looped.contains(&id) {
+                continue;
+            }
+            let Some((local, elems)) = crate::hir::tables::local_table(hir, id) else {
+                continue;
+            };
+            let HirKind::Let { init: Some(init), .. } = hir.expr(id).kind else {
+                continue;
+            };
+            if !sealed.contains(&local) {
+                continue;
+            }
+            let Some(made) = Self::hir_ty(hir, init).map(|t| apply_ty_prune(self.checker.subst(), t)) else {
+                continue;
+            };
+            let lits: Vec<_> = elems.iter().map(|&e| &hir.expr(e).kind).collect();
+            let key = format!("{made:?}|{lits:?}");
+            let slot = match self.interned_tables.get(&key) {
+                Some(&slot) => slot,
+                None => {
+                    let next = self.interned_tables.len();
+                    let slot = self
+                        .checker
+                        .alloc_synthetic_static_slot(format!("__table${next}"), crate::typechecking::ty::int());
+                    self.interned_tables.insert(key, slot);
+                    slot
+                }
+            };
+            out.insert(init.0, slot);
+        }
+        out
+    }
+
+    /// [`crate::hir::tables::fold_tables`] over `hir`: module `const`
+    /// tables by their slot, local ones when their type is `readonly`.
+    fn hir_fold_tables(&self, hir: &HirBody) -> Option<HirBody> {
+        let sealed = crate::hir::tables::sealed_locals(hir, &|t| self.hir_ty_is_readonly(t));
+        crate::hir::tables::fold_tables(hir, &HirTables { c: self, hir }, &|l| sealed.contains(&l))
+    }
+
+    fn hir_ty_is_readonly(&self, t: &Ty) -> bool {
+        matches!(apply_ty_prune(self.checker.subst(), t), Ty::Readonly(_))
+    }
+
+    /// The elements of the module `const` table the `Global` read `id`
+    /// names (#1561).
+    fn hir_frozen_table(&self, hir: &HirBody, id: HirId) -> Option<&[Option<crate::const_fold::ConstValue>]> {
+        let HirKind::Global { name, .. } = &hir.expr(id).kind else {
+            return None;
+        };
+        let slot = self.hir_global_static(hir, id, name)?;
+        self.frozen_tables.get(&slot).map(Vec::as_slice)
+    }
+
     fn hir_global_const(&self, hir: &HirBody, id: HirId, name: &str) -> Option<crate::const_fold::ConstValue> {
         use crate::const_fold::ConstValue;
         let expr = hir.expr(id);
@@ -9147,4 +9220,31 @@ fn close_params(ty: &Ty, args: &[Ty]) -> Option<Ty> {
 fn immediate_pair(layout: &crate::hir::layout::Layout) -> bool {
     use crate::hir::layout::{Layout, PairKind};
     matches!(layout, Layout::Pair(PairKind::Option | PairKind::Result | PairKind::Enum(_)))
+}
+
+/// [`crate::hir::tables::GlobalTables`] over the module `const` tables the
+/// compiler has recorded.
+struct HirTables<'c> {
+    c: &'c Compiler,
+    hir: &'c HirBody,
+}
+
+impl crate::hir::tables::GlobalTables for HirTables<'_> {
+    fn len(&self, id: HirId) -> Option<usize> {
+        self.c.hir_frozen_table(self.hir, id).map(<[_]>::len)
+    }
+
+    fn elem(&self, id: HirId, k: usize, read: HirId) -> Option<crate::hir::Lit> {
+        use crate::const_fold::ConstValue;
+        use crate::hir::Lit;
+        let value = self.c.hir_frozen_table(self.hir, id)?.get(k)?.as_ref()?;
+        let ty = apply_ty_prune(self.c.checker.subst(), Compiler::hir_ty(self.hir, read)?);
+        let prim = lower::primitive(&ty);
+        match value {
+            ConstValue::Int(n) if prim == Some(crate::typechecking::ty::INT) => Some(Lit::Int(*n)),
+            ConstValue::Float(f) if prim == Some(crate::typechecking::ty::FLOAT) => Some(Lit::Float(*f)),
+            ConstValue::Bool(b) if prim == Some(crate::typechecking::ty::BOOL) => Some(Lit::Bool(*b)),
+            _ => None,
+        }
+    }
 }
