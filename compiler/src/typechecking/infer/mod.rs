@@ -79,8 +79,6 @@ pub enum ForInKind {
     Array,
     /// Materialise homogeneous tuple elements into a temp array, then array path.
     Tuple { arity: usize },
-    /// `DictEntries` then array path; items are `(string, V)` pairs.
-    Dict,
     /// Resume/Done loop (completion value excluded from body).
     Coroutine,
     /// Lazy range counter loop (`0..n` / `0..=n`).
@@ -109,8 +107,6 @@ pub enum ForInCounted {
         inclusive: bool,
         float: bool,
     },
-    /// `DictEntries` then the array latch (C2b rung 3).
-    Dict,
 }
 
 /// Side-table entry for for-in codegen, keyed by the Loop node id.

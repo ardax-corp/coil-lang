@@ -580,9 +580,6 @@ pub struct HirMirInput<'a> {
     /// bound field's slot and word type (`None`: a wildcard), in pattern
     /// order.
     pub record_pats: HashMap<u32, Vec<Option<(u32, MirTy)>>>,
-    /// `for (k, v) in r` loops over a record: each slot's name (a string
-    /// table index) and word type, in slot order.
-    pub record_iters: HashMap<u32, Vec<(u32, MirTy)>>,
     /// `Vec::push` calls HIR emission inlines.
     pub pushes: HashSet<u32>,
     /// Host native calls whose arguments and result are plain (boxed
@@ -767,8 +764,6 @@ enum AggSrc {
 #[derive(Clone, Copy)]
 enum Items {
     Array,
-    /// A dict's `(key, value)` entries.
-    Dict,
     /// A tuple's items, gathered into an array.
     Tuple(usize),
 }
@@ -3174,12 +3169,6 @@ impl Lower<'_> {
                 body,
                 kind: Some(ForInKind::Array),
             } if self.heap_array(*iterable) => self.for_array(id, pat, *iterable, *body, None, Items::Array),
-            HirKind::ForIn {
-                pat,
-                iterable,
-                body,
-                kind: Some(ForInKind::Dict),
-            } => self.for_array(id, pat, *iterable, *body, None, Items::Dict),
             HirKind::ForIn {
                 pat,
                 iterable,
@@ -5980,40 +5969,10 @@ impl Lower<'_> {
         Ok(Val::V(self.b.ins_array_len(arr).map_err(mir)?))
     }
 
-    /// `for (k, v) in r` over record `r` (`src`): the array of its
-    /// `(name, value)` items, one tuple per slot (the fields sorted by
-    /// name), each name a string constant.
-    fn record_entries(&mut self, id: HirId, src: ValueId) -> Result<ValueId, Refusal> {
-        let words = self.inp.record_iters.get(&id.0).cloned().ok_or("for in record")?;
-        let HirKind::ForIn { iterable, .. } = self.hir.expr(id).kind else {
-            return Err("for in record".into());
-        };
-        let mut fields = match self.expr_ty(iterable).map(strip_readonly) {
-            Some(Ty::Record { fields }) => fields.clone(),
-            _ => return Err("for in record".into()),
-        };
-        fields.sort_by(|a, b| a.0.cmp(&b.0));
-        let mut items = Vec::with_capacity(words.len());
-        for (slot, ((name, w), (_, ty))) in words.into_iter().zip(&fields).enumerate() {
-            // The value rides in its tuple as the record holds it.
-            if is_unit(ty) || self.tuple_item(ty) != Some(w) {
-                return Err("for in record item".into());
-            }
-            let name = self.b.ins_string(name).map_err(mir)?;
-            let v = self.b.ins_heap_field_load(src, slot as u32, w).map_err(mir)?;
-            let kinds = common::pack_word_kinds([common::WORD_POINTER, (self.inp.word_kind)(ty)]);
-            let item = self.b.ins_alloc_kinds(MirAllocKind::Tuple, vec![name, v], kinds).map_err(mir)?;
-            items.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![item]).map_err(mir)?);
-        }
-        let arr = self.b.ins_alloc_kinds(MirAllocKind::Array, items, common::WORD_POINTER).map_err(mir)?;
-        self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![arr]).map_err(mir)
-    }
-
     /// `for x in xs` over a heap array, as HIR emission lowers it: the
     /// length is read once, and the index steps after the body (or at a
-    /// `continue`). A dict loops over its `(key, value)` entries array, a
-    /// tuple over an array of its items. A tuple pattern binds each part
-    /// from the item.
+    /// `continue`). A tuple loops over an array of its items. A tuple
+    /// pattern binds each part from the item.
     fn for_array(&mut self, id: HirId, pat: &HirPat, iterable: HirId, body: HirId, into_iter: Option<Label>, items: Items) -> Result<Val, Refusal> {
         let it_ty = self.expr_ty(iterable).cloned();
         // A user `into_iter`'s array holds the loop's items.
@@ -6023,7 +5982,6 @@ impl Lower<'_> {
                 _ => None,
             },
             (None, Items::Array, Some(t)) => self.inp.elem_word(t),
-            (None, Items::Dict, _) => Some(MirTy::HeapRef),
             (None, Items::Tuple(_), Some(t)) => match strip_readonly(t) {
                 Ty::Tuple(tys) => {
                     let words = tys.iter().map(|t| self.tuple_item(t)).collect::<Option<Vec<_>>>();
@@ -6081,8 +6039,6 @@ impl Lower<'_> {
                 self.b.ins_call(target, vec![src], &abi).map_err(mir)?.0
             }
             (None, Items::Array) => src,
-            // A record's `(name, value)` items, built from its slots.
-            (None, Items::Dict) => self.record_entries(id, src)?,
             (None, Items::Tuple(arity)) => {
                 let mut words = Vec::with_capacity(arity);
                 for k in 0..arity {
@@ -7414,7 +7370,6 @@ fn kind_name(kind: &HirKind) -> &'static str {
             Some(ForInKind::Array) if !matches!(pat, HirPat::Bind(_)) => "for in array pattern",
             Some(ForInKind::Array) => "for in array",
             Some(ForInKind::Tuple { .. }) => "for in tuple",
-            Some(ForInKind::Dict) => "for in dict",
             Some(ForInKind::Coroutine) => "for in coroutine",
             Some(ForInKind::Custom { counted: Some(_), .. }) => "for in counted custom",
             Some(ForInKind::Custom { .. }) => "for in iterator",
