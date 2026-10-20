@@ -4413,6 +4413,16 @@ impl Compiler {
         if forwards && self.trait_method_own_bounds(&class, method).is_empty() {
             return Ok(None);
         }
+        // A generic instance's head (`impl Id for Option<T>`) at an open
+        // argument (`Id::id(o)`, `o: Option<E>`): called as the method call
+        // `o.id()` is (#1609). A structural tuple's has its own call.
+        if inst_args.iter().any(Self::ty_has_var)
+            && !self.checker.generics().structural_tuples().any(|(_, _, f)| f == fqn)
+            && let HirKind::Call { args, .. } = &node.kind
+            && !args.is_empty()
+        {
+            return self.resolve_hir_instance_method(hir, call, method, args, false);
+        }
         self.hir_ground_direct(hir, call, class, inst_args, fqn, method).map(Some)
     }
 
@@ -4500,8 +4510,19 @@ impl Compiler {
             }
             Ok(layout)
         };
-        // A structural thunk (#1479) has no checker signature: its own.
-        let declared_params = self.checker.fn_param_tys(fqn).or_else(|| self.structural_thunk_params.get(fqn).cloned());
+        // A structural thunk (#1479) has no checker signature: its own. A
+        // default body has none either: it is the trait's open signature
+        // (`fn two(T x)` takes the enum object, #1609).
+        let default_sig = || {
+            let (class, method) = fqn.split_once("__default__")?;
+            let scheme = self.checker.typeclass_method_scheme(class, method)?;
+            Some(Self::fun_param_and_ret_tys(&scheme.ty))
+        };
+        let declared_params = self
+            .checker
+            .fn_param_tys(fqn)
+            .or_else(|| self.structural_thunk_params.get(fqn).cloned())
+            .or_else(|| default_sig().map(|(params, _)| params));
         let params = args
             .iter()
             .enumerate()
@@ -4512,7 +4533,7 @@ impl Compiler {
             .collect::<Result<Vec<_>, _>>()?;
         let ret = match sig.and_then(|s| s.ret).map_or_else(|| word(call), Ok) {
             Ok(ret) => ret,
-            Err(_) => own_niche(call, self.checker.fn_return_ty(fqn))?,
+            Err(_) => own_niche(call, self.checker.fn_return_ty(fqn).or_else(|| default_sig().map(|(_, ret)| ret)))?,
         };
         Ok((params, ret))
     }

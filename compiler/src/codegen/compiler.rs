@@ -2159,6 +2159,18 @@ impl Compiler {
     fn emit_dict_adapter_thunk(&mut self, class: &str, method: &str, inst_args: &[Ty], fqn: &str) {
         use crate::hir::synth::Synth;
         use crate::hir::{Builtin, LocalKind};
+        // A generic instance's AST head names its parameters as
+        // constructors (`Option<T>` as `Con("T")`); its adapter is typed in
+        // the checker's head, whose parameters are variables (#1609).
+        let head = self
+            .checker
+            .generics()
+            .instances
+            .iter()
+            .find(|inst| inst.class == class && inst.method_fqns.get(method).is_some_and(|f| f == fqn))
+            .filter(|inst| inst.args.len() == inst_args.len() && inst.args.iter().any(Self::ty_has_var))
+            .map(|inst| inst.args.clone());
+        let inst_args = head.as_deref().unwrap_or(inst_args);
         let raw = self.raw_instance_methods.contains(fqn);
         let sig = self.trait_method_boundary_sig(class, method, inst_args, false);
         if sig.is_none() && !raw {
