@@ -12984,6 +12984,28 @@ impl Checker {
         self.record_ffi_declare_metadata(key, dargs, true);
     }
 
+    /// `invoke`'s function id is the `int` handle `declare` returned, never a
+    /// Coil `fn` (#1666).
+    fn check_ffi_invoke_fn_id(&mut self, id_ty: &Ty, range: Range<usize>) {
+        let pruned = apply_ty_prune(&self.subst, id_ty);
+        let id_ty = crate::typechecking::ty::strip_readonly(&pruned).clone();
+        match unify_with(&self.subst, &int(), &id_ty) {
+            Ok(s) => self.absorb(&s),
+            Err(_) => {
+                let [found] = <[String; 1]>::try_from(self.diag_tys(&[&id_ty])).expect("one type");
+                let _ = self.error_with_help(
+                    ErrorCode::TypeMismatch,
+                    format!("Type mismatch: expected `int`, found `{found}`"),
+                    range,
+                    Some(
+                        "`invoke`'s function id is the `int` that `declare(lib, name, params, ret)` returns, not a Coil function"
+                            .to_string(),
+                    ),
+                );
+            }
+        }
+    }
+
     fn infer_ffi_invoke(&mut self, args: &[Output], range: Range<usize>) -> Ty {
         if self.ffi_fn_in_scope("invoke").is_none() {
             let _ = self.error_with_help(
@@ -12998,7 +13020,8 @@ impl Checker {
         let mut nfixed = 0usize;
         if args.len() == 3 {
             self.infer(&args[0]);
-            self.infer(&args[1]);
+            let id_ty = self.infer(&args[1]);
+            self.check_ffi_invoke_fn_id(&id_ty, args[1].0.into_range());
             if let Some((ty, var, fixed)) = self.ffi_invoke_fn_id_metadata(&args[1]) {
                 ret_ty = ty;
                 variadic = var;
