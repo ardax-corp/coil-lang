@@ -360,10 +360,32 @@ fn rewrite(body: &mut HirBody, local: LocalId, split: &Split) {
                     _ => {}
                 }
             }
+            // An inlined call's clear of the split local clears its fields.
             HirKind::Clear(xs) if xs.contains(&local) => {
-                body.exprs[i].kind = HirKind::Clear(xs.into_iter().filter(|&x| x != local).collect());
+                let mut out: Vec<LocalId> = xs.into_iter().filter(|&x| x != local).collect();
+                for &f in split.fields.values().flatten() {
+                    if !out.contains(&f) {
+                        out.push(f);
+                    }
+                }
+                body.exprs[i].kind = HirKind::Clear(out);
             }
             _ => {}
+        }
+    }
+}
+
+/// An inlined call's clear of `from`, renamed to `to`, clears `to`.
+fn rename_in_clears(body: &mut HirBody, from: LocalId, to: LocalId) {
+    for e in &mut body.exprs {
+        if let HirKind::Clear(xs) = &mut e.kind
+            && let Some(k) = xs.iter().position(|&x| x == from)
+        {
+            if xs.contains(&to) {
+                xs.remove(k);
+            } else {
+                xs[k] = to;
+            }
         }
     }
 }
@@ -447,6 +469,7 @@ fn arm(body: &mut HirBody, a: HirArm, split: &Split) -> HirArm {
                 && !super::lower::assigns_local(body, a.body, f)
             {
                 rename(body, a.body, *b, f);
+                rename_in_clears(body, *b, f);
                 continue;
             }
             let ty = body.local(f).ty.clone();

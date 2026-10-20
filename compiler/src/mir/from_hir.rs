@@ -4848,6 +4848,12 @@ impl Lower<'_> {
             vec![(lo, if lo_ty == MirTy::I64 { MirTy::HeapRef } else { lo_ty })]
         } else if self.inp.pair_locals.contains_key(&local.0) {
             return Err("clear pair local".into());
+        } else if self.inp.slots.get(local.0 as usize).copied().flatten().is_none() && !self.defer_locals.contains_key(&local.0) {
+            // No frame slot: a binding read as its value (an arm's SSA
+            // value, which need not reach this clear), or one emission
+            // never bound (an arm a split enum dropped or renamed to its
+            // field). No frame slot holds it.
+            return Ok(());
         } else {
             vec![(self.slot(local)?, self.local_ty(local)?)]
         };

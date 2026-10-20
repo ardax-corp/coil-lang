@@ -1306,7 +1306,9 @@ impl Compiler {
                             // A two-word field's slot holds its box, as
                             // `new` stores it (`Rep::Word` of a boxed layout).
                             .or_else(|| {
-                                matches!(crate::hir::layout::of_resolved(checker, &apply_ty_prune(checker.subst(), t)), crate::hir::layout::Layout::Pair(_))
+                                // A class parameter's at the made type's arguments.
+                                let at = made.and_then(|m| self.hir_param_field_at(m, t)).unwrap_or_else(|| t.clone());
+                                matches!(crate::hir::layout::of_resolved(checker, &apply_ty_prune(checker.subst(), &at)), crate::hir::layout::Layout::Pair(_))
                                     .then_some(crate::mir::MirTy::HeapRef)
                             })
                             // Any other tuple is a heap tuple object (#1170).
@@ -2018,6 +2020,25 @@ impl Compiler {
                 .any(|t| Self::finalized(&self.checker, &apply_ty_prune(self.checker.subst(), t)))
             {
                 return Err("drop-value".to_string());
+            }
+            // A `match` keeps its operand (and an arm its bindings) in the
+            // caller's frame past the call, where an object in it would
+            // stay rooted until the frame slot is reused (#ISSUE): keep the
+            // frame of a callee whose `match` holds one.
+            let holds = |t: &Option<Ty>| t.as_ref().is_none_or(|t| self.holds_object(t, 4));
+            let match_holds = callee.exprs.iter().any(|e| match &e.kind {
+                HirKind::Match { scrutinee, arms } => {
+                    holds(&callee.expr(*scrutinee).ty)
+                        || arms.iter().any(|a| {
+                            let mut hit = false;
+                            Self::hir_pat_locals(&a.pat, &mut |l| hit |= holds(&callee.local(l).ty));
+                            hit
+                        })
+                }
+                _ => false,
+            });
+            if match_holds {
+                return Err("match-holds-object".to_string());
             }
             // Spliced locals live on in the caller's frame, where a heap
             // value would stay reachable: those are cleared after the
@@ -6161,6 +6182,35 @@ impl Compiler {
 
     /// Payload field types of `variant` in a value of type `ty`, in
     /// declaration order.
+    /// Whether a `ty` value can reach an object or aggregate (what a weak
+    /// reference or a finalizer observes), looking `depth` payloads deep.
+    fn holds_object(&self, ty: &Ty, depth: usize) -> bool {
+        let ty = apply_ty_prune(self.checker.subst(), ty);
+        match lower::classify(&self.checker, &ty) {
+            Some(ValueClass::Scalar | ValueClass::Unit | ValueClass::Opaque) => false,
+            Some(ValueClass::Enum) if depth > 0 => {
+                let head = match crate::typechecking::ty::strip_readonly(&ty) {
+                    Ty::Constructor { owner, .. } => match owner.as_ref() {
+                        Ty::App(h, _) => h.as_ref().clone(),
+                        o => o.clone(),
+                    },
+                    Ty::App(h, _) => h.as_ref().clone(),
+                    t => t.clone(),
+                };
+                let Ty::Con(name) = head else {
+                    return true;
+                };
+                let Some(variants) = self.checker.enum_variants(&name) else {
+                    return true;
+                };
+                variants.iter().any(|(v, _, _)| {
+                    Self::payload_tys_of(&self.checker, &ty, v).is_none_or(|ps| ps.iter().any(|p| self.holds_object(p, depth - 1)))
+                })
+            }
+            _ => true,
+        }
+    }
+
     fn hir_payload_tys(&self, ty: &Ty, variant: &str) -> Option<Vec<Ty>> {
         Self::payload_tys_of(&self.checker, &apply_ty_prune(self.checker.subst(), ty), variant)
     }

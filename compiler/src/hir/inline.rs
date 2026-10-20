@@ -112,7 +112,6 @@ pub fn inlinable(callee: &HirBody, budget: usize) -> Result<Shape, &'static str>
             | HirKind::Resume { .. }
             | HirKind::Loop { .. }
             | HirKind::ForIn { .. }
-            | HirKind::Match { .. }
             | HirKind::Builtin { .. }
             | HirKind::Break
             | HirKind::Continue
