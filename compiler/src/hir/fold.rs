@@ -15,14 +15,87 @@ use super::lower::children;
 use super::{BinOp, HirBody, HirExpr, HirId, HirKind, HirPat, HirPatFields, Lit, MakeKind, UnOp};
 use crate::typechecking::ty::{self, Ty};
 
+/// Fold rounds: a local read as a literal ([`propagate_lets`]) can make
+/// another local's `let` a literal, which the next round reads through.
+const ROUNDS: usize = 4;
+
 /// `body` with every fold applied, or `None` when nothing folds.
 pub fn fold(body: &HirBody) -> Option<HirBody> {
     let root = body.root?;
     let mut out = body.clone();
     let mut hits = 0;
-    post(&mut out, root, &mut hits);
-    drop_unread(&mut out, root, &mut hits);
+    for _ in 0..ROUNDS {
+        post(&mut out, root, &mut hits);
+        drop_unread(&mut out, root, &mut hits);
+        if propagate_lets(&mut out, root, &mut hits) == 0 {
+            break;
+        }
+    }
     (hits > 0).then_some(out)
+}
+
+/// A scalar local bound once by a `let` of a literal (or of a block that
+/// is just one, a folded `if`'s value) and never written again reads as
+/// that literal, so what it feeds folds too: an inlined callee's
+/// parameter bound to the caller's `let m = 1`, say. Returns how many
+/// reads it rewrote.
+fn propagate_lets(body: &mut HirBody, root: HirId, hits: &mut usize) -> usize {
+    use std::collections::HashMap;
+    let mut lets: HashMap<super::LocalId, Option<Lit>> = HashMap::new();
+    let mut written = std::collections::HashSet::new();
+    let mut places = std::collections::HashSet::new();
+    let mut reads = Vec::new();
+    let mut stack = vec![root];
+    while let Some(k) = stack.pop() {
+        match &body.expr(k).kind {
+            HirKind::Let { local, init } => {
+                let lit = init.and_then(|v| literal_value(body, v)).filter(|_| {
+                    let local_ty = body.local(*local).ty.as_ref();
+                    init.is_some_and(|v| body.expr(v).ty.as_ref() == local_ty)
+                });
+                // A second `let` of the same local is a second write.
+                if lets.insert(*local, lit).is_some() {
+                    written.insert(*local);
+                }
+            }
+            HirKind::Assign { place, .. } | HirKind::Append { base: place, .. } => {
+                places.insert(*place);
+                if let HirKind::Local(l) = body.expr(*place).kind {
+                    written.insert(l);
+                }
+            }
+            HirKind::Clear(ls) => written.extend(ls.iter().copied()),
+            HirKind::Local(l) if !places.contains(&k) => reads.push((k, *l)),
+            _ => {}
+        }
+        stack.extend(children(body, k).into_iter().rev());
+    }
+    let mut n = 0;
+    for (k, l) in reads {
+        if written.contains(&l) || body.local(l).captured {
+            continue;
+        }
+        let Some(Some(lit)) = lets.get(&l) else { continue };
+        let e = &mut body.exprs[k.0 as usize];
+        e.kind = HirKind::Lit(lit.clone());
+        e.node = None;
+        n += 1;
+    }
+    *hits += n;
+    n
+}
+
+/// The scalar literal `id` is, looking through blocks that hold only it.
+fn literal_value(body: &HirBody, id: HirId) -> Option<Lit> {
+    match &body.expr(id).kind {
+        HirKind::Lit(l @ (Lit::Int(_) | Lit::Float(_) | Lit::Bool(_))) => Some(l.clone()),
+        HirKind::Block { stmts, tail: Some(t) } if stmts.iter().all(|&s| is_empty_block(body, s)) => literal_value(body, *t),
+        _ => None,
+    }
+}
+
+fn is_empty_block(body: &HirBody, id: HirId) -> bool {
+    matches!(&body.expr(id).kind, HirKind::Block { stmts, tail: None } if stmts.is_empty())
 }
 
 /// Statements that do nothing go: `x = x` (an identity folded away,
@@ -50,7 +123,7 @@ fn drop_unread(body: &mut HirBody, root: HirId, hits: &mut usize) {
         }
         stack.extend(children(body, k).into_iter().rev());
     }
-    let pure = |body: &HirBody, v: HirId| matches!(body.expr(v).kind, HirKind::Lit(_) | HirKind::Local(_));
+    let pure = |body: &HirBody, v: HirId| matches!(body.expr(v).kind, HirKind::Lit(_) | HirKind::Local(_)) || literal_value(body, v).is_some();
     for k in nodes.into_iter().filter(|k| stmts.contains(k)) {
         let gone = match body.expr(k).kind {
             HirKind::Let { local, init } => {

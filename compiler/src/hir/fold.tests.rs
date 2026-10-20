@@ -119,3 +119,17 @@ fn stores_to_a_local_nothing_reads_go() {
     // A store of something with an effect stays.
     assert_eq!(assigns_left("fn g() -> int { return 1; } fn f(int x) -> int { let j = 0; j = g(); return x; }"), 1);
 }
+
+#[test]
+fn a_local_bound_once_to_a_literal_folds_into_its_reads() {
+    // `m` is never written again, so its reads are the literal and the
+    // arithmetic and comparisons on it fold in turn.
+    assert_eq!(
+        folded_return("fn f() -> int { let m = 1; let b = m * 2 + 1; if b > 100 { return 0; } return b; }"),
+        "Lit(Int(3))"
+    );
+    // A `let` that folds to a literal reads as one in the next round.
+    assert_eq!(folded_return("fn f() -> int { let m = 1; let k = m + 1; let j = k * 3; return j; }"), "Lit(Int(6))");
+    // A local written again keeps its reads.
+    assert_eq!(folded_return("fn f(int x) -> int { let m = 1; if x > 0 { m = 2; } return m * 2; }"), "x IntMul lit");
+}

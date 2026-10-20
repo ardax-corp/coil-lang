@@ -3544,12 +3544,14 @@ fn const_while_false_eliminates_loop() {
 fn for_with_break_is_not_unrolled() {
     use common::Instruction;
     let (bc, _pool) = compile_src(
-        // A bound the compiler cannot fold, so the exit test stays.
+        // A bound the compiler cannot fold, so the exit test stays (`i`
+        // is written, so it does not read as its literal `0`).
         "fn f(int n) -> int { \
 let s = 0; \
 let i = 0; \
 while i < n { \
   s = s + i; \
+  i = i + 1; \
   break; \
 } \
 return s; \
