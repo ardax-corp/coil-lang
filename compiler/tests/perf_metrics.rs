@@ -2084,6 +2084,67 @@ fn readonly_types_compile_to_the_same_bytecode_as_plain() {
     }
 }
 
+/// A `readonly class` (#1558): instances, methods returning new ones,
+/// `readonly` views of them, and `==` through the implied `Eq`.
+const READONLY_CLASS: &str = "
+readonly class Point {
+    pub x: int,
+    pub y: int,
+}
+
+impl Point {
+    pub fn moved(int dx) -> Point {
+        return new Point(self.x + dx, self.y);
+    }
+}
+
+fn total(readonly Point p) -> int {
+    return p.x + p.y;
+}
+
+fn step(int i) -> int {
+    let p = new Point(i, i + 1);
+    return total(p.moved(2)) + p.y;
+}
+
+fn main() {
+    let acc = 0;
+    let i = 0;
+    while i < 100 {
+        acc = acc + step(i);
+        i = i + 1;
+    }
+    if new Point(1, 2) == new Point(1, 2) {
+        acc = acc + 1;
+    }
+    if acc < 0 {
+        panic(\"negative\");
+    }
+}
+";
+
+/// #1558: a `readonly class` compiles to the same bytecode as a plain
+/// class deriving `Eq` and `Hash`: immutability is checked, not run.
+#[test]
+fn readonly_class_compiles_to_the_same_bytecode_as_plain() {
+    let plain = READONLY_CLASS
+        .replace("readonly class", "#[derive(Eq, Hash)]\nclass")
+        .replace("readonly ", "");
+    // The implied and the written derives run on the macro host.
+    comptime::install();
+    for level in [compiler::OptLevel::None, compiler::OptLevel::Standard] {
+        let (ro, _) = compile_src_at(READONLY_CLASS, level);
+        let (pl, _) = compile_src_at(&plain, level);
+        let ops = |bc: &[Byte]| bc.iter().map(|b| *b.bytecode()).collect::<Vec<_>>();
+        assert!(
+            ro == pl,
+            "{level:?}: `readonly class` changed the bytecode\nreadonly: {:?}\nplain:    {:?}",
+            ops(&ro),
+            ops(&pl)
+        );
+    }
+}
+
 /// #1555: a generic function called with a `T` and with a `readonly T`
 /// gets one instance, not one per qualifier.
 #[test]
