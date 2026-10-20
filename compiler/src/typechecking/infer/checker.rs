@@ -212,6 +212,7 @@ impl Checker {
             bare_patterns_by_span: HashMap::new(),
             bare_cases_by_module: HashMap::new(),
             pending_exhaustive: Vec::new(),
+            pending_weak_args: Vec::new(),
             async_functions: std::collections::HashSet::new(),
             async_depth: 0,
             current_yield_ty: None,
@@ -1612,6 +1613,7 @@ impl Checker {
         self.ffi_exec_names.clear();
         self.variadic_call_arg_tags.clear();
         self.pending_exhaustive.clear();
+        self.pending_weak_args.clear();
         self.async_functions.clear();
         self.async_depth = 0;
         self.current_yield_ty = None;
@@ -1736,6 +1738,7 @@ impl Checker {
         };
         // Frame stays open; see doc-comment above.
         self.run_pending_exhaustiveness();
+        self.run_pending_weak_checks();
 
         // `test("…") { … }` cases provide a virtual main, reject a
         // user-written `fn main` in the same file.
@@ -5816,6 +5819,12 @@ impl Checker {
 
         if self.thread_fn_in_scope(&ident) == Some(ThreadBuiltin::Spawn) {
             return self.infer_thread_spawn_call(&arg_tys, args.as_deref(), range);
+        }
+
+        if self.gc_fn_in_scope(&ident) == Some(GcBuiltin::Weak)
+            && let Some(arg) = arg_tys.first()
+        {
+            self.pending_weak_args.push((arg.clone(), range.clone()));
         }
 
         self.maybe_record_ffi_param_invoke_flow_for_call(&ident, &flat_args);
@@ -17553,6 +17562,29 @@ impl Checker {
     /// point the substitution is closed, so the scrutinee type is
     /// fully resolved (any free type variables that were bound
     /// since the match site are visible here).
+    /// E0119 for each `gc::weak` argument that resolved to a readonly
+    /// class instance (#1644, design Q9). A weak handle observes the
+    /// instance's identity and the moment it is collected, so readonly
+    /// class instances could not be treated as values (#1562).
+    fn run_pending_weak_checks(&mut self) {
+        let pending = std::mem::take(&mut self.pending_weak_args);
+        for (ty, range) in pending {
+            let resolved = apply_ty_prune(&self.subst, &ty);
+            if !self.is_readonly_class_ty(&resolved) {
+                continue;
+            }
+            let shown = self.diag_ty(&resolved);
+            self.error_with_help(
+                ErrorCode::GenericTypeError,
+                format!("`weak()` is not allowed on `{shown}`, an instance of a readonly class"),
+                range,
+                Some(format!(
+                    "a readonly class instance is a value, with no identity or lifetime to observe; keep the `{shown}` itself, or make it a plain `class` if you need a weak handle"
+                )),
+            );
+        }
+    }
+
     fn run_pending_exhaustiveness(&mut self) {
         // Drain into a local so we can release the borrow on
         // `self` before mutating `self.messages`.
