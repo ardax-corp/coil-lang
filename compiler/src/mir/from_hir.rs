@@ -2380,7 +2380,7 @@ impl Lower<'_> {
         };
         let (lo, hi) = (self.fit(lo, MirTy::I64)?, self.fit(hi, MirTy::I64)?);
         let type_id = rl::range_heap_type_id(inclusive);
-        let obj = self.b.ins_alloc(MirAllocKind::Object { type_id, nfields: 2 }, Vec::new()).map_err(mir)?;
+        let obj = self.b.ins_alloc(MirAllocKind::Object { type_id, nfields: 2, record: false }, Vec::new()).map_err(mir)?;
         let obj = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?;
         self.b.ins_heap_field_store(obj, lo, 0).map_err(mir)?;
         self.b.ins_heap_field_store(obj, hi, 1).map_err(mir)?;
@@ -2399,7 +2399,7 @@ impl Lower<'_> {
         // A numeric range: its typed object, start and end its fields.
         if let Some(crate::hir::layout::PairKind::Range { inclusive }) = crate::typechecking::return_layout::two_word_range_kind(ty) {
             let type_id = crate::typechecking::return_layout::range_heap_type_id(inclusive);
-            let obj = self.b.ins_alloc(MirAllocKind::Object { type_id, nfields: 2 }, Vec::new()).map_err(mir)?;
+            let obj = self.b.ins_alloc(MirAllocKind::Object { type_id, nfields: 2, record: false }, Vec::new()).map_err(mir)?;
             let obj = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?;
             self.b.ins_heap_field_store(obj, lo, 0).map_err(mir)?;
             self.b.ins_heap_field_store(obj, hi, 1).map_err(mir)?;
@@ -2996,7 +2996,7 @@ impl Lower<'_> {
                 }
                 let slots = slots.into_iter().collect::<Option<Vec<_>>>().ok_or("record slot")?;
                 let nfields = slots.len() as u32;
-                let obj = self.b.ins_alloc(MirAllocKind::Object { type_id, nfields }, Vec::new()).map_err(mir)?;
+                let obj = self.b.ins_alloc(MirAllocKind::Object { type_id, nfields, record: true }, Vec::new()).map_err(mir)?;
                 let obj = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?;
                 for (slot, v) in slots.into_iter().enumerate() {
                     self.b.ins_heap_field_store(obj, v, slot as u32).map_err(mir)?;
@@ -3862,7 +3862,7 @@ impl Lower<'_> {
                     }
                     words.push(self.b.use_local(slot, ty).map_err(mir)?);
                 }
-                let obj = self.b.ins_alloc(MirAllocKind::Object { type_id, nfields }, Vec::new()).map_err(mir)?;
+                let obj = self.b.ins_alloc(MirAllocKind::Object { type_id, nfields, record: false }, Vec::new()).map_err(mir)?;
                 let obj = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?;
                 for (i, v) in words.into_iter().enumerate() {
                     self.b.ins_heap_field_store(obj, v, i as u32).map_err(mir)?;
@@ -5261,7 +5261,7 @@ impl Lower<'_> {
             return Ok(Val::Never);
         };
         let nfields = words.len() as u32;
-        let obj = self.b.ins_alloc(MirAllocKind::Object { type_id, nfields }, Vec::new()).map_err(mir)?;
+        let obj = self.b.ins_alloc(MirAllocKind::Object { type_id, nfields, record: false }, Vec::new()).map_err(mir)?;
         let obj = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?;
         for (slot, v) in words.into_iter().enumerate() {
             self.b.ins_heap_field_store(obj, v, slot as u32).map_err(mir)?;

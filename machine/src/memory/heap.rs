@@ -1858,6 +1858,10 @@ pub struct ObjInstance {
     pub type_id: u32,
     /// Set when `drop` has run (GC or explicit); drop must not run twice.
     pub finalized: bool,
+    /// A record (`{ a: 1 }`, or one the host builds): `==` compares two of
+    /// one `type_id` slot by slot. A class instance compares by identity
+    /// (coil-lang#1618).
+    pub record: bool,
 }
 
 impl Default for ObjInstance {
@@ -1866,6 +1870,7 @@ impl Default for ObjInstance {
             storage: InstanceStorage::Table(Table::default()),
             type_id: 0,
             finalized: false,
+            record: false,
         }
     }
 }
@@ -1891,7 +1896,15 @@ impl ObjInstance {
             storage,
             type_id,
             finalized: false,
+            record: false,
         }
+    }
+
+    /// Mark this instance a record ([`Self::record`]).
+    #[must_use]
+    pub fn as_record(mut self, record: bool) -> Self {
+        self.record = record;
+        self
     }
 
     pub fn set(&mut self, key: RefString, value: Member) {
@@ -1945,6 +1958,7 @@ impl ObjInstance {
             storage: InstanceStorage::from_vec(slots),
             type_id,
             finalized: false,
+            record: false,
         }
     }
 

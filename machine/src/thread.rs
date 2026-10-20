@@ -201,6 +201,9 @@ pub enum PortableValue {
     Instance {
         type_id: u32,
         fields: Vec<(String, PortableValue)>,
+        /// [`ObjInstance::record`], so a record sent to a thread still
+        /// compares by its fields.
+        record: bool,
     },
     /// A `BoxValue` cell: its tag (what `UnboxValue` checks) and payload.
     Boxed(u16, Box<PortableValue>),
@@ -228,10 +231,11 @@ impl std::fmt::Debug for PortableValue {
                 .field("payload", payload)
                 .field("type_id", type_id)
                 .finish(),
-            Self::Instance { type_id, fields } => f
+            Self::Instance { type_id, fields, record } => f
                 .debug_struct("Instance")
                 .field("type_id", type_id)
                 .field("fields", fields)
+                .field("record", record)
                 .finish(),
             Self::Boxed(tag, inner) => f.debug_tuple("Boxed").field(tag).field(inner).finish(),
             Self::Sender(_) => write!(f, "Sender(..)"),
@@ -262,9 +266,10 @@ impl PartialEq for PortableValue {
                     type_id: y2,
                 },
             ) => t1 == t2 && p1 == p2 && y1 == y2,
-            (Self::Instance { type_id: t1, fields: f1 }, Self::Instance { type_id: t2, fields: f2 }) => {
-                t1 == t2 && f1 == f2
-            }
+            (
+                Self::Instance { type_id: t1, fields: f1, record: r1 },
+                Self::Instance { type_id: t2, fields: f2, record: r2 },
+            ) => t1 == t2 && f1 == f2 && r1 == r2,
             (Self::Boxed(t1, a), Self::Boxed(t2, b)) => t1 == t2 && a == b,
             (Self::Sender(a), Self::Sender(b)) => Arc::ptr_eq(a, b),
             (Self::Receiver(a), Self::Receiver(b)) => Arc::ptr_eq(a, b),
@@ -929,6 +934,7 @@ fn encode_value(
             Ok(PortableValue::Instance {
                 type_id: inst.type_id,
                 fields,
+                record: inst.record,
             })
         }
         Object::Boxed(gc) => {
@@ -1006,18 +1012,18 @@ fn decode_portable(heap: &mut Heap, p: PortableValue) -> Result<Value, ThreadErr
             let (obj, _) = heap.alloc(obj_enum, Object::Enum);
             Ok(Value::from(obj.addr()))
         }
-        PortableValue::Instance { type_id, fields } => {
+        PortableValue::Instance { type_id, fields, record } => {
             if type_id != 0 && !fields.is_empty() && fields.iter().all(|(n, _)| n.is_empty()) {
                 let mut slots = Vec::with_capacity(fields.len());
                 for (_, pv) in fields {
                     slots.push(decode_portable(heap, pv)?);
                 }
-                let inst = ObjInstance::with_slots(type_id, slots);
+                let inst = ObjInstance::with_slots(type_id, slots).as_record(record);
                 let (obj, _) = heap.alloc(inst, Object::Instance);
                 Ok(Value::from(obj.addr()))
             } else {
                 let mut inst = if type_id != 0 {
-                    ObjInstance::with_type_id(type_id)
+                    ObjInstance::with_type_id(type_id).as_record(record)
                 } else {
                     ObjInstance::default()
                 };

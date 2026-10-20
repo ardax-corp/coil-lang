@@ -142,10 +142,13 @@ pub const ARCHIVE_MAJOR: u16 = 4;
 ///      the per-slot `debug_locs` / `debug_lines`, which new archives leave
 ///      empty; `-g0` / `-g1` / `-g2` pick what is kept (coil-lang#1491).
 ///      Older archives still load their dense tables.
+/// 41 — the top bit of `InitTyped`'s and `DenseMakeObject`'s field count
+///      marks a record, which `==` compares slot by slot (coil-lang#1618).
+///      Older archives never set it, and their records compare by identity.
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.
-pub const ARCHIVE_MINOR: u16 = 40;
+pub const ARCHIVE_MINOR: u16 = 41;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -1219,9 +1222,9 @@ mod tests {
     #[test]
     fn archive_version_matches_current_abi() {
         assert_eq!(ARCHIVE_MAJOR, 4);
-        assert_eq!(ARCHIVE_MINOR, 40);
-        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 40));
-        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.40");
+        assert_eq!(ARCHIVE_MINOR, 41);
+        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 41));
+        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.41");
     }
 
     #[test]

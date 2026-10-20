@@ -55,7 +55,7 @@ fn alloc_metadata_record(heap: &mut Heap, meta: &Metadata) -> Value {
         Value::from(modified_unix),
         Value::from(meta.len() as i64),
     ];
-    let (obj, _) = heap.alloc(ObjInstance::with_slots(common::FS_METADATA_TYPE_ID, slots), Object::Instance);
+    let (obj, _) = heap.alloc(ObjInstance::with_slots(common::FS_METADATA_TYPE_ID, slots).as_record(true), Object::Instance);
     Value::from(obj.addr())
 }
 

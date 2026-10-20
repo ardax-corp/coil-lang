@@ -255,8 +255,11 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
                 write!(f, "[{kinds}]")?;
             }
             match *kind {
-                MirAllocKind::Object { type_id, nfields } => {
+                MirAllocKind::Object { type_id, nfields, record } => {
                     write!(f, " {type_id}, {nfields}")?;
+                    if record {
+                        write!(f, ", record")?;
+                    }
                 }
                 MirAllocKind::Enum { tag } => write!(f, " {tag}")?,
                 MirAllocKind::DropEnum { tag, type_id } => write!(f, " {tag}, {type_id}")?,
@@ -817,7 +820,8 @@ impl<'a> Parser<'a> {
                     let type_id = self.uint()? as u32;
                     self.expect(',')?;
                     let nfields = self.uint()? as u32;
-                    MirAllocKind::Object { type_id, nfields }
+                    let record = self.eat_str(", record");
+                    MirAllocKind::Object { type_id, nfields, record }
                 }
                 "enum" => MirAllocKind::Enum {
                     tag: self.uint()? as u32,

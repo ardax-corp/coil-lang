@@ -3605,16 +3605,20 @@ fn dense_make_object(
     dest: u8,
     loc: DebugLoc,
 ) -> Result<Option<IlOp>, LowerError> {
-    let MirAllocKind::Object { type_id, nfields } = kind else {
+    let MirAllocKind::Object { type_id, nfields, record } = kind else {
         return Ok(None);
     };
-    let nfields =
-        u8::try_from(nfields).map_err(|_| LowerError::Refused("DenseMakeObject nfields".into()))?;
+    // The field count's top bit marks a record: a wider object is
+    // `InitTyped`'s.
+    let Some(nfields) = u8::try_from(nfields).ok().filter(|&n| n < 0x80) else {
+        return Ok(None);
+    };
     let type_id =
         u16::try_from(type_id).map_err(|_| LowerError::Refused("DenseMakeObject type_id".into()))?;
+    let record = if record { dense::MAKE_OBJECT_RECORD_BIT } else { 0 };
     Ok(Some(IlOp::from_plain_byte(
         Byte::new(Instruction::DenseMakeObject)
-            .with_operand_u32(dense::pack_make_object(dest, nfields, type_id)),
+            .with_operand_u32(dense::pack_make_object(dest, nfields, type_id) | record),
         loc,
     )))
 }
@@ -3748,10 +3752,16 @@ fn il_for_alloc_op(kind: MirAllocKind, arity: u32, kinds: u8, loc: DebugLoc) -> 
             Ok(IlOp::MakeEnum { kinds, tag, arity, loc })
         }
         MirAllocKind::DropEnum { .. } => Err(LowerError::Refused("drop enum op".into())),
-        MirAllocKind::Object { type_id, nfields } => Ok(IlOp::byte(
-            Byte::new(Instruction::InitTyped)
-                .with_operand_u32(common::pack_init_typed(type_id, nfields)),
-        )),
+        MirAllocKind::Object { type_id, nfields, record } => {
+            if nfields > 0x7FFF {
+                return Err(LowerError::Refused("InitTyped nfields".into()));
+            }
+            let record = if record { common::INIT_TYPED_RECORD_BIT } else { 0 };
+            Ok(IlOp::byte(
+                Byte::new(Instruction::InitTyped)
+                    .with_operand_u32(common::pack_init_typed(type_id, nfields) | record),
+            ))
+        }
         MirAllocKind::Coro { target } => Ok(IlOp::Entry {
             kind: crate::il::EntryKind::MakeCoro,
             arity,

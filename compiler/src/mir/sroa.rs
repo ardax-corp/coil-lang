@@ -217,6 +217,7 @@ mod tests {
                 MirAllocKind::Object {
                     type_id: 1,
                     nfields: 1,
+                    record: false,
                 },
                 Vec::new(),
             )

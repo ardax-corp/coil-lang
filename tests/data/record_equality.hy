@@ -1,11 +1,17 @@
 // `==` / `!=` on records is structural, as on tuples: same fields, each
 // compared as `==` compares it (#1618). Strings compare by content, nested
 // records by their fields, and records inside arrays, tuples and Options
-// compare the same way. Two names for one record are still equal.
+// compare the same way. Two names for one record are still equal. A
+// `float` field compares by IEEE 754, as scalar `float` `==` does.
 use tests::assert;
 
 fn build(string a, string b) -> string {
     return a + b;
+}
+
+fn nan() -> float {
+    let z = 0.0;
+    return z / z;
 }
 
 fn id<T>(T x) -> T {
@@ -78,4 +84,14 @@ test("records inside Options and enums") {
     assert!(Holder::Held({ n: 1, s: build("h", "i") }) == Holder::Held({ n: 1, s: "hi" }));
     assert!(Holder::Held({ n: 1, s: "hi" }) != Holder::Held({ n: 2, s: "hi" }));
     assert!(Holder::Held({ n: 1, s: "hi" }) != Holder::Empty);
+}
+
+test("float fields compare by IEEE 754") {
+    let n = nan();
+    assert!({ f: 0.0 } == { f: -0.0 });
+    assert!({ f: n } != { f: n });
+    assert!(!({ f: n, k: 1 } == { f: n, k: 1 }));
+    assert!({ p: { f: -0.0 }, s: "a" } == { p: { f: 0.0 }, s: "a" });
+    assert!([{ f: 0.0 }] == [{ f: -0.0 }]);
+    assert!(({ f: 0.0 }, 1) == ({ f: -0.0 }, 1));
 }

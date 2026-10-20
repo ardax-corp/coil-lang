@@ -576,10 +576,13 @@ pub enum MirAllocKind {
     Array,
     Tuple,
     /// `InitTyped` (`type_id`, `nfields`). Heap fields are SSA for maps (D1);
-    /// dense Object `DenseMakeObject` is D2.
+    /// dense Object `DenseMakeObject` is D2. `record` marks a record, which
+    /// `==` compares slot by slot (coil-lang#1618); a class instance
+    /// compares by identity.
     Object {
         type_id: u32,
         nfields: u32,
+        record: bool,
     },
     Enum {
         tag: u32,

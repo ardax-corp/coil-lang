@@ -352,8 +352,9 @@ impl<const S: usize> Machine<S> {
                 }
                 Instruction::InitTyped => {
                     let (type_id, nfields) = unpack_init_typed(opcode.operand_u32());
+                    let record = common::init_typed_is_record(opcode.operand_u32());
                     let (_, mut r) = self.heap.alloc(
-                        ObjInstance::with_type_id_and_fields(type_id, nfields as usize),
+                        ObjInstance::with_type_id_and_fields(type_id, nfields as usize).as_record(record),
                         Object::Instance,
                     );
                     let _ = r.as_mut();
@@ -1108,10 +1109,11 @@ impl<const S: usize> Machine<S> {
                 Instruction::DenseMakeObject => {
                     let (dest, nfields, type_id) =
                         common::dense::unpack_make_object(opcode.operand_u32());
+                    let record = common::dense::make_object_is_record(opcode.operand_u32());
                     let dest = dest as usize;
                     promise!(sp + dest < stack_cap);
                     let (_, mut r) = self.heap.alloc(
-                        ObjInstance::with_type_id_and_fields(type_id, nfields as usize),
+                        ObjInstance::with_type_id_and_fields(type_id, nfields as usize).as_record(record),
                         Object::Instance,
                     );
                     let _ = r.as_mut();

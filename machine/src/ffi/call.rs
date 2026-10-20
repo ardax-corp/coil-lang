@@ -371,7 +371,7 @@ fn unpack_struct(
     use crate::memory::ObjInstance;
     // A record: a slotted object, its slots the fields sorted by name.
     let slots = vec![Value::default(); layout.fields.len()];
-    let (obj, mut gc) = heap.alloc(ObjInstance::with_slots(common::FFI_STRUCT_TYPE_ID, slots), Object::Instance);
+    let (obj, mut gc) = heap.alloc(ObjInstance::with_slots(common::FFI_STRUCT_TYPE_ID, slots).as_record(true), Object::Instance);
     for (i, (_, fty)) in layout.fields.iter().enumerate() {
         let off = *layout
             .offsets

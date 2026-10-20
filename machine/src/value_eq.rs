@@ -5,6 +5,9 @@
 //! Strings compare by UTF-8 content (interned or not). Tuples compare
 //! element-wise like arrays. Boxed `ObjEnum` values compare by tag and payload
 //! (so `Result::Ok(x) == Result::Ok(x)` holds when the constructs still box).
+//! Records (instances marked [`ObjInstance::record`]) of one type id compare
+//! slot by slot, a slot of scalar word kind by its word (coil-lang#1618);
+//! class instances compare by identity.
 //! Heap-heap Result `Err` (`pointer | 1`) never equals an `Ok`; two `Err`s
 //! compare their payloads.
 //!
@@ -16,7 +19,7 @@ use std::collections::HashMap;
 
 use common::Value;
 
-use crate::memory::{Heap, Member, Object};
+use crate::memory::{Heap, Member, ObjInstance, Object};
 
 /// Deep / structural equality for VM values.
 pub fn values_eq(heap: &Heap, a: Value, b: Value) -> bool {
@@ -61,6 +64,7 @@ fn flat_eq(heap: &Heap, a: Value, b: Value) -> Option<bool> {
             }
         }
         (Object::Array(_) | Object::Tuple(_) | Object::Boxed(_), _) => None,
+        (Object::Instance(ga), Object::Instance(gb)) if same_record(ga.as_ref(), gb.as_ref()) => None,
         _ => Some(false),
     }
 }
@@ -141,20 +145,41 @@ fn values_eq_rec(
         (Object::Boxed(ga), Object::Boxed(gb)) => {
             members_eq(heap, &ga.as_ref().payload, &gb.as_ref().payload, fwd, rev)
         }
+        (Object::Instance(ga), Object::Instance(gb)) if same_record(ga.as_ref(), gb.as_ref()) => {
+            let (ra, rb) = (ga.as_ref(), gb.as_ref());
+            let kinds = heap.class_field_kinds(ra.type_id);
+            let (sa, sb) = (ra.slots().unwrap_or(&[]), rb.slots().unwrap_or(&[]));
+            sa.len() == sb.len()
+                && sa.iter().zip(sb).enumerate().all(|(i, (x, y))| {
+                    if kinds.get(i) == Some(&common::WORD_SCALAR) {
+                        x.raw() == y.raw()
+                    } else {
+                        values_eq_rec(heap, *x, *y, fwd, rev)
+                    }
+                })
+        }
         _ => false,
     }
+}
+
+/// Two records of one type: `==` compares their slots. A class instance
+/// (or a dict) is never one, so it compares by identity.
+fn same_record(a: &ObjInstance, b: &ObjInstance) -> bool {
+    a.record && b.record && a.type_id == b.type_id
 }
 
 /// The static shape of an aggregate whose leaves include `float`s, as the
 /// compiler encodes it for [`values_eq_shaped`]: `f` a float word, `w` any
 /// other value (compared by [`values_eq`]), `a` then the element shape of
 /// an array or `Vec`, `t` then a count digit and each element's shape of a
-/// tuple.
+/// tuple, `r` then a count digit and each slot's shape (its fields sorted by
+/// name) of a record.
 enum Shape {
     Float,
     Word,
     Array(Box<Shape>),
     Tuple(Vec<Shape>),
+    Record(Vec<Shape>),
 }
 
 fn parse_shape(bytes: &[u8], pos: &mut usize) -> Option<Shape> {
@@ -164,10 +189,11 @@ fn parse_shape(bytes: &[u8], pos: &mut usize) -> Option<Shape> {
         b'f' => Shape::Float,
         b'w' => Shape::Word,
         b'a' => Shape::Array(Box::new(parse_shape(bytes, pos)?)),
-        b't' => {
+        b't' | b'r' => {
             let n = bytes.get(*pos)?.checked_sub(b'0')?;
             *pos += 1;
-            Shape::Tuple((0..n).map(|_| parse_shape(bytes, pos)).collect::<Option<_>>()?)
+            let items = (0..n).map(|_| parse_shape(bytes, pos)).collect::<Option<_>>()?;
+            if c == b't' { Shape::Tuple(items) } else { Shape::Record(items) }
         }
         _ => return None,
     })
@@ -202,6 +228,15 @@ fn shaped_eq(heap: &Heap, a: Value, b: Value, shape: &Shape) -> bool {
                 ea.len() == items.len()
                     && eb.len() == items.len()
                     && ea.iter().zip(eb.iter()).zip(items).all(|((x, y), s)| shaped_eq(heap, *x, *y, s))
+            }
+            _ => values_eq(heap, a, b),
+        },
+        Shape::Record(items) => match (heap.find_object_by_addr(a.raw() as u64), heap.find_object_by_addr(b.raw() as u64)) {
+            (Some(Object::Instance(ga)), Some(Object::Instance(gb))) if same_record(ga.as_ref(), gb.as_ref()) => {
+                let (ea, eb) = (ga.as_ref().slots().unwrap_or(&[]), gb.as_ref().slots().unwrap_or(&[]));
+                ea.len() == items.len()
+                    && eb.len() == items.len()
+                    && ea.iter().zip(eb).zip(items).all(|((x, y), s)| shaped_eq(heap, *x, *y, s))
             }
             _ => values_eq(heap, a, b),
         },
@@ -471,5 +506,56 @@ mod tests {
         assert!(values_eq(&heap, ok, ok));
         assert!(values_eq(&heap, err, err));
         assert!(!values_eq(&heap, ok, err));
+    }
+
+    fn instance(heap: &mut Heap, type_id: u32, record: bool, slots: Vec<Value>) -> Value {
+        let (o, _) = heap.alloc(
+            crate::memory::ObjInstance::with_slots(type_id, slots).as_record(record),
+            Object::Instance,
+        );
+        Value::from(o.addr())
+    }
+
+    /// Records of one type compare slot by slot, strings by content
+    /// (coil-lang#1618).
+    #[test]
+    fn records_compare_by_slots() {
+        let mut heap = Heap::default();
+        let (sa, _) = heap.alloc(ObjString::from("x"), Object::String);
+        let (sb, _) = heap.alloc(ObjString::from("x"), Object::String);
+        let a = instance(&mut heap, 3, true, vec![Value::from(1_i64), Value::from(sa.addr())]);
+        let b = instance(&mut heap, 3, true, vec![Value::from(1_i64), Value::from(sb.addr())]);
+        let c = instance(&mut heap, 3, true, vec![Value::from(2_i64), Value::from(sb.addr())]);
+        assert!(values_eq(&heap, a, b));
+        assert!(!values_eq(&heap, a, c));
+        let outer_a = instance(&mut heap, 4, true, vec![a]);
+        let outer_b = instance(&mut heap, 4, true, vec![b]);
+        assert!(values_eq(&heap, outer_a, outer_b));
+    }
+
+    /// Class instances (no record mark) compare by identity, as do a
+    /// record and a class instance, or records of different types.
+    #[test]
+    fn class_instances_compare_by_identity() {
+        let mut heap = Heap::default();
+        let a = instance(&mut heap, 3, false, vec![Value::from(1_i64)]);
+        let b = instance(&mut heap, 3, false, vec![Value::from(1_i64)]);
+        let r = instance(&mut heap, 3, true, vec![Value::from(1_i64)]);
+        let other = instance(&mut heap, 5, true, vec![Value::from(1_i64)]);
+        assert!(values_eq(&heap, a, a));
+        assert!(!values_eq(&heap, a, b));
+        assert!(!values_eq(&heap, a, r));
+        assert!(!values_eq(&heap, r, other));
+    }
+
+    /// A record shape compares `float` slots by IEEE 754.
+    #[test]
+    fn record_shape_compares_floats_by_ieee() {
+        let mut heap = Heap::default();
+        let a = instance(&mut heap, 3, true, vec![Value::from(0.0_f64), Value::from(1_i64)]);
+        let b = instance(&mut heap, 3, true, vec![Value::from(-0.0_f64), Value::from(1_i64)]);
+        let n = instance(&mut heap, 3, true, vec![Value::from(f64::NAN), Value::from(1_i64)]);
+        assert!(values_eq_shaped(&heap, a, b, b"r2fw"));
+        assert!(!values_eq_shaped(&heap, n, n, b"r2fw"));
     }
 }

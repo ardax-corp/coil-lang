@@ -267,7 +267,8 @@ fn format_operands(
         Instruction::LoadField => format!("index={}", byte.operand_u32()),
         Instruction::InitTyped => {
             let (tid, n) = common::unpack_init_typed(byte.operand_u32());
-            format!("type_id={tid} fields={n}")
+            let record = if common::init_typed_is_record(byte.operand_u32()) { " record" } else { "" };
+            format!("type_id={tid} fields={n}{record}")
         }
         Instruction::SetField => match common::set_field_slot_index(byte.operand_u32()) {
             Some(i) => format!("slot={i}"),
@@ -413,7 +414,8 @@ fn format_operands(
         }
         Instruction::DenseMakeObject => {
             let (dest, nfields, type_id) = common::dense::unpack_make_object(byte.operand_u32());
-            format!("r{dest} = new #{type_id} ({nfields} fields)")
+            let record = if common::dense::make_object_is_record(byte.operand_u32()) { " record" } else { "" };
+            format!("r{dest} = new #{type_id} ({nfields} fields){record}")
         }
         _ => {
             let o = byte.operand_u32();

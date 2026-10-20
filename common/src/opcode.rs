@@ -498,14 +498,27 @@ pub const fn pack_dense_make_k(base: u8, arity: u8, kinds: u8) -> u64 {
 }
 
 pub const fn pack_init_typed(type_id: u32, field_count: u32) -> u32 {
-    ((field_count & 0xFFFF) << 16) | (type_id & 0xFFFF)
+    ((field_count & 0x7FFF) << 16) | (type_id & 0xFFFF)
 }
 
-/// Unpack [`pack_init_typed`]: `(type_id, field_count)`.
+/// Set in an `InitTyped` operand (bit 31, the top of the field count)
+/// when the object is a record, which `==` compares slot by slot; a class
+/// instance compares by identity (coil-lang#1618, minor 41).
+pub const INIT_TYPED_RECORD_BIT: u32 = 1 << 31;
+
+/// Unpack [`pack_init_typed`]: `(type_id, field_count)`, without
+/// [`INIT_TYPED_RECORD_BIT`].
 #[inline]
 #[must_use]
 pub const fn unpack_init_typed(operand: u32) -> (u32, u32) {
-    (operand & 0xFFFF, operand >> 16)
+    (operand & 0xFFFF, (operand >> 16) & 0x7FFF)
+}
+
+/// Whether an `InitTyped` operand builds a record ([`INIT_TYPED_RECORD_BIT`]).
+#[inline]
+#[must_use]
+pub const fn init_typed_is_record(operand: u32) -> bool {
+    operand & INIT_TYPED_RECORD_BIT != 0
 }
 
 /// `SetField` stores by slot when this bit is set; `[15:0]` is the index.
@@ -580,16 +593,29 @@ pub mod dense {
     pub const MAKE_TUPLE: u8 = 1;
     pub const MAKE_ENUM: u8 = 2;
 
-    /// Pack [`super::Instruction::DenseMakeObject`].
+    /// Pack [`super::Instruction::DenseMakeObject`]. `nfields` is below
+    /// 128: its top bit is [`MAKE_OBJECT_RECORD_BIT`].
     #[inline]
     pub const fn pack_make_object(dest: u8, nfields: u8, type_id: u16) -> u32 {
-        ((dest as u32) << 24) | ((nfields as u32) << 16) | (type_id as u32)
+        ((dest as u32) << 24) | (((nfields & 0x7F) as u32) << 16) | (type_id as u32)
     }
 
-    /// Unpack [`pack_make_object`]: `(dest, nfields, type_id)`.
+    /// Set in a `DenseMakeObject` operand (the top bit of the field count)
+    /// when the object is a record, as `InitTyped`'s
+    /// [`crate::INIT_TYPED_RECORD_BIT`] (coil-lang#1618, minor 41).
+    pub const MAKE_OBJECT_RECORD_BIT: u32 = 1 << 23;
+
+    /// Unpack [`pack_make_object`]: `(dest, nfields, type_id)`, without
+    /// [`MAKE_OBJECT_RECORD_BIT`].
     #[inline]
     pub const fn unpack_make_object(operand: u32) -> (u8, u8, u32) {
-        ((operand >> 24) as u8, (operand >> 16) as u8, operand & 0xFFFF)
+        ((operand >> 24) as u8, ((operand >> 16) & 0x7F) as u8, operand & 0xFFFF)
+    }
+
+    /// Whether a `DenseMakeObject` operand builds a record.
+    #[inline]
+    pub const fn make_object_is_record(operand: u32) -> bool {
+        operand & MAKE_OBJECT_RECORD_BIT != 0
     }
 
     /// Mnemonic for a [`super::Instruction::DenseBin`] kind byte.
