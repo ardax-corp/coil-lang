@@ -1102,7 +1102,12 @@ impl Pipeline {
         if self.processed.contains(&file) {
             return;
         }
-        let ns = namespace_of_in_roots(&self.roots, &self.project_root, &file);
+        // The embedded core prelude is `core` wherever the roots are.
+        let ns = if file == crate::macros::core_module_path() {
+            Some(crate::macros::CORE_MODULE.to_string())
+        } else {
+            namespace_of_in_roots(&self.roots, &self.project_root, &file)
+        };
         self.processed.push(file.clone());
         self.worklist.push_back(WorkItem {
             file: file.clone(),
