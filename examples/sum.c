@@ -88,6 +88,25 @@ int64_fn_int64 get_doubler(void) {
     return &doubler;
 }
 
+static int64_t noted = 0;
+
+/// Add `a + b` to a running total; returns nothing (for void `extern`
+/// tests: each call must leave the VM's operand stack as it found it).
+void sum_note(void *tag, int64_t a, int64_t b) {
+    (void)tag;
+    noted += a + b;
+}
+
+/// Clear the running total.
+void sum_reset(void) {
+    noted = 0;
+}
+
+/// The running total.
+int64_t sum_noted(void) {
+    return noted;
+}
+
 /// C varargs: sum `n` trailing `int64_t` arguments (for extern `...` tests).
 int64_t sum_n(int64_t n, ...) {
     va_list args;

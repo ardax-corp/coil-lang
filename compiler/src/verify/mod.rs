@@ -112,7 +112,7 @@ pub(crate) fn capture_module(
         return;
     }
     let module = crate::hir::build_module(checker, sidecar, module_path, ast);
-    let checks = encode::verify_module(&module);
+    let checks = encode::verify_module(&module, &|n| checker.is_readonly_class(n));
     VERIFY_CAPTURE.with(|c| {
         if let Some(out) = c.borrow_mut().as_mut() {
             out.push((module_path.to_string(), checks));

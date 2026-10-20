@@ -1419,6 +1419,24 @@ mod tests {
     }
 
     #[test]
+    fn reserved_type_names_are_the_builtin_type_ctors() {
+        // A user type may not take a builtin ctor's name (#1654): the list
+        // the checker rejects must track what is registered here.
+        let mut g = Generics::default();
+        g.register_builtin_type_ctors();
+        let mut registered: Vec<&str> = g
+            .nominal_type_modules
+            .keys()
+            .map(String::as_str)
+            .filter(|n| !common::is_poly_builtin_enum(n))
+            .collect();
+        registered.sort_unstable();
+        let mut reserved = common::BUILTIN_RESERVED_TYPE_NAMES.to_vec();
+        reserved.sort_unstable();
+        assert_eq!(registered, reserved);
+    }
+
+    #[test]
     fn hash_builtin_instances_cover_primitives() {
         let g = Generics::new();
         for ty in [int(), float(), string(), boolean(), unit(), byte()] {

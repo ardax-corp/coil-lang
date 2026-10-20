@@ -13,15 +13,60 @@
 //! A glue function is reserved the first time a call of it is planned (in
 //! a body, a monomorphic clone, a structural `Eq` thunk or another glue)
 //! and emitted with the structural thunks.
+//!
+//! A shared generic body has no ground type to key glue by: `==` on an
+//! aggregate of its type parameters (`Vec<T>`, `(T, int)`, `Option<T>`)
+//! calls an open glue function instead (#1642), one per such type up to
+//! renaming its variables, which takes each variable's `Eq` dictionary
+//! after the two values and compares a bare variable's part through it.
 
 use super::*;
 use crate::hir::{BinOp, Callee, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId, LocalKind, UnOp};
 use crate::hir::synth::Synth;
 use crate::typechecking::generics::Generics;
-use crate::typechecking::ty::{self as coil_ty, strip_readonly};
+use crate::typechecking::ty::{self as coil_ty, TyVarId, strip_readonly};
 
 /// The pseudo-class glue functions are named under (`EqGlue__Vec<Q>__eq`).
 const EQ_GLUE: &str = "EqGlue";
+
+/// The pseudo-class open glue functions are named under
+/// (`EqDictGlue__Vec<$0>__eq`, a variable as `$i`, or `$i.s` when its
+/// dictionary holds `eq` at slot `s`, a subclass bound's).
+const EQ_DICT_GLUE: &str = "EqDictGlue";
+
+/// An open glue call: the glue's key type and name, each variable of the
+/// key with its `eq` slot, in the glue's dictionary order, and the frame
+/// slot of each one's dictionary at the call.
+#[derive(Clone, Debug)]
+pub(super) struct DictGlue {
+    pub key: Ty,
+    pub fqn: String,
+    pub vars: Vec<(TyVarId, u32)>,
+    pub slots: Vec<u32>,
+}
+
+/// The type variables of `ty`, in order of first appearance.
+fn vars_in_order(ty: &Ty, out: &mut Vec<TyVarId>) {
+    match ty {
+        Ty::Var(v) => {
+            if !out.contains(v) {
+                out.push(*v);
+            }
+        }
+        Ty::App(head, items) => {
+            vars_in_order(head, out);
+            items.iter().for_each(|t| vars_in_order(t, out));
+        }
+        Ty::Fun(a, r) => {
+            vars_in_order(a, out);
+            vars_in_order(r, out);
+        }
+        Ty::Tuple(items) => items.iter().for_each(|t| vars_in_order(t, out)),
+        Ty::Record { fields } => fields.iter().for_each(|(_, t)| vars_in_order(t, out)),
+        Ty::Array { element, .. } | Ty::Readonly(element) => vars_in_order(element, out),
+        _ => {}
+    }
+}
 
 /// How a glue function takes its type apart.
 #[derive(Clone, Debug)]
@@ -224,6 +269,213 @@ impl Compiler {
             }
             glue_body(b, a, c, &shape)
         });
+    }
+}
+
+impl Compiler {
+    /// The `Eq` dictionary of type variable `v` here: its frame slot and
+    /// the `eq` method's slot in it. An open glue body's own, else one of
+    /// this shared body's bounds (`T: Eq`, or a subclass's as `T: Ord`).
+    fn eq_var_dict(&self, v: TyVarId) -> Option<(u32, u32)> {
+        if let Some(&(n, method)) = self.synth_eq_dicts.get(&v) {
+            return Some((self.lookup_slot(&format!("__dict{n}"))?, method));
+        }
+        if self.compiling_mono_clone {
+            return None;
+        }
+        let generics = self.checker.generics();
+        let eq_slot = |class: &str| {
+            let flat = generics.typeclass(class)?.flattened_methods(generics);
+            flat.iter().position(|(owner, m)| *owner == "Eq" && m.name == "eq").map(|i| i as u32)
+        };
+        let var = Ty::Var(v);
+        if let Some(OpenDictGoal::Slot(slot)) = self.resolve_open_dict_goal("Eq", std::slice::from_ref(&var)) {
+            return Some((slot, eq_slot("Eq")?));
+        }
+        let subst = self.checker.subst();
+        for name in [self.current_function_qualified.as_deref(), self.current_function_table_key.as_deref()].into_iter().flatten() {
+            let Some(scheme) = self.checker.env().lookup(name) else {
+                continue;
+            };
+            for (i, c) in scheme.constraints.iter().enumerate() {
+                let on_var = matches!(c.args.as_slice(), [a] if crate::typechecking::subst::apply_ty_prune(subst, a) == var);
+                if on_var
+                    && let Some(method) = eq_slot(&c.class)
+                    && let Some(slot) = self.lookup_slot(&format!("__dict{i}"))
+                {
+                    return Some((slot, method));
+                }
+            }
+        }
+        None
+    }
+
+    /// Whether an open part `ty` with a user `Eq` instance (`Box<T>`
+    /// deriving it) compares in open glue: its instance's context is only
+    /// `Eq`, which the glue builds from its variables' dictionaries
+    /// (#1661).
+    fn eq_open_instance_ok(&self, ty: &Ty) -> bool {
+        let generics = self.checker.generics();
+        generics
+            .find_generic_instance("Eq", std::slice::from_ref(ty))
+            .is_some_and(|inst| inst.context.iter().all(|c| c.class == "Eq"))
+    }
+
+    /// Whether open `ty` (a key) compares through open glue: it is taken
+    /// apart and some part, at any depth, is a type variable, a type with
+    /// a user `Eq` instance or a type needing glue. `None` when a part is
+    /// an open type with a user `Eq` instance whose context the glue
+    /// cannot build ([`Self::eq_open_instance_ok`]).
+    fn eq_dict_glue_needed(&self, ty: &Ty, visiting: &mut Vec<Ty>) -> Option<bool> {
+        if visiting.contains(ty) {
+            return Some(false);
+        }
+        let Some(shape) = self.eq_glue_shape(ty) else {
+            return Some(false);
+        };
+        visiting.push(ty.clone());
+        let mut needed = false;
+        for part in shape.parts() {
+            needed |= match part {
+                Ty::Var(_) => true,
+                p if crate::hir::layout::ty_is_closed(p) => self.eq_user_instance(p) || self.eq_glue_needed(p, &mut Vec::new()),
+                p if self.eq_user_instance(p) && self.eq_open_instance_ok(p) => true,
+                p if self.eq_user_instance(p) => {
+                    visiting.pop();
+                    return None;
+                }
+                p => match self.eq_dict_glue_needed(p, visiting) {
+                    Some(n) => n,
+                    None => {
+                        visiting.pop();
+                        return None;
+                    }
+                },
+            };
+        }
+        visiting.pop();
+        Some(needed)
+    }
+
+    /// Whether some part of open key `ty`, at any depth, is an open type
+    /// with a user `Eq` instance.
+    fn eq_open_instance_part(&self, ty: &Ty, visiting: &mut Vec<Ty>) -> bool {
+        if visiting.contains(ty) {
+            return false;
+        }
+        let Some(shape) = self.eq_glue_shape(ty) else {
+            return false;
+        };
+        visiting.push(ty.clone());
+        let found = shape.parts().into_iter().any(|p| {
+            !matches!(p, Ty::Var(_))
+                && !crate::hir::layout::ty_is_closed(p)
+                && (self.eq_user_instance(p) || self.eq_open_instance_part(p, visiting))
+        });
+        visiting.pop();
+        found
+    }
+
+    /// `Eq<v>` in an open glue body: `v`'s own dictionary, when it is an
+    /// `Eq` one (`eq` at slot 0), for an open part's instance context
+    /// (#1661).
+    pub(super) fn eq_glue_body_var_dict(&self, v: TyVarId) -> Option<u32> {
+        match self.synth_eq_dicts.get(&v) {
+            Some(&(n, 0)) => self.lookup_slot(&format!("__dict{n}")),
+            _ => None,
+        }
+    }
+
+    /// The open glue `==` (`ne`: `!=`) of open `ty` calls here, when `ty`
+    /// needs one and each of its variables has an `Eq` dictionary.
+    pub(super) fn eq_dict_glue_target(&self, ty: &Ty, ne: bool) -> Option<DictGlue> {
+        let key = self.eq_glue_key(ty);
+        if crate::hir::layout::ty_is_closed(&key) || matches!(key, Ty::Var(_)) {
+            return None;
+        }
+        let mut order = Vec::new();
+        vars_in_order(&key, &mut order);
+        if order.len() != coil_ty::ftv_ty(&key).len() {
+            return None;
+        }
+        let dicts = order.iter().map(|&v| self.eq_var_dict(v)).collect::<Option<Vec<_>>>()?;
+        if self.eq_dict_glue_needed(&key, &mut Vec::new()) != Some(true) {
+            return None;
+        }
+        // An open part's instance takes its variables' dictionaries as
+        // `Eq` ones: a subclass bound's holding `eq` elsewhere does not
+        // serve (#1661).
+        if dicts.iter().any(|&(_, method)| method != 0) && self.eq_open_instance_part(&key, &mut Vec::new()) {
+            return None;
+        }
+        let names: HashMap<TyVarId, Ty> = order
+            .iter()
+            .zip(&dicts)
+            .enumerate()
+            .map(|(i, (&v, &(_, method)))| (v, Ty::Con(if method == 0 { format!("${i}") } else { format!("${i}.{method}") })))
+            .collect();
+        let canon = Self::apply_ty_var_map(&key, &names);
+        let fqn = Generics::builtin_instance_fqn(EQ_DICT_GLUE, &canon.to_string(), if ne { "ne" } else { "eq" });
+        Some(DictGlue {
+            vars: order.into_iter().zip(dicts.iter().map(|&(_, m)| m)).collect(),
+            slots: dicts.into_iter().map(|(s, _)| s).collect(),
+            key,
+            fqn,
+        })
+    }
+
+    /// Reserve the open glue functions of `glue`'s key, as
+    /// [`Self::reserve_eq_glue`] does.
+    pub(super) fn reserve_eq_dict_glue(&mut self, glue: &DictGlue) {
+        for method in ["eq", "ne"] {
+            let fqn = match glue.fqn.rsplit_once("__") {
+                Some((base, _)) => format!("{base}__{method}"),
+                None => continue,
+            };
+            if self.functions.contains_key(&fqn) || self.fn_entry_labels.contains_key(&fqn) {
+                continue;
+            }
+            self.reserve_function_entry(fqn.clone());
+            self.eq_dict_glue.insert(fqn.clone(), glue.vars.clone());
+            self.structural_thunks.push((fqn, format!("dglue_{method}"), glue.key.clone()));
+        }
+    }
+
+    /// `==` at type variable `v` in an open glue body: its dictionary's
+    /// `eq`.
+    pub(super) fn eq_dict_glue_bound(&self, ty: &Ty) -> Option<(u32, u32)> {
+        match crate::typechecking::subst::apply_ty_prune(self.checker.subst(), ty) {
+            Ty::Var(v) if self.synth_eq_dicts.contains_key(&v) => self.eq_var_dict(v),
+            _ => None,
+        }
+    }
+
+    /// Emit the open glue `fqn` of `ty`: [`Self::emit_eq_glue`]'s body, its
+    /// variables' `Eq` dictionaries `__dict0..` after the two values.
+    pub(super) fn emit_eq_dict_glue(&mut self, fqn: &str, ty: &Ty, ne: bool) {
+        use crate::hir::synth::Synth;
+        let (Some(vars), Some(shape)) = (self.eq_dict_glue.get(fqn).cloned(), self.eq_glue_shape(ty)) else {
+            return;
+        };
+        let boolean = coil_ty::boolean();
+        let mut b = Synth::new(&self.checker, fqn, boolean.clone());
+        let a = b.local("arg0", ty.clone(), LocalKind::Param);
+        let c = b.local("arg1", ty.clone(), LocalKind::Param);
+        let value = if ne {
+            let (av, cv) = (b.read(a), b.read(c));
+            let eq = b.bin(BinOp::Overloaded("=="), av, cv, boolean.clone());
+            b.push(HirKind::Un { op: UnOp::Not, operand: eq }, boolean)
+        } else {
+            glue_body(&mut b, a, c, &shape)
+        };
+        let ret = b.ret(value);
+        let root = b.block(vec![ret], None, coil_ty::never());
+        let hir = Self::synth_generic(b.finish(root));
+        self.synth_plain_dicts = Some(vars.len());
+        self.synth_eq_dicts = vars.iter().enumerate().map(|(i, &(v, method))| (v, (i, method))).collect();
+        self.emit_synth_fn(fqn, &hir, HashMap::new(), false);
+        self.synth_plain_dicts = None;
+        self.synth_eq_dicts.clear();
     }
 }
 

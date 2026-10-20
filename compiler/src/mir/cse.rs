@@ -94,6 +94,9 @@ enum ReadKey {
     Field { object: ValueId, index: u32 },
     /// A `readonly class` instance's field: no write changes it (#1560).
     FixedField { object: ValueId, index: u32 },
+    /// An element or the length of an array no code writes (#1561).
+    FixedIndex { array: ValueId, index: ValueId },
+    FixedLen { array: ValueId },
     Len { array: ValueId },
     Call { target: crate::il::Label, args: Vec<ValueId> },
 }
@@ -112,7 +115,7 @@ impl ReadKey {
         match self {
             Self::Index { .. } => w.elements,
             Self::Field { .. } => w.fields,
-            Self::FixedField { .. } => false,
+            Self::FixedField { .. } | Self::FixedIndex { .. } | Self::FixedLen { .. } => false,
             Self::Len { .. } => w.lengths,
             Self::Call { args, .. } => (w.elements || w.fields || w.lengths) && args.iter().any(|&a| reads_heap(ty(a))),
         }
@@ -134,6 +137,10 @@ fn read_key(
         return None;
     }
     Some(match inst {
+        MirInst::Index { dest, array, index, .. } if invariant_loads.contains(dest) => {
+            ReadKey::FixedIndex { array: *array, index: *index }
+        }
+        MirInst::ArrayLen { dest, array } if invariant_loads.contains(dest) => ReadKey::FixedLen { array: *array },
         MirInst::Index { array, index, .. } => ReadKey::Index { array: *array, index: *index },
         MirInst::HeapFieldLoad { dest, object, index } if invariant_loads.contains(dest) => {
             ReadKey::FixedField { object: *object, index: *index }
