@@ -1136,14 +1136,38 @@ impl Compiler {
             self.hir_request_method_clone(&key);
             self.raw_instance_call = raw;
             let target = self.named_entry_target(&key, true);
+            // A generic-head instance's shared entry takes its receiver as
+            // the boxed enum object: a niche word goes as its enum object,
+            // a two-word `Option` / `Result` boxed from its pair (#1609).
+            let shared_entry = key == call.key;
+            let niches: Vec<Option<ValueLayout>> = args
+                .iter()
+                .zip(&call.params)
+                .zip(&boxes)
+                .map(|((&a, _), b)| (shared_entry && b.is_some()).then(|| self.hir_niche_arg(hir, emit, a, ValueLayout::Boxed)).flatten())
+                .collect();
             if let Some(dicts) = dicts
                 && let Some(boxed_ret) = self.hir_ret_shape(hir, id, &natural)
-                && args.iter().zip(&call.params).zip(&boxes).all(|((&a, &p), b)| {
-                    // A boxed argument goes from its own word.
-                    if b.is_some() { self.hir_arg_word(hir, emit, a, p) } else { self.hir_arg_passes(hir, emit, a, p) }
+                && args.iter().zip(&call.params).zip(&boxes).zip(&niches).all(|(((&a, &p), b), n)| {
+                    // A boxed argument goes from its own word, its enum
+                    // object (a niche word) or its pair boxed.
+                    if b.is_some() {
+                        self.hir_arg_word(hir, emit, a, p)
+                            || n.is_some()
+                            || (shared_entry
+                                && matches!(self.hir_natural(hir, emit, a), Some(Rep::Pair(_)))
+                                && self.hir_arg_passes(hir, emit, a, p))
+                    } else {
+                        self.hir_arg_passes(hir, emit, a, p)
+                    }
                 })
                 && let Some(target) = target
             {
+                for (&arg, &layout) in args.iter().zip(&niches) {
+                    if let Some(layout) = layout {
+                        t.niche_args.insert(arg.0, layout);
+                    }
+                }
                 t.calls.insert(
                     id.0,
                     crate::mir::HirCallSite {
@@ -1685,9 +1709,9 @@ impl Compiler {
     }
 
     /// The shape `values_eq_shaped` compares a value of `ty` by, when it
-    /// is an array, `Vec` or tuple with a `float` leaf (#1253): `f` a
-    /// float, `w` anything else, `a` an array's element shape, `t` a
-    /// tuple's count digit and element shapes.
+    /// is an array, `Vec`, tuple or record with a `float` leaf (#1253): `f`
+    /// a float, `w` anything else, `a` an array's element shape, `t` a
+    /// tuple's and `r` a record's count digit and part shapes.
     pub(super) fn eq_float_shape(&self, ty: &Ty) -> Option<String> {
         fn walk(ty: &Ty, out: &mut String) -> Option<()> {
             let ty = crate::typechecking::ty::strip_readonly(ty);
@@ -1705,6 +1729,16 @@ impl Compiler {
                 out.push(char::from(b'0' + n));
                 for item in items {
                     walk(item, out)?;
+                }
+            } else if let Ty::Record { fields } = ty {
+                // Slots are the fields sorted by name.
+                let n = u8::try_from(fields.len()).ok().filter(|&n| n <= 9)?;
+                let mut sorted: Vec<&(String, Ty)> = fields.iter().collect();
+                sorted.sort_by(|a, b| a.0.cmp(&b.0));
+                out.push('r');
+                out.push(char::from(b'0' + n));
+                for (_, field) in sorted {
+                    walk(field, out)?;
                 }
             } else {
                 out.push('w');

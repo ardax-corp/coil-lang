@@ -63,6 +63,10 @@ word kinds) a type id with precise `ClassWordKinds`. Reads and writes are
 `HeapFieldLoad` / `HeapFieldStore` (`DenseFieldLoad` / `DenseFieldStore`):
 CSE and LICM treat them as any class field. The host's records
 (`io::fs::metadata`, FFI `extern struct` returns) use the same layout.
+Record type ids come from their own range (`RECORD_TYPE_ID_BASE`,
+`common::is_record_type_id`), so the VM's `==` compares two records slot
+by slot and two class instances by identity (#1618). A record with a
+`float` field passes `values_eq_shaped` an `r` shape.
 Nothing emits keyed `MakeDict` / `GetField` any more. A 10M-iteration
 `p.x` / `p.y` read-write loop (`--release`): 4.34 s keyed, 1.29 s
 slotted. A class local in the same loop takes 0.40 s: its fields go to

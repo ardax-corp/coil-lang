@@ -5,6 +5,8 @@
 //! Strings compare by UTF-8 content (interned or not). Tuples compare
 //! element-wise like arrays. Boxed `ObjEnum` values compare by tag and payload
 //! (so `Result::Ok(x) == Result::Ok(x)` holds when the constructs still box).
+//! Records (instances whose type id [`common::is_record_type_id`]) compare
+//! slot by slot; class instances compare by identity.
 //! Heap-heap Result `Err` (`pointer | 1`) never equals an `Ok`; two `Err`s
 //! compare their payloads.
 //!
@@ -16,7 +18,7 @@ use std::collections::HashMap;
 
 use common::Value;
 
-use crate::memory::{Heap, Member, Object};
+use crate::memory::{Heap, Member, ObjInstance, Object};
 
 /// Deep / structural equality for VM values.
 pub fn values_eq(heap: &Heap, a: Value, b: Value) -> bool {
@@ -61,6 +63,9 @@ fn flat_eq(heap: &Heap, a: Value, b: Value) -> Option<bool> {
             }
         }
         (Object::Array(_) | Object::Tuple(_) | Object::Boxed(_), _) => None,
+        (Object::Instance(ga), Object::Instance(gb)) => {
+            if record_slots(ga.as_ref(), gb.as_ref()).is_some() { None } else { Some(false) }
+        }
         _ => Some(false),
     }
 }
@@ -141,20 +146,37 @@ fn values_eq_rec(
         (Object::Boxed(ga), Object::Boxed(gb)) => {
             members_eq(heap, &ga.as_ref().payload, &gb.as_ref().payload, fwd, rev)
         }
+        (Object::Instance(ga), Object::Instance(gb)) => match record_slots(ga.as_ref(), gb.as_ref()) {
+            Some((sa, sb)) => sa.iter().zip(sb).all(|(x, y)| values_eq_rec(heap, *x, *y, fwd, rev)),
+            None => false,
+        },
         _ => false,
     }
+}
+
+/// The slots of two records of one shape: both instances' type ids name a
+/// record and they hold the same number of slots. `==` compares a value
+/// only with one of its own static type, so equal counts mean one record
+/// type (a host-built record and a compiled one can differ in id alone).
+fn record_slots<'a>(a: &'a ObjInstance, b: &'a ObjInstance) -> Option<(&'a [Value], &'a [Value])> {
+    if !common::is_record_type_id(a.type_id) || !common::is_record_type_id(b.type_id) {
+        return None;
+    }
+    let (sa, sb) = (a.slots()?, b.slots()?);
+    (sa.len() == sb.len()).then_some((sa, sb))
 }
 
 /// The static shape of an aggregate whose leaves include `float`s, as the
 /// compiler encodes it for [`values_eq_shaped`]: `f` a float word, `w` any
 /// other value (compared by [`values_eq`]), `a` then the element shape of
 /// an array or `Vec`, `t` then a count digit and each element's shape of a
-/// tuple.
+/// tuple, `r` then a count digit and each slot's shape of a record.
 enum Shape {
     Float,
     Word,
     Array(Box<Shape>),
     Tuple(Vec<Shape>),
+    Record(Vec<Shape>),
 }
 
 fn parse_shape(bytes: &[u8], pos: &mut usize) -> Option<Shape> {
@@ -168,6 +190,11 @@ fn parse_shape(bytes: &[u8], pos: &mut usize) -> Option<Shape> {
             let n = bytes.get(*pos)?.checked_sub(b'0')?;
             *pos += 1;
             Shape::Tuple((0..n).map(|_| parse_shape(bytes, pos)).collect::<Option<_>>()?)
+        }
+        b'r' => {
+            let n = bytes.get(*pos)?.checked_sub(b'0')?;
+            *pos += 1;
+            Shape::Record((0..n).map(|_| parse_shape(bytes, pos)).collect::<Option<_>>()?)
         }
         _ => return None,
     })
@@ -205,6 +232,15 @@ fn shaped_eq(heap: &Heap, a: Value, b: Value, shape: &Shape) -> bool {
             }
             _ => values_eq(heap, a, b),
         },
+        Shape::Record(slots) => match (heap.find_object_by_addr(a.raw() as u64), heap.find_object_by_addr(b.raw() as u64)) {
+            (Some(Object::Instance(ga)), Some(Object::Instance(gb))) => match record_slots(ga.as_ref(), gb.as_ref()) {
+                Some((sa, sb)) => {
+                    sa.len() == slots.len() && sa.iter().zip(sb).zip(slots).all(|((x, y), s)| shaped_eq(heap, *x, *y, s))
+                }
+                None => values_eq(heap, a, b),
+            },
+            _ => values_eq(heap, a, b),
+        },
     }
 }
 
@@ -232,7 +268,7 @@ fn members_eq(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::{EnumPayload, ObjArray, ObjEnum, ObjString, ObjTuple, Object};
+    use crate::memory::{EnumPayload, ObjArray, ObjEnum, ObjInstance, ObjString, ObjTuple, Object};
 
     fn set_array_elem(heap: &Heap, addr: u64, index: usize, value: Value) {
         let Some(Object::Array(gc)) = heap.find_object_by_addr(addr) else {
@@ -312,6 +348,27 @@ mod tests {
         let (sa, sb) = (sa.addr(), sb.addr());
         let (oa, ob) = (some(&mut heap, sa), some(&mut heap, sb));
         assert_eq!(flat_eq(&heap, oa, ob), Some(true));
+    }
+
+    /// Records compare slot by slot; class instances by identity (#1618).
+    #[test]
+    fn records_compare_slots_and_classes_identity() {
+        let mut heap = Heap::default();
+        let (sa, _) = heap.alloc(ObjString::from("q"), Object::String);
+        let (sb, _) = heap.alloc(ObjString::from("q"), Object::String);
+        let inst = |heap: &mut Heap, id: u32, s: u64, n: i64| {
+            let (o, _) = heap.alloc(ObjInstance::with_slots(id, vec![Value::from(n), Value::from(s)]), Object::Instance);
+            Value::from(o.addr())
+        };
+        let rec = common::RECORD_TYPE_ID_BASE;
+        let (r1, r2, r3) = (inst(&mut heap, rec, sa.addr(), 1), inst(&mut heap, rec, sb.addr(), 1), inst(&mut heap, rec, sb.addr(), 2));
+        assert!(values_eq(&heap, r1, r2));
+        assert!(!values_eq(&heap, r1, r3));
+        let (c1, c2) = (inst(&mut heap, 1, sa.addr(), 1), inst(&mut heap, 1, sa.addr(), 1));
+        assert!(!values_eq(&heap, c1, c2));
+        assert!(values_eq(&heap, c1, c1));
+        assert!(values_eq_shaped(&heap, r1, r2, b"r2ww"));
+        assert!(!values_eq_shaped(&heap, r1, r3, b"r2ww"));
     }
 
     #[test]

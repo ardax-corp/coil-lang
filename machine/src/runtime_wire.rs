@@ -123,12 +123,13 @@ pub fn wire_thread_program_with_maps<const N: usize>(args: WireThreadProgramWith
     }));
 }
 
-/// Index [`common::ClassWordKinds`] rows by class `type_id`.
+/// Index [`common::ClassWordKinds`] rows by `type_id`, at
+/// [`common::type_kinds_index`].
 pub fn class_kind_table(rows: &[common::ClassWordKinds]) -> Arc<Vec<Box<[u8]>>> {
-    let len = rows.iter().map(|r| r.type_id as usize + 1).max().unwrap_or(0);
+    let len = rows.iter().map(|r| common::type_kinds_index(r.type_id) + 1).max().unwrap_or(0);
     let mut table: Vec<Box<[u8]>> = vec![Box::default(); len];
     for row in rows {
-        table[row.type_id as usize] = row.kinds.clone().into_boxed_slice();
+        table[common::type_kinds_index(row.type_id)] = row.kinds.clone().into_boxed_slice();
     }
     Arc::new(table)
 }

@@ -4413,6 +4413,16 @@ impl Compiler {
         if forwards && self.trait_method_own_bounds(&class, method).is_empty() {
             return Ok(None);
         }
+        // A generic instance's head (`impl Id for Option<T>`) at an open
+        // argument (`Id::id(o)`, `o: Option<E>`): called as the method call
+        // `o.id()` is (#1609). A structural tuple's has its own call.
+        if inst_args.iter().any(Self::ty_has_var)
+            && !self.checker.generics().structural_tuples().any(|(_, _, f)| f == fqn)
+            && let HirKind::Call { args, .. } = &node.kind
+            && !args.is_empty()
+        {
+            return self.resolve_hir_instance_method(hir, call, method, args, false);
+        }
         self.hir_ground_direct(hir, call, class, inst_args, fqn, method).map(Some)
     }
 
@@ -4500,8 +4510,19 @@ impl Compiler {
             }
             Ok(layout)
         };
-        // A structural thunk (#1479) has no checker signature: its own.
-        let declared_params = self.checker.fn_param_tys(fqn).or_else(|| self.structural_thunk_params.get(fqn).cloned());
+        // A structural thunk (#1479) has no checker signature: its own. A
+        // default body has none either: it is the trait's open signature
+        // (`fn two(T x)` takes the enum object, #1609).
+        let default_sig = || {
+            let (class, method) = fqn.split_once("__default__")?;
+            let scheme = self.checker.typeclass_method_scheme(class, method)?;
+            Some(Self::fun_param_and_ret_tys(&scheme.ty))
+        };
+        let declared_params = self
+            .checker
+            .fn_param_tys(fqn)
+            .or_else(|| self.structural_thunk_params.get(fqn).cloned())
+            .or_else(|| default_sig().map(|(params, _)| params));
         let params = args
             .iter()
             .enumerate()
@@ -4512,7 +4533,7 @@ impl Compiler {
             .collect::<Result<Vec<_>, _>>()?;
         let ret = match sig.and_then(|s| s.ret).map_or_else(|| word(call), Ok) {
             Ok(ret) => ret,
-            Err(_) => own_niche(call, self.checker.fn_return_ty(fqn))?,
+            Err(_) => own_niche(call, self.checker.fn_return_ty(fqn).or_else(|| default_sig().map(|(_, ret)| ret)))?,
         };
         Ok((params, ret))
     }
@@ -6611,11 +6632,12 @@ impl Compiler {
     fn hir_field(&self, hir: &HirBody, base: HirId, name: &str) -> Option<(FieldAt, Ty)> {
         let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, base)?);
         // A record's field is its slot among the fields sorted by name,
-        // each one boxed word.
+        // each one word: a niche `Option` / `Result` its niche word, as a
+        // tuple item (#1613).
         if let Ty::Record { fields } = crate::typechecking::ty::strip_readonly(&ty) {
             let (_, fty) = fields.iter().find(|(n, _)| n == name)?;
             let slot = fields.iter().filter(|(n, _)| n.as_str() < name).count() as u32;
-            return (self.value_layout(fty) == ValueLayout::Boxed).then(|| (FieldAt::Record(slot), fty.clone()));
+            return Some((FieldAt::Record(slot), fty.clone()));
         }
         if let Some(found) = self.hir_variant_field(&ty, name) {
             return Some(found);
@@ -7162,12 +7184,12 @@ impl Compiler {
                 kind: MakeKind::Record(_),
                 args,
             } => {
+                // Each field in its own type's layout: a niche `Option` /
+                // `Result` is stored as its niche word, as a tuple item
+                // (#1613).
                 for &item in args {
                     let ty = Self::hir_ty(hir, item).ok_or("value-type")?;
-                    if self.value_layout(ty) != ValueLayout::Boxed {
-                        return Err("record-field-layout");
-                    }
-                    self.hir_check_value(hir, emit, item, &BOXED)?;
+                    self.hir_check_value(hir, emit, item, &Rep::Word(self.value_layout(ty)))?;
                 }
             }
             HirKind::Make {
@@ -7513,7 +7535,13 @@ impl Compiler {
             // A type-only scalar `let x: T;`: zero until assigned.
             HirKind::Let { init: None, .. } => Ok(()),
             HirKind::LetPat { pat, init } => {
-                self.hir_check_let_pat(hir, pat)?;
+                match pat {
+                    // `let { a, b } = r`: each binding takes its slot's word
+                    // as the field's type names it, a niche `Option` /
+                    // `Result` its niche word (#1613).
+                    HirPat::Record(parts) if parts.iter().all(|(_, p)| matches!(p, HirPat::Wild | HirPat::Bind(_))) => {}
+                    _ => self.hir_check_let_pat(hir, pat)?,
+                }
                 if self.hir_product_let(hir, emit, pat, *init).is_some() {
                     let want = self.hir_natural(hir, emit, *init).ok_or("value-shape")?;
                     return self.hir_check_value(hir, emit, *init, &want);
@@ -7574,7 +7602,13 @@ impl Compiler {
                 self.hir_check_effect(hir, emit, *body)
             }
             HirKind::ForIn { pat, iterable, body, kind } => {
-                if !matches!(pat, HirPat::Bind(_)) {
+                // `for (k, v) in r` over a record: `v` takes each slot's
+                // word in its `(name, value)` item, a niche `Option` /
+                // `Result` its niche word (#1613).
+                let record_items = matches!(pat, HirPat::Tuple(ps) if ps.iter().all(|p| matches!(p, HirPat::Wild | HirPat::Bind(_))))
+                    && Self::hir_ty(hir, *iterable)
+                        .is_some_and(|t| matches!(crate::typechecking::ty::strip_readonly(&apply_ty_prune(self.checker.subst(), t)), Ty::Record { .. }));
+                if !matches!(pat, HirPat::Bind(_)) && !record_items {
                     self.hir_check_let_pat(hir, pat)?;
                 }
                 // The resumed word is stored as it comes back.
