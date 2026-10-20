@@ -10,7 +10,7 @@ class Box<T> {
 }
 
 impl Box<T> {
-    fn handle() -> Weak<T> {
+    pub fn handle() -> Weak<T> {
         return weak(self.v);
     }
 }

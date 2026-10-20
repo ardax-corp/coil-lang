@@ -10,7 +10,7 @@ class Keeper {
 }
 
 impl Keeper {
-    fn keep<T>(T x) -> Weak<T> {
+    pub fn keep<T>(T x) -> Weak<T> {
         return weak(x);
     }
 }
