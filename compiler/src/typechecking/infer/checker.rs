@@ -18805,6 +18805,11 @@ impl Checker {
                 .is_some_and(|k| self.enums_with_drop.contains(&k))
     }
 
+    /// Whether any class or enum has a `fn drop()`.
+    pub fn any_drop(&self) -> bool {
+        !self.classes_with_drop.is_empty() || !self.enums_with_drop.is_empty()
+    }
+
     pub fn classes_with_drop(&self) -> impl Iterator<Item = &String> {
         self.classes_with_drop.iter()
     }

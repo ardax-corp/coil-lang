@@ -376,6 +376,9 @@ pub struct Compiler {
     /// ([`Compiler::fn_is_heap_free`]); finalize binds them to precise maps.
     precise_frame_fns: HashSet<String>,
     precise_frames: Vec<common::PreciseFrameMap>,
+    /// What finalize built [`Self::precise_frames`] from besides the code,
+    /// to build them again after a compile-time patch of the code.
+    frame_inputs: Option<Box<FrameInputs>>,
 
     /// Native call-stack depth of [`Compiler::do_compile`]'s recursion,
     /// guarded against a fixed limit, see the analogous `infer_depth` on
@@ -757,6 +760,7 @@ impl Default for Compiler {
             expr_depth: 0,
             precise_frame_fns: HashSet::new(),
             precise_frames: Vec::new(),
+            frame_inputs: None,
             codegen_depth: 0,
             loop_stack: Vec::new(),
             loop_bbs: Vec::new(),
@@ -1020,6 +1024,16 @@ pub(crate) struct GatedHostCall {
     pub caps: common::Caps,
     /// The native's name (`open`, `env_exec`).
     pub native: &'static str,
+}
+
+/// The inputs of [`precise_frames::bind_precise_frames`] other than the
+/// code and the constant pool.
+struct FrameInputs {
+    needs_extent: HashSet<String>,
+    match_arities: HashMap<u32, u32>,
+    entries: Vec<(String, u32)>,
+    entry_sps: HashMap<String, u32>,
+    fn_kinds: HashMap<String, precise_frames::FnWordKinds>,
 }
 
 /// A `const` (or, `silent`, a pure `static let`) computed at compile time:

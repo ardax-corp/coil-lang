@@ -8316,17 +8316,14 @@ impl Compiler {
             }
         }
         let fn_kinds = self.fn_word_kinds(&entries, &entry_sps);
-        self.precise_frames = super::precise_frames::bind_precise_frames(
-            &self.precise_frame_fns,
-            &lowered.needs_frame_extent,
-            self.bytecode.as_slice(),
-            &self.constants,
-            &lowered.match_arities,
-            &entries,
-            &entry_sps,
-            self.prologue_jmp_target(),
-            &fn_kinds,
-        );
+        self.frame_inputs = Some(Box::new(super::FrameInputs {
+            needs_extent: lowered.needs_frame_extent.clone(),
+            match_arities: lowered.match_arities.clone(),
+            entries,
+            entry_sps,
+            fn_kinds,
+        }));
+        self.bind_precise_frames();
 
         let dense_seek = self
             .bytecode
@@ -8506,10 +8503,14 @@ impl Compiler {
     }
 
     /// `const`s to compute at compile time, in setup order, with their
-    /// initializer entries. Call after finalize.
+    /// initializer entries. Call after finalize. A program with a `fn
+    /// drop()` computes no silent item: one dropped at compile time would
+    /// not run its finalizer when the program runs.
     pub fn comptime_consts(&self) -> Vec<super::ComptimeConst> {
+        let drops = self.checker.any_drop();
         self.comptime_consts
             .iter()
+            .filter(|c| !(c.silent && drops))
             .map(|c| super::ComptimeConst {
                 entry: self
                     .function_offset(&format!("{STATIC_INIT_FN_PREFIX}{}", c.fqn))
@@ -8517,6 +8518,25 @@ impl Compiler {
                 ..c.clone()
             })
             .collect()
+    }
+
+    /// Build [`Self::precise_frames`] from the finalized code: at finalize,
+    /// and again after a compile-time patch changes what a frame holds.
+    fn bind_precise_frames(&mut self) {
+        let Some(inputs) = self.frame_inputs.as_ref() else {
+            return;
+        };
+        self.precise_frames = super::precise_frames::bind_precise_frames(
+            &self.precise_frame_fns,
+            &inputs.needs_extent,
+            self.bytecode.as_slice(),
+            &self.constants,
+            &inputs.match_arities,
+            &inputs.entries,
+            &inputs.entry_sps,
+            self.prologue_jmp_target(),
+            &inputs.fn_kinds,
+        );
     }
 
     /// Whether [`Self::fold_sites`] are computed at this level.
@@ -8533,7 +8553,9 @@ impl Compiler {
     /// the worker's depth).
     pub fn fold_sites(&self) -> Vec<(usize, usize, crate::macros::FoldCall)> {
         use crate::macros::{FoldCall, FoldValue};
-        if self.fold_fns.is_empty() {
+        // A call computed at compile time drops its values there, so a
+        // program with a `fn drop()` would miss those finalizers.
+        if self.fold_fns.is_empty() || self.checker.any_drop() {
             return Vec::new();
         }
         let mut entries: HashMap<usize, (usize, bool, bool)> = HashMap::new();
@@ -8590,9 +8612,11 @@ impl Compiler {
         let mut words = Vec::with_capacity(folds.len());
         for (_, _, value) in folds {
             let word = match value {
+                // An inline operand is non-negative: its top bit is the
+                // pool flag.
                 FoldValue::Word(w) => match i32::try_from(*w as i64) {
-                    Ok(small) => Byte::new(Instruction::CONST).with_const_inline(small),
-                    Err(_) => {
+                    Ok(small) if small >= 0 => Byte::new(Instruction::CONST).with_const_inline(small),
+                    _ => {
                         self.constants.push(*w);
                         Byte::new(Instruction::CONST).with_const_pool(self.constants.len() as u32 - 1)
                     }
@@ -8610,6 +8634,9 @@ impl Compiler {
             }
             code[*pc] = word;
         }
+        // A folded `CALL` is no longer a safepoint, and its value is no
+        // call result.
+        self.bind_precise_frames();
     }
 
     /// Replace the setup region's `CALL init; StoreStatic slot` for each of
