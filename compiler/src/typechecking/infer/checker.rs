@@ -16,7 +16,7 @@ use crate::typechecking::generics::{
 use crate::typechecking::id::{self, IdTable, NodeId};
 use crate::typechecking::kind::Kind;
 use crate::typechecking::subst::{Subst, apply_ty, apply_ty_prune, compose};
-use crate::typechecking::ty::{ArrayLength, array, array_fixed, tuple as tuple_ty};
+use crate::typechecking::ty::{ArrayLength, array, array_fixed, peel_constructor_refinement, tuple as tuple_ty};
 use crate::typechecking::ty::{AssocProjection, Constraint, Scheme};
 use crate::typechecking::ty::{
     EnumVariantPayloadTy, RANGE, RANGE_INCLUSIVE, Ty, TyVarId, boolean, float, ftv_ty, int,
@@ -4430,10 +4430,11 @@ impl Checker {
                     match unify_with(&self.subst, &prev_pruned, &t_pruned) {
                         Ok(s) => {
                             self.absorb(&s);
-                            elem_ty = Some(apply_ty_prune(
+                            let joined = apply_ty_prune(
                                 &self.subst,
-                                &crate::typechecking::ty::peel_constructor_refinement(prev_pruned),
-                            ));
+                                &crate::typechecking::ty::peel_constructor_refinement(prev_pruned.clone()),
+                            );
+                            elem_ty = Some(self.readonly_join(joined, &prev_pruned, &t_pruned));
                         }
                         Err(_) => {
                             let _ = self.error_with_help(
@@ -4463,6 +4464,12 @@ impl Checker {
             && let Some(exp) = self.expected_here.clone()
             && let exp = apply_ty_prune(&self.subst, &exp)
             && let Some(vec_elem) = vec_element_ty(&exp)
+            // A `readonly` element of a plain `Vec` keeps the literal's
+            // own type, so the binding site reports the dropped seal
+            // (#1552). Under `readonly Vec<P>` the elements are read-only
+            // anyway.
+            && (matches!(exp, Ty::Readonly(_))
+                || !self.drops_readonly(vec_elem, &apply_ty_prune(&self.subst, &element)))
             && let Ok(s) = unify_with(&self.subst, vec_elem, &element)
         {
             self.absorb(&s);
@@ -9109,6 +9116,56 @@ impl Checker {
         result
     }
 
+    /// E0107 when `actual` used where `expected` is wanted would drop a
+    /// `readonly` or add one to a container's element (#1552, #1558).
+    /// Both are already resolved under the substitution.
+    fn check_readonly_conversion(&mut self, expected: &Ty, actual: &Ty, range: &Range<usize>, context: &str) {
+        if self.drops_readonly(expected, actual) {
+            self.report_readonly_drop(expected, actual, range, context);
+        } else if self.gains_readonly_element(expected, actual) {
+            let _ = self.error_with_help(
+                ErrorCode::InvalidAssignment,
+                format!(
+                    "Cannot use a `{}` where `{}` is expected ({context})",
+                    self.diag_ty(actual),
+                    self.diag_ty(expected)
+                ),
+                range.clone(),
+                Some(format!(
+                    "the new name could store a `readonly` element that the old one then mutates; a parameter that only reads can take a `readonly {}`",
+                    self.diag_ty(actual)
+                )),
+            );
+        }
+    }
+
+    /// `joined`, the unified type of two branches or array elements `a`
+    /// and `b`, made `readonly` when either side is: the join of
+    /// `readonly P` and `P` is `readonly P`, whichever comes first, and
+    /// `Vec<readonly P>` with `Vec<P>` is `readonly Vec<P>` (#1552).
+    fn readonly_join(&self, joined: Ty, a: &Ty, b: &Ty) -> Ty {
+        let a = apply_ty_prune(&self.subst, a);
+        let b = apply_ty_prune(&self.subst, b);
+        if self.drops_readonly(&a, &b) || self.gains_readonly_element(&a, &b) {
+            self.readonly_qualify(joined)
+        } else {
+            joined
+        }
+    }
+
+    fn report_readonly_drop(&mut self, expected: &Ty, actual: &Ty, range: &Range<usize>, context: &str) {
+        let _ = self.error_with_help(
+            ErrorCode::InvalidAssignment,
+            format!(
+                "Cannot use a `{}` where `{}` is expected ({context})",
+                self.diag_ty(actual),
+                self.diag_ty(expected)
+            ),
+            range.clone(),
+            Some("a `readonly` value converts only to a `readonly` type, so it cannot be mutated through the new name; keep and pass the mutable value instead".to_string()),
+        );
+    }
+
     fn coerce_or_unify(
         &mut self,
         expected: &Ty,
@@ -9119,32 +9176,7 @@ impl Checker {
     ) -> Ty {
         let expected = apply_ty_prune(&self.subst, expected);
         let actual = apply_ty_prune(&self.subst, actual);
-        if self.drops_readonly(&expected, &actual) {
-            let _ = self.error_with_help(
-                ErrorCode::InvalidAssignment,
-                format!(
-                    "Cannot use a `{}` where `{}` is expected ({context})",
-                    self.diag_ty(&actual),
-                    self.diag_ty(&expected)
-                ),
-                range.clone(),
-                Some("a `readonly` value converts only to a `readonly` type, so it cannot be mutated through the new name; keep and pass the mutable value instead".to_string()),
-            );
-        } else if self.gains_readonly_element(&expected, &actual) {
-            let _ = self.error_with_help(
-                ErrorCode::InvalidAssignment,
-                format!(
-                    "Cannot use a `{}` where `{}` is expected ({context})",
-                    self.diag_ty(&actual),
-                    self.diag_ty(&expected)
-                ),
-                range.clone(),
-                Some(format!(
-                    "the new name could store a `readonly` element that the old one then mutates; a parameter that only reads can take a `readonly {}`",
-                    self.diag_ty(&actual)
-                )),
-            );
-        }
+        self.check_readonly_conversion(&expected, &actual, range, context);
         // A trait object seen read-only: pack the value as the plain
         // existential, then qualify it (#1558).
         if let Ty::Readonly(inner) = &expected
@@ -9268,6 +9300,10 @@ impl Checker {
             && matches!(node.1.as_ref(), Expression::Array(items) if !items.is_empty())
         {
             let vec_elem = vec_elem.clone();
+            // Its elements must not drop a `readonly` (#1552).
+            if self.drops_readonly(&vec_elem, element) {
+                self.report_readonly_drop(&expected, &actual, range, context);
+            }
             let _ = self.unify(&vec_elem, element, range, context);
             let ty = apply_ty_prune(&self.subst, &expected);
             self.retarget_node_ty(node.0.start, node.0.end, ty.clone());
@@ -9841,7 +9877,8 @@ impl Checker {
                 if let Some(t) = self.coerce_scalar_enum_to_backing(&b, &a) {
                     return t;
                 }
-                self.unify(&a, &b, range, ctx)
+                let joined = self.unify(&a, &b, range, ctx);
+                self.readonly_join(joined, &a, &b)
             }
         }
     }
@@ -16981,12 +17018,9 @@ impl Checker {
                 let expected_tys = expected_payload.field_types();
                 for (arg, expected_ty) in args.iter().zip(expected_tys.iter()) {
                     let arg_ty = self.infer(arg);
-                    self.unify(
-                        expected_ty,
-                        &arg_ty,
-                        &arg.0.into_range(),
-                        &format!("constructor `{}::{}` argument", enum_str, variant_str),
-                    );
+                    let context = format!("constructor `{}::{}` argument", enum_str, variant_str);
+                    self.check_readonly_payload(expected_ty, &arg_ty, &arg.0.into_range(), &context);
+                    self.unify(expected_ty, &arg_ty, &arg.0.into_range(), &context);
                 }
             }
             EnumConstructPayload::Record(parts) => {
@@ -17025,15 +17059,9 @@ impl Checker {
                         }
                     };
                     let arg_ty = self.infer(arg);
-                    self.unify(
-                        decl_ty,
-                        &arg_ty,
-                        &arg.0.into_range(),
-                        &format!(
-                            "constructor `{}::{}.{}` argument",
-                            enum_str, variant_str, decl_name,
-                        ),
-                    );
+                    let context = format!("constructor `{}::{}.{}` argument", enum_str, variant_str, decl_name);
+                    self.check_readonly_payload(decl_ty, &arg_ty, &arg.0.into_range(), &context);
+                    self.unify(decl_ty, &arg_ty, &arg.0.into_range(), &context);
                 }
                 // Check for any unknown field names (extra
                 // fields supplied at the call site).
@@ -17087,6 +17115,15 @@ impl Checker {
             tag,
             arity,
         }
+    }
+
+    /// An enum payload argument against its declared type: a payload is
+    /// a coercion site like a class constructor argument, so a `readonly`
+    /// value cannot fill a plain `P` payload (#1552).
+    fn check_readonly_payload(&mut self, expected: &Ty, actual: &Ty, range: &Range<usize>, context: &str) {
+        let expected = apply_ty_prune(&self.subst, expected);
+        let actual = apply_ty_prune(&self.subst, actual);
+        self.check_readonly_conversion(&expected, &actual, range, context);
     }
 
     /// True when `name` is a polymorphic enum (builtin Option/Result
@@ -18974,6 +19011,9 @@ impl Checker {
     /// new name could store a readonly `P` the old one then mutates. Under
     /// an outer `readonly` they are covariant (#1558).
     fn gains_readonly_element(&self, expected: &Ty, actual: &Ty) -> bool {
+        // An enum construct site (`Option::Some(p)`) is typed as its
+        // refined constructor: compare its owner (#1552).
+        let (expected, actual) = (&peel_constructor_refinement(expected.clone()), &peel_constructor_refinement(actual.clone()));
         let differs = |e: &Ty, a: &Ty| match (e, a) {
             (Ty::Readonly(inner), a) if !matches!(a, Ty::Readonly(_) | Ty::Var(_)) => {
                 self.has_mutable_interior(inner) || matches!(**inner, Ty::Var(_))
@@ -19001,6 +19041,7 @@ impl Checker {
     /// `readonly`: `readonly P` as a plain `P`, or `Vec<readonly P>` as
     /// `Vec<P>` (#1552). `T` converts to `readonly T`, never back.
     fn drops_readonly(&self, expected: &Ty, actual: &Ty) -> bool {
+        let (expected, actual) = (&peel_constructor_refinement(expected.clone()), &peel_constructor_refinement(actual.clone()));
         match (expected, actual) {
             (Ty::Readonly(_) | Ty::Var(_), _) => false,
             (_, Ty::Readonly(_)) => self.has_mutable_interior(expected),
