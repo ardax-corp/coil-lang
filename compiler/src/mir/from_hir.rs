@@ -4850,7 +4850,7 @@ impl Lower<'_> {
             let base = self.slot(local)?.0;
             tys.iter().enumerate().map(|(i, &ty)| (LocalId(base + i as u32), ty)).collect()
         } else if self.pair_local(local).is_some()
-            && self.hir.local(local).ty.as_ref().is_some_and(|t| crate::hir::lower::is_range_pair(t))
+            && self.hir.local(local).ty.as_ref().is_some_and(crate::hir::lower::is_range_pair)
         {
             // An unboxed range is two numbers: nothing to clear.
             return Ok(());
