@@ -7,36 +7,10 @@
 //! [`Heap::mark_value`] does), scalar kinds never. So a snapshot keeps
 //! everything the collector keeps alive and nothing else.
 
-use common::{HeapSnapshot, SnapObject, SnapWord, Value};
+use common::{HeapSnapshot, SnapObject, SnapStep, SnapWord, SnapshotError, Value};
 
 use super::super::AddrHashBuilder;
 use super::{EnumPayload, Heap, Member, ObjArray, ObjBoxed, ObjEnum, ObjInstance, ObjString, ObjTuple, Object};
-
-/// One step from a root to the value that could not be captured.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SnapStep {
-    /// Array / `Vec` element.
-    Element(usize),
-    /// Tuple element.
-    TupleElement(usize),
-    /// Enum variant payload word.
-    Payload(usize),
-    /// Class instance field slot (declaration order).
-    Field(usize),
-    /// The value inside a generic-runtime box.
-    Boxed,
-}
-
-/// A value reachable from a root that has no snapshot form.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SnapshotError {
-    /// Index into the roots passed to [`Heap::capture_snapshot`].
-    pub root: usize,
-    /// Path from the root to the offending value.
-    pub path: Vec<SnapStep>,
-    /// What it is, as a phrase ("a function value").
-    pub what: &'static str,
-}
 
 /// A root to capture: the static slot it is stored to, its value, and the
 /// slot's word kind (`common::WORD_*`).
@@ -267,7 +241,7 @@ impl Capture<'_> {
                     .enumerate()
                     .map(|(i, v)| {
                         let kind = kinds.get(i).copied().unwrap_or(common::WORD_UNKNOWN);
-                        self.word(*v, kind, parent(SnapStep::Field(i)))
+                        self.word(*v, kind, parent(SnapStep::Field { type_id: inst.type_id, index: i }))
                     })
                     .collect::<Result<_, _>>()?;
                 SnapObject::Instance {

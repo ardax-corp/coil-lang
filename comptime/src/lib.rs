@@ -19,8 +19,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use common::{Byte, Value};
 use compiler::ComptimeLimits;
-use compiler::macros::{CompiledExpansion, MacroHost, native_allowed_at_compile_time};
-use machine::{FfiError, HostClosureFn, Machine, NativeFn, Object};
+use compiler::macros::{CompiledExpansion, ConstEval, ConstEvalError, MacroHost, native_allowed_at_compile_time};
+use machine::{FfiError, HostClosureFn, Machine, NativeFn, Object, SnapRoot};
 
 /// Runs macros in a sandboxed VM.
 #[derive(Default)]
@@ -49,6 +49,63 @@ impl MacroHost for VmMacroHost {
             .map(|(entry, input)| run_entry(program, *entry, input, limits))
             .collect()
     }
+
+    fn eval_consts(
+        &self,
+        program: &CompiledExpansion,
+        consts: &[ConstEval],
+        limits: &ComptimeLimits,
+    ) -> Result<common::HeapSnapshot, ConstEvalError> {
+        let mut vm = new_vm(program);
+        vm.heap_mut()
+            .set_class_word_kinds(machine::class_kind_table(&program.class_word_kinds));
+        let captured = Captured::default();
+        let outer = machine::io::set_output_redirect(None);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = vm.with_output(captured.clone());
+            let result = eval_in(&mut vm, consts, limits, &captured);
+            let _ = vm.restore_output();
+            result
+        }));
+        machine::io::set_output_redirect(outer);
+        match outcome {
+            Ok(result) => result,
+            Err(_) => Err(ConstEvalError::Failed {
+                index: 0,
+                reason: "the VM aborted".to_string(),
+            }),
+        }
+    }
+}
+
+/// Run each initializer, keep its value in its slot, then snapshot them all.
+fn eval_in(
+    vm: &mut Machine<256>,
+    consts: &[ConstEval],
+    limits: &ComptimeLimits,
+    captured: &Captured,
+) -> Result<common::HeapSnapshot, ConstEvalError> {
+    for (index, c) in consts.iter().enumerate() {
+        let value = call_limited(vm, c.entry, &[], limits).map_err(|reason| {
+            let printed = String::from_utf8_lossy(&captured.0.lock().expect("capture lock")).trim().to_string();
+            let reason = match reason {
+                r if !r.is_empty() => r,
+                _ if !printed.is_empty() => printed,
+                _ => "it panicked".to_string(),
+            };
+            ConstEvalError::Failed { index, reason }
+        })?;
+        vm.set_static(c.slot, value);
+    }
+    let roots: Vec<SnapRoot> = consts
+        .iter()
+        .map(|c| SnapRoot {
+            slot: c.slot,
+            value: vm.static_value(c.slot).unwrap_or_default(),
+            kind: c.kind,
+        })
+        .collect();
+    vm.heap().capture_snapshot(&roots).map_err(ConstEvalError::Unsnapshottable)
 }
 
 /// A thread's VM for one expansion program. Holding the bytecode `Arc`
@@ -172,11 +229,21 @@ fn run_entry(program: &CompiledExpansion, entry: u32, input: &str, limits: &Comp
 }
 
 fn call_entry(vm: &mut Machine<256>, entry: u32, input: &str, limits: &ComptimeLimits) -> Result<String, String> {
-    vm.set_step_budget(Some(limits.steps));
-    vm.set_heap_cap(Some(usize::try_from(limits.heap_bytes).unwrap_or(usize::MAX)));
     let input = vm.heap_mut().intern(input.to_string());
     let arg = Value::from(input.as_ptr() as *mut u8 as u64);
-    let ret: Value = vm.call_function(entry, &[arg]);
+    let ret = call_limited(vm, entry, &[arg], limits)?;
+    match vm.heap().find_object_by_addr(ret.raw() as u64) {
+        Some(Object::String(s)) => Ok(s.as_ref().data.to_string()),
+        _ => Err("it did not return a string".to_string()),
+    }
+}
+
+/// Call `entry` within `limits`. An empty error is a plain panic (its
+/// message went to the VM's output).
+fn call_limited(vm: &mut Machine<256>, entry: u32, args: &[Value], limits: &ComptimeLimits) -> Result<Value, String> {
+    vm.set_step_budget(Some(limits.steps));
+    vm.set_heap_cap(Some(usize::try_from(limits.heap_bytes).unwrap_or(usize::MAX)));
+    let ret: Value = vm.call_function(entry, args);
     if vm.step_budget_exhausted() {
         return Err(format!(
             "it ran too long: {} steps (loop iterations + calls) is the limit; \
@@ -194,8 +261,5 @@ fn call_entry(vm: &mut Machine<256>, entry: u32, input: &str, limits: &ComptimeL
     if vm.panicked() {
         return Err(String::new());
     }
-    match vm.heap().find_object_by_addr(ret.raw() as u64) {
-        Some(Object::String(s)) => Ok(s.as_ref().data.to_string()),
-        _ => Err("it did not return a string".to_string()),
-    }
+    Ok(ret)
 }

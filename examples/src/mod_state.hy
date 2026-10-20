@@ -3,7 +3,7 @@
 
 const LIMIT = 10;
 
-// Does not fold: set once at startup (#1558).
+// Does not fold: computed once while compiling (#1558).
 const GREETING = greeting();
 
 static let counter: int = 0;

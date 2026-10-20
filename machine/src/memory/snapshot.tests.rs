@@ -1,9 +1,9 @@
 use std::cell::Cell;
 
-use common::{HeapSnapshot, SnapWord, Value};
+use common::{HeapSnapshot, SnapStep, SnapWord, SnapshotError, Value};
 
 use super::super::{EnumPayload, Heap, ObjArray, ObjEnum, ObjInstance, ObjString, ObjTuple, ObjWeak, Object};
-use super::{SnapRoot, SnapStep, SnapshotError};
+use super::SnapRoot;
 
 fn string(heap: &mut Heap, s: &str) -> Value {
     Value::from(heap.alloc(ObjString::from(s), Object::String).0.addr())
@@ -180,7 +180,7 @@ fn refuses_handles_with_their_path() {
         err,
         SnapshotError {
             root: 1,
-            path: vec![SnapStep::Field(1), SnapStep::Element(1)],
+            path: vec![SnapStep::Field { type_id: 4, index: 1 }, SnapStep::Element(1)],
             what: "a weak reference",
         }
     );
