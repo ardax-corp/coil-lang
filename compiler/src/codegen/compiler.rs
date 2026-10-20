@@ -4708,7 +4708,12 @@ impl Compiler {
         // instance dictionary. No `CALL` names it, so its precise frame map
         // takes the entry height from here; too low a height leaves the top
         // words unrooted.
-        let entry_sp = if dict_entry { hir.params.len() as u32 + 1 } else { 0 };
+        let entry_sp = match self.synth_plain_dicts {
+            // An open glue body's dictionaries follow its parameters (#1642).
+            Some(n) => (hir.params.len() + n) as u32,
+            None if dict_entry => hir.params.len() as u32 + 1,
+            None => 0,
+        };
         self.bytecode
             .record_func_with_sp(name.to_string(), entry, body_start, body_end, entry_sp);
         self.attach_hir_mir();
@@ -7640,6 +7645,10 @@ impl Compiler {
             for (fqn, method, ty) in std::mem::take(&mut due) {
                 if let Some(m) = method.strip_prefix("glue_") {
                     self.emit_eq_glue(&fqn, &ty, m == "ne");
+                    continue;
+                }
+                if let Some(m) = method.strip_prefix("dglue_") {
+                    self.emit_eq_dict_glue(&fqn, &ty, m == "ne");
                     continue;
                 }
                 let Some(tag) = Self::ty_to_value_tag(&ty) else {

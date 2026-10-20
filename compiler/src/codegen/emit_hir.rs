@@ -415,6 +415,9 @@ enum HirOp {
     /// instance method in dictionary slot `dict` at `method`, through
     /// `CallIndirect` (`emit_bound_operator_call`).
     Bound { dict: u32, method: u32 },
+    /// `==` / `!=` on an aggregate of type parameters in a shared generic
+    /// body: a call of its open glue with their `Eq` dictionaries (#1642).
+    Glue(super::eq_glue::DictGlue),
     /// An element-wise op on the packed kernel.
     Aggregate(crate::typechecking::AggregateArithInfo),
     /// A matrix / vector operator the checker recorded as linear algebra.
@@ -1108,6 +1111,16 @@ impl Compiler {
                 self.hir_mir_ctx.push((slot, own, (base + i) as u32));
             }
             entry
+        });
+        // An open glue body's `Eq` dictionaries (#1642): plain parameters
+        // after its own.
+        let entry_words = entry_words.or_else(|| {
+            self.synth_plain_dicts.map(|n| {
+                for i in 0..n {
+                    self.context.variables.intern(format!("__dict{i}"));
+                }
+                self.context.variables.len() as u32
+            })
         });
         let plan = lower::refusal(hir, &self.checker).map_or_else(|| self.plan_hir_body(hir), Err);
         let lowered = match plan {
@@ -7177,6 +7190,14 @@ impl Compiler {
         {
             return Err("operator-aggregate");
         }
+        // `==` on a type variable in an open glue body: its dictionary's
+        // `eq` (#1642).
+        if sym == "=="
+            && !self.synth_eq_dicts.is_empty()
+            && let Some((dict, method)) = Self::hir_ty(hir, lhs).and_then(|t| self.eq_dict_glue_bound(t))
+        {
+            return Ok(HirOp::Bound { dict, method });
+        }
         if let Some(hint) = self.bound_operator_hint(node.node, start, end)
             && let Some(dict) = self.lookup_slot(&format!("__dict{}", hint.dict_index))
         {
@@ -7267,6 +7288,13 @@ impl Compiler {
             && let Some((lookup, fqn)) = self.eq_glue_target(ty, sym == "!=")
         {
             return Some(HirOp::Call { lookup, fqn, class, method });
+        }
+        // One of a shared body's type parameters, through its open glue
+        // (#1642).
+        if matches!(sym, "==" | "!=")
+            && let Some(glue) = self.eq_dict_glue_target(ty, sym == "!=")
+        {
+            return Some(HirOp::Glue(glue));
         }
         match self.concrete_operator_target_ty(ty, class, method) {
             Some(_) => None,

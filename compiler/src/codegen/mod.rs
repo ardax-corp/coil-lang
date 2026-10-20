@@ -287,6 +287,15 @@ pub struct Compiler {
     /// In that body, each open item type's `__dictN` (by `N`), which `%v`
     /// shows it through.
     synth_show_dicts: HashMap<crate::typechecking::ty::TyVarId, usize>,
+    /// A compiler-made body taking this many plain `Eq` dictionaries after
+    /// its parameters, as `__dict0..` (an open glue function, #1642).
+    synth_plain_dicts: Option<usize>,
+    /// In that body, each type variable's `Eq` dictionary: its `__dictN`
+    /// (by `N`) and the `eq` method's slot in it.
+    synth_eq_dicts: HashMap<crate::typechecking::ty::TyVarId, (usize, u32)>,
+    /// Each reserved open glue function's type variables, in its
+    /// dictionaries' order, with their `eq` slots (#1642).
+    eq_dict_glue: HashMap<String, Vec<(crate::typechecking::ty::TyVarId, u32)>>,
     /// Fixed arity + rest flag per function table key. Survives multi-file
     /// `check_program` clears of `Checker::fn_param_names`, so `MakeFn` for
     /// imported names (e.g. `spawn(run_jobs, …)` after `use pool::worker::run_jobs`)
@@ -721,6 +730,9 @@ impl Default for Compiler {
             structural_tuple_thunks: Vec::new(),
             synth_entry_dicts: None,
             synth_show_dicts: HashMap::new(),
+            synth_plain_dicts: None,
+            synth_eq_dicts: HashMap::new(),
+            eq_dict_glue: HashMap::new(),
             fn_arities: HashMap::with_capacity(32),
             module_items: std::collections::HashMap::default(),
             native: HashMap::default(),
