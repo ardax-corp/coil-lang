@@ -39,6 +39,21 @@ fn first<T>(T a, T b, T c) -> T {
     return a;
 }
 
+fn mk<T>(T a, T b) -> Vec<T> {
+    let v: Vec<T> = Vec::new();
+    v.push(a);
+    v.push(b);
+    return v;
+}
+
+fn joined<T: Show>(string sep, T... xs) -> string {
+    let s = "";
+    for x in xs {
+        s = s + format("%v", x) + sep;
+    }
+    return s;
+}
+
 static let order: string = "";
 
 fn t(string s, int v) -> int {
@@ -76,4 +91,19 @@ test("spread arguments to a generic function") {
     assert!(first(...[7, 8, 9]) == 7);
     assert!(first(1, ...(2, 3)) == 1);
     assert!(pair(...("u", 4)) == "u-4");
+}
+
+test("a spread is the only call of a generic function at its types") {
+    let w = mk(...(1.5, 2.5));
+    assert!(w[0] == 1.5 && w[1] == 2.5);
+    let t = (true, false);
+    let b = mk(...t);
+    assert!(b[0] && !b[1]);
+    let v = mk(b: 8, a: 7);
+    assert!(v[0] == 7 && v[1] == 8);
+}
+
+test("a named fixed argument ahead of a generic rest pack") {
+    assert!(joined(sep: ";", 1, 2) == "1;2;");
+    assert!(joined(",", ...[3, 4]) == "3,4,");
 }
