@@ -1166,6 +1166,7 @@ impl Pipeline {
         if let Some(c) = self.compiler.get_mut() {
             c.clear_fn_value_escaped_program();
             c.set_program_finalizers_resize(None);
+            c.set_written_names_program(None);
         }
     }
 
@@ -1176,19 +1177,23 @@ impl Pipeline {
         let mut names = HashSet::new();
         // A finalizer in any file runs at every file's allocation safepoints.
         let mut finalizers_resize = false;
+        let mut written = HashSet::new();
         for cached in self.ast_cache.values() {
             if let Some(ast) = cached.ast() {
+                crate::static_writes::collect_written_names(ast, &mut written);
                 crate::typechecking::fn_value_escape::collect_fn_value_escaped(ast, &mut names);
                 finalizers_resize |= crate::typechecking::purity::finalizers_may_resize(ast);
             }
         }
         if let Some(ast) = extra {
+            crate::static_writes::collect_written_names(ast, &mut written);
             crate::typechecking::fn_value_escape::collect_fn_value_escaped(ast, &mut names);
             finalizers_resize |= crate::typechecking::purity::finalizers_may_resize(ast);
         }
         let compiler = self.compiler_lazy_mut();
         compiler.set_fn_value_escaped_program(names);
         compiler.set_program_finalizers_resize(Some(finalizers_resize));
+        compiler.set_written_names_program(Some(written));
     }
 
     /// Compile every discovered module in dependency order.

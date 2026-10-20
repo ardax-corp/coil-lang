@@ -9166,3 +9166,25 @@ fn main() { let _ = named(Some(1)); let _ = take(g); }";
     assert!(matches!(steps[..], [DictStep::Null]), "no partial dictionary: {steps:?}");
     assert!(!compiler.messages.is_empty(), "a dictionary missing its context is a compile error");
 }
+
+/// How many `LoadStatic`s the program `src` keeps (through the pipeline,
+/// which seeds the whole-program write facts).
+fn static_loads(src: &str) -> usize {
+    compile_src_pipeline(src, true)
+        .0
+        .iter()
+        .filter(|b| matches!(b.bytecode(), common::Instruction::LoadStatic))
+        .count()
+}
+
+#[test]
+fn a_static_let_nothing_writes_reads_as_its_value() {
+    // Never written anywhere: reads fold like a `static const`'s.
+    assert_eq!(static_loads("static let A = 1; static let B = 2; fn main() { if A + B != 3 { panic \"sum\"; } }"), 0);
+    // Written by assignment, compound assignment or `++` anywhere: `main`
+    // still loads it (and `+=` / `++` load it in `bump` too).
+    for write in ["A = 5;", "A += 1;", "A++;"] {
+        let loads = static_loads(&format!("static let A = 1; fn bump() {{ {write} }} fn main() {{ bump(); if A == 1 {{ panic \"same\"; }} }}"));
+        assert!(loads >= 1, "{write}");
+    }
+}

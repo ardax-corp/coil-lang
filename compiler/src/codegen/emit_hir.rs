@@ -6822,8 +6822,8 @@ impl Compiler {
             || self.const_env().contains_key(name)
             || self.module_const_values.contains_key(&resolved)
             || (!shadows
-                && (self.static_const_values.contains_key(&resolved) && self.checker.is_static_const_fqn(&resolved)
-                    || self.static_const_values.contains_key(&qualified) && self.checker.is_static_const_fqn(&qualified)));
+                && (self.static_const_values.contains_key(&resolved) && self.static_reads_fold(&resolved)
+                    || self.static_const_values.contains_key(&qualified) && self.static_reads_fold(&qualified)));
         if is_const || shadows {
             return None;
         }
@@ -7059,12 +7059,12 @@ impl Compiler {
             .or_else(|| {
                 self.static_const_values
                     .get(&resolved)
-                    .filter(|_| !shadows && self.checker.is_static_const_fqn(&resolved))
+                    .filter(|_| !shadows && self.static_reads_fold(&resolved))
             })
             .or_else(|| {
                 self.static_const_values
                     .get(&qualified)
-                    .filter(|_| !shadows && self.checker.is_static_const_fqn(&qualified))
+                    .filter(|_| !shadows && self.static_reads_fold(&qualified))
             })?
         };
         let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
