@@ -15,6 +15,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [Static trait methods](static-trait-methods.md) | #524: `static fn` in traits, `Owner::m` / `T::m` calls, return-type-directed bound resolution, per-field `#[derive(Default)]` |
 | [Generic instances](generic-instances.md) | #550 / #551 / #552: `impl Trait for Box<T>` and `Box<T: Bound>`, instance contexts, context dictionaries, open-goal dictionary resolution, derives on generic types |
 | [Per-type clones](generic-specialization.md) | #1417 / #1419: ground dictionaries built once into statics; per-type clones of other modules' generic methods and free functions (`ModuleCtx`); allocation numbers |
+| [Const tables](const-tables.md) | #1561: `const T = readonly [...]` lookup tables: a local one built once on first use, constant-index reads folded, variable-index reads invariant in LICM / CSE; shared-heap workers read the spawner's statics; measurements |
 | [Opt generalization](opt-generalization.md) | Historical: COI-333 A0: MIR default + one object story + dense-native + cost gate; A4 measurement; **B0** audit + **B1** Q6–Q8 entry hygiene |
 | [Denser MIR leftovers](mir-dense-leftovers.md) | Historical: post A0–C3 kick list (D0 `nsieve` keep; D1 class maps; D2 dense field; D3 boxed multi-payload match; Q9 `main` fuse) |
 | [MIR deopt / debugger](mir-deopt.md) | COI-299 I7: stop/deopt edges; VM debugger stays source of truth |
