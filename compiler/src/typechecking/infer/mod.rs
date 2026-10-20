@@ -454,6 +454,9 @@ pub struct Checker {
 
     /// Typeclass method signatures, keyed by `(class, method)`.
     typeclass_method_schemes: HashMap<(String, String), Scheme>,
+    /// Per trait method, bit `i`: parameter `i` is declared `readonly`
+    /// (`fn area(readonly A self)`), so no impl may mutate it (#1558).
+    trait_readonly_params: HashMap<(String, String), u64>,
 
     /// Expected type pushed by annotated `let` / `const` initializers so
     /// ground trait calls like `x.into()` can pin the conversion target

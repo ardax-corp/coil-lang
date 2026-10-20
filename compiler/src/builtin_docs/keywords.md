@@ -100,17 +100,33 @@ A read-only view of a value: nothing reachable through it can be changed.
 annotations, class fields and generic arguments (`Vec<readonly Point>`).
 `readonly e` views any expression read-only (`readonly [1, 2, 3]`,
 `readonly new Point(1, 2)`, `readonly p`). Field writes, index writes and
-`push`/`pop`/… through it are compile errors, while a class's own methods can
-still change it through `self`. The seal is deep: a field, element or loop
-variable read through it is `readonly` too. A `T` converts to `readonly T`,
-never back, and `Vec<T>` does not convert to `Vec<readonly T>`; a parameter
-that only reads takes `readonly Vec<T>`. `readonly` costs nothing at run time,
-and the variable itself can still be rebound.
+`push`/`pop`/… through it are compile errors, and so is calling a method or
+function that mutates it: the compiler infers which parameters (`self`
+included) each body mutates, and the error names the write (`it mutates
+`self` (writes field `x`)`). A trait method is callable on a `readonly` value,
+`readonly Area` trait objects included, only when the trait declares
+`readonly A self`; its impls must then not mutate `self`. The seal is deep: a
+field, element, loop variable or matched payload read through it is
+`readonly` too (`readonly Option<P>` is `Option<readonly P>`). A `T` converts
+to `readonly T`, never back, and `Vec<T>` does not convert to
+`Vec<readonly T>`; a parameter that only reads takes `readonly Vec<T>`.
+`readonly` costs nothing at run time, and the variable itself can still be
+rebound.
 
 ```coil
 class Point {
     pub x: int,
     pub y: int,
+}
+
+impl Point {
+    pub fn norm1() -> int {
+        return self.x + self.y;
+    }
+
+    pub fn shift() {
+        self.x = self.x + 1;
+    }
 }
 
 fn sum(readonly Point p) -> int {
@@ -120,7 +136,8 @@ fn sum(readonly Point p) -> int {
 fn main() {
     let xs = readonly [1, 2, 3];
     let p = new Point(1, 2);
-    let total = sum(p) + sum(readonly p);
+    let r = readonly p;
+    let total = sum(p) + sum(r) + r.norm1(); // `r.shift()` would not compile
 }
 ```
 

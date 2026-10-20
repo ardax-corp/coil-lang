@@ -312,3 +312,62 @@ fn say(string s) {
     let say = described.iter().find(|(n, _)| n == "say").map(|(_, d)| d.as_str());
     assert_eq!(say, Some("uses {write}: calls `write_all` (write); calls `stdout` (write)"));
 }
+
+const MUTATORS: &str = "
+class Inner {
+    pub n: int,
+}
+class P {
+    pub x: int,
+    pub inner: Inner,
+}
+impl P {
+    pub fn get() -> int {
+        return self.x;
+    }
+    pub fn bump() {
+        self.x = self.x + 1;
+    }
+    pub fn deep() {
+        let i = self.inner;
+        i.n = 0;
+    }
+    pub fn twice() {
+        self.bump();
+    }
+}
+fn copy_into(Vec<int> src, Vec<int> dst) {
+    for x in src {
+        dst.push(x);
+    }
+}
+fn fresh(P p) -> int {
+    let q = new P(1, new Inner(2));
+    q.x = p.x;
+    return q.x;
+}
+";
+
+#[test]
+fn mutates_names_each_written_parameter() {
+    let (m, out) = summaries(MUTATORS);
+    assert_eq!(of(&m, &out, "P::get").mutates, 0);
+    assert_eq!(of(&m, &out, "P::bump").mutates, 1);
+    assert_eq!(of(&m, &out, "P::deep").mutates, 1, "a write through a field read of self");
+    assert_eq!(of(&m, &out, "P::twice").mutates, 1, "through a callee that mutates self");
+    assert_eq!(of(&m, &out, "copy_into").mutates, 1 << 1, "only `dst`");
+    assert_eq!(of(&m, &out, "fresh").mutates, 0, "a local object is not a parameter");
+}
+
+#[test]
+fn descriptions_name_mutated_parameters() {
+    let owned = Box::leak(MUTATORS.to_string().into_boxed_str());
+    let ast = parser::Pratt::default().parse(owned).expect("parse");
+    let mut checker = Checker::new();
+    let _ = checker.check_program(&ast);
+    let described = describe_fns(&checker, &ast);
+    let get = |name: &str| described.iter().find(|(n, _)| n == name).map(|(_, d)| d.clone()).unwrap_or_default();
+    assert!(get("P::bump").ends_with("; mutates self"), "{}", get("P::bump"));
+    assert!(get("copy_into").ends_with("; mutates `dst`"), "{}", get("copy_into"));
+    assert_eq!(get("P::get"), "pure");
+}

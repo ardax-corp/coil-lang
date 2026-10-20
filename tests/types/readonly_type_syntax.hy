@@ -19,7 +19,7 @@ class Holder {
 }
 
 trait Area<A> {
-    fn area(A self) -> int {}
+    fn area(readonly A self) -> int {}
 }
 
 impl Area for Point {

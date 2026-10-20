@@ -192,8 +192,21 @@ impl Checker {
                     .unwrap_or_else(unit_ty);
                 let assoc_projections = self.current_assoc_projections.take().unwrap_or_default();
                 self.current_assoc_projections = prev_assoc;
+                // `readonly A self` / `readonly T x` declare that no impl
+                // mutates that parameter (#1558). The scheme keeps the plain
+                // type, as a `readonly` view needs no other representation;
+                // the declaration is checked against each impl's body and
+                // read at call sites through the trait.
+                let readonly_params = arg_tys
+                    .iter()
+                    .take(64)
+                    .enumerate()
+                    .filter(|(_, (_, ty))| matches!(apply_ty_prune(&self.subst, ty), Ty::Readonly(_)))
+                    .fold(0u64, |mask, (i, _)| mask | (1 << i));
+                self.trait_readonly_params.insert((name.to_string(), method_name.to_string()), readonly_params);
                 let fun_ty = arg_tys.iter().rev().fold(ret_ty, |ret, (_, arg)| {
-                    Ty::Fun(Box::new(arg.clone()), Box::new(ret))
+                    let arg = crate::typechecking::ty::strip_readonly(&apply_ty_prune(&self.subst, arg)).clone();
+                    Ty::Fun(Box::new(arg), Box::new(ret))
                 });
                 // The method's own bounds (`fn third<W: Show>`) follow the
                 // trait's constraint: a call passes their dictionaries after
