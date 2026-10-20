@@ -358,9 +358,14 @@ pub struct CompiledExpansion {
 /// top of the VM so the compiler itself does not depend on `machine`.
 pub trait MacroHost: Send + Sync {
     /// Call each `(entry, input)`: `entry` is the offset of a
-    /// `fn(string input) -> string`. Returns each result, or the panic /
-    /// error text.
-    fn run(&self, program: &CompiledExpansion, calls: &[(u32, String)]) -> Vec<Result<String, String>>;
+    /// `fn(string input) -> string`, each call within `limits`. Returns each
+    /// result, or the panic / error text.
+    fn run(
+        &self,
+        program: &CompiledExpansion,
+        calls: &[(u32, String)],
+        limits: &crate::ComptimeLimits,
+    ) -> Vec<Result<String, String>>;
 }
 
 static DEFAULT_HOST: std::sync::OnceLock<std::sync::Arc<dyn MacroHost>> = std::sync::OnceLock::new();
@@ -375,9 +380,6 @@ pub fn install_default_host(host: std::sync::Arc<dyn MacroHost>) {
 pub fn default_host() -> Option<std::sync::Arc<dyn MacroHost>> {
     DEFAULT_HOST.get().cloned()
 }
-
-/// Step budget for one macro call (loop back-edges + calls).
-pub const MACRO_STEP_BUDGET: u64 = 20_000_000;
 
 /// Host natives a macro may call: pure computation only (no IO, files,
 /// network, environment, clocks, threads or process control).
