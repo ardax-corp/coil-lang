@@ -1754,7 +1754,7 @@ fn pure_call_binop_leaves_results_on_stack_for_bin_return() {
 #[test]
 fn pure_helper_binop_stacks_across_call_for_bin_return() {
     use common::Instruction;
-    let (bc, _) = compile_src(
+    let (bc, _) = compile_src_no_inline(
         "fn left(int n) -> int { \
                let s = 0; \
                let i = 0; \
@@ -3656,6 +3656,8 @@ fn main() {
 }
 "#;
     let mut pipeline = crate::Pipeline::new();
+    // Its helper is the code under test: no copy of it inlines.
+    pipeline.set_inline_max_cost(0);
     let (bc, constants) = pipeline.compile_src(src).expect("compile");
     let pack_off = pipeline.compiler_mut().get_function("pack").expect("pack");
     let pack_bc = &bc[pack_off..];
@@ -3808,6 +3810,8 @@ fn main() {
 }
 "#;
     let mut pipeline = crate::Pipeline::new();
+    // Its helper is the code under test: no copy of it inlines.
+    pipeline.set_inline_max_cost(0);
     let (bc, constants) = pipeline.compile_src(src).expect("compile");
     let pack_off = pipeline.compiler_mut().get_function("pack").expect("pack");
     let pack_bc = &bc[pack_off..];
@@ -3857,6 +3861,8 @@ fn main() {
 }
 "#;
     let mut pipeline = crate::Pipeline::new();
+    // Its helper is the code under test: no copy of it inlines.
+    pipeline.set_inline_max_cost(0);
     let (bc, constants) = pipeline.compile_src(src).expect("compile");
     let pack_off = pipeline.compiler_mut().get_function("pack").expect("pack");
     let pack_bc = &bc[pack_off..];
@@ -3899,6 +3905,8 @@ fn main() {
 }
 "#;
     let mut pipeline = crate::Pipeline::new();
+    // Its helper is the code under test: no copy of it inlines.
+    pipeline.set_inline_max_cost(0);
     let (bc, constants) = pipeline.compile_src(src).expect("compile");
     let pack_off = pipeline.compiler_mut().get_function("pack").expect("pack");
     let pack_bc = &bc[pack_off..];
@@ -4174,6 +4182,8 @@ fn main() {
 }
 "#;
     let mut pipeline = crate::Pipeline::new();
+    // Its helper is the code under test: no copy of it inlines.
+    pipeline.set_inline_max_cost(0);
     let (bc, constants) = pipeline.compile_src(src).expect("compile");
     let bump_off = pipeline.compiler_mut().get_function("bump").expect("bump");
     let bump_bc = &bc[bump_off..];
@@ -4227,6 +4237,8 @@ fn main() {
 }
 "#;
     let mut pipeline = crate::Pipeline::new();
+    // Its helper is the code under test: no copy of it inlines.
+    pipeline.set_inline_max_cost(0);
     let (bc, constants) = pipeline.compile_src(src).expect("compile");
     let fill_off = pipeline.compiler_mut().get_function("fill").expect("fill");
     let main_off = pipeline.compiler_mut().get_function("main").expect("main");
@@ -4606,6 +4618,8 @@ fn main() {
 }
 "#;
     let mut pipeline = crate::Pipeline::new();
+    // Its helper is the code under test: no copy of it inlines.
+    pipeline.set_inline_max_cost(0);
     let (bc, constants) = pipeline.compile_src(src).expect("compile");
     let pack_off = pipeline.compiler_mut().get_function("pack").expect("pack");
     let pack_bc = &bc[pack_off..];
@@ -9205,8 +9219,8 @@ fn a_callee_too_big_to_inline_inlines_once_its_constant_argument_folds() {
     // `pick` costs more than the budget (five calls), but with `fast` bound
     // to `true` only `x + 1` is left: that copy splices into `main`.
     let src = "fn slow(int x) -> int { let i = 0; let s = 0; while i < x { s = s + i; i = i + 1; } return s; } \
-               fn pick(bool fast, int x) -> int { if fast { return x + 1; } return slow(x) + slow(x + 1) + slow(x + 2) + slow(x + 3) + slow(x + 4); } \
-               fn main() { let t = 0; let k = 0; while k < 3 { t = t + pick(true, k); k = k + 1; } if t != 6 { panic \"pick\"; } }";
+               fn pick(bool fast, int x) -> int { if fast { return x + 1; } return slow(slow(slow(slow(slow(x))))); } \
+               fn main() { let k = 5; if pick(true, k) != 6 { panic \"pick\"; } }";
     let calls = compile_fn_body(src, "main").iter().filter(|b| matches!(b.bytecode(), common::Instruction::CALL)).count();
     assert_eq!(calls, 0);
 }
@@ -9214,8 +9228,8 @@ fn a_callee_too_big_to_inline_inlines_once_its_constant_argument_folds() {
 #[test]
 fn a_callee_too_big_to_inline_keeps_its_call_on_a_runtime_argument() {
     let src = "fn slow(int x) -> int { let i = 0; let s = 0; while i < x { s = s + i; i = i + 1; } return s; } \
-               fn pick(bool fast, int x) -> int { if fast { return x + 1; } return slow(x) + slow(x + 1) + slow(x + 2) + slow(x + 3) + slow(x + 4); } \
-               fn main() { let t = 0; let k = 0; while k < 3 { t = t + pick(k < 5, k); k = k + 1; } if t != 6 { panic \"pick\"; } }";
+               fn pick(bool fast, int x) -> int { if fast { return x + 1; } return slow(slow(slow(slow(slow(x))))); } \
+               fn main() { let k = 5; if pick(k < 9, k) != 6 { panic \"pick\"; } }";
     let calls = compile_fn_body(src, "main").iter().filter(|b| matches!(b.bytecode(), common::Instruction::CALL)).count();
     assert_eq!(calls, 1);
 }
