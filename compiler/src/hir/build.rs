@@ -727,10 +727,12 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         b.body.root = Some(root);
         // In a generic class's shared method body `self` is the one object
         // word for every instance: its reads take the bare class type, not
-        // the scheme's open `C<T>`.
+        // the scheme's open `C<T>`. A generic enum's `self` keeps `E<T>`, so
+        // a `match self` sees the payloads.
         if let Some(owner) = owner
             && !is_static
             && crate::hir::lower::is_generic_class(self.checker, owner)
+            && self.checker.enum_variants(owner).is_none()
             && let Some(&this) = b.body.params.first()
         {
             let key = self.checker.resolve_class_key(owner).unwrap_or_else(|| owner.to_string());
