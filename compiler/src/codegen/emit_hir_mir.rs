@@ -1877,8 +1877,8 @@ impl Compiler {
     /// How a `%v` value of type `ty` is shown, when
     /// each step is one direct MIR has: a tuple's or record's items shown
     /// and formatted, `STRINGIFY` with no `Show` instance, or one plain
-    /// one-word `CALL` of the raw `show` entry on the boxed-layout value
-    /// (no boxing, conversion or dictionary). It interns the strings
+    /// one-word `CALL` of the raw `show` entry on the boxed-layout or
+    /// niche value (no boxing, conversion or dictionary). It interns the strings
     /// emission does.
     fn hir_show_ty(&mut self, ty: &Ty) -> Option<crate::mir::HirShow> {
         match ty {
@@ -1905,19 +1905,22 @@ impl Compiler {
             }
             _ => {}
         }
-        if self.value_layout(ty) != ValueLayout::Boxed {
-            return None;
-        }
+        // A niche `Option` / `Result` (`Some({ x: 1 })`, #1591) is its
+        // niche word, which only a raw entry takes as it is.
+        let niche = self.value_layout(ty) != ValueLayout::Boxed;
         let lookup_ty = Self::show_lookup_ty_for_instance(ty);
         let Some(fqn) = self
             .find_show_instance(&lookup_ty)
             .and_then(|inst| inst.method_fqns.get("show").cloned())
             .filter(|fqn| self.functions.contains_key(fqn) || self.fn_entry_labels.contains_key(fqn))
         else {
-            return Some(crate::mir::HirShow::Stringify);
+            return (!niche).then_some(crate::mir::HirShow::Stringify);
         };
         let fqn = self.instance_clone(&fqn, std::slice::from_ref(&lookup_ty)).unwrap_or(fqn);
         let raw = self.raw_instance_methods.contains(&fqn);
+        if niche && !raw {
+            return None;
+        }
         // A non-raw `show` takes the value boxed (`BoxValue`).
         let boxed = if raw { None } else { Self::ty_to_value_tag(&lookup_ty).map(|tag| tag as u32) };
         // A dictionary argument: not a plain call. Its code goes nowhere.
