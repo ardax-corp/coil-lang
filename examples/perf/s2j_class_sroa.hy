@@ -21,5 +21,5 @@ fn bump(int n) -> int {
 }
 
 fn main() {
-    write(stdout(), to_bytes(format("%i", bump(6))));
+    write(stdout(), to_bytes(format("%i", bump(black_box(6)))));
 }
