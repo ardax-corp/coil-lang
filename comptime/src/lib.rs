@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use common::{Byte, Value};
 use compiler::ComptimeLimits;
-use compiler::macros::{CompiledExpansion, ConstEval, ConstEvalError, MacroHost, native_allowed_at_compile_time};
+use compiler::macros::{CompiledExpansion, ConstEval, ConstEvalError, ConstEvalOutcome, MacroHost, native_allowed_at_compile_time};
 use machine::{FfiError, HostClosureFn, Machine, NativeFn, Object, SnapRoot};
 
 /// Runs macros in a sandboxed VM.
@@ -55,57 +55,146 @@ impl MacroHost for VmMacroHost {
         program: &CompiledExpansion,
         consts: &[ConstEval],
         limits: &ComptimeLimits,
-    ) -> Result<common::HeapSnapshot, ConstEvalError> {
-        let mut vm = new_vm(program);
-        vm.heap_mut()
-            .set_class_word_kinds(machine::class_kind_table(&program.class_word_kinds));
+    ) -> Result<ConstEvalOutcome, ConstEvalError> {
         let captured = Captured::default();
         let outer = machine::io::set_output_redirect(None);
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = vm.with_output(captured.clone());
-            let result = eval_in(&mut vm, consts, limits, &captured);
-            let _ = vm.restore_output();
-            result
-        }));
+        let result = eval_in(program, consts, limits, &captured);
         machine::io::set_output_redirect(outer);
+        result
+    }
+}
+
+fn const_vm(program: &CompiledExpansion, captured: &Captured) -> Box<Machine<256>> {
+    let mut vm = new_vm(program);
+    vm.heap_mut()
+        .set_class_word_kinds(machine::class_kind_table(&program.class_word_kinds));
+    let _ = vm.with_output(captured.clone());
+    vm
+}
+
+fn snap_roots(vm: &Machine<256>, consts: &[ConstEval], done: &[usize]) -> Vec<SnapRoot> {
+    done.iter()
+        .map(|&i| SnapRoot {
+            slot: consts[i].slot,
+            value: vm.static_value(consts[i].slot).unwrap_or_default(),
+            kind: consts[i].kind,
+        })
+        .collect()
+}
+
+/// Run each initializer and keep its value in its slot, then snapshot them
+/// all. A silent item that fails leaves the VM in an unknown state, so the
+/// values computed so far move to a new VM through a snapshot.
+fn eval_in(
+    program: &CompiledExpansion,
+    consts: &[ConstEval],
+    limits: &ComptimeLimits,
+    captured: &Captured,
+) -> Result<ConstEvalOutcome, ConstEvalError> {
+    let mut vm = const_vm(program, captured);
+    let mut done: Vec<usize> = Vec::new();
+    let mut skipped: Vec<usize> = Vec::new();
+    let mut silent_left = ComptimeLimits::SILENT_MODULE_STEPS;
+    for (index, c) in consts.iter().enumerate() {
+        let item_limits = if c.silent {
+            if silent_left == 0 {
+                skipped.push(index);
+                continue;
+            }
+            ComptimeLimits {
+                steps: ComptimeLimits::SILENT_CALL_STEPS.min(silent_left),
+                ..*limits
+            }
+        } else {
+            *limits
+        };
+        captured.0.lock().expect("capture lock").clear();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            call_limited(&mut vm, c.entry, &[], &item_limits)
+        }));
+        if c.silent {
+            silent_left = silent_left.saturating_sub(vm.steps_charged());
+        }
         match outcome {
-            Ok(result) => result,
-            Err(_) => Err(ConstEvalError::Failed {
-                index: 0,
-                reason: "the VM aborted".to_string(),
-            }),
+            Ok(Ok(value)) => {
+                vm.set_static(c.slot, value);
+                done.push(index);
+            }
+            Ok(Err(_)) | Err(_) if c.silent => {
+                skipped.push(index);
+                vm = rebuild(program, consts, &mut done, &mut skipped, vm, captured)?;
+            }
+            Ok(Err(reason)) => {
+                let _ = vm.restore_output();
+                return Err(ConstEvalError::Failed {
+                    index,
+                    reason: failure_reason(reason, captured),
+                });
+            }
+            Err(_) => {
+                return Err(ConstEvalError::Failed {
+                    index,
+                    reason: failure_reason("the VM aborted".to_string(), captured),
+                });
+            }
+        }
+    }
+    let snapshot = capture(&vm, consts, &mut done, &mut skipped);
+    let _ = vm.restore_output();
+    skipped.sort_unstable();
+    snapshot.map(|snapshot| ConstEvalOutcome { snapshot, skipped })
+}
+
+/// Snapshot the `done` items' values; a silent item whose value has no
+/// snapshot form moves to `skipped`.
+fn capture(
+    vm: &Machine<256>,
+    consts: &[ConstEval],
+    done: &mut Vec<usize>,
+    skipped: &mut Vec<usize>,
+) -> Result<common::HeapSnapshot, ConstEvalError> {
+    loop {
+        match vm.heap().capture_snapshot(&snap_roots(vm, consts, done)) {
+            Ok(snapshot) => return Ok(snapshot),
+            Err(e) if consts[done[e.root]].silent => skipped.push(done.remove(e.root)),
+            Err(mut e) => {
+                e.root = done[e.root];
+                return Err(ConstEvalError::Unsnapshottable(e));
+            }
         }
     }
 }
 
-/// Run each initializer, keep its value in its slot, then snapshot them all.
-fn eval_in(
-    vm: &mut Machine<256>,
+/// A new VM holding the values computed so far.
+fn rebuild(
+    program: &CompiledExpansion,
     consts: &[ConstEval],
-    limits: &ComptimeLimits,
+    done: &mut Vec<usize>,
+    skipped: &mut Vec<usize>,
+    old: Box<Machine<256>>,
     captured: &Captured,
-) -> Result<common::HeapSnapshot, ConstEvalError> {
-    for (index, c) in consts.iter().enumerate() {
-        let value = call_limited(vm, c.entry, &[], limits).map_err(|reason| {
-            let printed = String::from_utf8_lossy(&captured.0.lock().expect("capture lock")).trim().to_string();
-            let reason = match reason {
-                r if !r.is_empty() => r,
-                _ if !printed.is_empty() => printed,
-                _ => "it panicked".to_string(),
-            };
-            ConstEvalError::Failed { index, reason }
-        })?;
-        vm.set_static(c.slot, value);
+) -> Result<Box<Machine<256>>, ConstEvalError> {
+    let snapshot = capture(&old, consts, done, skipped);
+    let mut old = old;
+    let _ = old.restore_output();
+    drop(old);
+    let snapshot = snapshot?;
+    let mut vm = const_vm(program, captured);
+    for (slot, value) in vm.heap_mut().restore_snapshot(&snapshot) {
+        vm.set_static(slot, value);
     }
-    let roots: Vec<SnapRoot> = consts
-        .iter()
-        .map(|c| SnapRoot {
-            slot: c.slot,
-            value: vm.static_value(c.slot).unwrap_or_default(),
-            kind: c.kind,
-        })
-        .collect();
-    vm.heap().capture_snapshot(&roots).map_err(ConstEvalError::Unsnapshottable)
+    Ok(vm)
+}
+
+/// The failure text: the VM's own reason, else what the call printed.
+fn failure_reason(reason: String, captured: &Captured) -> String {
+    let printed = String::from_utf8_lossy(&captured.0.lock().expect("capture lock")).trim().to_string();
+    match reason {
+        r if r.is_empty() && !printed.is_empty() => printed,
+        r if r.is_empty() => "it panicked".to_string(),
+        r if r == "the VM aborted" && !printed.is_empty() => printed,
+        r => r,
+    }
 }
 
 /// A thread's VM for one expansion program. Holding the bytecode `Arc`

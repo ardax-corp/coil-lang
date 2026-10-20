@@ -370,27 +370,40 @@ pub trait MacroHost: Send + Sync {
         limits: &crate::ComptimeLimits,
     ) -> Vec<Result<String, String>>;
 
-    /// Compute `consts` in order on one compile-time VM of `program`: call
+    /// Compute `consts` in order on a compile-time VM of `program`: call
     /// each initializer, store its value to its static slot (later
-    /// initializers may read earlier consts), then capture every value as
-    /// one snapshot, so values shared between consts stay shared. Each call
-    /// runs within `limits`.
+    /// initializers may read earlier ones), then capture every value as one
+    /// snapshot, so values shared between them stay shared. An explicit
+    /// item runs within `limits`; a silent one within the silent tier
+    /// ([`crate::ComptimeLimits::SILENT_CALL_STEPS`] each,
+    /// [`crate::ComptimeLimits::SILENT_MODULE_STEPS`] for all of them) and,
+    /// when it fails, is left out instead of failing the rest.
     fn eval_consts(
         &self,
         program: &CompiledExpansion,
         consts: &[ConstEval],
         limits: &crate::ComptimeLimits,
-    ) -> Result<common::HeapSnapshot, ConstEvalError>;
+    ) -> Result<ConstEvalOutcome, ConstEvalError>;
 }
 
-/// A `const` to compute at compile time: the entry of its initializer
+/// A value to compute at compile time: the entry of its initializer
 /// (`__static_init$NAME`), the static slot its value is stored to and that
-/// slot's word kind (`common::WORD_*`).
+/// slot's word kind (`common::WORD_*`). `silent` for a `static let`, whose
+/// failure keeps its startup initializer; a `const`'s fails the build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConstEval {
     pub entry: u32,
     pub slot: u32,
     pub kind: u8,
+    pub silent: bool,
+}
+
+/// The computed values, and the silent items left out (indices into the
+/// request), which keep their startup initializers.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConstEvalOutcome {
+    pub snapshot: common::HeapSnapshot,
+    pub skipped: Vec<usize>,
 }
 
 /// Why [`MacroHost::eval_consts`] gave no snapshot.
@@ -398,7 +411,8 @@ pub struct ConstEval {
 pub enum ConstEvalError {
     /// Initializer `index` panicked or ran out of budget; the reason.
     Failed { index: usize, reason: String },
-    /// A value reached from a const has no compile-time form.
+    /// A value reached from a const has no compile-time form. `root` is
+    /// the index of the const in the request.
     Unsnapshottable(common::SnapshotError),
 }
 
