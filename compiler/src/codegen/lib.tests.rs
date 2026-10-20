@@ -5229,7 +5229,7 @@ fn match_nested_record_in_tuple_binds_correctly() {
 #[test]
 fn match_nested_record_in_record_binds_correctly() {
     use common::Instruction;
-    let (bc, _pool) = compile_src(
+    let (bc, _pool) = compile_src_no_inline(
         "enum Inner { I { v: int } } \
  enum Wrap { Good { x: Inner }, Bad(string) } \
  fn pick(Wrap w) -> int { \
@@ -5263,7 +5263,7 @@ fn match_nested_record_in_record_binds_correctly() {
 #[test]
 fn match_depth_3_nested_records_bind_correctly() {
     use common::Instruction;
-    let (bc, _pool) = compile_src(
+    let (bc, _pool) = compile_src_no_inline(
         "enum W { W { v: int } } \
  enum Baz { Qux { a: W } } \
  enum Foo { Bar(Baz), Other } \

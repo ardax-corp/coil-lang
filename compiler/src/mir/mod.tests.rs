@@ -2074,7 +2074,14 @@ fn main() {
     let _ = either(Result::Ok(1));
 }
 "#;
-    let (body, ..) = fn_body(src, "either");
+    // Not inlined into `main`, which would leave no body to read.
+    let mut p = crate::Pipeline::new();
+    p.set_inline_max_cost(0);
+    let (bc, _) = p.compile_src(src).expect("compile");
+    let syms = p.program_debug().fn_symbols;
+    let i = syms.iter().position(|s| s.name == "either").expect("either");
+    let end = syms.get(i + 1).map_or(bc.len(), |s| s.entry_pc as usize);
+    let body = &bc[syms[i].entry_pc as usize..end];
     let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
     assert!(
         names.iter().all(|n| !n.contains("Jmp") && !n.contains("JMP") && !n.contains("JumpIf")),
