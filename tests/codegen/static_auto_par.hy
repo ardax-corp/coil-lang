@@ -1,7 +1,7 @@
 // coil-lang#793: a function that reads or writes a `static let` is not
 // pure, so auto-par keeps a loop over it sequential (its workers have no
-// statics). A `const` is folded and stays pure, and so does one computed at
-// startup: nothing writes its slot (#1558).
+// statics). A `const` is folded and stays pure, and so does one computed by
+// a call: nothing writes its slot (#1558).
 use tests::assert;
 
 static let SCALE: int = 3;

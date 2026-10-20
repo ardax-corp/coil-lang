@@ -366,9 +366,30 @@ the primitives have built-in `Default` instances (`0`, `0.0`, `false`, `""`)
 so `Box<int>::default()` resolves. Generic types get no type-name `Show` /
 `String` default.
 
+## Compile-time consts
+
+A `const` whose initializer does not fold (`const T = table();`) is computed
+while compiling, on the same host (`MacroHost::eval_consts`):
+
+- Its initializer must be pure (the HIR effect summary of its `Static` body):
+  a read or write of a `static let`, or any IO, is E0134 naming the cause.
+- After `finalize_bytecode`, `Pipeline::compute_consts` runs every const's
+  `__static_init$NAME` in setup order on one fresh VM, each within
+  `ComptimeLimits`, storing each value to its slot so later consts can read
+  earlier ones. A panic or a limit is E0134 at the const.
+- The values are captured as one `common::HeapSnapshot` (sharing and cycles
+  kept; see `machine/src/memory/snapshot.rs`). A function, handle or other
+  runtime-only value is E0134 naming the path (`H.f`).
+- The setup region's `CALL init; StoreStatic slot` pairs become `NOOP`s and
+  one `RestoreSnapshot` (snapshot appended to the constant pool) at the first
+  const's place. The initializer bodies stay in the program.
+- Without a host (a pipeline built with no VM linked) consts keep their
+  startup initializers.
+
 ## Not yet
 
-- `comptime` (stage 4 of the macro design) is not started.
+- `comptime` expressions and blocks (stage 4 of the macro design) are not
+  started; computed `const`s are (see above).
 - A function-style macro call names the macro bare (`name!`); a path
   (`m::name!`) does not parse.
 - Compiled expansion programs and outputs are cached in memory only: a fresh

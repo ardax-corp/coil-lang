@@ -1,4 +1,4 @@
-// A module `const` whose value is computed at startup is readable from any
+// A module `const` whose value is computed by a call is readable from any
 // function; only reassignment is rejected (#1558).
 // Output: 42
 use io::{stdout, write};
