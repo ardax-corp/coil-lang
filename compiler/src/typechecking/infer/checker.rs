@@ -47,6 +47,8 @@ mod infer_fn;
 mod infer_match;
 #[path = "variadic.rs"]
 pub(super) mod variadic;
+#[path = "weak_check.rs"]
+pub(super) mod weak_check;
 
 /// Max native recursion depth for [`Checker::infer`]. Chosen well under what
 /// a debug-build stack of a few MiB can hold even with `infer_inner`'s
@@ -212,7 +214,7 @@ impl Checker {
             bare_patterns_by_span: HashMap::new(),
             bare_cases_by_module: HashMap::new(),
             pending_exhaustive: Vec::new(),
-            pending_weak_args: Vec::new(),
+            weak_checks: Default::default(),
             async_functions: std::collections::HashSet::new(),
             async_depth: 0,
             current_yield_ty: None,
@@ -1613,7 +1615,7 @@ impl Checker {
         self.ffi_exec_names.clear();
         self.variadic_call_arg_tags.clear();
         self.pending_exhaustive.clear();
-        self.pending_weak_args.clear();
+        self.weak_checks.clear_module();
         self.async_functions.clear();
         self.async_depth = 0;
         self.current_yield_ty = None;
@@ -2269,6 +2271,7 @@ impl Checker {
         let id = self.ids.resolve_walk_id(expr, seq_id);
         self.maybe_attach_def_id(id, expr);
         self.node_ids_by_span.insert((expr.0.start, expr.0.end), id);
+        let outer_range = std::mem::replace(&mut self.weak_checks.range, expr.0.into_range());
 
         // `current_expected` is the expected type of *this* node: hand it to
         // the node (`expected_here`) and clear it for its operands, unless
@@ -2281,6 +2284,7 @@ impl Checker {
             self.current_expected = None;
         }
         let ty = self.infer_inner(expr, Some(id));
+        self.weak_checks.range = outer_range;
         self.current_expected = outer;
         self.expected_here = prev_here;
         self.cache.insert(id, ty.clone());
@@ -5824,7 +5828,7 @@ impl Checker {
         if self.gc_fn_in_scope(&ident) == Some(GcBuiltin::Weak)
             && let Some(arg) = arg_tys.first()
         {
-            self.pending_weak_args.push((arg.clone(), range.clone()));
+            self.weak_checks.record_arg(arg.clone(), range.clone());
         }
 
         self.maybe_record_ffi_param_invoke_flow_for_call(&ident, &flat_args);
@@ -5918,17 +5922,25 @@ impl Checker {
 
     /// The instance's type parameters replaced by fresh variables, in its
     /// head and its context alike.
-    fn freshen_instance(&mut self, args: &[Ty], context: &[Constraint]) -> (Vec<Ty>, Vec<Constraint>) {
+    /// Also returns the old → fresh variable pairs.
+    fn freshen_instance(
+        &mut self,
+        args: &[Ty],
+        context: &[Constraint],
+    ) -> (Vec<Ty>, Vec<Constraint>, Vec<(TyVarId, TyVarId)>) {
         let mut vars = Vec::new();
         for a in args {
             Self::collect_ty_vars(a, &mut vars);
         }
         if vars.is_empty() {
-            return (args.to_vec(), context.to_vec());
+            return (args.to_vec(), context.to_vec(), Vec::new());
         }
         let mut fresh = Subst::empty();
+        let mut mapping = Vec::with_capacity(vars.len());
         for v in vars {
-            fresh.insert(v, Ty::Var(self.counter.fresh()));
+            let f = self.counter.fresh();
+            fresh.insert(v, Ty::Var(f));
+            mapping.push((v, f));
         }
         let args = args.iter().map(|a| apply_ty(&fresh, a)).collect();
         let context = context
@@ -5938,7 +5950,7 @@ impl Checker {
                 args: c.args.iter().map(|a| apply_ty(&fresh, a)).collect(),
             })
             .collect();
-        (args, context)
+        (args, context, mapping)
     }
 
     fn collect_ty_vars(ty: &Ty, out: &mut Vec<TyVarId>) {
@@ -10470,15 +10482,15 @@ impl Checker {
             .filter(|inst| inst.class == class && inst.args.len() == wanted_lookup.len())
             .cloned()
             .collect();
-        let mut matches: Vec<(InstanceDef, Subst)> = Vec::new();
-        let mut structural: Vec<(InstanceDef, Subst)> = Vec::new();
+        let mut matches: Vec<(InstanceDef, Subst, Vec<(TyVarId, TyVarId)>)> = Vec::new();
+        let mut structural: Vec<(InstanceDef, Subst, Vec<(TyVarId, TyVarId)>)> = Vec::new();
         for inst in candidates {
             let mut ok = true;
             let mut local = self.subst.clone();
             // A generic instance (`Show for Box<T>`) is instantiated fresh
             // per goal: its own parameters must never be bound globally, or
             // the first `Box<int>` would turn it into `Show for Box<int>`.
-            let (inst_args, inst_ctx) = self.freshen_instance(&inst.args, &inst.context);
+            let (inst_args, inst_ctx, fresh_vars) = self.freshen_instance(&inst.args, &inst.context);
             let generic = inst_args != inst.args;
             for (have, need) in inst_args.iter().zip(wanted_lookup.iter()) {
                 // An open goal argument cannot choose a generic instance
@@ -10523,9 +10535,9 @@ impl Checker {
                         .collect();
                 }
                 if shape || (generic && Generics::is_structural_tuple(&inst)) {
-                    structural.push((inst, local));
+                    structural.push((inst, local, fresh_vars));
                 } else {
-                    matches.push((inst, local));
+                    matches.push((inst, local, fresh_vars));
                 }
             }
         }
@@ -10538,8 +10550,10 @@ impl Checker {
         match matches.len() {
             0 => Ok(None),
             1 => {
-                let (inst, local) = matches.pop().expect("one match");
+                let (inst, local, fresh_vars) = matches.pop().expect("one match");
                 self.absorb(&local);
+                // Its methods' `weak()` calls on the head's parameters (#1670).
+                self.weak_checks.record_instance(fresh_vars, range);
                 Ok(Some(inst))
             }
             _ => {
@@ -11015,15 +11029,12 @@ impl Checker {
 
     /// Instantiate a scheme and record freshened variable kinds (Phase 5).
     fn instantiate_ty(&mut self, scheme: &Scheme) -> Ty {
-        let (ty, _, kinds) = instantiate_with_kinds(scheme, &mut self.counter);
-        self.var_kinds.extend(kinds);
-        ty
+        self.instantiate_scheme_mapped(scheme).0
     }
 
     /// Instantiate a scheme with constraints, recording freshened kinds.
     fn instantiate_scheme(&mut self, scheme: &Scheme) -> (Ty, Vec<Constraint>) {
-        let (ty, constraints, kinds) = instantiate_with_kinds(scheme, &mut self.counter);
-        self.var_kinds.extend(kinds);
+        let (ty, constraints, _) = self.instantiate_scheme_mapped(scheme);
         (ty, constraints)
     }
 
@@ -12185,6 +12196,7 @@ impl Checker {
             })
             .collect();
         self.var_kinds.extend(fresh_kinds);
+        self.weak_checks.record_inst(scheme, mapping.iter().map(|(&b, &f)| (b, f)));
         let ty = substitute_vars(&scheme.ty, &mapping);
         let constraints = scheme
             .constraints
@@ -17562,29 +17574,6 @@ impl Checker {
     /// point the substitution is closed, so the scrutinee type is
     /// fully resolved (any free type variables that were bound
     /// since the match site are visible here).
-    /// E0119 for each `gc::weak` argument that resolved to a readonly
-    /// class instance (#1644, design Q9). A weak handle observes the
-    /// instance's identity and the moment it is collected, so readonly
-    /// class instances could not be treated as values (#1562).
-    fn run_pending_weak_checks(&mut self) {
-        let pending = std::mem::take(&mut self.pending_weak_args);
-        for (ty, range) in pending {
-            let resolved = apply_ty_prune(&self.subst, &ty);
-            if !self.is_readonly_class_ty(&resolved) {
-                continue;
-            }
-            let shown = self.diag_ty(&resolved);
-            self.error_with_help(
-                ErrorCode::GenericTypeError,
-                format!("`weak()` is not allowed on `{shown}`, an instance of a readonly class"),
-                range,
-                Some(format!(
-                    "a readonly class instance is a value, with no identity or lifetime to observe; keep the `{shown}` itself, or make it a plain `class` if you need a weak handle"
-                )),
-            );
-        }
-    }
-
     fn run_pending_exhaustiveness(&mut self) {
         // Drain into a local so we can release the borrow on
         // `self` before mutating `self.messages`.
