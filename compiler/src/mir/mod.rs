@@ -37,6 +37,7 @@ mod licm;
 mod from_hir;
 mod pack;
 mod specialize;
+mod sccp;
 mod sroa;
 mod vectorize;
 mod strength;
@@ -72,6 +73,7 @@ pub use specialize::{
     fuse_fallback, lower_abi_body_reusing, take_dense_refusal, take_lir_refusal,
     try_specialize_body_side, BodyLabels, BodySidecar, LirDraft,
 };
+pub use sccp::sccp;
 pub use sroa::sroa;
 pub use strength::strength_reduce;
 #[cfg(test)]
