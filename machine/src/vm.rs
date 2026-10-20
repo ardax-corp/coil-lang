@@ -606,6 +606,15 @@ pub struct Machine<const S: usize> {
     heap_cap_hit: bool,
 }
 
+
+/// Install `kinds` as the static word kinds of the program this thread
+/// runs (what a GC root walk reads static slots by) and return the ones
+/// it replaces. A VM that runs on a thread already serving another program
+/// (the compile-time VM) installs its own and puts the old ones back.
+pub fn swap_static_word_kinds(kinds: Arc<Vec<u8>>) -> Arc<Vec<u8>> {
+    STATIC_KINDS.with_borrow_mut(|k| std::mem::replace(k, kinds))
+}
+
 impl<const S: usize> Default for Machine<S> {
     fn default() -> Self {
         Self::with_operand_capacity(crate::DEFAULT_OPERAND_STACK_SLOTS)

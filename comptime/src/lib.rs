@@ -59,7 +59,9 @@ impl MacroHost for VmMacroHost {
     ) -> Result<ConstEvalOutcome, ConstEvalError> {
         let captured = Captured::default();
         let outer = machine::io::set_output_redirect(None);
+        let kinds = machine::swap_static_word_kinds(program.static_word_kinds.clone());
         let result = eval_in(program, consts, folds, limits, &captured);
+        machine::swap_static_word_kinds(kinds);
         machine::io::set_output_redirect(outer);
         result
     }
@@ -339,12 +341,14 @@ fn run_entry(program: &CompiledExpansion, entry: u32, input: &str, limits: &Comp
     // `with_output` installs a thread-local redirect pointing into the VM;
     // put the caller's back before the VM is dropped.
     let outer = machine::io::set_output_redirect(None);
+    let kinds = machine::swap_static_word_kinds(program.static_word_kinds.clone());
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _ = vm.with_output(captured.clone());
         let result = call_entry(&mut vm, entry, input, limits);
         let _ = vm.restore_output();
         result
     }));
+    machine::swap_static_word_kinds(kinds);
     machine::io::set_output_redirect(outer);
     // Only a call that returned leaves the VM between frames; any other
     // outcome drops it.

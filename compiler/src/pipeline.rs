@@ -129,6 +129,8 @@ pub struct Pipeline {
     debugger_attached: bool,
     /// Collect IL opt counters for `--opt-stats` (COI-131).
     collect_opt_stats: bool,
+    /// Off: no call is computed at compile time, whatever the level.
+    call_fold: bool,
     /// Built on first use. `coil run` never compiles, and `Compiler::default`
     /// (builtin typeclasses + Vec signatures) was ~28% of process startup.
     compiler: std::cell::OnceCell<Compiler>,
@@ -728,6 +730,7 @@ impl Pipeline {
             debug_level: None,
             debugger_attached: false,
             collect_opt_stats: false,
+            call_fold: true,
             compiler: std::cell::OnceCell::new(),
             pending_native_ids: Vec::new(),
             sink,
@@ -1700,7 +1703,7 @@ impl Pipeline {
             .into_iter()
             .filter(|c| c.entry.is_some())
             .collect();
-        let sites = if self.compiler_lazy().call_fold_on() { self.compiler_lazy().fold_sites() } else { Vec::new() };
+        let sites = if self.call_fold && self.compiler_lazy().call_fold_on() { self.compiler_lazy().fold_sites() } else { Vec::new() };
         if consts.is_empty() && sites.is_empty() {
             return;
         }
@@ -1725,6 +1728,7 @@ impl Pipeline {
             operand_stack_slots: self.operand_stack_slots(),
             program_debug: self.program_debug(),
             class_word_kinds: self.class_word_kinds(),
+            static_word_kinds: std::sync::Arc::new(kinds.clone()),
         };
         let limits = self.host_grants.comptime;
         // One evaluation per distinct call.
@@ -2046,6 +2050,13 @@ impl Pipeline {
     }
 
     /// Select an IL optimization preset. Default is [`crate::OptLevel::Standard`].
+    /// Turn computing pure calls with constant arguments at compile time
+    /// off (or back on, at `-O2` and above). Tests of what such a call
+    /// compiles to turn it off.
+    pub fn set_call_fold(&mut self, on: bool) {
+        self.call_fold = on;
+    }
+
     pub fn set_opt_level(&mut self, level: crate::OptLevel) {
         self.opt_level = level;
         if self.compiler.get().is_some() {

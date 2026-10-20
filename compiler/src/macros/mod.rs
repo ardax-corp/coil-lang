@@ -355,6 +355,8 @@ pub struct CompiledExpansion {
     /// Per-class field word kinds, so captured instances know which fields
     /// are scalars.
     pub class_word_kinds: Vec<common::ClassWordKinds>,
+    /// Word kind of each static slot (`common::WORD_*`).
+    pub static_word_kinds: std::sync::Arc<Vec<u8>>,
 }
 
 /// Runs a compiled expansion program. Implemented by the `comptime` crate on

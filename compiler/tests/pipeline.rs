@@ -2169,6 +2169,8 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
+    // The call would be computed while compiling; this checks its worker.
+    pipeline.set_call_fold(false);
     let (bytecode, constants) = pipeline
         .compile_src(src)
         .expect("auto-par fib should compile");
@@ -2737,6 +2739,8 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
+    // The call would be computed while compiling; this checks its worker.
+    pipeline.set_call_fold(false);
     let (bytecode, constants) = pipeline
         .compile_src(src)
         .expect("auto-par triple_fib should compile");
@@ -3125,6 +3129,8 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
+    // The call would be computed while compiling; this checks its worker.
+    pipeline.set_call_fold(false);
     let (bytecode, constants) = pipeline
         .compile_src(src)
         .expect("auto-par fib should compile");

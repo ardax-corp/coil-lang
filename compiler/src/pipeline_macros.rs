@@ -1385,6 +1385,7 @@ impl SubProgram {
                 operand_stack_slots: sub.operand_stack_slots(),
                 program_debug: sub.program_debug(),
                 class_word_kinds: sub.class_word_kinds(),
+                static_word_kinds: std::sync::Arc::new(sub.static_word_kinds()),
             },
             offsets,
         })
