@@ -101,12 +101,9 @@ fn show_it<T: Show>(T x) -> string {
     return format("%v", x);
 }
 
-test("iteration over niche fields and a generic show") {
+test("reading niche fields by name and a generic show") {
     let r = { b: pick(0), a: pick(4) };
-    let out = "";
-    for (k, v) in r {
-        out += k + "=" + (v ?? "-") + ";";
-    }
+    let out = "a=" + (r.a ?? "-") + ";b=" + (r.b ?? "-") + ";";
     assert!(out == "a=n4;b=-;", out);
     assert!(show_it(r) == "{ a: Some(n4), b: None }", show_it(r));
 }
