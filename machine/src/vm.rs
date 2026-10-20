@@ -354,6 +354,12 @@ struct FramePins {
     /// `frames.len()` at first pin (TailCall keeps the same depth).
     depth: usize,
     by_slot: Vec<Option<Object>>,
+    /// Per slot, whether `ArrayPin` made the pin: it holds the array for
+    /// the frame (an older archive's `IndexPin*` reads it by slot alone).
+    /// A dense index's pin is only a cache of its register's object, and a
+    /// collection drops it once the register holds something else
+    /// ([`Machine::release_stale_pins`], #1651).
+    sticky: Vec<bool>,
 }
 
 #[inline]
@@ -392,8 +398,10 @@ fn pin_current_array_in(
         && pins.depth == frames_len {
             if pins.by_slot.len() <= idx {
                 pins.by_slot.resize(idx + 1, None);
+                pins.sticky.resize(idx + 1, false);
             }
             pins.by_slot[idx] = Some(obj);
+            pins.sticky[idx] = false;
             return;
         }
     let mut by_slot = vec![None; idx + 1];
@@ -401,6 +409,7 @@ fn pin_current_array_in(
     frame_pins.push(FramePins {
         depth: frames_len,
         by_slot,
+        sticky: vec![false; idx + 1],
     });
 }
 
@@ -1309,7 +1318,38 @@ impl<const S: usize> Machine<S> {
     #[inline]
     fn pin_current_array(&mut self, slot: u32, obj: Object) {
         pin_current_array_in(&mut self.frame_pins, self.frames.len(), slot, obj);
+        if let Some(pins) = self.frame_pins.last_mut() {
+            pins.sticky[slot as usize] = true;
+        }
         self.return_bookkeeping = true;
+    }
+
+    /// Drop the dense-index pins whose register no longer holds the pinned
+    /// object: a pin is only a cache of that register's object, but it is
+    /// a root, so once a clear zeroed the register (or it was rewritten) it
+    /// kept a destructured tuple and its elements alive until the frame
+    /// returned (#1651). A later index of the register looks the object up
+    /// again. Run before every root walk that marks.
+    fn release_stale_pins(&mut self) {
+        let frames = self.frames.len();
+        let stack = self.stack.as_slice();
+        for pins in &mut self.frame_pins {
+            let Some(i) = pins.depth.checked_sub(1).filter(|&i| i < frames) else {
+                continue;
+            };
+            let base = self.frames[i].get();
+            for (slot, (pin, &sticky)) in pins.by_slot.iter_mut().zip(&pins.sticky).enumerate() {
+                if sticky {
+                    continue;
+                }
+                if let Some(obj) = pin
+                    && let Some(word) = stack.get(base + slot)
+                    && word.raw() as u64 != obj.addr()
+                {
+                    *pin = None;
+                }
+            }
+        }
     }
 
     fn read_indexed(elements: &[Value], index: i64, unchecked: bool) -> Option<Value> {
@@ -1766,6 +1806,7 @@ impl<const S: usize> Machine<S> {
     }
 
     fn collect_vm_root_addrs(&mut self) -> Vec<u64> {
+        self.release_stale_pins();
         let mut roots = self.heap.take_gc_roots();
         self.for_each_vm_root(&mut |addr, _| roots.push(addr));
         roots

@@ -833,6 +833,35 @@
         assert_eq!(vm.dense_cache_addr_for_test(), pin);
     }
 
+    /// #1651: a collection drops a dense index's pin once its register no
+    /// longer holds the array (a clear zeroed it), and keeps one whose
+    /// register still does.
+    #[test]
+    fn collect_drops_dense_index_pin_of_a_zeroed_register() {
+        let mut vm = Machine::<8>::default();
+        vm.run(&[
+            Byte::new(Instruction::Seek).with_operand_u32(6),
+            const_int(5),
+            Byte::new(Instruction::MakeArray).with_operand_u32(1),
+            store_pop(0),
+            const_int(7),
+            Byte::new(Instruction::MakeArray).with_operand_u32(1),
+            store_pop(4),
+            const_int(0),
+            store_pop(1),
+            dense_index(common::dense::HEAP_UNCHECKED, 2, 0, 1),
+            dense_index(common::dense::HEAP_UNCHECKED, 3, 4, 1),
+            const_int(0),
+            store_pop(0),
+            Byte::new(Instruction::HALT),
+        ]);
+        let kept = vm.pinned_addr_for_test(4).expect("second array pinned");
+        assert!(vm.pinned_addr_for_test(0).is_some());
+        vm.gc_collect();
+        assert_eq!(vm.pinned_addr_for_test(0), None, "zeroed register's pin survived a collect");
+        assert_eq!(vm.pinned_addr_for_test(4), Some(kept));
+    }
+
     #[test]
     fn dense_store_index_reuses_pin_and_writes() {
         let mut vm = Machine::<8>::default();
