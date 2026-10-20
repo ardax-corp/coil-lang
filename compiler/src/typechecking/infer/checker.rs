@@ -14854,6 +14854,11 @@ impl Checker {
                 )
             });
         }
+        if let Some(primitive) = common::builtin_primitive_type_spelling(name) {
+            return Some(format!(
+                "built-in type names match in any letter case, so `{name}` names the built-in `{primitive}`; pick a different name"
+            ));
+        }
         common::is_reserved_builtin_type(name)
             .then(|| format!("`{name}` is a built-in type; pick a different name"))
     }
