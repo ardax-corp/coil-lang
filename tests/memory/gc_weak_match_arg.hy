@@ -11,6 +11,11 @@ class Node {
     pub next: Option<Node>,
 }
 
+enum Slot {
+    Full(Node, int),
+    Empty,
+}
+
 class Maker {
     pub k: int,
 }
@@ -146,6 +151,24 @@ test("a match statement's binding passed to a call is dropped") {
             Option::None => {},
         }
         junk = Option::None;
+        collect();
+        ok = ok && gone(w);
+        i = i + 1;
+    }
+    assert!(ok);
+}
+
+test("a boxed enum arm's binding passed to a call is dropped") {
+    let junk = Slot::Empty;
+    let i = 0;
+    let ok = true;
+    while i < 3 {
+        junk = Slot::Full(new Node(i, Option::None), i);
+        let w = match junk {
+            Slot::Full(n, _) => weak(n),
+            Slot::Empty => weak(new Node(-1, Option::None)),
+        };
+        junk = Slot::Empty;
         collect();
         ok = ok && gone(w);
         i = i + 1;
