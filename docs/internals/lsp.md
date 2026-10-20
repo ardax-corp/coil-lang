@@ -29,7 +29,8 @@ These requests are implemented and covered by `coil-lsp` scenario tests:
 | Hover | Types from the project checker (cross-file, `let x = e` shows the type of `e`, `let x: T` shows `T`), `///` docs including at the definition site in another file, parameter docs, virtual-module stubs, `macro` / `derive` / `attr` docs. Unparsable buffers fall back to the single-file / last-good path |
 | Completion | Keywords, decls, inferred types, function snippets, mid-edit sanitize / last-good fallback; `Enum.Case` after `.`; virtual exports after `::` |
 | Member completion | `recv.` / `recv.pre` / `self.field.` list the receiver class's fields, then methods (`Checker::class_members`). The receiver is typed from a copy of the buffer with the half-typed access removed; `self` is the enclosing `impl` owner |
-| Member goto-definition | `p.method` / `p.field` jump to the `impl` method or class field of the receiver's class, in open buffers or indexed project files |
+| Member goto-definition | `p.method` / `p.field` jump to the `impl` method or class field of the receiver's class, in open buffers or indexed project files; with neither, the method of the one `impl Trait for Class` that declares it |
+| Traits and `Owner::member` | `trait` declarations are definitions (hover shows the header and docs). In `Trait::method(x)` the owner jumps to the trait and the member to that trait's `fn method`, never another trait's or a free `fn` of the same name, then to the ground instance's method when the last typecheck resolved one (`Checker::call_dicts_for_span`). `Type::method` reaches an inherent `impl Type` method the same way. `SymbolIndex` keys these members `Owner::member` |
 | Inlay hints | `: T` after unannotated `let` names (not `_…` or `new C(…)`), `param:` before positional arguments to free functions (skipped when the argument is that same name) |
 | Code actions | Quick fixes: import an unknown name (E0100 / E0101 / E0110) from each workspace module that declares it, joining an existing `use m::{…}`; add `default => {},` to a non-exhaustive statement `match` (E0209). Refactor: add the inferred `: T` to the `let` under the cursor |
 | Signature help | Declaration-based `name(T a, U b) -> R` for local and imported `fn`s, methods, and `macro` / `attr` / `derive` callables; `name!(…)` strips the bang; nesting / string aware active parameter; virtual names from the completion index |
@@ -106,8 +107,8 @@ Leave these for a later LSP pass unless they block daily editing:
 - `textDocument/typeDefinition` is advertised but shares the definition
   handler (Coil has no separate type-def table).
 - Cross-project references that are not on the current use-graph.
-- Trait-item navigation; member completion on non-class receivers
-  (strings, arrays, enums).
+- Member completion on non-class receivers (strings, arrays, enums);
+  `Trait::` completion.
 - The default-arm quick fix skips value `match`es (a value arm needs an
   expression the fix cannot choose).
 - Semantic token modifiers (`declaration`, `readonly`, …).
