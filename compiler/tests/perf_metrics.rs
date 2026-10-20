@@ -2167,3 +2167,89 @@ fn main() {
         .collect();
     assert_eq!(clones.len(), 1, "`getx` should have one instance: {clones:?}");
 }
+
+/// #1561: a module `const` table read at a constant index folds to the
+/// element, and its length to a literal: no load of the table is left.
+#[test]
+fn const_table_constant_reads_fold() {
+    let src = "
+const T = readonly [10, 20, 30];
+
+fn pick() -> int {
+    return T[1] + T.len();
+}
+
+fn main() {
+    if pick() != 23 {
+        panic(\"pick\");
+    }
+}
+";
+    let (bc, pipeline) = compile_src_at(src, compiler::OptLevel::Standard);
+    let syms = pipeline.program_debug().fn_symbols;
+    let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
+    for name in ["pick", "main"].into_iter().filter(|n| names.contains(n)) {
+        let (start, end) = fn_pc_range(&syms, name, bc.len());
+        let ops: Vec<_> = bc[start..end].iter().map(|b| *b.bytecode()).collect();
+        assert_eq!(count_index_reads_in(&bc, start, end), 0, "`{name}` should not index the table; ops={ops:?}");
+        assert_eq!(count_opcodes_in(&bc, start, end, Instruction::LoadStatic), 0, "`{name}` should not load the table; ops={ops:?}");
+    }
+}
+
+/// #1561: `examples/perf/const_table_crc.hy` reads its module table with a
+/// variable index in a loop: the table's slot is loaded once, outside the
+/// loop, which reads one element per byte.
+#[test]
+fn const_table_slot_load_leaves_the_loop() {
+    let (bc, _, _, _, pipeline) = compile("examples/perf/const_table_crc.hy");
+    let syms = pipeline.program_debug().fn_symbols;
+    let (start, end) = fn_pc_range(&syms, "crc32", bc.len());
+    let (loop_start, loop_end) = innermost_loop_range(&bc, start, end);
+    let ops: Vec<_> = bc[start..end].iter().map(|b| *b.bytecode()).collect();
+    assert_eq!(count_opcodes_in(&bc, start, end, Instruction::LoadStatic), 1, "ops={ops:?}");
+    assert_eq!(
+        count_opcodes_in(&bc, loop_start, loop_end, Instruction::LoadStatic),
+        0,
+        "the table's slot should be loaded ahead of the loop; ops={ops:?}"
+    );
+    assert_eq!(count_index_reads_in(&bc, loop_start, loop_end), 2, "one data byte and one table element; ops={ops:?}");
+}
+
+/// #1561: a function-local `const` table of literals is built on the first
+/// call and loaded after that: a thousand calls allocate it once, not a
+/// thousand times.
+#[test]
+fn local_const_table_is_built_once() {
+    let src = "
+fn sbox(int x) -> int {
+    const S = readonly [12, 5, 6, 11, 9, 0, 10, 13, 3, 14, 15, 8, 4, 7, 1, 2];
+    let y = 0;
+    for k in 0..4 {
+        y = y | (S[(x >> (4 * k)) & 15] << (4 * k));
+    }
+    return y;
+}
+
+fn main() {
+    let s = 0;
+    let i = 0;
+    while i < 1000 {
+        s = (s + sbox(i ^ s)) & 65535;
+        i = i + 1;
+    }
+    if s < 0 {
+        panic(\"negative\");
+    }
+}
+";
+    let mut pipeline = Pipeline::new();
+    pipeline.set_auto_par(false);
+    pipeline.bind_workspace_language_roots();
+    let (bytecode, constants) = pipeline.compile_src(src).unwrap_or_else(|_| panic!("compile failed:\n{src}"));
+    let strings = pipeline.strings().to_vec();
+    let slots = pipeline.static_slot_count();
+    machine::reset_alloc_profile();
+    run_dispatch(bytecode, constants, strings, slots, &pipeline);
+    let allocs = machine::alloc_count();
+    assert!(allocs < 100, "the table should be built once, not per call: {allocs} allocations");
+}
