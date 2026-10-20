@@ -46,9 +46,10 @@ Pre-installed: `poop`, `valgrind`, `heaptrack`, `hyperfine`, `lua` (`.cursor/Doc
 ## Learned User Preferences
 
 - Aim for a regular language: one spelling per construct; do not add case-specific optimization workarounds that only serve a bench.
-- Dual syntax: drop C-style `for (init; cond; step)` (keep `while` and `for x in`); length is `x.len()` only (the free `len(x)` was removed; `Length` is the trait a user type implements for it); canonical `readonly` is before the value (`readonly new C(...)`, `readonly [...]`).
+- Dual syntax: drop C-style `for (init; cond; step)` (keep `while` and `for x in`); length is `x.len()` only (the free `len(x)` was removed; `Length` is the trait a user type implements for it); `readonly` is a prefix on a value (`readonly e` for any expression, `readonly new C(...)`) and on a type (`readonly T` in parameters, returns, lets, fields and generic arguments).
 - Linear tickets: one PR per issue, base on `main`, babysit until CI is green and merged before starting the next.
 
 ## Learned Workspace Facts
 
+- Trait methods have three call spellings: `x.m()`, `m(x)` and `Trait::m(x)`. The qualified one is the function form limited to that trait (it disambiguates same-named methods) and lowers to the same call (`infer_qualified_trait_call`, `qualified_trait_call_at`; see `docs/internals/static-trait-methods.md`).
 - Regularity target: one ground-call convention, panic on OOB (not `-1` / no-op); `a[i]` stays type `T`. `Option`/`Result` use niche / two-slot / boxed by shape (COI-92); arity-2 immediate products use two-slot `[a, b]` on direct `CALL`/`RETURN` (#302). Fuse opcodes are debt — rewrite existing ops rather than growing bench-shaped fuses.

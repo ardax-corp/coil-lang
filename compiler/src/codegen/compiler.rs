@@ -2084,12 +2084,60 @@ impl Compiler {
         if self.instance_call_takes_dict(&src.class, &src.method, &req.src) {
             self.plan_instance_dict(&mut dict, &src.class, &req.lookup);
         }
-        let layouts = params.iter().map(|t| self.value_layout(t)).collect();
-        let calls = HashMap::from([(req.src.clone(), (layouts, self.value_layout(&ret)))]);
-        let mut b = Synth::new(&self.checker, &req.name, ret.clone());
-        let locals: Vec<_> = params.iter().enumerate().map(|(i, t)| b.local(&format!("arg{i}"), t.clone(), LocalKind::Param)).collect();
-        let args = locals.into_iter().map(|l| b.read(l)).collect();
-        let call = b.call(&req.src, args, ret);
+        let layouts: Vec<_> = params.iter().map(|t| self.value_layout(t)).collect();
+        let ret_layout = self.value_layout(&ret);
+        // The clone's own types, as its callers (direct calls, its `$dict`
+        // adapter) pass and take its words: an `Option` / `Result` at the
+        // instance's types may be a niche word where the shared method
+        // takes it open (#1605).
+        let (own, own_ret) = match self.checker.typeclass_method_scheme(&src.class, &src.method) {
+            Some(scheme) if scheme.bounds.len() == req.lookup.len() => {
+                let mut inst = crate::typechecking::subst::Subst::empty();
+                for (bound, ty) in scheme.bounds.iter().zip(&req.lookup) {
+                    inst.insert(*bound, ty.clone());
+                }
+                let (open, open_ret) = Self::fun_param_and_ret_tys(&scheme.ty);
+                let own: Vec<_> = open.iter().map(|t| crate::typechecking::subst::apply_ty(&inst, t)).collect();
+                (own, crate::typechecking::subst::apply_ty(&inst, &open_ret))
+            }
+            _ => (params.clone(), ret.clone()),
+        };
+        // Converted only between an `Option` / `Result`'s niche word and
+        // its open enum object; any other word moves as it is.
+        let relayout = |c: &Self, own: &Ty, shared: &Ty, shared_layout: ValueLayout| {
+            shared_layout == ValueLayout::Boxed
+                && Self::ty_to_value_tag(shared) == Some(ValueTag::Instance)
+                && matches!(
+                    c.value_layout(own),
+                    ValueLayout::NicheOption | ValueLayout::NicheResult | ValueLayout::NicheUnitResult
+                )
+        };
+        let convert: Vec<bool> = params
+            .iter()
+            .zip(&layouts)
+            .enumerate()
+            .map(|(i, (t, &l))| own.get(i).is_some_and(|o| relayout(self, o, t, l)))
+            .collect();
+        let convert_ret = relayout(self, &own_ret, &ret, ret_layout);
+        let calls = HashMap::from([(req.src.clone(), (layouts, ret_layout))]);
+        let body_ret = if convert_ret { own_ret } else { ret.clone() };
+        let mut b = Synth::new(&self.checker, &req.name, body_ret.clone());
+        let mut args = Vec::with_capacity(params.len());
+        for (i, t) in params.iter().enumerate() {
+            let arg = if convert[i] {
+                let local = b.local(&format!("arg{i}"), own[i].clone(), LocalKind::Param);
+                let word = b.read(local);
+                b.builtin(crate::hir::Builtin::Relayout, vec![word], t.clone())
+            } else {
+                let local = b.local(&format!("arg{i}"), t.clone(), LocalKind::Param);
+                b.read(local)
+            };
+            args.push(arg);
+        }
+        let mut call = b.call(&req.src, args, ret);
+        if convert_ret {
+            call = b.builtin(crate::hir::Builtin::Relayout, vec![call], body_ret);
+        }
         let ret = b.ret(call);
         let root = b.block(vec![ret], None, crate::typechecking::ty::never());
         let hir = Self::synth_generic(b.finish(root));
@@ -2118,6 +2166,18 @@ impl Compiler {
     fn emit_dict_adapter_thunk(&mut self, class: &str, method: &str, inst_args: &[Ty], fqn: &str) {
         use crate::hir::synth::Synth;
         use crate::hir::{Builtin, LocalKind};
+        // A generic instance's AST head names its parameters as
+        // constructors (`Option<T>` as `Con("T")`); its adapter is typed in
+        // the checker's head, whose parameters are variables (#1609).
+        let head = self
+            .checker
+            .generics()
+            .instances
+            .iter()
+            .find(|inst| inst.class == class && inst.method_fqns.get(method).is_some_and(|f| f == fqn))
+            .filter(|inst| inst.args.len() == inst_args.len() && inst.args.iter().any(Self::ty_has_var))
+            .map(|inst| inst.args.clone());
+        let inst_args = head.as_deref().unwrap_or(inst_args);
         let raw = self.raw_instance_methods.contains(fqn);
         let sig = self.trait_method_boundary_sig(class, method, inst_args, false);
         if sig.is_none() && !raw {
@@ -2148,7 +2208,19 @@ impl Compiler {
         let ret = crate::typechecking::subst::apply_ty(&inst, &open_ret);
         // Its result, boxed back from the layout the method returns it in.
         let ret_from = sig.as_ref().and_then(|s| s.ret).filter(|&l| l != ValueLayout::Boxed);
-        let body_ret = if ret_from.is_some() { open_ret } else { ret.clone() };
+        // A bare type parameter's niche `Option` / `Result` result goes
+        // back as its enum object, boxed, as the argument comes (#1595).
+        let ret_box = (raw && ret_from.is_none() && matches!(open_ret, Ty::Var(_)))
+            .then(|| Self::ty_to_value_tag(&ret))
+            .flatten()
+            .filter(|&tag| tag == ValueTag::Instance && self.value_layout(&ret) != ValueLayout::Boxed);
+        let body_ret = if ret_from.is_some() {
+            open_ret
+        } else if ret_box.is_some() {
+            crate::typechecking::ty::int()
+        } else {
+            ret.clone()
+        };
         let mut b = Synth::new(&self.checker, &adapter, body_ret.clone());
         let mut args = Vec::with_capacity(nparams + 1);
         for slot in 0..nparams {
@@ -2162,6 +2234,18 @@ impl Compiler {
                 let local = b.local(&format!("arg{slot}"), open.clone(), LocalKind::Param);
                 let word = b.read(local);
                 b.builtin(Builtin::Relayout, vec![word], own)
+            } else if let Some((tag, ty)) = &tag
+                && *tag == ValueTag::Instance as u32
+                && matches!(self.value_layout(ty), ValueLayout::NicheOption | ValueLayout::NicheResult | ValueLayout::NicheUnitResult)
+            {
+                // A niche `Option` / `Result` comes as its enum object,
+                // boxed: unboxed, read as a plain word, to its niche word
+                // (#1580), as `emit_builtin_enum_show`'s adapter.
+                let int = crate::typechecking::ty::int();
+                let local = b.local(&format!("arg{slot}"), int.clone(), LocalKind::Param);
+                let word = b.read(local);
+                let obj = b.builtin(Builtin::Unbox { tag: *tag }, vec![word], int);
+                b.builtin(Builtin::Relayout, vec![obj], ty.clone())
             } else if let Some((tag, ty)) = tag {
                 // A `()` moves as the word it is.
                 let ty = if tag == ValueTag::Unit as u32 { crate::typechecking::ty::int() } else { ty };
@@ -2192,6 +2276,10 @@ impl Compiler {
         let mut value = b.call(fqn, args, ret);
         if ret_from.is_some() {
             value = b.builtin(Builtin::Relayout, vec![value], body_ret);
+        } else if let Some(tag) = ret_box {
+            let int = crate::typechecking::ty::int();
+            let obj = b.builtin(Builtin::Relayout, vec![value], int.clone());
+            value = b.builtin(Builtin::Box { tag: tag as u32 }, vec![obj], int);
         }
         let ret = b.ret(value);
         let root = b.block(vec![ret], None, crate::typechecking::ty::never());
@@ -2901,12 +2989,45 @@ impl Compiler {
     /// Layout (Phase 5): subclass methods first, then each superclass’s
     /// methods in declaration order (flattened). Superclass slots are filled
     /// from the matching superclass instance for the same type arguments.
+    ///
+    /// On `false`, `out` is as it was: a dictionary is planned whole or not
+    /// at all, never as method pointers without their context (#1596).
     fn plan_instance_dict(
         &mut self,
         out: &mut Vec<DictStep>,
         class: &str,
         lookup: &[crate::typechecking::Ty],
     ) -> bool {
+        let start = out.len();
+        let planned = self.plan_instance_dict_steps(out, class, lookup);
+        if !planned {
+            out.truncate(start);
+        }
+        planned
+    }
+
+    fn plan_instance_dict_steps(
+        &mut self,
+        out: &mut Vec<DictStep>,
+        class: &str,
+        lookup: &[crate::typechecking::Ty],
+    ) -> bool {
+        // A built-in enum's sum or constructor type (`Some(e)`'s, in a mono
+        // clone) as its `App` spelling, which a generic instance's head
+        // binds its context's variables against (#1580).
+        let spelled: Vec<Ty>;
+        let lookup = if lookup.iter().any(|t| !matches!(t, Ty::App(..)) && crate::typechecking::ty::builtin_enum_app(t).is_some()) {
+            spelled = lookup
+                .iter()
+                .map(|t| match t {
+                    Ty::App(..) => t.clone(),
+                    _ => crate::typechecking::ty::builtin_enum_app(t).unwrap_or_else(|| t.clone()),
+                })
+                .collect();
+            &spelled[..]
+        } else {
+            lookup
+        };
         // An open goal (`Show<Tree<T>>`, `Show<T>`) is served by a dictionary
         // in scope, or by the mono clone's concrete types; looking it up
         // would match an arbitrary instance (#551).
@@ -3017,8 +3138,16 @@ impl Compiler {
             };
             out.push(code);
         }
+        // The instance is found and its methods planned: a context goal it
+        // cannot build is a compile error (a context-less dictionary would
+        // be read past at run time, #1580), reported once at the innermost
+        // goal that fails.
         for (ctx_class, ctx_args) in &context {
+            let reported = self.messages.len();
             if !self.plan_instance_dict(out, ctx_class, ctx_args) {
+                if self.messages.len() == reported {
+                    self.missing_context_dict(ctx_class, ctx_args, diag_range.clone());
+                }
                 return false;
             }
         }
@@ -3205,10 +3334,11 @@ impl Compiler {
         if !self.instance_call_takes_dict(class, method, fqn) {
             return false;
         }
+        let reported = self.messages.len();
         if self.plan_instance_dict(out, class, lookup) {
             return true;
         }
-        if self.instance_context_len(fqn) > 0 {
+        if self.instance_context_len(fqn) > 0 && self.messages.len() == reported {
             self.missing_context_dict(class, lookup, range);
         }
         false
@@ -3470,7 +3600,18 @@ impl Compiler {
             Self::bind_scheme_vars(have, want, &mut vars);
         }
         instance.context.iter().all(|c| {
-            let args: Vec<Ty> = c.args.iter().map(|a| Self::apply_ty_var_map(a, &vars)).collect();
+            // A nested built-in enum (`Some(Some(e))`'s inner `Option<E>`)
+            // is bound as its sum: looked up by its `App` spelling, as
+            // `plan_instance_dict` does (#1595).
+            let args: Vec<Ty> = c
+                .args
+                .iter()
+                .map(|a| Self::apply_ty_var_map(a, &vars))
+                .map(|t| match t {
+                    Ty::App(..) => t,
+                    _ => crate::typechecking::ty::builtin_enum_app(&t).unwrap_or(t),
+                })
+                .collect();
             if !args.iter().any(Self::ty_is_open) {
                 return self.checker.generics().find_instance_relaxed(&c.class, &args).is_some();
             }

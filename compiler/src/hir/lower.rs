@@ -1773,9 +1773,18 @@ pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
 /// indirect callee, or a function's or ground method's returned closure.
 fn returned_closure(body: &HirBody, checker: &Checker, call: HirId) -> bool {
     match &body.expr(call).kind {
+        // A `PolyFn` call's at a ground function type: codegen adapts the
+        // shared body's closure to it (#1589).
         HirKind::Call {
             callee: Callee::Value(g), ..
-        } => indirect_callee(body, checker, *g),
+        } => {
+            indirect_callee(body, checker, *g)
+                || polyfn_callee(body, checker, *g)
+                    && body.expr(call).ty.as_ref().is_some_and(|t| {
+                        let t = apply_ty_prune(checker.subst(), t);
+                        mono_fun(checker, &t, &mut Vec::new())
+                    })
+        }
         // A non-generic function's returned closure. A generic one's at a
         // ground function type is a plain closure too (#1527): a mono
         // clone's, or the shared body's wrapped in an adapter to that type
@@ -2610,16 +2619,6 @@ impl Walk<'_> {
                 self.word(*handle)?;
                 self.value(*handle)
             }
-            // `readonly e`: `e`'s value.
-            HirKind::Builtin {
-                op: Builtin::Readonly,
-                args,
-            } => {
-                let [inner] = args.as_slice() else {
-                    return Err("builtin");
-                };
-                self.value(*inner)
-            }
             // `UnboxValue` / `BoxValue` / `STRINGIFY` of a dictionary-entry
             // word: the word, then the op.
             HirKind::Builtin {
@@ -2890,9 +2889,8 @@ impl Walk<'_> {
                     kind,
                     Some(
                         ForInKind::Array
-                            | ForInKind::Dict
                             | ForInKind::Custom {
-                                counted: Some(ForInCounted::Array | ForInCounted::Dict),
+                                counted: Some(ForInCounted::Array),
                                 ..
                             }
                     )
@@ -2935,15 +2933,10 @@ impl Walk<'_> {
                         self.word(*iterable)?;
                         self.value(*iterable)?;
                     }
-                    // `DictEntries`, then the array loop over `(key, value)`.
-                    Some(ForInKind::Dict) => {
-                        self.word(*iterable)?;
-                        self.value(*iterable)?;
-                    }
-                    // A user `into_iter` returning an array, dict or numeric
-                    // range: the iterable as is, the `CALL`, then that loop.
+                    // A user `into_iter` returning an array or numeric range:
+                    // the iterable as is, the `CALL`, then that loop.
                     Some(ForInKind::Custom {
-                        counted: Some(ForInCounted::Array | ForInCounted::Dict | ForInCounted::Range { .. }),
+                        counted: Some(ForInCounted::Array | ForInCounted::Range { .. }),
                         ..
                     })
                     // Or an iterator: `into_iter`, then `next` until `None`.
@@ -3072,7 +3065,7 @@ impl Walk<'_> {
             | HirKind::Resume { .. }
             | HirKind::Lambda { .. }
             | HirKind::Builtin {
-                op: Builtin::Done | Builtin::Readonly | Builtin::TypeOf | Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::Relayout,
+                op: Builtin::Done | Builtin::TypeOf | Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::Relayout,
                 ..
             } => self.value(id),
             other => Err(kind_name(other)),

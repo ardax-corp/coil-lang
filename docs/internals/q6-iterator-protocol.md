@@ -16,7 +16,7 @@ Not a permanent fuse-IL ceiling. Not a full `Iterator` trait rewrite.
 | Same helper, `continue`-split latch | No `VReduce` (body ≠ latch) | Extra continue label split the counted loop |
 | `for x in 0..n` helper | Fuse-IL (`MakeDict` / `STRING` / `GetField`) | Pratt wraps `0..n`; the no-heap `Range` arm missed |
 | `for` inside `main` + format / `push` | Fuse-IL | I4 + grow — not the iterator protocol |
-| User `Iterator` / coro / dict / first-class range value | Fuse-IL | `CALL` + `Option` match, `ResumeCoro`, heap fields |
+| User `Iterator` / coro / first-class range value | Fuse-IL | `CALL` + `Option` match, `ResumeCoro`, heap fields |
 
 A full `Iterator` interface would keep `next` → `Option` in the hot loop
 (JumpIfMatch / CALL). That is Q8 / I2 / I6 work, not the majority of
@@ -47,15 +47,13 @@ type level). Runtime lowering:
    `LoadField` 0/1 and uses the same counted latch. Bare `for x in r` on
    a live-in param pair can DestProp-peel back onto entry slots.
 5. **Tuple** — temp array, then (1).
-6. **Dict** — `DictEntries` then the array counted latch (1). Items are
-   `(string, V)` pairs (keys at `[0]`, values at `[1]`; that is the
-   entries surface). `for (k, v) in d` is the same lowering plus let-pattern
-   binds (`k`/`v` instead of `p[0]`/`p[1]`). Homogeneous values only. User
-   `into_iter` that returns a dict uses the same path.
+6. **Record** — not iterable: a record is a fixed set of named fields
+   (a checker error, E0119, that points to `collections::map::HashMap`).
+   The VM keeps `DictEntries` for older archives only.
 7. **User `Iterator::next`** (C2b rung 2) keeps
    `into_iter` then `next` → `Option` (Q8 two-slot / niche match + B3
    CALL) when `IntoIter` is not a counted builtin. If `IntoIter` is
-   array / homogeneous tuple / numeric Range / dict, `into_iter` then the
+   array / homogeneous tuple / numeric Range, `into_iter` then the
    matching Q6 counted latch (no `Iterator` instance required).
 8. **Coro** — existing protocol (`ResumeCoro` / `DoneCoro`, skip
    completion). MIR dense or LIR when cost ≤ fuse (C2b rung 4).
@@ -86,10 +84,6 @@ dynamic `0..n` stays sequential. See [auto-par.md](auto-par.md).
   Option tag JMP + CALL (dense when cost ≤ fuse; C2b rung 2).
 - `examples/perf/for_in_iter_range.hy` — `into_iter` → `Range<int>` helper
   is the same dense counted i64 (C2b rung 2).
-- `examples/perf/for_in_dict.hy` — dict for-in helper is `DictEntries`
-  plus counted Index / `DenseBin` when cost ≤ fuse (C2b rung 3).
-- `examples/perf/for_in_dict_pairs.hy` — same island with `for (k, v) in d`
-  (COI-371).
 - `examples/perf/for_in_coro.hy` — coro for-in helper is `ResumeCoro` /
   `DoneCoro` (dense or LIR when cost ≤ fuse; C2b rung 4).
 
@@ -107,7 +101,6 @@ Ranked as **B5** in [opt-generalization.md](opt-generalization.md) B0
   `STRING` / `MakeDict` in the helper). Escaped fn values and method
   `self` still box. **C2b rung 2** lands user `Iterator::next` on MIR
   (Q8 dense+match or LIR + CALL) and counted `into_iter` when `IntoIter`
-  is array / tuple / numeric Range. **C2b rung 3** maps `DictEntries` /
-  `MakeDict` so dict for-in (keys/values via entry pairs) may dense or
-  LIR. **C2b rung 4** maps `MakeCoro` / `ResumeCoro` / `DoneCoro` so
+  is array / tuple / numeric Range. **C2b rung 3** (dict for-in) is gone with record
+  iteration. **C2b rung 4** maps `MakeCoro` / `ResumeCoro` / `DoneCoro` so
   coro for-in may dense or LIR.

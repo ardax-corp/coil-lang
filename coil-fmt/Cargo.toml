@@ -8,6 +8,7 @@ name = "coil-fmt"
 path = "src/main.rs"
 
 [dependencies]
+coil-build-id = { path = "../coil-build-id" }
 parser = { path = "../parser" }
 reporting = { path = "../reporting" }
 clap = { version = "4.5", features = ["derive"] }

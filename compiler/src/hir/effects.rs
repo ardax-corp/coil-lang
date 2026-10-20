@@ -946,7 +946,7 @@ impl Cx<'_> {
             HirKind::ForIn { kind, .. } => {
                 if !matches!(
                     kind,
-                    Some(ForInKind::Array | ForInKind::Tuple { .. } | ForInKind::Dict | ForInKind::Range { .. })
+                    Some(ForInKind::Array | ForInKind::Tuple { .. } | ForInKind::Range { .. })
                 ) {
                     self.note(w, id, EffectFlags::UNKNOWN | EffectFlags::RESIZE, || {
                         "iterates a generator or a custom iterator".into()
@@ -962,7 +962,7 @@ impl Cx<'_> {
                 Builtin::Declare | Builtin::Invoke | Builtin::Dload => {
                     self.note(w, id, EffectFlags::FFI | EffectFlags::RESIZE, || "calls foreign code".into())
                 }
-                Builtin::TypeOf | Builtin::Done | Builtin::Readonly | Builtin::Default | Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::Relayout => {}
+                Builtin::TypeOf | Builtin::Done | Builtin::Default | Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::Relayout => {}
                 Builtin::Print => self.note(w, id, EffectFlags::WRITE, || "prints".into()),
             },
             // Workers of a parallel region have no statics, and another

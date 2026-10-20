@@ -119,6 +119,7 @@ impl Checker {
             for_in_pin_spans: HashSet::new(),
             fn_effects: HashMap::new(),
             program_fn_effects: HashMap::new(),
+            program_fn_params: HashMap::new(),
             program_method_effects: HashMap::new(),
             pure_fn_names: HashSet::new(),
             length_stability: Default::default(),
@@ -131,6 +132,7 @@ impl Checker {
             classes: std::collections::HashMap::new(),
             class_type_ids: std::collections::HashMap::new(),
             next_class_type_id: 1,
+            record_type_ids: std::collections::HashMap::new(),
             classes_with_drop: std::collections::HashSet::new(),
             enums_with_drop: std::collections::HashSet::new(),
             methods: std::collections::HashMap::new(),
@@ -204,6 +206,7 @@ impl Checker {
             enum_arities: BTreeMap::new(),
             enum_scalar: BTreeMap::new(),
             bare_constructs_by_span: HashMap::new(),
+            qualified_trait_calls_by_span: HashMap::new(),
             bare_patterns_by_span: HashMap::new(),
             bare_cases_by_module: HashMap::new(),
             pending_exhaustive: Vec::new(),
@@ -256,6 +259,7 @@ impl Checker {
             lambda_uncaptured_outer: None,
             lambda_rebound_statics: HashSet::new(),
             partial_fills_by_span: std::collections::HashMap::new(),
+            named_arg_slots_by_span: std::collections::HashMap::new(),
             partial_filled_tys_by_span: std::collections::HashMap::new(),
             current_assoc_projections: None,
             open_assoc_projections: HashMap::new(),
@@ -1535,6 +1539,7 @@ impl Checker {
         self.selected_overloads.clear();
         self.overload_decl_by_span.clear();
         self.partial_fills_by_span.clear();
+        self.named_arg_slots_by_span.clear();
         self.partial_filled_tys_by_span.clear();
         self.lambda_uncaptured_outer = None;
         self.call_site_dicts.clear();
@@ -1580,6 +1585,7 @@ impl Checker {
         self.enum_arities.retain(|k, _| k.contains("::"));
         self.enum_scalar.retain(|k, _| k.contains("::"));
         self.bare_constructs_by_span.clear();
+        self.qualified_trait_calls_by_span.clear();
         self.bare_patterns_by_span.clear();
         self.c_structs.clear();
         self.callback_sigs.clear();
@@ -3496,7 +3502,7 @@ impl Checker {
 
             Expression::Readonly(inner) => {
                 let inner_ty = self.infer(inner);
-                readonly_ty(apply_ty_prune(&self.subst, &inner_ty))
+                self.readonly_qualify(inner_ty)
             }
             Expression::QualifiedAccess { owner, member } => {
                 let fqn = self.class_member_fqn(owner, member);
@@ -3964,6 +3970,9 @@ impl Checker {
         let mut filled = vec![false; names.len()];
         let mut next = 0usize;
         let mut seen_named = false;
+        let key = (range.start, range.end);
+        let errors_before = self.messages.len();
+        let mut arg_slots = Vec::with_capacity(provided.len());
         for arg in provided {
             let arg_range = arg.0.into_range();
             let (slot, value) = match arg.1.as_ref() {
@@ -4010,6 +4019,7 @@ impl Checker {
                 }
             };
             let aty = self.infer(arg);
+            arg_slots.extend(slot);
             match slot {
                 Some(k) => {
                     filled[k] = true;
@@ -4035,6 +4045,12 @@ impl Checker {
                 Some("pass one argument per class field".to_string()),
             );
         }
+        if self.no_errors_since(errors_before) {
+            self.named_arg_slots_by_span.insert(
+                key,
+                NamedArgSlots { slots: arg_slots, params: names.len(), rest: false },
+            );
+        }
         apply_ty_prune(&self.subst, &result_ty)
     }
 
@@ -4042,7 +4058,17 @@ impl Checker {
     fn infer_access_expr(&mut self, receiver: &Output, field: &str, range: Range<usize>) -> Ty {
         let receiver_ty = self.infer(receiver);
         let resolved = apply_ty_prune(&self.subst, &receiver_ty);
-        match strip_readonly(&resolved) {
+        let ty = self.access_field_of(&resolved, field, range);
+        // A field read through a `readonly` value is `readonly` too (#1552).
+        if matches!(resolved, Ty::Readonly(_)) {
+            self.readonly_view(ty)
+        } else {
+            ty
+        }
+    }
+
+    fn access_field_of(&mut self, resolved: &Ty, field: &str, range: Range<usize>) -> Ty {
+        match strip_readonly(resolved) {
             Ty::Sum { name, variants } => {
                 self.access_field_in_sum(name, variants, None, field, range)
             }
@@ -4268,7 +4294,9 @@ impl Checker {
         }
         let resolved = apply_ty_prune(&self.subst, &target_ty);
         // Reads see through `readonly` (#1073); `xs[i] = …` is rejected on
-        // the store path.
+        // the store path. An element read through it is `readonly` too
+        // (#1552).
+        let readonly = matches!(resolved, Ty::Readonly(_));
         let resolved = crate::typechecking::ty::strip_readonly(&resolved).clone();
         // Peel `Matrix<Data>` so `m[i][j]` indexes the nested rows.
         let resolved =
@@ -4296,10 +4324,12 @@ impl Checker {
                         )),
                     );
                 }
-                (**element).clone()
+                let element = (**element).clone();
+                if readonly { self.readonly_view(element) } else { element }
             }
             other if vec_element_ty(other).is_some() => {
-                vec_element_ty(other).expect("checked").clone()
+                let element = vec_element_ty(other).expect("checked").clone();
+                if readonly { self.readonly_view(element) } else { element }
             }
             Ty::Tuple(tys) => {
                 // Tuple index: constant OOB diagnostic; dynamic OOB → fresh ty (runtime -1).
@@ -4695,6 +4725,19 @@ impl Checker {
         {
             return self.reject_fixed_array_grow(method, range);
         }
+        // `push`, `pop`, … change a `Vec` through any name, so they are
+        // writes through a `readonly Vec<T>` (#1558).
+        if matches!(resolved, Ty::Readonly(_))
+            && vec_element_ty(&resolved).is_some()
+            && matches!(*method, "push" | "pop" | "insert" | "remove" | "clear" | "reserve")
+        {
+            let _ = self.error_with_help(
+                ErrorCode::InvalidAssignment,
+                format!("Cannot `{method}` on a `{}`", self.diag_ty(&resolved)),
+                range.clone(),
+                Some("a `readonly` Vec cannot change; keep and use the mutable value instead".to_string()),
+            );
+        }
         // The method form runs through a shared thunk with no call site of
         // its own, so it is still gated where it is written.
         if *method == "attach"
@@ -4719,6 +4762,7 @@ impl Checker {
                 }
                 let fqn = format!("{}::{}", owner, method);
                 let user_argc = method_args.len();
+                let mut candidate = None;
                 let scheme = if self.is_overloaded(&fqn) {
                     let prelim_tys: Vec<Ty> = method_args
                         .iter()
@@ -4739,7 +4783,9 @@ impl Checker {
                                 &range,
                                 (c.fixed_arity, c.is_rest, c.id),
                             );
-                            c.scheme
+                            let scheme = c.scheme.clone();
+                            candidate = Some(c);
+                            scheme
                         }
                         OverloadSelect::Ambiguous => {
                             return self.error_with_help(
@@ -4773,9 +4819,12 @@ impl Checker {
                         .expect("method present")
                 };
                 let (fun_ty, constraints, _mapping) = self.instantiate_scheme_mapped(&scheme);
-                let mut arg_tys = vec![recv_ty];
-                let (tys, ordered_exprs) =
-                    self.infer_and_reorder_call_args(&fqn, method_args, &range);
+                let mut arg_tys = vec![self.method_self_arg(&recv_ty)];
+                // Named arguments match the picked overload's parameters.
+                let (tys, ordered_exprs) = match &candidate {
+                    Some(c) => self.infer_and_reorder_call_args_with_candidate(&fqn, c, method_args, &range),
+                    None => self.infer_and_reorder_call_args(&fqn, method_args, &range),
+                };
                 arg_tys.extend(tys);
                 // Align exprs with `[self, …args]` for coerce_or_unify
                 // (byte / string literal coercion on method args).
@@ -4809,11 +4858,13 @@ impl Checker {
             );
         }
 
-        if let Ty::Existential { class } = &resolved
+        // A `readonly` trait object dispatches like the plain one; its
+        // methods may still mutate `self` (#1558).
+        if let Ty::Existential { class } = strip_readonly(&resolved)
             && let Some((owner, method_slot, scheme)) =
                 self.existential_method_candidate(class, method)
         {
-            let mut arg_tys = vec![recv_ty];
+            let mut arg_tys = vec![self.method_self_arg(&recv_ty)];
             if let Some(a) = args {
                 for arg in a {
                     arg_tys.push(self.infer(arg));
@@ -4845,7 +4896,7 @@ impl Checker {
             {
                 self.bind_matching_abstract_constraints(Some(receiver_var), &dict_class);
                 let (fun_ty, constraints, mapping) = self.instantiate_scheme_mapped(&scheme);
-                let mut arg_tys = vec![recv_ty];
+                let mut arg_tys = vec![self.method_self_arg(&recv_ty)];
                 if let Some(a) = args {
                     for arg in a {
                         arg_tys.push(self.infer(arg));
@@ -4991,7 +5042,7 @@ impl Checker {
             };
             let _ = selected;
             let (fun_ty, constraints, _mapping) = self.instantiate_scheme_mapped(&scheme);
-            let mut arg_tys = vec![recv_ty];
+            let mut arg_tys = vec![self.method_self_arg(&recv_ty)];
             let mut arg_exprs = Vec::with_capacity(1 + method_args.len());
             arg_exprs.push(recv.clone());
             if self.fn_has_rest(&fqn) {
@@ -5023,7 +5074,7 @@ impl Checker {
         // `current_expected` when present (`let y: T = x.into()`).
         if let Some((class, scheme)) = self.ground_trait_method_for_receiver(method, &recv_ty) {
             let (fun_ty, constraints, mapping) = self.instantiate_scheme_mapped(&scheme);
-            let mut arg_tys = vec![recv_ty];
+            let mut arg_tys = vec![self.method_self_arg(&recv_ty)];
             if let Some(a) = args {
                 for arg in a {
                     arg_tys.push(self.infer(arg));
@@ -5136,6 +5187,11 @@ impl Checker {
                         range,
                         Some("read it as a value or assign with `Class::field = expr`".to_string()),
                     );
+                }
+                // `Trait::method(args)`: the free `method(args)` limited to `Trait`.
+                if let Some(class) = self.qualified_call_trait(owner) {
+                    let args = args.as_deref().unwrap_or(&[]);
+                    return self.infer_qualified_trait_call(&class, owner, member, args, id, range);
                 }
                 // Parser may emit Call(QualifiedAccess) for module paths;
                 // Class::static_method stays Construct, but accept Call too.
@@ -5622,7 +5678,7 @@ impl Checker {
             .map(|arg| self.infer_call_arg(arg))
             .collect();
         if let Some(Ty::Existential { class }) =
-            arg_tys.first().map(|ty| apply_ty_prune(&self.subst, ty))
+            arg_tys.first().map(|ty| strip_readonly(&apply_ty_prune(&self.subst, ty)).clone())
             && let Some((owner, method_slot, scheme)) =
                 self.existential_method_candidate(&class, &ident)
         {
@@ -5680,53 +5736,8 @@ impl Checker {
                         .collect()
                 }
             };
-            if let Some((dict_index, dict_class, class, method_slot, scheme)) =
-                self.select_bound_method(candidates, &ident, &range)
-            {
-                self.bind_matching_abstract_constraints(receiver_var, &dict_class);
-                let (fun_ty, constraints, mapping) = self.instantiate_scheme_mapped(&scheme);
-                if let Some(call_id) = id {
-                    self.bound_method_calls.insert(
-                        call_id,
-                        BoundMethodCall {
-                            dict_index,
-                            method_slot,
-                            arity: arg_tys.len(),
-                            has_receiver: false,
-                            class: class.clone(),
-                        },
-                    );
-                }
-                self.bound_method_calls_by_span.insert(
-                    (range.start, range.end),
-                    BoundMethodCall {
-                        dict_index,
-                        method_slot,
-                        arity: arg_tys.len(),
-                        has_receiver: false,
-                        class: class.clone(),
-                    },
-                );
-                let result = self.apply_function(
-                    Some(&format!("{}::{}", class, ident)),
-                    &fun_ty,
-                    &arg_tys,
-                    args.as_deref(),
-                    id,
-                    range.clone(),
-                );
-                if !constraints.is_empty() {
-                    self.bind_call_result_to_expected(&result);
-                    self.discharge_constraints(id, &constraints, &range);
-                    self.pin_assoc_after_discharge(
-                        &class,
-                        &constraints,
-                        Some(&scheme),
-                        &mapping,
-                        &range,
-                    );
-                }
-                return result;
+            if let Some(candidate) = self.select_bound_method(candidates, &ident, &range) {
+                return self.apply_bound_method_call(candidate, receiver_var, &ident, &arg_tys, args.as_deref(), id, &range);
             }
         }
 
@@ -5741,30 +5752,7 @@ impl Checker {
             && let Some(first) = arg_tys.first()
             && let Some((class, scheme)) = self.ground_trait_method_for_receiver(&ident, first)
         {
-            let (fun_ty, constraints, mapping) = self.instantiate_scheme_mapped(&scheme);
-            let result = self.apply_function(
-                Some(&format!("{}::{}", class, ident)),
-                &fun_ty,
-                &arg_tys,
-                if flat_args.is_empty() {
-                    None
-                } else {
-                    Some(&flat_args)
-                },
-                id,
-                range.clone(),
-            );
-            if !constraints.is_empty() {
-                self.discharge_constraints(id, &constraints, &range);
-                self.pin_assoc_after_discharge(
-                    &class,
-                    &constraints,
-                    Some(&scheme),
-                    &mapping,
-                    &range,
-                );
-            }
-            return apply_ty_prune(&self.subst, &result);
+            return self.apply_ground_trait_call(&class, &ident, &scheme, &arg_tys, &flat_args, false, id, &range);
         }
 
         // A bare name only an earlier module's frame binds (that module's
@@ -7468,7 +7456,9 @@ impl Checker {
                         Some("const fields are immutable after construction".to_string()),
                     );
                 }
-                match &resolved {
+                // A write through `readonly` was reported above; type the
+                // field all the same.
+                match strip_readonly(&resolved) {
                     Ty::Record { fields } => match fields.iter().find(|(n, _)| n == field) {
                         Some((_, fty)) => fty.clone(),
                         None => {
@@ -8645,6 +8635,9 @@ impl Checker {
         call_id: Option<NodeId>,
         range: Range<usize>,
     ) -> Ty {
+        if let Some(name) = name {
+            self.record_under_application(name, arg_tys.len(), &range);
+        }
         let mut current = fun_ty.clone();
         // Nullary `f()` calls apply the implicit `unit` parameter (see
         // `seal_nullary_fun_ty` on function declarations).
@@ -8763,6 +8756,53 @@ impl Checker {
             }
         }
         current
+    }
+
+    /// A call of the function or method `name` with fewer arguments than
+    /// its fixed parameters (counting a method's receiver) is a partial
+    /// application over the given prefix (#1231, #1361): record its fill
+    /// mask, as named holes record theirs, so codegen does not decide it
+    /// again. Rest, overloaded and extern functions never under-apply.
+    fn record_under_application(&mut self, name: &str, argc: usize, range: &Range<usize>) {
+        let key = (range.start, range.end);
+        if self.partial_fills_by_span.contains_key(&key)
+            || self.fn_has_rest(name)
+            || self.is_overloaded(name)
+            || self.extern_fns.contains(name)
+        {
+            return;
+        }
+        let receiver = name.rsplit_once("::").is_some_and(|(owner, method)| {
+            self.methods.get(owner).is_some_and(|m| m.contains_key(method))
+                && !self.static_methods.get(owner).is_some_and(|s| s.contains(method))
+        });
+        let declared = match self.fn_param_names.get(name) {
+            Some(params) => (params.len(), false),
+            None => match self.program_fn_params_of(name) {
+                Some(declared) => declared,
+                None => return,
+            },
+        };
+        if declared.1 {
+            return;
+        }
+        let fixed = declared.0 + usize::from(receiver);
+        if argc < fixed && fixed <= 64 {
+            let mask = 1u32.checked_shl(argc as u32).map_or(u32::MAX, |bit| bit - 1);
+            self.partial_fills_by_span.insert(key, mask);
+        }
+    }
+
+    /// [`Self::program_fn_params`] of `name` as written at a call: a
+    /// qualified name as it is, a bare one through its `use`.
+    fn program_fn_params_of(&self, name: &str) -> Option<(usize, bool)> {
+        if let Some(&declared) = self.program_fn_params.get(name) {
+            return Some(declared);
+        }
+        let info = self.def_interner.info(self.def_id_of(name)?)?;
+        let module = self.def_interner.module_path(info.module)?;
+        let key = if module.is_empty() { info.name.clone() } else { format!("{module}::{}", info.name) };
+        self.program_fn_params.get(&key).copied()
     }
 
     /// The `(Vec element, array element)` pair when an extern `Vec<T>`
@@ -9026,6 +9066,42 @@ impl Checker {
     ) -> Ty {
         let expected = apply_ty_prune(&self.subst, expected);
         let actual = apply_ty_prune(&self.subst, actual);
+        if self.drops_readonly(&expected, &actual) {
+            let _ = self.error_with_help(
+                ErrorCode::InvalidAssignment,
+                format!(
+                    "Cannot use a `{}` where `{}` is expected ({context})",
+                    self.diag_ty(&actual),
+                    self.diag_ty(&expected)
+                ),
+                range.clone(),
+                Some("a `readonly` value converts only to a `readonly` type, so it cannot be mutated through the new name; keep and pass the mutable value instead".to_string()),
+            );
+        } else if self.gains_readonly_element(&expected, &actual) {
+            let _ = self.error_with_help(
+                ErrorCode::InvalidAssignment,
+                format!(
+                    "Cannot use a `{}` where `{}` is expected ({context})",
+                    self.diag_ty(&actual),
+                    self.diag_ty(&expected)
+                ),
+                range.clone(),
+                Some(format!(
+                    "the new name could store a `readonly` element that the old one then mutates; a parameter that only reads can take a `readonly {}`",
+                    self.diag_ty(&actual)
+                )),
+            );
+        }
+        // A trait object seen read-only: pack the value as the plain
+        // existential, then qualify it (#1558).
+        if let Ty::Readonly(inner) = &expected
+            && matches!(inner.as_ref(), Ty::Existential { .. })
+        {
+            let inner = inner.as_ref().clone();
+            let actual = strip_readonly(&actual).clone();
+            let packed = self.coerce_or_unify(&inner, &actual, expr, range, context);
+            return readonly_ty(packed);
+        }
         // Integer literals may coerce to `byte` when in range 0..=255.
         if Self::is_byte_ty(&expected)
             && Self::is_int_ty(&actual)
@@ -11355,6 +11431,10 @@ impl Checker {
                     tys.push(self.parse_type_name(item));
                 }
                 crate::typechecking::ty::tuple(tys)
+            }
+            Expression::Readonly(inner) => {
+                let inner = self.parse_type_name(inner);
+                self.readonly_qualify(inner)
             }
             _ => Ty::Var(self.counter.fresh()),
         }
@@ -13836,6 +13916,17 @@ impl Checker {
         self.overload_decl_by_span.get(&(start, end)).copied()
     }
 
+    /// No error was reported after the first `before` messages.
+    fn no_errors_since(&self, before: usize) -> bool {
+        self.messages.iter().skip(before).all(|m| *m.kind() != reporting::MessageKind::ERROR)
+    }
+
+    /// Where the arguments of the call or `new` at this span go, when some
+    /// are named (see [`NamedArgSlots`]).
+    pub fn named_arg_slots(&self, start: usize, end: usize) -> Option<&NamedArgSlots> {
+        self.named_arg_slots_by_span.get(&(start, end))
+    }
+
     /// Fill bitmask for a partial-application call site, if any.
     pub fn partial_fill_at(&self, start: usize, end: usize) -> Option<u32> {
         self.partial_fills_by_span.get(&(start, end)).copied()
@@ -14065,6 +14156,8 @@ impl Checker {
         let mut rest_whole: Option<(Ty, Output)> = None;
         let mut next_pos = 0usize;
         let mut seen_named = false;
+        let errors_before = self.messages.len();
+        let mut arg_slots = Vec::with_capacity(args.len());
 
         for arg in args {
             match arg.1.as_ref() {
@@ -14105,6 +14198,7 @@ impl Checker {
                                 ));
                             } else {
                                 slots[idx] = Some((ty, value));
+                                arg_slots.push(idx);
                             }
                         }
                         None => {
@@ -14166,12 +14260,14 @@ impl Checker {
                             self.messages.push(msg);
                         }
                         slots[next_pos] = Some((ty, arg.clone()));
+                        arg_slots.push(next_pos);
                         next_pos += 1;
                     } else if has_rest
                         && self.vec_rest_spreads.contains(&(arg.0.start, arg.0.end))
                     {
                         if rest_elems.is_empty() {
                             rest_whole = Some((ty, arg.clone()));
+                            arg_slots.push(fixed_count);
                         } else {
                             let _ = self.error_with_help(
                                 ErrorCode::GenericTypeError,
@@ -14185,6 +14281,7 @@ impl Checker {
                         // Trailing positionals after fixed (and after named
                         // fixed args) pack into the rest array.
                         rest_elems.push((ty, arg.clone()));
+                        arg_slots.push(fixed_count);
                         next_pos += 1;
                     } else if seen_named {
                         let mut msg = Message::error(
@@ -14208,6 +14305,13 @@ impl Checker {
                     }
                 }
             }
+        }
+
+        if has_named && arg_slots.len() == args.len() && self.no_errors_since(errors_before) {
+            self.named_arg_slots_by_span.insert(
+                (range.start, range.end),
+                NamedArgSlots { slots: arg_slots, params: fixed_count, rest: has_rest },
+            );
         }
 
         // Positional-only under-application of fixed params: do not
@@ -16554,6 +16658,28 @@ impl Checker {
                 {
                     return ty;
                 }
+                // `Trait::method(args)`: the free `method(args)` limited to `Trait`.
+                if let Some(class) = self.qualified_call_trait(enum_name) {
+                    return match fields {
+                        EnumConstructPayload::Unit => {
+                            self.infer_qualified_trait_call(&class, enum_name, variant_name, &[], call_id, range)
+                        }
+                        EnumConstructPayload::Tuple(args) => {
+                            self.infer_qualified_trait_call(&class, enum_name, variant_name, args, call_id, range)
+                        }
+                        EnumConstructPayload::Record(parts) => {
+                            for p in parts {
+                                let _ = self.infer(&p.value);
+                            }
+                            self.error_with_help(
+                                ErrorCode::GenericTypeError,
+                                format!("trait method `{}::{}` is called with parentheses, not a record literal", enum_name, variant_name),
+                                range,
+                                Some(format!("write `{}::{}(...)` with positional arguments", enum_name, variant_name)),
+                            )
+                        }
+                    };
+                }
                 if let Some(ty) = self.try_infer_static_method_call(
                     enum_name,
                     variant_name,
@@ -16588,7 +16714,7 @@ impl Checker {
                 }
                 return self.error(
                     ErrorCode::UnknownEnum,
-                    format!("Cannot find enum `{}` in this scope", enum_name),
+                    format!("Cannot find enum, type or trait `{}` in this scope", enum_name),
                     range,
                 );
             }
@@ -17793,6 +17919,15 @@ impl Checker {
         self.bare_constructs_by_span.get(&(start, end))
     }
 
+    /// `Trait::method(args)` at this span: the callee name to lower it
+    /// with. That is the bare method, so it compiles exactly as the free
+    /// `method(args)`, unless a function, local or builtin of that name
+    /// would take the bare name; then `Trait::method`, which lowering
+    /// sends to the recorded dictionary or instance as it does `T::m`.
+    pub fn qualified_trait_call_at(&self, start: usize, end: usize) -> Option<&str> {
+        self.qualified_trait_calls_by_span.get(&(start, end)).map(String::as_str)
+    }
+
     /// Enum a bare constructor pattern at this span resolved to (#1352):
     /// `Some(v)` → `Option`, a unit case `Red` → its enum. `None` for a
     /// qualified pattern or a bare name that stayed a binding.
@@ -18425,9 +18560,40 @@ impl Checker {
                     .collect();
                 Some(common::ClassWordKinds { type_id, kinds })
             })
+            .chain(self.record_type_ids.iter().map(|((_, kinds), &type_id)| common::ClassWordKinds { type_id, kinds: kinds.clone() }))
             .collect();
         rows.sort_by_key(|r| r.type_id);
         rows
+    }
+
+    /// The `InitTyped` type id of the slotted record `fields` (any order;
+    /// slots are the fields sorted by name). One id per field names and
+    /// word kinds, so a structural type's values share it. A `()` field
+    /// holds the shared empty tuple object: an unknown word.
+    pub fn record_type_id(&mut self, fields: &[(String, Ty)]) -> u32 {
+        let mut sorted: Vec<&(String, Ty)> = fields.iter().collect();
+        sorted.sort_by(|a, b| a.0.cmp(&b.0));
+        let kinds = sorted
+            .iter()
+            .map(|(_, ty)| {
+                let ty = crate::typechecking::subst::apply_ty_prune(self.subst(), ty);
+                if crate::hir::layout::is_unit(&ty) {
+                    common::WORD_UNKNOWN
+                } else {
+                    crate::typechecking::value_layout::word_kind(self, &ty)
+                }
+            })
+            .collect();
+        let key = (sorted.iter().map(|(n, _)| n.clone()).collect(), kinds);
+        if let Some(&id) = self.record_type_ids.get(&key) {
+            return id;
+        }
+        // Records take ids from their own range, so the VM can tell one
+        // from a class instance (#1618).
+        let id = common::RECORD_TYPE_ID_BASE + self.record_type_ids.len() as u32;
+        assert!(id < common::RECORD_TYPE_ID_END, "more distinct record types than record type ids");
+        self.record_type_ids.insert(key, id);
+        id
     }
 
     /// Word kind (`common::WORD_*`) of every static slot, by slot index, from
@@ -18582,6 +18748,100 @@ impl Checker {
         }
     }
 
+    /// Whether a value of `ty` has state a write could change: a class,
+    /// `Vec`, array or record. Scalars, strings, tuples and enums do not
+    /// need `readonly` (#1552).
+    fn has_mutable_interior(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::Array { .. } | Ty::Record { .. } | Ty::Existential { .. } => true,
+            Ty::Con(name) => self.classes.contains_key(name),
+            Ty::App(head, _) => {
+                vec_element_ty(ty).is_some()
+                    || matches!(head.as_ref(), Ty::Con(name) if self.classes.contains_key(name))
+            }
+            _ => false,
+        }
+    }
+
+    /// `ty` read through a `readonly` value (a field, an element, a loop
+    /// variable): `readonly` too when it has a mutable interior, so the
+    /// seal is deep (#1552).
+    fn readonly_view(&self, ty: Ty) -> Ty {
+        let ty = apply_ty_prune(&self.subst, &ty);
+        if self.has_mutable_interior(&ty) { readonly_ty(ty) } else { ty }
+    }
+
+    /// `readonly T`, written as a type or as `readonly e`, normalised:
+    /// `readonly readonly T` is `readonly T`, a type with no mutable
+    /// interior (`int`, `string`, a function) is itself, and a tuple is
+    /// readonly element-wise (#1558).
+    fn readonly_qualify(&self, ty: Ty) -> Ty {
+        match apply_ty_prune(&self.subst, &ty) {
+            ty @ Ty::Readonly(_) => ty,
+            Ty::Tuple(items) => Ty::Tuple(items.into_iter().map(|t| self.readonly_qualify(t)).collect()),
+            ty @ Ty::Var(_) => readonly_ty(ty),
+            ty if self.has_mutable_interior(&ty) => readonly_ty(ty),
+            ty => ty,
+        }
+    }
+
+    /// Whether `expected` asks for a `readonly` element of a mutable
+    /// container where `actual` has a plain one: `Vec<P>` as
+    /// `Vec<readonly P>`. Container arguments are invariant, since the
+    /// new name could store a readonly `P` the old one then mutates. Under
+    /// an outer `readonly` they are covariant (#1558).
+    fn gains_readonly_element(&self, expected: &Ty, actual: &Ty) -> bool {
+        let differs = |e: &Ty, a: &Ty| match (e, a) {
+            (Ty::Readonly(inner), a) if !matches!(a, Ty::Readonly(_) | Ty::Var(_)) => {
+                self.has_mutable_interior(inner) || matches!(**inner, Ty::Var(_))
+            }
+            _ => self.gains_readonly_element(e, a),
+        };
+        match (expected, actual) {
+            (Ty::Readonly(_), _) => false,
+            (Ty::App(_, exp), Ty::App(_, act)) if exp.len() == act.len() => {
+                if self.has_mutable_interior(expected) {
+                    exp.iter().zip(act).any(|(e, a)| differs(e, a))
+                } else {
+                    exp.iter().zip(act).any(|(e, a)| self.gains_readonly_element(e, a))
+                }
+            }
+            (Ty::Array { element: exp, .. }, Ty::Array { element: act, .. }) => differs(exp, act),
+            (Ty::Tuple(exp), Ty::Tuple(act)) if exp.len() == act.len() => {
+                exp.iter().zip(act).any(|(e, a)| self.gains_readonly_element(e, a))
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether using `actual` where `expected` is wanted would drop a
+    /// `readonly`: `readonly P` as a plain `P`, or `Vec<readonly P>` as
+    /// `Vec<P>` (#1552). `T` converts to `readonly T`, never back.
+    fn drops_readonly(&self, expected: &Ty, actual: &Ty) -> bool {
+        match (expected, actual) {
+            (Ty::Readonly(_) | Ty::Var(_), _) => false,
+            (_, Ty::Readonly(_)) => self.has_mutable_interior(expected),
+            (Ty::App(_, exp), Ty::App(_, act)) | (Ty::Tuple(exp), Ty::Tuple(act)) => {
+                exp.len() == act.len() && exp.iter().zip(act).any(|(e, a)| self.drops_readonly(e, a))
+            }
+            (Ty::Array { element: exp, .. }, Ty::Array { element: act, .. }) => self.drops_readonly(exp, act),
+            (Ty::Record { fields: exp }, Ty::Record { fields: act }) => exp.iter().any(|(name, e)| {
+                act.iter()
+                    .find(|(n, _)| n == name)
+                    .is_some_and(|(_, a)| self.drops_readonly(e, a))
+            }),
+            _ => false,
+        }
+    }
+
+    /// The receiver as a method's `self` argument. A method may still
+    /// mutate a `readonly` receiver through `self` until calls are checked
+    /// against a per-parameter mutation summary (#1558), so `self` takes the
+    /// value without its `readonly`.
+    fn method_self_arg(&self, recv_ty: &Ty) -> Ty {
+        strip_readonly(&apply_ty_prune(&self.subst, recv_ty)).clone()
+    }
+
     fn check_readonly_external_mutation(&mut self, receiver_ty: &Ty, range: Range<usize>) {
         let pruned = apply_ty_prune(&self.subst, receiver_ty);
         if matches!(pruned, Ty::Readonly(_)) {
@@ -18622,8 +18882,9 @@ impl Checker {
 
     /// Resolve `for x in` iterable type to `Item` and record [`ForInInfo`].
     ///
-    /// Builtin synthesis covers arrays, homogeneous tuples/records, and
+    /// Builtin synthesis covers arrays, homogeneous tuples, ranges and
     /// coroutines. Otherwise looks up `IntoIterator` / `Iterator` instances.
+    /// A record is not iterable: its fields are a fixed set of names.
     fn resolve_for_in_iterable(
         &mut self,
         te: &Ty,
@@ -18631,6 +18892,15 @@ impl Checker {
         iterable_range: &Range<usize>,
         loop_range: &Range<usize>,
     ) -> Option<Ty> {
+        if let Ty::Record { .. } = crate::typechecking::ty::strip_readonly(&apply_ty_prune(&self.subst, te)) {
+            let _ = self.error_with_help(
+                ErrorCode::GenericTypeError,
+                format!("records are not iterable: `{}` is a fixed set of named fields", self.diag_ty(te)),
+                iterable_range.clone(),
+                Some("read the fields by name, or use `collections::map::HashMap` from the stdlib for keys to iterate".to_string()),
+            );
+            return None;
+        }
         if let Some((item, kind)) = self.builtin_for_in_kind(te, iterable_range) {
             self.record_for_in_info(
                 loop_id,
@@ -18778,8 +19048,12 @@ impl Checker {
     /// to trait instance lookup). Emits diagnostics for hetero tuple/dict.
     fn builtin_for_in_kind(&mut self, te: &Ty, range: &Range<usize>) -> Option<(Ty, ForInKind)> {
         match te {
-            // Iterating only reads, so it sees through `readonly` (#1073).
-            Ty::Readonly(inner) => self.builtin_for_in_kind(inner, range),
+            // Iterating only reads, so it sees through `readonly` (#1073);
+            // the loop variable is `readonly` too (#1552).
+            Ty::Readonly(inner) => {
+                let (item, kind) = self.builtin_for_in_kind(inner, range)?;
+                Some((self.readonly_view(item), kind))
+            }
             Ty::Array { element, .. } => Some((element.as_ref().clone(), ForInKind::Array)),
             other if vec_element_ty(other).is_some() => {
                 Some((vec_element_ty(other)?.clone(), ForInKind::Array))
@@ -18795,15 +19069,6 @@ impl Checker {
                     return None;
                 }
                 self.homogeneous_types(elems, range, "tuple").map(|item| (item, ForInKind::Tuple { arity: elems.len() }))
-            }
-            Ty::Record { fields } => {
-                let value_tys: Vec<Ty> = fields.iter().map(|(_, ty)| ty.clone()).collect();
-                if value_tys.is_empty() {
-                    // Vacuously homogeneous; Item = (string, α).
-                    let v = Ty::Var(self.counter.fresh());
-                    return Some((tuple_ty(vec![string(), v]), ForInKind::Dict));
-                }
-                self.homogeneous_types(&value_tys, range, "dict").map(|v| (tuple_ty(vec![string(), v]), ForInKind::Dict))
             }
             Ty::App(head, args) => {
                 if matches!(head.as_ref(), Ty::Con(n) if n == "coroutine") && args.len() == 2 {
@@ -18821,7 +19086,7 @@ impl Checker {
         }
     }
 
-    /// Array / tuple / numeric Range / dict `IntoIter` can reuse Q6
+    /// Array / tuple / numeric Range `IntoIter` can reuse Q6
     /// counted desugar after `into_iter`. Coro stays off this path.
     fn counted_into_iter_kind(
         &mut self,
@@ -18833,7 +19098,6 @@ impl Checker {
             ForInKind::Array => ForInCounted::Array,
             ForInKind::Tuple { arity } => ForInCounted::Tuple { arity },
             ForInKind::Range { inclusive, float } => ForInCounted::Range { inclusive, float },
-            ForInKind::Dict => ForInCounted::Dict,
             ForInKind::Coroutine | ForInKind::Custom { .. } => return None,
         };
         Some((item, counted))
@@ -19338,6 +19602,218 @@ impl Checker {
             self.pin_assoc_after_discharge(&class, &constraints, Some(&scheme), &mapping, &range);
         }
         Some(result)
+    }
+
+    /// `method(args)` through the dictionary of the bound `candidate`
+    /// selected (the free call under `T: Trait`, or `Trait::method(args)`).
+    #[allow(clippy::too_many_arguments)]
+    fn apply_bound_method_call(
+        &mut self,
+        candidate: (usize, String, String, usize, Scheme),
+        receiver_var: Option<TyVarId>,
+        method: &str,
+        arg_tys: &[Ty],
+        args: Option<&[Output]>,
+        id: Option<NodeId>,
+        range: &Range<usize>,
+    ) -> Ty {
+        let (dict_index, dict_class, class, method_slot, scheme) = candidate;
+        self.bind_matching_abstract_constraints(receiver_var, &dict_class);
+        let (fun_ty, constraints, mapping) = self.instantiate_scheme_mapped(&scheme);
+        let hint = BoundMethodCall {
+            dict_index,
+            method_slot,
+            arity: arg_tys.len(),
+            has_receiver: false,
+            class: class.clone(),
+        };
+        if let Some(call_id) = id {
+            self.bound_method_calls.insert(call_id, hint.clone());
+        }
+        self.bound_method_calls_by_span.insert((range.start, range.end), hint);
+        let result = self.apply_function(
+            Some(&format!("{}::{}", class, method)),
+            &fun_ty,
+            arg_tys,
+            args,
+            id,
+            range.clone(),
+        );
+        if !constraints.is_empty() {
+            self.bind_call_result_to_expected(&result);
+            self.discharge_constraints(id, &constraints, range);
+            self.pin_assoc_after_discharge(&class, &constraints, Some(&scheme), &mapping, range);
+        }
+        result
+    }
+
+    /// `method(args)` at a ground instance of `class`: its constraint is
+    /// discharged against the argument types (and, with `to_expected`, the
+    /// expected result type), landing in `call_dicts_at` for codegen.
+    #[allow(clippy::too_many_arguments)]
+    fn apply_ground_trait_call(
+        &mut self,
+        class: &str,
+        method: &str,
+        scheme: &Scheme,
+        arg_tys: &[Ty],
+        flat_args: &[Output],
+        to_expected: bool,
+        id: Option<NodeId>,
+        range: &Range<usize>,
+    ) -> Ty {
+        let (fun_ty, constraints, mapping) = self.instantiate_scheme_mapped(scheme);
+        let result = self.apply_function(
+            Some(&format!("{}::{}", class, method)),
+            &fun_ty,
+            arg_tys,
+            if flat_args.is_empty() { None } else { Some(flat_args) },
+            id,
+            range.clone(),
+        );
+        if !constraints.is_empty() {
+            if to_expected {
+                self.bind_call_result_to_expected(&result);
+            }
+            self.discharge_constraints(id, &constraints, range);
+            self.pin_assoc_after_discharge(class, &constraints, Some(scheme), &mapping, range);
+        }
+        apply_ty_prune(&self.subst, &result)
+    }
+
+    /// The trait `owner` names in `owner::method(args)`, when it names one
+    /// and no type: a type parameter, class, enum or primitive keeps its
+    /// `Type::method` meaning. `module::Trait` names a trait that module
+    /// declares.
+    fn qualified_call_trait(&self, owner: &str) -> Option<String> {
+        use crate::typechecking::ty::{BOOL, BYTE, FLOAT, INT, STRING};
+        let is_type_param = self.type_params_in_scope.iter().any(|frame| frame.contains_key(owner));
+        if is_type_param
+            || self.resolve_class_key(owner).is_some()
+            || self.resolve_enum_key(owner).is_some()
+            || matches!(owner, INT | FLOAT | STRING | BOOL | BYTE)
+        {
+            return None;
+        }
+        if let Some((module, name)) = owner.rsplit_once("::") {
+            return self
+                .generics
+                .typeclass(name)
+                .filter(|c| c.defined_module == module || c.defined_module.ends_with(&format!("::{module}")))
+                .map(|_| name.to_string());
+        }
+        let name = self.canonical_trait_name(owner);
+        self.generics.typeclass(&name).map(|_| name)
+    }
+
+    /// `Trait::method(args)`: the free call `method(args)` with only
+    /// `Trait`'s method as a candidate. It resolves through an active
+    /// bound's dictionary, a trait object, or the ground instance the
+    /// argument (or expected result) types select, and lowers to the same
+    /// call as the free form. A free fn of the same name or another trait's
+    /// method of that name is never considered.
+    fn infer_qualified_trait_call(
+        &mut self,
+        class: &str,
+        written: &str,
+        method: &str,
+        args: &[Output],
+        id: Option<NodeId>,
+        range: Range<usize>,
+    ) -> Ty {
+        let declared: Vec<String> = self
+            .generics
+            .typeclass(class)
+            .map(|c| c.methods.iter().map(|m| m.name.clone()).collect())
+            .unwrap_or_default();
+        if !declared.iter().any(|m| m == method) {
+            for a in args {
+                let _ = self.infer(a);
+            }
+            let help = if declared.is_empty() {
+                format!("trait `{}` declares no methods", written)
+            } else {
+                format!("trait `{}` declares {}", written, declared.iter().map(|m| format!("`{m}`")).collect::<Vec<_>>().join(", "))
+            };
+            return self.error_with_help(
+                ErrorCode::UnknownFunction,
+                format!("trait `{}` has no method `{}`", written, method),
+                range,
+                Some(help),
+            );
+        }
+        let shadowed = self.lookup_fn_scheme(method).is_some()
+            || self.is_overloaded(method)
+            || self.prelude_fn_in_scope(method).is_some()
+            || self.string_fn_for_call(method).is_some()
+            || self.ffi_fn_in_scope(method).is_some();
+        let callee = if shadowed { format!("{class}::{method}") } else { method.to_string() };
+        self.qualified_trait_calls_by_span.insert((range.start, range.end), callee);
+        let flat_args = self.flatten_spread_call_args(args);
+        let arg_tys: Vec<Ty> = flat_args.iter().map(|arg| self.infer_call_arg(arg)).collect();
+        if let Some(Ty::Existential { class: object }) =
+            arg_tys.first().map(|ty| strip_readonly(&apply_ty_prune(&self.subst, ty)).clone())
+            && let Some((owner, method_slot, scheme)) = self.existential_method_candidate(&object, method)
+            && owner == class
+        {
+            let hint = ExistentialMethodCall {
+                method_slot,
+                arity: arg_tys.len(),
+                has_receiver: false,
+            };
+            if let Some(call_id) = id {
+                self.existential_method_calls.insert(call_id, hint.clone());
+            }
+            self.existential_method_calls_by_span.insert((range.start, range.end), hint);
+            return self.apply_existential_method(&owner, method, &scheme, &arg_tys, Some(args), (id, range));
+        }
+        let only = |candidates: Vec<(usize, String, String, usize, Scheme)>| {
+            candidates.into_iter().filter(|(_, _, owner, _, _)| owner == class).collect::<Vec<_>>()
+        };
+        let open_tuple = arg_tys
+            .first()
+            .map(|ty| apply_ty_prune(&self.subst, ty))
+            .is_some_and(|ty| matches!(&ty, Ty::Tuple(_)) && Self::ty_mentions_var(&ty));
+        if !open_tuple && !only(self.bound_method_candidates(method, None)).is_empty() {
+            let receiver_var = arg_tys
+                .first()
+                .and_then(|ty| Self::constraint_var_of_ty(&apply_ty_prune(&self.subst, ty)));
+            let candidates = match receiver_var {
+                Some(v) => only(self.bound_method_candidates(method, Some(v))),
+                None => {
+                    let all = only(self.bound_method_candidates(method, None));
+                    all.into_iter()
+                        .filter(|candidate| self.bound_candidate_fits_args(candidate, &arg_tys))
+                        .collect()
+                }
+            };
+            if let Some(candidate) = self.select_bound_method(candidates, method, &range) {
+                return self.apply_bound_method_call(candidate, receiver_var, method, &arg_tys, Some(args), id, &range);
+            }
+        }
+        // A type parameter whose bounds leave out `Trait`.
+        if let Some(var) = arg_tys
+            .first()
+            .and_then(|ty| Self::constraint_var_of_ty(&apply_ty_prune(&self.subst, ty)))
+            && let Some(param) = self.type_params_in_scope.iter().rev().find_map(|frame| {
+                frame.iter().find(|(_, v)| apply_ty_prune(&self.subst, &Ty::Var(**v)) == Ty::Var(var)).map(|(n, _)| n.clone())
+            })
+        {
+            return self.error_with_help(
+                ErrorCode::GenericTypeError,
+                format!("`{}::{}` needs a `{}` bound on `{}`", written, method, written, param),
+                range,
+                Some(format!("add the bound (`{}: {}`)", param, written)),
+            );
+        }
+        let Some(scheme) = self
+            .typeclass_method_schemes
+            .get(&(class.to_string(), method.to_string()))
+            .cloned()
+        else {
+            return Ty::Var(self.counter.fresh());
+        };
+        self.apply_ground_trait_call(class, method, &scheme, &arg_tys, &flat_args, true, id, &range)
     }
 
     fn construct_payload_exprs<'a>(

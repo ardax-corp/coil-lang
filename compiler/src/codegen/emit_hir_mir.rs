@@ -103,9 +103,9 @@ pub(super) struct HirMirTables {
     /// Some code emission writes for this body reads one of the frame's
     /// dictionaries (`__dictN`) ([`Compiler::hir_mir_dict_reads`]).
     pub(super) reads_dicts: bool,
-    /// The key of each field a record `let` pattern binds (`None`: a
-    /// wildcard), by `let`: MIR pushes each as a string.
-    pub(super) record_pats: HashMap<u32, Vec<Option<u32>>>,
+    /// The `InitTyped` type id of each record literal's slotted object
+    /// ([`Checker::record_type_id`]), by literal.
+    pub(super) record_types: HashMap<u32, u32>,
     /// Shared generic call arguments of a niche layout passed in a boxed
     /// parameter ([`Compiler::hir_niche_arg`]): boxed to their enum
     /// object, by argument.
@@ -155,8 +155,7 @@ impl Compiler {
     }
 
     /// Intern the strings direct MIR reads by name that `hir`'s code
-    /// pushes: record keys (a record literal's, a field read or written by
-    /// name) and the backing string of each string-backed scalar enum
+    /// pushes: the backing string of each string-backed scalar enum
     /// variant it makes or matches.
     fn hir_mir_intern_keys(&mut self, hir: &HirBody) {
         let mut variants: Vec<(String, String)> = Vec::new();
@@ -177,15 +176,7 @@ impl Compiler {
         }
         for e in &hir.exprs {
             match &e.kind {
-                HirKind::Make { kind: MakeKind::Record(names), .. } => {
-                    for name in names {
-                        self.intern_string(name);
-                    }
-                }
-                HirKind::Field { base, name } if matches!(self.hir_field(hir, *base, name), Some((FieldAt::Name, _))) => {
-                    self.intern_string(name);
-                }
-                HirKind::Make { kind: MakeKind::Variant { enum_name, variant, .. }, .. } => {
+                    HirKind::Make { kind: MakeKind::Variant { enum_name, variant, .. }, .. } => {
                     variants.push((enum_name.clone(), variant.clone()));
                 }
                 HirKind::Match { arms, .. } => arms.iter().for_each(|a| pat_variants(&a.pat, &mut variants)),
@@ -594,8 +585,17 @@ impl Compiler {
             // `plan_polyfn_escape_dicts` plans.
             HirKind::Global { .. } if let Some(name) = emit.plan.polyfns.get(&id.0) => {
                 if let Some(target) = self.functions.get(name).and_then(|&entry| self.bytecode.entry_label_for_offset(entry)) {
+                    // Its declared parameters, so a call through the value
+                    // given more hands the rest to its result (#1589): a
+                    // curried one's value is `MakePolyFnCapture` of no
+                    // dictionaries.
+                    let params = self.polyfn_params(name);
                     let value = if self.checker.dict_arity_for(name) == 0 {
-                        Some(crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::PolyFn { target }, captures: Vec::new(), dicts: Vec::new() })
+                        let kind = match params {
+                            Some(params) => crate::mir::MirAllocKind::PolyFnCapture { target, params },
+                            None => crate::mir::MirAllocKind::PolyFn { target },
+                        };
+                        Some(crate::mir::HirFnValue { kind, captures: Vec::new(), dicts: Vec::new() })
                     } else {
                         let (name, ty) = (name.clone(), Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t)));
                         let steps = self.hir_mir_once(|this| {
@@ -604,7 +604,7 @@ impl Compiler {
                             steps
                         });
                         self.hir_mir_dict_program(&steps)
-                            .map(|dicts| crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::PolyFnCapture { target }, captures: Vec::new(), dicts })
+                            .map(|dicts| crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::PolyFnCapture { target, params: params.unwrap_or(0) }, captures: Vec::new(), dicts })
                     };
                     if let Some(value) = value {
                         t.fn_values.insert(id.0, value);
@@ -629,18 +629,12 @@ impl Compiler {
             {
                 t.array_copies.insert(value.0, native);
             }
-            // `let { a, b } = r`: each bound field read by its key.
-            HirKind::LetPat { pat: HirPat::Record(parts), .. } => {
-                let keys = parts
-                    .iter()
-                    .map(|(name, part)| match part {
-                        HirPat::Wild => Some(None),
-                        HirPat::Bind(_) => Some(Some(self.intern_string(name))),
-                        _ => None,
-                    })
-                    .collect::<Option<Vec<_>>>();
-                if let Some(keys) = keys {
-                    t.record_pats.insert(id.0, keys);
+            // `{a: x, b: y}`: a slotted object of its shape's type id.
+            HirKind::Make { kind: MakeKind::Record(_), .. } => {
+                let ty = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));
+                if let Some(Ty::Record { fields }) = ty.as_ref().map(crate::typechecking::ty::strip_readonly) {
+                    let type_id = self.checker.record_type_id(fields);
+                    t.record_types.insert(id.0, type_id);
                 }
             }
             HirKind::Bin { op: BinOp::StrConcat, .. } => {
@@ -1009,11 +1003,16 @@ impl Compiler {
         }
         let natural = Self::hir_call_rep(call);
         let span = hir.expr(id).span;
-        let natural_args = |this: &Self, params: &[ValueLayout]| args.iter().zip(params).all(|(&a, &p)| this.hir_arg_passes(hir, emit, a, p));
         if let Some(inst) = call.instance.as_ref().filter(|i| i.ground.is_some()) {
             let ground = inst.ground.as_ref().expect("ground call");
             let method = &ground.method;
-            let key = self.instance_clone(&call.key, &inst.args).unwrap_or_else(|| call.key.clone());
+            // A niche result the shared entry returns as its enum object
+            // (`fn id(T x) -> T` at `Option<T>`, #1595): direct MIR calls
+            // that entry, as emission does, and moves it to the niche word.
+            let key = match self.hir_ret_shape(hir, id, &natural) {
+                Some(true) => call.key.clone(),
+                _ => self.instance_clone(&call.key, &inst.args).unwrap_or_else(|| call.key.clone()),
+            };
             let steps = self.hir_mir_once(|this| {
                 let mut steps = Vec::new();
                 this.plan_call_instance_dict(&mut steps, (&inst.class, method, &key), &inst.args, span.0..span.1);
@@ -1038,12 +1037,28 @@ impl Compiler {
                 .iter()
                 .zip(&boxes)
                 .all(|(&a, b)| b.is_none() || !matches!(self.hir_natural(hir, emit, a), Some(Rep::Pair(_))));
+            // A niche word a generic instance's shared entry takes as its
+            // enum object (#1579); its clone at the call's types takes the
+            // niche word itself.
+            let clone = key != call.key;
+            let niches: Vec<Option<ValueLayout>> = args
+                .iter()
+                .zip(&call.params)
+                .map(|(&a, &p)| (!self.hir_arg_passes(hir, emit, a, p)).then(|| self.hir_niche_arg(hir, emit, a, p)).flatten())
+                .collect();
             if let Some(dicts) = dicts
                 && unpaired
-                && natural_args(self, &call.params)
+                && args.iter().zip(&call.params).zip(&niches).all(|((&a, &p), n)| n.is_some() || self.hir_arg_passes(hir, emit, a, p))
                 && let Some(target) = target
                 && let Some(boxed_ret) = self.hir_ret_shape(hir, id, &natural)
             {
+                for (&arg, &layout) in args.iter().zip(&niches) {
+                    if let Some(layout) = layout
+                        && !clone
+                    {
+                        t.niche_args.insert(arg.0, layout);
+                    }
+                }
                 t.calls.insert(
                     id.0,
                     crate::mir::HirCallSite {
@@ -1121,24 +1136,41 @@ impl Compiler {
             self.hir_request_method_clone(&key);
             self.raw_instance_call = raw;
             let target = self.named_entry_target(&key, true);
+            // A generic-head instance's shared entry takes its receiver as
+            // the boxed enum object: a niche word goes as its enum object,
+            // a two-word `Option` / `Result` boxed from its pair (#1609).
+            let shared_entry = key == call.key;
+            let niches: Vec<Option<ValueLayout>> = args
+                .iter()
+                .zip(&call.params)
+                .zip(&boxes)
+                .map(|((&a, _), b)| (shared_entry && b.is_some()).then(|| self.hir_niche_arg(hir, emit, a, ValueLayout::Boxed)).flatten())
+                .collect();
             if let Some(dicts) = dicts
                 && let Some(boxed_ret) = self.hir_ret_shape(hir, id, &natural)
-                && args.iter().zip(&call.params).zip(&boxes).all(|((&a, &p), b)| {
-                    // A boxed argument goes from its own word; a niche
-                    // `Option` / `Result` receiver of a shared body as its
-                    // enum object.
+                && args.iter().zip(&call.params).zip(&boxes).zip(&niches).all(|(((&a, &p), b), n)| {
+                    // A boxed argument goes from its own word, its enum
+                    // object (a niche word) or its pair boxed; a niche
+                    // `Option` / `Result` of a shared body as its enum object.
                     if b.is_some() {
                         self.hir_arg_word(hir, emit, a, p)
+                            || n.is_some()
+                            || (shared_entry
+                                && matches!(self.hir_natural(hir, emit, a), Some(Rep::Pair(_)))
+                                && self.hir_arg_passes(hir, emit, a, p))
                     } else {
                         self.hir_arg_passes(hir, emit, a, p) || self.hir_niche_arg(hir, emit, a, p).is_some()
                     }
                 })
                 && let Some(target) = target
             {
-                for (&arg, &param) in args.iter().zip(&call.params) {
-                    if !self.hir_arg_passes(hir, emit, arg, param)
-                        && let Some(layout) = self.hir_niche_arg(hir, emit, arg, param)
-                    {
+                for ((&arg, &param), (b, &layout)) in args.iter().zip(&call.params).zip(boxes.iter().zip(&niches)) {
+                    let layout = layout.or_else(|| {
+                        (b.is_none() && !self.hir_arg_passes(hir, emit, arg, param))
+                            .then(|| self.hir_niche_arg(hir, emit, arg, param))
+                            .flatten()
+                    });
+                    if let Some(layout) = layout {
                         t.niche_args.insert(arg.0, layout);
                     }
                 }
@@ -1299,8 +1331,15 @@ impl Compiler {
             Some(source) => self.generic_return_depends_on_type_param(source),
             None => Self::hir_polyfn_returns_var(hir, &self.checker, f),
         };
+        // A closure result, adapted from the shared body's boxed ABI to the
+        // call's ground type (#1589).
+        let (unbox, ret_adapt) = match self.hir_polyfn_ret_adapt(hir, emit, id, f, args.len()) {
+            None => (unbox, None),
+            Some(Ok(adapt)) => (false, adapt.map(|adapt| self.hir_closure_adapter(&adapt))),
+            Some(Err(_)) => return,
+        };
         let unbox = if unbox { call_ty.as_ref().and_then(Self::ty_to_value_tag).map(|tag| tag as u32) } else { None };
-        t.poly_calls.insert(id.0, crate::mir::HirPolyCall { boxes, dicts, unbox });
+        t.poly_calls.insert(id.0, crate::mir::HirPolyCall { boxes, dicts, unbox, ret_adapt });
     }
 
     /// Whether each of a `PolyFn` call's `n` parameters is a bare type
@@ -1630,7 +1669,11 @@ impl Compiler {
                 }
                 if let Some(inst) = call.instance.as_ref().filter(|i| i.ground.is_some()) {
                     let method = &inst.ground.as_ref().expect("ground call").method;
-                    let key = self.instance_clone(&call.key, &inst.args).unwrap_or_else(|| call.key.clone());
+                    // The entry [`Self::hir_mir_call`] calls (#1595).
+                    let key = match self.hir_ret_shape(hir, id, &Self::hir_call_rep(call)) {
+                        Some(true) => call.key.clone(),
+                        _ => self.instance_clone(&call.key, &inst.args).unwrap_or_else(|| call.key.clone()),
+                    };
                     return self.hir_mir_probe_unplanned(|this, steps| {
                         this.plan_call_instance_dict(steps, (&inst.class, method, &key), &inst.args, span);
                     });
@@ -1672,9 +1715,9 @@ impl Compiler {
     }
 
     /// The shape `values_eq_shaped` compares a value of `ty` by, when it
-    /// is an array, `Vec` or tuple with a `float` leaf (#1253): `f` a
-    /// float, `w` anything else, `a` an array's element shape, `t` a
-    /// tuple's count digit and element shapes.
+    /// is an array, `Vec`, tuple or record with a `float` leaf (#1253): `f`
+    /// a float, `w` anything else, `a` an array's element shape, `t` a
+    /// tuple's and `r` a record's count digit and part shapes.
     pub(super) fn eq_float_shape(&self, ty: &Ty) -> Option<String> {
         fn walk(ty: &Ty, out: &mut String) -> Option<()> {
             let ty = crate::typechecking::ty::strip_readonly(ty);
@@ -1692,6 +1735,16 @@ impl Compiler {
                 out.push(char::from(b'0' + n));
                 for item in items {
                     walk(item, out)?;
+                }
+            } else if let Ty::Record { fields } = ty {
+                // Slots are the fields sorted by name.
+                let n = u8::try_from(fields.len()).ok().filter(|&n| n <= 9)?;
+                let mut sorted: Vec<&(String, Ty)> = fields.iter().collect();
+                sorted.sort_by(|a, b| a.0.cmp(&b.0));
+                out.push('r');
+                out.push(char::from(b'0' + n));
+                for (_, field) in sorted {
+                    walk(field, out)?;
                 }
             } else {
                 out.push('w');
@@ -1825,8 +1878,8 @@ impl Compiler {
     /// How a `%v` value of type `ty` is shown, when
     /// each step is one direct MIR has: a tuple's or record's items shown
     /// and formatted, `STRINGIFY` with no `Show` instance, or one plain
-    /// one-word `CALL` of the raw `show` entry on the boxed-layout value
-    /// (no boxing, conversion or dictionary). It interns the strings
+    /// one-word `CALL` of the raw `show` entry on the boxed-layout or
+    /// niche value (no boxing, conversion or dictionary). It interns the strings
     /// emission does.
     fn hir_show_ty(&mut self, ty: &Ty) -> Option<crate::mir::HirShow> {
         match ty {
@@ -1836,12 +1889,14 @@ impl Compiler {
                 return Some(crate::mir::HirShow::Tuple { fmt, items });
             }
             Ty::Record { fields } => {
+                // In slot order: the fields sorted by name.
+                let mut fields = fields.clone();
+                fields.sort_by(|a, b| a.0.cmp(&b.0));
                 let mut shown = Vec::with_capacity(fields.len());
-                for (name, t) in fields {
-                    let key = self.intern_string(name);
-                    shown.push((key, t.clone(), self.hir_show_ty(t)?));
+                for (slot, (_, t)) in fields.iter().enumerate() {
+                    shown.push((slot as u32, t.clone(), self.hir_show_ty(t)?));
                 }
-                let fmt = self.intern_string(unescape_coil_string(&Self::record_show_format(fields)));
+                let fmt = self.intern_string(unescape_coil_string(&Self::record_show_format(&fields)));
                 return Some(crate::mir::HirShow::Record { fmt, fields: shown });
             }
             // An arity-wide tuple thunk's item: its own dictionary (#1479).
@@ -1851,19 +1906,22 @@ impl Compiler {
             }
             _ => {}
         }
-        if self.value_layout(ty) != ValueLayout::Boxed {
-            return None;
-        }
+        // A niche `Option` / `Result` (`Some({ x: 1 })`, #1591) is its
+        // niche word, which only a raw entry takes as it is.
+        let niche = self.value_layout(ty) != ValueLayout::Boxed;
         let lookup_ty = Self::show_lookup_ty_for_instance(ty);
         let Some(fqn) = self
             .find_show_instance(&lookup_ty)
             .and_then(|inst| inst.method_fqns.get("show").cloned())
             .filter(|fqn| self.functions.contains_key(fqn) || self.fn_entry_labels.contains_key(fqn))
         else {
-            return Some(crate::mir::HirShow::Stringify);
+            return (!niche).then_some(crate::mir::HirShow::Stringify);
         };
         let fqn = self.instance_clone(&fqn, std::slice::from_ref(&lookup_ty)).unwrap_or(fqn);
         let raw = self.raw_instance_methods.contains(&fqn);
+        if niche && !raw {
+            return None;
+        }
         // A non-raw `show` takes the value boxed (`BoxValue`).
         let boxed = if raw { None } else { Self::ty_to_value_tag(&lookup_ty).map(|tag| tag as u32) };
         // A dictionary argument: not a plain call. Its code goes nowhere.

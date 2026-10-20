@@ -83,6 +83,13 @@ pub fn unify_with(subst: &Subst, t1: &Ty, t2: &Ty) -> Result<Subst, UnifyError> 
     match (t1, t2) {
         // Identical type variables: trivially equal (no occurs check).
         (Ty::Var(v1), Ty::Var(v2)) if v1 == v2 => Ok(subst.clone()),
+        // `T` against `readonly T`: one type up to the qualifier, not an
+        // infinite one (#1558).
+        (Ty::Var(v1), Ty::Readonly(inner)) | (Ty::Readonly(inner), Ty::Var(v1))
+            if matches!(crate::typechecking::ty::strip_readonly(&inner), Ty::Var(v2) if *v2 == v1) =>
+        {
+            Ok(subst.clone())
+        }
 
         // Same type constructor (e.g. `int` with `int`).
         (Ty::Con(a), Ty::Con(b)) if a == b => Ok(subst.clone()),

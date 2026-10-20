@@ -1264,6 +1264,18 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 let args = fields.iter().map(|f| self.expr(b, &f.value)).collect();
                 self.emit(b, node, HirKind::Make { kind: MakeKind::Record(names), args })
             }
+            // `Trait::m(args)` is the free call `m(args)` the checker
+            // resolved within `Trait`.
+            E::Construct {
+                fields: fields @ (EnumConstructPayload::Unit | EnumConstructPayload::Tuple(_)),
+                ..
+            } if self.checker.qualified_trait_call_at(node.0.start, node.0.end).is_some() => {
+                let args = match fields {
+                    EnumConstructPayload::Tuple(items) => items.as_slice(),
+                    _ => &[],
+                };
+                self.qualified_trait_call(b, node, args)
+            }
             // `C::f(args)` on a class is a static method call (a bare
             // `C::f` names a static field first, as in codegen).
             E::Construct {
@@ -1430,7 +1442,9 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             E::TypeOf(inner) => self.builtin(b, node, Builtin::TypeOf, std::slice::from_ref(inner)),
             E::Dload(inner) => self.builtin(b, node, Builtin::Dload, std::slice::from_ref(inner)),
             E::Done(inner) => self.builtin(b, node, Builtin::Done, std::slice::from_ref(inner)),
-            E::Readonly(inner) => self.builtin(b, node, Builtin::Readonly, std::slice::from_ref(inner)),
+            // `readonly` lives on the type only; the HIR sees the value, so
+            // the passes that match an initializer's shape still see it.
+            E::Readonly(inner) => self.expr(b, inner),
             E::Declare(args) => self.builtin(b, node, Builtin::Declare, args),
             E::Invoke(args) => self.builtin(b, node, Builtin::Invoke, args),
             E::Default(_) => self.builtin(b, node, Builtin::Default, &[]),
@@ -1471,7 +1485,9 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             .and_then(|n| self.checker.existential_pack_at(n))
             .or_else(|| self.checker.existential_pack_span(e.span.0, e.span.1))?;
         let subst = self.checker.subst();
-        (crate::typechecking::subst::apply_ty_prune(subst, e.ty.as_ref()?) == crate::typechecking::subst::apply_ty_prune(subst, &pack.value_ty)).then(|| pack.class.clone())
+        // `readonly` has no runtime form: a `readonly P` packs as a `P` (#1558).
+        let ty = crate::typechecking::subst::apply_ty_prune(subst, e.ty.as_ref()?);
+        (strip_readonly(&ty) == &crate::typechecking::subst::apply_ty_prune(subst, &pack.value_ty)).then(|| pack.class.clone())
     }
 
     fn local_ty(&self, node: &Output<'_>, _name: &str) -> Option<Ty> {
@@ -1856,6 +1872,9 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 let call = self.split_over_application(b, call, &keys);
                 self.after(b, span_of(node), stmts, call)
             }
+            E::QualifiedAccess { .. } if self.checker.qualified_trait_call_at(node.0.start, node.0.end).is_some() => {
+                self.qualified_trait_call(b, node, args)
+            }
             E::QualifiedAccess { owner, member } => {
                 if self.checker.tag_for(owner, member).is_some() {
                     let args = self.exprs(b, args);
@@ -1902,6 +1921,20 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 self.emit(b, node, HirKind::Call { callee: Callee::Value(callee), args })
             }
         }
+    }
+
+    /// `Trait::m(args)`: the same call as the free `m(args)` (the checker
+    /// recorded its dictionary or instance at this node).
+    fn qualified_trait_call(&mut self, b: &mut BodyBuilder, node: &Output<'_>, args: &[Output<'_>]) -> HirId {
+        let (start, end) = span_of(node);
+        let name = self.checker.qualified_trait_call_at(start, end).unwrap_or_default().to_string();
+        let id = self.node_id(node);
+        let def = id.and_then(|i| self.sidecar.def_id(i));
+        let overload = id.and_then(|i| self.sidecar.overload(i)).map(|o| o.candidate_id);
+        let mut args = self.exprs(b, args);
+        let stmts = self.named_args_in_source_order(b, span_of(node), &mut args);
+        let call = self.emit(b, node, HirKind::Call { callee: Callee::Named { name, def, overload }, args });
+        self.after(b, span_of(node), stmts, call)
     }
 
     /// `Owner::member` in construct form calls a class's static method.
@@ -1969,7 +2002,9 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
     }
 
     /// Named arguments run in the order they are written (#1365): the
-    /// call shapes them into parameter or field order later, so each
+    /// call shapes them into the parameter or field order the checker
+    /// matched ([`NamedArgSlots`](crate::typechecking::infer::NamedArgSlots))
+    /// later, so when that order differs from the source order each
     /// argument that is not a literal is read into a temp first, in source
     /// order. Returns the `let`s to run ahead of the call.
     fn named_args_in_source_order(&mut self, b: &mut BodyBuilder, span: Span, args: &mut [HirId]) -> Vec<HirId> {
@@ -1992,6 +2027,10 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             || args.iter().any(|&a| matches!(b.body.exprs[a.0 as usize].kind, HirKind::Spread(_)))
             || args.iter().filter(|&&a| !lit(b, value(b, a))).count() < 2
             || args.iter().all(|&a| pure(b, a))
+            || self
+                .checker
+                .named_arg_slots(span.0, span.1)
+                .is_some_and(|record| record.slots.is_sorted())
         {
             return Vec::new();
         }

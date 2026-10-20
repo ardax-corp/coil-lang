@@ -79,8 +79,6 @@ pub enum ForInKind {
     Array,
     /// Materialise homogeneous tuple elements into a temp array, then array path.
     Tuple { arity: usize },
-    /// `DictEntries` then array path; items are `(string, V)` pairs.
-    Dict,
     /// Resume/Done loop (completion value excluded from body).
     Coroutine,
     /// Lazy range counter loop (`0..n` / `0..=n`).
@@ -109,8 +107,6 @@ pub enum ForInCounted {
         inclusive: bool,
         float: bool,
     },
-    /// `DictEntries` then the array latch (C2b rung 3).
-    Dict,
 }
 
 /// Side-table entry for for-in codegen, keyed by the Loop node id.
@@ -244,6 +240,11 @@ pub struct Checker {
     /// [`Self::fn_effects`] for every file checked so far (not reset per
     /// file), so calls into an already-checked module resolve by [`DefId`].
     pub(crate) program_fn_effects: HashMap<DefId, crate::typechecking::purity::EffectFlags>,
+    /// Fixed parameter count and rest flag of every function and method
+    /// checked so far, by module-qualified name (`m::f`, `m::C::f`; the
+    /// entry file's unqualified), so a call into an already-checked module
+    /// knows when it under-applies.
+    program_fn_params: HashMap<String, (usize, bool)>,
     /// Impl method effects for every file checked so far, keyed
     /// `module::Owner::method` (methods have no [`DefId`] of their own).
     pub(crate) program_method_effects: HashMap<String, crate::typechecking::purity::EffectFlags>,
@@ -274,6 +275,9 @@ pub struct Checker {
     /// Compile-time type ids for class instances (`InitTyped`). Never 0.
     class_type_ids: std::collections::HashMap<String, u32>,
     next_class_type_id: u32,
+    /// Slotted record shapes (fields sorted by name, with their word
+    /// kinds): their `InitTyped` type id, from the class ids' counter.
+    record_type_ids: std::collections::HashMap<(Vec<String>, Vec<u8>), u32>,
     /// Classes that declared inherent `fn drop(self)`.
     classes_with_drop: std::collections::HashSet<String>,
     /// Subset of [`Self::classes_with_drop`] whose owner is an enum.
@@ -509,6 +513,9 @@ pub struct Checker {
 
     /// Bare `Some`/`Ok`/`Red` (Call or Identifier) resolved to `Enum::Case`.
     bare_constructs_by_span: HashMap<(usize, usize), (String, String)>,
+    /// `Trait::method(args)` resolved as the free call `method(args)`
+    /// limited to `Trait`: span → the callee name lowering gives it.
+    qualified_trait_calls_by_span: HashMap<(usize, usize), String>,
 
     /// Bare constructor patterns (`Some(v)`, `None`, `Red`) resolved to their
     /// enum's registry key, by pattern span (#1352).
@@ -687,6 +694,11 @@ pub struct Checker {
     /// `MakeFn` partials (positional and named holes).
     pub partial_fills_by_span: std::collections::HashMap<(usize, usize), u32>,
 
+    /// Calls and constructors with named arguments, by span: where each
+    /// argument goes. The one place named arguments are matched to
+    /// parameters or fields; later stages read this instead.
+    named_arg_slots_by_span: std::collections::HashMap<(usize, usize), NamedArgSlots>,
+
     /// Per-slot types for [`partial_fills_by_span`] entries (slot index, ty).
     /// Needed when named holes are non-prefix (`add(b: 2)`) so typing does
     /// not feed args into `apply_function` in the wrong order.
@@ -766,6 +778,19 @@ mod coverage;
 mod sidecar;
 use coverage::CoverageTree;
 pub use sidecar::{SelectedOverload, TypedSidecar};
+
+/// How the checker matched a call's arguments (spreads flattened) to the
+/// callee's parameters, or a `new C(..)`'s to the class fields, when some
+/// are named: `slots[i]` is the parameter (field) index argument `i` fills,
+/// or `params` when it goes into the rest pack.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NamedArgSlots {
+    pub slots: Vec<usize>,
+    /// Fixed parameters (or fields) of the callee.
+    pub params: usize,
+    /// The callee ends in a rest parameter.
+    pub rest: bool,
+}
 
 /// Human-readable name of a payload shape, used in
 /// typecheck-error messages.

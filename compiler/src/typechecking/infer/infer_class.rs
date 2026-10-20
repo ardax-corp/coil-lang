@@ -1229,6 +1229,9 @@ impl Checker {
                     if let Some(has) = self.fn_has_rest.get(*name).copied() {
                         self.fn_has_rest.insert(fqn.clone(), has);
                     }
+                    if let Some(&declared) = self.program_fn_params.get(&self.qualify_module_name(name)) {
+                        self.program_fn_params.insert(fqn.clone(), declared);
+                    }
                     if let Some(tuple) = self.fn_tuple_rest.get(*name).copied() {
                         self.fn_tuple_rest.insert(fqn.clone(), tuple);
                     }

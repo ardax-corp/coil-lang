@@ -3947,7 +3947,7 @@ fn main() {
 }
 
 #[test]
-fn dict_field_access_keeps_interned_get_field() {
+fn record_field_access_reads_its_slot() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
@@ -3958,21 +3958,6 @@ fn main() {
 "#;
     let output = run_example_src(src);
     assert_eq!(output, "7");
-
-    let mut pipeline = test_pipeline();
-    let (bytecode, _) = pipeline.compile_src(src).expect("dict getfield");
-    assert!(
-        bytecode
-            .iter()
-            .any(|b| matches!(b.bytecode(), common::Instruction::GetField)),
-        "dict reads must use interned-name GetField"
-    );
-    assert!(
-        bytecode
-            .iter()
-            .any(|b| matches!(b.bytecode(), common::Instruction::MakeDict)),
-        "anonymous record must stay MakeDict"
-    );
 }
 
 #[test]

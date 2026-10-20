@@ -776,7 +776,19 @@ impl<'s> Formatter<'s> {
             }
             Expression::Readonly(inner) => {
                 self.push_str("readonly ");
-                self.fmt_output(inner);
+                // `readonly` qualifies one type atom: a function type keeps
+                // its parens, `readonly (int -> int)`.
+                let fn_type = matches!(
+                    inner.1.as_ref(),
+                    Expression::TypeFun(..) | Expression::Forall { .. }
+                );
+                if fn_type {
+                    self.push_str("(");
+                    self.fmt_output(inner);
+                    self.push_str(")");
+                } else {
+                    self.fmt_operand(inner, PREC_UNARY);
+                }
             }
             Expression::TypeOf(inner) => {
                 self.push_str("typeof ");
@@ -2667,9 +2679,11 @@ fn expr_prec(e: &Expression<'_>) -> u8 {
         Expression::Mul(..) | Expression::Div(..) | Expression::Mod(..) => 12,
         Expression::Pow(..) => PREC_POW,
         Expression::Cast(..) => PREC_CAST,
-        Expression::Negate(_) | Expression::Positive(_) | Expression::Not(_) | Expression::LogicalNot(_) => {
-            PREC_UNARY
-        }
+        Expression::Negate(_)
+        | Expression::Positive(_)
+        | Expression::Not(_)
+        | Expression::LogicalNot(_)
+        | Expression::Readonly(_) => PREC_UNARY,
         _ => u8::MAX,
     }
 }
@@ -2922,6 +2936,13 @@ mod tests {
     write_all(stdout(), to_bytes(format("%i", fib(32))));
     return;
 }"#;
+        round_trip(src);
+    }
+
+    #[test]
+    fn readonly_types_and_expressions_round_trip() {
+        let src = "class H {\n    pub p: readonly Point,\n    pub ps: Vec<readonly Point>,\n}\n\nfn f(readonly Point p, readonly (int -> int) g, readonly Point -> int h) -> readonly Vec<int> {\n    let q: readonly Point = readonly p.inner;\n    let r = readonly (a + b);\n    return readonly xs;\n}\n";
+        assert_eq!(format_source(src).unwrap(), src);
         round_trip(src);
     }
 

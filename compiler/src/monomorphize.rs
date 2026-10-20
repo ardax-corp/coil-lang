@@ -83,7 +83,9 @@ pub fn mono_key_ty(ty: &Ty) -> Ty {
         Ty::Record { fields } => Ty::Record {
             fields: fields.iter().map(|(n, t)| (n.clone(), mono_key_ty(t))).collect(),
         },
-        Ty::Readonly(inner) => Ty::Readonly(Box::new(mono_key_ty(inner))),
+        // `readonly` is a type-checking qualifier with no runtime form, so
+        // `f(x)` and `f(readonly x)` share one clone (#1555).
+        Ty::Readonly(inner) => mono_key_ty(inner),
         Ty::Var(_) | Ty::Con(_) | Ty::Existential { .. } | Ty::Forall { .. } | Ty::Never => ty.clone(),
     }
 }

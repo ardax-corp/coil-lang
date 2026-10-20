@@ -94,12 +94,18 @@ fn main() {
 
 ## readonly
 
-Seals an array literal or a new class instance against mutation from outside.
+A read-only view of a value: nothing reachable through it can be changed.
 
-`readonly [1, 2, 3]` and `readonly new Point(1, 2)` produce a `readonly T`
-value: field writes and index writes through it are compile errors, while the
-class's own methods can still change it through `self`. The variable itself
-can still be rebound.
+`readonly T` is a type, written anywhere a type is: parameters, returns, `let`
+annotations, class fields and generic arguments (`Vec<readonly Point>`).
+`readonly e` views any expression read-only (`readonly [1, 2, 3]`,
+`readonly new Point(1, 2)`, `readonly p`). Field writes, index writes and
+`push`/`pop`/… through it are compile errors, while a class's own methods can
+still change it through `self`. The seal is deep: a field, element or loop
+variable read through it is `readonly` too. A `T` converts to `readonly T`,
+never back, and `Vec<T>` does not convert to `Vec<readonly T>`; a parameter
+that only reads takes `readonly Vec<T>`. `readonly` costs nothing at run time,
+and the variable itself can still be rebound.
 
 ```coil
 class Point {
@@ -107,10 +113,14 @@ class Point {
     pub y: int,
 }
 
+fn sum(readonly Point p) -> int {
+    return p.x + p.y; // reading is fine; `p.x = 5;` would not compile
+}
+
 fn main() {
     let xs = readonly [1, 2, 3];
-    let p = readonly new Point(1, 2);
-    let sum = p.x + p.y; // reading is fine; `p.x = 5;` would not compile
+    let p = new Point(1, 2);
+    let total = sum(p) + sum(readonly p);
 }
 ```
 
@@ -884,6 +894,12 @@ bodies, and a trait can declare associated types (`type Elem;`) and
 `static fn` constructors. Use it as a bound (`T: Area`) or as an
 existential parameter type.
 
+A trait method is called as a method (`x.area()`), as a function
+(`area(x)`), or qualified by its trait (`Area::area(x)`). The qualified
+form resolves like the function form but only considers that trait's
+method, so it picks between two traits (or a trait and a free function)
+that share a method name; it compiles to the same call.
+
 ```coil
 trait Area<T> {
     fn area(T x) -> int;
@@ -900,7 +916,7 @@ impl Area for Square {
 }
 
 fn total<T: Area>(T a, T b) -> int {
-    return area(a) + area(b);
+    return area(a) + Area::area(b);
 }
 ```
 

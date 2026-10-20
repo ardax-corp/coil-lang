@@ -468,6 +468,8 @@ impl Checker {
             matches!(c.1.as_ref(), Expression::Argument { ty: None, is_rest: true, .. })
         }));
         self.fn_has_rest.insert(name.to_string(), has_rest);
+        self.program_fn_params
+            .insert(self.qualify_module_name(name), (arg_tys.len() - usize::from(has_rest), has_rest));
         self.fn_tuple_rest.insert(name.to_string(), has_tuple_rest);
         let mut declared_send_ty = false;
         let (ret_ty, yield_slot, send_slot) = if is_coro {
