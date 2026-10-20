@@ -1702,6 +1702,7 @@ impl Checker {
             self.messages.extend(msgs);
         }
         self.check_duplicate_classes(ast);
+        self.check_builtin_class_names(ast);
         self.pre_register_readonly_classes(ast);
         self.collect_variadic_templates(ast);
         self.pre_collect_free_function_param_names(ast);
@@ -14836,6 +14837,55 @@ impl Checker {
         }
     }
 
+    /// Help for a top-level `class` or `enum` named `name` that would
+    /// redeclare a built-in type, or `None` when the name is free here. The
+    /// built-in keeps its key, so such a type would split: a type position
+    /// would name it while `new` or a literal still built the built-in
+    /// (#1654). `Option` / `Result` are free once a `use prelude::… as`
+    /// rebinds them; the other built-ins have no such escape.
+    fn builtin_type_redeclaration_help(&self, name: &str) -> Option<String> {
+        if self.current_module == crate::macros::CORE_MODULE {
+            return None;
+        }
+        if common::is_poly_builtin_enum(name) {
+            return self.builtin_name_in_scope(name).then(|| {
+                format!(
+                    "`{name}` is in the prelude; free the short name with `use prelude::{name} as OtherName;` before redefining, or pick a different name"
+                )
+            });
+        }
+        common::is_reserved_builtin_type(name)
+            .then(|| format!("`{name}` is a built-in type; pick a different name"))
+    }
+
+    /// A top-level `class` may not take a built-in type's name (#1654).
+    fn check_builtin_class_names(&mut self, ast: &Output) {
+        fn walk<'a>(node: &'a Output<'a>, out: &mut Vec<(&'a str, Range<usize>)>) {
+            match Checker::pre_pass_unwrap_stmt(node).1.as_ref() {
+                Expression::Class { name, .. } => out.push((name, node.0.into_range())),
+                Expression::Program(children) | Expression::Fragment(children) => {
+                    for child in children {
+                        walk(child, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut classes = Vec::new();
+        walk(ast, &mut classes);
+        for (name, range) in classes {
+            if let Some(help) = self.builtin_type_redeclaration_help(name) {
+                let mut msg = Message::error(
+                    ErrorCode::DuplicateEnum,
+                    format!("Cannot redeclare built-in type `{name}`"),
+                    range,
+                );
+                msg.with_help(help);
+                self.messages.push(msg);
+            }
+        }
+    }
+
     /// Record this module's `readonly class` keys before any body is
     /// typed, so a use ahead of the declaration sees the class as immutable.
     fn pre_register_readonly_classes(&mut self, ast: &Output) {
@@ -16159,6 +16209,20 @@ impl Checker {
                 }
 
                 // Check 1: duplicate enum name (including built-ins still in scope).
+                if !common::is_builtin_enum(&name_str)
+                    && let Some(help) = self.builtin_type_redeclaration_help(name)
+                {
+                    let mut msg = Message::error(
+                        ErrorCode::DuplicateEnum,
+                        format!("Cannot redeclare built-in type `{}`", name),
+                        node.0.into_range(),
+                    );
+                    msg.with_help(help);
+                    errors.push(msg);
+                    self.restore_generic_type_ctor(&name_str, previous_generic_ctor);
+                    self.pop_type_params_for_type_parsing(pushed);
+                    return;
+                }
                 if common::is_builtin_enum(&name_str) {
                     if self.builtin_name_in_scope(&name_str)
                         || common::is_builtin_ffi_enum(&name_str)
