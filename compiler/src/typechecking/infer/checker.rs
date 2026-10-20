@@ -187,6 +187,7 @@ impl Checker {
             for_in_infos: HashMap::new(),
             for_in_infos_by_span: HashMap::new(),
             typeclass_method_schemes: HashMap::new(),
+            trait_readonly_params: HashMap::new(),
             current_expected: None,
             expected_here: None,
             type_aliases: vec![HashMap::new()],
@@ -1573,6 +1574,8 @@ impl Checker {
                     && def.defined_module != crate::typechecking::generics::BUILTIN_MODULE
             })
         });
+        let schemes = &self.typeclass_method_schemes;
+        self.trait_readonly_params.retain(|key, _| schemes.contains_key(key));
         self.current_expected = None;
         self.expected_here = None;
         self.type_aliases.clear();
@@ -4860,8 +4863,9 @@ impl Checker {
             );
         }
 
-        // A `readonly` trait object dispatches like the plain one; its
-        // methods may still mutate `self` (#1558).
+        // A `readonly` trait object dispatches like the plain one; only
+        // methods declared `readonly A self` may be called on it, which
+        // `hir::effects` checks (#1558).
         if let Ty::Existential { class } = strip_readonly(&resolved)
             && let Some((owner, method_slot, scheme)) =
                 self.existential_method_candidate(class, method)
@@ -6035,6 +6039,19 @@ impl Checker {
         end: usize,
     ) -> Option<&ExistentialMethodCall> {
         self.existential_method_calls_by_span.get(&(start, end))
+    }
+
+    /// Bit `i`: trait method `class::method` declares parameter `i`
+    /// `readonly` (`fn area(readonly A self)`, #1558).
+    pub fn trait_readonly_params(&self, class: &str, method: &str) -> u64 {
+        if let Some(&mask) = self.trait_readonly_params.get(&(class.to_string(), method.to_string())) {
+            return mask;
+        }
+        let short = |n: &str| n.rsplit("::").next().unwrap_or(n).to_string();
+        self.trait_readonly_params
+            .iter()
+            .filter(|((c, m), _)| m == method && short(c) == short(class))
+            .fold(0, |acc, (_, mask)| acc | mask)
     }
 
     pub fn typeclass_method_scheme(&self, class: &str, method: &str) -> Option<&Scheme> {
@@ -7438,14 +7455,10 @@ impl Checker {
                 }
             }
             Expression::Access(receiver, field) => {
-                let is_self_field = matches!(
-                    receiver.1.as_ref(),
-                    Expression::Identifier(n) if *n == "self" && self.impl_owner.is_some()
-                );
+                // `self` is no exception: a method whose `self` is
+                // declared `readonly` cannot write through it (#1558).
                 let receiver_ty = self.infer(receiver);
-                if !is_self_field {
-                    self.check_readonly_external_mutation(&receiver_ty, range.clone());
-                }
+                self.check_readonly_external_mutation(&receiver_ty, range.clone());
                 let resolved = apply_ty_prune(&self.subst, &receiver_ty);
                 let class_name = self.class_owner_from_ty(&resolved);
                 if let Some(class) = class_name.as_ref()
@@ -8693,6 +8706,22 @@ impl Checker {
                         {
                             // C sees one pointer to the elements either way.
                             self.unify(&elem.0, &elem.1, &range, "function argument");
+                            // ... and may write through it unless the
+                            // parameter is `readonly` (#1558).
+                            if matches!(apply_ty_prune(&self.subst, arg), Ty::Readonly(_))
+                                && !matches!(apply_ty_prune(&self.subst, param.as_ref()), Ty::Readonly(_))
+                            {
+                                let _ = self.error_with_help(
+                                    ErrorCode::InvalidAssignment,
+                                    format!(
+                                        "Cannot use a `{}` where `{}` is expected (function argument)",
+                                        self.diag_ty(arg),
+                                        self.diag_ty(param.as_ref())
+                                    ),
+                                    range.clone(),
+                                    Some("a foreign function may write through a plain parameter; declare it `readonly` in the `extern` block if it only reads".to_string()),
+                                );
+                            }
                         } else {
                             self.coerce_or_unify(
                                 param.as_ref(),
@@ -9103,6 +9132,15 @@ impl Checker {
             let actual = strip_readonly(&actual).clone();
             let packed = self.coerce_or_unify(&inner, &actual, expr, range, context);
             return readonly_ty(packed);
+        }
+        // `T` converts to `readonly T`: a plain argument fills the inner
+        // type, so a type variable binds the plain type rather than
+        // `readonly …` (a `readonly A self` trait method called on `T`).
+        if let Ty::Readonly(inner) = &expected
+            && !matches!(actual, Ty::Readonly(_))
+        {
+            let filled = self.coerce_or_unify(inner, &actual, expr, range, context);
+            return self.readonly_qualify(filled);
         }
         // Integer literals may coerce to `byte` when in range 0..=255.
         if Self::is_byte_ty(&expected)
@@ -12901,6 +12939,19 @@ impl Checker {
                     let mut tags = Vec::with_capacity(items.len());
                     for (i, item) in items.iter().enumerate() {
                         let ty = self.infer(item);
+                        // C may write through any pointer but a
+                        // `const uint8_t *` (#1558).
+                        let expected = declared.as_ref().and_then(|d| d.get(i)).copied();
+                        if matches!(apply_ty_prune(&self.subst, &ty), Ty::Readonly(_))
+                            && expected != Some(common::tag::CONST_BYTES)
+                        {
+                            let _ = self.error_with_help(
+                                ErrorCode::InvalidAssignment,
+                                "Cannot pass a `readonly` value to a foreign function that may write it".to_string(),
+                                item.0.into_range(),
+                                Some("only a `ConstBytes` parameter (`const uint8_t *`) takes a `readonly` value; declare it `ConstBytes`, or pass a value that is not `readonly`".to_string()),
+                            );
+                        }
                         if let Some(&expected_tag) = declared.as_ref().and_then(|d| d.get(i)) {
                             let pruned = apply_ty_prune(&self.subst, &ty);
                             if Self::ffi_integer_tag(expected_tag) && Self::ty_is_stream(&pruned) {
@@ -18872,6 +18923,14 @@ impl Checker {
                 exp.len() == act.len() && exp.iter().zip(act).any(|(e, a)| self.drops_readonly(e, a))
             }
             (Ty::Array { element: exp, .. }, Ty::Array { element: act, .. }) => self.drops_readonly(exp, act),
+            // A function that takes a plain `P` cannot stand where one is
+            // given a `readonly P` (#1558): `(readonly P) -> R` converts
+            // to `(P) -> R`, not back.
+            (Ty::Fun(exp_p, exp_r), Ty::Fun(act_p, act_r)) => {
+                let exp_p = apply_ty_prune(&self.subst, exp_p);
+                let act_p = apply_ty_prune(&self.subst, act_p);
+                self.drops_readonly(&act_p, &exp_p) || self.drops_readonly(exp_r, act_r)
+            }
             (Ty::Record { fields: exp }, Ty::Record { fields: act }) => exp.iter().any(|(name, e)| {
                 act.iter()
                     .find(|(n, _)| n == name)
@@ -18881,10 +18940,10 @@ impl Checker {
         }
     }
 
-    /// The receiver as a method's `self` argument. A method may still
-    /// mutate a `readonly` receiver through `self` until calls are checked
-    /// against a per-parameter mutation summary (#1558), so `self` takes the
-    /// value without its `readonly`.
+    /// The receiver as a method's `self` argument, without its
+    /// `readonly`: whether the method may be called on a readonly
+    /// receiver is checked after typing, against the method's inferred
+    /// per-parameter mutation summary (`hir::effects`, #1558).
     fn method_self_arg(&self, recv_ty: &Ty) -> Ty {
         strip_readonly(&apply_ty_prune(&self.subst, recv_ty)).clone()
     }
@@ -18894,9 +18953,9 @@ impl Checker {
         if matches!(pruned, Ty::Readonly(_)) {
             let _ = self.error_with_help(
                 ErrorCode::InvalidAssignment,
-                "Cannot mutate a `readonly` value from outside its defining methods".to_string(),
+                "Cannot mutate a `readonly` value".to_string(),
                 range,
-                Some("rebind the variable with a new `readonly` value, or mutate via `self` inside an inherent method".to_string()),
+                Some("rebind the variable to another value, or mutate the value through a name that is not `readonly`".to_string()),
             );
         }
     }
