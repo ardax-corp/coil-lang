@@ -87,6 +87,10 @@ struct St {
     /// payload are `$`-named and never change; the rest is forgotten
     /// wherever the heap may change.
     fields: HashMap<(u32, String), V>,
+    /// The heap's generation: it changes wherever fields are forgotten, so
+    /// two states with the same one see the same field values
+    /// ([`Enc::lazy`]).
+    heap: u32,
 }
 
 type Out = Option<(V, St)>;
@@ -136,6 +140,11 @@ struct Enc<'m> {
     obj_joins: Vec<(u32, u32, u32)>,
     /// Enum variant numbers, by `enum::variant`.
     tags: HashMap<String, u32>,
+    /// The value a field read made up, by `(object, field, heap)`: a later
+    /// read in the same heap, on another path or after a join that forgot
+    /// it, sees the same value.
+    lazy: HashMap<(u32, String, u32), V>,
+    next_heap: u32,
 }
 
 impl<'m> Enc<'m> {
@@ -153,12 +162,14 @@ impl<'m> Enc<'m> {
             next_seq: 0,
             obj_joins: Vec::new(),
             tags: HashMap::new(),
+            lazy: HashMap::new(),
+            next_heap: 0,
         }
     }
 
     fn function(&mut self, body: &'m HirBody) -> Option<FnCheck> {
         let root = body.root?;
-        let mut st = St { env: HashMap::new(), guard: "true".into(), fields: HashMap::new() };
+        let mut st = St { env: HashMap::new(), guard: "true".into(), fields: HashMap::new(), heap: 0 };
         let mut params = Vec::new();
         for &p in &body.params {
             let local = body.local(p);
@@ -309,6 +320,12 @@ impl<'m> Enc<'m> {
         }
     }
 
+    /// A heap generation no state has had.
+    fn new_heap(&mut self) -> u32 {
+        self.next_heap += 1;
+        self.next_heap
+    }
+
     fn new_obj(&mut self) -> u32 {
         self.next_seq += 1;
         self.next_seq
@@ -384,7 +401,8 @@ impl<'m> Enc<'m> {
             }
         }
         self.obj_joins.clear();
-        Some((v, St { env, guard, fields }))
+        let heap = if sa.heap == sb.heap { sa.heap } else { self.new_heap() };
+        Some((v, St { env, guard, fields, heap }))
     }
 
     fn merge(&mut self, c: &str, a: &V, b: &V) -> V {
@@ -946,7 +964,19 @@ impl<'m> Enc<'m> {
         if let Some(v) = st.fields.get(&key) {
             return v.clone();
         }
-        let v = self.invent(ty, st);
+        // An enum's tag and payload never change (what a sequence in one
+        // holds may).
+        let stable = name.starts_with('$') && !matches!(ty.map(shape), Some(Shape::Seq));
+        let heap = if stable { 0 } else { st.heap };
+        let lazy = (o, name.to_string(), heap);
+        let v = match self.lazy.get(&lazy) {
+            Some(v) => v.clone(),
+            None => {
+                let v = self.invent(ty, st);
+                self.lazy.insert(lazy, v.clone());
+                v
+            }
+        };
         if !matches!(v, V::Opaque) {
             st.fields.insert(key, v.clone());
         }
@@ -1010,11 +1040,13 @@ impl<'m> Enc<'m> {
                     V::Obj(o) => {
                         // Another object may be this one under another name.
                         st.fields.retain(|(_, n), _| n != name);
+                        st.heap = self.new_heap();
                         st.fields.insert((o, name.clone()), v.clone());
                     }
                     _ => {
                         self.exact = false;
                         st.fields.retain(|(_, n), _| n != name);
+                        st.heap = self.new_heap();
                     }
                 }
                 let shown = if flags.contains(crate::hir::HirFlags::ADJUST) && !flags.contains(crate::hir::HirFlags::PREFIX) {
@@ -1075,6 +1107,7 @@ impl<'m> Enc<'m> {
             st.env.insert(k, v);
         }
         st.fields.retain(|_, v| !matches!(v, V::Seq { id: other, .. } if *other != id));
+        st.heap = self.new_heap();
         for v in st.fields.values_mut() {
             if matches!(v, V::Seq { id: other, .. } if *other == id) {
                 *v = new.clone();
@@ -1101,6 +1134,7 @@ impl<'m> Enc<'m> {
     /// Every sequence may have changed.
     fn havoc_seqs(&mut self, st: &mut St) {
         st.fields.retain(|_, v| !matches!(v, V::Seq { .. }));
+        st.heap = self.new_heap();
         let seqs: Vec<(LocalId, u32)> = st
             .env
             .iter()
@@ -1247,9 +1281,10 @@ impl<'m> Enc<'m> {
         // What the callee may write: the sequences it was handed.
         let pure = callee.declared.as_ref().is_some_and(|d| d.names.is_empty());
         if !pure && args.iter().any(|v| matches!(v, V::Seq { .. } | V::Obj(_))) {
-            let mut caller = St { env: caller_env, guard: st.guard.clone(), fields: std::mem::take(&mut st.fields) };
+            let mut caller = St { env: caller_env, guard: st.guard.clone(), fields: std::mem::take(&mut st.fields), heap: st.heap };
             self.havoc_heap(&mut caller);
             st.fields = std::mem::take(&mut caller.fields);
+            st.heap = caller.heap;
             // The parameters name the objects as they are after the call.
             for (&p, v) in callee.params.iter().zip(args) {
                 if let V::Seq { id, .. } = v
