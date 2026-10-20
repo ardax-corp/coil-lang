@@ -309,9 +309,15 @@ builds a fresh one. The sandboxed native table is built once per process.
 - The host natives are the standard table in ABI order, with every native that
   isn't pure (IO, fs, network, env, clocks, threads, streams) replaced by a
   stub that fails the macro (`native_allowed_at_compile_time`).
-- The step budget is `MACRO_STEP_BUDGET` (20M loop back-edges + calls; see
-  `Machine::set_step_budget`). A runaway macro fails with "step budget
-  exhausted".
+- Each call runs within `ComptimeLimits` (`HostGrants::comptime`): a step
+  budget (`--comptime-steps`, default 1B loop back-edges + calls, see
+  `Machine::set_step_budget`) and a cap on live heap bytes (`--comptime-mem`,
+  default 1024 MiB, see `Machine::set_heap_cap`). A runaway macro fails with
+  "it ran too long", a hoarding one with "it used too much memory", each
+  naming the flag to raise. 1B steps is about 15 s of a tight loop on a
+  release build. The cap is checked at GC safepoints after a full collection,
+  so garbage never trips it; outgrowing it panics at the next back-edge or
+  call. Expansion sub-pipelines inherit the parent's limits.
 - A panic fails the macro with its message, so `panic "…"` is the way to
   inspect what a macro received.
 - The VM's thread-local output redirect is restored before the machine drops.

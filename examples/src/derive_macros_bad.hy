@@ -11,6 +11,17 @@ derive Spin(TypeDecl t) -> Code {
     return raw("");
 }
 
+/// Keeps about 32 MiB live: stopped by a small `--comptime-mem`.
+derive Hoard(TypeDecl t) -> Code {
+    let keep: Vec<int> = Vec::new();
+    let i = 0;
+    while i < 4000000 {
+        keep.push(i);
+        i += 1;
+    }
+    return raw("");
+}
+
 /// Reads the environment: host access is denied at compile time.
 derive Peek(TypeDecl t) -> Code {
     let v = var("HOME");
