@@ -1,7 +1,9 @@
-// `==` / `!=` on a generic class deriving `Eq` in a shared generic body
-// whose type parameter is bound by `Ord` (a subclass of `Eq`) builds the
-// class's `Eq` dictionary from the `Ord` one's `Eq` superclass and compares
-// structurally (#1694).
+// `==` / `!=` on a generic class deriving `Eq` in a generic body that runs
+// shared (called through a function value) whose type parameter has no
+// `Eq` bound of its own: a bound whose trait has `Eq` as a superclass
+// gives the class's `Eq` dictionary its `Eq` methods, and with none (`T:
+// Ord`) the parameter's values compare as the VM compares them, as they do
+// inside a `Vec<T>` there; the class compares field by field (#1694).
 use tests::assert;
 
 #[derive(Eq)]
@@ -9,9 +11,28 @@ class C {
     pub x: int,
 }
 
-#[derive(Eq, Ord)]
-class K {
-    pub x: int,
+class Money {
+    pub cents: int,
+    pub note: int,
+}
+
+impl Eq for Money {
+    pub fn eq(Money a, Money b) -> bool {
+        return a.cents == b.cents;
+    }
+    pub fn ne(Money a, Money b) -> bool {
+        return a.cents != b.cents;
+    }
+}
+
+trait Keyed<T: Eq> {
+    fn key(T x) -> int {}
+}
+
+impl Keyed for Money {
+    pub fn key(Money m) -> int {
+        return m.cents;
+    }
 }
 
 #[derive(Eq)]
@@ -39,6 +60,14 @@ fn mixed_same<A: Ord, B: Eq>(Box<A> a, Box<A> b, Box<B> c, Box<B> d) -> bool {
     return a == b && c == d;
 }
 
+fn keyed_same<T: Keyed>(Box<T> a, Box<T> b) -> bool {
+    return a == b;
+}
+
+fn keyed_vec_same<T: Keyed>(Vec<Box<T>> a, Vec<Box<T>> b) -> bool {
+    return a == b;
+}
+
 fn boxes(Vec<int> xs) -> Vec<Box<int>> {
     let out: Vec<Box<int>> = Vec::new();
     for x in xs {
@@ -47,16 +76,21 @@ fn boxes(Vec<int> xs) -> Vec<Box<int>> {
     return out;
 }
 
+fn money(int cents, int note) -> Vec<Box<Money>> {
+    let out: Vec<Box<Money>> = Vec::new();
+    out.push(new Box(new Money(cents, note)));
+    return out;
+}
+
 test("generic class under an Ord bound through a function value") {
     let f = box_same;
     assert!(f(new Box(1), new Box(1)));
     assert!(!f(new Box(1), new Box(2)));
+    assert!(f(new Box(1.5), new Box(1.5)));
+    assert!(!f(new Box(1.5), new Box(2.5)));
     let g = box_differ;
     assert!(!g(new Box(1), new Box(1)));
     assert!(g(new Box(1), new Box(2)));
-    let s = box_same;
-    assert!(s(new Box(new K(1)), new Box(new K(1))));
-    assert!(!s(new Box(new K(1)), new Box(new K(2))));
 }
 
 test("Vec of a generic class under an Ord bound") {
@@ -80,7 +114,11 @@ test("Ord and Eq bounds together") {
     assert!(!f(new Box(1), new Box(1), new Box(new C(2)), new Box(new C(4))));
 }
 
-test("direct calls still compare structurally") {
-    assert!(box_same(new Box(1), new Box(1)));
-    assert!(vec_box_same(boxes([1, 2]), boxes([1, 2])));
+test("a bound whose trait has Eq as a superclass") {
+    let f = keyed_same;
+    assert!(f(new Box(new Money(1, 2)), new Box(new Money(1, 3))));
+    assert!(!f(new Box(new Money(1, 2)), new Box(new Money(2, 2))));
+    let g = keyed_vec_same;
+    assert!(g(money(1, 2), money(1, 3)));
+    assert!(!g(money(1, 2), money(4, 2)));
 }

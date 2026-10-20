@@ -1020,9 +1020,18 @@ impl Compiler {
     /// `Eq` dictionary, loaded from this body's dictionary parameters.
     fn hir_mir_glue_call(&mut self, id: HirId, glue: &super::eq_glue::DictGlue, t: &mut HirMirTables) {
         self.reserve_eq_dict_glue(glue);
-        if !glue.slots.iter().all(|&slot| self.hir_mir_dict_param(slot)) {
+        if !glue.slots().all(|slot| self.hir_mir_dict_param(slot)) {
             return;
         }
+        let mut steps = Vec::new();
+        for &dict in &glue.dicts {
+            if !self.plan_var_eq_dict(&mut steps, dict) {
+                return;
+            }
+        }
+        let Some(dicts) = self.hir_mir_dict_program(&steps) else {
+            return;
+        };
         let Some(target) = self.named_entry_target(&glue.fqn, false) else {
             return;
         };
@@ -1032,7 +1041,7 @@ impl Compiler {
             pair_ret: false,
             coro: false,
             boxed_ret: false,
-            dicts: glue.slots.iter().map(|&slot| crate::mir::HirDictOp::Load(slot)).collect(),
+            dicts,
             boxes: Vec::new(),
             adapt: Vec::new(),
             unbox: None,
@@ -1570,6 +1579,7 @@ impl Compiler {
                 DictStep::Null => Some(HirDictOp::Null),
                 DictStep::Tuple(n) => Some(HirDictOp::Tuple(n)),
                 DictStep::Box(tag) => Some(HirDictOp::Box(tag)),
+                DictStep::Field(n) => Some(HirDictOp::Field(n)),
             })
             .collect()
     }
@@ -1614,7 +1624,7 @@ impl Compiler {
                         stack.push((start, false));
                     }
                 }
-                HirDictOp::Box(_) => {
+                HirDictOp::Box(_) | HirDictOp::Field(_) => {
                     let start = stack.pop().map_or(out.len(), |e| e.0);
                     out.push(op);
                     stack.push((start, false));
@@ -1671,7 +1681,7 @@ impl Compiler {
         match &e.kind {
             HirKind::Bin { .. } | HirKind::Un { .. } => match emit.plan.ops.get(&id.0) {
                 Some(&HirOp::Bound { dict, .. }) => !self.hir_mir_dict_param(dict),
-                Some(HirOp::Glue(glue)) => glue.slots.iter().any(|&slot| !self.hir_mir_dict_param(slot)),
+                Some(HirOp::Glue(glue)) => glue.slots().any(|slot| !self.hir_mir_dict_param(slot)),
                 Some(HirOp::Call { lookup, fqn, class, method }) => {
                     let lookup = lookup.clone();
                     let fqn = self.instance_clone(fqn, std::slice::from_ref(&lookup)).unwrap_or_else(|| fqn.clone());
