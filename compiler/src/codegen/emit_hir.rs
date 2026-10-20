@@ -3549,6 +3549,14 @@ impl Compiler {
         })
     }
 
+    /// A closed type, or a function type over closed ones.
+    fn closed_value_ty(ty: &Ty) -> bool {
+        match crate::typechecking::ty::strip_readonly(ty) {
+            Ty::Fun(param, ret) => Self::closed_value_ty(param) && Self::closed_value_ty(ret),
+            ty => crate::hir::layout::ty_is_closed(ty),
+        }
+    }
+
     /// `call` of inherent method `key` sent to its clone at the call's
     /// ground type arguments ([`Compiler::instance_clone`]) instead of the
     /// shared body `shared` stands for: each argument in its own layout,
@@ -3583,7 +3591,9 @@ impl Compiler {
             {
                 ty = self_ty;
             }
-            if !crate::hir::layout::ty_is_closed(&ty) || matches!(ty, Ty::Fun(..)) {
+            // A closure goes at its ground type: the clone calls it in the
+            // layouts it was built with (`Option<string>`'s niche result).
+            if !Self::closed_value_ty(&ty) {
                 return None;
             }
             arg_tys.push(ty);
@@ -3617,7 +3627,7 @@ impl Compiler {
         // A parameter or result one word, in a layout the thunk converts
         // from the shared one's.
         let one = |ty: &Ty| {
-            crate::hir::layout::ty_is_closed(ty)
+            Self::closed_value_ty(ty)
                 && lower::classify(&self.checker, ty).is_some_and(lower::is_word)
                 && !matches!(crate::hir::layout::of_resolved(&self.checker, ty), crate::hir::layout::Layout::Pair(_))
         };
@@ -3829,12 +3839,17 @@ impl Compiler {
         }
         // A generic class's methods are one shared body (no mono clones):
         // its open signature types keep the body's own layouts.
+        // A generic enum's (`Option<T>`'s) too: called at ground types, its
+        // clone there.
         let shared = lower::is_generic_class(&self.checker, owner)
-            && lower::classify(&self.checker, &recv_ty) == Some(ValueClass::Opaque);
+            && matches!(lower::classify(&self.checker, &recv_ty), Some(ValueClass::Opaque | ValueClass::Enum));
         // A user enum's word is its heap object, passed as a class's is.
         let receiver = match lower::classify(&self.checker, &recv_ty) {
             Some(ValueClass::Object) => true,
-            Some(ValueClass::Enum) => self.hir_boxed_enum_word(&recv_ty) && self.checker.has_impl(owner),
+            // A niche `Option` / `Result` boxes to the shared body's `self`.
+            Some(ValueClass::Enum) => {
+                (self.hir_boxed_enum_word(&recv_ty) || self.hir_niche_word(&recv_ty)) && self.checker.has_impl(owner)
+            }
             _ => false,
         };
         if !shared && !receiver {
@@ -3878,7 +3893,17 @@ impl Compiler {
         if let Some(call) = self.hir_partial(hir, call, &key, &key, self.checker.partial_fill_at(start, end), true)? {
             return Ok(call);
         }
-        let mut abi = self.hir_call_abi(key, &lookup, args.len(), Some(self.value_layout(&recv_ty)), shared || generic)?;
+        // A generic enum's shared body takes `self` as its enum object: a
+        // niche `Option` / `Result` receiver goes boxed.
+        let self_layout = match self.value_layout(&recv_ty) {
+            ValueLayout::NicheOption | ValueLayout::NicheResult | ValueLayout::NicheUnitResult
+                if lower::is_generic_class(&self.checker, owner) =>
+            {
+                ValueLayout::Boxed
+            }
+            layout => layout,
+        };
+        let mut abi = self.hir_call_abi(key, &lookup, args.len(), Some(self_layout), shared || generic)?;
         if generic {
             abi.generic = Some(Box::new(self.hir_generic_abi(hir, call, &lookup, args, 1)?));
         }
@@ -6911,7 +6936,10 @@ impl Compiler {
         if !Self::ty_has_var(&at) {
             return self.hir_class_ty_args_at(ty, fty);
         }
-        self.checker.ty_is_class(&at).then_some(at)
+        // An `Option` / `Result` open in a type variable is a boxed enum
+        // object (`new Box(Option::Some(new Box(e)))`).
+        let open_enum = crate::typechecking::ty::is_option_ty(&at) || crate::typechecking::ty::is_result_ty(&at);
+        (open_enum || self.checker.ty_is_class(&at)).then_some(at)
     }
 
     /// `new C(..)`'s class, instance field count and declared field types,

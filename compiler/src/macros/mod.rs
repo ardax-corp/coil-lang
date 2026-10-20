@@ -46,6 +46,77 @@ pub const ARBITRARY_MODULE: &str = "arbitrary";
 /// Source of the embedded `arbitrary` module.
 pub const ARBITRARY_SOURCE: &str = include_str!("../prelude/arbitrary.hy");
 
+/// Module path of the always-included core prelude (`Option`, `Result`
+/// and their methods). Every program depends on it.
+pub const CORE_MODULE: &str = "core";
+
+/// Source of the embedded `core` module.
+pub const CORE_SOURCE: &str = include_str!("../prelude/core.hy");
+
+/// An enum the core prelude marks with `#[lang(..)]`.
+#[derive(Debug)]
+pub struct LangEnum {
+    /// The lang item (`option`, `result`).
+    pub lang: String,
+    pub name: String,
+    pub type_params: Vec<String>,
+    /// Variants in tag order, each with its payload's type parameter names.
+    pub variants: Vec<(String, Vec<String>)>,
+}
+
+/// The `#[lang]` enums of [`CORE_SOURCE`], parsed once. The checker builds
+/// `Option` and `Result` from these declarations.
+pub fn core_lang_enums() -> &'static [LangEnum] {
+    use parser::ast::EnumVariantPayload;
+    use parser::ast::Expression;
+    static ENUMS: std::sync::OnceLock<Vec<LangEnum>> = std::sync::OnceLock::new();
+    ENUMS.get_or_init(|| {
+        let ast = parser::Pratt::default()
+            .parse(CORE_SOURCE)
+            .expect("core prelude parses");
+        let Expression::Program(items) = ast.1.as_ref() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for item in items {
+            let Expression::EnumDecl { attrs, name, type_params, variants, .. } = item.1.as_ref()
+            else {
+                continue;
+            };
+            let Some(lang) = crate::attrs::lang_item(attrs) else { continue };
+            let variants = variants
+                .iter()
+                .filter_map(|v| match v.1.as_ref() {
+                    Expression::EnumVariant { name, payload, .. } => {
+                        let params = match payload {
+                            EnumVariantPayload::Unit => Vec::new(),
+                            EnumVariantPayload::Tuple(parts) => parts
+                                .iter()
+                                .map(|p| match p.1.as_ref() {
+                                    Expression::Type(t) | Expression::Identifier(t) => t.to_string(),
+                                    _ => panic!("core prelude: `{name}` payloads must be type parameters"),
+                                })
+                                .collect(),
+                            EnumVariantPayload::Record(_) => {
+                                panic!("core prelude: `{name}` must be a tuple variant")
+                            }
+                        };
+                        Some((name.to_string(), params))
+                    }
+                    _ => None,
+                })
+                .collect();
+            out.push(LangEnum {
+                lang: lang.to_string(),
+                name: name.to_string(),
+                type_params: type_params.iter().map(|p| p.name.to_string()).collect(),
+                variants,
+            });
+        }
+        out
+    })
+}
+
 /// Derives [`DERIVE_MODULE`] declares: usable without a `use`.
 pub const PRELUDE_DERIVES: &[&str] = &[
     "Show",
@@ -77,6 +148,11 @@ pub fn arbitrary_module_path() -> PathBuf {
     PathBuf::from("<coil>/arbitrary.hy")
 }
 
+/// Pseudo path of the core prelude module.
+pub fn core_module_path() -> PathBuf {
+    PathBuf::from("<coil>/core.hy")
+}
+
 /// Embedded source for a pseudo path.
 pub fn embedded_source(path: &Path) -> Option<&'static str> {
     if path == macro_module_path() {
@@ -87,6 +163,8 @@ pub fn embedded_source(path: &Path) -> Option<&'static str> {
         Some(TASK_SOURCE)
     } else if path == arbitrary_module_path() {
         Some(ARBITRARY_SOURCE)
+    } else if path == core_module_path() {
+        Some(CORE_SOURCE)
     } else {
         None
     }
@@ -102,6 +180,8 @@ pub fn embedded_module(path: &Path) -> Option<&'static str> {
         Some(TASK_MODULE)
     } else if path == arbitrary_module_path() {
         Some(ARBITRARY_MODULE)
+    } else if path == core_module_path() {
+        Some(CORE_MODULE)
     } else {
         None
     }

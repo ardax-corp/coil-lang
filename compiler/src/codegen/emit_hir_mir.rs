@@ -1150,7 +1150,8 @@ impl Compiler {
                 && let Some(boxed_ret) = self.hir_ret_shape(hir, id, &natural)
                 && args.iter().zip(&call.params).zip(&boxes).zip(&niches).all(|(((&a, &p), b), n)| {
                     // A boxed argument goes from its own word, its enum
-                    // object (a niche word) or its pair boxed.
+                    // object (a niche word) or its pair boxed; a niche
+                    // `Option` / `Result` of a shared body as its enum object.
                     if b.is_some() {
                         self.hir_arg_word(hir, emit, a, p)
                             || n.is_some()
@@ -1158,12 +1159,17 @@ impl Compiler {
                                 && matches!(self.hir_natural(hir, emit, a), Some(Rep::Pair(_)))
                                 && self.hir_arg_passes(hir, emit, a, p))
                     } else {
-                        self.hir_arg_passes(hir, emit, a, p)
+                        self.hir_arg_passes(hir, emit, a, p) || self.hir_niche_arg(hir, emit, a, p).is_some()
                     }
                 })
                 && let Some(target) = target
             {
-                for (&arg, &layout) in args.iter().zip(&niches) {
+                for ((&arg, &param), (b, &layout)) in args.iter().zip(&call.params).zip(boxes.iter().zip(&niches)) {
+                    let layout = layout.or_else(|| {
+                        (b.is_none() && !self.hir_arg_passes(hir, emit, arg, param))
+                            .then(|| self.hir_niche_arg(hir, emit, arg, param))
+                            .flatten()
+                    });
                     if let Some(layout) = layout {
                         t.niche_args.insert(arg.0, layout);
                     }

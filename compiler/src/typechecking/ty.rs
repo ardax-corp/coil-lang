@@ -489,32 +489,14 @@ pub fn peel_constructor_refinement(ty: Ty) -> Ty {
     }
 }
 
-/// Build `Option<T>` as a sum type (`None` | `Some(T)`).
-///
-/// The builtin annotation path uses [`option_app_ty`]. This structural
-/// form is still used by constructor owners and match metadata.
+/// `Option<T>`: the same type as [`option_app_ty`].
 pub fn option_ty(inner: Ty) -> Ty {
-    Ty::Sum {
-        name: common::BUILTIN_OPTION_ENUM.into(),
-        variants: vec![
-            ("None".into(), EnumVariantPayloadTy::Unit),
-            ("Some".into(), EnumVariantPayloadTy::Tuple(vec![inner])),
-        ],
-    }
+    option_app_ty(inner)
 }
 
-/// Build `Result<T, E>` as a sum type (`Ok(T)` | `Err(E)`).
-///
-/// The builtin annotation path uses [`result_app_ty`]. This structural
-/// form is still used by constructor owners and match metadata.
+/// `Result<T, E>`: the same type as [`result_app_ty`].
 pub fn result_ty(ok: Ty, err: Ty) -> Ty {
-    Ty::Sum {
-        name: common::BUILTIN_RESULT_ENUM.into(),
-        variants: vec![
-            ("Ok".into(), EnumVariantPayloadTy::Tuple(vec![ok])),
-            ("Err".into(), EnumVariantPayloadTy::Tuple(vec![err])),
-        ],
-    }
+    result_app_ty(ok, err)
 }
 
 /// Extract `T` from `Option<T>` (Sum or Constructor owner).

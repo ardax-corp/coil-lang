@@ -1726,7 +1726,14 @@ pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
         .is_some_and(|t| {
             let t = apply_ty_prune(checker.subst(), t);
             matches!(strip_readonly(&t), Ty::Fun(..))
-                && fun_words_in(checker, &t, &mut Vec::new(), info.kind == LocalKind::Let && let_init_is_lambda(body, local))
+                // A shared generic body's `T -> Option<U>` parameter returns
+                // the open enum's boxed word, as a lambda bound to a `let`.
+                && fun_words_in(
+                    checker,
+                    &t,
+                    &mut Vec::new(),
+                    info.kind == LocalKind::Param || info.kind == LocalKind::Let && let_init_is_lambda(body, local),
+                )
         })
     {
         return false;

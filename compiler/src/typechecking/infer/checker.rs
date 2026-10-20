@@ -782,44 +782,39 @@ impl Checker {
             BUILTIN_RESULT_VARIANTS,
         };
 
-        // Option { None, Some(T) }
-        {
-            let name = BUILTIN_OPTION_ENUM.to_string();
-            let variant_names: Vec<String> = BUILTIN_OPTION_VARIANTS
+        // Declared in the core prelude (`prelude/core.hy`) as
+        // `#[lang(option)]` / `#[lang(result)]` enums. Natives and layouts
+        // rely on the names and the tag order, so the declarations must match.
+        for decl in crate::macros::core_lang_enums() {
+            let (name, expected) = match decl.lang.as_str() {
+                "option" => (BUILTIN_OPTION_ENUM, BUILTIN_OPTION_VARIANTS),
+                "result" => (BUILTIN_RESULT_ENUM, BUILTIN_RESULT_VARIANTS),
+                other => panic!("core prelude: unknown lang item `{other}`"),
+            };
+            let variant_names: Vec<String> = decl.variants.iter().map(|(v, _)| v.clone()).collect();
+            assert!(
+                decl.name == name && variant_names.iter().eq(expected.iter()),
+                "core prelude: `#[lang({})]` must be `{name}` with variants {expected:?}",
+                decl.lang
+            );
+            let payloads = decl
+                .variants
                 .iter()
-                .map(|s| s.to_string())
+                .map(|(_, params)| {
+                    if params.is_empty() {
+                        EnumVariantPayloadTy::Unit
+                    } else {
+                        EnumVariantPayloadTy::Tuple(params.iter().map(|p| Ty::Con(p.clone())).collect())
+                    }
+                })
                 .collect();
-            let payloads = vec![
-                EnumVariantPayloadTy::Unit,
-                EnumVariantPayloadTy::Tuple(vec![Ty::Con("T".into())]),
-            ];
-            let arities = vec![0, 1];
-            let mut tag_map = BTreeMap::new();
-            for (i, vn) in variant_names.iter().enumerate() {
-                tag_map.insert(vn.clone(), i as u32);
-            }
-            self.enums.insert(name.clone(), variant_names);
-            self.enum_tags.insert(name.clone(), tag_map);
-            self.enum_payloads.insert(name.clone(), payloads);
-            self.enum_arities.insert(name, arities);
-        }
-
-        // Result { Ok(T), Err(E) }
-        {
-            let name = BUILTIN_RESULT_ENUM.to_string();
-            let variant_names: Vec<String> = BUILTIN_RESULT_VARIANTS
+            let arities = decl.variants.iter().map(|(_, params)| params.len()).collect();
+            let tag_map = variant_names
                 .iter()
-                .map(|s| s.to_string())
-                .collect();
-            let payloads = vec![
-                EnumVariantPayloadTy::Tuple(vec![Ty::Con("T".into())]),
-                EnumVariantPayloadTy::Tuple(vec![Ty::Con("E".into())]),
-            ];
-            let arities = vec![1, 1];
-            let mut tag_map = BTreeMap::new();
-            for (i, vn) in variant_names.iter().enumerate() {
-                tag_map.insert(vn.clone(), i as u32);
-            }
+                .enumerate()
+                .map(|(i, vn)| (vn.clone(), i as u32))
+                .collect::<BTreeMap<_, _>>();
+            let name = name.to_string();
             self.enums.insert(name.clone(), variant_names);
             self.enum_tags.insert(name.clone(), tag_map);
             self.enum_payloads.insert(name.clone(), payloads);
@@ -1629,9 +1624,10 @@ impl Checker {
         // Keep FQN class tables / generic ctors so later files can `use`
         // `module::Class` (and `Class<T>`) after the defining module was
         // checked. Bare entry-module keys are dropped like overload sets.
-        self.classes.retain(|k, _| k.contains("::"));
-        self.methods.retain(|k, _| k.contains("::"));
-        self.static_methods.retain(|k, _| k.contains("::"));
+        // The core prelude's `Option` / `Result` methods keep bare keys.
+        self.classes.retain(|k, _| k.contains("::") || Self::is_lang_enum_key(k));
+        self.methods.retain(|k, _| k.contains("::") || Self::is_lang_enum_key(k));
+        self.static_methods.retain(|k, _| k.contains("::") || Self::is_lang_enum_key(k));
         self.const_class_fields.retain(|k, _| k.contains("::"));
         self.generics
             .generic_type_ctors
@@ -15918,6 +15914,18 @@ impl Checker {
                 type_params,
                 variants,
             } => {
+                // The core prelude's `#[lang]` enums are registered with the
+                // builtins (`register_builtin_option_result`).
+                if crate::attrs::lang_item(attrs).is_some() {
+                    if self.current_module != crate::macros::CORE_MODULE {
+                        errors.push(Message::error(
+                            ErrorCode::GenericTypeError,
+                            "`#[lang]` is reserved for the core prelude".to_string(),
+                            node.0.into_range(),
+                        ));
+                    }
+                    return;
+                }
                 let name_str = self.qualify_module_name(name);
                 let previous_generic_ctor = self.register_generic_type_ctor(&name_str, type_params);
                 let pushed = self.push_type_params_for_type_parsing(type_params);
@@ -16964,28 +16972,6 @@ impl Checker {
         enum_name: &str,
         variant_name: &str,
     ) -> (EnumVariantPayloadTy, Ty) {
-        if common::is_builtin_option_enum(enum_name) {
-            let t = Ty::Var(self.counter.fresh());
-            let owner = option_ty(t.clone());
-            let payload = if variant_name == "Some" {
-                EnumVariantPayloadTy::Tuple(vec![t])
-            } else {
-                EnumVariantPayloadTy::Unit
-            };
-            return (payload, owner);
-        }
-        if common::is_builtin_result_enum(enum_name) {
-            let t = Ty::Var(self.counter.fresh());
-            let e = Ty::Var(self.counter.fresh());
-            let owner = result_ty(t.clone(), e.clone());
-            let payload = if variant_name == "Ok" {
-                EnumVariantPayloadTy::Tuple(vec![t])
-            } else {
-                EnumVariantPayloadTy::Tuple(vec![e])
-            };
-            return (payload, owner);
-        }
-
         // User generic enum: freshen schema payloads (`Con(param)`).
         let params = self
             .generics
@@ -17063,12 +17049,6 @@ impl Checker {
 
     /// Build `Enum<α, …>` with a fresh type variable per type param.
     fn fresh_poly_app_ty(&mut self, enum_name: &str) -> Ty {
-        if common::is_builtin_option_enum(enum_name) {
-            return option_app_ty(Ty::Var(self.counter.fresh()));
-        }
-        if common::is_builtin_result_enum(enum_name) {
-            return result_app_ty(Ty::Var(self.counter.fresh()), Ty::Var(self.counter.fresh()));
-        }
         let params = self
             .generics
             .generic_type_ctors
@@ -18544,8 +18524,16 @@ impl Checker {
         if hits.len() == 1 { hits.pop() } else { None }
     }
 
+    /// `Option` / `Result`: the core prelude's lang enums, keyed bare.
+    pub(super) fn is_lang_enum_key(name: &str) -> bool {
+        common::is_builtin_option_enum(name) || common::is_builtin_result_enum(name)
+    }
+
     fn qualify_module_name(&self, name: &str) -> String {
-        if self.current_module.is_empty() {
+        // The core prelude's `Option` / `Result` keep their builtin names.
+        if self.current_module.is_empty()
+            || (self.current_module == crate::macros::CORE_MODULE && Self::is_lang_enum_key(name))
+        {
             name.to_string()
         } else {
             format!("{}::{}", self.current_module, name)

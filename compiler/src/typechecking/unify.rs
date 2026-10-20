@@ -372,6 +372,10 @@ pub fn unify_with(subst: &Subst, t1: &Ty, t2: &Ty) -> Result<Subst, UnifyError> 
         (Ty::Never, Ty::Never) => Ok(subst.clone()),
         (Ty::Never, _) | (_, Ty::Never) => Ok(subst.clone()),
 
+        // Two variables: bind the newer one, so an older variable (a
+        // declared type parameter) stays its class's representative and a
+        // scheme quantified over it still names it.
+        (Ty::Var(a), Ty::Var(b)) if a.0 < b.0 => bind_var(subst, b, Ty::Var(a)),
         // Type variable on either side: bind, with occurs check.
         (Ty::Var(v), t) => bind_var(subst, v, t),
         (t, Ty::Var(v)) => bind_var(subst, v, t),
@@ -606,11 +610,13 @@ mod tests {
     }
 
     #[test]
-    fn unify_two_different_vars_binds_left_to_right() {
-        // v(0) is on the left, so we bind v(0) → v(1). v(1) is unchanged.
+    fn unify_two_different_vars_binds_the_newer_one() {
+        // v(1) is newer, so we bind v(1) → v(0) whichever side it is on.
         let s = unify(&v(0), &v(1)).unwrap();
-        assert_eq!(apply_ty(&s, &v(0)), v(1));
-        assert_eq!(apply_ty(&s, &v(1)), v(1));
+        assert_eq!(apply_ty(&s, &v(0)), v(0));
+        assert_eq!(apply_ty(&s, &v(1)), v(0));
+        let s = unify(&v(1), &v(0)).unwrap();
+        assert_eq!(apply_ty(&s, &v(1)), v(0));
     }
 
     #[test]
@@ -753,9 +759,10 @@ mod tests {
         let s2 = unify_with(&s1, &v(0), &v(1)).unwrap();
         let s3 = unify_with(&s2, &v(1), &int()).unwrap();
 
-        // Single-apply sees the next variable in the chain.
-        assert_eq!(apply_ty(&s3, &v(0)), v(1));
-        assert_eq!(apply_ty(&s3, &v(1)), int());
+        // Single-apply sees the next variable in the chain: the newer
+        // variables point at the oldest, which holds the type.
+        assert_eq!(apply_ty(&s3, &v(0)), int());
+        assert_eq!(apply_ty(&s3, &v(1)), v(0));
         assert_eq!(apply_ty(&s3, &v(2)), v(0));
 
         // Pruned apply sees the fully resolved type.
@@ -770,11 +777,11 @@ mod tests {
         let s1 = unify(&v(0), &v(1)).unwrap();
         let s2 = unify_with(&s1, &v(0), &int()).unwrap();
 
-        // Single-apply leaves the alias intact: v(0) is bound to v(1),
+        // Single-apply leaves the alias intact: v(1) is bound to v(0),
         // which is itself bound to int. To get the final type the caller
-        // has to reapplied (apply_ty_prune).
-        assert_eq!(apply_ty(&s2, &v(0)), v(1));
-        assert_eq!(apply_ty(&s2, &v(1)), int());
+        // has to reapply (apply_ty_prune).
+        assert_eq!(apply_ty(&s2, &v(0)), int());
+        assert_eq!(apply_ty(&s2, &v(1)), v(0));
 
         // Pruned apply follows the alias chain.
         assert_eq!(apply_ty_prune(&s2, &v(0)), int());
