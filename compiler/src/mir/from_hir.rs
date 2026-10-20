@@ -5880,11 +5880,12 @@ impl Lower<'_> {
             };
         }
         let (ok, err) = (self.b.create_block(), self.b.create_block());
-        let payload = match ret {
-            Some(ty) => Some(self.b.ins_match_payload(obj, 0, ty).map_err(mir)?),
-            None => None,
-        };
-        self.b.jump_if_match(obj, 0, payload.into_iter().collect(), ok, err).map_err(mir)?;
+        // `Ok` always carries one word, a void call's too (the VM's
+        // `Ok(0)`): the match takes it, or the taken edge leaves it on the
+        // operand stack, one slot per call (#1638).
+        let word = self.b.ins_match_payload(obj, 0, ret.unwrap_or(MirTy::I64)).map_err(mir)?;
+        let payload = ret.map(|_| word);
+        self.b.jump_if_match(obj, 0, vec![word], ok, err).map_err(mir)?;
         let start = self.order.len();
         self.switch(err);
         self.at_expr(id, |l| {
