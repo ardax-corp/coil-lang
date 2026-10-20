@@ -957,6 +957,9 @@ impl Compiler {
         t: &mut HirMirTables,
     ) {
         let fqn = self.instance_clone(&fqn, std::slice::from_ref(&lookup)).unwrap_or(fqn);
+        if Self::is_eq_glue(&fqn) {
+            self.reserve_eq_glue(&lookup);
+        }
         let raw = self.raw_instance_methods.contains(&fqn);
         let span = hir.expr(id).span;
         let dict = self.hir_mir_once(|this| this.plan_call_instance_dict(&mut Vec::new(), (class, method, &fqn), std::slice::from_ref(&lookup), span.0..span.1));
@@ -982,7 +985,14 @@ impl Compiler {
         };
         if raw {
             // Each operand's MIR word is the boxed-layout word the stack passes.
-            if operands.iter().all(|&o| Self::hir_ty(hir, o).is_some_and(|t| self.value_layout(t) == ValueLayout::Boxed)) {
+            // A glue function (#1629) takes its own type's words, a niche
+            // word as one.
+            let declared = self.structural_thunk_params.get(&fqn);
+            let fits = |i: usize, layout: ValueLayout| {
+                layout == ValueLayout::Boxed
+                    || (Self::is_eq_glue(&fqn) && declared.and_then(|p| p.get(i)).is_some_and(|t| self.value_layout(t) == layout))
+            };
+            if operands.iter().enumerate().all(|(i, &o)| Self::hir_ty(hir, o).is_some_and(|t| fits(i, self.value_layout(t)))) {
                 t.calls.insert(id.0, site);
             }
         } else if arity == 2

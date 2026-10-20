@@ -10304,15 +10304,18 @@ impl Checker {
         let ty = show_lookup_ty(&apply_ty_prune(&self.subst, ty));
         let items: Vec<Ty> = match &ty {
             Ty::Tuple(items) if !items.is_empty() => items.clone(),
-            Ty::Record { fields } if !fields.is_empty() && class == "Show" => fields.iter().map(|(_, t)| t.clone()).collect(),
+            Ty::Record { fields } if !fields.is_empty() && matches!(class, "Show" | "Eq") => fields.iter().map(|(_, t)| t.clone()).collect(),
             Ty::Array { element, .. } => vec![(**element).clone()],
-            // `Option` / `Result` show their payload (#1479).
+            // `Option` / `Result` show their payload (#1479), and compare it
+            // (#1629).
             Ty::App(head, args)
-                if class == "Show"
+                if matches!(class, "Show" | "Eq")
                     && matches!(head.as_ref(), Ty::Con(n) if n == common::BUILTIN_OPTION_ENUM || n == common::BUILTIN_RESULT_ENUM) =>
             {
                 args.clone()
             }
+            // A `Vec` compares its elements (#1629).
+            Ty::App(head, args) if class == "Eq" && matches!(head.as_ref(), Ty::Con(n) if n == common::BUILTIN_VEC_TYPE) => args.clone(),
             _ => return,
         };
         // A tuple with an open item: the instance for its arity, with a

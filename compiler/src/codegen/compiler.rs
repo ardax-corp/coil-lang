@@ -16,6 +16,8 @@ mod emit_call;
 pub(super) mod emit_hir;
 #[path = "emit_match.rs"]
 mod emit_match;
+#[path = "eq_glue.rs"]
+mod eq_glue;
 
 #[cfg(any(test, feature = "dissect"))]
 type FinalizeIlOut = Option<crate::dissect::IlSnapshot>;
@@ -2325,6 +2327,10 @@ impl Compiler {
             name,
             "int" | "float" | "string" | "bool" | "unit" | "Option" | "Result"
         ) {
+            return None;
+        }
+        // A `Vec`'s `Eq` is structural (#1629): `==` compares it as an array.
+        if class == "Eq" && name == common::BUILTIN_VEC_TYPE {
             return None;
         }
         if self.checker.enum_variants(name).is_none() && !self.checker.is_class(name) {
@@ -7627,49 +7633,62 @@ impl Compiler {
         let after = skip.fresh_label(self.bytecode.il_mut());
         skip.emit_jump_to(after, BbJumpKind::Unconditional, self.bytecode.il_mut());
         self.hir_synth_callees.insert("format".to_string(), SynthCallee { format: true, ..SynthCallee::default() });
-        for (fqn, method, ty) in due {
-            let Some(tag) = Self::ty_to_value_tag(&ty) else {
-                continue;
-            };
-            let adapter = Self::dict_adapter_name(&fqn);
-            let boolean = crate::typechecking::ty::boolean();
-            for (name, tag) in [(fqn, None), (adapter, Some(tag as u32))] {
-                match (method.as_str(), &ty) {
-                    ("show", Ty::Array { element, .. }) => {
-                        let element = (**element).clone();
-                        self.emit_builtin_entry(&name, &[(ty.clone(), tag)], string.clone(), None, |b, a| {
-                            crate::hir::synth::array_show(b, a[0], element)
-                        })
+        // A glue body reserves its parts' glue as it is planned (#1629):
+        // emitted in the next round.
+        let mut due = due;
+        while !due.is_empty() {
+            for (fqn, method, ty) in std::mem::take(&mut due) {
+                if let Some(m) = method.strip_prefix("glue_") {
+                    self.emit_eq_glue(&fqn, &ty, m == "ne");
+                    continue;
+                }
+                let Some(tag) = Self::ty_to_value_tag(&ty) else {
+                    continue;
+                };
+                let adapter = Self::dict_adapter_name(&fqn);
+                let boolean = crate::typechecking::ty::boolean();
+                for (name, tag) in [(fqn, None), (adapter, Some(tag as u32))] {
+                    match (method.as_str(), &ty) {
+                        ("show", Ty::Array { element, .. }) => {
+                            let element = (**element).clone();
+                            self.emit_builtin_entry(&name, &[(ty.clone(), tag)], string.clone(), None, |b, a| {
+                                crate::hir::synth::array_show(b, a[0], element)
+                            })
+                        }
+                        ("show", Ty::App(..)) => self.emit_builtin_enum_show(&name, &ty, tag.is_some()),
+                        ("show", _) => self.emit_builtin_entry(&name, &[(ty.clone(), tag)], string.clone(), None, |b, a| {
+                            let fmt = b.str("%v");
+                            b.call("format", vec![fmt, a[0]], string.clone())
+                        }),
+                        // `==` / `!=` as the operator compares the type today.
+                        ("eq" | "ne", _) => {
+                            let sym = if method == "eq" { "==" } else { "!=" };
+                            let params = [(ty.clone(), tag), (ty.clone(), tag)];
+                            self.emit_builtin_entry(&name, &params, boolean.clone(), None, |b, a| {
+                                b.bin(crate::hir::BinOp::Overloaded(sym), a[0], a[1], boolean.clone())
+                            })
+                        }
+                        ("hash", _) => self.emit_structural_hash(&name, &ty, tag),
+                        // The structural length read, as `x.len()` (#1536).
+                        // A shape's (`Vec<a>`, #1542) reads it at any element
+                        // type: its entry takes the shape at `int`.
+                        ("len", _) => self.emit_builtin_entry(&name, &[(Self::structural_shape_at_int(&ty), tag)], int.clone(), None, |b, a| {
+                            b.push(
+                                crate::hir::HirKind::Call {
+                                    callee: crate::hir::Callee::Method { name: "len".to_string() },
+                                    args: vec![a[0]],
+                                },
+                                int.clone(),
+                            )
+                        }),
+                        _ => {}
                     }
-                    ("show", Ty::App(..)) => self.emit_builtin_enum_show(&name, &ty, tag.is_some()),
-                    ("show", _) => self.emit_builtin_entry(&name, &[(ty.clone(), tag)], string.clone(), None, |b, a| {
-                        let fmt = b.str("%v");
-                        b.call("format", vec![fmt, a[0]], string.clone())
-                    }),
-                    // `==` / `!=` as the operator compares the type today.
-                    ("eq" | "ne", _) => {
-                        let sym = if method == "eq" { "==" } else { "!=" };
-                        let params = [(ty.clone(), tag), (ty.clone(), tag)];
-                        self.emit_builtin_entry(&name, &params, boolean.clone(), None, |b, a| {
-                            b.bin(crate::hir::BinOp::Overloaded(sym), a[0], a[1], boolean.clone())
-                        })
-                    }
-                    ("hash", _) => self.emit_structural_hash(&name, &ty, tag),
-                    // The structural length read, as `x.len()` (#1536).
-                    // A shape's (`Vec<a>`, #1542) reads it at any element
-                    // type: its entry takes the shape at `int`.
-                    ("len", _) => self.emit_builtin_entry(&name, &[(Self::structural_shape_at_int(&ty), tag)], int.clone(), None, |b, a| {
-                        b.push(
-                            crate::hir::HirKind::Call {
-                                callee: crate::hir::Callee::Method { name: "len".to_string() },
-                                args: vec![a[0]],
-                            },
-                            int.clone(),
-                        )
-                    }),
-                    _ => {}
                 }
             }
+            due = std::mem::take(&mut self.structural_thunks)
+                .into_iter()
+                .filter(|(fqn, ..)| !self.functions.contains_key(fqn))
+                .collect();
         }
         for (fqn, arity) in tuples {
             self.emit_structural_tuple_show(&fqn, arity);

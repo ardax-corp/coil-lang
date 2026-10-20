@@ -1219,8 +1219,8 @@ impl Generics {
             .filter(|inst| inst.range == (0..0) && inst.defined_module == PRELUDE_OPS_MODULE && inst.context.is_empty())
             .filter_map(|inst| match inst.args.as_slice() {
                 [ty @ (Ty::Tuple(_) | Ty::Record { .. } | Ty::Array { .. })] => Some((inst.class.as_str(), ty)),
-                // `Length` of a `Vec` (#1536).
-                [ty] if inst.class == "Length" && super::ty::vec_element_ty(ty).is_some() => Some((inst.class.as_str(), ty)),
+                // `Length` of a `Vec` (#1536), and its `Eq` (#1629).
+                [ty] if matches!(inst.class.as_str(), "Length" | "Eq") && super::ty::vec_element_ty(ty).is_some() => Some((inst.class.as_str(), ty)),
                 [ty @ Ty::App(head, _)]
                     if matches!(head.as_ref(), Ty::Con(n) if n == common::BUILTIN_OPTION_ENUM || n == common::BUILTIN_RESULT_ENUM) =>
                 {
