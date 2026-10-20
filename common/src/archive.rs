@@ -144,10 +144,12 @@ pub const ARCHIVE_MAJOR: u16 = 4;
 ///      Older archives still load their dense tables.
 /// 41 — `RestoreSnapshot`: rebuild compile-time `const` values from a heap
 ///      snapshot in the constant pool ([`crate::HeapSnapshot`]).
+/// 42 — HostInvoke `black_box` (id 162): the identity, opaque to the
+///      optimizer. Older archives never reference it.
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.
-pub const ARCHIVE_MINOR: u16 = 41;
+pub const ARCHIVE_MINOR: u16 = 42;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -1221,9 +1223,9 @@ mod tests {
     #[test]
     fn archive_version_matches_current_abi() {
         assert_eq!(ARCHIVE_MAJOR, 4);
-        assert_eq!(ARCHIVE_MINOR, 41);
-        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 41));
-        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.41");
+        assert_eq!(ARCHIVE_MINOR, 42);
+        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 42));
+        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.42");
     }
 
     #[test]

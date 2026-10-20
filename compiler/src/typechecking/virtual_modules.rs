@@ -97,6 +97,9 @@ pub enum PreludeFn {
     Char,
     /// First code unit of a `string` as `Result<byte, string>`.
     Ord,
+    /// The identity, through the `black_box` host native the optimizer
+    /// cannot see through.
+    BlackBox,
     Sin,
     Cos,
     Tan,
@@ -128,6 +131,7 @@ impl PreludeFn {
             Self::Diff => "diff",
             Self::Char => "char",
             Self::Ord => "ord",
+            Self::BlackBox => "black_box",
             Self::Sin => "sin",
             Self::Cos => "cos",
             Self::Tan => "tan",
@@ -159,6 +163,7 @@ impl PreludeFn {
             "diff" => Some(Self::Diff),
             "char" => Some(Self::Char),
             "ord" => Some(Self::Ord),
+            "black_box" => Some(Self::BlackBox),
             "sin" => Some(Self::Sin),
             "cos" => Some(Self::Cos),
             "tan" => Some(Self::Tan),
@@ -751,6 +756,9 @@ impl VirtualModules {
                 },
                 BuiltinExport::Fn {
                     kind: PreludeFn::Char,
+                },
+                BuiltinExport::Fn {
+                    kind: PreludeFn::BlackBox,
                 },
             ],
         );

@@ -1198,6 +1198,13 @@ pub const HOST_NATIVES: &[HostNative] = &[
         effects: TEXT,
         caps: NO_CAP,
     },
+    HostNative {
+        name: "black_box",
+        arity: 1,
+        id: 162,
+        effects: HOST,
+        caps: NO_CAP,
+    },
 ];
 
 /// First packed-LA HostInvoke (`packed_dot`).
@@ -1273,6 +1280,11 @@ pub const FFI_READ_INTS_NATIVE: &str = "ffi_read_ints";
 /// (coil-lang#1253, archive minor 39).
 pub const VALUES_EQ_SHAPED_ID: u16 = 161;
 pub const VALUES_EQ_SHAPED_NATIVE: &str = "values_eq_shaped";
+/// `black_box(x)` (archive minor 42): returns `x`, which the optimizer
+/// cannot see through. Its `HOST` effect keeps it from being folded at
+/// compile time, hoisted or removed.
+pub const BLACK_BOX_ID: u16 = 162;
+pub const BLACK_BOX_NATIVE: &str = "black_box";
 
 pub const STREAM_ATTACH_NATIVE: &str = "stream_attach";
 pub const STREAM_PARK_NATIVE: &str = "stream_park";
@@ -1320,7 +1332,8 @@ pub const GC_COLLECT_NATIVE: &str = "gc_collect";
 pub const GC_REGISTER_FINALIZER_NATIVE: &str = "gc_register_finalizer";
 
 const _: () = {
-    assert!(HOST_NATIVES.len() == 162);
+    assert!(HOST_NATIVES.len() == 163);
+    assert!(HOST_NATIVES[BLACK_BOX_ID as usize].id == BLACK_BOX_ID);
     assert!(HOST_NATIVES[FFI_READ_INTS_ID as usize].id == FFI_READ_INTS_ID);
     assert!(HOST_NATIVES[VALUES_EQ_SHAPED_ID as usize].id == VALUES_EQ_SHAPED_ID);
     assert!(HOST_NATIVES[TASK_COND_NEW_ID as usize].id == TASK_COND_NEW_ID);

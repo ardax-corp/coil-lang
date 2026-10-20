@@ -146,6 +146,8 @@ pub fn host_arg_ok(id: u16, expected: MirTy, actual: MirTy) -> bool {
         // A packed kernel's scalar operand (`10.0 - a`) is its word, as an
         // embedder native's `float` argument or result is.
         || ((packed_la(id) || embedder_native(id)) && expected == MirTy::I64 && actual == MirTy::F64)
+        // `black_box` hands back whatever word it is given.
+        || (id == common::BLACK_BOX_ID && expected == MirTy::I64 && actual == MirTy::F64)
 }
 
 /// A packed linear-algebra kernel: its operands are heap arrays or tuples

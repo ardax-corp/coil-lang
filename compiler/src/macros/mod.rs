@@ -434,7 +434,7 @@ pub fn default_host() -> Option<std::sync::Arc<dyn MacroHost>> {
 pub fn native_allowed_at_compile_time(name: &str) -> bool {
     matches!(
         name,
-        "from_bytes" | "to_bytes" | "ord" | "char" | "hash_string" | "result_unit_probe" | "simd_axpy_reduce"
+        "from_bytes" | "to_bytes" | "ord" | "char" | "hash_string" | "result_unit_probe" | "simd_axpy_reduce" | "black_box"
     ) || ["math_", "vec_", "packed_", "gc_", "string_"]
         .iter()
         .any(|p| name.starts_with(p))

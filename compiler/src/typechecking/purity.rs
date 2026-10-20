@@ -535,6 +535,7 @@ fn export_effects(export: &BuiltinExport) -> Option<EffectFlags> {
         BuiltinExport::FfiFn { .. } => {
             EffectFlags::from_bits(EffectFlags::FFI | EffectFlags::RESIZE)
         }
+        BuiltinExport::Fn { kind: crate::typechecking::PreludeFn::BlackBox } => row(common::BLACK_BOX_NATIVE),
         BuiltinExport::Fn { kind } => match kind.math_native_name() {
             Some(registry) => row(registry),
             // `ord`, `char`, matrix helpers: compiled inline or

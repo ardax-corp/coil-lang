@@ -5377,6 +5377,7 @@ impl Checker {
                     }
                     PreludeFn::Diff => self.infer_matrix_cells_call(&reordered, id, range, "diff"),
                     PreludeFn::Ord => self.infer_ord(&reordered, range),
+                    PreludeFn::BlackBox => self.infer_black_box(&reordered, range),
                     PreludeFn::Char => self.infer_char(&reordered, range),
                     PreludeFn::Sin
                     | PreludeFn::Cos
@@ -5409,6 +5410,7 @@ impl Checker {
                 }
                 PreludeFn::Diff => self.infer_matrix_cells_call(arg_slice, id, range, "diff"),
                 PreludeFn::Ord => self.infer_ord(arg_slice, range),
+                PreludeFn::BlackBox => self.infer_black_box(arg_slice, range),
                 PreludeFn::Char => self.infer_char(arg_slice, range),
                 PreludeFn::Sin
                 | PreludeFn::Cos
@@ -7732,6 +7734,22 @@ impl Checker {
     }
 
     /// `ord(string) -> Result<byte, string>`.
+    /// `black_box(x) -> typeof x`.
+    fn infer_black_box(&mut self, args: &[Output], range: Range<usize>) -> Ty {
+        if args.len() != 1 {
+            for arg in args {
+                let _ = self.infer(arg);
+            }
+            return self.error_with_help(
+                ErrorCode::ConstructorArity,
+                format!("black_box expects 1 argument, got {}", args.len()),
+                range,
+                Some("use `black_box(x)` with the one value to hide from the optimizer".to_string()),
+            );
+        }
+        self.infer(&args[0])
+    }
+
     fn infer_ord(&mut self, args: &[Output], range: Range<usize>) -> Ty {
         use crate::typechecking::ty::byte;
         if args.len() != 1 {
