@@ -2547,6 +2547,30 @@
     }
 
     #[test]
+    fn readonly_parameter_type_parses() {
+        let src = "fn f(readonly Point p, Vec<readonly Point> ps) -> readonly Point { return readonly p; }";
+        let ast = Pratt::default().parse(src).expect("parse");
+        let Expression::Program(items) = ast.1.as_ref() else {
+            panic!("expected program");
+        };
+        let Expression::Function { args, .. } = items[0].1.as_ref() else {
+            panic!("expected function");
+        };
+        let Expression::Fragment(params) = args.1.as_ref() else {
+            panic!("expected params");
+        };
+        let Expression::Argument { name: "p", ty: Some(ty), .. } = params[0].1.as_ref() else {
+            panic!("expected argument `p`, got {:?}", params[0].1);
+        };
+        assert!(
+            matches!(ty.1.as_ref(), Expression::Readonly(inner) if matches!(inner.1.as_ref(), Expression::Type("Point"))),
+            "expected Readonly(Point), got {:?}",
+            ty.1
+        );
+        assert_eq!(format!("{}", items[0].1).matches("readonly").count(), 4);
+    }
+
+    #[test]
     fn parse_static_singleton_example_file() {
         let src = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),

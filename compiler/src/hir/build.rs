@@ -1474,7 +1474,9 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             .and_then(|n| self.checker.existential_pack_at(n))
             .or_else(|| self.checker.existential_pack_span(e.span.0, e.span.1))?;
         let subst = self.checker.subst();
-        (crate::typechecking::subst::apply_ty_prune(subst, e.ty.as_ref()?) == crate::typechecking::subst::apply_ty_prune(subst, &pack.value_ty)).then(|| pack.class.clone())
+        // `readonly` has no runtime form: a `readonly P` packs as a `P` (#1558).
+        let ty = crate::typechecking::subst::apply_ty_prune(subst, e.ty.as_ref()?);
+        (strip_readonly(&ty) == &crate::typechecking::subst::apply_ty_prune(subst, &pack.value_ty)).then(|| pack.class.clone())
     }
 
     fn local_ty(&self, node: &Output<'_>, _name: &str) -> Option<Ty> {

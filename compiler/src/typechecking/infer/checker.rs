@@ -3505,7 +3505,7 @@ impl Checker {
 
             Expression::Readonly(inner) => {
                 let inner_ty = self.infer(inner);
-                readonly_ty(apply_ty_prune(&self.subst, &inner_ty))
+                self.readonly_qualify(inner_ty)
             }
             Expression::QualifiedAccess { owner, member } => {
                 let fqn = self.class_member_fqn(owner, member);
@@ -4728,6 +4728,19 @@ impl Checker {
         {
             return self.reject_fixed_array_grow(method, range);
         }
+        // `push`, `pop`, … change a `Vec` through any name, so they are
+        // writes through a `readonly Vec<T>` (#1558).
+        if matches!(resolved, Ty::Readonly(_))
+            && vec_element_ty(&resolved).is_some()
+            && matches!(*method, "push" | "pop" | "insert" | "remove" | "clear" | "reserve")
+        {
+            let _ = self.error_with_help(
+                ErrorCode::InvalidAssignment,
+                format!("Cannot `{method}` on a `{}`", self.diag_ty(&resolved)),
+                range.clone(),
+                Some("a `readonly` Vec cannot change; keep and use the mutable value instead".to_string()),
+            );
+        }
         // The method form runs through a shared thunk with no call site of
         // its own, so it is still gated where it is written.
         if *method == "attach"
@@ -4848,11 +4861,13 @@ impl Checker {
             );
         }
 
-        if let Ty::Existential { class } = &resolved
+        // A `readonly` trait object dispatches like the plain one; its
+        // methods may still mutate `self` (#1558).
+        if let Ty::Existential { class } = strip_readonly(&resolved)
             && let Some((owner, method_slot, scheme)) =
                 self.existential_method_candidate(class, method)
         {
-            let mut arg_tys = vec![recv_ty];
+            let mut arg_tys = vec![self.method_self_arg(&recv_ty)];
             if let Some(a) = args {
                 for arg in a {
                     arg_tys.push(self.infer(arg));
@@ -5666,7 +5681,7 @@ impl Checker {
             .map(|arg| self.infer_call_arg(arg))
             .collect();
         if let Some(Ty::Existential { class }) =
-            arg_tys.first().map(|ty| apply_ty_prune(&self.subst, ty))
+            arg_tys.first().map(|ty| strip_readonly(&apply_ty_prune(&self.subst, ty)).clone())
             && let Some((owner, method_slot, scheme)) =
                 self.existential_method_candidate(&class, &ident)
         {
@@ -9015,6 +9030,30 @@ impl Checker {
                 range.clone(),
                 Some("a `readonly` value converts only to a `readonly` type, so it cannot be mutated through the new name; keep and pass the mutable value instead".to_string()),
             );
+        } else if self.gains_readonly_element(&expected, &actual) {
+            let _ = self.error_with_help(
+                ErrorCode::InvalidAssignment,
+                format!(
+                    "Cannot use a `{}` where `{}` is expected ({context})",
+                    self.diag_ty(&actual),
+                    self.diag_ty(&expected)
+                ),
+                range.clone(),
+                Some(format!(
+                    "the new name could store a `readonly` element that the old one then mutates; a parameter that only reads can take a `readonly {}`",
+                    self.diag_ty(&actual)
+                )),
+            );
+        }
+        // A trait object seen read-only: pack the value as the plain
+        // existential, then qualify it (#1558).
+        if let Ty::Readonly(inner) = &expected
+            && matches!(inner.as_ref(), Ty::Existential { .. })
+        {
+            let inner = inner.as_ref().clone();
+            let actual = strip_readonly(&actual).clone();
+            let packed = self.coerce_or_unify(&inner, &actual, expr, range, context);
+            return readonly_ty(packed);
         }
         // Integer literals may coerce to `byte` when in range 0..=255.
         if Self::is_byte_ty(&expected)
@@ -11345,6 +11384,10 @@ impl Checker {
                     tys.push(self.parse_type_name(item));
                 }
                 crate::typechecking::ty::tuple(tys)
+            }
+            Expression::Readonly(inner) => {
+                let inner = self.parse_type_name(inner);
+                self.readonly_qualify(inner)
             }
             _ => Ty::Var(self.counter.fresh()),
         }
@@ -18669,7 +18712,7 @@ impl Checker {
     /// need `readonly` (#1552).
     fn has_mutable_interior(&self, ty: &Ty) -> bool {
         match ty {
-            Ty::Array { .. } | Ty::Record { .. } => true,
+            Ty::Array { .. } | Ty::Record { .. } | Ty::Existential { .. } => true,
             Ty::Con(name) => self.classes.contains_key(name),
             Ty::App(head, _) => {
                 vec_element_ty(ty).is_some()
@@ -18685,6 +18728,49 @@ impl Checker {
     fn readonly_view(&self, ty: Ty) -> Ty {
         let ty = apply_ty_prune(&self.subst, &ty);
         if self.has_mutable_interior(&ty) { readonly_ty(ty) } else { ty }
+    }
+
+    /// `readonly T`, written as a type or as `readonly e`, normalised:
+    /// `readonly readonly T` is `readonly T`, a type with no mutable
+    /// interior (`int`, `string`, a function) is itself, and a tuple is
+    /// readonly element-wise (#1558).
+    fn readonly_qualify(&self, ty: Ty) -> Ty {
+        match apply_ty_prune(&self.subst, &ty) {
+            ty @ Ty::Readonly(_) => ty,
+            Ty::Tuple(items) => Ty::Tuple(items.into_iter().map(|t| self.readonly_qualify(t)).collect()),
+            ty @ Ty::Var(_) => readonly_ty(ty),
+            ty if self.has_mutable_interior(&ty) => readonly_ty(ty),
+            ty => ty,
+        }
+    }
+
+    /// Whether `expected` asks for a `readonly` element of a mutable
+    /// container where `actual` has a plain one: `Vec<P>` as
+    /// `Vec<readonly P>`. Container arguments are invariant, since the
+    /// new name could store a readonly `P` the old one then mutates. Under
+    /// an outer `readonly` they are covariant (#1558).
+    fn gains_readonly_element(&self, expected: &Ty, actual: &Ty) -> bool {
+        let differs = |e: &Ty, a: &Ty| match (e, a) {
+            (Ty::Readonly(inner), a) if !matches!(a, Ty::Readonly(_) | Ty::Var(_)) => {
+                self.has_mutable_interior(inner) || matches!(**inner, Ty::Var(_))
+            }
+            _ => self.gains_readonly_element(e, a),
+        };
+        match (expected, actual) {
+            (Ty::Readonly(_), _) => false,
+            (Ty::App(_, exp), Ty::App(_, act)) if exp.len() == act.len() => {
+                if self.has_mutable_interior(expected) {
+                    exp.iter().zip(act).any(|(e, a)| differs(e, a))
+                } else {
+                    exp.iter().zip(act).any(|(e, a)| self.gains_readonly_element(e, a))
+                }
+            }
+            (Ty::Array { element: exp, .. }, Ty::Array { element: act, .. }) => differs(exp, act),
+            (Ty::Tuple(exp), Ty::Tuple(act)) if exp.len() == act.len() => {
+                exp.iter().zip(act).any(|(e, a)| self.gains_readonly_element(e, a))
+            }
+            _ => false,
+        }
     }
 
     /// Whether using `actual` where `expected` is wanted would drop a
@@ -19624,7 +19710,8 @@ impl Checker {
         self.qualified_trait_calls_by_span.insert((range.start, range.end), callee);
         let flat_args = self.flatten_spread_call_args(args);
         let arg_tys: Vec<Ty> = flat_args.iter().map(|arg| self.infer_call_arg(arg)).collect();
-        if let Some(Ty::Existential { class: object }) = arg_tys.first().map(|ty| apply_ty_prune(&self.subst, ty))
+        if let Some(Ty::Existential { class: object }) =
+            arg_tys.first().map(|ty| strip_readonly(&apply_ty_prune(&self.subst, ty)).clone())
             && let Some((owner, method_slot, scheme)) = self.existential_method_candidate(&object, method)
             && owner == class
         {

@@ -413,7 +413,14 @@ impl<'pratt> Pratt<'pratt> {
                 .map_with(|(params, ret), e| {
                     (e.span(), Box::new(Expression::TypeFnSig { params, ret }))
                 });
-            choice((fn_sig_type, base_atom))
+            // `readonly T` qualifies the atom it prefixes, so
+            // `readonly P -> int` is `(readonly P) -> int`.
+            let readonly_type = recursive(|readonly_type| {
+                keyword!("readonly")
+                    .ignore_then(choice((readonly_type, fn_sig_type.clone(), base_atom.clone())))
+                    .map_with(|inner, e| (e.span(), Box::new(Expression::Readonly(inner))))
+            });
+            choice((readonly_type, fn_sig_type, base_atom))
                 .then(op!("->").ignore_then(type_ann.clone()).or_not())
                 .map_with(|(lhs, rhs), e| match rhs {
                     Some(rhs) => (e.span(), Box::new(Expression::TypeFun(lhs, rhs))),
@@ -554,8 +561,8 @@ impl<'pratt> Pratt<'pratt> {
                 // `self.call(...)` (which expects a leading
                 // ident) AND before `self.ident()`.
                 self.tuple_atom(expr.clone()),
-                // `[a, b, c]` — array atom (optionally `readonly […]`).
-                self.readonly_array_atom(expr.clone()),
+                // `[a, b, c]` — array atom.
+                self.array_atom(expr.clone()),
                 self.dict_atom(expr.clone()),
                 // `EnumName::Variant(args)` — qualified constructor
                 // application. MUST be tried before `qualified_access`
@@ -566,7 +573,6 @@ impl<'pratt> Pratt<'pratt> {
                 self.macro_call(expr.clone()),
                 self.construct(expr.clone()),
                 self.qualified_access(),
-                self.readonly_instantiate(expr.clone()),
                 self.new_readonly_removed(),
                 self.instantiate(expr.clone()),
                 // float comes before int so that `1.0` is parsed as a
@@ -762,9 +768,11 @@ impl<'pratt> Pratt<'pratt> {
                         )
                     },
                 ),
+                // `readonly e` (`'r'`): `e`'s value seen read-only, for any
+                // `e` (`readonly p.inner`, `readonly new P(1)`, `readonly [1]`).
                 prefix(
                     Precedence::Negate as u16,
-                    choice((op!('-'), op!('~'), op!('+'), op!('!'))),
+                    choice((op!('-'), op!('~'), op!('+'), op!('!'), keyword!("readonly").to('r'))),
                     |c, rhs, e| {
                         (
                             e.span(),
@@ -773,6 +781,7 @@ impl<'pratt> Pratt<'pratt> {
                                 '+' => Expression::Positive(rhs),
                                 '~' => Expression::Not(rhs),
                                 '!' => Expression::LogicalNot(rhs),
+                                'r' => Expression::Readonly(rhs),
                                 _ => unreachable!("No other prefix operators"),
                             }),
                         )
@@ -2704,24 +2713,6 @@ impl<'pratt> Pratt<'pratt> {
             .labelled("qualified access")
     }
 
-    /// `readonly [a, b, …]` array literal.
-    fn readonly_array_atom<
-        T: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
-            + Clone
-            + 'pratt,
-    >(
-        &self,
-        expr: T,
-    ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
-    {
-        choice((
-            keyword!("readonly")
-                .ignore_then(self.array_atom(expr.clone()))
-                .map_with(|inner, e| (e.span(), Box::new(Expression::Readonly(inner)))),
-            self.array_atom(expr),
-        ))
-    }
-
     /// Reject postfix `new readonly Class(...)`.
     fn new_readonly_removed(
         &self,
@@ -2734,32 +2725,6 @@ impl<'pratt> Pratt<'pratt> {
                     span,
                     "`readonly` is a prefix: write `readonly new Class(...)`",
                 ))
-            })
-    }
-
-    /// `readonly new Class(args)`.
-    fn readonly_instantiate<
-        T: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
-            + Clone
-            + 'pratt,
-    >(
-        &self,
-        expr: T,
-    ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
-    {
-        keyword!("readonly")
-            .ignore_then(keyword!("new"))
-            .ignore_then(self.item_path())
-            .then(self.params(expr))
-            .map_with(|(class, args), e| {
-                let class_output = (e.span(), Box::new(Expression::Identifier(class)));
-                (
-                    e.span(),
-                    Box::new(Expression::Readonly((
-                        e.span(),
-                        Box::new(Expression::Instantiate(class_output, args)),
-                    ))),
-                )
             })
     }
 

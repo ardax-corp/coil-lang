@@ -46,7 +46,7 @@ Pre-installed: `poop`, `valgrind`, `heaptrack`, `hyperfine`, `lua` (`.cursor/Doc
 ## Learned User Preferences
 
 - Aim for a regular language: one spelling per construct; do not add case-specific optimization workarounds that only serve a bench.
-- Dual syntax: drop C-style `for (init; cond; step)` (keep `while` and `for x in`); length is `x.len()` only (the free `len(x)` was removed; `Length` is the trait a user type implements for it); canonical `readonly` is before the value (`readonly new C(...)`, `readonly [...]`).
+- Dual syntax: drop C-style `for (init; cond; step)` (keep `while` and `for x in`); length is `x.len()` only (the free `len(x)` was removed; `Length` is the trait a user type implements for it); `readonly` is a prefix on a value (`readonly e` for any expression, `readonly new C(...)`) and on a type (`readonly T` in parameters, returns, lets, fields and generic arguments).
 - Linear tickets: one PR per issue, base on `main`, babysit until CI is green and merged before starting the next.
 
 ## Learned Workspace Facts

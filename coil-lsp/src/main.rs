@@ -5100,6 +5100,26 @@ fn fib(
     }
 
     #[test]
+    fn hover_shows_readonly_types() {
+        let document = Document {
+            text: "class Point {\n    pub x: int,\n}\n\nfn total(readonly Point p) -> readonly Point {\n    let q = p;\n    return q;\n}\n".into(),
+            version: 1,
+            last_good: None,
+        };
+        let text = |line, character| {
+            let hover = hover(&document, Position { line, character }).expect("hover");
+            let HoverContents::Markup(MarkupContent { value, .. }) = hover.contents else {
+                panic!("expected markup hover");
+            };
+            value
+        };
+        let total = text(4, 4);
+        assert!(total.contains("readonly Point -> readonly Point"), "{total}");
+        let p = text(5, 12);
+        assert!(p.contains("readonly Point"), "{p}");
+    }
+
+    #[test]
     fn parameter_hover_includes_parameter_docs() {
         let document = Document {
             text: "\
