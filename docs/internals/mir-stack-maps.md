@@ -144,6 +144,36 @@ and relocate mapped slots on collect.
   `gc_shrink` 435–485 → 443–477 ms (6 runs each), within the run-to-run
   spread.
   `tests/memory/gc_weak_some_in_loop.hy`.
+- **Copies and call arguments drop the value too** (#1625). A `match` or
+  `if let` arm's binding of an `Option::Some`'s object is a cast of the
+  scrutinee, which the dense tier gives a register of its own to pass to a
+  call; a call whose arguments are not in consecutive registers also moves
+  them into the gather window (`gather_base`), which no value owns. After
+  the scrutinee was rebound both still rooted the object until rewritten.
+  `source_clears` now also zeroes, beside each `ClearWord`, the cleared
+  value's dead copies (`CopySinks`: casts, match payloads, and the
+  elements of an enum or tuple it makes, transitively, not past a live
+  value) and the gather registers a dense push copied the value or one of
+  those copies into (`Gathers`; the LIR tier pushes from the value's own
+  register and gathers nothing). The rewrite scan counts a push's gather
+  writes as coming before the push, and `prune_clears` counts them as the
+  block's writes, so a gather register the next push rewrites before
+  anything can collect is not zeroed (a loop that rebinds a string it
+  formats, `examples/variadic.hy`, keeps its loop as it was). No per-call
+  zero is added: the zeros sit only at the clears that already exist.
+  Flagship `.hyc` and all 223 `examples/*.hy` and `examples/perf/*.hy`
+  archives are byte-identical to #1635. On a 3M-trip hit loop of the
+  pattern itself (`junk = Some(new Node(i, None))`, an arm passing `n` to a
+  call, `junk = None`), the loop gains one zero (two with a three-argument
+  call that gathers); medians of 30 interleaved runs on a loaded 4-core
+  host: 521 → 539 ms (one zero), 573 → 636 ms (two zeros), 437 → 455 and
+  436 → 476 ms with the helper inlined. The zero is `CONST 0; STORE`, two
+  dispatches; a dense `DenseConst r, 0` would be one, for every dense
+  clear. Not covered: a temporary passed straight to a call
+  (`weak(new Node(..))`) has no clear at all, and a tuple a dense
+  `DenseIndex` read stays pinned in `frame_pins` (rooting its elements)
+  after its register is zeroed.
+  `tests/memory/gc_weak_match_arg.hy`.
 - **Collection budget.** After a sweep the next threshold is
   `live × 4` when more than half the heap survived (a growing live set) and
   `live × 2` otherwise, never below the initial 1 MB budget.
