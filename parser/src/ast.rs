@@ -470,6 +470,10 @@ pub enum Expression<'expr> {
         name: &'expr str,
         ty: Option<Output<'expr>>,
         init: Output<'expr>,
+        /// A module `const` whose initializer does not fold, made a slot
+        /// set once at startup (`const_fold::lift_startup_consts`, #1558);
+        /// `false` when written `static`.
+        lifted: bool,
     },
 
     /// Dynamic library load: `dload(path)`.
@@ -1185,12 +1189,15 @@ impl<'a> Display for Expression<'a> {
                 name,
                 ty,
                 init,
+                lifted,
             } => {
                 let ty_str = ty
                     .as_ref()
                     .map(|t| format!(": {}", t.1))
                     .unwrap_or_default();
-                let kw = if *is_const {
+                let kw = if *lifted {
+                    "const"
+                } else if *is_const {
                     "static const"
                 } else {
                     "static let"

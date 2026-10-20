@@ -2656,7 +2656,8 @@ impl<'pratt> Pratt<'pratt> {
             .labelled("class field (`name: Type`)")
     }
 
-    /// Top-level `static let` / `static const` singleton binding.
+    /// Top-level `static let` / `static const` singleton binding
+    /// (`static const` is deprecated: write `const`, #1558).
     fn static_decl(
         &self,
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
@@ -2680,6 +2681,7 @@ impl<'pratt> Pratt<'pratt> {
                         name,
                         ty,
                         init,
+                        lifted: false,
                     }),
                 )
             })
