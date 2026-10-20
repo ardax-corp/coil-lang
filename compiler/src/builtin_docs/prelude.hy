@@ -336,8 +336,9 @@ impl RangeInclusive<T> {
 /// Implementations define the associated type `Item` (the element type) and
 /// `next`, which returns `Some(item)` for each value and `None` when the sequence is
 /// exhausted. `for x in e` first converts `e` with `IntoIterator`, then calls
-/// `next` until it returns `None`. Arrays, `Vec`, homogeneous tuples and
-/// records, coroutines and numeric ranges are iterable without an `impl`.
+/// `next` until it returns `None`. Arrays, `Vec`, homogeneous tuples,
+/// coroutines and numeric ranges are iterable without an `impl`; a record
+/// is not iterable (use `collections::map::HashMap` for keys to iterate).
 ///
 /// # Examples
 ///

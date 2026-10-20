@@ -1,9 +1,9 @@
 // for patterns, if let, while let (COI-371).
 use tests::assert;
 
-test("for tuple pattern on dict") {
+test("for tuple pattern on pairs") {
     let sum = 0;
-    let d = { a: 1, b: 2, c: 3 };
+    let d = [("a", 1), ("b", 2), ("c", 3)];
     for (k, v) in d {
         sum = sum + v;
     }

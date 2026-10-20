@@ -2077,12 +2077,60 @@ impl Compiler {
         if self.instance_call_takes_dict(&src.class, &src.method, &req.src) {
             self.plan_instance_dict(&mut dict, &src.class, &req.lookup);
         }
-        let layouts = params.iter().map(|t| self.value_layout(t)).collect();
-        let calls = HashMap::from([(req.src.clone(), (layouts, self.value_layout(&ret)))]);
-        let mut b = Synth::new(&self.checker, &req.name, ret.clone());
-        let locals: Vec<_> = params.iter().enumerate().map(|(i, t)| b.local(&format!("arg{i}"), t.clone(), LocalKind::Param)).collect();
-        let args = locals.into_iter().map(|l| b.read(l)).collect();
-        let call = b.call(&req.src, args, ret);
+        let layouts: Vec<_> = params.iter().map(|t| self.value_layout(t)).collect();
+        let ret_layout = self.value_layout(&ret);
+        // The clone's own types, as its callers (direct calls, its `$dict`
+        // adapter) pass and take its words: an `Option` / `Result` at the
+        // instance's types may be a niche word where the shared method
+        // takes it open (#1605).
+        let (own, own_ret) = match self.checker.typeclass_method_scheme(&src.class, &src.method) {
+            Some(scheme) if scheme.bounds.len() == req.lookup.len() => {
+                let mut inst = crate::typechecking::subst::Subst::empty();
+                for (bound, ty) in scheme.bounds.iter().zip(&req.lookup) {
+                    inst.insert(*bound, ty.clone());
+                }
+                let (open, open_ret) = Self::fun_param_and_ret_tys(&scheme.ty);
+                let own: Vec<_> = open.iter().map(|t| crate::typechecking::subst::apply_ty(&inst, t)).collect();
+                (own, crate::typechecking::subst::apply_ty(&inst, &open_ret))
+            }
+            _ => (params.clone(), ret.clone()),
+        };
+        // Converted only between an `Option` / `Result`'s niche word and
+        // its open enum object; any other word moves as it is.
+        let relayout = |c: &Self, own: &Ty, shared: &Ty, shared_layout: ValueLayout| {
+            shared_layout == ValueLayout::Boxed
+                && Self::ty_to_value_tag(shared) == Some(ValueTag::Instance)
+                && matches!(
+                    c.value_layout(own),
+                    ValueLayout::NicheOption | ValueLayout::NicheResult | ValueLayout::NicheUnitResult
+                )
+        };
+        let convert: Vec<bool> = params
+            .iter()
+            .zip(&layouts)
+            .enumerate()
+            .map(|(i, (t, &l))| own.get(i).is_some_and(|o| relayout(self, o, t, l)))
+            .collect();
+        let convert_ret = relayout(self, &own_ret, &ret, ret_layout);
+        let calls = HashMap::from([(req.src.clone(), (layouts, ret_layout))]);
+        let body_ret = if convert_ret { own_ret } else { ret.clone() };
+        let mut b = Synth::new(&self.checker, &req.name, body_ret.clone());
+        let mut args = Vec::with_capacity(params.len());
+        for (i, t) in params.iter().enumerate() {
+            let arg = if convert[i] {
+                let local = b.local(&format!("arg{i}"), own[i].clone(), LocalKind::Param);
+                let word = b.read(local);
+                b.builtin(crate::hir::Builtin::Relayout, vec![word], t.clone())
+            } else {
+                let local = b.local(&format!("arg{i}"), t.clone(), LocalKind::Param);
+                b.read(local)
+            };
+            args.push(arg);
+        }
+        let mut call = b.call(&req.src, args, ret);
+        if convert_ret {
+            call = b.builtin(crate::hir::Builtin::Relayout, vec![call], body_ret);
+        }
         let ret = b.ret(call);
         let root = b.block(vec![ret], None, crate::typechecking::ty::never());
         let hir = Self::synth_generic(b.finish(root));

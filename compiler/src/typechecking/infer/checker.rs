@@ -18841,8 +18841,9 @@ impl Checker {
 
     /// Resolve `for x in` iterable type to `Item` and record [`ForInInfo`].
     ///
-    /// Builtin synthesis covers arrays, homogeneous tuples/records, and
+    /// Builtin synthesis covers arrays, homogeneous tuples, ranges and
     /// coroutines. Otherwise looks up `IntoIterator` / `Iterator` instances.
+    /// A record is not iterable: its fields are a fixed set of names.
     fn resolve_for_in_iterable(
         &mut self,
         te: &Ty,
@@ -18850,6 +18851,15 @@ impl Checker {
         iterable_range: &Range<usize>,
         loop_range: &Range<usize>,
     ) -> Option<Ty> {
+        if let Ty::Record { .. } = crate::typechecking::ty::strip_readonly(&apply_ty_prune(&self.subst, te)) {
+            let _ = self.error_with_help(
+                ErrorCode::GenericTypeError,
+                format!("records are not iterable: `{}` is a fixed set of named fields", self.diag_ty(te)),
+                iterable_range.clone(),
+                Some("read the fields by name, or use `collections::map::HashMap` from the stdlib for keys to iterate".to_string()),
+            );
+            return None;
+        }
         if let Some((item, kind)) = self.builtin_for_in_kind(te, iterable_range) {
             self.record_for_in_info(
                 loop_id,
@@ -19019,15 +19029,6 @@ impl Checker {
                 }
                 self.homogeneous_types(elems, range, "tuple").map(|item| (item, ForInKind::Tuple { arity: elems.len() }))
             }
-            Ty::Record { fields } => {
-                let value_tys: Vec<Ty> = fields.iter().map(|(_, ty)| ty.clone()).collect();
-                if value_tys.is_empty() {
-                    // Vacuously homogeneous; Item = (string, α).
-                    let v = Ty::Var(self.counter.fresh());
-                    return Some((tuple_ty(vec![string(), v]), ForInKind::Dict));
-                }
-                self.homogeneous_types(&value_tys, range, "dict").map(|v| (tuple_ty(vec![string(), v]), ForInKind::Dict))
-            }
             Ty::App(head, args) => {
                 if matches!(head.as_ref(), Ty::Con(n) if n == "coroutine") && args.len() == 2 {
                     return Some((args[0].clone(), ForInKind::Coroutine));
@@ -19044,7 +19045,7 @@ impl Checker {
         }
     }
 
-    /// Array / tuple / numeric Range / dict `IntoIter` can reuse Q6
+    /// Array / tuple / numeric Range `IntoIter` can reuse Q6
     /// counted desugar after `into_iter`. Coro stays off this path.
     fn counted_into_iter_kind(
         &mut self,
@@ -19056,7 +19057,6 @@ impl Checker {
             ForInKind::Array => ForInCounted::Array,
             ForInKind::Tuple { arity } => ForInCounted::Tuple { arity },
             ForInKind::Range { inclusive, float } => ForInCounted::Range { inclusive, float },
-            ForInKind::Dict => ForInCounted::Dict,
             ForInKind::Coroutine | ForInKind::Custom { .. } => return None,
         };
         Some((item, counted))

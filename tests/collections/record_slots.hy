@@ -25,21 +25,13 @@ test("literal orders share one layout") {
     );
 }
 
-test("patterns, generics and iteration read slots by name") {
+test("patterns and generics read slots by name") {
     let r = { z: 3, m: 2, a: 1 };
     let { m, z } = r;
     assert!(m == 2 && z == 3);
     let s = id(r);
     s.z += 10;
     assert!(r.z == 13);
-    let names = "";
-    let total = 0;
-    for (k, v) in r {
-        names += k;
-        total += v;
-    }
-    assert!(names == "amz", names);
-    assert!(total == 16);
     assert!(format("%v", r) == "{ a: 1, m: 2, z: 13 }", format("%v", r));
 }
 
