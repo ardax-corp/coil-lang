@@ -404,6 +404,14 @@ pub struct Compiler {
     /// This module's `static let`s with pure initializers (HIR body names
     /// without `$init`), which are computed silently at compile time.
     pure_static_inits: HashSet<String>,
+    /// This module's functions whose calls with constant arguments may be
+    /// computed at compile time (HIR body name → returns a `string`).
+    fold_bodies: HashMap<String, bool>,
+    /// Every module's such functions, by bind name.
+    fold_fns: HashMap<String, bool>,
+    /// Auto-par worker → the function it computes (`__coil_par_fib` →
+    /// `fib`).
+    par_worker_of: HashMap<String, String>,
 
     /// `extern` dlopen/declare setup accumulated across modules, spliced into
     /// the prologue setup region at finalize (so imported-module `extern`
@@ -798,6 +806,9 @@ impl Default for Compiler {
             static_init: CodeBuf::new(),
             comptime_consts: Vec::new(),
             pure_static_inits: HashSet::new(),
+            fold_bodies: HashMap::new(),
+            fold_fns: HashMap::new(),
+            par_worker_of: HashMap::new(),
             ffi_init: CodeBuf::new(),
             current_source_file: None,
             source_file_indices: std::collections::BTreeMap::new(),

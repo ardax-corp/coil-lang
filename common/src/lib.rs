@@ -30,7 +30,7 @@ pub use line_table::*;
 pub use effects::EffectFlags;
 pub use ffi::tag;
 pub use ffi::*;
-pub use frame_bound::{FrameReserve, frame_reserve};
+pub use frame_bound::{FrameReserve, frame_reserve, jump_targets};
 pub use host::*;
 pub use interner::*;
 pub use opcode::*;

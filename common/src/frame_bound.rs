@@ -68,6 +68,26 @@ fn widest_payload(code: &[Byte], pool: &[u64]) -> usize {
         .max(HOST_PAYLOAD)
 }
 
+/// For each pc of `code`, whether a branch can land on it (falling through
+/// from the op before does not count). `None` when a branch target cannot
+/// be decoded.
+#[must_use]
+pub fn jump_targets(code: &[Byte], pool: &[u64]) -> Option<Vec<bool>> {
+    let mut out = vec![false; code.len()];
+    for b in code {
+        match step(b, pool, 0).jump {
+            Jump::To(t) => {
+                if let Some(hit) = out.get_mut(t) {
+                    *hit = true;
+                }
+            }
+            Jump::None => {}
+            Jump::Unknown => return None,
+        }
+    }
+    Some(out)
+}
+
 fn frame_words(code: &[Byte], pool: &[u64], match_payload: usize) -> usize {
     let n = code.len();
     let steps: Vec<Step> = code.iter().map(|b| step(b, pool, match_payload)).collect();

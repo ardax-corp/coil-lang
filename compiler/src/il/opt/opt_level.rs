@@ -108,6 +108,7 @@ fn all_off() -> OptimizeOptions {
         escape_analysis: false,
         branch_optimization: false,
         collect_stats: false,
+        call_fold: false,
         require_mir: false,
     }
 }
@@ -132,6 +133,7 @@ fn base_knobs(level: OptLevel) -> OptimizeOptions {
     o.sink_return = o.loop_unroll;
     // Lay out early exits after the body (`emit_hir`).
     o.branch_optimization = standard;
+    o.call_fold = standard;
     o
 }
 

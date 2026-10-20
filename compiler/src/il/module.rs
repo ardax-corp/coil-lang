@@ -1493,6 +1493,7 @@ mod tests {
             escape_analysis: false,
             branch_optimization: false,
             collect_stats: false,
+            call_fold: false,
             require_mir: false,
         }
     }
