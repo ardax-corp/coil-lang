@@ -348,5 +348,49 @@ fn main() {
     )
     .unwrap();
     check(&bin, &tmp, &ptr_field);
+
+    // A void `extern` call leaves the operand stack as it found it: more
+    // calls than the stack has slots, in `main`'s loop and in a callee the
+    // loop calls, a `(ptr, int, int)` shape and a no-argument one (#1638).
+    let void_calls = tmp.join("void_calls.hy");
+    std::fs::write(
+        &void_calls,
+        r#"
+extern "sum" {
+    fn get_doubler() -> ptr;
+    fn sum_note(ptr tag, int a, int b);
+    fn sum_reset();
+    fn sum_noted() -> int;
+}
+
+fn note(ptr p, int i) {
+    sum_reset();
+    sum_note(p, i, 1);
+}
+
+fn main() {
+    let p = get_doubler();
+    let n = 1100000;
+    let i = 0;
+    while i < n {
+        sum_note(p, 1, 0);
+        i = i + 1;
+    }
+    if sum_noted() != n {
+        panic "void calls in main lost a call";
+    }
+    let j = 0;
+    while j < n {
+        note(p, j);
+        j = j + 1;
+    }
+    if sum_noted() != n {
+        panic "void calls in a callee lost a call";
+    }
+}
+"#,
+    )
+    .unwrap();
+    check(&bin, &tmp, &void_calls);
     let _ = std::fs::remove_dir_all(&tmp);
 }
