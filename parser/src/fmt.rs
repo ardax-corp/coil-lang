@@ -1368,9 +1368,13 @@ impl<'s> Formatter<'s> {
                 type_params,
                 fields,
                 invariants,
+                readonly,
             } => {
                 self.fmt_docs(docs);
                 self.fmt_attrs(attrs);
+                if *readonly {
+                    self.push_str("readonly ");
+                }
                 self.push_str("class ");
                 self.push_str(name);
                 self.fmt_type_params(type_params);
