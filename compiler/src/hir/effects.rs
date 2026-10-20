@@ -946,7 +946,7 @@ impl Cx<'_> {
             HirKind::ForIn { kind, .. } => {
                 if !matches!(
                     kind,
-                    Some(ForInKind::Array | ForInKind::Tuple { .. } | ForInKind::Dict | ForInKind::Range { .. })
+                    Some(ForInKind::Array | ForInKind::Tuple { .. } | ForInKind::Range { .. })
                 ) {
                     self.note(w, id, EffectFlags::UNKNOWN | EffectFlags::RESIZE, || {
                         "iterates a generator or a custom iterator".into()

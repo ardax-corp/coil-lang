@@ -24,7 +24,6 @@ rungs are **not** in this table — see ladders below and
 |------|-------|--------|
 | Unicode / regex in SSA | out of MIR | Q9 **R4** leftover after **B9** / R3 maps |
 | User `Iterator::next` | dense or LIR | C2b rung 2 — Q8 match + B3 CALL |
-| Dict `for` | dense or LIR | C2b rung 3 — mapped `DictEntries` + counted latch (`for p` or `for (k, v)`) |
 | Coro `for` | dense or LIR | C2b rung 4 — mapped `MakeCoro` + `ResumeCoro` / `DoneCoro` |
 | Dense+match boxed `JumpIfMatch` (heap enum) | MIR→LIR or dense (D3) | cost gate |
 | Multi-payload `Unpack` / `JumpIfMatch` arity > 1 | dense or LIR when reconstruct ≤ fuse | **D3** ([COI-357](https://linear.app/ardax/issue/COI-357)) |
@@ -101,8 +100,6 @@ unless the reconstruct is a select diamond or leftover in-loop `Make*`.
 | `range_sum` | `for_in_range_array.hy` | dense counted i64 | **C2b** array-held Range |
 | `iter_sum` | `for_in_iter.hy` | dense or fuse-IL two-slot CALL+tag JMP | **C2b** user `Iterator::next`; cost gate |
 | `range_sum` | `for_in_iter_range.hy` | dense counted i64 | **C2b** `into_iter` → Range |
-| `dict_sum` | `for_in_dict.hy` | dense or LIR `DictEntries` + counted Index | **C2b** dict for-in; cost gate |
-| `dict_sum` | `for_in_dict_pairs.hy` | same + `for (k, v)` binds | **COI-371** pair pattern |
 | `coro_sum` | `for_in_coro.hy` | dense or LIR `ResumeCoro` / `DoneCoro` | **C2b** coro for-in; cost gate |
 | `main` | `operators_loop.hy` | fuse-IL | `Pow` / bitwise |
 | `hot` | `field_hot.hy` | dense + maps | **D2** `DenseFieldLoad` / `DenseMakeObject`; cost gate; `main` prints |
