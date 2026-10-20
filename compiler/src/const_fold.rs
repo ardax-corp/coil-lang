@@ -236,6 +236,24 @@ pub fn strength_div_int(k: i64) -> Option<u32> {
     strength_mul_int(k).filter(|&shift| shift > 0)
 }
 
+/// The elements of `readonly [e0, …]` (through groups): an array no code
+/// can write, born `readonly` (#1561).
+pub fn readonly_array_items<'e, 'a>(ast: &'e Output<'a>) -> Option<&'e [Output<'a>]> {
+    let mut node = ast;
+    let mut sealed = false;
+    loop {
+        match node.1.as_ref() {
+            Expression::Group(inner) | Expression::Expr(inner) => node = inner,
+            Expression::Readonly(inner) => {
+                sealed = true;
+                node = inner;
+            }
+            Expression::Array(items) if sealed => return Some(items),
+            _ => return None,
+        }
+    }
+}
+
 /// Make each module-level `const X = e;` whose `e` does not fold (a call,
 /// an array, another module's value) a slot set once at startup: the
 /// `static const` it replaces (#1558). One that folds stays a const the

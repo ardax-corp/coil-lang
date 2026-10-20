@@ -299,6 +299,21 @@ share their operands and do not copy them.
     same one under another name). An enum's tag and payload are `$tag` and
     `$Variant.field` fields, which never change. A `match` reads what its
     arms take apart once, so every arm and the code after the match agree.
+  - A state carries a heap generation, renewed wherever fields are
+    forgotten (a field or sequence write, a call or loop that may write, a
+    join of two states with different generations). The value made up for
+    a field's first read is kept by object, field and generation, so a
+    read on the other side of a branch (the right of `&&`), or after a
+    join that dropped it, sees the same value.
+  - An instance of a `readonly class` (`Checker::is_readonly_class`, passed
+    to `verify_module`) is frozen (`Enc::frozen`): no write can change its
+    fields, so calls, loop heads and field writes keep what is known of
+    them, like an enum's payload (#1560). A sequence a frozen field holds
+    may still change through another reference, so it is forgotten as
+    usual, and so are the fields of an ordinary object one holds. A
+    `readonly C` parameter of an ordinary class is not frozen: the caller
+    may hold a writable alias of it.
+    `coil-verify/tests/fixtures/readonly.hy` has the cases.
   - Floats and anything else are fresh constants.
 - Own `requires`: the function's own checks end their failing path without
   a goal, so they are assumptions.
@@ -327,7 +342,36 @@ share their operands and do not copy them.
   counterexample. Any other model is a "possible counterexample" of a
   clause that is not proved: the invariant may just be too weak.
 
-Not yet: floats, termination (`decreases`), and proofs across files.
+Not yet: floats, termination (`decreases`), proofs across files, and the
+fields `new C(…)` sets (a fresh instance's fields are unknown, so a
+caller's `call to f: requires c.x > 0` after `new C(1)` is not proved).
+
+### Readonly class fields: measurements (#1560)
+
+`coil-verify/tests/fixtures/readonly.hy`: 0 of 9 goals proved before, 5
+after, and the proof drops 4 checks (two `ensures` across a call, the
+loop's `ensures` and its invariant). Of the 5, `span` (a field read only
+on the right of `&&` in its `requires`) needed the generation fix alone;
+`fill`'s `ensures` needed it too; the other 3 need frozen fields. The 4
+not proved are the negative cases: a plain class written by a callee, a
+plain class across a call that may write, a `readonly` view of a plain
+class, and the length of a `Vec` a readonly class holds.
+
+Run time of a build that drops the proved checks: a 999-iteration loop,
+called 20 000 times, whose invariant reads two readonly class fields and
+whose body calls a function that writes a field of another object
+(`--contracts=all` and `-O0`, release build, 11 runs, 4-core container).
+Min / median, s:
+
+| | with proof | without |
+|---|---|---|
+| `--contracts=all` | 1.651 / 1.731, 1.772 / 2.085 | 1.713 / 1.774, 1.632 / 1.923 |
+| `-O0` | 2.580 / 2.752, 2.568 / 2.932 | 2.631 / 2.941, 2.518 / 2.648 |
+
+Two rounds each: a wash within noise. The invariant is three compares
+next to a call per iteration, so dropping it is not measurable here; the
+gain is in what is proved. Default `-O2` builds do not run `ensures` or
+invariants at all, so they are unaffected.
 
 ## Elsewhere
 

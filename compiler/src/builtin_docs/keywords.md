@@ -55,6 +55,10 @@ A module-level `const` whose value is known at compile time (`const LIMIT =
 `main`, and the name still cannot be reassigned. `static const` is the old spelling of this: it
 warns (E0129), and `coil fmt` rewrites it to `const`.
 
+A `const` set to a `readonly` array literal is a lookup table: a read at a
+constant index folds to the element, and a function-local
+`const t = readonly [1, 2, 3];` is built on its first run and reused.
+
 ```coil
 const VERSION = "1.0";
 

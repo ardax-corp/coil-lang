@@ -212,6 +212,7 @@ impl Checker {
             bare_patterns_by_span: HashMap::new(),
             bare_cases_by_module: HashMap::new(),
             pending_exhaustive: Vec::new(),
+            pending_weak_args: Vec::new(),
             async_functions: std::collections::HashSet::new(),
             async_depth: 0,
             current_yield_ty: None,
@@ -1612,6 +1613,7 @@ impl Checker {
         self.ffi_exec_names.clear();
         self.variadic_call_arg_tags.clear();
         self.pending_exhaustive.clear();
+        self.pending_weak_args.clear();
         self.async_functions.clear();
         self.async_depth = 0;
         self.current_yield_ty = None;
@@ -1700,6 +1702,7 @@ impl Checker {
             self.messages.extend(msgs);
         }
         self.check_duplicate_classes(ast);
+        self.check_builtin_class_names(ast);
         self.pre_register_readonly_classes(ast);
         self.collect_variadic_templates(ast);
         self.pre_collect_free_function_param_names(ast);
@@ -1736,6 +1739,7 @@ impl Checker {
         };
         // Frame stays open; see doc-comment above.
         self.run_pending_exhaustiveness();
+        self.run_pending_weak_checks();
 
         // `test("…") { … }` cases provide a virtual main, reject a
         // user-written `fn main` in the same file.
@@ -5816,6 +5820,12 @@ impl Checker {
 
         if self.thread_fn_in_scope(&ident) == Some(ThreadBuiltin::Spawn) {
             return self.infer_thread_spawn_call(&arg_tys, args.as_deref(), range);
+        }
+
+        if self.gc_fn_in_scope(&ident) == Some(GcBuiltin::Weak)
+            && let Some(arg) = arg_tys.first()
+        {
+            self.pending_weak_args.push((arg.clone(), range.clone()));
         }
 
         self.maybe_record_ffi_param_invoke_flow_for_call(&ident, &flat_args);
@@ -14827,6 +14837,55 @@ impl Checker {
         }
     }
 
+    /// Help for a top-level `class` or `enum` named `name` that would
+    /// redeclare a built-in type, or `None` when the name is free here. The
+    /// built-in keeps its key, so such a type would split: a type position
+    /// would name it while `new` or a literal still built the built-in
+    /// (#1654). `Option` / `Result` are free once a `use prelude::… as`
+    /// rebinds them; the other built-ins have no such escape.
+    fn builtin_type_redeclaration_help(&self, name: &str) -> Option<String> {
+        if self.current_module == crate::macros::CORE_MODULE {
+            return None;
+        }
+        if common::is_poly_builtin_enum(name) {
+            return self.builtin_name_in_scope(name).then(|| {
+                format!(
+                    "`{name}` is in the prelude; free the short name with `use prelude::{name} as OtherName;` before redefining, or pick a different name"
+                )
+            });
+        }
+        common::is_reserved_builtin_type(name)
+            .then(|| format!("`{name}` is a built-in type; pick a different name"))
+    }
+
+    /// A top-level `class` may not take a built-in type's name (#1654).
+    fn check_builtin_class_names(&mut self, ast: &Output) {
+        fn walk<'a>(node: &'a Output<'a>, out: &mut Vec<(&'a str, Range<usize>)>) {
+            match Checker::pre_pass_unwrap_stmt(node).1.as_ref() {
+                Expression::Class { name, .. } => out.push((name, node.0.into_range())),
+                Expression::Program(children) | Expression::Fragment(children) => {
+                    for child in children {
+                        walk(child, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut classes = Vec::new();
+        walk(ast, &mut classes);
+        for (name, range) in classes {
+            if let Some(help) = self.builtin_type_redeclaration_help(name) {
+                let mut msg = Message::error(
+                    ErrorCode::DuplicateEnum,
+                    format!("Cannot redeclare built-in type `{name}`"),
+                    range,
+                );
+                msg.with_help(help);
+                self.messages.push(msg);
+            }
+        }
+    }
+
     /// Record this module's `readonly class` keys before any body is
     /// typed, so a use ahead of the declaration sees the class as immutable.
     fn pre_register_readonly_classes(&mut self, ast: &Output) {
@@ -16150,6 +16209,20 @@ impl Checker {
                 }
 
                 // Check 1: duplicate enum name (including built-ins still in scope).
+                if !common::is_builtin_enum(&name_str)
+                    && let Some(help) = self.builtin_type_redeclaration_help(name)
+                {
+                    let mut msg = Message::error(
+                        ErrorCode::DuplicateEnum,
+                        format!("Cannot redeclare built-in type `{}`", name),
+                        node.0.into_range(),
+                    );
+                    msg.with_help(help);
+                    errors.push(msg);
+                    self.restore_generic_type_ctor(&name_str, previous_generic_ctor);
+                    self.pop_type_params_for_type_parsing(pushed);
+                    return;
+                }
                 if common::is_builtin_enum(&name_str) {
                     if self.builtin_name_in_scope(&name_str)
                         || common::is_builtin_ffi_enum(&name_str)
@@ -17553,6 +17626,29 @@ impl Checker {
     /// point the substitution is closed, so the scrutinee type is
     /// fully resolved (any free type variables that were bound
     /// since the match site are visible here).
+    /// E0119 for each `gc::weak` argument that resolved to a readonly
+    /// class instance (#1644, design Q9). A weak handle observes the
+    /// instance's identity and the moment it is collected, so readonly
+    /// class instances could not be treated as values (#1562).
+    fn run_pending_weak_checks(&mut self) {
+        let pending = std::mem::take(&mut self.pending_weak_args);
+        for (ty, range) in pending {
+            let resolved = apply_ty_prune(&self.subst, &ty);
+            if !self.is_readonly_class_ty(&resolved) {
+                continue;
+            }
+            let shown = self.diag_ty(&resolved);
+            self.error_with_help(
+                ErrorCode::GenericTypeError,
+                format!("`weak()` is not allowed on `{shown}`, an instance of a readonly class"),
+                range,
+                Some(format!(
+                    "a readonly class instance is a value, with no identity or lifetime to observe; keep the `{shown}` itself, or make it a plain `class` if you need a weak handle"
+                )),
+            );
+        }
+    }
+
     fn run_pending_exhaustiveness(&mut self) {
         // Drain into a local so we can release the borrow on
         // `self` before mutating `self.messages`.

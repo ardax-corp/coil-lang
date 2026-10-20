@@ -296,9 +296,15 @@ restores them around help). They are not Heap state.
 
 Static slots: one `statics` array on the **root** (or Heap-side table).
 Worker stacks must not each `init_static_slots` into a private copy that
-then aliases interned pointers from another Heap. C1 loop workers should
-not touch statics; if they need a string literal, they use the shared intern
-table / program string cache **on the Heap**, rooted for the epoch.
+then aliases interned pointers from another Heap. A shared-heap job starts
+with a copy of the spawning VM's statics (#1561: `ThreadSpawnContext::statics`,
+`Machine::load_shared_statics`): their words name objects of the one Heap
+the job is bound to, so a loop chunk reads a module `const` set at startup.
+A slot the job fills (a local `const` table built on first use, a ground
+dictionary) lands only in its copy, which the job drops when it ends;
+collect is forbidden in-epoch, so the object it names stays put meanwhile.
+If they need a string literal, they use the shared intern table / program
+string cache **on the Heap**, rooted for the epoch.
 
 ## E6 (C1) — implement against this
 
