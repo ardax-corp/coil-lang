@@ -61,6 +61,10 @@ pub struct Shape {
     heap_locals: Vec<LocalId>,
     /// The callee is another module's: its nodes take the call's span.
     foreign: bool,
+    /// In a loop, `heap_locals` keep their value until the next trip
+    /// rebinds them, as the loop's own locals do (nothing observes when
+    /// those values die), and are not cleared.
+    loop_inert: bool,
 }
 
 impl Shape {
@@ -76,6 +80,11 @@ impl Shape {
 
     pub fn with_heap_locals(mut self, locals: Vec<LocalId>) -> Self {
         self.heap_locals = locals;
+        self
+    }
+
+    pub fn with_loop_inert(mut self, inert: bool) -> Self {
+        self.loop_inert = inert;
         self
     }
 }
@@ -149,6 +158,7 @@ pub fn inlinable(callee: &HirBody, budget: usize) -> Result<Shape, &'static str>
         heap_result: false,
         heap_locals: Vec::new(),
         foreign: false,
+        loop_inert: false,
     })
 }
 
@@ -328,6 +338,7 @@ pub fn inline_calls<'a>(
         sites: 0,
         spliced: Vec::new(),
         clear: Vec::new(),
+        inert: Vec::new(),
         in_place,
         opaque: &opaque,
     };
@@ -336,10 +347,15 @@ pub fn inline_calls<'a>(
     // statement with a live one, and a temp's `let` hoisted into it would
     // never run.
     let mut live = vec![false; b.original];
-    let mut todo: Vec<HirId> = caller.root.into_iter().collect();
-    while let Some(id) = todo.pop() {
+    // Nodes in a loop's body: a spliced heap local there is rebound on
+    // the next trip, as the loop's own locals are, and is not cleared.
+    let mut looped = vec![false; b.original];
+    let mut todo: Vec<(HirId, bool)> = caller.root.into_iter().map(|r| (r, false)).collect();
+    while let Some((id, in_loop)) = todo.pop() {
         if !std::mem::replace(&mut live[id.0 as usize], true) {
-            todo.extend(super::lower::children(caller, id));
+            looped[id.0 as usize] = in_loop;
+            let inner = in_loop || matches!(caller.expr(id).kind, HirKind::Loop { .. } | HirKind::ForIn { .. });
+            todo.extend(super::lower::children(caller, id).into_iter().map(|c| (c, inner)));
         }
     }
     for (i, live) in live.into_iter().enumerate() {
@@ -360,7 +376,11 @@ pub fn inline_calls<'a>(
             }
             // The spliced heap locals die with the statement that read them,
             // as they did when the callee returned.
-            let clear = std::mem::take(&mut b.clear);
+            let mut clear = std::mem::take(&mut b.clear);
+            let inert = std::mem::take(&mut b.inert);
+            if !looped[i] {
+                clear.extend(inert);
+            }
             let returns = s.is_some_and(|s| matches!(b.body.expr(s).kind, HirKind::Return(_)));
             if !clear.is_empty() && !returns {
                 let span = b.body.exprs[i].span;
@@ -371,6 +391,7 @@ pub fn inline_calls<'a>(
         // and its spliced locals live to the end of the frame.
         let tail = tail.and_then(|t| b.statement(t, &callee_of, growth, &mut out));
         b.clear.clear();
+        b.inert.clear();
         b.body.exprs[i].kind = HirKind::Block { stmts: out, tail };
     }
     (!b.spliced.is_empty()).then_some((b.body, b.spliced))
@@ -385,6 +406,8 @@ struct Inliner<'o> {
     spliced: Vec<(String, super::Span)>,
     /// Heap locals spliced into the current statement.
     clear: Vec<LocalId>,
+    /// Those of [`Shape::loop_inert`] callees: cleared only outside loops.
+    inert: Vec<LocalId>,
     /// Splice calls that cannot hoist where they stand, as a block value
     /// (see [`Inliner::in_place_site`]).
     in_place: bool,
@@ -650,7 +673,7 @@ impl Inliner<'_> {
     fn expression_only(&self, callee: &HirBody, shape: &Shape, args: &[HirId]) -> bool {
         shape.stmts.is_empty()
             && shape.result.is_some()
-            && shape.heap_locals.is_empty()
+            && shape.heap_locals.iter().all(|l| callee.params.contains(l))
             && callee.params.iter().zip(args).all(|(&p, &a)| {
                 matches!(self.body.expr(a).kind, HirKind::Lit(_) | HirKind::Local(_)) && !rebinds(callee, p)
             })
@@ -773,7 +796,11 @@ impl Inliner<'_> {
         // A substituted parameter has no slot of its own.
         let substituted = |l: &LocalId| param_of(*l).is_some_and(|k| subst[k].is_some());
         let heap = shape.heap_locals.iter().filter(|l| !substituted(l)).map(|l| LocalId(l.0 + loff));
-        self.clear.extend(heap);
+        if shape.loop_inert {
+            self.inert.extend(heap);
+        } else {
+            self.clear.extend(heap);
+        }
         let mut hoisted = Vec::new();
         for (k, (&p, &a)) in callee.params.iter().zip(&args).enumerate() {
             if subst[k].is_some() {

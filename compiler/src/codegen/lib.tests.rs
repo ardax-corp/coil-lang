@@ -4040,6 +4040,7 @@ fn main() {
     let mut pipeline = crate::Pipeline::new();
     // The callees are looked up by name: keep them calls.
     pipeline.compiler_mut().hir_inline_heap = false;
+    pipeline.set_inline_max_cost(0);
     let (bc, constants) = pipeline.compile_src(src).expect("compile");
     let pack_off = pipeline.compiler_mut().get_function("pack").expect("pack");
     let nested_off = pipeline
@@ -4361,6 +4362,7 @@ fn main() {
     let mut pipeline = crate::Pipeline::new();
     // The callees are looked up by name: keep them calls.
     pipeline.compiler_mut().hir_inline_heap = false;
+    pipeline.set_inline_max_cost(0);
     let (bc, constants) = pipeline.compile_src(src).expect("compile");
     let pack_off = pipeline.compiler_mut().get_function("pack").expect("pack");
     let nested_off = pipeline

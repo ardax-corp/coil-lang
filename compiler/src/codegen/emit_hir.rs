@@ -609,9 +609,11 @@ impl Compiler {
         if !heap.is_empty() && !self.hir_inline_heap {
             return Err("heap local".to_string());
         }
+        let inert = self.hir_loop_inert(lambda, &heap);
         Ok(crate::hir::inline::inlinable(lambda, budget)?
             .with_heap_result(!scalar(&hir.expr(call).ty))
-            .with_heap_locals(heap))
+            .with_heap_locals(heap)
+            .with_loop_inert(inert))
     }
 
     /// A core `Option` / `Result` method as other modules splice it: its
@@ -2317,9 +2319,11 @@ impl Compiler {
                     return Err(format!("heap local `{}`", l.name));
                 }
             }
+            let inert = self.hir_loop_inert(callee, &heap);
             let shape = inline::inlinable(callee, budget)?
                 .with_heap_result(!scalar(&hir.expr(id).ty))
                 .with_heap_locals(heap)
+                .with_loop_inert(inert)
                 .with_foreign(core.is_some());
             Ok((callee, shape))
         };
@@ -6505,6 +6509,51 @@ impl Compiler {
             }
             _ => true,
         }
+    }
+
+    /// Whether spliced `callee`'s heap locals `heap` may keep their last
+    /// value until rebound in a loop, as the loop's own locals do: each is
+    /// a string or a scalar (or an enum of those), which no finalizer
+    /// observes, and with no call in `callee` no weak reference to one is
+    /// taken there.
+    fn hir_loop_inert(&self, callee: &HirBody, heap: &[LocalId]) -> bool {
+        let inert = |t: &Option<Ty>| {
+            t.as_ref().is_some_and(|t| {
+                let t = apply_ty_prune(self.checker.subst(), t);
+                lower::primitive(&t) == Some("string") || !self.holds_object(&t, 0) || self.enum_of_strings(&t, 4)
+            })
+        };
+        !callee.exprs.iter().any(|e| matches!(e.kind, HirKind::Call { .. } | HirKind::Builtin { .. } | HirKind::Lambda { .. }))
+            && heap.iter().all(|&l| inert(&callee.local(l).ty))
+    }
+
+    /// An enum whose payloads are strings and scalars, `depth` deep.
+    fn enum_of_strings(&self, ty: &Ty, depth: usize) -> bool {
+        if depth == 0 || !matches!(lower::classify(&self.checker, ty), Some(ValueClass::Enum)) {
+            return false;
+        }
+        let head = match crate::typechecking::ty::strip_readonly(ty) {
+            Ty::Constructor { owner, .. } => match owner.as_ref() {
+                Ty::App(h, _) => h.as_ref().clone(),
+                o => o.clone(),
+            },
+            Ty::App(h, _) => h.as_ref().clone(),
+            t => t.clone(),
+        };
+        let Ty::Con(name) = head else {
+            return false;
+        };
+        let Some(variants) = self.checker.enum_variants(&name) else {
+            return false;
+        };
+        variants.iter().all(|(v, _, _)| {
+            Self::payload_tys_of(&self.checker, ty, v).is_some_and(|ps| {
+                ps.iter().all(|p| {
+                    let p = apply_ty_prune(self.checker.subst(), p);
+                    lower::primitive(&p) == Some("string") || !self.holds_object(&p, 0) || self.enum_of_strings(&p, depth - 1)
+                })
+            })
+        })
     }
 
     fn hir_payload_tys(&self, ty: &Ty, variant: &str) -> Option<Vec<Ty>> {
