@@ -1278,6 +1278,8 @@ fn main() {
 }
 "#;
     let mut p = crate::Pipeline::new();
+    // `kernel` is called in a loop: with inlining it would splice in.
+    p.set_inline_max_cost(0);
     let (bc, constants) = p.compile_src(src).expect("compile dense CALL");
     let hot = p.function_offset("hot").expect("hot");
     let main = p.function_offset("main").expect("main");

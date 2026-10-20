@@ -4849,6 +4849,11 @@ impl Lower<'_> {
         } else if let Some(tys) = self.inp.sroa.get(&local.0) {
             let base = self.slot(local)?.0;
             tys.iter().enumerate().map(|(i, &ty)| (LocalId(base + i as u32), ty)).collect()
+        } else if self.pair_local(local).is_some()
+            && self.hir.local(local).ty.as_ref().is_some_and(crate::hir::lower::is_range_pair)
+        {
+            // An unboxed range is two numbers: nothing to clear.
+            return Ok(());
         } else if let Some((lo, _, lo_ty, _)) = self.pair_local(local) {
             // A heap payload moves through a pair as an opaque word.
             vec![(lo, if lo_ty == MirTy::I64 { MirTy::HeapRef } else { lo_ty })]

@@ -613,6 +613,9 @@ impl Compiler {
             return Err("heap local".to_string());
         }
         let inert = self.hir_loop_inert(lambda, &heap);
+        if lambda.exprs.iter().any(|e| matches!(e.kind, HirKind::Loop { .. } | HirKind::ForIn { .. })) {
+            return Err("lambda loop".to_string());
+        }
         Ok(crate::hir::inline::inlinable(lambda, budget)?
             .with_heap_result(!scalar(&hir.expr(call).ty))
             .with_heap_locals(heap)
@@ -2141,6 +2144,7 @@ impl Compiler {
                 Some((i as u32, self.hir_lambda_callee(module, hir, l)?))
             })
             .collect();
+        let invariant = inline::invariant_locals(hir);
         let callee_for = |id: HirId| -> Result<(&crate::hir::HirBody, inline::Shape), String> {
             if let Some(lambda) = lambda_calls.get(&id.0) {
                 return self.hir_lambda_shape(hir, id, lambda, budget).map(|shape| (lambda, shape));
@@ -2345,6 +2349,28 @@ impl Compiler {
                 .with_heap_locals(heap)
                 .with_loop_inert(inert)
                 .with_foreign(core.is_some());
+            // A pure callee with a loop, called on values that do not change
+            // in the caller: LICM hoists the call out of the caller's loop,
+            // which its spliced loop would not be.
+            // A callee's loop inlines only when it is short: a long one
+            // pays for its call many times over and keeps its own body.
+            if shape.looping() {
+                let short = inline::short_loops(callee).is_some_and(|ps| {
+                    ps.iter().all(|&p| {
+                        matches!(args.get(p).map(|&a| &hir.expr(a).kind),
+                            Some(HirKind::Lit(crate::hir::Lit::Int(k))) if *k <= inline::SHORT_TRIPS)
+                    })
+                });
+                if !short {
+                    return Err("long loop".to_string());
+                }
+            }
+            if shape.looping()
+                && crate::il::pure_call::name_in(&self.pure_fns, &callee.name)
+                && args.iter().all(|&a| inline::invariant_expr(hir, a, &invariant))
+            {
+                return Err("pure loop callee on invariant arguments".to_string());
+            }
             Ok((callee, shape))
         };
         let why = std::env::var_os("COIL_HIR_INLINE_WHY").is_some();

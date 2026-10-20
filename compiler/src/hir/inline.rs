@@ -46,6 +46,13 @@ pub(crate) fn heap_from_env() -> bool {
     )
 }
 
+/// Inlining callees with loops is on unless `COIL_HIR_INLINE_LOOPS=0` (or
+/// `false` / `off` / `no`).
+fn loops_from_env() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| !matches!(std::env::var("COIL_HIR_INLINE_LOOPS").as_deref(), Ok("0" | "false" | "off" | "no")))
+}
+
 /// What a callee's body splices in as: its statements and its result.
 #[derive(Debug, Clone)]
 pub struct Shape {
@@ -65,9 +72,18 @@ pub struct Shape {
     /// rebinds them, as the loop's own locals do (nothing observes when
     /// those values die), and are not cleared.
     loop_inert: bool,
+    /// The callee has a loop: it inlines only at a call inside a loop,
+    /// where the call is paid per trip. Elsewhere the call runs once and
+    /// the loop keeps its own body (and tier).
+    looping: bool,
 }
 
 impl Shape {
+    /// The callee has a loop.
+    pub fn looping(&self) -> bool {
+        self.looping
+    }
+
     pub fn with_foreign(mut self, foreign: bool) -> Self {
         self.foreign = foreign;
         self
@@ -92,6 +108,9 @@ impl Shape {
 /// HIR call weight in [`inlinable`]'s cost.
 const CALL_COST: usize = 25;
 
+/// HIR loop weight in [`inlinable`]'s cost.
+const LOOP_COST: usize = 4;
+
 /// Whether `callee` can be inlined within `budget`, and how.
 pub fn inlinable(callee: &HirBody, budget: usize) -> Result<Shape, &'static str> {
     if !matches!(callee.kind, BodyKind::Function | BodyKind::Method | BodyKind::Lambda) {
@@ -113,17 +132,15 @@ pub fn inlinable(callee: &HirBody, budget: usize) -> Result<Shape, &'static str>
     };
     let mut cost = 0;
     let mut returns = 0;
+    let mut looping = false;
     for e in &callee.exprs {
+        looping |= matches!(e.kind, HirKind::Loop { .. } | HirKind::ForIn { .. });
         cost += match &e.kind {
             HirKind::Lambda { .. }
             | HirKind::Defer { .. }
             | HirKind::Yield { .. }
             | HirKind::Resume { .. }
-            | HirKind::Loop { .. }
-            | HirKind::ForIn { .. }
             | HirKind::Builtin { .. }
-            | HirKind::Break
-            | HirKind::Continue
             | HirKind::Named { .. }
             | HirKind::Spread(_)
             | HirKind::Unsupported(_) => return Err("construct"),
@@ -132,6 +149,11 @@ pub fn inlinable(callee: &HirBody, budget: usize) -> Result<Shape, &'static str>
                 0
             }
             HirKind::Call { .. } => CALL_COST,
+            // A loop's body splices whole (its `break` / `continue` still
+            // name the callee's loop); the loop itself costs its test.
+            HirKind::Loop { .. } | HirKind::ForIn { .. } if loops_from_env() => LOOP_COST,
+            HirKind::Break | HirKind::Continue if loops_from_env() => 0,
+            HirKind::Loop { .. } | HirKind::ForIn { .. } | HirKind::Break | HirKind::Continue => return Err("construct"),
             HirKind::Block { .. } | HirKind::Lit(_) | HirKind::Local(_) => 0,
             _ => 1,
         };
@@ -158,6 +180,7 @@ pub fn inlinable(callee: &HirBody, budget: usize) -> Result<Shape, &'static str>
         heap_result: false,
         heap_locals: Vec::new(),
         foreign: false,
+        looping,
         loop_inert: false,
     })
 }
@@ -369,8 +392,10 @@ pub fn inline_calls<'a>(
             continue;
         };
         let mut out = Vec::with_capacity(stmts.len());
+        let here = looped[i];
+        let callee_here = |id: HirId| callee_of(id).filter(|(_, shape)| here || !shape.looping);
         for s in stmts {
-            let s = b.statement(s, &callee_of, growth, &mut out);
+            let s = b.statement(s, &callee_here, growth, &mut out);
             if let Some(s) = s {
                 out.push(s);
             }
@@ -389,7 +414,7 @@ pub fn inline_calls<'a>(
         }
         // A tail's calls hoist into the statements; the tail itself stays,
         // and its spliced locals live to the end of the frame.
-        let tail = tail.and_then(|t| b.statement(t, &callee_of, growth, &mut out));
+        let tail = tail.and_then(|t| b.statement(t, &callee_here, growth, &mut out));
         b.clear.clear();
         b.inert.clear();
         b.body.exprs[i].kind = HirKind::Block { stmts: out, tail };
@@ -1072,4 +1097,107 @@ fn map_pat(pat: &HirPat, lf: &dyn Fn(LocalId) -> LocalId) -> HirPat {
         HirPat::Tuple(ps) => HirPat::Tuple(ps.iter().map(|p| map_pat(p, lf)).collect()),
         HirPat::Record(fs) => HirPat::Record(fields(fs)),
     }
+}
+
+/// Locals of `body` that hold one value for the whole body: parameters, and
+/// `let`s outside every loop, that nothing assigns. A pure call whose
+/// arguments are these (or literals) computes the same value on every trip
+/// of a loop, so LICM hoists it.
+pub fn invariant_locals(body: &HirBody) -> std::collections::HashSet<LocalId> {
+    let mut varying = std::collections::HashSet::new();
+    let mut lets = Vec::new();
+    let mut todo: Vec<(HirId, bool)> = body.root.into_iter().map(|r| (r, false)).collect();
+    while let Some((id, in_loop)) = todo.pop() {
+        match &body.expr(id).kind {
+            HirKind::Assign { place, .. } | HirKind::Append { base: place, .. } => {
+                if let HirKind::Local(l) = body.expr(*place).kind {
+                    varying.insert(l);
+                }
+            }
+            HirKind::Let { local, .. } => {
+                if in_loop {
+                    varying.insert(*local);
+                } else {
+                    lets.push(*local);
+                }
+            }
+            _ => {}
+        }
+        let inner = in_loop || matches!(body.expr(id).kind, HirKind::Loop { .. } | HirKind::ForIn { .. });
+        todo.extend(super::lower::children(body, id).into_iter().map(|c| (c, inner)));
+    }
+    body.params
+        .iter()
+        .copied()
+        .chain(lets)
+        .filter(|l| !varying.contains(l) && !body.local(*l).captured)
+        .collect()
+}
+
+/// `id` computes one value for the whole body: literals and
+/// [`invariant_locals`] under operators.
+pub fn invariant_expr(body: &HirBody, id: HirId, invariant: &std::collections::HashSet<LocalId>) -> bool {
+    match &body.expr(id).kind {
+        HirKind::Lit(_) => true,
+        HirKind::Local(l) => invariant.contains(l),
+        HirKind::Bin { lhs, rhs, .. } => invariant_expr(body, *lhs, invariant) && invariant_expr(body, *rhs, invariant),
+        HirKind::Un { operand, .. } => invariant_expr(body, *operand, invariant),
+        HirKind::Cast { value } => invariant_expr(body, *value, invariant),
+        HirKind::Make { kind: super::MakeKind::Range { .. }, args } => args.iter().all(|&a| invariant_expr(body, a, invariant)),
+        _ => false,
+    }
+}
+
+/// Most trips a callee's loop may run for the callee to inline. A longer
+/// loop pays for its call many times over, and keeps its own body: its tier,
+/// its SIMD form, and invariants hoisted once per call.
+pub const SHORT_TRIPS: i64 = 16;
+
+/// Whether every loop of `callee` is short: bounded by a literal of at most
+/// [`SHORT_TRIPS`] or by a parameter nothing writes. `Some` lists those
+/// parameters; a call inlines only when it passes each one such a literal.
+pub fn short_loops(callee: &HirBody) -> Option<Vec<usize>> {
+    let mut params = Vec::new();
+    let bound = |id: HirId, params: &mut Vec<usize>| -> bool {
+        match callee.expr(id).kind {
+            HirKind::Lit(Lit::Int(k)) => k <= SHORT_TRIPS,
+            HirKind::Local(l) => match callee.params.iter().position(|&p| p == l) {
+                Some(k) if !rebinds(callee, l) => {
+                    params.push(k);
+                    true
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    };
+    for e in &callee.exprs {
+        match &e.kind {
+            HirKind::Loop { body } => {
+                // `while i < K`: the loop opens with `if i < K { .. } else { break }`.
+                let HirKind::Block { stmts, .. } = &callee.expr(*body).kind else { return None };
+                let HirKind::If { cond, els: Some(els), .. } = callee.expr(*stmts.first()?).kind else { return None };
+                if !matches!(callee.expr(els).kind, HirKind::Break) {
+                    return None;
+                }
+                let HirKind::Bin { op, lhs, rhs } = callee.expr(cond).kind else { return None };
+                let k = match op {
+                    BinOp::Lt | BinOp::Le => rhs,
+                    BinOp::Gt | BinOp::Ge => lhs,
+                    _ => return None,
+                };
+                if !bound(k, &mut params) {
+                    return None;
+                }
+            }
+            HirKind::ForIn { iterable, .. } => {
+                let HirKind::Make { kind: super::MakeKind::Range { .. }, args } = &callee.expr(*iterable).kind else { return None };
+                if !bound(*args.last()?, &mut params) {
+                    return None;
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(params)
 }
