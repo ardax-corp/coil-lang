@@ -2552,6 +2552,18 @@ impl<const S: usize> Machine<S> {
         self.statics = words.iter().map(|&w| Value::from(w as *mut u8)).collect();
     }
 
+    /// An isolate job's statics: the spawner's, copied into this VM's heap
+    /// ([`crate::reactor::JobStatics::Copied`], #1663). A slot whose copy
+    /// fails stays zeroed.
+    pub(crate) fn load_copied_statics(&mut self, slots: Vec<Option<crate::thread::SpawnArg>>) {
+        for (i, arg) in slots.into_iter().enumerate().take(self.statics.len()) {
+            let Some(arg) = arg else { continue };
+            if let Ok(v) = crate::thread::spawn_arg_to_value(self.heap_mut(), arg) {
+                self.statics[i] = v;
+            }
+        }
+    }
+
     /// Drop a finished shared-heap job's statics: their words name the
     /// heap it was bound to.
     pub(crate) fn clear_statics(&mut self) {

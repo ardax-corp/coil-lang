@@ -83,6 +83,10 @@ before `main` (a module constant is a `const`). In a class, `static count: int =
 is a class field read as `Class::count`. In an `impl` or trait, `static fn`
 is a method called on the type (`Counter::fresh()`), never on a value.
 
+A thread started with `thread::spawn` gets a copy of every static as it was
+when it was spawned: constants read the same values there, and its writes
+to a `static let` stay in that thread.
+
 ```coil
 static let hits = 0;
 
