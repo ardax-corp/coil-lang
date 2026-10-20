@@ -199,11 +199,20 @@ jobs:
           CARGO_PROFILE_RELEASE_PANIC=unwind \
             cargo test --release -p compiler --lib --no-run
 
+      - name: Release machine lib tests (#1686)
+        if: runner.os == 'Linux'
+        run: |
+          # Same profile as the step above, without debug_assertions; the
+          # dev-dependency on `common/debug-fmt` supplies the Debug impls.
+          CARGO_PROFILE_RELEASE_LTO=off CARGO_PROFILE_RELEASE_CODEGEN_UNITS=8 \
+          CARGO_PROFILE_RELEASE_PANIC=unwind \
+            cargo test --release -p machine --lib
+
       - name: Release VM no_pool park/close (COI-410)
         if: runner.os == 'Linux'
         run: |
-          # Opt-level 3 like the release VM. Tests need Debug on Value
-          # (`cfg(debug_assertions)`) and unwind so the harness can compile.
+          # Opt-level 3 like the release VM, with debug_assertions on and
+          # unwind so the harness can compile.
           CARGO_PROFILE_RELEASE_LTO=off \
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS=8 \
           CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true \
