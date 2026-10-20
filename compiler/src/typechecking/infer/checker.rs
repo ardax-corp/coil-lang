@@ -18751,34 +18751,82 @@ impl Checker {
     /// `Vec`, array or record. Scalars, strings, tuples and enums do not
     /// need `readonly` (#1552).
     fn has_mutable_interior(&self, ty: &Ty) -> bool {
+        self.has_mutable_interior_in(ty, &mut Vec::new())
+    }
+
+    /// [`Self::has_mutable_interior`]; `seen` holds the enums being
+    /// looked through, so a recursive enum ends.
+    fn has_mutable_interior_in(&self, ty: &Ty, seen: &mut Vec<String>) -> bool {
         match ty {
             Ty::Array { .. } | Ty::Record { .. } | Ty::Existential { .. } => true,
-            Ty::Con(name) => self.classes.contains_key(name),
+            Ty::Con(name) => match self.enum_payload_tys(name) {
+                Some(payloads) => self.enum_payloads_mutable(name, &payloads, seen),
+                None => self.classes.contains_key(name),
+            },
             Ty::App(head, _) => {
-                vec_element_ty(ty).is_some()
-                    || matches!(head.as_ref(), Ty::Con(name) if self.classes.contains_key(name))
+                if vec_element_ty(ty).is_some() {
+                    return true;
+                }
+                let Ty::Con(name) = head.as_ref() else { return false };
+                match self.enum_payload_tys(name) {
+                    // A generic enum's own payloads; what its arguments
+                    // hold is qualified through them.
+                    Some(payloads) => self.enum_payloads_mutable(name, &payloads, seen),
+                    None => self.classes.contains_key(name),
+                }
             }
             _ => false,
         }
     }
 
+    /// Every payload type of enum `name` (an enum with an `impl` is also a
+    /// class key, but holds only immutable payloads).
+    fn enum_payload_tys(&self, name: &str) -> Option<Vec<Ty>> {
+        if common::is_poly_builtin_enum(name) {
+            return Some(Vec::new());
+        }
+        let variants = self.enum_variants(name)?;
+        Some(variants.into_iter().flat_map(|(_, _, tys)| tys).collect())
+    }
+
+    fn enum_payloads_mutable(&self, name: &str, payloads: &[Ty], seen: &mut Vec<String>) -> bool {
+        if seen.iter().any(|s| s == name) {
+            return false;
+        }
+        seen.push(name.to_string());
+        let params = self.type_ctor_params(name).cloned().unwrap_or_default();
+        let out = payloads.iter().any(|t| {
+            !matches!(t, Ty::Con(p) if params.contains(p)) && self.has_mutable_interior_in(t, seen)
+        });
+        seen.pop();
+        out
+    }
+
     /// `ty` read through a `readonly` value (a field, an element, a loop
     /// variable): `readonly` too when it has a mutable interior, so the
-    /// seal is deep (#1552).
-    fn readonly_view(&self, ty: Ty) -> Ty {
+    /// seal is deep (#1552). A tuple or an enum's type arguments are
+    /// qualified element-wise.
+    pub(super) fn readonly_view(&self, ty: Ty) -> Ty {
         let ty = apply_ty_prune(&self.subst, &ty);
-        if self.has_mutable_interior(&ty) { readonly_ty(ty) } else { ty }
+        if matches!(ty, Ty::Var(_)) { ty } else { self.readonly_qualify(ty) }
     }
 
     /// `readonly T`, written as a type or as `readonly e`, normalised:
     /// `readonly readonly T` is `readonly T`, a type with no mutable
-    /// interior (`int`, `string`, a function) is itself, and a tuple is
-    /// readonly element-wise (#1558).
+    /// interior (`int`, `string`, a function) is itself, a tuple is
+    /// readonly element-wise and an enum in its type arguments
+    /// (`readonly Option<P>` is `Option<readonly P>`, #1558).
     fn readonly_qualify(&self, ty: Ty) -> Ty {
         match apply_ty_prune(&self.subst, &ty) {
             ty @ Ty::Readonly(_) => ty,
             Ty::Tuple(items) => Ty::Tuple(items.into_iter().map(|t| self.readonly_qualify(t)).collect()),
             ty @ Ty::Var(_) => readonly_ty(ty),
+            Ty::App(head, args)
+                if matches!(head.as_ref(), Ty::Con(n) if self.enum_payload_tys(n).is_some()) =>
+            {
+                let ty = Ty::App(head, args.into_iter().map(|t| self.readonly_qualify(t)).collect());
+                if self.has_mutable_interior(&ty) { readonly_ty(ty) } else { ty }
+            }
             ty if self.has_mutable_interior(&ty) => readonly_ty(ty),
             ty => ty,
         }

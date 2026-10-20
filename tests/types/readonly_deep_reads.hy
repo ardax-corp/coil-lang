@@ -48,3 +48,25 @@ test("a readonly binding can be rebound") {
     i = new Inner(2);
     assert!(i.n == 2);
 }
+
+class Holder {
+    pub o: Option<Inner>,
+}
+
+enum Shape {
+    Dot(Inner),
+}
+
+test("enum payloads under readonly can be read") {
+    let h = readonly new Holder(Option::Some(new Inner(7)));
+    let n = match h.o {
+        Option::Some(i) => i.n,
+        Option::None => 0,
+    };
+    assert!(n == 7);
+    let s: readonly Shape = Shape::Dot(new Inner(8));
+    let m = match s {
+        Shape::Dot(i) => i.n,
+    };
+    assert!(m == 8);
+}

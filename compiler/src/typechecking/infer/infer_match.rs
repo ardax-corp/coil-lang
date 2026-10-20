@@ -325,9 +325,27 @@ impl Checker {
                     .get(&enum_str)
                     .and_then(|a| a.get(tag as usize).copied())
                     .unwrap_or(0);
-                let expected_payload = self
+                // A payload matched out of a `readonly` enum value is
+                // read through it (#1552).
+                let pruned = apply_ty_prune(&self.subst, expected_ty);
+                let (expected_ty, readonly) = match &pruned {
+                    Ty::Readonly(inner) => (inner.as_ref(), true),
+                    other => (other, false),
+                };
+                let mut expected_payload = self
                     .poly_or_registry_payload(&enum_str, tag, expected_ty, pattern_range)
                     .unwrap_or(EnumVariantPayloadTy::Unit);
+                if readonly {
+                    expected_payload = match expected_payload {
+                        EnumVariantPayloadTy::Unit => EnumVariantPayloadTy::Unit,
+                        EnumVariantPayloadTy::Tuple(tys) => {
+                            EnumVariantPayloadTy::Tuple(tys.into_iter().map(|t| self.readonly_view(t)).collect())
+                        }
+                        EnumVariantPayloadTy::Record(fields) => EnumVariantPayloadTy::Record(
+                            fields.into_iter().map(|(n, t)| (n, self.readonly_view(t))).collect(),
+                        ),
+                    };
+                }
 
                 let (shape_matches, same_shape_with_wrong_arity) =
                     match (&expected_payload, payload) {
