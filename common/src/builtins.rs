@@ -138,6 +138,24 @@ pub fn is_poly_builtin_enum(name: &str) -> bool {
     is_builtin_option_enum(name) || is_builtin_result_enum(name)
 }
 
+/// Built-in type constructors, besides `Option` / `Result`, that are keyed
+/// by their bare name in every module: a user `class` or `enum` cannot take
+/// one of these names (#1654).
+pub const BUILTIN_RESERVED_TYPE_NAMES: &[&str] = &[
+    "Range",
+    "RangeInclusive",
+    "ArrayIter",
+    BUILTIN_MATRIX_TYPE,
+    BUILTIN_ROOT_TYPE,
+    BUILTIN_WEAK_TYPE,
+    BUILTIN_VEC_TYPE,
+];
+
+/// True when `name` is one of [`BUILTIN_RESERVED_TYPE_NAMES`].
+pub fn is_reserved_builtin_type(name: &str) -> bool {
+    BUILTIN_RESERVED_TYPE_NAMES.contains(&name)
+}
+
 /// Built-in nominal matrix wrapper (`Matrix<Data>`).
 ///
 /// `Data` is a nested static array/tuple layout (`[[T; N]; M]`). Runtime

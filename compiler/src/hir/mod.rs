@@ -31,6 +31,7 @@ pub mod bounds;
 pub mod unroll;
 pub mod sink_return;
 pub mod tuple_sroa;
+pub mod tables;
 
 use crate::typechecking::def_id::DefId;
 use crate::typechecking::id::NodeId;

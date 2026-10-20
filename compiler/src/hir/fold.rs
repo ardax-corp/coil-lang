@@ -25,9 +25,12 @@ pub fn fold(body: &HirBody) -> Option<HirBody> {
     let mut out = body.clone();
     let mut hits = 0;
     for _ in 0..ROUNDS {
+        let before = hits;
         post(&mut out, root, &mut hits);
         drop_unread(&mut out, root, &mut hits);
-        if propagate_lets(&mut out, root, &mut hits) == 0 {
+        // A match that folded can bind a constructor the next round's
+        // `post` folds a match on.
+        if propagate_lets(&mut out, root, &mut hits) == 0 && hits == before {
             break;
         }
     }
@@ -37,26 +40,38 @@ pub fn fold(body: &HirBody) -> Option<HirBody> {
 /// A scalar local bound once by a `let` of a literal (or of a block that
 /// is just one, a folded `if`'s value) and never written again reads as
 /// that literal, so what it feeds folds too: an inlined callee's
-/// parameter bound to the caller's `let m = 1`, say. Returns how many
+/// parameter bound to the caller's `let m = 1`, say. A local bound the
+/// same way to a [`constant_variant`] stands in as a copy of it where a
+/// `match` reads it, so [`known_variant`] takes the arm. Returns how many
 /// reads it rewrote.
 fn propagate_lets(body: &mut HirBody, root: HirId, hits: &mut usize) -> usize {
     use std::collections::HashMap;
     let mut lets: HashMap<super::LocalId, Option<Lit>> = HashMap::new();
+    let mut variants: HashMap<super::LocalId, HirId> = HashMap::new();
     let mut written = std::collections::HashSet::new();
     let mut places = std::collections::HashSet::new();
+    let mut scrutinees = std::collections::HashSet::new();
+    let mut cleared = std::collections::HashSet::new();
     let mut reads = Vec::new();
     let mut stack = vec![root];
     while let Some(k) = stack.pop() {
         match &body.expr(k).kind {
             HirKind::Let { local, init } => {
-                let lit = init.and_then(|v| literal_value(body, v)).filter(|_| {
-                    let local_ty = body.local(*local).ty.as_ref();
-                    init.is_some_and(|v| body.expr(v).ty.as_ref() == local_ty)
-                });
+                let local_ty = body.local(*local).ty.as_ref();
+                let same_ty = init.is_some_and(|v| body.expr(v).ty.as_ref() == local_ty);
+                let lit = init.and_then(|v| literal_value(body, v)).filter(|_| same_ty);
+                // A constructor's own type may name its variant: the read keeps
+                // the local's.
+                if let Some(v) = init.filter(|&v| constant_variant(body, v)) {
+                    variants.insert(*local, v);
+                }
                 // A second `let` of the same local is a second write.
                 if lets.insert(*local, lit).is_some() {
                     written.insert(*local);
                 }
+            }
+            HirKind::Match { scrutinee, .. } => {
+                scrutinees.insert(*scrutinee);
             }
             HirKind::Assign { place, .. } | HirKind::Append { base: place, .. } => {
                 places.insert(*place);
@@ -64,7 +79,9 @@ fn propagate_lets(body: &mut HirBody, root: HirId, hits: &mut usize) -> usize {
                     written.insert(l);
                 }
             }
-            HirKind::Clear(ls) => written.extend(ls.iter().copied()),
+            // A spliced heap local is cleared after its last read: no read
+            // sees the cleared slot, so a constructor still stands in for it.
+            HirKind::Clear(ls) => cleared.extend(ls.iter().copied()),
             HirKind::Local(l) if !places.contains(&k) => reads.push((k, *l)),
             _ => {}
         }
@@ -73,6 +90,20 @@ fn propagate_lets(body: &mut HirBody, root: HirId, hits: &mut usize) -> usize {
     let mut n = 0;
     for (k, l) in reads {
         if written.contains(&l) || body.local(l).captured {
+            continue;
+        }
+        if scrutinees.contains(&k)
+            && let Some(&v) = variants.get(&l)
+            && variant_args_fixed(body, v, &written)
+        {
+            let kind = copy_variant(body, v);
+            let e = &mut body.exprs[k.0 as usize];
+            e.kind = kind;
+            e.node = None;
+            n += 1;
+            continue;
+        }
+        if cleared.contains(&l) {
             continue;
         }
         let Some(Some(lit)) = lets.get(&l) else { continue };
@@ -94,6 +125,44 @@ fn literal_value(body: &HirBody, id: HirId) -> Option<Lit> {
     }
 }
 
+/// An enum constructor whose fields are literals, local reads or unit
+/// variants: building it twice builds the same value, with nothing run.
+fn constant_variant(body: &HirBody, id: HirId) -> bool {
+    let HirKind::Make { kind: MakeKind::Variant { .. }, args } = &body.expr(id).kind else { return false };
+    args.iter().all(|&a| matches!(body.expr(a).kind, HirKind::Lit(_) | HirKind::Local(_)) || unit_variant(body, a))
+}
+
+/// A variant with no fields.
+fn unit_variant(body: &HirBody, id: HirId) -> bool {
+    matches!(&body.expr(id).kind, HirKind::Make { kind: MakeKind::Variant { .. }, args } if args.is_empty())
+}
+
+/// No local the constructor `id` reads is written, so a copy of it read
+/// later builds the same value.
+fn variant_args_fixed(body: &HirBody, id: HirId, written: &std::collections::HashSet<super::LocalId>) -> bool {
+    let HirKind::Make { args, .. } = &body.expr(id).kind else { return false };
+    args.iter().all(|&a| match body.expr(a).kind {
+        HirKind::Local(l) => !written.contains(&l) && !body.local(l).captured,
+        _ => true,
+    })
+}
+
+/// A fresh copy of the constructor `id` (its fields are leaves), for a
+/// reader of the local it was bound to.
+fn copy_variant(body: &mut HirBody, id: HirId) -> HirKind {
+    let HirKind::Make { kind, args } = body.expr(id).kind.clone() else { unreachable!("a constructor") };
+    let args = args
+        .into_iter()
+        .map(|a| {
+            let mut e = body.expr(a).clone();
+            e.node = None;
+            body.exprs.push(e);
+            HirId(body.exprs.len() as u32 - 1)
+        })
+        .collect();
+    HirKind::Make { kind, args }
+}
+
 fn is_empty_block(body: &HirBody, id: HirId) -> bool {
     matches!(&body.expr(id).kind, HirKind::Block { stmts, tail: None } if stmts.is_empty())
 }
@@ -105,6 +174,7 @@ fn drop_unread(body: &mut HirBody, root: HirId, hits: &mut usize) {
     let mut places = std::collections::HashSet::new();
     let mut read = std::collections::HashSet::new();
     let mut stmts = std::collections::HashSet::new();
+    let mut clears = Vec::new();
     let mut nodes = Vec::new();
     let mut stack = vec![root];
     while let Some(k) = stack.pop() {
@@ -117,13 +187,24 @@ fn drop_unread(body: &mut HirBody, root: HirId, hits: &mut usize) {
                 read.insert(*l);
             }
             HirKind::Block { stmts: ss, .. } => stmts.extend(ss.iter().copied()),
-            HirKind::Clear(ls) => read.extend(ls.iter().copied()),
+            // Clearing a local is not a read: a dropped `let` leaves it too.
+            HirKind::Clear(_) => clears.push(k),
             HirKind::Defer { captures, .. } => read.extend(captures.iter().flatten().copied()),
             _ => {}
         }
         stack.extend(children(body, k).into_iter().rev());
     }
-    let pure = |body: &HirBody, v: HirId| matches!(body.expr(v).kind, HirKind::Lit(_) | HirKind::Local(_)) || literal_value(body, v).is_some();
+    let mut dropped = std::collections::HashSet::new();
+    // An `Option` / `Result` or unit-variant constructor of constant fields
+    // builds a value no finalizer watches (a user enum's may have one).
+    let pure = |body: &HirBody, v: HirId| {
+        matches!(body.expr(v).kind, HirKind::Lit(_) | HirKind::Local(_))
+            || literal_value(body, v).is_some()
+            || unit_variant(body, v)
+            || constant_variant(body, v)
+                && matches!(&body.expr(v).kind, HirKind::Make { kind: MakeKind::Variant { enum_name, .. }, .. }
+                    if common::is_builtin_option_enum(enum_name) || common::is_builtin_result_enum(enum_name))
+    };
     for k in nodes.into_iter().filter(|k| stmts.contains(k)) {
         let gone = match body.expr(k).kind {
             HirKind::Let { local, init } => {
@@ -137,10 +218,18 @@ fn drop_unread(body: &mut HirBody, root: HirId, hits: &mut usize) {
             _ => false,
         };
         if gone {
+            if let HirKind::Let { local, .. } = body.expr(k).kind {
+                dropped.insert(local);
+            }
             let e = &mut body.exprs[k.0 as usize];
             e.kind = HirKind::Block { stmts: Vec::new(), tail: None };
             e.node = None;
             *hits += 1;
+        }
+    }
+    for k in clears {
+        if let HirKind::Clear(ls) = &mut body.exprs[k.0 as usize].kind {
+            ls.retain(|l| !dropped.contains(l));
         }
     }
 }
@@ -225,7 +314,8 @@ fn square(body: &mut HirBody, id: HirId) -> Option<HirKind> {
 
 /// `match V(a, b) { V(x, _) => e, … }` is `e` with `x` read as `a`: the
 /// arm the constructor takes, with no enum built. Arms of other variants
-/// are skipped. Every field must be a literal or a local read, and the arm
+/// are skipped. Every field must be a literal, a local read or a unit
+/// variant, and the arm
 /// must not assign a binding or a field's local (so each read of `x` still
 /// sees `a`).
 fn known_variant(body: &mut HirBody, id: HirId) -> Option<HirKind> {
@@ -233,7 +323,7 @@ fn known_variant(body: &mut HirBody, id: HirId) -> Option<HirKind> {
     let HirKind::Make { kind: MakeKind::Variant { enum_name, variant, .. }, args } = &body.expr(*scrutinee).kind else {
         return None;
     };
-    if !args.iter().all(|a| matches!(body.expr(*a).kind, HirKind::Lit(_) | HirKind::Local(_))) {
+    if !args.iter().all(|&a| matches!(body.expr(a).kind, HirKind::Lit(_) | HirKind::Local(_)) || unit_variant(body, a)) {
         return None;
     }
     let (pats, arm) = arms.iter().find_map(|arm| match &arm.pat {

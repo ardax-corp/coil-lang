@@ -55,6 +55,10 @@ A module-level `const` whose value is known at compile time (`const LIMIT =
 `main`, and the name still cannot be reassigned. `static const` is the old spelling of this: it
 warns (E0129), and `coil fmt` rewrites it to `const`.
 
+A `const` set to a `readonly` array literal is a lookup table: a read at a
+constant index folds to the element, and a function-local
+`const t = readonly [1, 2, 3];` is built on its first run and reused.
+
 ```coil
 const VERSION = "1.0";
 
@@ -78,6 +82,10 @@ Declares a module-level or class-level slot shared by the whole program, or a me
 before `main` (a module constant is a `const`). In a class, `static count: int = 0`
 is a class field read as `Class::count`. In an `impl` or trait, `static fn`
 is a method called on the type (`Counter::fresh()`), never on a value.
+
+A thread started with `thread::spawn` gets a copy of every static as it was
+when it was spawned: constants read the same values there, and its writes
+to a `static let` stay in that thread.
 
 ```coil
 static let hits = 0;

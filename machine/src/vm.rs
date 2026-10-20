@@ -2542,7 +2542,32 @@ impl<const S: usize> Machine<S> {
             ffi_search_paths: self.ffi_search_paths.clone(),
             dload_gate: self.dload_gate.clone(),
             struct_layouts: Arc::clone(&self.struct_layouts),
+            statics: Arc::new(self.statics.iter().map(|v| v.raw() as u64).collect()),
         })
+    }
+
+    /// A shared-heap job's statics: the spawning VM's words, which name
+    /// objects of the heap this VM is bound to (#1561).
+    pub(crate) fn load_shared_statics(&mut self, words: &[u64]) {
+        self.statics = words.iter().map(|&w| Value::from(w as *mut u8)).collect();
+    }
+
+    /// An isolate job's statics: the spawner's, copied into this VM's heap
+    /// ([`crate::reactor::JobStatics::Copied`], #1663). A slot whose copy
+    /// fails stays zeroed.
+    pub(crate) fn load_copied_statics(&mut self, slots: Vec<Option<crate::thread::SpawnArg>>) {
+        for (i, arg) in slots.into_iter().enumerate().take(self.statics.len()) {
+            let Some(arg) = arg else { continue };
+            if let Ok(v) = crate::thread::spawn_arg_to_value(self.heap_mut(), arg) {
+                self.statics[i] = v;
+            }
+        }
+    }
+
+    /// Drop a finished shared-heap job's statics: their words name the
+    /// heap it was bound to.
+    pub(crate) fn clear_statics(&mut self) {
+        self.statics.clear();
     }
 
     fn sync_thread_program_from_current(&mut self) {

@@ -50,10 +50,12 @@ return a fresh array are not the same value
 ([coil-lang#790](https://github.com/ardax-corp/coil-lang/issues/790)).
 
 A `static let` read is `HOST` and a write is `HEAP_MUT` in both analyses:
-the chunk workers have no statics, and another call may change one
+a chunk worker reads a copy of the statics taken when it was spawned, and
+another call may change one
 ([coil-lang#793](https://github.com/ardax-corp/coil-lang/issues/793)). A
 module `const` stays pure: one that folds is inlined, and one set at startup
-is a slot nothing writes after it.
+is a slot nothing writes after it, which the worker's copy holds too
+([const tables](const-tables.md)).
 
 `coil dissect --effects` prints each function's effects with the first reason
 for each, and why auto-par left a loop or a fork site sequential when purity

@@ -40,6 +40,17 @@ fn bump(counter: &AtomicUsize) {
 }
 
 /// One unit of work for the reactor (isolated `call_function` on a worker VM).
+/// A job's starting statics (see [`Job::statics`]).
+pub enum JobStatics {
+    /// The spawning VM's static words, raw: they name objects of the one
+    /// heap a shared-heap job is bound to (#1561).
+    Shared(Arc<Vec<u64>>),
+    /// The spawning VM's statics copied out of its heap for an isolate job,
+    /// one entry per slot; `None` (a slot that is unset, or holds a value
+    /// that cannot cross threads) starts zeroed (#1663).
+    Copied(Vec<Option<SpawnArg>>),
+}
+
 pub struct Job {
     pub entry: u32,
     pub args: Vec<SpawnArg>,
@@ -58,6 +69,10 @@ pub struct Job {
     /// C struct layouts for pass-by-value FFI (ids are indices, so the
     /// worker VM takes the parent's list as is).
     pub struct_layouts: Arc<Vec<crate::CStructLayout>>,
+    /// What the job's statics start as: the spawning VM's, so startup
+    /// `const`s read the same values (#1561, #1663). `None` starts them
+    /// zeroed.
+    pub statics: Option<JobStatics>,
     /// Harness case (`coil-test`): run static init first, then report
     /// pass / fail instead of a spawn result.
     pub test: Option<TestJob>,
@@ -642,6 +657,7 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
         epoch,
         struct_layouts,
         test,
+        statics,
     } = job;
 
     // A joining root help-steals jobs onto its *own* thread, so the print
@@ -682,8 +698,17 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
             Arc::clone(&program.strings),
         );
         vm.set_struct_layouts(struct_layouts);
-        if !shared {
-            vm.init_static_slots(program.static_slot_count);
+        // A job reads the spawner's statics (startup `const`s, tables built
+        // once): a shared-heap job its words as they are, an isolate job
+        // the copies made into its own heap.
+        match statics {
+            Some(JobStatics::Shared(words)) if shared => vm.load_shared_statics(&words),
+            statics => {
+                vm.init_static_slots(program.static_slot_count);
+                if let Some(JobStatics::Copied(slots)) = statics {
+                    vm.load_copied_statics(slots);
+                }
+            }
         }
 
         let _guard = HostStateGuard::enter(vm);
@@ -723,6 +748,7 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
     reactor.inflight.fetch_sub(1, Ordering::SeqCst);
     reactor.notify();
     if shared {
+        vm.clear_statics();
         vm.unbind_shared_heap();
         vm.reset_shared_stack();
     } else {
@@ -914,6 +940,7 @@ pub fn job_from_spawn_context(
         epoch: None,
         struct_layouts: ctx.struct_layouts,
         test: None,
+        statics: None,
     }
 }
 
@@ -959,6 +986,7 @@ mod tests {
             epoch: None,
             struct_layouts: Arc::default(),
             test: None,
+            statics: None,
         };
         reactor.submit(job);
         state
@@ -990,6 +1018,7 @@ mod tests {
             ffi_search_paths: Vec::new(),
             dload_gate: DloadGate::deny_all(),
             struct_layouts: Arc::default(),
+            statics: Arc::default(),
         }
     }
 
@@ -1226,6 +1255,7 @@ mod tests {
             epoch: None,
             struct_layouts: Arc::default(),
             test: None,
+            statics: None,
         };
         // Must not push onto owner's deque — job goes to `foreign`'s injector.
         assert!(
