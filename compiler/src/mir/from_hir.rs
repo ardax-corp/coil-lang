@@ -4716,6 +4716,11 @@ impl Lower<'_> {
             let boxed = self.b.ins_alloc(MirAllocKind::Boxed { tag: call.tag }, vec![v]).map_err(mir)?;
             words.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![boxed]).map_err(mir)?);
         }
+        // The instance's dictionary, after the operands (#1661).
+        if !site.dicts.is_empty() {
+            let dicts = site.dicts.clone();
+            words.extend(self.dict_values(&dicts)?);
+        }
         let abi = DenseAbi {
             params: words.iter().map(|&v| self.b.value_ty(v)).collect(),
             ret,
