@@ -1015,9 +1015,12 @@ impl<'s> Formatter<'s> {
                 name,
                 ty,
                 init,
+                ..
             } => {
+                // `static const` is spelled `const` (#1558): a module
+                // `const` that does not fold is set once at startup.
                 if *is_const {
-                    self.push_str("static const ");
+                    self.push_str("const ");
                 } else {
                     self.push_str("static let ");
                 }
@@ -3380,6 +3383,14 @@ fn main() { return; }
     #[test]
     fn static_decl_and_fixed_array_types_round_trip() {
         stable("static let hits: int = 0;\n\nfn sum3([int; 3] xs) -> int {\n    return xs[0];\n}\n");
+    }
+
+    /// `static const` is the deprecated spelling of a module `const`
+    /// (#1558): `coil fmt` rewrites it.
+    #[test]
+    fn static_const_formats_as_const() {
+        let src = "static const LIMIT: int = 10;\n\nstatic const TABLE = [1, 2];\n";
+        assert_eq!(format_source(src).unwrap(), "const LIMIT: int = 10;\n\nconst TABLE = [1, 2];\n");
     }
 
     #[test]

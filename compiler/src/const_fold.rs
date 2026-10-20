@@ -236,10 +236,87 @@ pub fn strength_div_int(k: i64) -> Option<u32> {
     strength_mul_int(k).filter(|&shift| shift > 0)
 }
 
+/// Make each module-level `const X = e;` whose `e` does not fold (a call,
+/// an array, another module's value) a slot set once at startup: the
+/// `static const` it replaces (#1558). One that folds stays a const the
+/// compiler inlines. Folding sees this module's earlier consts, as codegen
+/// does, so the split matches what used to fold.
+pub fn lift_startup_consts(ast: &mut Output<'_>) {
+    let Expression::Program(children) = ast.1.as_mut() else {
+        return;
+    };
+    let mut env = HashMap::new();
+    for child in children.iter_mut() {
+        lift_startup_const(child, &mut env);
+    }
+}
+
+/// [`lift_startup_consts`] for one top-level item.
+fn lift_startup_const<'a>(node: &mut Output<'a>, env: &mut HashMap<String, ConstValue>) {
+    let lifted = match node.1.as_mut() {
+        Expression::Statement(inner) | Expression::Expr(inner) => return lift_startup_const(inner, env),
+        Expression::Fragment(parts) => {
+            let [binder, rhs] = parts.as_mut_slice() else {
+                return;
+            };
+            let Expression::Constant(name, ty) = binder.1.as_mut() else {
+                return;
+            };
+            let Expression::Identifier(name) = name.1.as_ref() else {
+                return;
+            };
+            let name = *name;
+            if let Some(value) = eval_expr(rhs, env) {
+                env.insert(name.to_string(), value);
+                return;
+            }
+            let init = std::mem::replace(rhs, (rhs.0, Box::new(Expression::Integer(0))));
+            Expression::StaticDecl {
+                is_const: true,
+                name,
+                ty: ty.take(),
+                init,
+                lifted: true,
+            }
+        }
+        _ => return,
+    };
+    *node.1 = lifted;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use parser::ast::Expression;
+
+    /// Each top-level `const` that folds stays one; the rest become
+    /// startup slots, and a const built from a slot is a slot too.
+    #[test]
+    fn lift_startup_consts_splits_on_folding() {
+        let src = "const A = 2;\nconst B = A + 1;\nconst C = f();\nconst D = C + 1;\nconst T = [1, 2];\nfn f() -> int { const L = f(); return 1; }\n";
+        let mut ast = parser::Pratt::default().parse(src).expect("parse");
+        lift_startup_consts(&mut ast);
+        let shown = ast.1.to_string();
+        for lifted in ["const C", "const D", "const T"] {
+            let at = shown.find(lifted).unwrap_or_else(|| panic!("{lifted} missing: {shown}"));
+            assert!(!shown[..at].ends_with("static "), "{shown}");
+        }
+        let Expression::Program(items) = ast.1.as_ref() else { panic!("program") };
+        let slots: Vec<&str> = items
+            .iter()
+            .filter_map(|i| {
+                let mut node = i;
+                while let Expression::Statement(inner) | Expression::Expr(inner) = node.1.as_ref() {
+                    node = inner;
+                }
+                match node.1.as_ref() {
+                    Expression::StaticDecl { name, lifted: true, is_const: true, .. } => Some(*name),
+                    _ => None,
+                }
+            })
+            .collect();
+        assert_eq!(slots, ["C", "D", "T"]);
+    }
 
     fn int_expr(n: i64) -> Output<'static> {
         (SimpleSpan::from(0..1), Box::new(Expression::Integer(n)))

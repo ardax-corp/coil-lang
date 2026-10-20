@@ -261,8 +261,8 @@ fn main() {
     .unwrap();
     check(&bin, &tmp, &const_bytes);
 
-    // A `static const` or `static let` in an `invoke` tuple is a value, not a
-    // callback (#868).
+    // A module `const` set at startup or a `static let` in an `invoke` tuple
+    // is a value, not a callback (#868).
     let globals = tmp.join("globals.hy");
     std::fs::write(
         &globals,
@@ -270,7 +270,11 @@ fn main() {
 use ffi::{declare, dload, invoke};
 use ffi::types::Int;
 
-static const FORTY = 40;
+fn forty() -> int {
+    return 40;
+}
+
+const FORTY = forty();
 static let two: int = 2;
 
 fn main() {

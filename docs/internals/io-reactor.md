@@ -108,7 +108,7 @@ stay **102–110**. `math_pow` (**110**) and `math_rem` (**132**) keep their row
 but no surface name reaches them: `prelude::math::{pow, rem}` were removed in
 favour of the `**` and `%` operators. Named `PI` / `E` / `TAU` live on coil-stdlib
 [`num`](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/modules.md)
-(`static const`, not HostInvoke). Package process/WebSocket/collections APIs
+(`const`, not HostInvoke). Package process/WebSocket/collections APIs
 belong in those package READMEs — this page only names host ids the VM owns.
 
 Virtual-time names still occupy panic stubs earlier in the table so the time

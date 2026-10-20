@@ -5070,7 +5070,7 @@ impl Compiler {
         }
     }
 
-    /// A global read that names a `const` / `static const` or a `static`
+    /// A global read that names a `const` or a `static`
     /// slot, so it moves as a value rather than as a function.
     fn hir_global_is_value(&self, hir: &HirBody, id: HirId, name: &str) -> bool {
         self.hir_global_static(hir, id, name).is_some() || self.hir_global_const(hir, id, name).is_some()
