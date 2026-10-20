@@ -102,6 +102,9 @@ pub fn emit_dense(
         if block.id != func.entry {
             out.push(IlOp::Label(block_lab[block.id.index()]));
         }
+        for &r in arg_clears.entry(block.id) {
+            push_clear_word(&mut out, r);
+        }
         let mut stacked: Vec<ValueId> = Vec::new();
         let mut starts: Vec<(usize, ValueId)> = Vec::new();
         let loc = func.term_loc(block.id);
@@ -115,7 +118,7 @@ pub fn emit_dense(
         // The zeros [`arg_clears`] puts after the op emitted last.
         let mut after: &[u8] = &[];
         for inst in &block.insts {
-            for &r in std::mem::replace(&mut after, arg_clears.get(&inst.dest()).map(Vec::as_slice).unwrap_or(&[])) {
+            for &r in std::mem::replace(&mut after, arg_clears.after(inst.dest())) {
                 push_clear_word(&mut out, r);
             }
             if inst.is_phi() {
@@ -1319,14 +1322,19 @@ impl Gathers {
 /// shares. `in_place` tells the calls emitted where they stand (the LIR
 /// tier emits an expression tree's call inside its user: none is zeroed
 /// after).
+///
+/// A call ending its block whose result the branch takes from the stack
+/// (`write(..)?`'s `JumpIfMatch`) keeps it there: its zeros go at the top
+/// of each successor instead ([`ArgClears::entry`]), when this block is
+/// that successor's only predecessor. The branch cannot collect.
 pub(super) fn arg_clears(
     func: &MirFunc,
     regs: &[u8],
     need_slot: &[bool],
     gathers: &Gathers,
     in_place: impl Fn(ValueId) -> bool,
-) -> HashMap<ValueId, Vec<u8>> {
-    let mut out: HashMap<ValueId, Vec<u8>> = HashMap::new();
+) -> ArgClears {
+    let mut out = ArgClears::default();
     let is_call = |inst: &MirInst| matches!(inst, MirInst::Call { .. } | MirInst::HostInvoke { .. } | MirInst::CallIndirect { .. });
     let slot = |v: ValueId| need_slot.get(v.index()).copied().unwrap_or(false) && v.index() < regs.len();
     let candidate = |v: ValueId| slot(v) && func.ty(v).is_heap_word() && !func.params.contains(&v) && !func.bound_words.contains(&v);
@@ -1337,14 +1345,29 @@ pub(super) fn arg_clears(
         return out;
     }
     // A constant (a `None` niche, a pooled string), or a cast of one,
-    // roots nothing.
+    // roots nothing. A box of plain words (an `Option<int>`, a pair of
+    // numbers, made to pass a value to `weak` or a generic parameter)
+    // holds no other object, and nothing but the call's register can hold
+    // that box: it stays as it was, so a weak to it still upgrades until
+    // the register is rewritten.
     let mut consts: HashSet<ValueId> = HashSet::new();
     for inst in func.blocks.iter().flat_map(|b| &b.insts) {
         match inst {
             MirInst::Const { dest, .. } => {
                 consts.insert(*dest);
             }
+            MirInst::Alloc {
+                dest,
+                kind: MirAllocKind::Enum { .. } | MirAllocKind::Tuple | MirAllocKind::Boxed { .. },
+                elems,
+                ..
+            } if elems.iter().all(|e| !func.ty(*e).is_heap_word()) => {
+                consts.insert(*dest);
+            }
             MirInst::Cast { dest, src, .. } if consts.contains(src) => {
+                consts.insert(*dest);
+            }
+            MirInst::GcBarrier { dest, roots, .. } if roots.len() == 1 && consts.contains(&roots[0]) && func.ty(*dest).is_heap_word() => {
                 consts.insert(*dest);
             }
             _ => {}
@@ -1352,6 +1375,7 @@ pub(super) fn arg_clears(
     }
     let live = super::gc::liveness_after(func);
     let cmp_dests = term_cmp_dests(func);
+    let preds = func.preds();
     let mut scan = RewriteScan::new(func, regs, &slot, &gathers.writes);
     for (b, block) in func.blocks.iter().enumerate() {
         // A compare fused into the branch is emitted at the terminator.
@@ -1381,12 +1405,62 @@ pub(super) fn arg_clears(
                 }
                 zero.push(r);
             }
-            if !zero.is_empty() {
-                out.insert(inst.dest(), zero);
+            if zero.is_empty() {
+                continue;
             }
+            if let Some(succs) = branch_takes(block, k, inst.dest()) {
+                let only_pred = |s: BlockId| preds[s.index()].len() == 1 && !func.block(s).insts.first().is_some_and(MirInst::is_phi);
+                if succs.iter().all(|&s| only_pred(s)) {
+                    for s in succs {
+                        let rs: Vec<u8> = zero.iter().copied().filter(|&r| scan.from(s, 0, r)).collect();
+                        if !rs.is_empty() {
+                            out.entry.entry(s).or_default().extend(rs);
+                        }
+                    }
+                    continue;
+                }
+            }
+            out.after.insert(inst.dest(), zero);
         }
     }
     out
+}
+
+/// The zeros [`arg_clears`] places: after a call (by its dest), or at the
+/// top of a block, below its label.
+#[derive(Default)]
+pub(super) struct ArgClears {
+    pub(super) after: HashMap<ValueId, Vec<u8>>,
+    pub(super) entry: HashMap<BlockId, Vec<u8>>,
+}
+
+impl ArgClears {
+    pub(super) fn after(&self, dest: ValueId) -> &[u8] {
+        self.after.get(&dest).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    pub(super) fn entry(&self, block: BlockId) -> &[u8] {
+        self.entry.get(&block).map(Vec::as_slice).unwrap_or(&[])
+    }
+}
+
+/// The successors of `block` when its op `k` is a call whose result
+/// `dest` its branch reads, and nothing is emitted between them (only the
+/// branch's own payloads follow, which it binds).
+fn branch_takes(block: &super::func::MirBlock, k: usize, dest: ValueId) -> Option<Vec<BlockId>> {
+    let term = block.term.as_ref()?;
+    let bound = |v: &ValueId| matches!(term, Terminator::JumpIfMatch { payloads, .. } if payloads.contains(v));
+    if !block.insts[k + 1..]
+        .iter()
+        .all(|i| matches!(i, MirInst::MatchPayload { dest: d, scrutinee, .. } if *scrutinee == dest && bound(d)))
+    {
+        return None;
+    }
+    match term {
+        Terminator::JumpIfMatch { scrutinee, taken, not_taken, .. } if *scrutinee == dest => Some(vec![*taken, *not_taken]),
+        Terminator::Br { cond, taken, not_taken } if *cond == dest => Some(vec![*taken, *not_taken]),
+        _ => None,
+    }
 }
 
 /// Drops the GC clears that zero a register no path into them leaves

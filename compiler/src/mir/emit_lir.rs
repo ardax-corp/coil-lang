@@ -142,6 +142,9 @@ pub(super) fn emit_lir_framed(
         if block.id != func.entry {
             out.push(IlOp::Label(block_lab[block.id.index()]));
         }
+        for &r in arg_clears.entry(block.id) {
+            super::emit::push_clear_word(&mut out, r);
+        }
         let term_loc = func.term_loc(block.id);
         consume_match_tos(&mut out, func, block.id, &plan, &regs, term_loc);
         // A miss leaves the scrutinee on the stack: the next arm's test
@@ -204,7 +207,7 @@ pub(super) fn emit_lir_framed(
                 continue;
             }
             emit_stored(&mut out, inst, func, &plan, &regs, pool, loc)?;
-            for &r in arg_clears.get(&dest).map(Vec::as_slice).unwrap_or(&[]) {
+            for &r in arg_clears.after(dest) {
                 super::emit::push_clear_word(&mut out, r);
             }
         }

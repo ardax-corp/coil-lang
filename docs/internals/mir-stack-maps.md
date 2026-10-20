@@ -186,8 +186,23 @@ and relocate mapped slots on collect.
   until the local is rebound or the function returns, as HIR emission's
   slots do (a `gc::Root` held in a local guards its payload,
   `tests/memory/gc_frame_maps_collect.hy`). Nor for a parameter, a
-  constant, a register a value live past the call shares, or where no
-  collection can come before the register is rewritten (`RewriteScan`).
+  constant, a box of plain words (an `Option<int>` or a pair of numbers
+  boxed to pass to `weak`: nothing else can hold that box, so a weak to
+  it keeps upgrading until the register is rewritten,
+  `tests/memory/gc_weak_option_arg.hy`), a register a value live past the
+  call shares, or where no collection can come before the register is
+  rewritten (`RewriteScan`). A call ending its block whose result the
+  branch reads from the stack (`write(..)?`'s `JumpIfMatch`) gets its
+  zeros at the top of each successor it is the only predecessor of, so
+  the result still feeds the branch directly. The zero made a register
+  dead at the allocations between its last push and the call
+  (`precise_frames` drops words every path overwrites first), while a
+  `CallIndirect`'s row was kept whole: an evacuation at such an
+  allocation moved the object and left the register naming its old
+  address, which the call's row then listed as a must-pointer (gc-stress,
+  an over-applied closure in `tests/functions/closure_over_application.hy`).
+  A `CallIndirect` row is now filtered by liveness like a `CALL`'s,
+  keeping only its base word, which a partial application still uses.
   Straight-line code with calls of temporaries grows by `CONST 0; STORE`
   per such word (125 of the 223 `examples/*.hy` and `examples/perf/*.hy`
   archives change, mostly in `main`'s output calls); a 3M-trip loop
