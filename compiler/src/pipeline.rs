@@ -1685,9 +1685,10 @@ impl Pipeline {
         Ok((bytecode, self.compiler_lazy_mut().constants().to_vec()))
     }
 
-    /// Compute every `const` initializer on the compile-time VM and replace
-    /// its startup call with the computed value (`RestoreSnapshot`). A
-    /// failure is E0134 at the const. Without a macro host (no VM linked)
+    /// Compute every `const` and pure `static let` initializer on the
+    /// compile-time VM and replace its startup call with the computed value
+    /// (`RestoreSnapshot`). A const's failure is E0134 at the const; a
+    /// `static let` that fails keeps its startup initializer. Without a macro host (no VM linked)
     /// consts keep their startup initializers. `entry_src` is the text of an
     /// in-memory entry, which has no file to read.
     fn compute_consts(&mut self, entry_src: Option<(&Path, &str)>) {
@@ -1710,6 +1711,7 @@ impl Pipeline {
                 entry: c.entry.unwrap_or_default(),
                 slot: c.slot,
                 kind: kinds.get(c.slot as usize).copied().unwrap_or(common::WORD_UNKNOWN),
+                silent: c.silent,
             })
             .collect();
         let program = crate::macros::CompiledExpansion {
@@ -1723,9 +1725,17 @@ impl Pipeline {
         };
         let limits = self.host_grants.comptime;
         match host.eval_consts(&program, &evals, &limits) {
-            Ok(snapshot) => {
-                let sites: Vec<(u32, u32)> = evals.iter().map(|e| (e.entry, e.slot)).collect();
-                let applied = self.compiler_lazy_mut().apply_const_snapshot(&sites, &snapshot.encode());
+            Ok(outcome) => {
+                let sites: Vec<(u32, u32)> = evals
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| !outcome.skipped.contains(i))
+                    .map(|(_, e)| (e.entry, e.slot))
+                    .collect();
+                if sites.is_empty() {
+                    return;
+                }
+                let applied = self.compiler_lazy_mut().apply_const_snapshot(&sites, &outcome.snapshot.encode());
                 debug_assert!(applied, "const setup calls not found in the setup region");
             }
             Err(crate::macros::ConstEvalError::Failed { index, reason }) => {

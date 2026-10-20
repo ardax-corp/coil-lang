@@ -398,9 +398,12 @@ pub struct Compiler {
 
     /// Global static initializers (spliced at `program_start_offset`). Same sink as `ffi_init`.
     static_init: CodeBuf,
-    /// `const`s whose initializer runs at compile time, in setup order
-    /// (comptime step 3).
+    /// `const`s and pure `static let`s whose initializer runs at compile
+    /// time, in setup order (comptime steps 3-4).
     comptime_consts: Vec<ComptimeConst>,
+    /// This module's `static let`s with pure initializers (HIR body names
+    /// without `$init`), which are computed silently at compile time.
+    pure_static_inits: HashSet<String>,
 
     /// `extern` dlopen/declare setup accumulated across modules, spliced into
     /// the prologue setup region at finalize (so imported-module `extern`
@@ -794,6 +797,7 @@ impl Default for Compiler {
             mono_var_tys: Vec::new(),
             static_init: CodeBuf::new(),
             comptime_consts: Vec::new(),
+            pure_static_inits: HashSet::new(),
             ffi_init: CodeBuf::new(),
             current_source_file: None,
             source_file_indices: std::collections::BTreeMap::new(),
@@ -1007,12 +1011,14 @@ pub(crate) struct GatedHostCall {
     pub native: &'static str,
 }
 
-/// A `const` computed at compile time: its name, static slot, and where it
-/// is declared (for errors raised after codegen).
+/// A `const` (or, `silent`, a pure `static let`) computed at compile time:
+/// its name, static slot, and where it is declared (for errors raised after
+/// codegen).
 #[derive(Debug, Clone)]
 pub struct ComptimeConst {
     pub fqn: String,
     pub slot: u32,
+    pub silent: bool,
     /// Entry of its initializer once finalized.
     pub entry: Option<u32>,
     pub file: Option<std::path::PathBuf>,

@@ -6879,12 +6879,15 @@ impl Compiler {
             Expression::StaticDecl { name, init, is_const, .. } => {
                 let fqn = self.qualify_static_fqn(name);
                 self.emit_static_initializer(&fqn, init);
-                if *is_const
+                let silent = !*is_const
+                    && (self.pure_static_inits.contains(&fqn) || self.pure_static_inits.contains(*name));
+                if (*is_const || silent)
                     && let Some(slot) = self.checker.static_slot_index(&fqn)
                 {
                     self.comptime_consts.push(super::ComptimeConst {
                         fqn,
                         slot,
+                        silent,
                         entry: None,
                         file: self.current_source_file.clone(),
                         span: ast.0.into_range(),
@@ -7510,6 +7513,7 @@ impl Compiler {
         self.pure_fns = self.typed_sidecar.pure_fn_names().clone();
         self.steady_fns = self.typed_sidecar.length_stability().fns.clone();
         self.alloc_steady = self.typed_sidecar.length_stability().alloc_stable;
+        self.pure_static_inits.clear();
         // E1: the HIR summaries also prove functions pure that call a
         // function parameter only with pure functions (`map(xs, fn ...)`).
         if let Some(hir) = self.hir_module.as_ref() {
@@ -7526,6 +7530,7 @@ impl Compiler {
                 effects::capture(hir, &fx, explained);
             }
             self.messages.extend(const_effect_messages(&self.checker, hir, &fx));
+            self.pure_static_inits = pure_static_inits(&self.checker, hir, &fx);
             let mutations = fx.mutations();
             let summaries = fx.summaries;
             self.pure_fns.extend(pure);
@@ -8566,6 +8571,19 @@ fn const_effect_messages(checker: &crate::typechecking::infer::Checker, hir: &cr
         out.push(msg);
     }
     out
+}
+
+/// `static let`s whose initializer is pure, by HIR name: computed at
+/// compile time when they can be (comptime step 4).
+fn pure_static_inits(checker: &crate::typechecking::infer::Checker, hir: &crate::hir::HirModule, fx: &crate::hir::effects::ModuleEffects) -> HashSet<String> {
+    hir.bodies
+        .iter()
+        .zip(&fx.summaries)
+        .filter(|(body, s)| body.kind == crate::hir::BodyKind::Static && s.visible.is_pure() && s.latent == 0)
+        .filter_map(|(body, _)| body.name.strip_suffix("$init"))
+        .filter(|name| !checker.is_const_static(name))
+        .map(str::to_string)
+        .collect()
 }
 
 #[cfg(test)]
