@@ -249,7 +249,7 @@ impl Checker {
         msg.push(Label::new(format!("this call sets a type parameter to `{shown}`"), range));
         if req.module == module {
             msg.push(Label::new(
-                format!("`weak()` is called on it here"),
+                "`weak()` is called on it here".to_string(),
                 req.origin.clone(),
             ));
         }

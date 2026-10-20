@@ -36,6 +36,8 @@ use super::*;
 type OpenAssocOwner = (TyVarId, String, Vec<String>);
 type OpenAssocValue = (TyVarId, Vec<Ty>);
 type OpenAssocKey = (OpenAssocOwner, OpenAssocValue);
+/// A generic instance's head variables and the fresh ones replacing them.
+type FreshVars = Vec<(TyVarId, TyVarId)>;
 
 #[path = "host_caps.rs"]
 mod host_caps;
@@ -5927,7 +5929,7 @@ impl Checker {
         &mut self,
         args: &[Ty],
         context: &[Constraint],
-    ) -> (Vec<Ty>, Vec<Constraint>, Vec<(TyVarId, TyVarId)>) {
+    ) -> (Vec<Ty>, Vec<Constraint>, FreshVars) {
         let mut vars = Vec::new();
         for a in args {
             Self::collect_ty_vars(a, &mut vars);
@@ -10482,8 +10484,8 @@ impl Checker {
             .filter(|inst| inst.class == class && inst.args.len() == wanted_lookup.len())
             .cloned()
             .collect();
-        let mut matches: Vec<(InstanceDef, Subst, Vec<(TyVarId, TyVarId)>)> = Vec::new();
-        let mut structural: Vec<(InstanceDef, Subst, Vec<(TyVarId, TyVarId)>)> = Vec::new();
+        let mut matches: Vec<(InstanceDef, Subst, FreshVars)> = Vec::new();
+        let mut structural: Vec<(InstanceDef, Subst, FreshVars)> = Vec::new();
         for inst in candidates {
             let mut ok = true;
             let mut local = self.subst.clone();
