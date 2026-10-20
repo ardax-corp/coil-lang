@@ -533,6 +533,10 @@ pub struct HirMirInput<'a> {
     /// Field reads of a `readonly class` instance: no store ever changes
     /// what they read (#1560).
     pub invariant_fields: HashSet<u32>,
+    /// Function-local `const` tables of literals (#1561): the array
+    /// `Make` and the static slot it is built into on first use and loaded
+    /// from after that.
+    pub frozen_arrays: HashMap<u32, u32>,
     /// Heap fields and `new` arguments whose slot holds a boxed enum
     /// object (a generic class's field open in a parameter) for a value
     /// whose own word is this niche layout: boxed on the way in, unboxed
@@ -3123,7 +3127,10 @@ impl Lower<'_> {
             HirKind::Make { kind, args } if self.inp.pair_tys.contains_key(&id.0) => self.make_pair(id, kind, args),
             HirKind::Make { kind: MakeKind::Tuple, args } => self.make_tuple(args),
             HirKind::Make { kind: MakeKind::Range { .. }, args } if self.expr_ty(id).is_some_and(lower::is_open_range) => self.make_open_range(id, args),
-            HirKind::Make { kind: MakeKind::Array, args } if self.heap_array(id) => self.make_array(id, args),
+            HirKind::Make { kind: MakeKind::Array, args } if self.heap_array(id) => match self.inp.frozen_arrays.get(&id.0) {
+                Some(&slot) => self.frozen_array(id, args, slot),
+                None => self.make_array(id, args),
+            },
             HirKind::Make { kind: MakeKind::Class(_), args } if self.inp.news.contains_key(&id.0) => self.make_object(id, args),
             HirKind::Make {
                 kind: MakeKind::Variant { variant, .. },
@@ -5255,6 +5262,33 @@ impl Lower<'_> {
         let stamp = self.expr_ty(id).and_then(array_elem).map_or(0, |e| (self.inp.array_stamp)(e));
         let arr = self.b.ins_alloc_kinds(MirAllocKind::Array, items, stamp).map_err(mir)?;
         Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![arr]).map_err(mir)?))
+    }
+
+    /// A local `const` table of literals (#1561): built into static `slot`
+    /// the first time it runs in this VM (an isolate thread's statics start
+    /// zeroed; a shared-heap job's copy may not have it yet), loaded after
+    /// that. No code writes the array, so sharing it is not seen.
+    fn frozen_array(&mut self, id: HirId, args: &[HirId], slot: u32) -> Result<Val, Refusal> {
+        let have = self.b.ins_load_static(slot, MirTy::HeapRef).map_err(mir)?;
+        let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+        let unset = self.b.ins_cmp(MirCmpOp::Eq, have, zero).map_err(mir)?;
+        let build = self.b.create_block();
+        let loaded = self.b.create_block();
+        let join = self.b.create_block();
+        self.b.branch(unset, build, loaded).map_err(mir)?;
+        self.switch(build);
+        let Val::V(built) = self.make_array(id, args)? else {
+            return Err("table element".into());
+        };
+        self.b.ins_store_static(slot, built).map_err(mir)?;
+        let built_from = self.cur;
+        self.jump(join)?;
+        self.switch(loaded);
+        self.jump(join)?;
+        self.switch(join);
+        let table = self.b.ins_stack_phi(vec![(built_from, built), (loaded, have)]).map_err(mir)?;
+        self.b.mark_invariant_load(table);
+        Ok(Val::V(table))
     }
 
     /// `new C(..)`: every argument, then the object and each field's store

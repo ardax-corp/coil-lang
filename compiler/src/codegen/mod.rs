@@ -482,6 +482,13 @@ pub struct Compiler {
     /// Ground dictionary programs built once into a static slot
     /// ([`Compiler::intern_dict_ops`]), by their ops.
     interned_dicts: HashMap<Vec<crate::mir::HirDictOp>, u32>,
+    /// Static slots of module `const`s set to a `readonly` array literal
+    /// (#1561): nothing ever writes the slot after startup or an element
+    /// of its array. Each element's value when it folds.
+    frozen_tables: HashMap<u32, Vec<Option<ConstValue>>>,
+    /// Function-local `const` tables of literals, built once into a static
+    /// slot on first use (#1561), by their element type and literals.
+    interned_tables: HashMap<String, u32>,
     /// Set by a call site that passes raw arguments, right before it emits
     /// the entry of a [`Self::raw_instance_methods`] method; any other call
     /// goes through the adapter.
@@ -777,6 +784,8 @@ impl Default for Compiler {
             pending_own_dicts: None,
             raw_instance_methods: HashSet::new(),
             interned_dicts: HashMap::new(),
+            frozen_tables: HashMap::new(),
+            interned_tables: HashMap::new(),
             raw_instance_call: false,
             inst_clone_srcs: HashMap::new(),
             inst_clones: HashMap::new(),

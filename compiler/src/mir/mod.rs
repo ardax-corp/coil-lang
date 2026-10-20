@@ -66,7 +66,7 @@ pub use inst::{BlockId, LocalId, MirUnaryOp, Terminator};
 pub use instcombine::{instcombine, instcombine_lir};
 #[cfg(test)]
 pub use layout::MirLayout;
-pub use licm::licm;
+pub use licm::{licm, mark_frozen_arrays};
 #[cfg(test)]
 pub use error::LowerError;
 pub use specialize::{
