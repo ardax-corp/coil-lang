@@ -41,7 +41,7 @@ cargo build --bin coil && (ulimit -v 65536; ./target/debug/coil test)  # 64MB le
 
 Every runnable program needs `fn main()` **unless** the file only has `test("…")` cases (harness injects virtual `main` for `coil test`; do not mix `main` and `test()` in one file).
 
-Implicit imports (no `use` needed): prelude (`prelude`, `prelude::ops`, `prelude::math`) — injected by the compiler, not written in source. `prelude::math` is IEEE HostInvoke: frozen `sin`/`cos`/`tan`/`sqrt`/`floor`/`ceil`/`exp`/`ln`/`pow` (**102–110**) plus M1 `atan`/`atan2`/`asin`/`acos`, `log10`/`log2`/`cbrt`, `rem`, `sinh`/`cosh`/`tanh` (**125–135**, archive minor 5). Named `PI` / `E` / `TAU` are [coil-stdlib `num`](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/modules.md) (`static const`), not natives.
+Implicit imports (no `use` needed): prelude (`prelude`, `prelude::ops`, `prelude::math`) — injected by the compiler, not written in source. `prelude::math` is IEEE HostInvoke: frozen `sin`/`cos`/`tan`/`sqrt`/`floor`/`ceil`/`exp`/`ln`/`pow` (**102–110**) plus M1 `atan`/`atan2`/`asin`/`acos`, `log10`/`log2`/`cbrt`, `rem`, `sinh`/`cosh`/`tanh` (**125–135**, archive minor 5). Named `PI` / `E` / `TAU` are [coil-stdlib `num`](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/modules.md) (`const`), not natives.
 
 Explicit `use` for: `io`, `string`, `ffi`, `thread`, `env`, `gc`, `clock` (`wall_nanos` / `mono_nanos` / `sleep_ms`). Time calendar/format: [coil-time](https://github.com/ardax-corp/coil-time). Regex: [coil-regex](https://github.com/ardax-corp/coil-regex). TLS: [coil-tls](https://github.com/ardax-corp/coil-tls). Crypto: [coil-crypto](https://github.com/ardax-corp/coil-crypto).
 

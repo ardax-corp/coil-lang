@@ -317,7 +317,7 @@ pub struct Checker {
     /// deeper than a same-named static's declaration frame is a local that
     /// shadows the static.
     ident_binding_frames: HashMap<(usize, usize), usize>,
-    /// Static FQN → env frame its `static let` / `static const` was bound in.
+    /// Static FQN → env frame its `static let` / startup `const` was bound in.
     static_decl_frames: HashMap<String, usize>,
     /// Span → NodeId so post-infer coercions can retarget `cache` (B2 sidecar).
     node_ids_by_span: HashMap<(usize, usize), NodeId>,
@@ -490,7 +490,7 @@ pub struct Checker {
     /// Foldable values for `const` bindings (loop-condition const eval).
     const_fold_env: HashMap<String, crate::typechecking::const_eval::ConstVal>,
 
-    /// Global static slots (`static let` / `static const` / class `static` fields).
+    /// Global static slots (`static let`, a module `const` set at startup, class `static` fields).
     /// Key = FQN (`module::name` or `Class::field`). Persists across modules.
     static_slots: HashMap<String, (u32, bool)>,
     static_slot_types: HashMap<String, Ty>,
