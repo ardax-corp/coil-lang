@@ -7262,6 +7262,12 @@ impl Compiler {
         if let Some(op) = self.hir_instance_operator(ty, class, method) {
             return Some(op);
         }
+        // An aggregate holding a user `Eq` compares through its glue (#1629).
+        if matches!(sym, "==" | "!=")
+            && let Some((lookup, fqn)) = self.eq_glue_target(ty, sym == "!=")
+        {
+            return Some(HirOp::Call { lookup, fqn, class, method });
+        }
         match self.concrete_operator_target_ty(ty, class, method) {
             Some(_) => None,
             None => match sym {
