@@ -7,7 +7,8 @@ use std::process::exit;
 
 use coil_cli::resolve_default_runner;
 use common::{
-    append_package_payload_with_natives, bytecode_uses_ffi, ffi_library_names_from_bytecode,
+    append_package_payload_with_natives, bytecode_uses_ffi, dload_request_stem,
+    ffi_library_names_from_bytecode,
     is_packaged_executable, is_system_ffi_stem, ArchivedArchivedProgram, ArchivedProgram, Byte,
     NativeLock, NativeLockEntry, ARCHIVE_VERSION, PACKAGE_FLAG_USES_FFI,
 };
@@ -170,16 +171,30 @@ pub fn build_native_lock(
     bytecode: &[Byte],
     strings: &[String],
 ) -> Result<NativeLock, String> {
-    let stems = ffi_library_names_from_bytecode(bytecode, strings);
+    // Reduce each literal to the stem the runtime dload gate uses
+    // (`./native/libtls.so` → `tls`), so one `--ffi-native name=tls` row covers
+    // every spelling of that library.
+    let mut stems: Vec<(String, String)> = Vec::new();
+    for literal in ffi_library_names_from_bytecode(bytecode, strings) {
+        let stem = dload_request_stem(&literal);
+        if !stems.iter().any(|(s, _)| *s == stem) {
+            stems.push((stem, literal));
+        }
+    }
     let mut entries = Vec::new();
 
-    for stem in &stems {
+    for (stem, literal) in &stems {
         if is_system_ffi_stem(stem) {
             continue;
         }
         let decl = natives.iter().find(|n| n.name == *stem).ok_or_else(|| {
+            let loaded = if literal == stem {
+                format!("`{stem}`")
+            } else {
+                format!("`{literal}` (stem `{stem}`)")
+            };
             format!(
-                "FFI library `{stem}` is loaded but has no `--ffi-native name={stem},…`; \
+                "FFI library {loaded} is loaded but has no `--ffi-native name={stem},…`; \
                      pass one with name/version/path (system libs like `c` need no entry)"
             )
         })?;
