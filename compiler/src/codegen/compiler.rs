@@ -7487,6 +7487,7 @@ impl Compiler {
             use crate::hir::effects;
             let fx = effects::ModuleEffects::solve(hir, &self.checker, module, &self.program_effects);
             self.messages.extend(fx.violation_messages());
+            self.messages.extend(fx.readonly_messages());
             let pure = effects::pure_names(hir, module, &fx.summaries, &self.pure_fns);
             if effects::effects_capture_active() {
                 let explained = (self.auto_par && auto_par_enabled()).then(|| {
@@ -7495,10 +7496,12 @@ impl Compiler {
                 });
                 effects::capture(hir, &fx, explained);
             }
+            let mutations = fx.mutations();
             let summaries = fx.summaries;
             self.pure_fns.extend(pure);
             self.steady_fns.extend(effects::steady_names(hir, module, &summaries, &self.pure_fns));
             self.program_effects.record(hir, &self.checker, module, &summaries);
+            self.program_effects.record_mutations(mutations);
         }
         if self.auto_par && auto_par_enabled() {
             // IPA sites on any pure function (self-recursion or helper arms).

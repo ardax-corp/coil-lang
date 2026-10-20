@@ -13,13 +13,19 @@
 //! Summaries are solved per module to a fixed point and kept for the whole
 //! program in [`ProgramEffects`] (modules compile in dependency order), so
 //! a call into an earlier module sees the callee's summary.
+//!
+//! A summary also says which parameters a body mutates (`mutates`, `self`
+//! is parameter 0 of a method): a write through a value reached from the
+//! parameter, or passing such a value where the callee mutates it. A call
+//! that passes a `readonly` value where the callee mutates it is E0107
+//! ([`ModuleEffects::readonly_messages`], #1558).
 
 use std::collections::{HashMap, HashSet};
 
 use common::EffectFlags;
 
 use super::lower::children;
-use super::{BodyKind, Builtin, BinOp, Callee, HirBody, HirId, HirKind, HirModule, LocalId, LocalKind, MakeKind};
+use super::{BodyKind, Builtin, BinOp, Callee, HirBody, HirId, HirKind, HirModule, HirPat, HirPatFields, LocalId, LocalKind, MakeKind};
 use crate::typechecking::def_id::DefId;
 use crate::typechecking::infer::{Checker, ForInKind};
 use crate::typechecking::purity::classify_host_name;
@@ -43,6 +49,10 @@ pub struct Summary {
     /// Bit `i`: the body calls its parameter `i` (a function value), so a
     /// call also has the effects of the function passed there.
     pub latent: u64,
+    /// Bit `i`: the body may change what its parameter `i` reaches (a
+    /// field, an element, a `Vec`), itself or through a callee. A
+    /// `readonly` argument there is E0107.
+    pub mutates: u64,
 }
 
 /// `open(path, "r")` with a literal mode reads or writes only as the mode
@@ -66,7 +76,7 @@ fn open_mode_summary(body: &HirBody, name: &str, args: &[HirId], s: Summary) -> 
     Summary {
         flags: keep(s.flags),
         visible: keep(s.visible),
-        latent: s.latent,
+        ..s
     }
 }
 
@@ -84,6 +94,7 @@ impl Summary {
             flags,
             visible: EffectFlags::from_bits(flags.bits() & !hidden),
             latent: 0,
+            mutates: 0,
         }
     }
 }
@@ -134,6 +145,10 @@ pub fn allowed(names: &[String]) -> EffectFlags {
     EffectFlags::from_bits(bits)
 }
 
+/// Why bodies mutate their parameters, by full body name:
+/// `(parameter index, "writes field `x`")`.
+pub type Mutations = HashMap<String, Vec<(u32, String)>>;
+
 /// Summaries of every body compiled so far, by full body name
 /// (`module::f`, `module::Owner::m`) and by [`DefId`] for functions.
 #[derive(Debug, Default)]
@@ -142,12 +157,35 @@ pub struct ProgramEffects {
     by_name: HashMap<String, Summary>,
     /// Trait methods of every module so far, with their declarations.
     traits: Vec<super::TraitEffects>,
+    /// Why a body mutates each parameter it mutates, by full body name:
+    /// `(parameter index, "writes field `x`")`.
+    mutations: Mutations,
 }
 
 impl ProgramEffects {
+    /// Why the body named `key` (or `module::key`, `.m()` for a method
+    /// `Owner::m`) mutates its parameter `j`, when an earlier module said.
+    fn mutation_reason(&self, key: &str, j: u32) -> Option<String> {
+        let key = key.trim_start_matches('.').trim_end_matches("()");
+        let suffix = format!("::{key}");
+        let found = self.mutations.get(key).or_else(|| {
+            self.mutations
+                .iter()
+                .find(|(name, _)| name.ends_with(&suffix))
+                .map(|(_, r)| r)
+        })?;
+        found.iter().find(|(k, _)| *k == j).map(|(_, r)| r.clone())
+    }
+
     /// The summary of the body named `name` (`module::f`, `module::Owner::m`).
     pub fn summary_named(&self, name: &str) -> Option<Summary> {
         self.by_name.get(name).copied()
+    }
+
+    /// Keep why a module's bodies mutate their parameters
+    /// ([`ModuleEffects::mutations`]), so a later module's E0107 can say so.
+    pub fn record_mutations(&mut self, mutations: Mutations) {
+        self.mutations.extend(mutations);
     }
 
     /// Keep `module`'s summaries for the modules compiled after it.
@@ -477,6 +515,68 @@ impl<'a> ModuleEffects<'a> {
         }
     }
 
+    /// Why each function and method mutates each parameter it mutates.
+    pub fn mutations(&self) -> Mutations {
+        let mut out = Mutations::new();
+        for (i, body) in self.cx.module.bodies.iter().enumerate() {
+            let m = self.summaries[i].mutates;
+            if m == 0 || !matches!(body.kind, BodyKind::Function | BodyKind::Method) {
+                continue;
+            }
+            let reasons = (0..64u32)
+                .filter(|j| m & (1 << j) != 0)
+                .map(|j| (j, self.mutation_reason(i, j)))
+                .collect();
+            out.insert(body.name.clone(), reasons);
+        }
+        out
+    }
+
+    /// Why body `index` mutates its parameter `j`.
+    pub fn mutation_reason(&self, index: usize, j: u32) -> String {
+        self.cx.mutation_reason(index, j, &self.summaries)
+    }
+
+    /// E0107 for every call that passes a `readonly` value where the callee
+    /// mutates it, and for every trait impl method that mutates a
+    /// parameter its trait declares `readonly` (#1558).
+    pub fn readonly_messages(&self) -> Vec<reporting::Message> {
+        use reporting::{ErrorCode, Message};
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
+        for i in 0..self.cx.module.bodies.len() {
+            let w = self.cx.walk_mutations(i, &self.summaries);
+            for hit in w.ro_hits.unwrap_or_default() {
+                if !seen.insert((hit.span, hit.message.clone())) {
+                    continue;
+                }
+                let mut msg = Message::error(ErrorCode::InvalidAssignment, hit.message, hit.span.0..hit.span.1);
+                msg.with_help(hit.help);
+                out.push(msg);
+            }
+        }
+        for (i, body) in self.cx.module.bodies.iter().enumerate() {
+            let local = local_name(self.cx.module_path, &body.name).unwrap_or(&body.name);
+            let Some((path, m)) = local.rsplit_once("::") else { continue };
+            let Some((tr, _)) = path.split_once(" for ") else { continue };
+            let declared = self.cx.checker.trait_readonly_params(tr, m);
+            let bad = self.summaries[i].mutates & declared;
+            let Some(j) = (0..64u32).find(|j| bad & (1 << j) != 0) else { continue };
+            let (_, param) = self.cx.callee_param(Some(i), None, j);
+            let mut msg = Message::error(
+                ErrorCode::InvalidAssignment,
+                format!(
+                    "`{local}` implements `{tr}::{m}`, which declares {param} `readonly`, but it mutates it: {}",
+                    self.mutation_reason(i, j)
+                ),
+                body.span.0..body.span.1,
+            );
+            msg.with_help("an impl must keep to the trait's `readonly` parameters; drop the write, or the `readonly` from the trait".to_string());
+            out.push(msg);
+        }
+        out
+    }
+
     /// Every reason body `index` is not pure, in source order.
     pub fn explain(&self, index: usize) -> Vec<Cause> {
         self.cx.walk(index, &self.summaries, true).causes.unwrap_or_default()
@@ -501,6 +601,14 @@ impl<'a> ModuleEffects<'a> {
         for (i, p) in body.params.iter().enumerate().take(64) {
             if s.latent & (1 << i) != 0 {
                 parts.push(format!("calls parameter `{}`", body.local(*p).name));
+            }
+        }
+        for (i, p) in body.params.iter().enumerate().take(64) {
+            if s.mutates & (1 << i) != 0 {
+                match body.local(*p).name.as_str() {
+                    "self" => parts.push("mutates self".to_string()),
+                    n => parts.push(format!("mutates `{n}`")),
+                }
             }
         }
         let head = if s.visible.is_pure() {
@@ -719,6 +827,9 @@ struct BodyFacts {
     /// `let f = <lambda or fn>` never reassigned: a call through `f` is a
     /// call of that function.
     fn_values: HashMap<LocalId, HirId>,
+    /// Locals that may hold a value reached from parameters: bit `i` for
+    /// parameter `i` ([`param_roots`]).
+    derived: HashMap<LocalId, u64>,
 }
 
 impl BodyFacts {
@@ -791,7 +902,171 @@ impl BodyFacts {
             }
         }
         fresh.retain(|l| !escaped.contains(l));
-        Self { private: fresh, fn_values }
+        let derived = derived_locals(body);
+        Self {
+            private: fresh,
+            fn_values,
+            derived,
+        }
+    }
+}
+
+/// Whether a value of `ty` can reach something a write could change.
+/// Scalars, strings and functions cannot.
+fn may_hold_mutable(ty: Option<&Ty>) -> bool {
+    match ty {
+        Some(Ty::Readonly(inner)) => may_hold_mutable(Some(inner)),
+        Some(Ty::Con(n)) => !matches!(
+            n.as_str(),
+            "int" | "float" | "bool" | "byte" | "string" | "unit" | "char" | "f32" | "f64"
+        ),
+        Some(Ty::Fun(..)) => false,
+        _ => true,
+    }
+}
+
+/// The parameters (bit `i` for parameter `i`) whose values `id` may
+/// reach: a parameter, a field, element or pattern binding read from one,
+/// or what a call returns when it was given one (a getter may return
+/// `self.inner`).
+fn param_roots(body: &HirBody, derived: &HashMap<LocalId, u64>, id: HirId) -> u64 {
+    let e = body.expr(id);
+    if !may_hold_mutable(e.ty.as_ref()) {
+        return 0;
+    }
+    let roots = |k: HirId| param_roots(body, derived, k);
+    match &e.kind {
+        HirKind::Local(l) => local_roots(body, derived, *l),
+        HirKind::Field { base, .. } | HirKind::Index { base, .. } => roots(*base),
+        HirKind::Cast { value } | HirKind::Named { value, .. } | HirKind::Spread(value) => roots(*value),
+        HirKind::Call { args, .. } | HirKind::Make { args, .. } | HirKind::Builtin { args, .. } => {
+            args.iter().fold(0, |m, a| m | roots(*a))
+        }
+        HirKind::Block { tail: Some(t), .. } => roots(*t),
+        HirKind::If { then, els, .. } => roots(*then) | els.map_or(0, roots),
+        HirKind::Match { arms, .. } => arms.iter().fold(0, |m, a| m | roots(a.body)),
+        _ => 0,
+    }
+}
+
+/// [`param_roots`] of local `l`. A lambda's captures count as parameters
+/// after its own: bit `params.len() + k` for capture `k`, which the body
+/// making the lambda maps back to the captured local.
+fn local_roots(body: &HirBody, derived: &HashMap<LocalId, u64>, l: LocalId) -> u64 {
+    let capture = body.captures.iter().position(|(_, inner)| *inner == l).map(|k| body.params.len() + k);
+    let own = body
+        .params
+        .iter()
+        .position(|p| *p == l)
+        .or(capture)
+        .filter(|&i| i < 64)
+        .map_or(0, |i| 1u64 << i);
+    own | derived.get(&l).copied().unwrap_or(0)
+}
+
+fn pat_binds(pat: &HirPat, out: &mut Vec<LocalId>) {
+    match pat {
+        HirPat::Bind(l) => out.push(*l),
+        HirPat::Tuple(items) => items.iter().for_each(|p| pat_binds(p, out)),
+        HirPat::Record(fields) => fields.iter().for_each(|(_, p)| pat_binds(p, out)),
+        HirPat::Variant { fields, .. } => match fields {
+            HirPatFields::Unit => {}
+            HirPatFields::Tuple(items) => items.iter().for_each(|p| pat_binds(p, out)),
+            HirPatFields::Record(fields) => fields.iter().for_each(|(_, p)| pat_binds(p, out)),
+        },
+        HirPat::Wild | HirPat::Int(_) => {}
+    }
+}
+
+/// [`BodyFacts::derived`]: what each local may reach of the parameters,
+/// through `let`, assignment, pattern bindings and `for` variables.
+fn derived_locals(body: &HirBody) -> HashMap<LocalId, u64> {
+    let mut derived: HashMap<LocalId, u64> = HashMap::new();
+    if body.params.is_empty() && body.captures.is_empty() {
+        return derived;
+    }
+    loop {
+        let mut changed = false;
+        let mut add = |derived: &mut HashMap<LocalId, u64>, l: LocalId, bits: u64| {
+            if bits == 0 {
+                return;
+            }
+            let slot = derived.entry(l).or_insert(0);
+            if *slot | bits != *slot {
+                *slot |= bits;
+                changed = true;
+            }
+        };
+        for e in &body.exprs {
+            let mut binds = Vec::new();
+            let bits = match &e.kind {
+                HirKind::Let { local, init: Some(init) } => {
+                    binds.push(*local);
+                    param_roots(body, &derived, *init)
+                }
+                HirKind::Assign { place, value } => match body.expr(*place).kind {
+                    HirKind::Local(l) => {
+                        binds.push(l);
+                        param_roots(body, &derived, *value)
+                    }
+                    _ => 0,
+                },
+                HirKind::LetPat { pat, init } => {
+                    pat_binds(pat, &mut binds);
+                    param_roots(body, &derived, *init)
+                }
+                HirKind::ForIn { pat, iterable, .. } => {
+                    pat_binds(pat, &mut binds);
+                    param_roots(body, &derived, *iterable)
+                }
+                HirKind::Match { scrutinee, arms } => {
+                    for arm in arms {
+                        pat_binds(&arm.pat, &mut binds);
+                    }
+                    param_roots(body, &derived, *scrutinee)
+                }
+                _ => 0,
+            };
+            for l in binds {
+                add(&mut derived, l, bits);
+            }
+        }
+        if !changed {
+            return derived;
+        }
+    }
+}
+
+/// The parameters a function value of type `ty` may mutate: every one
+/// its type does not declare `readonly`. A type-variable parameter is left
+/// out: the checker types the function passed for it with the argument's
+/// own type, `readonly` included.
+fn fn_type_mutates(ty: Option<&Ty>) -> u64 {
+    let mut out = 0;
+    let mut cur = ty;
+    let mut i = 0;
+    while let Some(Ty::Fun(p, r)) = cur {
+        if i < 64 && !matches!(p.as_ref(), Ty::Readonly(_) | Ty::Var(_)) {
+            out |= 1 << i;
+        }
+        i += 1;
+        cur = Some(r.as_ref());
+    }
+    out
+}
+
+/// Whether passing a value of `ty` where a callee mutates it would write
+/// through a `readonly`: a `readonly` value, or one in a tuple or an enum
+/// payload (both immutable themselves).
+fn readonly_at_top(checker: &Checker, ty: Option<&Ty>) -> bool {
+    match ty {
+        Some(Ty::Readonly(_)) => true,
+        Some(Ty::Tuple(items)) => items.iter().any(|t| readonly_at_top(checker, Some(t))),
+        Some(Ty::App(head, args)) => {
+            matches!(head.as_ref(), Ty::Con(n) if common::is_poly_builtin_enum(n) || checker.enum_variants(n).is_some())
+                && args.iter().any(|t| readonly_at_top(checker, Some(t)))
+        }
+        _ => false,
     }
 }
 
@@ -834,6 +1109,30 @@ struct Walk<'s> {
     out: Summary,
     /// Why the body has its effects, when [`explain`] asked.
     causes: Option<Vec<Cause>>,
+    /// Why the body mutates its parameters, when asked.
+    mut_causes: Option<Vec<MutCause>>,
+    /// Calls that pass a `readonly` value where the callee mutates it,
+    /// when asked.
+    ro_hits: Option<Vec<RoHit>>,
+}
+
+/// One place a body mutates what its parameters reach.
+#[derive(Debug, Clone)]
+struct MutCause {
+    /// The parameters reached there.
+    bits: u64,
+    /// "writes field `x`", "calls `.push()` on a `Vec`".
+    what: String,
+    /// A callee in this module mutates it as its parameter `.1`.
+    callee: Option<(usize, u32)>,
+}
+
+/// A call that passes a `readonly` value where the callee mutates it.
+#[derive(Debug, Clone)]
+struct RoHit {
+    span: super::Span,
+    message: String,
+    help: String,
 }
 
 /// One reason a body is not pure.
@@ -869,11 +1168,179 @@ impl Cx<'_> {
             summaries,
             out: Summary::default(),
             causes: explain.then(Vec::new),
+            mut_causes: None,
+            ro_hits: None,
         };
         if let Some(root) = body.root {
             self.expr(&mut w, root);
         }
         w
+    }
+
+    /// Body `index` walked for its parameter mutations and its calls that
+    /// mutate a `readonly` value, with the solved summaries.
+    fn walk_mutations<'s>(&self, index: usize, summaries: &'s [Summary]) -> Walk<'s> {
+        let body = &self.module.bodies[index];
+        let mut w = Walk {
+            index,
+            summaries,
+            out: Summary::default(),
+            causes: None,
+            mut_causes: Some(Vec::new()),
+            ro_hits: Some(Vec::new()),
+        };
+        if let Some(root) = body.root {
+            self.expr(&mut w, root);
+        }
+        w
+    }
+
+    /// The parameters `id` may reach in the walked body.
+    fn roots(&self, w: &Walk<'_>, id: HirId) -> u64 {
+        param_roots(&self.module.bodies[w.index], &self.facts[w.index].derived, id)
+    }
+
+    /// The body mutates what `bits` of its parameters reach.
+    fn mutate(&self, w: &mut Walk<'_>, bits: u64, callee: Option<(usize, u32)>, what: impl FnOnce() -> String) {
+        if bits == 0 {
+            return;
+        }
+        w.out.mutates |= bits;
+        if let Some(causes) = w.mut_causes.as_mut() {
+            causes.push(MutCause { bits, what: what(), callee });
+        }
+    }
+
+    /// Fold callee `shown`'s parameter mutations into `w`: an argument it
+    /// mutates is mutated here too, and one that is `readonly` is E0107.
+    /// `key` names an earlier module's callee, for its reasons.
+    #[allow(clippy::too_many_arguments)]
+    fn call_mutates(
+        &self,
+        w: &mut Walk<'_>,
+        at: HirId,
+        shown: &str,
+        mutates: u64,
+        callee_body: Option<usize>,
+        key: Option<&str>,
+        args: &[HirId],
+        trait_decl: bool,
+    ) {
+        if mutates == 0 {
+            return;
+        }
+        let body = &self.module.bodies[w.index];
+        let positional = args
+            .iter()
+            .all(|a| !matches!(body.expr(*a).kind, HirKind::Named { .. } | HirKind::Spread(_)));
+        if !positional {
+            let all = args.iter().fold(0, |m, a| m | self.roots(w, *a));
+            self.mutate(w, all, None, || format!("passes it to `{shown}`"));
+            return;
+        }
+        for (j, &arg) in args.iter().enumerate().take(64) {
+            if mutates & (1 << j) == 0 {
+                continue;
+            }
+            let j = j as u32;
+            let bits = self.roots(w, arg);
+            self.mutate(w, bits, callee_body.map(|b| (b, j)), || {
+                if trait_decl && callee_body.is_none() && shown.starts_with('.') && j == 0 {
+                    format!("calls `{shown}`, whose trait does not declare `self` `readonly`")
+                } else {
+                    format!("passes it to `{shown}`")
+                }
+            });
+            if w.ro_hits.is_none() || !readonly_at_top(self.checker, body.expr(arg).ty.as_ref()) {
+                continue;
+            }
+            let (what, mut param) = self.callee_param(callee_body, key, j);
+            if trait_decl && j == 0 {
+                param = "`self`".to_string();
+            }
+            let reason = match callee_body {
+                Some(b) => Some(self.mutation_reason(b, j, w.summaries)),
+                None => key.and_then(|k| self.program.mutation_reason(k, j)),
+            };
+            let because = reason.map_or_else(String::new, |r| format!(" ({r})"));
+            let message = if shown.starts_with('.') {
+                format!("Cannot call `{shown}` on a `readonly` value: it mutates {param}{because}")
+            } else {
+                format!("Cannot pass a `readonly` value to `{shown}`: it mutates {param}{because}")
+            };
+            let help = if trait_decl {
+                format!(
+                    "a trait method may be called on a `readonly` value only when the trait declares that parameter `readonly` (`fn {what}(readonly A self)`)"
+                )
+            } else {
+                "only a function or method that does not mutate it accepts a `readonly` value; mutate through a name that is not `readonly`".to_string()
+            };
+            let span = body.expr(at).span;
+            if let Some(hits) = w.ro_hits.as_mut() {
+                hits.push(RoHit { span, message, help });
+            }
+        }
+    }
+
+    /// How a diagnostic names parameter `j` of a callee: `self` or
+    /// parameter `p`, and the callee's short name.
+    fn callee_param(&self, callee_body: Option<usize>, key: Option<&str>, j: u32) -> (String, String) {
+        let short = |n: &str| n.rsplit("::").next().unwrap_or(n).trim_end_matches("()").trim_start_matches('.').to_string();
+        match callee_body {
+            Some(b) => {
+                let body = &self.module.bodies[b];
+                let name = body.params.get(j as usize).map(|p| body.local(*p).name.clone());
+                let param = match name.as_deref() {
+                    Some("self") => "`self`".to_string(),
+                    Some(n) => format!("parameter `{n}`"),
+                    None => format!("argument {}", j + 1),
+                };
+                (short(&body.name), param)
+            }
+            None => {
+                let param = if j == 0 && key.is_some_and(|k| k.starts_with('.')) {
+                    "`self`".to_string()
+                } else if j == 0 {
+                    "its first argument".to_string()
+                } else {
+                    format!("argument {}", j + 1)
+                };
+                (key.map(short).unwrap_or_default(), param)
+            }
+        }
+    }
+
+    /// Why body `index` mutates its parameter `j`, following calls in this
+    /// module: "writes field `x`", "calls `inner`, which writes field `x`".
+    fn mutation_reason(&self, index: usize, j: u32, summaries: &[Summary]) -> String {
+        let mut seen = HashSet::from([(index, j)]);
+        let mut parts: Vec<String> = Vec::new();
+        let (mut i, mut j) = (index, j);
+        loop {
+            let w = self.walk_mutations(i, summaries);
+            let found = w.mut_causes.unwrap_or_default().into_iter().find(|c| c.bits & (1 << j) != 0);
+            let Some(cause) = found else {
+                parts.push("mutates it".to_string());
+                break;
+            };
+            match cause.callee {
+                Some((b, k)) if seen.insert((b, k)) => {
+                    let callee = &self.module.bodies[b];
+                    if callee.kind == BodyKind::Lambda {
+                        parts.push("passes it to a lambda, which".to_string());
+                    } else {
+                        let name = local_name(self.module_path, &callee.name).unwrap_or(&callee.name);
+                        parts.push(format!("calls `{name}`, which"));
+                    }
+                    (i, j) = (b, k);
+                }
+                _ => {
+                    parts.push(cause.what);
+                    break;
+                }
+            }
+        }
+        parts.join(" ")
     }
 
     /// Add `bits` for the node `at`; `what` says why, when explaining.
@@ -921,6 +1388,20 @@ impl Cx<'_> {
         match &e.kind {
             HirKind::Call { callee, args } => self.call(w, id, callee, args),
             HirKind::Assign { place, .. } => match &body.expr(*place).kind {
+                HirKind::Field { base, name } if self.roots(w, *base) != 0 => {
+                    let bits = self.roots(w, *base);
+                    self.mutate(w, bits, None, || format!("writes field `{name}`"));
+                    if !self.is_private(w, *base) {
+                        self.note(w, id, EffectFlags::HEAP_MUT, || format!("writes field `{name}` of a shared object"))
+                    }
+                }
+                HirKind::Index { base, .. } if self.roots(w, *base) != 0 => {
+                    let bits = self.roots(w, *base);
+                    self.mutate(w, bits, None, || "writes an element".to_string());
+                    if !self.is_private(w, *base) {
+                        self.note(w, id, EffectFlags::HEAP_MUT, || "writes an element of a shared array".into())
+                    }
+                }
                 HirKind::Field { base, name } if !self.is_private(w, *base) => {
                     self.note(w, id, EffectFlags::HEAP_MUT, || format!("writes field `{name}` of a shared object"))
                 }
@@ -937,7 +1418,24 @@ impl Cx<'_> {
                 _ => {}
             },
             HirKind::Append { base, .. } if !self.is_private(w, *base) => {
+                let bits = self.roots(w, *base);
+                self.mutate(w, bits, None, || "appends to an array".to_string());
                 self.note(w, id, EffectFlags::HEAP_MUT | EffectFlags::RESIZE, || "appends to a shared array".into())
+            }
+            // A lambda that mutates what it captured mutates the captured
+            // local's values here, whenever it is called.
+            HirKind::Lambda { body: inner } => {
+                let lambda = &self.module.bodies[*inner];
+                let mutates = w.summaries[*inner].mutates >> lambda.params.len().min(63);
+                for (k, (outer, _)) in lambda.captures.iter().enumerate().take(64) {
+                    if mutates & (1 << k) != 0 {
+                        let bits = local_roots(body, &self.facts[w.index].derived, *outer);
+                        let name = &body.local(*outer).name;
+                        self.mutate(w, bits, Some((*inner, (lambda.params.len() + k) as u32)), || {
+                            format!("captures `{name}` in a lambda that mutates it")
+                        });
+                    }
+                }
             }
             HirKind::Yield { .. } => self.note(w, id, EffectFlags::YIELD | EffectFlags::RESIZE, || "yields".into()),
             HirKind::Resume { .. } => {
@@ -999,6 +1497,8 @@ impl Cx<'_> {
                     s = open_mode_summary(body, name, args, s);
                 }
                 self.apply(w, at, name, s, callee, args);
+                let trait_decl = callee.is_none() && self.known_named(w, name, *def).is_none() && self.is_trait_method(name);
+                self.call_mutates(w, at, name, s.mutates, callee, Some(name), args, trait_decl);
             }
             Callee::Method { name } => {
                 let Some(&recv) = args.first() else { return };
@@ -1012,6 +1512,8 @@ impl Cx<'_> {
                         return;
                     }
                     if VEC_MUTATORS.contains(&name.as_str()) {
+                        let bits = self.roots(w, recv);
+                        self.mutate(w, bits, None, || format!("calls `.{name}()` on a `Vec`"));
                         if !self.is_private(w, recv) {
                             self.note(w, at, EffectFlags::HEAP_MUT | EffectFlags::RESIZE, || {
                                 format!("calls `.{name}()` on a shared `Vec`")
@@ -1022,7 +1524,11 @@ impl Cx<'_> {
                 }
                 let shown = format!(".{name}()");
                 match self.method(w, recv, name) {
-                    Some((s, callee)) => self.apply(w, at, &shown, s, callee, args),
+                    Some((s, callee)) => {
+                        self.apply(w, at, &shown, s, callee, args);
+                        let trait_decl = callee.is_none() && self.method_is_trait_dispatch(w, recv, name);
+                        self.call_mutates(w, at, &shown, s.mutates, callee, Some(&shown), args, trait_decl);
+                    }
                     // As the AST walk: an unresolved method is unknown code,
                     // but `len` / `capacity` cannot resize.
                     None => {
@@ -1032,20 +1538,35 @@ impl Cx<'_> {
                             EffectFlags::UNKNOWN | EffectFlags::RESIZE
                         };
                         self.note(w, at, bits, || format!("calls `{shown}`, which this analysis does not resolve"));
+                        // A trait method whose trait leaves its effects
+                        // undeclared still says which parameters it keeps
+                        // `readonly`.
+                        if let Some((mutates, callee)) = self.trait_call_mutates(w, recv, name) {
+                            let trait_decl = callee.is_none();
+                            self.call_mutates(w, at, &shown, mutates, callee, Some(&shown), args, trait_decl);
+                        }
                     }
                 }
             }
             Callee::Value(f) => {
+                // A function value may mutate each argument its type does
+                // not declare `readonly`.
+                let by_type = fn_type_mutates(body.expr(*f).ty.as_ref());
                 if let Some(i) = self.param_index(w.index, *f) {
                     w.out.latent |= 1 << i;
+                    self.call_mutates(w, at, "a function value", by_type, None, None, args, false);
                     return;
                 }
                 match self.fn_value(w, *f) {
                     Some(s) => {
                         let callee = self.fn_value_body(w.index, *f);
-                        self.apply(w, at, "a function value", s, callee, args)
+                        self.apply(w, at, "a function value", s, callee, args);
+                        self.call_mutates(w, at, "a function value", s.mutates, callee, None, args, false);
                     }
-                    None => self.note(w, at, UNKNOWN.bits(), || "calls a function value it cannot resolve".into()),
+                    None => {
+                        self.note(w, at, UNKNOWN.bits(), || "calls a function value it cannot resolve".into());
+                        self.call_mutates(w, at, "a function value", by_type, None, None, args, false);
+                    }
                 }
             }
         }
@@ -1167,7 +1688,7 @@ impl Cx<'_> {
     /// `None` when there is no such trait or one leaves it undeclared.
     fn trait_method(&self, trait_name: Option<&str>, method: &str) -> Option<Summary> {
         let short = |n: &str| short_name(n).to_string();
-        let traits: Vec<String> = self
+        let full: Vec<String> = self
             .checker
             .generics()
             .typeclasses
@@ -1175,11 +1696,15 @@ impl Cx<'_> {
             .filter(|(name, def)| {
                 trait_name.is_none_or(|t| short(t) == short(name)) && def.methods.iter().any(|m| m.name == method)
             })
-            .map(|(name, _)| short(name))
+            .map(|(name, _)| name.clone())
             .collect();
-        if traits.is_empty() {
+        if full.is_empty() {
             return None;
         }
+        // A call through the trait mutates every parameter the trait does
+        // not declare `readonly` (#1558).
+        let mutates = full.iter().fold(0u64, |m, t| m | self.trait_method_mutates(t, method));
+        let traits: Vec<String> = full.iter().map(|n| short(n)).collect();
         let mut visible = EffectFlags::empty();
         for t in &traits {
             let decl = self
@@ -1195,7 +1720,100 @@ impl Cx<'_> {
             flags: visible.union(UNKNOWN),
             visible,
             latent: 0,
+            mutates,
         })
+    }
+
+    /// What a call of trait method `method` (of `trait_name` only, when
+    /// given) mutates, whether or not the trait declares its effects.
+    fn trait_mutates(&self, trait_name: Option<&str>, method: &str) -> Option<u64> {
+        let short = |n: &str| short_name(n).to_string();
+        let mut found = None;
+        for (name, def) in self.checker.generics().typeclasses.iter() {
+            if trait_name.is_none_or(|t| short(t) == short(name)) && def.methods.iter().any(|m| m.name == method) {
+                found = Some(found.unwrap_or(0) | self.trait_method_mutates(name, method));
+            }
+        }
+        found
+    }
+
+    /// What `recv.name()` mutates when it dispatches through a trait: the
+    /// impl body's own summary on a concrete receiver whose impl was seen,
+    /// else what the trait declares.
+    fn trait_call_mutates(&self, w: &Walk<'_>, recv: HirId, name: &str) -> Option<(u64, Option<usize>)> {
+        let e = self.module.bodies[w.index].expr(recv);
+        if let Some(Ty::Existential { class }) = e.ty.as_ref().map(crate::typechecking::ty::strip_readonly) {
+            return self.trait_mutates(Some(class), name).map(|m| (m, None));
+        }
+        let owner = self.checker.class_owner_at_span(e.span).or_else(|| class_of(e.ty.as_ref()).map(str::to_string));
+        if let Some(owner) = owner.as_deref()
+            && let Some(found) = self.instance_mutates(w, owner, name)
+        {
+            return Some(found);
+        }
+        self.trait_mutates(None, name).map(|m| (m, None))
+    }
+
+    /// The parameters of trait method `trait_name::method` that its trait
+    /// does not declare `readonly`.
+    fn trait_method_mutates(&self, trait_name: &str, method: &str) -> u64 {
+        let arity = self.checker.typeclass_method_scheme(trait_name, method).map_or(64, |s| {
+            let mut n = 0;
+            let mut ty = &s.ty;
+            while let Ty::Fun(_, r) = ty {
+                n += 1;
+                ty = r;
+            }
+            n
+        });
+        let all = if arity >= 64 { u64::MAX } else { (1u64 << arity) - 1 };
+        all & !self.checker.trait_readonly_params(trait_name, method)
+    }
+
+    /// Whether `name` (`m`, `Trait::m`) names a trait method.
+    fn is_trait_method(&self, name: &str) -> bool {
+        let (owner, m) = name.rsplit_once("::").map_or((None, name), |(o, m)| (Some(o), m));
+        self.checker.generics().typeclasses.iter().any(|(t, def)| {
+            owner.is_none_or(|o| short_name(o) == short_name(t)) && def.methods.iter().any(|d| d.name == m)
+        })
+    }
+
+    /// Whether `recv.name()` dispatches through a trait rather than to a
+    /// body this analysis sees.
+    fn method_is_trait_dispatch(&self, w: &Walk<'_>, recv: HirId, name: &str) -> bool {
+        let e = self.module.bodies[w.index].expr(recv);
+        if matches!(e.ty.as_ref().map(crate::typechecking::ty::strip_readonly), Some(Ty::Existential { .. })) {
+            return true;
+        }
+        self.is_trait_method(name)
+    }
+
+    /// What the impl of trait method `name` for class `owner` mutates, when
+    /// its body was seen (this module's or an earlier one's).
+    fn instance_mutates(&self, w: &Walk<'_>, owner: &str, name: &str) -> Option<(u64, Option<usize>)> {
+        let traits: Vec<&String> = self
+            .checker
+            .generics()
+            .typeclasses
+            .iter()
+            .filter(|(_, def)| def.methods.iter().any(|m| m.name == name))
+            .map(|(t, _)| t)
+            .collect();
+        for t in traits {
+            for tn in [t.as_str(), short_name(t)] {
+                let key = format!("{tn} for {owner}::{name}");
+                if let Some(Some(i)) = self.by_name.get(key.as_str()) {
+                    return Some((w.summaries[*i].mutates, Some(*i)));
+                }
+                let qualified = format!("{}::{key}", self.module_path);
+                for k in [key.as_str(), qualified.as_str()] {
+                    if let Some(s) = self.program.by_name.get(k) {
+                        return Some((s.mutates, None));
+                    }
+                }
+            }
+        }
+        None
     }
 
     fn named(&self, w: &Walk<'_>, name: &str, def: Option<DefId>) -> Summary {
@@ -1203,9 +1821,23 @@ impl Cx<'_> {
             return s;
         }
         let member = name.rsplit_once("::");
-        if let Some(s) = self.trait_method(member.map(|(owner, _)| owner), member.map_or(name, |(_, m)| m)) {
+        let (owner, method) = (member.map(|(owner, _)| owner), member.map_or(name, |(_, m)| m));
+        if let Some(s) = self.trait_method(owner, method) {
             return s;
         }
+        let mut s = self.named_host(name);
+        // An undeclared trait method still keeps its `readonly` parameters;
+        // a host native that writes the heap may write any argument.
+        s.mutates = match self.trait_mutates(owner, method) {
+            Some(m) => m,
+            None if s.flags.contains(EffectFlags::HEAP_MUT) => u64::MAX,
+            None => 0,
+        };
+        s
+    }
+
+    /// [`Self::named`] for a name that is no user function or trait method.
+    fn named_host(&self, name: &str) -> Summary {
         if is_vec_ctor(name) || name == "Vec::from" {
             return Summary::default();
         }
@@ -1267,14 +1899,14 @@ impl Cx<'_> {
     fn method(&self, w: &Walk<'_>, recv: HirId, name: &str) -> Option<(Summary, Option<usize>)> {
         let body = &self.module.bodies[w.index];
         let e = body.expr(recv);
-        if let Some(Ty::Existential { class }) = e.ty.as_ref() {
+        if let Some(Ty::Existential { class }) = e.ty.as_ref().map(crate::typechecking::ty::strip_readonly) {
             return self.trait_method(Some(class), name).map(|s| (s, None));
         }
         let owner = self
             .checker
             .class_owner_at_span(e.span)
             .or_else(|| class_of(e.ty.as_ref()).map(str::to_string));
-        if let Some(owner) = owner {
+        if let Some(owner) = owner.as_deref() {
             let key = format!("{owner}::{name}");
             if let Some(Some(i)) = self.by_name.get(key.as_str()) {
                 return Some((w.summaries[*i], Some(*i)));
@@ -1290,8 +1922,16 @@ impl Cx<'_> {
             }
         }
         // Not an inherent method: a trait method on a bound or a concrete
-        // receiver costs what the trait declares, as `name(recv)` does.
-        self.trait_method(None, name).map(|s| (s, None))
+        // receiver costs what the trait declares, as `name(recv)` does. On
+        // a concrete receiver whose impl body is known, that body says what
+        // it mutates.
+        let mut s = self.trait_method(None, name)?;
+        if let Some(owner) = owner.as_deref()
+            && let Some((mutates, _)) = self.instance_mutates(w, owner, name)
+        {
+            s.mutates = mutates;
+        }
+        Some((s, None))
     }
 }
 
