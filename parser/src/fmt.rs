@@ -1368,9 +1368,13 @@ impl<'s> Formatter<'s> {
                 type_params,
                 fields,
                 invariants,
+                readonly,
             } => {
                 self.fmt_docs(docs);
                 self.fmt_attrs(attrs);
+                if *readonly {
+                    self.push_str("readonly ");
+                }
                 self.push_str("class ");
                 self.push_str(name);
                 self.fmt_type_params(type_params);
@@ -2938,7 +2942,7 @@ mod tests {
 
     #[test]
     fn readonly_types_and_expressions_round_trip() {
-        let src = "class H {\n    pub p: readonly Point,\n    pub ps: Vec<readonly Point>,\n}\n\nfn f(readonly Point p, readonly (int -> int) g, readonly Point -> int h) -> readonly Vec<int> {\n    let q: readonly Point = readonly p.inner;\n    let r = readonly (a + b);\n    return readonly xs;\n}\n";
+        let src = "/// A value.\nreadonly class Point {\n    pub x: int,\n}\n\nclass H {\n    pub p: readonly Point,\n    pub ps: Vec<readonly Point>,\n}\n\nfn f(readonly Point p, readonly (int -> int) g, readonly Point -> int h) -> readonly Vec<int> {\n    let q: readonly Point = readonly p.inner;\n    let r = readonly (a + b);\n    return readonly xs;\n}\n";
         assert_eq!(format_source(src).unwrap(), src);
         round_trip(src);
     }
