@@ -18734,8 +18734,13 @@ impl Checker {
     /// [`Self::ident_shadows_static`] for codegen: `resolved` is the
     /// import-resolved name, `name` the bare identifier (current module).
     pub fn ident_shadows_static_name(&self, span: (usize, usize), name: &str, resolved: &str) -> bool {
-        self.ident_shadows_static(span, resolved)
-            || self.ident_shadows_static(span, &self.qualify_module_name(name))
+        let local = self.qualify_module_name(name);
+        // `use m::{x as y}` of a static: `y` binds in the importer's frame,
+        // not the static's (#1706).
+        if local != resolved && !self.static_slots.contains_key(&local) && self.static_decl_frames.contains_key(&local) {
+            return self.ident_shadows_static(span, &local);
+        }
+        self.ident_shadows_static(span, resolved) || self.ident_shadows_static(span, &local)
     }
 
     pub fn ident_shadows_static(&self, span: (usize, usize), fqn: &str) -> bool {
@@ -20216,6 +20221,19 @@ impl Checker {
         } else if let Some(ty) = self.module_consts.get(fqn).cloned() {
             self.env.insert_top(local.to_string(), Scheme::mono(ty));
             self.insert_const_binding(local.to_string());
+        } else if let Some(ty) = self.static_slot_types.get(fqn).cloned() {
+            // A `static`, or a `const` that does not fold (set at startup):
+            // its slot is keyed by FQN only, so an alias needs its own
+            // binding, and its frame so a read is not taken for a local
+            // that shadows the static (#1706).
+            self.env.insert_top(local.to_string(), Scheme::mono(ty));
+            let local_fqn = self.qualify_module_name(local);
+            if local_fqn != fqn {
+                self.static_decl_frames.insert(local_fqn, self.env.depth().saturating_sub(1));
+            }
+            if self.is_static_const_fqn(fqn) {
+                self.insert_const_binding(local.to_string());
+            }
         } else if self.env.lookup(local).is_none() && !self.macro_imports.contains(local) {
             let var = self.counter.fresh();
             self.env.insert_top(local.to_string(), Scheme::mono(Ty::Var(var)));
