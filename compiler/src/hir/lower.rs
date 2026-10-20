@@ -1701,9 +1701,10 @@ fn let_init_is_lambda(body: &HirBody, local: LocalId) -> bool {
 }
 
 pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
-    // An element of a `Vec`, array or tuple of monomorphic functions: the
-    // closure word it was stored as.
-    if let HirKind::Index { .. } = body.expr(f).kind {
+    // An element of a `Vec`, array or tuple of monomorphic functions, or a
+    // `const` or `static` holding one (#1685): the closure word it was
+    // stored as.
+    if let HirKind::Index { .. } | HirKind::Global { .. } = body.expr(f).kind {
         return body.expr(f).ty.as_ref().is_some_and(|t| {
             let t = apply_ty_prune(checker.subst(), t);
             mono_fun(checker, &t, &mut Vec::new())
