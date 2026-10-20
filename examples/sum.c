@@ -66,6 +66,21 @@ int64_t sum_bytes_after_cb(const uint8_t *buf, int64_t n, int64_fn_int64 cb) {
     return sum_bytes(buf, n);
 }
 
+/// Copy `n` bytes from `src` into `dst`, front to back (for `Bytes` tests;
+/// `dst` and `src` may be the same buffer).
+void copy_bytes(uint8_t *dst, const uint8_t *src, int64_t n) {
+    for (int64_t i = 0; i < n; i++) {
+        dst[i] = src[i];
+    }
+}
+
+/// Write `v` into `n` bytes of `buf` (for `Bytes` tests).
+void fill_bytes(uint8_t *buf, int64_t n, int64_t v) {
+    for (int64_t i = 0; i < n; i++) {
+        buf[i] = (uint8_t)v;
+    }
+}
+
 typedef struct {
     int32_t x;
     int32_t y;
