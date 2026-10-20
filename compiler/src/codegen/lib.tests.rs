@@ -4927,7 +4927,11 @@ fn index_with_len_minus_one_stashes_receiver_before_staged_index() {
     let (bc, _pool) = compile_src(
         r#"
 fn main() {
-    let ab = [97, 47];
+    // A `Vec`: a literal array's length and items are constants, and
+    // SCCP folds the whole dead read away.
+    let ab: Vec<int> = Vec::new();
+    ab.push(97);
+    ab.push(47);
     let last = ab[ab.len() - 1];
 }
 "#,

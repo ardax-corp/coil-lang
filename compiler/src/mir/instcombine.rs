@@ -147,6 +147,20 @@ fn instcombine_once(func: &mut MirFunc, strength: bool) -> usize {
     hits
 }
 
+/// The constant `inst` computes from the constants in `consts`, when it
+/// folds to one without trapping (for [`super::sccp`]). Identities that
+/// keep an operand do not count.
+pub(super) fn const_of(inst: &MirInst, consts: &HashMap<ValueId, MirConst>) -> Option<MirConst> {
+    if let MirInst::Const { c, .. } = inst {
+        return Some(*c);
+    }
+    let mut copy = inst.clone();
+    match fold_inst(&mut copy, consts, &HashSet::new(), &HashSet::new(), &HashMap::new(), false) {
+        Fold::ToConst(c) => Some(c),
+        _ => None,
+    }
+}
+
 enum Fold {
     None,
     /// Replace dest with an existing value (identity).

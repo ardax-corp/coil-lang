@@ -222,6 +222,7 @@ fn specialize_side(
         return refuse_dense("call ABI");
     }
     let mut func = from_hir.clone();
+    crate::mir::sccp(&mut func);
     loop_opts(&mut func, true);
     crate::mir::instcombine(&mut func);
     crate::mir::destprop(&mut func);
@@ -645,6 +646,11 @@ fn lir_tail(
     // branch leaves blocks nothing reaches: drop them, as lowering does
     // (emit_lir's liveness is slow over them). A coverage compile keeps
     // each line's code, so a line whose value folds still counts as run.
+    // SCCP first: it folds through φs (a join whose other arms never run,
+    // a loop φ that keeps its value), which `instcombine_lir` skips.
+    if !func.keep_lines {
+        crate::mir::sccp(&mut func);
+    }
     if !func.keep_lines && crate::mir::instcombine_lir(&mut func) > 0 {
         let order: Vec<_> = func.blocks.iter().map(|b| b.id).collect();
         super::from_hir::tidy(&mut func, &order);
