@@ -9160,3 +9160,31 @@ fn main() { let _ = named(Some(1)); let _ = take(g); }";
     assert!(matches!(steps[..], [DictStep::Null]), "no partial dictionary: {steps:?}");
     assert!(!compiler.messages.is_empty(), "a dictionary missing its context is a compile error");
 }
+
+/// How many `LoadStatic`s `main` of `src` keeps.
+fn main_static_loads(src: &str) -> usize {
+    compile_fn_body(src, "main")
+        .iter()
+        .filter(|b| matches!(b.bytecode(), common::Instruction::LoadStatic))
+        .count()
+}
+
+#[test]
+fn a_static_let_nothing_writes_reads_as_its_value() {
+    let show = "fn show(int x) { write(stdout(), to_bytes(format(\"%i\", x))); }";
+    // Never written anywhere: reads fold like a `static const`'s.
+    assert_eq!(
+        main_static_loads(&format!("static let A = 1; static let B = 2; {show} fn main() {{ show(A + B); }}")),
+        0
+    );
+    // Written by assignment, compound assignment or `++` anywhere: kept.
+    for write in ["A = 5;", "A += 1;", "A++;"] {
+        assert_eq!(
+            main_static_loads(&format!(
+                "static let A = 1; {show} fn bump() {{ {write} }} fn main() {{ bump(); show(A); }}"
+            )),
+            1,
+            "{write}"
+        );
+    }
+}
