@@ -351,6 +351,12 @@ pub struct Compiler {
     /// this set never widens to a two-slot RETURN.
     fn_value_escaped_program: Option<HashSet<String>>,
 
+    /// Whole-program names something may write (`Some` after the pipeline
+    /// seeds every AST in the compile; see [`crate::static_writes`]). A
+    /// `static let` whose name is not in it folds like a `static const`.
+    /// `None`: no fold.
+    written_names_program: Option<HashSet<String>>,
+
     /// Counter for compiler-generated temporary slots.
     temp_counter: u32,
 
@@ -752,6 +758,7 @@ impl Default for Compiler {
             generic_fn_value_refusal: std::cell::RefCell::new(None),
             polyfn_over_application: std::cell::RefCell::new(None),
             fn_value_escaped_program: None,
+            written_names_program: None,
             test_cases: Vec::new(),
             user_main_defined: false,
             include_tests: false,

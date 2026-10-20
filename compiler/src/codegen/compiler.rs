@@ -4812,6 +4812,23 @@ impl Compiler {
         self.checker.program_finalizers_resize = resize;
     }
 
+    pub fn set_written_names_program(&mut self, names: Option<HashSet<String>>) {
+        self.written_names_program = names;
+    }
+
+    /// Reads of the static `fqn` may fold to its constant initializer: a
+    /// `static const`, or a `static let` nothing in the program writes
+    /// (and no debugger may write).
+    pub(crate) fn static_reads_fold(&self, fqn: &str) -> bool {
+        if self.checker.is_static_const_fqn(fqn) {
+            return true;
+        }
+        let bare = fqn.rsplit("::").next().unwrap_or(fqn);
+        !self.debugger_attached
+            && self.checker.static_slot_index(fqn).is_some()
+            && self.written_names_program.as_ref().is_some_and(|w| !w.contains(bare))
+    }
+
     pub fn clear_fn_value_escaped_program(&mut self) {
         self.fn_value_escaped_program = None;
         self.pair_return_kinds.borrow_mut().clear();
@@ -6053,7 +6070,7 @@ impl Compiler {
             return;
         };
         if let Some(val) = crate::const_fold::eval_expr(init, self.const_env())
-            && self.checker.is_static_const_fqn(fqn) {
+            && self.static_reads_fold(fqn) {
                 self.static_const_values.insert(fqn.to_string(), val);
             }
         // Compile the initializer as its own zero-arg function in the module

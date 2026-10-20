@@ -30,6 +30,7 @@ mod monomorphize;
 mod pipeline;
 mod project_index;
 mod shadow_traits;
+mod static_writes;
 mod strip_tests;
 mod variadic;
 pub mod symbols;
