@@ -2419,9 +2419,10 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         // A first arm that matches anything (`x => e`, `default => e`) is
         // the whole match: `{ let x = s; e }`. Lowering dispatches only on
         // an `int` or an enum, so this is how a lone binding arm on a
-        // `float`, `string` or struct scrutinee lowers (#1658).
+        // `float`, `string` or class scrutinee lowers (#1658).
         if let Some(first) = out.first()
             && matches!(first.pat, HirPat::Bind(_) | HirPat::Wild)
+            && sty.as_ref().is_some_and(|t| !self.dispatchable(t))
         {
             let span = span_of(node);
             let stmt = match first.pat {
@@ -2432,6 +2433,21 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             return self.emit(b, node, HirKind::Block { stmts: vec![stmt], tail: Some(tail) });
         }
         self.emit(b, node, HirKind::Match { scrutinee, arms: out })
+    }
+
+    /// Whether a `match` on `ty` lowers as a dispatch: an `int`, or an
+    /// enum (a scalar one included), as `lower::is_scalar_match` and
+    /// `Walk::match_` take it.
+    fn dispatchable(&self, ty: &Ty) -> bool {
+        let ty = strip_readonly(ty);
+        let scalar_enum = match ty {
+            Ty::Constructor { owner, .. } => matches!(owner.as_ref(), Ty::Con(name) | Ty::Sum { name, .. } if self.checker.is_scalar_enum(name)),
+            Ty::Con(name) | Ty::Sum { name, .. } => self.checker.is_scalar_enum(name),
+            _ => false,
+        };
+        scalar_enum
+            || matches!(ty, Ty::Con(n) if n == coil_ty::INT)
+            || super::lower::classify(self.checker, ty) == Some(super::lower::ValueClass::Enum)
     }
 
     /// Regroup arms with nested payload patterns into one arm per outer
