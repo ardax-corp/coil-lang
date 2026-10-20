@@ -1469,8 +1469,9 @@ impl Cx<'_> {
                 self.note(w, id, EffectFlags::HOST, || format!("reads static `{name}`"))
             }
             // A trait operator runs user code this pass does not resolve.
-            HirKind::Bin { op: BinOp::Overloaded(op), .. } => {
-                self.note(w, id, EffectFlags::UNKNOWN, || format!("uses a trait operator `{op}`"))
+            HirKind::Bin { op: BinOp::Overloaded(op), lhs, rhs } => {
+                self.note(w, id, EffectFlags::UNKNOWN, || format!("uses a trait operator `{op}`"));
+                self.operator_mutates(w, id, op, *lhs, *rhs);
             }
             HirKind::Unsupported(what) => {
                 self.note(w, id, UNKNOWN.bits(), || format!("uses {what}, which this analysis does not model"))
@@ -1788,6 +1789,31 @@ impl Cx<'_> {
         self.is_trait_method(name)
     }
 
+    /// Fold what the trait operator `lhs op rhs` mutates into `w`, as the
+    /// call `lhs.method(rhs)` of its instance would (#1645). Only an operand
+    /// of a user class whose impl body was seen says: the built-in operator
+    /// traits cannot declare their parameters `readonly`, so a bound
+    /// operand's operator is not checked.
+    fn operator_mutates(&self, w: &mut Walk<'_>, at: HirId, op: &str, lhs: HirId, rhs: HirId) {
+        let (class, method) = match op {
+            "==" => ("Eq", "eq"),
+            "!=" => ("Eq", "ne"),
+            "<" => ("Lt", "lt"),
+            ">" => ("Gt", "gt"),
+            "<=" => ("Le", "le"),
+            ">=" => ("Ge", "ge"),
+            _ => match crate::typechecking::generics::Generics::operator_trait(op) {
+                Some(found) => found,
+                None => return,
+            },
+        };
+        let e = self.module.bodies[w.index].expr(lhs);
+        let Some(owner) = class_of(e.ty.as_ref()) else { return };
+        let Some((mutates, callee)) = self.instance_mutates_of(w, class, owner, method) else { return };
+        let shown = format!("{class}::{method}");
+        self.call_mutates(w, at, &shown, mutates, callee, Some(&shown), &[lhs, rhs], false);
+    }
+
     /// What the impl of trait method `name` for class `owner` mutates, when
     /// its body was seen (this module's or an earlier one's).
     fn instance_mutates(&self, w: &Walk<'_>, owner: &str, name: &str) -> Option<(u64, Option<usize>)> {
@@ -1799,17 +1825,21 @@ impl Cx<'_> {
             .filter(|(_, def)| def.methods.iter().any(|m| m.name == name))
             .map(|(t, _)| t)
             .collect();
-        for t in traits {
-            for tn in [t.as_str(), short_name(t)] {
-                let key = format!("{tn} for {owner}::{name}");
-                if let Some(Some(i)) = self.by_name.get(key.as_str()) {
-                    return Some((w.summaries[*i].mutates, Some(*i)));
-                }
-                let qualified = format!("{}::{key}", self.module_path);
-                for k in [key.as_str(), qualified.as_str()] {
-                    if let Some(s) = self.program.by_name.get(k) {
-                        return Some((s.mutates, None));
-                    }
+        traits.into_iter().find_map(|t| self.instance_mutates_of(w, t, owner, name))
+    }
+
+    /// What the impl of `trait_name::name` for class `owner` mutates, when
+    /// its body was seen.
+    fn instance_mutates_of(&self, w: &Walk<'_>, trait_name: &str, owner: &str, name: &str) -> Option<(u64, Option<usize>)> {
+        for tn in [trait_name, short_name(trait_name)] {
+            let key = format!("{tn} for {owner}::{name}");
+            if let Some(Some(i)) = self.by_name.get(key.as_str()) {
+                return Some((w.summaries[*i].mutates, Some(*i)));
+            }
+            let qualified = format!("{}::{key}", self.module_path);
+            for k in [key.as_str(), qualified.as_str()] {
+                if let Some(s) = self.program.by_name.get(k) {
+                    return Some((s.mutates, None));
                 }
             }
         }

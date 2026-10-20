@@ -2312,7 +2312,8 @@ impl Compiler {
     /// [`Self::concrete_operator_target`] for an operand of type `ty`.
     pub(super) fn concrete_operator_target_ty(&self, ty: &Ty, class: &str, method: &str) -> Option<(Ty, String)> {
         let resolved = crate::typechecking::subst::apply_ty_prune(self.checker.subst(), ty);
-        let lookup_ty = Self::show_lookup_ty_for_instance(&resolved);
+        // A `readonly` operand's operator is its type's instance (#1645).
+        let lookup_ty = Self::show_lookup_ty_for_instance(crate::typechecking::ty::strip_readonly(&resolved));
         // Dict Eq/Ord only for nominal user enums/classes; open Vars must not replace hardwired EQ/LT.
         let nominal = match &lookup_ty {
             Ty::Con(name) => Some(name.as_str()),
