@@ -1235,6 +1235,10 @@ fn goto_definitions(state: &ServerState, uri: &Uri, position: Position) -> Vec<L
         return Vec::new();
     };
     let name = document.text[range.clone()].to_owned();
+    let qualified = qualified_member_definitions(state, uri, &document.text, &range, &name);
+    if !qualified.is_empty() {
+        return qualified;
+    }
     let Some(file_path) = uri_path(uri) else {
         return local_definitions(state, &name);
     };
@@ -1250,6 +1254,136 @@ fn goto_definitions(state: &ServerState, uri: &Uri, position: Position) -> Vec<L
         }
     }
     local_definitions(state, &name)
+}
+
+/// `member` in `Owner::member` (`Area::size(x)`, `Point::new()`): the
+/// member declared under `Owner` (a trait method, an inherent `impl`
+/// method), then, for a `Trait::method(..)` call the last typecheck sent
+/// to a ground instance, that instance's method. Empty when `Owner`
+/// declares no such member (an enum case, a module function).
+fn qualified_member_definitions(
+    state: &ServerState,
+    uri: &Uri,
+    text: &str,
+    range: &Range<usize>,
+    name: &str,
+) -> Vec<Location> {
+    let Some((owner, "::")) = qualifier_before(text, range.start) else {
+        return Vec::new();
+    };
+    let key = format!("{owner}::{name}");
+    let mut locations: Vec<Location> = Vec::new();
+    let mut push = |location: Option<Location>| {
+        if let Some(location) = location
+            && !locations.contains(&location)
+        {
+            locations.push(location);
+        }
+    };
+    for (document_uri, document) in &state.documents {
+        let path = uri_path(document_uri).unwrap_or_default();
+        for definition in SymbolIndex::from_source(path, &document.text).definitions(&key) {
+            push(Some(Location {
+                uri: document_uri.clone(),
+                range: byte_range(&document.text, &definition.name_range),
+            }));
+        }
+    }
+    if let Some(project) = &state.project_index {
+        let mut paths: Vec<&PathBuf> = project.indexed_paths().collect();
+        paths.sort();
+        for path in paths {
+            if let Some(index) = project.symbols_for(path) {
+                for definition in index.definitions(&key) {
+                    push(location_for_file(state, &definition.file, &definition.name_range));
+                }
+            }
+        }
+    }
+    push(trait_instance_method(state, uri, text, range, &owner, name));
+    locations
+}
+
+/// The method of the ground instance the checker resolved the
+/// `Trait::method(..)` call whose member is at `member` to.
+fn trait_instance_method(
+    state: &ServerState,
+    uri: &Uri,
+    text: &str,
+    member: &Range<usize>,
+    owner: &str,
+    name: &str,
+) -> Option<Location> {
+    let path = uri_path(uri)?;
+    let project = state.project_index.as_ref()?;
+    // The checker's span tables are the last entry's, on this text.
+    if state.last_entry.as_ref() != Some(&path) || project.source_for(&path) != Some(text) {
+        return None;
+    }
+    let checker = project.checker();
+    let ast = Pratt::default().parse(text).ok()?;
+    let offset_of = |source: &str, part: &str| {
+        let base = source.as_ptr() as usize;
+        let ptr = part.as_ptr() as usize;
+        (ptr >= base && ptr + part.len() <= base + source.len()).then(|| ptr - base)
+    };
+    let mut call = None;
+    visit_nodes(&ast, &mut |node| {
+        if let Expression::Construct { variant_name, .. } = node.1.as_ref()
+            && offset_of(text, variant_name) == Some(member.start)
+        {
+            call = Some(node.0.start..node.0.end);
+        }
+    });
+    let call = call?;
+    checker.qualified_trait_call_at(call.start, call.end)?;
+    let leaf = |n: &str| n.rsplit("::").next().unwrap_or(n).to_owned();
+    let instance = checker
+        .call_dicts_for_span(call.start, call.end)?
+        .iter()
+        .find(|instance| leaf(&instance.class) == leaf(owner))?;
+    // The instance's `impl` block: this file first, then the project's.
+    let mut sources = vec![(path.clone(), text.to_owned())];
+    let mut others: Vec<&PathBuf> = project.indexed_paths().filter(|p| **p != path).collect();
+    others.sort();
+    sources.extend(
+        others
+            .into_iter()
+            .filter_map(|p| Some((p.clone(), project.source_for(p)?.to_owned()))),
+    );
+    for (file, source) in sources {
+        let Ok(ast) = Pratt::default().parse(&source) else {
+            continue;
+        };
+        let mut found = None;
+        visit_nodes(&ast, &mut |node| {
+            if let Expression::TypeClassImpl { class, methods, .. } = node.1.as_ref()
+                && node.0.start == instance.range.start
+                && node.0.end == instance.range.end
+                && leaf(class) == leaf(&instance.class)
+            {
+                found = impl_method_name(methods, name).and_then(|m| offset_of(&source, m));
+            }
+        });
+        if let Some(start) = found {
+            return location_for_file(state, &file, &(start..start + name.len()));
+        }
+    }
+    None
+}
+
+/// The name of method `name` among an `impl` block's items.
+fn impl_method_name<'e>(methods: &[Output<'e>], name: &str) -> Option<&'e str> {
+    methods.iter().find_map(|method| {
+        let inner = match method.1.as_ref() {
+            Expression::Method(_, inner) => inner,
+            _ => method,
+        };
+        match inner.1.as_ref() {
+            Expression::Function { name: n, .. } if *n == name => Some(*n),
+            _ => None,
+        }
+    })
 }
 
 fn local_definitions(state: &ServerState, name: &str) -> Vec<Location> {
@@ -1454,6 +1588,7 @@ fn workspace_symbols(state: &ServerState, query: &str) -> Vec<SymbolInformation>
                 compiler::SymbolKind::Namespace => lsp_types::SymbolKind::NAMESPACE,
                 compiler::SymbolKind::Method => lsp_types::SymbolKind::METHOD,
                 compiler::SymbolKind::Macro => lsp_types::SymbolKind::FUNCTION,
+                compiler::SymbolKind::Trait => lsp_types::SymbolKind::INTERFACE,
             },
             tags: None,
             deprecated: None,
@@ -3108,11 +3243,24 @@ fn member_decl_range(source: &str, owner: &str, member: &str) -> Option<Range<us
         (ptr >= base && ptr + name.len() <= base + source.len()).then(|| ptr - base)
     };
     let mut found = None;
+    // `impl Trait for Owner` methods, used when no field or inherent
+    // method has the name and exactly one instance does.
+    let mut instance_methods = Vec::new();
     visit_nodes(&ast, &mut |node| {
         if found.is_some() {
             return;
         }
         match node.1.as_ref() {
+            Expression::TypeClassImpl { args, methods, .. }
+                if args.first().is_some_and(|head| {
+                    let text = source.get(head.0.start..head.0.end).unwrap_or_default();
+                    text.split('<').next().unwrap_or_default().trim() == owner
+                }) =>
+            {
+                if let Some(name) = impl_method_name(methods, member) {
+                    instance_methods.extend(offset_of(name).map(|o| o..o + name.len()));
+                }
+            }
             Expression::Class { name, fields, .. } if *name == owner => {
                 for (_, field) in fields {
                     if let Expression::Field { name: fname, .. } = field.as_ref()
@@ -3139,7 +3287,10 @@ fn member_decl_range(source: &str, owner: &str, member: &str) -> Option<Range<us
             _ => {}
         }
     });
-    found
+    found.or_else(|| match instance_methods.as_slice() {
+        [one] => Some(one.clone()),
+        _ => None,
+    })
 }
 
 fn hover(document: &Document, position: Position) -> Option<Hover> {
@@ -4175,11 +4326,17 @@ fn merge_spanned_tokens(mut tokens: Vec<SpannedToken>) -> Vec<SpannedToken> {
     accepted
 }
 
+/// A segment of `Owner::member` this file does not define (an enum case,
+/// an imported trait): left to the lexical classes.
+fn unresolved_path_site(index: &SymbolIndex, site: &compiler::RefSite) -> bool {
+    site.path.is_some() && index.definitions(&site.name).is_empty()
+}
+
 fn symbol_kind_to_token_type(kind: SymbolKind) -> u32 {
     match kind {
         SymbolKind::Function | SymbolKind::Method => TOKEN_FUNCTION,
         SymbolKind::Macro => TOKEN_MACRO,
-        SymbolKind::Class | SymbolKind::Enum | SymbolKind::TypeAlias => TOKEN_TYPE,
+        SymbolKind::Class | SymbolKind::Enum | SymbolKind::TypeAlias | SymbolKind::Trait => TOKEN_TYPE,
         SymbolKind::Namespace => TOKEN_NAMESPACE,
         SymbolKind::Variable => TOKEN_VARIABLE,
     }
@@ -4195,9 +4352,11 @@ fn reference_token_type(index: &SymbolIndex, name: &str) -> u32 {
 
 fn definition_token_type(checker: &Checker, definition: &compiler::SymbolDef) -> u32 {
     match definition.kind {
-        SymbolKind::Class | SymbolKind::Enum | SymbolKind::TypeAlias | SymbolKind::Namespace => {
-            symbol_kind_to_token_type(definition.kind)
-        }
+        SymbolKind::Class
+        | SymbolKind::Enum
+        | SymbolKind::TypeAlias
+        | SymbolKind::Namespace
+        | SymbolKind::Trait => symbol_kind_to_token_type(definition.kind),
         SymbolKind::Function | SymbolKind::Method => TOKEN_FUNCTION,
         SymbolKind::Macro => TOKEN_MACRO,
         SymbolKind::Variable => checker
@@ -4221,7 +4380,11 @@ fn type_for_reference_site(
     if index.definitions(&site.name).first().is_some_and(|definition| {
         matches!(
             definition.kind,
-            SymbolKind::Namespace | SymbolKind::Class | SymbolKind::Enum | SymbolKind::TypeAlias
+            SymbolKind::Namespace
+                | SymbolKind::Class
+                | SymbolKind::Enum
+                | SymbolKind::TypeAlias
+                | SymbolKind::Trait
         )
     }) {
         return Some(reference_token_type(index, &site.name));
@@ -4264,7 +4427,7 @@ fn typed_semantic_tokens(source: &str, file: &PathBuf) -> Option<Vec<SpannedToke
         });
     }
     for site in index.all_reference_sites() {
-        if site.file != *file {
+        if site.file != *file || unresolved_path_site(&index, site) {
             continue;
         }
         tokens.push(SpannedToken {
@@ -4290,7 +4453,7 @@ fn ast_semantic_tokens(source: &str, file: &PathBuf) -> Vec<SpannedToken> {
         });
     }
     for site in index.all_reference_sites() {
-        if site.file != *file {
+        if site.file != *file || unresolved_path_site(&index, site) {
             continue;
         }
         tokens.push(SpannedToken {
@@ -5808,5 +5971,123 @@ fn main() {
         let help = decl_signature_help(&state, &uri, byte_position(source, offset)).expect("help");
         assert_eq!(help.signatures[0].label, "add(int a, int b) -> int");
         assert_eq!(help.active_parameter, Some(1));
+    }
+
+    const TRAIT_QUALIFIED_SRC: &str = "\
+trait Area<T> {
+    /// Area of a shape.
+    fn size(T s) -> int {}
+}
+trait Volume<T> {
+    /// Volume of a shape.
+    fn size(T s) -> int {}
+}
+class Sq { pub w: int, }
+impl Area for Sq { pub fn size(Sq s) -> int { return s.w; } }
+impl Volume for Sq { pub fn size(Sq s) -> int { return s.w * 2; } }
+fn main() { let a = Area::size(new Sq(1)); }
+";
+
+    fn trait_project(tag: &str, src: &str) -> (PathBuf, ServerState, HashMap<String, Uri>) {
+        let dir = std::env::temp_dir().join(format!("coil-lsp-trait-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        write_hy_project(&dir, &[("main.hy", src)]);
+        let (state, uris) = open_state(&dir, &[("main.hy", None)]);
+        (dir, state, uris)
+    }
+
+    fn location_text(src: &str, location: &Location) -> (usize, String) {
+        let start = position_to_byte(src, location.range.start).unwrap();
+        let end = position_to_byte(src, location.range.end).unwrap();
+        (start, src[start..end].to_owned())
+    }
+
+    #[test]
+    fn goto_definition_on_trait_name_in_qualified_call() {
+        let src = TRAIT_QUALIFIED_SRC;
+        let (dir, state, uris) = trait_project("owner", src);
+        let offset = src.find("Area::size(").unwrap();
+        let locations = goto_definitions(&state, &uris["main.hy"], byte_position(src, offset));
+        assert_eq!(locations.len(), 1, "{locations:?}");
+        let (start, text) = location_text(src, &locations[0]);
+        assert_eq!(text, "Area");
+        assert_eq!(start, src.find("trait Area").unwrap() + "trait ".len());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn goto_definition_on_trait_qualified_method_picks_that_trait() {
+        let src = TRAIT_QUALIFIED_SRC;
+        let (dir, state, uris) = trait_project("member", src);
+        let offset = src.find("Area::size(").unwrap() + "Area::".len();
+        let locations = goto_definitions(&state, &uris["main.hy"], byte_position(src, offset));
+        assert!(!locations.is_empty(), "no definition for Area::size");
+        let starts: Vec<usize> = locations.iter().map(|l| location_text(src, l).0).collect();
+        let area_decl = src.find("fn size(T s)").unwrap() + "fn ".len();
+        let volume_decl = src.rfind("fn size(T s)").unwrap() + "fn ".len();
+        let area_impl = src.find("impl Area for Sq { pub fn size").unwrap() + "impl Area for Sq { pub fn ".len();
+        let volume_impl = src.find("impl Volume for Sq { pub fn size").unwrap() + "impl Volume for Sq { pub fn ".len();
+        assert_eq!(starts[0], area_decl, "first location is Area's `fn size`: {locations:?}");
+        assert!(!starts.contains(&volume_decl), "Volume::size must not be offered: {locations:?}");
+        assert!(!starts.contains(&volume_impl), "Volume's impl must not be offered: {locations:?}");
+        assert!(starts.contains(&area_impl), "the checker's Area instance for Sq is offered: {locations:?}");
+        for location in &locations {
+            assert_eq!(location_text(src, location).1, "size");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hover_on_trait_qualified_method_shows_that_traits_docs() {
+        let src = TRAIT_QUALIFIED_SRC;
+        let (dir, mut state, uris) = trait_project("hover", src);
+        let offset = src.find("Area::size(").unwrap() + "Area::".len();
+        let hover = project_hover(&mut state, &uris["main.hy"], byte_position(src, offset)).expect("hover");
+        let HoverContents::Markup(markup) = hover.contents else { panic!("markup hover") };
+        assert!(markup.value.contains("Area of a shape."), "{}", markup.value);
+        assert!(!markup.value.contains("Volume of a shape."), "{}", markup.value);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hover_on_trait_name_shows_trait_header() {
+        let src = "\
+/// Things with an area.
+trait Area<T> { fn size(T s) -> int {} }
+class Sq { pub w: int, }
+impl Area for Sq { pub fn size(Sq s) -> int { return s.w; } }
+fn main() { let a = Area::size(new Sq(1)); }
+";
+        let (dir, mut state, uris) = trait_project("hover-owner", src);
+        let offset = src.find("Area::size(").unwrap();
+        let hover = project_hover(&mut state, &uris["main.hy"], byte_position(src, offset)).expect("hover");
+        let HoverContents::Markup(markup) = hover.contents else { panic!("markup hover") };
+        assert!(markup.value.contains("trait Area"), "{}", markup.value);
+        assert!(markup.value.contains("Things with an area."), "{}", markup.value);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn goto_definition_on_method_call_reaches_trait_instance_method() {
+        let src = "\
+trait Area<T> { fn size(T s) -> int {} }
+class Sq { pub w: int, }
+impl Area for Sq { pub fn size(Sq s) -> int { return s.w; } }
+fn main() {
+    let q = new Sq(3);
+    let a = q.size();
+}
+";
+        let dir = std::env::temp_dir().join(format!("coil-lsp-trait-dot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        write_hy_project(&dir, &[("main.hy", src)]);
+        let (mut state, uris) = open_state(&dir, &[("main.hy", None)]);
+        let offset = src.find("q.size()").unwrap() + "q.".len();
+        let location = member_definition(&mut state, &uris["main.hy"], byte_position(src, offset))
+            .expect("definition of q.size");
+        let (start, text) = location_text(src, &location);
+        assert_eq!(text, "size");
+        assert_eq!(start, src.find("pub fn size").unwrap() + "pub fn ".len());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
