@@ -3187,6 +3187,13 @@ impl Compiler {
         use crate::typechecking::subst::apply_ty_prune;
         let subst = self.checker.subst();
         let args: Vec<Ty> = args.iter().map(|a| apply_ty_prune(subst, a)).collect();
+        // An open glue body's variable (#1661).
+        if class == "Eq"
+            && let [Ty::Var(v)] = args.as_slice()
+            && let Some(slot) = self.eq_glue_body_var_dict(*v)
+        {
+            return Some(OpenDictGoal::Slot(slot));
+        }
         if let Some(vars) = self.mono_var_tys.last() {
             let concrete: Vec<Ty> = args.iter().map(|a| Self::apply_ty_var_map(a, vars)).collect();
             if !concrete.iter().any(Self::ty_is_open) {

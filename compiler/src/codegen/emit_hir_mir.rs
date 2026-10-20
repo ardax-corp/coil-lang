@@ -947,7 +947,9 @@ impl Compiler {
     /// User operator `id` on `operands` calling its instance method
     /// (`HirOp::Call`): a raw method takes the
     /// operands' own words (a plain call), any other a binary operator's
-    /// boxed operands (an operator call).
+    /// boxed operands (an operator call). An instance taking a dictionary
+    /// (`Box<T>`'s derived `Eq` in a shared body, built from `T`'s, #1661)
+    /// gets it after the operands, as a dictionary program.
     fn hir_mir_op_call(
         &mut self,
         hir: &HirBody,
@@ -963,11 +965,20 @@ impl Compiler {
         }
         let raw = self.raw_instance_methods.contains(&fqn);
         let span = hir.expr(id).span;
-        let dict = self.hir_mir_once(|this| this.plan_call_instance_dict(&mut Vec::new(), (class, method, &fqn), std::slice::from_ref(&lookup), span.0..span.1));
+        let mut steps = Vec::new();
+        let dict = self.hir_mir_once(|this| this.plan_call_instance_dict(&mut steps, (class, method, &fqn), std::slice::from_ref(&lookup), span.0..span.1));
+        let dicts = if dict {
+            match self.hir_mir_dict_program(&steps) {
+                Some(dicts) => dicts,
+                None => return,
+            }
+        } else {
+            Vec::new()
+        };
         // A two-word result comes back as two words (or boxed after the call).
         let one_word = self.two_word_return_kind(&fqn).is_none();
         self.raw_instance_call = raw;
-        let Some(target) = self.named_entry_target(&fqn, false).filter(|_| one_word && !dict) else {
+        let Some(target) = self.named_entry_target(&fqn, false).filter(|_| one_word) else {
             return;
         };
         let arity = operands.len();
@@ -977,7 +988,7 @@ impl Compiler {
             pair_ret: false,
             coro: false,
             boxed_ret: false,
-            dicts: Vec::new(),
+            dicts,
             boxes: Vec::new(),
             adapt: Vec::new(),
             unbox: None,
@@ -1664,7 +1675,8 @@ impl Compiler {
                 Some(HirOp::Call { lookup, fqn, class, method }) => {
                     let lookup = lookup.clone();
                     let fqn = self.instance_clone(fqn, std::slice::from_ref(&lookup)).unwrap_or_else(|| fqn.clone());
-                    self.hir_mir_probe_dicts(|this, steps| {
+                    // Its dictionary runs as a program (#1661).
+                    self.hir_mir_probe_unplanned(|this, steps| {
                         this.plan_call_instance_dict(steps, (class, method, &fqn), std::slice::from_ref(&lookup), span);
                     })
                 }
