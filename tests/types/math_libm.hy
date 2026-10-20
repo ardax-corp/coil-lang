@@ -1,5 +1,4 @@
 use tests::assert;
-use num::pow;
 
 fn approx(float actual, float expected, float epsilon) -> bool {
     let delta = actual - expected;
@@ -26,12 +25,12 @@ test("prelude math scalar functions") {
     assert!(ceil(0.0 - 1.25) == 0.0 - 1.0);
     assert!(approx(exp(1.0), 2.718281828459045, epsilon()));
     assert!(approx(ln(2.718281828459045), 1.0, epsilon()));
-    assert!(pow(2.0, 10.0) == 1024.0);
-    assert!(approx(pow(9.0, 0.5), 3.0, epsilon()));
+    assert!((2.0 ** 10.0) == 1024.0);
+    assert!(approx(9.0 ** 0.5, 3.0, epsilon()));
 }
 
 test("nested prelude math host invokes") {
-    assert!(approx(sqrt(pow(3.0, 2.0) + pow(4.0, 2.0)), 5.0, epsilon()));
+    assert!(approx(sqrt((3.0 ** 2.0) + (4.0 ** 2.0)), 5.0, epsilon()));
 }
 
 fn is_nan(float x) -> bool {
@@ -81,7 +80,7 @@ test("prelude math preserves IEEE exceptional values") {
     assert!(is_nan(ln_nan));
     assert!(ln(0.0) < 0.0 - 1000000.0);
     assert!(exp(1000.0) > 1000000.0);
-    assert!(pow(0.0, 0.0 - 1.0) > 1000000.0);
+    assert!(0.0 ** (0.0 - 1.0) > 1000000.0);
 }
 
 test("m1 math IEEE nan and inf edges") {

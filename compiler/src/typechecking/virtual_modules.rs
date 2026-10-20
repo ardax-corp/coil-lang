@@ -217,7 +217,7 @@ impl PreludeFn {
 
 /// `prelude::math::pow` was removed in favour of the `**` operator.
 const REMOVED_POW_HELP: &str =
-    "`prelude::math::pow` was removed: write `base ** exponent`, or `use num::{pow};` for a function";
+    "`prelude::math::pow` was removed: write `base ** exponent` (checked, wrapping and saturating forms are in `arith`)";
 /// `prelude::math::rem` was removed in favour of the `%` operator.
 const REMOVED_REM_HELP: &str = "`prelude::math::rem` was removed: write `x % y` (the same `fmod` remainder)";
 
