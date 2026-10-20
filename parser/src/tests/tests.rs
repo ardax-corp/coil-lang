@@ -2507,6 +2507,24 @@
     }
 
     #[test]
+    fn parse_readonly_class_declaration() {
+        match decl_ast!("readonly class Point { pub x: int, }") {
+            Expression::Class { name, readonly, fields, .. } => {
+                assert_eq!(name, "Point");
+                assert!(readonly);
+                assert_eq!(fields.len(), 1);
+            }
+            other => panic!("expected Class, got {other:?}"),
+        }
+        match decl_ast!("class Point { x: int, }") {
+            Expression::Class { readonly, .. } => assert!(!readonly),
+            other => panic!("expected Class, got {other:?}"),
+        }
+        let shown = decl_ast!("readonly class Point { x: int, }").to_string();
+        assert!(shown.starts_with("readonly class Point"), "{shown}");
+    }
+
+    #[test]
     fn parse_readonly_new_instantiate() {
         let src = "readonly new Point(1, 2);";
         let ast = Pratt::default()

@@ -1599,7 +1599,9 @@ impl Pipeline {
         let macro_call = src
             .match_indices("!(")
             .any(|(at, _)| src[..at].chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_'));
-        if src.contains("#[") || trait_contracts || macro_call {
+        // A `readonly class` derives its implied `Eq` / `Hash` there too.
+        let readonly_class = src.contains("readonly class");
+        if src.contains("#[") || trait_contracts || macro_call || readonly_class {
             let path = PathBuf::from("<input>.hy");
             self.overlays.insert(path.clone(), src.to_string());
             let result = self.compile_src_from_file(path.to_str().expect("utf-8 path"));

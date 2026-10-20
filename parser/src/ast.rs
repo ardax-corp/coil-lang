@@ -585,6 +585,8 @@ pub enum Expression<'expr> {
         fields: Vec<Output<'expr>>,
         /// `invariant` clauses between the header and the fields.
         invariants: Vec<Contract<'expr>>,
+        /// `readonly class`: every instance is immutable after `new`.
+        readonly: bool,
     },
     Implementation {
         /// Unused trait slot (`""` for inherent impls).
@@ -1695,6 +1697,7 @@ impl<'a> Display for Expression<'a> {
                 type_params,
                 fields,
                 invariants,
+                readonly,
             } => {
                 let tp = if type_params.is_empty() {
                     String::new()
@@ -1706,8 +1709,9 @@ impl<'a> Display for Expression<'a> {
                 let inv: String = invariants.iter().map(|c| format!(" {c}")).collect();
                 write!(
                     f,
-                    "{}class {}{}{} {{ {} }}",
+                    "{}{}class {}{}{} {{ {} }}",
                     attr_prefix,
+                    if *readonly { "readonly " } else { "" },
                     name,
                     tp,
                     inv,

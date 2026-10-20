@@ -225,6 +225,68 @@ fn derive_traits_from_attrs<'a>(attrs: &[Attribute<'a>]) -> Vec<&'a str> {
     out
 }
 
+/// Whether readonly class `name` gets an implied `Hash`: every field's
+/// type, as written, hashes. That is a primitive, a tuple of hashing
+/// types, one of the class's type parameters (the derived instance is
+/// bounded on it), or a class or enum of this module that derives or
+/// implements `Hash` or is itself a hashing readonly class. A `Vec`, an
+/// array, a map, a function or a type from another module has no `Hash`
+/// known here, so such a class implies only `Eq` and can `impl Hash`.
+fn readonly_class_hashes<'a>(decls: &[Output<'a>], name: &'a str, seen: &mut Vec<&'a str>) -> bool {
+    if seen.contains(&name) {
+        return true;
+    }
+    let Some((fields, type_params)) = decls.iter().find_map(|d| match d.1.as_ref() {
+        Expression::Class { name: n, fields, type_params, readonly: true, .. } if *n == name => {
+            Some((fields, type_params))
+        }
+        _ => None,
+    }) else {
+        return false;
+    };
+    seen.push(name);
+    let params: Vec<&str> = type_params.iter().map(|tp| tp.name).collect();
+    let ok = fields.iter().all(|f| match f.1.as_ref() {
+        Expression::Field { modifier: parser::ast::FieldModifier::Static, .. } => true,
+        Expression::Field { ty, .. } => type_hashes(decls, ty, &params, seen),
+        _ => true,
+    });
+    seen.pop();
+    ok
+}
+
+/// Whether a written field type hashes, for [`readonly_class_hashes`].
+fn type_hashes<'a>(decls: &[Output<'a>], ty: &Output<'a>, params: &[&str], seen: &mut Vec<&'a str>) -> bool {
+    match ty.1.as_ref() {
+        Expression::Readonly(inner) => type_hashes(decls, inner, params, seen),
+        Expression::Tuple(items) => items.iter().all(|t| type_hashes(decls, t, params, seen)),
+        Expression::Type(n) => {
+            matches!(*n, "int" | "float" | "string" | "bool" | "byte" | "unit")
+                || params.contains(n)
+                || named_type_hashes(decls, n, seen)
+        }
+        Expression::TypeApp { name, args } => {
+            named_type_hashes(decls, name, seen) && args.iter().all(|t| type_hashes(decls, t, params, seen))
+        }
+        _ => false,
+    }
+}
+
+/// Whether this module's class or enum `name` has `Hash`: derived,
+/// implemented, or implied as a readonly class.
+fn named_type_hashes<'a>(decls: &[Output<'a>], name: &'a str, seen: &mut Vec<&'a str>) -> bool {
+    if has_explicit_impl(decls, "Hash", name) {
+        return true;
+    }
+    decls.iter().any(|d| match d.1.as_ref() {
+        Expression::Class { name: n, attrs, readonly, .. } if *n == name => {
+            derive_traits_from_attrs(attrs).contains(&"Hash") || (*readonly && readonly_class_hashes(decls, name, seen))
+        }
+        Expression::EnumDecl { name: n, attrs, .. } if *n == name => derive_traits_from_attrs(attrs).contains(&"Hash"),
+        _ => false,
+    })
+}
+
 fn strip_processed_attrs(attrs: &mut Vec<Attribute<'_>>) {
     attrs.retain(|a| a.name != "derive" && a.name != "ffi");
 }
@@ -450,16 +512,31 @@ fn expand_decls<'a>(decls: &mut Vec<Output<'a>>, pending: &mut Vec<PendingMacro>
                 name,
                 type_params,
                 attrs,
+                readonly,
                 ..
             } => {
                 if let Some(a) = validate_attrs(attrs, "class", &mut messages, span, false).first() {
                     pending.push(pending_attr(a.name, &a.args, span, None));
                     None
                 } else {
+                let mut derives = derive_traits_from_attrs(attrs);
+                // A readonly class is a value: `==` is structural, as if it
+                // derived `Eq`, and so is `hash` when its fields hash
+                // (#1558).
+                if *readonly {
+                    for implied in ["Eq", "Hash"] {
+                        if !derives.contains(&implied)
+                            && !has_explicit_impl(decls, implied, name)
+                            && (implied == "Eq" || readonly_class_hashes(decls, name, &mut Vec::new()))
+                        {
+                            derives.push(implied);
+                        }
+                    }
+                }
                 Some(Job {
                     name,
                     generic: !type_params.is_empty(),
-                    derives: derive_traits_from_attrs(attrs),
+                    derives,
                     scalar_backing: None,
                 })
                 }

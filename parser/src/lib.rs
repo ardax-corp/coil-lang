@@ -2578,7 +2578,7 @@ impl<'pratt> Pratt<'pratt> {
             .collect::<Vec<_>>()
     }
 
-    /// `class Name { [pub] field: Type, ... }`
+    /// `[readonly] class Name { [pub] field: Type, ... }`
     ///
     /// Fields are private by default; `pub` makes them public.
     fn class(
@@ -2587,7 +2587,8 @@ impl<'pratt> Pratt<'pratt> {
     {
         self.docs_prefix()
             .then(self.attr_list())
-            .then(keyword!("class"))
+            .then(keyword!("readonly").or_not())
+            .then_ignore(keyword!("class"))
             .then(text::ident().padded_by(trivia()))
             .then(self.type_param_list())
             .then(self.contracts(CLASS_CONTRACTS))
@@ -2598,7 +2599,7 @@ impl<'pratt> Pratt<'pratt> {
                     .collect::<Vec<_>>()
                     .delimited_by(op!("{"), op!("}")),
             )
-            .map_with(|((((((docs, attrs), _), name), type_params), invariants), fields), e| {
+            .map_with(|((((((docs, attrs), readonly), name), type_params), invariants), fields), e| {
                 (
                     e.span(),
                     Box::new(Expression::Class {
@@ -2608,6 +2609,7 @@ impl<'pratt> Pratt<'pratt> {
                         type_params,
                         fields,
                         invariants,
+                        readonly: readonly.is_some(),
                     }),
                 )
             })

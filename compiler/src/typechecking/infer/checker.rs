@@ -200,6 +200,7 @@ impl Checker {
             synthetic_statics: std::collections::HashSet::new(),
             next_static_slot: 0,
             const_class_fields: HashMap::new(),
+            readonly_classes: HashSet::new(),
             impl_owner: None,
             enums: BTreeMap::new(),
             enum_tags: BTreeMap::new(),
@@ -1632,6 +1633,7 @@ impl Checker {
         self.methods.retain(|k, _| k.contains("::") || Self::is_lang_enum_key(k));
         self.static_methods.retain(|k, _| k.contains("::") || Self::is_lang_enum_key(k));
         self.const_class_fields.retain(|k, _| k.contains("::"));
+        self.readonly_classes.retain(|k| k.contains("::"));
         self.generics
             .generic_type_ctors
             .retain(|k, _| k.contains("::"));
@@ -1698,6 +1700,7 @@ impl Checker {
             self.messages.extend(msgs);
         }
         self.check_duplicate_classes(ast);
+        self.pre_register_readonly_classes(ast);
         self.collect_variadic_templates(ast);
         self.pre_collect_free_function_param_names(ast);
         self.pre_register_inherent_methods(ast);
@@ -4072,8 +4075,9 @@ impl Checker {
         let receiver_ty = self.infer(receiver);
         let resolved = apply_ty_prune(&self.subst, &receiver_ty);
         let ty = self.access_field_of(&resolved, field, range);
-        // A field read through a `readonly` value is `readonly` too (#1552).
-        if matches!(resolved, Ty::Readonly(_)) {
+        // A field read through a `readonly` value, or of a `readonly
+        // class` instance, is `readonly` too (#1552, #1558).
+        if matches!(resolved, Ty::Readonly(_)) || self.is_readonly_class_ty(&resolved) {
             self.readonly_view(ty)
         } else {
             ty
@@ -7470,6 +7474,16 @@ impl Checker {
                 let resolved = apply_ty_prune(&self.subst, &receiver_ty);
                 let class_name = self.class_owner_from_ty(&resolved);
                 if let Some(class) = class_name.as_ref()
+                    && self.readonly_classes.contains(class)
+                {
+                    let short = class.rsplit("::").next().unwrap_or(class);
+                    let _ = self.error_with_help(
+                        ErrorCode::InvalidAssignment,
+                        format!("Cannot assign to field `{field}` of `{short}`: `{short}` is a readonly class"),
+                        range.clone(),
+                        Some(format!("a readonly class instance never changes after `new`; build a new one with `new {short}(...)`")),
+                    );
+                } else if let Some(class) = class_name.as_ref()
                     && self.is_const_class_field(class, field)
                 {
                     let _ = self.error_with_help(
@@ -9759,13 +9773,17 @@ impl Checker {
                     .is_none()
                 {
                     let pretty = self.diag_tys(&resolved_args.iter().collect::<Vec<_>>()).join(", ");
-                    self.messages.push(Message::error(
+                    let mut msg = Message::error(
                         ErrorCode::GenericTypeError,
                         format!("No instance for `{}<{}>`", constraint.class, pretty),
                         arg_expr
                             .map(|arg| arg.0.into_range())
                             .unwrap_or_else(|| range.clone()),
-                    ));
+                    );
+                    if let Some(help) = self.readonly_class_hash_help(&constraint.class, &resolved_args) {
+                        msg.with_help(help);
+                    }
+                    self.messages.push(msg);
                 }
             }
         }
@@ -10019,15 +10037,20 @@ impl Checker {
                             // scalar dict for the aggregate head.
                             continue;
                         }
+                        let help = self.readonly_class_hash_help(&c.class, &resolved_args);
                         let pretty = Constraint {
                             class: c.class.clone(),
                             args: resolved_args,
                         };
-                        self.messages.push(Message::error(
+                        let mut msg = Message::error(
                             ErrorCode::GenericTypeError,
                             format!("No instance for `{}`", pretty),
                             range.clone(),
-                        ));
+                        );
+                        if let Some(help) = help {
+                            msg.with_help(help);
+                        }
+                        self.messages.push(msg);
                     }
                     Err(()) => {}
                 }
@@ -13342,6 +13365,8 @@ impl Checker {
             Some("fn drop(self) is only allowed on inherent class impls, not trait instances")
         } else if owner == DropOwner::Other {
             Some("fn drop(self) is only allowed on nominal classes and enums")
+        } else if self.readonly_classes.contains(owner_key) {
+            Some("fn drop(self) is not allowed on a readonly class: its instances are values, with no identity to finalise")
         } else if owner_is_enum && self.enum_scalar.contains_key(owner_key) {
             Some("fn drop(self) is not allowed on scalar-backed enums (they are not heap values)")
         } else if is_static {
@@ -14760,6 +14785,56 @@ impl Checker {
             msg.with_help(format!("a class named `{name}` was already declared in this module; remove or rename this declaration"));
             self.messages.push(msg);
         }
+    }
+
+    /// Record this module's `readonly class` keys before any body is
+    /// typed, so a use ahead of the declaration sees the class as immutable.
+    fn pre_register_readonly_classes(&mut self, ast: &Output) {
+        fn walk<'a>(node: &'a Output<'a>, out: &mut Vec<&'a str>) {
+            match Checker::pre_pass_unwrap_stmt(node).1.as_ref() {
+                Expression::Class { name, readonly: true, .. } => out.push(name),
+                Expression::Program(children) | Expression::Fragment(children) => {
+                    for child in children {
+                        walk(child, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut names = Vec::new();
+        walk(ast, &mut names);
+        for name in names {
+            let key = self.qualify_module_name(name);
+            self.readonly_classes.insert(key);
+        }
+    }
+
+    /// Whether `ty` (under any `readonly`) is an instance of a
+    /// `readonly class`.
+    pub(super) fn is_readonly_class_ty(&self, ty: &Ty) -> bool {
+        match strip_readonly(ty) {
+            Ty::Con(name) => self.readonly_classes.contains(name),
+            Ty::App(head, _) => matches!(head.as_ref(), Ty::Con(name) if self.readonly_classes.contains(name)),
+            _ => false,
+        }
+    }
+
+    /// Help for a missing `Hash` on a readonly class: it implies `Hash`
+    /// only when every field type hashes.
+    fn readonly_class_hash_help(&self, class: &str, args: &[Ty]) -> Option<String> {
+        let [ty] = args else { return None };
+        if class != "Hash" || !self.is_readonly_class_ty(&apply_ty_prune(&self.subst, ty)) {
+            return None;
+        }
+        Some(
+            "a readonly class implies `Hash` only when every field type hashes as written (no `Vec`, array, map or type from another module); add `impl Hash` for it"
+                .to_string(),
+        )
+    }
+
+    /// Whether class `key` was declared `readonly class`.
+    pub fn is_readonly_class(&self, key: &str) -> bool {
+        self.readonly_classes.contains(key)
     }
 
     /// Names of the classes and enums this module declares at the top level.
@@ -18818,9 +18893,11 @@ impl Checker {
     fn has_mutable_interior_in(&self, ty: &Ty, seen: &mut Vec<String>) -> bool {
         match ty {
             Ty::Array { .. } | Ty::Record { .. } | Ty::Existential { .. } => true,
+            // A readonly class instance never changes, and what its fields
+            // hold reads `readonly` through it: `readonly C` is `C`.
             Ty::Con(name) => match self.enum_payload_tys(name) {
                 Some(payloads) => self.enum_payloads_mutable(name, &payloads, seen),
-                None => self.classes.contains_key(name),
+                None => self.classes.contains_key(name) && !self.readonly_classes.contains(name),
             },
             Ty::App(head, _) => {
                 if vec_element_ty(ty).is_some() {
@@ -18831,7 +18908,7 @@ impl Checker {
                     // A generic enum's own payloads; what its arguments
                     // hold is qualified through them.
                     Some(payloads) => self.enum_payloads_mutable(name, &payloads, seen),
-                    None => self.classes.contains_key(name),
+                    None => self.classes.contains_key(name) && !self.readonly_classes.contains(name),
                 }
             }
             _ => false,
