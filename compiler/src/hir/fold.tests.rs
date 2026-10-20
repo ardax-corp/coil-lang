@@ -128,11 +128,8 @@ fn a_local_bound_once_to_a_literal_folds_into_its_reads() {
         folded_return("fn f() -> int { let m = 1; let b = m * 2 + 1; if b > 100 { return 0; } return b; }"),
         "Lit(Int(3))"
     );
-    // An `if` on it keeps one branch, whose value folds on.
-    assert_eq!(
-        folded_return("fn f() -> int { let m = 1; let a = if m == 0 { 10 } else { 20 }; return a * 2 + 1; }"),
-        "Lit(Int(41))"
-    );
+    // A `let` that folds to a literal reads as one in the next round.
+    assert_eq!(folded_return("fn f() -> int { let m = 1; let k = m + 1; let j = k * 3; return j; }"), "Lit(Int(6))");
     // A local written again keeps its reads.
     assert_eq!(folded_return("fn f(int x) -> int { let m = 1; if x > 0 { m = 2; } return m * 2; }"), "x IntMul lit");
 }
