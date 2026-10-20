@@ -2023,7 +2023,7 @@ impl Compiler {
             }
             // A `match` keeps its operand (and an arm its bindings) in the
             // caller's frame past the call, where an object in it would
-            // stay rooted until the frame slot is reused (#ISSUE): keep the
+            // stay rooted until the frame slot is reused (#1625): keep the
             // frame of a callee whose `match` holds one.
             let holds = |t: &Option<Ty>| t.as_ref().is_none_or(|t| self.holds_object(t, 4));
             let match_holds = callee.exprs.iter().any(|e| match &e.kind {
