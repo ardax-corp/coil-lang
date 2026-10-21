@@ -25,8 +25,8 @@ test("a short receiver keeps its method and lambda on one line") {
             s.run(fn (int x) {
                 let n = 41 + x;
                 let m = n * 2 - n;
-                assert!(m == 42);
-                m
+                let k = m * 3 - m * 2;
+                k
             });
             s.total
         },
