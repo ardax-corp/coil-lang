@@ -306,9 +306,11 @@ budget and calls the entry, and a call that returns normally ends with
 that panics, errors or runs out of steps drops the machine, and the next call
 builds a fresh one. The sandboxed native table is built once per process.
 
-- The host natives are the standard table in ABI order, with every native that
-  isn't pure (IO, fs, network, env, clocks, threads, streams) replaced by a
-  stub that fails the macro (`native_allowed_at_compile_time`).
+- The host natives are the standard table in ABI order. The fs, `open`,
+  stream, `env_var` and `env_exec` natives are gated (`comptime::io_gate`, see
+  "Compile-time IO" below); every other native that isn't pure (network,
+  clocks, threads, the rest of env) is replaced by a stub that fails the
+  evaluation (`native_allowed_at_compile_time`).
 - Each call runs within `ComptimeLimits` (`HostGrants::comptime`): a step
   budget (`--comptime-steps`, default 1B loop back-edges + calls, see
   `Machine::set_step_budget`) and a cap on live heap bytes (`--comptime-mem`,
@@ -321,6 +323,38 @@ builds a fresh one. The sandboxed native table is built once per process.
 - A panic fails the macro with its message, so `panic "…"` is the way to
   inspect what a macro received.
 - The VM's thread-local output redirect is restored before the machine drops.
+
+## Compile-time IO
+
+A `const`, a `comptime` expression or a macro may read files, write files,
+read environment variables and run programs only as the build allows:
+
+- `--comptime-read [MODULE=]PATH`, `--comptime-write [MODULE=]PATH`: files
+  under `PATH` (a file or directory).
+- `--comptime-env [MODULE=]NAME`, `--comptime-exec [MODULE=]NAME`: one
+  variable, one program (matched by file stem).
+- Each flag repeats. `MODULE=` scopes a grant to one module (a module
+  path such as `config::load`); without it the grant covers every module,
+  the entry file included. `HostGrants::comptime_io` holds them (`ComptimeGrants`,
+  `Scoped<T>`), and `ComptimeGrants::for_module` gives the
+  `macros::ComptimeIo` a single evaluation runs with.
+- Paths resolve against the compiler's working directory, not the source
+  file, and are canonicalized (`macros::absolute_path`), so `..` and symlinks
+  cannot leave a granted directory.
+- Typecheck (`const_effect_messages`): with no grant for its module, a const
+  initializer with any IO effect is E0134 and the help names the flags to
+  add. With a grant, effects the grants cover are left to the runtime gate
+  (stdlib wrappers carry broad effect sets); reading or writing a
+  `static let` is still E0134 (`Summary::statics`).
+- Runtime: `io_gate::set_active` installs the grants of the item being
+  evaluated (consts per module, macros by their provider module). A refused
+  call fails the evaluation with "reading `p` while compiling needs
+  `--comptime-read <dir>`"; silent folding and `static let` run with no
+  grants, so every gated native fails there.
+- Const initializers are not reachable from `main` for the runtime
+  `--allow-*` check (E0414): their IO happens while compiling.
+- Macro expansion caches key on the provider's grants, so changing them
+  re-expands.
 
 Module statics of providers are not initialised (the expansion program has no
 `main`), so macros should not depend on them.

@@ -268,3 +268,89 @@ impl HostGrants {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("coil_grants_{}_{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("granted/sub")).unwrap();
+        std::fs::write(dir.join("granted/sub/a.txt"), "a").unwrap();
+        std::fs::write(dir.join("secret.txt"), "s").unwrap();
+        dir
+    }
+
+    fn io_for(read: &Path) -> crate::macros::ComptimeIo {
+        let grants = ComptimeGrants {
+            read: vec![Scoped { module: None, value: read.to_path_buf() }],
+            write: vec![Scoped { module: None, value: read.to_path_buf() }],
+            env: vec![Scoped::parse("gen=TOKEN", |n| n.to_string())],
+            exec: vec![Scoped::parse("git", |n| n.to_string())],
+        };
+        grants.for_module("gen")
+    }
+
+    #[test]
+    fn scoped_grants_parse_a_module_prefix_only() {
+        let g = Scoped::parse("db_gen=db.internal:3306", |v| v.to_string());
+        assert_eq!(g.module.as_deref(), Some("db_gen"));
+        assert_eq!(g.value, "db.internal:3306");
+        let g = Scoped::parse("a::b=x", |v| v.to_string());
+        assert_eq!(g.module.as_deref(), Some("a::b"));
+        // Not a module path before `=`: the whole text is the value.
+        let g = Scoped::parse("./dir=odd", |v| v.to_string());
+        assert_eq!(g.module, None);
+        assert_eq!(g.value, "./dir=odd");
+    }
+
+    #[test]
+    fn grants_apply_to_their_module_or_any() {
+        let grants = ComptimeGrants {
+            env: vec![Scoped::parse("gen=TOKEN", |n| n.to_string()), Scoped::parse("HOME", |n| n.to_string())],
+            ..ComptimeGrants::default()
+        };
+        assert_eq!(grants.for_module("gen").env, ["TOKEN", "HOME"]);
+        assert_eq!(grants.for_module("other").env, ["HOME"]);
+    }
+
+    #[test]
+    fn reads_stay_under_the_granted_directory() {
+        let dir = scratch("read");
+        let io = io_for(&dir.join("granted"));
+        let p = |rel: &str| dir.join(rel).to_string_lossy().into_owned();
+        assert!(io.check_read(&p("granted/sub/a.txt")).is_ok());
+        assert!(io.check_read(&p("granted/missing.txt")).is_ok());
+        let err = io.check_read(&p("secret.txt")).unwrap_err();
+        assert!(err.contains("--comptime-read"), "{err}");
+        assert!(io.check_read(&p("granted/../secret.txt")).is_err());
+        assert!(io.check_read(&p("granted/nope/../../secret.txt")).is_err());
+        assert!(io.check_write(&p("granted/new/file.txt")).is_ok());
+        assert!(io.check_write(&p("elsewhere.txt")).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_does_not_lead_out() {
+        let dir = scratch("link");
+        std::os::unix::fs::symlink(dir.join("secret.txt"), dir.join("granted/link.txt")).unwrap();
+        std::os::unix::fs::symlink(&dir, dir.join("granted/up")).unwrap();
+        let io = io_for(&dir.join("granted"));
+        assert!(io.check_read(&dir.join("granted/link.txt").to_string_lossy()).is_err());
+        assert!(io.check_write(&dir.join("granted/up/new.txt").to_string_lossy()).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn env_names_and_program_stems_must_be_listed() {
+        let io = io_for(Path::new("/nonexistent-coil-grant"));
+        assert!(io.check_env("TOKEN").is_ok());
+        assert!(io.check_env("OTHER").unwrap_err().contains("--comptime-env OTHER"));
+        assert!(io.check_exec("git").is_ok());
+        assert!(io.check_exec("/usr/bin/git").is_ok());
+        assert!(io.check_exec("rm").unwrap_err().contains("--comptime-exec rm"));
+    }
+}
