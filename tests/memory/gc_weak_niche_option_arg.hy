@@ -61,3 +61,11 @@ test("an option held by a local stays alive") {
     };
     assert!(k == 5);
 }
+
+test("an object a local holds stays alive when wrapped in the argument") {
+    let n = new Node(6);
+    let w = weak_opt(Option::Some(n));
+    collect();
+    assert!(!gone(w));
+    assert!(n.v == 6);
+}
