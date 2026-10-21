@@ -48,7 +48,7 @@ pub enum JobStatics {
     /// The spawning VM's statics copied out of its heap for an isolate job,
     /// one entry per slot; `None` (a slot that is unset, or holds a value
     /// that cannot cross threads) starts zeroed (#1663).
-    Copied(Vec<Option<SpawnArg>>),
+    Copied(Vec<Option<crate::thread::StaticSlot>>),
 }
 
 pub struct Job {

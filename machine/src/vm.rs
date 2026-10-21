@@ -2594,12 +2594,12 @@ impl<const S: usize> Machine<S> {
     }
 
     /// An isolate job's statics: the spawner's, copied into this VM's heap
-    /// ([`crate::reactor::JobStatics::Copied`], #1663). A slot whose copy
-    /// fails stays zeroed.
-    pub(crate) fn load_copied_statics(&mut self, slots: Vec<Option<crate::thread::SpawnArg>>) {
-        for (i, arg) in slots.into_iter().enumerate().take(self.statics.len()) {
-            let Some(arg) = arg else { continue };
-            if let Ok(v) = crate::thread::spawn_arg_to_value(self.heap_mut(), arg) {
+    /// ([`crate::reactor::JobStatics::Copied`], #1663, #1684). A slot whose
+    /// copy fails stays zeroed.
+    pub(crate) fn load_copied_statics(&mut self, slots: Vec<Option<crate::thread::StaticSlot>>) {
+        for (i, slot) in slots.into_iter().enumerate().take(self.statics.len()) {
+            let Some(slot) = slot else { continue };
+            if let Some(v) = crate::thread::static_slot_to_value(self.heap_mut(), slot) {
                 self.statics[i] = v;
             }
         }
