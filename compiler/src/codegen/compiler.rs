@@ -8689,7 +8689,12 @@ fn const_effect_messages(checker: &crate::typechecking::infer::Checker, hir: &cr
             continue;
         }
         let s = fx.summaries[i];
-        if s.visible.is_pure() && s.latent == 0 {
+        // IO the build granted to this module's compile-time code is allowed;
+        // the host checks each path, name and program as it runs.
+        let module = name.rsplit_once("::").map_or("", |(m, _)| m);
+        let granted = checker.host_grants().comptime_io.for_module(module).effects();
+        let missing = s.visible.bits() & !granted;
+        if missing == 0 && s.latent == 0 {
             continue;
         }
         let short = name.rsplit("::").next().unwrap_or(name);
@@ -8702,14 +8707,37 @@ fn const_effect_messages(checker: &crate::typechecking::infer::Checker, hir: &cr
             },
             body.span.0..body.span.1,
         );
-        msg.with_help(if crate::comptime_expr::is_comptime_const(short) {
-            "a `comptime` expression cannot read or change anything outside the program; without `comptime` it is computed when the program runs".to_string()
-        } else {
-            "a `const` cannot read or change anything outside the program; use `static let` to compute it when the program starts".to_string()
+        msg.with_help(match grant_hint(missing) {
+            Some(hint) => hint,
+            None if crate::comptime_expr::is_comptime_const(short) => {
+                "a `comptime` expression cannot read or change the program's state; without `comptime` it is computed when the program runs".to_string()
+            }
+            None => "a `const` cannot read or change the program's state; use `static let` to compute it when the program starts".to_string(),
         });
         out.push(msg);
     }
     out
+}
+
+/// The flags that would let compile-time code have the `missing` effects,
+/// when IO is all that is missing.
+fn grant_hint(missing: u16) -> Option<String> {
+    use common::EffectFlags as F;
+    let flags: Vec<&str> = [
+        (F::READ, "`--comptime-read PATH`"),
+        (F::WRITE, "`--comptime-write PATH`"),
+        (F::ENV, "`--comptime-env NAME`"),
+        (F::EXEC, "`--comptime-exec STEM`"),
+    ]
+    .into_iter()
+    .filter(|(bit, _)| missing & bit != 0)
+    .map(|(_, flag)| flag)
+    .collect();
+    let io = F::READ | F::WRITE | F::ENV | F::EXEC;
+    if flags.is_empty() || missing & !io != 0 {
+        return None;
+    }
+    Some(format!("code run while compiling does IO only when the build grants it: pass {}", flags.join(" and ")))
 }
 
 /// Functions whose calls with constant arguments may be computed at compile

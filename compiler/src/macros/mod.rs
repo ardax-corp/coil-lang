@@ -383,12 +383,16 @@ pub trait MacroHost: Send + Sync {
     ///
     /// Then, on the same VM (so a call can read the consts), each of
     /// `folds` runs within the silent tier; one that fails is `None`.
+    ///
+    /// An explicit item may do the IO `io[item.io]` grants; nothing else
+    /// may do any.
     fn eval_consts(
         &self,
         program: &CompiledExpansion,
         consts: &[ConstEval],
         folds: &[FoldCall],
         limits: &crate::ComptimeLimits,
+        io: &[ComptimeIo],
     ) -> Result<ConstEvalOutcome, ConstEvalError>;
 }
 
@@ -419,6 +423,9 @@ pub struct ConstEval {
     pub slot: u32,
     pub kind: u8,
     pub silent: bool,
+    /// Index of its grants in the request's `io` (unused when `silent`:
+    /// silent work never does IO).
+    pub io: u32,
 }
 
 /// The computed values, the silent items left out (indices into the

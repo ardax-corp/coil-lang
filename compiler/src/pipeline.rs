@@ -1711,6 +1711,9 @@ impl Pipeline {
             return;
         };
         let kinds = self.static_word_kinds();
+        // Each module's grants once.
+        let mut io: Vec<crate::macros::ComptimeIo> = Vec::new();
+        let mut io_of: HashMap<&str, u32> = HashMap::new();
         let evals: Vec<crate::macros::ConstEval> = consts
             .iter()
             .map(|c| crate::macros::ConstEval {
@@ -1718,6 +1721,10 @@ impl Pipeline {
                 slot: c.slot,
                 kind: kinds.get(c.slot as usize).copied().unwrap_or(common::WORD_UNKNOWN),
                 silent: c.silent,
+                io: *io_of.entry(c.fqn.rsplit_once("::").map_or("", |(m, _)| m)).or_insert_with_key(|module| {
+                    io.push(self.host_grants.comptime_io.for_module(module));
+                    io.len() as u32 - 1
+                }),
             })
             .collect();
         let program = crate::macros::CompiledExpansion {
@@ -1743,7 +1750,7 @@ impl Pipeline {
                 })
             })
             .collect();
-        match host.eval_consts(&program, &evals, &folds, &limits) {
+        match host.eval_consts(&program, &evals, &folds, &limits, &io) {
             Ok(outcome) => {
                 let folded: Vec<_> = sites
                     .iter()
