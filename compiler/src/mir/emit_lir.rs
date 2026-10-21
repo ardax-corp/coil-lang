@@ -99,6 +99,10 @@ pub(super) fn emit_lir_framed(
     let mut entry_clears = super::emit::entry_clears(func, &regs, &plan.need_slot);
     let mut source_clears = super::emit::source_clears(func, &regs, &plan.need_slot, &super::emit::Gathers::default());
     super::emit::prune_clears(func, &regs, &plan.need_slot, &mut cleared, &mut entry_clears, &mut source_clears, &[]);
+    let roots = plan.tree_roots(func);
+    let arg_clears = super::emit::arg_clears(func, &regs, &plan.need_slot, &super::emit::Gathers::default(), |d| {
+        roots.get(d.index()).copied().flatten()
+    });
     let max_reg = plan
         .need_slot
         .iter()
@@ -138,6 +142,9 @@ pub(super) fn emit_lir_framed(
     for block in &func.blocks {
         if block.id != func.entry {
             out.push(IlOp::Label(block_lab[block.id.index()]));
+        }
+        for &r in arg_clears.entry(block.id) {
+            super::emit::push_clear_word(&mut out, r);
         }
         let term_loc = func.term_loc(block.id);
         consume_match_tos(&mut out, func, block.id, &plan, &regs, term_loc);
@@ -201,6 +208,9 @@ pub(super) fn emit_lir_framed(
                 continue;
             }
             emit_stored(&mut out, inst, func, &plan, &regs, pool, loc)?;
+            for &r in arg_clears.after(dest) {
+                super::emit::push_clear_word(&mut out, r);
+            }
         }
         let end = out.len();
         restore_block_op_locs(&mut out, &starts, end, func);
@@ -478,6 +488,38 @@ impl EmitPlan {
             stack_scrutinee,
             paired,
         }
+    }
+
+    /// Per value, the op it is emitted at: itself when it stands alone,
+    /// the root of its expression tree when it is an inline operand
+    /// (a tree value has one user, in its block), `None` when that root
+    /// is a terminator's operand.
+    fn tree_roots(&self, func: &MirFunc) -> Vec<Option<ValueId>> {
+        let n = self.tree.len();
+        let mut user: Vec<Option<ValueId>> = vec![None; n];
+        for inst in func.blocks.iter().flat_map(|b| &b.insts) {
+            if inst.is_phi() || matches!(inst, MirInst::ClearWord { .. }) {
+                continue;
+            }
+            for o in inst.operands() {
+                if self.tree.get(o.index()).copied().unwrap_or(false) {
+                    user[o.index()] = Some(inst.dest());
+                }
+            }
+        }
+        (0..n)
+            .map(|i| {
+                let mut v = ValueId(i as u32);
+                // A tree is a chain of single users: at most n steps.
+                for _ in 0..n {
+                    if !self.tree[v.index()] {
+                        return Some(v);
+                    }
+                    v = user[v.index()]?;
+                }
+                None
+            })
+            .collect()
     }
 
     /// The frame word of `home`.

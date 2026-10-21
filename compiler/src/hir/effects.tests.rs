@@ -371,3 +371,170 @@ fn descriptions_name_mutated_parameters() {
     assert!(get("copy_into").ends_with("; mutates `dst`"), "{}", get("copy_into"));
     assert_eq!(get("P::get"), "pure");
 }
+
+const COUNTER: &str = "
+class Counter {
+    pub n: int,
+}
+impl Counter {
+    pub fn bump() {
+        self.n = self.n + 1;
+    }
+    pub fn twice() {
+        self.bump();
+        self.bump();
+    }
+}
+static let G: int = 0;
+";
+
+#[test]
+fn a_method_that_writes_self_mutates_only_through_it() {
+    let (m, out) = summaries(COUNTER);
+    for name in ["Counter::bump", "Counter::twice"] {
+        let s = of(&m, &out, name);
+        assert!(s.flags.contains(EffectFlags::HEAP_MUT), "{name}: {s:?}");
+        assert_eq!(s.param_only & EffectFlags::HEAP_MUT, EffectFlags::HEAP_MUT, "{name}: {s:?}");
+    }
+}
+
+#[test]
+fn calling_it_on_an_object_the_caller_made_is_pure() {
+    let src = format!("{COUNTER}\nfn made() -> int {{ let c = new Counter(0); c.twice(); return c.n; }}");
+    let (m, out) = summaries(&src);
+    let s = of(&m, &out, "made");
+    assert!(s.is_pure(), "{s:?}");
+}
+
+#[test]
+fn calling_it_on_an_object_that_escapes_is_not_pure() {
+    let src = format!(
+        "{COUNTER}
+fn returned() -> Counter {{ let c = new Counter(0); c.bump(); return c; }}
+fn on_argument(Counter c) {{ c.bump(); }}
+fn aliased() -> int {{ let c = new Counter(0); let d = c; c.bump(); return d.n; }}"
+    );
+    let (m, out) = summaries(&src);
+    for name in ["returned", "on_argument", "aliased"] {
+        let s = of(&m, &out, name);
+        assert!(s.flags.contains(EffectFlags::HEAP_MUT), "{name}: {s:?}");
+    }
+}
+
+#[test]
+fn a_method_that_also_writes_a_static_is_not_discharged() {
+    let src = format!(
+        "{COUNTER}
+impl Counter {{
+    pub fn count() {{
+        self.n = self.n + 1;
+        G = G + 1;
+    }}
+}}
+fn made() -> int {{ let c = new Counter(0); c.count(); return c.n; }}"
+    );
+    let (m, out) = summaries(&src);
+    let s = of(&m, &out, "Counter::count");
+    assert_eq!(s.param_only & EffectFlags::HEAP_MUT, 0, "{s:?}");
+    assert!(of(&m, &out, "made").flags.contains(EffectFlags::HEAP_MUT));
+}
+
+fn readonly_errors(src: &str) -> Vec<String> {
+    let owned = Box::leak(src.to_string().into_boxed_str());
+    let ast = parser::Pratt::default().parse(owned).expect("parse");
+    let mut checker = Checker::new();
+    let _ = checker.check_program(&ast);
+    let sidecar = checker.typed_sidecar();
+    let module = build_module(&checker, &sidecar, "", &ast);
+    let program = ProgramEffects::default();
+    ModuleEffects::solve(&module, &checker, "", &program)
+        .readonly_messages()
+        .iter()
+        .map(|m| m.message().to_string())
+        .collect()
+}
+
+const RESET: &str = "
+trait Reset<R> {
+    fn reset(R self) {}
+}
+class P {
+    pub x: int,
+}
+impl Reset for P {
+    fn reset(P self) {
+        self.x = 0;
+    }
+}
+";
+
+#[test]
+fn arguments_packed_into_a_rest_parameter_take_its_mask_bit() {
+    let src = "
+class P {
+    pub x: int,
+}
+fn all(int a, P... rest) {
+    for r in rest {
+        r.x = 0;
+    }
+}
+fn two(P x, P y) {
+    all(0, x, y);
+}
+fn spread(int k, Vec<P> v) {
+    all(k, ...v);
+}
+";
+    let (m, out) = summaries(src);
+    assert_eq!(of(&m, &out, "all").mutates, 1 << 1);
+    assert_eq!(of(&m, &out, "two").mutates, 0b11, "both `x` and `y` go to `rest`");
+    assert_eq!(of(&m, &out, "spread").mutates, 1 << 1, "only `v` goes to `rest`");
+}
+
+#[test]
+fn a_readonly_value_spread_into_a_rest_parameter_is_e0107() {
+    let src = format!(
+        "{RESET}
+fn all<A, B: Reset>(A a, B... rest) {{
+    for r in rest {{
+        r.reset();
+    }}
+}}
+fn main() {{
+    let p = readonly new P(1);
+    let v: Vec<readonly P> = Vec::new();
+    v.push(p);
+    all(0, ...v);
+    all(0, new P(2), p);
+}}
+"
+    );
+    let errs = readonly_errors(&src);
+    assert_eq!(errs.len(), 2, "{errs:?}");
+    assert!(errs.iter().all(|e| e.contains("parameter `rest`")), "{errs:?}");
+}
+
+#[test]
+fn a_readonly_method_argument_is_named_not_called_on() {
+    let src = format!(
+        "{RESET}
+class H {{
+    pub n: int,
+}}
+impl H {{
+    pub fn put<B: Reset>(int k, B b) {{
+        b.reset();
+    }}
+}}
+fn main() {{
+    let p = readonly new P(1);
+    let h = new H(0);
+    h.put(0, p);
+}}
+"
+    );
+    let errs = readonly_errors(&src);
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert!(errs[0].starts_with("Cannot pass the `readonly` `p` to `.put()`: it mutates parameter `b`"), "{errs:?}");
+}

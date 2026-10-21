@@ -9,7 +9,8 @@ impl Add for M {
     }
 }
 
-impl Num for M {}
+impl Num for M {
+}
 
 fn main() {
     let m = new M(1) + new M(2);

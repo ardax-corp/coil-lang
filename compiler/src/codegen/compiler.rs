@@ -2326,6 +2326,20 @@ impl Compiler {
             },
             _ => None,
         };
+        // A tuple orders through its structural instance (#1721).
+        if nominal.is_none() && matches!(lookup_ty, Ty::Tuple(_)) && matches!(class, "Lt" | "Le" | "Gt" | "Ge") {
+            let fqn = self
+                .checker
+                .generics()
+                .find_instance(class, std::slice::from_ref(&lookup_ty))?
+                .method_fqns
+                .get(method)
+                .cloned()?;
+            if !self.functions.contains_key(&fqn) && !self.fn_entry_labels.contains_key(&fqn) {
+                return None;
+            }
+            return Some((lookup_ty, fqn));
+        }
         let name = nominal?;
         if matches!(
             name,
@@ -4264,6 +4278,12 @@ impl Compiler {
                 self.emit_builtin_entry(&fqn, &params, boolean.clone(), None, |b, a| b.bin(op, a[0], a[1], boolean.clone()));
             }
         }
+        // `string` orders by its UTF-8 bytes (coil-stdlib#48).
+        let params = [(string.clone(), tag_of(ValueTag::String)), (string.clone(), tag_of(ValueTag::String))];
+        for (class, method, op) in [("Lt", "lt", BinOp::Lt), ("Le", "le", BinOp::Le), ("Gt", "gt", BinOp::Gt), ("Ge", "ge", BinOp::Ge)] {
+            let fqn = Generics::builtin_instance_fqn(class, "string", method);
+            self.emit_builtin_entry(&fqn, &params, boolean.clone(), None, |b, a| b.bin(op, a[0], a[1], boolean.clone()));
+        }
         // `()` is always `()` (#1450): its operands, taken as the `Show`
         // thunk takes a unit, are never read.
         let params = [(int.clone(), tag_of(ValueTag::Unit)), (int.clone(), tag_of(ValueTag::Unit))];
@@ -4336,7 +4356,7 @@ impl Compiler {
                 self.note_raw_builtin_thunk(&fqn);
                 self.reserve_function_entry(Self::dict_adapter_name(&fqn));
                 self.reserve_function_entry(fqn.clone());
-                let arity = if matches!(method.as_str(), "eq" | "ne") { 2 } else { 1 };
+                let arity = if matches!(method.as_str(), "eq" | "ne" | "lt" | "le" | "gt" | "ge") { 2 } else { 1 };
                 let param = if method == "len" { Self::structural_shape_at_int(&ty) } else { ty.clone() };
                 self.structural_thunk_params.insert(fqn.clone(), vec![param; arity]);
                 if !self.structural_thunks.iter().any(|(f, ..)| *f == fqn) {
@@ -7737,6 +7757,14 @@ impl Compiler {
                             let params = [(ty.clone(), tag), (ty.clone(), tag)];
                             self.emit_builtin_entry(&name, &params, boolean.clone(), None, |b, a| {
                                 b.bin(crate::hir::BinOp::Overloaded(sym), a[0], a[1], boolean.clone())
+                            })
+                        }
+                        // A tuple's lexicographic order (#1721).
+                        ("lt" | "le" | "gt" | "ge", Ty::Tuple(items)) => {
+                            let items = items.clone();
+                            let params = [(ty.clone(), tag), (ty.clone(), tag)];
+                            self.emit_builtin_entry(&name, &params, boolean.clone(), None, |b, a| {
+                                crate::hir::synth::tuple_order(b, a[0], a[1], &items, &method)
                             })
                         }
                         ("hash", _) => self.emit_structural_hash(&name, &ty, tag),

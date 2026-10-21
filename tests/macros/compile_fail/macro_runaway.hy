@@ -1,5 +1,5 @@
 // Expected: E0119 — the derive loops forever (step budget).
-use derive_macros_bad::{Spin};
+use derive_macros_bad::Spin;
 
 #[derive(Spin)]
 class C {

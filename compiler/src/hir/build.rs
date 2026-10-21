@@ -30,7 +30,7 @@ use super::{
     UnOp,
 };
 use crate::typechecking::infer::{Checker, TypedSidecar};
-use crate::typechecking::def_id::DefId;
+use crate::typechecking::def_id::{DefId, DefKind};
 use crate::typechecking::ty::{
     self as coil_ty, Ty, is_option_ty, option_inner, result_ok_err, result_ty, strip_readonly,
 };
@@ -1264,6 +1264,13 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 let args = fields.iter().map(|f| self.expr(b, &f.value)).collect();
                 self.emit(b, node, HirKind::Make { kind: MakeKind::Record(names), args })
             }
+            // `m::F(args)` / `C::f(args)` of a `const` or `static` function
+            // value: a call of the value it reads (#1705).
+            E::Construct { enum_name, variant_name, fields: EnumConstructPayload::Tuple(items) }
+                if self.checker.qualified_value_call_at(node.0.start, node.0.end).is_some() =>
+            {
+                self.qualified_value_call(b, node, enum_name, variant_name, items)
+            }
             // `Trait::m(args)` is the free call `m(args)` the checker
             // resolved within `Trait`.
             E::Construct {
@@ -1424,7 +1431,12 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
 
             E::Lambda { args, body, .. } => self.lambda(b, node, args, body),
             E::Defer { captures, body } => {
-                let captures = captures.iter().map(|c| b.lookup(c)).collect();
+                let captures: Vec<Option<LocalId>> = captures.iter().map(|c| b.lookup(c)).collect();
+                // The thunk's frame copies each capture as one word (#1758):
+                // it is never split into slots, as a lambda's capture.
+                for local in captures.iter().flatten() {
+                    b.body.locals[local.0 as usize].captured = true;
+                }
                 let body = self.expr(b, body);
                 self.emit_ty(b, node, HirKind::Defer { captures, body }, Some(coil_ty::unit()))
             }
@@ -1849,6 +1861,24 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                     .node_id(callee_node)
                     .and_then(|i| self.sidecar.def_id(i))
                     .or_else(|| id.and_then(|i| self.sidecar.def_id(i)));
+                // `F(3)` for a `const F = sq` or a `static` holding a
+                // function value, own or imported: a call of the value it
+                // reads (#1685).
+                if self.global_fn_value(n, def) {
+                    let callee = self.expr(b, name);
+                    // An imported one's type, when the read has none of its own.
+                    if b.body.exprs[callee.0 as usize].ty.is_none() {
+                        let interner = self.checker.def_interner();
+                        let ty = def
+                            .or_else(|| self.checker.def_id_of(n))
+                            .and_then(|d| interner.info(d))
+                            .and_then(|info| Some(format!("{}::{}", interner.module_path(info.module)?, info.name)))
+                            .and_then(|fqn| self.checker.module_const_ty(&fqn).cloned().or_else(|| self.static_ty(&fqn)));
+                        b.body.exprs[callee.0 as usize].ty = ty;
+                    }
+                    let args = self.exprs(b, args);
+                    return self.emit(b, node, HirKind::Call { callee: Callee::Value(callee), args });
+                }
                 let overload = id.and_then(|i| self.sidecar.overload(i)).map(|o| o.candidate_id);
                 let mut args = self.exprs(b, args);
                 let stmts = self.named_args_in_source_order(b, span_of(node), &mut args);
@@ -1874,6 +1904,9 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             }
             E::QualifiedAccess { .. } if self.checker.qualified_trait_call_at(node.0.start, node.0.end).is_some() => {
                 self.qualified_trait_call(b, node, args)
+            }
+            E::QualifiedAccess { owner, member } if self.checker.qualified_value_call_at(node.0.start, node.0.end).is_some() => {
+                self.qualified_value_call(b, node, owner, member, args)
             }
             E::QualifiedAccess { owner, member } => {
                 if self.checker.tag_for(owner, member).is_some() {
@@ -1935,6 +1968,28 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         let stmts = self.named_args_in_source_order(b, span_of(node), &mut args);
         let call = self.emit(b, node, HirKind::Call { callee: Callee::Named { name, def, overload }, args });
         self.after(b, span_of(node), stmts, call)
+    }
+
+    /// `owner::member(args)` the checker typed as a call of the `const` or
+    /// `static` function value `owner::member` (#1705): read it, then call
+    /// the value, as a bare `F(args)` is.
+    fn qualified_value_call(&mut self, b: &mut BodyBuilder, node: &Output<'_>, owner: &str, member: &str, args: &[Output<'_>]) -> HirId {
+        let ty = self.checker.qualified_value_call_at(node.0.start, node.0.end).cloned();
+        let callee = self.synth(b, span_of(node), HirKind::Global { name: format!("{owner}::{member}"), def: None }, ty);
+        let args = self.exprs(b, args);
+        self.emit(b, node, HirKind::Call { callee: Callee::Value(callee), args })
+    }
+
+    /// Whether the bare `name` (resolved to `def`) reads a `const` or
+    /// `static` (whose value a call of `name` calls) rather than naming a
+    /// function.
+    fn global_fn_value(&self, name: &str, def: Option<DefId>) -> bool {
+        if self.checker.static_slot_index(name).is_some() || self.checker.static_slot_for_module_name(name).is_some() {
+            return true;
+        }
+        def.or_else(|| self.checker.def_id_of(name))
+            .and_then(|d| self.checker.def_interner().info(d))
+            .is_some_and(|info| matches!(info.kind, DefKind::Static | DefKind::Const))
     }
 
     /// `Owner::member` in construct form calls a class's static method.
@@ -2235,7 +2290,9 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             let e = b.temp("err", err_ty.clone());
             let x = b.temp("ok", ok_ty.clone());
             let read_e = self.synth(b, span, HirKind::Local(e), err_ty);
-            let panic = self.main_err_panic(b, None, span, read_e);
+            // The panic reports the `return`, as `raise` reports itself
+            // (#1740).
+            let panic = self.main_err_panic(b, None, span_of(node), read_e);
             let read_x = self.synth(b, span, HirKind::Local(x), ok_ty);
             let ok = self.synth_variant(b, span, common::BUILTIN_RESULT_ENUM, "Ok", vec![read_x], miss_ret(b));
             let ret = self.synth(b, span, HirKind::Return(Some(ok)), Some(coil_ty::never()));

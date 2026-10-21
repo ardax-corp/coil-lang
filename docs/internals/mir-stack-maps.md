@@ -169,11 +169,73 @@ and relocate mapped slots on collect.
   host: 521 → 539 ms (one zero), 573 → 636 ms (two zeros), 437 → 455 and
   436 → 476 ms with the helper inlined. The zero is `CONST 0; STORE`, two
   dispatches; a dense `DenseConst r, 0` would be one, for every dense
-  clear. Not covered: a temporary passed straight to a call
-  (`weak(new Node(..))`) has no clear at all, and a tuple a dense
-  `DenseIndex` read stays pinned in `frame_pins` (rooting its elements)
-  after its register is zeroed.
+  clear.
   `tests/memory/gc_weak_match_arg.hy`.
+- **A temporary passed to a call drops too** (#1650). A word passed
+  straight to a call (`weak(new Node(..))`) has no binding and so no
+  `ClearWord`; its register, and the gather register a dense call copied
+  it into, kept the object rooted until rewritten. `arg_clears` zeroes,
+  right after a call (`Call`, `HostInvoke`, `CallIndirect`, not a tail
+  call), the registers of the heap words it takes whose last use it is,
+  and their gather registers, in both tiers (LIR: a call inside an
+  expression tree gets its zeros after the tree's root, as below). Not
+  for a local's
+  word: the builder records each word `def_local` bound and each φ that
+  merges a local (`MirFunc::bound_words`), and the frame keeps those
+  until the local is rebound or the function returns, as HIR emission's
+  slots do (a `gc::Root` held in a local guards its payload,
+  `tests/memory/gc_frame_maps_collect.hy`). Nor for a parameter, a
+  constant, a box of plain words (an `Option<int>` or a pair of numbers
+  boxed to pass to `weak`: nothing else can hold that box, so a weak to
+  it keeps upgrading until the register is rewritten,
+  `tests/memory/gc_weak_option_arg.hy`), a register a value live past the
+  call shares, or where no collection can come before the register is
+  rewritten (`RewriteScan`). A call ending its block whose result the
+  branch reads from the stack (`write(..)?`'s `JumpIfMatch`) gets its
+  zeros at the top of each successor it is the only predecessor of, so
+  the result still feeds the branch directly. The zero made a register
+  dead at the allocations between its last push and the call
+  (`precise_frames` drops words every path overwrites first), while a
+  `CallIndirect`'s row was kept whole: an evacuation at such an
+  allocation moved the object and left the register naming its old
+  address, which the call's row then listed as a must-pointer (gc-stress,
+  an over-applied closure in `tests/functions/closure_over_application.hy`).
+  A `CallIndirect` row is now filtered by liveness like a `CALL`'s,
+  keeping only its base word, which a partial application still uses.
+  Straight-line code with calls of temporaries grows by `CONST 0; STORE`
+  per such word (125 of the 223 `examples/*.hy` and `examples/perf/*.hy`
+  archives change, mostly in `main`'s output calls); a 3M-trip loop
+  passing `new Node(i)` to a recursive helper (two zeros a trip, the
+  argument and its gather register) ran 0.511 s against 0.512 s user,
+  medians of 15 interleaved runs on a loaded host.
+  `tests/memory/gc_weak_temp_arg.hy`.
+- **A temporary stored into an object drops too** (#1690). The same
+  zeros follow every op that stores a word into an object, whose object
+  holds the word from there on: `ArrayPush` (`v.push(new Node(..))`),
+  `Alloc` (an enum, tuple, record or closure built from its elems:
+  `Holder::One(new Node(..))`), `HeapFieldStore` (`new Pair(new
+  Node(..))` sets each field), `StoreIndex` and `StoreStatic`, with the
+  same exclusions. An op that only reads a temporary (`f().x`) is left
+  as it was. Three cases a call does not have:
+  - A push's array operand goes even when a local bound it: the push's
+    dest is the same array, and the local is rebound to it. The old word
+    otherwise kept the whole vec, and so every element, rooted after
+    `v = Vec::new()`.
+  - A field or element store's dest is the stored word (the VM leaves it
+    on the stack). One nothing reads (`unused_store_dests`) is popped by
+    the LIR tier instead of stored to a register; the dense tier, which
+    moves it into the dest's register, zeroes that register after the
+    store like an operand's (the zero never names a register a local's
+    word shares).
+  - The LIR tier emits a single-use operand inside its user (an
+    expression tree: the enum alloc of `v.push(Holder::One(..))` is an
+    inline operand of the push), so an op there has no place of its own
+    for its zeros. They go after the tree's root (`EmitPlan::tree_roots`),
+    checked there: no op up to the root writes the register or takes a
+    local's word in it, and no value live past the root shares it. A
+    root that is a terminator's operand, a tail call or a compare fused
+    into the branch gets none.
+  `tests/memory/gc_weak_temp_consumed.hy`.
 - **Collection budget.** After a sweep the next threshold is
   `live × 4` when more than half the heap survived (a growing live set) and
   `live × 2` otherwise, never below the initial 1 MB budget.

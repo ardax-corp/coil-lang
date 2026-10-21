@@ -891,6 +891,27 @@ impl Generics {
             assoc_tys: HashMap::new(),
             context: Vec::new(),
         });
+        // Strings order by their UTF-8 bytes (coil-stdlib#48).
+        for (class, method) in [("Lt", "lt"), ("Le", "le"), ("Gt", "gt"), ("Ge", "ge")] {
+            self.instances.push(InstanceDef {
+                class: class.into(),
+                defined_module: PRELUDE_OPS_MODULE.into(),
+                range: 0..0,
+                args: vec![string()],
+                method_fqns: make_fqns(class, "string", &[method]),
+                assoc_tys: HashMap::new(),
+                context: Vec::new(),
+            });
+        }
+        self.instances.push(InstanceDef {
+            class: "Ord".into(),
+            defined_module: PRELUDE_OPS_MODULE.into(),
+            range: 0..0,
+            args: vec![string()],
+            method_fqns: HashMap::new(),
+            assoc_tys: HashMap::new(),
+            context: Vec::new(),
+        });
         self.instances.push(InstanceDef {
             class: "Length".into(),
             defined_module: PRELUDE_OPS_MODULE.into(),
@@ -1120,7 +1141,8 @@ impl Generics {
 
     /// Register the structural instance of `class` for the ground tuple,
     /// record, array, `Option` or `Result` `ty` (#1451, #1479): `Show` as `%v` shows it, `Eq`
-    /// as `==` compares it, `Hash` combining its items'. The checker adds
+    /// as `==` compares it, `Hash` combining its items', and a tuple's
+    /// `Lt` / `Le` / `Gt` / `Ge` / `Ord` ordering it lexicographically (#1721). The checker adds
     /// one the first time a goal asks for it
     /// (`Checker::ensure_structural_instance`); codegen emits its thunks
     /// ([`Self::structural_instances`]).
@@ -1130,6 +1152,12 @@ impl Generics {
             "Eq" => &["eq", "ne"],
             "Hash" => &["hash"],
             "Length" => &["len"],
+            // A tuple's lexicographic order (#1721); `Ord` has no methods.
+            "Lt" => &["lt"],
+            "Le" => &["le"],
+            "Gt" => &["gt"],
+            "Ge" => &["ge"],
+            "Ord" => &[],
             _ => return,
         };
         let ty_str = ty.to_string();
