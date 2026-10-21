@@ -419,6 +419,19 @@ impl<'s> Formatter<'s> {
         items: &[Output<'_>],
         single_item_trailing: bool,
     ) {
+        self.fmt_delimited_outputs_before(open, close, items, single_item_trailing, "");
+    }
+
+    /// [`Self::fmt_delimited_outputs`] for a list that `rest` follows on the
+    /// same line (a signature's `-> Ret {`): flat only when both fit.
+    fn fmt_delimited_outputs_before(
+        &mut self,
+        open: &str,
+        close: &str,
+        items: &[Output<'_>],
+        single_item_trailing: bool,
+        rest: &str,
+    ) {
         if items.is_empty() {
             self.push_str(open);
             self.push_str(close);
@@ -438,6 +451,7 @@ impl<'s> Formatter<'s> {
                 f.push_str(",");
             }
             f.push_str(close);
+            f.push_str(rest);
             f.out
         };
 
@@ -641,9 +655,14 @@ impl<'s> Formatter<'s> {
     }
 
     fn fmt_paren_arg_list(&mut self, args: &Output<'_>) {
+        self.fmt_paren_arg_list_before(args, "");
+    }
+
+    /// A parameter list that `rest` follows on the same line.
+    fn fmt_paren_arg_list_before(&mut self, args: &Output<'_>, rest: &str) {
         match args.1.as_ref() {
             Expression::Fragment(items) => {
-                self.fmt_delimited_outputs("(", ")", items, false);
+                self.fmt_delimited_outputs_before("(", ")", items, false, rest);
             }
             other => {
                 self.push_str("(");
@@ -2316,15 +2335,23 @@ impl<'s> Formatter<'s> {
         self.push_str("fn ");
         self.push_str(name);
         self.fmt_type_params(type_params);
-        self.fmt_paren_arg_list(args);
-        if let Some(ret) = returns {
-            self.push_str(" -> ");
-            self.fmt_type(ret);
-        }
-        self.fmt_where(where_constraints);
-        if let Some(e) = effects.as_ref().filter(|e| !e.pure) {
-            self.push_str(&format!(" {e}"));
-        }
+        // What follows `)` on the same line: the parameters wrap when the
+        // whole `(…) -> Ret {` would not fit, so the return type stays whole.
+        let rest = {
+            let mut f = Formatter::measure(self.indent);
+            f.fmt_signature_tail(returns.as_ref(), where_constraints, effects.as_ref());
+            if contracts.is_empty() {
+                match body.as_ref().map(|b| b.1.as_ref()) {
+                    Some(Expression::Block(items)) if items.is_empty() => f.push_str(" {}"),
+                    Some(Expression::Block(_)) => f.push_str(" {"),
+                    Some(_) => {}
+                    None => f.push_str(";"),
+                }
+            }
+            f.out
+        };
+        self.fmt_paren_arg_list_before(args, &rest);
+        self.fmt_signature_tail(returns.as_ref(), where_constraints, effects.as_ref());
         self.fmt_contracts(contracts);
         match body {
             Some(b) => {
@@ -2334,6 +2361,23 @@ impl<'s> Formatter<'s> {
                 self.out.truncate(self.out.trim_end().len());
                 self.push_str(";");
             }
+        }
+    }
+
+    /// ` -> Ret where … uses …` after a signature's parameter list.
+    fn fmt_signature_tail(
+        &mut self,
+        returns: Option<&Output<'_>>,
+        where_constraints: &[WhereConstraint<'_>],
+        effects: Option<&crate::ast::EffectDecl<'_>>,
+    ) {
+        if let Some(ret) = returns {
+            self.push_str(" -> ");
+            self.fmt_type(ret);
+        }
+        self.fmt_where(where_constraints);
+        if let Some(e) = effects.filter(|e| !e.pure) {
+            self.push_str(&format!(" {e}"));
         }
     }
 
