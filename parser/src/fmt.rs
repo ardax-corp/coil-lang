@@ -796,7 +796,7 @@ impl<'s> Formatter<'s> {
             }
             Expression::Comptime(inner) => {
                 self.push_str("comptime ");
-                self.fmt_output(inner);
+                self.fmt_operand(inner, PREC_UNARY);
             }
 
             Expression::And(lhs, rhs) => self.fmt_logic_chain(expr, lhs, rhs, "&&"),
@@ -2691,7 +2691,8 @@ fn expr_prec(e: &Expression<'_>) -> u8 {
         | Expression::Positive(_)
         | Expression::Not(_)
         | Expression::LogicalNot(_)
-        | Expression::Readonly(_) => PREC_UNARY,
+        | Expression::Readonly(_)
+        | Expression::Comptime(_) => PREC_UNARY,
         _ => u8::MAX,
     }
 }
