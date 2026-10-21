@@ -378,6 +378,22 @@ fn main() {
 }
 ```
 
+At the top level, `comptime { … }` is a block that returns `Code`: the
+declarations it generates replace it. It runs before the module is checked,
+so it may only call code from other modules, and it gets the same IO grants.
+
+```coil
+use macro::raw;
+
+comptime {
+    return raw("fn answer() -> int {\n    return 42;\n}\n");
+}
+
+fn main() {
+    let a = answer(); // 42
+}
+```
+
 ## enum
 
 Declares a sum type: a value is exactly one of its variants.
