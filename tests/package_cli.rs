@@ -6,8 +6,20 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-fn coil_embed_build_args(target_dir: &Path) -> Vec<String> {
-    vec![
+/// Cargo's output directory name for the profile the `coil` under test was built in
+/// (`debug`, `release`, or a custom profile's name), read from its path.
+fn coil_profile_dir(coil_bin: &Path) -> String {
+    coil_bin
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|n| n.to_str())
+        .unwrap_or("debug")
+        .to_string()
+}
+
+/// `profile_dir` is cargo's output directory name; `debug` is the default `dev` profile.
+fn coil_embed_build_args(target_dir: &Path, profile_dir: &str) -> Vec<String> {
+    let mut args: Vec<String> = vec![
         "build".into(),
         "-q".into(),
         "-p".into(),
@@ -15,24 +27,30 @@ fn coil_embed_build_args(target_dir: &Path) -> Vec<String> {
         "--no-default-features".into(),
         "--target-dir".into(),
         target_dir.display().to_string(),
-    ]
+    ];
+    if profile_dir != "debug" {
+        args.push("--profile".into());
+        args.push(profile_dir.into());
+    }
+    args
 }
 
-/// Build `coil-embed` with the same optional features as this `coil` so HostInvoke ids match.
+/// Build `coil-embed` with the same optional features as this `coil` so HostInvoke ids match,
+/// and in the same profile, so size checks against `coil` compare like with like (#1821).
 ///
 /// Uses a private `--target-dir` so a nested `cargo build` cannot deadlock on the
 /// parent `cargo test` target lock.
-fn build_matching_coil_embed() -> PathBuf {
+fn build_matching_coil_embed(coil_bin: &Path) -> PathBuf {
     let target_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/package-cli-embed");
-    let args = coil_embed_build_args(&target_dir);
+    let profile_dir = coil_profile_dir(coil_bin);
+    let args = coil_embed_build_args(&target_dir, &profile_dir);
     let status = Command::new("cargo")
         .args(&args)
         .status()
         .expect("spawn cargo build -p coil-embed");
-    let embed = target_dir.join(format!(
-        "debug/coil-embed{}",
-        std::env::consts::EXE_SUFFIX
-    ));
+    let embed = target_dir
+        .join(&profile_dir)
+        .join(format!("coil-embed{}", std::env::consts::EXE_SUFFIX));
     assert!(
         status.success() && embed.is_file(),
         "coil-embed missing at {} (build it with `cargo {}`)",
@@ -75,7 +93,7 @@ fn run_with_timeout(bin: &Path, secs: u64) -> std::process::Output {
 #[test]
 fn coil_embed_build_args_mirrors_optional_features() {
     let target_dir = Path::new("/tmp/coil-package-cli-embed-args");
-    let args = coil_embed_build_args(target_dir);
+    let args = coil_embed_build_args(target_dir, "debug");
     assert_eq!(
         &args[..5],
         ["build", "-q", "-p", "coil-embed", "--no-default-features"]
@@ -87,6 +105,20 @@ fn coil_embed_build_args_mirrors_optional_features() {
         "embed build must omit --features, got {args:?}"
     );
     assert_eq!(args.len(), 7);
+}
+
+#[test]
+fn coil_embed_build_matches_coil_profile() {
+    let target_dir = Path::new("/tmp/coil-package-cli-embed-args");
+    for profile in ["debug", "release", "branch_misses"] {
+        let coil = PathBuf::from(format!(
+            "/x/target/{profile}/coil{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        assert_eq!(coil_profile_dir(&coil), profile);
+    }
+    let args = coil_embed_build_args(target_dir, "release");
+    assert_eq!(&args[7..], ["--profile", "release"]);
 }
 
 #[cfg(unix)]
@@ -109,7 +141,7 @@ fn run_with_timeout_kills_hung_process() {
 fn package_fib_embedded_run_prints_55() {
     let bin = std::env::var("CARGO_BIN_EXE_coil")
         .expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
-    let embed = build_matching_coil_embed();
+    let embed = build_matching_coil_embed(Path::new(&bin));
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let entry = manifest.join("examples/fib.hy");
     let out = std::env::temp_dir().join(format!(
@@ -196,7 +228,7 @@ fn package_rejects_coil_as_runner() {
 fn package_ffi_without_native_inventory_fails() {
     let bin = std::env::var("CARGO_BIN_EXE_coil")
         .expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
-    let embed = build_matching_coil_embed();
+    let embed = build_matching_coil_embed(Path::new(&bin));
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let entry = manifest.join("examples/ffi_sum.hy");
     let out = std::env::temp_dir().join(format!(
@@ -234,7 +266,7 @@ fn package_ffi_without_native_inventory_fails() {
 fn package_with_native_lock_finds_library_in_cache_or_beside_exe() {
     let bin = std::env::var("CARGO_BIN_EXE_coil")
         .expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
-    let embed = build_matching_coil_embed();
+    let embed = build_matching_coil_embed(Path::new(&bin));
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
     let tmp = std::env::temp_dir().join(format!("coil_native_pack_{}", std::process::id()));
@@ -408,7 +440,7 @@ fn main() {
 fn package_backtrace_names_functions_unless_stripped() {
     let bin = std::env::var("CARGO_BIN_EXE_coil")
         .expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
-    let embed = build_matching_coil_embed();
+    let embed = build_matching_coil_embed(Path::new(&bin));
     let dir = std::env::temp_dir().join(format!("coil_pack_backtrace_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -466,7 +498,7 @@ fn main() {
 fn package_debug_levels() {
     let bin = std::env::var("CARGO_BIN_EXE_coil")
         .expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
-    let embed = build_matching_coil_embed();
+    let embed = build_matching_coil_embed(Path::new(&bin));
     let dir = std::env::temp_dir().join(format!("coil_pack_debug_level_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
