@@ -55,20 +55,14 @@ test("wait_readable match Ok after WouldBlock park") {
     // writer task runs and the reader's wait completes.
     let r = scope(
         fn (Scope sc) use (c, s) {
-            let reader = sc
-                .spawn(
-                    fn () use (c) {
-                        let g = http_read_after_wait(c);
-                        resume g
-                    },
-                );
-            sc
-                .spawn(
-                    fn () use (s) {
-                        let g = http_write_response(s);
-                        resume g
-                    },
-                );
+            let reader = sc.spawn(fn () use (c) {
+                let g = http_read_after_wait(c);
+                resume g
+            });
+            sc.spawn(fn () use (s) {
+                let g = http_write_response(s);
+                resume g
+            });
             match reader.join() {
                 Result::Ok(n) => n,
                 Result::Err(_) => -1,

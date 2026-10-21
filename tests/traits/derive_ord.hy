@@ -1,7 +1,7 @@
 // Exercised by `coil test`.
 use tests::assert;
 
-#[derive(Ord)]
+#[derive(Eq, Ord)]
 enum Color {
     Red,
     Blue,

@@ -36,7 +36,9 @@ const BOUNDS_CLAUSE: &str = "index in bounds";
 const MAX_CALL_DEPTH: u32 = 3;
 
 /// The goals of every function in `module` that has a contract or calls one.
-pub fn verify_module(module: &HirModule) -> Vec<FnCheck> {
+/// `readonly_class` tells whether a class name was declared `readonly
+/// class`: its instances' fields never change after `new` (#1560).
+pub fn verify_module(module: &HirModule, readonly_class: &dyn Fn(&str) -> bool) -> Vec<FnCheck> {
     let mut by_name: HashMap<&str, usize> = HashMap::new();
     for (i, b) in module.bodies.iter().enumerate() {
         if eligible(b) {
@@ -48,7 +50,7 @@ pub fn verify_module(module: &HirModule) -> Vec<FnCheck> {
         if !eligible(body) {
             continue;
         }
-        let mut enc = Enc::new(module, &by_name);
+        let mut enc = Enc::new(module, &by_name, readonly_class);
         if let Some(check) = enc.function(body)
             && !check.goals.is_empty()
         {
@@ -87,6 +89,10 @@ struct St {
     /// payload are `$`-named and never change; the rest is forgotten
     /// wherever the heap may change.
     fields: HashMap<(u32, String), V>,
+    /// The heap's generation: it changes wherever fields are forgotten, so
+    /// two states with the same one see the same field values
+    /// ([`Enc::lazy`]).
+    heap: u32,
 }
 
 type Out = Option<(V, St)>;
@@ -136,10 +142,20 @@ struct Enc<'m> {
     obj_joins: Vec<(u32, u32, u32)>,
     /// Enum variant numbers, by `enum::variant`.
     tags: HashMap<String, u32>,
+    /// The value a field read made up, by `(object, field, heap)`: a later
+    /// read in the same heap, on another path or after a join that forgot
+    /// it, sees the same value.
+    lazy: HashMap<(u32, String, u32), V>,
+    next_heap: u32,
+    readonly_class: &'m dyn Fn(&str) -> bool,
+    /// Instances of a readonly class: no write ever changes their fields,
+    /// so what is known of them is never forgotten (a sequence one holds
+    /// may still change).
+    frozen: HashSet<u32>,
 }
 
 impl<'m> Enc<'m> {
-    fn new(module: &'m HirModule, by_name: &'m HashMap<&'m str, usize>) -> Self {
+    fn new(module: &'m HirModule, by_name: &'m HashMap<&'m str, usize>, readonly_class: &'m dyn Fn(&str) -> bool) -> Self {
         Self {
             module,
             by_name,
@@ -153,12 +169,16 @@ impl<'m> Enc<'m> {
             next_seq: 0,
             obj_joins: Vec::new(),
             tags: HashMap::new(),
+            lazy: HashMap::new(),
+            next_heap: 0,
+            readonly_class,
+            frozen: HashSet::new(),
         }
     }
 
     fn function(&mut self, body: &'m HirBody) -> Option<FnCheck> {
         let root = body.root?;
-        let mut st = St { env: HashMap::new(), guard: "true".into(), fields: HashMap::new() };
+        let mut st = St { env: HashMap::new(), guard: "true".into(), fields: HashMap::new(), heap: 0 };
         let mut params = Vec::new();
         for &p in &body.params {
             let local = body.local(p);
@@ -304,9 +324,29 @@ impl<'m> Enc<'m> {
                 V::Seq { len, data: Some(data), id: self.next_seq }
             }
             Some(Shape::Unit) => V::Unit,
-            Some(Shape::Obj) => V::Obj(self.new_obj()),
+            Some(Shape::Obj) => V::Obj(self.new_obj_of(ty)),
             _ => V::Opaque,
         }
+    }
+
+    /// A new object of type `ty`, frozen when `ty` is a readonly class.
+    fn new_obj_of(&mut self, ty: Option<&Ty>) -> u32 {
+        let o = self.new_obj();
+        let readonly = match ty.map(crate::typechecking::ty::strip_readonly) {
+            Some(Ty::Con(n)) => (self.readonly_class)(n),
+            Some(Ty::App(head, _)) => matches!(head.as_ref(), Ty::Con(n) if (self.readonly_class)(n)),
+            _ => false,
+        };
+        if readonly {
+            self.frozen.insert(o);
+        }
+        o
+    }
+
+    /// A heap generation no state has had.
+    fn new_heap(&mut self) -> u32 {
+        self.next_heap += 1;
+        self.next_heap
     }
 
     fn new_obj(&mut self) -> u32 {
@@ -384,7 +424,8 @@ impl<'m> Enc<'m> {
             }
         }
         self.obj_joins.clear();
-        Some((v, St { env, guard, fields }))
+        let heap = if sa.heap == sb.heap { sa.heap } else { self.new_heap() };
+        Some((v, St { env, guard, fields, heap }))
     }
 
     fn merge(&mut self, c: &str, a: &V, b: &V) -> V {
@@ -411,6 +452,9 @@ impl<'m> Enc<'m> {
             }
             (V::Obj(x), V::Obj(y)) => {
                 let n = self.new_obj();
+                if self.frozen.contains(x) && self.frozen.contains(y) {
+                    self.frozen.insert(n);
+                }
                 self.obj_joins.push((n, *x, *y));
                 V::Obj(n)
             }
@@ -577,7 +621,7 @@ impl<'m> Enc<'m> {
                         V::Obj(o)
                     }
                     // A new instance: its fields are what the constructor set.
-                    MakeKind::Class(_) => V::Obj(self.new_obj()),
+                    MakeKind::Class(_) => V::Obj(self.new_obj_of(ty)),
                     MakeKind::Array if matches!(ty.map(shape), Some(Shape::Seq)) => {
                         let mut data = self.declare(ARR, "a");
                         for (i, v) in vals.iter().enumerate() {
@@ -946,7 +990,19 @@ impl<'m> Enc<'m> {
         if let Some(v) = st.fields.get(&key) {
             return v.clone();
         }
-        let v = self.invent(ty, st);
+        // An enum's tag and payload, and a readonly class instance's fields,
+        // never change (what a sequence in one holds may).
+        let stable = (name.starts_with('$') || self.frozen.contains(&o)) && !matches!(ty.map(shape), Some(Shape::Seq));
+        let heap = if stable { 0 } else { st.heap };
+        let lazy = (o, name.to_string(), heap);
+        let v = match self.lazy.get(&lazy) {
+            Some(v) => v.clone(),
+            None => {
+                let v = self.invent(ty, st);
+                self.lazy.insert(lazy, v.clone());
+                v
+            }
+        };
         if !matches!(v, V::Opaque) {
             st.fields.insert(key, v.clone());
         }
@@ -1008,13 +1064,18 @@ impl<'m> Enc<'m> {
                 let (v, mut st) = self.exec(f, value, st)?;
                 match bv {
                     V::Obj(o) => {
-                        // Another object may be this one under another name.
-                        st.fields.retain(|(_, n), _| n != name);
+                        // Another object may be this one under another name,
+                        // but never a readonly class instance.
+                        let frozen = &self.frozen;
+                        st.fields.retain(|(x, n), _| n != name || frozen.contains(x));
+                        st.heap = self.new_heap();
                         st.fields.insert((o, name.clone()), v.clone());
                     }
                     _ => {
                         self.exact = false;
-                        st.fields.retain(|(_, n), _| n != name);
+                        let frozen = &self.frozen;
+                        st.fields.retain(|(x, n), _| n != name || frozen.contains(x));
+                        st.heap = self.new_heap();
                     }
                 }
                 let shown = if flags.contains(crate::hir::HirFlags::ADJUST) && !flags.contains(crate::hir::HirFlags::PREFIX) {
@@ -1075,6 +1136,7 @@ impl<'m> Enc<'m> {
             st.env.insert(k, v);
         }
         st.fields.retain(|_, v| !matches!(v, V::Seq { id: other, .. } if *other != id));
+        st.heap = self.new_heap();
         for v in st.fields.values_mut() {
             if matches!(v, V::Seq { id: other, .. } if *other == id) {
                 *v = new.clone();
@@ -1092,15 +1154,17 @@ impl<'m> Enc<'m> {
     }
 
     /// Every sequence and every object field may have changed (an enum's
-    /// tag and payload cannot).
+    /// tag and payload, and a readonly class instance's fields, cannot).
     fn havoc_heap(&mut self, st: &mut St) {
         self.havoc_seqs(st);
-        st.fields.retain(|(_, n), _| n.starts_with('$'));
+        let frozen = &self.frozen;
+        st.fields.retain(|(o, n), _| n.starts_with('$') || frozen.contains(o));
     }
 
     /// Every sequence may have changed.
     fn havoc_seqs(&mut self, st: &mut St) {
         st.fields.retain(|_, v| !matches!(v, V::Seq { .. }));
+        st.heap = self.new_heap();
         let seqs: Vec<(LocalId, u32)> = st
             .env
             .iter()
@@ -1247,9 +1311,10 @@ impl<'m> Enc<'m> {
         // What the callee may write: the sequences it was handed.
         let pure = callee.declared.as_ref().is_some_and(|d| d.names.is_empty());
         if !pure && args.iter().any(|v| matches!(v, V::Seq { .. } | V::Obj(_))) {
-            let mut caller = St { env: caller_env, guard: st.guard.clone(), fields: std::mem::take(&mut st.fields) };
+            let mut caller = St { env: caller_env, guard: st.guard.clone(), fields: std::mem::take(&mut st.fields), heap: st.heap };
             self.havoc_heap(&mut caller);
             st.fields = std::mem::take(&mut caller.fields);
+            st.heap = caller.heap;
             // The parameters name the objects as they are after the call.
             for (&p, v) in callee.params.iter().zip(args) {
                 if let V::Seq { id, .. } = v

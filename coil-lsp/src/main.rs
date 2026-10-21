@@ -2360,7 +2360,7 @@ fn builtin_description(module: &str, name: &str, export: &BuiltinExport) -> Stri
         }
         ("ffi", "dload") => "Loads a dynamic library and returns a handle.".into(),
         ("ffi", "declare") => "Declares an FFI function signature for later invocation.".into(),
-        ("ffi", "invoke") => "Invokes a previously declared FFI function.".into(),
+        ("ffi", "invoke") => "Invokes a previously declared FFI function by its `int` id (unwrap `declare`'s `Result` with `?` or `match` first).".into(),
         ("env", "args") => "Returns the process command-line arguments.".into(),
         ("env", "var") => "Reads an environment variable.".into(),
         ("env", "set_var") => "Sets an environment variable.".into(),

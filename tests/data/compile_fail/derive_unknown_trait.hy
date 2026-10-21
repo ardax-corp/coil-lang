@@ -4,5 +4,4 @@ class C {
     pub v: int,
 }
 
-fn main() {
-}
+fn main() {}

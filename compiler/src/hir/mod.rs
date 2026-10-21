@@ -31,6 +31,7 @@ pub mod bounds;
 pub mod unroll;
 pub mod sink_return;
 pub mod tuple_sroa;
+pub mod tables;
 
 use crate::typechecking::def_id::DefId;
 use crate::typechecking::id::NodeId;
@@ -146,8 +147,8 @@ pub struct HirLocal {
     pub name: String,
     pub ty: Option<Ty>,
     pub kind: LocalKind,
-    /// A lambda in this body captures it, so it stays one plain word in
-    /// its own slot.
+    /// A lambda or `defer` in this body captures it, so it stays one plain
+    /// word in its own slot.
     pub captured: bool,
 }
 

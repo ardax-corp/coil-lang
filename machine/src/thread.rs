@@ -208,6 +208,13 @@ pub enum PortableValue {
     Receiver(Arc<ChannelInner>),
     MutexHandle(Arc<MutexInner>),
     RwLockHandle(Arc<RwLockInner>),
+    /// A standard stream inside one of the spawner's statics, reopened in
+    /// an isolate worker ([`value_to_static_arg`], #1684, #1708).
+    StdStream(StdStreamCopy),
+    /// A file or socket stream inside one of the spawner's statics: its
+    /// handle stays with the spawner, and the worker gets a stream whose
+    /// use panics (`StreamKind::Unsent`, #1684, #1708).
+    UnsentStream,
 }
 
 impl std::fmt::Debug for PortableValue {
@@ -238,6 +245,8 @@ impl std::fmt::Debug for PortableValue {
             Self::Receiver(_) => write!(f, "Receiver(..)"),
             Self::MutexHandle(_) => write!(f, "MutexHandle(..)"),
             Self::RwLockHandle(_) => write!(f, "RwLockHandle(..)"),
+            Self::StdStream(s) => write!(f, "StdStream({:?})", s.kind),
+            Self::UnsentStream => write!(f, "UnsentStream"),
         }
     }
 }
@@ -270,6 +279,8 @@ impl PartialEq for PortableValue {
             (Self::Receiver(a), Self::Receiver(b)) => Arc::ptr_eq(a, b),
             (Self::MutexHandle(a), Self::MutexHandle(b)) => Arc::ptr_eq(a, b),
             (Self::RwLockHandle(a), Self::RwLockHandle(b)) => Arc::ptr_eq(a, b),
+            (Self::StdStream(a), Self::StdStream(b)) => a == b,
+            (Self::UnsentStream, Self::UnsentStream) => true,
             _ => false,
         }
     }
@@ -829,18 +840,31 @@ pub(crate) fn is_immediate_value(heap: &Heap, v: Value) -> bool {
 }
 
 pub fn value_to_portable(heap: &Heap, v: Value) -> Result<PortableValue, ThreadErrorTag> {
+    encode_root(heap, v, false)
+}
+
+fn encode_root(heap: &Heap, v: Value, statics: bool) -> Result<PortableValue, ThreadErrorTag> {
     PORTABLE_ENCODE_COUNT.with(|c| {
         c.fetch_add(1, Ordering::Relaxed);
     });
-    let mut visited: HashSet<u64, AddrHashBuilder> = HashSet::default();
-    encode_value(heap, v, &mut visited)
+    let mut cx = Encode {
+        visited: HashSet::default(),
+        statics,
+    };
+    encode_value(heap, v, &mut cx)
 }
 
-fn encode_value(
-    heap: &Heap,
-    v: Value,
-    visited: &mut HashSet<u64, AddrHashBuilder>,
-) -> Result<PortableValue, ThreadErrorTag> {
+/// One [`value_to_portable`] walk.
+struct Encode {
+    visited: HashSet<u64, AddrHashBuilder>,
+    /// Copying the spawner's statics for an isolate worker: a stream
+    /// anywhere in the value becomes [`PortableValue::StdStream`] or
+    /// [`PortableValue::UnsentStream`] instead of refusing the value
+    /// (#1684, #1708). Spawn arguments and channel sends refuse it.
+    statics: bool,
+}
+
+fn encode_value(heap: &Heap, v: Value, cx: &mut Encode) -> Result<PortableValue, ThreadErrorTag> {
     if is_immediate_value(heap, v) {
         return Ok(PortableValue::Immediate(v.raw() as u64));
     }
@@ -863,6 +887,9 @@ fn encode_value(
         Object::RwLock(gc) => {
             return Ok(PortableValue::RwLockHandle(Arc::clone(&gc.as_ref().inner)));
         }
+        // Like a host handle: no graph under it, and one stream may appear
+        // twice in a value.
+        Object::Stream(gc) if cx.statics => return Ok(encode_static_stream(gc.as_ref())),
         _ => {}
     }
     // Immortal unit enums are address-shared singletons; re-visits are DAG
@@ -876,7 +903,7 @@ fn encode_value(
             type_id: 0,
         });
     }
-    if !visited.insert(addr) {
+    if !cx.visited.insert(addr) {
         return Err(ThreadErrorTag::NotSendable);
     }
     match obj {
@@ -887,21 +914,21 @@ fn encode_value(
         Object::Array(gc) => {
             let mut out = Vec::with_capacity(gc.as_ref().len());
             for e in gc.as_ref().iter() {
-                out.push(encode_value(heap, e, visited)?);
+                out.push(encode_value(heap, e, cx)?);
             }
             Ok(PortableValue::Array(out))
         }
         Object::Tuple(gc) => {
             let mut out = Vec::with_capacity(gc.as_ref().elements().len());
             for e in gc.as_ref().elements() {
-                out.push(encode_value(heap, *e, visited)?);
+                out.push(encode_value(heap, *e, cx)?);
             }
             Ok(PortableValue::Tuple(out))
         }
         Object::Enum(gc) => {
             let mut payload = Vec::with_capacity(gc.as_ref().payload.len());
             for m in &gc.as_ref().payload {
-                payload.push(encode_value(heap, *m, visited)?);
+                payload.push(encode_value(heap, *m, cx)?);
             }
             Ok(PortableValue::Enum {
                 tag: gc.as_ref().tag,
@@ -914,14 +941,14 @@ fn encode_value(
             let mut fields = Vec::new();
             if let Some(slots) = inst.slots() {
                 for v in slots {
-                    fields.push((String::new(), encode_value(heap, *v, visited)?));
+                    fields.push((String::new(), encode_value(heap, *v, cx)?));
                 }
             } else {
                 for (k, m) in inst.iter_fields() {
                     let name = k.as_ref().data.to_string();
                     let pv = match m {
-                        Member::Value(iv) => encode_value(heap, iv, visited)?,
-                        Member::Object(o) => encode_object(heap, o, visited)?,
+                        Member::Value(iv) => encode_value(heap, iv, cx)?,
+                        Member::Object(o) => encode_object(heap, o, cx)?,
                     };
                     fields.push((name, pv));
                 }
@@ -933,8 +960,8 @@ fn encode_value(
         }
         Object::Boxed(gc) => {
             let inner = match &gc.as_ref().payload {
-                Member::Value(iv) => encode_value(heap, *iv, visited)?,
-                Member::Object(o) => encode_object(heap, *o, visited)?,
+                Member::Value(iv) => encode_value(heap, *iv, cx)?,
+                Member::Object(o) => encode_object(heap, *o, cx)?,
             };
             Ok(PortableValue::Boxed(gc.as_ref().tag, Box::new(inner)))
         }
@@ -952,12 +979,26 @@ fn encode_value(
     }
 }
 
-fn encode_object(
-    heap: &Heap,
-    obj: Object,
-    visited: &mut HashSet<u64, AddrHashBuilder>,
-) -> Result<PortableValue, ThreadErrorTag> {
-    encode_value(heap, Value::from(obj.addr()), visited)
+fn encode_object(heap: &Heap, obj: Object, cx: &mut Encode) -> Result<PortableValue, ThreadErrorTag> {
+    encode_value(heap, Value::from(obj.addr()), cx)
+}
+
+/// A stream inside one of the spawner's statics, as an isolate worker
+/// gets it: a standard stream is process-wide, so the worker opens its own
+/// handle to it; a file or socket stream stays with the spawner.
+fn encode_static_stream(s: &crate::memory::ObjStream) -> PortableValue {
+    use crate::memory::StreamKind;
+    match s.kind {
+        StreamKind::Stdin | StreamKind::Stdout | StreamKind::Stderr => {
+            PortableValue::StdStream(StdStreamCopy {
+                kind: s.kind,
+                closed: s.closed,
+                read_timeout: s.read_timeout,
+                write_timeout: s.write_timeout,
+            })
+        }
+        _ => PortableValue::UnsentStream,
+    }
 }
 
 pub fn portable_to_value(heap: &mut Heap, p: PortableValue) -> Result<Value, ThreadErrorTag> {
@@ -1056,6 +1097,10 @@ fn decode_portable(heap: &mut Heap, p: PortableValue) -> Result<Value, ThreadErr
             let (obj, _) = heap.alloc(ObjRwLock { inner }, Object::RwLock);
             Ok(Value::from(obj.addr()))
         }
+        PortableValue::StdStream(std) => {
+            crate::io::stream_std_reopen(heap, &std).map_err(|_| ThreadErrorTag::Other)
+        }
+        PortableValue::UnsentStream => Ok(crate::io::alloc_unsent_stream(heap)),
     }
 }
 
@@ -1063,6 +1108,14 @@ fn decode_portable(heap: &mut Heap, p: PortableValue) -> Result<Value, ThreadErr
 /// `use` captures (sendable values, copied). Partial applications and rest
 /// functions are not sendable.
 fn spawn_fn_from_value(heap: &Heap, v: Value) -> Result<(u32, u32, Vec<SpawnArg>), ThreadErrorTag> {
+    spawn_fn_parts(heap, v, false)
+}
+
+fn spawn_fn_parts(
+    heap: &Heap,
+    v: Value,
+    statics: bool,
+) -> Result<(u32, u32, Vec<SpawnArg>), ThreadErrorTag> {
     let Some(Object::Fn(gc)) = heap.find_object_by_addr(v.raw() as u64) else {
         return Err(ThreadErrorTag::NotSendable);
     };
@@ -1073,12 +1126,25 @@ fn spawn_fn_from_value(heap: &Heap, v: Value) -> Result<(u32, u32, Vec<SpawnArg>
     let captures = f
         .captures
         .iter()
-        .map(|c| value_to_spawn_arg(heap, *c))
+        .map(|c| spawn_arg_from(heap, *c, statics))
         .collect::<Result<_, _>>()?;
     Ok((f.entry, f.arity, captures))
 }
 
 pub fn value_to_spawn_arg(heap: &Heap, v: Value) -> Result<SpawnArg, ThreadErrorTag> {
+    spawn_arg_from(heap, v, false)
+}
+
+/// One of the spawner's statics as an isolate worker gets it: copied like
+/// a spawn argument, except that a stream anywhere in it (the whole value,
+/// a tuple element, a class field, a closure capture) is reopened if it is
+/// a standard stream and otherwise becomes one that panics when used
+/// ([`Encode::statics`], #1684, #1708).
+fn value_to_static_arg(heap: &Heap, v: Value) -> Result<SpawnArg, ThreadErrorTag> {
+    spawn_arg_from(heap, v, true)
+}
+
+fn spawn_arg_from(heap: &Heap, v: Value, statics: bool) -> Result<SpawnArg, ThreadErrorTag> {
     if let Some(obj) = heap.find_object_by_addr(v.raw() as u64) {
         match obj {
             Object::Sender(gc) => {
@@ -1094,7 +1160,7 @@ pub fn value_to_spawn_arg(heap: &Heap, v: Value) -> Result<SpawnArg, ThreadError
                 return Ok(SpawnArg::RwLock(Arc::clone(&gc.as_ref().inner)));
             }
             Object::Fn(_) => {
-                let (entry, arity, captures) = spawn_fn_from_value(heap, v)?;
+                let (entry, arity, captures) = spawn_fn_parts(heap, v, statics)?;
                 return Ok(SpawnArg::Fn {
                     entry,
                     arity,
@@ -1104,7 +1170,7 @@ pub fn value_to_spawn_arg(heap: &Heap, v: Value) -> Result<SpawnArg, ThreadError
             _ => {}
         }
     }
-    Ok(SpawnArg::Value(value_to_portable(heap, v)?))
+    Ok(SpawnArg::Value(encode_root(heap, v, statics)?))
 }
 
 pub(crate) fn spawn_arg_to_value(heap: &mut Heap, arg: SpawnArg) -> Result<Value, ThreadErrorTag> {
@@ -1193,6 +1259,10 @@ pub struct ThreadSpawnContext {
     pub dload_gate: crate::ffi::DloadGate,
     /// Parent's C struct layouts (pass-by-value FFI).
     pub struct_layouts: Arc<Vec<crate::CStructLayout>>,
+    /// The parent's static slots, raw: a shared-heap job reads the same
+    /// startup `const`s (#1561). Its words name the parent's heap, so an
+    /// isolate job takes copies ([`copy_statics_out`]) instead.
+    pub statics: Arc<Vec<u64>>,
 }
 
 impl Clone for ThreadSpawnContext {
@@ -1209,8 +1279,45 @@ impl Clone for ThreadSpawnContext {
             ffi_search_paths: self.ffi_search_paths.clone(),
             dload_gate: self.dload_gate.clone(),
             struct_layouts: Arc::clone(&self.struct_layouts),
+            statics: Arc::clone(&self.statics),
         }
     }
+}
+
+/// A standard stream (`stdin()` / `stdout()` / `stderr()`) inside one of
+/// the spawner's statics: process-wide, so the worker opens its own handle
+/// to it ([`crate::io::stream_std_reopen`], #1684).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StdStreamCopy {
+    pub kind: crate::memory::StreamKind,
+    pub closed: bool,
+    pub read_timeout: Option<std::time::Duration>,
+    pub write_timeout: Option<std::time::Duration>,
+}
+
+/// An isolate worker's statics: each of the spawner's slots copied out of
+/// its heap the way spawn arguments are, so startup `const`s read the same
+/// values in the worker (#1663). A `static let` starts at the value it had
+/// when the worker was spawned, and the worker's writes stay its own. A
+/// standard stream anywhere in a slot's value is reopened in the worker and
+/// any other stream becomes one that panics when used (#1684, #1708). A
+/// slot that is unset, or holds another value that cannot cross threads (a
+/// cyclic graph), starts zeroed.
+fn copy_statics_out(heap: &Heap, words: &[u64], kinds: &[u8]) -> Vec<Option<SpawnArg>> {
+    words
+        .iter()
+        .enumerate()
+        .map(|(i, &w)| {
+            if w == 0 {
+                return None;
+            }
+            let v = Value::from(w as *mut u8);
+            if kinds.get(i) == Some(&common::WORD_SCALAR) || is_immediate_value(heap, v) {
+                return Some(SpawnArg::Value(PortableValue::Immediate(w)));
+            }
+            value_to_static_arg(heap, v).ok()
+        })
+        .collect()
 }
 
 pub fn host_spawn(heap: &mut Heap, args: &[Value]) -> Value {
@@ -1233,12 +1340,14 @@ fn try_host_spawn(heap: &mut Heap, args: &[Value]) -> Result<Value, ThreadErrorT
     let live_threads = Arc::clone(&ctx.live_threads);
     let reactor = Arc::clone(&ctx.reactor);
     let state = Arc::new(JoinState::new());
-    let job = crate::reactor::job_from_spawn_context(
+    let statics = copy_statics_out(heap, &ctx.statics, &ctx.program.static_word_kinds);
+    let mut job = crate::reactor::job_from_spawn_context(
         ctx,
         entry,
         spawn_args,
         Arc::clone(&state),
     );
+    job.statics = Some(crate::reactor::JobStatics::Copied(statics));
     reactor.submit(job);
     register_live_thread(&live_threads, Arc::clone(&state));
     let (obj, _) = heap.alloc(ObjThread { state }, Object::Thread);
@@ -1278,6 +1387,7 @@ fn try_host_spawn_shared(heap: &mut Heap, args: &[Value]) -> Result<Value, Threa
     let live_threads = Arc::clone(&ctx.live_threads);
     let reactor = Arc::clone(&ctx.reactor);
     let state = Arc::new(JoinState::with_shared_epoch(Arc::clone(&epoch)));
+    let statics = Arc::clone(&ctx.statics);
     let mut job = crate::reactor::job_from_spawn_context(
         ctx,
         entry,
@@ -1285,6 +1395,7 @@ fn try_host_spawn_shared(heap: &mut Heap, args: &[Value]) -> Result<Value, Threa
         Arc::clone(&state),
     );
     job.epoch = Some(epoch);
+    job.statics = Some(crate::reactor::JobStatics::Shared(statics));
     reactor.submit(job);
     register_live_thread(&live_threads, Arc::clone(&state));
     let (obj, _) = heap.alloc(ObjThread { state }, Object::Thread);
@@ -1994,6 +2105,41 @@ mod tests {
             value_to_portable(&heap, v),
             Err(ThreadErrorTag::NotSendable)
         );
+    }
+
+    #[test]
+    fn nested_stream_is_refused_as_spawn_arg_but_copied_as_static() {
+        let mut heap = Heap::default();
+        let out = crate::io::stream_stdout(&mut heap).unwrap();
+        let unsent = crate::io::alloc_unsent_stream(&mut heap);
+        let (tup, _) = heap.alloc(
+            ObjTuple::new(vec![out, Value::from(1_i64), unsent]),
+            Object::Tuple,
+        );
+        let v = Value::from(tup.addr());
+        assert_eq!(value_to_portable(&heap, v), Err(ThreadErrorTag::NotSendable));
+        assert!(value_to_spawn_arg(&heap, v).is_err());
+        let Ok(SpawnArg::Value(PortableValue::Tuple(elems))) = value_to_static_arg(&heap, v) else {
+            panic!("expected a copied tuple");
+        };
+        assert!(matches!(
+            elems[0],
+            PortableValue::StdStream(StdStreamCopy {
+                kind: crate::memory::StreamKind::Stdout,
+                closed: false,
+                ..
+            })
+        ));
+        assert_eq!(elems[1], PortableValue::Immediate(Value::from(1_i64).raw() as u64));
+        assert_eq!(elems[2], PortableValue::UnsentStream);
+        let mut worker = Heap::default();
+        let copy = portable_to_value(&mut worker, PortableValue::Tuple(elems)).unwrap();
+        let Some(Object::Tuple(gc)) = worker.find_object_by_addr(copy.raw() as u64) else {
+            panic!("expected a tuple");
+        };
+        let elems = gc.as_ref().elements().to_vec();
+        assert!(!crate::io::is_unsent_stream(&worker, elems[0]));
+        assert!(crate::io::is_unsent_stream(&worker, elems[2]));
     }
 
     #[test]

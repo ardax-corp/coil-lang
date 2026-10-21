@@ -1,7 +1,8 @@
 // A user class with hand-written `Add` … `Pow` instances and an empty
 // `impl Num` works with arithmetic operators and through a `T: Num` bound;
-// hand-written `Lt` / `Le` / `Gt` / `Ge` plus `impl Ord` give comparisons
-// and satisfy `T: Ord`. Compound assignment uses the same instances.
+// hand-written `Lt` / `Le` / `Gt` / `Ge` and `Eq` plus `impl Ord` give
+// comparisons and satisfy `T: Ord`. Compound assignment uses the same
+// instances.
 use tests::assert;
 
 class Money {
@@ -51,6 +52,15 @@ impl Neg for Money {
 }
 
 impl Num for Money {
+}
+
+impl Eq for Money {
+    pub fn eq(Money a, Money b) -> bool {
+        return a.cents == b.cents;
+    }
+    pub fn ne(Money a, Money b) -> bool {
+        return a.cents != b.cents;
+    }
 }
 
 impl Lt for Money {

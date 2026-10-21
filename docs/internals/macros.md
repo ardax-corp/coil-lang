@@ -439,12 +439,13 @@ expansion is 17%.
 `compiler/src/prelude/derive.hy` generates what the former Rust synthesizers
 built, as source: `Show` formats fields (`Name { a: %v }`) or
 variants (`E::V(%v)`), `Eq` / `Ord` compare field-wise then by variant order
-(`Lt` / `Le` / `Gt` / `Ge` plus an empty `Ord`), `Hash` combines with
+(`Lt` / `Le` / `Gt` / `Ge` plus an empty `Ord`, whose superclass `Eq` takes
+its own derive, #1716), `Hash` combines with
 `* 31 +` from the variant index, `Default` is a `static fn` that gives each
 field its type's default (`0`, `0.0`, `false`, `""`, or `Ty::default()`; an
 enum takes its first variant), and scalar-backed enums
-compare / show their backing (a `#[repr(string)]` enum orders by declaration,
-since strings have no ordering). When they replaced the Rust code, every
+compare / show / order their backing (a `#[repr(string)]` enum by its
+string's bytes, coil-lang#1722). When they replaced the Rust code, every
 derive-using program compiled to identical bytecode except enums with tuple
 variants: their payloads are bound by the pattern (`E::V(s_p0)`) since the old
 `p.0` field access cannot be written in source.
@@ -525,7 +526,7 @@ the consts (so the call can read them):
 - The fold happens after the HIR / MIR passes, so a folded value does not
   propagate further (`if is_even(4)` keeps its branch).
 
-`black_box(x)` (prelude, HostInvoke 162 with the `HOST` effect) returns `x`
+`black_box(x)` (prelude, HostInvoke 163 with the `HOST` effect) returns `x`
 through a call the optimizer cannot see into; benchmarks use it to keep a
 call from being computed while compiling.
 

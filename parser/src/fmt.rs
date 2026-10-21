@@ -80,6 +80,9 @@ struct Formatter<'s> {
     /// Scratch formatter from [`Self::measure`]: patterns measure flat, so a
     /// broken pattern does not change how the code around it is laid out.
     measuring: bool,
+    /// Columns the line still gets after the construct being laid out (a
+    /// statement's `;`), counted by [`Self::fits_flat`] (#1795).
+    trailing: usize,
 }
 
 impl<'s> Formatter<'s> {
@@ -94,6 +97,7 @@ impl<'s> Formatter<'s> {
             last_end: 0,
             type_ctx: false,
             measuring: false,
+            trailing: 0,
         }
     }
 
@@ -315,7 +319,7 @@ impl<'s> Formatter<'s> {
         self.leading_comments(start);
         self.blank_line_before(start);
         self.write_indent();
-        emit(self);
+        self.with_trailing(0, emit);
         self.last_end = end.max(self.last_end);
         self.trailing_comment(end);
         self.newline();
@@ -374,7 +378,18 @@ impl<'s> Formatter<'s> {
     }
 
     fn fits_flat(&self, flat: &str) -> bool {
-        self.flat || self.current_col().saturating_add(flat.len()) <= MAX_WIDTH
+        // A flat form that holds a block (`f(fn () { … })`) ends on a line of
+        // its own; the trailing columns land there, not on this line.
+        let trailing = if flat.contains('\n') { 0 } else { self.trailing };
+        self.flat
+            || self.current_col().saturating_add(flat.len()).saturating_add(trailing) <= MAX_WIDTH
+    }
+
+    /// Lay out `f` with `cols` columns still to follow on its last line.
+    fn with_trailing(&mut self, cols: usize, f: impl FnOnce(&mut Self)) {
+        let was = std::mem::replace(&mut self.trailing, cols);
+        f(self);
+        self.trailing = was;
     }
 
     /// A type annotation.
@@ -419,6 +434,19 @@ impl<'s> Formatter<'s> {
         items: &[Output<'_>],
         single_item_trailing: bool,
     ) {
+        self.fmt_delimited_outputs_before(open, close, items, single_item_trailing, "");
+    }
+
+    /// [`Self::fmt_delimited_outputs`] for a list that `rest` follows on the
+    /// same line (a signature's `-> Ret {`): flat only when both fit.
+    fn fmt_delimited_outputs_before(
+        &mut self,
+        open: &str,
+        close: &str,
+        items: &[Output<'_>],
+        single_item_trailing: bool,
+        rest: &str,
+    ) {
         if items.is_empty() {
             self.push_str(open);
             self.push_str(close);
@@ -438,6 +466,7 @@ impl<'s> Formatter<'s> {
                 f.push_str(",");
             }
             f.push_str(close);
+            f.push_str(rest);
             f.out
         };
 
@@ -641,9 +670,14 @@ impl<'s> Formatter<'s> {
     }
 
     fn fmt_paren_arg_list(&mut self, args: &Output<'_>) {
+        self.fmt_paren_arg_list_before(args, "");
+    }
+
+    /// A parameter list that `rest` follows on the same line.
+    fn fmt_paren_arg_list_before(&mut self, args: &Output<'_>, rest: &str) {
         match args.1.as_ref() {
             Expression::Fragment(items) => {
-                self.fmt_delimited_outputs("(", ")", items, false);
+                self.fmt_delimited_outputs_before("(", ")", items, false, rest);
             }
             other => {
                 self.push_str("(");
@@ -698,9 +732,10 @@ impl<'s> Formatter<'s> {
                 self.push_str(")");
             }
             Expression::ExprStatement(e) => {
-                self.fmt_value(e);
                 // A statement `match` ends at its `}`; no `;`.
-                if !matches!(strip_groups(e).1.as_ref(), Expression::Match { .. }) {
+                let semi = !matches!(strip_groups(e).1.as_ref(), Expression::Match { .. });
+                self.with_trailing(usize::from(semi), |f| f.fmt_value(e));
+                if semi {
                     self.push_str(";");
                 }
             }
@@ -791,8 +826,9 @@ impl<'s> Formatter<'s> {
                 }
             }
             Expression::TypeOf(inner) => {
+                // A unary prefix (#1773): `typeof x == "T"` compares the name.
                 self.push_str("typeof ");
-                self.fmt_output(inner);
+                self.fmt_operand(inner, PREC_UNARY);
             }
             Expression::Comptime(inner) => {
                 self.push_str("comptime ");
@@ -1034,7 +1070,7 @@ impl<'s> Formatter<'s> {
                     self.fmt_type(t);
                 }
                 self.push_str(" = ");
-                self.fmt_value(init);
+                self.with_trailing(1, |f| f.fmt_value(init));
                 self.push_str(";");
             }
 
@@ -1188,7 +1224,7 @@ impl<'s> Formatter<'s> {
                 self.push_str(name);
                 self.fmt_type_params(type_params);
                 self.push_str(" = ");
-                self.fmt_type(ty);
+                self.with_trailing(1, |f| f.fmt_type(ty));
                 self.push_str(";");
             }
             Expression::TypeApp { name, args } => {
@@ -1501,7 +1537,7 @@ impl<'s> Formatter<'s> {
                 self.push_str(name);
                 self.fmt_type_params(type_params);
                 self.push_str(" = ");
-                self.fmt_type(ty);
+                self.with_trailing(1, |f| f.fmt_type(ty));
                 self.push_str(";");
             }
 
@@ -1530,8 +1566,9 @@ impl<'s> Formatter<'s> {
         match s.1.as_ref() {
             Expression::ExprStatement(_) => self.fmt_expression(s.1.as_ref()),
             other => {
-                self.fmt_expression(other);
-                if stmt_needs_semicolon(other) {
+                let semi = stmt_needs_semicolon(other);
+                self.with_trailing(usize::from(semi), |f| f.fmt_expression(other));
+                if semi {
                     self.push_str(";");
                 }
             }
@@ -1547,9 +1584,10 @@ impl<'s> Formatter<'s> {
         match item.1.as_ref() {
             Expression::Statement(s) => self.fmt_statement_line(s),
             other => {
-                self.fmt_expression(other);
                 let tail = is_last && !self.src.is_empty() && !self.semicolon_after(item.0);
-                if stmt_needs_semicolon(other) && !tail {
+                let semi = stmt_needs_semicolon(other) && !tail;
+                self.with_trailing(usize::from(semi), |f| f.fmt_expression(other));
+                if semi {
                     self.push_str(";");
                 }
             }
@@ -2139,12 +2177,16 @@ impl<'s> Formatter<'s> {
         let (first, rest) = flatten_binary_chain(root, prec);
         let hang = self.current_col();
         self.fmt_operand_expr(first, prec);
-        for (op, operand) in rest {
+        let last = rest.len().saturating_sub(1);
+        for (i, (op, operand)) in rest.into_iter().enumerate() {
             let flat = self.render_flat(operand);
-            let fits_here = self.current_col() + op.len() + 2 + flat.len() <= MAX_WIDTH;
+            // The last operand's line also gets the statement's `;`.
+            let trailing = if i == last && !flat.contains('\n') { self.trailing } else { 0 };
+            let width = flat.len() + trailing;
+            let fits_here = self.current_col() + op.len() + 2 + width <= MAX_WIDTH;
             // Break only when that makes the operand fit; a call too long for
             // any line stays here and breaks inside its own parentheses.
-            let fits_below = hang + flat.len() <= MAX_WIDTH;
+            let fits_below = hang + width <= MAX_WIDTH;
             self.push_str(" ");
             self.push_str(op);
             if fits_here || !fits_below {
@@ -2215,6 +2257,32 @@ impl<'s> Formatter<'s> {
             return;
         }
 
+        // `s.spawn(…)`: a line break before `.` after a receiver no wider than
+        // the indent gains nothing, so the call stays on the receiver's line
+        // and its arguments break instead; a lone block lambda argument stays
+        // on that line too: `s.spawn(fn () {` (#1774).
+        if let [ChainPart::Root(Expression::Identifier(id)), part] = parts
+            && id.len() <= INDENT.len()
+        {
+            self.push_str(id);
+            if let ChainPart::Field {
+                optional,
+                name,
+                call_args: Some([arg]),
+            } = part
+                && self.hugs_lambda(arg)
+            {
+                self.push_str(if *optional { "?." } else { "." });
+                self.push_str(name);
+                self.push_str("(");
+                self.fmt_value(arg);
+                self.push_str(")");
+            } else {
+                self.emit_chain_field(part);
+            }
+            return;
+        }
+
         // The parser takes a line break before `.` / `?.` after any
         // receiver (#1540), so every part may start a line.
         match &parts[0] {
@@ -2228,6 +2296,23 @@ impl<'s> Formatter<'s> {
                 f.emit_chain_field(part);
             }
         });
+    }
+
+    /// Whether a call's only argument `arg` can open on the call's line: a
+    /// lambda with a block body and no comment around it.
+    fn hugs_lambda(&self, arg: &Output<'_>) -> bool {
+        let Expression::Lambda { body, .. } = strip_groups(arg).1.as_ref() else {
+            return false;
+        };
+        if !matches!(body.1.as_ref(), Expression::Block(_)) {
+            return false;
+        }
+        let start = self.content_start(arg.0);
+        let end = self.content_end(arg.0);
+        let open = self.opening_before(start, b'(').unwrap_or(start);
+        let close = self.closing_after(end, b')').unwrap_or(end);
+        // Comments inside the lambda stay with its body.
+        !self.has_comment_in(open, start) && !self.has_comment_in(end, close)
     }
 
     fn emit_chain_field(&mut self, part: &ChainPart<'_>) {
@@ -2325,15 +2410,23 @@ impl<'s> Formatter<'s> {
         self.push_str("fn ");
         self.push_str(name);
         self.fmt_type_params(type_params);
-        self.fmt_paren_arg_list(args);
-        if let Some(ret) = returns {
-            self.push_str(" -> ");
-            self.fmt_type(ret);
-        }
-        self.fmt_where(where_constraints);
-        if let Some(e) = effects.as_ref().filter(|e| !e.pure) {
-            self.push_str(&format!(" {e}"));
-        }
+        // What follows `)` on the same line: the parameters wrap when the
+        // whole `(…) -> Ret {` would not fit, so the return type stays whole.
+        let rest = {
+            let mut f = Formatter::measure(self.indent);
+            f.fmt_signature_tail(returns.as_ref(), where_constraints, effects.as_ref());
+            if contracts.is_empty() {
+                match body.as_ref().map(|b| b.1.as_ref()) {
+                    Some(Expression::Block(items)) if items.is_empty() => f.push_str(" {}"),
+                    Some(Expression::Block(_)) => f.push_str(" {"),
+                    Some(_) => {}
+                    None => f.push_str(";"),
+                }
+            }
+            f.out
+        };
+        self.fmt_paren_arg_list_before(args, &rest);
+        self.fmt_signature_tail(returns.as_ref(), where_constraints, effects.as_ref());
         self.fmt_contracts(contracts);
         match body {
             Some(b) => {
@@ -2343,6 +2436,23 @@ impl<'s> Formatter<'s> {
                 self.out.truncate(self.out.trim_end().len());
                 self.push_str(";");
             }
+        }
+    }
+
+    /// ` -> Ret where … uses …` after a signature's parameter list.
+    fn fmt_signature_tail(
+        &mut self,
+        returns: Option<&Output<'_>>,
+        where_constraints: &[WhereConstraint<'_>],
+        effects: Option<&crate::ast::EffectDecl<'_>>,
+    ) {
+        if let Some(ret) = returns {
+            self.push_str(" -> ");
+            self.fmt_type(ret);
+        }
+        self.fmt_where(where_constraints);
+        if let Some(e) = effects.filter(|e| !e.pure) {
+            self.push_str(&format!(" {e}"));
         }
     }
 
@@ -2697,7 +2807,8 @@ fn expr_prec(e: &Expression<'_>) -> u8 {
         | Expression::Not(_)
         | Expression::LogicalNot(_)
         | Expression::Readonly(_)
-        | Expression::Comptime(_) => PREC_UNARY,
+        | Expression::Comptime(_)
+        | Expression::TypeOf(_) => PREC_UNARY,
         _ => u8::MAX,
     }
 }
@@ -2979,6 +3090,45 @@ mod tests {
     }
 
     #[test]
+    fn typeof_shows_the_operand_it_takes() {
+        // #1773: `typeof` is a unary prefix, so `typeof(x) == "T"` is
+        // `(typeof x) == "T"` and prints as `typeof x == "T"`. A looser
+        // operand keeps its parentheses.
+        let src = "\
+fn main() {
+    let x = 1;
+    let a = typeof(x) == \"int\";
+    let b = typeof x as float;
+    let c = typeof 0..3;
+    let d = (typeof x) == \"int\";
+    let e = typeof (x);
+    let f = typeof (1, 2);
+    let g = typeof -x;
+    let h = typeof (x == \"int\");
+    let i = typeof p.f(1) + \"!\";
+}
+";
+        let expected = "\
+fn main() {
+    let x = 1;
+    let a = typeof x == \"int\";
+    let b = typeof x as float;
+    let c = typeof 0..3;
+    let d = (typeof x) == \"int\";
+    let e = typeof x;
+    let f = typeof (1, 2);
+    let g = typeof -x;
+    let h = typeof (x == \"int\");
+    let i = typeof p.f(1) + \"!\";
+}
+";
+        let formatted = format_source(src).unwrap();
+        assert_eq!(formatted, expected);
+        round_trip(&formatted);
+        assert_eq!(format_source(&formatted).unwrap(), formatted);
+    }
+
+    #[test]
     fn format_is_idempotent() {
         let src = "fn main() { return; }\n";
         let once = format_source(src).unwrap();
@@ -3176,6 +3326,16 @@ mod tests {
         };
         let docs = item_docs(items[0].1.as_ref()).expect("docs");
         assert_eq!(docs, ["Hello", "World"]);
+    }
+
+    #[test]
+    fn short_receiver_keeps_its_call_and_lambda_on_one_line() {
+        // #1774: `s`, `.spawn(` and `fn () {` used to land on three lines.
+        let src = "fn main() {\n    s.spawn(fn () {\n        let first_value_with_a_long_name = 41 + 1;\n        let second_value_with_a_long_name = first_value_with_a_long_name;\n        0\n    });\n    self.push(first_argument_with_a_long_name, second_argument_with_a_long_name, third_argument_xyz_long);\n    s.run(\n        // why\n        fn () {\n            let first_value_with_a_long_name = 41 + 1;\n            let second_value_with_a_long_name = first_value_with_a_long_name;\n        },\n    );\n    holder.spawn(fn () {\n        let first_value_with_a_long_name = 41 + 1;\n        let second_value_with_a_long_name = first_value_with_a_long_name;\n    });\n}\n";
+        let want = "fn main() {\n    s.spawn(fn () {\n        let first_value_with_a_long_name = 41 + 1;\n        let second_value_with_a_long_name = first_value_with_a_long_name;\n        0\n    });\n    self.push(\n        first_argument_with_a_long_name,\n        second_argument_with_a_long_name,\n        third_argument_xyz_long,\n    );\n    s.run(\n        // why\n        fn () {\n            let first_value_with_a_long_name = 41 + 1;\n            let second_value_with_a_long_name = first_value_with_a_long_name;\n        },\n    );\n    holder\n        .spawn(\n            fn () {\n                let first_value_with_a_long_name = 41 + 1;\n                let second_value_with_a_long_name = first_value_with_a_long_name;\n            },\n        );\n}\n";
+        let formatted = format_source(src).unwrap();
+        assert_eq!(formatted, want);
+        assert_eq!(format_source(&formatted).unwrap(), formatted);
     }
 
     #[test]
@@ -3539,5 +3699,33 @@ fn main() { return; }
         let once = format_source(&src).unwrap();
         assert_eq!(shape(&once), shape(&src), "meaning changed:\n{once}");
         assert!(!once.contains("(r?)"), "{once}");
+    }
+
+    #[test]
+    fn long_signature_wraps_parameters_not_the_return_type() {
+        // #1743: `(params) -> Ret {` is measured as a whole; when it does not
+        // fit, the parameters go one per line and `-> Ret {` stays together.
+        let src = "fn lock_write_all(string path, Vec<string> packages, Vec<string> allow_include, Vec<string> scripts) -> Result<int, string> {\n    return Result::Ok(0);\n}\n\nfn lock_count_entries(string path, Vec<string> packages, Vec<string> allow_include, Vec<string> sc) {\n}\n";
+        let expected = "\
+fn lock_write_all(
+    string path,
+    Vec<string> packages,
+    Vec<string> allow_include,
+    Vec<string> scripts,
+) -> Result<int, string> {
+    return Result::Ok(0);
+}
+
+fn lock_count_entries(
+    string path,
+    Vec<string> packages,
+    Vec<string> allow_include,
+    Vec<string> sc,
+) {}
+";
+        let formatted = format_source(src).unwrap();
+        assert_eq!(formatted, expected);
+        assert!(formatted.lines().all(|l| l.len() <= MAX_WIDTH), "{formatted}");
+        assert_eq!(format_source(&formatted).unwrap(), formatted);
     }
 }

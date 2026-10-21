@@ -395,7 +395,11 @@ impl Checker {
             );
         };
         // A `... xs` template's body is checked per instance (#1281).
-        if method_owner.is_none() && self.is_variadic_template(name) {
+        let template_key = match method_owner {
+            Some(owner) => format!("{owner}::{name}"),
+            None => name.to_string(),
+        };
+        if self.is_variadic_template(&template_key) {
             return Ty::Var(self.counter.fresh());
         }
         // Set up type parameter environment.
@@ -447,11 +451,9 @@ impl Checker {
         } else {
             None
         };
-        self.current_tuple_pack = match method_owner {
-            None => self.variadic_instance_pack(name),
-            Some(_) => None,
-        }
-        .or_else(|| Self::tuple_pack_ty_for_args(args, &mut self.counter));
+        self.current_tuple_pack = self
+            .variadic_instance_pack(&template_key)
+            .or_else(|| Self::tuple_pack_ty_for_args(args, &mut self.counter));
         let arg_tys = self.parse_arg_list(args);
         self.current_tuple_pack = None;
         // Record declaration-order param names for named call-site args.
@@ -525,6 +527,7 @@ impl Checker {
         if let Some(self_ty) = self_ty {
             fun_ty = Ty::Fun(Box::new(self_ty.clone()), Box::new(fun_ty));
         }
+        self.weak_checks.enter_fn(param_vars.clone(), fun_ty.clone());
 
         // Monomorphic recursion: bind a fresh α so the body can call this
         // function. Inherent methods bind `Owner::name` only — never the
@@ -595,7 +598,10 @@ impl Checker {
                     .insert(name.to_string());
             }
         } else {
-            self.forward_free_fn_schemes.remove(name);
+            // A forward call instantiated the stub's parameters (#1670).
+            if let Some(stub) = self.forward_free_fn_schemes.remove(name) {
+                self.weak_checks.alias(&stub.bounds, &param_vars);
+            }
             self.env
                 .insert_top(name.to_string(), Scheme::mono(Ty::Var(alpha)));
         }
@@ -804,6 +810,7 @@ impl Checker {
         }
 
         // Pop type param scope.
+        self.weak_checks.leave_fn();
         self.active_constraints.truncate(prev_constraints_len);
         self.type_params_in_scope.pop();
 

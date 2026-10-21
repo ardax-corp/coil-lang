@@ -37,6 +37,9 @@ pub struct VariadicState {
     calls: HashMap<(usize, usize), String>,
     /// No more instances will be made: a missing one is final.
     exhausted: bool,
+    /// Method templates (#1754): `Owner::method` key → the `impl` owner as
+    /// written and the method's name.
+    methods: HashMap<String, (String, String)>,
 }
 
 /// Templates other modules may call, and the copies made of them (#1386).
@@ -49,6 +52,9 @@ pub struct VariadicExports {
     copies: HashMap<(String, Ty), String>,
     /// Copies this round's calls need: `(module::template, pack, call span)`.
     pending: Vec<(String, Ty, Range<usize>)>,
+    /// `module::Owner::method` of method templates, which only their own
+    /// module can call (#1754).
+    methods: HashSet<String>,
 }
 
 /// The tuple-rest parameter of a function's argument list, if it has one.
@@ -91,6 +97,28 @@ impl Checker {
 
     pub fn is_variadic_template(&self, name: &str) -> bool {
         self.variadic.templates.contains(name)
+    }
+
+    /// The `impl` owner (as written) and method name of method template
+    /// `key` (`Owner::method`, #1754).
+    pub fn variadic_method_template(&self, key: &str) -> Option<(&str, &str)> {
+        self.variadic.methods.get(key).map(|(o, m)| (o.as_str(), m.as_str()))
+    }
+
+    /// This module's method templates (`Owner::method` keys).
+    pub fn variadic_method_keys(&self) -> Vec<String> {
+        self.variadic.methods.keys().cloned().collect()
+    }
+
+    /// Record `key` (`module::Owner::method`) as a method template, which
+    /// other modules cannot call (#1754).
+    pub fn export_variadic_method(&mut self, key: &str) {
+        self.variadic_exports.methods.insert(key.to_string());
+    }
+
+    /// Whether `method` of the `impl` for `owner` (as written) is a template.
+    pub fn is_variadic_method_template(&self, owner: &str, method: &str) -> bool {
+        self.variadic.methods.values().any(|(o, m)| o == owner && m == method)
     }
 
     /// `(template, pack)` of an instance.
@@ -215,6 +243,7 @@ impl Checker {
         self.variadic.templates.clear();
         self.variadic.pending.clear();
         self.variadic.calls.clear();
+        self.variadic.methods.clear();
         // Other modules' copies, called by their qualified names (#1386).
         for ((template, _), copy) in &self.variadic_exports.copies {
             if let Some(names) = self.variadic_exports.templates.get(template) {
@@ -227,6 +256,31 @@ impl Checker {
             return;
         };
         for child in children {
+            // An inherent method's `... xs` too, keyed `Owner::method` (#1754).
+            if let Expression::Implementation { what: "", owner, methods, .. } =
+                Self::pre_pass_unwrap_stmt(child).1.as_ref()
+            {
+                let owner_key = self.qualify_module_name(owner);
+                for method in methods {
+                    let Expression::Method(_, function) = method.1.as_ref() else {
+                        continue;
+                    };
+                    let Expression::Function { name, args, .. } = function.1.as_ref() else {
+                        continue;
+                    };
+                    if !has_tuple_rest(args) {
+                        continue;
+                    }
+                    let key = format!("{owner_key}::{name}");
+                    self.fn_has_rest.insert(key.clone(), true);
+                    self.fn_tuple_rest.insert(key.clone(), true);
+                    if !self.variadic.instance_of.contains_key(&key) {
+                        self.variadic.templates.insert(key.clone());
+                        self.variadic.methods.insert(key, (owner.to_string(), name.to_string()));
+                    }
+                }
+                continue;
+            }
             let Expression::Function { name, args, .. } = child.1.as_ref() else {
                 continue;
             };
@@ -276,6 +330,67 @@ impl Checker {
         };
         self.variadic.calls.insert((range.start, range.end), instance.clone());
         self.apply_variadic_instance(ident, &instance, &arg_tys, &ordered_args, id, range)
+    }
+
+    /// The error for a call of `key` (`module::Owner::method`), another
+    /// module's method template: its copies are made only for calls in its
+    /// own module (#1754).
+    pub(super) fn foreign_method_template_call(&mut self, key: &str, range: &Range<usize>) -> Option<Ty> {
+        if self.is_variadic_template(key) || !self.variadic_exports.methods.contains(key) {
+            return None;
+        }
+        Some(self.error_with_help(
+            ErrorCode::UnknownFunction,
+            format!("`{key}` packs its `... xs` per call, so only its own module can call it"),
+            range.clone(),
+            Some("call it through a function of that module, or give the rest parameter a type (`T... xs`)".to_string()),
+        ))
+    }
+
+    /// `recv.method(…)` of method template `key` (`Owner::method`, #1754):
+    /// type it as a call of the instance for its pack, or ask for one.
+    pub(super) fn infer_variadic_method_call(
+        &mut self,
+        key: &str,
+        recv: &Output,
+        recv_ty: &Ty,
+        raw_args: &[Output],
+        id: Option<NodeId>,
+        range: Range<usize>,
+    ) -> Ty {
+        let method = key.rsplit("::").next().unwrap_or(key);
+        let (arg_tys, ordered_args) = self.infer_and_reorder_call_args(key, raw_args, &range);
+        let fixed = self.fn_param_names.get(key).map_or(0, |n| n.len().saturating_sub(1));
+        let pack = match self.variadic_call_pack(method, &arg_tys, fixed, &range) {
+            Ok(pack) => pack,
+            Err(ty) => return ty,
+        };
+        let pair = (key.to_string(), pack.clone());
+        let Some(instance) = self.variadic.instances.get(&pair).cloned() else {
+            if !self.variadic.pending.contains(&pair) {
+                self.variadic.pending.push(pair);
+            }
+            return self.missing_variadic_copy(method, &pack, range);
+        };
+        self.variadic.calls.insert((range.start, range.end), instance.clone());
+        let Some(scheme) = self.lookup_fn_scheme(&instance) else {
+            return self.error(
+                ErrorCode::UnknownFunction,
+                format!("Cannot find method `{method}`"),
+                range,
+            );
+        };
+        let (fun_ty, constraints, _mapping) = self.instantiate_scheme_mapped(&scheme);
+        let mut tys = vec![self.method_self_arg(recv_ty)];
+        tys.extend(arg_tys);
+        let mut exprs = Vec::with_capacity(1 + ordered_args.len());
+        exprs.push(recv.clone());
+        exprs.extend(ordered_args);
+        let result = self.apply_function(Some(&instance), &fun_ty, &tys, Some(&exprs), id, range.clone());
+        if !constraints.is_empty() {
+            self.discharge_constraints(id, &constraints, &range);
+        }
+        result
     }
 
     /// The pack of a template call whose arguments typed as `arg_tys`.

@@ -512,3 +512,112 @@ fn main() {
         "bindings inside a mismatched constructor must not cascade into E0100: {all:?}"
     );
 }
+
+/// #1709: an opaque handle (`Stream`, thread handles) has no fields,
+/// indices or `push` to mutate through the binding, so `const` of one is
+/// fully constant and the shallow-const warning is noise.
+#[test]
+fn const_opaque_handle_does_not_warn_shallow() {
+    let msgs = check_messages(
+        r#"use io::{stdout, Stream};
+use thread::{Thread, Sender, Receiver, Mutex, RwLock};
+const OUT = stdout();
+fn handles(Thread th, Sender tx, Receiver rx, Mutex m, RwLock l) {
+    const s = stdout();
+    const t: Stream = stdout();
+    const th2 = th;
+    const tx2 = tx;
+    const rx2 = rx;
+    const m2 = m;
+    const l2 = l;
+}
+fn main() {}"#,
+    );
+    let shallow: Vec<_> = msgs
+        .iter()
+        .map(|m| m.message())
+        .filter(|m| m.contains("still mutable"))
+        .collect();
+    assert!(shallow.is_empty(), "opaque handles should not warn, got: {shallow:?}");
+}
+
+/// #1709: the warning stays for values a write can change: a `Vec`, a
+/// class instance, and a GC handle onto one.
+#[test]
+fn const_mutable_values_still_warn_shallow() {
+    let msgs = check_messages(
+        r#"use gc::{root, Root};
+class P { pub x: int, }
+fn main() {
+    const v: Vec<int> = Vec::new();
+    const p = new P(1);
+    const r: Root<P> = root(new P(2));
+}"#,
+    );
+    for name in ["v", "p", "r"] {
+        assert!(
+            msgs.iter().any(|m| {
+                m.message().contains(&format!("binding `{name}` is constant"))
+                    && m.message().contains("still mutable")
+            }),
+            "expected shallow-const warning for `{name}`, got: {:?}",
+            msgs.iter().map(|m| m.message()).collect::<Vec<_>>()
+        );
+    }
+}
+
+/// #1714: an enum whose payloads (and type arguments) hold no mutable
+/// interior has nothing a write could change, so `const` of one is fully
+/// constant: `Result<(Sender, Receiver), ThreadError>`, `Option<int>`, a
+/// plain user enum, an enum carrying only scalars.
+#[test]
+fn const_immutable_enum_does_not_warn_shallow() {
+    let msgs = check_messages(
+        r#"use thread::channel;
+enum Color { Red, Green, }
+enum Shape { Circle(float), Rect(int, int), }
+const C = Color::Red;
+fn main() {
+    const ends = channel();
+    const o: Option<int> = Some(1);
+    const r: Result<string, int> = Ok("x");
+    const c = Color::Green;
+    const s = Shape::Rect(1, 2);
+    const oc: Option<Color> = Some(Color::Red);
+}"#,
+    );
+    let shallow: Vec<_> = msgs
+        .iter()
+        .map(|m| m.message())
+        .filter(|m| m.contains("still mutable"))
+        .collect();
+    assert!(shallow.is_empty(), "immutable enums should not warn, got: {shallow:?}");
+}
+
+/// #1714: an enum still warns when its payload, or a type argument it
+/// carries, has a mutable interior: a `Vec`, a class instance, an array.
+#[test]
+fn const_enum_with_mutable_payload_still_warns_shallow() {
+    let msgs = check_messages(
+        r#"class P { pub x: int, }
+enum Holder { Empty, Has(P), }
+enum Bag { Items(Vec<int>), }
+fn main() {
+    const ov: Option<Vec<int>> = Some(Vec::new());
+    const op: Option<P> = Some(new P(1));
+    const rp: Result<int, P> = Err(new P(2));
+    const h = Holder::Has(new P(3));
+    const b = Bag::Items(Vec::new());
+}"#,
+    );
+    for name in ["ov", "op", "rp", "h", "b"] {
+        assert!(
+            msgs.iter().any(|m| {
+                m.message().contains(&format!("binding `{name}` is constant"))
+                    && m.message().contains("still mutable")
+            }),
+            "expected shallow-const warning for `{name}`, got: {:?}",
+            msgs.iter().map(|m| m.message()).collect::<Vec<_>>()
+        );
+    }
+}

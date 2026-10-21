@@ -164,6 +164,9 @@ pub enum HirDictOp {
     Tuple(u32),
     /// `BoxValue` (`tag`) of the top word: an existential pack's value.
     Box(u32),
+    /// Element `n` of the top word, a dictionary: a method's code pointer
+    /// in it.
+    Field(u32),
     /// `Load` of frame slot `n`, one of the body's own dictionary
     /// parameters: a dictionary it forwards.
     Load(u32),
@@ -533,6 +536,10 @@ pub struct HirMirInput<'a> {
     /// Field reads of a `readonly class` instance: no store ever changes
     /// what they read (#1560).
     pub invariant_fields: HashSet<u32>,
+    /// Function-local `const` tables of literals (#1561): the array
+    /// `Make` and the static slot it is built into on first use and loaded
+    /// from after that.
+    pub frozen_arrays: HashMap<u32, u32>,
     /// Heap fields and `new` arguments whose slot holds a boxed enum
     /// object (a generic class's field open in a parameter) for a value
     /// whose own word is this niche layout: boxed on the way in, unboxed
@@ -3123,7 +3130,10 @@ impl Lower<'_> {
             HirKind::Make { kind, args } if self.inp.pair_tys.contains_key(&id.0) => self.make_pair(id, kind, args),
             HirKind::Make { kind: MakeKind::Tuple, args } => self.make_tuple(args),
             HirKind::Make { kind: MakeKind::Range { .. }, args } if self.expr_ty(id).is_some_and(lower::is_open_range) => self.make_open_range(id, args),
-            HirKind::Make { kind: MakeKind::Array, args } if self.heap_array(id) => self.make_array(id, args),
+            HirKind::Make { kind: MakeKind::Array, args } if self.heap_array(id) => match self.inp.frozen_arrays.get(&id.0) {
+                Some(&slot) => self.frozen_array(id, args, slot),
+                None => self.make_array(id, args),
+            },
             HirKind::Make { kind: MakeKind::Class(_), args } if self.inp.news.contains_key(&id.0) => self.make_object(id, args),
             HirKind::Make {
                 kind: MakeKind::Variant { variant, .. },
@@ -3661,6 +3671,13 @@ impl Lower<'_> {
         let strings = [lhs, rhs].iter().all(|&e| self.expr_ty(e).is_some_and(is_string));
         if strings && matches!(op, BinOp::Eq | BinOp::Ne) {
             return Ok(Val::V(self.b.ins_str_eq(l, r, op == BinOp::Ne).map_err(mir)?));
+        }
+        // `<` / `<=` / `>` / `>=` on strings: their byte order's sign
+        // (`string_compare`) against `0` (coil-stdlib#48).
+        if strings && let Some(cmp) = cmp {
+            let order = self.b.ins_host_invoke(common::STRING_COMPARE_ID, vec![l, r]).map_err(mir)?;
+            let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+            return Ok(Val::V(self.b.ins_cmp(cmp, order, zero).map_err(mir)?));
         }
         // `==` on arrays compares elements; only scalars compare as words.
         if !lt.is_numeric() {
@@ -4237,6 +4254,11 @@ impl Lower<'_> {
                     stack.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![boxed]).map_err(mir)?);
                 }
                 HirDictOp::Interned { slot, ref ops } => stack.push(self.interned_dict(slot, ops)?),
+                HirDictOp::Field(n) => {
+                    let dict = stack.pop().ok_or("dictionary field")?;
+                    let at = self.b.ins_const(MirConst::I64(i64::from(n))).map_err(mir)?;
+                    stack.push(self.b.ins_index(dict, at, MirTy::I64, false).map_err(mir)?);
+                }
             }
         }
         Ok(stack)
@@ -4716,6 +4738,11 @@ impl Lower<'_> {
             let boxed = self.b.ins_alloc(MirAllocKind::Boxed { tag: call.tag }, vec![v]).map_err(mir)?;
             words.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![boxed]).map_err(mir)?);
         }
+        // The instance's dictionary, after the operands (#1661).
+        if !site.dicts.is_empty() {
+            let dicts = site.dicts.clone();
+            words.extend(self.dict_values(&dicts)?);
+        }
         let abi = DenseAbi {
             params: words.iter().map(|&v| self.b.value_ty(v)).collect(),
             ret,
@@ -4743,6 +4770,20 @@ impl Lower<'_> {
             let l = self.box_niche(self.niche_layout(lhs, lt)?, l)?;
             let r = self.box_niche(self.niche_layout(rhs, rt)?, r)?;
             return Ok(Val::V(self.b.ins_str_eq(l, r, sym == "!=").map_err(mir)?));
+        }
+        // A string-backed scalar enum's (or a `string`'s) words order by
+        // their bytes, as `<` on two strings does (#1722).
+        if lt == MirTy::HeapRef && rt == MirTy::HeapRef {
+            let cmp = match sym {
+                "<" => MirCmpOp::Lt,
+                ">" => MirCmpOp::Gt,
+                "<=" => MirCmpOp::Le,
+                ">=" => MirCmpOp::Ge,
+                _ => return Err(format!("operator {sym} words")),
+            };
+            let order = self.b.ins_host_invoke(common::STRING_COMPARE_ID, vec![l, r]).map_err(mir)?;
+            let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+            return Ok(Val::V(self.b.ins_cmp(cmp, order, zero).map_err(mir)?));
         }
         // A `bool`-backed scalar enum's words compare as their `0` / `1`.
         if lt == MirTy::Bool && rt == MirTy::Bool && matches!(sym, "==" | "!=") {
@@ -5260,6 +5301,33 @@ impl Lower<'_> {
         let stamp = self.expr_ty(id).and_then(array_elem).map_or(0, |e| (self.inp.array_stamp)(e));
         let arr = self.b.ins_alloc_kinds(MirAllocKind::Array, items, stamp).map_err(mir)?;
         Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![arr]).map_err(mir)?))
+    }
+
+    /// A local `const` table of literals (#1561): built into static `slot`
+    /// the first time it runs in this VM (an isolate thread's statics start
+    /// zeroed; a shared-heap job's copy may not have it yet), loaded after
+    /// that. No code writes the array, so sharing it is not seen.
+    fn frozen_array(&mut self, id: HirId, args: &[HirId], slot: u32) -> Result<Val, Refusal> {
+        let have = self.b.ins_load_static(slot, MirTy::HeapRef).map_err(mir)?;
+        let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+        let unset = self.b.ins_cmp(MirCmpOp::Eq, have, zero).map_err(mir)?;
+        let build = self.b.create_block();
+        let loaded = self.b.create_block();
+        let join = self.b.create_block();
+        self.b.branch(unset, build, loaded).map_err(mir)?;
+        self.switch(build);
+        let Val::V(built) = self.make_array(id, args)? else {
+            return Err("table element".into());
+        };
+        self.b.ins_store_static(slot, built).map_err(mir)?;
+        let built_from = self.cur;
+        self.jump(join)?;
+        self.switch(loaded);
+        self.jump(join)?;
+        self.switch(join);
+        let table = self.b.ins_stack_phi(vec![(built_from, built), (loaded, have)]).map_err(mir)?;
+        self.b.mark_invariant_load(table);
+        Ok(Val::V(table))
     }
 
     /// `new C(..)`: every argument, then the object and each field's store
@@ -5846,11 +5914,12 @@ impl Lower<'_> {
             };
         }
         let (ok, err) = (self.b.create_block(), self.b.create_block());
-        let payload = match ret {
-            Some(ty) => Some(self.b.ins_match_payload(obj, 0, ty).map_err(mir)?),
-            None => None,
-        };
-        self.b.jump_if_match(obj, 0, payload.into_iter().collect(), ok, err).map_err(mir)?;
+        // `Ok` always carries one word, a void call's too (the VM's
+        // `Ok(0)`): the match takes it, or the taken edge leaves it on the
+        // operand stack, one slot per call (#1638).
+        let word = self.b.ins_match_payload(obj, 0, ret.unwrap_or(MirTy::I64)).map_err(mir)?;
+        let payload = ret.map(|_| word);
+        self.b.jump_if_match(obj, 0, vec![word], ok, err).map_err(mir)?;
         let start = self.order.len();
         self.switch(err);
         self.at_expr(id, |l| {

@@ -510,11 +510,19 @@ fn candidate_for_call(
     let (fixed_args, rest_args, pack_rest) =
         split_call_args_for_mono(fn_name, args, checker, has_rest, fixed_count)?;
 
+    // `f(...t)` / `f(1, ...[2, 3])` (#1680): each spread's items in place,
+    // as codegen flattens them (`hir_flatten_spreads`).
+    let spread = |a: &&Output| matches!(peel(a).1.as_ref(), Expression::Spread(_));
+    let fixed_tys: Vec<Option<Ty>> = if !has_rest && fixed_args.iter().any(spread) {
+        spread_arg_tys(&fixed_args, ty_of)?
+    } else {
+        fixed_args.iter().map(|a| ty_of(a)).collect()
+    };
     if !has_rest {
-        if fixed_args.len() != sig.param_type_params.len() {
+        if fixed_tys.len() != sig.param_type_params.len() {
             return None;
         }
-    } else if fixed_args.len() < fixed_count {
+    } else if fixed_tys.len() < fixed_count {
         return None;
     }
 
@@ -538,8 +546,8 @@ fn candidate_for_call(
     } else {
         sig.param_type_params.as_slice()
     };
-    for (arg, tp_idx) in fixed_args.iter().zip(fixed_tps.iter()) {
-        let arg_ty = ty_of(arg)?;
+    for (arg_ty, tp_idx) in fixed_tys.iter().zip(fixed_tps.iter()) {
+        let arg_ty = arg_ty.clone()?;
         bind(&mut subst, *tp_idx, &arg_ty)?;
         arg_types.push(arg_ty);
     }
@@ -548,7 +556,19 @@ fn candidate_for_call(
         // One key slot per rest formal: the *element* ground type (not the
         // packed `[T]` / `[T; N]`), matching `mono_call_offset`.
         let rest_tp = sig.param_type_params.get(fixed_count).copied().flatten();
-        if rest_args.is_empty() {
+        // `f(...vec)` into a rest (#1728): the `Vec` is the pack, as
+        // codegen takes it (`hir_call_shapes`), so its element binds.
+        let whole = match rest_args.as_slice() {
+            [arg] => match peel(arg).1.as_ref() {
+                Expression::Spread(inner) => ty_of(inner).as_ref().and_then(crate::typechecking::ty::vec_element_ty).cloned(),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(elem) = whole {
+            bind(&mut subst, rest_tp, &elem)?;
+            arg_types.push(elem);
+        } else if rest_args.is_empty() {
             let elem = rest_tp.and_then(|i| subst[i].clone())?;
             arg_types.push(elem);
         } else {
@@ -573,7 +593,7 @@ fn candidate_for_call(
     // `Option<T>`, or only in the result): bound by matching the signature
     // against the ground argument and call types.
     if !has_rest && subst.iter().any(Option::is_none) {
-        bind_from_signature(fn_name, &mut subst, &fixed_args, call, checker, ty_of);
+        bind_from_signature(fn_name, &mut subst, &fixed_tys, call, checker, ty_of);
     }
     let subst = subst.into_iter().collect::<Option<Vec<_>>>()?;
     let subst_ids: Vec<TyId> = subst.into_iter().map(|ty| intern.intern(ty)).collect();
@@ -599,7 +619,7 @@ fn candidate_for_call(
 fn bind_from_signature(
     fn_name: &str,
     subst: &mut [Option<Ty>],
-    args: &[&Output],
+    arg_tys: &[Option<Ty>],
     call: &Output,
     checker: &Checker,
     ty_of: &dyn Fn(&Output) -> Option<Ty>,
@@ -607,17 +627,17 @@ fn bind_from_signature(
     // A returned closure's parameters are the result's (#1590).
     let (Some(vars), Some((params, ret))) = (
         checker.fn_type_param_vars(fn_name, subst.len()),
-        checker.fn_call_sig(fn_name, args.len()),
+        checker.fn_call_sig(fn_name, arg_tys.len()),
     ) else {
         return;
     };
-    if params.len() != args.len() {
+    if params.len() != arg_tys.len() {
         return;
     }
     let mut map = HashMap::new();
-    for (param, arg) in params.iter().zip(args) {
-        if let Some(ty) = ty_of(arg) {
-            crate::Compiler::bind_scheme_vars(param, &ty, &mut map);
+    for (param, ty) in params.iter().zip(arg_tys) {
+        if let Some(ty) = ty {
+            crate::Compiler::bind_scheme_vars(param, ty, &mut map);
         }
     }
     if let Some(ty) = ty_of(call) {
@@ -630,6 +650,27 @@ fn bind_from_signature(
             *slot = Some(ty);
         }
     }
+}
+
+/// The argument types of `args` with each spread flattened: a tuple or
+/// array literal's items, or a tuple value's fields. `None` for a spread of
+/// anything else.
+fn spread_arg_tys(args: &[&Output], ty_of: &dyn Fn(&Output) -> Option<Ty>) -> Option<Vec<Option<Ty>>> {
+    let mut tys = Vec::with_capacity(args.len());
+    for arg in args {
+        let Expression::Spread(inner) = peel(arg).1.as_ref() else {
+            tys.push(ty_of(arg));
+            continue;
+        };
+        match peel(inner).1.as_ref() {
+            Expression::Tuple(items) | Expression::Array(items) => tys.extend(items.iter().map(ty_of)),
+            _ => match ty_of(inner)? {
+                Ty::Tuple(items) => tys.extend(items.into_iter().map(Some)),
+                _ => return None,
+            },
+        }
+    }
+    Some(tys)
 }
 
 /// Mirror of codegen `split_call_args_for_rest` for mono planning.

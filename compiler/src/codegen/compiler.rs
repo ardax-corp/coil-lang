@@ -16,6 +16,8 @@ mod emit_call;
 pub(super) mod emit_hir;
 #[path = "emit_match.rs"]
 mod emit_match;
+#[path = "eq_glue.rs"]
+mod eq_glue;
 
 #[cfg(any(test, feature = "dissect"))]
 type FinalizeIlOut = Option<crate::dissect::IlSnapshot>;
@@ -82,6 +84,9 @@ pub(super) enum DictStep {
     Tuple(u32),
     /// The top word boxed with this value tag.
     Box(u32),
+    /// Element `n` of the top word, a dictionary: a method's code pointer
+    /// in it (a subclass bound's `Eq` methods, #1694).
+    Field(u32),
 }
 
 impl Compiler {
@@ -338,9 +343,9 @@ impl Compiler {
     /// run at `setup_entry_offset`; otherwise jump straight to `main`, or,
     /// with no `main`, to the prologue's `HALT` (there is nothing to run).
     pub fn prologue_jmp_target(&self) -> u32 {
-        // Interned dictionaries start zeroed and are built on first use:
-        // they need no setup.
-        if self.static_slot_count() > self.interned_dicts.len() as u32
+        // Interned dictionaries and local `const` tables start zeroed and
+        // are built on first use: they need no setup.
+        if self.static_slot_count() > (self.interned_dicts.len() + self.interned_tables.len()) as u32
             || self.has_extern_block()
             || self.checker.classes_with_drop().next().is_some()
         {
@@ -2311,7 +2316,8 @@ impl Compiler {
     /// [`Self::concrete_operator_target`] for an operand of type `ty`.
     pub(super) fn concrete_operator_target_ty(&self, ty: &Ty, class: &str, method: &str) -> Option<(Ty, String)> {
         let resolved = crate::typechecking::subst::apply_ty_prune(self.checker.subst(), ty);
-        let lookup_ty = Self::show_lookup_ty_for_instance(&resolved);
+        // A `readonly` operand's operator is its type's instance (#1645).
+        let lookup_ty = Self::show_lookup_ty_for_instance(crate::typechecking::ty::strip_readonly(&resolved));
         // Dict Eq/Ord only for nominal user enums/classes; open Vars must not replace hardwired EQ/LT.
         let nominal = match &lookup_ty {
             Ty::Con(name) => Some(name.as_str()),
@@ -2321,11 +2327,29 @@ impl Compiler {
             },
             _ => None,
         };
+        // A tuple orders through its structural instance (#1721).
+        if nominal.is_none() && matches!(lookup_ty, Ty::Tuple(_)) && matches!(class, "Lt" | "Le" | "Gt" | "Ge") {
+            let fqn = self
+                .checker
+                .generics()
+                .find_instance(class, std::slice::from_ref(&lookup_ty))?
+                .method_fqns
+                .get(method)
+                .cloned()?;
+            if !self.functions.contains_key(&fqn) && !self.fn_entry_labels.contains_key(&fqn) {
+                return None;
+            }
+            return Some((lookup_ty, fqn));
+        }
         let name = nominal?;
         if matches!(
             name,
             "int" | "float" | "string" | "bool" | "unit" | "Option" | "Result"
         ) {
+            return None;
+        }
+        // A `Vec`'s `Eq` is structural (#1629): `==` compares it as an array.
+        if class == "Eq" && name == common::BUILTIN_VEC_TYPE {
             return None;
         }
         if self.checker.enum_variants(name).is_none() && !self.checker.is_class(name) {
@@ -3043,6 +3067,14 @@ impl Compiler {
                 Some(OpenDictGoal::Concrete(tys)) => {
                     return self.plan_instance_dict(out, class, &tys);
                 }
+                // `Eq<T>` with no `Eq` bound in scope: one built from a
+                // subclass bound's, or the VM's compare (#1694).
+                None if class == "Eq"
+                    && let [Ty::Var(v)] = lookup
+                    && let Some(dict) = self.var_eq_dict(*v) =>
+                {
+                    return self.plan_var_eq_dict(out, dict);
+                }
                 // `Show<Box<T>>`: a generic instance whose context is
                 // resolved from scope below. A bare `Show<T>` has no instance.
                 None if lookup.iter().any(|t| matches!(t, Ty::Var(_))) => return false,
@@ -3181,6 +3213,13 @@ impl Compiler {
         use crate::typechecking::subst::apply_ty_prune;
         let subst = self.checker.subst();
         let args: Vec<Ty> = args.iter().map(|a| apply_ty_prune(subst, a)).collect();
+        // An open glue body's variable (#1661).
+        if class == "Eq"
+            && let [Ty::Var(v)] = args.as_slice()
+            && let Some(slot) = self.eq_glue_body_var_dict(*v)
+        {
+            return Some(OpenDictGoal::Slot(slot));
+        }
         if let Some(vars) = self.mono_var_tys.last() {
             let concrete: Vec<Ty> = args.iter().map(|a| Self::apply_ty_var_map(a, vars)).collect();
             if !concrete.iter().any(Self::ty_is_open) {
@@ -3618,7 +3657,8 @@ impl Compiler {
                 return self.checker.generics().find_instance_relaxed(&c.class, &args).is_some();
             }
             if args.iter().any(|t| matches!(t, Ty::Var(_))) {
-                return self.resolve_open_dict_goal(&c.class, &args).is_some();
+                return self.resolve_open_dict_goal(&c.class, &args).is_some()
+                    || (c.class == "Eq" && matches!(args.as_slice(), [Ty::Var(v)] if self.var_eq_dict(*v).is_some()));
             }
             self.open_instance_dict_ok(&c.class, &args, depth + 1)
         })
@@ -4240,6 +4280,12 @@ impl Compiler {
                 self.emit_builtin_entry(&fqn, &params, boolean.clone(), None, |b, a| b.bin(op, a[0], a[1], boolean.clone()));
             }
         }
+        // `string` orders by its UTF-8 bytes (coil-stdlib#48).
+        let params = [(string.clone(), tag_of(ValueTag::String)), (string.clone(), tag_of(ValueTag::String))];
+        for (class, method, op) in [("Lt", "lt", BinOp::Lt), ("Le", "le", BinOp::Le), ("Gt", "gt", BinOp::Gt), ("Ge", "ge", BinOp::Ge)] {
+            let fqn = Generics::builtin_instance_fqn(class, "string", method);
+            self.emit_builtin_entry(&fqn, &params, boolean.clone(), None, |b, a| b.bin(op, a[0], a[1], boolean.clone()));
+        }
         // `()` is always `()` (#1450): its operands, taken as the `Show`
         // thunk takes a unit, are never read.
         let params = [(int.clone(), tag_of(ValueTag::Unit)), (int.clone(), tag_of(ValueTag::Unit))];
@@ -4312,7 +4358,7 @@ impl Compiler {
                 self.note_raw_builtin_thunk(&fqn);
                 self.reserve_function_entry(Self::dict_adapter_name(&fqn));
                 self.reserve_function_entry(fqn.clone());
-                let arity = if matches!(method.as_str(), "eq" | "ne") { 2 } else { 1 };
+                let arity = if matches!(method.as_str(), "eq" | "ne" | "lt" | "le" | "gt" | "ge") { 2 } else { 1 };
                 let param = if method == "len" { Self::structural_shape_at_int(&ty) } else { ty.clone() };
                 self.structural_thunk_params.insert(fqn.clone(), vec![param; arity]);
                 if !self.structural_thunks.iter().any(|(f, ..)| *f == fqn) {
@@ -4704,7 +4750,12 @@ impl Compiler {
         // instance dictionary. No `CALL` names it, so its precise frame map
         // takes the entry height from here; too low a height leaves the top
         // words unrooted.
-        let entry_sp = if dict_entry { hir.params.len() as u32 + 1 } else { 0 };
+        let entry_sp = match self.synth_plain_dicts {
+            // An open glue body's dictionaries follow its parameters (#1642).
+            Some(n) => (hir.params.len() + n) as u32,
+            None if dict_entry => hir.params.len() as u32 + 1,
+            None => 0,
+        };
         self.bytecode
             .record_func_with_sp(name.to_string(), entry, body_start, body_end, entry_sp);
         self.attach_hir_mir();
@@ -4741,6 +4792,9 @@ impl Compiler {
                 _ => None,
             },
             Ty::Record { .. } => Some(ValueTag::Record),
+            // `readonly` has no runtime form: it boxes as the type it views
+            // (a generic `V` result read as `readonly Point`, #1640).
+            Ty::Readonly(inner) => Self::ty_to_value_tag(inner),
             // Open type vars, boxing is required but we don't know the tag yet
             Ty::Var(_) => None,
             _ => None,
@@ -6068,6 +6122,43 @@ impl Compiler {
         format!("{}::{}", self.resolve_class_ident(owner), member)
     }
 
+    /// Record each module `const` (or `static const`) whose initializer
+    /// is a `readonly` array literal (#1561), ahead of the functions that
+    /// read it: its slot is never written after startup and its array
+    /// never changes. Elements fold against this module's consts, as
+    /// [`crate::const_fold::lift_startup_consts`] folds them.
+    fn register_frozen_tables(&mut self, children: &[Output]) {
+        let mut env = self.const_env().clone();
+        for child in children {
+            let mut node = child;
+            while let Expression::Statement(inner) | Expression::Expr(inner) = node.1.as_ref() {
+                node = inner;
+            }
+            match node.1.as_ref() {
+                Expression::Fragment(parts) => {
+                    if let [binder, rhs] = parts.as_slice()
+                        && let Expression::Constant(name, _) = binder.1.as_ref()
+                        && let Expression::Identifier(name) = name.1.as_ref()
+                        && let Some(v) = crate::const_fold::eval_expr(rhs, &env)
+                    {
+                        env.insert(name.to_string(), v);
+                    }
+                }
+                Expression::StaticDecl { is_const: true, name, init, .. } => {
+                    let Some(items) = crate::const_fold::readonly_array_items(init) else {
+                        continue;
+                    };
+                    let Some(slot) = self.checker.static_slot_index(&self.qualify_static_fqn(name)) else {
+                        continue;
+                    };
+                    let elems = items.iter().map(|e| crate::const_fold::eval_expr(e, &env)).collect();
+                    self.frozen_tables.insert(slot, elems);
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn emit_static_initializer(&mut self, fqn: &str, init: &Output) {
         let Some(slot) = self.checker.static_slot_index(fqn) else {
             return;
@@ -6800,6 +6891,7 @@ impl Compiler {
             Expression::Module(_, _body) => {}
             Expression::Program(children) => {
                 self.program_seq += 1;
+                self.register_frozen_tables(children);
                 self.reserve_program_callable_entries(children);
                 self.reserve_inst_clone_labels();
                 if Self::program_needs_phased_emit(children) {
@@ -7655,49 +7747,78 @@ impl Compiler {
         let after = skip.fresh_label(self.bytecode.il_mut());
         skip.emit_jump_to(after, BbJumpKind::Unconditional, self.bytecode.il_mut());
         self.hir_synth_callees.insert("format".to_string(), SynthCallee { format: true, ..SynthCallee::default() });
-        for (fqn, method, ty) in due {
-            let Some(tag) = Self::ty_to_value_tag(&ty) else {
-                continue;
-            };
-            let adapter = Self::dict_adapter_name(&fqn);
-            let boolean = crate::typechecking::ty::boolean();
-            for (name, tag) in [(fqn, None), (adapter, Some(tag as u32))] {
-                match (method.as_str(), &ty) {
-                    ("show", Ty::Array { element, .. }) => {
-                        let element = (**element).clone();
-                        self.emit_builtin_entry(&name, &[(ty.clone(), tag)], string.clone(), None, |b, a| {
-                            crate::hir::synth::array_show(b, a[0], element)
-                        })
+        // A glue body reserves its parts' glue as it is planned (#1629):
+        // emitted in the next round.
+        let mut due = due;
+        while !due.is_empty() {
+            for (fqn, method, ty) in std::mem::take(&mut due) {
+                if let Some(m) = method.strip_prefix("glue_") {
+                    self.emit_eq_glue(&fqn, &ty, m == "ne");
+                    continue;
+                }
+                if let Some(m) = method.strip_prefix("dglue_") {
+                    self.emit_eq_dict_glue(&fqn, &ty, m == "ne");
+                    continue;
+                }
+                if let Some(m) = method.strip_prefix("any_") {
+                    self.emit_eq_any(&fqn, m == "ne");
+                    continue;
+                }
+                let Some(tag) = Self::ty_to_value_tag(&ty) else {
+                    continue;
+                };
+                let adapter = Self::dict_adapter_name(&fqn);
+                let boolean = crate::typechecking::ty::boolean();
+                for (name, tag) in [(fqn, None), (adapter, Some(tag as u32))] {
+                    match (method.as_str(), &ty) {
+                        ("show", Ty::Array { element, .. }) => {
+                            let element = (**element).clone();
+                            self.emit_builtin_entry(&name, &[(ty.clone(), tag)], string.clone(), None, |b, a| {
+                                crate::hir::synth::array_show(b, a[0], element)
+                            })
+                        }
+                        ("show", Ty::App(..)) => self.emit_builtin_enum_show(&name, &ty, tag.is_some()),
+                        ("show", _) => self.emit_builtin_entry(&name, &[(ty.clone(), tag)], string.clone(), None, |b, a| {
+                            let fmt = b.str("%v");
+                            b.call("format", vec![fmt, a[0]], string.clone())
+                        }),
+                        // `==` / `!=` as the operator compares the type today.
+                        ("eq" | "ne", _) => {
+                            let sym = if method == "eq" { "==" } else { "!=" };
+                            let params = [(ty.clone(), tag), (ty.clone(), tag)];
+                            self.emit_builtin_entry(&name, &params, boolean.clone(), None, |b, a| {
+                                b.bin(crate::hir::BinOp::Overloaded(sym), a[0], a[1], boolean.clone())
+                            })
+                        }
+                        // A tuple's lexicographic order (#1721).
+                        ("lt" | "le" | "gt" | "ge", Ty::Tuple(items)) => {
+                            let items = items.clone();
+                            let params = [(ty.clone(), tag), (ty.clone(), tag)];
+                            self.emit_builtin_entry(&name, &params, boolean.clone(), None, |b, a| {
+                                crate::hir::synth::tuple_order(b, a[0], a[1], &items, &method)
+                            })
+                        }
+                        ("hash", _) => self.emit_structural_hash(&name, &ty, tag),
+                        // The structural length read, as `x.len()` (#1536).
+                        // A shape's (`Vec<a>`, #1542) reads it at any element
+                        // type: its entry takes the shape at `int`.
+                        ("len", _) => self.emit_builtin_entry(&name, &[(Self::structural_shape_at_int(&ty), tag)], int.clone(), None, |b, a| {
+                            b.push(
+                                crate::hir::HirKind::Call {
+                                    callee: crate::hir::Callee::Method { name: "len".to_string() },
+                                    args: vec![a[0]],
+                                },
+                                int.clone(),
+                            )
+                        }),
+                        _ => {}
                     }
-                    ("show", Ty::App(..)) => self.emit_builtin_enum_show(&name, &ty, tag.is_some()),
-                    ("show", _) => self.emit_builtin_entry(&name, &[(ty.clone(), tag)], string.clone(), None, |b, a| {
-                        let fmt = b.str("%v");
-                        b.call("format", vec![fmt, a[0]], string.clone())
-                    }),
-                    // `==` / `!=` as the operator compares the type today.
-                    ("eq" | "ne", _) => {
-                        let sym = if method == "eq" { "==" } else { "!=" };
-                        let params = [(ty.clone(), tag), (ty.clone(), tag)];
-                        self.emit_builtin_entry(&name, &params, boolean.clone(), None, |b, a| {
-                            b.bin(crate::hir::BinOp::Overloaded(sym), a[0], a[1], boolean.clone())
-                        })
-                    }
-                    ("hash", _) => self.emit_structural_hash(&name, &ty, tag),
-                    // The structural length read, as `x.len()` (#1536).
-                    // A shape's (`Vec<a>`, #1542) reads it at any element
-                    // type: its entry takes the shape at `int`.
-                    ("len", _) => self.emit_builtin_entry(&name, &[(Self::structural_shape_at_int(&ty), tag)], int.clone(), None, |b, a| {
-                        b.push(
-                            crate::hir::HirKind::Call {
-                                callee: crate::hir::Callee::Method { name: "len".to_string() },
-                                args: vec![a[0]],
-                            },
-                            int.clone(),
-                        )
-                    }),
-                    _ => {}
                 }
             }
+            due = std::mem::take(&mut self.structural_thunks)
+                .into_iter()
+                .filter(|(fqn, ..)| !self.functions.contains_key(fqn))
+                .collect();
         }
         for (fqn, arity) in tuples {
             self.emit_structural_tuple_show(&fqn, arity);

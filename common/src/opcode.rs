@@ -478,7 +478,7 @@ pub enum Instruction {
     /// Rebuild the [`crate::HeapSnapshot`] encoded at constant-pool index
     /// operand and store each root into its static slot: the values of
     /// `const`s computed at compile time. Stack-neutral; allocates, but
-    /// runs only in the startup setup region. Archive **minor 41**.
+    /// runs only in the startup setup region. Archive **minor 42**.
     RestoreSnapshot,
 }
 

@@ -1754,7 +1754,7 @@ fn pure_call_binop_leaves_results_on_stack_for_bin_return() {
 #[test]
 fn pure_helper_binop_stacks_across_call_for_bin_return() {
     use common::Instruction;
-    let (bc, _) = compile_src(
+    let (bc, _) = compile_src_no_inline(
         "fn left(int n) -> int { \
                let s = 0; \
                let i = 0; \
@@ -2690,10 +2690,11 @@ fn mixed_enum_unit_tuple_record_all_in_one() {
     // bytecode (the codegen is silent on unused `let _`).
     let (bc, _pool) = compile_src_boxed_locals(
         "enum E { A, B(int), C { x: int } } \
- fn main() { \
+ fn mk() -> Vec<E> { \
  let a = E::A; \
  let b = E::B(1); \
  let c = E::C { x: 2 }; \
+ return [a, b, c]; \
  }",
     );
 
@@ -2993,10 +2994,11 @@ fn self_recursive_sites_are_not_predicate_peeled() {
 fn let_x_reassignment_emits_store_pop_not_store() {
     use common::Instruction;
     let (bc, _pool) = compile_src(
-        "fn main() { \
- let x = 5; \
- x = 10; \
+        "fn f(int n) -> int { \
+ let x = n; \
+ x = n + 1; \
  let y = x; \
+ return y; \
  }",
     );
 
@@ -3656,6 +3658,8 @@ fn main() {
 }
 "#;
     let mut pipeline = crate::Pipeline::new();
+    // Its helper is the code under test: no copy of it inlines.
+    pipeline.set_inline_max_cost(0);
     let (bc, constants) = pipeline.compile_src(src).expect("compile");
     let pack_off = pipeline.compiler_mut().get_function("pack").expect("pack");
     let pack_bc = &bc[pack_off..];
@@ -3808,6 +3812,8 @@ fn main() {
 }
 "#;
     let mut pipeline = crate::Pipeline::new();
+    // Its helper is the code under test: no copy of it inlines.
+    pipeline.set_inline_max_cost(0);
     let (bc, constants) = pipeline.compile_src(src).expect("compile");
     let pack_off = pipeline.compiler_mut().get_function("pack").expect("pack");
     let pack_bc = &bc[pack_off..];
@@ -3857,6 +3863,8 @@ fn main() {
 }
 "#;
     let mut pipeline = crate::Pipeline::new();
+    // Its helper is the code under test: no copy of it inlines.
+    pipeline.set_inline_max_cost(0);
     let (bc, constants) = pipeline.compile_src(src).expect("compile");
     let pack_off = pipeline.compiler_mut().get_function("pack").expect("pack");
     let pack_bc = &bc[pack_off..];
@@ -3899,6 +3907,8 @@ fn main() {
 }
 "#;
     let mut pipeline = crate::Pipeline::new();
+    // Its helper is the code under test: no copy of it inlines.
+    pipeline.set_inline_max_cost(0);
     let (bc, constants) = pipeline.compile_src(src).expect("compile");
     let pack_off = pipeline.compiler_mut().get_function("pack").expect("pack");
     let pack_bc = &bc[pack_off..];
@@ -4174,6 +4184,8 @@ fn main() {
 }
 "#;
     let mut pipeline = crate::Pipeline::new();
+    // Its helper is the code under test: no copy of it inlines.
+    pipeline.set_inline_max_cost(0);
     let (bc, constants) = pipeline.compile_src(src).expect("compile");
     let bump_off = pipeline.compiler_mut().get_function("bump").expect("bump");
     let bump_bc = &bc[bump_off..];
@@ -4227,6 +4239,8 @@ fn main() {
 }
 "#;
     let mut pipeline = crate::Pipeline::new();
+    // Its helper is the code under test: no copy of it inlines.
+    pipeline.set_inline_max_cost(0);
     let (bc, constants) = pipeline.compile_src(src).expect("compile");
     let fill_off = pipeline.compiler_mut().get_function("fill").expect("fill");
     let main_off = pipeline.compiler_mut().get_function("main").expect("main");
@@ -4606,6 +4620,8 @@ fn main() {
 }
 "#;
     let mut pipeline = crate::Pipeline::new();
+    // Its helper is the code under test: no copy of it inlines.
+    pipeline.set_inline_max_cost(0);
     let (bc, constants) = pipeline.compile_src(src).expect("compile");
     let pack_off = pipeline.compiler_mut().get_function("pack").expect("pack");
     let pack_bc = &bc[pack_off..];
@@ -6079,8 +6095,8 @@ use ffi::{dload, declare, invoke}; \
 use ffi::types::{Callback, Int}; \
 fn doubler(int x) -> int { return x * 2; } \
 fn main() { \
-  let lib = dload(\"libsum.so\"); \
-  let id = declare(lib, \"apply_cb\", (Callback, Int), Int); \
+  let lib = match dload(\"libsum.so\") { Result::Ok(h) => h, Result::Err(e) => panic e.message, }; \
+  let id = match declare(lib, \"apply_cb\", (Callback, Int), Int) { Result::Ok(v) => v, Result::Err(e) => panic e.message, }; \
   invoke(lib, id, (doubler, 21)); \
 }";
     let mut ast = Pratt::default().parse(src).expect("parse failed");
@@ -8065,8 +8081,9 @@ fn main() {
 fn nested_option_string_none_stays_boxed() {
     let (bc, _) = compile_src(
         r#"
-fn main() {
+fn mk() -> Vec<Option<Option<string>>> {
     let x: Option<Option<string>> = Option::None;
+    return [x];
 }
 "#,
     );
@@ -8359,7 +8376,7 @@ fn main() {
 
 #[test]
 fn result_mixed_int_heap_still_boxes() {
-    let (bc, _) = compile_src(
+    let (bc, _) = compile_src_no_inline(
         r#"
 class Box {
     pub n: int,
@@ -9198,6 +9215,26 @@ fn a_small_callee_with_a_loop_inlines() {
                fn main() { let t = 0; let k = 0; while k < 3 { t = t + first_over(10, k * 10); k = k + 1; } if t != 10 { panic \"first\"; } }";
     let calls = compile_fn_body(src, "main").iter().filter(|b| matches!(b.bytecode(), common::Instruction::CALL)).count();
     assert_eq!(calls, 0);
+}
+
+#[test]
+fn a_callee_too_big_to_inline_inlines_once_its_constant_argument_folds() {
+    // `pick` costs more than the budget (five calls), but with `fast` bound
+    // to `true` only `x + 1` is left: that copy splices into `main`.
+    let src = "fn slow(int x) -> int { let i = 0; let s = 0; while i < x { s = s + i; i = i + 1; } return s; } \
+               fn pick(bool fast, int x) -> int { if fast { return x + 1; } return slow(slow(slow(slow(slow(x))))); } \
+               fn main() { let k = 5; if pick(true, k) != 6 { panic \"pick\"; } }";
+    let calls = compile_fn_body(src, "main").iter().filter(|b| matches!(b.bytecode(), common::Instruction::CALL)).count();
+    assert_eq!(calls, 0);
+}
+
+#[test]
+fn a_callee_too_big_to_inline_keeps_its_call_on_a_runtime_argument() {
+    let src = "fn slow(int x) -> int { let i = 0; let s = 0; while i < x { s = s + i; i = i + 1; } return s; } \
+               fn pick(bool fast, int x) -> int { if fast { return x + 1; } return slow(slow(slow(slow(slow(x))))); } \
+               fn main() { let k = 5; if pick(k < 9, k) != 6 { panic \"pick\"; } }";
+    let calls = compile_fn_body(src, "main").iter().filter(|b| matches!(b.bytecode(), common::Instruction::CALL)).count();
+    assert_eq!(calls, 1);
 }
 
 #[test]

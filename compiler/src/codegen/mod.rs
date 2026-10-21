@@ -287,6 +287,15 @@ pub struct Compiler {
     /// In that body, each open item type's `__dictN` (by `N`), which `%v`
     /// shows it through.
     synth_show_dicts: HashMap<crate::typechecking::ty::TyVarId, usize>,
+    /// A compiler-made body taking this many plain `Eq` dictionaries after
+    /// its parameters, as `__dict0..` (an open glue function, #1642).
+    synth_plain_dicts: Option<usize>,
+    /// In that body, each type variable's `Eq` dictionary: its `__dictN`
+    /// (by `N`) and the `eq` method's slot in it.
+    synth_eq_dicts: HashMap<crate::typechecking::ty::TyVarId, (usize, u32)>,
+    /// Each reserved open glue function's type variables, in its
+    /// dictionaries' order, with their `eq` slots (#1642).
+    eq_dict_glue: HashMap<String, Vec<(crate::typechecking::ty::TyVarId, u32)>>,
     /// Fixed arity + rest flag per function table key. Survives multi-file
     /// `check_program` clears of `Checker::fn_param_names`, so `MakeFn` for
     /// imported names (e.g. `spawn(run_jobs, …)` after `use pool::worker::run_jobs`)
@@ -499,6 +508,13 @@ pub struct Compiler {
     /// Ground dictionary programs built once into a static slot
     /// ([`Compiler::intern_dict_ops`]), by their ops.
     interned_dicts: HashMap<Vec<crate::mir::HirDictOp>, u32>,
+    /// Static slots of module `const`s set to a `readonly` array literal
+    /// (#1561): nothing ever writes the slot after startup or an element
+    /// of its array. Each element's value when it folds.
+    frozen_tables: HashMap<u32, Vec<Option<ConstValue>>>,
+    /// Function-local `const` tables of literals, built once into a static
+    /// slot on first use (#1561), by their element type and literals.
+    interned_tables: HashMap<String, u32>,
     /// Set by a call site that passes raw arguments, right before it emits
     /// the entry of a [`Self::raw_instance_methods`] method; any other call
     /// goes through the adapter.
@@ -691,6 +707,10 @@ pub struct Compiler {
     /// Typed inlining takes callees with heap locals, cleared after the
     /// splicing statement (`COIL_HIR_INLINE_HEAP=0` off).
     hir_inline_heap: bool,
+    /// Typed inlining takes a too-big callee at a call with constant
+    /// arguments as its copy with those bound and folded
+    /// (`COIL_HIR_SPECIALIZE=0` off).
+    hir_inline_specialize: bool,
     /// Callee bodies typed inlining spliced (file, source range, name), so
     /// a capability chain still names the function a host call is in.
     inlined_bodies: Vec<(u32, std::ops::Range<usize>, String)>,
@@ -738,6 +758,9 @@ impl Default for Compiler {
             structural_tuple_thunks: Vec::new(),
             synth_entry_dicts: None,
             synth_show_dicts: HashMap::new(),
+            synth_plain_dicts: None,
+            synth_eq_dicts: HashMap::new(),
+            eq_dict_glue: HashMap::new(),
             fn_arities: HashMap::with_capacity(32),
             module_items: std::collections::HashMap::default(),
             native: HashMap::default(),
@@ -795,6 +818,8 @@ impl Default for Compiler {
             pending_own_dicts: None,
             raw_instance_methods: HashSet::new(),
             interned_dicts: HashMap::new(),
+            frozen_tables: HashMap::new(),
+            interned_tables: HashMap::new(),
             raw_instance_call: false,
             inst_clone_srcs: HashMap::new(),
             inst_clones: HashMap::new(),
@@ -866,6 +891,7 @@ impl Default for Compiler {
             hir_match_tree: crate::hir::match_tree::tree_from_env(),
             hir_inline_pair: crate::hir::inline::pair_from_env(),
             hir_inline_heap: crate::hir::inline::heap_from_env(),
+            hir_inline_specialize: crate::hir::inline::specialize_from_env(),
             inlined_bodies: Vec::new(),
             hir_mir: None,
             hir_mir_why: None,

@@ -1460,15 +1460,19 @@ impl<const S: usize> Machine<S> {
                 }
                 Instruction::LoadStatic => {
                     let slot = opcode.operand_u32() as usize;
-                    promise!(slot < self.statics.len());
-                    let val = self.statics[slot];
+                    debug_assert!(slot < self.statics.len());
+                    // Checked in release too: an out-of-range slot must not touch
+                    // memory past the statics buffer (#1744).
+                    let val = self.statics.get(slot).copied().unwrap_or_default();
                     self.stack.push(val);
                 }
                 Instruction::StoreStatic => {
                     let slot = opcode.operand_u32() as usize;
-                    promise!(slot < self.statics.len());
+                    debug_assert!(slot < self.statics.len());
                     let val = self.stack.pop();
-                    self.statics[slot] = val;
+                    if let Some(s) = self.statics.get_mut(slot) {
+                        *s = val;
+                    }
                 }
                 Instruction::BoxValue => {
                     let tag = (opcode.operand_u32() & 0xFFFF) as u16;

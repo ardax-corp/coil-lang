@@ -16,7 +16,7 @@ use crate::typechecking::generics::{
 use crate::typechecking::id::{self, IdTable, NodeId};
 use crate::typechecking::kind::Kind;
 use crate::typechecking::subst::{Subst, apply_ty, apply_ty_prune, compose};
-use crate::typechecking::ty::{ArrayLength, array, array_fixed, tuple as tuple_ty};
+use crate::typechecking::ty::{ArrayLength, array, array_fixed, peel_constructor_refinement, tuple as tuple_ty};
 use crate::typechecking::ty::{AssocProjection, Constraint, Scheme};
 use crate::typechecking::ty::{
     EnumVariantPayloadTy, RANGE, RANGE_INCLUSIVE, Ty, TyVarId, boolean, float, ftv_ty, int,
@@ -36,6 +36,8 @@ use super::*;
 type OpenAssocOwner = (TyVarId, String, Vec<String>);
 type OpenAssocValue = (TyVarId, Vec<Ty>);
 type OpenAssocKey = (OpenAssocOwner, OpenAssocValue);
+/// A generic instance's head variables and the fresh ones replacing them.
+type FreshVars = Vec<(TyVarId, TyVarId)>;
 
 #[path = "host_caps.rs"]
 mod host_caps;
@@ -47,6 +49,8 @@ mod infer_fn;
 mod infer_match;
 #[path = "variadic.rs"]
 pub(super) mod variadic;
+#[path = "weak_check.rs"]
+pub(super) mod weak_check;
 
 /// Max native recursion depth for [`Checker::infer`]. Chosen well under what
 /// a debug-build stack of a few MiB can hold even with `infer_inner`'s
@@ -98,6 +102,7 @@ impl Checker {
             counter: TyVarCounter::new(),
             subst: Subst::empty(),
             messages: Vec::new(),
+            rejected_builtin_type_decls: Vec::new(),
             current_return_ty: None,
             current_module: String::new(),
             virtual_modules: VirtualModules::new(),
@@ -209,9 +214,11 @@ impl Checker {
             enum_scalar: BTreeMap::new(),
             bare_constructs_by_span: HashMap::new(),
             qualified_trait_calls_by_span: HashMap::new(),
+            qualified_value_calls_by_span: HashMap::new(),
             bare_patterns_by_span: HashMap::new(),
             bare_cases_by_module: HashMap::new(),
             pending_exhaustive: Vec::new(),
+            weak_checks: Default::default(),
             async_functions: std::collections::HashSet::new(),
             async_depth: 0,
             current_yield_ty: None,
@@ -229,12 +236,16 @@ impl Checker {
             ffi_fn_variadic_by_field: HashMap::new(),
             ffi_fn_nfixed_by_field: HashMap::new(),
             ffi_fn_arg_tags_by_field: HashMap::new(),
+            ffi_fn_by_static: HashMap::new(),
+            ffi_prescan_statics: HashSet::new(),
+            ffi_prescan_locals: HashSet::new(),
             ffi_fn_param_invoke_ret: HashMap::new(),
             ffi_fn_param_invoke_args: HashMap::new(),
             current_function: None,
             extern_fns: HashSet::new(),
             extern_variadic: HashSet::new(),
             extern_variadic_nfixed: HashMap::new(),
+            extern_const_bytes: HashMap::new(),
             variadic_call_arg_tags: HashMap::new(),
             fn_result_mode: None,
             in_test_case: false,
@@ -653,6 +664,16 @@ impl Checker {
             }
         }
         self.scope_bindings.insert(local, export);
+    }
+
+    /// The built-in enum a `use … as` alias names (`Opt` after
+    /// `use prelude::Option as Opt;`), so the alias works as a type and
+    /// constructor head like the original name (#1700).
+    fn builtin_enum_alias(&self, name: &str) -> Option<&'static str> {
+        match self.scope_bindings.get(name)? {
+            BuiltinExport::Enum { name: builtin } if *builtin != name => Some(builtin),
+            _ => None,
+        }
     }
 
     /// Look up a short name in the virtual-module scope.
@@ -1512,6 +1533,34 @@ impl Checker {
     /// [`env_mut`](Self::env_mut) and [`Env::pop`] if you need to drop
     /// it.
     pub fn check_program(&mut self, ast: &Output) -> Ty {
+        let first_message = self.messages.len();
+        self.rejected_builtin_type_decls.clear();
+        let ty = self.check_program_body(ast);
+        self.drop_reserved_type_name_cascades(first_message);
+        ty
+    }
+
+    /// A user type that takes a reserved built-in name is not a type of its
+    /// own: every use of the name still means the built-in, so the rest of
+    /// the module reports errors that only restate the clash (`Orphan
+    /// instance Show<Option>`, a field access on a non-record type). Keep
+    /// just the E0200s for this module's errors (#1701).
+    fn drop_reserved_type_name_cascades(&mut self, first_message: usize) {
+        if self.rejected_builtin_type_decls.is_empty() {
+            return;
+        }
+        let rejected = std::mem::take(&mut self.rejected_builtin_type_decls);
+        let mut index = 0;
+        self.messages.retain(|msg| {
+            let keep = index < first_message
+                || !matches!(msg.kind(), reporting::MessageKind::ERROR)
+                || (msg.code() == Some(ErrorCode::DuplicateEnum) && rejected.contains(msg.range()));
+            index += 1;
+            keep
+        });
+    }
+
+    fn check_program_body(&mut self, ast: &Output) -> Ty {
         // Reset per-program state. The pre-pass, the main infer
         // pass, and the post-pass all share the same checker; only
         // the per-program tables and caches get cleared.
@@ -1590,6 +1639,7 @@ impl Checker {
         self.enum_scalar.retain(|k, _| k.contains("::"));
         self.bare_constructs_by_span.clear();
         self.qualified_trait_calls_by_span.clear();
+        self.qualified_value_calls_by_span.clear();
         self.bare_patterns_by_span.clear();
         self.c_structs.clear();
         self.callback_sigs.clear();
@@ -1603,15 +1653,20 @@ impl Checker {
         self.ffi_fn_variadic_by_field.clear();
         self.ffi_fn_nfixed_by_field.clear();
         self.ffi_fn_arg_tags_by_field.clear();
+        self.ffi_fn_by_static.clear();
+        self.ffi_prescan_statics.clear();
+        self.ffi_prescan_locals.clear();
         self.ffi_fn_param_invoke_ret.clear();
         self.ffi_fn_param_invoke_args.clear();
         self.current_function = None;
         self.extern_fns.clear();
         self.extern_variadic.clear();
         self.extern_variadic_nfixed.clear();
+        self.extern_const_bytes.clear();
         self.ffi_exec_names.clear();
         self.variadic_call_arg_tags.clear();
         self.pending_exhaustive.clear();
+        self.weak_checks.clear_module();
         self.async_functions.clear();
         self.async_depth = 0;
         self.current_yield_ty = None;
@@ -1700,6 +1755,7 @@ impl Checker {
             self.messages.extend(msgs);
         }
         self.check_duplicate_classes(ast);
+        self.check_builtin_class_names(ast);
         self.pre_register_readonly_classes(ast);
         self.collect_variadic_templates(ast);
         self.pre_collect_free_function_param_names(ast);
@@ -1736,6 +1792,7 @@ impl Checker {
         };
         // Frame stays open; see doc-comment above.
         self.run_pending_exhaustiveness();
+        self.run_pending_weak_checks();
 
         // `test("…") { … }` cases provide a virtual main, reject a
         // user-written `fn main` in the same file.
@@ -2266,6 +2323,7 @@ impl Checker {
         let id = self.ids.resolve_walk_id(expr, seq_id);
         self.maybe_attach_def_id(id, expr);
         self.node_ids_by_span.insert((expr.0.start, expr.0.end), id);
+        let outer_range = std::mem::replace(&mut self.weak_checks.range, expr.0.into_range());
 
         // `current_expected` is the expected type of *this* node: hand it to
         // the node (`expected_here`) and clear it for its operands, unless
@@ -2278,6 +2336,7 @@ impl Checker {
             self.current_expected = None;
         }
         let ty = self.infer_inner(expr, Some(id));
+        self.weak_checks.range = outer_range;
         self.current_expected = outer;
         self.expected_here = prev_here;
         self.cache.insert(id, ty.clone());
@@ -3552,6 +3611,7 @@ impl Checker {
                 };
                 self.static_decl_frames
                     .insert(fqn.clone(), self.env.depth().saturating_sub(1));
+                self.record_ffi_declare_for_static(fqn.clone(), init);
                 self.register_static_slot(fqn, *is_const, slot_ty.clone(), range.clone());
                 self.env
                     .insert_top(name.to_string(), Scheme::mono(slot_ty.clone()));
@@ -3700,6 +3760,33 @@ impl Checker {
         target
     }
 
+    /// An `extern` parameter's type: a `Bytes` buffer is the `Vec<byte>`
+    /// the callee writes into, a `ConstBytes` view a `readonly Vec<byte>`
+    /// (or a `string`, see [`Self::extern_const_bytes_string`]), as `invoke`
+    /// passes them (#1665); any other type as written.
+    fn extern_param_ty(&mut self, t: &Output) -> Ty {
+        match self.ffi_type_tag_from_output(t).map(|(tag, _)| tag) {
+            Some(common::tag::BYTES) => crate::typechecking::ty::vec_app_ty(crate::typechecking::ty::byte()),
+            Some(common::tag::CONST_BYTES) => {
+                readonly_ty(crate::typechecking::ty::vec_app_ty(crate::typechecking::ty::byte()))
+            }
+            _ => self.parse_type_name(t),
+        }
+    }
+
+    /// A `string` passed to `extern` `name`'s `ConstBytes` parameter `index`
+    /// in a call with `argc` arguments: lent in place, no `Vec<byte>` needed.
+    fn extern_const_bytes_string(&self, name: Option<&str>, argc: usize, index: usize, arg: &Ty) -> bool {
+        let Some(params) = name.and_then(|n| self.extern_const_bytes.get(n)) else {
+            return false;
+        };
+        let arg = apply_ty_prune(&self.subst, arg);
+        matches!(strip_readonly(&arg), Ty::Con(n) if n == crate::typechecking::ty::STRING)
+            && params
+                .iter()
+                .any(|&(nfixed, variadic, i)| i == index && (nfixed == argc || (variadic && argc >= nfixed)))
+    }
+
     #[inline(never)]
     fn infer_extern_block(
         &mut self,
@@ -3716,7 +3803,7 @@ impl Checker {
                     .iter()
                     .filter_map(|item| {
                         if let Expression::Argument { ty, .. } = item.1.as_ref() {
-                            ty.as_ref().map(|t| self.parse_type_name(t))
+                            ty.as_ref().map(|t| self.extern_param_ty(t))
                         } else {
                             None
                         }
@@ -3726,6 +3813,22 @@ impl Checker {
                 Vec::new()
             };
             let nfixed = arg_tys.len();
+            if let Expression::Fragment(items) = decl.args.1.as_ref() {
+                let const_bytes: Vec<usize> = items
+                    .iter()
+                    .filter_map(|item| match item.1.as_ref() {
+                        Expression::Argument { ty: Some(t), .. } => Some(t),
+                        _ => None,
+                    })
+                    .enumerate()
+                    .filter(|(_, t)| self.ffi_type_tag_from_output(t).map(|(tag, _)| tag) == Some(common::tag::CONST_BYTES))
+                    .map(|(i, _)| i)
+                    .collect();
+                if !const_bytes.is_empty() {
+                    let entry = self.extern_const_bytes.entry(decl.name.to_string()).or_default();
+                    entry.extend(const_bytes.into_iter().map(|i| (nfixed, decl.variadic, i)));
+                }
+            }
             let ret_ty = decl
                 .returns
                 .as_ref()
@@ -4433,10 +4536,11 @@ impl Checker {
                     match unify_with(&self.subst, &prev_pruned, &t_pruned) {
                         Ok(s) => {
                             self.absorb(&s);
-                            elem_ty = Some(apply_ty_prune(
+                            let joined = apply_ty_prune(
                                 &self.subst,
-                                &crate::typechecking::ty::peel_constructor_refinement(prev_pruned),
-                            ));
+                                &crate::typechecking::ty::peel_constructor_refinement(prev_pruned.clone()),
+                            );
+                            elem_ty = Some(self.readonly_join(joined, &prev_pruned, &t_pruned));
                         }
                         Err(_) => {
                             let _ = self.error_with_help(
@@ -4466,6 +4570,12 @@ impl Checker {
             && let Some(exp) = self.expected_here.clone()
             && let exp = apply_ty_prune(&self.subst, &exp)
             && let Some(vec_elem) = vec_element_ty(&exp)
+            // A `readonly` element of a plain `Vec` keeps the literal's
+            // own type, so the binding site reports the dropped seal
+            // (#1552). Under `readonly Vec<P>` the elements are read-only
+            // anyway.
+            && (matches!(exp, Ty::Readonly(_))
+                || !self.drops_readonly(vec_elem, &apply_ty_prune(&self.subst, &element)))
             && let Ok(s) = unify_with(&self.subst, vec_elem, &element)
         {
             self.absorb(&s);
@@ -4766,6 +4876,30 @@ impl Checker {
         {
             self.gate_stream_attach(range.clone());
         }
+        // A method's `... xs` template calls its instance for this call's
+        // pack (#1754).
+        if let Some(owner) = self.class_owner_from_ty(&resolved)
+            && self.methods.get(&owner).is_some_and(|m| m.contains_key(*method))
+            && !self.is_static_method(&owner, method)
+        {
+            let key = format!("{owner}::{method}");
+            if self.is_variadic_template(&key) {
+                self.check_inherent_method_access(&owner, method, &range);
+                return self.infer_variadic_method_call(&key, recv, &recv_ty, method_args, id, range);
+            }
+        }
+        if let Some(owner) = self.class_owner_from_ty(&resolved)
+            && let Some(ty) = self.foreign_method_template_call(&format!("{owner}::{method}"), &range)
+        {
+            for arg in method_args {
+                let value = match arg.1.as_ref() {
+                    Expression::NamedArg(_, v) => v,
+                    _ => arg,
+                };
+                let _ = self.infer(value);
+            }
+            return ty;
+        }
         // Named args on methods: only inherent class methods.
         if method_has_named {
             let class_owner = self.class_owner_from_ty(&resolved);
@@ -4862,7 +4996,7 @@ impl Checker {
                 if !constraints.is_empty() {
                     self.discharge_constraints(id, &constraints, &range);
                 }
-                return result;
+                return self.method_result(&recv_ty, result, false);
             }
             return self.error_with_help(
                 ErrorCode::GenericTypeError,
@@ -4901,7 +5035,7 @@ impl Checker {
             }
             self.existential_method_calls_by_span
                 .insert((range.start, range.end), hint);
-            return self.apply_existential_method(
+            let result = self.apply_existential_method(
                 &owner,
                 method,
                 &scheme,
@@ -4909,6 +5043,8 @@ impl Checker {
                 args.as_deref(),
                 (id, range),
             );
+            let declared = self.trait_readonly_params(&owner, method) & 1 != 0;
+            return self.method_result(&recv_ty, result, declared);
         }
         if let Some(receiver_var) = Self::constraint_var_of_ty(&resolved) {
             let candidates = self.bound_method_candidates(method, Some(receiver_var));
@@ -4963,7 +5099,8 @@ impl Checker {
                         &range,
                     );
                 }
-                return result;
+                let declared = self.trait_readonly_params(&class, method) & 1 != 0;
+                return self.method_result(&recv_ty, result, declared);
             }
         }
         // Inherent class methods win over ground trait methods (Rust-style).
@@ -5088,7 +5225,7 @@ impl Checker {
             if !constraints.is_empty() {
                 self.discharge_constraints(id, &constraints, &range);
             }
-            return result;
+            return self.method_result(&recv_ty, result, false);
         }
 
         // Ground trait method via concrete instance; pin return from
@@ -5122,7 +5259,9 @@ impl Checker {
                     &range,
                 );
             }
-            return apply_ty_prune(&self.subst, &result);
+            let declared = self.trait_readonly_params(&class, method) & 1 != 0;
+            let result = apply_ty_prune(&self.subst, &result);
+            return self.method_result(&recv_ty, result, declared);
         }
 
         if let Some(owner) = class_owner {
@@ -5200,6 +5339,9 @@ impl Checker {
         let ident = match name.1.as_ref() {
             Expression::Identifier(n) => n.to_string(),
             Expression::QualifiedAccess { owner, member } => {
+                if let Some(ty) = self.try_infer_qualified_value_call(owner, member, args.as_deref().unwrap_or(&[]), id, range.clone()) {
+                    return ty;
+                }
                 let fqn = self.class_member_fqn(owner, member);
                 if self.static_slot_types.contains_key(&fqn) {
                     return self.error_with_help(
@@ -5816,6 +5958,12 @@ impl Checker {
             return self.infer_thread_spawn_call(&arg_tys, args.as_deref(), range);
         }
 
+        if self.gc_fn_in_scope(&ident) == Some(GcBuiltin::Weak)
+            && let Some(arg) = arg_tys.first()
+        {
+            self.weak_checks.record_arg(arg.clone(), range.clone());
+        }
+
         self.maybe_record_ffi_param_invoke_flow_for_call(&ident, &flat_args);
 
         let result = self.apply_function(
@@ -5907,17 +6055,25 @@ impl Checker {
 
     /// The instance's type parameters replaced by fresh variables, in its
     /// head and its context alike.
-    fn freshen_instance(&mut self, args: &[Ty], context: &[Constraint]) -> (Vec<Ty>, Vec<Constraint>) {
+    /// Also returns the old → fresh variable pairs.
+    fn freshen_instance(
+        &mut self,
+        args: &[Ty],
+        context: &[Constraint],
+    ) -> (Vec<Ty>, Vec<Constraint>, FreshVars) {
         let mut vars = Vec::new();
         for a in args {
             Self::collect_ty_vars(a, &mut vars);
         }
         if vars.is_empty() {
-            return (args.to_vec(), context.to_vec());
+            return (args.to_vec(), context.to_vec(), Vec::new());
         }
         let mut fresh = Subst::empty();
+        let mut mapping = Vec::with_capacity(vars.len());
         for v in vars {
-            fresh.insert(v, Ty::Var(self.counter.fresh()));
+            let f = self.counter.fresh();
+            fresh.insert(v, Ty::Var(f));
+            mapping.push((v, f));
         }
         let args = args.iter().map(|a| apply_ty(&fresh, a)).collect();
         let context = context
@@ -5927,7 +6083,7 @@ impl Checker {
                 args: c.args.iter().map(|a| apply_ty(&fresh, a)).collect(),
             })
             .collect();
-        (args, context)
+        (args, context, mapping)
     }
 
     fn collect_ty_vars(ty: &Ty, out: &mut Vec<TyVarId>) {
@@ -6618,6 +6774,17 @@ impl Checker {
                 let _ = self.unify(elem, &int(), range, "range element type");
                 true
             }
+            // `string` is `Ord` (by bytes) but has no range: a range
+            // holds its bounds as scalar words.
+            other if Self::is_string_ty(other) => {
+                let _ = self.error_with_help(
+                    ErrorCode::GenericTypeError,
+                    "range bounds cannot be `string`".to_string(),
+                    range.clone(),
+                    Some("ranges take `int`, `byte`, `float` or another scalar `Ord` type".to_string()),
+                );
+                false
+            }
             other => {
                 if self.generics.has_instance("Ord", other) {
                     true
@@ -6882,7 +7049,7 @@ impl Checker {
             ("+", _) => "`+` takes `int` / `float` / `byte` operands, two strings, or a type with an `Add` instance".to_string(),
             (_, Some(class)) if bitwise => format!("`{op}` takes `int` / `byte` operands, or a type with a `{class}` instance"),
             (_, Some(class)) => format!(
-                "`{op}` takes `int` / `float` / `byte` operands, or a type with a `{class}` instance"
+                "`{op}` takes `int` / `float` / `byte` / `string` operands, or a type with a `{class}` instance"
             ),
             _ => format!("`{op}` takes `int` / `byte` operands"),
         };
@@ -6910,6 +7077,8 @@ impl Checker {
         if matches!(lookup, Ty::Var(_) | Ty::Never) || Self::is_numeric_operand_ty(&lookup) {
             return;
         }
+        // A tuple of `Ord` items orders lexicographically (#1721).
+        self.ensure_structural_tuple_ord(&lookup);
         if self
             .generics
             .find_instance(class, std::slice::from_ref(&lookup))
@@ -6945,7 +7114,7 @@ impl Checker {
                 range.clone(),
             );
             m.with_help(format!(
-                "`{op}` takes `int` / `float` / `byte` operands, or a type with a `{class}` instance (`#[derive(Ord)]`)"
+                "`{op}` takes `int` / `float` / `byte` / `string` operands, or a type with a `{class}` instance (`#[derive(Eq, Ord)]`)"
             ));
             m
         });
@@ -8743,6 +8912,8 @@ impl Checker {
                                 arg_exprs.and_then(|args| args.get(i)),
                                 &range,
                             );
+                        } else if extern_call && self.extern_const_bytes_string(name, arg_tys.len(), i, arg) {
+                            // A `ConstBytes` view of a string's bytes (#1665).
                         } else if let Some(elem) = extern_call
                             .then(|| self.fixed_array_for_extern_vec(param.as_ref(), arg))
                             .flatten()
@@ -9130,6 +9301,56 @@ impl Checker {
         result
     }
 
+    /// E0107 when `actual` used where `expected` is wanted would drop a
+    /// `readonly` or add one to a container's element (#1552, #1558).
+    /// Both are already resolved under the substitution.
+    fn check_readonly_conversion(&mut self, expected: &Ty, actual: &Ty, range: &Range<usize>, context: &str) {
+        if self.drops_readonly(expected, actual) {
+            self.report_readonly_drop(expected, actual, range, context);
+        } else if self.gains_readonly_element(expected, actual) {
+            let _ = self.error_with_help(
+                ErrorCode::InvalidAssignment,
+                format!(
+                    "Cannot use a `{}` where `{}` is expected ({context})",
+                    self.diag_ty(actual),
+                    self.diag_ty(expected)
+                ),
+                range.clone(),
+                Some(format!(
+                    "the new name could store a `readonly` element that the old one then mutates; a parameter that only reads can take a `readonly {}`",
+                    self.diag_ty(actual)
+                )),
+            );
+        }
+    }
+
+    /// `joined`, the unified type of two branches or array elements `a`
+    /// and `b`, made `readonly` when either side is: the join of
+    /// `readonly P` and `P` is `readonly P`, whichever comes first, and
+    /// `Vec<readonly P>` with `Vec<P>` is `readonly Vec<P>` (#1552).
+    fn readonly_join(&self, joined: Ty, a: &Ty, b: &Ty) -> Ty {
+        let a = apply_ty_prune(&self.subst, a);
+        let b = apply_ty_prune(&self.subst, b);
+        if self.drops_readonly(&a, &b) || self.gains_readonly_element(&a, &b) {
+            self.readonly_qualify(joined)
+        } else {
+            joined
+        }
+    }
+
+    fn report_readonly_drop(&mut self, expected: &Ty, actual: &Ty, range: &Range<usize>, context: &str) {
+        let _ = self.error_with_help(
+            ErrorCode::InvalidAssignment,
+            format!(
+                "Cannot use a `{}` where `{}` is expected ({context})",
+                self.diag_ty(actual),
+                self.diag_ty(expected)
+            ),
+            range.clone(),
+            Some("a `readonly` value converts only to a `readonly` type, so it cannot be mutated through the new name; keep and pass the mutable value instead".to_string()),
+        );
+    }
+
     fn coerce_or_unify(
         &mut self,
         expected: &Ty,
@@ -9140,32 +9361,7 @@ impl Checker {
     ) -> Ty {
         let expected = apply_ty_prune(&self.subst, expected);
         let actual = apply_ty_prune(&self.subst, actual);
-        if self.drops_readonly(&expected, &actual) {
-            let _ = self.error_with_help(
-                ErrorCode::InvalidAssignment,
-                format!(
-                    "Cannot use a `{}` where `{}` is expected ({context})",
-                    self.diag_ty(&actual),
-                    self.diag_ty(&expected)
-                ),
-                range.clone(),
-                Some("a `readonly` value converts only to a `readonly` type, so it cannot be mutated through the new name; keep and pass the mutable value instead".to_string()),
-            );
-        } else if self.gains_readonly_element(&expected, &actual) {
-            let _ = self.error_with_help(
-                ErrorCode::InvalidAssignment,
-                format!(
-                    "Cannot use a `{}` where `{}` is expected ({context})",
-                    self.diag_ty(&actual),
-                    self.diag_ty(&expected)
-                ),
-                range.clone(),
-                Some(format!(
-                    "the new name could store a `readonly` element that the old one then mutates; a parameter that only reads can take a `readonly {}`",
-                    self.diag_ty(&actual)
-                )),
-            );
-        }
+        self.check_readonly_conversion(&expected, &actual, range, context);
         // A trait object seen read-only: pack the value as the plain
         // existential, then qualify it (#1558).
         if let Ty::Readonly(inner) = &expected
@@ -9289,6 +9485,10 @@ impl Checker {
             && matches!(node.1.as_ref(), Expression::Array(items) if !items.is_empty())
         {
             let vec_elem = vec_elem.clone();
+            // Its elements must not drop a `readonly` (#1552).
+            if self.drops_readonly(&vec_elem, element) {
+                self.report_readonly_drop(&expected, &actual, range, context);
+            }
             let _ = self.unify(&vec_elem, element, range, context);
             let ty = apply_ty_prune(&self.subst, &expected);
             self.retarget_node_ty(node.0.start, node.0.end, ty.clone());
@@ -9862,7 +10062,8 @@ impl Checker {
                 if let Some(t) = self.coerce_scalar_enum_to_backing(&b, &a) {
                     return t;
                 }
-                self.unify(&a, &b, range, ctx)
+                let joined = self.unify(&a, &b, range, ctx);
+                self.readonly_join(joined, &a, &b)
             }
         }
     }
@@ -10319,21 +10520,28 @@ impl Checker {
             self.ensure_structural_length(ty);
             return;
         }
+        if matches!(class, "Ord" | "Lt" | "Le" | "Gt" | "Ge") {
+            self.ensure_structural_tuple_ord(ty);
+            return;
+        }
         if !matches!(class, "Show" | "Eq" | "Hash") {
             return;
         }
         let ty = show_lookup_ty(&apply_ty_prune(&self.subst, ty));
         let items: Vec<Ty> = match &ty {
             Ty::Tuple(items) if !items.is_empty() => items.clone(),
-            Ty::Record { fields } if !fields.is_empty() && class == "Show" => fields.iter().map(|(_, t)| t.clone()).collect(),
+            Ty::Record { fields } if !fields.is_empty() && matches!(class, "Show" | "Eq") => fields.iter().map(|(_, t)| t.clone()).collect(),
             Ty::Array { element, .. } => vec![(**element).clone()],
-            // `Option` / `Result` show their payload (#1479).
+            // `Option` / `Result` show their payload (#1479), and compare it
+            // (#1629).
             Ty::App(head, args)
-                if class == "Show"
+                if matches!(class, "Show" | "Eq")
                     && matches!(head.as_ref(), Ty::Con(n) if n == common::BUILTIN_OPTION_ENUM || n == common::BUILTIN_RESULT_ENUM) =>
             {
                 args.clone()
             }
+            // A `Vec` compares its elements (#1629).
+            Ty::App(head, args) if class == "Eq" && matches!(head.as_ref(), Ty::Con(n) if n == common::BUILTIN_VEC_TYPE) => args.clone(),
             _ => return,
         };
         // A tuple with an open item: the instance for its arity, with a
@@ -10363,6 +10571,36 @@ impl Checker {
         };
         if items_ok {
             self.generics.register_structural_instance(class, ty);
+        }
+    }
+
+    /// A ground tuple whose items are all `Ord` is `Ord` (#1721): it orders
+    /// lexicographically, so its `Lt` / `Le` / `Gt` / `Ge` instances and
+    /// the empty `Ord` are registered together, the first time a goal asks
+    /// for one, after its tuple items' and its structural `Eq` (a
+    /// superclass of `Ord`, #1716).
+    fn ensure_structural_tuple_ord(&mut self, ty: &Ty) {
+        let ty = show_lookup_ty(&apply_ty_prune(&self.subst, ty));
+        let Ty::Tuple(items) = &ty else {
+            return;
+        };
+        if items.is_empty() || Self::ty_mentions_var(&ty) || self.generics.has_instance("Ord", &ty) {
+            return;
+        }
+        for item in items {
+            self.ensure_structural_tuple_ord(item);
+        }
+        let ordered = items.iter().all(|item| {
+            let lookup = Self::operand_instance_lookup_ty(&show_lookup_ty(&apply_ty_prune(&self.subst, item)));
+            Self::is_numeric_operand_ty(&lookup)
+                || self.generics.has_instance("Ord", &lookup)
+                || self.generics.find_generic_instance("Ord", std::slice::from_ref(&lookup)).is_some()
+        });
+        if ordered {
+            self.ensure_structural_instance("Eq", std::slice::from_ref(&ty));
+            for class in ["Lt", "Le", "Gt", "Ge", "Ord"] {
+                self.generics.register_structural_instance(class, ty.clone());
+            }
         }
     }
 
@@ -10442,15 +10680,15 @@ impl Checker {
             .filter(|inst| inst.class == class && inst.args.len() == wanted_lookup.len())
             .cloned()
             .collect();
-        let mut matches: Vec<(InstanceDef, Subst)> = Vec::new();
-        let mut structural: Vec<(InstanceDef, Subst)> = Vec::new();
+        let mut matches: Vec<(InstanceDef, Subst, FreshVars)> = Vec::new();
+        let mut structural: Vec<(InstanceDef, Subst, FreshVars)> = Vec::new();
         for inst in candidates {
             let mut ok = true;
             let mut local = self.subst.clone();
             // A generic instance (`Show for Box<T>`) is instantiated fresh
             // per goal: its own parameters must never be bound globally, or
             // the first `Box<int>` would turn it into `Show for Box<int>`.
-            let (inst_args, inst_ctx) = self.freshen_instance(&inst.args, &inst.context);
+            let (inst_args, inst_ctx, fresh_vars) = self.freshen_instance(&inst.args, &inst.context);
             let generic = inst_args != inst.args;
             for (have, need) in inst_args.iter().zip(wanted_lookup.iter()) {
                 // An open goal argument cannot choose a generic instance
@@ -10495,9 +10733,9 @@ impl Checker {
                         .collect();
                 }
                 if shape || (generic && Generics::is_structural_tuple(&inst)) {
-                    structural.push((inst, local));
+                    structural.push((inst, local, fresh_vars));
                 } else {
-                    matches.push((inst, local));
+                    matches.push((inst, local, fresh_vars));
                 }
             }
         }
@@ -10510,8 +10748,10 @@ impl Checker {
         match matches.len() {
             0 => Ok(None),
             1 => {
-                let (inst, local) = matches.pop().expect("one match");
+                let (inst, local, fresh_vars) = matches.pop().expect("one match");
                 self.absorb(&local);
+                // Its methods' `weak()` calls on the head's parameters (#1670).
+                self.weak_checks.record_instance(fresh_vars, range);
                 Ok(Some(inst))
             }
             _ => {
@@ -10987,15 +11227,12 @@ impl Checker {
 
     /// Instantiate a scheme and record freshened variable kinds (Phase 5).
     fn instantiate_ty(&mut self, scheme: &Scheme) -> Ty {
-        let (ty, _, kinds) = instantiate_with_kinds(scheme, &mut self.counter);
-        self.var_kinds.extend(kinds);
-        ty
+        self.instantiate_scheme_mapped(scheme).0
     }
 
     /// Instantiate a scheme with constraints, recording freshened kinds.
     fn instantiate_scheme(&mut self, scheme: &Scheme) -> (Ty, Vec<Constraint>) {
-        let (ty, constraints, kinds) = instantiate_with_kinds(scheme, &mut self.counter);
-        self.var_kinds.extend(kinds);
+        let (ty, constraints, _) = self.instantiate_scheme_mapped(scheme);
         (ty, constraints)
     }
 
@@ -11638,6 +11875,12 @@ impl Checker {
                 return alias_ty.clone();
             }
         }
+        // `Opt` after `use prelude::Option as Opt;` (#1700).
+        if let Some(builtin) = self.builtin_enum_alias(name)
+            && self.resolve_class_key(name).is_none()
+        {
+            return self.parse_type_name_str_with_range(builtin, range);
+        }
         // Built-in type names are matched case-insensitively so the
         // user can write `String`, `STRING`, etc.
         match name.to_ascii_lowercase().as_str() {
@@ -11657,7 +11900,15 @@ impl Checker {
             "result" => result_app_ty(Ty::Var(self.counter.fresh()), Ty::Var(self.counter.fresh())),
             "ioerror" => Ty::Con(common::BUILTIN_IO_ERROR_ENUM.into()),
             "threaderror" => Ty::Con(common::BUILTIN_THREAD_ERROR_ENUM.into()),
-            "error" => Ty::Con(common::BUILTIN_FFI_ERROR_ENUM.into()),
+            // A user `class Error` / `enum Error` (any spelling) is its own
+            // type: the FFI `Error` is not reserved (#1701).
+            "error" if self.resolve_class_key(name).is_none()
+                && self
+                    .resolve_enum_key(name)
+                    .is_none_or(|key| key == common::BUILTIN_FFI_ERROR_ENUM) =>
+            {
+                Ty::Con(common::BUILTIN_FFI_ERROR_ENUM.into())
+            }
             "errorkind" => Ty::Con(common::BUILTIN_FFI_ERROR_KIND_ENUM.into()),
             _ => {
                 if let Some(key) = self.resolve_class_key(name) {
@@ -12157,6 +12408,7 @@ impl Checker {
             })
             .collect();
         self.var_kinds.extend(fresh_kinds);
+        self.weak_checks.record_inst(scheme, mapping.iter().map(|(&b, &f)| (b, f)));
         let ty = substitute_vars(&scheme.ty, &mapping);
         let constraints = scheme
             .constraints
@@ -12672,8 +12924,28 @@ impl Checker {
     }
 
     fn record_ffi_declare_metadata(&mut self, key: String, dargs: &[Output], store_field: bool) {
-        if dargs.len() != 4 && dargs.len() != 5 {
+        let Some((ret, variadic, nfixed, arg_tags)) = self.ffi_declare_signature(dargs) else {
             return;
+        };
+        if store_field {
+            self.ffi_fn_ret_by_field.insert(key.clone(), ret);
+            self.ffi_fn_variadic_by_field.insert(key.clone(), variadic);
+            self.ffi_fn_nfixed_by_field.insert(key.clone(), nfixed);
+            self.ffi_fn_arg_tags_by_field.insert(key, arg_tags);
+        } else {
+            self.ffi_fn_ret_owner.insert(key.clone(), self.ffi_binding_fn());
+            self.ffi_fn_ret_tys.insert(key.clone(), ret);
+            self.ffi_fn_variadic.insert(key.clone(), variadic);
+            self.ffi_fn_nfixed.insert(key.clone(), nfixed);
+            self.ffi_fn_arg_tags.insert(key, arg_tags);
+        }
+    }
+
+    /// `declare(lib, name, params, ret[, variadic])`'s return type, variadic
+    /// flag, fixed arity and parameter tags.
+    fn ffi_declare_signature(&self, dargs: &[Output]) -> Option<(Ty, bool, usize, Vec<u32>)> {
+        if dargs.len() != 4 && dargs.len() != 5 {
+            return None;
         }
         let ret = self.ty_from_ffi_type_expr(&dargs[3]);
         let (nfixed, arg_tags) = match dargs[2].1.as_ref() {
@@ -12695,17 +12967,28 @@ impl Checker {
         } else {
             false
         };
-        if store_field {
-            self.ffi_fn_ret_by_field.insert(key.clone(), ret);
-            self.ffi_fn_variadic_by_field.insert(key.clone(), variadic);
-            self.ffi_fn_nfixed_by_field.insert(key.clone(), nfixed);
-            self.ffi_fn_arg_tags_by_field.insert(key, arg_tags);
-        } else {
-            self.ffi_fn_ret_owner.insert(key.clone(), self.ffi_binding_fn());
-            self.ffi_fn_ret_tys.insert(key.clone(), ret);
-            self.ffi_fn_variadic.insert(key.clone(), variadic);
-            self.ffi_fn_nfixed.insert(key.clone(), nfixed);
-            self.ffi_fn_arg_tags.insert(key, arg_tags);
+        Some((ret, variadic, nfixed, arg_tags))
+    }
+
+    /// The FQN of the module `static` that `name` means here, unless a
+    /// parameter or local shadows it (#1667).
+    fn ffi_static_fqn(&self, name: &str) -> Option<String> {
+        let fqn = self.qualify_module_name(name);
+        let decl = *self.static_decl_frames.get(&fqn)?;
+        (self.env.lookup_frame(name) == Some(decl)).then_some(fqn)
+    }
+
+    /// The FQN of the module `static` `name` means during the `invoke`
+    /// pre-pass, which runs before statics are declared.
+    fn ffi_prescan_static_fqn(&self, name: &str) -> Option<String> {
+        (self.ffi_prescan_statics.contains(name) && !self.ffi_prescan_locals.contains(name))
+            .then(|| self.qualify_module_name(name))
+    }
+
+    /// Record the `declare` signature `value` gives the static `fqn`.
+    fn record_ffi_declare_for_static(&mut self, fqn: String, value: &Output) {
+        if let Some(sig) = Self::declare_args_from_expr(value).and_then(|dargs| self.ffi_declare_signature(dargs)) {
+            self.ffi_fn_by_static.insert(fqn, sig);
         }
     }
 
@@ -12724,6 +13007,10 @@ impl Checker {
     fn ffi_invoke_fn_id_metadata(&self, expr: &Output) -> Option<(Ty, bool, usize)> {
         match expr.1.as_ref() {
             Expression::Identifier(name) => {
+                if let Some(fqn) = self.ffi_static_fqn(name) {
+                    let (ty, variadic, nfixed, _) = self.ffi_fn_by_static.get(&fqn)?;
+                    return Some((ty.clone(), *variadic, *nfixed));
+                }
                 if let Some(ty) = self.ffi_fn_ret_tys.get(*name).filter(|_| self.ffi_local_binding_here(name)) {
                     let variadic = self.ffi_fn_variadic.get(*name).copied().unwrap_or(false);
                     let nfixed = self.ffi_fn_nfixed.get(*name).copied().unwrap_or(0);
@@ -12758,6 +13045,9 @@ impl Checker {
     fn ffi_invoke_arg_tags(&self, expr: &Output) -> Option<Vec<u32>> {
         match expr.1.as_ref() {
             Expression::Identifier(name) => {
+                if let Some(fqn) = self.ffi_static_fqn(name) {
+                    return self.ffi_fn_by_static.get(&fqn).map(|sig| sig.3.clone());
+                }
                 if let Some(tys) = self.ffi_fn_arg_tags.get(*name).filter(|_| self.ffi_local_binding_here(name)) {
                     return Some(tys.clone());
                 }
@@ -12782,7 +13072,10 @@ impl Checker {
         local_class_scopes: &[HashMap<String, String>],
     ) -> Option<Vec<u32>> {
         match expr.1.as_ref() {
-            Expression::Identifier(name) => self.ffi_fn_arg_tags.get(*name).filter(|_| self.ffi_local_binding_here(name)).cloned(),
+            Expression::Identifier(name) => match self.ffi_prescan_static_fqn(name) {
+                Some(fqn) => self.ffi_fn_by_static.get(&fqn).map(|sig| sig.3.clone()),
+                None => self.ffi_fn_arg_tags.get(*name).filter(|_| self.ffi_local_binding_here(name)).cloned(),
+            },
             Expression::Access(receiver, field) => {
                 let class = match receiver.1.as_ref() {
                     Expression::Identifier("self") => self.impl_owner.clone()?,
@@ -12800,6 +13093,12 @@ impl Checker {
     }
 
     fn maybe_record_ffi_declare_for_field_assignment(&mut self, target: &Output, value: &Output) {
+        if let Expression::Identifier(name) = target.1.as_ref()
+            && let Some(fqn) = self.ffi_static_fqn(name)
+        {
+            self.record_ffi_declare_for_static(fqn, value);
+            return;
+        }
         let Expression::Access(receiver, field) = target.1.as_ref() else {
             return;
         };
@@ -12816,6 +13115,17 @@ impl Checker {
     fn maybe_record_ffi_declare_for_let_init(&mut self, name: &str, init: &Output) {
         if let Some(dargs) = Self::declare_args_from_expr(init) {
             self.record_ffi_declare_metadata(name.to_string(), dargs, false);
+            return;
+        }
+        if let Expression::Identifier(src) = init.1.as_ref()
+            && let Some(fqn) = self.ffi_static_fqn(src)
+            && let Some((ret, variadic, nfixed, arg_tags)) = self.ffi_fn_by_static.get(&fqn).cloned()
+        {
+            self.ffi_fn_ret_owner.insert(name.to_string(), self.ffi_binding_fn());
+            self.ffi_fn_ret_tys.insert(name.to_string(), ret);
+            self.ffi_fn_variadic.insert(name.to_string(), variadic);
+            self.ffi_fn_nfixed.insert(name.to_string(), nfixed);
+            self.ffi_fn_arg_tags.insert(name.to_string(), arg_tags);
             return;
         }
         if let Expression::Access(receiver, field) = init.1.as_ref()
@@ -12882,6 +13192,10 @@ impl Checker {
     ) -> Option<(Ty, bool, usize)> {
         match expr.1.as_ref() {
             Expression::Identifier(name) => {
+                if let Some(fqn) = self.ffi_prescan_static_fqn(name) {
+                    let (ty, variadic, nfixed, _) = self.ffi_fn_by_static.get(&fqn)?;
+                    return Some((ty.clone(), *variadic, *nfixed));
+                }
                 if let Some(ty) = self.ffi_fn_ret_tys.get(*name).filter(|_| self.ffi_local_binding_here(name)) {
                     let variadic = self.ffi_fn_variadic.get(*name).copied().unwrap_or(false);
                     let nfixed = self.ffi_fn_nfixed.get(*name).copied().unwrap_or(0);
@@ -12965,6 +13279,36 @@ impl Checker {
         self.record_ffi_declare_metadata(key, dargs, true);
     }
 
+    /// `invoke`'s function id is the `int` handle `declare` returned (#1761):
+    /// never a Coil `fn` (#1666), and never `declare`'s `Result` itself, whose
+    /// boxed address the VM would read as an out-of-range id.
+    fn check_ffi_invoke_fn_id(&mut self, id_ty: &Ty, range: Range<usize>) {
+        let pruned = apply_ty_prune(&self.subst, id_ty);
+        let id_ty = crate::typechecking::ty::strip_readonly(&pruned).clone();
+        let help = if matches!(id_ty, Ty::Fun(..)) {
+            "`invoke`'s function id is the `int` that `declare(lib, name, params, ret)` returns, not a Coil function"
+        } else if is_result_ty(&id_ty) {
+            "`declare` returns `Result<int, Error>`; unwrap the id with `?` (`declare(...)?`) or `match` before passing it to `invoke`"
+        } else {
+            match unify_with(&self.subst, &id_ty, &int()) {
+                Ok(s) => {
+                    self.absorb(&s);
+                    return;
+                }
+                Err(_) => {
+                    "`invoke`'s function id is the `int` that `declare(lib, name, params, ret)` returns"
+                }
+            }
+        };
+        let [found] = <[String; 1]>::try_from(self.diag_tys(&[&id_ty])).expect("one type");
+        let _ = self.error_with_help(
+            ErrorCode::TypeMismatch,
+            format!("Type mismatch: expected `int`, found `{found}`"),
+            range,
+            Some(help.to_string()),
+        );
+    }
+
     fn infer_ffi_invoke(&mut self, args: &[Output], range: Range<usize>) -> Ty {
         if self.ffi_fn_in_scope("invoke").is_none() {
             let _ = self.error_with_help(
@@ -12979,7 +13323,8 @@ impl Checker {
         let mut nfixed = 0usize;
         if args.len() == 3 {
             self.infer(&args[0]);
-            self.infer(&args[1]);
+            let id_ty = self.infer(&args[1]);
+            self.check_ffi_invoke_fn_id(&id_ty, args[1].0.into_range());
             if let Some((ty, var, fixed)) = self.ffi_invoke_fn_id_metadata(&args[1]) {
                 ret_ty = ty;
                 variadic = var;
@@ -13132,6 +13477,16 @@ impl Checker {
     pub fn ffi_field_fn_id_variadic(&self, class: &str, field: &str) -> Option<bool> {
         let key = Self::qualified_class_field_key(class, field);
         self.ffi_fn_ret_by_field.contains_key(&key).then(|| self.ffi_fn_variadic_by_field.get(&key).copied().unwrap_or(false))
+    }
+
+    /// Whether the fn id held by the module `static` or `const` `name`
+    /// (bare or qualified) was declared variadic (`None` when no `declare`
+    /// was stored there, #1667).
+    pub fn ffi_static_fn_id_variadic(&self, name: &str) -> Option<bool> {
+        self.ffi_fn_by_static
+            .get(name)
+            .or_else(|| self.ffi_fn_by_static.get(&self.qualify_module_name(name)))
+            .map(|&(_, variadic, _, _)| variadic)
     }
 
     pub fn ffi_fn_id_variadic(&self, name: &str) -> Option<bool> {
@@ -14808,6 +15163,97 @@ impl Checker {
         }
     }
 
+    /// Help for a top-level `class` or `enum` named `name` that would
+    /// redeclare a built-in type, or `None` when the name is free here. The
+    /// built-in keeps its key, so such a type would split: a type position
+    /// would name it while `new` or a literal still built the built-in
+    /// (#1654). No `use` frees one of these names: a type position still
+    /// resolves `Option` / `Result` (in any letter case) to the built-in
+    /// even after `use prelude::Option as …` (#1672).
+    fn builtin_type_redeclaration_help(&self, name: &str) -> Option<String> {
+        if self.current_module == crate::macros::CORE_MODULE {
+            return None;
+        }
+        if common::is_poly_builtin_enum(name) {
+            return Some(Self::prelude_enum_redeclaration_help(name));
+        }
+        if let Some(builtin) = [common::BUILTIN_OPTION_ENUM, common::BUILTIN_RESULT_ENUM]
+            .into_iter()
+            .find(|b| b.eq_ignore_ascii_case(name))
+        {
+            return Some(format!(
+                "built-in type names match in any letter case, so `{name}` names the prelude `{builtin}`; pick a different name"
+            ));
+        }
+        if let Some(builtin) = Self::reserved_error_enum_spelling(name) {
+            return Some(if builtin == name {
+                format!("`{name}` is a built-in error enum; pick a different name")
+            } else {
+                format!(
+                    "built-in type names match in any letter case, so `{name}` names the built-in `{builtin}`; pick a different name"
+                )
+            });
+        }
+        if let Some(primitive) = common::builtin_primitive_type_spelling(name) {
+            return Some(format!(
+                "built-in type names match in any letter case, so `{name}` names the built-in `{primitive}`; pick a different name"
+            ));
+        }
+        common::is_reserved_builtin_type(name)
+            .then(|| format!("`{name}` is a built-in type; pick a different name"))
+    }
+
+    /// The built-in error enum (`IoError`, `ThreadError`, `EnvError`,
+    /// `ErrorKind`) a user type named `name` would clash with: each has a
+    /// built-in `Show` instance keyed by its bare name, and a type position
+    /// spelling `IoError`, `ThreadError` or `ErrorKind` in any letter case
+    /// names the built-in (#1701). The FFI `Error` has neither, so a user
+    /// type may take that name.
+    fn reserved_error_enum_spelling(name: &str) -> Option<&'static str> {
+        Generics::BUILTIN_SHOW_ENUMS
+            .iter()
+            .map(|(builtin, _)| *builtin)
+            .find(|builtin| {
+                *builtin == name
+                    || (*builtin != common::BUILTIN_ENV_ERROR_ENUM
+                        && builtin.eq_ignore_ascii_case(name))
+            })
+    }
+
+    /// E0200 help for a user `Option` / `Result` (#1672).
+    fn prelude_enum_redeclaration_help(name: &str) -> String {
+        format!("`{name}` is the built-in prelude enum; pick a different name")
+    }
+
+    /// A top-level `class` may not take a built-in type's name (#1654).
+    fn check_builtin_class_names(&mut self, ast: &Output) {
+        fn walk<'a>(node: &'a Output<'a>, out: &mut Vec<(&'a str, Range<usize>)>) {
+            match Checker::pre_pass_unwrap_stmt(node).1.as_ref() {
+                Expression::Class { name, .. } => out.push((name, node.0.into_range())),
+                Expression::Program(children) | Expression::Fragment(children) => {
+                    for child in children {
+                        walk(child, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut classes = Vec::new();
+        walk(ast, &mut classes);
+        for (name, range) in classes {
+            if let Some(help) = self.builtin_type_redeclaration_help(name) {
+                self.rejected_builtin_type_decls.push(range.clone());
+                let mut msg = Message::error(
+                    ErrorCode::DuplicateEnum,
+                    format!("Cannot redeclare built-in type `{name}`"),
+                    range,
+                );
+                msg.with_help(help);
+                self.messages.push(msg);
+            }
+        }
+    }
+
     /// Record this module's `readonly class` keys before any body is
     /// typed, so a use ahead of the declaration sees the class as immutable.
     fn pre_register_readonly_classes(&mut self, ast: &Output) {
@@ -15074,11 +15520,14 @@ impl Checker {
                 }
                 vars.extend(method_vars);
             }
-            self.current_tuple_pack = Self::tuple_pack_ty_for_args(args, &mut self.counter);
+            let fqn = format!("{}::{}", owner_key, name);
+            // A method template's instance has its pack fixed (#1754).
+            self.current_tuple_pack = self
+                .variadic_instance_pack(&fqn)
+                .or_else(|| Self::tuple_pack_ty_for_args(args, &mut self.counter));
             let arg_tys = self.parse_arg_list(args);
             self.current_tuple_pack = None;
             let param_names: Vec<String> = arg_tys.iter().map(|(n, _)| n.clone()).collect();
-            let fqn = format!("{}::{}", owner_key, name);
             // FQN only, a bare `join` / `iter` key would shadow
             // `use path::{join}` and other free-function imports.
             self.fn_param_names.insert(fqn.clone(), param_names);
@@ -15220,6 +15669,13 @@ impl Checker {
     /// Pre-pass: record `declare` metadata and param call-site flow before main
     /// inference so helpers defined before their callers still refine `invoke`.
     fn pre_pass_ffi_invoke_param_flow(&mut self, ast: &Output) {
+        if let Expression::Program(children) = Self::pre_pass_unwrap_stmt(ast).1.as_ref() {
+            for child in children {
+                if let Expression::StaticDecl { name, .. } = Self::pre_pass_unwrap_stmt(child).1.as_ref() {
+                    self.ffi_prescan_statics.insert(name.to_string());
+                }
+            }
+        }
         let mut local_class_scopes = Vec::new();
         self.pre_pass_ffi_invoke_param_flow_walk(ast, &mut local_class_scopes);
     }
@@ -15251,9 +15707,13 @@ impl Checker {
             }
             Expression::Function { name, args, body, .. } => {
                 let prev_fn = self.ffi_prescan_fn.replace(name.to_string());
+                let prev_locals = std::mem::take(&mut self.ffi_prescan_locals);
                 let mut scope = HashMap::new();
                 if let Expression::Fragment(children) = args.1.as_ref() {
                     for child in children {
+                        if let Expression::Argument { name, .. } = child.1.as_ref() {
+                            self.ffi_prescan_locals.insert(name.to_string());
+                        }
                         if let Expression::Argument {
                             ty: Some(ty),
                             name,
@@ -15271,6 +15731,7 @@ impl Checker {
                 }
                 local_class_scopes.pop();
                 self.ffi_prescan_fn = prev_fn;
+                self.ffi_prescan_locals = prev_locals;
             }
             Expression::Call { name, args } => {
                 if let Expression::Identifier(fn_name) = name.1.as_ref() {
@@ -15300,6 +15761,11 @@ impl Checker {
                 }
             }
             Expression::Assignment(target, value) => {
+                if let Expression::Identifier(name) = target.1.as_ref()
+                    && let Some(fqn) = self.ffi_prescan_static_fqn(name)
+                {
+                    self.record_ffi_declare_for_static(fqn, value);
+                }
                 self.maybe_pre_record_field_declare(target, value, local_class_scopes);
                 self.pre_pass_ffi_invoke_param_flow_walk(target, local_class_scopes);
                 self.pre_pass_ffi_invoke_param_flow_walk(value, local_class_scopes);
@@ -15405,7 +15871,10 @@ impl Checker {
                     self.pre_pass_ffi_invoke_param_flow_walk(index, local_class_scopes);
                 }
             }
-            Expression::StaticDecl { ty, init, .. } => {
+            Expression::StaticDecl { name, ty, init, .. } => {
+                if let Some(fqn) = self.ffi_prescan_static_fqn(name) {
+                    self.record_ffi_declare_for_static(fqn, init);
+                }
                 if let Some(ty) = ty {
                     self.pre_pass_ffi_invoke_param_flow_walk(ty, local_class_scopes);
                 }
@@ -15439,6 +15908,9 @@ impl Checker {
                     i += 1;
                 }
                 Expression::Variable(var_name, _) => {
+                    if self.ffi_prescan_fn.is_some() {
+                        self.ffi_prescan_locals.insert(var_name.to_string());
+                    }
                     self.pre_pass_ffi_invoke_param_flow_walk(stmt, local_class_scopes);
                     if i + 1 < children.len() {
                         let next = Self::pre_pass_unwrap_stmt(&children[i + 1]);
@@ -16131,20 +16603,36 @@ impl Checker {
                 }
 
                 // Check 1: duplicate enum name (including built-ins still in scope).
+                if (!common::is_builtin_enum(&name_str)
+                    || Self::reserved_error_enum_spelling(&name_str).is_some())
+                    && let Some(help) = self.builtin_type_redeclaration_help(name)
+                {
+                    self.rejected_builtin_type_decls.push(node.0.into_range());
+                    let mut msg = Message::error(
+                        ErrorCode::DuplicateEnum,
+                        format!("Cannot redeclare built-in type `{}`", name),
+                        node.0.into_range(),
+                    );
+                    msg.with_help(help);
+                    errors.push(msg);
+                    self.restore_generic_type_ctor(&name_str, previous_generic_ctor);
+                    self.pop_type_params_for_type_parsing(pushed);
+                    return;
+                }
                 if common::is_builtin_enum(&name_str) {
+                    // `Option` / `Result` stay built-in under any rebind (#1672).
                     if self.builtin_name_in_scope(&name_str)
+                        || common::is_poly_builtin_enum(&name_str)
                         || common::is_builtin_ffi_enum(&name_str)
                     {
+                        self.rejected_builtin_type_decls.push(node.0.into_range());
                         let mut msg = Message::error(
                             ErrorCode::DuplicateEnum,
                             format!("Cannot redeclare built-in enum `{}`", name_str),
                             node.0.into_range(),
                         );
                         if common::is_poly_builtin_enum(&name_str) {
-                            msg.with_help(format!(
-                                "`{}` is in the prelude; free the short name with `use prelude::{} as OtherName;` before redefining, or pick a different name",
-                                name_str, name_str
-                            ));
+                            msg.with_help(Self::prelude_enum_redeclaration_help(&name_str));
                         } else {
                             msg.with_help(format!(
                                 "`{}` is a compiler FFI type; use `ffi::types::{{…}}` instead of redeclaring it",
@@ -16156,8 +16644,9 @@ impl Checker {
                         self.pop_type_params_for_type_parsing(pushed);
                         return;
                     }
-                    // Prelude enum short name was rebound, drop the
-                    // compiler registration so the user enum can take over.
+                    // The FFI `Error` when this module did not import it:
+                    // drop the compiler registration so the user enum can
+                    // take over.
                     self.enums.remove(&name_str);
                     self.enum_tags.remove(&name_str);
                     self.enum_payloads.remove(&name_str);
@@ -16815,6 +17304,11 @@ impl Checker {
                 {
                     return ty;
                 }
+                if let EnumConstructPayload::Tuple(args) = fields
+                    && let Some(ty) = self.try_infer_qualified_value_call(enum_name, variant_name, args, call_id, range.clone())
+                {
+                    return ty;
+                }
                 // `Trait::method(args)`: the free `method(args)` limited to `Trait`.
                 if let Some(class) = self.qualified_call_trait(enum_name) {
                     return match fields {
@@ -16865,6 +17359,43 @@ impl Checker {
                         range,
                         Some(format!(
                             "or declare `static fn {}` to call it as `{}`",
+                            variant_name, static_fqn
+                        )),
+                    );
+                }
+                // `K::n(1)` of a class static or module const that holds no
+                // function (#1726): the function-typed one is called above.
+                if !matches!(fields, EnumConstructPayload::Unit)
+                    && let Some(ty) = self
+                        .static_slot_types
+                        .get(&static_fqn)
+                        .or_else(|| self.module_consts.get(&format!("{enum_name}::{variant_name}")))
+                        .cloned()
+                {
+                    let shown = self.diag_ty(&ty);
+                    return self.error_with_help(
+                        ErrorCode::NotAFunction,
+                        format!("`{}::{}` has type `{}`, not a function type", enum_name, variant_name, shown),
+                        range,
+                        Some(format!("read it as `{}::{}` without arguments", enum_name, variant_name)),
+                    );
+                }
+                // `C::x` of an instance field (`const` or not, #1726).
+                if let Some(class_key) = self.resolve_class_key(enum_name)
+                    && self
+                        .classes
+                        .get(&class_key)
+                        .is_some_and(|fields| fields.iter().any(|(_, name, _)| name == variant_name))
+                {
+                    return self.error_with_help(
+                        ErrorCode::GenericTypeError,
+                        format!(
+                            "`{}` is an instance field; read it on a value (`obj.{}`)",
+                            static_fqn, variant_name
+                        ),
+                        range,
+                        Some(format!(
+                            "or declare `static {}` to read it as `{}`",
                             variant_name, static_fqn
                         )),
                     );
@@ -17005,12 +17536,9 @@ impl Checker {
                 let expected_tys = expected_payload.field_types();
                 for (arg, expected_ty) in args.iter().zip(expected_tys.iter()) {
                     let arg_ty = self.infer(arg);
-                    self.unify(
-                        expected_ty,
-                        &arg_ty,
-                        &arg.0.into_range(),
-                        &format!("constructor `{}::{}` argument", enum_str, variant_str),
-                    );
+                    let context = format!("constructor `{}::{}` argument", enum_str, variant_str);
+                    self.check_readonly_payload(expected_ty, &arg_ty, &arg.0.into_range(), &context);
+                    self.unify(expected_ty, &arg_ty, &arg.0.into_range(), &context);
                 }
             }
             EnumConstructPayload::Record(parts) => {
@@ -17049,15 +17577,9 @@ impl Checker {
                         }
                     };
                     let arg_ty = self.infer(arg);
-                    self.unify(
-                        decl_ty,
-                        &arg_ty,
-                        &arg.0.into_range(),
-                        &format!(
-                            "constructor `{}::{}.{}` argument",
-                            enum_str, variant_str, decl_name,
-                        ),
-                    );
+                    let context = format!("constructor `{}::{}.{}` argument", enum_str, variant_str, decl_name);
+                    self.check_readonly_payload(decl_ty, &arg_ty, &arg.0.into_range(), &context);
+                    self.unify(decl_ty, &arg_ty, &arg.0.into_range(), &context);
                 }
                 // Check for any unknown field names (extra
                 // fields supplied at the call site).
@@ -17111,6 +17633,15 @@ impl Checker {
             tag,
             arity,
         }
+    }
+
+    /// An enum payload argument against its declared type: a payload is
+    /// a coercion site like a class constructor argument, so a `readonly`
+    /// value cannot fill a plain `P` payload (#1552).
+    fn check_readonly_payload(&mut self, expected: &Ty, actual: &Ty, range: &Range<usize>, context: &str) {
+        let expected = apply_ty_prune(&self.subst, expected);
+        let actual = apply_ty_prune(&self.subst, actual);
+        self.check_readonly_conversion(&expected, &actual, range, context);
     }
 
     /// True when `name` is a polymorphic enum (builtin Option/Result
@@ -18055,7 +18586,7 @@ impl Checker {
 
     /// Map surface enum paths (`ffi::types`, short `E`) to the registry key
     /// (`module::E` after COI-110).
-    fn registry_enum_key(&self, enum_name: &str) -> String {
+    pub(crate) fn registry_enum_key(&self, enum_name: &str) -> String {
         if common::is_builtin_ffi_enum(enum_name) {
             common::BUILTIN_FFI_TYPE_ENUM.to_string()
         } else {
@@ -18083,6 +18614,38 @@ impl Checker {
     /// sends to the recorded dictionary or instance as it does `T::m`.
     pub fn qualified_trait_call_at(&self, start: usize, end: usize) -> Option<&str> {
         self.qualified_trait_calls_by_span.get(&(start, end)).map(String::as_str)
+    }
+
+    /// The callee type of `m::F(args)` / `C::f(args)` at this span when it
+    /// calls a `const` or `static` function value (#1705).
+    pub fn qualified_value_call_at(&self, start: usize, end: usize) -> Option<&Ty> {
+        self.qualified_value_calls_by_span.get(&(start, end))
+    }
+
+    /// `owner::member(args)` naming a `const` or `static` of function type
+    /// (another module's, or a class static field): a call of its value
+    /// (#1705), as `let f = owner::member; f(args)` is.
+    fn try_infer_qualified_value_call(
+        &mut self,
+        owner: &str,
+        member: &str,
+        args: &[Output],
+        call_id: Option<NodeId>,
+        range: Range<usize>,
+    ) -> Option<Ty> {
+        let fqn = self.class_member_fqn(owner, member);
+        let callee_ty = match self.static_slot_types.get(&fqn) {
+            Some(ty) => apply_ty_prune(&self.subst, ty),
+            None => apply_ty_prune(&self.subst, self.module_consts.get(&format!("{owner}::{member}"))?),
+        };
+        if !matches!(strip_readonly(&callee_ty), Ty::Fun(..)) {
+            return None;
+        }
+        self.qualified_value_calls_by_span
+            .insert((range.start, range.end), callee_ty.clone());
+        let flat_args = self.flatten_spread_call_args(args);
+        let arg_tys: Vec<Ty> = flat_args.iter().map(|arg| self.infer_call_arg(arg)).collect();
+        Some(self.apply_function(None, &callee_ty, &arg_tys, Some(args), call_id, range))
     }
 
     /// Enum a bare constructor pattern at this span resolved to (#1352):
@@ -18629,8 +19192,13 @@ impl Checker {
     /// [`Self::ident_shadows_static`] for codegen: `resolved` is the
     /// import-resolved name, `name` the bare identifier (current module).
     pub fn ident_shadows_static_name(&self, span: (usize, usize), name: &str, resolved: &str) -> bool {
-        self.ident_shadows_static(span, resolved)
-            || self.ident_shadows_static(span, &self.qualify_module_name(name))
+        let local = self.qualify_module_name(name);
+        // `use m::{x as y}` of a static: `y` binds in the importer's frame,
+        // not the static's (#1706).
+        if local != resolved && !self.static_slots.contains_key(&local) && self.static_decl_frames.contains_key(&local) {
+            return self.ident_shadows_static(span, &local);
+        }
+        self.ident_shadows_static(span, resolved) || self.ident_shadows_static(span, &local)
     }
 
     pub fn ident_shadows_static(&self, span: (usize, usize), fqn: &str) -> bool {
@@ -18657,6 +19225,11 @@ impl Checker {
         let qualified = self.qualify_module_name(name);
         if self.enum_tags.contains_key(&qualified) {
             return Some(qualified);
+        }
+        if let Some(builtin) = self.builtin_enum_alias(name)
+            && self.enum_tags.contains_key(builtin)
+        {
+            return Some(builtin.to_string());
         }
         if let Some(scheme) = self.env.lookup(name) {
             let ty = apply_ty_prune(&self.subst, &scheme.ty);
@@ -18924,7 +19497,7 @@ impl Checker {
 
     fn warn_shallow_const_binding(&mut self, name: &str, ty: &Ty, range: Range<usize>) {
         let pruned = apply_ty_prune(&self.subst, ty);
-        if crate::typechecking::ty::is_shallow_const_mutable(&pruned) {
+        if self.const_shallow_mutable(&pruned) {
             let mut msg = Message::warn(
                 ErrorCode::GenericTypeError,
                 format!(
@@ -18938,6 +19511,30 @@ impl Checker {
                 "mutations through fields, indices, or `vec.push` will still succeed".to_string(),
             );
             self.messages.push(msg);
+        }
+    }
+
+    /// Whether a `const` of `ty` warns E0119. An enum, builtin or user,
+    /// warns only when one of its payloads or a type argument it carries
+    /// can be written through (#1714): `Option<int>` and `channel()`'s
+    /// `Result<(Sender, Receiver), ThreadError>` are fully constant, while
+    /// `Option<Vec<int>>` is not. Every other type follows
+    /// [`crate::typechecking::ty::is_shallow_const_mutable`].
+    fn const_shallow_mutable(&self, ty: &Ty) -> bool {
+        let (name, args) = match ty {
+            Ty::Con(name) => (name, &[][..]),
+            Ty::App(head, args) => match head.as_ref() {
+                Ty::Con(name) => (name, args.as_slice()),
+                _ => return crate::typechecking::ty::is_shallow_const_mutable(ty),
+            },
+            _ => return crate::typechecking::ty::is_shallow_const_mutable(ty),
+        };
+        match self.enum_payload_tys(name) {
+            Some(payloads) => {
+                self.enum_payloads_mutable(name, &payloads, &mut Vec::new())
+                    || args.iter().any(|a| self.const_shallow_mutable(a))
+            }
+            None => crate::typechecking::ty::is_shallow_const_mutable(ty),
         }
     }
 
@@ -19034,6 +19631,9 @@ impl Checker {
     /// new name could store a readonly `P` the old one then mutates. Under
     /// an outer `readonly` they are covariant (#1558).
     fn gains_readonly_element(&self, expected: &Ty, actual: &Ty) -> bool {
+        // An enum construct site (`Option::Some(p)`) is typed as its
+        // refined constructor: compare its owner (#1552).
+        let (expected, actual) = (&peel_constructor_refinement(expected.clone()), &peel_constructor_refinement(actual.clone()));
         let differs = |e: &Ty, a: &Ty| match (e, a) {
             (Ty::Readonly(inner), a) if !matches!(a, Ty::Readonly(_) | Ty::Var(_)) => {
                 self.has_mutable_interior(inner) || matches!(**inner, Ty::Var(_))
@@ -19061,6 +19661,7 @@ impl Checker {
     /// `readonly`: `readonly P` as a plain `P`, or `Vec<readonly P>` as
     /// `Vec<P>` (#1552). `T` converts to `readonly T`, never back.
     fn drops_readonly(&self, expected: &Ty, actual: &Ty) -> bool {
+        let (expected, actual) = (&peel_constructor_refinement(expected.clone()), &peel_constructor_refinement(actual.clone()));
         match (expected, actual) {
             (Ty::Readonly(_) | Ty::Var(_), _) => false,
             (_, Ty::Readonly(_)) => self.has_mutable_interior(expected),
@@ -19091,6 +19692,19 @@ impl Checker {
     /// per-parameter mutation summary (`hir::effects`, #1558).
     fn method_self_arg(&self, recv_ty: &Ty) -> Ty {
         strip_readonly(&apply_ty_prune(&self.subst, recv_ty)).clone()
+    }
+
+    /// What a method called on `recv_ty` returns: `readonly` too when the
+    /// receiver is, since the result may be `self` or reached from it (a
+    /// getter, `Ref::get`, `HashMap::get`), as calls derive values in
+    /// `hir::effects` (#1640). A trait method that declares `readonly A
+    /// self` is checked to hand out no mutable alias of `self`, so its
+    /// result keeps its type.
+    fn method_result(&self, recv_ty: &Ty, result: Ty, readonly_self: bool) -> Ty {
+        if readonly_self || !matches!(apply_ty_prune(&self.subst, recv_ty), Ty::Readonly(_)) {
+            return result;
+        }
+        self.readonly_view(result)
     }
 
     fn check_readonly_external_mutation(&mut self, receiver_ty: &Ty, range: Range<usize>) {
@@ -19592,13 +20206,28 @@ impl Checker {
     ) -> Option<Ty> {
         use parser::ast::EnumConstructPayload;
         if !self.is_static_method(owner, method) {
-            return None;
+            let key = self.class_member_fqn(owner, method);
+            let ty = self.foreign_method_template_call(&key, &range)?;
+            if let EnumConstructPayload::Tuple(args) = fields {
+                for arg in args {
+                    let _ = self.infer(arg);
+                }
+            }
+            return Some(ty);
         }
         let owner = self
             .resolve_class_key(owner)
             .unwrap_or_else(|| owner.to_string());
         self.check_inherent_method_access(&owner, method, &range);
         let fqn = format!("{}::{}", owner, method);
+        // A static method's `... xs` template calls its instance (#1754).
+        if self.is_variadic_template(&fqn) {
+            let args = match fields {
+                EnumConstructPayload::Tuple(args) => args.as_slice(),
+                _ => &[],
+            };
+            return Some(self.infer_variadic_call(&fqn, args, call_id, range));
+        }
         let scheme = self
             .methods
             .get(&owner)
@@ -20136,6 +20765,19 @@ impl Checker {
         } else if let Some(ty) = self.module_consts.get(fqn).cloned() {
             self.env.insert_top(local.to_string(), Scheme::mono(ty));
             self.insert_const_binding(local.to_string());
+        } else if let Some(ty) = self.static_slot_types.get(fqn).cloned() {
+            // A `static`, or a `const` that does not fold (set at startup):
+            // its slot is keyed by FQN only, so an alias needs its own
+            // binding, and its frame so a read is not taken for a local
+            // that shadows the static (#1706).
+            self.env.insert_top(local.to_string(), Scheme::mono(ty));
+            let local_fqn = self.qualify_module_name(local);
+            if local_fqn != fqn {
+                self.static_decl_frames.insert(local_fqn, self.env.depth().saturating_sub(1));
+            }
+            if self.is_static_const_fqn(fqn) {
+                self.insert_const_binding(local.to_string());
+            }
         } else if self.env.lookup(local).is_none() && !self.macro_imports.contains(local) {
             let var = self.counter.fresh();
             self.env.insert_top(local.to_string(), Scheme::mono(Ty::Var(var)));

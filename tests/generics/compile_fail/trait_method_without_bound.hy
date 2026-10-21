@@ -1,6 +1,6 @@
 // Expected: E0119 — calling `size` on `T` needs a `T: Size` bound.
 trait Size<T> {
-    fn size(T x) -> int;
+    fn size(T x) -> int {}
 }
 
 impl Size for int {

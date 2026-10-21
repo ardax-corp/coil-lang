@@ -898,9 +898,13 @@ impl Body<'_> {
     /// but does not purely overwrite, every word a pop could read under an
     /// inexact cursor, every word at an exit), writes under-approximated
     /// (pure slot stores and exact-cursor pushes). Only safepoints
-    /// that resume in this frame are filtered: exits and `CallIndirect`
-    /// (whose base word the VM keeps during a partial application) are not
-    /// in the result. `None` when an op has no model.
+    /// that resume in this frame are filtered (exits are not in the
+    /// result); a `CallIndirect` keeps its base word, which the VM keeps
+    /// during a partial application. A `CallIndirect` row is filtered like
+    /// a `CALL`'s: kept whole, it named a word dead at the allocations
+    /// before it, which an evacuation there left holding a moved object's
+    /// old address (an argument pushed from a register zeroed after the
+    /// call, #1650). `None` when an op has no model.
     fn liveness(
         &self,
         states: &HashMap<usize, FrameState>,
@@ -913,6 +917,8 @@ impl Body<'_> {
             all: bool,
             succs: Vec<usize>,
             filter: bool,
+            /// A word the row keeps live (a `CallIndirect`'s base word).
+            keep: Option<usize>,
         }
         let mut nodes: HashMap<usize, Node> = HashMap::with_capacity(states.len());
         let mut words = 0usize;
@@ -968,8 +974,15 @@ impl Body<'_> {
                 .chain(step.jump)
                 .filter(|s| states.contains_key(s))
                 .collect();
-            let filter = step.record.is_some() && !exit && !matches!(inst, CallIndirect);
-            nodes.insert(pc, Node { uses, defs, all, succs, filter });
+            let filter = step.record.is_some() && !exit;
+            let keep = matches!(inst, CallIndirect).then(|| {
+                let packed = b.operand_u32();
+                pre.hi.saturating_sub(1 + (packed & 0xFFFF) as usize + ((packed >> 16) & 0xFFFF) as usize)
+            });
+            if let Some(k) = keep {
+                words = words.max(k + 1);
+            }
+            nodes.insert(pc, Node { uses, defs, all, succs, filter, keep });
         }
         if words > MAX_WORDS {
             return None;
@@ -1029,7 +1042,13 @@ impl Body<'_> {
             nodes
                 .iter()
                 .filter(|(_, n)| n.filter)
-                .map(|(&pc, _)| (pc, out_of(pc, &live_in)))
+                .map(|(&pc, n)| {
+                    let mut out = out_of(pc, &live_in);
+                    if let Some(k) = n.keep {
+                        out[k] = true;
+                    }
+                    (pc, out)
+                })
                 .collect(),
         )
     }

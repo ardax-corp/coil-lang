@@ -928,6 +928,18 @@ impl Checker {
             } else {
                 self.generics.instances[idx].method_fqns = method_fqns;
                 self.generics.instances[idx].assoc_tys = assoc_tys;
+                // A goal met before this body was checked freshened the
+                // earlier registration's head variables (#1670).
+                let (mut was, mut now) = (Vec::new(), Vec::new());
+                for a in &self.generics.instances[idx].args {
+                    Checker::collect_ty_vars(a, &mut was);
+                }
+                for a in &arg_tys {
+                    Checker::collect_ty_vars(a, &mut now);
+                }
+                if was.len() == now.len() {
+                    self.weak_checks.alias(&was, &now);
+                }
                 self.generics.instances[idx].args = arg_tys.clone();
                 self.generics.instances[idx].range = range.clone();
                 self.generics.instances[idx].context = context.clone();
@@ -1134,6 +1146,11 @@ impl Checker {
                     ..
                 } = body.1.as_ref()
                 {
+                    // A `... xs` template is checked per instance (#1754);
+                    // its signature stub stands until it is dropped.
+                    if self.is_variadic_template(&format!("{owner_key}::{name}")) {
+                        continue;
+                    }
                     if *name == "drop" {
                         self.check_drop_decl(
                             what,

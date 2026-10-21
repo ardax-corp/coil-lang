@@ -695,6 +695,7 @@ impl Compiler {
                     let (lookup, fqn) = (lookup.clone(), fqn.clone());
                     self.hir_mir_op_call(hir, id, &[*lhs, *rhs], (class, method, fqn), lookup, t);
                 }
+                Some(HirOp::Glue(glue)) => self.hir_mir_glue_call(id, glue, t),
                 _ => {}
             },
             // A negated literal is its constant.
@@ -946,7 +947,9 @@ impl Compiler {
     /// User operator `id` on `operands` calling its instance method
     /// (`HirOp::Call`): a raw method takes the
     /// operands' own words (a plain call), any other a binary operator's
-    /// boxed operands (an operator call).
+    /// boxed operands (an operator call). An instance taking a dictionary
+    /// (`Box<T>`'s derived `Eq` in a shared body, built from `T`'s, #1661)
+    /// gets it after the operands, as a dictionary program.
     fn hir_mir_op_call(
         &mut self,
         hir: &HirBody,
@@ -957,13 +960,25 @@ impl Compiler {
         t: &mut HirMirTables,
     ) {
         let fqn = self.instance_clone(&fqn, std::slice::from_ref(&lookup)).unwrap_or(fqn);
+        if Self::is_eq_glue(&fqn) {
+            self.reserve_eq_glue(&lookup);
+        }
         let raw = self.raw_instance_methods.contains(&fqn);
         let span = hir.expr(id).span;
-        let dict = self.hir_mir_once(|this| this.plan_call_instance_dict(&mut Vec::new(), (class, method, &fqn), std::slice::from_ref(&lookup), span.0..span.1));
+        let mut steps = Vec::new();
+        let dict = self.hir_mir_once(|this| this.plan_call_instance_dict(&mut steps, (class, method, &fqn), std::slice::from_ref(&lookup), span.0..span.1));
+        let dicts = if dict {
+            match self.hir_mir_dict_program(&steps) {
+                Some(dicts) => dicts,
+                None => return,
+            }
+        } else {
+            Vec::new()
+        };
         // A two-word result comes back as two words (or boxed after the call).
         let one_word = self.two_word_return_kind(&fqn).is_none();
         self.raw_instance_call = raw;
-        let Some(target) = self.named_entry_target(&fqn, false).filter(|_| one_word && !dict) else {
+        let Some(target) = self.named_entry_target(&fqn, false).filter(|_| one_word) else {
             return;
         };
         let arity = operands.len();
@@ -973,7 +988,7 @@ impl Compiler {
             pair_ret: false,
             coro: false,
             boxed_ret: false,
-            dicts: Vec::new(),
+            dicts,
             boxes: Vec::new(),
             adapt: Vec::new(),
             unbox: None,
@@ -982,7 +997,14 @@ impl Compiler {
         };
         if raw {
             // Each operand's MIR word is the boxed-layout word the stack passes.
-            if operands.iter().all(|&o| Self::hir_ty(hir, o).is_some_and(|t| self.value_layout(t) == ValueLayout::Boxed)) {
+            // A glue function (#1629) takes its own type's words, a niche
+            // word as one.
+            let declared = self.structural_thunk_params.get(&fqn);
+            let fits = |i: usize, layout: ValueLayout| {
+                layout == ValueLayout::Boxed
+                    || (Self::is_eq_glue(&fqn) && declared.and_then(|p| p.get(i)).is_some_and(|t| self.value_layout(t) == layout))
+            };
+            if operands.iter().enumerate().all(|(i, &o)| Self::hir_ty(hir, o).is_some_and(|t| fits(i, self.value_layout(t)))) {
                 t.calls.insert(id.0, site);
             }
         } else if arity == 2
@@ -991,6 +1013,42 @@ impl Compiler {
             let shift = matches!(class, "Shl" | "Shr");
             t.op_calls.insert(id.0, crate::mir::HirOpCall { site, tag: tag as u32, shift });
         }
+    }
+
+    /// `==` / `!=` `id` through open glue `glue` (`HirOp::Glue`, #1642):
+    /// a plain call of the two operands' words, then each type variable's
+    /// `Eq` dictionary, loaded from this body's dictionary parameters.
+    fn hir_mir_glue_call(&mut self, id: HirId, glue: &super::eq_glue::DictGlue, t: &mut HirMirTables) {
+        self.reserve_eq_dict_glue(glue);
+        if !glue.slots().all(|slot| self.hir_mir_dict_param(slot)) {
+            return;
+        }
+        let mut steps = Vec::new();
+        for &dict in &glue.dicts {
+            if !self.plan_var_eq_dict(&mut steps, dict) {
+                return;
+            }
+        }
+        let Some(dicts) = self.hir_mir_dict_program(&steps) else {
+            return;
+        };
+        let Some(target) = self.named_entry_target(&glue.fqn, false) else {
+            return;
+        };
+        let site = crate::mir::HirCallSite {
+            target,
+            pair_args: vec![false; 2],
+            pair_ret: false,
+            coro: false,
+            boxed_ret: false,
+            dicts,
+            boxes: Vec::new(),
+            adapt: Vec::new(),
+            unbox: None,
+            ret_adapt: None,
+            ret_items: None,
+        };
+        t.calls.insert(id.0, site);
     }
 
     /// Call `id` of a function or method, past the builtins: its entry when it is one
@@ -1521,6 +1579,7 @@ impl Compiler {
                 DictStep::Null => Some(HirDictOp::Null),
                 DictStep::Tuple(n) => Some(HirDictOp::Tuple(n)),
                 DictStep::Box(tag) => Some(HirDictOp::Box(tag)),
+                DictStep::Field(n) => Some(HirDictOp::Field(n)),
             })
             .collect()
     }
@@ -1565,7 +1624,7 @@ impl Compiler {
                         stack.push((start, false));
                     }
                 }
-                HirDictOp::Box(_) => {
+                HirDictOp::Box(_) | HirDictOp::Field(_) => {
                     let start = stack.pop().map_or(out.len(), |e| e.0);
                     out.push(op);
                     stack.push((start, false));
@@ -1622,10 +1681,12 @@ impl Compiler {
         match &e.kind {
             HirKind::Bin { .. } | HirKind::Un { .. } => match emit.plan.ops.get(&id.0) {
                 Some(&HirOp::Bound { dict, .. }) => !self.hir_mir_dict_param(dict),
+                Some(HirOp::Glue(glue)) => glue.slots().any(|slot| !self.hir_mir_dict_param(slot)),
                 Some(HirOp::Call { lookup, fqn, class, method }) => {
                     let lookup = lookup.clone();
                     let fqn = self.instance_clone(fqn, std::slice::from_ref(&lookup)).unwrap_or_else(|| fqn.clone());
-                    self.hir_mir_probe_dicts(|this, steps| {
+                    // Its dictionary runs as a program (#1661).
+                    self.hir_mir_probe_unplanned(|this, steps| {
                         this.plan_call_instance_dict(steps, (class, method, &fqn), std::slice::from_ref(&lookup), span);
                     })
                 }

@@ -53,6 +53,15 @@ fn loops_from_env() -> bool {
     *ON.get_or_init(|| !matches!(std::env::var("COIL_HIR_INLINE_LOOPS").as_deref(), Ok("0" | "false" | "off" | "no")))
 }
 
+/// Whether a callee too big to inline is tried again with its constant
+/// arguments bound and folded (`COIL_HIR_SPECIALIZE=0` off).
+pub(crate) fn specialize_from_env() -> bool {
+    !matches!(
+        std::env::var("COIL_HIR_SPECIALIZE").as_deref(),
+        Ok("0" | "false" | "off" | "no")
+    )
+}
+
 /// What a callee's body splices in as: its statements and its result.
 #[derive(Debug, Clone)]
 pub struct Shape {
@@ -712,8 +721,10 @@ impl Inliner<'_> {
         let result = self.splice(call, callee, shape, Site::Direct, &mut stmts);
         let tail = result.unwrap_or_else(|| self.push(HirKind::Lit(Lit::Unit), Some(ty::unit()), span));
         // The call's node becomes the block (or the bare result), so its
-        // parent still reads it.
-        let kind = if stmts.is_empty() {
+        // parent still reads it. A result packed into the call's trait
+        // object stays a node of its own: its pack is keyed on it (#1757).
+        let packed = existential(&self.body.expr(call).ty) && !existential(&self.body.expr(tail).ty);
+        let kind = if stmts.is_empty() && !packed {
             let kind = self.body.expr(tail).kind.clone();
             self.tombstone(tail);
             kind
@@ -893,6 +904,11 @@ impl Inliner<'_> {
         });
         id
     }
+}
+
+/// A bare-class existential (`Sum`): a `[value, dictionary]` pack.
+fn existential(t: &Option<ty::Ty>) -> bool {
+    t.as_ref().is_some_and(|t| matches!(ty::strip_readonly(t), ty::Ty::Existential { .. }))
 }
 
 /// Whether `callee` assigns parameter `p` or a place rooted at it by index.
@@ -1200,4 +1216,91 @@ pub fn short_loops(callee: &HirBody) -> Option<Vec<usize>> {
         }
     }
     Some(params)
+}
+
+/// `callee` as a call with constant arguments runs it: each parameter at
+/// `consts` that the callee never writes reads as its literal. `None` when
+/// none could be bound, or a lambda in the callee might capture one.
+pub fn bind_params(callee: &HirBody, consts: &[(usize, Lit)]) -> Option<HirBody> {
+    if callee.exprs.iter().any(|e| matches!(e.kind, HirKind::Lambda { .. })) {
+        return None;
+    }
+    let mut out = callee.clone();
+    let mut bound = false;
+    for (k, lit) in consts {
+        let Some(&p) = callee.params.get(*k) else { continue };
+        if rebinds(callee, p) {
+            continue;
+        }
+        for e in &mut out.exprs {
+            if matches!(e.kind, HirKind::Local(l) if l == p) {
+                e.kind = HirKind::Lit(lit.clone());
+                bound = true;
+            }
+        }
+    }
+    bound.then_some(out)
+}
+
+/// Blank the nodes no longer reachable from `body`'s root (an arm or a
+/// branch a fold dropped), so [`inlinable`] neither charges nor refuses
+/// code that cannot run.
+pub fn blank_unreachable(body: &mut HirBody) {
+    let Some(root) = body.root else { return };
+    // Statements after one that always exits never run: a block cut there
+    // (its exiting nested blocks spliced in, so the exit is its own last
+    // statement, as a folded `if true { return a; }` leaves it).
+    for i in 0..body.exprs.len() {
+        let HirKind::Block { stmts, tail } = &body.exprs[i].kind else { continue };
+        let all: Vec<HirId> = stmts.iter().chain(tail).copied().collect();
+        let mut kept = Vec::new();
+        let mut cut = false;
+        for s in all {
+            flatten_exit(body, s, &mut kept);
+            if kept.last().is_some_and(|&k| exits_always(body, k)) {
+                cut = true;
+                break;
+            }
+        }
+        if cut {
+            body.exprs[i].kind = HirKind::Block { stmts: kept, tail: None };
+        }
+    }
+    let mut live = vec![false; body.exprs.len()];
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        if std::mem::replace(&mut live[id.0 as usize], true) {
+            continue;
+        }
+        stack.extend(super::lower::children(body, id));
+    }
+    for (e, live) in body.exprs.iter_mut().zip(live) {
+        if !live {
+            e.kind = HirKind::Lit(Lit::Unit);
+        }
+    }
+}
+
+/// Push `s` onto `out`, a nested block that always exits as its own
+/// statements.
+fn flatten_exit(body: &HirBody, s: HirId, out: &mut Vec<HirId>) {
+    match &body.expr(s).kind {
+        HirKind::Block { stmts, tail } if exits_always(body, s) => {
+            for &k in stmts.iter().chain(tail) {
+                flatten_exit(body, k, out);
+            }
+        }
+        _ => out.push(s),
+    }
+}
+
+/// `id` never completes normally: a `return`, `break` or `continue`, a
+/// block ending in one, or an `if` whose branches both are.
+fn exits_always(body: &HirBody, id: HirId) -> bool {
+    match &body.expr(id).kind {
+        HirKind::Return(_) | HirKind::Break | HirKind::Continue => true,
+        HirKind::Block { stmts, tail } => stmts.iter().chain(tail).any(|&k| exits_always(body, k)),
+        HirKind::If { then, els: Some(els), .. } => exits_always(body, *then) && exits_always(body, *els),
+        _ => false,
+    }
 }

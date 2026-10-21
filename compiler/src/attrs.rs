@@ -526,11 +526,29 @@ fn expand_decls<'a>(decls: &mut Vec<Output<'a>>, pending: &mut Vec<PendingMacro>
                     pending.push(pending_attr(a.name, &a.args, span, None));
                     None
                 } else {
+                let mut derives = derive_traits_from_attrs(attrs);
+                let scalar_backing = scalar_backing_ty_name(attrs, variants);
+                // A derived `Ord` orders a scalar enum by its backing word,
+                // and `bool` has no ordering: reject it here rather than in
+                // the derive's output (#1765).
+                if scalar_backing == Some("bool") && derives.contains(&"Ord") {
+                    derives.retain(|d| *d != "Ord");
+                    let mut msg = Message::error(
+                        ErrorCode::GenericTypeError,
+                        format!("Cannot derive `Ord` for `{name}`: its backing type `bool` has no ordering"),
+                        span.into_range(),
+                    );
+                    msg.with_help(
+                        "back the enum with `int` (`#[repr(int)]`, cases `= 0`, `= 1`) or write `impl Lt` / `Le` / `Gt` / `Ge` by hand"
+                            .to_string(),
+                    );
+                    messages.push(msg);
+                }
                 Some(Job {
                     name,
                     generic: !type_params.is_empty(),
-                    derives: derive_traits_from_attrs(attrs),
-                    scalar_backing: scalar_backing_ty_name(attrs, variants),
+                    derives,
+                    scalar_backing,
                 })
                 }
             }

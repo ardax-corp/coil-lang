@@ -55,6 +55,10 @@ A module-level `const` whose value is known at compile time (`const LIMIT =
 `main`, and the name still cannot be reassigned. `static const` is the old spelling of this: it
 warns (E0129), and `coil fmt` rewrites it to `const`.
 
+A `const` set to a `readonly` array literal is a lookup table: a read at a
+constant index folds to the element, and a function-local
+`const t = readonly [1, 2, 3];` is built on its first run and reused.
+
 ```coil
 const VERSION = "1.0";
 
@@ -78,6 +82,13 @@ Declares a module-level or class-level slot shared by the whole program, or a me
 before `main` (a module constant is a `const`). In a class, `static count: int = 0`
 is a class field read as `Class::count`. In an `impl` or trait, `static fn`
 is a method called on the type (`Counter::fresh()`), never on a value.
+
+A thread started with `thread::spawn` gets a copy of every static as it was
+when it was spawned: constants read the same values there, and its writes
+to a `static let` stay in that thread. A `stdin()`, `stdout()` or
+`stderr()` in a static, on its own or inside a tuple, array, enum or class
+field, is the same process stream in the thread; a file or socket stream
+cannot cross threads, and using it there panics.
 
 ```coil
 static let hits = 0;
@@ -113,7 +124,9 @@ included) each body mutates, and the error names the write (`it mutates
 `readonly Area` trait objects included, only when the trait declares
 `readonly A self`; its impls must then not mutate `self`. The seal is deep: a
 field, element, loop variable or matched payload read through it is
-`readonly` too (`readonly Option<P>` is `Option<readonly P>`). A `T` converts
+`readonly` too (`readonly Option<P>` is `Option<readonly P>`), and so is what
+a method called on it returns (`p.get_inner()`, `r.get()` on a `readonly
+Ref<P>`), unless its trait declares `readonly A self`. A `T` converts
 to `readonly T`, never back, and `Vec<T>` does not convert to
 `Vec<readonly T>`; a parameter that only reads takes `readonly Vec<T>`.
 `readonly` costs nothing at run time, and the variable itself can still be
@@ -347,11 +360,17 @@ The operand is type-checked but never evaluated. Nominal types are written
 with their defining module (`prelude::Option<int>`); types from the entry
 file stay bare. A type that is not fully known is a compile error.
 
+`typeof` is a unary prefix, like `-` or `readonly`: it takes the operand
+right after it (with any calls, fields or indexing), so
+`typeof x == "int"` compares the type name. Parenthesize a larger operand:
+`typeof (a + b)`.
+
 ```coil
 fn main() {
     let a = typeof 42; // "int"
     let b = typeof (1, "x"); // "(int, string)"
     let c = typeof Option::Some(1); // "prelude::Option<int>"
+    let d = typeof a == "string"; // true
 }
 ```
 

@@ -415,6 +415,9 @@ enum HirOp {
     /// instance method in dictionary slot `dict` at `method`, through
     /// `CallIndirect` (`emit_bound_operator_call`).
     Bound { dict: u32, method: u32 },
+    /// `==` / `!=` on an aggregate of type parameters in a shared generic
+    /// body: a call of its open glue with their `Eq` dictionaries (#1642).
+    Glue(super::eq_glue::DictGlue),
     /// An element-wise op on the packed kernel.
     Aggregate(crate::typechecking::AggregateArithInfo),
     /// A matrix / vector operator the checker recorded as linear algebra.
@@ -497,7 +500,7 @@ impl Compiler {
                     let (start, end) = e.span;
                     if self.hir_builtin(name).is_some()
                         || self.checker.is_overloaded(name)
-                        || self.checker.bare_construct_at(start, end).is_some()
+                        || self.is_bare_construct_call(name, start, end)
                         || self.checker.qualified_trait_call_at(start, end).is_some()
                         || self.sidecar_overload(e.node, start, end).is_some()
                         || self.checker.partial_fill_at(start, end).is_some()
@@ -977,12 +980,14 @@ impl Compiler {
                 let steady = |n: &str| crate::il::pure_call::name_in(&self.steady_fns, n);
                 let unrolled = self.opt_options.loop_unroll.then(|| crate::hir::unroll::unroll(body, self.opt_options.loop_unroll_factor)).flatten();
                 let body_u = unrolled.as_ref().unwrap_or(body);
-                let folded = self.opt_options.algebraic.then(|| crate::hir::fold::fold(body_u)).flatten();
-                let body_f = folded.as_ref().unwrap_or(body_u);
+                let tabled = self.opt_options.algebraic.then(|| self.hir_fold_tables(body_u)).flatten();
+                let body_t = tabled.as_ref().unwrap_or(body_u);
+                let folded = self.opt_options.algebraic.then(|| crate::hir::fold::fold(body_t)).flatten();
+                let body_f = folded.as_ref().unwrap_or(body_t);
                 let bounds = (self.opt_options.loop_bounds && self.alloc_steady).then(|| crate::hir::bounds::prove(body_f, steady)).flatten();
                 let body_b = bounds.as_ref().unwrap_or(body_f);
                 let sunk = self.opt_options.sink_return.then(|| crate::hir::sink_return::sink(body_b)).flatten();
-                match sunk.or(bounds).or(folded).or(unrolled) {
+                match sunk.or(bounds).or(folded).or(tabled).or(unrolled) {
                     Some(next) => match lower::refusal(&next, &self.checker)
                         .map_or_else(|| self.plan_hir_body(&next), Err)
                         .and_then(|mut e| self.plan_hir_lambdas(&module, &next, &mut e).map(|()| e))
@@ -1109,6 +1114,16 @@ impl Compiler {
             }
             entry
         });
+        // An open glue body's `Eq` dictionaries (#1642): plain parameters
+        // after its own.
+        let entry_words = entry_words.or_else(|| {
+            self.synth_plain_dicts.map(|n| {
+                for i in 0..n {
+                    self.context.variables.intern(format!("__dict{i}"));
+                }
+                self.context.variables.len() as u32
+            })
+        });
         let plan = lower::refusal(hir, &self.checker).map_or_else(|| self.plan_hir_body(hir), Err);
         let lowered = match plan {
             Ok(mut emit) => {
@@ -1177,11 +1192,16 @@ impl Compiler {
         let why = if plan.par_inline {
             Err("parallel loop".to_string())
         } else {
-            self.hir_mir_input(hir, emit, &tables, file, entry_words)
-                .and_then(|inp| crate::mir::lower_from_hir(hir, &inp))
+            let frozen = self.hir_frozen_arrays(hir);
+            self.hir_mir_input(hir, emit, &tables, file, entry_words).and_then(|mut inp| {
+                inp.frozen_arrays = frozen;
+                crate::mir::lower_from_hir(hir, &inp)
+            })
         };
         match why {
-            Ok(func) => {
+            Ok(mut func) => {
+                let slots: HashSet<u32> = self.frozen_tables.keys().copied().collect();
+                crate::mir::mark_frozen_arrays(&mut func, &slots);
                 crate::il::opt::note_hir_mir(None);
                 self.hir_mir_debug_vars(hir, emit, &tables.frame);
                 Some(func)
@@ -1934,6 +1954,7 @@ impl Compiler {
             }),
             heap_fields,
             invariant_fields,
+            frozen_arrays: HashMap::new(),
             boxed_niches,
             niche_args: &tables.niche_args,
             existential_packs: tables.existential_packs,
@@ -2127,6 +2148,53 @@ impl Compiler {
                 Some((id, self.hir_core_method_at(generic, hir, HirId(id))?))
             })
             .collect();
+        // Callees too big (or looping too long) to inline whose constant
+        // arguments fold them down to an inlinable body: that copy.
+        let specialized: HashMap<u32, crate::hir::HirBody> = emit
+            .plan
+            .calls
+            .iter()
+            .filter(|_| self.hir_inline_specialize)
+            .filter(|(_, call)| call.instance.is_none() && call.mono_of.is_none() && call.generic.is_none() && call.builtin.is_none())
+            .filter_map(|(&id, call)| {
+                let HirKind::Call { args, .. } = &hir.expr(HirId(id)).kind else {
+                    return None;
+                };
+                let consts: Vec<(usize, crate::hir::Lit)> = args
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(k, &a)| match &hir.expr(a).kind {
+                        HirKind::Lit(lit @ (crate::hir::Lit::Int(_) | crate::hir::Lit::Bool(_) | crate::hir::Lit::Float(_))) => {
+                            Some((k, lit.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                if consts.is_empty() {
+                    return None;
+                }
+                let index = self.hir_fn_body(&call.key)?;
+                let callee = &module.bodies[index];
+                if callee.kind != BodyKind::Function || callee.params.len() != args.len() {
+                    return None;
+                }
+                let base = folded.get(&index).unwrap_or(callee);
+                if inline::inlinable(base, budget).is_ok_and(|s| !s.looping()) {
+                    return None;
+                }
+                let bound = inline::bind_params(callee, &consts)?;
+                let unrolled = self.opt_options.loop_unroll.then(|| crate::hir::unroll::unroll(&bound, self.opt_options.loop_unroll_factor)).flatten();
+                let mut spec = unrolled.unwrap_or(bound);
+                if let Some(f) = crate::hir::fold::fold(&spec) {
+                    spec = f;
+                }
+                inline::blank_unreachable(&mut spec);
+                if inline::inlinable(&spec, budget).err() == Some("return") {
+                    spec = inline::single_exit(&spec)?;
+                }
+                inline::inlinable(&spec, budget).is_ok_and(|s| !s.looping()).then_some((id, spec))
+            })
+            .collect();
         // Calls of a local bound once to a lambda that captures nothing
         // (`let f = fn (x) => ..; f(v)`, as an inlined `map(f)` leaves
         // them), as the lambda's body.
@@ -2152,6 +2220,12 @@ impl Compiler {
             let Some(call) = emit.plan.calls.get(&id.0) else {
                 return Err("not-planned".to_string());
             };
+            // The checker's pack recipe for a call whose result packs into
+            // a trait object is keyed on the call: the callee's result
+            // spliced in its place would not pack (#1757).
+            if self.hir_existential_pack(hir, id).is_some() {
+                return Err("existential-pack".to_string());
+            }
             let core = core_insts.get(&id.0);
             let kind = [
                 (call.builtin.is_some(), "builtin"),
@@ -2170,7 +2244,7 @@ impl Compiler {
             {
                 return Err(format!("call-kind {what}"));
             }
-            let callee = match core.or_else(|| instances.get(&id.0)) {
+            let callee = match core.or_else(|| instances.get(&id.0)).or_else(|| specialized.get(&id.0)) {
                 Some(inst) => inst,
                 None if call.instance.is_some() => {
                     let index = *module.instance_fns.get(&call.key).ok_or_else(|| format!("no instance body `{}`", call.key))?;
@@ -2504,6 +2578,21 @@ impl Compiler {
                 }
                 continue;
             }
+            // `recv.m(1, a, b)` into an inherent method's `T... xs` (#1729)
+            // or `... xs` (#1734): the arguments after its fixed ones, named
+            // or not, pack as a free function's.
+            if let HirKind::Call { callee: Callee::Method { name }, args } = &body.exprs[i].kind
+                && let Some(key) = self.hir_method_rest_key(body, args, name)
+            {
+                let args = args.clone();
+                let span = body.exprs[i].span;
+                let b = out.get_or_insert_with(|| body.clone());
+                let packed = self.hir_method_rest_pack(b, &key, &args, span)?;
+                if let HirKind::Call { args, .. } = &mut b.exprs[i].kind {
+                    *args = packed;
+                }
+                continue;
+            }
             // `new C(y: 1, x: 2)` (#1074) and `recv.m(b: 2, a: 1)` (#1380):
             // named arguments into the field or parameter order the checker
             // matched them to (after the receiver).
@@ -2570,9 +2659,6 @@ impl Compiler {
             // A bare `... name` packs its arguments into a tuple.
             let tuple_rest = self.checker.fn_tuple_rest(&lookup) || self.checker.fn_tuple_rest(name);
             let generic = self.checker.is_generic_fn(&lookup);
-            if generic && shaped {
-                return Err("call-argument");
-            }
             // An overloaded name shapes by the overload the checker picked.
             let (names, has_rest, rest_ty) = if self.checker.is_overloaded(name) || self.checker.is_overloaded(&lookup) {
                 let e = &body.exprs[i];
@@ -2671,8 +2757,9 @@ impl Compiler {
                 }
                 next += 1;
             }
-            // A generic pack's type is its items' one ground type; a
-            // tuple pack's is its items' types in order.
+            // A generic pack's type is its items' one ground type (`P` and
+            // `readonly P` are one, as for the mono key, #1728); a tuple
+            // pack's is its items' types in order.
             let rest_ty = match rest_ty {
                 _ if whole_rest.is_some() => None,
                 Some(_) if tuple_rest => {
@@ -2686,8 +2773,15 @@ impl Compiler {
                     }
                 }
                 Some(declared) if generic => {
-                    let item = rest.first().and_then(|&r| b.expr(r).ty.clone()).map(|t| apply_ty_prune(self.checker.subst(), &t));
-                    let same = |t: &Ty| rest.iter().all(|&r| b.expr(r).ty.as_ref().map(|u| apply_ty_prune(self.checker.subst(), u)).as_ref() == Some(t));
+                    let key = |r: HirId| b.expr(r).ty.as_ref().map(|t| crate::monomorphize::mono_key_ty(&apply_ty_prune(self.checker.subst(), t)));
+                    let item = rest
+                        .first()
+                        .and_then(|&r| b.expr(r).ty.as_ref())
+                        .map(|t| crate::typechecking::ty::strip_readonly(&apply_ty_prune(self.checker.subst(), t)).clone());
+                    let same = |t: &Ty| {
+                        let k = crate::monomorphize::mono_key_ty(t);
+                        rest.iter().all(|&r| key(r).as_ref() == Some(&k))
+                    };
                     match (declared, item) {
                         (Ty::App(head, params), Some(item)) if params.len() == 1 && same(&item) && crate::hir::layout::ty_is_closed(&item) => {
                             Some(Ty::App(head, vec![item]))
@@ -2704,7 +2798,7 @@ impl Compiler {
             // Named arguments leaving holes are a partial application of
             // the filled parameters (its mask is the checker's fill mask).
             let filled = slots.iter().take_while(|s| s.is_some()).count();
-            if filled < fixed_count && has_rest {
+            if filled < fixed_count && (has_rest || generic) {
                 return Err("call-argument");
             }
             let mut new_args = slots.into_iter().flatten().collect::<Vec<_>>();
@@ -2722,6 +2816,120 @@ impl Compiler {
                 *args = new_args;
             }
         }
+        Ok(out)
+    }
+
+    /// The key of the inherent method `recv.method(..)` calls (`args[0]` is
+    /// the receiver) when it takes a rest parameter (`T... xs` or `... xs`).
+    fn hir_method_rest_key(&self, body: &HirBody, args: &[HirId], method: &str) -> Option<String> {
+        let recv = *args.first()?;
+        let recv_ty = apply_ty_prune(self.checker.subst(), body.expr(recv).ty.as_ref()?);
+        let recv_ty = crate::typechecking::ty::peel_constructor_refinement(recv_ty);
+        let owner = Checker::class_name_of_ty(&recv_ty)?;
+        let key = self.context.methods.get(owner)?.get(method)?;
+        (self.checker.fn_has_rest(key) && !self.checker.is_overloaded(key)).then(|| key.clone())
+    }
+
+    /// `recv.m(..)`'s arguments for method `key`'s rest parameter: the
+    /// receiver, the fixed arguments in parameter order (named ones where
+    /// the checker matched them), then one pack of the rest (a lone
+    /// `...vec` spread is the pack itself; a bare `... xs` packs a tuple),
+    /// as [`Self::hir_call_shapes`] shapes a free function's.
+    fn hir_method_rest_pack(
+        &self,
+        b: &mut HirBody,
+        key: &str,
+        args: &[HirId],
+        call_span: crate::hir::Span,
+    ) -> Result<Vec<HirId>, &'static str> {
+        let fixed_count = self
+            .checker
+            .fn_param_names(key)
+            .ok_or("call-argument")?
+            .len()
+            .checked_sub(1)
+            .ok_or("call-argument")?;
+        let tuple_rest = self.checker.fn_tuple_rest(key);
+        let ground = |b: &HirBody, r: HirId| b.expr(r).ty.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t));
+        let mut args = args.to_vec();
+        let whole = match args.last().map(|&a| &b.expr(a).kind) {
+            Some(&HirKind::Spread(inner))
+                if !tuple_rest
+                    && args.len() > 1
+                    && ground(b, inner).is_some_and(|t| crate::typechecking::ty::vec_element_ty(&t).is_some()) =>
+            {
+                args.pop();
+                Some(inner)
+            }
+            _ => None,
+        };
+        let flat = self.hir_flatten_spreads(b, &args[1..])?;
+        let mut out = vec![args[0]];
+        let rest = if flat.iter().any(|&a| matches!(b.expr(a).kind, HirKind::Named { .. })) {
+            // Named arguments go where the checker matched them (a whole
+            // `Vec` spread is the last slot, the pack's).
+            let record = self.checker.named_arg_slots(call_span.0, call_span.1).ok_or("call-argument")?;
+            if !record.rest || record.params != fixed_count || record.slots.len() != flat.len() + usize::from(whole.is_some()) {
+                return Err("call-argument");
+            }
+            let mut slots: Vec<Option<HirId>> = vec![None; fixed_count];
+            let mut rest = Vec::new();
+            for (&arg, &k) in flat.iter().zip(&record.slots) {
+                let value = match &b.expr(arg).kind {
+                    HirKind::Named { value, .. } => *value,
+                    _ => arg,
+                };
+                match slots.get_mut(k) {
+                    Some(slot) if slot.is_none() => *slot = Some(value),
+                    Some(_) => return Err("call-argument"),
+                    None => rest.push(value),
+                }
+            }
+            out.extend(slots.into_iter().collect::<Option<Vec<_>>>().ok_or("call-argument")?);
+            rest
+        } else {
+            if flat.len() < fixed_count {
+                return Err("call-argument");
+            }
+            out.extend_from_slice(&flat[..fixed_count]);
+            flat[fixed_count..].to_vec()
+        };
+        if let Some(inner) = whole {
+            if !rest.is_empty() {
+                return Err("call-argument");
+            }
+            out.push(inner);
+            return Ok(out);
+        }
+        let span = (call_span.1, call_span.1);
+        // A tuple pack's type is its items' types in order.
+        if tuple_rest {
+            let items: Option<Vec<Ty>> = rest.iter().map(|&r| ground(b, r)).collect();
+            let pack_ty = match items {
+                Some(items) if items.iter().all(crate::hir::layout::ty_is_closed) => Ty::Tuple(items),
+                _ => return Err("call-argument"),
+            };
+            out.push(Self::hir_push(b, &self.checker, HirKind::Make { kind: MakeKind::Tuple, args: rest }, Some(pack_ty), span));
+            return Ok(out);
+        }
+        let declared = self.checker.fn_param_tys(key).and_then(|tys| tys.last().cloned()).ok_or("call-argument")?;
+        // A generic pack's type is its items' one ground type (`P` and
+        // `readonly P` are one, as for the mono key).
+        let pack_ty = if !crate::hir::layout::ty_is_closed(&declared) {
+            let key_of = |t: &Ty| crate::monomorphize::mono_key_ty(t);
+            let item = rest.first().and_then(|&r| ground(b, r)).ok_or("call-argument")?;
+            let item = crate::typechecking::ty::strip_readonly(&item).clone();
+            let same = rest.iter().all(|&r| ground(b, r).is_some_and(|t| key_of(&t) == key_of(&item)));
+            match declared {
+                Ty::App(head, params) if params.len() == 1 && same && crate::hir::layout::ty_is_closed(&item) => {
+                    Ty::App(head, vec![item])
+                }
+                _ => return Err("call-argument"),
+            }
+        } else {
+            declared
+        };
+        out.push(Self::hir_push(b, &self.checker, HirKind::Make { kind: MakeKind::Array, args: rest }, Some(pack_ty), span));
         Ok(out)
     }
 
@@ -3380,6 +3588,15 @@ impl Compiler {
         Ok(())
     }
 
+    /// Whether a call of `name` at this span is bare constructor sugar
+    /// (`Bad(s)` for `ParseError::Bad`). The checker records the sugar by
+    /// span, and a compiler-made call can share its span: `main`'s
+    /// `return Err(e)` panics through a `string::format` call spanned at the
+    /// constructor (#1738). So the recorded variant must be the callee.
+    fn is_bare_construct_call(&self, name: &str, start: usize, end: usize) -> bool {
+        self.checker.bare_construct_at(start, end).is_some_and(|(_, variant)| variant == name)
+    }
+
     /// The table key and ABI of a direct call to `name`, or why it is not a
     /// plain `CALL` to a user function. The special forms are checked in
     /// `compile_call_expr`'s order, so a name those claim is never lowered
@@ -3429,7 +3646,7 @@ impl Compiler {
         }
         let node = hir.expr(call);
         let (start, end) = node.span;
-        if self.checker.bare_construct_at(start, end).is_some() {
+        if self.is_bare_construct_call(name, start, end) {
             return Err("callee-builtin");
         }
         if let Some(builtin) = self.hir_builtin(name) {
@@ -5263,7 +5480,9 @@ impl Compiler {
             Some(&(fixed, false)) if fixed as usize == explicit => {}
             // A rest parameter takes its pack as one more argument
             // ([`Self::hir_call_shapes`]).
-            Some(&(fixed, true)) if fixed as usize + 1 == explicit && self_layout.is_none() && !open => {}
+            // A method's pack too, a `Vec` or tuple as any other (#1729,
+            // #1734).
+            Some(&(fixed, true)) if fixed as usize + 1 == explicit && (self_layout.is_some() || !open) => {}
             // Declared later in the file: its entry is reserved but its
             // arity not yet recorded, so read it from the signature as the
             // AST call does. Its two-word return kind comes from the
@@ -6659,7 +6878,10 @@ impl Compiler {
     /// The tag of `variant`, checked against the enum `ty` names.
     fn hir_tag(&self, ty: &Ty, enum_name: &str, variant: &str) -> Option<u32> {
         let named = self.hir_enum_name(ty)?;
-        if !Self::hir_same_enum(&named, enum_name) {
+        // `Opt::Some` after `use prelude::Option as Opt;` (#1700).
+        if !Self::hir_same_enum(&named, enum_name)
+            && !Self::hir_same_enum(&named, &self.checker.registry_enum_key(enum_name))
+        {
             return None;
         }
         self.checker.tag_for(enum_name, variant)
@@ -7065,6 +7287,71 @@ impl Compiler {
         matches!(result, Ty::Var(_))
     }
 
+    /// Each function-local `const` table of literals in `hir` whose type is
+    /// `readonly` (#1561), by its array's `Make`: the static slot it is
+    /// built into once. Tables of the same literals share one. A table
+    /// inside a loop (a callee's, spliced into the caller's loop) keeps
+    /// its array, which LICM moves to the preheader of a dense loop.
+    fn hir_frozen_arrays(&mut self, hir: &HirBody) -> HashMap<u32, u32> {
+        let mut out = HashMap::new();
+        let sealed = crate::hir::tables::sealed_locals(hir, &|t| self.hir_ty_is_readonly(t));
+        let looped = crate::hir::tables::lets_in_loops(hir);
+        for i in 0..hir.exprs.len() {
+            let id = HirId(i as u32);
+            if looped.contains(&id) {
+                continue;
+            }
+            let Some((local, elems)) = crate::hir::tables::local_table(hir, id) else {
+                continue;
+            };
+            let HirKind::Let { init: Some(init), .. } = hir.expr(id).kind else {
+                continue;
+            };
+            if !sealed.contains(&local) {
+                continue;
+            }
+            let Some(made) = Self::hir_ty(hir, init).map(|t| apply_ty_prune(self.checker.subst(), t)) else {
+                continue;
+            };
+            let lits: Vec<_> = elems.iter().map(|&e| &hir.expr(e).kind).collect();
+            let key = format!("{made:?}|{lits:?}");
+            let slot = match self.interned_tables.get(&key) {
+                Some(&slot) => slot,
+                None => {
+                    let next = self.interned_tables.len();
+                    let slot = self
+                        .checker
+                        .alloc_synthetic_static_slot(format!("__table${next}"), crate::typechecking::ty::int());
+                    self.interned_tables.insert(key, slot);
+                    slot
+                }
+            };
+            out.insert(init.0, slot);
+        }
+        out
+    }
+
+    /// [`crate::hir::tables::fold_tables`] over `hir`: module `const`
+    /// tables by their slot, local ones when their type is `readonly`.
+    fn hir_fold_tables(&self, hir: &HirBody) -> Option<HirBody> {
+        let sealed = crate::hir::tables::sealed_locals(hir, &|t| self.hir_ty_is_readonly(t));
+        crate::hir::tables::fold_tables(hir, &HirTables { c: self, hir }, &|l| sealed.contains(&l))
+    }
+
+    fn hir_ty_is_readonly(&self, t: &Ty) -> bool {
+        matches!(apply_ty_prune(self.checker.subst(), t), Ty::Readonly(_))
+    }
+
+    /// The elements of the module `const` table the `Global` read `id`
+    /// names (#1561).
+    fn hir_frozen_table(&self, hir: &HirBody, id: HirId) -> Option<&[Option<crate::const_fold::ConstValue>]> {
+        let HirKind::Global { name, .. } = &hir.expr(id).kind else {
+            return None;
+        };
+        let slot = self.hir_global_static(hir, id, name)?;
+        self.frozen_tables.get(&slot).map(Vec::as_slice)
+    }
+
     fn hir_global_const(&self, hir: &HirBody, id: HirId, name: &str) -> Option<crate::const_fold::ConstValue> {
         use crate::const_fold::ConstValue;
         let expr = hir.expr(id);
@@ -7177,6 +7464,14 @@ impl Compiler {
         {
             return Err("operator-aggregate");
         }
+        // `==` on a type variable in an open glue body: its dictionary's
+        // `eq` (#1642).
+        if sym == "=="
+            && !self.synth_eq_dicts.is_empty()
+            && let Some((dict, method)) = Self::hir_ty(hir, lhs).and_then(|t| self.eq_dict_glue_bound(t))
+        {
+            return Ok(HirOp::Bound { dict, method });
+        }
         if let Some(hint) = self.bound_operator_hint(node.node, start, end)
             && let Some(dict) = self.lookup_slot(&format!("__dict{}", hint.dict_index))
         {
@@ -7262,10 +7557,27 @@ impl Compiler {
         if let Some(op) = self.hir_instance_operator(ty, class, method) {
             return Some(op);
         }
+        // An aggregate holding a user `Eq` compares through its glue (#1629).
+        if matches!(sym, "==" | "!=")
+            && let Some((lookup, fqn)) = self.eq_glue_target(ty, sym == "!=")
+        {
+            return Some(HirOp::Call { lookup, fqn, class, method });
+        }
+        // One of a shared body's type parameters, through its open glue
+        // (#1642).
+        if matches!(sym, "==" | "!=")
+            && let Some(glue) = self.eq_dict_glue_target(ty, sym == "!=")
+        {
+            return Some(HirOp::Glue(glue));
+        }
         match self.concrete_operator_target_ty(ty, class, method) {
             Some(_) => None,
             None => match sym {
                 "==" | "!=" => Some(HirOp::Prim),
+                // Ordering on a string-backed scalar enum with no instance
+                // (against its backing `string`, or another of its cases)
+                // orders the backing strings by their bytes (#1722).
+                "<" | ">" | "<=" | ">=" if self.hir_string_word(hir, lhs) && self.hir_string_word(hir, rhs) => Some(HirOp::Prim),
                 // Arithmetic or ordering on a number-backed scalar enum with
                 // no instance is on its backing word: a raw op over both
                 // operands, in the backing's lane.
@@ -7285,7 +7597,12 @@ impl Compiler {
     /// it has one with a one-word result.
     fn hir_instance_operator(&self, ty: &Ty, class: &'static str, method: &'static str) -> Option<HirOp> {
         let (lookup, fqn) = self.concrete_operator_target_ty(ty, class, method)?;
-        let ret = self.checker.fn_return_ty(&fqn)?;
+        // A tuple's structural order (#1721) has no source signature: a
+        // `bool`.
+        let ret = match &lookup {
+            Ty::Tuple(_) => crate::typechecking::ty::boolean(),
+            _ => self.checker.fn_return_ty(&fqn)?,
+        };
         if !matches!(
             lower::classify(&self.checker, &ret),
             Some(ValueClass::Scalar | ValueClass::Opaque | ValueClass::Object)
@@ -7298,6 +7615,21 @@ impl Compiler {
             class,
             method,
         })
+    }
+
+    /// Whether operand `id` is a `string` or a string-backed scalar enum.
+    fn hir_string_word(&self, hir: &HirBody, id: HirId) -> bool {
+        let Some(ty) = Self::hir_ty(hir, id) else {
+            return false;
+        };
+        let ty = apply_ty_prune(self.checker.subst(), ty);
+        let string = |t: &Ty| matches!(crate::typechecking::ty::strip_readonly(t), Ty::Con(n) if n == crate::typechecking::ty::STRING);
+        string(&ty)
+            || self
+                .hir_enum_name(&ty)
+                .filter(|name| self.checker.is_scalar_enum(name))
+                .and_then(|name| self.checker.scalar_value_ty(&name))
+                .is_some_and(|backing| string(&backing))
     }
 
     /// The lane of an `int` / `byte` (`false`) or `float` (`true`) operand,
@@ -9113,4 +9445,31 @@ fn close_params(ty: &Ty, args: &[Ty]) -> Option<Ty> {
 fn immediate_pair(layout: &crate::hir::layout::Layout) -> bool {
     use crate::hir::layout::{Layout, PairKind};
     matches!(layout, Layout::Pair(PairKind::Option | PairKind::Result | PairKind::Enum(_)))
+}
+
+/// [`crate::hir::tables::GlobalTables`] over the module `const` tables the
+/// compiler has recorded.
+struct HirTables<'c> {
+    c: &'c Compiler,
+    hir: &'c HirBody,
+}
+
+impl crate::hir::tables::GlobalTables for HirTables<'_> {
+    fn len(&self, id: HirId) -> Option<usize> {
+        self.c.hir_frozen_table(self.hir, id).map(<[_]>::len)
+    }
+
+    fn elem(&self, id: HirId, k: usize, read: HirId) -> Option<crate::hir::Lit> {
+        use crate::const_fold::ConstValue;
+        use crate::hir::Lit;
+        let value = self.c.hir_frozen_table(self.hir, id)?.get(k)?.as_ref()?;
+        let ty = apply_ty_prune(self.c.checker.subst(), Compiler::hir_ty(self.hir, read)?);
+        let prim = lower::primitive(&ty);
+        match value {
+            ConstValue::Int(n) if prim == Some(crate::typechecking::ty::INT) => Some(Lit::Int(*n)),
+            ConstValue::Float(f) if prim == Some(crate::typechecking::ty::FLOAT) => Some(Lit::Float(*f)),
+            ConstValue::Bool(b) if prim == Some(crate::typechecking::ty::BOOL) => Some(Lit::Bool(*b)),
+            _ => None,
+        }
+    }
 }

@@ -57,21 +57,15 @@ test("other tasks run while one waits on blocking") {
     let log: Vec<string> = Vec::new();
     let r = scope(
         fn (Scope s) use (log) {
-            let worker = s
-                .spawn(
-                    fn () use (log) {
-                        let v = got(task::blocking(slow_crunch));
-                        log.push("blocking done");
-                        v
-                    },
-                );
-            s
-                .spawn(
-                    fn () use (log) {
-                        log.push("other ran");
-                        0
-                    },
-                );
+            let worker = s.spawn(fn () use (log) {
+                let v = got(task::blocking(slow_crunch));
+                log.push("blocking done");
+                v
+            });
+            s.spawn(fn () use (log) {
+                log.push("other ran");
+                0
+            });
             match worker.join() {
                 Result::Ok(v) => v,
                 Result::Err(_) => -1,
