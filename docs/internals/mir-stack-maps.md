@@ -236,6 +236,30 @@ and relocate mapped slots on collect.
     root that is a terminator's operand, a tail call or a compare fused
     into the branch gets none.
   `tests/memory/gc_weak_temp_consumed.hy`.
+- **A heap payload moving as an `i64` drops too** (#1769). A two-word
+  enum (`Option`, `Result` or an enum of at most one payload word) passed
+  by value travels as a pair, payload and tag, and a heap payload rides
+  in it as an opaque `i64` word: a boxed enum is matched apart into a
+  `MatchPayload` typed `i64` and a φ of it, or its object is cast to
+  one. Not heap words, those registers were zeroed neither beside the
+  rebound local's `ClearWord` nor after the call, and kept the object
+  rooted until rewritten. `payload_words` marks them: an `i64`
+  `MatchPayload` or cast of a heap word, and the `i64` φs and casts that
+  copy one. `CopySinks` and `arg_clears` treat them as heap words, and a
+  call (or other consuming op) taking one also zeroes the dead registers
+  it was copied from (`payload_sources`: the φ's incomings, the match and
+  the enum it read, the object cast to it, not past a live value nor
+  into a register a local's word shares), since the LIR tier passes such
+  a word as an inline operand with no register of its own. A number
+  payload read the same way (`Option<int>` unboxed into a pair) is
+  zeroed too: harmless, and its type is not known there. Not covered: a
+  pair a call returns (`f(make())` at `-O0`), whose low word the MIR
+  gives no type to tell a heap payload from a number. Flagship `.hyc`
+  and every `examples/perf` archive are byte-identical to #1690; of the
+  225 `examples/*.hy` and `examples/perf/*.hy` archives that compile,
+  only `thread_reply` changes (two straight-line zeros, a received string
+  and the `stdout()` handle after their last call).
+  `tests/memory/gc_weak_enum_arg.hy`.
 - **Collection budget.** After a sweep the next threshold is
   `live × 4` when more than half the heap survived (a growing live set) and
   `live × 2` otherwise, never below the initial 1 MB budget.

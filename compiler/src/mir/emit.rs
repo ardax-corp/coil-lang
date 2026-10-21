@@ -1188,9 +1188,12 @@ pub(super) struct CopySinks {
 impl CopySinks {
     pub(super) fn new(func: &MirFunc) -> Self {
         let mut casts: HashMap<ValueId, Vec<ValueId>> = HashMap::new();
+        let payloads = payload_words(func);
         for inst in func.blocks.iter().flat_map(|b| &b.insts) {
             match inst {
-                MirInst::Cast { dest, src, .. } | MirInst::MatchPayload { dest, scrutinee: src, .. } if func.ty(*dest).is_heap_word() => {
+                MirInst::Cast { dest, src, .. } | MirInst::MatchPayload { dest, scrutinee: src, .. }
+                    if func.ty(*dest).is_heap_word() || payloads.contains(dest) =>
+                {
                     casts.entry(*src).or_default().push(*dest);
                 }
                 MirInst::Alloc {
@@ -1230,6 +1233,85 @@ impl CopySinks {
         }
         out
     }
+}
+
+/// The `i64` words that may hold a heap word: a boxed enum's payload
+/// read as a pair's low word (a two-word enum passed by value, whose
+/// heap payload moves as an opaque word), and the φs and casts that copy
+/// one. Typed `i64`, they are no heap word to [`CopySinks`] or
+/// [`arg_clears`], so a payload matched out of a rebound local, or passed
+/// on to a call, kept its object rooted in their registers (#1769). A
+/// plain number read the same way is zeroed too: harmless, and the
+/// payload's type is not known here.
+pub(super) fn payload_words(func: &MirFunc) -> HashSet<ValueId> {
+    let mut out: HashSet<ValueId> = HashSet::new();
+    for inst in func.blocks.iter().flat_map(|b| &b.insts) {
+        if let MirInst::MatchPayload { dest, scrutinee: src, .. } | MirInst::Cast { dest, src, .. } = inst
+            && func.ty(*dest) == MirTy::I64
+            && func.ty(*src).is_heap_word()
+        {
+            out.insert(*dest);
+        }
+    }
+    if out.is_empty() {
+        return out;
+    }
+    // Each round adds a value or stops: a loop's φs settle in a few.
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for inst in func.blocks.iter().flat_map(|b| &b.insts) {
+            let copies = match inst {
+                MirInst::Phi { dest, args, .. } => func.ty(*dest) == MirTy::I64 && args.iter().any(|(_, a)| out.contains(a)),
+                MirInst::Cast { dest, src, .. } => func.ty(*dest) == MirTy::I64 && out.contains(src),
+                _ => false,
+            };
+            if copies && out.insert(inst.dest()) {
+                changed = true;
+            }
+        }
+    }
+    out
+}
+
+/// Per payload word ([`payload_words`]), the values it was copied from:
+/// a φ's incomings, a cast's source, the enum a match read it from.
+fn payload_defs(func: &MirFunc, payloads: &HashSet<ValueId>) -> HashMap<ValueId, Vec<ValueId>> {
+    func.blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .filter(|i| payloads.contains(&i.dest()))
+        .filter_map(|i| match i {
+            MirInst::Phi { args, .. } => Some((i.dest(), args.iter().map(|&(_, a)| a).collect())),
+            MirInst::Cast { src, .. } | MirInst::MatchPayload { scrutinee: src, .. } => Some((i.dest(), vec![*src])),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The values a payload word was copied from ([`payload_defs`]) that
+/// still hold its object, transitively, not past a `stop` value. `v`
+/// itself is not listed.
+fn payload_sources(
+    func: &MirFunc,
+    payloads: &HashSet<ValueId>,
+    defs: &HashMap<ValueId, Vec<ValueId>>,
+    v: ValueId,
+    stop: impl Fn(ValueId) -> bool,
+) -> Vec<ValueId> {
+    let mut seen: HashSet<ValueId> = HashSet::from([v]);
+    let mut out = Vec::new();
+    let mut work = vec![v];
+    while let Some(x) = work.pop() {
+        for &s in defs.get(&x).map(Vec::as_slice).unwrap_or(&[]) {
+            if stop(s) || !seen.insert(s) || !(func.ty(s).is_heap_word() || payloads.contains(&s)) {
+                continue;
+            }
+            out.push(s);
+            work.push(s);
+        }
+    }
+    out
 }
 
 /// The gather registers a dense body's pushes copy heap words into
@@ -1340,7 +1422,16 @@ pub(super) fn arg_clears(
 ) -> ArgClears {
     let mut out = ArgClears::default();
     let slot = |v: ValueId| need_slot.get(v.index()).copied().unwrap_or(false) && v.index() < regs.len();
-    let heap_temp = |v: ValueId| slot(v) && func.ty(v).is_heap_word() && !func.params.contains(&v);
+    let payloads = payload_words(func);
+    let heapish = |v: ValueId| func.ty(v).is_heap_word() || payloads.contains(&v);
+    let payload_defs = payload_defs(func, &payloads);
+    let mut bound_regs = RegSet::default();
+    for &v in &func.bound_words {
+        if slot(v) {
+            bound_regs.insert(regs[v.index()]);
+        }
+    }
+    let heap_temp = |v: ValueId| slot(v) && heapish(v) && !func.params.contains(&v);
     let candidate = |v: ValueId| heap_temp(v) && !func.bound_words.contains(&v);
     // A push's dest is its array, which the local is rebound to: the
     // array's old word may go even when a local bound it.
@@ -1376,7 +1467,7 @@ pub(super) fn arg_clears(
                 kind: MirAllocKind::Enum { .. } | MirAllocKind::Tuple | MirAllocKind::Boxed { .. },
                 elems,
                 ..
-            } if elems.iter().all(|e| !func.ty(*e).is_heap_word()) => {
+            } if elems.iter().all(|e| !heapish(*e)) => {
                 consts.insert(*dest);
             }
             MirInst::Cast { dest, src, .. } if consts.contains(src) => {
@@ -1422,6 +1513,22 @@ pub(super) fn arg_clears(
                 .filter(|&v| operand_candidate(inst, v) && unused(v))
                 .map(|v| (regs[v.index()], v))
                 .collect();
+            // A payload word passed on: the registers it was copied from
+            // (its φ's incomings, the match it was read by and the enum
+            // matched, the object cast to it) hold the object too, also
+            // when the word itself has none (an inline operand of the LIR
+            // tier) (#1769). Not past a live value, nor into a register
+            // a local's word shares.
+            for v in inst.operands() {
+                if !payloads.contains(&v) || func.params.contains(&v) || func.bound_words.contains(&v) || !unused(v) {
+                    continue;
+                }
+                for s in payload_sources(func, &payloads, &payload_defs, v, |x| consts.contains(&x) || live[b][k].contains(&x)) {
+                    if candidate(s) && unused(s) && !bound_regs.contains(regs[s.index()]) {
+                        words.push((regs[s.index()], s));
+                    }
+                }
+            }
             for &(r, v) in gathers.by_push.get(&(b, k)).map(Vec::as_slice).unwrap_or(&[]) {
                 if candidate(v) && unused(v) {
                     words.push((r, v));
