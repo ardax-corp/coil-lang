@@ -186,15 +186,15 @@ fn failed_call_is_reported_once() {
 
 #[test]
 fn attribute_macro_body_diagnostics_point_at_the_statement() {
-    // `#[log]` / `#[measure]` re-emit the function with `f.with_name(…)`:
+    // Stacked `#[add_after]` re-emit the function with `f.with_name(…)`:
     // the body is the user's code, so its diagnostics stay on it (#1822).
     let name = "macro_attr_body_diagnostics";
     let out = compile_fail(name);
     for n in [
         "[E0136] unused `Result` value",
-        &format!("{name}.hy:12:5 ]"),
-        "[E0102] Type mismatch: expected `int`, found `string`",
         &format!("{name}.hy:13:5 ]"),
+        "[E0102] Type mismatch: expected `int`, found `string`",
+        &format!("{name}.hy:14:5 ]"),
     ] {
         assert!(out.contains(n), "{name}: missing `{n}` in:\n{out}");
     }

@@ -1,15 +1,16 @@
 // Expected: E0102 — a type error in a function an attribute macro wraps is
 // reported at the statement, not the whole item (#1822); so is the unused
 // `Result` warning before it.
-use io::stdout;
-use io::sync::write_all;
-use string::to_bytes;
-use attr_demo::{log, measure};
+use derive_macros::add_after;
 
-#[log(message = "enter")]
-#[measure(metric = "do_thing")]
+fn check(int x) -> Result<int, string> {
+    return Ok(x);
+}
+
+#[add_after(1)]
+#[add_after(by = 10)]
 fn do_thing(int x) -> int {
-    write_all(stdout(), to_bytes("hi"));
+    check(x);
     let y: int = "nope";
     return x + y;
 }
