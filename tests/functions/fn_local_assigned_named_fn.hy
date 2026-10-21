@@ -11,6 +11,14 @@ fn sum(int a, int b) -> int {
     return a + b;
 }
 
+fn ident<T>(T x) -> T {
+    return x;
+}
+
+fn inc(int x) -> int {
+    return x + 1;
+}
+
 fn scale(int k) -> fn(int, int) -> int {
     return fn (int a, int b) use (k) => (a + b) * k;
 }
@@ -48,8 +56,22 @@ fn from_closure(bool b, int k) -> int {
     if b {
         f = scale(k);
     }
-    let g = f;
-    return g(1, 2);
+    return f(1, 2);
+}
+
+fn generic_named(bool b) -> int {
+    let f: fn(int) -> int = inc;
+    if b {
+        f = ident;
+    }
+    return f(4);
+}
+
+fn param(fn(int) -> int f, bool b) -> int {
+    if b {
+        f = inc;
+    }
+    return f(4);
 }
 
 test("a function local reassigned to a named function") {
@@ -70,4 +92,14 @@ test("a function local reassigned in a loop") {
 test("a function local reassigned to a returned closure") {
     assert!(from_closure(false, 5) == 3);
     assert!(from_closure(true, 5) == 15);
+}
+
+test("a function local reassigned to a generic function") {
+    assert!(generic_named(false) == 5);
+    assert!(generic_named(true) == 4);
+}
+
+test("a function parameter reassigned to a named function") {
+    assert!(param(fn (int x) => x * 2, false) == 8);
+    assert!(param(fn (int x) => x * 2, true) == 5);
 }
