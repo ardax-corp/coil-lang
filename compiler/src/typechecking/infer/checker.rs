@@ -17178,6 +17178,23 @@ impl Checker {
                         )),
                     );
                 }
+                // `K::n(1)` of a class static or module const that holds no
+                // function (#1726): the function-typed one is called above.
+                if !matches!(fields, EnumConstructPayload::Unit)
+                    && let Some(ty) = self
+                        .static_slot_types
+                        .get(&static_fqn)
+                        .or_else(|| self.module_consts.get(&format!("{enum_name}::{variant_name}")))
+                        .cloned()
+                {
+                    let shown = self.diag_ty(&ty);
+                    return self.error_with_help(
+                        ErrorCode::NotAFunction,
+                        format!("`{}::{}` has type `{}`, not a function type", enum_name, variant_name, shown),
+                        range,
+                        Some(format!("read it as `{}::{}` without arguments", enum_name, variant_name)),
+                    );
+                }
                 return self.error(
                     ErrorCode::UnknownEnum,
                     format!("Cannot find enum, type or trait `{}` in this scope", enum_name),
