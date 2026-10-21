@@ -17195,6 +17195,26 @@ impl Checker {
                         Some(format!("read it as `{}::{}` without arguments", enum_name, variant_name)),
                     );
                 }
+                // `C::x` of an instance field (`const` or not, #1726).
+                if let Some(class_key) = self.resolve_class_key(enum_name)
+                    && self
+                        .classes
+                        .get(&class_key)
+                        .is_some_and(|fields| fields.iter().any(|(_, name, _)| name == variant_name))
+                {
+                    return self.error_with_help(
+                        ErrorCode::GenericTypeError,
+                        format!(
+                            "`{}` is an instance field; read it on a value (`obj.{}`)",
+                            static_fqn, variant_name
+                        ),
+                        range,
+                        Some(format!(
+                            "or declare `static {}` to read it as `{}`",
+                            variant_name, static_fqn
+                        )),
+                    );
+                }
                 return self.error(
                     ErrorCode::UnknownEnum,
                     format!("Cannot find enum, type or trait `{}` in this scope", enum_name),
