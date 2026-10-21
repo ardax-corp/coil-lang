@@ -536,9 +536,10 @@ pub struct Checker {
     /// Match exhaustiveness checks deferred until substitution is closed.
     pending_exhaustive: Vec<PendingExhaustive>,
 
-    /// `gc::weak` arguments, checked once substitution is closed: a
-    /// readonly class instance may not be weakened (#1644).
-    pending_weak_args: Vec<(Ty, Range<usize>)>,
+    /// `gc::weak` arguments and generic instantiations, checked once
+    /// substitution is closed: a readonly class instance may not be
+    /// weakened, directly (#1644) or through a type parameter (#1670).
+    weak_checks: checker::weak_check::WeakChecks,
 
     /// Names of `gen fn` declarations (for codegen).
     async_functions: std::collections::HashSet<String>,
@@ -612,6 +613,11 @@ pub struct Checker {
 
     /// Fixed-prefix arity for [`Self::extern_variadic`] entries.
     extern_variadic_nfixed: HashMap<String, usize>,
+
+    /// `ConstBytes` parameters of `extern` functions, as `(fixed arity,
+    /// variadic, index)` per name: typed `readonly Vec<byte>`, they also
+    /// take a `string`, lent in place as `invoke` lends it (#1665).
+    extern_const_bytes: HashMap<String, Vec<(usize, bool, usize)>>,
 
     /// Per-call-site FFI type tags for variadic FFI invokes (keyed by call span).
     /// Used by codegen because runtime `Value`s are untagged.
