@@ -14902,21 +14902,31 @@ impl Checker {
     /// redeclare a built-in type, or `None` when the name is free here. The
     /// built-in keeps its key, so such a type would split: a type position
     /// would name it while `new` or a literal still built the built-in
-    /// (#1654). `Option` / `Result` are free once a `use prelude::… as`
-    /// rebinds them; the other built-ins have no such escape.
+    /// (#1654). No `use` frees one of these names: a type position still
+    /// resolves `Option` / `Result` (in any letter case) to the built-in
+    /// even after `use prelude::Option as …` (#1672).
     fn builtin_type_redeclaration_help(&self, name: &str) -> Option<String> {
         if self.current_module == crate::macros::CORE_MODULE {
             return None;
         }
         if common::is_poly_builtin_enum(name) {
-            return self.builtin_name_in_scope(name).then(|| {
-                format!(
-                    "`{name}` is in the prelude; free the short name with `use prelude::{name} as OtherName;` before redefining, or pick a different name"
-                )
-            });
+            return Some(Self::prelude_enum_redeclaration_help(name));
+        }
+        if let Some(builtin) = [common::BUILTIN_OPTION_ENUM, common::BUILTIN_RESULT_ENUM]
+            .into_iter()
+            .find(|b| b.eq_ignore_ascii_case(name))
+        {
+            return Some(format!(
+                "built-in type names match in any letter case, so `{name}` names the prelude `{builtin}`; pick a different name"
+            ));
         }
         common::is_reserved_builtin_type(name)
             .then(|| format!("`{name}` is a built-in type; pick a different name"))
+    }
+
+    /// E0200 help for a user `Option` / `Result` (#1672).
+    fn prelude_enum_redeclaration_help(name: &str) -> String {
+        format!("`{name}` is the built-in prelude enum; pick a different name")
     }
 
     /// A top-level `class` may not take a built-in type's name (#1654).
@@ -16285,7 +16295,9 @@ impl Checker {
                     return;
                 }
                 if common::is_builtin_enum(&name_str) {
+                    // `Option` / `Result` stay built-in under any rebind (#1672).
                     if self.builtin_name_in_scope(&name_str)
+                        || common::is_poly_builtin_enum(&name_str)
                         || common::is_builtin_ffi_enum(&name_str)
                     {
                         let mut msg = Message::error(
@@ -16294,10 +16306,7 @@ impl Checker {
                             node.0.into_range(),
                         );
                         if common::is_poly_builtin_enum(&name_str) {
-                            msg.with_help(format!(
-                                "`{}` is in the prelude; free the short name with `use prelude::{} as OtherName;` before redefining, or pick a different name",
-                                name_str, name_str
-                            ));
+                            msg.with_help(Self::prelude_enum_redeclaration_help(&name_str));
                         } else {
                             msg.with_help(format!(
                                 "`{}` is a compiler FFI type; use `ffi::types::{{…}}` instead of redeclaring it",
@@ -16309,8 +16318,9 @@ impl Checker {
                         self.pop_type_params_for_type_parsing(pushed);
                         return;
                     }
-                    // Prelude enum short name was rebound, drop the
-                    // compiler registration so the user enum can take over.
+                    // A built-in error enum this module did not import
+                    // (`IoError`, …): drop the compiler registration so
+                    // the user enum can take over.
                     self.enums.remove(&name_str);
                     self.enum_tags.remove(&name_str);
                     self.enum_payloads.remove(&name_str);
