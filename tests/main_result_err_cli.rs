@@ -113,7 +113,7 @@ fn main() -> Result<unit, ThreadError> {
         for (name, src, msg) in [
             ("string_err.hy", string_err, "main returned Err(bad)"),
             ("thread_err.hy", thread_err, "main returned Err(JoinFailed)"),
-            ("enum_err.hy", enum_err, "main returned Err(E)"),
+            ("enum_err.hy", enum_err, "main returned Err(E::Bad)"),
         ] {
             let (success, line) = run(&bin, &dir, name, src, mode);
             assert!(!success, "{name} {mode:?}: expected a failing exit");
