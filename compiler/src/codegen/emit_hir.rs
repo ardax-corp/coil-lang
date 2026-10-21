@@ -2736,8 +2736,9 @@ impl Compiler {
                 }
                 next += 1;
             }
-            // A generic pack's type is its items' one ground type; a
-            // tuple pack's is its items' types in order.
+            // A generic pack's type is its items' one ground type (`P` and
+            // `readonly P` are one, as for the mono key, #1728); a tuple
+            // pack's is its items' types in order.
             let rest_ty = match rest_ty {
                 _ if whole_rest.is_some() => None,
                 Some(_) if tuple_rest => {
@@ -2751,8 +2752,15 @@ impl Compiler {
                     }
                 }
                 Some(declared) if generic => {
-                    let item = rest.first().and_then(|&r| b.expr(r).ty.clone()).map(|t| apply_ty_prune(self.checker.subst(), &t));
-                    let same = |t: &Ty| rest.iter().all(|&r| b.expr(r).ty.as_ref().map(|u| apply_ty_prune(self.checker.subst(), u)).as_ref() == Some(t));
+                    let key = |r: HirId| b.expr(r).ty.as_ref().map(|t| crate::monomorphize::mono_key_ty(&apply_ty_prune(self.checker.subst(), t)));
+                    let item = rest
+                        .first()
+                        .and_then(|&r| b.expr(r).ty.as_ref())
+                        .map(|t| crate::typechecking::ty::strip_readonly(&apply_ty_prune(self.checker.subst(), t)).clone());
+                    let same = |t: &Ty| {
+                        let k = crate::monomorphize::mono_key_ty(t);
+                        rest.iter().all(|&r| key(r).as_ref() == Some(&k))
+                    };
                     match (declared, item) {
                         (Ty::App(head, params), Some(item)) if params.len() == 1 && same(&item) && crate::hir::layout::ty_is_closed(&item) => {
                             Some(Ty::App(head, vec![item]))
