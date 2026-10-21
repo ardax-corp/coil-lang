@@ -1,0 +1,2 @@
+# Data files the comptime tests read byte for byte: no CRLF on Windows.
+tests/comptime/data/** -text
