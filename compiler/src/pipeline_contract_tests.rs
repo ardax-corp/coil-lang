@@ -307,7 +307,7 @@ fn case_text(t: &Target, runs: u32) -> String {
          __prop_tries += 1;\n\
          {draws}{checks}        \
          __prop_ran += 1;\n        \
-         let __prop_failed = __prop_run(fn (){capture} {{\n            {path}({args});\n        }});\n        \
+         let __prop_failed = __prop_run(fn (){capture} {{\n            let _ = {path}({args});\n        }});\n        \
          match __prop_failed {{\n            \
          Option::Some(prop_message__) => {{\n                \
          raise \"{path}(\" + {shown} + \"): \" + prop_message__;\n            }},\n            \
