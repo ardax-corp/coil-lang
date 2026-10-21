@@ -2655,7 +2655,8 @@ impl Checker {
             Expression::Expr(e) | Expression::Group(e) | Expression::Statement(e) => self.infer(e),
             // Semicolon form discards the value (same as a Rust statement).
             Expression::ExprStatement(e) => {
-                let _ = self.infer(e);
+                let ty = self.infer(e);
+                self.warn_unused_result(&ty, e);
                 unit_ty()
             }
 
@@ -7044,6 +7045,31 @@ impl Checker {
         let what = if op == "neg" { "`-` on a `byte`".to_string() } else { format!("`byte` `{op}`") };
         let mut msg = Message::warn(ErrorCode::ByteWrap, format!("{what} wraps modulo 256"), range.clone());
         msg.with_help("the result keeps its low 8 bits; convert to `int` first (`x as int`) for exact arithmetic".to_string());
+        self.messages.push(msg);
+    }
+
+    /// An expression statement whose value is a `Result` drops it, and with
+    /// it any error it holds (#1752), so it warns, like Rust's
+    /// `unused_must_use`. `expr?;` is not one (`?` consumes the `Result`),
+    /// a block's tail is its value, and `let _ = expr;` discards on purpose.
+    /// An assignment's value is the stored `Result`, which the target keeps.
+    fn warn_unused_result(&mut self, ty: &Ty, stmt: &Output) {
+        if matches!(
+            unwrap_expr_wrappers(stmt).1.as_ref(),
+            Expression::Assignment(..) | Expression::CompoundAssign(..)
+        ) {
+            return;
+        }
+        let ty = apply_ty_prune(&self.subst, ty);
+        if !is_result_ty(&ty) {
+            return;
+        }
+        let mut msg = Message::warn(
+            ErrorCode::UnusedResult,
+            "unused `Result` value: an error it holds is dropped".to_string(),
+            stmt.0.into_range(),
+        );
+        msg.with_help("handle it with `?` or `match`, or write `let _ = …;` to discard it on purpose".to_string());
         self.messages.push(msg);
     }
 
