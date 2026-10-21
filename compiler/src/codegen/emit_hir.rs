@@ -3612,6 +3612,12 @@ impl Compiler {
             if assigned.contains(&local.0) || hir.local(local).captured || deferred.contains(&local.0) {
                 continue;
             }
+            // A local of a one-word type stays one word even when its init
+            // is a pair: `let s: Sum = mk_r(2)` packs a readonly pair class
+            // into a trait object (#1562).
+            if hir.local(local).ty.as_ref().is_some_and(|t| self.hir_mir_pair_tys(t).is_none()) {
+                continue;
+            }
             if let Some(Rep::Pair(kind)) = emit.plan.calls.get(&init.0).map(Self::hir_call_rep) {
                 emit.plan.pair_locals.insert(local.0, kind);
                 continue;
