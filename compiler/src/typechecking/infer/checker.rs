@@ -4834,6 +4834,30 @@ impl Checker {
         {
             self.gate_stream_attach(range.clone());
         }
+        // A method's `... xs` template calls its instance for this call's
+        // pack (#1754).
+        if let Some(owner) = self.class_owner_from_ty(&resolved)
+            && self.methods.get(&owner).is_some_and(|m| m.contains_key(*method))
+            && !self.is_static_method(&owner, method)
+        {
+            let key = format!("{owner}::{method}");
+            if self.is_variadic_template(&key) {
+                self.check_inherent_method_access(&owner, method, &range);
+                return self.infer_variadic_method_call(&key, method, recv, &recv_ty, method_args, id, range);
+            }
+        }
+        if let Some(owner) = self.class_owner_from_ty(&resolved)
+            && let Some(ty) = self.foreign_method_template_call(&format!("{owner}::{method}"), &range)
+        {
+            for arg in method_args {
+                let value = match arg.1.as_ref() {
+                    Expression::NamedArg(_, v) => v,
+                    _ => arg,
+                };
+                let _ = self.infer(value);
+            }
+            return ty;
+        }
         // Named args on methods: only inherent class methods.
         if method_has_named {
             let class_owner = self.class_owner_from_ty(&resolved);
@@ -15344,11 +15368,14 @@ impl Checker {
                 }
                 vars.extend(method_vars);
             }
-            self.current_tuple_pack = Self::tuple_pack_ty_for_args(args, &mut self.counter);
+            let fqn = format!("{}::{}", owner_key, name);
+            // A method template's instance has its pack fixed (#1754).
+            self.current_tuple_pack = self
+                .variadic_instance_pack(&fqn)
+                .or_else(|| Self::tuple_pack_ty_for_args(args, &mut self.counter));
             let arg_tys = self.parse_arg_list(args);
             self.current_tuple_pack = None;
             let param_names: Vec<String> = arg_tys.iter().map(|(n, _)| n.clone()).collect();
-            let fqn = format!("{}::{}", owner_key, name);
             // FQN only, a bare `join` / `iter` key would shadow
             // `use path::{join}` and other free-function imports.
             self.fn_param_names.insert(fqn.clone(), param_names);
@@ -19906,13 +19933,28 @@ impl Checker {
     ) -> Option<Ty> {
         use parser::ast::EnumConstructPayload;
         if !self.is_static_method(owner, method) {
-            return None;
+            let key = self.class_member_fqn(owner, method);
+            let ty = self.foreign_method_template_call(&key, &range)?;
+            if let EnumConstructPayload::Tuple(args) = fields {
+                for arg in args {
+                    let _ = self.infer(arg);
+                }
+            }
+            return Some(ty);
         }
         let owner = self
             .resolve_class_key(owner)
             .unwrap_or_else(|| owner.to_string());
         self.check_inherent_method_access(&owner, method, &range);
         let fqn = format!("{}::{}", owner, method);
+        // A static method's `... xs` template calls its instance (#1754).
+        if self.is_variadic_template(&fqn) {
+            let args = match fields {
+                EnumConstructPayload::Tuple(args) => args.as_slice(),
+                _ => &[],
+            };
+            return Some(self.infer_variadic_call(&fqn, args, call_id, range));
+        }
         let scheme = self
             .methods
             .get(&owner)
