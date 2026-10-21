@@ -335,7 +335,7 @@ fn unused_results(src: &str) -> Vec<Message> {
         .collect()
 }
 
-/// The line (counting from 0 at the start of `src`) of each E0134
+/// The line (counting from 0 at the start of `src`) of each E0136
 /// unused-`Result` warning in `src`.
 fn unused_result_lines(src: &str) -> Vec<usize> {
     let mut lines: Vec<usize> = check_messages(src)

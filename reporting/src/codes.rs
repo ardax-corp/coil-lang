@@ -184,7 +184,7 @@ impl ErrorCode {
             Self::ShiftCountOutOfRange => "E0131",
             Self::UnassignedLocal => "E0132",
             Self::DuplicateImport => "E0133",
-            Self::UnusedResult => "E0134",
+            Self::UnusedResult => "E0136",
             Self::DuplicateEnum => "E0200",
             Self::DuplicateConstructor => "E0201",
             Self::UnknownEnum => "E0202",
