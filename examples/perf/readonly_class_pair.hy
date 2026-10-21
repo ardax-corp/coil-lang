@@ -2,7 +2,7 @@
 // function the inliner keeps (it recurses) moves as two words on the
 // direct CALL/RETURN, like a `(float, float)` tuple, instead of an object
 // per return.
-// Checksum: see the run.
+// Checksum: 45000150000.0
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};
