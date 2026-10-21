@@ -1904,10 +1904,11 @@ impl Pipeline {
 
     fn emit_const_error(&mut self, c: &crate::codegen::ComptimeConst, text: String, entry_src: Option<(&Path, &str)>) {
         let refused = text.contains("while compiling needs `--comptime-");
+        let offline = text.contains("with `--comptime-offline`");
         let mut msg = Message::error(ErrorCode::ConstNotComputable, text, c.span.clone());
         msg.with_help(if refused {
             "the build decides which files, environment variables and programs compile-time code may use".to_string()
-        } else if text.contains("with `--comptime-offline`") {
+        } else if offline {
             "an offline build uses the results kept in the compile-time cache (`--comptime-cache`)".to_string()
         } else if crate::comptime_expr::is_comptime_const(&c.fqn) {
             "a `comptime` expression is computed while compiling; without `comptime` it is computed when the program runs".to_string()
