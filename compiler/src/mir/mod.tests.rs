@@ -123,6 +123,8 @@ fn main() {
 }
 "#;
     let mut p = crate::Pipeline::new();
+    // Its helper is the code under test: no copy of it inlines.
+    p.set_inline_max_cost(0);
     let (bc, constants) = p.compile_src(src).expect("compile add/sub kernel");
     assert!(
         bc.iter().any(|b| is_dense_bin_op(*b.bytecode())),
@@ -179,6 +181,8 @@ fn main() {
 }
 "#;
     let mut p = crate::Pipeline::new();
+    // Its helper is the code under test: no copy of it inlines.
+    p.set_inline_max_cost(0);
     let (bc, constants) = p.compile_src(src).expect("compile nested");
     assert!(
         bc.iter().any(|b| is_dense_bin_op(*b.bytecode())),
@@ -207,6 +211,8 @@ fn main() {
 }
 "#;
     let mut p = crate::Pipeline::new();
+    // Its helper is the code under test: no copy of it inlines.
+    p.set_inline_max_cost(0);
     let (bc, constants) = p.compile_src(src).expect("compile licm kernel");
     let fdivs = bc
         .iter()
@@ -487,6 +493,8 @@ fn main() {
 }
 "#;
     let mut p = crate::Pipeline::new();
+    // Its helper is the code under test: no copy of it inlines.
+    p.set_inline_max_cost(0);
     let (bc, constants) = p.compile_src(src).expect("compile cse kernel");
     let fdivs = bc
         .iter()
@@ -528,6 +536,8 @@ fn main() {
 }
 "#;
     let mut p = crate::Pipeline::new();
+    // Its helper is the code under test: no copy of it inlines.
+    p.set_inline_max_cost(0);
     let (bc, constants) = p.compile_src(src).expect("compile gvn kernel");
     let fdivs = bc
         .iter()
@@ -598,6 +608,8 @@ fn main() {
 }
 "#;
     let mut p = crate::Pipeline::new();
+    // Its helper is the code under test: no copy of it inlines.
+    p.set_inline_max_cost(0);
     let (bc, constants) = p.compile_src(src).expect("compile float pipeline kernel");
     let fdivs = bc
         .iter()
@@ -686,6 +698,8 @@ fn main() {
 }
 "#;
     let mut p = crate::Pipeline::new();
+    // Its helper is the code under test: no copy of it inlines.
+    p.set_inline_max_cost(0);
     let (bc, constants) = p.compile_src(src).expect("compile iv sr kernel");
     let fmuls = bc
         .iter()
@@ -1106,6 +1120,8 @@ fn main() {
 }
 "#;
     let mut p = crate::Pipeline::new();
+    // Its helper is the code under test: no copy of it inlines.
+    p.set_inline_max_cost(0);
     let (bc, constants) = p.compile_src(src).expect("compile i64 add/sub");
     assert!(
         bc.iter().any(|b| is_dense_bin_op(*b.bytecode())),
@@ -2283,6 +2299,8 @@ fn main() {
 }
 "#;
     let mut p = crate::Pipeline::new();
+    // Its helper is the code under test: no copy of it inlines.
+    p.set_inline_max_cost(0);
     let (bc, constants) = p.compile_src(src).expect("compile pack");
     let symbols = p.program_debug().fn_symbols;
     let pack = symbols.iter().position(|s| s.name == "pack").expect("pack");
@@ -2407,6 +2425,8 @@ fn main() {
 }
 "#;
     let mut p = crate::Pipeline::new();
+    // Its helper is the code under test: no copy of it inlines.
+    p.set_inline_max_cost(0);
     let (bc, constants) = p.compile_src(src).expect("compile pack_store");
     let symbols = p.program_debug().fn_symbols;
     let pack = symbols.iter().position(|s| s.name == "pack").expect("pack");
@@ -2884,6 +2904,8 @@ fn main() {
 }
 "#;
     let mut def = crate::Pipeline::new();
+    // Its helper is the code under test: no copy of it inlines.
+    def.set_inline_max_cost(0);
     let (bc_def, constants) = def.compile_src(src).expect("compile default");
     assert!(
         bc_def.iter().any(|b| is_dense_bin_op(*b.bytecode())),
@@ -2895,6 +2917,8 @@ fn main() {
     );
 
     let mut attached = crate::Pipeline::new();
+    // Its helper is the code under test: no copy of it inlines.
+    attached.set_inline_max_cost(0);
     attached.set_debugger_attached(true);
     let (bc, constants_dbg) = attached
         .compile_src(src)
@@ -2922,6 +2946,8 @@ fn main() {
     vm_def.run_raw(&bc_def, &constants, def.strings(), def.static_slot_count());
 
     let mut og = crate::Pipeline::new();
+    // Its helper is the code under test: no copy of it inlines.
+    og.set_inline_max_cost(0);
     og.set_opt_level(crate::OptLevel::Debug);
     let (bc_og, constants_og) = og.compile_src(src).expect("compile -Og");
     assert!(
