@@ -2,17 +2,67 @@
 //! evaluation running ([`set_active`]): `--comptime-read` / `-write` /
 //! `-env` / `-exec` for the module of the const, `comptime` expression or
 //! macro. With no grants active (silent folding, `static let`) every one
-//! of them fails the evaluation.
+//! of them fails the evaluation. While recording ([`start_recording`]),
+//! each granted call is noted for the result cache.
 
 use std::cell::RefCell;
 use std::sync::Arc;
 
 use common::Value;
-use compiler::macros::ComptimeIo;
+use compiler::macros::{ComptimeAccess, ComptimeIo};
 use machine::{FfiError, Heap, HostClosureFn, NativeFn, Object};
 
 thread_local! {
     static ACTIVE: RefCell<Option<Arc<ComptimeIo>>> = const { RefCell::new(None) };
+    static RECORD: RefCell<Option<Vec<ComptimeAccess>>> = const { RefCell::new(None) };
+}
+
+/// Note the IO this thread's compile-time VM does from now on.
+pub fn start_recording() {
+    RECORD.with(|r| *r.borrow_mut() = Some(Vec::new()));
+}
+
+/// The IO noted since [`start_recording`], each once; stops recording.
+pub fn take_recording() -> Vec<ComptimeAccess> {
+    RECORD.with(|r| r.borrow_mut().take().unwrap_or_default())
+}
+
+fn recording() -> bool {
+    RECORD.with(|r| r.borrow().is_some())
+}
+
+fn note(access: ComptimeAccess) {
+    RECORD.with(|r| {
+        if let Some(list) = r.borrow_mut().as_mut()
+            && !list.contains(&access)
+        {
+            list.push(access);
+        }
+    });
+}
+
+/// A read of `path`, with what it sees before the native runs.
+fn note_read(path: &str) {
+    if !recording() {
+        return;
+    }
+    let path = compiler::macros::absolute_path(std::path::Path::new(path));
+    let seen = RECORD.with(|r| {
+        r.borrow()
+            .iter()
+            .flatten()
+            .any(|a| matches!(a, ComptimeAccess::Read { path: p, .. } if *p == path))
+    });
+    if !seen {
+        let digest = compiler::comptime_cache::path_digest(&path);
+        note(ComptimeAccess::Read { path, digest });
+    }
+}
+
+fn note_write(path: &str) {
+    if recording() {
+        note(ComptimeAccess::Write(compiler::macros::absolute_path(std::path::Path::new(path))));
+    }
 }
 
 /// Make `io` the grants of what this thread's compile-time VM runs next;
@@ -68,27 +118,39 @@ fn text(heap: &Heap, v: Value) -> Option<String> {
 
 fn check(io: &ComptimeIo, gate: Gate, heap: &Heap, args: &[Value]) -> Result<(), String> {
     let arg = |i: usize| args.get(i).and_then(|&v| text(heap, v)).ok_or_else(|| "a path argument is not a string".to_string());
+    let read = |path: &str| io.check_read(path).map(|()| note_read(path));
+    let write = |path: &str| io.check_write(path).map(|()| note_write(path));
     match gate {
-        Gate::Read => io.check_read(&arg(0)?),
-        Gate::Write(from, to) => (from..to).try_for_each(|i| io.check_write(&arg(i)?)),
+        Gate::Read => read(&arg(0)?),
+        Gate::Write(from, to) => (from..to).try_for_each(|i| write(&arg(i)?)),
         Gate::Copy => {
-            io.check_read(&arg(0)?)?;
-            io.check_write(&arg(1)?)
+            read(&arg(0)?)?;
+            write(&arg(1)?)
         }
         Gate::Open => {
             let path = arg(0)?;
             let mode = args.get(1).and_then(|&v| text(heap, v));
             let caps = common::open_mode_caps(mode.as_deref());
             if caps.contains(common::Caps::READ) {
-                io.check_read(&path)?;
+                read(&path)?;
             }
             if caps.contains(common::Caps::WRITE) {
-                io.check_write(&path)?;
+                write(&path)?;
             }
             Ok(())
         }
-        Gate::Env => io.check_env(&arg(0)?),
-        Gate::Exec => io.check_exec(&arg(0)?),
+        Gate::Env => {
+            let name = arg(0)?;
+            io.check_env(&name)?;
+            note(ComptimeAccess::Env(name));
+            Ok(())
+        }
+        Gate::Exec => {
+            let program = arg(0)?;
+            io.check_exec(&program)?;
+            note(ComptimeAccess::Exec(program));
+            Ok(())
+        }
         Gate::Stream => Ok(()),
     }
 }

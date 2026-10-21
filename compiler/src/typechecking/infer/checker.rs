@@ -18717,6 +18717,18 @@ impl Checker {
         self.class_type_ids.iter().map(|(k, id)| (k.as_str(), *id))
     }
 
+    /// A name for each class, enum and record type id that stays the same
+    /// from build to build (ids are handed out in compile order), for
+    /// cached compile-time values.
+    pub fn type_id_keys(&self) -> Vec<(u32, String)> {
+        let classes = self.class_type_ids.iter().map(|(k, id)| (*id, format!("class {k}")));
+        let records = self
+            .record_type_ids
+            .iter()
+            .map(|((names, kinds), id)| (*id, format!("record {}:{kinds:?}", names.join(","))));
+        classes.chain(records).collect()
+    }
+
     /// Field word kinds (`common::WORD_*`) of every class with typed slots,
     /// in slot order. Generic fields stay unknown.
     pub fn class_word_kinds(&self) -> Vec<common::ClassWordKinds> {

@@ -461,6 +461,7 @@ dependencies = [
  "rkyv",
  "serde",
  "serde_json",
+ "sha2",
  "stacker",
 ]
 

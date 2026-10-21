@@ -77,6 +77,9 @@ pub enum ErrorCode {
     /// has effects, panics, runs out of budget, or its value holds a
     /// function, handle or other value with no compile-time form.
     ConstNotComputable,
+    /// `--comptime-refresh` computed a cached compile-time result again
+    /// and it differs from the cached one (a note, not an error).
+    ComptimeResultChanged,
 
     DuplicateEnum,
     DuplicateConstructor,
@@ -186,6 +189,7 @@ impl ErrorCode {
             Self::UnassignedLocal => "E0132",
             Self::DuplicateImport => "E0133",
             Self::ConstNotComputable => "E0134",
+            Self::ComptimeResultChanged => "E0135",
             Self::DuplicateEnum => "E0200",
             Self::DuplicateConstructor => "E0201",
             Self::UnknownEnum => "E0202",
@@ -277,6 +281,7 @@ impl ErrorCode {
             Self::UnassignedLocal => "local read before it is assigned",
             Self::DuplicateImport => "local name imported twice",
             Self::ConstNotComputable => "const value cannot be computed at compile time",
+            Self::ComptimeResultChanged => "compile-time result changed on refresh",
             Self::DuplicateEnum => "duplicate enum",
             Self::DuplicateConstructor => "duplicate constructor",
             Self::UnknownEnum => "unknown enum",
@@ -376,6 +381,7 @@ mod tests {
             | UnassignedLocal
             | DuplicateImport
             | ConstNotComputable
+            | ComptimeResultChanged
             | DuplicateEnum
             | DuplicateConstructor
             | UnknownEnum
@@ -457,6 +463,7 @@ mod tests {
             UnassignedLocal,
             DuplicateImport,
             ConstNotComputable,
+            ComptimeResultChanged,
             DuplicateEnum,
             DuplicateConstructor,
             UnknownEnum,

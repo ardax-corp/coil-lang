@@ -364,14 +364,15 @@ pub struct CompiledExpansion {
 pub trait MacroHost: Send + Sync {
     /// Call each `(entry, input)`: `entry` is the offset of a
     /// `fn(string input) -> string`, each call within `limits` and with the
-    /// IO `io` grants. Returns each result, or the panic / error text.
+    /// IO `io` grants. Returns each result, or the panic / error text, with
+    /// the IO the call did.
     fn run(
         &self,
         program: &CompiledExpansion,
         calls: &[(u32, String)],
         limits: &crate::ComptimeLimits,
         io: &ComptimeIo,
-    ) -> Vec<Result<String, String>>;
+    ) -> Vec<MacroRun>;
 
     /// Compute `consts` in order on a compile-time VM of `program`: call
     /// each initializer, store its value to its static slot (later
@@ -418,7 +419,7 @@ pub struct FoldCall {
 /// (`__static_init$NAME`), the static slot its value is stored to and that
 /// slot's word kind (`common::WORD_*`). `silent` for a `static let`, whose
 /// failure keeps its startup initializer; a `const`'s fails the build.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConstEval {
     pub entry: u32,
     pub slot: u32,
@@ -427,6 +428,20 @@ pub struct ConstEval {
     /// Index of its grants in the request's `io` (unused when `silent`:
     /// silent work never does IO).
     pub io: u32,
+    /// Its value from the result cache (its static slot already set):
+    /// restored instead of calling the initializer.
+    pub cached: Option<std::sync::Arc<common::HeapSnapshot>>,
+    /// Record the IO it does, and when it did some, snapshot its value
+    /// alone, for the result cache ([`ConstEvalOutcome::records`]).
+    pub record: bool,
+}
+
+/// A `record` item that did IO: its index, the IO, and its value alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConstRecord {
+    pub index: usize,
+    pub accesses: Vec<ComptimeAccess>,
+    pub snapshot: common::HeapSnapshot,
 }
 
 /// The computed values, the silent items left out (indices into the
@@ -437,6 +452,7 @@ pub struct ConstEvalOutcome {
     pub snapshot: common::HeapSnapshot,
     pub skipped: Vec<usize>,
     pub folded: Vec<Option<FoldValue>>,
+    pub records: Vec<ConstRecord>,
 }
 
 /// Why [`MacroHost::eval_consts`] gave no snapshot.
@@ -465,14 +481,32 @@ pub fn default_host() -> Option<std::sync::Arc<dyn MacroHost>> {
 /// The IO one compile-time evaluation may do, resolved for the module its
 /// code is in ([`crate::ComptimeGrants::for_module`]): files under `read` /
 /// `write` (absolute), environment variables `env`, programs whose stem is
-/// in `exec`. The host checks each native call against it.
+/// in `exec`. The host checks each native call against it. `offline`
+/// (`--comptime-offline`) refuses the environment and programs: an
+/// evaluation runs then only when no cached result was found.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct ComptimeIo {
     pub read: Vec<PathBuf>,
     pub write: Vec<PathBuf>,
     pub env: Vec<String>,
     pub exec: Vec<String>,
+    pub offline: bool,
 }
+
+/// One granted IO call of a compile-time evaluation, as the result cache
+/// records it ([`crate::comptime_cache`]).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ComptimeAccess {
+    /// A file or directory read (absolute), with [`crate::comptime_cache::path_digest`]
+    /// of it when first read.
+    Read { path: PathBuf, digest: [u8; 32] },
+    Write(PathBuf),
+    Env(String),
+    Exec(String),
+}
+
+/// One macro call's output (or failure) and the IO it did.
+pub type MacroRun = (Result<String, String>, Vec<ComptimeAccess>);
 
 impl ComptimeIo {
     /// The effect bits (`common::EffectFlags`) code with these grants may
@@ -506,7 +540,7 @@ impl ComptimeIo {
 
     pub fn check_env(&self, name: &str) -> Result<(), String> {
         if self.env.iter().any(|n| n == name) {
-            return Ok(());
+            return self.check_online(&format!("reads environment variable `{name}`"));
         }
         Err(format!("reading environment variable `{name}` while compiling needs `--comptime-env {name}`"))
     }
@@ -514,9 +548,18 @@ impl ComptimeIo {
     pub fn check_exec(&self, program: &str) -> Result<(), String> {
         let stem = Path::new(program).file_stem().and_then(|s| s.to_str()).unwrap_or(program);
         if self.exec.iter().any(|s| s == stem) {
-            return Ok(());
+            return self.check_online(&format!("runs `{program}`"));
         }
         Err(format!("running `{program}` while compiling needs `--comptime-exec {stem}`"))
+    }
+
+    fn check_online(&self, what: &str) -> Result<(), String> {
+        if !self.offline {
+            return Ok(());
+        }
+        Err(format!(
+            "with `--comptime-offline` there is no cached result for this, and it {what} while compiling; build once without `--comptime-offline` to record it"
+        ))
     }
 }
 

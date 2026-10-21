@@ -21,7 +21,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use common::{Byte, Value};
 use compiler::ComptimeLimits;
-use compiler::macros::{CompiledExpansion, ComptimeIo, ConstEval, ConstEvalError, ConstEvalOutcome, FoldCall, FoldValue, MacroHost, native_allowed_at_compile_time};
+use compiler::macros::{
+    CompiledExpansion, ComptimeIo, ConstEval, ConstEvalError, ConstEvalOutcome, ConstRecord, FoldCall, FoldValue, MacroHost,
+    MacroRun, native_allowed_at_compile_time,
+};
 use machine::{FfiError, HostClosureFn, Machine, NativeFn, Object, SnapRoot};
 
 /// Runs macros in a sandboxed VM.
@@ -46,11 +49,15 @@ impl MacroHost for VmMacroHost {
         calls: &[(u32, String)],
         limits: &ComptimeLimits,
         io: &ComptimeIo,
-    ) -> Vec<Result<String, String>> {
+    ) -> Vec<MacroRun> {
         let outer = io_gate::set_active(Some(Arc::new(io.clone())));
         let out = calls
             .iter()
-            .map(|(entry, input)| run_entry(program, *entry, input, limits))
+            .map(|(entry, input)| {
+                io_gate::start_recording();
+                let result = run_entry(program, *entry, input, limits);
+                (result, io_gate::take_recording())
+            })
             .collect();
         io_gate::set_active(outer);
         out
@@ -110,7 +117,15 @@ fn eval_in(
     let mut done: Vec<usize> = Vec::new();
     let mut skipped: Vec<usize> = Vec::new();
     let mut silent_left = ComptimeLimits::SILENT_MODULE_STEPS;
+    let mut records = Vec::new();
     for (index, c) in consts.iter().enumerate() {
+        if let Some(snapshot) = &c.cached {
+            for (slot, value) in vm.heap_mut().restore_snapshot(snapshot) {
+                vm.set_static(slot, value);
+            }
+            done.push(index);
+            continue;
+        }
         let item_limits = if c.silent {
             if silent_left == 0 {
                 skipped.push(index);
@@ -125,10 +140,14 @@ fn eval_in(
         };
         captured.0.lock().expect("capture lock").clear();
         io_gate::set_active(if c.silent { None } else { io.get(c.io as usize).cloned() });
+        if c.record {
+            io_gate::start_recording();
+        }
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             call_limited(&mut vm, c.entry, &[], &item_limits)
         }));
         io_gate::set_active(None);
+        let accesses = io_gate::take_recording();
         if c.silent {
             silent_left = silent_left.saturating_sub(vm.steps_charged());
         }
@@ -136,6 +155,13 @@ fn eval_in(
             Ok(Ok(value)) => {
                 vm.set_static(c.slot, value);
                 done.push(index);
+                if !accesses.is_empty() {
+                    let root = SnapRoot { slot: c.slot, value, kind: c.kind };
+                    // A value with no snapshot form fails the whole capture below.
+                    if let Ok(snapshot) = vm.heap().capture_snapshot(&[root]) {
+                        records.push(ConstRecord { index, accesses, snapshot });
+                    }
+                }
             }
             Ok(Err(_)) | Err(_) if c.silent => {
                 skipped.push(index);
@@ -204,6 +230,7 @@ fn eval_in(
         snapshot,
         skipped,
         folded,
+        records,
     })
 }
 
