@@ -3512,4 +3512,32 @@ fn main() { return; }
         assert_eq!(shape(&once), shape(&src), "meaning changed:\n{once}");
         assert!(!once.contains("(r?)"), "{once}");
     }
+
+    #[test]
+    fn long_signature_wraps_parameters_not_the_return_type() {
+        // #1743: `(params) -> Ret {` is measured as a whole; when it does not
+        // fit, the parameters go one per line and `-> Ret {` stays together.
+        let src = "fn lock_write_all(string path, Vec<string> packages, Vec<string> allow_include, Vec<string> scripts) -> Result<int, string> {\n    return Result::Ok(0);\n}\n\nfn lock_count_entries(string path, Vec<string> packages, Vec<string> allow_include, Vec<string> sc) {\n}\n";
+        let expected = "\
+fn lock_write_all(
+    string path,
+    Vec<string> packages,
+    Vec<string> allow_include,
+    Vec<string> scripts,
+) -> Result<int, string> {
+    return Result::Ok(0);
+}
+
+fn lock_count_entries(
+    string path,
+    Vec<string> packages,
+    Vec<string> allow_include,
+    Vec<string> sc,
+) {}
+";
+        let formatted = format_source(src).unwrap();
+        assert_eq!(formatted, expected);
+        assert!(formatted.lines().all(|l| l.len() <= MAX_WIDTH), "{formatted}");
+        assert_eq!(format_source(&formatted).unwrap(), formatted);
+    }
 }
