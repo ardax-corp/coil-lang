@@ -1,7 +1,8 @@
 // #1831: a local whose `let` binds a literal (or `None`) and which is never
 // read, but is assigned a call's value (in a loop or straight-line),
 // compiles in direct MIR: the dropped `let` used to leave the assignments
-// with no slot. Each assigned value is still computed, for its effects.
+// with no slot (a block's last statement too). Each assigned value is
+// still computed, for its effects.
 use tests::assert;
 use string::format;
 
@@ -61,6 +62,11 @@ fn string_straight() {
     s = text(1);
 }
 
+fn string_literal_last() {
+    let s = "";
+    s = "x";
+}
+
 fn int_in_for() {
     let n = 0;
     for i in 0..3 {
@@ -111,6 +117,7 @@ fn main() {
     assert!(calls == 6);
     string_straight();
     assert!(calls == 7);
+    string_literal_last();
     int_in_for();
     assert!(calls == 10);
     option_in_for();
