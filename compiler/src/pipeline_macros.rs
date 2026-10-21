@@ -306,7 +306,8 @@ impl Pipeline {
             return None;
         }
         let ast = cached.ast()?;
-        let notes = self.expansion_notes(&entry, file, cached.source(), &ast.1);
+        let name = entry.file_name().map_or(file.into(), |n| n.to_string_lossy());
+        let notes = self.expansion_notes(&entry, &name, cached.source(), &ast.1);
         Some(parser::format_program_noted(&ast.1, notes))
     }
 
