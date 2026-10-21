@@ -51,6 +51,24 @@ impl H {
     }
 }
 
+class G<T> {
+    pub v: T,
+}
+
+impl G<T> {
+    pub fn sum(int... xs) -> int {
+        let s = 0;
+        for x in xs {
+            s = s + x;
+        }
+        return s;
+    }
+
+    pub fn count<B>(B... xs) -> int {
+        return xs.len();
+    }
+}
+
 test("a generic method with a rest parameter") {
     let h = new H(10);
     let p = new P(2);
@@ -58,6 +76,14 @@ test("a generic method with a rest parameter") {
     assert!(p.x == 0);
     assert!(h.count("a", "b") == 12);
     assert!(h.count(1, 2, 3) == 13);
+    let q = readonly new P(5);
+    assert!(h.count(new P(1), q) == 12);
+}
+
+test("a generic class's method with a rest parameter") {
+    let g = new G(1.5);
+    assert!(g.sum(1, 2) == 3);
+    assert!(g.count("a", "b", "c") == 3);
 }
 
 test("a method with a rest parameter") {
