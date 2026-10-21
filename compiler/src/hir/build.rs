@@ -2290,7 +2290,9 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             let e = b.temp("err", err_ty.clone());
             let x = b.temp("ok", ok_ty.clone());
             let read_e = self.synth(b, span, HirKind::Local(e), err_ty);
-            let panic = self.main_err_panic(b, None, span, read_e);
+            // The panic reports the `return`, as `raise` reports itself
+            // (#1740).
+            let panic = self.main_err_panic(b, None, span_of(node), read_e);
             let read_x = self.synth(b, span, HirKind::Local(x), ok_ty);
             let ok = self.synth_variant(b, span, common::BUILTIN_RESULT_ENUM, "Ok", vec![read_x], miss_ret(b));
             let ret = self.synth(b, span, HirKind::Return(Some(ok)), Some(coil_ty::never()));
