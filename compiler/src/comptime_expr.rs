@@ -100,7 +100,7 @@ fn collect<'a>(node: &mut Output<'a>, consts: &mut Vec<Output<'a>>) {
 /// Adjust the checker's messages for `program`'s `comptime` expressions: a
 /// name it cannot find there is most likely a local variable, and the
 /// hidden const's binding warnings speak of the expression.
-pub fn explain_messages(program: &Output<'_>, messages: &mut Vec<reporting::Message>) {
+pub fn explain_messages(program: &Output<'_>, messages: &mut [reporting::Message]) {
     let Expression::Program(items) = program.1.as_ref() else { return };
     let ranges: Vec<(&str, std::ops::Range<usize>)> = items
         .iter()

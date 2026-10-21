@@ -36,9 +36,10 @@ fn compile_fail_with(name: &str, limits: compiler::ComptimeLimits) -> String {
     comptime::install();
     let buf = Buf::default();
     let mut pipeline = Pipeline::with_reporter(ReportConfig::default(), Box::new(buf.clone()));
-    let mut grants = compiler::HostGrants::default();
-    grants.comptime = limits;
-    pipeline.set_host_grants(grants);
+    pipeline.set_host_grants(compiler::HostGrants {
+        comptime: limits,
+        ..Default::default()
+    });
     pipeline.bind_project_root(repo(), vec![PathBuf::from("examples/src")]);
     let file = repo().join("tests/macros/compile_fail").join(format!("{name}.hy"));
     let result = pipeline.compile_src_from_file(file.to_str().unwrap());

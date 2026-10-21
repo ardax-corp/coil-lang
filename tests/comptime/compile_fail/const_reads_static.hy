@@ -8,5 +8,4 @@ fn bump() -> int {
 
 const A = bump();
 
-fn main() {
-}
+fn main() {}

@@ -10,5 +10,4 @@ fn spin(int n) -> int {
 
 const S = spin(0);
 
-fn main() {
-}
+fn main() {}

@@ -381,10 +381,8 @@ pub fn reachable_functions(
     });
     let outside = outside.into_iter().flat_map(|(s, e)| graph.callees(ops, s, e));
     for callee in outside.collect::<Vec<_>>().into_iter().chain(extra) {
-        if !skip(&callee) {
-            if parent.insert(callee.clone(), None).is_none() {
-                work.push_back(callee);
-            }
+        if !skip(&callee) && parent.insert(callee.clone(), None).is_none() {
+            work.push_back(callee);
         }
     }
     while let Some(name) = work.pop_front() {
