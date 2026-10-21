@@ -1722,6 +1722,7 @@ impl Pipeline {
                 slot: c.slot,
                 kind: kinds.get(c.slot as usize).copied().unwrap_or(common::WORD_UNKNOWN),
                 silent: c.silent,
+                startup_ok: !c.silent && !crate::comptime_expr::is_comptime_const(short_name(&c.fqn)),
                 io: *io_of.entry(c.fqn.rsplit_once("::").map_or("", |(m, _)| m)).or_insert_with_key(|module| {
                     io.push(self.host_grants.comptime_io_for(module));
                     io.len() as u32 - 1

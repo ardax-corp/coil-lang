@@ -36,9 +36,13 @@ expansion round ([Pipeline stage](macros.md#pipeline-stage)).
    and macro declarations, so rounds repeat until nothing is pending (at most
    `MAX_ROUNDS`).
 3. Typecheck and codegen of the whole program. A const initializer must be
-   pure, or have IO its module was granted (E0134 otherwise).
+   pure, or have IO its module was granted (E0134 otherwise). A const that
+   only opens a process handle (`stdout()`, `declare(…)`) is computed at
+   startup instead.
 4. `compute_consts`. Every const runs in setup order on one VM. The values
-   become one `RestoreSnapshot`, and pure calls are folded at `-O2`+.
+   become one `RestoreSnapshot`, and pure calls are folded at `-O2`+. A
+   const whose value exists only at run time (a function value, a handle)
+   keeps its startup initializer.
 
 The staging rule follows from step 2: a top-level block or a macro runs
 before its own module is typechecked, so it can only use code from other
@@ -78,8 +82,9 @@ Download pins (`--comptime-pin`) are not built yet; see coil-lang#1755.
 ## Diagnostics
 
 - E0134: a const or `comptime` could not be computed: an effect without a
-  grant, a refused IO call, a panic, a limit, or a value that exists only at
-  run time (a function, a handle). The help says which.
+  grant, a refused IO call, a panic, a limit, or (for `comptime` only) a
+  value that exists only at run time (a function, a handle). The help says
+  which.
 - E0135 (info): `--comptime-refresh` got a different result than the cached
   one.
 - Errors in a top-level block's body are reported in the user's file. A

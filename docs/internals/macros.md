@@ -503,8 +503,14 @@ while compiling, on the same host (`MacroHost::eval_consts`):
   `ComptimeLimits`, storing each value to its slot so later consts can read
   earlier ones. A panic or a limit is E0134 at the const.
 - The values are captured as one `common::HeapSnapshot` (sharing and cycles
-  kept; see `machine/src/memory/snapshot.rs`). A function, handle or other
-  runtime-only value is E0134 naming the path (`H.f`).
+  kept; see `machine/src/memory/snapshot.rs`). A const whose value has no
+  snapshot form (a function value, a stream or other handle) keeps its
+  startup initializer (`ConstEval::startup_ok`); in a `comptime` expression
+  it is E0134 naming the path (`H.f`).
+- A const whose only effects are calls opening a process handle
+  (`stdout`, `stderr`, `stdin`, `dload`, `declare`:
+  `STARTUP_HANDLE_NATIVES`) is not computed while compiling at all: it
+  keeps its startup initializer. Any other IO still needs a grant.
 - The setup region's `CALL init; StoreStatic slot` pairs become `NOOP`s and
   one `RestoreSnapshot` (snapshot appended to the constant pool) at the first
   const's place. The initializer bodies stay in the program.

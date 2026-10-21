@@ -6975,7 +6975,9 @@ impl Compiler {
                 self.emit_static_initializer(&fqn, init);
                 let silent = !*is_const
                     && (self.pure_static_inits.contains(&fqn) || self.pure_static_inits.contains(*name));
+                let startup = *is_const && (self.startup_consts.contains(&fqn) || self.startup_consts.contains(*name));
                 if (*is_const || silent)
+                    && !startup
                     && let Some(slot) = self.checker.static_slot_index(&fqn)
                 {
                     self.comptime_consts.push(super::ComptimeConst {
@@ -7609,6 +7611,7 @@ impl Compiler {
         self.steady_fns = self.typed_sidecar.length_stability().fns.clone();
         self.alloc_steady = self.typed_sidecar.length_stability().alloc_stable;
         self.pure_static_inits.clear();
+        self.startup_consts.clear();
         self.fold_bodies.clear();
         // E1: the HIR summaries also prove functions pure that call a
         // function parameter only with pure functions (`map(xs, fn ...)`).
@@ -7625,7 +7628,9 @@ impl Compiler {
                 });
                 effects::capture(hir, &fx, explained);
             }
-            self.messages.extend(const_effect_messages(&self.checker, hir, &fx));
+            let (messages, startup) = const_effect_messages(&self.checker, hir, &fx);
+            self.messages.extend(messages);
+            self.startup_consts = startup;
             self.pure_static_inits = pure_static_inits(&self.checker, hir, &fx);
             self.fold_bodies = fold_bodies(hir, &fx);
             let mutations = fx.mutations();
@@ -8797,10 +8802,22 @@ impl Compiler {
     }
 }
 
+/// Natives whose result is a handle the running process opens (a standard
+/// stream, a library or symbol): a `const` of one is computed when the
+/// program starts.
+const STARTUP_HANDLE_NATIVES: [&str; 5] = ["stdout", "stderr", "stdin", "dload", "declare"];
+
 /// E0134 for each `const` whose initializer has effects: it is
-/// computed while compiling, where there is no outside world yet.
-fn const_effect_messages(checker: &crate::typechecking::infer::Checker, hir: &crate::hir::HirModule, fx: &crate::hir::effects::ModuleEffects) -> Vec<Message> {
+/// computed while compiling, where there is no outside world yet. The
+/// second result names the consts (by HIR name) whose only effects are
+/// [`STARTUP_HANDLE_NATIVES`] calls: those keep their startup initializer.
+fn const_effect_messages(
+    checker: &crate::typechecking::infer::Checker,
+    hir: &crate::hir::HirModule,
+    fx: &crate::hir::effects::ModuleEffects,
+) -> (Vec<Message>, HashSet<String>) {
     let mut out = Vec::new();
+    let mut startup = HashSet::new();
     for (i, body) in hir.bodies.iter().enumerate() {
         if body.kind != crate::hir::BodyKind::Static {
             continue;
@@ -8821,6 +8838,10 @@ fn const_effect_messages(checker: &crate::typechecking::infer::Checker, hir: &cr
             continue;
         }
         let short = name.rsplit("::").next().unwrap_or(name);
+        if !crate::comptime_expr::is_comptime_const(short) && !s.statics && s.latent == 0 && opens_handles_only(fx, i) {
+            startup.insert(name.to_string());
+            continue;
+        }
         let mut msg = Message::error(
             ErrorCode::ConstNotComputable,
             if crate::comptime_expr::is_comptime_const(short) {
@@ -8839,7 +8860,19 @@ fn const_effect_messages(checker: &crate::typechecking::infer::Checker, hir: &cr
         });
         out.push(msg);
     }
-    out
+    (out, startup)
+}
+
+/// Body `index`'s visible effects all come from calls to
+/// [`STARTUP_HANDLE_NATIVES`].
+fn opens_handles_only(fx: &crate::hir::effects::ModuleEffects, index: usize) -> bool {
+    let causes: Vec<_> = fx.explain(index).into_iter().filter(|c| !c.visible.is_pure()).collect();
+    !causes.is_empty()
+        && causes.iter().all(|c| {
+            c.callee.as_ref().is_some_and(|callee| {
+                callee.body.is_none() && STARTUP_HANDLE_NATIVES.contains(&callee.name.rsplit("::").next().unwrap_or(&callee.name))
+            })
+        })
 }
 
 /// The flags that would let compile-time code have the `missing` effects,

@@ -434,6 +434,10 @@ pub struct ConstEval {
     pub slot: u32,
     pub kind: u8,
     pub silent: bool,
+    /// A value with no snapshot form (a function value, a handle) keeps
+    /// its startup initializer instead of failing the build: a `const`'s,
+    /// not a `comptime` expression's.
+    pub startup_ok: bool,
     /// Index of its grants in the request's `io` (unused when `silent`:
     /// silent work never does IO).
     pub io: u32,

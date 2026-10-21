@@ -255,8 +255,8 @@ fn restored_vm(program: &CompiledExpansion, snapshot: &common::HeapSnapshot, cap
     vm
 }
 
-/// Snapshot the `done` items' values; a silent item whose value has no
-/// snapshot form moves to `skipped`.
+/// Snapshot the `done` items' values; a silent or `startup_ok` item whose
+/// value has no snapshot form moves to `skipped`.
 fn capture(
     vm: &Machine<256>,
     consts: &[ConstEval],
@@ -266,7 +266,7 @@ fn capture(
     loop {
         match vm.heap().capture_snapshot(&snap_roots(vm, consts, done)) {
             Ok(snapshot) => return Ok(snapshot),
-            Err(e) if consts[done[e.root]].silent => skipped.push(done.remove(e.root)),
+            Err(e) if consts[done[e.root]].silent || consts[done[e.root]].startup_ok => skipped.push(done.remove(e.root)),
             Err(mut e) => {
                 e.root = done[e.root];
                 return Err(ConstEvalError::Unsnapshottable(e));

@@ -416,6 +416,9 @@ pub struct Compiler {
     /// This module's `static let`s with pure initializers (HIR body names
     /// without `$init`), which are computed silently at compile time.
     pure_static_inits: HashSet<String>,
+    /// `const`s that open a process handle (`stdout()`, `declare(…)`),
+    /// by HIR name: computed when the program starts.
+    startup_consts: HashSet<String>,
     /// This module's functions whose calls with constant arguments may be
     /// computed at compile time (HIR body name → returns a `string`).
     fold_bodies: HashMap<String, bool>,
@@ -835,6 +838,7 @@ impl Default for Compiler {
             static_init: CodeBuf::new(),
             comptime_consts: Vec::new(),
             pure_static_inits: HashSet::new(),
+            startup_consts: HashSet::new(),
             fold_bodies: HashMap::new(),
             fold_fns: HashMap::new(),
             par_worker_of: HashMap::new(),
