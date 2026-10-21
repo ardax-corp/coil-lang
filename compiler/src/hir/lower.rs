@@ -1725,6 +1725,13 @@ fn indirect_callee_in(body: &HirBody, checker: &Checker, f: HirId, seen: &mut Ve
             matches!(strip_readonly(&t), Ty::Fun(..)) && fun_words_in(checker, &t, &mut Vec::new(), false)
         }) && returned_closure(body, checker, f, seen);
     }
+    // A lambda literal called in place (#1799), as a `let` bound to it.
+    if let HirKind::Lambda { .. } = body.expr(f).kind {
+        return body.expr(f).ty.as_ref().is_some_and(|t| {
+            let t = apply_ty_prune(checker.subst(), t);
+            matches!(strip_readonly(&t), Ty::Fun(..)) && fun_words_in(checker, &t, &mut Vec::new(), true)
+        });
+    }
     let HirKind::Local(local) = body.expr(f).kind else {
         return false;
     };
