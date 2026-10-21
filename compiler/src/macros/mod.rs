@@ -232,6 +232,8 @@ pub enum MacroKind {
     Attr,
     /// `macro name(…)`, used as `name!(…)`.
     Function,
+    /// A top-level `comptime { … }` block: its own expansion program.
+    Comptime,
 }
 
 impl MacroKind {
@@ -240,6 +242,7 @@ impl MacroKind {
             Self::Derive => "derive",
             Self::Attr => "attribute macro",
             Self::Function => "macro",
+            Self::Comptime => "`comptime` block",
         }
     }
 }

@@ -36,6 +36,17 @@ struct Job {
     /// The call's input, as `macro::Reader` decodes it (`macros::encode`):
     /// the declaration, then attribute arguments in parameter order.
     input: String,
+    /// A `comptime { … }` block: its expansion program.
+    block: Option<BlockProgram>,
+}
+
+/// The expansion program of a `comptime { … }` block: the file's `use`
+/// items and the block as a function returning `Code`.
+struct BlockProgram {
+    text: String,
+    /// Where the block's body sits in `text`, and in the file's report text.
+    body_at: usize,
+    body: std::ops::Range<usize>,
 }
 
 /// Macro outputs by [`Pipeline::job_key`], with the IO each did, for the
@@ -130,6 +141,33 @@ impl Pipeline {
             // Calls looked up by span, one walk for the whole round.
             let calls = cached.and_then(|c| c.ast()).map(index_calls).unwrap_or_default();
             for p in pending {
+                if p.kind == MacroKind::Comptime {
+                    if self.macro_stack.contains(file) {
+                        errors.push(Message::error(
+                            ErrorCode::GenericTypeError,
+                            "macro expansion cycle: this `comptime` block needs its own module compiled to run".to_string(),
+                            p.range.clone(),
+                        ));
+                        continue;
+                    }
+                    match self.block_program(file, &p, &report) {
+                        Some(block) => file_jobs.push(Job {
+                            file: file.clone(),
+                            decl: block_decl(),
+                            pending: p,
+                            provider_file: file.clone(),
+                            provider_module: module.clone(),
+                            input: String::new(),
+                            block: Some(block),
+                        }),
+                        None => errors.push(Message::error(
+                            ErrorCode::GenericTypeError,
+                            "`comptime` block not found".to_string(),
+                            p.range.clone(),
+                        )),
+                    }
+                    continue;
+                }
                 let call = calls.get(&p.target).copied();
                 match self.resolve_macro(file, &p, call) {
                     Ok((provider, decl, provider_module)) => {
@@ -164,6 +202,7 @@ impl Pipeline {
                                 provider_file: provider,
                                 provider_module,
                                 input,
+                                block: None,
                             }),
                             Err(msg) => errors.push(msg),
                         }
@@ -203,11 +242,17 @@ impl Pipeline {
         for (job, result) in jobs.iter().zip(results) {
             let msgs = match result {
                 Ok(text) => self.splice(job, &text, &mut replacements),
-                Err(err) => vec![Message::error(
-                    ErrorCode::GenericTypeError,
-                    format!("{} `{}` failed: {err}", job.decl.kind.describe(), job.decl.name),
-                    job.pending.range.clone(),
-                )],
+                Err(err) => {
+                    let err = match &job.block {
+                        Some(block) => self.block_positions(&job.file, block, &err),
+                        None => err,
+                    };
+                    vec![Message::error(
+                        ErrorCode::GenericTypeError,
+                        format!("{} failed: {err}", job_label(&job.decl)),
+                        job.pending.range.clone(),
+                    )]
+                }
             };
             if let Some(cached) = self.ast_cache.get_mut(&job.file) {
                 cached.push_expand_messages(msgs);
@@ -555,14 +600,34 @@ impl Pipeline {
         }
     }
 
+    /// The modules a job's output depends on: a macro's provider, or the
+    /// modules a `comptime` block's file uses (not the file itself, which
+    /// the block cannot call into).
+    fn job_sources(&self, job: &Job) -> Vec<PathBuf> {
+        if job.block.is_none() {
+            return vec![job.provider_file.clone()];
+        }
+        let mut deps: Vec<PathBuf> = self
+            .module_deps
+            .get(&job.file)
+            .into_iter()
+            .flatten()
+            .filter(|d| **d != job.file)
+            .cloned()
+            .collect();
+        deps.sort();
+        deps
+    }
+
     /// Hash of a macro call: the sources of its provider and everything the
     /// provider uses, the macro and its input.
     fn job_key(&self, job: &Job) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        self.hash_provider_sources(std::slice::from_ref(&job.provider_file), &mut h);
+        self.hash_provider_sources(&self.job_sources(job), &mut h);
         job.decl.fn_name.hash(&mut h);
         job.input.hash(&mut h);
+        job.block.as_ref().map(|b| &b.text).hash(&mut h);
         // A grant can turn a refused call into output.
         self.host_grants.comptime_io_for(&job.provider_module).hash(&mut h);
         h.finish()
@@ -575,12 +640,15 @@ impl Pipeline {
         if io.effects() == 0 {
             return None;
         }
-        let mut key = crate::comptime_cache::Key::new("macro");
+        let mut key = crate::comptime_cache::Key::new(if job.block.is_some() { "comptime block" } else { "macro" });
         key.text(&job.provider_module);
         key.text(&job.decl.fn_name);
         key.text(&job.input);
+        if let Some(block) = &job.block {
+            key.text(&block.text);
+        }
         key.grants(&io);
-        self.key_sources(std::slice::from_ref(&job.provider_file), &mut key);
+        self.key_sources(&self.job_sources(job), &mut key);
         Some(key.finish())
     }
 
@@ -635,7 +703,10 @@ impl Pipeline {
                 {
                     let job = &jobs[i];
                     let entry = cc::Entry {
-                        name: format!("{} {}::{}", job.decl.kind.describe(), job.provider_module, job.decl.name),
+                        name: match job.block {
+                            Some(_) => format!("`comptime` block in `{}`", job.provider_module),
+                            None => format!("{} {}::{}", job.decl.kind.describe(), job.provider_module, job.decl.name),
+                        },
                         accesses,
                         value: cc::Value::Text(text.clone()),
                     };
@@ -658,9 +729,8 @@ impl Pipeline {
         let mut msg = Message::info(
             ErrorCode::ComptimeResultChanged,
             format!(
-                "{} `{}` has new output: run again with `--comptime-refresh`, it differs from the cached one",
-                job.decl.kind.describe(),
-                job.decl.name
+                "{} has new output: run again with `--comptime-refresh`, it differs from the cached one",
+                job_label(&job.decl)
             ),
             job.pending.range.clone(),
         );
@@ -721,11 +791,27 @@ impl Pipeline {
         };
         // One program per provider module with every macro it declares, so
         // `coil test` / the LSP reuse it across files and rounds (compiling
-        // the provider costs the same with fewer wrappers).
+        // the provider costs the same with fewer wrappers). A `comptime`
+        // block is a program of its own.
         let mut results: Vec<(usize, crate::macros::MacroRun)> = Vec::with_capacity(todo.len());
         let mut groups: Vec<((String, PathBuf), Vec<usize>)> = Vec::new();
+        let mut programs: Vec<(u64, SubProgram, Vec<usize>)> = Vec::new();
         for &i in todo {
             let job = &jobs[i];
+            if let Some(block) = &job.block {
+                let key = self.job_key(job);
+                let disk_key = (!host.build_id().is_empty()).then(|| {
+                    let mut k = crate::comptime_cache::Key::new("comptime block program");
+                    k.text(host.build_id());
+                    k.text(&block.text);
+                    self.key_sources(&self.job_sources(job), &mut k);
+                    k.finish()
+                });
+                let what = "this `comptime` block".to_string();
+                let sub = self.sub_program(&host, block.text.clone(), vec![job.decl.fn_name.clone()], what, disk_key, &[i], jobs);
+                programs.push((key, sub, vec![i]));
+                continue;
+            }
             let key = (job.provider_module.clone(), job.provider_file.clone());
             match groups.iter_mut().find(|(k, _)| *k == key) {
                 Some((_, idx)) => idx.push(i),
@@ -785,35 +871,23 @@ impl Pipeline {
                 self.key_sources(std::slice::from_ref(&file), &mut k);
                 k.finish()
             });
-            let ctx = SubProgram {
-                project_root: self.project_root.clone(),
-                roots: self.roots.clone(),
-                host: host.clone(),
-                macro_stack: self
-                    .macro_stack
-                    .iter()
-                    .cloned()
-                    .chain(idx.iter().map(|&i| jobs[i].file.clone()))
-                    .collect(),
-                overlays: self.overlays.clone(),
-                comptime: self.host_grants.comptime,
-                comptime_io: self.host_grants.comptime_io.clone(),
-                comptime_cache: self.host_grants.comptime_cache.clone(),
-                text,
-                entries,
-                provider: module.clone(),
-                disk_key,
-            };
+            let what = format!("the macro module `{module}`");
+            let sub = self.sub_program(&host, text, entries, what, disk_key, &idx, jobs);
+            programs.push((key, sub, idx));
+        }
+        for (key, ctx, idx) in programs {
             let host = host.clone();
             let limits = self.host_grants.comptime;
-            // A macro does the IO its provider module was granted.
+            // A macro does the IO its provider module was granted; a block,
+            // its own module's.
+            let module = jobs[idx[0]].provider_module.clone();
             let io = self.host_grants.comptime_io_for(&module);
             // A nested compile plus a VM run is deeper than Windows' 1 MiB
             // main thread stack; continue on a fresh segment when little is left.
             let outs = stacker::maybe_grow(EXPANSION_RED_ZONE, EXPANSION_STACK, || {
                 let program = match compiled_program(key, ctx) {
                     Ok(p) => p,
-                    Err(e) => return vec![(Err(e), Vec::new()); idx.len()],
+                    Err(e) => return Err(e),
                 };
                 let mut calls = Vec::with_capacity(idx.len());
                 for &i in &idx {
@@ -821,15 +895,155 @@ impl Pipeline {
                         Some(&o) => calls.push((o, jobs[i].input.clone())),
                         None => {
                             let e = format!("`{}` is not a macro of `{module}`", jobs[i].decl.name);
-                            return vec![(Err(e), Vec::new()); idx.len()];
+                            return Ok(vec![(Err(e), Vec::new()); idx.len()]);
                         }
                     }
                 }
-                host.run(&program.expansion, &calls, &limits, &io)
+                Ok(host.run(&program.expansion, &calls, &limits, &io))
             });
+            let outs = match outs {
+                Ok(outs) => outs,
+                Err(failure) => {
+                    let summary = match &jobs[idx[0]].block {
+                        Some(block) => self.report_block_errors(&jobs[idx[0]], block, failure),
+                        None => failure.summary,
+                    };
+                    vec![(Err(summary), Vec::new()); idx.len()]
+                }
+            };
             results.extend(idx.iter().copied().zip(outs));
         }
         results
+    }
+
+    /// What compiling an expansion program for the jobs `idx` needs.
+    #[allow(clippy::too_many_arguments)]
+    fn sub_program(
+        &self,
+        host: &std::sync::Arc<dyn crate::macros::MacroHost>,
+        text: String,
+        entries: Vec<String>,
+        what: String,
+        disk_key: Option<String>,
+        idx: &[usize],
+        jobs: &[Job],
+    ) -> SubProgram {
+        SubProgram {
+            project_root: self.project_root.clone(),
+            roots: self.roots.clone(),
+            host: host.clone(),
+            macro_stack: self
+                .macro_stack
+                .iter()
+                .cloned()
+                .chain(idx.iter().map(|&i| jobs[i].file.clone()))
+                .collect(),
+            overlays: self.overlays.clone(),
+            comptime: self.host_grants.comptime,
+            comptime_io: self.host_grants.comptime_io.clone(),
+            comptime_cache: self.host_grants.comptime_cache.clone(),
+            text,
+            entries,
+            what,
+            disk_key,
+        }
+    }
+
+    /// The expansion program of the `comptime { … }` block `p` in `file`:
+    /// the file's `use` items, then the block as a function returning
+    /// `Code`. `report` is the file's report text.
+    fn block_program(&self, file: &Path, p: &PendingMacro, report: &str) -> Option<BlockProgram> {
+        let ast = self.ast_cache.get(file)?.ast()?;
+        let Expression::Program(children) = ast.1.as_ref() else {
+            return None;
+        };
+        let block = children.iter().find(|c| c.0 == p.target)?;
+        if !matches!(block.1.as_ref(), Expression::ComptimeBlock(_)) {
+            return None;
+        }
+        let mut text = String::from("use macro::Code as __coil_Code;\n");
+        for child in children.iter().filter(|c| is_use_item(c)) {
+            text.push_str(report.get(child.0.into_range())?);
+            text.push('\n');
+        }
+        text.push_str("fn __coil_block() -> __coil_Code ");
+        let body_at = text.len();
+        // The body with its braces (the block node's span leaves them out).
+        let whole = block.0.into_range();
+        let range = whole.start + report.get(whole.clone())?.find('{')?..whole.end;
+        text.push_str(report.get(range.clone())?);
+        text.push_str("\nfn __coil_run_0(string input) -> string {\n    return __coil_block().text;\n}\n");
+        Some(BlockProgram { text, body_at, body: range })
+    }
+
+    /// `err` with each `<coil>/expand.hy:LINE:COL` in `block`'s body (a
+    /// panic's, a backtrace's) written as the place in `file`.
+    fn block_positions(&self, file: &Path, block: &BlockProgram, err: &str) -> String {
+        let report = self.ast_cache.get(file).map(|c| c.report_source()).unwrap_or_default();
+        let line_of = |text: &str, at: usize| text.get(..at).map_or(0, |t| t.matches('\n').count()) + 1;
+        let body_line = line_of(&block.text, block.body_at);
+        let body_lines = block.text[block.body_at..].lines().count().max(1);
+        let file_line = line_of(&report, block.body.start);
+        let shown = file.display().to_string();
+        let entry = format!("{}:", expansion_entry_path().display());
+        let mut out = String::new();
+        let mut rest = err;
+        while let Some(at) = rest.find(&entry) {
+            out.push_str(&rest[..at]);
+            let after = &rest[at + entry.len()..];
+            let digits = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
+            match after[..digits].parse::<usize>() {
+                Ok(line) if (body_line..body_line + body_lines).contains(&line) => {
+                    out.push_str(&format!("{shown}:{}", file_line + line - body_line));
+                }
+                _ => out.push_str(&rest[at..at + entry.len() + digits]),
+            }
+            rest = &after[digits..];
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// Report the errors in a `comptime` block's body where they are in its
+    /// file. The rest of `failure` is the job's error.
+    fn report_block_errors(&mut self, job: &Job, block: &BlockProgram, failure: CompileFailure) -> String {
+        let window = block.body_at..block.body_at + block.body.len();
+        let declared = self
+            .ast_cache
+            .get(&job.file)
+            .and_then(|c| c.ast())
+            .map(declared_names)
+            .unwrap_or_default();
+        let mut mapped = Vec::new();
+        for msg in &failure.entry_errors {
+            let r = msg.range();
+            if !(window.contains(&r.start) && r.end <= window.end) {
+                continue;
+            }
+            let at = block.body.start + (r.start - window.start)..block.body.start + (r.end - window.start);
+            let mut out = Message::new(*msg.kind(), msg.message().to_string(), at);
+            if let Some(code) = msg.code() {
+                out.set_code(code);
+            }
+            let staged = declared.iter().find(|n| msg.message().contains(&format!("`{n}`")));
+            let help = match (staged, msg.help()) {
+                (Some(name), _) => Some(format!(
+                    "`{name}` is declared in this module; a `comptime` block can only use code from other modules, which compile before it"
+                )),
+                (None, h) => h.clone(),
+            };
+            if let Some(help) = help {
+                out.with_help(help);
+            }
+            mapped.push(out);
+        }
+        if mapped.is_empty() {
+            return failure.summary;
+        }
+        if let Some(cached) = self.ast_cache.get_mut(&job.file) {
+            cached.push_expand_messages(mapped);
+        }
+        "its code does not compile".to_string()
     }
 
     /// Parse one macro's output and put it into the file's AST (a call in
@@ -854,12 +1068,7 @@ impl Pipeline {
             Err(err) => {
                 let mut msg = Message::error(
                     ErrorCode::GenericTypeError,
-                    format!(
-                        "{} `{}` produced code that does not parse: {}",
-                        job.decl.kind.describe(),
-                        job.decl.name,
-                        err.message()
-                    ),
+                    format!("{} produced code that does not parse: {}", job_label(&job.decl), err.message()),
                     job.pending.range.clone(),
                 );
                 msg.with_help(format!("generated code:\n{text}"));
@@ -944,6 +1153,13 @@ impl Pipeline {
                     .iter()
                     .position(|c| crate::attrs::statement_call(c).is_some_and(|call| call.0 == job.pending.target))
                 else {
+                    return messages;
+                };
+                children.splice(at..=at, items);
+            }
+            (None, MacroKind::Comptime) => {
+                // Its items replace the block.
+                let Some(at) = children.iter().position(|c| c.0 == job.pending.target) else {
                     return messages;
                 };
                 children.splice(at..=at, items);
@@ -1111,7 +1327,63 @@ fn origin_of(kind: MacroKind, name: &str) -> String {
         MacroKind::Derive => format!("derive `{name}`"),
         MacroKind::Attr => format!("attribute macro `{name}`"),
         MacroKind::Function => format!("macro `{name}!`"),
+        MacroKind::Comptime => "a `comptime` block".to_string(),
     }
+}
+
+/// "macro `name`", or "`comptime` block", for diagnostics about a job.
+fn job_label(decl: &MacroDecl) -> String {
+    match decl.kind {
+        MacroKind::Comptime => decl.kind.describe().to_string(),
+        kind => format!("{} `{}`", kind.describe(), decl.name),
+    }
+}
+
+/// The declaration a `comptime` block job runs: its program's one entry.
+fn block_decl() -> MacroDecl {
+    MacroDecl {
+        kind: MacroKind::Comptime,
+        name: "comptime".to_string(),
+        fn_name: "__coil_block".to_string(),
+        helpers: Vec::new(),
+        input: MacroInput::Exprs,
+        params: Vec::new(),
+    }
+}
+
+/// A top-level `use` item (one `use a::{b, c};` is a fragment of them).
+fn is_use_item(node: &Output<'_>) -> bool {
+    match node.1.as_ref() {
+        Expression::Use { .. } => true,
+        Expression::Fragment(items) => !items.is_empty() && items.iter().all(is_use_item),
+        _ => false,
+    }
+}
+
+/// Names a program declares at the top level.
+fn declared_names<'a>(ast: &Output<'a>) -> Vec<&'a str> {
+    let Expression::Program(children) = ast.1.as_ref() else {
+        return Vec::new();
+    };
+    children
+        .iter()
+        .filter_map(|c| match c.1.as_ref() {
+            Expression::Function { name, .. }
+            | Expression::Class { name, .. }
+            | Expression::EnumDecl { name, .. }
+            | Expression::StaticDecl { name, .. }
+            | Expression::TypeAlias { name, .. }
+            | Expression::TypeClass { name, .. } => Some(*name),
+            Expression::Fragment(parts) => match parts.first().map(|p| p.1.as_ref()) {
+                Some(Expression::Constant(binder, _)) => match binder.1.as_ref() {
+                    Expression::Identifier(n) => Some(*n),
+                    _ => None,
+                },
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
 }
 
 /// What a call is replaced by.
@@ -1409,7 +1681,7 @@ thread_local! {
 
 /// The program for `key`, compiled on first use. Parallel pipelines wait
 /// for one compile instead of repeating it; failures are not cached.
-fn compiled_program(key: u64, ctx: SubProgram) -> Result<std::sync::Arc<CompiledProgram>, String> {
+fn compiled_program(key: u64, ctx: SubProgram) -> Result<std::sync::Arc<CompiledProgram>, CompileFailure> {
     if COMPILING.with(|c| c.borrow().contains(&key)) {
         return ctx.compile().map(std::sync::Arc::new);
     }
@@ -1450,15 +1722,16 @@ struct SubProgram {
     text: String,
     /// Macro function of `__coil_run_i`, by `i`.
     entries: Vec<String>,
-    /// Provider module, for the compile-error message.
-    provider: String,
+    /// What the program runs, for the compile-error message: "the macro
+    /// module `m`".
+    what: String,
     /// Its key in the on-disk program cache, when the host has a build id.
     disk_key: Option<String>,
 }
 
 impl SubProgram {
     /// The program from the on-disk cache, else compiled and kept there.
-    fn load_or_compile(self) -> Result<CompiledProgram, String> {
+    fn load_or_compile(self) -> Result<CompiledProgram, CompileFailure> {
         let dir = crate::comptime_cache::program_dir().filter(|_| self.disk_key.is_some());
         let key = self.disk_key.clone().unwrap_or_default();
         let path = dir.as_ref().map(|d| d.join(format!("{key}.prog")));
@@ -1475,8 +1748,15 @@ impl SubProgram {
     }
 
     /// Compile the expansion program in a sub-pipeline.
-    fn compile(self) -> Result<CompiledProgram, String> {
+    fn compile(self) -> Result<CompiledProgram, CompileFailure> {
         let mut sub = Pipeline::with_reporter(ReportConfig::default(), Box::new(std::io::sink()));
+        let entry_errors = EntryErrors::default();
+        sub.sink = Box::new(EntrySink {
+            sources: reporting::SourceMap::new(),
+            entry: None,
+            errors: entry_errors.clone(),
+            failed: false,
+        });
         sub.project_root = self.project_root;
         sub.roots = self.roots;
         sub.macro_host = Some(self.host.clone());
@@ -1512,13 +1792,19 @@ impl SubProgram {
                 } else {
                     detail
                 };
-                return Err(format!("could not compile the macro module `{}`: {detail}", self.provider));
+                return Err(CompileFailure {
+                    summary: format!("could not compile {}: {detail}", self.what),
+                    entry_errors: entry_errors.take(),
+                });
             }
         };
         let mut offsets = HashMap::new();
         for (i, entry) in self.entries.into_iter().enumerate() {
             let Some(o) = sub.function_offset(&format!("__coil_run_{i}")) else {
-                return Err("expansion entry was not compiled".to_string());
+                return Err(CompileFailure {
+                    summary: "expansion entry was not compiled".to_string(),
+                    entry_errors: Vec::new(),
+                });
             };
             offsets.insert(entry, o as u32);
         }
@@ -1535,6 +1821,70 @@ impl SubProgram {
             },
             offsets,
         })
+    }
+}
+
+/// Why an expansion program did not compile: a summary, and the errors in
+/// its entry file (`<coil>/expand.hy`) as reported there.
+struct CompileFailure {
+    summary: String,
+    entry_errors: Vec<Message>,
+}
+
+/// Errors an [`EntrySink`] kept.
+#[derive(Clone, Default)]
+struct EntryErrors(std::sync::Arc<std::sync::Mutex<Vec<Message>>>);
+
+impl EntryErrors {
+    fn take(&self) -> Vec<Message> {
+        self.0.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default()
+    }
+}
+
+/// The sink of an expansion program's pipeline: keeps the errors in the
+/// entry file, so a `comptime` block's report where they are in its file.
+struct EntrySink {
+    sources: reporting::SourceMap,
+    entry: Option<reporting::SourceId>,
+    errors: EntryErrors,
+    failed: bool,
+}
+
+impl reporting::DiagnosticSink for EntrySink {
+    fn emit(&mut self, diag: reporting::Diagnostic) {
+        if !diag.is_error() {
+            return;
+        }
+        self.failed = true;
+        let Some(loc) = diag.location.as_ref().filter(|l| Some(l.file) == self.entry) else {
+            return;
+        };
+        let mut msg = Message::new(reporting::MessageKind::ERROR, diag.message.clone(), loc.range.clone());
+        if let Some(code) = diag.code {
+            msg.set_code(code);
+        }
+        if let Some(help) = &diag.help {
+            msg.with_help(help.clone());
+        }
+        if let Ok(mut v) = self.errors.0.lock() {
+            v.push(msg);
+        }
+    }
+
+    fn register_source(&mut self, path: &Path, text: &str) -> reporting::SourceId {
+        let id = self.sources.insert(path, text);
+        if path == expansion_entry_path() {
+            self.entry = Some(id);
+        }
+        id
+    }
+
+    fn finish(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    fn had_errors(&self) -> bool {
+        self.failed
     }
 }
 

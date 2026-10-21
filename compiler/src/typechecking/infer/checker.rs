@@ -3329,6 +3329,9 @@ impl Checker {
             } => self.infer_lambda(args, captures, body, range),
 
             Expression::TestCase { name, body } => self.infer_test_case(name, body, &range),
+            // Left in place only when it could not be expanded, which
+            // was reported.
+            Expression::ComptimeBlock(_) => unit_ty(),
             Expression::Implementation {
                 what,
                 owner,
