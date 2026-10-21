@@ -1337,6 +1337,11 @@ impl<'s> Formatter<'s> {
                 self.fmt_block_or_inline(body);
             }
 
+            Expression::ComptimeBlock(body) => {
+                self.push_str("comptime ");
+                self.fmt_block_or_inline(body);
+            }
+
             Expression::EnumDecl {
                 docs,
                 attrs,

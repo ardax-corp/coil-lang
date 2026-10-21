@@ -16419,6 +16419,8 @@ impl Checker {
                 self.pre_register_enums_walk(name, errors);
                 self.pre_register_enums_walk(body, errors);
             }
+            // Expanded before this runs; its body is the expansion program's.
+            Expression::ComptimeBlock(_) => {}
 
             Expression::Branch(cond, body) => {
                 if let Some(c) = cond {

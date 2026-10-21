@@ -635,6 +635,12 @@ pub enum Expression<'expr> {
         body: Output<'expr>,
     },
 
+    /// Top-level `comptime { … }`: a block run while compiling whose
+    /// returned `Code` replaces it (comptime step 9). Expanded with the
+    /// macros, before typechecking; the tree walkers leave the body alone,
+    /// since it belongs to the expansion program, not to this module.
+    ComptimeBlock(Output<'expr>),
+
     /// Top-level `enum` declaration.
     EnumDecl {
         /// Leading `///` doc lines (without the `///` prefix).
@@ -1304,6 +1310,7 @@ impl<'a> Display for Expression<'a> {
             Self::TestCase { name, body } => {
                 write!(f, "test({}) {{\n{}}}", name.1, body.1)
             }
+            Self::ComptimeBlock(body) => write!(f, "comptime {}", body.1),
             Self::Call { name, args } => {
                 write!(
                     f,
@@ -2105,6 +2112,8 @@ impl<'expr> Expression<'expr> {
                 f(name);
                 f(body);
             }
+            // Not this module's code: it runs in the expansion program.
+            E::ComptimeBlock(_) => {}
             E::EnumDecl { variants, .. } => variants.iter().for_each(f),
             E::ExternStruct(decl) => decl.fields.iter().for_each(|(_, ty)| f(ty)),
             E::EnumVariant { payload, discriminant, .. } => {
@@ -2345,6 +2354,8 @@ impl<'expr> Expression<'expr> {
                 f(name);
                 f(body);
             }
+            // Not this module's code: it runs in the expansion program.
+            E::ComptimeBlock(_) => {}
             E::EnumDecl { variants, .. } => variants.iter_mut().for_each(f),
             E::ExternStruct(decl) => decl.fields.iter_mut().for_each(|(_, ty)| f(ty)),
             E::EnumVariant { payload, discriminant, .. } => {
@@ -2422,6 +2433,8 @@ impl Expression<'_> {
         use Expression as E;
         match self {
             E::AttrDecl { where_constraints, .. } => shift_where(where_constraints, delta),
+            // The walkers skip its body.
+            E::ComptimeBlock(body) => shift_spans(body, delta),
             E::Function { where_constraints, effects, contracts, .. } => {
                 shift_where(where_constraints, delta);
                 if let Some(effects) = effects {

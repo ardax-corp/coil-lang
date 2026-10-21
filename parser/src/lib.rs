@@ -2122,6 +2122,7 @@ impl<'pratt> Pratt<'pratt> {
             self.trait_impl_for_block(stmt.clone()),
             self.impl_block(stmt.clone()),
             self.test_case(stmt.clone()),
+            self.comptime_block(stmt.clone()),
             self.attr_decl(),
             self.derive_decl(),
             self.fn_macro_decl(),
@@ -2153,6 +2154,23 @@ impl<'pratt> Pratt<'pratt> {
             .then(self.block(stmt))
             .map_with(|(name, body), e| (e.span(), Box::new(Expression::TestCase { name, body })))
             .labelled("test case")
+    }
+
+    /// Top-level `comptime { … }`: a block that returns the `Code` it
+    /// expands to. (`comptime e` in an expression is a prefix operator.)
+    fn comptime_block<
+        T: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+    >(
+        &self,
+        stmt: T,
+    ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
+    {
+        keyword!("comptime")
+            .ignore_then(self.block(stmt))
+            .map_with(|body, e| (e.span(), Box::new(Expression::ComptimeBlock(body))))
+            .labelled("comptime block")
     }
 
     /// `type Name = T;` — type alias declaration.
