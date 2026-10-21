@@ -1297,7 +1297,7 @@ mod tests {
             Some(common::RESULT_UNIT_PROBE_NATIVE)
         );
         assert_eq!(
-            names.get(names.len() - 3).map(String::as_str),
+            names.get(names.len() - 4).map(String::as_str),
             Some(common::FFI_READ_INTS_NATIVE)
         );
         assert_eq!(
