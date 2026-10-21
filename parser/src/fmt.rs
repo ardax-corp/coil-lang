@@ -2206,7 +2206,17 @@ impl<'s> Formatter<'s> {
             }
             Expression::Call { name, args } => {
                 self.fmt_output(name);
-                self.fmt_delimited_outputs("(", ")", args.as_deref().unwrap_or(&[]), false);
+                // A lone block lambda argument opens on the call's line:
+                // `scope(fn (Scope s) {` (#1796), as after a short receiver.
+                if let Some([arg]) = args.as_deref()
+                    && self.hugs_lambda(arg)
+                {
+                    self.push_str("(");
+                    self.fmt_value(arg);
+                    self.push_str(")");
+                } else {
+                    self.fmt_delimited_outputs("(", ")", args.as_deref().unwrap_or(&[]), false);
+                }
             }
             other => self.fmt_expression(other),
         }
