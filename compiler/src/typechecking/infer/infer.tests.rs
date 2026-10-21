@@ -2756,3 +2756,28 @@ fn rebound_prelude_option_still_rejects_user_enum_without_rebind_help() {
         );
     }
 }
+
+/// A type declaration that takes a reserved built-in name reports its E0200
+/// and no errors that only restate the clash (#1701).
+#[test]
+fn reserved_type_name_reports_only_e0200() {
+    for src in [
+        "class Option { pub n: int, }\nimpl Show for Option { pub fn show(Option o) -> string { return \"x\"; } }\nfn get(Option o) -> int { return o.n; }\nfn main() { let _ = get(new Option(3)); }\n",
+        "class INT { pub n: int, }\nfn get(INT x) -> int { return x.n; }\nfn main() { let _ = get(new INT(3)); }\n",
+        "enum Bool { Yes, No, }\nfn yes(Bool b) -> bool { return match b { Bool::Yes => true, Bool::No => false, }; }\nfn main() { let _ = yes(Bool::Yes); }\n",
+        "enum Range { Open, Closed, }\nfn main() { let _ = show(Range::Open); }\n",
+        "class IoError { pub n: int, }\nimpl Show for IoError { pub fn show(IoError e) -> string { return \"x\"; } }\nfn main() { let _ = new IoError(3).n; }\n",
+        "enum ThreadError { Busy, }\nfn main() { let _ = show(ThreadError::Busy); }\n",
+    ] {
+        let (c, _) = check(src);
+        let errors: Vec<_> = c
+            .messages()
+            .iter()
+            .filter(|m| matches!(m.kind(), reporting::MessageKind::ERROR))
+            .collect();
+        assert!(
+            errors.len() == 1 && errors[0].code() == Some(ErrorCode::DuplicateEnum),
+            "expected only E0200 for {src:?}, got {errors:?}"
+        );
+    }
+}

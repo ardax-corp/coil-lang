@@ -102,6 +102,7 @@ impl Checker {
             counter: TyVarCounter::new(),
             subst: Subst::empty(),
             messages: Vec::new(),
+            rejected_builtin_type_decls: Vec::new(),
             current_return_ty: None,
             current_module: String::new(),
             virtual_modules: VirtualModules::new(),
@@ -1532,6 +1533,34 @@ impl Checker {
     /// [`env_mut`](Self::env_mut) and [`Env::pop`] if you need to drop
     /// it.
     pub fn check_program(&mut self, ast: &Output) -> Ty {
+        let first_message = self.messages.len();
+        self.rejected_builtin_type_decls.clear();
+        let ty = self.check_program_body(ast);
+        self.drop_reserved_type_name_cascades(first_message);
+        ty
+    }
+
+    /// A user type that takes a reserved built-in name is not a type of its
+    /// own: every use of the name still means the built-in, so the rest of
+    /// the module reports errors that only restate the clash (`Orphan
+    /// instance Show<Option>`, a field access on a non-record type). Keep
+    /// just the E0200s for this module's errors (#1701).
+    fn drop_reserved_type_name_cascades(&mut self, first_message: usize) {
+        if self.rejected_builtin_type_decls.is_empty() {
+            return;
+        }
+        let rejected = std::mem::take(&mut self.rejected_builtin_type_decls);
+        let mut index = 0;
+        self.messages.retain(|msg| {
+            let keep = index < first_message
+                || !matches!(msg.kind(), reporting::MessageKind::ERROR)
+                || (msg.code() == Some(ErrorCode::DuplicateEnum) && rejected.contains(msg.range()));
+            index += 1;
+            keep
+        });
+    }
+
+    fn check_program_body(&mut self, ast: &Output) -> Ty {
         // Reset per-program state. The pre-pass, the main infer
         // pass, and the post-pass all share the same checker; only
         // the per-program tables and caches get cleared.
@@ -7014,6 +7043,8 @@ impl Checker {
         if matches!(lookup, Ty::Var(_) | Ty::Never) || Self::is_numeric_operand_ty(&lookup) {
             return;
         }
+        // A tuple of `Ord` items orders lexicographically (#1721).
+        self.ensure_structural_tuple_ord(&lookup);
         if self
             .generics
             .find_instance(class, std::slice::from_ref(&lookup))
@@ -10439,6 +10470,10 @@ impl Checker {
             self.ensure_structural_length(ty);
             return;
         }
+        if matches!(class, "Ord" | "Lt" | "Le" | "Gt" | "Ge") {
+            self.ensure_structural_tuple_ord(ty);
+            return;
+        }
         if !matches!(class, "Show" | "Eq" | "Hash") {
             return;
         }
@@ -10486,6 +10521,34 @@ impl Checker {
         };
         if items_ok {
             self.generics.register_structural_instance(class, ty);
+        }
+    }
+
+    /// A ground tuple whose items are all `Ord` is `Ord` (#1721): it orders
+    /// lexicographically, so its `Lt` / `Le` / `Gt` / `Ge` instances and
+    /// the empty `Ord` are registered together, the first time a goal asks
+    /// for one, after its tuple items'.
+    fn ensure_structural_tuple_ord(&mut self, ty: &Ty) {
+        let ty = show_lookup_ty(&apply_ty_prune(&self.subst, ty));
+        let Ty::Tuple(items) = &ty else {
+            return;
+        };
+        if items.is_empty() || Self::ty_mentions_var(&ty) || self.generics.has_instance("Ord", &ty) {
+            return;
+        }
+        for item in items {
+            self.ensure_structural_tuple_ord(item);
+        }
+        let ordered = items.iter().all(|item| {
+            let lookup = Self::operand_instance_lookup_ty(&show_lookup_ty(&apply_ty_prune(&self.subst, item)));
+            Self::is_numeric_operand_ty(&lookup)
+                || self.generics.has_instance("Ord", &lookup)
+                || self.generics.find_generic_instance("Ord", std::slice::from_ref(&lookup)).is_some()
+        });
+        if ordered {
+            for class in ["Lt", "Le", "Gt", "Ge", "Ord"] {
+                self.generics.register_structural_instance(class, ty.clone());
+            }
         }
     }
 
@@ -11785,7 +11848,15 @@ impl Checker {
             "result" => result_app_ty(Ty::Var(self.counter.fresh()), Ty::Var(self.counter.fresh())),
             "ioerror" => Ty::Con(common::BUILTIN_IO_ERROR_ENUM.into()),
             "threaderror" => Ty::Con(common::BUILTIN_THREAD_ERROR_ENUM.into()),
-            "error" => Ty::Con(common::BUILTIN_FFI_ERROR_ENUM.into()),
+            // A user `class Error` / `enum Error` (any spelling) is its own
+            // type: the FFI `Error` is not reserved (#1701).
+            "error" if self.resolve_class_key(name).is_none()
+                && self
+                    .resolve_enum_key(name)
+                    .is_none_or(|key| key == common::BUILTIN_FFI_ERROR_ENUM) =>
+            {
+                Ty::Con(common::BUILTIN_FFI_ERROR_ENUM.into())
+            }
             "errorkind" => Ty::Con(common::BUILTIN_FFI_ERROR_KIND_ENUM.into()),
             _ => {
                 if let Some(key) = self.resolve_class_key(name) {
@@ -15052,6 +15123,15 @@ impl Checker {
                 "built-in type names match in any letter case, so `{name}` names the prelude `{builtin}`; pick a different name"
             ));
         }
+        if let Some(builtin) = Self::reserved_error_enum_spelling(name) {
+            return Some(if builtin == name {
+                format!("`{name}` is a built-in error enum; pick a different name")
+            } else {
+                format!(
+                    "built-in type names match in any letter case, so `{name}` names the built-in `{builtin}`; pick a different name"
+                )
+            });
+        }
         if let Some(primitive) = common::builtin_primitive_type_spelling(name) {
             return Some(format!(
                 "built-in type names match in any letter case, so `{name}` names the built-in `{primitive}`; pick a different name"
@@ -15059,6 +15139,23 @@ impl Checker {
         }
         common::is_reserved_builtin_type(name)
             .then(|| format!("`{name}` is a built-in type; pick a different name"))
+    }
+
+    /// The built-in error enum (`IoError`, `ThreadError`, `EnvError`,
+    /// `ErrorKind`) a user type named `name` would clash with: each has a
+    /// built-in `Show` instance keyed by its bare name, and a type position
+    /// spelling `IoError`, `ThreadError` or `ErrorKind` in any letter case
+    /// names the built-in (#1701). The FFI `Error` has neither, so a user
+    /// type may take that name.
+    fn reserved_error_enum_spelling(name: &str) -> Option<&'static str> {
+        Generics::BUILTIN_SHOW_ENUMS
+            .iter()
+            .map(|(builtin, _)| *builtin)
+            .find(|builtin| {
+                *builtin == name
+                    || (*builtin != common::BUILTIN_ENV_ERROR_ENUM
+                        && builtin.eq_ignore_ascii_case(name))
+            })
     }
 
     /// E0200 help for a user `Option` / `Result` (#1672).
@@ -15083,6 +15180,7 @@ impl Checker {
         walk(ast, &mut classes);
         for (name, range) in classes {
             if let Some(help) = self.builtin_type_redeclaration_help(name) {
+                self.rejected_builtin_type_decls.push(range.clone());
                 let mut msg = Message::error(
                     ErrorCode::DuplicateEnum,
                     format!("Cannot redeclare built-in type `{name}`"),
@@ -16440,9 +16538,11 @@ impl Checker {
                 }
 
                 // Check 1: duplicate enum name (including built-ins still in scope).
-                if !common::is_builtin_enum(&name_str)
+                if (!common::is_builtin_enum(&name_str)
+                    || Self::reserved_error_enum_spelling(&name_str).is_some())
                     && let Some(help) = self.builtin_type_redeclaration_help(name)
                 {
+                    self.rejected_builtin_type_decls.push(node.0.into_range());
                     let mut msg = Message::error(
                         ErrorCode::DuplicateEnum,
                         format!("Cannot redeclare built-in type `{}`", name),
@@ -16460,6 +16560,7 @@ impl Checker {
                         || common::is_poly_builtin_enum(&name_str)
                         || common::is_builtin_ffi_enum(&name_str)
                     {
+                        self.rejected_builtin_type_decls.push(node.0.into_range());
                         let mut msg = Message::error(
                             ErrorCode::DuplicateEnum,
                             format!("Cannot redeclare built-in enum `{}`", name_str),
@@ -16478,9 +16579,9 @@ impl Checker {
                         self.pop_type_params_for_type_parsing(pushed);
                         return;
                     }
-                    // A built-in error enum this module did not import
-                    // (`IoError`, …): drop the compiler registration so
-                    // the user enum can take over.
+                    // The FFI `Error` when this module did not import it:
+                    // drop the compiler registration so the user enum can
+                    // take over.
                     self.enums.remove(&name_str);
                     self.enum_tags.remove(&name_str);
                     self.enum_payloads.remove(&name_str);
@@ -17190,6 +17291,43 @@ impl Checker {
                         range,
                         Some(format!(
                             "or declare `static fn {}` to call it as `{}`",
+                            variant_name, static_fqn
+                        )),
+                    );
+                }
+                // `K::n(1)` of a class static or module const that holds no
+                // function (#1726): the function-typed one is called above.
+                if !matches!(fields, EnumConstructPayload::Unit)
+                    && let Some(ty) = self
+                        .static_slot_types
+                        .get(&static_fqn)
+                        .or_else(|| self.module_consts.get(&format!("{enum_name}::{variant_name}")))
+                        .cloned()
+                {
+                    let shown = self.diag_ty(&ty);
+                    return self.error_with_help(
+                        ErrorCode::NotAFunction,
+                        format!("`{}::{}` has type `{}`, not a function type", enum_name, variant_name, shown),
+                        range,
+                        Some(format!("read it as `{}::{}` without arguments", enum_name, variant_name)),
+                    );
+                }
+                // `C::x` of an instance field (`const` or not, #1726).
+                if let Some(class_key) = self.resolve_class_key(enum_name)
+                    && self
+                        .classes
+                        .get(&class_key)
+                        .is_some_and(|fields| fields.iter().any(|(_, name, _)| name == variant_name))
+                {
+                    return self.error_with_help(
+                        ErrorCode::GenericTypeError,
+                        format!(
+                            "`{}` is an instance field; read it on a value (`obj.{}`)",
+                            static_fqn, variant_name
+                        ),
+                        range,
+                        Some(format!(
+                            "or declare `static {}` to read it as `{}`",
                             variant_name, static_fqn
                         )),
                     );

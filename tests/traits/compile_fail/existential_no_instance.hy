@@ -1,6 +1,6 @@
 // Expected: E0119 — packing a value as `Describe` needs a `Describe` instance for its type.
 trait Describe<D> {
-    fn describe(D self) -> string;
+    fn describe(D self) -> string {}
 }
 
 class Sq {

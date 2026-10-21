@@ -59,7 +59,7 @@ pub fn emit_dense(
     let gathers = Gathers::new(func, &regs, &plan.need_slot, scratch, entry_label);
     let mut source_clears = source_clears(func, &regs, &plan.need_slot, &gathers);
     prune_clears(func, &regs, &plan.need_slot, &mut cleared, &mut entry_clears, &mut source_clears, &gathers.writes);
-    let arg_clears = arg_clears(func, &regs, &plan.need_slot, &gathers, |_| true);
+    let arg_clears = arg_clears(func, &regs, &plan.need_slot, &gathers, Some);
     let gather = gather_window(func, entry_label);
     let mut max_slot = plan
         .need_slot
@@ -1309,19 +1309,23 @@ impl Gathers {
     }
 }
 
-/// Registers to zero right after a call, by the call's dest: those of a
-/// heap word it takes whose last use it is (a temporary passed straight
-/// to it, `weak(new Node(..))`), and the gather registers a dense call
-/// copied such a word into ([`Gathers`]). No `ClearWord` names a
-/// temporary, so without them the call's argument register kept the
-/// object rooted until rewritten (#1650). Only where a collection may
+/// Registers to zero right after a call, or an op that stores a word
+/// into an object ([`consumes`]), by its dest: those of a heap word it
+/// takes whose last use it is (a temporary passed straight to it,
+/// `weak(new Node(..))`, `v.push(new Node(..))`, `Some(new Node(..))`),
+/// and the gather registers a dense op copied such a word into
+/// ([`Gathers`]). No `ClearWord` names a temporary, so without them the
+/// op's operand register kept the object rooted until rewritten (#1650,
+/// #1690). Only where a collection may
 /// come before the register is rewritten ([`RewriteScan`]), and never for
 /// a local's word ([`MirFunc::bound_words`]: the frame holds it until the
 /// local is rebound, as a `gc::Root` guard relies on), a parameter (the
 /// caller roots it), a constant, or a register a value live past the call
-/// shares. `in_place` tells the calls emitted where they stand (the LIR
-/// tier emits an expression tree's call inside its user: none is zeroed
-/// after).
+/// shares. `emitted_at` names the op each op's zeros follow: itself, or
+/// for an op the LIR tier emits inside an expression tree, the tree's
+/// root (`v.push(Holder::One(new Node(..)))`: the enum's alloc is an
+/// inline operand of the push), when no op up to the root writes the
+/// register; `None` when it has none.
 ///
 /// A call ending its block whose result the branch takes from the stack
 /// (`write(..)?`'s `JumpIfMatch`) keeps it there: its zeros go at the top
@@ -1332,14 +1336,25 @@ pub(super) fn arg_clears(
     regs: &[u8],
     need_slot: &[bool],
     gathers: &Gathers,
-    in_place: impl Fn(ValueId) -> bool,
+    emitted_at: impl Fn(ValueId) -> Option<ValueId>,
 ) -> ArgClears {
     let mut out = ArgClears::default();
-    let is_call = |inst: &MirInst| matches!(inst, MirInst::Call { .. } | MirInst::HostInvoke { .. } | MirInst::CallIndirect { .. });
     let slot = |v: ValueId| need_slot.get(v.index()).copied().unwrap_or(false) && v.index() < regs.len();
-    let candidate = |v: ValueId| slot(v) && func.ty(v).is_heap_word() && !func.params.contains(&v) && !func.bound_words.contains(&v);
+    let heap_temp = |v: ValueId| slot(v) && func.ty(v).is_heap_word() && !func.params.contains(&v);
+    let candidate = |v: ValueId| heap_temp(v) && !func.bound_words.contains(&v);
+    // A push's dest is its array, which the local is rebound to: the
+    // array's old word may go even when a local bound it.
+    let operand_candidate = |inst: &MirInst, v: ValueId| match inst {
+        MirInst::ArrayPush { array, .. } if *array == v => heap_temp(v),
+        _ => candidate(v),
+    };
+    let dead_stores = unused_store_dests(func);
     let any = func.blocks.iter().any(|b| {
-        b.insts.iter().any(|i| is_call(i) && !is_tail_call_inst(func, b, i) && i.operands().into_iter().any(candidate))
+        b.insts.iter().any(|i| {
+            consumes(i)
+                && !is_tail_call_inst(func, b, i)
+                && (i.operands().into_iter().any(|v| operand_candidate(i, v)) || dead_stores.contains(&i.dest()))
+        })
     });
     if !any {
         return out;
@@ -1383,22 +1398,58 @@ pub(super) fn arg_clears(
             .and_then(|d| block.insts.iter().find(|i| i.dest() == d))
             .map(|i| i.operands())
             .unwrap_or_default();
+        let index: HashMap<ValueId, usize> = block.insts.iter().enumerate().map(|(k, i)| (i.dest(), k)).collect();
         for (k, inst) in block.insts.iter().enumerate() {
-            if !is_call(inst) || is_tail_call_inst(func, block, inst) || !in_place(inst.dest()) {
+            if !consumes(inst) || is_tail_call_inst(func, block, inst) {
                 continue;
             }
-            let dead = |v: ValueId| candidate(v) && !consts.contains(&v) && !live[b][k].contains(&v) && !fused_reads.contains(&v);
-            let mut words: Vec<(u8, ValueId)> = inst.operands().into_iter().filter(|&v| dead(v)).map(|v| (regs[v.index()], v)).collect();
+            // The op the zeros follow: this one, or the root of the
+            // expression tree the LIR tier emits it inside.
+            let Some(at) = emitted_at(inst.dest()) else {
+                continue;
+            };
+            let Some(&k_at) = index.get(&at) else {
+                continue;
+            };
+            let root = &block.insts[k_at];
+            if k_at < k || is_tail_call_inst(func, block, root) || cmp_dests[b] == Some(at) {
+                continue;
+            }
+            let unused = |v: ValueId| !consts.contains(&v) && !live[b][k].contains(&v) && !fused_reads.contains(&v);
+            let mut words: Vec<(u8, ValueId)> = inst
+                .operands()
+                .into_iter()
+                .filter(|&v| operand_candidate(inst, v) && unused(v))
+                .map(|v| (regs[v.index()], v))
+                .collect();
             for &(r, v) in gathers.by_push.get(&(b, k)).map(Vec::as_slice).unwrap_or(&[]) {
-                if dead(v) {
+                if candidate(v) && unused(v) {
                     words.push((r, v));
                 }
             }
+            // A store's dest nothing reads: the copy of the stored word the
+            // dense tier moves into its register (the LIR tier gives it none).
+            for d in inst.dests() {
+                if dead_stores.contains(&d) && candidate(d) && !consts.contains(&d) {
+                    words.push((regs[d.index()], d));
+                }
+            }
+            // A tree's ops up to its root are emitted before the zeros:
+            // none may write the register, or take a local's word in it.
+            let span = &block.insts[k..=k_at];
             let mut zero: Vec<u8> = Vec::new();
             for (r, _) in words {
                 if zero.contains(&r)
-                    || inst.dests().any(|d| slot(d) && regs[d.index()] == r)
-                    || live[b][k].iter().any(|&x| slot(x) && regs[x.index()] == r)
+                    || inst.dests().any(|d| slot(d) && !dead_stores.contains(&d) && regs[d.index()] == r)
+                    || span[1..].iter().flat_map(MirInst::dests).any(|d| slot(d) && regs[d.index()] == r)
+                    // A store's dest may share its value's register: a
+                    // local's word stays.
+                    || span.iter().any(|i| {
+                        i.operands()
+                            .into_iter()
+                            .any(|o| slot(o) && regs[o.index()] == r && !(operand_candidate(i, o) && !consts.contains(&o)))
+                    })
+                    || live[b][k_at].iter().any(|&x| slot(x) && regs[x.index()] == r)
                     || !scan.from(block.id, k + 1, r)
                 {
                     continue;
@@ -1408,7 +1459,7 @@ pub(super) fn arg_clears(
             if zero.is_empty() {
                 continue;
             }
-            if let Some(succs) = branch_takes(block, k, inst.dest()) {
+            if let Some(succs) = branch_takes(block, k_at, at) {
                 let only_pred = |s: BlockId| preds[s.index()].len() == 1 && !func.block(s).insts.first().is_some_and(MirInst::is_phi);
                 if succs.iter().all(|&s| only_pred(s)) {
                     for s in succs {
@@ -1420,10 +1471,74 @@ pub(super) fn arg_clears(
                     continue;
                 }
             }
-            out.after.insert(inst.dest(), zero);
+            let after = out.after.entry(at).or_default();
+            for r in zero {
+                if !after.contains(&r) {
+                    after.push(r);
+                }
+            }
         }
     }
     out
+}
+
+/// The ops [`arg_clears`] zeroes the dead operands of: a call (not a
+/// tail call), and an op that stores a word into an object, so the
+/// object holds it from there and its register only kept a copy: an
+/// array push, an allocation (an enum, tuple, record or closure built
+/// from its elems), a field or element store, a static store (#1690).
+/// An op that only reads a temporary (a field load of `f().x`) is left
+/// as it was.
+fn consumes(inst: &MirInst) -> bool {
+    matches!(
+        inst,
+        MirInst::Call { .. }
+            | MirInst::HostInvoke { .. }
+            | MirInst::CallIndirect { .. }
+            | MirInst::ArrayPush { .. }
+            | MirInst::Alloc { .. }
+            | MirInst::HeapFieldStore { .. }
+            | MirInst::StoreIndex { .. }
+            | MirInst::StoreStatic { .. }
+    )
+}
+
+/// The dests of field and element stores nothing reads. A store's dest
+/// is the word it stored (the VM leaves it on the stack), so writing it
+/// to a register kept a copy of the stored object rooted there until the
+/// register was rewritten (`new Pair(new Node(..))`, #1690): emission
+/// zeroes it after the store ([`arg_clears`], the dense tier, which moves
+/// the word into the dest's register), or writes none (the LIR tier pops
+/// the word).
+pub(super) fn unused_store_dests(func: &MirFunc) -> HashSet<ValueId> {
+    let mut stores: HashSet<ValueId> = func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .filter_map(|i| match i {
+            MirInst::HeapFieldStore { dest, .. } | MirInst::StoreIndex { dest, .. } => Some(*dest),
+            _ => None,
+        })
+        .collect();
+    if stores.is_empty() {
+        return stores;
+    }
+    for block in &func.blocks {
+        for inst in &block.insts {
+            for v in inst.operands() {
+                stores.remove(&v);
+            }
+        }
+        if let Some(term) = &block.term {
+            for v in super::gc::term_uses(term) {
+                stores.remove(&v);
+            }
+        }
+    }
+    for v in func.debug_slots.values() {
+        stores.remove(v);
+    }
+    stores
 }
 
 /// The zeros [`arg_clears`] places: after a call (by its dest), or at the

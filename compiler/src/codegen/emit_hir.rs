@@ -2220,6 +2220,12 @@ impl Compiler {
             let Some(call) = emit.plan.calls.get(&id.0) else {
                 return Err("not-planned".to_string());
             };
+            // The checker's pack recipe for a call whose result packs into
+            // a trait object is keyed on the call: the callee's result
+            // spliced in its place would not pack (#1757).
+            if self.hir_existential_pack(hir, id).is_some() {
+                return Err("existential-pack".to_string());
+            }
             let core = core_insts.get(&id.0);
             let kind = [
                 (call.builtin.is_some(), "builtin"),
@@ -2572,10 +2578,10 @@ impl Compiler {
                 }
                 continue;
             }
-            // `recv.m(1, a, b)` into an inherent method's `T... xs` (#1729):
-            // the arguments after its fixed ones pack as a free function's.
+            // `recv.m(1, a, b)` into an inherent method's `T... xs` (#1729)
+            // or `... xs` (#1734): the arguments after its fixed ones, named
+            // or not, pack as a free function's.
             if let HirKind::Call { callee: Callee::Method { name }, args } = &body.exprs[i].kind
-                && !args.iter().any(|&a| matches!(body.expr(a).kind, HirKind::Named { .. }))
                 && let Some(key) = self.hir_method_rest_key(body, args, name)
             {
                 let args = args.clone();
@@ -2814,21 +2820,21 @@ impl Compiler {
     }
 
     /// The key of the inherent method `recv.method(..)` calls (`args[0]` is
-    /// the receiver) when it takes a typed rest parameter (`T... xs`).
+    /// the receiver) when it takes a rest parameter (`T... xs` or `... xs`).
     fn hir_method_rest_key(&self, body: &HirBody, args: &[HirId], method: &str) -> Option<String> {
         let recv = *args.first()?;
         let recv_ty = apply_ty_prune(self.checker.subst(), body.expr(recv).ty.as_ref()?);
         let recv_ty = crate::typechecking::ty::peel_constructor_refinement(recv_ty);
         let owner = Checker::class_name_of_ty(&recv_ty)?;
         let key = self.context.methods.get(owner)?.get(method)?;
-        (self.checker.fn_has_rest(key) && !self.checker.fn_tuple_rest(key) && !self.checker.is_overloaded(key))
-            .then(|| key.clone())
+        (self.checker.fn_has_rest(key) && !self.checker.is_overloaded(key)).then(|| key.clone())
     }
 
     /// `recv.m(..)`'s arguments for method `key`'s rest parameter: the
-    /// receiver, the fixed arguments, then one pack of the rest (a lone
-    /// `...vec` spread is the pack itself), as [`Self::hir_call_shapes`]
-    /// shapes a free function's.
+    /// receiver, the fixed arguments in parameter order (named ones where
+    /// the checker matched them), then one pack of the rest (a lone
+    /// `...vec` spread is the pack itself; a bare `... xs` packs a tuple),
+    /// as [`Self::hir_call_shapes`] shapes a free function's.
     fn hir_method_rest_pack(
         &self,
         b: &mut HirBody,
@@ -2843,12 +2849,14 @@ impl Compiler {
             .len()
             .checked_sub(1)
             .ok_or("call-argument")?;
-        let declared = self.checker.fn_param_tys(key).and_then(|tys| tys.last().cloned()).ok_or("call-argument")?;
+        let tuple_rest = self.checker.fn_tuple_rest(key);
         let ground = |b: &HirBody, r: HirId| b.expr(r).ty.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t));
         let mut args = args.to_vec();
         let whole = match args.last().map(|&a| &b.expr(a).kind) {
             Some(&HirKind::Spread(inner))
-                if args.len() > 1 && ground(b, inner).is_some_and(|t| crate::typechecking::ty::vec_element_ty(&t).is_some()) =>
+                if !tuple_rest
+                    && args.len() > 1
+                    && ground(b, inner).is_some_and(|t| crate::typechecking::ty::vec_element_ty(&t).is_some()) =>
             {
                 args.pop();
                 Some(inner)
@@ -2856,12 +2864,36 @@ impl Compiler {
             _ => None,
         };
         let flat = self.hir_flatten_spreads(b, &args[1..])?;
-        if flat.len() < fixed_count {
-            return Err("call-argument");
-        }
         let mut out = vec![args[0]];
-        out.extend_from_slice(&flat[..fixed_count]);
-        let rest = flat[fixed_count..].to_vec();
+        let rest = if flat.iter().any(|&a| matches!(b.expr(a).kind, HirKind::Named { .. })) {
+            // Named arguments go where the checker matched them (a whole
+            // `Vec` spread is the last slot, the pack's).
+            let record = self.checker.named_arg_slots(call_span.0, call_span.1).ok_or("call-argument")?;
+            if !record.rest || record.params != fixed_count || record.slots.len() != flat.len() + usize::from(whole.is_some()) {
+                return Err("call-argument");
+            }
+            let mut slots: Vec<Option<HirId>> = vec![None; fixed_count];
+            let mut rest = Vec::new();
+            for (&arg, &k) in flat.iter().zip(&record.slots) {
+                let value = match &b.expr(arg).kind {
+                    HirKind::Named { value, .. } => *value,
+                    _ => arg,
+                };
+                match slots.get_mut(k) {
+                    Some(slot) if slot.is_none() => *slot = Some(value),
+                    Some(_) => return Err("call-argument"),
+                    None => rest.push(value),
+                }
+            }
+            out.extend(slots.into_iter().collect::<Option<Vec<_>>>().ok_or("call-argument")?);
+            rest
+        } else {
+            if flat.len() < fixed_count {
+                return Err("call-argument");
+            }
+            out.extend_from_slice(&flat[..fixed_count]);
+            flat[fixed_count..].to_vec()
+        };
         if let Some(inner) = whole {
             if !rest.is_empty() {
                 return Err("call-argument");
@@ -2869,6 +2901,18 @@ impl Compiler {
             out.push(inner);
             return Ok(out);
         }
+        let span = (call_span.1, call_span.1);
+        // A tuple pack's type is its items' types in order.
+        if tuple_rest {
+            let items: Option<Vec<Ty>> = rest.iter().map(|&r| ground(b, r)).collect();
+            let pack_ty = match items {
+                Some(items) if items.iter().all(crate::hir::layout::ty_is_closed) => Ty::Tuple(items),
+                _ => return Err("call-argument"),
+            };
+            out.push(Self::hir_push(b, &self.checker, HirKind::Make { kind: MakeKind::Tuple, args: rest }, Some(pack_ty), span));
+            return Ok(out);
+        }
+        let declared = self.checker.fn_param_tys(key).and_then(|tys| tys.last().cloned()).ok_or("call-argument")?;
         // A generic pack's type is its items' one ground type (`P` and
         // `readonly P` are one, as for the mono key).
         let pack_ty = if !crate::hir::layout::ty_is_closed(&declared) {
@@ -2885,7 +2929,6 @@ impl Compiler {
         } else {
             declared
         };
-        let span = (call_span.1, call_span.1);
         out.push(Self::hir_push(b, &self.checker, HirKind::Make { kind: MakeKind::Array, args: rest }, Some(pack_ty), span));
         Ok(out)
     }
@@ -5437,13 +5480,9 @@ impl Compiler {
             Some(&(fixed, false)) if fixed as usize == explicit => {}
             // A rest parameter takes its pack as one more argument
             // ([`Self::hir_call_shapes`]).
-            // A method's typed pack too, a `Vec` as any other (#1729).
-            Some(&(fixed, true))
-                if fixed as usize + 1 == explicit
-                    && match self_layout {
-                        None => !open,
-                        Some(_) => !self.checker.fn_tuple_rest(&lookup),
-                    } => {}
+            // A method's pack too, a `Vec` or tuple as any other (#1729,
+            // #1734).
+            Some(&(fixed, true)) if fixed as usize + 1 == explicit && (self_layout.is_some() || !open) => {}
             // Declared later in the file: its entry is reserved but its
             // arity not yet recorded, so read it from the signature as the
             // AST call does. Its two-word return kind comes from the
@@ -7535,6 +7574,10 @@ impl Compiler {
             Some(_) => None,
             None => match sym {
                 "==" | "!=" => Some(HirOp::Prim),
+                // Ordering on a string-backed scalar enum with no instance
+                // (against its backing `string`, or another of its cases)
+                // orders the backing strings by their bytes (#1722).
+                "<" | ">" | "<=" | ">=" if self.hir_string_word(hir, lhs) && self.hir_string_word(hir, rhs) => Some(HirOp::Prim),
                 // Arithmetic or ordering on a number-backed scalar enum with
                 // no instance is on its backing word: a raw op over both
                 // operands, in the backing's lane.
@@ -7554,7 +7597,12 @@ impl Compiler {
     /// it has one with a one-word result.
     fn hir_instance_operator(&self, ty: &Ty, class: &'static str, method: &'static str) -> Option<HirOp> {
         let (lookup, fqn) = self.concrete_operator_target_ty(ty, class, method)?;
-        let ret = self.checker.fn_return_ty(&fqn)?;
+        // A tuple's structural order (#1721) has no source signature: a
+        // `bool`.
+        let ret = match &lookup {
+            Ty::Tuple(_) => crate::typechecking::ty::boolean(),
+            _ => self.checker.fn_return_ty(&fqn)?,
+        };
         if !matches!(
             lower::classify(&self.checker, &ret),
             Some(ValueClass::Scalar | ValueClass::Opaque | ValueClass::Object)
@@ -7567,6 +7615,21 @@ impl Compiler {
             class,
             method,
         })
+    }
+
+    /// Whether operand `id` is a `string` or a string-backed scalar enum.
+    fn hir_string_word(&self, hir: &HirBody, id: HirId) -> bool {
+        let Some(ty) = Self::hir_ty(hir, id) else {
+            return false;
+        };
+        let ty = apply_ty_prune(self.checker.subst(), ty);
+        let string = |t: &Ty| matches!(crate::typechecking::ty::strip_readonly(t), Ty::Con(n) if n == crate::typechecking::ty::STRING);
+        string(&ty)
+            || self
+                .hir_enum_name(&ty)
+                .filter(|name| self.checker.is_scalar_enum(name))
+                .and_then(|name| self.checker.scalar_value_ty(&name))
+                .is_some_and(|backing| string(&backing))
     }
 
     /// The lane of an `int` / `byte` (`false`) or `float` (`true`) operand,
