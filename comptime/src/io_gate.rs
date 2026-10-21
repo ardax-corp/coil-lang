@@ -101,11 +101,11 @@ pub fn gated(name: &str, native: Arc<dyn NativeFn>) -> Option<Arc<dyn NativeFn>>
     Some(Arc::new(HostClosureFn::new(sig, move |heap, args| {
         let io = ACTIVE.with(|a| a.borrow().clone());
         let Some(io) = io else {
-            return Err(FfiError::Unsupported(format!(
+            return Err(FfiError::Panic(format!(
                 "`{name}` is not available here: only a `const` or `comptime` expression may do IO while compiling"
             )));
         };
-        check(&io, gate, heap, args).map_err(FfiError::Unsupported)?;
+        check(&io, gate, heap, args).map_err(FfiError::Panic)?;
         native.invoke(heap, args)
     })))
 }

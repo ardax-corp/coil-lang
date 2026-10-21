@@ -4,7 +4,7 @@ use crate::typechecking::{CStructDef, ForInInfo, ForInKind};
 use reporting::{ErrorCode, Message};
 
 /// Synthetic function name prefix for a static initializer body.
-const STATIC_INIT_FN_PREFIX: &str = "__static_init$";
+pub(super) const STATIC_INIT_FN_PREFIX: &str = "__static_init$";
 /// Most generic-head instance / default-body clones in one compilation.
 const INST_CLONE_MAX_TOTAL: usize = 256;
 
@@ -8689,12 +8689,14 @@ fn const_effect_messages(checker: &crate::typechecking::infer::Checker, hir: &cr
             continue;
         }
         let s = fx.summaries[i];
-        // IO the build granted to this module's compile-time code is allowed;
-        // the host checks each path, name and program as it runs.
+        // With IO granted to this module's compile-time code, anything but a
+        // mutable static (or code this analysis cannot see) may run: the
+        // host checks each native call, path, name and program as it runs.
+        // Without, the initializer must be pure.
         let module = name.rsplit_once("::").map_or("", |(m, _)| m);
         let granted = checker.host_grants().comptime_io.for_module(module).effects();
-        let missing = s.visible.bits() & !granted;
-        if missing == 0 && s.latent == 0 {
+        let missing = if granted == 0 { s.visible.bits() } else { s.visible.bits() & common::EffectFlags::UNKNOWN };
+        if missing == 0 && s.latent == 0 && !(granted != 0 && s.statics) {
             continue;
         }
         let short = name.rsplit("::").next().unwrap_or(name);
@@ -8707,7 +8709,7 @@ fn const_effect_messages(checker: &crate::typechecking::infer::Checker, hir: &cr
             },
             body.span.0..body.span.1,
         );
-        msg.with_help(match grant_hint(missing) {
+        msg.with_help(match grant_hint(missing).filter(|_| !s.statics && s.latent == 0) {
             Some(hint) => hint,
             None if crate::comptime_expr::is_comptime_const(short) => {
                 "a `comptime` expression cannot read or change the program's state; without `comptime` it is computed when the program runs".to_string()
@@ -8720,7 +8722,8 @@ fn const_effect_messages(checker: &crate::typechecking::infer::Checker, hir: &cr
 }
 
 /// The flags that would let compile-time code have the `missing` effects,
-/// when IO is all that is missing.
+/// when it touches no mutable static: with IO granted, anything else the
+/// host allows may run.
 fn grant_hint(missing: u16) -> Option<String> {
     use common::EffectFlags as F;
     let flags: Vec<&str> = [
@@ -8730,11 +8733,12 @@ fn grant_hint(missing: u16) -> Option<String> {
         (F::EXEC, "`--comptime-exec STEM`"),
     ]
     .into_iter()
-    .filter(|(bit, _)| missing & bit != 0)
+    // Reading a file closes it, which is a write too.
+    .filter(|&(bit, _)| missing & bit != 0 && !(bit == F::WRITE && missing & F::READ != 0))
     .map(|(_, flag)| flag)
     .collect();
-    let io = F::READ | F::WRITE | F::ENV | F::EXEC;
-    if flags.is_empty() || missing & !io != 0 {
+    // Other effects (closing a stream, waiting on it) come with the IO.
+    if flags.is_empty() || missing & F::UNKNOWN != 0 {
         return None;
     }
     Some(format!("code run while compiling does IO only when the build grants it: pass {}", flags.join(" and ")))

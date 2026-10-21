@@ -249,8 +249,22 @@ fn rebuild(
 }
 
 /// The failure text: the VM's own reason, else what the call printed.
-fn failure_reason(reason: String, captured: &Captured) -> String {
+/// What the VM printed before it stopped. A native the host refused says
+/// what to grant, and where in a library it was called does not help.
+fn printed_text(captured: &Captured) -> String {
     let printed = String::from_utf8_lossy(&captured.0.lock().expect("capture lock")).trim().to_string();
+    let (first, rest) = printed.split_once('\n').unwrap_or((&printed, ""));
+    match first.strip_prefix("panic: ") {
+        Some(msg) if msg.contains(" while compiling") => {
+            let msg = msg.rsplit_once(" at ").map_or(msg, |(m, _)| m);
+            if rest.is_empty() { msg.to_string() } else { format!("{msg}\n{rest}") }
+        }
+        _ => printed,
+    }
+}
+
+fn failure_reason(reason: String, captured: &Captured) -> String {
+    let printed = printed_text(captured);
     match reason {
         r if r.is_empty() && !printed.is_empty() => printed,
         r if r.is_empty() => "it panicked".to_string(),
@@ -322,7 +336,7 @@ fn build_sandbox_natives() -> Vec<Arc<dyn NativeFn>> {
             } else {
                 let sig = native.signature().clone();
                 Arc::new(HostClosureFn::new(sig, move |_heap, _args| {
-                    Err(FfiError::Unsupported(format!(
+                    Err(FfiError::Panic(format!(
                         "`{name}` is not available while compiling"
                     )))
                 })) as Arc<dyn NativeFn>
@@ -366,7 +380,7 @@ fn run_entry(program: &CompiledExpansion, entry: u32, input: &str, limits: &Comp
         vm.reset_isolate_heap();
         keep_vm(program, vm);
     }
-    let printed = String::from_utf8_lossy(&captured.0.lock().expect("capture lock")).trim().to_string();
+    let printed = printed_text(&captured);
     match outcome {
         Ok(Ok(text)) => Ok(text),
         Ok(Err(reason)) if reason.is_empty() => Err(if printed.is_empty() {
