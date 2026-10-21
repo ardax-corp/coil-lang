@@ -19,6 +19,12 @@
 //! parameter, or passing such a value where the callee mutates it. A call
 //! that passes a `readonly` value where the callee mutates it is E0107
 //! ([`ModuleEffects::readonly_messages`], #1558).
+//!
+//! A write into an object the body made itself is invisible to callers.
+//! That covers a call that mutates only such an object too (design §3.7,
+//! #1648): [`Summary::param_only`] keeps apart the `mutate` a body has
+//! only from changing what its parameters reach, and a caller passing
+//! there only objects it owns ([`BodyFacts::owned`]) does not pay it.
 
 use std::collections::{HashMap, HashSet};
 
@@ -53,7 +59,15 @@ pub struct Summary {
     /// field, an element, a `Vec`), itself or through a callee. A
     /// `readonly` argument there is E0107.
     pub mutates: u64,
+    /// The bits of `flags` among [`OWNED_BITS`] that come only from
+    /// changing what its parameters reach, through a parameter or a field
+    /// or element path from one. A caller that passes there only objects
+    /// it owns ([`BodyFacts::owned`]) discharges them (design §3.7, #1648).
+    pub param_only: u16,
 }
+
+/// Effects a write to an object can have that its owner hides.
+const OWNED_BITS: u16 = EffectFlags::HEAP_MUT | EffectFlags::RESIZE;
 
 /// `open(path, "r")` with a literal mode reads or writes only as the mode
 /// says, as the capability check reads it (#886).
@@ -95,6 +109,7 @@ impl Summary {
             visible: EffectFlags::from_bits(flags.bits() & !hidden),
             latent: 0,
             mutates: 0,
+            param_only: 0,
         }
     }
 }
@@ -830,6 +845,12 @@ struct BodyFacts {
     /// Locals that may hold a value reached from parameters: bit `i` for
     /// parameter `i` ([`param_roots`]).
     derived: HashMap<LocalId, u64>,
+    /// Private objects that may also be passed to calls ([`owned_locals`]):
+    /// a call that mutates only these costs no `mutate`.
+    owned: HashSet<LocalId>,
+    /// Locals assigned after their binding: a parameter among them no
+    /// longer holds what the caller passed.
+    assigned: HashSet<LocalId>,
 }
 
 impl BodyFacts {
@@ -868,7 +889,7 @@ impl BodyFacts {
         // Where a fresh local may appear: the base of `x.f` / `x[i]`, the
         // receiver of a `Vec` method, and `return x`.
         let mut allowed = HashSet::new();
-        let mut escaped = assigned;
+        let mut escaped = assigned.clone();
         for e in &body.exprs {
             match &e.kind {
                 HirKind::Field { base, .. } | HirKind::Index { base, .. } | HirKind::Append { base, .. } => {
@@ -893,6 +914,7 @@ impl BodyFacts {
                 _ => {}
             }
         }
+        let mut owned: HashSet<LocalId> = fresh.iter().copied().filter(|l| !escaped.contains(l)).collect();
         for (i, e) in body.exprs.iter().enumerate() {
             if let HirKind::Local(l) = e.kind
                 && fresh.contains(&l)
@@ -902,11 +924,120 @@ impl BodyFacts {
             }
         }
         fresh.retain(|l| !escaped.contains(l));
+        owned_locals(body, &mut owned);
         let derived = derived_locals(body);
         Self {
             private: fresh,
             fn_values,
             derived,
+            owned,
+            assigned,
+        }
+    }
+}
+
+/// Whether a value of `id` can give a private object nothing a write
+/// through that object could change but itself: a value of a type with
+/// nothing mutable in it, a `readonly` one, or a new object or `Vec` made
+/// of such values.
+fn inert(body: &HirBody, id: HirId) -> bool {
+    let e = body.expr(id);
+    if !may_hold_mutable(e.ty.as_ref()) || matches!(e.ty, Some(Ty::Readonly(_))) {
+        return true;
+    }
+    match &e.kind {
+        HirKind::Named { value, .. } => inert(body, *value),
+        HirKind::Make {
+            kind: MakeKind::Array | MakeKind::Tuple | MakeKind::Class(_) | MakeKind::Record(_),
+            args,
+        } => args.iter().all(|a| inert(body, *a)),
+        HirKind::Call { callee: Callee::Named { name, .. }, args } if is_vec_ctor(name) => {
+            args.iter().all(|a| inert(body, *a))
+        }
+        _ => false,
+    }
+}
+
+/// Narrow `owned` (fresh, never reassigned, captured or deferred locals) to
+/// the objects no write through them can reach anything else, and that
+/// never leave the body (design §3.7, #1648). Each is made of
+/// [`inert`] values, is given only inert values afterwards, and appears
+/// only as:
+/// - the base of `x.f` / `x[i]`, or the receiver of a `Vec` method;
+/// - `return x` from a body that returns a `readonly` view;
+/// - an argument of a call whose other arguments are inert or owned and
+///   whose result holds nothing mutable or is `readonly`, so the callee
+///   can neither hand back an alias nor store a shared value in it.
+fn owned_locals(body: &HirBody, owned: &mut HashSet<LocalId>) {
+    if owned.is_empty() {
+        return;
+    }
+    // The local a place `x.f.g` / `x[i]` writes into.
+    fn place_root(body: &HirBody, id: HirId) -> Option<LocalId> {
+        match &body.expr(id).kind {
+            HirKind::Local(l) => Some(*l),
+            HirKind::Field { base, .. } | HirKind::Index { base, .. } => place_root(body, *base),
+            _ => None,
+        }
+    }
+    let readonly_ret = matches!(body.ret, Some(Ty::Readonly(_))) || !may_hold_mutable(body.ret.as_ref());
+    let mut parent: HashMap<HirId, HirId> = HashMap::new();
+    for i in 0..body.exprs.len() {
+        let id = HirId(i as u32);
+        for k in children(body, id) {
+            parent.insert(k, id);
+        }
+    }
+    for e in &body.exprs {
+        match &e.kind {
+            HirKind::Let { local, init: Some(init) } if owned.contains(local) && !inert(body, *init) => {
+                owned.remove(local);
+            }
+            HirKind::Assign { place, value } | HirKind::Append { base: place, value } => {
+                if let Some(l) = place_root(body, *place)
+                    && !inert(body, *value)
+                {
+                    owned.remove(&l);
+                }
+            }
+            _ => {}
+        }
+    }
+    loop {
+        let before = owned.len();
+        for (i, e) in body.exprs.iter().enumerate() {
+            let HirKind::Local(l) = e.kind else { continue };
+            if !owned.contains(&l) {
+                continue;
+            }
+            let id = HirId(i as u32);
+            let ok = parent.get(&id).is_some_and(|&p| match &body.expr(p).kind {
+                HirKind::Field { base, .. } | HirKind::Index { base, .. } | HirKind::Append { base, .. } => *base == id,
+                HirKind::Return(Some(_)) => readonly_ret,
+                HirKind::Call { callee: Callee::Method { name }, args }
+                    if args.first().is_some_and(|&r| is_vec(body.expr(r).ty.as_ref()))
+                        && (VEC_MUTATORS.contains(&name.as_str()) || matches!(name.as_str(), "len" | "capacity")) =>
+                {
+                    args[0] == id && args[1..].iter().all(|a| inert(body, *a))
+                }
+                HirKind::Call {
+                    callee: Callee::Named { .. } | Callee::Method { .. },
+                    args,
+                } => {
+                    let ty = body.expr(p).ty.as_ref();
+                    (!may_hold_mutable(ty) || matches!(ty, Some(Ty::Readonly(_))))
+                        && args.iter().all(|&a| {
+                            inert(body, a) || matches!(body.expr(a).kind, HirKind::Local(k) if owned.contains(&k))
+                        })
+                }
+                _ => false,
+            });
+            if !ok {
+                owned.remove(&l);
+            }
+        }
+        if owned.len() == before {
+            return;
         }
     }
 }
@@ -1114,6 +1245,10 @@ struct Walk<'s> {
     /// Calls that pass a `readonly` value where the callee mutates it,
     /// when asked.
     ro_hits: Option<Vec<RoHit>>,
+    /// [`OWNED_BITS`] seen only from changing what parameters reach, and
+    /// seen from anything else ([`Summary::param_only`]).
+    through_params: u16,
+    elsewhere: u16,
 }
 
 /// One place a body mutates what its parameters reach.
@@ -1196,10 +1331,13 @@ impl Cx<'_> {
             causes: explain.then(Vec::new),
             mut_causes: None,
             ro_hits: None,
+            through_params: 0,
+            elsewhere: 0,
         };
         if let Some(root) = body.root {
             self.expr(&mut w, root);
         }
+        w.out.param_only = w.through_params & !w.elsewhere;
         w
     }
 
@@ -1214,10 +1352,13 @@ impl Cx<'_> {
             causes: None,
             mut_causes: Some(Vec::new()),
             ro_hits: Some(Vec::new()),
+            through_params: 0,
+            elsewhere: 0,
         };
         if let Some(root) = body.root {
             self.expr(&mut w, root);
         }
+        w.out.param_only = w.through_params & !w.elsewhere;
         w
     }
 
@@ -1522,7 +1663,41 @@ impl Cx<'_> {
 
     /// Add `bits` for the node `at`; `what` says why, when explaining.
     fn note(&self, w: &mut Walk<'_>, at: HirId, bits: u16, what: impl FnOnce() -> String) {
-        self.record(w, at, Summary::of(EffectFlags::from_bits(bits)), || None, what);
+        self.record(w, at, Summary::of(EffectFlags::from_bits(bits)), 0, || None, what);
+    }
+
+    /// As [`Self::note`], for a write of `values` into what the place
+    /// `base` reaches. One through a parameter path ([`Self::param_path`])
+    /// that stores only [`inert`] values is [`Summary::param_only`]: it
+    /// cannot make an object the caller owns reach anything shared.
+    fn note_write(
+        &self,
+        w: &mut Walk<'_>,
+        at: HirId,
+        base: HirId,
+        values: &[HirId],
+        bits: u16,
+        what: impl FnOnce() -> String,
+    ) {
+        let body = &self.module.bodies[w.index];
+        let through = if self.param_path(w, base) && values.iter().all(|v| inert(body, *v)) { bits } else { 0 };
+        self.record(w, at, Summary::of(EffectFlags::from_bits(bits)), through, || None, what);
+    }
+
+    /// Whether `id` is a parameter the body never reassigns, or a field or
+    /// element read from one.
+    fn param_path(&self, w: &Walk<'_>, id: HirId) -> bool {
+        let body = &self.module.bodies[w.index];
+        match &body.expr(id).kind {
+            HirKind::Local(l) => body.params.contains(l) && !self.facts[w.index].assigned.contains(l),
+            HirKind::Field { base, .. } | HirKind::Index { base, .. } => self.param_path(w, *base),
+            _ => false,
+        }
+    }
+
+    fn is_owned(&self, w: &Walk<'_>, id: HirId) -> bool {
+        let body = &self.module.bodies[w.index];
+        matches!(body.expr(id).kind, HirKind::Local(l) if self.facts[w.index].owned.contains(&l))
     }
 
     /// As [`Self::note`], for effects no user sees (a panic, a `defer`).
@@ -1531,18 +1706,23 @@ impl Cx<'_> {
             flags: EffectFlags::from_bits(bits),
             ..Summary::default()
         };
-        self.record(w, at, s, || None, what);
+        self.record(w, at, s, 0, || None, what);
     }
 
-    /// Add `s`'s effects (not its latent parameters) for the node `at`.
+    /// Add `s`'s effects (not its latent parameters) for the node `at`;
+    /// those of `through` come only from changing what parameters reach.
     fn record(
         &self,
         w: &mut Walk<'_>,
         at: HirId,
         s: Summary,
+        through: u16,
         callee: impl FnOnce() -> Option<Called>,
         what: impl FnOnce() -> String,
     ) {
+        let owned_bits = s.flags.bits() & OWNED_BITS;
+        w.through_params |= owned_bits & through;
+        w.elsewhere |= owned_bits & !through;
         w.out.flags = w.out.flags.union(s.flags);
         w.out.visible = w.out.visible.union(s.visible);
         if let Some(causes) = w.causes.as_mut()
@@ -1564,19 +1744,23 @@ impl Cx<'_> {
         let e = body.expr(id);
         match &e.kind {
             HirKind::Call { callee, args } => self.call(w, id, callee, args),
-            HirKind::Assign { place, .. } => match &body.expr(*place).kind {
+            HirKind::Assign { place, value } => match &body.expr(*place).kind {
                 HirKind::Field { base, name } if self.roots(w, *base) != 0 => {
                     let bits = self.roots(w, *base);
                     self.mutate(w, bits, None, || format!("writes field `{name}`"));
                     if !self.is_private(w, *base) {
-                        self.note(w, id, EffectFlags::HEAP_MUT, || format!("writes field `{name}` of a shared object"))
+                        self.note_write(w, id, *base, &[*value], EffectFlags::HEAP_MUT, || {
+                            format!("writes field `{name}` of a shared object")
+                        })
                     }
                 }
                 HirKind::Index { base, .. } if self.roots(w, *base) != 0 => {
                     let bits = self.roots(w, *base);
                     self.mutate(w, bits, None, || "writes an element".to_string());
                     if !self.is_private(w, *base) {
-                        self.note(w, id, EffectFlags::HEAP_MUT, || "writes an element of a shared array".into())
+                        self.note_write(w, id, *base, &[*value], EffectFlags::HEAP_MUT, || {
+                            "writes an element of a shared array".into()
+                        })
                     }
                 }
                 HirKind::Field { base, name } if !self.is_private(w, *base) => {
@@ -1594,10 +1778,12 @@ impl Cx<'_> {
                 }
                 _ => {}
             },
-            HirKind::Append { base, .. } if !self.is_private(w, *base) => {
+            HirKind::Append { base, value } if !self.is_private(w, *base) => {
                 let bits = self.roots(w, *base);
                 self.mutate(w, bits, None, || "appends to an array".to_string());
-                self.note(w, id, EffectFlags::HEAP_MUT | EffectFlags::RESIZE, || "appends to a shared array".into())
+                self.note_write(w, id, *base, &[*value], EffectFlags::HEAP_MUT | EffectFlags::RESIZE, || {
+                    "appends to a shared array".into()
+                })
             }
             // A lambda that mutates what it captured mutates the captured
             // local's values here, whenever it is called.
@@ -1662,7 +1848,8 @@ impl Cx<'_> {
 
     fn is_private(&self, w: &Walk<'_>, base: HirId) -> bool {
         let body = &self.module.bodies[w.index];
-        matches!(body.expr(base).kind, HirKind::Local(l) if self.facts[w.index].private.contains(&l))
+        let facts = &self.facts[w.index];
+        matches!(body.expr(base).kind, HirKind::Local(l) if facts.private.contains(&l) || facts.owned.contains(&l))
     }
 
     fn call(&self, w: &mut Walk<'_>, at: HirId, callee: &Callee, args: &[HirId]) {
@@ -1699,7 +1886,7 @@ impl Cx<'_> {
                         let bits = self.roots(w, recv);
                         self.mutate(w, bits, None, || format!("calls `.{name}()` on a `Vec`"));
                         if !self.is_private(w, recv) {
-                            self.note(w, at, EffectFlags::HEAP_MUT | EffectFlags::RESIZE, || {
+                            self.note_write(w, at, recv, &args[1..], EffectFlags::HEAP_MUT | EffectFlags::RESIZE, || {
                                 format!("calls `.{name}()` on a shared `Vec`")
                             });
                         }
@@ -1775,14 +1962,15 @@ impl Cx<'_> {
                 body,
             })
         };
-        self.record(w, at, callee, link, || format!("calls `{shown}`"));
-        if callee.latent == 0 {
-            return;
-        }
         let body = &self.module.bodies[w.index];
         let positional = args
             .iter()
             .all(|a| !matches!(body.expr(*a).kind, HirKind::Named { .. } | HirKind::Spread(_)));
+        let (callee_cost, through) = self.owned_discharge(w, callee, args, positional);
+        self.record(w, at, callee_cost, through, link, || format!("calls `{shown}`"));
+        if callee.latent == 0 {
+            return;
+        }
         for i in 0..64 {
             if callee.latent & (1 << i) == 0 {
                 continue;
@@ -1807,11 +1995,46 @@ impl Cx<'_> {
                             body: self.fn_value_body(index, arg),
                         })
                     };
-                    self.record(w, arg, s, passed, || format!("passes `{shown}` a function that is not pure"))
+                    self.record(w, arg, s, 0, passed, || format!("passes `{shown}` a function that is not pure"))
                 }
                 _ => self.note(w, arg, UNKNOWN.bits(), || format!("passes `{shown}` a function it cannot resolve")),
             }
         }
+    }
+
+    /// What a call of `callee` costs here, and which of that comes only
+    /// from changing what this body's parameters reach (design §3.7,
+    /// #1648). When the callee's `mutate` comes only from changing what
+    /// its parameters reach, and each argument it mutates is an object
+    /// this body owns, those writes are invisible to every caller and cost
+    /// nothing. When some are this body's own parameter paths instead,
+    /// the writes are this body's parameter writes.
+    fn owned_discharge(&self, w: &Walk<'_>, callee: Summary, args: &[HirId], positional: bool) -> (Summary, u16) {
+        let bits = callee.flags.bits() & OWNED_BITS & callee.param_only;
+        if bits == 0 || callee.mutates == 0 || !positional {
+            return (callee, 0);
+        }
+        let mut all_owned = true;
+        for j in 0..64 {
+            if callee.mutates & (1 << j) == 0 {
+                continue;
+            }
+            match args.get(j) {
+                Some(&a) if self.is_owned(w, a) => {}
+                Some(&a) if self.param_path(w, a) => all_owned = false,
+                _ => return (callee, 0),
+            }
+        }
+        if !all_owned {
+            return (callee, bits);
+        }
+        let keep = |f: EffectFlags| EffectFlags::from_bits(f.bits() & !bits);
+        let cost = Summary {
+            flags: keep(callee.flags),
+            visible: keep(callee.visible),
+            ..callee
+        };
+        (cost, 0)
     }
 
     /// The summary of the function value `id` evaluates to, when known.
@@ -1905,6 +2128,7 @@ impl Cx<'_> {
             visible,
             latent: 0,
             mutates,
+            param_only: 0,
         })
     }
 

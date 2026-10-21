@@ -73,3 +73,54 @@ fn main() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A bare `Ok(..)` / `Err(..)` returned from `main` lowers whatever the error
+/// type, and an `Err` still fails the program (coil-lang#1738).
+#[test]
+fn a_bare_constructor_returned_from_main_lowers() {
+    let bin = std::env::var("CARGO_BIN_EXE_coil").expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
+    let dir = std::env::temp_dir().join(format!("coil_main_result_bare_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let string_err = "fn main() -> Result<unit, string> {
+    return Err(\"bad\");
+}
+";
+    let thread_err = "use thread::{channel, ThreadError};
+
+fn main() -> Result<unit, ThreadError> {
+    let pair = channel()?;
+    return Err(ThreadError::JoinFailed);
+}
+";
+    let enum_err = "enum E {
+    Bad(int),
+}
+
+fn main() -> Result<int, E> {
+    return Err(Bad(3));
+}
+";
+    let ok = "use thread::{channel, ThreadError};
+
+fn main() -> Result<unit, ThreadError> {
+    let pair = channel()?;
+    return Ok(());
+}
+";
+    for mode in [&[][..], &["-O0"][..]] {
+        for (name, src, msg) in [
+            ("string_err.hy", string_err, "main returned Err(bad)"),
+            ("thread_err.hy", thread_err, "main returned Err(JoinFailed)"),
+            ("enum_err.hy", enum_err, "main returned Err(E)"),
+        ] {
+            let (success, line) = run(&bin, &dir, name, src, mode);
+            assert!(!success, "{name} {mode:?}: expected a failing exit");
+            assert!(line.starts_with(&format!("panic: {msg}")), "{name} {mode:?}: {line}");
+        }
+        let (success, line) = run(&bin, &dir, "ok.hy", ok, mode);
+        assert!(success, "ok.hy {mode:?}: {line}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
