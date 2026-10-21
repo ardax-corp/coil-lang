@@ -355,6 +355,28 @@ fn main() {
 }
 ```
 
+## comptime
+
+Computes an expression while compiling; the program gets its value.
+
+`comptime e` binds like unary `-`: `comptime f(x) + 1` adds at run time, so
+write `comptime (a + b)` for a whole expression. The expression follows the
+rules of a `const`: it may call any function, but must not read or change a
+`static let` or do IO, and cannot use local variables or parameters. A panic
+or a value with no compile-time form (a function, a handle) is a compile
+error. Each `comptime` expression is computed once and shared by every use.
+
+```coil
+fn sq(int x) -> int {
+    return x * x;
+}
+
+fn main() {
+    let a = comptime sq(12); // 144, computed while compiling
+    let b = comptime sq(2) + 1; // 5: the `+ 1` runs in the program
+}
+```
+
 ## enum
 
 Declares a sum type: a value is exactly one of its variants.

@@ -125,7 +125,8 @@ impl Compiler {
         let shadowing = crate::shadow_traits::rename(ast);
         // Checks, adding a copy of each `... xs` function per call shape.
         let mut checked = crate::variadic::check_with_instances(&mut self.checker, ast, foreign);
-        let messages = self.checker.take_messages();
+        let mut messages = self.checker.take_messages();
+        crate::comptime_expr::explain_messages(ast, &mut messages);
         let failed = messages.iter().any(|m| *m.kind() == reporting::MessageKind::ERROR);
         if checked.instances.is_empty() && checked.copies.is_empty() && shadowing.is_empty() {
             self.messages.extend(messages);
@@ -6891,7 +6892,8 @@ impl Compiler {
                         silent,
                         entry: None,
                         file: self.current_source_file.clone(),
-                        span: ast.0.into_range(),
+                        // A `comptime` expression's const has no source of its own.
+                        span: if crate::comptime_expr::is_comptime_const(name) { init.0 } else { ast.0 }.into_range(),
                     });
                 }
             }
@@ -8693,10 +8695,18 @@ fn const_effect_messages(checker: &crate::typechecking::infer::Checker, hir: &cr
         let short = name.rsplit("::").next().unwrap_or(name);
         let mut msg = Message::error(
             ErrorCode::ConstNotComputable,
-            format!("const `{short}` is computed while compiling, but its initializer is {}", fx.describe(i)),
+            if crate::comptime_expr::is_comptime_const(short) {
+                format!("this `comptime` expression is computed while compiling, but it {}", fx.describe(i))
+            } else {
+                format!("const `{short}` is computed while compiling, but its initializer is {}", fx.describe(i))
+            },
             body.span.0..body.span.1,
         );
-        msg.with_help("a `const` cannot read or change anything outside the program; use `static let` to compute it when the program starts".to_string());
+        msg.with_help(if crate::comptime_expr::is_comptime_const(short) {
+            "a `comptime` expression cannot read or change anything outside the program; without `comptime` it is computed when the program runs".to_string()
+        } else {
+            "a `const` cannot read or change anything outside the program; use `static let` to compute it when the program starts".to_string()
+        });
         out.push(msg);
     }
     out

@@ -773,9 +773,18 @@ impl<'pratt> Pratt<'pratt> {
                 ),
                 // `readonly e` (`'r'`): `e`'s value seen read-only, for any
                 // `e` (`readonly p.inner`, `readonly new P(1)`, `readonly [1]`).
+                // `comptime e` (`'c'`): `e` computed while compiling; binds
+                // like `-`, so `comptime f(x)? + 1` adds at run time.
                 prefix(
                     Precedence::Negate as u16,
-                    choice((op!('-'), op!('~'), op!('+'), op!('!'), keyword!("readonly").to('r'))),
+                    choice((
+                        op!('-'),
+                        op!('~'),
+                        op!('+'),
+                        op!('!'),
+                        keyword!("readonly").to('r'),
+                        keyword!("comptime").to('c'),
+                    )),
                     |c, rhs, e| {
                         (
                             e.span(),
@@ -785,6 +794,7 @@ impl<'pratt> Pratt<'pratt> {
                                 '~' => Expression::Not(rhs),
                                 '!' => Expression::LogicalNot(rhs),
                                 'r' => Expression::Readonly(rhs),
+                                'c' => Expression::Comptime(rhs),
                                 _ => unreachable!("No other prefix operators"),
                             }),
                         )

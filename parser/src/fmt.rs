@@ -794,6 +794,10 @@ impl<'s> Formatter<'s> {
                 self.push_str("typeof ");
                 self.fmt_output(inner);
             }
+            Expression::Comptime(inner) => {
+                self.push_str("comptime ");
+                self.fmt_operand(inner, PREC_UNARY);
+            }
 
             Expression::And(lhs, rhs) => self.fmt_logic_chain(expr, lhs, rhs, "&&"),
             Expression::Or(lhs, rhs) => self.fmt_logic_chain(expr, lhs, rhs, "||"),
@@ -2687,7 +2691,8 @@ fn expr_prec(e: &Expression<'_>) -> u8 {
         | Expression::Positive(_)
         | Expression::Not(_)
         | Expression::LogicalNot(_)
-        | Expression::Readonly(_) => PREC_UNARY,
+        | Expression::Readonly(_)
+        | Expression::Comptime(_) => PREC_UNARY,
         _ => u8::MAX,
     }
 }
@@ -2889,6 +2894,12 @@ mod tests {
         let formatted = format_source(src).expect("format failed");
         let ast2 = parse_exprs(&formatted);
         assert_eq!(ast1, ast2, "formatted:\n{formatted}");
+    }
+
+    #[test]
+    fn comptime_keeps_its_operand_parens() {
+        let src = "fn f() -> int {\n    let a = comptime sq(2) + 1;\n    return comptime (a + 1) * comptime sq(3);\n}\n";
+        assert_eq!(format_source(src).unwrap(), src);
     }
 
     #[test]

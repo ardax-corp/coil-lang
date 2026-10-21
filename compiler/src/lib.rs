@@ -3,6 +3,7 @@ mod attrs;
 mod block_builder;
 pub mod builtin_docs;
 pub(crate) mod escape;
+mod comptime_expr;
 mod const_fold;
 pub mod debug_vars;
 #[cfg(any(test, feature = "dissect"))]

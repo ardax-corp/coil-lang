@@ -57,6 +57,12 @@ impl Pipeline {
     /// modules are discovered.
     pub(super) fn expand_user_macros(&mut self) {
         self.expand_macro_rounds();
+        // Macro output may hold `comptime` expressions and consts to lift.
+        for file in self.processed.clone() {
+            if let Some(ast) = self.ast_cache.get_mut(&file).and_then(|c| c.ast_mut()) {
+                crate::const_fold::lift_startup_consts(ast);
+            }
+        }
         // Generated impls get their trait's contracts too.
         self.inherit_trait_contracts();
         // `coil test`: the entry file's contracts become test cases.

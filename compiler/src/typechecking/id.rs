@@ -217,6 +217,7 @@ pub fn walk_children<'n, 's>(node: &'n Output<'s>, visit: &mut dyn FnMut(&'n Out
         | Expression::Raise(e)
         | Expression::Panic(e)
         | Expression::TypeOf(e)
+        | Expression::Comptime(e)
         | Expression::Try(e)
         | Expression::Yield(e)
         | Expression::YieldFrom(e)
