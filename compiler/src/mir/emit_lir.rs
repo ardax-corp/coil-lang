@@ -2465,6 +2465,9 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
                 loc,
                 hint: Default::default(),
             });
+            if super::emit::miss_edge_pops(func, *scrutinee, *not_taken) {
+                out.push(IlOp::Pop { loc });
+            }
             if !is_fallthrough(func, block.id, *not_taken) {
                 out.push(IlOp::Jump {
                     kind: IlJumpKind::Unconditional,

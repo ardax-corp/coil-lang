@@ -3189,6 +3189,15 @@ fn left_by_miss(func: &MirFunc, preds: &[BlockId], block: BlockId, scrutinee: Va
         })
 }
 
+/// The miss edge of a `JumpIfMatch` on `scrutinee` into `not_taken` pops
+/// the scrutinee itself: `not_taken` is also reached by a path that leaves
+/// no scrutinee (a failed sub-pattern test of an earlier arm, `Op::Mul(a, 1)`
+/// on `Mul(4, 2)`), so nothing there takes the word the miss left, and a
+/// loop running the match grows the stack each pass (#1780).
+pub(super) fn miss_edge_pops(func: &MirFunc, scrutinee: ValueId, not_taken: BlockId) -> bool {
+    !scrutinee_left_by_miss(func, not_taken, scrutinee)
+}
+
 /// `block` is reached only by boxed `JumpIfMatch` misses, which leave the
 /// scrutinee on the stack, takes no payload of it (a unit or wildcard last
 /// arm, or a later arm's test that pushes the scrutinee again), and can run
@@ -3377,6 +3386,9 @@ fn emit_boxed_jump_if_match(args: EmitBoxedJumpIfMatchArgs<'_>) -> Result<(), Lo
         stacked.pop();
     } else {
         stacked.clear();
+    }
+    if miss_edge_pops(func, scrutinee, not_taken) {
+        out.push(IlOp::Pop { loc });
     }
     if !is_fallthrough(func, block.id, not_taken) {
         out.push(IlOp::Jump {
