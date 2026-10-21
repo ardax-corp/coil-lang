@@ -6689,6 +6689,17 @@ impl Checker {
                 let _ = self.unify(elem, &int(), range, "range element type");
                 true
             }
+            // `string` is `Ord` (by bytes) but has no range: a range
+            // holds its bounds as scalar words.
+            other if Self::is_string_ty(other) => {
+                let _ = self.error_with_help(
+                    ErrorCode::GenericTypeError,
+                    "range bounds cannot be `string`".to_string(),
+                    range.clone(),
+                    Some("ranges take `int`, `byte`, `float` or another scalar `Ord` type".to_string()),
+                );
+                false
+            }
             other => {
                 if self.generics.has_instance("Ord", other) {
                     true
@@ -6953,7 +6964,7 @@ impl Checker {
             ("+", _) => "`+` takes `int` / `float` / `byte` operands, two strings, or a type with an `Add` instance".to_string(),
             (_, Some(class)) if bitwise => format!("`{op}` takes `int` / `byte` operands, or a type with a `{class}` instance"),
             (_, Some(class)) => format!(
-                "`{op}` takes `int` / `float` / `byte` operands, or a type with a `{class}` instance"
+                "`{op}` takes `int` / `float` / `byte` / `string` operands, or a type with a `{class}` instance"
             ),
             _ => format!("`{op}` takes `int` / `byte` operands"),
         };
@@ -7016,7 +7027,7 @@ impl Checker {
                 range.clone(),
             );
             m.with_help(format!(
-                "`{op}` takes `int` / `float` / `byte` operands, or a type with a `{class}` instance (`#[derive(Ord)]`)"
+                "`{op}` takes `int` / `float` / `byte` / `string` operands, or a type with a `{class}` instance (`#[derive(Ord)]`)"
             ));
             m
         });
@@ -13055,6 +13066,26 @@ impl Checker {
         self.record_ffi_declare_metadata(key, dargs, true);
     }
 
+    /// `invoke`'s function id is the handle `declare` returned, never a Coil
+    /// `fn` (#1666). Only a function type is refused: the id may also be
+    /// `declare`'s `Result` itself, which existing callers pass straight in.
+    fn check_ffi_invoke_fn_id(&mut self, id_ty: &Ty, range: Range<usize>) {
+        let pruned = apply_ty_prune(&self.subst, id_ty);
+        let id_ty = crate::typechecking::ty::strip_readonly(&pruned).clone();
+        if matches!(id_ty, Ty::Fun(..)) {
+            let [found] = <[String; 1]>::try_from(self.diag_tys(&[&id_ty])).expect("one type");
+            let _ = self.error_with_help(
+                ErrorCode::TypeMismatch,
+                format!("Type mismatch: expected `int`, found `{found}`"),
+                range,
+                Some(
+                    "`invoke`'s function id is the `int` that `declare(lib, name, params, ret)` returns, not a Coil function"
+                        .to_string(),
+                ),
+            );
+        }
+    }
+
     fn infer_ffi_invoke(&mut self, args: &[Output], range: Range<usize>) -> Ty {
         if self.ffi_fn_in_scope("invoke").is_none() {
             let _ = self.error_with_help(
@@ -13069,7 +13100,8 @@ impl Checker {
         let mut nfixed = 0usize;
         if args.len() == 3 {
             self.infer(&args[0]);
-            self.infer(&args[1]);
+            let id_ty = self.infer(&args[1]);
+            self.check_ffi_invoke_fn_id(&id_ty, args[1].0.into_range());
             if let Some((ty, var, fixed)) = self.ffi_invoke_fn_id_metadata(&args[1]) {
                 ret_ty = ty;
                 variadic = var;
@@ -14902,21 +14934,36 @@ impl Checker {
     /// redeclare a built-in type, or `None` when the name is free here. The
     /// built-in keeps its key, so such a type would split: a type position
     /// would name it while `new` or a literal still built the built-in
-    /// (#1654). `Option` / `Result` are free once a `use prelude::… as`
-    /// rebinds them; the other built-ins have no such escape.
+    /// (#1654). No `use` frees one of these names: a type position still
+    /// resolves `Option` / `Result` (in any letter case) to the built-in
+    /// even after `use prelude::Option as …` (#1672).
     fn builtin_type_redeclaration_help(&self, name: &str) -> Option<String> {
         if self.current_module == crate::macros::CORE_MODULE {
             return None;
         }
         if common::is_poly_builtin_enum(name) {
-            return self.builtin_name_in_scope(name).then(|| {
-                format!(
-                    "`{name}` is in the prelude; free the short name with `use prelude::{name} as OtherName;` before redefining, or pick a different name"
-                )
-            });
+            return Some(Self::prelude_enum_redeclaration_help(name));
+        }
+        if let Some(builtin) = [common::BUILTIN_OPTION_ENUM, common::BUILTIN_RESULT_ENUM]
+            .into_iter()
+            .find(|b| b.eq_ignore_ascii_case(name))
+        {
+            return Some(format!(
+                "built-in type names match in any letter case, so `{name}` names the prelude `{builtin}`; pick a different name"
+            ));
+        }
+        if let Some(primitive) = common::builtin_primitive_type_spelling(name) {
+            return Some(format!(
+                "built-in type names match in any letter case, so `{name}` names the built-in `{primitive}`; pick a different name"
+            ));
         }
         common::is_reserved_builtin_type(name)
             .then(|| format!("`{name}` is a built-in type; pick a different name"))
+    }
+
+    /// E0200 help for a user `Option` / `Result` (#1672).
+    fn prelude_enum_redeclaration_help(name: &str) -> String {
+        format!("`{name}` is the built-in prelude enum; pick a different name")
     }
 
     /// A top-level `class` may not take a built-in type's name (#1654).
@@ -16285,7 +16332,9 @@ impl Checker {
                     return;
                 }
                 if common::is_builtin_enum(&name_str) {
+                    // `Option` / `Result` stay built-in under any rebind (#1672).
                     if self.builtin_name_in_scope(&name_str)
+                        || common::is_poly_builtin_enum(&name_str)
                         || common::is_builtin_ffi_enum(&name_str)
                     {
                         let mut msg = Message::error(
@@ -16294,10 +16343,7 @@ impl Checker {
                             node.0.into_range(),
                         );
                         if common::is_poly_builtin_enum(&name_str) {
-                            msg.with_help(format!(
-                                "`{}` is in the prelude; free the short name with `use prelude::{} as OtherName;` before redefining, or pick a different name",
-                                name_str, name_str
-                            ));
+                            msg.with_help(Self::prelude_enum_redeclaration_help(&name_str));
                         } else {
                             msg.with_help(format!(
                                 "`{}` is a compiler FFI type; use `ffi::types::{{…}}` instead of redeclaring it",
@@ -16309,8 +16355,9 @@ impl Checker {
                         self.pop_type_params_for_type_parsing(pushed);
                         return;
                     }
-                    // Prelude enum short name was rebound, drop the
-                    // compiler registration so the user enum can take over.
+                    // A built-in error enum this module did not import
+                    // (`IoError`, …): drop the compiler registration so
+                    // the user enum can take over.
                     self.enums.remove(&name_str);
                     self.enum_tags.remove(&name_str);
                     self.enum_payloads.remove(&name_str);
@@ -18772,8 +18819,13 @@ impl Checker {
     /// [`Self::ident_shadows_static`] for codegen: `resolved` is the
     /// import-resolved name, `name` the bare identifier (current module).
     pub fn ident_shadows_static_name(&self, span: (usize, usize), name: &str, resolved: &str) -> bool {
-        self.ident_shadows_static(span, resolved)
-            || self.ident_shadows_static(span, &self.qualify_module_name(name))
+        let local = self.qualify_module_name(name);
+        // `use m::{x as y}` of a static: `y` binds in the importer's frame,
+        // not the static's (#1706).
+        if local != resolved && !self.static_slots.contains_key(&local) && self.static_decl_frames.contains_key(&local) {
+            return self.ident_shadows_static(span, &local);
+        }
+        self.ident_shadows_static(span, resolved) || self.ident_shadows_static(span, &local)
     }
 
     pub fn ident_shadows_static(&self, span: (usize, usize), fqn: &str) -> bool {
@@ -20254,6 +20306,19 @@ impl Checker {
         } else if let Some(ty) = self.module_consts.get(fqn).cloned() {
             self.env.insert_top(local.to_string(), Scheme::mono(ty));
             self.insert_const_binding(local.to_string());
+        } else if let Some(ty) = self.static_slot_types.get(fqn).cloned() {
+            // A `static`, or a `const` that does not fold (set at startup):
+            // its slot is keyed by FQN only, so an alias needs its own
+            // binding, and its frame so a read is not taken for a local
+            // that shadows the static (#1706).
+            self.env.insert_top(local.to_string(), Scheme::mono(ty));
+            let local_fqn = self.qualify_module_name(local);
+            if local_fqn != fqn {
+                self.static_decl_frames.insert(local_fqn, self.env.depth().saturating_sub(1));
+            }
+            if self.is_static_const_fqn(fqn) {
+                self.insert_const_binding(local.to_string());
+            }
         } else if self.env.lookup(local).is_none() && !self.macro_imports.contains(local) {
             let var = self.counter.fresh();
             self.env.insert_top(local.to_string(), Scheme::mono(Ty::Var(var)));

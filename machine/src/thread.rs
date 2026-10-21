@@ -1218,13 +1218,36 @@ impl Clone for ThreadSpawnContext {
     }
 }
 
+/// A standard stream (`stdin()` / `stdout()` / `stderr()`) held by one of
+/// the spawner's statics: process-wide, so the worker opens its own handle
+/// to it ([`crate::io::stream_std_reopen`], #1684).
+pub struct StdStreamCopy {
+    pub kind: crate::memory::StreamKind,
+    pub closed: bool,
+    pub read_timeout: Option<std::time::Duration>,
+    pub write_timeout: Option<std::time::Duration>,
+}
+
+/// One of the spawner's static slots as an isolate worker starts it.
+pub enum StaticSlot {
+    /// Copied out of the spawner's heap like a spawn argument (#1663).
+    Value(SpawnArg),
+    /// A standard stream, reopened in the worker (#1684).
+    StdStream(StdStreamCopy),
+    /// A file or socket stream: its handle stays with the spawner, and the
+    /// worker's slot holds a stream whose use panics (#1684).
+    UnsentStream,
+}
+
 /// An isolate worker's statics: each of the spawner's slots copied out of
 /// its heap the way spawn arguments are, so startup `const`s read the same
 /// values in the worker (#1663). A `static let` starts at the value it had
-/// when the worker was spawned, and the worker's writes stay its own. A slot
-/// that is unset, or holds a value that cannot cross threads (a stream, a
-/// cyclic graph), starts zeroed.
-fn copy_statics_out(heap: &Heap, words: &[u64], kinds: &[u8]) -> Vec<Option<SpawnArg>> {
+/// when the worker was spawned, and the worker's writes stay its own. A
+/// standard stream is reopened in the worker and any other stream becomes
+/// one that panics when used (#1684). A slot that is unset, or holds another
+/// value that cannot cross threads (a cyclic graph), starts zeroed.
+fn copy_statics_out(heap: &Heap, words: &[u64], kinds: &[u8]) -> Vec<Option<StaticSlot>> {
+    use crate::memory::StreamKind;
     words
         .iter()
         .enumerate()
@@ -1234,11 +1257,34 @@ fn copy_statics_out(heap: &Heap, words: &[u64], kinds: &[u8]) -> Vec<Option<Spaw
             }
             let v = Value::from(w as *mut u8);
             if kinds.get(i) == Some(&common::WORD_SCALAR) || is_immediate_value(heap, v) {
-                return Some(SpawnArg::Value(PortableValue::Immediate(w)));
+                return Some(StaticSlot::Value(SpawnArg::Value(PortableValue::Immediate(w))));
             }
-            value_to_spawn_arg(heap, v).ok()
+            if let Some(Object::Stream(gc)) = heap.find_object_by_addr(w) {
+                let s = gc.as_ref();
+                return Some(match s.kind {
+                    StreamKind::Stdin | StreamKind::Stdout | StreamKind::Stderr => {
+                        StaticSlot::StdStream(StdStreamCopy {
+                            kind: s.kind,
+                            closed: s.closed,
+                            read_timeout: s.read_timeout,
+                            write_timeout: s.write_timeout,
+                        })
+                    }
+                    _ => StaticSlot::UnsentStream,
+                });
+            }
+            value_to_spawn_arg(heap, v).ok().map(StaticSlot::Value)
         })
         .collect()
+}
+
+/// A [`StaticSlot`] as a value of the worker's heap.
+pub(crate) fn static_slot_to_value(heap: &mut Heap, slot: StaticSlot) -> Option<Value> {
+    match slot {
+        StaticSlot::Value(arg) => spawn_arg_to_value(heap, arg).ok(),
+        StaticSlot::StdStream(std) => crate::io::stream_std_reopen(heap, &std).ok(),
+        StaticSlot::UnsentStream => Some(crate::io::alloc_unsent_stream(heap)),
+    }
 }
 
 pub fn host_spawn(heap: &mut Heap, args: &[Value]) -> Value {

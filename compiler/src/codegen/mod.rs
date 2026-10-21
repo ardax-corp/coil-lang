@@ -690,6 +690,10 @@ pub struct Compiler {
     /// Typed inlining takes callees with heap locals, cleared after the
     /// splicing statement (`COIL_HIR_INLINE_HEAP=0` off).
     hir_inline_heap: bool,
+    /// Typed inlining takes a too-big callee at a call with constant
+    /// arguments as its copy with those bound and folded
+    /// (`COIL_HIR_SPECIALIZE=0` off).
+    hir_inline_specialize: bool,
     /// Callee bodies typed inlining spliced (file, source range, name), so
     /// a capability chain still names the function a host call is in.
     inlined_bodies: Vec<(u32, std::ops::Range<usize>, String)>,
@@ -864,6 +868,7 @@ impl Default for Compiler {
             hir_match_tree: crate::hir::match_tree::tree_from_env(),
             hir_inline_pair: crate::hir::inline::pair_from_env(),
             hir_inline_heap: crate::hir::inline::heap_from_env(),
+            hir_inline_specialize: crate::hir::inline::specialize_from_env(),
             inlined_bodies: Vec::new(),
             hir_mir: None,
             hir_mir_why: None,

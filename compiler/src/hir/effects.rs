@@ -1262,11 +1262,30 @@ struct MutCause {
     callee: Option<(usize, u32)>,
 }
 
-/// A value a call passes, the parameter it fills, and its type.
+/// A value a call passes, the parameters it may fill, and its type.
 struct Passed {
-    param: usize,
+    /// One bit, or every parameter from its position on when a
+    /// dynamic-length spread comes at or before it (#1681).
+    params: u64,
     arg: HirId,
     ty: Option<Ty>,
+    /// The local it reads, when the call passes one directly.
+    name: Option<String>,
+}
+
+/// An argument after named and spread arguments are flattened: its value,
+/// its type, the local it names, and whether it is a spread whose length
+/// is not known statically.
+struct Flat {
+    arg: HirId,
+    ty: Option<Ty>,
+    name: Option<String>,
+    dynamic: bool,
+}
+
+/// Every parameter from `j` on.
+fn bits_from(j: usize) -> u64 {
+    if j >= 64 { 0 } else { u64::MAX << j }
 }
 
 /// A call that passes a `readonly` value where the callee mutates it.
@@ -1378,27 +1397,32 @@ impl Cx<'_> {
             return;
         }
         let body = &self.module.bodies[w.index];
-        let Some(passed) = self.passed_args(body, at, args) else {
+        let rest = self.rest_param(body, at, callee_body, key, args);
+        let Some(passed) = self.passed_args(body, at, args, rest) else {
             let all = args.iter().fold(0, |m, a| m | self.roots(w, *a));
             self.mutate(w, all, None, || format!("passes it to `{shown}`"));
             return;
         };
-        for Passed { param: j, arg, ty } in passed {
-            if j >= 64 || mutates & (1 << j) == 0 {
+        for Passed { params, arg, ty, name } in passed {
+            let hit = params & mutates;
+            if hit == 0 {
                 continue;
             }
-            let j = j as u32;
             let bits = self.roots(w, arg);
-            self.mutate(w, bits, callee_body.map(|b| (b, j)), || {
-                if trait_decl && callee_body.is_none() && shown.starts_with('.') && j == 0 {
-                    format!("calls `{shown}`, whose trait does not declare `self` `readonly`")
-                } else {
-                    format!("passes it to `{shown}`")
-                }
-            });
+            for j in (0..64u32).filter(|j| hit & (1 << j) != 0) {
+                self.mutate(w, bits, callee_body.map(|b| (b, j)), || {
+                    if trait_decl && callee_body.is_none() && shown.starts_with('.') && j == 0 {
+                        format!("calls `{shown}`, whose trait does not declare `self` `readonly`")
+                    } else {
+                        format!("passes it to `{shown}`")
+                    }
+                });
+            }
             if w.ro_hits.is_none() || !readonly_at_top(self.checker, ty.as_ref()) {
                 continue;
             }
+            // One error for the argument, at the first parameter it mutates.
+            let j = hit.trailing_zeros();
             let (what, mut param) = self.callee_param(callee_body, key, j);
             if trait_decl && j == 0 {
                 param = "`self`".to_string();
@@ -1408,8 +1432,12 @@ impl Cx<'_> {
                 None => key.and_then(|k| self.program.mutation_reason(k, j)),
             };
             let because = reason.map_or_else(String::new, |r| format!(" ({r})"));
-            let message = if shown.starts_with('.') {
+            // A method call's receiver is what it is called on; any other
+            // argument is passed to it, by name when it is a local (#1681).
+            let message = if shown.starts_with('.') && j == 0 {
                 format!("Cannot call `{shown}` on a `readonly` value: it mutates {param}{because}")
+            } else if let Some(n) = name {
+                format!("Cannot pass the `readonly` `{n}` to `{shown}`: it mutates {param}{because}")
             } else {
                 format!("Cannot pass a `readonly` value to `{shown}`: it mutates {param}{because}")
             };
@@ -1428,24 +1456,59 @@ impl Cx<'_> {
     }
 
     /// Each value a call passes, with the parameter it fills: a named
-    /// argument goes to the parameter the checker matched it to, and a
-    /// spread of a tuple or a fixed array passes each item in turn (#1646).
-    /// `None` when that is not known.
-    fn passed_args(&self, body: &HirBody, at: HirId, args: &[HirId]) -> Option<Vec<Passed>> {
-        let mut flat: Vec<(HirId, Option<Ty>)> = Vec::with_capacity(args.len());
+    /// argument goes to the parameter the checker matched it to, a spread
+    /// of a tuple or a fixed array passes each item in turn (#1646), and
+    /// arguments packed into a rest parameter all fill it (#1681). A spread
+    /// whose length is not known fills the rest parameter when the callee
+    /// has one, and may fill any parameter from its position on otherwise.
+    /// `None` when named arguments' parameters are not known.
+    fn passed_args(&self, body: &HirBody, at: HirId, args: &[HirId], rest: Option<usize>) -> Option<Vec<Passed>> {
+        let mut flat: Vec<Flat> = Vec::with_capacity(args.len());
         let mut named = false;
+        let local = |id: HirId| match body.expr(id).kind {
+            HirKind::Local(l) => Some(body.local(l).name.clone()),
+            _ => None,
+        };
         for &arg in args {
             match &body.expr(arg).kind {
                 HirKind::Named { value, .. } => {
                     named = true;
-                    flat.push((*value, body.expr(*value).ty.clone()));
+                    flat.push(Flat { arg: *value, ty: body.expr(*value).ty.clone(), name: local(*value), dynamic: false });
                 }
-                HirKind::Spread(inner) => flat.extend(self.spread_items(body, *inner)?),
-                _ => flat.push((arg, body.expr(arg).ty.clone())),
+                HirKind::Spread(inner) => match self.spread_items(body, *inner) {
+                    Some(items) => {
+                        flat.extend(items.into_iter().map(|(arg, ty)| Flat { arg, ty, name: None, dynamic: false }))
+                    }
+                    None => flat.push(Flat {
+                        arg: *inner,
+                        ty: self.spread_element(body, *inner),
+                        name: local(*inner).map(|n| format!("...{n}")),
+                        dynamic: true,
+                    }),
+                },
+                _ => flat.push(Flat { arg, ty: body.expr(arg).ty.clone(), name: local(arg), dynamic: false }),
             }
         }
+        let passed = |params: u64, f: Flat| Passed { params, arg: f.arg, ty: f.ty, name: f.name };
         if !named {
-            return Some(flat.into_iter().enumerate().map(|(j, (arg, ty))| Passed { param: j, arg, ty }).collect());
+            // Where a spread of unknown length starts that does not fill
+            // the rest parameter: it and every later argument may fill any
+            // parameter from there on.
+            let mut unknown: Option<usize> = None;
+            let mut out = Vec::with_capacity(flat.len());
+            for (j, f) in flat.into_iter().enumerate() {
+                let params = match (unknown, rest) {
+                    (Some(k), _) => bits_from(k),
+                    (None, Some(r)) if j >= r => bits_from(r) & !bits_from(r + 1),
+                    (None, _) if f.dynamic => {
+                        unknown = Some(j);
+                        bits_from(j)
+                    }
+                    (None, _) => bits_from(j) & !bits_from(j + 1),
+                };
+                out.push(passed(params, f));
+            }
+            return Some(out);
         }
         let (start, end) = body.expr(at).span;
         let record = self.checker.named_arg_slots(start, end)?;
@@ -1454,12 +1517,63 @@ impl Cx<'_> {
         Some(
             flat.into_iter()
                 .enumerate()
-                .map(|(i, (arg, ty))| {
-                    let param = if i < skip { i } else { skip + record.slots[i - skip] };
-                    Passed { param, arg, ty }
+                .map(|(i, f)| {
+                    let j = if i < skip { i } else { skip + record.slots[i - skip] };
+                    passed(bits_from(j) & !bits_from(j + 1), f)
                 })
                 .collect(),
         )
+    }
+
+    /// The parameter a call's trailing arguments are packed into, when the
+    /// callee ends in a rest parameter (`T... xs`).
+    fn rest_param(
+        &self,
+        body: &HirBody,
+        at: HirId,
+        callee_body: Option<usize>,
+        key: Option<&str>,
+        args: &[HirId],
+    ) -> Option<usize> {
+        let method = key.is_some_and(|k| k.starts_with('.'));
+        let name = match callee_body {
+            Some(b) => self.module.bodies[b].name.clone(),
+            None if method => {
+                let recv = body.expr(*args.first()?);
+                let owner = self.checker.class_owner_at_span(recv.span).or_else(|| class_of(recv.ty.as_ref()).map(str::to_string))?;
+                format!("{owner}::{}", key?.trim_start_matches('.').trim_end_matches("()"))
+            }
+            None => key?.to_string(),
+        };
+        let candidates = self.checker.overload_candidates(&name)?;
+        let (fixed, is_rest) = match candidates {
+            [c] => (c.fixed_arity, c.is_rest),
+            _ => {
+                let (start, end) = body.expr(at).span;
+                let (fixed, is_rest, _) = self.checker.selected_overload_at(start, end)?;
+                (fixed, is_rest)
+            }
+        };
+        // A method's fixed parameters leave out its receiver.
+        is_rest.then_some(fixed + usize::from(method))
+    }
+
+    /// What each item of `...inner` may be, for a spread whose length is
+    /// not known: the element of a `Vec` or an array, `readonly` when the
+    /// spread value is.
+    fn spread_element(&self, body: &HirBody, inner: HirId) -> Option<Ty> {
+        let ty = crate::typechecking::subst::apply_ty_prune(self.checker.subst(), body.expr(inner).ty.as_ref()?);
+        let (bare, ro) = match &ty {
+            Ty::Readonly(t) => (t.as_ref(), true),
+            t => (t, false),
+        };
+        let element = match bare {
+            Ty::App(head, items) if matches!(head.as_ref(), Ty::Con(n) if n == common::BUILTIN_VEC_TYPE) => items.first()?,
+            Ty::Array { element, .. } => element.as_ref(),
+            _ => return Some(ty),
+        };
+        let element = element.clone();
+        Some(if ro && may_hold_mutable(Some(&element)) { Ty::Readonly(Box::new(element)) } else { element })
     }
 
     /// The items `...inner` passes, each with its type: a literal's own

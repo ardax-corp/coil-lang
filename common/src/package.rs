@@ -67,6 +67,9 @@ pub struct NativeLockEntry {
     pub size: u64,
     pub requires: Vec<String>,
     pub requires_hint: String,
+    /// `coil natives dump` project mode only: the row's local file is absent,
+    /// so `sha256` is empty and `size` is 0. Never set in an embedded lock.
+    pub missing: bool,
 }
 
 /// Host triple + direct native artifacts embedded beside the `.hyc` archive.
@@ -92,6 +95,9 @@ impl NativeLock {
             out.push_str(&format!("      \"filename\": {},\n", json_string(&e.filename)));
             out.push_str(&format!("      \"sha256\": {},\n", json_string(&e.sha256)));
             out.push_str(&format!("      \"size\": {},\n", e.size));
+            if e.missing {
+                out.push_str("      \"missing\": true,\n");
+            }
             out.push_str("      \"requires\": [");
             for (j, r) in e.requires.iter().enumerate() {
                 if j > 0 {
@@ -142,6 +148,7 @@ impl NativeLock {
                 size: json_obj_u64(e, "size")?,
                 requires,
                 requires_hint: json_obj_str(e, "requires_hint").unwrap_or_default(),
+                missing: matches!(json_obj_get(e, "missing"), Some(Json::Bool(true))),
             });
         }
         Ok(Self { os, arch, entries })
@@ -149,11 +156,20 @@ impl NativeLock {
 
     /// TSV lines: package, version, filename, sha256, size.
     /// Prefixed with `# os=…` / `# arch=…` comments for host checks.
+    /// A [`NativeLockEntry::missing`] row has empty sha256 and size and a
+    /// sixth column `missing`.
     pub fn to_tsv(&self) -> String {
         let mut out = String::new();
         out.push_str(&format!("# os={}\n", self.os));
         out.push_str(&format!("# arch={}\n", self.arch));
         for e in &self.entries {
+            if e.missing {
+                out.push_str(&format!(
+                    "{}\t{}\t{}\t\t\tmissing\n",
+                    e.package, e.version, e.filename
+                ));
+                continue;
+            }
             out.push_str(&format!(
                 "{}\t{}\t{}\t{}\t{}\n",
                 e.package, e.version, e.filename, e.sha256, e.size
@@ -199,7 +215,6 @@ fn json_string(s: &str) -> String {
 #[derive(Debug, Clone)]
 enum Json {
     Null,
-    #[allow(dead_code)]
     Bool(bool),
     Number(u64),
     String(String),
@@ -669,6 +684,7 @@ mod tests {
                 size: 12,
                 requires: vec!["libpcre2-8.so.0".into()],
                 requires_hint: "pacman -S pcre2".into(),
+                missing: false,
             }],
         };
         let json = lock.to_json();

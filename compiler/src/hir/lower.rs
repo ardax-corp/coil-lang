@@ -1701,9 +1701,10 @@ fn let_init_is_lambda(body: &HirBody, local: LocalId) -> bool {
 }
 
 pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
-    // An element of a `Vec`, array or tuple of monomorphic functions: the
-    // closure word it was stored as.
-    if let HirKind::Index { .. } = body.expr(f).kind {
+    // An element of a `Vec`, array or tuple of monomorphic functions, or a
+    // `const` or `static` holding one (#1685): the closure word it was
+    // stored as.
+    if let HirKind::Index { .. } | HirKind::Global { .. } = body.expr(f).kind {
         return body.expr(f).ty.as_ref().is_some_and(|t| {
             let t = apply_ty_prune(checker.subst(), t);
             mono_fun(checker, &t, &mut Vec::new())
@@ -2311,10 +2312,12 @@ impl Walk<'_> {
                     return self.value(*rhs);
                 }
                 // `a + b` is `FORMAT "%s%s"` over both; `==` / `!=` compare
-                // strings with `EQ`.
+                // strings with `EQ`, and `<` / `<=` / `>` / `>=` through
+                // `string_compare`.
                 let string = |id: HirId| matches!(self.ty(id).map(strip_readonly), Some(Ty::Con(n)) if n == coil_ty::STRING);
                 let concat = matches!(op, BinOp::StrConcat);
-                if concat || (matches!(op, BinOp::Eq | BinOp::Ne) && string(*lhs)) {
+                let compare = matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge);
+                if concat || (compare && string(*lhs)) {
                     if !string(*lhs) || !string(*rhs) {
                         return Err("operand-type");
                     }
@@ -3056,8 +3059,11 @@ impl Walk<'_> {
             }
             // A `()` statement (a unit `match` arm, a nested item) does nothing.
             _ if is_unit_make(body, id) || matches!(body.expr(id).kind, HirKind::Lit(Lit::Unit)) => Ok(()),
+            // A bare value as a body's root: an anonymous `fn`'s `=> e`
+            // that reads a `static` or an unfolded `const` (#1713).
             HirKind::Lit(_)
             | HirKind::Local(_)
+            | HirKind::Global { .. }
             | HirKind::Bin { .. }
             | HirKind::Logic { .. }
             | HirKind::Un { .. }

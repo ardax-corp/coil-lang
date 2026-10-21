@@ -1198,6 +1198,13 @@ pub const HOST_NATIVES: &[HostNative] = &[
         effects: TEXT,
         caps: NO_CAP,
     },
+    HostNative {
+        name: "string_compare",
+        arity: 2,
+        id: 162,
+        effects: TEXT,
+        caps: NO_CAP,
+    },
 ];
 
 /// First packed-LA HostInvoke (`packed_dot`).
@@ -1273,6 +1280,10 @@ pub const FFI_READ_INTS_NATIVE: &str = "ffi_read_ints";
 /// (coil-lang#1253, archive minor 39).
 pub const VALUES_EQ_SHAPED_ID: u16 = 161;
 pub const VALUES_EQ_SHAPED_NATIVE: &str = "values_eq_shaped";
+/// `<` / `<=` / `>` / `>=` on `string`: `-1` / `0` / `1` by UTF-8 bytes
+/// (coil-stdlib#48, archive minor 41).
+pub const STRING_COMPARE_ID: u16 = 162;
+pub const STRING_COMPARE_NATIVE: &str = "string_compare";
 
 pub const STREAM_ATTACH_NATIVE: &str = "stream_attach";
 pub const STREAM_PARK_NATIVE: &str = "stream_park";
@@ -1320,8 +1331,9 @@ pub const GC_COLLECT_NATIVE: &str = "gc_collect";
 pub const GC_REGISTER_FINALIZER_NATIVE: &str = "gc_register_finalizer";
 
 const _: () = {
-    assert!(HOST_NATIVES.len() == 162);
+    assert!(HOST_NATIVES.len() == 163);
     assert!(HOST_NATIVES[FFI_READ_INTS_ID as usize].id == FFI_READ_INTS_ID);
+    assert!(HOST_NATIVES[STRING_COMPARE_ID as usize].id == STRING_COMPARE_ID);
     assert!(HOST_NATIVES[VALUES_EQ_SHAPED_ID as usize].id == VALUES_EQ_SHAPED_ID);
     assert!(HOST_NATIVES[TASK_COND_NEW_ID as usize].id == TASK_COND_NEW_ID);
     assert!(HOST_NATIVES[TASK_COND_NOTIFY_ID as usize].id == TASK_COND_NOTIFY_ID);

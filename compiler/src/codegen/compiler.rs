@@ -84,6 +84,9 @@ pub(super) enum DictStep {
     Tuple(u32),
     /// The top word boxed with this value tag.
     Box(u32),
+    /// Element `n` of the top word, a dictionary: a method's code pointer
+    /// in it (a subclass bound's `Eq` methods, #1694).
+    Field(u32),
 }
 
 impl Compiler {
@@ -3049,6 +3052,14 @@ impl Compiler {
                 Some(OpenDictGoal::Concrete(tys)) => {
                     return self.plan_instance_dict(out, class, &tys);
                 }
+                // `Eq<T>` with no `Eq` bound in scope: one built from a
+                // subclass bound's, or the VM's compare (#1694).
+                None if class == "Eq"
+                    && let [Ty::Var(v)] = lookup
+                    && let Some(dict) = self.var_eq_dict(*v) =>
+                {
+                    return self.plan_var_eq_dict(out, dict);
+                }
                 // `Show<Box<T>>`: a generic instance whose context is
                 // resolved from scope below. A bare `Show<T>` has no instance.
                 None if lookup.iter().any(|t| matches!(t, Ty::Var(_))) => return false,
@@ -3631,7 +3642,8 @@ impl Compiler {
                 return self.checker.generics().find_instance_relaxed(&c.class, &args).is_some();
             }
             if args.iter().any(|t| matches!(t, Ty::Var(_))) {
-                return self.resolve_open_dict_goal(&c.class, &args).is_some();
+                return self.resolve_open_dict_goal(&c.class, &args).is_some()
+                    || (c.class == "Eq" && matches!(args.as_slice(), [Ty::Var(v)] if self.var_eq_dict(*v).is_some()));
             }
             self.open_instance_dict_ok(&c.class, &args, depth + 1)
         })
@@ -4251,6 +4263,12 @@ impl Compiler {
                 let fqn = Generics::builtin_instance_fqn("Eq", ty, method);
                 self.emit_builtin_entry(&fqn, &params, boolean.clone(), None, |b, a| b.bin(op, a[0], a[1], boolean.clone()));
             }
+        }
+        // `string` orders by its UTF-8 bytes (coil-stdlib#48).
+        let params = [(string.clone(), tag_of(ValueTag::String)), (string.clone(), tag_of(ValueTag::String))];
+        for (class, method, op) in [("Lt", "lt", BinOp::Lt), ("Le", "le", BinOp::Le), ("Gt", "gt", BinOp::Gt), ("Ge", "ge", BinOp::Ge)] {
+            let fqn = Generics::builtin_instance_fqn(class, "string", method);
+            self.emit_builtin_entry(&fqn, &params, boolean.clone(), None, |b, a| b.bin(op, a[0], a[1], boolean.clone()));
         }
         // `()` is always `()` (#1450): its operands, taken as the `Show`
         // thunk takes a unit, are never read.
@@ -7695,6 +7713,10 @@ impl Compiler {
                 }
                 if let Some(m) = method.strip_prefix("dglue_") {
                     self.emit_eq_dict_glue(&fqn, &ty, m == "ne");
+                    continue;
+                }
+                if let Some(m) = method.strip_prefix("any_") {
+                    self.emit_eq_any(&fqn, m == "ne");
                     continue;
                 }
                 let Some(tag) = Self::ty_to_value_tag(&ty) else {

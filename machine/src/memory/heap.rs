@@ -1305,6 +1305,10 @@ pub enum StreamKind {
     Udp,
     /// Package IO attached in place (`Stream.attach`).
     Attached,
+    /// A file or socket stream a `thread::spawn` worker read from a static
+    /// of its spawner: the handle stays with the spawner, so using it in
+    /// the worker panics (#1684).
+    Unsent,
 }
 
 #[derive(Clone, Copy)]
