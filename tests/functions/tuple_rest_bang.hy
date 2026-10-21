@@ -11,14 +11,14 @@ fn second(int skip, ... xs) {
 
 fn main() {
     if !second(0, 1.5, true) {
-        write(stdout(), to_bytes("false"));
+        let _ = write(stdout(), to_bytes("false"));
     } else {
-        write(stdout(), to_bytes("true"));
+        let _ = write(stdout(), to_bytes("true"));
     }
     if !later() {
-        write(stdout(), to_bytes(" false"));
+        let _ = write(stdout(), to_bytes(" false"));
     } else {
-        write(stdout(), to_bytes(" true"));
+        let _ = write(stdout(), to_bytes(" true"));
     }
 }
 

@@ -5,6 +5,6 @@ use io::{stdout, write};
 use string::to_bytes;
 
 fn main() -> Result<int, string> {
-    write(stdout(), to_bytes("ok"));
+    let _ = write(stdout(), to_bytes("ok"));
     return Ok(0);
 }

@@ -20,5 +20,5 @@ impl Into<Fahrenheit> for Celsius {
 
 fn main() {
     let f: Fahrenheit = new Celsius(0).into();
-    write(stdout(), to_bytes(format("%i", f.f)));
+    let _ = write(stdout(), to_bytes(format("%i", f.f)));
 }

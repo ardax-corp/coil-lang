@@ -29,5 +29,5 @@ fn main() {
     let n = relay(id, 4);
     let s = relay_s(id, "x");
     let t = twice(id, 6);
-    write(stdout(), to_bytes(format("%i %s %i\n", n, s, t)));
+    let _ = write(stdout(), to_bytes(format("%i %s %i\n", n, s, t)));
 }

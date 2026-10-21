@@ -6,5 +6,5 @@ use string::{format, to_bytes};
 fn main() {
     let x = 5;
     let y = x + 1;
-    write(stdout(), to_bytes(format("%i", y)));
+    let _ = write(stdout(), to_bytes(format("%i", y)));
 }

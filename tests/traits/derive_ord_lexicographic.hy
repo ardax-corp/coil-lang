@@ -13,9 +13,9 @@ fn main() {
     let a = Pair::Pair { x: 1, y: 2 };
     let b = Pair::Pair { x: 1, y: 3 };
     let c = Pair::Pair { x: 2, y: 0 };
-    write(stdout(), to_bytes(format("%z,", a < b)));
-    write(stdout(), to_bytes(format("%z,", a < c)));
-    write(stdout(), to_bytes(format("%z,", b < a)));
-    write(stdout(), to_bytes(format("%z,", a <= a)));
-    write(stdout(), to_bytes(format("%z", a < a)));
+    let _ = write(stdout(), to_bytes(format("%z,", a < b)));
+    let _ = write(stdout(), to_bytes(format("%z,", a < c)));
+    let _ = write(stdout(), to_bytes(format("%z,", b < a)));
+    let _ = write(stdout(), to_bytes(format("%z,", a <= a)));
+    let _ = write(stdout(), to_bytes(format("%z", a < a)));
 }

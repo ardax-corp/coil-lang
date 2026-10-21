@@ -6,7 +6,7 @@ use io::sync::write_all;
 use string::{format, to_bytes};
 
 fn t(string s, int v) -> int {
-    write_all(stdout(), to_bytes(s));
+    let _ = write_all(stdout(), to_bytes(s));
     return v;
 }
 
@@ -34,7 +34,7 @@ impl C {
 }
 
 fn make(int k) -> C {
-    write_all(stdout(), to_bytes("r"));
+    let _ = write_all(stdout(), to_bytes("r"));
     return new C(k);
 }
 
@@ -42,24 +42,24 @@ fn main() {
     let c = new C(100);
     // Shuffled names with side effects run in source order.
     let r = c.m(b: t("b", 2), a: t("a", 1));
-    write_all(stdout(), to_bytes(format("%i ", r)));
+    let _ = write_all(stdout(), to_bytes(format("%i ", r)));
     // A computed receiver still runs before its arguments.
     let r2 = make(100).m(a: t("a", 1), b: 2);
-    write_all(stdout(), to_bytes(format("%i ", r2)));
+    let _ = write_all(stdout(), to_bytes(format("%i ", r2)));
     // A positional prefix, then shuffled names.
     let s = c.g(t("1", 1), c: t("c", 3), b: t("b", 2));
-    write_all(stdout(), to_bytes(format("%s ", s)));
+    let _ = write_all(stdout(), to_bytes(format("%s ", s)));
     // Plain values need no temps.
     let n = 2;
     if c.m(b: n, a: 1) == 112 && c.m(1, b: t("c", 2)) == 112 && c.g(b: 2, c: 3, a: 1) == "123" {
-        write_all(stdout(), to_bytes("1 "));
+        let _ = write_all(stdout(), to_bytes("1 "));
     }
     // A static method takes named arguments too.
     let q = C::s(b: t("b", 2), a: t("a", 1));
-    write_all(stdout(), to_bytes(format("%i ", q)));
-    write_all(stdout(), to_bytes(format("%i ", c.twice(3))));
+    let _ = write_all(stdout(), to_bytes(format("%i ", q)));
+    let _ = write_all(stdout(), to_bytes(format("%i ", c.twice(3))));
     if nested() {
-        write_all(stdout(), to_bytes("1"));
+        let _ = write_all(stdout(), to_bytes("1"));
     }
 }
 

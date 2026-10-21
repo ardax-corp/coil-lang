@@ -80,5 +80,5 @@ fn main() {
     text = text + " " + third(1, 1.5) + " " + third(new Pt(9), "q") + " " + 3.deft(5);
     let f = picked;
     text = text + " " + f(1, Option::Some(2), "a") + " " + f(2, Option::None, 4.5);
-    write(stdout(), to_bytes(text));
+    let _ = write(stdout(), to_bytes(text));
 }

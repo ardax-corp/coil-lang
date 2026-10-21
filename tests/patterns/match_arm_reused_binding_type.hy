@@ -25,6 +25,6 @@ fn get(Shape s) -> int {
 }
 
 fn main() {
-    write(stdout(), to_bytes(format("%i", get(Shape::Pt(Point::Point { x: 1, y: 2 })))));
-    write(stdout(), to_bytes(format("%i", get(Shape::Rc(Rect::Rect { w: 3, h: 4 })))));
+    let _ = write(stdout(), to_bytes(format("%i", get(Shape::Pt(Point::Point { x: 1, y: 2 })))));
+    let _ = write(stdout(), to_bytes(format("%i", get(Shape::Rc(Rect::Rect { w: 3, h: 4 })))));
 }

@@ -90,5 +90,5 @@ fn main() {
         outcome(fn () => stuck_five()),
         "contract violated: decreases n - i (did not decrease) in stuck",
     );
-    write(stdout(), to_bytes("ok"));
+    let _ = write(stdout(), to_bytes("ok"));
 }

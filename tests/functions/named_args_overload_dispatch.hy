@@ -11,6 +11,6 @@ fn greet(string name, int age) -> string {
 }
 
 fn main() {
-    write(stdout(), to_bytes(format("%s", greet(name: "Ada"))));
-    write(stdout(), to_bytes(format("%s", greet(name: "Grace", age: 40))));
+    let _ = write(stdout(), to_bytes(format("%s", greet(name: "Ada"))));
+    let _ = write(stdout(), to_bytes(format("%s", greet(name: "Grace", age: 40))));
 }

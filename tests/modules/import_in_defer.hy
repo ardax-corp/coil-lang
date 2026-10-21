@@ -6,7 +6,7 @@ use string::to_bytes;
 
 fn main() {
     defer {
-        write_all(stdout(), to_bytes("d"));
+        let _ = write_all(stdout(), to_bytes("d"));
     }
-    write_all(stdout(), to_bytes("a"));
+    let _ = write_all(stdout(), to_bytes("a"));
 }

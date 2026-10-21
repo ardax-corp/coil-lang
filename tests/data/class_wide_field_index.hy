@@ -61,7 +61,7 @@ fn main() {
     w.f33 = 5;
     w.bump();
     let total = w.f33 + w.f40 + w.f40;
-    write(
+    let _ = write(
         stdout(),
         to_bytes(format("%i %i %i %i %i\n", w.f33, w.f40 - 5, w.f7, w.f40 * 2, total + 29)),
     );

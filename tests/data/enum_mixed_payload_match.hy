@@ -14,5 +14,5 @@ fn describe(Pair p) -> int {
 }
 
 fn main() {
-    write(stdout(), to_bytes(format("%i", describe(Pair::Both(7, "abcd")))));
+    let _ = write(stdout(), to_bytes(format("%i", describe(Pair::Both(7, "abcd")))));
 }

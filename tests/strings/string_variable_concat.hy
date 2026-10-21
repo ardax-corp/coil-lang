@@ -5,5 +5,5 @@ use string::to_bytes;
 fn main() {
     let a = "GET";
     let b = "/hi";
-    write(stdout(), to_bytes(a + b));
+    let _ = write(stdout(), to_bytes(a + b));
 }

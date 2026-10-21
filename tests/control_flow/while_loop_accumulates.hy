@@ -9,5 +9,5 @@ fn main() {
         acc = acc + i;
         i = i + 1;
     }
-    write(stdout(), to_bytes(format("%i", acc)));
+    let _ = write(stdout(), to_bytes(format("%i", acc)));
 }

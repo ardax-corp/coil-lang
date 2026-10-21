@@ -136,9 +136,9 @@ fn generic() -> string {
 
 fn main() {
     let o = stdout();
-    write(o, to_bytes(format("%s\n", passing())));
-    write(o, to_bytes(format("%s\n", equality())));
-    write(o, to_bytes(format("%s\n", shows())));
-    write(o, to_bytes(format("%s\n", stored())));
-    write(o, to_bytes(format("%s\n", generic())));
+    let _ = write(o, to_bytes(format("%s\n", passing())));
+    let _ = write(o, to_bytes(format("%s\n", equality())));
+    let _ = write(o, to_bytes(format("%s\n", shows())));
+    let _ = write(o, to_bytes(format("%s\n", stored())));
+    let _ = write(o, to_bytes(format("%s\n", generic())));
 }

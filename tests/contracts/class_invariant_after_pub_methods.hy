@@ -71,5 +71,5 @@ fn main() {
         "contract violated: invariant self.balance >= 0 (\"no overdraft\") in Account::withdraw",
     );
     expect(outcome(fn () => open_negative()), "in new Account");
-    write(stdout(), to_bytes("ok"));
+    let _ = write(stdout(), to_bytes("ok"));
 }

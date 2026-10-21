@@ -44,7 +44,7 @@ fn main() {
     let b = both(text, 2.5, true);
     let c = tags(tagged, 4);
     let d = apply(konst, 3);
-    write(
+    let _ = write(
         stdout(),
         to_bytes(format("%s|%s|%i|%s|%s\n", a, b, c, d, apply(text, 7) + " " + text(true))),
     );

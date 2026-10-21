@@ -12,5 +12,5 @@ class Worker {
 fn main() {
     let pair = channel()?;
     send((new Worker(pair[0])).tx, "hi")?;
-    write(stdout(), to_bytes(format("%s", recv(pair[1])?)));
+    let _ = write(stdout(), to_bytes(format("%s", recv(pair[1])?)));
 }

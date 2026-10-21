@@ -11,5 +11,5 @@ fn add3(int a, int b, int c) -> int {
 fn main() {
     let p = add3(1);
     let q = p(2);
-    write(stdout(), to_bytes(format("%i", q(3))));
+    let _ = write(stdout(), to_bytes(format("%i", q(3))));
 }

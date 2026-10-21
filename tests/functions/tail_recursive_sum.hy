@@ -11,5 +11,5 @@ fn sum_to(int n, int acc) -> int {
 }
 
 fn main() {
-    write(stdout(), to_bytes(format("%i", sum_to(5, 0))));
+    let _ = write(stdout(), to_bytes(format("%i", sum_to(5, 0))));
 }

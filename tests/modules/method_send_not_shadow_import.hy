@@ -25,5 +25,5 @@ fn main() {
     let t = spawn(work)?;
     let w = new ThreadWrapper(t, pair[0]);
     w.send("hi")?;
-    write(stdout(), to_bytes(format("%s", recv(pair[1])?)));
+    let _ = write(stdout(), to_bytes(format("%s", recv(pair[1])?)));
 }

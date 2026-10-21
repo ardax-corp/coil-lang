@@ -60,7 +60,7 @@ fn nested_choice(Choice c) -> int {
 fn main() {
     let b = new BoxInt(Option::Some(21));
     let t = new BoxInt(Option::Some(7));
-    write(
+    let _ = write(
         stdout(),
         to_bytes(
             format(

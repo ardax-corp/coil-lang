@@ -39,6 +39,6 @@ impl Iterator for ItemBoxIter {
 fn main() {
     let b = new ItemBox(0);
     for x in b {
-        write(stdout(), to_bytes(format("%i", x)));
+        let _ = write(stdout(), to_bytes(format("%i", x)));
     }
 }

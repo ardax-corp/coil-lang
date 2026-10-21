@@ -13,5 +13,5 @@ fn get(Stream x) -> int {
 }
 
 fn main() {
-    write(stdout(), to_bytes(format("%i", get(new Stream(3)))));
+    let _ = write(stdout(), to_bytes(format("%i", get(new Stream(3)))));
 }

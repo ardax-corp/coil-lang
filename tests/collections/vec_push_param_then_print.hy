@@ -7,7 +7,7 @@ use string::format;
 fn push1(Vec<int> codes, int code) {
     codes.push(code);
     let k = format("n%i", code);
-    io::sync::println(k);
+    let _ = io::sync::println(k);
 }
 
 fn push2(Vec<int> codes, Vec<string> names, int code) {
@@ -21,5 +21,5 @@ fn main() {
     let d: Vec<int> = [5];
     let s: Vec<string> = [];
     push2(d, s, 7);
-    io::sync::println(format("%i %i %i", c.len(), d[0], d[1]));
+    let _ = io::sync::println(format("%i %i %i", c.len(), d[0], d[1]));
 }

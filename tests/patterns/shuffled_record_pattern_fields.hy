@@ -12,5 +12,5 @@ fn main() {
     let v = match e {
         E::Foo { y: _, x: a, z: _ } => a,
     };
-    write(stdout(), to_bytes(format("%i", v)));
+    let _ = write(stdout(), to_bytes(format("%i", v)));
 }

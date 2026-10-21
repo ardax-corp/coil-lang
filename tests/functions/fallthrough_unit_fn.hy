@@ -8,5 +8,5 @@ fn unitish() {
 
 fn main() {
     unitish();
-    write(stdout(), to_bytes("ok"));
+    let _ = write(stdout(), to_bytes("ok"));
 }

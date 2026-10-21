@@ -60,5 +60,5 @@ fn main() {
     let d = take_head(new Words("y"));
     let n = count(new Words("w"));
     let m = count(Option::Some(3));
-    write(stdout(), to_bytes(format("%i %s %i %s %i %i\n", a, b, c, d, n, m)));
+    let _ = write(stdout(), to_bytes(format("%i %s %i %s %i %i\n", a, b, c, d, n, m)));
 }

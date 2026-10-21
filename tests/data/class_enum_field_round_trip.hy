@@ -21,7 +21,7 @@ impl Box {
 fn main() {
     let b = new Box(Status::Done(9));
     let s = b.get();
-    write(
+    let _ = write(
         stdout(),
         to_bytes(
             format(
@@ -33,7 +33,7 @@ fn main() {
             ),
         ),
     );
-    write(
+    let _ = write(
         stdout(),
         to_bytes(
             format(

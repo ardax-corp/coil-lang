@@ -6,7 +6,7 @@ fn early(int n) {
     if n == 0 {
         return;
     }
-    write(stdout(), to_bytes("go"));
+    let _ = write(stdout(), to_bytes("go"));
     return;
 }
 

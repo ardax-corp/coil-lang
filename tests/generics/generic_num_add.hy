@@ -7,5 +7,5 @@ fn add<T: Num>(T a, T b) -> T {
 }
 
 fn main() {
-    write(stdout(), to_bytes(format("%i", add(1, 2))));
+    let _ = write(stdout(), to_bytes(format("%i", add(1, 2))));
 }

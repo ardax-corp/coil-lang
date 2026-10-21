@@ -11,5 +11,5 @@ fn main() {
         }
         i = i + 1;
     }
-    write(stdout(), to_bytes(format("%i,%i", i, n)));
+    let _ = write(stdout(), to_bytes(format("%i,%i", i, n)));
 }
