@@ -91,6 +91,7 @@ impl Pipeline {
                         site,
                         origin: "the contract tests of this file".to_string(),
                         text,
+                        verbatim: Vec::new(),
                     });
                 }
                 Err(err) => {

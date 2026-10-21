@@ -107,6 +107,7 @@ impl Pipeline {
                     site,
                     origin: format!("the contracts of `{}::{name}`", key.1),
                     text: snippet,
+                    verbatim: Vec::new(),
                 });
                 let Expression::Program(mut gen_items) = *generated.1 else { continue };
                 let Some(Expression::Function { contracts: mut copies, .. }) = gen_items.pop().map(|g| *g.1) else {
