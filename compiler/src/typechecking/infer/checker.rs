@@ -4843,7 +4843,7 @@ impl Checker {
             let key = format!("{owner}::{method}");
             if self.is_variadic_template(&key) {
                 self.check_inherent_method_access(&owner, method, &range);
-                return self.infer_variadic_method_call(&key, method, recv, &recv_ty, method_args, id, range);
+                return self.infer_variadic_method_call(&key, recv, &recv_ty, method_args, id, range);
             }
         }
         if let Some(owner) = self.class_owner_from_ty(&resolved)

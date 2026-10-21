@@ -352,13 +352,13 @@ impl Checker {
     pub(super) fn infer_variadic_method_call(
         &mut self,
         key: &str,
-        method: &str,
         recv: &Output,
         recv_ty: &Ty,
         raw_args: &[Output],
         id: Option<NodeId>,
         range: Range<usize>,
     ) -> Ty {
+        let method = key.rsplit("::").next().unwrap_or(key);
         let (arg_tys, ordered_args) = self.infer_and_reorder_call_args(key, raw_args, &range);
         let fixed = self.fn_param_names.get(key).map_or(0, |n| n.len().saturating_sub(1));
         let pack = match self.variadic_call_pack(method, &arg_tys, fixed, &range) {
