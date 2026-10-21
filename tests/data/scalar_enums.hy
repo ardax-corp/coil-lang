@@ -113,7 +113,7 @@ test("derived Eq Hash Show Ord") {
 }
 
 #[repr(int)]
-#[derive(Ord)]
+#[derive(Eq, Ord)]
 enum Rank {
     High = 10,
     Low = 1,
