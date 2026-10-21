@@ -294,6 +294,24 @@ and relocate mapped slots on collect.
   medians of 41 interleaved runs 55.9 → 54.4 ms).
   `tests/memory/gc_weak_field_rebind.hy`,
   `tests/memory/gc_weak_pair_result.hy`.
+- **A niche `Option` built as an argument drops too** (#1802). An
+  `Option` of a heap type is one word, and `Option::Some(new Node(..))`
+  is a cast of the object's word (`word.niche_opt.heapref`) that the LIR
+  tier emits as an inline operand of the call, with no register of its
+  own: `arg_clears` found no operand register to zero, and the object's
+  register is no operand of the call, so it kept the object rooted until
+  rewritten (`weak_opt(Some(new Node(3)))`, or an inlined
+  `weak_opt(some_node(3))`). `arg_clears` now walks a heap word cast from
+  another heap or payload word back to its sources, as it does a payload
+  word (`payload_sources`), with the same stops (a live value, a
+  constant, a local's or a parameter's word, a register a local's word
+  shares). Of the 233 `examples/*.hy` and `examples/perf/*.hy` that
+  compile, at `-O2` and `-O0`, only `io_nested_host` and
+  `io_nested_write` change against #1791: one straight-line zero each, of
+  `open(..)`'s `Result` after the call its `?` passed the stream to
+  (`read_to_end(open(..)?)`, `write_all(open(..)?, ..)`).
+  Every `examples/perf` archive and listing is byte-identical.
+  `tests/memory/gc_weak_niche_option_arg.hy`.
 - **Collection budget.** After a sweep the next threshold is
   `live × 4` when more than half the heap survived (a growing live set) and
   `live × 2` otherwise, never below the initial 1 MB budget.
