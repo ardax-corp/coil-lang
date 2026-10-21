@@ -43,6 +43,10 @@ pub fn install() {
 }
 
 impl MacroHost for VmMacroHost {
+    fn build_id(&self) -> &'static str {
+        coil_build_id::BUILD_ID
+    }
+
     fn run(
         &self,
         program: &CompiledExpansion,

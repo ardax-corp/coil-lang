@@ -49,14 +49,24 @@ impl CacheConfig {
     }
 }
 
-/// `$COIL_CACHE_DIR/comptime`, else `$XDG_CACHE_HOME/coil/comptime`, else
-/// `~/.cache/coil/comptime` (spool's cache root, then `comptime`).
-pub fn default_dir() -> Option<PathBuf> {
+/// The user's coil cache: `$COIL_CACHE_DIR`, else `$XDG_CACHE_HOME/coil`,
+/// else `~/.cache/coil` (spool's cache root).
+pub fn user_cache_root() -> Option<PathBuf> {
     let var = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);
-    let root = var("COIL_CACHE_DIR")
+    var("COIL_CACHE_DIR")
         .or_else(|| var("XDG_CACHE_HOME").map(|d| d.join("coil")))
-        .or_else(|| var("HOME").or_else(|| var("USERPROFILE")).map(|h| h.join(".cache").join("coil")))?;
-    Some(root.join("comptime"))
+        .or_else(|| var("HOME").or_else(|| var("USERPROFILE")).map(|h| h.join(".cache").join("coil")))
+}
+
+/// The default `--comptime-cache`: `comptime` in [`user_cache_root`].
+pub fn default_dir() -> Option<PathBuf> {
+    Some(user_cache_root()?.join("comptime"))
+}
+
+/// Compiled expansion programs, which only save time and are never
+/// committed: `macro-programs` in [`user_cache_root`].
+pub fn program_dir() -> Option<PathBuf> {
+    Some(user_cache_root()?.join("macro-programs"))
 }
 
 /// sha256 of what a read of `path` saw: a file's bytes, a directory's
@@ -214,13 +224,20 @@ pub fn load(dir: &Path, key: &str) -> Option<Entry> {
 /// Keep `entry` for `key`. Best effort: a cache that cannot be written
 /// only costs the next build time.
 pub fn store(dir: &Path, key: &str, entry: &Entry) {
+    write_atomic(dir, &entry_path(dir, key), &encode(entry));
+}
+
+/// Write `bytes` to `path` in `dir` through a temporary file, so a reader
+/// never sees part of it. Best effort.
+pub fn write_atomic(dir: &Path, path: &Path, bytes: &[u8]) {
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     if std::fs::create_dir_all(dir).is_err() {
         return;
     }
     let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp = dir.join(format!(".{key}.{}.{n}.tmp", std::process::id()));
-    if std::fs::write(&tmp, encode(entry)).is_ok() && std::fs::rename(&tmp, entry_path(dir, key)).is_err() {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = dir.join(format!(".{name}.{}.{n}.tmp", std::process::id()));
+    if std::fs::write(&tmp, bytes).is_ok() && std::fs::rename(&tmp, path).is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
 }

@@ -190,9 +190,10 @@ discover_all → expand_user_macros → (discover newly used modules) → typech
    providers, so it is compiled once per provider set and process
    (`COMPILED`, keyed by the provider modules and the sources of the
    providers and their dependencies; parallel `coil test` workers wait for
-   one compile, and failures are not cached). The compile runs in a
-   sub-`Pipeline` with the same roots, which expands its own modules' macros
-   the same way. Files already being expanded by an enclosing pipeline are on
+   one compile, and failures are not cached), and across processes on disk
+   (see the limitations below). The compile runs in a sub-`Pipeline` with
+   the same roots, grants and result cache, which expands its own modules'
+   macros the same way. Files already being expanded by an enclosing pipeline are on
    `macro_stack`, and reaching one again is reported as an expansion cycle.
 5. **Run** every call through the `MacroHost` (below) with its input.
    Outputs are cached for the life of the process too, keyed by the provider
@@ -524,6 +525,15 @@ local variables, which the module const cannot see.
   started; `comptime` expressions and computed `const`s are (see above).
 - A function-style macro call names the macro bare (`name!`); a path
   (`m::name!`) does not parse.
-- Compiled expansion programs are cached in memory only: a fresh process
-  compiles each provider set once more. Outputs that did IO are kept on
-  disk by the result cache.
+- Compiled expansion programs are also kept on disk, in
+  `<user cache root>/macro-programs/<key>.prog` (`COIL_CACHE_DIR`, else
+  `XDG_CACHE_HOME/coil`, else `~/.cache/coil`; never the `--comptime-cache`
+  dir, which may be committed). The key is a sha256 of the host's build id
+  (`MacroHost::build_id`, the `coil-build-id` of the comptime crate, so any
+  compiler change is a miss), the provider module, the generated
+  `expand.hy` text and the provider sources with their dependencies. A file
+  holds the entry offsets and the program as an archive, verified again on
+  load. Compiling the `assert!` provider costs about 115 ms per process;
+  loading it, under 2 ms (release build, 2026-10-21: one-`assert!` file
+  146 ms cold, 21 ms warm). Outputs that did IO are kept by the result
+  cache.
