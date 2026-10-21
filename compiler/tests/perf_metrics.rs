@@ -2094,11 +2094,12 @@ const READONLY_CLASS: &str = "
 readonly class Point {
     pub x: int,
     pub y: int,
+    pub z: int,
 }
 
 impl Point {
     pub fn moved(int dx) -> Point {
-        return new Point(self.x + dx, self.y);
+        return new Point(self.x + dx, self.y, self.z);
     }
 }
 
@@ -2107,7 +2108,7 @@ fn total(readonly Point p) -> int {
 }
 
 fn step(int i) -> int {
-    let p = new Point(i, i + 1);
+    let p = new Point(i, i + 1, 0);
     return total(p.moved(2)) + p.y;
 }
 
@@ -2118,7 +2119,7 @@ fn main() {
         acc = acc + step(i);
         i = i + 1;
     }
-    if new Point(1, 2) == new Point(1, 2) {
+    if new Point(1, 2, 3) == new Point(1, 2, 3) {
         acc = acc + 1;
     }
     if acc < 0 {
@@ -2128,7 +2129,8 @@ fn main() {
 ";
 
 /// #1558: a `readonly class` compiles to the same bytecode as a plain
-/// class deriving `Eq` and `Hash`: immutability is checked, not run.
+/// class deriving `Eq` and `Hash`: immutability is checked, not run. Three
+/// fields, since one of two immediates moves as a pair instead (#1562).
 #[test]
 fn readonly_class_compiles_to_the_same_bytecode_as_plain() {
     let plain = READONLY_CLASS
