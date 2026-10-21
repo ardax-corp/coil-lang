@@ -118,7 +118,7 @@ resolved: a derive emits `self.x.show()` and the typechecker reports a missing
 decoded as written; anything else goes through `const_fold::eval_expr` with no
 bindings, so `2 * 2` is `int 4` but a variable or a call is not a constant.
 Folded string expressions (`"a" + "b"`) are not offered yet because the folder
-keeps some escapes undecoded. A float is sent as decimal digits and a power of
+keeps some escapes undecoded (#1810). A float is sent as decimal digits and a power of
 ten and rebuilt exactly when the digits fit in 53 bits and the exponent in 22.
 
 Everything in the model is a class with inherent methods; there are no enum

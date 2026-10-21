@@ -520,7 +520,7 @@ pub fn expr_value(e: &Output<'_>) -> (&'static str, String, i64) {
             Some((digits, exp)) => ("float", digits, exp),
             None => ("", String::new(), 0),
         },
-        // Folded strings keep some escapes undecoded; only a literal is exact.
+        // Folded strings keep some escapes undecoded (#1810); only a literal is exact.
         Some(ConstValue::Str(_)) | None => ("", String::new(), 0),
     }
 }
