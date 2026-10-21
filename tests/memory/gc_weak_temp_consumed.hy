@@ -27,8 +27,8 @@ fn gone<T>(Weak<T> w) -> bool {
     };
 }
 
-fn weak_in(Holder h) -> Weak<Node> {
-    return match h {
+fn weak_at(Vec<Holder> v, int i) -> Weak<Node> {
+    return match v[i] {
         Holder::One(n) => weak(n),
         Holder::Empty => weak(new Node(-1)),
     };
@@ -75,16 +75,14 @@ test("a pushed object stays alive while the vec holds it") {
     assert!(v[0].v == 2);
 }
 
-test("a new object wrapped in an enum is dropped with the enum") {
-    let h = Holder::One(new Node(3));
-    let w = weak_in(h);
-    h = Holder::Empty;
+test("a new object wrapped in an enum and pushed is dropped with the vec") {
+    let v: Vec<Holder> = Vec::new();
+    v.push(Holder::One(new Node(3)));
+    let w = weak_at(v, 0);
+    v = Vec::new();
     collect();
     assert!(gone(w));
-    assert!(match h {
-        Holder::Empty => true,
-        default => false,
-    });
+    assert!(v.len() == 0);
 }
 
 test("a new object in a class field is dropped with the object") {
