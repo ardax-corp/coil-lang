@@ -1,6 +1,13 @@
 // Expected: E0102 — one wrong-enum arm next to a default still fails.
-enum A { X, Y }
-enum B { P, Q }
+enum A {
+    X,
+    Y,
+}
+
+enum B {
+    P,
+    Q,
+}
 
 fn f(A a) -> int {
     return match a {

@@ -4,5 +4,4 @@ enum Status {
     NotFound,
 }
 
-fn main() {
-}
+fn main() {}

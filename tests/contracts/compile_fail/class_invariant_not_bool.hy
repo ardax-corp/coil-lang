@@ -1,5 +1,7 @@
 // Expected: E0102 — a class `invariant` must be a `bool`.
-class C invariant self.n {
+class C
+    invariant self.n
+{
     pub n: int,
 }
 
