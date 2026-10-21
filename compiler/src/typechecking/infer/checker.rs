@@ -213,6 +213,7 @@ impl Checker {
             enum_scalar: BTreeMap::new(),
             bare_constructs_by_span: HashMap::new(),
             qualified_trait_calls_by_span: HashMap::new(),
+            qualified_value_calls_by_span: HashMap::new(),
             bare_patterns_by_span: HashMap::new(),
             bare_cases_by_module: HashMap::new(),
             pending_exhaustive: Vec::new(),
@@ -1599,6 +1600,7 @@ impl Checker {
         self.enum_scalar.retain(|k, _| k.contains("::"));
         self.bare_constructs_by_span.clear();
         self.qualified_trait_calls_by_span.clear();
+        self.qualified_value_calls_by_span.clear();
         self.bare_patterns_by_span.clear();
         self.c_structs.clear();
         self.callback_sigs.clear();
@@ -5266,6 +5268,9 @@ impl Checker {
         let ident = match name.1.as_ref() {
             Expression::Identifier(n) => n.to_string(),
             Expression::QualifiedAccess { owner, member } => {
+                if let Some(ty) = self.try_infer_qualified_value_call(owner, member, args.as_deref().unwrap_or(&[]), id, range.clone()) {
+                    return ty;
+                }
                 let fqn = self.class_member_fqn(owner, member);
                 if self.static_slot_types.contains_key(&fqn) {
                     return self.error_with_help(
@@ -17114,6 +17119,11 @@ impl Checker {
                 {
                     return ty;
                 }
+                if let EnumConstructPayload::Tuple(args) = fields
+                    && let Some(ty) = self.try_infer_qualified_value_call(enum_name, variant_name, args, call_id, range.clone())
+                {
+                    return ty;
+                }
                 // `Trait::method(args)`: the free `method(args)` limited to `Trait`.
                 if let Some(class) = self.qualified_call_trait(enum_name) {
                     return match fields {
@@ -18382,6 +18392,38 @@ impl Checker {
     /// sends to the recorded dictionary or instance as it does `T::m`.
     pub fn qualified_trait_call_at(&self, start: usize, end: usize) -> Option<&str> {
         self.qualified_trait_calls_by_span.get(&(start, end)).map(String::as_str)
+    }
+
+    /// The callee type of `m::F(args)` / `C::f(args)` at this span when it
+    /// calls a `const` or `static` function value (#1705).
+    pub fn qualified_value_call_at(&self, start: usize, end: usize) -> Option<&Ty> {
+        self.qualified_value_calls_by_span.get(&(start, end))
+    }
+
+    /// `owner::member(args)` naming a `const` or `static` of function type
+    /// (another module's, or a class static field): a call of its value
+    /// (#1705), as `let f = owner::member; f(args)` is.
+    fn try_infer_qualified_value_call(
+        &mut self,
+        owner: &str,
+        member: &str,
+        args: &[Output],
+        call_id: Option<NodeId>,
+        range: Range<usize>,
+    ) -> Option<Ty> {
+        let fqn = self.class_member_fqn(owner, member);
+        let callee_ty = match self.static_slot_types.get(&fqn) {
+            Some(ty) => apply_ty_prune(&self.subst, ty),
+            None => apply_ty_prune(&self.subst, self.module_consts.get(&format!("{owner}::{member}"))?),
+        };
+        if !matches!(strip_readonly(&callee_ty), Ty::Fun(..)) {
+            return None;
+        }
+        self.qualified_value_calls_by_span
+            .insert((range.start, range.end), callee_ty.clone());
+        let flat_args = self.flatten_spread_call_args(args);
+        let arg_tys: Vec<Ty> = flat_args.iter().map(|arg| self.infer_call_arg(arg)).collect();
+        Some(self.apply_function(None, &callee_ty, &arg_tys, Some(args), call_id, range))
     }
 
     /// Enum a bare constructor pattern at this span resolved to (#1352):

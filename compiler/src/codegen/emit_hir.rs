@@ -500,7 +500,7 @@ impl Compiler {
                     let (start, end) = e.span;
                     if self.hir_builtin(name).is_some()
                         || self.checker.is_overloaded(name)
-                        || self.checker.bare_construct_at(start, end).is_some()
+                        || self.is_bare_construct_call(name, start, end)
                         || self.checker.qualified_trait_call_at(start, end).is_some()
                         || self.sidecar_overload(e.node, start, end).is_some()
                         || self.checker.partial_fill_at(start, end).is_some()
@@ -2751,8 +2751,9 @@ impl Compiler {
                 }
                 next += 1;
             }
-            // A generic pack's type is its items' one ground type; a
-            // tuple pack's is its items' types in order.
+            // A generic pack's type is its items' one ground type (`P` and
+            // `readonly P` are one, as for the mono key, #1728); a tuple
+            // pack's is its items' types in order.
             let rest_ty = match rest_ty {
                 _ if whole_rest.is_some() => None,
                 Some(_) if tuple_rest => {
@@ -2766,8 +2767,15 @@ impl Compiler {
                     }
                 }
                 Some(declared) if generic => {
-                    let item = rest.first().and_then(|&r| b.expr(r).ty.clone()).map(|t| apply_ty_prune(self.checker.subst(), &t));
-                    let same = |t: &Ty| rest.iter().all(|&r| b.expr(r).ty.as_ref().map(|u| apply_ty_prune(self.checker.subst(), u)).as_ref() == Some(t));
+                    let key = |r: HirId| b.expr(r).ty.as_ref().map(|t| crate::monomorphize::mono_key_ty(&apply_ty_prune(self.checker.subst(), t)));
+                    let item = rest
+                        .first()
+                        .and_then(|&r| b.expr(r).ty.as_ref())
+                        .map(|t| crate::typechecking::ty::strip_readonly(&apply_ty_prune(self.checker.subst(), t)).clone());
+                    let same = |t: &Ty| {
+                        let k = crate::monomorphize::mono_key_ty(t);
+                        rest.iter().all(|&r| key(r).as_ref() == Some(&k))
+                    };
                     match (declared, item) {
                         (Ty::App(head, params), Some(item)) if params.len() == 1 && same(&item) && crate::hir::layout::ty_is_closed(&item) => {
                             Some(Ty::App(head, vec![item]))
@@ -3574,6 +3582,15 @@ impl Compiler {
         Ok(())
     }
 
+    /// Whether a call of `name` at this span is bare constructor sugar
+    /// (`Bad(s)` for `ParseError::Bad`). The checker records the sugar by
+    /// span, and a compiler-made call can share its span: `main`'s
+    /// `return Err(e)` panics through a `string::format` call spanned at the
+    /// constructor (#1738). So the recorded variant must be the callee.
+    fn is_bare_construct_call(&self, name: &str, start: usize, end: usize) -> bool {
+        self.checker.bare_construct_at(start, end).is_some_and(|(_, variant)| variant == name)
+    }
+
     /// The table key and ABI of a direct call to `name`, or why it is not a
     /// plain `CALL` to a user function. The special forms are checked in
     /// `compile_call_expr`'s order, so a name those claim is never lowered
@@ -3623,7 +3640,7 @@ impl Compiler {
         }
         let node = hir.expr(call);
         let (start, end) = node.span;
-        if self.checker.bare_construct_at(start, end).is_some() {
+        if self.is_bare_construct_call(name, start, end) {
             return Err("callee-builtin");
         }
         if let Some(builtin) = self.hir_builtin(name) {

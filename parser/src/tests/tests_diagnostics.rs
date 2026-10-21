@@ -365,3 +365,37 @@ fn unclosed_call_names_the_delimiters() {
     let err = parse_err("fn main() {\n    foo(1, 2;\n}\n");
     assert_eq!(err.message(), "unexpected `;`, expected `,` or `)`");
 }
+
+/// `pub` marks class fields and `impl` methods only; on any other item the
+/// error names `pub` instead of "expected `;` or `:`" (coil-lang#1725).
+#[test]
+fn pub_on_a_top_level_item_is_named() {
+    for (src, kw) in [
+        ("pub const X = 1;\nfn main() {}\n", "const"),
+        ("pub static let y = 2;\nfn main() {}\n", "static"),
+        ("pub class C { a: int }\nfn main() {}\n", "class"),
+        ("pub fn f() -> int { return 1; }\nfn main() {}\n", "fn"),
+        ("pub enum E { A }\nfn main() {}\n", "enum"),
+        ("/// Doc.\npub const X = 1;\nfn main() {}\n", "const"),
+        ("fn main() {\n    pub let x = 1;\n}\n", "let"),
+    ] {
+        let err = parse_err(src);
+        assert_eq!(err.code(), Some(ErrorCode::ParseError), "{src}");
+        let text = err_text(src);
+        assert!(
+            err.message().contains(&format!("`pub` is not allowed on `{kw}`")),
+            "{src}: {text}"
+        );
+        assert!(text.contains("remove `pub`"), "{src}: {text}");
+        assert!(!text.contains("expected `;` or `:`"), "{src}: {text}");
+    }
+}
+
+/// `pub` where it belongs still parses.
+#[test]
+fn pub_on_fields_and_methods_still_parses() {
+    let src = "class C {\n    pub x: int,\n    pub static s: int = 1,\n    pub const k: int = 2,\n}\n\
+               impl C {\n    pub fn get() -> int { return self.x; }\n    pub static fn make() -> C { return new C(1); }\n}\n\
+               fn main() {}\n";
+    assert!(Pratt::default().parse(src).is_ok());
+}
