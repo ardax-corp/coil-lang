@@ -6839,7 +6839,10 @@ impl Compiler {
     /// The tag of `variant`, checked against the enum `ty` names.
     fn hir_tag(&self, ty: &Ty, enum_name: &str, variant: &str) -> Option<u32> {
         let named = self.hir_enum_name(ty)?;
-        if !Self::hir_same_enum(&named, enum_name) {
+        // `Opt::Some` after `use prelude::Option as Opt;` (#1700).
+        if !Self::hir_same_enum(&named, enum_name)
+            && !Self::hir_same_enum(&named, &self.checker.registry_enum_key(enum_name))
+        {
             return None;
         }
         self.checker.tag_for(enum_name, variant)
