@@ -3294,6 +3294,16 @@ fn main() {
     }
 
     #[test]
+    fn free_call_hugs_its_sole_block_lambda() {
+        // #1796: `scope(` and `fn (Scope s) {` used to land on two lines.
+        let src = "fn main() {\n    let r = scope(\n        fn (Scope s) {\n            let first_value_with_a_long_name = 41 + 1;\n            let second_value_with_a_long_name = first_value_with_a_long_name;\n            0\n        },\n    );\n    task::scope(fn (Scope s) {\n        let first_value_with_a_long_name = 41 + 1;\n        let second_value_with_a_long_name = first_value_with_a_long_name;\n    });\n    run(\n        // why\n        fn () {\n            let first_value_with_a_long_name = 41 + 1;\n            let second_value_with_a_long_name = first_value_with_a_long_name;\n        },\n    );\n    both(1, fn () {\n        let first_value_with_a_long_name = 41 + 1;\n        let second_value_with_a_long_name = first_value_with_a_long_name;\n    });\n    short(fn () { 0 });\n}\n";
+        let want = "fn main() {\n    let r = scope(fn (Scope s) {\n        let first_value_with_a_long_name = 41 + 1;\n        let second_value_with_a_long_name = first_value_with_a_long_name;\n        0\n    });\n    task::scope(fn (Scope s) {\n        let first_value_with_a_long_name = 41 + 1;\n        let second_value_with_a_long_name = first_value_with_a_long_name;\n    });\n    run(\n        // why\n        fn () {\n            let first_value_with_a_long_name = 41 + 1;\n            let second_value_with_a_long_name = first_value_with_a_long_name;\n        },\n    );\n    both(\n        1,\n        fn () {\n            let first_value_with_a_long_name = 41 + 1;\n            let second_value_with_a_long_name = first_value_with_a_long_name;\n        },\n    );\n    short(fn () {\n        0\n    });\n}\n";
+        let formatted = format_source(src).unwrap();
+        assert_eq!(formatted, want);
+        assert_eq!(format_source(&formatted).unwrap(), formatted);
+    }
+
+    #[test]
     fn wraps_long_and_chain_with_hanging_indent() {
         let src = "\
 fn main() {
