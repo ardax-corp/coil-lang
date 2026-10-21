@@ -81,13 +81,11 @@ test("method clauses hold for a correct method") {
 }
 
 test("a method's requires blames the caller") {
-    let m = outcome(
-        fn () {
-            let a = new Account(0, 0);
-            a.deposit(0);
-            0
-        },
-    );
+    let m = outcome(fn () {
+        let a = new Account(0, 0);
+        a.deposit(0);
+        0
+    });
     assert!(has(m, "contract violated: requires amount > 0 (\"deposit must be positive\")"), m);
     assert!(has(m, "called from"), m);
 }
@@ -105,13 +103,11 @@ test("old is the value on entry") {
 }
 
 test("a unit method that breaks its ensures panics at its end") {
-    let m = outcome(
-        fn () {
-            let a = new Account(2, 0);
-            a.sloppy_deposit(3);
-            0
-        },
-    );
+    let m = outcome(fn () {
+        let a = new Account(2, 0);
+        a.sloppy_deposit(3);
+        0
+    });
     assert!(has(m, "ensures self.balance == old(self.balance) + amount"), m);
     assert!(!has(m, "called from"), m);
 }

@@ -415,6 +415,9 @@ pub struct HirMirInput<'a> {
     pub pair_locals: HashMap<u32, (u32, MirTy, MirTy)>,
     /// Word types of each expression of a two-word type.
     pub pair_tys: HashMap<u32, (MirTy, MirTy)>,
+    /// Calls returning a two-word enum whose low word may carry a heap
+    /// payload ([`MirFunc::heap_pair_calls`]).
+    pub heap_pairs: HashSet<u32>,
     /// Word types of a two-word result.
     pub ret_pair: Option<(MirTy, MirTy)>,
     /// Stack arrays kept in frame slots: first slot, length and element
@@ -2899,7 +2902,16 @@ impl Lower<'_> {
                     Some((obj, index)) => {
                         self.b.ins_heap_field_store(obj, v, index).map_err(mir)?;
                     }
-                    None => self.b.def_local(LocalId(slot), v).map_err(mir)?,
+                    None => {
+                        // A field split into a frame slot is a local of its
+                        // own: its rebind drops the old word, as a local's
+                        // does (#1791).
+                        let old = self.rebound_word(LocalId(slot), ty)?;
+                        self.b.def_local(LocalId(slot), v).map_err(mir)?;
+                        if let Some(old) = old {
+                            self.b.ins_clear_word(old).map_err(mir)?;
+                        }
+                    }
                 }
                 Ok(Val::Unit)
             }
@@ -3726,6 +3738,13 @@ impl Lower<'_> {
         if strings && matches!(op, BinOp::Eq | BinOp::Ne) {
             return Ok(Val::V(self.b.ins_str_eq(l, r, op == BinOp::Ne).map_err(mir)?));
         }
+        // `<` / `<=` / `>` / `>=` on strings: their byte order's sign
+        // (`string_compare`) against `0` (coil-stdlib#48).
+        if strings && let Some(cmp) = cmp {
+            let order = self.b.ins_host_invoke(common::STRING_COMPARE_ID, vec![l, r]).map_err(mir)?;
+            let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+            return Ok(Val::V(self.b.ins_cmp(cmp, order, zero).map_err(mir)?));
+        }
         // `==` on arrays compares elements; only scalars compare as words.
         if !lt.is_numeric() {
             return Err("operator operand type".into());
@@ -4224,6 +4243,9 @@ impl Lower<'_> {
         }
         if let Some(want) = niche {
             return self.unbox_niche(dest, want);
+        }
+        if dest_hi.is_some() && self.inp.heap_pairs.contains(&id.0) {
+            self.b.mark_heap_pair_call(dest);
         }
         Ok(match dest_hi {
             Some(hi) => Val::Pair(dest, hi),
@@ -4819,6 +4841,20 @@ impl Lower<'_> {
             let l = self.box_niche(self.niche_layout(lhs, lt)?, l)?;
             let r = self.box_niche(self.niche_layout(rhs, rt)?, r)?;
             return Ok(Val::V(self.b.ins_str_eq(l, r, sym == "!=").map_err(mir)?));
+        }
+        // A string-backed scalar enum's (or a `string`'s) words order by
+        // their bytes, as `<` on two strings does (#1722).
+        if lt == MirTy::HeapRef && rt == MirTy::HeapRef {
+            let cmp = match sym {
+                "<" => MirCmpOp::Lt,
+                ">" => MirCmpOp::Gt,
+                "<=" => MirCmpOp::Le,
+                ">=" => MirCmpOp::Ge,
+                _ => return Err(format!("operator {sym} words")),
+            };
+            let order = self.b.ins_host_invoke(common::STRING_COMPARE_ID, vec![l, r]).map_err(mir)?;
+            let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+            return Ok(Val::V(self.b.ins_cmp(cmp, order, zero).map_err(mir)?));
         }
         // A `bool`-backed scalar enum's words compare as their `0` / `1`.
         if lt == MirTy::Bool && rt == MirTy::Bool && matches!(sym, "==" | "!=") {

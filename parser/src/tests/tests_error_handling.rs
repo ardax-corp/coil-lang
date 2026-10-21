@@ -57,6 +57,26 @@
     }
 
     #[test]
+    fn typeof_binds_like_a_unary_prefix() {
+        // #1773: `typeof(x) == "int"` is `(typeof x) == "int"`.
+        for src in ["typeof(x) == \"int\"", "typeof x == \"int\""] {
+            match unwrap_expr(parse_expr(src).as_ref()) {
+                Expression::Eq(lhs, _) => {
+                    assert!(matches!(lhs.1.as_ref(), Expression::TypeOf(_)), "`{src}`: lhs {:?}", lhs.1)
+                }
+                other => panic!("`{src}`: expected Eq, got {:?}", other),
+            }
+        }
+        match unwrap_expr(parse_expr("typeof p.f(1) + \"!\"").as_ref()) {
+            Expression::Add(lhs, _) => match lhs.1.as_ref() {
+                Expression::TypeOf(inner) => assert_eq!(inner.1.to_string(), "p.f(1)"),
+                other => panic!("expected TypeOf, got {:?}", other),
+            },
+            other => panic!("expected Add, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn postfix_try_parses_to_try() {
         same_try!("x?");
         assert!(matches!(

@@ -500,7 +500,7 @@ impl Compiler {
                     let (start, end) = e.span;
                     if self.hir_builtin(name).is_some()
                         || self.checker.is_overloaded(name)
-                        || self.checker.bare_construct_at(start, end).is_some()
+                        || self.is_bare_construct_call(name, start, end)
                         || self.checker.qualified_trait_call_at(start, end).is_some()
                         || self.sidecar_overload(e.node, start, end).is_some()
                         || self.checker.partial_fill_at(start, end).is_some()
@@ -1363,6 +1363,14 @@ impl Compiler {
             .iter()
             .enumerate()
             .filter_map(|(i, e)| Some((i as u32, self.hir_mir_pair_tys(e.ty.as_ref()?)?)))
+            .collect::<HashMap<u32, _>>();
+        // Of those, the ones whose low word may carry a heap payload.
+        let heap_pairs = hir
+            .exprs
+            .iter()
+            .enumerate()
+            .filter(|(i, e)| pair_tys.contains_key(&(*i as u32)) && e.ty.as_ref().is_some_and(|t| self.hir_pair_holds_heap(t)))
+            .map(|(i, _)| i as u32)
             .collect();
         // The locals of outlined parallel loop bodies live in their chunk
         // worker's frame, not this body's.
@@ -1863,6 +1871,7 @@ impl Compiler {
             slots: &frame.slots,
             pair_locals,
             pair_tys,
+            heap_pairs,
             ret_pair,
             stacks,
             sroa,
@@ -2054,9 +2063,7 @@ impl Compiler {
                 let fields = self.checker.class_fields(&key)?;
                 return Some((word(&fields[0].1)?, word(&fields[1].1)?));
             }
-            PairKind::Option => vec!["Some".into(), "None".into()],
-            PairKind::Result => vec!["Ok".into(), "Err".into()],
-            PairKind::Enum(name) => self.checker.enum_variants(&name)?.into_iter().map(|(v, _, _)| v).collect(),
+            kind => self.pair_variants(kind)?,
         };
         let mut lo = None;
         for variant in &variants {
@@ -2082,6 +2089,38 @@ impl Compiler {
             }
         }
         Some((lo.unwrap_or(MirTy::I64), MirTy::I64))
+    }
+
+    /// The variants of a two-word enum layout (none for a range or a
+    /// product).
+    fn pair_variants(&self, kind: crate::hir::layout::PairKind) -> Option<Vec<String>> {
+        use crate::hir::layout::PairKind;
+        Some(match kind {
+            PairKind::Range { .. } | PairKind::Product | PairKind::Class(_) => Vec::new(),
+            PairKind::Option => vec!["Some".into(), "None".into()],
+            PairKind::Result => vec!["Ok".into(), "Err".into()],
+            PairKind::Enum(name) => self.checker.enum_variants(&name)?.into_iter().map(|(v, _, _)| v).collect(),
+        })
+    }
+
+    /// Whether a two-word enum of type `ty` may carry a heap payload in
+    /// its low word (#1791): a payload that is no scalar word and not
+    /// immediate, as [`Self::hir_mir_pair_tys`] moves it as an opaque
+    /// `i64`. Unknown payloads count as heap.
+    fn hir_pair_holds_heap(&self, ty: &Ty) -> bool {
+        use crate::hir::layout::{self, Layout};
+        use crate::mir::scalar_mir_ty as word;
+        let ty = apply_ty_prune(self.checker.subst(), ty);
+        let Layout::Pair(kind) = layout::of_resolved(&self.checker, &ty) else {
+            return false;
+        };
+        let Some(variants) = self.pair_variants(kind) else {
+            return true;
+        };
+        variants.iter().any(|v| match self.hir_payload_tys(&ty, v) {
+            Some(ps) => ps.iter().any(|p| !layout::is_unit(p) && word(p).is_none() && !layout::is_immediate(p)),
+            None => true,
+        })
     }
 
     /// Whether typed inlining runs on `hir`: on, at an opt level that
@@ -2229,6 +2268,12 @@ impl Compiler {
             let Some(call) = emit.plan.calls.get(&id.0) else {
                 return Err("not-planned".to_string());
             };
+            // The checker's pack recipe for a call whose result packs into
+            // a trait object is keyed on the call: the callee's result
+            // spliced in its place would not pack (#1757).
+            if self.hir_existential_pack(hir, id).is_some() {
+                return Err("existential-pack".to_string());
+            }
             let core = core_insts.get(&id.0);
             let kind = [
                 (call.builtin.is_some(), "builtin"),
@@ -2581,6 +2626,21 @@ impl Compiler {
                 }
                 continue;
             }
+            // `recv.m(1, a, b)` into an inherent method's `T... xs` (#1729)
+            // or `... xs` (#1734): the arguments after its fixed ones, named
+            // or not, pack as a free function's.
+            if let HirKind::Call { callee: Callee::Method { name }, args } = &body.exprs[i].kind
+                && let Some(key) = self.hir_method_rest_key(body, args, name)
+            {
+                let args = args.clone();
+                let span = body.exprs[i].span;
+                let b = out.get_or_insert_with(|| body.clone());
+                let packed = self.hir_method_rest_pack(b, &key, &args, span)?;
+                if let HirKind::Call { args, .. } = &mut b.exprs[i].kind {
+                    *args = packed;
+                }
+                continue;
+            }
             // `new C(y: 1, x: 2)` (#1074) and `recv.m(b: 2, a: 1)` (#1380):
             // named arguments into the field or parameter order the checker
             // matched them to (after the receiver).
@@ -2745,8 +2805,9 @@ impl Compiler {
                 }
                 next += 1;
             }
-            // A generic pack's type is its items' one ground type; a
-            // tuple pack's is its items' types in order.
+            // A generic pack's type is its items' one ground type (`P` and
+            // `readonly P` are one, as for the mono key, #1728); a tuple
+            // pack's is its items' types in order.
             let rest_ty = match rest_ty {
                 _ if whole_rest.is_some() => None,
                 Some(_) if tuple_rest => {
@@ -2760,8 +2821,15 @@ impl Compiler {
                     }
                 }
                 Some(declared) if generic => {
-                    let item = rest.first().and_then(|&r| b.expr(r).ty.clone()).map(|t| apply_ty_prune(self.checker.subst(), &t));
-                    let same = |t: &Ty| rest.iter().all(|&r| b.expr(r).ty.as_ref().map(|u| apply_ty_prune(self.checker.subst(), u)).as_ref() == Some(t));
+                    let key = |r: HirId| b.expr(r).ty.as_ref().map(|t| crate::monomorphize::mono_key_ty(&apply_ty_prune(self.checker.subst(), t)));
+                    let item = rest
+                        .first()
+                        .and_then(|&r| b.expr(r).ty.as_ref())
+                        .map(|t| crate::typechecking::ty::strip_readonly(&apply_ty_prune(self.checker.subst(), t)).clone());
+                    let same = |t: &Ty| {
+                        let k = crate::monomorphize::mono_key_ty(t);
+                        rest.iter().all(|&r| key(r).as_ref() == Some(&k))
+                    };
                     match (declared, item) {
                         (Ty::App(head, params), Some(item)) if params.len() == 1 && same(&item) && crate::hir::layout::ty_is_closed(&item) => {
                             Some(Ty::App(head, vec![item]))
@@ -2796,6 +2864,120 @@ impl Compiler {
                 *args = new_args;
             }
         }
+        Ok(out)
+    }
+
+    /// The key of the inherent method `recv.method(..)` calls (`args[0]` is
+    /// the receiver) when it takes a rest parameter (`T... xs` or `... xs`).
+    fn hir_method_rest_key(&self, body: &HirBody, args: &[HirId], method: &str) -> Option<String> {
+        let recv = *args.first()?;
+        let recv_ty = apply_ty_prune(self.checker.subst(), body.expr(recv).ty.as_ref()?);
+        let recv_ty = crate::typechecking::ty::peel_constructor_refinement(recv_ty);
+        let owner = Checker::class_name_of_ty(&recv_ty)?;
+        let key = self.context.methods.get(owner)?.get(method)?;
+        (self.checker.fn_has_rest(key) && !self.checker.is_overloaded(key)).then(|| key.clone())
+    }
+
+    /// `recv.m(..)`'s arguments for method `key`'s rest parameter: the
+    /// receiver, the fixed arguments in parameter order (named ones where
+    /// the checker matched them), then one pack of the rest (a lone
+    /// `...vec` spread is the pack itself; a bare `... xs` packs a tuple),
+    /// as [`Self::hir_call_shapes`] shapes a free function's.
+    fn hir_method_rest_pack(
+        &self,
+        b: &mut HirBody,
+        key: &str,
+        args: &[HirId],
+        call_span: crate::hir::Span,
+    ) -> Result<Vec<HirId>, &'static str> {
+        let fixed_count = self
+            .checker
+            .fn_param_names(key)
+            .ok_or("call-argument")?
+            .len()
+            .checked_sub(1)
+            .ok_or("call-argument")?;
+        let tuple_rest = self.checker.fn_tuple_rest(key);
+        let ground = |b: &HirBody, r: HirId| b.expr(r).ty.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t));
+        let mut args = args.to_vec();
+        let whole = match args.last().map(|&a| &b.expr(a).kind) {
+            Some(&HirKind::Spread(inner))
+                if !tuple_rest
+                    && args.len() > 1
+                    && ground(b, inner).is_some_and(|t| crate::typechecking::ty::vec_element_ty(&t).is_some()) =>
+            {
+                args.pop();
+                Some(inner)
+            }
+            _ => None,
+        };
+        let flat = self.hir_flatten_spreads(b, &args[1..])?;
+        let mut out = vec![args[0]];
+        let rest = if flat.iter().any(|&a| matches!(b.expr(a).kind, HirKind::Named { .. })) {
+            // Named arguments go where the checker matched them (a whole
+            // `Vec` spread is the last slot, the pack's).
+            let record = self.checker.named_arg_slots(call_span.0, call_span.1).ok_or("call-argument")?;
+            if !record.rest || record.params != fixed_count || record.slots.len() != flat.len() + usize::from(whole.is_some()) {
+                return Err("call-argument");
+            }
+            let mut slots: Vec<Option<HirId>> = vec![None; fixed_count];
+            let mut rest = Vec::new();
+            for (&arg, &k) in flat.iter().zip(&record.slots) {
+                let value = match &b.expr(arg).kind {
+                    HirKind::Named { value, .. } => *value,
+                    _ => arg,
+                };
+                match slots.get_mut(k) {
+                    Some(slot) if slot.is_none() => *slot = Some(value),
+                    Some(_) => return Err("call-argument"),
+                    None => rest.push(value),
+                }
+            }
+            out.extend(slots.into_iter().collect::<Option<Vec<_>>>().ok_or("call-argument")?);
+            rest
+        } else {
+            if flat.len() < fixed_count {
+                return Err("call-argument");
+            }
+            out.extend_from_slice(&flat[..fixed_count]);
+            flat[fixed_count..].to_vec()
+        };
+        if let Some(inner) = whole {
+            if !rest.is_empty() {
+                return Err("call-argument");
+            }
+            out.push(inner);
+            return Ok(out);
+        }
+        let span = (call_span.1, call_span.1);
+        // A tuple pack's type is its items' types in order.
+        if tuple_rest {
+            let items: Option<Vec<Ty>> = rest.iter().map(|&r| ground(b, r)).collect();
+            let pack_ty = match items {
+                Some(items) if items.iter().all(crate::hir::layout::ty_is_closed) => Ty::Tuple(items),
+                _ => return Err("call-argument"),
+            };
+            out.push(Self::hir_push(b, &self.checker, HirKind::Make { kind: MakeKind::Tuple, args: rest }, Some(pack_ty), span));
+            return Ok(out);
+        }
+        let declared = self.checker.fn_param_tys(key).and_then(|tys| tys.last().cloned()).ok_or("call-argument")?;
+        // A generic pack's type is its items' one ground type (`P` and
+        // `readonly P` are one, as for the mono key).
+        let pack_ty = if !crate::hir::layout::ty_is_closed(&declared) {
+            let key_of = |t: &Ty| crate::monomorphize::mono_key_ty(t);
+            let item = rest.first().and_then(|&r| ground(b, r)).ok_or("call-argument")?;
+            let item = crate::typechecking::ty::strip_readonly(&item).clone();
+            let same = rest.iter().all(|&r| ground(b, r).is_some_and(|t| key_of(&t) == key_of(&item)));
+            match declared {
+                Ty::App(head, params) if params.len() == 1 && same && crate::hir::layout::ty_is_closed(&item) => {
+                    Ty::App(head, vec![item])
+                }
+                _ => return Err("call-argument"),
+            }
+        } else {
+            declared
+        };
+        out.push(Self::hir_push(b, &self.checker, HirKind::Make { kind: MakeKind::Array, args: rest }, Some(pack_ty), span));
         Ok(out)
     }
 
@@ -3465,6 +3647,15 @@ impl Compiler {
         Ok(())
     }
 
+    /// Whether a call of `name` at this span is bare constructor sugar
+    /// (`Bad(s)` for `ParseError::Bad`). The checker records the sugar by
+    /// span, and a compiler-made call can share its span: `main`'s
+    /// `return Err(e)` panics through a `string::format` call spanned at the
+    /// constructor (#1738). So the recorded variant must be the callee.
+    fn is_bare_construct_call(&self, name: &str, start: usize, end: usize) -> bool {
+        self.checker.bare_construct_at(start, end).is_some_and(|(_, variant)| variant == name)
+    }
+
     /// The table key and ABI of a direct call to `name`, or why it is not a
     /// plain `CALL` to a user function. The special forms are checked in
     /// `compile_call_expr`'s order, so a name those claim is never lowered
@@ -3514,7 +3705,7 @@ impl Compiler {
         }
         let node = hir.expr(call);
         let (start, end) = node.span;
-        if self.checker.bare_construct_at(start, end).is_some() {
+        if self.is_bare_construct_call(name, start, end) {
             return Err("callee-builtin");
         }
         if let Some(builtin) = self.hir_builtin(name) {
@@ -5348,7 +5539,9 @@ impl Compiler {
             Some(&(fixed, false)) if fixed as usize == explicit => {}
             // A rest parameter takes its pack as one more argument
             // ([`Self::hir_call_shapes`]).
-            Some(&(fixed, true)) if fixed as usize + 1 == explicit && self_layout.is_none() && !open => {}
+            // A method's pack too, a `Vec` or tuple as any other (#1729,
+            // #1734).
+            Some(&(fixed, true)) if fixed as usize + 1 == explicit && (self_layout.is_some() || !open) => {}
             // Declared later in the file: its entry is reserved but its
             // arity not yet recorded, so read it from the signature as the
             // AST call does. Its two-word return kind comes from the
@@ -6744,7 +6937,10 @@ impl Compiler {
     /// The tag of `variant`, checked against the enum `ty` names.
     fn hir_tag(&self, ty: &Ty, enum_name: &str, variant: &str) -> Option<u32> {
         let named = self.hir_enum_name(ty)?;
-        if !Self::hir_same_enum(&named, enum_name) {
+        // `Opt::Some` after `use prelude::Option as Opt;` (#1700).
+        if !Self::hir_same_enum(&named, enum_name)
+            && !Self::hir_same_enum(&named, &self.checker.registry_enum_key(enum_name))
+        {
             return None;
         }
         self.checker.tag_for(enum_name, variant)
@@ -7437,6 +7633,10 @@ impl Compiler {
             Some(_) => None,
             None => match sym {
                 "==" | "!=" => Some(HirOp::Prim),
+                // Ordering on a string-backed scalar enum with no instance
+                // (against its backing `string`, or another of its cases)
+                // orders the backing strings by their bytes (#1722).
+                "<" | ">" | "<=" | ">=" if self.hir_string_word(hir, lhs) && self.hir_string_word(hir, rhs) => Some(HirOp::Prim),
                 // Arithmetic or ordering on a number-backed scalar enum with
                 // no instance is on its backing word: a raw op over both
                 // operands, in the backing's lane.
@@ -7456,7 +7656,12 @@ impl Compiler {
     /// it has one with a one-word result.
     fn hir_instance_operator(&self, ty: &Ty, class: &'static str, method: &'static str) -> Option<HirOp> {
         let (lookup, fqn) = self.concrete_operator_target_ty(ty, class, method)?;
-        let ret = self.checker.fn_return_ty(&fqn)?;
+        // A tuple's structural order (#1721) has no source signature: a
+        // `bool`.
+        let ret = match &lookup {
+            Ty::Tuple(_) => crate::typechecking::ty::boolean(),
+            _ => self.checker.fn_return_ty(&fqn)?,
+        };
         if !matches!(
             lower::classify(&self.checker, &ret),
             Some(ValueClass::Scalar | ValueClass::Opaque | ValueClass::Object)
@@ -7469,6 +7674,21 @@ impl Compiler {
             class,
             method,
         })
+    }
+
+    /// Whether operand `id` is a `string` or a string-backed scalar enum.
+    fn hir_string_word(&self, hir: &HirBody, id: HirId) -> bool {
+        let Some(ty) = Self::hir_ty(hir, id) else {
+            return false;
+        };
+        let ty = apply_ty_prune(self.checker.subst(), ty);
+        let string = |t: &Ty| matches!(crate::typechecking::ty::strip_readonly(t), Ty::Con(n) if n == crate::typechecking::ty::STRING);
+        string(&ty)
+            || self
+                .hir_enum_name(&ty)
+                .filter(|name| self.checker.is_scalar_enum(name))
+                .and_then(|name| self.checker.scalar_value_ty(&name))
+                .is_some_and(|backing| string(&backing))
     }
 
     /// The lane of an `int` / `byte` (`false`) or `float` (`true`) operand,

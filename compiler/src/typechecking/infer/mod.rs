@@ -179,6 +179,9 @@ pub struct Checker {
     counter: TyVarCounter,
     subst: Subst,
     messages: Vec<Message>,
+    /// Spans of this module's E0200s for a type declaration that takes a
+    /// reserved built-in name: the module then reports only those (#1701).
+    rejected_builtin_type_decls: Vec<std::ops::Range<usize>>,
 
     /// Type that the enclosing function expects to return, if any.
     /// `None` outside of a function body. Set when entering a function
@@ -523,6 +526,9 @@ pub struct Checker {
     /// `Trait::method(args)` resolved as the free call `method(args)`
     /// limited to `Trait`: span → the callee name lowering gives it.
     qualified_trait_calls_by_span: HashMap<(usize, usize), String>,
+    /// `m::F(args)` / `C::f(args)` calling the function value of a
+    /// `const` or `static` (#1705): span → the callee's type.
+    qualified_value_calls_by_span: HashMap<(usize, usize), Ty>,
 
     /// Bare constructor patterns (`Some(v)`, `None`, `Red`) resolved to their
     /// enum's registry key, by pattern span (#1352).
@@ -594,6 +600,16 @@ pub struct Checker {
 
     /// Declared FFI argument tags keyed by `Class::field`.
     ffi_fn_arg_tags_by_field: HashMap<String, Vec<u32>>,
+
+    /// The `declare` signature (return type, variadic, fixed arity, argument
+    /// tags) a module `static` holds, keyed by its FQN (#1667).
+    ffi_fn_by_static: HashMap<String, (Ty, bool, usize, Vec<u32>)>,
+
+    /// Module `static` names the `invoke` pre-pass may record a `declare`
+    /// for, and the current function's parameters and `let`s that shadow
+    /// them.
+    ffi_prescan_statics: HashSet<String>,
+    ffi_prescan_locals: HashSet<String>,
 
     /// `invoke` return metadata keyed by `fn_name::param_name` from call sites.
     ffi_fn_param_invoke_ret: HashMap<String, (Ty, bool, usize)>,

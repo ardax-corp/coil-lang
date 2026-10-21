@@ -57,6 +57,8 @@ pub struct MirBuilder {
     /// Locals kept in a home ([`MirInst::HomeStore`]): each
     /// [`Self::def_local`] of one also writes its home.
     pub homed: HashMap<LocalId, u16>,
+    /// The heap words [`Self::def_local`] bound ([`MirFunc::bound_words`]).
+    bound: Vec<ValueId>,
 }
 
 impl MirBuilder {
@@ -75,6 +77,7 @@ impl MirBuilder {
             allow_host_edges: false,
             pending_loc: DebugLoc::unknown(),
             homed: HashMap::new(),
+            bound: Vec::new(),
         }
     }
 
@@ -105,6 +108,12 @@ impl MirBuilder {
         self.func.steady_calls.insert(dest);
     }
 
+    /// `dest` is the low word of a pair a call returns that may carry a
+    /// heap payload ([`MirFunc::heap_pair_calls`]).
+    pub fn mark_heap_pair_call(&mut self, dest: ValueId) {
+        self.func.heap_pair_calls.insert(dest);
+    }
+
     pub fn entry(&self) -> BlockId {
         self.func.entry
     }
@@ -128,6 +137,7 @@ impl MirBuilder {
         let b = self.cur()?;
         if self.func.ty(val).is_heap_word() {
             self.func.heap_slots.insert(local);
+            self.bound.push(val);
         } else {
             self.func.word_slots.insert(local);
         }
@@ -1157,6 +1167,8 @@ impl MirBuilder {
         self.rewrite_subst();
         self.finished = true;
         self.func.debug_slots = self.snapshot_debug_slots();
+        let bound: HashSet<ValueId> = self.bound.iter().chain(&self.var_phis).map(|&v| self.resolve(v)).collect();
+        self.func.bound_words = bound;
         if self.func.has_gc_edge() {
             super::gc::fill_live_roots(&mut self.func);
         }

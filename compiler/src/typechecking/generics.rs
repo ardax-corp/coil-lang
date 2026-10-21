@@ -559,10 +559,11 @@ impl Generics {
             );
         }
 
-        // Convenience bundle: `T: Ord` implies Lt + Le + Gt + Ge via the
-        // flattened superclass dictionary layout. Ord itself has no methods.
-        // Builtin Ord does not declare Eq as a superclass. User-defined
-        // classes use `trait Ordered<T: Equal>` for that path.
+        // Convenience bundle: `T: Ord` implies Lt + Le + Gt + Ge and Eq via
+        // the flattened superclass dictionary layout. Ord itself has no
+        // methods. With Eq a superclass, `==` in a `T: Ord` body uses `T`'s
+        // `Eq` from the `Ord` dictionary, in a shared body as in a mono
+        // clone (#1716), and an `Ord` instance needs an `Eq` one.
         self.typeclasses.insert(
             "Ord".into(),
             TypeClassDef {
@@ -570,7 +571,7 @@ impl Generics {
                 defined_module: PRELUDE_OPS_MODULE.into(),
                 type_params: vec!["T".into()],
                 param_kinds: vec![Kind::Type],
-                superclasses: vec!["Lt".into(), "Le".into(), "Gt".into(), "Ge".into()],
+                superclasses: vec!["Lt".into(), "Le".into(), "Gt".into(), "Ge".into(), "Eq".into()],
                 assoc_types: vec![],
                 methods: vec![],
             },
@@ -891,6 +892,27 @@ impl Generics {
             assoc_tys: HashMap::new(),
             context: Vec::new(),
         });
+        // Strings order by their UTF-8 bytes (coil-stdlib#48).
+        for (class, method) in [("Lt", "lt"), ("Le", "le"), ("Gt", "gt"), ("Ge", "ge")] {
+            self.instances.push(InstanceDef {
+                class: class.into(),
+                defined_module: PRELUDE_OPS_MODULE.into(),
+                range: 0..0,
+                args: vec![string()],
+                method_fqns: make_fqns(class, "string", &[method]),
+                assoc_tys: HashMap::new(),
+                context: Vec::new(),
+            });
+        }
+        self.instances.push(InstanceDef {
+            class: "Ord".into(),
+            defined_module: PRELUDE_OPS_MODULE.into(),
+            range: 0..0,
+            args: vec![string()],
+            method_fqns: HashMap::new(),
+            assoc_tys: HashMap::new(),
+            context: Vec::new(),
+        });
         self.instances.push(InstanceDef {
             class: "Length".into(),
             defined_module: PRELUDE_OPS_MODULE.into(),
@@ -1120,7 +1142,8 @@ impl Generics {
 
     /// Register the structural instance of `class` for the ground tuple,
     /// record, array, `Option` or `Result` `ty` (#1451, #1479): `Show` as `%v` shows it, `Eq`
-    /// as `==` compares it, `Hash` combining its items'. The checker adds
+    /// as `==` compares it, `Hash` combining its items', and a tuple's
+    /// `Lt` / `Le` / `Gt` / `Ge` / `Ord` ordering it lexicographically (#1721). The checker adds
     /// one the first time a goal asks for it
     /// (`Checker::ensure_structural_instance`); codegen emits its thunks
     /// ([`Self::structural_instances`]).
@@ -1130,6 +1153,12 @@ impl Generics {
             "Eq" => &["eq", "ne"],
             "Hash" => &["hash"],
             "Length" => &["len"],
+            // A tuple's lexicographic order (#1721); `Ord` has no methods.
+            "Lt" => &["lt"],
+            "Le" => &["le"],
+            "Gt" => &["gt"],
+            "Ge" => &["ge"],
+            "Ord" => &[],
             _ => return,
         };
         let ty_str = ty.to_string();

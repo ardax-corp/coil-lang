@@ -76,9 +76,12 @@ its own copy, which the job drops when it ends. An isolate job
 (`thread::spawn`) has its own heap, so it gets copies instead: at spawn each
 slot is copied out of the spawner's heap the way spawn arguments are
 (`copy_statics_out`, `Machine::load_copied_statics`, #1663). A standard
-stream is reopened in the worker (`StaticSlot::StdStream`); any other stream
-becomes a `StreamKind::Unsent` placeholder that panics in every stream
-native (`UnsentStreamGuard`, #1684). A slot holding another value that
+stream anywhere in the value, top level or nested, is reopened in the worker
+(`PortableValue::StdStream`); any other stream becomes a `StreamKind::Unsent`
+placeholder that panics in every stream native (`PortableValue::UnsentStream`,
+`UnsentStreamGuard`, #1684, #1708). Only the statics walk encodes streams
+(`value_to_static_arg`); spawn arguments and channel sends still refuse
+them. A slot holding another value that
 cannot cross threads (a cyclic graph) starts zeroed
 ([shared-heap sendability](shared-heap-sendability.md)).
 

@@ -59,35 +59,25 @@ test("200 sequential Connection-close GETs park then discard") {
         let c = triple[0];
         let s = triple[1];
         let listener = triple[2];
-        let r = scope(
-            fn (Scope sc) use (c, s) {
-                let reader = sc
-                    .spawn(
-                        fn () use (c) {
-                            let g = http_read_after_wait(c);
-                            resume g
-                        },
-                    );
-                sc
-                    .spawn(
-                        fn () use (s) {
-                            match write(
-                                s,
-                                to_bytes(
-                                    "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
-                                ),
-                            ) {
-                                Result::Ok(_) => 0,
-                                Result::Err(_) => panic "server write",
-                            }
-                        },
-                    );
-                match reader.join() {
-                    Result::Ok(n) => n,
-                    Result::Err(_) => -1,
+        let r = scope(fn (Scope sc) use (c, s) {
+            let reader = sc.spawn(fn () use (c) {
+                let g = http_read_after_wait(c);
+                resume g
+            });
+            sc.spawn(fn () use (s) {
+                match write(
+                    s,
+                    to_bytes("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"),
+                ) {
+                    Result::Ok(_) => 0,
+                    Result::Err(_) => panic "server write",
                 }
-            },
-        );
+            });
+            match reader.join() {
+                Result::Ok(n) => n,
+                Result::Err(_) => -1,
+            }
+        });
         let n = match r {
             Result::Ok(n) => n,
             Result::Err(_) => -1,

@@ -156,6 +156,19 @@ pub fn is_reserved_builtin_type(name: &str) -> bool {
     BUILTIN_RESERVED_TYPE_NAMES.contains(&name)
 }
 
+/// Primitive type names a type annotation matches in any letter case
+/// (`String` is `string`), so a user `class` or `enum` cannot take one of
+/// these names in any spelling (#1673).
+pub const BUILTIN_PRIMITIVE_TYPE_NAMES: &[&str] = &["int", "float", "bool", "byte", "string", "void"];
+
+/// The primitive `name` spells in any letter case, if any.
+pub fn builtin_primitive_type_spelling(name: &str) -> Option<&'static str> {
+    BUILTIN_PRIMITIVE_TYPE_NAMES
+        .iter()
+        .copied()
+        .find(|p| p.eq_ignore_ascii_case(name))
+}
+
 /// Built-in nominal matrix wrapper (`Matrix<Data>`).
 ///
 /// `Data` is a nested static array/tuple layout (`[[T; N]; M]`). Runtime

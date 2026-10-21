@@ -633,7 +633,9 @@ pub fn is_opaque_handle(name: &str) -> bool {
 /// Whether a `const` binding should emit a shallow-immutability warning.
 /// A `readonly` value is frozen all the way down (#1552), and an opaque
 /// handle has nothing to mutate through (#1709). A GC `Root<T>` /
-/// `Weak<T>` handle warns as its target `T` does.
+/// `Weak<T>` handle warns as its target `T` does. The checker looks
+/// through enums first (`Checker::const_shallow_mutable`, #1714), since
+/// whether one holds mutable state depends on its declared payloads.
 pub fn is_shallow_const_mutable(ty: &Ty) -> bool {
     match ty {
         Ty::Readonly(_) => false,

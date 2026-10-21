@@ -556,7 +556,19 @@ fn candidate_for_call(
         // One key slot per rest formal: the *element* ground type (not the
         // packed `[T]` / `[T; N]`), matching `mono_call_offset`.
         let rest_tp = sig.param_type_params.get(fixed_count).copied().flatten();
-        if rest_args.is_empty() {
+        // `f(...vec)` into a rest (#1728): the `Vec` is the pack, as
+        // codegen takes it (`hir_call_shapes`), so its element binds.
+        let whole = match rest_args.as_slice() {
+            [arg] => match peel(arg).1.as_ref() {
+                Expression::Spread(inner) => ty_of(inner).as_ref().and_then(crate::typechecking::ty::vec_element_ty).cloned(),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(elem) = whole {
+            bind(&mut subst, rest_tp, &elem)?;
+            arg_types.push(elem);
+        } else if rest_args.is_empty() {
             let elem = rest_tp.and_then(|i| subst[i].clone())?;
             arg_types.push(elem);
         } else {

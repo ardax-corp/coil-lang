@@ -32,14 +32,12 @@ fn waits_on(Channel<int> ch) -> int {
 test("cancel stops a task waiting in recv") {
     LOG = 0;
     let ch: Channel<int> = task::channel(1);
-    let r = scope(
-        fn (Scope s) use (ch) {
-            let t = s.spawn(fn () use (ch) => waits_on(ch));
-            task::yield_now();
-            t.cancel();
-            cancelled(t.join())
-        },
-    );
+    let r = scope(fn (Scope s) use (ch) {
+        let t = s.spawn(fn () use (ch) => waits_on(ch));
+        task::yield_now();
+        t.cancel();
+        cancelled(t.join())
+    });
     assert!(r == Result::Ok(true));
     assert!(LOG == 1);
     // The channel is untouched and still usable.
@@ -64,14 +62,12 @@ fn ordered_defers() -> int {
 test("the same task finishes normally when its channel closes") {
     LOG = 0;
     let ch: Channel<int> = task::channel(1);
-    let r = scope(
-        fn (Scope s) use (ch) {
-            let t = s.spawn(fn () use (ch) => waits_on(ch));
-            task::yield_now();
-            ch.close();
-            t.join()
-        },
-    );
+    let r = scope(fn (Scope s) use (ch) {
+        let t = s.spawn(fn () use (ch) => waits_on(ch));
+        task::yield_now();
+        ch.close();
+        t.join()
+    });
     let v = match r {
         Result::Ok(Result::Ok(v)) => v,
         default => -100,
@@ -82,43 +78,37 @@ test("the same task finishes normally when its channel closes") {
 
 test("a cancelled task runs its defers last-registered first") {
     LOG = 0;
-    let r = scope(
-        fn (Scope s) {
-            let t = s.spawn(ordered_defers);
-            task::yield_now();
-            t.cancel();
-            cancelled(t.join())
-        },
-    );
+    let r = scope(fn (Scope s) {
+        let t = s.spawn(ordered_defers);
+        task::yield_now();
+        t.cancel();
+        cancelled(t.join())
+    });
     assert!(r == Result::Ok(true));
     assert!(LOG == 321);
 }
 
 test("cancelling a finished task leaves its value") {
-    let r = scope(
-        fn (Scope s) {
-            let t = s.spawn(fn () => 5);
-            let first = match t.join() {
-                Result::Ok(v) => v,
-                Result::Err(_) => -1,
-            };
-            t.cancel();
-            let second = match t.join() {
-                Result::Ok(v) => v,
-                Result::Err(_) => -1,
-            };
-            first * 10 + second
-        },
-    );
+    let r = scope(fn (Scope s) {
+        let t = s.spawn(fn () => 5);
+        let first = match t.join() {
+            Result::Ok(v) => v,
+            Result::Err(_) => -1,
+        };
+        t.cancel();
+        let second = match t.join() {
+            Result::Ok(v) => v,
+            Result::Err(_) => -1,
+        };
+        first * 10 + second
+    });
     assert!(r == Result::Ok(55));
-    let still = scope(
-        fn (Scope s) {
-            let t = s.spawn(fn () => 5);
-            let _ = t.join();
-            t.cancel();
-            cancelled(t.join())
-        },
-    );
+    let still = scope(fn (Scope s) {
+        let t = s.spawn(fn () => 5);
+        let _ = t.join();
+        t.cancel();
+        cancelled(t.join())
+    });
     assert!(still == Result::Ok(false));
 }
 
@@ -133,27 +123,22 @@ fn joins_other(Task<int> other) -> int {
 
 test("cancel stops a task waiting in join, and the joined task goes on") {
     LOG = 0;
-    let r = scope(
-        fn (Scope s) {
-            let slow = s
-                .spawn(
-                    fn () {
-                        task::sleep(20);
-                        push(5);
-                        7
-                    },
-                );
-            let waiter = s.spawn(fn () use (slow) => joins_other(slow));
-            task::yield_now();
-            waiter.cancel();
-            let w = cancelled(waiter.join());
-            let v = match slow.join() {
-                Result::Ok(v) => v,
-                Result::Err(_) => -1,
-            };
-            w && v == 7
-        },
-    );
+    let r = scope(fn (Scope s) {
+        let slow = s.spawn(fn () {
+            task::sleep(20);
+            push(5);
+            7
+        });
+        let waiter = s.spawn(fn () use (slow) => joins_other(slow));
+        task::yield_now();
+        waiter.cancel();
+        let w = cancelled(waiter.join());
+        let v = match slow.join() {
+            Result::Ok(v) => v,
+            Result::Err(_) => -1,
+        };
+        w && v == 7
+    });
     assert!(r == Result::Ok(true));
     assert!(LOG == 45);
 }
@@ -168,37 +153,27 @@ fn sleeps_long() -> int {
 
 test("a sibling may cancel another task") {
     LOG = 0;
-    let r = scope(
-        fn (Scope s) {
-            let victim = s.spawn(sleeps_long);
-            s
-                .spawn(
-                    fn () use (victim) {
-                        victim.cancel();
-                        0
-                    },
-                );
-            cancelled(victim.join())
-        },
-    );
+    let r = scope(fn (Scope s) {
+        let victim = s.spawn(sleeps_long);
+        s.spawn(fn () use (victim) {
+            victim.cancel();
+            0
+        });
+        cancelled(victim.join())
+    });
     assert!(r == Result::Ok(true));
     assert!(LOG == 6);
 }
 
 test("a cancelled task does not fail its scope") {
-    let r = scope(
-        fn (Scope s) {
-            let t = s
-                .spawn(
-                    fn () {
-                        task::sleep(10000);
-                        0
-                    },
-                );
-            task::yield_now();
-            t.cancel();
-            3
-        },
-    );
+    let r = scope(fn (Scope s) {
+        let t = s.spawn(fn () {
+            task::sleep(10000);
+            0
+        });
+        task::yield_now();
+        t.cancel();
+        3
+    });
     assert!(r == Result::Ok(3));
 }

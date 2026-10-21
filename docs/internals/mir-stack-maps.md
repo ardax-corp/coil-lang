@@ -169,11 +169,131 @@ and relocate mapped slots on collect.
   host: 521 → 539 ms (one zero), 573 → 636 ms (two zeros), 437 → 455 and
   436 → 476 ms with the helper inlined. The zero is `CONST 0; STORE`, two
   dispatches; a dense `DenseConst r, 0` would be one, for every dense
-  clear. Not covered: a temporary passed straight to a call
-  (`weak(new Node(..))`) has no clear at all, and a tuple a dense
-  `DenseIndex` read stays pinned in `frame_pins` (rooting its elements)
-  after its register is zeroed.
+  clear.
   `tests/memory/gc_weak_match_arg.hy`.
+- **A temporary passed to a call drops too** (#1650). A word passed
+  straight to a call (`weak(new Node(..))`) has no binding and so no
+  `ClearWord`; its register, and the gather register a dense call copied
+  it into, kept the object rooted until rewritten. `arg_clears` zeroes,
+  right after a call (`Call`, `HostInvoke`, `CallIndirect`, not a tail
+  call), the registers of the heap words it takes whose last use it is,
+  and their gather registers, in both tiers (LIR: a call inside an
+  expression tree gets its zeros after the tree's root, as below). Not
+  for a local's
+  word: the builder records each word `def_local` bound and each φ that
+  merges a local (`MirFunc::bound_words`), and the frame keeps those
+  until the local is rebound or the function returns, as HIR emission's
+  slots do (a `gc::Root` held in a local guards its payload,
+  `tests/memory/gc_frame_maps_collect.hy`). Nor for a parameter, a
+  constant, a box of plain words (an `Option<int>` or a pair of numbers
+  boxed to pass to `weak`: nothing else can hold that box, so a weak to
+  it keeps upgrading until the register is rewritten,
+  `tests/memory/gc_weak_option_arg.hy`), a register a value live past the
+  call shares, or where no collection can come before the register is
+  rewritten (`RewriteScan`). A call ending its block whose result the
+  branch reads from the stack (`write(..)?`'s `JumpIfMatch`) gets its
+  zeros at the top of each successor it is the only predecessor of, so
+  the result still feeds the branch directly. The zero made a register
+  dead at the allocations between its last push and the call
+  (`precise_frames` drops words every path overwrites first), while a
+  `CallIndirect`'s row was kept whole: an evacuation at such an
+  allocation moved the object and left the register naming its old
+  address, which the call's row then listed as a must-pointer (gc-stress,
+  an over-applied closure in `tests/functions/closure_over_application.hy`).
+  A `CallIndirect` row is now filtered by liveness like a `CALL`'s,
+  keeping only its base word, which a partial application still uses.
+  Straight-line code with calls of temporaries grows by `CONST 0; STORE`
+  per such word (125 of the 223 `examples/*.hy` and `examples/perf/*.hy`
+  archives change, mostly in `main`'s output calls); a 3M-trip loop
+  passing `new Node(i)` to a recursive helper (two zeros a trip, the
+  argument and its gather register) ran 0.511 s against 0.512 s user,
+  medians of 15 interleaved runs on a loaded host.
+  `tests/memory/gc_weak_temp_arg.hy`.
+- **A temporary stored into an object drops too** (#1690). The same
+  zeros follow every op that stores a word into an object, whose object
+  holds the word from there on: `ArrayPush` (`v.push(new Node(..))`),
+  `Alloc` (an enum, tuple, record or closure built from its elems:
+  `Holder::One(new Node(..))`), `HeapFieldStore` (`new Pair(new
+  Node(..))` sets each field), `StoreIndex` and `StoreStatic`, with the
+  same exclusions. An op that only reads a temporary (`f().x`) is left
+  as it was. Three cases a call does not have:
+  - A push's array operand goes even when a local bound it: the push's
+    dest is the same array, and the local is rebound to it. The old word
+    otherwise kept the whole vec, and so every element, rooted after
+    `v = Vec::new()`.
+  - A field or element store's dest is the stored word (the VM leaves it
+    on the stack). One nothing reads (`unused_store_dests`) is popped by
+    the LIR tier instead of stored to a register; the dense tier, which
+    moves it into the dest's register, zeroes that register after the
+    store like an operand's (the zero never names a register a local's
+    word shares).
+  - The LIR tier emits a single-use operand inside its user (an
+    expression tree: the enum alloc of `v.push(Holder::One(..))` is an
+    inline operand of the push), so an op there has no place of its own
+    for its zeros. They go after the tree's root (`EmitPlan::tree_roots`),
+    checked there: no op up to the root writes the register or takes a
+    local's word in it, and no value live past the root shares it. A
+    root that is a terminator's operand, a tail call or a compare fused
+    into the branch gets none.
+  `tests/memory/gc_weak_temp_consumed.hy`.
+- **A heap payload moving as an `i64` drops too** (#1769). A two-word
+  enum (`Option`, `Result` or an enum of at most one payload word) passed
+  by value travels as a pair, payload and tag, and a heap payload rides
+  in it as an opaque `i64` word: a boxed enum is matched apart into a
+  `MatchPayload` typed `i64` and a φ of it, or its object is cast to
+  one. Not heap words, those registers were zeroed neither beside the
+  rebound local's `ClearWord` nor after the call, and kept the object
+  rooted until rewritten. `payload_words` marks them: an `i64`
+  `MatchPayload` or cast of a heap word, and the `i64` φs and casts that
+  copy one. `CopySinks` and `arg_clears` treat them as heap words, and a
+  call (or other consuming op) taking one also zeroes the dead registers
+  it was copied from (`payload_sources`: the φ's incomings, the match and
+  the enum it read, the object cast to it, not past a live value nor
+  into a register a local's word shares), since the LIR tier passes such
+  a word as an inline operand with no register of its own. A number
+  payload read the same way (`Option<int>` unboxed into a pair) is
+  zeroed too: harmless, and its type is not known there. A pair a call
+  returns (`f(make())` at `-O0`) was not covered until #1791 (below).
+  Flagship `.hyc`
+  and every `examples/perf` archive are byte-identical to #1690; of the
+  225 `examples/*.hy` and `examples/perf/*.hy` archives that compile,
+  only `thread_reply` changes (two straight-line zeros, a received string
+  and the `stdout()` handle after their last call).
+  `tests/memory/gc_weak_enum_arg.hy`.
+- **A rebound field and a returned pair drop too** (#1791). A class
+  local that never escapes is scalar-replaced: each field gets a frame
+  slot of its own (`HirMirInput::sroa` / `fields`), and `b.n = e` lowered
+  to a `def_local` of the field's slot with no `ClearWord` of the word
+  it held, so the old field value stayed rooted in its register. The
+  field store now clears the slot's old heap word after binding the new
+  one, exactly as a local's rebind does (#1402), and the existing
+  `cleared_words` / `entry_clears` / `source_clears` place or drop the
+  zero. The fix sits in `from_hir`, not HIR SROA: HIR emission already
+  overwrites the field's frame slot (which ends the old value), and only
+  MIR gives the new value a register of its own.
+  The low word of a pair a call returns is an `i64` too, so passing it
+  straight on (`weak_in(make(3))` at `-O0`) kept its payload rooted.
+  The MIR cannot tell a heap payload from a number there, so HIR
+  emission lists the two-word expressions whose enum has a payload that
+  is no scalar word (`HirMirInput::heap_pairs`, from the same variant
+  payloads as `hir_mir_pair_tys`); `from_hir` marks such a call's low
+  dest (`MirFunc::heap_pair_calls`), and `payload_words` takes it as a
+  payload word. A number pair (`Option<int>`, an enum of ints) is not
+  marked: zeroing every call's pair put two dead zeros in the hot loop of
+  `examples/perf/match_enum_loop` at `-O0`. `Gathers` also take payload
+  words now: a dense call copying one into its gather window (an
+  inlined `make` in `weak_in(make(i))` in a loop) left the object rooted
+  there after its other registers were zeroed.
+  Of the 225 `examples/*.hy` and `examples/perf/*.hy` archives that
+  compile, at `-O2` and `-O0`, only three change against #1769:
+  `raise_try` (two straight-line zeros, a `Result` with a heap payload
+  after the call that took it), `perf/s2g_escape_edges` (one straight-line
+  zero of the rebound field `h.a` in `pack_field`) and, at `-O0` only,
+  `perf/match_enum_loop` (one zero a trip after `score_res(wrap_res(i))`,
+  whose `Result<int, string>` may carry a string; run time within noise,
+  medians of 41 interleaved runs 55.9 → 54.4 ms).
+  `tests/memory/gc_weak_field_rebind.hy`,
+  `tests/memory/gc_weak_pair_result.hy`.
 - **Collection budget.** After a sweep the next threshold is
   `live × 4` when more than half the heap survived (a growing live set) and
   `live × 2` otherwise, never below the initial 1 MB budget.

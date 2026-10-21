@@ -1399,6 +1399,7 @@ pub fn assigns_local(hir: &HirBody, body: HirId, local: LocalId) -> bool {
 pub fn ffi_fn_variadic(body: &HirBody, checker: &Checker, f: HirId) -> bool {
     match &body.expr(f).kind {
         HirKind::Local(local) => checker.ffi_fn_id_variadic(&body.local(*local).name).unwrap_or(false),
+        HirKind::Global { name, .. } => checker.ffi_static_fn_id_variadic(name).unwrap_or(false),
         HirKind::Field { base, name } => body
             .expr(*base)
             .ty
@@ -1701,9 +1702,17 @@ fn let_init_is_lambda(body: &HirBody, local: LocalId) -> bool {
 }
 
 pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
-    // An element of a `Vec`, array or tuple of monomorphic functions: the
-    // closure word it was stored as.
-    if let HirKind::Index { .. } = body.expr(f).kind {
+    indirect_callee_in(body, checker, f, &mut Vec::new())
+}
+
+/// `indirect_callee`, with the function locals whose check is under way:
+/// one copied from another (#1783) is reached again on a cycle
+/// (`f = g; g = f`), where it holds only what its other values put there.
+fn indirect_callee_in(body: &HirBody, checker: &Checker, f: HirId, seen: &mut Vec<LocalId>) -> bool {
+    // An element of a `Vec`, array or tuple of monomorphic functions, or a
+    // `const` or `static` holding one (#1685): the closure word it was
+    // stored as.
+    if let HirKind::Index { .. } | HirKind::Global { .. } = body.expr(f).kind {
         return body.expr(f).ty.as_ref().is_some_and(|t| {
             let t = apply_ty_prune(checker.subst(), t);
             mono_fun(checker, &t, &mut Vec::new())
@@ -1714,12 +1723,23 @@ pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
         return body.expr(f).ty.as_ref().is_some_and(|t| {
             let t = apply_ty_prune(checker.subst(), t);
             matches!(strip_readonly(&t), Ty::Fun(..)) && fun_words_in(checker, &t, &mut Vec::new(), false)
-        }) && returned_closure(body, checker, f);
+        }) && returned_closure(body, checker, f, seen);
     }
     let HirKind::Local(local) = body.expr(f).kind else {
         return false;
     };
+    if seen.contains(&local) {
+        return true;
+    }
     let info = body.local(local);
+    let assigned: Vec<HirId> = body
+        .exprs
+        .iter()
+        .filter_map(|e| match e.kind {
+            HirKind::Assign { place, value } if body.expr(place).kind == HirKind::Local(local) => Some(value),
+            _ => None,
+        })
+        .collect();
     if !info
         .ty
         .as_ref()
@@ -1732,38 +1752,46 @@ pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
                     checker,
                     &t,
                     &mut Vec::new(),
-                    info.kind == LocalKind::Param || info.kind == LocalKind::Let && let_init_is_lambda(body, local),
+                    info.kind == LocalKind::Param || info.kind == LocalKind::Let && let_init_is_lambda(body, local) && assigned.is_empty(),
                 )
         })
     {
         return false;
     }
-    let assigned = body.exprs.iter().any(|e| {
-        matches!(&e.kind, HirKind::Assign { place, .. } if matches!(body.expr(*place).kind, HirKind::Local(l) if l == local))
-    });
-    if assigned {
-        return false;
-    }
-    match info.kind {
-        // A `for` or destructuring binding of a monomorphic function
-        // element: the closure word it was stored as. A captured one is
-        // its closure word, as the enclosing body's own call through it
-        // would be.
-        LocalKind::Param | LocalKind::Pattern | LocalKind::Capture => true,
-        LocalKind::Let => body.exprs.iter().any(|e| match &e.kind {
-            // A named function read as a value is `MakeFn` (codegen refuses
-            // a generic one, whose `MakePolyFn` calls differently).
-            HirKind::Let { local: l, init: Some(init) } if *l == local => match &body.expr(*init).kind {
-                HirKind::Call { .. } => returned_closure(body, checker, *init),
-                HirKind::Global { .. } | HirKind::Lambda { .. } => true,
-                // A function field or element: the closure word stored there.
-                HirKind::Field { .. } | HirKind::Index { .. } => body.expr(*init).ty.as_ref().is_some_and(|t| {
-                    let t = apply_ty_prune(checker.subst(), t);
-                    mono_fun(checker, &t, &mut Vec::new())
-                }),
+    // Each value stored into it is a closure word too (#1759): a named
+    // function, a lambda, a returned closure.
+    seen.push(local);
+    let words = assigned.iter().all(|&value| closure_word(body, checker, value, seen))
+        && match info.kind {
+            // A `for` or destructuring binding of a monomorphic function
+            // element: the closure word it was stored as. A captured one is
+            // its closure word, as the enclosing body's own call through it
+            // would be.
+            LocalKind::Param | LocalKind::Pattern | LocalKind::Capture => true,
+            LocalKind::Let => body.exprs.iter().any(|e| match &e.kind {
+                HirKind::Let { local: l, init: Some(init) } if *l == local => closure_word(body, checker, *init, seen),
                 _ => false,
-            },
+            }),
             _ => false,
+        };
+    seen.pop();
+    words
+}
+
+/// Whether `value`, bound to or stored into a function-typed local, is a
+/// plain closure word a call through the local can take.
+fn closure_word(body: &HirBody, checker: &Checker, value: HirId, seen: &mut Vec<LocalId>) -> bool {
+    match &body.expr(value).kind {
+        HirKind::Call { .. } => returned_closure(body, checker, value, seen),
+        // Another function local that is one itself (#1783): its copy.
+        HirKind::Local(_) => indirect_callee_in(body, checker, value, seen),
+        // A named function read as a value is `MakeFn` (codegen refuses a
+        // generic one, whose `MakePolyFn` calls differently).
+        HirKind::Global { .. } | HirKind::Lambda { .. } => true,
+        // A function field or element: the closure word stored there.
+        HirKind::Field { .. } | HirKind::Index { .. } => body.expr(value).ty.as_ref().is_some_and(|t| {
+            let t = apply_ty_prune(checker.subst(), t);
+            mono_fun(checker, &t, &mut Vec::new())
         }),
         _ => false,
     }
@@ -1771,14 +1799,14 @@ pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
 
 /// A call whose result is a plain closure word: a value call through an
 /// indirect callee, or a function's or ground method's returned closure.
-fn returned_closure(body: &HirBody, checker: &Checker, call: HirId) -> bool {
+fn returned_closure(body: &HirBody, checker: &Checker, call: HirId, seen: &mut Vec<LocalId>) -> bool {
     match &body.expr(call).kind {
         // A `PolyFn` call's at a ground function type: codegen adapts the
         // shared body's closure to it (#1589).
         HirKind::Call {
             callee: Callee::Value(g), ..
         } => {
-            indirect_callee(body, checker, *g)
+            indirect_callee_in(body, checker, *g, seen)
                 || polyfn_callee(body, checker, *g)
                     && body.expr(call).ty.as_ref().is_some_and(|t| {
                         let t = apply_ty_prune(checker.subst(), t);
@@ -2205,11 +2233,11 @@ impl Walk<'_> {
             FfiBuiltin::Invoke => {
                 let [lib, f, values] = args else { return Err("callee-arity") };
                 let items = tuple_items(body, *values).ok_or("ffi-arguments")?;
-                // The id is a value: a local, a field, or an `int` `static` /
-                // `const` read (#1639), not a named function.
-                let id_global = matches!(body.expr(*f).kind, HirKind::Global { .. })
-                    && self.ty(*f).is_some_and(|t| primitive(&apply_ty_prune(self.checker.subst(), t)) == Some(coil_ty::INT));
-                if !id_global && !matches!(body.expr(*f).kind, HirKind::Local(_) | HirKind::Field { .. }) {
+                // The id is a value: any `int` expression (a literal, a call,
+                // an `int` `static` / `const` read (#1639), ..; #1788), or a
+                // local or field, not a named function.
+                let id_int = self.ty(*f).is_some_and(|t| primitive(&apply_ty_prune(self.checker.subst(), t)) == Some(coil_ty::INT));
+                if !id_int && !matches!(body.expr(*f).kind, HirKind::Local(_) | HirKind::Field { .. }) {
                     return Err("ffi-function");
                 }
                 if ffi_fn_variadic(body, self.checker, *f) && ffi_variadic_tags(body, self.checker, id, items).is_none()
@@ -2296,8 +2324,11 @@ impl Walk<'_> {
                 // `NEQ`; the codegen plan picks (`Compiler::hir_operator`).
                 if let BinOp::Overloaded(sym) = op {
                     // `==` / `!=` on arrays compare structurally (`EQ`), as
-                    // the AST; other operators on them are element-wise.
-                    if !matches!(*sym, "==" | "!=") && (self.elementwise(*lhs) || self.elementwise(*rhs)) {
+                    // the AST; other operators on them are element-wise,
+                    // but for a tuple's lexicographic order: a call of its
+                    // `Lt` / .. instance (#1721).
+                    let ordering = matches!(*sym, "<" | ">" | "<=" | ">=") && aggregate_info(self.checker, body, id).is_none();
+                    if !matches!(*sym, "==" | "!=") && !ordering && (self.elementwise(*lhs) || self.elementwise(*rhs)) {
                         return self.aggregate_arith(id, *lhs, Some(*rhs));
                     }
                     if !matches!(*sym, "==" | "!=" | "<" | ">" | "<=" | ">=")
@@ -2311,10 +2342,12 @@ impl Walk<'_> {
                     return self.value(*rhs);
                 }
                 // `a + b` is `FORMAT "%s%s"` over both; `==` / `!=` compare
-                // strings with `EQ`.
+                // strings with `EQ`, and `<` / `<=` / `>` / `>=` through
+                // `string_compare`.
                 let string = |id: HirId| matches!(self.ty(id).map(strip_readonly), Some(Ty::Con(n)) if n == coil_ty::STRING);
                 let concat = matches!(op, BinOp::StrConcat);
-                if concat || (matches!(op, BinOp::Eq | BinOp::Ne) && string(*lhs)) {
+                let compare = matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge);
+                if concat || (compare && string(*lhs)) {
                     if !string(*lhs) || !string(*rhs) {
                         return Err("operand-type");
                     }
@@ -3056,8 +3089,11 @@ impl Walk<'_> {
             }
             // A `()` statement (a unit `match` arm, a nested item) does nothing.
             _ if is_unit_make(body, id) || matches!(body.expr(id).kind, HirKind::Lit(Lit::Unit)) => Ok(()),
+            // A bare value as a body's root: an anonymous `fn`'s `=> e`
+            // that reads a `static` or an unfolded `const` (#1713).
             HirKind::Lit(_)
             | HirKind::Local(_)
+            | HirKind::Global { .. }
             | HirKind::Bin { .. }
             | HirKind::Logic { .. }
             | HirKind::Un { .. }

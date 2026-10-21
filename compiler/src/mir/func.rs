@@ -109,6 +109,16 @@ pub struct MirFunc {
     /// No code that runs at an allocation (a finalizer) resizes an array:
     /// an allocation leaves every length as it was.
     pub lengths_steady: bool,
+    /// Heap words a local was bound to (each `def_local`, and the φs that
+    /// merge a local's definitions). The frame holds a local's word until
+    /// it is rebound or the function returns, so emission zeroes past
+    /// their last use only the registers of temporaries (#1650).
+    pub bound_words: HashSet<ValueId>,
+    /// Low words of the pairs calls return whose enum may carry a heap
+    /// payload there (an opaque `i64`): emission zeroes them past their
+    /// last use like the payload words a match reads (#1791). A pair of
+    /// numbers (`Option<int>`) is not listed.
+    pub heap_pair_calls: HashSet<ValueId>,
 }
 
 impl MirFunc {
@@ -144,6 +154,8 @@ impl MirFunc {
         for v in self.debug_slots.values_mut() {
             *v = map(*v);
         }
+        let renamed: Vec<ValueId> = self.bound_words.iter().map(|&v| map(v)).collect();
+        self.bound_words.extend(renamed);
     }
 
     pub fn new(name: impl Into<String>) -> Self {
@@ -177,6 +189,8 @@ impl MirFunc {
             invariant_loads: HashSet::new(),
             steady_calls: HashSet::new(),
             lengths_steady: true,
+            bound_words: HashSet::new(),
+            heap_pair_calls: HashSet::new(),
         }
     }
 

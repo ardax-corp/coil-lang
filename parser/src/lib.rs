@@ -556,10 +556,6 @@ impl<'pratt> Pratt<'pratt> {
                 keyword!("panic")
                     .ignore_then(expr.clone())
                     .map_with(|inner, e| (e.span(), Box::new(Expression::Panic(inner)))),
-                // `typeof expr` — compile-time type name (string).
-                keyword!("typeof")
-                    .ignore_then(expr.clone())
-                    .map_with(|inner, e| (e.span(), Box::new(Expression::TypeOf(inner)))),
                 // `(a, b, c)` — tuple atom. MUST come before
                 // `self.call(...)` (which expects a leading
                 // ident) AND before `self.ident()`.
@@ -773,9 +769,18 @@ impl<'pratt> Pratt<'pratt> {
                 ),
                 // `readonly e` (`'r'`): `e`'s value seen read-only, for any
                 // `e` (`readonly p.inner`, `readonly new P(1)`, `readonly [1]`).
+                // `typeof e` (`'t'`): compile-time type name (string). As a
+                // unary prefix, `typeof(x) == "T"` compares the name (#1773).
                 prefix(
                     Precedence::Negate as u16,
-                    choice((op!('-'), op!('~'), op!('+'), op!('!'), keyword!("readonly").to('r'))),
+                    choice((
+                        op!('-'),
+                        op!('~'),
+                        op!('+'),
+                        op!('!'),
+                        keyword!("readonly").to('r'),
+                        keyword!("typeof").to('t'),
+                    )),
                     |c, rhs, e| {
                         (
                             e.span(),
@@ -785,6 +790,7 @@ impl<'pratt> Pratt<'pratt> {
                                 '~' => Expression::Not(rhs),
                                 '!' => Expression::LogicalNot(rhs),
                                 'r' => Expression::Readonly(rhs),
+                                't' => Expression::TypeOf(rhs),
                                 _ => unreachable!("No other prefix operators"),
                             }),
                         )
@@ -3762,7 +3768,7 @@ impl<'pratt> Pratt<'pratt> {
                     .find(|err| is_duplicate_field_parse_error(err))
                     .or(errs.first());
                 let primary = primary_err
-                    .map(|err| shift(err.span().into_range()))
+                    .map(|err| shift(error_range(input, err)))
                     .unwrap_or_default();
                 let title = primary_err
                     .map(|err| format_parse_error_title(input, err))
@@ -3777,7 +3783,7 @@ impl<'pratt> Pratt<'pratt> {
                 errs.iter().for_each(|err| {
                     message.push(Label::new(
                         format_parse_error_label(input, err),
-                        shift(err.span().into_range()),
+                        shift(error_range(input, err)),
                     ));
                 });
 
@@ -3797,10 +3803,54 @@ impl<'pratt> Pratt<'pratt> {
     }
 }
 
+/// Item keywords that `pub` may be written before by mistake.
+const NOT_PUB_ITEMS: &[&str] = &[
+    "const", "static", "let", "class", "fn", "gen", "pure", "enum", "trait", "impl", "type",
+    "use", "mod", "extern", "readonly", "test",
+];
+
+/// The parser failed at an item keyword right after the word `pub`: the
+/// keyword and the range of `pub`. `pub` marks class fields and `impl`
+/// methods only; anywhere else the parser read it as an expression and
+/// asked for `;` (coil-lang#1725).
+fn misplaced_pub<'a>(input: &'a str, err: &Rich<'_, char>) -> Option<(&'a str, std::ops::Range<usize>)> {
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    let word_at = |at: usize| {
+        let rest = input.get(at..)?;
+        Some(&rest[..rest.find(|c: char| !is_ident(c)).unwrap_or(rest.len())])
+    };
+    let at = err.span().start;
+    let word = word_at(at)?;
+    // After doc comments the parser stops at `pub` itself; elsewhere it
+    // reads `pub` as an expression and stops at the keyword after it.
+    let (kw, start) = if word == "pub" {
+        let next = at + 3 + input[at + 3..].len() - input[at + 3..].trim_start().len();
+        (word_at(next)?, at)
+    } else {
+        (word, input[..at].trim_end().strip_suffix("pub")?.len())
+    };
+    if !NOT_PUB_ITEMS.contains(&kw) || input[..start].chars().next_back().is_some_and(is_ident) {
+        return None;
+    }
+    Some((kw, start..start + 3))
+}
+
+/// Where the error points: `pub` itself for a misplaced `pub`.
+fn error_range(input: &str, err: &Rich<'_, char>) -> std::ops::Range<usize> {
+    misplaced_pub(input, err)
+        .map(|(_, r)| r)
+        .unwrap_or_else(|| err.span().into_range())
+}
+
 /// Prefer custom chumsky messages as the diagnostic title; fall back to a short summary.
 fn format_parse_error_title(input: &str, err: &Rich<'_, char>) -> String {
     if let Some(msg) = missing_param_type_message(input, err) {
         return msg;
+    }
+    if let Some((kw, _)) = misplaced_pub(input, err) {
+        return format!(
+            "`pub` is not allowed on `{kw}`: it marks class fields and `impl` methods only"
+        );
     }
     match err.reason() {
         RichReason::Custom(msg) => msg.to_string(),
@@ -3910,6 +3960,9 @@ fn format_parse_error_label(input: &str, err: &Rich<'_, char>) -> String {
     if let Some(msg) = missing_param_type_message(input, err) {
         return msg;
     }
+    if misplaced_pub(input, err).is_some() {
+        return "`pub` is only for class fields and `impl` methods".to_string();
+    }
     match err.reason() {
         RichReason::Custom(msg) => msg.to_string(),
         RichReason::ExpectedFound { expected, .. } => {
@@ -3923,6 +3976,11 @@ fn format_parse_error_label(input: &str, err: &Rich<'_, char>) -> String {
 }
 
 fn parse_error_help(input: &str, err: &Rich<'_, char>) -> Option<String> {
+    if misplaced_pub(input, err).is_some() {
+        return Some(
+            "remove `pub`: every top-level item can be imported with `use` without it".to_string(),
+        );
+    }
     if missing_param_type_message(input, err).is_some() {
         return Some(
             "function parameters are written `Type name`, not `name` or `name: Type`".to_string(),
