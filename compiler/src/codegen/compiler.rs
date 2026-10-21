@@ -1561,6 +1561,8 @@ impl Compiler {
     pub(super) fn instance_clone(&mut self, fqn: &str, lookup: &[Ty]) -> Option<String> {
         const MAX_PER_METHOD: usize = 8;
         let src = self.inst_clone_srcs.get(fqn)?;
+        // Keyed without `readonly`, which has no runtime form (#1806).
+        let lookup = &lookup.iter().map(crate::typechecking::ty::strip_readonly_deep).collect::<Vec<_>>()[..];
         if lookup.len() != src.head.len() || lookup.iter().any(Self::ty_has_var) {
             return None;
         }
