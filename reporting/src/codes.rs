@@ -73,6 +73,9 @@ pub enum ErrorCode {
     UnassignedLocal,
     /// Two `use` imports bind the same local name to different items.
     DuplicateImport,
+    /// An expression statement drops a `Result` (warning; `let _ = …;`
+    /// discards one on purpose).
+    UnusedResult,
 
     DuplicateEnum,
     DuplicateConstructor,
@@ -181,6 +184,7 @@ impl ErrorCode {
             Self::ShiftCountOutOfRange => "E0131",
             Self::UnassignedLocal => "E0132",
             Self::DuplicateImport => "E0133",
+            Self::UnusedResult => "E0134",
             Self::DuplicateEnum => "E0200",
             Self::DuplicateConstructor => "E0201",
             Self::UnknownEnum => "E0202",
@@ -271,6 +275,7 @@ impl ErrorCode {
             Self::ShiftCountOutOfRange => "shift count out of range",
             Self::UnassignedLocal => "local read before it is assigned",
             Self::DuplicateImport => "local name imported twice",
+            Self::UnusedResult => "unused `Result` value",
             Self::DuplicateEnum => "duplicate enum",
             Self::DuplicateConstructor => "duplicate constructor",
             Self::UnknownEnum => "unknown enum",
@@ -369,6 +374,7 @@ mod tests {
             | ShiftCountOutOfRange
             | UnassignedLocal
             | DuplicateImport
+            | UnusedResult
             | DuplicateEnum
             | DuplicateConstructor
             | UnknownEnum
@@ -449,6 +455,7 @@ mod tests {
             ShiftCountOutOfRange,
             UnassignedLocal,
             DuplicateImport,
+            UnusedResult,
             DuplicateEnum,
             DuplicateConstructor,
             UnknownEnum,
