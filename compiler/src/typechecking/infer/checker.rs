@@ -7053,6 +7053,9 @@ impl Checker {
     /// `unused_must_use`. `expr?;` is not one (`?` consumes the `Result`),
     /// a block's tail is its value, and `let _ = expr;` discards on purpose.
     /// An assignment's value is the stored `Result`, which the target keeps.
+    /// In a `test` body it is an error instead (#1819): an `assert!` helper
+    /// called as `helper();` would drop its failed `Err` and the case would
+    /// pass.
     fn warn_unused_result(&mut self, ty: &Ty, stmt: &Output) {
         if matches!(
             unwrap_expr_wrappers(stmt).1.as_ref(),
@@ -7064,12 +7067,23 @@ impl Checker {
         if !is_result_ty(&ty) {
             return;
         }
-        let mut msg = Message::warn(
-            ErrorCode::UnusedResult,
-            "unused `Result` value: an error it holds is dropped".to_string(),
-            stmt.0.into_range(),
-        );
-        msg.with_help("handle it with `?` or `match`, or write `let _ = …;` to discard it on purpose".to_string());
+        let msg = if self.in_test_case {
+            let mut msg = Message::error(
+                ErrorCode::UnusedResult,
+                "unused `Result` value in a test: an error it holds is dropped and the test still passes".to_string(),
+                stmt.0.into_range(),
+            );
+            msg.with_help("write `…?;` to fail the test on an error, or `let _ = …;` to discard it on purpose".to_string());
+            msg
+        } else {
+            let mut msg = Message::warn(
+                ErrorCode::UnusedResult,
+                "unused `Result` value: an error it holds is dropped".to_string(),
+                stmt.0.into_range(),
+            );
+            msg.with_help("handle it with `?` or `match`, or write `let _ = …;` to discard it on purpose".to_string());
+            msg
+        };
         self.messages.push(msg);
     }
 
