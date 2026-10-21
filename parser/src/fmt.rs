@@ -2908,6 +2908,12 @@ mod tests {
     }
 
     #[test]
+    fn comptime_value_block_round_trips() {
+        let src = "fn f() -> int {\n    let n = comptime {\n        let a = sq(3);\n        return a + 1;\n    };\n    return n;\n}\n";
+        assert_eq!(format_source(src).unwrap(), src);
+    }
+
+    #[test]
     fn comptime_block_round_trips() {
         let src = "use gen::adder;\n\ncomptime {\n    let n = 40;\n    return adder(\"f\", n);\n}\n\nfn main() {}\n";
         assert_eq!(format_source(src).unwrap(), src);

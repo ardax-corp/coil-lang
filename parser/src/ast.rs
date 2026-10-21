@@ -635,10 +635,12 @@ pub enum Expression<'expr> {
         body: Output<'expr>,
     },
 
-    /// Top-level `comptime { … }`: a block run while compiling whose
-    /// returned `Code` replaces it (comptime step 9). Expanded with the
-    /// macros, before typechecking; the tree walkers leave the body alone,
-    /// since it belongs to the expansion program, not to this module.
+    /// `comptime { … }`. At the top level, a block run while compiling
+    /// whose returned `Code` replaces it (comptime step 9), expanded with
+    /// the macros before typechecking. In an expression, a block whose
+    /// returned value is computed like `comptime e` (it becomes a hidden
+    /// function and const, `comptime_expr::hoist`). The tree walkers leave
+    /// the body alone: it is not code of the enclosing function.
     ComptimeBlock(Output<'expr>),
 
     /// Top-level `enum` declaration.
