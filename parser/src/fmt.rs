@@ -2961,6 +2961,42 @@ mod tests {
     }
 
     #[test]
+    fn typeof_shows_the_operand_it_takes() {
+        // #1760: `typeof` takes a whole expression, so `typeof(x) == "T"`
+        // is `typeof ((x) == "T")`. Printing it `typeof x == "T"` keeps that
+        // meaning but reads as a comparison; parenthesize an operand that
+        // binds looser than a unary operator.
+        let src = "\
+fn main() {
+    let x = 1;
+    let a = typeof(x) == \"int\";
+    let b = typeof x as float;
+    let c = typeof 0..3;
+    let d = (typeof x) == \"int\";
+    let e = typeof (x);
+    let f = typeof (1, 2);
+    let g = typeof -x;
+}
+";
+        let expected = "\
+fn main() {
+    let x = 1;
+    let a = typeof (x == \"int\");
+    let b = typeof (x as float);
+    let c = typeof (0..3);
+    let d = (typeof x) == \"int\";
+    let e = typeof x;
+    let f = typeof (1, 2);
+    let g = typeof -x;
+}
+";
+        let formatted = format_source(src).unwrap();
+        assert_eq!(formatted, expected);
+        round_trip(&formatted);
+        assert_eq!(format_source(&formatted).unwrap(), formatted);
+    }
+
+    #[test]
     fn format_is_idempotent() {
         let src = "fn main() { return; }\n";
         let once = format_source(src).unwrap();
@@ -3521,41 +3557,5 @@ fn main() { return; }
         let once = format_source(&src).unwrap();
         assert_eq!(shape(&once), shape(&src), "meaning changed:\n{once}");
         assert!(!once.contains("(r?)"), "{once}");
-    }
-
-    #[test]
-    fn typeof_shows_the_operand_it_takes() {
-        // #1760: `typeof` takes a whole expression, so `typeof(x) == "T"`
-        // is `typeof ((x) == "T")`. Printing it `typeof x == "T"` keeps that
-        // meaning but reads as a comparison; parenthesize an operand that
-        // binds looser than a unary operator.
-        let src = "\
-fn main() {
-    let x = 1;
-    let a = typeof(x) == \"int\";
-    let b = typeof x as float;
-    let c = typeof 0..3;
-    let d = (typeof x) == \"int\";
-    let e = typeof (x);
-    let f = typeof (1, 2);
-    let g = typeof -x;
-}
-";
-        let expected = "\
-fn main() {
-    let x = 1;
-    let a = typeof (x == \"int\");
-    let b = typeof (x as float);
-    let c = typeof (0..3);
-    let d = (typeof x) == \"int\";
-    let e = typeof x;
-    let f = typeof (1, 2);
-    let g = typeof -x;
-}
-";
-        let formatted = format_source(src).unwrap();
-        assert_eq!(formatted, expected);
-        round_trip(&formatted);
-        assert_eq!(format_source(&formatted).unwrap(), formatted);
     }
 }
