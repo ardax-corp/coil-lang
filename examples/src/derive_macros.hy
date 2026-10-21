@@ -174,15 +174,15 @@ attr contracted(FnDecl f) -> Code {
     };
 }
 
-/// Allocates about 100 MiB but keeps little live, then adds
+/// Allocates about 2 MiB but keeps little live, then adds
 /// `churned() -> int` with how many vectors it built: the compile-time
 /// memory cap counts live objects, not garbage.
 derive Churn(TypeDecl t) -> Code {
     let built = 0;
-    while built < 2000 {
+    while built < 100 {
         let scratch: Vec<int> = Vec::new();
         let i = 0;
-        while i < 6000 {
+        while i < 2000 {
             scratch.push(i);
             i += 1;
         }

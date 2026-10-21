@@ -81,11 +81,11 @@ fn runaway_macro_hits_step_budget() {
 #[test]
 fn hoarding_macro_hits_memory_cap() {
     let limits = compiler::ComptimeLimits {
-        heap_bytes: 8 << 20,
+        heap_bytes: 1 << 20,
         ..Default::default()
     };
     let out = compile_fail_with("macro_memory_cap", limits);
-    for n in ["derive `Hoard` failed", "8 MiB", "--comptime-mem"] {
+    for n in ["derive `Hoard` failed", "1 MiB", "--comptime-mem"] {
         assert!(out.contains(n), "missing `{n}` in:\n{out}");
     }
 }

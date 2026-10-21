@@ -11,11 +11,11 @@ derive Spin(TypeDecl t) -> Code {
     return raw("");
 }
 
-/// Keeps about 32 MiB live: stopped by a small `--comptime-mem`.
+/// Keeps over 1 MiB live: stopped by `--comptime-mem 1`.
 derive Hoard(TypeDecl t) -> Code {
     let keep: Vec<int> = Vec::new();
     let i = 0;
-    while i < 4000000 {
+    while i < 140000 {
         keep.push(i);
         i += 1;
     }
