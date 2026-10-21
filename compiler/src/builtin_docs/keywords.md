@@ -124,7 +124,9 @@ included) each body mutates, and the error names the write (`it mutates
 `readonly Area` trait objects included, only when the trait declares
 `readonly A self`; its impls must then not mutate `self`. The seal is deep: a
 field, element, loop variable or matched payload read through it is
-`readonly` too (`readonly Option<P>` is `Option<readonly P>`). A `T` converts
+`readonly` too (`readonly Option<P>` is `Option<readonly P>`), and so is what
+a method called on it returns (`p.get_inner()`, `r.get()` on a `readonly
+Ref<P>`), unless its trait declares `readonly A self`. A `T` converts
 to `readonly T`, never back, and `Vec<T>` does not convert to
 `Vec<readonly T>`; a parameter that only reads takes `readonly Vec<T>`.
 `readonly` costs nothing at run time, and the variable itself can still be
@@ -358,11 +360,17 @@ The operand is type-checked but never evaluated. Nominal types are written
 with their defining module (`prelude::Option<int>`); types from the entry
 file stay bare. A type that is not fully known is a compile error.
 
+`typeof` is a unary prefix, like `-` or `readonly`: it takes the operand
+right after it (with any calls, fields or indexing), so
+`typeof x == "int"` compares the type name. Parenthesize a larger operand:
+`typeof (a + b)`.
+
 ```coil
 fn main() {
     let a = typeof 42; // "int"
     let b = typeof (1, "x"); // "(int, string)"
     let c = typeof Option::Some(1); // "prelude::Option<int>"
+    let d = typeof a == "string"; // true
 }
 ```
 

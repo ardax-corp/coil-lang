@@ -4790,6 +4790,9 @@ impl Compiler {
                 _ => None,
             },
             Ty::Record { .. } => Some(ValueTag::Record),
+            // `readonly` has no runtime form: it boxes as the type it views
+            // (a generic `V` result read as `readonly Point`, #1640).
+            Ty::Readonly(inner) => Self::ty_to_value_tag(inner),
             // Open type vars, boxing is required but we don't know the tag yet
             Ty::Var(_) => None,
             _ => None,

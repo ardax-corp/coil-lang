@@ -56,19 +56,16 @@ test("a producer never runs more than capacity ahead of the consumer") {
     max_ahead.push(0);
     let r = scope(
         fn (Scope s) use (ch, max_ahead) {
-            s
-                .spawn(
-                    fn () use (ch, max_ahead) {
-                        for i in 1..21 {
-                            put(ch, i);
-                            if ch.len() > max_ahead[0] {
-                                max_ahead[0] = ch.len();
-                            }
-                        }
-                        ch.close();
-                        0
-                    },
-                );
+            s.spawn(fn () use (ch, max_ahead) {
+                for i in 1..21 {
+                    put(ch, i);
+                    if ch.len() > max_ahead[0] {
+                        max_ahead[0] = ch.len();
+                    }
+                }
+                ch.close();
+                0
+            });
             let sum = 0;
             let last = 0;
             let ordered = true;
@@ -106,15 +103,12 @@ test("several producers share one channel") {
             let p = 0;
             while p < 3 {
                 let base = p * 100;
-                s
-                    .spawn(
-                        fn () use (ch, base) {
-                            for i in 0..4 {
-                                put(ch, base + i);
-                            }
-                            0
-                        },
-                    );
+                s.spawn(fn () use (ch, base) {
+                    for i in 0..4 {
+                        put(ch, base + i);
+                    }
+                    0
+                });
                 p += 1;
             }
             let sum = 0;
