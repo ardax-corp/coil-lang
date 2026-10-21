@@ -523,6 +523,9 @@ pub struct Checker {
     /// `Trait::method(args)` resolved as the free call `method(args)`
     /// limited to `Trait`: span → the callee name lowering gives it.
     qualified_trait_calls_by_span: HashMap<(usize, usize), String>,
+    /// `m::F(args)` / `C::f(args)` calling the function value of a
+    /// `const` or `static` (#1705): span → the callee's type.
+    qualified_value_calls_by_span: HashMap<(usize, usize), Ty>,
 
     /// Bare constructor patterns (`Some(v)`, `None`, `Red`) resolved to their
     /// enum's registry key, by pattern span (#1352).
