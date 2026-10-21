@@ -32,5 +32,5 @@ fn run() -> int {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", run())));
+    let _ = write_all(stdout(), to_bytes(format("%i", run())));
 }

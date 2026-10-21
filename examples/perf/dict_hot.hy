@@ -11,5 +11,5 @@ fn main() {
         d.y += 2;
         i = i + 1;
     }
-    write_all(stdout(), to_bytes(format("%i", d.x + d.y)));
+    let _ = write_all(stdout(), to_bytes(format("%i", d.x + d.y)));
 }

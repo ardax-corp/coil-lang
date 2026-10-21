@@ -31,5 +31,5 @@ fn hot(Vec<int> v, int n) -> int {
 
 fn main() {
     let v = fill(64);
-    write_all(stdout(), to_bytes(format("%i", hot(v, 4000000))));
+    let _ = write_all(stdout(), to_bytes(format("%i", hot(v, 4000000))));
 }

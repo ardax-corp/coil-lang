@@ -58,5 +58,5 @@ fn main() {
         total = total + scan(t, v);
         round = round + 1;
     }
-    write_all(stdout(), to_bytes(format("%i %i", total, t.hits)));
+    let _ = write_all(stdout(), to_bytes(format("%i %i", total, t.hits)));
 }

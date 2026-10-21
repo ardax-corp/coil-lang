@@ -34,5 +34,5 @@ fn hot() -> int {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", hot())));
+    let _ = write_all(stdout(), to_bytes(format("%i", hot())));
 }

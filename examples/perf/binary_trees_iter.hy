@@ -34,5 +34,5 @@ fn main() {
         depth = depth + 2;
     }
     sum = sum + long_lived;
-    write_all(stdout(), to_bytes(format("%i", sum)));
+    let _ = write_all(stdout(), to_bytes(format("%i", sum)));
 }

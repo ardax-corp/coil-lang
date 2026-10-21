@@ -20,5 +20,5 @@ fn main() {
     for i in 0..4000000 {
         s = (s + sbox16(i ^ s)) & 65535;
     }
-    write_all(stdout(), to_bytes(format("%i", s)));
+    let _ = write_all(stdout(), to_bytes(format("%i", s)));
 }

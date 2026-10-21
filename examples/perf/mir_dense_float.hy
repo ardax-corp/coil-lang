@@ -38,5 +38,5 @@ fn mandel(int size, int max_iter) -> int {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", mandel(80, 40))));
+    let _ = write_all(stdout(), to_bytes(format("%i", mandel(80, 40))));
 }

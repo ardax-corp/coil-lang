@@ -28,5 +28,5 @@ fn main() {
         s = s + even(80, 0);
         i = i + 1;
     }
-    write_all(stdout(), to_bytes(format("%i", s)));
+    let _ = write_all(stdout(), to_bytes(format("%i", s)));
 }

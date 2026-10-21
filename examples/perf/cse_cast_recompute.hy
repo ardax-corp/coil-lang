@@ -19,5 +19,5 @@ fn hot(int n) -> int {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", hot(1000000))));
+    let _ = write_all(stdout(), to_bytes(format("%i", hot(1000000))));
 }

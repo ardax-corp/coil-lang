@@ -21,5 +21,5 @@ fn triple_fib(int n) -> int {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", triple_fib(32))));
+    let _ = write_all(stdout(), to_bytes(format("%i", triple_fib(32))));
 }

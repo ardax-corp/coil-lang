@@ -41,5 +41,5 @@ fn mandelbrot() -> int {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", mandelbrot())));
+    let _ = write_all(stdout(), to_bytes(format("%i", mandelbrot())));
 }

@@ -17,5 +17,5 @@ fn count_until(bool stop, int n) -> int {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", count_until(false, 10))));
+    let _ = write_all(stdout(), to_bytes(format("%i", count_until(false, 10))));
 }

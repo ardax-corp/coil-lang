@@ -19,5 +19,5 @@ fn main() {
         acc = acc + a + b;
         i = i + 1;
     }
-    write_all(stdout(), to_bytes(format("%i", acc)));
+    let _ = write_all(stdout(), to_bytes(format("%i", acc)));
 }
