@@ -335,6 +335,18 @@ fn unused_results(src: &str) -> Vec<Message> {
         .collect()
 }
 
+/// The line (counting from 0 at the start of `src`) of each E0134
+/// unused-`Result` warning in `src`.
+fn unused_result_lines(src: &str) -> Vec<usize> {
+    let mut lines: Vec<usize> = check_messages(src)
+        .iter()
+        .filter(|m| m.code() == Some(ErrorCode::UnusedResult))
+        .map(|m| src[..m.range().start].matches('\n').count())
+        .collect();
+    lines.sort_unstable();
+    lines
+}
+
 // #1752: `Err("bad");` drops the `Result`; the program used to compile and
 // exit 0 with no hint that the error went nowhere.
 #[test]
@@ -353,6 +365,102 @@ fn main() -> Result<int, string> {
         "expected one unused-Result warning, got: {:?}",
         msgs.iter().map(|m| m.message()).collect::<Vec<_>>()
     );
+}
+
+// #1752: `expr?;` consumes the `Result` and `let _ = expr;` discards it on
+// purpose; a bare call statement is the one that drops it.
+#[test]
+fn discarded_result_try_and_let_underscore_do_not_warn() {
+    let src = r#"
+fn f(int n) -> Result<int, string> {
+    if n > 0 {
+        return Ok(n);
+    }
+    return Err("neg");
+}
+fn main() -> Result<int, string> {
+    f(1)?;
+    let _ = f(2);
+    let _ = Err("bad");
+    f(3);
+    return Ok(0);
+}
+"#;
+    assert_eq!(unused_result_lines(src), vec![11]);
+}
+
+// #1752: a method returning `Result` called as a statement warns, as a
+// unit method does not.
+#[test]
+fn discarded_result_method_call_warns() {
+    let src = r#"
+class Store {
+    pub n: int,
+}
+impl Store {
+    pub fn put(int v) -> Result<int, string> {
+        if v < 0 {
+            return Err("neg");
+        }
+        self.n = v;
+        return Ok(v);
+    }
+    pub fn clear() {
+        self.n = 0;
+    }
+}
+fn main() {
+    let s = new Store(0);
+    s.put(4);
+    s.clear();
+    let _ = s.put(5);
+}
+"#;
+    assert_eq!(unused_result_lines(src), vec![18]);
+}
+
+// #1752: inside a lambda a dropped `Result` statement warns; the body's
+// tail and an `=>` body are the lambda's value, and `return` uses it.
+#[test]
+fn discarded_result_in_lambda_warns_only_for_statements() {
+    let src = r#"
+fn f(int n) -> Result<int, string> {
+    return Ok(n);
+}
+fn main() {
+    let g = fn (int n) {
+        f(n);
+        return f(n);
+    };
+    let t = fn (int n) {
+        f(n)
+    };
+    let h = fn (int n) => f(n);
+    let _ = g(1);
+    let _ = t(1);
+    let _ = h(1);
+}
+"#;
+    assert_eq!(unused_result_lines(src), vec![6]);
+}
+
+// #1752: only `Result` warns for now; other dropped values (`Option`,
+// `int`) stay silent.
+#[test]
+fn discarded_non_result_values_do_not_warn() {
+    let src = r#"
+fn o(int n) -> Option<int> {
+    return Some(n);
+}
+fn i(int n) -> int {
+    return n;
+}
+fn main() {
+    o(1);
+    i(2);
+}
+"#;
+    assert_eq!(unused_result_lines(src), Vec::<usize>::new());
 }
 
 #[test]
