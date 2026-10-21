@@ -376,7 +376,8 @@ read environment variables and run programs only as the build allows:
   past its clock fails (E0134 / the macro's error) even when its code
   handled the timeout as an `Err`. Pure code is bounded by the step budget.
 - Each flag repeats. `MODULE=` scopes a grant to one module (a module
-  path such as `config::load`); without it the grant covers every module,
+  path such as `config::load`) and the modules under it (`config::load::…`;
+  spool scopes a dependency's grants to its top-level modules); without it the grant covers every module,
   the entry file included. `HostGrants::comptime_io` holds them (`ComptimeGrants`,
   `Scoped<T>`), and `ComptimeGrants::for_module` gives the
   `macros::ComptimeIo` a single evaluation runs with.

@@ -59,7 +59,8 @@ pub struct Scoped<T> {
 }
 
 impl<T> Scoped<T> {
-    /// `MODULE=VALUE` scopes to `MODULE`; anything else is for any module.
+    /// `MODULE=VALUE` scopes to `MODULE` and the modules under it
+    /// (`MODULE::…`); anything else is for any module.
     /// `value` turns the text after `=` (or the whole text) into a `T`.
     pub fn parse(text: &str, value: impl FnOnce(&str) -> T) -> Self {
         match text.split_once('=') {
@@ -72,7 +73,9 @@ impl<T> Scoped<T> {
     }
 
     fn applies_to(&self, module: &str) -> bool {
-        self.module.as_deref().is_none_or(|m| m == module)
+        self.module.as_deref().is_none_or(|m| {
+            module == m || module.strip_prefix(m).is_some_and(|rest| rest.starts_with("::"))
+        })
     }
 }
 
@@ -341,6 +344,18 @@ mod tests {
         };
         assert_eq!(grants.for_module("gen").env, ["TOKEN", "HOME"]);
         assert_eq!(grants.for_module("other").env, ["HOME"]);
+    }
+
+    #[test]
+    fn a_scope_covers_the_modules_under_it() {
+        let grants = ComptimeGrants {
+            env: vec![Scoped::parse("gen=TOKEN", |n| n.to_string())],
+            ..ComptimeGrants::default()
+        };
+        assert_eq!(grants.for_module("gen::schema").env, ["TOKEN"]);
+        assert_eq!(grants.for_module("gen::schema::v2").env, ["TOKEN"]);
+        assert!(grants.for_module("generate").env.is_empty(), "a name prefix is not a module prefix");
+        assert!(grants.for_module("other::gen").env.is_empty());
     }
 
     #[test]
