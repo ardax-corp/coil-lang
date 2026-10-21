@@ -4841,7 +4841,9 @@ mod tests {
     fn options_report_help_and_errors() {
         let cwd = Path::new("/");
         assert_eq!(parse_options(["--help".to_string()], cwd), Ok(None));
-        assert_eq!(parse_options(Vec::new(), cwd), Ok(Some(LspOptions::default())));
+        let mut defaults = LspOptions::default();
+        defaults.grants.comptime_cache.replay = true;
+        assert_eq!(parse_options(Vec::new(), cwd), Ok(Some(defaults)));
         assert!(parse_options(["--root".to_string()], cwd).is_err());
         assert!(parse_options(["--bogus".to_string()], cwd).is_err());
     }
