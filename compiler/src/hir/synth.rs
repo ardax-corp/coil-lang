@@ -336,3 +336,48 @@ pub fn structural_hash(b: &mut Synth, value: HirId, items: &[Ty], targets: &[Opt
     let out = b.read(acc);
     b.block(stmts, Some(out), int)
 }
+
+/// `Lt::lt` (`method`, or `le` / `gt` / `ge`) of two tuples `a` and `b`
+/// of `items` (#1721): lexicographic, the first item that differs decides.
+/// Item `i` before the last decides when it orders strictly
+/// (`x_i < y_i`), and passes on only when neither orders before the other
+/// (`x_i <= y_i && y_i <= x_i`, so a `NaN` item decides `false`); the last
+/// takes the operator itself. Each item compares as the operator does at
+/// its type (a primitive, a string's bytes, its own instance).
+pub fn tuple_order(b: &mut Synth, a: HirId, c: HirId, items: &[Ty], method: &str) -> HirId {
+    let boolean = coil_ty::boolean();
+    let (strict, op): (&'static str, &'static str) = match method {
+        "lt" => ("<", "<"),
+        "le" => ("<", "<="),
+        "gt" => (">", ">"),
+        _ => (">", ">="),
+    };
+    let mut stmts = Vec::with_capacity(2);
+    let mut sides = [Vec::with_capacity(items.len()), Vec::with_capacity(items.len())];
+    for (side, (value, prefix)) in [(a, "x"), (c, "y")].into_iter().enumerate() {
+        let mut pats = Vec::with_capacity(items.len());
+        for (i, item) in items.iter().enumerate() {
+            let l = b.local(&format!("{prefix}{i}"), item.clone(), LocalKind::Pattern);
+            pats.push(HirPat::Bind(l));
+            sides[side].push(l);
+        }
+        stmts.push(b.push(HirKind::LetPat { pat: HirPat::Tuple(pats), init: value }, coil_ty::unit()));
+    }
+    let cmp = |b: &mut Synth, sym: &'static str, i: usize, swap: bool| {
+        let (l, r) = if swap { (sides[1][i], sides[0][i]) } else { (sides[0][i], sides[1][i]) };
+        let (l, r) = (b.read(l), b.read(r));
+        let op = super::build::resolve_bin(sym, Some(&items[i]), Some(&items[i]));
+        b.bin(op, l, r, boolean.clone())
+    };
+    let last = items.len() - 1;
+    let mut acc = cmp(b, op, last, false);
+    for i in (0..last).rev() {
+        let before = cmp(b, strict, i, false);
+        let le = cmp(b, "<=", i, false);
+        let ge = cmp(b, "<=", i, true);
+        let same = b.push(HirKind::Logic { and: true, lhs: le, rhs: ge }, boolean.clone());
+        let rest = b.push(HirKind::Logic { and: true, lhs: same, rhs: acc }, boolean.clone());
+        acc = b.push(HirKind::Logic { and: false, lhs: before, rhs: rest }, boolean.clone());
+    }
+    b.block(stmts, Some(acc), boolean)
+}

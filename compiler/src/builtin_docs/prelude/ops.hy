@@ -495,6 +495,10 @@ trait Eq<T> {
 /// a range bound. `#[derive(Ord)]` orders an enum or class by its fields in
 /// declaration order.
 ///
+/// A tuple whose elements are all `Ord` is `Ord` too, ordered
+/// lexicographically: the first element that differs decides
+/// (`(1, "b") < (2, "a")`).
+///
 /// # Examples
 ///
 /// ```
@@ -510,6 +514,7 @@ trait Eq<T> {
 ///     assert!(smaller(3, 2) == 2);
 ///     assert!(smaller(1.5, 2.5) == 1.5);
 ///     assert!(smaller("pear", "fig") == "fig");
+///     assert!(smaller((1, "b"), (1, "a")) == (1, "a"));
 /// }
 /// ```
 trait Ord<T: Lt + Le + Gt + Ge> {

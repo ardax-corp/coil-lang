@@ -7554,7 +7554,12 @@ impl Compiler {
     /// it has one with a one-word result.
     fn hir_instance_operator(&self, ty: &Ty, class: &'static str, method: &'static str) -> Option<HirOp> {
         let (lookup, fqn) = self.concrete_operator_target_ty(ty, class, method)?;
-        let ret = self.checker.fn_return_ty(&fqn)?;
+        // A tuple's structural order (#1721) has no source signature: a
+        // `bool`.
+        let ret = match &lookup {
+            Ty::Tuple(_) => crate::typechecking::ty::boolean(),
+            _ => self.checker.fn_return_ty(&fqn)?,
+        };
         if !matches!(
             lower::classify(&self.checker, &ret),
             Some(ValueClass::Scalar | ValueClass::Opaque | ValueClass::Object)
