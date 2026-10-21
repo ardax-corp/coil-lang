@@ -327,6 +327,34 @@ fn main() {
     );
 }
 
+/// Messages that warn a `Result` statement's value is dropped (#1752).
+fn unused_results(src: &str) -> Vec<Message> {
+    check_messages(src)
+        .into_iter()
+        .filter(|m| m.message().contains("unused `Result`"))
+        .collect()
+}
+
+// #1752: `Err("bad");` drops the `Result`; the program used to compile and
+// exit 0 with no hint that the error went nowhere.
+#[test]
+fn discarded_result_literal_warns() {
+    let msgs = unused_results(
+        r#"
+fn main() -> Result<int, string> {
+    Err("bad");
+    return Ok(0);
+}
+"#,
+    );
+    assert_eq!(
+        msgs.len(),
+        1,
+        "expected one unused-Result warning, got: {:?}",
+        msgs.iter().map(|m| m.message()).collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn removed_string_trait_points_at_show() {
     for (src, needle) in [
