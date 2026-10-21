@@ -59,7 +59,15 @@ pub fn format_range(src: &str, _range: std::ops::Range<usize>) -> Result<String,
 /// Format an AST without its source text (no comments, no blank-line
 /// preservation). Prefer [`format_source`].
 pub fn format_program(expr: &Expression<'_>) -> String {
+    format_program_noted(expr, Vec::new())
+}
+
+/// [`format_program`] with a `//` comment line before some top-level
+/// items: `notes[i]` leads item `i` of the program (`coil dissect --expand`
+/// names the macro or `comptime` block an item came from).
+pub fn format_program_noted(expr: &Expression<'_>, notes: Vec<Option<String>>) -> String {
     let mut f = Formatter::new("", Vec::new());
+    f.item_notes = notes;
     f.fmt_expression(expr);
     f.finish()
 }
@@ -80,6 +88,8 @@ struct Formatter<'s> {
     /// Scratch formatter from [`Self::measure`]: patterns measure flat, so a
     /// broken pattern does not change how the code around it is laid out.
     measuring: bool,
+    /// See [`format_program_noted`].
+    item_notes: Vec<Option<String>>,
 }
 
 impl<'s> Formatter<'s> {
@@ -94,6 +104,7 @@ impl<'s> Formatter<'s> {
             last_end: 0,
             type_ctx: false,
             measuring: false,
+            item_notes: Vec::new(),
         }
     }
 
@@ -1641,6 +1652,13 @@ impl<'s> Formatter<'s> {
                 self.fmt_use_group(&uses);
                 &items[i - 1]
             } else {
+                if let Some(Some(note)) = self.item_notes.get(i).cloned() {
+                    for line in note.lines() {
+                        self.push_str("// ");
+                        self.push_str(line);
+                        self.newline();
+                    }
+                }
                 self.fmt_expression(items[i].1.as_ref());
                 i += 1;
                 &items[i - 1]

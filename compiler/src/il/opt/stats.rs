@@ -79,6 +79,25 @@ pub struct OptStats {
     /// Bodies whose inlined HIR did not plan, by reason (kept un-inlined).
     #[serde(default)]
     pub hir_inline_refused: Vec<PassHit>,
+    /// Compile-time code (comptime step 12): macro calls and `comptime`
+    /// blocks run (compiling their programs included), and how many of them
+    /// reused an earlier result; wall time in microseconds.
+    #[serde(default)]
+    pub comptime_macro_runs: usize,
+    #[serde(default)]
+    pub comptime_macro_cached: usize,
+    #[serde(default)]
+    pub comptime_macro_us: u64,
+    /// `const`s and `comptime` expressions computed, how many came from the
+    /// result cache, pure calls tried for folding, and the wall time.
+    #[serde(default)]
+    pub comptime_consts: usize,
+    #[serde(default)]
+    pub comptime_consts_cached: usize,
+    #[serde(default)]
+    pub comptime_folds: usize,
+    #[serde(default)]
+    pub comptime_const_us: u64,
 }
 
 impl OptStats {
@@ -127,6 +146,13 @@ impl OptStats {
         for hit in &other.hir_inline_refused {
             note_reason(&mut self.hir_inline_refused, &hit.name, hit.applied);
         }
+        self.comptime_macro_runs += other.comptime_macro_runs;
+        self.comptime_macro_cached += other.comptime_macro_cached;
+        self.comptime_macro_us += other.comptime_macro_us;
+        self.comptime_consts += other.comptime_consts;
+        self.comptime_consts_cached += other.comptime_consts_cached;
+        self.comptime_folds += other.comptime_folds;
+        self.comptime_const_us += other.comptime_const_us;
         for hit in &other.passes {
             self.merge_pass(&hit.name, hit.applied, hit.ops_delta);
         }
@@ -201,6 +227,21 @@ impl OptStats {
                 let _ = writeln!(out, "    refused {}: {}", hit.name, hit.applied);
             }
         }
+        if self.comptime_macro_runs + self.comptime_consts + self.comptime_folds > 0 {
+            let ms = |us: u64| us as f64 / 1000.0;
+            let _ = writeln!(
+                out,
+                "  comptime: {:.1} ms\n    macros and blocks: {} run, {} reused, {:.1} ms\n    consts: {} computed, {} from the cache, {} pure calls tried, {:.1} ms",
+                ms(self.comptime_macro_us + self.comptime_const_us),
+                self.comptime_macro_runs,
+                self.comptime_macro_cached,
+                ms(self.comptime_macro_us),
+                self.comptime_consts,
+                self.comptime_consts_cached,
+                self.comptime_folds,
+                ms(self.comptime_const_us)
+            );
+        }
         if self.passes.is_empty() {
             let _ = writeln!(out, "  passes: (none applied)");
         } else {
@@ -232,7 +273,7 @@ impl OptStats {
             );
         }
         format!(
-            "{{\"ops_eliminated\":{},\"ops_added\":{},\"functions_inlined\":{},\"loops_unrolled\":{},\"loads_eliminated\":{},\"stores_eliminated\":{},\"branches_optimized\":{},\"blocks_reordered\":{},\"iterations\":{},\"bodies_dense\":{},\"bodies_lir\":{},\"bodies_fuse\":{},\"hir_lowered\":{},\"hir_fallback\":{},\"passes\":[{}]}}",
+            "{{\"ops_eliminated\":{},\"ops_added\":{},\"functions_inlined\":{},\"loops_unrolled\":{},\"loads_eliminated\":{},\"stores_eliminated\":{},\"branches_optimized\":{},\"blocks_reordered\":{},\"iterations\":{},\"bodies_dense\":{},\"bodies_lir\":{},\"bodies_fuse\":{},\"hir_lowered\":{},\"hir_fallback\":{},\"comptime_macro_runs\":{},\"comptime_macro_cached\":{},\"comptime_macro_us\":{},\"comptime_consts\":{},\"comptime_consts_cached\":{},\"comptime_folds\":{},\"comptime_const_us\":{},\"passes\":[{}]}}",
             self.ops_eliminated,
             self.ops_added,
             self.functions_inlined,
@@ -247,6 +288,13 @@ impl OptStats {
             self.bodies_fuse,
             self.hir_lowered,
             self.hir_fallback,
+            self.comptime_macro_runs,
+            self.comptime_macro_cached,
+            self.comptime_macro_us,
+            self.comptime_consts,
+            self.comptime_consts_cached,
+            self.comptime_folds,
+            self.comptime_const_us,
             passes
         )
     }
@@ -322,6 +370,27 @@ pub(crate) fn note_hir_inlined(sites: usize) {
 /// Count one body whose inlined HIR was refused, and why.
 pub(crate) fn note_hir_inline_refused(reason: &str) {
     with_stats(|s| note_reason(&mut s.hir_inline_refused, reason, 1));
+}
+
+/// Count one round of macro and `comptime` block runs (`reused` of
+/// `runs` from a cache) that took `us` microseconds.
+pub(crate) fn note_comptime_macros(runs: usize, reused: usize, us: u64) {
+    with_stats(|s| {
+        s.comptime_macro_runs += runs;
+        s.comptime_macro_cached += reused;
+        s.comptime_macro_us += us;
+    });
+}
+
+/// Count one const evaluation: `consts` computed (`cached` from the result
+/// cache) and `folds` pure calls tried, in `us` microseconds.
+pub(crate) fn note_comptime_consts(consts: usize, cached: usize, folds: usize, us: u64) {
+    with_stats(|s| {
+        s.comptime_consts += consts;
+        s.comptime_consts_cached += cached;
+        s.comptime_folds += folds;
+        s.comptime_const_us += us;
+    });
 }
 
 /// Record one body's final tier and refusal reasons.

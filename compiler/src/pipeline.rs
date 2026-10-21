@@ -1710,6 +1710,7 @@ impl Pipeline {
         let Some(host) = self.macro_host.clone() else {
             return;
         };
+        let started = std::time::Instant::now();
         let kinds = self.static_word_kinds();
         // Each module's grants once.
         let mut io: Vec<crate::macros::ComptimeIo> = Vec::new();
@@ -1754,7 +1755,10 @@ impl Pipeline {
                 })
             })
             .collect();
-        match host.eval_consts(&program, &evals, &folds, &limits, &io) {
+        let outcome = host.eval_consts(&program, &evals, &folds, &limits, &io);
+        let cached = evals.iter().filter(|e| e.cached.is_some()).count();
+        crate::il::opt::note_comptime_consts(evals.len(), cached, folds.len(), started.elapsed().as_micros() as u64);
+        match outcome {
             Ok(outcome) => {
                 self.store_cached_consts(&consts, &outcome.records, &cache, entry_src);
                 let folded: Vec<_> = sites
