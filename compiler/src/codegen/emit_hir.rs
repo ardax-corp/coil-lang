@@ -2220,6 +2220,12 @@ impl Compiler {
             let Some(call) = emit.plan.calls.get(&id.0) else {
                 return Err("not-planned".to_string());
             };
+            // The checker's pack recipe for a call whose result packs into
+            // a trait object is keyed on the call: the callee's result
+            // spliced in its place would not pack (#1757).
+            if self.hir_existential_pack(hir, id).is_some() {
+                return Err("existential-pack".to_string());
+            }
             let core = core_insts.get(&id.0);
             let kind = [
                 (call.builtin.is_some(), "builtin"),
