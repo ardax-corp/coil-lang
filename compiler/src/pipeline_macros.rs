@@ -982,7 +982,7 @@ impl Pipeline {
         let report = self.ast_cache.get(file).map(|c| c.report_source()).unwrap_or_default();
         let line_of = |text: &str, at: usize| text.get(..at).map_or(0, |t| t.matches('\n').count()) + 1;
         let body_line = line_of(&block.text, block.body_at);
-        let body_lines = block.text[block.body_at..].lines().count().max(1);
+        let body_lines = block.text[block.body_at..block.body_at + block.body.len()].lines().count().max(1);
         let file_line = line_of(&report, block.body.start);
         let shown = file.display().to_string();
         let entry = format!("{}:", expansion_entry_path().display());
@@ -1001,7 +1001,12 @@ impl Pipeline {
             rest = &after[digits..];
         }
         out.push_str(rest);
-        out
+        // The backtrace's wrapper frames are not the user's code.
+        out.lines()
+            .filter(|l| !l.trim_start().starts_with("in __coil_run_0 "))
+            .map(|l| l.replacen("in __coil_block at", "in the `comptime` block at", 1))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Report the errors in a `comptime` block's body where they are in its

@@ -11,7 +11,9 @@ fn records(Vec<string> names) -> Code {
     let text = "";
     for name in names {
         if name != "" {
-            text = text + "class " + name + " {\n    pub id: int,\n}\n\nimpl " + name + " {\n    pub fn name() -> string {\n        return \"" + name + "\";\n    }\n}\n\n";
+            text = text + "class " + name + " {\n    pub id: int,\n}\n\nimpl " + name +
+                   " {\n    pub fn name() -> string {\n        return \"" + name +
+                   "\";\n    }\n}\n\n";
         }
     }
     return raw(text);
