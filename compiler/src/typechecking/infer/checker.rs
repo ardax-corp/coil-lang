@@ -665,6 +665,16 @@ impl Checker {
         self.scope_bindings.insert(local, export);
     }
 
+    /// The built-in enum a `use … as` alias names (`Opt` after
+    /// `use prelude::Option as Opt;`), so the alias works as a type and
+    /// constructor head like the original name (#1700).
+    fn builtin_enum_alias(&self, name: &str) -> Option<&'static str> {
+        match self.scope_bindings.get(name)? {
+            BuiltinExport::Enum { name: builtin } if *builtin != name => Some(builtin),
+            _ => None,
+        }
+    }
+
     /// Look up a short name in the virtual-module scope.
     pub fn scope_binding(&self, name: &str) -> Option<&BuiltinExport> {
         self.scope_bindings.get(name)
@@ -11750,6 +11760,12 @@ impl Checker {
                 return alias_ty.clone();
             }
         }
+        // `Opt` after `use prelude::Option as Opt;` (#1700).
+        if let Some(builtin) = self.builtin_enum_alias(name)
+            && self.resolve_class_key(name).is_none()
+        {
+            return self.parse_type_name_str_with_range(builtin, range);
+        }
         // Built-in type names are matched case-insensitively so the
         // user can write `String`, `STRING`, etc.
         match name.to_ascii_lowercase().as_str() {
@@ -18364,7 +18380,7 @@ impl Checker {
 
     /// Map surface enum paths (`ffi::types`, short `E`) to the registry key
     /// (`module::E` after COI-110).
-    fn registry_enum_key(&self, enum_name: &str) -> String {
+    pub(crate) fn registry_enum_key(&self, enum_name: &str) -> String {
         if common::is_builtin_ffi_enum(enum_name) {
             common::BUILTIN_FFI_TYPE_ENUM.to_string()
         } else {
@@ -18996,6 +19012,11 @@ impl Checker {
         let qualified = self.qualify_module_name(name);
         if self.enum_tags.contains_key(&qualified) {
             return Some(qualified);
+        }
+        if let Some(builtin) = self.builtin_enum_alias(name)
+            && self.enum_tags.contains_key(builtin)
+        {
+            return Some(builtin.to_string());
         }
         if let Some(scheme) = self.env.lookup(name) {
             let ty = apply_ty_prune(&self.subst, &scheme.ty);
