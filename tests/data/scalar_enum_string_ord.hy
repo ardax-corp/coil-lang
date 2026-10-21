@@ -1,6 +1,7 @@
 // A `#[repr(string)]` enum orders by its backing string (byte-wise), as an
-// `int`-backed one orders by its number: with or without `#[derive(Ord)]`,
-// and not by declaration order (#1722).
+// `int`-backed one orders by its number: `#[derive(Ord)]` orders its cases
+// by their strings, not by declaration order, and with no derive a case
+// compares with a plain `string` (#1722).
 use tests::assert;
 
 #[repr(string)]
@@ -42,19 +43,14 @@ fn pick(int i) -> Fruit {
     return Fruit::Apple;
 }
 
-test("operators without a derive order by the backing string") {
-    assert!(Fruit::Fig < Fruit::Pear);
-    assert!(Fruit::Apple <= Fruit::Fig);
-    assert!(Fruit::Pear > Fruit::Apple);
-    assert!(Fruit::Pear >= Fruit::Pear);
-    assert!(!(Fruit::Pear < Fruit::Fig));
-    assert!(pick(2) < pick(1));
-    assert!(pick(0) > pick(1));
-}
-
-test("against a plain string") {
+test("without a derive, against its backing string") {
     assert!(Fruit::Fig < "g");
     assert!("a" < Fruit::Apple);
+    assert!(Fruit::Pear >= "pear");
+    assert!(Fruit::Apple <= "b");
+    assert!(!(Fruit::Pear > "q"));
+    assert!(pick(2) < "fig");
+    assert!("figs" > pick(1));
 }
 
 test("derived Ord orders by the backing string") {

@@ -493,7 +493,8 @@ trait Eq<T> {
 /// `byte` and `string` are ordered (a `string` by its UTF-8 bytes, so
 /// `"B" < "a"` and a prefix sorts first); `bool` is not. A `string` is not
 /// a range bound. `#[derive(Ord)]` orders an enum or class by its fields in
-/// declaration order.
+/// declaration order, and a scalar-backed enum (`#[repr(int)]`,
+/// `#[repr(string)]`, ..) by its backing value.
 ///
 /// # Examples
 ///
