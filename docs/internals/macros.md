@@ -110,9 +110,16 @@ resolved: a derive emits `self.x.show()` and the typechecker reports a missing
 | `TypeRef` | `str()`, `head()`, `args()` |
 | `Attr` / `AttrArg` | `name`, `args`, `has(key)`, `arg(key, fallback)` |
 | `FnDecl` | `name`, `params: Vec<Param>`, `ret`, `type_params`, `attrs`, `owner` (class of an `impl` method), `is_static`, `is_coro`, `declares_effects`, `is_pure` (`pure fn`), `effects` (the `uses {…}` names), `uses_clause()`, `requires` / `ensures` (each clause as written after its keyword), `contract_clauses()`, `body_source()` (braces included), `signature(name)`, `arg_names()`, `source` |
-| `Expr` | a `name!(…)` argument as written: `str()` (source text), `src()` (parenthesized unless a single term), `kind()` (`"literal"` / `"ident"` / `"path"` / `"call"` / `"other"`), `is_literal()`, `is_ident()` |
+| `Expr` | a `name!(…)` argument as written: `str()` (source text), `src()` (parenthesized unless a single term), `kind()` (`"literal"` / `"ident"` / `"path"` / `"call"` / `"other"`), `is_literal()`, `is_ident()`, and the constant value when the argument folds to one: `int()`, `float()` (an int is accepted too), `bool()`, `string()` (escapes decoded), each an `Option` that is `None` otherwise |
 | `Code` | generated source: `src()` |
 | helpers | `lit(string)` (string literal), `lit_int`, `raw(text)`, `ident(name)`, `join(Vec<Code>, sep)`, `concat` |
+
+`Expr` values come from `macros::encode::expr_value`: a string literal is
+decoded as written; anything else goes through `const_fold::eval_expr` with no
+bindings, so `2 * 2` is `int 4` but a variable or a call is not a constant.
+Folded string expressions (`"a" + "b"`) are not offered yet because the folder
+keeps some escapes undecoded. A float is sent as decimal digits and a power of
+ten and rebuilt exactly when the digits fit in 53 bits and the exponent in 22.
 
 Everything in the model is a class with inherent methods; there are no enum
 payloads, traits or type aliases: cross-module aliases and enum payloads of
