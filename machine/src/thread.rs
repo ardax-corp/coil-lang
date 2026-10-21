@@ -494,6 +494,7 @@ pub(crate) struct MachineHostState {
     // call, so cloning these up front (the natives and the dload gate's
     // pin tables) cost more than the call itself.
     spawn_context: unsafe fn(*mut ()) -> Option<ThreadSpawnContext>,
+    static_words: unsafe fn(*mut ()) -> Arc<Vec<u64>>,
     dload_gate: unsafe fn(*mut ()) -> *const crate::ffi::DloadGate,
     io_reactor: Option<std::sync::Arc<crate::io_reactor::IoReactor>>,
     cpu_reactor: Option<std::sync::Arc<crate::reactor::Reactor>>,
@@ -530,6 +531,7 @@ impl HostStateGuard {
                 end_shared_steal: Self::end_steal::<N>,
                 debugger_attached,
                 spawn_context: Self::spawn_context::<N>,
+                static_words: Self::static_words::<N>,
                 dload_gate: Self::dload_gate::<N>,
                 io_reactor,
                 cpu_reactor,
@@ -544,6 +546,10 @@ impl HostStateGuard {
 
     unsafe fn spawn_context<const N: usize>(raw: *mut ()) -> Option<ThreadSpawnContext> {
         unsafe { (*(raw.cast::<Machine<N>>())).thread_spawn_context() }
+    }
+
+    unsafe fn static_words<const N: usize>(raw: *mut ()) -> Arc<Vec<u64>> {
+        unsafe { (*(raw.cast::<Machine<N>>())).static_words() }
     }
 
     unsafe fn dload_gate<const N: usize>(raw: *mut ()) -> *const crate::ffi::DloadGate {
@@ -585,6 +591,11 @@ fn host_spawn_context() -> Result<ThreadSpawnContext, ThreadErrorTag> {
             .and_then(|s| unsafe { (s.spawn_context)(s.raw) })
             .ok_or(ThreadErrorTag::Other)
     })
+}
+
+/// The running VM's static words as they are now.
+fn host_static_words() -> Option<Arc<Vec<u64>>> {
+    HOST_STATE.with(|c| c.borrow().as_ref().map(|s| unsafe { (s.static_words)(s.raw) }))
 }
 
 fn host_debugger_attached() -> bool {
@@ -1387,7 +1398,9 @@ fn try_host_spawn_shared(heap: &mut Heap, args: &[Value]) -> Result<Value, Threa
     let live_threads = Arc::clone(&ctx.live_threads);
     let reactor = Arc::clone(&ctx.reactor);
     let state = Arc::new(JoinState::with_shared_epoch(Arc::clone(&epoch)));
-    let statics = Arc::clone(&ctx.statics);
+    // Opening the epoch may collect and move objects, so the statics are
+    // read again after it: `ctx`'s copy can name a moved object's old slot.
+    let statics = host_static_words().unwrap_or_else(|| Arc::clone(&ctx.statics));
     let mut job = crate::reactor::job_from_spawn_context(
         ctx,
         entry,
