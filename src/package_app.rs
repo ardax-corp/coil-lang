@@ -216,6 +216,7 @@ pub fn build_native_lock(
             size,
             requires: decl.requires.clone(),
             requires_hint: decl.requires_hint.clone(),
+            missing: false,
         });
     }
 
@@ -237,13 +238,32 @@ pub fn native_lock_from_ffi_natives(natives: &[FfiNative]) -> Result<NativeLock,
         }
         let filename = platform_shared_lib_filename(&decl.name);
         let lib_path = decl.path.join(&filename);
-        // The pin is the local file's hash, so the file must exist.
-        if !lib_path.is_file() {
-            return Err(format!(
-                "--ffi-native `{}`: expected library at `{}`",
-                decl.name,
-                lib_path.display()
-            ));
+        // The pin is the local file's hash. A file that is not there yet is
+        // listed as missing (no hash) so a downloader can fetch it; anything
+        // else at that path that is not a readable file is still an error.
+        match fs::metadata(&lib_path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                entries.push(NativeLockEntry {
+                    package: decl.package.clone(),
+                    version: decl.version.clone(),
+                    stem: decl.name.clone(),
+                    filename,
+                    sha256: String::new(),
+                    size: 0,
+                    requires: decl.requires.clone(),
+                    requires_hint: decl.requires_hint.clone(),
+                    missing: true,
+                });
+                continue;
+            }
+            Ok(meta) if meta.is_file() => {}
+            _ => {
+                return Err(format!(
+                    "--ffi-native `{}`: expected library at `{}`",
+                    decl.name,
+                    lib_path.display()
+                ));
+            }
         }
         let (sha256, size) = sha256_hex_file(&lib_path)?;
         entries.push(NativeLockEntry {
@@ -255,6 +275,7 @@ pub fn native_lock_from_ffi_natives(natives: &[FfiNative]) -> Result<NativeLock,
             size,
             requires: decl.requires.clone(),
             requires_hint: decl.requires_hint.clone(),
+            missing: false,
         });
     }
     Ok(NativeLock {
@@ -474,6 +495,47 @@ mod tests {
             load_archive_bytes(bytes.as_slice()),
             Err(LoadErr::Version(_))
         ));
+    }
+
+    /// Project-mode `coil natives dump` lists a row whose local file is not
+    /// there yet as missing instead of failing, so a downloader can fetch it;
+    /// a file that is there is still hashed (coil-lang#1657).
+    #[test]
+    fn native_lock_from_ffi_natives_lists_missing_rows() {
+        let dir = std::env::temp_dir().join(format!("coil_dump_missing_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let here = platform_shared_lib_filename("here");
+        fs::write(dir.join(&here), b"abc").unwrap();
+        let gone = platform_shared_lib_filename("gone");
+        // A directory where the library should be is still an error.
+        fs::create_dir_all(dir.join("odd").join(platform_shared_lib_filename("odd"))).unwrap();
+        let row = |name: &str, path: &Path| {
+            parse_ffi_native(&format!("name={name},version=1.0.0,path={}", path.display())).unwrap()
+        };
+        let lock = native_lock_from_ffi_natives(&[row("here", &dir), row("gone", &dir)]);
+        let odd = native_lock_from_ffi_natives(&[row("odd", &dir.join("odd"))]);
+        let _ = fs::remove_dir_all(&dir);
+
+        let lock = lock.expect("a missing local file is listed, not an error");
+        assert_eq!(lock.entries.len(), 2);
+        let (h, g) = (&lock.entries[0], &lock.entries[1]);
+        assert!(!h.missing);
+        assert_eq!(h.size, 3);
+        assert_eq!(
+            h.sha256,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert!(g.missing);
+        assert_eq!((g.filename.as_str(), g.sha256.as_str(), g.size), (gone.as_str(), "", 0));
+
+        let tsv = lock.to_tsv();
+        assert!(tsv.contains(&format!("here\t1.0.0\t{here}\t{}\t3\n", h.sha256)), "{tsv}");
+        assert!(tsv.contains(&format!("gone\t1.0.0\t{gone}\t\t\tmissing\n")), "{tsv}");
+        let back = NativeLock::from_json(&lock.to_json()).expect("json round trip");
+        assert_eq!(back, lock);
+
+        assert!(odd.is_err(), "a directory at the library path must not pass");
     }
 
     /// A `dload` path literal reduces to the stem the runtime gate uses, so
