@@ -1,5 +1,8 @@
 // Expected: E0216 — `_` is not a catch-all (`default` is).
-enum Status { Open, Closed }
+enum Status {
+    Open,
+    Closed,
+}
 
 fn main() {
     let s = Status::Open;

@@ -504,73 +504,33 @@ impl Eq for Mode {
 
 impl Lt for Mode {
     fn lt(Mode __ord_lt_a_Mode, Mode __ord_lt_b_Mode) -> bool {
-        return match __ord_lt_a_Mode {
-            Mode::Read => match __ord_lt_b_Mode {
-                Mode::Read => false,
-                Mode::Write => true,
-                default => false,
-            },
-            Mode::Write => match __ord_lt_b_Mode {
-                Mode::Read => false,
-                Mode::Write => false,
-                default => false,
-            },
-            default => false,
-        };
+        let __ord_lt_al_Mode: string = __ord_lt_a_Mode;
+        let __ord_lt_bl_Mode: string = __ord_lt_b_Mode;
+        return __ord_lt_al_Mode < __ord_lt_bl_Mode;
     }
 }
 
 impl Le for Mode {
     fn le(Mode __ord_le_a_Mode, Mode __ord_le_b_Mode) -> bool {
-        return match __ord_le_a_Mode {
-            Mode::Read => match __ord_le_b_Mode {
-                Mode::Read => true,
-                Mode::Write => true,
-                default => false,
-            },
-            Mode::Write => match __ord_le_b_Mode {
-                Mode::Read => false,
-                Mode::Write => true,
-                default => false,
-            },
-            default => false,
-        };
+        let __ord_le_al_Mode: string = __ord_le_a_Mode;
+        let __ord_le_bl_Mode: string = __ord_le_b_Mode;
+        return __ord_le_al_Mode <= __ord_le_bl_Mode;
     }
 }
 
 impl Gt for Mode {
     fn gt(Mode __ord_gt_a_Mode, Mode __ord_gt_b_Mode) -> bool {
-        return match __ord_gt_a_Mode {
-            Mode::Read => match __ord_gt_b_Mode {
-                Mode::Read => false,
-                Mode::Write => false,
-                default => false,
-            },
-            Mode::Write => match __ord_gt_b_Mode {
-                Mode::Read => true,
-                Mode::Write => false,
-                default => false,
-            },
-            default => false,
-        };
+        let __ord_gt_al_Mode: string = __ord_gt_a_Mode;
+        let __ord_gt_bl_Mode: string = __ord_gt_b_Mode;
+        return __ord_gt_al_Mode > __ord_gt_bl_Mode;
     }
 }
 
 impl Ge for Mode {
     fn ge(Mode __ord_ge_a_Mode, Mode __ord_ge_b_Mode) -> bool {
-        return match __ord_ge_a_Mode {
-            Mode::Read => match __ord_ge_b_Mode {
-                Mode::Read => true,
-                Mode::Write => false,
-                default => false,
-            },
-            Mode::Write => match __ord_ge_b_Mode {
-                Mode::Read => true,
-                Mode::Write => true,
-                default => false,
-            },
-            default => false,
-        };
+        let __ord_ge_al_Mode: string = __ord_ge_a_Mode;
+        let __ord_ge_bl_Mode: string = __ord_ge_b_Mode;
+        return __ord_ge_al_Mode >= __ord_ge_bl_Mode;
     }
 }
 

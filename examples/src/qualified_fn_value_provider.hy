@@ -19,3 +19,7 @@ static let HOOK: fn(int) -> int = twice;
 class Ops {
     pub static triple: fn(int) -> int = fn (int x) => x * 3,
 }
+
+// Not a function: tests/functions/compile_fail/call_non_function_module_const.hy
+// calls it and must be rejected (#1726).
+const LIMIT = 10;

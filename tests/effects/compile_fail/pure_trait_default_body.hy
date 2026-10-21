@@ -13,7 +13,8 @@ class C {
     pub v: int,
 }
 
-impl Count for C {}
+impl Count for C {
+}
 
 fn main() {
     count(new C(1));

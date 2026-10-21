@@ -419,6 +419,19 @@ impl<'s> Formatter<'s> {
         items: &[Output<'_>],
         single_item_trailing: bool,
     ) {
+        self.fmt_delimited_outputs_before(open, close, items, single_item_trailing, "");
+    }
+
+    /// [`Self::fmt_delimited_outputs`] for a list that `rest` follows on the
+    /// same line (a signature's `-> Ret {`): flat only when both fit.
+    fn fmt_delimited_outputs_before(
+        &mut self,
+        open: &str,
+        close: &str,
+        items: &[Output<'_>],
+        single_item_trailing: bool,
+        rest: &str,
+    ) {
         if items.is_empty() {
             self.push_str(open);
             self.push_str(close);
@@ -438,6 +451,7 @@ impl<'s> Formatter<'s> {
                 f.push_str(",");
             }
             f.push_str(close);
+            f.push_str(rest);
             f.out
         };
 
@@ -641,9 +655,14 @@ impl<'s> Formatter<'s> {
     }
 
     fn fmt_paren_arg_list(&mut self, args: &Output<'_>) {
+        self.fmt_paren_arg_list_before(args, "");
+    }
+
+    /// A parameter list that `rest` follows on the same line.
+    fn fmt_paren_arg_list_before(&mut self, args: &Output<'_>, rest: &str) {
         match args.1.as_ref() {
             Expression::Fragment(items) => {
-                self.fmt_delimited_outputs("(", ")", items, false);
+                self.fmt_delimited_outputs_before("(", ")", items, false, rest);
             }
             other => {
                 self.push_str("(");
@@ -792,7 +811,17 @@ impl<'s> Formatter<'s> {
             }
             Expression::TypeOf(inner) => {
                 self.push_str("typeof ");
-                self.fmt_output(inner);
+                // The parser hands `typeof` the whole expression after it
+                // (`typeof x == "T"` is `typeof (x == "T")`): show an operand
+                // that binds looser than a unary one in its parentheses.
+                let operand = strip_groups(inner);
+                if expr_prec(operand.1.as_ref()) < PREC_UNARY {
+                    self.push_str("(");
+                    self.fmt_output(operand);
+                    self.push_str(")");
+                } else {
+                    self.fmt_output(inner);
+                }
             }
 
             Expression::And(lhs, rhs) => self.fmt_logic_chain(expr, lhs, rhs, "&&"),
@@ -2316,15 +2345,23 @@ impl<'s> Formatter<'s> {
         self.push_str("fn ");
         self.push_str(name);
         self.fmt_type_params(type_params);
-        self.fmt_paren_arg_list(args);
-        if let Some(ret) = returns {
-            self.push_str(" -> ");
-            self.fmt_type(ret);
-        }
-        self.fmt_where(where_constraints);
-        if let Some(e) = effects.as_ref().filter(|e| !e.pure) {
-            self.push_str(&format!(" {e}"));
-        }
+        // What follows `)` on the same line: the parameters wrap when the
+        // whole `(…) -> Ret {` would not fit, so the return type stays whole.
+        let rest = {
+            let mut f = Formatter::measure(self.indent);
+            f.fmt_signature_tail(returns.as_ref(), where_constraints, effects.as_ref());
+            if contracts.is_empty() {
+                match body.as_ref().map(|b| b.1.as_ref()) {
+                    Some(Expression::Block(items)) if items.is_empty() => f.push_str(" {}"),
+                    Some(Expression::Block(_)) => f.push_str(" {"),
+                    Some(_) => {}
+                    None => f.push_str(";"),
+                }
+            }
+            f.out
+        };
+        self.fmt_paren_arg_list_before(args, &rest);
+        self.fmt_signature_tail(returns.as_ref(), where_constraints, effects.as_ref());
         self.fmt_contracts(contracts);
         match body {
             Some(b) => {
@@ -2334,6 +2371,23 @@ impl<'s> Formatter<'s> {
                 self.out.truncate(self.out.trim_end().len());
                 self.push_str(";");
             }
+        }
+    }
+
+    /// ` -> Ret where … uses …` after a signature's parameter list.
+    fn fmt_signature_tail(
+        &mut self,
+        returns: Option<&Output<'_>>,
+        where_constraints: &[WhereConstraint<'_>],
+        effects: Option<&crate::ast::EffectDecl<'_>>,
+    ) {
+        if let Some(ret) = returns {
+            self.push_str(" -> ");
+            self.fmt_type(ret);
+        }
+        self.fmt_where(where_constraints);
+        if let Some(e) = effects.filter(|e| !e.pure) {
+            self.push_str(&format!(" {e}"));
         }
     }
 
@@ -2951,6 +3005,42 @@ mod tests {
     }
 
     #[test]
+    fn typeof_shows_the_operand_it_takes() {
+        // #1760: `typeof` takes a whole expression, so `typeof(x) == "T"`
+        // is `typeof ((x) == "T")`. Printing it `typeof x == "T"` keeps that
+        // meaning but reads as a comparison; parenthesize an operand that
+        // binds looser than a unary operator.
+        let src = "\
+fn main() {
+    let x = 1;
+    let a = typeof(x) == \"int\";
+    let b = typeof x as float;
+    let c = typeof 0..3;
+    let d = (typeof x) == \"int\";
+    let e = typeof (x);
+    let f = typeof (1, 2);
+    let g = typeof -x;
+}
+";
+        let expected = "\
+fn main() {
+    let x = 1;
+    let a = typeof (x == \"int\");
+    let b = typeof (x as float);
+    let c = typeof (0..3);
+    let d = (typeof x) == \"int\";
+    let e = typeof x;
+    let f = typeof (1, 2);
+    let g = typeof -x;
+}
+";
+        let formatted = format_source(src).unwrap();
+        assert_eq!(formatted, expected);
+        round_trip(&formatted);
+        assert_eq!(format_source(&formatted).unwrap(), formatted);
+    }
+
+    #[test]
     fn format_is_idempotent() {
         let src = "fn main() { return; }\n";
         let once = format_source(src).unwrap();
@@ -3511,5 +3601,33 @@ fn main() { return; }
         let once = format_source(&src).unwrap();
         assert_eq!(shape(&once), shape(&src), "meaning changed:\n{once}");
         assert!(!once.contains("(r?)"), "{once}");
+    }
+
+    #[test]
+    fn long_signature_wraps_parameters_not_the_return_type() {
+        // #1743: `(params) -> Ret {` is measured as a whole; when it does not
+        // fit, the parameters go one per line and `-> Ret {` stays together.
+        let src = "fn lock_write_all(string path, Vec<string> packages, Vec<string> allow_include, Vec<string> scripts) -> Result<int, string> {\n    return Result::Ok(0);\n}\n\nfn lock_count_entries(string path, Vec<string> packages, Vec<string> allow_include, Vec<string> sc) {\n}\n";
+        let expected = "\
+fn lock_write_all(
+    string path,
+    Vec<string> packages,
+    Vec<string> allow_include,
+    Vec<string> scripts,
+) -> Result<int, string> {
+    return Result::Ok(0);
+}
+
+fn lock_count_entries(
+    string path,
+    Vec<string> packages,
+    Vec<string> allow_include,
+    Vec<string> sc,
+) {}
+";
+        let formatted = format_source(src).unwrap();
+        assert_eq!(formatted, expected);
+        assert!(formatted.lines().all(|l| l.len() <= MAX_WIDTH), "{formatted}");
+        assert_eq!(format_source(&formatted).unwrap(), formatted);
     }
 }

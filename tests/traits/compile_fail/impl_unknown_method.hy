@@ -1,6 +1,6 @@
 // Expected: E0119 — an impl may only define the trait's methods; `perimeter` is not one.
 trait Shape<S> {
-    fn area(S self) -> int;
+    fn area(S self) -> int {}
 }
 
 class Sq {
