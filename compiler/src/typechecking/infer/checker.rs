@@ -6672,6 +6672,10 @@ impl Checker {
         if class != "Eq" && !matches!(&pruned, Ty::Var(_)) {
             self.check_ground_ordering_operands(&pruned, class, method, &range);
         }
+        if class == "Eq" && !matches!(&pruned, Ty::Var(_)) {
+            let op = if method == "ne" { "!=" } else { "==" };
+            self.check_eq_type_param_bounds(&pruned, &pruned, op, &range, 0);
+        }
         if let Ty::Var(var) = pruned {
             if self.user_dict_index(var, class).is_none() {
                 self.bind_matching_abstract_constraints(Some(var), class);
@@ -6691,6 +6695,115 @@ impl Checker {
             }
         }
         boolean()
+    }
+
+    /// The type parameter in scope whose variable is `v` (under the
+    /// current substitution), by name.
+    fn rigid_type_param_name(&self, v: TyVarId) -> Option<String> {
+        self.type_params_in_scope.iter().rev().find_map(|frame| {
+            frame
+                .iter()
+                .find(|&(_, &p)| apply_ty_prune(&self.subst, &Ty::Var(p)) == Ty::Var(v))
+                .map(|(name, _)| name.clone())
+        })
+    }
+
+    /// Whether `ty` mentions a type parameter in scope.
+    fn mentions_rigid_type_param(&self, ty: &Ty) -> bool {
+        let mut vars = Vec::new();
+        Self::collect_ty_vars(&apply_ty_prune(&self.subst, ty), &mut vars);
+        vars.into_iter().any(|v| self.rigid_type_param_name(v).is_some())
+    }
+
+    /// `==` / `!=` on `ty` (a part of the operands' type `whole`) whose
+    /// `Eq` instance needs a type parameter's `Eq` (`Box<T>` deriving `Eq`
+    /// is `Eq for Box<T: Eq>`) is an error unless a bound gives `T` one
+    /// (`T: Eq`, or `T: Ord`, #1716). Without it a body that runs shared
+    /// (called through a function value) has no `Eq` for `T` and would
+    /// compare a class `T` by identity, while a mono clone calls its `Eq`
+    /// (#1804). A builtin aggregate (`Vec`, `Option`, `Result`, a tuple,
+    /// record or array) is checked part by part.
+    fn check_eq_type_param_bounds(&mut self, ty: &Ty, whole: &Ty, op: &str, range: &Range<usize>, depth: usize) {
+        if depth > 32 || !self.mentions_rigid_type_param(ty) {
+            return;
+        }
+        let ty = apply_ty_prune(&self.subst, ty);
+        let parts: Vec<Ty> = match &ty {
+            Ty::Var(_) | Ty::Fun(..) => return,
+            Ty::Tuple(items) => items.clone(),
+            Ty::Record { fields } => fields.iter().map(|(_, t)| t.clone()).collect(),
+            Ty::Array { element, .. } | Ty::Readonly(element) => vec![(**element).clone()],
+            Ty::App(head, args)
+                if matches!(head.as_ref(), Ty::Con(n) if n == common::BUILTIN_VEC_TYPE
+                    || n == common::BUILTIN_OPTION_ENUM
+                    || n == common::BUILTIN_RESULT_ENUM) =>
+            {
+                args.clone()
+            }
+            _ => Vec::new(),
+        };
+        if !parts.is_empty() || !matches!(&ty, Ty::App(..)) {
+            for part in &parts {
+                self.check_eq_type_param_bounds(part, whole, op, range, depth + 1);
+            }
+            return;
+        }
+        // A class or enum with no `Eq` instance compares by identity, as
+        // it does in every body.
+        let Ok(Some(instance)) = self.find_unique_instance("Eq", std::slice::from_ref(&ty), range) else {
+            return;
+        };
+        for c in &instance.context {
+            let args: Vec<Ty> = c.args.iter().map(|a| apply_ty_prune(&self.subst, a)).collect();
+            let goal = Constraint {
+                class: c.class.clone(),
+                args: args.clone(),
+            };
+            match args.as_slice() {
+                [Ty::Var(v)] => {
+                    if self.constraint_is_covered(&goal) {
+                        continue;
+                    }
+                    let Some(param) = self.rigid_type_param_name(*v) else {
+                        continue;
+                    };
+                    let shown = self.show_with_type_param_names(whole);
+                    let mut msg = Message::error(
+                        ErrorCode::GenericTypeError,
+                        format!(
+                            "`{op}` on `{shown}` needs `{}` for `{param}`, and `{param}` has no `{}` bound",
+                            c.class, c.class
+                        ),
+                        range.clone(),
+                    );
+                    msg.with_help(if c.class == "Eq" {
+                        format!("add `Eq` to `{param}`'s bound (`{param}: Eq`, or `{param}: Ord`, which implies `Eq`)")
+                    } else {
+                        format!("add `{}` to `{param}`'s bound", c.class)
+                    });
+                    self.messages.push(msg);
+                }
+                _ if goal.class == "Eq" => {
+                    for a in &args {
+                        self.check_eq_type_param_bounds(a, whole, op, range, depth + 1);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// `ty` with the type parameters in scope by name (`Box<T>`).
+    fn show_with_type_param_names(&self, ty: &Ty) -> String {
+        let mut named = Subst::empty();
+        for frame in &self.type_params_in_scope {
+            for (name, &var) in frame {
+                if let Ty::Var(rep) = apply_ty_prune(&self.subst, &Ty::Var(var)) {
+                    named.insert(rep, Ty::Con(name.clone()));
+                }
+            }
+        }
+        apply_ty(&named, &apply_ty_prune(&self.subst, ty)).to_string()
     }
 
     /// Lazy `start..end` / `start..=end`, bounds unify to `T` with `T: Ord`.
