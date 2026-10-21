@@ -18,3 +18,20 @@ fn records(Vec<string> names) -> Code {
     }
     return raw(text);
 }
+
+/// `macro NAME(Expr e) -> Code`: `e` times `n`.
+fn scale_macro(string name, int n) -> Code {
+    return raw(
+        "macro " + name + "(Expr e) -> Code {\n    return quote expr { ($" + "{e}) * " + n.show() +
+        " };\n}\n",
+    );
+}
+
+/// `derive NAME`: `T::field_count()`, the number of the type's fields.
+fn count_derive(string name) -> Code {
+    return raw(
+        "derive " + name + "(TypeDecl t) -> Code {\n    return quote items {\n        impl $" +
+        "{t.name} {\n            pub static fn field_count() -> int {\n                return $" +
+        "{lit_int(t.fields().len())};\n            }\n        }\n    };\n}\n",
+    );
+}
