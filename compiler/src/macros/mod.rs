@@ -492,7 +492,9 @@ pub fn default_host() -> Option<std::sync::Arc<dyn MacroHost>> {
 /// `write` (absolute), environment variables `env`, programs whose stem is
 /// in `exec`, TCP connections to `net` (`host` or `host:port`). The host checks each native call against it. `offline`
 /// (`--comptime-offline`) refuses the environment and programs: an
-/// evaluation runs then only when no cached result was found.
+/// evaluation runs then only when no cached result was found. `replay` is
+/// the language server's offline mode: it also refuses writes, and its
+/// refusals say to build the project.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct ComptimeIo {
     pub read: Vec<PathBuf>,
@@ -501,6 +503,7 @@ pub struct ComptimeIo {
     pub exec: Vec<String>,
     pub net: Vec<String>,
     pub offline: bool,
+    pub replay: bool,
 }
 
 /// One granted IO call of a compile-time evaluation, as the result cache
@@ -546,6 +549,11 @@ impl ComptimeIo {
 
     pub fn check_write(&self, path: &str) -> Result<(), String> {
         if under_any(&absolute_path(Path::new(path)), &self.write) {
+            if self.replay {
+                return Err(format!(
+                    "the editor does not run compile-time code that writes files (`{path}`); build the project to run it"
+                ));
+            }
             return Ok(());
         }
         Err(format!("writing `{path}` while compiling needs `--comptime-write {}`", grant_hint(path)))
@@ -578,6 +586,11 @@ impl ComptimeIo {
     fn check_online(&self, what: &str) -> Result<(), String> {
         if !self.offline {
             return Ok(());
+        }
+        if self.replay {
+            return Err(format!(
+                "the editor uses cached compile-time results only, and this one is not cached or is out of date: it {what} while compiling; build the project to record it"
+            ));
         }
         Err(format!(
             "with `--comptime-offline` there is no cached result for this, and it {what} while compiling; build once without `--comptime-offline` to record it"

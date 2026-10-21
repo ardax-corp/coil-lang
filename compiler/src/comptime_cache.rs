@@ -41,6 +41,9 @@ pub struct CacheConfig {
     pub offline: bool,
     /// Ignore cached results, compute them again and report which changed.
     pub refresh: bool,
+    /// The language server: like `offline`, and compile-time code that
+    /// writes files is refused too; a refusal says to build the project.
+    pub replay: bool,
 }
 
 impl CacheConfig {

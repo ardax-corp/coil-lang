@@ -175,7 +175,7 @@ pub mod doc_examples;
 pub mod fmt;
 
 pub use ast::item_docs;
-pub use fmt::{format_program, format_range, format_source};
+pub use fmt::{format_program, format_program_noted, format_range, format_source};
 
 #[derive(Default)]
 pub struct Pratt<'pratt> {

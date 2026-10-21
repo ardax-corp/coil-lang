@@ -131,6 +131,10 @@ fn parse_options(
     };
     let _ = cli.stdio;
     let mut grants = cli.grants.into_grants();
+    // Compile-time IO comes from the cache only: the editor recompiles on
+    // every change and must not hit the network or rewrite files then.
+    grants.comptime_cache.replay = true;
+    grants.comptime_cache.refresh = false;
     grants.ffi_search_paths = grants
         .ffi_search_paths
         .into_iter()
@@ -4774,6 +4778,15 @@ mod tests {
         assert_eq!(options.grants.allow_dload, vec!["sdl2".to_string()]);
         assert_eq!(options.grants.ffi_search_paths, vec![PathBuf::from("/work/app/native")]);
         assert_eq!(options.workspace, Some(PathBuf::from("/work/app/proj")));
+        assert!(options.grants.comptime_cache.replay, "the editor replays compile-time IO from the cache");
+    }
+
+    #[test]
+    fn comptime_refresh_is_ignored() {
+        let args = ["--comptime-refresh", "--comptime-env", "TOKEN"].map(String::from);
+        let options = parse_options(args, Path::new("/work")).unwrap().expect("not help");
+        assert!(!options.grants.comptime_cache.refresh);
+        assert!(options.grants.comptime_io_for("main").check_env("TOKEN").is_err());
     }
 
     /// Every builtin the compiler defines has hover docs in
@@ -4828,7 +4841,9 @@ mod tests {
     fn options_report_help_and_errors() {
         let cwd = Path::new("/");
         assert_eq!(parse_options(["--help".to_string()], cwd), Ok(None));
-        assert_eq!(parse_options(Vec::new(), cwd), Ok(Some(LspOptions::default())));
+        let mut defaults = LspOptions::default();
+        defaults.grants.comptime_cache.replay = true;
+        assert_eq!(parse_options(Vec::new(), cwd), Ok(Some(defaults)));
         assert!(parse_options(["--root".to_string()], cwd).is_err());
         assert!(parse_options(["--bogus".to_string()], cwd).is_err());
     }

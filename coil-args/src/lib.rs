@@ -328,6 +328,7 @@ impl HostGrantFlags {
                 dir: self.comptime_cache,
                 offline: self.comptime_offline,
                 refresh: self.comptime_refresh,
+                replay: false,
             },
         };
         if self.allow_all {
