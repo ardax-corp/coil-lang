@@ -1127,6 +1127,13 @@ struct MutCause {
     callee: Option<(usize, u32)>,
 }
 
+/// A value a call passes, the parameter it fills, and its type.
+struct Passed {
+    param: usize,
+    arg: HirId,
+    ty: Option<Ty>,
+}
+
 /// A call that passes a `readonly` value where the callee mutates it.
 #[derive(Debug, Clone)]
 struct RoHit {
@@ -1230,16 +1237,13 @@ impl Cx<'_> {
             return;
         }
         let body = &self.module.bodies[w.index];
-        let positional = args
-            .iter()
-            .all(|a| !matches!(body.expr(*a).kind, HirKind::Named { .. } | HirKind::Spread(_)));
-        if !positional {
+        let Some(passed) = self.passed_args(body, at, args) else {
             let all = args.iter().fold(0, |m, a| m | self.roots(w, *a));
             self.mutate(w, all, None, || format!("passes it to `{shown}`"));
             return;
-        }
-        for (j, &arg) in args.iter().enumerate().take(64) {
-            if mutates & (1 << j) == 0 {
+        };
+        for Passed { param: j, arg, ty } in passed {
+            if j >= 64 || mutates & (1 << j) == 0 {
                 continue;
             }
             let j = j as u32;
@@ -1251,7 +1255,7 @@ impl Cx<'_> {
                     format!("passes it to `{shown}`")
                 }
             });
-            if w.ro_hits.is_none() || !readonly_at_top(self.checker, body.expr(arg).ty.as_ref()) {
+            if w.ro_hits.is_none() || !readonly_at_top(self.checker, ty.as_ref()) {
                 continue;
             }
             let (what, mut param) = self.callee_param(callee_body, key, j);
@@ -1279,6 +1283,65 @@ impl Cx<'_> {
             if let Some(hits) = w.ro_hits.as_mut() {
                 hits.push(RoHit { span, message, help });
             }
+        }
+    }
+
+    /// Each value a call passes, with the parameter it fills: a named
+    /// argument goes to the parameter the checker matched it to, and a
+    /// spread of a tuple or a fixed array passes each item in turn (#1646).
+    /// `None` when that is not known.
+    fn passed_args(&self, body: &HirBody, at: HirId, args: &[HirId]) -> Option<Vec<Passed>> {
+        let mut flat: Vec<(HirId, Option<Ty>)> = Vec::with_capacity(args.len());
+        let mut named = false;
+        for &arg in args {
+            match &body.expr(arg).kind {
+                HirKind::Named { value, .. } => {
+                    named = true;
+                    flat.push((*value, body.expr(*value).ty.clone()));
+                }
+                HirKind::Spread(inner) => flat.extend(self.spread_items(body, *inner)?),
+                _ => flat.push((arg, body.expr(arg).ty.clone())),
+            }
+        }
+        if !named {
+            return Some(flat.into_iter().enumerate().map(|(j, (arg, ty))| Passed { param: j, arg, ty }).collect());
+        }
+        let (start, end) = body.expr(at).span;
+        let record = self.checker.named_arg_slots(start, end)?;
+        // A method call's receiver comes before the matched arguments.
+        let skip = flat.len().checked_sub(record.slots.len()).filter(|&k| k <= 1)?;
+        Some(
+            flat.into_iter()
+                .enumerate()
+                .map(|(i, (arg, ty))| {
+                    let param = if i < skip { i } else { skip + record.slots[i - skip] };
+                    Passed { param, arg, ty }
+                })
+                .collect(),
+        )
+    }
+
+    /// The items `...inner` passes, each with its type: a literal's own
+    /// items, or a tuple's or fixed array's elements (each read from
+    /// `inner`, so it reaches what `inner` does).
+    fn spread_items(&self, body: &HirBody, inner: HirId) -> Option<Vec<(HirId, Option<Ty>)>> {
+        use crate::typechecking::ty::ArrayLength;
+        let e = body.expr(inner);
+        if let HirKind::Make { kind: MakeKind::Array | MakeKind::Tuple, args: items } = &e.kind {
+            return Some(items.iter().map(|&it| (it, body.expr(it).ty.clone())).collect());
+        }
+        let ty = crate::typechecking::subst::apply_ty_prune(self.checker.subst(), e.ty.as_ref()?);
+        let (ty, ro) = match ty {
+            Ty::Readonly(t) => (*t, true),
+            t => (t, false),
+        };
+        let wrap = |t: Ty| Some(if ro && may_hold_mutable(Some(&t)) { Ty::Readonly(Box::new(t)) } else { t });
+        match ty {
+            Ty::Tuple(elems) => Some(elems.into_iter().map(|t| (inner, wrap(t))).collect()),
+            Ty::Array { element, length: ArrayLength::Static(n) } => {
+                Some((0..n).map(|_| (inner, wrap((*element).clone()))).collect())
+            }
+            _ => None,
         }
     }
 
