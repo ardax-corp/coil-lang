@@ -1,6 +1,6 @@
 // Expected: E0119 — `float` has no `Size` instance, so it does not satisfy `T: Size`.
 trait Size<T> {
-    fn size(T x) -> int;
+    fn size(T x) -> int {}
 }
 
 impl Size for int {

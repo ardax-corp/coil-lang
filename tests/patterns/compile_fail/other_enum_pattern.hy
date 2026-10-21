@@ -1,6 +1,13 @@
 // Expected: E0102 — a pattern from enum B against a scrutinee of enum A.
-enum A { X, Y }
-enum B { P, Q }
+enum A {
+    X,
+    Y,
+}
+
+enum B {
+    P,
+    Q,
+}
 
 fn f(A a) -> int {
     return match a {
