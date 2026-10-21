@@ -125,6 +125,10 @@ impl Pipeline {
         if files.is_empty() {
             return false;
         }
+        // A module with macros pending this round may generate the macro an
+        // importer needs (comptime step 10): the importer waits a round.
+        let busy: std::collections::HashSet<PathBuf> = files.iter().cloned().collect();
+        let mut deferred: Vec<(PathBuf, PendingMacro)> = Vec::new();
         let mut jobs: Vec<Job> = Vec::new();
         for file in &files {
             let module = self.namespace_for(file);
@@ -133,6 +137,10 @@ impl Pipeline {
                 .get_mut(file)
                 .map(|c| c.take_pending_macros())
                 .unwrap_or_default();
+            // Item-level uses in this file, which may declare the macro
+            // another use names: that use then gets the staging error.
+            let item_level = |p: &PendingMacro| matches!(p.position, CallPosition::Item | CallPosition::Decl);
+            let generating = pending.iter().filter(|p| item_level(p)).count();
             let mut errors = Vec::new();
             let mut file_jobs = Vec::new();
             let cached = self.ast_cache.get(file);
@@ -207,6 +215,12 @@ impl Pipeline {
                             Err(msg) => errors.push(msg),
                         }
                     }
+                    Err(None)
+                        if generating > usize::from(item_level(&p))
+                            || self.import_candidates(file, &p.name).iter().any(|c| c != file && busy.contains(c)) =>
+                    {
+                        deferred.push((file.clone(), p));
+                    }
                     Err(None) => {
                         let mut msg = crate::attrs::unresolved_macro_message(&p);
                         // A call in macro output resolves where it lands and
@@ -232,8 +246,14 @@ impl Pipeline {
             }
             jobs.extend(file_jobs);
         }
+        let waiting = !deferred.is_empty();
+        for (file, p) in deferred {
+            if let Some(cached) = self.ast_cache.get_mut(&file) {
+                cached.push_pending_macros([p]);
+            }
+        }
         if jobs.is_empty() {
-            return false;
+            return waiting;
         }
         let results = self.run_expansions(&jobs);
         // Calls in expression / statement position are replaced in one walk
@@ -412,6 +432,32 @@ impl Pipeline {
                 p.range.clone(),
             ))),
         }
+    }
+
+    /// Modules `file`'s `use` items would take a macro `name` from.
+    fn import_candidates(&self, file: &Path, name: &str) -> Vec<PathBuf> {
+        let Some(ast) = self.ast_cache.get(file).and_then(|c| c.ast()) else {
+            return Vec::new();
+        };
+        let resolve = |path: &[String], item: &str| {
+            crate::macros::embedded_use(path, item)
+                .map(|(file, _)| file)
+                .or_else(|| resolve_use_in_roots(&self.roots, &self.project_root, path, item))
+        };
+        top_level_uses(ast)
+            .into_iter()
+            .filter_map(|(path, item, alias)| {
+                if item == "*" {
+                    let mut segs = path.clone();
+                    let last = segs.pop()?;
+                    resolve(&segs, &last)
+                } else if alias.as_deref().unwrap_or(&item) == name {
+                    resolve(&path, &item)
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     /// The macro call's input: the declaration, then its attribute
@@ -1087,9 +1133,11 @@ impl Pipeline {
             origin: origin_of(job.decl.kind, &job.decl.name),
             text: snippet.clone(),
         });
-        // Built-in attributes in generated code expand as usual.
+        // Built-in attributes in generated code expand as usual; macro
+        // items it declares are this module's (comptime step 10).
         let expand = crate::attrs::expand_program_in(&mut generated, &module);
         messages.extend(expand.messages);
+        cached.push_macro_decls(expand.macro_decls);
         // Macros in the output run next round; they report at this site.
         let nested: Vec<PendingMacro> = expand
             .pending

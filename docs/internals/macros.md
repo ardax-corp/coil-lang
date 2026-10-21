@@ -175,6 +175,9 @@ discover_all → expand_user_macros → (discover newly used modules) → typech
    "Unknown attribute" / "unknown macro `name!`" (for a call in macro output
    the help names the provider to declare or import it in). A module using
    its own macro is a staging error.
+   A name that does not resolve waits a round instead when a module it would
+   be imported from still has pending macros this round, or when its own file
+   has other item-level ones: their output may declare it (below).
 3. **Encode** each call's input as one string (`macros::encode::Wire`):
    length-prefixed fields (`<len>:<bytes>`, lists as a count then their
    items) in the order the model's constructors take them, then the
@@ -207,7 +210,11 @@ discover_all → expand_user_macros → (discover newly used modules) → typech
    `0x4000_0000+` spans the `Show` defaults use. Macro uses in
    generated code (stacked attributes, derives on a generated type) run in the
    next round, up to 16 rounds. Derive outputs keep the order the derives are
-   listed in. A call's output is parsed for its position (below). A derive
+   listed in. Macro items in output at the top level (`macro`, `derive`,
+   `attr`, written by a `comptime` block or a macro) are lowered and
+   registered in the file's `macro_decls`, so other modules use them like
+   hand-written ones from the next round on; their own module may not
+   (the staging error). A call's output is parsed for its position (below). A derive
    that writes `impl Show for T` replaces the compiler's default type-name
    `Show`; an attribute macro that replaces a type drops
    the old type's defaults. A call's output replaces the call once every
