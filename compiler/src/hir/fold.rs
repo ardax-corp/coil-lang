@@ -169,7 +169,8 @@ fn is_empty_block(body: &HirBody, id: HirId) -> bool {
 
 /// Statements that do nothing go: `x = x` (an identity folded away,
 /// `t = t + 0`), and the `let` and assignments of a literal or a local read
-/// to a local nothing reads (an unrolled counter's steps, say).
+/// to a local nothing reads (an unrolled counter's steps, say). Any other
+/// assignment to such a local keeps only its value, as a statement.
 fn drop_unread(body: &mut HirBody, root: HirId, hits: &mut usize) {
     let mut places = std::collections::HashSet::new();
     let mut read = std::collections::HashSet::new();
@@ -182,6 +183,9 @@ fn drop_unread(body: &mut HirBody, root: HirId, hits: &mut usize) {
         match &body.expr(k).kind {
             HirKind::Assign { place, .. } => {
                 places.insert(*place);
+                // An assignment is `()` wherever it sits, a block's tail
+                // too: one left to a dropped `let`'s local has no slot.
+                stmts.insert(k);
             }
             HirKind::Local(l) if !places.contains(&k) => {
                 read.insert(*l);
@@ -206,13 +210,24 @@ fn drop_unread(body: &mut HirBody, root: HirId, hits: &mut usize) {
                     if common::is_builtin_option_enum(enum_name) || common::is_builtin_result_enum(enum_name))
     };
     for k in nodes.into_iter().filter(|k| stmts.contains(k)) {
+        let unread = |l: super::LocalId| !read.contains(&l) && !body.local(l).captured;
         let gone = match body.expr(k).kind {
-            HirKind::Let { local, init } => {
-                !read.contains(&local) && !body.local(local).captured && init.is_none_or(|v| pure(body, v))
-            }
+            HirKind::Let { local, init } => unread(local) && init.is_none_or(|v| pure(body, v)),
             HirKind::Assign { place, value } => match (&body.expr(place).kind, &body.expr(value).kind) {
                 (HirKind::Local(x), HirKind::Local(y)) if x == y => true,
-                (HirKind::Local(l), _) => !read.contains(l) && !body.local(*l).captured && pure(body, value),
+                (HirKind::Local(l), _) if unread(*l) => {
+                    if !pure(body, value) {
+                        // The value still runs, for its effects, but is
+                        // not stored: its `let` may be dropped, leaving the
+                        // local no slot (#1831).
+                        let e = &mut body.exprs[k.0 as usize];
+                        e.kind = HirKind::Block { stmts: vec![value], tail: None };
+                        e.node = None;
+                        *hits += 1;
+                        continue;
+                    }
+                    true
+                }
                 _ => false,
             },
             _ => false,

@@ -6,6 +6,11 @@ use crate::typechecking::infer::Checker;
 
 /// How many assignments `f` keeps after `fold`.
 fn assigns_left(src: &str) -> usize {
+    kinds_left(src, |k| matches!(k, HirKind::Assign { .. }))
+}
+
+/// How many of `f`'s nodes `keep` holds for after `fold`.
+fn kinds_left(src: &str, keep: fn(&HirKind) -> bool) -> usize {
     let owned = Box::leak(src.to_string().into_boxed_str());
     let ast = parser::Pratt::default().parse(owned).expect("parse");
     let mut checker = Checker::new();
@@ -17,7 +22,7 @@ fn assigns_left(src: &str) -> usize {
     let mut n = 0;
     let mut stack = vec![out.root.expect("root")];
     while let Some(id) = stack.pop() {
-        n += usize::from(matches!(out.expr(id).kind, HirKind::Assign { .. }));
+        n += usize::from(keep(&out.expr(id).kind));
         stack.extend(children(&out, id));
     }
     n
@@ -116,8 +121,10 @@ fn int_literals_fold_to_any_64_bit_result() {
 fn stores_to_a_local_nothing_reads_go() {
     // `j` is only ever stored; `y` is read.
     assert_eq!(assigns_left("fn f(int x) -> int { let j = 0; j = x; j = 3; let y = x; y = 4; return y; }"), 1);
-    // A store of something with an effect stays.
-    assert_eq!(assigns_left("fn g() -> int { return 1; } fn f(int x) -> int { let j = 0; j = g(); return x; }"), 1);
+    // A store of something with an effect keeps only the effect (#1831).
+    let src = "fn g() -> int { return 1; } fn f(int x) -> int { let j = 0; j = g(); return x; }";
+    assert_eq!(assigns_left(src), 0);
+    assert_eq!(kinds_left(src, |k| matches!(k, HirKind::Call { .. })), 1);
 }
 
 #[test]
