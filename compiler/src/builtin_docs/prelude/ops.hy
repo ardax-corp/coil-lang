@@ -492,8 +492,9 @@ trait Eq<T> {
 /// and `>=` on `T`, and range bounds (`a..b`) must be `Ord`. `int`, `float`,
 /// `byte` and `string` are ordered (a `string` by its UTF-8 bytes, so
 /// `"B" < "a"` and a prefix sorts first); `bool` is not. A `string` is not
-/// a range bound. `#[derive(Ord)]` orders an enum or class by its fields in
-/// declaration order.
+/// a range bound. A tuple whose elements are all `Ord` is `Ord`, ordered
+/// lexicographically (`(1, "b") < (2, "a")`). `#[derive(Ord)]` orders an
+/// enum or class by its fields in declaration order.
 ///
 /// # Examples
 ///

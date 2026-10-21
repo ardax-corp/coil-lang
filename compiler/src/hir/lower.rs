@@ -2296,8 +2296,11 @@ impl Walk<'_> {
                 // `NEQ`; the codegen plan picks (`Compiler::hir_operator`).
                 if let BinOp::Overloaded(sym) = op {
                     // `==` / `!=` on arrays compare structurally (`EQ`), as
-                    // the AST; other operators on them are element-wise.
-                    if !matches!(*sym, "==" | "!=") && (self.elementwise(*lhs) || self.elementwise(*rhs)) {
+                    // the AST; other operators on them are element-wise,
+                    // but for a tuple's lexicographic order: a call of its
+                    // `Lt` / .. instance (#1721).
+                    let ordering = matches!(*sym, "<" | ">" | "<=" | ">=") && aggregate_info(self.checker, body, id).is_none();
+                    if !matches!(*sym, "==" | "!=") && !ordering && (self.elementwise(*lhs) || self.elementwise(*rhs)) {
                         return self.aggregate_arith(id, *lhs, Some(*rhs));
                     }
                     if !matches!(*sym, "==" | "!=" | "<" | ">" | "<=" | ">=")

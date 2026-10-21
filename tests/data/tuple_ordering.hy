@@ -11,6 +11,11 @@ enum Suit {
     Hearts,
 }
 
+#[derive(Eq, Ord)]
+class P {
+    pub x: int,
+}
+
 fn smaller<T: Ord>(T a, T b) -> T {
     if a < b {
         return a;
@@ -67,4 +72,15 @@ test("sort a Vec of tuples") {
     assert!(s[1] == (1, "z"));
     assert!(s[2] == (2, "a"));
     assert!(s[3] == (2, "b"));
+}
+
+test("class items, readonly tuples and NaN") {
+    assert!((new P(1), "a") < (new P(2), "a"));
+    assert!(!((new P(2), "a") < (new P(1), "z")));
+    let t: readonly (P, int) = (new P(1), 3);
+    assert!(t < (new P(1), 4));
+    // A `NaN` item is not equal to itself: it decides `false`.
+    let nan = 0.0 / 0.0;
+    assert!(!((nan, 1) < (nan, 2)));
+    assert!((1.0, nan) < (2.0, nan));
 }

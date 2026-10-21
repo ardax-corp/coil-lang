@@ -6992,6 +6992,8 @@ impl Checker {
         if matches!(lookup, Ty::Var(_) | Ty::Never) || Self::is_numeric_operand_ty(&lookup) {
             return;
         }
+        // A tuple of `Ord` items orders lexicographically (#1721).
+        self.ensure_structural_tuple_ord(&lookup);
         if self
             .generics
             .find_instance(class, std::slice::from_ref(&lookup))
@@ -10417,6 +10419,10 @@ impl Checker {
             self.ensure_structural_length(ty);
             return;
         }
+        if matches!(class, "Ord" | "Lt" | "Le" | "Gt" | "Ge") {
+            self.ensure_structural_tuple_ord(ty);
+            return;
+        }
         if !matches!(class, "Show" | "Eq" | "Hash") {
             return;
         }
@@ -10464,6 +10470,34 @@ impl Checker {
         };
         if items_ok {
             self.generics.register_structural_instance(class, ty);
+        }
+    }
+
+    /// A ground tuple whose items are all `Ord` is `Ord` (#1721): it orders
+    /// lexicographically, so its `Lt` / `Le` / `Gt` / `Ge` instances and
+    /// the empty `Ord` are registered together, the first time a goal asks
+    /// for one, after its tuple items'.
+    fn ensure_structural_tuple_ord(&mut self, ty: &Ty) {
+        let ty = show_lookup_ty(&apply_ty_prune(&self.subst, ty));
+        let Ty::Tuple(items) = &ty else {
+            return;
+        };
+        if items.is_empty() || Self::ty_mentions_var(&ty) || self.generics.has_instance("Ord", &ty) {
+            return;
+        }
+        for item in items {
+            self.ensure_structural_tuple_ord(item);
+        }
+        let ordered = items.iter().all(|item| {
+            let lookup = Self::operand_instance_lookup_ty(&show_lookup_ty(&apply_ty_prune(&self.subst, item)));
+            Self::is_numeric_operand_ty(&lookup)
+                || self.generics.has_instance("Ord", &lookup)
+                || self.generics.find_generic_instance("Ord", std::slice::from_ref(&lookup)).is_some()
+        });
+        if ordered {
+            for class in ["Lt", "Le", "Gt", "Ge", "Ord"] {
+                self.generics.register_structural_instance(class, ty.clone());
+            }
         }
     }
 
