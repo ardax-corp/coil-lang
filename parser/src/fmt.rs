@@ -2210,27 +2210,26 @@ impl<'s> Formatter<'s> {
         // the indent gains nothing, so the call stays on the receiver's line
         // and its arguments break instead; a lone block lambda argument stays
         // on that line too: `s.spawn(fn () {` (#1774).
-        if let [ChainPart::Root(Expression::Identifier(id)), part] = parts {
-            if id.len() <= INDENT.len() {
-                self.push_str(id);
-                if let ChainPart::Field {
-                    optional,
-                    name,
-                    call_args: Some([arg]),
-                } = part
-                {
-                    if self.hugs_lambda(arg) {
-                        self.push_str(if *optional { "?." } else { "." });
-                        self.push_str(name);
-                        self.push_str("(");
-                        self.fmt_value(arg);
-                        self.push_str(")");
-                        return;
-                    }
-                }
+        if let [ChainPart::Root(Expression::Identifier(id)), part] = parts
+            && id.len() <= INDENT.len()
+        {
+            self.push_str(id);
+            if let ChainPart::Field {
+                optional,
+                name,
+                call_args: Some([arg]),
+            } = part
+                && self.hugs_lambda(arg)
+            {
+                self.push_str(if *optional { "?." } else { "." });
+                self.push_str(name);
+                self.push_str("(");
+                self.fmt_value(arg);
+                self.push_str(")");
+            } else {
                 self.emit_chain_field(part);
-                return;
             }
+            return;
         }
 
         // The parser takes a line break before `.` / `?.` after any
