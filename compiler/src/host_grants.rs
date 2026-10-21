@@ -344,6 +344,18 @@ mod tests {
     }
 
     #[test]
+    fn a_scope_covers_the_modules_under_it() {
+        let grants = ComptimeGrants {
+            env: vec![Scoped::parse("gen=TOKEN", |n| n.to_string())],
+            ..ComptimeGrants::default()
+        };
+        assert_eq!(grants.for_module("gen::schema").env, ["TOKEN"]);
+        assert_eq!(grants.for_module("gen::schema::v2").env, ["TOKEN"]);
+        assert!(grants.for_module("generate").env.is_empty(), "a name prefix is not a module prefix");
+        assert!(grants.for_module("other::gen").env.is_empty());
+    }
+
+    #[test]
     fn reads_stay_under_the_granted_directory() {
         let dir = scratch("read");
         let io = io_for(&dir.join("granted"));
