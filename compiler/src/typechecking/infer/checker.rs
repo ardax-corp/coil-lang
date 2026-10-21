@@ -4993,7 +4993,7 @@ impl Checker {
                 if !constraints.is_empty() {
                     self.discharge_constraints(id, &constraints, &range);
                 }
-                return result;
+                return self.method_result(&recv_ty, result, false);
             }
             return self.error_with_help(
                 ErrorCode::GenericTypeError,
@@ -5032,7 +5032,7 @@ impl Checker {
             }
             self.existential_method_calls_by_span
                 .insert((range.start, range.end), hint);
-            return self.apply_existential_method(
+            let result = self.apply_existential_method(
                 &owner,
                 method,
                 &scheme,
@@ -5040,6 +5040,8 @@ impl Checker {
                 args.as_deref(),
                 (id, range),
             );
+            let declared = self.trait_readonly_params(&owner, method) & 1 != 0;
+            return self.method_result(&recv_ty, result, declared);
         }
         if let Some(receiver_var) = Self::constraint_var_of_ty(&resolved) {
             let candidates = self.bound_method_candidates(method, Some(receiver_var));
@@ -5094,7 +5096,8 @@ impl Checker {
                         &range,
                     );
                 }
-                return result;
+                let declared = self.trait_readonly_params(&class, method) & 1 != 0;
+                return self.method_result(&recv_ty, result, declared);
             }
         }
         // Inherent class methods win over ground trait methods (Rust-style).
@@ -5219,7 +5222,7 @@ impl Checker {
             if !constraints.is_empty() {
                 self.discharge_constraints(id, &constraints, &range);
             }
-            return result;
+            return self.method_result(&recv_ty, result, false);
         }
 
         // Ground trait method via concrete instance; pin return from
@@ -5253,7 +5256,9 @@ impl Checker {
                     &range,
                 );
             }
-            return apply_ty_prune(&self.subst, &result);
+            let declared = self.trait_readonly_params(&class, method) & 1 != 0;
+            let result = apply_ty_prune(&self.subst, &result);
+            return self.method_result(&recv_ty, result, declared);
         }
 
         if let Some(owner) = class_owner {
@@ -19627,6 +19632,19 @@ impl Checker {
     /// per-parameter mutation summary (`hir::effects`, #1558).
     fn method_self_arg(&self, recv_ty: &Ty) -> Ty {
         strip_readonly(&apply_ty_prune(&self.subst, recv_ty)).clone()
+    }
+
+    /// What a method called on `recv_ty` returns: `readonly` too when the
+    /// receiver is, since the result may be `self` or reached from it (a
+    /// getter, `Ref::get`, `HashMap::get`), as calls derive values in
+    /// `hir::effects` (#1640). A trait method that declares `readonly A
+    /// self` is checked to hand out no mutable alias of `self`, so its
+    /// result keeps its type.
+    fn method_result(&self, recv_ty: &Ty, result: Ty, readonly_self: bool) -> Ty {
+        if readonly_self || !matches!(apply_ty_prune(&self.subst, recv_ty), Ty::Readonly(_)) {
+            return result;
+        }
+        self.readonly_view(result)
     }
 
     fn check_readonly_external_mutation(&mut self, receiver_ty: &Ty, range: Range<usize>) {
