@@ -1722,6 +1722,14 @@ pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
         return false;
     };
     let info = body.local(local);
+    let assigned: Vec<HirId> = body
+        .exprs
+        .iter()
+        .filter_map(|e| match e.kind {
+            HirKind::Assign { place, value } if body.expr(place).kind == HirKind::Local(local) => Some(value),
+            _ => None,
+        })
+        .collect();
     if !info
         .ty
         .as_ref()
@@ -1734,16 +1742,15 @@ pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
                     checker,
                     &t,
                     &mut Vec::new(),
-                    info.kind == LocalKind::Param || info.kind == LocalKind::Let && let_init_is_lambda(body, local),
+                    info.kind == LocalKind::Param || info.kind == LocalKind::Let && let_init_is_lambda(body, local) && assigned.is_empty(),
                 )
         })
     {
         return false;
     }
-    let assigned = body.exprs.iter().any(|e| {
-        matches!(&e.kind, HirKind::Assign { place, .. } if matches!(body.expr(*place).kind, HirKind::Local(l) if l == local))
-    });
-    if assigned {
+    // Each value stored into it is a closure word too (#1759): a named
+    // function, a lambda, a returned closure.
+    if !assigned.iter().all(|&value| closure_word(body, checker, value)) {
         return false;
     }
     match info.kind {
@@ -1753,19 +1760,25 @@ pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
         // would be.
         LocalKind::Param | LocalKind::Pattern | LocalKind::Capture => true,
         LocalKind::Let => body.exprs.iter().any(|e| match &e.kind {
-            // A named function read as a value is `MakeFn` (codegen refuses
-            // a generic one, whose `MakePolyFn` calls differently).
-            HirKind::Let { local: l, init: Some(init) } if *l == local => match &body.expr(*init).kind {
-                HirKind::Call { .. } => returned_closure(body, checker, *init),
-                HirKind::Global { .. } | HirKind::Lambda { .. } => true,
-                // A function field or element: the closure word stored there.
-                HirKind::Field { .. } | HirKind::Index { .. } => body.expr(*init).ty.as_ref().is_some_and(|t| {
-                    let t = apply_ty_prune(checker.subst(), t);
-                    mono_fun(checker, &t, &mut Vec::new())
-                }),
-                _ => false,
-            },
+            HirKind::Let { local: l, init: Some(init) } if *l == local => closure_word(body, checker, *init),
             _ => false,
+        }),
+        _ => false,
+    }
+}
+
+/// Whether `value`, bound to or stored into a function-typed local, is a
+/// plain closure word a call through the local can take.
+fn closure_word(body: &HirBody, checker: &Checker, value: HirId) -> bool {
+    match &body.expr(value).kind {
+        HirKind::Call { .. } => returned_closure(body, checker, value),
+        // A named function read as a value is `MakeFn` (codegen refuses a
+        // generic one, whose `MakePolyFn` calls differently).
+        HirKind::Global { .. } | HirKind::Lambda { .. } => true,
+        // A function field or element: the closure word stored there.
+        HirKind::Field { .. } | HirKind::Index { .. } => body.expr(value).ty.as_ref().is_some_and(|t| {
+            let t = apply_ty_prune(checker.subst(), t);
+            mono_fun(checker, &t, &mut Vec::new())
         }),
         _ => false,
     }
@@ -2298,8 +2311,11 @@ impl Walk<'_> {
                 // `NEQ`; the codegen plan picks (`Compiler::hir_operator`).
                 if let BinOp::Overloaded(sym) = op {
                     // `==` / `!=` on arrays compare structurally (`EQ`), as
-                    // the AST; other operators on them are element-wise.
-                    if !matches!(*sym, "==" | "!=") && (self.elementwise(*lhs) || self.elementwise(*rhs)) {
+                    // the AST; other operators on them are element-wise,
+                    // but for a tuple's lexicographic order: a call of its
+                    // `Lt` / .. instance (#1721).
+                    let ordering = matches!(*sym, "<" | ">" | "<=" | ">=") && aggregate_info(self.checker, body, id).is_none();
+                    if !matches!(*sym, "==" | "!=") && !ordering && (self.elementwise(*lhs) || self.elementwise(*rhs)) {
                         return self.aggregate_arith(id, *lhs, Some(*rhs));
                     }
                     if !matches!(*sym, "==" | "!=" | "<" | ">" | "<=" | ">=")

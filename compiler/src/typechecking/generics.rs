@@ -1141,7 +1141,8 @@ impl Generics {
 
     /// Register the structural instance of `class` for the ground tuple,
     /// record, array, `Option` or `Result` `ty` (#1451, #1479): `Show` as `%v` shows it, `Eq`
-    /// as `==` compares it, `Hash` combining its items'. The checker adds
+    /// as `==` compares it, `Hash` combining its items', and a tuple's
+    /// `Lt` / `Le` / `Gt` / `Ge` / `Ord` ordering it lexicographically (#1721). The checker adds
     /// one the first time a goal asks for it
     /// (`Checker::ensure_structural_instance`); codegen emits its thunks
     /// ([`Self::structural_instances`]).
@@ -1151,6 +1152,12 @@ impl Generics {
             "Eq" => &["eq", "ne"],
             "Hash" => &["hash"],
             "Length" => &["len"],
+            // A tuple's lexicographic order (#1721); `Ord` has no methods.
+            "Lt" => &["lt"],
+            "Le" => &["le"],
+            "Gt" => &["gt"],
+            "Ge" => &["ge"],
+            "Ord" => &[],
             _ => return,
         };
         let ty_str = ty.to_string();

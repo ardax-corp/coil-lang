@@ -72,16 +72,13 @@ test("a sleeping task's local survives a collection in its sibling") {
 test("a vector captured by a waiting task keeps its elements") {
     let r = scope(
         fn (Scope s) {
-            let t = s
-                .spawn(
-                    fn () {
-                        let v: Vec<string> = Vec::new();
-                        v.push("a");
-                        v.push("b");
-                        task::sleep(5);
-                        v[0] + v[1]
-                    },
-                );
+            let t = s.spawn(fn () {
+                let v: Vec<string> = Vec::new();
+                v.push("a");
+                v.push("b");
+                task::sleep(5);
+                v[0] + v[1]
+            });
             task::yield_now();
             collect();
             match t.join() {

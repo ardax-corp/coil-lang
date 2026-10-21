@@ -4,5 +4,4 @@ enum Status {
     Fine = 200,
 }
 
-fn main() {
-}
+fn main() {}
