@@ -38,5 +38,5 @@ fn main() {
         let _ = axpy(2.0, x, y);
         round = round + 1;
     }
-    write_all(stdout(), to_bytes(format("%i", checksum(y) as int)));
+    let _ = write_all(stdout(), to_bytes(format("%i", checksum(y) as int)));
 }

@@ -42,5 +42,5 @@ fn choose<c: * -> Constraint, T: c>(T a, T b) -> int {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", choose(7, 7))));
+    let _ = write_all(stdout(), to_bytes(format("%i", choose(7, 7))));
 }

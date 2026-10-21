@@ -9,6 +9,6 @@ const OUT = stdout();
 
 fn main() {
     const out = stdout();
-    write(OUT, to_bytes("a"));
-    write(out, to_bytes("b"));
+    let _ = write(OUT, to_bytes("a"));
+    let _ = write(out, to_bytes("b"));
 }

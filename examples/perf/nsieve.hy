@@ -28,5 +28,5 @@ fn nsieve(int n) -> int {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", nsieve(1 << 14))));
+    let _ = write_all(stdout(), to_bytes(format("%i", nsieve(1 << 14))));
 }

@@ -9,7 +9,7 @@ use io::{stdin, write};
 // nothing is written to stdin).
 fn write_bytes() {
     let data = Vec::from([1 as byte, 2 as byte]);
-    write(stdin(), data);
+    let _ = write(stdin(), data);
 }
 
 test("Vec<byte> from a string literal") {

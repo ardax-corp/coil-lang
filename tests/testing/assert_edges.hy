@@ -15,7 +15,7 @@ fn passes() -> Result<(), string> {
 }
 
 test("match on assert Ok") {
-    write_all(
+    let _ = write_all(
         stdout(),
         to_bytes(
             format(

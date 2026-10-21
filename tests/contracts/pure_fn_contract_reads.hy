@@ -17,5 +17,5 @@ fn main() {
     if !(first(v) == 7) {
         panic "assertion failed";
     }
-    write(stdout(), to_bytes("ok"));
+    let _ = write(stdout(), to_bytes("ok"));
 }

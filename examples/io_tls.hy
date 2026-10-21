@@ -23,5 +23,5 @@ use io::sync::write_all;
 use string::to_bytes;
 
 fn main() {
-    write_all(stdout(), to_bytes("use-coil-tls"));
+    let _ = write_all(stdout(), to_bytes("use-coil-tls"));
 }

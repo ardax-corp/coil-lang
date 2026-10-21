@@ -70,5 +70,5 @@ fn main() {
         outcome(fn () use (a) => skim_three(a)),
         "contract violated: ensures self.balance == old(self.balance) + amount (\"skimmed\") in Account::skim",
     );
-    write(stdout(), to_bytes("ok"));
+    let _ = write(stdout(), to_bytes("ok"));
 }

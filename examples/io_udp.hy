@@ -28,7 +28,7 @@ fn echo_once() {
 }
 
 fn main() {
-    write_all(
+    let _ = write_all(
         stdout(),
         to_bytes(
             format(

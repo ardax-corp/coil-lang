@@ -28,5 +28,5 @@ fn get<P: * -> *, Pointer, A>(P<A> ptr, A fallback) -> P::Ref<A> {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", get(Option::Some(42), 0))));
+    let _ = write_all(stdout(), to_bytes(format("%i", get(Option::Some(42), 0))));
 }

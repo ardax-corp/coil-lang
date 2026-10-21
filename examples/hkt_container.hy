@@ -24,5 +24,5 @@ fn get<F: Container, A>(F<A> xs, A fallback) -> A {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", get(Option::Some(42), 0))));
+    let _ = write_all(stdout(), to_bytes(format("%i", get(Option::Some(42), 0))));
 }

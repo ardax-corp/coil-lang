@@ -67,5 +67,5 @@ fn main() {
         settle();
         round = round + 1;
     }
-    write_all(stdout(), to_bytes(format("%i", total)));
+    let _ = write_all(stdout(), to_bytes(format("%i", total)));
 }

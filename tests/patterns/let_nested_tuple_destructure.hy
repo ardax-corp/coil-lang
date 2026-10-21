@@ -5,7 +5,7 @@ use string::{format, to_bytes};
 
 fn main() {
     let (a, (b, c)) = (1, (2, 3));
-    write(stdout(), to_bytes(format("%i", a)));
-    write(stdout(), to_bytes(format("%i", b)));
-    write(stdout(), to_bytes(format("%i", c)));
+    let _ = write(stdout(), to_bytes(format("%i", a)));
+    let _ = write(stdout(), to_bytes(format("%i", b)));
+    let _ = write(stdout(), to_bytes(format("%i", c)));
 }

@@ -18,7 +18,7 @@ fn add<T: Num>(T a, T b) -> T {
 
 fn main() {
     let s = scale((1, 2), 2);
-    write_all(stdout(), to_bytes(format("%i%i,", s[0], s[1])));
+    let _ = write_all(stdout(), to_bytes(format("%i%i,", s[0], s[1])));
     let t = add((2, 3), (3, 2));
-    write_all(stdout(), to_bytes(format("%i%i", t[0], t[1])));
+    let _ = write_all(stdout(), to_bytes(format("%i%i", t[0], t[1])));
 }

@@ -16,5 +16,5 @@ fn hot(float a, float dx, int n) -> float {
 }
 
 fn main() {
-    write(stdout(), to_bytes(format("%i", hot(1.5, 2.0 / 1000000.0, 2000000) as int)));
+    let _ = write(stdout(), to_bytes(format("%i", hot(1.5, 2.0 / 1000000.0, 2000000) as int)));
 }

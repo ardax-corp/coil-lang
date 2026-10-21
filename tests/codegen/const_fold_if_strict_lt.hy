@@ -5,8 +5,8 @@ use string::{format, to_bytes};
 
 fn main() {
     if 5 < 5 {
-        write(stdout(), to_bytes(format("%i", 1)));
+        let _ = write(stdout(), to_bytes(format("%i", 1)));
     } else {
-        write(stdout(), to_bytes(format("%i", 0)));
+        let _ = write(stdout(), to_bytes(format("%i", 0)));
     }
 }

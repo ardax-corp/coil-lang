@@ -27,5 +27,5 @@ fn show(Result<string, string> r) -> string {
 
 fn main() {
     let line = show(check(42)) + "," + show(check(1)) + "," + show(check_with_message(1));
-    write_all(stdout(), to_bytes(line));
+    let _ = write_all(stdout(), to_bytes(line));
 }

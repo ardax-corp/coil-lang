@@ -16,5 +16,5 @@ fn churn(int n) -> int {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", churn(3000000))));
+    let _ = write_all(stdout(), to_bytes(format("%i", churn(3000000))));
 }

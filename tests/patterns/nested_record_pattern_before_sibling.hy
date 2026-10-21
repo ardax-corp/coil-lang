@@ -20,5 +20,5 @@ fn both(Wrap w) -> int {
 
 fn main() {
     let w = Wrap::W { inner: Inner::I { x: 10, y: 20 }, name: 3 };
-    write(stdout(), to_bytes(format("%i", both(w))));
+    let _ = write(stdout(), to_bytes(format("%i", both(w))));
 }

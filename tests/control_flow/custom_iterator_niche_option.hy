@@ -30,6 +30,6 @@ impl Iterator for TextCounter {
 fn main() {
     let value = new TextCounter(0, 2, "x");
     for text in value {
-        write(stdout(), to_bytes(format("%s", text)));
+        let _ = write(stdout(), to_bytes(format("%s", text)));
     }
 }

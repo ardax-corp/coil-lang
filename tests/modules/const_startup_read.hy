@@ -11,5 +11,5 @@ fn forty() -> int {
 const VERSION = forty() + 2;
 
 fn main() {
-    write(stdout(), to_bytes(format("%i", VERSION)));
+    let _ = write(stdout(), to_bytes(format("%i", VERSION)));
 }

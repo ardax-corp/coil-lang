@@ -30,8 +30,8 @@ fn main() {
     // Non-zero pointer address — print low 16 bits as a smoke check
     // that we got a real address back (not -1 / null).
     if ptr == 0 {
-        write_all(stdout(), to_bytes(format("%i", 0)));
+        let _ = write_all(stdout(), to_bytes(format("%i", 0)));
     } else {
-        write_all(stdout(), to_bytes(format("%i", 1)));
+        let _ = write_all(stdout(), to_bytes(format("%i", 1)));
     }
 }

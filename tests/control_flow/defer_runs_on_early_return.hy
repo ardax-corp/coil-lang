@@ -6,7 +6,7 @@ use string::{format, to_bytes};
 
 fn f(int n) -> int {
     defer {
-        write(stdout(), to_bytes("d"));
+        let _ = write(stdout(), to_bytes("d"));
     }
     if n == 0 {
         return 1;
@@ -15,6 +15,6 @@ fn f(int n) -> int {
 }
 
 fn main() {
-    write(stdout(), to_bytes(format("%i,", f(0))));
-    write(stdout(), to_bytes(format("%i", f(9))));
+    let _ = write(stdout(), to_bytes(format("%i,", f(0))));
+    let _ = write(stdout(), to_bytes(format("%i", f(9))));
 }

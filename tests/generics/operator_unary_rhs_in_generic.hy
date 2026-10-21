@@ -39,5 +39,5 @@ fn main() {
     let q = g(new M(5), new M(1));
     let s = spread(3, 10, "d");
     let t = spread(3, 10, true);
-    write(stdout(), to_bytes(format("%i %i %i %s %s", r.c, n, q.c, s, t)));
+    let _ = write(stdout(), to_bytes(format("%i %i %i %s %s", r.c, n, q.c, s, t)));
 }

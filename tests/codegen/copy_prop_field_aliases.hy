@@ -13,5 +13,5 @@ fn sum(Point point) -> int {
 }
 
 fn main() {
-    write(stdout(), to_bytes(format("%i", sum(new Point(3, 4)))));
+    let _ = write(stdout(), to_bytes(format("%i", sum(new Point(3, 4)))));
 }

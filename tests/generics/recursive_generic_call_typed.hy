@@ -30,5 +30,5 @@ fn main() {
     let xs: Vec<int> = Vec::from([1, 2, 3]);
     let r = reversed(xs);
     let d = depth(3) ?? -1;
-    write(stdout(), to_bytes(format("%i %i %i %i\n", r[0], r[1], r[2], d)));
+    let _ = write(stdout(), to_bytes(format("%i %i %i %i\n", r[0], r[1], r[2], d)));
 }

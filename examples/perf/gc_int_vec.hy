@@ -39,5 +39,5 @@ fn main() {
         total = total + 1;
         round = round + 1;
     }
-    write_all(stdout(), to_bytes(format("%i %i", total, big.len())));
+    let _ = write_all(stdout(), to_bytes(format("%i %i", total, big.len())));
 }

@@ -15,5 +15,5 @@ fn sum_alias() -> int {
 }
 
 fn main() {
-    write(stdout(), to_bytes(format("%i", sum_alias())));
+    let _ = write(stdout(), to_bytes(format("%i", sum_alias())));
 }

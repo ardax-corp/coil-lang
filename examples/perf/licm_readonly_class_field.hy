@@ -34,5 +34,5 @@ fn main() {
         apply(new Cfg(3, r), xs, st);
         s = s + st.sum % 997;
     }
-    write_all(stdout(), to_bytes(format("%i", s)));
+    let _ = write_all(stdout(), to_bytes(format("%i", s)));
 }

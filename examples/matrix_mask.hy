@@ -21,7 +21,7 @@ fn main() {
     let f = matrix([[1.0, 2.0], [3.0, 4.0]]);
     let g = matrix([[0.0, 2.0], [9.0, 1.0]]);
     let gt = f > g;
-    write_all(
+    let _ = write_all(
         stdout(),
         to_bytes(
             format(
@@ -37,7 +37,7 @@ fn main() {
             ),
         ),
     );
-    write_all(
+    let _ = write_all(
         stdout(),
         to_bytes(
             format(
@@ -53,7 +53,7 @@ fn main() {
             ),
         ),
     );
-    write_all(
+    let _ = write_all(
         stdout(),
         to_bytes(
             format(
@@ -69,7 +69,7 @@ fn main() {
             ),
         ),
     );
-    write_all(
+    let _ = write_all(
         stdout(),
         to_bytes(
             format(
@@ -85,7 +85,7 @@ fn main() {
             ),
         ),
     );
-    write_all(
+    let _ = write_all(
         stdout(),
         to_bytes(
             format(
@@ -101,8 +101,8 @@ fn main() {
             ),
         ),
     );
-    write_all(stdout(), to_bytes(format("%i,%i,", shifted[0][0], flipped[0][0] as int)));
-    write_all(
+    let _ = write_all(stdout(), to_bytes(format("%i,%i,", shifted[0][0], flipped[0][0] as int)));
+    let _ = write_all(
         stdout(),
         to_bytes(
             format("%i%i%i%i", gt[0][0] as int, gt[0][1] as int, gt[1][0] as int, gt[1][1] as int),

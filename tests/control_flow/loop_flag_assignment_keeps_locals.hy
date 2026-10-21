@@ -13,6 +13,6 @@ fn main() {
         got = 1;
         i = i + 1;
     }
-    write(stdout(), to_bytes(format("%i", got)));
-    write(stdout(), to_bytes(format("%i", a + b + c)));
+    let _ = write(stdout(), to_bytes(format("%i", got)));
+    let _ = write(stdout(), to_bytes(format("%i", a + b + c)));
 }

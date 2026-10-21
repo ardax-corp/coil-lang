@@ -8,5 +8,5 @@ fn twice_first<T: Num>(T... xs) -> T {
 }
 
 fn main() {
-    write(stdout(), to_bytes(format("%i", twice_first(21))));
+    let _ = write(stdout(), to_bytes(format("%i", twice_first(21))));
 }

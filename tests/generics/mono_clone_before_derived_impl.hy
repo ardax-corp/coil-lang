@@ -22,5 +22,5 @@ fn main() {
     let s = spread(3, 10);
     let t = spread(5, 6);
     let v = new Ver(2);
-    write(stdout(), to_bytes(format("%s %s %s %v\n", s, t, show(v), v == new Ver(2))));
+    let _ = write(stdout(), to_bytes(format("%s %s %s %v\n", s, t, show(v), v == new Ver(2))));
 }

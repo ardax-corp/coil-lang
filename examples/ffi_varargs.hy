@@ -21,5 +21,5 @@ extern "sum" {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", sum_n(3, 10, 20, 30))));
+    let _ = write_all(stdout(), to_bytes(format("%i", sum_n(3, 10, 20, 30))));
 }

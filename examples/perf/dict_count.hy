@@ -52,5 +52,5 @@ fn main() {
         acc = acc + buckets[j];
         j = j + 1;
     }
-    write_all(stdout(), to_bytes(format("%i", sum + (acc & 65535))));
+    let _ = write_all(stdout(), to_bytes(format("%i", sum + (acc & 65535))));
 }

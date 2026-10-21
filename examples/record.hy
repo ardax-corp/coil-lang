@@ -39,10 +39,13 @@ fn y_coord(Point p) -> int {
 
 fn main() {
     // Pattern-destructured access.
-    write_all(stdout(), to_bytes(format("%i", distance_squared(Point::Point { x: 5, y: 12 }))));
+    let _ = write_all(
+        stdout(),
+        to_bytes(format("%i", distance_squared(Point::Point { x: 5, y: 12 }))),
+    );
 
     // Field access: `p.x` and `p.y` extract the
     // record fields without a match.
-    write_all(stdout(), to_bytes(format("%i", x_coord(Point::Point { x: 5, y: 12 }))));
-    write_all(stdout(), to_bytes(format("%i", y_coord(Point::Point { x: 5, y: 12 }))));
+    let _ = write_all(stdout(), to_bytes(format("%i", x_coord(Point::Point { x: 5, y: 12 }))));
+    let _ = write_all(stdout(), to_bytes(format("%i", y_coord(Point::Point { x: 5, y: 12 }))));
 }

@@ -11,5 +11,5 @@ fn main() {
     let b = to_square!(3);
     let c = sum_squares!(3, 4);
     let d = square_plus_one!(to_square!(1) + 4);
-    write(stdout(), to_bytes(format("%i %i %i %i", a, b, c, d)));
+    let _ = write(stdout(), to_bytes(format("%i %i %i %i", a, b, c, d)));
 }

@@ -7,5 +7,5 @@ fn main() {
     let rw = rwlock(10)?;
     with_write(rw, fn (int n) => (n + 1, 0))?;
     let v = with_read(rw, fn (int n) => n)?;
-    write(stdout(), to_bytes(format("%i", v)));
+    let _ = write(stdout(), to_bytes(format("%i", v)));
 }

@@ -23,5 +23,5 @@ fn nested(int n) -> int {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", nested(2000))));
+    let _ = write_all(stdout(), to_bytes(format("%i", nested(2000))));
 }

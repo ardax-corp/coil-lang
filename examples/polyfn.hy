@@ -38,13 +38,13 @@ fn capture_show<T: Describable>(T _witness) {
 
 fn main() {
     let f = id;
-    write_all(stdout(), to_bytes(format("%i", f(42))));
-    write_all(stdout(), to_bytes(format("%f", f(4.0))));
+    let _ = write_all(stdout(), to_bytes(format("%i", f(42))));
+    let _ = write_all(stdout(), to_bytes(format("%f", f(4.0))));
 
     let constrained = show;
-    write_all(stdout(), to_bytes(format("%i", constrained(41))));
-    write_all(stdout(), to_bytes(format("%i", apply_id(id, 42))));
+    let _ = write_all(stdout(), to_bytes(format("%i", constrained(41))));
+    let _ = write_all(stdout(), to_bytes(format("%i", apply_id(id, 42))));
 
     let captured = capture_show(0);
-    write_all(stdout(), to_bytes(format("%i", captured(41))));
+    let _ = write_all(stdout(), to_bytes(format("%i", captured(41))));
 }

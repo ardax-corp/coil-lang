@@ -7,8 +7,8 @@ use io::sync::write_all;
 use string::{format, to_bytes};
 
 fn greet(string name, int age) {
-    write_all(stdout(), to_bytes(format("%s", name)));
-    write_all(stdout(), to_bytes(format("%i", age)));
+    let _ = write_all(stdout(), to_bytes(format("%s", name)));
+    let _ = write_all(stdout(), to_bytes(format("%i", age)));
 }
 
 fn main() {

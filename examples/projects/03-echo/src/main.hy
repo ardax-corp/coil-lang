@@ -101,5 +101,5 @@ fn main() {
         Result::Ok(s) => s,
         Result::Err(_) => "err",
     };
-    write_all(stdout(), to_bytes(text));
+    let _ = write_all(stdout(), to_bytes(text));
 }

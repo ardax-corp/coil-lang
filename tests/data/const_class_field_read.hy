@@ -10,6 +10,6 @@ class Point {
 
 fn main() {
     let p = new Point(7, 9);
-    write(stdout(), to_bytes(format("%i", p.x)));
-    write(stdout(), to_bytes(format("%i", p.y)));
+    let _ = write(stdout(), to_bytes(format("%i", p.x)));
+    let _ = write(stdout(), to_bytes(format("%i", p.y)));
 }

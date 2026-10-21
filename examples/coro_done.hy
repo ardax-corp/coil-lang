@@ -13,10 +13,10 @@ gen fn steps() {
 
 fn main() {
     let h = steps();
-    write_all(stdout(), to_bytes(format("%z", done(h))));
+    let _ = write_all(stdout(), to_bytes(format("%z", done(h))));
     resume h;
-    write_all(stdout(), to_bytes(format("%z", done(h))));
+    let _ = write_all(stdout(), to_bytes(format("%z", done(h))));
     resume h;
     resume h; // completes
-    write_all(stdout(), to_bytes(format("%z", done(h))));
+    let _ = write_all(stdout(), to_bytes(format("%z", done(h))));
 }

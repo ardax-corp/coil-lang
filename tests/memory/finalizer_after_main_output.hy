@@ -11,7 +11,7 @@ class Noisy {
 
 impl Noisy {
     fn drop() {
-        write_all(stdout(), to_bytes("dropped"));
+        let _ = write_all(stdout(), to_bytes("dropped"));
     }
 }
 
@@ -19,5 +19,5 @@ static let kept: Option<Noisy> = Option::None;
 
 fn main() {
     kept = Option::Some(new Noisy(1));
-    write_all(stdout(), to_bytes("main;"));
+    let _ = write_all(stdout(), to_bytes("main;"));
 }

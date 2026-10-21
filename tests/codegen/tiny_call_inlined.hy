@@ -8,5 +8,5 @@ fn add(int a, int b) -> int {
 }
 
 fn main() {
-    write(stdout(), to_bytes(format("%i", add(3, 4))));
+    let _ = write(stdout(), to_bytes(format("%i", add(3, 4))));
 }

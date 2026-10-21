@@ -13,5 +13,5 @@ fn dot_ok() -> int {
 }
 
 fn main() {
-    write(stdout(), to_bytes(format("%i", dot_ok())));
+    let _ = write(stdout(), to_bytes(format("%i", dot_ok())));
 }

@@ -9,5 +9,5 @@ use string::{format, to_bytes};
 
 fn main() {
     let n = drive();
-    write_all(stdout(), to_bytes(format("%i", n)));
+    let _ = write_all(stdout(), to_bytes(format("%i", n)));
 }

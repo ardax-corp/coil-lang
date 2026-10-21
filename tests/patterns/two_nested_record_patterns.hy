@@ -20,5 +20,5 @@ fn sum(Pair p) -> int {
 
 fn main() {
     let p = Pair::P { a: Inner::I { x: 1, y: 2 }, b: Inner::I { x: 10, y: 20 } };
-    write(stdout(), to_bytes(format("%i", sum(p))));
+    let _ = write(stdout(), to_bytes(format("%i", sum(p))));
 }

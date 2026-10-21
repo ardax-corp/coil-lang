@@ -19,7 +19,7 @@ fn distance(Point p) -> int {
 
 fn main() {
     let p: Point = (3, 4);
-    write_all(stdout(), to_bytes(format("%i", p[0])));
-    write_all(stdout(), to_bytes(format("%i", p[1])));
-    write_all(stdout(), to_bytes(format("%i", distance(p))));
+    let _ = write_all(stdout(), to_bytes(format("%i", p[0])));
+    let _ = write_all(stdout(), to_bytes(format("%i", p[1])));
+    let _ = write_all(stdout(), to_bytes(format("%i", distance(p))));
 }

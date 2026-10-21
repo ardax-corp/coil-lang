@@ -45,7 +45,7 @@ fn main() {
     let b = new BoxInt(Option::Some(21));
     let leaf = new Node(3, Option::None);
     let root = new Node(1, Option::Some(leaf));
-    write(
+    let _ = write(
         stdout(),
         to_bytes(format("%i,%i,%i", nested_boxed(b), nested_shadow(b), nested_niche(root))),
     );

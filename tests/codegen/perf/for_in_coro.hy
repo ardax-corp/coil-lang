@@ -30,5 +30,5 @@ fn main() {
         total = total + coro_sum();
         round = round + 1;
     }
-    write_all(stdout(), to_bytes(format("%i", total)));
+    let _ = write_all(stdout(), to_bytes(format("%i", total)));
 }

@@ -10,5 +10,5 @@ type Pair<T> = (T, T);
 
 fn main() {
     let p: Pair<int> = (3, 4);
-    write_all(stdout(), to_bytes(format("%i", p[0] + p[1])));
+    let _ = write_all(stdout(), to_bytes(format("%i", p[0] + p[1])));
 }

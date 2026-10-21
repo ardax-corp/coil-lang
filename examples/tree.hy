@@ -20,7 +20,7 @@ fn sum_tree(Tree t) -> int {
 }
 
 fn main() {
-    write_all(
+    let _ = write_all(
         stdout(),
         to_bytes(
             format(

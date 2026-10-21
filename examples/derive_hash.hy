@@ -18,13 +18,13 @@ enum Outer {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%z,", 42.hash() == 42.hash())));
-    write_all(stdout(), to_bytes(format("%z,", "hi".hash() == "hi".hash())));
-    write_all(
+    let _ = write_all(stdout(), to_bytes(format("%z,", 42.hash() == 42.hash())));
+    let _ = write_all(stdout(), to_bytes(format("%z,", "hi".hash() == "hi".hash())));
+    let _ = write_all(
         stdout(),
         to_bytes(format("%z,", Outer::Wrap(Inner::A(1)).hash() == Outer::Wrap(Inner::A(1)).hash())),
     );
-    write_all(
+    let _ = write_all(
         stdout(),
         to_bytes(format("%z", Outer::Wrap(Inner::A(1)).hash() != Outer::Wrap(Inner::A(2)).hash())),
     );

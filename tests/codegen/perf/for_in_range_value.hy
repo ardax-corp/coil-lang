@@ -22,5 +22,5 @@ fn main() {
         total = total + range_sum(1 << 14);
         round = round + 1;
     }
-    write_all(stdout(), to_bytes(format("%i", total)));
+    let _ = write_all(stdout(), to_bytes(format("%i", total)));
 }

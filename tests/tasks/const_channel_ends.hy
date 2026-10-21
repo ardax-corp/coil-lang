@@ -12,10 +12,10 @@ fn run() -> Result<int, ThreadError> {
     const pair = ends?;
     send(pair[0], 7)?;
     const got = recv(pair[1])?;
-    write(stdout(), to_bytes(format("%i %i", got, n.unwrap_or(0))));
+    let _ = write(stdout(), to_bytes(format("%i %i", got, n.unwrap_or(0))));
     return 0;
 }
 
 fn main() {
-    run();
+    let _ = run();
 }

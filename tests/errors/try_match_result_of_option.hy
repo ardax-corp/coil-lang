@@ -29,5 +29,5 @@ fn show(Result<int, string> r) -> string {
 }
 
 fn main() {
-    write(stdout(), to_bytes(format("%s;%s;%s", show(f(0)), show(f(1)), show(f(2)))));
+    let _ = write(stdout(), to_bytes(format("%s;%s;%s", show(f(0)), show(f(1)), show(f(2)))));
 }

@@ -5,7 +5,7 @@ use string::{format, to_bytes};
 fn ok_unit() -> Result<(), string> {}
 
 fn main() {
-    write(
+    let _ = write(
         stdout(),
         to_bytes(
             format(

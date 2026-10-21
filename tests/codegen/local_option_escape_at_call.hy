@@ -11,5 +11,5 @@ fn take(Option<int> o) -> int {
 
 fn main() {
     let x = Option::Some(7);
-    write(stdout(), to_bytes(format("%i", take(x))));
+    let _ = write(stdout(), to_bytes(format("%i", take(x))));
 }

@@ -6,7 +6,7 @@ use io::sync::write_all;
 use string::{format, to_bytes};
 
 fn t(string s, int v) -> int {
-    write_all(stdout(), to_bytes(s));
+    let _ = write_all(stdout(), to_bytes(s));
     return v;
 }
 
@@ -25,16 +25,16 @@ class P {
 
 fn main() {
     let r = f(b: t("b", 2), a: t("a", 1));
-    write_all(stdout(), to_bytes(format("%i ", r)));
+    let _ = write_all(stdout(), to_bytes(format("%i ", r)));
     let p = new P(y: t("y", 2), x: t("x", 1));
-    write_all(stdout(), to_bytes(format("%i%i ", p.x, p.y)));
+    let _ = write_all(stdout(), to_bytes(format("%i%i ", p.x, p.y)));
     let s = g(t("1", 1), c: t("c", 3), b: t("b", 2));
-    write_all(stdout(), to_bytes(format("%s ", s)));
+    let _ = write_all(stdout(), to_bytes(format("%s ", s)));
     let n = 1;
     let q = f(b: n, a: t("b", 1));
-    write_all(stdout(), to_bytes(format("%i ", q)));
+    let _ = write_all(stdout(), to_bytes(format("%i ", q)));
     if nested() {
-        write_all(stdout(), to_bytes("1"));
+        let _ = write_all(stdout(), to_bytes("1"));
     }
 }
 

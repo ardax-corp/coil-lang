@@ -38,7 +38,7 @@ fn main() {
         Result::Err(_) => 2,
     };
 
-    write(
+    let _ = write(
         stdout(),
         to_bytes(
             format(

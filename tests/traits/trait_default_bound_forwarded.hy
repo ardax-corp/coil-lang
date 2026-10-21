@@ -35,5 +35,5 @@ fn main() {
     text = text + " " + 3.third("x");
     text = text + " " + new Pt(1).third(5) + " " + new Pt(1).third(6);
     text = text + " " + use_pass(new Pt(2));
-    write(stdout(), to_bytes(text));
+    let _ = write(stdout(), to_bytes(text));
 }

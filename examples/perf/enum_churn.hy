@@ -41,5 +41,5 @@ fn main() {
         t = t + area(i) + direct(i);
         i = i + 1;
     }
-    write_all(stdout(), to_bytes(format("%i", t)));
+    let _ = write_all(stdout(), to_bytes(format("%i", t)));
 }

@@ -14,5 +14,5 @@ fn main() {
     for x in 0..200000 {
         acc = acc + sq(x);
     }
-    write_all(stdout(), to_bytes(format("%i", acc)));
+    let _ = write_all(stdout(), to_bytes(format("%i", acc)));
 }

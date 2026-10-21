@@ -44,5 +44,5 @@ fn main() {
         acc = (acc + mix(i)) & 1099511627775;
         i = i + 1;
     }
-    write_all(stdout(), to_bytes(format("%i %i", check(), acc)));
+    let _ = write_all(stdout(), to_bytes(format("%i %i", check(), acc)));
 }

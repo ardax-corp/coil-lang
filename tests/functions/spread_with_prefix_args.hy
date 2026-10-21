@@ -10,5 +10,5 @@ fn add3(int a, int b, int c) -> int {
 }
 
 fn main() {
-    write(stdout(), to_bytes(format("%i", add3(1, ...(2, 3)))));
+    let _ = write(stdout(), to_bytes(format("%i", add3(1, ...(2, 3)))));
 }

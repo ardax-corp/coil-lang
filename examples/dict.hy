@@ -12,7 +12,7 @@ use string::{format, to_bytes};
 
 fn main() {
     let d = { foo: 42, bar: 100 };
-    write_all(stdout(), to_bytes(format("%i", d.foo)));
-    write_all(stdout(), to_bytes(format("%i", d.bar)));
-    write_all(stdout(), to_bytes(format("%i", d.foo)));
+    let _ = write_all(stdout(), to_bytes(format("%i", d.foo)));
+    let _ = write_all(stdout(), to_bytes(format("%i", d.bar)));
+    let _ = write_all(stdout(), to_bytes(format("%i", d.foo)));
 }

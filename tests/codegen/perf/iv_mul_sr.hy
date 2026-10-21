@@ -18,5 +18,5 @@ fn iv_mul(int n, int c) -> int {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", iv_mul(3000000, 7))));
+    let _ = write_all(stdout(), to_bytes(format("%i", iv_mul(3000000, 7))));
 }

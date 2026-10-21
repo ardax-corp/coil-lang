@@ -31,5 +31,5 @@ fn wrapped_let<T>(T s, int b) -> string where Wrap<T, string> {
 
 fn main() {
     let out = wrapped(5, 2) + "|" + wrapped_method(4, 5) + "|" + wrapped_let(10, 2);
-    write(stdout(), to_bytes(out));
+    let _ = write(stdout(), to_bytes(out));
 }

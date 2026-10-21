@@ -36,5 +36,5 @@ fn mandelbrot_iter(int size, int max_iter) -> int {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", mandelbrot_iter(160, 50))));
+    let _ = write_all(stdout(), to_bytes(format("%i", mandelbrot_iter(160, 50))));
 }

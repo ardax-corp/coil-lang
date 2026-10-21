@@ -22,12 +22,12 @@ gen fn early() {
 
 fn main() {
     for x in counter() {
-        write_all(stdout(), to_bytes(format("%i", x)));
+        let _ = write_all(stdout(), to_bytes(format("%i", x)));
     }
     for y in early() {
         if y == 20 {
             break;
         }
-        write_all(stdout(), to_bytes(format("%i", y)));
+        let _ = write_all(stdout(), to_bytes(format("%i", y)));
     }
 }

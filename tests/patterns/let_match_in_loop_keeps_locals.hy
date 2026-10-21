@@ -14,5 +14,5 @@ fn main() {
         acc = acc + v;
         i = i + 1;
     }
-    write(stdout(), to_bytes(format("%i,%i", acc, i)));
+    let _ = write(stdout(), to_bytes(format("%i,%i", acc, i)));
 }

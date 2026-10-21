@@ -18,5 +18,5 @@ fn main() {
     join(t1)?;
     join(t2)?;
     let n = with_lock(m, fn (int x) => (x, x))?;
-    write_all(stdout(), to_bytes(format("%i", n)));
+    let _ = write_all(stdout(), to_bytes(format("%i", n)));
 }

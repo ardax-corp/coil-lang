@@ -12,6 +12,6 @@ use io::sync::write_all;
 use string::{format, to_bytes};
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", add(5, 7))));
-    write_all(stdout(), to_bytes(format("%i", mul(6, 7))));
+    let _ = write_all(stdout(), to_bytes(format("%i", add(5, 7))));
+    let _ = write_all(stdout(), to_bytes(format("%i", mul(6, 7))));
 }

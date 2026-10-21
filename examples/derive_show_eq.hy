@@ -24,18 +24,18 @@ class Cell {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%v,", Color::Red)));
-    write_all(stdout(), to_bytes(format("%z,", Color::Red == Color::Red)));
-    write_all(stdout(), to_bytes(format("%z,", Color::Red == Color::Blue)));
-    write_all(stdout(), to_bytes(format("%z,", Color::Red < Color::Blue)));
+    let _ = write_all(stdout(), to_bytes(format("%v,", Color::Red)));
+    let _ = write_all(stdout(), to_bytes(format("%z,", Color::Red == Color::Red)));
+    let _ = write_all(stdout(), to_bytes(format("%z,", Color::Red == Color::Blue)));
+    let _ = write_all(stdout(), to_bytes(format("%z,", Color::Red < Color::Blue)));
 
     let p = Point::Point { x: 5, y: 12 };
-    write_all(stdout(), to_bytes(format("%v,", p)));
-    write_all(stdout(), to_bytes(format("%z,", p == Point::Point { x: 5, y: 12 })));
-    write_all(stdout(), to_bytes(format("%z,", p == Point::Origin)));
+    let _ = write_all(stdout(), to_bytes(format("%v,", p)));
+    let _ = write_all(stdout(), to_bytes(format("%z,", p == Point::Point { x: 5, y: 12 })));
+    let _ = write_all(stdout(), to_bytes(format("%z,", p == Point::Origin)));
 
     let c = new Cell(42);
-    write_all(stdout(), to_bytes(format("%v,", c)));
-    write_all(stdout(), to_bytes(format("%z,", c == new Cell(42))));
-    write_all(stdout(), to_bytes(format("%z", c == new Cell(7))));
+    let _ = write_all(stdout(), to_bytes(format("%v,", c)));
+    let _ = write_all(stdout(), to_bytes(format("%z,", c == new Cell(42))));
+    let _ = write_all(stdout(), to_bytes(format("%z", c == new Cell(7))));
 }

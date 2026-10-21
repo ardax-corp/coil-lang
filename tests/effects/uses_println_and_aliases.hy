@@ -10,16 +10,16 @@ use io::sync::write_all;
 use string::to_bytes as tb;
 
 fn greet() uses {write, suspend} {
-    println("");
+    let _ = println("");
 }
 
 fn greet_parts() uses {write, suspend} {
-    print("");
-    eprintln("");
+    let _ = print("");
+    let _ = eprintln("");
 }
 
 fn emit_aliased(string s) uses {write, suspend} {
-    write_all(stdout(), tb(s));
+    let _ = write_all(stdout(), tb(s));
 }
 
 fn byte_len(string s) -> int uses {} {

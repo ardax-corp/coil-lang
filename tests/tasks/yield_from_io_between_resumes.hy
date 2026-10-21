@@ -17,9 +17,9 @@ gen fn wrap() {
 fn main() {
     let h = wrap();
     let v0 = resume h;
-    write_all(stdout(), to_bytes(format("%i", v0)));
+    let _ = write_all(stdout(), to_bytes(format("%i", v0)));
     let v1 = resume h;
-    write_all(stdout(), to_bytes(format("%i", v1)));
+    let _ = write_all(stdout(), to_bytes(format("%i", v1)));
     let v2 = resume h;
-    write_all(stdout(), to_bytes(format("%i", v2)));
+    let _ = write_all(stdout(), to_bytes(format("%i", v2)));
 }

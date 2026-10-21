@@ -41,5 +41,5 @@ fn main() {
         total = total + sum(50000, 3 + r).value;
         r = r + 1;
     }
-    write_all(stdout(), to_bytes(format("%i", total)));
+    let _ = write_all(stdout(), to_bytes(format("%i", total)));
 }

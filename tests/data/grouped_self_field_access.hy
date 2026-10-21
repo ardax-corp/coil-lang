@@ -18,5 +18,5 @@ fn main() {
     let pair = channel()?;
     let w = new Worker(pair[0]);
     w.push("hi")?;
-    write(stdout(), to_bytes(format("%s", recv(pair[1])?)));
+    let _ = write(stdout(), to_bytes(format("%s", recv(pair[1])?)));
 }

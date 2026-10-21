@@ -33,7 +33,7 @@ fn fill(Vec<int> xs, int n) uses {mutate} {
 }
 
 fn emit(string s) uses {write, suspend} {
-    write_all(stdout(), to_bytes(s));
+    let _ = write_all(stdout(), to_bytes(s));
 }
 
 fn has_path() -> bool uses {env} {

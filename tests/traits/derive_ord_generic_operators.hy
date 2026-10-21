@@ -15,5 +15,5 @@ fn main() {
     let b = new Box(3) < new Box(2);
     let c = new Box(new Box(5)) >= new Box(new Box(4));
     let d = new Box(1.5) <= new Box(2.5);
-    write(stdout(), to_bytes(format("%v %v %v %v\n", a, b, c, d)));
+    let _ = write(stdout(), to_bytes(format("%v %v %v %v\n", a, b, c, d)));
 }

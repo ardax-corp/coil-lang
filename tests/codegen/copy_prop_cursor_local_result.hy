@@ -11,5 +11,5 @@ fn read_back(int x) -> int {
 }
 
 fn main() {
-    write(stdout(), to_bytes(format("%i", read_back(1))));
+    let _ = write(stdout(), to_bytes(format("%i", read_back(1))));
 }

@@ -16,5 +16,5 @@ fn main() {
         Option::Some(_) => "some",
         Option::None => "none",
     };
-    write(stdout(), to_bytes(out));
+    let _ = write(stdout(), to_bytes(out));
 }

@@ -10,6 +10,6 @@ fn unwrap(Option o) -> int {
 }
 
 fn main() {
-    write(stdout(), to_bytes(format("%i,", unwrap(Option::Some(42)))));
-    write(stdout(), to_bytes(format("%i", unwrap(Option::None))));
+    let _ = write(stdout(), to_bytes(format("%i,", unwrap(Option::Some(42)))));
+    let _ = write(stdout(), to_bytes(format("%i", unwrap(Option::None))));
 }

@@ -15,5 +15,5 @@ fn sum(Vec<int> arr) -> int {
 
 fn main() {
     let v: Vec<int> = Vec::from([1, 2, 3, 4]);
-    write_all(stdout(), to_bytes(format("%i", sum(v))));
+    let _ = write_all(stdout(), to_bytes(format("%i", sum(v))));
 }

@@ -23,6 +23,6 @@ impl Counter {
 
 fn main() {
     let c = new Counter(10);
-    write_all(stdout(), to_bytes(format("%i", c.bump())));
-    write_all(stdout(), to_bytes(format("%i", c.bump(5))));
+    let _ = write_all(stdout(), to_bytes(format("%i", c.bump())));
+    let _ = write_all(stdout(), to_bytes(format("%i", c.bump(5))));
 }

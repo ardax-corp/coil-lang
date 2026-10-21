@@ -8,6 +8,6 @@ fn f(int a, int... xs) -> int {
 }
 
 fn main() {
-    write(stdout(), to_bytes(format("%i", f(a: 10, 1, 2, 3))));
-    write(stdout(), to_bytes(format("%i", f(a: 7))));
+    let _ = write(stdout(), to_bytes(format("%i", f(a: 10, 1, 2, 3))));
+    let _ = write(stdout(), to_bytes(format("%i", f(a: 7))));
 }

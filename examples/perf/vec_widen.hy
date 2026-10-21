@@ -42,5 +42,5 @@ fn main() {
         i = i + 1;
     }
     let total = sum_i(1024) + sum_from(v, 8) + sum_next(v);
-    write_all(stdout(), to_bytes(format("%i", total)));
+    let _ = write_all(stdout(), to_bytes(format("%i", total)));
 }

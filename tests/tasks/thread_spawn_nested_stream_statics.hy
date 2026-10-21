@@ -66,16 +66,16 @@ fn run(() -> int f) -> int {
 
 fn main() {
     if run(tuple_stream) < 0 {
-        write(stdout(), to_bytes("tuple FAILED\n"));
+        let _ = write(stdout(), to_bytes("tuple FAILED\n"));
     }
     if run(class_stream) < 0 {
-        write(stdout(), to_bytes("class FAILED\n"));
+        let _ = write(stdout(), to_bytes("class FAILED\n"));
     }
     if run(array_stream) < 0 {
-        write(stdout(), to_bytes("array FAILED\n"));
+        let _ = write(stdout(), to_bytes("array FAILED\n"));
     }
     if run(enum_stream) < 0 {
-        write(stdout(), to_bytes("enum FAILED\n"));
+        let _ = write(stdout(), to_bytes("enum FAILED\n"));
     }
-    write(stdout(), to_bytes("back in main\n"));
+    let _ = write(stdout(), to_bytes("back in main\n"));
 }

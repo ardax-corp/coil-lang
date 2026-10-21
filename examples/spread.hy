@@ -15,6 +15,6 @@ fn triple_sum(int a, int b, int c) -> int {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", pair_sum(...(1, 2)))));
-    write_all(stdout(), to_bytes(format("%i", triple_sum(...[10, 20, 30]))));
+    let _ = write_all(stdout(), to_bytes(format("%i", pair_sum(...(1, 2)))));
+    let _ = write_all(stdout(), to_bytes(format("%i", triple_sum(...[10, 20, 30]))));
 }

@@ -9,5 +9,5 @@ use io::sync::write_all;
 use string::{format, to_bytes};
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", 42)));
+    let _ = write_all(stdout(), to_bytes(format("%i", 42)));
 }

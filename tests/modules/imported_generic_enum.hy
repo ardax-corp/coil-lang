@@ -10,5 +10,5 @@ fn main() {
         Slot::Full(v) => v,
         Slot::Free => 0,
     };
-    write(stdout(), to_bytes(format("%v %i", leaf(3), n)));
+    let _ = write(stdout(), to_bytes(format("%v %i", leaf(3), n)));
 }

@@ -26,5 +26,5 @@ fn hot(int n, int iters) -> int {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", hot(7, 20000000))));
+    let _ = write_all(stdout(), to_bytes(format("%i", hot(7, 20000000))));
 }

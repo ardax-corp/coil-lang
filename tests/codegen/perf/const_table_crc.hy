@@ -67,5 +67,5 @@ fn main() {
         }
         s = (s + crc32(data)) % 1000000007;
     }
-    write_all(stdout(), to_bytes(format("%i", s)));
+    let _ = write_all(stdout(), to_bytes(format("%i", s)));
 }

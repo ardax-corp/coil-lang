@@ -19,6 +19,6 @@ fn main() {
     let replies = channel()?;
     let t = spawn(worker, (jobs[1], replies[0]))?;
     send(jobs[0], "ping")?;
-    write_all(stdout(), to_bytes(format("%s", recv(replies[1])?)));
+    let _ = write_all(stdout(), to_bytes(format("%s", recv(replies[1])?)));
     join(t)?;
 }
