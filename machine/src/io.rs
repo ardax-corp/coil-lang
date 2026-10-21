@@ -287,6 +287,74 @@ pub fn stream_stderr(heap: &mut Heap) -> Result<Value, IoErrorTag> {
     alloc_stream(heap, handle, StreamKind::Stderr).map_err(|e| IoErrorTag::from_kind(e.kind()))
 }
 
+/// A standard stream a `thread::spawn` worker read from a static of its
+/// spawner, as the worker sees it ([`crate::thread::StaticSlot::StdStream`]):
+/// its own handle to the same process stream, closed if the spawner's was
+/// (#1684).
+pub(crate) fn stream_std_reopen(
+    heap: &mut Heap,
+    std: &crate::thread::StdStreamCopy,
+) -> Result<Value, IoErrorTag> {
+    if std.closed {
+        let (obj, _) = heap.alloc(
+            ObjStream {
+                handle: None,
+                kind: std.kind,
+                closed: true,
+                read_timeout: None,
+                write_timeout: None,
+                attached: None,
+            },
+            Object::Stream,
+        );
+        return Ok(Value::from(obj.addr()));
+    }
+    let stream = match std.kind {
+        StreamKind::Stdin => stream_stdin(heap)?,
+        StreamKind::Stdout => stream_stdout(heap)?,
+        StreamKind::Stderr => stream_stderr(heap)?,
+        _ => return Err(IoErrorTag::InvalidInput),
+    };
+    with_stream_mut(heap, stream, |s| {
+        s.read_timeout = std.read_timeout;
+        s.write_timeout = std.write_timeout;
+    })?;
+    Ok(stream)
+}
+
+/// A file or socket stream a `thread::spawn` worker read from a static of
+/// its spawner: a placeholder whose use panics ([`StreamKind::Unsent`]).
+pub(crate) fn alloc_unsent_stream(heap: &mut Heap) -> Value {
+    let (obj, _) = heap.alloc(
+        ObjStream {
+            handle: None,
+            kind: StreamKind::Unsent,
+            closed: false,
+            read_timeout: None,
+            write_timeout: None,
+            attached: None,
+        },
+        Object::Stream,
+    );
+    Value::from(obj.addr())
+}
+
+/// Whether `v` is an [`alloc_unsent_stream`] placeholder.
+pub(crate) fn is_unsent_stream(heap: &Heap, v: Value) -> bool {
+    let v = peel_one_boxed(heap, v);
+    matches!(
+        heap.find_object_by_addr(v.raw() as u64),
+        Some(Object::Stream(gc)) if gc.as_ref().kind == StreamKind::Unsent
+    )
+}
+
+/// The panic for using an [`alloc_unsent_stream`] placeholder.
+pub(crate) const UNSENT_STREAM_PANIC: &str = "this Stream is a static of the thread that \
+spawned this worker, and a file or socket stream cannot cross threads: only \
+stdin(), stdout() and stderr() can be used from a static in a thread::spawn \
+worker; open the stream in the worker, or send the data to the thread that \
+owns it over a channel";
+
 pub fn stream_open(heap: &mut Heap, path: &str, mode: &str) -> Result<Value, IoErrorTag> {
     let handle =
         NativeHandle::open_file(path, mode).map_err(|e| IoErrorTag::from_kind(e.kind()))?;

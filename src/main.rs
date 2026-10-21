@@ -407,7 +407,15 @@ fn cmd_natives_dump(pipeline: &mut Pipeline, exe: Option<&str>, natives: &[FfiNa
         }
     } else {
         match native_lock_from_ffi_natives(natives) {
-            Ok(lock) => lock,
+            Ok(lock) => {
+                for e in lock.entries.iter().filter(|e| e.missing) {
+                    eprintln!(
+                        "note: --ffi-native `{}`: `{}` is not present locally; listed as missing (no sha256)",
+                        e.stem, e.filename
+                    );
+                }
+                lock
+            }
             Err(e) => fail_and_exit(pipeline, ErrorCode::IoError, e),
         }
     };

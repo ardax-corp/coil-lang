@@ -7,7 +7,8 @@ use std::process::exit;
 
 use coil_cli::resolve_default_runner;
 use common::{
-    append_package_payload_with_natives, bytecode_uses_ffi, ffi_library_names_from_bytecode,
+    append_package_payload_with_natives, bytecode_uses_ffi, dload_request_stem,
+    ffi_library_names_from_bytecode,
     is_packaged_executable, is_system_ffi_stem, ArchivedArchivedProgram, ArchivedProgram, Byte,
     NativeLock, NativeLockEntry, ARCHIVE_VERSION, PACKAGE_FLAG_USES_FFI,
 };
@@ -170,16 +171,30 @@ pub fn build_native_lock(
     bytecode: &[Byte],
     strings: &[String],
 ) -> Result<NativeLock, String> {
-    let stems = ffi_library_names_from_bytecode(bytecode, strings);
+    // Reduce each literal to the stem the runtime dload gate uses
+    // (`./native/libtls.so` → `tls`), so one `--ffi-native name=tls` row covers
+    // every spelling of that library.
+    let mut stems: Vec<(String, String)> = Vec::new();
+    for literal in ffi_library_names_from_bytecode(bytecode, strings) {
+        let stem = dload_request_stem(&literal);
+        if !stems.iter().any(|(s, _)| *s == stem) {
+            stems.push((stem, literal));
+        }
+    }
     let mut entries = Vec::new();
 
-    for stem in &stems {
+    for (stem, literal) in &stems {
         if is_system_ffi_stem(stem) {
             continue;
         }
         let decl = natives.iter().find(|n| n.name == *stem).ok_or_else(|| {
+            let loaded = if literal == stem {
+                format!("`{stem}`")
+            } else {
+                format!("`{literal}` (stem `{stem}`)")
+            };
             format!(
-                "FFI library `{stem}` is loaded but has no `--ffi-native name={stem},…`; \
+                "FFI library {loaded} is loaded but has no `--ffi-native name={stem},…`; \
                      pass one with name/version/path (system libs like `c` need no entry)"
             )
         })?;
@@ -201,6 +216,7 @@ pub fn build_native_lock(
             size,
             requires: decl.requires.clone(),
             requires_hint: decl.requires_hint.clone(),
+            missing: false,
         });
     }
 
@@ -222,13 +238,32 @@ pub fn native_lock_from_ffi_natives(natives: &[FfiNative]) -> Result<NativeLock,
         }
         let filename = platform_shared_lib_filename(&decl.name);
         let lib_path = decl.path.join(&filename);
-        // The pin is the local file's hash, so the file must exist.
-        if !lib_path.is_file() {
-            return Err(format!(
-                "--ffi-native `{}`: expected library at `{}`",
-                decl.name,
-                lib_path.display()
-            ));
+        // The pin is the local file's hash. A file that is not there yet is
+        // listed as missing (no hash) so a downloader can fetch it; anything
+        // else at that path that is not a readable file is still an error.
+        match fs::metadata(&lib_path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                entries.push(NativeLockEntry {
+                    package: decl.package.clone(),
+                    version: decl.version.clone(),
+                    stem: decl.name.clone(),
+                    filename,
+                    sha256: String::new(),
+                    size: 0,
+                    requires: decl.requires.clone(),
+                    requires_hint: decl.requires_hint.clone(),
+                    missing: true,
+                });
+                continue;
+            }
+            Ok(meta) if meta.is_file() => {}
+            _ => {
+                return Err(format!(
+                    "--ffi-native `{}`: expected library at `{}`",
+                    decl.name,
+                    lib_path.display()
+                ));
+            }
         }
         let (sha256, size) = sha256_hex_file(&lib_path)?;
         entries.push(NativeLockEntry {
@@ -240,6 +275,7 @@ pub fn native_lock_from_ffi_natives(natives: &[FfiNative]) -> Result<NativeLock,
             size,
             requires: decl.requires.clone(),
             requires_hint: decl.requires_hint.clone(),
+            missing: false,
         });
     }
     Ok(NativeLock {
@@ -459,6 +495,76 @@ mod tests {
             load_archive_bytes(bytes.as_slice()),
             Err(LoadErr::Version(_))
         ));
+    }
+
+    /// Project-mode `coil natives dump` lists a row whose local file is not
+    /// there yet as missing instead of failing, so a downloader can fetch it;
+    /// a file that is there is still hashed (coil-lang#1657).
+    #[test]
+    fn native_lock_from_ffi_natives_lists_missing_rows() {
+        let dir = std::env::temp_dir().join(format!("coil_dump_missing_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let here = platform_shared_lib_filename("here");
+        fs::write(dir.join(&here), b"abc").unwrap();
+        let gone = platform_shared_lib_filename("gone");
+        // A directory where the library should be is still an error.
+        fs::create_dir_all(dir.join("odd").join(platform_shared_lib_filename("odd"))).unwrap();
+        let row = |name: &str, path: &Path| {
+            parse_ffi_native(&format!("name={name},version=1.0.0,path={}", path.display())).unwrap()
+        };
+        let lock = native_lock_from_ffi_natives(&[row("here", &dir), row("gone", &dir)]);
+        let odd = native_lock_from_ffi_natives(&[row("odd", &dir.join("odd"))]);
+        let _ = fs::remove_dir_all(&dir);
+
+        let lock = lock.expect("a missing local file is listed, not an error");
+        assert_eq!(lock.entries.len(), 2);
+        let (h, g) = (&lock.entries[0], &lock.entries[1]);
+        assert!(!h.missing);
+        assert_eq!(h.size, 3);
+        assert_eq!(
+            h.sha256,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert!(g.missing);
+        assert_eq!((g.filename.as_str(), g.sha256.as_str(), g.size), (gone.as_str(), "", 0));
+
+        let tsv = lock.to_tsv();
+        assert!(tsv.contains(&format!("here\t1.0.0\t{here}\t{}\t3\n", h.sha256)), "{tsv}");
+        assert!(tsv.contains(&format!("gone\t1.0.0\t{gone}\t\t\tmissing\n")), "{tsv}");
+        let back = NativeLock::from_json(&lock.to_json()).expect("json round trip");
+        assert_eq!(back, lock);
+
+        assert!(odd.is_err(), "a directory at the library path must not pass");
+    }
+
+    /// A `dload` path literal reduces to the stem the runtime gate uses, so
+    /// one `--ffi-native name=<stem>` row covers it (coil-lang#1656).
+    #[test]
+    fn build_native_lock_reduces_dload_path_to_stem() {
+        let dir = std::env::temp_dir().join(format!("coil_lock_stem_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let filename = platform_shared_lib_filename("tls");
+        fs::write(dir.join(&filename), b"not really a library").unwrap();
+        let natives = vec![parse_ffi_native(&format!(
+            "name=tls,version=1.0.0,path={}",
+            dir.display()
+        ))
+        .unwrap()];
+        let strings = vec![format!("./native/{filename}"), "tls".to_string()];
+        let bytecode = vec![
+            Byte::new(Instruction::STRING).with_operand_u32(0),
+            Byte::new(Instruction::FfiLoad),
+            Byte::new(Instruction::STRING).with_operand_u32(1),
+            Byte::new(Instruction::FfiLoad),
+        ];
+        let lock = build_native_lock(&natives, &bytecode, &strings);
+        let _ = fs::remove_dir_all(&dir);
+        let lock = lock.expect("the `tls` row covers `./native/libtls.so`");
+        assert_eq!(lock.entries.len(), 1, "one entry per stem: {:?}", lock.entries);
+        assert_eq!(lock.entries[0].stem, "tls");
+        assert_eq!(lock.entries[0].filename, filename);
     }
 
     #[test]

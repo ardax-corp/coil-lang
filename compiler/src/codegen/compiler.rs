@@ -84,6 +84,9 @@ pub(super) enum DictStep {
     Tuple(u32),
     /// The top word boxed with this value tag.
     Box(u32),
+    /// Element `n` of the top word, a dictionary: a method's code pointer
+    /// in it (a subclass bound's `Eq` methods, #1694).
+    Field(u32),
 }
 
 impl Compiler {
@@ -2312,7 +2315,8 @@ impl Compiler {
     /// [`Self::concrete_operator_target`] for an operand of type `ty`.
     pub(super) fn concrete_operator_target_ty(&self, ty: &Ty, class: &str, method: &str) -> Option<(Ty, String)> {
         let resolved = crate::typechecking::subst::apply_ty_prune(self.checker.subst(), ty);
-        let lookup_ty = Self::show_lookup_ty_for_instance(&resolved);
+        // A `readonly` operand's operator is its type's instance (#1645).
+        let lookup_ty = Self::show_lookup_ty_for_instance(crate::typechecking::ty::strip_readonly(&resolved));
         // Dict Eq/Ord only for nominal user enums/classes; open Vars must not replace hardwired EQ/LT.
         let nominal = match &lookup_ty {
             Ty::Con(name) => Some(name.as_str()),
@@ -3048,6 +3052,14 @@ impl Compiler {
                 Some(OpenDictGoal::Concrete(tys)) => {
                     return self.plan_instance_dict(out, class, &tys);
                 }
+                // `Eq<T>` with no `Eq` bound in scope: one built from a
+                // subclass bound's, or the VM's compare (#1694).
+                None if class == "Eq"
+                    && let [Ty::Var(v)] = lookup
+                    && let Some(dict) = self.var_eq_dict(*v) =>
+                {
+                    return self.plan_var_eq_dict(out, dict);
+                }
                 // `Show<Box<T>>`: a generic instance whose context is
                 // resolved from scope below. A bare `Show<T>` has no instance.
                 None if lookup.iter().any(|t| matches!(t, Ty::Var(_))) => return false,
@@ -3186,6 +3198,13 @@ impl Compiler {
         use crate::typechecking::subst::apply_ty_prune;
         let subst = self.checker.subst();
         let args: Vec<Ty> = args.iter().map(|a| apply_ty_prune(subst, a)).collect();
+        // An open glue body's variable (#1661).
+        if class == "Eq"
+            && let [Ty::Var(v)] = args.as_slice()
+            && let Some(slot) = self.eq_glue_body_var_dict(*v)
+        {
+            return Some(OpenDictGoal::Slot(slot));
+        }
         if let Some(vars) = self.mono_var_tys.last() {
             let concrete: Vec<Ty> = args.iter().map(|a| Self::apply_ty_var_map(a, vars)).collect();
             if !concrete.iter().any(Self::ty_is_open) {
@@ -3623,7 +3642,8 @@ impl Compiler {
                 return self.checker.generics().find_instance_relaxed(&c.class, &args).is_some();
             }
             if args.iter().any(|t| matches!(t, Ty::Var(_))) {
-                return self.resolve_open_dict_goal(&c.class, &args).is_some();
+                return self.resolve_open_dict_goal(&c.class, &args).is_some()
+                    || (c.class == "Eq" && matches!(args.as_slice(), [Ty::Var(v)] if self.var_eq_dict(*v).is_some()));
             }
             self.open_instance_dict_ok(&c.class, &args, depth + 1)
         })
@@ -4243,6 +4263,12 @@ impl Compiler {
                 let fqn = Generics::builtin_instance_fqn("Eq", ty, method);
                 self.emit_builtin_entry(&fqn, &params, boolean.clone(), None, |b, a| b.bin(op, a[0], a[1], boolean.clone()));
             }
+        }
+        // `string` orders by its UTF-8 bytes (coil-stdlib#48).
+        let params = [(string.clone(), tag_of(ValueTag::String)), (string.clone(), tag_of(ValueTag::String))];
+        for (class, method, op) in [("Lt", "lt", BinOp::Lt), ("Le", "le", BinOp::Le), ("Gt", "gt", BinOp::Gt), ("Ge", "ge", BinOp::Ge)] {
+            let fqn = Generics::builtin_instance_fqn(class, "string", method);
+            self.emit_builtin_entry(&fqn, &params, boolean.clone(), None, |b, a| b.bin(op, a[0], a[1], boolean.clone()));
         }
         // `()` is always `()` (#1450): its operands, taken as the `Show`
         // thunk takes a unit, are never read.
@@ -7687,6 +7713,10 @@ impl Compiler {
                 }
                 if let Some(m) = method.strip_prefix("dglue_") {
                     self.emit_eq_dict_glue(&fqn, &ty, m == "ne");
+                    continue;
+                }
+                if let Some(m) = method.strip_prefix("any_") {
+                    self.emit_eq_any(&fqn, m == "ne");
                     continue;
                 }
                 let Some(tag) = Self::ty_to_value_tag(&ty) else {

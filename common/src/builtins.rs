@@ -138,6 +138,37 @@ pub fn is_poly_builtin_enum(name: &str) -> bool {
     is_builtin_option_enum(name) || is_builtin_result_enum(name)
 }
 
+/// Built-in type constructors, besides `Option` / `Result`, that are keyed
+/// by their bare name in every module: a user `class` or `enum` cannot take
+/// one of these names (#1654).
+pub const BUILTIN_RESERVED_TYPE_NAMES: &[&str] = &[
+    "Range",
+    "RangeInclusive",
+    "ArrayIter",
+    BUILTIN_MATRIX_TYPE,
+    BUILTIN_ROOT_TYPE,
+    BUILTIN_WEAK_TYPE,
+    BUILTIN_VEC_TYPE,
+];
+
+/// True when `name` is one of [`BUILTIN_RESERVED_TYPE_NAMES`].
+pub fn is_reserved_builtin_type(name: &str) -> bool {
+    BUILTIN_RESERVED_TYPE_NAMES.contains(&name)
+}
+
+/// Primitive type names a type annotation matches in any letter case
+/// (`String` is `string`), so a user `class` or `enum` cannot take one of
+/// these names in any spelling (#1673).
+pub const BUILTIN_PRIMITIVE_TYPE_NAMES: &[&str] = &["int", "float", "bool", "byte", "string", "void"];
+
+/// The primitive `name` spells in any letter case, if any.
+pub fn builtin_primitive_type_spelling(name: &str) -> Option<&'static str> {
+    BUILTIN_PRIMITIVE_TYPE_NAMES
+        .iter()
+        .copied()
+        .find(|p| p.eq_ignore_ascii_case(name))
+}
+
 /// Built-in nominal matrix wrapper (`Matrix<Data>`).
 ///
 /// `Data` is a nested static array/tuple layout (`[[T; N]; M]`). Runtime

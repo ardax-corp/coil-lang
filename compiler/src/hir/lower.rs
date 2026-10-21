@@ -2312,10 +2312,12 @@ impl Walk<'_> {
                     return self.value(*rhs);
                 }
                 // `a + b` is `FORMAT "%s%s"` over both; `==` / `!=` compare
-                // strings with `EQ`.
+                // strings with `EQ`, and `<` / `<=` / `>` / `>=` through
+                // `string_compare`.
                 let string = |id: HirId| matches!(self.ty(id).map(strip_readonly), Some(Ty::Con(n)) if n == coil_ty::STRING);
                 let concat = matches!(op, BinOp::StrConcat);
-                if concat || (matches!(op, BinOp::Eq | BinOp::Ne) && string(*lhs)) {
+                let compare = matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge);
+                if concat || (compare && string(*lhs)) {
                     if !string(*lhs) || !string(*rhs) {
                         return Err("operand-type");
                     }

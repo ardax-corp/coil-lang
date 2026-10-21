@@ -164,6 +164,9 @@ pub enum HirDictOp {
     Tuple(u32),
     /// `BoxValue` (`tag`) of the top word: an existential pack's value.
     Box(u32),
+    /// Element `n` of the top word, a dictionary: a method's code pointer
+    /// in it.
+    Field(u32),
     /// `Load` of frame slot `n`, one of the body's own dictionary
     /// parameters: a dictionary it forwards.
     Load(u32),
@@ -3669,6 +3672,13 @@ impl Lower<'_> {
         if strings && matches!(op, BinOp::Eq | BinOp::Ne) {
             return Ok(Val::V(self.b.ins_str_eq(l, r, op == BinOp::Ne).map_err(mir)?));
         }
+        // `<` / `<=` / `>` / `>=` on strings: their byte order's sign
+        // (`string_compare`) against `0` (coil-stdlib#48).
+        if strings && let Some(cmp) = cmp {
+            let order = self.b.ins_host_invoke(common::STRING_COMPARE_ID, vec![l, r]).map_err(mir)?;
+            let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+            return Ok(Val::V(self.b.ins_cmp(cmp, order, zero).map_err(mir)?));
+        }
         // `==` on arrays compares elements; only scalars compare as words.
         if !lt.is_numeric() {
             return Err("operator operand type".into());
@@ -4244,6 +4254,11 @@ impl Lower<'_> {
                     stack.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![boxed]).map_err(mir)?);
                 }
                 HirDictOp::Interned { slot, ref ops } => stack.push(self.interned_dict(slot, ops)?),
+                HirDictOp::Field(n) => {
+                    let dict = stack.pop().ok_or("dictionary field")?;
+                    let at = self.b.ins_const(MirConst::I64(i64::from(n))).map_err(mir)?;
+                    stack.push(self.b.ins_index(dict, at, MirTy::I64, false).map_err(mir)?);
+                }
             }
         }
         Ok(stack)
@@ -4722,6 +4737,11 @@ impl Lower<'_> {
             }
             let boxed = self.b.ins_alloc(MirAllocKind::Boxed { tag: call.tag }, vec![v]).map_err(mir)?;
             words.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![boxed]).map_err(mir)?);
+        }
+        // The instance's dictionary, after the operands (#1661).
+        if !site.dicts.is_empty() {
+            let dicts = site.dicts.clone();
+            words.extend(self.dict_values(&dicts)?);
         }
         let abi = DenseAbi {
             params: words.iter().map(|&v| self.b.value_ty(v)).collect(),

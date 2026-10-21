@@ -303,6 +303,13 @@ the job is bound to, so a loop chunk reads a module `const` set at startup.
 A slot the job fills (a local `const` table built on first use, a ground
 dictionary) lands only in its copy, which the job drops when it ends;
 collect is forbidden in-epoch, so the object it names stays put meanwhile.
+An isolate job cannot take those words, which name the spawner's heap: it
+starts with each slot deep-copied into its own heap like a spawn argument
+(#1663: `JobStatics::Copied`); a stdin / stdout / stderr stream is reopened
+there, and a file or socket stream becomes a placeholder whose use panics
+(#1684). Re-running the startup initialisers instead
+would repeat their effects (a `print` in an initializer, a counter it bumps)
+and see a `static let` at its initial value, not the spawner's.
 If they need a string literal, they use the shared intern table / program
 string cache **on the Heap**, rooted for the epoch.
 

@@ -891,6 +891,27 @@ impl Generics {
             assoc_tys: HashMap::new(),
             context: Vec::new(),
         });
+        // Strings order by their UTF-8 bytes (coil-stdlib#48).
+        for (class, method) in [("Lt", "lt"), ("Le", "le"), ("Gt", "gt"), ("Ge", "ge")] {
+            self.instances.push(InstanceDef {
+                class: class.into(),
+                defined_module: PRELUDE_OPS_MODULE.into(),
+                range: 0..0,
+                args: vec![string()],
+                method_fqns: make_fqns(class, "string", &[method]),
+                assoc_tys: HashMap::new(),
+                context: Vec::new(),
+            });
+        }
+        self.instances.push(InstanceDef {
+            class: "Ord".into(),
+            defined_module: PRELUDE_OPS_MODULE.into(),
+            range: 0..0,
+            args: vec![string()],
+            method_fqns: HashMap::new(),
+            assoc_tys: HashMap::new(),
+            context: Vec::new(),
+        });
         self.instances.push(InstanceDef {
             class: "Length".into(),
             defined_module: PRELUDE_OPS_MODULE.into(),
@@ -1416,6 +1437,24 @@ mod tests {
         assert_eq!(g.typeclass("Default").unwrap().methods[0].name, "default");
         assert!(g.typeclass("String").is_none(), "`String` was folded into `Show`");
         assert!(g.typeclass("Send").unwrap().methods.is_empty());
+    }
+
+    #[test]
+    fn reserved_type_names_are_the_builtin_type_ctors() {
+        // A user type may not take a builtin ctor's name (#1654): the list
+        // the checker rejects must track what is registered here.
+        let mut g = Generics::default();
+        g.register_builtin_type_ctors();
+        let mut registered: Vec<&str> = g
+            .nominal_type_modules
+            .keys()
+            .map(String::as_str)
+            .filter(|n| !common::is_poly_builtin_enum(n))
+            .collect();
+        registered.sort_unstable();
+        let mut reserved = common::BUILTIN_RESERVED_TYPE_NAMES.to_vec();
+        reserved.sort_unstable();
+        assert_eq!(registered, reserved);
     }
 
     #[test]
