@@ -30,12 +30,11 @@ test("a call 100 columns wide before its ; is broken") {
         third_argument_value_xxxxxxx,
     );
     let sink = new Sink(0);
-    sink
-        .push_three(
-            first_argument_value,
-            second_argument_value,
-            third_argument_value_xxxxxxxxxxxxx,
-        );
+    sink.push_three(
+        first_argument_value,
+        second_argument_value,
+        third_argument_value_xxxxxxxxxxxxx,
+    );
     add_three(
         first_argument_value,
         second_argument_value,
