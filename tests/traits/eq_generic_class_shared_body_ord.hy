@@ -1,9 +1,8 @@
 // `==` / `!=` on a generic class deriving `Eq` in a generic body that runs
 // shared (called through a function value) whose type parameter has no
 // `Eq` bound of its own: a bound whose trait has `Eq` as a superclass
-// gives the class's `Eq` dictionary its `Eq` methods, and with none (`T:
-// Ord`) the parameter's values compare as the VM compares them, as they do
-// inside a `Vec<T>` there; the class compares field by field (#1694).
+// (`T: Keyed`, or `T: Ord`, #1716) gives the class's `Eq` dictionary its
+// `Eq` methods; the class compares field by field (#1694).
 use tests::assert;
 
 #[derive(Eq)]
