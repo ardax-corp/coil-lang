@@ -41,6 +41,100 @@ pub struct HostGrants {
     /// Limits for code the build runs at compile time (`--comptime-steps`,
     /// `--comptime-mem`). Not a capability: [`Self::grant_all`] leaves it.
     pub comptime: ComptimeLimits,
+    /// What code the build runs at compile time may touch
+    /// (`--comptime-read`, …). Separate from the `allow_*` grants, which are
+    /// the program's: [`Self::grant_all`] leaves these too.
+    pub comptime_io: ComptimeGrants,
+}
+
+/// One compile-time grant: for any module, or only for code in `module`
+/// (`--comptime-read gen=api/`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Scoped<T> {
+    pub module: Option<String>,
+    pub value: T,
+}
+
+impl<T> Scoped<T> {
+    /// `MODULE=VALUE` scopes to `MODULE`; anything else is for any module.
+    /// `value` turns the text after `=` (or the whole text) into a `T`.
+    pub fn parse(text: &str, value: impl FnOnce(&str) -> T) -> Self {
+        match text.split_once('=') {
+            Some((module, rest)) if is_module_path(module) => Self {
+                module: Some(module.to_string()),
+                value: value(rest),
+            },
+            _ => Self { module: None, value: value(text) },
+        }
+    }
+
+    fn applies_to(&self, module: &str) -> bool {
+        self.module.as_deref().is_none_or(|m| m == module)
+    }
+}
+
+/// `a`, `a::b`: identifiers joined by `::`.
+fn is_module_path(s: &str) -> bool {
+    !s.is_empty()
+        && s.split("::").all(|part| {
+            let mut chars = part.chars();
+            chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+}
+
+/// The IO compile-time code may do (`--comptime-read PATH`,
+/// `--comptime-write PATH`, `--comptime-env NAME`, `--comptime-exec STEM`,
+/// each optionally `MODULE=`-scoped). Paths are as given; [`Self::for_module`]
+/// resolves them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ComptimeGrants {
+    pub read: Vec<Scoped<PathBuf>>,
+    pub write: Vec<Scoped<PathBuf>>,
+    pub env: Vec<Scoped<String>>,
+    pub exec: Vec<Scoped<String>>,
+}
+
+impl ComptimeGrants {
+    pub fn is_empty(&self) -> bool {
+        self.read.is_empty() && self.write.is_empty() && self.env.is_empty() && self.exec.is_empty()
+    }
+
+    /// What code in `module` may do: the unscoped grants and those scoped
+    /// to it, with paths made absolute (against the working directory) and
+    /// symlinks resolved where they exist.
+    pub fn for_module(&self, module: &str) -> crate::macros::ComptimeIo {
+        fn paths(list: &[Scoped<PathBuf>], module: &str) -> Vec<PathBuf> {
+            list.iter()
+                .filter(|g| g.applies_to(module))
+                .map(|g| crate::macros::absolute_path(&g.value))
+                .collect()
+        }
+        fn names(list: &[Scoped<String>], module: &str) -> Vec<String> {
+            list.iter().filter(|g| g.applies_to(module)).map(|g| g.value.clone()).collect()
+        }
+        crate::macros::ComptimeIo {
+            read: paths(&self.read, module),
+            write: paths(&self.write, module),
+            env: names(&self.env, module),
+            exec: names(&self.exec, module),
+        }
+    }
+
+    /// Add `other`'s grants (duplicates ignored).
+    pub fn extend(&mut self, other: ComptimeGrants) {
+        fn add<T: PartialEq>(into: &mut Vec<T>, from: Vec<T>) {
+            for g in from {
+                if !into.contains(&g) {
+                    into.push(g);
+                }
+            }
+        }
+        add(&mut self.read, other.read);
+        add(&mut self.write, other.write);
+        add(&mut self.env, other.env);
+        add(&mut self.exec, other.exec);
+    }
 }
 
 /// How far one compile-time evaluation (a macro call, and later a `const`

@@ -454,6 +454,114 @@ pub fn default_host() -> Option<std::sync::Arc<dyn MacroHost>> {
     DEFAULT_HOST.get().cloned()
 }
 
+/// The IO one compile-time evaluation may do, resolved for the module its
+/// code is in ([`crate::ComptimeGrants::for_module`]): files under `read` /
+/// `write` (absolute), environment variables `env`, programs whose stem is
+/// in `exec`. The host checks each native call against it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct ComptimeIo {
+    pub read: Vec<PathBuf>,
+    pub write: Vec<PathBuf>,
+    pub env: Vec<String>,
+    pub exec: Vec<String>,
+}
+
+impl ComptimeIo {
+    /// The effect bits (`common::EffectFlags`) code with these grants may
+    /// have while compiling.
+    pub fn effects(&self) -> u16 {
+        use common::EffectFlags as F;
+        [
+            (!self.read.is_empty(), F::READ),
+            (!self.write.is_empty(), F::WRITE),
+            (!self.env.is_empty(), F::ENV),
+            (!self.exec.is_empty(), F::EXEC),
+        ]
+        .into_iter()
+        .filter(|(on, _)| *on)
+        .fold(0, |acc, (_, bits)| acc | bits)
+    }
+
+    pub fn check_read(&self, path: &str) -> Result<(), String> {
+        if under_any(&absolute_path(Path::new(path)), &self.read) {
+            return Ok(());
+        }
+        Err(format!("reading `{path}` while compiling needs `--comptime-read {}`", grant_hint(path)))
+    }
+
+    pub fn check_write(&self, path: &str) -> Result<(), String> {
+        if under_any(&absolute_path(Path::new(path)), &self.write) {
+            return Ok(());
+        }
+        Err(format!("writing `{path}` while compiling needs `--comptime-write {}`", grant_hint(path)))
+    }
+
+    pub fn check_env(&self, name: &str) -> Result<(), String> {
+        if self.env.iter().any(|n| n == name) {
+            return Ok(());
+        }
+        Err(format!("reading environment variable `{name}` while compiling needs `--comptime-env {name}`"))
+    }
+
+    pub fn check_exec(&self, program: &str) -> Result<(), String> {
+        let stem = Path::new(program).file_stem().and_then(|s| s.to_str()).unwrap_or(program);
+        if self.exec.iter().any(|s| s == stem) {
+            return Ok(());
+        }
+        Err(format!("running `{program}` while compiling needs `--comptime-exec {stem}`"))
+    }
+}
+
+/// The directory to grant for `path`: itself when it is one, else its
+/// parent (`.` for a bare file name).
+fn grant_hint(path: &str) -> String {
+    let p = Path::new(path);
+    if p.is_dir() {
+        return path.to_string();
+    }
+    match p.parent().map(|d| d.to_string_lossy().into_owned()) {
+        Some(d) if !d.is_empty() => format!("{d}/"),
+        _ => ".".to_string(),
+    }
+}
+
+fn under_any(path: &Path, roots: &[PathBuf]) -> bool {
+    // A `..` left in a path that does not exist yet could climb out through
+    // a symlink, so such a path is under nothing.
+    !path.components().any(|c| c == std::path::Component::ParentDir) && roots.iter().any(|root| path.starts_with(root))
+}
+
+/// `path` made absolute against the working directory, with symlinks
+/// resolved as far as it exists, so a link cannot lead out of a granted
+/// directory. A part that does not exist yet is kept as written.
+pub fn absolute_path(path: &Path) -> PathBuf {
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(path)
+    };
+    if let Ok(real) = joined.canonicalize() {
+        return real;
+    }
+    // The longest prefix that exists, resolved, then the rest.
+    let mut rest = Vec::new();
+    let mut base = joined.as_path();
+    loop {
+        match (base.parent(), base.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_os_string());
+                base = parent;
+                if let Ok(mut real) = base.canonicalize() {
+                    real.extend(rest.iter().rev());
+                    return real;
+                }
+            }
+            // Ends in `..` or reached the root: leave it as written.
+            _ => return joined,
+        }
+    }
+}
+
 /// Host natives a macro may call: pure computation only (no IO, files,
 /// network, environment, clocks, threads or process control).
 pub fn native_allowed_at_compile_time(name: &str) -> bool {
