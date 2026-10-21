@@ -948,6 +948,8 @@ impl Compiler {
                 let enums = crate::hir::enum_sroa::scalarize(body, |n| !self.checker.enum_has_drop(n));
                 let tuples = crate::hir::tuple_sroa::scalarize(enums.as_ref().unwrap_or(body), |t| !Self::ty_has_var(t));
                 let split = tuples.or(enums);
+                let classes = crate::hir::readonly_sroa::scalarize(split.as_ref().unwrap_or(body), |name| self.hir_readonly_split_fields(name));
+                let split = classes.or(split);
                 match split {
                     Some(next) => match lower::refusal(&next, &self.checker)
                         .map_or_else(|| self.plan_hir_body(&next), Err)
@@ -7784,6 +7786,25 @@ impl Compiler {
             return None;
         }
         Some((class, fields.into_iter().map(|(_, ty)| ty).collect()))
+    }
+
+    /// The fields of readonly class `name` when a local of it may be split
+    /// into field locals and rebuilt at each whole use
+    /// (`hir::readonly_sroa`): not generic, no `drop`, 1 to 32 fields of
+    /// closed, non-unit types, laid out as declared.
+    fn hir_readonly_split_fields(&self, name: &str) -> Option<Vec<(String, Ty)>> {
+        let key = self.checker.resolve_class_key(name)?;
+        if !self.checker.is_readonly_class(&key) || self.checker.class_has_drop(&key) || lower::is_generic_class(&self.checker, &key) {
+            return None;
+        }
+        let class = self.resolve_class_ident(name);
+        let fields = self.hir_class_fields(&class)?;
+        let codegen = self.context.classes.get(&class)?;
+        let fits = (1..=32).contains(&fields.len())
+            && codegen.len() == fields.len()
+            && codegen.iter().zip(&fields).all(|((a, _), (b, _))| a == b)
+            && fields.iter().all(|(_, t)| !Self::ty_has_var(t) && !crate::hir::layout::is_unit(t));
+        fits.then_some(fields)
     }
 
     /// `new C(args).f` of a class with no `drop`: the arguments, their

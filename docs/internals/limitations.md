@@ -53,7 +53,7 @@ Lambdas and `defer` isolate the env (`take_and_isolate`). File-level imports and
 | `Option` field moves | **Decided (copy-on-match):** `match` copies the scrutinee / field pointer; nested `match` on the same `Option` field is valid. Outer pattern bindings stay in scope (codegen merges `match_bindings`). Was a nested-match lookup hole, not a true move. | [COI-77](https://linear.app/ardax/issue/COI-77) |
 | User trait calls | **Decided (dictionaries for generic bodies only):** ground Show/Length/Hash/user-trait methods with a static entry emit `CALL`. Operators on ground numeric/eq/ord types still lower to opcodes. Shared generic bodies keep dictionary passing. Spec: [types.md](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/types.md#call-site-dispatch). | [COI-78](https://linear.app/ardax/issue/COI-78) |
 | `readonly` and calls | **Implemented (#1558 P4):** `hir/effects.rs` infers which parameters (`self` = 0) each body mutates, through writes, `Vec` mutators, callees, lambdas that capture them and values read from them; a call that passes a `readonly` value where the callee mutates it is `E0107`. What a method called on a `readonly` value returns is `readonly` too (`readonly R`, deep), since it may be `self` or reached from it (a getter, `Ref::get`, `HashMap::get`); a fresh result (`moved()`) is sealed as well, unless the method's trait declares `readonly A self`, which the impl is checked against (#1640). Trait methods declare it (`fn area(readonly A self)`); an undeclared trait method mutates every parameter. A trait operator on a user class (`a + b` through its `impl Add`) is checked as the call of its impl (#1645); on a type-variable operand it is not, since the built-in operator traits cannot declare `readonly`. A named argument is checked against the parameter the checker matched it to, and a spread of a tuple or fixed array item by item (#1646); arguments packed into a rest parameter (`T... xs`) are checked against it, a `Vec` spread among them included (#1681); a spread whose length is not known anywhere else counts as passing its items, and every later argument, to every parameter from its position on. A caller of a method that mutates only an object the caller made stays `pure` (design §3.7, #1648): `Summary::param_only` says which of a body's `mutate` comes only from writes of inert values through its parameter paths, and a call that mutates only owned objects (made of inert values, never stored, captured, aliased by a call result or returned but as `readonly`) discharges it. A write through a `let` alias of a parameter (`let it = self.items; it.push(1)`) or of a parameter value (`self.inner = i`) still keeps every caller impure. | — |
-| `readonly class` | **Implemented (#1558 P5):** instances never change after `new` (`E0107` on any field write, `self` included), fields read `readonly`, `readonly C` is `C`, no `fn drop` (`E0126`). `==` is structural through an implied `Eq` (a `Vec<C>` field compares elements by identity, #1629). `Hash` is implied only when every field type hashes *as written* (primitives, tuples, type parameters, this module's hashing types): a `Vec`, array, map or another module's type leaves it out, so such a class needs its own `impl Hash`. `weak()` on an instance is still allowed. The optimisations it enables (#1560, #1562) are not done. | — |
+| `readonly class` | **Implemented (#1558 P5):** instances never change after `new` (`E0107` on any field write, `self` included), fields read `readonly`, `readonly C` is `C`, no `fn drop` (`E0126`). `==` is structural through an implied `Eq` (a `Vec<C>` field compares elements by identity, #1629). `Hash` is implied only when every field type hashes *as written* (primitives, tuples, type parameters, this module's hashing types): a `Vec`, array, map or another module's type leaves it out, so such a class needs its own `impl Hash`. `weak()` on an instance is refused (`E0119`, #1644 / #1670). An escaping local is built at each escaping use instead of up front (`hir::readonly_sroa`, #1562 step 1, below); two-slot passing (#1562 step 2) is not done. | — |
 | GC drop storing `self` | **Decided (allow-once):** storing `self` from `fn drop()` can keep the cell alive after the sweep (post-drop re-mark). Drop still runs at most once (`finalized`, including explicit `obj.drop()`). Defined footgun, not a pin API — use `gc::root` / `Weak`. Spec: [gc.md](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/gc.md). | [COI-79](https://linear.app/ardax/issue/COI-79) |
 
 ## IL optimizations (low)
@@ -107,6 +107,27 @@ out, and a local built once and never reassigned resolves its matches at
 compile time. Fields are scalars or `string`; whole-value uses (calls,
 returns, `==`, `??`), record variants and `fn drop()` enums keep the heap
 enum.
+
+**Readonly class locals** (`hir::readonly_sroa`, after HIR inlining,
+#1562): a `let p = new P(..)` of a non-generic `readonly class` with 1 to
+32 closed fields, reassigned only to `new P(..)`, whose whole value is
+used (passed, returned, pushed, compared) becomes one local per field.
+`p.x` reads its local and each whole use is a fresh `new P(..)` of the
+locals, built where that use runs. Two instances with the same fields
+cannot be told apart (structural `==`, no `drop`, no `weak()`), so a hot
+path that only reads fields allocates nothing and a cold escape pays for
+its own object. The split is refused when a whole use sits in a loop the
+`let` is outside of, or when two whole uses can run on one path (they must
+be in different arms of an `if` or `match`), since either would build more
+objects than the one built up front; at most 8 whole uses. Plain classes
+keep the one-object rule (`class_boxes`): a field write or identity `==`
+must see the same object. `examples/perf/readonly_class_escape.hy` (2M
+iterations, every 2000th point pushed to a `Vec`; release build, 15
+interleaved runs, 4-core container): **0.251 / 0.276 s** min / median
+before, **0.081 / 0.086 s** after. The non-escaping loop of #1554
+(`step` reads `p.x + p.y`) and `licm_readonly_class_field`,
+`s2j_class_sroa`, `mandelbrot`, `nbody`, `binary_trees` compile to
+identical archives.
 
 **MakeArray frame scalarization (Q1 / COI-334).** Codegen escape answer
 (the IL `escape_analysis` pass was removed 2026-10): non-escaping `[T; N]` /
