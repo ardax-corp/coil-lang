@@ -179,6 +179,9 @@ pub struct Checker {
     counter: TyVarCounter,
     subst: Subst,
     messages: Vec<Message>,
+    /// Spans of this module's E0200s for a type declaration that takes a
+    /// reserved built-in name: the module then reports only those (#1701).
+    rejected_builtin_type_decls: Vec<std::ops::Range<usize>>,
 
     /// Type that the enclosing function expects to return, if any.
     /// `None` outside of a function body. Set when entering a function
