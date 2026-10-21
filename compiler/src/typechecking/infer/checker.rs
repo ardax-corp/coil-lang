@@ -7080,7 +7080,7 @@ impl Checker {
                 range.clone(),
             );
             m.with_help(format!(
-                "`{op}` takes `int` / `float` / `byte` / `string` operands, or a type with a `{class}` instance (`#[derive(Ord)]`)"
+                "`{op}` takes `int` / `float` / `byte` / `string` operands, or a type with a `{class}` instance (`#[derive(Eq, Ord)]`)"
             ));
             m
         });
