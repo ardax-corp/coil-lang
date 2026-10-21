@@ -197,7 +197,9 @@ discover_all → expand_user_macros → (discover newly used modules) → typech
 5. **Run** every call through the `MacroHost` (below) with its input.
    Outputs are cached for the life of the process too, keyed by the provider
    sources, the macro and its input (`Pipeline::job_key`), so the LSP does not
-   rerun macros on every keystroke.
+   rerun macros on every keystroke. An output is reused only while the files
+   it read are unchanged; one that wrote a file is not reused. A macro that
+   did IO also goes to the result cache (see "Compile-time result cache").
 6. **Splice.** `CachedAst::parse_generated` parses each output with
    `Pratt::parse_at`, so its spans sit after the end of the file (and of
    earlier snippets), as if it followed them in the text. Spans never collide with the file's own or with the synthetic
@@ -356,6 +358,46 @@ read environment variables and run programs only as the build allows:
 - Macro expansion caches key on the provider's grants, so changing them
   re-expands.
 
+## Compile-time result cache
+
+`compiler::comptime_cache` keeps the result of each evaluation that did
+granted IO, so the next build does not read the environment or run a program
+again:
+
+- What is cached: an explicit const or `comptime` expression (its value, as a
+  one-root heap snapshot) and a macro call (its output text) whose
+  evaluation made at least one granted IO call and wrote no file. Pure
+  evaluations are always computed: they cannot change between builds. The
+  VM notes each granted call (`io_gate::start_recording`), with the sha256 of
+  what a read saw (`path_digest`: a file's bytes, a directory's sorted names,
+  `missing`, plus a symlink's target).
+- Key (sha256): cache format, archive version, OS and arch, the const's
+  name and word kind (or the provider module, macro and input), its grants,
+  and the sources of its module and every module it uses, each with the
+  macro output spliced into it (`Pipeline::key_sources`). So an edit to that
+  module or a dependency is a miss; an edit elsewhere is not.
+- An entry (`<key>.entry` in the cache dir) lists the IO with portable paths
+  (relative to the working directory) and the value. A hit needs every
+  recorded read to see the same digest. A snapshot's type ids are stored
+  with their names (`Checker::type_id_keys`: `class m::P`, record shapes)
+  and moved to the current program's ids on load; a type that is gone or
+  has a different field count is a miss.
+- Location: `--comptime-cache DIR`, else `$COIL_CACHE_DIR/comptime`,
+  `$XDG_CACHE_HOME/coil/comptime`, `~/.cache/coil/comptime`. Writes go to a
+  temporary file and are renamed into place; a cache that cannot be written
+  only costs time.
+- `--comptime-refresh`: entries that used the environment or a program are
+  ignored and computed again; a value that differs is reported as E0135
+  (info). Entries that only read files need no refresh: a changed file is
+  already a miss.
+- `--comptime-offline`: on a miss, the environment and programs are refused
+  (`ComptimeIo::offline`), with an error that says to build once without
+  it. File reads still work. Environment values are never stored, only
+  names.
+- A cached const is restored into the evaluating VM instead of calling its
+  initializer (`ConstEval::cached`), so later consts read it as usual and
+  the program's snapshot is captured as before.
+
 Module statics of providers are not initialised (the expansion program has no
 `main`), so macros should not depend on them.
 
@@ -482,6 +524,6 @@ local variables, which the module const cannot see.
   started; `comptime` expressions and computed `const`s are (see above).
 - A function-style macro call names the macro bare (`name!`); a path
   (`m::name!`) does not parse.
-- Compiled expansion programs and outputs are cached in memory only: a fresh
-  process compiles each provider set once more (an on-disk cache needs a
-  location policy for user projects).
+- Compiled expansion programs are cached in memory only: a fresh process
+  compiles each provider set once more. Outputs that did IO are kept on
+  disk by the result cache.
