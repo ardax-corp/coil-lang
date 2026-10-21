@@ -35,6 +35,11 @@ pub fn hoist<'a>(program: &mut Output<'a>) {
 fn hoist_items<'a>(items: &mut Vec<Output<'a>>) {
     let mut at = 0;
     while at < items.len() {
+        // A top-level block is code generation, expanded with the macros.
+        if matches!(items[at].1.as_ref(), Expression::ComptimeBlock(_)) {
+            at += 1;
+            continue;
+        }
         let mut consts = Vec::new();
         collect(&mut items[at], &mut consts);
         let n = consts.len();
@@ -44,6 +49,39 @@ fn hoist_items<'a>(items: &mut Vec<Output<'a>>) {
 }
 
 fn collect<'a>(node: &mut Output<'a>, consts: &mut Vec<Output<'a>>) {
+    if let Expression::ComptimeBlock(body) = node.1.as_mut() {
+        // `comptime { … }` in an expression: `fn __comptime_<offset>_body()
+        // { … }` (its return type inferred) and a `comptime` call of it.
+        // Its own `comptime` expressions are hoisted first.
+        let mut items = vec![std::mem::replace(body, (body.0, Box::new(Expression::Block(Vec::new()))))];
+        hoist_items(&mut items);
+        let body = items.pop().expect("the body");
+        consts.extend(items);
+        let fresh = crate::attrs::fresh_span;
+        let name = crate::attrs::leak(format!("{PREFIX}{}_body", node.0.start));
+        consts.push((
+            fresh(),
+            Box::new(Expression::Function {
+                docs: Vec::new(),
+                attrs: Vec::new(),
+                name,
+                is_coro: false,
+                is_static: false,
+                type_params: Vec::new(),
+                args: (fresh(), Box::new(Expression::Fragment(Vec::new()))),
+                returns: None,
+                where_constraints: Vec::new(),
+                effects: None,
+                contracts: Vec::new(),
+                body: Some(body),
+            }),
+        ));
+        let call = Expression::Call {
+            name: (fresh(), Box::new(Expression::Identifier(name))),
+            args: Some(Vec::new()),
+        };
+        *node.1 = Expression::Comptime((fresh(), Box::new(call)));
+    }
     node.1.for_each_child_mut(&mut |c| collect(c, consts));
     if !matches!(node.1.as_ref(), Expression::Comptime(_)) {
         return;
@@ -68,6 +106,10 @@ pub fn explain_messages(program: &Output<'_>, messages: &mut Vec<reporting::Mess
         .iter()
         .filter_map(|item| match item.1.as_ref() {
             Expression::StaticDecl { name, init, .. } if is_comptime_const(name) => Some((*name, init.0.into_range())),
+            // A `comptime { … }` block's hidden function.
+            Expression::Function { name, body: Some(body), .. } if is_comptime_const(name) => {
+                Some((*name, body.0.into_range()))
+            }
             Expression::Fragment(parts) => match parts.as_slice() {
                 [binder, value] => match binder.1.as_ref() {
                     Expression::Constant(name, _) => match name.1.as_ref() {

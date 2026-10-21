@@ -537,6 +537,16 @@ and `explain_messages` word diagnostics about the hidden const as "this
 `comptime` expression", and a name it cannot find gets a help line about
 local variables, which the module const cannot see.
 
+`comptime { … }` in an expression (an atom, `Expression::ComptimeBlock`, the
+same node as the top-level block) is hoisted too: its body becomes a hidden
+function `__comptime_<offset>_body()` with an inferred return type, and the
+block becomes `comptime __comptime_<offset>_body()`, so it is a computed
+const like any other and may call its own module's functions. Its own
+`comptime` expressions get their consts first. The local-variable help
+covers the hidden function's body. A unit-valued block (only side effects)
+does not lower yet (#1798), and neither does a block-bodied lambda called in
+place (#1799), which is why the block is a named function.
+
 ## Compile-time blocks
 
 A top-level `comptime { … }` (`Expression::ComptimeBlock`) runs while

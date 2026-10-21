@@ -378,6 +378,23 @@ fn main() {
 }
 ```
 
+Inside a function, `comptime { … }` is a block computed the same way: the
+value it returns takes its place. It follows the same rules, so it cannot
+use the function's parameters or local variables.
+
+```coil
+fn sq(int x) -> int {
+    return x * x;
+}
+
+fn main() {
+    let n = comptime {
+        let base = sq(3);
+        return base * 4; // 36, computed while compiling
+    };
+}
+```
+
 At the top level, `comptime { … }` is a block that returns `Code`: the
 declarations it generates replace it. It runs before the module is checked,
 so it may only call code from other modules, and it gets the same IO grants.
