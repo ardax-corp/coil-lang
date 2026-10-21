@@ -469,7 +469,7 @@ fn writes_of(b: &Byte, constants: &[u64]) -> Option<Vec<u32>> {
         | StoreIndexPin | StoreIndexPinUnchecked | MakeFn | MakePolyFn | MakePolyFnCapture
         | MakeCoro | ResumeCoro | DoneCoro | LoadStatic | StoreStatic | TagEnumType
         | TagArrayKind | TailCall | YieldCoro | YieldFromCoro | VLoad | VStore | VBin | VMove
-        | VFma => Vec::new(),
+        | VFma | RestoreSnapshot => Vec::new(),
         VReduce => vec![b.dense_abc_parts().1 as u32],
         _ => return None,
     })

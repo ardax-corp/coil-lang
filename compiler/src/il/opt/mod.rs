@@ -32,6 +32,10 @@ pub struct OptimizeOptions {
     /// Record body tiers and HIR counters into [`stats::OptStats`] (COI-131).
     /// Default **off**.
     pub collect_stats: bool,
+    /// Compute pure calls with constant arguments at compile time
+    /// (`Pipeline::compute_consts`, comptime step 4). On at Standard and
+    /// above (and Size); `COIL_CALL_FOLD=0` turns it off.
+    pub call_fold: bool,
     /// Every function must lower through direct MIR: a body left on its
     /// raw stack IL (the fuse tier) is an internal error. The compiler sets
     /// this when codegen reported no errors; IL-only modules leave it off.
@@ -99,7 +103,7 @@ mod stats;
 pub(crate) use labels::{max_code_label, remap_label_space};
 pub use opt_level::OptLevel;
 pub(crate) use stats::{
-    note_body_tier, note_body_tiers, note_fuse_reason, note_hir_fallback, note_hir_mir, note_hir_mir_kept,
+    note_body_tier, note_body_tiers, note_comptime_consts, note_comptime_macros, note_fuse_reason, note_hir_fallback, note_hir_mir, note_hir_mir_kept,
     note_hir_inline_refused, note_hir_inlined, note_hir_lowered,
 };
 pub use stats::{BodyTier, OptStats, begin_opt_stats, last_opt_stats};

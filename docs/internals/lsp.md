@@ -41,6 +41,7 @@ These requests are implemented and covered by `coil-lsp` scenario tests:
 | Folding | One fold per top-level document symbol that spans lines |
 | Selection ranges | Nested AST spans containing the cursor (full file if parse fails) |
 | Semantic tokens | Lexical comments (`//`, nestable `/* */`), strings (including escaped quotes), numbers, operators, plus AST / `Checker` classification. Contextual `derive` / `macro` / `quote` / `attrs` highlight as keywords; `name!(…)` calls use the `macro` token type |
+| Compile-time code | Macros and `comptime` blocks expand as in a build, but compile-time IO comes from the result cache only (`CacheConfig::replay`). On a miss, reading the environment, running a program, connecting or writing a file is refused, and the diagnostic says to build the project. Pass the build's `--comptime-*` flags and start the server in the build's working directory so both use one cache. See [Comptime](comptime.md#tooling) |
 | Coverage | From the `coil test --coverage` tracefile, for workspace sources (not `.deps`): a code lens over each function (`covered 7/9 lines (78%)`), a **Coverage:** row in its hover, and hint diagnostics for functions below the threshold and for runs of uncovered lines. See [Coverage](#coverage) |
 
 Search roots for an opened workspace are `src`, `.` (sibling files at the

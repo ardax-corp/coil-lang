@@ -97,6 +97,14 @@ class Expr {
     pub text: string,
     /// `literal`, `ident`, `path`, `call` or `other`.
     pub kind_name: string,
+    /// For a constant argument (`3`, `-2.5`, `"a\n"`, `1 + 2`): `int`,
+    /// `float`, `bool` or `string`, else `""`.
+    pub value_kind: string,
+    /// The value: decimal digits for an `int`, the text for a `string`,
+    /// `1` / `0` for a `bool`; for a `float`, the digits of `d` in
+    /// `d * 10^value_exp`.
+    pub value_text: string,
+    pub value_exp: int,
 }
 
 impl Expr {
@@ -125,6 +133,77 @@ impl Expr {
     pub fn is_ident() -> bool {
         return self.kind_name == "ident";
     }
+
+    /// The argument's value when it is an integer constant: `3`, `-2`,
+    /// `2 * 21`. Names are not looked up (macros run before typechecking).
+    pub fn int() -> Option<int> {
+        if self.value_kind != "int" {
+            return Option::None;
+        }
+        return Option::Some(decimal(self.value_text));
+    }
+
+    /// The value of a float constant (`2.5`, `-1.0e3`), or of an integer one.
+    pub fn float() -> Option<float> {
+        if self.value_kind == "int" {
+            return Option::Some(decimal(self.value_text) as float);
+        }
+        if self.value_kind != "float" {
+            return Option::None;
+        }
+        let d = decimal(self.value_text) as float;
+        let scale = 1.0;
+        let i = 0;
+        let e = self.value_exp;
+        if e < 0 {
+            e = 0 - e;
+        }
+        while i < e {
+            scale *= 10.0;
+            i += 1;
+        }
+        // Exact `d` and `scale`, so one correctly rounded step.
+        if self.value_exp < 0 {
+            return Option::Some(d / scale);
+        }
+        return Option::Some(d * scale);
+    }
+
+    /// The value of a `true` / `false` constant.
+    pub fn bool() -> Option<bool> {
+        if self.value_kind != "bool" {
+            return Option::None;
+        }
+        return Option::Some(self.value_text == "1");
+    }
+
+    /// The value of a string constant, escapes decoded: for `"a\"b"`, `a"b`.
+    pub fn string() -> Option<string> {
+        if self.value_kind != "string" {
+            return Option::None;
+        }
+        return Option::Some(self.value_text);
+    }
+}
+
+/// A decimal integer the compiler wrote (`-` then digits, in range).
+fn decimal(string text) -> int {
+    let digits = to_bytes(text);
+    let n = 0;
+    let i = 0;
+    let negative = digits.len() > 0 && digits[0] == 45 as byte;
+    if negative {
+        i = 1;
+    }
+    // Counted down, so the most negative `int` fits.
+    while i < digits.len() {
+        n = n * 10 - (digits[i] as int - 48);
+        i += 1;
+    }
+    if negative {
+        return n;
+    }
+    return 0 - n;
 }
 
 /// A type annotation as written (not resolved): `Vec<int>`, `json::Value`.
@@ -618,11 +697,14 @@ impl Reader {
         return new Ident(name);
     }
 
-    /// A macro argument: kind, then text.
+    /// A macro argument: kind, text, then its value (kind, text, exponent).
     pub fn expr() -> Expr {
         let kind = self.str();
         let text = self.str();
-        return new Expr(text, kind);
+        let value_kind = self.str();
+        let value_text = self.str();
+        let value_exp = self.int();
+        return new Expr(text, kind, value_kind, value_text, value_exp);
     }
 
     pub fn exprs() -> Vec<Expr> {

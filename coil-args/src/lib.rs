@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use clap::{ArgMatches, Args, Command, FromArgMatches};
-use compiler::{ContractLevel, DebugLevel, HostGrants, OptLevel};
+use compiler::{ComptimeGrants, ComptimeLimits, ContractLevel, DebugLevel, HostGrants, OptLevel, Scoped};
 
 /// SARIF / LSP diagnostic stream (commands that report through the compiler).
 #[derive(Args, Clone, Debug, Default)]
@@ -152,6 +152,63 @@ pub struct HostGrantFlags {
     /// Load STEM's library without a hash check (repeatable)
     #[arg(long = "dload-trusted", value_name = "STEM", action = clap::ArgAction::Append)]
     pub dload_trusted: Vec<String>,
+    /// Most steps (loop iterations + calls) one compile-time evaluation may
+    /// run, such as a macro call (default 1000000000)
+    #[arg(long = "comptime-steps", value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
+    pub comptime_steps: Option<u64>,
+    /// Most memory, in MiB, one compile-time evaluation may keep live
+    /// (default 1024)
+    #[arg(long = "comptime-mem", value_name = "MIB", value_parser = clap::value_parser!(u64).range(1..=1 << 40))]
+    pub comptime_mem: Option<u64>,
+    /// Let compile-time code read files under PATH; `MODULE=PATH` for code in
+    /// MODULE and the modules under it only (repeatable)
+    #[arg(long = "comptime-read", value_name = "[MODULE=]PATH", action = clap::ArgAction::Append)]
+    pub comptime_read: Vec<String>,
+    /// Let compile-time code write files under PATH (repeatable, `MODULE=` as above)
+    #[arg(long = "comptime-write", value_name = "[MODULE=]PATH", action = clap::ArgAction::Append)]
+    pub comptime_write: Vec<String>,
+    /// Let compile-time code read environment variable NAME (repeatable,
+    /// `MODULE=` as above)
+    #[arg(long = "comptime-env", value_name = "[MODULE=]NAME", action = clap::ArgAction::Append)]
+    pub comptime_env: Vec<String>,
+    /// Let compile-time code run programs named STEM (repeatable, `MODULE=`
+    /// as above)
+    #[arg(long = "comptime-exec", value_name = "[MODULE=]STEM", action = clap::ArgAction::Append)]
+    pub comptime_exec: Vec<String>,
+    /// Let compile-time code connect to HOST (any port) or HOST:PORT over
+    /// TCP (repeatable, `MODULE=` as above)
+    #[arg(long = "comptime-net", value_name = "[MODULE=]HOST[:PORT]", action = clap::ArgAction::Append)]
+    pub comptime_net: Vec<String>,
+    /// Most seconds one compile-time evaluation may take, checked at each
+    /// IO call; one connect or read waits at most 30 (default 300)
+    #[arg(long = "comptime-timeout", value_name = "SECS", value_parser = clap::value_parser!(u64).range(1..))]
+    pub comptime_timeout: Option<u64>,
+    /// Keep the results of compile-time IO in DIR (default
+    /// ~/.cache/coil/comptime)
+    #[arg(long = "comptime-cache", value_name = "DIR")]
+    pub comptime_cache: Option<PathBuf>,
+    /// Use cached compile-time results only: a result that is not cached
+    /// may not read the environment or run a program
+    #[arg(long = "comptime-offline", conflicts_with = "comptime_refresh")]
+    pub comptime_offline: bool,
+    /// Compute cached compile-time results that used the environment or a
+    /// program again, and report which changed
+    #[arg(long = "comptime-refresh")]
+    pub comptime_refresh: bool,
+}
+
+/// Parse grant and compile-time limit flags from `words` (a test file's
+/// `// Flags:` header), as the command line would.
+pub fn parse_grant_flags(words: &[&str]) -> Result<HostGrantFlags, String> {
+    #[derive(clap::Parser)]
+    #[command(no_binary_name = true, disable_help_flag = true)]
+    struct Words {
+        #[command(flatten)]
+        grants: HostGrantFlags,
+    }
+    <Words as clap::Parser>::try_parse_from(words)
+        .map(|w| w.grants)
+        .map_err(|e| e.render().to_string().lines().next().unwrap_or("bad flags").to_string())
 }
 
 /// `STEM=SHA256` with a 64-digit hex digest.
@@ -183,10 +240,73 @@ impl HostGrantFlags {
             || !self.ffi_search_path.is_empty()
             || !self.dload_pin.is_empty()
             || !self.dload_trusted.is_empty()
+            || self.comptime_steps.is_some()
+            || self.comptime_mem.is_some()
+            || !self.comptime_read.is_empty()
+            || !self.comptime_write.is_empty()
+            || !self.comptime_env.is_empty()
+            || !self.comptime_exec.is_empty()
+            || !self.comptime_net.is_empty()
+            || self.comptime_timeout.is_some()
+            || self.comptime_cache.is_some()
+            || self.comptime_offline
+            || self.comptime_refresh
+    }
+
+    /// The `--comptime-read` / `-write` / `-env` / `-exec` grants.
+    fn comptime_io(&self) -> ComptimeGrants {
+        let paths = |list: &[String]| list.iter().map(|g| Scoped::parse(g, |p| PathBuf::from(p))).collect();
+        let names = |list: &[String]| list.iter().map(|g| Scoped::parse(g, |n| n.to_string())).collect();
+        ComptimeGrants {
+            read: paths(&self.comptime_read),
+            write: paths(&self.comptime_write),
+            env: names(&self.comptime_env),
+            exec: names(&self.comptime_exec),
+            net: names(&self.comptime_net),
+        }
+    }
+
+    /// Add these flags to `grants`: capabilities and lists add up, and a
+    /// limit given here replaces the one in `grants`.
+    pub fn apply_to(self, grants: &mut HostGrants) {
+        let limits = grants.comptime;
+        let steps = self.comptime_steps;
+        let mem = self.comptime_mem;
+        let timeout = self.comptime_timeout;
+        let extra = self.into_grants();
+        grants.comptime_io.extend(extra.comptime_io);
+        if extra.comptime_cache.dir.is_some() {
+            grants.comptime_cache.dir = extra.comptime_cache.dir;
+        }
+        grants.comptime_cache.offline |= extra.comptime_cache.offline;
+        grants.comptime_cache.refresh |= extra.comptime_cache.refresh;
+        grants.allow_attach |= extra.allow_attach;
+        grants.allow_exec |= extra.allow_exec;
+        grants.allow_exit |= extra.allow_exit;
+        grants.allow_ffi_exec |= extra.allow_ffi_exec;
+        grants.allow_read |= extra.allow_read;
+        grants.allow_write |= extra.allow_write;
+        grants.allow_net |= extra.allow_net;
+        grants.allow_env |= extra.allow_env;
+        for stem in extra.allow_dload {
+            grants.grant_dload_allow(stem);
+        }
+        for path in extra.ffi_search_paths {
+            grants.add_ffi_search_path(path);
+        }
+        grants.dload_pins.extend(extra.dload_pins);
+        grants.dload_trusted.extend(extra.dload_trusted);
+        grants.comptime = ComptimeLimits {
+            steps: steps.unwrap_or(limits.steps),
+            heap_bytes: mem.map_or(limits.heap_bytes, |m| m << 20),
+            timeout_secs: timeout.unwrap_or(limits.timeout_secs),
+        };
     }
 
     pub fn into_grants(self) -> HostGrants {
+        let comptime_io = self.comptime_io();
         let mut grants = HostGrants {
+            comptime_io,
             allow_attach: self.allow_attach,
             allow_exec: self.allow_exec,
             allow_exit: self.allow_exit,
@@ -199,6 +319,17 @@ impl HostGrantFlags {
             ffi_search_paths: self.ffi_search_path,
             dload_pins: self.dload_pin,
             dload_trusted: self.dload_trusted,
+            comptime: ComptimeLimits {
+                steps: self.comptime_steps.unwrap_or(ComptimeLimits::DEFAULT_STEPS),
+                heap_bytes: self.comptime_mem.unwrap_or(ComptimeLimits::DEFAULT_MEM_MIB) << 20,
+                timeout_secs: self.comptime_timeout.unwrap_or(ComptimeLimits::DEFAULT_TIMEOUT_SECS),
+            },
+            comptime_cache: compiler::comptime_cache::CacheConfig {
+                dir: self.comptime_cache,
+                offline: self.comptime_offline,
+                refresh: self.comptime_refresh,
+                replay: false,
+            },
         };
         if self.allow_all {
             grants.grant_all();

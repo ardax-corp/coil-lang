@@ -918,6 +918,7 @@ where
         | Expression::Raise(e)
         | Expression::Panic(e)
         | Expression::TypeOf(e)
+        | Expression::Comptime(e)
         | Expression::Try(e)
         | Expression::Yield(e)
         | Expression::YieldFrom(e)
@@ -1057,6 +1058,8 @@ where
             f(name);
             f(body);
         }
+        // Expanded before this runs; its body is the expansion program's.
+        Expression::ComptimeBlock(_) => {}
         Expression::TypeApp { args, .. } => {
             for arg in args {
                 f(arg);

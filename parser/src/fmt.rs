@@ -59,7 +59,15 @@ pub fn format_range(src: &str, _range: std::ops::Range<usize>) -> Result<String,
 /// Format an AST without its source text (no comments, no blank-line
 /// preservation). Prefer [`format_source`].
 pub fn format_program(expr: &Expression<'_>) -> String {
+    format_program_noted(expr, Vec::new())
+}
+
+/// [`format_program`] with a `//` comment line before some top-level
+/// items: `notes[i]` leads item `i` of the program (`coil dissect --expand`
+/// names the macro or `comptime` block an item came from).
+pub fn format_program_noted(expr: &Expression<'_>, notes: Vec<Option<String>>) -> String {
     let mut f = Formatter::new("", Vec::new());
+    f.item_notes = notes;
     f.fmt_expression(expr);
     f.finish()
 }
@@ -83,6 +91,8 @@ struct Formatter<'s> {
     /// Columns the line still gets after the construct being laid out (a
     /// statement's `;`), counted by [`Self::fits_flat`] (#1795).
     trailing: usize,
+    /// See [`format_program_noted`].
+    item_notes: Vec<Option<String>>,
 }
 
 impl<'s> Formatter<'s> {
@@ -98,6 +108,7 @@ impl<'s> Formatter<'s> {
             type_ctx: false,
             measuring: false,
             trailing: 0,
+            item_notes: Vec::new(),
         }
     }
 
@@ -830,6 +841,10 @@ impl<'s> Formatter<'s> {
                 self.push_str("typeof ");
                 self.fmt_operand(inner, PREC_UNARY);
             }
+            Expression::Comptime(inner) => {
+                self.push_str("comptime ");
+                self.fmt_operand(inner, PREC_UNARY);
+            }
 
             Expression::And(lhs, rhs) => self.fmt_logic_chain(expr, lhs, rhs, "&&"),
             Expression::Or(lhs, rhs) => self.fmt_logic_chain(expr, lhs, rhs, "||"),
@@ -1369,6 +1384,11 @@ impl<'s> Formatter<'s> {
                 self.fmt_block_or_inline(body);
             }
 
+            Expression::ComptimeBlock(body) => {
+                self.push_str("comptime ");
+                self.fmt_block_or_inline(body);
+            }
+
             Expression::EnumDecl {
                 docs,
                 attrs,
@@ -1670,6 +1690,13 @@ impl<'s> Formatter<'s> {
                 self.fmt_use_group(&uses);
                 &items[i - 1]
             } else {
+                if let Some(Some(note)) = self.item_notes.get(i).cloned() {
+                    for line in note.lines() {
+                        self.push_str("// ");
+                        self.push_str(line);
+                        self.newline();
+                    }
+                }
                 self.fmt_expression(items[i].1.as_ref());
                 i += 1;
                 &items[i - 1]
@@ -2808,6 +2835,7 @@ fn expr_prec(e: &Expression<'_>) -> u8 {
         | Expression::Not(_)
         | Expression::LogicalNot(_)
         | Expression::Readonly(_)
+        | Expression::Comptime(_)
         | Expression::TypeOf(_) => PREC_UNARY,
         _ => u8::MAX,
     }
@@ -3010,6 +3038,24 @@ mod tests {
         let formatted = format_source(src).expect("format failed");
         let ast2 = parse_exprs(&formatted);
         assert_eq!(ast1, ast2, "formatted:\n{formatted}");
+    }
+
+    #[test]
+    fn comptime_keeps_its_operand_parens() {
+        let src = "fn f() -> int {\n    let a = comptime sq(2) + 1;\n    return comptime (a + 1) * comptime sq(3);\n}\n";
+        assert_eq!(format_source(src).unwrap(), src);
+    }
+
+    #[test]
+    fn comptime_value_block_round_trips() {
+        let src = "fn f() -> int {\n    let n = comptime {\n        let a = sq(3);\n        return a + 1;\n    };\n    return n;\n}\n";
+        assert_eq!(format_source(src).unwrap(), src);
+    }
+
+    #[test]
+    fn comptime_block_round_trips() {
+        let src = "use gen::adder;\n\ncomptime {\n    let n = 40;\n    return adder(\"f\", n);\n}\n\nfn main() {}\n";
+        assert_eq!(format_source(src).unwrap(), src);
     }
 
     #[test]

@@ -448,6 +448,9 @@ const STACK_OVERFLOW: &str = "stack overflow: recursion exceeds the VM's operand
 pub(crate) const STEP_BUDGET_EXHAUSTED: &str =
     "step budget exhausted: execution exceeded its back-edge / call limit";
 
+/// Panic when the heap outgrows [`Machine::set_heap_cap`]'s cap.
+pub(crate) const HEAP_CAP_EXCEEDED: &str = "heap limit exceeded: live objects outgrew the memory cap";
+
 /// Call depths [`Machine::rearm_call_window`] reserves ahead of the current one.
 const CALL_WINDOW: usize = 32;
 
@@ -608,6 +611,20 @@ pub struct Machine<const S: usize> {
     /// `fuel` as [`Self::set_step_budget`] last set it (see
     /// [`Self::steps_charged`]).
     fuel_start: u64,
+    /// Heap cap from [`Self::set_heap_cap`] (`usize::MAX`: none).
+    heap_cap: usize,
+    /// Set once the live heap outgrew [`Self::heap_cap`] after a full
+    /// collection (see [`Self::heap_cap_exceeded`]).
+    heap_cap_hit: bool,
+}
+
+
+/// Install `kinds` as the static word kinds of the program this thread
+/// runs (what a GC root walk reads static slots by) and return the ones
+/// it replaces. A VM that runs on a thread already serving another program
+/// (the compile-time VM) installs its own and puts the old ones back.
+pub fn swap_static_word_kinds(kinds: Arc<Vec<u8>>) -> Arc<Vec<u8>> {
+    STATIC_KINDS.with_borrow_mut(|k| std::mem::replace(k, kinds))
 }
 
 impl<const S: usize> Default for Machine<S> {
@@ -694,6 +711,8 @@ impl<const S: usize> Machine<S> {
             fuel: u64::MAX,
             step_budget_hit: false,
             fuel_start: u64::MAX,
+            heap_cap: usize::MAX,
+            heap_cap_hit: false,
         }
     }
 
@@ -722,13 +741,52 @@ impl<const S: usize> Machine<S> {
         self.step_budget_hit
     }
 
-    /// Fuel reached zero: panic with [`STEP_BUDGET_EXHAUSTED`] at `pc`.
+    /// Limit the heap to `cap` bytes of objects, checked at GC safepoints
+    /// after a full collection. Outgrowing it is a VM panic at the next loop
+    /// back-edge or call ([`Self::panicked`] and [`Self::heap_cap_exceeded`]
+    /// become true). `None` (the default) removes the limit. Like the step
+    /// budget, it spans every run until set again.
+    pub fn set_heap_cap(&mut self, cap: Option<usize>) {
+        self.heap_cap = cap.unwrap_or(usize::MAX);
+        self.heap_cap_hit = false;
+        self.heap.get_mut().set_byte_cap(self.heap_cap);
+    }
+
+    /// True once the heap outgrew the cap from [`Self::set_heap_cap`].
+    pub fn heap_cap_exceeded(&self) -> bool {
+        self.heap_cap_hit
+    }
+
+    /// At a GC safepoint: collect fully when the heap is over its cap, and if
+    /// it still is, stop at the next charge (the fuel check is the only
+    /// place the dispatch loop looks, so the hot path pays nothing).
+    #[cold]
+    #[inline(never)]
+    fn heap_cap_safepoint(&mut self) {
+        if !self.heap_cap_hit {
+            self.gc_collect();
+            if !self.heap.get().over_byte_cap() {
+                return;
+            }
+            self.heap_cap_hit = true;
+        }
+        self.fuel = 1;
+    }
+
+    /// Fuel reached zero: panic with [`STEP_BUDGET_EXHAUSTED`] at `pc` (or
+    /// [`HEAP_CAP_EXCEEDED`] when [`Self::heap_cap_safepoint`] drained it).
     /// Returns `false` (stop), like [`Self::runtime_panic`]. Leaves one unit
     /// so any later charge (host re-entry after the panic) stops again.
     #[cold]
     #[inline(never)]
     fn step_budget_out(&mut self, pc: usize) -> bool {
         self.fuel = 1;
+        if self.heap_cap_hit {
+            if self.panicked {
+                return false;
+            }
+            return self.runtime_panic(HEAP_CAP_EXCEEDED, pc);
+        }
         if self.step_budget_hit {
             self.panicked = true;
             return false;
@@ -1742,6 +1800,9 @@ impl<const S: usize> Machine<S> {
             crate::memory::GcPhase::Marking => self.gc_mark_slice(),
             crate::memory::GcPhase::Sweeping => self.gc_sweep_slice(),
         }
+        if unlikely(self.heap.get().over_byte_cap()) {
+            self.heap_cap_safepoint();
+        }
     }
 
     /// Open a cycle: mark to completion now, leave the sweep to later
@@ -2584,6 +2645,22 @@ impl<const S: usize> Machine<S> {
         self.statics = vec![Value::default(); static_slots as usize];
     }
 
+    /// Static slot `slot`'s value (`None` past the slots).
+    pub fn static_value(&self, slot: u32) -> Option<Value> {
+        self.statics.get(slot as usize).copied()
+    }
+
+    /// Write static slot `slot`; false past the slots.
+    pub fn set_static(&mut self, slot: u32, value: Value) -> bool {
+        match self.statics.get_mut(slot as usize) {
+            Some(s) => {
+                *s = value;
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn heap_mut(&mut self) -> &mut Heap {
         self.heap.get_mut()
     }
@@ -2604,8 +2681,13 @@ impl<const S: usize> Machine<S> {
             ffi_search_paths: self.ffi_search_paths.clone(),
             dload_gate: self.dload_gate.clone(),
             struct_layouts: Arc::clone(&self.struct_layouts),
-            statics: Arc::new(self.statics.iter().map(|v| v.raw() as u64).collect()),
+            statics: self.static_words(),
         })
+    }
+
+    /// The static slots' words, for a worker that reads them.
+    pub fn static_words(&self) -> Arc<Vec<u64>> {
+        Arc::new(self.statics.iter().map(|v| v.raw() as u64).collect())
     }
 
     /// A shared-heap job's statics: the spawning VM's words, which name
@@ -3894,7 +3976,7 @@ impl<const S: usize> Machine<S> {
             // variant. A stale ceiling (e.g. YieldFromCoro) makes later opcodes
             // (`StoreIndex`, `DoneCoro`, `ArrayPush`, …) UB via assert_unchecked.
             #[cfg(not(debug_assertions))]
-            promise!(*bc as u8 <= Instruction::NEQF as u8);
+            promise!(*bc as u8 <= Instruction::RestoreSnapshot as u8);
 
             match bc {
                 Instruction::STORE => {

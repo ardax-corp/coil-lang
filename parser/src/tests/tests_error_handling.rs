@@ -57,6 +57,21 @@
     }
 
     #[test]
+    fn comptime_binds_like_unary_minus() {
+        match unwrap_expr(parse_expr("comptime f(x)? + 1").as_ref()) {
+            Expression::Add(lhs, _) => match lhs.1.as_ref() {
+                Expression::Comptime(inner) => assert_eq!(inner.1.to_string(), "f(x)?"),
+                other => panic!("expected Comptime, got {:?}", other),
+            },
+            other => panic!("expected Add, got {:?}", other),
+        }
+        match unwrap_expr(parse_expr("comptime (1 + 2)").as_ref()) {
+            Expression::Comptime(_) => {}
+            other => panic!("expected Comptime of group, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn typeof_binds_like_a_unary_prefix() {
         // #1773: `typeof(x) == "int"` is `(typeof x) == "int"`.
         for src in ["typeof(x) == \"int\"", "typeof x == \"int\""] {

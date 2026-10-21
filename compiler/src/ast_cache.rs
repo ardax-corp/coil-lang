@@ -145,6 +145,12 @@ impl CachedAst {
         &self.macro_decls
     }
 
+    /// Register macro items found in generated code: other modules may use
+    /// them from the next round on.
+    pub fn push_macro_decls(&mut self, decls: impl IntoIterator<Item = MacroDecl>) {
+        self.macro_decls.extend(decls);
+    }
+
     /// User macro uses still waiting for the pipeline.
     pub fn pending_macros(&self) -> &[PendingMacro] {
         &self.expand.pending

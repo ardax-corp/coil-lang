@@ -232,6 +232,8 @@ pub enum MacroKind {
     Attr,
     /// `macro name(…)`, used as `name!(…)`.
     Function,
+    /// A top-level `comptime { … }` block: its own expansion program.
+    Comptime,
 }
 
 impl MacroKind {
@@ -240,6 +242,7 @@ impl MacroKind {
             Self::Derive => "derive",
             Self::Attr => "attribute macro",
             Self::Function => "macro",
+            Self::Comptime => "`comptime` block",
         }
     }
 }
@@ -352,15 +355,127 @@ pub struct CompiledExpansion {
     pub static_slot_count: u32,
     pub operand_stack_slots: u32,
     pub program_debug: common::ProgramDebug,
+    /// Per-class field word kinds, so captured instances know which fields
+    /// are scalars.
+    pub class_word_kinds: Vec<common::ClassWordKinds>,
+    /// Word kind of each static slot (`common::WORD_*`).
+    pub static_word_kinds: std::sync::Arc<Vec<u8>>,
 }
 
 /// Runs a compiled expansion program. Implemented by the `comptime` crate on
 /// top of the VM so the compiler itself does not depend on `machine`.
 pub trait MacroHost: Send + Sync {
+    /// Id of the compiler and VM this host was built with, which keys the
+    /// on-disk cache of compiled expansion programs; empty keeps none.
+    fn build_id(&self) -> &'static str {
+        ""
+    }
+
     /// Call each `(entry, input)`: `entry` is the offset of a
-    /// `fn(string input) -> string`. Returns each result, or the panic /
-    /// error text.
-    fn run(&self, program: &CompiledExpansion, calls: &[(u32, String)]) -> Vec<Result<String, String>>;
+    /// `fn(string input) -> string`, each call within `limits` and with the
+    /// IO `io` grants. Returns each result, or the panic / error text, with
+    /// the IO the call did.
+    fn run(
+        &self,
+        program: &CompiledExpansion,
+        calls: &[(u32, String)],
+        limits: &crate::ComptimeLimits,
+        io: &ComptimeIo,
+    ) -> Vec<MacroRun>;
+
+    /// Compute `consts` in order on a compile-time VM of `program`: call
+    /// each initializer, store its value to its static slot (later
+    /// initializers may read earlier ones), then capture every value as one
+    /// snapshot, so values shared between them stay shared. An explicit
+    /// item runs within `limits`; a silent one within the silent tier
+    /// ([`crate::ComptimeLimits::SILENT_CALL_STEPS`] each,
+    /// [`crate::ComptimeLimits::SILENT_MODULE_STEPS`] for all of them) and,
+    /// when it fails, is left out instead of failing the rest.
+    ///
+    /// Then, on the same VM (so a call can read the consts), each of
+    /// `folds` runs within the silent tier; one that fails is `None`.
+    ///
+    /// An explicit item may do the IO `io[item.io]` grants; nothing else
+    /// may do any.
+    fn eval_consts(
+        &self,
+        program: &CompiledExpansion,
+        consts: &[ConstEval],
+        folds: &[FoldCall],
+        limits: &crate::ComptimeLimits,
+        io: &[ComptimeIo],
+    ) -> Result<ConstEvalOutcome, ConstEvalError>;
+}
+
+/// A word or a string: an argument or result of a call folded at compile
+/// time.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum FoldValue {
+    Word(u64),
+    Text(String),
+}
+
+/// A pure call with constant arguments to compute at compile time: its
+/// callee's entry, the arguments, and whether it returns a `string`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FoldCall {
+    pub entry: u32,
+    pub args: Vec<FoldValue>,
+    pub text: bool,
+}
+
+/// A value to compute at compile time: the entry of its initializer
+/// (`__static_init$NAME`), the static slot its value is stored to and that
+/// slot's word kind (`common::WORD_*`). `silent` for a `static let`, whose
+/// failure keeps its startup initializer; a `const`'s fails the build.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConstEval {
+    pub entry: u32,
+    pub slot: u32,
+    pub kind: u8,
+    pub silent: bool,
+    /// A value with no snapshot form (a function value, a handle) keeps
+    /// its startup initializer instead of failing the build: a `const`'s,
+    /// not a `comptime` expression's.
+    pub startup_ok: bool,
+    /// Index of its grants in the request's `io` (unused when `silent`:
+    /// silent work never does IO).
+    pub io: u32,
+    /// Its value from the result cache (its static slot already set):
+    /// restored instead of calling the initializer.
+    pub cached: Option<std::sync::Arc<common::HeapSnapshot>>,
+    /// Record the IO it does, and when it did some, snapshot its value
+    /// alone, for the result cache ([`ConstEvalOutcome::records`]).
+    pub record: bool,
+}
+
+/// A `record` item that did IO: its index, the IO, and its value alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConstRecord {
+    pub index: usize,
+    pub accesses: Vec<ComptimeAccess>,
+    pub snapshot: common::HeapSnapshot,
+}
+
+/// The computed values, the silent items left out (indices into the
+/// request), which keep their startup initializers, and each fold's
+/// result.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConstEvalOutcome {
+    pub snapshot: common::HeapSnapshot,
+    pub skipped: Vec<usize>,
+    pub folded: Vec<Option<FoldValue>>,
+    pub records: Vec<ConstRecord>,
+}
+
+/// Why [`MacroHost::eval_consts`] gave no snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConstEvalError {
+    /// Initializer `index` panicked or ran out of budget; the reason.
+    Failed { index: usize, reason: String },
+    /// A value reached from a const has no compile-time form. `root` is
+    /// the index of the const in the request.
+    Unsnapshottable(common::SnapshotError),
 }
 
 static DEFAULT_HOST: std::sync::OnceLock<std::sync::Arc<dyn MacroHost>> = std::sync::OnceLock::new();
@@ -376,15 +491,173 @@ pub fn default_host() -> Option<std::sync::Arc<dyn MacroHost>> {
     DEFAULT_HOST.get().cloned()
 }
 
-/// Step budget for one macro call (loop back-edges + calls).
-pub const MACRO_STEP_BUDGET: u64 = 20_000_000;
+/// The IO one compile-time evaluation may do, resolved for the module its
+/// code is in ([`crate::ComptimeGrants::for_module`]): files under `read` /
+/// `write` (absolute), environment variables `env`, programs whose stem is
+/// in `exec`, TCP connections to `net` (`host` or `host:port`). The host checks each native call against it. `offline`
+/// (`--comptime-offline`) refuses the environment and programs: an
+/// evaluation runs then only when no cached result was found. `replay` is
+/// the language server's offline mode: it also refuses writes, and its
+/// refusals say to build the project.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct ComptimeIo {
+    pub read: Vec<PathBuf>,
+    pub write: Vec<PathBuf>,
+    pub env: Vec<String>,
+    pub exec: Vec<String>,
+    pub net: Vec<String>,
+    pub offline: bool,
+    pub replay: bool,
+}
+
+/// One granted IO call of a compile-time evaluation, as the result cache
+/// records it ([`crate::comptime_cache`]).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ComptimeAccess {
+    /// A file or directory read (absolute), with [`crate::comptime_cache::path_digest`]
+    /// of it when first read.
+    Read { path: PathBuf, digest: [u8; 32] },
+    Write(PathBuf),
+    Env(String),
+    Exec(String),
+    /// A TCP connection, `host:port`.
+    Net(String),
+}
+
+/// One macro call's output (or failure) and the IO it did.
+pub type MacroRun = (Result<String, String>, Vec<ComptimeAccess>);
+
+impl ComptimeIo {
+    /// The effect bits (`common::EffectFlags`) code with these grants may
+    /// have while compiling.
+    pub fn effects(&self) -> u16 {
+        use common::EffectFlags as F;
+        [
+            (!self.read.is_empty(), F::READ),
+            (!self.write.is_empty(), F::WRITE),
+            (!self.env.is_empty(), F::ENV),
+            (!self.exec.is_empty(), F::EXEC),
+            (!self.net.is_empty(), F::NET),
+        ]
+        .into_iter()
+        .filter(|(on, _)| *on)
+        .fold(0, |acc, (_, bits)| acc | bits)
+    }
+
+    pub fn check_read(&self, path: &str) -> Result<(), String> {
+        if under_any(&absolute_path(Path::new(path)), &self.read) {
+            return Ok(());
+        }
+        Err(format!("reading `{path}` while compiling needs `--comptime-read {}`", grant_hint(path)))
+    }
+
+    pub fn check_write(&self, path: &str) -> Result<(), String> {
+        if under_any(&absolute_path(Path::new(path)), &self.write) {
+            if self.replay {
+                return Err(format!(
+                    "the editor does not run compile-time code that writes files (`{path}`); build the project to run it"
+                ));
+            }
+            return Ok(());
+        }
+        Err(format!("writing `{path}` while compiling needs `--comptime-write {}`", grant_hint(path)))
+    }
+
+    pub fn check_env(&self, name: &str) -> Result<(), String> {
+        if self.env.iter().any(|n| n == name) {
+            return self.check_online(&format!("reads environment variable `{name}`"));
+        }
+        Err(format!("reading environment variable `{name}` while compiling needs `--comptime-env {name}`"))
+    }
+
+    pub fn check_exec(&self, program: &str) -> Result<(), String> {
+        let stem = Path::new(program).file_stem().and_then(|s| s.to_str()).unwrap_or(program);
+        if self.exec.iter().any(|s| s == stem) {
+            return self.check_online(&format!("runs `{program}`"));
+        }
+        Err(format!("running `{program}` while compiling needs `--comptime-exec {stem}`"))
+    }
+
+    /// A TCP connection to `host:port`: granted by `host` or `host:port`.
+    pub fn check_net(&self, host: &str, port: i64) -> Result<(), String> {
+        let at = format!("{host}:{port}");
+        if self.net.iter().any(|g| g.eq_ignore_ascii_case(host) || g.eq_ignore_ascii_case(&at)) {
+            return self.check_online(&format!("connects to `{at}`"));
+        }
+        Err(format!("connecting to `{at}` while compiling needs `--comptime-net {at}`"))
+    }
+
+    fn check_online(&self, what: &str) -> Result<(), String> {
+        if !self.offline {
+            return Ok(());
+        }
+        if self.replay {
+            return Err(format!(
+                "the editor uses cached compile-time results only, and this one is not cached or is out of date: it {what} while compiling; build the project to record it"
+            ));
+        }
+        Err(format!(
+            "with `--comptime-offline` there is no cached result for this, and it {what} while compiling; build once without `--comptime-offline` to record it"
+        ))
+    }
+}
+
+/// The directory to grant for `path`: itself when it is one, else its
+/// parent (`.` for a bare file name).
+fn grant_hint(path: &str) -> String {
+    let p = Path::new(path);
+    if p.is_dir() {
+        return path.to_string();
+    }
+    match p.parent().map(|d| d.to_string_lossy().into_owned()) {
+        Some(d) if !d.is_empty() => format!("{d}/"),
+        _ => ".".to_string(),
+    }
+}
+
+fn under_any(path: &Path, roots: &[PathBuf]) -> bool {
+    // A `..` left in a path that does not exist yet could climb out through
+    // a symlink, so such a path is under nothing.
+    !path.components().any(|c| c == std::path::Component::ParentDir) && roots.iter().any(|root| path.starts_with(root))
+}
+
+/// `path` made absolute against the working directory, with symlinks
+/// resolved as far as it exists, so a link cannot lead out of a granted
+/// directory. A part that does not exist yet is kept as written.
+pub fn absolute_path(path: &Path) -> PathBuf {
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(path)
+    };
+    if let Ok(real) = joined.canonicalize() {
+        return real;
+    }
+    // The longest prefix that exists, resolved, then the rest.
+    let mut rest = Vec::new();
+    let mut base = joined.as_path();
+    loop {
+        match (base.parent(), base.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_os_string());
+                base = parent;
+                if let Ok(mut real) = base.canonicalize() {
+                    real.extend(rest.iter().rev());
+                    return real;
+                }
+            }
+            // Ends in `..` or reached the root: leave it as written.
+            _ => return joined,
+        }
+    }
+}
 
 /// Host natives a macro may call: pure computation only (no IO, files,
 /// network, environment, clocks, threads or process control).
 pub fn native_allowed_at_compile_time(name: &str) -> bool {
     matches!(
         name,
-        "from_bytes" | "to_bytes" | "ord" | "char" | "hash_string" | "result_unit_probe" | "simd_axpy_reduce"
+        "from_bytes" | "to_bytes" | "ord" | "char" | "hash_string" | "result_unit_probe" | "simd_axpy_reduce" | "black_box"
     ) || ["math_", "vec_", "packed_", "gc_", "string_"]
         .iter()
         .any(|p| name.starts_with(p))

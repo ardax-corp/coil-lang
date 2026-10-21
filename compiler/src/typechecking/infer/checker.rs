@@ -3389,6 +3389,9 @@ impl Checker {
             } => self.infer_lambda(args, captures, body, range),
 
             Expression::TestCase { name, body } => self.infer_test_case(name, body, &range),
+            // Left in place only when it could not be expanded, which
+            // was reported.
+            Expression::ComptimeBlock(_) => unit_ty(),
             Expression::Implementation {
                 what,
                 owner,
@@ -5520,6 +5523,7 @@ impl Checker {
                     }
                     PreludeFn::Diff => self.infer_matrix_cells_call(&reordered, id, range, "diff"),
                     PreludeFn::Ord => self.infer_ord(&reordered, range),
+                    PreludeFn::BlackBox => self.infer_black_box(&reordered, range),
                     PreludeFn::Char => self.infer_char(&reordered, range),
                     PreludeFn::Sin
                     | PreludeFn::Cos
@@ -5552,6 +5556,7 @@ impl Checker {
                 }
                 PreludeFn::Diff => self.infer_matrix_cells_call(arg_slice, id, range, "diff"),
                 PreludeFn::Ord => self.infer_ord(arg_slice, range),
+                PreludeFn::BlackBox => self.infer_black_box(arg_slice, range),
                 PreludeFn::Char => self.infer_char(arg_slice, range),
                 PreludeFn::Sin
                 | PreludeFn::Cos
@@ -8054,6 +8059,22 @@ impl Checker {
     }
 
     /// `ord(string) -> Result<byte, string>`.
+    /// `black_box(x) -> typeof x`.
+    fn infer_black_box(&mut self, args: &[Output], range: Range<usize>) -> Ty {
+        if args.len() != 1 {
+            for arg in args {
+                let _ = self.infer(arg);
+            }
+            return self.error_with_help(
+                ErrorCode::ConstructorArity,
+                format!("black_box expects 1 argument, got {}", args.len()),
+                range,
+                Some("use `black_box(x)` with the one value to hide from the optimizer".to_string()),
+            );
+        }
+        self.infer(&args[0])
+    }
+
     fn infer_ord(&mut self, args: &[Output], range: Range<usize>) -> Ty {
         use crate::typechecking::ty::byte;
         if args.len() != 1 {
@@ -16932,6 +16953,7 @@ impl Checker {
             | Expression::Raise(e)
             | Expression::Panic(e)
             | Expression::TypeOf(e)
+            | Expression::Comptime(e)
             | Expression::Try(e)
             | Expression::Yield(e)
             | Expression::YieldFrom(e)
@@ -17074,6 +17096,8 @@ impl Checker {
                 self.pre_register_enums_walk(name, errors);
                 self.pre_register_enums_walk(body, errors);
             }
+            // Expanded before this runs; its body is the expansion program's.
+            Expression::ComptimeBlock(_) => {}
 
             Expression::Branch(cond, body) => {
                 if let Some(c) = cond {
@@ -19311,6 +19335,13 @@ impl Checker {
         is_let(name) || is_let(&self.qualify_module_name(name))
     }
 
+    /// True for a `const` lifted to a static slot (its value is computed,
+    /// not folded), by its own or its module-qualified name.
+    pub(crate) fn is_const_static(&self, name: &str) -> bool {
+        let is_const = |fqn: &str| self.static_slots.get(fqn).is_some_and(|(_, is_const)| *is_const);
+        is_const(name) || is_const(&self.qualify_module_name(name))
+    }
+
     /// Static slot for a name in the current module namespace.
     pub fn static_slot_for_module_name(&self, name: &str) -> Option<u32> {
         self.static_slot_index(&self.qualify_module_name(name))
@@ -19433,8 +19464,32 @@ impl Checker {
     }
 
     /// Every class key with its `InitTyped` type id.
+    /// Name of field slot `index` of the class or record with `InitTyped`
+    /// id `type_id`.
+    pub fn typed_field_name(&self, type_id: u32, index: usize) -> Option<String> {
+        if let Some((key, _)) = self.class_type_ids.iter().find(|(_, id)| **id == type_id) {
+            return self.class_fields(key)?.get(index).map(|(name, _)| name.clone());
+        }
+        self.record_type_ids
+            .iter()
+            .find(|(_, id)| **id == type_id)
+            .and_then(|((names, _), _)| names.get(index).cloned())
+    }
+
     pub fn class_type_id_entries(&self) -> impl Iterator<Item = (&str, u32)> {
         self.class_type_ids.iter().map(|(k, id)| (k.as_str(), *id))
+    }
+
+    /// A name for each class, enum and record type id that stays the same
+    /// from build to build (ids are handed out in compile order), for
+    /// cached compile-time values.
+    pub fn type_id_keys(&self) -> Vec<(u32, String)> {
+        let classes = self.class_type_ids.iter().map(|(k, id)| (*id, format!("class {k}")));
+        let records = self
+            .record_type_ids
+            .iter()
+            .map(|((names, kinds), id)| (*id, format!("record {}:{kinds:?}", names.join(","))));
+        classes.chain(records).collect()
     }
 
     /// Field word kinds (`common::WORD_*`) of every class with typed slots,
@@ -19524,6 +19579,11 @@ impl Checker {
             || self
                 .resolve_class_key(name)
                 .is_some_and(|k| self.enums_with_drop.contains(&k))
+    }
+
+    /// Whether any class or enum has a `fn drop()`.
+    pub fn any_drop(&self) -> bool {
+        !self.classes_with_drop.is_empty() || !self.enums_with_drop.is_empty()
     }
 
     pub fn classes_with_drop(&self) -> impl Iterator<Item = &String> {

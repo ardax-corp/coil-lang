@@ -384,6 +384,9 @@ pub enum Expression<'expr> {
     Cast(Output<'expr>, Output<'expr>),
     /// `typeof expr` — compile-time fully-qualified type name as `string`.
     TypeOf(Output<'expr>),
+    /// `comptime expr` — evaluated while compiling; the program sees the
+    /// value (a hidden module `const` after expansion).
+    Comptime(Output<'expr>),
     /// `expr?.field` — optional field access on `Option`.
     OptionalAccess(Output<'expr>, &'expr str),
     Negate(Output<'expr>),
@@ -631,6 +634,14 @@ pub enum Expression<'expr> {
         name: Output<'expr>,
         body: Output<'expr>,
     },
+
+    /// `comptime { … }`. At the top level, a block run while compiling
+    /// whose returned `Code` replaces it (comptime step 9), expanded with
+    /// the macros before typechecking. In an expression, a block whose
+    /// returned value is computed like `comptime e` (it becomes a hidden
+    /// function and const, `comptime_expr::hoist`). The tree walkers leave
+    /// the body alone: it is not code of the enclosing function.
+    ComptimeBlock(Output<'expr>),
 
     /// Top-level `enum` declaration.
     EnumDecl {
@@ -1301,6 +1312,7 @@ impl<'a> Display for Expression<'a> {
             Self::TestCase { name, body } => {
                 write!(f, "test({}) {{\n{}}}", name.1, body.1)
             }
+            Self::ComptimeBlock(body) => write!(f, "comptime {}", body.1),
             Self::Call { name, args } => {
                 write!(
                     f,
@@ -1649,6 +1661,7 @@ impl<'a> Display for Expression<'a> {
             Self::Coalesce(lhs, rhs) => write!(f, "{} ?? {}", lhs.1, rhs.1),
             Self::Cast(expr, ty) => write!(f, "{} as {}", expr.1, ty.1),
             Self::TypeOf(inner) => write!(f, "typeof {}", inner.1),
+            Self::Comptime(inner) => write!(f, "comptime {}", inner.1),
             Self::Raise(inner) => write!(f, "raise {}", inner.1),
             Self::Panic(inner) => write!(f, "panic {}", inner.1),
             Self::Yield(inner) => write!(f, "yield {}", inner.1),
@@ -1920,6 +1933,7 @@ impl<'expr> Expression<'expr> {
             | E::YieldFrom(a)
             | E::Try(a)
             | E::TypeOf(a)
+            | E::Comptime(a)
             | E::OptionalAccess(a, _)
             | E::Negate(a)
             | E::Not(a)
@@ -2100,6 +2114,8 @@ impl<'expr> Expression<'expr> {
                 f(name);
                 f(body);
             }
+            // Not this module's code: it runs in the expansion program.
+            E::ComptimeBlock(_) => {}
             E::EnumDecl { variants, .. } => variants.iter().for_each(f),
             E::ExternStruct(decl) => decl.fields.iter().for_each(|(_, ty)| f(ty)),
             E::EnumVariant { payload, discriminant, .. } => {
@@ -2159,6 +2175,7 @@ impl<'expr> Expression<'expr> {
             | E::YieldFrom(a)
             | E::Try(a)
             | E::TypeOf(a)
+            | E::Comptime(a)
             | E::OptionalAccess(a, _)
             | E::Negate(a)
             | E::Not(a)
@@ -2339,6 +2356,8 @@ impl<'expr> Expression<'expr> {
                 f(name);
                 f(body);
             }
+            // Not this module's code: it runs in the expansion program.
+            E::ComptimeBlock(_) => {}
             E::EnumDecl { variants, .. } => variants.iter_mut().for_each(f),
             E::ExternStruct(decl) => decl.fields.iter_mut().for_each(|(_, ty)| f(ty)),
             E::EnumVariant { payload, discriminant, .. } => {
@@ -2416,6 +2435,8 @@ impl Expression<'_> {
         use Expression as E;
         match self {
             E::AttrDecl { where_constraints, .. } => shift_where(where_constraints, delta),
+            // The walkers skip its body.
+            E::ComptimeBlock(body) => shift_spans(body, delta),
             E::Function { where_constraints, effects, contracts, .. } => {
                 shift_where(where_constraints, delta);
                 if let Some(effects) = effects {
@@ -2462,6 +2483,7 @@ impl Expression<'_> {
             | E::Coalesce(..)
             | E::Cast(..)
             | E::TypeOf(..)
+            | E::Comptime(..)
             | E::OptionalAccess(..)
             | E::Negate(..)
             | E::Not(..)

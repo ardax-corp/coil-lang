@@ -108,6 +108,10 @@ pub enum GcPhase {
 pub struct Heap {
     alloc_bytes: usize,
     gc_next_threshold: usize,
+    /// Most bytes the heap may hold ([`Self::set_byte_cap`]); `usize::MAX`
+    /// when unlimited. The collection threshold never exceeds it, so an
+    /// allocation past it reaches a safepoint.
+    byte_cap: usize,
     gc_growth_factor: usize,
     /// Heap bytes when the current sweep started (survival for the next budget).
     gc_sweep_start_bytes: usize,
@@ -160,6 +164,7 @@ impl Default for Heap {
         Self {
             alloc_bytes: 0,
             gc_next_threshold: GC_NEXT_THRESHOLD,
+            byte_cap: usize::MAX,
             gc_growth_factor: GC_GROWTH_FACTOR,
             gc_sweep_start_bytes: 0,
             strings: Table::default(),
@@ -725,7 +730,8 @@ impl Heap {
         self.gc_next_threshold = self
             .alloc_bytes
             .saturating_mul(growth)
-            .max(GC_NEXT_THRESHOLD);
+            .max(GC_NEXT_THRESHOLD)
+            .min(self.byte_cap);
         // Empty chunks the program did not touch all cycle go back to the OS.
         self.slab.release_idle_chunks();
         self.gc_phase = GcPhase::Idle;
@@ -749,6 +755,20 @@ impl Heap {
     /// Returns the number of bytes that are being allocated.
     pub const fn size(&self) -> usize {
         self.alloc_bytes
+    }
+
+    /// Limit the heap to `cap` bytes (`usize::MAX`: unlimited). The heap
+    /// itself never refuses an allocation; the VM checks
+    /// [`Self::over_byte_cap`] at its GC safepoints.
+    pub fn set_byte_cap(&mut self, cap: usize) {
+        self.byte_cap = cap;
+        self.gc_next_threshold = self.gc_next_threshold.min(cap);
+    }
+
+    /// True when the heap holds more than [`Self::set_byte_cap`] allows.
+    #[inline]
+    pub fn over_byte_cap(&self) -> bool {
+        self.alloc_bytes > self.byte_cap
     }
 
     /// Slab chunks currently mapped (64KiB each). Sweep does not unmap.
@@ -3808,6 +3828,10 @@ fn resident_kib() -> usize {
 #[path = "compact.rs"]
 mod compact;
 pub use compact::{AddrMap, EvacPlan, Evacuation};
+
+#[path = "snapshot.rs"]
+mod snapshot;
+pub use snapshot::SnapRoot;
 
 #[cfg(test)]
 mod tests {

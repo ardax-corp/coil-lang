@@ -120,6 +120,8 @@ pub fn build_standard_host_natives(
     push_values_eq_shaped(&mut out, &mut register_id);
     // Append-only after values_eq_shaped: string ordering (minor 41).
     push_string_compare(&mut out, &mut register_id);
+    // Append-only after string_compare: `black_box` (minor 43).
+    push_black_box(&mut out, &mut register_id);
     assert_eq!(
         out.len(),
         common::HOST_NATIVES.len(),
@@ -368,6 +370,16 @@ fn push_string_bytes(
             Ok(Some(host(heap, args)))
         })));
     }
+}
+
+/// `black_box(x) -> x`: the identity, as a call the optimizer cannot see
+/// through.
+fn push_black_box(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
+    let name = common::BLACK_BOX_NATIVE;
+    let sig = FfiSignature::from_parts(name.to_string(), vec![FfiType::Int], FfiType::Int).expect("black_box signature");
+    let id = out.len();
+    register_id(name, id);
+    out.push(Arc::new(HostClosureFn::new(sig, |_heap, args| Ok(Some(args[0])))));
 }
 
 /// `values_eq_shaped(a, b, shape) -> bool`: `==` on an aggregate whose
@@ -1285,16 +1297,20 @@ mod tests {
             Some(common::RESULT_UNIT_PROBE_NATIVE)
         );
         assert_eq!(
-            names.get(names.len() - 3).map(String::as_str),
+            names.get(names.len() - 4).map(String::as_str),
             Some(common::FFI_READ_INTS_NATIVE)
         );
         assert_eq!(
-            names.get(names.len() - 2).map(String::as_str),
+            names.get(names.len() - 3).map(String::as_str),
             Some(common::VALUES_EQ_SHAPED_NATIVE)
         );
         assert_eq!(
-            names.last().map(String::as_str),
+            names.get(names.len() - 2).map(String::as_str),
             Some(common::STRING_COMPARE_NATIVE)
+        );
+        assert_eq!(
+            names.last().map(String::as_str),
+            Some(common::BLACK_BOX_NATIVE)
         );
         assert_eq!(attach, 119);
     }
@@ -1610,6 +1626,10 @@ mod tests {
             registrations.get(end + 26).map(|(n, _)| n.as_str()),
             Some(common::STRING_COMPARE_NATIVE)
         );
-        assert_eq!(registrations.len(), end + 27);
+        assert_eq!(
+            registrations.get(end + 27).map(|(n, _)| n.as_str()),
+            Some(common::BLACK_BOX_NATIVE)
+        );
+        assert_eq!(registrations.len(), end + 28);
     }
 }

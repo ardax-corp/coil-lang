@@ -28,9 +28,18 @@ fn repo() -> PathBuf {
 
 /// Compile `tests/macros/compile_fail/<name>.hy`; return rendered diagnostics.
 fn compile_fail(name: &str) -> String {
+    compile_fail_with(name, compiler::ComptimeLimits::default())
+}
+
+/// [`compile_fail`] under `limits` (what the file's `// Flags:` header asks).
+fn compile_fail_with(name: &str, limits: compiler::ComptimeLimits) -> String {
     comptime::install();
     let buf = Buf::default();
     let mut pipeline = Pipeline::with_reporter(ReportConfig::default(), Box::new(buf.clone()));
+    pipeline.set_host_grants(compiler::HostGrants {
+        comptime: limits,
+        ..Default::default()
+    });
     pipeline.bind_project_root(repo(), vec![PathBuf::from("examples/src")]);
     let file = repo().join("tests/macros/compile_fail").join(format!("{name}.hy"));
     let result = pipeline.compile_src_from_file(file.to_str().unwrap());
@@ -59,12 +68,31 @@ fn unknown_helper_attribute() {
 
 #[test]
 fn runaway_macro_hits_step_budget() {
-    expect("macro_runaway", &["derive `Spin` failed", "step budget exhausted"]);
+    let limits = compiler::ComptimeLimits {
+        steps: 1_000_000,
+        ..Default::default()
+    };
+    let out = compile_fail_with("macro_runaway", limits);
+    for n in ["derive `Spin` failed", "1000000 steps", "--comptime-steps"] {
+        assert!(out.contains(n), "missing `{n}` in:\n{out}");
+    }
+}
+
+#[test]
+fn hoarding_macro_hits_memory_cap() {
+    let limits = compiler::ComptimeLimits {
+        heap_bytes: 1 << 20,
+        ..Default::default()
+    };
+    let out = compile_fail_with("macro_memory_cap", limits);
+    for n in ["derive `Hoard` failed", "1 MiB", "--comptime-mem"] {
+        assert!(out.contains(n), "missing `{n}` in:\n{out}");
+    }
 }
 
 #[test]
 fn host_access_is_denied() {
-    expect("macro_host_denied", &["`env_var` is not available to compile-time macros"]);
+    expect("macro_host_denied", &["needs `--comptime-env HOME`"]);
 }
 
 #[test]

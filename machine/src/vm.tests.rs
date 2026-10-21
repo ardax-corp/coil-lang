@@ -4514,6 +4514,58 @@
         assert_eq!(vm.pop().as_int(), 42);
     }
 
+    /// `RestoreSnapshot` fills the static slots from the pool snapshot; the
+    /// rebuilt objects are rooted by the statics alone and survive GC.
+    #[test]
+    fn restore_snapshot_fills_statics_that_survive_gc() {
+        use common::{HeapSnapshot, SnapObject, SnapWord};
+        let snapshot = HeapSnapshot {
+            objects: vec![
+                SnapObject::String("from-compile-time".into()),
+                SnapObject::Tuple { kinds: 0, words: vec![SnapWord::Ref { index: 0, err_bit: false }, SnapWord::Raw(5)] },
+            ],
+            statics: vec![(0, SnapWord::Ref { index: 0, err_bit: false }), (1, SnapWord::Ref { index: 1, err_bit: false })],
+        };
+        let mut constants = vec![99u64];
+        let at = constants.len() as u32;
+        constants.extend(snapshot.encode());
+
+        let mut vm = Machine::<256>::default();
+        vm.heap_mut().set_gc_threshold_for_test(0);
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        vm.with_output(TestOutputBuf(Arc::clone(&buf)));
+        let mut bytecode = vec![Byte::new(Instruction::RestoreSnapshot).with_operand_u32(at)];
+        for _ in 0..64 {
+            bytecode.push(const_int(0));
+            bytecode.push(make_enum(0, 1));
+            bytecode.push(Byte::new(Instruction::POP));
+        }
+        bytecode.push(Byte::new(Instruction::LoadStatic).with_operand_u32(0));
+        bytecode.push(Byte::new(Instruction::PRINT));
+        bytecode.push(Byte::new(Instruction::HALT));
+
+        vm.run_with_pool(&bytecode, &constants, &[], 2);
+        assert!(!vm.panicked());
+        let _ = vm.restore_output();
+        assert_eq!(String::from_utf8(take_test_output(buf)).expect("utf-8"), "from-compile-time");
+    }
+
+    /// Unverified bytecode whose snapshot names a slot the program does not
+    /// have panics instead of writing out of bounds.
+    #[test]
+    fn restore_snapshot_rejects_out_of_range_slots() {
+        use common::{HeapSnapshot, SnapWord};
+        let snapshot = HeapSnapshot { objects: vec![], statics: vec![(3, SnapWord::Raw(1))] };
+        let constants = snapshot.encode();
+        let bytecode = [
+            Byte::new(Instruction::RestoreSnapshot).with_operand_u32(0),
+            Byte::new(Instruction::HALT),
+        ];
+        let mut vm = Machine::<64>::default();
+        vm.run_with_pool(&bytecode, &constants, &[], 1);
+        assert!(vm.panicked());
+    }
+
     /// COI-19: heap objects reachable only via static slots must survive GC.
     /// Pre-fix, `gc_collect` rooted the operand stack / coroutines but not
     /// `Machine::statics`, so `StoreStatic` of an `FfiLoad` library (or any

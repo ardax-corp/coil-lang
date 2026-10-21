@@ -73,6 +73,13 @@ pub enum ErrorCode {
     UnassignedLocal,
     /// Two `use` imports bind the same local name to different items.
     DuplicateImport,
+    /// A `const` initializer that cannot be evaluated at compile time: it
+    /// has effects, panics, runs out of budget, or its value holds a
+    /// function, handle or other value with no compile-time form.
+    ConstNotComputable,
+    /// `--comptime-refresh` computed a cached compile-time result again
+    /// and it differs from the cached one (a note, not an error).
+    ComptimeResultChanged,
     /// An expression statement drops a `Result` (warning; `let _ = …;`
     /// discards one on purpose).
     UnusedResult,
@@ -184,6 +191,8 @@ impl ErrorCode {
             Self::ShiftCountOutOfRange => "E0131",
             Self::UnassignedLocal => "E0132",
             Self::DuplicateImport => "E0133",
+            Self::ConstNotComputable => "E0134",
+            Self::ComptimeResultChanged => "E0135",
             Self::UnusedResult => "E0136",
             Self::DuplicateEnum => "E0200",
             Self::DuplicateConstructor => "E0201",
@@ -275,6 +284,8 @@ impl ErrorCode {
             Self::ShiftCountOutOfRange => "shift count out of range",
             Self::UnassignedLocal => "local read before it is assigned",
             Self::DuplicateImport => "local name imported twice",
+            Self::ConstNotComputable => "const value cannot be computed at compile time",
+            Self::ComptimeResultChanged => "compile-time result changed on refresh",
             Self::UnusedResult => "unused `Result` value",
             Self::DuplicateEnum => "duplicate enum",
             Self::DuplicateConstructor => "duplicate constructor",
@@ -374,6 +385,8 @@ mod tests {
             | ShiftCountOutOfRange
             | UnassignedLocal
             | DuplicateImport
+            | ConstNotComputable
+            | ComptimeResultChanged
             | UnusedResult
             | DuplicateEnum
             | DuplicateConstructor
@@ -455,6 +468,8 @@ mod tests {
             ShiftCountOutOfRange,
             UnassignedLocal,
             DuplicateImport,
+            ConstNotComputable,
+            ComptimeResultChanged,
             UnusedResult,
             DuplicateEnum,
             DuplicateConstructor,

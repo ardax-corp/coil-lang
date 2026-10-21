@@ -217,6 +217,7 @@ pub fn walk_children<'n, 's>(node: &'n Output<'s>, visit: &mut dyn FnMut(&'n Out
         | Expression::Raise(e)
         | Expression::Panic(e)
         | Expression::TypeOf(e)
+        | Expression::Comptime(e)
         | Expression::Try(e)
         | Expression::Yield(e)
         | Expression::YieldFrom(e)
@@ -354,6 +355,8 @@ pub fn walk_children<'n, 's>(node: &'n Output<'s>, visit: &mut dyn FnMut(&'n Out
             visit(name);
             visit(body);
         }
+        // Expanded before this runs; its body is the expansion program's.
+        Expression::ComptimeBlock(_) => {}
 
         Expression::Branch(cond, body) => {
             if let Some(c) = cond {

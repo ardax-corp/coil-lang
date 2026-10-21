@@ -253,8 +253,10 @@ pub fn readonly_array_items<'e, 'a>(ast: &'e Output<'a>) -> Option<&'e [Output<'
 /// an array, another module's value) a slot set once at startup: the
 /// `static const` it replaces (#1558). One that folds stays a const the
 /// compiler inlines. Folding sees this module's earlier consts, as codegen
-/// does, so the split matches what used to fold.
+/// does, so the split matches what used to fold. `comptime` expressions
+/// become consts first. Idempotent.
 pub fn lift_startup_consts(ast: &mut Output<'_>) {
+    crate::comptime_expr::hoist(ast);
     let Expression::Program(children) = ast.1.as_mut() else {
         return;
     };

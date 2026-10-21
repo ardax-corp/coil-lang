@@ -3,6 +3,8 @@ mod attrs;
 mod block_builder;
 pub mod builtin_docs;
 pub(crate) mod escape;
+pub mod comptime_cache;
+mod comptime_expr;
 mod const_fold;
 pub mod debug_vars;
 #[cfg(any(test, feature = "dissect"))]
@@ -45,7 +47,7 @@ pub use dissect::{
     format_bytecode_section,
     format_il, format_symbol_index, matches_fn_pat,
 };
-pub use host_grants::HostGrants;
+pub use host_grants::{ComptimeGrants, ComptimeLimits, HostGrants, Scoped};
 pub use module_roots::{default_module_roots, resolve_use_in_roots};
 pub use pipeline::*;
 pub use project_index::ProjectIndex;

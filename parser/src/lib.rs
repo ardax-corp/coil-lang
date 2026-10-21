@@ -175,7 +175,7 @@ pub mod doc_examples;
 pub mod fmt;
 
 pub use ast::item_docs;
-pub use fmt::{format_program, format_range, format_source};
+pub use fmt::{format_program, format_program_noted, format_range, format_source};
 
 #[derive(Default)]
 pub struct Pratt<'pratt> {
@@ -601,6 +601,11 @@ impl<'pratt> Pratt<'pratt> {
                     .labelled("new"),
                 // Contextual `quote kind { … }`; `quote(x)` stays a call.
                 self.quote_atom(expr.clone()),
+                // `comptime { … }` in an expression: a block computed while
+                // compiling (`comptime e` with any other operand is a prefix).
+                keyword!("comptime")
+                    .ignore_then(self.brace_body(stmt.clone(), expr.clone()))
+                    .map_with(|body, e| (e.span(), Box::new(Expression::ComptimeBlock(body)))),
                 // Anonymous `fn (…)` before `ident` so `fn` stays a keyword.
                 self.lambda_atom(expr.clone(), stmt),
                 self.ident(),
@@ -769,6 +774,8 @@ impl<'pratt> Pratt<'pratt> {
                 ),
                 // `readonly e` (`'r'`): `e`'s value seen read-only, for any
                 // `e` (`readonly p.inner`, `readonly new P(1)`, `readonly [1]`).
+                // `comptime e` (`'c'`): `e` computed while compiling; binds
+                // like `-`, so `comptime f(x)? + 1` adds at run time.
                 // `typeof e` (`'t'`): compile-time type name (string). As a
                 // unary prefix, `typeof(x) == "T"` compares the name (#1773).
                 prefix(
@@ -779,6 +786,7 @@ impl<'pratt> Pratt<'pratt> {
                         op!('+'),
                         op!('!'),
                         keyword!("readonly").to('r'),
+                        keyword!("comptime").to('c'),
                         keyword!("typeof").to('t'),
                     )),
                     |c, rhs, e| {
@@ -790,6 +798,7 @@ impl<'pratt> Pratt<'pratt> {
                                 '~' => Expression::Not(rhs),
                                 '!' => Expression::LogicalNot(rhs),
                                 'r' => Expression::Readonly(rhs),
+                                'c' => Expression::Comptime(rhs),
                                 't' => Expression::TypeOf(rhs),
                                 _ => unreachable!("No other prefix operators"),
                             }),
@@ -2118,6 +2127,7 @@ impl<'pratt> Pratt<'pratt> {
             self.trait_impl_for_block(stmt.clone()),
             self.impl_block(stmt.clone()),
             self.test_case(stmt.clone()),
+            self.comptime_block(stmt.clone()),
             self.attr_decl(),
             self.derive_decl(),
             self.fn_macro_decl(),
@@ -2149,6 +2159,23 @@ impl<'pratt> Pratt<'pratt> {
             .then(self.block(stmt))
             .map_with(|(name, body), e| (e.span(), Box::new(Expression::TestCase { name, body })))
             .labelled("test case")
+    }
+
+    /// Top-level `comptime { … }`: a block that returns the `Code` it
+    /// expands to. (`comptime e` in an expression is a prefix operator.)
+    fn comptime_block<
+        T: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+    >(
+        &self,
+        stmt: T,
+    ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
+    {
+        keyword!("comptime")
+            .ignore_then(self.block(stmt))
+            .map_with(|body, e| (e.span(), Box::new(Expression::ComptimeBlock(body))))
+            .labelled("comptime block")
     }
 
     /// `type Name = T;` — type alias declaration.

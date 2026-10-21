@@ -461,6 +461,7 @@ dependencies = [
  "rkyv",
  "serde",
  "serde_json",
+ "sha2",
  "stacker",
 ]
 
@@ -468,6 +469,7 @@ dependencies = [
 name = "comptime"
 version = "0.1.0"
 dependencies = [
+ "coil-build-id",
  "common",
  "compiler",
  "machine",

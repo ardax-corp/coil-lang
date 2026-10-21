@@ -475,6 +475,11 @@ pub enum Instruction {
     EQF,
     /// IEEE 754 `float` `!=`. Archive **minor 38**.
     NEQF,
+    /// Rebuild the [`crate::HeapSnapshot`] encoded at constant-pool index
+    /// operand and store each root into its static slot: the values of
+    /// `const`s computed at compile time. Stack-neutral; allocates, but
+    /// runs only in the startup setup region. Archive **minor 42**.
+    RestoreSnapshot,
 }
 
 impl From<u8> for Instruction {
@@ -928,6 +933,7 @@ impl Instruction {
             Self::MakeArrayK => "MakeArrayK",
             Self::EQF => "EQF",
             Self::NEQF => "NEQF",
+            Self::RestoreSnapshot => "RestoreSnapshot",
         }
     }
 }
@@ -2045,7 +2051,7 @@ mod tests {
     fn instruction_from_u8_covers_last_appended_variant() {
         // ARCHIVE stability: last variant must remain decodable (keep in sync
         // with machine release `promise!` ceiling).
-        let last = Instruction::NEQF as u8;
+        let last = Instruction::RestoreSnapshot as u8;
         let decoded: Instruction = last.into();
         assert_eq!(decoded as u8, last);
     }

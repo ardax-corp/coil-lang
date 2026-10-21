@@ -11,7 +11,10 @@ fn bump() -> int {
 }
 
 fn main() {
-    if bump() != 200000 {
+    // Through a function value: a direct call would be computed while
+    // compiling (-O2 folds pure calls with constant arguments).
+    let run = black_box(bump);
+    if run() != 200000 {
         panic "looping_makearray checksum";
     }
 }

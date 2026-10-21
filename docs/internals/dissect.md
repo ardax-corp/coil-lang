@@ -23,11 +23,11 @@ coil-dissect examples/fib.hy --fn fib --il
 | `--il` | Also print the stack IL as planned (snapshot after finalize splices, before lower): each body is a placeholder until MIR emits it, glue and thunks are real |
 | `--il-post` | Also print the IL after each body's dense or LIR emission, before fuse / lowering |
 | `--hir` | Also print each body's HIR (typed, desugared tree) |
-| `--expand` | Print the entry file after macro expansion (no bytecode) |
+| `--expand` | Print the entry file after macro expansion (no bytecode); generated and `comptime` items are marked with where they came from |
 | `--tests` | Compile `test("…") { … }` cases too (`__zs_test_N`), so PCs match a `coil test` run (for example a gc-stress report) |
 | `--mir` | Also print the MIR of each numeric body that reached emission, marked `dense` / `lir`; a dense body says whether it was kept or lost the cost gate to its LIR form |
 | `--effects` | Also print each function's effects with the first reason for each (`step: uses {write, suspend}: calls `write_all` (write, suspend)`, `apply: pure apart from its parameters: calls parameter `f``) and the parameters it mutates (`Point::bump: uses {mutate}: writes field `x` of a shared object (mutate); mutates self`, the summary a call with a `readonly` argument is checked against), then, when auto-par is on, each counted loop or fork site left sequential only because a callee is impure (`;; loop over `i` in `main` not parallelized: `step` reads static `SCALE` (read)`). See [auto-par.md](auto-par.md) |
-| `-O LEVEL` | Optimization level, as for `coil compile` (`--opt-stats` / `--opt-stats-json` print body tiers and HIR counters) |
+| `-O LEVEL` | Optimization level, as for `coil compile` (`--opt-stats` / `--opt-stats-json` print body tiers, HIR counters and compile-time work) |
 | `--ast` | Also pretty-print the entry-file AST (as `coil fmt` writes it) |
 | `--root DIR` | Extra `use`/`mod` search directory (repeatable; default `src`) |
 | `--entry FILE` | Entry `.hy` instead of the positional file |

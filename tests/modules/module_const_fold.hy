@@ -1,5 +1,5 @@
 // Module-level consts fold, including ones built from other consts; one
-// that does not fold is computed once at startup (#1558).
+// that does not fold is computed once while compiling (#1558).
 use tests::assert;
 
 const BASE = 40;

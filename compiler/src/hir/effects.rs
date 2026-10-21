@@ -59,6 +59,9 @@ pub struct Summary {
     /// field, an element, a `Vec`), itself or through a callee. A
     /// `readonly` argument there is E0107.
     pub mutates: u64,
+    /// Reads or writes a mutable `static`, itself or through a callee: what
+    /// compile-time code may never do, even with IO granted.
+    pub statics: bool,
     /// The bits of `flags` among [`OWNED_BITS`] that come only from
     /// changing what its parameters reach, through a parameter or a field
     /// or element path from one. A caller that passes there only objects
@@ -109,6 +112,7 @@ impl Summary {
             visible: EffectFlags::from_bits(flags.bits() & !hidden),
             latent: 0,
             mutates: 0,
+            statics: false,
             param_only: 0,
         }
     }
@@ -1700,6 +1704,15 @@ impl Cx<'_> {
         matches!(body.expr(id).kind, HirKind::Local(l) if self.facts[w.index].owned.contains(&l))
     }
 
+    /// As [`Self::note`], for an access to a mutable static.
+    fn note_static(&self, w: &mut Walk<'_>, at: HirId, bits: u16, what: impl FnOnce() -> String) {
+        let s = Summary {
+            statics: true,
+            ..Summary::of(EffectFlags::from_bits(bits))
+        };
+        self.record(w, at, s, 0, || None, what);
+    }
+
     /// As [`Self::note`], for effects no user sees (a panic, a `defer`).
     fn note_hidden(&self, w: &mut Walk<'_>, at: HirId, bits: u16, what: impl FnOnce() -> String) {
         let s = Summary {
@@ -1725,6 +1738,7 @@ impl Cx<'_> {
         w.elsewhere |= owned_bits & !through;
         w.out.flags = w.out.flags.union(s.flags);
         w.out.visible = w.out.visible.union(s.visible);
+        w.out.statics |= s.statics;
         if let Some(causes) = w.causes.as_mut()
             && !s.flags.is_pure()
         {
@@ -1774,7 +1788,7 @@ impl Cx<'_> {
                     self.note(w, id, EffectFlags::HEAP_MUT, || format!("writes captured `{name}`"))
                 }
                 HirKind::Global { name, .. } => {
-                    self.note(w, id, EffectFlags::HEAP_MUT, || format!("writes static `{name}`"))
+                    self.note_static(w, id, EffectFlags::HEAP_MUT, || format!("writes static `{name}`"))
                 }
                 _ => {}
             },
@@ -1829,7 +1843,7 @@ impl Cx<'_> {
             // Workers of a parallel region have no statics, and another
             // call may change one (coil-lang#793).
             HirKind::Global { name, .. } if self.checker.is_mutable_static(name) => {
-                self.note(w, id, EffectFlags::HOST, || format!("reads static `{name}`"))
+                self.note_static(w, id, EffectFlags::HOST, || format!("reads static `{name}`"))
             }
             // A trait operator runs user code this pass does not resolve.
             HirKind::Bin { op: BinOp::Overloaded(op), lhs, rhs } => {
@@ -2128,6 +2142,9 @@ impl Cx<'_> {
             visible,
             latent: 0,
             mutates,
+            // An impl may reach a static wherever its declaration allows
+            // reads or writes.
+            statics: visible.contains(EffectFlags::HOST) || visible.contains(EffectFlags::HEAP_MUT),
             param_only: 0,
         })
     }

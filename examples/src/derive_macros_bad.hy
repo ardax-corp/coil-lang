@@ -11,6 +11,17 @@ derive Spin(TypeDecl t) -> Code {
     return raw("");
 }
 
+/// Keeps a 2 MiB string live: stopped by `--comptime-mem 1`.
+derive Hoard(TypeDecl t) -> Code {
+    let keep = "x";
+    let k = 0;
+    while k < 21 {
+        keep = keep + keep;
+        k += 1;
+    }
+    return raw("");
+}
+
 /// Reads the environment: host access is denied at compile time.
 derive Peek(TypeDecl t) -> Code {
     let v = var("HOME");

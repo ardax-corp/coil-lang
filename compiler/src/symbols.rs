@@ -258,6 +258,7 @@ impl SymbolIndex {
                 | Expression::YieldFrom(inner)
                 | Expression::Try(inner)
                 | Expression::TypeOf(inner)
+                | Expression::Comptime(inner)
                 | Expression::OptionalAccess(inner, _)
                 | Expression::Negate(inner)
                 | Expression::Not(inner)
@@ -452,6 +453,8 @@ impl SymbolIndex {
                     visit_output(index, file, source, name);
                     visit_output(index, file, source, body);
                 }
+                // Expanded before this runs; its body is the expansion program's.
+                Expression::ComptimeBlock(_) => {}
                 Expression::EnumDecl { variants, .. } => visit_outputs(index, file, source, variants),
                 Expression::EnumVariant { payload, .. } => match payload {
                     EnumVariantPayload::Unit => {}

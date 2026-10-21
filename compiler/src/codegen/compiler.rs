@@ -4,7 +4,7 @@ use crate::typechecking::{CStructDef, ForInInfo, ForInKind};
 use reporting::{ErrorCode, Message};
 
 /// Synthetic function name prefix for a static initializer body.
-const STATIC_INIT_FN_PREFIX: &str = "__static_init$";
+pub(super) const STATIC_INIT_FN_PREFIX: &str = "__static_init$";
 /// Most generic-head instance / default-body clones in one compilation.
 const INST_CLONE_MAX_TOTAL: usize = 256;
 
@@ -130,7 +130,8 @@ impl Compiler {
         let shadowing = crate::shadow_traits::rename(ast);
         // Checks, adding a copy of each `... xs` function per call shape.
         let mut checked = crate::variadic::check_with_instances(&mut self.checker, ast, foreign);
-        let messages = self.checker.take_messages();
+        let mut messages = self.checker.take_messages();
+        crate::comptime_expr::explain_messages(ast, &mut messages);
         let failed = messages.iter().any(|m| *m.kind() == reporting::MessageKind::ERROR);
         if checked.instances.is_empty() && checked.copies.is_empty() && shadowing.is_empty() {
             self.messages.extend(messages);
@@ -3802,6 +3803,7 @@ impl Compiler {
             c.bind_function_entry(bind);
         });
         if lowered {
+            self.par_worker_of.insert(worker_name.clone(), table_key.to_string());
             let body_end = self.bytecode.len();
             self.record_fn_span(worker_name.clone(), body_start, body_end);
             let entry = self.fn_entry_labels.get(&worker_name).copied();
@@ -6971,9 +6973,26 @@ impl Compiler {
             Expression::Expr(child) | Expression::Statement(child) => {
                 bytecode.append(&mut self.do_compile(child))
             }
-            Expression::StaticDecl { name, init, .. } => {
+            Expression::StaticDecl { name, init, is_const, .. } => {
                 let fqn = self.qualify_static_fqn(name);
                 self.emit_static_initializer(&fqn, init);
+                let silent = !*is_const
+                    && (self.pure_static_inits.contains(&fqn) || self.pure_static_inits.contains(*name));
+                let startup = *is_const && (self.startup_consts.contains(&fqn) || self.startup_consts.contains(*name));
+                if (*is_const || silent)
+                    && !startup
+                    && let Some(slot) = self.checker.static_slot_index(&fqn)
+                {
+                    self.comptime_consts.push(super::ComptimeConst {
+                        fqn,
+                        slot,
+                        silent,
+                        entry: None,
+                        file: self.current_source_file.clone(),
+                        // A `comptime` expression's const has no source of its own.
+                        span: if crate::comptime_expr::is_comptime_const(name) { init.0 } else { ast.0 }.into_range(),
+                    });
+                }
             }
             Expression::Class {
                 docs: _,
@@ -7594,6 +7613,9 @@ impl Compiler {
         self.pure_fns = self.typed_sidecar.pure_fn_names().clone();
         self.steady_fns = self.typed_sidecar.length_stability().fns.clone();
         self.alloc_steady = self.typed_sidecar.length_stability().alloc_stable;
+        self.pure_static_inits.clear();
+        self.startup_consts.clear();
+        self.fold_bodies.clear();
         // E1: the HIR summaries also prove functions pure that call a
         // function parameter only with pure functions (`map(xs, fn ...)`).
         if let Some(hir) = self.hir_module.as_ref() {
@@ -7609,6 +7631,11 @@ impl Compiler {
                 });
                 effects::capture(hir, &fx, explained);
             }
+            let (messages, startup) = const_effect_messages(&self.checker, hir, &fx);
+            self.messages.extend(messages);
+            self.startup_consts = startup;
+            self.pure_static_inits = pure_static_inits(&self.checker, hir, &fx);
+            self.fold_bodies = fold_bodies(hir, &fx);
             let mutations = fx.mutations();
             let summaries = fx.summaries;
             self.pure_fns.extend(pure);
@@ -7657,6 +7684,12 @@ impl Compiler {
 
         let mut program = self.do_compile(ast);
         self.namespace = ns.to_string();
+        for (name, text) in std::mem::take(&mut self.fold_bodies) {
+            let qualified = self.qualify_static_fqn(&name);
+            if let Some(key) = [name, qualified].into_iter().find(|k| self.functions.contains_key(k)) {
+                self.fold_fns.insert(key, text);
+            }
+        }
 
         self.messages.extend(self.checker.take_messages());
 
@@ -8414,17 +8447,14 @@ impl Compiler {
             }
         }
         let fn_kinds = self.fn_word_kinds(&entries, &entry_sps);
-        self.precise_frames = super::precise_frames::bind_precise_frames(
-            &self.precise_frame_fns,
-            &lowered.needs_frame_extent,
-            self.bytecode.as_slice(),
-            &self.constants,
-            &lowered.match_arities,
-            &entries,
-            &entry_sps,
-            self.prologue_jmp_target(),
-            &fn_kinds,
-        );
+        self.frame_inputs = Some(Box::new(super::FrameInputs {
+            needs_extent: lowered.needs_frame_extent.clone(),
+            match_arities: lowered.match_arities.clone(),
+            entries,
+            entry_sps,
+            fn_kinds,
+        }));
+        self.bind_precise_frames();
 
         let dense_seek = self
             .bytecode
@@ -8602,6 +8632,319 @@ impl Compiler {
     pub fn bytecode_vec(&self) -> Vec<Byte> {
         self.bytecode.clone_bytes()
     }
+
+    /// `const`s to compute at compile time, in setup order, with their
+    /// initializer entries. Call after finalize. A program with a `fn
+    /// drop()` computes no silent item: one dropped at compile time would
+    /// not run its finalizer when the program runs.
+    pub fn comptime_consts(&self) -> Vec<super::ComptimeConst> {
+        let drops = self.checker.any_drop();
+        self.comptime_consts
+            .iter()
+            .filter(|c| !(c.silent && drops))
+            .map(|c| super::ComptimeConst {
+                entry: self
+                    .function_offset(&format!("{STATIC_INIT_FN_PREFIX}{}", c.fqn))
+                    .map(|o| o as u32),
+                ..c.clone()
+            })
+            .collect()
+    }
+
+    /// Build [`Self::precise_frames`] from the finalized code: at finalize,
+    /// and again after a compile-time patch changes what a frame holds.
+    fn bind_precise_frames(&mut self) {
+        let Some(inputs) = self.frame_inputs.as_ref() else {
+            return;
+        };
+        self.precise_frames = super::precise_frames::bind_precise_frames(
+            &self.precise_frame_fns,
+            &inputs.needs_extent,
+            self.bytecode.as_slice(),
+            &self.constants,
+            &inputs.match_arities,
+            &inputs.entries,
+            &inputs.entry_sps,
+            self.prologue_jmp_target(),
+            &inputs.fn_kinds,
+        );
+    }
+
+    /// Whether [`Self::fold_sites`] are computed at this level.
+    pub fn call_fold_on(&self) -> bool {
+        self.opt_options.call_fold && !self.debugger_attached && std::env::var_os("COIL_CALL_FOLD").is_none_or(|v| v != "0")
+    }
+
+    /// Pure calls with constant arguments in the finalized code, as
+    /// `(pc of the CALL, its arity, the call)`: a `CALL` to a function
+    /// [`Self::fold_fns`] lists, one word back, whose arguments are the
+    /// `CONST` / `STRING` words right before it with no branch landing
+    /// among them (so they are its arguments on every path). A call to an
+    /// auto-par worker computes the function it runs (its last argument is
+    /// the worker's depth).
+    pub fn fold_sites(&self) -> Vec<(usize, usize, crate::macros::FoldCall)> {
+        use crate::macros::{FoldCall, FoldValue};
+        // A call computed at compile time drops its values there, so a
+        // program with a `fn drop()` would miss those finalizers.
+        if self.fold_fns.is_empty() || self.checker.any_drop() {
+            return Vec::new();
+        }
+        let mut entries: HashMap<usize, (usize, bool, bool)> = HashMap::new();
+        for (name, &text) in &self.fold_fns {
+            if let Some(entry) = self.function_offset(name) {
+                entries.insert(entry, (entry, text, false));
+            }
+        }
+        for (worker, func) in &self.par_worker_of {
+            if let (Some(w), Some(&text)) = (self.function_offset(worker), self.fold_fns.get(func))
+                && let Some(entry) = self.function_offset(func)
+            {
+                entries.insert(w, (entry, text, true));
+            }
+        }
+        let code = self.bytecode.as_slice();
+        let Some(targets) = common::jump_targets(code, &self.constants) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (pc, b) in code.iter().enumerate() {
+            if *b.bytecode() != Instruction::CALL || b.call_ret_words() != 1 {
+                continue;
+            }
+            let (arity, target) = b.call_parts();
+            let Some(&(entry, text, worker)) = entries.get(&target) else {
+                continue;
+            };
+            if arity > pc || (worker && arity == 0) || targets[pc + 1 - arity..=pc].iter().any(|&t| t) {
+                continue;
+            }
+            let args: Option<Vec<FoldValue>> = code[pc - arity..pc]
+                .iter()
+                .map(|w| match *w.bytecode() {
+                    Instruction::CONST => Some(FoldValue::Word(w.constant(&self.constants))),
+                    Instruction::STRING => self.strings.get(w.operand_u32() as usize).cloned().map(FoldValue::Text),
+                    _ => None,
+                })
+                .collect();
+            let Some(mut args) = args else { continue };
+            if worker {
+                args.pop();
+            }
+            out.push((pc, arity, FoldCall { entry: entry as u32, args, text }));
+        }
+        out
+    }
+
+    /// Replace each folded call (`(pc of the CALL, arity, value)`, from
+    /// [`Self::fold_sites`]) with its value: its argument words become
+    /// `NOOP`s and the `CALL` a `CONST` or `STRING`.
+    pub fn apply_call_folds(&mut self, folds: &[(usize, usize, crate::macros::FoldValue)]) {
+        use crate::macros::FoldValue;
+        let mut words = Vec::with_capacity(folds.len());
+        for (_, _, value) in folds {
+            let word = match value {
+                // An inline operand is non-negative: its top bit is the
+                // pool flag.
+                FoldValue::Word(w) => match i32::try_from(*w as i64) {
+                    Ok(small) if small >= 0 => Byte::new(Instruction::CONST).with_const_inline(small),
+                    _ => {
+                        self.constants.push(*w);
+                        Byte::new(Instruction::CONST).with_const_pool(self.constants.len() as u32 - 1)
+                    }
+                },
+                FoldValue::Text(s) => Byte::new(Instruction::STRING).with_operand_u32(self.intern_string(s)),
+            };
+            words.push(word);
+        }
+        let Some(code) = self.bytecode.lowered_mut() else {
+            return;
+        };
+        for ((pc, arity, _), word) in folds.iter().zip(words) {
+            for w in &mut code[pc - arity..*pc] {
+                *w = Byte::new(Instruction::NOOP);
+            }
+            code[*pc] = word;
+        }
+        // A folded `CALL` is no longer a safepoint, and its value is no
+        // call result.
+        self.bind_precise_frames();
+    }
+
+    /// Replace the setup region's `CALL init; StoreStatic slot` for each of
+    /// `consts` (`(entry, slot)`) with one `RestoreSnapshot` of `snapshot`
+    /// (appended to the pool), at the first const's place, and `NOOP`s.
+    /// False, changing nothing, when a const's setup pair is not found.
+    pub fn apply_const_snapshot(&mut self, consts: &[(u32, u32)], snapshot: &[u64]) -> bool {
+        let Some(code) = self.bytecode.lowered_mut() else {
+            return false;
+        };
+        let mut sites = Vec::with_capacity(consts.len());
+        for &(entry, slot) in consts {
+            let found = code.windows(2).position(|w| {
+                *w[0].bytecode() == Instruction::CALL
+                    && w[0].call_parts().1 == entry as usize
+                    && *w[1].bytecode() == Instruction::StoreStatic
+                    && w[1].operand_u32() == slot
+            });
+            match found {
+                Some(at) => sites.push(at),
+                None => return false,
+            }
+        }
+        let Some(&first) = sites.iter().min() else {
+            return false;
+        };
+        let at = self.constants.len() as u32;
+        for &site in &sites {
+            code[site] = Byte::new(Instruction::NOOP);
+            code[site + 1] = Byte::new(Instruction::NOOP);
+        }
+        code[first] = Byte::new(Instruction::RestoreSnapshot).with_operand_u32(at);
+        self.constants.extend_from_slice(snapshot);
+        true
+    }
+}
+
+/// Natives whose result is a handle the running process opens (a standard
+/// stream, a library or symbol): a `const` of one is computed when the
+/// program starts.
+const STARTUP_HANDLE_NATIVES: [&str; 5] = ["stdout", "stderr", "stdin", "dload", "declare"];
+
+/// E0134 for each `const` whose initializer has effects: it is
+/// computed while compiling, where there is no outside world yet. The
+/// second result names the consts (by HIR name) whose only effects are
+/// [`STARTUP_HANDLE_NATIVES`] calls: those keep their startup initializer.
+fn const_effect_messages(
+    checker: &crate::typechecking::infer::Checker,
+    hir: &crate::hir::HirModule,
+    fx: &crate::hir::effects::ModuleEffects,
+) -> (Vec<Message>, HashSet<String>) {
+    let mut out = Vec::new();
+    let mut startup = HashSet::new();
+    for (i, body) in hir.bodies.iter().enumerate() {
+        if body.kind != crate::hir::BodyKind::Static {
+            continue;
+        }
+        let Some(name) = body.name.strip_suffix("$init") else { continue };
+        if !checker.is_const_static(name) {
+            continue;
+        }
+        let s = fx.summaries[i];
+        // With IO granted to this module's compile-time code, anything but a
+        // mutable static (or code this analysis cannot see) may run: the
+        // host checks each native call, path, name and program as it runs.
+        // Without, the initializer must be pure.
+        let module = name.rsplit_once("::").map_or("", |(m, _)| m);
+        let granted = checker.host_grants().comptime_io.for_module(module).effects();
+        let missing = if granted == 0 { s.visible.bits() } else { s.visible.bits() & common::EffectFlags::UNKNOWN };
+        if missing == 0 && s.latent == 0 && !(granted != 0 && s.statics) {
+            continue;
+        }
+        let short = name.rsplit("::").next().unwrap_or(name);
+        if !crate::comptime_expr::is_comptime_const(short) && !s.statics && s.latent == 0 && opens_handles_only(fx, i) {
+            startup.insert(name.to_string());
+            continue;
+        }
+        let mut msg = Message::error(
+            ErrorCode::ConstNotComputable,
+            if crate::comptime_expr::is_comptime_const(short) {
+                format!("this `comptime` expression is computed while compiling, but it {}", fx.describe(i))
+            } else {
+                format!("const `{short}` is computed while compiling, but its initializer {}", fx.describe(i))
+            },
+            body.span.0..body.span.1,
+        );
+        msg.with_help(match grant_hint(missing).filter(|_| !s.statics && s.latent == 0) {
+            Some(hint) => hint,
+            None if crate::comptime_expr::is_comptime_const(short) => {
+                "a `comptime` expression cannot read or change the program's state; without `comptime` it is computed when the program runs".to_string()
+            }
+            None => "a `const` cannot read or change the program's state; use `static let` to compute it when the program starts".to_string(),
+        });
+        out.push(msg);
+    }
+    (out, startup)
+}
+
+/// Body `index`'s visible effects all come from calls to
+/// [`STARTUP_HANDLE_NATIVES`].
+fn opens_handles_only(fx: &crate::hir::effects::ModuleEffects, index: usize) -> bool {
+    let causes: Vec<_> = fx.explain(index).into_iter().filter(|c| !c.visible.is_pure()).collect();
+    !causes.is_empty()
+        && causes.iter().all(|c| {
+            c.callee.as_ref().is_some_and(|callee| {
+                callee.body.is_none() && STARTUP_HANDLE_NATIVES.contains(&callee.name.rsplit("::").next().unwrap_or(&callee.name))
+            })
+        })
+}
+
+/// The flags that would let compile-time code have the `missing` effects,
+/// when it touches no mutable static: with IO granted, anything else the
+/// host allows may run.
+fn grant_hint(missing: u16) -> Option<String> {
+    use common::EffectFlags as F;
+    let flags: Vec<&str> = [
+        (F::READ, "`--comptime-read PATH`"),
+        (F::WRITE, "`--comptime-write PATH`"),
+        (F::ENV, "`--comptime-env NAME`"),
+        (F::EXEC, "`--comptime-exec STEM`"),
+        (F::NET, "`--comptime-net HOST:PORT`"),
+    ]
+    .into_iter()
+    // Reading a file closes it, which is a write too; reading a socket is
+    // a read and a write.
+    .filter(|&(bit, _)| {
+        missing & bit != 0
+            && !(bit == F::WRITE && missing & F::READ != 0)
+            && !((bit == F::READ || bit == F::WRITE) && missing & F::NET != 0)
+    })
+    .map(|(_, flag)| flag)
+    .collect();
+    // Other effects (closing a stream, waiting on it) come with the IO.
+    if flags.is_empty() || missing & F::UNKNOWN != 0 {
+        return None;
+    }
+    Some(format!("code run while compiling does IO only when the build grants it: pass {}", flags.join(" and ")))
+}
+
+/// Functions whose calls with constant arguments may be computed at compile
+/// time (comptime step 4): pure, not generic, a coroutine or a closure, and
+/// returning one word (`int`, `float`, `bool`, `byte`) or a `string` (→
+/// `true`), by HIR name.
+fn fold_bodies(hir: &crate::hir::HirModule, fx: &crate::hir::effects::ModuleEffects) -> HashMap<String, bool> {
+    use crate::typechecking::ty::{BOOL, BYTE, FLOAT, INT, STRING};
+    hir.bodies
+        .iter()
+        .zip(&fx.summaries)
+        .filter(|(body, s)| {
+            body.kind == crate::hir::BodyKind::Function
+                && !body.is_generic
+                && !body.is_coro
+                && !body.result_mode
+                && body.captures.is_empty()
+                && body.name != "main"
+                && s.visible.is_pure()
+                && s.latent == 0
+        })
+        .filter_map(|(body, _)| match body.ret.as_ref().map(crate::typechecking::ty::strip_readonly) {
+            Some(Ty::Con(n)) if [INT, FLOAT, BOOL, BYTE].contains(&n.as_str()) => Some((body.name.clone(), false)),
+            Some(Ty::Con(n)) if n == STRING => Some((body.name.clone(), true)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `static let`s whose initializer is pure, by HIR name: computed at
+/// compile time when they can be (comptime step 4).
+fn pure_static_inits(checker: &crate::typechecking::infer::Checker, hir: &crate::hir::HirModule, fx: &crate::hir::effects::ModuleEffects) -> HashSet<String> {
+    hir.bodies
+        .iter()
+        .zip(&fx.summaries)
+        .filter(|(body, s)| body.kind == crate::hir::BodyKind::Static && s.visible.is_pure() && s.latent == 0)
+        .filter_map(|(body, _)| body.name.strip_suffix("$init"))
+        .filter(|name| !checker.is_const_static(name))
+        .map(str::to_string)
+        .collect()
 }
 
 #[cfg(test)]

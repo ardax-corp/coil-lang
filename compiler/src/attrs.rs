@@ -91,11 +91,32 @@ fn reject_qualified_impl_heads(ast: &Output<'_>) -> Vec<Message> {
 /// output next round.
 fn record_macro_calls(children: &[Output<'_>], pending: &mut Vec<PendingMacro>) {
     for child in children {
+        if let Expression::ComptimeBlock(_) = child.1.as_ref() {
+            push_comptime_block(child, pending);
+            continue;
+        }
         match statement_call(child) {
             Some(call) => push_call(call, CallPosition::Item, pending),
             None => record_in(child, pending),
         }
     }
+}
+
+/// A top-level `comptime { … }` runs like an item-position macro call;
+/// diagnostics point at its keyword.
+fn push_comptime_block(block: &Output<'_>, pending: &mut Vec<PendingMacro>) {
+    let start = block.0.start;
+    pending.push(PendingMacro {
+        kind: MacroKind::Comptime,
+        name: "comptime".to_string(),
+        target: block.0,
+        position: CallPosition::Item,
+        owner: None,
+        args: Vec::new(),
+        range: start..start + "comptime".len(),
+        member_attrs: Vec::new(),
+        from_provider: None,
+    });
 }
 
 fn record_in(node: &Output<'_>, pending: &mut Vec<PendingMacro>) {
@@ -169,6 +190,12 @@ pub fn unresolved_macro_message(p: &PendingMacro) -> Message {
         MacroKind::Attr => Message::error(
             ErrorCode::GenericTypeError,
             format!("Unknown attribute `{}`", p.name),
+            p.range.clone(),
+        ),
+        // Never looked up: it is its own program.
+        MacroKind::Comptime => Message::error(
+            ErrorCode::GenericTypeError,
+            "`comptime` block could not be run".to_string(),
             p.range.clone(),
         ),
         MacroKind::Function => {

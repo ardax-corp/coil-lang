@@ -578,3 +578,22 @@ fn output_header_checks_what_main_prints() {
     assert!(!verdict("cases.hy"), "{:?}", result.cases);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn flags_header_adds_to_the_run_grants() {
+    let src = "// Expected: E0119 — x.\n// Flags: --comptime-steps 5000 --comptime-mem 8 --allow-read\nfn main() {}\n";
+    let flags = declared_flags(src).expect("parses").expect("has a header");
+    let mut grants = compiler::HostGrants {
+        allow_env: true,
+        ..Default::default()
+    };
+    flags.apply_to(&mut grants);
+    assert_eq!(grants.comptime.steps, 5000);
+    assert_eq!(grants.comptime.heap_bytes, 8 << 20);
+    assert!(grants.allow_read && grants.allow_env);
+    assert!(declared_flags("// Output: x\nfn main() {}\n").unwrap().is_none());
+    // Only the leading comment header counts.
+    assert!(declared_flags("fn main() {}\n// Flags: --allow-read\n").unwrap().is_none());
+    let bad = declared_flags("// Flags: --comptime-steps lots\n").unwrap_err();
+    assert!(bad.contains("bad `// Flags:` header"), "{bad}");
+}

@@ -101,6 +101,23 @@ pub fn verify_bytecode(
                     limits.strings
                 ));
             }
+            RestoreSnapshot => {
+                let snapshot = constants
+                    .get(operand as usize..)
+                    .ok_or(crate::SnapshotDecodeError::Truncated)
+                    .and_then(crate::HeapSnapshot::decode);
+                match snapshot {
+                    Err(e) => return fail(format!("RestoreSnapshot at pool index {operand}: {e}")),
+                    Ok(s) => {
+                        if let Some((slot, _)) = s.statics.iter().find(|(slot, _)| *slot as usize >= limits.static_slots) {
+                            return fail(format!(
+                                "RestoreSnapshot static slot {slot} out of range ({})",
+                                limits.static_slots
+                            ));
+                        }
+                    }
+                }
+            }
             LoadStatic | StoreStatic if operand as usize >= limits.static_slots => {
                 return fail(format!(
                     "static slot {operand} out of range ({})",
@@ -164,6 +181,25 @@ mod tests {
             strings: 1,
             static_slots: 1,
         }
+    }
+
+    /// `RestoreSnapshot` must point at a whole snapshot whose slots exist.
+    #[test]
+    fn restore_snapshot_needs_a_valid_snapshot_and_slots() {
+        use crate::{HeapSnapshot, SnapWord};
+        let code = [Byte::new(Instruction::RestoreSnapshot).with_operand_u32(1), Byte::new(Instruction::HALT)];
+        let snapshot = |slot| HeapSnapshot { objects: vec![], statics: vec![(slot, SnapWord::Raw(1))] };
+        let mut pool = vec![7];
+        pool.extend(snapshot(0).encode());
+        assert!(verify_bytecode(&code, &pool, limits()).is_ok());
+        let mut pool = vec![7];
+        pool.extend(snapshot(1).encode());
+        let err = verify_bytecode(&code, &pool, limits()).expect_err("slot 1 of 1");
+        assert!(err.reason.contains("static slot 1"), "{}", err.reason);
+        let mut pool = vec![7];
+        pool.extend(&snapshot(0).encode()[..3]);
+        assert!(verify_bytecode(&code, &pool, limits()).is_err(), "truncated");
+        assert!(verify_bytecode(&code, &[7], limits()).is_err(), "past the pool");
     }
 
     fn jmp(target: u32) -> Byte {

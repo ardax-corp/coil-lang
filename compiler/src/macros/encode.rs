@@ -485,7 +485,8 @@ pub fn expr_kind(e: &Expression<'_>) -> &'static str {
     }
 }
 
-/// One `Expr`: kind, then the source text (`source` sliced by its span).
+/// One `Expr`: kind, the source text (`source` sliced by its span), then
+/// its value when it is a constant (`Expr::int()`, …): kind, text, exponent.
 pub fn expr(w: &mut Wire, e: &Output<'_>, source: &str) {
     w.str(expr_kind(e.1.as_ref()));
     let text = source
@@ -494,6 +495,51 @@ pub fn expr(w: &mut Wire, e: &Output<'_>, source: &str) {
         .map(str::to_string)
         .unwrap_or_else(|| e.1.to_string());
     w.str(&text);
+    let (kind, value, exp) = expr_value(e);
+    w.str(kind);
+    w.str(&value);
+    w.str(&exp.to_string());
+}
+
+/// An argument's constant value: `("int", "-3", 0)`, `("string", text, 0)`,
+/// `("bool", "1", 0)`, `("float", digits, exp)` for `digits * 10^exp`, or
+/// `("", "", 0)`. Names are not looked up: macros run before typechecking.
+pub fn expr_value(e: &Output<'_>) -> (&'static str, String, i64) {
+    use crate::const_fold::ConstValue;
+    let mut inner = e;
+    while let Expression::Expr(x) | Expression::Group(x) = inner.1.as_ref() {
+        inner = x;
+    }
+    if let Expression::String(s) = inner.1.as_ref() {
+        return ("string", crate::codegen::unescape_coil_string(s), 0);
+    }
+    match crate::const_fold::eval_expr(inner, &std::collections::HashMap::new()) {
+        Some(ConstValue::Int(n)) => ("int", n.to_string(), 0),
+        Some(ConstValue::Bool(b)) => ("bool", if b { "1" } else { "0" }.to_string(), 0),
+        Some(ConstValue::Float(f)) => match float_parts(f) {
+            Some((digits, exp)) => ("float", digits, exp),
+            None => ("", String::new(), 0),
+        },
+        // Folded strings keep some escapes undecoded (#1810); only a literal is exact.
+        Some(ConstValue::Str(_)) | None => ("", String::new(), 0),
+    }
+}
+
+/// `f` as `digits * 10^exp` with both exact as floats (the shortest digits
+/// that print `f`; `|exp| <= 22`, `|digits| < 2^53`), so the macro VM
+/// rebuilds `f` with one correctly rounded multiply or divide.
+fn float_parts(f: f64) -> Option<(String, i64)> {
+    if !f.is_finite() {
+        return None;
+    }
+    let sci = format!("{f:e}");
+    let (mantissa, exp) = sci.split_once('e')?;
+    let exp: i64 = exp.parse().ok()?;
+    let (whole, frac) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let digits = format!("{whole}{frac}");
+    let exp = exp - frac.len() as i64;
+    let n: i64 = digits.parse().ok()?;
+    (n.unsigned_abs() < (1 << 53) && exp.abs() <= 22).then(|| (n.to_string(), exp))
 }
 
 pub fn arg(w: &mut Wire, arg: &MacroArg) {
