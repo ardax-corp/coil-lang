@@ -89,22 +89,16 @@ test("an IO wait in one task lets another task run") {
     let log: Vec<string> = Vec::new();
     let r = scope(
         fn (Scope s) use (listener, port, log) {
-            let server = s
-                .spawn(
-                    fn () use (listener, log) {
-                        let conn = accept_one(listener);
-                        log.push("accepted");
-                        body_len(conn)
-                    },
-                );
-            s
-                .spawn(
-                    fn () use (port, log) {
-                        task::sleep(20);
-                        log.push("connecting");
-                        send_later(port, 0, "hello tasks")
-                    },
-                );
+            let server = s.spawn(fn () use (listener, log) {
+                let conn = accept_one(listener);
+                log.push("accepted");
+                body_len(conn)
+            });
+            s.spawn(fn () use (port, log) {
+                task::sleep(20);
+                log.push("connecting");
+                send_later(port, 0, "hello tasks")
+            });
             ok_or(server.join(), -100)
         },
     );
@@ -117,15 +111,12 @@ test("IO inside a generator suspends the task, not the generator") {
     let port = local_addr(listener)?[1];
     let r = scope(
         fn (Scope s) use (listener, port) {
-            let reader = s
-                .spawn(
-                    fn () use (listener) {
-                        let g = read_all(accept_one(listener));
-                        // The read parks inside the generator; the first value it yields
-                        // is the real length, not a placeholder.
-                        resume g
-                    },
-                );
+            let reader = s.spawn(fn () use (listener) {
+                let g = read_all(accept_one(listener));
+                // The read parks inside the generator; the first value it yields
+                // is the real length, not a placeholder.
+                resume g
+            });
             s.spawn(fn () use (port) => send_later(port, 20, "twelve bytes"));
             ok_or(reader.join(), -100)
         },
@@ -148,18 +139,15 @@ test("connects from many tasks finish while the server task accepts") {
     let port = local_addr(listener)?[1];
     let r = scope(
         fn (Scope s) use (listener, port) {
-            let server = s
-                .spawn(
-                    fn () use (listener) {
-                        let total = 0;
-                        let i = 0;
-                        while i < 8 {
-                            total = total + body_len(accept_one(listener));
-                            i = i + 1;
-                        }
-                        total
-                    },
-                );
+            let server = s.spawn(fn () use (listener) {
+                let total = 0;
+                let i = 0;
+                while i < 8 {
+                    total = total + body_len(accept_one(listener));
+                    i = i + 1;
+                }
+                total
+            });
             let i = 0;
             while i < 8 {
                 s.spawn(fn () use (port) => send_and_wait_close(port, "abc"));

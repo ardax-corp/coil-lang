@@ -28,22 +28,16 @@ test("the scope waits for children nobody joined") {
     let log: Vec<int> = Vec::new();
     let r = scope(
         fn (Scope s) use (log) {
-            s
-                .spawn(
-                    fn () use (log) {
-                        task::sleep(20);
-                        log.push(1);
-                        0
-                    },
-                );
-            s
-                .spawn(
-                    fn () use (log) {
-                        task::yield_now();
-                        log.push(2);
-                        0
-                    },
-                );
+            s.spawn(fn () use (log) {
+                task::sleep(20);
+                log.push(1);
+                0
+            });
+            s.spawn(fn () use (log) {
+                task::yield_now();
+                log.push(2);
+                0
+            });
             0
         },
     );
@@ -55,21 +49,15 @@ test("the scope waits for children nobody joined") {
 test("join returns each value whatever order the children finish in") {
     let r = scope(
         fn (Scope s) {
-            let slow = s
-                .spawn(
-                    fn () {
-                        task::sleep(30);
-                        1
-                    },
-                );
+            let slow = s.spawn(fn () {
+                task::sleep(30);
+                1
+            });
             let fast = s.spawn(fn () => 2);
-            let mid = s
-                .spawn(
-                    fn () {
-                        task::sleep(10);
-                        3
-                    },
-                );
+            let mid = s.spawn(fn () {
+                task::sleep(10);
+                3
+            });
             ok_or(slow.join(), -100) * 100 + ok_or(mid.join(), -100) * 10 + ok_or(fast.join(), -100)
         },
     );
@@ -90,21 +78,15 @@ test("a child can spawn a sibling through the captured scope") {
     let log: Vec<int> = Vec::new();
     let r = scope(
         fn (Scope s) use (log) {
-            let first = s
-                .spawn(
-                    fn () use (s, log) {
-                        log.push(1);
-                        s
-                            .spawn(
-                                fn () use (log) {
-                                    log.push(3);
-                                    0
-                                },
-                            );
-                        log.push(2);
-                        0
-                    },
-                );
+            let first = s.spawn(fn () use (s, log) {
+                log.push(1);
+                s.spawn(fn () use (log) {
+                    log.push(3);
+                    0
+                });
+                log.push(2);
+                0
+            });
             ok_or(first.join(), -1)
         },
     );
@@ -116,15 +98,12 @@ test("a child can spawn a sibling through the captured scope") {
 test("a child returns a heap value through join") {
     let r = scope(
         fn (Scope s) {
-            let t = s
-                .spawn(
-                    fn () {
-                        let v: Vec<int> = Vec::new();
-                        v.push(4);
-                        v.push(5);
-                        v
-                    },
-                );
+            let t = s.spawn(fn () {
+                let v: Vec<int> = Vec::new();
+                v.push(4);
+                v.push(5);
+                v
+            });
             match t.join() {
                 Result::Ok(v) => v.len() * 10 + v[1],
                 Result::Err(_) => -1,
