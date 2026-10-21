@@ -2572,6 +2572,21 @@ impl Compiler {
                 }
                 continue;
             }
+            // `recv.m(1, a, b)` into an inherent method's `T... xs` (#1729):
+            // the arguments after its fixed ones pack as a free function's.
+            if let HirKind::Call { callee: Callee::Method { name }, args } = &body.exprs[i].kind
+                && !args.iter().any(|&a| matches!(body.expr(a).kind, HirKind::Named { .. }))
+                && let Some(key) = self.hir_method_rest_key(body, args, name)
+            {
+                let args = args.clone();
+                let span = body.exprs[i].span;
+                let b = out.get_or_insert_with(|| body.clone());
+                let packed = self.hir_method_rest_pack(b, &key, &args, span)?;
+                if let HirKind::Call { args, .. } = &mut b.exprs[i].kind {
+                    *args = packed;
+                }
+                continue;
+            }
             // `new C(y: 1, x: 2)` (#1074) and `recv.m(b: 2, a: 1)` (#1380):
             // named arguments into the field or parameter order the checker
             // matched them to (after the receiver).
@@ -2787,6 +2802,83 @@ impl Compiler {
                 *args = new_args;
             }
         }
+        Ok(out)
+    }
+
+    /// The key of the inherent method `recv.method(..)` calls (`args[0]` is
+    /// the receiver) when it takes a typed rest parameter (`T... xs`).
+    fn hir_method_rest_key(&self, body: &HirBody, args: &[HirId], method: &str) -> Option<String> {
+        let recv = *args.first()?;
+        let recv_ty = apply_ty_prune(self.checker.subst(), body.expr(recv).ty.as_ref()?);
+        let recv_ty = crate::typechecking::ty::peel_constructor_refinement(recv_ty);
+        let owner = Checker::class_name_of_ty(&recv_ty)?;
+        let key = self.context.methods.get(owner)?.get(method)?;
+        (self.checker.fn_has_rest(key) && !self.checker.fn_tuple_rest(key) && !self.checker.is_overloaded(key))
+            .then(|| key.clone())
+    }
+
+    /// `recv.m(..)`'s arguments for method `key`'s rest parameter: the
+    /// receiver, the fixed arguments, then one pack of the rest (a lone
+    /// `...vec` spread is the pack itself), as [`Self::hir_call_shapes`]
+    /// shapes a free function's.
+    fn hir_method_rest_pack(
+        &self,
+        b: &mut HirBody,
+        key: &str,
+        args: &[HirId],
+        call_span: crate::hir::Span,
+    ) -> Result<Vec<HirId>, &'static str> {
+        let fixed_count = self
+            .checker
+            .fn_param_names(key)
+            .ok_or("call-argument")?
+            .len()
+            .checked_sub(1)
+            .ok_or("call-argument")?;
+        let declared = self.checker.fn_param_tys(key).and_then(|tys| tys.last().cloned()).ok_or("call-argument")?;
+        let ground = |b: &HirBody, r: HirId| b.expr(r).ty.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t));
+        let mut args = args.to_vec();
+        let whole = match args.last().map(|&a| &b.expr(a).kind) {
+            Some(&HirKind::Spread(inner))
+                if args.len() > 1 && ground(b, inner).is_some_and(|t| crate::typechecking::ty::vec_element_ty(&t).is_some()) =>
+            {
+                args.pop();
+                Some(inner)
+            }
+            _ => None,
+        };
+        let flat = self.hir_flatten_spreads(b, &args[1..])?;
+        if flat.len() < fixed_count {
+            return Err("call-argument");
+        }
+        let mut out = vec![args[0]];
+        out.extend_from_slice(&flat[..fixed_count]);
+        let rest = flat[fixed_count..].to_vec();
+        if let Some(inner) = whole {
+            if !rest.is_empty() {
+                return Err("call-argument");
+            }
+            out.push(inner);
+            return Ok(out);
+        }
+        // A generic pack's type is its items' one ground type (`P` and
+        // `readonly P` are one, as for the mono key).
+        let pack_ty = if !crate::hir::layout::ty_is_closed(&declared) {
+            let key_of = |t: &Ty| crate::monomorphize::mono_key_ty(t);
+            let item = rest.first().and_then(|&r| ground(b, r)).ok_or("call-argument")?;
+            let item = crate::typechecking::ty::strip_readonly(&item).clone();
+            let same = rest.iter().all(|&r| ground(b, r).is_some_and(|t| key_of(&t) == key_of(&item)));
+            match declared {
+                Ty::App(head, params) if params.len() == 1 && same && crate::hir::layout::ty_is_closed(&item) => {
+                    Ty::App(head, vec![item])
+                }
+                _ => return Err("call-argument"),
+            }
+        } else {
+            declared
+        };
+        let span = (call_span.1, call_span.1);
+        out.push(Self::hir_push(b, &self.checker, HirKind::Make { kind: MakeKind::Array, args: rest }, Some(pack_ty), span));
         Ok(out)
     }
 
@@ -5328,7 +5420,13 @@ impl Compiler {
             Some(&(fixed, false)) if fixed as usize == explicit => {}
             // A rest parameter takes its pack as one more argument
             // ([`Self::hir_call_shapes`]).
-            Some(&(fixed, true)) if fixed as usize + 1 == explicit && self_layout.is_none() && !open => {}
+            // A method's typed pack too, a `Vec` as any other (#1729).
+            Some(&(fixed, true))
+                if fixed as usize + 1 == explicit
+                    && match self_layout {
+                        None => !open,
+                        Some(_) => !self.checker.fn_tuple_rest(&lookup),
+                    } => {}
             // Declared later in the file: its entry is reserved but its
             // arity not yet recorded, so read it from the signature as the
             // AST call does. Its two-word return kind comes from the
