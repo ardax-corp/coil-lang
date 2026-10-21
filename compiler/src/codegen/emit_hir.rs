@@ -6872,7 +6872,10 @@ impl Compiler {
     /// The tag of `variant`, checked against the enum `ty` names.
     fn hir_tag(&self, ty: &Ty, enum_name: &str, variant: &str) -> Option<u32> {
         let named = self.hir_enum_name(ty)?;
-        if !Self::hir_same_enum(&named, enum_name) {
+        // `Opt::Some` after `use prelude::Option as Opt;` (#1700).
+        if !Self::hir_same_enum(&named, enum_name)
+            && !Self::hir_same_enum(&named, &self.checker.registry_enum_key(enum_name))
+        {
             return None;
         }
         self.checker.tag_for(enum_name, variant)
@@ -7584,7 +7587,12 @@ impl Compiler {
     /// it has one with a one-word result.
     fn hir_instance_operator(&self, ty: &Ty, class: &'static str, method: &'static str) -> Option<HirOp> {
         let (lookup, fqn) = self.concrete_operator_target_ty(ty, class, method)?;
-        let ret = self.checker.fn_return_ty(&fqn)?;
+        // A tuple's structural order (#1721) has no source signature: a
+        // `bool`.
+        let ret = match &lookup {
+            Ty::Tuple(_) => crate::typechecking::ty::boolean(),
+            _ => self.checker.fn_return_ty(&fqn)?,
+        };
         if !matches!(
             lower::classify(&self.checker, &ret),
             Some(ValueClass::Scalar | ValueClass::Opaque | ValueClass::Object)
