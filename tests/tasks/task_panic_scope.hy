@@ -37,16 +37,14 @@ test("a panicking child runs its defers") {
 }
 
 test("the panic message keeps its formatting") {
-    let r = scope(
-        fn (Scope s) {
-            s.spawn(fn () {
-                let n = 41 + 1;
-                panic "bad value: " + n.show();
-                0
-            });
+    let r = scope(fn (Scope s) {
+        s.spawn(fn () {
+            let n = 41 + 1;
+            panic "bad value: " + n.show();
             0
-        },
-    );
+        });
+        0
+    });
     assert!(panic_message(r) == "bad value: 42");
 }
 
@@ -59,15 +57,13 @@ fn inner_scope_fails() -> string {
 }
 
 test("a failed nested scope does not fail the outer one") {
-    let r = scope(
-        fn (Scope s) {
-            let child = s.spawn(inner_scope_fails);
-            match child.join() {
-                Result::Ok(m) => m,
-                Result::Err(_) => "child failed",
-            }
-        },
-    );
+    let r = scope(fn (Scope s) {
+        let child = s.spawn(inner_scope_fails);
+        match child.join() {
+            Result::Ok(m) => m,
+            Result::Err(_) => "child failed",
+        }
+    });
     let text = match r {
         Result::Ok(m) => m,
         Result::Err(_) => "outer failed",
@@ -76,13 +72,11 @@ test("a failed nested scope does not fail the outer one") {
 }
 
 test("the first panic wins when two children panic") {
-    let r = scope(
-        fn (Scope s) {
-            s.spawn(fn () => panic "first");
-            s.spawn(fn () => panic "second");
-            0
-        },
-    );
+    let r = scope(fn (Scope s) {
+        s.spawn(fn () => panic "first");
+        s.spawn(fn () => panic "second");
+        0
+    });
     assert!(panic_message(r) == "first");
 }
 

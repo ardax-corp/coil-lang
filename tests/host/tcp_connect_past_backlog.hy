@@ -28,28 +28,26 @@ fn accepted(Result<int, TaskError> r) -> int {
 test("connects past the listen backlog suspend only their own task") {
     let listener = listen("127.0.0.1", 0)?;
     let port = local_addr(listener)?[1];
-    let r = scope(
-        fn (Scope s) use (listener, port) {
-            let server = s.spawn(fn () use (listener) {
-                let n = 0;
-                while n < 200 {
-                    let c = match accept_wait(listener) {
-                        Result::Ok(c) => c,
-                        Result::Err(_) => panic "accept",
-                    };
-                    let _ = close(c);
-                    n = n + 1;
-                }
-                n
-            });
-            let i = 0;
-            while i < 200 {
-                s.spawn(fn () use (port) => connect_close(port));
-                i = i + 1;
+    let r = scope(fn (Scope s) use (listener, port) {
+        let server = s.spawn(fn () use (listener) {
+            let n = 0;
+            while n < 200 {
+                let c = match accept_wait(listener) {
+                    Result::Ok(c) => c,
+                    Result::Err(_) => panic "accept",
+                };
+                let _ = close(c);
+                n = n + 1;
             }
-            accepted(server.join())
-        },
-    );
+            n
+        });
+        let i = 0;
+        while i < 200 {
+            s.spawn(fn () use (port) => connect_close(port));
+            i = i + 1;
+        }
+        accepted(server.join())
+    });
     if accepted(r) != 200 {
         raise "not all accepted";
     }

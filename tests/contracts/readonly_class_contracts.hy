@@ -81,12 +81,10 @@ test("readonly class contracts hold across calls and loops") {
 
 test("a plain class written by a callee breaks the ensures") {
     let m = message(
-        scope(
-            fn (Scope s) {
-                let _ = s.spawn(fn () => box_after_reset(new Box(3)));
-                0
-            },
-        ),
+        scope(fn (Scope s) {
+            let _ = s.spawn(fn () => box_after_reset(new Box(3)));
+            0
+        }),
     );
     assert!(find_from(m, "contract violated: ensures result >= 0 in box_after_reset", 0) >= 0, m);
 }

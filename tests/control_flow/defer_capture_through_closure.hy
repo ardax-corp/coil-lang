@@ -26,11 +26,9 @@ test("through a closure") {
 
 test("through a spawned task") {
     let log = new Log(0);
-    let _ = scope(
-        fn (Scope s) use (log) {
-            s.spawn(fn () use (log) => fails(log));
-            0
-        },
-    );
+    let _ = scope(fn (Scope s) use (log) {
+        s.spawn(fn () use (log) => fails(log));
+        0
+    });
     assert!(log.n == 1);
 }

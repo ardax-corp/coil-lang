@@ -22,12 +22,10 @@ test("yield_now outside a scope returns at once") {
 }
 
 fn run_once(int k) -> int {
-    let r = scope(
-        fn (Scope s) use (k) {
-            let t = s.spawn(fn () use (k) => k * k);
-            t.join()
-        },
-    );
+    let r = scope(fn (Scope s) use (k) {
+        let t = s.spawn(fn () use (k) => k * k);
+        t.join()
+    });
     return match r {
         Result::Ok(Result::Ok(v)) => v,
         default => -1,

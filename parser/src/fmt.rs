@@ -2219,7 +2219,17 @@ impl<'s> Formatter<'s> {
             }
             Expression::Call { name, args } => {
                 self.fmt_output(name);
-                self.fmt_delimited_outputs("(", ")", args.as_deref().unwrap_or(&[]), false);
+                // A lone block lambda argument opens on the call's line:
+                // `scope(fn (Scope s) {` (#1796), as after a short receiver.
+                if let Some([arg]) = args.as_deref()
+                    && self.hugs_lambda(arg)
+                {
+                    self.push_str("(");
+                    self.fmt_value(arg);
+                    self.push_str(")");
+                } else {
+                    self.fmt_delimited_outputs("(", ")", args.as_deref().unwrap_or(&[]), false);
+                }
             }
             other => self.fmt_expression(other),
         }
@@ -3305,6 +3315,16 @@ fn main() {
         // #1774: `s`, `.spawn(` and `fn () {` used to land on three lines.
         let src = "fn main() {\n    s.spawn(fn () {\n        let first_value_with_a_long_name = 41 + 1;\n        let second_value_with_a_long_name = first_value_with_a_long_name;\n        0\n    });\n    self.push(first_argument_with_a_long_name, second_argument_with_a_long_name, third_argument_xyz_long);\n    s.run(\n        // why\n        fn () {\n            let first_value_with_a_long_name = 41 + 1;\n            let second_value_with_a_long_name = first_value_with_a_long_name;\n        },\n    );\n    holder.spawn(fn () {\n        let first_value_with_a_long_name = 41 + 1;\n        let second_value_with_a_long_name = first_value_with_a_long_name;\n    });\n}\n";
         let want = "fn main() {\n    s.spawn(fn () {\n        let first_value_with_a_long_name = 41 + 1;\n        let second_value_with_a_long_name = first_value_with_a_long_name;\n        0\n    });\n    self.push(\n        first_argument_with_a_long_name,\n        second_argument_with_a_long_name,\n        third_argument_xyz_long,\n    );\n    s.run(\n        // why\n        fn () {\n            let first_value_with_a_long_name = 41 + 1;\n            let second_value_with_a_long_name = first_value_with_a_long_name;\n        },\n    );\n    holder\n        .spawn(\n            fn () {\n                let first_value_with_a_long_name = 41 + 1;\n                let second_value_with_a_long_name = first_value_with_a_long_name;\n            },\n        );\n}\n";
+        let formatted = format_source(src).unwrap();
+        assert_eq!(formatted, want);
+        assert_eq!(format_source(&formatted).unwrap(), formatted);
+    }
+
+    #[test]
+    fn free_call_hugs_its_sole_block_lambda() {
+        // #1796: `scope(` and `fn (Scope s) {` used to land on two lines.
+        let src = "fn main() {\n    let r = scope(\n        fn (Scope s) {\n            let first_value_with_a_long_name = 41 + 1;\n            let second_value_with_a_long_name = first_value_with_a_long_name;\n            0\n        },\n    );\n    task::scope(fn (Scope s) {\n        let first_value_with_a_long_name = 41 + 1;\n        let second_value_with_a_long_name = first_value_with_a_long_name;\n    });\n    run(\n        // why\n        fn () {\n            let first_value_with_a_long_name = 41 + 1;\n            let second_value_with_a_long_name = first_value_with_a_long_name;\n        },\n    );\n    both(1, fn () {\n        let first_value_with_a_long_name = 41 + 1;\n        let second_value_with_a_long_name = first_value_with_a_long_name;\n    });\n    short(fn () { 0 });\n}\n";
+        let want = "fn main() {\n    let r = scope(fn (Scope s) {\n        let first_value_with_a_long_name = 41 + 1;\n        let second_value_with_a_long_name = first_value_with_a_long_name;\n        0\n    });\n    task::scope(fn (Scope s) {\n        let first_value_with_a_long_name = 41 + 1;\n        let second_value_with_a_long_name = first_value_with_a_long_name;\n    });\n    run(\n        // why\n        fn () {\n            let first_value_with_a_long_name = 41 + 1;\n            let second_value_with_a_long_name = first_value_with_a_long_name;\n        },\n    );\n    both(\n        1,\n        fn () {\n            let first_value_with_a_long_name = 41 + 1;\n            let second_value_with_a_long_name = first_value_with_a_long_name;\n        },\n    );\n    short(fn () {\n        0\n    });\n}\n";
         let formatted = format_source(src).unwrap();
         assert_eq!(formatted, want);
         assert_eq!(format_source(&formatted).unwrap(), formatted);

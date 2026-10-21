@@ -56,15 +56,13 @@ test("an inner timeout fires inside an outer one") {
 }
 
 test("a timeout inside a scope's child") {
-    let r = scope(
-        fn (Scope s) {
-            let t = s.spawn(fn () => inner_times_out());
-            match t.join() {
-                Result::Ok(v) => v,
-                Result::Err(_) => -1,
-            }
-        },
-    );
+    let r = scope(fn (Scope s) {
+        let t = s.spawn(fn () => inner_times_out());
+        match t.join() {
+            Result::Ok(v) => v,
+            Result::Err(_) => -1,
+        }
+    });
     assert!(r == Result::Ok(1));
 }
 
@@ -92,17 +90,15 @@ fn shielded_then_more() -> int {
 
 test("a cancel during a shield stops the task as the shield returns") {
     LOG = 0;
-    let r = scope(
-        fn (Scope s) {
-            let t = s.spawn(shielded_then_more);
-            task::yield_now();
-            t.cancel();
-            match t.join() {
-                Result::Err(TaskError::Cancelled) => true,
-                default => false,
-            }
-        },
-    );
+    let r = scope(fn (Scope s) {
+        let t = s.spawn(shielded_then_more);
+        task::yield_now();
+        t.cancel();
+        match t.join() {
+            Result::Err(TaskError::Cancelled) => true,
+            default => false,
+        }
+    });
     assert!(r == Result::Ok(true));
     assert!(LOG == 18);
 }
@@ -111,33 +107,29 @@ fn nested_shields() -> int {
     defer {
         push(7);
     }
-    shield(
-        fn () {
-            shield(fn () {
-                task::sleep(5);
-                push(1);
-            });
+    shield(fn () {
+        shield(fn () {
             task::sleep(5);
-            push(2);
-        },
-    );
+            push(1);
+        });
+        task::sleep(5);
+        push(2);
+    });
     task::sleep(10000);
     return 0;
 }
 
 test("nested shields both finish before the cancel") {
     LOG = 0;
-    let r = scope(
-        fn (Scope s) {
-            let t = s.spawn(nested_shields);
-            task::yield_now();
-            t.cancel();
-            match t.join() {
-                Result::Err(TaskError::Cancelled) => true,
-                default => false,
-            }
-        },
-    );
+    let r = scope(fn (Scope s) {
+        let t = s.spawn(nested_shields);
+        task::yield_now();
+        t.cancel();
+        match t.join() {
+            Result::Err(TaskError::Cancelled) => true,
+            default => false,
+        }
+    });
     assert!(r == Result::Ok(true));
     assert!(LOG == 127);
 }

@@ -37,15 +37,13 @@ test("scope over int, string and Option results") {
 
 test("a captured value and a spawned child") {
     let base = 10;
-    let r = scope(
-        fn (Scope s) use (base) {
-            let t = s.spawn(fn () use (base) => base * 3);
-            return match t.join() {
-                Result::Ok(v) => v + 1,
-                Result::Err(_) => 0,
-            };
-        },
-    );
+    let r = scope(fn (Scope s) use (base) {
+        let t = s.spawn(fn () use (base) => base * 3);
+        return match t.join() {
+            Result::Ok(v) => v + 1,
+            Result::Err(_) => 0,
+        };
+    });
     assert!(ok_int(r) == 31);
 }
 

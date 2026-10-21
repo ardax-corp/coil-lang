@@ -94,24 +94,20 @@ test("each invariant clause is checked") {
 }
 
 test("a pub method that breaks the invariant names the method") {
-    let m = outcome(
-        fn () {
-            let a = new Account(1, 10);
-            a.withdraw(2);
-            0
-        },
-    );
+    let m = outcome(fn () {
+        let a = new Account(1, 10);
+        a.withdraw(2);
+        0
+    });
     assert!(has(m, "invariant self.balance >= 0"), m);
     assert!(has(m, "in Account::withdraw"), m);
 }
 
 test("a pub method that leaves a private helper's damage panics") {
-    let m = outcome(
-        fn () {
-            let a = new Account(1, 10);
-            a.transfer(5, 1);
-            0
-        },
-    );
+    let m = outcome(fn () {
+        let a = new Account(1, 10);
+        a.transfer(5, 1);
+        0
+    });
     assert!(has(m, "in Account::transfer"), m);
 }
