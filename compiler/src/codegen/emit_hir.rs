@@ -500,7 +500,7 @@ impl Compiler {
                     let (start, end) = e.span;
                     if self.hir_builtin(name).is_some()
                         || self.checker.is_overloaded(name)
-                        || self.checker.bare_construct_at(start, end).is_some()
+                        || self.is_bare_construct_call(name, start, end)
                         || self.checker.qualified_trait_call_at(start, end).is_some()
                         || self.sidecar_overload(e.node, start, end).is_some()
                         || self.checker.partial_fill_at(start, end).is_some()
@@ -3445,6 +3445,15 @@ impl Compiler {
         Ok(())
     }
 
+    /// Whether a call of `name` at this span is bare constructor sugar
+    /// (`Bad(s)` for `ParseError::Bad`). The checker records the sugar by
+    /// span, and a compiler-made call can share its span: `main`'s
+    /// `return Err(e)` panics through a `string::format` call spanned at the
+    /// constructor (#1738). So the recorded variant must be the callee.
+    fn is_bare_construct_call(&self, name: &str, start: usize, end: usize) -> bool {
+        self.checker.bare_construct_at(start, end).is_some_and(|(_, variant)| variant == name)
+    }
+
     /// The table key and ABI of a direct call to `name`, or why it is not a
     /// plain `CALL` to a user function. The special forms are checked in
     /// `compile_call_expr`'s order, so a name those claim is never lowered
@@ -3494,7 +3503,7 @@ impl Compiler {
         }
         let node = hir.expr(call);
         let (start, end) = node.span;
-        if self.checker.bare_construct_at(start, end).is_some() {
+        if self.is_bare_construct_call(name, start, end) {
             return Err("callee-builtin");
         }
         if let Some(builtin) = self.hir_builtin(name) {
