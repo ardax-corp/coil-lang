@@ -613,6 +613,11 @@ pub struct Checker {
     /// Fixed-prefix arity for [`Self::extern_variadic`] entries.
     extern_variadic_nfixed: HashMap<String, usize>,
 
+    /// `ConstBytes` parameters of `extern` functions, as `(fixed arity,
+    /// variadic, index)` per name: typed `readonly Vec<byte>`, they also
+    /// take a `string`, lent in place as `invoke` lends it (#1665).
+    extern_const_bytes: HashMap<String, Vec<(usize, bool, usize)>>,
+
     /// Per-call-site FFI type tags for variadic FFI invokes (keyed by call span).
     /// Used by codegen because runtime `Value`s are untagged.
     variadic_call_arg_tags: HashMap<(usize, usize), Vec<(u32, u32)>>,
