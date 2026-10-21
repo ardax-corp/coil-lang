@@ -1765,15 +1765,20 @@ impl Pipeline {
             }
             Err(crate::macros::ConstEvalError::Failed { index, reason }) => {
                 let c = &consts[index];
-                let text = format!("const `{}` could not be computed while compiling: {reason}", short_name(&c.fqn));
+                let text = format!(
+                    "{} could not be computed while compiling: {reason}",
+                    crate::comptime_expr::describe(short_name(&c.fqn))
+                );
                 self.emit_const_error(c, text, entry_src);
             }
             Err(crate::macros::ConstEvalError::Unsnapshottable(e)) => {
                 let c = &consts[e.root];
-                let at = self.snap_path_text(short_name(&c.fqn), &e.path);
+                let short = short_name(&c.fqn);
+                let root = if crate::comptime_expr::is_comptime_const(short) { "value" } else { short };
+                let at = self.snap_path_text(root, &e.path);
                 let text = format!(
-                    "const `{}` cannot keep its value: `{at}` is {}, which exists only while a program runs",
-                    short_name(&c.fqn),
+                    "{} cannot keep its value: `{at}` is {}, which exists only while a program runs",
+                    crate::comptime_expr::describe(short),
                     e.what
                 );
                 self.emit_const_error(c, text, entry_src);
@@ -1803,7 +1808,11 @@ impl Pipeline {
 
     fn emit_const_error(&mut self, c: &crate::codegen::ComptimeConst, text: String, entry_src: Option<(&Path, &str)>) {
         let mut msg = Message::error(ErrorCode::ConstNotComputable, text, c.span.clone());
-        msg.with_help("a `const` is computed while compiling; use `static let` to compute it when the program starts".to_string());
+        msg.with_help(if crate::comptime_expr::is_comptime_const(&c.fqn) {
+            "a `comptime` expression is computed while compiling; without `comptime` it is computed when the program runs".to_string()
+        } else {
+            "a `const` is computed while compiling; use `static let` to compute it when the program starts".to_string()
+        });
         let source = c.file.as_deref().and_then(|file| {
             let text = match entry_src {
                 Some((p, src)) if p == file => Some(src.to_string()),
