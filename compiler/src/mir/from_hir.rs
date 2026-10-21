@@ -5926,6 +5926,12 @@ impl Lower<'_> {
     fn ffi_operand(&mut self, op: &HirFfiOperand) -> Result<Option<ValueId>, Refusal> {
         Ok(Some(match op {
             HirFfiOperand::Static(slot) => self.b.ins_load_static(*slot, MirTy::I64).map_err(mir)?,
+            // A two-word value (a `static` holding `declare`'s unmatched
+            // `Result`, #1731) passes boxed, as a local holding one does.
+            HirFfiOperand::Value(id) if self.inp.pair_tys.contains_key(id) => match self.boxed_word(HirId(*id))? {
+                Some(v) => v,
+                None => return Ok(None),
+            },
             HirFfiOperand::Value(id) => match self.word(HirId(*id))? {
                 Some(v) => v,
                 None => return Ok(None),

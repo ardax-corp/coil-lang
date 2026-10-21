@@ -2208,9 +2208,15 @@ impl Walk<'_> {
                 let [lib, f, values] = args else { return Err("callee-arity") };
                 let items = tuple_items(body, *values).ok_or("ffi-arguments")?;
                 // The id is a value: a local, a field, or an `int` `static` /
-                // `const` read (#1639), not a named function.
+                // `const` read (#1639), not a named function. A `static`
+                // holding `declare`'s unmatched `Result<int, _>` passes as a
+                // local holding one does (#1731).
                 let id_global = matches!(body.expr(*f).kind, HirKind::Global { .. })
-                    && self.ty(*f).is_some_and(|t| primitive(&apply_ty_prune(self.checker.subst(), t)) == Some(coil_ty::INT));
+                    && self.ty(*f).is_some_and(|t| {
+                        let t = apply_ty_prune(self.checker.subst(), t);
+                        let ok = coil_ty::result_ok_err(strip_readonly(&t)).map(|(ok, _)| ok);
+                        primitive(ok.as_ref().unwrap_or(&t)) == Some(coil_ty::INT)
+                    });
                 if !id_global && !matches!(body.expr(*f).kind, HirKind::Local(_) | HirKind::Field { .. }) {
                     return Err("ffi-function");
                 }
