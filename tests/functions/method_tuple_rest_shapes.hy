@@ -42,6 +42,10 @@ impl H {
     pub fn forward(... xs) -> int {
         return self.count(...xs) * 10;
     }
+
+    pub static fn make(... xs) -> int {
+        return xs.len();
+    }
 }
 
 fn count(... xs) -> int {
@@ -95,4 +99,10 @@ test("a generic class's method") {
     assert!(g.size() == 0);
     assert!(g.last(1, "z") == "z");
     assert!(new G(2).last(true, 3) == 3);
+}
+
+test("a static method") {
+    assert!(H::make(1, "a") == 2);
+    assert!(H::make() == 0);
+    assert!(H::make(true) == 1);
 }
