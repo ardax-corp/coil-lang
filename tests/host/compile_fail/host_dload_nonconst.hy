@@ -1,5 +1,5 @@
 // Expected: E0411 — non-const `dload` path is a compile error.
-use ffi::{dload};
+use ffi::dload;
 
 fn main() {
     let name = "plugin";

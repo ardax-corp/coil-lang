@@ -288,7 +288,7 @@ pub fn stream_stderr(heap: &mut Heap) -> Result<Value, IoErrorTag> {
 }
 
 /// A standard stream a `thread::spawn` worker read from a static of its
-/// spawner, as the worker sees it ([`crate::thread::StaticSlot::StdStream`]):
+/// spawner, as the worker sees it ([`crate::thread::PortableValue::StdStream`]):
 /// its own handle to the same process stream, closed if the spawner's was
 /// (#1684).
 pub(crate) fn stream_std_reopen(
