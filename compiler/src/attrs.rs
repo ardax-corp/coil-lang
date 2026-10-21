@@ -9,7 +9,10 @@
 
 use parser::{
     SimpleSpan,
-    ast::{AttrArgs, Attribute, EnumVariantPayload, Expression, Output, Visibility},
+    ast::{
+        AttrArgs, Attribute, EnumVariantPayload, Expression, MatchArm, Output, Pattern, PatternField,
+        PatternPayload, Visibility,
+    },
 };
 use reporting::{ErrorCode, Message};
 
@@ -479,11 +482,12 @@ fn expand_decls<'a>(decls: &mut Vec<Output<'a>>, pending: &mut Vec<PendingMacro>
         }
 
         /// A class or enum whose derives to record.
-        struct Job<'a> {
+        struct Job<'v, 'a> {
             name: &'a str,
             generic: bool,
             derives: Vec<&'a str>,
             scalar_backing: Option<&'a str>,
+            variants: &'v [Output<'a>],
         }
         let job = match decls[i].1.as_ref() {
             Expression::EnumDecl {
@@ -504,6 +508,7 @@ fn expand_decls<'a>(decls: &mut Vec<Output<'a>>, pending: &mut Vec<PendingMacro>
                     generic: !type_params.is_empty(),
                     derives: derive_traits_from_attrs(attrs),
                     scalar_backing: scalar_backing_ty_name(attrs, variants),
+                    variants,
                 })
                 }
             }
@@ -538,6 +543,7 @@ fn expand_decls<'a>(decls: &mut Vec<Output<'a>>, pending: &mut Vec<PendingMacro>
                     generic: !type_params.is_empty(),
                     derives,
                     scalar_backing: None,
+                    variants: &[],
                 })
                 }
             }
@@ -551,6 +557,7 @@ fn expand_decls<'a>(decls: &mut Vec<Output<'a>>, pending: &mut Vec<PendingMacro>
                 generic: job.generic,
                 derives: &job.derives,
                 scalar_backing: job.scalar_backing,
+                variants: job.variants,
                 decls,
                 pending,
             })
@@ -611,13 +618,15 @@ struct ExpandDerivesArgs<'args, 'a> {
     generic: bool,
     derives: &'args [&'a str],
     scalar_backing: Option<&'a str>,
+    /// The enum's variants (empty for a class).
+    variants: &'args [Output<'a>],
     decls: &'args [Output<'a>],
     pending: &'args mut Vec<PendingMacro>,
 }
 
 /// Record a class / enum's derives as derive macros to run (built-ins live in
-/// `compiler/src/prelude/derive.hy`) and add the type-name `Show` / `String`
-/// defaults the derives and explicit impls leave uncovered.
+/// `compiler/src/prelude/derive.hy`) and add the default `Show` the derives
+/// and explicit impls leave uncovered.
 fn expand_derives<'a>(args: ExpandDerivesArgs<'_, 'a>) -> Vec<Output<'a>> {
     let ExpandDerivesArgs {
         span,
@@ -625,6 +634,7 @@ fn expand_derives<'a>(args: ExpandDerivesArgs<'_, 'a>) -> Vec<Output<'a>> {
         generic,
         derives,
         scalar_backing,
+        variants,
         decls,
         pending,
     } = args;
@@ -638,13 +648,14 @@ fn expand_derives<'a>(args: ExpandDerivesArgs<'_, 'a>) -> Vec<Output<'a>> {
         return Vec::new();
     }
     let mut out = Vec::new();
-    push_default_display_impls(span, name, derives, decls, scalar_backing, &mut out);
+    push_default_display_impls(span, name, derives, decls, scalar_backing, variants, &mut out);
     out
 }
 
-/// Auto-generate FQN-only `Show` when neither derive nor an explicit
-/// `impl` covers the type. Bodies return the type name as a string literal
-/// (same display as `typeof self` for non-generic types).
+/// Auto-generate a default `Show` when neither derive nor an explicit
+/// `impl` covers the type: a class shows its type name (same display as
+/// `typeof self` for non-generic types), an enum its qualified variant name
+/// `E::V` with any payload elided (#1749), and a scalar enum its backing value.
     ///
 /// Inserted beside the type so typecheck sees the instance before later
 /// `fn main` / statements. Script-style top-level match/expr after the type
@@ -656,11 +667,14 @@ fn push_default_display_impls<'a>(
     derives: &[&str],
     decls: &[Output<'a>],
     scalar_backing: Option<&'a str>,
+    variants: &[Output<'a>],
     out: &mut Vec<Output<'a>>,
 ) {
     if !derives.contains(&"Show") && !has_explicit_impl(decls, "Show", name) {
         if let Some(backing) = scalar_backing {
             out.push(synth_show_scalar_enum(span, name, backing));
+        } else if !variants.is_empty() {
+            out.push(synth_show_variant_name(span, name, variants));
         } else {
             out.push(synth_show_type_name(span, name));
         }
@@ -695,6 +709,66 @@ fn has_explicit_impl(decls: &[Output<'_>], class: &str, ty_name: &str) -> bool {
 fn synth_show_type_name<'a>(span: SimpleSpan, name: &'a str) -> Output<'a> {
     let p = leak(format!("__show_{}", name));
     let body = str_lit(span, name);
+    let show_m = method_fn(
+        span,
+        "show",
+        vec![arg(span, name, p)],
+        "string",
+        block_return(span, body),
+    );
+    typeclass_impl(span, "Show", name, vec![show_m])
+}
+
+/// `match v { E::A => "E::A", E::B(_) => "E::B", E::C { x: _ } => "E::C" }`.
+fn synth_show_variant_name<'a>(span: SimpleSpan, name: &'a str, variants: &[Output<'a>]) -> Output<'a> {
+    let p = leak(format!("__show_{}", name));
+    let wildcard = || (fresh_span(), Pattern::Wildcard);
+    let arms = variants
+        .iter()
+        .filter_map(|v| match v.1.as_ref() {
+            Expression::EnumVariant {
+                name: variant_name,
+                payload,
+                ..
+            } => Some((*variant_name, payload)),
+            _ => None,
+        })
+        .map(|(variant_name, payload)| {
+            let payload = match payload {
+                EnumVariantPayload::Unit => PatternPayload::Unit,
+                EnumVariantPayload::Tuple(items) => {
+                    PatternPayload::Tuple(items.iter().map(|_| wildcard()).collect())
+                }
+                EnumVariantPayload::Record(fields) => PatternPayload::Record(
+                    fields
+                        .iter()
+                        .map(|f| PatternField {
+                            name: f.name,
+                            pattern: wildcard(),
+                        })
+                        .collect(),
+                ),
+            };
+            MatchArm {
+                pattern: (
+                    fresh_span(),
+                    Pattern::Constructor {
+                        enum_name: name,
+                        variant_name,
+                        payload,
+                    },
+                ),
+                body: str_lit(span, leak(format!("{name}::{variant_name}"))),
+            }
+        })
+        .collect();
+    let body = at(
+        span,
+        Expression::Match {
+            scrutinee: ident(span, p),
+            arms,
+        },
+    );
     let show_m = method_fn(
         span,
         "show",

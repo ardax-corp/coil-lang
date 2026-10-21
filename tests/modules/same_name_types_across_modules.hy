@@ -40,6 +40,6 @@ test("both enums keep their own cases") {
 test("each class shows through its own instance") {
     assert!(show_reader(3) == "Reader { n: 3 }");
     assert!(format("%v", new Reader(1, "x")) == "Reader");
-    assert!(format("%v", Mode::On) == "Mode");
+    assert!(format("%v", Mode::On) == "Mode::On");
     assert!(show_text_reader("t") == "Reader { text: t }");
 }
