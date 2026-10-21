@@ -609,8 +609,7 @@ impl<'pratt> Pratt<'pratt> {
                 // compiling (`comptime e` with any other operand is a prefix).
                 keyword!("comptime")
                     .ignore_then(self.brace_body(stmt.clone(), expr.clone()))
-                    .map_with(|body, e| (e.span(), Box::new(Expression::ComptimeBlock(body))))
-                    .labelled("comptime block"),
+                    .map_with(|body, e| (e.span(), Box::new(Expression::ComptimeBlock(body)))),
                 // Anonymous `fn (…)` before `ident` so `fn` stays a keyword.
                 self.lambda_atom(expr.clone(), stmt),
                 self.ident(),
