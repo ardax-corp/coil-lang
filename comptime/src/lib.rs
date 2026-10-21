@@ -14,12 +14,14 @@
 //! on a fresh VM. A call that panics, runs out of budget or aborts drops the
 //! VM; the next call builds a new one.
 
+mod io_gate;
+
 use std::cell::RefCell;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use common::{Byte, Value};
 use compiler::ComptimeLimits;
-use compiler::macros::{CompiledExpansion, ConstEval, ConstEvalError, ConstEvalOutcome, FoldCall, FoldValue, MacroHost, native_allowed_at_compile_time};
+use compiler::macros::{CompiledExpansion, ComptimeIo, ConstEval, ConstEvalError, ConstEvalOutcome, FoldCall, FoldValue, MacroHost, native_allowed_at_compile_time};
 use machine::{FfiError, HostClosureFn, Machine, NativeFn, Object, SnapRoot};
 
 /// Runs macros in a sandboxed VM.
@@ -43,11 +45,15 @@ impl MacroHost for VmMacroHost {
         program: &CompiledExpansion,
         calls: &[(u32, String)],
         limits: &ComptimeLimits,
+        io: &ComptimeIo,
     ) -> Vec<Result<String, String>> {
-        calls
+        let outer = io_gate::set_active(Some(Arc::new(io.clone())));
+        let out = calls
             .iter()
             .map(|(entry, input)| run_entry(program, *entry, input, limits))
-            .collect()
+            .collect();
+        io_gate::set_active(outer);
+        out
     }
 
     fn eval_consts(
@@ -56,11 +62,14 @@ impl MacroHost for VmMacroHost {
         consts: &[ConstEval],
         folds: &[FoldCall],
         limits: &ComptimeLimits,
+        io: &[ComptimeIo],
     ) -> Result<ConstEvalOutcome, ConstEvalError> {
         let captured = Captured::default();
         let outer = machine::io::set_output_redirect(None);
         let kinds = machine::swap_static_word_kinds(program.static_word_kinds.clone());
-        let result = eval_in(program, consts, folds, limits, &captured);
+        let io: Vec<Arc<ComptimeIo>> = io.iter().cloned().map(Arc::new).collect();
+        let result = eval_in(program, consts, folds, limits, &io, &captured);
+        io_gate::set_active(None);
         machine::swap_static_word_kinds(kinds);
         machine::io::set_output_redirect(outer);
         result
@@ -94,6 +103,7 @@ fn eval_in(
     consts: &[ConstEval],
     folds: &[FoldCall],
     limits: &ComptimeLimits,
+    io: &[Arc<ComptimeIo>],
     captured: &Captured,
 ) -> Result<ConstEvalOutcome, ConstEvalError> {
     let mut vm = const_vm(program, captured);
@@ -114,9 +124,11 @@ fn eval_in(
             *limits
         };
         captured.0.lock().expect("capture lock").clear();
+        io_gate::set_active(if c.silent { None } else { io.get(c.io as usize).cloned() });
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             call_limited(&mut vm, c.entry, &[], &item_limits)
         }));
+        io_gate::set_active(None);
         if c.silent {
             silent_left = silent_left.saturating_sub(vm.steps_charged());
         }
@@ -241,8 +253,22 @@ fn rebuild(
 }
 
 /// The failure text: the VM's own reason, else what the call printed.
-fn failure_reason(reason: String, captured: &Captured) -> String {
+/// What the VM printed before it stopped. A native the host refused says
+/// what to grant, and where in a library it was called does not help.
+fn printed_text(captured: &Captured) -> String {
     let printed = String::from_utf8_lossy(&captured.0.lock().expect("capture lock")).trim().to_string();
+    let (first, rest) = printed.split_once('\n').unwrap_or((&printed, ""));
+    match first.strip_prefix("panic: ") {
+        Some(msg) if msg.contains(" while compiling") => {
+            let msg = msg.rsplit_once(" at ").map_or(msg, |(m, _)| m);
+            if rest.is_empty() { msg.to_string() } else { format!("{msg}\n{rest}") }
+        }
+        _ => printed,
+    }
+}
+
+fn failure_reason(reason: String, captured: &Captured) -> String {
+    let printed = printed_text(captured);
     match reason {
         r if r.is_empty() && !printed.is_empty() => printed,
         r if r.is_empty() => "it panicked".to_string(),
@@ -309,11 +335,13 @@ fn build_sandbox_natives() -> Vec<Arc<dyn NativeFn>> {
         .map(|(native, name)| {
             if native_allowed_at_compile_time(&name) {
                 native
+            } else if let Some(gated) = io_gate::gated(&name, native.clone()) {
+                gated
             } else {
                 let sig = native.signature().clone();
                 Arc::new(HostClosureFn::new(sig, move |_heap, _args| {
-                    Err(FfiError::Unsupported(format!(
-                        "`{name}` is not available to compile-time macros"
+                    Err(FfiError::Panic(format!(
+                        "`{name}` is not available while compiling"
                     )))
                 })) as Arc<dyn NativeFn>
             }
@@ -356,7 +384,7 @@ fn run_entry(program: &CompiledExpansion, entry: u32, input: &str, limits: &Comp
         vm.reset_isolate_heap();
         keep_vm(program, vm);
     }
-    let printed = String::from_utf8_lossy(&captured.0.lock().expect("capture lock")).trim().to_string();
+    let printed = printed_text(&captured);
     match outcome {
         Ok(Ok(text)) => Ok(text),
         Ok(Err(reason)) if reason.is_empty() => Err(if printed.is_empty() {

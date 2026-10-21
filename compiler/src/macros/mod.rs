@@ -363,13 +363,14 @@ pub struct CompiledExpansion {
 /// top of the VM so the compiler itself does not depend on `machine`.
 pub trait MacroHost: Send + Sync {
     /// Call each `(entry, input)`: `entry` is the offset of a
-    /// `fn(string input) -> string`, each call within `limits`. Returns each
-    /// result, or the panic / error text.
+    /// `fn(string input) -> string`, each call within `limits` and with the
+    /// IO `io` grants. Returns each result, or the panic / error text.
     fn run(
         &self,
         program: &CompiledExpansion,
         calls: &[(u32, String)],
         limits: &crate::ComptimeLimits,
+        io: &ComptimeIo,
     ) -> Vec<Result<String, String>>;
 
     /// Compute `consts` in order on a compile-time VM of `program`: call
@@ -383,12 +384,16 @@ pub trait MacroHost: Send + Sync {
     ///
     /// Then, on the same VM (so a call can read the consts), each of
     /// `folds` runs within the silent tier; one that fails is `None`.
+    ///
+    /// An explicit item may do the IO `io[item.io]` grants; nothing else
+    /// may do any.
     fn eval_consts(
         &self,
         program: &CompiledExpansion,
         consts: &[ConstEval],
         folds: &[FoldCall],
         limits: &crate::ComptimeLimits,
+        io: &[ComptimeIo],
     ) -> Result<ConstEvalOutcome, ConstEvalError>;
 }
 
@@ -419,6 +424,9 @@ pub struct ConstEval {
     pub slot: u32,
     pub kind: u8,
     pub silent: bool,
+    /// Index of its grants in the request's `io` (unused when `silent`:
+    /// silent work never does IO).
+    pub io: u32,
 }
 
 /// The computed values, the silent items left out (indices into the
@@ -452,6 +460,114 @@ pub fn install_default_host(host: std::sync::Arc<dyn MacroHost>) {
 /// The host installed with [`install_default_host`], if any.
 pub fn default_host() -> Option<std::sync::Arc<dyn MacroHost>> {
     DEFAULT_HOST.get().cloned()
+}
+
+/// The IO one compile-time evaluation may do, resolved for the module its
+/// code is in ([`crate::ComptimeGrants::for_module`]): files under `read` /
+/// `write` (absolute), environment variables `env`, programs whose stem is
+/// in `exec`. The host checks each native call against it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct ComptimeIo {
+    pub read: Vec<PathBuf>,
+    pub write: Vec<PathBuf>,
+    pub env: Vec<String>,
+    pub exec: Vec<String>,
+}
+
+impl ComptimeIo {
+    /// The effect bits (`common::EffectFlags`) code with these grants may
+    /// have while compiling.
+    pub fn effects(&self) -> u16 {
+        use common::EffectFlags as F;
+        [
+            (!self.read.is_empty(), F::READ),
+            (!self.write.is_empty(), F::WRITE),
+            (!self.env.is_empty(), F::ENV),
+            (!self.exec.is_empty(), F::EXEC),
+        ]
+        .into_iter()
+        .filter(|(on, _)| *on)
+        .fold(0, |acc, (_, bits)| acc | bits)
+    }
+
+    pub fn check_read(&self, path: &str) -> Result<(), String> {
+        if under_any(&absolute_path(Path::new(path)), &self.read) {
+            return Ok(());
+        }
+        Err(format!("reading `{path}` while compiling needs `--comptime-read {}`", grant_hint(path)))
+    }
+
+    pub fn check_write(&self, path: &str) -> Result<(), String> {
+        if under_any(&absolute_path(Path::new(path)), &self.write) {
+            return Ok(());
+        }
+        Err(format!("writing `{path}` while compiling needs `--comptime-write {}`", grant_hint(path)))
+    }
+
+    pub fn check_env(&self, name: &str) -> Result<(), String> {
+        if self.env.iter().any(|n| n == name) {
+            return Ok(());
+        }
+        Err(format!("reading environment variable `{name}` while compiling needs `--comptime-env {name}`"))
+    }
+
+    pub fn check_exec(&self, program: &str) -> Result<(), String> {
+        let stem = Path::new(program).file_stem().and_then(|s| s.to_str()).unwrap_or(program);
+        if self.exec.iter().any(|s| s == stem) {
+            return Ok(());
+        }
+        Err(format!("running `{program}` while compiling needs `--comptime-exec {stem}`"))
+    }
+}
+
+/// The directory to grant for `path`: itself when it is one, else its
+/// parent (`.` for a bare file name).
+fn grant_hint(path: &str) -> String {
+    let p = Path::new(path);
+    if p.is_dir() {
+        return path.to_string();
+    }
+    match p.parent().map(|d| d.to_string_lossy().into_owned()) {
+        Some(d) if !d.is_empty() => format!("{d}/"),
+        _ => ".".to_string(),
+    }
+}
+
+fn under_any(path: &Path, roots: &[PathBuf]) -> bool {
+    // A `..` left in a path that does not exist yet could climb out through
+    // a symlink, so such a path is under nothing.
+    !path.components().any(|c| c == std::path::Component::ParentDir) && roots.iter().any(|root| path.starts_with(root))
+}
+
+/// `path` made absolute against the working directory, with symlinks
+/// resolved as far as it exists, so a link cannot lead out of a granted
+/// directory. A part that does not exist yet is kept as written.
+pub fn absolute_path(path: &Path) -> PathBuf {
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(path)
+    };
+    if let Ok(real) = joined.canonicalize() {
+        return real;
+    }
+    // The longest prefix that exists, resolved, then the rest.
+    let mut rest = Vec::new();
+    let mut base = joined.as_path();
+    loop {
+        match (base.parent(), base.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_os_string());
+                base = parent;
+                if let Ok(mut real) = base.canonicalize() {
+                    real.extend(rest.iter().rev());
+                    return real;
+                }
+            }
+            // Ends in `..` or reached the root: leave it as written.
+            _ => return joined,
+        }
+    }
 }
 
 /// Host natives a macro may call: pure computation only (no IO, files,

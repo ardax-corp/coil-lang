@@ -1711,6 +1711,9 @@ impl Pipeline {
             return;
         };
         let kinds = self.static_word_kinds();
+        // Each module's grants once.
+        let mut io: Vec<crate::macros::ComptimeIo> = Vec::new();
+        let mut io_of: HashMap<&str, u32> = HashMap::new();
         let evals: Vec<crate::macros::ConstEval> = consts
             .iter()
             .map(|c| crate::macros::ConstEval {
@@ -1718,6 +1721,10 @@ impl Pipeline {
                 slot: c.slot,
                 kind: kinds.get(c.slot as usize).copied().unwrap_or(common::WORD_UNKNOWN),
                 silent: c.silent,
+                io: *io_of.entry(c.fqn.rsplit_once("::").map_or("", |(m, _)| m)).or_insert_with_key(|module| {
+                    io.push(self.host_grants.comptime_io.for_module(module));
+                    io.len() as u32 - 1
+                }),
             })
             .collect();
         let program = crate::macros::CompiledExpansion {
@@ -1743,7 +1750,7 @@ impl Pipeline {
                 })
             })
             .collect();
-        match host.eval_consts(&program, &evals, &folds, &limits) {
+        match host.eval_consts(&program, &evals, &folds, &limits, &io) {
             Ok(outcome) => {
                 let folded: Vec<_> = sites
                     .iter()
@@ -1807,8 +1814,11 @@ impl Pipeline {
     }
 
     fn emit_const_error(&mut self, c: &crate::codegen::ComptimeConst, text: String, entry_src: Option<(&Path, &str)>) {
+        let refused = text.contains("while compiling needs `--comptime-");
         let mut msg = Message::error(ErrorCode::ConstNotComputable, text, c.span.clone());
-        msg.with_help(if crate::comptime_expr::is_comptime_const(&c.fqn) {
+        msg.with_help(if refused {
+            "the build decides which files, environment variables and programs compile-time code may use".to_string()
+        } else if crate::comptime_expr::is_comptime_const(&c.fqn) {
             "a `comptime` expression is computed while compiling; without `comptime` it is computed when the program runs".to_string()
         } else {
             "a `const` is computed while compiling; use `static let` to compute it when the program starts".to_string()

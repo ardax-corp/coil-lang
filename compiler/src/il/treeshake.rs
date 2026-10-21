@@ -347,6 +347,7 @@ pub fn reachable_functions(
     roots: &[String],
     test_pcs: &[usize],
     extra: &[&[IlOp]],
+    skip: &dyn Fn(&str) -> bool,
 ) -> (ReachParents, HashMap<String, (usize, usize)>) {
     let graph = CallGraph::new(buf, functions, fn_entry_labels, None);
     let ops = buf.ops();
@@ -380,7 +381,7 @@ pub fn reachable_functions(
     });
     let outside = outside.into_iter().flat_map(|(s, e)| graph.callees(ops, s, e));
     for callee in outside.collect::<Vec<_>>().into_iter().chain(extra) {
-        {
+        if !skip(&callee) {
             if parent.insert(callee.clone(), None).is_none() {
                 work.push_back(callee);
             }

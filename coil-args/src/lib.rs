@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use clap::{ArgMatches, Args, Command, FromArgMatches};
-use compiler::{ComptimeLimits, ContractLevel, DebugLevel, HostGrants, OptLevel};
+use compiler::{ComptimeGrants, ComptimeLimits, ContractLevel, DebugLevel, HostGrants, OptLevel, Scoped};
 
 /// SARIF / LSP diagnostic stream (commands that report through the compiler).
 #[derive(Args, Clone, Debug, Default)]
@@ -160,6 +160,21 @@ pub struct HostGrantFlags {
     /// (default 1024)
     #[arg(long = "comptime-mem", value_name = "MIB", value_parser = clap::value_parser!(u64).range(1..=1 << 40))]
     pub comptime_mem: Option<u64>,
+    /// Let compile-time code read files under PATH; `MODULE=PATH` for code in
+    /// MODULE only (repeatable)
+    #[arg(long = "comptime-read", value_name = "[MODULE=]PATH", action = clap::ArgAction::Append)]
+    pub comptime_read: Vec<String>,
+    /// Let compile-time code write files under PATH (repeatable, `MODULE=` as above)
+    #[arg(long = "comptime-write", value_name = "[MODULE=]PATH", action = clap::ArgAction::Append)]
+    pub comptime_write: Vec<String>,
+    /// Let compile-time code read environment variable NAME (repeatable,
+    /// `MODULE=` as above)
+    #[arg(long = "comptime-env", value_name = "[MODULE=]NAME", action = clap::ArgAction::Append)]
+    pub comptime_env: Vec<String>,
+    /// Let compile-time code run programs named STEM (repeatable, `MODULE=`
+    /// as above)
+    #[arg(long = "comptime-exec", value_name = "[MODULE=]STEM", action = clap::ArgAction::Append)]
+    pub comptime_exec: Vec<String>,
 }
 
 /// Parse grant and compile-time limit flags from `words` (a test file's
@@ -207,6 +222,22 @@ impl HostGrantFlags {
             || !self.dload_trusted.is_empty()
             || self.comptime_steps.is_some()
             || self.comptime_mem.is_some()
+            || !self.comptime_read.is_empty()
+            || !self.comptime_write.is_empty()
+            || !self.comptime_env.is_empty()
+            || !self.comptime_exec.is_empty()
+    }
+
+    /// The `--comptime-read` / `-write` / `-env` / `-exec` grants.
+    fn comptime_io(&self) -> ComptimeGrants {
+        let paths = |list: &[String]| list.iter().map(|g| Scoped::parse(g, |p| PathBuf::from(p))).collect();
+        let names = |list: &[String]| list.iter().map(|g| Scoped::parse(g, |n| n.to_string())).collect();
+        ComptimeGrants {
+            read: paths(&self.comptime_read),
+            write: paths(&self.comptime_write),
+            env: names(&self.comptime_env),
+            exec: names(&self.comptime_exec),
+        }
     }
 
     /// Add these flags to `grants`: capabilities and lists add up, and a
@@ -216,6 +247,7 @@ impl HostGrantFlags {
         let steps = self.comptime_steps;
         let mem = self.comptime_mem;
         let extra = self.into_grants();
+        grants.comptime_io.extend(extra.comptime_io);
         grants.allow_attach |= extra.allow_attach;
         grants.allow_exec |= extra.allow_exec;
         grants.allow_exit |= extra.allow_exit;
@@ -239,7 +271,9 @@ impl HostGrantFlags {
     }
 
     pub fn into_grants(self) -> HostGrants {
+        let comptime_io = self.comptime_io();
         let mut grants = HostGrants {
+            comptime_io,
             allow_attach: self.allow_attach,
             allow_exec: self.allow_exec,
             allow_exit: self.allow_exit,

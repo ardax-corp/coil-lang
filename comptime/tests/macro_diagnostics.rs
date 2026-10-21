@@ -91,7 +91,7 @@ fn hoarding_macro_hits_memory_cap() {
 
 #[test]
 fn host_access_is_denied() {
-    expect("macro_host_denied", &["`env_var` is not available to compile-time macros"]);
+    expect("macro_host_denied", &["needs `--comptime-env HOME`"]);
 }
 
 #[test]

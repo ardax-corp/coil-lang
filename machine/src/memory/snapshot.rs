@@ -149,8 +149,8 @@ impl Heap {
         match word {
             SnapWord::Raw(raw) => Value::from(raw),
             SnapWord::Ref { index, err_bit } => Value::from(objects[index as usize].addr() | u64::from(err_bit)),
-            SnapWord::UnitEnum(tag) => Value::from(self.immortal_unit_enum(tag).addr()),
-            SnapWord::EmptyTuple => Value::from(self.immortal_empty_tuple().addr()),
+            SnapWord::UnitEnum { tag, err_bit } => Value::from(self.immortal_unit_enum(tag).addr() | u64::from(err_bit)),
+            SnapWord::EmptyTuple { err_bit } => Value::from(self.immortal_empty_tuple().addr() | u64::from(err_bit)),
         }
     }
 }
@@ -172,8 +172,13 @@ impl Capture<'_> {
     fn object_word(&mut self, object: Object, err_bit: bool, parent: Parent) -> Result<SnapWord, SnapshotError> {
         // Shared singletons are rebuilt from the restoring heap's own.
         match &object {
-            Object::Enum(gc) if gc.as_ref().payload.is_empty() => return Ok(SnapWord::UnitEnum(gc.as_ref().tag)),
-            Object::Tuple(gc) if gc.as_ref().elements().is_empty() => return Ok(SnapWord::EmptyTuple),
+            Object::Enum(gc) if gc.as_ref().payload.is_empty() => {
+                return Ok(SnapWord::UnitEnum {
+                    tag: gc.as_ref().tag,
+                    err_bit,
+                });
+            }
+            Object::Tuple(gc) if gc.as_ref().elements().is_empty() => return Ok(SnapWord::EmptyTuple { err_bit }),
             _ => {}
         }
         if let Some(what) = unsupported(&object) {

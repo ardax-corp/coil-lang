@@ -128,6 +128,12 @@ impl Compiler {
             &roots,
             &test_pcs,
             &[self.static_init.ops(), self.ffi_init.ops()],
+            // A `const` is computed while compiling, under the build's
+            // `--comptime-*` grants; its initializer does not run in the program.
+            &|name| {
+                name.strip_prefix(super::compiler::STATIC_INIT_FN_PREFIX)
+                    .is_some_and(|fqn| self.checker.is_const_static(fqn))
+            },
         );
         // Test bodies by their description: `test "parses"`.
         let tests: HashMap<&str, &str> = self
