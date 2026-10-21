@@ -1,7 +1,8 @@
 // `invoke` takes its return type (and variadic arity) from the `declare`
 // that produced the function id also when the id is a module `static`:
-// one assigned in a function written before or after the `invoke`, one
-// initialised from `declare`, and one passed on as a parameter (#1667).
+// one assigned in a function written before or after the `invoke`, a
+// `static` or `const` initialised from `declare`, a local copy, and one
+// passed on as a parameter (#1667).
 // The handle `7` is not a loaded library, so each `declare` and `invoke`
 // fails with `InvalidHandle`; the cases pin what the checker accepts.
 use tests::assert;
@@ -18,7 +19,15 @@ static let fn_early = 0;
 
 static let fn_var = 0;
 
-static let fn_init = declare(7, "f", (), Float);
+static let fn_init = match declare(7, "f", (), Float) {
+    Result::Ok(id) => id,
+    Result::Err(_) => 0,
+};
+
+const FN_CONST = match declare(7, "f", (), Float) {
+    Result::Ok(id) => id,
+    Result::Err(_) => 0,
+};
 
 fn call_late(int lib) -> Result<float, Error> {
     let f: float = invoke(lib, fn_late, ())?;
@@ -46,6 +55,17 @@ fn call_variadic(int lib) -> Result<float, Error> {
 
 fn call_init(int lib) -> Result<float, Error> {
     let f: float = invoke(lib, fn_init, ())?;
+    return f;
+}
+
+fn call_const(int lib) -> Result<float, Error> {
+    let f: float = invoke(lib, FN_CONST, ())?;
+    return f;
+}
+
+fn call_copy(int lib) -> Result<float, Error> {
+    let id = fn_init;
+    let f: float = invoke(lib, id, ())?;
     return f;
 }
 
@@ -87,6 +107,8 @@ test("invoke refines its return type through a static") {
     assert!(invalid(call_late(7)));
     assert!(invalid(call_early(7)));
     assert!(invalid(call_init(7)));
+    assert!(invalid(call_const(7)));
+    assert!(invalid(call_copy(7)));
     assert!(invalid(via_param()));
 }
 
