@@ -616,8 +616,8 @@ the file reuses its program and result. When it does not compile, the
 sub-pipeline's errors in its body (kept by an `EntrySink`) are reported
 where they are in the user's file; a panic's position and backtrace are
 rewritten the same way. `return` must give `Code`: `?` does not apply, so
-use `??` or `match` on a `Result`. A block in a function body does not
-parse; it is item-level only. A file using its own block's output, or a
+use `??` or `match` on a `Result`. A block inside a function is a value
+block instead (see "Compile-time expressions"). A file using its own block's output, or a
 cycle through the modules it uses, is the usual expansion-cycle error.
 
 Timing (release build, 2026-10-21): a file with one block calling a
