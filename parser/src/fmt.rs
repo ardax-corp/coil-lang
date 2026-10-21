@@ -811,7 +811,17 @@ impl<'s> Formatter<'s> {
             }
             Expression::TypeOf(inner) => {
                 self.push_str("typeof ");
-                self.fmt_output(inner);
+                // The parser hands `typeof` the whole expression after it
+                // (`typeof x == "T"` is `typeof (x == "T")`): show an operand
+                // that binds looser than a unary one in its parentheses.
+                let operand = strip_groups(inner);
+                if expr_prec(operand.1.as_ref()) < PREC_UNARY {
+                    self.push_str("(");
+                    self.fmt_output(operand);
+                    self.push_str(")");
+                } else {
+                    self.fmt_output(inner);
+                }
             }
 
             Expression::And(lhs, rhs) => self.fmt_logic_chain(expr, lhs, rhs, "&&"),
@@ -2992,6 +3002,42 @@ mod tests {
         let src = "/// A value.\nreadonly class Point {\n    pub x: int,\n}\n\nclass H {\n    pub p: readonly Point,\n    pub ps: Vec<readonly Point>,\n}\n\nfn f(readonly Point p, readonly (int -> int) g, readonly Point -> int h) -> readonly Vec<int> {\n    let q: readonly Point = readonly p.inner;\n    let r = readonly (a + b);\n    return readonly xs;\n}\n";
         assert_eq!(format_source(src).unwrap(), src);
         round_trip(src);
+    }
+
+    #[test]
+    fn typeof_shows_the_operand_it_takes() {
+        // #1760: `typeof` takes a whole expression, so `typeof(x) == "T"`
+        // is `typeof ((x) == "T")`. Printing it `typeof x == "T"` keeps that
+        // meaning but reads as a comparison; parenthesize an operand that
+        // binds looser than a unary operator.
+        let src = "\
+fn main() {
+    let x = 1;
+    let a = typeof(x) == \"int\";
+    let b = typeof x as float;
+    let c = typeof 0..3;
+    let d = (typeof x) == \"int\";
+    let e = typeof (x);
+    let f = typeof (1, 2);
+    let g = typeof -x;
+}
+";
+        let expected = "\
+fn main() {
+    let x = 1;
+    let a = typeof (x == \"int\");
+    let b = typeof (x as float);
+    let c = typeof (0..3);
+    let d = (typeof x) == \"int\";
+    let e = typeof x;
+    let f = typeof (1, 2);
+    let g = typeof -x;
+}
+";
+        let formatted = format_source(src).unwrap();
+        assert_eq!(formatted, expected);
+        round_trip(&formatted);
+        assert_eq!(format_source(&formatted).unwrap(), formatted);
     }
 
     #[test]
