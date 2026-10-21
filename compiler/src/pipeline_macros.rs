@@ -24,6 +24,21 @@ pub(crate) struct GeneratedRange {
     /// What wrote the code, for the help line: ``derive `Eq` ``.
     pub origin: String,
     pub text: String,
+    /// Stretches of `range` the macro copied from earlier text unchanged
+    /// (`f.body`, `t.source`): each with where that text starts. A
+    /// diagnostic inside one stays on the code the user wrote.
+    pub verbatim: Vec<(std::ops::Range<usize>, usize)>,
+}
+
+impl GeneratedRange {
+    /// `range` in the text this snippet copied it from, when it lies in one
+    /// verbatim stretch.
+    pub fn translate(&self, range: &std::ops::Range<usize>) -> Option<std::ops::Range<usize>> {
+        self.verbatim
+            .iter()
+            .find(|(seg, _)| seg.start <= range.start && range.end <= seg.end)
+            .map(|(seg, from)| from + (range.start - seg.start)..from + (range.end - seg.start))
+    }
 }
 
 /// One macro call in the expansion program.
@@ -36,6 +51,9 @@ struct Job {
     /// The call's input, as `macro::Reader` decodes it (`macros::encode`):
     /// the declaration, then attribute arguments in parameter order.
     input: String,
+    /// Report-text stretches the input carries as written (the body, the
+    /// declaration), by start offset: output that copies them keeps their spans.
+    verbatim: Vec<(usize, String)>,
 }
 
 /// Macro outputs by [`Pipeline::job_key`], for the life of the process: an
@@ -149,6 +167,14 @@ impl Pipeline {
                         }
                         match self.encode_input(file, &module, &p, &decl, &report, call) {
                             Ok(input) => file_jobs.push(Job {
+                                verbatim: match decl.input {
+                                    MacroInput::Exprs => Vec::new(),
+                                    _ => cached
+                                        .and_then(|c| c.ast())
+                                        .and_then(|ast| find_target(ast, &p))
+                                        .map(|node| verbatim_pieces(node, &report))
+                                        .unwrap_or_default(),
+                                },
                                 file: file.clone(),
                                 pending: p,
                                 decl,
@@ -744,6 +770,7 @@ impl Pipeline {
         };
         self.generated_ranges.push(GeneratedRange {
             file: job.file.clone(),
+            verbatim: verbatim_segments(&snippet, range.start, &job.verbatim),
             range,
             site: job.pending.range.clone(),
             origin: origin_of(job.decl.kind, &job.decl.name),
@@ -881,6 +908,7 @@ impl Pipeline {
             site: job.pending.range.clone(),
             origin: origin_of(job.decl.kind, &job.decl.name),
             text: snippet.clone(),
+            verbatim: Vec::new(),
         });
         let expand = crate::attrs::expand_program_in(&mut generated, &module);
         messages.extend(expand.messages);
@@ -952,34 +980,93 @@ impl Pipeline {
     }
 
     /// Move a diagnostic that points into generated code to the macro's use
-    /// site, keeping the generated line as help.
+    /// site, keeping the generated line as help. In code the macro copied
+    /// unchanged (a wrapped function's body) it moves back to where that
+    /// code was written instead.
     pub(super) fn remap_generated(&self, file: &Path, msg: &Message) -> Message {
-        let start = msg.range().start;
-        let Some(g) = self
-            .generated_ranges
-            .iter()
-            .find(|g| g.file == file && g.range.contains(&start))
-        else {
-            return msg.clone();
-        };
-        let local = start - g.range.start;
-        let line = g.text[..local.min(g.text.len())].matches('\n').count();
-        let line_text = g.text.lines().nth(line).unwrap_or("").trim();
-        let mut out = Message::new(
-            *msg.kind(),
-            msg.message().to_string(),
-            g.site.clone(),
-        );
-        if let Some(code) = msg.code() {
-            out.set_code(code);
+        let mut msg = msg.clone();
+        loop {
+            let start = msg.range().start;
+            let Some(g) = self
+                .generated_ranges
+                .iter()
+                .find(|g| g.file == file && g.range.contains(&start))
+            else {
+                return msg;
+            };
+            if let Some(range) = g.translate(msg.range()) {
+                // Copied text comes from before the snippet: this ends.
+                let mut out = Message::new(*msg.kind(), msg.message().to_string(), range);
+                if let Some(code) = msg.code() {
+                    out.set_code(code);
+                }
+                if let Some(h) = msg.help() {
+                    out.with_help(h.clone());
+                }
+                for label in msg.labels() {
+                    if let Some(r) = g.translate(label.range()) {
+                        out.push(reporting::Label::new(label.message().to_string(), r));
+                    }
+                }
+                msg = out;
+                continue;
+            }
+            let local = start - g.range.start;
+            let line = g.text[..local.min(g.text.len())].matches('\n').count();
+            let line_text = g.text.lines().nth(line).unwrap_or("").trim();
+            let mut out = Message::new(*msg.kind(), msg.message().to_string(), g.site.clone());
+            if let Some(code) = msg.code() {
+                out.set_code(code);
+            }
+            let mut help = format!("in code generated by {}: `{line_text}`", g.origin);
+            if let Some(h) = msg.help() {
+                help = format!("{h}\n{help}");
+            }
+            out.with_help(help);
+            return out;
         }
-        let mut help = format!("in code generated by {}: `{line_text}`", g.origin);
-        if let Some(h) = msg.help() {
-            help = format!("{h}\n{help}");
-        }
-        out.with_help(help);
-        out
     }
+}
+
+/// Text of `node` the macro input carries as written, by start offset in
+/// `source`: the declaration without its leading docs and attributes, and
+/// a function's body inside its braces (`FnDecl::with_name` keeps it).
+fn verbatim_pieces(node: &Output<'_>, source: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    let range = node.0.into_range();
+    if let Some(text) = source.get(range.clone()) {
+        let rest = encode::skip_leading_attrs(text);
+        out.push((range.end - rest.len(), rest.to_string()));
+    }
+    if let Expression::Function { body: Some(body), .. } = node.1.as_ref()
+        && let Some(text) = source.get(body.0.into_range())
+    {
+        out.push((body.0.start, text.to_string()));
+    }
+    out.retain(|(_, t)| !t.trim().is_empty());
+    out
+}
+
+/// Where `pieces` occur in `snippet` (which starts at `offset`): each
+/// stretch with the offset of the text it copies. Longer pieces first; a
+/// stretch never overlaps another.
+fn verbatim_segments(
+    snippet: &str,
+    offset: usize,
+    pieces: &[(usize, String)],
+) -> Vec<(std::ops::Range<usize>, usize)> {
+    let mut pieces: Vec<&(usize, String)> = pieces.iter().collect();
+    pieces.sort_by_key(|(_, t)| std::cmp::Reverse(t.len()));
+    let mut out: Vec<(std::ops::Range<usize>, usize)> = Vec::new();
+    for (from, text) in pieces {
+        for (at, _) in snippet.match_indices(text.as_str()) {
+            let seg = offset + at..offset + at + text.len();
+            if out.iter().all(|(s, _)| seg.end <= s.start || s.end <= seg.start) {
+                out.push((seg, *from));
+            }
+        }
+    }
+    out
 }
 
 fn origin_of(kind: MacroKind, name: &str) -> String {
