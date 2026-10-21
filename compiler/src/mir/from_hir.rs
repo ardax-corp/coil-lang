@@ -2877,7 +2877,16 @@ impl Lower<'_> {
                     Some((obj, index)) => {
                         self.b.ins_heap_field_store(obj, v, index).map_err(mir)?;
                     }
-                    None => self.b.def_local(LocalId(slot), v).map_err(mir)?,
+                    None => {
+                        // A field split into a frame slot is a local of its
+                        // own: its rebind drops the old word, as a local's
+                        // does (#1791).
+                        let old = self.rebound_word(LocalId(slot), ty)?;
+                        self.b.def_local(LocalId(slot), v).map_err(mir)?;
+                        if let Some(old) = old {
+                            self.b.ins_clear_word(old).map_err(mir)?;
+                        }
+                    }
                 }
                 Ok(Val::Unit)
             }
