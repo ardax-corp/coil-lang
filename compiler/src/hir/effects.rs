@@ -1710,7 +1710,7 @@ impl Cx<'_> {
             statics: true,
             ..Summary::of(EffectFlags::from_bits(bits))
         };
-        self.record(w, at, s, || None, what);
+        self.record(w, at, s, 0, || None, what);
     }
 
     /// As [`Self::note`], for effects no user sees (a panic, a `defer`).
