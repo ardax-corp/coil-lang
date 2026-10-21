@@ -10,5 +10,5 @@ class Scratch {
 }
 
 test("garbage does not count toward the compile-time memory cap") {
-    assert!(Scratch::churned() == 100);
+    assert!(Scratch::churned() == 20);
 }

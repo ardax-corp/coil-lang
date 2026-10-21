@@ -174,19 +174,22 @@ attr contracted(FnDecl f) -> Code {
     };
 }
 
-/// Allocates about 2 MiB but keeps little live, then adds
-/// `churned() -> int` with how many vectors it built: the compile-time
-/// memory cap counts live objects, not garbage.
+/// Allocates about 2.5 MiB of strings but keeps little live, then adds
+/// `churned() -> int` with how many strings it built: the compile-time
+/// memory cap counts live objects, not garbage. Doubling keeps the step and
+/// allocation counts small, so it stays quick under the gc-stress harness.
 derive Churn(TypeDecl t) -> Code {
     let built = 0;
-    while built < 100 {
-        let scratch: Vec<int> = Vec::new();
-        let i = 0;
-        while i < 2000 {
-            scratch.push(i);
-            i += 1;
+    while built < 20 {
+        let scratch = "x";
+        let k = 0;
+        while k < 16 {
+            scratch = scratch + scratch;
+            k += 1;
         }
-        built += 1;
+        if scratch.len() == 65536 {
+            built += 1;
+        }
     }
     return quote items {
         impl ${t.name} {
