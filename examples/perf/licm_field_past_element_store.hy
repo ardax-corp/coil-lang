@@ -32,5 +32,5 @@ fn main() {
         apply(c, xs, out);
         s = s + out[r];
     }
-    write_all(stdout(), to_bytes(format("%i", s)));
+    let _ = write_all(stdout(), to_bytes(format("%i", s)));
 }

@@ -5,10 +5,10 @@ use string::{format, to_bytes};
 
 fn main() {
     for x in 0..1 {
-        write(stdout(), to_bytes(format("%i", x)));
+        let _ = write(stdout(), to_bytes(format("%i", x)));
     }
-    write(stdout(), to_bytes(","));
+    let _ = write(stdout(), to_bytes(","));
     for x in 0..=1 {
-        write(stdout(), to_bytes(format("%i", x)));
+        let _ = write(stdout(), to_bytes(format("%i", x)));
     }
 }

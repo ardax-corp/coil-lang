@@ -19,5 +19,5 @@ fn main() {
     let h = new Handle(1);
     let r = root(h);
     collect();
-    write(stdout(), to_bytes(format("%i", drops)));
+    let _ = write(stdout(), to_bytes(format("%i", drops)));
 }

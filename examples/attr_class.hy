@@ -16,6 +16,6 @@ class Point {
 
 fn main() {
     let p = Point::make(5, 12);
-    write_all(stdout(), to_bytes(format("%i", p.x)));
-    write_all(stdout(), to_bytes(format("%i", p.y)));
+    let _ = write_all(stdout(), to_bytes(format("%i", p.x)));
+    let _ = write_all(stdout(), to_bytes(format("%i", p.y)));
 }

@@ -29,5 +29,5 @@ fn main() {
     let a = first(Vec::from([new Sq(1)]));
     let b = first(Vec::from([new Sq(2), new Sq(5)]));
     let c = first(Vec::from([new Sq(3)])) + N;
-    write(stdout(), to_bytes(format("%i %i %i", a, b, c)));
+    let _ = write(stdout(), to_bytes(format("%i %i %i", a, b, c)));
 }

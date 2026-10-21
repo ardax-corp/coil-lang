@@ -64,5 +64,5 @@ fn main() {
         outcome(fn () => show(11)),
         "contract violated: ensures result < 100 in Area for int::area",
     );
-    write(stdout(), to_bytes("ok"));
+    let _ = write(stdout(), to_bytes("ok"));
 }

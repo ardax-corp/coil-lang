@@ -22,5 +22,5 @@ fn make() {
 fn main() {
     make();
     collect();
-    write(stdout(), to_bytes(format("%i", drops)));
+    let _ = write(stdout(), to_bytes(format("%i", drops)));
 }

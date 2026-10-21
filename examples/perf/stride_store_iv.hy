@@ -25,5 +25,5 @@ fn hot(int n, int p, int reps) -> int {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", hot(4096, 3, 20000))));
+    let _ = write_all(stdout(), to_bytes(format("%i", hot(4096, 3, 20000))));
 }

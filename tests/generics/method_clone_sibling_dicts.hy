@@ -36,5 +36,5 @@ fn main() {
     let b: Bag<int> = Bag::new();
     let x = b.add(10);
     let y = b.add(3);
-    write(stdout(), to_bytes(format("%i %i", x, y)));
+    let _ = write(stdout(), to_bytes(format("%i %i", x, y)));
 }

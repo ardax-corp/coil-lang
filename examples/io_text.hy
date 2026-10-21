@@ -10,7 +10,7 @@ use string::{format, from_bytes, to_bytes};
 fn main() {
     // "hello" as ASCII bytes
     let hello = to_bytes("hello");
-    write_all(
+    let _ = write_all(
         stdout(),
         to_bytes(
             format(
@@ -24,5 +24,5 @@ fn main() {
     );
 
     let back = to_bytes("hi");
-    write_all(stdout(), to_bytes(format("%i", back.len())));
+    let _ = write_all(stdout(), to_bytes(format("%i", back.len())));
 }

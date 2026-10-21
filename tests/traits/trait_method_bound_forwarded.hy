@@ -56,5 +56,5 @@ fn main() {
     text = text + " " + new Pt(1).third(5) + " " + new Pt(1).third(6);
     text = text + " " + use_pass(3);
     text = text + " " + new Box(1).third(2) + " " + new Box(3).third(4);
-    write(stdout(), to_bytes(text));
+    let _ = write(stdout(), to_bytes(text));
 }

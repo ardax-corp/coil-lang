@@ -129,7 +129,7 @@ fn options() {
 
 test("a shared body's closure returning an Option of its type parameter") {
     fill();
-    options();
+    options()?;
 }
 
 fn tuples() {
@@ -152,7 +152,7 @@ fn tuples() {
 
 test("a shared body's closure returning a tuple of its type parameter") {
     fill();
-    tuples();
+    tuples()?;
 }
 
 fn results() {
@@ -178,5 +178,5 @@ fn results() {
 
 test("a shared body's closure returning a Result of its type parameter") {
     fill();
-    results();
+    results()?;
 }

@@ -9,7 +9,7 @@ fn run_jobs(Receiver rx) -> Result<int, ThreadError> {
         if job == "stop" {
             break;
         }
-        write_all(stdout(), to_bytes(format("%s,", job)));
+        let _ = write_all(stdout(), to_bytes(format("%s,", job)));
     }
     return 0;
 }

@@ -82,5 +82,5 @@ fn tak_iter(int x0, int y0, int z0) -> int {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", tak_iter(18, 12, 6))));
+    let _ = write_all(stdout(), to_bytes(format("%i", tak_iter(18, 12, 6))));
 }

@@ -18,5 +18,5 @@ fn pack(float a, float x0, float dx, float y, int n) -> float {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", pack(1.0, 0.0, 1.0, 0.0, 2000000) as int)));
+    let _ = write_all(stdout(), to_bytes(format("%i", pack(1.0, 0.0, 1.0, 0.0, 2000000) as int)));
 }

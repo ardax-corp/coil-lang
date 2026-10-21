@@ -29,7 +29,7 @@ fn greet(string name, string... extras) -> string {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", sum(1, 2, 3))));
-    write_all(stdout(), to_bytes(format("%i", sum())));
-    write_all(stdout(), to_bytes(format("%s", greet(name: "Hi", "!", "?"))));
+    let _ = write_all(stdout(), to_bytes(format("%i", sum(1, 2, 3))));
+    let _ = write_all(stdout(), to_bytes(format("%i", sum())));
+    let _ = write_all(stdout(), to_bytes(format("%s", greet(name: "Hi", "!", "?"))));
 }

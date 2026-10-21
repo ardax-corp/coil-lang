@@ -34,7 +34,7 @@ fn run(string path, Vec<byte> data) {
 fn main() {
     let path = "coil_io_file_test.bin";
     let data = to_bytes("Hi");
-    write_all(
+    let _ = write_all(
         stdout(),
         to_bytes(
             format(

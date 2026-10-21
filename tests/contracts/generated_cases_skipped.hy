@@ -26,7 +26,7 @@ fn no_instance_bad(Plain p) -> int
 fn writes_bad(int x) -> int
     ensures result > x
 {
-    write_all(stdout(), to_bytes(""));
+    let _ = write_all(stdout(), to_bytes(""));
     return x;
 }
 

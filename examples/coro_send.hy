@@ -9,7 +9,7 @@ use string::{format, to_bytes};
 
 gen fn ping() {
     let msg = yield "ready";
-    write_all(stdout(), to_bytes(format("%s", msg)));
+    let _ = write_all(stdout(), to_bytes(format("%s", msg)));
 }
 
 fn main() {

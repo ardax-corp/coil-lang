@@ -31,6 +31,8 @@ thread_local! {
     static OUTPUT_REDIRECT: RefCell<Option<OutputRedirect>> = RefCell::new(None);
     static SHARED_PRINT: RefCell<Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>> =
         const { RefCell::new(None) };
+    static SHARED_STDOUT: RefCell<Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>> =
+        const { RefCell::new(None) };
 }
 
 pub(crate) fn take_pending_io_park() -> Option<IoParkRequest> {
@@ -50,6 +52,24 @@ pub fn set_shared_print_redirect(
     buf: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
 ) -> Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>> {
     SHARED_PRINT.with(|cell| cell.replace(buf))
+}
+
+/// Install this OS thread's stdout-only capture (see
+/// [`crate::vm::Machine::set_shared_stdout`]).
+pub fn set_shared_stdout_redirect(
+    buf: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
+) -> Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>> {
+    SHARED_STDOUT.with(|cell| cell.replace(buf))
+}
+
+fn mirror_captured_stdout(bytes: &[u8]) {
+    SHARED_STDOUT.with(|cell| {
+        if let Some(buf) = cell.borrow().as_ref()
+            && let Ok(mut g) = buf.lock()
+        {
+            g.extend_from_slice(bytes);
+        }
+    });
 }
 
 fn with_output_redirect<T>(f: impl FnOnce(&mut (dyn Write + Send)) -> T) -> Option<T> {
@@ -513,6 +533,11 @@ fn stream_write_bytes(heap: &mut Heap, stream: Value, bytes: &[u8]) -> Result<us
         if matches!(s.kind, StreamKind::Stdout | StreamKind::Stderr)
             && let Some(result) = write_captured_stdout(bytes)
         {
+            if s.kind == StreamKind::Stdout
+                && let Ok(n) = result
+            {
+                mirror_captured_stdout(&bytes[..n]);
+            }
             return result;
         }
         let handle = s.handle.as_mut().unwrap();

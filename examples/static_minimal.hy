@@ -16,6 +16,6 @@ class Counter {
 fn main() {
     hits = hits + 1;
     Counter::count = Counter::count + 1;
-    write_all(stdout(), to_bytes(format("%i", hits)));
-    write_all(stdout(), to_bytes(format("%i", Counter::count)));
+    let _ = write_all(stdout(), to_bytes(format("%i", hits)));
+    let _ = write_all(stdout(), to_bytes(format("%i", Counter::count)));
 }

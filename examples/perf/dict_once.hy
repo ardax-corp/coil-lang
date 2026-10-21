@@ -51,5 +51,5 @@ fn main() {
     for i in 0..1000 {
         total = total + larger(new Score(i), new Score(500)).v;
     }
-    write(stdout(), to_bytes(format("%i\n", total)));
+    let _ = write(stdout(), to_bytes(format("%i\n", total)));
 }

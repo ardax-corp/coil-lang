@@ -1045,9 +1045,10 @@ impl Compiler {
             return None;
         }
         // A boxed tuple splits into `[a, b]` through a temp slot, which is
-        // unsafe above live operands, so products stay one boxed word.
+        // unsafe above live operands, so products (and readonly classes
+        // laid out as them) stay one boxed word.
         crate::typechecking::return_layout::two_word_kind(&self.checker, ty)
-            .filter(|kind| self.hir_pair_kind(kind) && *kind != PairKind::Product)
+            .filter(|kind| self.hir_pair_kind(kind) && !matches!(kind, PairKind::Product | PairKind::Class(_)))
     }
 
     /// Per parameter of `callee`, the two-word kind it takes (empty when it
@@ -1562,6 +1563,8 @@ impl Compiler {
     pub(super) fn instance_clone(&mut self, fqn: &str, lookup: &[Ty]) -> Option<String> {
         const MAX_PER_METHOD: usize = 8;
         let src = self.inst_clone_srcs.get(fqn)?;
+        // Keyed without `readonly`, which has no runtime form (#1806).
+        let lookup = &lookup.iter().map(crate::typechecking::ty::strip_readonly_deep).collect::<Vec<_>>()[..];
         if lookup.len() != src.head.len() || lookup.iter().any(Self::ty_has_var) {
             return None;
         }

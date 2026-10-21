@@ -15,7 +15,7 @@ fn foo(A a) {
     {
         let a = B::B { y: 7 };
     }
-    write(stdout(), to_bytes(format("%i", a.x)));
+    let _ = write(stdout(), to_bytes(format("%i", a.x)));
 }
 
 fn main() {

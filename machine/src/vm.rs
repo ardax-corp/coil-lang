@@ -551,6 +551,9 @@ pub struct Machine<const S: usize> {
     thread_program: Option<std::sync::Arc<crate::thread::ThreadProgram>>,
     /// Optional shared stdout capture for worker threads.
     shared_print: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
+    /// What of `shared_print` is stdout: panic messages and stderr writes
+    /// stay out of it (a `coil-test` case's `// Output:`, #1828).
+    shared_stdout: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
     /// Undetached spawns owned by this VM (joined at end of `run_with_pool`).
     live_threads: crate::thread::LiveThreadRegistry,
     /// Shared concurrent OS-worker budget for this root VM (and its workers).
@@ -683,6 +686,7 @@ impl<const S: usize> Machine<S> {
             coverage: None,
             thread_program: None,
             shared_print: None,
+            shared_stdout: None,
             live_threads: crate::thread::new_live_thread_registry(),
             worker_cap,
             reactor,
@@ -1298,9 +1302,9 @@ impl<const S: usize> Machine<S> {
             }
             let _ = out.flush();
         } else {
-            eprint!("panic: {message}{loc_suffix}");
+            eprintln!("panic: {message}{loc_suffix}");
             if !backtrace.is_empty() {
-                eprintln!("\n{backtrace}");
+                eprintln!("{backtrace}");
             }
             let _ = io::stderr().flush();
         }
@@ -2583,6 +2587,22 @@ impl<const S: usize> Machine<S> {
         self.shared_print.clone()
     }
 
+    /// Also copy this VM's stdout (not its panic messages or stderr) into
+    /// `buf`, next to the shared print buffer that takes both (#1828).
+    pub fn set_shared_stdout(&mut self, buf: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>) {
+        self.shared_stdout = buf.clone();
+        crate::io::set_shared_stdout_redirect(buf);
+    }
+
+    /// Copy `text` into the stdout capture, when there is one.
+    pub(crate) fn mirror_stdout(&self, text: &str) {
+        if let Some(buf) = &self.shared_stdout
+            && let Ok(mut g) = buf.lock()
+        {
+            g.extend_from_slice(text.as_bytes());
+        }
+    }
+
     /// Replace the undetached-spawn registry (used by workers to share the
     /// root VM's list so nested `spawn` still joins with the root).
     pub fn set_live_threads(&mut self, registry: crate::thread::LiveThreadRegistry) {
@@ -2652,6 +2672,7 @@ impl<const S: usize> Machine<S> {
             program,
             natives: self.natives.clone_registry(),
             shared_print: self.shared_print.clone(),
+            shared_stdout: self.shared_stdout.clone(),
             live_threads: std::sync::Arc::clone(&self.live_threads),
             worker_cap: std::sync::Arc::clone(&self.worker_cap),
             reactor: std::sync::Arc::clone(&self.reactor),

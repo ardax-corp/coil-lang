@@ -15,14 +15,17 @@ counter!(Clicks);
 
 fn main() {
     // Expressions.
-    write_all(stdout(), to_bytes(format("%i %i %i ", square!(1 + 2), sum!(1, 2, 3 * 4), quad!(2))));
+    let _ = write_all(
+        stdout(),
+        to_bytes(format("%i %i %i ", square!(1 + 2), sum!(1, 2, 3 * 4), quad!(2))),
+    );
     // Statements.
     let a = 1;
     let b = 2;
     swap!(a, b);
     check!(a == 2);
-    write_all(stdout(), to_bytes(format("swapped %i %i ", a, b)));
+    let _ = write_all(stdout(), to_bytes(format("swapped %i %i ", a, b)));
     let c = new Clicks(0);
     c.bump();
-    write_all(stdout(), to_bytes(format("clicks %i", c.bump())));
+    let _ = write_all(stdout(), to_bytes(format("clicks %i", c.bump())));
 }

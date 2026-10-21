@@ -14,10 +14,10 @@ fn main() {
     let a = counter(1);
     let b = counter(100);
 
-    write(stdout(), to_bytes(format("%i,", resume a)));
-    write(stdout(), to_bytes(format("%i,", resume b)));
-    write(stdout(), to_bytes(format("%i,", resume a)));
-    write(stdout(), to_bytes(format("%i,", resume b)));
-    write(stdout(), to_bytes(format("%i,", resume a)));
-    write(stdout(), to_bytes(format("%i", resume b)));
+    let _ = write(stdout(), to_bytes(format("%i,", resume a)));
+    let _ = write(stdout(), to_bytes(format("%i,", resume b)));
+    let _ = write(stdout(), to_bytes(format("%i,", resume a)));
+    let _ = write(stdout(), to_bytes(format("%i,", resume b)));
+    let _ = write(stdout(), to_bytes(format("%i,", resume a)));
+    let _ = write(stdout(), to_bytes(format("%i", resume b)));
 }

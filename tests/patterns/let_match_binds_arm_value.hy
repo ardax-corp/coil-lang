@@ -9,10 +9,10 @@ fn main() {
         Option::None => 7,
         Option::Some(v) => v,
     };
-    write(stdout(), to_bytes(format("%i", x)));
+    let _ = write(stdout(), to_bytes(format("%i", x)));
     let y = match Option::Some(42) {
         Option::None => 0,
         Option::Some(v) => v,
     };
-    write(stdout(), to_bytes(format("%i", y)));
+    let _ = write(stdout(), to_bytes(format("%i", y)));
 }

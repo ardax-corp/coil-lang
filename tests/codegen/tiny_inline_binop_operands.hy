@@ -10,5 +10,5 @@ fn add(int a, int b) -> int {
 fn main() {
     let x = 3;
     let y = 4;
-    write(stdout(), to_bytes(format("%i", add(x, y) + add(y, x))));
+    let _ = write(stdout(), to_bytes(format("%i", add(x, y) + add(y, x))));
 }

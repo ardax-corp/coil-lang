@@ -14,7 +14,7 @@ gen fn outer() {
 
 fn main() {
     let h = outer();
-    write(stdout(), to_bytes(format("%i,", resume h)));
-    write(stdout(), to_bytes(format("%i,", resume h)));
-    write(stdout(), to_bytes(format("%i", resume h)));
+    let _ = write(stdout(), to_bytes(format("%i,", resume h)));
+    let _ = write(stdout(), to_bytes(format("%i,", resume h)));
+    let _ = write(stdout(), to_bytes(format("%i", resume h)));
 }

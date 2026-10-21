@@ -13,5 +13,5 @@ fn work() -> int {
 
 fn main() {
     let t = spawn(work)?;
-    write_all(stdout(), to_bytes(format("%i", join(t)?)));
+    let _ = write_all(stdout(), to_bytes(format("%i", join(t)?)));
 }

@@ -32,5 +32,5 @@ pure fn via_call(Sq a) -> int {
 
 fn main() {
     let total = via_bound(new Sq(2)) + via_concrete(new Sq(3)) + via_call(new Sq(1));
-    write(stdout(), to_bytes(format("%i", total)));
+    let _ = write(stdout(), to_bytes(format("%i", total)));
 }

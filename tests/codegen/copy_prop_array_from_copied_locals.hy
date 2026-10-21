@@ -11,5 +11,5 @@ fn build() -> int {
 }
 
 fn main() {
-    write(stdout(), to_bytes(format("%i", build())));
+    let _ = write(stdout(), to_bytes(format("%i", build())));
 }

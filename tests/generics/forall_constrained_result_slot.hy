@@ -35,5 +35,5 @@ fn tags(forall T: Tagged. T -> int f, int n) -> int {
 fn main() {
     let c = tags(tagged, 4);
     let d = apply(konst, 3);
-    write(stdout(), to_bytes(format("%i|%s\n", c, d)));
+    let _ = write(stdout(), to_bytes(format("%i|%s\n", c, d)));
 }

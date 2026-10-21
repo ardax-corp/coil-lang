@@ -36,7 +36,7 @@ fn describe(string path) {
 
 fn main() {
     let path = "coil_io_eof_test.bin";
-    write_all(
+    let _ = write_all(
         stdout(),
         to_bytes(
             format(

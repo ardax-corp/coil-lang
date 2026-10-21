@@ -114,6 +114,11 @@ pub struct MirFunc {
     /// it is rebound or the function returns, so emission zeroes past
     /// their last use only the registers of temporaries (#1650).
     pub bound_words: HashSet<ValueId>,
+    /// Low words of the pairs calls return whose enum may carry a heap
+    /// payload there (an opaque `i64`): emission zeroes them past their
+    /// last use like the payload words a match reads (#1791). A pair of
+    /// numbers (`Option<int>`) is not listed.
+    pub heap_pair_calls: HashSet<ValueId>,
 }
 
 impl MirFunc {
@@ -185,6 +190,7 @@ impl MirFunc {
             steady_calls: HashSet::new(),
             lengths_steady: true,
             bound_words: HashSet::new(),
+            heap_pair_calls: HashSet::new(),
         }
     }
 

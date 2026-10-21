@@ -33,5 +33,5 @@ fn to_f(Celsius c) -> Fahrenheit {
 
 fn main() {
     let f = to_f(new Celsius(0));
-    write(stdout(), to_bytes(format("%i", f.f)));
+    let _ = write(stdout(), to_bytes(format("%i", f.f)));
 }

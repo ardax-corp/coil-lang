@@ -14,5 +14,5 @@ gen fn greet() -> int {
 
 fn main() {
     let n = block_on(greet());
-    write_all(stdout(), to_bytes(format("%i", n)));
+    let _ = write_all(stdout(), to_bytes(format("%i", n)));
 }

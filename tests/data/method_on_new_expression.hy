@@ -15,5 +15,5 @@ impl Point {
 }
 
 fn main() {
-    write(stdout(), to_bytes(format("%i", (new Point(1, 3)).sum())));
+    let _ = write(stdout(), to_bytes(format("%i", (new Point(1, 3)).sum())));
 }

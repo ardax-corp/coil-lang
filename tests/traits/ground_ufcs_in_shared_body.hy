@@ -39,5 +39,5 @@ fn main() {
     let k = g;
     let text = h(2.5, 2) + " " + k("x", "", 7) + " " + new Box(true).third("b");
     text = text + " " + show(9) + " " + third(1, "");
-    write(stdout(), to_bytes(text));
+    let _ = write(stdout(), to_bytes(text));
 }

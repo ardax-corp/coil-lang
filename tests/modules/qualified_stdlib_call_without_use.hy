@@ -3,5 +3,5 @@
 use io::{stdout, write};
 
 fn main() {
-    write(stdout(), string::to_bytes(string::format("%s", "ok")));
+    let _ = write(stdout(), string::to_bytes(string::format("%s", "ok")));
 }

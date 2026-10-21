@@ -12,5 +12,5 @@ fn main() {
         Option::Some(_) => 9,
         Option::None => 2,
     };
-    write(stdout(), to_bytes(format("%i,%i", y, z)));
+    let _ = write(stdout(), to_bytes(format("%i,%i", y, z)));
 }

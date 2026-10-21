@@ -10,7 +10,10 @@ use io::sync::write_all;
 use string::{format, to_bytes};
 
 fn print_task(Task t) {
-    write_all(stdout(), to_bytes(format("%i:%s [%s] | ", t.id, t.title, status_name(t.status))));
+    let _ = write_all(
+        stdout(),
+        to_bytes(format("%i:%s [%s] | ", t.id, t.title, status_name(t.status))),
+    );
 }
 
 fn main() {
@@ -23,7 +26,7 @@ fn main() {
     advance_task(board, 3);
     advance_task(board, 3);
 
-    write_all(
+    let _ = write_all(
         stdout(),
         to_bytes(format("board:%i done:%i | ", board_len(board), count_done(board))),
     );

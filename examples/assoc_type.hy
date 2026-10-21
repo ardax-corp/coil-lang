@@ -28,5 +28,5 @@ fn take_head<C: Collect>(C xs) -> C::Elem {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", take_head(Option::Some(42)))));
+    let _ = write_all(stdout(), to_bytes(format("%i", take_head(Option::Some(42)))));
 }

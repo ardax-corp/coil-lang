@@ -297,7 +297,10 @@ enum CaseState {
 struct PendingCase {
     name: String,
     state: CaseState,
+    /// Everything the case printed, panic messages and stderr included.
     output: Arc<Mutex<Vec<u8>>>,
+    /// Its stdout alone, which `// Output:` checks (#1828).
+    stdout: Arc<Mutex<Vec<u8>>>,
     kind: CaseKind,
 }
 
@@ -406,6 +409,7 @@ fn finish_file(run: &Run<'_>, file: PendingFile, result: &mut SuiteResult) -> us
             reason = report_ok.then(|| "example did not panic (`should_panic`)".to_string());
         }
         let output = std::mem::take(&mut *case.output.lock().unwrap_or_else(|e| e.into_inner()));
+        let stdout = std::mem::take(&mut *case.stdout.lock().unwrap_or_else(|e| e.into_inner()));
         // A `// Output:` header checks a passing case's prints; it names
         // one program, so a file with `test` blocks cannot use it.
         let expected_output = file.expected_output.as_ref().filter(|_| case.kind == CaseKind::Test);
@@ -414,11 +418,11 @@ fn finish_file(run: &Run<'_>, file: PendingFile, result: &mut SuiteResult) -> us
                 ok = false;
                 Some("`// Output:` needs a file whose only case is `fn main()`".to_string())
             }
-            Some(want) if ok && output != want.as_bytes() => {
+            Some(want) if ok && stdout != want.as_bytes() => {
                 ok = false;
                 Some(format!(
                     "printed {:?}, `// Output:` expects {want:?}",
-                    String::from_utf8_lossy(&output)
+                    String::from_utf8_lossy(&stdout)
                 ))
             }
             _ => reason,
@@ -891,12 +895,15 @@ fn start_case(
     run: &Run<'_>,
     dispatch: Dispatch,
     name: String,
-    ctx: ThreadSpawnContext,
+    mut ctx: ThreadSpawnContext,
     case: TestCase,
     kind: CaseKind,
 ) -> PendingCase {
     let output = Arc::new(Mutex::new(Vec::new()));
     let print = Arc::clone(&output);
+    // The case and the threads it spawns copy their stdout here too.
+    let stdout = Arc::new(Mutex::new(Vec::new()));
+    ctx.shared_stdout = Some(Arc::clone(&stdout));
     let state = match dispatch {
         Dispatch::Pool => CaseState::Running(run.reactor.submit_test(ctx, case, print)),
         Dispatch::Inline => CaseState::Done(run.reactor.run_test_here(ctx, case, print)),
@@ -905,6 +912,7 @@ fn start_case(
         name,
         state,
         output,
+        stdout,
         kind,
     }
 }
@@ -921,6 +929,7 @@ fn decided_case(name: String, passed: bool, reason: Option<String>, output: Vec<
             timed_out: false,
         }),
         output: Arc::new(Mutex::new(output)),
+        stdout: Arc::default(),
         kind,
     }
 }

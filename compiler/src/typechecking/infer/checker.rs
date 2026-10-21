@@ -2655,7 +2655,8 @@ impl Checker {
             Expression::Expr(e) | Expression::Group(e) | Expression::Statement(e) => self.infer(e),
             // Semicolon form discards the value (same as a Rust statement).
             Expression::ExprStatement(e) => {
-                let _ = self.infer(e);
+                let ty = self.infer(e);
+                self.warn_unused_result(&ty, e);
                 unit_ty()
             }
 
@@ -6677,6 +6678,10 @@ impl Checker {
         if class != "Eq" && !matches!(&pruned, Ty::Var(_)) {
             self.check_ground_ordering_operands(&pruned, class, method, &range);
         }
+        if class == "Eq" && !matches!(&pruned, Ty::Var(_)) {
+            let op = if method == "ne" { "!=" } else { "==" };
+            self.check_eq_type_param_bounds(&pruned, &pruned, op, &range, 0);
+        }
         if let Ty::Var(var) = pruned {
             if self.user_dict_index(var, class).is_none() {
                 self.bind_matching_abstract_constraints(Some(var), class);
@@ -6696,6 +6701,115 @@ impl Checker {
             }
         }
         boolean()
+    }
+
+    /// The type parameter in scope whose variable is `v` (under the
+    /// current substitution), by name.
+    fn rigid_type_param_name(&self, v: TyVarId) -> Option<String> {
+        self.type_params_in_scope.iter().rev().find_map(|frame| {
+            frame
+                .iter()
+                .find(|&(_, &p)| apply_ty_prune(&self.subst, &Ty::Var(p)) == Ty::Var(v))
+                .map(|(name, _)| name.clone())
+        })
+    }
+
+    /// Whether `ty` mentions a type parameter in scope.
+    fn mentions_rigid_type_param(&self, ty: &Ty) -> bool {
+        let mut vars = Vec::new();
+        Self::collect_ty_vars(&apply_ty_prune(&self.subst, ty), &mut vars);
+        vars.into_iter().any(|v| self.rigid_type_param_name(v).is_some())
+    }
+
+    /// `==` / `!=` on `ty` (a part of the operands' type `whole`) whose
+    /// `Eq` instance needs a type parameter's `Eq` (`Box<T>` deriving `Eq`
+    /// is `Eq for Box<T: Eq>`) is an error unless a bound gives `T` one
+    /// (`T: Eq`, or `T: Ord`, #1716). Without it a body that runs shared
+    /// (called through a function value) has no `Eq` for `T` and would
+    /// compare a class `T` by identity, while a mono clone calls its `Eq`
+    /// (#1804). A builtin aggregate (`Vec`, `Option`, `Result`, a tuple,
+    /// record or array) is checked part by part.
+    fn check_eq_type_param_bounds(&mut self, ty: &Ty, whole: &Ty, op: &str, range: &Range<usize>, depth: usize) {
+        if depth > 32 || !self.mentions_rigid_type_param(ty) {
+            return;
+        }
+        let ty = apply_ty_prune(&self.subst, ty);
+        let parts: Vec<Ty> = match &ty {
+            Ty::Var(_) | Ty::Fun(..) => return,
+            Ty::Tuple(items) => items.clone(),
+            Ty::Record { fields } => fields.iter().map(|(_, t)| t.clone()).collect(),
+            Ty::Array { element, .. } | Ty::Readonly(element) => vec![(**element).clone()],
+            Ty::App(head, args)
+                if matches!(head.as_ref(), Ty::Con(n) if n == common::BUILTIN_VEC_TYPE
+                    || n == common::BUILTIN_OPTION_ENUM
+                    || n == common::BUILTIN_RESULT_ENUM) =>
+            {
+                args.clone()
+            }
+            _ => Vec::new(),
+        };
+        if !parts.is_empty() || !matches!(&ty, Ty::App(..)) {
+            for part in &parts {
+                self.check_eq_type_param_bounds(part, whole, op, range, depth + 1);
+            }
+            return;
+        }
+        // A class or enum with no `Eq` instance compares by identity, as
+        // it does in every body.
+        let Ok(Some(instance)) = self.find_unique_instance("Eq", std::slice::from_ref(&ty), range) else {
+            return;
+        };
+        for c in &instance.context {
+            let args: Vec<Ty> = c.args.iter().map(|a| apply_ty_prune(&self.subst, a)).collect();
+            let goal = Constraint {
+                class: c.class.clone(),
+                args: args.clone(),
+            };
+            match args.as_slice() {
+                [Ty::Var(v)] => {
+                    if self.constraint_is_covered(&goal) {
+                        continue;
+                    }
+                    let Some(param) = self.rigid_type_param_name(*v) else {
+                        continue;
+                    };
+                    let shown = self.show_with_type_param_names(whole);
+                    let mut msg = Message::error(
+                        ErrorCode::GenericTypeError,
+                        format!(
+                            "`{op}` on `{shown}` needs `{}` for `{param}`, and `{param}` has no `{}` bound",
+                            c.class, c.class
+                        ),
+                        range.clone(),
+                    );
+                    msg.with_help(if c.class == "Eq" {
+                        format!("add `Eq` to `{param}`'s bound (`{param}: Eq`, or `{param}: Ord`, which implies `Eq`)")
+                    } else {
+                        format!("add `{}` to `{param}`'s bound", c.class)
+                    });
+                    self.messages.push(msg);
+                }
+                _ if goal.class == "Eq" => {
+                    for a in &args {
+                        self.check_eq_type_param_bounds(a, whole, op, range, depth + 1);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// `ty` with the type parameters in scope by name (`Box<T>`).
+    fn show_with_type_param_names(&self, ty: &Ty) -> String {
+        let mut named = Subst::empty();
+        for frame in &self.type_params_in_scope {
+            for (name, &var) in frame {
+                if let Ty::Var(rep) = apply_ty_prune(&self.subst, &Ty::Var(var)) {
+                    named.insert(rep, Ty::Con(name.clone()));
+                }
+            }
+        }
+        apply_ty(&named, &apply_ty_prune(&self.subst, ty)).to_string()
     }
 
     /// Lazy `start..end` / `start..=end`, bounds unify to `T` with `T: Ord`.
@@ -6936,6 +7050,45 @@ impl Checker {
         let what = if op == "neg" { "`-` on a `byte`".to_string() } else { format!("`byte` `{op}`") };
         let mut msg = Message::warn(ErrorCode::ByteWrap, format!("{what} wraps modulo 256"), range.clone());
         msg.with_help("the result keeps its low 8 bits; convert to `int` first (`x as int`) for exact arithmetic".to_string());
+        self.messages.push(msg);
+    }
+
+    /// An expression statement whose value is a `Result` drops it, and with
+    /// it any error it holds (#1752), so it warns, like Rust's
+    /// `unused_must_use`. `expr?;` is not one (`?` consumes the `Result`),
+    /// a block's tail is its value, and `let _ = expr;` discards on purpose.
+    /// An assignment's value is the stored `Result`, which the target keeps.
+    /// In a `test` body it is an error instead (#1819): an `assert!` helper
+    /// called as `helper();` would drop its failed `Err` and the case would
+    /// pass.
+    fn warn_unused_result(&mut self, ty: &Ty, stmt: &Output) {
+        if matches!(
+            unwrap_expr_wrappers(stmt).1.as_ref(),
+            Expression::Assignment(..) | Expression::CompoundAssign(..)
+        ) {
+            return;
+        }
+        let ty = apply_ty_prune(&self.subst, ty);
+        if !is_result_ty(&ty) {
+            return;
+        }
+        let msg = if self.in_test_case {
+            let mut msg = Message::error(
+                ErrorCode::UnusedResult,
+                "unused `Result` value in a test: an error it holds is dropped and the test still passes".to_string(),
+                stmt.0.into_range(),
+            );
+            msg.with_help("write `…?;` to fail the test on an error, or `let _ = …;` to discard it on purpose".to_string());
+            msg
+        } else {
+            let mut msg = Message::warn(
+                ErrorCode::UnusedResult,
+                "unused `Result` value: an error it holds is dropped".to_string(),
+                stmt.0.into_range(),
+            );
+            msg.with_help("handle it with `?` or `match`, or write `let _ = …;` to discard it on purpose".to_string());
+            msg
+        };
         self.messages.push(msg);
     }
 
@@ -12824,7 +12977,8 @@ impl Checker {
             );
         }
         if args.len() == 4 || args.len() == 5 {
-            self.infer(&args[0]);
+            let lib_ty = self.infer(&args[0]);
+            self.check_ffi_lib_handle(&lib_ty, "declare", args[0].0.into_range());
             self.infer(&args[1]);
             if let Some(sym) = host_caps::const_string_expr(&args[1]) {
                 self.gate_ffi_exec_symbol(&sym, &sym, args[1].0.into_range());
@@ -13309,6 +13463,36 @@ impl Checker {
         );
     }
 
+    /// The library handle `declare` and `invoke` take is the `int` that
+    /// `dload` returns (#1787), never `dload`'s `Result` itself, as for
+    /// `invoke`'s function id (#1761).
+    fn check_ffi_lib_handle(&mut self, lib_ty: &Ty, builtin: &str, range: Range<usize>) {
+        let pruned = apply_ty_prune(&self.subst, lib_ty);
+        let lib_ty = crate::typechecking::ty::strip_readonly(&pruned).clone();
+        let help = if is_result_ty(&lib_ty) {
+            format!(
+                "`dload` returns `Result<int, Error>`; unwrap the handle with `?` (`dload(...)?`) or `match` before passing it to `{builtin}`"
+            )
+        } else {
+            match unify_with(&self.subst, &lib_ty, &int()) {
+                Ok(s) => {
+                    self.absorb(&s);
+                    return;
+                }
+                Err(_) => format!(
+                    "`{builtin}`'s library handle is the `int` that `dload(path)` returns"
+                ),
+            }
+        };
+        let [found] = <[String; 1]>::try_from(self.diag_tys(&[&lib_ty])).expect("one type");
+        let _ = self.error_with_help(
+            ErrorCode::TypeMismatch,
+            format!("Type mismatch: expected `int`, found `{found}`"),
+            range,
+            Some(help),
+        );
+    }
+
     fn infer_ffi_invoke(&mut self, args: &[Output], range: Range<usize>) -> Ty {
         if self.ffi_fn_in_scope("invoke").is_none() {
             let _ = self.error_with_help(
@@ -13322,7 +13506,8 @@ impl Checker {
         let mut variadic = false;
         let mut nfixed = 0usize;
         if args.len() == 3 {
-            self.infer(&args[0]);
+            let lib_ty = self.infer(&args[0]);
+            self.check_ffi_lib_handle(&lib_ty, "invoke", args[0].0.into_range());
             let id_ty = self.infer(&args[1]);
             self.check_ffi_invoke_fn_id(&id_ty, args[1].0.into_range());
             if let Some((ty, var, fixed)) = self.ffi_invoke_fn_id_metadata(&args[1]) {

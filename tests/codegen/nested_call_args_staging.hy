@@ -21,5 +21,5 @@ fn concat_bytes(Vec<byte> a, Vec<byte> b) -> Vec<byte> {
 
 fn main() {
     let msg = concat_bytes(to_bytes("GET "), to_bytes("/hi"));
-    write(stdout(), msg);
+    let _ = write(stdout(), msg);
 }

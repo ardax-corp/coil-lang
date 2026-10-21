@@ -36,5 +36,5 @@ fn hot(Cell n, int iters) -> int {
 
 fn main() {
     let n = new Cell(1, 2, 3, 4);
-    write_all(stdout(), to_bytes(format("%i", hot(n, 2000000))));
+    let _ = write_all(stdout(), to_bytes(format("%i", hot(n, 2000000))));
 }

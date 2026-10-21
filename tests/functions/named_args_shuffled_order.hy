@@ -7,8 +7,8 @@ use io::{stdout, write};
 use string::{format, to_bytes};
 
 fn greet(string name, int age) {
-    write(stdout(), to_bytes(format("%s", name)));
-    write(stdout(), to_bytes(format("%i", age)));
+    let _ = write(stdout(), to_bytes(format("%s", name)));
+    let _ = write(stdout(), to_bytes(format("%i", age)));
 }
 
 fn main() {

@@ -12,5 +12,5 @@ fn bump(int x) -> int {
 fn main() {
     let m = mutex(41)?;
     let n = with_lock(m, fn (int x) => (bump(x), bump(x)))?;
-    write_all(stdout(), to_bytes(format("%i", n)));
+    let _ = write_all(stdout(), to_bytes(format("%i", n)));
 }

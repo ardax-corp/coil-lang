@@ -19,5 +19,5 @@ fn main() {
         let inner = { a: B::B { y: 7 } };
         let { a } = inner;
     }
-    write(stdout(), to_bytes(format("%i", a.x)));
+    let _ = write(stdout(), to_bytes(format("%i", a.x)));
 }

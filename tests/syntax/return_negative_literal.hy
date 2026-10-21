@@ -8,6 +8,6 @@ fn neg() -> int {
 }
 
 fn main() {
-    write(stdout(), to_bytes(format("%i", neg())));
-    write(stdout(), to_bytes(format("%i", 0 - 1)));
+    let _ = write(stdout(), to_bytes(format("%i", neg())));
+    let _ = write(stdout(), to_bytes(format("%i", 0 - 1)));
 }

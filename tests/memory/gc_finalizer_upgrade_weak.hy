@@ -39,5 +39,5 @@ fn main() {
         },
         Option::None => -1,
     };
-    write(stdout(), to_bytes(format("%i%i", during, after)));
+    let _ = write(stdout(), to_bytes(format("%i%i", during, after)));
 }

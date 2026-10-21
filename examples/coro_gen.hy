@@ -14,7 +14,7 @@ gen fn counter() {
 
 fn main() {
     let h = counter();
-    write_all(stdout(), to_bytes(format("%i", resume h)));
-    write_all(stdout(), to_bytes(format("%i", resume h)));
-    write_all(stdout(), to_bytes(format("%i", resume h)));
+    let _ = write_all(stdout(), to_bytes(format("%i", resume h)));
+    let _ = write_all(stdout(), to_bytes(format("%i", resume h)));
+    let _ = write_all(stdout(), to_bytes(format("%i", resume h)));
 }

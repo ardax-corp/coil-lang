@@ -21,9 +21,9 @@ impl Point {
 
 fn main() {
     let xs = readonly [1, 2, 3];
-    write_all(stdout(), to_bytes(format("%i", xs.len())));
+    let _ = write_all(stdout(), to_bytes(format("%i", xs.len())));
     let p = readonly new Point(1, 2);
     let q = p.shifted();
-    write_all(stdout(), to_bytes(format("%i", p.x)));
-    write_all(stdout(), to_bytes(format("%i", q.x)));
+    let _ = write_all(stdout(), to_bytes(format("%i", p.x)));
+    let _ = write_all(stdout(), to_bytes(format("%i", q.x)));
 }

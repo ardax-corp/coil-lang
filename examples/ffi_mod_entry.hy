@@ -14,5 +14,5 @@ use string::{format, to_bytes};
 use ffi_mod::sys::run_twice;
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", run_twice())));
+    let _ = write_all(stdout(), to_bytes(format("%i", run_twice())));
 }

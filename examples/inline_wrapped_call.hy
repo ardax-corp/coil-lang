@@ -24,5 +24,5 @@ fn wrap_sub(int n) -> int {
 
 fn main() {
     // (1 + 5) + (10 - 3) == 13; a leaked body clobbers the left operand.
-    write_all(stdout(), to_bytes(format("%i", wrap_add(5) + wrap_sub(3))));
+    let _ = write_all(stdout(), to_bytes(format("%i", wrap_add(5) + wrap_sub(3))));
 }

@@ -27,12 +27,7 @@ pub fn eval_expr<'a>(
         Expression::Integer(n) => Some(ConstValue::Int(*n)),
         Expression::Float(n) => Some(ConstValue::Float(*n)),
         Expression::Bool(b) => Some(ConstValue::Bool(*b)),
-        Expression::String(s) => Some(ConstValue::Str(
-            s.replace("\\n", "\n")
-                .replace("\\r", "\r")
-                .replace("\\t", "\t")
-                .replace("\\0", "\0"),
-        )),
+        Expression::String(s) => Some(ConstValue::Str(crate::codegen::unescape_coil_string(s))),
         Expression::Identifier(name) => env.get(*name).cloned(),
         Expression::Group(inner) | Expression::Expr(inner) | Expression::Statement(inner) => {
             eval_expr(inner, env)
@@ -492,6 +487,15 @@ mod tests {
         let rhs = (SimpleSpan::from(0..1), Box::new(Expression::String("llo")));
         let add = (SimpleSpan::from(0..1), Box::new(Expression::Add(lhs, rhs)));
         assert_eq!(eval_expr(&add, &env), Some(ConstValue::Str("hello".into())));
+    }
+
+    #[test]
+    fn string_literal_decodes_every_escape() {
+        let env = HashMap::new();
+        let lit = |raw: &'static str| (SimpleSpan::from(0..1), Box::new(Expression::String(raw)));
+        assert_eq!(eval_expr(&lit(r#"a\"b\\c"#), &env), Some(ConstValue::Str("a\"b\\c".into())));
+        assert_eq!(eval_expr(&lit(r"\\n"), &env), Some(ConstValue::Str("\\n".into())));
+        assert_eq!(eval_expr(&lit(r"\x41\u{e9}\e"), &env), Some(ConstValue::Str("A\u{e9}\x1b".into())));
     }
 
     #[test]

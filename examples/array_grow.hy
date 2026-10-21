@@ -10,7 +10,7 @@ fn main() {
     let a = Vec::from([1, 2]);
     a.push(3);
     a.push(4);
-    write_all(stdout(), to_bytes(format("%i", a.len())));
-    write_all(stdout(), to_bytes(format("%i", a[0])));
-    write_all(stdout(), to_bytes(format("%i", a[3])));
+    let _ = write_all(stdout(), to_bytes(format("%i", a.len())));
+    let _ = write_all(stdout(), to_bytes(format("%i", a[0])));
+    let _ = write_all(stdout(), to_bytes(format("%i", a[3])));
 }

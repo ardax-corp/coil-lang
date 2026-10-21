@@ -55,7 +55,7 @@ fn bump(int x) -> int uses {read, mutate} {
 }
 
 fn say(string s) uses {write, suspend} {
-    write_all(stdout(), to_bytes(s));
+    let _ = write_all(stdout(), to_bytes(s));
 }
 
 test("declared functions run as written") {

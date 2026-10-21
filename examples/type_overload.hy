@@ -20,7 +20,7 @@ fn show(string s) -> string {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(show(7)));
-    write_all(stdout(), to_bytes(show(1.5)));
-    write_all(stdout(), to_bytes(show("hi")));
+    let _ = write_all(stdout(), to_bytes(show(7)));
+    let _ = write_all(stdout(), to_bytes(show(1.5)));
+    let _ = write_all(stdout(), to_bytes(show("hi")));
 }

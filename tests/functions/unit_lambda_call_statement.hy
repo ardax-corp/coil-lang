@@ -12,16 +12,16 @@ fn apply(() -> () f) {
 fn main() {
     let run = fn () {
         let n = 1;
-        write(stdout(), to_bytes("1;"));
+        let _ = write(stdout(), to_bytes("1;"));
     };
     run();
     apply(fn () {
-        write(stdout(), to_bytes("2;"));
+        let _ = write(stdout(), to_bytes("2;"));
     });
     let k = 3;
     let last = fn () use (k) {
         if k == 3 {
-            write(stdout(), to_bytes("3"));
+            let _ = write(stdout(), to_bytes("3"));
         }
     };
     last();

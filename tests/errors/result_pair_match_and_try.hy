@@ -27,5 +27,5 @@ fn main() {
         Result::Ok(_) => 0,
         Result::Err(_) => 1,
     };
-    write(stdout(), to_bytes(format("%i,%i,%i", ok, bad, direct_bad)));
+    let _ = write(stdout(), to_bytes(format("%i,%i,%i", ok, bad, direct_bad)));
 }

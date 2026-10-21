@@ -40,17 +40,17 @@ fn both_panic(Option<int> o) -> int {
 
 fn after_return() -> int {
     return 1;
-    write(stdout(), to_bytes("dead"));
+    let _ = write(stdout(), to_bytes("dead"));
 }
 
 fn after_endless() -> int {
     while true {}
-    write(stdout(), to_bytes("dead"));
+    let _ = write(stdout(), to_bytes("dead"));
 }
 
 fn defer_before_endless() -> int {
     defer {
-        write(stdout(), to_bytes("d"));
+        let _ = write(stdout(), to_bytes("d"));
     }
     while true {}
 }
@@ -58,7 +58,7 @@ fn defer_before_endless() -> int {
 fn defer_inside_endless() -> int {
     while true {
         defer {
-            write(stdout(), to_bytes("d"));
+            let _ = write(stdout(), to_bytes("d"));
         }
     }
 }

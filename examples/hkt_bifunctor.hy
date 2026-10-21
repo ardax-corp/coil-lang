@@ -21,5 +21,5 @@ fn get_tag<F: * -> * -> *, Bifunctor, A, B>(F<A, B> xs) -> int {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", get_tag(Result::Ok(7)))));
+    let _ = write_all(stdout(), to_bytes(format("%i", get_tag(Result::Ok(7)))));
 }

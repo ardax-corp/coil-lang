@@ -26,102 +26,90 @@ test("a scope returns a non-int body value") {
 
 test("the scope waits for children nobody joined") {
     let log: Vec<int> = Vec::new();
-    let r = scope(
-        fn (Scope s) use (log) {
-            s.spawn(fn () use (log) {
-                task::sleep(20);
-                log.push(1);
-                0
-            });
-            s.spawn(fn () use (log) {
-                task::yield_now();
-                log.push(2);
-                0
-            });
+    let r = scope(fn (Scope s) use (log) {
+        s.spawn(fn () use (log) {
+            task::sleep(20);
+            log.push(1);
             0
-        },
-    );
+        });
+        s.spawn(fn () use (log) {
+            task::yield_now();
+            log.push(2);
+            0
+        });
+        0
+    });
     assert!(ok_or(r, -1) == 0);
     assert!(log.len() == 2);
     assert!(log[0] == 2 && log[1] == 1);
 }
 
 test("join returns each value whatever order the children finish in") {
-    let r = scope(
-        fn (Scope s) {
-            let slow = s.spawn(fn () {
-                task::sleep(30);
-                1
-            });
-            let fast = s.spawn(fn () => 2);
-            let mid = s.spawn(fn () {
-                task::sleep(10);
-                3
-            });
-            ok_or(slow.join(), -100) * 100 + ok_or(mid.join(), -100) * 10 + ok_or(fast.join(), -100)
-        },
-    );
+    let r = scope(fn (Scope s) {
+        let slow = s.spawn(fn () {
+            task::sleep(30);
+            1
+        });
+        let fast = s.spawn(fn () => 2);
+        let mid = s.spawn(fn () {
+            task::sleep(10);
+            3
+        });
+        ok_or(slow.join(), -100) * 100 + ok_or(mid.join(), -100) * 10 + ok_or(fast.join(), -100)
+    });
     assert!(ok_or(r, -1) == 132);
 }
 
 test("joining a task twice returns its value both times") {
-    let r = scope(
-        fn (Scope s) {
-            let t = s.spawn(fn () => 21);
-            ok_or(t.join(), -100) + ok_or(t.join(), -100)
-        },
-    );
+    let r = scope(fn (Scope s) {
+        let t = s.spawn(fn () => 21);
+        ok_or(t.join(), -100) + ok_or(t.join(), -100)
+    });
     assert!(ok_or(r, -1) == 42);
 }
 
 test("a child can spawn a sibling through the captured scope") {
     let log: Vec<int> = Vec::new();
-    let r = scope(
-        fn (Scope s) use (log) {
-            let first = s.spawn(fn () use (s, log) {
-                log.push(1);
-                s.spawn(fn () use (log) {
-                    log.push(3);
-                    0
-                });
-                log.push(2);
+    let r = scope(fn (Scope s) use (log) {
+        let first = s.spawn(fn () use (s, log) {
+            log.push(1);
+            s.spawn(fn () use (log) {
+                log.push(3);
                 0
             });
-            ok_or(first.join(), -1)
-        },
-    );
+            log.push(2);
+            0
+        });
+        ok_or(first.join(), -1)
+    });
     assert!(ok_or(r, -1) == 0);
     assert!(log.len() == 3);
     assert!(log[0] == 1 && log[1] == 2 && log[2] == 3);
 }
 
 test("a child returns a heap value through join") {
-    let r = scope(
-        fn (Scope s) {
-            let t = s.spawn(fn () {
-                let v: Vec<int> = Vec::new();
-                v.push(4);
-                v.push(5);
-                v
-            });
-            match t.join() {
-                Result::Ok(v) => v.len() * 10 + v[1],
-                Result::Err(_) => -1,
-            }
-        },
-    );
+    let r = scope(fn (Scope s) {
+        let t = s.spawn(fn () {
+            let v: Vec<int> = Vec::new();
+            v.push(4);
+            v.push(5);
+            v
+        });
+        match t.join() {
+            Result::Ok(v) => v.len() * 10 + v[1],
+            Result::Err(_) => -1,
+        }
+    });
     assert!(ok_or(r, -2) == 25);
 }
 
 test("tasks kept past the scope still hold their values") {
     let kept: Vec<Task<string>> = Vec::new();
-    let r = scope(
-        fn (Scope s) use (kept) {
-            kept.push(s.spawn(fn () => "a"));
-            kept.push(s.spawn(fn () => "b"));
-            0
-        },
-    );
+    let r = scope(fn (Scope s) use (kept) {
+        kept.push(s.spawn(fn () => "a"));
+        kept.push(s.spawn(fn () => "b"));
+        0
+    });
     assert!(ok_or(r, -1) == 0);
     let a = match kept[0].join() {
         Result::Ok(v) => v,

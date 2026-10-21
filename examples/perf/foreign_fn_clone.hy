@@ -10,5 +10,5 @@ fn main() {
     for i in 0..300 {
         xs.push((i * 37) % 101);
     }
-    write(stdout(), to_bytes(format("%i\n", largest(xs, 0))));
+    let _ = write(stdout(), to_bytes(format("%i\n", largest(xs, 0))));
 }

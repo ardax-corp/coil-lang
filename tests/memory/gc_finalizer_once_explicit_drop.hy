@@ -20,5 +20,5 @@ fn main() {
     h.drop();
     h.drop();
     collect();
-    write(stdout(), to_bytes(format("%i", drops)));
+    let _ = write(stdout(), to_bytes(format("%i", drops)));
 }

@@ -30,10 +30,10 @@ fn scale_negative_x(int x) -> int {
 }
 
 fn main() {
-    write(stdout(), to_bytes(format("%i,", scale_rhs(5))));
-    write(stdout(), to_bytes(format("%i,", scale_lhs(7))));
-    write(stdout(), to_bytes(format("%i,", scale_const(3))));
-    write(stdout(), to_bytes(format("%i,", scale_one(9))));
-    write(stdout(), to_bytes(format("%i,", scale_six(7))));
-    write(stdout(), to_bytes(format("%i", scale_negative_x(0 - 3))));
+    let _ = write(stdout(), to_bytes(format("%i,", scale_rhs(5))));
+    let _ = write(stdout(), to_bytes(format("%i,", scale_lhs(7))));
+    let _ = write(stdout(), to_bytes(format("%i,", scale_const(3))));
+    let _ = write(stdout(), to_bytes(format("%i,", scale_one(9))));
+    let _ = write(stdout(), to_bytes(format("%i,", scale_six(7))));
+    let _ = write(stdout(), to_bytes(format("%i", scale_negative_x(0 - 3))));
 }

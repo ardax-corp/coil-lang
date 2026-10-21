@@ -22,5 +22,5 @@ fn apply_cast<A, B>(A x) -> B where Convert<A, B> {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", apply_cast(42))));
+    let _ = write_all(stdout(), to_bytes(format("%i", apply_cast(42))));
 }

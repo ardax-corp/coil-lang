@@ -4,7 +4,7 @@ use io::{stdout, write};
 use string::{format, to_bytes};
 
 fn show_it<T: Show>(T x) {
-    write(stdout(), to_bytes(format("%v,", x)));
+    let _ = write(stdout(), to_bytes(format("%v,", x)));
 }
 
 fn main() {

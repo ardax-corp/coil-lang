@@ -41,14 +41,14 @@ use string::{format};
 fn main() {
     let a = 9223372036854775807;
     let b = a + 1;
-    println(format(\"%i\", b));
+    let _ = println(format(\"%i\", b));
 }
 ";
     // #885: the overflow is on line 8, not inside the inlined `show`.
     let inlined = "use io::sync::{println};
 use string::{format};
 fn show(int x) {
-    println(format(\"%i\", x));
+    let _ = println(format(\"%i\", x));
 }
 fn main() {
     let a = 9223372036854775807;

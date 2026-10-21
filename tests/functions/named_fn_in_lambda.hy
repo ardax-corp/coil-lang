@@ -10,5 +10,5 @@ fn rec(int n) -> int {
 
 fn main() {
     let f = fn (int x) => rec(x);
-    write_all(stdout(), to_bytes(format("%i", f(41))));
+    let _ = write_all(stdout(), to_bytes(format("%i", f(41))));
 }

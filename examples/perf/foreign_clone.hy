@@ -10,5 +10,5 @@ fn main() {
     for i in 0..300 {
         t.add(i % 7);
     }
-    write(stdout(), to_bytes(format("%i %i\n", t.count(3), t.count(9))));
+    let _ = write(stdout(), to_bytes(format("%i %i\n", t.count(3), t.count(9))));
 }

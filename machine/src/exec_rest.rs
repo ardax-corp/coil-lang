@@ -313,6 +313,7 @@ impl<const S: usize> Machine<S> {
                     if let Some(out) = self.output.as_mut() {
                         let _ = write!(out, "{}", s);
                         let _ = out.flush();
+                        self.mirror_stdout(s.data.as_str());
                     } else {
                         print!("{}", s);
                         let _ = io::stdout().flush();
@@ -764,7 +765,7 @@ impl<const S: usize> Machine<S> {
                         let _ = write!(out, "panic: {}{}{}", s, loc_suffix, backtrace);
                         let _ = out.flush();
                     } else {
-                        eprint!("panic: {}{}{}", s, loc_suffix, backtrace);
+                        eprintln!("panic: {}{}{}", s, loc_suffix, backtrace);
                         let _ = io::stderr().flush();
                     }
                     self.panicked = true;

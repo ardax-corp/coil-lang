@@ -39,5 +39,5 @@ impl Counter {
 
 fn main() {
     let c = new Counter(5);
-    write_all(stdout(), to_bytes(format("%i", c.describe())));
+    let _ = write_all(stdout(), to_bytes(format("%i", c.describe())));
 }

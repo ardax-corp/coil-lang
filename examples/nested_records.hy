@@ -26,5 +26,5 @@ fn get_v(Wrap w) -> int {
 
 fn main() {
     let w = Wrap::W { inner: Inner::I { v: 99 }, name: "x" };
-    write_all(stdout(), to_bytes(format("%i", get_v(w))));
+    let _ = write_all(stdout(), to_bytes(format("%i", get_v(w))));
 }

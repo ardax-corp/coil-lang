@@ -22,14 +22,14 @@ class Point {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%s\n", typeof 42)));
-    write_all(stdout(), to_bytes(format("%s\n", typeof "hi")));
-    write_all(stdout(), to_bytes(format("%s\n", typeof (1, 2))));
-    write_all(stdout(), to_bytes(format("%i\n", "foo".len())));
-    write_all(stdout(), to_bytes(format("%i\n", [1, 2, 3].len())));
-    write_all(stdout(), to_bytes(format("%i\n", (1, 2).len())));
-    write_all(stdout(), to_bytes(format("%i\n", ({ a: 1, b: 2 }).len())));
+    let _ = write_all(stdout(), to_bytes(format("%s\n", typeof 42)));
+    let _ = write_all(stdout(), to_bytes(format("%s\n", typeof "hi")));
+    let _ = write_all(stdout(), to_bytes(format("%s\n", typeof (1, 2))));
+    let _ = write_all(stdout(), to_bytes(format("%i\n", "foo".len())));
+    let _ = write_all(stdout(), to_bytes(format("%i\n", [1, 2, 3].len())));
+    let _ = write_all(stdout(), to_bytes(format("%i\n", (1, 2).len())));
+    let _ = write_all(stdout(), to_bytes(format("%i\n", ({ a: 1, b: 2 }).len())));
     let p = new Point(1, 2);
-    write_all(stdout(), to_bytes(format("%s\n", typeof p)));
-    write_all(stdout(), to_bytes(format("%v\n", p)));
+    let _ = write_all(stdout(), to_bytes(format("%s\n", typeof p)));
+    let _ = write_all(stdout(), to_bytes(format("%v\n", p)));
 }

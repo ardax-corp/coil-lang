@@ -57,5 +57,5 @@ fn main() {
         panic "assertion failed";
     }
     expect(outcome(fn () => find_off(3)), "contract violated: ensures result >= 0 in find_off");
-    write(stdout(), to_bytes("ok"));
+    let _ = write(stdout(), to_bytes("ok"));
 }

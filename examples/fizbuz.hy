@@ -8,10 +8,10 @@ use string::{format, to_bytes};
 
 fn fizbuz(int n) {
     if (n % 3) == 0 {
-        write_all(stdout(), to_bytes("FIZ"));
+        let _ = write_all(stdout(), to_bytes("FIZ"));
     }
     if (n % 5) == 0 {
-        write_all(stdout(), to_bytes("BUZ"));
+        let _ = write_all(stdout(), to_bytes("BUZ"));
     }
 }
 

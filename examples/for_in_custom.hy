@@ -36,6 +36,6 @@ impl Iterator for Counter {
 fn main() {
     let c = new Counter(0, 3);
     for x in c {
-        write_all(stdout(), to_bytes(format("%i", x)));
+        let _ = write_all(stdout(), to_bytes(format("%i", x)));
     }
 }

@@ -10,5 +10,5 @@ fn add3(int a, int b, int c) -> int {
 
 fn main() {
     let pack = (1, 2, 3);
-    write(stdout(), to_bytes(format("%i", add3(...pack))));
+    let _ = write(stdout(), to_bytes(format("%i", add3(...pack))));
 }

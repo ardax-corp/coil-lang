@@ -19,6 +19,6 @@ fn fib(
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", fib(32))));
+    let _ = write_all(stdout(), to_bytes(format("%i", fib(32))));
     return;
 }

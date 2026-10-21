@@ -8,11 +8,11 @@ use string::{format, to_bytes};
 
 fn main() {
     let a = Option::None ?? "bar";
-    write_all(stdout(), to_bytes(format("%s,", a)));
+    let _ = write_all(stdout(), to_bytes(format("%s,", a)));
     let b = Option::Some("hi") ?? "bar";
-    write_all(stdout(), to_bytes(format("%s,", b)));
+    let _ = write_all(stdout(), to_bytes(format("%s,", b)));
     let c = Result::Err("boom") ?? 7;
-    write_all(stdout(), to_bytes(format("%i,", c)));
+    let _ = write_all(stdout(), to_bytes(format("%i,", c)));
     let d = Result::Ok(9) ?? 7;
-    write_all(stdout(), to_bytes(format("%i", d)));
+    let _ = write_all(stdout(), to_bytes(format("%i", d)));
 }

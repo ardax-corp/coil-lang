@@ -46,5 +46,5 @@ fn main() {
         total = total + iter_sum(new Counter(0, 1 << 14));
         round = round + 1;
     }
-    write_all(stdout(), to_bytes(format("%i", total)));
+    let _ = write_all(stdout(), to_bytes(format("%i", total)));
 }

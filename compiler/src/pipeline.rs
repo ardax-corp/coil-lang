@@ -2332,16 +2332,27 @@ impl Pipeline {
             let Some(stored) = debug.source_files.get(loc.file as usize) else {
                 continue;
             };
-            let byte = loc.start_byte as usize;
-            let Some(g) = self.generated_ranges.iter().find(|g| {
-                g.range.contains(&byte) && source_file_matches_generated(stored, &g.file)
-            }).or_else(|| {
-                self.generated_ranges.iter().find(|g| g.range.contains(&byte))
-            }) else {
-                continue;
-            };
-            loc.start_byte = g.site.start as u32;
-            loc.end_byte = (g.site.end.max(g.site.start + 1)) as u32;
+            let mut range = loc.start_byte as usize..(loc.end_byte as usize).max(loc.start_byte as usize);
+            // Code a macro copied unchanged maps back to where it was
+            // written; the rest to the macro's site.
+            loop {
+                let byte = range.start;
+                let Some(g) = self.generated_ranges.iter().find(|g| {
+                    g.range.contains(&byte) && source_file_matches_generated(stored, &g.file)
+                }).or_else(|| {
+                    self.generated_ranges.iter().find(|g| g.range.contains(&byte))
+                }) else {
+                    break;
+                };
+                if let Some(r) = g.translate(&range) {
+                    range = r;
+                    continue;
+                }
+                range = g.site.start..g.site.end.max(g.site.start + 1);
+                break;
+            }
+            loc.start_byte = range.start as u32;
+            loc.end_byte = range.end as u32;
         }
     }
 

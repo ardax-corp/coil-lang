@@ -75,5 +75,5 @@ fn main() {
         let _ = invoke(lib, uncompress, (out, out_len, packed, packed_len[0]));
         round = round + 1;
     }
-    write_all(stdout(), to_bytes(format("crc=%i out[4095]=%i\n", crc, out[4095] as int)));
+    let _ = write_all(stdout(), to_bytes(format("crc=%i out[4095]=%i\n", crc, out[4095] as int)));
 }

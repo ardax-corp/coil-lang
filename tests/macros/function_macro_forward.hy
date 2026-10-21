@@ -12,5 +12,5 @@ fn main() {
     let d = to_cube_raw!(4);
     let e = to_cube!(to_cube_raw!(1) + 4);
     let f = to_cube!(1) + to_to_cube!(1) + 4;
-    write(stdout(), to_bytes(format("%i %i %i %i %i %i", a, b, c, d, e, f)));
+    let _ = write(stdout(), to_bytes(format("%i %i %i %i %i %i", a, b, c, d, e, f)));
 }

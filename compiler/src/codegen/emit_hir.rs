@@ -948,6 +948,8 @@ impl Compiler {
                 let enums = crate::hir::enum_sroa::scalarize(body, |n| !self.checker.enum_has_drop(n));
                 let tuples = crate::hir::tuple_sroa::scalarize(enums.as_ref().unwrap_or(body), |t| !Self::ty_has_var(t));
                 let split = tuples.or(enums);
+                let classes = crate::hir::readonly_sroa::scalarize(split.as_ref().unwrap_or(body), |name| self.hir_readonly_split_fields(name));
+                let split = classes.or(split);
                 match split {
                     Some(next) => match lower::refusal(&next, &self.checker)
                         .map_or_else(|| self.plan_hir_body(&next), Err)
@@ -1361,6 +1363,14 @@ impl Compiler {
             .iter()
             .enumerate()
             .filter_map(|(i, e)| Some((i as u32, self.hir_mir_pair_tys(e.ty.as_ref()?)?)))
+            .collect::<HashMap<u32, _>>();
+        // Of those, the ones whose low word may carry a heap payload.
+        let heap_pairs = hir
+            .exprs
+            .iter()
+            .enumerate()
+            .filter(|(i, e)| pair_tys.contains_key(&(*i as u32)) && e.ty.as_ref().is_some_and(|t| self.hir_pair_holds_heap(t)))
+            .map(|(i, _)| i as u32)
             .collect();
         // The locals of outlined parallel loop bodies live in their chunk
         // worker's frame, not this body's.
@@ -1861,6 +1871,7 @@ impl Compiler {
             slots: &frame.slots,
             pair_locals,
             pair_tys,
+            heap_pairs,
             ret_pair,
             stacks,
             sroa,
@@ -1894,6 +1905,9 @@ impl Compiler {
             steady_fn: Box::new(move |n: &str| crate::il::pure_call::name_in(steady_fns, n)),
             box_at: &emit.plan.box_at,
             is_class: Box::new(is_class),
+            pair_class: Box::new(move |t: &Ty| {
+                crate::hir::layout::readonly_pair_class(checker, &apply_ty_prune(checker.subst(), t)).map(|key| checker.class_type_id(&key))
+            }),
             scalar_enum: Box::new(scalar_enum),
             niche: Box::new(niche),
             boxed_enum: Box::new(move |t: &Ty, variant: Option<&str>| {
@@ -2045,9 +2059,11 @@ impl Compiler {
                 };
                 return Some((word(&items[0])?, word(&items[1])?));
             }
-            PairKind::Option => vec!["Some".into(), "None".into()],
-            PairKind::Result => vec!["Ok".into(), "Err".into()],
-            PairKind::Enum(name) => self.checker.enum_variants(&name)?.into_iter().map(|(v, _, _)| v).collect(),
+            PairKind::Class(key) => {
+                let fields = self.checker.class_fields(&key)?;
+                return Some((word(&fields[0].1)?, word(&fields[1].1)?));
+            }
+            kind => self.pair_variants(kind)?,
         };
         let mut lo = None;
         for variant in &variants {
@@ -2073,6 +2089,38 @@ impl Compiler {
             }
         }
         Some((lo.unwrap_or(MirTy::I64), MirTy::I64))
+    }
+
+    /// The variants of a two-word enum layout (none for a range or a
+    /// product).
+    fn pair_variants(&self, kind: crate::hir::layout::PairKind) -> Option<Vec<String>> {
+        use crate::hir::layout::PairKind;
+        Some(match kind {
+            PairKind::Range { .. } | PairKind::Product | PairKind::Class(_) => Vec::new(),
+            PairKind::Option => vec!["Some".into(), "None".into()],
+            PairKind::Result => vec!["Ok".into(), "Err".into()],
+            PairKind::Enum(name) => self.checker.enum_variants(&name)?.into_iter().map(|(v, _, _)| v).collect(),
+        })
+    }
+
+    /// Whether a two-word enum of type `ty` may carry a heap payload in
+    /// its low word (#1791): a payload that is no scalar word and not
+    /// immediate, as [`Self::hir_mir_pair_tys`] moves it as an opaque
+    /// `i64`. Unknown payloads count as heap.
+    fn hir_pair_holds_heap(&self, ty: &Ty) -> bool {
+        use crate::hir::layout::{self, Layout};
+        use crate::mir::scalar_mir_ty as word;
+        let ty = apply_ty_prune(self.checker.subst(), ty);
+        let Layout::Pair(kind) = layout::of_resolved(&self.checker, &ty) else {
+            return false;
+        };
+        let Some(variants) = self.pair_variants(kind) else {
+            return true;
+        };
+        variants.iter().any(|v| match self.hir_payload_tys(&ty, v) {
+            Some(ps) => ps.iter().any(|p| !layout::is_unit(p) && word(p).is_none() && !layout::is_immediate(p)),
+            None => true,
+        })
     }
 
     /// Whether typed inlining runs on `hir`: on, at an opt level that
@@ -3542,6 +3590,17 @@ impl Compiler {
                 _ => None,
             })
             .collect();
+        // A `defer` thunk's frame copies each capture as one word, so a
+        // captured local stays one word.
+        let deferred: HashSet<u32> = hir
+            .exprs
+            .iter()
+            .filter_map(|e| match &e.kind {
+                HirKind::Defer { captures, .. } => Some(captures.iter().flatten().map(|l| l.0)),
+                _ => None,
+            })
+            .flatten()
+            .collect();
         for expr in &hir.exprs {
             let HirKind::Let {
                 local,
@@ -3550,7 +3609,13 @@ impl Compiler {
             else {
                 continue;
             };
-            if assigned.contains(&local.0) || hir.local(local).captured {
+            if assigned.contains(&local.0) || hir.local(local).captured || deferred.contains(&local.0) {
+                continue;
+            }
+            // A local of a one-word type stays one word even when its init
+            // is a pair: `let s: Sum = mk_r(2)` packs a readonly pair class
+            // into a trait object (#1562).
+            if hir.local(local).ty.as_ref().is_some_and(|t| self.hir_mir_pair_tys(t).is_none()) {
                 continue;
             }
             if let Some(Rep::Pair(kind)) = emit.plan.calls.get(&init.0).map(Self::hir_call_rep) {
@@ -4192,6 +4257,10 @@ impl Compiler {
         }
         let call_ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, call)?);
         Self::bind_scheme_vars(&ret_ty, &call_ty, &mut map);
+        // A `readonly` type argument is its type's: one clone for both (#1806).
+        for ty in map.values_mut() {
+            *ty = crate::typechecking::ty::strip_readonly_deep(ty);
+        }
         // Each type argument one word in its own layout (no pair).
         let word = |ty: &Ty| {
             crate::hir::layout::ty_is_closed(ty)
@@ -6602,7 +6671,7 @@ impl Compiler {
     /// A two-word kind the lowering builds and matches: a numeric range,
     /// an arity-2 immediate product, or a declared enum.
     pub(super) fn hir_pair_kind(&self, kind: &PairKind) -> bool {
-        matches!(kind, PairKind::Range { .. } | PairKind::Product) || self.hir_pair_enum(kind)
+        matches!(kind, PairKind::Range { .. } | PairKind::Product | PairKind::Class(_)) || self.hir_pair_enum(kind)
     }
 
     /// How an indexed or field-read base is pushed: a pair boxes into its
@@ -7745,6 +7814,25 @@ impl Compiler {
             return None;
         }
         Some((class, fields.into_iter().map(|(_, ty)| ty).collect()))
+    }
+
+    /// The fields of readonly class `name` when a local of it may be split
+    /// into field locals and rebuilt at each whole use
+    /// (`hir::readonly_sroa`): not generic, no `drop`, 1 to 32 fields of
+    /// closed, non-unit types, laid out as declared.
+    fn hir_readonly_split_fields(&self, name: &str) -> Option<Vec<(String, Ty)>> {
+        let key = self.checker.resolve_class_key(name)?;
+        if !self.checker.is_readonly_class(&key) || self.checker.class_has_drop(&key) || lower::is_generic_class(&self.checker, &key) {
+            return None;
+        }
+        let class = self.resolve_class_ident(name);
+        let fields = self.hir_class_fields(&class)?;
+        let codegen = self.context.classes.get(&class)?;
+        let fits = (1..=32).contains(&fields.len())
+            && codegen.len() == fields.len()
+            && codegen.iter().zip(&fields).all(|((a, _), (b, _))| a == b)
+            && fields.iter().all(|(_, t)| !Self::ty_has_var(t) && !crate::hir::layout::is_unit(t));
+        fits.then_some(fields)
     }
 
     /// `new C(args).f` of a class with no `drop`: the arguments, their

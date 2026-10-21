@@ -52,5 +52,5 @@ fn main() {
     ys.push(3);
     ys.push(new Pt(4));
     let rest = format("%s|%s|%s|%s", show(u.what), describe(l.what), show(ys[0]), show(ys[1]));
-    write(stdout(), to_bytes(first + "|" + rest));
+    let _ = write(stdout(), to_bytes(first + "|" + rest));
 }

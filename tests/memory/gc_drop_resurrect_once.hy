@@ -33,5 +33,5 @@ fn main() {
     let d1 = drops;
     clear_kept();
     collect();
-    write(stdout(), to_bytes(format("%i%i", d1, drops)));
+    let _ = write(stdout(), to_bytes(format("%i%i", d1, drops)));
 }

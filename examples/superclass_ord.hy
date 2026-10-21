@@ -37,7 +37,7 @@ fn cmp_lt<T: Ordered>(T a, T b) -> bool {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%z", cmp_eq(3, 3))));
-    write_all(stdout(), to_bytes(format("%z", cmp_lt(1, 2))));
-    write_all(stdout(), to_bytes(format("%z", cmp_eq(1, 2))));
+    let _ = write_all(stdout(), to_bytes(format("%z", cmp_eq(3, 3))));
+    let _ = write_all(stdout(), to_bytes(format("%z", cmp_lt(1, 2))));
+    let _ = write_all(stdout(), to_bytes(format("%z", cmp_eq(1, 2))));
 }

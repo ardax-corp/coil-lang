@@ -97,7 +97,7 @@ fn main() {
     if f(new Box1("o", true)) + "k" == "ok" {
         tail = "ok";
     }
-    write(
+    let _ = write(
         stdout(),
         to_bytes(
             format(

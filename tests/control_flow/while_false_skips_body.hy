@@ -5,7 +5,7 @@ use string::{format, to_bytes};
 
 fn main() {
     while false {
-        write(stdout(), to_bytes(format("%i", 1)));
+        let _ = write(stdout(), to_bytes(format("%i", 1)));
     }
-    write(stdout(), to_bytes(format("%i", 2)));
+    let _ = write(stdout(), to_bytes(format("%i", 2)));
 }

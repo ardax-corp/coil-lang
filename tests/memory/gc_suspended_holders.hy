@@ -51,42 +51,38 @@ test("a paused generator's local survives a collection") {
 
 test("a sleeping task's local survives a collection in its sibling") {
     drops = 0;
-    let r = scope(
-        fn (Scope s) {
-            let t = s.spawn(task_holding);
-            task::yield_now();
-            collect();
-            let during = drop_count();
-            let v = match t.join() {
-                Result::Ok(v) => v,
-                Result::Err(_) => -1,
-            };
-            during * 100 + v
-        },
-    );
+    let r = scope(fn (Scope s) {
+        let t = s.spawn(task_holding);
+        task::yield_now();
+        collect();
+        let during = drop_count();
+        let v = match t.join() {
+            Result::Ok(v) => v,
+            Result::Err(_) => -1,
+        };
+        during * 100 + v
+    });
     assert!(r == Result::Ok(6));
     collect();
     assert!(drops == 1);
 }
 
 test("a vector captured by a waiting task keeps its elements") {
-    let r = scope(
-        fn (Scope s) {
-            let t = s.spawn(fn () {
-                let v: Vec<string> = Vec::new();
-                v.push("a");
-                v.push("b");
-                task::sleep(5);
-                v[0] + v[1]
-            });
-            task::yield_now();
-            collect();
-            match t.join() {
-                Result::Ok(s) => s,
-                Result::Err(_) => "failed",
-            }
-        },
-    );
+    let r = scope(fn (Scope s) {
+        let t = s.spawn(fn () {
+            let v: Vec<string> = Vec::new();
+            v.push("a");
+            v.push("b");
+            task::sleep(5);
+            v[0] + v[1]
+        });
+        task::yield_now();
+        collect();
+        match t.join() {
+            Result::Ok(s) => s,
+            Result::Err(_) => "failed",
+        }
+    });
     let text = match r {
         Result::Ok(s) => s,
         Result::Err(_) => "scope failed",

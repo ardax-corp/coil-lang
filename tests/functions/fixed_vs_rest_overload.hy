@@ -13,7 +13,7 @@ fn f(int x, int y, int... xs) -> int {
 }
 
 fn main() {
-    write(stdout(), to_bytes(format("%i", f(1))));
-    write(stdout(), to_bytes(format("%i", f(1, 2))));
-    write(stdout(), to_bytes(format("%i", f(1, 2, 3, 4))));
+    let _ = write(stdout(), to_bytes(format("%i", f(1))));
+    let _ = write(stdout(), to_bytes(format("%i", f(1, 2))));
+    let _ = write(stdout(), to_bytes(format("%i", f(1, 2, 3, 4))));
 }

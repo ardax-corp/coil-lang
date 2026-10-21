@@ -40,5 +40,5 @@ fn main() {
     let k = h(1) == Result::Err(Fault::Busy);
     let m = h(2) == Result::Err(Fault::Busy);
     let n = g(false) == g(false);
-    write(stdout(), to_bytes(format("%v %v %v %v %v %v %v %v\n", a, b, c, d, e, k, m, n)));
+    let _ = write(stdout(), to_bytes(format("%v %v %v %v %v %v %v %v\n", a, b, c, d, e, k, m, n)));
 }

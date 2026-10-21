@@ -74,5 +74,5 @@ fn main() {
         i = i + 1;
     }
     let result = sqrt(vbv / vv);
-    write_all(stdout(), to_bytes(format("%i", (result * 1000000000.0) as int)));
+    let _ = write_all(stdout(), to_bytes(format("%i", (result * 1000000000.0) as int)));
 }

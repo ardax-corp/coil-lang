@@ -33,6 +33,6 @@ fn show_e(Result r) -> string {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i,", show_i(double_pos(5, 0)))));
-    write_all(stdout(), to_bytes(format("%s", show_e(double_pos(1, 1)))));
+    let _ = write_all(stdout(), to_bytes(format("%i,", show_i(double_pos(5, 0)))));
+    let _ = write_all(stdout(), to_bytes(format("%s", show_e(double_pos(1, 1)))));
 }

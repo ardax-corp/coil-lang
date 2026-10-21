@@ -51,5 +51,5 @@ fn main() {
     let u = wrap(Unit::B);
     let e = via(Dir::Down(3));
     let f = via(Dir::Up);
-    write(stdout(), to_bytes(format("%s|%s|%s|%s|%s|%s", a, b, c, u, e, f)));
+    let _ = write(stdout(), to_bytes(format("%s|%s|%s|%s|%s|%s", a, b, c, u, e, f)));
 }

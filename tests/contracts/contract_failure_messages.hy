@@ -30,7 +30,7 @@ fn expect(string m, string part) {
 }
 
 fn say(string s) {
-    write(stdout(), to_bytes(s));
+    let _ = write(stdout(), to_bytes(s));
 }
 
 fn num(int n) -> string {

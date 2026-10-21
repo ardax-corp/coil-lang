@@ -30,7 +30,7 @@ fn main() {
     let f = add;
     {
         let f = capture_show(0);
-        write(stdout(), to_bytes(format("%i", f(41))));
+        let _ = write(stdout(), to_bytes(format("%i", f(41))));
     }
-    write(stdout(), to_bytes(format("%i", f(1, 2))));
+    let _ = write(stdout(), to_bytes(format("%i", f(1, 2))));
 }

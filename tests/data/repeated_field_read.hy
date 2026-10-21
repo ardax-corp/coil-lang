@@ -13,5 +13,5 @@ fn twice(Point p) -> int {
 }
 
 fn main() {
-    write(stdout(), to_bytes(format("%i", twice(new Point(3, 4)))));
+    let _ = write(stdout(), to_bytes(format("%i", twice(new Point(3, 4)))));
 }

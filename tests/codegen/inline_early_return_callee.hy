@@ -12,6 +12,6 @@ fn early(int n, int is_neg) -> int {
 }
 
 fn main() {
-    write(stdout(), to_bytes(format("%i,", early(4, 1))));
-    write(stdout(), to_bytes(format("%i", early(4, 0))));
+    let _ = write(stdout(), to_bytes(format("%i,", early(4, 1))));
+    let _ = write(stdout(), to_bytes(format("%i", early(4, 0))));
 }

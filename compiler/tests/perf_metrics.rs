@@ -2094,11 +2094,12 @@ const READONLY_CLASS: &str = "
 readonly class Point {
     pub x: int,
     pub y: int,
+    pub z: int,
 }
 
 impl Point {
     pub fn moved(int dx) -> Point {
-        return new Point(self.x + dx, self.y);
+        return new Point(self.x + dx, self.y, self.z);
     }
 }
 
@@ -2107,7 +2108,7 @@ fn total(readonly Point p) -> int {
 }
 
 fn step(int i) -> int {
-    let p = new Point(i, i + 1);
+    let p = new Point(i, i + 1, 0);
     return total(p.moved(2)) + p.y;
 }
 
@@ -2118,7 +2119,7 @@ fn main() {
         acc = acc + step(i);
         i = i + 1;
     }
-    if new Point(1, 2) == new Point(1, 2) {
+    if new Point(1, 2, 3) == new Point(1, 2, 3) {
         acc = acc + 1;
     }
     if acc < 0 {
@@ -2128,7 +2129,8 @@ fn main() {
 ";
 
 /// #1558: a `readonly class` compiles to the same bytecode as a plain
-/// class deriving `Eq` and `Hash`: immutability is checked, not run.
+/// class deriving `Eq` and `Hash`: immutability is checked, not run. Three
+/// fields, since one of two immediates moves as a pair instead (#1562).
 #[test]
 fn readonly_class_compiles_to_the_same_bytecode_as_plain() {
     let plain = READONLY_CLASS
@@ -2170,6 +2172,37 @@ fn main() {
         .filter(|n| n.starts_with("getx$mono"))
         .collect();
     assert_eq!(clones.len(), 1, "`getx` should have one instance: {clones:?}");
+}
+
+/// #1806: a generic method's clone at a `T` and at a `readonly T` type
+/// argument is one instance (#1555's rule for methods too).
+#[test]
+fn readonly_type_argument_shares_the_method_clone() {
+    let src = "
+use collections::map::HashMap;
+class Point { pub x: int, }
+fn main() {
+    let m: HashMap<string, Point> = HashMap::new();
+    m.insert(\"a\", new Point(5));
+    let r: HashMap<string, readonly Point> = HashMap::new();
+    r.insert(\"a\", new Point(6));
+    let p = m.get(\"a\", new Point(0));
+    let q = r.get(\"a\", new Point(0));
+}
+";
+    let (_, pipeline) = compile_src_at(src, compiler::OptLevel::None);
+    let syms = pipeline.program_debug().fn_symbols;
+    let clones: Vec<&str> = syms
+        .iter()
+        .map(|s| s.name.as_str())
+        .filter(|n| n.contains("$inst$") && n.contains("Point"))
+        .collect();
+    let gets = clones.iter().filter(|n| n.contains("::get$inst$")).count();
+    assert_eq!(gets, 1, "`get` should have one instance: {clones:?}");
+    assert!(
+        clones.iter().all(|n| !n.contains("readonly")),
+        "no clone should be keyed with `readonly`: {clones:?}"
+    );
 }
 
 /// #1561: a module `const` table read at a constant index folds to the

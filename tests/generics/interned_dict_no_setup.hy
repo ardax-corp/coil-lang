@@ -28,5 +28,5 @@ impl Bag<K: Eq + Hash> {
 
 fn main() {
     let b: Bag<int> = Bag::new();
-    write(stdout(), to_bytes(format("%i", b.add(10))));
+    let _ = write(stdout(), to_bytes(format("%i", b.add(10))));
 }

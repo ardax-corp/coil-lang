@@ -49,13 +49,11 @@ test("a TCP echo between two tasks") {
     let listener = listen("127.0.0.1", 0)?;
     let port = local_addr(listener)?[1];
     assert!(port > 0);
-    let r = scope(
-        fn (Scope s) use (listener, port) {
-            let server = s.spawn(fn () use (listener) => serve_once(listener));
-            let client = s.spawn(fn () use (port) => call(port, "ping"));
-            text_of(server.join()) + "|" + text_of(client.join())
-        },
-    );
+    let r = scope(fn (Scope s) use (listener, port) {
+        let server = s.spawn(fn () use (listener) => serve_once(listener));
+        let client = s.spawn(fn () use (port) => call(port, "ping"));
+        text_of(server.join()) + "|" + text_of(client.join())
+    });
     let both = match r {
         Result::Ok(t) => t,
         Result::Err(_) => "scope failed",

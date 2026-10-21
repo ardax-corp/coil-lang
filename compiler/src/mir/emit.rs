@@ -1237,8 +1237,9 @@ impl CopySinks {
 
 /// The `i64` words that may hold a heap word: a boxed enum's payload
 /// read as a pair's low word (a two-word enum passed by value, whose
-/// heap payload moves as an opaque word), and the φs and casts that copy
-/// one. Typed `i64`, they are no heap word to [`CopySinks`] or
+/// heap payload moves as an opaque word), the low word of a pair a call
+/// returns when its enum may carry a heap payload there
+/// ([`MirFunc::heap_pair_calls`]), and the φs and casts that copy one. Typed `i64`, they are no heap word to [`CopySinks`] or
 /// [`arg_clears`], so a payload matched out of a rebound local, or passed
 /// on to a call, kept its object rooted in their registers (#1769). A
 /// plain number read the same way is zeroed too: harmless, and the
@@ -1249,6 +1250,14 @@ pub(super) fn payload_words(func: &MirFunc) -> HashSet<ValueId> {
         if let MirInst::MatchPayload { dest, scrutinee: src, .. } | MirInst::Cast { dest, src, .. } = inst
             && func.ty(*dest) == MirTy::I64
             && func.ty(*src).is_heap_word()
+        {
+            out.insert(*dest);
+        }
+        // A pair a call returns that may carry a heap payload: its low
+        // word (#1791).
+        if let MirInst::Call { dest, dest_hi: Some(_), .. } = inst
+            && func.ty(*dest) == MirTy::I64
+            && func.heap_pair_calls.contains(dest)
         {
             out.insert(*dest);
         }
@@ -1336,6 +1345,8 @@ impl Gathers {
     pub(super) fn new(func: &MirFunc, regs: &[u8], need_slot: &[bool], scratch: u8, self_entry: Option<Label>) -> Self {
         let mut out = Self::default();
         let slot = |v: ValueId| need_slot.get(v.index()).copied().unwrap_or(false) && v.index() < regs.len();
+        // A payload word moving as an `i64` holds its object too (#1791).
+        let payloads = payload_words(func);
         for (b, block) in func.blocks.iter().enumerate() {
             for (k, inst) in block.insts.iter().enumerate() {
                 if is_tail_call_inst(func, block, inst) {
@@ -1365,7 +1376,7 @@ impl Gathers {
                     }
                     for (i, w) in words.iter().enumerate() {
                         let Some(r) = scratch.checked_add(i as u8) else { break };
-                        if r == slots[i] || !func.ty(*w).is_heap_word() {
+                        if r == slots[i] || !(func.ty(*w).is_heap_word() || payloads.contains(w)) {
                             continue;
                         }
                         let rs = out.by_value.entry(*w).or_default();
@@ -1424,7 +1435,20 @@ pub(super) fn arg_clears(
     let slot = |v: ValueId| need_slot.get(v.index()).copied().unwrap_or(false) && v.index() < regs.len();
     let payloads = payload_words(func);
     let heapish = |v: ValueId| func.ty(v).is_heap_word() || payloads.contains(&v);
-    let payload_defs = payload_defs(func, &payloads);
+    // A heap word cast from another (`Option::Some(new Node(..))`'s niche
+    // word): the LIR tier emits it as an inline operand with no register
+    // of its own, so its source's register is what holds the object
+    // (#1802). Walked like a payload word.
+    let mut copied = payloads.clone();
+    for inst in func.blocks.iter().flat_map(|b| &b.insts) {
+        if let MirInst::Cast { dest, src, .. } = inst
+            && func.ty(*dest).is_heap_word()
+            && heapish(*src)
+        {
+            copied.insert(*dest);
+        }
+    }
+    let payload_defs = payload_defs(func, &copied);
     let mut bound_regs = RegSet::default();
     for &v in &func.bound_words {
         if slot(v) {
@@ -1517,10 +1541,11 @@ pub(super) fn arg_clears(
             // (its φ's incomings, the match it was read by and the enum
             // matched, the object cast to it) hold the object too, also
             // when the word itself has none (an inline operand of the LIR
-            // tier) (#1769). Not past a live value, nor into a register
-            // a local's word shares.
+            // tier) (#1769). Likewise a heap word cast from another, a
+            // niche `Option::Some` (#1802). Not past a live value, nor
+            // into a register a local's word shares.
             for v in inst.operands() {
-                if !payloads.contains(&v) || func.params.contains(&v) || func.bound_words.contains(&v) || !unused(v) {
+                if !copied.contains(&v) || func.params.contains(&v) || func.bound_words.contains(&v) || !unused(v) {
                     continue;
                 }
                 for s in payload_sources(func, &payloads, &payload_defs, v, |x| consts.contains(&x) || live[b][k].contains(&x)) {

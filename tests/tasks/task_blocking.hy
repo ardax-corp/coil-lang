@@ -55,43 +55,39 @@ test("blocking returns a string result") {
 
 test("other tasks run while one waits on blocking") {
     let log: Vec<string> = Vec::new();
-    let r = scope(
-        fn (Scope s) use (log) {
-            let worker = s.spawn(fn () use (log) {
-                let v = got(task::blocking(slow_crunch));
-                log.push("blocking done");
-                v
-            });
-            s.spawn(fn () use (log) {
-                log.push("other ran");
-                0
-            });
-            match worker.join() {
-                Result::Ok(v) => v,
-                Result::Err(_) => -1,
-            }
-        },
-    );
+    let r = scope(fn (Scope s) use (log) {
+        let worker = s.spawn(fn () use (log) {
+            let v = got(task::blocking(slow_crunch));
+            log.push("blocking done");
+            v
+        });
+        s.spawn(fn () use (log) {
+            log.push("other ran");
+            0
+        });
+        match worker.join() {
+            Result::Ok(v) => v,
+            Result::Err(_) => -1,
+        }
+    });
     assert!(r == Result::Ok(499500));
     assert!(log.len() == 2);
     assert!(log[0] == "other ran" && log[1] == "blocking done");
 }
 
 test("several tasks wait on blocking work at once") {
-    let r = scope(
-        fn (Scope s) {
-            let a = s.spawn(fn () => got(task::blocking_with(times, 1)));
-            let b = s.spawn(fn () => got(task::blocking_with(times, 2)));
-            let c = s.spawn(fn () => got(task::blocking_with(times, 3)));
-            let total = 0;
-            for t in [a, b, c] {
-                total += match t.join() {
-                    Result::Ok(v) => v,
-                    Result::Err(_) => -100,
-                };
-            }
-            total
-        },
-    );
+    let r = scope(fn (Scope s) {
+        let a = s.spawn(fn () => got(task::blocking_with(times, 1)));
+        let b = s.spawn(fn () => got(task::blocking_with(times, 2)));
+        let c = s.spawn(fn () => got(task::blocking_with(times, 3)));
+        let total = 0;
+        for t in [a, b, c] {
+            total += match t.join() {
+                Result::Ok(v) => v,
+                Result::Err(_) => -100,
+            };
+        }
+        total
+    });
     assert!(r == Result::Ok(18));
 }

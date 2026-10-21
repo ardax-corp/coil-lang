@@ -15,6 +15,6 @@ fn add(int x, int y) -> int {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", add(1))));
-    write_all(stdout(), to_bytes(format("%i", add(2, 3))));
+    let _ = write_all(stdout(), to_bytes(format("%i", add(1))));
+    let _ = write_all(stdout(), to_bytes(format("%i", add(2, 3))));
 }

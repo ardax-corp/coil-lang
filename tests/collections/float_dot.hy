@@ -3,5 +3,5 @@ use io::{stdout, write};
 use string::{format, to_bytes};
 
 fn main() {
-    write(stdout(), to_bytes(format("%f", dot([1.5, 2.0], [2.5, 4.0]))));
+    let _ = write(stdout(), to_bytes(format("%f", dot([1.5, 2.0], [2.5, 4.0]))));
 }

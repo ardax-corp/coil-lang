@@ -26,5 +26,5 @@ fn get<T: Tiny>(T x) -> int {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", get(41))));
+    let _ = write_all(stdout(), to_bytes(format("%i", get(41))));
 }

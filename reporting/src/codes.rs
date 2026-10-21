@@ -80,6 +80,9 @@ pub enum ErrorCode {
     /// `--comptime-refresh` computed a cached compile-time result again
     /// and it differs from the cached one (a note, not an error).
     ComptimeResultChanged,
+    /// An expression statement drops a `Result` (warning; `let _ = …;`
+    /// discards one on purpose).
+    UnusedResult,
 
     DuplicateEnum,
     DuplicateConstructor,
@@ -190,6 +193,7 @@ impl ErrorCode {
             Self::DuplicateImport => "E0133",
             Self::ConstNotComputable => "E0134",
             Self::ComptimeResultChanged => "E0135",
+            Self::UnusedResult => "E0136",
             Self::DuplicateEnum => "E0200",
             Self::DuplicateConstructor => "E0201",
             Self::UnknownEnum => "E0202",
@@ -282,6 +286,7 @@ impl ErrorCode {
             Self::DuplicateImport => "local name imported twice",
             Self::ConstNotComputable => "const value cannot be computed at compile time",
             Self::ComptimeResultChanged => "compile-time result changed on refresh",
+            Self::UnusedResult => "unused `Result` value",
             Self::DuplicateEnum => "duplicate enum",
             Self::DuplicateConstructor => "duplicate constructor",
             Self::UnknownEnum => "unknown enum",
@@ -382,6 +387,7 @@ mod tests {
             | DuplicateImport
             | ConstNotComputable
             | ComptimeResultChanged
+            | UnusedResult
             | DuplicateEnum
             | DuplicateConstructor
             | UnknownEnum
@@ -464,6 +470,7 @@ mod tests {
             DuplicateImport,
             ConstNotComputable,
             ComptimeResultChanged,
+            UnusedResult,
             DuplicateEnum,
             DuplicateConstructor,
             UnknownEnum,

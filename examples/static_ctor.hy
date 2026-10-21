@@ -45,9 +45,9 @@ impl Counter {
 
 fn main() {
     let p = Point::new(40, 2);
-    write_all(stdout(), to_bytes(format("%i,", p.sum())));
+    let _ = write_all(stdout(), to_bytes(format("%i,", p.sum())));
 
     let c = Counter::fresh();
-    write_all(stdout(), to_bytes(format("%i,", c.id)));
-    write_all(stdout(), to_bytes(format("%i", Counter::count)));
+    let _ = write_all(stdout(), to_bytes(format("%i,", c.id)));
+    let _ = write_all(stdout(), to_bytes(format("%i", Counter::count)));
 }

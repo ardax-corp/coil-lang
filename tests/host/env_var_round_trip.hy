@@ -27,5 +27,5 @@ fn round_trip() -> string {
 }
 
 fn main() {
-    write(stdout(), to_bytes(format("%s", round_trip())));
+    let _ = write(stdout(), to_bytes(format("%s", round_trip())));
 }

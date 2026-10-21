@@ -19,5 +19,5 @@ fn main() {
     let s = show(b);
     let a: D = 5;
     let c: Show = "x";
-    write(stdout(), to_bytes(format("%s|%s|%s", s, d(a), show(c))));
+    let _ = write(stdout(), to_bytes(format("%s|%s|%s", s, d(a), show(c))));
 }

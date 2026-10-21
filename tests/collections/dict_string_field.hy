@@ -5,6 +5,6 @@ use string::{format, to_bytes};
 
 fn main() {
     let d = { name: "hi", n: 9 };
-    write(stdout(), to_bytes(format("%s", d.name)));
-    write(stdout(), to_bytes(format("%i", d.n)));
+    let _ = write(stdout(), to_bytes(format("%s", d.name)));
+    let _ = write(stdout(), to_bytes(format("%i", d.n)));
 }

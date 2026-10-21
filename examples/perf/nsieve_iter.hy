@@ -40,5 +40,5 @@ fn nsieve_iter(int n) -> int {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", nsieve_iter(1 << 14))));
+    let _ = write_all(stdout(), to_bytes(format("%i", nsieve_iter(1 << 14))));
 }
