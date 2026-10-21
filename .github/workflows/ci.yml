@@ -100,7 +100,9 @@ jobs:
 
   # `.hy` sources must be `coil fmt`-clean. `compile_fail/` directories hold
   # deliberately broken programs; `coil fmt` skips them when walking. The embedded prelude
-  # (`compiler/src/prelude`) and the comptime fixtures are.
+  # (`compiler/src/prelude`) and the comptime fixtures are. A `compile_fail/` test is
+  # checked too unless it expects a parse error (E0001, or E0208 for a duplicate field),
+  # which `coil fmt` cannot parse either.
   fmt:
     name: coil fmt --check
     runs-on: ubuntu-latest
@@ -124,6 +126,10 @@ jobs:
         run: |
           cargo build -p coil-fmt
           ./target/debug/coil-fmt --check examples tests compiler/src/prelude comptime/tests
+          # `grep -L` exits 1 when it lists nothing; only coil-fmt's status counts.
+          find tests -path '*/compile_fail/*.hy' -print0 \
+            | { xargs -0 grep -LZE '^// Expected: .*E0(001|208)\b' || true; } \
+            | xargs -0 ./target/debug/coil-fmt --check
 
   test:
     name: test (${{ matrix.os }})

@@ -26,3 +26,16 @@ fn total(... xs) -> int {
 fn own() -> int {
     return count(1, "a");
 }
+
+impl Box {
+    // A method's `... xs` gets copies only for this module's calls
+    // (tests/modules/compile_fail/variadic_method_across_modules.hy,
+    // coil-lang#1754).
+    pub fn tally(... xs) -> int {
+        return self.v + xs.len();
+    }
+}
+
+fn own_tally() -> int {
+    return new Box(1).tally(2, "b");
+}

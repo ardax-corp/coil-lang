@@ -8,7 +8,9 @@ fn bump() -> bool {
 
 fn main() {
     let i = 0;
-    while i < 3 invariant bump() {
+    while i < 3
+        invariant bump()
+    {
         i = i + 1;
     }
 }

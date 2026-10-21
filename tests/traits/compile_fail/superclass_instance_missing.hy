@@ -1,10 +1,10 @@
 // Expected: E0119 — `impl Ordered for int` needs the superclass instance `Equal<int>`.
 trait Equal<T> {
-    fn eq_val(T a, T b) -> bool;
+    fn eq_val(T a, T b) -> bool {}
 }
 
 trait Ordered<T: Equal> {
-    fn lt_val(T a, T b) -> bool;
+    fn lt_val(T a, T b) -> bool {}
 }
 
 impl Ordered for int {

@@ -102,6 +102,7 @@ impl Checker {
             counter: TyVarCounter::new(),
             subst: Subst::empty(),
             messages: Vec::new(),
+            rejected_builtin_type_decls: Vec::new(),
             current_return_ty: None,
             current_module: String::new(),
             virtual_modules: VirtualModules::new(),
@@ -1532,6 +1533,34 @@ impl Checker {
     /// [`env_mut`](Self::env_mut) and [`Env::pop`] if you need to drop
     /// it.
     pub fn check_program(&mut self, ast: &Output) -> Ty {
+        let first_message = self.messages.len();
+        self.rejected_builtin_type_decls.clear();
+        let ty = self.check_program_body(ast);
+        self.drop_reserved_type_name_cascades(first_message);
+        ty
+    }
+
+    /// A user type that takes a reserved built-in name is not a type of its
+    /// own: every use of the name still means the built-in, so the rest of
+    /// the module reports errors that only restate the clash (`Orphan
+    /// instance Show<Option>`, a field access on a non-record type). Keep
+    /// just the E0200s for this module's errors (#1701).
+    fn drop_reserved_type_name_cascades(&mut self, first_message: usize) {
+        if self.rejected_builtin_type_decls.is_empty() {
+            return;
+        }
+        let rejected = std::mem::take(&mut self.rejected_builtin_type_decls);
+        let mut index = 0;
+        self.messages.retain(|msg| {
+            let keep = index < first_message
+                || !matches!(msg.kind(), reporting::MessageKind::ERROR)
+                || (msg.code() == Some(ErrorCode::DuplicateEnum) && rejected.contains(msg.range()));
+            index += 1;
+            keep
+        });
+    }
+
+    fn check_program_body(&mut self, ast: &Output) -> Ty {
         // Reset per-program state. The pre-pass, the main infer
         // pass, and the post-pass all share the same checker; only
         // the per-program tables and caches get cleared.
@@ -4843,6 +4872,30 @@ impl Checker {
                 == Some(crate::typechecking::ty::STREAM)
         {
             self.gate_stream_attach(range.clone());
+        }
+        // A method's `... xs` template calls its instance for this call's
+        // pack (#1754).
+        if let Some(owner) = self.class_owner_from_ty(&resolved)
+            && self.methods.get(&owner).is_some_and(|m| m.contains_key(*method))
+            && !self.is_static_method(&owner, method)
+        {
+            let key = format!("{owner}::{method}");
+            if self.is_variadic_template(&key) {
+                self.check_inherent_method_access(&owner, method, &range);
+                return self.infer_variadic_method_call(&key, recv, &recv_ty, method_args, id, range);
+            }
+        }
+        if let Some(owner) = self.class_owner_from_ty(&resolved)
+            && let Some(ty) = self.foreign_method_template_call(&format!("{owner}::{method}"), &range)
+        {
+            for arg in method_args {
+                let value = match arg.1.as_ref() {
+                    Expression::NamedArg(_, v) => v,
+                    _ => arg,
+                };
+                let _ = self.infer(value);
+            }
+            return ty;
         }
         // Named args on methods: only inherent class methods.
         if method_has_named {
@@ -11819,7 +11872,15 @@ impl Checker {
             "result" => result_app_ty(Ty::Var(self.counter.fresh()), Ty::Var(self.counter.fresh())),
             "ioerror" => Ty::Con(common::BUILTIN_IO_ERROR_ENUM.into()),
             "threaderror" => Ty::Con(common::BUILTIN_THREAD_ERROR_ENUM.into()),
-            "error" => Ty::Con(common::BUILTIN_FFI_ERROR_ENUM.into()),
+            // A user `class Error` / `enum Error` (any spelling) is its own
+            // type: the FFI `Error` is not reserved (#1701).
+            "error" if self.resolve_class_key(name).is_none()
+                && self
+                    .resolve_enum_key(name)
+                    .is_none_or(|key| key == common::BUILTIN_FFI_ERROR_ENUM) =>
+            {
+                Ty::Con(common::BUILTIN_FFI_ERROR_ENUM.into())
+            }
             "errorkind" => Ty::Con(common::BUILTIN_FFI_ERROR_KIND_ENUM.into()),
             _ => {
                 if let Some(key) = self.resolve_class_key(name) {
@@ -13190,24 +13251,34 @@ impl Checker {
         self.record_ffi_declare_metadata(key, dargs, true);
     }
 
-    /// `invoke`'s function id is the handle `declare` returned, never a Coil
-    /// `fn` (#1666). Only a function type is refused: the id may also be
-    /// `declare`'s `Result` itself, which existing callers pass straight in.
+    /// `invoke`'s function id is the `int` handle `declare` returned (#1761):
+    /// never a Coil `fn` (#1666), and never `declare`'s `Result` itself, whose
+    /// boxed address the VM would read as an out-of-range id.
     fn check_ffi_invoke_fn_id(&mut self, id_ty: &Ty, range: Range<usize>) {
         let pruned = apply_ty_prune(&self.subst, id_ty);
         let id_ty = crate::typechecking::ty::strip_readonly(&pruned).clone();
-        if matches!(id_ty, Ty::Fun(..)) {
-            let [found] = <[String; 1]>::try_from(self.diag_tys(&[&id_ty])).expect("one type");
-            let _ = self.error_with_help(
-                ErrorCode::TypeMismatch,
-                format!("Type mismatch: expected `int`, found `{found}`"),
-                range,
-                Some(
-                    "`invoke`'s function id is the `int` that `declare(lib, name, params, ret)` returns, not a Coil function"
-                        .to_string(),
-                ),
-            );
-        }
+        let help = if matches!(id_ty, Ty::Fun(..)) {
+            "`invoke`'s function id is the `int` that `declare(lib, name, params, ret)` returns, not a Coil function"
+        } else if is_result_ty(&id_ty) {
+            "`declare` returns `Result<int, Error>`; unwrap the id with `?` (`declare(...)?`) or `match` before passing it to `invoke`"
+        } else {
+            match unify_with(&self.subst, &id_ty, &int()) {
+                Ok(s) => {
+                    self.absorb(&s);
+                    return;
+                }
+                Err(_) => {
+                    "`invoke`'s function id is the `int` that `declare(lib, name, params, ret)` returns"
+                }
+            }
+        };
+        let [found] = <[String; 1]>::try_from(self.diag_tys(&[&id_ty])).expect("one type");
+        let _ = self.error_with_help(
+            ErrorCode::TypeMismatch,
+            format!("Type mismatch: expected `int`, found `{found}`"),
+            range,
+            Some(help.to_string()),
+        );
     }
 
     fn infer_ffi_invoke(&mut self, args: &[Output], range: Range<usize>) -> Ty {
@@ -15086,6 +15157,15 @@ impl Checker {
                 "built-in type names match in any letter case, so `{name}` names the prelude `{builtin}`; pick a different name"
             ));
         }
+        if let Some(builtin) = Self::reserved_error_enum_spelling(name) {
+            return Some(if builtin == name {
+                format!("`{name}` is a built-in error enum; pick a different name")
+            } else {
+                format!(
+                    "built-in type names match in any letter case, so `{name}` names the built-in `{builtin}`; pick a different name"
+                )
+            });
+        }
         if let Some(primitive) = common::builtin_primitive_type_spelling(name) {
             return Some(format!(
                 "built-in type names match in any letter case, so `{name}` names the built-in `{primitive}`; pick a different name"
@@ -15093,6 +15173,23 @@ impl Checker {
         }
         common::is_reserved_builtin_type(name)
             .then(|| format!("`{name}` is a built-in type; pick a different name"))
+    }
+
+    /// The built-in error enum (`IoError`, `ThreadError`, `EnvError`,
+    /// `ErrorKind`) a user type named `name` would clash with: each has a
+    /// built-in `Show` instance keyed by its bare name, and a type position
+    /// spelling `IoError`, `ThreadError` or `ErrorKind` in any letter case
+    /// names the built-in (#1701). The FFI `Error` has neither, so a user
+    /// type may take that name.
+    fn reserved_error_enum_spelling(name: &str) -> Option<&'static str> {
+        Generics::BUILTIN_SHOW_ENUMS
+            .iter()
+            .map(|(builtin, _)| *builtin)
+            .find(|builtin| {
+                *builtin == name
+                    || (*builtin != common::BUILTIN_ENV_ERROR_ENUM
+                        && builtin.eq_ignore_ascii_case(name))
+            })
     }
 
     /// E0200 help for a user `Option` / `Result` (#1672).
@@ -15117,6 +15214,7 @@ impl Checker {
         walk(ast, &mut classes);
         for (name, range) in classes {
             if let Some(help) = self.builtin_type_redeclaration_help(name) {
+                self.rejected_builtin_type_decls.push(range.clone());
                 let mut msg = Message::error(
                     ErrorCode::DuplicateEnum,
                     format!("Cannot redeclare built-in type `{name}`"),
@@ -15394,11 +15492,14 @@ impl Checker {
                 }
                 vars.extend(method_vars);
             }
-            self.current_tuple_pack = Self::tuple_pack_ty_for_args(args, &mut self.counter);
+            let fqn = format!("{}::{}", owner_key, name);
+            // A method template's instance has its pack fixed (#1754).
+            self.current_tuple_pack = self
+                .variadic_instance_pack(&fqn)
+                .or_else(|| Self::tuple_pack_ty_for_args(args, &mut self.counter));
             let arg_tys = self.parse_arg_list(args);
             self.current_tuple_pack = None;
             let param_names: Vec<String> = arg_tys.iter().map(|(n, _)| n.clone()).collect();
-            let fqn = format!("{}::{}", owner_key, name);
             // FQN only, a bare `join` / `iter` key would shadow
             // `use path::{join}` and other free-function imports.
             self.fn_param_names.insert(fqn.clone(), param_names);
@@ -16474,9 +16575,11 @@ impl Checker {
                 }
 
                 // Check 1: duplicate enum name (including built-ins still in scope).
-                if !common::is_builtin_enum(&name_str)
+                if (!common::is_builtin_enum(&name_str)
+                    || Self::reserved_error_enum_spelling(&name_str).is_some())
                     && let Some(help) = self.builtin_type_redeclaration_help(name)
                 {
+                    self.rejected_builtin_type_decls.push(node.0.into_range());
                     let mut msg = Message::error(
                         ErrorCode::DuplicateEnum,
                         format!("Cannot redeclare built-in type `{}`", name),
@@ -16494,6 +16597,7 @@ impl Checker {
                         || common::is_poly_builtin_enum(&name_str)
                         || common::is_builtin_ffi_enum(&name_str)
                     {
+                        self.rejected_builtin_type_decls.push(node.0.into_range());
                         let mut msg = Message::error(
                             ErrorCode::DuplicateEnum,
                             format!("Cannot redeclare built-in enum `{}`", name_str),
@@ -16512,9 +16616,9 @@ impl Checker {
                         self.pop_type_params_for_type_parsing(pushed);
                         return;
                     }
-                    // A built-in error enum this module did not import
-                    // (`IoError`, …): drop the compiler registration so
-                    // the user enum can take over.
+                    // The FFI `Error` when this module did not import it:
+                    // drop the compiler registration so the user enum can
+                    // take over.
                     self.enums.remove(&name_str);
                     self.enum_tags.remove(&name_str);
                     self.enum_payloads.remove(&name_str);
@@ -20022,13 +20126,28 @@ impl Checker {
     ) -> Option<Ty> {
         use parser::ast::EnumConstructPayload;
         if !self.is_static_method(owner, method) {
-            return None;
+            let key = self.class_member_fqn(owner, method);
+            let ty = self.foreign_method_template_call(&key, &range)?;
+            if let EnumConstructPayload::Tuple(args) = fields {
+                for arg in args {
+                    let _ = self.infer(arg);
+                }
+            }
+            return Some(ty);
         }
         let owner = self
             .resolve_class_key(owner)
             .unwrap_or_else(|| owner.to_string());
         self.check_inherent_method_access(&owner, method, &range);
         let fqn = format!("{}::{}", owner, method);
+        // A static method's `... xs` template calls its instance (#1754).
+        if self.is_variadic_template(&fqn) {
+            let args = match fields {
+                EnumConstructPayload::Tuple(args) => args.as_slice(),
+                _ => &[],
+            };
+            return Some(self.infer_variadic_call(&fqn, args, call_id, range));
+        }
         let scheme = self
             .methods
             .get(&owner)

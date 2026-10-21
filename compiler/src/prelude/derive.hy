@@ -231,10 +231,9 @@ fn ord_impl(
     let a = "__ord_" + method + "_a_" + t.name.str();
     let b = "__ord_" + method + "_b_" + t.name.str();
     let body = "";
-    // A numeric backing orders by value; a string backing has no ordering
-    // (strings are not ordered), so `#[repr(string)]` enums order by
-    // declaration like any other enum.
-    if t.repr != "" && t.repr != "string" {
+    // A scalar backing orders by value: a number numerically, a string by
+    // its bytes (#1722).
+    if t.repr != "" {
         let al = "__ord_" + method + "_al_" + t.name.str();
         let bl = "__ord_" + method + "_bl_" + t.name.str();
         body = "let " + al + ": " + t.repr + " = " + a + ";\nlet " + bl + ": " + t.repr + " = " + b +
