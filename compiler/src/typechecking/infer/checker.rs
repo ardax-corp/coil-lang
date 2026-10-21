@@ -12803,7 +12803,8 @@ impl Checker {
             );
         }
         if args.len() == 4 || args.len() == 5 {
-            self.infer(&args[0]);
+            let lib_ty = self.infer(&args[0]);
+            self.check_ffi_lib_handle(&lib_ty, "declare", args[0].0.into_range());
             self.infer(&args[1]);
             if let Some(sym) = host_caps::const_string_expr(&args[1]) {
                 self.gate_ffi_exec_symbol(&sym, &sym, args[1].0.into_range());
@@ -13288,6 +13289,36 @@ impl Checker {
         );
     }
 
+    /// The library handle `declare` and `invoke` take is the `int` that
+    /// `dload` returns (#1787), never `dload`'s `Result` itself, as for
+    /// `invoke`'s function id (#1761).
+    fn check_ffi_lib_handle(&mut self, lib_ty: &Ty, builtin: &str, range: Range<usize>) {
+        let pruned = apply_ty_prune(&self.subst, lib_ty);
+        let lib_ty = crate::typechecking::ty::strip_readonly(&pruned).clone();
+        let help = if is_result_ty(&lib_ty) {
+            format!(
+                "`dload` returns `Result<int, Error>`; unwrap the handle with `?` (`dload(...)?`) or `match` before passing it to `{builtin}`"
+            )
+        } else {
+            match unify_with(&self.subst, &lib_ty, &int()) {
+                Ok(s) => {
+                    self.absorb(&s);
+                    return;
+                }
+                Err(_) => format!(
+                    "`{builtin}`'s library handle is the `int` that `dload(path)` returns"
+                ),
+            }
+        };
+        let [found] = <[String; 1]>::try_from(self.diag_tys(&[&lib_ty])).expect("one type");
+        let _ = self.error_with_help(
+            ErrorCode::TypeMismatch,
+            format!("Type mismatch: expected `int`, found `{found}`"),
+            range,
+            Some(help),
+        );
+    }
+
     fn infer_ffi_invoke(&mut self, args: &[Output], range: Range<usize>) -> Ty {
         if self.ffi_fn_in_scope("invoke").is_none() {
             let _ = self.error_with_help(
@@ -13301,7 +13332,8 @@ impl Checker {
         let mut variadic = false;
         let mut nfixed = 0usize;
         if args.len() == 3 {
-            self.infer(&args[0]);
+            let lib_ty = self.infer(&args[0]);
+            self.check_ffi_lib_handle(&lib_ty, "invoke", args[0].0.into_range());
             let id_ty = self.infer(&args[1]);
             self.check_ffi_invoke_fn_id(&id_ty, args[1].0.into_range());
             if let Some((ty, var, fixed)) = self.ffi_invoke_fn_id_metadata(&args[1]) {
