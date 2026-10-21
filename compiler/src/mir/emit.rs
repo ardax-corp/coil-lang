@@ -1342,6 +1342,8 @@ impl Gathers {
     pub(super) fn new(func: &MirFunc, regs: &[u8], need_slot: &[bool], scratch: u8, self_entry: Option<Label>) -> Self {
         let mut out = Self::default();
         let slot = |v: ValueId| need_slot.get(v.index()).copied().unwrap_or(false) && v.index() < regs.len();
+        // A payload word moving as an `i64` holds its object too (#1791).
+        let payloads = payload_words(func);
         for (b, block) in func.blocks.iter().enumerate() {
             for (k, inst) in block.insts.iter().enumerate() {
                 if is_tail_call_inst(func, block, inst) {
@@ -1371,7 +1373,7 @@ impl Gathers {
                     }
                     for (i, w) in words.iter().enumerate() {
                         let Some(r) = scratch.checked_add(i as u8) else { break };
-                        if r == slots[i] || !func.ty(*w).is_heap_word() {
+                        if r == slots[i] || !(func.ty(*w).is_heap_word() || payloads.contains(w)) {
                             continue;
                         }
                         let rs = out.by_value.entry(*w).or_default();
