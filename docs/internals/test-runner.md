@@ -208,7 +208,9 @@ GC-stress build), `--limit-as-kb N` caps each process's address space like
 CI builds the binaries once per OS and build mode (`harness-build`: debug
 and release, each with its GC-stress `coil-test`) and runs every setting
 (default, `-O 0`, `COIL_HIR_INLINE=0`, leak smoke, GC stress) in both modes
-as separate `harness` cells, side by side. The same corpus must pass in both
+as separate `harness` cells, side by side. The macOS builds and cells are
+their own jobs (`harness-build-macos`, `harness-macos`), so the Linux cells
+never wait on the capped macOS runners. The same corpus must pass in both
 modes, so a build-mode difference (optimizer, overflow checks, debug
 assertions) fails one of them.
 

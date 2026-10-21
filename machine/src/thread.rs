@@ -1193,6 +1193,10 @@ pub struct ThreadSpawnContext {
     pub dload_gate: crate::ffi::DloadGate,
     /// Parent's C struct layouts (pass-by-value FFI).
     pub struct_layouts: Arc<Vec<crate::CStructLayout>>,
+    /// The parent's static slots, raw: a shared-heap job reads the same
+    /// startup `const`s (#1561). Its words name the parent's heap, so an
+    /// isolate job takes copies ([`copy_statics_out`]) instead.
+    pub statics: Arc<Vec<u64>>,
 }
 
 impl Clone for ThreadSpawnContext {
@@ -1209,8 +1213,32 @@ impl Clone for ThreadSpawnContext {
             ffi_search_paths: self.ffi_search_paths.clone(),
             dload_gate: self.dload_gate.clone(),
             struct_layouts: Arc::clone(&self.struct_layouts),
+            statics: Arc::clone(&self.statics),
         }
     }
+}
+
+/// An isolate worker's statics: each of the spawner's slots copied out of
+/// its heap the way spawn arguments are, so startup `const`s read the same
+/// values in the worker (#1663). A `static let` starts at the value it had
+/// when the worker was spawned, and the worker's writes stay its own. A slot
+/// that is unset, or holds a value that cannot cross threads (a stream, a
+/// cyclic graph), starts zeroed.
+fn copy_statics_out(heap: &Heap, words: &[u64], kinds: &[u8]) -> Vec<Option<SpawnArg>> {
+    words
+        .iter()
+        .enumerate()
+        .map(|(i, &w)| {
+            if w == 0 {
+                return None;
+            }
+            let v = Value::from(w as *mut u8);
+            if kinds.get(i) == Some(&common::WORD_SCALAR) || is_immediate_value(heap, v) {
+                return Some(SpawnArg::Value(PortableValue::Immediate(w)));
+            }
+            value_to_spawn_arg(heap, v).ok()
+        })
+        .collect()
 }
 
 pub fn host_spawn(heap: &mut Heap, args: &[Value]) -> Value {
@@ -1233,12 +1261,14 @@ fn try_host_spawn(heap: &mut Heap, args: &[Value]) -> Result<Value, ThreadErrorT
     let live_threads = Arc::clone(&ctx.live_threads);
     let reactor = Arc::clone(&ctx.reactor);
     let state = Arc::new(JoinState::new());
-    let job = crate::reactor::job_from_spawn_context(
+    let statics = copy_statics_out(heap, &ctx.statics, &ctx.program.static_word_kinds);
+    let mut job = crate::reactor::job_from_spawn_context(
         ctx,
         entry,
         spawn_args,
         Arc::clone(&state),
     );
+    job.statics = Some(crate::reactor::JobStatics::Copied(statics));
     reactor.submit(job);
     register_live_thread(&live_threads, Arc::clone(&state));
     let (obj, _) = heap.alloc(ObjThread { state }, Object::Thread);
@@ -1278,6 +1308,7 @@ fn try_host_spawn_shared(heap: &mut Heap, args: &[Value]) -> Result<Value, Threa
     let live_threads = Arc::clone(&ctx.live_threads);
     let reactor = Arc::clone(&ctx.reactor);
     let state = Arc::new(JoinState::with_shared_epoch(Arc::clone(&epoch)));
+    let statics = Arc::clone(&ctx.statics);
     let mut job = crate::reactor::job_from_spawn_context(
         ctx,
         entry,
@@ -1285,6 +1316,7 @@ fn try_host_spawn_shared(heap: &mut Heap, args: &[Value]) -> Result<Value, Threa
         Arc::clone(&state),
     );
     job.epoch = Some(epoch);
+    job.statics = Some(crate::reactor::JobStatics::Shared(statics));
     reactor.submit(job);
     register_live_thread(&live_threads, Arc::clone(&state));
     let (obj, _) = heap.alloc(ObjThread { state }, Object::Thread);

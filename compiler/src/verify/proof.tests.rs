@@ -43,7 +43,7 @@ fn build(proof: impl FnOnce(&[FnCheck]) -> Proof) -> crate::hir::HirModule {
     let _ = checker.check_program(&ast);
     crate::hir::set_contract_level(crate::hir::ContractLevel::All);
     let sidecar = checker.typed_sidecar();
-    let checks = super::super::encode::verify_module(&crate::hir::build_module(&checker, &sidecar, "", &ast));
+    let checks = super::super::encode::verify_module(&crate::hir::build_module(&checker, &sidecar, "", &ast), &|n| checker.is_readonly_class(n));
     let _scope = ProofScope::set(Some(proof(&checks)));
     crate::hir::build_module(&checker, &sidecar, "", &ast)
 }

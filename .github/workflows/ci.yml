@@ -199,11 +199,20 @@ jobs:
           CARGO_PROFILE_RELEASE_PANIC=unwind \
             cargo test --release -p compiler --lib --no-run
 
+      - name: Release machine lib tests (#1686)
+        if: runner.os == 'Linux'
+        run: |
+          # Same profile as the step above, without debug_assertions; the
+          # dev-dependency on `common/debug-fmt` supplies the Debug impls.
+          CARGO_PROFILE_RELEASE_LTO=off CARGO_PROFILE_RELEASE_CODEGEN_UNITS=8 \
+          CARGO_PROFILE_RELEASE_PANIC=unwind \
+            cargo test --release -p machine --lib
+
       - name: Release VM no_pool park/close (COI-410)
         if: runner.os == 'Linux'
         run: |
-          # Opt-level 3 like the release VM. Tests need Debug on Value
-          # (`cfg(debug_assertions)`) and unwind so the harness can compile.
+          # Opt-level 3 like the release VM, with debug_assertions on and
+          # unwind so the harness can compile.
           CARGO_PROFILE_RELEASE_LTO=off \
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS=8 \
           CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true \
@@ -236,15 +245,20 @@ jobs:
   # such as an optimizer or overflow-check bug shows up) and cached by
   # rust-cache. Every `harness` cell below downloads them instead of
   # building its own.
+  #
+  # Linux and macOS are separate jobs so the Linux harness cells start as soon
+  # as the Linux builds finish: macOS runners are capped and can queue for a
+  # long time, and a `needs:` on one matrix job waits for all of its cells.
+  # The macOS jobs reuse the Linux jobs' steps through YAML anchors.
   harness-build:
     name: harness build (${{ matrix.mode }}, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest]
         mode: [debug, release]
-    steps:
+    steps: &harness-build-steps
       - uses: actions/checkout@v4
 
       - name: Install system deps (Ubuntu)
@@ -302,18 +316,11 @@ jobs:
         os: [ubuntu-latest]
         mode: [debug, release]
         variant: [default, O0, no-inline, leak-smoke, gc-stress]
-        include:
-          # macOS (aarch64): stack scanning and the frame maps are per
-          # target, the compiler settings are not.
-          - { os: macos-latest, mode: debug, variant: default }
-          - { os: macos-latest, mode: debug, variant: gc-stress }
-          - { os: macos-latest, mode: release, variant: default }
-          - { os: macos-latest, mode: release, variant: gc-stress }
-    env:
+    env: &harness-env
       # A worker abort (coil-lang#804) prints where it happened.
       RUST_BACKTRACE: "1"
       FLAGS: --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
-    steps:
+    steps: &harness-steps
       - uses: actions/checkout@v4
 
       - uses: actions/checkout@v4
@@ -381,6 +388,32 @@ jobs:
           name: harness-logs-${{ matrix.os }}-${{ matrix.mode }}-${{ matrix.variant }}
           path: target/corpora
           retention-days: 7
+
+  harness-build-macos:
+    name: harness build (${{ matrix.mode }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest]
+        mode: [debug, release]
+    steps: *harness-build-steps
+
+  # macOS (aarch64): stack scanning and the frame maps are per target, the
+  # compiler settings are not.
+  harness-macos:
+    name: harness ${{ matrix.variant }} (${{ matrix.mode }}, ${{ matrix.os }})
+    needs: harness-build-macos
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest]
+        mode: [debug, release]
+        variant: [default, gc-stress]
+    env: *harness-env
+    steps: *harness-steps
 
   # MinGW host matches release-binaries (COI-100/102): MSVC cannot link the
   # MSYS2 libffi package. Keep this on PRs so Unix-only host APIs fail

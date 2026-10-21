@@ -348,5 +348,154 @@ fn main() {
     )
     .unwrap();
     check(&bin, &tmp, &ptr_field);
+
+    // A void `extern` call leaves the operand stack as it found it: more
+    // calls than the stack has slots, in `main`'s loop and in a callee the
+    // loop calls, a `(ptr, int, int)` shape and a no-argument one (#1638).
+    let void_calls = tmp.join("void_calls.hy");
+    std::fs::write(
+        &void_calls,
+        r#"
+extern "sum" {
+    fn get_doubler() -> ptr;
+    fn sum_note(ptr tag, int a, int b);
+    fn sum_reset();
+    fn sum_noted() -> int;
+}
+
+fn note(ptr p, int i) {
+    sum_reset();
+    sum_note(p, i, 1);
+}
+
+fn main() {
+    let p = get_doubler();
+    let n = 1100000;
+    let i = 0;
+    while i < n {
+        sum_note(p, 1, 0);
+        i = i + 1;
+    }
+    if sum_noted() != n {
+        panic "void calls in main lost a call";
+    }
+    let j = 0;
+    while j < n {
+        note(p, j);
+        j = j + 1;
+    }
+    if sum_noted() != n {
+        panic "void calls in a callee lost a call";
+    }
+}
+"#,
+    )
+    .unwrap();
+    check(&bin, &tmp, &void_calls);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// An `extern` takes `Bytes` / `ConstBytes` parameters as `declare` /
+/// `invoke` do (#1665): `ConstBytes` reads a `string` or a `Vec<byte>`,
+/// `Bytes` writes into a `Vec<byte>` (also when the same array is passed
+/// twice), and a `readonly` buffer goes only to `ConstBytes`.
+#[test]
+fn extern_byte_buffer_params() {
+    let bin = std::env::var("CARGO_BIN_EXE_coil")
+        .expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let tmp = std::env::temp_dir().join(format!("coil_extern_bytes_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    let so = tmp.join(machine::platform_shared_lib_filename("sum"));
+    let mut cc = Command::new("cc");
+    #[cfg(target_os = "macos")]
+    {
+        cc.arg("-dynamiclib");
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        cc.arg("-shared").arg("-fPIC");
+    }
+    let status = cc
+        .args([
+            "-O2",
+            "-o",
+            so.to_str().unwrap(),
+            manifest_dir.join("examples/sum.c").to_str().unwrap(),
+        ])
+        .status()
+        .expect("cc");
+    assert!(status.success(), "failed to build {}", so.display());
+
+    let src = tmp.join("bytes.hy");
+    std::fs::write(
+        &src,
+        r#"
+use ffi::types::{Bytes, ConstBytes};
+use string::{format, to_bytes};
+
+extern "sum" {
+    fn sum_bytes(ConstBytes buf, int n) -> int;
+    fn copy_bytes(Bytes dst, ConstBytes src, int n);
+    fn fill_bytes(bytes buf, int n, int v);
+}
+
+fn main() {
+    if sum_bytes(format("%s%s", "AB", "C"), 3) != 65 + 66 + 67 {
+        panic "string view failed";
+    }
+    let v: Vec<byte> = to_bytes("ab");
+    if sum_bytes(v, 2) != 97 + 98 || v[0] != (97 as byte) {
+        panic "Vec<byte> view failed";
+    }
+    fill_bytes(v, 2, 120);
+    if v[0] != (120 as byte) || v[1] != (120 as byte) {
+        panic "Bytes write failed";
+    }
+    let d: Vec<byte> = to_bytes("..");
+    copy_bytes(d, "yz", 2);
+    if d[0] != (121 as byte) || d[1] != (122 as byte) {
+        panic "Bytes copy failed";
+    }
+    copy_bytes(d, d, 2);
+    if d[0] != (121 as byte) || d[1] != (122 as byte) {
+        panic "same-array copy failed";
+    }
+}
+"#,
+    )
+    .unwrap();
+    check(&bin, &tmp, &src);
+
+    let ro = tmp.join("readonly.hy");
+    std::fs::write(
+        &ro,
+        r#"
+use ffi::types::Bytes;
+use string::to_bytes;
+
+extern "sum" {
+    fn fill_bytes(Bytes buf, int n, int v);
+}
+
+fn main() {
+    let v: readonly Vec<byte> = to_bytes("ab");
+    fill_bytes(v, 2, 120);
+}
+"#,
+    )
+    .unwrap();
+    let out = Command::new(&bin)
+        .args(["compile", "--allow-dload", "sum", "--ffi-search-path"])
+        .arg(&tmp)
+        .arg(&ro)
+        .arg("-o")
+        .arg(tmp.join("ro.hyc"))
+        .output()
+        .expect("coil compile");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success() && err.contains("E0107"), "readonly Bytes argument compiled: {err}");
     let _ = std::fs::remove_dir_all(&tmp);
 }

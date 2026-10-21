@@ -56,8 +56,9 @@ pub fn emit_dense(
     let regs = coalesce_latch_overwrite(func, regs, &plan.need_slot);
     let mut cleared = cleared_words(func, &regs, &plan.need_slot);
     let mut entry_clears = entry_clears(func, &regs, &plan.need_slot);
-    let mut source_clears = source_clears(func, &regs, &plan.need_slot);
-    prune_clears(func, &regs, &plan.need_slot, &mut cleared, &mut entry_clears, &mut source_clears);
+    let gathers = Gathers::new(func, &regs, &plan.need_slot, scratch, entry_label);
+    let mut source_clears = source_clears(func, &regs, &plan.need_slot, &gathers);
+    prune_clears(func, &regs, &plan.need_slot, &mut cleared, &mut entry_clears, &mut source_clears, &gathers.writes);
     let gather = gather_window(func, entry_label);
     let mut max_slot = plan
         .need_slot
@@ -486,7 +487,7 @@ pub(super) fn entry_clears(func: &MirFunc, regs: &[u8], need_slot: &[bool]) -> H
     let live = super::gc::liveness_after(func);
     let sources = CopySources::new(func);
     let below = SourceRegs::new(func, &sources, regs, &slot);
-    let mut scan = RewriteScan::new(func, regs, &slot);
+    let mut scan = RewriteScan::new(func, regs, &slot, &[]);
     for h in headers {
         let phis: Vec<(ValueId, &Vec<(BlockId, ValueId)>)> = h
             .insts
@@ -613,8 +614,10 @@ struct RewriteScan<'f> {
     func: &'f MirFunc,
     /// Per block, the ops (past its φs) that may collect, by index.
     loud: Vec<Vec<usize>>,
-    /// Per block, the ops (past its φs) whose dest has a register, by index.
-    writes: Vec<Vec<(usize, u8)>>,
+    /// Per block, the ops (past its φs) whose dest has a register, by index,
+    /// and whether the op writes it before it runs (a push's gather
+    /// register, [`Gathers`]) rather than as its result.
+    writes: Vec<Vec<(usize, u8, bool)>>,
     preds: Vec<Vec<usize>>,
     /// Per register asked, whether a collection may come first from the
     /// top of each block.
@@ -622,7 +625,7 @@ struct RewriteScan<'f> {
 }
 
 impl<'f> RewriteScan<'f> {
-    fn new(func: &'f MirFunc, regs: &[u8], slot: &impl Fn(ValueId) -> bool) -> Self {
+    fn new(func: &'f MirFunc, regs: &[u8], slot: &impl Fn(ValueId) -> bool, gather_writes: &[(usize, usize, u8)]) -> Self {
         let quiet = |inst: &MirInst| {
             (!super::gc::collects(inst) || matches!(inst, MirInst::ClearWord { .. } | MirInst::KeepAlive { .. }))
                 && (func.cleanup.is_none() || !inst.may_trap(func))
@@ -639,9 +642,12 @@ impl<'f> RewriteScan<'f> {
                 if !quiet(inst) {
                     loud[b].push(k);
                 }
+                for &(_, _, r) in gather_writes.iter().filter(|&&(gb, gk, _)| gb == b && gk == k) {
+                    writes[b].push((k, r, true));
+                }
                 let d = inst.dest();
                 if slot(d) {
-                    writes[b].push((k, regs[d.index()]));
+                    writes[b].push((k, regs[d.index()], false));
                 }
             }
             for s in block.term.as_ref().map(Terminator::succs).unwrap_or_default() {
@@ -661,9 +667,9 @@ impl<'f> RewriteScan<'f> {
         #[cfg(test)]
         REWRITE_SCANS.with(|c| c.set(c.get() + 1));
         let loud = self.loud[b].iter().copied().find(|&k| k >= start);
-        let write = self.writes[b].iter().find(|&&(k, r)| k >= start && r == reg).map(|&(k, _)| k);
+        let write = self.writes[b].iter().find(|&&(k, r, _)| k >= start && r == reg).map(|&(k, _, before)| (k, before));
         match (loud, write) {
-            (Some(l), w) if w.is_none_or(|w| l <= w) => Some(true),
+            (Some(l), w) if w.is_none_or(|(w, before)| l < w || (l == w && !before)) => Some(true),
             (_, Some(_)) => Some(false),
             _ => self.func.blocks[b].term.is_none().then_some(true),
         }
@@ -1066,19 +1072,23 @@ fn cycle_components(func: &MirFunc) -> Vec<Option<usize>> {
 /// sources ([`CopySources`]) that no live value shares, and that a
 /// collection may still scan before they are rewritten. Without them a
 /// rebound `Option` keeps its object rooted through the register the `Some`
-/// was cast from (#1411).
-pub(super) fn source_clears(func: &MirFunc, regs: &[u8], need_slot: &[bool]) -> HashMap<ValueId, Vec<u8>> {
+/// was cast from (#1411). Likewise its dead copies ([`CopySinks`]: a match
+/// arm's binding of the `Some`'s object) and the gather registers a dense
+/// call copied it or them into ([`Gathers`]): a binding passed to a call
+/// kept the object rooted in the call's argument register (#1625).
+pub(super) fn source_clears(func: &MirFunc, regs: &[u8], need_slot: &[bool], gathers: &Gathers) -> HashMap<ValueId, Vec<u8>> {
     let mut out: HashMap<ValueId, Vec<u8>> = HashMap::new();
     if !func.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(i, MirInst::ClearWord { .. }))) {
         return out;
     }
     let sources = CopySources::new(func);
+    let sinks = CopySinks::new(func);
     let live = super::gc::liveness_after(func);
     let cmp_dests = term_cmp_dests(func);
     let comps = cycle_components(func);
     let slot = |v: ValueId| need_slot.get(v.index()).copied().unwrap_or(false) && v.index() < regs.len();
     let below = SourceRegs::new(func, &sources, regs, &slot);
-    let mut scan = RewriteScan::new(func, regs, &slot);
+    let mut scan = RewriteScan::new(func, regs, &slot, &gathers.writes);
     for (b, block) in func.blocks.iter().enumerate() {
         // A compare fused into the branch is emitted at the terminator.
         let fused_reads: Vec<ValueId> = cmp_dests[b]
@@ -1109,7 +1119,7 @@ pub(super) fn source_clears(func: &MirFunc, regs: &[u8], need_slot: &[bool]) -> 
             let known = (cycle.is_none() && fused_reads.iter().all(|v| !func.ty(*v).is_heap_word()))
                 .then(|| below.first(*value, live))
                 .flatten();
-            let met: Vec<u8> = match known {
+            let mut met: Vec<u8> = match known {
                 Some(first) => first.iter().copied().filter(|&r| asked.insert(r)).collect(),
                 None => sources
                     .new_regs_along(func, *value, |x| live.contains(&x), edge, &below, reg, &mut asked)
@@ -1117,6 +1127,21 @@ pub(super) fn source_clears(func: &MirFunc, regs: &[u8], need_slot: &[bool]) -> 
                     .map(|s| regs[s.index()])
                     .collect(),
             };
+            let copies = sinks.of(*value, |x| live.contains(&x));
+            for s in &copies {
+                if let Some(r) = reg(*s)
+                    && asked.insert(r)
+                {
+                    met.push(r);
+                }
+            }
+            for x in std::iter::once(value).chain(&copies) {
+                for &r in gathers.of(*x) {
+                    if asked.insert(r) {
+                        met.push(r);
+                    }
+                }
+            }
             for r in met {
                 if (slot(*value) && r == regs[value.index()])
                     || rs.contains(&r)
@@ -1134,6 +1159,135 @@ pub(super) fn source_clears(func: &MirFunc, regs: &[u8], need_slot: &[bool]) -> 
         }
     }
     out
+}
+
+/// The heap words a value's word was copied to or holds, transitively:
+/// its casts (a match arm's binding of an `Option::Some`'s object), its
+/// match payloads (an arm's binding of a boxed enum's field) and, for an
+/// enum or tuple it makes, the elements it was made from. The reverse of
+/// [`CopySources`] through casts: a φ's copy is cleared past its edge
+/// ([`entry_clears`]). Each keeps its word in its own register after its
+/// last use, a call's argument or a constructor's element, so once the
+/// value is rebound they still root it until rewritten (#1625).
+pub(super) struct CopySinks {
+    casts: HashMap<ValueId, Vec<ValueId>>,
+}
+
+impl CopySinks {
+    pub(super) fn new(func: &MirFunc) -> Self {
+        let mut casts: HashMap<ValueId, Vec<ValueId>> = HashMap::new();
+        for inst in func.blocks.iter().flat_map(|b| &b.insts) {
+            match inst {
+                MirInst::Cast { dest, src, .. } | MirInst::MatchPayload { dest, scrutinee: src, .. } if func.ty(*dest).is_heap_word() => {
+                    casts.entry(*src).or_default().push(*dest);
+                }
+                MirInst::Alloc {
+                    dest,
+                    kind: MirAllocKind::Enum { .. } | MirAllocKind::Tuple,
+                    elems,
+                    ..
+                } => {
+                    let heap: Vec<ValueId> = elems.iter().copied().filter(|e| func.ty(*e).is_heap_word()).collect();
+                    if !heap.is_empty() {
+                        casts.entry(*dest).or_default().extend(heap);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Self { casts }
+    }
+
+    /// The words of `v` not past a `stop` value (a live value: it holds
+    /// the word itself). `v` itself is not listed.
+    pub(super) fn of(&self, v: ValueId, stop: impl Fn(ValueId) -> bool) -> Vec<ValueId> {
+        if self.casts.is_empty() {
+            return Vec::new();
+        }
+        let mut seen: HashSet<ValueId> = HashSet::from([v]);
+        let mut out = Vec::new();
+        let mut work = vec![v];
+        while let Some(x) = work.pop() {
+            for &d in self.casts.get(&x).map(Vec::as_slice).unwrap_or(&[]) {
+                if stop(d) || !seen.insert(d) {
+                    continue;
+                }
+                out.push(d);
+                work.push(d);
+            }
+        }
+        out
+    }
+}
+
+/// The gather registers a dense body's pushes copy heap words into
+/// ([`gather_base`]: arguments not in consecutive registers are moved to
+/// the scratch window first). Nothing else writes those registers, so
+/// each keeps the last word copied there after the call: the argument's
+/// object stays rooted however its value is cleared (#1625). The LIR tier
+/// pushes from the value's own register and gathers nothing.
+#[derive(Default)]
+pub(super) struct Gathers {
+    /// Per argument value, the scratch registers it may be copied into.
+    by_value: HashMap<ValueId, Vec<u8>>,
+    /// The scratch registers each push writes, by block index and op
+    /// index: before the op runs.
+    pub(super) writes: Vec<(usize, usize, u8)>,
+}
+
+impl Gathers {
+    pub(super) fn new(func: &MirFunc, regs: &[u8], need_slot: &[bool], scratch: u8, self_entry: Option<Label>) -> Self {
+        let mut out = Self::default();
+        let slot = |v: ValueId| need_slot.get(v.index()).copied().unwrap_or(false) && v.index() < regs.len();
+        for (b, block) in func.blocks.iter().enumerate() {
+            for (k, inst) in block.insts.iter().enumerate() {
+                if is_tail_call_inst(func, block, inst) {
+                    continue;
+                }
+                // The words each push takes, in the order `emit_inst` pushes
+                // them (an enum's both ways: `DenseMake` reads them reversed).
+                let orders: Vec<Vec<ValueId>> = match inst {
+                    MirInst::Call { args, target, .. } if Some(*target) != self_entry => vec![args.clone()],
+                    MirInst::HostInvoke { args, .. } => vec![args.clone()],
+                    MirInst::CallIndirect { args, callee, .. } => vec![args.iter().copied().chain([*callee]).collect()],
+                    MirInst::Alloc { kind: MirAllocKind::Enum { .. }, elems, .. } => {
+                        vec![elems.clone(), elems.iter().rev().copied().collect()]
+                    }
+                    MirInst::Alloc { elems, .. } => vec![elems.clone()],
+                    MirInst::Format { fmt, args, .. } => vec![std::iter::once(*fmt).chain(args.iter().copied()).collect()],
+                    MirInst::StrEq { lhs, rhs, .. } => vec![vec![*lhs, *rhs]],
+                    _ => continue,
+                };
+                for words in orders {
+                    if !words.iter().all(|w| slot(*w)) {
+                        continue;
+                    }
+                    let slots: Vec<u8> = words.iter().map(|w| regs[w.index()]).collect();
+                    if slots.windows(2).all(|w| w[1] == w[0].saturating_add(1)) {
+                        continue;
+                    }
+                    for (i, w) in words.iter().enumerate() {
+                        let Some(r) = scratch.checked_add(i as u8) else { break };
+                        if r == slots[i] || !func.ty(*w).is_heap_word() {
+                            continue;
+                        }
+                        let rs = out.by_value.entry(*w).or_default();
+                        if !rs.contains(&r) {
+                            rs.push(r);
+                        }
+                        if !out.writes.contains(&(b, k, r)) {
+                            out.writes.push((b, k, r));
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn of(&self, v: ValueId) -> &[u8] {
+        self.by_value.get(&v).map(Vec::as_slice).unwrap_or(&[])
+    }
 }
 
 /// Drops the GC clears that zero a register no path into them leaves
@@ -1158,6 +1312,7 @@ pub(super) fn prune_clears(
     cleared: &mut HashSet<ValueId>,
     entry: &mut HashMap<(BlockId, BlockId), Vec<u8>>,
     source: &mut HashMap<ValueId, Vec<u8>>,
+    gather_writes: &[(usize, usize, u8)],
 ) {
     if cleared.is_empty() && entry.is_empty() && source.is_empty() {
         return;
@@ -1185,6 +1340,12 @@ pub(super) fn prune_clears(
                     defs[b].insert(regs[d.index()]);
                 }
             }
+        }
+    }
+    // A push's gather registers ([`Gathers`]) are written where it stands.
+    for &(b, _, r) in gather_writes {
+        if b < nb {
+            defs[b].insert(r);
         }
     }
     // Parameters arrive holding words; a word no op defines may be written

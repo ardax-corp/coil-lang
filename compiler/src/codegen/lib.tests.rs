@@ -2690,10 +2690,11 @@ fn mixed_enum_unit_tuple_record_all_in_one() {
     // bytecode (the codegen is silent on unused `let _`).
     let (bc, _pool) = compile_src_boxed_locals(
         "enum E { A, B(int), C { x: int } } \
- fn main() { \
+ fn mk() -> Vec<E> { \
  let a = E::A; \
  let b = E::B(1); \
  let c = E::C { x: 2 }; \
+ return [a, b, c]; \
  }",
     );
 
@@ -2993,10 +2994,11 @@ fn self_recursive_sites_are_not_predicate_peeled() {
 fn let_x_reassignment_emits_store_pop_not_store() {
     use common::Instruction;
     let (bc, _pool) = compile_src(
-        "fn main() { \
- let x = 5; \
- x = 10; \
+        "fn f(int n) -> int { \
+ let x = n; \
+ x = n + 1; \
  let y = x; \
+ return y; \
  }",
     );
 
@@ -8079,8 +8081,9 @@ fn main() {
 fn nested_option_string_none_stays_boxed() {
     let (bc, _) = compile_src(
         r#"
-fn main() {
+fn mk() -> Vec<Option<Option<string>>> {
     let x: Option<Option<string>> = Option::None;
+    return [x];
 }
 "#,
     );
@@ -8373,7 +8376,7 @@ fn main() {
 
 #[test]
 fn result_mixed_int_heap_still_boxes() {
-    let (bc, _) = compile_src(
+    let (bc, _) = compile_src_no_inline(
         r#"
 class Box {
     pub n: int,

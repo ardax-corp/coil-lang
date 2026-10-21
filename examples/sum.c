@@ -66,6 +66,21 @@ int64_t sum_bytes_after_cb(const uint8_t *buf, int64_t n, int64_fn_int64 cb) {
     return sum_bytes(buf, n);
 }
 
+/// Copy `n` bytes from `src` into `dst`, front to back (for `Bytes` tests;
+/// `dst` and `src` may be the same buffer).
+void copy_bytes(uint8_t *dst, const uint8_t *src, int64_t n) {
+    for (int64_t i = 0; i < n; i++) {
+        dst[i] = src[i];
+    }
+}
+
+/// Write `v` into `n` bytes of `buf` (for `Bytes` tests).
+void fill_bytes(uint8_t *buf, int64_t n, int64_t v) {
+    for (int64_t i = 0; i < n; i++) {
+        buf[i] = (uint8_t)v;
+    }
+}
+
 typedef struct {
     int32_t x;
     int32_t y;
@@ -86,6 +101,25 @@ static int64_t doubler(int64_t x) {
 /// Return a C function pointer (opaque Ptr / Callback to coil).
 int64_fn_int64 get_doubler(void) {
     return &doubler;
+}
+
+static int64_t noted = 0;
+
+/// Add `a + b` to a running total; returns nothing (for void `extern`
+/// tests: each call must leave the VM's operand stack as it found it).
+void sum_note(void *tag, int64_t a, int64_t b) {
+    (void)tag;
+    noted += a + b;
+}
+
+/// Clear the running total.
+void sum_reset(void) {
+    noted = 0;
+}
+
+/// The running total.
+int64_t sum_noted(void) {
+    return noted;
 }
 
 /// C varargs: sum `n` trailing `int64_t` arguments (for extern `...` tests).

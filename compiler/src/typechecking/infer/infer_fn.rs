@@ -525,6 +525,7 @@ impl Checker {
         if let Some(self_ty) = self_ty {
             fun_ty = Ty::Fun(Box::new(self_ty.clone()), Box::new(fun_ty));
         }
+        self.weak_checks.enter_fn(param_vars.clone(), fun_ty.clone());
 
         // Monomorphic recursion: bind a fresh α so the body can call this
         // function. Inherent methods bind `Owner::name` only — never the
@@ -595,7 +596,10 @@ impl Checker {
                     .insert(name.to_string());
             }
         } else {
-            self.forward_free_fn_schemes.remove(name);
+            // A forward call instantiated the stub's parameters (#1670).
+            if let Some(stub) = self.forward_free_fn_schemes.remove(name) {
+                self.weak_checks.alias(&stub.bounds, &param_vars);
+            }
             self.env
                 .insert_top(name.to_string(), Scheme::mono(Ty::Var(alpha)));
         }
@@ -804,6 +808,7 @@ impl Checker {
         }
 
         // Pop type param scope.
+        self.weak_checks.leave_fn();
         self.active_constraints.truncate(prev_constraints_len);
         self.type_params_in_scope.pop();
 

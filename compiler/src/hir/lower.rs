@@ -2205,7 +2205,11 @@ impl Walk<'_> {
             FfiBuiltin::Invoke => {
                 let [lib, f, values] = args else { return Err("callee-arity") };
                 let items = tuple_items(body, *values).ok_or("ffi-arguments")?;
-                if !matches!(body.expr(*f).kind, HirKind::Local(_) | HirKind::Field { .. }) {
+                // The id is a value: a local, a field, or an `int` `static` /
+                // `const` read (#1639), not a named function.
+                let id_global = matches!(body.expr(*f).kind, HirKind::Global { .. })
+                    && self.ty(*f).is_some_and(|t| primitive(&apply_ty_prune(self.checker.subst(), t)) == Some(coil_ty::INT));
+                if !id_global && !matches!(body.expr(*f).kind, HirKind::Local(_) | HirKind::Field { .. }) {
                     return Err("ffi-function");
                 }
                 if ffi_fn_variadic(body, self.checker, *f) && ffi_variadic_tags(body, self.checker, id, items).is_none()
