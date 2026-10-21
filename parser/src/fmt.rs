@@ -2897,6 +2897,12 @@ mod tests {
     }
 
     #[test]
+    fn comptime_keeps_its_operand_parens() {
+        let src = "fn f() -> int {\n    let a = comptime sq(2) + 1;\n    return comptime (a + 1) * comptime sq(3);\n}\n";
+        assert_eq!(format_source(src).unwrap(), src);
+    }
+
+    #[test]
     fn short_constructor_patterns_stay_on_one_line() {
         let src = "fn f(S s) -> int {\n    let t = S::C { r: 1 };\n    return match s {\n        S::C { r: _ } => 1,\n        S::B { a, b, c, d } => 2,\n        S::B { a: x, b: y, c: z } => 3,\n        S::T(a, b, c, d) => 4,\n    };\n}\n";
         assert_eq!(format_source(src).unwrap(), src);

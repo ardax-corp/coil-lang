@@ -427,10 +427,25 @@ the consts (so the call can read them):
 through a call the optimizer cannot see into; benchmarks use it to keep a
 call from being computed while compiling.
 
+## Compile-time expressions
+
+`comptime e` (a prefix at unary-minus precedence, `Expression::Comptime`) is a
+computed `const` written inline. `comptime_expr::hoist`, run first by
+`const_fold::lift_startup_consts` (at parse, and again after user macros
+expand, so macro output may use it too), replaces each one with a read of a
+new module const `__comptime_<offset>` placed just before the item that
+holds it; a nested `comptime` gets its const first. From there it is a
+`const` like any other: E0134 for effects, panics, limits and runtime-only
+values, and its value comes from the snapshot. Its synthetic nodes get fresh
+spans; `ComptimeConst::span` is the expression's. `comptime_expr::describe`
+and `explain_messages` word diagnostics about the hidden const as "this
+`comptime` expression", and a name it cannot find gets a help line about
+local variables, which the module const cannot see.
+
 ## Not yet
 
-- `comptime` expressions and blocks (stage 4 of the macro design) are not
-  started; computed `const`s are (see above).
+- Item-level `comptime { … }` blocks (stage 4 of the macro design) are not
+  started; `comptime` expressions and computed `const`s are (see above).
 - A function-style macro call names the macro bare (`name!`); a path
   (`m::name!`) does not parse.
 - Compiled expansion programs and outputs are cached in memory only: a fresh

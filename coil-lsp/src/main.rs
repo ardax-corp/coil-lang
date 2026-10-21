@@ -4262,7 +4262,7 @@ fn coil_keywords() -> &'static [&'static str] {
         "match", "return", "true", "false", "use", "mod", "pub", "static", "defer",
         "raise", "panic", "yield", "break", "continue", "where", "impl", "trait", "extern", "as",
         "readonly", "new", "default", "typeof", "resume", "with", "done", "attr", "struct",
-        "test", "forall", "from",
+        "test", "forall", "from", "comptime",
     ]
 }
 
