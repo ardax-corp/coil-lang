@@ -704,7 +704,7 @@ impl Pipeline {
                     let job = &jobs[i];
                     let entry = cc::Entry {
                         name: match job.block {
-                            Some(_) => format!("`comptime` block in `{}`", job.provider_module),
+                            Some(_) => format!("`comptime` block in {}", job.file.display()),
                             None => format!("{} {}::{}", job.decl.kind.describe(), job.provider_module, job.decl.name),
                         },
                         accesses,
