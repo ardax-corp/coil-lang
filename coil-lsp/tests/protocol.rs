@@ -31,7 +31,16 @@ impl Client {
 
     /// Spawn with `args` and send `initialize` with `params`.
     fn spawn_init(args: &[&str], params: Value) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_coil-lsp"))
+        Self::spawn_in(None, args, params)
+    }
+
+    /// [`Self::spawn_init`] in working directory `cwd`.
+    fn spawn_in(cwd: Option<&Path>, args: &[&str], params: Value) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_coil-lsp"));
+        if let Some(cwd) = cwd {
+            command.current_dir(cwd);
+        }
+        let mut child = command
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -255,6 +264,45 @@ fn command_line_roots_and_grants_reach_diagnostics() {
     let vendor = dir.join("vendor");
     let with = last(&["--root", vendor.to_str().unwrap(), "--allow-ffi-exec"]);
     assert!(with.is_empty(), "false diagnostics with flags: {with:?}");
+}
+
+/// Compile-time IO in the editor comes from the result cache only
+/// (comptime step 12): a macro that reads the environment shows its cached
+/// output, and without one the diagnostic says to build the project.
+#[test]
+fn comptime_io_is_replayed_from_the_cache() {
+    let provider = "use macro::{Expr, Code, lit};\nuse env::var;\n\nmacro env_text(Expr name) -> Code {\n    return lit(var(name.src()) ?? \"\");\n}\n";
+    let main = "use gen::{env_text};\n\nfn main() {\n    let n: int = env_text!(CT_VALUE).len();\n}\n";
+    let dir = project("comptime-replay", &[("src/main.hy", main), ("src/gen.hy", provider)]);
+    let main_uri = uri(&dir.join("src/main.hy"));
+    let flags = ["--comptime-cache", "cache", "--comptime-env", "CT_VALUE"];
+    let last = || -> Vec<String> {
+        let params = json!({ "rootUri": uri(&dir), "capabilities": {} });
+        let mut client = Client::spawn_in(Some(&dir), &flags, params);
+        open(&mut client, &main_uri, main);
+        client.request("shutdown", Value::Null);
+        client.diagnostics_for(&main_uri).pop().expect("diagnostics published")
+    };
+
+    let cold = last();
+    assert!(
+        cold.iter().any(|m| m.contains("`CT_VALUE`") && m.contains("build the project")),
+        "a miss says to build: {cold:?}"
+    );
+
+    let coil = Path::new(env!("CARGO_BIN_EXE_coil-lsp")).with_file_name(format!("coil{}", std::env::consts::EXE_SUFFIX));
+    let built = Command::new(&coil)
+        .current_dir(&dir)
+        .env("CT_VALUE", "one")
+        .env("COIL_CACHE_DIR", dir.join("user-cache"))
+        .args(["compile", "-o", "main.hyc"])
+        .args(flags)
+        .arg("src/main.hy")
+        .output()
+        .unwrap_or_else(|e| panic!("run {} (build `coil` too): {e}", coil.display()));
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+    let warm = last();
+    assert!(warm.is_empty(), "the cached output is used: {warm:?}");
 }
 
 /// `--workspace` names the project directory, so module roots resolve
