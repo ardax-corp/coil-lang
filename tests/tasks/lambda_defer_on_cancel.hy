@@ -20,18 +20,15 @@ test("a lambda's defer runs on cancel") {
     LOG = 0;
     let r = scope(
         fn (Scope s) {
-            let victim = s
-                .spawn(
-                    fn () {
-                        defer {
-                            push(6);
-                        }
-                        push(1);
-                        task::sleep(10000);
-                        push(9);
-                        0
-                    },
-                );
+            let victim = s.spawn(fn () {
+                defer {
+                    push(6);
+                }
+                push(1);
+                task::sleep(10000);
+                push(9);
+                0
+            });
             task::yield_now();
             victim.cancel();
             cancelled(victim.join())
@@ -46,17 +43,14 @@ test("a lambda's defer reads its captures on cancel") {
     let d = 7;
     let r = scope(
         fn (Scope s) use (d) {
-            let victim = s
-                .spawn(
-                    fn () use (d) {
-                        defer use (d) {
-                            push(d);
-                        }
-                        push(2);
-                        task::sleep(10000);
-                        0
-                    },
-                );
+            let victim = s.spawn(fn () use (d) {
+                defer use (d) {
+                    push(d);
+                }
+                push(2);
+                task::sleep(10000);
+                0
+            });
             task::yield_now();
             victim.cancel();
             cancelled(victim.join())
@@ -70,17 +64,14 @@ test("a lambda's defer runs once when the task finishes") {
     LOG = 0;
     let r = scope(
         fn (Scope s) {
-            let t = s
-                .spawn(
-                    fn () {
-                        defer {
-                            push(6);
-                        }
-                        push(1);
-                        task::sleep(1);
-                        3
-                    },
-                );
+            let t = s.spawn(fn () {
+                defer {
+                    push(6);
+                }
+                push(1);
+                task::sleep(1);
+                3
+            });
             t.join()
         },
     );

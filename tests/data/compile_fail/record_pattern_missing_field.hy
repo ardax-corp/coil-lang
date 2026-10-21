@@ -9,5 +9,4 @@ fn f(Pt p) -> int {
     };
 }
 
-fn main() {
-}
+fn main() {}

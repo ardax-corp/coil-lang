@@ -35,7 +35,7 @@ const EQ_GLUE: &str = "EqGlue";
 const EQ_DICT_GLUE: &str = "EqDictGlue";
 
 /// The pseudo-class of the `Eq` dictionary a shared body passes for a
-/// type variable none of whose bounds has `Eq` (`T: Ord`): `eq` / `ne` as
+/// type variable none of whose bounds has `Eq` (`T: Lt`): `eq` / `ne` as
 /// the VM's structural `EQ` compares the two values (#1694).
 const EQ_ANY: &str = "EqAny";
 
@@ -442,7 +442,7 @@ impl Compiler {
             }
             // Each variable's dictionary as an `Eq` one, [`EQ_ANY`]'s for
             // one with no `Eq` bound, when some other part needs the glue
-            // (`Vec<Box<T>>` at `T: Ord`, #1694); else the VM's `EQ` compares
+            // (`Vec<Box<T>>` at `T: Lt`, #1694); else the VM's `EQ` compares
             // the value, as it compares the variables' parts.
             _ => {
                 if self.eq_dict_glue_needed(&key, false, &mut Vec::new()) != Some(true) {

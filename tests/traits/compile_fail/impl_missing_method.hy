@@ -1,7 +1,7 @@
 // Expected: E0119 — an impl must provide every trait method without a default (`name`).
 trait Shape<S> {
-    fn area(S self) -> int;
-    fn name(S self) -> string;
+    fn area(S self) -> int {}
+    fn name(S self) -> string {}
 }
 
 class Sq {

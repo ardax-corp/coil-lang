@@ -6095,8 +6095,8 @@ use ffi::{dload, declare, invoke}; \
 use ffi::types::{Callback, Int}; \
 fn doubler(int x) -> int { return x * 2; } \
 fn main() { \
-  let lib = dload(\"libsum.so\"); \
-  let id = declare(lib, \"apply_cb\", (Callback, Int), Int); \
+  let lib = match dload(\"libsum.so\") { Result::Ok(h) => h, Result::Err(e) => panic e.message, }; \
+  let id = match declare(lib, \"apply_cb\", (Callback, Int), Int) { Result::Ok(v) => v, Result::Err(e) => panic e.message, }; \
   invoke(lib, id, (doubler, 21)); \
 }";
     let mut ast = Pratt::default().parse(src).expect("parse failed");

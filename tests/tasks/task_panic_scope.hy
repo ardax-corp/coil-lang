@@ -39,14 +39,11 @@ test("a panicking child runs its defers") {
 test("the panic message keeps its formatting") {
     let r = scope(
         fn (Scope s) {
-            s
-                .spawn(
-                    fn () {
-                        let n = 41 + 1;
-                        panic "bad value: " + n.show();
-                        0
-                    },
-                );
+            s.spawn(fn () {
+                let n = 41 + 1;
+                panic "bad value: " + n.show();
+                0
+            });
             0
         },
     );

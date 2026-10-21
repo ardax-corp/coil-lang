@@ -3,5 +3,4 @@ fn f() -> [int] {
     return [1];
 }
 
-fn main() {
-}
+fn main() {}

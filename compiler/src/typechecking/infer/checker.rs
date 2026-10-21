@@ -4873,6 +4873,30 @@ impl Checker {
         {
             self.gate_stream_attach(range.clone());
         }
+        // A method's `... xs` template calls its instance for this call's
+        // pack (#1754).
+        if let Some(owner) = self.class_owner_from_ty(&resolved)
+            && self.methods.get(&owner).is_some_and(|m| m.contains_key(*method))
+            && !self.is_static_method(&owner, method)
+        {
+            let key = format!("{owner}::{method}");
+            if self.is_variadic_template(&key) {
+                self.check_inherent_method_access(&owner, method, &range);
+                return self.infer_variadic_method_call(&key, recv, &recv_ty, method_args, id, range);
+            }
+        }
+        if let Some(owner) = self.class_owner_from_ty(&resolved)
+            && let Some(ty) = self.foreign_method_template_call(&format!("{owner}::{method}"), &range)
+        {
+            for arg in method_args {
+                let value = match arg.1.as_ref() {
+                    Expression::NamedArg(_, v) => v,
+                    _ => arg,
+                };
+                let _ = self.infer(value);
+            }
+            return ty;
+        }
         // Named args on methods: only inherent class methods.
         if method_has_named {
             let class_owner = self.class_owner_from_ty(&resolved);
@@ -7085,7 +7109,7 @@ impl Checker {
                 range.clone(),
             );
             m.with_help(format!(
-                "`{op}` takes `int` / `float` / `byte` / `string` operands, or a type with a `{class}` instance (`#[derive(Ord)]`)"
+                "`{op}` takes `int` / `float` / `byte` / `string` operands, or a type with a `{class}` instance (`#[derive(Eq, Ord)]`)"
             ));
             m
         });
@@ -10532,7 +10556,8 @@ impl Checker {
     /// A ground tuple whose items are all `Ord` is `Ord` (#1721): it orders
     /// lexicographically, so its `Lt` / `Le` / `Gt` / `Ge` instances and
     /// the empty `Ord` are registered together, the first time a goal asks
-    /// for one, after its tuple items'.
+    /// for one, after its tuple items' and its structural `Eq` (a
+    /// superclass of `Ord`, #1716).
     fn ensure_structural_tuple_ord(&mut self, ty: &Ty) {
         let ty = show_lookup_ty(&apply_ty_prune(&self.subst, ty));
         let Ty::Tuple(items) = &ty else {
@@ -10551,6 +10576,7 @@ impl Checker {
                 || self.generics.find_generic_instance("Ord", std::slice::from_ref(&lookup)).is_some()
         });
         if ordered {
+            self.ensure_structural_instance("Eq", std::slice::from_ref(&ty));
             for class in ["Lt", "Le", "Gt", "Ge", "Ord"] {
                 self.generics.register_structural_instance(class, ty.clone());
             }
@@ -13232,24 +13258,34 @@ impl Checker {
         self.record_ffi_declare_metadata(key, dargs, true);
     }
 
-    /// `invoke`'s function id is the handle `declare` returned, never a Coil
-    /// `fn` (#1666). Only a function type is refused: the id may also be
-    /// `declare`'s `Result` itself, which existing callers pass straight in.
+    /// `invoke`'s function id is the `int` handle `declare` returned (#1761):
+    /// never a Coil `fn` (#1666), and never `declare`'s `Result` itself, whose
+    /// boxed address the VM would read as an out-of-range id.
     fn check_ffi_invoke_fn_id(&mut self, id_ty: &Ty, range: Range<usize>) {
         let pruned = apply_ty_prune(&self.subst, id_ty);
         let id_ty = crate::typechecking::ty::strip_readonly(&pruned).clone();
-        if matches!(id_ty, Ty::Fun(..)) {
-            let [found] = <[String; 1]>::try_from(self.diag_tys(&[&id_ty])).expect("one type");
-            let _ = self.error_with_help(
-                ErrorCode::TypeMismatch,
-                format!("Type mismatch: expected `int`, found `{found}`"),
-                range,
-                Some(
-                    "`invoke`'s function id is the `int` that `declare(lib, name, params, ret)` returns, not a Coil function"
-                        .to_string(),
-                ),
-            );
-        }
+        let help = if matches!(id_ty, Ty::Fun(..)) {
+            "`invoke`'s function id is the `int` that `declare(lib, name, params, ret)` returns, not a Coil function"
+        } else if is_result_ty(&id_ty) {
+            "`declare` returns `Result<int, Error>`; unwrap the id with `?` (`declare(...)?`) or `match` before passing it to `invoke`"
+        } else {
+            match unify_with(&self.subst, &id_ty, &int()) {
+                Ok(s) => {
+                    self.absorb(&s);
+                    return;
+                }
+                Err(_) => {
+                    "`invoke`'s function id is the `int` that `declare(lib, name, params, ret)` returns"
+                }
+            }
+        };
+        let [found] = <[String; 1]>::try_from(self.diag_tys(&[&id_ty])).expect("one type");
+        let _ = self.error_with_help(
+            ErrorCode::TypeMismatch,
+            format!("Type mismatch: expected `int`, found `{found}`"),
+            range,
+            Some(help.to_string()),
+        );
     }
 
     fn infer_ffi_invoke(&mut self, args: &[Output], range: Range<usize>) -> Ty {
@@ -15463,11 +15499,14 @@ impl Checker {
                 }
                 vars.extend(method_vars);
             }
-            self.current_tuple_pack = Self::tuple_pack_ty_for_args(args, &mut self.counter);
+            let fqn = format!("{}::{}", owner_key, name);
+            // A method template's instance has its pack fixed (#1754).
+            self.current_tuple_pack = self
+                .variadic_instance_pack(&fqn)
+                .or_else(|| Self::tuple_pack_ty_for_args(args, &mut self.counter));
             let arg_tys = self.parse_arg_list(args);
             self.current_tuple_pack = None;
             let param_names: Vec<String> = arg_tys.iter().map(|(n, _)| n.clone()).collect();
-            let fqn = format!("{}::{}", owner_key, name);
             // FQN only, a bare `join` / `iter` key would shadow
             // `use path::{join}` and other free-function imports.
             self.fn_param_names.insert(fqn.clone(), param_names);
@@ -20107,13 +20146,28 @@ impl Checker {
     ) -> Option<Ty> {
         use parser::ast::EnumConstructPayload;
         if !self.is_static_method(owner, method) {
-            return None;
+            let key = self.class_member_fqn(owner, method);
+            let ty = self.foreign_method_template_call(&key, &range)?;
+            if let EnumConstructPayload::Tuple(args) = fields {
+                for arg in args {
+                    let _ = self.infer(arg);
+                }
+            }
+            return Some(ty);
         }
         let owner = self
             .resolve_class_key(owner)
             .unwrap_or_else(|| owner.to_string());
         self.check_inherent_method_access(&owner, method, &range);
         let fqn = format!("{}::{}", owner, method);
+        // A static method's `... xs` template calls its instance (#1754).
+        if self.is_variadic_template(&fqn) {
+            let args = match fields {
+                EnumConstructPayload::Tuple(args) => args.as_slice(),
+                _ => &[],
+            };
+            return Some(self.infer_variadic_call(&fqn, args, call_id, range));
+        }
         let scheme = self
             .methods
             .get(&owner)
