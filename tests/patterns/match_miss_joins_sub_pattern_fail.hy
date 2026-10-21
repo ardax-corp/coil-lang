@@ -57,9 +57,26 @@ fn run_nested(Vec<Op> ops, int n) -> int {
     return acc;
 }
 
+// The closure keeps `run_closure` off the dense numeric path, so this
+// match goes through the general (LIR) emitter.
+fn run_closure(Vec<Op> ops, int n) -> int {
+    let base = 0;
+    let f = fn (int x) use (base) => x + base;
+    let acc = 0;
+    let i = 0;
+    while i < n {
+        for op in ops {
+            acc = acc + eval(op);
+        }
+        i = i + 1;
+    }
+    return f(acc);
+}
+
 test("a miss joining a failed sub-pattern leaves the stack as it was") {
     assert!(run([Op::Neg(Option::Some(6))], 200000) == 200000);
     assert!(run([Op::Mul(4, 1), Op::Mul(4, 2), Op::Nop], 100000) == 600000);
+    assert!(run_closure([Op::Mul(4, 1), Op::Mul(4, 2), Op::Nop], 100000) == 600000);
     let ops: Vec<Op> = [
         Op::Add(2, 3),
         Op::Mul(4, 5),
