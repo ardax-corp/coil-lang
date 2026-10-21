@@ -765,7 +765,7 @@ impl<const S: usize> Machine<S> {
                         let _ = write!(out, "panic: {}{}{}", s, loc_suffix, backtrace);
                         let _ = out.flush();
                     } else {
-                        eprint!("panic: {}{}{}", s, loc_suffix, backtrace);
+                        eprintln!("panic: {}{}{}", s, loc_suffix, backtrace);
                         let _ = io::stderr().flush();
                     }
                     self.panicked = true;

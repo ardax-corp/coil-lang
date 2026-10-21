@@ -1244,9 +1244,9 @@ impl<const S: usize> Machine<S> {
             }
             let _ = out.flush();
         } else {
-            eprint!("panic: {message}{loc_suffix}");
+            eprintln!("panic: {message}{loc_suffix}");
             if !backtrace.is_empty() {
-                eprintln!("\n{backtrace}");
+                eprintln!("{backtrace}");
             }
             let _ = io::stderr().flush();
         }
