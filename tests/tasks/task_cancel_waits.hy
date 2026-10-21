@@ -135,14 +135,11 @@ test("cancel stops a task waiting in join, and the joined task goes on") {
     LOG = 0;
     let r = scope(
         fn (Scope s) {
-            let slow = s
-                .spawn(
-                    fn () {
-                        task::sleep(20);
-                        push(5);
-                        7
-                    },
-                );
+            let slow = s.spawn(fn () {
+                task::sleep(20);
+                push(5);
+                7
+            });
             let waiter = s.spawn(fn () use (slow) => joins_other(slow));
             task::yield_now();
             waiter.cancel();
@@ -171,13 +168,10 @@ test("a sibling may cancel another task") {
     let r = scope(
         fn (Scope s) {
             let victim = s.spawn(sleeps_long);
-            s
-                .spawn(
-                    fn () use (victim) {
-                        victim.cancel();
-                        0
-                    },
-                );
+            s.spawn(fn () use (victim) {
+                victim.cancel();
+                0
+            });
             cancelled(victim.join())
         },
     );
@@ -188,13 +182,10 @@ test("a sibling may cancel another task") {
 test("a cancelled task does not fail its scope") {
     let r = scope(
         fn (Scope s) {
-            let t = s
-                .spawn(
-                    fn () {
-                        task::sleep(10000);
-                        0
-                    },
-                );
+            let t = s.spawn(fn () {
+                task::sleep(10000);
+                0
+            });
             task::yield_now();
             t.cancel();
             3

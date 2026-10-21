@@ -78,24 +78,18 @@ test("a thread recv inside a task lets the other tasks run") {
     let worker = spawn(late_reply, tx)?;
     let r = scope(
         fn (Scope s) use (log, rx) {
-            let waiter = s
-                .spawn(
-                    fn () use (log, rx) {
-                        let v = match recv(rx) {
-                            Result::Ok(v) => v,
-                            Result::Err(_) => -1,
-                        };
-                        log.push("received");
-                        v
-                    },
-                );
-            s
-                .spawn(
-                    fn () use (log) {
-                        log.push("other ran");
-                        0
-                    },
-                );
+            let waiter = s.spawn(fn () use (log, rx) {
+                let v = match recv(rx) {
+                    Result::Ok(v) => v,
+                    Result::Err(_) => -1,
+                };
+                log.push("received");
+                v
+            });
+            s.spawn(fn () use (log) {
+                log.push("other ran");
+                0
+            });
             match waiter.join() {
                 Result::Ok(v) => v,
                 Result::Err(_) => -1,

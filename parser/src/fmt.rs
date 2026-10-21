@@ -2235,6 +2235,32 @@ impl<'s> Formatter<'s> {
             return;
         }
 
+        // `s.spawn(…)`: a line break before `.` after a receiver no wider than
+        // the indent gains nothing, so the call stays on the receiver's line
+        // and its arguments break instead; a lone block lambda argument stays
+        // on that line too: `s.spawn(fn () {` (#1774).
+        if let [ChainPart::Root(Expression::Identifier(id)), part] = parts
+            && id.len() <= INDENT.len()
+        {
+            self.push_str(id);
+            if let ChainPart::Field {
+                optional,
+                name,
+                call_args: Some([arg]),
+            } = part
+                && self.hugs_lambda(arg)
+            {
+                self.push_str(if *optional { "?." } else { "." });
+                self.push_str(name);
+                self.push_str("(");
+                self.fmt_value(arg);
+                self.push_str(")");
+            } else {
+                self.emit_chain_field(part);
+            }
+            return;
+        }
+
         // The parser takes a line break before `.` / `?.` after any
         // receiver (#1540), so every part may start a line.
         match &parts[0] {
@@ -2248,6 +2274,23 @@ impl<'s> Formatter<'s> {
                 f.emit_chain_field(part);
             }
         });
+    }
+
+    /// Whether a call's only argument `arg` can open on the call's line: a
+    /// lambda with a block body and no comment around it.
+    fn hugs_lambda(&self, arg: &Output<'_>) -> bool {
+        let Expression::Lambda { body, .. } = strip_groups(arg).1.as_ref() else {
+            return false;
+        };
+        if !matches!(body.1.as_ref(), Expression::Block(_)) {
+            return false;
+        }
+        let start = self.content_start(arg.0);
+        let end = self.content_end(arg.0);
+        let open = self.opening_before(start, b'(').unwrap_or(start);
+        let close = self.closing_after(end, b')').unwrap_or(end);
+        // Comments inside the lambda stay with its body.
+        !self.has_comment_in(open, start) && !self.has_comment_in(end, close)
     }
 
     fn emit_chain_field(&mut self, part: &ChainPart<'_>) {
@@ -3238,6 +3281,16 @@ fn main() {
         };
         let docs = item_docs(items[0].1.as_ref()).expect("docs");
         assert_eq!(docs, ["Hello", "World"]);
+    }
+
+    #[test]
+    fn short_receiver_keeps_its_call_and_lambda_on_one_line() {
+        // #1774: `s`, `.spawn(` and `fn () {` used to land on three lines.
+        let src = "fn main() {\n    s.spawn(fn () {\n        let first_value_with_a_long_name = 41 + 1;\n        let second_value_with_a_long_name = first_value_with_a_long_name;\n        0\n    });\n    self.push(first_argument_with_a_long_name, second_argument_with_a_long_name, third_argument_xyz_long);\n    s.run(\n        // why\n        fn () {\n            let first_value_with_a_long_name = 41 + 1;\n            let second_value_with_a_long_name = first_value_with_a_long_name;\n        },\n    );\n    holder.spawn(fn () {\n        let first_value_with_a_long_name = 41 + 1;\n        let second_value_with_a_long_name = first_value_with_a_long_name;\n    });\n}\n";
+        let want = "fn main() {\n    s.spawn(fn () {\n        let first_value_with_a_long_name = 41 + 1;\n        let second_value_with_a_long_name = first_value_with_a_long_name;\n        0\n    });\n    self.push(\n        first_argument_with_a_long_name,\n        second_argument_with_a_long_name,\n        third_argument_xyz_long,\n    );\n    s.run(\n        // why\n        fn () {\n            let first_value_with_a_long_name = 41 + 1;\n            let second_value_with_a_long_name = first_value_with_a_long_name;\n        },\n    );\n    holder\n        .spawn(\n            fn () {\n                let first_value_with_a_long_name = 41 + 1;\n                let second_value_with_a_long_name = first_value_with_a_long_name;\n            },\n        );\n}\n";
+        let formatted = format_source(src).unwrap();
+        assert_eq!(formatted, want);
+        assert_eq!(format_source(&formatted).unwrap(), formatted);
     }
 
     #[test]
