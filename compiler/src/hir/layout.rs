@@ -48,6 +48,9 @@ pub enum PairKind {
     Range { inclusive: bool },
     /// A closed user enum whose variants carry at most one field: `[payload, tag]`.
     Enum(String),
+    /// A `readonly class` (by key) of two immediate fields: `[first, second]`
+    /// (#1562). Its boxed form is an instance of the class.
+    Class(String),
 }
 
 impl PairKind {
@@ -58,7 +61,7 @@ impl PairKind {
             Self::Option => Some(common::BUILTIN_OPTION_ENUM),
             Self::Result => Some(common::BUILTIN_RESULT_ENUM),
             Self::Enum(name) => Some(name),
-            Self::Product | Self::Range { .. } => None,
+            Self::Product | Self::Range { .. } | Self::Class(_) => None,
         }
     }
 }
@@ -144,7 +147,27 @@ fn pair_kind(checker: &Checker, ty: &Ty) -> Option<PairKind> {
         return (is_immediate(&ok) || (is_unit(&ok) && is_immediate(&err)))
             .then_some(PairKind::Result);
     }
+    if let Some(key) = readonly_pair_class(checker, ty) {
+        return Some(PairKind::Class(key));
+    }
     unary_user_enum_name(checker, ty).map(|name| PairKind::Enum(name.to_string()))
+}
+
+/// The key of a `readonly class` that moves as two words like an arity-2
+/// immediate tuple (#1562): not generic, no `drop`, exactly two fields,
+/// each `int`, `float`, `bool` or `byte`. Two instances with the same
+/// fields cannot be told apart (structural `==`, no `weak()`), so the
+/// object need not exist until something takes it as one word.
+pub(crate) fn readonly_pair_class(checker: &Checker, ty: &Ty) -> Option<String> {
+    let Ty::Con(name) = strip_readonly(ty) else {
+        return None;
+    };
+    let key = checker.resolve_class_key(name)?;
+    if !checker.is_readonly_class(&key) || checker.class_has_drop(&key) || checker.generics().generic_type_ctors.contains_key(&key) {
+        return None;
+    }
+    let fields = checker.class_fields(&key)?;
+    (fields.len() == 2 && fields.iter().all(|(_, t)| is_immediate(t))).then_some(key)
 }
 
 /// `int`, `float`, `bool` or `byte`.

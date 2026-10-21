@@ -23,6 +23,7 @@ impl Compiler {
             PairKind::Product => "(T, T)",
             PairKind::Range { inclusive: false } => "__range",
             PairKind::Range { inclusive: true } => "__range_inc",
+            PairKind::Class(name) => name,
             _ => kind.enum_name().unwrap_or_default(),
         };
         let mut message = Message::error(

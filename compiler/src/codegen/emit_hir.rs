@@ -1905,6 +1905,9 @@ impl Compiler {
             steady_fn: Box::new(move |n: &str| crate::il::pure_call::name_in(steady_fns, n)),
             box_at: &emit.plan.box_at,
             is_class: Box::new(is_class),
+            pair_class: Box::new(move |t: &Ty| {
+                crate::hir::layout::readonly_pair_class(checker, &apply_ty_prune(checker.subst(), t)).map(|key| checker.class_type_id(&key))
+            }),
             scalar_enum: Box::new(scalar_enum),
             niche: Box::new(niche),
             boxed_enum: Box::new(move |t: &Ty, variant: Option<&str>| {
@@ -2056,6 +2059,10 @@ impl Compiler {
                 };
                 return Some((word(&items[0])?, word(&items[1])?));
             }
+            PairKind::Class(key) => {
+                let fields = self.checker.class_fields(&key)?;
+                return Some((word(&fields[0].1)?, word(&fields[1].1)?));
+            }
             kind => self.pair_variants(kind)?,
         };
         let mut lo = None;
@@ -2089,7 +2096,7 @@ impl Compiler {
     fn pair_variants(&self, kind: crate::hir::layout::PairKind) -> Option<Vec<String>> {
         use crate::hir::layout::PairKind;
         Some(match kind {
-            PairKind::Range { .. } | PairKind::Product => Vec::new(),
+            PairKind::Range { .. } | PairKind::Product | PairKind::Class(_) => Vec::new(),
             PairKind::Option => vec!["Some".into(), "None".into()],
             PairKind::Result => vec!["Ok".into(), "Err".into()],
             PairKind::Enum(name) => self.checker.enum_variants(&name)?.into_iter().map(|(v, _, _)| v).collect(),
@@ -3583,6 +3590,17 @@ impl Compiler {
                 _ => None,
             })
             .collect();
+        // A `defer` thunk's frame copies each capture as one word, so a
+        // captured local stays one word.
+        let deferred: HashSet<u32> = hir
+            .exprs
+            .iter()
+            .filter_map(|e| match &e.kind {
+                HirKind::Defer { captures, .. } => Some(captures.iter().flatten().map(|l| l.0)),
+                _ => None,
+            })
+            .flatten()
+            .collect();
         for expr in &hir.exprs {
             let HirKind::Let {
                 local,
@@ -3591,7 +3609,13 @@ impl Compiler {
             else {
                 continue;
             };
-            if assigned.contains(&local.0) || hir.local(local).captured {
+            if assigned.contains(&local.0) || hir.local(local).captured || deferred.contains(&local.0) {
+                continue;
+            }
+            // A local of a one-word type stays one word even when its init
+            // is a pair: `let s: Sum = mk_r(2)` packs a readonly pair class
+            // into a trait object (#1562).
+            if hir.local(local).ty.as_ref().is_some_and(|t| self.hir_mir_pair_tys(t).is_none()) {
                 continue;
             }
             if let Some(Rep::Pair(kind)) = emit.plan.calls.get(&init.0).map(Self::hir_call_rep) {
@@ -6647,7 +6671,7 @@ impl Compiler {
     /// A two-word kind the lowering builds and matches: a numeric range,
     /// an arity-2 immediate product, or a declared enum.
     pub(super) fn hir_pair_kind(&self, kind: &PairKind) -> bool {
-        matches!(kind, PairKind::Range { .. } | PairKind::Product) || self.hir_pair_enum(kind)
+        matches!(kind, PairKind::Range { .. } | PairKind::Product | PairKind::Class(_)) || self.hir_pair_enum(kind)
     }
 
     /// How an indexed or field-read base is pushed: a pair boxes into its
