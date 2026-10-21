@@ -72,7 +72,7 @@ There is **no `print` statement** — use `io` + `string::format` / `to_bytes`.
 | FFI | `extern "lib" { fn …; }` (any stem but the libc aliases) or `use ffi::{dload, declare, invoke}` + `ffi::types::{Int, …}` |
 | Attributes | `#[derive(Show, Eq, Ord, Hash, Default, Send, Sensitive)]` (composes with `#[repr(int)]` on scalar enums), user derives and attribute macros (below); tests are `test("desc") { … }` only |
 | Macros | `derive Name(TypeDecl t) -> Code attrs(helper) { … }`, `attr name(FnDecl f, int by) -> Code { … }` and `macro name(Expr a, Vec<Expr> rest) -> Code { … }` (used as `name!(…)` in expression, statement or item position) run at compile time; build output with `quote items|expr|stmts|type { … ${x} … $(xs),* }` (`use macro::{TypeDecl, Expr, Code, lit, raw, ident}`). Import with `use`; a module cannot use its own macros. No IO in macros; `panic` to inspect. See `docs/internals/macros.md` |
-| Type query | `typeof expr` → compile-time FQN string (not evaluated at runtime) |
+| Type query | `typeof expr` → compile-time FQN string (not evaluated at runtime); unary prefix, so `typeof x == "int"` compares the name |
 
 Named call-site args: positional prefix then `f(name: v)`. Rest: trailing `T... xs`. Spread: `f(...pack)`.
 

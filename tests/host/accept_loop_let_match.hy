@@ -56,21 +56,19 @@ fn two_fetches(int port) -> string {
 test("a let-bound accept match in a loop handles two connections") {
     let listener = listen("127.0.0.1", 0)?;
     let port = local_addr(listener)?[1];
-    let r = scope(
-        fn (Scope s) use (listener, port) {
-            let server = s.spawn(fn () use (listener) => serve_two(listener));
-            let client = s.spawn(fn () use (port) => two_fetches(port));
-            let served = match server.join() {
-                Result::Ok(n) => n,
-                Result::Err(_) => -1,
-            };
-            let got = match client.join() {
-                Result::Ok(t) => t,
-                Result::Err(_) => "client failed",
-            };
-            (served, got)
-        },
-    );
+    let r = scope(fn (Scope s) use (listener, port) {
+        let server = s.spawn(fn () use (listener) => serve_two(listener));
+        let client = s.spawn(fn () use (port) => two_fetches(port));
+        let served = match server.join() {
+            Result::Ok(n) => n,
+            Result::Err(_) => -1,
+        };
+        let got = match client.join() {
+            Result::Ok(t) => t,
+            Result::Err(_) => "client failed",
+        };
+        (served, got)
+    });
     let (served, got) = match r {
         Result::Ok(p) => p,
         Result::Err(_) => (-1, "scope failed"),

@@ -33,41 +33,35 @@ fn sleeper_task(Scope s, int d, int ms) -> Task<int> {
 
 test("cancel unwinds a suspended task") {
     LOG = 0;
-    let r = scope(
-        fn (Scope s) {
-            let t = sleeper_task(s, 1, 10000);
-            task::yield_now();
-            t.cancel();
-            cancelled(t.join())
-        },
-    );
+    let r = scope(fn (Scope s) {
+        let t = sleeper_task(s, 1, 10000);
+        task::yield_now();
+        t.cancel();
+        cancelled(t.join())
+    });
     assert!(r == Result::Ok(true));
     assert!(LOG == 1);
 }
 
 test("a task cancelled before it ran never runs") {
     LOG = 0;
-    let r = scope(
-        fn (Scope s) {
-            let t = sleeper_task(s, 1, 0);
-            t.cancel();
-            cancelled(t.join())
-        },
-    );
+    let r = scope(fn (Scope s) {
+        let t = sleeper_task(s, 1, 0);
+        t.cancel();
+        cancelled(t.join())
+    });
     assert!(r == Result::Ok(true));
     assert!(LOG == 0);
 }
 
 test("a sibling panic cancels the others, running their defers") {
     LOG = 0;
-    let r = scope(
-        fn (Scope s) {
-            sleeper_task(s, 2, 10000);
-            sleeper_task(s, 3, 10000);
-            s.spawn(fn () => panic "boom");
-            0
-        },
-    );
+    let r = scope(fn (Scope s) {
+        sleeper_task(s, 2, 10000);
+        sleeper_task(s, 3, 10000);
+        s.spawn(fn () => panic "boom");
+        0
+    });
     let failed = match r {
         Result::Err(TaskError::Panicked(m)) => m == "boom",
         default => false,
@@ -91,16 +85,14 @@ fn closes_slowly() -> int {
 
 test("a defer may suspend while its task unwinds") {
     LOG = 0;
-    let r = scope(
-        fn (Scope s) {
-            let t = s.spawn(closes_slowly);
-            task::yield_now();
-            t.cancel();
-            // A second cancel does not interrupt the unwinding defer.
-            t.cancel();
-            cancelled(t.join())
-        },
-    );
+    let r = scope(fn (Scope s) {
+        let t = s.spawn(closes_slowly);
+        task::yield_now();
+        t.cancel();
+        // A second cancel does not interrupt the unwinding defer.
+        t.cancel();
+        cancelled(t.join())
+    });
     assert!(r == Result::Ok(true));
     assert!(LOG == 4);
 }
@@ -118,14 +110,12 @@ fn owns_a_scope() -> int {
 
 test("cancelling a task cancels the tasks of its scopes") {
     LOG = 0;
-    let r = scope(
-        fn (Scope s) {
-            let t = s.spawn(owns_a_scope);
-            task::sleep(5);
-            t.cancel();
-            cancelled(t.join())
-        },
-    );
+    let r = scope(fn (Scope s) {
+        let t = s.spawn(owns_a_scope);
+        task::sleep(5);
+        t.cancel();
+        cancelled(t.join())
+    });
     assert!(r == Result::Ok(true));
     assert!(LOG == 56);
 }
@@ -163,14 +153,12 @@ fn guarded() -> int {
 
 test("a shield finishes before the cancel unwinds") {
     LOG = 0;
-    let r = scope(
-        fn (Scope s) {
-            let t = s.spawn(guarded);
-            task::yield_now();
-            t.cancel();
-            cancelled(t.join())
-        },
-    );
+    let r = scope(fn (Scope s) {
+        let t = s.spawn(guarded);
+        task::yield_now();
+        t.cancel();
+        cancelled(t.join())
+    });
     assert!(r == Result::Ok(true));
     assert!(LOG == 18);
 }

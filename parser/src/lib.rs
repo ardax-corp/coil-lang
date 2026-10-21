@@ -556,10 +556,6 @@ impl<'pratt> Pratt<'pratt> {
                 keyword!("panic")
                     .ignore_then(expr.clone())
                     .map_with(|inner, e| (e.span(), Box::new(Expression::Panic(inner)))),
-                // `typeof expr` — compile-time type name (string).
-                keyword!("typeof")
-                    .ignore_then(expr.clone())
-                    .map_with(|inner, e| (e.span(), Box::new(Expression::TypeOf(inner)))),
                 // `(a, b, c)` — tuple atom. MUST come before
                 // `self.call(...)` (which expects a leading
                 // ident) AND before `self.ident()`.
@@ -773,9 +769,18 @@ impl<'pratt> Pratt<'pratt> {
                 ),
                 // `readonly e` (`'r'`): `e`'s value seen read-only, for any
                 // `e` (`readonly p.inner`, `readonly new P(1)`, `readonly [1]`).
+                // `typeof e` (`'t'`): compile-time type name (string). As a
+                // unary prefix, `typeof(x) == "T"` compares the name (#1773).
                 prefix(
                     Precedence::Negate as u16,
-                    choice((op!('-'), op!('~'), op!('+'), op!('!'), keyword!("readonly").to('r'))),
+                    choice((
+                        op!('-'),
+                        op!('~'),
+                        op!('+'),
+                        op!('!'),
+                        keyword!("readonly").to('r'),
+                        keyword!("typeof").to('t'),
+                    )),
                     |c, rhs, e| {
                         (
                             e.span(),
@@ -785,6 +790,7 @@ impl<'pratt> Pratt<'pratt> {
                                 '~' => Expression::Not(rhs),
                                 '!' => Expression::LogicalNot(rhs),
                                 'r' => Expression::Readonly(rhs),
+                                't' => Expression::TypeOf(rhs),
                                 _ => unreachable!("No other prefix operators"),
                             }),
                         )

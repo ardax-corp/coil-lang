@@ -1702,6 +1702,13 @@ fn let_init_is_lambda(body: &HirBody, local: LocalId) -> bool {
 }
 
 pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
+    indirect_callee_in(body, checker, f, &mut Vec::new())
+}
+
+/// `indirect_callee`, with the function locals whose check is under way:
+/// one copied from another (#1783) is reached again on a cycle
+/// (`f = g; g = f`), where it holds only what its other values put there.
+fn indirect_callee_in(body: &HirBody, checker: &Checker, f: HirId, seen: &mut Vec<LocalId>) -> bool {
     // An element of a `Vec`, array or tuple of monomorphic functions, or a
     // `const` or `static` holding one (#1685): the closure word it was
     // stored as.
@@ -1716,11 +1723,14 @@ pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
         return body.expr(f).ty.as_ref().is_some_and(|t| {
             let t = apply_ty_prune(checker.subst(), t);
             matches!(strip_readonly(&t), Ty::Fun(..)) && fun_words_in(checker, &t, &mut Vec::new(), false)
-        }) && returned_closure(body, checker, f);
+        }) && returned_closure(body, checker, f, seen);
     }
     let HirKind::Local(local) = body.expr(f).kind else {
         return false;
     };
+    if seen.contains(&local) {
+        return true;
+    }
     let info = body.local(local);
     let assigned: Vec<HirId> = body
         .exprs
@@ -1750,28 +1760,31 @@ pub fn indirect_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
     }
     // Each value stored into it is a closure word too (#1759): a named
     // function, a lambda, a returned closure.
-    if !assigned.iter().all(|&value| closure_word(body, checker, value)) {
-        return false;
-    }
-    match info.kind {
-        // A `for` or destructuring binding of a monomorphic function
-        // element: the closure word it was stored as. A captured one is
-        // its closure word, as the enclosing body's own call through it
-        // would be.
-        LocalKind::Param | LocalKind::Pattern | LocalKind::Capture => true,
-        LocalKind::Let => body.exprs.iter().any(|e| match &e.kind {
-            HirKind::Let { local: l, init: Some(init) } if *l == local => closure_word(body, checker, *init),
+    seen.push(local);
+    let words = assigned.iter().all(|&value| closure_word(body, checker, value, seen))
+        && match info.kind {
+            // A `for` or destructuring binding of a monomorphic function
+            // element: the closure word it was stored as. A captured one is
+            // its closure word, as the enclosing body's own call through it
+            // would be.
+            LocalKind::Param | LocalKind::Pattern | LocalKind::Capture => true,
+            LocalKind::Let => body.exprs.iter().any(|e| match &e.kind {
+                HirKind::Let { local: l, init: Some(init) } if *l == local => closure_word(body, checker, *init, seen),
+                _ => false,
+            }),
             _ => false,
-        }),
-        _ => false,
-    }
+        };
+    seen.pop();
+    words
 }
 
 /// Whether `value`, bound to or stored into a function-typed local, is a
 /// plain closure word a call through the local can take.
-fn closure_word(body: &HirBody, checker: &Checker, value: HirId) -> bool {
+fn closure_word(body: &HirBody, checker: &Checker, value: HirId, seen: &mut Vec<LocalId>) -> bool {
     match &body.expr(value).kind {
-        HirKind::Call { .. } => returned_closure(body, checker, value),
+        HirKind::Call { .. } => returned_closure(body, checker, value, seen),
+        // Another function local that is one itself (#1783): its copy.
+        HirKind::Local(_) => indirect_callee_in(body, checker, value, seen),
         // A named function read as a value is `MakeFn` (codegen refuses a
         // generic one, whose `MakePolyFn` calls differently).
         HirKind::Global { .. } | HirKind::Lambda { .. } => true,
@@ -1786,14 +1799,14 @@ fn closure_word(body: &HirBody, checker: &Checker, value: HirId) -> bool {
 
 /// A call whose result is a plain closure word: a value call through an
 /// indirect callee, or a function's or ground method's returned closure.
-fn returned_closure(body: &HirBody, checker: &Checker, call: HirId) -> bool {
+fn returned_closure(body: &HirBody, checker: &Checker, call: HirId, seen: &mut Vec<LocalId>) -> bool {
     match &body.expr(call).kind {
         // A `PolyFn` call's at a ground function type: codegen adapts the
         // shared body's closure to it (#1589).
         HirKind::Call {
             callee: Callee::Value(g), ..
         } => {
-            indirect_callee(body, checker, *g)
+            indirect_callee_in(body, checker, *g, seen)
                 || polyfn_callee(body, checker, *g)
                     && body.expr(call).ty.as_ref().is_some_and(|t| {
                         let t = apply_ty_prune(checker.subst(), t);
@@ -2220,11 +2233,11 @@ impl Walk<'_> {
             FfiBuiltin::Invoke => {
                 let [lib, f, values] = args else { return Err("callee-arity") };
                 let items = tuple_items(body, *values).ok_or("ffi-arguments")?;
-                // The id is a value: a local, a field, or an `int` `static` /
-                // `const` read (#1639), not a named function.
-                let id_global = matches!(body.expr(*f).kind, HirKind::Global { .. })
-                    && self.ty(*f).is_some_and(|t| primitive(&apply_ty_prune(self.checker.subst(), t)) == Some(coil_ty::INT));
-                if !id_global && !matches!(body.expr(*f).kind, HirKind::Local(_) | HirKind::Field { .. }) {
+                // The id is a value: any `int` expression (a literal, a call,
+                // an `int` `static` / `const` read (#1639), ..; #1788), or a
+                // local or field, not a named function.
+                let id_int = self.ty(*f).is_some_and(|t| primitive(&apply_ty_prune(self.checker.subst(), t)) == Some(coil_ty::INT));
+                if !id_int && !matches!(body.expr(*f).kind, HirKind::Local(_) | HirKind::Field { .. }) {
                     return Err("ffi-function");
                 }
                 if ffi_fn_variadic(body, self.checker, *f) && ffi_variadic_tags(body, self.checker, id, items).is_none()

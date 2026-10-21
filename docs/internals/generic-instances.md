@@ -67,7 +67,8 @@ by the expected type. Generic instances are found by the superclass check, the
 ## Not done
 
 - **Superclass contexts.** `impl Ord for Box<T: Ord>` still needs its own
-  superclass instances (`Lt<Box<T>>`, …) declared, as for concrete instances;
-  the derive declares them.
+  superclass instances (`Lt<Box<T>>`, …, `Eq<Box<T>>`) declared, as for
+  concrete instances; `#[derive(Ord)]` declares the `Lt` … `Ge` ones and
+  `Eq` takes its own derive (`#[derive(Eq, Ord)]`, #1716).
 - **Dictionary allocation.** A dictionary for an open goal is still built at
   each use; ground ones are interned (#1417).

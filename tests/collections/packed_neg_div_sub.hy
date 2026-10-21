@@ -9,7 +9,8 @@ test("8-wide int negate, float divide and scalar-left subtract") {
     let f = [2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0];
     let d = f / [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0];
     let s = 10 - a;
-    let out = format("%i%i,", n[0], n[7]) + format("%f%f,", d[0], d[7]) + format("%i%i", s[0], s[7]);
+    let out = format("%i%i,", n[0], n[7]) + format("%f%f,", d[0], d[7]) +
+              format("%i%i", s[0], s[7]);
     assert!(out == "-1-8,1.08.0,92", out);
 }
 

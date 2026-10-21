@@ -4873,6 +4873,30 @@ impl Checker {
         {
             self.gate_stream_attach(range.clone());
         }
+        // A method's `... xs` template calls its instance for this call's
+        // pack (#1754).
+        if let Some(owner) = self.class_owner_from_ty(&resolved)
+            && self.methods.get(&owner).is_some_and(|m| m.contains_key(*method))
+            && !self.is_static_method(&owner, method)
+        {
+            let key = format!("{owner}::{method}");
+            if self.is_variadic_template(&key) {
+                self.check_inherent_method_access(&owner, method, &range);
+                return self.infer_variadic_method_call(&key, recv, &recv_ty, method_args, id, range);
+            }
+        }
+        if let Some(owner) = self.class_owner_from_ty(&resolved)
+            && let Some(ty) = self.foreign_method_template_call(&format!("{owner}::{method}"), &range)
+        {
+            for arg in method_args {
+                let value = match arg.1.as_ref() {
+                    Expression::NamedArg(_, v) => v,
+                    _ => arg,
+                };
+                let _ = self.infer(value);
+            }
+            return ty;
+        }
         // Named args on methods: only inherent class methods.
         if method_has_named {
             let class_owner = self.class_owner_from_ty(&resolved);
@@ -4969,7 +4993,7 @@ impl Checker {
                 if !constraints.is_empty() {
                     self.discharge_constraints(id, &constraints, &range);
                 }
-                return result;
+                return self.method_result(&recv_ty, result, false);
             }
             return self.error_with_help(
                 ErrorCode::GenericTypeError,
@@ -5008,7 +5032,7 @@ impl Checker {
             }
             self.existential_method_calls_by_span
                 .insert((range.start, range.end), hint);
-            return self.apply_existential_method(
+            let result = self.apply_existential_method(
                 &owner,
                 method,
                 &scheme,
@@ -5016,6 +5040,8 @@ impl Checker {
                 args.as_deref(),
                 (id, range),
             );
+            let declared = self.trait_readonly_params(&owner, method) & 1 != 0;
+            return self.method_result(&recv_ty, result, declared);
         }
         if let Some(receiver_var) = Self::constraint_var_of_ty(&resolved) {
             let candidates = self.bound_method_candidates(method, Some(receiver_var));
@@ -5070,7 +5096,8 @@ impl Checker {
                         &range,
                     );
                 }
-                return result;
+                let declared = self.trait_readonly_params(&class, method) & 1 != 0;
+                return self.method_result(&recv_ty, result, declared);
             }
         }
         // Inherent class methods win over ground trait methods (Rust-style).
@@ -5195,7 +5222,7 @@ impl Checker {
             if !constraints.is_empty() {
                 self.discharge_constraints(id, &constraints, &range);
             }
-            return result;
+            return self.method_result(&recv_ty, result, false);
         }
 
         // Ground trait method via concrete instance; pin return from
@@ -5229,7 +5256,9 @@ impl Checker {
                     &range,
                 );
             }
-            return apply_ty_prune(&self.subst, &result);
+            let declared = self.trait_readonly_params(&class, method) & 1 != 0;
+            let result = apply_ty_prune(&self.subst, &result);
+            return self.method_result(&recv_ty, result, declared);
         }
 
         if let Some(owner) = class_owner {
@@ -7080,7 +7109,7 @@ impl Checker {
                 range.clone(),
             );
             m.with_help(format!(
-                "`{op}` takes `int` / `float` / `byte` / `string` operands, or a type with a `{class}` instance (`#[derive(Ord)]`)"
+                "`{op}` takes `int` / `float` / `byte` / `string` operands, or a type with a `{class}` instance (`#[derive(Eq, Ord)]`)"
             ));
             m
         });
@@ -10527,7 +10556,8 @@ impl Checker {
     /// A ground tuple whose items are all `Ord` is `Ord` (#1721): it orders
     /// lexicographically, so its `Lt` / `Le` / `Gt` / `Ge` instances and
     /// the empty `Ord` are registered together, the first time a goal asks
-    /// for one, after its tuple items'.
+    /// for one, after its tuple items' and its structural `Eq` (a
+    /// superclass of `Ord`, #1716).
     fn ensure_structural_tuple_ord(&mut self, ty: &Ty) {
         let ty = show_lookup_ty(&apply_ty_prune(&self.subst, ty));
         let Ty::Tuple(items) = &ty else {
@@ -10546,6 +10576,7 @@ impl Checker {
                 || self.generics.find_generic_instance("Ord", std::slice::from_ref(&lookup)).is_some()
         });
         if ordered {
+            self.ensure_structural_instance("Eq", std::slice::from_ref(&ty));
             for class in ["Lt", "Le", "Gt", "Ge", "Ord"] {
                 self.generics.register_structural_instance(class, ty.clone());
             }
@@ -12772,7 +12803,8 @@ impl Checker {
             );
         }
         if args.len() == 4 || args.len() == 5 {
-            self.infer(&args[0]);
+            let lib_ty = self.infer(&args[0]);
+            self.check_ffi_lib_handle(&lib_ty, "declare", args[0].0.into_range());
             self.infer(&args[1]);
             if let Some(sym) = host_caps::const_string_expr(&args[1]) {
                 self.gate_ffi_exec_symbol(&sym, &sym, args[1].0.into_range());
@@ -13227,24 +13259,64 @@ impl Checker {
         self.record_ffi_declare_metadata(key, dargs, true);
     }
 
-    /// `invoke`'s function id is the handle `declare` returned, never a Coil
-    /// `fn` (#1666). Only a function type is refused: the id may also be
-    /// `declare`'s `Result` itself, which existing callers pass straight in.
+    /// `invoke`'s function id is the `int` handle `declare` returned (#1761):
+    /// never a Coil `fn` (#1666), and never `declare`'s `Result` itself, whose
+    /// boxed address the VM would read as an out-of-range id.
     fn check_ffi_invoke_fn_id(&mut self, id_ty: &Ty, range: Range<usize>) {
         let pruned = apply_ty_prune(&self.subst, id_ty);
         let id_ty = crate::typechecking::ty::strip_readonly(&pruned).clone();
-        if matches!(id_ty, Ty::Fun(..)) {
-            let [found] = <[String; 1]>::try_from(self.diag_tys(&[&id_ty])).expect("one type");
-            let _ = self.error_with_help(
-                ErrorCode::TypeMismatch,
-                format!("Type mismatch: expected `int`, found `{found}`"),
-                range,
-                Some(
-                    "`invoke`'s function id is the `int` that `declare(lib, name, params, ret)` returns, not a Coil function"
-                        .to_string(),
+        let help = if matches!(id_ty, Ty::Fun(..)) {
+            "`invoke`'s function id is the `int` that `declare(lib, name, params, ret)` returns, not a Coil function"
+        } else if is_result_ty(&id_ty) {
+            "`declare` returns `Result<int, Error>`; unwrap the id with `?` (`declare(...)?`) or `match` before passing it to `invoke`"
+        } else {
+            match unify_with(&self.subst, &id_ty, &int()) {
+                Ok(s) => {
+                    self.absorb(&s);
+                    return;
+                }
+                Err(_) => {
+                    "`invoke`'s function id is the `int` that `declare(lib, name, params, ret)` returns"
+                }
+            }
+        };
+        let [found] = <[String; 1]>::try_from(self.diag_tys(&[&id_ty])).expect("one type");
+        let _ = self.error_with_help(
+            ErrorCode::TypeMismatch,
+            format!("Type mismatch: expected `int`, found `{found}`"),
+            range,
+            Some(help.to_string()),
+        );
+    }
+
+    /// The library handle `declare` and `invoke` take is the `int` that
+    /// `dload` returns (#1787), never `dload`'s `Result` itself, as for
+    /// `invoke`'s function id (#1761).
+    fn check_ffi_lib_handle(&mut self, lib_ty: &Ty, builtin: &str, range: Range<usize>) {
+        let pruned = apply_ty_prune(&self.subst, lib_ty);
+        let lib_ty = crate::typechecking::ty::strip_readonly(&pruned).clone();
+        let help = if is_result_ty(&lib_ty) {
+            format!(
+                "`dload` returns `Result<int, Error>`; unwrap the handle with `?` (`dload(...)?`) or `match` before passing it to `{builtin}`"
+            )
+        } else {
+            match unify_with(&self.subst, &lib_ty, &int()) {
+                Ok(s) => {
+                    self.absorb(&s);
+                    return;
+                }
+                Err(_) => format!(
+                    "`{builtin}`'s library handle is the `int` that `dload(path)` returns"
                 ),
-            );
-        }
+            }
+        };
+        let [found] = <[String; 1]>::try_from(self.diag_tys(&[&lib_ty])).expect("one type");
+        let _ = self.error_with_help(
+            ErrorCode::TypeMismatch,
+            format!("Type mismatch: expected `int`, found `{found}`"),
+            range,
+            Some(help),
+        );
     }
 
     fn infer_ffi_invoke(&mut self, args: &[Output], range: Range<usize>) -> Ty {
@@ -13260,7 +13332,8 @@ impl Checker {
         let mut variadic = false;
         let mut nfixed = 0usize;
         if args.len() == 3 {
-            self.infer(&args[0]);
+            let lib_ty = self.infer(&args[0]);
+            self.check_ffi_lib_handle(&lib_ty, "invoke", args[0].0.into_range());
             let id_ty = self.infer(&args[1]);
             self.check_ffi_invoke_fn_id(&id_ty, args[1].0.into_range());
             if let Some((ty, var, fixed)) = self.ffi_invoke_fn_id_metadata(&args[1]) {
@@ -15458,11 +15531,14 @@ impl Checker {
                 }
                 vars.extend(method_vars);
             }
-            self.current_tuple_pack = Self::tuple_pack_ty_for_args(args, &mut self.counter);
+            let fqn = format!("{}::{}", owner_key, name);
+            // A method template's instance has its pack fixed (#1754).
+            self.current_tuple_pack = self
+                .variadic_instance_pack(&fqn)
+                .or_else(|| Self::tuple_pack_ty_for_args(args, &mut self.counter));
             let arg_tys = self.parse_arg_list(args);
             self.current_tuple_pack = None;
             let param_names: Vec<String> = arg_tys.iter().map(|(n, _)| n.clone()).collect();
-            let fqn = format!("{}::{}", owner_key, name);
             // FQN only, a bare `join` / `iter` key would shadow
             // `use path::{join}` and other free-function imports.
             self.fn_param_names.insert(fqn.clone(), param_names);
@@ -19590,6 +19666,19 @@ impl Checker {
         strip_readonly(&apply_ty_prune(&self.subst, recv_ty)).clone()
     }
 
+    /// What a method called on `recv_ty` returns: `readonly` too when the
+    /// receiver is, since the result may be `self` or reached from it (a
+    /// getter, `Ref::get`, `HashMap::get`), as calls derive values in
+    /// `hir::effects` (#1640). A trait method that declares `readonly A
+    /// self` is checked to hand out no mutable alias of `self`, so its
+    /// result keeps its type.
+    fn method_result(&self, recv_ty: &Ty, result: Ty, readonly_self: bool) -> Ty {
+        if readonly_self || !matches!(apply_ty_prune(&self.subst, recv_ty), Ty::Readonly(_)) {
+            return result;
+        }
+        self.readonly_view(result)
+    }
+
     fn check_readonly_external_mutation(&mut self, receiver_ty: &Ty, range: Range<usize>) {
         let pruned = apply_ty_prune(&self.subst, receiver_ty);
         if matches!(pruned, Ty::Readonly(_)) {
@@ -20089,13 +20178,28 @@ impl Checker {
     ) -> Option<Ty> {
         use parser::ast::EnumConstructPayload;
         if !self.is_static_method(owner, method) {
-            return None;
+            let key = self.class_member_fqn(owner, method);
+            let ty = self.foreign_method_template_call(&key, &range)?;
+            if let EnumConstructPayload::Tuple(args) = fields {
+                for arg in args {
+                    let _ = self.infer(arg);
+                }
+            }
+            return Some(ty);
         }
         let owner = self
             .resolve_class_key(owner)
             .unwrap_or_else(|| owner.to_string());
         self.check_inherent_method_access(&owner, method, &range);
         let fqn = format!("{}::{}", owner, method);
+        // A static method's `... xs` template calls its instance (#1754).
+        if self.is_variadic_template(&fqn) {
+            let args = match fields {
+                EnumConstructPayload::Tuple(args) => args.as_slice(),
+                _ => &[],
+            };
+            return Some(self.infer_variadic_call(&fqn, args, call_id, range));
+        }
         let scheme = self
             .methods
             .get(&owner)

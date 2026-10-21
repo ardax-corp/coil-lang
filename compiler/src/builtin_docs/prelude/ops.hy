@@ -486,10 +486,12 @@ trait Eq<T> {
     fn ne(T a, T b) -> bool {}
 }
 
-/// The ordering bundle: `Lt`, `Le`, `Gt` and `Ge`.
+/// The ordering bundle: `Lt`, `Le`, `Gt` and `Ge`, with `Eq`.
 ///
-/// `Ord` has no methods of its own. A bound `T: Ord` allows `<`, `<=`, `>`
-/// and `>=` on `T`, and range bounds (`a..b`) must be `Ord`. `int`, `float`,
+/// `Ord` has no methods of its own. A bound `T: Ord` allows `<`, `<=`, `>`,
+/// `>=`, `==` and `!=` on `T`, and range bounds (`a..b`) must be `Ord`.
+/// `Eq` is a superclass, so a type that is `Ord` is `Eq` too: an `impl Ord`
+/// or `#[derive(Ord)]` needs an `Eq` instance (`#[derive(Eq, Ord)]`). `int`, `float`,
 /// `byte` and `string` are ordered (a `string` by its UTF-8 bytes, so
 /// `"B" < "a"` and a prefix sorts first); `bool` is not. A `string` is not
 /// a range bound. `#[derive(Ord)]` orders an enum or class by its fields in
@@ -518,7 +520,7 @@ trait Eq<T> {
 ///     assert!(smaller((1, "b"), (1, "a")) == (1, "a"));
 /// }
 /// ```
-trait Ord<T: Lt + Le + Gt + Ge> {
+trait Ord<T: Lt + Le + Gt + Ge + Eq> {
 }
 
 /// The less-than operator `<`.
