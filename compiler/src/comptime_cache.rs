@@ -7,9 +7,9 @@
 //! evaluation's name and code (the sources of its module and every module
 //! that module uses, macro output included), its grants, and the cache and
 //! archive formats. It lists the files it read with their sha256
-//! ([`path_digest`]), so a changed file is a miss. The environment and
-//! programs run are consulted again only on a miss or with
-//! `--comptime-refresh`; their values are never stored, only names.
+//! ([`path_digest`]), so a changed file is a miss. The environment, the
+//! programs run and the network are consulted again only on a miss or with
+//! `--comptime-refresh`; environment values are never stored, only names.
 //! `--comptime-offline` refuses them on a miss.
 //!
 //! Evaluations that write files are not cached: a hit would skip the write.
@@ -155,7 +155,7 @@ impl Key {
             self.u64(list.len() as u64);
             list.iter().for_each(|p| self.text(p));
         }
-        for names in [&io.env, &io.exec] {
+        for names in [&io.env, &io.exec, &io.net] {
             let mut list = names.clone();
             list.sort();
             self.u64(list.len() as u64);
@@ -206,10 +206,13 @@ pub fn reads_unchanged(accesses: &[ComptimeAccess]) -> bool {
     })
 }
 
-/// Whether `entry` used the environment or ran a program: what
-/// `--comptime-refresh` computes again.
+/// Whether `entry` used the environment, ran a program or used the
+/// network: what `--comptime-refresh` computes again.
 pub fn uses_outside(entry: &Entry) -> bool {
-    entry.accesses.iter().any(|a| matches!(a, ComptimeAccess::Env(_) | ComptimeAccess::Exec(_)))
+    entry
+        .accesses
+        .iter()
+        .any(|a| matches!(a, ComptimeAccess::Env(_) | ComptimeAccess::Exec(_) | ComptimeAccess::Net(_)))
 }
 
 fn entry_path(dir: &Path, key: &str) -> PathBuf {
@@ -269,6 +272,10 @@ fn encode(entry: &Entry) -> Vec<u8> {
             ComptimeAccess::Exec(name) => {
                 out.push(3);
                 text(&mut out, name);
+            }
+            ComptimeAccess::Net(at) => {
+                out.push(4);
+                text(&mut out, at);
             }
         }
     }
@@ -335,6 +342,7 @@ fn decode(bytes: &[u8]) -> Option<Entry> {
             1 => ComptimeAccess::Write(resolve(&r.text()?)),
             2 => ComptimeAccess::Env(r.text()?),
             3 => ComptimeAccess::Exec(r.text()?),
+            4 => ComptimeAccess::Net(r.text()?),
             _ => return None,
         });
     }

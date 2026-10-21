@@ -5,8 +5,9 @@
 //! of them fails the evaluation. While recording ([`start_recording`]),
 //! each granted call is noted for the result cache.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use common::Value;
 use compiler::macros::{ComptimeAccess, ComptimeIo};
@@ -15,6 +16,38 @@ use machine::{FfiError, Heap, HostClosureFn, NativeFn, Object};
 thread_local! {
     static ACTIVE: RefCell<Option<Arc<ComptimeIo>>> = const { RefCell::new(None) };
     static RECORD: RefCell<Option<Vec<ComptimeAccess>>> = const { RefCell::new(None) };
+    static DEADLINE: Cell<Option<(Instant, u64)>> = const { Cell::new(None) };
+}
+
+/// Start the clock of one evaluation: its IO calls fail once `secs` pass.
+pub fn start_clock(secs: u64) {
+    DEADLINE.with(|d| d.set(Some((Instant::now() + Duration::from_secs(secs), secs))));
+}
+
+/// Milliseconds one network wait may take now: at most
+/// [`compiler::ComptimeLimits::NET_OP_SECS`], and a little past the end of
+/// the clock, so a wait cut short by it ends the evaluation late
+/// ([`clock_ran_out`]).
+fn net_wait_ms() -> i64 {
+    let op = Duration::from_secs(compiler::ComptimeLimits::NET_OP_SECS);
+    let left = DEADLINE
+        .with(|d| d.get())
+        .map_or(op, |(end, _)| end.saturating_duration_since(Instant::now()) + Duration::from_millis(100));
+    op.min(left).as_millis().max(1) as i64
+}
+
+/// The error of an evaluation that is past its clock.
+pub fn clock_ran_out() -> Option<String> {
+    match DEADLINE.with(|d| d.get()) {
+        Some((end, secs)) if Instant::now() >= end => Some(format!(
+            "it ran out of time: an evaluation may take {secs} s (`--comptime-timeout SECS` raises it)"
+        )),
+        _ => None,
+    }
+}
+
+fn check_clock() -> Result<(), String> {
+    clock_ran_out().map_or(Ok(()), Err)
 }
 
 /// Note the IO this thread's compile-time VM does from now on.
@@ -86,8 +119,10 @@ enum Gate {
     Env,
     /// Argument `0` is a program to run.
     Exec,
-    /// A stream operation: the stream came from a granted `open`.
+    /// A stream operation: the stream came from a granted `open` or connect.
     Stream,
+    /// `tcp_connect(host, port)` / `tcp_connect_timeout(host, port, ms)`.
+    Net,
 }
 
 fn gate_of(name: &str) -> Option<Gate> {
@@ -104,7 +139,9 @@ fn gate_of(name: &str) -> Option<Gate> {
         "open" => Gate::Open,
         "env_var" => Gate::Env,
         "env_exec" => Gate::Exec,
-        "read" | "write" | "close" | "write_from" => Gate::Stream,
+        "read" | "write" | "close" | "write_from" | "await_readable" | "await_writable" | "tcp_peer_addr"
+        | "tcp_local_addr" | "tcp_set_nodelay" | "tcp_shutdown" => Gate::Stream,
+        "tcp_connect" | "tcp_connect_timeout" => Gate::Net,
         _ => return None,
     })
 }
@@ -152,6 +189,13 @@ fn check(io: &ComptimeIo, gate: Gate, heap: &Heap, args: &[Value]) -> Result<(),
             Ok(())
         }
         Gate::Stream => Ok(()),
+        Gate::Net => {
+            let host = arg(0)?;
+            let port = args.get(1).map_or(0, |v| v.as_int());
+            io.check_net(&host, port)?;
+            note(ComptimeAccess::Net(format!("{host}:{port}")));
+            Ok(())
+        }
     }
 }
 
@@ -168,7 +212,35 @@ pub fn gated(name: &str, native: Arc<dyn NativeFn>) -> Option<Arc<dyn NativeFn>>
                 "`{name}` is not available here: only a `const`, a `comptime` expression or a macro may do IO while compiling"
             )));
         };
+        check_clock().map_err(FfiError::Panic)?;
         check(&io, gate, heap, args).map_err(FfiError::Panic)?;
-        native.invoke(heap, args)
+        if matches!(gate, Gate::Net) {
+            return Ok(Some(connect(heap, args)));
+        }
+        let out = native.invoke(heap, args);
+        // A wait that ran into the end of the clock ends the evaluation.
+        check_clock().map_err(FfiError::Panic)?;
+        out
     })))
+}
+
+/// A granted connect, waiting at most [`net_wait_ms`] (less when the call
+/// asked for less), with each read and write on the stream bounded by what
+/// [`net_wait_ms`] is then.
+fn connect(heap: &mut Heap, args: &[Value]) -> Value {
+    use machine::io::{as_result_value, stream_set_read_timeout, stream_set_write_timeout, tcp_connect_timeout, value_as_string};
+    let host = value_as_string(heap, args[0]).unwrap_or_default();
+    let port = args[1].as_int();
+    let wait = net_wait_ms();
+    let ms = match args.get(2).map(|v| v.as_int()) {
+        Some(asked) if asked > 0 => asked.min(wait),
+        _ => wait,
+    };
+    let stream = tcp_connect_timeout(heap, &host, port, ms);
+    if let Ok(s) = stream {
+        let wait = net_wait_ms();
+        let _ = stream_set_read_timeout(heap, s, wait);
+        let _ = stream_set_write_timeout(heap, s, wait);
+    }
+    as_result_value(heap, stream)
 }

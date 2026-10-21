@@ -336,6 +336,17 @@ read environment variables and run programs only as the build allows:
   under `PATH` (a file or directory).
 - `--comptime-env [MODULE=]NAME`, `--comptime-exec [MODULE=]NAME`: one
   variable, one program (matched by file stem).
+- `--comptime-net [MODULE=]HOST[:PORT]`: TCP connections to `HOST` (any
+  port) or `HOST:PORT` (`tcp_connect` / `tcp_connect_timeout`; the stream
+  natives, `await_readable` / `await_writable` and `tcp_peer_addr` … follow
+  a granted connect). Listening, accepting and UDP stay unavailable. The
+  host is matched as written, so `localhost` does not grant `127.0.0.1`.
+- `--comptime-timeout SECS` (default 300): wall-clock time per evaluation
+  (`ComptimeLimits::timeout_secs`, clock started by `io_gate::start_clock`).
+  Each connect, and each read or write on a connected stream, waits at most
+  30 s (`NET_OP_SECS`) and at most until just past the clock; an evaluation
+  past its clock fails (E0134 / the macro's error) even when its code
+  handled the timeout as an `Err`. Pure code is bounded by the step budget.
 - Each flag repeats. `MODULE=` scopes a grant to one module (a module
   path such as `config::load`); without it the grant covers every module,
   the entry file included. `HostGrants::comptime_io` holds them (`ComptimeGrants`,
@@ -387,13 +398,13 @@ again:
   `$XDG_CACHE_HOME/coil/comptime`, `~/.cache/coil/comptime`. Writes go to a
   temporary file and are renamed into place; a cache that cannot be written
   only costs time.
-- `--comptime-refresh`: entries that used the environment or a program are
-  ignored and computed again; a value that differs is reported as E0135
+- `--comptime-refresh`: entries that used the environment, a program or the
+  network are ignored and computed again; a value that differs is reported as E0135
   (info). Entries that only read files need no refresh: a changed file is
   already a miss.
-- `--comptime-offline`: on a miss, the environment and programs are refused
-  (`ComptimeIo::offline`), with an error that says to build once without
-  it. File reads still work. Environment values are never stored, only
+- `--comptime-offline`: on a miss, the environment, programs and the
+  network are refused (`ComptimeIo::offline`), with an error that says to
+  build once without it. File reads still work. Environment values are never stored, only
   names.
 - A cached const is restored into the evaluating VM instead of calling its
   initializer (`ConstEval::cached`), so later consts read it as usual and
