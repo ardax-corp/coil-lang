@@ -1431,7 +1431,12 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
 
             E::Lambda { args, body, .. } => self.lambda(b, node, args, body),
             E::Defer { captures, body } => {
-                let captures = captures.iter().map(|c| b.lookup(c)).collect();
+                let captures: Vec<Option<LocalId>> = captures.iter().map(|c| b.lookup(c)).collect();
+                // The thunk's frame copies each capture as one word (#1758):
+                // it is never split into slots, as a lambda's capture.
+                for local in captures.iter().flatten() {
+                    b.body.locals[local.0 as usize].captured = true;
+                }
                 let body = self.expr(b, body);
                 self.emit_ty(b, node, HirKind::Defer { captures, body }, Some(coil_ty::unit()))
             }
