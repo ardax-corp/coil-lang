@@ -1264,6 +1264,13 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 let args = fields.iter().map(|f| self.expr(b, &f.value)).collect();
                 self.emit(b, node, HirKind::Make { kind: MakeKind::Record(names), args })
             }
+            // `m::F(args)` / `C::f(args)` of a `const` or `static` function
+            // value: a call of the value it reads (#1705).
+            E::Construct { enum_name, variant_name, fields: EnumConstructPayload::Tuple(items) }
+                if self.checker.qualified_value_call_at(node.0.start, node.0.end).is_some() =>
+            {
+                self.qualified_value_call(b, node, enum_name, variant_name, items)
+            }
             // `Trait::m(args)` is the free call `m(args)` the checker
             // resolved within `Trait`.
             E::Construct {
@@ -1893,6 +1900,9 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             E::QualifiedAccess { .. } if self.checker.qualified_trait_call_at(node.0.start, node.0.end).is_some() => {
                 self.qualified_trait_call(b, node, args)
             }
+            E::QualifiedAccess { owner, member } if self.checker.qualified_value_call_at(node.0.start, node.0.end).is_some() => {
+                self.qualified_value_call(b, node, owner, member, args)
+            }
             E::QualifiedAccess { owner, member } => {
                 if self.checker.tag_for(owner, member).is_some() {
                     let args = self.exprs(b, args);
@@ -1953,6 +1963,16 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         let stmts = self.named_args_in_source_order(b, span_of(node), &mut args);
         let call = self.emit(b, node, HirKind::Call { callee: Callee::Named { name, def, overload }, args });
         self.after(b, span_of(node), stmts, call)
+    }
+
+    /// `owner::member(args)` the checker typed as a call of the `const` or
+    /// `static` function value `owner::member` (#1705): read it, then call
+    /// the value, as a bare `F(args)` is.
+    fn qualified_value_call(&mut self, b: &mut BodyBuilder, node: &Output<'_>, owner: &str, member: &str, args: &[Output<'_>]) -> HirId {
+        let ty = self.checker.qualified_value_call_at(node.0.start, node.0.end).cloned();
+        let callee = self.synth(b, span_of(node), HirKind::Global { name: format!("{owner}::{member}"), def: None }, ty);
+        let args = self.exprs(b, args);
+        self.emit(b, node, HirKind::Call { callee: Callee::Value(callee), args })
     }
 
     /// Whether the bare `name` (resolved to `def`) reads a `const` or
