@@ -234,6 +234,9 @@ impl Checker {
             ffi_fn_variadic_by_field: HashMap::new(),
             ffi_fn_nfixed_by_field: HashMap::new(),
             ffi_fn_arg_tags_by_field: HashMap::new(),
+            ffi_fn_by_static: HashMap::new(),
+            ffi_prescan_statics: HashSet::new(),
+            ffi_prescan_locals: HashSet::new(),
             ffi_fn_param_invoke_ret: HashMap::new(),
             ffi_fn_param_invoke_args: HashMap::new(),
             current_function: None,
@@ -1609,6 +1612,9 @@ impl Checker {
         self.ffi_fn_variadic_by_field.clear();
         self.ffi_fn_nfixed_by_field.clear();
         self.ffi_fn_arg_tags_by_field.clear();
+        self.ffi_fn_by_static.clear();
+        self.ffi_prescan_statics.clear();
+        self.ffi_prescan_locals.clear();
         self.ffi_fn_param_invoke_ret.clear();
         self.ffi_fn_param_invoke_args.clear();
         self.current_function = None;
@@ -3561,6 +3567,7 @@ impl Checker {
                 };
                 self.static_decl_frames
                     .insert(fqn.clone(), self.env.depth().saturating_sub(1));
+                self.record_ffi_declare_for_static(fqn.clone(), init);
                 self.register_static_slot(fqn, *is_const, slot_ty.clone(), range.clone());
                 self.env
                     .insert_top(name.to_string(), Scheme::mono(slot_ty.clone()));
@@ -12773,8 +12780,28 @@ impl Checker {
     }
 
     fn record_ffi_declare_metadata(&mut self, key: String, dargs: &[Output], store_field: bool) {
-        if dargs.len() != 4 && dargs.len() != 5 {
+        let Some((ret, variadic, nfixed, arg_tags)) = self.ffi_declare_signature(dargs) else {
             return;
+        };
+        if store_field {
+            self.ffi_fn_ret_by_field.insert(key.clone(), ret);
+            self.ffi_fn_variadic_by_field.insert(key.clone(), variadic);
+            self.ffi_fn_nfixed_by_field.insert(key.clone(), nfixed);
+            self.ffi_fn_arg_tags_by_field.insert(key, arg_tags);
+        } else {
+            self.ffi_fn_ret_owner.insert(key.clone(), self.ffi_binding_fn());
+            self.ffi_fn_ret_tys.insert(key.clone(), ret);
+            self.ffi_fn_variadic.insert(key.clone(), variadic);
+            self.ffi_fn_nfixed.insert(key.clone(), nfixed);
+            self.ffi_fn_arg_tags.insert(key, arg_tags);
+        }
+    }
+
+    /// `declare(lib, name, params, ret[, variadic])`'s return type, variadic
+    /// flag, fixed arity and parameter tags.
+    fn ffi_declare_signature(&self, dargs: &[Output]) -> Option<(Ty, bool, usize, Vec<u32>)> {
+        if dargs.len() != 4 && dargs.len() != 5 {
+            return None;
         }
         let ret = self.ty_from_ffi_type_expr(&dargs[3]);
         let (nfixed, arg_tags) = match dargs[2].1.as_ref() {
@@ -12796,17 +12823,28 @@ impl Checker {
         } else {
             false
         };
-        if store_field {
-            self.ffi_fn_ret_by_field.insert(key.clone(), ret);
-            self.ffi_fn_variadic_by_field.insert(key.clone(), variadic);
-            self.ffi_fn_nfixed_by_field.insert(key.clone(), nfixed);
-            self.ffi_fn_arg_tags_by_field.insert(key, arg_tags);
-        } else {
-            self.ffi_fn_ret_owner.insert(key.clone(), self.ffi_binding_fn());
-            self.ffi_fn_ret_tys.insert(key.clone(), ret);
-            self.ffi_fn_variadic.insert(key.clone(), variadic);
-            self.ffi_fn_nfixed.insert(key.clone(), nfixed);
-            self.ffi_fn_arg_tags.insert(key, arg_tags);
+        Some((ret, variadic, nfixed, arg_tags))
+    }
+
+    /// The FQN of the module `static` that `name` means here, unless a
+    /// parameter or local shadows it (#1667).
+    fn ffi_static_fqn(&self, name: &str) -> Option<String> {
+        let fqn = self.qualify_module_name(name);
+        let decl = *self.static_decl_frames.get(&fqn)?;
+        (self.env.lookup_frame(name) == Some(decl)).then_some(fqn)
+    }
+
+    /// The FQN of the module `static` `name` means during the `invoke`
+    /// pre-pass, which runs before statics are declared.
+    fn ffi_prescan_static_fqn(&self, name: &str) -> Option<String> {
+        (self.ffi_prescan_statics.contains(name) && !self.ffi_prescan_locals.contains(name))
+            .then(|| self.qualify_module_name(name))
+    }
+
+    /// Record the `declare` signature `value` gives the static `fqn`.
+    fn record_ffi_declare_for_static(&mut self, fqn: String, value: &Output) {
+        if let Some(sig) = Self::declare_args_from_expr(value).and_then(|dargs| self.ffi_declare_signature(dargs)) {
+            self.ffi_fn_by_static.insert(fqn, sig);
         }
     }
 
@@ -12825,6 +12863,10 @@ impl Checker {
     fn ffi_invoke_fn_id_metadata(&self, expr: &Output) -> Option<(Ty, bool, usize)> {
         match expr.1.as_ref() {
             Expression::Identifier(name) => {
+                if let Some(fqn) = self.ffi_static_fqn(name) {
+                    let (ty, variadic, nfixed, _) = self.ffi_fn_by_static.get(&fqn)?;
+                    return Some((ty.clone(), *variadic, *nfixed));
+                }
                 if let Some(ty) = self.ffi_fn_ret_tys.get(*name).filter(|_| self.ffi_local_binding_here(name)) {
                     let variadic = self.ffi_fn_variadic.get(*name).copied().unwrap_or(false);
                     let nfixed = self.ffi_fn_nfixed.get(*name).copied().unwrap_or(0);
@@ -12859,6 +12901,9 @@ impl Checker {
     fn ffi_invoke_arg_tags(&self, expr: &Output) -> Option<Vec<u32>> {
         match expr.1.as_ref() {
             Expression::Identifier(name) => {
+                if let Some(fqn) = self.ffi_static_fqn(name) {
+                    return self.ffi_fn_by_static.get(&fqn).map(|sig| sig.3.clone());
+                }
                 if let Some(tys) = self.ffi_fn_arg_tags.get(*name).filter(|_| self.ffi_local_binding_here(name)) {
                     return Some(tys.clone());
                 }
@@ -12883,7 +12928,10 @@ impl Checker {
         local_class_scopes: &[HashMap<String, String>],
     ) -> Option<Vec<u32>> {
         match expr.1.as_ref() {
-            Expression::Identifier(name) => self.ffi_fn_arg_tags.get(*name).filter(|_| self.ffi_local_binding_here(name)).cloned(),
+            Expression::Identifier(name) => match self.ffi_prescan_static_fqn(name) {
+                Some(fqn) => self.ffi_fn_by_static.get(&fqn).map(|sig| sig.3.clone()),
+                None => self.ffi_fn_arg_tags.get(*name).filter(|_| self.ffi_local_binding_here(name)).cloned(),
+            },
             Expression::Access(receiver, field) => {
                 let class = match receiver.1.as_ref() {
                     Expression::Identifier("self") => self.impl_owner.clone()?,
@@ -12901,6 +12949,12 @@ impl Checker {
     }
 
     fn maybe_record_ffi_declare_for_field_assignment(&mut self, target: &Output, value: &Output) {
+        if let Expression::Identifier(name) = target.1.as_ref()
+            && let Some(fqn) = self.ffi_static_fqn(name)
+        {
+            self.record_ffi_declare_for_static(fqn, value);
+            return;
+        }
         let Expression::Access(receiver, field) = target.1.as_ref() else {
             return;
         };
@@ -12917,6 +12971,17 @@ impl Checker {
     fn maybe_record_ffi_declare_for_let_init(&mut self, name: &str, init: &Output) {
         if let Some(dargs) = Self::declare_args_from_expr(init) {
             self.record_ffi_declare_metadata(name.to_string(), dargs, false);
+            return;
+        }
+        if let Expression::Identifier(src) = init.1.as_ref()
+            && let Some(fqn) = self.ffi_static_fqn(src)
+            && let Some((ret, variadic, nfixed, arg_tags)) = self.ffi_fn_by_static.get(&fqn).cloned()
+        {
+            self.ffi_fn_ret_owner.insert(name.to_string(), self.ffi_binding_fn());
+            self.ffi_fn_ret_tys.insert(name.to_string(), ret);
+            self.ffi_fn_variadic.insert(name.to_string(), variadic);
+            self.ffi_fn_nfixed.insert(name.to_string(), nfixed);
+            self.ffi_fn_arg_tags.insert(name.to_string(), arg_tags);
             return;
         }
         if let Expression::Access(receiver, field) = init.1.as_ref()
@@ -12983,6 +13048,10 @@ impl Checker {
     ) -> Option<(Ty, bool, usize)> {
         match expr.1.as_ref() {
             Expression::Identifier(name) => {
+                if let Some(fqn) = self.ffi_prescan_static_fqn(name) {
+                    let (ty, variadic, nfixed, _) = self.ffi_fn_by_static.get(&fqn)?;
+                    return Some((ty.clone(), *variadic, *nfixed));
+                }
                 if let Some(ty) = self.ffi_fn_ret_tys.get(*name).filter(|_| self.ffi_local_binding_here(name)) {
                     let variadic = self.ffi_fn_variadic.get(*name).copied().unwrap_or(false);
                     let nfixed = self.ffi_fn_nfixed.get(*name).copied().unwrap_or(0);
@@ -13254,6 +13323,16 @@ impl Checker {
     pub fn ffi_field_fn_id_variadic(&self, class: &str, field: &str) -> Option<bool> {
         let key = Self::qualified_class_field_key(class, field);
         self.ffi_fn_ret_by_field.contains_key(&key).then(|| self.ffi_fn_variadic_by_field.get(&key).copied().unwrap_or(false))
+    }
+
+    /// Whether the fn id held by the module `static` or `const` `name`
+    /// (bare or qualified) was declared variadic (`None` when no `declare`
+    /// was stored there, #1667).
+    pub fn ffi_static_fn_id_variadic(&self, name: &str) -> Option<bool> {
+        self.ffi_fn_by_static
+            .get(name)
+            .or_else(|| self.ffi_fn_by_static.get(&self.qualify_module_name(name)))
+            .map(|&(_, variadic, _, _)| variadic)
     }
 
     pub fn ffi_fn_id_variadic(&self, name: &str) -> Option<bool> {
@@ -15406,6 +15485,13 @@ impl Checker {
     /// Pre-pass: record `declare` metadata and param call-site flow before main
     /// inference so helpers defined before their callers still refine `invoke`.
     fn pre_pass_ffi_invoke_param_flow(&mut self, ast: &Output) {
+        if let Expression::Program(children) = Self::pre_pass_unwrap_stmt(ast).1.as_ref() {
+            for child in children {
+                if let Expression::StaticDecl { name, .. } = Self::pre_pass_unwrap_stmt(child).1.as_ref() {
+                    self.ffi_prescan_statics.insert(name.to_string());
+                }
+            }
+        }
         let mut local_class_scopes = Vec::new();
         self.pre_pass_ffi_invoke_param_flow_walk(ast, &mut local_class_scopes);
     }
@@ -15437,9 +15523,13 @@ impl Checker {
             }
             Expression::Function { name, args, body, .. } => {
                 let prev_fn = self.ffi_prescan_fn.replace(name.to_string());
+                let prev_locals = std::mem::take(&mut self.ffi_prescan_locals);
                 let mut scope = HashMap::new();
                 if let Expression::Fragment(children) = args.1.as_ref() {
                     for child in children {
+                        if let Expression::Argument { name, .. } = child.1.as_ref() {
+                            self.ffi_prescan_locals.insert(name.to_string());
+                        }
                         if let Expression::Argument {
                             ty: Some(ty),
                             name,
@@ -15457,6 +15547,7 @@ impl Checker {
                 }
                 local_class_scopes.pop();
                 self.ffi_prescan_fn = prev_fn;
+                self.ffi_prescan_locals = prev_locals;
             }
             Expression::Call { name, args } => {
                 if let Expression::Identifier(fn_name) = name.1.as_ref() {
@@ -15486,6 +15577,11 @@ impl Checker {
                 }
             }
             Expression::Assignment(target, value) => {
+                if let Expression::Identifier(name) = target.1.as_ref()
+                    && let Some(fqn) = self.ffi_prescan_static_fqn(name)
+                {
+                    self.record_ffi_declare_for_static(fqn, value);
+                }
                 self.maybe_pre_record_field_declare(target, value, local_class_scopes);
                 self.pre_pass_ffi_invoke_param_flow_walk(target, local_class_scopes);
                 self.pre_pass_ffi_invoke_param_flow_walk(value, local_class_scopes);
@@ -15591,7 +15687,10 @@ impl Checker {
                     self.pre_pass_ffi_invoke_param_flow_walk(index, local_class_scopes);
                 }
             }
-            Expression::StaticDecl { ty, init, .. } => {
+            Expression::StaticDecl { name, ty, init, .. } => {
+                if let Some(fqn) = self.ffi_prescan_static_fqn(name) {
+                    self.record_ffi_declare_for_static(fqn, init);
+                }
                 if let Some(ty) = ty {
                     self.pre_pass_ffi_invoke_param_flow_walk(ty, local_class_scopes);
                 }
@@ -15625,6 +15724,9 @@ impl Checker {
                     i += 1;
                 }
                 Expression::Variable(var_name, _) => {
+                    if self.ffi_prescan_fn.is_some() {
+                        self.ffi_prescan_locals.insert(var_name.to_string());
+                    }
                     self.pre_pass_ffi_invoke_param_flow_walk(stmt, local_class_scopes);
                     if i + 1 < children.len() {
                         let next = Self::pre_pass_unwrap_stmt(&children[i + 1]);
