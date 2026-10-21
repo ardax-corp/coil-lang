@@ -2638,9 +2638,6 @@ impl Compiler {
             // A bare `... name` packs its arguments into a tuple.
             let tuple_rest = self.checker.fn_tuple_rest(&lookup) || self.checker.fn_tuple_rest(name);
             let generic = self.checker.is_generic_fn(&lookup);
-            if generic && shaped {
-                return Err("call-argument");
-            }
             // An overloaded name shapes by the overload the checker picked.
             let (names, has_rest, rest_ty) = if self.checker.is_overloaded(name) || self.checker.is_overloaded(&lookup) {
                 let e = &body.exprs[i];
@@ -2772,7 +2769,7 @@ impl Compiler {
             // Named arguments leaving holes are a partial application of
             // the filled parameters (its mask is the checker's fill mask).
             let filled = slots.iter().take_while(|s| s.is_some()).count();
-            if filled < fixed_count && has_rest {
+            if filled < fixed_count && (has_rest || generic) {
                 return Err("call-argument");
             }
             let mut new_args = slots.into_iter().flatten().collect::<Vec<_>>();
