@@ -59,7 +59,8 @@ pub struct Scoped<T> {
 }
 
 impl<T> Scoped<T> {
-    /// `MODULE=VALUE` scopes to `MODULE`; anything else is for any module.
+    /// `MODULE=VALUE` scopes to `MODULE` and the modules under it
+    /// (`MODULE::…`); anything else is for any module.
     /// `value` turns the text after `=` (or the whole text) into a `T`.
     pub fn parse(text: &str, value: impl FnOnce(&str) -> T) -> Self {
         match text.split_once('=') {
@@ -72,7 +73,9 @@ impl<T> Scoped<T> {
     }
 
     fn applies_to(&self, module: &str) -> bool {
-        self.module.as_deref().is_none_or(|m| m == module)
+        self.module.as_deref().is_none_or(|m| {
+            module == m || module.strip_prefix(m).is_some_and(|rest| rest.starts_with("::"))
+        })
     }
 }
 

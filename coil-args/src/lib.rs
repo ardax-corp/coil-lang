@@ -161,7 +161,7 @@ pub struct HostGrantFlags {
     #[arg(long = "comptime-mem", value_name = "MIB", value_parser = clap::value_parser!(u64).range(1..=1 << 40))]
     pub comptime_mem: Option<u64>,
     /// Let compile-time code read files under PATH; `MODULE=PATH` for code in
-    /// MODULE only (repeatable)
+    /// MODULE and the modules under it only (repeatable)
     #[arg(long = "comptime-read", value_name = "[MODULE=]PATH", action = clap::ArgAction::Append)]
     pub comptime_read: Vec<String>,
     /// Let compile-time code write files under PATH (repeatable, `MODULE=` as above)
