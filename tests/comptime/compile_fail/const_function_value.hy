@@ -1,4 +1,5 @@
-// Expected: E0134 — a function value has no compile-time form.
+// Expected: E0134 — a `comptime` expression's value must exist while
+// compiling, and a function value has no compile-time form.
 class Holder {
     pub f: fn(int) -> int,
 }
@@ -11,7 +12,6 @@ fn make() -> Holder {
     return new Holder(twice);
 }
 
-const H = make();
-
 fn main() {
+    let h = comptime make();
 }
