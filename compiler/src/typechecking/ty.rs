@@ -623,6 +623,26 @@ pub fn strip_readonly(ty: &Ty) -> &Ty {
     }
 }
 
+/// `ty` with every `readonly` qualifier in it peeled: the type a clone is
+/// keyed and built at, since `readonly` has no runtime form (#1555, #1806).
+pub fn strip_readonly_deep(ty: &Ty) -> Ty {
+    let rec = |items: &[Ty]| items.iter().map(strip_readonly_deep).collect::<Vec<_>>();
+    match ty {
+        Ty::Readonly(inner) => strip_readonly_deep(inner),
+        Ty::App(head, args) => Ty::App(Box::new(strip_readonly_deep(head)), rec(args)),
+        Ty::Fun(a, b) => Ty::Fun(Box::new(strip_readonly_deep(a)), Box::new(strip_readonly_deep(b))),
+        Ty::Tuple(items) => Ty::Tuple(rec(items)),
+        Ty::Array { element, length } => Ty::Array {
+            element: Box::new(strip_readonly_deep(element)),
+            length: *length,
+        },
+        Ty::Record { fields } => Ty::Record {
+            fields: fields.iter().map(|(n, t)| (n.clone(), strip_readonly_deep(t))).collect(),
+        },
+        _ => ty.clone(),
+    }
+}
+
 /// Whether `name` is a builtin opaque handle: an IO `Stream` or a
 /// `thread` handle. It has no fields, indices or `push` a write could go
 /// through; what it refers to changes only through its own host calls.

@@ -4186,6 +4186,10 @@ impl Compiler {
         }
         let call_ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, call)?);
         Self::bind_scheme_vars(&ret_ty, &call_ty, &mut map);
+        // A `readonly` type argument is its type's: one clone for both (#1806).
+        for ty in map.values_mut() {
+            *ty = crate::typechecking::ty::strip_readonly_deep(ty);
+        }
         // Each type argument one word in its own layout (no pair).
         let word = |ty: &Ty| {
             crate::hir::layout::ty_is_closed(ty)
