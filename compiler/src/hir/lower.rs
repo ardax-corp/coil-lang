@@ -1399,6 +1399,7 @@ pub fn assigns_local(hir: &HirBody, body: HirId, local: LocalId) -> bool {
 pub fn ffi_fn_variadic(body: &HirBody, checker: &Checker, f: HirId) -> bool {
     match &body.expr(f).kind {
         HirKind::Local(local) => checker.ffi_fn_id_variadic(&body.local(*local).name).unwrap_or(false),
+        HirKind::Global { name, .. } => checker.ffi_static_fn_id_variadic(name).unwrap_or(false),
         HirKind::Field { base, name } => body
             .expr(*base)
             .ty
