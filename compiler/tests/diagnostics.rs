@@ -444,6 +444,27 @@ fn main() {
     assert_eq!(unused_result_lines(src), vec![6]);
 }
 
+// #1752: an assignment's value is the stored `Result`, which its target
+// keeps, so `x = r;`, `c.f = r;` and `v[i] = r;` do not warn.
+#[test]
+fn result_assignment_statements_do_not_warn() {
+    let src = r#"
+class Cell {
+    pub r: Result<int, string>,
+}
+fn main() {
+    let x = Ok(1);
+    x = Err("a");
+    let c = new Cell(Ok(2));
+    c.r = Err("b");
+    let v = Vec::from([Ok(3)]);
+    v[0] = Err("c");
+    let _ = x;
+}
+"#;
+    assert_eq!(unused_result_lines(src), Vec::<usize>::new());
+}
+
 // #1752: only `Result` warns for now; other dropped values (`Option`,
 // `int`) stay silent.
 #[test]

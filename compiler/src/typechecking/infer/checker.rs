@@ -6910,7 +6910,14 @@ impl Checker {
     /// it any error it holds (#1752), so it warns, like Rust's
     /// `unused_must_use`. `expr?;` is not one (`?` consumes the `Result`),
     /// a block's tail is its value, and `let _ = expr;` discards on purpose.
+    /// An assignment's value is the stored `Result`, which the target keeps.
     fn warn_unused_result(&mut self, ty: &Ty, stmt: &Output) {
+        if matches!(
+            unwrap_expr_wrappers(stmt).1.as_ref(),
+            Expression::Assignment(..) | Expression::CompoundAssign(..)
+        ) {
+            return;
+        }
         let ty = apply_ty_prune(&self.subst, ty);
         if !is_result_ty(&ty) {
             return;
