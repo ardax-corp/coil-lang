@@ -372,6 +372,73 @@ fn descriptions_name_mutated_parameters() {
     assert_eq!(get("P::get"), "pure");
 }
 
+const COUNTER: &str = "
+class Counter {
+    pub n: int,
+}
+impl Counter {
+    pub fn bump() {
+        self.n = self.n + 1;
+    }
+    pub fn twice() {
+        self.bump();
+        self.bump();
+    }
+}
+static let G: int = 0;
+";
+
+#[test]
+fn a_method_that_writes_self_mutates_only_through_it() {
+    let (m, out) = summaries(COUNTER);
+    for name in ["Counter::bump", "Counter::twice"] {
+        let s = of(&m, &out, name);
+        assert!(s.flags.contains(EffectFlags::HEAP_MUT), "{name}: {s:?}");
+        assert_eq!(s.param_only & EffectFlags::HEAP_MUT, EffectFlags::HEAP_MUT, "{name}: {s:?}");
+    }
+}
+
+#[test]
+fn calling_it_on_an_object_the_caller_made_is_pure() {
+    let src = format!("{COUNTER}\nfn made() -> int {{ let c = new Counter(0); c.twice(); return c.n; }}");
+    let (m, out) = summaries(&src);
+    let s = of(&m, &out, "made");
+    assert!(s.is_pure(), "{s:?}");
+}
+
+#[test]
+fn calling_it_on_an_object_that_escapes_is_not_pure() {
+    let src = format!(
+        "{COUNTER}
+fn returned() -> Counter {{ let c = new Counter(0); c.bump(); return c; }}
+fn on_argument(Counter c) {{ c.bump(); }}
+fn aliased() -> int {{ let c = new Counter(0); let d = c; c.bump(); return d.n; }}"
+    );
+    let (m, out) = summaries(&src);
+    for name in ["returned", "on_argument", "aliased"] {
+        let s = of(&m, &out, name);
+        assert!(s.flags.contains(EffectFlags::HEAP_MUT), "{name}: {s:?}");
+    }
+}
+
+#[test]
+fn a_method_that_also_writes_a_static_is_not_discharged() {
+    let src = format!(
+        "{COUNTER}
+impl Counter {{
+    pub fn count() {{
+        self.n = self.n + 1;
+        G = G + 1;
+    }}
+}}
+fn made() -> int {{ let c = new Counter(0); c.count(); return c.n; }}"
+    );
+    let (m, out) = summaries(&src);
+    let s = of(&m, &out, "Counter::count");
+    assert_eq!(s.param_only & EffectFlags::HEAP_MUT, 0, "{s:?}");
+    assert!(of(&m, &out, "made").flags.contains(EffectFlags::HEAP_MUT));
+}
+
 fn readonly_errors(src: &str) -> Vec<String> {
     let owned = Box::leak(src.to_string().into_boxed_str());
     let ast = parser::Pratt::default().parse(owned).expect("parse");

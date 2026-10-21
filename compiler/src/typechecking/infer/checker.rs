@@ -213,6 +213,7 @@ impl Checker {
             enum_scalar: BTreeMap::new(),
             bare_constructs_by_span: HashMap::new(),
             qualified_trait_calls_by_span: HashMap::new(),
+            qualified_value_calls_by_span: HashMap::new(),
             bare_patterns_by_span: HashMap::new(),
             bare_cases_by_module: HashMap::new(),
             pending_exhaustive: Vec::new(),
@@ -234,6 +235,9 @@ impl Checker {
             ffi_fn_variadic_by_field: HashMap::new(),
             ffi_fn_nfixed_by_field: HashMap::new(),
             ffi_fn_arg_tags_by_field: HashMap::new(),
+            ffi_fn_by_static: HashMap::new(),
+            ffi_prescan_statics: HashSet::new(),
+            ffi_prescan_locals: HashSet::new(),
             ffi_fn_param_invoke_ret: HashMap::new(),
             ffi_fn_param_invoke_args: HashMap::new(),
             current_function: None,
@@ -659,6 +663,16 @@ impl Checker {
             }
         }
         self.scope_bindings.insert(local, export);
+    }
+
+    /// The built-in enum a `use … as` alias names (`Opt` after
+    /// `use prelude::Option as Opt;`), so the alias works as a type and
+    /// constructor head like the original name (#1700).
+    fn builtin_enum_alias(&self, name: &str) -> Option<&'static str> {
+        match self.scope_bindings.get(name)? {
+            BuiltinExport::Enum { name: builtin } if *builtin != name => Some(builtin),
+            _ => None,
+        }
     }
 
     /// Look up a short name in the virtual-module scope.
@@ -1596,6 +1610,7 @@ impl Checker {
         self.enum_scalar.retain(|k, _| k.contains("::"));
         self.bare_constructs_by_span.clear();
         self.qualified_trait_calls_by_span.clear();
+        self.qualified_value_calls_by_span.clear();
         self.bare_patterns_by_span.clear();
         self.c_structs.clear();
         self.callback_sigs.clear();
@@ -1609,6 +1624,9 @@ impl Checker {
         self.ffi_fn_variadic_by_field.clear();
         self.ffi_fn_nfixed_by_field.clear();
         self.ffi_fn_arg_tags_by_field.clear();
+        self.ffi_fn_by_static.clear();
+        self.ffi_prescan_statics.clear();
+        self.ffi_prescan_locals.clear();
         self.ffi_fn_param_invoke_ret.clear();
         self.ffi_fn_param_invoke_args.clear();
         self.current_function = None;
@@ -3561,6 +3579,7 @@ impl Checker {
                 };
                 self.static_decl_frames
                     .insert(fqn.clone(), self.env.depth().saturating_sub(1));
+                self.record_ffi_declare_for_static(fqn.clone(), init);
                 self.register_static_slot(fqn, *is_const, slot_ty.clone(), range.clone());
                 self.env
                     .insert_top(name.to_string(), Scheme::mono(slot_ty.clone()));
@@ -5259,6 +5278,9 @@ impl Checker {
         let ident = match name.1.as_ref() {
             Expression::Identifier(n) => n.to_string(),
             Expression::QualifiedAccess { owner, member } => {
+                if let Some(ty) = self.try_infer_qualified_value_call(owner, member, args.as_deref().unwrap_or(&[]), id, range.clone()) {
+                    return ty;
+                }
                 let fqn = self.class_member_fqn(owner, member);
                 if self.static_slot_types.contains_key(&fqn) {
                     return self.error_with_help(
@@ -6992,6 +7014,8 @@ impl Checker {
         if matches!(lookup, Ty::Var(_) | Ty::Never) || Self::is_numeric_operand_ty(&lookup) {
             return;
         }
+        // A tuple of `Ord` items orders lexicographically (#1721).
+        self.ensure_structural_tuple_ord(&lookup);
         if self
             .generics
             .find_instance(class, std::slice::from_ref(&lookup))
@@ -10417,6 +10441,10 @@ impl Checker {
             self.ensure_structural_length(ty);
             return;
         }
+        if matches!(class, "Ord" | "Lt" | "Le" | "Gt" | "Ge") {
+            self.ensure_structural_tuple_ord(ty);
+            return;
+        }
         if !matches!(class, "Show" | "Eq" | "Hash") {
             return;
         }
@@ -10464,6 +10492,34 @@ impl Checker {
         };
         if items_ok {
             self.generics.register_structural_instance(class, ty);
+        }
+    }
+
+    /// A ground tuple whose items are all `Ord` is `Ord` (#1721): it orders
+    /// lexicographically, so its `Lt` / `Le` / `Gt` / `Ge` instances and
+    /// the empty `Ord` are registered together, the first time a goal asks
+    /// for one, after its tuple items'.
+    fn ensure_structural_tuple_ord(&mut self, ty: &Ty) {
+        let ty = show_lookup_ty(&apply_ty_prune(&self.subst, ty));
+        let Ty::Tuple(items) = &ty else {
+            return;
+        };
+        if items.is_empty() || Self::ty_mentions_var(&ty) || self.generics.has_instance("Ord", &ty) {
+            return;
+        }
+        for item in items {
+            self.ensure_structural_tuple_ord(item);
+        }
+        let ordered = items.iter().all(|item| {
+            let lookup = Self::operand_instance_lookup_ty(&show_lookup_ty(&apply_ty_prune(&self.subst, item)));
+            Self::is_numeric_operand_ty(&lookup)
+                || self.generics.has_instance("Ord", &lookup)
+                || self.generics.find_generic_instance("Ord", std::slice::from_ref(&lookup)).is_some()
+        });
+        if ordered {
+            for class in ["Lt", "Le", "Gt", "Ge", "Ord"] {
+                self.generics.register_structural_instance(class, ty.clone());
+            }
         }
     }
 
@@ -11738,6 +11794,12 @@ impl Checker {
                 return alias_ty.clone();
             }
         }
+        // `Opt` after `use prelude::Option as Opt;` (#1700).
+        if let Some(builtin) = self.builtin_enum_alias(name)
+            && self.resolve_class_key(name).is_none()
+        {
+            return self.parse_type_name_str_with_range(builtin, range);
+        }
         // Built-in type names are matched case-insensitively so the
         // user can write `String`, `STRING`, etc.
         match name.to_ascii_lowercase().as_str() {
@@ -12773,8 +12835,28 @@ impl Checker {
     }
 
     fn record_ffi_declare_metadata(&mut self, key: String, dargs: &[Output], store_field: bool) {
-        if dargs.len() != 4 && dargs.len() != 5 {
+        let Some((ret, variadic, nfixed, arg_tags)) = self.ffi_declare_signature(dargs) else {
             return;
+        };
+        if store_field {
+            self.ffi_fn_ret_by_field.insert(key.clone(), ret);
+            self.ffi_fn_variadic_by_field.insert(key.clone(), variadic);
+            self.ffi_fn_nfixed_by_field.insert(key.clone(), nfixed);
+            self.ffi_fn_arg_tags_by_field.insert(key, arg_tags);
+        } else {
+            self.ffi_fn_ret_owner.insert(key.clone(), self.ffi_binding_fn());
+            self.ffi_fn_ret_tys.insert(key.clone(), ret);
+            self.ffi_fn_variadic.insert(key.clone(), variadic);
+            self.ffi_fn_nfixed.insert(key.clone(), nfixed);
+            self.ffi_fn_arg_tags.insert(key, arg_tags);
+        }
+    }
+
+    /// `declare(lib, name, params, ret[, variadic])`'s return type, variadic
+    /// flag, fixed arity and parameter tags.
+    fn ffi_declare_signature(&self, dargs: &[Output]) -> Option<(Ty, bool, usize, Vec<u32>)> {
+        if dargs.len() != 4 && dargs.len() != 5 {
+            return None;
         }
         let ret = self.ty_from_ffi_type_expr(&dargs[3]);
         let (nfixed, arg_tags) = match dargs[2].1.as_ref() {
@@ -12796,17 +12878,28 @@ impl Checker {
         } else {
             false
         };
-        if store_field {
-            self.ffi_fn_ret_by_field.insert(key.clone(), ret);
-            self.ffi_fn_variadic_by_field.insert(key.clone(), variadic);
-            self.ffi_fn_nfixed_by_field.insert(key.clone(), nfixed);
-            self.ffi_fn_arg_tags_by_field.insert(key, arg_tags);
-        } else {
-            self.ffi_fn_ret_owner.insert(key.clone(), self.ffi_binding_fn());
-            self.ffi_fn_ret_tys.insert(key.clone(), ret);
-            self.ffi_fn_variadic.insert(key.clone(), variadic);
-            self.ffi_fn_nfixed.insert(key.clone(), nfixed);
-            self.ffi_fn_arg_tags.insert(key, arg_tags);
+        Some((ret, variadic, nfixed, arg_tags))
+    }
+
+    /// The FQN of the module `static` that `name` means here, unless a
+    /// parameter or local shadows it (#1667).
+    fn ffi_static_fqn(&self, name: &str) -> Option<String> {
+        let fqn = self.qualify_module_name(name);
+        let decl = *self.static_decl_frames.get(&fqn)?;
+        (self.env.lookup_frame(name) == Some(decl)).then_some(fqn)
+    }
+
+    /// The FQN of the module `static` `name` means during the `invoke`
+    /// pre-pass, which runs before statics are declared.
+    fn ffi_prescan_static_fqn(&self, name: &str) -> Option<String> {
+        (self.ffi_prescan_statics.contains(name) && !self.ffi_prescan_locals.contains(name))
+            .then(|| self.qualify_module_name(name))
+    }
+
+    /// Record the `declare` signature `value` gives the static `fqn`.
+    fn record_ffi_declare_for_static(&mut self, fqn: String, value: &Output) {
+        if let Some(sig) = Self::declare_args_from_expr(value).and_then(|dargs| self.ffi_declare_signature(dargs)) {
+            self.ffi_fn_by_static.insert(fqn, sig);
         }
     }
 
@@ -12825,6 +12918,10 @@ impl Checker {
     fn ffi_invoke_fn_id_metadata(&self, expr: &Output) -> Option<(Ty, bool, usize)> {
         match expr.1.as_ref() {
             Expression::Identifier(name) => {
+                if let Some(fqn) = self.ffi_static_fqn(name) {
+                    let (ty, variadic, nfixed, _) = self.ffi_fn_by_static.get(&fqn)?;
+                    return Some((ty.clone(), *variadic, *nfixed));
+                }
                 if let Some(ty) = self.ffi_fn_ret_tys.get(*name).filter(|_| self.ffi_local_binding_here(name)) {
                     let variadic = self.ffi_fn_variadic.get(*name).copied().unwrap_or(false);
                     let nfixed = self.ffi_fn_nfixed.get(*name).copied().unwrap_or(0);
@@ -12859,6 +12956,9 @@ impl Checker {
     fn ffi_invoke_arg_tags(&self, expr: &Output) -> Option<Vec<u32>> {
         match expr.1.as_ref() {
             Expression::Identifier(name) => {
+                if let Some(fqn) = self.ffi_static_fqn(name) {
+                    return self.ffi_fn_by_static.get(&fqn).map(|sig| sig.3.clone());
+                }
                 if let Some(tys) = self.ffi_fn_arg_tags.get(*name).filter(|_| self.ffi_local_binding_here(name)) {
                     return Some(tys.clone());
                 }
@@ -12883,7 +12983,10 @@ impl Checker {
         local_class_scopes: &[HashMap<String, String>],
     ) -> Option<Vec<u32>> {
         match expr.1.as_ref() {
-            Expression::Identifier(name) => self.ffi_fn_arg_tags.get(*name).filter(|_| self.ffi_local_binding_here(name)).cloned(),
+            Expression::Identifier(name) => match self.ffi_prescan_static_fqn(name) {
+                Some(fqn) => self.ffi_fn_by_static.get(&fqn).map(|sig| sig.3.clone()),
+                None => self.ffi_fn_arg_tags.get(*name).filter(|_| self.ffi_local_binding_here(name)).cloned(),
+            },
             Expression::Access(receiver, field) => {
                 let class = match receiver.1.as_ref() {
                     Expression::Identifier("self") => self.impl_owner.clone()?,
@@ -12901,6 +13004,12 @@ impl Checker {
     }
 
     fn maybe_record_ffi_declare_for_field_assignment(&mut self, target: &Output, value: &Output) {
+        if let Expression::Identifier(name) = target.1.as_ref()
+            && let Some(fqn) = self.ffi_static_fqn(name)
+        {
+            self.record_ffi_declare_for_static(fqn, value);
+            return;
+        }
         let Expression::Access(receiver, field) = target.1.as_ref() else {
             return;
         };
@@ -12917,6 +13026,17 @@ impl Checker {
     fn maybe_record_ffi_declare_for_let_init(&mut self, name: &str, init: &Output) {
         if let Some(dargs) = Self::declare_args_from_expr(init) {
             self.record_ffi_declare_metadata(name.to_string(), dargs, false);
+            return;
+        }
+        if let Expression::Identifier(src) = init.1.as_ref()
+            && let Some(fqn) = self.ffi_static_fqn(src)
+            && let Some((ret, variadic, nfixed, arg_tags)) = self.ffi_fn_by_static.get(&fqn).cloned()
+        {
+            self.ffi_fn_ret_owner.insert(name.to_string(), self.ffi_binding_fn());
+            self.ffi_fn_ret_tys.insert(name.to_string(), ret);
+            self.ffi_fn_variadic.insert(name.to_string(), variadic);
+            self.ffi_fn_nfixed.insert(name.to_string(), nfixed);
+            self.ffi_fn_arg_tags.insert(name.to_string(), arg_tags);
             return;
         }
         if let Expression::Access(receiver, field) = init.1.as_ref()
@@ -12983,6 +13103,10 @@ impl Checker {
     ) -> Option<(Ty, bool, usize)> {
         match expr.1.as_ref() {
             Expression::Identifier(name) => {
+                if let Some(fqn) = self.ffi_prescan_static_fqn(name) {
+                    let (ty, variadic, nfixed, _) = self.ffi_fn_by_static.get(&fqn)?;
+                    return Some((ty.clone(), *variadic, *nfixed));
+                }
                 if let Some(ty) = self.ffi_fn_ret_tys.get(*name).filter(|_| self.ffi_local_binding_here(name)) {
                     let variadic = self.ffi_fn_variadic.get(*name).copied().unwrap_or(false);
                     let nfixed = self.ffi_fn_nfixed.get(*name).copied().unwrap_or(0);
@@ -13254,6 +13378,16 @@ impl Checker {
     pub fn ffi_field_fn_id_variadic(&self, class: &str, field: &str) -> Option<bool> {
         let key = Self::qualified_class_field_key(class, field);
         self.ffi_fn_ret_by_field.contains_key(&key).then(|| self.ffi_fn_variadic_by_field.get(&key).copied().unwrap_or(false))
+    }
+
+    /// Whether the fn id held by the module `static` or `const` `name`
+    /// (bare or qualified) was declared variadic (`None` when no `declare`
+    /// was stored there, #1667).
+    pub fn ffi_static_fn_id_variadic(&self, name: &str) -> Option<bool> {
+        self.ffi_fn_by_static
+            .get(name)
+            .or_else(|| self.ffi_fn_by_static.get(&self.qualify_module_name(name)))
+            .map(|&(_, variadic, _, _)| variadic)
     }
 
     pub fn ffi_fn_id_variadic(&self, name: &str) -> Option<bool> {
@@ -15406,6 +15540,13 @@ impl Checker {
     /// Pre-pass: record `declare` metadata and param call-site flow before main
     /// inference so helpers defined before their callers still refine `invoke`.
     fn pre_pass_ffi_invoke_param_flow(&mut self, ast: &Output) {
+        if let Expression::Program(children) = Self::pre_pass_unwrap_stmt(ast).1.as_ref() {
+            for child in children {
+                if let Expression::StaticDecl { name, .. } = Self::pre_pass_unwrap_stmt(child).1.as_ref() {
+                    self.ffi_prescan_statics.insert(name.to_string());
+                }
+            }
+        }
         let mut local_class_scopes = Vec::new();
         self.pre_pass_ffi_invoke_param_flow_walk(ast, &mut local_class_scopes);
     }
@@ -15437,9 +15578,13 @@ impl Checker {
             }
             Expression::Function { name, args, body, .. } => {
                 let prev_fn = self.ffi_prescan_fn.replace(name.to_string());
+                let prev_locals = std::mem::take(&mut self.ffi_prescan_locals);
                 let mut scope = HashMap::new();
                 if let Expression::Fragment(children) = args.1.as_ref() {
                     for child in children {
+                        if let Expression::Argument { name, .. } = child.1.as_ref() {
+                            self.ffi_prescan_locals.insert(name.to_string());
+                        }
                         if let Expression::Argument {
                             ty: Some(ty),
                             name,
@@ -15457,6 +15602,7 @@ impl Checker {
                 }
                 local_class_scopes.pop();
                 self.ffi_prescan_fn = prev_fn;
+                self.ffi_prescan_locals = prev_locals;
             }
             Expression::Call { name, args } => {
                 if let Expression::Identifier(fn_name) = name.1.as_ref() {
@@ -15486,6 +15632,11 @@ impl Checker {
                 }
             }
             Expression::Assignment(target, value) => {
+                if let Expression::Identifier(name) = target.1.as_ref()
+                    && let Some(fqn) = self.ffi_prescan_static_fqn(name)
+                {
+                    self.record_ffi_declare_for_static(fqn, value);
+                }
                 self.maybe_pre_record_field_declare(target, value, local_class_scopes);
                 self.pre_pass_ffi_invoke_param_flow_walk(target, local_class_scopes);
                 self.pre_pass_ffi_invoke_param_flow_walk(value, local_class_scopes);
@@ -15591,7 +15742,10 @@ impl Checker {
                     self.pre_pass_ffi_invoke_param_flow_walk(index, local_class_scopes);
                 }
             }
-            Expression::StaticDecl { ty, init, .. } => {
+            Expression::StaticDecl { name, ty, init, .. } => {
+                if let Some(fqn) = self.ffi_prescan_static_fqn(name) {
+                    self.record_ffi_declare_for_static(fqn, init);
+                }
                 if let Some(ty) = ty {
                     self.pre_pass_ffi_invoke_param_flow_walk(ty, local_class_scopes);
                 }
@@ -15625,6 +15779,9 @@ impl Checker {
                     i += 1;
                 }
                 Expression::Variable(var_name, _) => {
+                    if self.ffi_prescan_fn.is_some() {
+                        self.ffi_prescan_locals.insert(var_name.to_string());
+                    }
                     self.pre_pass_ffi_invoke_param_flow_walk(stmt, local_class_scopes);
                     if i + 1 < children.len() {
                         let next = Self::pre_pass_unwrap_stmt(&children[i + 1]);
@@ -17012,6 +17169,11 @@ impl Checker {
                 {
                     return ty;
                 }
+                if let EnumConstructPayload::Tuple(args) = fields
+                    && let Some(ty) = self.try_infer_qualified_value_call(enum_name, variant_name, args, call_id, range.clone())
+                {
+                    return ty;
+                }
                 // `Trait::method(args)`: the free `method(args)` limited to `Trait`.
                 if let Some(class) = self.qualified_call_trait(enum_name) {
                     return match fields {
@@ -17062,6 +17224,43 @@ impl Checker {
                         range,
                         Some(format!(
                             "or declare `static fn {}` to call it as `{}`",
+                            variant_name, static_fqn
+                        )),
+                    );
+                }
+                // `K::n(1)` of a class static or module const that holds no
+                // function (#1726): the function-typed one is called above.
+                if !matches!(fields, EnumConstructPayload::Unit)
+                    && let Some(ty) = self
+                        .static_slot_types
+                        .get(&static_fqn)
+                        .or_else(|| self.module_consts.get(&format!("{enum_name}::{variant_name}")))
+                        .cloned()
+                {
+                    let shown = self.diag_ty(&ty);
+                    return self.error_with_help(
+                        ErrorCode::NotAFunction,
+                        format!("`{}::{}` has type `{}`, not a function type", enum_name, variant_name, shown),
+                        range,
+                        Some(format!("read it as `{}::{}` without arguments", enum_name, variant_name)),
+                    );
+                }
+                // `C::x` of an instance field (`const` or not, #1726).
+                if let Some(class_key) = self.resolve_class_key(enum_name)
+                    && self
+                        .classes
+                        .get(&class_key)
+                        .is_some_and(|fields| fields.iter().any(|(_, name, _)| name == variant_name))
+                {
+                    return self.error_with_help(
+                        ErrorCode::GenericTypeError,
+                        format!(
+                            "`{}` is an instance field; read it on a value (`obj.{}`)",
+                            static_fqn, variant_name
+                        ),
+                        range,
+                        Some(format!(
+                            "or declare `static {}` to read it as `{}`",
                             variant_name, static_fqn
                         )),
                     );
@@ -18252,7 +18451,7 @@ impl Checker {
 
     /// Map surface enum paths (`ffi::types`, short `E`) to the registry key
     /// (`module::E` after COI-110).
-    fn registry_enum_key(&self, enum_name: &str) -> String {
+    pub(crate) fn registry_enum_key(&self, enum_name: &str) -> String {
         if common::is_builtin_ffi_enum(enum_name) {
             common::BUILTIN_FFI_TYPE_ENUM.to_string()
         } else {
@@ -18280,6 +18479,38 @@ impl Checker {
     /// sends to the recorded dictionary or instance as it does `T::m`.
     pub fn qualified_trait_call_at(&self, start: usize, end: usize) -> Option<&str> {
         self.qualified_trait_calls_by_span.get(&(start, end)).map(String::as_str)
+    }
+
+    /// The callee type of `m::F(args)` / `C::f(args)` at this span when it
+    /// calls a `const` or `static` function value (#1705).
+    pub fn qualified_value_call_at(&self, start: usize, end: usize) -> Option<&Ty> {
+        self.qualified_value_calls_by_span.get(&(start, end))
+    }
+
+    /// `owner::member(args)` naming a `const` or `static` of function type
+    /// (another module's, or a class static field): a call of its value
+    /// (#1705), as `let f = owner::member; f(args)` is.
+    fn try_infer_qualified_value_call(
+        &mut self,
+        owner: &str,
+        member: &str,
+        args: &[Output],
+        call_id: Option<NodeId>,
+        range: Range<usize>,
+    ) -> Option<Ty> {
+        let fqn = self.class_member_fqn(owner, member);
+        let callee_ty = match self.static_slot_types.get(&fqn) {
+            Some(ty) => apply_ty_prune(&self.subst, ty),
+            None => apply_ty_prune(&self.subst, self.module_consts.get(&format!("{owner}::{member}"))?),
+        };
+        if !matches!(strip_readonly(&callee_ty), Ty::Fun(..)) {
+            return None;
+        }
+        self.qualified_value_calls_by_span
+            .insert((range.start, range.end), callee_ty.clone());
+        let flat_args = self.flatten_spread_call_args(args);
+        let arg_tys: Vec<Ty> = flat_args.iter().map(|arg| self.infer_call_arg(arg)).collect();
+        Some(self.apply_function(None, &callee_ty, &arg_tys, Some(args), call_id, range))
     }
 
     /// Enum a bare constructor pattern at this span resolved to (#1352):
@@ -18853,6 +19084,11 @@ impl Checker {
         if self.enum_tags.contains_key(&qualified) {
             return Some(qualified);
         }
+        if let Some(builtin) = self.builtin_enum_alias(name)
+            && self.enum_tags.contains_key(builtin)
+        {
+            return Some(builtin.to_string());
+        }
         if let Some(scheme) = self.env.lookup(name) {
             let ty = apply_ty_prune(&self.subst, &scheme.ty);
             if let Ty::Con(n) = &ty
@@ -19090,7 +19326,7 @@ impl Checker {
 
     fn warn_shallow_const_binding(&mut self, name: &str, ty: &Ty, range: Range<usize>) {
         let pruned = apply_ty_prune(&self.subst, ty);
-        if crate::typechecking::ty::is_shallow_const_mutable(&pruned) {
+        if self.const_shallow_mutable(&pruned) {
             let mut msg = Message::warn(
                 ErrorCode::GenericTypeError,
                 format!(
@@ -19104,6 +19340,30 @@ impl Checker {
                 "mutations through fields, indices, or `vec.push` will still succeed".to_string(),
             );
             self.messages.push(msg);
+        }
+    }
+
+    /// Whether a `const` of `ty` warns E0119. An enum, builtin or user,
+    /// warns only when one of its payloads or a type argument it carries
+    /// can be written through (#1714): `Option<int>` and `channel()`'s
+    /// `Result<(Sender, Receiver), ThreadError>` are fully constant, while
+    /// `Option<Vec<int>>` is not. Every other type follows
+    /// [`crate::typechecking::ty::is_shallow_const_mutable`].
+    fn const_shallow_mutable(&self, ty: &Ty) -> bool {
+        let (name, args) = match ty {
+            Ty::Con(name) => (name, &[][..]),
+            Ty::App(head, args) => match head.as_ref() {
+                Ty::Con(name) => (name, args.as_slice()),
+                _ => return crate::typechecking::ty::is_shallow_const_mutable(ty),
+            },
+            _ => return crate::typechecking::ty::is_shallow_const_mutable(ty),
+        };
+        match self.enum_payload_tys(name) {
+            Some(payloads) => {
+                self.enum_payloads_mutable(name, &payloads, &mut Vec::new())
+                    || args.iter().any(|a| self.const_shallow_mutable(a))
+            }
+            None => crate::typechecking::ty::is_shallow_const_mutable(ty),
         }
     }
 
