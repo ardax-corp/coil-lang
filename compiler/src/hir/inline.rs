@@ -721,8 +721,10 @@ impl Inliner<'_> {
         let result = self.splice(call, callee, shape, Site::Direct, &mut stmts);
         let tail = result.unwrap_or_else(|| self.push(HirKind::Lit(Lit::Unit), Some(ty::unit()), span));
         // The call's node becomes the block (or the bare result), so its
-        // parent still reads it.
-        let kind = if stmts.is_empty() {
+        // parent still reads it. A result packed into the call's trait
+        // object stays a node of its own: its pack is keyed on it (#1757).
+        let packed = existential(&self.body.expr(call).ty) && !existential(&self.body.expr(tail).ty);
+        let kind = if stmts.is_empty() && !packed {
             let kind = self.body.expr(tail).kind.clone();
             self.tombstone(tail);
             kind
@@ -902,6 +904,11 @@ impl Inliner<'_> {
         });
         id
     }
+}
+
+/// A bare-class existential (`Sum`): a `[value, dictionary]` pack.
+fn existential(t: &Option<ty::Ty>) -> bool {
+    t.as_ref().is_some_and(|t| matches!(ty::strip_readonly(t), ty::Ty::Existential { .. }))
 }
 
 /// Whether `callee` assigns parameter `p` or a place rooted at it by index.
