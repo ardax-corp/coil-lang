@@ -2660,8 +2660,13 @@ impl<const S: usize> Machine<S> {
             ffi_search_paths: self.ffi_search_paths.clone(),
             dload_gate: self.dload_gate.clone(),
             struct_layouts: Arc::clone(&self.struct_layouts),
-            statics: Arc::new(self.statics.iter().map(|v| v.raw() as u64).collect()),
+            statics: self.static_words(),
         })
+    }
+
+    /// The static slots' words, for a worker that reads them.
+    pub fn static_words(&self) -> Arc<Vec<u64>> {
+        Arc::new(self.statics.iter().map(|v| v.raw() as u64).collect())
     }
 
     /// A shared-heap job's statics: the spawning VM's words, which name
