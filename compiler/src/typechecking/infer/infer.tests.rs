@@ -2733,3 +2733,26 @@ fn walk<T>(T x) {
         .expect("expected a not-iterable reject");
     assert_eq!(msg.message(), "type `T` is not iterable");
 }
+
+/// `use prelude::Option as …` does not free `Option` for a user type, so the
+/// E0200 help must not advertise it as an escape (#1672).
+#[test]
+fn rebound_prelude_option_still_rejects_user_enum_without_rebind_help() {
+    for src in [
+        "use prelude::Option as PreludeOption;\nenum Option { Yes, No }\nfn main() {}\n",
+        "enum Option { Yes, No }\nfn main() {}\n",
+        "use prelude::Result as PreludeResult;\nclass Result { pub n: int, }\nfn main() {}\n",
+    ] {
+        let (c, _) = check(src);
+        let msg = c
+            .messages()
+            .iter()
+            .find(|m| m.code() == Some(ErrorCode::DuplicateEnum))
+            .unwrap_or_else(|| panic!("expected E0200 for {src:?}, got {:?}", c.messages()));
+        let help = msg.help().as_ref().expect("missing help");
+        assert!(
+            !help.contains("use prelude::") && help.contains("pick a different name"),
+            "help must not advertise a rebind escape, got {help:?}"
+        );
+    }
+}

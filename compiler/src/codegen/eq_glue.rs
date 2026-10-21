@@ -310,11 +310,22 @@ impl Compiler {
         None
     }
 
+    /// Whether an open part `ty` with a user `Eq` instance (`Box<T>`
+    /// deriving it) compares in open glue: its instance's context is only
+    /// `Eq`, which the glue builds from its variables' dictionaries
+    /// (#1661).
+    fn eq_open_instance_ok(&self, ty: &Ty) -> bool {
+        let generics = self.checker.generics();
+        generics
+            .find_generic_instance("Eq", std::slice::from_ref(ty))
+            .is_some_and(|inst| inst.context.iter().all(|c| c.class == "Eq"))
+    }
+
     /// Whether open `ty` (a key) compares through open glue: it is taken
     /// apart and some part, at any depth, is a type variable, a type with
     /// a user `Eq` instance or a type needing glue. `None` when a part is
-    /// an open type with a user `Eq` instance (`Box<T>` deriving it),
-    /// which the glue does not take.
+    /// an open type with a user `Eq` instance whose context the glue
+    /// cannot build ([`Self::eq_open_instance_ok`]).
     fn eq_dict_glue_needed(&self, ty: &Ty, visiting: &mut Vec<Ty>) -> Option<bool> {
         if visiting.contains(ty) {
             return Some(false);
@@ -328,6 +339,7 @@ impl Compiler {
             needed |= match part {
                 Ty::Var(_) => true,
                 p if crate::hir::layout::ty_is_closed(p) => self.eq_user_instance(p) || self.eq_glue_needed(p, &mut Vec::new()),
+                p if self.eq_user_instance(p) && self.eq_open_instance_ok(p) => true,
                 p if self.eq_user_instance(p) => {
                     visiting.pop();
                     return None;
@@ -345,6 +357,35 @@ impl Compiler {
         Some(needed)
     }
 
+    /// Whether some part of open key `ty`, at any depth, is an open type
+    /// with a user `Eq` instance.
+    fn eq_open_instance_part(&self, ty: &Ty, visiting: &mut Vec<Ty>) -> bool {
+        if visiting.contains(ty) {
+            return false;
+        }
+        let Some(shape) = self.eq_glue_shape(ty) else {
+            return false;
+        };
+        visiting.push(ty.clone());
+        let found = shape.parts().into_iter().any(|p| {
+            !matches!(p, Ty::Var(_))
+                && !crate::hir::layout::ty_is_closed(p)
+                && (self.eq_user_instance(p) || self.eq_open_instance_part(p, visiting))
+        });
+        visiting.pop();
+        found
+    }
+
+    /// `Eq<v>` in an open glue body: `v`'s own dictionary, when it is an
+    /// `Eq` one (`eq` at slot 0), for an open part's instance context
+    /// (#1661).
+    pub(super) fn eq_glue_body_var_dict(&self, v: TyVarId) -> Option<u32> {
+        match self.synth_eq_dicts.get(&v) {
+            Some(&(n, 0)) => self.lookup_slot(&format!("__dict{n}")),
+            _ => None,
+        }
+    }
+
     /// The open glue `==` (`ne`: `!=`) of open `ty` calls here, when `ty`
     /// needs one and each of its variables has an `Eq` dictionary.
     pub(super) fn eq_dict_glue_target(&self, ty: &Ty, ne: bool) -> Option<DictGlue> {
@@ -359,6 +400,12 @@ impl Compiler {
         }
         let dicts = order.iter().map(|&v| self.eq_var_dict(v)).collect::<Option<Vec<_>>>()?;
         if self.eq_dict_glue_needed(&key, &mut Vec::new()) != Some(true) {
+            return None;
+        }
+        // An open part's instance takes its variables' dictionaries as
+        // `Eq` ones: a subclass bound's holding `eq` elsewhere does not
+        // serve (#1661).
+        if dicts.iter().any(|&(_, method)| method != 0) && self.eq_open_instance_part(&key, &mut Vec::new()) {
             return None;
         }
         let names: HashMap<TyVarId, Ty> = order
