@@ -635,7 +635,8 @@ trait Ge<T> {
 ///
 /// `int`, `float`, `byte`, `string`, `bool` and `unit` have builtin
 /// instances; tuples and records are shown structurally. A non-generic class
-/// or enum without an instance shows its type name. `#[derive(Show)]`
+/// without an instance shows its type name, and a non-generic enum its
+/// qualified variant name (`E::V`, payload elided). `#[derive(Show)]`
 /// generates a field-by-field instance.
 ///
 /// # Examples
