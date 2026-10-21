@@ -35,13 +35,11 @@ fn verdict(bool ok) -> string {
 }
 
 fn main() {
-    let r = scope(
-        fn (Scope s) {
-            let a = s.spawn(fn () => slurp("/etc/hosts"));
-            let b = s.spawn(fn () => slurp("/etc/passwd"));
-            size(a.join()) > 0 && size(b.join()) > 0
-        },
-    );
+    let r = scope(fn (Scope s) {
+        let a = s.spawn(fn () => slurp("/etc/hosts"));
+        let b = s.spawn(fn () => slurp("/etc/passwd"));
+        size(a.join()) > 0 && size(b.join()) > 0
+    });
     let text = match r {
         Result::Ok(ok) => verdict(ok),
         default => "failed",

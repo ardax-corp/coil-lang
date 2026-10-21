@@ -20,17 +20,15 @@ fn with_runner(Runner -> int f) -> int {
 }
 
 test("a short receiver keeps its method and lambda on one line") {
-    let r = with_runner(
-        fn (Runner s) {
-            s.run(fn (int x) {
-                let n = 41 + x;
-                let m = n * 2 - n;
-                let k = m * 3 - m * 2;
-                k
-            });
-            s.total
-        },
-    );
+    let r = with_runner(fn (Runner s) {
+        s.run(fn (int x) {
+            let n = 41 + x;
+            let m = n * 2 - n;
+            let k = m * 3 - m * 2;
+            k
+        });
+        s.total
+    });
     assert!(r == 42);
 }
 

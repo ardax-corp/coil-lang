@@ -73,17 +73,15 @@ fn run_echo() -> Result<string, IoError> {
     let listener = listen("127.0.0.1", 0)?;
     let port = local_addr(listener)?[1];
     let body = request_body();
-    let r = scope(
-        fn (Scope s) use (listener, port, body) {
-            let server = s.spawn(fn () use (listener) => serve_one(listener));
-            let client = s.spawn(fn () use (port, body) => ask(port, body));
-            let back = match client.join() {
-                Result::Ok(Result::Ok(frame)) => frame,
-                default => Vec::new(),
-            };
-            served(server) && payload_eq(back, body) == 1
-        },
-    );
+    let r = scope(fn (Scope s) use (listener, port, body) {
+        let server = s.spawn(fn () use (listener) => serve_one(listener));
+        let client = s.spawn(fn () use (port, body) => ask(port, body));
+        let back = match client.join() {
+            Result::Ok(Result::Ok(frame)) => frame,
+            default => Vec::new(),
+        };
+        served(server) && payload_eq(back, body) == 1
+    });
     close(listener)?;
     return match r {
         Result::Ok(ok) => Result::Ok(verdict(ok)),

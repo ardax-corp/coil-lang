@@ -49,7 +49,7 @@ test("wrapped signatures still bind every parameter") {
     v.push("a");
     assert!(lock_serialize_all_entries("p", v, v, 1) == "p");
     assert!(lock_write_all("pq", v, v, v) == Result::Ok(5));
-    lock_count_entries("p", v, v, v);
+    lock_count_entries("p", v, v, v)?;
     let l = new Locks(1);
     assert!(l.locks_write_all("p", v, v) == Result::Ok(4));
 }

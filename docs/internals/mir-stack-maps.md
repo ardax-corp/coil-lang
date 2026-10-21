@@ -236,6 +236,64 @@ and relocate mapped slots on collect.
     root that is a terminator's operand, a tail call or a compare fused
     into the branch gets none.
   `tests/memory/gc_weak_temp_consumed.hy`.
+- **A heap payload moving as an `i64` drops too** (#1769). A two-word
+  enum (`Option`, `Result` or an enum of at most one payload word) passed
+  by value travels as a pair, payload and tag, and a heap payload rides
+  in it as an opaque `i64` word: a boxed enum is matched apart into a
+  `MatchPayload` typed `i64` and a φ of it, or its object is cast to
+  one. Not heap words, those registers were zeroed neither beside the
+  rebound local's `ClearWord` nor after the call, and kept the object
+  rooted until rewritten. `payload_words` marks them: an `i64`
+  `MatchPayload` or cast of a heap word, and the `i64` φs and casts that
+  copy one. `CopySinks` and `arg_clears` treat them as heap words, and a
+  call (or other consuming op) taking one also zeroes the dead registers
+  it was copied from (`payload_sources`: the φ's incomings, the match and
+  the enum it read, the object cast to it, not past a live value nor
+  into a register a local's word shares), since the LIR tier passes such
+  a word as an inline operand with no register of its own. A number
+  payload read the same way (`Option<int>` unboxed into a pair) is
+  zeroed too: harmless, and its type is not known there. A pair a call
+  returns (`f(make())` at `-O0`) was not covered until #1791 (below).
+  Flagship `.hyc`
+  and every `examples/perf` archive are byte-identical to #1690; of the
+  225 `examples/*.hy` and `examples/perf/*.hy` archives that compile,
+  only `thread_reply` changes (two straight-line zeros, a received string
+  and the `stdout()` handle after their last call).
+  `tests/memory/gc_weak_enum_arg.hy`.
+- **A rebound field and a returned pair drop too** (#1791). A class
+  local that never escapes is scalar-replaced: each field gets a frame
+  slot of its own (`HirMirInput::sroa` / `fields`), and `b.n = e` lowered
+  to a `def_local` of the field's slot with no `ClearWord` of the word
+  it held, so the old field value stayed rooted in its register. The
+  field store now clears the slot's old heap word after binding the new
+  one, exactly as a local's rebind does (#1402), and the existing
+  `cleared_words` / `entry_clears` / `source_clears` place or drop the
+  zero. The fix sits in `from_hir`, not HIR SROA: HIR emission already
+  overwrites the field's frame slot (which ends the old value), and only
+  MIR gives the new value a register of its own.
+  The low word of a pair a call returns is an `i64` too, so passing it
+  straight on (`weak_in(make(3))` at `-O0`) kept its payload rooted.
+  The MIR cannot tell a heap payload from a number there, so HIR
+  emission lists the two-word expressions whose enum has a payload that
+  is no scalar word (`HirMirInput::heap_pairs`, from the same variant
+  payloads as `hir_mir_pair_tys`); `from_hir` marks such a call's low
+  dest (`MirFunc::heap_pair_calls`), and `payload_words` takes it as a
+  payload word. A number pair (`Option<int>`, an enum of ints) is not
+  marked: zeroing every call's pair put two dead zeros in the hot loop of
+  `examples/perf/match_enum_loop` at `-O0`. `Gathers` also take payload
+  words now: a dense call copying one into its gather window (an
+  inlined `make` in `weak_in(make(i))` in a loop) left the object rooted
+  there after its other registers were zeroed.
+  Of the 225 `examples/*.hy` and `examples/perf/*.hy` archives that
+  compile, at `-O2` and `-O0`, only three change against #1769:
+  `raise_try` (two straight-line zeros, a `Result` with a heap payload
+  after the call that took it), `perf/s2g_escape_edges` (one straight-line
+  zero of the rebound field `h.a` in `pack_field`) and, at `-O0` only,
+  `perf/match_enum_loop` (one zero a trip after `score_res(wrap_res(i))`,
+  whose `Result<int, string>` may carry a string; run time within noise,
+  medians of 41 interleaved runs 55.9 → 54.4 ms).
+  `tests/memory/gc_weak_field_rebind.hy`,
+  `tests/memory/gc_weak_pair_result.hy`.
 - **Collection budget.** After a sweep the next threshold is
   `live × 4` when more than half the heap survived (a growing live set) and
   `live × 2` otherwise, never below the initial 1 MB budget.

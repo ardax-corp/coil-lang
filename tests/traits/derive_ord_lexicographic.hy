@@ -4,7 +4,7 @@
 use io::{stdout, write};
 use string::{format, to_bytes};
 
-#[derive(Ord)]
+#[derive(Eq, Ord)]
 enum Pair {
     Pair { x: int, y: int },
 }

@@ -10,5 +10,8 @@ fn main() {
     let a = [[1, 2], [3, 4]];
     let b = [[5, 6], [7, 8]];
     let c = matmul(a, b);
-    let _ = write_all(stdout(), to_bytes(format("%i,%i,%i,%i", c[0][0], c[0][1], c[1][0], c[1][1])));
+    let _ = write_all(
+        stdout(),
+        to_bytes(format("%i,%i,%i,%i", c[0][0], c[0][1], c[1][0], c[1][1])),
+    );
 }

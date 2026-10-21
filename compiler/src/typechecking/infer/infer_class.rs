@@ -1146,6 +1146,11 @@ impl Checker {
                     ..
                 } = body.1.as_ref()
                 {
+                    // A `... xs` template is checked per instance (#1754);
+                    // its signature stub stands until it is dropped.
+                    if self.is_variadic_template(&format!("{owner_key}::{name}")) {
+                        continue;
+                    }
                     if *name == "drop" {
                         self.check_drop_decl(
                             what,

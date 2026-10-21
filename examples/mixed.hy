@@ -26,6 +26,9 @@ fn area(Shape s) -> int {
 fn main() {
     let _ = write_all(stdout(), to_bytes(format("%i\n", area(Shape::Empty))));
     let _ = write_all(stdout(), to_bytes(format("%i\n", area(Shape::CircleR(5)))));
-    let _ = write_all(stdout(), to_bytes(format("%i\n", area(Shape::Rect { width: 3, height: 4 }))));
+    let _ = write_all(
+        stdout(),
+        to_bytes(format("%i\n", area(Shape::Rect { width: 3, height: 4 }))),
+    );
     let _ = write_all(stdout(), to_bytes(format("%i\n", area(Shape::Tri { a: 1, b: 2, c: 3 }))));
 }

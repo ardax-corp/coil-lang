@@ -412,6 +412,9 @@ pub struct HirMirInput<'a> {
     pub pair_locals: HashMap<u32, (u32, MirTy, MirTy)>,
     /// Word types of each expression of a two-word type.
     pub pair_tys: HashMap<u32, (MirTy, MirTy)>,
+    /// Calls returning a two-word enum whose low word may carry a heap
+    /// payload ([`MirFunc::heap_pair_calls`]).
+    pub heap_pairs: HashSet<u32>,
     /// Word types of a two-word result.
     pub ret_pair: Option<(MirTy, MirTy)>,
     /// Stack arrays kept in frame slots: first slot, length and element
@@ -2877,7 +2880,16 @@ impl Lower<'_> {
                     Some((obj, index)) => {
                         self.b.ins_heap_field_store(obj, v, index).map_err(mir)?;
                     }
-                    None => self.b.def_local(LocalId(slot), v).map_err(mir)?,
+                    None => {
+                        // A field split into a frame slot is a local of its
+                        // own: its rebind drops the old word, as a local's
+                        // does (#1791).
+                        let old = self.rebound_word(LocalId(slot), ty)?;
+                        self.b.def_local(LocalId(slot), v).map_err(mir)?;
+                        if let Some(old) = old {
+                            self.b.ins_clear_word(old).map_err(mir)?;
+                        }
+                    }
                 }
                 Ok(Val::Unit)
             }
@@ -4175,6 +4187,9 @@ impl Lower<'_> {
         }
         if let Some(want) = niche {
             return self.unbox_niche(dest, want);
+        }
+        if dest_hi.is_some() && self.inp.heap_pairs.contains(&id.0) {
+            self.b.mark_heap_pair_call(dest);
         }
         Ok(match dest_hi {
             Some(hi) => Val::Pair(dest, hi),

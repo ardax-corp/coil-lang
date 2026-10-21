@@ -559,10 +559,11 @@ impl Generics {
             );
         }
 
-        // Convenience bundle: `T: Ord` implies Lt + Le + Gt + Ge via the
-        // flattened superclass dictionary layout. Ord itself has no methods.
-        // Builtin Ord does not declare Eq as a superclass. User-defined
-        // classes use `trait Ordered<T: Equal>` for that path.
+        // Convenience bundle: `T: Ord` implies Lt + Le + Gt + Ge and Eq via
+        // the flattened superclass dictionary layout. Ord itself has no
+        // methods. With Eq a superclass, `==` in a `T: Ord` body uses `T`'s
+        // `Eq` from the `Ord` dictionary, in a shared body as in a mono
+        // clone (#1716), and an `Ord` instance needs an `Eq` one.
         self.typeclasses.insert(
             "Ord".into(),
             TypeClassDef {
@@ -570,7 +571,7 @@ impl Generics {
                 defined_module: PRELUDE_OPS_MODULE.into(),
                 type_params: vec!["T".into()],
                 param_kinds: vec![Kind::Type],
-                superclasses: vec!["Lt".into(), "Le".into(), "Gt".into(), "Ge".into()],
+                superclasses: vec!["Lt".into(), "Le".into(), "Gt".into(), "Ge".into(), "Eq".into()],
                 assoc_types: vec![],
                 methods: vec![],
             },
