@@ -1361,6 +1361,14 @@ impl Compiler {
             .iter()
             .enumerate()
             .filter_map(|(i, e)| Some((i as u32, self.hir_mir_pair_tys(e.ty.as_ref()?)?)))
+            .collect::<HashMap<u32, _>>();
+        // Of those, the ones whose low word may carry a heap payload.
+        let heap_pairs = hir
+            .exprs
+            .iter()
+            .enumerate()
+            .filter(|(i, e)| pair_tys.contains_key(&(*i as u32)) && e.ty.as_ref().is_some_and(|t| self.hir_pair_holds_heap(t)))
+            .map(|(i, _)| i as u32)
             .collect();
         // The locals of outlined parallel loop bodies live in their chunk
         // worker's frame, not this body's.
@@ -1861,6 +1869,7 @@ impl Compiler {
             slots: &frame.slots,
             pair_locals,
             pair_tys,
+            heap_pairs,
             ret_pair,
             stacks,
             sroa,
@@ -2045,9 +2054,7 @@ impl Compiler {
                 };
                 return Some((word(&items[0])?, word(&items[1])?));
             }
-            PairKind::Option => vec!["Some".into(), "None".into()],
-            PairKind::Result => vec!["Ok".into(), "Err".into()],
-            PairKind::Enum(name) => self.checker.enum_variants(&name)?.into_iter().map(|(v, _, _)| v).collect(),
+            kind => self.pair_variants(kind)?,
         };
         let mut lo = None;
         for variant in &variants {
@@ -2073,6 +2080,38 @@ impl Compiler {
             }
         }
         Some((lo.unwrap_or(MirTy::I64), MirTy::I64))
+    }
+
+    /// The variants of a two-word enum layout (none for a range or a
+    /// product).
+    fn pair_variants(&self, kind: crate::hir::layout::PairKind) -> Option<Vec<String>> {
+        use crate::hir::layout::PairKind;
+        Some(match kind {
+            PairKind::Range { .. } | PairKind::Product => Vec::new(),
+            PairKind::Option => vec!["Some".into(), "None".into()],
+            PairKind::Result => vec!["Ok".into(), "Err".into()],
+            PairKind::Enum(name) => self.checker.enum_variants(&name)?.into_iter().map(|(v, _, _)| v).collect(),
+        })
+    }
+
+    /// Whether a two-word enum of type `ty` may carry a heap payload in
+    /// its low word (#1791): a payload that is no scalar word and not
+    /// immediate, as [`Self::hir_mir_pair_tys`] moves it as an opaque
+    /// `i64`. Unknown payloads count as heap.
+    fn hir_pair_holds_heap(&self, ty: &Ty) -> bool {
+        use crate::hir::layout::{self, Layout};
+        use crate::mir::scalar_mir_ty as word;
+        let ty = apply_ty_prune(self.checker.subst(), ty);
+        let Layout::Pair(kind) = layout::of_resolved(&self.checker, &ty) else {
+            return false;
+        };
+        let Some(variants) = self.pair_variants(kind) else {
+            return true;
+        };
+        variants.iter().any(|v| match self.hir_payload_tys(&ty, v) {
+            Some(ps) => ps.iter().any(|p| !layout::is_unit(p) && word(p).is_none() && !layout::is_immediate(p)),
+            None => true,
+        })
     }
 
     /// Whether typed inlining runs on `hir`: on, at an opt level that

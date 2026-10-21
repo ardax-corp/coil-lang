@@ -1237,8 +1237,9 @@ impl CopySinks {
 
 /// The `i64` words that may hold a heap word: a boxed enum's payload
 /// read as a pair's low word (a two-word enum passed by value, whose
-/// heap payload moves as an opaque word), and the φs and casts that copy
-/// one. Typed `i64`, they are no heap word to [`CopySinks`] or
+/// heap payload moves as an opaque word), the low word of a pair a call
+/// returns when its enum may carry a heap payload there
+/// ([`MirFunc::heap_pair_calls`]), and the φs and casts that copy one. Typed `i64`, they are no heap word to [`CopySinks`] or
 /// [`arg_clears`], so a payload matched out of a rebound local, or passed
 /// on to a call, kept its object rooted in their registers (#1769). A
 /// plain number read the same way is zeroed too: harmless, and the
@@ -1249,6 +1250,14 @@ pub(super) fn payload_words(func: &MirFunc) -> HashSet<ValueId> {
         if let MirInst::MatchPayload { dest, scrutinee: src, .. } | MirInst::Cast { dest, src, .. } = inst
             && func.ty(*dest) == MirTy::I64
             && func.ty(*src).is_heap_word()
+        {
+            out.insert(*dest);
+        }
+        // A pair a call returns that may carry a heap payload: its low
+        // word (#1791).
+        if let MirInst::Call { dest, dest_hi: Some(_), .. } = inst
+            && func.ty(*dest) == MirTy::I64
+            && func.heap_pair_calls.contains(dest)
         {
             out.insert(*dest);
         }
@@ -1336,6 +1345,8 @@ impl Gathers {
     pub(super) fn new(func: &MirFunc, regs: &[u8], need_slot: &[bool], scratch: u8, self_entry: Option<Label>) -> Self {
         let mut out = Self::default();
         let slot = |v: ValueId| need_slot.get(v.index()).copied().unwrap_or(false) && v.index() < regs.len();
+        // A payload word moving as an `i64` holds its object too (#1791).
+        let payloads = payload_words(func);
         for (b, block) in func.blocks.iter().enumerate() {
             for (k, inst) in block.insts.iter().enumerate() {
                 if is_tail_call_inst(func, block, inst) {
@@ -1365,7 +1376,7 @@ impl Gathers {
                     }
                     for (i, w) in words.iter().enumerate() {
                         let Some(r) = scratch.checked_add(i as u8) else { break };
-                        if r == slots[i] || !func.ty(*w).is_heap_word() {
+                        if r == slots[i] || !(func.ty(*w).is_heap_word() || payloads.contains(w)) {
                             continue;
                         }
                         let rs = out.by_value.entry(*w).or_default();
