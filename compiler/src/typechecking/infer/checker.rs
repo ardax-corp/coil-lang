@@ -7104,7 +7104,7 @@ impl Checker {
                 range.clone(),
             );
             m.with_help(format!(
-                "`{op}` takes `int` / `float` / `byte` / `string` operands, or a type with a `{class}` instance (`#[derive(Ord)]`)"
+                "`{op}` takes `int` / `float` / `byte` / `string` operands, or a type with a `{class}` instance (`#[derive(Eq, Ord)]`)"
             ));
             m
         });
@@ -10551,7 +10551,8 @@ impl Checker {
     /// A ground tuple whose items are all `Ord` is `Ord` (#1721): it orders
     /// lexicographically, so its `Lt` / `Le` / `Gt` / `Ge` instances and
     /// the empty `Ord` are registered together, the first time a goal asks
-    /// for one, after its tuple items'.
+    /// for one, after its tuple items' and its structural `Eq` (a
+    /// superclass of `Ord`, #1716).
     fn ensure_structural_tuple_ord(&mut self, ty: &Ty) {
         let ty = show_lookup_ty(&apply_ty_prune(&self.subst, ty));
         let Ty::Tuple(items) = &ty else {
@@ -10570,6 +10571,7 @@ impl Checker {
                 || self.generics.find_generic_instance("Ord", std::slice::from_ref(&lookup)).is_some()
         });
         if ordered {
+            self.ensure_structural_instance("Eq", std::slice::from_ref(&ty));
             for class in ["Lt", "Le", "Gt", "Ge", "Ord"] {
                 self.generics.register_structural_instance(class, ty.clone());
             }
