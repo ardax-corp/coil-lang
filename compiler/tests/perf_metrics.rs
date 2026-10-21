@@ -2172,6 +2172,37 @@ fn main() {
     assert_eq!(clones.len(), 1, "`getx` should have one instance: {clones:?}");
 }
 
+/// #1806: a generic method's clone at a `T` and at a `readonly T` type
+/// argument is one instance (#1555's rule for methods too).
+#[test]
+fn readonly_type_argument_shares_the_method_clone() {
+    let src = "
+use collections::map::HashMap;
+class Point { pub x: int, }
+fn main() {
+    let m: HashMap<string, Point> = HashMap::new();
+    m.insert(\"a\", new Point(5));
+    let r: HashMap<string, readonly Point> = HashMap::new();
+    r.insert(\"a\", new Point(6));
+    let p = m.get(\"a\", new Point(0));
+    let q = r.get(\"a\", new Point(0));
+}
+";
+    let (_, pipeline) = compile_src_at(src, compiler::OptLevel::None);
+    let syms = pipeline.program_debug().fn_symbols;
+    let clones: Vec<&str> = syms
+        .iter()
+        .map(|s| s.name.as_str())
+        .filter(|n| n.contains("$inst$") && n.contains("Point"))
+        .collect();
+    let gets = clones.iter().filter(|n| n.contains("::get$inst$")).count();
+    assert_eq!(gets, 1, "`get` should have one instance: {clones:?}");
+    assert!(
+        clones.iter().all(|n| !n.contains("readonly")),
+        "no clone should be keyed with `readonly`: {clones:?}"
+    );
+}
+
 /// #1561: a module `const` table read at a constant index folds to the
 /// element, and its length to a literal: no load of the table is left.
 #[test]
