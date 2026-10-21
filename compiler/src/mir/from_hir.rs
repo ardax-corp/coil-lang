@@ -363,6 +363,9 @@ pub type BoxedEnumFn<'a> = Box<dyn Fn(&Ty, Option<&str>) -> Option<Vec<Ty>> + 'a
 /// An enum's finalizer type id when it has `fn drop()`, by name.
 pub type EnumDropFn<'a> = Box<dyn Fn(&str) -> Option<u32> + 'a>;
 
+/// The type id of a readonly class laid out as a pair, by type (#1562).
+pub type PairClassFn<'a> = Box<dyn Fn(&Ty) -> Option<u32> + 'a>;
+
 /// A variant's payload field names, by enum and variant name.
 pub type PayloadNamesFn<'a> = Box<dyn Fn(&str, &str) -> Vec<String> + 'a>;
 
@@ -495,6 +498,9 @@ pub struct HirMirInput<'a> {
     pub box_at: &'a HashMap<u32, Vec<u32>>,
     /// Whether a type is a class: its value is a heap object.
     pub is_class: Box<dyn Fn(&Ty) -> bool + 'a>,
+    /// The type id of a `readonly class` that moves as a pair (#1562): its
+    /// box is an object of that class with the two words as its fields.
+    pub pair_class: PairClassFn<'a>,
     /// Whether a local of this type is pinned: it can hold an object with
     /// a `drop`, which must stay reachable as long as HIR emission's frame
     /// slot holds it (until the local is rebound or the function returns).
@@ -2047,8 +2053,9 @@ impl Lower<'_> {
             let hi = self.b.ins_index(v, one, hi_ty, false).map_err(mir)?;
             return Ok(Val::Pair(lo, hi));
         }
-        // A boxed numeric range: a typed object, start and end its fields.
-        if crate::typechecking::return_layout::two_word_range_kind(ty).is_some() {
+        // A boxed numeric range: a typed object, start and end its fields;
+        // a readonly class pair: an instance, its two fields (#1562).
+        if crate::typechecking::return_layout::two_word_range_kind(ty).is_some() || (self.inp.pair_class)(ty).is_some() {
             let lo = self.b.ins_heap_field_load(v, 0, lo_ty).map_err(mir)?;
             let hi = self.b.ins_heap_field_load(v, 1, hi_ty).map_err(mir)?;
             return Ok(Val::Pair(lo, hi));
@@ -2410,15 +2417,30 @@ impl Lower<'_> {
             self.b.ins_heap_field_store(obj, hi, 1).map_err(mir)?;
             return Ok(Val::V(obj));
         }
+        // A readonly class pair: an instance of the class (#1562).
+        if let Some(type_id) = (self.inp.pair_class)(ty) {
+            let obj = self.b.ins_alloc(MirAllocKind::Object { type_id, nfields: 2 }, Vec::new()).map_err(mir)?;
+            let obj = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?;
+            self.b.ins_heap_field_store(obj, lo, 0).map_err(mir)?;
+            self.b.ins_heap_field_store(obj, hi, 1).map_err(mir)?;
+            return Ok(Val::V(obj));
+        }
         self.box_pair(ty, lo, hi)
     }
 
-    /// `id`'s word; refuses `()` and `Never` is passed up as `None`.
+    /// `id`'s word; refuses `()` and `Never` is passed up as `None`. A
+    /// readonly class kept as a pair is one word as its instance (#1562).
     fn word(&mut self, id: HirId) -> Result<Option<ValueId>, Refusal> {
         match self.value(id)? {
             Val::V(v) => Ok(Some(v)),
             Val::Never => Ok(None),
             Val::Unit => Err("unit operand".into()),
+            Val::Pair(lo, hi) if let Some(ty) = self.expr_ty(id).filter(|t| (self.inp.pair_class)(t).is_some()).cloned() => {
+                match self.box_pair_val(&ty, lo, hi)? {
+                    Val::V(v) => Ok(Some(v)),
+                    _ => Err("pair operand".into()),
+                }
+            }
             Val::Pair(..) => Err("pair operand".into()),
         }
     }
@@ -2900,6 +2922,38 @@ impl Lower<'_> {
                     Some(&layout) => self.unbox_niche(w, niche_word(layout)?),
                     None => Ok(Val::V(w)),
                 }
+            }
+            // A field of a readonly class kept as its pair (#1562): that
+            // word, with no object.
+            HirKind::Field { base, .. }
+                if let Some(&(slot, ty)) = self.inp.heap_fields.get(&id.0)
+                    && slot < 2
+                    && self.inp.pair_tys.contains_key(&base.0)
+                    && self.expr_ty(*base).is_some_and(|t| (self.inp.pair_class)(t).is_some()) =>
+            {
+                let w = match self.value(*base)? {
+                    Val::Never => return Ok(Val::Never),
+                    Val::Pair(lo, hi) => {
+                        if slot == 0 {
+                            lo
+                        } else {
+                            hi
+                        }
+                    }
+                    // One word (a parameter, an element): its instance.
+                    Val::V(obj) if self.b.value_ty(obj) == MirTy::HeapRef => {
+                        let w = self.b.ins_heap_field_load(obj, slot, ty).map_err(mir)?;
+                        if self.inp.invariant_fields.contains(&id.0) {
+                            self.b.mark_invariant_load(w);
+                        }
+                        w
+                    }
+                    _ => return Err("field base".into()),
+                };
+                if self.b.value_ty(w) != ty {
+                    return Err("field type".into());
+                }
+                Ok(Val::V(w))
             }
             HirKind::Field { base, .. } if let Some(&(slot, ty)) = self.inp.heap_fields.get(&id.0) => {
                 // A two-word enum is boxed for the read, as HIR emission's.
@@ -4020,6 +4074,8 @@ impl Lower<'_> {
                 && self.expr_ty(arg).is_some_and(|t| {
                     // A numeric range's word is its typed object.
                     crate::typechecking::return_layout::two_word_range_kind(t).is_some()
+                        // A readonly class pair's word is its instance.
+                        || (self.inp.pair_class)(t).is_some()
                         || (self.inp.word(t).is_none() && ((self.inp.boxed_view)(t, None).is_some() || is_heap_tuple(t)))
                 });
             // A `()` goes as the empty tuple object, as HIR emission
@@ -6421,7 +6477,7 @@ impl Lower<'_> {
                 };
                 (lo, self.b.ins_const(MirConst::I64(i64::from(*tag))).map_err(mir)?)
             }
-            MakeKind::Range { .. } | MakeKind::Tuple => {
+            MakeKind::Range { .. } | MakeKind::Tuple | MakeKind::Class(_) => {
                 let [a, b] = args else {
                     return Err("make pair".into());
                 };

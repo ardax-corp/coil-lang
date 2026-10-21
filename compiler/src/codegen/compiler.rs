@@ -1044,9 +1044,10 @@ impl Compiler {
             return None;
         }
         // A boxed tuple splits into `[a, b]` through a temp slot, which is
-        // unsafe above live operands, so products stay one boxed word.
+        // unsafe above live operands, so products (and readonly classes
+        // laid out as them) stay one boxed word.
         crate::typechecking::return_layout::two_word_kind(&self.checker, ty)
-            .filter(|kind| self.hir_pair_kind(kind) && *kind != PairKind::Product)
+            .filter(|kind| self.hir_pair_kind(kind) && !matches!(kind, PairKind::Product | PairKind::Class(_)))
     }
 
     /// Per parameter of `callee`, the two-word kind it takes (empty when it

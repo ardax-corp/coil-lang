@@ -42,7 +42,7 @@ fn layout_str(layout: &Layout) -> Option<String> {
                 PairKind::Product => "product".to_string(),
                 PairKind::Range { inclusive: false } => "range".to_string(),
                 PairKind::Range { inclusive: true } => "range_inclusive".to_string(),
-                PairKind::Enum(name) => name.clone(),
+                PairKind::Enum(name) | PairKind::Class(name) => name.clone(),
             }
         ),
         Layout::NicheOption => "niche Option".to_string(),
