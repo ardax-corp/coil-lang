@@ -54,28 +54,20 @@ test("await_readable match Ok after WouldBlock park") {
     let listener = triple[2];
     // The reader parks inside its generator; that suspends its task, so the
     // writer task runs and the reader's wait completes.
-    let r = scope(
-        fn (Scope sc) use (c, s) {
-            let reader = sc
-                .spawn(
-                    fn () use (c) {
-                        let g = http_read_after_wait(c);
-                        resume g
-                    },
-                );
-            sc
-                .spawn(
-                    fn () use (s) {
-                        let g = http_write_response(s);
-                        resume g
-                    },
-                );
-            match reader.join() {
-                Result::Ok(n) => n,
-                Result::Err(_) => -1,
-            }
-        },
-    );
+    let r = scope(fn (Scope sc) use (c, s) {
+        let reader = sc.spawn(fn () use (c) {
+            let g = http_read_after_wait(c);
+            resume g
+        });
+        sc.spawn(fn () use (s) {
+            let g = http_write_response(s);
+            resume g
+        });
+        match reader.join() {
+            Result::Ok(n) => n,
+            Result::Err(_) => -1,
+        }
+    });
     let n = match r {
         Result::Ok(n) => n,
         Result::Err(_) => -1,

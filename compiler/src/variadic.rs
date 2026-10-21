@@ -114,6 +114,8 @@ pub fn check_with_instances<'a>(
     let mut instances: Vec<Instance> = Vec::new();
     let mut copies: Vec<ForeignCopy<'a>> = Vec::new();
     let mut templates: Vec<Output<'a>> = Vec::new();
+    // `Owner::method` keys of method templates (#1754).
+    let mut methods: Vec<String> = Vec::new();
     // Rounds that added copies; a round that only renamed calls re-checks
     // once more and asks for nothing new.
     let mut rounds = 0;
@@ -161,6 +163,7 @@ pub fn check_with_instances<'a>(
         if !asks {
             // Every call names its copy now: check once more without the
             // templates (codegen compiles only what the last check saw).
+            methods.extend(checker.variadic_method_keys());
             templates.extend(drop_templates(ast, checker));
             continue;
         }
@@ -199,7 +202,12 @@ pub fn check_with_instances<'a>(
             }
             let index = instances.len();
             let name = format!("{template}__va{index}");
-            if add_instance(ast, &template, &name, SPAN_BASE + index * SPAN_REGION) {
+            let base = SPAN_BASE + index * SPAN_REGION;
+            let added = match checker.variadic_method_template(&template) {
+                Some((owner, method)) => add_method_instance(ast, owner, method, &name, base),
+                None => add_instance(ast, &template, &name, base),
+            };
+            if added {
                 checker.add_variadic_instance(&template, pack.clone(), &name);
                 instances.push(Instance { name, template, pack });
             }
@@ -214,7 +222,12 @@ pub fn check_with_instances<'a>(
                 checker.export_variadic_template(&format!("{module}::{name}"), function);
             }
         }
-        for inst in &instances {
+        // Method templates are not exported (#1754): an importer's call is
+        // an error.
+        for key in &methods {
+            checker.export_variadic_method(key);
+        }
+        for inst in instances.iter().filter(|i| !i.template.contains("::")) {
             checker.add_variadic_export_copy(
                 &format!("{module}::{}", inst.template),
                 inst.pack.clone(),
@@ -242,6 +255,10 @@ pub fn remap_message(msg: &Message, instances: &[Instance], copies: &[ForeignCop
     let mut text = msg.message().to_string();
     for inst in instances {
         text = text.replace(&inst.name, &inst.template);
+        // A method instance is spelled by its method name too (#1754).
+        if let (Some((_, name)), Some((_, template))) = (inst.name.rsplit_once("::"), inst.template.rsplit_once("::")) {
+            text = text.replace(name, template);
+        }
     }
     for copy in copies {
         text = text.replace(&copy.fqn(), &copy.template_fqn());
@@ -327,17 +344,93 @@ fn add_instance<'a>(ast: &mut Output<'a>, template: &str, name: &str, base: usiz
     true
 }
 
-/// Whether the module declares a free `fn` with an untyped `... xs`.
+/// Append to the inherent `impl` of `owner` (as written) declaring
+/// `method` a clone of it named after `name` (`Owner::method__vaN`), its
+/// spans moved by `base` (#1754). False when there is no such method.
+fn add_method_instance(ast: &mut Output<'_>, owner: &str, method: &str, name: &str, base: usize) -> bool {
+    let Expression::Program(children) = ast.1.as_mut() else {
+        return false;
+    };
+    let short = name.rsplit("::").next().unwrap_or(name);
+    for child in children.iter_mut() {
+        let Expression::Implementation { what: "", owner: o, methods, .. } = unwrap_stmt_mut(child).1.as_mut() else {
+            continue;
+        };
+        if *o != owner {
+            continue;
+        }
+        let Some(found) = methods.iter().find(|m| method_name(m) == Some(method)) else {
+            continue;
+        };
+        let mut copy = found.clone();
+        respan(&mut copy, base);
+        if let Expression::Method(_, function) = copy.1.as_mut()
+            && let Expression::Function { name: fn_name, docs, .. } = function.1.as_mut()
+        {
+            *fn_name = leak(short.to_string());
+            docs.clear();
+        }
+        methods.push(copy);
+        return true;
+    }
+    false
+}
+
+/// The name an `impl` member declares, when it is a method.
+fn method_name<'a>(member: &Output<'a>) -> Option<&'a str> {
+    match member.1.as_ref() {
+        Expression::Method(_, function) => template_name(function),
+        _ => None,
+    }
+}
+
+/// A top-level item under its statement wrappers.
+fn unwrap_stmt_mut<'n, 'a>(node: &'n mut Output<'a>) -> &'n mut Output<'a> {
+    if !matches!(
+        node.1.as_ref(),
+        Expression::Statement(_) | Expression::ExprStatement(_) | Expression::Expr(_) | Expression::Group(_)
+    ) {
+        return node;
+    }
+    match node.1.as_mut() {
+        Expression::Statement(inner)
+        | Expression::ExprStatement(inner)
+        | Expression::Expr(inner)
+        | Expression::Group(inner) => unwrap_stmt_mut(inner),
+        _ => unreachable!("checked above"),
+    }
+}
+
+/// A top-level item under its statement wrappers.
+fn unwrap_stmt<'n, 'a>(node: &'n Output<'a>) -> &'n Output<'a> {
+    match node.1.as_ref() {
+        Expression::Statement(inner)
+        | Expression::ExprStatement(inner)
+        | Expression::Expr(inner)
+        | Expression::Group(inner) => unwrap_stmt(inner),
+        _ => node,
+    }
+}
+
+/// Whether the module declares a free `fn` or inherent method with an
+/// untyped `... xs`.
 fn has_templates(ast: &Output<'_>) -> bool {
     let Expression::Program(children) = ast.1.as_ref() else {
         return false;
     };
-    children.iter().any(|c| match c.1.as_ref() {
+    let tuple_rest = |f: &Output<'_>| match f.1.as_ref() {
         Expression::Function { args, .. } => matches!(args.1.as_ref(), Expression::Fragment(items)
             if items.last().is_some_and(|a| {
                 matches!(a.1.as_ref(), Expression::Argument { ty: None, is_rest: true, .. })
             })),
         _ => false,
+    };
+    children.iter().any(|c| match unwrap_stmt(c).1.as_ref() {
+        // An inherent method's too (#1754).
+        Expression::Implementation { what: "", methods, .. } => methods
+            .iter()
+            .any(|m| matches!(m.1.as_ref(), Expression::Method(_, f) if tuple_rest(f))),
+        _ => tuple_rest(c),
     })
 }
 
@@ -370,8 +463,30 @@ fn rename_in(node: &mut Output<'_>, checker: &Checker, count: &mut usize) {
         *callee = leak(instance.to_string());
         *count += 1;
     }
+    // `recv.m(…)` / `Owner::m(…)` of a method template (#1754).
+    if let Some(instance) = checker.variadic_call_at(span.start, span.end)
+        && checker
+            .variadic_instance_of(instance)
+            .is_some_and(|(template, _)| checker.variadic_method_template(template).is_some())
+    {
+        let short = instance.rsplit("::").next().unwrap_or(instance);
+        let member = match node.1.as_mut() {
+            Expression::Call { name, .. } => match name.1.as_mut() {
+                Expression::Access(_, member) | Expression::QualifiedAccess { member, .. } => Some(member),
+                _ => None,
+            },
+            Expression::Construct { variant_name, .. } => Some(variant_name),
+            _ => None,
+        };
+        if let Some(member) = member
+            && *member != short
+        {
+            *member = leak(short.to_string());
+            *count += 1;
+        }
+    }
     // `module::f(…)` of another module's template (#1386).
-    if let Expression::Call { name, .. } = node.1.as_mut()
+    else if let Expression::Call { name, .. } = node.1.as_mut()
         && matches!(name.1.as_ref(), Expression::QualifiedAccess { .. })
         && let Some(instance) = checker.variadic_call_at(span.start, span.end)
     {
@@ -389,6 +504,12 @@ fn drop_templates<'a>(ast: &mut Output<'a>, checker: &Checker) -> Vec<Output<'a>
     };
     let mut dropped = Vec::new();
     for child in children.iter_mut() {
+        // A method template leaves its `impl` (#1754); importers cannot
+        // call it, so it is not returned.
+        if let Expression::Implementation { what: "", owner, methods, .. } = unwrap_stmt_mut(child).1.as_mut() {
+            methods.retain(|m| !method_name(m).is_some_and(|n| checker.is_variadic_method_template(owner, n)));
+            continue;
+        }
         if let Expression::Function { name, .. } = child.1.as_ref()
             && checker.is_variadic_template(name)
         {

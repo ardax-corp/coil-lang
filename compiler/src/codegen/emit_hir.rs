@@ -2259,6 +2259,12 @@ impl Compiler {
             let Some(call) = emit.plan.calls.get(&id.0) else {
                 return Err("not-planned".to_string());
             };
+            // The checker's pack recipe for a call whose result packs into
+            // a trait object is keyed on the call: the callee's result
+            // spliced in its place would not pack (#1757).
+            if self.hir_existential_pack(hir, id).is_some() {
+                return Err("existential-pack".to_string());
+            }
             let core = core_insts.get(&id.0);
             let kind = [
                 (call.builtin.is_some(), "builtin"),
@@ -7607,6 +7613,10 @@ impl Compiler {
             Some(_) => None,
             None => match sym {
                 "==" | "!=" => Some(HirOp::Prim),
+                // Ordering on a string-backed scalar enum with no instance
+                // (against its backing `string`, or another of its cases)
+                // orders the backing strings by their bytes (#1722).
+                "<" | ">" | "<=" | ">=" if self.hir_string_word(hir, lhs) && self.hir_string_word(hir, rhs) => Some(HirOp::Prim),
                 // Arithmetic or ordering on a number-backed scalar enum with
                 // no instance is on its backing word: a raw op over both
                 // operands, in the backing's lane.
@@ -7644,6 +7654,21 @@ impl Compiler {
             class,
             method,
         })
+    }
+
+    /// Whether operand `id` is a `string` or a string-backed scalar enum.
+    fn hir_string_word(&self, hir: &HirBody, id: HirId) -> bool {
+        let Some(ty) = Self::hir_ty(hir, id) else {
+            return false;
+        };
+        let ty = apply_ty_prune(self.checker.subst(), ty);
+        let string = |t: &Ty| matches!(crate::typechecking::ty::strip_readonly(t), Ty::Con(n) if n == crate::typechecking::ty::STRING);
+        string(&ty)
+            || self
+                .hir_enum_name(&ty)
+                .filter(|name| self.checker.is_scalar_enum(name))
+                .and_then(|name| self.checker.scalar_value_ty(&name))
+                .is_some_and(|backing| string(&backing))
     }
 
     /// The lane of an `int` / `byte` (`false`) or `float` (`true`) operand,

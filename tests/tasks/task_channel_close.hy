@@ -44,34 +44,30 @@ test("recv drains queued values before reporting Closed") {
 
 test("close wakes a task waiting in recv") {
     let ch: Channel<int> = task::channel(1);
-    let r = scope(
-        fn (Scope s) use (ch) {
-            let reader = s.spawn(fn () use (ch) => recv_code(ch));
-            task::yield_now();
-            ch.close();
-            match reader.join() {
-                Result::Ok(v) => v,
-                Result::Err(_) => -100,
-            }
-        },
-    );
+    let r = scope(fn (Scope s) use (ch) {
+        let reader = s.spawn(fn () use (ch) => recv_code(ch));
+        task::yield_now();
+        ch.close();
+        match reader.join() {
+            Result::Ok(v) => v,
+            Result::Err(_) => -100,
+        }
+    });
     assert!(r == Result::Ok(-1));
 }
 
 test("close wakes a task waiting in send") {
     let ch: Channel<int> = task::channel(1);
-    let r = scope(
-        fn (Scope s) use (ch) {
-            let _ = ch.send(1);
-            let writer = s.spawn(fn () use (ch) => is_closed_err(ch.send(2)));
-            task::yield_now();
-            ch.close();
-            match writer.join() {
-                Result::Ok(b) => b,
-                Result::Err(_) => false,
-            }
-        },
-    );
+    let r = scope(fn (Scope s) use (ch) {
+        let _ = ch.send(1);
+        let writer = s.spawn(fn () use (ch) => is_closed_err(ch.send(2)));
+        task::yield_now();
+        ch.close();
+        match writer.join() {
+            Result::Ok(b) => b,
+            Result::Err(_) => false,
+        }
+    });
     assert!(r == Result::Ok(true));
     // The value queued before the close is still there.
     assert!(recv_code(ch) == 1);
@@ -92,24 +88,22 @@ test("closing twice is harmless") {
 
 test("every receiver waiting on a closed channel wakes") {
     let ch: Channel<int> = task::channel(2);
-    let r = scope(
-        fn (Scope s) use (ch) {
-            let a = s.spawn(fn () use (ch) => recv_code(ch));
-            let b = s.spawn(fn () use (ch) => recv_code(ch));
-            let c = s.spawn(fn () use (ch) => recv_code(ch));
-            task::yield_now();
-            let _ = ch.send(5);
-            ch.close();
-            let total = 0;
-            for t in [a, b, c] {
-                total = total + match t.join() {
-                    Result::Ok(v) => v,
-                    Result::Err(_) => -100,
-                };
-            }
-            total
-        },
-    );
+    let r = scope(fn (Scope s) use (ch) {
+        let a = s.spawn(fn () use (ch) => recv_code(ch));
+        let b = s.spawn(fn () use (ch) => recv_code(ch));
+        let c = s.spawn(fn () use (ch) => recv_code(ch));
+        task::yield_now();
+        let _ = ch.send(5);
+        ch.close();
+        let total = 0;
+        for t in [a, b, c] {
+            total = total + match t.join() {
+                Result::Ok(v) => v,
+                Result::Err(_) => -100,
+            };
+        }
+        total
+    });
     // One receiver gets 5, the other two see Closed (-1 each).
     assert!(r == Result::Ok(3));
 }

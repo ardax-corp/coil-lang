@@ -1435,6 +1435,7 @@ pub(super) fn arg_clears(
     let slot = |v: ValueId| need_slot.get(v.index()).copied().unwrap_or(false) && v.index() < regs.len();
     let payloads = payload_words(func);
     let heapish = |v: ValueId| func.ty(v).is_heap_word() || payloads.contains(&v);
+<<<<<<< HEAD
     // A heap word cast from another (`Option::Some(new Node(..))`'s niche
     // word): the LIR tier emits it as an inline operand with no register
     // of its own, so its source's register is what holds the object
@@ -1449,6 +1450,9 @@ pub(super) fn arg_clears(
         }
     }
     let payload_defs = payload_defs(func, &copied);
+=======
+    let payload_defs = payload_defs(func, &payloads);
+>>>>>>> origin/main
     let mut bound_regs = RegSet::default();
     for &v in &func.bound_words {
         if slot(v) {
@@ -1541,11 +1545,18 @@ pub(super) fn arg_clears(
             // (its φ's incomings, the match it was read by and the enum
             // matched, the object cast to it) hold the object too, also
             // when the word itself has none (an inline operand of the LIR
+<<<<<<< HEAD
             // tier) (#1769). Likewise a heap word cast from another, a
             // niche `Option::Some` (#1802). Not past a live value, nor
             // into a register a local's word shares.
             for v in inst.operands() {
                 if !copied.contains(&v) || func.params.contains(&v) || func.bound_words.contains(&v) || !unused(v) {
+=======
+            // tier) (#1769). Not past a live value, nor into a register
+            // a local's word shares.
+            for v in inst.operands() {
+                if !payloads.contains(&v) || func.params.contains(&v) || func.bound_words.contains(&v) || !unused(v) {
+>>>>>>> origin/main
                     continue;
                 }
                 for s in payload_sources(func, &payloads, &payload_defs, v, |x| consts.contains(&x) || live[b][k].contains(&x)) {
@@ -3436,6 +3447,15 @@ fn left_by_miss(func: &MirFunc, preds: &[BlockId], block: BlockId, scrutinee: Va
         })
 }
 
+/// The miss edge of a `JumpIfMatch` on `scrutinee` into `not_taken` pops
+/// the scrutinee itself: `not_taken` is also reached by a path that leaves
+/// no scrutinee (a failed sub-pattern test of an earlier arm, `Op::Mul(a, 1)`
+/// on `Mul(4, 2)`), so nothing there takes the word the miss left, and a
+/// loop running the match grows the stack each pass (#1780).
+pub(super) fn miss_edge_pops(func: &MirFunc, scrutinee: ValueId, not_taken: BlockId) -> bool {
+    !scrutinee_left_by_miss(func, not_taken, scrutinee)
+}
+
 /// `block` is reached only by boxed `JumpIfMatch` misses, which leave the
 /// scrutinee on the stack, takes no payload of it (a unit or wildcard last
 /// arm, or a later arm's test that pushes the scrutinee again), and can run
@@ -3624,6 +3644,9 @@ fn emit_boxed_jump_if_match(args: EmitBoxedJumpIfMatchArgs<'_>) -> Result<(), Lo
         stacked.pop();
     } else {
         stacked.clear();
+    }
+    if miss_edge_pops(func, scrutinee, not_taken) {
+        out.push(IlOp::Pop { loc });
     }
     if !is_fallthrough(func, block.id, not_taken) {
         out.push(IlOp::Jump {

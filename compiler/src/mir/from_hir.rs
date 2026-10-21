@@ -4786,6 +4786,20 @@ impl Lower<'_> {
             let r = self.box_niche(self.niche_layout(rhs, rt)?, r)?;
             return Ok(Val::V(self.b.ins_str_eq(l, r, sym == "!=").map_err(mir)?));
         }
+        // A string-backed scalar enum's (or a `string`'s) words order by
+        // their bytes, as `<` on two strings does (#1722).
+        if lt == MirTy::HeapRef && rt == MirTy::HeapRef {
+            let cmp = match sym {
+                "<" => MirCmpOp::Lt,
+                ">" => MirCmpOp::Gt,
+                "<=" => MirCmpOp::Le,
+                ">=" => MirCmpOp::Ge,
+                _ => return Err(format!("operator {sym} words")),
+            };
+            let order = self.b.ins_host_invoke(common::STRING_COMPARE_ID, vec![l, r]).map_err(mir)?;
+            let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+            return Ok(Val::V(self.b.ins_cmp(cmp, order, zero).map_err(mir)?));
+        }
         // A `bool`-backed scalar enum's words compare as their `0` / `1`.
         if lt == MirTy::Bool && rt == MirTy::Bool && matches!(sym, "==" | "!=") {
             let l = self.b.ins_cast(MirCastKind::Word, MirTy::I64, l).map_err(mir)?;

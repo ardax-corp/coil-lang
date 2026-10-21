@@ -1,5 +1,5 @@
 // Expected: E0408 — `Stream.attach` requires `--allow-attach`.
-use io::{stdout};
+use io::stdout;
 
 fn main() {
     let s = stdout();

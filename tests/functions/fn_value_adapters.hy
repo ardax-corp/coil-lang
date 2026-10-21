@@ -34,14 +34,12 @@ test("blocking_with of a named function") {
 
 test("blocking_with in a lambda") {
     let k = 1;
-    let r = run(
-        fn () use (k) {
-            match task::blocking_with(sq, 7) {
-                Result::Ok(v) => v + k,
-                Result::Err(_) => -1,
-            }
-        },
-    );
+    let r = run(fn () use (k) {
+        match task::blocking_with(sq, 7) {
+            Result::Ok(v) => v + k,
+            Result::Err(_) => -1,
+        }
+    });
     assert!(r == 50);
 }
 
