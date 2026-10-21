@@ -348,7 +348,7 @@ fn data_uses(inst: &MirInst) -> Vec<ValueId> {
     }
 }
 
-fn term_uses(term: &Terminator) -> Vec<ValueId> {
+pub(super) fn term_uses(term: &Terminator) -> Vec<ValueId> {
     match term {
         Terminator::Br { cond, .. } => vec![*cond],
         Terminator::JumpIfMatch { scrutinee, .. } => vec![*scrutinee],
