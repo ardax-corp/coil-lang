@@ -313,6 +313,7 @@ mod tests {
             write: vec![Scoped { module: None, value: read.to_path_buf() }],
             env: vec![Scoped::parse("gen=TOKEN", |n| n.to_string())],
             exec: vec![Scoped::parse("git", |n| n.to_string())],
+            net: vec![Scoped::parse("db.internal:3306", |n| n.to_string()), Scoped::parse("example.org", |n| n.to_string())],
         };
         grants.for_module("gen")
     }
@@ -376,5 +377,11 @@ mod tests {
         assert!(io.check_exec("git").is_ok());
         assert!(io.check_exec("/usr/bin/git").is_ok());
         assert!(io.check_exec("rm").unwrap_err().contains("--comptime-exec rm"));
+        assert!(io.check_net("db.internal", 3306).is_ok());
+        assert!(io.check_net("db.internal", 5432).unwrap_err().contains("--comptime-net db.internal:5432"));
+        assert!(io.check_net("EXAMPLE.org", 443).is_ok(), "a host grant covers any port");
+        assert!(io.check_net("example.com", 443).is_err());
+        let offline = crate::macros::ComptimeIo { offline: true, ..io.clone() };
+        assert!(offline.check_net("example.org", 443).unwrap_err().contains("--comptime-offline"));
     }
 }
