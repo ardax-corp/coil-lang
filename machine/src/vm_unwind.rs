@@ -103,11 +103,15 @@ impl<const S: usize> Machine<S> {
     /// `unwind_resume`: the pad ran; drop its frame (unless it is the floor)
     /// and let the panic go on to the callers.
     fn unwind_resume(&mut self) {
-        if self.frames.len() > self.unwind_floor() {
+        let above_floor = self.frames.len() > self.unwind_floor();
+        if above_floor {
             self.unwind_drop_frame();
         }
         self.panicked = true;
-        self.unwind.armed = true;
+        // The floor frame stays, and its ip is still inside its own cleanup
+        // range: unwinding it again would rerun its pad forever (#1758).
+        // No frame of this execution is left below it.
+        self.unwind.armed = above_floor;
         self.unwind.resumed = true;
     }
 
