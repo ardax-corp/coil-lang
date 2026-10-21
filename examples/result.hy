@@ -16,7 +16,7 @@ fn unwrap_result(Result r) -> int {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", unwrap_result(Result::Ok(Option::Some(42))))));
-    write_all(stdout(), to_bytes(format("%i", unwrap_result(Result::Ok(Option::None)))));
-    write_all(stdout(), to_bytes(format("%i", unwrap_result(Result::Err("oops")))));
+    let _ = write_all(stdout(), to_bytes(format("%i", unwrap_result(Result::Ok(Option::Some(42))))));
+    let _ = write_all(stdout(), to_bytes(format("%i", unwrap_result(Result::Ok(Option::None)))));
+    let _ = write_all(stdout(), to_bytes(format("%i", unwrap_result(Result::Err("oops")))));
 }

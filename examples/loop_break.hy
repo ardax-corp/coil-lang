@@ -20,5 +20,5 @@ fn main() {
         sum = sum + i;
         i = i + 1;
     }
-    write_all(stdout(), to_bytes(format("%i", sum)));
+    let _ = write_all(stdout(), to_bytes(format("%i", sum)));
 }

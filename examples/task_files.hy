@@ -46,5 +46,5 @@ fn main() {
         Result::Ok(ok) => verdict(ok),
         default => "failed",
     };
-    write_all(stdout(), to_bytes(text));
+    let _ = write_all(stdout(), to_bytes(text));
 }

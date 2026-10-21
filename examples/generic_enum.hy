@@ -19,5 +19,5 @@ fn unwrap(Box<int> b) -> int {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", unwrap(Box::Full(7)))));
+    let _ = write_all(stdout(), to_bytes(format("%i", unwrap(Box::Full(7)))));
 }

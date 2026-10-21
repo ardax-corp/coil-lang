@@ -18,10 +18,10 @@ fn main() {
         Option::Some(s) => s,
         Option::None => "gone",
     };
-    write_all(stdout(), to_bytes(label));
+    let _ = write_all(stdout(), to_bytes(label));
     let taken = match unroot(r) {
         Option::Some(s) => s,
         Option::None => "gone",
     };
-    write_all(stdout(), to_bytes(format("\n%s", taken)));
+    let _ = write_all(stdout(), to_bytes(format("\n%s", taken)));
 }

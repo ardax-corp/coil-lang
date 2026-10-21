@@ -18,5 +18,5 @@ impl Cell<T> {
 
 fn main() {
     let c = new Cell(42);
-    write_all(stdout(), to_bytes(format("%i", c.get())));
+    let _ = write_all(stdout(), to_bytes(format("%i", c.get())));
 }

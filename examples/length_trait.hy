@@ -26,9 +26,9 @@ fn sized<T: Length>(T x) -> int {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i\n", "foo".len())));
-    write_all(stdout(), to_bytes(format("%i\n", (new Pair(1, 2)).len())));
-    write_all(
+    let _ = write_all(stdout(), to_bytes(format("%i\n", "foo".len())));
+    let _ = write_all(stdout(), to_bytes(format("%i\n", (new Pair(1, 2)).len())));
+    let _ = write_all(
         stdout(),
         to_bytes(format("%i\n", sized("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"))),
     );

@@ -26,5 +26,5 @@ fn leak_handle() {
 fn main() {
     leak_handle();
     collect();
-    write_all(stdout(), to_bytes(log));
+    let _ = write_all(stdout(), to_bytes(log));
 }

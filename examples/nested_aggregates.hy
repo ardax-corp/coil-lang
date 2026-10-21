@@ -18,7 +18,7 @@ fn sum_ages(Table rows) -> int {
     let total = 0;
     for row in rows {
         let (name, age) = row;
-        write_all(stdout(), to_bytes(format("%s:%i", name, age)));
+        let _ = write_all(stdout(), to_bytes(format("%s:%i", name, age)));
         total = total + age;
     }
     return total;
@@ -26,5 +26,5 @@ fn sum_ages(Table rows) -> int {
 
 fn main() {
     let people: Table = Vec::from([("alice", 30), ("bob", 25)]);
-    write_all(stdout(), to_bytes(format("total:%i", sum_ages(people))));
+    let _ = write_all(stdout(), to_bytes(format("total:%i", sum_ages(people))));
 }

@@ -8,9 +8,9 @@ use string::{format, to_bytes};
 
 fn main() {
     let x = 5;
-    write_all(stdout(), to_bytes(format("%i", x)));
+    let _ = write_all(stdout(), to_bytes(format("%i", x)));
     let y = 10;
-    write_all(stdout(), to_bytes(format("%i", y)));
+    let _ = write_all(stdout(), to_bytes(format("%i", y)));
     x = 20;
-    write_all(stdout(), to_bytes(format("%i", x)));
+    let _ = write_all(stdout(), to_bytes(format("%i", x)));
 }

@@ -11,5 +11,5 @@ use io::sync::write_all;
 use string::{format, to_bytes};
 
 fn sadge() {
-    write_all(stdout(), to_bytes(format("%x\n", 420)));
+    let _ = write_all(stdout(), to_bytes(format("%x\n", 420)));
 }

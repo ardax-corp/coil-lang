@@ -9,7 +9,7 @@ use string::{format, to_bytes};
 fn main() {
     let b: byte = 255;
     let arr = Vec::from([1 as byte, 2 as byte, 3 as byte]);
-    write_all(stdout(), to_bytes(format("%i", b)));
-    write_all(stdout(), to_bytes(format("%i", arr.len())));
-    write_all(stdout(), to_bytes(format("%i", arr[1])));
+    let _ = write_all(stdout(), to_bytes(format("%i", b)));
+    let _ = write_all(stdout(), to_bytes(format("%i", arr.len())));
+    let _ = write_all(stdout(), to_bytes(format("%i", arr[1])));
 }

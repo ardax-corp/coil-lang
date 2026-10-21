@@ -19,7 +19,7 @@ impl Show for Point {
 }
 
 fn show_it<T: Show>(T x) {
-    write_all(stdout(), to_bytes(format("%v", x)));
+    let _ = write_all(stdout(), to_bytes(format("%v", x)));
 }
 
 fn main() {

@@ -14,5 +14,5 @@ use string::{format, to_bytes};
 
 fn main() {
     sadge();
-    write_all(stdout(), to_bytes(format("%x\n", 69)));
+    let _ = write_all(stdout(), to_bytes(format("%x\n", 69)));
 }

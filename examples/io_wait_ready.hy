@@ -25,12 +25,12 @@ fn main() {
     let h2 = slurp("/etc/passwd");
     while !done(h1) || !done(h2) {
         if !done(h1) {
-            resume h1;
+            let _ = resume h1;
         }
         if !done(h2) {
-            resume h2;
+            let _ = resume h2;
         }
         wait_ready();
     }
-    write_all(stdout(), to_bytes(format("ok")));
+    let _ = write_all(stdout(), to_bytes(format("ok")));
 }

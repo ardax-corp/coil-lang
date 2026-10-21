@@ -6,7 +6,7 @@ use string::{format, to_bytes};
 
 /// Write `text` to stdout (generated code calls `attr_demo::say`).
 fn say(string text) {
-    write_all(stdout(), to_bytes(format("%s", text)));
+    let _ = write_all(stdout(), to_bytes(format("%s", text)));
 }
 
 // `f` renamed to `inner`, and a wrapper under `f`'s name that says `text`

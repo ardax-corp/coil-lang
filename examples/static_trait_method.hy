@@ -46,5 +46,5 @@ fn main() {
     let p = Point::from_val(new Val(4));
     let n: int = decode(new Val(4));
     let cfg = Config::default();
-    write_all(stdout(), to_bytes(format("%i,%i,%i", p.x, n, cfg.port)));
+    let _ = write_all(stdout(), to_bytes(format("%i,%i,%i", p.x, n, cfg.port)));
 }

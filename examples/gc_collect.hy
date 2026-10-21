@@ -25,5 +25,5 @@ fn main() {
         Option::Some(_) => "some",
         Option::None => "none",
     };
-    write_all(stdout(), to_bytes(label));
+    let _ = write_all(stdout(), to_bytes(label));
 }

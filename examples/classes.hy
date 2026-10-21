@@ -28,12 +28,12 @@ impl Point {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", 2 * 2 + 3)));
+    let _ = write_all(stdout(), to_bytes(format("%i", 2 * 2 + 3)));
 
     let p = new Point(1, 3);
-    write_all(stdout(), to_bytes(format("%i", p.sum())));
+    let _ = write_all(stdout(), to_bytes(format("%i", p.sum())));
 
     p.set_x(5);
-    write_all(stdout(), to_bytes(format("%i", p.x)));
-    write_all(stdout(), to_bytes(format("%i", p.sum())));
+    let _ = write_all(stdout(), to_bytes(format("%i", p.x)));
+    let _ = write_all(stdout(), to_bytes(format("%i", p.sum())));
 }

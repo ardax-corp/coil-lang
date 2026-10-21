@@ -14,5 +14,5 @@ fn unwrap(Option o) -> int {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", unwrap(Option::Some(42)))));
+    let _ = write_all(stdout(), to_bytes(format("%i", unwrap(Option::Some(42)))));
 }

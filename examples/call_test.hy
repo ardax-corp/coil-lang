@@ -15,5 +15,5 @@ fn add(int a, int b) -> int {
 
 fn main() {
     add(3, 4);
-    write_all(stdout(), to_bytes("done"));
+    let _ = write_all(stdout(), to_bytes("done"));
 }

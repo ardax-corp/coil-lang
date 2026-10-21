@@ -28,5 +28,5 @@ fn main() {
         Result::Ok(v) => v,
         Result::Err(e) => panic e.message,
     };
-    write_all(stdout(), to_bytes(format("%i", n)));
+    let _ = write_all(stdout(), to_bytes(format("%i", n)));
 }

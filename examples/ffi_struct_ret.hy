@@ -20,6 +20,6 @@ fn main() -> Result<(), Error> {
     let lib = dload("sum")?;
     let make_id = declare(lib, "make_point", (Int32, Int32), Point)?;
     let p = invoke(lib, make_id, (3, 4))?;
-    write_all(stdout(), to_bytes(format("%i", p.x)));
-    write_all(stdout(), to_bytes(format("%i", p.y)));
+    let _ = write_all(stdout(), to_bytes(format("%i", p.x)));
+    let _ = write_all(stdout(), to_bytes(format("%i", p.y)));
 }

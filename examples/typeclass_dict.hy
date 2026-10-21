@@ -31,6 +31,6 @@ fn outer<T: Describable>(T x) -> int {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", show(41))));
-    write_all(stdout(), to_bytes(format("%i", outer(41))));
+    let _ = write_all(stdout(), to_bytes(format("%i", show(41))));
+    let _ = write_all(stdout(), to_bytes(format("%i", outer(41))));
 }

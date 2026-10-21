@@ -11,10 +11,10 @@ use attr_demo::{log, measure};
 #[log(message = "enter")]
 #[measure(metric = "do_thing")]
 fn do_thing(int x, string name) -> int {
-    write_all(stdout(), to_bytes(format("%s", name)));
+    let _ = write_all(stdout(), to_bytes(format("%s", name)));
     return x;
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", do_thing(42, "hi"))));
+    let _ = write_all(stdout(), to_bytes(format("%i", do_thing(42, "hi"))));
 }

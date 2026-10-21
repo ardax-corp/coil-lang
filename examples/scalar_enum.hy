@@ -25,5 +25,5 @@ fn label(Status s) -> string {
 
 fn main() {
     let s = Status::Ok;
-    write_all(stdout(), to_bytes(format("%s %i %v\n", label(s), s, s)));
+    let _ = write_all(stdout(), to_bytes(format("%s %i %v\n", label(s), s, s)));
 }

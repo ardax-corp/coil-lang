@@ -12,5 +12,5 @@ fn main() {
     m.insert(1, "a");
     m.insert(2, "b");
     m.insert(1, "A");
-    write_all(stdout(), to_bytes(format("%s,%i", m.get(1, "?"), m.size())));
+    let _ = write_all(stdout(), to_bytes(format("%s,%i", m.get(1, "?"), m.size())));
 }
