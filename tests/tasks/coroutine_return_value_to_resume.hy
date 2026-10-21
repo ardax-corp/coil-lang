@@ -12,7 +12,7 @@ gen fn counter() {
 
 fn main() {
     let h = counter();
-    write(stdout(), to_bytes(format("%i,", resume h))); // yield 1
-    write(stdout(), to_bytes(format("%i,", resume h))); // yield 2
-    write(stdout(), to_bytes(format("%i", resume h))); // return 42
+    let _ = write(stdout(), to_bytes(format("%i,", resume h))); // yield 1
+    let _ = write(stdout(), to_bytes(format("%i,", resume h))); // yield 2
+    let _ = write(stdout(), to_bytes(format("%i", resume h))); // return 42
 }

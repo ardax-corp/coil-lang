@@ -10,5 +10,5 @@ fn show(Option<string> value) -> string {
 }
 
 fn main() {
-    write(stdout(), to_bytes(format("%s,%s", show(Option::Some("ok")), show(Option::None))));
+    let _ = write(stdout(), to_bytes(format("%s,%s", show(Option::Some("ok")), show(Option::None))));
 }

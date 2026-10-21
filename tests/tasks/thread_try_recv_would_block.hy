@@ -13,5 +13,5 @@ fn main() {
             default => "other",
         },
     };
-    write(stdout(), to_bytes(format("%s", msg)));
+    let _ = write(stdout(), to_bytes(format("%s", msg)));
 }

@@ -8,7 +8,7 @@ use string::{format, to_bytes};
 fn worker() -> int {
     let i = 0;
     while i < 3 {
-        write(stdout(), to_bytes(format("%i", i)));
+        let _ = write(stdout(), to_bytes(format("%i", i)));
         i = i + 1;
     }
     return 0;

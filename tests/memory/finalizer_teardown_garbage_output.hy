@@ -10,7 +10,7 @@ class Handle {
 
 impl Handle {
     fn drop() {
-        write(stdout(), to_bytes("closed"));
+        let _ = write(stdout(), to_bytes("closed"));
     }
 }
 

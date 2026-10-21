@@ -18,5 +18,5 @@ fn main() {
     sleep_ms(15);
     let w1 = wall_nanos();
     let m1 = mono_nanos();
-    write(stdout(), to_bytes(format("%i%i", flag(w1, w0), flag(m1, m0))));
+    let _ = write(stdout(), to_bytes(format("%i%i", flag(w1, w0), flag(m1, m0))));
 }

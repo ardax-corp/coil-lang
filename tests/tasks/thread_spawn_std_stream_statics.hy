@@ -67,18 +67,18 @@ fn run_bool(() -> bool f) -> bool {
 
 fn check(string what, bool ok) {
     if ok {
-        write(OUT, to_bytes(format("%s ok\n", what)));
+        let _ = write(OUT, to_bytes(format("%s ok\n", what)));
     } else {
-        write(OUT, to_bytes(format("%s FAILED\n", what)));
+        let _ = write(OUT, to_bytes(format("%s FAILED\n", what)));
     }
 }
 
 fn main() {
     let n = run_int(say, 7);
-    write(OUT, to_bytes(format("wrote %i\n", n)));
+    let _ = write(OUT, to_bytes(format("wrote %i\n", n)));
     check("err", run_bool(err_writes));
     check("in", run_bool(in_has_fd));
-    close(SHUT);
+    let _ = close(SHUT);
     check("closed", run_bool(shut_is_closed));
-    write(OUT, to_bytes("back in main\n"));
+    let _ = write(OUT, to_bytes("back in main\n"));
 }

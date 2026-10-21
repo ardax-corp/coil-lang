@@ -14,7 +14,7 @@ fn work(Sender tx) -> Result<int, ThreadError> {
 fn main() -> Result<unit, ThreadError> {
     let (tx, rx) = channel()?;
     let t = spawn(work, tx)?;
-    write(stdout(), to_bytes(format("%i", recv(rx)?)));
+    let _ = write(stdout(), to_bytes(format("%i", recv(rx)?)));
     join(t)?;
     return Ok(());
 }

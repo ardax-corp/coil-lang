@@ -12,5 +12,5 @@ fn main() {
         Result::Ok(_) => 1,
         Result::Err(_) => 0,
     };
-    write_all(stdout(), to_bytes(format("%i", code)));
+    let _ = write_all(stdout(), to_bytes(format("%i", code)));
 }

@@ -9,7 +9,7 @@ gen fn unit_ret() {
 
 fn main() {
     let h = unit_ret();
-    write(stdout(), to_bytes(format("%z,", done(h))));
+    let _ = write(stdout(), to_bytes(format("%z,", done(h))));
     let _ = resume h;
-    write(stdout(), to_bytes(format("%z", done(h))));
+    let _ = write(stdout(), to_bytes(format("%z", done(h))));
 }
