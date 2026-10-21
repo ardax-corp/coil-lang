@@ -487,7 +487,7 @@ pub fn default_host() -> Option<std::sync::Arc<dyn MacroHost>> {
 /// The IO one compile-time evaluation may do, resolved for the module its
 /// code is in ([`crate::ComptimeGrants::for_module`]): files under `read` /
 /// `write` (absolute), environment variables `env`, programs whose stem is
-/// in `exec`. The host checks each native call against it. `offline`
+/// in `exec`, TCP connections to `net` (`host` or `host:port`). The host checks each native call against it. `offline`
 /// (`--comptime-offline`) refuses the environment and programs: an
 /// evaluation runs then only when no cached result was found.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
@@ -496,6 +496,7 @@ pub struct ComptimeIo {
     pub write: Vec<PathBuf>,
     pub env: Vec<String>,
     pub exec: Vec<String>,
+    pub net: Vec<String>,
     pub offline: bool,
 }
 
@@ -509,6 +510,8 @@ pub enum ComptimeAccess {
     Write(PathBuf),
     Env(String),
     Exec(String),
+    /// A TCP connection, `host:port`.
+    Net(String),
 }
 
 /// One macro call's output (or failure) and the IO it did.
@@ -524,6 +527,7 @@ impl ComptimeIo {
             (!self.write.is_empty(), F::WRITE),
             (!self.env.is_empty(), F::ENV),
             (!self.exec.is_empty(), F::EXEC),
+            (!self.net.is_empty(), F::NET),
         ]
         .into_iter()
         .filter(|(on, _)| *on)
@@ -557,6 +561,15 @@ impl ComptimeIo {
             return self.check_online(&format!("runs `{program}`"));
         }
         Err(format!("running `{program}` while compiling needs `--comptime-exec {stem}`"))
+    }
+
+    /// A TCP connection to `host:port`: granted by `host` or `host:port`.
+    pub fn check_net(&self, host: &str, port: i64) -> Result<(), String> {
+        let at = format!("{host}:{port}");
+        if self.net.iter().any(|g| g.eq_ignore_ascii_case(host) || g.eq_ignore_ascii_case(&at)) {
+            return self.check_online(&format!("connects to `{at}`"));
+        }
+        Err(format!("connecting to `{at}` while compiling needs `--comptime-net {at}`"))
     }
 
     fn check_online(&self, what: &str) -> Result<(), String> {

@@ -96,11 +96,12 @@ pub struct ComptimeGrants {
     pub write: Vec<Scoped<PathBuf>>,
     pub env: Vec<Scoped<String>>,
     pub exec: Vec<Scoped<String>>,
+    pub net: Vec<Scoped<String>>,
 }
 
 impl ComptimeGrants {
     pub fn is_empty(&self) -> bool {
-        self.read.is_empty() && self.write.is_empty() && self.env.is_empty() && self.exec.is_empty()
+        self.read.is_empty() && self.write.is_empty() && self.env.is_empty() && self.exec.is_empty() && self.net.is_empty()
     }
 
     /// What code in `module` may do: the unscoped grants and those scoped
@@ -121,6 +122,7 @@ impl ComptimeGrants {
             write: paths(&self.write, module),
             env: names(&self.env, module),
             exec: names(&self.exec, module),
+            net: names(&self.net, module),
             offline: false,
         }
     }
@@ -138,6 +140,7 @@ impl ComptimeGrants {
         add(&mut self.write, other.write);
         add(&mut self.env, other.env);
         add(&mut self.exec, other.exec);
+        add(&mut self.net, other.net);
     }
 }
 
@@ -154,6 +157,9 @@ pub struct ComptimeLimits {
     pub steps: u64,
     /// Heap bytes of live objects after a full collection.
     pub heap_bytes: u64,
+    /// Wall-clock seconds one evaluation may take, checked at each IO call;
+    /// one connect or read waits at most [`Self::NET_OP_SECS`] of it.
+    pub timeout_secs: u64,
 }
 
 impl ComptimeLimits {
@@ -161,6 +167,10 @@ impl ComptimeLimits {
     pub const DEFAULT_STEPS: u64 = 1_000_000_000;
     /// Default `--comptime-mem`, in MiB.
     pub const DEFAULT_MEM_MIB: u64 = 1024;
+    /// Default `--comptime-timeout`, in seconds.
+    pub const DEFAULT_TIMEOUT_SECS: u64 = 300;
+    /// Longest wait of one network connect or read.
+    pub const NET_OP_SECS: u64 = 30;
     /// Silent tier: steps for one automatically folded call.
     pub const SILENT_CALL_STEPS: u64 = 1_000_000;
     /// Silent tier: steps for all automatic folding in one module.
@@ -172,6 +182,7 @@ impl Default for ComptimeLimits {
         Self {
             steps: Self::DEFAULT_STEPS,
             heap_bytes: Self::DEFAULT_MEM_MIB << 20,
+            timeout_secs: Self::DEFAULT_TIMEOUT_SECS,
         }
     }
 }
@@ -302,6 +313,7 @@ mod tests {
             write: vec![Scoped { module: None, value: read.to_path_buf() }],
             env: vec![Scoped::parse("gen=TOKEN", |n| n.to_string())],
             exec: vec![Scoped::parse("git", |n| n.to_string())],
+            net: vec![Scoped::parse("db.internal:3306", |n| n.to_string()), Scoped::parse("example.org", |n| n.to_string())],
         };
         grants.for_module("gen")
     }
@@ -365,5 +377,11 @@ mod tests {
         assert!(io.check_exec("git").is_ok());
         assert!(io.check_exec("/usr/bin/git").is_ok());
         assert!(io.check_exec("rm").unwrap_err().contains("--comptime-exec rm"));
+        assert!(io.check_net("db.internal", 3306).is_ok());
+        assert!(io.check_net("db.internal", 5432).unwrap_err().contains("--comptime-net db.internal:5432"));
+        assert!(io.check_net("EXAMPLE.org", 443).is_ok(), "a host grant covers any port");
+        assert!(io.check_net("example.com", 443).is_err());
+        let offline = crate::macros::ComptimeIo { offline: true, ..io.clone() };
+        assert!(offline.check_net("example.org", 443).unwrap_err().contains("--comptime-offline"));
     }
 }

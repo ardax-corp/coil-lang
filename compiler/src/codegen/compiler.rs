@@ -8731,10 +8731,16 @@ fn grant_hint(missing: u16) -> Option<String> {
         (F::WRITE, "`--comptime-write PATH`"),
         (F::ENV, "`--comptime-env NAME`"),
         (F::EXEC, "`--comptime-exec STEM`"),
+        (F::NET, "`--comptime-net HOST:PORT`"),
     ]
     .into_iter()
-    // Reading a file closes it, which is a write too.
-    .filter(|&(bit, _)| missing & bit != 0 && !(bit == F::WRITE && missing & F::READ != 0))
+    // Reading a file closes it, which is a write too; reading a socket is
+    // a read and a write.
+    .filter(|&(bit, _)| {
+        missing & bit != 0
+            && !(bit == F::WRITE && missing & F::READ != 0)
+            && !((bit == F::READ || bit == F::WRITE) && missing & F::NET != 0)
+    })
     .map(|(_, flag)| flag)
     .collect();
     // Other effects (closing a stream, waiting on it) come with the IO.

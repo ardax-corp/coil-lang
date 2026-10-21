@@ -151,3 +151,75 @@ fn a_macro_program_from_the_user_cache_runs_the_same() {
     assert!(!cold.0 && cold.2.contains("no booms"), "{}", cold.2);
     assert_eq!(p.run("", &[]), cold);
 }
+
+/// A server on 127.0.0.1 that answers each connection with `reply` (or,
+/// with `None`, accepts and never answers); its port.
+fn serve(reply: Option<&'static str>) -> u16 {
+    use std::io::Write;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for conn in listener.incoming().flatten() {
+            match reply {
+                Some(text) => {
+                    let mut conn = conn;
+                    let _ = conn.write_all(text.as_bytes());
+                }
+                None => held.push(conn),
+            }
+        }
+    });
+    port
+}
+
+fn fetch_source(port: u16) -> String {
+    format!(
+        "use io::close;\nuse io::sync::read_to_end;\nuse io::net::tcp::connect;\nuse string::from_bytes;\n{PRINT}
+fn fetch() -> Result<string, IoError> {{
+    let s = connect(\"127.0.0.1\", {port})?;
+    let text = from_bytes(read_to_end(s)?)?;
+    close(s)?;
+    return Result::Ok(text);
+}}
+
+const GOT = fetch() ?? \"failed\";
+
+fn main() {{
+    write(stdout(), to_bytes(GOT));
+}}
+"
+    )
+}
+
+#[test]
+fn a_network_read_is_granted_and_cached() {
+    let p = Project::new("net");
+    let port = serve(Some("from the network"));
+    p.write("main.hy", &fetch_source(port));
+    let (ok, _, err) = p.run("", &[]);
+    assert!(!ok && err.contains("--comptime-net"), "{err}");
+    let net = ["--comptime-net", "127.0.0.1"];
+    let (ok, out, err) = p.run("", &net);
+    assert!(ok, "{err}");
+    assert_eq!(out, "from the network");
+    assert_eq!(p.run("", &["--comptime-net", "127.0.0.1", "--comptime-offline"]).1, "from the network");
+
+    let other = Project::new("net_other");
+    other.write("main.hy", &fetch_source(port));
+    let (ok, _, err) = other.run("", &["--comptime-net", "localhost"]);
+    assert!(!ok && err.contains(&format!("--comptime-net 127.0.0.1:{port}")), "{err}");
+    let (ok, _, err) = other.run("", &["--comptime-net", "127.0.0.1", "--comptime-offline"]);
+    assert!(!ok && err.contains("--comptime-offline"), "{err}");
+}
+
+#[test]
+fn a_silent_server_runs_into_the_timeout() {
+    let p = Project::new("net_silent");
+    p.write("main.hy", &fetch_source(serve(None)));
+    let started = std::time::Instant::now();
+    let (ok, _, err) = p.run("", &["--comptime-net", "127.0.0.1", "--comptime-timeout", "1"]);
+    assert!(!ok && err.contains("ran out of time") && err.contains("--comptime-timeout"), "{err}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
+}
+

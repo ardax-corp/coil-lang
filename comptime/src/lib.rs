@@ -59,7 +59,9 @@ impl MacroHost for VmMacroHost {
             .iter()
             .map(|(entry, input)| {
                 io_gate::start_recording();
-                let result = run_entry(program, *entry, input, limits);
+                io_gate::start_clock(limits.timeout_secs);
+                let result = run_entry(program, *entry, input, limits)
+                    .and_then(|out| io_gate::clock_ran_out().map_or(Ok(out), Err));
                 (result, io_gate::take_recording())
             })
             .collect();
@@ -147,6 +149,7 @@ fn eval_in(
         if c.record {
             io_gate::start_recording();
         }
+        io_gate::start_clock(limits.timeout_secs);
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             call_limited(&mut vm, c.entry, &[], &item_limits)
         }));
@@ -155,6 +158,11 @@ fn eval_in(
         if c.silent {
             silent_left = silent_left.saturating_sub(vm.steps_charged());
         }
+        // Past the clock, a result is an evaluation cut short.
+        let outcome = match outcome {
+            Ok(Ok(_)) if !c.silent && let Some(msg) = io_gate::clock_ran_out() => Ok(Err(msg)),
+            other => other,
+        };
         match outcome {
             Ok(Ok(value)) => {
                 vm.set_static(c.slot, value);
@@ -290,7 +298,7 @@ fn printed_text(captured: &Captured) -> String {
     let printed = String::from_utf8_lossy(&captured.0.lock().expect("capture lock")).trim().to_string();
     let (first, rest) = printed.split_once('\n').unwrap_or((&printed, ""));
     match first.strip_prefix("panic: ") {
-        Some(msg) if msg.contains(" while compiling") => {
+        Some(msg) if msg.contains(" while compiling") || msg.contains("`--comptime-") => {
             let msg = msg.rsplit_once(" at ").map_or(msg, |(m, _)| m);
             if rest.is_empty() { msg.to_string() } else { format!("{msg}\n{rest}") }
         }

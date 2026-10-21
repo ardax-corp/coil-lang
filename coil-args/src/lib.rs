@@ -175,6 +175,14 @@ pub struct HostGrantFlags {
     /// as above)
     #[arg(long = "comptime-exec", value_name = "[MODULE=]STEM", action = clap::ArgAction::Append)]
     pub comptime_exec: Vec<String>,
+    /// Let compile-time code connect to HOST (any port) or HOST:PORT over
+    /// TCP (repeatable, `MODULE=` as above)
+    #[arg(long = "comptime-net", value_name = "[MODULE=]HOST[:PORT]", action = clap::ArgAction::Append)]
+    pub comptime_net: Vec<String>,
+    /// Most seconds one compile-time evaluation may take, checked at each
+    /// IO call; one connect or read waits at most 30 (default 300)
+    #[arg(long = "comptime-timeout", value_name = "SECS", value_parser = clap::value_parser!(u64).range(1..))]
+    pub comptime_timeout: Option<u64>,
     /// Keep the results of compile-time IO in DIR (default
     /// ~/.cache/coil/comptime)
     #[arg(long = "comptime-cache", value_name = "DIR")]
@@ -238,6 +246,8 @@ impl HostGrantFlags {
             || !self.comptime_write.is_empty()
             || !self.comptime_env.is_empty()
             || !self.comptime_exec.is_empty()
+            || !self.comptime_net.is_empty()
+            || self.comptime_timeout.is_some()
             || self.comptime_cache.is_some()
             || self.comptime_offline
             || self.comptime_refresh
@@ -252,6 +262,7 @@ impl HostGrantFlags {
             write: paths(&self.comptime_write),
             env: names(&self.comptime_env),
             exec: names(&self.comptime_exec),
+            net: names(&self.comptime_net),
         }
     }
 
@@ -261,6 +272,7 @@ impl HostGrantFlags {
         let limits = grants.comptime;
         let steps = self.comptime_steps;
         let mem = self.comptime_mem;
+        let timeout = self.comptime_timeout;
         let extra = self.into_grants();
         grants.comptime_io.extend(extra.comptime_io);
         if extra.comptime_cache.dir.is_some() {
@@ -287,6 +299,7 @@ impl HostGrantFlags {
         grants.comptime = ComptimeLimits {
             steps: steps.unwrap_or(limits.steps),
             heap_bytes: mem.map_or(limits.heap_bytes, |m| m << 20),
+            timeout_secs: timeout.unwrap_or(limits.timeout_secs),
         };
     }
 
@@ -309,6 +322,7 @@ impl HostGrantFlags {
             comptime: ComptimeLimits {
                 steps: self.comptime_steps.unwrap_or(ComptimeLimits::DEFAULT_STEPS),
                 heap_bytes: self.comptime_mem.unwrap_or(ComptimeLimits::DEFAULT_MEM_MIB) << 20,
+                timeout_secs: self.comptime_timeout.unwrap_or(ComptimeLimits::DEFAULT_TIMEOUT_SECS),
             },
             comptime_cache: compiler::comptime_cache::CacheConfig {
                 dir: self.comptime_cache,

@@ -363,10 +363,9 @@ Computes an expression while compiling; the program gets its value.
 write `comptime (a + b)` for a whole expression. The expression follows the
 rules of a `const`: it may call any function, but must not read or change a
 `static let`, may do IO only as `--comptime-read`, `--comptime-write`,
-`--comptime-env` and `--comptime-exec` allow, and cannot use local variables
-or parameters. A panic
-or a value with no compile-time form (a function, a handle) is a compile
-error. Each `comptime` expression is computed once and shared by every use.
+`--comptime-env`, `--comptime-exec` and `--comptime-net` allow, and cannot
+use local variables or parameters. A panic or a value with no compile-time
+form (a function, a handle) is a compile error. Each `comptime` expression is computed once and shared by every use.
 
 ```coil
 fn sq(int x) -> int {
