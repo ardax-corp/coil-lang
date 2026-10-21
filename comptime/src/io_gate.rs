@@ -1,7 +1,8 @@
 //! IO natives on the compile-time VM, checked against the grants of the
 //! evaluation running ([`set_active`]): `--comptime-read` / `-write` /
-//! `-env` / `-exec`. With no grants active (macros, silent folding) every
-//! one of them fails the evaluation.
+//! `-env` / `-exec` for the module of the const, `comptime` expression or
+//! macro. With no grants active (silent folding, `static let`) every one
+//! of them fails the evaluation.
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -102,7 +103,7 @@ pub fn gated(name: &str, native: Arc<dyn NativeFn>) -> Option<Arc<dyn NativeFn>>
         let io = ACTIVE.with(|a| a.borrow().clone());
         let Some(io) = io else {
             return Err(FfiError::Panic(format!(
-                "`{name}` is not available here: only a `const` or `comptime` expression may do IO while compiling"
+                "`{name}` is not available here: only a `const`, a `comptime` expression or a macro may do IO while compiling"
             )));
         };
         check(&io, gate, heap, args).map_err(FfiError::Panic)?;

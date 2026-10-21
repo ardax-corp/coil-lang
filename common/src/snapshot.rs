@@ -47,10 +47,10 @@ pub enum SnapWord {
     /// Object `index` of the snapshot. `err_bit` keeps a niche `Result`
     /// `Err` (pointer `| 1`).
     Ref { index: u32, err_bit: bool },
-    /// The shared unit variant with this tag.
-    UnitEnum(u32),
-    /// The shared `()`.
-    EmptyTuple,
+    /// The shared unit variant with this tag; `err_bit` as for `Ref`.
+    UnitEnum { tag: u32, err_bit: bool },
+    /// The shared `()`; `err_bit` as for `Ref`.
+    EmptyTuple { err_bit: bool },
 }
 
 /// One heap object of a snapshot.
@@ -264,8 +264,8 @@ fn encode_words(out: &mut Vec<u64>, words: &[SnapWord]) {
             let tag = match w {
                 SnapWord::Raw(_) => TAG_RAW,
                 SnapWord::Ref { .. } => TAG_REF,
-                SnapWord::UnitEnum(_) => TAG_UNIT_ENUM,
-                SnapWord::EmptyTuple => TAG_EMPTY_TUPLE,
+                SnapWord::UnitEnum { .. } => TAG_UNIT_ENUM,
+                SnapWord::EmptyTuple { .. } => TAG_EMPTY_TUPLE,
             };
             tags |= tag << (2 * i);
         }
@@ -274,8 +274,8 @@ fn encode_words(out: &mut Vec<u64>, words: &[SnapWord]) {
     out.extend(words.iter().map(|w| match *w {
         SnapWord::Raw(raw) => raw,
         SnapWord::Ref { index, err_bit } => u64::from(index) << 1 | u64::from(err_bit),
-        SnapWord::UnitEnum(tag) => u64::from(tag),
-        SnapWord::EmptyTuple => 0,
+        SnapWord::UnitEnum { tag, err_bit } => u64::from(tag) << 1 | u64::from(err_bit),
+        SnapWord::EmptyTuple { err_bit } => u64::from(err_bit),
     }));
 }
 
@@ -324,8 +324,11 @@ impl<'a> Reader<'a> {
                         index: u32::try_from(raw >> 1).map_err(|_| SnapshotDecodeError::BadRef(u32::MAX))?,
                         err_bit: raw & 1 != 0,
                     },
-                    TAG_UNIT_ENUM => SnapWord::UnitEnum(raw as u32),
-                    _ => SnapWord::EmptyTuple,
+                    TAG_UNIT_ENUM => SnapWord::UnitEnum {
+                        tag: (raw >> 1) as u32,
+                        err_bit: raw & 1 != 0,
+                    },
+                    _ => SnapWord::EmptyTuple { err_bit: raw & 1 != 0 },
                 })
             })
             .collect()
@@ -374,7 +377,7 @@ mod tests {
                 },
                 SnapObject::Tuple { kinds: 0b1001, words: vec![SnapWord::Raw(u64::MAX), SnapWord::Ref { index: 3, err_bit: false }] },
                 SnapObject::Enum { tag: 7, type_id: 42, kinds: 2, words: vec![SnapWord::Ref { index: 0, err_bit: true }] },
-                SnapObject::Instance { type_id: 9, words: vec![SnapWord::UnitEnum(3), SnapWord::EmptyTuple, SnapWord::Ref { index: 5, err_bit: false }] },
+                SnapObject::Instance { type_id: 9, words: vec![SnapWord::UnitEnum { tag: 3, err_bit: true }, SnapWord::EmptyTuple { err_bit: false }, SnapWord::Ref { index: 5, err_bit: false }] },
                 SnapObject::Boxed { tag: 4, word: SnapWord::Raw(f64::NAN.to_bits()) },
             ],
             statics: vec![(0, SnapWord::Ref { index: 5, err_bit: false }), (3, SnapWord::Raw(17))],

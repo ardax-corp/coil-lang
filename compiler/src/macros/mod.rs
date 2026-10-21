@@ -363,13 +363,14 @@ pub struct CompiledExpansion {
 /// top of the VM so the compiler itself does not depend on `machine`.
 pub trait MacroHost: Send + Sync {
     /// Call each `(entry, input)`: `entry` is the offset of a
-    /// `fn(string input) -> string`, each call within `limits`. Returns each
-    /// result, or the panic / error text.
+    /// `fn(string input) -> string`, each call within `limits` and with the
+    /// IO `io` grants. Returns each result, or the panic / error text.
     fn run(
         &self,
         program: &CompiledExpansion,
         calls: &[(u32, String)],
         limits: &crate::ComptimeLimits,
+        io: &ComptimeIo,
     ) -> Vec<Result<String, String>>;
 
     /// Compute `consts` in order on a compile-time VM of `program`: call

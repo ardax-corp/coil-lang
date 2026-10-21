@@ -45,11 +45,15 @@ impl MacroHost for VmMacroHost {
         program: &CompiledExpansion,
         calls: &[(u32, String)],
         limits: &ComptimeLimits,
+        io: &ComptimeIo,
     ) -> Vec<Result<String, String>> {
-        calls
+        let outer = io_gate::set_active(Some(Arc::new(io.clone())));
+        let out = calls
             .iter()
             .map(|(entry, input)| run_entry(program, *entry, input, limits))
-            .collect()
+            .collect();
+        io_gate::set_active(outer);
+        out
     }
 
     fn eval_consts(

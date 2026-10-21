@@ -8705,7 +8705,7 @@ fn const_effect_messages(checker: &crate::typechecking::infer::Checker, hir: &cr
             if crate::comptime_expr::is_comptime_const(short) {
                 format!("this `comptime` expression is computed while compiling, but it {}", fx.describe(i))
             } else {
-                format!("const `{short}` is computed while compiling, but its initializer is {}", fx.describe(i))
+                format!("const `{short}` is computed while compiling, but its initializer {}", fx.describe(i))
             },
             body.span.0..body.span.1,
         );

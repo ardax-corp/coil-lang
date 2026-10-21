@@ -540,6 +540,8 @@ impl Pipeline {
         self.hash_provider_sources(std::slice::from_ref(&job.provider_file), &mut h);
         job.decl.fn_name.hash(&mut h);
         job.input.hash(&mut h);
+        // A grant can turn a refused call into output.
+        self.host_grants.comptime_io.for_module(&job.provider_module).hash(&mut h);
         h.finish()
     }
 
@@ -688,6 +690,8 @@ impl Pipeline {
             };
             let host = host.clone();
             let limits = self.host_grants.comptime;
+            // A macro does the IO its provider module was granted.
+            let io = self.host_grants.comptime_io.for_module(&module);
             // A nested compile plus a VM run is deeper than Windows' 1 MiB
             // main thread stack; continue on a fresh segment when little is left.
             let outs = stacker::maybe_grow(EXPANSION_RED_ZONE, EXPANSION_STACK, || {
@@ -704,7 +708,7 @@ impl Pipeline {
                         }
                     }
                 }
-                host.run(&program.expansion, &calls, &limits)
+                host.run(&program.expansion, &calls, &limits, &io)
             });
             for (&i, out) in idx.iter().zip(outs) {
                 results[i] = Some(out);
