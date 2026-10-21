@@ -499,3 +499,91 @@ fn main() {
     assert!(!out.status.success() && err.contains("E0107"), "readonly Bytes argument compiled: {err}");
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// A variadic `declare` cached in a `static let` keeps its signature:
+/// `invoke` through the static passes the extra arguments as C varargs with
+/// their tags and returns the declared type, whether the static is read in
+/// a function written before or after the one that stores it (#1667).
+#[test]
+fn invoke_through_static_fn_id() {
+    let bin = std::env::var("CARGO_BIN_EXE_coil")
+        .expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let tmp = std::env::temp_dir().join(format!("coil_static_fn_id_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    let so = tmp.join(machine::platform_shared_lib_filename("sum"));
+    let mut cc = Command::new("cc");
+    #[cfg(target_os = "macos")]
+    {
+        cc.arg("-dynamiclib");
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        cc.arg("-shared").arg("-fPIC");
+    }
+    let status = cc
+        .args([
+            "-O2",
+            "-o",
+            so.to_str().unwrap(),
+            manifest_dir.join("examples/sum.c").to_str().unwrap(),
+        ])
+        .status()
+        .expect("cc");
+    assert!(status.success(), "failed to build {}", so.display());
+
+    let src = tmp.join("static_id.hy");
+    std::fs::write(
+        &src,
+        r#"
+use ffi::{declare, dload, invoke, Error};
+use ffi::types::Int;
+
+static let lib = 0;
+static let sum_n_id = 0;
+static let sum_id = 0;
+
+fn total() -> Result<int, Error> {
+    let n: int = invoke(lib, sum_n_id, (3, 10, 20, 12))?;
+    return n;
+}
+
+fn load() -> Result<(), Error> {
+    lib = dload("sum")?;
+    sum_n_id = declare(lib, "sum_n", (Int,), Int, true)?;
+    sum_id = declare(lib, "sum", (Int, Int), Int)?;
+}
+
+fn pair() -> Result<int, Error> {
+    let n: int = invoke(lib, sum_id, (40, 2))?;
+    return n;
+}
+
+fn main() {
+    match load() {
+        Result::Ok(_) => {},
+        Result::Err(e) => panic e.message,
+    }
+    let n = match total() {
+        Result::Ok(v) => v,
+        Result::Err(e) => panic e.message,
+    };
+    if n != 42 {
+        panic "variadic invoke through a static failed";
+    }
+    let m = match pair() {
+        Result::Ok(v) => v,
+        Result::Err(e) => panic e.message,
+    };
+    if m + 1 != 43 {
+        panic "invoke through a static failed";
+    }
+}
+"#,
+    )
+    .unwrap();
+    check(&bin, &tmp, &src);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
