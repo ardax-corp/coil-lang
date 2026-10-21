@@ -31,8 +31,8 @@ fn main() {
     let x = 1;
     let y = 2;
     let z = 3;
-    write(stdout(), to_bytes(format("%i,", i)));
-    write(stdout(), to_bytes(format("%i,", flags)));
-    write(stdout(), to_bytes(format("%i,", and_ok)));
-    write(stdout(), to_bytes(format("%i", add3(x, y, z))));
+    let _ = write(stdout(), to_bytes(format("%i,", i)));
+    let _ = write(stdout(), to_bytes(format("%i,", flags)));
+    let _ = write(stdout(), to_bytes(format("%i,", and_ok)));
+    let _ = write(stdout(), to_bytes(format("%i", add3(x, y, z))));
 }

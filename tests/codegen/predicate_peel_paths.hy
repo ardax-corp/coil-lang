@@ -15,6 +15,6 @@ fn base(int n) -> int {
 }
 
 fn main() {
-    write(stdout(), to_bytes(format("%i,", base(0))));
-    write(stdout(), to_bytes(format("%i", base(5))));
+    let _ = write(stdout(), to_bytes(format("%i,", base(0))));
+    let _ = write(stdout(), to_bytes(format("%i", base(5))));
 }

@@ -15,5 +15,5 @@ fn tak(int x, int y, int z) -> int {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", tak(18, 12, 6))));
+    let _ = write_all(stdout(), to_bytes(format("%i", tak(18, 12, 6))));
 }

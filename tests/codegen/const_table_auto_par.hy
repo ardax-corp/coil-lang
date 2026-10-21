@@ -48,5 +48,5 @@ fn main() {
     for i in 0..400000 {
         b = b + weighted(i);
     }
-    write(stdout(), to_bytes(format("%i %i %i", a, b, local_sum())));
+    let _ = write(stdout(), to_bytes(format("%i %i %i", a, b, local_sum())));
 }

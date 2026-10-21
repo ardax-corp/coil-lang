@@ -26,5 +26,5 @@ fn hot(float scale, int n) -> float {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", hot(3.0, 8000000) as int)));
+    let _ = write_all(stdout(), to_bytes(format("%i", hot(3.0, 8000000) as int)));
 }

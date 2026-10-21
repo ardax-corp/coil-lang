@@ -11,5 +11,5 @@ fn fib(int n) -> int {
 }
 
 fn main() {
-    write(stdout(), to_bytes(format("%i", fib(12))));
+    let _ = write(stdout(), to_bytes(format("%i", fib(12))));
 }

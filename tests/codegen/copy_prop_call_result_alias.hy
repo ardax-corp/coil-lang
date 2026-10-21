@@ -13,5 +13,5 @@ fn use_copy() -> int {
 }
 
 fn main() {
-    write(stdout(), to_bytes(format("%i", use_copy())));
+    let _ = write(stdout(), to_bytes(format("%i", use_copy())));
 }

@@ -26,5 +26,5 @@ fn main() {
         s = s + hot(xf, 1.0 - xf);
         i = i + 1;
     }
-    write_all(stdout(), to_bytes(format("%i", s as int)));
+    let _ = write_all(stdout(), to_bytes(format("%i", s as int)));
 }

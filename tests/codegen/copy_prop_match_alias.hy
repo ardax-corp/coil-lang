@@ -17,5 +17,5 @@ fn unwrap(Choice choice) -> int {
 fn main() {
     let value = Choice::Value(42);
     let alias = value;
-    write(stdout(), to_bytes(format("%i", unwrap(alias))));
+    let _ = write(stdout(), to_bytes(format("%i", unwrap(alias))));
 }

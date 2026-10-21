@@ -59,5 +59,5 @@ fn parse_url(string s) -> int {
 }
 
 fn main() {
-    write(stdout(), to_bytes(format("%i", parse_url("http://example.com/hi"))));
+    let _ = write(stdout(), to_bytes(format("%i", parse_url("http://example.com/hi"))));
 }

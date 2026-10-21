@@ -15,5 +15,5 @@ fn main() {
         Choice::Value(value) => value,
     };
     let field = Point::Point { x: 9 }.x;
-    write(stdout(), to_bytes(format("%i,%i", unwrapped, field)));
+    let _ = write(stdout(), to_bytes(format("%i,%i", unwrapped, field)));
 }

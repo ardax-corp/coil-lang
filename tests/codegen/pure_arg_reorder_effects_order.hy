@@ -5,15 +5,15 @@ use io::{stdout, write};
 use string::{format, to_bytes};
 
 fn effect() -> int {
-    write(stdout(), to_bytes(format("%i,", 7)));
+    let _ = write(stdout(), to_bytes(format("%i,", 7)));
     return 2;
 }
 
 fn sink(int a, int b) -> int {
-    write(stdout(), to_bytes(format("%i,", a + b)));
+    let _ = write(stdout(), to_bytes(format("%i,", a + b)));
     return a + b;
 }
 
 fn main() {
-    write(stdout(), to_bytes(format("%i", sink(effect(), 10))));
+    let _ = write(stdout(), to_bytes(format("%i", sink(effect(), 10))));
 }

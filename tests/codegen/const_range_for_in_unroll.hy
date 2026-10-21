@@ -8,5 +8,5 @@ fn main() {
     for x in 0..3 {
         s = s + x;
     }
-    write(stdout(), to_bytes(format("%i", s)));
+    let _ = write(stdout(), to_bytes(format("%i", s)));
 }
