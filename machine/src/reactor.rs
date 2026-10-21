@@ -40,6 +40,17 @@ fn bump(counter: &AtomicUsize) {
 }
 
 /// One unit of work for the reactor (isolated `call_function` on a worker VM).
+/// A job's starting statics (see [`Job::statics`]).
+pub enum JobStatics {
+    /// The spawning VM's static words, raw: they name objects of the one
+    /// heap a shared-heap job is bound to (#1561).
+    Shared(Arc<Vec<u64>>),
+    /// The spawning VM's statics copied out of its heap for an isolate job,
+    /// one entry per slot; `None` (a slot that is unset, or holds a value
+    /// that cannot cross threads) starts zeroed (#1663).
+    Copied(Vec<Option<SpawnArg>>),
+}
+
 pub struct Job {
     pub entry: u32,
     pub args: Vec<SpawnArg>,
@@ -58,8 +69,10 @@ pub struct Job {
     /// C struct layouts for pass-by-value FFI (ids are indices, so the
     /// worker VM takes the parent's list as is).
     pub struct_layouts: Arc<Vec<crate::CStructLayout>>,
-    /// A shared-heap job's copy of the spawning VM's statics (#1561).
-    pub statics: Option<Arc<Vec<u64>>>,
+    /// What the job's statics start as: the spawning VM's, so startup
+    /// `const`s read the same values (#1561, #1663). `None` starts them
+    /// zeroed.
+    pub statics: Option<JobStatics>,
     /// Harness case (`coil-test`): run static init first, then report
     /// pass / fail instead of a spawn result.
     pub test: Option<TestJob>,
@@ -685,11 +698,17 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
             Arc::clone(&program.strings),
         );
         vm.set_struct_layouts(struct_layouts);
-        // A shared-heap job reads the spawner's statics (startup `const`s,
-        // tables built once); an isolate job starts them zeroed.
-        match statics.as_deref() {
-            Some(words) if shared => vm.load_shared_statics(words),
-            _ => vm.init_static_slots(program.static_slot_count),
+        // A job reads the spawner's statics (startup `const`s, tables built
+        // once): a shared-heap job its words as they are, an isolate job
+        // the copies made into its own heap.
+        match statics {
+            Some(JobStatics::Shared(words)) if shared => vm.load_shared_statics(&words),
+            statics => {
+                vm.init_static_slots(program.static_slot_count);
+                if let Some(JobStatics::Copied(slots)) = statics {
+                    vm.load_copied_statics(slots);
+                }
+            }
         }
 
         let _guard = HostStateGuard::enter(vm);

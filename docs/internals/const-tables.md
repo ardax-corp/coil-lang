@@ -72,8 +72,12 @@ those reads as pure, #1558). A shared-heap job now starts with a copy of
 the spawning VM's statics (`ThreadSpawnContext::statics`,
 `Machine::load_shared_statics`); the words name the one shared heap, and
 nothing collects during the epoch. A local table a worker builds lands in
-its own copy, which the job drops when it ends. Isolate jobs still start
-with zeroed statics ([shared-heap sendability](shared-heap-sendability.md)).
+its own copy, which the job drops when it ends. An isolate job
+(`thread::spawn`) has its own heap, so it gets copies instead: at spawn each
+slot is copied out of the spawner's heap the way spawn arguments are
+(`copy_statics_out`, `Machine::load_copied_statics`, #1663). A slot holding
+a value that cannot cross threads (a stream, a cyclic graph) starts zeroed
+([shared-heap sendability](shared-heap-sendability.md)).
 
 ## Measurements
 

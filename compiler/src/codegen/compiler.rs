@@ -2312,7 +2312,8 @@ impl Compiler {
     /// [`Self::concrete_operator_target`] for an operand of type `ty`.
     pub(super) fn concrete_operator_target_ty(&self, ty: &Ty, class: &str, method: &str) -> Option<(Ty, String)> {
         let resolved = crate::typechecking::subst::apply_ty_prune(self.checker.subst(), ty);
-        let lookup_ty = Self::show_lookup_ty_for_instance(&resolved);
+        // A `readonly` operand's operator is its type's instance (#1645).
+        let lookup_ty = Self::show_lookup_ty_for_instance(crate::typechecking::ty::strip_readonly(&resolved));
         // Dict Eq/Ord only for nominal user enums/classes; open Vars must not replace hardwired EQ/LT.
         let nominal = match &lookup_ty {
             Ty::Con(name) => Some(name.as_str()),
@@ -3186,6 +3187,13 @@ impl Compiler {
         use crate::typechecking::subst::apply_ty_prune;
         let subst = self.checker.subst();
         let args: Vec<Ty> = args.iter().map(|a| apply_ty_prune(subst, a)).collect();
+        // An open glue body's variable (#1661).
+        if class == "Eq"
+            && let [Ty::Var(v)] = args.as_slice()
+            && let Some(slot) = self.eq_glue_body_var_dict(*v)
+        {
+            return Some(OpenDictGoal::Slot(slot));
+        }
         if let Some(vars) = self.mono_var_tys.last() {
             let concrete: Vec<Ty> = args.iter().map(|a| Self::apply_ty_var_map(a, vars)).collect();
             if !concrete.iter().any(Self::ty_is_open) {
