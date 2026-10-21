@@ -1337,6 +1337,11 @@ impl<'s> Formatter<'s> {
                 self.fmt_block_or_inline(body);
             }
 
+            Expression::ComptimeBlock(body) => {
+                self.push_str("comptime ");
+                self.fmt_block_or_inline(body);
+            }
+
             Expression::EnumDecl {
                 docs,
                 attrs,
@@ -2899,6 +2904,12 @@ mod tests {
     #[test]
     fn comptime_keeps_its_operand_parens() {
         let src = "fn f() -> int {\n    let a = comptime sq(2) + 1;\n    return comptime (a + 1) * comptime sq(3);\n}\n";
+        assert_eq!(format_source(src).unwrap(), src);
+    }
+
+    #[test]
+    fn comptime_block_round_trips() {
+        let src = "use gen::adder;\n\ncomptime {\n    let n = 40;\n    return adder(\"f\", n);\n}\n\nfn main() {}\n";
         assert_eq!(format_source(src).unwrap(), src);
     }
 

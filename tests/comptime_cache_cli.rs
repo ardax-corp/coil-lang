@@ -2,7 +2,8 @@
 //! `--comptime-refresh`) across separate builds: a const or macro that read
 //! the environment keeps its cached result until refreshed, one that read a
 //! file is computed again when the file changes, and offline builds use only
-//! cached results. Compiled macro programs are kept in the user cache.
+//! cached results; so does a `comptime { … }` block. Compiled macro programs
+//! are kept in the user cache.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -150,6 +151,31 @@ fn a_macro_program_from_the_user_cache_runs_the_same() {
     let cold = p.run("", &[]);
     assert!(!cold.0 && cold.2.contains("no booms"), "{}", cold.2);
     assert_eq!(p.run("", &[]), cold);
+}
+
+#[test]
+fn a_block_result_is_cached() {
+    let p = Project::new("block");
+    p.write(
+        "gen.hy",
+        "use macro::{Code, raw};\n\nfn value_fn(string v) -> Code {\n    return raw(\"fn value() -> string {\\n    return \\\"\" + v + \"\\\";\\n}\\n\");\n}\n",
+    );
+    let main = |extra: &str| {
+        format!(
+            "use env::var;\nuse gen::value_fn;\n{PRINT}\ncomptime {{\n    return value_fn(var(\"CT_VALUE\") ?? \"none\");\n}}\n\nfn main() {{\n    write(stdout(), to_bytes(value(){extra}));\n}}\n"
+        )
+    };
+    p.write("main.hy", &main(""));
+    let (ok, out, err) = p.run("one", &[]);
+    assert!(ok, "{err}");
+    assert_eq!(out, "one");
+    // The block does not depend on the rest of its file.
+    p.write("main.hy", &main(" + \"!\""));
+    assert_eq!(p.run("two", &[]).1, "one!", "the cached output");
+    let (_, out, err) = p.run("two", &["--comptime-refresh"]);
+    assert_eq!(out, "two!");
+    assert!(err.contains("E0135") && err.contains("`comptime` block has new output"), "{err}");
+    assert_eq!(p.run("three", &["--comptime-offline"]).1, "two!");
 }
 
 /// A server on 127.0.0.1 that answers each connection with `reply` (or,

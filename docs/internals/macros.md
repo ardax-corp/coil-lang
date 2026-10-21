@@ -530,10 +530,55 @@ and `explain_messages` word diagnostics about the hidden const as "this
 `comptime` expression", and a name it cannot find gets a help line about
 local variables, which the module const cannot see.
 
+## Compile-time blocks
+
+A top-level `comptime { … }` (`Expression::ComptimeBlock`) runs while
+compiling and returns `Code`; the items it returns replace it, like the
+output of a `name!(…);` call at the top level. It is the code-generating
+counterpart of `comptime e`: it runs before typechecking, with the macros, so
+it may only use code from other modules, which compile first. Its own
+module's functions do not exist yet ("Cannot find function `f`", with help
+naming the staging rule).
+
+```coil
+use api_gen::classes;
+use io::file::read_text;
+
+comptime {
+    // built with --comptime-read api
+    return classes(read_text("api/schema.json") ?? "{}");
+}
+```
+
+The tree walkers (`for_each_child`) do not enter the block: its body is
+not its module's code. `attrs` records it as a pending macro of kind
+`MacroKind::Comptime` at item position, with the diagnostic range on the
+keyword. `Pipeline::block_program` builds its expansion program: the file's
+top-level `use` items (as written), then
+
+```coil
+use macro::Code as __coil_Code;
+fn __coil_block() -> __coil_Code { <the block> }
+fn __coil_run_0(string input) -> string { return __coil_block().text; }
+```
+
+Each block is a program of its own, compiled by the same sub-pipeline as a
+provider's and run with its module's grants (`comptime_io_for`). Its keys
+(in-process, on-disk program, result cache) hold that text and the sources
+of the modules its file uses, not the file itself, so an edit elsewhere in
+the file reuses its program and result. When it does not compile, the
+sub-pipeline's errors in its body (kept by an `EntrySink`) are reported
+where they are in the user's file; a panic's position and backtrace are
+rewritten the same way. `return` must give `Code`: `?` does not apply, so
+use `??` or `match` on a `Result`. A block in a function body does not
+parse; it is item-level only. A file using its own block's output, or a
+cycle through the modules it uses, is the usual expansion-cycle error.
+
+Timing (release build, 2026-10-21): a file with one block calling a
+generator module, 244 ms cold, 109 ms with its program from the user cache.
+
 ## Not yet
 
-- Item-level `comptime { … }` blocks (stage 4 of the macro design) are not
-  started; `comptime` expressions and computed `const`s are (see above).
 - A function-style macro call names the macro bare (`name!`); a path
   (`m::name!`) does not parse.
 - Compiled expansion programs are also kept on disk, in
