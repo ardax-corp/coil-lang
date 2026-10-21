@@ -1714,7 +1714,7 @@ impl Pipeline {
         // Each module's grants once.
         let mut io: Vec<crate::macros::ComptimeIo> = Vec::new();
         let mut io_of: HashMap<&str, u32> = HashMap::new();
-        let evals: Vec<crate::macros::ConstEval> = consts
+        let mut evals: Vec<crate::macros::ConstEval> = consts
             .iter()
             .map(|c| crate::macros::ConstEval {
                 entry: c.entry.unwrap_or_default(),
@@ -1722,11 +1722,15 @@ impl Pipeline {
                 kind: kinds.get(c.slot as usize).copied().unwrap_or(common::WORD_UNKNOWN),
                 silent: c.silent,
                 io: *io_of.entry(c.fqn.rsplit_once("::").map_or("", |(m, _)| m)).or_insert_with_key(|module| {
-                    io.push(self.host_grants.comptime_io.for_module(module));
+                    io.push(self.host_grants.comptime_io_for(module));
                     io.len() as u32 - 1
                 }),
+                cached: None,
+                record: false,
             })
             .collect();
+        let mut cache = ConstCache::default();
+        self.load_cached_consts(&consts, &mut evals, &io, &mut cache);
         let program = crate::macros::CompiledExpansion {
             bytecode: std::sync::Arc::new(self.compiler_lazy().bytecode_vec()),
             constants: std::sync::Arc::new(self.compiler_lazy().constants().to_vec()),
@@ -1752,6 +1756,7 @@ impl Pipeline {
             .collect();
         match host.eval_consts(&program, &evals, &folds, &limits, &io) {
             Ok(outcome) => {
+                self.store_cached_consts(&consts, &outcome.records, &cache, entry_src);
                 let folded: Vec<_> = sites
                     .iter()
                     .zip(&site_calls)
@@ -1793,6 +1798,90 @@ impl Pipeline {
         }
     }
 
+    /// Fill `evals[i].cached` from the result cache, or mark the const to
+    /// be recorded (comptime step 7). Only explicit consts that may do IO
+    /// are cached: pure ones give the same value every time.
+    fn load_cached_consts(
+        &self,
+        consts: &[crate::codegen::ComptimeConst],
+        evals: &mut [crate::macros::ConstEval],
+        io: &[crate::macros::ComptimeIo],
+        cache: &mut ConstCache,
+    ) {
+        use crate::comptime_cache as cc;
+        let config = &self.host_grants.comptime_cache;
+        let Some(dir) = config.resolved_dir() else { return };
+        cache.keys = vec![None; consts.len()];
+        cache.old = vec![None; consts.len()];
+        for (i, (c, e)) in consts.iter().zip(evals.iter_mut()).enumerate() {
+            let grants = &io[e.io as usize];
+            let Some(file) = c.file.as_ref().filter(|_| !c.silent && grants.effects() != 0) else { continue };
+            if cache.types.is_none() {
+                let keys = self.compiler_lazy().checker().type_id_keys();
+                cache.ids = keys.iter().map(|(id, k)| (k.clone(), *id)).collect();
+                cache.types = Some(keys.into_iter().collect());
+                cache.fields = self.class_word_kinds().iter().map(|c| (c.type_id, c.kinds.len())).collect();
+            }
+            let mut key = cc::Key::new("const");
+            key.text(&c.fqn);
+            key.u64(u64::from(e.kind));
+            key.grants(grants);
+            self.key_sources(std::slice::from_ref(file), &mut key);
+            let key = key.finish();
+            let entry = cc::load(&dir, &key).filter(cc::still_valid);
+            let snapshot = entry.as_ref().and_then(|entry| cache.snapshot(entry, e.slot));
+            match snapshot {
+                Some(s) if !(config.refresh && entry.as_ref().is_some_and(cc::uses_outside)) => {
+                    e.cached = Some(std::sync::Arc::new(s));
+                }
+                _ => {
+                    e.record = true;
+                    cache.old[i] = snapshot;
+                }
+            }
+            cache.keys[i] = Some(key);
+        }
+        cache.dir = Some(dir);
+    }
+
+    /// Keep the recorded consts' values, and with `--comptime-refresh` say
+    /// which differ from the cached ones.
+    fn store_cached_consts(
+        &mut self,
+        consts: &[crate::codegen::ComptimeConst],
+        records: &[crate::macros::ConstRecord],
+        cache: &ConstCache,
+        entry_src: Option<(&Path, &str)>,
+    ) {
+        use crate::comptime_cache as cc;
+        let (Some(dir), Some(types)) = (&cache.dir, &cache.types) else { return };
+        for r in records {
+            let Some(key) = cache.keys.get(r.index).cloned().flatten() else { continue };
+            let c = &consts[r.index];
+            if !cc::cacheable(&r.accesses) {
+                continue;
+            }
+            let Some(table) = cc::type_table(&r.snapshot, types) else { continue };
+            let entry = cc::Entry {
+                name: c.fqn.clone(),
+                accesses: r.accesses.clone(),
+                value: cc::Value::Snapshot { types: table, words: r.snapshot.encode() },
+            };
+            cc::store(dir, &key, &entry);
+            let old = cache.old.get(r.index).and_then(|o| o.as_ref());
+            if self.host_grants.comptime_cache.refresh && old.is_some_and(|o| *o != r.snapshot) {
+                let what = crate::comptime_expr::describe(short_name(&c.fqn));
+                let mut msg = Message::info(
+                    ErrorCode::ComptimeResultChanged,
+                    format!("{what} has a new value: computed again with `--comptime-refresh`, it differs from the cached one"),
+                    c.span.clone(),
+                );
+                msg.with_help("what it read from the environment or a program changed since it was cached".to_string());
+                self.emit_const_message(c, &msg, entry_src);
+            }
+        }
+    }
+
     /// `NAME.field[3].0` for a snapshot path from const `NAME`.
     fn snap_path_text(&self, name: &str, path: &[common::SnapStep]) -> String {
         let mut out = name.to_string();
@@ -1818,11 +1907,18 @@ impl Pipeline {
         let mut msg = Message::error(ErrorCode::ConstNotComputable, text, c.span.clone());
         msg.with_help(if refused {
             "the build decides which files, environment variables and programs compile-time code may use".to_string()
+        } else if text.contains("with `--comptime-offline`") {
+            "an offline build uses the results kept in the compile-time cache (`--comptime-cache`)".to_string()
         } else if crate::comptime_expr::is_comptime_const(&c.fqn) {
             "a `comptime` expression is computed while compiling; without `comptime` it is computed when the program runs".to_string()
         } else {
             "a `const` is computed while compiling; use `static let` to compute it when the program starts".to_string()
         });
+        self.emit_const_message(c, &msg, entry_src);
+    }
+
+    /// Show `msg` against const `c`'s source.
+    fn emit_const_message(&mut self, c: &crate::codegen::ComptimeConst, msg: &Message, entry_src: Option<(&Path, &str)>) {
         let source = c.file.as_deref().and_then(|file| {
             let text = match entry_src {
                 Some((p, src)) if p == file => Some(src.to_string()),
@@ -1831,8 +1927,9 @@ impl Pipeline {
             Some((file.to_path_buf(), text))
         });
         match source {
-            Some((file, text)) => self.emit_message(&file, &text, &msg),
-            None => self.emit_spanless_error(ErrorCode::ConstNotComputable, msg.message().to_string()),
+            Some((file, text)) => self.emit_message(&file, &text, msg),
+            None if matches!(msg.kind(), reporting::MessageKind::ERROR) => self.emit_spanless_error(ErrorCode::ConstNotComputable, msg.message().to_string()),
+            None => {}
         }
     }
 
@@ -3853,4 +3950,31 @@ fn main() {
 /// `C` of `module::C`.
 fn short_name(fqn: &str) -> &str {
     fqn.rsplit("::").next().unwrap_or(fqn)
+}
+
+/// The result cache's view of one `compute_consts` request.
+#[derive(Default)]
+struct ConstCache {
+    dir: Option<PathBuf>,
+    /// Each const's entry key, when it is cached.
+    keys: Vec<Option<String>>,
+    /// The cached value a recomputed const had (`--comptime-refresh`).
+    old: Vec<Option<common::HeapSnapshot>>,
+    /// This program's type keys by id, their ids by key, class field counts.
+    types: Option<HashMap<u32, String>>,
+    ids: HashMap<String, u32>,
+    fields: HashMap<u32, usize>,
+}
+
+impl ConstCache {
+    /// `entry`'s value with this program's type ids, in static `slot`.
+    fn snapshot(&self, entry: &crate::comptime_cache::Entry, slot: u32) -> Option<common::HeapSnapshot> {
+        let crate::comptime_cache::Value::Snapshot { types, words } = &entry.value else { return None };
+        let mut snapshot = common::HeapSnapshot::decode(words).ok()?;
+        if snapshot.statics.len() != 1 || !crate::comptime_cache::remap(&mut snapshot, types, &self.ids, &self.fields) {
+            return None;
+        }
+        snapshot.statics[0].0 = slot;
+        Some(snapshot)
+    }
 }

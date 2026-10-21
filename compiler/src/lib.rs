@@ -3,6 +3,7 @@ mod attrs;
 mod block_builder;
 pub mod builtin_docs;
 pub(crate) mod escape;
+pub mod comptime_cache;
 mod comptime_expr;
 mod const_fold;
 pub mod debug_vars;

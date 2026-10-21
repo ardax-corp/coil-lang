@@ -45,6 +45,9 @@ pub struct HostGrants {
     /// (`--comptime-read`, …). Separate from the `allow_*` grants, which are
     /// the program's: [`Self::grant_all`] leaves these too.
     pub comptime_io: ComptimeGrants,
+    /// Where results of compile-time IO are kept and how they are used
+    /// (`--comptime-cache`, `--comptime-offline`, `--comptime-refresh`).
+    pub comptime_cache: crate::comptime_cache::CacheConfig,
 }
 
 /// One compile-time grant: for any module, or only for code in `module`
@@ -118,6 +121,7 @@ impl ComptimeGrants {
             write: paths(&self.write, module),
             env: names(&self.env, module),
             exec: names(&self.exec, module),
+            offline: false,
         }
     }
 
@@ -176,6 +180,15 @@ impl HostGrants {
     /// All capabilities denied; empty dload allow and search paths.
     pub fn deny_all() -> Self {
         Self::default()
+    }
+
+    /// The compile-time IO of code in `module`, with the cache's offline
+    /// mode.
+    pub fn comptime_io_for(&self, module: &str) -> crate::macros::ComptimeIo {
+        crate::macros::ComptimeIo {
+            offline: self.comptime_cache.offline,
+            ..self.comptime_io.for_module(module)
+        }
     }
 
     /// Every capability except `dload` (`--allow-all`).

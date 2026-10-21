@@ -175,6 +175,18 @@ pub struct HostGrantFlags {
     /// as above)
     #[arg(long = "comptime-exec", value_name = "[MODULE=]STEM", action = clap::ArgAction::Append)]
     pub comptime_exec: Vec<String>,
+    /// Keep the results of compile-time IO in DIR (default
+    /// ~/.cache/coil/comptime)
+    #[arg(long = "comptime-cache", value_name = "DIR")]
+    pub comptime_cache: Option<PathBuf>,
+    /// Use cached compile-time results only: a result that is not cached
+    /// may not read the environment or run a program
+    #[arg(long = "comptime-offline", conflicts_with = "comptime_refresh")]
+    pub comptime_offline: bool,
+    /// Compute cached compile-time results that used the environment or a
+    /// program again, and report which changed
+    #[arg(long = "comptime-refresh")]
+    pub comptime_refresh: bool,
 }
 
 /// Parse grant and compile-time limit flags from `words` (a test file's
@@ -226,6 +238,9 @@ impl HostGrantFlags {
             || !self.comptime_write.is_empty()
             || !self.comptime_env.is_empty()
             || !self.comptime_exec.is_empty()
+            || self.comptime_cache.is_some()
+            || self.comptime_offline
+            || self.comptime_refresh
     }
 
     /// The `--comptime-read` / `-write` / `-env` / `-exec` grants.
@@ -248,6 +263,11 @@ impl HostGrantFlags {
         let mem = self.comptime_mem;
         let extra = self.into_grants();
         grants.comptime_io.extend(extra.comptime_io);
+        if extra.comptime_cache.dir.is_some() {
+            grants.comptime_cache.dir = extra.comptime_cache.dir;
+        }
+        grants.comptime_cache.offline |= extra.comptime_cache.offline;
+        grants.comptime_cache.refresh |= extra.comptime_cache.refresh;
         grants.allow_attach |= extra.allow_attach;
         grants.allow_exec |= extra.allow_exec;
         grants.allow_exit |= extra.allow_exit;
@@ -289,6 +309,11 @@ impl HostGrantFlags {
             comptime: ComptimeLimits {
                 steps: self.comptime_steps.unwrap_or(ComptimeLimits::DEFAULT_STEPS),
                 heap_bytes: self.comptime_mem.unwrap_or(ComptimeLimits::DEFAULT_MEM_MIB) << 20,
+            },
+            comptime_cache: compiler::comptime_cache::CacheConfig {
+                dir: self.comptime_cache,
+                offline: self.comptime_offline,
+                refresh: self.comptime_refresh,
             },
         };
         if self.allow_all {

@@ -38,9 +38,12 @@ struct Job {
     input: String,
 }
 
-/// Macro outputs by [`Pipeline::job_key`], for the life of the process: an
-/// editor re-checks on every keystroke, and providers rarely change.
-static EXPANSION_CACHE: std::sync::Mutex<Option<HashMap<u64, String>>> = std::sync::Mutex::new(None);
+/// Macro outputs by [`Pipeline::job_key`], with the IO each did, for the
+/// life of the process: an editor re-checks on every keystroke, and
+/// providers rarely change. An output is reused while the files it read
+/// are unchanged.
+type CachedOutput = (String, Vec<crate::macros::ComptimeAccess>);
+static EXPANSION_CACHE: std::sync::Mutex<Option<HashMap<u64, CachedOutput>>> = std::sync::Mutex::new(None);
 
 /// Rounds of macros-in-generated-code before giving up.
 const MAX_ROUNDS: usize = 16;
@@ -506,10 +509,9 @@ impl Pipeline {
         Ok(wire.finish())
     }
 
-    /// Hash the sources of `providers` and every module they use.
-    fn hash_provider_sources(&self, providers: &[PathBuf], h: &mut impl std::hash::Hasher) {
-        use std::hash::Hash;
-        let mut closure: Vec<PathBuf> = providers.to_vec();
+    /// `files` and every module they use, sorted.
+    fn source_closure(&self, files: &[PathBuf]) -> Vec<PathBuf> {
+        let mut closure: Vec<PathBuf> = files.to_vec();
         let mut i = 0;
         while i < closure.len() {
             for dep in self.module_deps.get(&closure[i]).into_iter().flatten() {
@@ -521,6 +523,27 @@ impl Pipeline {
         }
         closure.sort();
         closure.dedup();
+        closure
+    }
+
+    /// Feed a result-cache key the sources of `files` and every module they
+    /// use, each with the macro output spliced into it.
+    pub(crate) fn key_sources(&self, files: &[PathBuf], key: &mut crate::comptime_cache::Key) {
+        let closure = self.source_closure(files);
+        key.u64(closure.len() as u64);
+        for file in &closure {
+            key.path(file);
+            match self.ast_cache.get(file) {
+                Some(c) => key.text(&c.report_source()),
+                None => key.text(crate::macros::embedded_source(file).unwrap_or_default()),
+            }
+        }
+    }
+
+    /// Hash the sources of `providers` and every module they use.
+    fn hash_provider_sources(&self, providers: &[PathBuf], h: &mut impl std::hash::Hasher) {
+        use std::hash::Hash;
+        let closure = self.source_closure(providers);
         for file in &closure {
             file.hash(h);
             let source = self
@@ -541,29 +564,110 @@ impl Pipeline {
         job.decl.fn_name.hash(&mut h);
         job.input.hash(&mut h);
         // A grant can turn a refused call into output.
-        self.host_grants.comptime_io.for_module(&job.provider_module).hash(&mut h);
+        self.host_grants.comptime_io_for(&job.provider_module).hash(&mut h);
         h.finish()
     }
 
-    /// Compile the expansion program and run every job. One result per job.
-    fn run_expansions(&mut self, jobs: &[Job]) -> Vec<Result<String, String>> {
-        let keys: Vec<u64> = jobs.iter().map(|j| self.job_key(j)).collect();
-        if let Some(cached) = EXPANSION_CACHE.lock().ok().and_then(|c| {
-            let c = c.as_ref()?;
-            keys.iter().map(|k| c.get(k).cloned()).collect::<Option<Vec<_>>>()
-        }) {
-            return cached.into_iter().map(Ok).collect();
+    /// Result-cache key of a macro call (comptime step 7), when its
+    /// provider may do IO: what [`Self::job_key`] covers, as sha256.
+    fn job_cache_key(&self, job: &Job) -> Option<String> {
+        let io = self.host_grants.comptime_io_for(&job.provider_module);
+        if io.effects() == 0 {
+            return None;
         }
-        let results = self.compile_and_run(jobs);
-        if let Ok(mut cache) = EXPANSION_CACHE.lock() {
-            let cache = cache.get_or_insert_with(HashMap::new);
-            for (key, result) in keys.iter().zip(&results) {
-                if let Ok(text) = result {
-                    cache.insert(*key, text.clone());
+        let mut key = crate::comptime_cache::Key::new("macro");
+        key.text(&job.provider_module);
+        key.text(&job.decl.fn_name);
+        key.text(&job.input);
+        key.grants(&io);
+        self.key_sources(std::slice::from_ref(&job.provider_file), &mut key);
+        Some(key.finish())
+    }
+
+    /// Run every job: an output cached in this process or in the result
+    /// cache is reused, the rest are compiled and run. One result per job.
+    fn run_expansions(&mut self, jobs: &[Job]) -> Vec<Result<String, String>> {
+        use crate::comptime_cache as cc;
+        let keys: Vec<u64> = jobs.iter().map(|j| self.job_key(j)).collect();
+        let mut results: Vec<Option<Result<String, String>>> = vec![None; jobs.len()];
+        if let Ok(cache) = EXPANSION_CACHE.lock()
+            && let Some(cache) = cache.as_ref()
+        {
+            for (result, key) in results.iter_mut().zip(&keys) {
+                if let Some((text, accesses)) = cache.get(key)
+                    && cc::reads_unchanged(accesses)
+                {
+                    *result = Some(Ok(text.clone()));
                 }
             }
         }
+        let config = self.host_grants.comptime_cache.clone();
+        let dir = config.resolved_dir();
+        let mut disk_keys: Vec<Option<String>> = vec![None; jobs.len()];
+        let mut old: Vec<Option<String>> = vec![None; jobs.len()];
+        for (i, job) in jobs.iter().enumerate() {
+            let Some(dir) = dir.as_ref().filter(|_| results[i].is_none()) else { continue };
+            let Some(key) = self.job_cache_key(job) else { continue };
+            if let Some(entry) = cc::load(dir, &key).filter(cc::still_valid)
+                && let cc::Value::Text(text) = &entry.value
+            {
+                if config.refresh && cc::uses_outside(&entry) {
+                    old[i] = Some(text.clone());
+                } else {
+                    results[i] = Some(Ok(text.clone()));
+                    remember_output(keys[i], text, &entry.accesses);
+                }
+            }
+            disk_keys[i] = Some(key);
+        }
+        let todo: Vec<usize> = (0..jobs.len()).filter(|&i| results[i].is_none()).collect();
+        if todo.is_empty() {
+            return results.into_iter().flatten().collect();
+        }
+        for (i, (result, accesses)) in self.compile_and_run(jobs, &todo) {
+            if let Ok(text) = &result {
+                // A hit would skip the write.
+                if !accesses.iter().any(|a| matches!(a, crate::macros::ComptimeAccess::Write(_))) {
+                    remember_output(keys[i], text, &accesses);
+                }
+                if let (Some(dir), Some(key)) = (&dir, &disk_keys[i])
+                    && cc::cacheable(&accesses)
+                {
+                    let job = &jobs[i];
+                    let entry = cc::Entry {
+                        name: format!("{} {}::{}", job.decl.kind.describe(), job.provider_module, job.decl.name),
+                        accesses,
+                        value: cc::Value::Text(text.clone()),
+                    };
+                    cc::store(dir, key, &entry);
+                    if old[i].as_ref().is_some_and(|o| o != text) {
+                        self.report_changed_output(job);
+                    }
+                }
+            }
+            results[i] = Some(result);
+        }
         results
+            .into_iter()
+            .map(|r| r.unwrap_or_else(|| Err("macro was not run".to_string())))
+            .collect()
+    }
+
+    /// `--comptime-refresh` gave `job` a different output than the cached one.
+    fn report_changed_output(&mut self, job: &Job) {
+        let mut msg = Message::info(
+            ErrorCode::ComptimeResultChanged,
+            format!(
+                "{} `{}` has new output: run again with `--comptime-refresh`, it differs from the cached one",
+                job.decl.kind.describe(),
+                job.decl.name
+            ),
+            job.pending.range.clone(),
+        );
+        msg.with_help("what it read from the environment or a program changed since it was cached".to_string());
+        if let Some(cached) = self.ast_cache.get_mut(&job.file) {
+            cached.push_expand_messages([msg]);
+        }
     }
 
     /// Local names `file` imports with `use` that name a macro of the
@@ -608,19 +712,20 @@ impl Pipeline {
             .unwrap_or_default()
     }
 
-    fn compile_and_run(&mut self, jobs: &[Job]) -> Vec<Result<String, String>> {
+    fn compile_and_run(&mut self, jobs: &[Job], todo: &[usize]) -> Vec<(usize, crate::macros::MacroRun)> {
         let Some(host) = self.macro_host.clone() else {
-            return jobs
+            return todo
                 .iter()
-                .map(|_| Err("this build has no compile-time macro host".to_string()))
+                .map(|&i| (i, (Err("this build has no compile-time macro host".to_string()), Vec::new())))
                 .collect();
         };
         // One program per provider module with every macro it declares, so
         // `coil test` / the LSP reuse it across files and rounds (compiling
         // the provider costs the same with fewer wrappers).
-        let mut results: Vec<Option<Result<String, String>>> = vec![None; jobs.len()];
+        let mut results: Vec<(usize, crate::macros::MacroRun)> = Vec::with_capacity(todo.len());
         let mut groups: Vec<((String, PathBuf), Vec<usize>)> = Vec::new();
-        for (i, job) in jobs.iter().enumerate() {
+        for &i in todo {
+            let job = &jobs[i];
             let key = (job.provider_module.clone(), job.provider_file.clone());
             match groups.iter_mut().find(|(k, _)| *k == key) {
                 Some((_, idx)) => idx.push(i),
@@ -691,33 +796,29 @@ impl Pipeline {
             let host = host.clone();
             let limits = self.host_grants.comptime;
             // A macro does the IO its provider module was granted.
-            let io = self.host_grants.comptime_io.for_module(&module);
+            let io = self.host_grants.comptime_io_for(&module);
             // A nested compile plus a VM run is deeper than Windows' 1 MiB
             // main thread stack; continue on a fresh segment when little is left.
             let outs = stacker::maybe_grow(EXPANSION_RED_ZONE, EXPANSION_STACK, || {
                 let program = match compiled_program(key, ctx) {
                     Ok(p) => p,
-                    Err(e) => return vec![Err(e); idx.len()],
+                    Err(e) => return vec![(Err(e), Vec::new()); idx.len()],
                 };
                 let mut calls = Vec::with_capacity(idx.len());
                 for &i in &idx {
                     match program.offsets.get(&jobs[i].decl.fn_name) {
                         Some(&o) => calls.push((o, jobs[i].input.clone())),
                         None => {
-                            return vec![Err(format!("`{}` is not a macro of `{module}`", jobs[i].decl.name)); idx.len()];
+                            let e = format!("`{}` is not a macro of `{module}`", jobs[i].decl.name);
+                            return vec![(Err(e), Vec::new()); idx.len()];
                         }
                     }
                 }
                 host.run(&program.expansion, &calls, &limits, &io)
             });
-            for (&i, out) in idx.iter().zip(outs) {
-                results[i] = Some(out);
-            }
+            results.extend(idx.iter().copied().zip(outs));
         }
         results
-            .into_iter()
-            .map(|r| r.unwrap_or_else(|| Err("macro was not run".to_string())))
-            .collect()
     }
 
     /// Parse one macro's output and put it into the file's AST (a call in
@@ -1399,5 +1500,11 @@ impl SubProgram {
             },
             offsets,
         })
+    }
+}
+
+fn remember_output(key: u64, text: &str, accesses: &[crate::macros::ComptimeAccess]) {
+    if let Ok(mut cache) = EXPANSION_CACHE.lock() {
+        cache.get_or_insert_with(HashMap::new).insert(key, (text.to_string(), accesses.to_vec()));
     }
 }
