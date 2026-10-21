@@ -777,6 +777,14 @@ impl Pipeline {
                 ));
                 entries.push(decl.fn_name.clone());
             }
+            let disk_key = (!host.build_id().is_empty()).then(|| {
+                let mut k = crate::comptime_cache::Key::new("macro program");
+                k.text(host.build_id());
+                k.text(&module);
+                k.text(&text);
+                self.key_sources(std::slice::from_ref(&file), &mut k);
+                k.finish()
+            });
             let ctx = SubProgram {
                 project_root: self.project_root.clone(),
                 roots: self.roots.clone(),
@@ -789,9 +797,12 @@ impl Pipeline {
                     .collect(),
                 overlays: self.overlays.clone(),
                 comptime: self.host_grants.comptime,
+                comptime_io: self.host_grants.comptime_io.clone(),
+                comptime_cache: self.host_grants.comptime_cache.clone(),
                 text,
                 entries,
                 provider: module.clone(),
+                disk_key,
             };
             let host = host.clone();
             let limits = self.host_grants.comptime;
@@ -1415,7 +1426,7 @@ fn compiled_program(key: u64, ctx: SubProgram) -> Result<std::sync::Arc<Compiled
         return Ok(program.clone());
     }
     COMPILING.with(|c| c.borrow_mut().push(key));
-    let result = ctx.compile().map(std::sync::Arc::new);
+    let result = ctx.load_or_compile().map(std::sync::Arc::new);
     COMPILING.with(|c| c.borrow_mut().retain(|k| *k != key));
     if let Ok(program) = &result {
         *slot = Some(program.clone());
@@ -1430,17 +1441,39 @@ struct SubProgram {
     host: std::sync::Arc<dyn crate::macros::MacroHost>,
     macro_stack: Vec<PathBuf>,
     overlays: HashMap<PathBuf, String>,
-    /// The parent's compile-time limits, for macros the sub-pipeline expands.
+    /// The parent's compile-time limits, grants and result cache, for
+    /// macros the sub-pipeline expands.
     comptime: crate::ComptimeLimits,
+    comptime_io: crate::ComptimeGrants,
+    comptime_cache: crate::comptime_cache::CacheConfig,
     /// Source of `<coil>/expand.hy`.
     text: String,
     /// Macro function of `__coil_run_i`, by `i`.
     entries: Vec<String>,
     /// Provider module, for the compile-error message.
     provider: String,
+    /// Its key in the on-disk program cache, when the host has a build id.
+    disk_key: Option<String>,
 }
 
 impl SubProgram {
+    /// The program from the on-disk cache, else compiled and kept there.
+    fn load_or_compile(self) -> Result<CompiledProgram, String> {
+        let dir = crate::comptime_cache::program_dir().filter(|_| self.disk_key.is_some());
+        let key = self.disk_key.clone().unwrap_or_default();
+        let path = dir.as_ref().map(|d| d.join(format!("{key}.prog")));
+        if let Some(program) = path.as_ref().and_then(|p| std::fs::read(p).ok()).and_then(|b| decode_program(&b)) {
+            return Ok(program);
+        }
+        let program = self.compile()?;
+        if let (Some(dir), Some(path)) = (dir, path)
+            && let Some(bytes) = encode_program(&program)
+        {
+            crate::comptime_cache::write_atomic(&dir, &path, &bytes);
+        }
+        Ok(program)
+    }
+
     /// Compile the expansion program in a sub-pipeline.
     fn compile(self) -> Result<CompiledProgram, String> {
         let mut sub = Pipeline::with_reporter(ReportConfig::default(), Box::new(std::io::sink()));
@@ -1461,6 +1494,8 @@ impl SubProgram {
         // the program never uses, so they are not checked here.
         sub.host_grants.grant_all();
         sub.host_grants.comptime = self.comptime;
+        sub.host_grants.comptime_io = self.comptime_io;
+        sub.host_grants.comptime_cache = self.comptime_cache;
         let (bytecode, constants) = match sub.compile_src_from_file(entry.to_str().expect("utf-8 path")) {
             Ok(out) => out,
             Err(_) => {
@@ -1507,4 +1542,88 @@ fn remember_output(key: u64, text: &str, accesses: &[crate::macros::ComptimeAcce
     if let Ok(mut cache) = EXPANSION_CACHE.lock() {
         cache.get_or_insert_with(HashMap::new).insert(key, (text.to_string(), accesses.to_vec()));
     }
+}
+
+const PROGRAM_MAGIC: &[u8; 8] = b"COILMPG1";
+
+/// A compiled expansion program as a file: its entry offsets, then the
+/// program as an archive (verified again on load).
+fn encode_program(program: &CompiledProgram) -> Option<Vec<u8>> {
+    let e = &program.expansion;
+    let mut archive = common::ArchivedProgram {
+        version: common::ARCHIVE_VERSION,
+        static_slot_count: e.static_slot_count,
+        constants: e.constants.to_vec(),
+        strings: e.strings.to_vec(),
+        bytecode: e.bytecode.to_vec(),
+        source_files: Vec::new(),
+        debug_locs: Vec::new(),
+        fn_symbols: Vec::new(),
+        struct_layouts: Vec::new(),
+        operand_stack_slots: e.operand_stack_slots,
+        stack_maps: Vec::new(),
+        precise_frames: Vec::new(),
+        class_word_kinds: e.class_word_kinds.clone(),
+        static_word_kinds: e.static_word_kinds.to_vec(),
+        debug_lines: Vec::new(),
+        cleanup_ranges: Vec::new(),
+        line_table: Vec::new(),
+        span_table: Vec::new(),
+    };
+    archive.set_debug(e.program_debug.clone(), common::DebugLevel::Full);
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&archive).ok()?;
+    let mut out = PROGRAM_MAGIC.to_vec();
+    let mut offsets: Vec<(&String, &u32)> = program.offsets.iter().collect();
+    offsets.sort();
+    out.extend_from_slice(&(offsets.len() as u64).to_le_bytes());
+    for (name, offset) in offsets {
+        out.extend_from_slice(&(name.len() as u64).to_le_bytes());
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(&offset.to_le_bytes());
+    }
+    out.extend_from_slice(&bytes);
+    Some(out)
+}
+
+fn decode_program(bytes: &[u8]) -> Option<CompiledProgram> {
+    let mut rest = bytes.strip_prefix(PROGRAM_MAGIC.as_slice())?;
+    let mut take = |n: usize| -> Option<&[u8]> {
+        if rest.len() < n {
+            return None;
+        }
+        let (head, tail) = rest.split_at(n);
+        rest = tail;
+        Some(head)
+    };
+    let word = |b: &[u8]| u64::from_le_bytes(b.try_into().unwrap_or_default());
+    let count = word(take(8)?);
+    let mut offsets = HashMap::new();
+    for _ in 0..count {
+        let len = usize::try_from(word(take(8)?)).ok()?;
+        let name = String::from_utf8(take(len)?.to_vec()).ok()?;
+        let offset = u32::from_le_bytes(take(4)?.try_into().ok()?);
+        offsets.insert(name, offset);
+    }
+    // rkyv needs the archive aligned.
+    let mut aligned = rkyv::util::AlignedVec::<16>::new();
+    aligned.extend_from_slice(rest);
+    let decoded = common::decode_archived_program(&aligned).ok()?;
+    let p = decoded.program;
+    if p.version != common::ARCHIVE_VERSION {
+        return None;
+    }
+    let program_debug = p.debug_bundle();
+    Some(CompiledProgram {
+        expansion: crate::macros::CompiledExpansion {
+            bytecode: std::sync::Arc::new(p.bytecode),
+            constants: std::sync::Arc::new(p.constants),
+            strings: std::sync::Arc::new(p.strings),
+            static_slot_count: p.static_slot_count,
+            operand_stack_slots: p.operand_stack_slots,
+            program_debug,
+            class_word_kinds: p.class_word_kinds,
+            static_word_kinds: std::sync::Arc::new(p.static_word_kinds),
+        },
+        offsets,
+    })
 }

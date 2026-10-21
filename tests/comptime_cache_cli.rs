@@ -2,7 +2,7 @@
 //! `--comptime-refresh`) across separate builds: a const or macro that read
 //! the environment keeps its cached result until refreshed, one that read a
 //! file is computed again when the file changes, and offline builds use only
-//! cached results.
+//! cached results. Compiled macro programs are kept in the user cache.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -31,7 +31,7 @@ impl Project {
     /// stdout, stderr.
     fn run(&self, value: &str, flags: &[&str]) -> (bool, String, String) {
         let mut cmd = Command::new(&self.bin);
-        cmd.current_dir(&self.dir).env("CT_VALUE", value);
+        cmd.current_dir(&self.dir).env("CT_VALUE", value).env("COIL_CACHE_DIR", self.dir.join("user-cache"));
         cmd.args(["--root", ".", "--comptime-cache", "cache", "--comptime-env", "CT_VALUE"]);
         cmd.args(flags);
         for root in compiler::Pipeline::workspace_language_extra_roots() {
@@ -129,4 +129,25 @@ fn a_cached_class_value_survives_new_types() {
     let (ok, out, err) = p.run("two", &[]);
     assert!(ok, "{err}");
     assert_eq!(out, "one 8");
+}
+
+#[test]
+fn a_macro_program_from_the_user_cache_runs_the_same() {
+    let p = Project::new("program");
+    p.write(
+        "gen.hy",
+        "use macro::{Expr, Code, lit};\n\nmacro shout(Expr e) -> Code {\n    if e.src() == \"boom\" {\n        panic \"no booms\";\n    }\n    return lit(e.src() + \"!\");\n}\n",
+    );
+    p.write("main.hy", &format!("use gen::shout;\n{PRINT}\nfn main() {{\n    write(stdout(), to_bytes(shout!(hey)));\n}}\n"));
+    let first = p.run("", &[]);
+    let programs = p.dir.join("user-cache").join("macro-programs");
+    assert!(std::fs::read_dir(&programs).is_ok_and(|mut d| d.next().is_some()), "no program kept");
+    assert_eq!(first.1, "hey!");
+    assert_eq!(p.run("", &[]), first, "from the cache");
+
+    // A panic names the same place either way.
+    p.write("main.hy", &format!("use gen::shout;\n{PRINT}\nfn main() {{\n    write(stdout(), to_bytes(shout!(boom)));\n}}\n"));
+    let cold = p.run("", &[]);
+    assert!(!cold.0 && cold.2.contains("no booms"), "{}", cold.2);
+    assert_eq!(p.run("", &[]), cold);
 }

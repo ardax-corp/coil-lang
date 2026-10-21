@@ -362,6 +362,12 @@ pub struct CompiledExpansion {
 /// Runs a compiled expansion program. Implemented by the `comptime` crate on
 /// top of the VM so the compiler itself does not depend on `machine`.
 pub trait MacroHost: Send + Sync {
+    /// Id of the compiler and VM this host was built with, which keys the
+    /// on-disk cache of compiled expansion programs; empty keeps none.
+    fn build_id(&self) -> &'static str {
+        ""
+    }
+
     /// Call each `(entry, input)`: `entry` is the offset of a
     /// `fn(string input) -> string`, each call within `limits` and with the
     /// IO `io` grants. Returns each result, or the panic / error text, with
