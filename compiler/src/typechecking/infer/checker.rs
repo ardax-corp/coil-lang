@@ -19255,7 +19255,7 @@ impl Checker {
 
     fn warn_shallow_const_binding(&mut self, name: &str, ty: &Ty, range: Range<usize>) {
         let pruned = apply_ty_prune(&self.subst, ty);
-        if crate::typechecking::ty::is_shallow_const_mutable(&pruned) {
+        if self.const_shallow_mutable(&pruned) {
             let mut msg = Message::warn(
                 ErrorCode::GenericTypeError,
                 format!(
@@ -19269,6 +19269,30 @@ impl Checker {
                 "mutations through fields, indices, or `vec.push` will still succeed".to_string(),
             );
             self.messages.push(msg);
+        }
+    }
+
+    /// Whether a `const` of `ty` warns E0119. An enum, builtin or user,
+    /// warns only when one of its payloads or a type argument it carries
+    /// can be written through (#1714): `Option<int>` and `channel()`'s
+    /// `Result<(Sender, Receiver), ThreadError>` are fully constant, while
+    /// `Option<Vec<int>>` is not. Every other type follows
+    /// [`crate::typechecking::ty::is_shallow_const_mutable`].
+    fn const_shallow_mutable(&self, ty: &Ty) -> bool {
+        let (name, args) = match ty {
+            Ty::Con(name) => (name, &[][..]),
+            Ty::App(head, args) => match head.as_ref() {
+                Ty::Con(name) => (name, args.as_slice()),
+                _ => return crate::typechecking::ty::is_shallow_const_mutable(ty),
+            },
+            _ => return crate::typechecking::ty::is_shallow_const_mutable(ty),
+        };
+        match self.enum_payload_tys(name) {
+            Some(payloads) => {
+                self.enum_payloads_mutable(name, &payloads, &mut Vec::new())
+                    || args.iter().any(|a| self.const_shallow_mutable(a))
+            }
+            None => crate::typechecking::ty::is_shallow_const_mutable(ty),
         }
     }
 

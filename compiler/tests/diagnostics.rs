@@ -565,3 +565,59 @@ fn main() {
         );
     }
 }
+
+/// #1714: an enum whose payloads (and type arguments) hold no mutable
+/// interior has nothing a write could change, so `const` of one is fully
+/// constant: `Result<(Sender, Receiver), ThreadError>`, `Option<int>`, a
+/// plain user enum, an enum carrying only scalars.
+#[test]
+fn const_immutable_enum_does_not_warn_shallow() {
+    let msgs = check_messages(
+        r#"use thread::channel;
+enum Color { Red, Green, }
+enum Shape { Circle(float), Rect(int, int), }
+const C = Color::Red;
+fn main() {
+    const ends = channel();
+    const o: Option<int> = Some(1);
+    const r: Result<string, int> = Ok("x");
+    const c = Color::Green;
+    const s = Shape::Rect(1, 2);
+    const oc: Option<Color> = Some(Color::Red);
+}"#,
+    );
+    let shallow: Vec<_> = msgs
+        .iter()
+        .map(|m| m.message())
+        .filter(|m| m.contains("still mutable"))
+        .collect();
+    assert!(shallow.is_empty(), "immutable enums should not warn, got: {shallow:?}");
+}
+
+/// #1714: an enum still warns when its payload, or a type argument it
+/// carries, has a mutable interior: a `Vec`, a class instance, an array.
+#[test]
+fn const_enum_with_mutable_payload_still_warns_shallow() {
+    let msgs = check_messages(
+        r#"class P { pub x: int, }
+enum Holder { Empty, Has(P), }
+enum Bag { Items(Vec<int>), }
+fn main() {
+    const ov: Option<Vec<int>> = Some(Vec::new());
+    const op: Option<P> = Some(new P(1));
+    const rp: Result<int, P> = Err(new P(2));
+    const h = Holder::Has(new P(3));
+    const b = Bag::Items(Vec::new());
+}"#,
+    );
+    for name in ["ov", "op", "rp", "h", "b"] {
+        assert!(
+            msgs.iter().any(|m| {
+                m.message().contains(&format!("binding `{name}` is constant"))
+                    && m.message().contains("still mutable")
+            }),
+            "expected shallow-const warning for `{name}`, got: {:?}",
+            msgs.iter().map(|m| m.message()).collect::<Vec<_>>()
+        );
+    }
+}
