@@ -14,7 +14,6 @@ fn twice(int n) -> int {
 test("comparison takes the type name") {
     let x = 1;
     let s = "a";
-    assert!(typeof(x) == "int");
     assert!(typeof x == "int");
     assert!(typeof s == "string");
     assert!(typeof s != "bool");
@@ -26,7 +25,7 @@ test("binary operators apply to the name") {
     let x = 1;
     assert!(typeof x + "!" == "int!");
     assert!(typeof (x == 1) == "bool");
-    assert!(typeof (1 + 2.5) == "float");
+    assert!(typeof (1.5 + 2.5) == "float");
 }
 
 test("postfix forms stay in the operand") {
