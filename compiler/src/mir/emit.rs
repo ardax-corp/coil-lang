@@ -1238,7 +1238,8 @@ impl CopySinks {
 /// The `i64` words that may hold a heap word: a boxed enum's payload
 /// read as a pair's low word (a two-word enum passed by value, whose
 /// heap payload moves as an opaque word), the low word of a pair a call
-/// returns, and the φs and casts that copy one. Typed `i64`, they are no heap word to [`CopySinks`] or
+/// returns when its enum may carry a heap payload there
+/// ([`MirFunc::heap_pair_calls`]), and the φs and casts that copy one. Typed `i64`, they are no heap word to [`CopySinks`] or
 /// [`arg_clears`], so a payload matched out of a rebound local, or passed
 /// on to a call, kept its object rooted in their registers (#1769). A
 /// plain number read the same way is zeroed too: harmless, and the
@@ -1252,9 +1253,11 @@ pub(super) fn payload_words(func: &MirFunc) -> HashSet<ValueId> {
         {
             out.insert(*dest);
         }
-        // A pair a call returns: its low word (#1791).
+        // A pair a call returns that may carry a heap payload: its low
+        // word (#1791).
         if let MirInst::Call { dest, dest_hi: Some(_), .. } = inst
             && func.ty(*dest) == MirTy::I64
+            && func.heap_pair_calls.contains(dest)
         {
             out.insert(*dest);
         }

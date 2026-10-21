@@ -412,6 +412,9 @@ pub struct HirMirInput<'a> {
     pub pair_locals: HashMap<u32, (u32, MirTy, MirTy)>,
     /// Word types of each expression of a two-word type.
     pub pair_tys: HashMap<u32, (MirTy, MirTy)>,
+    /// Calls returning a two-word enum whose low word may carry a heap
+    /// payload ([`MirFunc::heap_pair_calls`]).
+    pub heap_pairs: HashSet<u32>,
     /// Word types of a two-word result.
     pub ret_pair: Option<(MirTy, MirTy)>,
     /// Stack arrays kept in frame slots: first slot, length and element
@@ -4184,6 +4187,9 @@ impl Lower<'_> {
         }
         if let Some(want) = niche {
             return self.unbox_niche(dest, want);
+        }
+        if dest_hi.is_some() && self.inp.heap_pairs.contains(&id.0) {
+            self.b.mark_heap_pair_call(dest);
         }
         Ok(match dest_hi {
             Some(hi) => Val::Pair(dest, hi),
