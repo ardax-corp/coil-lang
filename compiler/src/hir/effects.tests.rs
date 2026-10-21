@@ -371,3 +371,103 @@ fn descriptions_name_mutated_parameters() {
     assert!(get("copy_into").ends_with("; mutates `dst`"), "{}", get("copy_into"));
     assert_eq!(get("P::get"), "pure");
 }
+
+fn readonly_errors(src: &str) -> Vec<String> {
+    let owned = Box::leak(src.to_string().into_boxed_str());
+    let ast = parser::Pratt::default().parse(owned).expect("parse");
+    let mut checker = Checker::new();
+    let _ = checker.check_program(&ast);
+    let sidecar = checker.typed_sidecar();
+    let module = build_module(&checker, &sidecar, "", &ast);
+    let program = ProgramEffects::default();
+    ModuleEffects::solve(&module, &checker, "", &program)
+        .readonly_messages()
+        .iter()
+        .map(|m| m.message().to_string())
+        .collect()
+}
+
+const RESET: &str = "
+trait Reset<R> {
+    fn reset(R self) {}
+}
+class P {
+    pub x: int,
+}
+impl Reset for P {
+    fn reset(P self) {
+        self.x = 0;
+    }
+}
+";
+
+#[test]
+fn arguments_packed_into_a_rest_parameter_take_its_mask_bit() {
+    let src = "
+class P {
+    pub x: int,
+}
+fn all(int a, P... rest) {
+    for r in rest {
+        r.x = 0;
+    }
+}
+fn two(P x, P y) {
+    all(0, x, y);
+}
+fn spread(int k, Vec<P> v) {
+    all(k, ...v);
+}
+";
+    let (m, out) = summaries(src);
+    assert_eq!(of(&m, &out, "all").mutates, 1 << 1);
+    assert_eq!(of(&m, &out, "two").mutates, 0b11, "both `x` and `y` go to `rest`");
+    assert_eq!(of(&m, &out, "spread").mutates, 1 << 1, "only `v` goes to `rest`");
+}
+
+#[test]
+fn a_readonly_value_spread_into_a_rest_parameter_is_e0107() {
+    let src = format!(
+        "{RESET}
+fn all<A, B: Reset>(A a, B... rest) {{
+    for r in rest {{
+        r.reset();
+    }}
+}}
+fn main() {{
+    let p = readonly new P(1);
+    let v: Vec<readonly P> = Vec::new();
+    v.push(p);
+    all(0, ...v);
+    all(0, new P(2), p);
+}}
+"
+    );
+    let errs = readonly_errors(&src);
+    assert_eq!(errs.len(), 2, "{errs:?}");
+    assert!(errs.iter().all(|e| e.contains("parameter `rest`")), "{errs:?}");
+}
+
+#[test]
+fn a_readonly_method_argument_is_named_not_called_on() {
+    let src = format!(
+        "{RESET}
+class H {{
+    pub n: int,
+}}
+impl H {{
+    pub fn put<B: Reset>(int k, B b) {{
+        b.reset();
+    }}
+}}
+fn main() {{
+    let p = readonly new P(1);
+    let h = new H(0);
+    h.put(0, p);
+}}
+"
+    );
+    let errs = readonly_errors(&src);
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert!(errs[0].starts_with("Cannot pass the `readonly` `p` to `.put()`: it mutates parameter `b`"), "{errs:?}");
+}

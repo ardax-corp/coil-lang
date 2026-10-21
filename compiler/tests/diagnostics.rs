@@ -512,3 +512,56 @@ fn main() {
         "bindings inside a mismatched constructor must not cascade into E0100: {all:?}"
     );
 }
+
+/// #1709: an opaque handle (`Stream`, thread handles) has no fields,
+/// indices or `push` to mutate through the binding, so `const` of one is
+/// fully constant and the shallow-const warning is noise.
+#[test]
+fn const_opaque_handle_does_not_warn_shallow() {
+    let msgs = check_messages(
+        r#"use io::{stdout, Stream};
+use thread::{Thread, Sender, Receiver, Mutex, RwLock};
+const OUT = stdout();
+fn handles(Thread th, Sender tx, Receiver rx, Mutex m, RwLock l) {
+    const s = stdout();
+    const t: Stream = stdout();
+    const th2 = th;
+    const tx2 = tx;
+    const rx2 = rx;
+    const m2 = m;
+    const l2 = l;
+}
+fn main() {}"#,
+    );
+    let shallow: Vec<_> = msgs
+        .iter()
+        .map(|m| m.message())
+        .filter(|m| m.contains("still mutable"))
+        .collect();
+    assert!(shallow.is_empty(), "opaque handles should not warn, got: {shallow:?}");
+}
+
+/// #1709: the warning stays for values a write can change: a `Vec`, a
+/// class instance, and a GC handle onto one.
+#[test]
+fn const_mutable_values_still_warn_shallow() {
+    let msgs = check_messages(
+        r#"use gc::{root, Root};
+class P { pub x: int, }
+fn main() {
+    const v: Vec<int> = Vec::new();
+    const p = new P(1);
+    const r: Root<P> = root(new P(2));
+}"#,
+    );
+    for name in ["v", "p", "r"] {
+        assert!(
+            msgs.iter().any(|m| {
+                m.message().contains(&format!("binding `{name}` is constant"))
+                    && m.message().contains("still mutable")
+            }),
+            "expected shallow-const warning for `{name}`, got: {:?}",
+            msgs.iter().map(|m| m.message()).collect::<Vec<_>>()
+        );
+    }
+}

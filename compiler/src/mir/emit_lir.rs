@@ -99,6 +99,9 @@ pub(super) fn emit_lir_framed(
     let mut entry_clears = super::emit::entry_clears(func, &regs, &plan.need_slot);
     let mut source_clears = super::emit::source_clears(func, &regs, &plan.need_slot, &super::emit::Gathers::default());
     super::emit::prune_clears(func, &regs, &plan.need_slot, &mut cleared, &mut entry_clears, &mut source_clears, &[]);
+    let arg_clears = super::emit::arg_clears(func, &regs, &plan.need_slot, &super::emit::Gathers::default(), |d| {
+        !plan.tree[d.index()]
+    });
     let max_reg = plan
         .need_slot
         .iter()
@@ -138,6 +141,9 @@ pub(super) fn emit_lir_framed(
     for block in &func.blocks {
         if block.id != func.entry {
             out.push(IlOp::Label(block_lab[block.id.index()]));
+        }
+        for &r in arg_clears.entry(block.id) {
+            super::emit::push_clear_word(&mut out, r);
         }
         let term_loc = func.term_loc(block.id);
         consume_match_tos(&mut out, func, block.id, &plan, &regs, term_loc);
@@ -201,6 +207,9 @@ pub(super) fn emit_lir_framed(
                 continue;
             }
             emit_stored(&mut out, inst, func, &plan, &regs, pool, loc)?;
+            for &r in arg_clears.after(dest) {
+                super::emit::push_clear_word(&mut out, r);
+            }
         }
         let end = out.len();
         restore_block_op_locs(&mut out, &starts, end, func);

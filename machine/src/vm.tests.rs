@@ -4621,6 +4621,20 @@
         assert_eq!(vm.pop().as_int(), 1);
     }
 
+    /// Out-of-range LoadStatic pushes a default value in release instead of reading
+    /// past the statics buffer (#1744).
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn load_static_out_of_range_pushes_default() {
+        let code = [
+            Byte::new(Instruction::LoadStatic).with_operand_u32(99),
+            Byte::new(Instruction::HALT),
+        ];
+        let mut vm = Machine::<64>::default();
+        vm.run_with_pool(&code, &[], &[], 1);
+        assert_eq!(vm.pop().as_int(), 0);
+    }
+
     #[test]
     #[cfg(debug_assertions)]
     #[should_panic(expected = "slot < self.statics.len()")]

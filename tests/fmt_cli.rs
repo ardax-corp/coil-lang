@@ -172,6 +172,39 @@ fn  add ( int x ) -> int {
     let _ = std::fs::remove_dir_all(&cwd);
 }
 
+/// `coil fmt` and the compiler share the parser, so `pub` on a top-level
+/// item is rejected by both with the same message (coil-lang#1725).
+#[test]
+fn fmt_rejects_pub_on_top_level_item_like_the_compiler() {
+    ensure_coil_fmt();
+    let cwd = scratch_dir("pub-item");
+    let path = cwd.join("pub_item.hy");
+    let src = "pub const X = 1;\n\nfn main() {\n    println(X);\n}\n";
+    std::fs::write(&path, src).expect("write");
+
+    let fmt = Command::new(coil_bin())
+        .args(["fmt", "--check", path.to_str().unwrap()])
+        .output()
+        .expect("spawn coil fmt --check");
+    let run = Command::new(coil_bin())
+        .arg(path.to_str().unwrap())
+        .output()
+        .expect("spawn coil");
+    let fmt_err = String::from_utf8_lossy(&fmt.stderr);
+    let run_err = String::from_utf8_lossy(&run.stderr);
+    assert!(!fmt.status.success(), "fmt accepted it: {fmt_err}");
+    assert!(!run.status.success(), "coil accepted it: {run_err}");
+    for (tool, err) in [("coil fmt", &fmt_err), ("coil", &run_err)] {
+        assert!(
+            err.contains("`pub` is not allowed on `const`"),
+            "{tool} should name `pub`:\n{err}"
+        );
+    }
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), src, "file untouched");
+
+    let _ = std::fs::remove_dir_all(&cwd);
+}
+
 /// `--release` when `coil` is a release build, so the helper matches it.
 fn release_flag(coil: &std::path::Path) -> &'static [&'static str] {
     match coil.parent().and_then(std::path::Path::file_name) {
