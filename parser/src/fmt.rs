@@ -80,6 +80,9 @@ struct Formatter<'s> {
     /// Scratch formatter from [`Self::measure`]: patterns measure flat, so a
     /// broken pattern does not change how the code around it is laid out.
     measuring: bool,
+    /// Columns the line still gets after the construct being laid out (a
+    /// statement's `;`), counted by [`Self::fits_flat`] (#1795).
+    trailing: usize,
 }
 
 impl<'s> Formatter<'s> {
@@ -94,6 +97,7 @@ impl<'s> Formatter<'s> {
             last_end: 0,
             type_ctx: false,
             measuring: false,
+            trailing: 0,
         }
     }
 
@@ -315,7 +319,7 @@ impl<'s> Formatter<'s> {
         self.leading_comments(start);
         self.blank_line_before(start);
         self.write_indent();
-        emit(self);
+        self.with_trailing(0, emit);
         self.last_end = end.max(self.last_end);
         self.trailing_comment(end);
         self.newline();
@@ -374,7 +378,18 @@ impl<'s> Formatter<'s> {
     }
 
     fn fits_flat(&self, flat: &str) -> bool {
-        self.flat || self.current_col().saturating_add(flat.len()) <= MAX_WIDTH
+        // A flat form that holds a block (`f(fn () { … })`) ends on a line of
+        // its own; the trailing columns land there, not on this line.
+        let trailing = if flat.contains('\n') { 0 } else { self.trailing };
+        self.flat
+            || self.current_col().saturating_add(flat.len()).saturating_add(trailing) <= MAX_WIDTH
+    }
+
+    /// Lay out `f` with `cols` columns still to follow on its last line.
+    fn with_trailing(&mut self, cols: usize, f: impl FnOnce(&mut Self)) {
+        let was = std::mem::replace(&mut self.trailing, cols);
+        f(self);
+        self.trailing = was;
     }
 
     /// A type annotation.
@@ -717,9 +732,10 @@ impl<'s> Formatter<'s> {
                 self.push_str(")");
             }
             Expression::ExprStatement(e) => {
-                self.fmt_value(e);
                 // A statement `match` ends at its `}`; no `;`.
-                if !matches!(strip_groups(e).1.as_ref(), Expression::Match { .. }) {
+                let semi = !matches!(strip_groups(e).1.as_ref(), Expression::Match { .. });
+                self.with_trailing(usize::from(semi), |f| f.fmt_value(e));
+                if semi {
                     self.push_str(";");
                 }
             }
@@ -1050,7 +1066,7 @@ impl<'s> Formatter<'s> {
                     self.fmt_type(t);
                 }
                 self.push_str(" = ");
-                self.fmt_value(init);
+                self.with_trailing(1, |f| f.fmt_value(init));
                 self.push_str(";");
             }
 
@@ -1204,7 +1220,7 @@ impl<'s> Formatter<'s> {
                 self.push_str(name);
                 self.fmt_type_params(type_params);
                 self.push_str(" = ");
-                self.fmt_type(ty);
+                self.with_trailing(1, |f| f.fmt_type(ty));
                 self.push_str(";");
             }
             Expression::TypeApp { name, args } => {
@@ -1512,7 +1528,7 @@ impl<'s> Formatter<'s> {
                 self.push_str(name);
                 self.fmt_type_params(type_params);
                 self.push_str(" = ");
-                self.fmt_type(ty);
+                self.with_trailing(1, |f| f.fmt_type(ty));
                 self.push_str(";");
             }
 
@@ -1541,8 +1557,9 @@ impl<'s> Formatter<'s> {
         match s.1.as_ref() {
             Expression::ExprStatement(_) => self.fmt_expression(s.1.as_ref()),
             other => {
-                self.fmt_expression(other);
-                if stmt_needs_semicolon(other) {
+                let semi = stmt_needs_semicolon(other);
+                self.with_trailing(usize::from(semi), |f| f.fmt_expression(other));
+                if semi {
                     self.push_str(";");
                 }
             }
@@ -1558,9 +1575,10 @@ impl<'s> Formatter<'s> {
         match item.1.as_ref() {
             Expression::Statement(s) => self.fmt_statement_line(s),
             other => {
-                self.fmt_expression(other);
                 let tail = is_last && !self.src.is_empty() && !self.semicolon_after(item.0);
-                if stmt_needs_semicolon(other) && !tail {
+                let semi = stmt_needs_semicolon(other) && !tail;
+                self.with_trailing(usize::from(semi), |f| f.fmt_expression(other));
+                if semi {
                     self.push_str(";");
                 }
             }
@@ -2150,12 +2168,16 @@ impl<'s> Formatter<'s> {
         let (first, rest) = flatten_binary_chain(root, prec);
         let hang = self.current_col();
         self.fmt_operand_expr(first, prec);
-        for (op, operand) in rest {
+        let last = rest.len().saturating_sub(1);
+        for (i, (op, operand)) in rest.into_iter().enumerate() {
             let flat = self.render_flat(operand);
-            let fits_here = self.current_col() + op.len() + 2 + flat.len() <= MAX_WIDTH;
+            // The last operand's line also gets the statement's `;`.
+            let trailing = if i == last && !flat.contains('\n') { self.trailing } else { 0 };
+            let width = flat.len() + trailing;
+            let fits_here = self.current_col() + op.len() + 2 + width <= MAX_WIDTH;
             // Break only when that makes the operand fit; a call too long for
             // any line stays here and breaks inside its own parentheses.
-            let fits_below = hang + flat.len() <= MAX_WIDTH;
+            let fits_below = hang + width <= MAX_WIDTH;
             self.push_str(" ");
             self.push_str(op);
             if fits_here || !fits_below {

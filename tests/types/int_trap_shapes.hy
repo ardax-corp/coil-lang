@@ -117,6 +117,8 @@ test("vectorizable loops trap like scalar ones") {
     assert!(scale(2, v, y) == 2);
     assert!(outcome(fn () use (w, y) => scale(2, w, y)) == "integer overflow");
     // A sum folds in element order: big + big overflows first.
-    let u: Vec<int> = Vec::from([big, big, 0 - big, 0 - big, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    let u: Vec<int> = Vec::from(
+        [big, big, 0 - big, 0 - big, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+    );
     assert!(outcome(fn () use (u) => scan(u)) == "integer overflow");
 }
