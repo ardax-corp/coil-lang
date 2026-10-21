@@ -791,18 +791,9 @@ impl<'s> Formatter<'s> {
                 }
             }
             Expression::TypeOf(inner) => {
+                // A unary prefix (#1773): `typeof x == "T"` compares the name.
                 self.push_str("typeof ");
-                // The parser hands `typeof` the whole expression after it
-                // (`typeof x == "T"` is `typeof (x == "T")`): show an operand
-                // that binds looser than a unary one in its parentheses.
-                let operand = strip_groups(inner);
-                if expr_prec(operand.1.as_ref()) < PREC_UNARY {
-                    self.push_str("(");
-                    self.fmt_output(operand);
-                    self.push_str(")");
-                } else {
-                    self.fmt_output(inner);
-                }
+                self.fmt_operand(inner, PREC_UNARY);
             }
 
             Expression::And(lhs, rhs) => self.fmt_logic_chain(expr, lhs, rhs, "&&"),
@@ -2697,7 +2688,8 @@ fn expr_prec(e: &Expression<'_>) -> u8 {
         | Expression::Positive(_)
         | Expression::Not(_)
         | Expression::LogicalNot(_)
-        | Expression::Readonly(_) => PREC_UNARY,
+        | Expression::Readonly(_)
+        | Expression::TypeOf(_) => PREC_UNARY,
         _ => u8::MAX,
     }
 }
@@ -2962,10 +2954,9 @@ mod tests {
 
     #[test]
     fn typeof_shows_the_operand_it_takes() {
-        // #1760: `typeof` takes a whole expression, so `typeof(x) == "T"`
-        // is `typeof ((x) == "T")`. Printing it `typeof x == "T"` keeps that
-        // meaning but reads as a comparison; parenthesize an operand that
-        // binds looser than a unary operator.
+        // #1773: `typeof` is a unary prefix, so `typeof(x) == "T"` is
+        // `(typeof x) == "T"` and prints as `typeof x == "T"`. A looser
+        // operand keeps its parentheses.
         let src = "\
 fn main() {
     let x = 1;
@@ -2976,18 +2967,22 @@ fn main() {
     let e = typeof (x);
     let f = typeof (1, 2);
     let g = typeof -x;
+    let h = typeof (x == \"int\");
+    let i = typeof p.f(1) + \"!\";
 }
 ";
         let expected = "\
 fn main() {
     let x = 1;
-    let a = typeof (x == \"int\");
-    let b = typeof (x as float);
-    let c = typeof (0..3);
+    let a = typeof x == \"int\";
+    let b = typeof x as float;
+    let c = typeof 0..3;
     let d = (typeof x) == \"int\";
     let e = typeof x;
     let f = typeof (1, 2);
     let g = typeof -x;
+    let h = typeof (x == \"int\");
+    let i = typeof p.f(1) + \"!\";
 }
 ";
         let formatted = format_source(src).unwrap();
