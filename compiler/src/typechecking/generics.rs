@@ -891,6 +891,27 @@ impl Generics {
             assoc_tys: HashMap::new(),
             context: Vec::new(),
         });
+        // Strings order by their UTF-8 bytes (coil-stdlib#48).
+        for (class, method) in [("Lt", "lt"), ("Le", "le"), ("Gt", "gt"), ("Ge", "ge")] {
+            self.instances.push(InstanceDef {
+                class: class.into(),
+                defined_module: PRELUDE_OPS_MODULE.into(),
+                range: 0..0,
+                args: vec![string()],
+                method_fqns: make_fqns(class, "string", &[method]),
+                assoc_tys: HashMap::new(),
+                context: Vec::new(),
+            });
+        }
+        self.instances.push(InstanceDef {
+            class: "Ord".into(),
+            defined_module: PRELUDE_OPS_MODULE.into(),
+            range: 0..0,
+            args: vec![string()],
+            method_fqns: HashMap::new(),
+            assoc_tys: HashMap::new(),
+            context: Vec::new(),
+        });
         self.instances.push(InstanceDef {
             class: "Length".into(),
             defined_module: PRELUDE_OPS_MODULE.into(),

@@ -4264,6 +4264,12 @@ impl Compiler {
                 self.emit_builtin_entry(&fqn, &params, boolean.clone(), None, |b, a| b.bin(op, a[0], a[1], boolean.clone()));
             }
         }
+        // `string` orders by its UTF-8 bytes (coil-stdlib#48).
+        let params = [(string.clone(), tag_of(ValueTag::String)), (string.clone(), tag_of(ValueTag::String))];
+        for (class, method, op) in [("Lt", "lt", BinOp::Lt), ("Le", "le", BinOp::Le), ("Gt", "gt", BinOp::Gt), ("Ge", "ge", BinOp::Ge)] {
+            let fqn = Generics::builtin_instance_fqn(class, "string", method);
+            self.emit_builtin_entry(&fqn, &params, boolean.clone(), None, |b, a| b.bin(op, a[0], a[1], boolean.clone()));
+        }
         // `()` is always `()` (#1450): its operands, taken as the `Show`
         // thunk takes a unit, are never read.
         let params = [(int.clone(), tag_of(ValueTag::Unit)), (int.clone(), tag_of(ValueTag::Unit))];

@@ -3672,6 +3672,13 @@ impl Lower<'_> {
         if strings && matches!(op, BinOp::Eq | BinOp::Ne) {
             return Ok(Val::V(self.b.ins_str_eq(l, r, op == BinOp::Ne).map_err(mir)?));
         }
+        // `<` / `<=` / `>` / `>=` on strings: their byte order's sign
+        // (`string_compare`) against `0` (coil-stdlib#48).
+        if strings && let Some(cmp) = cmp {
+            let order = self.b.ins_host_invoke(common::STRING_COMPARE_ID, vec![l, r]).map_err(mir)?;
+            let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+            return Ok(Val::V(self.b.ins_cmp(cmp, order, zero).map_err(mir)?));
+        }
         // `==` on arrays compares elements; only scalars compare as words.
         if !lt.is_numeric() {
             return Err("operator operand type".into());
