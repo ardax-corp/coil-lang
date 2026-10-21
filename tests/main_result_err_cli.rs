@@ -185,7 +185,7 @@ fn main() -> Result<unit, string> {
         ] {
             let (success, line) = run(&bin, &dir, name, src, mode);
             assert!(!success, "{name} {mode:?}: expected a failing exit");
-            assert!(line.starts_with("panic: main returned Err(") && line.ends_with(&format!(" at {at}")), "{name} {mode:?}: {line}");
+            assert!(line.starts_with("panic: main returned Err(") && line.ends_with(&format!("/{at}")), "{name} {mode:?}: {line}");
         }
     }
     let _ = std::fs::remove_dir_all(&dir);
