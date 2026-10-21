@@ -124,6 +124,7 @@ impl ComptimeGrants {
             exec: names(&self.exec, module),
             net: names(&self.net, module),
             offline: false,
+            replay: false,
         }
     }
 
@@ -197,7 +198,8 @@ impl HostGrants {
     /// mode.
     pub fn comptime_io_for(&self, module: &str) -> crate::macros::ComptimeIo {
         crate::macros::ComptimeIo {
-            offline: self.comptime_cache.offline,
+            offline: self.comptime_cache.offline || self.comptime_cache.replay,
+            replay: self.comptime_cache.replay,
             ..self.comptime_io.for_module(module)
         }
     }
@@ -383,5 +385,22 @@ mod tests {
         assert!(io.check_net("example.com", 443).is_err());
         let offline = crate::macros::ComptimeIo { offline: true, ..io.clone() };
         assert!(offline.check_net("example.org", 443).unwrap_err().contains("--comptime-offline"));
+        assert!(offline.check_write("/nonexistent-coil-grant/out.txt").is_ok());
+    }
+
+    #[test]
+    fn replay_refuses_what_the_cache_must_answer() {
+        let mut grants = HostGrants::deny_all();
+        grants.comptime_io = ComptimeGrants {
+            write: vec![Scoped { module: None, value: PathBuf::from("/nonexistent-coil-grant") }],
+            env: vec![Scoped::parse("TOKEN", |n| n.to_string())],
+            ..ComptimeGrants::default()
+        };
+        grants.comptime_cache.replay = true;
+        let io = grants.comptime_io_for("gen");
+        assert!(io.offline && io.replay);
+        assert!(io.check_env("TOKEN").unwrap_err().contains("build the project"));
+        assert!(io.check_write("/nonexistent-coil-grant/out.txt").unwrap_err().contains("does not run compile-time code that writes"));
+        assert!(io.check_read("/nonexistent-coil-grant/a.txt").is_err(), "reads still need a grant");
     }
 }
