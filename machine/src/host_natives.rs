@@ -122,6 +122,8 @@ pub fn build_standard_host_natives(
     push_string_compare(&mut out, &mut register_id);
     // Append-only after string_compare: `black_box` (minor 43).
     push_black_box(&mut out, &mut register_id);
+    // Append-only after black_box: `io::capture_begin` / `capture_end` (minor 44).
+    push_wiring(&mut out, &mut register_id, crate::io::IO_CAPTURE_WIRING, "io capture");
     assert_eq!(
         out.len(),
         common::HOST_NATIVES.len(),
@@ -1297,20 +1299,28 @@ mod tests {
             Some(common::RESULT_UNIT_PROBE_NATIVE)
         );
         assert_eq!(
-            names.get(names.len() - 4).map(String::as_str),
+            names.get(names.len() - 6).map(String::as_str),
             Some(common::FFI_READ_INTS_NATIVE)
         );
         assert_eq!(
-            names.get(names.len() - 3).map(String::as_str),
+            names.get(names.len() - 5).map(String::as_str),
             Some(common::VALUES_EQ_SHAPED_NATIVE)
         );
         assert_eq!(
-            names.get(names.len() - 2).map(String::as_str),
+            names.get(names.len() - 4).map(String::as_str),
             Some(common::STRING_COMPARE_NATIVE)
         );
         assert_eq!(
-            names.last().map(String::as_str),
+            names.get(names.len() - 3).map(String::as_str),
             Some(common::BLACK_BOX_NATIVE)
+        );
+        assert_eq!(
+            names.get(names.len() - 2).map(String::as_str),
+            Some(common::IO_CAPTURE_BEGIN_NATIVE)
+        );
+        assert_eq!(
+            names.last().map(String::as_str),
+            Some(common::IO_CAPTURE_END_NATIVE)
         );
         assert_eq!(attach, 119);
     }
@@ -1630,6 +1640,10 @@ mod tests {
             registrations.get(end + 27).map(|(n, _)| n.as_str()),
             Some(common::BLACK_BOX_NATIVE)
         );
-        assert_eq!(registrations.len(), end + 28);
+        assert_eq!(
+            registrations.get(end + 29).map(|(n, _)| n.as_str()),
+            Some(common::IO_CAPTURE_END_NATIVE)
+        );
+        assert_eq!(registrations.len(), end + 30);
     }
 }

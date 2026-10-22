@@ -682,6 +682,9 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
     let prev_shared_stderr = redirected
         .then(|| crate::io::set_shared_stderr_redirect(None))
         .flatten();
+    // A job starts with no `io::capture_begin()` open, and one it leaves
+    // open (an `assert!` between begin and end) ends with it.
+    let prev_captures = crate::io::take_captures();
     if let Some(e) = &epoch {
         vm.bind_shared_heap(e);
     }
@@ -744,12 +747,14 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
         }
     }));
     crate::env::restore_exit_request(outer_exit);
+    crate::io::flush_open_captures();
     if redirected {
         crate::io::set_output_redirect(prev_output);
         crate::io::set_shared_print_redirect(prev_shared_print);
         crate::io::set_shared_stdout_redirect(prev_shared_stdout);
         crate::io::set_shared_stderr_redirect(prev_shared_stderr);
     }
+    crate::io::restore_captures(prev_captures);
 
     let stored = match result {
         Ok(Ok(pv)) => Ok(pv),
