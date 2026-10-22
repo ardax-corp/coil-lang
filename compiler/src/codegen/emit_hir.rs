@@ -7053,6 +7053,30 @@ impl Compiler {
         (Self::ty_has_var(&fty) && stored != own).then_some(Rep::Word(stored))
     }
 
+    /// Whether declared field type `fty` holds a type parameter as a `Vec`
+    /// or array element (through tuples and nested containers) where the
+    /// read's ground type `at` has a niche `Option` / `Result` (#1896).
+    fn hir_open_niche_elems(&self, fty: &Ty, at: &Ty) -> bool {
+        use crate::typechecking::ty::{strip_readonly, vec_element_ty};
+        let (fty, at) = (strip_readonly(fty), strip_readonly(at));
+        let elems = match (fty, at) {
+            (Ty::Array { element: f, .. }, Ty::Array { element: a, .. }) => Some((f.as_ref(), a.as_ref())),
+            _ => vec_element_ty(fty).zip(vec_element_ty(at)),
+        };
+        if let Some((f, a)) = elems {
+            return match strip_readonly(f) {
+                Ty::Var(_) => self.hir_niche_word(a),
+                _ => self.hir_open_niche_elems(f, a),
+            };
+        }
+        match (fty, at) {
+            (Ty::Tuple(fs), Ty::Tuple(ats)) if fs.len() == ats.len() => {
+                fs.iter().zip(ats).any(|(f, a)| self.hir_open_niche_elems(f, a))
+            }
+            _ => false,
+        }
+    }
+
     /// `typeof e`'s text: `e`'s ground type, as `compile_expr`'s `TypeOf`.
     fn hir_typeof(&self, hir: &HirBody, arg: HirId) -> Option<String> {
         let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, arg)?);
@@ -8071,6 +8095,16 @@ impl Compiler {
                     && !stored.as_ref().zip(layout).is_some_and(|(s, l)| Self::hir_convertible(s, &Rep::Word(l)))
                 {
                     return Err("field-layout");
+                }
+                // A generic class's `Vec<V>` / `[V]` slot holds a niche
+                // element as the shared body boxed it; read here at its
+                // ground type the elements would be taken as niche words
+                // (#1896). Refused until open `V` holds the ground word.
+                if !self.compiling_mono_clone
+                    && let Some(ty) = Self::hir_ty(hir, id)
+                    && self.hir_open_niche_elems(&fty, &apply_ty_prune(self.checker.subst(), ty))
+                {
+                    return Err("open-niche-element");
                 }
                 let base_rep = Self::hir_index_base_rep(self.hir_natural(hir, emit, *base).ok_or("value-shape")?);
                 self.hir_check_value(hir, emit, *base, &base_rep)?;
