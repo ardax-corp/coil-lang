@@ -4,5 +4,4 @@ extern struct Point {
     y: int32,
 };
 
-fn main() {
-}
+fn main() {}
