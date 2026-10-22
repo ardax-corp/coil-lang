@@ -5166,7 +5166,9 @@ impl Compiler {
         // A clone (`source`) is checked under the method it clones.
         let mode_key = match source {
             Some(source) => source,
-            None if self.checker.fn_return_ty(&qualified).is_some() => qualified.as_str(),
+            None if self.checker.fn_return_ty(&qualified).is_some() || qualified.contains("__default__") => {
+                qualified.as_str()
+            }
             None => name,
         };
         self.compiling_result_mode = self.checker.fn_is_result_mode(mode_key);
