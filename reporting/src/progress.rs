@@ -128,6 +128,22 @@ impl Progress {
         self.draw(&mut s, true);
     }
 
+    /// Run `f` (which prints, say, to stdout) with the bar off the screen,
+    /// then draw it again.
+    pub fn suspend<T>(&self, f: impl FnOnce() -> T) -> T {
+        let mut s = self.lock();
+        if s.drawn {
+            let mut err = std::io::stderr().lock();
+            let _ = err.write_all(b"\r\x1b[2K");
+            let _ = err.flush();
+            s.drawn = false;
+        }
+        let out = f();
+        let _ = std::io::stdout().flush();
+        self.draw(&mut s, true);
+        out
+    }
+
     /// Take the bar off the screen (before the final report).
     pub fn clear(&self) {
         let mut s = self.lock();

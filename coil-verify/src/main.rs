@@ -20,6 +20,7 @@ use compiler::verify::encode::BOUNDS;
 use compiler::verify::proof::{Outcome, Proof, path_for};
 use compiler::verify::{FnCheck, Goal, ParamShape};
 use compiler::{ContractLevel, Pipeline};
+use reporting::progress::{Progress, bar_enabled};
 use reporting::{ReportConfig, ReportFormat};
 use solver::{Answer, Solver, show_value};
 
@@ -61,6 +62,9 @@ struct VerifyCli {
     /// Do not write FILE.proof
     #[arg(long)]
     no_proof: bool,
+    /// Also list proved and skipped checks (default: only failed and not proved)
+    #[arg(short = 'v', long)]
+    verbose: bool,
     /// Entry `.hy` file
     #[arg(value_name = "FILE")]
     file: Option<String>,
@@ -135,23 +139,43 @@ fn main() {
     let mut tally = Tally::default();
     let mut indexes = Tally::default();
     let mut outcomes: Vec<Vec<Outcome>> = Vec::new();
-    let mut out = std::io::stdout().lock();
+    let selected = |check: &FnCheck| cli.fn_pat.as_deref().is_none_or(|p| check.name.contains(p));
+    let total = checks.iter().filter(|c| selected(c)).map(|c| c.goals.len()).sum();
+    // On a terminal, a bar on stderr while the solver works (not under
+    // `--smt`, whose queries go to stdout as they are asked).
+    let progress = Progress::with_bar("verify", "checks", total, bar_enabled() && !cli.smt);
+    // Checks that are not proved, for the list after the report.
+    let mut open = Vec::new();
     for check in &checks {
         let mut mine = Vec::new();
-        if cli.fn_pat.as_deref().is_some_and(|p| !check.name.contains(p)) {
+        if !selected(check) {
             outcomes.push(vec![Outcome::Unknown; check.goals.len()]);
             continue;
         }
         for goal in &check.goals {
             let bounds = goal.keyword == BOUNDS;
             let t = if bounds { &mut indexes } else { &mut tally };
+            progress.start(&check.name);
             let (line, outcome) = report(&solver, check, goal, &source, &filename, cli.smt, t);
+            progress.finish_one(!matches!(outcome, Outcome::Failed));
             mine.push(outcome);
-            if !bounds || cli.bounds {
-                let _ = writeln!(out, "{line}");
+            let problem = matches!(outcome, Outcome::Failed | Outcome::Unknown);
+            if (!bounds || cli.bounds) && (problem || cli.verbose) {
+                progress.suspend(|| writeln!(std::io::stdout(), "{line}").ok());
+            }
+            if problem && (!bounds || cli.bounds) {
+                open.push(line.lines().next().unwrap_or_default().to_string());
             }
         }
         outcomes.push(mine);
+    }
+    progress.clear();
+    let mut out = std::io::stdout().lock();
+    if cli.verbose && !open.is_empty() {
+        let _ = writeln!(out, "\nnot proved:");
+        for line in &open {
+            let _ = writeln!(out, "    {line}");
+        }
     }
     let _ = writeln!(
         out,
