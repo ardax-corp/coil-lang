@@ -8,14 +8,6 @@
 
 use super::{HirArm, HirPat, HirPatFields};
 
-/// Grouping is on unless `COIL_HIR_MATCH_TREE=0` (or `false` / `off` / `no`).
-pub(crate) fn tree_from_env() -> bool {
-    !matches!(
-        std::env::var("COIL_HIR_MATCH_TREE").as_deref(),
-        Ok("0" | "false" | "off" | "no")
-    )
-}
-
 /// The rows of one outer variant, in source order.
 #[derive(Debug)]
 pub struct Group<'a> {

@@ -433,18 +433,21 @@ impl Compiler {
 
     /// Turn typed inlining of HIR bodies on or off (default `COIL_HIR_INLINE`).
     pub fn set_hir_inline(&mut self, on: bool) {
-        self.hir_inline = on;
+        self.opt_options.hir_inline = on;
     }
 
     /// Keep enum locals built in place as two slots or boxed (default
     /// `COIL_HIR_PAIR_LOCALS`).
     pub fn set_hir_pair_locals(&mut self, on: bool) {
-        self.hir_pair_locals = on;
+        self.opt_options.hir_pair_locals = on;
     }
 
     /// Apply an [`crate::OptLevel`] preset to IL opts and inlining budgets.
+    /// The switches no level sets keep their values.
     pub fn set_opt_level(&mut self, level: crate::OptLevel) {
-        self.opt_options = level.options();
+        let mut opts = level.options();
+        opts.keep_knobs(&self.opt_options);
+        self.opt_options = opts;
         self.inline_cost.max_inline_cost = level.inline_max_cost();
         self.inline_cost.inline_across_modules = level.inline_across_modules();
         if !level.inline_across_modules() {
@@ -7578,7 +7581,7 @@ impl Compiler {
         self.messages.extend(stack_bound.messages);
         self.operand_stack_slots = stack_bound.operand_slots_needed;
         self.recursive_fns = crate::typechecking::analyze_recursive_fns(ast, &bare_cases);
-        self.recursive_pure = if self.auto_par && auto_par_enabled() {
+        self.recursive_pure = if self.auto_par && self.opt_options.auto_par {
             crate::typechecking::analyze_recursive_pure(ast, &bare_cases)
         } else {
             HashSet::new()
@@ -7598,7 +7601,7 @@ impl Compiler {
             self.messages.extend(fx.readonly_messages());
             let pure = effects::pure_names(hir, module, &fx.summaries, &self.pure_fns);
             if effects::effects_capture_active() {
-                let explained = (self.auto_par && auto_par_enabled()).then(|| {
+                let explained = (self.auto_par && self.opt_options.auto_par).then(|| {
                     let all: HashSet<String> = self.pure_fns.union(&pure).cloned().collect();
                     effects::auto_par_explanations(ast, hir, module, &fx, &all, &bare_cases)
                 });
@@ -7616,7 +7619,7 @@ impl Compiler {
             self.program_effects.record(hir, &self.checker, module, &summaries);
             self.program_effects.record_mutations(mutations);
         }
-        if self.auto_par && auto_par_enabled() {
+        if self.auto_par && self.opt_options.auto_par {
             // IPA sites on any pure function (self-recursion or helper arms).
             let pure = &self.pure_fns;
             self.par_shapes = crate::typechecking::analyze_par_fork_sites(ast, pure, &bare_cases);

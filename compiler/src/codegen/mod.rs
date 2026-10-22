@@ -643,7 +643,8 @@ pub struct Compiler {
     /// after the body (#1532).
     hir_closure_adapters: HashMap<compiler::emit_hir::HirClosureAdapt, crate::il::Label>,
     hir_closure_adapter_tail: Vec<(crate::il::Label, compiler::emit_hir::HirClosureAdapt)>,
-    /// When false, skip auto fork-join even if `COIL_AUTO_PAR` is on.
+    /// When false, skip auto fork-join even if
+    /// [`crate::il::opt::OptimizeOptions::auto_par`] is on.
     auto_par: bool,
 
     /// Operand-stack capacity for the VM (from recursion-depth analysis).
@@ -698,32 +699,11 @@ pub struct Compiler {
     hir_module: Option<crate::hir::HirModule>,
     /// Function body index in [`Self::hir_module`] by declaration span.
     hir_fns: HashMap<(usize, usize), usize>,
-    /// Typed inlining on HIR bodies (the default; `COIL_HIR_INLINE=0` turns it off).
-    hir_inline: bool,
     /// A debugger session compiles this program: no typed inlining.
     debugger_attached: bool,
-    /// Nested matches dispatch on their outer tag once (`COIL_HIR_MATCH_TREE=0` off).
-    hir_match_tree: bool,
-    /// Typed inlining takes callees returning a two-word `Option`, `Result`
-    /// or enum (`COIL_HIR_INLINE_PAIR=0` off).
-    hir_inline_pair: bool,
-    /// Typed inlining takes callees with heap locals, cleared after the
-    /// splicing statement (`COIL_HIR_INLINE_HEAP=0` off).
-    hir_inline_heap: bool,
-    /// Typed inlining takes a too-big callee at a call with constant
-    /// arguments as its copy with those bound and folded
-    /// (`COIL_HIR_SPECIALIZE=0` off).
-    hir_inline_specialize: bool,
     /// Callee bodies typed inlining spliced (file, source range, name), so
     /// a capability chain still names the function a host call is in.
     inlined_bodies: Vec<(u32, std::ops::Range<usize>, String)>,
-    /// An enum local built in place (`let r = if c { Some(x) } else { None }`)
-    /// lives in two slots when its type is a two-word pair
-    /// (`COIL_HIR_PAIR_LOCALS=0` off).
-    hir_pair_locals: bool,
-    /// Typed inlining takes mono clone callees, as their generic body at the
-    /// call's types (`COIL_HIR_INLINE_MONO=0` off).
-    hir_inline_mono: bool,
     /// Function and method body index in [`Self::hir_module`] by name
     /// (`None` when two bodies share it).
     hir_fn_names: HashMap<String, Option<usize>>,
@@ -890,12 +870,7 @@ impl Default for Compiler {
             hir_refusal: None,
             hir_module: None,
             hir_fns: HashMap::new(),
-            hir_inline: crate::hir::inline::inline_from_env(),
             debugger_attached: false,
-            hir_match_tree: crate::hir::match_tree::tree_from_env(),
-            hir_inline_pair: crate::hir::inline::pair_from_env(),
-            hir_inline_heap: crate::hir::inline::heap_from_env(),
-            hir_inline_specialize: crate::hir::inline::specialize_from_env(),
             inlined_bodies: Vec::new(),
             hir_mir: None,
             hir_mir_why: None,
@@ -907,27 +882,11 @@ impl Default for Compiler {
             hir_mir_ctx: Vec::new(),
             hir_entry_unbox: Vec::new(),
             hir_mir_unbox: Vec::new(),
-            hir_inline_mono: !matches!(
-                std::env::var("COIL_HIR_INLINE_MONO").as_deref(),
-                Ok("0" | "false" | "off" | "no")
-            ),
-            hir_pair_locals: !matches!(
-                std::env::var("COIL_HIR_PAIR_LOCALS").as_deref(),
-                Ok("0" | "false" | "off" | "no")
-            ),
             hir_fn_names: HashMap::new(),
             hir_portable: HashMap::new(),
             hir_core_methods: HashMap::new(),
         }
     }
-}
-
-/// `COIL_AUTO_PAR=0` disables automatic fork-join of pure recursive binops.
-fn auto_par_enabled() -> bool {
-    !matches!(
-        std::env::var("COIL_AUTO_PAR"),
-        Ok(v) if matches!(v.as_str(), "0" | "false" | "off" | "no")
-    )
 }
 
 /// Extract enum name from `Ty::Con` / `Ty::Sum` / nested `Ty::Constructor`.

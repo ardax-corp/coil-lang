@@ -1498,6 +1498,17 @@ mod tests {
             call_fold: false,
             mir_fold: false,
             mir_loop: false,
+            hir_inline: false,
+            hir_inline_pair: false,
+            hir_inline_heap: false,
+            hir_inline_loops: false,
+            hir_inline_specialize: false,
+            hir_inline_mono: false,
+            hir_match_tree: false,
+            hir_pair_locals: false,
+            hir_bisect: None,
+            mir_sccp: false,
+            auto_par: false,
             require_mir: false,
         }
     }
