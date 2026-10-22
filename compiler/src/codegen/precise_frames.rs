@@ -53,6 +53,7 @@ pub fn bind_precise_frames(
     starts.sort_unstable();
     starts.dedup();
     let foreign = inbound_targets(bytecode, constants);
+    let indirect_one_word = indirect_returns_one_word(bytecode, &starts);
     let mut out = Vec::new();
     for (i, &entry) in starts.iter().enumerate() {
         let end = starts.get(i + 1).copied().unwrap_or(bytecode.len() as u32);
@@ -116,6 +117,7 @@ pub fn bind_precise_frames(
                     end,
                     &seed,
                     &ret_ptr,
+                    indirect_one_word,
                 ) {
                     row.at_pc = at_pc;
                 }
@@ -126,6 +128,48 @@ pub fn bind_precise_frames(
         }
     }
     out
+}
+
+/// Whether every function a `CallIndirect` can reach returns one word: no
+/// body a code pointer names (`CodePtr` / `MakePolyFn`), nor any body those
+/// tail-call into, ends in a two-word `RETURN`. The compiler keeps such
+/// targets on the one-word boxed ABI; this checks it on the bytecode, so a
+/// `CallIndirect` result is one exact word and loops that call through a
+/// closure or a dictionary reach a fixpoint instead of widening the cursor
+/// every pass.
+fn indirect_returns_one_word(bytecode: &[Byte], starts: &[u32]) -> bool {
+    let body_of = |pc: usize| -> Option<(usize, usize)> {
+        let i = starts.partition_point(|&s| s as usize <= pc).checked_sub(1)?;
+        let end = starts.get(i + 1).map_or(bytecode.len(), |&e| e as usize);
+        Some((starts[i] as usize, end))
+    };
+    let mut work: Vec<usize> = bytecode
+        .iter()
+        .filter(|b| matches!(*b.bytecode(), Instruction::CodePtr | Instruction::MakePolyFn))
+        .map(|b| b.operand_u32() as usize)
+        .collect();
+    let mut seen: HashSet<usize> = HashSet::new();
+    while let Some(pc) = work.pop() {
+        let Some((entry, end)) = body_of(pc) else {
+            return false;
+        };
+        if !seen.insert(entry) {
+            continue;
+        }
+        for b in &bytecode[entry..end] {
+            match *b.bytecode() {
+                Instruction::RETURN if b.return_words() >= 2 => return false,
+                Instruction::TailCall => {
+                    if b.call_ret_words() >= 2 {
+                        return false;
+                    }
+                    work.push(b.call_parts().1);
+                }
+                _ => {}
+            }
+        }
+    }
+    true
 }
 
 /// Highest frame word the body can touch, plus one: `None` when an op is not
@@ -719,6 +763,7 @@ fn analyze_body(
     end: u32,
     seed: &EntrySeed,
     ret_ptr: &HashMap<u32, bool>,
+    indirect_one_word: bool,
 ) -> Option<Vec<SlotMap>> {
     let (entry, end) = (entry as usize, end as usize);
     let (arity, coroutine) = entry_arity(bytecode, constants, entry, seed)?;
@@ -730,6 +775,7 @@ fn analyze_body(
         end,
         params: (!coroutine && seed.params.len() == arity).then_some(&seed.params[..]),
         ret_ptr,
+        indirect_one_word,
     };
     let mut merged: std::collections::BTreeMap<usize, std::collections::BTreeSet<u16>> =
         std::collections::BTreeMap::new();
@@ -806,6 +852,9 @@ struct Body<'a> {
     params: Option<&'a [bool]>,
     /// Callee entry PC → its one-word result is a must-pointer.
     ret_ptr: &'a HashMap<u32, bool>,
+    /// No `CallIndirect` target returns two words
+    /// ([`indirect_returns_one_word`]).
+    indirect_one_word: bool,
 }
 
 impl Body<'_> {
@@ -1363,9 +1412,12 @@ fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Opt
             step.record = Some(st.heap_slots(st.hi + 1, true));
             st.clobber_from(st.lo);
             st.push(true)?;
-            // The callee's return width is not encoded: one or two words.
-            st.write(st.hi, true, false)?;
-            st.raise(st.lo, st.hi + 1);
+            // The call does not encode the callee's return width: one word
+            // when no code pointer reaches a two-word return, else one or two.
+            if !body.indirect_one_word {
+                st.write(st.hi, true, false)?;
+                st.raise(st.lo, st.hi + 1);
+            }
         }
         // Suspends: the frame's words below the cursor are saved and restored
         // on resume; anything above is gone. Outside a coroutine the value
