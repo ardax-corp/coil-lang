@@ -919,11 +919,11 @@ impl Compiler {
         let item = hir.local(local).ty.clone();
         let niche = item
             .as_ref()
-            .is_some_and(|ty| crate::typechecking::value_layout::niche_heap_only(&self.checker, ty));
+            .is_some_and(|ty| crate::layout::niche_heap_only(&self.checker, ty));
         // Pinned as emission pins it, so `next`'s `CALL` agrees.
         if let Some(item) = &item {
             let opt = crate::typechecking::ty::option_ty(item.clone());
-            let pair = crate::typechecking::return_layout::two_word_kind(&self.checker, &opt);
+            let pair = crate::layout::two_word_kind(&self.checker, &opt);
             self.pin_two_word_return_kind(next_fqn, pair);
         }
         let two_slot = self.two_word_return_kind(next_fqn).is_some();
@@ -1492,7 +1492,7 @@ impl Compiler {
             || (param == ValueLayout::Boxed
                 && Self::hir_ty(hir, id).is_some_and(|ty| {
                     let ty = apply_ty_prune(self.checker.subst(), ty);
-                    crate::typechecking::return_layout::two_word_range_kind(&ty).is_some()
+                    crate::layout::two_word_range_kind(&ty).is_some()
                 }))
     }
 

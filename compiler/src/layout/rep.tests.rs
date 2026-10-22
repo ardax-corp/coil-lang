@@ -1,8 +1,6 @@
 use super::*;
-use crate::mir::MirLayout;
-use crate::typechecking::return_layout::two_word_kind;
+use crate::layout::{MirLayout, two_word_kind};
 use crate::typechecking::ty::{TyVarId, int, option_ty, range_ty, result_ty, string, unit};
-use crate::typechecking::value_layout::{ValueLayout, value_layout};
 
 fn checked(src: &str) -> Checker {
     let owned = Box::leak(src.to_string().into_boxed_str());

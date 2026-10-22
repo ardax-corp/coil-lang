@@ -14,7 +14,6 @@
 //! the same tiers; explicit `Deopt` is skipped at emit. History of each
 //! piece: `docs/internals/mir.md`.
 
-mod abi;
 mod builder;
 mod call_convoy;
 mod cse;
@@ -32,7 +31,6 @@ mod emit_lir;
 mod func;
 mod inst;
 mod instcombine;
-mod layout;
 mod licm;
 mod from_hir;
 mod pack;
@@ -45,7 +43,6 @@ mod stackmap;
 mod text;
 mod ty;
 
-pub use abi::DenseCallMap;
 pub use builder::{MirBuilder, MirError};
 pub use cse::{cse, cse_lir, gvn};
 pub use destprop::destprop;
@@ -64,8 +61,6 @@ pub use inst::{MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirFfiOp
 #[cfg(test)]
 pub use inst::{BlockId, LocalId, MirUnaryOp, Terminator};
 pub use instcombine::{instcombine, instcombine_lir};
-#[cfg(test)]
-pub use layout::MirLayout;
 pub use licm::{licm, mark_frozen_arrays};
 #[cfg(test)]
 pub use error::LowerError;

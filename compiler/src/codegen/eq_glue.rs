@@ -241,7 +241,7 @@ impl Compiler {
     /// Whether `ty` (a key) compares through glue: it is taken apart and
     /// some part, at any depth, has a user `Eq` instance.
     fn eq_glue_needed(&self, ty: &Ty, visiting: &mut Vec<Ty>) -> bool {
-        if !crate::hir::layout::ty_is_closed(ty) || visiting.contains(ty) {
+        if !crate::layout::ty_is_closed(ty) || visiting.contains(ty) {
             return false;
         }
         let Some(shape) = self.eq_glue_shape(ty) else {
@@ -368,7 +368,7 @@ impl Compiler {
         for part in shape.parts() {
             needed |= match part {
                 Ty::Var(_) => vars,
-                p if crate::hir::layout::ty_is_closed(p) => self.eq_user_instance(p) || self.eq_glue_needed(p, &mut Vec::new()),
+                p if crate::layout::ty_is_closed(p) => self.eq_user_instance(p) || self.eq_glue_needed(p, &mut Vec::new()),
                 p if self.eq_user_instance(p) && self.eq_open_instance_ok(p) => true,
                 p if self.eq_user_instance(p) => {
                     visiting.pop();
@@ -399,7 +399,7 @@ impl Compiler {
         visiting.push(ty.clone());
         let found = shape.parts().into_iter().any(|p| {
             !matches!(p, Ty::Var(_))
-                && !crate::hir::layout::ty_is_closed(p)
+                && !crate::layout::ty_is_closed(p)
                 && (self.eq_user_instance(p) || self.eq_open_instance_part(p, visiting))
         });
         visiting.pop();
@@ -420,7 +420,7 @@ impl Compiler {
     /// needs one and each of its variables has an `Eq` dictionary.
     pub(super) fn eq_dict_glue_target(&self, ty: &Ty, ne: bool) -> Option<DictGlue> {
         let key = self.eq_glue_key(ty);
-        if crate::hir::layout::ty_is_closed(&key) || matches!(key, Ty::Var(_)) {
+        if crate::layout::ty_is_closed(&key) || matches!(key, Ty::Var(_)) {
             return None;
         }
         let mut order = Vec::new();
@@ -606,7 +606,7 @@ impl Compiler {
 
 /// `x == y` at `ty`; `()` parts are always equal.
 fn part_eq(b: &mut Synth, x: HirId, y: HirId, ty: &Ty) -> HirId {
-    if crate::hir::layout::is_unit(ty) {
+    if crate::layout::is_unit(ty) {
         return b.push(HirKind::Lit(Lit::Bool(true)), coil_ty::boolean());
     }
     let op = crate::hir::build::resolve_bin("==", Some(ty), Some(ty));

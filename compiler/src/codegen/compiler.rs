@@ -1,5 +1,5 @@
 use super::*;
-use crate::typechecking::value_layout::ValueLayout;
+use crate::layout::ValueLayout;
 use crate::typechecking::{CStructDef, ForInInfo, ForInKind};
 use reporting::{ErrorCode, Message};
 
@@ -1033,7 +1033,7 @@ impl Compiler {
     /// The two-word kind a parameter of type `ty` of `callee` takes, if any
     /// (see [`Self::callee_has_unboxed_range_params`]).
     pub(super) fn param_pair_kind(&self, callee: &str, ty: &Ty) -> Option<PairKind> {
-        if let Some(kind) = crate::typechecking::return_layout::two_word_range_kind(ty) {
+        if let Some(kind) = crate::layout::two_word_range_kind(ty) {
             return Some(kind);
         }
         let lookup = strip_overload_key(callee);
@@ -1047,7 +1047,7 @@ impl Compiler {
         // A boxed tuple splits into `[a, b]` through a temp slot, which is
         // unsafe above live operands, so products (and readonly classes
         // laid out as them) stay one boxed word.
-        crate::typechecking::return_layout::two_word_kind(&self.checker, ty)
+        crate::layout::two_word_kind(&self.checker, ty)
             .filter(|kind| self.hir_pair_kind(kind) && !matches!(kind, PairKind::Product | PairKind::Class(_)))
     }
 
@@ -1092,7 +1092,7 @@ impl Compiler {
             return kind.clone();
         }
         if let Some(ty) = self.sidecar_ty_of(arg)
-            && let Some(kind) = crate::typechecking::return_layout::two_word_range_kind(&ty) {
+            && let Some(kind) = crate::layout::two_word_range_kind(&ty) {
                 return Some(kind);
             }
         let Expression::Argument { ty: Some(ty), .. } = arg.1.as_ref() else {
@@ -4895,7 +4895,7 @@ impl Compiler {
     }
 
     /// `Some(kind)` for a compiled function whose direct CALL/RETURN can
-    /// use the known ≤2-word ABI (see `typechecking::return_layout`).
+    /// use the known ≤2-word ABI (see `layout::two_word_kind`).
     /// Enums are `[payload, tag]`; arity-2 immediate products are `[a, b]`;
     /// numeric `Range` / `RangeInclusive` are `[start, end]`.
     /// Niched heap `Option<T>` / heap-heap `Result<T, E>`, unbounded `T`,
@@ -4944,7 +4944,7 @@ impl Compiler {
             .checker
             .fn_return_ty(name)
             .or_else(|| self.checker.fn_return_ty(lookup))?;
-        crate::typechecking::return_layout::two_word_kind(&self.checker, &ty)
+        crate::layout::two_word_kind(&self.checker, &ty)
     }
 
     /// Trait methods live under `Class__Type__method` FQNs that `env` lookup
@@ -4971,7 +4971,7 @@ impl Compiler {
         let Some(ty) = ty else {
             return;
         };
-        let kind = crate::typechecking::return_layout::two_word_kind(&self.checker, &ty);
+        let kind = crate::layout::two_word_kind(&self.checker, &ty);
         self.pin_two_word_return_kind(fqn, kind);
     }
 
@@ -5310,7 +5310,7 @@ impl Compiler {
         entry_sps: &HashMap<String, u32>,
     ) -> HashMap<String, super::precise_frames::FnWordKinds> {
         use crate::typechecking::subst::apply_ty_prune;
-        use crate::typechecking::value_layout::word_kind;
+        use crate::layout::word_kind;
         let mut out = HashMap::new();
         for (name, _) in entries {
             if out.contains_key(name) {
@@ -5362,7 +5362,7 @@ impl Compiler {
                 };
                 // A `()` parameter holds the empty tuple object, a pointer,
                 // as a tuple's `()` item does (#1465).
-                params.push(if crate::hir::layout::is_unit(&apply_ty_prune(self.checker.subst(), param)) {
+                params.push(if crate::layout::is_unit(&apply_ty_prune(self.checker.subst(), param)) {
                     common::WORD_POINTER
                 } else {
                     word_kind(&self.checker, param)
@@ -6326,9 +6326,9 @@ impl Compiler {
 
     /// Layout of a value of type `ty` (the shared [`value_layout`] query).
     ///
-    /// [`value_layout`]: crate::typechecking::value_layout::value_layout
+    /// [`value_layout`]: crate::layout::value_layout
     fn value_layout(&self, ty: &Ty) -> ValueLayout {
-        crate::typechecking::value_layout::value_layout(&self.checker, ty)
+        crate::layout::value_layout(&self.checker, ty)
     }
 
     /// Layout of the function being compiled's return value.
@@ -7991,7 +7991,7 @@ impl Compiler {
         let mut calls = HashMap::new();
         let mut targets = Vec::with_capacity(items.len());
         for item in &items {
-            if crate::hir::layout::is_unit(item) {
+            if crate::layout::is_unit(item) {
                 targets.push(None);
                 continue;
             }

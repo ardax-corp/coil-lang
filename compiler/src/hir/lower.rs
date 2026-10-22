@@ -61,7 +61,7 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
     if is_scalar(ty) {
         return Some(ValueClass::Scalar);
     }
-    if super::layout::is_unit(ty) {
+    if crate::layout::is_unit(ty) {
         return Some(ValueClass::Unit);
     }
     match ty {
@@ -191,7 +191,7 @@ fn fun_words_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>, open_enum: b
     // A bare type parameter (a shared generic body's own `T -> U`
     // parameter) is one boxed word too.
     let plain = |t: &Ty, seen: &mut Vec<String>| {
-        (super::layout::ty_is_closed(t) || matches!(strip_readonly(t), Ty::Fun(..) | Ty::Var(_)))
+        (crate::layout::ty_is_closed(t) || matches!(strip_readonly(t), Ty::Fun(..) | Ty::Var(_)))
             && matches!(
                 classify_in(checker, t, seen),
                 Some(ValueClass::Scalar | ValueClass::Opaque | ValueClass::Object | ValueClass::Aggregate)
@@ -200,9 +200,9 @@ fn fun_words_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>, open_enum: b
     match strip_readonly(ty) {
         // `() -> T` takes a unit parameter, and `T -> ()` returns one.
         Ty::Fun(param, ret) => {
-            let unit = |t: &Ty| super::layout::is_unit(strip_readonly(t));
+            let unit = |t: &Ty| crate::layout::is_unit(strip_readonly(t));
             let closed_enum = |t: &Ty, seen: &mut Vec<String>| {
-                (super::layout::ty_is_closed(t) || open_enum && super::layout::of(checker, t) == super::layout::Layout::Word)
+                (crate::layout::ty_is_closed(t) || open_enum && crate::layout::of(checker, t) == crate::layout::Layout::Word)
                     && classify_in(checker, t, seen) == Some(ValueClass::Enum)
             };
             // A closure literal's tuple of type parameters (a shared generic
@@ -211,7 +211,7 @@ fn fun_words_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>, open_enum: b
             let open_tuple = |t: &Ty, seen: &mut Vec<String>| {
                 open_enum
                     && matches!(strip_readonly(t), Ty::Tuple(_))
-                    && !super::layout::ty_is_closed(t)
+                    && !crate::layout::ty_is_closed(t)
                     && params_closed(t)
                     && classify_in(checker, t, seen) == Some(ValueClass::Aggregate)
             };
@@ -223,7 +223,7 @@ fn fun_words_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>, open_enum: b
 }
 
 /// Closed but for type parameters (a generic class's shared method body):
-/// each parameter is one boxed word, and [`super::layout::of`] gives a type
+/// each parameter is one boxed word, and [`crate::layout::of`] gives a type
 /// open in one the same layout the AST codegen uses.
 fn params_closed(ty: &Ty) -> bool {
     match strip_readonly(ty) {
@@ -280,7 +280,7 @@ fn object_class(checker: &Checker, name: &str) -> Option<ValueClass> {
     let fields = checker.class_fields(&key)?;
     fields
         .iter()
-        .all(|(_, ty)| super::layout::ty_is_closed(ty) || is_existential(ty) || mono_fun(checker, ty, &mut Vec::new()))
+        .all(|(_, ty)| crate::layout::ty_is_closed(ty) || is_existential(ty) || mono_fun(checker, ty, &mut Vec::new()))
         .then_some(ValueClass::Object)
 }
 
@@ -1208,7 +1208,7 @@ fn user_enum(checker: &Checker, name: &str, seen: &mut Vec<String>) -> Option<Va
     seen.push(name.to_string());
     let ok = variants.iter().all(|(_, _, payload)| {
         payload.iter().all(|field| {
-            super::layout::ty_is_closed(field) && classify_in(checker, field, seen).is_some()
+            crate::layout::ty_is_closed(field) && classify_in(checker, field, seen).is_some()
         })
     });
     seen.pop();
@@ -1223,7 +1223,7 @@ pub fn generic_enum_payload(checker: &Checker, enum_name: &str, variant: &str, a
         return None;
     }
     let (_, _, payload) = checker.enum_variants(enum_name)?.into_iter().find(|(n, _, _)| n == variant)?;
-    Some(payload.iter().map(|t| super::layout::bind_params(t, params, args)).collect())
+    Some(payload.iter().map(|t| crate::layout::bind_params(t, params, args)).collect())
 }
 
 /// An instance of a generic user enum (`Tree<int>`, or `Tree<T>` in a
@@ -1261,7 +1261,7 @@ fn generic_user_enum(checker: &Checker, name: &str, args: &[Ty], seen: &mut Vec<
 /// A numeric `Range` / `RangeInclusive`: `[start, end]` in a direct
 /// call's arguments and result and in an unboxed local, else one boxed word.
 pub fn is_range_pair(ty: &Ty) -> bool {
-    crate::typechecking::return_layout::two_word_range_kind(ty).is_some()
+    crate::layout::two_word_range_kind(ty).is_some()
 }
 
 /// A `Range<T>` / `RangeInclusive<T>` over an open type parameter `T`.
@@ -1605,7 +1605,7 @@ pub fn is_unit_value(body: &HirBody, checker: &Checker, id: HirId) -> bool {
     body.expr(id)
         .ty
         .as_ref()
-        .is_some_and(|t| super::layout::is_unit(&apply_ty_prune(checker.subst(), t)))
+        .is_some_and(|t| crate::layout::is_unit(&apply_ty_prune(checker.subst(), t)))
 }
 
 /// The `while` shape the builder desugars to: `Loop { Block { If(c, b, Break) } }`.
@@ -1635,7 +1635,7 @@ pub fn arm_fields(body: &HirBody, pat: &HirPat) -> Result<Vec<Option<super::Loca
     let field = |p: &HirPat| match p {
         HirPat::Wild => Ok(None),
         // A `()` payload (`Ok(ok)` of the `?` desugaring) binds no word.
-        HirPat::Bind(l) if body.local(*l).ty.as_ref().is_some_and(super::layout::is_unit) => Ok(None),
+        HirPat::Bind(l) if body.local(*l).ty.as_ref().is_some_and(crate::layout::is_unit) => Ok(None),
         HirPat::Bind(l) => Ok(Some(*l)),
         _ => Err("pattern-nested"),
     };
@@ -1916,7 +1916,7 @@ pub fn is_identity_arm(body: &HirBody, arm: &HirArm) -> bool {
             ..
         } => match parts.as_slice() {
             [HirPat::Bind(l)] => {
-                !body.local(*l).ty.as_ref().is_some_and(super::layout::is_unit)
+                !body.local(*l).ty.as_ref().is_some_and(crate::layout::is_unit)
                     && matches!(body.expr(arm.body).kind, HirKind::Local(r) if r == *l)
             }
             _ => false,

@@ -19,7 +19,7 @@ use crate::hir::{
     BinOp, Builtin, Callee, HirArm, HirBody, HirFlags, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId, MakeKind, UnOp,
 };
 use crate::typechecking::subst::apply_ty_prune;
-use crate::typechecking::value_layout::ValueLayout;
+use crate::layout::ValueLayout;
 
 #[path = "emit_hir_mir.rs"]
 mod emit_hir_mir;
@@ -602,7 +602,7 @@ impl Compiler {
         let scalar = |ty: &Option<Ty>| {
             ty.as_ref().is_some_and(|t| {
                 matches!(lower::classify(&self.checker, t), Some(ValueClass::Scalar | ValueClass::Unit))
-                    || self.hir_inline_pair && immediate_pair(&crate::hir::layout::of(&self.checker, t))
+                    || self.hir_inline_pair && immediate_pair(&crate::layout::of(&self.checker, t))
             })
         };
         if lambda.exprs.iter().any(|e| matches!(e.kind, HirKind::Lambda { .. })) {
@@ -737,12 +737,12 @@ impl Compiler {
         if !inst.locals.iter().all(|l| closed(&l.ty)) || !inst.exprs.iter().all(|e| closed(&e.ty)) || !closed(&inst.ret) {
             return None;
         }
-        inst.ret_layout = inst.ret.as_ref().map_or(crate::hir::layout::Layout::Word, |t| crate::hir::layout::of(&self.checker, t));
+        inst.ret_layout = inst.ret.as_ref().map_or(crate::layout::Layout::Word, |t| crate::layout::of(&self.checker, t));
         // Each value in its own layout at the instance's types, not the
         // generic body's boxed one.
         for e in &mut inst.exprs {
             if let Some(t) = &e.ty {
-                e.layout = crate::hir::layout::of(&self.checker, t);
+                e.layout = crate::layout::of(&self.checker, t);
             }
         }
         match crate::hir::inline::inlinable(&inst, usize::MAX) {
@@ -1398,7 +1398,7 @@ impl Compiler {
                 // pointer-niche `Option` / `Result` element its niche word
                 // (`hir_stack_rep`).
                 Some(element) => crate::mir::scalar_mir_ty(element).or_else(|| {
-                    use crate::typechecking::value_layout::{value_layout, word_kind};
+                    use crate::layout::{value_layout, word_kind};
                     match value_layout(&self.checker, element) {
                         // So does a two-word enum's: its boxed object.
                         ValueLayout::Boxed => (word_kind(&self.checker, element) == common::WORD_POINTER
@@ -1424,7 +1424,7 @@ impl Compiler {
             let t = apply_ty_prune(checker.subst(), t);
             checker.ty_is_class(&t)
         };
-        let niche = move |t: &Ty| match crate::typechecking::value_layout::value_layout(checker, t) {
+        let niche = move |t: &Ty| match crate::layout::value_layout(checker, t) {
             ValueLayout::NicheOption | ValueLayout::NicheUnitResult => Some(crate::mir::MirTy::NicheOpt),
             ValueLayout::NicheResult => Some(crate::mir::MirTy::NicheRes),
             ValueLayout::Boxed => None,
@@ -1442,7 +1442,7 @@ impl Compiler {
         // The backing word of a scalar enum type.
         let scalar_enum = move |t: &Ty| {
             let t = apply_ty_prune(checker.subst(), t);
-            if !crate::hir::layout::is_scalar_enum_ty(checker, &t) {
+            if !crate::layout::is_scalar_enum_ty(checker, &t) {
                 return None;
             }
             let name = match crate::typechecking::ty::strip_readonly(&t) {
@@ -1475,8 +1475,8 @@ impl Compiler {
                     let t = apply_ty_prune(checker.subst(), t);
                     (opaque_vars
                         && (crate::typechecking::ty::is_option_ty(&t) || crate::typechecking::ty::is_result_ty(&t))
-                        && crate::typechecking::value_layout::value_layout(checker, &t) == ValueLayout::Boxed
-                        && crate::hir::layout::of_resolved(checker, &t) == crate::hir::layout::Layout::Word)
+                        && crate::layout::value_layout(checker, &t) == ValueLayout::Boxed
+                        && crate::layout::of_resolved(checker, &t) == crate::layout::Layout::Word)
                         .then_some(crate::mir::MirTy::HeapRef)
                 })
                 // A foreign `ptr`: a raw address word, as a local holds it
@@ -1486,7 +1486,7 @@ impl Compiler {
         // A scalar enum's backing word.
         let scalar_enum = move |t: &Ty| {
             let t = apply_ty_prune(checker.subst(), t);
-            if !crate::hir::layout::is_scalar_enum_ty(checker, &t) {
+            if !crate::layout::is_scalar_enum_ty(checker, &t) {
                 return None;
             }
             let name = match crate::typechecking::ty::strip_readonly(&t) {
@@ -1543,7 +1543,7 @@ impl Compiler {
                             // An existential field holds its pack's heap word.
                             .or_else(|| matches!(crate::typechecking::ty::strip_readonly(t), Ty::Existential { .. }).then_some(crate::mir::MirTy::HeapRef))
                             .or_else(|| {
-                                field_word(t).filter(|_| crate::typechecking::value_layout::value_layout(checker, t) == ValueLayout::Boxed)
+                                field_word(t).filter(|_| crate::layout::value_layout(checker, t) == ValueLayout::Boxed)
                             })
                             .or_else(|| word(&self.hir_class_ty_args_at(made?, t)?))
                             // A two-word field's slot holds its box, as
@@ -1551,7 +1551,7 @@ impl Compiler {
                             .or_else(|| {
                                 // A class parameter's at the made type's arguments.
                                 let at = made.and_then(|m| self.hir_param_field_at(m, t)).unwrap_or_else(|| t.clone());
-                                matches!(crate::hir::layout::of_resolved(checker, &apply_ty_prune(checker.subst(), &at)), crate::hir::layout::Layout::Pair(_))
+                                matches!(crate::layout::of_resolved(checker, &apply_ty_prune(checker.subst(), &at)), crate::layout::Layout::Pair(_))
                                     .then_some(crate::mir::MirTy::HeapRef)
                             })
                             // Any other tuple is a heap tuple object (#1170).
@@ -1593,15 +1593,15 @@ impl Compiler {
         // Option<Node<T>>`) holds its boxed word; read or written at a
         // ground type with a niche layout of its own it converts there.
         let open_niche = |fty: &Ty, at: &Ty| {
-            let at_layout = crate::typechecking::value_layout::value_layout(checker, at);
+            let at_layout = crate::layout::value_layout(checker, at);
             // A bare parameter (`item: T`) holds a niche value as its
             // boxed enum object too.
             let bare = matches!(crate::typechecking::ty::strip_readonly(fty), Ty::Var(_));
             (Self::ty_has_var(fty)
                 && (bare
                     || (field_word(fty) == Some(crate::mir::MirTy::HeapRef)
-                        && crate::typechecking::value_layout::value_layout(checker, fty) == ValueLayout::Boxed
-                        && crate::hir::layout::of_resolved(checker, &apply_ty_prune(checker.subst(), fty)) == crate::hir::layout::Layout::Word))
+                        && crate::layout::value_layout(checker, fty) == ValueLayout::Boxed
+                        && crate::layout::of_resolved(checker, &apply_ty_prune(checker.subst(), fty)) == crate::layout::Layout::Word))
                 && at_layout != ValueLayout::Boxed)
                 .then_some(at_layout)
         };
@@ -1610,7 +1610,7 @@ impl Compiler {
             field_word(t).or_else(|| {
                 let t = apply_ty_prune(checker.subst(), t);
                 // A heap tuple is its object's word (#1170).
-                (matches!(crate::hir::layout::of_resolved(checker, &t), crate::hir::layout::Layout::Pair(_))
+                (matches!(crate::layout::of_resolved(checker, &t), crate::layout::Layout::Pair(_))
                     || matches!(t, Ty::Tuple(ref items) if !items.is_empty()))
                 .then_some(crate::mir::MirTy::HeapRef)
             })
@@ -1688,7 +1688,7 @@ impl Compiler {
                 // A `()` field holds the empty tuple object (#1510).
                 HirKind::Field { base, name }
                     if let Some((FieldAt::Record(slot), fty)) = self.hir_field(hir, *base, name)
-                        && crate::hir::layout::is_unit(&apply_ty_prune(checker.subst(), &fty)) =>
+                        && crate::layout::is_unit(&apply_ty_prune(checker.subst(), &fty)) =>
                 {
                     record_fields.insert(i as u32, (slot, crate::mir::MirTy::HeapRef));
                 }
@@ -1707,7 +1707,7 @@ impl Compiler {
                             let (_, fty) = fields.iter().find(|(f, _)| f == n)?;
                             let slot = fields.iter().filter(|(f, _)| f < n).count() as u32;
                             // A `()` field holds the empty tuple object (#1510).
-                            if crate::hir::layout::is_unit(&apply_ty_prune(checker.subst(), fty)) {
+                            if crate::layout::is_unit(&apply_ty_prune(checker.subst(), fty)) {
                                 return Some((slot, crate::mir::MirTy::HeapRef));
                             }
                             let w = record_word(fty)?;
@@ -1736,7 +1736,7 @@ impl Compiler {
                             HirPat::Bind(_) => {
                                 let (_, fty) = fields.iter().find(|(f, _)| f == n)?;
                                 // A `()` binding has no slot (#1510).
-                                if crate::hir::layout::is_unit(&apply_ty_prune(checker.subst(), fty)) {
+                                if crate::layout::is_unit(&apply_ty_prune(checker.subst(), fty)) {
                                     return Some(None);
                                 }
                                 let slot = fields.iter().filter(|(f, _)| f < n).count() as u32;
@@ -1771,14 +1771,14 @@ impl Compiler {
                         // A two-word field value is stored boxed.
                         let stored = |t: &Ty| {
                             word(t).or_else(|| scalar_enum(t)).or_else(|| {
-                                (crate::hir::layout::of_resolved(checker, &apply_ty_prune(checker.subst(), t)) != crate::hir::layout::Layout::Word
-                                    && crate::typechecking::value_layout::value_layout(checker, t) == ValueLayout::Boxed)
+                                (crate::layout::of_resolved(checker, &apply_ty_prune(checker.subst(), t)) != crate::layout::Layout::Word
+                                    && crate::layout::value_layout(checker, t) == ValueLayout::Boxed)
                                     .then_some(crate::mir::MirTy::HeapRef)
                             })
                             // A boxed user enum (a case of two or more
                             // payload fields) is one heap word already (#1167).
                             .or_else(|| {
-                                field_word(t).filter(|_| crate::typechecking::value_layout::value_layout(checker, t) == ValueLayout::Boxed)
+                                field_word(t).filter(|_| crate::layout::value_layout(checker, t) == ValueLayout::Boxed)
                             })
                             // A heap tuple is its object's word (#1170).
                             .or_else(|| {
@@ -1802,8 +1802,8 @@ impl Compiler {
                             let at = Self::hir_ty(hir, arg)?;
                             (Self::ty_has_var(t)
                                 && field_word(t) == Some(crate::mir::MirTy::HeapRef)
-                                && crate::typechecking::value_layout::value_layout(checker, t) == ValueLayout::Boxed
-                                && crate::typechecking::value_layout::value_layout(checker, at) == ValueLayout::Boxed)
+                                && crate::layout::value_layout(checker, t) == ValueLayout::Boxed
+                                && crate::layout::value_layout(checker, at) == ValueLayout::Boxed)
                                 .then_some(crate::mir::MirTy::HeapRef)
                         })
                     })
@@ -1829,7 +1829,7 @@ impl Compiler {
                     // A two-word enum result is unboxed at the edge, one
                     // `JumpIfMatch` per variant: each variant's tag and arity.
                     let ty = Self::hir_ty(hir, HirId(i)).map(|t| apply_ty_prune(self.checker.subst(), t));
-                    let unbox = match ty.as_ref().and_then(|t| crate::typechecking::return_layout::two_word_kind(&self.checker, t)) {
+                    let unbox = match ty.as_ref().and_then(|t| crate::layout::two_word_kind(&self.checker, t)) {
                         Some(kind) => Some(
                             self.checker
                                 .enum_variants(kind.enum_name()?)?
@@ -1906,7 +1906,7 @@ impl Compiler {
             box_at: &emit.plan.box_at,
             is_class: Box::new(is_class),
             pair_class: Box::new(move |t: &Ty| {
-                crate::hir::layout::readonly_pair_class(checker, &apply_ty_prune(checker.subst(), t)).map(|key| checker.class_type_id(&key))
+                crate::layout::readonly_pair_class(checker, &apply_ty_prune(checker.subst(), t)).map(|key| checker.class_type_id(&key))
             }),
             scalar_enum: Box::new(scalar_enum),
             niche: Box::new(niche),
@@ -1914,7 +1914,7 @@ impl Compiler {
                 let t = apply_ty_prune(checker.subst(), t);
                 if crate::typechecking::ty::is_option_ty(&t)
                     || crate::typechecking::ty::is_result_ty(&t)
-                    || crate::hir::layout::of_resolved(checker, &t) != crate::hir::layout::Layout::Word
+                    || crate::layout::of_resolved(checker, &t) != crate::layout::Layout::Word
                 {
                     return None;
                 }
@@ -1924,22 +1924,22 @@ impl Compiler {
             enum_drop: Box::new(move |name: &str| {
                 checker.enum_has_drop(name).then(|| checker.class_type_id(name))
             }),
-            word_kind: Box::new(move |t: &Ty| crate::typechecking::value_layout::word_kind(checker, t)),
-            array_stamp: Box::new(move |t: &Ty| crate::typechecking::value_layout::array_elem_stamp(checker, t)),
+            word_kind: Box::new(move |t: &Ty| crate::layout::word_kind(checker, t)),
+            array_stamp: Box::new(move |t: &Ty| crate::layout::array_elem_stamp(checker, t)),
             match_tree: self.hir_match_tree,
             payload_names: Box::new(move |enum_name: &str, variant: &str| {
                 checker.payload_tys_for(enum_name, variant).into_iter().map(|(name, _)| name).collect()
             }),
             pair_variants: Box::new(move |t: &Ty| {
                 let t = apply_ty_prune(checker.subst(), t);
-                let kind = crate::typechecking::return_layout::two_word_kind(checker, &t)?.enum_name()?.to_string();
+                let kind = crate::layout::two_word_kind(checker, &t)?.enum_name()?.to_string();
                 let mut variants = Vec::new();
                 for (name, tag, _) in checker.enum_variants(&kind)? {
                     let payload = Self::payload_tys_of(checker, &t, &name)?;
                     let word = match payload.as_slice() {
                         [] => None,
-                        [p] if crate::hir::layout::is_unit(p) => Some(crate::mir::MirTy::I64),
-                        [p] if !crate::hir::layout::is_immediate(p) => Some(crate::mir::MirTy::HeapRef),
+                        [p] if crate::layout::is_unit(p) => Some(crate::mir::MirTy::I64),
+                        [p] if !crate::layout::is_immediate(p) => Some(crate::mir::MirTy::HeapRef),
                         [p] => Some(crate::mir::scalar_mir_ty(p)?),
                         _ => return None,
                     };
@@ -1949,7 +1949,7 @@ impl Compiler {
             }),
             boxed_view: Box::new(move |t: &Ty, variant: Option<&str>| {
                 let t = apply_ty_prune(checker.subst(), t);
-                if crate::typechecking::value_layout::value_layout(checker, &t) != ValueLayout::Boxed {
+                if crate::layout::value_layout(checker, &t) != ValueLayout::Boxed {
                     return None;
                 }
                 Self::boxed_payloads(checker, &t, variant)
@@ -2027,7 +2027,7 @@ impl Compiler {
     /// A non-scalar enum type's payload types for `variant` (`Some` of
     /// nothing without one), as a boxed `ObjEnum` carries them.
     fn boxed_payloads(checker: &Checker, t: &Ty, variant: Option<&str>) -> Option<Vec<Ty>> {
-        if crate::hir::layout::is_scalar_enum_ty(checker, t) {
+        if crate::layout::is_scalar_enum_ty(checker, t) {
             return None;
         }
         let name = Self::enum_name_of(t)?;
@@ -2042,7 +2042,7 @@ impl Compiler {
     }
 
     fn hir_mir_pair_tys(&self, ty: &Ty) -> Option<(crate::mir::MirTy, crate::mir::MirTy)> {
-        use crate::hir::layout::{self, Layout, PairKind};
+        use crate::layout::{self, Layout, PairKind};
         use crate::mir::{scalar_mir_ty as word, MirTy};
         let ty = apply_ty_prune(self.checker.subst(), ty);
         let Layout::Pair(kind) = layout::of_resolved(&self.checker, &ty) else {
@@ -2093,8 +2093,8 @@ impl Compiler {
 
     /// The variants of a two-word enum layout (none for a range or a
     /// product).
-    fn pair_variants(&self, kind: crate::hir::layout::PairKind) -> Option<Vec<String>> {
-        use crate::hir::layout::PairKind;
+    fn pair_variants(&self, kind: crate::layout::PairKind) -> Option<Vec<String>> {
+        use crate::layout::PairKind;
         Some(match kind {
             PairKind::Range { .. } | PairKind::Product | PairKind::Class(_) => Vec::new(),
             PairKind::Option => vec!["Some".into(), "None".into()],
@@ -2108,7 +2108,7 @@ impl Compiler {
     /// immediate, as [`Self::hir_mir_pair_tys`] moves it as an opaque
     /// `i64`. Unknown payloads count as heap.
     fn hir_pair_holds_heap(&self, ty: &Ty) -> bool {
-        use crate::hir::layout::{self, Layout};
+        use crate::layout::{self, Layout};
         use crate::mir::scalar_mir_ty as word;
         let ty = apply_ty_prune(self.checker.subst(), ty);
         let Layout::Pair(kind) = layout::of_resolved(&self.checker, &ty) else {
@@ -2347,7 +2347,7 @@ impl Compiler {
                 || callee.result_mode && !self.hir_inline_pair
                 || if call.instance.is_some() { shared(callee) } else { callee.name.contains(" for ") }
                 || core.is_none() && home(callee) != here
-                || !matches!(callee.ret_layout, crate::hir::layout::Layout::Word)
+                || !matches!(callee.ret_layout, crate::layout::Layout::Word)
                     && !callee.ret_layout.is_niche()
                     && !(self.hir_inline_pair && immediate_pair(&callee.ret_layout))
             {
@@ -2438,7 +2438,7 @@ impl Compiler {
                     matches!(
                         lower::classify(&self.checker, t),
                         Some(ValueClass::Scalar | ValueClass::Unit)
-                    ) || self.hir_inline_pair && immediate_pair(&crate::hir::layout::of(&self.checker, t))
+                    ) || self.hir_inline_pair && immediate_pair(&crate::layout::of(&self.checker, t))
                 })
             };
             let HirKind::Call { args, .. } = &hir.expr(id).kind else {
@@ -2598,7 +2598,7 @@ impl Compiler {
                     HirKind::Let { local, init: Some(_) } if *local == l => {
                         e.kind = HirKind::Lit(Lit::Unit);
                         e.ty = Some(crate::typechecking::ty::unit());
-                        e.layout = crate::hir::layout::Layout::Word;
+                        e.layout = crate::layout::Layout::Word;
                         e.node = None;
                     }
                     HirKind::Clear(cleared) => cleared.retain(|&c| c != l),
@@ -2816,7 +2816,7 @@ impl Compiler {
                         .map(|&r| b.expr(r).ty.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t)))
                         .collect();
                     match items {
-                        Some(items) if items.iter().all(crate::hir::layout::ty_is_closed) => Some(Ty::Tuple(items)),
+                        Some(items) if items.iter().all(crate::layout::ty_is_closed) => Some(Ty::Tuple(items)),
                         _ => return Err("call-argument"),
                     }
                 }
@@ -2831,7 +2831,7 @@ impl Compiler {
                         rest.iter().all(|&r| key(r).as_ref() == Some(&k))
                     };
                     match (declared, item) {
-                        (Ty::App(head, params), Some(item)) if params.len() == 1 && same(&item) && crate::hir::layout::ty_is_closed(&item) => {
+                        (Ty::App(head, params), Some(item)) if params.len() == 1 && same(&item) && crate::layout::ty_is_closed(&item) => {
                             Some(Ty::App(head, vec![item]))
                         }
                         _ => return Err("call-argument"),
@@ -2954,7 +2954,7 @@ impl Compiler {
         if tuple_rest {
             let items: Option<Vec<Ty>> = rest.iter().map(|&r| ground(b, r)).collect();
             let pack_ty = match items {
-                Some(items) if items.iter().all(crate::hir::layout::ty_is_closed) => Ty::Tuple(items),
+                Some(items) if items.iter().all(crate::layout::ty_is_closed) => Ty::Tuple(items),
                 _ => return Err("call-argument"),
             };
             out.push(Self::hir_push(b, &self.checker, HirKind::Make { kind: MakeKind::Tuple, args: rest }, Some(pack_ty), span));
@@ -2963,13 +2963,13 @@ impl Compiler {
         let declared = self.checker.fn_param_tys(key).and_then(|tys| tys.last().cloned()).ok_or("call-argument")?;
         // A generic pack's type is its items' one ground type (`P` and
         // `readonly P` are one, as for the mono key).
-        let pack_ty = if !crate::hir::layout::ty_is_closed(&declared) {
+        let pack_ty = if !crate::layout::ty_is_closed(&declared) {
             let key_of = |t: &Ty| crate::monomorphize::mono_key_ty(t);
             let item = rest.first().and_then(|&r| ground(b, r)).ok_or("call-argument")?;
             let item = crate::typechecking::ty::strip_readonly(&item).clone();
             let same = rest.iter().all(|&r| ground(b, r).is_some_and(|t| key_of(&t) == key_of(&item)));
             match declared {
-                Ty::App(head, params) if params.len() == 1 && same && crate::hir::layout::ty_is_closed(&item) => {
+                Ty::App(head, params) if params.len() == 1 && same && crate::layout::ty_is_closed(&item) => {
                     Ty::App(head, vec![item])
                 }
                 _ => return Err("call-argument"),
@@ -3041,7 +3041,7 @@ impl Compiler {
     /// Append a desugaring node to `body`.
     fn hir_push(body: &mut HirBody, checker: &Checker, kind: HirKind, ty: Option<Ty>, span: crate::hir::Span) -> HirId {
         let id = HirId(body.exprs.len() as u32);
-        let layout = ty.as_ref().map_or(crate::hir::layout::Layout::Word, |t| crate::hir::layout::of_resolved(checker, t));
+        let layout = ty.as_ref().map_or(crate::layout::Layout::Word, |t| crate::layout::of_resolved(checker, t));
         body.exprs.push(crate::hir::HirExpr {
             kind,
             ty,
@@ -3073,14 +3073,14 @@ impl Compiler {
     /// unless every local and node type is ground there.
     fn hir_inline_instance(&self, generic: &HirBody, map: &HashMap<crate::typechecking::ty::TyVarId, Ty>) -> Option<HirBody> {
         let mut inst = self.hir_instance(generic, map);
-        let closed = |t: &Option<Ty>| t.as_ref().is_none_or(crate::hir::layout::ty_is_closed);
+        let closed = |t: &Option<Ty>| t.as_ref().is_none_or(crate::layout::ty_is_closed);
         if !inst.locals.iter().all(|l| closed(&l.ty)) || !inst.exprs.iter().all(|e| closed(&e.ty)) || !closed(&inst.ret) {
             return None;
         }
         inst.ret_layout = inst
             .ret
             .as_ref()
-            .map_or(crate::hir::layout::Layout::Word, |t| crate::hir::layout::of(&self.checker, t));
+            .map_or(crate::layout::Layout::Word, |t| crate::layout::of(&self.checker, t));
         Some(inst)
     }
 
@@ -3110,7 +3110,7 @@ impl Compiler {
             {
                 // `==` / `!=` over `()` (`T = unit`) is its literal once both
                 // sides have run, as the builder folds a ground one (#1450).
-                let unit = |id: crate::hir::HirId| exprs[id.0 as usize].ty.as_ref().is_some_and(crate::hir::layout::is_unit);
+                let unit = |id: crate::hir::HirId| exprs[id.0 as usize].ty.as_ref().is_some_and(crate::layout::is_unit);
                 if matches!(sym, "==" | "!=") && unit(lhs) && unit(rhs) {
                     let value = crate::hir::HirId(exprs.len() as u32);
                     let mut lit = crate::hir::HirExpr { kind: HirKind::Lit(crate::hir::Lit::Bool(sym == "==")), ..exprs[i].clone() };
@@ -3206,7 +3206,7 @@ impl Compiler {
             }
             for &param in &lam.params {
                 let ty = lam.local(param).ty.as_ref().ok_or("lambda-param")?;
-                if crate::typechecking::return_layout::two_word_range_kind(ty).is_some() {
+                if crate::layout::two_word_range_kind(ty).is_some() {
                     return Err("lambda-param");
                 }
             }
@@ -3946,7 +3946,7 @@ impl Compiler {
             let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id).ok_or("callee-signature")?);
             match lower::classify(&self.checker, &ty) {
                 Some(ValueClass::Scalar | ValueClass::Opaque | ValueClass::Object | ValueClass::Aggregate)
-                    if crate::hir::layout::ty_is_closed(&ty) =>
+                    if crate::layout::ty_is_closed(&ty) =>
                 {
                     Ok(self.value_layout(&ty))
                 }
@@ -4003,7 +4003,7 @@ impl Compiler {
             let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id).ok_or("callee-signature")?);
             match lower::classify(&self.checker, &ty) {
                 Some(ValueClass::Scalar | ValueClass::Opaque | ValueClass::Object | ValueClass::Aggregate)
-                    if crate::hir::layout::ty_is_closed(&ty) =>
+                    if crate::layout::ty_is_closed(&ty) =>
                 {
                     Ok(self.value_layout(&ty))
                 }
@@ -4065,7 +4065,7 @@ impl Compiler {
             // A type argument still open (a generic caller): no clone.
             let subst: Option<Vec<Ty>> = vars
                 .iter()
-                .map(|v| map.get(v).filter(|t| crate::hir::layout::ty_is_closed(t)).cloned())
+                .map(|v| map.get(v).filter(|t| crate::layout::ty_is_closed(t)).cloned())
                 .collect();
             return self.mono_plan.specialization_for_subst(key, &subst?);
         }
@@ -4108,7 +4108,7 @@ impl Compiler {
             let ty = Self::hir_ty(hir, arg).ok_or("callee-generic")?;
             let ty = apply_ty_prune(self.checker.subst(), ty);
             // A ground closure argument is one word the clone calls as is.
-            if !(crate::hir::layout::ty_is_closed(&ty) || ground_fun(&ty)) {
+            if !(crate::layout::ty_is_closed(&ty) || ground_fun(&ty)) {
                 return Err("callee-generic");
             }
             arg_tys.push(ty);
@@ -4143,7 +4143,7 @@ impl Compiler {
         // the clone builds it at its ground types (#1567).
         let enum_boundary = |generic: &Ty, concrete: &Ty| {
             !matches!(generic, Ty::Var(_))
-                && !crate::hir::layout::ty_is_closed(generic)
+                && !crate::layout::ty_is_closed(generic)
                 && lower::classify(&self.checker, concrete) == Some(ValueClass::Enum)
                 && self.generic_enum_layout(generic).is_some()
         };
@@ -4166,14 +4166,14 @@ impl Compiler {
         }
         // A result type the parameters do not bind is the call's own.
         let mut ret = at(&ret_ty);
-        if !crate::hir::layout::ty_is_closed(&ret)
+        if !crate::layout::ty_is_closed(&ret)
             && let Some(ty) = Self::hir_ty(hir, call)
         {
             ret = apply_ty_prune(self.checker.subst(), ty);
         }
         // A returned function (`return show`, a `PolyFn`) is one word.
         let fun = matches!(crate::typechecking::ty::strip_readonly(&ret), Ty::Fun(..) | Ty::Forall { .. });
-        if !(crate::hir::layout::ty_is_closed(&ret) || fun) || lower::classify(&self.checker, &ret).is_none() {
+        if !(crate::layout::ty_is_closed(&ret) || fun) || lower::classify(&self.checker, &ret).is_none() {
             return Err("callee-signature");
         }
         let ret_layout = if enum_boundary(&ret_ty, &ret) {
@@ -4201,7 +4201,7 @@ impl Compiler {
     fn closed_value_ty(ty: &Ty) -> bool {
         match crate::typechecking::ty::strip_readonly(ty) {
             Ty::Fun(param, ret) => Self::closed_value_ty(param) && Self::closed_value_ty(ret),
-            ty => crate::hir::layout::ty_is_closed(ty),
+            ty => crate::layout::ty_is_closed(ty),
         }
     }
 
@@ -4263,9 +4263,9 @@ impl Compiler {
         }
         // Each type argument one word in its own layout (no pair).
         let word = |ty: &Ty| {
-            crate::hir::layout::ty_is_closed(ty)
+            crate::layout::ty_is_closed(ty)
                 && lower::classify(&self.checker, ty).is_some_and(lower::is_word)
-                && crate::hir::layout::of_resolved(&self.checker, ty) == crate::hir::layout::Layout::Word
+                && crate::layout::of_resolved(&self.checker, ty) == crate::layout::Layout::Word
         };
         let lookup_tys = src
             .head
@@ -4281,7 +4281,7 @@ impl Compiler {
         let one = |ty: &Ty| {
             Self::closed_value_ty(ty)
                 && lower::classify(&self.checker, ty).is_some_and(lower::is_word)
-                && !matches!(crate::hir::layout::of_resolved(&self.checker, ty), crate::hir::layout::Layout::Pair(_))
+                && !matches!(crate::layout::of_resolved(&self.checker, ty), crate::layout::Layout::Pair(_))
         };
         let mut params = Vec::with_capacity(param_tys.len());
         let mut own_tys = Vec::with_capacity(param_tys.len());
@@ -4300,8 +4300,8 @@ impl Compiler {
         // the open type's layout, as a mono clone's (`resolve_hir_mono`).
         let boundary = !matches!(ret_ty, Ty::Var(_))
             && !one(&ret)
-            && !crate::hir::layout::ty_is_closed(&ret_ty)
-            && crate::hir::layout::ty_is_closed(&ret)
+            && !crate::layout::ty_is_closed(&ret_ty)
+            && crate::layout::ty_is_closed(&ret)
             && lower::classify(&self.checker, &ret) == Some(ValueClass::Enum);
         let unit = matches!(&ret, Ty::Con(n) if n == crate::typechecking::ty::UNIT);
         let ret_layout = if boundary {
@@ -4724,8 +4724,8 @@ impl Compiler {
         }
         let ty = Self::hir_ty(hir, call).ok_or("vec-ctor")?;
         let ty = apply_ty_prune(self.checker.subst(), ty);
-        let elem = crate::typechecking::value_layout::vec_elem_ty(&self.checker, &ty).ok_or("vec-ctor")?;
-        let stamp = crate::typechecking::value_layout::array_elem_stamp(&self.checker, &elem);
+        let elem = crate::layout::vec_elem_ty(&self.checker, &ty).ok_or("vec-ctor")?;
+        let stamp = crate::layout::array_elem_stamp(&self.checker, &elem);
         let twin = Self::stamped_vec_ctor_name(name.unwrap_or_default(), stamp);
         let key = match twin {
             Some(twin) if self.functions.contains_key(&twin) => twin,
@@ -4837,7 +4837,7 @@ impl Compiler {
         let word = |id: HirId, declared: Option<&Ty>| {
             let ty = Self::hir_ty(hir, id).ok_or("callee-signature")?;
             match lower::classify(&self.checker, ty) {
-                Some(ValueClass::Enum) if !crate::hir::layout::ty_is_closed(&apply_ty_prune(self.checker.subst(), ty)) => {
+                Some(ValueClass::Enum) if !crate::layout::ty_is_closed(&apply_ty_prune(self.checker.subst(), ty)) => {
                     Ok(self.value_layout(ty))
                 }
                 Some(ValueClass::Enum) => match declared {
@@ -4919,7 +4919,7 @@ impl Compiler {
             }
         }
         vars.iter()
-            .map(|v| map.get(v).filter(|t| crate::hir::layout::ty_is_closed(t)).map(Self::show_lookup_ty_for_instance))
+            .map(|v| map.get(v).filter(|t| crate::layout::ty_is_closed(t)).map(Self::show_lookup_ty_for_instance))
             .collect()
     }
 
@@ -5277,7 +5277,7 @@ impl Compiler {
             .map(|(i, &arg)| {
                 let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, arg)?);
                 (unbox.get(i).is_some_and(Option::is_some)
-                    && crate::typechecking::value_layout::word_kind(&self.checker, &ty) != common::WORD_POINTER)
+                    && crate::layout::word_kind(&self.checker, &ty) != common::WORD_POINTER)
                     .then(|| Self::show_lookup_ty_for_instance(&ty))
             })
             .collect();
@@ -5341,10 +5341,10 @@ impl Compiler {
             }
         }
         let ret_ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, call).ok_or("callee-signature")?);
-        if !crate::hir::layout::ty_is_closed(&ret_ty) || lower::classify(&self.checker, &ret_ty).is_none() {
+        if !crate::layout::ty_is_closed(&ret_ty) || lower::classify(&self.checker, &ret_ty).is_none() {
             return Err("callee-signature");
         }
-        let ret = if crate::hir::layout::of(&self.checker, &ret_ty).words() == 1 {
+        let ret = if crate::layout::of(&self.checker, &ret_ty).words() == 1 {
             self.value_layout(&ret_ty)
         } else {
             ValueLayout::Boxed
@@ -5429,7 +5429,7 @@ impl Compiler {
                 if specs.get(i) == Some(&'v') {
                     let ty = apply_ty_prune(self.checker.subst(), ty);
                     // A tuple or record shows field by field.
-                    if !crate::hir::layout::ty_is_closed(&ty)
+                    if !crate::layout::ty_is_closed(&ty)
                         && self.hir_bound_show(hir, arg).is_none()
                         && !self.hir_generic_show(&ty)
                         && !self.synth_shows_items(&ty)
@@ -5440,7 +5440,7 @@ impl Compiler {
                 }
                 let string = matches!(crate::typechecking::ty::strip_readonly(ty), Ty::Con(n) if n == crate::typechecking::ty::STRING);
                 // A scalar enum's word is its backing literal.
-                let scalar = crate::hir::layout::is_scalar_enum_ty(&self.checker, ty);
+                let scalar = crate::layout::is_scalar_enum_ty(&self.checker, ty);
                 if !string && !scalar && lower::primitive(ty).is_none() {
                     return Err("format-argument");
                 }
@@ -5522,7 +5522,7 @@ impl Compiler {
         self_layout: Option<ValueLayout>,
         open: bool,
     ) -> Result<HirCall, &'static str> {
-        let open_ty = |ty: &Ty| open && !crate::hir::layout::ty_is_closed(ty);
+        let open_ty = |ty: &Ty| open && !crate::layout::ty_is_closed(ty);
         let lookup = lookup.to_string();
         if self.checker.is_generic_fn(&lookup) && !open {
             return Err("callee-generic");
@@ -5606,7 +5606,7 @@ impl Compiler {
         }
         let mut param_tys = self.checker.fn_param_tys(&lookup).ok_or("callee-signature")?;
         // A signature with no declared parameters is `() -> T`.
-        if explicit == 0 && param_tys.last().is_some_and(crate::hir::layout::is_unit) {
+        if explicit == 0 && param_tys.last().is_some_and(crate::layout::is_unit) {
             param_tys.pop();
         }
         let mut params = Vec::with_capacity(argc);
@@ -5758,14 +5758,14 @@ impl Compiler {
         let open = |ty: &Ty| (shared || !forwarded.is_empty()) && matches!(ty, Ty::Var(_));
         // A tuple with an open item, in a shared body, is one boxed object
         // whose dictionary the call builds (#1479).
-        let open_tuple = |ty: &Ty| shared && matches!(ty, Ty::Tuple(_)) && !crate::hir::layout::ty_is_closed(ty);
+        let open_tuple = |ty: &Ty| shared && matches!(ty, Ty::Tuple(_)) && !crate::layout::ty_is_closed(ty);
         // So is an instance of a generic class, a `Vec`, an array or a
         // record built from the body's type parameters (`Box<E>`, #1542):
         // one heap word, whose dictionary a generic instance serves.
         let open_object = |ty: &Ty| shared && self.hir_open_heap_word(ty);
         let ground = |id: HirId| {
             let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
-            (crate::hir::layout::ty_is_closed(&ty)
+            (crate::layout::ty_is_closed(&ty)
                 || ground_fun(&ty)
                 || open(&ty)
                 || open_tuple(&ty)
@@ -5847,7 +5847,7 @@ impl Compiler {
         let nested = |v: &crate::typechecking::ty::TyVarId| {
             params.iter().chain(ret_parts.iter().copied()).any(|t| !matches!(t, Ty::Var(_)) && crate::typechecking::ty::ftv_ty(t).contains(v))
         };
-        if vars.iter().any(|(v, ty)| !crate::hir::layout::ty_is_closed(ty) && self.hir_open_enum_word(ty) && nested(v)) {
+        if vars.iter().any(|(v, ty)| !crate::layout::ty_is_closed(ty) && self.hir_open_enum_word(ty) && nested(v)) {
             return Err("callee-generic");
         }
         // In a clone, `self` is typed by its class alone (`HashMap`): its
@@ -5981,10 +5981,10 @@ impl Compiler {
             if unbox && !(ty == crate::mir::MirTy::HeapRef || ty.is_numeric() || ty == crate::mir::MirTy::Bool) {
                 return Err("callee-generic");
             }
-            let kind = if crate::hir::layout::is_unit(&g) {
+            let kind = if crate::layout::is_unit(&g) {
                 common::WORD_POINTER
             } else {
-                crate::typechecking::value_layout::word_kind(&self.checker, &g)
+                crate::layout::word_kind(&self.checker, &g)
             };
             Ok((HirRetItem { ty, unbox }, kind))
         };
@@ -6048,10 +6048,10 @@ impl Compiler {
     /// The MIR word of an item of ground type `ty` inside a tuple or enum
     /// object: a `()` is the empty tuple object, a scalar enum its tag.
     fn hir_ret_item_word(&self, ty: &Ty) -> Result<crate::mir::MirTy, &'static str> {
-        if crate::hir::layout::is_unit(ty) {
+        if crate::layout::is_unit(ty) {
             return Ok(crate::mir::MirTy::HeapRef);
         }
-        if crate::hir::layout::is_scalar_enum_ty(&self.checker, ty) {
+        if crate::layout::is_scalar_enum_ty(&self.checker, ty) {
             return Ok(crate::mir::MirTy::I64);
         }
         self.hir_adapt_word_ty(ty)
@@ -6138,7 +6138,7 @@ impl Compiler {
         let param = self.checker.fn_param_tys(&req.src)?.into_iter().next()?;
         let vars = self.mono_var_tys.last()?;
         let ty = Self::apply_ty_var_map(&apply_ty_prune(self.checker.subst(), &param), vars);
-        crate::hir::layout::ty_is_closed(&ty).then_some(ty)
+        crate::layout::ty_is_closed(&ty).then_some(ty)
     }
 
     /// For a callee parameter `A1 -> .. -> R` given the ground function
@@ -6199,7 +6199,7 @@ impl Compiler {
         }
         // `unit -> R`: a closure of no parameters.
         if let [(s, g)] = parts.as_slice()
-            && crate::hir::layout::is_unit(g)
+            && crate::layout::is_unit(g)
             && !quantified(s)
         {
             parts.clear();
@@ -6283,7 +6283,7 @@ impl Compiler {
         if as_is(ground) {
             return Ok(HirAdaptConv::Same);
         }
-        if crate::hir::layout::is_unit(ground) || crate::hir::layout::is_scalar_enum_ty(&self.checker, ground) {
+        if crate::layout::is_unit(ground) || crate::layout::is_scalar_enum_ty(&self.checker, ground) {
             return Err("callee-generic");
         }
         // A two-word value crosses a closure call as its object.
@@ -6299,8 +6299,8 @@ impl Compiler {
 
     /// A value of two words where it is held (a range, a pair enum).
     fn hir_adapt_two_words(&self, ty: &Ty) -> bool {
-        crate::typechecking::return_layout::two_word_kind(&self.checker, ty).is_some()
-            || crate::typechecking::return_layout::two_word_range_kind(ty).is_some()
+        crate::layout::two_word_kind(&self.checker, ty).is_some()
+            || crate::layout::two_word_range_kind(ty).is_some()
     }
 
     /// The MIR word type of a value of ground type `ty` crossing a closure
@@ -6311,10 +6311,10 @@ impl Compiler {
         if let Some(word) = crate::mir::scalar_mir_ty(ty) {
             return Ok(word);
         }
-        if matches!(crate::typechecking::ty::strip_readonly(ty), Ty::Var(_)) || crate::hir::layout::is_unit(ty) {
+        if matches!(crate::typechecking::ty::strip_readonly(ty), Ty::Var(_)) || crate::layout::is_unit(ty) {
             return Ok(MirTy::I64);
         }
-        if crate::hir::layout::is_scalar_enum_ty(&self.checker, ty) {
+        if crate::layout::is_scalar_enum_ty(&self.checker, ty) {
             return Err("callee-generic");
         }
         // A two-word value crosses a closure call as its object.
@@ -6600,7 +6600,7 @@ impl Compiler {
     /// items each have the thunk's dictionary.
     fn synth_shows_items(&self, ty: &Ty) -> bool {
         matches!(ty, Ty::Tuple(items) if !self.synth_show_dicts.is_empty()
-            && items.iter().all(|t| crate::hir::layout::ty_is_closed(t) || matches!(t, Ty::Var(v) if self.synth_show_dicts.contains_key(v))))
+            && items.iter().all(|t| crate::layout::ty_is_closed(t) || matches!(t, Ty::Var(v) if self.synth_show_dicts.contains_key(v))))
     }
 
     /// An open type whose `Show` is a bounded generic instance
@@ -6632,7 +6632,7 @@ impl Compiler {
     /// `let r = Ok(9);` keeps it, so it boxes and unboxes as a type
     /// parameter like a ground boxed enum (#1517).
     fn hir_open_enum_word(&self, ty: &Ty) -> bool {
-        !crate::hir::layout::ty_is_closed(ty)
+        !crate::layout::ty_is_closed(ty)
             && matches!(crate::typechecking::ty::strip_readonly(ty), Ty::App(..) | Ty::Sum { .. } | Ty::Constructor { .. })
             && lower::classify(&self.checker, ty) == Some(ValueClass::Enum)
             && self.hir_boxed_enum_word(ty)
@@ -6644,7 +6644,7 @@ impl Compiler {
     /// parameter by its tag alone (#1542).
     fn hir_open_heap_word(&self, ty: &Ty) -> bool {
         let ty = crate::typechecking::ty::strip_readonly(ty);
-        if crate::hir::layout::ty_is_closed(ty) {
+        if crate::layout::ty_is_closed(ty) {
             return false;
         }
         match ty {
@@ -6734,7 +6734,7 @@ impl Compiler {
             return None;
         }
         let ty = hir.local(local).ty.as_ref()?;
-        let kind = crate::typechecking::return_layout::two_word_kind(&self.checker, ty)?;
+        let kind = crate::layout::two_word_kind(&self.checker, ty)?;
         (self.hir_pair_enum(&kind) && self.hir_builds_pair(hir, emit, init, &kind)).then_some(kind)
     }
 
@@ -6997,8 +6997,8 @@ impl Compiler {
                 Self::hir_ty(hir, id)
                     .filter(|ty| {
                         self.hir_enum_name(ty).is_some()
-                            && !crate::hir::layout::is_scalar_enum_ty(&self.checker, ty)
-                            && crate::hir::layout::of(&self.checker, ty).words() == 1
+                            && !crate::layout::is_scalar_enum_ty(&self.checker, ty)
+                            && crate::layout::of(&self.checker, ty).words() == 1
                     })
                     .map_or(BOXED, |ty| Rep::Word(self.value_layout(ty))),
             ),
@@ -7526,7 +7526,7 @@ impl Compiler {
         }
         let (variant, idx) = self.checker.field_index_for_tagged(&enum_name, name, tag)?;
         let (_, fty) = self.checker.payload_tys_for(&enum_name, &variant).get(idx as usize)?.clone();
-        (crate::hir::layout::ty_is_closed(&fty) && self.value_layout(&fty) == ValueLayout::Boxed)
+        (crate::layout::ty_is_closed(&fty) && self.value_layout(&fty) == ValueLayout::Boxed)
             .then_some((FieldAt::Slot(u32::from(idx)), fty))
     }
 
@@ -7855,7 +7855,7 @@ impl Compiler {
         let fits = (1..=32).contains(&fields.len())
             && codegen.len() == fields.len()
             && codegen.iter().zip(&fields).all(|((a, _), (b, _))| a == b)
-            && fields.iter().all(|(_, t)| !Self::ty_has_var(t) && !crate::hir::layout::is_unit(t));
+            && fields.iter().all(|(_, t)| !Self::ty_has_var(t) && !crate::layout::is_unit(t));
         fits.then_some(fields)
     }
 
@@ -8021,7 +8021,7 @@ impl Compiler {
                         || self.hir_polyfn_nested(hir, emit, *f)
                         || closure.as_ref().is_some_and(Result::is_err)
                         || closure.is_none()
-                            && ty.as_ref().is_none_or(|t| !crate::hir::layout::ty_is_closed(t) && !self.hir_open_enum_word(t))
+                            && ty.as_ref().is_none_or(|t| !crate::layout::ty_is_closed(t) && !self.hir_open_enum_word(t))
                     {
                         return Err("callee-value");
                     }
@@ -9331,7 +9331,7 @@ impl Compiler {
         }
         let unit = Some(Ty::Con(crate::typechecking::ty::UNIT.into()));
         let node = |w: &mut HirBody, kind: HirKind, ty: Option<Ty>| {
-            w.exprs.push(HirExpr { kind, ty, layout: crate::hir::layout::Layout::Word, span: (0, 0), node: None, flags: HirFlags::default() });
+            w.exprs.push(HirExpr { kind, ty, layout: crate::layout::Layout::Word, span: (0, 0), node: None, flags: HirFlags::default() });
             HirId(w.exprs.len() as u32 - 1)
         };
         let mut stmts = Vec::new();
@@ -9370,14 +9370,14 @@ impl Compiler {
         }
         for (e, live) in w.exprs.iter_mut().zip(live) {
             if !live {
-                *e = HirExpr { kind: HirKind::Lit(Lit::Unit), ty: None, layout: crate::hir::layout::Layout::Word, span: e.span, node: None, flags: HirFlags::default() };
+                *e = HirExpr { kind: HirKind::Lit(Lit::Unit), ty: None, layout: crate::layout::Layout::Word, span: e.span, node: None, flags: HirFlags::default() };
             }
         }
         w.name = format!("{}$par", hir.name);
         w.kind = crate::hir::BodyKind::Function;
         w.params = params;
         w.ret = Some(int);
-        w.ret_layout = crate::hir::layout::Layout::Word;
+        w.ret_layout = crate::layout::Layout::Word;
         w.result_mode = false;
         w.is_coro = false;
         w.captures.clear();
@@ -9510,7 +9510,7 @@ fn hir_bisect(name: &str) -> bool {
 fn ground_fun(ty: &Ty) -> bool {
     match crate::typechecking::ty::strip_readonly(ty) {
         Ty::Fun(param, ret) => {
-            let ground = |t: &Ty| crate::hir::layout::ty_is_closed(t) || ground_fun(t);
+            let ground = |t: &Ty| crate::layout::ty_is_closed(t) || ground_fun(t);
             ground(param) && ground(ret)
         }
         _ => false,
@@ -9564,8 +9564,8 @@ fn close_params(ty: &Ty, args: &[Ty]) -> Option<Ty> {
 
 /// A two-word `Option`, `Result` or user enum: a payload word and a tag,
 /// so a frame slot holding it keeps at most a `Result`'s error alive.
-fn immediate_pair(layout: &crate::hir::layout::Layout) -> bool {
-    use crate::hir::layout::{Layout, PairKind};
+fn immediate_pair(layout: &crate::layout::Layout) -> bool {
+    use crate::layout::{Layout, PairKind};
     matches!(layout, Layout::Pair(PairKind::Option | PairKind::Result | PairKind::Enum(_)))
 }
 

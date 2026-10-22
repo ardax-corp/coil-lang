@@ -155,7 +155,7 @@ they are not emitted. `BinSlotSlotConstJmpt` still has a live handler.
 | `mir/emit.rs` | dense emit | maps, untyped host, I4 print, unboxed Field (I3 is LIR) |
 | `mir/emit.rs` `emit_br_cond` | `DenseCmp` on branches | stack reconstruct for `*Jmpf` |
 | `mir/vectorize.rs` | `V*` | GC/deopt; Call/Host/match; not a single counted latch+Return |
-| `mir/abi.rs` `MAX_MODELED_RET_WORDS = 2` | N>2 CALL/RETURN | C1b leftover |
+| `layout/abi.rs` `MAX_MODELED_RET_WORDS = 2` | N>2 CALL/RETURN | C1b leftover |
 
 `lir_eligible` is the leftover MIR→LIR reconstruct wall, **not** a fusion
 entry tax. New packed opcodes must not be added to `hard_refuse` /
