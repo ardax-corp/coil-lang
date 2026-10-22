@@ -531,8 +531,8 @@ while compiling, on the same host (`MacroHost::eval_consts`):
 
 ## Compile-time calls
 
-At `-O2` and above (`OptimizeOptions::call_fold`; `COIL_CALL_FOLD=0` or
-`Pipeline::set_call_fold(false)` turns it off) a pure call with constant
+At `-O2` and above (`OptimizeOptions::call_fold`; `--fold-calls off`,
+`COIL_CALL_FOLD=0` or `Pipeline::set_call_fold(false)` turns it off) a pure call with constant
 arguments is computed while compiling, in the same `eval_consts` run as
 the consts (so the call can read them):
 

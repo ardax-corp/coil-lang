@@ -541,6 +541,9 @@ fn main() {
             if let Some(level) = cli.contracts {
                 pipeline.set_contracts(level);
             }
+            if let Some(on) = cli.fold_calls {
+                pipeline.set_call_fold(on);
+            }
             if cli.opt_stats || cli.opt_stats_json {
                 pipeline.set_collect_opt_stats(true);
             }

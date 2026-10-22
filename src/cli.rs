@@ -81,6 +81,8 @@ pub(crate) struct CliArgs {
     /// `-g` / `--strip-debug`; `None` is the command's default.
     pub debug_level: Option<DebugLevel>,
     pub contracts: Option<compiler::ContractLevel>,
+    /// `--fold-calls on|off`; `None` keeps the pipeline default.
+    pub fold_calls: Option<bool>,
     pub opt_stats: bool,
     pub opt_stats_json: bool,
     pub host_grants: HostGrants,
@@ -338,6 +340,7 @@ pub(crate) fn parse_args(args: &[String]) -> Result<CliArgs, String> {
             opt_level: OptLevel::Standard,
             debug_level: None,
             contracts: None,
+            fold_calls: None,
             opt_stats: false,
             opt_stats_json: false,
             host_grants: HostGrants::deny_all(),
@@ -396,6 +399,7 @@ fn cli_from(
         opt_level: opt.opt_level.unwrap_or(OptLevel::Standard),
         debug_level: None,
         contracts: opt.contracts,
+        fold_calls: opt.fold_calls,
         opt_stats: profile.opt_stats,
         opt_stats_json: profile.opt_stats_json,
         host_grants: grants.into_grants(),

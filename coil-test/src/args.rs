@@ -361,6 +361,7 @@ fn assemble(parts: RunParts) -> Result<(ReportConfig, Box<TestOptions>), String>
             opt_level: parts.opt.level(),
             debug_level: parts.debug,
             contracts: parts.opt.contracts,
+            fold_calls: parts.opt.fold_calls,
             contract_runs: parts.contract_runs,
             grants: parts.grants.into_grants(),
             extra_roots: parts.roots.root,
