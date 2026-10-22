@@ -36,6 +36,10 @@ pub struct OptLevelFlags {
     /// in `coil test`, requires at -O2 and above)
     #[arg(long, value_name = "LEVEL", value_parser = ContractLevel::parse)]
     pub contracts: Option<ContractLevel>,
+    /// Compute pure calls with constant arguments at compile time: on
+    /// (default, at -O2 and above) or off. Overrides `COIL_CALL_FOLD`
+    #[arg(long, value_name = "on|off", value_parser = parse_fold_calls, action = clap::ArgAction::Set)]
+    pub fold_calls: Option<bool>,
 }
 
 impl OptLevelFlags {
@@ -53,6 +57,14 @@ fn parse_opt_level(s: &str) -> Result<OptLevel, String> {
         "invalid --opt-level (expected none|basic|standard|aggressive|size|debug or 0|1|2|3|s|g)"
             .into()
     })
+}
+
+fn parse_fold_calls(s: &str) -> Result<bool, String> {
+    match s {
+        "on" => Ok(true),
+        "off" => Ok(false),
+        _ => Err(format!("invalid --fold-calls `{s}` (expected on|off)")),
+    }
 }
 
 /// `-g0` / `-g1` / `-g2` for commands that compile Coil source

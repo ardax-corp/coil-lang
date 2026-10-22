@@ -30,6 +30,8 @@ cargo run -- examples/fib.hy    # prints 2178309
 
 ## Documentation
 
+Live docs site: https://coil-website-jet.vercel.app
+
 User-facing docs live in [coil-website](https://github.com/ardax-corp/coil-website) (`src/content/docs/`) until a public domain is set. Site routes are `/docs/<path>` (for example `/docs/manual/getting-started`).
 
 | Audience | Start here |

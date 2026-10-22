@@ -34,7 +34,8 @@ pub struct OptimizeOptions {
     pub collect_stats: bool,
     /// Compute pure calls with constant arguments at compile time
     /// (`Pipeline::compute_consts`, comptime step 4). On at Standard and
-    /// above (and Size); `COIL_CALL_FOLD=0` turns it off.
+    /// above (and Size); `--fold-calls off` / `COIL_CALL_FOLD=0` turn it off
+    /// (`Pipeline::set_call_fold`).
     pub call_fold: bool,
     /// Every function must lower through direct MIR: a body left on its
     /// raw stack IL (the fuse tier) is an internal error. The compiler sets

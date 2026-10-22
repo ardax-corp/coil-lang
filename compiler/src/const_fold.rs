@@ -165,7 +165,8 @@ fn eval_int_bit<'a>(
     Some(ConstValue::Int(op(a, b)))
 }
 
-/// Fold `<<` / `>>` only when the shift is in `0..32` (VM `i32` shift).
+/// Fold `<<` / `>>` with the VM's 64-bit semantics (`int_arith::shl` /
+/// `shr`); a count outside `0..=63` traps there, so it is left unfolded.
 fn eval_int_shift<'a>(
     lhs: &Output<'a>,
     rhs: &Output<'a>,
@@ -178,17 +179,12 @@ fn eval_int_shift<'a>(
     let ConstValue::Int(b) = eval_expr(rhs, env)? else {
         return None;
     };
-    if !(0..32).contains(&b) {
-        return None;
-    }
-    let a32 = a as i32;
-    let n = b as u32;
     let r = if left {
-        a32.wrapping_shl(n)
+        int_arith::shl(a, b)
     } else {
-        a32.wrapping_shr(n)
+        int_arith::shr(a, b)
     };
-    Some(ConstValue::Int(r as i64))
+    r.ok().map(ConstValue::Int)
 }
 
 fn eval_cmp<'a>(

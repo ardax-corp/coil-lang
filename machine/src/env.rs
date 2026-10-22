@@ -2,6 +2,7 @@
 
 use std::cell::Cell;
 use std::process::Command;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use common::{BUILTIN_ENV_ERROR_VARIANTS, BUILTIN_RESULT_VARIANTS, Value};
@@ -114,11 +115,26 @@ fn parse_name(heap: &Heap, v: Value) -> Result<String, EnvErrorTag> {
     Ok(name)
 }
 
-/// Command-line arguments (`std::env::args`, including argv0).
+/// The program's argv when the host process is not the program itself
+/// (`coil file.hy -- a b`, `coil run x.hyc -- a b`). Unset in a packaged
+/// app, whose own argv is the program's.
+static PROGRAM_ARGS: OnceLock<Vec<String>> = OnceLock::new();
+
+/// Make `env::args()` return `argv` (program name first) instead of the host
+/// process's argv. Set once, before the program runs; later calls are ignored.
+pub fn set_program_args(argv: Vec<String>) {
+    let _ = PROGRAM_ARGS.set(argv);
+}
+
+/// Command-line arguments, including argv0: those given to
+/// [`set_program_args`], else `std::env::args`.
 ///
 /// Always `Result::Ok` with the argv vector (matches `Result<Vec<string>, EnvError>`).
 pub fn host_args(heap: &mut Heap, _args: &[Value]) -> Value {
-    let strings: Vec<String> = std::env::args().collect();
+    let strings: Vec<String> = match PROGRAM_ARGS.get() {
+        Some(argv) => argv.clone(),
+        None => std::env::args().collect(),
+    };
     let arr = alloc_string_array(heap, &strings);
     as_result_value(heap, Ok(arr))
 }

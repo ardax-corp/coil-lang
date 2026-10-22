@@ -81,11 +81,16 @@ pub(crate) struct CliArgs {
     /// `-g` / `--strip-debug`; `None` is the command's default.
     pub debug_level: Option<DebugLevel>,
     pub contracts: Option<compiler::ContractLevel>,
+    /// `--fold-calls on|off`; `None` keeps the pipeline default.
+    pub fold_calls: Option<bool>,
     pub opt_stats: bool,
     pub opt_stats_json: bool,
     pub host_grants: HostGrants,
     /// Extra `--root` directories (default `src` is always included).
     pub module_roots: Vec<PathBuf>,
+    /// Arguments after `--` for `coil FILE` / `coil run ARCHIVE`: the
+    /// program's `env::args()` after its name.
+    pub program_args: Vec<String>,
 }
 
 #[derive(Parser, Debug)]
@@ -95,6 +100,8 @@ pub(crate) struct CliArgs {
     about = "Coil compiler and runtime",
     disable_help_subcommand = true,
     after_help = "Pass the entry as a positional `.hy` or `--entry FILE`.\n\
+Program arguments follow `--`: `coil FILE -- a b` and `coil run X.hyc -- a b` run\n\
+with `env::args()` == [FILE, a, b]; coil's own flags are never visible to the program.\n\
 Default diagnostics: pretty reports on stderr.\n\
 `--root DIR` is repeatable extra `use`/`mod` search (default is `src` under cwd).\n\
 Host grants (`--allow-attach`, `--allow-exec`, `--allow-exit`, `--allow-ffi-exec`,\n\
@@ -328,7 +335,25 @@ fn is_reserved(name: &str) -> bool {
 }
 
 /// Parse argv (including argv0). `-V` / `--version` win over every other token.
+///
+/// For `coil FILE` and `coil run ARCHIVE`, everything after the first `--` is
+/// the program's own arguments ([`CliArgs::program_args`]), never parsed as
+/// coil flags. Other commands see the whole argv as before (`coil test -- …`).
 pub(crate) fn parse_args(args: &[String]) -> Result<CliArgs, String> {
+    if let Some(dashes) = args.iter().position(|a| a == "--")
+        && let Ok(mut cli) = parse_coil_args(&args[..dashes])
+        && matches!(
+            cli.command,
+            Command::BuildAndRun { .. } | Command::Run { .. }
+        )
+    {
+        cli.program_args = args[dashes + 1..].to_vec();
+        return Ok(cli);
+    }
+    parse_coil_args(args)
+}
+
+fn parse_coil_args(args: &[String]) -> Result<CliArgs, String> {
     if args.iter().skip(1).any(|a| a == "-V" || a == "--version") {
         return Ok(CliArgs {
             command: Command::Version,
@@ -338,10 +363,12 @@ pub(crate) fn parse_args(args: &[String]) -> Result<CliArgs, String> {
             opt_level: OptLevel::Standard,
             debug_level: None,
             contracts: None,
+            fold_calls: None,
             opt_stats: false,
             opt_stats_json: false,
             host_grants: HostGrants::deny_all(),
             module_roots: Vec::new(),
+            program_args: Vec::new(),
         });
     }
 
@@ -396,10 +423,12 @@ fn cli_from(
         opt_level: opt.opt_level.unwrap_or(OptLevel::Standard),
         debug_level: None,
         contracts: opt.contracts,
+        fold_calls: opt.fold_calls,
         opt_stats: profile.opt_stats,
         opt_stats_json: profile.opt_stats_json,
         host_grants: grants.into_grants(),
         module_roots: roots,
+        program_args: Vec::new(),
     }
 }
 
@@ -1132,6 +1161,37 @@ mod tests {
             vec![PathBuf::from("examples/src"), PathBuf::from("vendor")]
         );
         assert!(parse_args(&args(&["--entry", "a.hy", "b.hy"])).is_err());
+    }
+
+    #[test]
+    fn parse_program_args_after_double_dash() {
+        let cli = parse_args(&args(&["--root", "lib", "a.hy", "--", "x", "--root", "-V"])).unwrap();
+        assert_eq!(
+            cli.command,
+            Command::BuildAndRun {
+                filename: "a.hy".into()
+            }
+        );
+        assert_eq!(cli.module_roots, vec![PathBuf::from("lib")]);
+        assert_eq!(cli.program_args, ["x", "--root", "-V"]);
+
+        let cli = parse_args(&args(&["run", "out.hyc", "--", "a", "b"])).unwrap();
+        assert_eq!(
+            cli.command,
+            Command::Run {
+                archive: "out.hyc".into()
+            }
+        );
+        assert_eq!(cli.program_args, ["a", "b"]);
+
+        let cli = parse_args(&args(&["a.hy", "--"])).unwrap();
+        assert!(cli.program_args.is_empty());
+        let cli = parse_args(&args(&["a.hy"])).unwrap();
+        assert!(cli.program_args.is_empty());
+        // Other commands keep their own `--` handling.
+        let cli = parse_args(&args(&["test", "--", "x"])).unwrap();
+        assert_eq!(cli.command, Command::Test);
+        assert!(cli.program_args.is_empty());
     }
 
     #[test]
