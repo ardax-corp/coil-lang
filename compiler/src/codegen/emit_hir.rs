@@ -1594,14 +1594,12 @@ impl Compiler {
         // ground type with a niche layout of its own it converts there.
         let open_niche = |fty: &Ty, at: &Ty| {
             let at_layout = crate::layout::value_layout(checker, at);
-            // A bare parameter (`item: T`) holds a niche value as its
-            // boxed enum object too.
-            let bare = matches!(crate::typechecking::ty::strip_readonly(fty), Ty::Var(_));
+            // A bare parameter (`item: T`) holds rep(ground T): a niche
+            // value as its niche word.
             (Self::ty_has_var(fty)
-                && (bare
-                    || (field_word(fty) == Some(crate::mir::MirTy::HeapRef)
-                        && crate::layout::value_layout(checker, fty) == ValueLayout::Boxed
-                        && crate::layout::of_resolved(checker, &apply_ty_prune(checker.subst(), fty)) == crate::layout::Layout::Word))
+                && field_word(fty) == Some(crate::mir::MirTy::HeapRef)
+                && crate::layout::value_layout(checker, fty) == ValueLayout::Boxed
+                && crate::layout::of_resolved(checker, &apply_ty_prune(checker.subst(), fty)) == crate::layout::Layout::Word
                 && at_layout != ValueLayout::Boxed)
                 .then_some(at_layout)
         };
@@ -3803,6 +3801,9 @@ impl Compiler {
             };
             abi.generic = Some(Box::new(self.hir_generic_abi(hir, call, &lookup, args, 0)?));
         }
+        if shared || generic {
+            self.hir_bare_niche_abi(hir, call, &lookup, 0, &mut abi);
+        }
         // `C::f(..)` at ground type arguments: the static method's clone.
         if (shared || generic)
             && !forwards
@@ -4558,6 +4559,9 @@ impl Compiler {
         let mut abi = self.hir_call_abi(key, &lookup, args.len(), Some(self_layout), shared || generic)?;
         if generic {
             abi.generic = Some(Box::new(self.hir_generic_abi(hir, call, &lookup, args, 1)?));
+        }
+        if shared || generic {
+            self.hir_bare_niche_abi(hir, call, &lookup, 1, &mut abi);
         }
         // At ground type arguments, the method's clone there.
         if (shared || generic)
@@ -5701,6 +5705,39 @@ impl Compiler {
         })
     }
 
+    /// A shared body's bare type parameter holds rep(ground T): a niche
+    /// `Option` / `Result` argument or result of `call` declared bare
+    /// (`V x`, `-> V`) passes as its niche word (boxed to its tag where
+    /// the body boxes it), not as an enum object.
+    fn hir_bare_niche_abi(&self, hir: &HirBody, call: HirId, lookup: &str, receivers: usize, abi: &mut HirCall) {
+        let HirKind::Call { args, .. } = &hir.expr(call).kind else {
+            return;
+        };
+        let niche = |id: HirId| {
+            let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
+            (crate::layout::ty_is_closed(&ty) && self.hir_niche_word(&ty)).then(|| self.value_layout(&ty))
+        };
+        let explicit = args.len().saturating_sub(receivers);
+        if let Some(tys) = self.checker.fn_param_tys(lookup) {
+            let declared = if tys.len() == args.len() && receivers > 0 { &tys[receivers..] } else { &tys[..explicit.min(tys.len())] };
+            for (k, ty) in declared.iter().enumerate() {
+                let i = receivers + k;
+                if matches!(crate::typechecking::ty::strip_readonly(ty), Ty::Var(_))
+                    && let Some(layout) = niche(args[i])
+                    && abi.params.get(i) == Some(&ValueLayout::Boxed)
+                {
+                    abi.params[i] = layout;
+                }
+            }
+        }
+        if self.checker.fn_return_ty(lookup).is_some_and(|ty| matches!(crate::typechecking::ty::strip_readonly(&ty), Ty::Var(_)))
+            && let Some(layout) = niche(call)
+            && abi.ret == ValueLayout::Boxed
+        {
+            abi.ret = layout;
+        }
+    }
+
     /// The bounded-generic ABI of `call` (`args[..receivers]` are not boxed):
     /// bare type-parameter arguments boxed, one ground dictionary per
     /// constraint, a bare type-parameter result unboxed.
@@ -5804,12 +5841,6 @@ impl Compiler {
         let ret_ty = ground(call)
             .or_else(|| (!ret_boxed).then(|| loose(call)).flatten())
             .ok_or("callee-generic")?;
-        // A type parameter the signature names only bare (`T x`, `-> T`, a
-        // returned closure's `T`), never inside another type (`Option<T>`,
-        // `[T]`).
-        let only_bare = |v: &crate::typechecking::ty::TyVarId| {
-            !params.iter().chain(ret_parts.iter().copied()).any(|t| !matches!(t, Ty::Var(_)) && crate::typechecking::ty::ftv_ty(t).contains(v))
-        };
         let mut boxed = vec![None; receivers];
         for (i, ty) in arg_tys[receivers..].iter().enumerate() {
             let bare = params
@@ -5819,17 +5850,11 @@ impl Compiler {
                 boxed.push(None);
                 continue;
             }
-            // Immediates, plain objects and heap enums box to a tagged
-            // word (`BoxValue Instance` for an enum); a pair enum word does
-            // not. A niche word boxes as its enum object, the open type's
-            // layout its bound's dictionary (#1565) or a closure's adapter
-            // (#1532) reads, where the parameter is only bare: inside
-            // another type the shared body would hold it in a slot the
-            // caller reads at its niche layout.
-            if lower::classify(&self.checker, ty) == Some(ValueClass::Enum)
-                && !self.hir_boxed_enum_word(ty)
-                && !(self.hir_niche_word(ty) && params.get(skip + i).is_some_and(|p| matches!(p, Ty::Var(v) if only_bare(v))))
-            {
+            // Immediates, plain objects, heap enums and niche words box to
+            // a tagged word (`BoxValue Instance` for an enum, the niche word
+            // itself: a shared body holds rep(ground T)); a pair enum word
+            // does not.
+            if lower::classify(&self.checker, ty) == Some(ValueClass::Enum) && !self.hir_boxed_enum_word(ty) && !self.hir_niche_word(ty) {
                 return Err("callee-generic");
             }
             boxed.push(Some(ty.clone()));
@@ -5885,12 +5910,11 @@ impl Compiler {
             }
         }
         let unbox = (ret_boxed && !open(&ret_ty)).then(|| ret_ty.clone());
-        // A niche result comes back as its boxed enum object, which the
-        // call unboxes to its niche word (#1565).
+        // A niche result comes back as its niche word boxed.
         if unbox.is_some()
             && lower::classify(&self.checker, &ret_ty) == Some(ValueClass::Enum)
             && !self.hir_boxed_enum_word(&ret_ty)
-            && !(self.hir_niche_word(&ret_ty) && matches!(cur, Ty::Var(v) if only_bare(v)))
+            && !self.hir_niche_word(&ret_ty)
         {
             return Err("callee-generic");
         }
@@ -7050,31 +7074,10 @@ impl Compiler {
         };
         let own = self.value_layout(Self::hir_ty(hir, id)?);
         let stored = self.value_layout(&fty);
-        (Self::ty_has_var(&fty) && stored != own).then_some(Rep::Word(stored))
-    }
-
-    /// Whether declared field type `fty` holds a type parameter as a `Vec`
-    /// or array element (through tuples and nested containers) where the
-    /// read's ground type `at` has a niche `Option` / `Result` (#1896).
-    fn hir_open_niche_elems(&self, fty: &Ty, at: &Ty) -> bool {
-        use crate::typechecking::ty::{strip_readonly, vec_element_ty};
-        let (fty, at) = (strip_readonly(fty), strip_readonly(at));
-        let elems = match (fty, at) {
-            (Ty::Array { element: f, .. }, Ty::Array { element: a, .. }) => Some((f.as_ref(), a.as_ref())),
-            _ => vec_element_ty(fty).zip(vec_element_ty(at)),
-        };
-        if let Some((f, a)) = elems {
-            return match strip_readonly(f) {
-                Ty::Var(_) => self.hir_niche_word(a),
-                _ => self.hir_open_niche_elems(f, a),
-            };
-        }
-        match (fty, at) {
-            (Ty::Tuple(fs), Ty::Tuple(ats)) if fs.len() == ats.len() => {
-                fs.iter().zip(ats).any(|(f, a)| self.hir_open_niche_elems(f, a))
-            }
-            _ => false,
-        }
+        // A bare parameter field holds a niche value as its niche word.
+        let bare_niche = matches!(crate::typechecking::ty::strip_readonly(&fty), Ty::Var(_))
+            && matches!(own, ValueLayout::NicheOption | ValueLayout::NicheResult | ValueLayout::NicheUnitResult);
+        (Self::ty_has_var(&fty) && stored != own && !bare_niche).then_some(Rep::Word(stored))
     }
 
     /// `typeof e`'s text: `e`'s ground type, as `compile_expr`'s `TypeOf`.
@@ -7776,13 +7779,15 @@ impl Compiler {
             return None;
         }
         let at = apply_ty_prune(self.checker.subst(), at);
-        (!Self::ty_has_var(&at) && self.value_layout(&at) == ValueLayout::Boxed).then_some(at)
+        let bare = matches!(crate::typechecking::ty::strip_readonly(fty), Ty::Var(_));
+        (!Self::ty_has_var(&at) && (self.value_layout(&at) == ValueLayout::Boxed || (bare && self.hir_niche_word(&at)))).then_some(at)
     }
 
     /// Declared field type `fty` of a generic class (its parameters opened
     /// by [`Self::hir_class_fields`]) at the class's type arguments in
     /// `ty`, when that is ground and its value is stored as it is (a boxed
-    /// layout: a niche `Option` in a `T` slot is a boxed enum object).
+    /// layout, or a bare `T` slot, which holds rep(ground T): a niche word;
+    /// a niche `Option<T>` slot holds the open type's boxed enum object).
     fn hir_class_ty_args_at(&self, ty: &Ty, fty: &Ty) -> Option<Ty> {
         if !Self::ty_has_var(fty) {
             return None;
@@ -7792,7 +7797,8 @@ impl Compiler {
             return None;
         };
         let at = close_params(fty, args)?;
-        (!Self::ty_has_var(&at) && self.value_layout(&at) == ValueLayout::Boxed).then_some(at)
+        let bare = matches!(crate::typechecking::ty::strip_readonly(fty), Ty::Var(_));
+        (!Self::ty_has_var(&at) && (self.value_layout(&at) == ValueLayout::Boxed || (bare && self.hir_niche_word(&at)))).then_some(at)
     }
 
     /// Field type `fty`, a bare class parameter, at made type `ty` when a
@@ -8091,20 +8097,14 @@ impl Compiler {
                 // layout (an `Option<T>` boxed); read at a ground receiver
                 // it converts to the ground one ([`Self::hir_field_rep`]).
                 let stored = self.hir_field_rep(hir, id);
+                // A bare `T` slot holds the ground word itself.
+                let bare = matches!(crate::typechecking::ty::strip_readonly(&fty), Ty::Var(_))
+                    && Self::hir_ty(hir, id).is_some_and(|ty| self.hir_niche_word(ty));
                 if layout != Some(self.value_layout(&fty))
+                    && !bare
                     && !stored.as_ref().zip(layout).is_some_and(|(s, l)| Self::hir_convertible(s, &Rep::Word(l)))
                 {
                     return Err("field-layout");
-                }
-                // A generic class's `Vec<V>` / `[V]` slot holds a niche
-                // element as the shared body boxed it; read here at its
-                // ground type the elements would be taken as niche words
-                // (#1896). Refused until open `V` holds the ground word.
-                if !self.compiling_mono_clone
-                    && let Some(ty) = Self::hir_ty(hir, id)
-                    && self.hir_open_niche_elems(&fty, &apply_ty_prune(self.checker.subst(), ty))
-                {
-                    return Err("open-niche-element");
                 }
                 let base_rep = Self::hir_index_base_rep(self.hir_natural(hir, emit, *base).ok_or("value-shape")?);
                 self.hir_check_value(hir, emit, *base, &base_rep)?;

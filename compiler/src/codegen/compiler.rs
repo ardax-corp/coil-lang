@@ -2219,7 +2219,7 @@ impl Compiler {
         // Its result, boxed back from the layout the method returns it in.
         let ret_from = sig.as_ref().and_then(|s| s.ret).filter(|&l| l != ValueLayout::Boxed);
         // A bare type parameter's niche `Option` / `Result` result goes
-        // back as its enum object, boxed, as the argument comes (#1595).
+        // back as its niche word, boxed, as the argument comes (#1595).
         let ret_box = (raw && ret_from.is_none() && matches!(open_ret, Ty::Var(_)))
             .then(|| Self::ty_to_value_tag(&ret))
             .flatten()
@@ -2244,18 +2244,6 @@ impl Compiler {
                 let local = b.local(&format!("arg{slot}"), open.clone(), LocalKind::Param);
                 let word = b.read(local);
                 b.builtin(Builtin::Relayout, vec![word], own)
-            } else if let Some((tag, ty)) = &tag
-                && *tag == ValueTag::Instance as u32
-                && matches!(self.value_layout(ty), ValueLayout::NicheOption | ValueLayout::NicheResult | ValueLayout::NicheUnitResult)
-            {
-                // A niche `Option` / `Result` comes as its enum object,
-                // boxed: unboxed, read as a plain word, to its niche word
-                // (#1580), as `emit_builtin_enum_show`'s adapter.
-                let int = crate::typechecking::ty::int();
-                let local = b.local(&format!("arg{slot}"), int.clone(), LocalKind::Param);
-                let word = b.read(local);
-                let obj = b.builtin(Builtin::Unbox { tag: *tag }, vec![word], int);
-                b.builtin(Builtin::Relayout, vec![obj], ty.clone())
             } else if let Some((tag, ty)) = tag {
                 // A `()` moves as the word it is.
                 let ty = if tag == ValueTag::Unit as u32 { crate::typechecking::ty::int() } else { ty };
@@ -2287,9 +2275,7 @@ impl Compiler {
         if ret_from.is_some() {
             value = b.builtin(Builtin::Relayout, vec![value], body_ret);
         } else if let Some(tag) = ret_box {
-            let int = crate::typechecking::ty::int();
-            let obj = b.builtin(Builtin::Relayout, vec![value], int.clone());
-            value = b.builtin(Builtin::Box { tag: tag as u32 }, vec![obj], int);
+            value = b.builtin(Builtin::Box { tag: tag as u32 }, vec![value], crate::typechecking::ty::int());
         }
         let ret = b.ret(value);
         let root = b.block(vec![ret], None, crate::typechecking::ty::never());
@@ -7916,8 +7902,7 @@ impl Compiler {
     /// The `Show` thunk `name` of a ground `Option` / `Result` `ty`
     /// (#1479): `Some(x)` / `None` / `Ok(x)` / `Err(e)`, the payload as
     /// `format("%v", x)` shows it. The `$dict` adapter (`adapter`) takes the
-    /// enum as a dictionary passes it, boxed: unboxed, then moved to the
-    /// type's own layout when that is a niche.
+    /// enum as a dictionary passes it, its own word boxed.
     fn emit_builtin_enum_show(&mut self, name: &str, ty: &Ty, adapter: bool) {
         use crate::hir::synth::Synth;
         use crate::hir::{Builtin, HirPat, HirPatFields, LocalKind};
@@ -7929,22 +7914,12 @@ impl Compiler {
                 None => return,
             },
         };
-        let niche = self.value_layout(ty) != ValueLayout::Boxed;
         let mut b = Synth::new(&self.checker, name, string.clone());
         let value = if adapter {
             let tag = ValueTag::Instance as u32;
-            if niche {
-                // The enum object, read as a plain word, to its niche word.
-                let int = crate::typechecking::ty::int();
-                let arg = b.local("arg0", int.clone(), LocalKind::Param);
-                let word = b.read(arg);
-                let obj = b.builtin(Builtin::Unbox { tag }, vec![word], int);
-                b.builtin(Builtin::Relayout, vec![obj], ty.clone())
-            } else {
-                let arg = b.local("arg0", ty.clone(), LocalKind::Param);
-                let word = b.read(arg);
-                b.builtin(Builtin::Unbox { tag }, vec![word], ty.clone())
-            }
+            let arg = b.local("arg0", ty.clone(), LocalKind::Param);
+            let word = b.read(arg);
+            b.builtin(Builtin::Unbox { tag }, vec![word], ty.clone())
         } else {
             let arg = b.local("arg0", ty.clone(), LocalKind::Param);
             b.read(arg)
