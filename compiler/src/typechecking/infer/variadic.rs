@@ -57,6 +57,13 @@ pub struct VariadicExports {
     methods: HashSet<String>,
 }
 
+impl VariadicExports {
+    /// Whether `fqn` (`module::template`) is a `... xs` function.
+    pub fn is_template(&self, fqn: &str) -> bool {
+        self.templates.contains_key(fqn)
+    }
+}
+
 /// The tuple-rest parameter of a function's argument list, if it has one.
 pub fn has_tuple_rest(args: &Output) -> bool {
     matches!(args.1.as_ref(), Expression::Fragment(children)

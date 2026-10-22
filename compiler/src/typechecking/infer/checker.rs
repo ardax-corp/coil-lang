@@ -109,6 +109,7 @@ impl Checker {
             scope_bindings: HashMap::new(),
             disk_imports: HashSet::new(),
             unresolved_imports: HashMap::new(),
+            module_item_names: HashMap::new(),
             import_locals: HashMap::new(),
             def_interner,
             schemes_by_def: HashMap::new(),
@@ -1747,6 +1748,9 @@ impl Checker {
         );
         self.module_locals
             .insert(self.current_module_id, self.local_defs.clone());
+        // Union: a module is checked again for variadic copies (#1386).
+        let names = self.module_item_names.entry(self.current_module.clone()).or_default();
+        crate::typechecking::resolve::item_names(ast, names);
         self.bare_cases_by_module
             .insert(self.current_module_id, Default::default());
 
@@ -3981,6 +3985,23 @@ impl Checker {
         } else {
             format!("{module_ns}::{name}")
         };
+        // A checked module that declares no `name`, and no one-item file
+        // `module_ns/name.hy` (#1851).
+        if let Some(names) = self.module_item_names.get(&module_ns)
+            && !names.contains(name)
+            && !self.module_item_names.contains_key(&fqn)
+            // Macros are expanded away before the provider is checked, and
+            // `... xs` templates are left out of its checked body.
+            && !self.macro_imports.contains(&local)
+            && !self.variadic_exports.is_template(&fqn)
+        {
+            return self.error_with_help(
+                ErrorCode::UnknownValue,
+                format!("module `{module_ns}` has no item `{name}`"),
+                range,
+                Some(format!("`{module_ns}` declares nothing named `{name}`; check the spelling")),
+            );
+        }
         self.drop_prelude_fn(&local);
         // Prefer the defining module's real scheme (incl. generics with
         // bounds) over a dummy Var so call sites get dict-passing ABI.
