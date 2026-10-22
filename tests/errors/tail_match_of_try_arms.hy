@@ -1,4 +1,4 @@
-// @output ok\nnone\nmain ok
+// @output ok\nnone\nmain ok\n
 // A trailing `match` whose arms end in `x?` is the body's last statement,
 // not its value: the `int` the arms give is dropped and the function falls
 // off into `Ok(())` (#1844). In `main` and in any unit function that uses `?`.
