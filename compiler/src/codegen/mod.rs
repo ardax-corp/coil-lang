@@ -11,7 +11,7 @@ use reporting::Label as DiagLabel;
 
 use crate::block_builder::{BlockBuilder, JumpKind as BbJumpKind, Label as BbLabel};
 use crate::const_fold::ConstValue;
-use crate::hir::layout::PairKind;
+use crate::layout::PairKind;
 use crate::il::{CodeBuf, EmitBuf, IlOp, Label as IlLabel};
 use crate::monomorphize::{MonoKey, MonoPlan};
 use crate::typechecking::{Checker, Ty};
@@ -251,9 +251,9 @@ pub const PROLOGUE_HALT_OFFSET: usize = 2;
 /// see [`Compiler::trait_method_boundary_sig`].
 pub(super) struct BoundarySig {
     /// Per parameter: the layout the target reads, when it can differ.
-    pub(super) params: Vec<Option<crate::typechecking::value_layout::ValueLayout>>,
+    pub(super) params: Vec<Option<crate::layout::ValueLayout>>,
     /// The layout the target returns, when it can differ.
-    pub(super) ret: Option<crate::typechecking::value_layout::ValueLayout>,
+    pub(super) ret: Option<crate::layout::ValueLayout>,
 }
 
 pub struct Compiler {
@@ -619,7 +619,7 @@ pub struct Compiler {
     /// functions it calls that have no checker signature (test cases, the
     /// worker itself), with their parameter and result layouts.
     /// `None` for any other body.
-    hir_synth_calls: Option<HashMap<String, (Vec<crate::typechecking::value_layout::ValueLayout>, crate::typechecking::value_layout::ValueLayout)>>,
+    hir_synth_calls: Option<HashMap<String, (Vec<crate::layout::ValueLayout>, crate::layout::ValueLayout)>>,
     /// While a compiler-made body lowers: how it calls a callee past its
     /// arguments, by name.
     hir_synth_callees: HashMap<String, compiler::SynthCallee>,

@@ -1,5 +1,5 @@
 use super::*;
-use crate::typechecking::value_layout::ValueLayout;
+use crate::layout::ValueLayout;
 use crate::typechecking::{CStructDef, ForInInfo, ForInKind};
 use reporting::{ErrorCode, Message};
 
@@ -1000,25 +1000,13 @@ impl Compiler {
     /// slots, `[payload, tag]` / `[start, end]`, when every call reaches the function directly: not a fn value, method,
     /// overload, generic or coroutine, which keep the one-word boxed ABI.
     fn callee_has_unboxed_range_params(&self, name: &str) -> bool {
-        let Some(params) = self.callee_param_tys_for_pairs(name) else {
-            return false;
-        };
-        params
-            .iter()
-            .any(|ty| self.param_pair_kind(name, ty).is_some())
+        self.callee_param_pairs_all(name).iter().any(Option::is_some)
     }
 
-    fn callee_param_tys_for_pairs(&self, name: &str) -> Option<Vec<Ty>> {
+    /// What decides `name`'s parameters' calling convention
+    /// ([`crate::layout::convention_param`]), and its parameter types.
+    fn callee_param_facts(&self, name: &str) -> Option<(crate::layout::CalleeFacts, Vec<Ty>)> {
         let lookup = strip_overload_key(name);
-        if self.is_fn_value_escaped(lookup) || self.is_fn_value_escaped(name) {
-            return None;
-        }
-        if self.checker.inherent_method_visibility(lookup).is_some()
-            || is_instance_method_fqn(&self.checker, lookup)
-            || is_instance_method_fqn(&self.checker, name)
-        {
-            return None;
-        }
         let params = self
             .checker
             .fn_param_tys(name)
@@ -1027,41 +1015,36 @@ impl Compiler {
         // function value keeps the one-word ABI.
         let under_applied =
             (0..params.len()).any(|argc| self.is_fn_value_escaped(&format!("{lookup}#{argc}")));
-        (!under_applied).then_some(params)
+        let facts = crate::layout::CalleeFacts {
+            escaped: self.is_fn_value_escaped(lookup) || self.is_fn_value_escaped(name) || under_applied,
+            inherent_method: self.checker.inherent_method_visibility(lookup).is_some(),
+            instance_method: is_instance_method_fqn(&self.checker, lookup) || is_instance_method_fqn(&self.checker, name),
+            overloaded_or_generic: self.checker.is_overloaded(lookup) || self.checker.is_generic_fn(lookup),
+            coroutine: self.coroutine_fns.contains(name) || self.coroutine_fns.contains(lookup),
+            host_native: false,
+        };
+        Some((facts, params))
     }
 
-    /// The two-word kind a parameter of type `ty` of `callee` takes, if any
-    /// (see [`Self::callee_has_unboxed_range_params`]).
-    pub(super) fn param_pair_kind(&self, callee: &str, ty: &Ty) -> Option<PairKind> {
-        if let Some(kind) = crate::typechecking::return_layout::two_word_range_kind(ty) {
-            return Some(kind);
-        }
-        let lookup = strip_overload_key(callee);
-        if self.checker.is_overloaded(lookup)
-            || self.checker.is_generic_fn(lookup)
-            || self.coroutine_fns.contains(callee)
-            || self.coroutine_fns.contains(lookup)
-        {
-            return None;
-        }
-        // A boxed tuple splits into `[a, b]` through a temp slot, which is
-        // unsafe above live operands, so products (and readonly classes
-        // laid out as them) stay one boxed word.
-        crate::typechecking::return_layout::two_word_kind(&self.checker, ty)
-            .filter(|kind| self.hir_pair_kind(kind) && !matches!(kind, PairKind::Product | PairKind::Class(_)))
+    /// Per parameter of `name`, its two-slot form ([`crate::layout::convention_param`]).
+    fn callee_param_pairs_all(&self, name: &str) -> Vec<Option<PairKind>> {
+        let Some((facts, params)) = self.callee_param_facts(name) else {
+            return Vec::new();
+        };
+        params
+            .iter()
+            .map(|ty| crate::layout::convention_param(&self.checker, &facts, ty, |kind| self.hir_pair_kind(kind)))
+            .collect()
     }
 
     /// Per parameter of `callee`, the two-word kind it takes (empty when it
     /// takes none).
     pub(super) fn callee_param_pairs(&self, callee: &str) -> Vec<Option<PairKind>> {
-        if !self.callee_has_unboxed_range_params(callee) {
+        let pairs = self.callee_param_pairs_all(callee);
+        if pairs.iter().all(Option::is_none) {
             return Vec::new();
         }
-        self.callee_param_tys_for_pairs(callee)
-            .unwrap_or_default()
-            .iter()
-            .map(|ty| self.param_pair_kind(callee, ty))
-            .collect()
+        pairs
     }
 
     /// The function being compiled's key that answers
@@ -1092,7 +1075,7 @@ impl Compiler {
             return kind.clone();
         }
         if let Some(ty) = self.sidecar_ty_of(arg)
-            && let Some(kind) = crate::typechecking::return_layout::two_word_range_kind(&ty) {
+            && let Some(kind) = crate::layout::two_word_range_kind(&ty) {
                 return Some(kind);
             }
         let Expression::Argument { ty: Some(ty), .. } = arg.1.as_ref() else {
@@ -2219,7 +2202,7 @@ impl Compiler {
         // Its result, boxed back from the layout the method returns it in.
         let ret_from = sig.as_ref().and_then(|s| s.ret).filter(|&l| l != ValueLayout::Boxed);
         // A bare type parameter's niche `Option` / `Result` result goes
-        // back as its enum object, boxed, as the argument comes (#1595).
+        // back as its niche word, boxed, as the argument comes (#1595).
         let ret_box = (raw && ret_from.is_none() && matches!(open_ret, Ty::Var(_)))
             .then(|| Self::ty_to_value_tag(&ret))
             .flatten()
@@ -2244,18 +2227,6 @@ impl Compiler {
                 let local = b.local(&format!("arg{slot}"), open.clone(), LocalKind::Param);
                 let word = b.read(local);
                 b.builtin(Builtin::Relayout, vec![word], own)
-            } else if let Some((tag, ty)) = &tag
-                && *tag == ValueTag::Instance as u32
-                && matches!(self.value_layout(ty), ValueLayout::NicheOption | ValueLayout::NicheResult | ValueLayout::NicheUnitResult)
-            {
-                // A niche `Option` / `Result` comes as its enum object,
-                // boxed: unboxed, read as a plain word, to its niche word
-                // (#1580), as `emit_builtin_enum_show`'s adapter.
-                let int = crate::typechecking::ty::int();
-                let local = b.local(&format!("arg{slot}"), int.clone(), LocalKind::Param);
-                let word = b.read(local);
-                let obj = b.builtin(Builtin::Unbox { tag: *tag }, vec![word], int);
-                b.builtin(Builtin::Relayout, vec![obj], ty.clone())
             } else if let Some((tag, ty)) = tag {
                 // A `()` moves as the word it is.
                 let ty = if tag == ValueTag::Unit as u32 { crate::typechecking::ty::int() } else { ty };
@@ -2287,9 +2258,7 @@ impl Compiler {
         if ret_from.is_some() {
             value = b.builtin(Builtin::Relayout, vec![value], body_ret);
         } else if let Some(tag) = ret_box {
-            let int = crate::typechecking::ty::int();
-            let obj = b.builtin(Builtin::Relayout, vec![value], int.clone());
-            value = b.builtin(Builtin::Box { tag: tag as u32 }, vec![obj], int);
+            value = b.builtin(Builtin::Box { tag: tag as u32 }, vec![value], crate::typechecking::ty::int());
         }
         let ret = b.ret(value);
         let root = b.block(vec![ret], None, crate::typechecking::ty::never());
@@ -4895,7 +4864,7 @@ impl Compiler {
     }
 
     /// `Some(kind)` for a compiled function whose direct CALL/RETURN can
-    /// use the known ≤2-word ABI (see `typechecking::return_layout`).
+    /// use the known ≤2-word ABI (see `layout::two_word_kind`).
     /// Enums are `[payload, tag]`; arity-2 immediate products are `[a, b]`;
     /// numeric `Range` / `RangeInclusive` are `[start, end]`.
     /// Niched heap `Option<T>` / heap-heap `Result<T, E>`, unbounded `T`,
@@ -4921,30 +4890,24 @@ impl Compiler {
     }
 
     fn compute_two_word_return_kind(&self, name: &str) -> Option<PairKind> {
-        if self.coroutine_fns.contains(name) {
-            return None;
-        }
-        // Escaping CallIndirect/MakeFn/PolyFn/FFI/spawn keep one-word boxed ABI; prefer package-wide seed.
-        if self.is_fn_value_escaped(name) {
-            return None;
-        }
-        // Trait instance methods are dictionary entries (`CodePtr`), so they
-        // keep the one-word ABI unless a definition site pinned a pair
-        // (`pin_trait_method_pair_return`: Iterator / IntoIterator).
-        if is_instance_method_fqn(&self.checker, name) {
-            return None;
-        }
         let lookup = strip_overload_key(name);
-        // Host natives never use two-slot CALL/RETURN (one packed HostInvoke word).
-        if self.ident_is_host_native(name) || self.ident_is_host_native(lookup) {
-            return None;
-        }
+        // Escaping CallIndirect/MakeFn/PolyFn/FFI/spawn keep one-word boxed
+        // ABI; trait instance methods are dictionary entries (`CodePtr`)
+        // unless a definition site pinned a pair
+        // (`pin_trait_method_pair_return`: Iterator / IntoIterator).
+        let facts = crate::layout::CalleeFacts {
+            coroutine: self.coroutine_fns.contains(name),
+            escaped: self.is_fn_value_escaped(name),
+            instance_method: is_instance_method_fqn(&self.checker, name),
+            host_native: self.ident_is_host_native(name) || self.ident_is_host_native(lookup),
+            ..crate::layout::CalleeFacts::default()
+        };
         // `fn_return_ty` is not by-name lookup; must not feed this classifier (steals caller return ty).
         let ty = self
             .checker
             .fn_return_ty(name)
             .or_else(|| self.checker.fn_return_ty(lookup))?;
-        crate::typechecking::return_layout::two_word_kind(&self.checker, &ty)
+        crate::layout::convention_ret(&self.checker, &facts, &ty)
     }
 
     /// Trait methods live under `Class__Type__method` FQNs that `env` lookup
@@ -4971,7 +4934,7 @@ impl Compiler {
         let Some(ty) = ty else {
             return;
         };
-        let kind = crate::typechecking::return_layout::two_word_kind(&self.checker, &ty);
+        let kind = crate::layout::two_word_kind(&self.checker, &ty);
         self.pin_two_word_return_kind(fqn, kind);
     }
 
@@ -5310,7 +5273,7 @@ impl Compiler {
         entry_sps: &HashMap<String, u32>,
     ) -> HashMap<String, super::precise_frames::FnWordKinds> {
         use crate::typechecking::subst::apply_ty_prune;
-        use crate::typechecking::value_layout::word_kind;
+        use crate::layout::word_kind;
         let mut out = HashMap::new();
         for (name, _) in entries {
             if out.contains_key(name) {
@@ -5362,7 +5325,7 @@ impl Compiler {
                 };
                 // A `()` parameter holds the empty tuple object, a pointer,
                 // as a tuple's `()` item does (#1465).
-                params.push(if crate::hir::layout::is_unit(&apply_ty_prune(self.checker.subst(), param)) {
+                params.push(if crate::layout::is_unit(&apply_ty_prune(self.checker.subst(), param)) {
                     common::WORD_POINTER
                 } else {
                     word_kind(&self.checker, param)
@@ -6326,9 +6289,9 @@ impl Compiler {
 
     /// Layout of a value of type `ty` (the shared [`value_layout`] query).
     ///
-    /// [`value_layout`]: crate::typechecking::value_layout::value_layout
+    /// [`value_layout`]: crate::layout::value_layout
     fn value_layout(&self, ty: &Ty) -> ValueLayout {
-        crate::typechecking::value_layout::value_layout(&self.checker, ty)
+        crate::layout::value_layout(&self.checker, ty)
     }
 
     /// Layout of the function being compiled's return value.
@@ -7916,8 +7879,7 @@ impl Compiler {
     /// The `Show` thunk `name` of a ground `Option` / `Result` `ty`
     /// (#1479): `Some(x)` / `None` / `Ok(x)` / `Err(e)`, the payload as
     /// `format("%v", x)` shows it. The `$dict` adapter (`adapter`) takes the
-    /// enum as a dictionary passes it, boxed: unboxed, then moved to the
-    /// type's own layout when that is a niche.
+    /// enum as a dictionary passes it, its own word boxed.
     fn emit_builtin_enum_show(&mut self, name: &str, ty: &Ty, adapter: bool) {
         use crate::hir::synth::Synth;
         use crate::hir::{Builtin, HirPat, HirPatFields, LocalKind};
@@ -7929,22 +7891,12 @@ impl Compiler {
                 None => return,
             },
         };
-        let niche = self.value_layout(ty) != ValueLayout::Boxed;
         let mut b = Synth::new(&self.checker, name, string.clone());
         let value = if adapter {
             let tag = ValueTag::Instance as u32;
-            if niche {
-                // The enum object, read as a plain word, to its niche word.
-                let int = crate::typechecking::ty::int();
-                let arg = b.local("arg0", int.clone(), LocalKind::Param);
-                let word = b.read(arg);
-                let obj = b.builtin(Builtin::Unbox { tag }, vec![word], int);
-                b.builtin(Builtin::Relayout, vec![obj], ty.clone())
-            } else {
-                let arg = b.local("arg0", ty.clone(), LocalKind::Param);
-                let word = b.read(arg);
-                b.builtin(Builtin::Unbox { tag }, vec![word], ty.clone())
-            }
+            let arg = b.local("arg0", ty.clone(), LocalKind::Param);
+            let word = b.read(arg);
+            b.builtin(Builtin::Unbox { tag }, vec![word], ty.clone())
         } else {
             let arg = b.local("arg0", ty.clone(), LocalKind::Param);
             b.read(arg)
@@ -7991,7 +7943,7 @@ impl Compiler {
         let mut calls = HashMap::new();
         let mut targets = Vec::with_capacity(items.len());
         for item in &items {
-            if crate::hir::layout::is_unit(item) {
+            if crate::layout::is_unit(item) {
                 targets.push(None);
                 continue;
             }

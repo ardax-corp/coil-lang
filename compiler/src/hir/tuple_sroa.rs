@@ -292,7 +292,7 @@ pub(super) fn set_block(body: &mut HirBody, at: HirId, stmts: Vec<HirId>) {
     let e = &mut body.exprs[at.0 as usize];
     e.kind = HirKind::Block { stmts, tail: None };
     e.ty = Some(ty::unit());
-    e.layout = super::layout::Layout::Word;
+    e.layout = crate::layout::Layout::Word;
     e.node = None;
 }
 
@@ -301,7 +301,7 @@ pub(super) fn push(body: &mut HirBody, kind: HirKind, ty: Option<Ty>, span: supe
     body.exprs.push(HirExpr {
         kind,
         ty,
-        layout: super::layout::Layout::Word,
+        layout: crate::layout::Layout::Word,
         span,
         node: None,
         flags: HirFlags::default(),

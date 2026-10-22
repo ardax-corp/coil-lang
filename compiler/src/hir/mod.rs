@@ -19,7 +19,6 @@ pub mod build;
 pub mod check;
 pub mod effects;
 pub mod enum_sroa;
-pub mod layout;
 pub mod inline;
 pub mod lower;
 pub mod match_tree;
@@ -38,7 +37,7 @@ use crate::typechecking::def_id::DefId;
 use crate::typechecking::id::NodeId;
 use crate::typechecking::infer::ForInKind;
 use crate::typechecking::ty::Ty;
-use layout::Layout;
+use crate::layout::Layout;
 
 pub use build::build_module;
 

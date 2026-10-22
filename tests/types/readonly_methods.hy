@@ -55,7 +55,7 @@ test("stdlib methods that only read") {
     let m: HashMap<string, int> = HashMap::new();
     m.insert("a", 1);
     let r = readonly m;
-    assert!(r.get("a", 0) == 1);
+    assert!(r.get_or("a", 0) == 1);
     assert!(r.contains("a"));
 }
 

@@ -27,10 +27,10 @@ use common::DebugLoc;
 use crate::hir::{lower, BinOp, Builtin, Callee, HirArm, HirBody, HirFlags, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId as HirLocal, MakeKind, UnOp};
 use crate::il::Label;
 use crate::typechecking::infer::{ForInCounted, ForInKind};
-use crate::typechecking::value_layout::ValueLayout;
+use crate::layout::ValueLayout;
 use crate::typechecking::ty::{strip_readonly, vec_element_ty, Ty};
 
-use super::abi::DenseAbi;
+use crate::layout::DenseAbi;
 use super::builder::{MirBuilder, MirError};
 use super::func::MirFunc;
 use super::inst::{BlockId, LocalId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirGcKind, MirInst, Terminator, ValueId};
@@ -519,10 +519,10 @@ pub struct HirMirInput<'a> {
     /// `MakeEnum`), by name: its finalizer type id.
     pub enum_drop: EnumDropFn<'a>,
     /// How a heap word of a type reads for the collector (`common::WORD_*`,
-    /// as `value_layout::word_kind`): tuple and enum construction kinds.
+    /// as `layout::word_kind`): tuple and enum construction kinds.
     pub word_kind: Box<dyn Fn(&Ty) -> u8 + 'a>,
     /// The element kind an array of a type is stamped with at construction
-    /// (`value_layout::array_elem_stamp`): packed bytes, pointer elements.
+    /// (`layout::array_elem_stamp`): packed bytes, pointer elements.
     pub array_stamp: Box<dyn Fn(&Ty) -> u8 + 'a>,
     /// The enum a two-word enum type pairs (not a tuple or range) and its
     /// variants' tags and payload word types (none for no payload), in
@@ -2058,7 +2058,7 @@ impl Lower<'_> {
         }
         // A boxed numeric range: a typed object, start and end its fields;
         // a readonly class pair: an instance, its two fields (#1562).
-        if crate::typechecking::return_layout::two_word_range_kind(ty).is_some() || (self.inp.pair_class)(ty).is_some() {
+        if crate::layout::two_word_range_kind(ty).is_some() || (self.inp.pair_class)(ty).is_some() {
             let lo = self.b.ins_heap_field_load(v, 0, lo_ty).map_err(mir)?;
             let hi = self.b.ins_heap_field_load(v, 1, hi_ty).map_err(mir)?;
             return Ok(Val::Pair(lo, hi));
@@ -2382,7 +2382,7 @@ impl Lower<'_> {
     /// `a..b` over a shared generic body's open `T` (#1230): the typed
     /// range object a boxed `Range<int>` is, its bounds the unboxed words.
     fn make_open_range(&mut self, id: HirId, args: &[HirId]) -> Result<Val, Refusal> {
-        use crate::typechecking::return_layout as rl;
+        use crate::layout as rl;
         let [a, b] = args else {
             return Err("make range".into());
         };
@@ -2412,8 +2412,8 @@ impl Lower<'_> {
             return Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?));
         }
         // A numeric range: its typed object, start and end its fields.
-        if let Some(crate::hir::layout::PairKind::Range { inclusive }) = crate::typechecking::return_layout::two_word_range_kind(ty) {
-            let type_id = crate::typechecking::return_layout::range_heap_type_id(inclusive);
+        if let Some(crate::layout::PairKind::Range { inclusive }) = crate::layout::two_word_range_kind(ty) {
+            let type_id = crate::layout::range_heap_type_id(inclusive);
             let obj = self.b.ins_alloc(MirAllocKind::Object { type_id, nfields: 2 }, Vec::new()).map_err(mir)?;
             let obj = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?;
             self.b.ins_heap_field_store(obj, lo, 0).map_err(mir)?;
@@ -4092,7 +4092,7 @@ impl Lower<'_> {
             let boxed = !pair
                 && self.expr_ty(arg).is_some_and(|t| {
                     // A numeric range's word is its typed object.
-                    crate::typechecking::return_layout::two_word_range_kind(t).is_some()
+                    crate::layout::two_word_range_kind(t).is_some()
                         // A readonly class pair's word is its instance.
                         || (self.inp.pair_class)(t).is_some()
                         || (self.inp.word(t).is_none() && ((self.inp.boxed_view)(t, None).is_some() || is_heap_tuple(t)))
@@ -4518,8 +4518,16 @@ impl Lower<'_> {
 
     /// The word a plain one-word local holds, as a `Local` read.
     fn local_word(&mut self, local: HirLocal) -> Result<ValueId, Refusal> {
-        if self.pair_local(local).is_some() {
-            return Err("capture pair".into());
+        // A two-slot local is one word, its box, wherever a word is
+        // required (a capture).
+        if let Some((lo, hi, lo_ty, hi_ty)) = self.pair_local(local) {
+            let ty = self.hir.local(local).ty.clone().ok_or("capture pair type")?;
+            let lo = self.b.use_local(lo, lo_ty).map_err(mir)?;
+            let hi = self.b.use_local(hi, hi_ty).map_err(mir)?;
+            return match self.box_pair_val(&ty, lo, hi)? {
+                Val::V(v) => Ok(v),
+                _ => Err("capture pair".into()),
+            };
         }
         if let Some(&v) = self.aliases.get(&local.0) {
             return Ok(v);
@@ -4720,14 +4728,7 @@ impl Lower<'_> {
             let Some(v) = v else {
                 return Ok(Val::Never);
             };
-            // A niche enum goes to a bare type parameter as its object.
-            let v = match self.b.value_ty(v) {
-                from @ (MirTy::NicheOpt | MirTy::NicheRes) if tag.is_some() => {
-                    let layout = self.niche_layout(arg, from)?;
-                    self.box_niche(layout, v)?
-                }
-                _ => v,
-            };
+            // A niche enum goes to a bare type parameter as its own word.
             let v = match tag {
                 Some(tag) => {
                     let boxed = self.at_expr(arg, |l| l.b.ins_alloc(MirAllocKind::Boxed { tag }, vec![v]).map_err(mir))?;
@@ -4755,12 +4756,8 @@ impl Lower<'_> {
         let ret = if p.unbox.is_some() { MirTy::HeapRef } else { word };
         let dest = self.at_expr(id, |l| l.b.ins_call_indirect_dicts(callee, words, dicts, ret).map_err(mir))?;
         let dest = match p.unbox {
-            // A niche enum for a bare type parameter comes back boxed as
-            // its object (#1515).
-            Some(tag) if matches!(word, MirTy::NicheOpt | MirTy::NicheRes) => {
-                let obj = self.b.ins_unbox(dest, tag, MirTy::HeapRef).map_err(mir)?;
-                return self.unbox_niche(obj, word);
-            }
+            // A niche enum for a bare type parameter comes back as its own
+            // word boxed.
             Some(tag) => self.b.ins_unbox(dest, tag, word).map_err(mir)?,
             None => dest,
         };
@@ -5255,7 +5252,7 @@ impl Lower<'_> {
     /// box, as `word_or_boxed` stores it.
     fn boxed_pair_item(&self, ty: &Ty) -> bool {
         self.inp.word(ty).is_none()
-            && ((self.inp.boxed_view)(ty, None).is_some() || crate::typechecking::return_layout::two_word_range_kind(ty).is_some())
+            && ((self.inp.boxed_view)(ty, None).is_some() || crate::layout::two_word_range_kind(ty).is_some())
     }
 
     fn heap_array(&self, id: HirId) -> bool {

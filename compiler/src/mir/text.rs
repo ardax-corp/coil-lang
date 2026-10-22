@@ -389,7 +389,7 @@ impl<'a> Parser<'a> {
             func.ret_ty = Some(self.ty()?);
             if self.eat(',') {
                 func.ret_hi_ty = Some(self.ty()?);
-                func.ret_layout = super::layout::MirLayout::TwoSlot;
+                func.ret_layout = crate::layout::MirLayout::TwoSlot;
             }
         }
         self.expect('{')?;

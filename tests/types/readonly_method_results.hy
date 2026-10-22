@@ -69,13 +69,13 @@ test("Ref and HashMap reads through a readonly value") {
     let m: HashMap<string, Point> = HashMap::new();
     m.insert("a", new Point(5, new Inner(6)));
     let rm = readonly m;
-    assert!(rm.get("a", new Point(0, new Inner(0))).x == 5);
+    assert!(rm.get_or("a", new Point(0, new Inner(0))).x == 5);
     let n: readonly HashMap<string, int> = HashMap::new();
-    assert!(n.get("z", 9) + 1 == 10);
+    assert!(n.get_or("z", 9) + 1 == 10);
 }
 
 test("a generic result at a readonly type argument") {
     let m: HashMap<string, readonly Point> = HashMap::new();
     m.insert("a", new Point(8, new Inner(9)));
-    assert!(m.get("a", new Point(0, new Inner(0))).inner.n == 9);
+    assert!(m.get_or("a", new Point(0, new Inner(0))).inner.n == 9);
 }

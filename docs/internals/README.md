@@ -24,6 +24,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [Specialize refuse](specialize-refuse.md) | Historical: hard walls vs Q6–Q9 ladders / cost gate; B1–B9; C1 self two-slot CALL; **S8** fusion not gated on specialize keep |
 | [IL lowering](../../compiler/src/il/opt/README.md) | No IL optimization passes remain (removed 2026-10): where each former pass went, `sp` vs `tell`, fuse-select contract |
 | [Limitations](limitations.md) | Known gaps, workarounds, and tracking |
+| [Value representation](layout.md) | `rep(T)` per static type: niches, the two-slot call convention, shared generic bodies, the representation matrix |
 | [Optimization roadmap](optimization-roadmap.md) | AOT/JIT plan; landed opts (#304–#318); hit-bench prove rule; PGO removed (#301). Extra benches: `gc_churn`, Option/Result churn, `iv_mul_sr` / `licm_nested_chains` / `tail_sibling` / `cse_*` / `dest_prop_field_alias` |
 | [VM dispatch alignment](dispatch-alignment.md) | Why `coil` and `coil-embed` ran the same code at different speeds; `-align-loops=64` (not enabled); PGO + BOLT tried |
 | [Threaded execute dispatch](threaded-dispatch.md) | COI-373–376 G0–G3 A/B record (table / hotmatch removed); G3 hot/cold I-cache split |

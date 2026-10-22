@@ -25,7 +25,7 @@ use super::inst::{
     BlockId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp,
     Terminator, ValueId,
 };
-use super::layout::MirLayout;
+use crate::layout::MirLayout;
 use super::error::LowerError;
 use super::ty::MirTy;
 
@@ -1674,7 +1674,7 @@ fn emit_lir_call(args: EmitLirCallArgs<'_>) -> Result<(), LowerError> {
         arity: args.len() as u32,
         target,
         loc,
-        ret_words: super::abi::ret_words_from_hi(dest_hi),
+        ret_words: crate::layout::ret_words_from_hi(dest_hi),
     });
     if let Some(hi) = dest_hi {
         out.push(IlOp::StorePop {
@@ -2423,12 +2423,12 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
                 arity: call_args.len() as u32,
                 target: *target,
                 loc,
-                ret_words: super::abi::ret_words_from_hi(*dest_hi),
+                ret_words: crate::layout::ret_words_from_hi(*dest_hi),
             });
         }
         Terminator::Return { lo, hi } => {
-            let ret_words = super::abi::ret_words_from_hi(*hi);
-            if super::abi::is_multi_word_ret(ret_words) && func.ret_layout != MirLayout::TwoSlot {
+            let ret_words = crate::layout::ret_words_from_hi(*hi);
+            if crate::layout::is_multi_word_ret(ret_words) && func.ret_layout != MirLayout::TwoSlot {
                 return Err(LowerError::Refused("pair return without twoslot".into()));
             }
             if let Some(v) = lo {

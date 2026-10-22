@@ -155,6 +155,12 @@ jobs:
           find tests -path '*/compile_fail/*.hy' -print0 \
             | { xargs -0 grep -LZE '^// @expected .*E0(001|208)\b' || true; } \
             | xargs -0 ./target/debug/coil-fmt --check
+          ./target/debug/coil-fmt --check scripts/rep_matrix_known_wrong
+
+      # `tests/representation/` is generated; a hand edit or a generator
+      # change without regenerating fails here.
+      - name: Representation matrix up to date
+        run: python3 scripts/gen_rep_matrix.py --check
 
       # Fail fast on pull requests: a failed job cancels the rest of the run,
       # so a quick fix doesn't wait behind jobs that are already moot.

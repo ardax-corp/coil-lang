@@ -51,7 +51,7 @@ pub fn stage(body: &HirBody, target: HirId) -> Option<HirBody> {
             init: Some(init),
         },
         ty: Some(ty::unit()),
-        layout: super::layout::Layout::Word,
+        layout: crate::layout::Layout::Word,
         span,
         node: None,
         flags: HirFlags::default(),
@@ -361,7 +361,7 @@ fn push_let(b: &mut HirBody, local: LocalId, init: HirId, span: super::Span) -> 
         HirExpr {
             kind: HirKind::Let { local, init: Some(init) },
             ty: Some(ty::unit()),
-            layout: super::layout::Layout::Word,
+            layout: crate::layout::Layout::Word,
             span,
             node: None,
             flags: HirFlags::default(),
