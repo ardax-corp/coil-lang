@@ -86,6 +86,7 @@ pub enum ErrorCode {
     /// An `if` whose value is used (`let x = if c { 1 } else { 2 };`) has
     /// no `else`: there is no value on the false path.
     IfWithoutElse,
+    ComptimeFoldBudget,
 
     DuplicateEnum,
     DuplicateConstructor,
@@ -198,6 +199,7 @@ impl ErrorCode {
             Self::ComptimeResultChanged => "E0135",
             Self::UnusedResult => "E0136",
             Self::IfWithoutElse => "E0137",
+            Self::ComptimeFoldBudget => "E0138",
             Self::DuplicateEnum => "E0200",
             Self::DuplicateConstructor => "E0201",
             Self::UnknownEnum => "E0202",
@@ -292,6 +294,7 @@ impl ErrorCode {
             Self::ComptimeResultChanged => "compile-time result changed on refresh",
             Self::UnusedResult => "unused `Result` value",
             Self::IfWithoutElse => "`if` used as a value has no `else`",
+            Self::ComptimeFoldBudget => "call too long to compute while compiling without `comptime`",
             Self::DuplicateEnum => "duplicate enum",
             Self::DuplicateConstructor => "duplicate constructor",
             Self::UnknownEnum => "unknown enum",
@@ -394,6 +397,7 @@ mod tests {
             | ComptimeResultChanged
             | UnusedResult
             | IfWithoutElse
+            | ComptimeFoldBudget
             | DuplicateEnum
             | DuplicateConstructor
             | UnknownEnum
@@ -478,6 +482,7 @@ mod tests {
             ComptimeResultChanged,
             UnusedResult,
             IfWithoutElse,
+            ComptimeFoldBudget,
             DuplicateEnum,
             DuplicateConstructor,
             UnknownEnum,

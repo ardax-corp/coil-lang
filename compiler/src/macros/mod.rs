@@ -465,6 +465,10 @@ pub struct ConstEvalOutcome {
     pub snapshot: common::HeapSnapshot,
     pub skipped: Vec<usize>,
     pub folded: Vec<Option<FoldValue>>,
+    /// The folds that ran out of the silent tier's steps, with the
+    /// microseconds each ran before it stopped: `comptime` would compute
+    /// them (coil-lang#1918).
+    pub over_budget: Vec<(usize, u64)>,
     pub records: Vec<ConstRecord>,
 }
 
