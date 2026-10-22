@@ -3969,6 +3969,21 @@
         assert_eq!(vm.pop().as_int(), 99);
     }
 
+    /// A box unboxed at another tag is a representation bug: debug and
+    /// gc-stress builds panic instead of reading a null word.
+    #[cfg(any(debug_assertions, feature = "gc-stress"))]
+    #[test]
+    fn unbox_tag_mismatch_panics_in_debug() {
+        let (panicked, out) = run_capturing_panic(&[
+            const_int(99),
+            Byte::new(Instruction::BoxValue).with_operand_u32(0),
+            Byte::new(Instruction::UnboxValue).with_operand_u32(5),
+            Byte::new(Instruction::HALT),
+        ]);
+        assert!(panicked, "tag mismatch: {out:?}");
+        assert!(out.contains("UnboxValue: boxed tag 0 where tag 5 is expected"), "{out:?}");
+    }
+
     /// `MakePolyFn` allocates a heap object and pushes a non-null address.
     #[test]
     fn make_polyfn_allocates() {
