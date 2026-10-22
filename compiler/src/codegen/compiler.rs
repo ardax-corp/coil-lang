@@ -8682,7 +8682,7 @@ impl Compiler {
 
     /// Whether [`Self::fold_sites`] are computed at this level.
     pub fn call_fold_on(&self) -> bool {
-        self.opt_options.call_fold && !self.debugger_attached && std::env::var_os("COIL_CALL_FOLD").is_none_or(|v| v != "0")
+        self.opt_options.call_fold && !self.debugger_attached
     }
 
     /// Pure calls with constant arguments in the finalized code, as

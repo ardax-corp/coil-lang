@@ -57,6 +57,8 @@ pub struct TestOptions {
     pub debug_level: Option<compiler::DebugLevel>,
     /// `--contracts`; tests check every clause unless told otherwise.
     pub contracts: Option<compiler::ContractLevel>,
+    /// `--fold-calls on|off`; `None` keeps the pipeline default.
+    pub fold_calls: Option<bool>,
     /// `--contract-runs`: calls per generated contract test (0: none).
     pub contract_runs: u32,
     pub grants: HostGrants,
@@ -795,6 +797,9 @@ fn run_pipeline(config: &ReportConfig, options: &TestOptions, reporter: Box<dyn 
         pipeline.set_debug_level(compiler::DebugLevel::Full);
     }
     pipeline.set_contracts(options.contracts.unwrap_or(compiler::ContractLevel::All));
+    if let Some(on) = options.fold_calls {
+        pipeline.set_call_fold(on);
+    }
     pipeline.set_host_grants(options.grants.clone());
     // Same search path CI passes with `--root`: examples and a sibling
     // coil-stdlib checkout, when those directories exist.

@@ -107,12 +107,14 @@ Same release binary. Process-start switch:
 | unset / `1` / `table` | fn-pointer trampoline (default) |
 | `2` / `hotmatch` | compact hot match |
 
-Always `COIL_AUTO_PAR=0` for sequential flagship `.hyc`. Compile with
+Always `COIL_AUTO_PAR=0` for sequential flagship `.hyc`, and compile with
+`--fold-calls off`: otherwise `mandelbrot`, `tak` and `nsieve` compute their
+result at compile time and `main` is a constant. Compile with
 `--root .deps/coil-stdlib/src` when the userland stdlib is not on the default
 search path.
 
 ```bash
-COIL_AUTO_PAR=0 ./target/release/coil compile --root .deps/coil-stdlib/src \
+COIL_AUTO_PAR=0 ./target/release/coil compile --fold-calls off --root .deps/coil-stdlib/src \
   examples/perf/mandelbrot.hy -o /tmp/m.hyc
 COIL_THREADED_DISPATCH=0 COIL_AUTO_PAR=0 ./target/release/coil run /tmp/m.hyc   # expect 625885
 COIL_THREADED_DISPATCH=1 COIL_AUTO_PAR=0 ./target/release/coil run /tmp/m.hyc

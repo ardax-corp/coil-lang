@@ -56,6 +56,11 @@ module's functions.
 | Explicit (`const`, `comptime`, macros, blocks) | `--comptime-steps` (1B) | `--comptime-mem` (1024 MiB) | `--comptime-timeout` (300 s), checked at IO calls | an error that names the flag |
 | Silent (pure `static let`, call folding) | 1M per call, 20M per module | the same | none | the code is left as written |
 
+`--fold-calls off` (on `coil`, `coil compile`, `coil dissect` and
+`coil test`) turns call folding off; `COIL_CALL_FOLD=0` does the same when
+the flag is not given. Benchmarks of the VM build with it, since a
+benchmark's `main` is often one pure call with constant arguments.
+
 Details: [Compile-time host](macros.md#compile-time-host).
 
 ## IO

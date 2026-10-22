@@ -130,6 +130,16 @@ If an opt is sound but does not fire on flagship `.hyc` (`mandelbrot`, `tak`,
 **prove those**. Do **not** skip merge solely because flagship archives are
 identical; flagships remain controls. Skip only on hit-bench wash or regress.
 
+Build flagship archives with `--fold-calls off`. At `-O2` and above a pure
+call with constant arguments is computed at compile time
+([comptime.md](comptime.md)), so `mandelbrot`, `tak` and `nsieve` otherwise
+compile `main` to a constant and the VM never runs the benchmark:
+
+```bash
+COIL_AUTO_PAR=0 ./target/release/coil compile --fold-calls off \
+  --root .deps/coil-stdlib/src examples/perf/mandelbrot.hy -o /tmp/m.hyc
+```
+
 **MIR language islands** ([mir-islands.md](mir-islands.md)) use a stricter
 rule: prove on real language surface + embed A/B; do **not** invent a
 synthetic hit bench whose only job is a score. Identical flagship archives

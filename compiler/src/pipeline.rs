@@ -144,6 +144,7 @@ pub struct Pipeline {
     /// Collect IL opt counters for `--opt-stats` (COI-131).
     collect_opt_stats: bool,
     /// Off: no call is computed at compile time, whatever the level.
+    /// `COIL_CALL_FOLD=0` starts it off; `--fold-calls` sets it.
     call_fold: bool,
     /// Built on first use. `coil run` never compiles, and `Compiler::default`
     /// (builtin typeclasses + Vec signatures) was ~28% of process startup.
@@ -746,7 +747,7 @@ impl Pipeline {
             debug_level: None,
             debugger_attached: false,
             collect_opt_stats: false,
-            call_fold: true,
+            call_fold: std::env::var_os("COIL_CALL_FOLD").is_none_or(|v| v != "0"),
             compiler: std::cell::OnceCell::new(),
             pending_native_ids: Vec::new(),
             sink,
@@ -2209,7 +2210,8 @@ impl Pipeline {
     /// Select an IL optimization preset. Default is [`crate::OptLevel::Standard`].
     /// Turn computing pure calls with constant arguments at compile time
     /// off (or back on, at `-O2` and above). Tests of what such a call
-    /// compiles to turn it off.
+    /// compiles to turn it off. Starts off under `COIL_CALL_FOLD=0`;
+    /// `--fold-calls on|off` calls this, so the flag wins over the env.
     pub fn set_call_fold(&mut self, on: bool) {
         self.call_fold = on;
     }
