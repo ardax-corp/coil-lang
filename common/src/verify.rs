@@ -4,8 +4,10 @@
 //! hand-edited archive would be undefined behaviour rather than an error.
 //! [`verify_bytecode`] checks every operand the interpreter trusts without a
 //! runtime test: retired opcodes, jump / call targets, constant-pool,
-//! string-table and static-slot indices. Frame-slot operands and stack height
-//! are still compiler invariants (they need per-function frame sizes).
+//! string-table and static-slot indices, and the inner opcode byte fused
+//! ops carry (the VM turns it back into an `Instruction` by transmute).
+//! Frame-slot operands and stack height are still compiler invariants (they
+//! need per-function frame sizes).
 
 use crate::opcode::{Byte, Instruction};
 
@@ -81,6 +83,15 @@ pub fn verify_bytecode(
                 reason: format!("{what} pool index {idx} out of range ({})", constants.len()),
             })
         };
+        // A fused op's inner opcode byte becomes an `Instruction` by an
+        // unchecked transmute in the VM; past the last variant that is UB.
+        let inner = |code: u8, what: &str| {
+            if code > Instruction::RestoreSnapshot as u8 {
+                fail(format!("{what} inner opcode {code} out of range"))
+            } else {
+                Ok(())
+            }
+        };
         if is_retired(op) {
             return fail(format!("retired opcode {}", op as u8));
         }
@@ -128,8 +139,13 @@ pub fn verify_bytecode(
                 let target = pool((operand & 0xFFFF) as usize, "JumpIfMatch")?;
                 jump(target as usize, "JumpIfMatch")?;
             }
+            BinSlotImm => inner(byte.bin_slot_imm_parts().0, "BinSlotImm")?,
+            BinSlotSlot => inner(byte.bin_slot_slot_parts().0, "BinSlotSlot")?,
+            BinSlotSlotStore => inner(byte.bin_slot_slot_store_parts().0, "BinSlotSlotStore")?,
+            BinReturn => inner(byte.bin_return_op(), "BinReturn")?,
             CmpJmpf | CmpJmpt => {
-                let t = byte.cmp_jmpf_parts().1;
+                let (cmp, t) = byte.cmp_jmpf_parts();
+                inner(cmp, "CmpJmp")?;
                 let target = if byte.cmp_jmpf_is_pool() {
                     pool(t, "CmpJmp")? as usize
                 } else {
@@ -147,11 +163,15 @@ pub fn verify_bytecode(
                 jump(target, "LogNotJmp")?;
             }
             BinSlotImmJmpf | BinSlotImmJmpt => {
-                let desc = pool(byte.bin_slot_imm_jmpf_parts().2, "BinSlotImmJmp")?;
+                let (cmp, _, idx) = byte.bin_slot_imm_jmpf_parts();
+                inner(cmp, "BinSlotImmJmp")?;
+                let desc = pool(idx, "BinSlotImmJmp")?;
                 jump((desc >> 32) as usize, "BinSlotImmJmp")?;
             }
             BinSlotSlotJmpf | BinSlotSlotJmpt => {
-                let desc = pool(byte.bin_slot_slot_jmpf_parts().2, "BinSlotSlotJmp")?;
+                let (cmp, _, idx) = byte.bin_slot_slot_jmpf_parts();
+                inner(cmp, "BinSlotSlotJmp")?;
+                let desc = pool(idx, "BinSlotSlotJmp")?;
                 jump((desc >> 32) as usize, "BinSlotSlotJmp")?;
             }
             BinSlotSlotConstJmpt => {
@@ -161,7 +181,9 @@ pub fn verify_bytecode(
                 jump(target, "BinSlotSlotConstJmp")?;
             }
             BinSlotImmStore => {
-                pool(byte.bin_slot_imm_store_parts().2, "BinSlotImmStore")?;
+                let (bin, _, idx) = byte.bin_slot_imm_store_parts();
+                inner(bin, "BinSlotImmStore")?;
+                pool(idx, "BinSlotImmStore")?;
             }
             DenseMakeK => {
                 pool((operand & 0xFFFF) as usize, "DenseMakeK")?;
@@ -239,6 +261,41 @@ mod tests {
         let code = [Byte::new(Instruction::BinSlotSlotJmpf).with_bin_slot_slot_jmpf(0, 0, 0)];
         assert!(verify_bytecode(&code, &[5u64 << 32], limits()).is_err());
         assert!(verify_bytecode(&code, &[1u64 << 32], limits()).is_ok());
+    }
+
+    /// A fused op's inner opcode byte past the last `Instruction` would be
+    /// transmuted into an invalid enum value by the VM.
+    #[test]
+    fn rejects_fused_inner_opcode_out_of_range() {
+        let add = Instruction::ADD as u8;
+        let lt = Instruction::LE as u8;
+        let last = Instruction::RestoreSnapshot as u8;
+        let fused = |op: u8, cmp: u8| {
+            [
+                Byte::new(Instruction::BinSlotImm).with_bin_slot_imm(op, 0, 1),
+                Byte::new(Instruction::BinSlotSlot).with_bin_slot_slot(op, 0, 0),
+                Byte::new(Instruction::BinSlotSlotStore).with_bin_slot_slot_store(op, 0, 0, 0),
+                Byte::new(Instruction::BinSlotImmStore).with_bin_slot_imm_store(op, 0, 0),
+                Byte::new(Instruction::BinReturn).with_bin_return(op),
+                Byte::new(Instruction::CmpJmpf).with_cmp_jmpf(cmp, 0),
+                Byte::new(Instruction::CmpJmpt).with_cmp_jmpf(cmp, 0),
+                Byte::new(Instruction::BinSlotImmJmpf).with_bin_slot_imm_jmpf(cmp, 0, 0),
+                Byte::new(Instruction::BinSlotImmJmpt).with_bin_slot_imm_jmpf(cmp, 0, 0),
+                Byte::new(Instruction::BinSlotSlotJmpf).with_bin_slot_slot_jmpf(cmp, 0, 0),
+                Byte::new(Instruction::BinSlotSlotJmpt).with_bin_slot_slot_jmpf(cmp, 0, 0),
+            ]
+        };
+        // Pool word 0: jump descriptor with target 0, also a valid imm.
+        let pool = [0u64];
+        for good in fused(add, lt).into_iter().chain(fused(last, last)) {
+            let res = verify_bytecode(&[good], &pool, limits());
+            assert_eq!(res, Ok(()), "{:#010x}", good.operand_u32());
+        }
+        for bad in fused(last + 1, last + 1).into_iter().chain(fused(0xFF, 0xFF)) {
+            let err = verify_bytecode(&[bad], &pool, limits()).unwrap_err();
+            assert_eq!(err.pc, 0, "{err}");
+            assert!(err.reason.contains("inner opcode"), "{err}");
+        }
     }
 
     #[test]
