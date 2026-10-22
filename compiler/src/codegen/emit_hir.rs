@@ -201,10 +201,6 @@ enum HirAdaptConv {
     /// A bare type parameter's value: `BoxValue` of this tag on the way
     /// in, `UnboxValue` on the way out.
     Box(u32),
-    /// A bare type parameter's niche `Option` word: its enum object, boxed
-    /// (`Instance`) on the way in; unboxed and back to the niche word on
-    /// the way out.
-    NicheOption,
 }
 
 /// Builtin calls the lowering emits inline, as `compile_call_expr` does.
@@ -6317,11 +6313,8 @@ impl Compiler {
         if self.hir_adapt_two_words(ground) {
             return Self::ty_to_value_tag(ground).map(|tag| HirAdaptConv::Box(tag as u32)).ok_or("callee-generic");
         }
-        match self.value_layout(ground) {
-            ValueLayout::NicheOption => Ok(HirAdaptConv::NicheOption),
-            ValueLayout::Boxed => Self::ty_to_value_tag(ground).map(|tag| HirAdaptConv::Box(tag as u32)).ok_or("callee-generic"),
-            _ => Err("callee-generic"),
-        }
+        // A niche word boxes as itself (rep(ground T)), as any other word.
+        Self::ty_to_value_tag(ground).map(|tag| HirAdaptConv::Box(tag as u32)).ok_or("callee-generic")
     }
 
     /// A value of two words where it is held (a range, a pair enum).
@@ -6410,7 +6403,7 @@ impl Compiler {
     /// object first), the closure called, and its result unboxed (a niche
     /// `Option` back to its niche word).
     fn closure_adapter_mir(name: &str, adapt: &HirClosureAdapt) -> Result<crate::mir::MirFunc, String> {
-        use crate::mir::{MirAllocKind, MirCastKind, MirCmpOp, MirConst, MirGcKind, MirTy};
+        use crate::mir::{MirAllocKind, MirCastKind, MirConst, MirGcKind, MirTy};
         let err = |e: crate::mir::MirError| format!("mir: {e}");
         let mut b = crate::mir::MirBuilder::new(name.to_string());
         b.set_ret_ty(adapt.ret.ty);
@@ -6420,32 +6413,11 @@ impl Compiler {
             let obj = b.ins_alloc(MirAllocKind::Boxed { tag }, vec![v])?;
             b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj])
         };
-        let make_enum = |b: &mut crate::mir::MirBuilder, tag: u32, payload: Vec<_>| {
-            let obj = b.ins_alloc(MirAllocKind::Enum { tag }, payload)?;
-            b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj])
-        };
         let mut args = Vec::with_capacity(params.len());
         for (w, p) in adapt.args.iter().zip(params) {
             args.push(match w.conv {
                 HirAdaptConv::Same => p,
                 HirAdaptConv::Box(tag) => boxed(&mut b, tag, p).map_err(err)?,
-                // `None` is the zero word, `Some(p)` the payload's.
-                HirAdaptConv::NicheOption => {
-                    let zero = b.ins_const(MirConst::I64(0)).map_err(err)?;
-                    let some = b.ins_cmp(MirCmpOp::Ne, p, zero).map_err(err)?;
-                    let (hit, fall, join) = (b.create_block(), b.create_block(), b.create_block());
-                    b.branch(some, hit, fall).map_err(err)?;
-                    b.switch_to_block(fall);
-                    let none = make_enum(&mut b, 0, Vec::new()).map_err(err)?;
-                    b.jump(join).map_err(err)?;
-                    b.switch_to_block(hit);
-                    let payload = b.ins_cast(MirCastKind::Word, MirTy::HeapRef, p).map_err(err)?;
-                    let some = make_enum(&mut b, 1, vec![payload]).map_err(err)?;
-                    b.jump(join).map_err(err)?;
-                    b.switch_to_block(join);
-                    let obj = b.ins_stack_phi(vec![(fall, none), (hit, some)]).map_err(err)?;
-                    boxed(&mut b, ValueTag::Instance as u32, obj).map_err(err)?
-                }
             });
         }
         let any = common::UNBOX_ANY_TAG;
@@ -6492,20 +6464,6 @@ impl Compiler {
                 let r = b.ins_call_indirect(f, args, MirTy::HeapRef).map_err(err)?;
                 let v = b.ins_unbox(r, any, adapt.ret.ty).map_err(err)?;
                 b.ret(Some(v)).map_err(err)?;
-            }
-            HirAdaptConv::NicheOption => {
-                let r = b.ins_call_indirect(f, args, MirTy::HeapRef).map_err(err)?;
-                let obj = b.ins_unbox(r, any, MirTy::HeapRef).map_err(err)?;
-                let (hit, miss) = (b.create_block(), b.create_block());
-                let p = b.ins_match_payload(obj, 0, MirTy::HeapRef).map_err(err)?;
-                b.jump_if_match(obj, 1, vec![p], hit, miss).map_err(err)?;
-                b.switch_to_block(hit);
-                let w = b.ins_cast(MirCastKind::Word, MirTy::NicheOpt, p).map_err(err)?;
-                b.ret(Some(w)).map_err(err)?;
-                b.switch_to_block(miss);
-                let zero = b.ins_const(MirConst::I64(0)).map_err(err)?;
-                let w = b.ins_cast(MirCastKind::Word, MirTy::NicheOpt, zero).map_err(err)?;
-                b.ret(Some(w)).map_err(err)?;
             }
         }
         b.finish().map_err(err)

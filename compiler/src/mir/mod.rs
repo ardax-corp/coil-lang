@@ -57,7 +57,7 @@ pub use func::MirBlock;
 pub use specialize::{capture_pinned_mir, start_mir_capture, take_mir_capture};
 pub use deopt::DraftDeoptMap;
 pub use stackmap::is_alloc_opcode;
-pub use inst::{MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirFfiOp, MirGcKind, MirInst, ValueId};
+pub use inst::{MirAllocKind, MirBinOp, MirCastKind, MirConst, MirFfiOp, MirGcKind, MirInst, ValueId};
 #[cfg(test)]
 pub use inst::{BlockId, LocalId, MirUnaryOp, Terminator};
 pub use instcombine::{instcombine, instcombine_lir};
