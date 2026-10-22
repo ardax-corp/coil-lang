@@ -15,7 +15,12 @@ fn solver_ready() -> bool {
     found
 }
 
+/// `coil-verify --no-proof -v` (every check listed) on a fixture.
 fn run(fixture: &str, extra: &[&str]) -> (i32, String) {
+    run_with(fixture, &[&["-v"], extra].concat())
+}
+
+fn run_with(fixture: &str, extra: &[&str]) -> (i32, String) {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     let out = Command::new(env!("CARGO_BIN_EXE_coil-verify"))
         .current_dir(&dir)
@@ -176,4 +181,20 @@ fn the_proof_file_drops_checks_over_readonly_class_fields() {
     assert!(proof.contains("check width_after_note\t"), "{proof}");
     assert!(!proof.contains("check box_after_note\t"), "{proof}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn lists_only_what_is_not_proved_without_verbose() {
+    if !solver_ready() {
+        return;
+    }
+    let (code, out) = run_with("failed.hy", &[]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("FAILED   wrong_max: ensures result >= a && result >= b  [failed.hy:4:5]"), "{out}");
+    let (_, out) = run("failed.hy", &[]);
+    assert!(out.contains("\nnot proved:\n    FAILED   wrong_max"), "{out}");
+    let (code, out) = run_with("proved.hy", &[]);
+    assert_eq!(code, 0, "{out}");
+    assert!(!out.contains("proved   "), "{out}");
+    assert!(out.contains("8 proved, 0 failed, 0 not proved"), "{out}");
 }

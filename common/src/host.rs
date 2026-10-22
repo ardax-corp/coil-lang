@@ -1212,6 +1212,20 @@ pub const HOST_NATIVES: &[HostNative] = &[
         effects: HOST,
         caps: NO_CAP,
     },
+    HostNative {
+        name: "io_capture_begin",
+        arity: 0,
+        id: 164,
+        effects: HOST,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "io_capture_end",
+        arity: 0,
+        id: 165,
+        effects: HOST,
+        caps: NO_CAP,
+    },
 ];
 
 /// First packed-LA HostInvoke (`packed_dot`).
@@ -1296,6 +1310,13 @@ pub const STRING_COMPARE_NATIVE: &str = "string_compare";
 /// compile time, hoisted or removed.
 pub const BLACK_BOX_ID: u16 = 163;
 pub const BLACK_BOX_NATIVE: &str = "black_box";
+/// `io::capture_begin()` / `io::capture_end()` (archive minor 44): keep
+/// this thread's stdout and stderr writes in memory instead of writing them,
+/// and hand them back as `(stdout, stderr)` strings.
+pub const IO_CAPTURE_BEGIN_ID: u16 = 164;
+pub const IO_CAPTURE_BEGIN_NATIVE: &str = "io_capture_begin";
+pub const IO_CAPTURE_END_ID: u16 = 165;
+pub const IO_CAPTURE_END_NATIVE: &str = "io_capture_end";
 
 pub const STREAM_ATTACH_NATIVE: &str = "stream_attach";
 pub const STREAM_PARK_NATIVE: &str = "stream_park";
@@ -1343,8 +1364,10 @@ pub const GC_COLLECT_NATIVE: &str = "gc_collect";
 pub const GC_REGISTER_FINALIZER_NATIVE: &str = "gc_register_finalizer";
 
 const _: () = {
-    assert!(HOST_NATIVES.len() == 164);
+    assert!(HOST_NATIVES.len() == 166);
     assert!(HOST_NATIVES[BLACK_BOX_ID as usize].id == BLACK_BOX_ID);
+    assert!(HOST_NATIVES[IO_CAPTURE_BEGIN_ID as usize].id == IO_CAPTURE_BEGIN_ID);
+    assert!(HOST_NATIVES[IO_CAPTURE_END_ID as usize].id == IO_CAPTURE_END_ID);
     assert!(HOST_NATIVES[FFI_READ_INTS_ID as usize].id == FFI_READ_INTS_ID);
     assert!(HOST_NATIVES[STRING_COMPARE_ID as usize].id == STRING_COMPARE_ID);
     assert!(HOST_NATIVES[VALUES_EQ_SHAPED_ID as usize].id == VALUES_EQ_SHAPED_ID);

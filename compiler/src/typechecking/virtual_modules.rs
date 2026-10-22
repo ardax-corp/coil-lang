@@ -916,6 +916,10 @@ impl VirtualModules {
         for kind in IoBuiltin::core() {
             io_exports.push(BuiltinExport::IoFn { kind: *kind });
         }
+        io_exports.extend(host_exports(&[
+            ("capture_begin", common::IO_CAPTURE_BEGIN_NATIVE),
+            ("capture_end", common::IO_CAPTURE_END_NATIVE),
+        ]));
         modules.insert(IO_MODULE, io_exports);
 
         let string_exports: Vec<BuiltinExport> = StringBuiltin::all()

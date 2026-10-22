@@ -254,6 +254,11 @@ FAILED   calls_half: call to half: requires x >= 0  [a.hy:15:12]
 unknown  sum_to: invariant s >= 0  [a.hy:9:17] (possible counterexample n = 1)
 ```
 
+Only failed and not-proved checks are listed, then the summary; `-v` /
+`--verbose` lists every check (as above) and repeats the ones not proved
+after the list. On a terminal a progress bar counts checks on stderr while
+the solver runs.
+
 Exit status 1 when a clause has a counterexample, or with `--strict` when
 one is not proved. Each index into a `Vec` or string is also a goal; the
 summary counts them (`3 of 4 index bounds checks proved`) and `--bounds`

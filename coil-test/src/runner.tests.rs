@@ -19,6 +19,7 @@ fn options(root: &Path, fail_fast: bool) -> TestOptions {
         order: Order::Sorted,
         jobs: 2,
         show_output: false,
+        verbose: false,
         coverage: None,
         opt_level: OptLevel::Standard,
         debug_level: None,

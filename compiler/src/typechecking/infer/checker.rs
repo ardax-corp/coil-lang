@@ -1293,6 +1293,8 @@ impl Checker {
 
             "clock_wall_nanos" | "clock_mono_nanos" => fun(&[], int()),
             "clock_sleep_ms" => fun(&[int()], unit_ty()),
+            "io_capture_begin" => fun(&[], unit_ty()),
+            "io_capture_end" => fun(&[], tuple_ty(vec![string(), string()])),
 
             "task_scope_open" => fun(&[], int()),
             "task_scope_close" | "task_join" => fun(&[int()], int()),

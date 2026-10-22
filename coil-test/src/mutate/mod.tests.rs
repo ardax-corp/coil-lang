@@ -128,6 +128,7 @@ fn weak_suite_end_to_end() {
             order: Order::Shuffled(1),
             jobs,
             show_output: false,
+            verbose: false,
             coverage: None,
             opt_level: OptLevel::Standard,
             debug_level: None,

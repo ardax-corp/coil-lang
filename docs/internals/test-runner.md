@@ -154,6 +154,44 @@ rather than a flat list of all cases so only one compiled file is in memory at
 a time (the leak smoke runs under `ulimit -v 65536`). splitmix64 +
 Fisher–Yates live in `coil-test/src/order.rs`; there is no `rand` dependency.
 
+## Report
+
+On a terminal a progress bar counts files as they finish
+(`reporting::progress`); in CI logs and pipes (or with `COIL_PROGRESS=0`) it
+draws nothing. A failing file prints `FAILED <file>` as it finishes. After the
+run come the details of every failure, a list of the failed cases, and the
+summary:
+
+```text
+running 4 files (seed 0x58a753087eda7cf7, 4 jobs)
+FAILED t/a.hy
+
+failures:
+
+---- t/a.hy: fails ----
+failed: one is not two
+stdout:
+out text
+stderr:
+err text
+
+failed:
+    t/a.hy: fails
+
+test result: FAILED. 2 passed; 1 failed; 3 total; finished in 0.21s
+```
+
+To check what code prints, a test captures it instead of using a header:
+`io::capture_begin()` keeps the thread's stdout and stderr writes in memory
+and `io::capture_end()` returns them as `(stdout, stderr)` (captures nest; a
+capture left open when a case ends, say by a failed `assert!`, goes to the
+case's output). See `tests/testing/capture_output.hy`.
+
+A file that does not compile shows its diagnostics in its block. `-v` /
+`--verbose` also lists passing files (`ok   <file>`) and their warnings;
+`--show-output` prints passing cases' output as they finish. `--json` events
+carry each shown case's `stdout` and `stderr` next to the combined `output`.
+
 ## Parallel runs
 
 Each case runs as a job on the CPU reactor (`machine/src/reactor.rs`,
@@ -169,9 +207,11 @@ worker count and the number of compile threads.
 | `N > 1` | `N` threads, at most `2N` files ahead of the report | reactor pool; the runner helps while it waits |
 
 - **Output is deterministic.** Files are reported in start order whatever
-  `-j` is; compiler diagnostics and each case's prints / panic message are
-  captured and replayed next to their verdict. Passing cases' output is
-  hidden unless `--show-output`.
+  `-j` is. Each case's stdout, and its stderr with its panic message, are
+  captured apart (`ThreadSpawnContext::shared_stdout` / `shared_stderr`, so
+  the threads a case spawns are captured too) and never reach the terminal
+  while the run goes. Passing cases' output and passing files' compiler
+  warnings are hidden unless `--show-output` / `--verbose`.
 - **Isolation.** A worker VM is reused across jobs. Statics are reset and
   re-initialized per case, and the heap, finalizer registry (drop PCs), C
   struct layouts and thread program are replaced per job, so a case never sees
@@ -267,16 +307,22 @@ test root, `-O`, `--root`, grants, `--seed`, `-j`.
 $ coil mutate --root src
 mutate: baseline run
 running 1 file (seed 0x…, 4 jobs)
-ok   tests/clamp.hy
 
 mutate: 8 mutants in 1 file (4 covered, 4 jobs)
-killed      src/mathx.hy:2  `x < lo` → `!(x < lo)`  [cond]  (tests/clamp.hy: clamps low)
 survived    src/mathx.hy:2  `<` → `<=`  [boundary]
 …
-no coverage src/mathx.hy:12  `*` → `/`  [arith]
+
+survived (no test fails with these edits):
+    survived    src/mathx.hy:2  `<` → `<=`  [boundary]
+    …
 
 mutation score: 50.0% (2 killed, 0 timed out, 2 survived; 0 unviable, 4 without coverage)
 ```
+
+Like `coil test`, the baseline and the mutants each move a progress bar on a
+terminal; only survivors print as they finish, and again in a list before
+the score. `-v` / `--verbose` prints every mutant (`killed … (tests/clamp.hy:
+clamps low)`, `no coverage …`) as it finishes.
 
 1. **Baseline.** Run the suite once with line coverage, keeping each case's
    covered lines and step count (`TestReport::steps`). Any failure stops

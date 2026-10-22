@@ -9,7 +9,8 @@ use coil_host::{
     ExecutePipelineArgs, bind_cli_roots, execute_pipeline, ffi_entry_path, pipeline_dload_gate,
 };
 use common::{ARCHIVE_VERSION, ArchivedProgram, ProgramDebug, format_archive_version};
-use compiler::Pipeline;
+use compiler::{CompileStep, Pipeline};
+use reporting::progress::{ClearingWriter, Progress};
 use reporting::{ErrorCode, ReportConfig, ReportFormat};
 use rkyv::rancor::Error;
 
@@ -19,6 +20,50 @@ mod package_app;
 use cli::{Command, DEFAULT_OUT, parse_args, print_version};
 use package_app::{FfiNative, cmd_package, native_lock_from_ffi_natives};
 
+
+/// The bar `coil FILE`, `compile` and `package` show while compiling (on a
+/// terminal, once compiling takes long enough to notice).
+static COMPILE_PROGRESS: std::sync::OnceLock<std::sync::Arc<Progress>> = std::sync::OnceLock::new();
+
+/// Show compile progress for `pipeline`: one step per module, then linking.
+/// Returns the diagnostics writer, which takes the bar off the screen first.
+fn compile_progress(pipeline_format: ReportFormat) -> Box<dyn Write + Send> {
+    let progress = std::sync::Arc::new(
+        Progress::new("compile", "modules", 0).with_delay(std::time::Duration::from_millis(300)),
+    );
+    if pipeline_format != ReportFormat::Pretty || !progress.is_drawing() {
+        return writer_for(pipeline_format);
+    }
+    let _ = COMPILE_PROGRESS.set(std::sync::Arc::clone(&progress));
+    Box::new(ClearingWriter::new(progress, std::io::stderr()))
+}
+
+fn wire_compile_progress(pipeline: &mut Pipeline) {
+    let Some(progress) = COMPILE_PROGRESS.get().cloned() else { return };
+    let started = std::sync::atomic::AtomicBool::new(false);
+    pipeline.set_progress(Some(std::sync::Arc::new(move |step: CompileStep<'_>| match step {
+        // The modules, then linking.
+        CompileStep::Modules(n) => progress.add_total(n + 1),
+        CompileStep::Module(path) => {
+            if started.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                progress.finish_one(true);
+            }
+            progress.start(&path.display().to_string());
+        }
+        CompileStep::Link => {
+            progress.finish_one(true);
+            progress.start("linking");
+        }
+    })));
+}
+
+/// Take the compile bar off the screen for good (before the program runs or
+/// the command reports).
+fn end_compile_progress() {
+    if let Some(progress) = COMPILE_PROGRESS.get() {
+        progress.finish();
+    }
+}
 
 fn writer_for(format: ReportFormat) -> Box<dyn Write + Send> {
     match format {
@@ -255,7 +300,9 @@ fn cmd_build_and_run(
     opt_stats: bool,
     opt_stats_json: bool,
 ) {
-    let (bytecode, constants) = match pipeline.compile_src_from_file(filename) {
+    let compiled = pipeline.compile_src_from_file(filename);
+    end_compile_progress();
+    let (bytecode, constants) = match compiled {
         Ok(ok) => ok,
         Err(_) => {
             let _ = pipeline.finish_reporting();
@@ -303,6 +350,7 @@ fn cmd_compile(
     opt_stats_json: bool,
 ) {
     compile_to_archive(pipeline, filename, output);
+    end_compile_progress();
     print_opt_stats(opt_stats, opt_stats_json);
     if let Err(e) = pipeline.finish_reporting() {
         pipeline.emit_spanless_warning(
@@ -475,7 +523,10 @@ fn main() {
         Command::Lsp => dispatch_helper("lsp"),
         command => {
             let format = config.format;
-            let mut pipeline = Pipeline::with_reporter(config, writer_for(format));
+            let compiles = matches!(command, Command::BuildAndRun { .. } | Command::Compile { .. } | Command::Package { .. });
+            let writer = if compiles { compile_progress(format) } else { writer_for(format) };
+            let mut pipeline = Pipeline::with_reporter(config, writer);
+            wire_compile_progress(&mut pipeline);
             pipeline.set_host_grants(cli.host_grants.clone());
             bind_cli_roots(&mut pipeline, cli.module_roots.clone());
             if cli.include_tests {

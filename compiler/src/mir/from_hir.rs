@@ -5919,9 +5919,12 @@ impl Lower<'_> {
             (Some(_), None) => return Err("host pair result".into()),
             (None, _) => None,
         };
+        // A tuple (`io::capture_end`'s two strings) comes back as its boxed
+        // tuple object.
+        let tuple = pair.is_none() && !raw && self.expr_ty(id).is_some_and(|t| matches!(strip_readonly(t), Ty::Tuple(items) if !items.is_empty()));
         let unit = self.expr_ty(id).is_some_and(is_unit);
         let ret = match self.expr_ty(id) {
-            _ if pair.is_some() || raw => Some(MirTy::HeapRef),
+            _ if pair.is_some() || tuple || raw => Some(MirTy::HeapRef),
             _ if unit => None,
             // A boxed enum (`thread_spawn`'s `Result<thread, ThreadError>`)
             // stays the object it comes back as.
@@ -5955,6 +5958,10 @@ impl Lower<'_> {
         let out = self.at_expr(id, |l| l.b.ins_host_invoke_as(native, words, layout, ret).map_err(mir))?;
         if let Some(((lo_ty, _), variants)) = pair {
             return self.unbox_pair(out, lo_ty, &variants);
+        }
+        if tuple && let Some(&(lo_ty, hi_ty)) = self.inp.pair_tys.get(&id.0) {
+            let ty = self.expr_ty(id).ok_or("host tuple type")?.clone();
+            return self.unbox_word(&ty, out, lo_ty, hi_ty);
         }
         Ok(if unit { Val::Unit } else { Val::V(out) })
     }

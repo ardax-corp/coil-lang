@@ -33,7 +33,81 @@ thread_local! {
         const { RefCell::new(None) };
     static SHARED_STDOUT: RefCell<Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>> =
         const { RefCell::new(None) };
+    static SHARED_STDERR: RefCell<Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>> =
+        const { RefCell::new(None) };
+    /// `io::capture_begin()` frames, innermost last: `(stdout, stderr)`.
+    static CAPTURES: RefCell<Vec<(Vec<u8>, Vec<u8>)>> = const { RefCell::new(Vec::new()) };
 }
+
+/// Keep this thread's stdout and stderr writes from here on, until the
+/// matching [`capture_end`]. Captures nest.
+pub fn capture_begin() {
+    CAPTURES.with(|c| c.borrow_mut().push((Vec::new(), Vec::new())));
+}
+
+/// What the innermost capture kept, as `(stdout, stderr)`; empty when none
+/// is open.
+pub fn capture_end() -> (Vec<u8>, Vec<u8>) {
+    CAPTURES.with(|c| c.borrow_mut().pop()).unwrap_or_default()
+}
+
+/// Take every open capture off this thread (a job starts with none), to
+/// put back with [`restore_captures`].
+pub fn take_captures() -> Vec<(Vec<u8>, Vec<u8>)> {
+    CAPTURES.with(|c| std::mem::take(&mut *c.borrow_mut()))
+}
+
+/// Write what captures still open kept to the job's own output (a test
+/// that failed between `capture_begin()` and `capture_end()` still shows
+/// its prints), and close them.
+pub fn flush_open_captures() {
+    for (out, err) in take_captures() {
+        for (kind, bytes) in [(StreamKind::Stdout, out), (StreamKind::Stderr, err)] {
+            if !bytes.is_empty()
+                && let Some(Ok(n)) = write_captured_stdout(&bytes)
+            {
+                mirror_captured(kind, &bytes[..n]);
+            }
+        }
+    }
+}
+
+pub fn restore_captures(frames: Vec<(Vec<u8>, Vec<u8>)>) {
+    CAPTURES.with(|c| *c.borrow_mut() = frames);
+}
+
+/// Append `bytes` to the innermost open capture's stdout (or stderr).
+/// False when nothing is capturing.
+pub(crate) fn capture_write(stderr: bool, bytes: &[u8]) -> bool {
+    CAPTURES.with(|c| match c.borrow_mut().last_mut() {
+        Some((out, err)) => {
+            if stderr { err } else { out }.extend_from_slice(bytes);
+            true
+        }
+        None => false,
+    })
+}
+
+fn host_capture_begin(_heap: &mut Heap, _args: &[Value]) -> Value {
+    capture_begin();
+    Value::default()
+}
+
+fn host_capture_end(heap: &mut Heap, _args: &[Value]) -> Value {
+    let (out, err) = capture_end();
+    let mut string = |bytes: Vec<u8>| {
+        let gc = heap.intern(String::from_utf8_lossy(&bytes).into_owned());
+        Value::from(gc.as_ptr() as *mut u8 as u64)
+    };
+    let (out, err) = (string(out), string(err));
+    alloc_tuple2(heap, out, err)
+}
+
+/// Pipeline wiring: `(registry_name, arity, host_fn)`.
+pub const IO_CAPTURE_WIRING: &[(&str, usize, crate::HostValueFn)] = &[
+    (common::IO_CAPTURE_BEGIN_NATIVE, 0, host_capture_begin),
+    (common::IO_CAPTURE_END_NATIVE, 0, host_capture_end),
+];
 
 pub(crate) fn take_pending_io_park() -> Option<IoParkRequest> {
     PENDING_IO_PARK.with(|c| c.borrow_mut().take())
@@ -62,8 +136,18 @@ pub fn set_shared_stdout_redirect(
     SHARED_STDOUT.with(|cell| cell.replace(buf))
 }
 
-fn mirror_captured_stdout(bytes: &[u8]) {
-    SHARED_STDOUT.with(|cell| {
+/// Install this OS thread's stderr-only capture (see
+/// [`crate::vm::Machine::set_shared_stderr`]).
+pub fn set_shared_stderr_redirect(
+    buf: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
+) -> Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>> {
+    SHARED_STDERR.with(|cell| cell.replace(buf))
+}
+
+/// Copy a captured stdout (or stderr) write into that stream's own capture.
+fn mirror_captured(kind: StreamKind, bytes: &[u8]) {
+    let cell = if kind == StreamKind::Stdout { &SHARED_STDOUT } else { &SHARED_STDERR };
+    cell.with(|cell| {
         if let Some(buf) = cell.borrow().as_ref()
             && let Ok(mut g) = buf.lock()
         {
@@ -531,12 +615,15 @@ fn stream_write_bytes(heap: &mut Heap, stream: Value, bytes: &[u8]) -> Result<us
             return Err(IoErrorTag::AlreadyClosed);
         }
         if matches!(s.kind, StreamKind::Stdout | StreamKind::Stderr)
+            && capture_write(s.kind == StreamKind::Stderr, bytes)
+        {
+            return Ok(bytes.len());
+        }
+        if matches!(s.kind, StreamKind::Stdout | StreamKind::Stderr)
             && let Some(result) = write_captured_stdout(bytes)
         {
-            if s.kind == StreamKind::Stdout
-                && let Ok(n) = result
-            {
-                mirror_captured_stdout(&bytes[..n]);
+            if let Ok(n) = result {
+                mirror_captured(s.kind, &bytes[..n]);
             }
             return result;
         }

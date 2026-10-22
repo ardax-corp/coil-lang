@@ -293,8 +293,9 @@ fn test_failure_reports_assert_message() {
         .expect("spawn coil test");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success());
+    let stderr = stderr.replace('\\', "/");
     assert!(
-        stderr.contains("> Test \"custom\" failed: one is not two"),
+        stderr.contains("---- tests/a.hy: custom ----\nfailed: one is not two"),
         "stderr={stderr}"
     );
     cleanup(&cwd);

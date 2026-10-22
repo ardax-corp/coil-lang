@@ -293,7 +293,10 @@ pub fn cmd_package(
     natives: &[FfiNative],
     check_native: bool,
 ) {
-    let archive_bytes = match compile_program_archive_bytes(pipeline, filename) {
+    let archive_bytes = compile_program_archive_bytes(pipeline, filename);
+    // Notes below and errors go to a clean line.
+    crate::end_compile_progress();
+    let archive_bytes = match archive_bytes {
         Ok(b) => b,
         Err(()) => {
             let _ = pipeline.finish_reporting();

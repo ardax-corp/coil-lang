@@ -310,7 +310,9 @@ impl<const S: usize> Machine<S> {
                 Instruction::PRINT => {
                     let ptr = self.stack.pop().as_ptr::<GcData<ObjString>>();
                     let s = unsafe { (*ptr).as_ref() };
-                    if let Some(out) = self.output.as_mut() {
+                    if crate::io::capture_write(false, s.data.as_bytes()) {
+                        // `io::capture_begin()` keeps it.
+                    } else if let Some(out) = self.output.as_mut() {
                         let _ = write!(out, "{}", s);
                         let _ = out.flush();
                         self.mirror_stdout(s.data.as_str());
@@ -762,8 +764,10 @@ impl<const S: usize> Machine<S> {
                         .map(|bt| format!("\n{bt}"))
                         .unwrap_or_default();
                     if let Some(out) = self.output.as_mut() {
-                        let _ = write!(out, "panic: {}{}{}", s, loc_suffix, backtrace);
+                        let text = format!("panic: {}{}{}", s, loc_suffix, backtrace);
+                        let _ = write!(out, "{text}");
                         let _ = out.flush();
+                        self.mirror_stderr(&text);
                     } else {
                         eprintln!("panic: {}{}{}", s, loc_suffix, backtrace);
                         let _ = io::stderr().flush();
