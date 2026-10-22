@@ -12664,8 +12664,11 @@ impl Checker {
                 .map(|(k, _, _)| (k.clone(), self.generic_fns.contains(k), self.generics.generic_fns.contains(k)))
                 .collect(),
             arity: modes.iter().map(|(k, _, _)| (k.clone(), self.fn_dict_arity.get(k).copied())).collect(),
+            // The bare name and `module::name`: a trait method's signature
+            // infers under both, and the qualified one is what `use m::{name}`
+            // binds, so it must not replace a free fn of that name.
+            env: modes.iter().map(|(k, _, _)| (k.clone(), mark)).collect(),
             modes,
-            env: names.iter().map(|n| (n.to_string(), mark)).collect(),
             defs: names
                 .iter()
                 .filter_map(|n| self.local_defs.get(*n).copied())
