@@ -26,7 +26,7 @@ fn say(Res v) -> string {
 fn mapped(Res x) -> Res {
     let m: HashMap<string, Res> = HashMap::new();
     m.insert("k", x);
-    return m.get("k", x);
+    return m.get_or("k", x);
 }
 
 fn main() {

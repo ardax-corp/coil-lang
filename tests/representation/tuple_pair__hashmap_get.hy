@@ -14,7 +14,7 @@ fn say((int, float) v) -> string {
 fn mapped((int, float) x) -> (int, float) {
     let m: HashMap<string, (int, float)> = HashMap::new();
     m.insert("k", x);
-    return m.get("k", x);
+    return m.get_or("k", x);
 }
 
 fn main() {

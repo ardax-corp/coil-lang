@@ -18,7 +18,7 @@ fn say(Obj v) -> string {
 fn mapped(Obj x) -> Obj {
     let m: HashMap<string, Obj> = HashMap::new();
     m.insert("k", x);
-    return m.get("k", x);
+    return m.get_or("k", x);
 }
 
 fn main() {

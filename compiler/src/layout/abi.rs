@@ -22,7 +22,7 @@
 //! Result/Option ABI layouts for MIR→LIR (COI-270) and I1 SSA word names.
 //!
 //! Matches [`two_word_kind`] and
-//! `docs/internals/limitations.md` (COI-92). No new pair opcodes and no
+//! `docs/internals/layout.md` (COI-92). No new pair opcodes and no
 //! nursery: two-slot is `[payload, tag]` (or `[a, b]`) on direct
 //! `CALL`/`RETURN`; heap niches are one `Value` word.
 //!
