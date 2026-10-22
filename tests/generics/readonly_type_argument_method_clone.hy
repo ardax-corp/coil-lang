@@ -7,14 +7,14 @@ class Point {
     pub x: int,
 }
 
-test("a map of readonly values and one of plain values share `get`") {
+test("a map of readonly values and one of plain values share `get_or`") {
     let m: HashMap<string, Point> = HashMap::new();
     m.insert("a", new Point(5));
     let r: HashMap<string, readonly Point> = HashMap::new();
     r.insert("a", new Point(6));
     r.insert("b", new Point(7));
-    assert!(m.get("a", new Point(0)).x == 5);
-    assert!(r.get("a", new Point(0)).x == 6);
-    assert!(r.get("b", new Point(0)).x == 7);
-    assert!(r.get("c", new Point(1)).x == 1);
+    assert!(m.get_or("a", new Point(0)).x == 5);
+    assert!(r.get_or("a", new Point(0)).x == 6);
+    assert!(r.get_or("b", new Point(0)).x == 7);
+    assert!(r.get_or("c", new Point(1)).x == 1);
 }
