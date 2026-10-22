@@ -1456,7 +1456,7 @@ pub fn cmd_test(config: ReportConfig, options: TestOptions) -> i32 {
 }
 
 /// The failed cases' details, then their names, before the summary line.
-fn print_failures(failures: &[String]) {
+pub(crate) fn print_failures(failures: &[String]) {
     if failures.is_empty() {
         return;
     }

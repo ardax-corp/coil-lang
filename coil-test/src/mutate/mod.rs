@@ -21,13 +21,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 
 use machine::reactor::Reactor;
+use reporting::progress::{Progress, paint};
 use reporting::{ErrorCode, ReportConfig};
 
 use crate::coverage::CoverageOptions;
 use crate::events::{self, Event};
 use crate::runner::{
     CaseOutcome, Compiled, Report, SuiteResult, TestOptions, canonical, compile_test_file,
-    run_test_suite, writer_for,
+    print_failures, run_test_suite, writer_for,
 };
 use job::{Isolation, MutantJob, Verdict, run_in_child, run_job};
 use sites::{Operator, Site};
@@ -204,9 +205,13 @@ pub fn run_mutate(config: ReportConfig, options: &MutateOptions) -> Result<Mutat
         failed,
         coverage,
         cases,
+        failures,
         ..
     } = run_test_suite(config.clone(), &baseline_options)?;
     if failed != 0 {
+        if !options.json {
+            print_failures(&failures);
+        }
         return Err(format!(
             "baseline has {failed} failing test{}; mutants need a green suite",
             if failed == 1 { "" } else { "s" }
@@ -349,6 +354,7 @@ fn run_all(ctx: &MutantCtx<'_>, planned: &[Planned], jobs: usize) -> Vec<MutantR
     let next = AtomicUsize::new(0);
     let (tx, rx) = mpsc::channel::<(usize, MutantResult)>();
     let mut results = Vec::with_capacity(planned.len());
+    let progress = (!ctx.json).then(|| Progress::new("mutate", "mutants", planned.len()));
     std::thread::scope(|scope| {
         for _ in 0..jobs {
             let tx = tx.clone();
@@ -373,10 +379,17 @@ fn run_all(ctx: &MutantCtx<'_>, planned: &[Planned], jobs: usize) -> Vec<MutantR
         for (i, result) in rx.iter() {
             ready.insert(i, result);
             while let Some(result) = ready.remove(&results.len()) {
-                if ctx.json {
-                    mutant_event(&result).emit();
-                } else {
-                    print_result(&result);
+                match &progress {
+                    None => mutant_event(&result).emit(),
+                    Some(progress) => {
+                        // A survivor is what mutation testing reports; the
+                        // rest only move the bar unless `--verbose`.
+                        if result.status == Status::Survived || ctx.options.verbose {
+                            progress.println(&result_line(&result));
+                        }
+                        progress.start(&format!("{}:{}", result.file, result.line));
+                        progress.finish_one(result.status != Status::Survived);
+                    }
                 }
                 results.push(result);
             }
@@ -385,20 +398,25 @@ fn run_all(ctx: &MutantCtx<'_>, planned: &[Planned], jobs: usize) -> Vec<MutantR
     results
 }
 
-fn print_result(m: &MutantResult) {
+fn result_line(m: &MutantResult) -> String {
     let by = m
         .killed_by
         .as_deref()
         .map_or(String::new(), |t| format!("  ({t})"));
-    eprintln!(
-        "{:<11} {}:{}  `{}` → `{}`  [{}]{by}",
-        m.status.name(),
+    let status = format!("{:<11}", m.status.name());
+    let status = match m.status {
+        Status::Survived => paint(&status, false),
+        Status::Killed | Status::TimedOut => paint(&status, true),
+        _ => status,
+    };
+    format!(
+        "{status} {}:{}  `{}` → `{}`  [{}]{by}",
         m.file,
         m.line,
         m.original,
         m.replacement,
         m.operator.name(),
-    );
+    )
 }
 
 /// Build and run one mutant.
@@ -503,6 +521,14 @@ pub fn cmd_mutate(config: ReportConfig, options: MutateOptions) {
     if options.json {
         report.summary_event(options.min_score).emit();
     } else {
+        let survived: Vec<&MutantResult> = report.mutants.iter().filter(|m| m.status == Status::Survived).collect();
+        if !survived.is_empty() {
+            // No test noticed these edits: each is a missing assertion.
+            eprintln!("\nsurvived (no test fails with these edits):");
+            for m in survived {
+                eprintln!("    {}", result_line(m));
+            }
+        }
         eprintln!();
         eprintln!("{}", report.summary());
         if let (Some(min), Some(score)) = (options.min_score, score)

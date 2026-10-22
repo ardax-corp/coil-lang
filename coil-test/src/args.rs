@@ -171,6 +171,9 @@ struct MutateCli {
     /// NDJSON events on stdout (plan, mutant, summary, error)
     #[arg(long)]
     json: bool,
+    /// Print every mutant as it finishes, not only survivors
+    #[arg(short = 'v', long)]
+    verbose: bool,
     /// Shuffle files and cases with seed N (decimal or 0x hex)
     #[arg(long, value_name = "N", value_parser = parse_seed)]
     seed: Option<u64>,
@@ -265,7 +268,7 @@ fn parse_mutate(expanded: &[String], original: &[String]) -> Result<Parsed, Stri
         path: cli.path,
         fail_fast: false,
         show_output: false,
-        verbose: false,
+        verbose: cli.verbose,
         coverage: false,
         coverage_out: None,
         per_test_out: None,

@@ -307,16 +307,22 @@ test root, `-O`, `--root`, grants, `--seed`, `-j`.
 $ coil mutate --root src
 mutate: baseline run
 running 1 file (seed 0x…, 4 jobs)
-ok   tests/clamp.hy
 
 mutate: 8 mutants in 1 file (4 covered, 4 jobs)
-killed      src/mathx.hy:2  `x < lo` → `!(x < lo)`  [cond]  (tests/clamp.hy: clamps low)
 survived    src/mathx.hy:2  `<` → `<=`  [boundary]
 …
-no coverage src/mathx.hy:12  `*` → `/`  [arith]
+
+survived (no test fails with these edits):
+    survived    src/mathx.hy:2  `<` → `<=`  [boundary]
+    …
 
 mutation score: 50.0% (2 killed, 0 timed out, 2 survived; 0 unviable, 4 without coverage)
 ```
+
+Like `coil test`, the baseline and the mutants each move a progress bar on a
+terminal; only survivors print as they finish, and again in a list before
+the score. `-v` / `--verbose` prints every mutant (`killed … (tests/clamp.hy:
+clamps low)`, `no coverage …`) as it finishes.
 
 1. **Baseline.** Run the suite once with line coverage, keeping each case's
    covered lines and step count (`TestReport::steps`). Any failure stops
