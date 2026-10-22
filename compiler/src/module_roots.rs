@@ -9,6 +9,83 @@ pub fn default_module_roots() -> Vec<PathBuf> {
     vec![PathBuf::from("src")]
 }
 
+/// Installed coil-stdlib roots that exist as directories, in search order:
+/// `$COIL_STDLIB_DIR`, then its alias `$COIL_STDLIB`, then
+/// `~/.coil/stdlib/src` (where spool installs it).
+///
+/// A variable may name the checkout or its `src`: a directory with a `src`
+/// subdirectory contributes that `src`, so the checkout's `tests/` and `docs/`
+/// never become importable modules.
+pub fn stdlib_module_roots() -> Vec<PathBuf> {
+    let var = |name: &str| {
+        std::env::var_os(name)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    };
+    let home = var("HOME").or_else(|| var("USERPROFILE"));
+    stdlib_roots_from(var("COIL_STDLIB_DIR"), var("COIL_STDLIB"), home)
+}
+
+fn stdlib_roots_from(
+    stdlib_dir: Option<PathBuf>,
+    stdlib_alias: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    for dir in [stdlib_dir, stdlib_alias].into_iter().flatten() {
+        let src = dir.join("src");
+        candidates.push(if src.is_dir() { src } else { dir });
+    }
+    if let Some(home) = home {
+        candidates.push(home.join(".coil").join("stdlib").join("src"));
+    }
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for dir in candidates {
+        if dir.is_dir() && !roots.contains(&dir) {
+            roots.push(dir);
+        }
+    }
+    roots
+}
+
+/// Top-level modules of coil-stdlib (`io::sync`, `collections::…`, `text`).
+const STDLIB_MODULES: &[&str] = &[
+    "arith",
+    "ascii",
+    "bytes",
+    "cell",
+    "collections",
+    "conv",
+    "encoding",
+    "fmt",
+    "io",
+    "num",
+    "path",
+    "random",
+    "text",
+];
+
+/// E0900 help for an unresolved `use` of a coil-stdlib module when no search
+/// root holds that module at all (no stdlib root is configured).
+pub fn stdlib_root_help(roots: &[PathBuf], project_root: &Path, path: &[String]) -> Option<String> {
+    let first = path.first()?;
+    if !STDLIB_MODULES.contains(&first.as_str()) {
+        return None;
+    }
+    let present = roots.iter().any(|root| {
+        let dir = abs_search_root(project_root, root);
+        dir.join(first).is_dir() || dir.join(format!("{first}.hy")).is_file()
+    });
+    if present {
+        return None;
+    }
+    Some(format!(
+        "coil-stdlib provides `{first}::…` modules and no stdlib root was found: pass \
+         `--root <coil-stdlib>/src`, set `COIL_STDLIB_DIR` to a coil-stdlib checkout, \
+         or install it into `~/.coil/stdlib` with spool"
+    ))
+}
+
 fn abs_search_root(project_root: &Path, root: &Path) -> PathBuf {
     if root.as_os_str().is_empty() || root == Path::new(".") {
         project_root.to_path_buf()
@@ -145,6 +222,58 @@ fn path_to_namespace(rel: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stdlib_roots_prefer_src_and_add_the_spool_install() {
+        let tmp =
+            std::env::temp_dir().join(format!("coil_module_roots_stdlib_{}", std::process::id()));
+        let checkout = tmp.join("checkout");
+        let alias = tmp.join("alias_src");
+        let home = tmp.join("home");
+        std::fs::create_dir_all(checkout.join("src")).unwrap();
+        std::fs::create_dir_all(&alias).unwrap();
+        std::fs::create_dir_all(home.join(".coil/stdlib/src")).unwrap();
+
+        let roots = stdlib_roots_from(
+            Some(checkout.clone()),
+            Some(alias.clone()),
+            Some(home.clone()),
+        );
+        assert_eq!(
+            roots,
+            vec![
+                checkout.join("src"),
+                alias.clone(),
+                home.join(".coil/stdlib/src"),
+            ]
+        );
+        // Missing directories are skipped; one directory is listed once.
+        let roots = stdlib_roots_from(Some(tmp.join("missing")), Some(alias.clone()), None);
+        assert_eq!(roots, vec![alias.clone()]);
+        let roots = stdlib_roots_from(Some(alias.clone()), Some(alias.clone()), None);
+        assert_eq!(roots, vec![alias.clone()]);
+        assert!(stdlib_roots_from(None, None, Some(tmp.join("nohome"))).is_empty());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn stdlib_root_help_only_when_no_root_holds_the_module() {
+        let tmp = std::env::temp_dir().join(format!(
+            "coil_module_roots_stdlib_help_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(tmp.join("lib/io")).unwrap();
+        let src = [PathBuf::from("src")];
+        let io_sync = ["io".to_string(), "sync".to_string()];
+        let help = stdlib_root_help(&src, &tmp, &io_sync).expect("help for io::sync");
+        assert!(help.contains("COIL_STDLIB_DIR"), "{help}");
+        assert!(stdlib_root_help(&src, &tmp, &["nowhere".to_string()]).is_none());
+        let with_stdlib = [PathBuf::from("src"), PathBuf::from("lib")];
+        assert!(stdlib_root_help(&with_stdlib, &tmp, &io_sync).is_none());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     fn path_to_namespace_strips_extension_and_uses_double_colon() {

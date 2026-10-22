@@ -341,7 +341,8 @@ impl HostGrantFlags {
 /// Extra `use`/`mod` search directories (`--root`, repeatable).
 #[derive(Args, Clone, Debug, Default)]
 pub struct RootFlags {
-    /// Extra module search directory (repeatable). Default is `src` under cwd.
+    /// Extra module search directory (repeatable). Searched after `src` under
+    /// cwd and before the installed stdlib (`$COIL_STDLIB_DIR`, `~/.coil/stdlib/src`).
     #[arg(long = "root", value_name = "DIR", action = clap::ArgAction::Append)]
     pub root: Vec<PathBuf>,
 }

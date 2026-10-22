@@ -97,6 +97,8 @@ pub(crate) struct CliArgs {
     after_help = "Pass the entry as a positional `.hy` or `--entry FILE`.\n\
 Default diagnostics: pretty reports on stderr.\n\
 `--root DIR` is repeatable extra `use`/`mod` search (default is `src` under cwd).\n\
+The installed stdlib is searched after them: `$COIL_STDLIB_DIR` (or its `src`),\n\
+`$COIL_STDLIB`, then `~/.coil/stdlib/src`, when those directories exist.\n\
 Host grants (`--allow-attach`, `--allow-exec`, `--allow-exit`, `--allow-ffi-exec`,\n\
 `--allow-dload STEM`) are CLI / Pipeline API for compile and typecheck.\n\
 `coil run out.hyc` and coil-embed do\n\

@@ -17,6 +17,8 @@ In GitHub Actions, install the snapshot instead of building coil from source:
 
 With [spool](https://github.com/ardax-corp/spool), `./bootstrap.sh --channel edge --install` installs the snapshot into `~/.coil`.
 
+Every coil tool searches the userland stdlib (`use io::sync::…`) without a `--root` flag: `$COIL_STDLIB_DIR` (a coil-stdlib checkout or its `src`; `$COIL_STDLIB` is an alias), then `~/.coil/stdlib/src` where spool installs it. `--root` directories come first.
+
 Build from source:
 
 ```bash

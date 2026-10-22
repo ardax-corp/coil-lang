@@ -46,9 +46,10 @@ These requests are implemented and covered by `coil-lsp` scenario tests:
 
 Search roots for an opened workspace are `src`, `.` (sibling files at the
 project root), and each `.deps/*/src` checkout when present, then any
-`--root DIR` given on the command line. A file under nested roots is
-namespaced by the innermost one. Other roots come only from `--root`
-flags, as for `coil`.
+`--root DIR` given on the command line, then the installed stdlib
+(`$COIL_STDLIB_DIR`, `$COIL_STDLIB`, `~/.coil/stdlib/src`, when present).
+A file under nested roots is namespaced by the innermost one. Other roots
+come only from `--root` flags, as for `coil`.
 
 `coil lsp` takes the same root and host-grant flags as `coil compile`, so a
 project tool can start it with the flags it uses everywhere else:

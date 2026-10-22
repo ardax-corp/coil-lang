@@ -1081,6 +1081,11 @@ fn lsp_module_roots(workspace: &Path, extra: &[PathBuf]) -> Vec<PathBuf> {
             roots.push(root.clone());
         }
     }
+    for root in compiler::stdlib_module_roots() {
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
     roots
 }
 

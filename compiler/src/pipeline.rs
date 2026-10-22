@@ -18,6 +18,7 @@ use reporting::{
 use crate::host_grants::HostGrants;
 use crate::module_roots::{
     default_module_roots, namespace_of_in_roots, resolve_mod_in_roots, resolve_use_in_roots,
+    stdlib_module_roots, stdlib_root_help,
 };
 use crate::Compiler;
 
@@ -466,14 +467,17 @@ impl Pipeline {
         self.roots = roots;
     }
 
-    /// Bind `project_dir` with default `src` plus `extra` roots (test helper).
+    /// Bind `project_dir` with default `src`, then `extra` (`--root`), then the
+    /// installed coil-stdlib ([`stdlib_module_roots`]: `$COIL_STDLIB_DIR`,
+    /// `$COIL_STDLIB`, `~/.coil/stdlib/src`). Explicit roots come first, so
+    /// they win over the installed stdlib.
     pub fn bind_project_roots_with_default(
         &mut self,
         project_dir: PathBuf,
         extra: impl IntoIterator<Item = PathBuf>,
     ) {
         let mut roots = default_module_roots();
-        for r in extra {
+        for r in extra.into_iter().chain(stdlib_module_roots()) {
             if !roots.contains(&r) {
                 roots.push(r);
             }
@@ -970,12 +974,21 @@ impl Pipeline {
                     self.emit_message(parent_file, parent_src, &msg);
                     self.failed = true;
                 } else {
-                    self.emit_module_not_found(
-                        parent_file,
-                        parent_src,
+                    let mut msg = Message::error(
+                        ErrorCode::IoError,
+                        format!("Module not found: `use {}`", Self::format_use_path(path, name)),
                         use_range,
-                        format!("`use {}`", Self::format_use_path(path, name)),
                     );
+                    let module = if path.is_empty() {
+                        std::slice::from_ref(name)
+                    } else {
+                        &path[..]
+                    };
+                    if let Some(help) = stdlib_root_help(&self.roots, &self.project_root, module) {
+                        msg.with_help(help);
+                    }
+                    self.emit_message(parent_file, parent_src, &msg);
+                    self.failed = true;
                 }
             }
             Expression::Module(name, _body) => {
