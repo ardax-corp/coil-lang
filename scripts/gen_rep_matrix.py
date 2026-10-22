@@ -307,7 +307,7 @@ POSITIONS = [
     Pos(
         "thread_join",
         "threaded({X})",
-        "fn threaded({T} x) -> {T} {\n    let th = match spawn(fn () use (x) => x) {\n        Ok(t) => t,\n        Err(_) => panic \"spawn\",\n    };\n    return match join(th) {\n        Ok(v) => v,\n        Err(_) => panic \"join\",\n    };\n}\n",
+        "fn threaded({T} x) -> {T} {\n    let th = match spawn(fn () use (x) => x) {\n        Ok(t) => t,\n        Err(_) => panic \"spawn\",\n    };\n    // `Thread` is untyped: pin the joined value's type, or a\n    // result-mode `return` wraps it as the `Ok` payload.\n    let got: {T} = match join(th) {\n        Ok(v) => v,\n        Err(_) => panic \"join\",\n    };\n    return got;\n}\n",
         ("thread::{join, spawn}",),
     ),
     Pos(

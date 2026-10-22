@@ -1,8 +1,8 @@
-// @expected E0801 — a generic class's `Vec<V>` field holds a niche `Option`
-// boxed by the shared body; read at its ground type from ground code it
-// would print an empty payload (#1896). Refused until open `V` holds the
-// ground word (niche-vs-boxed step 3 turns this into an `@output` test).
-use io::sync::{println};
+// A generic class's `Vec<V>` field holds a niche `Option` as the shared
+// body stored it: its niche word, read at its ground type from ground code
+// as the same word (#1896).
+// @output some one\nsome one\n
+use io::sync::println;
 
 class Slot<V> {
     pub v: V,

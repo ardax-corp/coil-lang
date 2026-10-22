@@ -6002,7 +6002,10 @@ impl Compiler {
             }
             let g = ground(t);
             let ty = self.hir_ret_item_word(&g)?;
-            if unbox && !(ty == crate::mir::MirTy::HeapRef || ty.is_numeric() || ty == crate::mir::MirTy::Bool) {
+            if unbox
+                && !(matches!(ty, crate::mir::MirTy::HeapRef | crate::mir::MirTy::Bool | crate::mir::MirTy::NicheOpt | crate::mir::MirTy::NicheRes)
+                    || ty.is_numeric())
+            {
                 return Err("callee-generic");
             }
             let kind = if crate::layout::is_unit(&g) {
@@ -9477,12 +9480,19 @@ impl Compiler {
     /// A fresh slot for `local`. HIR locals are distinct even when their
     /// names repeat, so a shadowing `let` gets its own `__shadow_` slot
     /// (the debugger shows it under the source name).
-    /// Every name a `let` pattern binds is one boxed word, as the AST
-    /// stores the raw `Index` / `GetField` result.
+    /// Every name a `let` pattern binds is one word, as the item holds it:
+    /// boxed, or a niche `Option` / `Result`'s niche word.
     fn hir_check_let_pat(&self, hir: &HirBody, pat: &HirPat) -> Check {
         match pat {
             HirPat::Wild => Ok(()),
-            HirPat::Bind(local) if self.hir_local_layout(hir, *local) == ValueLayout::Boxed => Ok(()),
+            HirPat::Bind(local)
+                if matches!(
+                    self.hir_local_layout(hir, *local),
+                    ValueLayout::Boxed | ValueLayout::NicheOption | ValueLayout::NicheResult | ValueLayout::NicheUnitResult
+                ) =>
+            {
+                Ok(())
+            }
             HirPat::Bind(_) => Err("let-pattern-layout"),
             HirPat::Tuple(items) => items.iter().try_for_each(|p| self.hir_check_let_pat(hir, p)),
             HirPat::Record(fields) => fields.iter().try_for_each(|(_, p)| self.hir_check_let_pat(hir, p)),

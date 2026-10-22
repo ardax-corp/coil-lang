@@ -28,10 +28,13 @@ fn threaded(Res x) -> Res {
         Ok(t) => t,
         Err(_) => panic "spawn",
     };
-    return match join(th) {
+    // `Thread` is untyped: pin the joined value's type, or a
+    // result-mode `return` wraps it as the `Ok` payload.
+    let got: Res = match join(th) {
         Ok(v) => v,
         Err(_) => panic "join",
     };
+    return got;
 }
 
 fn main() {
