@@ -755,6 +755,7 @@ impl FrameState {
 /// `None` when the body cannot be described. Closure bodies compiled inside
 /// it (code pointers fed to `MakeFn`) are analysed from their own entry and
 /// merged; any other entry into the middle of the body refuses it.
+#[allow(clippy::too_many_arguments)]
 fn analyze_body(
     bytecode: &[Byte],
     constants: &[u64],
