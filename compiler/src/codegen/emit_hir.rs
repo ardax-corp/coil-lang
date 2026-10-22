@@ -1393,7 +1393,9 @@ impl Compiler {
                 // A heap element's slot holds its boxed word; a
                 // pointer-niche `Option` / `Result` element its niche word
                 // (`hir_stack_rep`).
-                Some(element) => crate::mir::scalar_mir_ty(element).or_else(|| {
+                Some(element) => crate::mir::scalar_mir_ty(element)
+                    .or_else(|| Self::scalar_enum_mir_ty(&self.checker, element))
+                    .or_else(|| {
                     use crate::layout::{value_layout, word_kind};
                     match value_layout(&self.checker, element) {
                         // So does a two-word enum's: its boxed object.
@@ -1436,26 +1438,7 @@ impl Compiler {
             || hir.locals.iter().any(|l| l.ty.as_ref().is_some_and(holds_var))
             || hir.exprs.iter().any(|e| e.ty.as_ref().is_some_and(holds_var));
         // The backing word of a scalar enum type.
-        let scalar_enum = move |t: &Ty| {
-            let t = apply_ty_prune(checker.subst(), t);
-            if !crate::layout::is_scalar_enum_ty(checker, &t) {
-                return None;
-            }
-            let name = match crate::typechecking::ty::strip_readonly(&t) {
-                Ty::Constructor { owner, .. } => match owner.as_ref() {
-                    Ty::Con(name) | Ty::Sum { name, .. } => name.clone(),
-                    _ => return None,
-                },
-                Ty::Con(name) | Ty::Sum { name, .. } => name.clone(),
-                _ => return None,
-            };
-            // A `#[repr(string)]` value is its backing string's heap word.
-            let backing = checker.scalar_value_ty(&name)?;
-            if matches!(crate::typechecking::ty::strip_readonly(&backing), Ty::Con(n) if n == crate::typechecking::ty::STRING) {
-                return Some(crate::mir::MirTy::HeapRef);
-            }
-            crate::mir::scalar_mir_ty(&backing).filter(|t| matches!(t, crate::mir::MirTy::I64 | crate::mir::MirTy::F64 | crate::mir::MirTy::Bool))
-        };
+        let scalar_enum = move |t: &Ty| Self::scalar_enum_mir_ty(checker, t);
         let word = |t: &Ty| {
             crate::mir::word_mir_ty(t)
                 .or_else(|| {
@@ -1480,26 +1463,7 @@ impl Compiler {
                 .or_else(|| (matches!(crate::typechecking::ty::strip_readonly(t), Ty::Con(n) if n == "ptr") && !is_class(t)).then_some(crate::mir::MirTy::I64))
         };
         // A scalar enum's backing word.
-        let scalar_enum = move |t: &Ty| {
-            let t = apply_ty_prune(checker.subst(), t);
-            if !crate::layout::is_scalar_enum_ty(checker, &t) {
-                return None;
-            }
-            let name = match crate::typechecking::ty::strip_readonly(&t) {
-                Ty::Constructor { owner, .. } => match owner.as_ref() {
-                    Ty::Con(name) | Ty::Sum { name, .. } => name.clone(),
-                    _ => return None,
-                },
-                Ty::Con(name) | Ty::Sum { name, .. } => name.clone(),
-                _ => return None,
-            };
-            // A `#[repr(string)]` value is its backing string's heap word.
-            let backing = checker.scalar_value_ty(&name)?;
-            if matches!(crate::typechecking::ty::strip_readonly(&backing), Ty::Con(n) if n == crate::typechecking::ty::STRING) {
-                return Some(crate::mir::MirTy::HeapRef);
-            }
-            crate::mir::scalar_mir_ty(&backing).filter(|t| matches!(t, crate::mir::MirTy::I64 | crate::mir::MirTy::F64 | crate::mir::MirTy::Bool))
-        };
+        let scalar_enum = move |t: &Ty| Self::scalar_enum_mir_ty(checker, t);
         // Fields of heap class objects whose slot holds the word the
         // field's type names (a generic field holds a boxed value).
         // A string field, or a two-word enum's, holds its boxed heap word.
@@ -2015,6 +1979,28 @@ impl Compiler {
         }
     }
 
+    /// The backing word of a scalar enum type (`None` for any other type).
+    fn scalar_enum_mir_ty(checker: &crate::typechecking::Checker, t: &Ty) -> Option<crate::mir::MirTy> {
+        let t = apply_ty_prune(checker.subst(), t);
+        if !crate::layout::is_scalar_enum_ty(checker, &t) {
+            return None;
+        }
+        let name = match crate::typechecking::ty::strip_readonly(&t) {
+            Ty::Constructor { owner, .. } => match owner.as_ref() {
+                Ty::Con(name) | Ty::Sum { name, .. } => name.clone(),
+                _ => return None,
+            },
+            Ty::Con(name) | Ty::Sum { name, .. } => name.clone(),
+            _ => return None,
+        };
+        // A `#[repr(string)]` value is its backing string's heap word.
+        let backing = checker.scalar_value_ty(&name)?;
+        if matches!(crate::typechecking::ty::strip_readonly(&backing), Ty::Con(n) if n == crate::typechecking::ty::STRING) {
+            return Some(crate::mir::MirTy::HeapRef);
+        }
+        crate::mir::scalar_mir_ty(&backing).filter(|t| matches!(t, crate::mir::MirTy::I64 | crate::mir::MirTy::F64 | crate::mir::MirTy::Bool))
+    }
+
     /// The word types of a two-word `ty` in direct MIR: `[payload, tag]`
     /// with one payload type across the variants, `[start, end]`, or
     /// `[a, b]`.
@@ -2037,7 +2023,12 @@ impl Compiler {
 
     fn hir_mir_pair_tys(&self, ty: &Ty) -> Option<(crate::mir::MirTy, crate::mir::MirTy)> {
         use crate::layout::{self, Layout, PairKind};
-        use crate::mir::{scalar_mir_ty as word, MirTy};
+        use crate::mir::MirTy;
+        // A scalar enum item is its backing word, like an `int` (#1903).
+        let word = |t: &Ty| {
+            crate::mir::scalar_mir_ty(t)
+                .or_else(|| Self::scalar_enum_mir_ty(&self.checker, t).filter(|w| *w != MirTy::HeapRef))
+        };
         let ty = apply_ty_prune(self.checker.subst(), ty);
         let Layout::Pair(kind) = layout::of_resolved(&self.checker, &ty) else {
             return None;
