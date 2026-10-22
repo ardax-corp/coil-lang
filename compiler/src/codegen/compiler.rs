@@ -575,6 +575,12 @@ impl Compiler {
         self.functions.get(name).copied()
     }
 
+    /// The end of the function whose entry is `entry`: the next function's
+    /// entry, or the end of the code.
+    pub fn function_end(&self, entry: usize) -> usize {
+        self.functions.values().copied().filter(|&o| o > entry).min().unwrap_or(self.bytecode.len())
+    }
+
     /// Bind a fresh entry label at the current PC and register `name`.
     fn bind_function_entry(&mut self, name: String) -> (usize, IlLabel) {
         let offset = self.bytecode.len();

@@ -56,6 +56,13 @@ module's functions.
 | Explicit (`const`, `comptime`, macros, blocks) | `--comptime-steps` (1B) | `--comptime-mem` (1024 MiB) | `--comptime-timeout` (300 s), checked at IO calls | an error that names the flag |
 | Silent (pure `static let`, call folding) | 1M per call, 20M per module | the same | none | the code is left as written |
 
+A folded call that runs out of the silent tier's steps also gets an
+E0138 Info at the call (coil-lang#1918): `comptime <call>` would compute it,
+at the cost of a longer build (the help gives the time it ran before it
+stopped, a lower bound). A call that panics stays quiet, and calls inside a
+`const` or `comptime` initializer are not fold sites: they are computed with
+the initializer.
+
 `--fold-calls off` (on `coil`, `coil compile`, `coil dissect` and
 `coil test`) turns call folding off; `COIL_CALL_FOLD=0` does the same when
 the flag is not given. Benchmarks of the VM build with it, since a

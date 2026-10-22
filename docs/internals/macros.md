@@ -550,6 +550,12 @@ the consts (so the call can read them):
   tier (sharing its 20M-step pool with the silent static lets). One that
   panics, runs out or returns a non-string where a string is expected
   stays a call.
+  `ConstEvalOutcome::over_budget` lists the ones that ran out of steps,
+  with the time each ran; `Pipeline::note_fold_budget` reports each such
+  call site as E0138 (Info) suggesting `comptime` (coil-lang#1918).
+- Sites inside an explicit (`const` / `comptime`) initializer are dropped
+  (`Compiler::function_end` bounds the initializer): the initializer computes
+  them within the explicit budget.
 - `apply_call_folds` turns the argument words into `NOOP`s and the `CALL`
   into a `CONST` (a negative or wide word from the pool) or `STRING`, then
   builds the precise frame maps again.
