@@ -280,8 +280,23 @@ impl Checker {
             type_params.iter().map(|tp| tp.name.to_string()).zip(param_vars.iter().copied()).collect();
         let mut settled = Vec::new();
         for m in methods {
+            let default = trait_method_name(m)
+                .filter(|mname| method_defs.iter().any(|d| d.has_default && d.name == *mname));
+            // A default body infers under its bare name, which a free fn may
+            // share (`text::split` beside `Searchable::split`): record its own
+            // result mode under its FQN, which codegen compiles it by.
+            if default.is_some() {
+                self.clear_bare_result_modes(&shield);
+            }
             let _ = self.infer(m);
-            if method_defs.iter().any(|d| d.has_default && Some(d.name.as_str()) == trait_method_name(m)) {
+            if let Some(mname) = default {
+                let fqn = Generics::default_method_fqn(name, mname);
+                if self.result_mode_fns.contains(mname) {
+                    self.result_mode_fns.insert(fqn.clone());
+                }
+                if self.result_mode_ok_is_result.contains(mname) {
+                    self.result_mode_ok_is_result.insert(fqn);
+                }
                 self.reject_bound_type_params(&named, &mut settled, &m.0.into_range());
             } else {
                 settled.extend(

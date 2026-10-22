@@ -24,19 +24,14 @@ fn find_from(hay: &[u8], needle: &[u8], start: i64) -> i64 {
     if needle.is_empty() {
         return start as i64;
     }
-    hay[start..]
-        .windows(needle.len())
-        .position(|w| w == needle)
-        .map_or(-1, |i| (start + i) as i64)
+    memchr::memmem::find(&hay[start..], needle).map_or(-1, |i| (start + i) as i64)
 }
 
 fn rfind(hay: &[u8], needle: &[u8]) -> i64 {
     if needle.is_empty() {
         return hay.len() as i64;
     }
-    hay.windows(needle.len())
-        .rposition(|w| w == needle)
-        .map_or(-1, |i| i as i64)
+    memchr::memmem::rfind(hay, needle).map_or(-1, |i| i as i64)
 }
 
 fn match_at(hay: &[u8], needle: &[u8], at: i64) -> bool {
