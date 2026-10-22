@@ -1000,25 +1000,13 @@ impl Compiler {
     /// slots, `[payload, tag]` / `[start, end]`, when every call reaches the function directly: not a fn value, method,
     /// overload, generic or coroutine, which keep the one-word boxed ABI.
     fn callee_has_unboxed_range_params(&self, name: &str) -> bool {
-        let Some(params) = self.callee_param_tys_for_pairs(name) else {
-            return false;
-        };
-        params
-            .iter()
-            .any(|ty| self.param_pair_kind(name, ty).is_some())
+        self.callee_param_pairs_all(name).iter().any(Option::is_some)
     }
 
-    fn callee_param_tys_for_pairs(&self, name: &str) -> Option<Vec<Ty>> {
+    /// What decides `name`'s parameters' calling convention
+    /// ([`crate::layout::convention_param`]), and its parameter types.
+    fn callee_param_facts(&self, name: &str) -> Option<(crate::layout::CalleeFacts, Vec<Ty>)> {
         let lookup = strip_overload_key(name);
-        if self.is_fn_value_escaped(lookup) || self.is_fn_value_escaped(name) {
-            return None;
-        }
-        if self.checker.inherent_method_visibility(lookup).is_some()
-            || is_instance_method_fqn(&self.checker, lookup)
-            || is_instance_method_fqn(&self.checker, name)
-        {
-            return None;
-        }
         let params = self
             .checker
             .fn_param_tys(name)
@@ -1027,41 +1015,36 @@ impl Compiler {
         // function value keeps the one-word ABI.
         let under_applied =
             (0..params.len()).any(|argc| self.is_fn_value_escaped(&format!("{lookup}#{argc}")));
-        (!under_applied).then_some(params)
+        let facts = crate::layout::CalleeFacts {
+            escaped: self.is_fn_value_escaped(lookup) || self.is_fn_value_escaped(name) || under_applied,
+            inherent_method: self.checker.inherent_method_visibility(lookup).is_some(),
+            instance_method: is_instance_method_fqn(&self.checker, lookup) || is_instance_method_fqn(&self.checker, name),
+            overloaded_or_generic: self.checker.is_overloaded(lookup) || self.checker.is_generic_fn(lookup),
+            coroutine: self.coroutine_fns.contains(name) || self.coroutine_fns.contains(lookup),
+            host_native: false,
+        };
+        Some((facts, params))
     }
 
-    /// The two-word kind a parameter of type `ty` of `callee` takes, if any
-    /// (see [`Self::callee_has_unboxed_range_params`]).
-    pub(super) fn param_pair_kind(&self, callee: &str, ty: &Ty) -> Option<PairKind> {
-        if let Some(kind) = crate::layout::two_word_range_kind(ty) {
-            return Some(kind);
-        }
-        let lookup = strip_overload_key(callee);
-        if self.checker.is_overloaded(lookup)
-            || self.checker.is_generic_fn(lookup)
-            || self.coroutine_fns.contains(callee)
-            || self.coroutine_fns.contains(lookup)
-        {
-            return None;
-        }
-        // A boxed tuple splits into `[a, b]` through a temp slot, which is
-        // unsafe above live operands, so products (and readonly classes
-        // laid out as them) stay one boxed word.
-        crate::layout::two_word_kind(&self.checker, ty)
-            .filter(|kind| self.hir_pair_kind(kind) && !matches!(kind, PairKind::Product | PairKind::Class(_)))
+    /// Per parameter of `name`, its two-slot form ([`crate::layout::convention_param`]).
+    fn callee_param_pairs_all(&self, name: &str) -> Vec<Option<PairKind>> {
+        let Some((facts, params)) = self.callee_param_facts(name) else {
+            return Vec::new();
+        };
+        params
+            .iter()
+            .map(|ty| crate::layout::convention_param(&self.checker, &facts, ty, |kind| self.hir_pair_kind(kind)))
+            .collect()
     }
 
     /// Per parameter of `callee`, the two-word kind it takes (empty when it
     /// takes none).
     pub(super) fn callee_param_pairs(&self, callee: &str) -> Vec<Option<PairKind>> {
-        if !self.callee_has_unboxed_range_params(callee) {
+        let pairs = self.callee_param_pairs_all(callee);
+        if pairs.iter().all(Option::is_none) {
             return Vec::new();
         }
-        self.callee_param_tys_for_pairs(callee)
-            .unwrap_or_default()
-            .iter()
-            .map(|ty| self.param_pair_kind(callee, ty))
-            .collect()
+        pairs
     }
 
     /// The function being compiled's key that answers
@@ -4907,30 +4890,24 @@ impl Compiler {
     }
 
     fn compute_two_word_return_kind(&self, name: &str) -> Option<PairKind> {
-        if self.coroutine_fns.contains(name) {
-            return None;
-        }
-        // Escaping CallIndirect/MakeFn/PolyFn/FFI/spawn keep one-word boxed ABI; prefer package-wide seed.
-        if self.is_fn_value_escaped(name) {
-            return None;
-        }
-        // Trait instance methods are dictionary entries (`CodePtr`), so they
-        // keep the one-word ABI unless a definition site pinned a pair
-        // (`pin_trait_method_pair_return`: Iterator / IntoIterator).
-        if is_instance_method_fqn(&self.checker, name) {
-            return None;
-        }
         let lookup = strip_overload_key(name);
-        // Host natives never use two-slot CALL/RETURN (one packed HostInvoke word).
-        if self.ident_is_host_native(name) || self.ident_is_host_native(lookup) {
-            return None;
-        }
+        // Escaping CallIndirect/MakeFn/PolyFn/FFI/spawn keep one-word boxed
+        // ABI; trait instance methods are dictionary entries (`CodePtr`)
+        // unless a definition site pinned a pair
+        // (`pin_trait_method_pair_return`: Iterator / IntoIterator).
+        let facts = crate::layout::CalleeFacts {
+            coroutine: self.coroutine_fns.contains(name),
+            escaped: self.is_fn_value_escaped(name),
+            instance_method: is_instance_method_fqn(&self.checker, name),
+            host_native: self.ident_is_host_native(name) || self.ident_is_host_native(lookup),
+            ..crate::layout::CalleeFacts::default()
+        };
         // `fn_return_ty` is not by-name lookup; must not feed this classifier (steals caller return ty).
         let ty = self
             .checker
             .fn_return_ty(name)
             .or_else(|| self.checker.fn_return_ty(lookup))?;
-        crate::layout::two_word_kind(&self.checker, &ty)
+        crate::layout::convention_ret(&self.checker, &facts, &ty)
     }
 
     /// Trait methods live under `Class__Type__method` FQNs that `env` lookup

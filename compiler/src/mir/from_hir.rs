@@ -4518,8 +4518,16 @@ impl Lower<'_> {
 
     /// The word a plain one-word local holds, as a `Local` read.
     fn local_word(&mut self, local: HirLocal) -> Result<ValueId, Refusal> {
-        if self.pair_local(local).is_some() {
-            return Err("capture pair".into());
+        // A two-slot local is one word, its box, wherever a word is
+        // required (a capture).
+        if let Some((lo, hi, lo_ty, hi_ty)) = self.pair_local(local) {
+            let ty = self.hir.local(local).ty.clone().ok_or("capture pair type")?;
+            let lo = self.b.use_local(lo, lo_ty).map_err(mir)?;
+            let hi = self.b.use_local(hi, hi_ty).map_err(mir)?;
+            return match self.box_pair_val(&ty, lo, hi)? {
+                Val::V(v) => Ok(v),
+                _ => Err("capture pair".into()),
+            };
         }
         if let Some(&v) = self.aliases.get(&local.0) {
             return Ok(v);

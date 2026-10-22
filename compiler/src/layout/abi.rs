@@ -96,6 +96,56 @@ pub fn two_word_kind(checker: &Checker, ty: &Ty) -> Option<PairKind> {
     }
 }
 
+/// What the code generator knows of a callee that decides its calling
+/// convention. Two slots are only a calling convention: a direct `CALL` /
+/// `RETURN` of a ground callee whose address never escapes; everywhere a
+/// value must be one word (a field, a capture, a container, a shared
+/// body, a dictionary or closure call) it is its box ([`two_word_kind`]'s
+/// object, `box_pair_val` in MIR).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CalleeFacts {
+    /// A function value, partial application, `spawn` or FFI takes its
+    /// address: every caller uses the one-word ABI.
+    pub escaped: bool,
+    /// A `gen fn`: its call is `MakeCoro`, its result the handle word.
+    pub coroutine: bool,
+    /// A host native: one packed `HostInvoke` word.
+    pub host_native: bool,
+    /// A trait instance method: a dictionary entry (`CodePtr`), unless a
+    /// definition site pinned its result's pair.
+    pub instance_method: bool,
+    /// An inherent method: its parameters stay one word.
+    pub inherent_method: bool,
+    /// An overloaded or generic function: its parameters stay one word
+    /// (a numeric range's two words excepted).
+    pub overloaded_or_generic: bool,
+}
+
+/// The two-slot form of a callee's result of type `ret`, if any.
+pub fn convention_ret(checker: &Checker, facts: &CalleeFacts, ret: &Ty) -> Option<PairKind> {
+    if facts.coroutine || facts.escaped || facts.instance_method || facts.host_native {
+        return None;
+    }
+    two_word_kind(checker, ret)
+}
+
+/// The two-slot form of a callee's parameter of type `ty`, if any: a
+/// numeric range, or a pair enum `enum_pair` admits. Products and
+/// readonly classes stay one boxed word (a boxed tuple would split into
+/// `[a, b]` through a temp slot above live operands).
+pub fn convention_param(checker: &Checker, facts: &CalleeFacts, ty: &Ty, enum_pair: impl Fn(&PairKind) -> bool) -> Option<PairKind> {
+    if facts.escaped || facts.instance_method || facts.inherent_method {
+        return None;
+    }
+    if let Some(kind) = two_word_range_kind(ty) {
+        return Some(kind);
+    }
+    if facts.overloaded_or_generic || facts.coroutine {
+        return None;
+    }
+    two_word_kind(checker, ty).filter(|kind| !matches!(kind, PairKind::Product | PairKind::Class(_)) && (matches!(kind, PairKind::Range { .. }) || enum_pair(kind)))
+}
+
 #[cfg(test)]
 mod pair_tests {
     use super::*;
