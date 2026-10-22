@@ -3,8 +3,7 @@
 //
 // @output small big
 
-use io::stdout;
-use io::sync::write_all;
+use io::{stdout, write};
 use string::to_bytes;
 
 fn size(int n) -> string {
@@ -21,5 +20,5 @@ fn main() {
     } else {
         ""
     };
-    let _ = write_all(stdout(), to_bytes(size(3) + sep + size(30)));
+    let _ = write(stdout(), to_bytes(size(3) + sep + size(30)));
 }

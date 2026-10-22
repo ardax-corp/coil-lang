@@ -2,8 +2,7 @@
 // expression, and it binds as a primary, so `+ 1` applies to the whole `if`
 // (as after a `match`).
 // @output 1 2 11 4
-use io::stdout;
-use io::sync::write_all;
+use io::{stdout, write};
 use string::{format, to_bytes};
 
 fn main() {
@@ -29,5 +28,5 @@ fn main() {
     } else {
         0
     };
-    let _ = write_all(stdout(), to_bytes(format("%i %i %i %i", a, b, d, e)));
+    let _ = write(stdout(), to_bytes(format("%i %i %i %i", a, b, d, e)));
 }

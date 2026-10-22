@@ -1,8 +1,7 @@
 // An `else if` chain as a value: each branch's trailing expression, joined
 // to one type (`string` here).
 // @output neg zero small big
-use io::stdout;
-use io::sync::write_all;
+use io::{stdout, write};
 use string::to_bytes;
 
 fn name(int n) -> string {
@@ -19,5 +18,5 @@ fn name(int n) -> string {
 
 fn main() {
     let s = name(-3) + " " + name(0) + " " + name(4) + " " + name(40);
-    let _ = write_all(stdout(), to_bytes(s));
+    let _ = write(stdout(), to_bytes(s));
 }

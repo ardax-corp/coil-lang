@@ -1,8 +1,7 @@
 // `return if … else …;` returns on every path, so a non-unit function needs
 // no other `return` (E0111 does not fire).
 // @output 5 -5
-use io::stdout;
-use io::sync::write_all;
+use io::{stdout, write};
 use string::{format, to_bytes};
 
 fn abs(int n) -> int {
@@ -19,5 +18,5 @@ fn main() {
     } else {
         0
     };
-    let _ = write_all(stdout(), to_bytes(format("%i %i", abs(-5), neg)));
+    let _ = write(stdout(), to_bytes(format("%i %i", abs(-5), neg)));
 }

@@ -1,8 +1,7 @@
 // A statement `if` keeps its behaviour next to the expression form: no
 // `else` needed, bodies are statements, and no `;` after the `}`.
 // @output 1 3
-use io::stdout;
-use io::sync::write_all;
+use io::{stdout, write};
 use string::{format, to_bytes};
 
 fn main() {
@@ -16,5 +15,5 @@ fn main() {
     } else if x == 2 {
         y = 4;
     }
-    let _ = write_all(stdout(), to_bytes(format("%i %i", x, y)));
+    let _ = write(stdout(), to_bytes(format("%i %i", x, y)));
 }

@@ -1,7 +1,6 @@
 // An `if` expression as a call argument and as an operand.
 // @output 14 7
-use io::stdout;
-use io::sync::write_all;
+use io::{stdout, write};
 use string::{format, to_bytes};
 
 fn twice(int n) -> int {
@@ -20,5 +19,5 @@ fn main() {
     } else {
         0
     };
-    let _ = write_all(stdout(), to_bytes(format("%i %i", a, b)));
+    let _ = write(stdout(), to_bytes(format("%i %i", a, b)));
 }
