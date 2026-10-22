@@ -2,7 +2,7 @@
 //!
 //! Runs after `check_program` on the same AST. Types come from the
 //! [`TypedSidecar`] (by span, then by [`NodeId`]); layouts from
-//! [`super::layout::of`]. Sugar is removed here:
+//! [`crate::layout::of`]. Sugar is removed here:
 //!
 //! - `e?` is a `Match` whose miss arm returns the `None` / `Err`.
 //! - `a ?? b` is a `Match` with `b` in the miss arm.
@@ -23,7 +23,7 @@ use parser::ast::{
     PatternPayload,
 };
 
-use super::layout::{self, Layout};
+use crate::layout::{self, Layout};
 use super::{
     BinOp, BodyKind, Builtin, Callee, HirArm, HirBody, HirExpr, HirFlags, HirId, HirKind,
     HirLocal, HirModule, HirPat, HirPatFields, IndexKind, Lit, LocalId, LocalKind, MakeKind, Span,

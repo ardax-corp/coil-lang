@@ -304,7 +304,7 @@ impl IlModule {
         // Leaf-first: a caller may take dense once every callee it CALLs is dense.
         // Every other body takes LIR from its MIR (lowered from HIR).
         self.needs_frame_extent.clear();
-        let mut dense_calls = crate::mir::DenseCallMap::new();
+        let mut dense_calls = crate::layout::DenseCallMap::new();
         // Pinned (`defer`) bodies try LIR below, with their cleanup pad.
         let mut pending: Vec<usize> = (0..self.funcs.len())
             .filter(|&i| !self.funcs[i].meta.pinned)

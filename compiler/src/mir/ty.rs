@@ -11,7 +11,7 @@ use crate::typechecking::infer::Checker;
 #[cfg(test)]
 use crate::typechecking::{Ty, ty as coil_ty, ty::is_option_ty};
 
-use super::layout::MirLayout;
+use crate::layout::MirLayout;
 
 /// Specialized numeric + heap/niche types plus lattice bounds.
 ///
@@ -182,7 +182,7 @@ impl MirTy {
             MirLayout::HeapNiche => Self::NicheRes,
             MirLayout::TwoSlot => Self::Value,
             MirLayout::Word => {
-                if crate::hir::layout::niche_heap_only(checker, ty) {
+                if crate::layout::niche_heap_only(checker, ty) {
                     Self::HeapRef
                 } else {
                     match ty {

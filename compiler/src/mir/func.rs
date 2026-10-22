@@ -6,7 +6,7 @@ use common::DebugLoc;
 
 use super::gc::LiveRootSet;
 use super::inst::{BlockId, LocalId, MirDeoptKind, MirInst, Terminator, ValueId};
-use super::layout::MirLayout;
+use crate::layout::MirLayout;
 use super::ty::MirTy;
 
 /// One leave / stop edge with live IL locals (I7 / C3). Sidecar only.

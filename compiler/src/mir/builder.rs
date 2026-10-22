@@ -514,7 +514,7 @@ impl MirBuilder {
         &mut self,
         target: crate::il::Label,
         args: Vec<ValueId>,
-        abi: &super::abi::DenseAbi,
+        abi: &crate::layout::DenseAbi,
     ) -> Result<(ValueId, Option<ValueId>), MirError> {
         if abi.params.len() != args.len() {
             return Err(MirError::msg(format!(
@@ -1154,7 +1154,7 @@ impl MirBuilder {
         let hi = self.resolve(hi);
         self.func.ret_ty = Some(self.func.ret_ty.unwrap_or_else(|| self.resolve_ty(lo)));
         self.func.ret_hi_ty = Some(self.func.ret_hi_ty.unwrap_or_else(|| self.resolve_ty(hi)));
-        self.func.ret_layout = super::layout::MirLayout::TwoSlot;
+        self.func.ret_layout = crate::layout::MirLayout::TwoSlot;
         self.set_term(Terminator::Return {
             lo: Some(lo),
             hi: Some(hi),
@@ -1625,7 +1625,7 @@ mod tests {
         let mut b = MirBuilder::new("word");
         let word = b.add_param(MirTy::I64).unwrap();
         let heap = b.add_param(MirTy::HeapRef).unwrap();
-        let abi = |p| crate::mir::abi::DenseAbi {
+        let abi = |p| crate::layout::DenseAbi {
             params: vec![p],
             ret: MirTy::I64,
             ret_hi: None,

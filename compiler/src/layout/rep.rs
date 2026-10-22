@@ -1,14 +1,15 @@
-//! The one layout query: how a value of a type crosses a word, a `CALL` and
-//! a `RETURN`.
+//! Value representation: how a value of a static type is held in a word,
+//! crosses a `CALL` / `RETURN`, and reads to the GC.
 //!
-//! [`of`] decides one [`Layout`] per type. The older entry points are thin
-//! views of it:
+//! [`of`] decides one [`Layout`] per type; every other answer here is a
+//! view of it:
 //!
-//! - [`crate::typechecking::value_layout::value_layout`] is the one-word
-//!   encoding (boxed or a pointer niche).
-//! - [`crate::typechecking::return_layout::two_word_kind`] is the
-//!   two-slot direct `CALL`/`RETURN` width.
-//! - [`crate::mir::MirLayout`] is the MIR ABI class.
+//! - [`value_layout`] is the one-word encoding (boxed or a pointer niche),
+//!   which codegen, `HostInvoke` packing and FFI repacking all ask.
+//! - [`word_kind`] / [`array_elem_stamp`] are what the GC and array stamps
+//!   read a word as.
+//! - [`super::abi::two_word_kind`] is the two-slot direct `CALL`/`RETURN`
+//!   width, and [`super::abi::MirLayout`] the MIR ABI class.
 //!
 //! The two-slot and niche cases are disjoint: a pair needs an immediate
 //! payload, a niche a heap one.
@@ -344,6 +345,197 @@ pub fn bind_params(ty: &Ty, params: &[String], args: &[Ty]) -> Ty {
     }
 }
 
+/// One-word representation of a value of some type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueLayout {
+    /// Immediate, heap object, or boxed `ObjEnum` — no special encoding.
+    Boxed,
+    /// `Option<T>` with heap `T`: `0` is `None`, otherwise the payload pointer.
+    NicheOption,
+    /// `Result<(), E>` with heap `E`: `0` is `Ok(())`, otherwise the error pointer.
+    NicheUnitResult,
+    /// `Result<T, E>` with heap `T` and `E`: `Ok` is the pointer, `Err` is `pointer | 1`.
+    NicheResult,
+}
+
+impl ValueLayout {
+    pub fn is_niche_option(&self) -> bool {
+        matches!(self, Self::NicheOption)
+    }
+
+    pub fn is_niche_unit_result(&self) -> bool {
+        matches!(self, Self::NicheUnitResult)
+    }
+
+    pub fn is_niche_result(&self) -> bool {
+        matches!(self, Self::NicheResult)
+    }
+
+    /// `HostInvoke` layout bits a host native packs this value with.
+    pub fn host_enum_layout(&self) -> u32 {
+        match self {
+            Self::NicheOption | Self::NicheUnitResult => common::HOST_ENUM_LAYOUT_OPTION_NICHE,
+            Self::NicheResult => common::HOST_ENUM_LAYOUT_RESULT_NICHE,
+            Self::Boxed => common::HOST_ENUM_LAYOUT_BOXED,
+        }
+    }
+}
+
+/// Layout of a value of type `ty` (resolved through the checker's substitution).
+/// The one-word view of [`crate::layout::of`]: a two-slot pair is boxed.
+pub fn value_layout(checker: &Checker, ty: &Ty) -> ValueLayout {
+    let ty = apply_ty_prune(checker.subst(), ty);
+    ValueLayout::from(&niche_of(checker, &ty))
+}
+
+impl From<&Layout> for ValueLayout {
+    fn from(layout: &Layout) -> Self {
+        match layout {
+            Layout::NicheOption => Self::NicheOption,
+            Layout::NicheUnitResult => Self::NicheUnitResult,
+            Layout::NicheResult => Self::NicheResult,
+            Layout::Word | Layout::Pair(_) => Self::Boxed,
+        }
+    }
+}
+
+/// How a heap word of static type `ty` reads (`common::WORD_*`): a number /
+/// bool / scalar enum is never a reference; a ground heap object or a niche
+/// word is `0` or an object address (bit 0 set for a `Result` `Err`);
+/// anything generic or unresolved stays unknown.
+pub fn word_kind(checker: &Checker, ty: &Ty) -> u8 {
+    let ty = apply_ty_prune(checker.subst(), ty);
+    let ty = strip_readonly(&ty);
+    if let Ty::Con(name) = ty
+        && matches!(
+            name.as_str(),
+            crate::typechecking::ty::INT | crate::typechecking::ty::FLOAT | crate::typechecking::ty::BOOL | crate::typechecking::ty::BYTE | UNIT
+        )
+    {
+        return common::WORD_SCALAR;
+    }
+    if is_scalar_enum_ty(checker, ty) {
+        // A `#[repr(string)]` value is its backing string's heap word.
+        let string = scalar_enum_name(checker, ty)
+            .and_then(|name| checker.scalar_value_ty(name))
+            .is_some_and(|b| matches!(strip_readonly(&b), Ty::Con(n) if n == crate::typechecking::ty::STRING));
+        return if string { common::WORD_POINTER } else { common::WORD_SCALAR };
+    }
+    if niche_heap_only(checker, ty) || value_layout(checker, ty) != ValueLayout::Boxed {
+        return common::WORD_POINTER;
+    }
+    // A `Vec<T>` / `[T]` / `[T; N]` word is always an array object, whatever
+    // `T` is (a fixed array stored as a word is materialized on the heap).
+    if matches!(ty, Ty::Array { .. })
+        || matches!(ty, Ty::App(head, _) if matches!(head.as_ref(), Ty::Con(n) if n == common::BUILTIN_VEC_TYPE))
+    {
+        return common::WORD_POINTER;
+    }
+    common::WORD_UNKNOWN
+}
+
+/// Element kind an array of `elem` is stamped with at construction
+/// (`MakeArrayK`): `WORD_POINTER` for ground heap words,
+/// `WORD_BYTE` for `byte` / `bool` (the runtime packs those one byte per
+/// element), else `WORD_UNKNOWN` (no stamp).
+pub fn array_elem_stamp(checker: &Checker, elem: &Ty) -> u8 {
+    let ty = apply_ty_prune(checker.subst(), elem);
+    if let Ty::Con(name) = strip_readonly(&ty)
+        && matches!(name.as_str(), crate::typechecking::ty::BOOL | crate::typechecking::ty::BYTE)
+    {
+        return common::WORD_BYTE;
+    }
+    match word_kind(checker, &ty) {
+        common::WORD_POINTER => common::WORD_POINTER,
+        _ => common::WORD_UNKNOWN,
+    }
+}
+
+/// `Some(elem)` when `ty` is `Vec<elem>` / `[elem]`.
+pub fn vec_elem_ty(checker: &Checker, ty: &Ty) -> Option<Ty> {
+    let ty = apply_ty_prune(checker.subst(), ty);
+    match strip_readonly(&ty) {
+        Ty::App(head, args)
+            if args.len() == 1
+                && matches!(head.as_ref(), Ty::Con(n) if n == common::BUILTIN_VEC_TYPE) =>
+        {
+            Some(args[0].clone())
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
-#[path = "layout.tests.rs"]
+mod word_tests {
+    use super::*;
+    use crate::typechecking::ty::{array, int, option_ty, result_ty, string, unit};
+
+    #[test]
+    fn layouts_follow_payload_heapness() {
+        let c = Checker::new();
+        let layout = |ty: Ty| value_layout(&c, &ty);
+        assert_eq!(layout(option_ty(string())), ValueLayout::NicheOption);
+        assert_eq!(layout(option_ty(int())), ValueLayout::Boxed);
+        assert_eq!(
+            layout(result_ty(unit(), string())),
+            ValueLayout::NicheUnitResult
+        );
+        assert_eq!(
+            layout(result_ty(string(), string())),
+            ValueLayout::NicheResult
+        );
+        assert_eq!(layout(result_ty(int(), string())), ValueLayout::Boxed);
+        assert_eq!(layout(string()), ValueLayout::Boxed);
+    }
+
+    #[test]
+    fn word_kinds_follow_static_types() {
+        let c = Checker::new();
+        let kind = |ty: Ty| word_kind(&c, &ty);
+        assert_eq!(kind(int()), common::WORD_SCALAR);
+        assert_eq!(kind(Ty::Con("float".into())), common::WORD_SCALAR);
+        assert_eq!(kind(Ty::Con("bool".into())), common::WORD_SCALAR);
+        assert_eq!(kind(unit()), common::WORD_SCALAR);
+        assert_eq!(kind(string()), common::WORD_POINTER);
+        assert_eq!(kind(option_ty(string())), common::WORD_POINTER);
+        assert_eq!(kind(result_ty(string(), string())), common::WORD_POINTER);
+        // Boxed `Option<int>` and unresolved generics stay unknown.
+        assert_eq!(kind(option_ty(int())), common::WORD_UNKNOWN);
+        assert_eq!(kind(Ty::Con("T".into())), common::WORD_UNKNOWN);
+        // Arrays are objects whatever their element type.
+        assert_eq!(kind(array(Ty::Var(crate::typechecking::ty::TyVarId(0)))), common::WORD_POINTER);
+    }
+
+    #[test]
+    fn array_stamps_pack_bytes_and_bools_only() {
+        let c = Checker::new();
+        let stamp = |ty: Ty| array_elem_stamp(&c, &ty);
+        assert_eq!(stamp(Ty::Con("byte".into())), common::WORD_BYTE);
+        assert_eq!(stamp(Ty::Con("bool".into())), common::WORD_BYTE);
+        assert_eq!(stamp(int()), common::WORD_UNKNOWN);
+        assert_eq!(stamp(Ty::Con("float".into())), common::WORD_UNKNOWN);
+        assert_eq!(stamp(string()), common::WORD_POINTER);
+        assert_eq!(stamp(option_ty(int())), common::WORD_UNKNOWN);
+        assert_eq!(stamp(Ty::Con("T".into())), common::WORD_UNKNOWN);
+    }
+
+    #[test]
+    fn host_bits_match_layout() {
+        assert_eq!(
+            ValueLayout::NicheUnitResult.host_enum_layout(),
+            common::HOST_ENUM_LAYOUT_OPTION_NICHE
+        );
+        assert_eq!(
+            ValueLayout::NicheResult.host_enum_layout(),
+            common::HOST_ENUM_LAYOUT_RESULT_NICHE
+        );
+        assert_eq!(
+            ValueLayout::Boxed.host_enum_layout(),
+            common::HOST_ENUM_LAYOUT_BOXED
+        );
+    }
+}
+
+#[cfg(test)]
+#[path = "rep.tests.rs"]
 mod tests;
