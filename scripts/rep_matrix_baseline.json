@@ -30,13 +30,6 @@
     "detail": "exit -6: internal compiler error: 1 body fell back to the HIR stack lowering: `popped` (no MIR from HIR: stack array type)",
     "status": "crash"
   },
-  "scalar_enum__thread_join": {
-    "codes": [
-      "E0119"
-    ],
-    "detail": "Error: [E0119] spawn closure capture `x` of type `Lvl` is not sendable across threads",
-    "status": "refused"
-  },
   "scalar_enum__tuple_item": {
     "detail": "exit -6: internal compiler error: 1 body fell back to the HIR stack lowering: `untupled` (no MIR from HIR: pair operand)",
     "status": "crash"

@@ -1477,6 +1477,10 @@ impl Checker {
                 {
                     return true;
                 }
+                // A `#[repr(..)]` enum is an immediate word (#1904).
+                if self.is_scalar_enum(name) {
+                    return true;
+                }
                 // User class: sendable when every field type is sendable
                 // (so `spawn(f, mailbox)` works for a class of channel ends).
                 if let Some(fields) = self.classes.get(name) {
