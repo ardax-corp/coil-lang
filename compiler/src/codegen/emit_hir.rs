@@ -3182,11 +3182,11 @@ impl Compiler {
             if lam.is_coro {
                 return Err("lambda-body");
             }
-            // Captures are plain one-word locals of this body.
+            // Captures are one-word locals of this body; a two-slot one is
+            // captured as its box.
             for &(outer, _) in &lam.captures {
                 let plain = (outer.0 as usize) < hir.locals.len()
                     && !emit.plan.sroa.contains_key(&outer.0)
-                    && !emit.plan.pair_locals.contains_key(&outer.0)
                     && !emit.plan.stacks.contains_key(&outer.0)
                     && hir
                         .local(outer)

@@ -1,18 +1,4 @@
 {
-  "option_int__closure_capture": {
-    "codes": [
-      "E0801"
-    ],
-    "detail": "lambda-capture",
-    "status": "refused"
-  },
-  "option_int__thread_join": {
-    "codes": [
-      "E0801"
-    ],
-    "detail": "lambda-capture",
-    "status": "refused"
-  },
   "result_unit__hashmap_entry": {
     "codes": [
       "E0801"
