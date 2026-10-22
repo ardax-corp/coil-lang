@@ -8,7 +8,7 @@
 //! checker or sidecar fact is found for it; lowering clears the debug
 //! locations it would derive from it.
 
-use super::layout;
+use crate::layout;
 use super::{BinOp, Builtin, Callee, HirArm, HirBody, HirExpr, HirFlags, HirId, HirKind, HirLocal, HirPat, Lit, LocalId, LocalKind};
 use crate::typechecking::infer::Checker;
 use crate::typechecking::ty::{self as coil_ty, Ty};

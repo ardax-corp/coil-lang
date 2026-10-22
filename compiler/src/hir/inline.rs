@@ -340,7 +340,7 @@ fn push_expr(b: &mut HirBody, kind: HirKind, ty: Option<ty::Ty>, span: super::Sp
     b.exprs.push(HirExpr {
         kind,
         ty,
-        layout: super::layout::Layout::Word,
+        layout: crate::layout::Layout::Word,
         span,
         node: None,
         flags: HirFlags::default(),
@@ -888,7 +888,7 @@ impl Inliner<'_> {
         let e = &mut self.body.exprs[id.0 as usize];
         e.kind = HirKind::Lit(Lit::Unit);
         e.ty = Some(ty::unit());
-        e.layout = super::layout::Layout::Word;
+        e.layout = crate::layout::Layout::Word;
         e.node = None;
     }
 
@@ -897,7 +897,7 @@ impl Inliner<'_> {
         self.body.exprs.push(HirExpr {
             kind,
             ty,
-            layout: super::layout::Layout::Word,
+            layout: crate::layout::Layout::Word,
             span,
             node: None,
             flags: HirFlags::default(),

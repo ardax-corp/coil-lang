@@ -6,7 +6,7 @@
 
 use std::fmt::Write;
 
-use super::layout::{Layout, PairKind};
+use crate::layout::{Layout, PairKind};
 use super::{
     BinOp, Callee, HirBody, HirFlags, HirId, HirKind, HirModule, HirPat, HirPatFields, Lit,
     LocalId, LocalKind, MakeKind,

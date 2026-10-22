@@ -24,6 +24,7 @@ pub use hir::effects::{
 pub use hir::{ContractLevel, start_hir_capture, take_hir_capture};
 pub use mir::{start_mir_capture, take_mir_capture};
 pub(crate) mod hir;
+mod layout;
 mod host_grants;
 mod local_scopes;
 pub mod macros;

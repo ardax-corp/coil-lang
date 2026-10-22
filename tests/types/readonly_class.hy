@@ -57,7 +57,7 @@ test("equality and hash are structural") {
     assert!(a.hash() == b.hash());
     let m: HashMap<Point, string> = HashMap::new();
     m.insert(a, "a");
-    assert!(m.get(b, "") == "a");
+    assert!(m.get_or(b, "") == "a");
 }
 
 test("readonly Point is Point") {

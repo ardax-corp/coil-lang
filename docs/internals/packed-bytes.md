@@ -36,7 +36,7 @@ words if any element does not fit). The legacy `TagArrayKind` (stamping an
 existing array; older archives only) does the same.
 
 - Array literals: `emit_hir` stamps `MakeArrayK` with
-  `value_layout::array_elem_stamp` (byte / bool → `WORD_BYTE`).
+  `layout::array_elem_stamp` (byte / bool → `WORD_BYTE`).
 - `Vec::new` / `with_capacity`: `$bytes` thunk twins (next to the `$ptr`
   ones) make the empty array with `MakeArrayK WORD_BYTE` (then `reserve`);
   call sites pick them by static type, in every tier (the MIR tiers call the

@@ -2186,8 +2186,8 @@ fn main() {
     m.insert(\"a\", new Point(5));
     let r: HashMap<string, readonly Point> = HashMap::new();
     r.insert(\"a\", new Point(6));
-    let p = m.get(\"a\", new Point(0));
-    let q = r.get(\"a\", new Point(0));
+    let p = m.get_or(\"a\", new Point(0));
+    let q = r.get_or(\"a\", new Point(0));
 }
 ";
     let (_, pipeline) = compile_src_at(src, compiler::OptLevel::None);
@@ -2197,8 +2197,8 @@ fn main() {
         .map(|s| s.name.as_str())
         .filter(|n| n.contains("$inst$") && n.contains("Point"))
         .collect();
-    let gets = clones.iter().filter(|n| n.contains("::get$inst$")).count();
-    assert_eq!(gets, 1, "`get` should have one instance: {clones:?}");
+    let gets = clones.iter().filter(|n| n.contains("::get_or$inst$")).count();
+    assert_eq!(gets, 1, "`get_or` should have one instance: {clones:?}");
     assert!(
         clones.iter().all(|n| !n.contains("readonly")),
         "no clone should be keyed with `readonly`: {clones:?}"

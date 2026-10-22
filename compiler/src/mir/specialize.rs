@@ -7,7 +7,7 @@ use crate::il::{IlOp, Label};
 
 use std::collections::HashMap;
 
-use super::abi::{DenseAbi, DenseCallMap};
+use crate::layout::{DenseAbi, DenseCallMap};
 use super::deopt::DraftDeoptMap;
 use super::emit::emit_dense;
 

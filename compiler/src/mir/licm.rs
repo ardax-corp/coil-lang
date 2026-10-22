@@ -1150,7 +1150,7 @@ mod tests {
         let exit = b.create_block();
         b.jump(header).unwrap();
         b.switch_to_block(header);
-        let abi = crate::mir::abi::DenseAbi {
+        let abi = crate::layout::DenseAbi {
             params: vec![MirTy::I64],
             ret: MirTy::I64,
             ret_hi: Some(MirTy::I64),

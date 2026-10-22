@@ -260,7 +260,7 @@ matches (no inner host). Hit bench: `examples/perf/mir_dense_host.hy`.
 
 ## M1–M3 — typed dense→dense CALL (COI-291)
 
-One-word ABI ([`compiler/src/mir/abi.rs`](../../compiler/src/mir/abi.rs)):
+One-word ABI ([`compiler/src/layout/abi.rs`](../../compiler/src/layout/abi.rs)):
 
 - **Args:** `arity` Value words in callee slots `0..arity` (same bits as
   typed dense slots — `i64`/`f64`/`bool`).
@@ -464,8 +464,8 @@ or a nursery.
 
 ### Layouts (align with shipped codegen)
 
-[`MirLayout::from_coil_ty`](../../compiler/src/mir/layout.rs) matches
-[`return_layout`](../../compiler/src/typechecking/return_layout.rs) for
+[`MirLayout::from_coil_ty`](../../compiler/src/layout/abi.rs) matches
+[`two_word_kind`](../../compiler/src/layout/abi.rs) for
 builtins (user arity-≤1 enums stay classified only in codegen):
 
 | Shape | Layout | Edge |

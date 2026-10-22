@@ -2657,6 +2657,17 @@ impl Checker {
                 declarations,
             } => self.infer_extern_block(library, declarations, range),
 
+            // An `if` used as a value (the parser wraps only that form in
+            // `Expr`) needs an `else`: the false path has no value (#1877).
+            Expression::Expr(e) if if_value_without_else(e) => {
+                let _ = self.infer(e);
+                self.error_with_help(
+                    ErrorCode::IfWithoutElse,
+                    "`if` used as a value has no `else`".to_string(),
+                    range,
+                    Some("add an `else { … }` branch that gives the value when the condition is false".to_string()),
+                )
+            }
             Expression::Expr(e) | Expression::Group(e) | Expression::Statement(e) => self.infer(e),
             // Semicolon form discards the value (same as a Rust statement).
             Expression::ExprStatement(e) => {
@@ -19510,7 +19521,7 @@ impl Checker {
                 let fields = self.class_fields(key)?;
                 let kinds = fields
                     .iter()
-                    .map(|(_, ty)| crate::typechecking::value_layout::word_kind(self, ty))
+                    .map(|(_, ty)| crate::layout::word_kind(self, ty))
                     .collect();
                 Some(common::ClassWordKinds { type_id, kinds })
             })
@@ -19531,10 +19542,10 @@ impl Checker {
             .iter()
             .map(|(_, ty)| {
                 let ty = crate::typechecking::subst::apply_ty_prune(self.subst(), ty);
-                if crate::hir::layout::is_unit(&ty) {
+                if crate::layout::is_unit(&ty) {
                     common::WORD_UNKNOWN
                 } else {
-                    crate::typechecking::value_layout::word_kind(self, &ty)
+                    crate::layout::word_kind(self, &ty)
                 }
             })
             .collect();
@@ -19559,7 +19570,7 @@ impl Checker {
                 continue;
             }
             if let (Some(k), Some(ty)) = (kinds.get_mut(id as usize), self.static_slot_types.get(fqn)) {
-                *k = crate::typechecking::value_layout::word_kind(self, ty);
+                *k = crate::layout::word_kind(self, ty);
             }
         }
         kinds
@@ -21262,5 +21273,21 @@ fn result_depth(ty: &Ty) -> usize {
     match result_ok_err(ty) {
         Some((ok, _)) => 1 + result_depth(&ok),
         None => 0,
+    }
+}
+
+/// An `if` / `if let` with no `else`. Under an `Expr` wrapper (the value
+/// form the parser builds) that is E0137. A missing `if let` else is the
+/// empty block the parser spans over the whole `if let`.
+fn if_value_without_else(e: &Output) -> bool {
+    match e.1.as_ref() {
+        Expression::If(branches) => !branches
+            .iter()
+            .any(|b| matches!(b.1.as_ref(), Expression::Branch(None, _))),
+        Expression::IfLet { else_arm, .. } => {
+            matches!(else_arm.body.1.as_ref(), Expression::Block(items) if items.is_empty())
+                && else_arm.body.0 == e.0
+        }
+        _ => false,
     }
 }
