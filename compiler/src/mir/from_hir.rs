@@ -293,7 +293,11 @@ impl HirMirInput<'_> {
             .or_else(|| (self.scalar_enum)(ty))
             .or_else(|| (self.niche)(ty))
             .or_else(|| (self.boxed_enum)(ty, None).map(|_| MirTy::HeapRef))
-            .or_else(|| array_elem(ty).and_then(|e| self.heap_elem(e).or_else(|| (self.niche)(e))).map(|_| MirTy::HeapRef))
+            .or_else(|| {
+                array_elem(ty)
+                    .and_then(|e| self.heap_elem(e).or_else(|| (self.niche)(e)).or_else(|| (self.scalar_enum)(e)))
+                    .map(|_| MirTy::HeapRef)
+            })
             .or_else(|| (self.opaque_vars && is_var(ty)).then_some(MirTy::I64))
             .or_else(|| (self.opaque_vars && array_elem(ty).is_some_and(is_var)).then_some(MirTy::HeapRef))
             // A higher-kinded `P<A>` (a type variable applied): an object
@@ -328,7 +332,8 @@ impl HirMirInput<'_> {
     /// the word itself, as HIR emission stores it), or a heap word.
     fn elem_word(&self, arr: &Ty) -> Option<MirTy> {
         let elem = array_elem(arr)?;
-        match scalar(elem) {
+        // A scalar enum's element is its backing word (#1903).
+        match scalar(elem).or_else(|| (self.scalar_enum)(elem)) {
             Some(t) => Some(t),
             // A type parameter's element: the opaque word as stored.
             _ if self.opaque_vars && is_var(elem) => Some(MirTy::I64),
@@ -5235,6 +5240,8 @@ impl Lower<'_> {
     /// plain heap word.
     fn tuple_item(&self, ty: &Ty) -> Option<MirTy> {
         scalar(ty)
+            // A scalar enum item is its backing word (#1903).
+            .or_else(|| (self.inp.scalar_enum)(ty))
             // A `()` item is the empty tuple object (#1427).
             .or_else(|| is_unit(ty).then_some(MirTy::HeapRef))
             .or_else(|| self.inp.plain_heap(ty).then_some(MirTy::HeapRef))
