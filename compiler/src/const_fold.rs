@@ -270,7 +270,7 @@ fn lift_startup_const<'a>(node: &mut Output<'a>, env: &mut HashMap<String, Const
             let [binder, rhs] = parts.as_mut_slice() else {
                 return;
             };
-            let Expression::Constant(name, ty) = binder.1.as_mut() else {
+            let Expression::Constant(name, ty, docs) = binder.1.as_mut() else {
                 return;
             };
             let Expression::Identifier(name) = name.1.as_ref() else {
@@ -283,6 +283,7 @@ fn lift_startup_const<'a>(node: &mut Output<'a>, env: &mut HashMap<String, Const
             }
             let init = std::mem::replace(rhs, (rhs.0, Box::new(Expression::Integer(0))));
             Expression::StaticDecl {
+                docs: std::mem::take(docs),
                 is_const: true,
                 name,
                 ty: ty.take(),

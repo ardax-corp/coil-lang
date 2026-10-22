@@ -907,7 +907,7 @@ fn lambda_arg_node_ids_cached_before_body() {
             Expression::Program(cs) | Expression::Block(cs) | Expression::Fragment(cs) => {
                 cs.iter().find_map(find_lambda_arg_span)
             }
-            Expression::Variable(_, Some(value)) | Expression::Constant(_, Some(value)) => {
+            Expression::Variable(_, Some(value)) | Expression::Constant(_, Some(value), ..) => {
                 find_lambda_arg_span(value)
             }
             Expression::Lambda { args, .. } => {
@@ -955,7 +955,7 @@ fn lambda_multi_arg_node_ids_cached() {
                     out.extend(collect_lambda_arg_spans(c));
                 }
             }
-            Expression::Variable(_, Some(value)) | Expression::Constant(_, Some(value)) => {
+            Expression::Variable(_, Some(value)) | Expression::Constant(_, Some(value), ..) => {
                 out.extend(collect_lambda_arg_spans(value));
             }
             Expression::Lambda { args, .. } => {
@@ -1005,7 +1005,7 @@ fn nested_lambda_arg_node_ids_cached() {
                     out.extend(collect_lambda_arg_spans(c));
                 }
             }
-            Expression::Variable(_, Some(value)) | Expression::Constant(_, Some(value)) => {
+            Expression::Variable(_, Some(value)) | Expression::Constant(_, Some(value), ..) => {
                 out.extend(collect_lambda_arg_spans(value));
             }
             Expression::Lambda { args, body, .. } => {

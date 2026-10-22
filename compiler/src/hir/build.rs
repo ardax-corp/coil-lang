@@ -1178,7 +1178,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 let local = b.local(name, ty, LocalKind::Let);
                 self.emit_ty(b, node, HirKind::Let { local, init: None }, Some(coil_ty::unit()))
             }
-            E::Constant(name, _) => {
+            E::Constant(name, ..) => {
                 let n = match name.1.as_ref() {
                     E::Identifier(n) => n.to_string(),
                     _ => "<const>".to_string(),
@@ -1586,7 +1586,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                     let local = b.local(name, ty, LocalKind::Let);
                     return self.emit_ty(b, node, HirKind::Let { local, init: Some(init) }, Some(coil_ty::unit()));
                 }
-                Expression::Constant(name, _) => {
+                Expression::Constant(name, ..) => {
                     let n = match name.1.as_ref() {
                         Expression::Identifier(n) => n.to_string(),
                         _ => "<const>".to_string(),

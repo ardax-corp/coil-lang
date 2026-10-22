@@ -5781,7 +5781,7 @@ impl Compiler {
             | NamedArg(_, e)
             | Member(e)
             | Method(_, e)
-            | Constant(e, _)
+            | Constant(e, ..)
             | Variable(_, Some(e)) => Self::count_field_key_uses(e, counts),
             Variable(_, None) => {}
             Resume(e, Some(v)) | Coalesce(e, v) | Cast(e, v) | Index(e, Some(v)) => {
@@ -6113,7 +6113,7 @@ impl Compiler {
             match node.1.as_ref() {
                 Expression::Fragment(parts) => {
                     if let [binder, rhs] = parts.as_slice()
-                        && let Expression::Constant(name, _) = binder.1.as_ref()
+                        && let Expression::Constant(name, ..) = binder.1.as_ref()
                         && let Expression::Identifier(name) = name.1.as_ref()
                         && let Some(v) = crate::const_fold::eval_expr(rhs, &env)
                     {
@@ -6901,7 +6901,7 @@ impl Compiler {
             // bodies read; anything else here is a parameter list.
             Expression::Fragment(children) => {
                 if let [binder, rhs] = children.as_slice()
-                    && let Expression::Constant(name, _ty) = binder.1.as_ref()
+                    && let Expression::Constant(name, _ty, ..) = binder.1.as_ref()
                 {
                     let name = self.resolve_variable(name);
                     match crate::const_fold::eval_expr(rhs, self.const_env()) {

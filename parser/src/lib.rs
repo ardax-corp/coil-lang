@@ -2787,9 +2787,9 @@ impl<'pratt> Pratt<'pratt> {
         &self,
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
     {
-        just("static")
-            .padded_by(trivia())
-            .ignore_then(choice((
+        self.docs_prefix()
+            .then_ignore(just("static").padded_by(trivia()))
+            .then(choice((
                 keyword!("const").to(true),
                 just("let").padded_by(trivia()).to(false),
             )))
@@ -2798,10 +2798,11 @@ impl<'pratt> Pratt<'pratt> {
             .then_ignore(op!("="))
             .then(self.expr())
             .then_ignore(op!(";"))
-            .map_with(|(((is_const, name), ty), init), e| {
+            .map_with(|((((docs, is_const), name), ty), init), e| {
                 (
                     e.span(),
                     Box::new(Expression::StaticDecl {
+                        docs,
                         is_const,
                         name,
                         ty,
@@ -3276,13 +3277,14 @@ impl<'pratt> Pratt<'pratt> {
         expr: T,
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
     {
-        keyword!("const")
-            .ignore_then(text::ident().map_with(output!(Identifier)))
+        self.docs_prefix()
+            .then_ignore(keyword!("const"))
+            .then(text::ident().map_with(output!(Identifier)))
             .then(op!(":").ignore_then(self.type_annotation()).or_not())
             .then_ignore(op!("="))
             .then(expr)
-            .map_with(|((name, ty), val), e| {
-                let result = vec![(e.span(), Box::new(Expression::Constant(name, ty))), val];
+            .map_with(|(((docs, name), ty), val), e| {
+                let result = vec![(e.span(), Box::new(Expression::Constant(name, ty, docs))), val];
                 (e.span(), Box::new(Expression::Fragment(result)))
             })
     }

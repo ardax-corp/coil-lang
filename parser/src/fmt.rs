@@ -1047,7 +1047,8 @@ impl<'s> Formatter<'s> {
                     self.fmt_type(t);
                 }
             }
-            Expression::Constant(name, ty) => {
+            Expression::Constant(name, ty, docs) => {
+                self.fmt_docs(docs);
                 self.push_str("const ");
                 self.fmt_output(name);
                 if let Some(t) = ty {
@@ -1062,12 +1063,14 @@ impl<'s> Formatter<'s> {
                 self.fmt_value(rhs);
             }
             Expression::StaticDecl {
+                docs,
                 is_const,
                 name,
                 ty,
                 init,
                 ..
             } => {
+                self.fmt_docs(docs);
                 // `static const` is spelled `const` (#1558): a module
                 // `const` that does not fold is set once at startup.
                 if *is_const {
@@ -1876,7 +1879,8 @@ impl<'s> Formatter<'s> {
                     self.fmt_value(val);
                 }
             }
-            Expression::Constant(name, ty) => {
+            Expression::Constant(name, ty, docs) => {
+                self.fmt_docs(docs);
                 self.push_str("const ");
                 self.fmt_output(name);
                 if let Some(t) = ty {
