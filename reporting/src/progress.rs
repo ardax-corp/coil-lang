@@ -47,6 +47,8 @@ struct State {
     last_draw: Option<Instant>,
     /// A bar line is on screen and must be cleared before other output.
     drawn: bool,
+    /// [`Progress::finish`] was called: never draw again.
+    finished: bool,
 }
 
 /// A progress bar: `label [=====>    ] done/total  N failed  current`.
@@ -56,6 +58,9 @@ pub struct Progress {
     unit: String,
     enabled: bool,
     started: Instant,
+    /// Nothing draws before this much time has passed, so quick runs (a
+    /// small `coil compile`) never flash a bar.
+    delay: Duration,
     state: Mutex<State>,
 }
 
@@ -71,6 +76,7 @@ impl Progress {
             unit: unit.to_string(),
             enabled,
             started: Instant::now(),
+            delay: Duration::ZERO,
             state: Mutex::new(State {
                 total,
                 done: 0,
@@ -78,8 +84,21 @@ impl Progress {
                 current: String::new(),
                 last_draw: None,
                 drawn: false,
+                finished: false,
             }),
         }
+    }
+
+    /// Draw nothing until `delay` has passed.
+    pub fn with_delay(mut self, delay: Duration) -> Self {
+        self.delay = delay;
+        self
+    }
+
+    /// Take the bar off the screen for good (before a compiled program runs).
+    pub fn finish(&self) {
+        self.clear();
+        self.lock().finished = true;
     }
 
     pub fn is_drawing(&self) -> bool {
@@ -161,7 +180,7 @@ impl Progress {
     }
 
     fn draw(&self, s: &mut State, force: bool) {
-        if !self.enabled {
+        if !self.enabled || s.finished || self.started.elapsed() < self.delay {
             return;
         }
         let now = Instant::now();
@@ -177,6 +196,32 @@ impl Progress {
     }
 }
 
+/// A writer (the compiler's diagnostics on stderr) that takes the bar off
+/// the screen while it writes.
+pub struct ClearingWriter<W> {
+    progress: std::sync::Arc<Progress>,
+    inner: W,
+}
+
+impl<W> ClearingWriter<W> {
+    pub fn new(progress: std::sync::Arc<Progress>, inner: W) -> Self {
+        ClearingWriter { progress, inner }
+    }
+}
+
+impl<W: Write> Write for ClearingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // No redraw after: a diagnostic comes in many small writes, and the
+        // bar comes back with the next step.
+        self.progress.clear();
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 impl Drop for Progress {
     fn drop(&mut self) {
         self.clear();
@@ -185,7 +230,7 @@ impl Drop for Progress {
 
 /// The bar line, cut to `width` columns.
 pub fn render(label: &str, unit: &str, done: usize, total: usize, failed: usize, current: &str, width: usize) -> String {
-    let filled = if total == 0 { 0 } else { (done.min(total) * BAR_CELLS) / total };
+    let filled = (done.min(total) * BAR_CELLS).checked_div(total).unwrap_or(0);
     let mut bar = "=".repeat(filled);
     if filled < BAR_CELLS {
         bar.push('>');

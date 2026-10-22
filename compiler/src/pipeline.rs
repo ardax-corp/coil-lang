@@ -56,6 +56,20 @@ struct WorkItem {
 /// Predicate over a source path (see [`Pipeline::set_keep_fns_in`]).
 pub type KeepFnFilter = std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
+/// Where [`Pipeline::compile_src_from_file`] is (see [`Pipeline::set_progress`]).
+#[derive(Debug, Clone, Copy)]
+pub enum CompileStep<'a> {
+    /// Discovery found this many modules to compile.
+    Modules(usize),
+    /// Compiling this module.
+    Module(&'a std::path::Path),
+    /// Every module compiled: linking and lowering to bytecode.
+    Link,
+}
+
+/// A [`Pipeline::set_progress`] callback.
+pub type CompileProgress = std::sync::Arc<dyn Fn(CompileStep<'_>) + Send + Sync>;
+
 pub struct Pipeline {
     failed: bool,
     project_root: PathBuf,
@@ -141,6 +155,8 @@ pub struct Pipeline {
     sink: Box<dyn DiagnosticSink>,
     /// How many compiler messages have already been emitted to [`Self::sink`].
     messages_emitted: usize,
+    /// Told what [`Self::compile_src_from_file`] is doing (a CLI progress bar).
+    progress: Option<CompileProgress>,
     /// Retain post-opt IL across the next [`Self::compile_src`] (cursor_model).
     retain_cursor_il: bool,
     cursor_il: Option<crate::il::tell::CursorIlSnap>,
@@ -735,6 +751,7 @@ impl Pipeline {
             pending_native_ids: Vec::new(),
             sink,
             messages_emitted: 0,
+            progress: None,
             retain_cursor_il: false,
             cursor_il: None,
             macro_host: crate::macros::default_host(),
@@ -1206,14 +1223,31 @@ impl Pipeline {
     }
 
     fn emit_discovered_modules(&mut self) {
-        for item in self.worklist_in_dependency_order() {
+        let order = self.worklist_in_dependency_order();
+        self.step(CompileStep::Modules(order.len()));
+        for item in order {
             let is_entry = self
                 .entry_file
                 .as_ref()
                 .map(|e| *e == item.file)
                 .unwrap_or(false);
+            self.step(CompileStep::Module(&item.file));
             self.compile_file(item, is_entry);
         }
+    }
+
+    /// Tell [`Self::set_progress`]'s callback about `step`.
+    fn step(&self, step: CompileStep<'_>) {
+        if let Some(progress) = &self.progress {
+            progress(step);
+        }
+    }
+
+    /// Call `progress` as [`Self::compile_src_from_file`] goes: the module
+    /// count once discovery is done, each module as it starts, then
+    /// linking.
+    pub fn set_progress(&mut self, progress: Option<CompileProgress>) {
+        self.progress = progress;
     }
 
     /// Parse (and expand) `file` into [`Self::ast_cache`]. Returns false on I/O.
@@ -2020,6 +2054,7 @@ impl Pipeline {
         }
 
         // Linked IL → one lower (fuse-select + labels). See `Pipeline::compile`.
+        self.step(CompileStep::Link);
         if self.retain_cursor_il {
             self.compiler_lazy_mut().set_retain_cursor_il(true);
         }
