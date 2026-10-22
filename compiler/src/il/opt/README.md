@@ -44,8 +44,8 @@ Removed with no replacement, because measurement showed no effect:
 convoys, `invert_guard_branch`, `slot_promote_tell`, `ssa_gvn` and per-body
 `cfg_gvn`. MIR instcombine / strength reduction / GVN are separate.
 
-The HIR passes run in `emit_hir` after inlining: unroll, fold, cse, licm,
-bounds, sink_return. MIR runs its own passes per tier ([mir.md](../../../../docs/internals/mir.md)).
+The HIR passes run in `emit_hir` after inlining: unroll, fold,
+bounds, sink_return. MIR runs its own passes per tier (CSE in `mir/cse.rs`, LICM in `mir/licm.rs`) ([mir.md](../../../../docs/internals/mir.md)).
 
 ## Cursor facts: `sp` vs `tell`
 
