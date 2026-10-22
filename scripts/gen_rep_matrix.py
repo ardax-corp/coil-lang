@@ -41,10 +41,10 @@ BASELINE = ROOT / "scripts" / "rep_matrix_baseline.json"
 # The issue a red cell's failure is filed as, by its detail text.
 ISSUES = [
     (r"callee-generic", "#1888"),
-    (r"open-niche-element", "#1896"),
     (r"no MIR from HIR", "#1903"),
     (r"not sendable", "#1904"),
     (r"host Option/Result layout mismatch", "#1905"),
+    (r"value-type", "#1912"),
 ]
 
 

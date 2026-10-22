@@ -59,6 +59,8 @@ pub use deopt::DraftDeoptMap;
 pub use stackmap::is_alloc_opcode;
 pub use inst::{MirAllocKind, MirBinOp, MirCastKind, MirConst, MirFfiOp, MirGcKind, MirInst, ValueId};
 #[cfg(test)]
+pub use inst::MirCmpOp;
+#[cfg(test)]
 pub use inst::{BlockId, LocalId, MirUnaryOp, Terminator};
 pub use instcombine::{instcombine, instcombine_lir};
 pub use licm::{licm, mark_frozen_arrays};
