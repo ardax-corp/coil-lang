@@ -1,4 +1,4 @@
-// Expected: E0410 — `dload` stem not on `--allow-dload`.
+// @expected E0410 — `dload` stem not on `--allow-dload`.
 use ffi::dload;
 
 fn main() {

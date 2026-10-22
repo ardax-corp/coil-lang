@@ -1,6 +1,6 @@
 // Named arguments run in the order they are written, not in parameter or
 // field order, for calls and constructors alike (#1365).
-// Output: ba3 yx12 1cb123 b2 ba1
+// @output ba3 yx12 1cb123 b2 ba1
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};

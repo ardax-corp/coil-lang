@@ -1,6 +1,6 @@
 // User generic enum — same construct/match machinery as builtin Option.
 //
-// Output: 7
+// @output 7
 
 use io::stdout;
 use io::sync::write_all;

@@ -1,4 +1,4 @@
-// Expected: E0119 — field access on non-record type.
+// @expected E0119 — field access on non-record type.
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};

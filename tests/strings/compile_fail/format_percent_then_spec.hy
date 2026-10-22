@@ -1,4 +1,4 @@
-// Expected: E0300 — after `%%`, `%s` still requires a string.
+// @expected E0300 — after `%%`, `%s` still requires a string.
 use string::format;
 
 fn main() {

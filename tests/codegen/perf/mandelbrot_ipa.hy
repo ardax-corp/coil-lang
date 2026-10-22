@@ -1,5 +1,5 @@
 // examples/perf/mandelbrot_ipa.hy run as a test: the checksum pins the shape below.
-// Output: 625885
+// @output 625885
 
 // Loop-IPA hit bench: same Mandelbrot checksum as examples/perf/mandelbrot.hy
 // (size=160, max_iter=50 → 625885). Escape stays a pure `pixel` helper; the

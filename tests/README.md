@@ -29,13 +29,18 @@ the part of the language it covers:
 Inside a corpus:
 
 - a `.hy` file with `test("…") { … }` cases runs each case; a file with only
-  `fn main()` runs it and compares stdout with its `// Output:` header when it
+  `fn main()` runs it and compares stdout with its `// @output` header when it
   has one;
 - `compile_fail/` holds programs the compiler must reject with one of the
-  error codes on the file's `// Expected: E0102 — why` header lines;
-- a `// Flags:` header line adds grant and compile-time limit flags for that
-  file only (`// Flags: --comptime-steps 1000000 --allow-read`), on top of the
+  error codes on the file's `// @expected E0102 — why` header lines;
+- a `// @flags` header line adds grant and compile-time limit flags for that
+  file only (`// @flags --comptime-steps 1000000 --allow-read`), on top of the
   ones the run passes.
+
+Header directives (`@output`, `@expected`, `@flags`) sit in the file's leading
+comment lines; their names are case-insensitive and the colon after the name
+is optional (`// @Output: 3`). A header still using the old `// Output:`
+spelling fails, so it cannot silently stop being checked.
 
 Run one corpus with `coil test tests/<corpus>`, or every corpus in parallel
 with `scripts/test-corpora.sh` (see [test-runner](../docs/internals/test-runner.md)).

@@ -1,6 +1,6 @@
 // Constant-trip `for` unroll must advance `i` via `step` between bodies.
 // If unroll engaged but skipped `step`, `s = s + i` would stay `0`.
-// Output: 6
+// @output 6
 use io::{stdout, write};
 use string::{format, to_bytes};
 

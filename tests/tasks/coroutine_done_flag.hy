@@ -1,6 +1,6 @@
 // `done(h)` is false before the first resume and true after completion
 // without needing another resume (M6: extra resume panics).
-// Output: false,1,false,2,true
+// @output false,1,false,2,true
 use io::{stdout, write};
 use string::{format, to_bytes};
 

@@ -1,6 +1,6 @@
 // Invariant `t = 42` in a counted `while` must still be visible after the loop
 // (COI-120 sinks the store rather than dropping a live slot).
-// Output: 42
+// @output 42
 use io::{stdout, write};
 use string::{format, to_bytes};
 

@@ -1,7 +1,7 @@
 // Nested CALL + `let x = f(); if x == k` must not hang: mem_fwd must not
 // turn StorePop;Load into Dup;Store when the store extends tell past TOS
 // (shared-stack CmpJmpf would eat the local — broke http `parse_url`).
-// Output: 18
+// @output 18
 use io::{stdout, write};
 use string::{format, to_bytes};
 

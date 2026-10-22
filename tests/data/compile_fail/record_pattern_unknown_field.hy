@@ -1,4 +1,4 @@
-// Expected: E0207 — a record pattern may name only the variant's declared fields.
+// @expected E0207 — a record pattern may name only the variant's declared fields.
 enum Pt {
     Pt { x: int, y: int },
 }

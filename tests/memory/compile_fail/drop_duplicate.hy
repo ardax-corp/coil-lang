@@ -1,4 +1,4 @@
-// Expected: E0126 — at most one fn drop per class.
+// @expected E0126 — at most one fn drop per class.
 class Handle {
     pub fd: int,
 }

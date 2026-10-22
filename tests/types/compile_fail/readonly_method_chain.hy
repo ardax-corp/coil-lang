@@ -1,4 +1,4 @@
-// Expected: E0107 — `twice` mutates `self` through `bump`, so it cannot be called on a `readonly` value (#1558).
+// @expected E0107 — `twice` mutates `self` through `bump`, so it cannot be called on a `readonly` value (#1558).
 class Counter {
     pub n: int,
 }

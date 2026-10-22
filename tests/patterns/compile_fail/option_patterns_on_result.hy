@@ -1,4 +1,4 @@
-// Expected: E0102 — `Option` patterns cannot match a `Result` scrutinee.
+// @expected E0102 — `Option` patterns cannot match a `Result` scrutinee.
 fn get() -> Result<string, int> {
     return Result::Ok("x");
 }

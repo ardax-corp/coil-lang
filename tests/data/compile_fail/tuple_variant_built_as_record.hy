@@ -1,4 +1,4 @@
-// Expected: E0205 — `JsonValue::Obj` wraps a class as a tuple payload; build it
+// @expected E0205 — `JsonValue::Obj` wraps a class as a tuple payload; build it
 // with `JsonValue::Obj(new JsonObject(1))`, not with record syntax.
 class JsonObject {
     pub x: int,

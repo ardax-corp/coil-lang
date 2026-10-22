@@ -1,4 +1,4 @@
-// Expected: E0119 — a `gc::Root` is not sendable, so it cannot be a
+// @expected E0119 — a `gc::Root` is not sendable, so it cannot be a
 // `thread::spawn` argument.
 use thread::{spawn, join};
 use gc::{root, Root};

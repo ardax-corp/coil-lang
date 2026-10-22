@@ -1,6 +1,6 @@
 // Class statics updated from instance methods.
 //
-// Output: 121
+// @output 121
 
 use io::stdout;
 use io::sync::write_all;

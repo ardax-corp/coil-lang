@@ -1,7 +1,7 @@
 //
 // Irrefutable let destructuring: tuple and record patterns.
 //
-// Output: 12342
+// @output 12342
 
 use io::stdout;
 use io::sync::write_all;

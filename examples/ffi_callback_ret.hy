@@ -4,7 +4,7 @@
 // address as a coil callback requires a separate declare/host
 // trampoline (not automatic in this phase).
 //
-// Output: (not checked: needs `--allow-dload sum`; see the example_ffi_* pipeline tests)
+// @output (not checked: needs `--allow-dload sum`; see the example_ffi_* pipeline tests)
 
 use ffi::declare;
 use ffi::dload;

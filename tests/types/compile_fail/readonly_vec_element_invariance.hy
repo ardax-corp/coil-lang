@@ -1,4 +1,4 @@
-// Expected: E0107 — `Vec<Point>` does not convert to `Vec<readonly Point>`: the new name could push a readonly `Point` the old one then mutates (#1558).
+// @expected E0107 — `Vec<Point>` does not convert to `Vec<readonly Point>`: the new name could push a readonly `Point` the old one then mutates (#1558).
 class Point {
     pub x: int,
 }

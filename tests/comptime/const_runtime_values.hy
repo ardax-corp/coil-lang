@@ -1,6 +1,6 @@
 // A `const` whose value exists only while a program runs (a function value,
 // a standard stream) keeps its startup initializer instead of E0134.
-// Output: hi
+// @output hi
 use tests::assert;
 use io::{stdout, write};
 use string::to_bytes;

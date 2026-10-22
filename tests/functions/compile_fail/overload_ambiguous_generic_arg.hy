@@ -1,4 +1,4 @@
-// Expected: E0122 — with `x: T` open, both `f(int)` and `f(float)` fit the call.
+// @expected E0122 — with `x: T` open, both `f(int)` and `f(float)` fit the call.
 fn f(int x) -> int {
     return x;
 }

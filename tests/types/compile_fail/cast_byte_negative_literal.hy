@@ -1,4 +1,4 @@
-// Expected: E0102
+// @expected E0102
 // A negative literal cast to byte is still rejected after #845.
 
 fn main() {

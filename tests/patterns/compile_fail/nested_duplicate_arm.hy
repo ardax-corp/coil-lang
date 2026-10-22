@@ -1,4 +1,4 @@
-// Expected: E0210 — `Result::Ok(Option::None)` is already matched by the arm before it.
+// @expected E0210 — `Result::Ok(Option::None)` is already matched by the arm before it.
 fn f(Result<Option<int>, string> r) -> int {
     return match r {
         Result::Ok(Option::None) => 0,

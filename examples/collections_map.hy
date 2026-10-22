@@ -1,6 +1,6 @@
 // examples/collections_map.hy — HashMap insert, overwrite and lookup
 //
-// Output: A,2
+// @output A,2
 
 use io::stdout;
 use io::sync::write_all;

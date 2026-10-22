@@ -1,4 +1,4 @@
-// Expected: E0102 — a `string -> int` value does not fit a `fn(int x) -> int` alias.
+// @expected E0102 — a `string -> int` value does not fit a `fn(int x) -> int` alias.
 type IntFn = fn(int x) -> int;
 
 fn apply(IntFn f) -> int {

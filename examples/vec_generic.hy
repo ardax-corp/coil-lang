@@ -2,7 +2,7 @@
 // `scale` keeps a fixed `(T,T)` shape; `add` is fully shape-generic and
 // monomorphizes to zip when called with ground tuples.
 //
-// Output: 24,55
+// @output 24,55
 
 use io::stdout;
 use io::sync::write_all;

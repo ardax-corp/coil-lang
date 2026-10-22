@@ -1,4 +1,4 @@
-// Expected: E0200 — duplicate enum name.
+// @expected E0200 — duplicate enum name.
 enum Foo {
     A,
 }

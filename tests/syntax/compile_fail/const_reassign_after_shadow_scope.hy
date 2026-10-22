@@ -1,4 +1,4 @@
-// Expected: E0107 — the const is constant again once the shadowing block ends.
+// @expected E0107 — the const is constant again once the shadowing block ends.
 fn main() {
     const x = 1;
     {

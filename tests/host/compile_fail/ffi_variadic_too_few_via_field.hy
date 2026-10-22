@@ -1,4 +1,4 @@
-// Expected: E0405 — the variadic `declare` stored in `api.id` has two fixed
+// @expected E0405 — the variadic `declare` stored in `api.id` has two fixed
 // parameters; `invoke` passes one.
 use ffi::declare;
 use ffi::invoke;

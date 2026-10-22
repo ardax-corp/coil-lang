@@ -1,5 +1,5 @@
 // Capture-free `with_lock` callback may CALL a named `fn`.
-// Output: 42
+// @output 42
 use thread::{mutex, with_lock};
 use io::stdout;
 use io::sync::write_all;

@@ -1,4 +1,4 @@
-// Expected: E0406 — a static initializer runs at startup, so an `env::exec` it
+// @expected E0406 — a static initializer runs at startup, so an `env::exec` it
 // reaches needs `--allow-exec`.
 use env::exec;
 

@@ -1,4 +1,4 @@
-// Expected: E0107 — a `readonly Area` allows only trait methods declared `readonly A self` (#1558).
+// @expected E0107 — a `readonly Area` allows only trait methods declared `readonly A self` (#1558).
 trait Area<A> {
     fn area(readonly A self) -> int {}
     fn grow(A self) {}

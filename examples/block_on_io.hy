@@ -1,6 +1,6 @@
 // `task::block_on` drives a coroutine to its completion value.
 //
-// Output: 2
+// @output 2
 
 use io::stdout;
 use io::sync::write_all;

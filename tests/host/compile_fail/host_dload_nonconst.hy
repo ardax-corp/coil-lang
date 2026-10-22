@@ -1,4 +1,4 @@
-// Expected: E0411 — non-const `dload` path is a compile error.
+// @expected E0411 — non-const `dload` path is a compile error.
 use ffi::dload;
 
 fn main() {

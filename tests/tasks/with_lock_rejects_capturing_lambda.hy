@@ -1,5 +1,5 @@
 // Capturing lambda is still refused by `with_lock` (runtime NotSendable).
-// Output: 0
+// @output 0
 use thread::{mutex, with_lock};
 use io::stdout;
 use io::sync::write_all;

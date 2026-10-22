@@ -2,10 +2,9 @@
 // that takes no type-parameter argument (`self.twice()`) passes it ground
 // dictionaries: the generic body forwards its own, which a clone does not
 // have (#1419).
+// @output 103 103
 use io::{stdout, write};
 use string::{format, to_bytes};
-
-// Output: 103 103
 
 class Bag<K> {
     items: Vec<K>,

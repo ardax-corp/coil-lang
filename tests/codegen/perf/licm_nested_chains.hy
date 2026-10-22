@@ -1,5 +1,5 @@
 // examples/perf/licm_nested_chains.hy run as a test: the checksum pins the shape below.
-// Output: 64012000000
+// @output 64012000000
 
 // CPU: two independent invariant int chains in nested loops.
 // LICM iterate must hoist both; a single-chain-then-return pass leaves one.

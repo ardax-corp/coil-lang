@@ -1,4 +1,4 @@
-// Expected: E0107 — the loop variable over a `readonly` array is `readonly` (#1552).
+// @expected E0107 — the loop variable over a `readonly` array is `readonly` (#1552).
 class Inner {
     pub n: int,
 }

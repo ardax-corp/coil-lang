@@ -1,4 +1,4 @@
-// Expected: E0115 — ?? on non-Option/non-Result.
+// @expected E0115 — ?? on non-Option/non-Result.
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};

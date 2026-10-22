@@ -1,4 +1,4 @@
-// Expected: E0107 — `readonly (Point, int)` is readonly element-wise, so a destructured `Point` cannot be written (#1558).
+// @expected E0107 — `readonly (Point, int)` is readonly element-wise, so a destructured `Point` cannot be written (#1558).
 class Point {
     pub x: int,
 }

@@ -1,6 +1,6 @@
 // Unary higher-kinded trait: Container<F: * -> *>.
 //
-// Output: 42
+// @output 42
 
 use io::stdout;
 use io::sync::write_all;

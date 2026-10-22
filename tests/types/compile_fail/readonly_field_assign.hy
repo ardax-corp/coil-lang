@@ -1,4 +1,4 @@
-// Expected: E0107 — storing a `readonly` value in a plain `Point` field drops the seal (#1552).
+// @expected E0107 — storing a `readonly` value in a plain `Point` field drops the seal (#1552).
 class Point {
     pub x: int,
 }

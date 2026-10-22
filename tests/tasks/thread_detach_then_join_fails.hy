@@ -1,4 +1,4 @@
-// Output: jf
+// @output jf
 use thread::{detach, join, spawn, ThreadError};
 use io::{stdout, write};
 use string::{format, to_bytes};

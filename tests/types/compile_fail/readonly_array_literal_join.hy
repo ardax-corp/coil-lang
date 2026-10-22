@@ -1,4 +1,4 @@
-// Expected: E0107 — an array literal with a `readonly` element after a plain one has `readonly` elements (#1552).
+// @expected E0107 — an array literal with a `readonly` element after a plain one has `readonly` elements (#1552).
 class Point {
     pub x: int,
 }

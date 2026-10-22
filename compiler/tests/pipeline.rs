@@ -466,28 +466,8 @@ fn run_example_multifile(path: &str) -> String {
     run_bytecode(bytecode, constants, &pipeline, Some(full.as_path()))
 }
 
-/// Undo the escapes of an example's `// Output:` line (`\n`, `\t`, `\e`, `\\`).
-fn unescape_documented_output(line: &str) -> String {
-    let mut out = String::with_capacity(line.len());
-    let mut chars = line.chars();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            out.push(c);
-            continue;
-        }
-        match chars.next() {
-            Some('n') => out.push('\n'),
-            Some('t') => out.push('\t'),
-            Some('e') => out.push('\u{1b}'),
-            Some(other) => out.push(other),
-            None => out.push('\\'),
-        }
-    }
-    out
-}
-
-/// Every `examples/*.hy` ends its header with `// Output: <exact stdout>`
-/// (escaped) or `// Output: (not checked: <why>)`. Run each one and compare,
+/// Every `examples/*.hy` ends its header with `// @output <exact stdout>`
+/// (escaped) or `// @output (not checked: <why>)`. Run each one and compare,
 /// so an example cannot break or drift from what it documents (#614).
 #[test]
 fn examples_print_their_documented_output() {
@@ -506,19 +486,14 @@ fn examples_print_their_documented_output() {
     for name in &names {
         let path = format!("examples/{name}");
         let src = std::fs::read_to_string(workspace_root.join(&path)).expect("read example");
-        let documented = src
-            .lines()
-            .take_while(|l| l.starts_with("//"))
-            .find_map(|l| l.strip_prefix("// Output:"));
-        let Some(documented) = documented else {
-            failures.push(format!("{path}: no `// Output:` line in its header"));
+        let Some(documented) = parser::test_headers::value(&src, "output") else {
+            failures.push(format!("{path}: no `// @output` line in its header"));
             continue;
         };
-        let documented = documented.strip_prefix(' ').unwrap_or(documented);
         if documented.starts_with("(not checked") {
             continue;
         }
-        let expected = unescape_documented_output(documented);
+        let expected = parser::test_headers::unescape(documented);
         let got = run_example(&path);
         checked += 1;
         if got != expected {
@@ -527,7 +502,7 @@ fn examples_print_their_documented_output() {
     }
     assert!(
         failures.is_empty(),
-        "examples disagree with their `// Output:` headers:\n{}",
+        "examples disagree with their `// @output` headers:\n{}",
         failures.join("\n")
     );
     assert!(checked > 100, "only {checked} examples were checked");

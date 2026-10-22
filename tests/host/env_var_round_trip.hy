@@ -1,5 +1,5 @@
 // `env::set_var`, `env::var` and `env::remove_var` round-trip a value.
-// Output: coil_ok
+// @output coil_ok
 use env::{remove_var, set_var, var};
 use io::{stdout, write};
 use string::{format, to_bytes};

@@ -1,4 +1,4 @@
-// Expected: E0001 — a clause's message must be a string literal.
+// @expected E0001 — a clause's message must be a string literal.
 fn f(int x) -> int
     requires x > 0, 5
 {

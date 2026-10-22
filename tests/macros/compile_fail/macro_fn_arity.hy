@@ -1,4 +1,4 @@
-// Expected: E0119 — `square!` takes one argument.
+// @expected E0119 — `square!` takes one argument.
 use fn_macros::square;
 
 fn main() {

@@ -1,6 +1,6 @@
 // Two handles from the same parameterized `gen fn`, resumed alternately and
 // inline as call arguments, each keep their own argument and position.
-// Output: 1,100,2,101,3,102
+// @output 1,100,2,101,3,102
 use io::{stdout, write};
 use string::{format, to_bytes};
 

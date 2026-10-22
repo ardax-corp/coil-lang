@@ -1,5 +1,5 @@
 // `write_all` between resumes must not mark the delegating coroutine done.
-// Output: 012
+// @output 012
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};

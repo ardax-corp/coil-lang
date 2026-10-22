@@ -1,4 +1,4 @@
-// Expected: E0413 — writing to a stream is the `write` effect.
+// @expected E0413 — writing to a stream is the `write` effect.
 use io::{stdout, write};
 use string::to_bytes;
 

@@ -1,4 +1,4 @@
-// Output: 0
+// @output 0
 use gc::{collect, root};
 use io::{stdout, write};
 use string::{format, to_bytes};

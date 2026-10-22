@@ -1,4 +1,4 @@
-// Output: 4! 4 4 x! x x 5! 5 5 6! 6 6 7! 7 7 8! 8 8 1|2! 3|4!
+// @output 4! 4 4 x! x x 5! 5 5 6! 6 6 7! 7 7 8! 8 8 1|2! 3|4!
 // A trait instance method's own bounded type parameter (`fn third<W:
 // Show>`) is passed on to a bounded generic (`shout(w)`) and shown
 // (`show(w)`, `w.show()`): an `int` instance, a class instance and a

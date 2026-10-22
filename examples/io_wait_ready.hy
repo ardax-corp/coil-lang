@@ -1,7 +1,7 @@
 // Batch two cooperative awaits without wrapping each in block_on.
 // Each await_* inside an gen fn yields + registers; wait_ready polls both.
 //
-// Output: ok
+// @output ok
 
 use io::stdout;
 use io::open;

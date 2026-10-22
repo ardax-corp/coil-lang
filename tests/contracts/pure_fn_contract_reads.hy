@@ -1,6 +1,6 @@
 // Reading memory is no effect: a `pure fn` keeps `requires` / `ensures`
 // clauses that index and measure its `Vec` argument.
-// Output: ok
+// @output ok
 use io::{stdout, write};
 use string::to_bytes;
 

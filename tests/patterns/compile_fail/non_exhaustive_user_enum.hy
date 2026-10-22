@@ -1,4 +1,4 @@
-// Expected: E0209 — non-exhaustive match on user-defined enum.
+// @expected E0209 — non-exhaustive match on user-defined enum.
 enum Status {
     Open,
     Closed,

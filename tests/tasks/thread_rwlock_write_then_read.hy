@@ -1,4 +1,4 @@
-// Output: 11
+// @output 11
 use thread::{rwlock, with_read, with_write};
 use io::{stdout, write};
 use string::{format, to_bytes};

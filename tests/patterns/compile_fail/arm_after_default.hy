@@ -1,4 +1,4 @@
-// Expected: E0210 — no arm can follow `default`; it is unreachable.
+// @expected E0210 — no arm can follow `default`; it is unreachable.
 enum Shape {
     Dot,
     Circle(int),

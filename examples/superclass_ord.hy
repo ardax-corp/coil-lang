@@ -2,7 +2,7 @@
 // only by `T: Ordered` can still call `eq_val`, through the implied `Equal`
 // bound.
 //
-// Output: truetruefalse
+// @output truetruefalse
 
 use io::stdout;
 use io::sync::write_all;

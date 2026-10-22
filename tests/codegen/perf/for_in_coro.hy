@@ -1,5 +1,5 @@
 // examples/perf/for_in_coro.hy run as a test: the checksum pins the shape below.
-// Output: 193536
+// @output 193536
 
 // C2b / Q6 rung 4: coro for-in as ResumeCoro / DoneCoro (MIR dense or LIR).
 // Helper sums yields. `main` stays format. Completion value is skipped.

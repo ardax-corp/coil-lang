@@ -1,4 +1,4 @@
-// Expected: E0001 — a macro call is a bare name (`square!(…)`); `m::square!(…)`
+// @expected E0001 — a macro call is a bare name (`square!(…)`); `m::square!(…)`
 // does not parse.
 use fn_macros::square;
 

@@ -1,7 +1,7 @@
 // A macro's output may call macros its provider imports from another provider
 // (#1407): `square` comes from `fn_macros` through `fn_macros_imported`'s own
 // `use`, and is not imported here.
-// Output: 10 9 25 26
+// @output 10 9 25 26
 use io::{stdout, write};
 use string::{format, to_bytes};
 use fn_macros_imported::{square_plus_one, to_square, sum_squares};

@@ -1,4 +1,4 @@
-// Expected: E0107 — an imported `const` keeps its rule: it cannot be
+// @expected E0107 — an imported `const` keeps its rule: it cannot be
 // reassigned, as one of the same file cannot (#1210).
 use mod_state::GREETING;
 

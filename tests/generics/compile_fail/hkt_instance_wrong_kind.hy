@@ -1,4 +1,4 @@
-// Expected: E0119 — `Container<F: * -> *>` needs a type constructor; `int` has kind `*`.
+// @expected E0119 — `Container<F: * -> *>` needs a type constructor; `int` has kind `*`.
 trait Container<F: * -> *> {
     fn first<A>(F<A> xs, A fallback) -> A {}
 }

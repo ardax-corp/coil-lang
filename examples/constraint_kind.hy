@@ -5,7 +5,7 @@
 // - Calling `lt_val` binds `c` to Ordered.
 // - Calling `eq_val` then uses Ordered's Equal superclass slot.
 //
-// Output: 42
+// @output 42
 
 use io::stdout;
 use io::sync::write_all;

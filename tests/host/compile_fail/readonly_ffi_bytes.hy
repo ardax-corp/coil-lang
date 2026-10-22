@@ -1,4 +1,4 @@
-// Expected: E0107 — C may write a `Bytes` (`uint8_t *`) argument, so a `readonly` buffer goes only to `ConstBytes` (#1558).
+// @expected E0107 — C may write a `Bytes` (`uint8_t *`) argument, so a `readonly` buffer goes only to `ConstBytes` (#1558).
 use ffi::declare;
 use ffi::dload;
 use ffi::invoke;

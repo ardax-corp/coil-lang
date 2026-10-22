@@ -1,9 +1,8 @@
 // A `forall` parameter passes on to another `forall` parameter of the same
 // type (#1189).
+// @output 5 x 8\n
 use io::{stdout, write};
 use string::{format, to_bytes};
-
-// Output: 5 x 8
 
 fn id<T>(T x) -> T {
     return x;

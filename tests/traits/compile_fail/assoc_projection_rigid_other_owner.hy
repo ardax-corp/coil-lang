@@ -1,4 +1,4 @@
-// Expected: E0119 — a trait call on a `D` returns `D::Elem`, not `C::Elem` (#1462).
+// @expected E0119 — a trait call on a `D` returns `D::Elem`, not `C::Elem` (#1462).
 trait Collect<C> {
     type Elem;
     fn head(C xs) -> Elem {}

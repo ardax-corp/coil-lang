@@ -1,4 +1,4 @@
-// Expected: E0119 — inside a generic body `C::Elem` is rigid, not `string` (#1462).
+// @expected E0119 — inside a generic body `C::Elem` is rigid, not `string` (#1462).
 trait Collect<C> {
     type Elem;
     fn head(C xs) -> Elem {}

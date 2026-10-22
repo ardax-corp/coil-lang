@@ -1,4 +1,4 @@
-// Expected: E0213 — mixed payload and `=` scalar cases.
+// @expected E0213 — mixed payload and `=` scalar cases.
 enum Status {
     Ok = 200,
     Fail(int),

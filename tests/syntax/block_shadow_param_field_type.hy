@@ -1,5 +1,5 @@
 // Shadowing a function parameter inside a block must restore Access typing.
-// Output: 42
+// @output 42
 use io::{stdout, write};
 use string::{format, to_bytes};
 

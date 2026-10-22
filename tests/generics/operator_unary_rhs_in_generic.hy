@@ -1,4 +1,4 @@
-// Output: 4 -4 -4 d7 true7
+// @output 4 -4 -4 d7 true7
 // A unary operator as the right operand of a binary one in a generic body
 // whose operators go through the op traits (`x + -y`), and a shared generic
 // body whose ground operands sit under a dictionary call.

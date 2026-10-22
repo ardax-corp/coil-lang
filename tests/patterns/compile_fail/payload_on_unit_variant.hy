@@ -1,4 +1,4 @@
-// Expected: E0205 — `Shape::Dot` is a unit variant and takes no payload.
+// @expected E0205 — `Shape::Dot` is a unit variant and takes no payload.
 enum Shape {
     Dot,
     Circle(int),

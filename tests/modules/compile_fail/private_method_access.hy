@@ -1,4 +1,4 @@
-// Expected: E0128 — private method outside impl.
+// @expected E0128 — private method outside impl.
 class Box {
     n: int,
 }

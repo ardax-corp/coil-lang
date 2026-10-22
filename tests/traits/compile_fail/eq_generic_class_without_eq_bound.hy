@@ -1,4 +1,4 @@
-// Expected: E0119 — `Box<T>` derives `Eq`, so `==` on it needs `T`'s `Eq`, and `T: Lt` has none (#1804); add `Eq` to `T`'s bound.
+// @expected E0119 — `Box<T>` derives `Eq`, so `==` on it needs `T`'s `Eq`, and `T: Lt` has none (#1804); add `Eq` to `T`'s bound.
 #[derive(Eq, Ord)]
 class K {
     pub v: int,

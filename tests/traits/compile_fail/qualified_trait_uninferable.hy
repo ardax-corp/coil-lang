@@ -1,4 +1,4 @@
-// Expected: E0119 — nothing chooses the instance for `Zero::zero()`: two
+// @expected E0119 — nothing chooses the instance for `Zero::zero()`: two
 // match and there is no annotation.
 trait Zero<S> {
     fn zero() -> S {}

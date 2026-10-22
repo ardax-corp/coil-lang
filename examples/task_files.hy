@@ -1,7 +1,7 @@
 // Read two files concurrently as tasks. An IO wait suspends only its own
 // task, so the other one keeps running; the scope waits for both.
 //
-// Output: ok
+// @output ok
 
 use io::stdout;
 use io::open;

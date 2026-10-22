@@ -1,4 +1,4 @@
-// Expected: E0119 — `float` has no `Size` instance, so it does not satisfy `T: Size`.
+// @expected E0119 — `float` has no `Size` instance, so it does not satisfy `T: Size`.
 trait Size<T> {
     fn size(T x) -> int {}
 }

@@ -1,6 +1,6 @@
 // examples/let_test.hy — `let` bindings and re-assignment.
 //
-// Output: 51020
+// @output 51020
 
 use io::stdout;
 use io::sync::write_all;

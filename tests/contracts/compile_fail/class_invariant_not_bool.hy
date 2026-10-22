@@ -1,4 +1,4 @@
-// Expected: E0102 — a class `invariant` must be a `bool`.
+// @expected E0102 — a class `invariant` must be a `bool`.
 class C
     invariant self.n
 {

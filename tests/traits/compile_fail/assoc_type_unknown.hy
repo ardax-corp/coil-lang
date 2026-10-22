@@ -1,4 +1,4 @@
-// Expected: E0119 — an impl may not define an associated type the trait lacks (`Extra`).
+// @expected E0119 — an impl may not define an associated type the trait lacks (`Extra`).
 trait Collect<C> {
     type Elem;
     fn head(C xs) -> Elem {}

@@ -1,4 +1,4 @@
-// Expected: E0101 — `math` has no function `nope`.
+// @expected E0101 — `math` has no function `nope`.
 use math::add;
 
 fn main() {

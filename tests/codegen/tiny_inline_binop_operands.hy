@@ -1,5 +1,5 @@
 // Tiny-inline binop arms must stage (not bury) — `add(x,y)+add(y,x)` == 14.
-// Output: 14
+// @output 14
 use io::{stdout, write};
 use string::{format, to_bytes};
 

@@ -1,4 +1,4 @@
-// Expected: E0119 — `#[test]` on a `fn` is not a test; tests are
+// @expected E0119 — `#[test]` on a `fn` is not a test; tests are
 // `test("…") { … }` cases.
 use tests::assert;
 

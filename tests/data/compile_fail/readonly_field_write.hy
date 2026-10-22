@@ -1,4 +1,4 @@
-// Expected: E0107 — a `readonly` handle rejects external field writes.
+// @expected E0107 — a `readonly` handle rejects external field writes.
 class P {
     pub x: int,
 }

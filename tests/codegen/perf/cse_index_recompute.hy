@@ -1,5 +1,5 @@
 // examples/perf/cse_index_recompute.hy run as a test: the checksum pins the shape below.
-// Output: 504000000
+// @output 504000000
 
 // Hit bench for local EarlyCSE: force Index recomputes InstCombine +
 // cfg_gvn/ssa_gvn do not already fold (varying index, stored first hit).

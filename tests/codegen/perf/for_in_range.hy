@@ -1,5 +1,5 @@
 // examples/perf/for_in_range.hy run as a test: the checksum pins the shape below.
-// Output: 12884115456
+// @output 12884115456
 
 // Q6 friend: literal `0..n` for-in as a counted cur/end loop (no range dict).
 use io::stdout;

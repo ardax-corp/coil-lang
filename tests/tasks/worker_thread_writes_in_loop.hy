@@ -1,6 +1,6 @@
 // A `thread::spawn` worker writing to stdout in a loop prints every iteration
 // before `join` returns.
-// Output: 012
+// @output 012
 use thread::{join, spawn};
 use io::{stdout, write};
 use string::{format, to_bytes};

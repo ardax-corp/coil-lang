@@ -1,5 +1,5 @@
 // examples/perf/dict_hot.hy run as a test: the checksum pins the shape below.
-// Output: 6000
+// @output 6000
 
 // CPU: dict field read/write pressure (GetField / SetField).
 use io::stdout;

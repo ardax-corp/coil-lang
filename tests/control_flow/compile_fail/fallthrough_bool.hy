@@ -1,4 +1,4 @@
-// Expected: E0111 — an empty `-> bool` body needs a `return`.
+// @expected E0111 — an empty `-> bool` body needs a `return`.
 fn flag() -> bool {}
 
 fn main() {

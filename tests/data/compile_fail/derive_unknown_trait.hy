@@ -1,4 +1,4 @@
-// Expected: E0119 — `Num` is not a derivable trait.
+// @expected E0119 — `Num` is not a derivable trait.
 #[derive(Num)]
 class C {
     pub v: int,

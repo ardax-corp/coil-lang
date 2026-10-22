@@ -1,6 +1,6 @@
 // A module `const` whose value is computed by a call is readable from any
 // function; only reassignment is rejected (#1558).
-// Output: 42
+// @output 42
 use io::{stdout, write};
 use string::{format, to_bytes};
 

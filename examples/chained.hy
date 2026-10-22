@@ -3,7 +3,7 @@
 // `Outer` has a record-shaped variant whose `x` field is itself a
 // record-shaped enum (`Inner`); `p.x.v` reads through both.
 //
-// Output: 427
+// @output 427
 
 use io::stdout;
 use io::sync::write_all;

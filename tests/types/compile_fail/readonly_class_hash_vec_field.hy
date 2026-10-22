@@ -1,4 +1,4 @@
-// Expected: E0119 — a `Vec` field has no `Hash`, so this readonly class implies only `Eq` (#1558).
+// @expected E0119 — a `Vec` field has no `Hash`, so this readonly class implies only `Eq` (#1558).
 readonly class Path {
     pub points: Vec<int>,
 }

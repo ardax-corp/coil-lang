@@ -1,4 +1,4 @@
-// Expected: E0107 — `Option<readonly Point>` does not convert to a typed `Option<Point>` (#1552).
+// @expected E0107 — `Option<readonly Point>` does not convert to a typed `Option<Point>` (#1552).
 class Point {
     pub x: int,
 }

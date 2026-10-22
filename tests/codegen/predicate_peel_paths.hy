@@ -1,5 +1,5 @@
 // Predicate peel base path and recursive path must both return correct values.
-// Output: 1,6
+// @output 1,6
 use io::{stdout, write};
 use string::{format, to_bytes};
 

@@ -1,4 +1,4 @@
-// Expected: E0102 — the later helper takes an `int`; the method passes a string.
+// @expected E0102 — the later helper takes an `int`; the method passes a string.
 class Foo {
     pub v: int,
 }

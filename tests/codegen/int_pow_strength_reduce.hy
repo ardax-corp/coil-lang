@@ -1,5 +1,5 @@
 // `x ** 0/1/2` strength-reduce must still match `i32::pow` (incl. `0 ** 0` → 1).
-// Output: 1,5,25,125,1
+// @output 1,5,25,125,1
 use io::{stdout, write};
 use string::{format, to_bytes};
 

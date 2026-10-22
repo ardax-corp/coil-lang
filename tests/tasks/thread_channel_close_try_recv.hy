@@ -1,4 +1,4 @@
-// Output: disc
+// @output disc
 use thread::{channel, close, try_recv, ThreadError};
 use io::{stdout, write};
 use string::{format, to_bytes};

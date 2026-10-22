@@ -1,4 +1,4 @@
-// Expected: E0117 — Option `?` cannot propagate out of a Result function.
+// @expected E0117 — Option `?` cannot propagate out of a Result function.
 fn find() -> Option<int> {
     return Option::None;
 }

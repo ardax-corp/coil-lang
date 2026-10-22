@@ -1,6 +1,6 @@
 // examples/derive_hash.hy — recursive `#[derive(Hash)]` + primitive Hash.
 //
-// Output: true,true,true,true
+// @output true,true,true,true
 
 use io::stdout;
 use io::sync::write_all;

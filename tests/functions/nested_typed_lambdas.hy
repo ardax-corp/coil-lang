@@ -1,6 +1,6 @@
 // Lambdas with typed parameters nested inside other lambdas see their own
 // parameters and compute the right result.
-// Output: 42
+// @output 42
 use io::{stdout, write};
 use string::{format, to_bytes};
 

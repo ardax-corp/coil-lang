@@ -1,4 +1,4 @@
-// Expected: E0203 — unknown variant.
+// @expected E0203 — unknown variant.
 enum Color {
     Red,
 }

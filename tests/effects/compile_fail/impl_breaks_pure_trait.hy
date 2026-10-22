@@ -1,4 +1,4 @@
-// Expected: E0413 — an impl must keep to its trait method's `pure` declaration.
+// @expected E0413 — an impl must keep to its trait method's `pure` declaration.
 static let N: int = 0;
 
 trait Area<A> {

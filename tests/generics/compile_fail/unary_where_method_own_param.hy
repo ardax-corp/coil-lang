@@ -1,4 +1,4 @@
-// Expected: E0119 — a method's own type parameter takes its bound inline
+// @expected E0119 — a method's own type parameter takes its bound inline
 // (`fn show_it<U: Show>`), not as `where Show<U>`.
 class Cell<T> {
     pub v: T,

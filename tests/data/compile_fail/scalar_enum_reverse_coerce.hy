@@ -1,4 +1,4 @@
-// Expected: E0102 — a scalar enum coerces to its backing, never back: write `Status::Ok`.
+// @expected E0102 — a scalar enum coerces to its backing, never back: write `Status::Ok`.
 #[repr(int)]
 enum Status {
     Ok = 200,

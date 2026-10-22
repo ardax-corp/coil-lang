@@ -1,7 +1,7 @@
 // Built-in `Result` and `Option`: a nested match with two `Ok` arms (inner
 // `Some` vs `None`) and an `Err` arm.
 //
-// Output: 420-1
+// @output 420-1
 
 use io::stdout;
 use io::sync::write_all;

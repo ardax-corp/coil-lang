@@ -1,4 +1,4 @@
-// Expected: E0114 — `?` needs an Option or a Result operand.
+// @expected E0114 — `?` needs an Option or a Result operand.
 fn f() -> Option<int> {
     let n = 3;
     let v = n?;

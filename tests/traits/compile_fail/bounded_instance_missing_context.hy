@@ -1,4 +1,4 @@
-// Expected: E0119 — `Describe for Box<T: Describe>` needs
+// @expected E0119 — `Describe for Box<T: Describe>` needs
 // `Describe<Point>`, and there is none.
 class Box<T> {
     pub item: T,

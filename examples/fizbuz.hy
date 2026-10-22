@@ -1,6 +1,6 @@
 // FizzBuzz-style branching on `%`.
 //
-// Output: FIZBUZFIZFIZBUZFIZFIZBUZ
+// @output FIZBUZFIZFIZBUZFIZFIZBUZ
 
 use io::stdout;
 use io::sync::write_all;

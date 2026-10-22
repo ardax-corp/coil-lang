@@ -1,4 +1,4 @@
-// Expected: E0102 — `invoke`'s library handle must be the `int` that `dload`
+// @expected E0102 — `invoke`'s library handle must be the `int` that `dload`
 // returns, not its unmatched `Result`; unwrap it with `?` or `match` (#1787).
 use ffi::{invoke, Error};
 

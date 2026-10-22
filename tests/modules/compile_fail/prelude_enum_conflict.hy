@@ -1,4 +1,4 @@
-// Expected: E0200 — `Option` is the prelude enum and cannot be redeclared.
+// @expected E0200 — `Option` is the prelude enum and cannot be redeclared.
 enum Option {
     Yes,
     No,

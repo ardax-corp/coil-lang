@@ -1,5 +1,5 @@
 // One-level self-unroll must not change recursive fib results.
-// Output: 55
+// @output 55
 use io::{stdout, write};
 use string::{format, to_bytes};
 

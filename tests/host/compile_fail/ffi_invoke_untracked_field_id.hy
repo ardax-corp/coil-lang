@@ -1,4 +1,4 @@
-// Expected: E0102 — `api.id` never holds a `declare` result, so `invoke` on it
+// @expected E0102 — `api.id` never holds a `declare` result, so `invoke` on it
 // is not refined to `float`.
 use ffi::declare;
 use ffi::invoke;

@@ -1,4 +1,4 @@
-// Expected: E0126 — drop takes no extra parameters.
+// @expected E0126 — drop takes no extra parameters.
 class Handle {
     pub fd: int,
 }

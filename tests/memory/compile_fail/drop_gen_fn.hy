@@ -1,4 +1,4 @@
-// Expected: E0126 — `fn drop` cannot be a `gen fn` (it must return unit).
+// @expected E0126 — `fn drop` cannot be a `gen fn` (it must return unit).
 class C {
     pub n: int,
 }

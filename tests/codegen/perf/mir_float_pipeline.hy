@@ -1,5 +1,5 @@
 // examples/perf/mir_float_pipeline.hy run as a test: the checksum pins the shape below.
-// Output: 374999812500
+// @output 374999812500
 
 // Hit bench for COI-285 MIR float pipeline: exact `x / 2^k` → `x * 2^{-k}`
 // and known-finite `cast(i) - cast(i)` → `+0` (then `s + 0` → `s`).

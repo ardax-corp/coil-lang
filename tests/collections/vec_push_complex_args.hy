@@ -1,6 +1,6 @@
 // `v.push(x)` keeps every element when `x` is a `format` call, a `match`
 // or a `new Class(...)` expression.
-// Output: lines=2 pkgs=2 names=1 n0=name='n'
+// @output lines=2 pkgs=2 names=1 n0=name='n'
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};

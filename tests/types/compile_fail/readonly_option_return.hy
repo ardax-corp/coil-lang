@@ -1,4 +1,4 @@
-// Expected: E0107 — returning `Option::Some(p)` as `Option<Point>` drops the seal of a `readonly` `p` (#1552).
+// @expected E0107 — returning `Option::Some(p)` as `Option<Point>` drops the seal of a `readonly` `p` (#1552).
 class Point {
     pub x: int,
 }

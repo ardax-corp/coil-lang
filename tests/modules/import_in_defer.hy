@@ -1,5 +1,5 @@
 // Same rebind rule for `defer` bodies that call disk-module imports.
-// Output: ad
+// @output ad
 use io::stdout;
 use io::sync::write_all;
 use string::to_bytes;

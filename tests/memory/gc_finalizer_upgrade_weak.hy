@@ -1,4 +1,4 @@
-// Output: 10
+// @output 10
 use gc::{collect, weak, upgrade, Weak};
 use io::{stdout, write};
 use string::{format, to_bytes};

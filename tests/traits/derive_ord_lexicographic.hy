@@ -1,6 +1,6 @@
 // `#[derive(Ord)]` compares payload fields lexicographically in declaration
 // order: equal leading fields fall through to the next field.
-// Output: true,true,false,true,false
+// @output true,true,false,true,false
 use io::{stdout, write};
 use string::{format, to_bytes};
 

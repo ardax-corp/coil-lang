@@ -2,7 +2,7 @@
 // order at runtime. Happy-path goldens only exercise source-order and
 // positional-prefix forms; a missing codegen reorder would still typecheck
 // here (string then int) but print the wrong values.
-// Output: Ada36Grace40
+// @output Ada36Grace40
 use io::{stdout, write};
 use string::{format, to_bytes};
 

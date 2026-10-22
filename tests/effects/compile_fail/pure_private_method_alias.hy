@@ -1,4 +1,4 @@
-// Expected: E0413 — a method that returns its receiver hands out a mutable
+// @expected E0413 — a method that returns its receiver hands out a mutable
 // alias, so the object is not private and mutating it is `mutate` (#1648).
 class Counter {
     pub n: int,

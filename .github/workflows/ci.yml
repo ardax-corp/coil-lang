@@ -128,7 +128,7 @@ jobs:
           ./target/debug/coil-fmt --check examples tests compiler/src/prelude comptime/tests
           # `grep -L` exits 1 when it lists nothing; only coil-fmt's status counts.
           find tests -path '*/compile_fail/*.hy' -print0 \
-            | { xargs -0 grep -LZE '^// Expected: .*E0(001|208)\b' || true; } \
+            | { xargs -0 grep -LZE '^// @expected .*E0(001|208)\b' || true; } \
             | xargs -0 ./target/debug/coil-fmt --check
 
   test:

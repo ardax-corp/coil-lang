@@ -1,6 +1,6 @@
 // Pure-arg reorder must keep CALL arg order while evaluating pure temps before
 // effectful args (print from effect runs first; sink still sees a=2, b=10).
-// Output: 7,12,12
+// @output 7,12,12
 use io::{stdout, write};
 use string::{format, to_bytes};
 

@@ -1,4 +1,4 @@
-// Expected: E0102 — the copy of method `add_first` for a `(string)` pack adds
+// @expected E0102 — the copy of method `add_first` for a `(string)` pack adds
 // a string to an int; the `(int)` copy alone would compile (coil-lang#1754).
 class H {
     pub n: int,

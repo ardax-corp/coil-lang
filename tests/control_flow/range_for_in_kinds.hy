@@ -1,6 +1,6 @@
 // `for` over int half-open and closed ranges, a range value, an empty
 // decreasing range, a byte range and a float range (examples/range.hy).
-// Output: 012340123561.02.03.0
+// @output 012340123561.02.03.0
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};

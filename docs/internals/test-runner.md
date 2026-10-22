@@ -32,9 +32,9 @@ lives in the `coil-host` crate, shared by `coil` and `coil-test`.
 
 | Path | Expectation |
 |------|-------------|
-| any `.hy` under a `compile_fail/` segment | the compiler must reject it with one of the error codes its header declares (`// Expected: E0209 — why`; several: `E0410 or E0409`). A rejection for another reason, a missing declaration, or a compiler panic is a failure |
+| any `.hy` under a `compile_fail/` segment | the compiler must reject it with one of the error codes its header declares (`// @expected E0209 — why`; several: `E0410 or E0409`). A rejection for another reason, a missing declaration, or a compiler panic is a failure |
 | a file with `test("…") { … }` / `#[test] fn` cases | each case is a reactor job: static init, then the case; it fails on `panic` or an `Err` return |
-| a file without cases | `main` runs once as a single opaque case |
+| a file without cases | `main` runs once as a single opaque case; with a `// @output TEXT` header line its stdout must be exactly `TEXT` (escapes `\n`, `\t`, `\e`, `\\`). Header directive names are case-insensitive; see [tests/README.md](../../tests/README.md) |
 | a function with `requires` / `ensures` (in a test file, or in a project source a test file imports) | a generated `contract: f` case calls it with random arguments (`--contract-runs N`, default 100, 0 off); see [contracts](contracts.md#generated-tests) |
 | a code example in the `///` docs of a test file, or of a project source a test file imports | a `doc: module::item (file:line)` case compiles and runs it as its own program; see [doc-tests](#doc-tests) |
 

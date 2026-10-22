@@ -1,4 +1,4 @@
-// Expected: E0119 — only a tuple, array or Vec can be spread.
+// @expected E0119 — only a tuple, array or Vec can be spread.
 fn diff(int a, int b) -> int {
     return a - b;
 }

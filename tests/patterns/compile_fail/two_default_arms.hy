@@ -1,4 +1,4 @@
-// Expected: E0215 — a match may have only one `default` arm.
+// @expected E0215 — a match may have only one `default` arm.
 enum Shape {
     Dot,
     Circle(int),

@@ -1,4 +1,4 @@
-// Flags: --comptime-read tests/comptime/data --comptime-read comptime_io=tests/comptime/data
+// @flags --comptime-read tests/comptime/data --comptime-read comptime_io=tests/comptime/data
 // A `const`, a `comptime` expression and a macro read files while compiling,
 // within the granted directory; the program itself needs no `--allow-read`.
 use io::file::read_text;

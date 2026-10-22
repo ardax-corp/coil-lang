@@ -1,6 +1,6 @@
 // A worker thread whose body lives in another module and uses `?` on its
 // channel reads, fed jobs until "stop"; the entry's `?`s share the link.
-// Output: a,b,
+// @output a,b,
 use thread::{Sender, Thread, channel, join, send, spawn};
 use pool::worker::run_jobs;
 

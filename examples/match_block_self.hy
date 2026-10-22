@@ -3,7 +3,7 @@
 // Match arm bodies may be `{ … }` blocks. Those are expression blocks
 // (not dict literals), so `self.get()` works inside them.
 //
-// Output: 5
+// @output 5
 
 use io::stdout;
 use io::sync::write_all;

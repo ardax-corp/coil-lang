@@ -1,5 +1,5 @@
 // examples/perf/dest_prop_field_alias.hy run as a test: the checksum pins the shape below.
-// Output: 40000000
+// @output 40000000
 
 // Hit bench for dest_prop: in-loop slot alias of a class, then several
 // GetField uses. copy_prop refuses GetField-shaped loads; slot_promote

@@ -3,7 +3,7 @@
 // `add(3, 4);` is an expression statement: the call runs and its value is
 // dropped.
 //
-// Output: done
+// @output done
 
 use io::stdout;
 use io::sync::write_all;

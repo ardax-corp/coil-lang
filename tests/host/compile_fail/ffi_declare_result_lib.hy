@@ -1,4 +1,4 @@
-// Expected: E0102 — `declare`'s library handle must be the `int` that `dload`
+// @expected E0102 — `declare`'s library handle must be the `int` that `dload`
 // returns, not its unmatched `Result`; unwrap it with `?` or `match` (#1787).
 use ffi::declare;
 use ffi::Error;

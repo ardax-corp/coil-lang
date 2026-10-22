@@ -1,4 +1,4 @@
-// Expected: E0100 — a pattern binding does not outlive its match arm.
+// @expected E0100 — a pattern binding does not outlive its match arm.
 fn main() {
     let x = Option::Some(1);
     let r = match x {

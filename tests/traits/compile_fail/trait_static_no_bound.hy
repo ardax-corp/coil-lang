@@ -1,4 +1,4 @@
-// Expected: E0119 — no bound on `T` declares `from_val`.
+// @expected E0119 — no bound on `T` declares `from_val`.
 class Val {
     pub i: int,
 }

@@ -1,4 +1,4 @@
-// Expected: E0102 — a derived `Ord` compares each field, and `Inner` has no `Lt`.
+// @expected E0102 — a derived `Ord` compares each field, and `Inner` has no `Lt`.
 class Inner {
     pub v: int,
 }

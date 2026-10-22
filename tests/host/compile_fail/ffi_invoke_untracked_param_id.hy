@@ -1,4 +1,4 @@
-// Expected: E0102 — `helper` is only called with `0`, not a `declare`d id, so
+// @expected E0102 — `helper` is only called with `0`, not a `declare`d id, so
 // its `invoke` result is not refined to `float`.
 use ffi::declare;
 use ffi::invoke;

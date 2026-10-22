@@ -1,5 +1,5 @@
 // Bit identities: `x | 0` and `x ^ x` keep value / yield zero (COI-123).
-// Output: 7 0
+// @output 7 0
 use io::{stdout, write};
 use string::{format, to_bytes};
 

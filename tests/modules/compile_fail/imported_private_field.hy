@@ -1,4 +1,4 @@
-// Expected: E0128 — `balance` is private to `mod_state::Account`; importing the
+// @expected E0128 — `balance` is private to `mod_state::Account`; importing the
 // class does not open it.
 use mod_state::Account;
 

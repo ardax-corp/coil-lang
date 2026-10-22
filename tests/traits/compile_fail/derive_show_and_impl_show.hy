@@ -1,4 +1,4 @@
-// Expected: E0119 — `#[derive(Show)]` and a hand-written `impl Show` for one type overlap.
+// @expected E0119 — `#[derive(Show)]` and a hand-written `impl Show` for one type overlap.
 #[derive(Show)]
 class Sq {
     pub side: int,

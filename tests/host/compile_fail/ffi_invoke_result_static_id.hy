@@ -1,4 +1,4 @@
-// Expected: E0102 — a `static` holding `declare`'s unmatched `Result` is not
+// @expected E0102 — a `static` holding `declare`'s unmatched `Result` is not
 // an `int` function id; unwrap it with `?` or `match` (#1731, #1761).
 use ffi::declare;
 use ffi::invoke;

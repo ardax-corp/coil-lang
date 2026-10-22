@@ -1,4 +1,4 @@
-// Expected: E0107 — `get` on a `readonly HashMap<string, Point>` returns a `readonly Point` (#1640).
+// @expected E0107 — `get` on a `readonly HashMap<string, Point>` returns a `readonly Point` (#1640).
 use collections::map::HashMap;
 
 class Point {

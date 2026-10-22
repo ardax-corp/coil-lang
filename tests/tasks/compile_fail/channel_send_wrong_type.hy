@@ -1,4 +1,4 @@
-// Expected: E0102 — a `Channel<int>` only takes `int` values.
+// @expected E0102 — a `Channel<int>` only takes `int` values.
 use task::Channel;
 
 fn main() {

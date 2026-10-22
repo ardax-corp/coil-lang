@@ -1,4 +1,4 @@
-// Expected: E0132 — assigning on only one branch leaves the read unassigned on the other.
+// @expected E0132 — assigning on only one branch leaves the read unassigned on the other.
 fn f(bool b) -> string {
     let s: string;
     if b {

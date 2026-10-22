@@ -1,4 +1,4 @@
-// Expected: E0216 — `_` is not a catch-all (`default` is).
+// @expected E0216 — `_` is not a catch-all (`default` is).
 enum Status {
     Open,
     Closed,

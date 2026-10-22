@@ -1,9 +1,8 @@
 // A generic function's recursive call has its declared return type, so a
 // method call on the result needs no annotation (#1191).
+// @output 3 2 1 3\n
 use io::{stdout, write};
 use string::{format, to_bytes};
-
-// Output: 3 2 1 3
 
 fn reversed<T>(Vec<T> xs) -> Vec<T> {
     if xs.len() == 0 {

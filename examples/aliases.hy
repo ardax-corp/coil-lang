@@ -3,7 +3,7 @@
 // `type X = T;` declares an alias for an existing type. Aliases only exist
 // at compile time (no runtime cost); they make long types readable.
 //
-// Output: 347
+// @output 347
 
 use io::stdout;
 use io::sync::write_all;

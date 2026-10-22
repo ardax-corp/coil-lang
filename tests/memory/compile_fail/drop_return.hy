@@ -1,4 +1,4 @@
-// Expected: E0126 — fn drop must return unit.
+// @expected E0126 — fn drop must return unit.
 class Handle {
     pub fd: int,
 }

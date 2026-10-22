@@ -1,6 +1,6 @@
 // Binary higher-kinded trait: Bifunctor<F: * -> * -> *>.
 //
-// Output: 42
+// @output 42
 
 use io::stdout;
 use io::sync::write_all;

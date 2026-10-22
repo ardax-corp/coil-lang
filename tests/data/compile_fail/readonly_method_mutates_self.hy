@@ -1,4 +1,4 @@
-// Expected: E0107 — a method that mutates `self` cannot be called on a `readonly` instance (#1558).
+// @expected E0107 — a method that mutates `self` cannot be called on a `readonly` instance (#1558).
 class P {
     pub x: int,
 }

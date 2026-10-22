@@ -1,6 +1,6 @@
 // `old(e)` in an `ensures` reads `e` at entry: a method's field and a
 // `Vec` argument's length; a broken one names its message and method.
-// Output: ok
+// @output ok
 use io::{stdout, write};
 use string::{to_bytes, find_from};
 use task::{scope, Scope, TaskError};

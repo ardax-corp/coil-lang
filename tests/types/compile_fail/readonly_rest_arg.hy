@@ -1,4 +1,4 @@
-// Expected: E0107 — `p` is the second argument packed into `rest`, which `all` mutates through `Reset::reset` (#1681).
+// @expected E0107 — `p` is the second argument packed into `rest`, which `all` mutates through `Reset::reset` (#1681).
 trait Reset<R> {
     fn reset(R self) {}
 }

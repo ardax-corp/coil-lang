@@ -1,5 +1,5 @@
 // Rest-only generic with a typeclass constraint needs a call-site dict.
-// Output: 1
+// @output 1
 use io::{stdout, write};
 use string::{format, to_bytes};
 

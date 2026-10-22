@@ -1,6 +1,6 @@
 // `%v` formats tuples and records.
 //
-// Output: (1, 2){ a: 3, b: 4 }
+// @output (1, 2){ a: 3, b: 4 }
 
 use io::stdout;
 use io::sync::write_all;

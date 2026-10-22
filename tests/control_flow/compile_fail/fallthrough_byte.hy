@@ -1,4 +1,4 @@
-// Expected: E0111 — an empty `-> byte` body needs a `return`.
+// @expected E0111 — an empty `-> byte` body needs a `return`.
 fn b() -> byte {}
 
 fn main() {

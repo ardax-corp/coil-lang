@@ -1,4 +1,4 @@
-// Expected: E0119 — no derive `NoSuchDerive` exists.
+// @expected E0119 — no derive `NoSuchDerive` exists.
 #[derive(NoSuchDerive)]
 class C {
     pub x: int,

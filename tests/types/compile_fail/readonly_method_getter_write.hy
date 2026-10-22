@@ -1,4 +1,4 @@
-// Expected: E0107 — a write through what a getter returns from `self` mutates `self` (#1558).
+// @expected E0107 — a write through what a getter returns from `self` mutates `self` (#1558).
 class Inner {
     pub n: int,
 }

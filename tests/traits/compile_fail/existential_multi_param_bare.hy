@@ -1,4 +1,4 @@
-// Expected: E0119 — a two-parameter trait cannot be a bare (existential) parameter type.
+// @expected E0119 — a two-parameter trait cannot be a bare (existential) parameter type.
 trait Convert<A, B> {
     fn cast(A x) -> B {}
 }

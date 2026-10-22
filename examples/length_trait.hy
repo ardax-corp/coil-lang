@@ -4,7 +4,7 @@
 // 2
 // 42
 //
-// Output: 3\n2\n42\n
+// @output 3\n2\n42\n
 
 use io::stdout;
 use io::sync::write_all;

@@ -1,4 +1,4 @@
-// Expected: E0406 — `env::exec` requires `--allow-exec`.
+// @expected E0406 — `env::exec` requires `--allow-exec`.
 use env::exec;
 
 fn main() {

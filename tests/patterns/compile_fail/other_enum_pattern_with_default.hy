@@ -1,4 +1,4 @@
-// Expected: E0102 — one wrong-enum arm next to a default still fails.
+// @expected E0102 — one wrong-enum arm next to a default still fails.
 enum A {
     X,
     Y,

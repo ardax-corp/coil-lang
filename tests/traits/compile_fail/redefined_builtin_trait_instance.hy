@@ -1,4 +1,4 @@
-// Expected: E0119 — a bound on the module's own `Eq` needs an instance of
+// @expected E0119 — a bound on the module's own `Eq` needs an instance of
 // that trait: the builtin `Eq` that `int` has does not count (#1345).
 use prelude::ops::Eq as PreludeEq;
 

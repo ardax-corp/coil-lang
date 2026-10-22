@@ -1,4 +1,4 @@
-// Expected: E0208 — a field may be named only once in a constructor call.
+// @expected E0208 — a field may be named only once in a constructor call.
 class P {
     pub x: int,
     pub y: int,

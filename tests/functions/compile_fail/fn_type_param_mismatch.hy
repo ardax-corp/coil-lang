@@ -1,4 +1,4 @@
-// Expected: E0102 — a `string -> int` value does not fit a `fn(int) -> int` parameter.
+// @expected E0102 — a `string -> int` value does not fit a `fn(int) -> int` parameter.
 fn apply(fn(int) -> int f) -> int {
     return f(1);
 }

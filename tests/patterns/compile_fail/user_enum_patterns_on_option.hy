@@ -1,4 +1,4 @@
-// Expected: E0102 — patterns of a user enum cannot match an `Option` scrutinee.
+// @expected E0102 — patterns of a user enum cannot match an `Option` scrutinee.
 enum Shape {
     Dot,
     Line(int, int),

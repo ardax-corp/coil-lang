@@ -1,6 +1,6 @@
 // Free functions overloaded by arity.
 //
-// Output: 15
+// @output 15
 
 use io::stdout;
 use io::sync::write_all;

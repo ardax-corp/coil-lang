@@ -1,4 +1,4 @@
-// Expected: E0107 — an element of a `readonly` array is `readonly` too (#1552).
+// @expected E0107 — an element of a `readonly` array is `readonly` too (#1552).
 class Inner {
     pub n: int,
 }

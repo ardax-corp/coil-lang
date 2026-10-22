@@ -1,4 +1,4 @@
-// Expected: E0122 — an overloaded name is ambiguous as a value.
+// @expected E0122 — an overloaded name is ambiguous as a value.
 fn kind(int x) -> string {
     return "i";
 }

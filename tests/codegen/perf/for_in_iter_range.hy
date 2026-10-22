@@ -1,5 +1,5 @@
 // examples/perf/for_in_iter_range.hy run as a test: the checksum pins the shape below.
-// Output: 12884115456
+// @output 12884115456
 
 // C2b / Q6 rung 2: user into_iter returning Range uses the counted latch.
 use io::stdout;

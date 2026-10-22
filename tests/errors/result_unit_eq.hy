@@ -1,9 +1,8 @@
 // `==` / `!=` on a `Result<unit, E>` with a heap or enum error type, between
 // a call's result and a literal `Result` (#1193).
+// @output true false true true true true false true\n
 use io::{stdout, write};
 use string::{format, to_bytes};
-
-// Output: true false true true true true false true
 
 enum Fault {
     Busy,

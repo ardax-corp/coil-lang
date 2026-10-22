@@ -2,7 +2,7 @@
 // (`where Wrap<T, string>`) is the given inside the generic body: calls
 // through it pick `B = string` from the bound and leave `T` to the caller,
 // in both function and method form (#1442).
-// Output: <7>|<9>|<12>
+// @output <7>|<9>|<12>
 use io::{stdout, write};
 use string::to_bytes;
 

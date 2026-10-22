@@ -1,4 +1,4 @@
-// Expected: E0119 — nothing chooses `T` for `make()`: two
+// @expected E0119 — nothing chooses `T` for `make()`: two
 // `Default` instances match and there is no annotation.
 #[derive(Default)]
 class Q {

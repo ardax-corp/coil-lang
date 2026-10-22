@@ -1,4 +1,4 @@
-// Expected: E0102 — a pattern from enum B against a scrutinee of enum A.
+// @expected E0102 — a pattern from enum B against a scrutinee of enum A.
 enum A {
     X,
     Y,

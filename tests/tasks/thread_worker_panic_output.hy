@@ -1,7 +1,7 @@
 // #1828: a `thread::spawn` worker's panic message is not part of the
 // case's stdout under `coil test`, as it is not under `coil`: it goes to
 // stderr, so the `// Output:` header sees only what `main` printed.
-// Output: before\njoined: err\n
+// @output before\njoined: err\n
 use io::{stdout, write};
 use string::to_bytes;
 use thread::{join, spawn};

@@ -4,7 +4,7 @@
 // whose field is itself a record variant, binding `v` and `name` in one
 // pattern.
 //
-// Output: 99
+// @output 99
 
 use io::stdout;
 use io::sync::write_all;

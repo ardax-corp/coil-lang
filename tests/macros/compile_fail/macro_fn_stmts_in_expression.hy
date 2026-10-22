@@ -1,4 +1,4 @@
-// Expected: E0119 — a call in expression position must expand to one
+// @expected E0119 — a call in expression position must expand to one
 // expression; `swap!` produces statements.
 use fn_macros::swap;
 

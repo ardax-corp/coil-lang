@@ -1,4 +1,4 @@
-// Expected: E0107 — `ro + x` calls `Add::add`, whose impl for `V` mutates `self`, so it cannot run on a `readonly` value (#1645).
+// @expected E0107 — `ro + x` calls `Add::add`, whose impl for `V` mutates `self`, so it cannot run on a `readonly` value (#1645).
 class V {
     pub x: int,
 }

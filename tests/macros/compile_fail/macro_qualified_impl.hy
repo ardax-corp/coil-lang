@@ -1,4 +1,4 @@
-// Expected: E0119 — a module-qualified `impl` head is only written by macros (hygiene);
+// @expected E0119 — a module-qualified `impl` head is only written by macros (hygiene);
 // source imports the trait and names it bare.
 use derive_macros::Summary;
 

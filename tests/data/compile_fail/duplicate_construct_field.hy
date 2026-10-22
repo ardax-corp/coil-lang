@@ -1,4 +1,4 @@
-// Expected: E0208 — duplicate field in record constructor (parse E0208).
+// @expected E0208 — duplicate field in record constructor (parse E0208).
 enum E {
     Foo { x: int, y: int },
 }

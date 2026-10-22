@@ -1,5 +1,5 @@
 // examples/perf/mir_lir_fold.hy run as a test: the checksum pins the shape below.
-// Output: 65535 645758238144
+// @output 65535 645758238144
 
 // Hit bench for #1434: MIR constant folding on LIR bodies. A body whose
 // only arithmetic is bitwise ops and shifts takes LIR (no dense attempt),

@@ -1,6 +1,6 @@
 // ANSI escape sequences in string literals (`\e`).
 //
-// Output: \e[31mred\e[0m
+// @output \e[31mred\e[0m
 
 use io::stdout;
 use io::sync::write_all;

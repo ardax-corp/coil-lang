@@ -1,4 +1,4 @@
-// Expected: E0119 — the format string must be a literal so its specifiers can be checked.
+// @expected E0119 — the format string must be a literal so its specifiers can be checked.
 use string::format;
 
 fn main() {

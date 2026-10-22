@@ -1,4 +1,4 @@
-// Expected: E0107 — an `Option` field read through a `readonly` holder hands back a `readonly Point` (#1552).
+// @expected E0107 — an `Option` field read through a `readonly` holder hands back a `readonly Point` (#1552).
 class Point {
     pub x: int,
 }

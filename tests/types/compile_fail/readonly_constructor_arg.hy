@@ -1,4 +1,4 @@
-// Expected: E0107 — a `readonly` value cannot fill a plain `Point` field (#1552).
+// @expected E0107 — a `readonly` value cannot fill a plain `Point` field (#1552).
 class Point {
     pub x: int,
 }

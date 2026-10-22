@@ -1,5 +1,5 @@
 // Signed `/` is toward zero; arithmetic `>>` would differ for negatives.
-// Output: -2
+// @output -2
 use io::{stdout, write};
 use string::{format, to_bytes};
 

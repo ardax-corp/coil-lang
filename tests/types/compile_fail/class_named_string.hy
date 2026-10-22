@@ -1,4 +1,4 @@
-// Expected: E0200 — `String` is the built-in `string` (built-in type names
+// @expected E0200 — `String` is the built-in `string` (built-in type names
 // match in any letter case); a class cannot take the name (#1673).
 class String {
     pub s: string,

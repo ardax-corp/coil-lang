@@ -1,5 +1,5 @@
 // An array literal built from a copied local holds the copied value.
-// Output: 30
+// @output 30
 use io::{stdout, write};
 use string::{format, to_bytes};
 

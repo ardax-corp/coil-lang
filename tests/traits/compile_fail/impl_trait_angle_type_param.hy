@@ -1,4 +1,4 @@
-// Expected: E0119 — `impl Show<T>` is not a generic inherent impl: `Show` is
+// @expected E0119 — `impl Show<T>` is not a generic inherent impl: `Show` is
 // a trait, so an instance is written `impl Show for T`.
 class Foo {
     pub v: int,

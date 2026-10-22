@@ -1,4 +1,4 @@
-// Expected: E0207 — reading a field the class does not declare.
+// @expected E0207 — reading a field the class does not declare.
 class P {
     pub x: int,
 }

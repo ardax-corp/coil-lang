@@ -1,4 +1,4 @@
-// Output: 234
+// @output 234
 use io::{stdout, write};
 use string::{format, to_bytes};
 

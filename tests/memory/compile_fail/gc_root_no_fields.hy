@@ -1,4 +1,4 @@
-// Expected: E0119 — a `Root<T>` is opaque; read the value with `gc::get`.
+// @expected E0119 — a `Root<T>` is opaque; read the value with `gc::get`.
 use gc::root;
 
 fn main() {

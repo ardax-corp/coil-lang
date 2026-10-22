@@ -1,5 +1,5 @@
 // examples/perf/array_mut.hy run as a test: the checksum pins the shape below.
-// Output: 2000
+// @output 2000
 
 // CPU: StoreIndex + compound update hot loop.
 use io::stdout;

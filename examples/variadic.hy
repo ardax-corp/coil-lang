@@ -1,6 +1,6 @@
 // Variadic parameters (`int... xs`).
 //
-// Output: 60Hi!?
+// @output 60Hi!?
 
 use io::stdout;
 use io::sync::write_all;

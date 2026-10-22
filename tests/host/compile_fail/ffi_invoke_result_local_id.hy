@@ -1,4 +1,4 @@
-// Expected: E0102 — `invoke`'s function id must be the `int` handle, not the
+// @expected E0102 — `invoke`'s function id must be the `int` handle, not the
 // `Result` that `declare` returns; unwrap it with `?` or `match` (#1761).
 use ffi::declare;
 use ffi::invoke;

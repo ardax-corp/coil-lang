@@ -1,7 +1,7 @@
 // Loop `invariant` / `decreases` clauses that hold let the loop run; a
 // `for` invariant that breaks after the last item, and a `decreases` that
 // stalls on `continue`, fail with their clause and function.
-// Output: ok
+// @output ok
 use io::{stdout, write};
 use string::{to_bytes, find_from};
 use task::{scope, Scope, TaskError};

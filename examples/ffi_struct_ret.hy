@@ -1,6 +1,6 @@
 // examples/ffi_struct_ret.hy — FFI struct return via make_point.
 //
-// Output: (not checked: needs `--allow-dload sum`; see the example_ffi_* pipeline tests)
+// @output (not checked: needs `--allow-dload sum`; see the example_ffi_* pipeline tests)
 
 use ffi::Error;
 use ffi::declare;

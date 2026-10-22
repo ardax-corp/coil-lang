@@ -1,4 +1,4 @@
-// Expected: E0413 — reading an environment variable is the `env` effect.
+// @expected E0413 — reading an environment variable is the `env` effect.
 use env::var;
 
 pure fn home() -> bool {

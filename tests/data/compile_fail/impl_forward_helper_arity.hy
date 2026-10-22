@@ -1,4 +1,4 @@
-// Expected: E0119 — the later helper takes one argument; the method passes two.
+// @expected E0119 — the later helper takes one argument; the method passes two.
 class Foo {
     pub v: int,
 }

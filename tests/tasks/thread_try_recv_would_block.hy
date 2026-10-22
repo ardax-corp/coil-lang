@@ -1,4 +1,4 @@
-// Output: wb
+// @output wb
 use thread::{channel, try_recv, ThreadError};
 use io::{stdout, write};
 use string::{format, to_bytes};

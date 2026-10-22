@@ -1,4 +1,4 @@
-// Expected: E0119 — `Box<T>` derives `Ord`, but `Plain` has no `Ord`, so `<` on `Box<Plain>` has no instance (#1186).
+// @expected E0119 — `Box<T>` derives `Ord`, but `Plain` has no `Ord`, so `<` on `Box<Plain>` has no instance (#1186).
 class Plain {
     pub v: int,
 }

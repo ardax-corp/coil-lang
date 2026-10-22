@@ -5,7 +5,7 @@
 // (`--root examples/src`); the function's fully qualified name is
 // `foo::sadge::sadge`.
 //
-// Output: 1a4\n45\n
+// @output 1a4\n45\n
 
 use foo::sadge;
 use io::stdout;

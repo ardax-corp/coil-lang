@@ -1,4 +1,4 @@
-// Expected: E0209 — `Rect { w: 0, h }` leaves every other width uncovered.
+// @expected E0209 — `Rect { w: 0, h }` leaves every other width uncovered.
 enum Shape {
     Dot,
     Circle(int),

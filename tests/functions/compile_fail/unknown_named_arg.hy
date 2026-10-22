@@ -1,4 +1,4 @@
-// Expected: E0207 — no parameter is called `c`.
+// @expected E0207 — no parameter is called `c`.
 fn diff(int a, int b) -> int {
     return a - b;
 }

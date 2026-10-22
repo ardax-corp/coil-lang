@@ -1,4 +1,4 @@
-// Expected: E0107 — a `readonly Point` return value cannot be written (#1558).
+// @expected E0107 — a `readonly Point` return value cannot be written (#1558).
 class Point {
     pub x: int,
 }

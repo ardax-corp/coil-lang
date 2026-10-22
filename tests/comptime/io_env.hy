@@ -1,4 +1,4 @@
-// Flags: --comptime-env PATH --comptime-env COIL_COMPTIME_UNSET_VAR
+// @flags --comptime-env PATH --comptime-env COIL_COMPTIME_UNSET_VAR
 // A `comptime` expression reads granted environment variables.
 use env::var;
 use tests::assert;

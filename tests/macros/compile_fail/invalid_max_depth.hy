@@ -1,4 +1,4 @@
-// Expected: E0119 — #[max_depth(N)] requires a positive integer.
+// @expected E0119 — #[max_depth(N)] requires a positive integer.
 #[max_depth(0)]
 fn fib(int n) -> int {
     if n <= 2 {

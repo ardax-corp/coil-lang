@@ -1,5 +1,5 @@
 // examples/perf/mir_gvn_divf.hy run as a test: the checksum pins the shape below.
-// Output: 21333330666666
+// @output 21333330666666
 
 // Hit bench for COI-284 MIR cross-block GVN/PRE: `xf / scale` in both
 // diamond arms and again after the join. Same-block CSE cannot share

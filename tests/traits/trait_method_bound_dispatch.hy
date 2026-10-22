@@ -1,4 +1,4 @@
-// Output: 2.5! 2.5! 2.5! z! dz! 7! d7! btrue! dbtrue! 1.5! q! d5! 3a! 24.5!
+// @output 2.5! 2.5! 2.5! z! dz! 7! d7! btrue! dbtrue! 1.5! q! d5! 3a! 24.5!
 // A trait method's own bound (`fn third<W: Show>`) open at the call: a
 // generic body forwards its own dictionary to a direct, a function-style
 // and a bound call, a default body calls its sibling with it, and a

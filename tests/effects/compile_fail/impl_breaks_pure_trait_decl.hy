@@ -1,4 +1,4 @@
-// Expected: E0413 — a trait method declared `pure` without a body binds
+// @expected E0413 — a trait method declared `pure` without a body binds
 // every impl: this one writes a static.
 static let HITS: int = 0;
 

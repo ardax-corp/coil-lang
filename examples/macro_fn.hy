@@ -3,7 +3,7 @@
 // where it is written. `coil dissect --expand examples/macro_fn.hy` shows the
 // expanded program.
 //
-// Output: 9 15 16 swapped 2 1 clicks 2
+// @output 9 15 16 swapped 2 1 clicks 2
 
 use io::stdout;
 use io::sync::write_all;

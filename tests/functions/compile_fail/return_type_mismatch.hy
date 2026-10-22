@@ -1,4 +1,4 @@
-// Expected: E0102 — the returned value must have the declared return type.
+// @expected E0102 — the returned value must have the declared return type.
 fn count() -> int {
     return "three";
 }

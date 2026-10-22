@@ -1,4 +1,4 @@
-// Expected: E0413 — spawning a thread is the `thread` effect.
+// @expected E0413 — spawning a thread is the `thread` effect.
 use thread::spawn;
 
 pure fn go() {

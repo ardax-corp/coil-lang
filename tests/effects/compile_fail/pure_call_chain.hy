@@ -1,4 +1,4 @@
-// Expected: E0413 — an effect two calls down still breaks `pure` (top → middle → leaf).
+// @expected E0413 — an effect two calls down still breaks `pure` (top → middle → leaf).
 static let N: int = 0;
 
 fn leaf() -> int {

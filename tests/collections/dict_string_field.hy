@@ -1,5 +1,5 @@
 // Dict fields holding strings and ints read back their values.
-// Output: hi9
+// @output hi9
 use io::{stdout, write};
 use string::{format, to_bytes};
 

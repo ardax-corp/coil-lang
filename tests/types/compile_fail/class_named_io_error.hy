@@ -1,4 +1,4 @@
-// Expected: E0200 — `IoError` is a built-in error enum with a built-in
+// @expected E0200 — `IoError` is a built-in error enum with a built-in
 // `Show` instance; a class cannot take the name (#1701).
 class IoError {
     pub n: int,

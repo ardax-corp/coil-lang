@@ -1,4 +1,4 @@
-// Expected: E0408 — the free function `io::attach` requires `--allow-attach`.
+// @expected E0408 — the free function `io::attach` requires `--allow-attach`.
 use io::{stdout, attach};
 
 fn main() {

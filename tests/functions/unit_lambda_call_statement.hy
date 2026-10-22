@@ -1,4 +1,4 @@
-// Output: 1;2;2;3
+// @output 1;2;2;3
 // Calling a block lambda that returns `()` as a statement, directly and
 // through a `() -> ()` parameter (#1214).
 use io::{stdout, write};

@@ -1,5 +1,5 @@
 // Auto-par fork-join of pure recursive `fib(n-1)+fib(n-2)` must stay correct.
-// Output: 144
+// @output 144
 use io::{stdout, write};
 use string::{format, to_bytes};
 

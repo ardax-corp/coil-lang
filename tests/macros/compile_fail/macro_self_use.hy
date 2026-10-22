@@ -1,4 +1,4 @@
-// Expected: E0119 — a module cannot use a derive it declares.
+// @expected E0119 — a module cannot use a derive it declares.
 use macro::{TypeDecl, Code, raw};
 
 derive Local(TypeDecl t) -> Code {

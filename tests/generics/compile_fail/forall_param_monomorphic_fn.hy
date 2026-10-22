@@ -1,4 +1,4 @@
-// Expected: E0102 — a `forall T. T -> T` parameter needs a polymorphic function;
+// @expected E0102 — a `forall T. T -> T` parameter needs a polymorphic function;
 // the named `int -> int` function `inc` is not one.
 fn inc(int x) -> int {
     return x;

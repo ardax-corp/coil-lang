@@ -1,5 +1,5 @@
 // examples/perf/for_in_range_value.hy run as a test: the checksum pins the shape below.
-// Output: 12884115456
+// @output 12884115456
 
 // B5 / Q6: first-class range local (`let r = 0..n`) as counted cur/end.
 use io::stdout;

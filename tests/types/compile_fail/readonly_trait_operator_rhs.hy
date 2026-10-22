@@ -1,4 +1,4 @@
-// Expected: E0107 — `x + ro` passes `ro` to `Add::add`, whose impl for `V` mutates its parameter `o` (#1645).
+// @expected E0107 — `x + ro` passes `ro` to `Add::add`, whose impl for `V` mutates its parameter `o` (#1645).
 class V {
     pub x: int,
 }

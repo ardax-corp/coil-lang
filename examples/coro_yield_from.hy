@@ -1,6 +1,6 @@
 // `yield from` delegates to another coroutine.
 //
-// Output: 012
+// @output 012
 
 use io::stdout;
 use io::sync::write_all;

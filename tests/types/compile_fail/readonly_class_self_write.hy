@@ -1,4 +1,4 @@
-// Expected: E0107 — no method may write a field of a readonly class, `self` included (#1558).
+// @expected E0107 — no method may write a field of a readonly class, `self` included (#1558).
 readonly class Point {
     pub x: int,
 }

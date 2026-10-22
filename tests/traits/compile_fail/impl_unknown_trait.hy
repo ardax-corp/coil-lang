@@ -1,4 +1,4 @@
-// Expected: E0119 — `impl Shape for Sq` names a trait that does not exist.
+// @expected E0119 — `impl Shape for Sq` names a trait that does not exist.
 class Sq {
     pub side: int,
 }

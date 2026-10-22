@@ -1,5 +1,5 @@
 // examples/perf/iv_mul_sr.hy run as a test: the checksum pins the shape below.
-// Output: 31499989500000
+// @output 31499989500000
 
 // CPU: force integer IV strength reduction (`i * c` → add recurrence).
 // Odd invariant factor so codegen does not rewrite the mul to SHL.

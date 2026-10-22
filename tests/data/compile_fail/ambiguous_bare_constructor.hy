@@ -1,4 +1,4 @@
-// Expected: E0201 — a bare `Foo` is ambiguous when two enums declare it;
+// @expected E0201 — a bare `Foo` is ambiguous when two enums declare it;
 // write `A::Foo` or `B::Foo`.
 enum A {
     Foo,

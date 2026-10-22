@@ -1,5 +1,5 @@
 // Fields past index 32 of a wide class read and write on direct MIR (#1498).
-// Output: 5 40 7 90 124\n
+// @output 5 40 7 90 124\n
 use io::{stdout, write};
 use string::{format, to_bytes};
 

@@ -1,6 +1,6 @@
 // `return e;` in a `gen fn` is its completion value: the `resume` that
 // finishes the coroutine evaluates to `e`, like a yielded value.
-// Output: 1,2,42
+// @output 1,2,42
 use io::{stdout, write};
 use string::{format, to_bytes};
 

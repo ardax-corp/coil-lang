@@ -1,4 +1,4 @@
-// Expected: E0119 — `Lt for Box<T: Lt>` used at `Box<Plain>` needs `Lt<Plain>` (#1186).
+// @expected E0119 — `Lt for Box<T: Lt>` used at `Box<Plain>` needs `Lt<Plain>` (#1186).
 class Plain {
     pub v: int,
 }

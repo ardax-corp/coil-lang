@@ -173,6 +173,7 @@ pub mod ast;
 pub mod comments;
 pub mod doc_examples;
 pub mod fmt;
+pub mod test_headers;
 
 pub use ast::item_docs;
 pub use fmt::{format_program, format_program_noted, format_range, format_source};

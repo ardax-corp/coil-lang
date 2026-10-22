@@ -1,6 +1,6 @@
 // Coroutines: `yield` suspends, `resume` continues.
 //
-// Output: Suspended\n1Resumed\n
+// @output Suspended\n1Resumed\n
 
 use io::stdout;
 use io::sync::write_all;

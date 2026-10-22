@@ -1,5 +1,5 @@
 // Shuffled record pattern `{ y: _, x: a }` must bind declaration-order `x`.
-// Output: 1
+// @output 1
 use io::{stdout, write};
 use string::{format, to_bytes};
 

@@ -1,4 +1,4 @@
-// Expected: E0119 — `Box` takes one type argument.
+// @expected E0119 — `Box` takes one type argument.
 class Box<T> {
     pub item: T,
 }

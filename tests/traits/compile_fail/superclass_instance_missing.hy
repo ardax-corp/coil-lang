@@ -1,4 +1,4 @@
-// Expected: E0119 — `impl Ordered for int` needs the superclass instance `Equal<int>`.
+// @expected E0119 — `impl Ordered for int` needs the superclass instance `Equal<int>`.
 trait Equal<T> {
     fn eq_val(T a, T b) -> bool {}
 }

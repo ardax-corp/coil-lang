@@ -1,4 +1,4 @@
-// Output: 1 4 9
+// @output 1 4 9
 // A `static let` in the file must not change which trait method a
 // bounded generic over a class calls.
 use io::{stdout, write};

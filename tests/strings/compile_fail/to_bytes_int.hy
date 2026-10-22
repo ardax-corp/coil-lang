@@ -1,4 +1,4 @@
-// Expected: E0102 — `to_bytes` encodes a `string`.
+// @expected E0102 — `to_bytes` encodes a `string`.
 use string::to_bytes;
 
 fn main() {

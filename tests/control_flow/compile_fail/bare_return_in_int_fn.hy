@@ -1,4 +1,4 @@
-// Expected: E0102 — `return;` returns unit, not the declared `int`.
+// @expected E0102 — `return;` returns unit, not the declared `int`.
 fn f() -> int {
     return;
 }

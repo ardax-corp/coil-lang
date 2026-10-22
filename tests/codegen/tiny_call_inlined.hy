@@ -1,5 +1,5 @@
 // Tiny direct-call inlining must preserve call semantics end-to-end.
-// Output: 7
+// @output 7
 use io::{stdout, write};
 use string::{format, to_bytes};
 

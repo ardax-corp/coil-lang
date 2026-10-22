@@ -1,4 +1,4 @@
-// Expected: E0202 — `Shape` names no enum, type or trait.
+// @expected E0202 — `Shape` names no enum, type or trait.
 trait Area<T> {
     fn size(T s) -> int {}
 }

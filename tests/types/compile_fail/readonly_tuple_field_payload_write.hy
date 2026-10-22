@@ -1,4 +1,4 @@
-// Expected: E0107 — a tuple field read through a `readonly` holder is readonly element-wise (#1552).
+// @expected E0107 — a tuple field read through a `readonly` holder is readonly element-wise (#1552).
 class Point {
     pub x: int,
 }

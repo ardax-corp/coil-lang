@@ -1,4 +1,4 @@
-// Expected: E0101 — a `comptime` block can only call code from other
+// @expected E0101 — a `comptime` block can only call code from other
 // modules: this module is not compiled yet when the block runs.
 use comptime_gen::adder;
 

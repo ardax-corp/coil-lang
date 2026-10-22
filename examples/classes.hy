@@ -6,7 +6,7 @@
 //   5  — p.x after set_x(5)
 //   8  — p.sum() after mutation
 //
-// Output: 7458
+// @output 7458
 
 use io::stdout;
 use io::sync::write_all;

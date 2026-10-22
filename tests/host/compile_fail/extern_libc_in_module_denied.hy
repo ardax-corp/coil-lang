@@ -1,4 +1,4 @@
-// Expected: E0410 — an `extern "c"` block in an imported module is
+// @expected E0410 — an `extern "c"` block in an imported module is
 // denied like one in the entry file.
 use libc_extern::c_strlen;
 

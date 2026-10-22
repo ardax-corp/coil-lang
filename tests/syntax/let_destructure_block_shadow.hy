@@ -1,6 +1,6 @@
 // Inner-block destructure must not clobber an outer binding's slot.
 // outer `a` must survive inner-block shadow
-// Output: 42
+// @output 42
 use io::{stdout, write};
 use string::{format, to_bytes};
 

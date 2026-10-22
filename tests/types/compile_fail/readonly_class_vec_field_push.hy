@@ -1,4 +1,4 @@
-// Expected: E0107 — a readonly class's fields read `readonly`, so its `Vec` cannot grow through it (#1558).
+// @expected E0107 — a readonly class's fields read `readonly`, so its `Vec` cannot grow through it (#1558).
 readonly class Bag {
     pub items: Vec<int>,
 }

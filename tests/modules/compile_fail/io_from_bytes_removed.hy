@@ -1,4 +1,4 @@
-// Expected: E0101 — `io::from_bytes` was removed; it is `string::from_bytes`.
+// @expected E0101 — `io::from_bytes` was removed; it is `string::from_bytes`.
 use io::{stdout, from_bytes};
 
 fn main() {

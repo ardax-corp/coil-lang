@@ -1,4 +1,4 @@
-// Expected: E0107 — enum record fields are immutable; build a new variant instead.
+// @expected E0107 — enum record fields are immutable; build a new variant instead.
 enum Pt {
     Pt { x: int, y: int },
 }

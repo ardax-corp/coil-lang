@@ -1,4 +1,4 @@
-// Expected: E0100 — a `comptime` expression cannot use a local variable.
+// @expected E0100 — a `comptime` expression cannot use a local variable.
 fn sq(int x) -> int {
     return x * x;
 }

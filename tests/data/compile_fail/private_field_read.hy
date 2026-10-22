@@ -1,4 +1,4 @@
-// Expected: E0128 — a field without `pub` is readable only inside its class's `impl`.
+// @expected E0128 — a field without `pub` is readable only inside its class's `impl`.
 class Account {
     balance: int,
 }

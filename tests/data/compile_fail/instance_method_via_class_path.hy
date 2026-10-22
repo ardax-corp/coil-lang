@@ -1,4 +1,4 @@
-// Expected: E0119 — an instance method is called on a value (`p.sum()`), not as
+// @expected E0119 — an instance method is called on a value (`p.sum()`), not as
 // `Point::sum()`.
 class Point {
     pub x: int,

@@ -1,6 +1,6 @@
 // `const` locals.
 //
-// Output: 42hi
+// @output 42hi
 
 use io::stdout;
 use io::sync::write_all;

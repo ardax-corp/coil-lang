@@ -1,4 +1,4 @@
-// Expected: E0801 — continue outside loop.
+// @expected E0801 — continue outside loop.
 fn main() {
     continue;
 }

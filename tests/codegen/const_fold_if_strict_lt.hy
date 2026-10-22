@@ -1,5 +1,5 @@
 // Const-fold `if` with strict `<` equality boundary takes else (Le vs Leq).
-// Output: 0
+// @output 0
 use io::{stdout, write};
 use string::{format, to_bytes};
 

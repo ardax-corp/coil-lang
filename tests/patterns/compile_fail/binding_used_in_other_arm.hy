@@ -1,4 +1,4 @@
-// Expected: E0100 — a pattern binding is in scope only in its own arm.
+// @expected E0100 — a pattern binding is in scope only in its own arm.
 enum Shape {
     Dot,
     Circle(int),

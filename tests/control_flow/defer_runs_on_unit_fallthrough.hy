@@ -1,6 +1,6 @@
 // A `defer` runs when a unit function falls off the end of its body, after
 // the body's own statements.
-// Output: bd
+// @output bd
 use io::{stdout, write};
 use string::{format, to_bytes};
 

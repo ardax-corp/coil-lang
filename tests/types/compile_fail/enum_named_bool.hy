@@ -1,4 +1,4 @@
-// Expected: E0200 — `Bool` names the built-in `bool`; an enum cannot take the
+// @expected E0200 — `Bool` names the built-in `bool`; an enum cannot take the
 // name (#1673).
 enum Bool {
     Yes,

@@ -3,7 +3,7 @@
 // In expression position the value coerces to the backing (`int` here).
 // Show/String of a case is that backing (`Status.Ok` shows as `200`).
 //
-// Output: ok 200 200\n
+// @output ok 200 200\n
 
 use io::stdout;
 use io::sync::write_all;

@@ -1,4 +1,4 @@
-// Expected: E0119 — a trait method call on a type with no instance (`Describe<string>`).
+// @expected E0119 — a trait method call on a type with no instance (`Describe<string>`).
 trait Describe<D> {
     fn describe(D self) -> string {}
 }

@@ -1,5 +1,5 @@
 // End-to-end TailCall: self-recursive accumulator must print the correct sum.
-// Output: 15
+// @output 15
 use io::{stdout, write};
 use string::{format, to_bytes};
 

@@ -1,4 +1,4 @@
-// Expected: E0413 — an object returned mutable after a call that mutates it
+// @expected E0413 — an object returned mutable after a call that mutates it
 // is not kept private: the method call is `mutate` (#1648).
 class Counter {
     pub n: int,

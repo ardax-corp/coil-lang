@@ -1,5 +1,5 @@
 // examples/perf/mandelbrot.hy run as a test: the checksum pins the shape below.
-// Output: 625885
+// @output 625885
 
 // CPU: nested loops + float arithmetic (cross-lang fair bench).
 // Checksum of Mandelbrot escape iterations; size=160, max_iter=50.

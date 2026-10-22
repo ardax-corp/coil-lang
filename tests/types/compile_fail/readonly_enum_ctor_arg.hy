@@ -1,4 +1,4 @@
-// Expected: E0107 — a `readonly` value cannot fill a plain `Point` enum payload (#1552).
+// @expected E0107 — a `readonly` value cannot fill a plain `Point` enum payload (#1552).
 class Point {
     pub x: int,
 }

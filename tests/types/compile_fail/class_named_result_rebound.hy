@@ -1,4 +1,4 @@
-// Expected: E0200 — `Result` is the built-in prelude enum; a class cannot
+// @expected E0200 — `Result` is the built-in prelude enum; a class cannot
 // take the name, even after `use prelude::Result as …` (#1672).
 use prelude::Result as PreludeResult;
 

@@ -1,6 +1,6 @@
 // ?. optional field access + ?? fallback on a record (dict).
 //
-// Output: 42,0
+// @output 42,0
 
 use io::stdout;
 use io::sync::write_all;

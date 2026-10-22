@@ -2,7 +2,7 @@
 // writes, and methods that mutate `self`, are not. A method returns a new
 // value instead.
 //
-// Output: 312
+// @output 312
 
 use io::stdout;
 use io::sync::write_all;

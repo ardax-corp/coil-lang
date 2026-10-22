@@ -2,7 +2,7 @@
 // (len preserved). Nested format-inside-Construct payload correctness is a
 // separate clobber (still open); this only guards the Vec::push drop.
 // push with Construct(format,…) must not drop the vec
-// Output: 2
+// @output 2
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};

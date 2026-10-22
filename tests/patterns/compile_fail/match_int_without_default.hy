@@ -1,4 +1,4 @@
-// Expected: E0209 — literal arms cannot cover every `int`.
+// @expected E0209 — literal arms cannot cover every `int`.
 fn f(int n) -> int {
     return match n {
         1 => 10,

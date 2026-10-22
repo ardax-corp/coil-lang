@@ -1,6 +1,6 @@
 // `x = match …` reassignment inside a loop uses the same binding-context
 // match lowering as `let x = match …`.
-// Output: 2
+// @output 2
 use io::{stdout, write};
 use string::{format, to_bytes};
 

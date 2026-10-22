@@ -1,4 +1,4 @@
-// Expected: E0121 — `all(a, b)` overlaps `all(a, ...rest)`.
+// @expected E0121 — `all(a, b)` overlaps `all(a, ...rest)`.
 use macro::{Expr, Code};
 
 macro all(Expr a, Vec<Expr> rest) -> Code {

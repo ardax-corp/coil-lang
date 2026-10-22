@@ -1,4 +1,4 @@
-// Expected: E0102 — every `yield` in a `gen fn` has the same type.
+// @expected E0102 — every `yield` in a `gen fn` has the same type.
 gen fn mixed() {
     yield 1;
     yield "two";

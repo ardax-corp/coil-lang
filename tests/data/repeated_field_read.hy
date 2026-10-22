@@ -1,5 +1,5 @@
 // Reading the same field twice in one expression gives the same value.
-// Output: 6
+// @output 6
 use io::{stdout, write};
 use string::{format, to_bytes};
 

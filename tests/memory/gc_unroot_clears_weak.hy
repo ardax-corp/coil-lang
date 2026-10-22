@@ -1,4 +1,4 @@
-// Output: none
+// @output none
 use gc::{collect, get, root, unroot, weak, upgrade};
 use io::{stdout, write};
 use string::to_bytes;

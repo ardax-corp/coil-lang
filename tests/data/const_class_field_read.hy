@@ -1,5 +1,5 @@
 // Class `const` fields are readable after construction (mutation is blocked separately).
-// Output: 79
+// @output 79
 use io::{stdout, write};
 use string::{format, to_bytes};
 

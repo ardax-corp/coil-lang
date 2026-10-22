@@ -1,6 +1,6 @@
 // A `let` bound from a `match` inside a `for … in` body (with a panicking
 // arm that never runs) feeds an accumulator declared outside the loop.
-// Output: 9
+// @output 9
 use io::{stdout, write};
 use string::{format, to_bytes};
 

@@ -1,4 +1,4 @@
-// Expected: E0111 — an empty body returning a user enum needs a `return`.
+// @expected E0111 — an empty body returning a user enum needs a `return`.
 enum Color {
     Red,
     Blue,

@@ -1,4 +1,4 @@
-// Expected: E0107 — `readonly p` seals any expression, not just literals (#1558).
+// @expected E0107 — `readonly p` seals any expression, not just literals (#1558).
 class Point {
     pub x: int,
 }

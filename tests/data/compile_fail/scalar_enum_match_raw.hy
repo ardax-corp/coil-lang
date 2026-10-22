@@ -1,4 +1,4 @@
-// Expected: E0102 — a `Status` scrutinee matches `Status::…` cases, not raw backing literals.
+// @expected E0102 — a `Status` scrutinee matches `Status::…` cases, not raw backing literals.
 #[repr(int)]
 enum Status {
     Ok = 200,

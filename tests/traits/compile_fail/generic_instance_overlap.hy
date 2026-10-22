@@ -1,4 +1,4 @@
-// Expected: E0119 — `Box<T>` covers `Box<int>`.
+// @expected E0119 — `Box<T>` covers `Box<int>`.
 class Box<T> {
     pub item: T,
 }

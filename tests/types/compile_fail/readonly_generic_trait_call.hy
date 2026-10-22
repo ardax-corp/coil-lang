@@ -1,4 +1,4 @@
-// Expected: E0107 — `clear` mutates `v` through `Reset::reset`, which its trait does not declare `readonly A self` (#1558).
+// @expected E0107 — `clear` mutates `v` through `Reset::reset`, which its trait does not declare `readonly A self` (#1558).
 trait Reset<R> {
     fn reset(R self) {}
 }

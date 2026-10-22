@@ -91,13 +91,13 @@ fn run_test_suite_compile_fail_inversion_and_mixed_tree() {
     // Type error under compile_fail/, with its code declared ⇒ harness pass.
     std::fs::write(
         cf.join("bad.hy"),
-        "// Expected: E0102 — a string is not an int.\nfn main() {\n  let x: int = \"no\";\n}\n",
+        "// @expected E0102 — a string is not an int.\nfn main() {\n  let x: int = \"no\";\n}\n",
     )
     .unwrap();
     // Rejected, but for another reason than the declared one ⇒ failure.
     std::fs::write(
         cf.join("wrong_reason.hy"),
-        "// Expected: E0209 — not what this file does.\nfn main() {\n  let x: int = \"no\";\n}\n",
+        "// @expected E0209 — not what this file does.\nfn main() {\n  let x: int = \"no\";\n}\n",
     )
     .unwrap();
     // Well-typed under compile_fail/ ⇒ harness failure (inverted).
@@ -414,17 +414,17 @@ fn cmd_test_returns_zero_when_the_suite_is_green() {
 
 #[test]
 fn compile_fail_header_declares_error_codes() {
-    let src = "// Expected: E0209 — non-exhaustive match.\n// E0999 in a later comment line is not a declaration.\nfn main() {}\n";
+    let src = "// @expected E0209 — non-exhaustive match.\n// E0999 in a later comment line is not a declaration.\nfn main() {}\n";
     assert_eq!(declared_error_codes(src), vec!["E0209".to_string()]);
-    let two = "// Expected: E0410 or E0409 — either gate.\nfn main() {}\n";
+    let two = "// @expected E0410 or E0409 — either gate.\nfn main() {}\n";
     assert_eq!(declared_error_codes(two), vec!["E0410", "E0409"]);
-    assert!(declared_error_codes("// Expected: compile failure.\n").is_empty());
-    assert!(declared_error_codes("fn main() {}\n// Expected: E0209\n").is_empty());
+    assert!(declared_error_codes("// @expected compile failure.\n").is_empty());
+    assert!(declared_error_codes("fn main() {}\n// @expected E0209\n").is_empty());
 }
 
 #[test]
 fn compile_fail_passes_only_on_a_declared_code() {
-    let src = "// Expected: E0209 — x.\n";
+    let src = "// @expected E0209 — x.\n";
     assert_eq!(
         compile_fail_verdict(src, "Error: [E0209] Non-exhaustive"),
         (true, None)
@@ -555,14 +555,14 @@ fn output_header_checks_what_main_prints() {
     std::fs::create_dir_all(&root).unwrap();
     let program = |out: &str| {
         format!(
-            "// Output: {out}\nuse io::{{stdout, write}};\nuse string::to_bytes;\nfn main() {{\n    write(stdout(), to_bytes(\"a\\nb\"));\n}}\n"
+            "// @output {out}\nuse io::{{stdout, write}};\nuse string::to_bytes;\nfn main() {{\n    write(stdout(), to_bytes(\"a\\nb\"));\n}}\n"
         )
     };
     std::fs::write(root.join("right.hy"), program("a\\nb")).unwrap();
     std::fs::write(root.join("wrong.hy"), program("a b")).unwrap();
     std::fs::write(
         root.join("cases.hy"),
-        "// Output: x\ntest(\"one\") {}\ntest(\"two\") {}\n",
+        "// @output x\ntest(\"one\") {}\ntest(\"two\") {}\n",
     )
     .unwrap();
     let result = run_test_suite(ReportConfig::default(), &options(&root, false)).expect("suite runs");
@@ -580,8 +580,27 @@ fn output_header_checks_what_main_prints() {
 }
 
 #[test]
+fn header_directives_ignore_case_and_old_spellings_fail() {
+    let root = unique_tmp("header_spelling");
+    std::fs::create_dir_all(&root).unwrap();
+    let program = |header: &str| {
+        format!(
+            "{header}\nuse io::{{stdout, write}};\nuse string::to_bytes;\nfn main() {{\n    write(stdout(), to_bytes(\"hi\"));\n}}\n"
+        )
+    };
+    std::fs::write(root.join("upper.hy"), program("// @Output: hi")).unwrap();
+    std::fs::write(root.join("old.hy"), program("// Output: hi")).unwrap();
+    let result = run_test_suite(ReportConfig::default(), &options(&root, false)).expect("suite runs");
+    // `old.hy` fails on its header, before it has cases.
+    assert!(result.cases.iter().all(|c| c.passed && c.file.ends_with("upper.hy")), "{:?}", result.cases);
+    assert_eq!((result.passed, result.failed), (1, 1));
+    assert!(legacy_header("// Output: hi\n").unwrap().contains("`// @output`"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn flags_header_adds_to_the_run_grants() {
-    let src = "// Expected: E0119 — x.\n// Flags: --comptime-steps 5000 --comptime-mem 8 --allow-read\nfn main() {}\n";
+    let src = "// @expected E0119 — x.\n// @flags --comptime-steps 5000 --comptime-mem 8 --allow-read\nfn main() {}\n";
     let flags = declared_flags(src).expect("parses").expect("has a header");
     let mut grants = compiler::HostGrants {
         allow_env: true,
@@ -591,9 +610,9 @@ fn flags_header_adds_to_the_run_grants() {
     assert_eq!(grants.comptime.steps, 5000);
     assert_eq!(grants.comptime.heap_bytes, 8 << 20);
     assert!(grants.allow_read && grants.allow_env);
-    assert!(declared_flags("// Output: x\nfn main() {}\n").unwrap().is_none());
+    assert!(declared_flags("// @output x\nfn main() {}\n").unwrap().is_none());
     // Only the leading comment header counts.
-    assert!(declared_flags("fn main() {}\n// Flags: --allow-read\n").unwrap().is_none());
-    let bad = declared_flags("// Flags: --comptime-steps lots\n").unwrap_err();
-    assert!(bad.contains("bad `// Flags:` header"), "{bad}");
+    assert!(declared_flags("fn main() {}\n// @flags --allow-read\n").unwrap().is_none());
+    let bad = declared_flags("// @flags --comptime-steps lots\n").unwrap_err();
+    assert!(bad.contains("bad `// @flags` header"), "{bad}");
 }

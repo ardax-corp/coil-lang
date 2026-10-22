@@ -1,4 +1,4 @@
-// Expected: E0107 — a `match` whose later arm is `readonly` joins to a `readonly` value (#1552).
+// @expected E0107 — a `match` whose later arm is `readonly` joins to a `readonly` value (#1552).
 class Point {
     pub x: int,
 }

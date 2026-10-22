@@ -1,4 +1,4 @@
-// Expected: E0102 — generated code has a type error, reported at
+// @expected E0102 — generated code has a type error, reported at
 // the `#[derive]`.
 use derive_macros_bad::BadType;
 

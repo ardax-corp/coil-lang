@@ -1,4 +1,4 @@
-// Expected: E0102 — `assert!`'s message must be a `string`.
+// @expected E0102 — `assert!`'s message must be a `string`.
 use tests::assert;
 
 test("int message") {

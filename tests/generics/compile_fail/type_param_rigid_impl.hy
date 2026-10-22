@@ -1,4 +1,4 @@
-// Expected: E0119 — an impl's type parameter is rigid in every method (#801).
+// @expected E0119 — an impl's type parameter is rigid in every method (#801).
 class Keys<K> {
     pub keys: Vec<K>,
 }

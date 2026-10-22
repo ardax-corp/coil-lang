@@ -1,4 +1,4 @@
-// Expected: E0201 — bare `Foo(x)` names a case of both `A` and `B`, and the
+// @expected E0201 — bare `Foo(x)` names a case of both `A` and `B`, and the
 // `int` scrutinee picks neither; write `A::Foo` or `B::Foo`.
 enum A {
     Foo(int),

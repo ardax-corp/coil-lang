@@ -1,6 +1,6 @@
 // An `ensures` on a body whose every exit is a `return` inside
 // `while true` checks the returned value, not the loop's unit tail.
-// Output: ok
+// @output ok
 use io::{stdout, write};
 use string::{to_bytes, find_from};
 use task::{scope, Scope, TaskError};

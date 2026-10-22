@@ -16,7 +16,7 @@
 //
 // `use tls` / `use io::net::tls` without coil-tls on roots does not resolve.
 //
-// Output: use-coil-tls
+// @output use-coil-tls
 
 use io::stdout;
 use io::sync::write_all;

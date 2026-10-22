@@ -1,5 +1,5 @@
 // `while false` must skip the body entirely.
-// Output: 2
+// @output 2
 use io::{stdout, write};
 use string::{format, to_bytes};
 

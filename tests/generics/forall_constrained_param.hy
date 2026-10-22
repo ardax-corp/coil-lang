@@ -1,9 +1,8 @@
 // A bounded generic passed to a `forall T: C. …` parameter gets the
 // constraint's dictionary at each call inside the callee (#1188).
+// @output 1|2.5|true|40|k|7 true\n
 use io::{stdout, write};
 use string::{format, to_bytes};
-
-// Output: 1|2.5|true|40|k|7 true
 
 trait Tagged<T> {
     fn tag_of(T x) -> int {}

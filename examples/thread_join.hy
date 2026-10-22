@@ -1,6 +1,6 @@
 // Threads: `spawn` a function and `join` its result.
 //
-// Output: 42
+// @output 42
 
 use thread::{join, spawn};
 use io::stdout;

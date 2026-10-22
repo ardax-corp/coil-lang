@@ -1,4 +1,4 @@
-// Output: ok:ok:err:ok:boom\ntrue true false true\n() () ()\n2 1 2 2\nok ok err ok\n
+// @output ok:ok:err:ok:boom\ntrue true false true\n() () ()\n2 1 2 2\nok ok err ok\n
 // `()` and `unit` are one type: `Result<(), E>` and `Result<unit, E>` mix
 // freely (passed, returned, `?`, `==`, matched, stored, generic), and `()`
 // shows as `()` whichever spelling made it.

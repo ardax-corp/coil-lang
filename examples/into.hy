@@ -3,7 +3,7 @@
 // target type must be local (strict orphan rule — builtin heads like `int`
 // are not allowed as instance arguments for foreign traits).
 //
-// Output: 32
+// @output 32
 
 use io::stdout;
 use io::sync::write_all;

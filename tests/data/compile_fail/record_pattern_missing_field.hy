@@ -1,4 +1,4 @@
-// Expected: E0206 — a record pattern binds every declared field.
+// @expected E0206 — a record pattern binds every declared field.
 enum Pt {
     Pt { x: int, y: int },
 }

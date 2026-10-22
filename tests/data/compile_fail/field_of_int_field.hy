@@ -1,4 +1,4 @@
-// Expected: E0119 — `p.x` is an `int`, which has no field `y`.
+// @expected E0119 — `p.x` is an `int`, which has no field `y`.
 enum Point {
     Origin,
     Point { x: int, y: int },

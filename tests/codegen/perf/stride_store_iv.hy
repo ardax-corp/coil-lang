@@ -1,5 +1,5 @@
 // examples/perf/stride_store_iv.hy run as a test: the checksum pins the shape below.
-// Output: 1
+// @output 1
 
 // Hit bench for COI-382 S5: stride DenseStoreIndex + IV bump.
 // Flagship nsieve k-loop is the same shape; n=1<<14 is ~2.5ms wall (wash).

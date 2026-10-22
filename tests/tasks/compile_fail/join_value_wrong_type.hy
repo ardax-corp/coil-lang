@@ -1,4 +1,4 @@
-// Expected: E0102 — `join` on a `Task<int>` gives `Result<int, TaskError>`;
+// @expected E0102 — `join` on a `Task<int>` gives `Result<int, TaskError>`;
 // its `Ok` value is not a `string`.
 use task::{scope, Scope};
 

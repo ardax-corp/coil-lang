@@ -1,4 +1,4 @@
-// Expected: E0107 — `HashMap::insert` mutates `self`, so a `readonly` map cannot call it; `get` can (#1558).
+// @expected E0107 — `HashMap::insert` mutates `self`, so a `readonly` map cannot call it; `get` can (#1558).
 use collections::map::HashMap;
 
 fn main() {
