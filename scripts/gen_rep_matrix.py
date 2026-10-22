@@ -41,10 +41,10 @@ BASELINE = ROOT / "scripts" / "rep_matrix_baseline.json"
 # The issue a red cell's failure is filed as, by its detail text.
 ISSUES = [
     (r"callee-generic", "#1888"),
-    (r"open-niche-element", "#1896"),
     (r"no MIR from HIR", "#1903"),
     (r"not sendable", "#1904"),
     (r"host Option/Result layout mismatch", "#1905"),
+    (r"value-type", "#1912"),
 ]
 
 
@@ -307,7 +307,7 @@ POSITIONS = [
     Pos(
         "thread_join",
         "threaded({X})",
-        "fn threaded({T} x) -> {T} {\n    let th = match spawn(fn () use (x) => x) {\n        Ok(t) => t,\n        Err(_) => panic \"spawn\",\n    };\n    return match join(th) {\n        Ok(v) => v,\n        Err(_) => panic \"join\",\n    };\n}\n",
+        "fn threaded({T} x) -> {T} {\n    let th = match spawn(fn () use (x) => x) {\n        Ok(t) => t,\n        Err(_) => panic \"spawn\",\n    };\n    // `Thread` is untyped: pin the joined value's type, or a\n    // result-mode `return` wraps it as the `Ok` payload.\n    let got: {T} = match join(th) {\n        Ok(v) => v,\n        Err(_) => panic \"join\",\n    };\n    return got;\n}\n",
         ("thread::{join, spawn}",),
     ),
     Pos(

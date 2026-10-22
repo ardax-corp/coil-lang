@@ -4720,14 +4720,7 @@ impl Lower<'_> {
             let Some(v) = v else {
                 return Ok(Val::Never);
             };
-            // A niche enum goes to a bare type parameter as its object.
-            let v = match self.b.value_ty(v) {
-                from @ (MirTy::NicheOpt | MirTy::NicheRes) if tag.is_some() => {
-                    let layout = self.niche_layout(arg, from)?;
-                    self.box_niche(layout, v)?
-                }
-                _ => v,
-            };
+            // A niche enum goes to a bare type parameter as its own word.
             let v = match tag {
                 Some(tag) => {
                     let boxed = self.at_expr(arg, |l| l.b.ins_alloc(MirAllocKind::Boxed { tag }, vec![v]).map_err(mir))?;
@@ -4755,12 +4748,8 @@ impl Lower<'_> {
         let ret = if p.unbox.is_some() { MirTy::HeapRef } else { word };
         let dest = self.at_expr(id, |l| l.b.ins_call_indirect_dicts(callee, words, dicts, ret).map_err(mir))?;
         let dest = match p.unbox {
-            // A niche enum for a bare type parameter comes back boxed as
-            // its object (#1515).
-            Some(tag) if matches!(word, MirTy::NicheOpt | MirTy::NicheRes) => {
-                let obj = self.b.ins_unbox(dest, tag, MirTy::HeapRef).map_err(mir)?;
-                return self.unbox_niche(obj, word);
-            }
+            // A niche enum for a bare type parameter comes back as its own
+            // word boxed.
             Some(tag) => self.b.ins_unbox(dest, tag, word).map_err(mir)?,
             None => dest,
         };

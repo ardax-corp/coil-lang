@@ -1197,12 +1197,13 @@ impl Compiler {
             // A generic-head instance's shared entry takes its receiver as
             // the boxed enum object: a niche word goes as its enum object,
             // a two-word `Option` / `Result` boxed from its pair (#1609).
+            // A bare type parameter's argument goes as its own word boxed.
             let shared_entry = key == call.key;
             let niches: Vec<Option<ValueLayout>> = args
                 .iter()
-                .zip(&call.params)
                 .zip(&boxes)
-                .map(|((&a, _), b)| (shared_entry && b.is_some()).then(|| self.hir_niche_arg(hir, emit, a, ValueLayout::Boxed)).flatten())
+                .enumerate()
+                .map(|(i, (&a, b))| (shared_entry && i == 0 && b.is_some()).then(|| self.hir_niche_arg(hir, emit, a, ValueLayout::Boxed)).flatten())
                 .collect();
             if let Some(dicts) = dicts
                 && let Some(boxed_ret) = self.hir_ret_shape(hir, id, &natural)
