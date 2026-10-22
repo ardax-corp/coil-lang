@@ -469,6 +469,12 @@ pub enum StringBuiltin {
     Rfind,
     /// `match_at(s, needle, at) -> bool`.
     MatchAt,
+    /// `find_all(hay, needle) -> Vec<int>`: non-overlapping match offsets.
+    FindAll,
+    /// `split(hay, sep) -> Vec<string>`.
+    Split,
+    /// `replace_all(hay, needle, with) -> string`.
+    ReplaceAll,
 }
 
 impl StringBuiltin {
@@ -482,6 +488,9 @@ impl StringBuiltin {
             Self::FindFrom => "find_from",
             Self::Rfind => "rfind",
             Self::MatchAt => "match_at",
+            Self::FindAll => "find_all",
+            Self::Split => "split",
+            Self::ReplaceAll => "replace_all",
         }
     }
 
@@ -499,6 +508,9 @@ impl StringBuiltin {
             Self::FindFrom => Some("string_find_from"),
             Self::Rfind => Some("string_rfind"),
             Self::MatchAt => Some("string_match_at"),
+            Self::FindAll => Some(common::STRING_FIND_ALL_NATIVE),
+            Self::Split => Some(common::STRING_SPLIT_NATIVE),
+            Self::ReplaceAll => Some(common::STRING_REPLACE_ALL_NATIVE),
         }
     }
 
@@ -512,6 +524,9 @@ impl StringBuiltin {
             Self::FindFrom,
             Self::Rfind,
             Self::MatchAt,
+            Self::FindAll,
+            Self::Split,
+            Self::ReplaceAll,
         ]
     }
 }

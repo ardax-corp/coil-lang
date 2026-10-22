@@ -1041,6 +1041,9 @@ impl Checker {
             StringBuiltin::FindFrom => fun(&[string(), string(), int()], int()),
             StringBuiltin::Rfind => fun(&[string(), string()], int()),
             StringBuiltin::MatchAt => fun(&[string(), string(), int()], boolean()),
+            StringBuiltin::FindAll => fun(&[string(), string()], vec_app_ty(int())),
+            StringBuiltin::Split => fun(&[string(), string()], vec_app_ty(string())),
+            StringBuiltin::ReplaceAll => fun(&[string(), string(), string()], string()),
         };
         Scheme::mono(ty)
     }

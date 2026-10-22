@@ -16,6 +16,23 @@
 /// ```
 fn byte_at(string s, int i) -> int {}
 
+/// Returns the byte offsets of every non-overlapping `needle` in `hay`, left
+/// to right.
+///
+/// An empty `needle` matches at every character boundary, `0` through
+/// `hay.len()`. `text::Searchable` methods use this for `string` patterns.
+///
+/// # Examples
+///
+/// ```
+/// use string::{find_all};
+/// # use tests::assert;
+/// let at = find_all("a,b,,c", ",");
+/// assert!(at.len() == 3 && at[0] == 1 && at[2] == 4);
+/// assert!(find_all("aaaa", "aa").len() == 2);
+/// ```
+fn find_all(string hay, string needle) -> Vec<int> {}
+
 /// Returns the byte offset of the first `needle` in `hay` at or after `start`, or `-1`.
 ///
 /// `start` is clamped to `0..=hay.len()`. An empty `needle` matches at the
@@ -102,6 +119,20 @@ fn from_bytes(Vec<byte> bytes) -> Result<string, IoError> {}
 /// ```
 fn match_at(string s, string needle, int at) -> bool {}
 
+/// Returns `hay` with every non-overlapping `needle` replaced by `with`.
+///
+/// An empty `needle` inserts `with` at every character boundary.
+///
+/// # Examples
+///
+/// ```
+/// use string::{replace_all};
+/// # use tests::assert;
+/// assert!(replace_all("a-b-c", "-", "+") == "a+b+c");
+/// assert!(replace_all("ab", "", "-") == "-a-b-");
+/// ```
+fn replace_all(string hay, string needle, string with) -> string {}
+
 /// Returns the byte offset of the last `needle` in `hay`, or `-1`.
 ///
 /// An empty `needle` matches at `hay.len()`.
@@ -147,6 +178,21 @@ fn rfind(string hay, string needle) -> int {}
 /// assert!(split_char);
 /// ```
 fn slice_bytes(string s, int start, int end) -> Result<string, IoError> {}
+
+/// Returns the pieces of `hay` between the matches of `sep`.
+///
+/// A match at either end gives an empty first or last piece, and an empty
+/// `sep` splits between every character (`["", "a", "b", ""]` for `"ab"`).
+///
+/// # Examples
+///
+/// ```
+/// use string::{split};
+/// # use tests::assert;
+/// let parts = split("a,b,,c", ",");
+/// assert!(parts.len() == 4 && parts[1] == "b" && parts[2] == "");
+/// ```
+fn split(string hay, string sep) -> Vec<string> {}
 
 /// Encodes `s` as UTF-8 into a new `Vec<byte>`.
 ///
