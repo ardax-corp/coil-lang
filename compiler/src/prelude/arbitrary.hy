@@ -5,9 +5,9 @@
 use macro::{TypeDecl, Variant, TypeRef, Code, raw};
 use task::{scope, Scope, TaskError};
 
-// A seeded source of random values. `size` bounds how big values get
-// (ints in `[-size, size]`, lengths up to `size`); `coil test` grows it
-// from 0 so the first failures it finds are small.
+/// A seeded source of random values. `size` bounds how big values get
+/// (ints in `[-size, size]`, lengths up to `size`); `coil test` grows it
+/// from 0 so the first failures it finds are small.
 class Gen {
     state: int,
     size: int,
@@ -20,6 +20,18 @@ fn mask32() -> int {
 }
 
 impl Gen {
+    /// A generator seeded with `seed` (0 is replaced by a fixed non-zero seed),
+    /// starting at size 10.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use arbitrary::Gen;
+    /// # use tests::assert;
+    /// let g = Gen::new(7);
+    /// let n = g.int_in(1, 6);
+    /// assert!(n >= 1 && n <= 6);
+    /// ```
     pub static fn new(int seed) -> Gen {
         let s = seed & mask32();
         if s == 0 {
@@ -28,11 +40,12 @@ impl Gen {
         return new Gen(s, 10, 0);
     }
 
-    // The current size bound.
+    /// The current size bound.
     pub fn size() -> int {
         return self.size;
     }
 
+    /// Sets the size bound; negative sizes become 0.
     pub fn resize(int size) {
         if size < 0 {
             size = 0;
@@ -40,7 +53,7 @@ impl Gen {
         self.size = size;
     }
 
-    // 32 random bits.
+    /// 32 random bits.
     pub fn bits() -> int {
         let x = self.state;
         x = x ^ ((x << 13) & mask32());
@@ -50,7 +63,7 @@ impl Gen {
         return x;
     }
 
-    // Uniform in `[0, n)`; 0 when `n <= 0`.
+    /// Uniform in `[0, n)`; 0 when `n <= 0`.
     pub fn below(int n) -> int {
         if n <= 0 {
             return 0;
@@ -61,7 +74,7 @@ impl Gen {
         return ((self.bits() << 31) | (self.bits() >> 1)) % n;
     }
 
-    // Uniform in `[lo, hi]`.
+    /// Uniform in `[lo, hi]`.
     pub fn int_in(int lo, int hi) -> int {
         if hi <= lo {
             return lo;
@@ -69,13 +82,13 @@ impl Gen {
         return lo + self.below(hi - lo + 1);
     }
 
-    // True one time in `n`.
+    /// True one time in `n`.
     pub fn one_in(int n) -> bool {
         return self.below(n) == 0;
     }
 
-    // How many elements a collection gets: up to `size`, none once the
-    // value is nested `deep()`.
+    /// How many elements a collection gets: up to `size`, none once the
+    /// value is nested `deep()`.
     pub fn len() -> int {
         if self.deep() {
             return 0;
@@ -83,33 +96,44 @@ impl Gen {
         return self.below(self.size + 1);
     }
 
-    // How deep the value being built is nested in others.
+    /// How deep the value being built is nested in others.
     pub fn depth() -> int {
         return self.depth;
     }
 
-    // Around the parts of a value. Once `deep()`, collections are empty and
-    // derived enums take a variant without payloads, so recursive types end.
+    /// Around the parts of a value. Once `deep()`, collections are empty and
+    /// derived enums take a variant without payloads, so recursive types end.
     pub fn enter() {
         self.depth += 1;
     }
 
+    /// Undoes one `enter`.
     pub fn leave() {
         self.depth -= 1;
     }
 
-    // Past this depth derived enums stop nesting.
+    /// Past this depth derived enums stop nesting.
     pub fn deep() -> bool {
         return self.depth >= 4;
     }
 }
 
-// A type `coil test` can make values of.
+/// A type `coil test` can make values of.
 trait Arbitrary<T> {
     static fn arbitrary(Gen g) -> T {}
 }
 
-// A random `T`, chosen by the expected type: `let x: Vec<int> = any(g);`.
+/// A random `T`, chosen by the expected type: `let x: Vec<int> = any(g);`.
+///
+/// # Examples
+///
+/// ```
+/// use arbitrary::{any, Gen};
+/// # use tests::assert;
+/// let g = Gen::new(1);
+/// let xs: Vec<int> = any(g);
+/// assert!(xs.len() <= g.size());
+/// ```
 fn any<T: Arbitrary>(Gen g) -> T {
     return T::arbitrary(g);
 }
