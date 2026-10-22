@@ -15,6 +15,7 @@ use machine::Machine;
 use machine::reactor::{Reactor, TestCase, TestHandle, TestReport};
 use machine::thread::ThreadSpawnContext;
 use parser::doc_examples::{self, ExampleMode};
+use parser::test_headers;
 use reporting::{ErrorCode, ReportConfig, ReportFormat};
 
 use crate::coverage::{Coverage, CoverageOptions, ProgramLines, project_filter, test_fn_ranges};
@@ -122,58 +123,37 @@ pub fn is_compile_fail(path: &Path) -> bool {
     path.components().any(|c| c.as_os_str() == "compile_fail")
 }
 
-/// Error codes (`E0209`) a `compile_fail/` file declares on the `// Expected:`
+/// Error codes (`E0209`) a `compile_fail/` file declares on the `// @expected`
 /// lines of its leading comment header.
 pub fn declared_error_codes(src: &str) -> Vec<String> {
-    src.lines()
-        .take_while(|l| l.starts_with("//"))
-        .filter(|l| l.contains("Expected"))
-        .flat_map(error_codes_in)
-        .collect()
+    test_headers::values(src, "expected").flat_map(error_codes_in).collect()
 }
 
-/// Grant and compile-time limit flags a file declares on the `// Flags:` line
-/// of its leading comment header (`// Flags: --comptime-steps 100000`), added
+/// Grant and compile-time limit flags a file declares on the `// @flags` line
+/// of its leading comment header (`// @flags --comptime-steps 100000`), added
 /// to the run's own. `Ok(None)` when there is no such line.
 pub fn declared_flags(src: &str) -> Result<Option<coil_args::HostGrantFlags>, String> {
-    let Some(line) = src
-        .lines()
-        .take_while(|l| l.starts_with("//"))
-        .find_map(|l| l.strip_prefix("// Flags:"))
-    else {
+    let Some(line) = test_headers::value(src, "flags") else {
         return Ok(None);
     };
     let words: Vec<&str> = line.split_whitespace().collect();
     coil_args::parse_grant_flags(&words)
         .map(Some)
-        .map_err(|e| format!("bad `// Flags:` header: {e}"))
+        .map_err(|e| format!("bad `// @flags` header: {e}"))
 }
 
-/// The stdout a `fn main()`-only file declares on the `// Output:` line of
+/// The stdout a `fn main()`-only file declares on the `// @output` line of
 /// its leading comment header, unescaped (`\n`, `\t`, `\e`, `\\`), as
 /// `examples/` document theirs. `None` when there is no such line.
 pub fn declared_output(src: &str) -> Option<String> {
-    let line = src
-        .lines()
-        .take_while(|l| l.starts_with("//"))
-        .find_map(|l| l.strip_prefix("// Output:"))?;
-    let line = line.strip_prefix(' ').unwrap_or(line);
-    let mut out = String::with_capacity(line.len());
-    let mut chars = line.chars();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            out.push(c);
-            continue;
-        }
-        match chars.next() {
-            Some('n') => out.push('\n'),
-            Some('t') => out.push('\t'),
-            Some('e') => out.push('\u{1b}'),
-            Some(other) => out.push(other),
-            None => out.push('\\'),
-        }
-    }
-    Some(out)
+    test_headers::value(src, "output").map(test_headers::unescape)
+}
+
+/// A header line still in the old `// @output` spelling, as a failure
+/// message: it would no longer be checked.
+pub fn legacy_header(src: &str) -> Option<String> {
+    test_headers::legacy_line(src)
+        .map(|(line, new)| format!("`{line}`: header directives are spelled `{new}` now"))
 }
 
 /// Every `E` + four digits in `text`, in order.
@@ -203,7 +183,7 @@ fn compile_fail_verdict(src: &str, reported: &str) -> (bool, Option<String>) {
     if declared.is_empty() {
         return (
             false,
-            Some("no expected error code: start the file with `// Expected: E…`".to_string()),
+            Some("no expected error code: start the file with `// @expected E…`".to_string()),
         );
     }
     let mut got = error_codes_in(reported);
@@ -299,7 +279,7 @@ struct PendingCase {
     state: CaseState,
     /// Everything the case printed, panic messages and stderr included.
     output: Arc<Mutex<Vec<u8>>>,
-    /// Its stdout alone, which `// Output:` checks (#1828).
+    /// Its stdout alone, which `// @output` checks (#1828).
     stdout: Arc<Mutex<Vec<u8>>>,
     kind: CaseKind,
 }
@@ -325,7 +305,7 @@ struct PendingFile {
     cases: Vec<PendingCase>,
     /// PC → source line map for recording this program's coverage.
     lines: Option<ProgramLines>,
-    /// What the file's single case must print (`// Output:` header).
+    /// What the file's single case must print (`// @output` header).
     expected_output: Option<String>,
 }
 
@@ -410,18 +390,18 @@ fn finish_file(run: &Run<'_>, file: PendingFile, result: &mut SuiteResult) -> us
         }
         let output = std::mem::take(&mut *case.output.lock().unwrap_or_else(|e| e.into_inner()));
         let stdout = std::mem::take(&mut *case.stdout.lock().unwrap_or_else(|e| e.into_inner()));
-        // A `// Output:` header checks a passing case's prints; it names
+        // A `// @output` header checks a passing case's prints; it names
         // one program, so a file with `test` blocks cannot use it.
         let expected_output = file.expected_output.as_ref().filter(|_| case.kind == CaseKind::Test);
         let reason = match expected_output {
             Some(_) if ok && !single_case => {
                 ok = false;
-                Some("`// Output:` needs a file whose only case is `fn main()`".to_string())
+                Some("`// @output` needs a file whose only case is `fn main()`".to_string())
             }
             Some(want) if ok && stdout != want.as_bytes() => {
                 ok = false;
                 Some(format!(
-                    "printed {:?}, `// Output:` expects {want:?}",
+                    "printed {:?}, `// @output` expects {want:?}",
                     String::from_utf8_lossy(&stdout)
                 ))
             }
@@ -592,7 +572,7 @@ pub(crate) fn compile_test_file(
     // Expected compile rejection: suppress ariadne noise so the harness
     // summary stays readable when many compile_fail files exist.
     // A rejection's diagnostics are kept apart: the case checks their error
-    // codes against the file's `// Expected:` header instead of printing them.
+    // codes against the file's `// @expected` header instead of printing them.
     let rejection = Captured::default();
     let reporter: Box<dyn Write + Send> = match diagnostics {
         Some(d) if !expect_compile_fail => Box::new(d.clone()),
@@ -605,6 +585,9 @@ pub(crate) fn compile_test_file(
         .find(|(file, _)| file == path)
         .map(|(_, text)| text.clone())
         .or_else(|| std::fs::read_to_string(path).ok());
+    if let Some(why) = header.as_deref().and_then(legacy_header) {
+        return Compiled::Decided(false, Some(format!("> Test \"{display}\" failed ({why})")));
+    }
     match header.as_deref().map(declared_flags) {
         Some(Ok(Some(flags))) => {
             let mut grants = options.grants.clone();

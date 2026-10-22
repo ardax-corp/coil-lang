@@ -48,7 +48,7 @@ pub const DEFAULT_WALL_TIMEOUT: u64 = 60;
     about = "Compile and run every test under [PATH] (default: ./tests)",
     disable_help_subcommand = true,
     after_help = "Files under a `compile_fail/` directory must be rejected by the compiler\n\
-with an error code their header declares (`// Expected: E0209 — why`).\n\
+with an error code their header declares (`// @expected E0209 — why`).\n\
 \n\
 `--seed N` shuffles files and cases (decimal or 0x hex; default: random,\n\
 or $COIL_TEST_SEED; the header prints the seed). `--no-shuffle` keeps\n\
