@@ -2,7 +2,12 @@
 // while the other args were stored into temps over it, so
 // `contains(name()?, "--root")` compared "--root" with itself.
 use tests::assert;
-use text::contains;
+use text::Searchable;
+
+// A free fn on purpose: the regression is about `?` in a call argument.
+fn contains(string hay, string needle) -> bool {
+    return hay.contains(needle);
+}
 
 fn name() -> Result<string, string> {
     return Result::Ok("coil");

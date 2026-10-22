@@ -1,7 +1,7 @@
 // Resuming a coroutine that already returned panics with "resumed after
 // completion" (bare `resume` and `resume … with`), instead of a stale value.
 use tests::assert;
-use text::contains;
+use text::Searchable;
 use task::{scope, Scope, TaskError};
 
 gen fn counter() {
@@ -55,10 +55,10 @@ test("first resume returns the completion value") {
 
 test("resume after completion panics") {
     let m = outcome(fn () => resume_twice());
-    assert!(contains(m, "resumed after completion"), m);
+    assert!(m.contains("resumed after completion"), m);
 }
 
 test("resume with a value after completion panics") {
     let m = outcome(fn () => send_after_done());
-    assert!(contains(m, "resumed after completion"), m);
+    assert!(m.contains("resumed after completion"), m);
 }
