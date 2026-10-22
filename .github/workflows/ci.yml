@@ -15,6 +15,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# `actions: write` lets a failed job cancel the rest of its run.
+permissions:
+  contents: read
+  actions: write
+
 env:
   CARGO_TERM_COLOR: always
   CI: "true"
@@ -51,6 +56,16 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --workspace --lib --tests --bins -- -D warnings
+
+      # Fail fast on pull requests: a failed job cancels the rest of the run,
+      # so a quick fix doesn't wait behind jobs that are already moot.
+      - name: Cancel the rest of the run
+        if: failure() && github.event_name == 'pull_request'
+        continue-on-error: true
+        shell: bash
+        run: gh run cancel ${{ github.run_id }} --repo ${{ github.repository }}
+        env:
+          GH_TOKEN: ${{ github.token }}
 
   # `cfg(windows)` host code (machine io / fs / reactor / threads) is only
   # linted here.
@@ -98,6 +113,16 @@ jobs:
           export PATH="$MINGW_PREFIX/bin:$cargo_bin:/usr/bin:$PATH"
           cargo clippy --workspace --lib --tests --bins -- -D warnings
 
+      # Fail fast on pull requests: a failed job cancels the rest of the run,
+      # so a quick fix doesn't wait behind jobs that are already moot.
+      - name: Cancel the rest of the run
+        if: failure() && github.event_name == 'pull_request'
+        continue-on-error: true
+        shell: bash
+        run: gh run cancel ${{ github.run_id }} --repo ${{ github.repository }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+
   # `.hy` sources must be `coil fmt`-clean. `compile_fail/` directories hold
   # deliberately broken programs; `coil fmt` skips them when walking. The embedded prelude
   # (`compiler/src/prelude`) and the comptime fixtures are. A `compile_fail/` test is
@@ -136,6 +161,16 @@ jobs:
       # change without regenerating fails here.
       - name: Representation matrix up to date
         run: python3 scripts/gen_rep_matrix.py --check
+
+      # Fail fast on pull requests: a failed job cancels the rest of the run,
+      # so a quick fix doesn't wait behind jobs that are already moot.
+      - name: Cancel the rest of the run
+        if: failure() && github.event_name == 'pull_request'
+        continue-on-error: true
+        shell: bash
+        run: gh run cancel ${{ github.run_id }} --repo ${{ github.repository }}
+        env:
+          GH_TOKEN: ${{ github.token }}
 
   test:
     name: test (${{ matrix.os }})
@@ -252,6 +287,16 @@ jobs:
         run: |
           BIN=./target/debug/coil ./examples/projects/run-tests.sh
 
+      # Fail fast on pull requests: a failed job cancels the rest of the run,
+      # so a quick fix doesn't wait behind jobs that are already moot.
+      - name: Cancel the rest of the run
+        if: failure() && github.event_name == 'pull_request'
+        continue-on-error: true
+        shell: bash
+        run: gh run cancel ${{ github.run_id }} --repo ${{ github.repository }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+
   # The `.hy` harness binaries, built once per OS and build mode (debug and
   # release: the same corpus must pass in both, so a build-mode difference
   # such as an optimizer or overflow-check bug shows up) and cached by
@@ -311,6 +356,16 @@ jobs:
           name: harness-bin-${{ matrix.os }}-${{ matrix.mode }}
           path: harness-bin
           retention-days: 1
+
+      # Fail fast on pull requests: a failed job cancels the rest of the run,
+      # so a quick fix doesn't wait behind jobs that are already moot.
+      - name: Cancel the rest of the run
+        if: failure() && github.event_name == 'pull_request'
+        continue-on-error: true
+        shell: bash
+        run: gh run cancel ${{ github.run_id }} --repo ${{ github.repository }}
+        env:
+          GH_TOKEN: ${{ github.token }}
 
   # The `.hy` corpora under each compiler / VM setting and build mode, one
   # cell each so debug and release run side by side.
@@ -400,6 +455,16 @@ jobs:
           name: harness-logs-${{ matrix.os }}-${{ matrix.mode }}-${{ matrix.variant }}
           path: target/corpora
           retention-days: 7
+
+      # Fail fast on pull requests: a failed job cancels the rest of the run,
+      # so a quick fix doesn't wait behind jobs that are already moot.
+      - name: Cancel the rest of the run
+        if: failure() && github.event_name == 'pull_request'
+        continue-on-error: true
+        shell: bash
+        run: gh run cancel ${{ github.run_id }} --repo ${{ github.repository }}
+        env:
+          GH_TOKEN: ${{ github.token }}
 
   harness-build-macos:
     name: harness build (${{ matrix.mode }}, ${{ matrix.os }})
@@ -511,3 +576,13 @@ jobs:
           cargo_bin="$(cygpath -u "${CARGO_HOME:-$USERPROFILE/.cargo}")/bin"
           export PATH="$MINGW_PREFIX/bin:$cargo_bin:/usr/bin:$PATH"
           BIN=./target/debug/coil.exe bash ./examples/projects/run-tests.sh
+
+      # Fail fast on pull requests: a failed job cancels the rest of the run,
+      # so a quick fix doesn't wait behind jobs that are already moot.
+      - name: Cancel the rest of the run
+        if: failure() && github.event_name == 'pull_request'
+        continue-on-error: true
+        shell: bash
+        run: gh run cancel ${{ github.run_id }} --repo ${{ github.repository }}
+        env:
+          GH_TOKEN: ${{ github.token }}
