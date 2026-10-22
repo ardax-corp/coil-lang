@@ -16,6 +16,7 @@ use machine::reactor::{Reactor, TestCase, TestHandle, TestReport};
 use machine::thread::ThreadSpawnContext;
 use parser::doc_examples::{self, ExampleMode};
 use parser::test_headers;
+use reporting::progress::{Progress, paint};
 use reporting::{ErrorCode, ReportConfig, ReportFormat};
 
 use crate::coverage::{Coverage, CoverageOptions, ProgramLines, project_filter, test_fn_ranges};
@@ -47,6 +48,8 @@ pub struct TestOptions {
     pub jobs: usize,
     /// Also print passing cases' captured output (`--show-output`).
     pub show_output: bool,
+    /// List every file with its verdict, not only failures (`--verbose`).
+    pub verbose: bool,
     /// Line coverage (`--coverage`); `None` = off.
     pub coverage: Option<CoverageOptions>,
     pub opt_level: OptLevel,
@@ -223,6 +226,10 @@ pub struct SuiteResult {
     pub coverage: Option<Coverage>,
     /// Every case's outcome, in report order.
     pub cases: Vec<CaseOutcome>,
+    /// Text reports of the failed cases and files, for the end of the run.
+    pub failures: Vec<String>,
+    /// Passing files whose compiler warnings were not shown.
+    pub quiet_diagnostics: usize,
 }
 
 /// One case's verdict, as `coil mutate` needs it from the baseline run.
@@ -246,6 +253,8 @@ struct Run<'a> {
     coverage: Option<&'a Mutex<Coverage>>,
     /// Project sources found while compiling tests.
     sources: Discovered,
+    /// The text report's progress bar.
+    progress: Option<Progress>,
 }
 
 /// Project sources (under the current directory, outside the test root and
@@ -281,6 +290,8 @@ struct PendingCase {
     output: Arc<Mutex<Vec<u8>>>,
     /// Its stdout alone, which `// @output` checks (#1828).
     stdout: Arc<Mutex<Vec<u8>>>,
+    /// Its stderr writes and panic message.
+    stderr: Arc<Mutex<Vec<u8>>>,
     kind: CaseKind,
 }
 
@@ -346,21 +357,30 @@ impl Captured {
     }
 }
 
-/// Wait for a file's cases, print its report, and add it to `result`.
-/// Returns the file's failed count.
+/// Wait for a file's cases, report it, and add it to `result`. Returns the
+/// file's failed count.
+///
+/// As text, a file's outcome moves the progress bar; a failure prints a
+/// `FAILED` line at once, and its details (reason, the case's stdout and
+/// stderr, the file's diagnostics) are kept in `result.failures` for the
+/// report at the end. Passing files print nothing unless `--verbose` or
+/// `--show-output`.
 fn finish_file(run: &Run<'_>, file: PendingFile, result: &mut SuiteResult) -> usize {
     let report = run.options.report;
     let diagnostics = file.diagnostics.take();
-    if !diagnostics.is_empty() && report == Report::Human {
+    // SARIF / LSP diagnostics are machine-read: they go out as they come.
+    let pretty = run.config.format == ReportFormat::Pretty;
+    if !diagnostics.is_empty() && report == Report::Human && !pretty {
         let _ = writer_for(run.config.format).write_all(&diagnostics);
     }
     let (mut passed, mut failed) = (0, 0);
     let mut message = None;
+    // Failure details for the end-of-run report.
+    let mut blocks = Vec::new();
+    let mut shown = Vec::new();
     if let Some((ok, m)) = file.verdict {
-        if report == Report::Human
-            && let Some(m) = &m
-        {
-            eprintln!("{m}");
+        if !ok {
+            blocks.push(failure_block(&file.display, None, m.as_deref(), b"", b""));
         }
         message = m;
         if ok {
@@ -390,6 +410,7 @@ fn finish_file(run: &Run<'_>, file: PendingFile, result: &mut SuiteResult) -> us
         }
         let output = std::mem::take(&mut *case.output.lock().unwrap_or_else(|e| e.into_inner()));
         let stdout = std::mem::take(&mut *case.stdout.lock().unwrap_or_else(|e| e.into_inner()));
+        let stderr = std::mem::take(&mut *case.stderr.lock().unwrap_or_else(|e| e.into_inner()));
         // A `// @output` header checks a passing case's prints; it names
         // one program, so a file with `test` blocks cannot use it.
         let expected_output = file.expected_output.as_ref().filter(|_| case.kind == CaseKind::Test);
@@ -429,22 +450,20 @@ fn finish_file(run: &Run<'_>, file: PendingFile, result: &mut SuiteResult) -> us
         }
         match report {
             Report::Human => {
-                if show {
-                    print_captured(&output);
-                }
+                let reason = match (timed_out, &reason) {
+                    (true, _) => Some("timed out".to_string()),
+                    (false, r) => r.clone(),
+                };
                 if !ok {
-                    match (timed_out, &reason) {
-                        (true, _) => eprintln!("> Test \"{}\" failed (timed out)", case.name),
-                        // `assert!(cond, "message")` raises `Err("message")`.
-                        (false, Some(reason)) => {
-                            eprintln!("> Test \"{}\" failed: {reason}", case.name)
-                        }
-                        (false, None) => eprintln!("> Test \"{}\" failed", case.name),
-                    }
+                    blocks.push(failure_block(&file.display, Some(&case.name), reason.as_deref(), &stdout, &stderr));
+                } else if show && !output.is_empty() {
+                    shown.push(output_block(&file.display, &case.name, &stdout, &stderr));
                 }
             }
             Report::Json => {
                 let text = String::from_utf8_lossy(&output);
+                let out = String::from_utf8_lossy(&stdout);
+                let err = String::from_utf8_lossy(&stderr);
                 case_events.push(
                     Event::object()
                         .str("name", &case.name)
@@ -452,6 +471,8 @@ fn finish_file(run: &Run<'_>, file: PendingFile, result: &mut SuiteResult) -> us
                         .bool("timed_out", timed_out)
                         .opt_str("reason", reason.as_deref())
                         .opt_str("output", (show && !text.is_empty()).then_some(&*text))
+                        .opt_str("stdout", (show && !out.is_empty()).then_some(&*out))
+                        .opt_str("stderr", (show && !err.is_empty()).then_some(&*err))
                         .finish(),
                 );
             }
@@ -460,11 +481,41 @@ fn finish_file(run: &Run<'_>, file: PendingFile, result: &mut SuiteResult) -> us
     }
     match report {
         Report::Human => {
-            if failed == 0 {
-                eprintln!("ok   {}", file.display);
-            } else {
-                eprintln!("FAILED {}", file.display);
+            let verbose = run.options.verbose || run.options.show_output;
+            if pretty && !diagnostics.is_empty() {
+                let text = String::from_utf8_lossy(&diagnostics).trim_end().to_string();
+                if failed != 0 {
+                    // With the file's first failure: they are often why.
+                    match blocks.first_mut() {
+                        Some(block) => block.push_str(&format!("\ncompiler diagnostics:\n{text}")),
+                        None => blocks.push(format!("---- {} ----\ncompiler diagnostics:\n{text}", file.display)),
+                    }
+                } else if verbose {
+                    shown.push(format!("---- {} (compiler diagnostics) ----\n{text}", file.display));
+                } else {
+                    result.quiet_diagnostics += 1;
+                }
             }
+            let line = if failed == 0 {
+                verbose.then(|| format!("{}   {}", paint("ok", true), file.display))
+            } else {
+                Some(format!("{} {}", paint("FAILED", false), file.display))
+            };
+            match &run.progress {
+                Some(progress) => {
+                    for text in line.iter().chain(&shown) {
+                        progress.println(text);
+                    }
+                    progress.start(&file.display);
+                    progress.finish_one(failed == 0);
+                }
+                None => {
+                    for text in line.iter().chain(&shown) {
+                        eprintln!("{text}");
+                    }
+                }
+            }
+            result.failures.extend(blocks);
         }
         Report::Json => {
             let diagnostics = String::from_utf8_lossy(&diagnostics);
@@ -488,16 +539,47 @@ fn finish_file(run: &Run<'_>, file: PendingFile, result: &mut SuiteResult) -> us
     failed
 }
 
-/// Replay a case's prints / panic message on stderr, next to its verdict.
-fn print_captured(output: &[u8]) {
-    if output.is_empty() {
+/// A failed case (or file, with no case name) for the report at the end:
+/// why it failed, then what it printed on each stream.
+fn failure_block(file: &str, case: Option<&str>, reason: Option<&str>, stdout: &[u8], stderr: &[u8]) -> String {
+    let mut block = match case {
+        Some(case) if case != file => format!("---- {file}: {case} ----"),
+        _ => format!("---- {file} ----"),
+    };
+    // File-level messages read `> Test "…" failed (why)`: keep the why.
+    let reason = reason.map(|r| match r.strip_prefix(&format!("> Test \"{file}\" failed")) {
+        Some(rest) => rest.trim().trim_start_matches('(').trim_end_matches(')'),
+        None => r,
+    });
+    match reason {
+        Some(reason) if !reason.is_empty() => block.push_str(&format!("\n{}: {reason}", paint("failed", false))),
+        _ if case.is_none() => block.push_str(&format!("\n{}: does not compile", paint("failed", false))),
+        _ => {}
+    }
+    push_stream(&mut block, "stdout", stdout);
+    push_stream(&mut block, "stderr", stderr);
+    block
+}
+
+/// A passing case's prints (`--show-output`).
+fn output_block(file: &str, case: &str, stdout: &[u8], stderr: &[u8]) -> String {
+    let mut block = if case == file {
+        format!("---- {file} (output) ----")
+    } else {
+        format!("---- {file}: {case} (output) ----")
+    };
+    push_stream(&mut block, "stdout", stdout);
+    push_stream(&mut block, "stderr", stderr);
+    block
+}
+
+/// `\n<name>:\n<text>` when `bytes` is not empty.
+fn push_stream(block: &mut String, name: &str, bytes: &[u8]) {
+    if bytes.is_empty() {
         return;
     }
-    let mut err = std::io::stderr().lock();
-    let _ = err.write_all(output);
-    if !output.ends_with(b"\n") {
-        let _ = err.write_all(b"\n");
-    }
+    let text = String::from_utf8_lossy(bytes);
+    block.push_str(&format!("\n{name}:\n{}", text.trim_end_matches('\n')));
 }
 
 /// Replace the first `JMP target` at or after `from` with `HALT` (the static-init
@@ -887,6 +969,8 @@ fn start_case(
     // The case and the threads it spawns copy their stdout here too.
     let stdout = Arc::new(Mutex::new(Vec::new()));
     ctx.shared_stdout = Some(Arc::clone(&stdout));
+    let stderr = Arc::new(Mutex::new(Vec::new()));
+    ctx.shared_stderr = Some(Arc::clone(&stderr));
     let state = match dispatch {
         Dispatch::Pool => CaseState::Running(run.reactor.submit_test(ctx, case, print)),
         Dispatch::Inline => CaseState::Done(run.reactor.run_test_here(ctx, case, print)),
@@ -896,6 +980,7 @@ fn start_case(
         state,
         output,
         stdout,
+        stderr,
         kind,
     }
 }
@@ -911,8 +996,9 @@ fn decided_case(name: String, passed: bool, reason: Option<String>, output: Vec<
             steps: 0,
             timed_out: false,
         }),
-        output: Arc::new(Mutex::new(output)),
+        output: Arc::new(Mutex::new(output.clone())),
         stdout: Arc::default(),
+        stderr: Arc::new(Mutex::new(output)),
         kind,
     }
 }
@@ -1093,6 +1179,8 @@ pub fn run_test_suite(config: ReportConfig, options: &TestOptions) -> Result<Sui
         reactor: &reactor,
         coverage: coverage.as_ref(),
         sources: Discovered::default(),
+        progress: (options.report == Report::Human)
+            .then(|| Progress::new("test", "files", files.len())),
     };
     let targets: Vec<Target> = files
         .into_iter()
@@ -1109,16 +1197,17 @@ pub fn run_test_suite(config: ReportConfig, options: &TestOptions) -> Result<Sui
     let docs = std::mem::take(&mut *lock(&run.sources.docs));
     let stopped = run.options.fail_fast && result.failed != 0;
     if !(contracts.is_empty() && docs.is_empty()) && !stopped {
-        if options.report == Report::Human {
+        if let Some(progress) = &run.progress {
             for (what, set) in [("contracts", &contracts), ("doc-tests", &docs)] {
-                if !set.is_empty() {
-                    eprintln!(
+                if !set.is_empty() && run.options.verbose {
+                    progress.println(&format!(
                         "{what} of {} project file{}",
                         set.len(),
                         if set.len() == 1 { "" } else { "s" }
-                    );
+                    ));
                 }
             }
+            progress.add_total(contracts.union(&docs).count());
         }
         let mut sources: Vec<Target> = contracts
             .union(&docs)
@@ -1134,6 +1223,8 @@ pub fn run_test_suite(config: ReportConfig, options: &TestOptions) -> Result<Sui
         result.failed += more.failed;
         result.files_run.extend(more.files_run);
         result.cases.extend(more.cases);
+        result.failures.extend(more.failures);
+        result.quiet_diagnostics += more.quiet_diagnostics;
     }
     reactor.shutdown();
     result.coverage = coverage.map(|c| c.into_inner().unwrap_or_else(|e| e.into_inner()));
@@ -1264,10 +1355,13 @@ pub fn suite_exit_code(failed: usize) -> i32 {
 /// value — falling off `main` after a red summary would green CI.
 pub fn cmd_test(config: ReportConfig, options: TestOptions) -> i32 {
     let json = options.report == Report::Json;
+    let started = std::time::Instant::now();
     let SuiteResult {
         passed,
         failed,
         coverage,
+        failures,
+        quiet_diagnostics,
         ..
     } = match run_test_suite(config.clone(), &options) {
         Ok(result) => result,
@@ -1285,11 +1379,19 @@ pub fn cmd_test(config: ReportConfig, options: TestOptions) -> i32 {
     };
 
     if !json {
+        print_failures(&failures);
+        if quiet_diagnostics != 0 {
+            eprintln!(
+                "\n{quiet_diagnostics} passing file{} had compiler warnings (`--verbose` shows them)",
+                if quiet_diagnostics == 1 { "" } else { "s" }
+            );
+        }
         eprintln!();
         eprintln!(
-            "test result: {}. {passed} passed; {failed} failed; {} total",
+            "test result: {}. {passed} passed; {failed} failed; {} total; finished in {:.2}s",
             if failed == 0 { "ok" } else { "FAILED" },
-            passed + failed
+            passed + failed,
+            started.elapsed().as_secs_f64()
         );
     }
     let mut coverage_event = "null".to_string();
@@ -1351,6 +1453,23 @@ pub fn cmd_test(config: ReportConfig, options: TestOptions) -> i32 {
         eprintln!("rerun in this order with `--seed {}`", format_seed(seed));
     }
     suite_exit_code(failed)
+}
+
+/// The failed cases' details, then their names, before the summary line.
+fn print_failures(failures: &[String]) {
+    if failures.is_empty() {
+        return;
+    }
+    eprintln!("\nfailures:");
+    for block in failures {
+        eprintln!("\n{block}");
+    }
+    eprintln!("\nfailed:");
+    for block in failures {
+        let title = block.lines().next().unwrap_or_default();
+        let title = title.trim_start_matches("---- ").trim_end_matches(" ----");
+        eprintln!("    {title}");
+    }
 }
 
 /// A non-fatal problem: an `error` event under `--json`, else stderr.

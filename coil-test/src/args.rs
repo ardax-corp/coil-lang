@@ -85,6 +85,9 @@ struct TestCli {
     /// Also print passing cases' output (failures always show it)
     #[arg(long)]
     show_output: bool,
+    /// List every file as it finishes, and passing files' compiler warnings
+    #[arg(short = 'v', long)]
+    verbose: bool,
     /// Line coverage of project sources: lcov + summary
     #[arg(long)]
     coverage: bool,
@@ -222,6 +225,7 @@ fn parse_test(args: &[String]) -> Result<Parsed, String> {
         path: cli.path,
         fail_fast: cli.fail_fast,
         show_output: cli.show_output,
+        verbose: cli.verbose,
         coverage: cli.coverage,
         coverage_out: cli.coverage_out,
         per_test_out: cli.coverage_per_test,
@@ -261,6 +265,7 @@ fn parse_mutate(expanded: &[String], original: &[String]) -> Result<Parsed, Stri
         path: cli.path,
         fail_fast: false,
         show_output: false,
+        verbose: false,
         coverage: false,
         coverage_out: None,
         per_test_out: None,
@@ -306,6 +311,7 @@ struct RunParts {
     path: Option<String>,
     fail_fast: bool,
     show_output: bool,
+    verbose: bool,
     coverage: bool,
     coverage_out: Option<PathBuf>,
     per_test_out: Option<PathBuf>,
@@ -338,6 +344,7 @@ fn assemble(parts: RunParts) -> Result<(ReportConfig, Box<TestOptions>), String>
             order,
             jobs: parts.jobs.unwrap_or_else(default_jobs),
             show_output: parts.show_output,
+            verbose: parts.verbose,
             coverage: (parts.coverage
                 || parts.coverage_out.is_some()
                 || parts.per_test_out.is_some())

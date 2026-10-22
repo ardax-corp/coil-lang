@@ -40,8 +40,8 @@ test("none") {
             .expect("spawn coil-test");
         let err = String::from_utf8_lossy(&out.stderr);
         for want in [
-            "> Test \"io\" failed: `?` got Err(NotFound)",
-            "> Test \"none\" failed: `?` got None",
+            "cases.hy: io ----\nfailed: `?` got Err(NotFound)",
+            "cases.hy: none ----\nfailed: `?` got None",
         ] {
             assert!(err.contains(want), "expected {want:?} in stderr: {err}");
         }

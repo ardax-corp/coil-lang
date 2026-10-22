@@ -154,6 +154,38 @@ rather than a flat list of all cases so only one compiled file is in memory at
 a time (the leak smoke runs under `ulimit -v 65536`). splitmix64 +
 Fisher–Yates live in `coil-test/src/order.rs`; there is no `rand` dependency.
 
+## Report
+
+On a terminal a progress bar counts files as they finish
+(`reporting::progress`); in CI logs and pipes (or with `COIL_PROGRESS=0`) it
+draws nothing. A failing file prints `FAILED <file>` as it finishes. After the
+run come the details of every failure, a list of the failed cases, and the
+summary:
+
+```text
+running 4 files (seed 0x58a753087eda7cf7, 4 jobs)
+FAILED t/a.hy
+
+failures:
+
+---- t/a.hy: fails ----
+failed: one is not two
+stdout:
+out text
+stderr:
+err text
+
+failed:
+    t/a.hy: fails
+
+test result: FAILED. 2 passed; 1 failed; 3 total; finished in 0.21s
+```
+
+A file that does not compile shows its diagnostics in its block. `-v` /
+`--verbose` also lists passing files (`ok   <file>`) and their warnings;
+`--show-output` prints passing cases' output as they finish. `--json` events
+carry each shown case's `stdout` and `stderr` next to the combined `output`.
+
 ## Parallel runs
 
 Each case runs as a job on the CPU reactor (`machine/src/reactor.rs`,
@@ -169,9 +201,11 @@ worker count and the number of compile threads.
 | `N > 1` | `N` threads, at most `2N` files ahead of the report | reactor pool; the runner helps while it waits |
 
 - **Output is deterministic.** Files are reported in start order whatever
-  `-j` is; compiler diagnostics and each case's prints / panic message are
-  captured and replayed next to their verdict. Passing cases' output is
-  hidden unless `--show-output`.
+  `-j` is. Each case's stdout, and its stderr with its panic message, are
+  captured apart (`ThreadSpawnContext::shared_stdout` / `shared_stderr`, so
+  the threads a case spawns are captured too) and never reach the terminal
+  while the run goes. Passing cases' output and passing files' compiler
+  warnings are hidden unless `--show-output` / `--verbose`.
 - **Isolation.** A worker VM is reused across jobs. Statics are reset and
   re-initialized per case, and the heap, finalizer registry (drop PCs), C
   struct layouts and thread program are replaced per job, so a case never sees
