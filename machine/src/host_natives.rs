@@ -124,6 +124,8 @@ pub fn build_standard_host_natives(
     push_black_box(&mut out, &mut register_id);
     // Append-only after black_box: `io::capture_begin` / `capture_end` (minor 44).
     push_wiring(&mut out, &mut register_id, crate::io::IO_CAPTURE_WIRING, "io capture");
+    // Append-only after io_capture_end: whole-string searches (minor 45).
+    push_string_searches(&mut out, &mut register_id);
     assert_eq!(
         out.len(),
         common::HOST_NATIVES.len(),
@@ -366,6 +368,29 @@ fn push_string_bytes(
     for &(name, arity, host) in specs {
         let sig = FfiSignature::from_parts(name.to_string(), vec![FfiType::Int; arity], FfiType::Int)
             .expect("string byte native signature");
+        let id = out.len();
+        register_id(name, id);
+        out.push(Arc::new(HostClosureFn::new(sig, move |heap, args| {
+            Ok(Some(host(heap, args)))
+        })));
+    }
+}
+
+/// `string_find_all` / `string_split` / `string_replace_all`, after the
+/// byte-offset block.
+fn push_string_searches(
+    out: &mut Vec<Arc<dyn NativeFn>>,
+    register_id: &mut impl FnMut(&str, usize),
+) {
+    use crate::str_bytes::{string_find_all, string_replace_all, string_split};
+    let specs: &[(&str, usize, crate::HostValueFn)] = &[
+        (common::STRING_FIND_ALL_NATIVE, 2, string_find_all),
+        (common::STRING_SPLIT_NATIVE, 2, string_split),
+        (common::STRING_REPLACE_ALL_NATIVE, 3, string_replace_all),
+    ];
+    for &(name, arity, host) in specs {
+        let sig = FfiSignature::from_parts(name.to_string(), vec![FfiType::Int; arity], FfiType::Int)
+            .expect("string search native signature");
         let id = out.len();
         register_id(name, id);
         out.push(Arc::new(HostClosureFn::new(sig, move |heap, args| {
@@ -1299,28 +1324,32 @@ mod tests {
             Some(common::RESULT_UNIT_PROBE_NATIVE)
         );
         assert_eq!(
-            names.get(names.len() - 6).map(String::as_str),
+            names.get(names.len() - 9).map(String::as_str),
             Some(common::FFI_READ_INTS_NATIVE)
         );
         assert_eq!(
-            names.get(names.len() - 5).map(String::as_str),
+            names.get(names.len() - 8).map(String::as_str),
             Some(common::VALUES_EQ_SHAPED_NATIVE)
         );
         assert_eq!(
-            names.get(names.len() - 4).map(String::as_str),
+            names.get(names.len() - 7).map(String::as_str),
             Some(common::STRING_COMPARE_NATIVE)
         );
         assert_eq!(
-            names.get(names.len() - 3).map(String::as_str),
+            names.get(names.len() - 6).map(String::as_str),
             Some(common::BLACK_BOX_NATIVE)
         );
         assert_eq!(
-            names.get(names.len() - 2).map(String::as_str),
+            names.get(names.len() - 5).map(String::as_str),
             Some(common::IO_CAPTURE_BEGIN_NATIVE)
         );
         assert_eq!(
-            names.last().map(String::as_str),
+            names.get(names.len() - 4).map(String::as_str),
             Some(common::IO_CAPTURE_END_NATIVE)
+        );
+        assert_eq!(
+            names.last().map(String::as_str),
+            Some(common::STRING_REPLACE_ALL_NATIVE)
         );
         assert_eq!(attach, 119);
     }
@@ -1644,6 +1673,10 @@ mod tests {
             registrations.get(end + 29).map(|(n, _)| n.as_str()),
             Some(common::IO_CAPTURE_END_NATIVE)
         );
-        assert_eq!(registrations.len(), end + 30);
+        assert_eq!(
+            registrations.get(end + 32).map(|(n, _)| n.as_str()),
+            Some(common::STRING_REPLACE_ALL_NATIVE)
+        );
+        assert_eq!(registrations.len(), end + 33);
     }
 }

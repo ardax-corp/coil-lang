@@ -1226,6 +1226,27 @@ pub const HOST_NATIVES: &[HostNative] = &[
         effects: HOST,
         caps: NO_CAP,
     },
+    HostNative {
+        name: "string_find_all",
+        arity: 2,
+        id: 166,
+        effects: TEXT_R,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "string_split",
+        arity: 2,
+        id: 167,
+        effects: TEXT_R,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "string_replace_all",
+        arity: 3,
+        id: 168,
+        effects: TEXT_R,
+        caps: NO_CAP,
+    },
 ];
 
 /// First packed-LA HostInvoke (`packed_dot`).
@@ -1317,6 +1338,15 @@ pub const IO_CAPTURE_BEGIN_ID: u16 = 164;
 pub const IO_CAPTURE_BEGIN_NATIVE: &str = "io_capture_begin";
 pub const IO_CAPTURE_END_ID: u16 = 165;
 pub const IO_CAPTURE_END_NATIVE: &str = "io_capture_end";
+/// Whole-string literal searches (archive minor 45): `string::find_all`,
+/// `split` and `replace_all` find every match in one call, for
+/// `text::Pattern for string`.
+pub const STRING_FIND_ALL_ID: u16 = 166;
+pub const STRING_FIND_ALL_NATIVE: &str = "string_find_all";
+pub const STRING_SPLIT_ID: u16 = 167;
+pub const STRING_SPLIT_NATIVE: &str = "string_split";
+pub const STRING_REPLACE_ALL_ID: u16 = 168;
+pub const STRING_REPLACE_ALL_NATIVE: &str = "string_replace_all";
 
 pub const STREAM_ATTACH_NATIVE: &str = "stream_attach";
 pub const STREAM_PARK_NATIVE: &str = "stream_park";
@@ -1364,7 +1394,10 @@ pub const GC_COLLECT_NATIVE: &str = "gc_collect";
 pub const GC_REGISTER_FINALIZER_NATIVE: &str = "gc_register_finalizer";
 
 const _: () = {
-    assert!(HOST_NATIVES.len() == 166);
+    assert!(HOST_NATIVES.len() == 169);
+    assert!(HOST_NATIVES[STRING_FIND_ALL_ID as usize].id == STRING_FIND_ALL_ID);
+    assert!(HOST_NATIVES[STRING_SPLIT_ID as usize].id == STRING_SPLIT_ID);
+    assert!(HOST_NATIVES[STRING_REPLACE_ALL_ID as usize].id == STRING_REPLACE_ALL_ID);
     assert!(HOST_NATIVES[BLACK_BOX_ID as usize].id == BLACK_BOX_ID);
     assert!(HOST_NATIVES[IO_CAPTURE_BEGIN_ID as usize].id == IO_CAPTURE_BEGIN_ID);
     assert!(HOST_NATIVES[IO_CAPTURE_END_ID as usize].id == IO_CAPTURE_END_ID);

@@ -152,10 +152,13 @@ pub const ARCHIVE_MAJOR: u16 = 4;
 /// 44 — HostInvoke `io_capture_begin` / `io_capture_end` (ids 164, 165):
 ///      capture this thread's stdout / stderr in memory. Older archives
 ///      never reference them.
+/// 45 — HostInvoke `string_find_all` / `string_split` /
+///      `string_replace_all` (ids 166–168): every match of a literal in one
+///      call. Older archives never reference them.
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.
-pub const ARCHIVE_MINOR: u16 = 44;
+pub const ARCHIVE_MINOR: u16 = 45;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -1229,9 +1232,9 @@ mod tests {
     #[test]
     fn archive_version_matches_current_abi() {
         assert_eq!(ARCHIVE_MAJOR, 4);
-        assert_eq!(ARCHIVE_MINOR, 44);
-        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 44));
-        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.44");
+        assert_eq!(ARCHIVE_MINOR, 45);
+        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 45));
+        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.45");
     }
 
     #[test]
