@@ -469,6 +469,8 @@ pub enum Expression<'expr> {
 
     /// Top-level `static let` / `static const` singleton binding.
     StaticDecl {
+        /// `///` lines above the declaration (#1843).
+        docs: Vec<&'expr str>,
         is_const: bool,
         name: &'expr str,
         ty: Option<Output<'expr>>,
@@ -569,7 +571,9 @@ pub enum Expression<'expr> {
     },
 
     Variable(&'expr str, Option<Output<'expr>>),
-    Constant(Output<'expr>, Option<Output<'expr>>),
+    /// `const name[: T]`; the value is the next item of the enclosing
+    /// `Fragment`. The last field holds the `///` lines above it (#1843).
+    Constant(Output<'expr>, Option<Output<'expr>>, Vec<&'expr str>),
 
     /// `let (a, b) = expr;` / `let { x, y } = expr;` — irrefutable
     /// destructuring (Phase P1). Distinct from match [`Pattern`] so
@@ -1203,6 +1207,7 @@ impl<'a> Display for Expression<'a> {
                 ty,
                 init,
                 lifted,
+                ..
             } => {
                 let ty_str = ty
                     .as_ref()
@@ -2088,7 +2093,7 @@ impl<'expr> Expression<'expr> {
                     f(ty);
                 }
             }
-            E::Constant(a, b) => {
+            E::Constant(a, b, ..) => {
                 f(a);
                 if let Some(b) = b {
                     f(b);
@@ -2330,7 +2335,7 @@ impl<'expr> Expression<'expr> {
                     f(ty);
                 }
             }
-            E::Constant(a, b) => {
+            E::Constant(a, b, ..) => {
                 f(a);
                 if let Some(b) = b {
                     f(b);

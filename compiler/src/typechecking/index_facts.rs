@@ -385,7 +385,7 @@ fn walk_tree(
             walk_tree(checker, init, pure, env, calls);
             bind_name(checker, env, name, init);
         }
-        Expression::Constant(name_n, Some(init)) => {
+        Expression::Constant(name_n, Some(init), ..) => {
             walk_tree(checker, init, pure, env, calls);
             if let Expression::Identifier(name) = name_n.1.as_ref() {
                 bind_name(checker, env, name, init);

@@ -2711,7 +2711,7 @@ impl Checker {
                 unit_ty()
             }
 
-            Expression::Constant(name, ty_opt) => {
+            Expression::Constant(name, ty_opt, ..) => {
                 let var_ty = match ty_opt {
                     Some(ann) => self.parse_type_name(ann),
                     None => Ty::Var(self.counter.fresh()),
@@ -3606,6 +3606,7 @@ impl Checker {
                 ty,
                 init,
                 lifted,
+                ..
             } => {
                 if *is_const && !*lifted {
                     self.warn_deprecated(
@@ -6448,7 +6449,7 @@ impl Checker {
                         }
                     }
                 }
-                Expression::Constant(name, ty_opt) => {
+                Expression::Constant(name, ty_opt, ..) => {
                     let var_ty = match ty_opt {
                         Some(ann) => self.parse_type_name(ann),
                         None => Ty::Var(self.counter.fresh()),
@@ -16953,7 +16954,7 @@ impl Checker {
             | Expression::Use { .. }
             | Expression::Module(_, _)
             | Expression::Variable(_, _)
-            | Expression::Constant(_, _)
+            | Expression::Constant(..)
             | Expression::Argument { .. }
             | Expression::Field { .. }
             | Expression::QualifiedAccess { .. }

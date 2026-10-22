@@ -530,7 +530,7 @@
                 Expression::Fragment(children) => {
                     assert_eq!(children.len(), 2);
                     match children[0].1.as_ref() {
-                        Expression::Constant(name, ty) => {
+                        Expression::Constant(name, ty, ..) => {
                             assert!(ty.is_none());
                             match name.1.as_ref() {
                                 Expression::Identifier(name) => assert_eq!(*name, "answer"),

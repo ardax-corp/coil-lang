@@ -116,7 +116,7 @@ fn each_binder(ast: &Output<'_>, cases: &BareCases, f: &mut dyn FnMut(&str)) {
         Expression::Variable(n, _) | Expression::Argument { name: n, .. } => {
             out.insert((*n).to_string());
         }
-        Expression::Constant(name, _) => {
+        Expression::Constant(name, ..) => {
             if let Expression::Identifier(n) = peel(name).1.as_ref() {
                 out.insert((*n).to_string());
             }
@@ -741,7 +741,7 @@ fn collect_nested_fns(ast: &Output<'_>, facts: &mut HashMap<String, FnFacts>, ca
             collect_nested_fns(body, facts, cases);
         }
         Expression::Variable(_, Some(init)) => collect_nested_fns(init, facts, cases),
-        Expression::Constant(_, Some(init)) => collect_nested_fns(init, facts, cases),
+        Expression::Constant(_, Some(init), ..) => collect_nested_fns(init, facts, cases),
         Expression::LetDestructure { rhs, .. } => collect_nested_fns(rhs, facts, cases),
         Expression::Resume(t, arg) => {
             collect_nested_fns(t, facts, cases);
@@ -924,7 +924,7 @@ fn walk_body(ast: &Output<'_>, facts: &mut FnFacts) {
             walk_body(body, facts);
         }
         Expression::Variable(_, Some(init)) => walk_body(init, facts),
-        Expression::Constant(_, Some(init)) => walk_body(init, facts),
+        Expression::Constant(_, Some(init), ..) => walk_body(init, facts),
         Expression::LetDestructure { rhs, .. } => walk_body(rhs, facts),
         Expression::Lambda { .. } => {
             facts.local.insert(EffectFlags::UNKNOWN);
