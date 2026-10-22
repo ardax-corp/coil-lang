@@ -1260,6 +1260,8 @@ pub struct ThreadSpawnContext {
     pub shared_print: Option<Arc<Mutex<Vec<u8>>>>,
     /// The stdout part of `shared_print` (see [`Machine::set_shared_stdout`]).
     pub shared_stdout: Option<Arc<Mutex<Vec<u8>>>>,
+    /// The stderr part of `shared_print`: stderr writes and panic messages.
+    pub shared_stderr: Option<Arc<Mutex<Vec<u8>>>>,
     pub live_threads: LiveThreadRegistry,
     pub worker_cap: Arc<WorkerCap>,
     pub reactor: Arc<crate::reactor::Reactor>,
@@ -1285,6 +1287,7 @@ impl Clone for ThreadSpawnContext {
             natives: self.natives.clone_registry(),
             shared_print: self.shared_print.clone(),
             shared_stdout: self.shared_stdout.clone(),
+            shared_stderr: self.shared_stderr.clone(),
             live_threads: Arc::clone(&self.live_threads),
             worker_cap: Arc::clone(&self.worker_cap),
             reactor: Arc::clone(&self.reactor),

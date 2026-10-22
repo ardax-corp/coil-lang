@@ -762,8 +762,10 @@ impl<const S: usize> Machine<S> {
                         .map(|bt| format!("\n{bt}"))
                         .unwrap_or_default();
                     if let Some(out) = self.output.as_mut() {
-                        let _ = write!(out, "panic: {}{}{}", s, loc_suffix, backtrace);
+                        let text = format!("panic: {}{}{}", s, loc_suffix, backtrace);
+                        let _ = write!(out, "{text}");
                         let _ = out.flush();
+                        self.mirror_stderr(&text);
                     } else {
                         eprintln!("panic: {}{}{}", s, loc_suffix, backtrace);
                         let _ = io::stderr().flush();

@@ -554,6 +554,8 @@ pub struct Machine<const S: usize> {
     /// What of `shared_print` is stdout: panic messages and stderr writes
     /// stay out of it (a `coil-test` case's `// @output`, #1828).
     shared_stdout: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
+    /// What of `shared_print` is stderr: stderr writes and panic messages.
+    shared_stderr: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
     /// Undetached spawns owned by this VM (joined at end of `run_with_pool`).
     live_threads: crate::thread::LiveThreadRegistry,
     /// Shared concurrent OS-worker budget for this root VM (and its workers).
@@ -687,6 +689,7 @@ impl<const S: usize> Machine<S> {
             thread_program: None,
             shared_print: None,
             shared_stdout: None,
+            shared_stderr: None,
             live_threads: crate::thread::new_live_thread_registry(),
             worker_cap,
             reactor,
@@ -1296,11 +1299,14 @@ impl<const S: usize> Machine<S> {
         };
         let backtrace = self.format_panic_backtrace(panic_insn_ip);
         if let Some(out) = self.output.as_mut() {
-            let _ = write!(out, "panic: {message}{loc_suffix}");
+            let mut text = format!("panic: {message}{loc_suffix}");
             if !backtrace.is_empty() {
-                let _ = write!(out, "\n{backtrace}");
+                text.push('\n');
+                text.push_str(&backtrace);
             }
+            let _ = write!(out, "{text}");
             let _ = out.flush();
+            self.mirror_stderr(&text);
         } else {
             eprintln!("panic: {message}{loc_suffix}");
             if !backtrace.is_empty() {
@@ -2594,9 +2600,24 @@ impl<const S: usize> Machine<S> {
         crate::io::set_shared_stdout_redirect(buf);
     }
 
+    /// Also copy this VM's stderr writes and panic messages into `buf`.
+    pub fn set_shared_stderr(&mut self, buf: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>) {
+        self.shared_stderr = buf.clone();
+        crate::io::set_shared_stderr_redirect(buf);
+    }
+
     /// Copy `text` into the stdout capture, when there is one.
     pub(crate) fn mirror_stdout(&self, text: &str) {
         if let Some(buf) = &self.shared_stdout
+            && let Ok(mut g) = buf.lock()
+        {
+            g.extend_from_slice(text.as_bytes());
+        }
+    }
+
+    /// Copy `text` into the stderr capture, when there is one.
+    pub(crate) fn mirror_stderr(&self, text: &str) {
+        if let Some(buf) = &self.shared_stderr
             && let Ok(mut g) = buf.lock()
         {
             g.extend_from_slice(text.as_bytes());
@@ -2673,6 +2694,7 @@ impl<const S: usize> Machine<S> {
             natives: self.natives.clone_registry(),
             shared_print: self.shared_print.clone(),
             shared_stdout: self.shared_stdout.clone(),
+            shared_stderr: self.shared_stderr.clone(),
             live_threads: std::sync::Arc::clone(&self.live_threads),
             worker_cap: std::sync::Arc::clone(&self.worker_cap),
             reactor: std::sync::Arc::clone(&self.reactor),

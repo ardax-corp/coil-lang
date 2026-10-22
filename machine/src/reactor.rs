@@ -60,6 +60,8 @@ pub struct Job {
     pub shared_print: Option<Arc<Mutex<Vec<u8>>>>,
     /// The stdout part of `shared_print` (see [`Machine::set_shared_stdout`]).
     pub shared_stdout: Option<Arc<Mutex<Vec<u8>>>>,
+    /// The stderr part of `shared_print`.
+    pub shared_stderr: Option<Arc<Mutex<Vec<u8>>>>,
     pub live_threads: LiveThreadRegistry,
     pub reactor: Arc<Reactor>,
     pub io_reactor: Arc<crate::io_reactor::IoReactor>,
@@ -651,6 +653,7 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
         natives,
         shared_print,
         shared_stdout,
+        shared_stderr,
         live_threads,
         reactor,
         io_reactor,
@@ -676,6 +679,9 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
     let prev_shared_stdout = redirected
         .then(|| crate::io::set_shared_stdout_redirect(None))
         .flatten();
+    let prev_shared_stderr = redirected
+        .then(|| crate::io::set_shared_stderr_redirect(None))
+        .flatten();
     if let Some(e) = &epoch {
         vm.bind_shared_heap(e);
     }
@@ -698,6 +704,7 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
             vm.with_output(SharedPrintWriter(Arc::clone(buf)));
             crate::io::set_shared_print_redirect(Some(Arc::clone(buf)));
             vm.set_shared_stdout(shared_stdout.clone());
+            vm.set_shared_stderr(shared_stderr.clone());
         }
         vm.load_shared_program(
             Arc::clone(&program.code),
@@ -741,6 +748,7 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
         crate::io::set_output_redirect(prev_output);
         crate::io::set_shared_print_redirect(prev_shared_print);
         crate::io::set_shared_stdout_redirect(prev_shared_stdout);
+        crate::io::set_shared_stderr_redirect(prev_shared_stderr);
     }
 
     let stored = match result {
@@ -940,6 +948,7 @@ pub fn job_from_spawn_context(
         natives: ctx.natives,
         shared_print: ctx.shared_print,
         shared_stdout: ctx.shared_stdout,
+        shared_stderr: ctx.shared_stderr,
         live_threads: ctx.live_threads,
         reactor: ctx.reactor,
         io_reactor: ctx.io_reactor,
@@ -987,6 +996,7 @@ mod tests {
             natives: Natives::new(),
             shared_print: None,
             shared_stdout: None,
+            shared_stderr: None,
             live_threads: crate::thread::new_live_thread_registry(),
             reactor: Arc::clone(reactor),
             io_reactor: crate::io_reactor::IoReactor::new(),
@@ -1021,6 +1031,7 @@ mod tests {
             natives: Natives::new(),
             shared_print: None,
             shared_stdout: None,
+            shared_stderr: None,
             live_threads: crate::thread::new_live_thread_registry(),
             worker_cap: crate::thread::WorkerCap::from_count(1),
             reactor: Arc::clone(reactor),
@@ -1258,6 +1269,7 @@ mod tests {
             natives: Natives::new(),
             shared_print: None,
             shared_stdout: None,
+            shared_stderr: None,
             live_threads: crate::thread::new_live_thread_registry(),
             reactor: Arc::clone(&foreign),
             io_reactor: crate::io_reactor::IoReactor::new(),

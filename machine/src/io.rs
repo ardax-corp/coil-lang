@@ -33,6 +33,8 @@ thread_local! {
         const { RefCell::new(None) };
     static SHARED_STDOUT: RefCell<Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>> =
         const { RefCell::new(None) };
+    static SHARED_STDERR: RefCell<Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>> =
+        const { RefCell::new(None) };
 }
 
 pub(crate) fn take_pending_io_park() -> Option<IoParkRequest> {
@@ -62,8 +64,18 @@ pub fn set_shared_stdout_redirect(
     SHARED_STDOUT.with(|cell| cell.replace(buf))
 }
 
-fn mirror_captured_stdout(bytes: &[u8]) {
-    SHARED_STDOUT.with(|cell| {
+/// Install this OS thread's stderr-only capture (see
+/// [`crate::vm::Machine::set_shared_stderr`]).
+pub fn set_shared_stderr_redirect(
+    buf: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
+) -> Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>> {
+    SHARED_STDERR.with(|cell| cell.replace(buf))
+}
+
+/// Copy a captured stdout (or stderr) write into that stream's own capture.
+fn mirror_captured(kind: StreamKind, bytes: &[u8]) {
+    let cell = if kind == StreamKind::Stdout { &SHARED_STDOUT } else { &SHARED_STDERR };
+    cell.with(|cell| {
         if let Some(buf) = cell.borrow().as_ref()
             && let Ok(mut g) = buf.lock()
         {
@@ -533,10 +545,8 @@ fn stream_write_bytes(heap: &mut Heap, stream: Value, bytes: &[u8]) -> Result<us
         if matches!(s.kind, StreamKind::Stdout | StreamKind::Stderr)
             && let Some(result) = write_captured_stdout(bytes)
         {
-            if s.kind == StreamKind::Stdout
-                && let Ok(n) = result
-            {
-                mirror_captured_stdout(&bytes[..n]);
+            if let Ok(n) = result {
+                mirror_captured(s.kind, &bytes[..n]);
             }
             return result;
         }
