@@ -5024,8 +5024,16 @@ impl Compiler {
             {
                 return Some(ty);
             }
-        // Own-module DefId — not `local_defs` of the last typechecked file.
+        // A trait default body has no checker signature of its own: it
+        // returns as the trait declares the method, which is the layout its
+        // callers take (a niche `Option<Span>`).
         let name = qualified.or(table_key)?;
+        if let Some((class, method)) = name.split_once("__default__")
+            && let Some(scheme) = self.checker.typeclass_method_scheme(class, method)
+        {
+            return Some(Self::fun_param_and_ret_tys(&scheme.ty).1);
+        }
+        // Own-module DefId — not `local_defs` of the last typechecked file.
         if let Some((module, bare)) = name.rsplit_once("::") {
             self.checker
                 .interned_def(module, bare)
