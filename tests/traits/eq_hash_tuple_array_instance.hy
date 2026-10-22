@@ -85,7 +85,7 @@ test("a tuple keys a HashMap") {
     m.insert((2, 1), "b");
     m.insert((1, 2), "c");
     assert!(m.size() == 2);
-    assert!(m.get((1, 2), "") == "c");
-    assert!(m.get((2, 1), "") == "b");
-    assert!(m.get((3, 3), "none") == "none");
+    assert!(m.get_or((1, 2), "") == "c");
+    assert!(m.get_or((2, 1), "") == "b");
+    assert!(m.get_or((3, 3), "none") == "none");
 }

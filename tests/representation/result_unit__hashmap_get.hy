@@ -16,7 +16,7 @@ fn say(Result<(), string> v) -> string {
 fn mapped(Result<(), string> x) -> Result<(), string> {
     let m: HashMap<string, Result<(), string>> = HashMap::new();
     m.insert("k", x);
-    return m.get("k", x);
+    return m.get_or("k", x);
 }
 
 fn main() {

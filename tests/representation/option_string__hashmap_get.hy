@@ -16,7 +16,7 @@ fn say(Option<string> v) -> string {
 fn mapped(Option<string> x) -> Option<string> {
     let m: HashMap<string, Option<string>> = HashMap::new();
     m.insert("k", x);
-    return m.get("k", x);
+    return m.get_or("k", x);
 }
 
 fn main() {

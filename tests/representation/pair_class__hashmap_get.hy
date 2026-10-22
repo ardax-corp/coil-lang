@@ -18,7 +18,7 @@ fn say(P v) -> string {
 fn mapped(P x) -> P {
     let m: HashMap<string, P> = HashMap::new();
     m.insert("k", x);
-    return m.get("k", x);
+    return m.get_or("k", x);
 }
 
 fn main() {

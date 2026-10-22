@@ -103,7 +103,7 @@ test("methods, function values and hashing") {
     assert!(apply(fn (Vec2 a, Vec2 c) => a.add(c)) == new Vec2(4.0, 6.0));
     let m: HashMap<Cell, string> = HashMap::new();
     m.insert(cell(2), "two");
-    assert!(m.get(new Cell(2, true), "") == "two");
+    assert!(m.get_or(new Cell(2, true), "") == "two");
     let s = format("%f", walk(new Vec2(1.0, 0.0), 2).x);
     assert!(s.len() > 0);
 }

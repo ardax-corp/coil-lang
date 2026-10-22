@@ -272,7 +272,7 @@ POSITIONS = [
     Pos(
         "hashmap_get",
         "mapped({X})",
-        "fn mapped({T} x) -> {T} {\n    let m: HashMap<string, {T}> = HashMap::new();\n    m.insert(\"k\", x);\n    return m.get(\"k\", x);\n}\n",
+        "fn mapped({T} x) -> {T} {\n    let m: HashMap<string, {T}> = HashMap::new();\n    m.insert(\"k\", x);\n    return m.get_or(\"k\", x);\n}\n",
         ("collections::map::HashMap",),
     ),
     Pos(

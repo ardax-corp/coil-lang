@@ -13,7 +13,7 @@ fn say(string v) -> string {
 fn mapped(string x) -> string {
     let m: HashMap<string, string> = HashMap::new();
     m.insert("k", x);
-    return m.get("k", x);
+    return m.get_or("k", x);
 }
 
 fn main() {
