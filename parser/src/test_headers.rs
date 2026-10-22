@@ -48,8 +48,8 @@ pub fn legacy_line(src: &str) -> Option<(&str, String)> {
     header(src).find_map(|line| {
         let rest = line.strip_prefix("//")?.trim_start();
         DIRECTIVES.iter().find_map(|name| {
-            let head = rest.get(..name.len() + 1)?;
-            (head[..name.len()].eq_ignore_ascii_case(name) && head.ends_with(':'))
+            let head = rest.get(..name.len())?;
+            (head.eq_ignore_ascii_case(name) && rest[name.len()..].starts_with(':'))
                 .then(|| (line, format!("// @{name}")))
         })
     })
@@ -107,6 +107,7 @@ mod tests {
         assert_eq!(legacy_line("// x\n// expected: E0102\n").map(|(_, n)| n).as_deref(), Some("// @expected"));
         assert_eq!(legacy_line("// Expected output: ok\n// Flags are fine\n"), None);
         assert_eq!(legacy_line("// @output 3\n"), None);
+        assert_eq!(legacy_line("// …x\n// Exp…\n"), None);
     }
 
     #[test]

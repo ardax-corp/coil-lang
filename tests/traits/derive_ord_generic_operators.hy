@@ -1,6 +1,6 @@
 // A generic `#[derive(Ord)]` class compares with `<` / `>=` at an element
 // type that has `Ord`, including a nested derived class (#1186).
-// @output true false true true
+// @output true false true true\n
 use io::{stdout, write};
 use string::{format, to_bytes};
 

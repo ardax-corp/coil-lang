@@ -1,6 +1,6 @@
 // A cloned generic followed by a derived class: the clone must not leave the
 // code generator's node cursor past the derived impls' nodes (#1190).
-// @output 7 5 Ver { n: 2 } true
+// @output 7 5 Ver { n: 2 } true\n
 use io::{stdout, write};
 use string::{format, to_bytes};
 
