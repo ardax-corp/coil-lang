@@ -4258,11 +4258,13 @@ impl Compiler {
         for ty in map.values_mut() {
             *ty = crate::typechecking::ty::strip_readonly_deep(ty);
         }
-        // Each type argument one word in its own layout (no pair).
+        // Each type argument one word in its own layout (no pair): a niche
+        // word is the same word in the shared body (rep(ground T)), so a
+        // clone is only a cost decision.
         let word = |ty: &Ty| {
             crate::layout::ty_is_closed(ty)
                 && lower::classify(&self.checker, ty).is_some_and(lower::is_word)
-                && crate::layout::of_resolved(&self.checker, ty) == crate::layout::Layout::Word
+                && !matches!(crate::layout::of_resolved(&self.checker, ty), crate::layout::Layout::Pair(_))
         };
         let lookup_tys = src
             .head
@@ -4403,7 +4405,19 @@ impl Compiler {
         let root = b.block(vec![ret], None, crate::typechecking::ty::never());
         let mut hir = b.finish(root);
         hir.is_generic = true;
-        let calls = HashMap::from([(plan.shared.clone(), (plan.shared_params.clone(), plan.shared_ret))]);
+        // A boxed argument or result is the boxed word whatever the shared
+        // call's own layout for it (a niche word boxed as itself).
+        let shared_params = plan
+            .shared_params
+            .iter()
+            .enumerate()
+            .map(|(slot, &l)| match plan.generic.as_ref().and_then(|g| g.boxed.get(slot)?.as_ref()) {
+                Some(_) => ValueLayout::Boxed,
+                None => l,
+            })
+            .collect();
+        let shared_ret = if unbox.is_some() { ValueLayout::Boxed } else { plan.shared_ret };
+        let calls = HashMap::from([(plan.shared.clone(), (shared_params, shared_ret))]);
         self.hir_synth_callees.insert(plan.shared.clone(), compiler::SynthCallee { dicts, ..compiler::SynthCallee::default() });
         self.emit_synth_fn(name, &hir, calls, true);
         self.hir_synth_callees.clear();
