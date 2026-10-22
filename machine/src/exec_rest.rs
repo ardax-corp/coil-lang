@@ -1549,6 +1549,15 @@ impl<const S: usize> Machine<S> {
                                 Member::Object(o) => Value::from(o.addr()),
                             }
                         } else {
+                            // The box was made for another static type than
+                            // the unboxer's: a representation bug (debug and
+                            // gc-stress builds only).
+                            #[cfg(any(debug_assertions, feature = "gc-stress"))]
+                            {
+                                let message = format!("UnboxValue: boxed tag {} where tag {expected_tag} is expected", b.tag);
+                                return dispatch::RestFlow::Done(self.runtime_panic(&message, ip.saturating_sub(1)));
+                            }
+                            #[cfg(not(any(debug_assertions, feature = "gc-stress")))]
                             Value::default()
                         }
                     } else {
