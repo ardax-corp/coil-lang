@@ -2,7 +2,7 @@
 // set at startup and a `const` table: a shared-heap worker reads the
 // statics of the VM that spawned it. A function-local table its first
 // call builds in a worker is that worker's own.
-// Output: 239999400000 360001200000 32838255328
+// @output 239999400000 360001200000 32838255328
 use io::{stdout, write};
 use string::{format, to_bytes};
 

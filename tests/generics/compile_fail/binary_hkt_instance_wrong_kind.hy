@@ -1,4 +1,4 @@
-// Expected: E0119 — `Bifunctor` takes a `* -> * -> *` constructor; `Option` has
+// @expected E0119 — `Bifunctor` takes a `* -> * -> *` constructor; `Option` has
 // kind `* -> *`.
 trait Bifunctor<F: * -> * -> *> {
     fn tag<A, B>(F<A, B> xs) -> int {}

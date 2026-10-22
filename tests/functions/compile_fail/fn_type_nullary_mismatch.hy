@@ -1,4 +1,4 @@
-// Expected: E0102 — an `int -> int` value does not fit a `fn() -> int` parameter.
+// @expected E0102 — an `int -> int` value does not fit a `fn() -> int` parameter.
 fn at(fn() -> int f) -> int {
     return f();
 }

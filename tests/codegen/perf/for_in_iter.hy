@@ -1,5 +1,5 @@
 // examples/perf/for_in_iter.hy run as a test: the checksum pins the shape below.
-// Output: 12884115456
+// @output 12884115456
 
 // C2b / Q6 rung 2: user Iterator::next as two-slot Option match + CALL.
 use io::stdout;

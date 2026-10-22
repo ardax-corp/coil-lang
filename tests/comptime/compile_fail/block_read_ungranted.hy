@@ -1,4 +1,4 @@
-// Expected: E0119 — a `comptime` block reads files only under a granted
+// @expected E0119 — a `comptime` block reads files only under a granted
 // `--comptime-read` directory.
 use io::file::read_text;
 use comptime_gen::adder;

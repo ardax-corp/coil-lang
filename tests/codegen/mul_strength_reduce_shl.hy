@@ -1,6 +1,6 @@
 // `x * 2^n` / `2^n * x` / `x * const(2^n)` must lower to SHL but still
 // compute the same values as MUL (wrong shift amount is silent otherwise).
-// Output: 40,28,48,9,42,-24
+// @output 40,28,48,9,42,-24
 use io::{stdout, write};
 use string::{format, to_bytes};
 

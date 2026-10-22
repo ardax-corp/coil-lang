@@ -1,7 +1,7 @@
 // A `const` can hold the `Result` of `channel()` and an `Option` of a scalar
 // (#1714): a builtin enum application whose payloads hold no mutable interior
 // is fully constant and does not warn E0119 (see compiler/tests/diagnostics.rs).
-// Output: 7 3
+// @output 7 3
 use thread::{channel, send, recv, ThreadError};
 use io::{stdout, write};
 use string::{format, to_bytes};

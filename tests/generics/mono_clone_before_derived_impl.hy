@@ -1,9 +1,8 @@
 // A cloned generic followed by a derived class: the clone must not leave the
 // code generator's node cursor past the derived impls' nodes (#1190).
+// @output 7 5 Ver { n: 2 } true
 use io::{stdout, write};
 use string::{format, to_bytes};
-
-// Output: 7 5 Ver { n: 2 } true
 
 fn spread<A: Num + Ord + Show>(A lo, A hi) -> string {
     let d = hi - lo;

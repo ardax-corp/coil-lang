@@ -1,6 +1,6 @@
 // examples/derive_show_eq.hy — `#[derive(...)]` for Show / Eq / Ord.
 //
-// Output: Color::Red,true,false,true,Point::Point { x: 5, y: 12 },true,false,Cell { value: 42 },true,false
+// @output Color::Red,true,false,true,Point::Point { x: 5, y: 12 },true,false,Cell { value: 42 },true,false
 
 use io::stdout;
 use io::sync::write_all;

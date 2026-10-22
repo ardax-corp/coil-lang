@@ -1,4 +1,4 @@
-// Expected: E0101 — trait `Area` declares no method `perimeter`.
+// @expected E0101 — trait `Area` declares no method `perimeter`.
 trait Area<T> {
     fn size(T s) -> int {}
 }

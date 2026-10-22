@@ -1,7 +1,7 @@
 // With two `Wrap<_, string>` instances in scope the bound
 // `where Wrap<T, string>` still resolves at the call of `wrapped`, not
 // inside its body, so the body is not ambiguous (#1442).
-// Output: <7>|b3|<9>|b1
+// @output <7>|b3|<9>|b1
 use io::{stdout, write};
 use string::to_bytes;
 

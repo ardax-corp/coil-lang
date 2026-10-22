@@ -1,4 +1,4 @@
-// Output: 11112
+// @output 11112
 use io::open;
 use io::stdout;
 use io::write;

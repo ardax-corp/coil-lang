@@ -1,4 +1,4 @@
-// Expected: E0119 — `#[max_depth(N)]` needs a positive N.
+// @expected E0119 — `#[max_depth(N)]` needs a positive N.
 #[max_depth(0)]
 fn walk(int n) -> int {
     if n == 0 {

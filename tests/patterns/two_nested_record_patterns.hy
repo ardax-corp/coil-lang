@@ -1,6 +1,6 @@
 // Two nested multi-field record patterns in one arm each bind their own
 // fields.
-// Output: 33
+// @output 33
 use io::{stdout, write};
 use string::{format, to_bytes};
 

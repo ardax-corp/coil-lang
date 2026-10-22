@@ -1,4 +1,4 @@
-// Expected: E0119 — a `static fn` is called as `C::make()`, not on an instance.
+// @expected E0119 — a `static fn` is called as `C::make()`, not on an instance.
 class C {
     pub v: int,
 }

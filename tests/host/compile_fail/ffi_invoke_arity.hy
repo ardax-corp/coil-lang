@@ -1,4 +1,4 @@
-// Expected: E0405 — `invoke` takes (lib, fn_id, args_tuple).
+// @expected E0405 — `invoke` takes (lib, fn_id, args_tuple).
 use ffi::{dload, invoke};
 
 fn main() {

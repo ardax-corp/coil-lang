@@ -1,5 +1,5 @@
 // COI-19: heap value in a user static survives `gc::collect` (static roots).
-// Output: across-gc
+// @output across-gc
 use gc::collect;
 use io::stdout;
 use io::sync::write_all;

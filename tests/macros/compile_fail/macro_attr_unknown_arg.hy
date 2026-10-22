@@ -1,4 +1,4 @@
-// Expected: E0119 — `add_after` has no parameter `times`.
+// @expected E0119 — `add_after` has no parameter `times`.
 use derive_macros::add_after;
 
 #[add_after(by = 1, times = 2)]

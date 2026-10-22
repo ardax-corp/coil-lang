@@ -1,5 +1,5 @@
 // P1: `arr[i] = x` then read-back.
-// Output: 0420
+// @output 0420
 use io::{stdout, write};
 use string::{format, to_bytes};
 

@@ -1,4 +1,4 @@
-// Expected: E0100 — a `defer` body is checked like any block: an unknown name is rejected.
+// @expected E0100 — a `defer` body is checked like any block: an unknown name is rejected.
 use io::{stdout, write};
 use string::{format, to_bytes};
 

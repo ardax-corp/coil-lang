@@ -1,4 +1,4 @@
-// Expected: E0111 — a `-> string` body that falls off the end needs a `return`.
+// @expected E0111 — a `-> string` body that falls off the end needs a `return`.
 use io::{stdout, write};
 use string::{format, to_bytes};
 

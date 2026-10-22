@@ -1,4 +1,4 @@
-// Expected: E0119 — a trait's type parameter is rigid in its default
+// @expected E0119 — a trait's type parameter is rigid in its default
 // method bodies (#838). `x > 0` would make `T` an `int` while the shared
 // default body still receives a boxed `T`.
 trait Area<T> {

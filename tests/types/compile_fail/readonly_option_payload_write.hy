@@ -1,4 +1,4 @@
-// Expected: E0107 — a payload matched out of a `readonly Option<Point>` is a `readonly Point` (#1552).
+// @expected E0107 — a payload matched out of a `readonly Option<Point>` is a `readonly Point` (#1552).
 class Point {
     pub x: int,
 }

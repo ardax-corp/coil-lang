@@ -1,4 +1,4 @@
-// Expected: E0119 — a method that calls `weak()` on its class's type parameter may not be called on an instance holding a readonly class (#1670).
+// @expected E0119 — a method that calls `weak()` on its class's type parameter may not be called on an instance holding a readonly class (#1670).
 use gc::{weak, Weak};
 
 readonly class P {

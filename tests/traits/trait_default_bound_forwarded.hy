@@ -1,4 +1,4 @@
-// Output: 4! 4 4 x! x x 5! 5 5 6! 6 6 7! 7 7 8! 8 8
+// @output 4! 4 4 x! x x 5! 5 5 6! 6 6 7! 7 7 8! 8 8
 // A trait default body's own bounded type parameter (`fn third<W:
 // Show>`) is passed on to a bounded generic (`shout(w)`) and shown
 // (`show(w)`, `w.show()`), for an `int` instance and a class instance,

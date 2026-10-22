@@ -1,7 +1,7 @@
 // Attribute macros (`examples/src/attr_demo.hy`) wrapping a function.
 // Stacked macros apply outermost first: `log` wraps `measure` wraps the body.
 //
-// Output: enterdo_thinghi42
+// @output enterdo_thinghi42
 
 use io::stdout;
 use io::sync::write_all;

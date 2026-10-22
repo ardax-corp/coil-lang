@@ -1,7 +1,7 @@
 // An attribute macro (`examples/src/attr_demo.hy`) on a class: it keeps the
 // class and adds a logging `make` constructor.
 //
-// Output: Point ctor512
+// @output Point ctor512
 
 use io::stdout;
 use io::sync::write_all;

@@ -1,4 +1,4 @@
-// Expected: E0119 — `ensure!` takes 1 or 2 arguments.
+// @expected E0119 — `ensure!` takes 1 or 2 arguments.
 use fn_macros::ensure;
 
 fn main() {

@@ -1,6 +1,6 @@
 // Methods overloaded by arity.
 //
-// Output: 1116
+// @output 1116
 
 use io::stdout;
 use io::sync::write_all;

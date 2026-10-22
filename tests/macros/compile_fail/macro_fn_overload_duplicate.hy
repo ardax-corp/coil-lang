@@ -1,4 +1,4 @@
-// Expected: E0121 — two `twice` macros take one argument each.
+// @expected E0121 — two `twice` macros take one argument each.
 use macro::{Expr, Code};
 
 macro twice(Expr e) -> Code {

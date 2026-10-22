@@ -1,4 +1,4 @@
-// Expected: E0107 — a `readonly` value cannot be passed to a plain `Point` parameter (#1552).
+// @expected E0107 — a `readonly` value cannot be passed to a plain `Point` parameter (#1552).
 class Point {
     pub x: int,
 }

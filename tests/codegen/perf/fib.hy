@@ -1,5 +1,5 @@
 // examples/perf/fib.hy run as a test: the checksum pins the shape below.
-// Output: 2178309
+// @output 2178309
 
 // CPU: plain naive fib recursion (cross-lang fair bench).
 // Sequential A4 row: compile with COIL_AUTO_PAR=0.

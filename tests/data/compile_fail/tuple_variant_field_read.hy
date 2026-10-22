@@ -1,4 +1,4 @@
-// Expected: E0119 — a tuple variant has no named fields; match it instead.
+// @expected E0119 — a tuple variant has no named fields; match it instead.
 enum Tuple {
     Wrap(int, int),
 }

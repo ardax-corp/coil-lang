@@ -1,4 +1,4 @@
-// Expected: E0102 — each constructor argument must match its field's type.
+// @expected E0102 — each constructor argument must match its field's type.
 class P {
     pub x: int,
 }

@@ -1,5 +1,5 @@
 // examples/perf/const_table_local.hy run as a test: the checksum pins the shape below.
-// Output: 5465
+// @output 5465
 
 // Lookup-table bench for #1561: a function-local `const` table (the
 // PRESENT cipher's 4-bit S-box) read with a variable index, in a function

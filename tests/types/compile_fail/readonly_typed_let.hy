@@ -1,4 +1,4 @@
-// Expected: E0107 — a typed `let` cannot drop `readonly` (#1552).
+// @expected E0107 — a typed `let` cannot drop `readonly` (#1552).
 class Point {
     pub x: int,
 }

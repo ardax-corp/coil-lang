@@ -1,6 +1,6 @@
 // `byte` / `Vec<byte>` basics used by the IO layer.
 //
-// Output: 25532
+// @output 25532
 
 use io::stdout;
 use io::sync::write_all;

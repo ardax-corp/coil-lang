@@ -1,6 +1,6 @@
 // Nominal `Matrix` — `*` is matmul (Mul), `+` is element-wise.
 //
-// Output: 19,22,43,502
+// @output 19,22,43,502
 
 use io::stdout;
 use io::sync::write_all;

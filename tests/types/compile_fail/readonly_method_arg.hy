@@ -1,4 +1,4 @@
-// Expected: E0107 — `h.put(0, p)` passes the `readonly` `p` to parameter `b`, which `H::put` mutates (#1681).
+// @expected E0107 — `h.put(0, p)` passes the `readonly` `p` to parameter `b`, which `H::put` mutates (#1681).
 trait Reset<R> {
     fn reset(R self) {}
 }

@@ -1,4 +1,4 @@
-// Expected: E0102 — the `declare`d signature takes an `Int`; a `Stream` is not one.
+// @expected E0102 — the `declare`d signature takes an `Int`; a `Stream` is not one.
 use ffi::declare;
 use ffi::invoke;
 use ffi::types::Int;

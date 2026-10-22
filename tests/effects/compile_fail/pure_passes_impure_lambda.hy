@@ -1,4 +1,4 @@
-// Expected: E0413 — a caller pays for the lambda it passes to a higher-order function.
+// @expected E0413 — a caller pays for the lambda it passes to a higher-order function.
 static let N: int = 0;
 
 fn apply(int -> int f, int x) -> int uses {} {

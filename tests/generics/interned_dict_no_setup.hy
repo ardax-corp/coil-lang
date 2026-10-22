@@ -1,4 +1,4 @@
-// Output: 3
+// @output 3
 //
 // A program whose only statics are interned trait dictionaries (built on
 // first use) has no setup region: the prologue jumps straight to `main`.

@@ -1,4 +1,4 @@
-// Expected: E0126 — scalar-backed enums are not heap values.
+// @expected E0126 — scalar-backed enums are not heap values.
 #[repr(int)]
 enum Level {
     Low = 1,

@@ -1,5 +1,5 @@
 // `.to_vec()` must yield the same sequence as `for` (shared LE/LEQ + step).
-// Output: 0123|0123|7|1.02.03.0|1.02.03.0|0
+// @output 0123|0123|7|1.02.03.0|1.02.03.0|0
 use io::{stdout, write};
 use string::{format, to_bytes};
 

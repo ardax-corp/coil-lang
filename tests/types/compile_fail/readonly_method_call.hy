@@ -1,4 +1,4 @@
-// Expected: E0107 — `c.bump()` mutates `self`, so it cannot be called through a `readonly` value (#1558).
+// @expected E0107 — `c.bump()` mutates `self`, so it cannot be called through a `readonly` value (#1558).
 class Counter {
     pub n: int,
 }

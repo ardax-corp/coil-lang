@@ -1,6 +1,6 @@
 // A disk-module import (`io::sync::write_all`) is visible inside a lambda body
 // without a `use (…)` capture, like a virtual-module import.
-// Output: ok
+// @output ok
 use io::stdout;
 use io::sync::write_all;
 use string::to_bytes;

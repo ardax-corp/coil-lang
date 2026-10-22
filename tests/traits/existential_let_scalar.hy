@@ -1,4 +1,4 @@
-// Output: 1|int 5|x
+// @output 1|int 5|x
 // A `let` annotated with a trait packs a scalar value too (#1183), for a
 // builtin trait and a user trait alike.
 use io::{stdout, write};

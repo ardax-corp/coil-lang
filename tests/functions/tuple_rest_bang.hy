@@ -1,7 +1,7 @@
 // `!` on the result of a call whose return type is not known yet (a bare
 // `... xs` function, typed per call shape, or a `fn` declared further down
 // with no return type) takes it as `bool` (coil-lang#1429, #1435).
-// Output: true true
+// @output true true
 use io::{stdout, write};
 use string::to_bytes;
 

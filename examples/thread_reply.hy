@@ -1,6 +1,6 @@
 // Threads: request/reply over two channels.
 //
-// Output: ping
+// @output ping
 
 use thread::{Receiver, Sender, channel, join, recv, send, spawn};
 use io::stdout;

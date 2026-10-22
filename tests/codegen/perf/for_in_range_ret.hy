@@ -1,5 +1,5 @@
 // examples/perf/for_in_range_ret.hy run as a test: the checksum pins the shape below.
-// Output: 12884115456
+// @output 12884115456
 
 // C2 / Q6: returned Range as two-slot [start, end], then counted for-in.
 use io::stdout;

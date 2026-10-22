@@ -2,7 +2,7 @@
 // instance. A method returns the bare `Elem`; the projection `C::Elem` under
 // `C: Collect` resolves to `int` at a ground call site.
 //
-// Output: 42
+// @output 42
 
 use io::stdout;
 use io::sync::write_all;

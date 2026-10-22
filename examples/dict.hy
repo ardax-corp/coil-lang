@@ -4,7 +4,7 @@
 // type. Fields are read with `d.field`; reading a field the record does not
 // have is a compile-time error (tests/compile_fail/missing_record_field.hy).
 //
-// Output: 4210042
+// @output 4210042
 
 use io::stdout;
 use io::sync::write_all;

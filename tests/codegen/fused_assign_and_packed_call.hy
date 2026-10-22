@@ -1,5 +1,5 @@
 // Fused assign / two-local AND-if / packed three-arg call must evaluate correctly.
-// Output: 2,7,2,6
+// @output 2,7,2,6
 use io::{stdout, write};
 use string::{format, to_bytes};
 

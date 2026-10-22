@@ -1,4 +1,4 @@
-// Expected: E0102 — every arm must produce the same type.
+// @expected E0102 — every arm must produce the same type.
 enum Shape {
     Dot,
     Circle(int),

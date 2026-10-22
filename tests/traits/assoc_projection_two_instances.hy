@@ -1,9 +1,8 @@
 // A generic using `C::Elem` is called at two instances whose `Elem`
 // differs; each call gets its own instance's type (#1187).
+// @output 7 x 0 y 2 1
 use io::{stdout, write};
 use string::{format, to_bytes};
-
-// Output: 7 x 0 y 2 1
 
 trait Collect<C> {
     type Elem;

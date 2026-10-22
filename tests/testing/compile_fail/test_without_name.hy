@@ -1,4 +1,4 @@
-// Expected: E0001 — `test` needs a name: `test("…") { … }`.
+// @expected E0001 — `test` needs a name: `test("…") { … }`.
 use tests::assert;
 
 test() {

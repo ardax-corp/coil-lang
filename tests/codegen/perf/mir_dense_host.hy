@@ -1,5 +1,5 @@
 // examples/perf/mir_dense_host.hy run as a test: the checksum pins the shape below.
-// Output: 1159795
+// @output 1159795
 
 // Hit bench for COI-290 W4: allowlisted HostInvoke inside a dense body.
 // Parent (W3) refuses HostInvoke and stays fuse-IL. `hot` loops sin + mul/add.

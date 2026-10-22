@@ -14,7 +14,7 @@
 // needs `--allow-dload STEM` and a `--dload-pin` or `--dload-trusted`; the
 // libc aliases (`extern "c"`) are always denied.
 //
-// Output: (not checked: needs `--allow-dload sum`; see the example_ffi_* pipeline tests)
+// @output (not checked: needs `--allow-dload sum`; see the example_ffi_* pipeline tests)
 
 use io::stdout;
 use io::sync::write_all;

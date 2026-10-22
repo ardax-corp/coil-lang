@@ -5,7 +5,7 @@
 // also be read directly (`p.x`). Prints the squared distance from the origin
 // (5² + 12² = 169), then `p.x` and `p.y`.
 //
-// Output: 169512
+// @output 169512
 
 use io::stdout;
 use io::sync::write_all;

@@ -1,4 +1,4 @@
-// Expected: E0102 — the impl's `area` returns string, the trait declares int (#1185).
+// @expected E0102 — the impl's `area` returns string, the trait declares int (#1185).
 trait Shape<S> {
     fn area(S self) -> int {}
 }

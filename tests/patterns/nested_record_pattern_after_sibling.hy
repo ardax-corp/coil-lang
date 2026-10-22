@@ -1,6 +1,6 @@
 // A nested multi-field record pattern after a sibling field binds both the
 // sibling and the nested fields.
-// Output: 33
+// @output 33
 use io::{stdout, write};
 use string::{format, to_bytes};
 

@@ -1,4 +1,4 @@
-// Expected: E0119 — a generic that passes its type parameter on to a generic calling `weak()` carries the restriction to its own callers (#1670).
+// @expected E0119 — a generic that passes its type parameter on to a generic calling `weak()` carries the restriction to its own callers (#1670).
 use gc::{weak, Weak};
 
 readonly class P {

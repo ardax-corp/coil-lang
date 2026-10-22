@@ -1,4 +1,4 @@
-// Expected: E0410 — `dload("c")` is always denied.
+// @expected E0410 — `dload("c")` is always denied.
 use ffi::dload;
 
 fn main() {

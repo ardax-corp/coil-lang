@@ -1,4 +1,4 @@
-// Expected: E0122 — a name overloaded by arity is ambiguous as a value.
+// @expected E0122 — a name overloaded by arity is ambiguous as a value.
 fn add(int x) -> int {
     return x;
 }

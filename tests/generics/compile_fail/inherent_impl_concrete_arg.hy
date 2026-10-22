@@ -1,4 +1,4 @@
-// Expected: E0119 — the `<…>` of an inherent impl declares type parameters;
+// @expected E0119 — the `<…>` of an inherent impl declares type parameters;
 // `int` is a type, so `impl Cell<int>` is written `impl Cell<T>`.
 class Cell<T> {
     pub v: T,

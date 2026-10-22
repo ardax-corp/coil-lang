@@ -1,6 +1,6 @@
 // Regression: `defer` inside a function must run on early `return`, not
 // only on fall-through.
-// Output: d1,d2
+// @output d1,d2
 use io::{stdout, write};
 use string::{format, to_bytes};
 

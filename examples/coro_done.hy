@@ -1,6 +1,6 @@
 // examples/coro_done.hy — done(h) builtin.
 //
-// Output: falsefalsetrue
+// @output falsefalsetrue
 
 use io::stdout;
 use io::sync::write_all;

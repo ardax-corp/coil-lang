@@ -1,7 +1,7 @@
 // tests::assert! — a failed condition returns `Err` from the enclosing
 // function: the given message, or one naming the condition.
 //
-// Output: ok,Assertion: 'n == 42' failed,custom
+// @output ok,Assertion: 'n == 42' failed,custom
 
 use tests::assert;
 use io::stdout;

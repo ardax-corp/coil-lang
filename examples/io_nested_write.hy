@@ -1,7 +1,7 @@
 // Nested IO HostInvoke as the first of two args: `write_all(open(...), buf)`.
 // Regression for emit_io_host_invoke when outer arity > 1.
 //
-// Output: 2
+// @output 2
 
 use io::close;
 use io::open;

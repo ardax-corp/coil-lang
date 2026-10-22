@@ -1,4 +1,4 @@
-// Expected: E0119 — `spawn` takes a function and at most one argument.
+// @expected E0119 — `spawn` takes a function and at most one argument.
 use thread::spawn;
 
 fn work(int a, int b) -> int {

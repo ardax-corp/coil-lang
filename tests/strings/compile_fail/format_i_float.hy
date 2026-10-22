@@ -1,4 +1,4 @@
-// Expected: E0300 — `%i` takes an `int` (or `byte`), not a `float`.
+// @expected E0300 — `%i` takes an `int` (or `byte`), not a `float`.
 use string::format;
 
 fn main() {

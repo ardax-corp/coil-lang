@@ -2,7 +2,7 @@
 // Literals infer `[int; N]`, so zip is allowed. Dynamic `[T] ⊕ [T]` is a
 // hard type error (see diagnostics tests).
 //
-// Output: 46,45,18
+// @output 46,45,18
 
 use io::stdout;
 use io::sync::write_all;

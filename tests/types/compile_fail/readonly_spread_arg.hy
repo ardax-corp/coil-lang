@@ -1,4 +1,4 @@
-// Expected: E0107 — `...t` passes the `readonly` `p` as parameter `b`, which `put` mutates through `Reset::reset` (#1646).
+// @expected E0107 — `...t` passes the `readonly` `p` as parameter `b`, which `put` mutates through `Reset::reset` (#1646).
 trait Reset<R> {
     fn reset(R self) {}
 }

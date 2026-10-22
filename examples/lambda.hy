@@ -1,6 +1,6 @@
 // An anonymous `fn` that captures a local with `use (…)`.
 //
-// Output: 42
+// @output 42
 
 use io::stdout;
 use io::sync::write_all;

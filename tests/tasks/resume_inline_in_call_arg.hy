@@ -1,6 +1,6 @@
 // `resume h` used inline as a call argument (no `let`) yields each value in
 // order.
-// Output: 0,1,2
+// @output 0,1,2
 use io::{stdout, write};
 use string::{format, to_bytes};
 

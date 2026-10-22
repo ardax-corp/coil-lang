@@ -1,4 +1,4 @@
-// Expected: E0107 — an impl may not mutate a parameter its trait declares `readonly` (#1558).
+// @expected E0107 — an impl may not mutate a parameter its trait declares `readonly` (#1558).
 trait Area<A> {
     fn area(readonly A self) -> int {}
 }

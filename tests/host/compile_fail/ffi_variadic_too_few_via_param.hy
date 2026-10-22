@@ -1,4 +1,4 @@
-// Expected: E0405 — the variadic `declare` has two fixed parameters, and the
+// @expected E0405 — the variadic `declare` has two fixed parameters, and the
 // id reaches `invoke` through `helper`'s parameter with only one argument.
 use ffi::declare;
 use ffi::invoke;

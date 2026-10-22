@@ -1,6 +1,6 @@
 // Generic type aliases expand at typecheck time.
 //
-// Output: 7
+// @output 7
 
 use io::stdout;
 use io::sync::write_all;

@@ -1,4 +1,4 @@
-// Expected: E0119 — `add_after` needs `by`.
+// @expected E0119 — `add_after` needs `by`.
 use derive_macros::add_after;
 
 #[add_after]

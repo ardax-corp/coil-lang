@@ -1,4 +1,4 @@
-// Expected: E0202 — `NoSuch::Missing(1)` names an enum that is not declared.
+// @expected E0202 — `NoSuch::Missing(1)` names an enum that is not declared.
 enum Real {
     Bar(int),
 }

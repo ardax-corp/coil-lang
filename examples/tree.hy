@@ -1,6 +1,6 @@
 // examples/tree.hy — recursive enum to verify isorecursive encoding
 //
-// Output: 6
+// @output 6
 
 use io::stdout;
 use io::sync::write_all;

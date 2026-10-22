@@ -1,4 +1,4 @@
-// Expected: E0300 — `%z` takes a `bool`.
+// @expected E0300 — `%z` takes a `bool`.
 use string::format;
 
 fn main() {

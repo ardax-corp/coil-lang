@@ -1,4 +1,4 @@
-// Expected: E0200 — built-in type names match case-insensitively, so
+// @expected E0200 — built-in type names match case-insensitively, so
 // `OPTION` names the prelude `Option`; a class cannot take it (#1672).
 class OPTION {
     pub n: int,

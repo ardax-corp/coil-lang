@@ -1,4 +1,4 @@
-// Expected: E0200 — `ThreadError` is a built-in error enum; an enum cannot
+// @expected E0200 — `ThreadError` is a built-in error enum; an enum cannot
 // take the name, imported or not (#1701).
 enum ThreadError {
     Busy,

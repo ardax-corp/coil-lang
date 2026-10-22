@@ -1,7 +1,7 @@
 // A multi-parameter trait with a `where` clause: `Convert<A, B>` with an
 // `int` -> `int` identity instance.
 //
-// Output: 42
+// @output 42
 
 use io::stdout;
 use io::sync::write_all;

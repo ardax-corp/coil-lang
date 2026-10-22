@@ -1,4 +1,4 @@
-// Expected: E0300 — `%d` is not a specifier for a `byte` either; use `%i`.
+// @expected E0300 — `%d` is not a specifier for a `byte` either; use `%i`.
 use string::format;
 
 fn main() {

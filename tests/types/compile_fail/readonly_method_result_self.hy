@@ -1,4 +1,4 @@
-// Expected: E0107 — a method that returns `self`, called on a `readonly` value, returns it `readonly` (#1640).
+// @expected E0107 — a method that returns `self`, called on a `readonly` value, returns it `readonly` (#1640).
 class Point {
     pub x: int,
 }

@@ -1,6 +1,6 @@
 // A coroutine as a generator: each `resume` runs to the next `yield`.
 //
-// Output: 012
+// @output 012
 
 use io::stdout;
 use io::sync::write_all;

@@ -1,4 +1,4 @@
-// Expected: E0200 — `INT` names the built-in `int`; a class cannot take the
+// @expected E0200 — `INT` names the built-in `int`; a class cannot take the
 // name (#1673).
 class INT {
     pub n: int,

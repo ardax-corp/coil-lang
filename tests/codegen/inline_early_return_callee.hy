@@ -1,6 +1,6 @@
 // Early-return diamond callees are tiny-inlined; both arms must still evaluate
 // correctly at the call site.
-// Output: -1,8
+// @output -1,8
 use io::{stdout, write};
 use string::{format, to_bytes};
 

@@ -1,6 +1,6 @@
 // A static initializer's setup reaches `main`, not an earlier recursive
 // function that reused `main`'s label.
-// Output: main ran
+// @output main ran
 use io::stdout;
 use io::sync::write_all;
 use string::to_bytes;

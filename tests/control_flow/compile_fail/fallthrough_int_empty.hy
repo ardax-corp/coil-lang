@@ -1,4 +1,4 @@
-// Expected: E0111 — a `-> int` body with no statements needs a `return`.
+// @expected E0111 — a `-> int` body with no statements needs a `return`.
 use io::{stdout, write};
 use string::{format, to_bytes};
 

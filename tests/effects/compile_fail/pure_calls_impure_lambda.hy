@@ -1,4 +1,4 @@
-// Expected: E0413 — calling a local function value whose body has an effect.
+// @expected E0413 — calling a local function value whose body has an effect.
 static let N: int = 0;
 
 fn bump(int x) -> int {

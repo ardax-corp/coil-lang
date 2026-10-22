@@ -1,5 +1,5 @@
 // `io::fs::exists(".")` returns `Ok` for the working directory.
-// Output: 1
+// @output 1
 use io::fs::exists;
 use io::stdout;
 use io::write;

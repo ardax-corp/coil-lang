@@ -1,4 +1,4 @@
-// Expected: E0128 — a method without `pub` is callable only inside its class's `impl`.
+// @expected E0128 — a method without `pub` is callable only inside its class's `impl`.
 class Account {
     pub n: int,
 }

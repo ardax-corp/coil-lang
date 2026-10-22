@@ -1,6 +1,6 @@
 // `.into()` works on a `new C(...)` receiver written inline, with the
 // target type chosen by the expected type.
-// Output: 32
+// @output 32
 use io::{stdout, write};
 use string::{format, to_bytes};
 

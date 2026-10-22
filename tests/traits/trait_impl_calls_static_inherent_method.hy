@@ -1,5 +1,5 @@
 // COI-115: static inherent helper used from a trait instance.
-// Output: 7
+// @output 7
 use io::{stdout, write};
 use string::{format, to_bytes};
 

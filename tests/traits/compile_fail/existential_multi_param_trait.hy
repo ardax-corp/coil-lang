@@ -1,4 +1,4 @@
-// Expected: E0102 — only unary traits are existential value types; a value is not a
+// @expected E0102 — only unary traits are existential value types; a value is not a
 // `Convert` (a two-parameter trait).
 trait Convert<A, B> {
     fn cast(A x) -> B {}

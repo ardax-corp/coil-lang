@@ -1,6 +1,6 @@
 // A class `invariant` holds after `new` and each `pub` method; a private
 // helper may break it for a while. Failures name the method or `new C`.
-// Output: ok
+// @output ok
 use io::{stdout, write};
 use string::{to_bytes, find_from};
 use task::{scope, Scope, TaskError};

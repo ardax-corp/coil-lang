@@ -1,4 +1,4 @@
-// Expected: E0119 — missing field on dict access.
+// @expected E0119 — missing field on dict access.
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};

@@ -1,6 +1,6 @@
 // Same-arity overloads selected by argument type.
 //
-// Output: i:7f:1.5s:hi
+// @output i:7f:1.5s:hi
 
 use io::stdout;
 use io::sync::write_all;

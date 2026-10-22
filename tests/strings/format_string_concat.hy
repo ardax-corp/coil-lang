@@ -1,4 +1,4 @@
-// Output: n=77!
+// @output n=77!
 use io::{stdout, write};
 use string::{format, to_bytes};
 

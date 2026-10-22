@@ -1,4 +1,4 @@
-// Expected: E0300 — `%v` on a type parameter needs a `Show` bound.
+// @expected E0300 — `%v` on a type parameter needs a `Show` bound.
 use string::format;
 
 fn f<T>(T x) -> string {

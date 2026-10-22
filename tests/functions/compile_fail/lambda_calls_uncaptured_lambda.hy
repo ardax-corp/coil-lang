@@ -1,4 +1,4 @@
-// Expected: E0101 — a lambda calling an outer lambda-valued local must list
+// @expected E0101 — a lambda calling an outer lambda-valued local must list
 // it in `use (g)`.
 fn main() {
     let g = fn (int x) => x;

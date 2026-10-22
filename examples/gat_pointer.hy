@@ -2,7 +2,7 @@
 // constructor. The generic `get` returns the projection `P::Ref<A>`, which
 // the `Pointer<Option>` instance resolves to `A`.
 //
-// Output: 42
+// @output 42
 
 use io::stdout;
 use io::sync::write_all;

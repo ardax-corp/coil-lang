@@ -1,4 +1,4 @@
-// Expected: E0119 — the later helper `twice` has `T: Num`; `string` has no
+// @expected E0119 — the later helper `twice` has `T: Num`; `string` has no
 // `Num` instance.
 class Foo {
     pub v: string,

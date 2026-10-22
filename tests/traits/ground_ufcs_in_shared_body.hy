@@ -1,4 +1,4 @@
-// Output: 2 2.5 7 x! 4b! 9 1!
+// @output 2 2.5 7 x! 4b! 9 1!
 // A function-style trait call on a ground argument inside a shared
 // generic body (reached through a function value, and in a trait
 // instance's method) resolves to the argument's own instance, not to an

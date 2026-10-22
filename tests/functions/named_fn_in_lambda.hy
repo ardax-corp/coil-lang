@@ -1,5 +1,5 @@
 // Top-level named `fn`s are callable from a lambda without `use` (empty captures).
-// Output: 42
+// @output 42
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};

@@ -1,4 +1,4 @@
-// Expected: E0107 — a function taking a plain `Vec<Point>` cannot stand where a `readonly` one is passed (#1558).
+// @expected E0107 — a function taking a plain `Vec<Point>` cannot stand where a `readonly` one is passed (#1558).
 class Point {
     pub x: int,
 }

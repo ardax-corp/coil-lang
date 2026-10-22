@@ -1,5 +1,5 @@
 // Capture-free `spawn` lambda may CALL a named `fn`.
-// Output: 42
+// @output 42
 use thread::{spawn, join};
 use io::stdout;
 use io::sync::write_all;

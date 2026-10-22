@@ -1,4 +1,4 @@
-// Expected: E0119 — `impl Ord for Score` needs the superclass instance `Eq<Score>` (#1716).
+// @expected E0119 — `impl Ord for Score` needs the superclass instance `Eq<Score>` (#1716).
 class Score {
     pub v: int,
 }

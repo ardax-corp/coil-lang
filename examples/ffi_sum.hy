@@ -23,7 +23,7 @@
 // Each of dload / declare / invoke returns `Result<_, Error>`;
 // unwrap with match (or `?` in a Result-returning function).
 //
-// Output: (not checked: needs `--allow-dload sum`; see the example_ffi_* pipeline tests)
+// @output (not checked: needs `--allow-dload sum`; see the example_ffi_* pipeline tests)
 
 use ffi::declare;
 use ffi::dload;

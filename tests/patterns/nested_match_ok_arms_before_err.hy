@@ -1,6 +1,6 @@
 // Two `Result::Ok(Option::…)` arms before the `Result::Err` arm each pick
 // their own inner variant.
-// Output: 420-1
+// @output 420-1
 use io::{stdout, write};
 use string::{format, to_bytes};
 

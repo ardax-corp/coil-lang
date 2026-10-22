@@ -2,7 +2,7 @@
 // Homogeneous tuples are iterable (Item = element type). Heterogeneous
 // tuples are rejected at typecheck time.
 //
-// Output: 123
+// @output 123
 
 use io::stdout;
 use io::sync::write_all;

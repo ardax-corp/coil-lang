@@ -1,4 +1,4 @@
-// Expected: E0102 — a type error in a function an attribute macro wraps is
+// @expected E0102 — a type error in a function an attribute macro wraps is
 // reported at the statement, not the whole item (#1822); so is the unused
 // `Result` warning before it.
 use derive_macros::add_after;

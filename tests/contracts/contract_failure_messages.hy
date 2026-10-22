@@ -1,7 +1,7 @@
 // Contracts that hold let the program run; a failed `requires` blames the
 // caller, a failed `ensures` is reported at the function, on an early
 // `return`, a `?` error return and the tail. Failures run in child tasks.
-// Output: 44102neg|end
+// @output 44102neg|end
 use io::{stdout, write};
 use string::{format, to_bytes, find_from};
 use task::{scope, Scope, TaskError};

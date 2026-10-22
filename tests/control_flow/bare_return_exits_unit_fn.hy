@@ -1,4 +1,4 @@
-// Output: go
+// @output go
 use io::{stdout, write};
 use string::{format, to_bytes};
 

@@ -1,6 +1,6 @@
 // examples/generic_class.hy — generic class + impl end-to-end.
 //
-// Output: 42
+// @output 42
 
 use io::stdout;
 use io::sync::write_all;

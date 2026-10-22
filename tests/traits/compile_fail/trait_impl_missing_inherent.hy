@@ -1,4 +1,4 @@
-// Expected: E0101 — a trait impl body calls `m.iter()`, but `Box` declares no
+// @expected E0101 — a trait impl body calls `m.iter()`, but `Box` declares no
 // inherent `iter`.
 class Box {
     pub v: int,

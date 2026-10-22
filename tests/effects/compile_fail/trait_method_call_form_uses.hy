@@ -1,4 +1,4 @@
-// Expected: E0413 — `a.emit()` on a bound receiver has the effects its trait
+// @expected E0413 — `a.emit()` on a bound receiver has the effects its trait
 // method declares (`uses {write}`), as `emit(a)` does.
 trait Sink<S> {
     fn emit(S self) -> int uses {write} {}

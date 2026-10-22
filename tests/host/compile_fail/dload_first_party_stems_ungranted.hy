@@ -1,4 +1,4 @@
-// Expected: E0410 — first-party stems (`time`, `crypto`, `tls`, `regex`)
+// @expected E0410 — first-party stems (`time`, `crypto`, `tls`, `regex`)
 // still need `--allow-dload`, even as absolute paths.
 use ffi::dload;
 

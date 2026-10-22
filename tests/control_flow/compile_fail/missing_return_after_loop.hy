@@ -1,4 +1,4 @@
-// Expected: E0111 — a `while` that is not `while true` may end, so the
+// @expected E0111 — a `while` that is not `while true` may end, so the
 // code after it still needs a `return`.
 fn find(int n) -> int {
     let i = 0;

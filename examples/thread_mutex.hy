@@ -1,6 +1,6 @@
 // Threads: a shared counter behind a `mutex`.
 //
-// Output: 2
+// @output 2
 
 use thread::{join, mutex, spawn, with_lock};
 use io::stdout;

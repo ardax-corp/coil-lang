@@ -1,5 +1,5 @@
 // A parenthesized receiver `(self).field` reads the field like `self.field`.
-// Output: hi
+// @output hi
 use thread::{channel, recv, send, Sender};
 use io::{stdout, write};
 use string::{format, to_bytes};

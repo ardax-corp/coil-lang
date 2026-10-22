@@ -1,4 +1,4 @@
-// Output: main;dropped
+// @output main;dropped
 // A finalizer still pending when `main` returns runs before exit, and the
 // harness sees its output just as `coil FILE` prints it (#1212).
 use io::stdout;

@@ -1,5 +1,5 @@
 // A class field holding a payload enum reads back the stored variant.
-// Output: 99
+// @output 99
 use io::{stdout, write};
 use string::{format, to_bytes};
 

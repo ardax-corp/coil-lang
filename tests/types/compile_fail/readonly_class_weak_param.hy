@@ -1,4 +1,4 @@
-// Expected: E0119 — `weak()` is refused for a readonly class parameter, through an import alias too (#1644).
+// @expected E0119 — `weak()` is refused for a readonly class parameter, through an import alias too (#1644).
 use gc::{weak as handle, Weak};
 
 readonly class Point {

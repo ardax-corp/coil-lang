@@ -1,4 +1,4 @@
-// Expected: E0107 — a module `const` computed by a call cannot be reassigned.
+// @expected E0107 — a module `const` computed by a call cannot be reassigned.
 fn version() -> string {
     return "1.0";
 }

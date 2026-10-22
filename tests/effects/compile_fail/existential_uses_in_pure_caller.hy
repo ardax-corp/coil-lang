@@ -1,4 +1,4 @@
-// Expected: E0413 — a call through an existential of a trait whose method
+// @expected E0413 — a call through an existential of a trait whose method
 // declares `uses {write}` has that effect, even if this impl does not.
 trait Sink<S> {
     fn put(S self, int x) uses {write} {}

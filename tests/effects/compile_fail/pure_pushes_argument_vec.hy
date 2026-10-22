@@ -1,4 +1,4 @@
-// Expected: E0413 — pushing onto a `Vec` the function was passed is `mutate`.
+// @expected E0413 — pushing onto a `Vec` the function was passed is `mutate`.
 pure fn add(Vec<int> xs) {
     xs.push(1);
 }

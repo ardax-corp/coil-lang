@@ -1,4 +1,4 @@
-// Expected: E0413 — an `ensures` clause must have no effects; `say` writes to stdout.
+// @expected E0413 — an `ensures` clause must have no effects; `say` writes to stdout.
 use io::stdout;
 use io::sync::write_all;
 use string::to_bytes;

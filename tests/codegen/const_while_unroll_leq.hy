@@ -1,5 +1,5 @@
 // Same induction check with `i <= 2` (3 trips: 0+1+2).
-// Output: 3
+// @output 3
 use io::{stdout, write};
 use string::{format, to_bytes};
 

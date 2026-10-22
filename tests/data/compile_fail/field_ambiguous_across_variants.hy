@@ -1,4 +1,4 @@
-// Expected: E0119 — `x` is a field of two variants of `Two`; narrow with `match`
+// @expected E0119 — `x` is a field of two variants of `Two`; narrow with `match`
 // before reading it.
 enum Two {
     A { x: int, y: int },

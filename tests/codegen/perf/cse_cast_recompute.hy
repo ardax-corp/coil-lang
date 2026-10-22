@@ -1,5 +1,5 @@
 // examples/perf/cse_cast_recompute.hy run as a test: the checksum pins the shape below.
-// Output: 1999998000000
+// @output 1999998000000
 
 // Hit bench for local EarlyCSE: force CastIntToFloat recomputes that
 // ssa_gvn does not number (varying i, first cast stored).

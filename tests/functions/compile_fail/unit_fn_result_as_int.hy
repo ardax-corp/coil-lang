@@ -1,4 +1,4 @@
-// Expected: E0102 — a function without `->` returns unit.
+// @expected E0102 — a function without `->` returns unit.
 fn touch() {}
 
 fn main() {

@@ -1,6 +1,6 @@
 // Recursive Fibonacci.
 //
-// Output: 2178309
+// @output 2178309
 
 use io::stdout;
 use io::sync::write_all;

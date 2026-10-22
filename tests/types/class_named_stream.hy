@@ -1,6 +1,6 @@
 // A user `class Stream` is its own type next to `io`'s opaque `Stream`
 // (#1673).
-// Output: 3
+// @output 3
 use io::{stdout, write};
 use string::{format, to_bytes};
 

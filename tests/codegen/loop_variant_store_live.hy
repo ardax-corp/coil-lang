@@ -1,5 +1,5 @@
 // Loop-variant stores must keep the last iteration's value.
-// Output: 9
+// @output 9
 use io::{stdout, write};
 use string::{format, to_bytes};
 

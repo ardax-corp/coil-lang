@@ -1,4 +1,4 @@
-// Expected: E0207 — `Shape::Rect` has no field `d`.
+// @expected E0207 — `Shape::Rect` has no field `d`.
 enum Shape {
     Dot,
     Circle(int),

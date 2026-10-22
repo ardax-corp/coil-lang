@@ -1,4 +1,4 @@
-// Expected: E0107 — a field read from a `readonly` value is `readonly` too (#1552).
+// @expected E0107 — a field read from a `readonly` value is `readonly` too (#1552).
 class Inner {
     pub n: int,
 }

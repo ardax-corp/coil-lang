@@ -1,4 +1,4 @@
-// Expected: E0208 — `a` is already filled by the positional prefix.
+// @expected E0208 — `a` is already filled by the positional prefix.
 fn diff(int a, int b) -> int {
     return a - b;
 }

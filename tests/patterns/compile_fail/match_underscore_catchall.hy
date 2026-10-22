@@ -1,4 +1,4 @@
-// Expected: E0216 — `_` is not a whole-arm catch-all.
+// @expected E0216 — `_` is not a whole-arm catch-all.
 enum Status {
     Open,
     Closed,

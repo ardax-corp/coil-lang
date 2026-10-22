@@ -1,4 +1,4 @@
-// Expected: E0102 or E0113 — `resume h with v` needs `v` of the coroutine's
+// @expected E0102 or E0113 — `resume h with v` needs `v` of the coroutine's
 // send type (`int` here, from `n + 1`).
 gen fn adder() {
     let n = yield 0;

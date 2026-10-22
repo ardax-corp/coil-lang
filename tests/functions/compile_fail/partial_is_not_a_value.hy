@@ -1,4 +1,4 @@
-// Expected: E0102 — an under-applied call is a partial function, not its result.
+// @expected E0102 — an under-applied call is a partial function, not its result.
 fn add(int a, int b) -> int {
     return a + b;
 }

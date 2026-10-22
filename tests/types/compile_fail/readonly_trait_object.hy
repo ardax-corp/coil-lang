@@ -1,4 +1,4 @@
-// Expected: E0107 — a `readonly Point` packs only as a `readonly Area`, not a plain `Area` (#1558).
+// @expected E0107 — a `readonly Point` packs only as a `readonly Area`, not a plain `Area` (#1558).
 trait Area<A> {
     fn area(A self) -> int {}
 }

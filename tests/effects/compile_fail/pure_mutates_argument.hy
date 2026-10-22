@@ -1,4 +1,4 @@
-// Expected: E0413 — writing a field of an object the function did not create is `mutate`.
+// @expected E0413 — writing a field of an object the function did not create is `mutate`.
 class Cell {
     pub v: int,
 }

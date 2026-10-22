@@ -1,4 +1,4 @@
-// Expected: E0119 — `weak()` would observe a readonly class instance's identity and lifetime, which a value has not (#1644).
+// @expected E0119 — `weak()` would observe a readonly class instance's identity and lifetime, which a value has not (#1644).
 use gc::{weak, Weak};
 
 readonly class Point {

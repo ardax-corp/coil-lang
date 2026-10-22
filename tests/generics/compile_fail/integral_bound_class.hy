@@ -1,4 +1,4 @@
-// Expected: E0119 — a class with no `Integral` instance does not satisfy `T: Integral`.
+// @expected E0119 — a class with no `Integral` instance does not satisfy `T: Integral`.
 class Flags {
     pub bits: int,
 }

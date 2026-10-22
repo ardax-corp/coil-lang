@@ -1,5 +1,5 @@
 // examples/perf/tak.hy run as a test: the checksum pins the shape below.
-// Output: 7
+// @output 7
 
 // CPU: deep recursion without auto-par binary shape (cross-lang fair bench).
 use io::stdout;

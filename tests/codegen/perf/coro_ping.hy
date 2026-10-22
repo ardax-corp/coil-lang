@@ -1,5 +1,5 @@
 // examples/perf/coro_ping.hy run as a test: the checksum pins the shape below.
-// Output: 124750
+// @output 124750
 
 // CPU: coroutine resume/yield traffic.
 use io::stdout;

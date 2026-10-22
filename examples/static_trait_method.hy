@@ -2,7 +2,7 @@
 // chosen by its owner (`Point::from_val(v)`) or by the expected type of a
 // generic call (`let p: Point = decode(v)`).
 //
-// Output: 4,8,0
+// @output 4,8,0
 
 use io::stdout;
 use io::sync::write_all;

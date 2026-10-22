@@ -1,7 +1,7 @@
 // #1684: a static holding `stdout()`, `stderr()` or `stdin()` works in a
 // `thread::spawn` worker. The standard streams are process-wide, so the
 // worker opens its own handle to the same stream instead of reading null.
-// Output: worker 7\nwrote 9\nerr ok\nin ok\nclosed ok\nback in main\n
+// @output worker 7\nwrote 9\nerr ok\nin ok\nclosed ok\nback in main\n
 use io::{close, stderr, stdin, stdout, write, IoError, Stream};
 use string::{format, to_bytes};
 use thread::{join, spawn};

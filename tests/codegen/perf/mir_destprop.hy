@@ -1,5 +1,5 @@
 // examples/perf/mir_destprop.hy run as a test: the checksum pins the shape below.
-// Output: 1200000300000
+// @output 1200000300000
 
 // Hit bench for COI-282 MIR DestProp: both arms identity-copy `a`, then
 // several uses of the dest. InstCombine folds `+ 0` / `* 1`; DestProp

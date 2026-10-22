@@ -1,6 +1,6 @@
 // A local copied into another local keeps its value when used in a return
 // expression with a parameter.
-// Output: 42
+// @output 42
 use io::{stdout, write};
 use string::{format, to_bytes};
 

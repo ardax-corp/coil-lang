@@ -1,4 +1,4 @@
-// Output: 12 14|Pt { x: 1 }|pt 2|3|Pt { x: 4 }
+// @output 12 14|Pt { x: 1 }|pt 2|3|Pt { x: 4 }
 // A bare-class existential works as a class field and as a `Vec` element:
 // a value packs where the field or element type asks for it, as it does at
 // a parameter, and each element keeps its own instance.

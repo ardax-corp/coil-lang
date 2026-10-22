@@ -1,4 +1,4 @@
-// Output: GET/hi
+// @output GET/hi
 use io::{stdout, write};
 use string::to_bytes;
 

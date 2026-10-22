@@ -1,4 +1,4 @@
-// Expected: E0102 — `invoke`'s function id is the `int` a `declare` returned;
+// @expected E0102 — `invoke`'s function id is the `int` a `declare` returned;
 // `doubler` is a Coil `fn`, not a foreign one (#1666).
 use ffi::invoke;
 

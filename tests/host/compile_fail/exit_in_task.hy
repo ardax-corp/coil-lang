@@ -1,4 +1,4 @@
-// Expected: E0407 — a task body `main` spawns is reached code.
+// @expected E0407 — a task body `main` spawns is reached code.
 use env::exit;
 use task::{scope, Scope};
 

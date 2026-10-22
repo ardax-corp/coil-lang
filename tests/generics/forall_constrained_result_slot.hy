@@ -1,10 +1,9 @@
 // A string returned through a `forall T: C. …` parameter stays a live
 // heap reference in its local slot after a call with a different
 // constraint's dictionary, at every optimization level (#1530).
+// @output 40|k
 use io::{stdout, write};
 use string::{format, to_bytes};
-
-// Output: 40|k
 
 trait Tagged<T> {
     fn tag_of(T x) -> int {}

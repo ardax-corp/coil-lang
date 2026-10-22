@@ -1,4 +1,4 @@
-// Output: 14
+// @output 14
 // A trait method called in method form (`a.area()`) gets the trait's
 // declared effects, as `area(a)` does, on a bound or a concrete receiver.
 use io::{stdout, write};

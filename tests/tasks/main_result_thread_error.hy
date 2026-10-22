@@ -1,7 +1,7 @@
 // `main` can return `Result<unit, ThreadError>`, take `?` on `channel()`,
 // `thread::spawn`, `recv` and `join`, and end with a bare `return Ok(())`
 // (#1738): the returned constructor lowers in `main` as it does in a helper.
-// Output: 7
+// @output 7
 use thread::{channel, spawn, join, send, recv, Sender, ThreadError};
 use io::{stdout, write};
 use string::{format, to_bytes};

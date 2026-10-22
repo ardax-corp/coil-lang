@@ -1,6 +1,6 @@
 // String concatenation and `format`.
 //
-// Output: hello world42-x
+// @output hello world42-x
 
 use io::stdout;
 use io::sync::write_all;

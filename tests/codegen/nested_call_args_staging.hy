@@ -1,6 +1,6 @@
 // Two nested host calls as arguments of one call (`to_bytes(...)` twice)
 // each keep their own result: the first is not overwritten by the second.
-// Output: GET /hi
+// @output GET /hi
 use io::{stdout, write};
 use string::{format, to_bytes};
 

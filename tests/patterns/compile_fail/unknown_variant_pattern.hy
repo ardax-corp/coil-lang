@@ -1,4 +1,4 @@
-// Expected: E0211 — `Shape::Square` is not a variant of `Shape`.
+// @expected E0211 — `Shape::Square` is not a variant of `Shape`.
 enum Shape {
     Dot,
     Circle(int),

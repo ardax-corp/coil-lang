@@ -1,4 +1,4 @@
-// Expected: E0209 — `Color::Blue` is not covered.
+// @expected E0209 — `Color::Blue` is not covered.
 enum Color {
     Red,
     Green,

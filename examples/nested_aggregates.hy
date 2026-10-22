@@ -4,7 +4,7 @@
 //   type Row = (string, int);
 //   type Table = Vec<Row>;
 //
-// Output: alice:30bob:25total:55
+// @output alice:30bob:25total:55
 
 use io::stdout;
 use io::sync::write_all;

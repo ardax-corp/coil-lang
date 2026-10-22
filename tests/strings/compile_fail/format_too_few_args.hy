@@ -1,4 +1,4 @@
-// Expected: E0119 or E0301 — every `%` specifier needs an argument.
+// @expected E0119 or E0301 — every `%` specifier needs an argument.
 use string::format;
 
 fn main() {

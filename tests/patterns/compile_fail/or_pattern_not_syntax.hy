@@ -1,4 +1,4 @@
-// Expected: E0001 — there are no `|` or-patterns; write one arm per pattern.
+// @expected E0001 — there are no `|` or-patterns; write one arm per pattern.
 enum Shape {
     Dot,
     Circle(int),

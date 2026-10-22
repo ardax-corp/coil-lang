@@ -1,4 +1,4 @@
-// Expected: E0107 — `xs[0].bump()` mutates `self`, so it cannot be called on an element of a `readonly` array (#1552).
+// @expected E0107 — `xs[0].bump()` mutates `self`, so it cannot be called on an element of a `readonly` array (#1552).
 class Point {
     pub x: int,
 }

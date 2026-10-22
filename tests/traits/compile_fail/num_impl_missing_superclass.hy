@@ -1,4 +1,4 @@
-// Expected: E0119 — `impl Num` needs every superclass instance (`Sub`, … `Rem`, `Pow`).
+// @expected E0119 — `impl Num` needs every superclass instance (`Sub`, … `Rem`, `Pow`).
 class M {
     pub c: int,
 }

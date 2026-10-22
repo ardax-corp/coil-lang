@@ -1,4 +1,4 @@
-// Expected: E0119 — `#[lang]` is reserved for the core prelude.
+// @expected E0119 — `#[lang]` is reserved for the core prelude.
 #[lang(option)]
 enum Maybe<T> {
     Nothing,

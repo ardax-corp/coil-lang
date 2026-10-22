@@ -1,4 +1,4 @@
-// Expected: E0413 — an object captured by a lambda is not private, so a
+// @expected E0413 — an object captured by a lambda is not private, so a
 // method that mutates it is `mutate` (#1648).
 class Counter {
     pub n: int,

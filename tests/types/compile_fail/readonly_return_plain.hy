@@ -1,4 +1,4 @@
-// Expected: E0107 — returning a `readonly` value as a plain `Point` drops the seal (#1552).
+// @expected E0107 — returning a `readonly` value as a plain `Point` drops the seal (#1552).
 class Point {
     pub x: int,
 }

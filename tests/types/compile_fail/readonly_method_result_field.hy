@@ -1,4 +1,4 @@
-// Expected: E0107 — a getter called on a `readonly` value returns `readonly Inner`, so it cannot be written (#1640).
+// @expected E0107 — a getter called on a `readonly` value returns `readonly Inner`, so it cannot be written (#1640).
 class Inner {
     pub n: int,
 }

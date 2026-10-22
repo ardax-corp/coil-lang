@@ -1,4 +1,4 @@
-// Expected: E0119 — a `Vec` has no static length to fill fixed parameters.
+// @expected E0119 — a `Vec` has no static length to fill fixed parameters.
 fn add(int a, int b) -> int {
     return a + b;
 }

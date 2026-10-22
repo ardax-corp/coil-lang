@@ -1,5 +1,5 @@
 // `return c.into();` under `-> Fahrenheit` pins the Into target at runtime.
-// Output: 32
+// @output 32
 use io::{stdout, write};
 use string::{format, to_bytes};
 

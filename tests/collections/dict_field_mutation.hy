@@ -1,5 +1,5 @@
 // `d.field = value` updates a dict field in place; later reads see it.
-// Output: 99z
+// @output 99z
 use io::{stdout, write};
 use string::{format, to_bytes};
 

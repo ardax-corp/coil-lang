@@ -1,4 +1,4 @@
-// Expected: E0102 — `gc::get` takes a `Root<T>`, not a plain value.
+// @expected E0102 — `gc::get` takes a `Root<T>`, not a plain value.
 use gc::get;
 
 fn main() {

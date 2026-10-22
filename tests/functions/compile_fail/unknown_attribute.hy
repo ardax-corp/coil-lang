@@ -1,4 +1,4 @@
-// Expected: E0119 — unknown attribute names are rejected.
+// @expected E0119 — unknown attribute names are rejected.
 #[nope]
 fn one() -> int {
     return 1;

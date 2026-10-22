@@ -1,5 +1,5 @@
 // examples/perf/const_table_crc.hy run as a test: the checksum pins the shape below.
-// Output: 322673926
+// @output 322673926
 
 // Lookup-table bench for #1561: CRC-32 over a 4 KiB buffer, 2000 times,
 // through a module `const` table written down as a `readonly` array.

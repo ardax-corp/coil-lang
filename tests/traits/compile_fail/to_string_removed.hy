@@ -1,4 +1,4 @@
-// Expected: E0101 — no compiler-provided `to_string` any more; call `show()`.
+// @expected E0101 — no compiler-provided `to_string` any more; call `show()`.
 class Pt {
     pub x: int,
 }

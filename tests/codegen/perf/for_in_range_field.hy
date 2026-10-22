@@ -1,5 +1,5 @@
 // examples/perf/for_in_range_field.hy run as a test: the checksum pins the shape below.
-// Output: 12884115456
+// @output 12884115456
 
 // C2b / Q6 rung 1: heap-field Range as counted cur/end (no GetField).
 use io::stdout;

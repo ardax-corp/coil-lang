@@ -1,6 +1,6 @@
 // Two independent `if` tests on `%` per call (examples/fizbuz.hy): both
 // branches run for multiples of 15.
-// Output: FIZBUZFIZFIZBUZFIZFIZBUZ
+// @output FIZBUZFIZFIZBUZFIZFIZBUZ
 use io::stdout;
 use io::sync::write_all;
 use string::to_bytes;

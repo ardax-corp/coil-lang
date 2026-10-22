@@ -1,7 +1,7 @@
 // Two handles from the SAME parameterized gen fn, interleaved,
 // with `resume` used inline directly as a `print` argument.
 //
-// Output: 10,100,101,11,12,102
+// @output 10,100,101,11,12,102
 
 use io::stdout;
 use io::sync::write_all;

@@ -1,5 +1,5 @@
 // examples/perf/operators_loop.hy run as a test: the checksum pins the shape below.
-// Output: 149912
+// @output 149912
 
 // CPU: Pow, BITAND, BITOR, LogNot in a tight loop.
 use io::stdout;

@@ -1,4 +1,4 @@
-// Expected: E0107 — `Option::Some(p)` with a `readonly` `p` cannot fill an `Option<Point>` parameter (#1552).
+// @expected E0107 — `Option::Some(p)` with a `readonly` `p` cannot fill an `Option<Point>` parameter (#1552).
 class Point {
     pub x: int,
 }

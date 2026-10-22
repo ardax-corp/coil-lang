@@ -1,4 +1,4 @@
-// Expected: E0102 — `<` on a class with no `Lt` instance.
+// @expected E0102 — `<` on a class with no `Lt` instance.
 class Sq {
     pub side: int,
 }

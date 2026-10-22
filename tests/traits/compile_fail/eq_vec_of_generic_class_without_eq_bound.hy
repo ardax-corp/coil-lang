@@ -1,4 +1,4 @@
-// Expected: E0119 — `==` on `Vec<Box<T>>` compares each `Box<T>` with its derived `Eq`, which needs `T`'s `Eq`; `T: Lt` has none (#1804).
+// @expected E0119 — `==` on `Vec<Box<T>>` compares each `Box<T>` with its derived `Eq`, which needs `T`'s `Eq`; `T: Lt` has none (#1804).
 #[derive(Eq)]
 class Box<T> {
     pub v: T,

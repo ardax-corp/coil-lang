@@ -1,5 +1,5 @@
 // examples/perf/mir_dense_i64.hy run as a test: the checksum pins the shape below.
-// Output: 2000001000000
+// @output 2000001000000
 
 // Hit bench for COI-288 W2: dense specialize on counted i64 +/− (no heap/CALL).
 // Pre-W2 infer required float arith or unused has_i32; i64 loops stayed fuse-IL.

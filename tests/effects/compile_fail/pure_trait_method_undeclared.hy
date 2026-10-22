@@ -1,4 +1,4 @@
-// Expected: E0413 — a call through a trait method with no declaration has unknown
+// @expected E0413 — a call through a trait method with no declaration has unknown
 // effects, so a `pure fn` cannot make it.
 trait Size<T> {
     fn size(T x) -> int {}

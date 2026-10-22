@@ -2,7 +2,7 @@
 //
 // Exercises string::format plus io::stdout/write_all.
 //
-// Output: 42
+// @output 42
 
 use io::stdout;
 use io::sync::write_all;

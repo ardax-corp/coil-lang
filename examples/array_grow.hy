@@ -1,6 +1,6 @@
 // `Vec::from` an array literal, then grow it with `push`.
 //
-// Output: 414
+// @output 414
 
 use io::stdout;
 use io::sync::write_all;

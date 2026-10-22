@@ -1,4 +1,4 @@
-// Expected: E0102 — bare `Red` is a `Light` case, so it is a constructor
+// @expected E0102 — bare `Red` is a `Light` case, so it is a constructor
 // pattern, not a binding, and cannot match an `Option<int>`.
 enum Light {
     Red,

@@ -1,4 +1,4 @@
-// Output: 1;-1;e
+// @output 1;-1;e
 // `match f()? { … }` over a `Result<Option<int>, E>` (#1213).
 use io::{stdout, write};
 use string::{format, to_bytes};

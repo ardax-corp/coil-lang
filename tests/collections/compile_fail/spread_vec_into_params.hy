@@ -1,4 +1,4 @@
-// Expected: E0119 — a `Vec` has no static length, so `f(...v)` cannot spread it into
+// @expected E0119 — a `Vec` has no static length, so `f(...v)` cannot spread it into
 // fixed parameters.
 fn rows() -> Vec<int> {
     return [1, 2, 3];

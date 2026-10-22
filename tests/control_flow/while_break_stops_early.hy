@@ -1,5 +1,5 @@
 // `break` disables unroll — first iteration still runs, rest skipped.
-// Output: 0
+// @output 0
 use io::{stdout, write};
 use string::{format, to_bytes};
 

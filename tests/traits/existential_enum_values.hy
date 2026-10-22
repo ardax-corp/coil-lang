@@ -1,4 +1,4 @@
-// Output: Dir::Down(3)|Dir::Up|Two::Q(1, 2)|Unit::B|d down 3|d up
+// @output Dir::Down(3)|Dir::Up|Two::Q(1, 2)|Unit::B|d down 3|d up
 // An enum value packs as a bare-class existential with its instance, as a
 // class value does: unit and payload variants, one-word and two-word
 // layouts, derived `Show` and a user trait (#1184).

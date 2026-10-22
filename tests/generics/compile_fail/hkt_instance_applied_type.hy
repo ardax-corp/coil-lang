@@ -1,4 +1,4 @@
-// Expected: E0119 — `Container<F: * -> *>` needs a bare type constructor
+// @expected E0119 — `Container<F: * -> *>` needs a bare type constructor
 // (`Option`), not an applied type (`Option<int>`).
 trait Container<F: * -> *> {
     fn first<A>(F<A> xs) -> A {}

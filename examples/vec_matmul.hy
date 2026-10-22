@@ -1,6 +1,6 @@
 // Named helper — `matmul` on nested fixed-length matrices (row-major).
 //
-// Output: 19,22,43,50
+// @output 19,22,43,50
 
 use io::stdout;
 use io::sync::write_all;

@@ -1,4 +1,4 @@
-// Expected: E0413 — a method that also writes a static is `mutate` even on
+// @expected E0413 — a method that also writes a static is `mutate` even on
 // a private receiver (#1648).
 static let BUMPS: int = 0;
 

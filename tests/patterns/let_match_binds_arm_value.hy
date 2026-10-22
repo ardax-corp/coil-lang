@@ -1,6 +1,6 @@
 // `let x = match { … }` binds the value of the arm that ran, and the
 // statements after the `let` still run.
-// Output: 742
+// @output 742
 use io::{stdout, write};
 use string::{format, to_bytes};
 

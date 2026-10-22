@@ -1,4 +1,4 @@
-// Expected: E0107 — `readonly` is deep: a field of a field cannot be written (#1552).
+// @expected E0107 — `readonly` is deep: a field of a field cannot be written (#1552).
 class Inner {
     pub n: int,
 }

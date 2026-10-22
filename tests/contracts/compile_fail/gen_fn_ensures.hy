@@ -1,4 +1,4 @@
-// Expected: E0119 — a `gen fn` cannot have an `ensures` yet.
+// @expected E0119 — a `gen fn` cannot have an `ensures` yet.
 gen fn count(int n) -> int
     ensures result > 0
 {

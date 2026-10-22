@@ -1,5 +1,5 @@
 // P0: early-loop flag reassignment sticks while later locals stay live.
-// Output: 16
+// @output 16
 use io::{stdout, write};
 use string::{format, to_bytes};
 

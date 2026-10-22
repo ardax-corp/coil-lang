@@ -1,4 +1,4 @@
-// Expected: E0119 — an impl must define each associated type of the trait (`Elem`).
+// @expected E0119 — an impl must define each associated type of the trait (`Elem`).
 trait Collect<C> {
     type Elem;
     fn head(C xs) -> Elem {}

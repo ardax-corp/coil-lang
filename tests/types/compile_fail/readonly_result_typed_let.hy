@@ -1,4 +1,4 @@
-// Expected: E0107 — `Result::Ok(p)` with a `readonly` `p` does not convert to `Result<Point, string>` (#1552).
+// @expected E0107 — `Result::Ok(p)` with a `readonly` `p` does not convert to `Result<Point, string>` (#1552).
 class Point {
     pub x: int,
 }

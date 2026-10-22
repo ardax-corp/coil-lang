@@ -1,6 +1,6 @@
 // EOF is Ok(None) from a non-blocking `read` on an empty file.
 //
-// Output: eof
+// @output eof
 
 use io::close;
 use io::open;

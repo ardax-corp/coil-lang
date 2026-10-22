@@ -1,4 +1,4 @@
-// Expected: E0001 — a match needs at least one arm.
+// @expected E0001 — a match needs at least one arm.
 enum Shape {
     Dot,
     Circle(int),

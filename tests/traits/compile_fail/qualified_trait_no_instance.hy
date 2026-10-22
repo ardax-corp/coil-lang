@@ -1,4 +1,4 @@
-// Expected: E0119 — `Area::size("x")` needs an `Area<string>` instance.
+// @expected E0119 — `Area::size("x")` needs an `Area<string>` instance.
 trait Area<T> {
     fn size(T s) -> int {}
 }

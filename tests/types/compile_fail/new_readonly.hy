@@ -1,4 +1,4 @@
-// Expected: E0001 — `readonly` is a prefix (`readonly new C(...)`).
+// @expected E0001 — `readonly` is a prefix (`readonly new C(...)`).
 class Point {
     pub x: int,
     pub y: int,

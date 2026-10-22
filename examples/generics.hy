@@ -4,7 +4,7 @@
 // Callers that only need `+` can bound `T: Add` instead.
 // See typeclass_dict.hy and polyfn.hy for user dictionaries and PolyFn values.
 //
-// Output: 7424.0427
+// @output 7424.0427
 
 use io::stdout;
 use io::sync::write_all;

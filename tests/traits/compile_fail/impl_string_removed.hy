@@ -1,4 +1,4 @@
-// Expected: E0119 — the `String` trait was removed; implement `Show`.
+// @expected E0119 — the `String` trait was removed; implement `Show`.
 class Pt {
     pub x: int,
 }

@@ -1,4 +1,4 @@
-// Expected: E0102 — the copy of `add_first` for a `(string)` pack adds a
+// @expected E0102 — the copy of `add_first` for a `(string)` pack adds a
 // string to an int; the `(int)` copy alone would compile (coil-lang#1281).
 fn add_first(... xs) -> int {
     return xs[0] + 1;

@@ -1,4 +1,4 @@
-// Expected: E0413 — `twice` is declared `pure` but calls `bump`, which
+// @expected E0413 — `twice` is declared `pure` but calls `bump`, which
 // writes a static.
 static let HITS: int = 0;
 

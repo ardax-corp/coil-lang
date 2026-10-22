@@ -1,4 +1,4 @@
-// Expected: E0406 — a call inside a lambda that `main` calls is reached too.
+// @expected E0406 — a call inside a lambda that `main` calls is reached too.
 use env::exec;
 
 fn main() {

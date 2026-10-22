@@ -1,6 +1,6 @@
 // A push onto a `Vec<int>` parameter reaches the caller's vector even when
 // the callee then allocates and prints (#1381, lost at -O0).
-// Output: n1\n1 5 7\n
+// @output n1\n1 5 7\n
 use io::sync;
 use string::format;
 

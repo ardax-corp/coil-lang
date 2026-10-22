@@ -1,4 +1,4 @@
-// Expected: E0210 — `Result::Ok(Option::Some(_))` is already matched by the
+// @expected E0210 — `Result::Ok(Option::Some(_))` is already matched by the
 // binding arm `Result::Ok(Option::Some(v))` before it.
 fn unwrap(Result r) -> int {
     return match r {

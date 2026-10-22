@@ -1,4 +1,4 @@
-// Expected: E0119 — `Shape::Circle` has one payload, not two.
+// @expected E0119 — `Shape::Circle` has one payload, not two.
 enum Shape {
     Dot,
     Circle(int),

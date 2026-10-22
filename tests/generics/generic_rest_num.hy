@@ -1,5 +1,5 @@
 // Rest-only Num generic must monomorphize (not print a boxed heap pointer).
-// Output: 42
+// @output 42
 use io::{stdout, write};
 use string::{format, to_bytes};
 

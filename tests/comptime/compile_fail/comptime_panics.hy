@@ -1,4 +1,4 @@
-// Expected: E0134 — the expression panics while compiling.
+// @expected E0134 — the expression panics while compiling.
 fn boom(int x) -> int {
     if x > 2 {
         panic "too big";

@@ -1,4 +1,4 @@
-// Expected: E0107 — the named `b: p` fills parameter `b`, which `put` mutates through `Reset::reset`, though `p` comes first (#1646).
+// @expected E0107 — the named `b: p` fills parameter `b`, which `put` mutates through `Reset::reset`, though `p` comes first (#1646).
 trait Reset<R> {
     fn reset(R self) {}
 }

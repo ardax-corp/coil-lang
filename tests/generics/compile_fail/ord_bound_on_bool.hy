@@ -1,4 +1,4 @@
-// Expected: E0119 — `bool` has no `Ord` instance.
+// @expected E0119 — `bool` has no `Ord` instance.
 fn max_of<T: Ord>(T a, T b) -> T {
     if a > b {
         return a;

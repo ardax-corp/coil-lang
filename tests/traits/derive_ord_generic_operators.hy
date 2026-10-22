@@ -1,9 +1,8 @@
 // A generic `#[derive(Ord)]` class compares with `<` / `>=` at an element
 // type that has `Ord`, including a nested derived class (#1186).
+// @output true false true true
 use io::{stdout, write};
 use string::{format, to_bytes};
-
-// Output: true false true true
 
 #[derive(Eq, Ord)]
 class Box<T> {

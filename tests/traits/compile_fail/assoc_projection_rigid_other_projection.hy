@@ -1,4 +1,4 @@
-// Expected: E0119 — `D::Elem` is not `C::Elem` (#1462).
+// @expected E0119 — `D::Elem` is not `C::Elem` (#1462).
 trait Collect<C> {
     type Elem;
     fn head(C xs) -> Elem {}

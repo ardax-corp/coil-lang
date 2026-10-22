@@ -1,4 +1,4 @@
-// Expected: E0209 — `Result::Ok(Option::None)` is not covered.
+// @expected E0209 — `Result::Ok(Option::None)` is not covered.
 fn f(Result<Option<int>, string> r) -> int {
     return match r {
         Result::Ok(Option::Some(v)) => v,

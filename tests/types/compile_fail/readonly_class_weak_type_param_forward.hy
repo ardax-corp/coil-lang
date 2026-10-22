@@ -1,4 +1,4 @@
-// Expected: E0119 — the instantiation is refused when the generic that calls `weak()` is declared after its caller (#1670).
+// @expected E0119 — the instantiation is refused when the generic that calls `weak()` is declared after its caller (#1670).
 use gc::{weak, Weak};
 
 readonly class P {

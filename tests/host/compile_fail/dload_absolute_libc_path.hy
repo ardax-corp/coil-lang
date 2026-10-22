@@ -1,4 +1,4 @@
-// Expected: E0410 — an absolute path to libc is the libc alias, always denied.
+// @expected E0410 — an absolute path to libc is the libc alias, always denied.
 use ffi::dload;
 
 fn main() {

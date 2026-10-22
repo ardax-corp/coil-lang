@@ -1,7 +1,7 @@
 // An auto-par loop worker reads a `const` table computed while compiling.
 // Opening the parallel section may collect and move the table first, so
 // the worker must get the statics as they are after that (gc-stress).
-// Output: 360001200000
+// @output 360001200000
 use io::{stdout, write};
 use string::{format, to_bytes};
 

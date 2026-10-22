@@ -1,7 +1,7 @@
 // A trait method's `requires` / `ensures` apply to its impl for `int`:
 // the `requires` blames the caller under the impl's name, the trait's
 // `ensures` and the impl's own `ensures` are both checked.
-// Output: ok
+// @output ok
 use io::{stdout, write};
 use string::{to_bytes, find_from};
 use task::{scope, Scope, TaskError};

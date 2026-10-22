@@ -1,4 +1,4 @@
-// Expected: E0400 — tuple index out of bounds.
+// @expected E0400 — tuple index out of bounds.
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};

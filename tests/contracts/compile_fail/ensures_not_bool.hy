@@ -1,4 +1,4 @@
-// Expected: E0102 — an `ensures` clause must be a `bool`.
+// @expected E0102 — an `ensures` clause must be a `bool`.
 fn f(int x) -> int
     ensures result
 {

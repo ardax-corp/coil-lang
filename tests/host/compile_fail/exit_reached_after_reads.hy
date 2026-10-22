@@ -1,4 +1,4 @@
-// Expected: E0407 — `env::exit` reached from `main` needs `--allow-exit`,
+// @expected E0407 — `env::exit` reached from `main` needs `--allow-exit`,
 // even when the read calls before it are granted and the unreached `exec`
 // and `remove_file` helpers need nothing.
 use env::{exec, exit};

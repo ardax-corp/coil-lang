@@ -1,5 +1,5 @@
 // examples/perf/for_in_sum.hy run as a test: the checksum pins the shape below.
-// Output: 12884115456
+// @output 12884115456
 
 // Q6: for-in pin over a large int Vec. The `sum` helper is the counted
 // island (same shape as `while i < len`). `main` keeps fill + format.

@@ -1,6 +1,6 @@
 // Arms that reuse a binding name for payloads of different types read each
 // field against that arm's own payload type.
-// Output: 24
+// @output 24
 use io::{stdout, write};
 use string::{format, to_bytes};
 

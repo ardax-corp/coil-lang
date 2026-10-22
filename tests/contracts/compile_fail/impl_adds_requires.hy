@@ -1,4 +1,4 @@
-// Expected: E0119 — an impl of a trait method may add `ensures` but not `requires`.
+// @expected E0119 — an impl of a trait method may add `ensures` but not `requires`.
 trait Area<T> {
     fn area(T x) -> int
         ensures result >= 0

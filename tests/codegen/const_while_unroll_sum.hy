@@ -1,6 +1,6 @@
 // A short counted `while` loop (a candidate for full unrolling) still runs
 // its induction step on every trip and sums 0..4.
-// Output: 6
+// @output 6
 use io::{stdout, write};
 use string::{format, to_bytes};
 

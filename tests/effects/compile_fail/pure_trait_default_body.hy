@@ -1,4 +1,4 @@
-// Expected: E0413 — a trait method's default body must keep to the method's
+// @expected E0413 — a trait method's default body must keep to the method's
 // own `pure` declaration.
 static let N: int = 0;
 

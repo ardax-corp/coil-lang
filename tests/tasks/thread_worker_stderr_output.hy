@@ -1,7 +1,7 @@
 // #1828: what a case and its workers write to `stderr()` is not part of the
 // case's stdout under `coil test`, so the `// Output:` header sees only
 // what went to `stdout()`.
-// Output: main out\nworker out\n
+// @output main out\nworker out\n
 use io::{stderr, stdout, write};
 use string::to_bytes;
 use thread::{join, spawn};

@@ -1,4 +1,4 @@
-// Expected: E0119 — two instances of `Shape` for the same type overlap.
+// @expected E0119 — two instances of `Shape` for the same type overlap.
 trait Shape<S> {
     fn area(S self) -> int {}
 }

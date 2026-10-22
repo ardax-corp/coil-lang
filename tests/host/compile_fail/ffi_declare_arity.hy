@@ -1,4 +1,4 @@
-// Expected: E0404 — `declare` takes (lib, name, args_tuple, ret_type[, variadic]).
+// @expected E0404 — `declare` takes (lib, name, args_tuple, ret_type[, variadic]).
 use ffi::dload;
 use ffi::declare;
 use ffi::types::Int;

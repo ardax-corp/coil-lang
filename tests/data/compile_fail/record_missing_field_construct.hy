@@ -1,4 +1,4 @@
-// Expected: E0206 — missing field in record constructor.
+// @expected E0206 — missing field in record constructor.
 enum Point {
     Point { x: int, y: int },
 }

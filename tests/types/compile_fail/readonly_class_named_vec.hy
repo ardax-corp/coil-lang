@@ -1,4 +1,4 @@
-// Expected: E0200 — `Vec` is the built-in `Vec<T>`; a readonly class cannot
+// @expected E0200 — `Vec` is the built-in `Vec<T>`; a readonly class cannot
 // redeclare it either (#1654).
 readonly class Vec {
     pub x: int,

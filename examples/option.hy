@@ -1,6 +1,6 @@
 // Built-in Option — unwrap via match.
 //
-// Output: 42
+// @output 42
 
 use io::stdout;
 use io::sync::write_all;

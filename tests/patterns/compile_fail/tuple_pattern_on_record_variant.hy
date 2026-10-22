@@ -1,4 +1,4 @@
-// Expected: E0205 — `Shape::Rect` is a record variant; match it with `{ w, h }`.
+// @expected E0205 — `Shape::Rect` is a record variant; match it with `{ w, h }`.
 enum Shape {
     Dot,
     Circle(int),

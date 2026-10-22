@@ -1,4 +1,4 @@
-// Expected: E0300 — `%v` on a tuple holding an unbounded `T` needs `T: Show`.
+// @expected E0300 — `%v` on a tuple holding an unbounded `T` needs `T: Show`.
 use string::format;
 
 fn bad<T>(T x) -> string {

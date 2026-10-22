@@ -1,4 +1,4 @@
-// Expected: E0102 — Status is not constructed from a raw int.
+// @expected E0102 — Status is not constructed from a raw int.
 enum Status {
     Ok = 200,
     NotFound = 404,

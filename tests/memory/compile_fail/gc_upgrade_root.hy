@@ -1,4 +1,4 @@
-// Expected: E0102 — `gc::upgrade` takes a `Weak<T>`; a `Root` is read with `get`.
+// @expected E0102 — `gc::upgrade` takes a `Weak<T>`; a `Root` is read with `get`.
 use gc::{upgrade, root};
 
 fn main() {

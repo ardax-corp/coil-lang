@@ -1,4 +1,4 @@
-// Expected: E0107 — `Reset::reset(p)` runs `P`'s impl, which writes `self.x`, on the `readonly` `p` (#1647).
+// @expected E0107 — `Reset::reset(p)` runs `P`'s impl, which writes `self.x`, on the `readonly` `p` (#1647).
 trait Reset<R> {
     fn reset(R self) {}
 }

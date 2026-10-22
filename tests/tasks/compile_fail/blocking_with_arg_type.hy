@@ -1,4 +1,4 @@
-// Expected: E0102 — `task::blocking_with(f, arg)` passes `arg` to `f`, so
+// @expected E0102 — `task::blocking_with(f, arg)` passes `arg` to `f`, so
 // its type must match `f`'s parameter.
 use task::blocking_with;
 

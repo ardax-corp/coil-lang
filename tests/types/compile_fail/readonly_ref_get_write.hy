@@ -1,4 +1,4 @@
-// Expected: E0107 — `get()` on a `readonly Ref<Point>` returns a `readonly Point`: `Ref` is not an escape hatch (#1640).
+// @expected E0107 — `get()` on a `readonly Ref<Point>` returns a `readonly Point`: `Ref` is not an escape hatch (#1640).
 use cell::Ref;
 
 class Point {

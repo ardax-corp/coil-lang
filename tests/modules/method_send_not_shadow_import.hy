@@ -1,6 +1,6 @@
 // Regression: inherent `fn send` must not shadow `thread::send`, so
 // `send(self.channel, msg)` typechecks and runs.
-// Output: hi
+// @output hi
 use thread::{channel, recv, send, spawn, Sender, Thread};
 use io::{stdout, write};
 use string::{format, to_bytes};

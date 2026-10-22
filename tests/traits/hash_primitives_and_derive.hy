@@ -1,5 +1,5 @@
 // Primitive `Hash` covers non-int payloads used by derive.
-// Output: true,true,true,true,true
+// @output true,true,true,true,true
 use io::{stdout, write};
 use string::{format, to_bytes};
 

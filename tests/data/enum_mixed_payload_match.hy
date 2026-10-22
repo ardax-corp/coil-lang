@@ -1,5 +1,5 @@
 // A variant with an int and a string payload binds both in `match`.
-// Output: 11
+// @output 11
 use io::{stdout, write};
 use string::{format, to_bytes};
 

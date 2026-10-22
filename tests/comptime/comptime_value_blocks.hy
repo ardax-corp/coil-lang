@@ -1,4 +1,4 @@
-// Flags: --comptime-read tests/comptime/data
+// @flags --comptime-read tests/comptime/data
 // `comptime { … }` in an expression: the block runs while compiling, and the
 // value it returns takes its place, like a `comptime` expression.
 use io::file::read_text;

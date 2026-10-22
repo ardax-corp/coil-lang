@@ -1,6 +1,6 @@
 // examples/finalizer.hy — GC-time `fn drop()` on a class (FFI-shaped handle).
 //
-// Output: closed
+// @output closed
 
 use gc::collect;
 use io::stdout;

@@ -1,6 +1,6 @@
 // Reading a field straight off `new Class(...)` yields that field's value
 // (here a channel sender that is then used).
-// Output: hi
+// @output hi
 use thread::{channel, recv, send, Sender};
 use io::{stdout, write};
 use string::{format, to_bytes};

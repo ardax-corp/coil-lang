@@ -2,7 +2,7 @@
 // `%v` displays values through the `Show` trait. Builtin instances
 // cover int/float/string/bool/unit; user types can `impl Show for T`.
 //
-// Output: 42hi1.5true(3,4)99
+// @output 42hi1.5true(3,4)99
 
 use io::stdout;
 use io::sync::write_all;

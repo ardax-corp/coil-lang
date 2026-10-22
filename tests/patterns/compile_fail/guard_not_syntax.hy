@@ -1,4 +1,4 @@
-// Expected: E0001 — match arms take no `if` guard; test inside the arm instead.
+// @expected E0001 — match arms take no `if` guard; test inside the arm instead.
 enum Shape {
     Dot,
     Circle(int),

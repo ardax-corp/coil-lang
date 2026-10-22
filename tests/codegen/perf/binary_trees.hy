@@ -1,5 +1,5 @@
 // examples/perf/binary_trees.hy run as a test: the checksum pins the shape below.
-// Output: 135854
+// @output 135854
 
 // CPU: recursive alloc + walk (cross-lang fair bench).
 // Binary trees checksum; max depth 10.

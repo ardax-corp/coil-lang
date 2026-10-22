@@ -1,4 +1,4 @@
-// Expected: E0119 — `#[test]` is rejected; write `test("…") { … }`.
+// @expected E0119 — `#[test]` is rejected; write `test("…") { … }`.
 #[test]
 fn check() {
     let x = 1;

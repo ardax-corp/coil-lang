@@ -1,5 +1,5 @@
 // Regression: method call on `(new Class(...))` must resolve the owner.
-// Output: 4
+// @output 4
 use io::{stdout, write};
 use string::{format, to_bytes};
 

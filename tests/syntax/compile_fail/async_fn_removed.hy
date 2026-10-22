@@ -1,4 +1,4 @@
-// Expected: E0001 — `async fn` was removed; generator functions are `gen fn`.
+// @expected E0001 — `async fn` was removed; generator functions are `gen fn`.
 async fn count() {
     yield 1;
 }

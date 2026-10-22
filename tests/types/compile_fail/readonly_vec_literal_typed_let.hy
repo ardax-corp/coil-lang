@@ -1,4 +1,4 @@
-// Expected: E0107 — a typed `Vec<Point>` cannot be built from a `readonly` element (#1552).
+// @expected E0107 — a typed `Vec<Point>` cannot be built from a `readonly` element (#1552).
 class Point {
     pub x: int,
 }

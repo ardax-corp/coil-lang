@@ -1,4 +1,4 @@
-// Expected: E0119 — `==` on `Option<Box<Box<T>>>` needs `Eq<Box<T>>`, which needs `T`'s `Eq`; `T: Hash` has none (#1804).
+// @expected E0119 — `==` on `Option<Box<Box<T>>>` needs `Eq<Box<T>>`, which needs `T`'s `Eq`; `T: Hash` has none (#1804).
 #[derive(Eq)]
 class Box<T> {
     pub v: T,

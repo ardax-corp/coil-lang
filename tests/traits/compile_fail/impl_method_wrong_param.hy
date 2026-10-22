@@ -1,4 +1,4 @@
-// Expected: E0102 — the impl's `scale` takes a string, the trait declares int (#1185).
+// @expected E0102 — the impl's `scale` takes a string, the trait declares int (#1185).
 trait Scale<S> {
     fn scale(S self, int k) -> int {}
 }

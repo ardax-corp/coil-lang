@@ -1,4 +1,4 @@
-// Expected: E0101 — `prelude::math::pow` was removed; write `base ** exponent`.
+// @expected E0101 — `prelude::math::pow` was removed; write `base ** exponent`.
 use prelude::math::pow;
 
 fn main() {

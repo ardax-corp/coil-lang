@@ -1,6 +1,6 @@
 // Named arguments on a method call land in their parameters after the
 // receiver, and run in the order they are written, receiver first (#1380).
-// Output: ba112 ra112 1cb123 c1 ba12 yx133 rba1
+// @output ba112 ra112 1cb123 c1 ba12 yx133 rba1
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};

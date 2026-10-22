@@ -1,4 +1,4 @@
-// Expected: E0102 — `?` on a call that raises `string` and on one that raises
+// @expected E0102 — `?` on a call that raises `string` and on one that raises
 // `int` would give `c` two error types.
 fn a() {
     raise "s";

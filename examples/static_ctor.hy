@@ -10,7 +10,7 @@
 //   1  — Counter::fresh().id (count was bumped to 1)
 //   1  — Counter::count after one fresh()
 //
-// Output: 42,1,1
+// @output 42,1,1
 
 use io::stdout;
 use io::sync::write_all;

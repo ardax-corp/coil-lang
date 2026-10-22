@@ -1,4 +1,4 @@
-// Expected: E0100 — imported functions in a lambda body do not lift the
+// @expected E0100 — imported functions in a lambda body do not lift the
 // rule that an outer local (`y`) needs `use (y)`.
 use io::stdout;
 use io::sync::write_all;

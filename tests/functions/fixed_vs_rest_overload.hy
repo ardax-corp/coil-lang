@@ -1,6 +1,6 @@
 // Fixed-N vs rest-K (N < K) must dispatch by argc: exact fixed wins at N;
 // rest handles K and above. Typechecker unit tests alone miss wrong CALL targets.
-// Output: 1035
+// @output 1035
 use io::{stdout, write};
 use string::{format, to_bytes};
 

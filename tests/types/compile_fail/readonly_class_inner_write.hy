@@ -1,4 +1,4 @@
-// Expected: E0107 — a mutable object held by a readonly class is read-only through it (#1558).
+// @expected E0107 — a mutable object held by a readonly class is read-only through it (#1558).
 class Counter {
     pub n: int,
 }

@@ -1,6 +1,6 @@
 // `clock::wall_nanos` and `clock::mono_nanos` both advance across a short
 // `clock::sleep_ms`.
-// Output: 11
+// @output 11
 use clock::{mono_nanos, sleep_ms, wall_nanos};
 use io::{stdout, write};
 use string::{format, to_bytes};

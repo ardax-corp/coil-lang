@@ -1,4 +1,4 @@
-// Expected: E0108 — an inherent method's receiver is implicit; a `Node self`
+// @expected E0108 — an inherent method's receiver is implicit; a `Node self`
 // parameter would be a second argument shadowing it.
 class Node {
     pub tag: int,

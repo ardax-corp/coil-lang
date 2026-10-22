@@ -1,5 +1,5 @@
 // examples/perf/dense_cast_bin.hy run as a test: the checksum pins the shape below.
-// Output: 2000001000000
+// @output 2000001000000
 
 // Hit bench for COI-380 S3: inner-loop i2f consumed by DenseBin.
 // Flagship mandelbrot casts sit on x/y headers (160² / 160), not iter.

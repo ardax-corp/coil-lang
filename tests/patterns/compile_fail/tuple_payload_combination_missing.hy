@@ -1,4 +1,4 @@
-// Expected: E0209 — `Two(None, Some(_))` is covered by no arm.
+// @expected E0209 — `Two(None, Some(_))` is covered by no arm.
 enum Pair {
     Two(Option<int>, Option<int>),
 }

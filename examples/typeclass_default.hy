@@ -1,7 +1,7 @@
 // A trait method with a default body (`next`) that calls a required one
 // (`base`).
 //
-// Output: 42
+// @output 42
 
 use io::stdout;
 use io::sync::write_all;

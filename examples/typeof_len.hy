@@ -10,7 +10,7 @@
 // Point
 // Point
 //
-// Output: int\nstring\n(int, int)\n3\n3\n2\n2\nPoint\nPoint\n
+// @output int\nstring\n(int, int)\n3\n3\n2\n2\nPoint\nPoint\n
 
 use io::stdout;
 use io::sync::write_all;

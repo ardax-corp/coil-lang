@@ -1,4 +1,4 @@
-// Expected: E0119 — `size` is an instance method of `Measurable`;
+// @expected E0119 — `size` is an instance method of `Measurable`;
 // `Box::size(..)` is not a spelling for it.
 trait Measurable<T> {
     fn size(T x) -> int {}

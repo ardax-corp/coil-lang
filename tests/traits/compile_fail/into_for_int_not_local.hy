@@ -1,4 +1,4 @@
-// Expected: E0119 — orphan instance: `Into` is not defined here and `int` is not a
+// @expected E0119 — orphan instance: `Into` is not defined here and `int` is not a
 // local type, even though `Wrapper` is.
 class Wrapper {
     pub v: int,

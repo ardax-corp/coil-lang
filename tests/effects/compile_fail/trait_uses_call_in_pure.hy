@@ -1,4 +1,4 @@
-// Expected: E0413 — a call through a trait method declared `uses {read}` has `read`.
+// @expected E0413 — a call through a trait method declared `uses {read}` has `read`.
 trait Load<A> {
     fn load(A self) -> int uses {read} {}
 }

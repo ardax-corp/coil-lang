@@ -1,4 +1,4 @@
-// Expected: E0413 — a declaration must cover its callees: `log` writes to a
+// @expected E0413 — a declaration must cover its callees: `log` writes to a
 // stream, which `uses {read}` does not cover.
 use io::{stdout, write};
 use string::to_bytes;

@@ -1,4 +1,4 @@
-// Expected: E0119 — calling `size` on `T` needs a `T: Size` bound.
+// @expected E0119 — calling `size` on `T` needs a `T: Size` bound.
 trait Size<T> {
     fn size(T x) -> int {}
 }

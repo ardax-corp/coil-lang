@@ -1,4 +1,4 @@
-// Expected: E0107 — `Vec<readonly Point>` does not convert to `Vec<Point>` (#1558).
+// @expected E0107 — `Vec<readonly Point>` does not convert to `Vec<Point>` (#1558).
 class Point {
     pub x: int,
 }

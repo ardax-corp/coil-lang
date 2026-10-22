@@ -1,4 +1,4 @@
-// Expected: E0107 — a `readonly Point` field cannot be written through, even in a mutable holder (#1558).
+// @expected E0107 — a `readonly Point` field cannot be written through, even in a mutable holder (#1558).
 class Point {
     pub x: int,
 }

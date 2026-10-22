@@ -1,4 +1,4 @@
-// Expected: E0413 — #886: a "w" mode writes, so `uses {read}` is not enough.
+// @expected E0413 — #886: a "w" mode writes, so `uses {read}` is not enough.
 use io::open;
 
 fn make(string path) -> bool uses {read} {

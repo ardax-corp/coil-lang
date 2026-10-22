@@ -3,7 +3,7 @@
 // worker. The rest of the value is copied, and a standard stream is the
 // same process stream there. A file stream: see
 // thread_spawn_nested_file_stream_static.hy.
-// Output: tuple 1\nclass 2\narray 3\nenum 4\nback in main\n
+// @output tuple 1\nclass 2\narray 3\nenum 4\nback in main\n
 use io::{stdout, write, Stream};
 use string::{format, to_bytes};
 use thread::{join, spawn};

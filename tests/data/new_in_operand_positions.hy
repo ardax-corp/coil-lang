@@ -1,7 +1,7 @@
 // A `new` used inside an operand (a call argument under an operator chain,
 // a second argument, a receiver, a nested constructor, a condition) builds
 // its object like a `let`-bound one would (#1443).
-// Output: x... <x> 23 true true 7 3 12 -3 5 2 9 yes 6 41 no!x x!x 8 ok
+// @output x... <x> 23 true true 7 3 12 -3 5 2 9 yes 6 41 no!x x!x 8 ok
 use io::{stdout, write};
 use string::{format, to_bytes};
 

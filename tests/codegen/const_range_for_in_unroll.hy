@@ -1,5 +1,5 @@
 // Range for-in unroll (`0..3`) binds successive values correctly.
-// Output: 3
+// @output 3
 use io::{stdout, write};
 use string::{format, to_bytes};
 

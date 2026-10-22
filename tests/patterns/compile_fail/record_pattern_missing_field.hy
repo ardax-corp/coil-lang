@@ -1,4 +1,4 @@
-// Expected: E0206 — a record pattern lists every field (skip one with `h: _`).
+// @expected E0206 — a record pattern lists every field (skip one with `h: _`).
 enum Shape {
     Dot,
     Circle(int),

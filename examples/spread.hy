@@ -1,6 +1,6 @@
 // Spread a tuple or array into a call with `...`.
 //
-// Output: 360
+// @output 360
 
 use io::stdout;
 use io::sync::write_all;

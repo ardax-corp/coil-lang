@@ -1,4 +1,4 @@
-// Expected: E0001 — patterns take no bool literals (`true` would bind a name).
+// @expected E0001 — patterns take no bool literals (`true` would bind a name).
 fn f(bool b) -> int {
     return match b {
         true => 1,

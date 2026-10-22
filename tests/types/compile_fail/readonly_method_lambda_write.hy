@@ -1,4 +1,4 @@
-// Expected: E0107 — a method whose lambda writes the captured `self` mutates `self` (#1558).
+// @expected E0107 — a method whose lambda writes the captured `self` mutates `self` (#1558).
 class P {
     pub x: int,
 }

@@ -1,4 +1,4 @@
-// Expected: E0119 — a type parameter compared with an `int` is not `int` (#801).
+// @expected E0119 — a type parameter compared with an `int` is not `int` (#801).
 fn generic_below<T: Ord>(Vec<T> xs, int idx) -> bool {
     return idx < xs[0];
 }

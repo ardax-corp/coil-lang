@@ -1,4 +1,4 @@
-// Expected: E0119 — a trait instance whose method calls `weak()` on its head's type parameter may not be used for a readonly class, directly or through a bound (#1670).
+// @expected E0119 — a trait instance whose method calls `weak()` on its head's type parameter may not be used for a readonly class, directly or through a bound (#1670).
 use gc::{weak, Weak};
 
 readonly class P {

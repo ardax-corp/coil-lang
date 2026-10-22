@@ -1,4 +1,4 @@
-// Expected: E0120 — no overload of `f` takes three arguments.
+// @expected E0120 — no overload of `f` takes three arguments.
 fn f(int a) -> int {
     return a;
 }

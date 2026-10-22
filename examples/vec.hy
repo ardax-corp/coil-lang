@@ -1,6 +1,6 @@
 // Fixed `[T; N]` stack locals + heap `Vec<T>` method sugar.
 //
-// Output: 20,3,99,2
+// @output 20,3,99,2
 
 use io::stdout;
 use io::sync::write_all;

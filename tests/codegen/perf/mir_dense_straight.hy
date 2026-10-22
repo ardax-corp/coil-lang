@@ -1,5 +1,5 @@
 // examples/perf/mir_dense_straight.hy run as a test: the checksum pins the shape below.
-// Output: -146834
+// @output -146834
 
 // Hit bench: dense specialize on a no-back-edge numeric body when the
 // reconstruct beats fuse-IL cost. The `main` caller loop has I/O + CALL

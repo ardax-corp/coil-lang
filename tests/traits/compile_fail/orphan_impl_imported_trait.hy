@@ -1,4 +1,4 @@
-// Expected: E0119 — orphan instance: `Foreign` comes from another module and
+// @expected E0119 — orphan instance: `Foreign` comes from another module and
 // `int` is not a local type.
 use ns_iface::Foreign;
 

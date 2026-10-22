@@ -1,6 +1,6 @@
 // Exercise io::drive and await_* registration (no hung wait).
 //
-// Output: 0
+// @output 0
 
 use io::stdout;
 use io::drive;

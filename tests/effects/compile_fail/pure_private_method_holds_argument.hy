@@ -1,4 +1,4 @@
-// Expected: E0413 — an object made around an argument reaches it, so a
+// @expected E0413 — an object made around an argument reaches it, so a
 // method that mutates through it is `mutate` (#1648).
 class Inner {
     pub n: int,

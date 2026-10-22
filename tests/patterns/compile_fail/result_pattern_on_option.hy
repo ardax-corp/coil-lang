@@ -1,4 +1,4 @@
-// Expected: E0102 — `Result::Ok` is not a constructor of `Option`.
+// @expected E0102 — `Result::Ok` is not a constructor of `Option`.
 fn f(Option<int> o) -> int {
     return match o {
         Result::Ok(v) => v,

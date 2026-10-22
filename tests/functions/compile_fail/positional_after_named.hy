@@ -1,4 +1,4 @@
-// Expected: E0119 — a positional argument may not follow a named one.
+// @expected E0119 — a positional argument may not follow a named one.
 fn diff(int a, int b) -> int {
     return a - b;
 }

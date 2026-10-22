@@ -1,4 +1,4 @@
-// Expected: E0119 — the inherent `iter` declared after the trait impl takes no
+// @expected E0119 — the inherent `iter` declared after the trait impl takes no
 // arguments, so `m.iter(1)` is a call with too many.
 class Box {
     pub v: int,

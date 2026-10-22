@@ -1,4 +1,4 @@
-// Expected: E0406 — a gated call inside a method `main` calls is reached.
+// @expected E0406 — a gated call inside a method `main` calls is reached.
 use env::exec;
 
 class Runner {

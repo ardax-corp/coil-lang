@@ -1,5 +1,5 @@
 // examples/perf/licm_lir_pure_call.hy run as a test: the checksum pins the shape below.
-// Output: 157207000000
+// @output 157207000000
 
 // CPU: a loop that adds an invariant pure call and an invariant int
 // division each iteration, in a body that returns an object allocated

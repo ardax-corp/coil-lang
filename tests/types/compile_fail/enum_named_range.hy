@@ -1,4 +1,4 @@
-// Expected: E0200 — `Range` is the built-in `Range<T>`; an enum cannot
+// @expected E0200 — `Range` is the built-in `Range<T>`; an enum cannot
 // redeclare it (#1654).
 enum Range {
     Open,

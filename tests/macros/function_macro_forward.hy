@@ -1,6 +1,6 @@
 // An expression macro whose output is a single macro call expands fully: the
 // nested call is found where the outer call was (#1404).
-// Output: 8 8 27 64 125 6
+// @output 8 8 27 64 125 6
 use io::{stdout, write};
 use string::{format, to_bytes};
 use fn_macros_forward::{to_cube, to_to_cube, to_cube_raw};

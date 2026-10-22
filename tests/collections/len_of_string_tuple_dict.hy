@@ -1,5 +1,5 @@
 // `len` of a string, tuple and dict bound to locals or returned from calls.
-// Output: 2\n3\n2\n
+// @output 2\n3\n2\n
 use io::{stdout, write};
 use string::{format, to_bytes};
 

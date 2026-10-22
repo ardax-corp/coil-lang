@@ -1,4 +1,4 @@
-// Expected: E0413 — a call that may store an argument into a private
+// @expected E0413 — a call that may store an argument into a private
 // object makes it reach shared state, so mutating it is `mutate` (#1648).
 class Inner {
     pub n: int,

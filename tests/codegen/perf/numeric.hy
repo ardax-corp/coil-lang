@@ -1,5 +1,5 @@
 // examples/perf/numeric.hy run as a test: the checksum pins the shape below.
-// Output: 1999000
+// @output 1999000
 
 // CPU: iterative arithmetic + control flow (while, compound assign).
 use io::stdout;

@@ -1,5 +1,5 @@
 // `let x = match …` inside `while` must not corrupt loop locals across iterations.
-// Output: 3,3
+// @output 3,3
 use io::{stdout, write};
 use string::{format, to_bytes};
 
