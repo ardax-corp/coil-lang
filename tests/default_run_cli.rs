@@ -294,7 +294,7 @@ fn test_failure_reports_assert_message() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success());
     assert!(
-        stderr.contains("> Test \"custom\" failed: one is not two"),
+        stderr.contains("---- tests/a.hy: custom ----\nfailed: one is not two"),
         "stderr={stderr}"
     );
     cleanup(&cwd);
