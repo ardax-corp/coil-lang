@@ -552,7 +552,7 @@ pub struct Machine<const S: usize> {
     /// Optional shared stdout capture for worker threads.
     shared_print: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
     /// What of `shared_print` is stdout: panic messages and stderr writes
-    /// stay out of it (a `coil-test` case's `// Output:`, #1828).
+    /// stay out of it (a `coil-test` case's `// @output`, #1828).
     shared_stdout: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
     /// Undetached spawns owned by this VM (joined at end of `run_with_pool`).
     live_threads: crate::thread::LiveThreadRegistry,

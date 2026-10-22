@@ -31,7 +31,7 @@ fn compile_fail(name: &str) -> String {
     compile_fail_with(name, compiler::ComptimeLimits::default())
 }
 
-/// [`compile_fail`] under `limits` (what the file's `// Flags:` header asks).
+/// [`compile_fail`] under `limits` (what the file's `// @flags` header asks).
 fn compile_fail_with(name: &str, limits: compiler::ComptimeLimits) -> String {
     comptime::install();
     let buf = Buf::default();

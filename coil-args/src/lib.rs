@@ -198,7 +198,7 @@ pub struct HostGrantFlags {
 }
 
 /// Parse grant and compile-time limit flags from `words` (a test file's
-/// `// Flags:` header), as the command line would.
+/// `// @flags` header), as the command line would.
 pub fn parse_grant_flags(words: &[&str]) -> Result<HostGrantFlags, String> {
     #[derive(clap::Parser)]
     #[command(no_binary_name = true, disable_help_flag = true)]
