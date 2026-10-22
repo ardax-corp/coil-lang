@@ -202,6 +202,9 @@ pub struct Checker {
     /// local, its FQN and the placeholder variable it is bound to. A value
     /// use of it is an error unless `m::x` turned out to be a value (#1338).
     unresolved_imports: HashMap<String, (String, TyVarId)>,
+    /// Module path -> every name its top level declares (persists across
+    /// files): a disk `use` of a name not in it is an error (#1851).
+    module_item_names: HashMap<String, HashSet<String>>,
     /// Local name -> FQN of every `use` in the current file. A second `use`
     /// binding the same local to another item is an error (#1354).
     import_locals: HashMap<String, String>,
