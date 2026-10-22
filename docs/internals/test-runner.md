@@ -181,6 +181,12 @@ failed:
 test result: FAILED. 2 passed; 1 failed; 3 total; finished in 0.21s
 ```
 
+To check what code prints, a test captures it instead of using a header:
+`io::capture_begin()` keeps the thread's stdout and stderr writes in memory
+and `io::capture_end()` returns them as `(stdout, stderr)` (captures nest; a
+capture left open when a case ends, say by a failed `assert!`, goes to the
+case's output). See `tests/testing/capture_output.hy`.
+
 A file that does not compile shows its diagnostics in its block. `-v` /
 `--verbose` also lists passing files (`ok   <file>`) and their warnings;
 `--show-output` prints passing cases' output as they finish. `--json` events

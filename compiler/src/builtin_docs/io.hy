@@ -288,6 +288,43 @@ fn stdout() -> Stream {}
 /// ```
 fn stderr() -> Stream {}
 
+/// Starts keeping this thread's stdout and stderr writes in memory instead
+/// of writing them, until the matching `capture_end()`.
+///
+/// Captures nest: each `capture_end()` closes the innermost one. Use it in
+/// tests to check what code prints. Threads spawned while capturing write
+/// to their own output. A capture still open when a test case ends goes to
+/// that case's output.
+///
+/// # Examples
+///
+/// ```
+/// use io::{capture_begin, capture_end, stdout, write};
+/// use string::{to_bytes};
+/// # use tests::assert;
+/// capture_begin();
+/// let _ = write(stdout(), to_bytes("hi\n"));
+/// let (out, err) = capture_end();
+/// assert!(out == "hi\n" && err == "");
+/// ```
+fn capture_begin() {}
+
+/// Ends the innermost `capture_begin()` and returns what it kept, as
+/// `(stdout, stderr)`. Both are empty when no capture is open.
+///
+/// # Examples
+///
+/// ```
+/// use io::{capture_begin, capture_end, stderr, write};
+/// use string::{to_bytes};
+/// # use tests::assert;
+/// capture_begin();
+/// let _ = write(stderr(), to_bytes("oops"));
+/// let (_, err) = capture_end();
+/// assert!(err == "oops");
+/// ```
+fn capture_end() -> (string, string) {}
+
 /// Opens the file at `path` with `mode` and returns a stream on it.
 ///
 /// Modes:
