@@ -3,6 +3,7 @@
 
 use common::Instruction;
 
+use crate::il::opt::OptimizeOptions;
 use crate::il::{IlOp, Label};
 
 use std::collections::HashMap;
@@ -146,6 +147,7 @@ pub fn try_specialize_body_side(
     official_entry: Option<Label>,
     from_hir: Option<&crate::mir::MirFunc>,
     side: &mut BodySidecar,
+    opts: &OptimizeOptions,
 ) -> Option<(Vec<IlOp>, DenseAbi)> {
     let Some(func) = from_hir else {
         return refuse_dense("no MIR from HIR");
@@ -155,7 +157,7 @@ pub fn try_specialize_body_side(
     }
     let mut direct_side = BodySidecar::default();
     let mut direct_pool = pool.clone();
-    let out = specialize_side(fallback, labels, name, &mut direct_pool, calls, official_entry, func, &mut direct_side)?;
+    let out = specialize_side(fallback, labels, name, &mut direct_pool, calls, official_entry, func, &mut direct_side, opts)?;
     *pool = direct_pool;
     *side = direct_side;
     crate::il::opt::note_hir_mir_kept();
@@ -172,6 +174,7 @@ fn specialize_side(
     official_entry: Option<Label>,
     from_hir: &crate::mir::MirFunc,
     side: &mut BodySidecar,
+    opts: &OptimizeOptions,
 ) -> Option<(Vec<IlOp>, DenseAbi)> {
     // Nested / multi-header numeric loops are eligible (flagship mandelbrot).
     // Infer requires float +/−/×/÷, or counted i64 +/−/×/÷/%. A
@@ -222,13 +225,22 @@ fn specialize_side(
         return refuse_dense("call ABI");
     }
     let mut func = from_hir.clone();
-    crate::mir::sccp(&mut func);
-    loop_opts(&mut func, true);
-    crate::mir::instcombine(&mut func);
-    crate::mir::destprop(&mut func);
-    crate::mir::strength_reduce(&mut func);
-    crate::mir::cse(&mut func);
-    crate::mir::gvn(&mut func);
+    // `-O0` / `-Og` run none of these; `-O1` only the folds.
+    if opts.mir_fold {
+        crate::mir::sccp(&mut func);
+    }
+    if opts.mir_loop {
+        loop_opts(&mut func, true);
+    }
+    if opts.mir_fold {
+        crate::mir::instcombine(&mut func);
+        crate::mir::destprop(&mut func);
+    }
+    if opts.mir_loop {
+        crate::mir::strength_reduce(&mut func);
+        crate::mir::cse(&mut func);
+        crate::mir::gvn(&mut func);
+    }
     // S2f: reuse the mutated array after StoreIndex (drop rematerialized Alloc).
     crate::mir::sroa(&mut func);
     super::deopt::fill_deopt_maps(&mut func);
@@ -254,10 +266,14 @@ fn specialize_side(
     let (remap, deopt) = super::emit::dense_sidecars(&func, entry);
     side.debug_slot_remap = remap;
     side.deopt = Some(deopt);
-    if let Some(packed) = super::pack::try_axpy_pack(&func, entry, pool) {
+    if opts.mir_loop
+        && let Some(packed) = super::pack::try_axpy_pack(&func, entry, pool)
+    {
         return Some((packed, abi));
     }
-    if let Some(vecd) = super::vectorize::try_vectorize(&func, entry, pool, label_hi) {
+    if opts.mir_loop
+        && let Some(vecd) = super::vectorize::try_vectorize(&func, entry, pool, label_hi)
+    {
         return Some((vecd, abi));
     }
     capture_mir(name, "dense", &func);
@@ -480,6 +496,7 @@ pub fn try_lower_abi_body_side(
     pool: &mut Vec<u64>,
     from_hir: Option<&crate::mir::MirFunc>,
     side: &mut BodySidecar,
+    opts: &OptimizeOptions,
 ) -> Option<Vec<IlOp>> {
     // I8: any inferable unfused body, not only two-slot / match / field accidents.
     // S2c: allocating leftovers need every allocation followed by its barrier.
@@ -506,13 +523,13 @@ pub fn try_lower_abi_body_side(
     // A debugger reads the locals where the source keeps them, and a
     // coroutine's frame lives across its yields: both keep their code.
     let yields = func.blocks.iter().flat_map(|b| &b.insts).any(|i| matches!(i, crate::mir::MirInst::Yield { .. }));
-    if !func.debug_keep && !yields {
+    if !func.debug_keep && !yields && opts.mir_loop {
         loop_opts(&mut func, false);
     }
     if has_alloc {
         crate::mir::sroa(&mut func);
     }
-    lir_tail(labels, name, pool, has_alloc, func, side)
+    lir_tail(labels, name, pool, has_alloc, func, side, opts)
 }
 
 /// The scalar passes both tiers run first: local CSE, trivial-φ copy
@@ -553,7 +570,7 @@ impl LirDraft {
 /// Lower a body's MIR to LIR against a copy of `pool`: what runs if dense
 /// refuses it. Leaves `pool` and the MIR capture as they were and the
 /// refusal census empty; [`lower_abi_body_reusing`] keeps the result.
-pub fn fuse_fallback(labels: &BodyLabels, name: &str, pool: &[u64], func: &crate::mir::MirFunc) -> LirDraft {
+pub fn fuse_fallback(labels: &BodyLabels, name: &str, pool: &[u64], func: &crate::mir::MirFunc, opts: &OptimizeOptions) -> LirDraft {
     let outer = MIR_CAPTURE.with(|c| {
         let mut c = c.borrow_mut();
         let outer = c.take();
@@ -565,7 +582,7 @@ pub fn fuse_fallback(labels: &BodyLabels, name: &str, pool: &[u64], func: &crate
     LIR_REFUSAL.with(|c| c.borrow_mut().take());
     let mut grown = pool.to_vec();
     let mut side = BodySidecar::default();
-    let out = try_lower_abi_body_side(labels, name, &mut grown, Some(func), &mut side);
+    let out = try_lower_abi_body_side(labels, name, &mut grown, Some(func), &mut side, opts);
     let captured = MIR_CAPTURE.with(|c| std::mem::replace(&mut *c.borrow_mut(), outer));
     let refusal = LIR_REFUSAL.with(|c| c.borrow_mut().take());
     LirDraft {
@@ -592,10 +609,11 @@ pub fn lower_abi_body_reusing(
     pool: &mut Vec<u64>,
     from_hir: Option<&crate::mir::MirFunc>,
     side: &mut BodySidecar,
+    opts: &OptimizeOptions,
 ) -> Option<Vec<IlOp>> {
     let fits = |d: &LirDraft| pool.len() >= d.base && u32::try_from(pool.len() + d.added.len()).is_ok();
     let Some(draft) = draft.filter(fits) else {
-        return try_lower_abi_body_side(labels, name, pool, from_hir, side);
+        return try_lower_abi_body_side(labels, name, pool, from_hir, side, opts);
     };
     let at: Vec<u32> = draft
         .added
@@ -639,19 +657,21 @@ fn lir_tail(
     has_alloc: bool,
     mut func: crate::mir::MirFunc,
     side: &mut BodySidecar,
+    opts: &OptimizeOptions,
 ) -> Option<Vec<IlOp>> {
     // Constants that only meet in MIR (after inlining, copy forwarding)
     // fold as they do on dense, whether or not the body has the arithmetic
-    // dense pays for (#1434). Like `hir::fold`, at every level. A folded
+    // dense pays for (#1434), at `-O1` and up (`mir_fold`). A folded
     // branch leaves blocks nothing reaches: drop them, as lowering does
     // (emit_lir's liveness is slow over them). A coverage compile keeps
     // each line's code, so a line whose value folds still counts as run.
     // SCCP first: it folds through φs (a join whose other arms never run,
     // a loop φ that keeps its value), which `instcombine_lir` skips.
-    if !func.keep_lines {
+    let fold = !func.keep_lines && opts.mir_fold;
+    if fold {
         crate::mir::sccp(&mut func);
     }
-    if !func.keep_lines && crate::mir::instcombine_lir(&mut func) > 0 {
+    if fold && crate::mir::instcombine_lir(&mut func) > 0 {
         let order: Vec<_> = func.blocks.iter().map(|b| b.id).collect();
         super::from_hir::tidy(&mut func, &order);
     }

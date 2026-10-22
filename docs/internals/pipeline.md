@@ -38,14 +38,16 @@ Names, types, and call meaning live in **DefIds**, the **typed sidecar** and HIR
 
 `Pipeline::set_opt_level` / CLI `-O` / `--opt-level` select an [`OptLevel`](../../compiler/src/il/opt/opt_level.rs) preset that fills `OptimizeOptions` (and typed-inlining budgets). Default is **Standard**. The switches gate HIR passes, HIR lowering and the MIR tiers.
 
-| Level | CLI | Passes (all on HIR) |
-|-------|-----|-----------|
-| None | `-O0`, `none` | HIR constant folding only; no inlining |
-| Basic | `-O1`, `basic` | None + small-budget inlining (same module only) |
-| Standard | `-O2`, `standard` (default) | fold, enum / tuple / readonly class scalar replacement, local CSE, LICM, bounds proofs, unroll, `sink_return`, early-exit layout; cross-module inlining |
-| Aggressive | `-O3`, `aggressive` | Standard passes with a larger inline budget. (`seek_back_edge` was removed: its residual `Seek` blocked MIR dense and made `-O3` 1.3–2.5× slower than `-O2` on loop benches.) |
-| Size | `-Os`, `size` | Standard without loop unroll or `sink_return`, smaller inline budget |
-| Debug | `-Og`, `debug` | HIR constant folding only (no scalar replacement, unroll or inlining) |
+| Level | CLI | HIR passes | MIR passes |
+|-------|-----|------------|------------|
+| None | `-O0`, `none` | constant folding only; no inlining | none |
+| Basic | `-O1`, `basic` | None + small-budget inlining (same module only) | folds: SCCP, InstCombine, DestProp (`mir_fold`) |
+| Standard | `-O2`, `standard` (default) | fold, enum / tuple / readonly class scalar replacement, bounds proofs, unroll, `sink_return`, early-exit layout; cross-module inlining | folds + CSE, LICM, IV strength reduction, GVN/PRE, saxpy-reduce pack and vectorizer (`mir_loop`) |
+| Aggressive | `-O3`, `aggressive` | Standard passes with a larger inline budget. (`seek_back_edge` was removed: its residual `Seek` blocked MIR dense and made `-O3` 1.3–2.5× slower than `-O2` on loop benches.) | as Standard |
+| Size | `-Os`, `size` | Standard without loop unroll or `sink_return`, smaller inline budget | as Standard |
+| Debug | `-Og`, `debug` | constant folding only (no scalar replacement, unroll or inlining) | none |
+
+MIR passes run in `mir::specialize` ([mir.md](mir.md#passes-by-level)). At every level a body still lowers to MIR and takes dense or LIR by the same gates; what emission needs runs regardless of level: SROA's reuse of a stored array, deopt maps, `tidy` after a fold, the dense cost gate.
 
 `None ⊂ Basic ⊂ Standard ⊂ Aggressive` on enable flags. Size and Debug are independent axes.
 

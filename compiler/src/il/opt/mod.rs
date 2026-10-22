@@ -36,6 +36,15 @@ pub struct OptimizeOptions {
     /// (`Pipeline::compute_consts`, comptime step 4). On at Standard and
     /// above (and Size); `COIL_CALL_FOLD=0` turns it off.
     pub call_fold: bool,
+    /// MIR constant propagation and folding before emission
+    /// (`mir::specialize`): SCCP, InstCombine and DestProp on dense
+    /// bodies, SCCP and InstCombine's folds on LIR bodies. On at every
+    /// level but None and Debug.
+    pub mir_fold: bool,
+    /// MIR redundancy and loop passes (`mir::specialize`): CSE, LICM, IV
+    /// strength reduction and GVN/PRE, and the dense saxpy-reduce pack and
+    /// vectorizer. On at Standard and above (and Size).
+    pub mir_loop: bool,
     /// Every function must lower through direct MIR: a body left on its
     /// raw stack IL (the fuse tier) is an internal error. The compiler sets
     /// this when codegen reported no errors; IL-only modules leave it off.
