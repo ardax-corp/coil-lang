@@ -109,6 +109,8 @@ fn all_off() -> OptimizeOptions {
         branch_optimization: false,
         collect_stats: false,
         call_fold: false,
+        mir_fold: false,
+        mir_loop: false,
         require_mir: false,
     }
 }
@@ -119,7 +121,7 @@ fn base_knobs(level: OptLevel) -> OptimizeOptions {
     // Gate HIR passes in `emit_hir`, not IL table rows: constant folding (at
     // every level), scalar replacement (enum / tuple SROA), counted-loop
     // bounds proofs and full unroll of short counted loops (not at Size: it
-    // grows code). MIR CSE and LICM have no switch.
+    // grows code).
     o.algebraic = true;
     let standard = matches!(
         level,
@@ -134,6 +136,10 @@ fn base_knobs(level: OptLevel) -> OptimizeOptions {
     // Lay out early exits after the body (`emit_hir`).
     o.branch_optimization = standard;
     o.call_fold = standard;
+    // MIR: no pass but what emission needs at None and Debug, folding
+    // only at Basic.
+    o.mir_fold = !matches!(level, OptLevel::None | OptLevel::Debug);
+    o.mir_loop = standard;
     o
 }
 
@@ -152,6 +158,8 @@ fn flag_vec(o: &OptimizeOptions) -> Vec<bool> {
         o.loop_unroll,
         o.escape_analysis,
         o.branch_optimization,
+        o.mir_fold,
+        o.mir_loop,
     ]
 }
 
@@ -233,6 +241,20 @@ mod tests {
         let o = OptLevel::Debug.options();
         assert!(o.algebraic);
         assert!(!o.escape_analysis && !o.loop_unroll);
+    }
+
+    #[test]
+    fn mir_passes_follow_the_level() {
+        for level in [OptLevel::None, OptLevel::Debug] {
+            let o = level.options();
+            assert!(!o.mir_fold && !o.mir_loop, "{level:?} runs no MIR pass");
+        }
+        let o = OptLevel::Basic.options();
+        assert!(o.mir_fold && !o.mir_loop);
+        for level in [OptLevel::Standard, OptLevel::Aggressive, OptLevel::Size] {
+            let o = level.options();
+            assert!(o.mir_fold && o.mir_loop, "{level:?} runs every MIR pass");
+        }
     }
 
     #[test]
