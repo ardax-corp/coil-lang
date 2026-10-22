@@ -90,6 +90,15 @@ fn resolve_entry_filename(filename: &str) -> Result<String, String> {
     }
 }
 
+/// `env::args()` for the program `coil` runs: its path, then the arguments
+/// after `--`. coil's own argv (flags, `--root`, …) stays invisible to it.
+fn set_program_args(program: &str, args: &[String]) {
+    let argv = std::iter::once(program.to_string())
+        .chain(args.iter().cloned())
+        .collect();
+    machine::env::set_program_args(argv);
+}
+
 fn print_opt_stats(text: bool, json: bool) {
     if !text && !json {
         return;
@@ -553,6 +562,7 @@ fn main() {
                         Ok(f) => f,
                         Err(msg) => fail_and_exit(&mut pipeline, ErrorCode::MissingInputFile, msg),
                     };
+                    set_program_args(&filename, &cli.program_args);
                     cmd_build_and_run(
                         &mut pipeline,
                         &filename,
@@ -573,7 +583,10 @@ fn main() {
                         cli.opt_stats_json,
                     );
                 }
-                Command::Run { archive } => cmd_run(&mut pipeline, &archive),
+                Command::Run { archive } => {
+                    set_program_args(&archive, &cli.program_args);
+                    cmd_run(&mut pipeline, &archive);
+                }
                 Command::Package {
                     filename,
                     output,
