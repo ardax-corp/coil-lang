@@ -540,10 +540,13 @@ impl<'pratt> Pratt<'pratt> {
         recursive(|expr| {
             let stmt = self.statement_with_expr(expr.clone());
             let atom = choice((
-                // `match` is a keyword atom — registered before
+                // `match` and `if` are keyword atoms — registered before
                 // `self.ident()` so the identifier parser refuses
-                // to match it.
-                self.match_expr(expr.clone(), stmt.clone()),
+                // to match them.
+                choice((
+                    self.match_expr(expr.clone(), stmt.clone()),
+                    self.if_expr(stmt.clone(), expr.clone()),
+                )),
                 // `done` stays a keyword builtin. `dload` / `declare` /
                 // `invoke` are ordinary calls resolved via `use ffi::{…}`.
                 self.done_(expr.clone()),
@@ -1903,6 +1906,92 @@ impl<'pratt> Pratt<'pratt> {
                 });
 
             choice((if_let, if_bool))
+        })
+    }
+
+    /// `if c { a } else { b }` (and `else if` / `if let`) as an expression.
+    ///
+    /// Branch bodies are value blocks, as a `match` arm's: statements, then
+    /// an optional trailing expression that is the branch's value. The node
+    /// comes back wrapped in [`Expression::Expr`]: that marks an `if` whose
+    /// value is used (a statement `if` is never wrapped), so the checker
+    /// requires its `else` (E0137). `else` is optional here so a missing
+    /// one is that type error, not a parse error; a missing `if let` else
+    /// is an empty block spanning the whole `if let`, as the statement
+    /// parser builds it.
+    fn if_expr<
+        S: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+        E: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+    >(
+        &self,
+        stmt: S,
+        expr: E,
+    ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
+    {
+        // `recursive` enables `else if` / `else if let` to call back.
+        recursive(|if_expr| {
+            let body = self
+                .brace_body(stmt.clone(), expr.clone())
+                .labelled("block `{ ... }`");
+            let else_tail = keyword!("else")
+                .ignore_then(choice((body.clone(), if_expr.clone())))
+                .or_not();
+
+            let if_let = keyword!("if")
+                .ignore_then(keyword!("let"))
+                .ignore_then(self.pattern())
+                .then_ignore(op!("="))
+                .then(expr.clone().labelled("condition"))
+                .then(body.clone())
+                .then(else_tail.clone())
+                .map_with(|(((pattern, scrutinee), then_body), else_clause), e| {
+                    let else_body = else_clause
+                        .unwrap_or_else(|| (e.span(), Box::new(Expression::Block(Vec::new()))));
+                    (
+                        e.span(),
+                        Box::new(Expression::IfLet {
+                            scrutinee,
+                            then_arm: MatchArm {
+                                pattern,
+                                body: then_body,
+                            },
+                            else_arm: MatchArm {
+                                pattern: (e.span(), Pattern::Default),
+                                body: else_body,
+                            },
+                        }),
+                    )
+                });
+
+            let if_bool = keyword!("if")
+                .ignore_then(expr.clone().labelled("condition"))
+                .then(body)
+                .then(else_tail)
+                .map_with(|((cond, body), else_clause), e| {
+                    let then_branch: Output =
+                        (e.span(), Box::new(Expression::Branch(Some(cond), body)));
+                    let mut branches: Vec<Output> = vec![then_branch];
+                    if let Some(else_output) = else_clause {
+                        // An `else if` chain is one flat `If`, as a statement's.
+                        if let Expression::Expr(inner) = else_output.1.as_ref()
+                            && let Expression::If(more) = inner.1.as_ref()
+                        {
+                            branches.extend(more.iter().cloned());
+                        } else {
+                            branches.push((
+                                e.span(),
+                                Box::new(Expression::Branch(None, else_output)),
+                            ));
+                        }
+                    }
+                    (e.span(), Box::new(Expression::If(branches)))
+                });
+
+            choice((if_let, if_bool)).map_with(|node, e| (e.span(), Box::new(Expression::Expr(node))))
         })
     }
 
