@@ -11,6 +11,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [MIR language islands](mir-islands.md) | Historical: COI-292 I0–I8 ladder that grew MIR coverage before every body went through MIR (M4/M5, 2026-10) |
 | [Int overflow](int-overflow.md) | Int `+ - * / % **` and negation give the exact result or panic; where the VM, folds, optimizations, auto-par, SIMD and packed kernels keep that |
 | [Language quirks](language-quirks.md) | Locked Q1–Q9 (2026-09-10): `[T; N]` box-once, class field-SROA, grow type error, defined `i % N`, panic vs raise, roadmap Q6–Q9 |
+| [`if` expression](if-expression.md) | #1877: `if … else …` / `if let … else …` as a value; primary precedence like `match`; E0137 for a missing `else`; reuses the `If` / `Match` HIR |
 | [Q6 iterator protocol](q6-iterator-protocol.md) | Counted desugar for `for` (array / literal range / B5 locals / C2 param+returned Range / C2b heap-field + user `Iterator::next` + dict + coro) |
 | [Q9 format / string](q9-format-string.md) | I4 reopen: SSA + LIR reconstruct of `STRING` / `PRINT` / `FORMAT` / `STRINGIFY`; R2 bytes HostInvoke; R3 maps; R4 unicode leftover |
 | [Static trait methods](static-trait-methods.md) | #524: `static fn` in traits, `Owner::m` / `T::m` calls, return-type-directed bound resolution, per-field `#[derive(Default)]` |

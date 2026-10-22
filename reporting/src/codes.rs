@@ -83,6 +83,9 @@ pub enum ErrorCode {
     /// An expression statement drops a `Result` (warning; `let _ = …;`
     /// discards one on purpose).
     UnusedResult,
+    /// An `if` whose value is used (`let x = if c { 1 } else { 2 };`) has
+    /// no `else`: there is no value on the false path.
+    IfWithoutElse,
 
     DuplicateEnum,
     DuplicateConstructor,
@@ -194,6 +197,7 @@ impl ErrorCode {
             Self::ConstNotComputable => "E0134",
             Self::ComptimeResultChanged => "E0135",
             Self::UnusedResult => "E0136",
+            Self::IfWithoutElse => "E0137",
             Self::DuplicateEnum => "E0200",
             Self::DuplicateConstructor => "E0201",
             Self::UnknownEnum => "E0202",
@@ -287,6 +291,7 @@ impl ErrorCode {
             Self::ConstNotComputable => "const value cannot be computed at compile time",
             Self::ComptimeResultChanged => "compile-time result changed on refresh",
             Self::UnusedResult => "unused `Result` value",
+            Self::IfWithoutElse => "`if` used as a value has no `else`",
             Self::DuplicateEnum => "duplicate enum",
             Self::DuplicateConstructor => "duplicate constructor",
             Self::UnknownEnum => "unknown enum",
@@ -388,6 +393,7 @@ mod tests {
             | ConstNotComputable
             | ComptimeResultChanged
             | UnusedResult
+            | IfWithoutElse
             | DuplicateEnum
             | DuplicateConstructor
             | UnknownEnum
@@ -471,6 +477,7 @@ mod tests {
             ConstNotComputable,
             ComptimeResultChanged,
             UnusedResult,
+            IfWithoutElse,
             DuplicateEnum,
             DuplicateConstructor,
             UnknownEnum,
