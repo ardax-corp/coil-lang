@@ -1327,6 +1327,7 @@ name = "reporting"
 version = "0.1.0"
 dependencies = [
  "ariadne",
+ "libc",
  "serde",
  "serde_json",
 ]

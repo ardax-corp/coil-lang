@@ -13,6 +13,7 @@ mod diagnostic;
 mod lsp_sink;
 mod message;
 mod position;
+pub mod progress;
 mod sarif_sink;
 mod sink;
 mod source;
