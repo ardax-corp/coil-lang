@@ -461,6 +461,49 @@ impl MirFunc {
         Ok(())
     }
 
+    /// Every use is dominated by its definition: a φ operand by the end of
+    /// the block it comes from, any other use by an earlier instruction of
+    /// its block or by a dominating block. Params and blocks nothing reaches
+    /// pass. Debug builds run it after each pass (#1869).
+    pub fn verify_dominance(&self) -> Result<(), String> {
+        let dom = super::licm::Dominators::new(self, &self.preds());
+        let mut def: Vec<Option<(BlockId, usize)>> = vec![None; self.types.len()];
+        for b in &self.blocks {
+            for (i, inst) in b.insts.iter().enumerate() {
+                for d in inst.dests() {
+                    def[d.index()] = Some((b.id, i));
+                }
+            }
+        }
+        let dominated = |v: ValueId, b: BlockId, i: usize| match def.get(v.index()).copied().flatten() {
+            None => true,
+            Some((db, di)) if db == b => di < i,
+            Some((db, _)) => dom.dominates(db, b),
+        };
+        for b in &self.blocks {
+            for (i, inst) in b.insts.iter().enumerate() {
+                if let MirInst::Phi { dest, args, .. } = inst {
+                    if let Some((from, v)) = args.iter().find(|(from, v)| !dominated(*v, *from, usize::MAX)) {
+                        return Err(format!("{dest} phi reads {v} from {from}, which its def does not dominate"));
+                    }
+                } else if let Some(o) = inst.operands().into_iter().find(|&o| !dominated(o, b.id, i)) {
+                    return Err(format!("{} in {} reads {o} before its def dominates it", inst.dest(), b.id));
+                }
+            }
+            if let Some(term) = &b.term {
+                let mut uses = Vec::new();
+                term.clone().rewrite_values(|v| {
+                    uses.push(v);
+                    v
+                });
+                if let Some(o) = uses.into_iter().find(|&o| !dominated(o, b.id, usize::MAX)) {
+                    return Err(format!("{} terminator reads {o} before its def dominates it", b.id));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn check_inst(&self, inst: &MirInst, preds: &[BlockId]) -> Result<(), String> {
         match inst {
             MirInst::Const { dest, c } => {
