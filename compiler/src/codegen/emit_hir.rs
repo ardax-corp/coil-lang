@@ -4462,7 +4462,10 @@ impl Compiler {
         if forwards && (lower::is_vec(hir, &self.checker, recv) || method == "to_vec") {
             return Err("callee-trait");
         }
-        if lower::is_vec(hir, &self.checker, recv) {
+        // A trait method the `Vec` type has no method of (`v.show()`,
+        // #1848) resolves as any receiver's.
+        let vec_method = self.context.methods.get(common::BUILTIN_VEC_TYPE).is_some_and(|m| m.contains_key(method));
+        if lower::is_vec(hir, &self.checker, recv) && vec_method {
             return self.resolve_hir_vec_method(hir, call, method, args);
         }
         let recv_ty = Self::hir_ty(hir, recv).ok_or("method-receiver")?;

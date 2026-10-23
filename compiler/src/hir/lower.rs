@@ -2454,7 +2454,10 @@ impl Walk<'_> {
                     return Err("call-type");
                 }
                 let recv = *args.first().ok_or("method-receiver")?;
-                if is_vec(body, self.checker, recv) {
+                // A trait method `Vec` has no method of (`v.show()`,
+                // #1848) is any receiver's.
+                let inherent = matches!(name.as_str(), "push" | "pop" | "insert" | "remove" | "clear" | "reserve" | "capacity" | "len");
+                if is_vec(body, self.checker, recv) && inherent {
                     return self.vec_method(name, args);
                 }
                 // Any one-word receiver may name a ground trait instance's
