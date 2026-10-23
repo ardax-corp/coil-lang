@@ -9,6 +9,8 @@ use std::ptr::NonNull;
 use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
 const CHUNK: usize = 64 * 1024;
+/// Entries of [`Slab::chunk_for`]'s recent-chunk cache.
+const RECENT: usize = 8;
 
 /// Bytes per slab chunk (evacuation accounting).
 pub const CHUNK_BYTES: usize = CHUNK;
@@ -30,6 +32,21 @@ struct PageMeta {
     slot_size: u32,
     slot_align: u32,
     first_off: u32,
+    /// `ceil(2^64 / slot_size)`: an offset `n` is a multiple of the slot
+    /// size iff `n * slot_magic <= slot_magic - 1` (wrapping), a multiply
+    /// where `%` divides on every heap-pointer probe.
+    slot_magic: u64,
+}
+
+impl PageMeta {
+    fn new(slot_size: u32, slot_align: u32, first_off: u32) -> Self {
+        Self { slot_size, slot_align, first_off, slot_magic: (u64::MAX / u64::from(slot_size)).wrapping_add(1) }
+    }
+
+    /// Whether `rel` (an offset from the first slot) starts a slot.
+    fn is_slot_offset(&self, rel: u32) -> bool {
+        u64::from(rel).wrapping_mul(self.slot_magic) <= self.slot_magic.wrapping_sub(1)
+    }
 }
 
 const SEGS: usize = 32;
@@ -274,9 +291,12 @@ pub struct Slab {
     released: Vec<((u32, u32), Vec<usize>)>,
     /// Sweep cycles since the last idle scan (see [`RELEASE_WINDOW`]).
     cycles_since_scan: u32,
-    /// Entry of the last chunk that contained a lookup. Entries never move,
-    /// so one word stays valid and a racing update cannot tear it.
-    last: AtomicPtr<Chunk>,
+    /// Entries of the chunks that last contained a lookup, one per 64 KiB
+    /// window of the address (`addr >> 16`, mod [`RECENT`]): a loop reading
+    /// strings of a few size classes touches a few chunks, and one entry
+    /// alone missed on every switch. Entries never move, so each word stays
+    /// valid and a racing update cannot tear it.
+    recent: [AtomicPtr<Chunk>; RECENT],
     /// Per chunk index: pages given back (the slot walk skips them so it
     /// does not fault zero pages back in).
     released_mask: Vec<bool>,
@@ -309,7 +329,7 @@ impl Slab {
             free: Vec::new(),
             released: Vec::new(),
             cycles_since_scan: 0,
-            last: AtomicPtr::new(std::ptr::null_mut()),
+            recent: std::array::from_fn(|_| AtomicPtr::new(std::ptr::null_mut())),
             released_mask: Vec::new(),
         }
     }
@@ -481,7 +501,7 @@ impl Slab {
                 return false;
             }
             let rel = off - meta.first_off;
-            rel.is_multiple_of(meta.slot_size) && (off as usize) + (meta.slot_size as usize) <= CHUNK
+            meta.is_slot_offset(rel) && (off as usize) + (meta.slot_size as usize) <= CHUNK
         })
     }
 
@@ -714,11 +734,7 @@ impl Slab {
         if new_chunk {
             self.chunks.push(Chunk {
                 ptr,
-                meta: PageMeta {
-                    slot_size: slot_size as u32,
-                    slot_align: align as u32,
-                    first_off: first_off as u32,
-                },
+                meta: PageMeta::new(slot_size as u32, align as u32, first_off as u32),
             });
         }
         first_slot.expect("gc slab chunk smaller than one slot")
@@ -726,7 +742,7 @@ impl Slab {
 
     #[inline]
     fn chunk_for(&self, addr: u64) -> Option<(u64, &PageMeta)> {
-        let last = self.last.load(Ordering::Relaxed);
+        let last = self.recent[Self::recent_index(addr)].load(Ordering::Relaxed);
         if !last.is_null() {
             let c = unsafe { &*last };
             let start = c.ptr as u64;
@@ -743,8 +759,12 @@ impl Slab {
     #[inline(never)]
     fn chunk_for_slow(&self, addr: u64) -> Option<(u64, &PageMeta)> {
         let c = self.chunks.get(self.chunks.position(addr)?)?;
-        self.last.store(std::ptr::from_ref(c).cast_mut(), Ordering::Relaxed);
+        self.recent[Self::recent_index(addr)].store(std::ptr::from_ref(c).cast_mut(), Ordering::Relaxed);
         Some((c.ptr as u64, &c.meta))
+    }
+
+    fn recent_index(addr: u64) -> usize {
+        (addr >> 16) as usize % RECENT
     }
 }
 
@@ -851,6 +871,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn slot_offset_test_matches_remainder() {
+        for size in [1u32, 8, 16, 24, 40, 48, 56, 72, 96, 120, 136, 4096, 65536] {
+            let meta = PageMeta::new(size, 8, 0);
+            for rel in (0..70_000u32).chain([u32::MAX - 7, u32::MAX]) {
+                assert_eq!(meta.is_slot_offset(rel), rel % size == 0, "size {size} rel {rel}");
+            }
+        }
+    }
+
+    #[test]
     fn chunk_table_keeps_entries_across_segment_growth() {
         let mut t = ChunkTable::new();
         let n = SEG0 * 7 + 5;
@@ -860,7 +890,7 @@ mod tests {
         for i in 0..n {
             t.push(Chunk {
                 ptr: first(i),
-                meta: PageMeta { slot_size: 8, slot_align: 8, first_off: 0 },
+                meta: PageMeta::new(8, 8, 0),
             });
             if i == 0 {
                 let p0: *const Chunk = t.get(0).unwrap();
