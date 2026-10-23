@@ -112,7 +112,7 @@ impl Checker {
             module_item_names: HashMap::new(),
             import_locals: HashMap::new(),
             imported_enum_keys: HashMap::new(),
-            module_class_names: HashSet::new(),
+            module_class_names: HashMap::new(),
             def_interner,
             schemes_by_def: HashMap::new(),
             local_defs: HashMap::new(),
@@ -12124,15 +12124,25 @@ impl Checker {
             return self.coroutine_type(arg_tys[0].clone(), arg_tys[1].clone());
         }
 
-        let ctor = self
-            .resolve_class_key(name)
-            .or_else(|| self.resolve_enum_key(name))
-            .unwrap_or_else(|| name.to_string());
+        // A generic class of this file the main walk has not registered yet
+        // (a forward signature or enum payload, #1980, #1983).
+        let pending_local = match self.resolve_class_key(name) {
+            Some(_) => None,
+            None => self.module_class_names.get(name).copied().filter(|&n| n > 0),
+        };
+        let ctor = match pending_local {
+            Some(_) => self.qualify_module_name(name),
+            None => self
+                .resolve_class_key(name)
+                .or_else(|| self.resolve_enum_key(name))
+                .unwrap_or_else(|| name.to_string()),
+        };
         if let Some(expected_arity) = self
             .generics
             .generic_type_ctors
             .get(&ctor)
             .map(|params| params.len())
+            .or(pending_local)
         {
             if expected_arity != arg_tys.len() {
                 self.messages.push(Message::error(
@@ -12215,7 +12225,7 @@ impl Checker {
                 }
                 // A class of this file the main walk has not registered yet
                 // (a forward signature or enum payload, #1980, #1983).
-                if self.module_class_names.contains(name) {
+                if self.module_class_names.contains_key(name) {
                     return Ty::Con(self.qualify_module_name(name));
                 }
                 // COI-110: enums live under `module::Name`; annotations must use
@@ -15651,18 +15661,17 @@ impl Checker {
         }
     }
 
-    /// Record this module's `readonly class` keys before any body is
-    /// typed, so a use ahead of the declaration sees the class as immutable.
-    /// Record every top-level class name of this file
-    /// (`module_class_names`). Classes are registered during the main walk,
-    /// after the pre-passes parse forward fn and method signatures and enum
-    /// payloads: a type there that names one of them still has to be this
-    /// module's `m::Name`, not a bare `Name` (#1980, #1983).
+    /// Record every top-level class name of this file with its number of
+    /// type parameters (`module_class_names`). Classes are registered during
+    /// the main walk, after the pre-passes parse forward fn and method
+    /// signatures and enum payloads: a type there that names one of them
+    /// (`Box`, `Box<int>`) still has to be this module's `m::Box`, not a bare
+    /// `Box` (#1980, #1983).
     fn collect_module_class_names(&mut self, ast: &Output) {
-        fn walk(node: &Output, out: &mut HashSet<String>) {
+        fn walk(node: &Output, out: &mut HashMap<String, usize>) {
             match Checker::pre_pass_unwrap_stmt(node).1.as_ref() {
-                Expression::Class { name, .. } => {
-                    out.insert(name.to_string());
+                Expression::Class { name, type_params, .. } => {
+                    out.insert(name.to_string(), type_params.len());
                 }
                 Expression::Program(children) | Expression::Fragment(children) => {
                     for child in children {
@@ -15672,11 +15681,13 @@ impl Checker {
                 _ => {}
             }
         }
-        let mut names = HashSet::new();
+        let mut names = HashMap::new();
         walk(ast, &mut names);
         self.module_class_names = names;
     }
 
+    /// Record this module's `readonly class` keys before any body is
+    /// typed, so a use ahead of the declaration sees the class as immutable.
     fn pre_register_readonly_classes(&mut self, ast: &Output) {
         fn walk<'a>(node: &'a Output<'a>, out: &mut Vec<&'a str>) {
             match Checker::pre_pass_unwrap_stmt(node).1.as_ref() {
