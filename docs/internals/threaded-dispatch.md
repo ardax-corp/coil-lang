@@ -68,6 +68,12 @@ bodies type a `T` word as `i64` in MIR.)
 | 2^21 pushes, `Vec::new` (grows) | 85 ms | 39 ms |
 | nsieve(2^21), n from argv | 303 ms | 250 ms |
 
+Fused `EQ` / `NEQ` (`BinSlotSlotJmpf op=EQ`, `DenseIndexJmpf` tails) stay
+structural (`value_eq::values_eq`); `fused::eq_values` answers two unequal
+words of which one lies outside the slab span (an `int` compare) before any
+heap probe (#1866). A 4.2M-iteration loop on `k == needle` (even, unequal
+ints): 75 ms -> 63 ms, vs 59 ms for the same loop on `k > needle`.
+
 Debugger-attached runs never enter the hot loop (per-op stops).
 
 ## Remaining ops (G2)
