@@ -156,8 +156,8 @@ pub const ARCHIVE_MAJOR: u16 = 4;
 ///      body reads the byte in place instead of a `string_byte_at`
 ///      HostInvoke. Older runtimes would read the flag as an array index.
 /// 46 — byte-lane SIMD: `VLoad` type `simd::TY_U8`, `VBin` byte kinds
-///      (`simd::M_*`, `B_CMP`, `BS_CMP`), `VMask`, and the dense unaries
-///      `UNARY_CTZ` / `UNARY_BLSR`. Older runtimes do not know them.
+///      (`simd::M_*`, `B_CMP`, `BS_CMP`), `VMask`, `VScan`, and the dense
+///      unaries `UNARY_CTZ` / `UNARY_BLSR`. Older runtimes do not know them.
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.

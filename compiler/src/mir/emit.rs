@@ -2523,6 +2523,18 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
                 ),
             ));
         }
+        MirInst::ByteScan { dest, from, bound, inclusive, streams, scalars, expr } => {
+            let body = byte_scan_body(expr, streams, scalars, regs)
+                .ok_or_else(|| LowerError::Refused("byte scan body too large".into()))?;
+            let flag = if *inclusive { common::simd::SCAN_INCLUSIVE } else { 0 };
+            out.push(byte(Byte::new(Instruction::VScan).with_dense_abc(
+                body.len() as u8 | flag,
+                regs[dest.index()],
+                regs[from.index()],
+                regs[bound.index()],
+            )));
+            out.extend(body.into_iter().map(byte));
+        }
         MirInst::Unary { dest, op, src } => {
             let kind = match (*op, func.ty(*src)) {
                 (MirUnaryOp::Not, _) => dense::UNARY_NOT,
@@ -4446,4 +4458,117 @@ pub(super) fn paired_alloc_dests(func: &MirFunc) -> HashMap<ValueId, ValueId> {
         }
     }
     out
+}
+
+/// A `ByteScan`'s `VScan` body: byte-lane `V*` ops, each node into a
+/// vector register (stack-allocated, eight in all), the mask in `v0`. A
+/// `VLoad`'s index slot holds the stream's offset from the scan position.
+fn byte_scan_body(
+    expr: &super::inst::LaneExpr,
+    streams: &[(ValueId, ValueId)],
+    scalars: &[ValueId],
+    regs: &[u8],
+) -> Option<Vec<Byte>> {
+    use super::inst::{LaneExpr, LaneVal};
+    use common::simd;
+
+    struct Ctx<'a> {
+        out: Vec<Byte>,
+        next: u8,
+        streams: &'a [(ValueId, ValueId)],
+        scalars: &'a [ValueId],
+        regs: &'a [u8],
+    }
+
+    impl Ctx<'_> {
+        fn reg(&mut self) -> Option<u8> {
+            let r = self.next;
+            if usize::from(r) >= simd::NREGS {
+                return None;
+            }
+            self.next += 1;
+            Some(r)
+        }
+
+        fn vbin(&mut self, kind: u8, dest: u8, a: u8, b: u8) {
+            self.out.push(Byte::new(Instruction::VBin).with_dense_abc(kind, dest, a, b));
+        }
+
+        fn load(&mut self, s: u8) -> Option<u8> {
+            let (arr, idx) = *self.streams.get(usize::from(s))?;
+            let r = self.reg()?;
+            self.out.push(Byte::new(Instruction::VLoad).with_dense_abc(
+                simd::TY_U8,
+                r,
+                self.regs[arr.index()],
+                self.regs[idx.index()],
+            ));
+            Some(r)
+        }
+
+        fn eval(&mut self, e: &LaneExpr) -> Option<u8> {
+            let pred = |op: MirCmpOp| match op {
+                MirCmpOp::Lt => dense::CMP_LT,
+                MirCmpOp::Le => dense::CMP_LE,
+                MirCmpOp::Gt => dense::CMP_GT,
+                MirCmpOp::Ge => dense::CMP_GE,
+                MirCmpOp::Eq => dense::CMP_EQ,
+                MirCmpOp::Ne => dense::CMP_NE,
+            };
+            let base = self.next;
+            let r = match e {
+                // `x != x` / `x == x` on any loaded lane.
+                LaneExpr::Const(b) => {
+                    let r = self.load(0)?;
+                    let k = if *b { dense::CMP_EQ } else { dense::CMP_NE };
+                    self.vbin(simd::B_CMP + k, r, r, r);
+                    r
+                }
+                LaneExpr::Cmp { op, lhs, rhs } => match (*lhs, *rhs) {
+                    (LaneVal::Stream(a), LaneVal::Stream(b)) => {
+                        let (x, y) = (self.load(a)?, self.load(b)?);
+                        self.vbin(simd::B_CMP + pred(*op), x, x, y);
+                        x
+                    }
+                    (LaneVal::Stream(a), LaneVal::Scalar(k)) => {
+                        let x = self.load(a)?;
+                        let slot = self.regs[self.scalars.get(usize::from(k))?.index()];
+                        self.vbin(simd::BS_CMP + pred(*op), x, slot, x);
+                        x
+                    }
+                    (LaneVal::Scalar(_), LaneVal::Stream(_)) => {
+                        let flipped = match op {
+                            MirCmpOp::Lt => MirCmpOp::Gt,
+                            MirCmpOp::Le => MirCmpOp::Ge,
+                            MirCmpOp::Gt => MirCmpOp::Lt,
+                            MirCmpOp::Ge => MirCmpOp::Le,
+                            o => *o,
+                        };
+                        return self.eval(&LaneExpr::Cmp { op: flipped, lhs: *rhs, rhs: *lhs });
+                    }
+                    (LaneVal::Scalar(_), LaneVal::Scalar(_)) => return None,
+                },
+                LaneExpr::And(a, b) | LaneExpr::Or(a, b) => {
+                    let x = self.eval(a)?;
+                    let y = self.eval(b)?;
+                    let kind = if matches!(e, LaneExpr::And(..)) { simd::M_AND } else { simd::M_OR };
+                    self.vbin(kind, x, x, y);
+                    x
+                }
+                LaneExpr::Not(a) => {
+                    let x = self.eval(a)?;
+                    self.vbin(simd::M_NOT, x, x, x);
+                    x
+                }
+            };
+            // Registers past the result are free again.
+            debug_assert_eq!(r, base);
+            self.next = base + 1;
+            Some(r)
+        }
+    }
+
+    let mut cx = Ctx { out: Vec::new(), next: 0, streams, scalars, regs };
+    cx.eval(expr)?;
+    (cx.out.len() <= common::simd::SCAN_MAX_BODY).then_some(cx.out)
 }
