@@ -4184,7 +4184,9 @@ fn emit_dense_push(
     Ok(())
 }
 
-/// `common::WORD_*` of a heap word of this MIR type.
+/// `common::WORD_*` of a heap word of this MIR type. Not for an
+/// [`MirFunc::opaque_words`] body: a type variable's word is typed `I64`
+/// there and may be an object (#1955), so its kinds stay unknown (0).
 fn mir_word_kind(ty: MirTy) -> u8 {
     match ty {
         MirTy::I64 | MirTy::F64 | MirTy::Bool => common::WORD_SCALAR,
