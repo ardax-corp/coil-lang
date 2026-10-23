@@ -366,7 +366,9 @@ Mark **Q** items that E6 must not guess silently.
    collect). Discard if C1 must GC while chunks run — then back-edge polls
    are mandatory before steal ships.
 2. **Runtime freeze bit** vs type-only `readonly` / purity. Defense in depth
-   vs hot-path header checks.
+   vs hot-path header checks. Debug and `gc-stress` builds check it
+   ([shared-heap-guard.md](shared-heap-guard.md), #1892): a shared-heap job
+   may write only objects allocated in its epoch. Release relies on the proof.
 3. **Heap lock.** Mutex around heap-structure mutation (interning, unit
    enums, resize accounting, collect). `Heap::alloc` no longer takes it per
    object: each mutator thread takes a batch of 64 slots per size class

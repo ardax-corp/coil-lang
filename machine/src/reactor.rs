@@ -562,6 +562,9 @@ fn run_help_job(reactor: &Reactor, job: Job) {
     // The waiting job may be mid-epoch on its own heap; the helped one must
     // not allocate from (or flush into) that batch (#766, #779).
     let _stash = crate::memory::stash_epoch_batch();
+    // The waiting job's shared-heap write guard does not cover the helped
+    // job, nor the reset of the helper VM's own heap afterwards.
+    let _write_scope = crate::memory::EpochWriteScope::unchecked();
     with_help_vm(&program, |vm| run_job_on_vm(vm, job));
 }
 
@@ -729,6 +732,9 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
         }
 
         let _guard = HostStateGuard::enter(vm);
+        // Debug / gc-stress: a shared-heap job may write only objects of its
+        // epoch; any other job on this thread (help-steal) writes freely.
+        let _write_scope = crate::memory::EpochWriteScope::enter(vm.heap(), shared);
         if let Some(test) = &test {
             return Ok(run_test_job(vm, entry, test));
         }

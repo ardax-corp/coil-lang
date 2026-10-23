@@ -331,7 +331,7 @@ impl IlModule {
                 let mut side = crate::mir::BodySidecar::default();
                 let fallback = fuse_fallbacks[i].get_or_insert_with(|| {
                     let func = body.meta.hir_mir.as_deref()?;
-                    Some(crate::mir::fuse_fallback(&labels[i], &body.meta.name, pool, func))
+                    Some(crate::mir::fuse_fallback(&labels[i], &body.meta.name, pool, func, opts))
                 });
                 if let Some((dense, abi)) = crate::mir::try_specialize_body_side(
                     fallback.as_ref().and_then(crate::mir::LirDraft::ops),
@@ -342,6 +342,7 @@ impl IlModule {
                     body.meta.entry,
                     body.meta.hir_mir.as_deref(),
                     &mut side,
+                    opts,
                 ) {
                     // Even empty: a local it leaves out has no register.
                     side_remaps.insert(body.meta.name.clone(), side.debug_slot_remap);
@@ -395,6 +396,7 @@ impl IlModule {
                 pool,
                 body.meta.hir_mir.as_deref(),
                 &mut side,
+                opts,
             ) {
                 // Do not re-run stack-IL opts: `local_cse` refuses MOD and
                 // rematerializes a stored remainder (pair_int_churn +12%).
@@ -1494,6 +1496,19 @@ mod tests {
             branch_optimization: false,
             collect_stats: false,
             call_fold: false,
+            mir_fold: false,
+            mir_loop: false,
+            hir_inline: false,
+            hir_inline_pair: false,
+            hir_inline_heap: false,
+            hir_inline_loops: false,
+            hir_inline_specialize: false,
+            hir_inline_mono: false,
+            hir_match_tree: false,
+            hir_pair_locals: false,
+            hir_bisect: None,
+            mir_sccp: false,
+            auto_par: false,
             require_mir: false,
         }
     }

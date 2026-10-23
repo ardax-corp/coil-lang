@@ -18,8 +18,12 @@ the history of how MIR coverage grew to every body; their notes about
 2. `IlModule::optimize_and_flatten` (`il/module.rs`) tries **dense** leaf
    first: MIR passes, then dense emit, kept when its cost beats the body's
    LIR form and every callee it `CALL`s is dense.
-3. Otherwise the body takes **LIR**: SROA (allocating bodies) or CSE, then
-   InstCombine's folds (`instcombine_lir`), then `emit_lir`. A `defer` body takes LIR with its cleanup pad.
+3. Otherwise the body takes **LIR**: CSE and LICM, SROA (allocating
+   bodies), then SCCP and InstCombine's folds (`instcombine_lir`), then
+   `emit_lir`. A `defer` body takes LIR with its cleanup pad.
+
+Which of those passes run depends on the optimization level
+([passes by level](#passes-by-level)).
 4. All bodies are concatenated and lowered once by `il::lower`
    (fuse-select, PCs, encode).
 
@@ -31,6 +35,7 @@ the history of how MIR coverage grew to every body; their notes about
 | `lower_from_hir` | HIR body → SSA, for every body |
 | `try_specialize_body_side` | MIR CSE/GVN + LICM + InstCombine (P11 float peeps) + DestProp + IV SR + saxpy-reduce HostInvoke (P12) or dense emit (HostInvoke box/unbox; cost gate vs the body's LIR form) |
 | `try_lower_abi_body_side` | SROA or CSE + LIR emit (`emit_lir`) |
+| `mir::sccp` | Sparse conditional constant propagation; dense and LIR ([SCCP](#sccp)) |
 | `mir::cse` | Same-block GVN (includes `DIVF`/`DIV`); used on dense and LIR |
 | `mir::gvn` | Dominator GVN + fully-anticipated fork PRE; dense only |
 | `mir::licm` | Natural-loop hoist of invariant arith/cmp/cast/length/field reads; trapping ops (int `Div`/`Rem`/`Pow`, checked `Index`) and pure calls move behind a copy of the loop test; dense and LIR bodies (LIR keeps literals in the loop) |
@@ -107,6 +112,52 @@ Only the prologue `ArrayPin` is still emitted; `IndexPin*` / `StoreIndexPin*` ar
 Boxed dense+match stays I2 LIR (JumpIfMatch stack protocol vs dense regs).
 Niche / two-slot match may dense (**Q8**).
 Stack-map note: [mir-stack-maps.md](mir-stack-maps.md).
+
+## Passes by level
+
+`OptimizeOptions` (filled from the [`OptLevel`](pipeline.md#optimization-levels))
+reaches `try_specialize_body_side`, `fuse_fallback` and
+`lower_abi_body_reusing` from `IlModule::optimize_and_flatten`. Two
+switches gate the passes:
+
+| Switch | On at | Dense | LIR |
+|--------|-------|-------|-----|
+| `mir_fold` | `-O1` and up, `-Os` | SCCP, InstCombine, DestProp | SCCP, `instcombine_lir` (+ `tidy`) |
+| `mir_loop` | `-O2`, `-O3`, `-Os` | CSE, DestProp, LICM, CSE (`loop_opts`); IV strength reduction, CSE, GVN/PRE; saxpy-reduce pack (P12) and vectorizer (S5) | `loop_opts` with `cse_lir` |
+
+At `-O0` and `-Og` neither runs: the body's MIR is emitted as lowering
+built it. What emission needs runs at every level: SROA's reuse of the
+array a `StoreIndex` mutated (S2f; dense always, LIR on allocating
+bodies), `fill_deopt_maps`, the index-dest repaint, and the dense gates
+(cost gate, `StoreIndex` / `Index` counts). A coverage compile (`keep_lines`)
+still skips the LIR folds, and a debugger-attached or coroutine body still
+skips `loop_opts` on LIR, at every level.
+
+## SCCP
+
+`mir::sccp` (`sccp.rs`) is Wegman–Zadeck sparse conditional constant
+propagation. Every value starts unknown (⊤) and every block unreached but
+the entry; reached blocks evaluate their instructions over ⊤ → constant →
+varying (⊥). A φ meets only the values on edges that run, and a branch on
+a known condition runs one edge, so a loop φ that only gets its own value
+back stays constant and a join whose other arms never run takes the one
+that does: what InstCombine (which skips φs) and `tidy` (which only drops
+blocks nothing jumps to) miss.
+
+Each value proven constant then becomes a `Const`, a branch on one a
+jump, φ edges from blocks that never run go, the blocks nothing reaches
+are dropped and DCE runs. Only pure scalar ops fold (`Bin`, `Cmp`,
+`Unary`, `Cast`, `Phi`); an op that would trap is never constant
+(`instcombine::const_of` refuses it), so it stays and traps at run time.
+A body that has not settled after `MAX_SWEEPS` (64) sweeps is left as it
+was.
+
+It runs first on dense bodies and before `instcombine_lir` on LIR ones
+(#1434: constants that only meet in MIR, after inlining, fold whether or
+not the body takes dense), under `mir_fold`. `COIL_MIR_SCCP=0` (or
+`false` / `off` / `no`) turns it off for bisecting
+(`OptimizeOptions::mir_sccp`; [environment knobs](pipeline.md#environment-knobs)). Tests:
+`sccp.tests.rs`.
 
 ## P1 — dense exec (COI-268)
 
@@ -306,7 +357,7 @@ Hit bench: `examples/perf/mir_instcombine.hy`.
 (`+ - * / %` only), so a body whose only arithmetic is bitwise ops or
 shifts never reached InstCombine: constants that meet only in MIR (after
 inlining, copy forwarding) were computed at run time. `lir_tail` now runs
-`instcombine_lir` on every LIR body, at every level like `hir::fold`: the
+`instcombine_lir` on every LIR body at `-O1` and up (`mir_fold`): the
 constant folds, identities and constant branches, without the strength
 rewrites (`x * 2` is one op with an immediate on the stack machine; `x + x`
 reads `x` twice). When it changes the body, `from_hir::tidy` drops the

@@ -38,20 +38,52 @@ Names, types, and call meaning live in **DefIds**, the **typed sidecar** and HIR
 
 `Pipeline::set_opt_level` / CLI `-O` / `--opt-level` select an [`OptLevel`](../../compiler/src/il/opt/opt_level.rs) preset that fills `OptimizeOptions` (and typed-inlining budgets). Default is **Standard**. The switches gate HIR passes, HIR lowering and the MIR tiers.
 
-| Level | CLI | Passes (all on HIR) |
-|-------|-----|-----------|
-| None | `-O0`, `none` | HIR constant folding only; no inlining |
-| Basic | `-O1`, `basic` | None + small-budget inlining (same module only) |
-| Standard | `-O2`, `standard` (default) | fold, enum / tuple / readonly class scalar replacement, local CSE, LICM, bounds proofs, unroll, `sink_return`, early-exit layout; cross-module inlining |
-| Aggressive | `-O3`, `aggressive` | Standard passes with a larger inline budget. (`seek_back_edge` was removed: its residual `Seek` blocked MIR dense and made `-O3` 1.3–2.5× slower than `-O2` on loop benches.) |
-| Size | `-Os`, `size` | Standard without loop unroll or `sink_return`, smaller inline budget |
-| Debug | `-Og`, `debug` | HIR constant folding only (no scalar replacement, unroll or inlining) |
+| Level | CLI | HIR passes | MIR passes |
+|-------|-----|------------|------------|
+| None | `-O0`, `none` | constant folding only; no inlining | none |
+| Basic | `-O1`, `basic` | None + small-budget inlining (same module only) | folds: SCCP, InstCombine, DestProp (`mir_fold`) |
+| Standard | `-O2`, `standard` (default) | fold, enum / tuple / readonly class scalar replacement, bounds proofs, unroll, `sink_return`, early-exit layout; cross-module inlining | folds + CSE, LICM, IV strength reduction, GVN/PRE, saxpy-reduce pack and vectorizer (`mir_loop`) |
+| Aggressive | `-O3`, `aggressive` | Standard passes with a larger inline budget. (`seek_back_edge` was removed: its residual `Seek` blocked MIR dense and made `-O3` 1.3–2.5× slower than `-O2` on loop benches.) | as Standard |
+| Size | `-Os`, `size` | Standard without loop unroll or `sink_return`, smaller inline budget | as Standard |
+| Debug | `-Og`, `debug` | constant folding only (no scalar replacement, unroll or inlining) | none |
+
+MIR passes run in `mir::specialize` ([mir.md](mir.md#passes-by-level)). At every level a body still lowers to MIR and takes dense or LIR by the same gates; what emission needs runs regardless of level: SROA's reuse of a stored array, deopt maps, `tidy` after a fold, the dense cost gate.
 
 `None ⊂ Basic ⊂ Standard ⊂ Aggressive` on enable flags. Size and Debug are independent axes.
 
 Branch layout (COI-128) is **on** at Standard, Aggressive and Size (`branch_optimization`) and happens in HIR lowering: an `if` arm or two-arm niche `match` arm that always returns is moved after the function's fall-through return (`CodeBuf::move_exits_to_end`), and the jump that skipped it inverts, so the code after the exit falls through. Layout is heuristic only (a returning arm is cold). **PGO was removed** ([#301](https://github.com/ardax-corp/coil-lang/pull/301)): no `--pgo-*` flags, ingest, instrumentation, heat knobs, or `BranchProfile`. Do not revive that plumbing.
 
 Basic-block reordering (COI-129) and jump threading also happen in HIR lowering: the cold-exit layout above covers the `else` arm and a pair `match`'s returning last arm, and an `if` / `else` ending a loop body jumps straight to the back edge. The stack-IL `block_reordering` and `jump_thread` passes were removed 2026-10.
+
+### Environment knobs
+
+A few switches no level sets are on by default and turned off by an
+environment variable, for bisecting a miscompile or measuring one pass.
+Each is an `OptimizeOptions` field: `OptLevel::options` reads the
+variable once when it builds the options (`env_knobs` in
+[`opt_level.rs`](../../compiler/src/il/opt/opt_level.rs)), the passes read
+the field, and `Compiler::set_opt_level` keeps the field's value across a
+level change. `0` / `false` / `off` / `no` turn a switch off; anything
+else, or unset, leaves it on.
+
+| Variable | Field | Off means |
+|----------|-------|-----------|
+| `COIL_HIR_INLINE` | `hir_inline` | no typed inlining (`Pipeline::set_hir_inline` overrides) |
+| `COIL_HIR_INLINE_PAIR` | `hir_inline_pair` | callees returning a two-word `Option` / `Result` / enum stay calls |
+| `COIL_HIR_INLINE_HEAP` | `hir_inline_heap` | callees with heap locals stay calls |
+| `COIL_HIR_INLINE_LOOPS` | `hir_inline_loops` | callees with loops stay calls |
+| `COIL_HIR_SPECIALIZE` | `hir_inline_specialize` | a too-big callee is not retried with its constant arguments bound |
+| `COIL_HIR_INLINE_MONO` | `hir_inline_mono` | mono clone callees stay calls |
+| `COIL_HIR_MATCH_TREE` | `hir_match_tree` | nested matches test each row in order, not by outer tag |
+| `COIL_HIR_PAIR_LOCALS` | `hir_pair_locals` | an enum local built in place is boxed, not two slots |
+| `COIL_MIR_SCCP` | `mir_sccp` | no MIR SCCP (the other `mir_fold` passes still run) |
+| `COIL_AUTO_PAR` | `auto_par` | no automatic fork-join (`Pipeline::set_auto_par(false)` too) |
+| `COIL_HIR_BISECT=N` | `hir_bisect` | (a number, unset by default) only the first `N` bodies HIR lowering admits in the process lower; the `N`th is named on stderr |
+
+`COIL_CALL_FOLD=0` turns compile-time call folding off through
+`Pipeline::call_fold` instead (see `call_fold`). `COIL_HIR_WHY`,
+`COIL_HIR_MIR_WHY` and `COIL_HIR_INLINE_WHY` only print why a body or
+call was refused; they change no code.
 
 Iterative optimization (COI-130) was removed: re-running the pipeline miscompiled loop tests (LICM is not idempotent) and no opt level enabled it. The pipeline runs once.
 

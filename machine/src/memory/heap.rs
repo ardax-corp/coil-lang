@@ -95,6 +95,96 @@ impl Drop for EpochBatchStash {
     }
 }
 
+// Shared-heap epoch write guard (debug / gc-stress only, #1892): see
+// `docs/internals/shared-heap-guard.md`.
+#[cfg(any(debug_assertions, feature = "gc-stress"))]
+thread_local! {
+    /// Generation of the steal epoch whose shared-heap job this thread is
+    /// running, or 0 when it runs none. While non-zero, every
+    /// [`GcData::as_mut`] on this thread must target an object allocated in
+    /// that epoch.
+    static EPOCH_WRITE_GEN: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+/// While alive, this thread runs one reactor job: a shared-heap job may then
+/// write only objects allocated in its epoch, an isolate job anything in its
+/// own heap. Dropping it restores the enclosing job's rule (a join that
+/// help-steals nests jobs on one thread). Zero-sized and a no-op unless
+/// `debug_assertions` or the `gc-stress` feature is on.
+#[must_use]
+pub struct EpochWriteScope {
+    #[cfg(any(debug_assertions, feature = "gc-stress"))]
+    prev: u8,
+}
+
+impl EpochWriteScope {
+    /// Enter a job on `heap` (the heap the job's VM is bound to): a
+    /// shared-heap job of `heap`'s open epoch when `shared`, otherwise a job
+    /// that may write anything ([`Self::unchecked`]).
+    #[cfg(any(debug_assertions, feature = "gc-stress"))]
+    #[inline]
+    pub fn enter(heap: &Heap, shared: bool) -> Self {
+        Self::set(if shared { heap.epoch_gen } else { 0 })
+    }
+
+    /// Lift the guard until dropped: a join that help-steals runs the stolen
+    /// job (and the reset of its helper VM's own heap) on this thread.
+    #[cfg(any(debug_assertions, feature = "gc-stress"))]
+    #[inline]
+    pub fn unchecked() -> Self {
+        Self::set(0)
+    }
+
+    #[cfg(any(debug_assertions, feature = "gc-stress"))]
+    fn set(generation: u8) -> Self {
+        Self {
+            prev: EPOCH_WRITE_GEN.with(|g| g.replace(generation)),
+        }
+    }
+
+    /// Release build: no guard.
+    #[cfg(not(any(debug_assertions, feature = "gc-stress")))]
+    #[inline(always)]
+    pub fn enter(_heap: &Heap, _shared: bool) -> Self {
+        Self {}
+    }
+
+    /// Release build: no guard.
+    #[cfg(not(any(debug_assertions, feature = "gc-stress")))]
+    #[inline(always)]
+    pub fn unchecked() -> Self {
+        Self {}
+    }
+}
+
+#[cfg(any(debug_assertions, feature = "gc-stress"))]
+impl Drop for EpochWriteScope {
+    fn drop(&mut self) {
+        let _ = EPOCH_WRITE_GEN.try_with(|g| g.set(self.prev));
+    }
+}
+
+/// A shared-heap job wrote an object that was not allocated in its epoch:
+/// the compiler's purity / disjointness proof was wrong. A worker's Rust
+/// panic is caught and turned into a failed join (the arm reruns
+/// sequentially), which would hide this, so outside the crate's own unit
+/// tests the process aborts.
+#[cfg(any(debug_assertions, feature = "gc-stress"))]
+#[cold]
+#[inline(never)]
+fn epoch_write_violation(addr: u64, object_gen: u8, epoch_gen: u8) -> ! {
+    let msg = format!(
+        "shared-heap epoch guard: a worker wrote object {addr:#x} that is not \
+         from its epoch (object epoch {object_gen}, job epoch {epoch_gen}); \
+         see docs/internals/shared-heap-guard.md (#1892)"
+    );
+    if cfg!(test) {
+        panic!("{msg}");
+    }
+    eprintln!("{msg}");
+    std::process::abort()
+}
+
 /// Collector phase. `Idle` means the last cycle finished.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GcPhase {
@@ -150,6 +240,11 @@ pub struct Heap {
     /// `alloc_bytes` past which a steal epoch aborts (see
     /// [`EPOCH_GC_HEADROOM_FACTOR`]); only meaningful while `epoch_stw`.
     epoch_gc_ceiling: usize,
+    /// Debug / gc-stress: generation of the current (or last) steal epoch,
+    /// never 0 once an epoch opened; stamped on objects allocated in it
+    /// ([`EpochWriteScope`]).
+    #[cfg(any(debug_assertions, feature = "gc-stress"))]
+    epoch_gen: u8,
 }
 
 /// Machine-owned heap that can borrow the root Heap for a C1 steal job.
@@ -185,6 +280,8 @@ impl Default for Heap {
             epoch_stw: false,
             epoch_gc_ceiling: 0,
             alloc_lock: ptr::null(),
+            #[cfg(any(debug_assertions, feature = "gc-stress"))]
+            epoch_gen: 0,
         }
     }
 }
@@ -288,6 +385,11 @@ impl Heap {
             .saturating_mul(EPOCH_GC_HEADROOM_FACTOR)
             .max(self.alloc_bytes.saturating_add(EPOCH_GC_HEADROOM_MIN));
         self.alloc_lock = lock as *const Mutex<()>;
+        #[cfg(any(debug_assertions, feature = "gc-stress"))]
+        {
+            // Skip 0, which marks objects allocated outside any epoch.
+            self.epoch_gen = self.epoch_gen.wrapping_add(1).max(1);
+        }
     }
 
     pub fn exit_epoch_stw(&mut self) {
@@ -342,6 +444,8 @@ impl Heap {
             slots.pop().expect("epoch batch refill")
         });
         let (object, content) = Self::init_slot(slot.cast::<GcData<T>>(), data, map);
+        #[cfg(any(debug_assertions, feature = "gc-stress"))]
+        content.header.epoch.set(self.epoch_gen);
         EPOCH_BATCH_TLS.with(|cell| {
             let mut batch = cell.borrow_mut();
             batch.bytes += object.size();
@@ -3351,6 +3455,12 @@ struct GcHeader {
     marked: Cell<bool>,
     /// Allocated while a sweep was running; that sweep skips it once.
     fresh: Cell<bool>,
+    /// Debug / gc-stress: generation of the steal epoch the object was
+    /// allocated in, 0 outside any epoch ([`EpochWriteScope`]). It takes a
+    /// byte of what is header padding before an 8-aligned payload; release
+    /// builds do not have it.
+    #[cfg(any(debug_assertions, feature = "gc-stress"))]
+    epoch: Cell<u8>,
 }
 
 #[repr(C)]
@@ -3365,6 +3475,8 @@ impl GcHeader {
             kind: Cell::new(0),
             marked: Cell::new(false),
             fresh: Cell::new(false),
+            #[cfg(any(debug_assertions, feature = "gc-stress"))]
+            epoch: Cell::new(0),
         }
     }
 }
@@ -3410,7 +3522,28 @@ impl<T> AsRef<T> for GcData<T> {
 
 impl<T> AsMut<T> for GcData<T> {
     fn as_mut(&mut self) -> &mut T {
+        #[cfg(any(debug_assertions, feature = "gc-stress"))]
+        self.check_epoch_write();
         &mut self.data
+    }
+}
+
+#[cfg(any(debug_assertions, feature = "gc-stress"))]
+impl<T> GcData<T> {
+    /// Inside a shared-heap job, a payload write must target an object
+    /// allocated in that job's epoch ([`EpochWriteScope`]). Every VM
+    /// payload write reaches the object through [`AsMut::as_mut`] (directly
+    /// or via [`Gc::payload_mut`]), so this one check covers field stores,
+    /// index stores, pushes, `may_hold_refs` and resize bookkeeping.
+    #[inline]
+    fn check_epoch_write(&self) {
+        let job = EPOCH_WRITE_GEN.try_with(std::cell::Cell::get).unwrap_or(0);
+        if job != 0 {
+            let own = self.header.epoch.get();
+            if own != job {
+                epoch_write_violation(self as *const Self as u64, own, job);
+            }
+        }
     }
 }
 
@@ -4785,6 +4918,47 @@ mod tests {
         let next = heap.alloc(ObjString::from("p"), Object::String).0.addr();
         assert_eq!(next - addrs[0], next_plain - plain_addrs[0]);
         assert_eq!(heap.live_object_count(), 4);
+    }
+
+    /// The shared-heap write guard (#1892) lets a job write what it
+    /// allocated in its epoch, and lets an unchecked scope (a help-stolen
+    /// job) write anything.
+    #[cfg(any(debug_assertions, feature = "gc-stress"))]
+    #[test]
+    fn epoch_write_guard_allows_epoch_objects() {
+        let lock = Mutex::new(());
+        let mut heap = Heap::default();
+        let (_, mut old) = heap.alloc(ObjArray::new(vec![Value::from(0_i64)]), Object::Array);
+        heap.enter_epoch_stw(&lock);
+        {
+            let _scope = EpochWriteScope::enter(&heap, true);
+            let (_, mut fresh) = heap.alloc(ObjArray::with_capacity(4), Object::Array);
+            fresh.as_mut().push(Value::from(1_i64));
+            heap.account_array(fresh.as_mut());
+            {
+                let _help = EpochWriteScope::unchecked();
+                old.as_mut().set(0, Value::from(2_i64));
+            }
+        }
+        heap.flush_epoch_batch();
+        heap.exit_epoch_stw();
+        // Outside any job the guard is off.
+        old.as_mut().set(0, Value::from(3_i64));
+        assert_eq!(old.as_ref().get(0), Some(Value::from(3_i64)));
+    }
+
+    /// A shared-heap job that writes an object from before its epoch (a
+    /// wrong purity proof) is caught.
+    #[cfg(any(debug_assertions, feature = "gc-stress"))]
+    #[test]
+    #[should_panic(expected = "shared-heap epoch guard")]
+    fn epoch_write_guard_rejects_pre_epoch_object() {
+        let lock = Mutex::new(());
+        let mut heap = Heap::default();
+        let (_, mut old) = heap.alloc(ObjArray::new(vec![Value::from(0_i64)]), Object::Array);
+        heap.enter_epoch_stw(&lock);
+        let _scope = EpochWriteScope::enter(&heap, true);
+        old.as_mut().set(0, Value::from(1_i64));
     }
 
     /// Allocs between sweep quanta prepend to `head`; freeing the old dead

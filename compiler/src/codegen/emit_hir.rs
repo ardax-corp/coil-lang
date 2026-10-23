@@ -531,7 +531,7 @@ impl Compiler {
             o.ty = ty(&l.ty);
         }
         out.ret = ty(&body.ret);
-        let out = match inline::inlinable(&out, usize::MAX) {
+        let out = match inline::inlinable(&out, usize::MAX, self.opt_options.hir_inline_loops) {
             Err("return") => inline::single_exit(&out)?,
             _ => out,
         };
@@ -598,7 +598,7 @@ impl Compiler {
         let scalar = |ty: &Option<Ty>| {
             ty.as_ref().is_some_and(|t| {
                 matches!(lower::classify(&self.checker, t), Some(ValueClass::Scalar | ValueClass::Unit))
-                    || self.hir_inline_pair && immediate_pair(&crate::layout::of(&self.checker, t))
+                    || self.opt_options.hir_inline_pair && immediate_pair(&crate::layout::of(&self.checker, t))
             })
         };
         if lambda.exprs.iter().any(|e| matches!(e.kind, HirKind::Lambda { .. })) {
@@ -608,14 +608,14 @@ impl Compiler {
             return Err("weak".to_string());
         }
         let heap: Vec<LocalId> = (0..lambda.locals.len() as u32).map(LocalId).filter(|&l| !scalar(&lambda.local(l).ty)).collect();
-        if !heap.is_empty() && !self.hir_inline_heap {
+        if !heap.is_empty() && !self.opt_options.hir_inline_heap {
             return Err("heap local".to_string());
         }
         let inert = self.hir_loop_inert(lambda, &heap);
         if lambda.exprs.iter().any(|e| matches!(e.kind, HirKind::Loop { .. } | HirKind::ForIn { .. })) {
             return Err("lambda loop".to_string());
         }
-        Ok(crate::hir::inline::inlinable(lambda, budget)?
+        Ok(crate::hir::inline::inlinable(lambda, budget, self.opt_options.hir_inline_loops)?
             .with_heap_result(!scalar(&hir.expr(call).ty))
             .with_heap_locals(heap)
             .with_loop_inert(inert))
@@ -741,7 +741,7 @@ impl Compiler {
                 e.layout = crate::layout::of(&self.checker, t);
             }
         }
-        match crate::hir::inline::inlinable(&inst, usize::MAX) {
+        match crate::hir::inline::inlinable(&inst, usize::MAX, self.opt_options.hir_inline_loops) {
             Err("return") => crate::hir::inline::single_exit(&inst),
             _ => Some(inst),
         }
@@ -1040,7 +1040,7 @@ impl Compiler {
         {
             self.hir_portable.insert(key, portable);
         }
-        let plan = plan.and_then(|emit| hir_bisect(&hir.name).then_some(emit).ok_or("bisect"));
+        let plan = plan.and_then(|emit| hir_bisect(&hir.name, self.opt_options.hir_bisect).then_some(emit).ok_or("bisect"));
         let lowered = match plan {
             Ok(mut emit) => {
                 if let Some(root) = hir.root {
@@ -1943,7 +1943,7 @@ impl Compiler {
             }),
             word_kind: Box::new(move |t: &Ty| crate::layout::word_kind(checker, t)),
             array_stamp: Box::new(move |t: &Ty| crate::layout::array_elem_stamp(checker, t)),
-            match_tree: self.hir_match_tree,
+            match_tree: self.opt_options.hir_match_tree,
             payload_names: Box::new(move |enum_name: &str, variant: &str| {
                 checker.payload_tys_for(enum_name, variant).into_iter().map(|(name, _)| name).collect()
             }),
@@ -2145,7 +2145,7 @@ impl Compiler {
     /// or method.
     fn hir_inline_on(&self, hir: &HirBody) -> bool {
         use crate::hir::BodyKind;
-        self.hir_inline
+        self.opt_options.hir_inline
             && !self.debugger_attached
             && self.inline_cost.max_inline_cost > 0
             && self.keep_fns_in.is_none()
@@ -2182,7 +2182,7 @@ impl Compiler {
                 Some(_) => module.instance_fns.get(&call.key).copied(),
                 None => self.hir_fn_body(&call.key),
             })
-            .filter(|&index| inline::inlinable(&module.bodies[index], budget).err() == Some("return"))
+            .filter(|&index| inline::inlinable(&module.bodies[index], budget, self.opt_options.hir_inline_loops).err() == Some("return"))
             .filter_map(|index| Some((index, inline::single_exit(&module.bodies[index])?)))
             .collect();
         // Mono clone callees, as their generic body at the call's types.
@@ -2190,12 +2190,12 @@ impl Compiler {
             .plan
             .calls
             .iter()
-            .filter(|_| self.hir_inline_mono)
+            .filter(|_| self.opt_options.hir_inline_mono)
             .filter_map(|(&id, call)| {
                 let (name, map) = call.mono_of.as_deref()?;
                 let index = self.hir_fn_names.get(name.as_str()).copied().flatten()?;
                 let inst = self.hir_inline_instance(&module.bodies[index], map)?;
-                match inline::inlinable(&inst, budget) {
+                match inline::inlinable(&inst, budget, self.opt_options.hir_inline_loops) {
                     Err("return") => inline::single_exit(&inst).map(|b| (id, b)),
                     _ => Some((id, inst)),
                 }
@@ -2219,7 +2219,7 @@ impl Compiler {
             .plan
             .calls
             .iter()
-            .filter(|_| self.hir_inline_specialize)
+            .filter(|_| self.opt_options.hir_inline_specialize)
             .filter(|(_, call)| call.instance.is_none() && call.mono_of.is_none() && call.generic.is_none() && call.builtin.is_none())
             .filter_map(|(&id, call)| {
                 let HirKind::Call { args, .. } = &hir.expr(HirId(id)).kind else {
@@ -2244,7 +2244,7 @@ impl Compiler {
                     return None;
                 }
                 let base = folded.get(&index).unwrap_or(callee);
-                if inline::inlinable(base, budget).is_ok_and(|s| !s.looping()) {
+                if inline::inlinable(base, budget, self.opt_options.hir_inline_loops).is_ok_and(|s| !s.looping()) {
                     return None;
                 }
                 let bound = inline::bind_params(callee, &consts)?;
@@ -2254,10 +2254,10 @@ impl Compiler {
                     spec = f;
                 }
                 inline::blank_unreachable(&mut spec);
-                if inline::inlinable(&spec, budget).err() == Some("return") {
+                if inline::inlinable(&spec, budget, self.opt_options.hir_inline_loops).err() == Some("return") {
                     spec = inline::single_exit(&spec)?;
                 }
-                inline::inlinable(&spec, budget).is_ok_and(|s| !s.looping()).then_some((id, spec))
+                inline::inlinable(&spec, budget, self.opt_options.hir_inline_loops).is_ok_and(|s| !s.looping()).then_some((id, spec))
             })
             .collect();
         // Calls of a local bound once to a lambda that captures nothing
@@ -2294,12 +2294,12 @@ impl Compiler {
             let core = core_insts.get(&id.0);
             let kind = [
                 (call.builtin.is_some(), "builtin"),
-                (call.pair.is_some() && !self.hir_inline_pair, "pair"),
+                (call.pair.is_some() && !self.opt_options.hir_inline_pair, "pair"),
                 (call.mono && !instances.contains_key(&id.0), "mono"),
                 (call.generic.is_some(), "generic"),
                 (call.instance.as_ref().is_some_and(|i| i.args.iter().any(Self::ty_has_var)), "instance"),
                 (!call.own_dicts.is_empty(), "own-bounds"),
-                (!call.ranges.is_empty() && !self.hir_inline_pair, "ranges"),
+                (!call.ranges.is_empty() && !self.opt_options.hir_inline_pair, "ranges"),
                 (self.coroutine_fns.contains(&call.key), "coroutine"),
                 // An auto-parallel callee's call runs its split worker.
                 (self.par_shapes.contains_key(Self::par_shape_key(&call.key)), "par"),
@@ -2347,7 +2347,7 @@ impl Compiler {
                         if size > self.inline_cost.max_cross_module_inline_cost {
                             return Err("cost".to_string());
                         }
-                        let shape = inline::inlinable(callee, budget)?.with_foreign(true);
+                        let shape = inline::inlinable(callee, budget, self.opt_options.hir_inline_loops)?.with_foreign(true);
                         return Ok((callee, shape));
                     }
                     let index = self.hir_fn_body(&call.key).ok_or("ambiguous")?;
@@ -2361,12 +2361,12 @@ impl Compiler {
                 b.locals.iter().any(|l| l.ty.as_ref().is_none_or(|t| Self::ty_has_var(&apply_ty_prune(self.checker.subst(), t))))
             };
             if callee.name == hir.name
-                || callee.result_mode && !self.hir_inline_pair
+                || callee.result_mode && !self.opt_options.hir_inline_pair
                 || if call.instance.is_some() { shared(callee) } else { callee.name.contains(" for ") }
                 || core.is_none() && home(callee) != here
                 || !matches!(callee.ret_layout, crate::layout::Layout::Word)
                     && !callee.ret_layout.is_niche()
-                    && !(self.hir_inline_pair && immediate_pair(&callee.ret_layout))
+                    && !(self.opt_options.hir_inline_pair && immediate_pair(&callee.ret_layout))
             {
                 return Err(format!("callee `{}`", callee.name));
             }
@@ -2455,7 +2455,7 @@ impl Compiler {
                     matches!(
                         lower::classify(&self.checker, t),
                         Some(ValueClass::Scalar | ValueClass::Unit)
-                    ) || self.hir_inline_pair && immediate_pair(&crate::layout::of(&self.checker, t))
+                    ) || self.opt_options.hir_inline_pair && immediate_pair(&crate::layout::of(&self.checker, t))
                 })
             };
             let HirKind::Call { args, .. } = &hir.expr(id).kind else {
@@ -2468,7 +2468,7 @@ impl Compiler {
                     continue;
                 }
                 heap.push(local);
-                if self.hir_inline_heap {
+                if self.opt_options.hir_inline_heap {
                     continue;
                 }
                 let bound = match callee.params.iter().position(|&p| p == local) {
@@ -2483,7 +2483,7 @@ impl Compiler {
                 }
             }
             let inert = self.hir_loop_inert(callee, &heap);
-            let shape = inline::inlinable(callee, budget)?
+            let shape = inline::inlinable(callee, budget, self.opt_options.hir_inline_loops)?
                 .with_heap_result(!scalar(&hir.expr(id).ty))
                 .with_heap_locals(heap)
                 .with_loop_inert(inert)
@@ -6769,7 +6769,7 @@ impl Compiler {
     /// other such locals. It then lives in two slots, as a two-word call's
     /// result does, and a `match` on it reads the tag slot.
     fn hir_pair_init(&self, hir: &HirBody, emit: &HirEmit, local: LocalId, init: HirId) -> Option<PairKind> {
-        if !self.hir_pair_locals {
+        if !self.opt_options.hir_pair_locals {
             return None;
         }
         let ty = hir.local(local).ty.as_ref()?;
@@ -9513,12 +9513,13 @@ impl Compiler {
     }
 }
 
-/// `COIL_HIR_BISECT=N` lowers only the first `N` bodies the plan admits
-/// (per process) and names the `N`th on stderr, to bisect a miscompile.
-fn hir_bisect(name: &str) -> bool {
+/// `limit` (`COIL_HIR_BISECT=N`, [`crate::il::opt::OptimizeOptions::hir_bisect`])
+/// lowers only the first `N` bodies the plan admits (per process) and names
+/// the `N`th on stderr, to bisect a miscompile.
+fn hir_bisect(name: &str, limit: Option<usize>) -> bool {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static SEEN: AtomicUsize = AtomicUsize::new(0);
-    let Some(limit) = std::env::var("COIL_HIR_BISECT").ok().and_then(|v| v.parse::<usize>().ok()) else {
+    let Some(limit) = limit else {
         return true;
     };
     let n = SEEN.fetch_add(1, Ordering::Relaxed) + 1;
