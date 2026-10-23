@@ -12942,7 +12942,11 @@ impl Checker {
         };
         let mut out = Vec::new();
         for ((owner_var, assoc, _), (pvar, args)) in &self.open_assoc_projections {
-            if !scheme.assoc_projections.iter().any(|p| rep(p.var) == rep(*pvar)) {
+            // A projection the body alone names (`it.next()`'s `I::Item`,
+            // #1940) is not in the signature's list; its owner being one of
+            // the clone's own parameters places it.
+            let owned = scheme.assoc_projections.iter().any(|p| rep(p.var) == rep(*pvar)) || vars.contains_key(owner_var);
+            if !owned {
                 continue;
             }
             let Some(owner_ty) = vars.get(owner_var).or_else(|| vars.get(&rep(*owner_var))) else {

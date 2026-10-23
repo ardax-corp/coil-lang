@@ -5058,13 +5058,22 @@ impl Compiler {
             instance.args.clone()
         };
         let fqn = instance.method_fqns.get(method).cloned().ok_or("callee-trait")?;
-        if !(self.functions.contains_key(&fqn) || self.fn_entry_labels.contains_key(&fqn))
-            || self.two_word_return_kind(&fqn).is_some()
-        {
+        if !(self.functions.contains_key(&fqn) || self.fn_entry_labels.contains_key(&fqn)) {
             return Err("callee-trait");
         }
+        // A pair return comes back as its two words (#1940).
+        let pair = self.two_word_return_kind(&fqn);
         let is_default = Self::is_default_method_fqn(&instance.class, method, &fqn);
-        let sig = self.trait_method_boundary_sig(&instance.class, method, &lookup, is_default);
+        let mut sig = self.trait_method_boundary_sig(&instance.class, method, &lookup, is_default);
+        // The trait spells the result through its own projection
+        // (`Option<Self::Item>`), open in the boundary signature and so read
+        // boxed; the instance entry returns at its own closed type (#1940).
+        if !is_default
+            && let Some(s) = sig.as_mut().filter(|s| s.ret.is_some())
+            && let Some(own) = self.checker.fn_return_ty(&fqn).filter(crate::layout::ty_is_closed)
+        {
+            s.ret = Some(self.value_layout(&own));
+        }
         let (params, ret) = self.hir_ground_words(hir, call, args, &fqn, sig.as_ref())?;
         let own_dicts = self.hir_own_dicts(hir, call, &instance.class, method, args, 1)?;
         let unbox = self
@@ -5075,7 +5084,7 @@ impl Compiler {
             .collect();
         Ok(HirCall {
             key: fqn,
-            pair: None,
+            pair,
             params,
             ret,
             method: true,
