@@ -88,7 +88,9 @@ pub enum ForInKind {
     /// User `IntoIterator`: `into_iter` then a counted builtin `IntoIter`
     /// (array / tuple / numeric range) or `Iterator::next` → `Option<Item>`.
     Custom {
-        into_iter_fqn: String,
+        /// `None` for an `Iterator` that is not `IntoIterator`: the loop
+        /// calls `next` on the iterable itself.
+        into_iter_fqn: Option<String>,
         /// `None` when [`Self::Custom::counted`] desugars `IntoIter`.
         next_fqn: Option<String>,
         counted: Option<ForInCounted>,
