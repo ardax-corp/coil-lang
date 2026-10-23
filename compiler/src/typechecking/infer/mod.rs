@@ -552,6 +552,15 @@ pub struct Checker {
     /// its body never resolves (#1845).
     open_operands: Vec<(Ty, &'static str, Range<usize>)>,
 
+    /// Empty `[]` call arguments, typed by the parameter they meet rather
+    /// than an expected type: the enclosing function rejects any that do
+    /// not resolve to a `Vec<T>` or `[T; 0]` (#1876).
+    open_empty_arrays: Vec<(Ty, Range<usize>)>,
+
+    /// Set by `infer_call_arg` for an empty `[]` argument, taken by
+    /// `infer_array_literal`.
+    defer_empty_array: bool,
+
     /// Array literals whose elements are different types, waiting for the
     /// element type to resolve: a trait object packs each element (#1853),
     /// anything else is the element mismatch.

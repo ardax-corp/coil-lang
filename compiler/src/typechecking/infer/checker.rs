@@ -220,6 +220,8 @@ impl Checker {
             bare_cases_by_module: HashMap::new(),
             pending_exhaustive: Vec::new(),
             open_operands: Vec::new(),
+            open_empty_arrays: Vec::new(),
+            defer_empty_array: false,
             mixed_literals: Vec::new(),
             fn_body_depth: 0,
             weak_checks: Default::default(),
@@ -3111,7 +3113,15 @@ impl Checker {
                         range,
                     );
                 };
+                // The fallback has the payload's type: `args() ?? []` (#1876).
+                let known = apply_ty_prune(&self.subst, &payload);
+                let prev_expected = if matches!(known, Ty::Var(_)) {
+                    self.current_expected.clone()
+                } else {
+                    self.current_expected.replace(known)
+                };
                 let rhs_ty = self.infer(rhs);
+                self.current_expected = prev_expected;
                 self.unify(&payload, &rhs_ty, &rhs.0.into_range(), "coalesce rhs");
                 payload
             }
@@ -4494,6 +4504,7 @@ impl Checker {
 
     #[inline(never)]
     fn infer_array_literal(&mut self, items: &[Output], range: Range<usize>) -> Ty {
+        let deferred = std::mem::take(&mut self.defer_empty_array);
         let expected_elem = self.expected_here.clone().and_then(|exp| {
             let exp = apply_ty_prune(&self.subst, &exp);
             if let Ty::Array { element, .. } = &exp {
@@ -4620,6 +4631,13 @@ impl Checker {
                         ArrayLength::Dynamic => {}
                     }
                 }
+            }
+            // A call argument takes its parameter's type once the call
+            // unifies; `check_open_empty_arrays` rejects anything else.
+            if deferred {
+                let ty = Ty::Var(self.counter.fresh());
+                self.open_empty_arrays.push((ty.clone(), range));
+                return ty;
             }
             return self.error_with_help(
                 ErrorCode::GenericTypeError,
@@ -7068,6 +7086,30 @@ impl Checker {
                     "annotate the value (`let n: int = …;`), or give the channel or thread handle it comes from its type (`Receiver<int>`)"
                         .to_string(),
                 ),
+            );
+        }
+    }
+
+    /// E0119 for each empty `[]` argument noted since `mark` whose
+    /// parameter did not make it a `Vec<T>` or `[T; 0]` (#1876).
+    pub(super) fn check_open_empty_arrays(&mut self, mark: usize) {
+        let open: Vec<_> = self.open_empty_arrays.drain(mark..).collect();
+        for (ty, range) in open {
+            let ty = apply_ty_prune(&self.subst, &ty);
+            let ok = vec_element_ty(&ty).is_some()
+                || matches!(&ty, Ty::Array { length: ArrayLength::Static(0), .. });
+            if ok {
+                continue;
+            }
+            let message = match &ty {
+                Ty::Var(_) => "empty array literal `[]` requires a type annotation".to_string(),
+                other => format!("empty array literal `[]` cannot be `{}`", self.diag_ty(other)),
+            };
+            self.error_with_help(
+                ErrorCode::GenericTypeError,
+                message,
+                range,
+                Some("annotate as `Vec<T>` (growable) or `[T; 0]` (fixed empty array)".to_string()),
             );
         }
     }
@@ -14187,11 +14229,13 @@ impl Checker {
 
         self.push_scope();
         let (open_mark, mixed_mark) = (self.open_operands.len(), self.mixed_literals.len());
+        let empty_mark = self.open_empty_arrays.len();
         self.fn_body_depth += 1;
         let _ = self.infer(body);
         self.fn_body_depth -= 1;
         self.check_mixed_literals(mixed_mark);
         self.check_open_operands(open_mark);
+        self.check_open_empty_arrays(empty_mark);
         self.pop_scope();
         self.in_test_case = prev_in_test;
 
@@ -14827,7 +14871,10 @@ impl Checker {
                 return ty;
             }
         let prev_expected = self.current_expected.take();
+        self.defer_empty_array = self.fn_body_depth > 0
+            && matches!(arg.1.as_ref(), Expression::Array(items) if items.is_empty());
         let ty = self.infer(arg);
+        self.defer_empty_array = false;
         self.current_expected = prev_expected;
         ty
     }
