@@ -807,11 +807,14 @@ impl Compiler {
         };
         let ok = self.mono_var_tys.last().is_some_and(|map| {
             let inst = self.hir_instance(&module.bodies[index], map);
-            match self.hir_call_shapes(&inst) {
-                Ok(Some(shaped)) => self.plan_hir_body(&shaped).is_ok(),
-                Ok(None) => self.plan_hir_body(&inst).is_ok(),
-                Err(_) => false,
-            }
+            let r = match self.hir_call_shapes(&inst) {
+                Ok(Some(shaped)) => self.plan_hir_body(&shaped).map(|_| ()),
+                Ok(None) => self.plan_hir_body(&inst).map(|_| ()),
+                Err(e) => Err(e),
+            };
+            // Only its calls are probed: the clone's frame (its parameters'
+            // slots) is not set up yet, so a frame refusal says nothing.
+            !r.is_err_and(|why| why.starts_with("callee"))
         });
         self.hir_module = Some(module);
         ok
