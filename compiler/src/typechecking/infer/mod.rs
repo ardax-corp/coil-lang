@@ -545,6 +545,11 @@ pub struct Checker {
     /// Match exhaustiveness checks deferred until substitution is closed.
     pending_exhaustive: Vec<PendingExhaustive>,
 
+    /// Arithmetic operands whose type was still open at the operator, with
+    /// the operator and its span: the enclosing function rejects any that
+    /// its body never resolves (#1845).
+    open_operands: Vec<(Ty, &'static str, Range<usize>)>,
+
     /// `gc::weak` arguments and generic instantiations, checked once
     /// substitution is closed: a readonly class instance may not be
     /// weakened, directly (#1644) or through a type parameter (#1670).

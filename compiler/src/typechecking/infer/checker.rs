@@ -219,6 +219,7 @@ impl Checker {
             bare_patterns_by_span: HashMap::new(),
             bare_cases_by_module: HashMap::new(),
             pending_exhaustive: Vec::new(),
+            open_operands: Vec::new(),
             weak_checks: Default::default(),
             async_functions: std::collections::HashSet::new(),
             async_depth: 0,
@@ -6964,8 +6965,46 @@ impl Checker {
         }
         if let Ty::Var(v) = pruned {
             self.bind_arith_operator(v, op, id, &range);
+            self.note_open_operand(v, &result, op, &range);
         }
         result
+    }
+
+    /// Remember an operand type that is neither known nor a type parameter
+    /// at its operator; [`Self::check_open_operands`] rejects it if nothing
+    /// in the function resolves it later (#1845).
+    fn note_open_operand(&mut self, v: TyVarId, ty: &Ty, op: &str, range: &Range<usize>) {
+        let bound = Generics::operator_trait(op).is_some_and(|(class, _)| self.user_dict_index(v, class).is_some());
+        if bound || self.is_type_param_var(v) {
+            return;
+        }
+        let Some(op) = ["+", "-", "*", "/", "%", "**", "&", "|", "^", "<<", ">>"].into_iter().find(|o| *o == op) else {
+            return;
+        };
+        self.open_operands.push((ty.clone(), op, range.clone()));
+    }
+
+    /// E0119 for each operand noted since `mark` whose type the function
+    /// body never resolved: code generation has no operator to call.
+    pub(super) fn check_open_operands(&mut self, mark: usize) {
+        let open: Vec<_> = self.open_operands.drain(mark..).collect();
+        for (ty, op, range) in open {
+            let Ty::Var(v) = apply_ty_prune(&self.subst, &ty) else {
+                continue;
+            };
+            if self.is_type_param_var(v) {
+                continue;
+            }
+            self.error_with_help(
+                ErrorCode::GenericTypeError,
+                format!("the operands of `{op}` have no known type"),
+                range,
+                Some(
+                    "annotate the value (`let n: int = …;`), or give the channel or thread handle it comes from its type (`Receiver<int>`)"
+                        .to_string(),
+                ),
+            );
+        }
     }
 
     /// `x << n` / `x >> n`: the count is an `int` whatever `x` is (#883),

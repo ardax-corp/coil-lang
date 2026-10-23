@@ -634,8 +634,10 @@ impl Checker {
         } else {
             None
         };
+        let open_mark = self.open_operands.len();
         let _ = self.infer(body);
         self.infer_contracts(contracts, &arg_tys, &ret_ty, is_coro);
+        self.check_open_operands(open_mark);
         if method_owner.is_none() {
             self.current_function = prev_function;
         }
