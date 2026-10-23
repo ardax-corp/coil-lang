@@ -210,6 +210,10 @@ pub struct Checker {
     /// Local name -> FQN of every `use` in the current file. A second `use`
     /// binding the same local to another item is an error (#1354).
     import_locals: HashMap<String, String>,
+    /// Local name -> enum key of every `use` of another module's enum, bound
+    /// before enums are registered so a payload type that names one resolves
+    /// to it (#1947).
+    imported_enum_keys: HashMap<String, String>,
     /// Local names bound by disk-module `use` (e.g. `io::sync::write_all`).
     /// Like virtual imports and module-visible named `fn`s, these are
     /// file-level globals — not lambda/defer captures — and must be rebound

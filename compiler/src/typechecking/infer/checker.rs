@@ -111,6 +111,7 @@ impl Checker {
             unresolved_imports: HashMap::new(),
             module_item_names: HashMap::new(),
             import_locals: HashMap::new(),
+            imported_enum_keys: HashMap::new(),
             def_interner,
             schemes_by_def: HashMap::new(),
             local_defs: HashMap::new(),
@@ -1670,6 +1671,7 @@ impl Checker {
         self.disk_imports.clear();
         self.unresolved_imports.clear();
         self.import_locals.clear();
+        self.imported_enum_keys.clear();
         self.local_defs.clear();
         self.def_ids_by_node.clear();
         self.in_bounds_index.clear();
@@ -15954,7 +15956,8 @@ impl Checker {
     }
 
     /// Bind `use m::{Alias}` to another module's type alias, as the qualified
-    /// `m::Alias` resolves (`qualified_type_aliases`).
+    /// `m::Alias` resolves (`qualified_type_aliases`), and `use m::{E}` to
+    /// another module's enum (`imported_enum_keys`, #1947).
     fn import_type_aliases(&mut self, node: &Output) {
         match node.1.as_ref() {
             Expression::Statement(inner)
@@ -15976,6 +15979,8 @@ impl Checker {
                     self.type_aliases[0].insert(local, ty);
                 } else if let Some(def) = self.qualified_generic_aliases.get(&fqn).cloned() {
                     self.generic_aliases.insert(local, def);
+                } else if self.enum_tags.contains_key(&fqn) {
+                    self.imported_enum_keys.insert(local, fqn);
                 }
             }
             _ => {}
@@ -19566,6 +19571,11 @@ impl Checker {
         let qualified = self.qualify_module_name(name);
         if self.enum_tags.contains_key(&qualified) {
             return Some(qualified);
+        }
+        if let Some(key) = self.imported_enum_keys.get(name)
+            && self.enum_tags.contains_key(key)
+        {
+            return Some(key.clone());
         }
         if let Some(builtin) = self.builtin_enum_alias(name)
             && self.enum_tags.contains_key(builtin)
