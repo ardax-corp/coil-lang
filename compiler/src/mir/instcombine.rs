@@ -750,6 +750,27 @@ mod tests {
     }
 
     #[test]
+    fn folded_branch_drops_the_dead_edge_phi_input() {
+        // A `brif` on a constant becomes a `jump` (#1899): the join's phi
+        // loses the input from the edge that no longer exists.
+        let text = "func @f(v0: i64) -> i64 {
+bb0:
+    v1 = bconst true
+    brif v1, bb1, bb2
+bb1:
+    v2 = iconst.i64 1
+    jump bb2
+bb2:
+    v3 = phi.i64 [bb0: v0, bb1: v2]
+    return v3
+}";
+        let mut f = crate::mir::parse_func(text).expect(text);
+        f.verify().unwrap();
+        assert!(instcombine(&mut f) >= 1);
+        f.verify().unwrap();
+    }
+
+    #[test]
     fn f64_identity_on_binop_result() {
         let mut b = MirBuilder::new("id");
         let x = b.add_param(MirTy::F64).unwrap();
