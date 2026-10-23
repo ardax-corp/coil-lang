@@ -1565,6 +1565,10 @@ fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Opt
             let (heap, must) = (st.bit(src), st.must_ptr(src));
             st.set_copy(dest, heap, must)?;
         }
+        // `s[i]` on a string (`HEAP_STR_BYTE`) is a byte, never a heap word.
+        DenseIndex if b.dense_abc_parts().0 & common::dense::HEAP_STR_BYTE != 0 => {
+            st.set(b.dense_abc_parts().1, false)?
+        }
         DenseIndex | DenseFieldLoad => st.set(b.dense_abc_parts().1, true)?,
         DenseStoreIndex | DenseFieldStore => {}
         // SIMD lanes live in VM vector registers; only a reduce writes a slot.
