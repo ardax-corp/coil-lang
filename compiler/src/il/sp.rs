@@ -13,7 +13,7 @@ use super::op::{EntryKind, IlJumpKind, IlOp};
 /// Net stack delta for `op`, or `None` if the effect is unknown / fail-closed.
 pub fn stack_delta(op: &IlOp) -> Option<i32> {
     match op {
-        IlOp::Label(_) | IlOp::JoinLabel(_) => Some(0),
+        IlOp::Label(_) => Some(0),
         IlOp::Load { .. }
         | IlOp::Const { .. }
         | IlOp::ConstPool { .. }
@@ -382,7 +382,7 @@ mod tests {
     }
 
     /// STORE pops; it does not raise operand height to `slot + 1`. After
-    /// `CONST; STORE 5` height is 0, not 6 — that floor is `il::tell`.
+    /// `CONST; STORE 5` height is 0, not 6.
     #[test]
     fn store_does_not_raise_operand_height() {
         let store = IlOp::StorePop {

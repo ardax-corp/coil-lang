@@ -1,10 +1,10 @@
 # MIR stack maps (I5 roadmap)
 
-I5 ([COI-300](https://linear.app/ardax/issue/COI-300/i5-alloc-gc-barriers-in-mir))
+I5 (COI-300)
 makes **alloc edges visible** in the SSA sidecar (`Alloc` + `GcBarrier`).
-S2a ([COI-305](https://linear.app/ardax/issue/COI-305/s2a-live-root-sidecar-at-mir-gcbarrier-alloc))
+S2a (COI-305)
 fills **live-root lists** at those edges.
-S2b ([COI-306](https://linear.app/ardax/issue/COI-306/s2b-slot-frame-stack-maps-for-interpreter-gc))
+S2b (COI-306)
 encodes those roots as **slot / frame maps** the interpreter uses to root
 and relocate mapped slots on collect.
 

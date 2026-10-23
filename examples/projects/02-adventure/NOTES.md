@@ -2,14 +2,15 @@
 
 ## What it shows
 
-Playable text adventure over **stdin/stdout**: rooms/items (`world.hy`),
-byte-line command parse (`commands.hy`), save encode/decode (`save.hy`),
-REPL + file/stdin IO in `main.hy`.
+Playable text adventure over **stdin/stdout**: `Room` / `Dir` enums and the
+player (`world.hy`), parsing a line into a `Command` enum with
+`text::split` (`commands.hy`), save encode/decode (`save.hy`), and the
+`read_line` loop + file IO with `println(…)?` in `main.hy`.
 
 ## Play (interactive)
 
-The REPL reads **all of stdin** with `read_to_end` then splits on `\n`. On a
-TTY type commands and end with **Ctrl+D** (EOF), or pipe a transcript:
+The REPL reads stdin a line at a time with `read_line` until EOF. On a TTY
+type commands and end with **Ctrl+D**, or pipe a transcript:
 
 ```bash
 ./examples/projects/02-adventure/demo.sh
@@ -41,17 +42,18 @@ Expected gist: Hall → Library (take key) → inventory → Hall → Garden →
 
 | File | Role |
 |------|------|
-| `src/world.hy` | Player, rooms, move, key |
-| `src/commands.hy` | `Cmd` + `parse_line` / `bytes_eq` |
-| `src/save.hy` | Pure 2-byte encode/decode (`SaveData`) |
-| `src/main.hy` | REPL + stdin/`open`/`write_all`/`read_to_end` |
+| `src/world.hy` | `Room`, `Dir`, `Player`, moves and the key |
+| `src/commands.hy` | `Command` enum + `parse_command` |
+| `src/save.hy` | Two-byte save encode/decode (`SaveData`) |
+| `src/main.hy` | REPL: `read_line`, `println`, save file `open` / `write_all` / `read_to_end` |
 
 ## Ergonomics / gaps noticed
 
-1. Stream IO stays in the entry file for clarity; dependency modules may call
-   IO HostInvoke + `?` (see regression `multi_file_io_hostinvoke_try_in_dependency`).
-2. No `read_line` builtin — batch `read_to_end` + `\n` split (Ctrl+D / pipe).
-3. Commands compared as `[byte]` (not `from_bytes`).
-4. Avoid `x < 0` for EOF/sentinels; use `==` / positive sentinels (`99`).
-5. Prefer `let s = stdin(); read_to_end(s)` (nested HostInvoke was buggy; fixed).
-6. Test harness is CWD-`./tests` only.
+1. `match` takes no string patterns, so `parse_command` compares words with
+   `==` in an `if` chain.
+2. `text::trim` / `to_lower` return `Result<string, string>` while `main`'s
+   `?` is for `IoError`; `??` with the input as the fallback keeps them out of
+   `?` (coil-lang#1847).
+3. `return` is not an expression, so a `match` arm cannot return early;
+   `handle` keeps a `playing` flag instead.
+4. The test harness scans `./tests` relative to CWD only.

@@ -3,9 +3,8 @@
 // IPA hit bench (COI-366 F1): COIL_AUTO_PAR=1 — one parameterized worker
 // with hop/grain policy, not per-arg `__coil_par_fib_N` clones.
 // Checksum: fib(32) = 2178309.
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn fib(int n) -> int {
     if n <= 2 {
@@ -15,5 +14,5 @@ fn fib(int n) -> int {
 }
 
 fn main() {
-    let _ = write_all(stdout(), to_bytes(format("%i", fib(32))));
+    let _ = print(format("%i", fib(32)));
 }

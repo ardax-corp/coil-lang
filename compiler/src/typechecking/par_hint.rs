@@ -405,7 +405,7 @@ fn walk_escapes(
             walk_escapes(iterable, user_fns, out, callees, aliases);
             walk_escapes(body, user_fns, out, callees, aliases);
         }
-        Expression::Variable(_, Some(init)) | Expression::Constant(_, Some(init)) => {
+        Expression::Variable(_, Some(init)) | Expression::Constant(_, Some(init), ..) => {
             walk_escapes(init, user_fns, out, callees, aliases)
         }
         Expression::LetDestructure { rhs, .. } => {

@@ -12,7 +12,7 @@ pub(crate) fn max_code_label(ops: &[IlOp]) -> u32 {
 
 fn code_label_id(op: &IlOp) -> Option<u32> {
     match op {
-        IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
+        IlOp::Label(Label(id)) => Some(*id),
         IlOp::Jump { target, .. } | IlOp::Entry { target, .. } => Some(target.0),
         _ => None,
     }
@@ -33,7 +33,7 @@ pub(crate) fn remap_label_space(
     }
     let mut map = HashMap::<u32, u32>::new();
     for op in ops {
-        if let IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) = op {
+        if let IlOp::Label(Label(id)) = op {
             map.entry(*id).or_insert_with(|| {
                 let n = *next_label;
                 *next_label = next_label.saturating_add(1);
@@ -48,7 +48,6 @@ pub(crate) fn remap_label_space(
         .iter()
         .map(|op| match op {
             IlOp::Label(Label(id)) => IlOp::Label(Label(map[id])),
-            IlOp::JoinLabel(Label(id)) => IlOp::JoinLabel(Label(map[id])),
             IlOp::Jump {
                 kind,
                 target,

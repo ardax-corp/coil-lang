@@ -908,6 +908,45 @@
         assert_eq!(vm.pinned_addr_for_test(4), Some(kept));
     }
 
+    fn dense_array_push(flags: u8, dest: u8, arr: u8, val: u8) -> Byte {
+        let op = ((flags as u32) << 24)
+            | ((dest as u32) << 16)
+            | ((arr as u32) << 8)
+            | (val as u32);
+        Byte::new(Instruction::DenseArrayPush).with_operand_u32(op)
+    }
+
+    /// #1864: pushes the storage has room for run in the dense streak, one
+    /// that grows the array yields back to the giant match; both keep every
+    /// element in order.
+    #[test]
+    fn dense_array_push_in_streak_and_on_growth() {
+        let mut vm = Machine::<8>::default();
+        let mut code = vec![
+            Byte::new(Instruction::Seek).with_operand_u32(4),
+            const_int(1),
+            Byte::new(Instruction::MakeArray).with_operand_u32(1),
+            store_pop(0),
+            const_int(300),
+            store_pop(1),
+        ];
+        // A jump into the pushes enters the streak.
+        code.push(Byte::new(Instruction::JMP).with_operand_u32(code.len() as u32 + 1));
+        for _ in 0..9 {
+            code.push(dense_array_push(0, 0, 0, 1));
+        }
+        code.push(Byte::new(Instruction::DenseArrayLen).with_operand_u32(2 << 8));
+        code.push(const_int(9));
+        code.push(store_pop(3));
+        code.push(dense_index(common::dense::HEAP_UNCHECKED, 3, 0, 3));
+        code.push(load(2));
+        code.push(load(3));
+        code.push(Byte::new(Instruction::HALT));
+        vm.run(&code);
+        assert_eq!(vm.pop().as_int(), 300);
+        assert_eq!(vm.pop().as_int(), 10);
+    }
+
     #[test]
     fn dense_store_index_reuses_pin_and_writes() {
         let mut vm = Machine::<8>::default();

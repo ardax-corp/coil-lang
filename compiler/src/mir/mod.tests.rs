@@ -467,6 +467,14 @@ fn main() {
         stride >= 1,
         "COI-382 S5: nsieve k-loop should be DenseStoreIndex; DenseBin; JMP"
     );
+    // The store's unread dest shares the stored value's register: no
+    // `DenseMove` re-materializes the constant before it (#1867).
+    for w in bc.windows(2) {
+        assert!(
+            !(*w[0].bytecode() == Instruction::DenseMove && *w[1].bytecode() == Instruction::DenseStoreIndex),
+            "#1867: nsieve k-loop moves the stored value before DenseStoreIndex"
+        );
+    }
     let mut vm = machine::Machine::<64>::with_operand_capacity(64);
     p.wire_host_natives(&mut vm);
     vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());

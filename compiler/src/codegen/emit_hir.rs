@@ -1416,7 +1416,14 @@ impl Compiler {
                 // A heap element's slot holds its boxed word; a
                 // pointer-niche `Option` / `Result` element its niche word
                 // (`hir_stack_rep`).
-                Some(element) => crate::mir::scalar_mir_ty(element).or_else(|| {
+                Some(element) => crate::mir::scalar_mir_ty(element)
+                    .or_else(|| Self::scalar_enum_mir_ty(&self.checker, element))
+                    // A trait object element: its `[value, dictionary]` pack (#1853).
+                    .or_else(|| {
+                        matches!(crate::typechecking::ty::strip_readonly(element), Ty::Existential { .. })
+                            .then_some(crate::mir::MirTy::HeapRef)
+                    })
+                    .or_else(|| {
                     use crate::layout::{value_layout, word_kind};
                     match value_layout(&self.checker, element) {
                         // So does a two-word enum's: its boxed object.
@@ -1459,26 +1466,7 @@ impl Compiler {
             || hir.locals.iter().any(|l| l.ty.as_ref().is_some_and(holds_var))
             || hir.exprs.iter().any(|e| e.ty.as_ref().is_some_and(holds_var));
         // The backing word of a scalar enum type.
-        let scalar_enum = move |t: &Ty| {
-            let t = apply_ty_prune(checker.subst(), t);
-            if !crate::layout::is_scalar_enum_ty(checker, &t) {
-                return None;
-            }
-            let name = match crate::typechecking::ty::strip_readonly(&t) {
-                Ty::Constructor { owner, .. } => match owner.as_ref() {
-                    Ty::Con(name) | Ty::Sum { name, .. } => name.clone(),
-                    _ => return None,
-                },
-                Ty::Con(name) | Ty::Sum { name, .. } => name.clone(),
-                _ => return None,
-            };
-            // A `#[repr(string)]` value is its backing string's heap word.
-            let backing = checker.scalar_value_ty(&name)?;
-            if matches!(crate::typechecking::ty::strip_readonly(&backing), Ty::Con(n) if n == crate::typechecking::ty::STRING) {
-                return Some(crate::mir::MirTy::HeapRef);
-            }
-            crate::mir::scalar_mir_ty(&backing).filter(|t| matches!(t, crate::mir::MirTy::I64 | crate::mir::MirTy::F64 | crate::mir::MirTy::Bool))
-        };
+        let scalar_enum = move |t: &Ty| Self::scalar_enum_mir_ty(checker, t);
         let word = |t: &Ty| {
             crate::mir::word_mir_ty(t)
                 .or_else(|| {
@@ -1503,26 +1491,7 @@ impl Compiler {
                 .or_else(|| (matches!(crate::typechecking::ty::strip_readonly(t), Ty::Con(n) if n == "ptr") && !is_class(t)).then_some(crate::mir::MirTy::I64))
         };
         // A scalar enum's backing word.
-        let scalar_enum = move |t: &Ty| {
-            let t = apply_ty_prune(checker.subst(), t);
-            if !crate::layout::is_scalar_enum_ty(checker, &t) {
-                return None;
-            }
-            let name = match crate::typechecking::ty::strip_readonly(&t) {
-                Ty::Constructor { owner, .. } => match owner.as_ref() {
-                    Ty::Con(name) | Ty::Sum { name, .. } => name.clone(),
-                    _ => return None,
-                },
-                Ty::Con(name) | Ty::Sum { name, .. } => name.clone(),
-                _ => return None,
-            };
-            // A `#[repr(string)]` value is its backing string's heap word.
-            let backing = checker.scalar_value_ty(&name)?;
-            if matches!(crate::typechecking::ty::strip_readonly(&backing), Ty::Con(n) if n == crate::typechecking::ty::STRING) {
-                return Some(crate::mir::MirTy::HeapRef);
-            }
-            crate::mir::scalar_mir_ty(&backing).filter(|t| matches!(t, crate::mir::MirTy::I64 | crate::mir::MirTy::F64 | crate::mir::MirTy::Bool))
-        };
+        let scalar_enum = move |t: &Ty| Self::scalar_enum_mir_ty(checker, t);
         // Fields of heap class objects whose slot holds the word the
         // field's type names (a generic field holds a boxed value).
         // A string field, or a two-word enum's, holds its boxed heap word.
@@ -2038,6 +2007,28 @@ impl Compiler {
         }
     }
 
+    /// The backing word of a scalar enum type (`None` for any other type).
+    fn scalar_enum_mir_ty(checker: &crate::typechecking::Checker, t: &Ty) -> Option<crate::mir::MirTy> {
+        let t = apply_ty_prune(checker.subst(), t);
+        if !crate::layout::is_scalar_enum_ty(checker, &t) {
+            return None;
+        }
+        let name = match crate::typechecking::ty::strip_readonly(&t) {
+            Ty::Constructor { owner, .. } => match owner.as_ref() {
+                Ty::Con(name) | Ty::Sum { name, .. } => name.clone(),
+                _ => return None,
+            },
+            Ty::Con(name) | Ty::Sum { name, .. } => name.clone(),
+            _ => return None,
+        };
+        // A `#[repr(string)]` value is its backing string's heap word.
+        let backing = checker.scalar_value_ty(&name)?;
+        if matches!(crate::typechecking::ty::strip_readonly(&backing), Ty::Con(n) if n == crate::typechecking::ty::STRING) {
+            return Some(crate::mir::MirTy::HeapRef);
+        }
+        crate::mir::scalar_mir_ty(&backing).filter(|t| matches!(t, crate::mir::MirTy::I64 | crate::mir::MirTy::F64 | crate::mir::MirTy::Bool))
+    }
+
     /// The word types of a two-word `ty` in direct MIR: `[payload, tag]`
     /// with one payload type across the variants, `[start, end]`, or
     /// `[a, b]`.
@@ -2060,7 +2051,12 @@ impl Compiler {
 
     fn hir_mir_pair_tys(&self, ty: &Ty) -> Option<(crate::mir::MirTy, crate::mir::MirTy)> {
         use crate::layout::{self, Layout, PairKind};
-        use crate::mir::{scalar_mir_ty as word, MirTy};
+        use crate::mir::MirTy;
+        // A scalar enum item is its backing word, like an `int` (#1903).
+        let word = |t: &Ty| {
+            crate::mir::scalar_mir_ty(t)
+                .or_else(|| Self::scalar_enum_mir_ty(&self.checker, t).filter(|w| *w != MirTy::HeapRef))
+        };
         let ty = apply_ty_prune(self.checker.subst(), ty);
         let Layout::Pair(kind) = layout::of_resolved(&self.checker, &ty) else {
             return None;
@@ -4501,7 +4497,10 @@ impl Compiler {
         if forwards && (lower::is_vec(hir, &self.checker, recv) || method == "to_vec") {
             return Err("callee-trait");
         }
-        if lower::is_vec(hir, &self.checker, recv) {
+        // A trait method the `Vec` type has no method of (`v.show()`,
+        // #1848) resolves as any receiver's.
+        let vec_method = self.context.methods.get(common::BUILTIN_VEC_TYPE).is_some_and(|m| m.contains_key(method));
+        if lower::is_vec(hir, &self.checker, recv) && vec_method {
             return self.resolve_hir_vec_method(hir, call, method, args);
         }
         let recv_ty = Self::hir_ty(hir, recv).ok_or("method-receiver")?;
@@ -4654,11 +4653,9 @@ impl Compiler {
             return Ok(None);
         }
         let own_dicts = self.hir_own_dicts(hir, call, &class, method, args, 0)?;
-        // A pair return has its own ABI. (An open goal resolves its
-        // dictionary from scope when the call is emitted, as on the AST.)
-        if self.two_word_return_kind(&fqn).is_some() {
-            return Err("callee-trait");
-        }
+        // A pair return comes back as its two words (#1938). (An open goal
+        // resolves its dictionary from scope when the call is emitted.)
+        let pair = self.two_word_return_kind(&fqn);
         let recv = *args.first().ok_or("method-receiver")?;
         let recv_ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, recv).ok_or("method-receiver")?);
         let is_default = Self::is_default_method_fqn(&class, method, &fqn);
@@ -4677,7 +4674,7 @@ impl Compiler {
         let recv_box = (class != "Iterator" && class != "IntoIterator").then(|| Self::show_lookup_ty_for_instance(&recv_ty));
         Ok(Some(HirCall {
             key: fqn,
-            pair: None,
+            pair,
             params,
             ret,
             method: true,
@@ -5061,13 +5058,22 @@ impl Compiler {
             instance.args.clone()
         };
         let fqn = instance.method_fqns.get(method).cloned().ok_or("callee-trait")?;
-        if !(self.functions.contains_key(&fqn) || self.fn_entry_labels.contains_key(&fqn))
-            || self.two_word_return_kind(&fqn).is_some()
-        {
+        if !(self.functions.contains_key(&fqn) || self.fn_entry_labels.contains_key(&fqn)) {
             return Err("callee-trait");
         }
+        // A pair return comes back as its two words (#1940).
+        let pair = self.two_word_return_kind(&fqn);
         let is_default = Self::is_default_method_fqn(&instance.class, method, &fqn);
-        let sig = self.trait_method_boundary_sig(&instance.class, method, &lookup, is_default);
+        let mut sig = self.trait_method_boundary_sig(&instance.class, method, &lookup, is_default);
+        // The trait spells the result through its own projection
+        // (`Option<Self::Item>`), open in the boundary signature and so read
+        // boxed; the instance entry returns at its own closed type (#1940).
+        if !is_default
+            && let Some(s) = sig.as_mut().filter(|s| s.ret.is_some())
+            && let Some(own) = self.checker.fn_return_ty(&fqn).filter(crate::layout::ty_is_closed)
+        {
+            s.ret = Some(self.value_layout(&own));
+        }
         let (params, ret) = self.hir_ground_words(hir, call, args, &fqn, sig.as_ref())?;
         let own_dicts = self.hir_own_dicts(hir, call, &instance.class, method, args, 1)?;
         let unbox = self
@@ -5078,7 +5084,7 @@ impl Compiler {
             .collect();
         Ok(HirCall {
             key: fqn,
-            pair: None,
+            pair,
             params,
             ret,
             method: true,
@@ -8577,7 +8583,10 @@ impl Compiler {
                 ) = (kind, pat)
                 {
                     let known = |f: &str| self.functions.contains_key(f) || self.fn_entry_labels.contains_key(f);
-                    if !known(into_iter_fqn) || !known(next_fqn) || self.two_word_return_kind(into_iter_fqn).is_some() {
+                    let into_ok = into_iter_fqn
+                        .as_deref()
+                        .is_none_or(|f| known(f) && self.two_word_return_kind(f).is_none());
+                    if !into_ok || !known(next_fqn) {
                         return Err("for-in-iterator");
                     }
                     // The item is stored as `next` leaves it.
@@ -8591,6 +8600,9 @@ impl Compiler {
                     ..
                 }) = kind
                 {
+                    let Some(into_iter_fqn) = into_iter_fqn else {
+                        return Err("for-in-custom");
+                    };
                     if !self.functions.contains_key(into_iter_fqn) && !self.fn_entry_labels.contains_key(into_iter_fqn) {
                         return Err("for-in-custom");
                     }
@@ -9167,7 +9179,7 @@ impl Compiler {
         let arity = 3 + live.len();
         let worker_ty = (0..arity).fold(int.clone(), |acc, _| Ty::Fun(Box::new(coil_ty::int()), Box::new(acc)));
         let thread_err = Ty::Con(common::BUILTIN_THREAD_ERROR_ENUM.into());
-        let spawned_ty = coil_ty::result_ty(coil_ty::thread_ty(), thread_err.clone());
+        let spawned_ty = coil_ty::result_ty(coil_ty::thread_ty(int.clone()), thread_err.clone());
         let joined_ty = coil_ty::result_ty(int.clone(), thread_err);
         let fold_op = match site.op {
             LoopReduceOp::Add => BinOp::IntAdd,
@@ -9202,7 +9214,7 @@ impl Compiler {
         // A range of one or more chunks: spawn each, then join and fold.
         let fork = |b: &mut Synth, chunks: &[(Bound, Bound)], whole: (Bound, Bound)| -> HirId {
             let handles: Vec<LocalId> =
-                (0..chunks.len()).map(|i| b.local(&format!("__coil_par_handle{i}"), coil_ty::thread_ty(), LocalKind::Pattern)).collect();
+                (0..chunks.len()).map(|i| b.local(&format!("__coil_par_handle{i}"), coil_ty::thread_ty(coil_ty::int()), LocalKind::Pattern)).collect();
             let partials: Vec<LocalId> =
                 (0..chunks.len()).map(|i| b.local(&format!("__coil_par_part{i}"), coil_ty::int(), LocalKind::Pattern)).collect();
             // Innermost first: the fold, then each join, then each spawn.

@@ -634,8 +634,16 @@ impl Checker {
         } else {
             None
         };
+        let open_mark = self.open_operands.len();
+        let empty_mark = self.open_empty_arrays.len();
+        let mixed_mark = self.mixed_literals.len();
+        self.fn_body_depth += 1;
         let _ = self.infer(body);
+        self.fn_body_depth -= 1;
         self.infer_contracts(contracts, &arg_tys, &ret_ty, is_coro);
+        self.check_mixed_literals(mixed_mark);
+        self.check_open_operands(open_mark);
+        self.check_open_empty_arrays(empty_mark);
         if method_owner.is_none() {
             self.current_function = prev_function;
         }

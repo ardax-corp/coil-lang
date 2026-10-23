@@ -257,12 +257,12 @@ MIR-specialized bodies emit `DenseIndex` / `DenseStoreIndex` instead of
 `IndexPin*`; COI-372 reuses the same `frame_pins` table from those opcodes
 (no new opcode). Unpinned stack `Index` `find_object_by_addr` (slab + poison)
 is leftover cost, not a new product.
-That reverses the original [COI-85](https://linear.app/ardax/issue/COI-85)
+That reverses the original COI-85
 "Index stays checked" decision; `LEQ` / `GEQ` still bind. Unproven, host, FFI,
 growing-array, alias-push, and impure helper-call loops stay checked. Pure user
 helpers on `b[i]` no longer block the proof
-([COI-99](https://linear.app/ardax/issue/COI-99)).
-Pins *are* the ArrayPtr handle ([COI-198](https://linear.app/ardax/issue/COI-198));
+(COI-99).
+Pins *are* the ArrayPtr handle (COI-198);
 do not add a second opcode.
 
 What is still open (full refusal table in
@@ -384,7 +384,7 @@ existing opcode; fits append-only opcode ABI.
 
 | Family | Evidence (post Phases 1–4) | Est. dynamic weight | Recommendation | Rationale |
 |--------|----------------------------|---------------------|----------------|-----------|
-| `*Jmpt` counterparts (`CmpJmpt` / `BinSlot*Jmpt` / `BinSlotSlotConstJmpt` / …) | mandelbrot escape `BinSlotSlotConstJmpt`; `would_be_jmpt_after_invert=0`; tak/nsieve/numeric stay 0 | ~1.28M/run (iter escape, one dispatch not two) | **done** ([COI-87](https://linear.app/ardax/issue/COI-87)) | Invert fused `*Jmpf; JMP` into `*Jmpt`. Same packing as the false twins. Loop headers remain `*Jmpf`. |
+| `*Jmpt` counterparts (`CmpJmpt` / `BinSlot*Jmpt` / `BinSlotSlotConstJmpt` / …) | mandelbrot escape `BinSlotSlotConstJmpt`; `would_be_jmpt_after_invert=0`; tak/nsieve/numeric stay 0 | ~1.28M/run (iter escape, one dispatch not two) | **done** (COI-87) | Invert fused `*Jmpf; JMP` into `*Jmpt`. Same packing as the false twins. Loop headers remain `*Jmpf`. |
 | Cast spill → `FloatChainStore` | mandelbrot `cr`/`ci` casts | material in mandelbrot float body | **removed** | `il::cast_spill` only fed `FloatChainStore`; once that opcode was retired the pass was forced off at every level and has been deleted. |
 | Function tree-shake | eager `Hash__*`/`Show__*`/… thunks in archives | binary size / dissect noise | **done** | Reachability prune before lower (`il::treeshake`); roots = `main` (+ tests when included). |
 | Unused-slot DCE across jumps | assignment-only locals kept by jump-as-used | IL store noise | **done** | `hir::fold` drops stores to locals nothing reads (was `dead_store_at`, removed 2026-10). |

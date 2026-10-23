@@ -1,9 +1,8 @@
 // Hit bench for COI-287 W1: dense specialize on float +/− (no * or /).
 // Pre-W1 infer required MULF/DIVF; add-only stayed fuse-IL. DIVF already
 // qualified — this kernel must not use * or / or parent and W1 match.
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn hot(float a, float b, int n) -> float {
     let i = 0;
@@ -17,5 +16,5 @@ fn hot(float a, float b, int n) -> float {
 }
 
 fn main() {
-    let _ = write_all(stdout(), to_bytes(format("%i", hot(2.0, 1.0, 2000000) as int)));
+    let _ = print(format("%i", hot(2.0, 1.0, 2000000) as int));
 }

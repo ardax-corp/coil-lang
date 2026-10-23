@@ -2,9 +2,8 @@
 // also writes a field of another object. A field store could change a
 // field of an ordinary class, but never one of a `readonly class`, so
 // `c.scale` and `c.bias` move to the preheader.
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 readonly class Cfg {
     pub scale: int,
@@ -34,5 +33,5 @@ fn main() {
         apply(new Cfg(3, r), xs, st);
         s = s + st.sum % 997;
     }
-    let _ = write_all(stdout(), to_bytes(format("%i", s)));
+    let _ = print(format("%i", s));
 }

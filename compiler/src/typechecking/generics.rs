@@ -265,6 +265,11 @@ impl Generics {
         self.generic_type_ctors
             .insert(common::BUILTIN_WEAK_TYPE.into(), vec!["T".into()]);
         self.register_nominal_type(common::BUILTIN_WEAK_TYPE, GC_MODULE);
+        // `thread` handles carry their value type (#1905). The `thread`
+        // module exports the names; a bare `Thread` infers its `T`.
+        for handle in crate::typechecking::ty::THREAD_HANDLES {
+            self.generic_type_ctors.insert(handle.into(), vec!["T".into()]);
+        }
         self.generic_type_ctors
             .insert(common::BUILTIN_VEC_TYPE.into(), vec!["T".into()]);
         self.register_nominal_type(common::BUILTIN_VEC_TYPE, PRELUDE_MODULE);
@@ -1248,8 +1253,8 @@ impl Generics {
             .filter(|inst| inst.range == (0..0) && inst.defined_module == PRELUDE_OPS_MODULE && inst.context.is_empty())
             .filter_map(|inst| match inst.args.as_slice() {
                 [ty @ (Ty::Tuple(_) | Ty::Record { .. } | Ty::Array { .. })] => Some((inst.class.as_str(), ty)),
-                // `Length` of a `Vec` (#1536), and its `Eq` (#1629).
-                [ty] if matches!(inst.class.as_str(), "Length" | "Eq") && super::ty::vec_element_ty(ty).is_some() => Some((inst.class.as_str(), ty)),
+                // `Length` of a `Vec` (#1536), its `Eq` (#1629) and `Show` (#1848).
+                [ty] if matches!(inst.class.as_str(), "Length" | "Eq" | "Show") && super::ty::vec_element_ty(ty).is_some() => Some((inst.class.as_str(), ty)),
                 [ty @ Ty::App(head, _)]
                     if matches!(head.as_ref(), Ty::Con(n) if n == common::BUILTIN_OPTION_ENUM || n == common::BUILTIN_RESULT_ENUM) =>
                 {

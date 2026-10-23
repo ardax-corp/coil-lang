@@ -622,7 +622,11 @@ fn expand_decls<'a>(decls: &mut Vec<Output<'a>>, pending: &mut Vec<PendingMacro>
                     p.member_attrs = member_attrs.clone();
                     owned = true;
                 }
-                if !owned {
+                // An attribute macro on the type expands first and re-emits
+                // it (`${raw(t.source)}`); its derives own the attributes on
+                // the copy, checked when that is expanded (#1846).
+                let rewritten = pending.iter().any(|p| p.kind == MacroKind::Attr && p.target == span);
+                if !owned && !rewritten {
                     for name in &member_attrs {
                         let mut msg = Message::error(
                             ErrorCode::GenericTypeError,

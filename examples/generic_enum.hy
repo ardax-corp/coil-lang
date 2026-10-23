@@ -2,9 +2,8 @@
 //
 // @output 7
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 enum Box<T> {
     Empty,
@@ -19,5 +18,5 @@ fn unwrap(Box<int> b) -> int {
 }
 
 fn main() {
-    let _ = write_all(stdout(), to_bytes(format("%i", unwrap(Box::Full(7)))));
+    let _ = print(format("%i", unwrap(Box::Full(7))));
 }

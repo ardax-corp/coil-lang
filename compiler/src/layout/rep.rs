@@ -309,6 +309,8 @@ pub fn ty_is_closed(ty: &Ty) -> bool {
     match ty {
         Ty::Var(_) | Ty::Fun(_, _) | Ty::Existential { .. } | Ty::Forall { .. } => false,
         Ty::Constructor { owner: inner, .. } => ty_is_closed(inner),
+        // A `thread` handle is one host word whatever it carries (#1905).
+        Ty::App(..) if crate::typechecking::ty::opaque_handle_name(ty).is_some() => true,
         Ty::App(_, args) => args.iter().all(ty_is_closed),
         Ty::Tuple(items) => items.iter().all(ty_is_closed),
         Ty::Record { fields } => fields.iter().all(|(_, f)| ty_is_closed(f)),

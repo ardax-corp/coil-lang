@@ -1,8 +1,7 @@
 // CPU: `while i < v.len() { f(v[i]) }` with a non-inlined pure helper — COI-99.
 // `v.len()` is invariant across the CALL, so it hoists; `v[i]` may uncheck.
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn absorb(int x) -> int {
     let k = 0;
@@ -47,5 +46,5 @@ fn main() {
         total = total + scan(v);
         round = round + 1;
     }
-    let _ = write_all(stdout(), to_bytes(format("%i", total)));
+    let _ = print(format("%i", total));
 }

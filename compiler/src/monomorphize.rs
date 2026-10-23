@@ -1134,7 +1134,7 @@ where
         | Expression::Break
         | Expression::Continue
         | Expression::Variable(_, _)
-        | Expression::Constant(_, _)
+        | Expression::Constant(..)
         | Expression::Argument { .. }
         | Expression::Field { .. }
         | Expression::QualifiedAccess { .. }

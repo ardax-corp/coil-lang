@@ -4,9 +4,8 @@
 // Explicit return poisons #278 frame-local unboxing (local_escape.rs).
 // Integer counterpart: examples/perf/result_int_churn.hy.
 // ITERS=10000000 (each step adds 13); checksum 130000000.
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 class Node {
     pub v: int,
@@ -30,5 +29,5 @@ fn main() {
         };
         i = i + 1;
     }
-    let _ = write_all(stdout(), to_bytes(format("%i", acc)));
+    let _ = print(format("%i", acc));
 }

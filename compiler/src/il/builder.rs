@@ -357,11 +357,6 @@ impl IlBuilder {
                     self.bound.insert(nid);
                     self.ops.push(IlOp::Label(Label(nid)));
                 }
-                IlOp::JoinLabel(Label(id)) => {
-                    let nid = map_label(id, self);
-                    self.bound.insert(nid);
-                    self.ops.push(IlOp::JoinLabel(Label(nid)));
-                }
                 IlOp::Jump {
                     kind,
                     target,
@@ -429,7 +424,6 @@ impl IlBuilder {
         for op in &mut chunk {
             match op {
                 IlOp::Label(Label(id))
-                | IlOp::JoinLabel(Label(id))
                 | IlOp::Jump {
                     target: Label(id), ..
                 }
@@ -446,7 +440,7 @@ impl IlBuilder {
             }
         }
         for op in &chunk {
-            if let IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) = op {
+            if let IlOp::Label(Label(id)) = op {
                 self.bound.insert(*id);
             }
             if let IlOp::Jump {

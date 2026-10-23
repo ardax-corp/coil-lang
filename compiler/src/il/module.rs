@@ -166,7 +166,7 @@ impl IlModule {
                 glue_map.insert(*old, fresh);
                 for op in &mut chunk[body_len..] {
                     match op {
-                        IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) if *id == shared => *id = fresh,
+                        IlOp::Label(Label(id)) if *id == shared => *id = fresh,
                         IlOp::Jump { target, .. } | IlOp::Entry { target, .. } if target.0 == shared => {
                             target.0 = fresh;
                         }
@@ -236,7 +236,7 @@ impl IlModule {
         // first-wins body map must not claim it (the prologue `JMP` to the
         // static-init setup would land in that body).
         for op in self.prologue.iter().chain(module.epilogue.iter()) {
-            if let IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) = op {
+            if let IlOp::Label(Label(id)) = op {
                 prior_labels.insert(*id, *id);
             }
         }
@@ -538,7 +538,7 @@ pub(crate) fn prove_trailing_if_end_after_next_body_replace() {
     let bound: Vec<u32> = flat
         .iter()
         .filter_map(|op| match op {
-            IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
+            IlOp::Label(Label(id)) => Some(*id),
             _ => None,
         })
         .collect();
@@ -588,8 +588,8 @@ fn drop_jumps_to_next_label(ops: &mut Vec<IlOp>) {
                 ..
             } => ops[i + 1..]
                 .iter()
-                .take_while(|op| matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)))
-                .any(|op| matches!(op, IlOp::Label(l) | IlOp::JoinLabel(l) if l == target)),
+                .take_while(|op| matches!(op, IlOp::Label(_)))
+                .any(|op| matches!(op, IlOp::Label(l) if l == target)),
             _ => false,
         };
         if next {
@@ -615,7 +615,7 @@ fn absorb_trailing_labels(module: &mut IlModule) {
         .ops
         .iter()
         .filter_map(|op| match op {
-            IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
+            IlOp::Label(Label(id)) => Some(*id),
             _ => None,
         })
         .collect();
@@ -635,7 +635,7 @@ fn absorb_trailing_labels(module: &mut IlModule) {
     let mut moved = Vec::new();
     for op in module.epilogue.drain(..) {
         match op {
-            IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) if needed.contains(&id) => {
+            IlOp::Label(Label(id)) if needed.contains(&id) => {
                 moved.push(op);
             }
             other => kept.push(other),
@@ -654,7 +654,7 @@ fn merge_remap_labels(prior: &mut HashMap<u32, u32>, local: HashMap<u32, u32>) {
 fn bound_label_ids(ops: &[IlOp]) -> HashSet<u32> {
     ops.iter()
         .filter_map(|op| match op {
-            IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
+            IlOp::Label(Label(id)) => Some(*id),
             _ => None,
         })
         .collect()
@@ -662,7 +662,7 @@ fn bound_label_ids(ops: &[IlOp]) -> HashSet<u32> {
 
 fn first_label_id(ops: &[IlOp]) -> Option<u32> {
     ops.iter().find_map(|op| match op {
-        IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
+        IlOp::Label(Label(id)) => Some(*id),
         _ => None,
     })
 }
@@ -702,7 +702,7 @@ fn remap_cross_function_entry_call_targets(
     let local: HashSet<u32> = ops
         .iter()
         .filter_map(|op| match op {
-            IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
+            IlOp::Label(Label(id)) => Some(*id),
             _ => None,
         })
         .collect();
@@ -734,7 +734,7 @@ fn remap_cross_function_jump_targets(
     let local: HashSet<u32> = ops
         .iter()
         .filter_map(|op| match op {
-            IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
+            IlOp::Label(Label(id)) => Some(*id),
             _ => None,
         })
         .collect();
@@ -868,7 +868,7 @@ mod tests {
         let (flat, _, _) = m.to_flat();
         let mut label_ids = Vec::new();
         for op in &flat {
-            if let IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) = op {
+            if let IlOp::Label(Label(id)) = op {
                 label_ids.push(*id);
             }
         }
@@ -995,7 +995,7 @@ mod tests {
         let callee_label = flat
             .iter()
             .find_map(|op| match op {
-                IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
+                IlOp::Label(Label(id)) => Some(*id),
                 _ => None,
             })
             .expect("callee entry label");
@@ -1048,7 +1048,7 @@ mod tests {
         let callee_label = flat
             .iter()
             .filter_map(|op| match op {
-                IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
+                IlOp::Label(Label(id)) => Some(*id),
                 _ => None,
             })
             .nth(3)
@@ -1099,7 +1099,7 @@ mod tests {
         let callee_label = flat
             .iter()
             .filter_map(|op| match op {
-                IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
+                IlOp::Label(Label(id)) => Some(*id),
                 _ => None,
             })
             .nth(3)
@@ -1145,7 +1145,7 @@ mod tests {
         let callee_label = flat
             .iter()
             .find_map(|op| match op {
-                IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
+                IlOp::Label(Label(id)) => Some(*id),
                 _ => None,
             })
             .expect("callee body label");
@@ -1196,7 +1196,7 @@ mod tests {
         let callee_label = flat
             .iter()
             .filter_map(|op| match op {
-                IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
+                IlOp::Label(Label(id)) => Some(*id),
                 _ => None,
             })
             .nth(2)
@@ -1288,7 +1288,7 @@ mod tests {
         let method_label = flat
             .iter()
             .filter_map(|op| match op {
-                IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
+                IlOp::Label(Label(id)) => Some(*id),
                 _ => None,
             })
             .nth(1)
@@ -1348,7 +1348,7 @@ mod tests {
             })
             .expect("main JMPF");
         let last_label = flat.iter().rev().find_map(|op| match op {
-            IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
+            IlOp::Label(Label(id)) => Some(*id),
             _ => None,
         });
         assert_eq!(
@@ -1359,7 +1359,7 @@ mod tests {
         let sum_mid = flat
             .iter()
             .filter_map(|op| match op {
-                IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
+                IlOp::Label(Label(id)) => Some(*id),
                 _ => None,
             })
             .nth(1)
@@ -1406,7 +1406,7 @@ mod tests {
         let drop_label = flat
             .iter()
             .find_map(|op| match op {
-                IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
+                IlOp::Label(Label(id)) => Some(*id),
                 _ => None,
             })
             .expect("drop entry label");

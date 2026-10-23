@@ -26,7 +26,7 @@ rungs are **not** in this table — see ladders below and
 | User `Iterator::next` | dense or LIR | C2b rung 2 — Q8 match + B3 CALL |
 | Coro `for` | dense or LIR | C2b rung 4 — mapped `MakeCoro` + `ResumeCoro` / `DoneCoro` |
 | Dense+match boxed `JumpIfMatch` (heap enum) | MIR→LIR or dense (D3) | cost gate |
-| Multi-payload `Unpack` / `JumpIfMatch` arity > 1 | dense or LIR when reconstruct ≤ fuse | **D3** ([COI-357](https://linear.app/ardax/issue/COI-357)) |
+| Multi-payload `Unpack` / `JumpIfMatch` arity > 1 | dense or LIR when reconstruct ≤ fuse | **D3** (COI-357) |
 | Native deopt resume maps | compiler sidecar (`DraftDeoptMap`); not archived; emit skips `Deopt` | **I7** / **C3** — maps exist; P5 resume leftover |
 | Incomplete deopt maps (stack-only / convoy TOS) | native must refuse | **C3** leftover |
 | Unmapped alloc / GC safepoint | dense with a frame extent (minor 22); LIR needs every allocation followed by its `GcBarrier` (`mir_maps_ok`); precise frame maps cover both | **B6** maps `ArrayPush` / CALL+`Make*`; **D1** maps InitTyped+field |
@@ -124,43 +124,43 @@ error (**Q3**). A2 emits `DenseIndex` / `DenseMake` / `DensePush`.
 
 A/B: prefer `coil-embed`; flagships flat (±5%) or identical archives; no
 vanity microbenches. Refuse tables shrink toward hard walls
-([COI-336](https://linear.app/ardax/issue/COI-336/a3-broaden-mir-entry-shrink-refuse-tables)).
+(COI-336).
 Post-Q6–Q9 ranked revisit: [opt-generalization.md](opt-generalization.md) B0
-([COI-338](https://linear.app/ardax/issue/COI-338/b0-post-quirks-refuse-audit-ranked-revisit-plan)).
+(COI-338).
 Denser leftovers after C3: [mir-dense-leftovers.md](mir-dense-leftovers.md).
-**B1** ([COI-339](https://linear.app/ardax/issue/COI-339)) is entry hygiene
+**B1** (COI-339) is entry hygiene
 for the Q6–Q8 first rungs (tables + `lir_eligible` / infer). **B2**
-([COI-340](https://linear.app/ardax/issue/COI-340)) is the Seek / frame
+(COI-340) is the Seek / frame
 parking reconstruct so tight `fib` / `tak` can win the cost gate.
-**B3** ([COI-341](https://linear.app/ardax/issue/COI-341)) opens two-slot
+**B3** (COI-341) opens two-slot
 helper `CALL` / `RETURN` on dense and LIR; keep/refuse is still cost.
-**B6** ([COI-344](https://linear.app/ardax/issue/COI-344)) maps
+**B6** (COI-344) maps
 `ArrayPush` grow sites and CALL+alloc drafts; cost gate still refuses
 boxed reconstruct.
-**B7** ([COI-345](https://linear.app/ardax/issue/COI-345)) opens sibling /
+**B7** (COI-345) opens sibling /
 mutual `TailCall` (one-word and two-slot); keep/refuse is still cost.
-**C1** ([COI-349](https://linear.app/ardax/issue/COI-349)) opens self
+**C1** (COI-349) opens self
 two-slot `CALL` / `RETURN` on the same dest + `dest_hi` reconstruct.
 N>2 stays refuse (`MAX_MODELED_RET_WORDS`). LIR still cannot reconstruct
 one-word `CALL` / `TailCall`.
-**B8** ([COI-346](https://linear.app/ardax/issue/COI-346)) drops the
+**B8** (COI-346) drops the
 debugger-attached / `-Og` specialize refuse. Majority bodies may dense
 or LIR; the VM debugger steps the reconstruct. **C3** records resume
 maps and remaps named lets; leftover: P5 native resume, incomplete
 convoy maps, per-PC locals, codegen-unknown line locs.
-**B9** ([COI-347](https://linear.app/ardax/issue/COI-347)) maps
+**B9** (COI-347) maps
 `FORMAT` / `STRINGIFY` (Q9 R3). Dense infer still refuses table ops.
 Leftover: unicode / regex in SSA (R4).
-**D0** ([COI-354](https://linear.app/ardax/issue/COI-354)) keeps `nsieve`
+**D0** (COI-354) keeps `nsieve`
 dense after lift: `slot_env` follows trivial-phi subst so in-loop
 `ArrayPush` verifies. Cost gate unchanged (no skip-the-gate).
-**D1** ([COI-355](https://linear.app/ardax/issue/COI-355)) maps
+**D1** (COI-355) maps
 `InitTyped`+`SetField`/`GetField` on escaping named objects. Escaping
 `self` stays boxed-once (Q2). I3 non-escaping stays unboxed.
-**D2** ([COI-356](https://linear.app/ardax/issue/COI-356)) reconstructs
+**D2** (COI-356) reconstructs
 those as `DenseFieldLoad` / `DenseFieldStore` / `DenseMakeObject` so the
 cost gate can keep field loops. LIR still `HeapField`.
-**D3** ([COI-357](https://linear.app/ardax/issue/COI-357)) reconstructs
+**D3** (COI-357) reconstructs
 boxed multi-payload `JumpIfMatch` / `Unpack(n)` with per-index maps.
 Keep/refuse is the cost gate. No trees opcode.
 

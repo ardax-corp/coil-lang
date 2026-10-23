@@ -391,29 +391,46 @@ pub fn stream_ty() -> Ty {
     Ty::Con(STREAM.into())
 }
 
-/// Build the opaque `Thread` join-handle type.
-pub fn thread_ty() -> Ty {
-    Ty::Con(THREAD.into())
+/// Build the opaque `Thread<T>` join handle of a thread returning `T`
+/// (#1905: `join` gives back the spawned function's own type).
+pub fn thread_ty(value: Ty) -> Ty {
+    Ty::App(Box::new(Ty::Con(THREAD.into())), vec![value])
 }
 
-/// Build the opaque channel `Sender` type.
-pub fn sender_ty() -> Ty {
-    Ty::Con(SENDER.into())
+/// Build the opaque channel `Sender<T>` type.
+pub fn sender_ty(value: Ty) -> Ty {
+    Ty::App(Box::new(Ty::Con(SENDER.into())), vec![value])
 }
 
-/// Build the opaque channel `Receiver` type.
-pub fn receiver_ty() -> Ty {
-    Ty::Con(RECEIVER.into())
+/// Build the opaque channel `Receiver<T>` type.
+pub fn receiver_ty(value: Ty) -> Ty {
+    Ty::App(Box::new(Ty::Con(RECEIVER.into())), vec![value])
 }
 
-/// Build the opaque `Mutex` type.
-pub fn mutex_ty() -> Ty {
-    Ty::Con(MUTEX.into())
+/// Build the opaque `Mutex<T>` type.
+pub fn mutex_ty(value: Ty) -> Ty {
+    Ty::App(Box::new(Ty::Con(MUTEX.into())), vec![value])
 }
 
-/// Build the opaque `RwLock` type.
-pub fn rwlock_ty() -> Ty {
-    Ty::Con(RWLOCK.into())
+/// Build the opaque `RwLock<T>` type.
+pub fn rwlock_ty(value: Ty) -> Ty {
+    Ty::App(Box::new(Ty::Con(RWLOCK.into())), vec![value])
+}
+
+/// The `thread` handle types that carry their value type.
+pub const THREAD_HANDLES: [&str; 5] = [THREAD, SENDER, RECEIVER, MUTEX, RWLOCK];
+
+/// The name of a builtin opaque handle `ty` is: a bare `Stream`, or a
+/// `thread` handle applied to its value type (`Thread<T>`, `Sender<T>`, …).
+pub fn opaque_handle_name(ty: &Ty) -> Option<&str> {
+    match strip_readonly(ty) {
+        Ty::Con(n) if n == STREAM => Some(n),
+        Ty::App(head, args) if args.len() == 1 => match head.as_ref() {
+            Ty::Con(n) if THREAD_HANDLES.contains(&n.as_str()) => Some(n),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// Build the `unit` type (used for side-effecting expressions, `print`, etc.).
@@ -671,6 +688,7 @@ pub fn is_shallow_const_mutable(ty: &Ty) -> bool {
         }
         Ty::App(head, args) => match (head.as_ref(), args.as_slice()) {
             (Ty::Con(n), [target]) if n == ROOT || n == WEAK => is_shallow_const_mutable(target),
+            (Ty::Con(n), [_]) if THREAD_HANDLES.contains(&n.as_str()) => false,
             _ => true,
         },
         _ => false,

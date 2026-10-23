@@ -1,8 +1,7 @@
 // Local tuples read with constant indices: escape analysis turns them into
 // slots, so the loop allocates nothing.
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn churn(int n) -> int {
     let total = 0;
@@ -16,5 +15,5 @@ fn churn(int n) -> int {
 }
 
 fn main() {
-    let _ = write_all(stdout(), to_bytes(format("%i", churn(3000000))));
+    let _ = print(format("%i", churn(3000000)));
 }

@@ -12,7 +12,10 @@ inputs:
       after every green CI run) or a release tag such as `v0.2.0`.
     default: edge
   stdlib:
-    description: Also clone coil-stdlib and export COIL_STDLIB_DIR (`true` or `false`).
+    description: >-
+      Also clone coil-stdlib and export its directory as COIL_STDLIB_DIR
+      (`true` or `false`). coil does not read it: pass
+      `--root "$COIL_STDLIB_DIR/src"` (or this action's `src` output).
     default: "false"
   stdlib-ref:
     description: coil-stdlib branch, tag or commit to clone (empty = default branch).

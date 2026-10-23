@@ -5,8 +5,8 @@
 //! hands the streak to `execute_dense`, a compact match that runs until the
 //! first op outside `ALWAYS_HOT`, so a dense loop does not bounce back to the
 //! giant match per opcode. CALL / RETURN / packed LOAD / STORE stay on the
-//! giant match. FORMAT / HostInvoke / `rest` live in `.text.unlikely` so they
-//! are not in the hot working set.
+//! giant match. Every other opcode goes to `exec_rest`, a separate function
+//! that keeps them out of the giant match's code (not `#[cold]`, #1882).
 //!
 //! A 256-entry fn-pointer table and a compact "hotmatch" loop were measured as
 //! A/B alternatives (COI-373..376, `COIL_THREADED_DISPATCH`) and removed: they
@@ -32,10 +32,38 @@ struct HotExtra<'a> {
     vregs: &'a mut [[u64; common::simd::LANES]; common::simd::NREGS],
 }
 
-/// Outcome of a remaining (non-kernel) op executed via [`super::Machine::exec_rest`].
+/// Outcome of a call helper of [`super::Machine::exec_rest`].
 pub(super) enum RestFlow {
     Continue,
     Done(bool),
+}
+
+/// What [`super::Machine::exec_rest`] hands back to `execute`: the `ip` /
+/// `sp` to resume at, or (`ip == usize::MAX`) the paused flag to return.
+/// Two words come back in registers, so the two hottest values are not
+/// spilled to memory around every rest op (#1882).
+#[derive(Clone, Copy)]
+pub(super) struct RestExit {
+    ip: usize,
+    sp: usize,
+}
+
+impl RestExit {
+    #[inline(always)]
+    pub(super) fn resume(ip: usize, sp: usize) -> Self {
+        Self { ip, sp }
+    }
+
+    #[inline(always)]
+    pub(super) fn done(paused: bool) -> Self {
+        Self { ip: usize::MAX, sp: paused as usize }
+    }
+
+    /// `Err(paused)` when execution stops; otherwise `(ip, sp)`.
+    #[inline(always)]
+    pub(super) fn get(self) -> Result<(usize, usize), bool> {
+        if self.ip == usize::MAX { Err(self.sp != 0) } else { Ok((self.ip, self.sp)) }
+    }
 }
 
 struct HotCtx<'a, 'e> {
@@ -93,6 +121,7 @@ const ALWAYS_HOT: [u64; 4] = {
     b = or_hot(b, Instruction::DenseIndex);
     b = or_hot(b, Instruction::DenseStoreIndex);
     b = or_hot(b, Instruction::DenseArrayLen);
+    b = or_hot(b, Instruction::DenseArrayPush);
     b = or_hot(b, Instruction::DenseFieldLoad);
     b = or_hot(b, Instruction::DenseFieldStore);
     b = or_hot(b, Instruction::JMP);
@@ -605,6 +634,42 @@ pub(super) fn dense_store_index(args: DenseStoreIndexArgs<'_>) -> Result<(), Den
         return Err(DenseFail::StoreNonArray);
     }
     Ok(())
+}
+
+/// Not a panic: a streak op handing itself back to the giant match
+/// unexecuted (`ctx.ip` back on it), which [`consume_always_hot_streak`]
+/// reports as a plain stop.
+static STREAK_YIELD: &str = "dense streak yield";
+
+/// `DenseArrayPush` that fits the array's storage as it is (#1864): the
+/// array from the one-entry dense cache, no growth, so no accounting and no
+/// allocation safepoint. False when the push would grow (or the slot is not
+/// an array): the giant match runs it.
+#[inline(always)]
+fn dense_array_push(ctx: &mut HotCtx<'_, '_>, opcode: &Byte) -> bool {
+    let (_, dest, arr, val) = opcode.dense_abc_parts();
+    let (sp, stack_cap) = (ctx.sp, ctx.stack_cap);
+    promise!(sp + dest < stack_cap);
+    promise!(sp + arr < stack_cap);
+    promise!(sp + val < stack_cap);
+    let target = ctx.stack[sp + arr];
+    let value = ctx.stack[sp + val];
+    let Some(Object::Array(mut gc)) = resolve_dense_index_object_in(
+        ctx.heap,
+        ctx.extra.frames_len,
+        ctx.extra.frame_pins,
+        ctx.extra.dense_obj_addr,
+        ctx.extra.dense_obj,
+        arr as u32,
+        target.raw() as u64,
+    ) else {
+        return false;
+    };
+    if !gc.as_mut().push_in_place(value) {
+        return false;
+    }
+    ctx.stack[sp + dest] = target;
+    true
 }
 
 #[inline(always)]
@@ -1181,6 +1246,14 @@ fn exec_dense(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) {
                 ctx.panic_msg = Some("index out of bounds");
             }
         }
+        Instruction::DenseArrayPush => {
+            if !dense_array_push(ctx, &opcode) {
+                // Back to the push: the giant match grows the array and
+                // runs the allocation safepoint.
+                ctx.ip -= 1;
+                ctx.panic_msg = Some(STREAK_YIELD);
+            }
+        }
         Instruction::DenseStoreIndex => match dense_store_index(DenseStoreIndexArgs {
             stack: ctx.stack,
             sp: ctx.sp,
@@ -1228,11 +1301,11 @@ fn execute_dense(ctx: &mut HotCtx<'_, '_>) {
         if unlikely(!is_always_hot(bc)) {
             return;
         }
-        super::note_dispatch_at(ctx.ip, ctx.stack, ctx.sp);
+        super::note_dispatch_at(ctx.ip);
         ctx.ip += 1;
         prefetch_code(ctx.code, ctx.ip);
         exec_dense(ctx, bc, opcode);
-        // Panic is the only stop.
+        // A panic (or a `STREAK_YIELD`) is the only stop.
         if unlikely(ctx.panic_msg.is_some()) {
             return;
         }
@@ -1311,7 +1384,7 @@ pub(super) fn consume_always_hot_streak<const S: usize>(
     *ip = ctx.ip;
     *sp = ctx.sp;
     *fuel = ctx.fuel;
-    ctx.panic_msg
+    ctx.panic_msg.filter(|msg| !std::ptr::eq(*msg, STREAK_YIELD))
 }
 
 #[cfg(test)]

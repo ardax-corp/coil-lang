@@ -3,13 +3,12 @@
 //
 // @output hello
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 gen fn ping() {
     let msg = yield "ready";
-    let _ = write_all(stdout(), to_bytes(format("%s", msg)));
+    let _ = print(format("%s", msg));
 }
 
 fn main() {

@@ -1,7 +1,6 @@
 // C2b / Q6 rung 2: user Iterator::next as two-slot Option match + CALL.
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 class Counter {
     pub cur: int,
@@ -43,5 +42,5 @@ fn main() {
         total = total + iter_sum(new Counter(0, 1 << 14));
         round = round + 1;
     }
-    let _ = write_all(stdout(), to_bytes(format("%i", total)));
+    let _ = print(format("%i", total));
 }

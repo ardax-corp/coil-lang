@@ -1,7 +1,6 @@
 // C2 / Q6: returned Range as two-slot [start, end], then counted for-in.
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn make_range(int n) -> Range<int> {
     return 0..n;
@@ -23,5 +22,5 @@ fn main() {
         total = total + range_sum(1 << 14);
         round = round + 1;
     }
-    let _ = write_all(stdout(), to_bytes(format("%i", total)));
+    let _ = print(format("%i", total));
 }

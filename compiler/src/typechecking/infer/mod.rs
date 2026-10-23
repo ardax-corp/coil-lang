@@ -88,7 +88,9 @@ pub enum ForInKind {
     /// User `IntoIterator`: `into_iter` then a counted builtin `IntoIter`
     /// (array / tuple / numeric range) or `Iterator::next` → `Option<Item>`.
     Custom {
-        into_iter_fqn: String,
+        /// `None` for an `Iterator` that is not `IntoIterator`: the loop
+        /// calls `next` on the iterable itself.
+        into_iter_fqn: Option<String>,
         /// `None` when [`Self::Custom::counted`] desugars `IntoIter`.
         next_fqn: Option<String>,
         counted: Option<ForInCounted>,
@@ -202,9 +204,16 @@ pub struct Checker {
     /// local, its FQN and the placeholder variable it is bound to. A value
     /// use of it is an error unless `m::x` turned out to be a value (#1338).
     unresolved_imports: HashMap<String, (String, TyVarId)>,
+    /// Module path -> every name its top level declares (persists across
+    /// files): a disk `use` of a name not in it is an error (#1851).
+    module_item_names: HashMap<String, HashSet<String>>,
     /// Local name -> FQN of every `use` in the current file. A second `use`
     /// binding the same local to another item is an error (#1354).
     import_locals: HashMap<String, String>,
+    /// Local name -> enum key of every `use` of another module's enum, bound
+    /// before enums are registered so a payload type that names one resolves
+    /// to it (#1947).
+    imported_enum_keys: HashMap<String, String>,
     /// Local names bound by disk-module `use` (e.g. `io::sync::write_all`).
     /// Like virtual imports and module-visible named `fn`s, these are
     /// file-level globals — not lambda/defer captures — and must be rebound
@@ -542,6 +551,28 @@ pub struct Checker {
     /// Match exhaustiveness checks deferred until substitution is closed.
     pending_exhaustive: Vec<PendingExhaustive>,
 
+    /// Arithmetic operands whose type was still open at the operator, with
+    /// the operator and its span: the enclosing function rejects any that
+    /// its body never resolves (#1845).
+    open_operands: Vec<(Ty, &'static str, Range<usize>)>,
+
+    /// Empty `[]` call arguments, typed by the parameter they meet rather
+    /// than an expected type: the enclosing function rejects any that do
+    /// not resolve to a `Vec<T>` or `[T; 0]` (#1876).
+    open_empty_arrays: Vec<(Ty, Range<usize>)>,
+
+    /// Set by `infer_call_arg` for an empty `[]` argument, taken by
+    /// `infer_array_literal`.
+    defer_empty_array: bool,
+
+    /// Array literals whose elements are different types, waiting for the
+    /// element type to resolve: a trait object packs each element (#1853),
+    /// anything else is the element mismatch.
+    mixed_literals: Vec<MixedLiteral>,
+    /// Function bodies being checked: a mixed literal outside one (a type
+    /// alias's right-hand side) is reported where it stands.
+    fn_body_depth: usize,
+
     /// `gc::weak` arguments and generic instantiations, checked once
     /// substitution is closed: a readonly class instance may not be
     /// weakened, directly (#1644) or through a type parameter (#1670).
@@ -763,6 +794,19 @@ pub struct CStructDef {
 pub struct CallbackSigDef {
     pub args: Vec<u32>,
     pub ret: u32,
+}
+
+/// An array literal of differently typed elements, checked once its
+/// element type is known (#1853).
+#[derive(Debug, Clone)]
+struct MixedLiteral {
+    /// The literal's element type: an open variable at the literal.
+    element: Ty,
+    /// Each element's type, node and span, as its pack is recorded.
+    items: Vec<(Ty, Option<NodeId>, (usize, usize))>,
+    /// The first mismatch, reported if no trait object takes them all.
+    mismatch: String,
+    range: Range<usize>,
 }
 
 /// One pending exhaustiveness check, recorded at the match site and

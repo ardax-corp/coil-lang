@@ -1,39 +1,29 @@
-// 01-todo — small showcase: classes, arrays, Result/?, format, modules.
+// 01-todo — small showcase: classes, an enum field, Vec, Result/?, modules.
 //
 // Expected output:
-//   board:3 done:1 | 1:write tests [Doing] | 2:ship demo [Todo] | 3:nap [Done] |
+//   board: 3 tasks, 1 done
+//   1: write tests [Doing]
+//   2: ship demo [Todo]
+//   3: nap [Done]
 
-use board::{Task, add_task, advance_task, board_len, count_done, empty_board, status_name};
+use board::{Task, add_task, advance_task, count_done, status_name};
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::println;
+use string::format;
 
-fn print_task(Task t) {
-    let _ = write_all(
-        stdout(),
-        to_bytes(format("%i:%s [%s] | ", t.id, t.title, status_name(t.status))),
-    );
-}
+fn main() -> Result<(), string> {
+    let board: Vec<Task> = [];
+    add_task(board, "write tests");
+    add_task(board, "ship demo");
+    let nap = add_task(board, "nap");
 
-fn main() {
-    let board = empty_board();
-    board = add_task(board, "write tests");
-    board = add_task(board, "ship demo");
-    board = add_task(board, "nap");
+    advance_task(board, 1)?;
+    advance_task(board, nap)?;
+    advance_task(board, nap)?;
 
-    advance_task(board, 1);
-    advance_task(board, 3);
-    advance_task(board, 3);
-
-    let _ = write_all(
-        stdout(),
-        to_bytes(format("board:%i done:%i | ", board_len(board), count_done(board))),
-    );
-
-    let i = 1;
-    while i <= board_len(board) {
-        print_task(board[i]);
-        i = i + 1;
+    let _ = println(format("board: %i tasks, %i done", board.len(), count_done(board)));
+    for t in board {
+        let _ = println(format("%i: %s [%s]", t.id, t.title, status_name(t.status)));
     }
+    return Ok(());
 }

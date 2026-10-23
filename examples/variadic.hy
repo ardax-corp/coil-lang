@@ -2,9 +2,8 @@
 //
 // @output 60Hi!?
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn sum(int... xs) -> int {
     let n = xs.len();
@@ -29,7 +28,7 @@ fn greet(string name, string... extras) -> string {
 }
 
 fn main() {
-    let _ = write_all(stdout(), to_bytes(format("%i", sum(1, 2, 3))));
-    let _ = write_all(stdout(), to_bytes(format("%i", sum())));
-    let _ = write_all(stdout(), to_bytes(format("%s", greet(name: "Hi", "!", "?"))));
+    let _ = print(format("%i", sum(1, 2, 3)));
+    let _ = print(format("%i", sum()));
+    let _ = print(format("%s", greet(name: "Hi", "!", "?")));
 }

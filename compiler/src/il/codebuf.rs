@@ -433,7 +433,7 @@ impl CodeBuf {
         let mut existing: Option<Label> = None;
         for (i, op) in self.il.ops().iter().enumerate() {
             if emitting == code_pos {
-                if let IlOp::Label(l) | IlOp::JoinLabel(l) = op {
+                if let IlOp::Label(l) = op {
                     existing = Some(*l);
                 } else {
                     raw_idx = i;

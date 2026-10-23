@@ -603,7 +603,7 @@ fn host_native_at(bytecode: &[Byte], start: usize, pc: usize, constants: &[u64])
             return fits.then_some(native.name);
         }
         let il = IlOp::byte(byte);
-        if matches!(il, IlOp::Jump { .. } | IlOp::Label(_) | IlOp::JoinLabel(_)) {
+        if matches!(il, IlOp::Jump { .. } | IlOp::Label(_)) {
             return None;
         }
         depth += crate::il::stack_delta(&il)?;
@@ -711,7 +711,7 @@ pub fn format_bytecode_annotated(
 
 pub(crate) fn format_il_op(op: &IlOp) -> String {
     match op {
-        IlOp::Label(l) | IlOp::JoinLabel(l) => format!("Label L{}", l.0),
+        IlOp::Label(l) => format!("Label L{}", l.0),
         IlOp::Jump { kind, target, .. } => {
             let k = match kind {
                 IlJumpKind::Unconditional => "JMP",

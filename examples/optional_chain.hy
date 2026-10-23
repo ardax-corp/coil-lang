@@ -2,9 +2,8 @@
 //
 // @output 42,0
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn show(Option o) -> int {
     return match o {
@@ -16,6 +15,6 @@ fn show(Option o) -> int {
 fn main() {
     let some = Option::Some({ v: 42 });
     let none = Option::None;
-    let _ = write_all(stdout(), to_bytes(format("%i,", show(some?.v))));
-    let _ = write_all(stdout(), to_bytes(format("%i", none?.v ?? 0)));
+    let _ = print(format("%i,", show(some?.v)));
+    let _ = print(format("%i", none?.v ?? 0));
 }

@@ -1,9 +1,9 @@
 # Language quirks (locked Q1–Q9)
 
 Locked **2026-09-10**. Source of truth: Linear project
-[Language quirks](https://linear.app/ardax/project/language-quirks-025aacdd851c)
-([COI-323](https://linear.app/ardax/issue/COI-323) … [COI-332](https://linear.app/ardax/issue/COI-332);
-this note is [COI-331](https://linear.app/ardax/issue/COI-331)).
+Language quirks
+(COI-323 … COI-332;
+this note is COI-331).
 
 This file is **spec**, not a compiler changelog. Implementation tickets are
 Q1–Q9 themselves. Do not treat leftover I4 / dense refuse rows as
@@ -25,15 +25,15 @@ cookbook for Q5 is the section below plus
 
 | Id | Issue | Title | Locked |
 |----|-------|-------|--------|
-| Q1 | [COI-323](https://linear.app/ardax/issue/COI-323) | `[T; N]` reference + box-once | Reference semantics. Invisible unbox (frame slots / SROA) only when proven non-escaping. On escape, **box once** and reuse that heap identity. |
-| Q2 | [COI-324](https://linear.app/ardax/issue/COI-324) | Named class reference + field-SROA | Named `new C` locals are references. Invisible field-SROA when field-only and non-escaping. Any identity use forces a real heap instance. Mirrors Q1. |
-| Q3 | [COI-325](https://linear.app/ardax/issue/COI-325) | `[T; N]` cannot grow | `ArrayPush` / grow on a fixed array is a **type error**. Use `Vec`. |
-| Q4 | [COI-326](https://linear.app/ardax/issue/COI-326) | Defined `i % N` for indexing | For **indexing**, `i % N` always maps into `0..N` (Euclidean-or-equivalent). Plain `xs[k]` without `%` still OOB outside `0..N`. |
-| Q5 | [COI-327](https://linear.app/ardax/issue/COI-327) | `panic` vs `raise` | Keep both: `panic` **aborts the process**; `raise` **is catchable**. Document hard. Checksum / CLI boards use `panic`. |
-| Q6 | [COI-328](https://linear.app/ardax/issue/COI-328) | MIR-friendly `for` / iterator | **Commit** a near-term MIR-friendly iterator protocol — not a permanent fuse-IL ceiling. |
-| Q7 | [COI-329](https://linear.app/ardax/issue/COI-329) | Dense / LIR recursion | **Commit** near-term dense or LIR recursion / typed recursive `CALL`. Recursive callees are not forever fuse-only. |
-| Q8 | [COI-330](https://linear.app/ardax/issue/COI-330) | Dense+match niche / two-slot | **Commit** near-term **dense+match** for niche / two-slot (not only MIR→LIR I2). |
-| Q9 | [COI-332](https://linear.app/ardax/issue/COI-332) | Full format / string on MIR | **Commit** full format / string on MIR. **Reopen I4** as a delivery ladder, not a permanent barrier. |
+| Q1 | COI-323 | `[T; N]` reference + box-once | Reference semantics. Invisible unbox (frame slots / SROA) only when proven non-escaping. On escape, **box once** and reuse that heap identity. |
+| Q2 | COI-324 | Named class reference + field-SROA | Named `new C` locals are references. Invisible field-SROA when field-only and non-escaping. Any identity use forces a real heap instance. Mirrors Q1. |
+| Q3 | COI-325 | `[T; N]` cannot grow | `ArrayPush` / grow on a fixed array is a **type error**. Use `Vec`. |
+| Q4 | COI-326 | Defined `i % N` for indexing | For **indexing**, `i % N` always maps into `0..N` (Euclidean-or-equivalent). Plain `xs[k]` without `%` still OOB outside `0..N`. |
+| Q5 | COI-327 | `panic` vs `raise` | Keep both: `panic` **aborts the process**; `raise` **is catchable**. Document hard. Checksum / CLI boards use `panic`. |
+| Q6 | COI-328 | MIR-friendly `for` / iterator | **Commit** a near-term MIR-friendly iterator protocol — not a permanent fuse-IL ceiling. |
+| Q7 | COI-329 | Dense / LIR recursion | **Commit** near-term dense or LIR recursion / typed recursive `CALL`. Recursive callees are not forever fuse-only. |
+| Q8 | COI-330 | Dense+match niche / two-slot | **Commit** near-term **dense+match** for niche / two-slot (not only MIR→LIR I2). |
+| Q9 | COI-332 | Full format / string on MIR | **Commit** full format / string on MIR. **Reopen I4** as a delivery ladder, not a permanent barrier. |
 
 ## Q1 — `[T; N]` is a reference; box once on escape
 
@@ -50,8 +50,8 @@ later escape edge. Later private index of that local goes through the
 boxed object (slots are only a pre-escape rewrite). Value-array semantics
 and always-heap are non-goals.
 
-Compiler (A1 [COI-334](https://linear.app/ardax/issue/COI-334) + Q1
-[COI-323](https://linear.app/ardax/issue/COI-323)): codegen boxes once (the IL `escape_analysis` pass was
+Compiler (A1 COI-334 + Q1
+COI-323): codegen boxes once (the IL `escape_analysis` pass was
 removed 2026-10). A refused
 inline must not leave a stale box cache (that was a fresh
 `LOAD` of an unwritten slot). S2g's old fresh-`MakeArray`-per-edge policy
@@ -70,12 +70,12 @@ field uses after it go through the boxed instance. Do not emit a fresh
 `InitTyped` per edge. `fn drop()` and arity 0 or > 32 stay heap from
 construction (finalizer / layout).
 
-Compiler (S2j [COI-320](https://linear.app/ardax/issue/COI-320) + Q2
-[COI-324](https://linear.app/ardax/issue/COI-324)): codegen binds eligible
+Compiler (S2j COI-320 + Q2
+COI-324): codegen binds eligible
 `new C` to field slots and `emit_escape_unboxed_class` boxes once.
 HIR lowering decides which locals never escape (the checker's `local_escape` sidecar was removed as unused).
 
-**[COI-84](https://linear.app/ardax/issue/COI-84) non-goal is superseded
+**COI-84 non-goal is superseded
 for this narrow case.** COI-84 closed as “named locals stay allocated”
 (#134 pin). Q2 reopens field-SROA and aligns that pin with box-once:
 identity still forces heap, but not a heap-from-`new` refuse.
@@ -89,7 +89,7 @@ Growable storage is `Vec`. Length-changing Vec methods (`push`, `insert`,
 the typechecker (call site and method-as-value access), not later as a
 MIR / escape refuse.
 
-Compiler ([COI-325](https://linear.app/ardax/issue/COI-325)):
+Compiler (COI-325):
 `FixedArrayGrow` (E0412) with help `use Vec<T> for growable storage`.
 
 ## Q4 — Indexing `i % N` maps into `0..N`
@@ -113,7 +113,7 @@ always fix up.
 Plain `xs[k]` **without** `%` still panics OOB when `k` is outside
 `0..N`. Defined mod does not weaken unproven index checks.
 
-Compiler ([COI-326](https://linear.app/ardax/issue/COI-326)):
+Compiler (COI-326):
 `compile_array_index_expr` + sidecar `nonneg_expr`. Heap `Index` and
 SROA select share the same rem.
 
@@ -183,14 +183,14 @@ this docs PR. They **do** change how island / refuse docs may speak:
 Island inventory: [mir-islands.md](mir-islands.md). Dense refuse rows:
 [specialize-refuse.md](specialize-refuse.md). Post-Q6–Q9 ranked leftover
 board: [opt-generalization.md](opt-generalization.md) B0
-([COI-338](https://linear.app/ardax/issue/COI-338/b0-post-quirks-refuse-audit-ranked-revisit-plan)).
+(COI-338).
 
 ## Opt implications (do not implement here)
 
 | Area | Implication |
 |------|-------------|
 | S2g | **Box-once** (Q1 / COI-334). Identity across return / call / field / host matches. |
-| Heap ops | A2 ([COI-335](https://linear.app/ardax/issue/COI-335)): dense-native `Index` / `StoreIndex` / `ArrayLen` / `Make*` when maps allow. Box only at CALL / RETURN / HostInvoke (`DensePush`). Residual LOAD/STORE boxing stays fuse-IL via the cost gate. |
+| Heap ops | A2 (COI-335): dense-native `Index` / `StoreIndex` / `ArrayLen` / `Make*` when maps allow. Box only at CALL / RETURN / HostInvoke (`DensePush`). Residual LOAD/STORE boxing stays fuse-IL via the cost gate. |
 | S2j / I3 | Mirrors Q2. Field-only unbox stays; identity boxes once and reuses. COI-84 non-goal does not block that case. |
 | Grow | Type error on `[T; N]` (Q3). Do not keep grow as an opt refuse for fixed arrays once the checker lands. |
 | Defined mod | S2f / S2k / S2h select and runtime `%` follow Q4. Negative `i % N` is in-range. |

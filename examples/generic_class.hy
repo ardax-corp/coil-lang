@@ -2,9 +2,8 @@
 //
 // @output 42
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 class Cell<T> {
     pub value: T,
@@ -18,5 +17,5 @@ impl Cell<T> {
 
 fn main() {
     let c = new Cell(42);
-    let _ = write_all(stdout(), to_bytes(format("%i", c.get())));
+    let _ = print(format("%i", c.get()));
 }

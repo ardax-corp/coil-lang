@@ -155,7 +155,10 @@ jobs:
           find tests -path '*/compile_fail/*.hy' -print0 \
             | { xargs -0 grep -LZE '^// @expected .*E0(001|208)\b' || true; } \
             | xargs -0 ./target/debug/coil-fmt --check
-          ./target/debug/coil-fmt --check scripts/rep_matrix_known_wrong
+          # Empty once every known-wrong cell is fixed, and git keeps no empty dirs.
+          if [ -d scripts/rep_matrix_known_wrong ]; then
+            ./target/debug/coil-fmt --check scripts/rep_matrix_known_wrong
+          fi
 
       # `tests/representation/` is generated; a hand edit or a generator
       # change without regenerating fails here.
@@ -275,13 +278,13 @@ jobs:
             vm::tests::program_string_cache_dropped_when_incremental_sweep_starts \
             -- --exact
 
-      - name: VM-wire suites (pipeline / perf_metrics / namespace / cursor_model)
+      - name: VM-wire suites (pipeline / perf_metrics / namespace)
         if: runner.os == 'Linux'
         run: |
           # `required-features = ["vm-wire"]` keeps these out of the workspace
           # suite. Name them: `--tests` would rerun every compiler test.
           cargo test -p compiler --features vm-wire \
-            --test pipeline --test perf_metrics --test namespace --test cursor_model
+            --test pipeline --test perf_metrics --test namespace
 
       - name: Showcase project tests
         run: |

@@ -576,7 +576,7 @@ fn walk_self_calls<'a>(ast: &'a Output<'a>, fn_name: &str, out: &mut Vec<&'a [Ou
             walk_self_calls(iterable, fn_name, out);
             walk_self_calls(body, fn_name, out);
         }
-        Expression::Variable(_, Some(init)) | Expression::Constant(_, Some(init)) => {
+        Expression::Variable(_, Some(init)) | Expression::Constant(_, Some(init), ..) => {
             walk_self_calls(init, fn_name, out);
         }
         Expression::Function {
@@ -1510,7 +1510,7 @@ fn let_const_binding<'a>(items: &'a [Output<'a>]) -> Option<(&'a str, &'a Output
     }
     match peel(&items[0]).1.as_ref() {
         Expression::Variable(n, _) => Some((*n, &items[1])),
-        Expression::Constant(name_e, _) => match peel(name_e).1.as_ref() {
+        Expression::Constant(name_e, ..) => match peel(name_e).1.as_ref() {
             Expression::Identifier(n) => Some((*n, &items[1])),
             _ => None,
         },

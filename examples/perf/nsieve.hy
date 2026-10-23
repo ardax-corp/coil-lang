@@ -1,8 +1,7 @@
 // CPU: integer loops + array mutation (cross-lang fair bench).
 // Sieve of Eratosthenes; n = 1<<14; prints prime count.
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn nsieve(int n) -> int {
     let flags: Vec<int> = Vec::with_capacity(n);
@@ -28,5 +27,5 @@ fn nsieve(int n) -> int {
 }
 
 fn main() {
-    let _ = write_all(stdout(), to_bytes(format("%i", nsieve(1 << 14))));
+    let _ = print(format("%i", nsieve(1 << 14)));
 }

@@ -5,6 +5,9 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | Document | Contents |
 |----------|----------|
 | [Pipeline](pipeline.md) | Parse → typecheck → HIR (inline, optimize) → MIR for every body → dense or LIR bytecode → archive → execute |
+| [Archive history](archive-history.md) | Older archive minors (5–37); `common/src/archive.rs` is the ledger for the current version |
+| [Dictionary passing](dictionary-passing.md) | Calling convention for trait-bounded generics that are not monomorphized |
+| [Type unification](type-unification.md) | Unification rules of the checker, by type shape |
 | [Comptime](comptime.md) | Code that runs while compiling: consts, `comptime` expressions and blocks, macros, folding; stages, limits, IO grants, result cache, tooling |
 | [Macros](macros.md) | User `derive` / attribute macros: `macro` model, `quote`, compile-time VM stage, hygiene, sandbox |
 | [Numeric MIR](mir.md) | MIR: every body lowers from HIR to SSA; dense and LIR tiers; pass history (P1–P12, I1–I8) |
@@ -44,7 +47,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [Stack bounds](stack-bounds.md) | Operand stack sizing, run-time growth, and the optional `#[max_depth]` |
 | [Collections VM split](collections-vm-split.md) | Userland collections vs VM primitives |
 | [Debug line table](debug-info.md) | `source_files` / `debug_locs` in `.hyc` |
-| [Superinstruction candidates](superinstructions-candidates.md) | Historical: [COI-378](https://linear.app/ardax/issue/COI-378) S0: fused-op inventory, S1–S8 refine notes, extras that do not need specialize-keep |
+| [Superinstruction candidates](superinstructions-candidates.md) | Historical: COI-378 S0: fused-op inventory, S1–S8 refine notes, extras that do not need specialize-keep |
 | [Opcodes](opcodes.md) | Selected bytecode ops behind builtins |
 | [Dissect](dissect.md) | `coil dissect` — in-memory bytecode / IL / AST dump |
 | [Array pins](array-pin.md) | Array-handle pins: only the prologue `ArrayPin` is still emitted; `IndexPin*` / `StoreIndexPin*` are retired |

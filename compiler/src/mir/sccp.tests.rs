@@ -106,3 +106,21 @@ bb2:
 }";
     assert_eq!(returned_const(text), None);
 }
+
+#[test]
+fn a_one_input_phi_removed_alone_rewrites_its_uses() {
+    // Nothing folds but the phi (#1898): its uses must still read `v0`.
+    let text = "func @f(v0: i64) -> i64 {
+bb0:
+    jump bb1
+bb1:
+    v1 = phi.i64 [bb0: v0]
+    v2 = iadd v1, v1
+    return v2
+}";
+    let mut f = parse_func(text).expect(text);
+    f.verify().unwrap();
+    sccp(&mut f);
+    f.verify().unwrap();
+    assert!(f.blocks.iter().flat_map(|b| &b.insts).all(|i| !i.is_phi()), "phi left:\n{f}");
+}

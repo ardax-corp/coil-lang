@@ -3,6 +3,7 @@
 // @output true,true,true,true
 
 use io::stdout;
+use io::sync::print;
 use io::sync::write_all;
 use string::{format, to_bytes};
 
@@ -18,8 +19,8 @@ enum Outer {
 }
 
 fn main() {
-    let _ = write_all(stdout(), to_bytes(format("%z,", 42.hash() == 42.hash())));
-    let _ = write_all(stdout(), to_bytes(format("%z,", "hi".hash() == "hi".hash())));
+    let _ = print(format("%z,", 42.hash() == 42.hash()));
+    let _ = print(format("%z,", "hi".hash() == "hi".hash()));
     let _ = write_all(
         stdout(),
         to_bytes(format("%z,", Outer::Wrap(Inner::A(1)).hash() == Outer::Wrap(Inner::A(1)).hash())),

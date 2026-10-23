@@ -3,9 +3,8 @@
 //
 // @output 42
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 trait Convert<A, B> {
     fn cast(A x) -> B {}
@@ -22,5 +21,5 @@ fn apply_cast<A, B>(A x) -> B where Convert<A, B> {
 }
 
 fn main() {
-    let _ = write_all(stdout(), to_bytes(format("%i", apply_cast(42))));
+    let _ = print(format("%i", apply_cast(42)));
 }

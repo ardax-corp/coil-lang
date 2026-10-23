@@ -43,9 +43,5 @@ name = "namespace"
 required-features = ["vm-wire"]
 
 [[test]]
-name = "cursor_model"
-required-features = ["vm-wire"]
-
-[[test]]
 name = "perf_metrics"
 required-features = ["vm-wire"]

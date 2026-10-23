@@ -4,9 +4,8 @@
 // loop IPA can chunk it. Nested `for y { for x { sum += pixel(...) } }` is
 // still sequential today (outer IV is not an int capture inside that body).
 // Sequential A4: COIL_AUTO_PAR=0. Flagship mandelbrot.hy stays the control.
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn pixel(int x, int y) -> int {
     let cr = (2.0 * (x as float) / 160.0) - 1.5;
@@ -41,5 +40,5 @@ fn mandelbrot() -> int {
 }
 
 fn main() {
-    let _ = write_all(stdout(), to_bytes(format("%i", mandelbrot())));
+    let _ = print(format("%i", mandelbrot()));
 }

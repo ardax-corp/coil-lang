@@ -191,7 +191,8 @@ pub enum HirIterNext {
 /// `into_iter` once, then `next` until it returns `None`.
 #[derive(Clone, Debug)]
 pub struct HirIterLoop {
-    pub into_iter: Label,
+    /// `None` when the iterable is the iterator.
+    pub into_iter: Option<Label>,
     pub next: Label,
     /// The iterator `into_iter` returns.
     pub iter_ty: Ty,
@@ -293,7 +294,11 @@ impl HirMirInput<'_> {
             .or_else(|| (self.scalar_enum)(ty))
             .or_else(|| (self.niche)(ty))
             .or_else(|| (self.boxed_enum)(ty, None).map(|_| MirTy::HeapRef))
-            .or_else(|| array_elem(ty).and_then(|e| self.heap_elem(e).or_else(|| (self.niche)(e))).map(|_| MirTy::HeapRef))
+            .or_else(|| {
+                array_elem(ty)
+                    .and_then(|e| self.heap_elem(e).or_else(|| (self.niche)(e)).or_else(|| (self.scalar_enum)(e)))
+                    .map(|_| MirTy::HeapRef)
+            })
             .or_else(|| (self.opaque_vars && is_var(ty)).then_some(MirTy::I64))
             .or_else(|| (self.opaque_vars && array_elem(ty).is_some_and(is_var)).then_some(MirTy::HeapRef))
             // A higher-kinded `P<A>` (a type variable applied): an object
@@ -328,7 +333,8 @@ impl HirMirInput<'_> {
     /// the word itself, as HIR emission stores it), or a heap word.
     fn elem_word(&self, arr: &Ty) -> Option<MirTy> {
         let elem = array_elem(arr)?;
-        match scalar(elem) {
+        // A scalar enum's element is its backing word (#1903).
+        match scalar(elem).or_else(|| (self.scalar_enum)(elem)) {
             Some(t) => Some(t),
             // A type parameter's element: the opaque word as stored.
             _ if self.opaque_vars && is_var(elem) => Some(MirTy::I64),
@@ -816,8 +822,7 @@ fn is_gc_handle(ty: &Ty) -> bool {
 /// An opaque `thread` module handle (`Thread`, `Sender`, `Receiver`,
 /// `Mutex`, `RwLock`): a heap object.
 fn is_thread(ty: &Ty) -> bool {
-    use crate::typechecking::ty::{MUTEX, RECEIVER, RWLOCK, SENDER, THREAD};
-    matches!(strip_readonly(ty), Ty::Con(n) if [THREAD, SENDER, RECEIVER, MUTEX, RWLOCK].contains(&n.as_str()))
+    crate::typechecking::ty::opaque_handle_name(ty).is_some_and(|n| n != crate::typechecking::ty::STREAM)
 }
 
 /// The element type of an array or `Vec`.
@@ -3562,12 +3567,17 @@ impl Lower<'_> {
         let Some(src) = self.word_or_boxed(iterable)? else {
             return Ok(Val::Never);
         };
-        let abi = DenseAbi {
-            params: vec![self.b.value_ty(src)],
-            ret: it_ty,
-            ret_hi: None,
+        let it = match plan.into_iter {
+            Some(into_iter) => {
+                let abi = DenseAbi {
+                    params: vec![self.b.value_ty(src)],
+                    ret: it_ty,
+                    ret_hi: None,
+                };
+                self.b.ins_call(into_iter, vec![src], &abi).map_err(mir)?.0
+            }
+            None => src,
         };
-        let (it, _) = self.b.ins_call(plan.into_iter, vec![src], &abi).map_err(mir)?;
         let item = self.hir.local(local).ty.clone().ok_or("local type")?;
         let opt = crate::typechecking::ty::option_ty(item);
         let (ret, ret_hi) = match plan.shape {
@@ -4559,7 +4569,13 @@ impl Lower<'_> {
         // A two-word value comes back boxed, as the adapter's one-word ABI
         // returns it: the word, unboxed where a pair is read.
         let boxed_pair = self.inp.pair_tys.contains_key(&id.0);
-        if boxed_pair && (self.inp.boxed_view)(ty, None).is_none() {
+        // Any pair `unbox_word` reads back: an enum, a product tuple
+        // (#1859), a range or a readonly class pair.
+        let unboxable = (self.inp.boxed_view)(ty, None).is_some()
+            || matches!(strip_readonly(ty), Ty::Tuple(items) if items.len() == 2)
+            || crate::layout::two_word_range_kind(ty).is_some()
+            || (self.inp.pair_class)(ty).is_some();
+        if boxed_pair && !unboxable {
             return Err("bound call pair".into());
         }
         let unit = is_unit(ty);
@@ -5239,6 +5255,8 @@ impl Lower<'_> {
     /// plain heap word.
     fn tuple_item(&self, ty: &Ty) -> Option<MirTy> {
         scalar(ty)
+            // A scalar enum item is its backing word (#1903).
+            .or_else(|| (self.inp.scalar_enum)(ty))
             // A `()` item is the empty tuple object (#1427).
             .or_else(|| is_unit(ty).then_some(MirTy::HeapRef))
             .or_else(|| self.inp.plain_heap(ty).then_some(MirTy::HeapRef))

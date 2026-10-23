@@ -8,11 +8,10 @@
 //
 // @output (not checked: needs `--allow-dload sum`; see the example_ffi_* pipeline tests)
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 use ffi_mod::sys::run_twice;
 
 fn main() {
-    let _ = write_all(stdout(), to_bytes(format("%i", run_twice())));
+    let _ = print(format("%i", run_twice()));
 }

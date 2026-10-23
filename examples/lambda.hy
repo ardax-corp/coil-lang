@@ -2,12 +2,11 @@
 //
 // @output 42
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn main() {
     let y = 10;
     let f = fn (int x) use (y) => x + y;
-    let _ = write_all(stdout(), to_bytes(format("%i", f(32))));
+    let _ = print(format("%i", f(32)));
 }

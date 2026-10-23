@@ -77,3 +77,16 @@ element store (+2.6% instructions on the tight `stride_store_iv` loop,
   drains; queued instances are shaded and marking continues).
 - Weak handles clear at the mark→sweep transition, before any reclaim.
 - Archive / opcodes unchanged (runtime-only).
+
+## Finalizer and weak side lists (#1870)
+
+Before each sweep a cycle must find two kinds of object: unmarked objects that still owe a `drop`, and `Weak` handles whose referents died. It no longer walks every slab slot to find them. The heap keeps two address lists: `Heap::finalizable` and `Heap::weaks`.
+
+- **Joining.** A `Weak` joins its list at allocation. An instance or enum joins the finalizable list in three cases:
+  - it is allocated with a `type_id` that has a `drop` (a bitset mirrors the VM's finalizer registry);
+  - `TagEnumType` gives it such a type later;
+  - its type is registered after it was allocated, which costs one heap walk at registration.
+- **Superset.** Both lists may hold more than the live candidates. Each pass sorts and dedups its list. It drops an entry whose slot is poisoned, which happens when a sweep freed it. It also drops an entry whose slot now holds another kind of object, a weak that is already cleared, or an object that is already finalized. An evacuation forwards both lists before it frees the old slots. Epoch allocations collect their entries in the thread's batch and fold them in when the batch flushes.
+- **Cost.** Each cycle now costs O(candidates) instead of O(heap). Measured with `callgrind` on a 300k-object live heap plus 3M short-lived objects:
+  - one live `drop` type: overhead went from 4.6% to 1.3% of instructions;
+  - one `Weak`: overhead went from 1.7% to none.

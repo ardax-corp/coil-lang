@@ -799,6 +799,10 @@ fn run_pipeline(config: &ReportConfig, options: &TestOptions, reporter: Box<dyn 
     pipeline.set_contracts(options.contracts.unwrap_or(compiler::ContractLevel::All));
     if let Some(on) = options.fold_calls {
         pipeline.set_call_fold(on);
+    } else if options.coverage.is_some() {
+        // A computed call never runs its body, so its lines would read
+        // uncovered and `coil mutate` would skip them (#1856).
+        pipeline.set_call_fold(false);
     }
     pipeline.set_host_grants(options.grants.clone());
     // Same search path CI passes with `--root`: examples and a sibling

@@ -1,7 +1,7 @@
 //! IL → `Vec<Byte>` lowering: one [`fuse_select`] then PC assign.
 //!
 //! Fuse windows are typed [`IlOp`]. Residual [`IlOp::Byte`] is a cold refuse.
-//! Labels / [`IlOp::JoinLabel`] / [`FuseHint`] are hard barriers (D3). No
+//! Labels and [`FuseHint`] are hard barriers (D3). No
 //! post-lower `adjust_target`. Per-function fuse is not production.
 
 use std::collections::HashMap;
@@ -29,7 +29,7 @@ pub struct Lowered {
     pub func_label_maps: Vec<HashMap<u32, u32>>,
     /// Post-fusion bytecode length.
     pub code_len: usize,
-    /// Post-opt, pre-fuse ops when captured for the cursor_model gate.
+    /// Post-opt, pre-fuse ops when captured for `coil dissect`.
     pub pre_fuse_ops: Option<Vec<IlOp>>,
     /// Payload arity of each `JumpIfMatch`, by PC (bytecode encodes only the tag).
     pub match_arities: HashMap<u32, u32>,
@@ -251,7 +251,7 @@ fn try_lower_optimized(ops: &[IlOp], pool: &mut Vec<u64>) -> Result<Lowered, IlE
 /// Called once from [`lower_optimized`] after concat. Not a second lowering:
 /// PC assign / encode still happen in [`lower_optimized`]. Residual
 /// [`IlOp::Byte`] is [`Slot::Cold`] — refused in any multi-op window.
-/// [`IlOp::Label`] / [`IlOp::JoinLabel`] binds and [`FuseHint`] are barriers
+/// [`IlOp::Label`] binds and [`FuseHint`] are barriers
 /// (D3 metadata, no dummy ops). Per-function fuse is not production.
 pub(crate) fn fuse_select(ops: &[IlOp], pool: &mut Vec<u64>) -> FuseOut {
     assert_no_residual_abs_jumps(ops);
@@ -262,7 +262,7 @@ pub(crate) fn fuse_select(ops: &[IlOp], pool: &mut Vec<u64>) -> FuseOut {
 
     for op in ops {
         match op {
-            IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => pending.push(*id),
+            IlOp::Label(Label(id)) => pending.push(*id),
             IlOp::Jump {
                 kind,
                 target,
@@ -1436,7 +1436,7 @@ mod tests {
             IlJumpKind::JumpIfFalse,
             exit,
             common::DebugLoc::unknown(),
-            FuseHint::nofuse_value_under_jmp(),
+            FuseHint { nofuse: true },
         );
         il.push_byte(Byte::new(Instruction::CONST).with_const_inline(1));
         il.bind_label(exit);
@@ -2386,7 +2386,7 @@ mod tests {
         );
     }
 
-    /// COI-80 retain path: only `capture_ops` fills `pre_fuse_ops` for the gate.
+    /// Only `capture_ops` fills `pre_fuse_ops` (for `coil dissect`).
     #[test]
     fn lower_module_inner_captures_pre_fuse_ops_only_when_requested() {
         let loc = DebugLoc::unknown();

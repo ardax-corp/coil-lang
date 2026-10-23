@@ -56,7 +56,7 @@ test("a request and reply channel pair round-trips") {
     let t = spawn(doubler, (jobs[1], replies[0]))?;
     send(jobs[0], 21)?;
     assert!(recv(replies[1])? == 42);
-    join(t)?;
+    (join(t)?)?;
 }
 
 test("with_lock serializes increments from several threads") {
@@ -64,9 +64,9 @@ test("with_lock serializes increments from several threads") {
     let a = spawn(bump_many, m)?;
     let b = spawn(bump_many, m)?;
     let c = spawn(bump_many, m)?;
-    join(a)?;
-    join(b)?;
-    join(c)?;
+    (join(a)?)?;
+    (join(b)?)?;
+    (join(c)?)?;
     assert!(with_lock(m, fn (int x) => (x, x))? == 300);
 }
 
@@ -94,7 +94,7 @@ test("a thread recv inside a task lets the other tasks run") {
             Result::Err(_) => -1,
         }
     });
-    join(worker)?;
+    (join(worker)?)?;
     assert!(r == Result::Ok(7));
     assert!(log[0] == "other ran" && log[1] == "received");
 }

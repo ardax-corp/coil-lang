@@ -2,9 +2,8 @@
 //
 // @output 11
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 static let hits = 0;
 
@@ -16,6 +15,6 @@ class Counter {
 fn main() {
     hits = hits + 1;
     Counter::count = Counter::count + 1;
-    let _ = write_all(stdout(), to_bytes(format("%i", hits)));
-    let _ = write_all(stdout(), to_bytes(format("%i", Counter::count)));
+    let _ = print(format("%i", hits));
+    let _ = print(format("%i", Counter::count));
 }

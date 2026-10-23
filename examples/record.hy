@@ -8,6 +8,7 @@
 // @output 169512
 
 use io::stdout;
+use io::sync::print;
 use io::sync::write_all;
 use string::{format, to_bytes};
 
@@ -46,6 +47,6 @@ fn main() {
 
     // Field access: `p.x` and `p.y` extract the
     // record fields without a match.
-    let _ = write_all(stdout(), to_bytes(format("%i", x_coord(Point::Point { x: 5, y: 12 }))));
-    let _ = write_all(stdout(), to_bytes(format("%i", y_coord(Point::Point { x: 5, y: 12 }))));
+    let _ = print(format("%i", x_coord(Point::Point { x: 5, y: 12 })));
+    let _ = print(format("%i", y_coord(Point::Point { x: 5, y: 12 })));
 }

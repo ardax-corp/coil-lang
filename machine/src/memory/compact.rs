@@ -393,6 +393,7 @@ impl Heap {
             emptied,
             mut stats,
         } = plan;
+        self.forward_side_lists(&fwd);
         for &old in fwd.keys() {
             // SAFETY: `old` is a live slot origin copied above; poisoning the
             // header makes it a free slot without dropping the moved payload.

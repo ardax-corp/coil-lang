@@ -1,9 +1,8 @@
 // Iterative sibling of fib.hy. Same fib(32) = 2178309.
 // This is O(n) additions, not the recursive call tree. Compare the answer,
 // not the instruction count, with examples/perf/fib.hy.
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn fib_iter(int n) -> int {
     if n <= 2 {
@@ -23,5 +22,5 @@ fn fib_iter(int n) -> int {
 }
 
 fn main() {
-    let _ = write_all(stdout(), to_bytes(format("%i", fib_iter(32))));
+    let _ = print(format("%i", fib_iter(32)));
 }

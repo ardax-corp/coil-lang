@@ -14,8 +14,6 @@ mod capabilities;
 mod emit_call;
 #[path = "emit_hir.rs"]
 pub(super) mod emit_hir;
-#[path = "emit_match.rs"]
-mod emit_match;
 #[path = "eq_glue.rs"]
 mod eq_glue;
 
@@ -2270,7 +2268,14 @@ impl Compiler {
             .then(|| Self::ty_to_value_tag(&ret))
             .flatten()
             .filter(|&tag| tag == ValueTag::Instance && self.value_layout(&ret) != ValueLayout::Boxed);
-        let body_ret = if ret_from.is_some() {
+        // A two-word result (`Option<int>`) comes back as its pair at the
+        // method's own type; the adapter returns it boxed, as the open
+        // result a dictionary caller reads (#1938).
+        let pair_ret = self
+            .two_word_return_kind(fqn)
+            .and_then(|_| self.fn_return_ty(fqn))
+            .filter(|_| ret_from.is_none() && ret_box.is_none());
+        let body_ret = if ret_from.is_some() || pair_ret.is_some() {
             open_ret
         } else if ret_box.is_some() {
             crate::typechecking::ty::int()
@@ -2317,7 +2322,7 @@ impl Compiler {
         }
         let params = args.iter().map(|&a| self.value_layout(b.body.expr(a).ty.as_ref().expect("typed"))).collect();
         let calls = HashMap::from([(fqn.to_string(), (params, self.value_layout(&ret)))]);
-        let mut value = b.call(fqn, args, ret);
+        let mut value = b.call(fqn, args, pair_ret.unwrap_or(ret));
         if ret_from.is_some() {
             value = b.builtin(Builtin::Relayout, vec![value], body_ret);
         } else if let Some(tag) = ret_box {
@@ -4070,7 +4075,7 @@ impl Compiler {
 
         // Spawn arm 0: its sequential callee, or this worker one hop down.
         let ParArm::Call { callee: callee0, args: args0 } = &site.arms[0];
-        let spawned_ty = coil_ty::result_ty(coil_ty::thread_ty(), thread_err.clone());
+        let spawned_ty = coil_ty::result_ty(coil_ty::thread_ty(arm_rets[0].clone()), thread_err.clone());
         let spawn_seq = {
             let tys: Vec<Ty> = args0.iter().filter_map(&form_ty).collect();
             let f = b.push(HirKind::Global { name: callee0.clone(), def: None }, fn_ty(&tys, &arm_rets[0]));
@@ -4093,7 +4098,7 @@ impl Compiler {
         };
 
         // With a handle: the other arms here, then join arm 0 and combine.
-        let handle = b.local("__coil_par_handle", coil_ty::thread_ty(), LocalKind::Pattern);
+        let handle = b.local("__coil_par_handle", coil_ty::thread_ty(arm_rets[0].clone()), LocalKind::Pattern);
         let joined = b.local("__coil_par_arm0", arm_rets[0].clone(), LocalKind::Pattern);
         let mut on_handle = Vec::new();
         let mut held = vec![joined];
@@ -5844,7 +5849,7 @@ impl Compiler {
             | NamedArg(_, e)
             | Member(e)
             | Method(_, e)
-            | Constant(e, _)
+            | Constant(e, ..)
             | Variable(_, Some(e)) => Self::count_field_key_uses(e, counts),
             Variable(_, None) => {}
             Resume(e, Some(v)) | Coalesce(e, v) | Cast(e, v) | Index(e, Some(v)) => {
@@ -6176,7 +6181,7 @@ impl Compiler {
             match node.1.as_ref() {
                 Expression::Fragment(parts) => {
                     if let [binder, rhs] = parts.as_slice()
-                        && let Expression::Constant(name, _) = binder.1.as_ref()
+                        && let Expression::Constant(name, ..) = binder.1.as_ref()
                         && let Expression::Identifier(name) = name.1.as_ref()
                         && let Some(v) = crate::const_fold::eval_expr(rhs, &env)
                     {
@@ -6964,7 +6969,7 @@ impl Compiler {
             // bodies read; anything else here is a parameter list.
             Expression::Fragment(children) => {
                 if let [binder, rhs] = children.as_slice()
-                    && let Expression::Constant(name, _ty) = binder.1.as_ref()
+                    && let Expression::Constant(name, _ty, ..) = binder.1.as_ref()
                 {
                     let name = self.resolve_variable(name);
                     match crate::const_fold::eval_expr(rhs, self.const_env()) {
@@ -7821,6 +7826,13 @@ impl Compiler {
                                 crate::hir::synth::array_show(b, a[0], element)
                             })
                         }
+                        // A `Vec` shows as an array does (#1848).
+                        ("show", Ty::App(..)) if let Some(element) = crate::typechecking::ty::vec_element_ty(&ty) => {
+                            let element = element.clone();
+                            self.emit_builtin_entry(&name, &[(ty.clone(), tag)], string.clone(), None, |b, a| {
+                                crate::hir::synth::array_show(b, a[0], element)
+                            })
+                        }
                         ("show", Ty::App(..)) => self.emit_builtin_enum_show(&name, &ty, tag.is_some()),
                         ("show", _) => self.emit_builtin_entry(&name, &[(ty.clone(), tag)], string.clone(), None, |b, a| {
                             let fmt = b.str("%v");
@@ -8086,18 +8098,6 @@ impl Compiler {
         }
     }
 
-    /// Retain post-opt pre-fuse IL on the next [`Self::finalize_bytecode`].
-    pub(crate) fn set_retain_cursor_il(&mut self, retain: bool) {
-        self.retain_cursor_il = retain;
-        if !retain {
-            self.cursor_il = None;
-        }
-    }
-
-    pub(crate) fn take_cursor_il(&mut self) -> Option<crate::il::tell::CursorIlSnap> {
-        self.cursor_il.take()
-    }
-
     /// Like [`finalize_bytecode`], but also returns a pre-opt IL snapshot for dissect.
     #[cfg(any(test, feature = "dissect"))]
     pub fn finalize_bytecode_capturing_il(&mut self) -> crate::dissect::IlSnapshot {
@@ -8289,11 +8289,13 @@ impl Compiler {
             .iter()
             .map(|f| (f.name.clone(), f.entry_sp))
             .collect();
-        let mut lowered = if self.retain_cursor_il || capture_il {
+        #[cfg_attr(not(any(test, feature = "dissect")), allow(unused_mut))]
+        let mut lowered = if capture_il {
             self.bytecode.lower_in_place_capturing(&mut self.constants)
         } else {
             self.bytecode.lower_in_place(&mut self.constants)
         };
+        #[cfg(any(test, feature = "dissect"))]
         let cursor_ops = lowered.pre_fuse_ops.take();
         let map = |t: usize| -> usize {
             if let Some(&p) = lowered.pre_to_post.get(&t) {
@@ -8330,7 +8332,7 @@ impl Compiler {
             let mut post_funcs: Vec<crate::il::IlFunc> = Vec::new();
             let mut emitting = 0usize;
             for op in ops {
-                if let IlOp::Label(l) | IlOp::JoinLabel(l) = op
+                if let IlOp::Label(l) = op
                     && let Some(&i) = entries.get(&l.0)
                 {
                     if let Some(prev) = post_funcs.last_mut() {
@@ -8505,12 +8507,6 @@ impl Compiler {
             "debug_locs / bytecode length mismatch after finalize"
         );
 
-        if self.retain_cursor_il {
-            self.cursor_il = Some(crate::il::tell::CursorIlSnap {
-                ops: cursor_ops.unwrap_or_default(),
-                pre_to_post: lowered.pre_to_post.clone(),
-            });
-        }
 
         #[cfg(any(test, feature = "dissect"))]
         return il_snapshot;

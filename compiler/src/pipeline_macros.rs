@@ -369,7 +369,7 @@ impl Pipeline {
                     Expression::Function { name, .. } => (*name, true),
                     Expression::StaticDecl { name, .. } => (*name, false),
                     Expression::Fragment(parts) => match parts.first().map(|p| p.1.as_ref()) {
-                        Some(Expression::Constant(binder, _)) => match binder.1.as_ref() {
+                        Some(Expression::Constant(binder, ..)) => match binder.1.as_ref() {
                             Expression::Identifier(n) => (*n, false),
                             _ => return None,
                         },
@@ -1580,7 +1580,7 @@ fn declared_names<'a>(ast: &Output<'a>) -> Vec<&'a str> {
             | Expression::TypeAlias { name, .. }
             | Expression::TypeClass { name, .. } => Some(*name),
             Expression::Fragment(parts) => match parts.first().map(|p| p.1.as_ref()) {
-                Some(Expression::Constant(binder, _)) => match binder.1.as_ref() {
+                Some(Expression::Constant(binder, ..)) => match binder.1.as_ref() {
                     Expression::Identifier(n) => Some(*n),
                     _ => None,
                 },

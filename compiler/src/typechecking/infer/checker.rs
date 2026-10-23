@@ -109,7 +109,9 @@ impl Checker {
             scope_bindings: HashMap::new(),
             disk_imports: HashSet::new(),
             unresolved_imports: HashMap::new(),
+            module_item_names: HashMap::new(),
             import_locals: HashMap::new(),
+            imported_enum_keys: HashMap::new(),
             def_interner,
             schemes_by_def: HashMap::new(),
             local_defs: HashMap::new(),
@@ -218,6 +220,11 @@ impl Checker {
             bare_patterns_by_span: HashMap::new(),
             bare_cases_by_module: HashMap::new(),
             pending_exhaustive: Vec::new(),
+            open_operands: Vec::new(),
+            open_empty_arrays: Vec::new(),
+            defer_empty_array: false,
+            mixed_literals: Vec::new(),
+            fn_body_depth: 0,
             weak_checks: Default::default(),
             async_functions: std::collections::HashSet::new(),
             async_depth: 0,
@@ -1063,7 +1070,6 @@ impl Checker {
             mutex_ty, receiver_ty, rwlock_ty, sender_ty, thread_ty, tuple,
         };
         let thread_err = Ty::Con(common::BUILTIN_THREAD_ERROR_ENUM.into());
-        let res_thread = result_app_ty(thread_ty(), thread_err.clone());
         let res_unit = result_app_ty(unit_ty(), thread_err.clone());
         let fun = |params: &[Ty], ret: Ty| {
             params
@@ -1072,118 +1078,57 @@ impl Checker {
                 .fold(ret, |acc, p| Ty::Fun(Box::new(p.clone()), Box::new(acc)))
         };
         let fn_ty = |param: Ty, ret: Ty| Ty::Fun(Box::new(param), Box::new(ret));
-        match kind {
+        // Every handle carries its value type `T` (#1905): what the thread
+        // returns, what the channel moves, what the lock guards.
+        let t = self.counter.fresh();
+        let tv = Ty::Var(t);
+        let ty = match kind {
             ThreadBuiltin::Spawn => {
-                let t = self.counter.fresh();
                 let a = self.counter.fresh();
-                let fn_a_t = fn_ty(Ty::Var(a), Ty::Var(t));
-                Scheme::poly(vec![t, a], vec![], fun(&[fn_a_t, Ty::Var(a)], res_thread))
-            }
-            ThreadBuiltin::Join => {
-                let t = self.counter.fresh();
-                Scheme::poly(
-                    vec![t],
+                let fn_a_t = fn_ty(Ty::Var(a), tv.clone());
+                return Scheme::poly(
+                    vec![t, a],
                     vec![],
-                    fun(
-                        &[thread_ty()],
-                        result_app_ty(Ty::Var(t), thread_err.clone()),
-                    ),
-                )
+                    fun(&[fn_a_t, Ty::Var(a)], result_app_ty(thread_ty(tv), thread_err)),
+                );
             }
-            ThreadBuiltin::Detach => Scheme::mono(fun(&[thread_ty()], res_unit)),
-            ThreadBuiltin::Channel => {
-                let t = self.counter.fresh();
-                Scheme::poly(
-                    vec![t],
-                    vec![],
-                    fun(
-                        &[],
-                        result_app_ty(tuple(vec![sender_ty(), receiver_ty()]), thread_err),
-                    ),
-                )
-            }
-            ThreadBuiltin::Send | ThreadBuiltin::TrySend => {
-                let t = self.counter.fresh();
-                Scheme::poly(
-                    vec![t],
-                    vec![],
-                    fun(&[sender_ty(), Ty::Var(t)], res_unit.clone()),
-                )
-            }
+            ThreadBuiltin::Join => fun(&[thread_ty(tv.clone())], result_app_ty(tv, thread_err)),
+            ThreadBuiltin::Detach => fun(&[thread_ty(tv)], res_unit),
+            ThreadBuiltin::Channel => fun(
+                &[],
+                result_app_ty(tuple(vec![sender_ty(tv.clone()), receiver_ty(tv)]), thread_err),
+            ),
+            ThreadBuiltin::Send | ThreadBuiltin::TrySend => fun(&[sender_ty(tv.clone()), tv], res_unit),
             ThreadBuiltin::Recv | ThreadBuiltin::TryRecv => {
-                let t = self.counter.fresh();
-                Scheme::poly(
-                    vec![t],
-                    vec![],
-                    fun(
-                        &[receiver_ty()],
-                        result_app_ty(Ty::Var(t), thread_err.clone()),
-                    ),
-                )
+                fun(&[receiver_ty(tv.clone())], result_app_ty(tv, thread_err))
             }
-            ThreadBuiltin::Close => Scheme::mono(fun(&[sender_ty()], res_unit.clone())),
-            ThreadBuiltin::Mutex => {
-                let t = self.counter.fresh();
-                Scheme::poly(
-                    vec![t],
-                    vec![],
-                    fun(&[Ty::Var(t)], result_app_ty(mutex_ty(), thread_err.clone())),
-                )
-            }
-            ThreadBuiltin::Rwlock => {
-                let t = self.counter.fresh();
-                Scheme::poly(
-                    vec![t],
-                    vec![],
-                    fun(
-                        &[Ty::Var(t)],
-                        result_app_ty(rwlock_ty(), thread_err.clone()),
-                    ),
-                )
-            }
-            ThreadBuiltin::WithLock => {
-                let t = self.counter.fresh();
+            ThreadBuiltin::Close => fun(&[sender_ty(tv)], res_unit),
+            ThreadBuiltin::Mutex => fun(std::slice::from_ref(&tv), result_app_ty(mutex_ty(tv.clone()), thread_err)),
+            ThreadBuiltin::Rwlock => fun(std::slice::from_ref(&tv), result_app_ty(rwlock_ty(tv.clone()), thread_err)),
+            ThreadBuiltin::WithLock | ThreadBuiltin::WithWrite | ThreadBuiltin::TryWrite => {
                 let r = self.counter.fresh();
-                let callback = fn_ty(Ty::Var(t), tuple(vec![Ty::Var(t), Ty::Var(r)]));
-                Scheme::poly(
+                let callback = fn_ty(tv.clone(), tuple(vec![tv.clone(), Ty::Var(r)]));
+                let lock = if matches!(kind, ThreadBuiltin::WithLock) { mutex_ty(tv) } else { rwlock_ty(tv) };
+                return Scheme::poly(
                     vec![t, r],
                     vec![],
-                    fun(
-                        &[mutex_ty(), callback],
-                        result_app_ty(Ty::Var(r), thread_err.clone()),
-                    ),
-                )
-            }
-            ThreadBuiltin::WithWrite | ThreadBuiltin::TryWrite => {
-                let t = self.counter.fresh();
-                let r = self.counter.fresh();
-                let callback = fn_ty(Ty::Var(t), tuple(vec![Ty::Var(t), Ty::Var(r)]));
-                Scheme::poly(
-                    vec![t, r],
-                    vec![],
-                    fun(
-                        &[rwlock_ty(), callback],
-                        result_app_ty(Ty::Var(r), thread_err.clone()),
-                    ),
-                )
+                    fun(&[lock, callback], result_app_ty(Ty::Var(r), thread_err)),
+                );
             }
             ThreadBuiltin::WithRead | ThreadBuiltin::TryRead => {
-                let t = self.counter.fresh();
                 let r = self.counter.fresh();
-                let callback = fn_ty(Ty::Var(t), Ty::Var(r));
-                Scheme::poly(
+                let callback = fn_ty(tv.clone(), Ty::Var(r));
+                return Scheme::poly(
                     vec![t, r],
                     vec![],
-                    fun(
-                        &[rwlock_ty(), callback],
-                        result_app_ty(Ty::Var(r), thread_err.clone()),
-                    ),
-                )
+                    fun(&[rwlock_ty(tv), callback], result_app_ty(Ty::Var(r), thread_err)),
+                );
             }
             ThreadBuiltin::Lock | ThreadBuiltin::TryLock | ThreadBuiltin::Unlock => {
-                Scheme::mono(fun(&[mutex_ty()], res_unit))
+                fun(&[mutex_ty(tv)], res_unit)
             }
-        }
+        };
+        Scheme::poly(vec![t], vec![], ty)
     }
 
     /// Scheme for a virtual `gc` host native (inserted on `use gc::{…}`).
@@ -1363,7 +1308,8 @@ impl Checker {
     ) -> Ty {
         use crate::typechecking::ty::thread_ty;
         let thread_err = Ty::Con(common::BUILTIN_THREAD_ERROR_ENUM.into());
-        let res_thread = result_app_ty(thread_ty(), thread_err.clone());
+        // The handle carries what the function returns (#1905).
+        let res_thread = |t| result_app_ty(thread_ty(Ty::Var(t)), thread_err.clone());
         let fn_ty = |param: Ty, ret: Ty| Ty::Fun(Box::new(param), Box::new(ret));
         match arg_tys.len() {
             0 => self.error_with_help(
@@ -1383,7 +1329,7 @@ impl Checker {
                     "spawn function",
                 );
                 self.check_spawn_captures_sendable(arg_exprs.and_then(|a| a.first()), &range);
-                res_thread
+                res_thread(t)
             }
             2 => {
                 let t = self.counter.fresh();
@@ -1419,7 +1365,7 @@ impl Checker {
                         ),
                     );
                 }
-                res_thread
+                res_thread(t)
             }
             n => self.error_with_help(
                 ErrorCode::GenericTypeError,
@@ -1465,11 +1411,11 @@ impl Checker {
                         | "uint16"
                         | "uint32"
                         | "uint64"
-                ) || name == crate::typechecking::ty::SENDER
-                    || name == crate::typechecking::ty::RECEIVER
-                    || name == crate::typechecking::ty::MUTEX
-                    || name == crate::typechecking::ty::RWLOCK
-                {
+                ) {
+                    return true;
+                }
+                // A `#[repr(..)]` enum is an immediate word (#1904).
+                if self.is_scalar_enum(name) {
                     return true;
                 }
                 // User class: sendable when every field type is sendable
@@ -1490,6 +1436,13 @@ impl Checker {
                     Ty::Con(n) if n == common::BUILTIN_ROOT_TYPE || n == common::BUILTIN_WEAK_TYPE
                 ) {
                     return false;
+                }
+                // Channel ends and locks are shared handles whatever they
+                // carry; a `Thread<T>` join handle stays with its spawner.
+                if let Ty::Con(n) = head.as_ref()
+                    && crate::typechecking::ty::THREAD_HANDLES.contains(&n.as_str())
+                {
+                    return n != crate::typechecking::ty::THREAD;
                 }
                 args.iter().all(|t| self.is_thread_sendable_ty(t))
             }
@@ -1714,6 +1667,7 @@ impl Checker {
         self.disk_imports.clear();
         self.unresolved_imports.clear();
         self.import_locals.clear();
+        self.imported_enum_keys.clear();
         self.local_defs.clear();
         self.def_ids_by_node.clear();
         self.in_bounds_index.clear();
@@ -1743,6 +1697,9 @@ impl Checker {
         );
         self.module_locals
             .insert(self.current_module_id, self.local_defs.clone());
+        // Union: a module is checked again for variadic copies (#1386).
+        let names = self.module_item_names.entry(self.current_module.clone()).or_default();
+        crate::typechecking::resolve::item_names(ast, names);
         self.bare_cases_by_module
             .insert(self.current_module_id, Default::default());
 
@@ -1753,6 +1710,7 @@ impl Checker {
             self.messages.extend(msgs);
         }
         self.check_duplicate_classes(ast);
+        self.check_duplicate_consts(ast);
         self.check_builtin_class_names(ast);
         self.pre_register_readonly_classes(ast);
         self.collect_variadic_templates(ast);
@@ -1789,6 +1747,7 @@ impl Checker {
             }
         };
         // Frame stays open; see doc-comment above.
+        self.check_mixed_literals(0);
         self.run_pending_exhaustiveness();
         self.run_pending_weak_checks();
 
@@ -2707,7 +2666,7 @@ impl Checker {
                 unit_ty()
             }
 
-            Expression::Constant(name, ty_opt) => {
+            Expression::Constant(name, ty_opt, ..) => {
                 let var_ty = match ty_opt {
                     Some(ann) => self.parse_type_name(ann),
                     None => Ty::Var(self.counter.fresh()),
@@ -3153,7 +3112,15 @@ impl Checker {
                         range,
                     );
                 };
+                // The fallback has the payload's type: `args() ?? []` (#1876).
+                let known = apply_ty_prune(&self.subst, &payload);
+                let prev_expected = if matches!(known, Ty::Var(_)) {
+                    self.current_expected.clone()
+                } else {
+                    self.current_expected.replace(known)
+                };
                 let rhs_ty = self.infer(rhs);
+                self.current_expected = prev_expected;
                 self.unify(&payload, &rhs_ty, &rhs.0.into_range(), "coalesce rhs");
                 payload
             }
@@ -3602,6 +3569,7 @@ impl Checker {
                 ty,
                 init,
                 lifted,
+                ..
             } => {
                 if *is_const && !*lifted {
                     self.warn_deprecated(
@@ -3976,6 +3944,23 @@ impl Checker {
         } else {
             format!("{module_ns}::{name}")
         };
+        // A checked module that declares no `name`, and no one-item file
+        // `module_ns/name.hy` (#1851).
+        if let Some(names) = self.module_item_names.get(&module_ns)
+            && !names.contains(name)
+            && !self.module_item_names.contains_key(&fqn)
+            // Macros are expanded away before the provider is checked, and
+            // `... xs` templates are left out of its checked body.
+            && !self.macro_imports.contains(&local)
+            && !self.variadic_exports.is_template(&fqn)
+        {
+            return self.error_with_help(
+                ErrorCode::UnknownValue,
+                format!("module `{module_ns}` has no item `{name}`"),
+                range,
+                Some(format!("`{module_ns}` declares nothing named `{name}`; check the spelling")),
+            );
+        }
         self.drop_prelude_fn(&local);
         // Prefer the defining module's real scheme (incl. generics with
         // bounds) over a dummy Var so call sites get dict-passing ABI.
@@ -4518,6 +4503,7 @@ impl Checker {
 
     #[inline(never)]
     fn infer_array_literal(&mut self, items: &[Output], range: Range<usize>) -> Ty {
+        let deferred = std::mem::take(&mut self.defer_empty_array);
         let expected_elem = self.expected_here.clone().and_then(|exp| {
             let exp = apply_ty_prune(&self.subst, &exp);
             if let Ty::Array { element, .. } = &exp {
@@ -4525,7 +4511,15 @@ impl Checker {
             }
             vec_element_ty(&exp).cloned()
         });
+        // Where a trait object is expected (`Vec<Shape>`), each element packs
+        // as its own instance once the literal settles, as a pushed one does
+        // (#1853).
+        let to_trait_object = expected_elem
+            .as_ref()
+            .is_some_and(|e| matches!(strip_readonly(&apply_ty_prune(&self.subst, e)), Ty::Existential { .. }));
         let mut elem_ty: Option<Ty> = None;
+        let mut seen: Vec<(Ty, Option<NodeId>, (usize, usize))> = Vec::with_capacity(items.len());
+        let mut mismatch: Option<String> = None;
         for item in items {
             let prev_expected = self.current_expected.take();
             if let Some(ref e) = expected_elem {
@@ -4539,6 +4533,10 @@ impl Checker {
                 &self.subst,
                 &t,
             ));
+            seen.push((t_pruned.clone(), self.ids.id_of_output(item), (item.0.start, item.0.end)));
+            if mismatch.is_some() || to_trait_object {
+                continue;
+            }
             match &elem_ty {
                 None => elem_ty = Some(t_pruned),
                 Some(prev) => {
@@ -4553,25 +4551,34 @@ impl Checker {
                             elem_ty = Some(self.readonly_join(joined, &prev_pruned, &t_pruned));
                         }
                         Err(_) => {
-                            let _ = self.error_with_help(
-                                ErrorCode::TypeMismatch,
-                                {
-                                    let [want, have] = <[String; 2]>::try_from(
-                                        self.diag_tys(&[&prev_pruned, &t_pruned]),
-                                    )
-                                    .expect("two types");
-                                    format!("array element type mismatch: expected `{want}`, found `{have}`")
-                                },
-                                range.clone(),
-                                Some(
-                                    "an array literal requires every element to have the same type"
-                                        .to_string(),
-                                ),
-                            );
+                            let [want, have] = <[String; 2]>::try_from(self.diag_tys(&[&prev_pruned, &t_pruned]))
+                                .expect("two types");
+                            mismatch = Some(format!("array element type mismatch: expected `{want}`, found `{have}`"));
                         }
                     }
                 }
             }
+        }
+        // Differently typed elements: one trait object the literal turns out
+        // to be (`Vec::from([new Circle(1), new Square(2)])` as a
+        // `Vec<Shape>`) takes them all, so wait for the element type (#1853).
+        if self.fn_body_depth == 0 && !to_trait_object
+            && let Some(mismatch) = mismatch.take()
+        {
+            let _ = self.error_with_help(
+                ErrorCode::ArrayElementMismatch,
+                mismatch,
+                range.clone(),
+                Some("an array literal requires every element to have the same type".to_string()),
+            );
+        }
+        if to_trait_object && mismatch.is_none() {
+            mismatch = Some("array element type mismatch".to_string());
+        }
+        if let Some(mismatch) = mismatch {
+            let element = Ty::Var(self.counter.fresh());
+            self.mixed_literals.push(MixedLiteral { element: element.clone(), items: seen, mismatch, range: range.clone() });
+            elem_ty = Some(element);
         }
         let element = elem_ty.unwrap_or_else(|| Ty::Var(self.counter.fresh()));
         let len = items.len();
@@ -4623,6 +4630,13 @@ impl Checker {
                         ArrayLength::Dynamic => {}
                     }
                 }
+            }
+            // A call argument takes its parameter's type once the call
+            // unifies; `check_open_empty_arrays` rejects anything else.
+            if deferred {
+                let ty = Ty::Var(self.counter.fresh());
+                self.open_empty_arrays.push((ty.clone(), range));
+                return ty;
             }
             return self.error_with_help(
                 ErrorCode::GenericTypeError,
@@ -6444,7 +6458,7 @@ impl Checker {
                         }
                     }
                 }
-                Expression::Constant(name, ty_opt) => {
+                Expression::Constant(name, ty_opt, ..) => {
                     let var_ty = match ty_opt {
                         Some(ann) => self.parse_type_name(ann),
                         None => Ty::Var(self.counter.fresh()),
@@ -6992,8 +7006,111 @@ impl Checker {
         }
         if let Ty::Var(v) = pruned {
             self.bind_arith_operator(v, op, id, &range);
+            self.note_open_operand(v, &result, op, &range);
         }
         result
+    }
+
+    /// Remember an operand type that is neither known nor a type parameter
+    /// at its operator; [`Self::check_open_operands`] rejects it if nothing
+    /// in the function resolves it later (#1845).
+    fn note_open_operand(&mut self, v: TyVarId, ty: &Ty, op: &str, range: &Range<usize>) {
+        let bound = Generics::operator_trait(op).is_some_and(|(class, _)| self.user_dict_index(v, class).is_some());
+        if bound || self.is_type_param_var(v) {
+            return;
+        }
+        let Some(op) = ["+", "-", "*", "/", "%", "**", "&", "|", "^", "<<", ">>"].into_iter().find(|o| *o == op) else {
+            return;
+        };
+        self.open_operands.push((ty.clone(), op, range.clone()));
+    }
+
+    /// Settle each mixed array literal noted since `mark`: a trait object
+    /// element type packs every element as its own instance, as a pushed
+    /// one is; any other is the literal's element mismatch (#1853).
+    pub(super) fn check_mixed_literals(&mut self, mark: usize) {
+        let pending: Vec<MixedLiteral> = self.mixed_literals.drain(mark..).collect();
+        for lit in pending {
+            let element = apply_ty_prune(&self.subst, &lit.element);
+            let Ty::Existential { class } = strip_readonly(&element).clone() else {
+                let _ = self.error_with_help(
+                    ErrorCode::ArrayElementMismatch,
+                    lit.mismatch,
+                    lit.range,
+                    Some("an array literal requires every element to have the same type, or a trait object type it can pack each one as (`let xs: Vec<Shape> = [...]`)".to_string()),
+                );
+                continue;
+            };
+            for (ty, id, span) in lit.items {
+                let actual = apply_ty_prune(&self.subst, &ty);
+                if matches!(strip_readonly(&actual), Ty::Existential { class: c } if *c == class) {
+                    continue;
+                }
+                let lookup_ty = Self::existential_lookup_ty(&actual);
+                let range = span.0..span.1;
+                match self.find_unique_instance(&class, std::slice::from_ref(&lookup_ty), &range) {
+                    Ok(Some(_)) => {
+                        let pack = ExistentialPack { class: class.clone(), value_ty: lookup_ty };
+                        if let Some(id) = id {
+                            self.existential_packs.insert(id, pack.clone());
+                        }
+                        self.existential_packs_by_span.insert(span, pack);
+                    }
+                    Ok(None) => {
+                        let pretty = Constraint { class: class.clone(), args: vec![lookup_ty] };
+                        self.messages.push(Message::error(ErrorCode::GenericTypeError, format!("No instance for `{}`", pretty), range));
+                    }
+                    Err(()) => {}
+                }
+            }
+        }
+    }
+
+    /// E0119 for each operand noted since `mark` whose type the function
+    /// body never resolved: code generation has no operator to call.
+    pub(super) fn check_open_operands(&mut self, mark: usize) {
+        let open: Vec<_> = self.open_operands.drain(mark..).collect();
+        for (ty, op, range) in open {
+            let Ty::Var(v) = apply_ty_prune(&self.subst, &ty) else {
+                continue;
+            };
+            if self.is_type_param_var(v) {
+                continue;
+            }
+            self.error_with_help(
+                ErrorCode::GenericTypeError,
+                format!("the operands of `{op}` have no known type"),
+                range,
+                Some(
+                    "annotate the value (`let n: int = …;`), or give the channel or thread handle it comes from its type (`Receiver<int>`)"
+                        .to_string(),
+                ),
+            );
+        }
+    }
+
+    /// E0119 for each empty `[]` argument noted since `mark` whose
+    /// parameter did not make it a `Vec<T>` or `[T; 0]` (#1876).
+    pub(super) fn check_open_empty_arrays(&mut self, mark: usize) {
+        let open: Vec<_> = self.open_empty_arrays.drain(mark..).collect();
+        for (ty, range) in open {
+            let ty = apply_ty_prune(&self.subst, &ty);
+            let ok = vec_element_ty(&ty).is_some()
+                || matches!(&ty, Ty::Array { length: ArrayLength::Static(0), .. });
+            if ok {
+                continue;
+            }
+            let message = match &ty {
+                Ty::Var(_) => "empty array literal `[]` requires a type annotation".to_string(),
+                other => format!("empty array literal `[]` cannot be `{}`", self.diag_ty(other)),
+            };
+            self.error_with_help(
+                ErrorCode::GenericTypeError,
+                message,
+                range,
+                Some("annotate as `Vec<T>` (growable) or `[T; 0]` (fixed empty array)".to_string()),
+            );
+        }
     }
 
     /// `x << n` / `x >> n`: the count is an `int` whatever `x` is (#883),
@@ -10702,8 +10819,8 @@ impl Checker {
             {
                 args.clone()
             }
-            // A `Vec` compares its elements (#1629).
-            Ty::App(head, args) if class == "Eq" && matches!(head.as_ref(), Ty::Con(n) if n == common::BUILTIN_VEC_TYPE) => args.clone(),
+            // A `Vec` compares its elements (#1629) and shows them (#1848).
+            Ty::App(head, args) if matches!(class, "Show" | "Eq") && matches!(head.as_ref(), Ty::Con(n) if n == common::BUILTIN_VEC_TYPE) => args.clone(),
             _ => return,
         };
         // A tuple with an open item: the instance for its arity, with a
@@ -10885,6 +11002,16 @@ impl Checker {
                 // never for the head's variables.
                 let mut inst = inst;
                 if inst_args != inst.args {
+                    // Its associated types at the goal's types too: `Item`
+                    // of `IntoIterator for HashMap<K, V>` is the map's own
+                    // `Entry<K, V>`, not one over the head's variables (#1912).
+                    let mut fresh = Subst::empty();
+                    for &(old, new) in &fresh_vars {
+                        fresh.insert(old, Ty::Var(new));
+                    }
+                    for value in inst.assoc_tys.values_mut() {
+                        value.ty = apply_ty_prune(&local, &apply_ty(&fresh, &value.ty));
+                    }
                     inst.args = inst_args.iter().map(|a| apply_ty_prune(&local, a)).collect();
                     inst.context = inst_ctx
                         .iter()
@@ -11799,11 +11926,16 @@ impl Checker {
                     .or_else(|| self.nominal_head_from_ty(ty));
                 head.as_deref().is_some_and(|name| {
                     let mod_of = |n: &str| self.generics.nominal_type_module(n);
-                    mod_of(name) == Some(self.current_module.as_str())
+                    // The core prelude declares `Option` / `Result`, which
+                    // the registry files under `prelude` (#1906).
+                    let home = |m: Option<&str>| {
+                        m == Some(self.current_module.as_str())
+                            || (self.current_module == "core" && m == Some(crate::typechecking::virtual_modules::PRELUDE_MODULE))
+                    };
+                    home(mod_of(name))
                         // COI-110 registers enums/classes under `module::Name`;
                         // synth `Show`/`String` still pass the short head.
-                        || mod_of(&self.qualify_module_name(name))
-                            == Some(self.current_module.as_str())
+                        || home(mod_of(&self.qualify_module_name(name)))
                 })
             })
     }
@@ -12053,11 +12185,12 @@ impl Checker {
             "string" => string(),
             "void" => unit_ty(),
             "stream" => crate::typechecking::ty::stream_ty(),
-            "thread" => crate::typechecking::ty::thread_ty(),
-            "sender" => crate::typechecking::ty::sender_ty(),
-            "receiver" => crate::typechecking::ty::receiver_ty(),
-            "mutex" => crate::typechecking::ty::mutex_ty(),
-            "rwlock" => crate::typechecking::ty::rwlock_ty(),
+            // A bare handle name infers what it carries (#1905).
+            "thread" => crate::typechecking::ty::thread_ty(Ty::Var(self.counter.fresh())),
+            "sender" => crate::typechecking::ty::sender_ty(Ty::Var(self.counter.fresh())),
+            "receiver" => crate::typechecking::ty::receiver_ty(Ty::Var(self.counter.fresh())),
+            "mutex" => crate::typechecking::ty::mutex_ty(Ty::Var(self.counter.fresh())),
+            "rwlock" => crate::typechecking::ty::rwlock_ty(Ty::Var(self.counter.fresh())),
             "option" => option_app_ty(Ty::Var(self.counter.fresh())),
             "result" => result_app_ty(Ty::Var(self.counter.fresh()), Ty::Var(self.counter.fresh())),
             "ioerror" => Ty::Con(common::BUILTIN_IO_ERROR_ENUM.into()),
@@ -12806,7 +12939,11 @@ impl Checker {
         };
         let mut out = Vec::new();
         for ((owner_var, assoc, _), (pvar, args)) in &self.open_assoc_projections {
-            if !scheme.assoc_projections.iter().any(|p| rep(p.var) == rep(*pvar)) {
+            // A projection the body alone names (`it.next()`'s `I::Item`,
+            // #1940) is not in the signature's list; its owner being one of
+            // the clone's own parameters places it.
+            let owned = scheme.assoc_projections.iter().any(|p| rep(p.var) == rep(*pvar)) || vars.contains_key(owner_var);
+            if !owned {
                 continue;
             }
             let Some(owner_ty) = vars.get(owner_var).or_else(|| vars.get(&rep(*owner_var))) else {
@@ -14094,7 +14231,14 @@ impl Checker {
         let prev_in_test = std::mem::replace(&mut self.in_test_case, true);
 
         self.push_scope();
+        let (open_mark, mixed_mark) = (self.open_operands.len(), self.mixed_literals.len());
+        let empty_mark = self.open_empty_arrays.len();
+        self.fn_body_depth += 1;
         let _ = self.infer(body);
+        self.fn_body_depth -= 1;
+        self.check_mixed_literals(mixed_mark);
+        self.check_open_operands(open_mark);
+        self.check_open_empty_arrays(empty_mark);
         self.pop_scope();
         self.in_test_case = prev_in_test;
 
@@ -14730,7 +14874,10 @@ impl Checker {
                 return ty;
             }
         let prev_expected = self.current_expected.take();
+        self.defer_empty_array = self.fn_body_depth > 0
+            && matches!(arg.1.as_ref(), Expression::Array(items) if items.is_empty());
         let ty = self.infer(arg);
+        self.defer_empty_array = false;
         self.current_expected = prev_expected;
         ty
     }
@@ -15360,6 +15507,50 @@ impl Checker {
         }
     }
 
+    /// A second top-level `const` of a name already declared in this module
+    /// would silently replace the first (#1960): report it. A `const` whose
+    /// initializer runs at startup is a lifted static, the same declaration.
+    fn check_duplicate_consts(&mut self, ast: &Output) {
+        fn const_name<'a>(node: &'a Expression<'a>) -> Option<&'a str> {
+            match node {
+                Expression::Fragment(parts) => match parts.as_slice() {
+                    [binder, _] => match binder.1.as_ref() {
+                        Expression::Constant(name, ..) => match name.1.as_ref() {
+                            Expression::Identifier(n) => Some(*n),
+                            _ => None,
+                        },
+                        _ => None,
+                    },
+                    _ => None,
+                },
+                Expression::StaticDecl { name, lifted: true, .. } => Some(*name),
+                _ => None,
+            }
+        }
+        fn walk<'a>(node: &'a Output<'a>, seen: &mut HashSet<&'a str>, dups: &mut Vec<(&'a str, Range<usize>)>) {
+            let inner = Checker::pre_pass_unwrap_stmt(node);
+            if let Some(name) = const_name(inner.1.as_ref()) {
+                if !seen.insert(name) {
+                    dups.push((name, node.0.into_range()));
+                }
+                return;
+            }
+            if let Expression::Program(children) | Expression::Fragment(children) = inner.1.as_ref() {
+                for child in children {
+                    walk(child, seen, dups);
+                }
+            }
+        }
+        let mut seen = HashSet::new();
+        let mut dups = Vec::new();
+        walk(ast, &mut seen, &mut dups);
+        for (name, range) in dups {
+            let mut msg = Message::error(ErrorCode::ConstantRedeclaration, format!("Duplicate constant `{name}`"), range);
+            msg.with_help(format!("a constant named `{name}` was already declared in this module; remove or rename this declaration"));
+            self.messages.push(msg);
+        }
+    }
+
     /// Help for a top-level `class` or `enum` named `name` that would
     /// redeclare a built-in type, or `None` when the name is free here. The
     /// built-in keeps its key, so such a type would split: a type position
@@ -15810,7 +16001,8 @@ impl Checker {
     }
 
     /// Bind `use m::{Alias}` to another module's type alias, as the qualified
-    /// `m::Alias` resolves (`qualified_type_aliases`).
+    /// `m::Alias` resolves (`qualified_type_aliases`), and `use m::{E}` to
+    /// another module's enum (`imported_enum_keys`, #1947).
     fn import_type_aliases(&mut self, node: &Output) {
         match node.1.as_ref() {
             Expression::Statement(inner)
@@ -15832,6 +16024,8 @@ impl Checker {
                     self.type_aliases[0].insert(local, ty);
                 } else if let Some(def) = self.qualified_generic_aliases.get(&fqn).cloned() {
                     self.generic_aliases.insert(local, def);
+                } else if self.enum_tags.contains_key(&fqn) {
+                    self.imported_enum_keys.insert(local, fqn);
                 }
             }
             _ => {}
@@ -16949,7 +17143,7 @@ impl Checker {
             | Expression::Use { .. }
             | Expression::Module(_, _)
             | Expression::Variable(_, _)
-            | Expression::Constant(_, _)
+            | Expression::Constant(..)
             | Expression::Argument { .. }
             | Expression::Field { .. }
             | Expression::QualifiedAccess { .. }
@@ -19423,6 +19617,11 @@ impl Checker {
         if self.enum_tags.contains_key(&qualified) {
             return Some(qualified);
         }
+        if let Some(key) = self.imported_enum_keys.get(name)
+            && self.enum_tags.contains_key(key)
+        {
+            return Some(key.clone());
+        }
         if let Some(builtin) = self.builtin_enum_alias(name)
             && self.enum_tags.contains_key(builtin)
         {
@@ -20005,7 +20204,7 @@ impl Checker {
                         loop_range,
                         ForInInfo {
                             kind: ForInKind::Custom {
-                                into_iter_fqn,
+                                into_iter_fqn: Some(into_iter_fqn),
                                 next_fqn: None,
                                 counted: Some(counted),
                             },
@@ -20034,7 +20233,7 @@ impl Checker {
                                     loop_range,
                                     ForInInfo {
                                         kind: ForInKind::Custom {
-                                            into_iter_fqn,
+                                            into_iter_fqn: Some(into_iter_fqn),
                                             next_fqn: Some(next_fqn),
                                             counted: None,
                                         },
@@ -20076,7 +20275,31 @@ impl Checker {
                     Err(()) => None,
                 }
             }
-            Ok(None) => {
+            // An iterator itself loops on its own `next`.
+            Ok(None) => match self.find_unique_instance("Iterator", std::slice::from_ref(te), iterable_range) {
+                Ok(Some(iter_inst)) => {
+                    let item = iter_inst
+                        .assoc_tys
+                        .get("Item")
+                        .map(|v| v.ty.clone())
+                        .unwrap_or_else(|| Ty::Var(self.counter.fresh()));
+                    let next_fqn = iter_inst.method_fqns.get("next").cloned();
+                    let item_ty = apply_ty_prune(&self.subst, &item);
+                    self.record_for_in_info(
+                        loop_id,
+                        loop_range,
+                        ForInInfo {
+                            kind: ForInKind::Custom {
+                                into_iter_fqn: None,
+                                next_fqn,
+                                counted: None,
+                            },
+                            item_ty: item_ty.clone(),
+                        },
+                    );
+                    Some(item_ty)
+                }
+                Ok(None) => {
                 let _ = self.error_with_help(
                     ErrorCode::GenericTypeError,
                     format!("type `{}` is not iterable", self.diag_ty(te)),
@@ -20087,7 +20310,9 @@ impl Checker {
                     ),
                 );
                 None
-            }
+                }
+                Err(()) => None,
+            },
             Err(()) => None,
         }
     }

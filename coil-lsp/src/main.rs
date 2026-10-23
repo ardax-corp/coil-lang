@@ -2072,8 +2072,13 @@ fn collect_decl_candidates(expression: &Expression<'_>, out: &mut HashMap<String
         Expression::TypeAlias { name, docs, .. } => {
             insert_decl_candidate(out, name, CompletionItemKind::TYPE_PARAMETER, docs);
         }
-        Expression::StaticDecl { name, .. } => {
-            insert_decl_candidate(out, name, CompletionItemKind::VARIABLE, &[]);
+        Expression::StaticDecl { name, docs, .. } => {
+            insert_decl_candidate(out, name, CompletionItemKind::VARIABLE, docs);
+        }
+        Expression::Constant(name, _, docs) => {
+            if let Expression::Identifier(name) = name.1.as_ref() {
+                insert_decl_candidate(out, name, CompletionItemKind::CONSTANT, docs);
+            }
         }
         Expression::Variable(name, _) => {
             insert_decl_candidate(out, name, CompletionItemKind::VARIABLE, &[]);
@@ -3566,7 +3571,7 @@ fn walk_children(expression: &Expression<'_>, offset: usize, out: &mut Vec<Range
                 collect_spans_containing(branch, offset, out);
             }
         }
-        Expression::Variable(_, Some(init)) | Expression::Constant(_, Some(init)) => {
+        Expression::Variable(_, Some(init)) | Expression::Constant(_, Some(init), ..) => {
             collect_spans_containing(init, offset, out);
         }
         Expression::Class { fields, .. } => {

@@ -282,7 +282,7 @@ fn walk_children(ast: &Output<'_>, f: &mut dyn FnMut(&Output<'_>)) {
             f(init);
         }
         Expression::Variable(_, Some(t)) => f(t),
-        Expression::Constant(init, ty) => {
+        Expression::Constant(init, ty, ..) => {
             f(init);
             if let Some(t) = ty {
                 f(t);

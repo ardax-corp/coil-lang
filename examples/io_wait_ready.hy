@@ -3,14 +3,13 @@
 //
 // @output ok
 
-use io::stdout;
 use io::open;
 use io::close;
 use io::wait_readable;
 use io::wait_ready;
-use io::sync::write_all;
+use io::sync::print;
 use io::sync::read_to_end;
-use string::{format, to_bytes};
+use string::format;
 
 gen fn slurp(string path) -> Result<int, IoError> {
     let s = open(path, "r")?;
@@ -32,5 +31,5 @@ fn main() {
         }
         wait_ready();
     }
-    let _ = write_all(stdout(), to_bytes(format("ok")));
+    let _ = print(format("ok"));
 }

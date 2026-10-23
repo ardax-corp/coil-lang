@@ -1,9 +1,9 @@
-# Superinstruction / fusion candidates ([COI-378](https://linear.app/ardax/issue/COI-378) S0)
+# Superinstruction / fusion candidates (COI-378 S0)
 
 > **Status: historical.** Inventory taken when fuse-IL (stack lowering) was the majority path. Today fusion happens in `il::lower` fuse-select over what dense and LIR emit, in the LIR emitter, and in a few VM peeks; there are no fuse-IL peephole passes. Today's pipeline: [pipeline.md](pipeline.md).
 
 Docs-only inventory for Linear project
-[Superinstructions](https://linear.app/ardax/project/superinstructions-54baee2beca8).
+Superinstructions.
 Tip `cf7a193c` (`main`). No compiler or VM behavior change.
 
 Architect: refine **S1–S8** from the tables here. Do not re-dissect unless a
@@ -31,7 +31,7 @@ Layer key: **dense emit** = pack in `mir/emit.rs` / `vectorize.rs` before
 ops become residual `IlOp::Byte`. **IL peep** = `fuse_select` on typed
 `IlOp`. **Gate lift** = typed-IL / SP / refuse table.
 
-**S8 fact that binds every dense ticket ([COI-385](https://linear.app/ardax/issue/COI-385), landed):**
+**S8 fact that binds every dense ticket (COI-385, landed):**
 fusion is **not** blocked on specialize keep. Cost / `lir_eligible` do not
 refuse because a packed op appeared. `IlOp::from_plain_byte` does **not**
 lift `Dense*` / `V*` (`compiler/src/il/op.rs` falls through to
@@ -45,14 +45,14 @@ IL; print `main` stays fuse-IL. Note also
 
 | ID | Linear | Ticket shape | Dissect (this PR) | Layer | Refine |
 |----|--------|--------------|-------------------|-------|--------|
-| **S1** | [COI-377](https://linear.app/ardax/issue/COI-377) | Dense cmp/bin → jmp | `mandelbrot` inner: `DenseBin×3 ; BinSlotSlotJmpf GTF`. Headers: `DenseMove* ; BinSlotSlotJmpf GT` (no `DenseCmp`). `emit_br_cond` reconstructs stack cmp so fuse-select already made `*Jmpf` (1 dispatch). | dense emit | **Done (ISA pack).** Two-word `DenseBinJmpf` (archive **minor 17**): first `dense_abc` on the opcode, payload word is the fused `*Jmpf` (same stream-width lesson as `DenseBin2`). Real 2→1 on the inner mag + GTF. Outer y/x headers stay 1-op `BinSlotSlotJmpf`. **Not** `DenseCmp`+jmp. `fib` bytecode unchanged; keep `unlikely(is_hot)`. |
-| **S2** | [COI-381](https://linear.app/ardax/issue/COI-381) | 2-wide `DenseBin` pack | `mandelbrot` has **18** `DenseBin`. Inner latch is `DenseBin×6 ; DenseMove ; JMP`. | dense emit | **Done (ISA pack).** Two-word `DenseBin2` (archive **minor 16**): first `dense_abc` on the opcode, payload word is the second `DenseBin` (chosen over a pool descriptor so the second packing stays in the instruction stream). Sequential IEEE; `mir/emit.rs` `pack_chained_dense_bin`. Inner latch `DenseBin×6` → three `DenseBin2`. **Not** X4 VM peek, **not** `FloatChainStore`. `fib` bytecode is unchanged; default table peek of `is_hot` must keep the giant match as fall-through (`unlikely(is_hot)`). |
-| **S3** | [COI-380](https://linear.app/ardax/issue/COI-380) | `DenseCast`+`DenseBin` | Three `DenseCast` sites, all **x/y headers** (`DenseCast ; DenseBin×3`), not the innermost `iter` loop. | dense-streak VM peek | **Done (peek, no opcode).** After S2 the header is `DenseCast ; DenseBin2 ; DenseBin`. Table/hotmatch consume the trailing `DenseBin`/`DenseBin2` in the `DenseCast` handler; X4 also takes leftover `DenseBin` after that `DenseBin2`. Bytecode unchanged; no archive bump; not ALWAYS_HOT growth. Giant match stays split. Flagship wall is header-noise — prove on `examples/perf/dense_cast_bin.hy`. `fib` has no this shape; keep `unlikely(is_hot)`. |
-| **S4** | [COI-379](https://linear.app/ardax/issue/COI-379) | `DenseIndex` + imm cmp + jmpf | `nsieve` p-loop: `DenseIndex ; BinSlotImmJmpf EQ` (`flags[p] == 1`). | dense emit | **Done (ISA pack).** Two-word `DenseIndexJmpf` (archive **minor 18**): first `dense_abc` on the opcode, payload word is the fused `*Jmpf` (same stream-width as `DenseBinJmpf`). Real 2→1 on the p-loop `flags[p] == 1`. Stacks with [COI-372](https://linear.app/ardax/issue/COI-372) last-addr `Object` cache. Index stays dense-native (not `IndexPin`). `fib` bytecode unchanged; keep `unlikely(is_hot)`. |
-| **S5** | [COI-382](https://linear.app/ardax/issue/COI-382) | Index/StoreIndex stride pair | Inner k-loop is **`DenseMove ; DenseStoreIndex ; DenseBin ; JMP`** — store of 0 with `k = k + p`. **No** `DenseIndex` in that loop. | dense-streak VM peek | **Done (peek, no opcode).** Table/hotmatch consume trailing `DenseBin`/`DenseBin2` then `JMP` in the `DenseStoreIndex` handler (one dispatch for store + IV bump + latch). Bytecode unchanged (`DenseMove` stays its own op). No archive bump; not ALWAYS_HOT growth. Giant match stays three-dispatch on store/bin/jmp. `fib` has no this shape; keep `unlikely(is_hot)`. Not consecutive Index+Store of the same cell. |
-| **S6** | [COI-383](https://linear.app/ardax/issue/COI-383) | `DenseMove` coalesce | `mandelbrot` **9** `DenseMove` (φ / latch copies). Pairs: `DenseMove ; DenseMove ; BinSlotSlotJmpf`. | MIR destprop / dense emit | **Done (peep, no opcode).** Sink φ incomings past last use of the dest, then the existing latch overwrite aliases `i = i+1` / mandelbrot `tr`→`zr`. Identity `DenseMove` drop. No new opcode; LOAD/STORE cost 2 vs `DenseMove` 1 unchanged. Nested-accumulator interference coalesce was unsound (SROA pack checksum) and is not shipped. |
-| **S7** | [COI-384](https://linear.app/ardax/issue/COI-384) | Fuse-IL peep parity for S1–S5 shapes | `fib`/`tak`/`item_check`/`bottom_up` stay fuse-IL. Stack `*Jmpf` / `BinSlotImm` / `BinReturn` **already fire** (`fib` is 7 ops). Dense S1–S5 shapes do not appear on these bodies. | IL peep | **Done (peep, no opcode).** `item_check` `CONST; LOAD; ADD` → `BinSlotImm`: fuse-select matches const-left commute bins (shape appears after slot-promote); the HIR fold puts source literals on the right. `bottom_up` MakeEnum+RETURN is X3. Do not densify `main`/FORMAT. Dense S1–S5 “parity” remains N/A on fuse-IL flagships. |
-| **S8** | [COI-385](https://linear.app/ardax/issue/COI-385) | Fusion not blocked on specialize keep | Cost gate / `lir_eligible` do **not** refuse because a packed op appeared. Live fuse-select block is **`Dense*` / `V*` as residual `Byte` → Cold**. `emit_cost` weights `Seek` and LOAD/STORE, not opcode novelty. | keep packing in dense emit / VM peek | **Done (docs + tests, no typed lift).** Do **not** add packed ops to specialize refuse; do **not** make specialize keep a prerequisite. Print `main` stays fuse-IL. Optional `from_plain_byte` lift refused: fuse-select should not see dense ABC ops. |
+| **S1** | COI-377 | Dense cmp/bin → jmp | `mandelbrot` inner: `DenseBin×3 ; BinSlotSlotJmpf GTF`. Headers: `DenseMove* ; BinSlotSlotJmpf GT` (no `DenseCmp`). `emit_br_cond` reconstructs stack cmp so fuse-select already made `*Jmpf` (1 dispatch). | dense emit | **Done (ISA pack).** Two-word `DenseBinJmpf` (archive **minor 17**): first `dense_abc` on the opcode, payload word is the fused `*Jmpf` (same stream-width lesson as `DenseBin2`). Real 2→1 on the inner mag + GTF. Outer y/x headers stay 1-op `BinSlotSlotJmpf`. **Not** `DenseCmp`+jmp. `fib` bytecode unchanged; keep `unlikely(is_hot)`. |
+| **S2** | COI-381 | 2-wide `DenseBin` pack | `mandelbrot` has **18** `DenseBin`. Inner latch is `DenseBin×6 ; DenseMove ; JMP`. | dense emit | **Done (ISA pack).** Two-word `DenseBin2` (archive **minor 16**): first `dense_abc` on the opcode, payload word is the second `DenseBin` (chosen over a pool descriptor so the second packing stays in the instruction stream). Sequential IEEE; `mir/emit.rs` `pack_chained_dense_bin`. Inner latch `DenseBin×6` → three `DenseBin2`. **Not** X4 VM peek, **not** `FloatChainStore`. `fib` bytecode is unchanged; default table peek of `is_hot` must keep the giant match as fall-through (`unlikely(is_hot)`). |
+| **S3** | COI-380 | `DenseCast`+`DenseBin` | Three `DenseCast` sites, all **x/y headers** (`DenseCast ; DenseBin×3`), not the innermost `iter` loop. | dense-streak VM peek | **Done (peek, no opcode).** After S2 the header is `DenseCast ; DenseBin2 ; DenseBin`. Table/hotmatch consume the trailing `DenseBin`/`DenseBin2` in the `DenseCast` handler; X4 also takes leftover `DenseBin` after that `DenseBin2`. Bytecode unchanged; no archive bump; not ALWAYS_HOT growth. Giant match stays split. Flagship wall is header-noise — prove on `examples/perf/dense_cast_bin.hy`. `fib` has no this shape; keep `unlikely(is_hot)`. |
+| **S4** | COI-379 | `DenseIndex` + imm cmp + jmpf | `nsieve` p-loop: `DenseIndex ; BinSlotImmJmpf EQ` (`flags[p] == 1`). | dense emit | **Done (ISA pack).** Two-word `DenseIndexJmpf` (archive **minor 18**): first `dense_abc` on the opcode, payload word is the fused `*Jmpf` (same stream-width as `DenseBinJmpf`). Real 2→1 on the p-loop `flags[p] == 1`. Stacks with COI-372 last-addr `Object` cache. Index stays dense-native (not `IndexPin`). `fib` bytecode unchanged; keep `unlikely(is_hot)`. |
+| **S5** | COI-382 | Index/StoreIndex stride pair | Inner k-loop is **`DenseMove ; DenseStoreIndex ; DenseBin ; JMP`** — store of 0 with `k = k + p`. **No** `DenseIndex` in that loop. | dense-streak VM peek | **Done (peek, no opcode).** Table/hotmatch consume trailing `DenseBin`/`DenseBin2` then `JMP` in the `DenseStoreIndex` handler (one dispatch for store + IV bump + latch). Bytecode unchanged (`DenseMove` stays its own op). No archive bump; not ALWAYS_HOT growth. Giant match stays three-dispatch on store/bin/jmp. `fib` has no this shape; keep `unlikely(is_hot)`. Not consecutive Index+Store of the same cell. |
+| **S6** | COI-383 | `DenseMove` coalesce | `mandelbrot` **9** `DenseMove` (φ / latch copies). Pairs: `DenseMove ; DenseMove ; BinSlotSlotJmpf`. | MIR destprop / dense emit | **Done (peep, no opcode).** Sink φ incomings past last use of the dest, then the existing latch overwrite aliases `i = i+1` / mandelbrot `tr`→`zr`. Identity `DenseMove` drop. No new opcode; LOAD/STORE cost 2 vs `DenseMove` 1 unchanged. Nested-accumulator interference coalesce was unsound (SROA pack checksum) and is not shipped. |
+| **S7** | COI-384 | Fuse-IL peep parity for S1–S5 shapes | `fib`/`tak`/`item_check`/`bottom_up` stay fuse-IL. Stack `*Jmpf` / `BinSlotImm` / `BinReturn` **already fire** (`fib` is 7 ops). Dense S1–S5 shapes do not appear on these bodies. | IL peep | **Done (peep, no opcode).** `item_check` `CONST; LOAD; ADD` → `BinSlotImm`: fuse-select matches const-left commute bins (shape appears after slot-promote); the HIR fold puts source literals on the right. `bottom_up` MakeEnum+RETURN is X3. Do not densify `main`/FORMAT. Dense S1–S5 “parity” remains N/A on fuse-IL flagships. |
+| **S8** | COI-385 | Fusion not blocked on specialize keep | Cost gate / `lir_eligible` do **not** refuse because a packed op appeared. Live fuse-select block is **`Dense*` / `V*` as residual `Byte` → Cold**. `emit_cost` weights `Seek` and LOAD/STORE, not opcode novelty. | keep packing in dense emit / VM peek | **Done (docs + tests, no typed lift).** Do **not** add packed ops to specialize refuse; do **not** make specialize keep a prerequisite. Print `main` stays fuse-IL. Optional `from_plain_byte` lift refused: fuse-select should not see dense ABC ops. |
 
 Kick order (project ladder): **S8** (landed, docs+tests; no typed `Dense*` lift) → **S2** (landed, two-word `DenseBin2`) → **S1** (landed, two-word `DenseBinJmpf`) → **S4** (landed, two-word `DenseIndexJmpf`) → **S6** → **S3** (landed, table/hotmatch peek) → **S5** (landed, table/hotmatch peek) → **S7** (landed, `item_check` const-left `BinSlotImm`).
 
@@ -86,7 +86,7 @@ Blocked (do not file as kick tickets): revive `FloatChainStore`; CALL-prep super
 ### Fuse-select (`compiler/src/il/lower.rs`)
 
 One named pass after concat. Residual `IlOp::Byte` is `Slot::Cold`.
-Labels / `JoinLabel` / `FuseHint` are barriers. Per-function fuse is not
+Labels / `FuseHint` are barriers. Per-function fuse is not
 production.
 
 | Opcode | Window | Emit |
@@ -221,7 +221,7 @@ order-of-magnitude, not `vm_profile`).
 
 ## Threaded execute (sibling, not this project)
 
-[Threaded execute dispatch](https://linear.app/ardax/project/threaded-execute-dispatch-e632b8b7ca96)
+Threaded execute dispatch
 is cheaper dispatch, not new packed ops. `machine/src/fused.rs`: rustc
 1.98 has no stable `become`; a 256-entry fn-pointer table was ~2% slower
 on mandelbrot. 162 match arms including tombstones.

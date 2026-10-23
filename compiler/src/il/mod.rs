@@ -16,11 +16,13 @@ pub(crate) mod module;
 mod op;
 pub(crate) mod opt;
 pub(crate) mod pure_call;
+// Stack-height deltas, for `coil dissect`'s depth column.
+#[cfg(any(test, feature = "dissect"))]
 mod sp;
-pub mod tell;
 mod treeshake;
 
 pub use opt::OptLevel;
+#[cfg(any(test, feature = "dissect"))]
 #[cfg(any(test, feature = "dissect"))]
 pub(crate) use sp::stack_delta;
 

@@ -1,10 +1,10 @@
 # MIR debugger / deopt boundaries (I7)
 
-I7 ([COI-299](https://linear.app/ardax/issue/COI-299/i7-debugger-deopt-boundaries-on-mir))
+I7 (COI-299)
 names **stop** and **deopt** edges on the SSA sidecar so a later native
-tier can leave safely. **B8** ([COI-346](https://linear.app/ardax/issue/COI-346/b8-i7-debuggerdeopt-mir-wall))
+tier can leave safely. **B8** (COI-346)
 ladders the blanket fuse-IL refuse: debugger-attached and `-Og` may
-dense / MIR→LIR. **C3** ([COI-350](https://linear.app/ardax/issue/COI-350/c3-native-deopt-maps-named-let-slots-sparse-debugloc))
+dense / MIR→LIR. **C3** (COI-350)
 adds compiler-internal resume maps, remaps named `let` slots after SSA
 register assign, and forwards known `DebugLoc` through dense / LIR emit.
 The VM debugger still steps **reconstructed bytecode**. There is no

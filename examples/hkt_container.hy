@@ -2,9 +2,8 @@
 //
 // @output 42
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 trait Container<F: * -> *> {
     fn first<A>(F<A> xs, A fallback) -> A {}
@@ -24,5 +23,5 @@ fn get<F: Container, A>(F<A> xs, A fallback) -> A {
 }
 
 fn main() {
-    let _ = write_all(stdout(), to_bytes(format("%i", get(Option::Some(42), 0))));
+    let _ = print(format("%i", get(Option::Some(42), 0)));
 }
