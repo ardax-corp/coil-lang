@@ -27,15 +27,26 @@ step.
 end, and a 64 KiB line with a `,` every 1 KiB. `coil` release, x86-64
 container, ns per call:
 
-| Case | main `bb3996a` | step 1 |
-|------|----------------|--------|
-| Coil loop, find a byte | 6 270 000 | 1 900 000 |
-| Coil loop, find `"needle"` | 7 480 000 | 2 120 000 |
-| stdlib `find_in` (native), byte | 3 300 | 3 060 |
-| stdlib `find_in` (native), `"needle"` | 3 450 | 2 480 |
-| stdlib `split` on the sparse line | 36 800 | 35 500 |
+| Case | main `bb3996a` | step 1 | step 3 |
+|------|----------------|--------|--------|
+| Coil loop, find a byte | 6 270 000 | 1 900 000 | 11 000 |
+| Coil loop, find `"needle"` | 7 480 000 | 2 120 000 | 225 000 |
+| stdlib `find_in` (native), byte | 3 300 | 3 060 | 1 950 |
+| stdlib `find_in` (native), `"needle"` | 3 450 | 2 480 | 2 400 |
+| stdlib `split` on the sparse line | 36 800 | 35 500 | 36 000 |
 
-The plain loop costs about 96 ns per byte, about 1 900 times the native.
+On main the plain loop costs about 96 ns per byte, about 1 900 times the
+native. After step 3 the byte loop is about 0.17 ns per byte, 5 to 6
+times the native `memchr`. The substring loop stops at every `n` (once
+per 64 bytes in this line) and runs the scalar compare there, so it
+costs about 220 ns per candidate: a first-byte filter, where `memmem`
+filters on two bytes. The stdlib rewrite (step 4) filters on two bytes
+in plain Coil.
+
+A first attempt kept the 64-byte loop in MIR (a `ByteMask` instruction
+per block, then `== 0`, `+ 64` and a range test as ordinary ops). That
+cost about 7 dispatches and 95 ns per 64 bytes (find a byte: 98 000 ns),
+so the loop moved into the VM as one `VScan` op.
 
 ## Design
 
@@ -60,9 +71,9 @@ A vector register is 64 bytes, so byte lanes reuse it as 64 `u8` lanes:
 - Dense unaries `ctz` (count trailing zeros) and `blsr` (clear the
   lowest set bit), both non-trapping.
 
-`coil-simd` runs each op as four 16-byte SSE2 / NEON steps, with AVX2 and
-AVX-512 used when the host has them. A scalar reference stays in
-`scalar.rs`.
+`coil_simd::bytes64` runs each op as four 16-byte SSE2 / NEON steps (the
+targets' baseline, so no runtime dispatch). Its `scalar` module is the
+reference in tests and the fallback on other targets.
 
 ### 3. Vectorising early-exit loops (skip-ahead)
 
@@ -72,22 +83,29 @@ iteration can be a *no-op*: the path from the loop body to the latch
 reads bytes at `arr[iv + inv]`, compares them, and changes nothing but
 the induction variable. The pass derives the lane predicate `P` = "this
 iteration does something" from the body's branches (so `&&` / `||`
-chains work) and puts a skip-ahead block in front of the old header:
+chains and their `bool` φs work) and puts a scan in front of the old
+header:
 
 ```text
-H': i' = φ(init, i + 1 from latch, i' + 64 from S1), other φs likewise
-    if i' + 64 > bound or a read would leave its array: go to H(i')
-S0: m = ByteMask(P, lanes i' .. i' + 64)
-    if m == 0: S1: i' + 64, back to H'
-S2: i2 = i' + ctz(m), go to H(i2)
-H:  the old loop, now entered at i2, its latch going back to H'
+G:  i' = φ(init, i + 1 from latch), other φs likewise
+    i2 = ByteScan(P, from i', while i' <= bound - 64)
+H:  the old loop, now entered at i2, its latch going back to G
 ```
+
+`ByteScan` is one MIR instruction and one VM op, `VScan`. Its body is
+the predicate as byte-lane `VLoad` / `VBin` words, run by the VM in a
+loop without dispatch: from `i'`, 64 lanes at a time, it stops at the
+first lane where `P` holds, at the bound, or where a read would leave
+its string, and returns that position. The strings are resolved once per
+scan. Vector registers live only inside the op, so no vector value
+crosses MIR instructions and register allocation does not change.
 
 The scalar loop runs only at candidates and near the end, so the
 semantics (bounds panics, side effects, other loop values) are the
 original loop's. The same rule covers:
 
-- find a byte (`s[i] == c`),
+- find a byte (`s[i] == c`), and byte classes (`c >= 48 && c <= 57`,
+  `c == a || c == b`, `c != x`),
 - the first-byte filter of a substring search, with the full compare
   only at candidates,
 - the inner compare loop (`while j < m && s[i + j] == p[j]`): two byte
@@ -95,9 +113,15 @@ original loop's. The same rule covers:
 - counting loops (`if s[i] == c { n = n + 1; }`), whose count is
   unchanged on a skipped iteration.
 
-`ByteMask` is one MIR instruction producing an `i64`. Vector registers
-live only inside its expansion, so no vector value crosses MIR
-instructions and register allocation does not change.
+The range setup it adds sits in the loop's preheader; loop-invariant
+code motion runs again after the pass, so for an inner loop it moves
+out of the outer one.
+
+Integer edges: the pass computes `bound - 64` and stream offsets with
+ordinary trapping `i64` arithmetic in the preheader, so a bound within
+64 of `i64::MIN` traps where the scalar loop would not. No string or
+array is that long, and a hand-written bound that low runs no iterations
+anyway.
 
 ### 4. Userland search on it
 
@@ -110,8 +134,8 @@ rewritten as plain loops. Whether the `string::find_from` / `rfind` /
 | Step | PR | Change |
 |------|----|--------|
 | 0 | #1951 | This plan and `examples/perf/text_scan_long.hy` |
-| 1 | | `s[i]` dense: `DenseIndex` flag `HEAP_STR_BYTE`, archive minor 45; the plain loop goes from 96 to 29 ns per byte |
-| 2 | | VM byte lanes (`VLoad` `TY_U8`, `VBin` `M_*` / `B_CMP` / `BS_CMP`), `VMask`, dense `UNARY_CTZ` / `UNARY_BLSR`; `coil_simd::bytes64` (SSE2 / NEON baseline, no dispatch); archive minor 46 |
-| 3 | | MIR `byte_scan` skip-ahead pass |
+| 1 | #1953 | `s[i]` dense: `DenseIndex` flag `HEAP_STR_BYTE`, archive minor 45; the plain loop goes from 96 to 29 ns per byte |
+| 2 | #1954 | VM byte lanes (`VLoad` `TY_U8`, `VBin` `M_*` / `B_CMP` / `BS_CMP`), `VMask`, dense `UNARY_CTZ` / `UNARY_BLSR`; `coil_simd::bytes64` (SSE2 / NEON baseline, no dispatch); archive minor 46 |
+| 3 | | MIR `byte_scan` pass: `ByteScan` / VM `VScan` (archive minor 46); find a byte 6.3 ms to 11 µs per 64 KiB |
 | 4 | | coil-stdlib `text` search in plain loops |
 | 5 | | Website docs; feature branch to `main` |

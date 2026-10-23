@@ -227,3 +227,25 @@ fn panics(() -> int f) -> bool {
 test("a start before the string still panics") {
     assert!(panics(from_before_start));
 }
+
+// A loop bounded by an arbitrary int, not the string's length.
+fn find_upto(string s, byte b, int from, int n) -> int {
+    let i = from;
+    while i < n {
+        if s[i] == b {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+test("bounds near the int limits do not overflow") {
+    let s = with_mark(300, 250, ";");
+    let lo = -9223372036854775807 - 1;
+    assert!(find_upto(s, 59, 0, lo) == -1);
+    assert!(find_upto(s, 59, 0, lo + 10) == -1);
+    assert!(find_upto(s, 59, 0, 250) == -1);
+    assert!(find_upto(s, 59, 0, 251) == 250);
+    assert!(find_upto(s, 59, 200, 9223372036854775807) == 250);
+}
