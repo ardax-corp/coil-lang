@@ -1,6 +1,6 @@
 # Superinstruction investigation dumps
 
-[COI-378](https://linear.app/ardax/issue/COI-378) S0 evidence. Generated with
+COI-378 S0 evidence. Generated with
 release `coil` / `coil-dissect`, `COIL_AUTO_PAR=0`,
 `--root .deps/coil-stdlib/src`. See
 `docs/internals/superinstructions-candidates.md`.

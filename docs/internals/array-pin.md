@@ -4,14 +4,14 @@
 > **Status: partly retired.** Since MIR emits every body (M5, 2026-10-15), only `ArrayPin` is still emitted: a function's prologue pins the array parameters the checker proved length-stable (`pin_params`, `emit_sidecar_array_pins` in `codegen/compiler.rs`), and the VM's per-frame pin table backs the dense `DenseIndex` cache. Nothing emits `IndexPin*` / `StoreIndexPin*` any more; MIR indexes with `Index` / `IndexUnchecked`. Those four opcodes and their VM handlers stay only so older archives load, until the next archive major. The notes below are the historical design record.
 
 [#192](https://github.com/ardax-corp/coil-lang/pull/192) already shipped the
-handle [COI-198](https://linear.app/ardax/issue/COI-198) asked for. Proven
+handle COI-198 asked for. Proven
 counted / stride loops pin the array once and index through a cached `Object`,
 so those sites skip `Heap::find_object_by_addr`. This note is the layout. It is
 not a second pin opcode.
 
-This is not [COI-99](https://linear.app/ardax/issue/COI-99) (which helpers may
+This is not COI-99 (which helpers may
 appear in a length-invariant loop). Named-local class SROA stays a non-goal
-([COI-84](https://linear.app/ardax/issue/COI-84)). No JIT.
+(COI-84). No JIT.
 
 ## Already on main (pin opcodes)
 
@@ -77,10 +77,10 @@ lower to `IndexUnchecked` / `StoreIndexUnchecked`, and MIR-dense bodies use
 The same length-sensitive refusals as Unchecked apply: `ArrayPush`, rebound
 array slot, impure `CALL`, host, FFI, `GetField`/`SetField`, `CallIndirect`,
 `TailCall`, `YieldCoro` / `YieldFromCoro`, `FORMAT`, `MakeArray`. Pure user
-helpers are not a barrier ([COI-99](https://linear.app/ardax/issue/COI-99)).
+helpers are not a barrier (COI-99).
 `LEQ` / `GEQ` headers are not in-bounds proofs
-([COI-85](https://linear.app/ardax/issue/COI-85) /
-[COI-98](https://linear.app/ardax/issue/COI-98)).
+(COI-85 /
+COI-98).
 
 ### Who consumes it
 
@@ -154,7 +154,7 @@ roots.
   the local slot is later overwritten. That is extra liveness, not a
   use-after-free. A dense index's pin lasts only while its register still
   holds the object (#1651).
-- Resurrection from `fn drop()` ([COI-79](https://linear.app/ardax/issue/COI-79))
+- Resurrection from `fn drop()` (COI-79)
   is unchanged: drop still runs at most once; a pin that kept the object marked
   simply delays drop until the frame unwinds and a later collection sees it
   unmarked.
@@ -212,7 +212,7 @@ Fail closed: that loop keeps checked `Index` and does not get `ArrayPin` /
 | Out of scope | Why |
 |--------------|-----|
 | Second pin / ArrayPtr opcode | Minor 13 already is that handle |
-| Named-local class SROA / stack instances | [COI-84](https://linear.app/ardax/issue/COI-84); frame pins are array identity, not scalar replacement |
+| Named-local class SROA / stack instances | COI-84; frame pins are array identity, not scalar replacement |
 | JIT | Interpreter compatibility path; see [optimization-roadmap.md](optimization-roadmap.md) |
 | Pinning every `Index` in the VM | Unproven / aliased / host paths stay on `find_object_by_addr` (slab + poison); fail closed |
 | Interior pointers into `elements` | `ArrayPush` reallocates the `Vec`; pin holds `Gc`, not a slice |
@@ -220,7 +220,7 @@ Fail closed: that loop keeps checked `Index` and does not get `ArrayPin` /
 
 ## Decision
 
-**Shipped.** Pins are the product. [COI-198](https://linear.app/ardax/issue/COI-198)
+**Shipped.** Pins are the product. COI-198
 is Done. Do not file a Feature for ArrayPtr.
 
 Leave unpinned `find_object_by_addr` (slab + poison) as an ordinary leftover

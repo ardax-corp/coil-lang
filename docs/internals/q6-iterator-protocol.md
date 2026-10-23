@@ -2,7 +2,7 @@
 
 > **Status: historical.** Written while stack-lowered (fuse-IL) bodies were the default. Since M5 (2026-10-15) every body lowers through MIR and emits dense or LIR. Today's pipeline: [pipeline.md](pipeline.md).
 
-Linear: [COI-328](https://linear.app/ardax/issue/COI-328/q6-mir-friendly-iterator-protocol-for-for).
+Linear: COI-328.
 Not a permanent fuse-IL ceiling. Not a full `Iterator` trait rewrite.
 
 ## Choice

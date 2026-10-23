@@ -42,18 +42,18 @@ Which of those passes run depends on the optimization level
 | text form | Print / parse for round-trip tests |
 
 Language `int` / `float` / `bool` map to `i64` / `f64` / `bool`. I1
-([COI-293](https://linear.app/ardax/issue/COI-293/i1-heap-niche-types-in-mir-lattice))
+(COI-293)
 adds `heapref` / `niche_opt` / `niche_res` under `value` so infer/lower can
 **carry** shipped heap and niche Option/Result words in SSA. Dense emit and
 `DenseAbi` take numeric, `HeapRef`, and niche word lanes; two-slot `RETURN`
-and allocating / escaping bodies stay fuse-IL or LIR. I2 ([COI-294](https://linear.app/ardax/issue/COI-294/i2-match-on-niche-two-slot-in-mir)
-/ [COI-302](https://linear.app/ardax/issue/COI-302/after-unlock-i2-boxedconstructmatch-cost-gate))
+and allocating / escaping bodies stay fuse-IL or LIR. I2 (COI-294
+/ COI-302)
 lowers niche / two-slot / boxed-overlap match (`LogNot` / tag `Br` /
 `JumpIfMatch` any tag, arity ≤ 1 including arity 0 overlap). **Q8**
-([COI-330](https://linear.app/ardax/issue/COI-330)) reconstructs niche /
+(COI-330) reconstructs niche /
 two-slot match as dense register `Br` (cost gate vs LIR/fuse). Boxed
 `JumpIfMatch` stays MIR→LIR.
-I3 ([COI-295](https://linear.app/ardax/issue/COI-295/i3-non-escaping-class-fields-in-mir))
+I3 (COI-295)
 lowers field load/store on **non-escaping** named class locals that
 lowering unboxed into consecutive slots
 (`FieldLoad` / `FieldStore`). Escaping / heap-backed named locals
@@ -76,8 +76,8 @@ Nothing emits keyed `MakeDict` / `GetField` any more. A 10M-iteration
 `p.x` / `p.y` read-write loop (`--release`): 4.34 s keyed, 1.29 s
 slotted. A class local in the same loop takes 0.40 s: its fields go to
 frame slots (I3), which records do not yet.
-I4 / Q9 ([COI-296](https://linear.app/ardax/issue/COI-296/i4-string-format-mir-subset-or-refuse),
-[COI-332](https://linear.app/ardax/issue/COI-332))
+I4 / Q9 (COI-296,
+COI-332)
 names `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` as SSA (R1) and
 reconstructs them on MIR→LIR. Dense infer still refuses table ops so
 numeric specialize is unchanged. **R2** densifies `from_bytes` /
@@ -85,25 +85,25 @@ numeric specialize is unchanged. **R2** densifies `from_bytes` /
 `FORMAT` / `STRINGIFY` like I5 alloc. There is no second
 Format lowering. Unicode / regex are out of MIR (R4 leftover). Ladder:
 [q9-format-string.md](q9-format-string.md).
-I5 ([COI-300](https://linear.app/ardax/issue/COI-300/i5-alloc-gc-barriers-in-mir))
+I5 (COI-300)
 names `Alloc` (`MakeArray` / `MakeTuple` / `MakeEnum` / `InitTyped`) and
 `GcBarrier` safepoints. S2a
-([COI-305](https://linear.app/ardax/issue/COI-305/s2a-live-root-sidecar-at-mir-gcbarrier-alloc))
+(COI-305)
 fills live-heap `roots` (and IL slots when snapshotted). S2b
-([COI-306](https://linear.app/ardax/issue/COI-306/s2b-slot-frame-stack-maps-for-interpreter-gc))
+(COI-306)
 encoded those slots as interpreter frame maps (no longer emitted: precise
 frame maps of the final bytecode cover every body,
 [mir-stack-maps.md](mir-stack-maps.md)). S2c
-([COI-307](https://linear.app/ardax/issue/COI-307/s2c-specialize-lir-across-alloc-when-maps-exist))
+(COI-307)
 lets infer / specialize / `emit_lir` cross alloc **only** when those
 maps exist. S2d
-([COI-314](https://linear.app/ardax/issue/COI-314/s2d-map-backed-looping-alloc-further-alloc-opts))
+(COI-314)
 extends that to mapped **preheader** `Make*` + index (dense) and
 compare-only looping leftovers (LIR). S2e
-([COI-316](https://linear.app/ardax/issue/COI-316)) drops per-residual
+(COI-316) drops per-residual
 `Seek` restore; in-loop `Make*` stays off dense (boxing tax).
 Post-loop-only heap returns stay fuse-IL (invert+fuse). Unmapped allocating bodies stay fuse-IL. S3
-([COI-308](https://linear.app/ardax/issue/COI-308/s3-widen-densemir-coverage-match-call-heap-index))
+(COI-308)
 widens dense coverage: one-word `CALL` beyond the dense map, and I6
 HostInvoke including Q9 R2 `from_bytes` / `to_bytes`. Heap-index / `StoreIndex` take dense after V* miss (S3b): unpinned
 `Index` / `StoreIndex` / `ArrayLen`. Residual `StorePop` leaves tell at
@@ -291,16 +291,16 @@ I6-typed hosts including Q9 R2 `from_bytes` / `to_bytes`. Precise float/heap
 types still live on math / packed / axpy specs.
 
 I6
-([COI-297](https://linear.app/ardax/issue/COI-297/i6-effects-hostinvoke-as-mir-edges))
+(COI-297)
 types natives as SSA `HostInvoke` edges when `allow_effects` is set. I7
-([COI-299](https://linear.app/ardax/issue/COI-299/i7-debugger-deopt-boundaries-on-mir))
+(COI-299)
 names `Deopt` stop / leave edges (`allow_deopt`). **B8:** debugger-attached
 and `-Og` may dense + MIR→LIR; emit skips explicit `Deopt`. **C3:**
 compiler-internal resume maps, named-let remap, sparse emit locs
 (no archive bump; P5 resume leftover).
 The VM debugger steps the reconstruct
 ([mir-deopt.md](mir-deopt.md)). I8
-([COI-298](https://linear.app/ardax/issue/COI-298/i8-broaden-mir-emit-entry-post-i1-i3))
+(COI-298)
 lifts leftover bodies through MIR→LIR when there is no hard refuse.
 Unmapped I5 alloc and HostInvoke/`CALL` stay fuse-IL on the LIR path.
 Q9 R1 string/format may lift. User `CALL` is COI-291 (below). Dense emit keeps

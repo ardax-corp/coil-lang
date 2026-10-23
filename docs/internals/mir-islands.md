@@ -7,9 +7,9 @@ MIR is a **typed SSA sidecar** that grows **island by island**. It is not a
 wholesale rewrite of the compiler, and it is not a second semantic language
 IR.
 
-Linear project: [MIR language islands](https://linear.app/ardax/project/mir-language-islands-01a45453f2f1).
+Linear project: MIR language islands.
 Numeric dense / LIR history stays in [mir.md](mir.md) and the
-[Coil Low IR](https://linear.app/ardax/project/coil-low-ir-51e2b0cb7b46) project.
+Coil Low IR project.
 P5 Cranelift stays parked there.
 
 ## Doctrine
@@ -57,15 +57,15 @@ ConstReturnImm fuse is not undone.
 
 | # | Island | Issue | Outcome | Status |
 |---|--------|-------|---------|--------|
-| I0 | Doctrine + refuse map | [COI-292](https://linear.app/ardax/issue/COI-292/i0-mir-islands-doctrine-refuse-inventory) | This note; feature → path → target island | on main (#340) |
-| I1 | Heap / niche types | [COI-293](https://linear.app/ardax/issue/COI-293/i1-heap-niche-types-in-mir-lattice) | `MirTy` / `MirLayout` name heap-ref + niche Option/Result Value words; infer/lower may carry them; no GC maps; no specialize of allocating/escaping bodies | on main (#342) |
-| I2 | Match on niche / two-slot / boxed overlap | [COI-294](https://linear.app/ardax/issue/COI-294/i2-match-on-niche-two-slot-in-mir) / [COI-302](https://linear.app/ardax/issue/COI-302/after-unlock-i2-boxedconstructmatch-cost-gate) / [COI-330](https://linear.app/ardax/issue/COI-330) Q8 / [COI-357](https://linear.app/ardax/issue/COI-357) D3 | JumpIfMatch-shaped control in MIR; arity 0 overlap + any tag; niche `LogNot` / two-slot tag `Br`; **Q8** dense reconstruct for niche / two-slot (register `Br`, cost gate); boxed unary `JumpIfMatch` may LIR; **D3** boxed multi-payload `Unpack(n)` | on main + Q8 (#388) + D3 |
-| I3 | Non-escaping class fields | [COI-295](https://linear.app/ardax/issue/COI-295/i3-non-escaping-class-fields-in-mir) | Field load/store using the existing local-escape sidecar; escaping named locals stay fuse-IL | on main (#344) |
-| I4 | String / format subset | [COI-296](https://linear.app/ardax/issue/COI-296/i4-string-format-mir-subset-or-refuse) / [COI-332](https://linear.app/ardax/issue/COI-332) Q9 | **Q9 R1–R3 shipped.** Table `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` are SSA + MIR→LIR reconstruct. Dense infer still refuses table ops. `from_bytes` / `to_bytes` are I6 dense HostInvoke. `FORMAT` / `STRINGIFY` take I5-style maps. Leftover: unicode/regex (R4). No half-format second lowering | #345 barrier; Q9 R1 #389; Q9 R2 B4; Q9 R3 B9; ladder [q9-format-string.md](q9-format-string.md) |
-| I5 | Alloc + GC barriers | [COI-300](https://linear.app/ardax/issue/COI-300/i5-alloc-gc-barriers-in-mir) / [COI-305](https://linear.app/ardax/issue/COI-305/s2a-live-root-sidecar-at-mir-gcbarrier-alloc) / [COI-306](https://linear.app/ardax/issue/COI-306/s2b-slot-frame-stack-maps-for-interpreter-gc) / [COI-307](https://linear.app/ardax/issue/COI-307/s2c-specialize-lir-across-alloc-when-maps-exist) / [COI-314](https://linear.app/ardax/issue/COI-314/s2d-map-backed-looping-alloc-further-alloc-opts) | MakeArray / alloc edges; S2a live-root sidecar; S2b interpreter slot / frame maps; S2c specialize / LIR across alloc when maps exist; S2d mapped in-loop / preheader Make* | I5 / S2a–S2d on main |
-| I6 | Effects / HostInvoke | [COI-297](https://linear.app/ardax/issue/COI-297/i6-effects-hostinvoke-as-mir-edges) | Broader than W4 allowlist; purity sidecar drives barriers | on main (#347) |
-| I7 | Debugger / deopt | [COI-299](https://linear.app/ardax/issue/COI-299/i7-debugger-deopt-boundaries-on-mir) / [COI-346](https://linear.app/ardax/issue/COI-346/b8-i7-debuggerdeopt-mir-wall) / [COI-350](https://linear.app/ardax/issue/COI-350) C3 | Deopt / stop metadata on MIR edges; **B8** debugger-attached / `-Og` may dense / LIR; **C3** compiler-internal resume maps + named-let remap + sparse emit locs; emit skips `Deopt` (no archive maps) | I7 on main (#348); B8 / C3 ladder |
-| I8 | Broaden MIR emit | [COI-298](https://linear.app/ardax/issue/COI-298/i8-broaden-mir-emit-entry-post-i1-i3) / [COI-301](https://linear.app/ardax/issue/COI-301/unlock-retarget-i8-shape-tests-broaden-lir-eligible) / [COI-336](https://linear.app/ardax/issue/COI-336) A3 / [COI-339](https://linear.app/ardax/issue/COI-339) B1 | Lift when there is no LIR reconstruct wall; keep via cost gate (no work-op / Seek≤64 / host-id floors). Q6–Q8 first rungs are entry hygiene | on main (#380); B0 audit + B1 hygiene [opt-generalization.md](opt-generalization.md) |
+| I0 | Doctrine + refuse map | COI-292 | This note; feature → path → target island | on main (#340) |
+| I1 | Heap / niche types | COI-293 | `MirTy` / `MirLayout` name heap-ref + niche Option/Result Value words; infer/lower may carry them; no GC maps; no specialize of allocating/escaping bodies | on main (#342) |
+| I2 | Match on niche / two-slot / boxed overlap | COI-294 / COI-302 / COI-330 Q8 / COI-357 D3 | JumpIfMatch-shaped control in MIR; arity 0 overlap + any tag; niche `LogNot` / two-slot tag `Br`; **Q8** dense reconstruct for niche / two-slot (register `Br`, cost gate); boxed unary `JumpIfMatch` may LIR; **D3** boxed multi-payload `Unpack(n)` | on main + Q8 (#388) + D3 |
+| I3 | Non-escaping class fields | COI-295 | Field load/store using the existing local-escape sidecar; escaping named locals stay fuse-IL | on main (#344) |
+| I4 | String / format subset | COI-296 / COI-332 Q9 | **Q9 R1–R3 shipped.** Table `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` are SSA + MIR→LIR reconstruct. Dense infer still refuses table ops. `from_bytes` / `to_bytes` are I6 dense HostInvoke. `FORMAT` / `STRINGIFY` take I5-style maps. Leftover: unicode/regex (R4). No half-format second lowering | #345 barrier; Q9 R1 #389; Q9 R2 B4; Q9 R3 B9; ladder [q9-format-string.md](q9-format-string.md) |
+| I5 | Alloc + GC barriers | COI-300 / COI-305 / COI-306 / COI-307 / COI-314 | MakeArray / alloc edges; S2a live-root sidecar; S2b interpreter slot / frame maps; S2c specialize / LIR across alloc when maps exist; S2d mapped in-loop / preheader Make* | I5 / S2a–S2d on main |
+| I6 | Effects / HostInvoke | COI-297 | Broader than W4 allowlist; purity sidecar drives barriers | on main (#347) |
+| I7 | Debugger / deopt | COI-299 / COI-346 / COI-350 C3 | Deopt / stop metadata on MIR edges; **B8** debugger-attached / `-Og` may dense / LIR; **C3** compiler-internal resume maps + named-let remap + sparse emit locs; emit skips `Deopt` (no archive maps) | I7 on main (#348); B8 / C3 ladder |
+| I8 | Broaden MIR emit | COI-298 / COI-301 / COI-336 A3 / COI-339 B1 | Lift when there is no LIR reconstruct wall; keep via cost gate (no work-op / Seek≤64 / host-id floors). Q6–Q8 first rungs are entry hygiene | on main (#380); B0 audit + B1 hygiene [opt-generalization.md](opt-generalization.md) |
 
 I4 was closed as a hard MIR barrier (#345). **Q9 R1** reopens it as a
 phased island: SSA + LIR reconstruct of the shipped string/format
@@ -90,7 +90,7 @@ HostInvoke. **Q9 R3** maps `FORMAT` / `STRINGIFY`. Unicode / regex stay out unti
 | Nested / mixed / `CallIndirect` Option/Result | boxed `ObjEnum` + fuse-IL | stay refuse until a later island says otherwise |
 | `match` / `JumpIfMatch` on niche / two-slot (any tag, arity ≤ 1) | **Q8** dense register `Br` when reconstruct ≤ opted fuse-IL; else LIR / fuse-IL | **I2** + **Q8** |
 | `match` / `JumpIfMatch` on boxed unary (arity 0 overlap; last-arm `Unpack`) | MIR→LIR when reconstruct ≤ opted fuse-IL; else fuse-IL | **I2** (boxed unary stays LIR) |
-| `match` / `JumpIfMatch` on boxed multi-payload (`Unpack` arity > 1) / user polymorphism | **D3** dense or LIR when reconstruct ≤ fuse (`Unpack(n)` + per-index maps); user polymorphism stays fuse-IL | **D3** ([COI-357](https://linear.app/ardax/issue/COI-357)); polymorphism refuse |
+| `match` / `JumpIfMatch` on boxed multi-payload (`Unpack` arity > 1) / user polymorphism | **D3** dense or LIR when reconstruct ≤ fuse (`Unpack(n)` + per-index maps); user polymorphism stays fuse-IL | **D3** (COI-357); polymorphism refuse |
 | Class fields (escaping / heap-backed) | fuse-IL | stay refuse (I3 is **non-escaping** only) |
 | Non-escaping named class locals (sidecar) | MIR→LIR `FieldLoad` / `FieldStore` on unboxed slots | **I3** |
 | Heap index / `MakeArray` / alloc | SSA `Alloc` / `ArrayPush` + `GcBarrier` when `allow_alloc`; S2a–S2l + **A2** / **B6** dense-native `Index` / `Make*` / `DensePush` / `DenseArrayPush`; keep when maps exist and cost ≤ fuse-IL. Leftover unmapped grow / class edges stay fuse-IL. Boxed unary match may LIR (I2); multi-payload may dense/LIR (**D3**); niche / two-slot match may dense (**Q8**) | **I5** / **S2** / **A2** / **B6** |

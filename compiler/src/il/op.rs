@@ -103,7 +103,7 @@ pub enum IlOp {
     /// this (`Slot::Cold`). Jump/call ops that still embed absolute PCs are
     /// accepted for transitional emit paths; prefer [`IlOp::Jump`] /
     /// [`IlOp::Entry`]. Dense packing is dense emit / VM peek, not a
-    /// fuse-select peep ([COI-385](https://linear.app/ardax/issue/COI-385) S8).
+    /// fuse-select peep (COI-385 S8).
     Byte {
         byte: Byte,
         loc: DebugLoc,

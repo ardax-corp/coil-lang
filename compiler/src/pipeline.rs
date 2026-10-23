@@ -487,7 +487,9 @@ impl Pipeline {
 
     /// Extra `use`/`mod` roots for this repo's examples and stdlib checkouts.
     ///
-    /// CLI/tests pass these as `--root`.
+    /// CLI/tests pass these as `--root`. `COIL_STDLIB` adds one more stdlib
+    /// root for the cargo-workspace tests only; the installed `coil` reads
+    /// no environment variable for roots (#1871).
     pub fn workspace_language_extra_roots() -> Vec<PathBuf> {
         let ws = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()

@@ -2,6 +2,8 @@
 
 Statically typed scripting language with explicit generics and constraint-based inference. Source files use the `.hy` extension; compiled archives are `.hyc`.
 
+Documentation, the tutorial and the language reference live at [coil-lang.dev](https://coil-lang.dev).
+
 ## Install
 
 Download a binary from [GitHub Releases](https://github.com/ardax-corp/coil-lang/releases). No tagged release is published yet; until one is, the rolling [`edge`](https://github.com/ardax-corp/coil-lang/releases/tag/edge) pre-release has the toolkit for Linux (x86_64 glibc and musl, aarch64 glibc), macOS (aarch64) and Windows (x86_64 MinGW). It is rebuilt from `main` after every green CI run, so it is a snapshot, not a stable release. `SHA256SUMS` lists the checksums.
@@ -11,9 +13,11 @@ In GitHub Actions, install the snapshot instead of building coil from source:
 ```yaml
 - uses: ardax-corp/coil-lang/.github/actions/setup-coil@main
   with:
-    stdlib: true   # optional: also clone coil-stdlib, exported as COIL_STDLIB_DIR
-- run: coil test
+    stdlib: true   # optional: also clone coil-stdlib into $COIL_STDLIB_DIR
+- run: coil test --root "$COIL_STDLIB_DIR/src"
 ```
+
+`coil` reads no environment variable for library roots: pass each one with `--root`. `COIL_STDLIB_DIR` is only where the action put the checkout (also its `src` output).
 
 With [spool](https://github.com/ardax-corp/spool), `./bootstrap.sh --channel edge --install` installs the snapshot into `~/.coil`.
 

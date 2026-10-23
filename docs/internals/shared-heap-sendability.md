@@ -1,8 +1,8 @@
 # Shared-heap sendability (C0 / STW)
 
-[COI-363](https://linear.app/ardax/issue/COI-363/e5-c0-shared-heap-sendability-design-stw)
+COI-363
 locks the sendability story for **shared-heap steal**. This note is the
-contract [COI-365](https://linear.app/ardax/issue/COI-365/e6-c1-shared-heap-loop-chunk-steal-stw)
+contract COI-365
 implements.
 
 **C1 status (E6):** counted-loop chunks use HostInvoke `thread_spawn_shared`
@@ -22,8 +22,8 @@ Related: [auto-par.md](auto-par.md), [gc-incremental.md](gc-incremental.md),
 [io-reactor.md](io-reactor.md). Findings that ranked the ladder:
 PR [#403](https://github.com/ardax-corp/coil-lang/pull/403) (do **not** merge
 that PR; use the writeup only). Isolate-tax cuts that this note builds on:
-[COI-360](https://linear.app/ardax/issue/COI-360) E2 (#413). Maps that make
-multi-stack GC honest: [COI-359](https://linear.app/ardax/issue/COI-359) E1
+COI-360 E2 (#413). Maps that make
+multi-stack GC honest: COI-359 E1
 (archive minor 14).
 
 ## Goal
