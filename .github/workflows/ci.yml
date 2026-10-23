@@ -155,7 +155,10 @@ jobs:
           find tests -path '*/compile_fail/*.hy' -print0 \
             | { xargs -0 grep -LZE '^// @expected .*E0(001|208)\b' || true; } \
             | xargs -0 ./target/debug/coil-fmt --check
-          ./target/debug/coil-fmt --check scripts/rep_matrix_known_wrong
+          # Empty once every known-wrong cell is fixed, and git keeps no empty dirs.
+          if [ -d scripts/rep_matrix_known_wrong ]; then
+            ./target/debug/coil-fmt --check scripts/rep_matrix_known_wrong
+          fi
 
       # `tests/representation/` is generated; a hand edit or a generator
       # change without regenerating fails here.
