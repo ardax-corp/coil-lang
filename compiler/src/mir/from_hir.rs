@@ -4559,7 +4559,13 @@ impl Lower<'_> {
         // A two-word value comes back boxed, as the adapter's one-word ABI
         // returns it: the word, unboxed where a pair is read.
         let boxed_pair = self.inp.pair_tys.contains_key(&id.0);
-        if boxed_pair && (self.inp.boxed_view)(ty, None).is_none() {
+        // Any pair `unbox_word` reads back: an enum, a product tuple
+        // (#1859), a range or a readonly class pair.
+        let unboxable = (self.inp.boxed_view)(ty, None).is_some()
+            || matches!(strip_readonly(ty), Ty::Tuple(items) if items.len() == 2)
+            || crate::layout::two_word_range_kind(ty).is_some()
+            || (self.inp.pair_class)(ty).is_some();
+        if boxed_pair && !unboxable {
             return Err("bound call pair".into());
         }
         let unit = is_unit(ty);
