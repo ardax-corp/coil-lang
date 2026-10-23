@@ -27,13 +27,17 @@ step.
 end, and a 64 KiB line with a `,` every 1 KiB. `coil` release, x86-64
 container, ns per call:
 
-| Case | main `bb3996a` | step 1 | step 3 |
-|------|----------------|--------|--------|
-| Coil loop, find a byte | 6 270 000 | 1 900 000 | 11 000 |
-| Coil loop, find `"needle"` | 7 480 000 | 2 120 000 | 225 000 |
-| stdlib `find_in` (native), byte | 3 300 | 3 060 | 1 950 |
-| stdlib `find_in` (native), `"needle"` | 3 450 | 2 480 | 2 400 |
-| stdlib `split` on the sparse line | 36 800 | 35 500 | 36 000 |
+| Case | main `bb3996a` | step 1 | step 3 | step 4 |
+|------|----------------|--------|--------|--------|
+| Coil loop, find a byte | 6 270 000 | 1 900 000 | 11 000 | 2 600 |
+| Coil loop, find `"needle"` | 7 480 000 | 2 120 000 | 225 000 | 125 000 |
+| stdlib `find_in`, byte | 3 300 | 3 060 | 1 950 | 3 300 |
+| stdlib `find_in`, `"needle"` | 3 450 | 2 480 | 2 400 | 4 000 |
+| stdlib `split` on the sparse line | 36 800 | 35 500 | 36 000 | 52 500 |
+
+Through step 3 the stdlib rows call the `memchr` native; from step 4 they
+are plain Coil loops (the native's numbers on the step 4 binary: 1 600,
+2 400 and 35 600).
 
 On main the plain loop costs about 96 ns per byte, about 1 900 times the
 native. After step 3 the byte loop is about 0.17 ns per byte, 5 to 6
@@ -42,6 +46,16 @@ per 64 bytes in this line) and runs the scalar compare there, so it
 costs about 220 ns per candidate: a first-byte filter, where `memmem`
 filters on two bytes. The stdlib rewrite (step 4) filters on two bytes
 in plain Coil.
+
+Step 4 tuned the VM side: a scan that is too short for 64 lanes returns
+before decoding its body, each stream loads once per block, the range
+checks are hoisted out of the block loop, and the two commonest bodies
+(one stream against a byte, two offsets of one string against two
+bytes) run as tight loops over the string. A dense `s[i]` also pins its
+string per register, so a loop reading two strings stops looking them up
+on every read. The stdlib's plain-loop search then runs within 2 times
+the native for a byte and the two-byte filter, and `split` within
+1.5 times (each piece pays a call and a scan setup).
 
 A first attempt kept the 64-byte loop in MIR (a `ByteMask` instruction
 per block, then `== 0`, `+ 64` and a range test as ordinary ops). That
@@ -136,6 +150,6 @@ rewritten as plain loops. Whether the `string::find_from` / `rfind` /
 | 0 | #1951 | This plan and `examples/perf/text_scan_long.hy` |
 | 1 | #1953 | `s[i]` dense: `DenseIndex` flag `HEAP_STR_BYTE`, archive minor 45; the plain loop goes from 96 to 29 ns per byte |
 | 2 | #1954 | VM byte lanes (`VLoad` `TY_U8`, `VBin` `M_*` / `B_CMP` / `BS_CMP`), `VMask`, dense `UNARY_CTZ` / `UNARY_BLSR`; `coil_simd::bytes64` (SSE2 / NEON baseline, no dispatch); archive minor 46 |
-| 3 | | MIR `byte_scan` pass: `ByteScan` / VM `VScan` (archive minor 46); find a byte 6.3 ms to 11 µs per 64 KiB |
-| 4 | | coil-stdlib `text` search in plain loops |
+| 3 | #1963 | MIR `byte_scan` pass: `ByteScan` / VM `VScan` (archive minor 46); find a byte 6.3 ms to 11 µs per 64 KiB |
+| 4 | | coil-stdlib `text` search in plain loops (coil-stdlib, two-byte filter); VM scan fast paths, string pins |
 | 5 | | Website docs; feature branch to `main` |
