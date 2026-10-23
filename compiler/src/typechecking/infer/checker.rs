@@ -1068,7 +1068,6 @@ impl Checker {
             mutex_ty, receiver_ty, rwlock_ty, sender_ty, thread_ty, tuple,
         };
         let thread_err = Ty::Con(common::BUILTIN_THREAD_ERROR_ENUM.into());
-        let res_thread = result_app_ty(thread_ty(), thread_err.clone());
         let res_unit = result_app_ty(unit_ty(), thread_err.clone());
         let fun = |params: &[Ty], ret: Ty| {
             params
@@ -1077,118 +1076,57 @@ impl Checker {
                 .fold(ret, |acc, p| Ty::Fun(Box::new(p.clone()), Box::new(acc)))
         };
         let fn_ty = |param: Ty, ret: Ty| Ty::Fun(Box::new(param), Box::new(ret));
-        match kind {
+        // Every handle carries its value type `T` (#1905): what the thread
+        // returns, what the channel moves, what the lock guards.
+        let t = self.counter.fresh();
+        let tv = Ty::Var(t);
+        let ty = match kind {
             ThreadBuiltin::Spawn => {
-                let t = self.counter.fresh();
                 let a = self.counter.fresh();
-                let fn_a_t = fn_ty(Ty::Var(a), Ty::Var(t));
-                Scheme::poly(vec![t, a], vec![], fun(&[fn_a_t, Ty::Var(a)], res_thread))
-            }
-            ThreadBuiltin::Join => {
-                let t = self.counter.fresh();
-                Scheme::poly(
-                    vec![t],
+                let fn_a_t = fn_ty(Ty::Var(a), tv.clone());
+                return Scheme::poly(
+                    vec![t, a],
                     vec![],
-                    fun(
-                        &[thread_ty()],
-                        result_app_ty(Ty::Var(t), thread_err.clone()),
-                    ),
-                )
+                    fun(&[fn_a_t, Ty::Var(a)], result_app_ty(thread_ty(tv), thread_err)),
+                );
             }
-            ThreadBuiltin::Detach => Scheme::mono(fun(&[thread_ty()], res_unit)),
-            ThreadBuiltin::Channel => {
-                let t = self.counter.fresh();
-                Scheme::poly(
-                    vec![t],
-                    vec![],
-                    fun(
-                        &[],
-                        result_app_ty(tuple(vec![sender_ty(), receiver_ty()]), thread_err),
-                    ),
-                )
-            }
-            ThreadBuiltin::Send | ThreadBuiltin::TrySend => {
-                let t = self.counter.fresh();
-                Scheme::poly(
-                    vec![t],
-                    vec![],
-                    fun(&[sender_ty(), Ty::Var(t)], res_unit.clone()),
-                )
-            }
+            ThreadBuiltin::Join => fun(&[thread_ty(tv.clone())], result_app_ty(tv, thread_err)),
+            ThreadBuiltin::Detach => fun(&[thread_ty(tv)], res_unit),
+            ThreadBuiltin::Channel => fun(
+                &[],
+                result_app_ty(tuple(vec![sender_ty(tv.clone()), receiver_ty(tv)]), thread_err),
+            ),
+            ThreadBuiltin::Send | ThreadBuiltin::TrySend => fun(&[sender_ty(tv.clone()), tv], res_unit),
             ThreadBuiltin::Recv | ThreadBuiltin::TryRecv => {
-                let t = self.counter.fresh();
-                Scheme::poly(
-                    vec![t],
-                    vec![],
-                    fun(
-                        &[receiver_ty()],
-                        result_app_ty(Ty::Var(t), thread_err.clone()),
-                    ),
-                )
+                fun(&[receiver_ty(tv.clone())], result_app_ty(tv, thread_err))
             }
-            ThreadBuiltin::Close => Scheme::mono(fun(&[sender_ty()], res_unit.clone())),
-            ThreadBuiltin::Mutex => {
-                let t = self.counter.fresh();
-                Scheme::poly(
-                    vec![t],
-                    vec![],
-                    fun(&[Ty::Var(t)], result_app_ty(mutex_ty(), thread_err.clone())),
-                )
-            }
-            ThreadBuiltin::Rwlock => {
-                let t = self.counter.fresh();
-                Scheme::poly(
-                    vec![t],
-                    vec![],
-                    fun(
-                        &[Ty::Var(t)],
-                        result_app_ty(rwlock_ty(), thread_err.clone()),
-                    ),
-                )
-            }
-            ThreadBuiltin::WithLock => {
-                let t = self.counter.fresh();
+            ThreadBuiltin::Close => fun(&[sender_ty(tv)], res_unit),
+            ThreadBuiltin::Mutex => fun(std::slice::from_ref(&tv), result_app_ty(mutex_ty(tv.clone()), thread_err)),
+            ThreadBuiltin::Rwlock => fun(std::slice::from_ref(&tv), result_app_ty(rwlock_ty(tv.clone()), thread_err)),
+            ThreadBuiltin::WithLock | ThreadBuiltin::WithWrite | ThreadBuiltin::TryWrite => {
                 let r = self.counter.fresh();
-                let callback = fn_ty(Ty::Var(t), tuple(vec![Ty::Var(t), Ty::Var(r)]));
-                Scheme::poly(
+                let callback = fn_ty(tv.clone(), tuple(vec![tv.clone(), Ty::Var(r)]));
+                let lock = if matches!(kind, ThreadBuiltin::WithLock) { mutex_ty(tv) } else { rwlock_ty(tv) };
+                return Scheme::poly(
                     vec![t, r],
                     vec![],
-                    fun(
-                        &[mutex_ty(), callback],
-                        result_app_ty(Ty::Var(r), thread_err.clone()),
-                    ),
-                )
-            }
-            ThreadBuiltin::WithWrite | ThreadBuiltin::TryWrite => {
-                let t = self.counter.fresh();
-                let r = self.counter.fresh();
-                let callback = fn_ty(Ty::Var(t), tuple(vec![Ty::Var(t), Ty::Var(r)]));
-                Scheme::poly(
-                    vec![t, r],
-                    vec![],
-                    fun(
-                        &[rwlock_ty(), callback],
-                        result_app_ty(Ty::Var(r), thread_err.clone()),
-                    ),
-                )
+                    fun(&[lock, callback], result_app_ty(Ty::Var(r), thread_err)),
+                );
             }
             ThreadBuiltin::WithRead | ThreadBuiltin::TryRead => {
-                let t = self.counter.fresh();
                 let r = self.counter.fresh();
-                let callback = fn_ty(Ty::Var(t), Ty::Var(r));
-                Scheme::poly(
+                let callback = fn_ty(tv.clone(), Ty::Var(r));
+                return Scheme::poly(
                     vec![t, r],
                     vec![],
-                    fun(
-                        &[rwlock_ty(), callback],
-                        result_app_ty(Ty::Var(r), thread_err.clone()),
-                    ),
-                )
+                    fun(&[rwlock_ty(tv), callback], result_app_ty(Ty::Var(r), thread_err)),
+                );
             }
             ThreadBuiltin::Lock | ThreadBuiltin::TryLock | ThreadBuiltin::Unlock => {
-                Scheme::mono(fun(&[mutex_ty()], res_unit))
+                fun(&[mutex_ty(tv)], res_unit)
             }
-        }
+        };
+        Scheme::poly(vec![t], vec![], ty)
     }
 
     /// Scheme for a virtual `gc` host native (inserted on `use gc::{…}`).
@@ -1368,7 +1306,8 @@ impl Checker {
     ) -> Ty {
         use crate::typechecking::ty::thread_ty;
         let thread_err = Ty::Con(common::BUILTIN_THREAD_ERROR_ENUM.into());
-        let res_thread = result_app_ty(thread_ty(), thread_err.clone());
+        // The handle carries what the function returns (#1905).
+        let res_thread = |t| result_app_ty(thread_ty(Ty::Var(t)), thread_err.clone());
         let fn_ty = |param: Ty, ret: Ty| Ty::Fun(Box::new(param), Box::new(ret));
         match arg_tys.len() {
             0 => self.error_with_help(
@@ -1388,7 +1327,7 @@ impl Checker {
                     "spawn function",
                 );
                 self.check_spawn_captures_sendable(arg_exprs.and_then(|a| a.first()), &range);
-                res_thread
+                res_thread(t)
             }
             2 => {
                 let t = self.counter.fresh();
@@ -1424,7 +1363,7 @@ impl Checker {
                         ),
                     );
                 }
-                res_thread
+                res_thread(t)
             }
             n => self.error_with_help(
                 ErrorCode::GenericTypeError,
@@ -1470,11 +1409,7 @@ impl Checker {
                         | "uint16"
                         | "uint32"
                         | "uint64"
-                ) || name == crate::typechecking::ty::SENDER
-                    || name == crate::typechecking::ty::RECEIVER
-                    || name == crate::typechecking::ty::MUTEX
-                    || name == crate::typechecking::ty::RWLOCK
-                {
+                ) {
                     return true;
                 }
                 // A `#[repr(..)]` enum is an immediate word (#1904).
@@ -1499,6 +1434,13 @@ impl Checker {
                     Ty::Con(n) if n == common::BUILTIN_ROOT_TYPE || n == common::BUILTIN_WEAK_TYPE
                 ) {
                     return false;
+                }
+                // Channel ends and locks are shared handles whatever they
+                // carry; a `Thread<T>` join handle stays with its spawner.
+                if let Ty::Con(n) = head.as_ref()
+                    && crate::typechecking::ty::THREAD_HANDLES.contains(&n.as_str())
+                {
+                    return n != crate::typechecking::ty::THREAD;
                 }
                 args.iter().all(|t| self.is_thread_sendable_ty(t))
             }
@@ -12093,11 +12035,12 @@ impl Checker {
             "string" => string(),
             "void" => unit_ty(),
             "stream" => crate::typechecking::ty::stream_ty(),
-            "thread" => crate::typechecking::ty::thread_ty(),
-            "sender" => crate::typechecking::ty::sender_ty(),
-            "receiver" => crate::typechecking::ty::receiver_ty(),
-            "mutex" => crate::typechecking::ty::mutex_ty(),
-            "rwlock" => crate::typechecking::ty::rwlock_ty(),
+            // A bare handle name infers what it carries (#1905).
+            "thread" => crate::typechecking::ty::thread_ty(Ty::Var(self.counter.fresh())),
+            "sender" => crate::typechecking::ty::sender_ty(Ty::Var(self.counter.fresh())),
+            "receiver" => crate::typechecking::ty::receiver_ty(Ty::Var(self.counter.fresh())),
+            "mutex" => crate::typechecking::ty::mutex_ty(Ty::Var(self.counter.fresh())),
+            "rwlock" => crate::typechecking::ty::rwlock_ty(Ty::Var(self.counter.fresh())),
             "option" => option_app_ty(Ty::Var(self.counter.fresh())),
             "result" => result_app_ty(Ty::Var(self.counter.fresh()), Ty::Var(self.counter.fresh())),
             "ioerror" => Ty::Con(common::BUILTIN_IO_ERROR_ENUM.into()),

@@ -265,6 +265,11 @@ impl Generics {
         self.generic_type_ctors
             .insert(common::BUILTIN_WEAK_TYPE.into(), vec!["T".into()]);
         self.register_nominal_type(common::BUILTIN_WEAK_TYPE, GC_MODULE);
+        // `thread` handles carry their value type (#1905). The `thread`
+        // module exports the names; a bare `Thread` infers its `T`.
+        for handle in crate::typechecking::ty::THREAD_HANDLES {
+            self.generic_type_ctors.insert(handle.into(), vec!["T".into()]);
+        }
         self.generic_type_ctors
             .insert(common::BUILTIN_VEC_TYPE.into(), vec!["T".into()]);
         self.register_nominal_type(common::BUILTIN_VEC_TYPE, PRELUDE_MODULE);

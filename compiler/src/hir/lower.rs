@@ -69,7 +69,7 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
         // A foreign pointer: one word, only moved and passed to `extern`s.
         Ty::Con(n) if n == "ptr" && !checker.is_class(n) && checker.enum_variants(n).is_none() => Some(ValueClass::Opaque),
         // Host handles (`io` streams, threads, channels, locks): one word.
-        Ty::Con(n) if is_host_handle(n) && !checker.is_class(n) && checker.enum_variants(n).is_none() => {
+        Ty::Con(n) if n == coil_ty::STREAM && !checker.is_class(n) && checker.enum_variants(n).is_none() => {
             Some(ValueClass::Opaque)
         }
         Ty::Constructor { owner, .. } => classify_in(checker, owner, seen),
@@ -107,6 +107,10 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
             // A GC `Root<T>` / `Weak<T>` handle: one host word, only moved
             // and passed to the `gc` natives.
             if matches!(name.as_str(), coil_ty::ROOT | coil_ty::WEAK) && args.len() == 1 && !checker.is_class(name) {
+                return Some(ValueClass::Opaque);
+            }
+            // A `thread` handle (`Thread<T>`, `Sender<T>`, …): one host word.
+            if coil_ty::opaque_handle_name(ty).is_some() && !checker.is_class(name) {
                 return Some(ValueClass::Opaque);
             }
             // A generic class instance: one object word, its methods shared
@@ -1481,11 +1485,6 @@ pub fn refusal_at(body: &HirBody, checker: &Checker) -> Option<(&'static str, Op
     walk.effect(root)
         .err()
         .map(|reason| (reason, walk.stage_at.filter(|_| STAGED.contains(&reason))))
-}
-
-/// The builtin opaque types the `io` and `thread` modules export.
-fn is_host_handle(name: &str) -> bool {
-    matches!(name, coil_ty::STREAM | "Thread" | "Sender" | "Receiver" | "Mutex" | "RwLock")
 }
 
 /// A `()`-typed local: bound by `let` for its initializer's effect only.
