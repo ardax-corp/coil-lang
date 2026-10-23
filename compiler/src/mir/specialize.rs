@@ -231,6 +231,9 @@ fn specialize_side(
     crate::mir::gvn(&mut func);
     // S2f: reuse the mutated array after StoreIndex (drop rematerialized Alloc).
     crate::mir::sroa(&mut func);
+    // An object made on each path into a φ and only read field by field
+    // after it (`find_in(..) ?? new Span(..)`) is its fields' φs.
+    crate::mir::phi_sroa(&mut func);
     super::deopt::fill_deopt_maps(&mut func);
     paint_index_dest_from_uses(&mut func);
     let stores_ssa = func
