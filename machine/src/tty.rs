@@ -54,10 +54,10 @@ pub fn tty_size(heap: &mut Heap, stream: Value) -> Result<(i64, i64), IoErrorTag
     if let Some(size) = os::size(raw) {
         return Ok(size);
     }
-    if is_std(kind) {
-        if let Some(size) = os::std_size() {
-            return Ok(size);
-        }
+    if is_std(kind)
+        && let Some(size) = os::std_size()
+    {
+        return Ok(size);
     }
     Err(IoErrorTag::NotATerminal)
 }
@@ -217,7 +217,7 @@ mod os {
         let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
         // SAFETY: TIOCGWINSZ writes one `winsize`.
         let rc = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws) };
-        (rc == 0 && ws.ws_col > 0 && ws.ws_row > 0).then(|| (ws.ws_col as i64, ws.ws_row as i64))
+        (rc == 0 && ws.ws_col > 0 && ws.ws_row > 0).then_some((ws.ws_col as i64, ws.ws_row as i64))
     }
 
     pub fn std_size() -> Option<(i64, i64)> {
@@ -230,7 +230,7 @@ mod os {
     fn device(fd: Raw) -> Option<(u64, u64)> {
         let mut st: libc::stat = unsafe { std::mem::zeroed() };
         // SAFETY: `fstat` writes one `stat`.
-        (unsafe { libc::fstat(fd, &mut st) } == 0).then(|| (st.st_dev as u64, st.st_ino as u64))
+        (unsafe { libc::fstat(fd, &mut st) } == 0).then_some((st.st_dev as u64, st.st_ino as u64))
     }
 
     /// Terminals in raw mode at once; more is an error.
@@ -465,9 +465,9 @@ mod os {
     use crate::io::IoErrorTag;
     use crate::io_handle::NativeHandle;
 
-    pub type Raw = isize;
+    pub type Raw = Handle;
 
-    type Handle = isize;
+    type Handle = *mut core::ffi::c_void;
 
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
@@ -549,14 +549,14 @@ mod os {
 
     pub fn raw_of(h: &NativeHandle) -> Raw {
         match h {
-            NativeHandle::File(f) => f.as_raw_handle() as isize,
-            _ => 0,
+            NativeHandle::File(f) => f.as_raw_handle(),
+            _ => std::ptr::null_mut(),
         }
     }
 
     fn console_mode(h: Handle) -> Option<u32> {
         let mut mode = 0u32;
-        (h != 0 && unsafe { GetConsoleMode(h, &mut mode) } != 0).then_some(mode)
+        (!h.is_null() && unsafe { GetConsoleMode(h, &mut mode) } != 0).then_some(mode)
     }
 
     pub fn is_tty(h: Raw) -> bool {
@@ -565,7 +565,7 @@ mod os {
 
     fn window_size(h: Handle) -> Option<(i64, i64)> {
         let mut info = ScreenBufferInfo::default();
-        if h == 0 || unsafe { GetConsoleScreenBufferInfo(h, &mut info) } == 0 {
+        if h.is_null() || unsafe { GetConsoleScreenBufferInfo(h, &mut info) } == 0 {
             return None;
         }
         let cols = info.window.right as i64 - info.window.left as i64 + 1;
