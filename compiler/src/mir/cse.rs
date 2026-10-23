@@ -523,9 +523,11 @@ pub(super) fn dce(func: &mut MirFunc) {
         })
         .collect();
     for (b, block) in func.blocks.iter_mut().enumerate() {
+        // A φ is live only through a live use; one nothing reads (an
+        // `Option` tag after its `match` folded) would still copy its
+        // incomings on every edge, whose own defs are gone.
         block.insts.retain(|i| {
-            i.is_phi()
-                || i.is_effect_barrier()
+            i.is_effect_barrier()
                 || traps.contains(&i.dest())
                 || live.contains(&i.dest())
                 || matches!(i, MirInst::MatchPayload { scrutinee, .. } if unpacked.contains(&(b, *scrutinee)))

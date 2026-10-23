@@ -2045,7 +2045,8 @@ pub(super) fn coalesce_latch_overwrite(
             }
         }
     }
-    coalesce_join_phis(func, regs, need_slot)
+    let regs = coalesce_join_phis(func, regs, need_slot);
+    coalesce_join_incomings(func, regs, need_slot)
 }
 
 /// Give an element or field store's dest that nothing reads its value's
@@ -2116,6 +2117,82 @@ fn coalesce_join_phis(func: &MirFunc, mut regs: Vec<u8>, need_slot: &[bool]) -> 
                     && slot(dest)
                 {
                     regs[v.index()] = regs[dest.index()];
+                }
+            }
+        }
+    }
+    regs
+}
+
+/// Give a forward join's scalar φ incoming the φ's register when the
+/// incoming is computed in the predecessor that jumps straight to the join
+/// and the φ is its only use: `return Ok(x + 1)` in one arm of an
+/// inlined callee then computes into the join's register, and the edge copy
+/// disappears. Scalars only: heap words keep their own registers for the
+/// edge `ClearWord`s. The incoming's live range is that block's tail, where
+/// nothing else in the φ's register is live (the φ is defined at the join,
+/// which does not dominate a forward predecessor).
+fn coalesce_join_incomings(func: &MirFunc, mut regs: Vec<u8>, need_slot: &[bool]) -> Vec<u8> {
+    let n = regs.len();
+    let slot = |v: ValueId| v.index() < n && need_slot.get(v.index()).copied().unwrap_or(false);
+    let scalar = |v: ValueId| matches!(func.types.get(v.index()), Some(MirTy::I64 | MirTy::F64 | MirTy::Bool));
+    let mut uses: HashMap<ValueId, usize> = HashMap::new();
+    let mut def_in: HashMap<ValueId, BlockId> = HashMap::new();
+    for block in &func.blocks {
+        for inst in &block.insts {
+            for v in inst.operands() {
+                *uses.entry(v).or_default() += 1;
+            }
+            if matches!(
+                inst,
+                MirInst::Const { .. } | MirInst::Bin { .. } | MirInst::Cmp { .. } | MirInst::Unary { .. } | MirInst::Cast { .. }
+            ) {
+                def_in.insert(inst.dest(), block.id);
+            }
+        }
+        if let Some(term) = &block.term {
+            let mut t = term.clone();
+            t.rewrite_values(|v| {
+                *uses.entry(v).or_default() += 1;
+                v
+            });
+        }
+    }
+    let mut sharing: HashMap<u8, usize> = HashMap::new();
+    for (i, &r) in regs.iter().enumerate() {
+        if need_slot.get(i).copied().unwrap_or(false) {
+            *sharing.entry(r).or_default() += 1;
+        }
+    }
+    for block in &func.blocks {
+        let phis: Vec<(ValueId, &Vec<(BlockId, ValueId)>)> = block
+            .insts
+            .iter()
+            .map_while(|inst| match inst {
+                MirInst::Phi { dest, args, .. } => Some((*dest, args)),
+                _ => None,
+            })
+            .collect();
+        // A loop header's φ is live around the back edge.
+        if phis.iter().any(|(_, args)| args.iter().any(|(p, _)| p.index() >= block.id.index())) {
+            continue;
+        }
+        for (dest, args) in phis {
+            if !slot(dest) || !scalar(dest) {
+                continue;
+            }
+            for &(pred, v) in args {
+                let only_jump = matches!(func.block(pred).term, Some(Terminator::Jump { dest: to }) if to == block.id);
+                if only_jump
+                    && slot(v)
+                    && func.types.get(v.index()) == func.types.get(dest.index())
+                    && def_in.get(&v) == Some(&pred)
+                    && uses.get(&v) == Some(&1)
+                    && sharing.get(&regs[v.index()]) == Some(&1)
+                {
+                    *sharing.entry(regs[v.index()]).or_default() -= 1;
+                    regs[v.index()] = regs[dest.index()];
+                    *sharing.entry(regs[dest.index()]).or_default() += 1;
                 }
             }
         }
@@ -2285,6 +2362,19 @@ pub(super) fn emit_br_cond(args: EmitBrCondArgs<'_>) -> Result<(), LowerError> {
         return Ok(());
     }
     if plan.needs_slot(cond) {
+        // A 0/1 bool register (`a < b || c == d`) branches as `slot != 0`:
+        // fuse-select makes that one `BinSlotImmJmpf` (and packs it into
+        // a `DenseBinJmpf` behind the `DenseBin` that computed it) where
+        // `LOAD; JMPF` took two dispatches and left the dense streak.
+        if canonical_bool_in(block, cond, 2) {
+            out.push(IlOp::BinSlotImm {
+                op: Instruction::NEQ as u8,
+                slot: regs[cond.index()],
+                imm: 0,
+                loc,
+            });
+            return Ok(());
+        }
         out.push(IlOp::Load {
             slot: u32::from(regs[cond.index()]),
             loc,
@@ -2301,6 +2391,27 @@ pub(super) fn emit_br_cond(args: EmitBrCondArgs<'_>) -> Result<(), LowerError> {
         pool,
         loc,
     })
+}
+
+/// `v` is a 0 / 1 word: a compare, or `&` / `|` / `^` of such words,
+/// defined in `block` (`depth` bounds the walk). `JMPF` tests the low byte
+/// only, so a branch may compare the whole word with 0 just for these.
+fn canonical_bool_in(block: &super::func::MirBlock, v: ValueId, depth: u32) -> bool {
+    let Some(def) = block.insts.iter().rev().find(|inst| inst.dest() == v) else {
+        return false;
+    };
+    match def {
+        MirInst::Cmp { .. } => true,
+        MirInst::Bin {
+            op: MirBinOp::BitAnd | MirBinOp::BitOr | MirBinOp::Xor,
+            lhs,
+            rhs,
+            ..
+        } if depth > 0 => {
+            canonical_bool_in(block, *lhs, depth - 1) && canonical_bool_in(block, *rhs, depth - 1)
+        }
+        _ => false,
+    }
 }
 
 pub(super) fn emit_cond_jumps(

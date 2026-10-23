@@ -148,7 +148,7 @@ pub(super) fn is_always_hot_disc(disc: u8) -> bool {
     (ALWAYS_HOT[i >> 6] >> (i & 63)) & 1 != 0
 }
 
-#[inline(always)]
+#[cfg(test)]
 fn is_always_hot(bc: Instruction) -> bool {
     is_always_hot_disc(bc as u8)
 }
@@ -1011,8 +1011,11 @@ fn copy_byte(code: &[Byte], ip: usize) -> Byte {
 
 /// ALWAYS_HOT kernel only — no CALL/LOAD/imm, so `execute_dense` does not
 /// pull FORMAT / HostInvoke / return text into the same match (COI-376).
+/// `false` (with `ip` still on the word) for an op outside `ALWAYS_HOT`: the
+/// match's own jump table is the hot test, so a dispatch does not also probe
+/// the `ALWAYS_HOT` bitset.
 #[inline(always)]
-fn exec_dense(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) {
+fn exec_dense(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) -> bool {
     match bc {
         Instruction::VLoad => {
             let (ty, vdest, arr, idx) = opcode.dense_abc_parts();
@@ -1054,7 +1057,7 @@ fn exec_dense(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) {
                     Value::from(0i64)
                 };
                 crate::simd::vbin_bytes_in(regs, kind, dest, a, b, scalar);
-                return;
+                return true;
             }
             let splat = matches!(kind, common::simd::SPLAT_I64 | common::simd::SPLAT_F64);
             let scalar = if splat {
@@ -1082,7 +1085,7 @@ fn exec_dense(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) {
             promise!(ctx.sp + bound < ctx.stack_cap);
             let Some(body) = ctx.code.get(ctx.ip..ctx.ip + n) else {
                 ctx.panic_msg = Some("VScan body past the code");
-                return;
+                return true;
             };
             let (from, bound) = (ctx.stack[ctx.sp + from].as_int(), ctx.stack[ctx.sp + bound].as_int());
             match super::vscan(ctx.heap, ctx.stack, ctx.sp, ctx.extra.vregs, body, from, bound, inclusive) {
@@ -1107,7 +1110,7 @@ fn exec_dense(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) {
             let tail = take_code_word(ctx);
             let r = dense_bin2(ctx.stack, ctx.sp, &opcode, &tail, ctx.stack_cap);
             if !hot_int(ctx, r) {
-                return;
+                return true;
             }
             let _ = apply_trailing_dense_bin_residue(ctx);
             if ctx.panic_msg.is_none() {
@@ -1117,7 +1120,7 @@ fn exec_dense(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) {
         Instruction::DenseBinJmpf => {
             let r = dense_bin(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
             if !hot_int(ctx, r) {
-                return;
+                return true;
             }
             let tail = take_code_word(ctx);
             let target = dense_bin_jmp_tail(
@@ -1145,7 +1148,7 @@ fn exec_dense(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) {
             .is_err()
             {
                 ctx.panic_msg = Some("index out of bounds");
-                return;
+                return true;
             }
             let tail = take_code_word(ctx);
             let target = dense_bin_jmp_tail(
@@ -1281,14 +1284,18 @@ fn exec_dense(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) {
             if dense_field_store(ctx.stack, ctx.sp, &opcode, ctx.heap, ctx.stack_cap).is_err() => {
                 ctx.panic_msg = Some("SetField on non-instance");
             }
-        _ => {}
+        Instruction::DenseFieldStore => {}
+        _ => {
+            ctx.ip -= 1;
+            return false;
+        }
     }
+    true
 }
 
 /// Dedicated dense-kernel entry: compact match, no handler table (COI-376).
 /// Stops on the first non-`ALWAYS_HOT` op (peek, no new discriminant).
-#[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot"))]
+#[inline(always)]
 fn execute_dense(ctx: &mut HotCtx<'_, '_>) {
     let code_len = ctx.code.len();
     loop {
@@ -1298,13 +1305,17 @@ fn execute_dense(ctx: &mut HotCtx<'_, '_>) {
         promise!(ctx.ip < code_len);
         let opcode = copy_byte(ctx.code, ctx.ip);
         let bc = *opcode.bytecode();
-        if unlikely(!is_always_hot(bc)) {
-            return;
-        }
-        super::note_dispatch_at(ctx.ip);
+        // Same ceiling as the giant match: the `exec_dense` jump table then
+        // needs no range check.
+        #[cfg(not(debug_assertions))]
+        promise!(bc as u8 <= Instruction::VScan as u8);
+        let at = ctx.ip;
         ctx.ip += 1;
         prefetch_code(ctx.code, ctx.ip);
-        exec_dense(ctx, bc, opcode);
+        if !exec_dense(ctx, bc, opcode) {
+            return;
+        }
+        super::note_dispatch_at(at);
         // A panic (or a `STREAK_YIELD`) is the only stop.
         if unlikely(ctx.panic_msg.is_some()) {
             return;
@@ -1335,6 +1346,7 @@ pub(super) struct ConsumeAlwaysHotStreakArgs<'a, const S: usize> {
 /// checked with [`is_always_hot_disc`]. Fib never calls this.
 /// Mandelbrot enters once and stays in the dense loop across the back edge.
 #[inline(never)]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot"))]
 pub(super) fn consume_always_hot_streak<const S: usize>(
     args: ConsumeAlwaysHotStreakArgs<'_, S>,
 ) -> Option<&'static str> {
@@ -1438,6 +1450,48 @@ mod tests {
         let heap = crate::memory::Heap::default();
         assert_eq!(table.fast_return(3, Value::from(0i64), &heap), None);
         assert_eq!(table.fast_return(0, Value::from(0i64), &heap), None);
+    }
+
+    /// `exec_dense`'s match is the streak's hot test: every op outside
+    /// `ALWAYS_HOT` must leave it untouched (ip back on the word), so the
+    /// arms and the bitset cannot drift apart.
+    #[test]
+    fn exec_dense_refuses_every_op_outside_always_hot() {
+        let mut stack = Stack::<Value>::with_capacity(16);
+        let mut heap = Heap::default();
+        let mut frame_pins = Vec::new();
+        let mut dense_obj_addr = 0u64;
+        let mut dense_obj = None;
+        let mut vregs = [[0u64; common::simd::LANES]; common::simd::NREGS];
+        let code = [Byte::new(Instruction::HALT)];
+        for disc in 0..=Instruction::VScan as u8 {
+            let op: Instruction = disc.into();
+            if is_always_hot(op) {
+                continue;
+            }
+            let mut extra = HotExtra {
+                frames_len: 1,
+                frame_pins: &mut frame_pins,
+                dense_obj_addr: &mut dense_obj_addr,
+                dense_obj: &mut dense_obj,
+                vregs: &mut vregs,
+            };
+            let mut ctx = HotCtx {
+                stack: &mut stack,
+                sp: 0,
+                ip: 1,
+                code: &code,
+                constants: &[],
+                heap: &mut heap,
+                stack_cap: 16,
+                panic_msg: None,
+                fuel: 1,
+                extra: &mut extra,
+            };
+            assert!(!exec_dense(&mut ctx, op, Byte::new(op)), "{}", disc);
+            assert_eq!(ctx.ip, 0, "{}", disc);
+            assert!(ctx.panic_msg.is_none(), "{}", disc);
+        }
     }
 
     #[test]
