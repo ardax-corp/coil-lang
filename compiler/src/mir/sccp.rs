@@ -91,10 +91,12 @@ pub fn sccp(func: &mut MirFunc) -> usize {
             let at = block.insts.iter().take_while(|i| i.is_phi()).count();
             block.insts.splice(at..at, consts_after_phis);
         }
-        // A φ left with one incoming value is that value.
+        // A φ left with one incoming value is that value. Its uses are
+        // rewritten below, so it counts as a fold (#1898).
         block.insts.retain(|i| match i {
             MirInst::Phi { dest, args, .. } if args.len() == 1 => {
                 subst.insert(*dest, args[0].1);
+                hits += 1;
                 false
             }
             _ => true,
