@@ -550,6 +550,14 @@ pub struct Checker {
     /// its body never resolves (#1845).
     open_operands: Vec<(Ty, &'static str, Range<usize>)>,
 
+    /// Array literals whose elements are different types, waiting for the
+    /// element type to resolve: a trait object packs each element (#1853),
+    /// anything else is the element mismatch.
+    mixed_literals: Vec<MixedLiteral>,
+    /// Function bodies being checked: a mixed literal outside one (a type
+    /// alias's right-hand side) is reported where it stands.
+    fn_body_depth: usize,
+
     /// `gc::weak` arguments and generic instantiations, checked once
     /// substitution is closed: a readonly class instance may not be
     /// weakened, directly (#1644) or through a type parameter (#1670).
@@ -771,6 +779,19 @@ pub struct CStructDef {
 pub struct CallbackSigDef {
     pub args: Vec<u32>,
     pub ret: u32,
+}
+
+/// An array literal of differently typed elements, checked once its
+/// element type is known (#1853).
+#[derive(Debug, Clone)]
+struct MixedLiteral {
+    /// The literal's element type: an open variable at the literal.
+    element: Ty,
+    /// Each element's type, node and span, as its pack is recorded.
+    items: Vec<(Ty, Option<NodeId>, (usize, usize))>,
+    /// The first mismatch, reported if no trait object takes them all.
+    mismatch: String,
+    range: Range<usize>,
 }
 
 /// One pending exhaustiveness check, recorded at the match site and

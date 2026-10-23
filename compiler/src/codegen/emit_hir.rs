@@ -1395,6 +1395,11 @@ impl Compiler {
                 // (`hir_stack_rep`).
                 Some(element) => crate::mir::scalar_mir_ty(element)
                     .or_else(|| Self::scalar_enum_mir_ty(&self.checker, element))
+                    // A trait object element: its `[value, dictionary]` pack (#1853).
+                    .or_else(|| {
+                        matches!(crate::typechecking::ty::strip_readonly(element), Ty::Existential { .. })
+                            .then_some(crate::mir::MirTy::HeapRef)
+                    })
                     .or_else(|| {
                     use crate::layout::{value_layout, word_kind};
                     match value_layout(&self.checker, element) {

@@ -220,6 +220,8 @@ impl Checker {
             bare_cases_by_module: HashMap::new(),
             pending_exhaustive: Vec::new(),
             open_operands: Vec::new(),
+            mixed_literals: Vec::new(),
+            fn_body_depth: 0,
             weak_checks: Default::default(),
             async_functions: std::collections::HashSet::new(),
             async_depth: 0,
@@ -1744,6 +1746,7 @@ impl Checker {
             }
         };
         // Frame stays open; see doc-comment above.
+        self.check_mixed_literals(0);
         self.run_pending_exhaustiveness();
         self.run_pending_weak_checks();
 
@@ -4498,7 +4501,15 @@ impl Checker {
             }
             vec_element_ty(&exp).cloned()
         });
+        // Where a trait object is expected (`Vec<Shape>`), each element packs
+        // as its own instance once the literal settles, as a pushed one does
+        // (#1853).
+        let to_trait_object = expected_elem
+            .as_ref()
+            .is_some_and(|e| matches!(strip_readonly(&apply_ty_prune(&self.subst, e)), Ty::Existential { .. }));
         let mut elem_ty: Option<Ty> = None;
+        let mut seen: Vec<(Ty, Option<NodeId>, (usize, usize))> = Vec::with_capacity(items.len());
+        let mut mismatch: Option<String> = None;
         for item in items {
             let prev_expected = self.current_expected.take();
             if let Some(ref e) = expected_elem {
@@ -4512,6 +4523,10 @@ impl Checker {
                 &self.subst,
                 &t,
             ));
+            seen.push((t_pruned.clone(), self.ids.id_of_output(item), (item.0.start, item.0.end)));
+            if mismatch.is_some() || to_trait_object {
+                continue;
+            }
             match &elem_ty {
                 None => elem_ty = Some(t_pruned),
                 Some(prev) => {
@@ -4526,25 +4541,34 @@ impl Checker {
                             elem_ty = Some(self.readonly_join(joined, &prev_pruned, &t_pruned));
                         }
                         Err(_) => {
-                            let _ = self.error_with_help(
-                                ErrorCode::TypeMismatch,
-                                {
-                                    let [want, have] = <[String; 2]>::try_from(
-                                        self.diag_tys(&[&prev_pruned, &t_pruned]),
-                                    )
-                                    .expect("two types");
-                                    format!("array element type mismatch: expected `{want}`, found `{have}`")
-                                },
-                                range.clone(),
-                                Some(
-                                    "an array literal requires every element to have the same type"
-                                        .to_string(),
-                                ),
-                            );
+                            let [want, have] = <[String; 2]>::try_from(self.diag_tys(&[&prev_pruned, &t_pruned]))
+                                .expect("two types");
+                            mismatch = Some(format!("array element type mismatch: expected `{want}`, found `{have}`"));
                         }
                     }
                 }
             }
+        }
+        // Differently typed elements: one trait object the literal turns out
+        // to be (`Vec::from([new Circle(1), new Square(2)])` as a
+        // `Vec<Shape>`) takes them all, so wait for the element type (#1853).
+        if self.fn_body_depth == 0 && !to_trait_object
+            && let Some(mismatch) = mismatch.take()
+        {
+            let _ = self.error_with_help(
+                ErrorCode::TypeMismatch,
+                mismatch,
+                range.clone(),
+                Some("an array literal requires every element to have the same type".to_string()),
+            );
+        }
+        if to_trait_object && mismatch.is_none() {
+            mismatch = Some("array element type mismatch".to_string());
+        }
+        if let Some(mismatch) = mismatch {
+            let element = Ty::Var(self.counter.fresh());
+            self.mixed_literals.push(MixedLiteral { element: element.clone(), items: seen, mismatch, range: range.clone() });
+            elem_ty = Some(element);
         }
         let element = elem_ty.unwrap_or_else(|| Ty::Var(self.counter.fresh()));
         let len = items.len();
@@ -6982,6 +7006,47 @@ impl Checker {
             return;
         };
         self.open_operands.push((ty.clone(), op, range.clone()));
+    }
+
+    /// Settle each mixed array literal noted since `mark`: a trait object
+    /// element type packs every element as its own instance, as a pushed
+    /// one is; any other is the literal's element mismatch (#1853).
+    pub(super) fn check_mixed_literals(&mut self, mark: usize) {
+        let pending: Vec<MixedLiteral> = self.mixed_literals.drain(mark..).collect();
+        for lit in pending {
+            let element = apply_ty_prune(&self.subst, &lit.element);
+            let Ty::Existential { class } = strip_readonly(&element).clone() else {
+                let _ = self.error_with_help(
+                    ErrorCode::TypeMismatch,
+                    lit.mismatch,
+                    lit.range,
+                    Some("an array literal requires every element to have the same type, or a trait object type it can pack each one as (`let xs: Vec<Shape> = [...]`)".to_string()),
+                );
+                continue;
+            };
+            for (ty, id, span) in lit.items {
+                let actual = apply_ty_prune(&self.subst, &ty);
+                if matches!(strip_readonly(&actual), Ty::Existential { class: c } if *c == class) {
+                    continue;
+                }
+                let lookup_ty = Self::existential_lookup_ty(&actual);
+                let range = span.0..span.1;
+                match self.find_unique_instance(&class, std::slice::from_ref(&lookup_ty), &range) {
+                    Ok(Some(_)) => {
+                        let pack = ExistentialPack { class: class.clone(), value_ty: lookup_ty };
+                        if let Some(id) = id {
+                            self.existential_packs.insert(id, pack.clone());
+                        }
+                        self.existential_packs_by_span.insert(span, pack);
+                    }
+                    Ok(None) => {
+                        let pretty = Constraint { class: class.clone(), args: vec![lookup_ty] };
+                        self.messages.push(Message::error(ErrorCode::GenericTypeError, format!("No instance for `{}`", pretty), range));
+                    }
+                    Err(()) => {}
+                }
+            }
+        }
     }
 
     /// E0119 for each operand noted since `mark` whose type the function
@@ -14116,7 +14181,12 @@ impl Checker {
         let prev_in_test = std::mem::replace(&mut self.in_test_case, true);
 
         self.push_scope();
+        let (open_mark, mixed_mark) = (self.open_operands.len(), self.mixed_literals.len());
+        self.fn_body_depth += 1;
         let _ = self.infer(body);
+        self.fn_body_depth -= 1;
+        self.check_mixed_literals(mixed_mark);
+        self.check_open_operands(open_mark);
         self.pop_scope();
         self.in_test_case = prev_in_test;
 
