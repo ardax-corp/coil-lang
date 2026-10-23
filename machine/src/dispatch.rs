@@ -5,8 +5,8 @@
 //! hands the streak to `execute_dense`, a compact match that runs until the
 //! first op outside `ALWAYS_HOT`, so a dense loop does not bounce back to the
 //! giant match per opcode. CALL / RETURN / packed LOAD / STORE stay on the
-//! giant match. FORMAT / HostInvoke / `rest` live in `.text.unlikely` so they
-//! are not in the hot working set.
+//! giant match. Every other opcode goes to `exec_rest`, a separate function
+//! that keeps them out of the giant match's code (not `#[cold]`, #1882).
 //!
 //! A 256-entry fn-pointer table and a compact "hotmatch" loop were measured as
 //! A/B alternatives (COI-373..376, `COIL_THREADED_DISPATCH`) and removed: they
@@ -31,10 +31,38 @@ struct HotExtra<'a> {
     dense_obj: &'a mut Option<Object>,
 }
 
-/// Outcome of a remaining (non-kernel) op executed via [`super::Machine::exec_rest`].
+/// Outcome of a call helper of [`super::Machine::exec_rest`].
 pub(super) enum RestFlow {
     Continue,
     Done(bool),
+}
+
+/// What [`super::Machine::exec_rest`] hands back to `execute`: the `ip` /
+/// `sp` to resume at, or (`ip == usize::MAX`) the paused flag to return.
+/// Two words come back in registers, so the two hottest values are not
+/// spilled to memory around every rest op (#1882).
+#[derive(Clone, Copy)]
+pub(super) struct RestExit {
+    ip: usize,
+    sp: usize,
+}
+
+impl RestExit {
+    #[inline(always)]
+    pub(super) fn resume(ip: usize, sp: usize) -> Self {
+        Self { ip, sp }
+    }
+
+    #[inline(always)]
+    pub(super) fn done(paused: bool) -> Self {
+        Self { ip: usize::MAX, sp: paused as usize }
+    }
+
+    /// `Err(paused)` when execution stops; otherwise `(ip, sp)`.
+    #[inline(always)]
+    pub(super) fn get(self) -> Result<(usize, usize), bool> {
+        if self.ip == usize::MAX { Err(self.sp != 0) } else { Ok((self.ip, self.sp)) }
+    }
 }
 
 struct HotCtx<'a, 'e> {
