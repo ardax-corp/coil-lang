@@ -11885,11 +11885,16 @@ impl Checker {
                     .or_else(|| self.nominal_head_from_ty(ty));
                 head.as_deref().is_some_and(|name| {
                     let mod_of = |n: &str| self.generics.nominal_type_module(n);
-                    mod_of(name) == Some(self.current_module.as_str())
+                    // The core prelude declares `Option` / `Result`, which
+                    // the registry files under `prelude` (#1906).
+                    let home = |m: Option<&str>| {
+                        m == Some(self.current_module.as_str())
+                            || (self.current_module == "core" && m == Some(crate::typechecking::virtual_modules::PRELUDE_MODULE))
+                    };
+                    home(mod_of(name))
                         // COI-110 registers enums/classes under `module::Name`;
                         // synth `Show`/`String` still pass the short head.
-                        || mod_of(&self.qualify_module_name(name))
-                            == Some(self.current_module.as_str())
+                        || home(mod_of(&self.qualify_module_name(name)))
                 })
             })
     }
