@@ -42,9 +42,6 @@ fn meet(a: Lat, b: Lat) -> Lat {
 /// Fold what SCCP proves constant. Returns how many values and branches
 /// it rewrote.
 pub fn sccp(func: &mut MirFunc) -> usize {
-    if !enabled() {
-        return 0;
-    }
     let Some((vals, reached, edges)) = solve(func) else {
         return 0;
     };
@@ -138,12 +135,6 @@ pub fn sccp(func: &mut MirFunc) -> usize {
     super::from_hir::tidy(func, &order);
     super::cse::dce(func);
     hits
-}
-
-/// SCCP is on unless `COIL_MIR_SCCP=0` (or `false` / `off` / `no`).
-fn enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| !matches!(std::env::var("COIL_MIR_SCCP").as_deref(), Ok("0" | "false" | "off" | "no")))
 }
 
 /// Values SCCP may replace by a `Const`: pure scalar computations. A call

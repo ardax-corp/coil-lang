@@ -125,8 +125,9 @@ pub struct Pipeline {
     keep_fns_in: Option<KeepFnFilter>,
     /// When false, skip auto fork-join even if `COIL_AUTO_PAR` is on.
     auto_par: bool,
-    /// Typed inlining of HIR bodies (the default; `COIL_HIR_INLINE=0` off).
-    hir_inline: bool,
+    /// Typed inlining of HIR bodies, when set; `None` keeps the compiler's
+    /// [`crate::il::opt::OptimizeOptions::hir_inline`] (`COIL_HIR_INLINE`).
+    hir_inline: Option<bool>,
     /// Host/test `dload` grants (stem + file to hash). Not set from CLI flags.
     extra_dload_grants: Vec<(String, PathBuf)>,
     /// Host/test extra stems with no lock hash (`set_dload_allowlist`).
@@ -323,7 +324,9 @@ impl Pipeline {
             c.set_collect_opt_stats(self.collect_opt_stats);
             c.set_debugger_attached(self.debugger_attached);
             c.set_auto_par(self.auto_par);
-            c.set_hir_inline(self.hir_inline);
+            if let Some(on) = self.hir_inline {
+                c.set_hir_inline(on);
+            }
             c.set_include_tests(self.include_tests);
             c.set_keep_fns_in(self.keep_fns_in.clone());
             #[cfg(any(test, feature = "vm-wire"))]
@@ -738,7 +741,7 @@ impl Pipeline {
             contract_sources: Vec::new(),
             keep_fns_in: None,
             auto_par: true,
-            hir_inline: crate::hir::inline::inline_from_env(),
+            hir_inline: None,
             extra_dload_grants: Vec::new(),
             extra_dload_stems: Vec::new(),
             host_grants: HostGrants::deny_all(),
@@ -1738,7 +1741,16 @@ impl Pipeline {
             .into_iter()
             .filter(|c| c.entry.is_some())
             .collect();
-        let sites = if self.call_fold && self.compiler_lazy().call_fold_on() { self.compiler_lazy().fold_sites() } else { Vec::new() };
+        let mut sites = if self.call_fold && self.compiler_lazy().call_fold_on() { self.compiler_lazy().fold_sites() } else { Vec::new() };
+        // A call in a `const` or `comptime` initializer is computed with it,
+        // within the explicit budget (coil-lang#1918).
+        let explicit: Vec<std::ops::Range<usize>> = consts
+            .iter()
+            .filter(|c| !c.silent)
+            .filter_map(|c| c.entry.map(|e| e as usize))
+            .map(|e| e..self.compiler_lazy().function_end(e))
+            .collect();
+        sites.retain(|(pc, _, _)| !explicit.iter().any(|r| r.contains(pc)));
         if consts.is_empty() && sites.is_empty() {
             return;
         }
@@ -1803,6 +1815,7 @@ impl Pipeline {
                     .filter_map(|((pc, arity, _), &i)| Some((*pc, *arity, outcome.folded.get(i)?.clone()?)))
                     .collect();
                 self.compiler_lazy_mut().apply_call_folds(&folded);
+                self.note_fold_budget(&sites, &site_calls, &outcome.over_budget, entry_src);
                 let const_sites: Vec<(u32, u32)> = evals
                     .iter()
                     .enumerate()
@@ -1956,6 +1969,58 @@ impl Pipeline {
             "a `const` is computed while compiling; use `static let` to compute it when the program starts".to_string()
         });
         self.emit_const_message(c, &msg, entry_src);
+    }
+
+    /// E0138 at each call that automatic folding gave up on because it
+    /// ran out of the silent tier's steps: `comptime` would compute it
+    /// (coil-lang#1918). `over` lists those calls with the microseconds
+    /// each ran before it stopped.
+    fn note_fold_budget(
+        &mut self,
+        sites: &[(usize, usize, crate::macros::FoldCall)],
+        site_calls: &[usize],
+        over: &[(usize, u64)],
+        entry_src: Option<(&Path, &str)>,
+    ) {
+        if over.is_empty() {
+            return;
+        }
+        let files = self.compiler_lazy().source_files_list();
+        let mut seen = HashSet::new();
+        for ((pc, _, _), call) in sites.iter().zip(site_calls) {
+            let Some(&(_, micros)) = over.iter().find(|(i, _)| i == call) else { continue };
+            let Some(loc) = self.debug_locs().get(*pc).copied().filter(|l| l.is_known()) else { continue };
+            if !seen.insert((loc.file, loc.start_byte, loc.end_byte)) {
+                continue;
+            }
+            let Some(stored) = files.get(loc.file as usize) else { continue };
+            // Code a macro generated has no spelling in the source to suggest.
+            let generated = self.generated_ranges.iter().any(|g| {
+                g.range.contains(&(loc.start_byte as usize)) && source_file_matches_generated(stored, &g.file)
+            });
+            if generated {
+                continue;
+            }
+            let file = PathBuf::from(stored);
+            let text = match entry_src {
+                Some((p, src)) if p == file => Some(src.to_string()),
+                _ => self.overlays.get(&file).cloned().or_else(|| std::fs::read_to_string(&file).ok()),
+            };
+            let Some(text) = text else { continue };
+            let span = loc.start_byte as usize..loc.end_byte as usize;
+            let Some(call_text) = text.get(span.clone()).map(str::trim).filter(|t| !t.is_empty()) else { continue };
+            let mut msg = Message::info(
+                ErrorCode::ComptimeFoldBudget,
+                format!("`{call_text}` could be computed while compiling, but it runs longer than automatic folding allows"),
+                span,
+            );
+            msg.with_help(format!(
+                "write `comptime {call_text}` to compute it while compiling; that makes compilation take longer \
+                 (it ran {:.1} ms before the automatic folding limit stopped it)",
+                micros as f64 / 1000.0
+            ));
+            self.emit_message(&file, &text, &msg);
+        }
     }
 
     /// Show `msg` against const `c`'s source.
@@ -2201,7 +2266,7 @@ impl Pipeline {
     /// Typed inlining of HIR bodies. Tests that pin a callee's own code
     /// shape (its MIR tier, its `CALL`) turn it off.
     pub fn set_hir_inline(&mut self, on: bool) {
-        self.hir_inline = on;
+        self.hir_inline = Some(on);
         if self.compiler.get().is_some() {
             self.compiler_lazy_mut().set_hir_inline(on);
         }

@@ -46,6 +46,41 @@ pub struct OptimizeOptions {
     /// strength reduction and GVN/PRE, and the dense saxpy-reduce pack and
     /// vectorizer. On at Standard and above (and Size).
     pub mir_loop: bool,
+    /// Typed inlining of HIR bodies (`hir::inline`). Every level; the
+    /// inline budget is what turns it off at `-O0` / `-Og`.
+    /// `COIL_HIR_INLINE=0` off.
+    pub hir_inline: bool,
+    /// Typed inlining takes callees returning a two-word `Option`,
+    /// `Result` or enum. `COIL_HIR_INLINE_PAIR=0` off.
+    pub hir_inline_pair: bool,
+    /// Typed inlining takes callees with heap locals, cleared after the
+    /// splicing statement. `COIL_HIR_INLINE_HEAP=0` off.
+    pub hir_inline_heap: bool,
+    /// Typed inlining takes callees with loops. `COIL_HIR_INLINE_LOOPS=0`
+    /// off.
+    pub hir_inline_loops: bool,
+    /// Typed inlining takes a too-big callee at a call with constant
+    /// arguments as its copy with those bound and folded.
+    /// `COIL_HIR_SPECIALIZE=0` off.
+    pub hir_inline_specialize: bool,
+    /// Typed inlining takes mono clone callees, as their generic body at
+    /// the call's types. `COIL_HIR_INLINE_MONO=0` off.
+    pub hir_inline_mono: bool,
+    /// Nested matches dispatch on their outer tag once (`hir::match_tree`).
+    /// `COIL_HIR_MATCH_TREE=0` off.
+    pub hir_match_tree: bool,
+    /// An enum local built in place lives in two slots when its type is a
+    /// two-word pair. `COIL_HIR_PAIR_LOCALS=0` off.
+    pub hir_pair_locals: bool,
+    /// Lower only the first `N` bodies HIR lowering admits (per process)
+    /// and name the `N`th on stderr, to bisect a miscompile.
+    /// `COIL_HIR_BISECT=N`; `None` (unset) lowers every body.
+    pub hir_bisect: Option<usize>,
+    /// MIR SCCP, when [`Self::mir_fold`] runs. `COIL_MIR_SCCP=0` off.
+    pub mir_sccp: bool,
+    /// Automatic fork-join of pure recursive calls and counted loops
+    /// (`Pipeline::set_auto_par` also turns it off). `COIL_AUTO_PAR=0` off.
+    pub auto_par: bool,
     /// Every function must lower through direct MIR: a body left on its
     /// raw stack IL (the fuse tier) is an internal error. The compiler sets
     /// this when codegen reported no errors; IL-only modules leave it off.

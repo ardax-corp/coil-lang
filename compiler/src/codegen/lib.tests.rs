@@ -66,7 +66,7 @@ fn compile_src_no_inline(src: &str) -> (Vec<Byte>, Vec<u64>) {
 /// Tests of a callee's own code: one with heap locals would splice into its
 /// caller.
 fn compile_src_heap_calls(src: &str) -> (Vec<Byte>, Vec<u64>) {
-    compile_src_tuned(src, |c| c.hir_inline_heap = false)
+    compile_src_tuned(src, |c| c.opt_options.hir_inline_heap = false)
 }
 
 /// Tests of how an enum value is built: a local built in place would
@@ -4051,7 +4051,7 @@ fn main() {
 "#;
     let mut pipeline = crate::Pipeline::new();
     // The callees are looked up by name: keep them calls.
-    pipeline.compiler_mut().hir_inline_heap = false;
+    pipeline.compiler_mut().opt_options.hir_inline_heap = false;
     pipeline.set_inline_max_cost(0);
     let (bc, constants) = pipeline.compile_src(src).expect("compile");
     let pack_off = pipeline.compiler_mut().get_function("pack").expect("pack");
@@ -4377,7 +4377,7 @@ fn main() {
 "#;
     let mut pipeline = crate::Pipeline::new();
     // The callees are looked up by name: keep them calls.
-    pipeline.compiler_mut().hir_inline_heap = false;
+    pipeline.compiler_mut().opt_options.hir_inline_heap = false;
     pipeline.set_inline_max_cost(0);
     let (bc, constants) = pipeline.compile_src(src).expect("compile");
     let pack_off = pipeline.compiler_mut().get_function("pack").expect("pack");
@@ -4562,7 +4562,7 @@ fn main() {
 "#;
     let mut pipeline = crate::Pipeline::new();
     // The callees are looked up by name: keep them calls.
-    pipeline.compiler_mut().hir_inline_heap = false;
+    pipeline.compiler_mut().opt_options.hir_inline_heap = false;
     let (bc, constants) = pipeline.compile_src(load).expect("compile");
     let mut vm = machine::Machine::<64>::with_operand_capacity(64);
     pipeline.wire_host_natives(&mut vm);
@@ -4696,7 +4696,7 @@ fn main() {
 "#;
     let mut pipeline = crate::Pipeline::new();
     // The callees are looked up by name: keep them calls.
-    pipeline.compiler_mut().hir_inline_heap = false;
+    pipeline.compiler_mut().opt_options.hir_inline_heap = false;
     let (bc, constants) = pipeline.compile_src(src).expect("compile");
     let off = pipeline
         .compiler_mut()
@@ -4742,7 +4742,7 @@ fn main() {
 "#;
     let mut pipeline = crate::Pipeline::new();
     // The callees are looked up by name: keep them calls.
-    pipeline.compiler_mut().hir_inline_heap = false;
+    pipeline.compiler_mut().opt_options.hir_inline_heap = false;
     let (bc, constants) = pipeline.compile_src(src).expect("compile");
     let off = pipeline
         .compiler_mut()
@@ -4787,7 +4787,7 @@ fn main() {
 "#;
     let mut pipeline = crate::Pipeline::new();
     // The callees are looked up by name: keep them calls.
-    pipeline.compiler_mut().hir_inline_heap = false;
+    pipeline.compiler_mut().opt_options.hir_inline_heap = false;
     let (bc, constants) = pipeline.compile_src(src).expect("compile");
     let off = pipeline.compiler_mut().get_function("poke").expect("poke");
     let body = &bc[off..];
@@ -9116,7 +9116,7 @@ fn main() {
 fn hir_inline_splices_heap_locals_and_clears_them() {
     let (off, _) = compile_src_tuned(HIR_INLINE_HEAP, |c| {
         c.set_hir_inline(true);
-        c.hir_inline_heap = false;
+        c.opt_options.hir_inline_heap = false;
     });
     let (on, _) = compile_src_tuned(HIR_INLINE_HEAP, |c| c.set_hir_inline(true));
     assert!(call_count(&on) < call_count(&off), "`pair_sum` splices into `hot`");

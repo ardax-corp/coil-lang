@@ -197,7 +197,8 @@ fn eval_in(
     let snapshot = capture(&vm, consts, &mut done, &mut skipped)?;
     skipped.sort_unstable();
     let mut folded = Vec::with_capacity(folds.len());
-    for f in folds {
+    let mut over_budget = Vec::new();
+    for (index, f) in folds.iter().enumerate() {
         if silent_left == 0 {
             folded.push(None);
             continue;
@@ -206,6 +207,7 @@ fn eval_in(
             steps: ComptimeLimits::SILENT_CALL_STEPS.min(silent_left),
             ..*limits
         };
+        let started = std::time::Instant::now();
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let args: Vec<Value> = f
                 .args
@@ -228,6 +230,9 @@ fn eval_in(
             }
         }));
         silent_left = silent_left.saturating_sub(vm.steps_charged());
+        if vm.step_budget_exhausted() {
+            over_budget.push((index, started.elapsed().as_micros() as u64));
+        }
         match outcome {
             Ok(Ok(value)) => folded.push(Some(value)),
             _ => {
@@ -242,6 +247,7 @@ fn eval_in(
         snapshot,
         skipped,
         folded,
+        over_budget,
         records,
     })
 }

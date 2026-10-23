@@ -125,3 +125,56 @@ fn fold_calls_rejects_other_values() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("--fold-calls"), "stderr={err}");
 }
+
+/// `fib(n)` printed from `main`, with `call` as the argument expression.
+fn fib_program(call: &str) -> String {
+    format!(
+        "use io::stdout;\n\
+         use io::sync::write_all;\n\
+         use string::{{format, to_bytes}};\n\
+         \n\
+         fn fib(int n) -> int {{\n    if n <= 2 {{\n        return 1;\n    }}\n    return fib(n - 1) + fib(n - 2);\n}}\n\
+         \n\
+         fn main() {{\n    let _ = write_all(stdout(), to_bytes(format(\"%i\", {call})));\n}}\n"
+    )
+}
+
+/// `coil compile` of `src` plus `extra` flags; stderr on success.
+fn compile_stderr(name: &str, src: &str, extra: &[&str]) -> String {
+    let dir = std::env::temp_dir().join(format!("coil-fold-notice-{}-{name}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let entry = dir.join("main.hy");
+    std::fs::write(&entry, src).expect("write main.hy");
+    let mut cmd = Command::new(coil_bin());
+    cmd.arg("compile");
+    for root in compiler::Pipeline::workspace_language_extra_roots() {
+        cmd.arg("--root").arg(root);
+    }
+    cmd.args(extra).arg(&entry).arg("-o").arg(dir.join("main.hyc"));
+    cmd.env_remove("COIL_CALL_FOLD");
+    let out = cmd.output().expect("spawn coil compile");
+    let _ = std::fs::remove_dir_all(&dir);
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "compile {name} failed: {err}");
+    err
+}
+
+/// A pure call too long for automatic folding says `comptime` would
+/// compute it (coil-lang#1918); one that folds, or a build without
+/// folding, says nothing.
+#[test]
+fn fold_over_budget_suggests_comptime() {
+    let long = compile_stderr("long", &fib_program("fib(32)"), &[]);
+    assert!(long.contains("E0138"), "fib(32) gives E0138, stderr={long}");
+    assert!(long.contains("comptime fib(32)"), "help names the spelling, stderr={long}");
+    assert!(long.contains("compilation take longer"), "help says what it costs, stderr={long}");
+
+    let short = compile_stderr("short", &fib_program("fib(20)"), &[]);
+    assert!(!short.contains("E0138"), "fib(20) folds, stderr={short}");
+
+    let explicit = compile_stderr("explicit", &fib_program("comptime fib(32)"), &[]);
+    assert!(!explicit.contains("E0138"), "comptime fib(32) folds, stderr={explicit}");
+
+    let off = compile_stderr("off", &fib_program("fib(32)"), &["--fold-calls", "off"]);
+    assert!(!off.contains("E0138"), "--fold-calls off tries nothing, stderr={off}");
+}

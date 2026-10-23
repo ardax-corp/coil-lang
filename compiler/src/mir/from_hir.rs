@@ -2602,8 +2602,12 @@ impl Lower<'_> {
             }
             HirKind::Global { .. } | HirKind::Lambda { .. } if let Some(f) = self.inp.fn_values.get(&id.0) => self.fn_value(id, &f.clone()),
             HirKind::Global { .. } => self.global(id),
-            // `a + b` on strings is `format("%s%s", a, b)`.
-            HirKind::Bin { op: BinOp::StrConcat, lhs, rhs } if let Some(&idx) = self.inp.formats.get(&id.0) => self.format(id, idx, &[*lhs, *rhs]),
+            // `a + b` on strings is `format("%s%s", a, b)`; a chain `a + b +
+            // c` is one `format("%s%s%s", a, b, c)`.
+            HirKind::Bin { op: BinOp::StrConcat, .. } if let Some(&idx) = self.inp.formats.get(&id.0) => {
+                let leaves = self.hir.concat_leaves(id);
+                self.format(id, idx, &leaves)
+            }
             HirKind::Bin { lhs, rhs, .. } if let Some(&la) = self.inp.linalgs.get(&id.0) => self.linalg(id, la, &[*lhs, *rhs]),
             HirKind::Un { operand, .. } if let Some(&la) = self.inp.linalgs.get(&id.0) => self.linalg(id, la, &[*operand]),
             HirKind::Call { args, .. } if let Some(&la) = self.inp.linalgs.get(&id.0) => self.linalg(id, la, args),

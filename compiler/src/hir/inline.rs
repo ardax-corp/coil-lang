@@ -19,49 +19,6 @@ use super::{Callee, HirArm, HirBody, HirExpr, HirFlags, HirId, HirKind, HirLocal
 use super::{BinOp, BodyKind, Lit};
 use crate::typechecking::ty;
 
-/// Typed inlining is on unless `COIL_HIR_INLINE=0` (or `false` / `off` / `no`).
-pub(crate) fn inline_from_env() -> bool {
-    !matches!(
-        std::env::var("COIL_HIR_INLINE").as_deref(),
-        Ok("0" | "false" | "off" | "no")
-    )
-}
-
-/// Inlining callees with a two-word result is on unless
-/// `COIL_HIR_INLINE_PAIR=0` (or `false` / `off` / `no`).
-pub(crate) fn pair_from_env() -> bool {
-    !matches!(
-        std::env::var("COIL_HIR_INLINE_PAIR").as_deref(),
-        Ok("0" | "false" | "off" | "no")
-    )
-}
-
-/// Inlining callees with heap locals (cleared after the statement that
-/// splices them) is on unless `COIL_HIR_INLINE_HEAP=0` (or `false` / `off` /
-/// `no`).
-pub(crate) fn heap_from_env() -> bool {
-    !matches!(
-        std::env::var("COIL_HIR_INLINE_HEAP").as_deref(),
-        Ok("0" | "false" | "off" | "no")
-    )
-}
-
-/// Inlining callees with loops is on unless `COIL_HIR_INLINE_LOOPS=0` (or
-/// `false` / `off` / `no`).
-fn loops_from_env() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| !matches!(std::env::var("COIL_HIR_INLINE_LOOPS").as_deref(), Ok("0" | "false" | "off" | "no")))
-}
-
-/// Whether a callee too big to inline is tried again with its constant
-/// arguments bound and folded (`COIL_HIR_SPECIALIZE=0` off).
-pub(crate) fn specialize_from_env() -> bool {
-    !matches!(
-        std::env::var("COIL_HIR_SPECIALIZE").as_deref(),
-        Ok("0" | "false" | "off" | "no")
-    )
-}
-
 /// What a callee's body splices in as: its statements and its result.
 #[derive(Debug, Clone)]
 pub struct Shape {
@@ -120,8 +77,10 @@ const CALL_COST: usize = 25;
 /// HIR loop weight in [`inlinable`]'s cost.
 const LOOP_COST: usize = 4;
 
-/// Whether `callee` can be inlined within `budget`, and how.
-pub fn inlinable(callee: &HirBody, budget: usize) -> Result<Shape, &'static str> {
+/// Whether `callee` can be inlined within `budget`, and how. `loops`:
+/// a callee with a loop may inline
+/// ([`crate::il::opt::OptimizeOptions::hir_inline_loops`]).
+pub fn inlinable(callee: &HirBody, budget: usize, loops: bool) -> Result<Shape, &'static str> {
     if !matches!(callee.kind, BodyKind::Function | BodyKind::Method | BodyKind::Lambda) {
         return Err("kind");
     }
@@ -160,8 +119,8 @@ pub fn inlinable(callee: &HirBody, budget: usize) -> Result<Shape, &'static str>
             HirKind::Call { .. } => CALL_COST,
             // A loop's body splices whole (its `break` / `continue` still
             // name the callee's loop); the loop itself costs its test.
-            HirKind::Loop { .. } | HirKind::ForIn { .. } if loops_from_env() => LOOP_COST,
-            HirKind::Break | HirKind::Continue if loops_from_env() => 0,
+            HirKind::Loop { .. } | HirKind::ForIn { .. } if loops => LOOP_COST,
+            HirKind::Break | HirKind::Continue if loops => 0,
             HirKind::Loop { .. } | HirKind::ForIn { .. } | HirKind::Break | HirKind::Continue => return Err("construct"),
             HirKind::Block { .. } | HirKind::Lit(_) | HirKind::Local(_) => 0,
             _ => 1,

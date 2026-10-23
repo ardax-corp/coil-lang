@@ -226,7 +226,7 @@ fn specialize_side(
     }
     let mut func = from_hir.clone();
     // `-O0` / `-Og` run none of these; `-O1` only the folds.
-    if opts.mir_fold {
+    if opts.mir_fold && opts.mir_sccp {
         crate::mir::sccp(&mut func);
     }
     if opts.mir_loop {
@@ -243,6 +243,9 @@ fn specialize_side(
     }
     // S2f: reuse the mutated array after StoreIndex (drop rematerialized Alloc).
     crate::mir::sroa(&mut func);
+    // An object made on each path into a φ and only read field by field
+    // after it (`find_in(..) ?? new Span(..)`) is its fields' φs.
+    crate::mir::phi_sroa(&mut func);
     super::deopt::fill_deopt_maps(&mut func);
     paint_index_dest_from_uses(&mut func);
     let stores_ssa = func
@@ -668,7 +671,7 @@ fn lir_tail(
     // SCCP first: it folds through φs (a join whose other arms never run,
     // a loop φ that keeps its value), which `instcombine_lir` skips.
     let fold = !func.keep_lines && opts.mir_fold;
-    if fold {
+    if fold && opts.mir_sccp {
         crate::mir::sccp(&mut func);
     }
     if fold && crate::mir::instcombine_lir(&mut func) > 0 {
