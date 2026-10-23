@@ -457,8 +457,12 @@ impl Checker {
         let arg_tys = self.parse_arg_list(args);
         self.current_tuple_pack = None;
         // Record declaration-order param names for named call-site args.
+        // A method's signature tables are keyed `Owner::method`, the key its
+        // calls resolve to: under its bare name they would overwrite a free
+        // function of the same name, whose bare calls then read the method's
+        // arity (#1981).
         self.fn_param_names.insert(
-            name.to_string(),
+            template_key.clone(),
             arg_tys.iter().map(|(n, _)| n.clone()).collect(),
         );
         let has_rest = matches!(args.1.as_ref(), Expression::Fragment(children)
@@ -469,10 +473,14 @@ impl Checker {
         if children.last().is_some_and(|c| {
             matches!(c.1.as_ref(), Expression::Argument { ty: None, is_rest: true, .. })
         }));
-        self.fn_has_rest.insert(name.to_string(), has_rest);
+        self.fn_has_rest.insert(template_key.clone(), has_rest);
+        let program_key = match method_owner {
+            Some(_) => template_key.clone(),
+            None => self.qualify_module_name(name),
+        };
         self.program_fn_params
-            .insert(self.qualify_module_name(name), (arg_tys.len() - usize::from(has_rest), has_rest));
-        self.fn_tuple_rest.insert(name.to_string(), has_tuple_rest);
+            .insert(program_key, (arg_tys.len() - usize::from(has_rest), has_rest));
+        self.fn_tuple_rest.insert(template_key.clone(), has_tuple_rest);
         let mut declared_send_ty = false;
         let (ret_ty, yield_slot, send_slot) = if is_coro {
             let yield_ty = Ty::Var(self.counter.fresh());

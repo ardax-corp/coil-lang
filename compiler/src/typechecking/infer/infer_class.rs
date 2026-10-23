@@ -1265,21 +1265,10 @@ impl Checker {
                             }
                         }
                     }
-                    // Method calls resolve as `Owner::method`; mirror that
-                    // key for named-arg reorder (self is never named).
+                    // Method calls resolve as `Owner::method`, the key
+                    // `infer_function` records the signature under (self is
+                    // never named).
                     let fqn = format!("{}::{}", owner_key, name);
-                    if let Some(names) = self.fn_param_names.get(*name).cloned() {
-                        self.fn_param_names.insert(fqn.clone(), names);
-                    }
-                    if let Some(has) = self.fn_has_rest.get(*name).copied() {
-                        self.fn_has_rest.insert(fqn.clone(), has);
-                    }
-                    if let Some(&declared) = self.program_fn_params.get(&self.qualify_module_name(name)) {
-                        self.program_fn_params.insert(fqn.clone(), declared);
-                    }
-                    if let Some(tuple) = self.fn_tuple_rest.get(*name).copied() {
-                        self.fn_tuple_rest.insert(fqn.clone(), tuple);
-                    }
                     let mut all_vars = param_vars.clone();
                     all_vars.extend(method_vars);
                     let mut all_constraints = impl_constraints.clone();
@@ -1304,8 +1293,8 @@ impl Checker {
                     }
                     // Arity overloads keyed by FQN — user-arg count only
                     // (`self` is packed separately at CALL sites).
-                    let has_rest = self.fn_has_rest.get(*name).copied().unwrap_or(false);
-                    let param_names = self.fn_param_names.get(*name).cloned().unwrap_or_default();
+                    let has_rest = self.fn_has_rest.get(&fqn).copied().unwrap_or(false);
+                    let param_names = self.fn_param_names.get(&fqn).cloned().unwrap_or_default();
                     let fixed_arity = if has_rest {
                         param_names.len().saturating_sub(1)
                     } else {
