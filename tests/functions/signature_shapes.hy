@@ -2,8 +2,8 @@
 // function (the curried signature peeled past its parameters), an overload
 // (typed by the last overload of its name), a `Result<(), E>` body ending in
 // `f()?;`, and a `bool` string native.
+// `match_at` is a plain loop at the end of this file.
 use tests::assert;
-use string::match_at;
 
 fn adder(int k) -> fn(int x) -> int {
     return fn (int y) use (k) => y + k;
@@ -70,4 +70,17 @@ test("a tail try in a unit result body") {
 test("a bool string native") {
     assert!(starts("coil", "co"));
     assert!(!starts("coil", "il"));
+}
+
+// `needle` at byte offset `at` of `s`.
+fn match_at(string s, string needle, int at) -> bool {
+    let m = needle.len();
+    if at < 0 || at > s.len() - m {
+        return false;
+    }
+    let j = 0;
+    while j < m && s[at + j] == needle[j] {
+        j = j + 1;
+    }
+    return j == m;
 }

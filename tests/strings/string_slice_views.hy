@@ -1,7 +1,7 @@
 // `slice_bytes` of a long string shares its buffer instead of copying.
 // These check that views read, compare, hash and grow like copies.
 use tests::assert;
-use string::{slice_bytes, byte_at};
+use string::slice_bytes;
 
 fn cut(string s, int a, int b) -> string {
     return match slice_bytes(s, a, b) {
@@ -47,10 +47,10 @@ test("appending to a view leaves the source alone") {
     let head = cut(s, 0, 100);
     let other = head + "?";
     assert!(s.len() == 400);
-    assert!(byte_at(s, 399) == 98);
+    assert!(s[399] as int == 98);
     assert!(grown.len() == 101);
-    assert!(byte_at(grown, 100) == 33);
-    assert!(byte_at(other, 100) == 63);
+    assert!(grown[100] as int == 33);
+    assert!(other[100] as int == 63);
     assert!(cut(s, 100, 101) == "a");
 }
 

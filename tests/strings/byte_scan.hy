@@ -1,9 +1,9 @@
 // Early-exit byte loops skip 64 iterations at a time where the body does
-// nothing (`mir/byte_scan.rs`). Each loop here is checked against the
-// `find_from` native at every needle position around the 64-byte lanes,
-// from every start, and at the ends.
+// nothing (`mir/byte_scan.rs`). Each loop here is checked against a plain
+// `find_from` (end of file) at every needle position around the 64-byte
+// lanes, from every start, and at the ends.
 use tests::assert;
-use string::{find_from, slice_bytes};
+use string::slice_bytes;
 use thread::{join, spawn, ThreadError};
 
 fn find_byte(string s, int b, int from) -> int {
@@ -274,4 +274,28 @@ test("a two-byte filter at every position") {
             at = at + 1;
         }
     }
+}
+
+// The first `needle` in `hay` at or after `start` (clamped), or `-1`.
+fn find_from(string hay, string needle, int start) -> int {
+    let n = hay.len();
+    let m = needle.len();
+    let i = if start < 0 {
+        0
+    } else if start > n {
+        n
+    } else {
+        start
+    };
+    while i + m <= n {
+        let j = 0;
+        while j < m && hay[i + j] == needle[j] {
+            j = j + 1;
+        }
+        if j == m {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
 }

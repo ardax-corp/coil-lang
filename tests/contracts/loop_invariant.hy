@@ -1,9 +1,9 @@
 // Loop `invariant` clauses hold each time the condition is tested: before
 // the first iteration, after each one (`continue` included) and, for a
 // `for` loop, after the last item. A `break` leaves without a check.
+// `find_from` is a plain loop at the end of this file.
 use tests::assert;
 use task::{scope, Scope, TaskError};
-use string::find_from;
 
 fn message(Result<int, TaskError> r) -> string {
     return match r {
@@ -123,4 +123,28 @@ test("an invariant is checked before the first iteration") {
     assert!(false_on_entry(new In(0)) == 5);
     let m = outcome(fn () => false_on_entry(new In(0 - 1)));
     assert!(has(m, "invariant i >= 0"), m);
+}
+
+// The first `needle` in `hay` at or after `start` (clamped), or `-1`.
+fn find_from(string hay, string needle, int start) -> int {
+    let n = hay.len();
+    let m = needle.len();
+    let i = if start < 0 {
+        0
+    } else if start > n {
+        n
+    } else {
+        start
+    };
+    while i + m <= n {
+        let j = 0;
+        while j < m && hay[i + j] == needle[j] {
+            j = j + 1;
+        }
+        if j == m {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
 }
