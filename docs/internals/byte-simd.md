@@ -27,13 +27,13 @@ step.
 end, and a 64 KiB line with a `,` every 1 KiB. `coil` release, x86-64
 container, ns per call:
 
-| Case | main `bb3996a` |
-|------|----------------|
-| Coil loop, find a byte | 6 270 000 |
-| Coil loop, find `"needle"` | 7 480 000 |
-| stdlib `find_in` (native), byte | 3 300 |
-| stdlib `find_in` (native), `"needle"` | 3 450 |
-| stdlib `split` on the sparse line | 36 800 |
+| Case | main `bb3996a` | step 1 |
+|------|----------------|--------|
+| Coil loop, find a byte | 6 270 000 | 1 900 000 |
+| Coil loop, find `"needle"` | 7 480 000 | 2 120 000 |
+| stdlib `find_in` (native), byte | 3 300 | 3 060 |
+| stdlib `find_in` (native), `"needle"` | 3 450 | 2 480 |
+| stdlib `split` on the sparse line | 36 800 | 35 500 |
 
 The plain loop costs about 96 ns per byte, about 1 900 times the native.
 
@@ -109,8 +109,8 @@ rewritten as plain loops. Whether the `string::find_from` / `rfind` /
 
 | Step | PR | Change |
 |------|----|--------|
-| 0 | | This plan and `examples/perf/text_scan_long.hy` |
-| 1 | | `s[i]` dense |
+| 0 | #1951 | This plan and `examples/perf/text_scan_long.hy` |
+| 1 | | `s[i]` dense: `DenseIndex` flag `HEAP_STR_BYTE`, archive minor 45; the plain loop goes from 96 to 29 ns per byte |
 | 2 | | VM byte lanes, `VMask`, `ctz` / `blsr`; archive minor bump |
 | 3 | | MIR `byte_scan` skip-ahead pass |
 | 4 | | coil-stdlib `text` search in plain loops |
