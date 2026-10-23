@@ -197,6 +197,7 @@ pub enum IoErrorTag {
     Truncated = 9,
     Certificate = 10,
     Handshake = 11,
+    NotATerminal = 12,
 }
 
 impl IoErrorTag {
@@ -229,6 +230,7 @@ impl IoErrorTag {
             9 => Self::Truncated,
             10 => Self::Certificate,
             11 => Self::Handshake,
+            12 => Self::NotATerminal,
             _ => Self::Other,
         }
     }
@@ -247,6 +249,7 @@ impl IoErrorTag {
             "Truncated" => Self::Truncated,
             "Certificate" => Self::Certificate,
             "Handshake" => Self::Handshake,
+            "NotATerminal" => Self::NotATerminal,
             _ => Self::Other,
         }
     }
@@ -2207,11 +2210,13 @@ mod tests {
             (IoErrorTag::Truncated, 9),
             (IoErrorTag::Certificate, 10),
             (IoErrorTag::Handshake, 11),
+            (IoErrorTag::NotATerminal, 12),
         ] {
             let v = alloc_io_error(&mut heap, tag);
             assert_eq!(enum_tag(&heap, v), Some(expected));
         }
-        assert_eq!(BUILTIN_IO_ERROR_VARIANTS.len(), 12);
+        assert_eq!(BUILTIN_IO_ERROR_VARIANTS.len(), 13);
+        assert_eq!(BUILTIN_IO_ERROR_VARIANTS[12], "NotATerminal");
         assert_eq!(BUILTIN_IO_ERROR_VARIANTS[8], "TimedOut");
         assert_eq!(BUILTIN_IO_ERROR_VARIANTS[11], "Handshake");
     }

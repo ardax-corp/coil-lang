@@ -355,6 +355,7 @@ mod tests {
             9 => Some(IoErrorTag::Truncated),
             10 => Some(IoErrorTag::Certificate),
             11 => Some(IoErrorTag::Handshake),
+            12 => Some(IoErrorTag::NotATerminal),
             _ => None,
         }
     }

@@ -35,6 +35,7 @@ pub const BUILTIN_IO_ERROR_VARIANTS: &[&str] = &[
     "Truncated",
     "Certificate",
     "Handshake",
+    "NotATerminal",
 ];
 
 /// Built-in `ThreadError` enum name (virtual `thread` module).
