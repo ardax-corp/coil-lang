@@ -5,6 +5,11 @@
 /// Pass it to `join` to wait for the result, or to `detach` to let the
 /// thread finish on its own. A `Thread` cannot be sent to another thread.
 ///
+/// `T` is what the thread's function returns, so `join` gives back that
+/// type. A bare `Thread` in a type infers its `T`; the channel and lock
+/// handles (`Sender<T>`, `Receiver<T>`, `Mutex<T>`, `RwLock<T>`) carry
+/// their value type the same way.
+///
 /// # Examples
 ///
 /// ```
@@ -15,7 +20,7 @@
 /// }
 ///
 /// fn main() {
-///     let t: Thread = match spawn(double, 21) {
+///     let t: Thread<int> = match spawn(double, 21) {
 ///         Result::Ok(t) => t,
 ///         Result::Err(_) => panic "spawn failed",
 ///     };
@@ -26,7 +31,7 @@
 ///     assert!(n == 42);
 /// }
 /// ```
-class Thread {}
+class Thread<T> {}
 
 /// The sending half of a channel made by `channel`.
 ///
@@ -52,7 +57,7 @@ class Thread {}
 /// };
 /// assert!(got == "hi");
 /// ```
-class Sender {}
+class Sender<T> {}
 
 /// The receiving half of a channel made by `channel`.
 ///
@@ -77,7 +82,7 @@ class Sender {}
 /// let _ = send(tx, 1);
 /// assert!(match try_recv(r) { Result::Ok(v) => v == 1, Result::Err(_) => false });
 /// ```
-class Receiver {}
+class Receiver<T> {}
 
 /// A mutual-exclusion lock that owns a value, made by `mutex`.
 ///
@@ -101,7 +106,7 @@ class Receiver {}
 /// };
 /// assert!(now == 5);
 /// ```
-class Mutex {}
+class Mutex<T> {}
 
 /// A readers-writer lock that owns a value, made by `rwlock`.
 ///
@@ -125,7 +130,7 @@ class Mutex {}
 /// };
 /// assert!(seen == 2);
 /// ```
-class RwLock {}
+class RwLock<T> {}
 
 /// The error of every `thread` function.
 ///
@@ -205,7 +210,7 @@ enum ThreadError {
 ///     assert!(n == 49);
 /// }
 /// ```
-fn spawn<A, B>(A -> B f, A arg) -> Result<Thread, ThreadError> {}
+fn spawn<A, B>(A -> B f, A arg) -> Result<Thread<B>, ThreadError> {}
 
 /// Waits for the thread to finish and returns the value its function returned.
 ///
@@ -236,7 +241,7 @@ fn spawn<A, B>(A -> B f, A arg) -> Result<Thread, ThreadError> {}
 ///     assert!(again);
 /// }
 /// ```
-fn join<T>(Thread t) -> Result<T, ThreadError> {}
+fn join<T>(Thread<T> t) -> Result<T, ThreadError> {}
 
 /// Lets the thread run to completion without being joined.
 ///
@@ -266,7 +271,7 @@ fn join<T>(Thread t) -> Result<T, ThreadError> {}
 ///     assert!(joined);
 /// }
 /// ```
-fn detach(Thread t) -> Result<unit, ThreadError> {}
+fn detach<T>(Thread<T> t) -> Result<unit, ThreadError> {}
 
 /// Creates an unbounded channel and returns its `(Sender, Receiver)` ends.
 ///
@@ -299,7 +304,7 @@ fn detach(Thread t) -> Result<unit, ThreadError> {}
 ///     assert!(a + b == 30);
 /// }
 /// ```
-fn channel() -> Result<(Sender, Receiver), ThreadError> {}
+fn channel<T>() -> Result<(Sender<T>, Receiver<T>), ThreadError> {}
 
 /// Sends a copy of `value` on the channel.
 ///
@@ -323,7 +328,7 @@ fn channel() -> Result<(Sender, Receiver), ThreadError> {}
 /// };
 /// assert!(v[2] == 3);
 /// ```
-fn send<T>(Sender tx, T value) -> Result<unit, ThreadError> {}
+fn send<T>(Sender<T> tx, T value) -> Result<unit, ThreadError> {}
 
 /// Takes the next value from the channel, waiting until one arrives.
 ///
@@ -349,7 +354,7 @@ fn send<T>(Sender tx, T value) -> Result<unit, ThreadError> {}
 /// };
 /// assert!(done);
 /// ```
-fn recv<T>(Receiver rx) -> Result<T, ThreadError> {}
+fn recv<T>(Receiver<T> rx) -> Result<T, ThreadError> {}
 
 /// Sends `value` without waiting.
 ///
@@ -368,7 +373,7 @@ fn recv<T>(Receiver rx) -> Result<T, ThreadError> {}
 /// assert!(match try_send(tx, 7) { Result::Ok(_) => true, Result::Err(_) => false });
 /// assert!(match try_recv(rx) { Result::Ok(v) => v == 7, Result::Err(_) => false });
 /// ```
-fn try_send<T>(Sender tx, T value) -> Result<unit, ThreadError> {}
+fn try_send<T>(Sender<T> tx, T value) -> Result<unit, ThreadError> {}
 
 /// Takes the next value if there is one, without waiting.
 ///
@@ -392,7 +397,7 @@ fn try_send<T>(Sender tx, T value) -> Result<unit, ThreadError> {}
 /// let _ = send(tx, 3);
 /// assert!(match try_recv(rx) { Result::Ok(v) => v == 3, Result::Err(_) => false });
 /// ```
-fn try_recv<T>(Receiver rx) -> Result<T, ThreadError> {}
+fn try_recv<T>(Receiver<T> rx) -> Result<T, ThreadError> {}
 
 /// Closes the channel: no more sends.
 ///
@@ -415,7 +420,7 @@ fn try_recv<T>(Receiver rx) -> Result<T, ThreadError> {}
 /// };
 /// assert!(refused);
 /// ```
-fn close(Sender tx) -> Result<unit, ThreadError> {}
+fn close<T>(Sender<T> tx) -> Result<unit, ThreadError> {}
 
 /// Creates a mutex holding a copy of `initial`.
 ///
@@ -448,7 +453,7 @@ fn close(Sender tx) -> Result<unit, ThreadError> {}
 ///     assert!(n == 2);
 /// }
 /// ```
-fn mutex<T>(T initial) -> Result<Mutex, ThreadError> {}
+fn mutex<T>(T initial) -> Result<Mutex<T>, ThreadError> {}
 
 /// Locks `m`, runs `f` on its value, stores the new value and returns the result.
 ///
@@ -474,7 +479,7 @@ fn mutex<T>(T initial) -> Result<Mutex, ThreadError> {}
 /// assert!(before == 10);
 /// assert!(match with_lock(m, fn (int n) => (n, n)) { Result::Ok(n) => n == 20, Result::Err(_) => false });
 /// ```
-fn with_lock<A, B>(Mutex m, A -> (A, B) f) -> Result<B, ThreadError> {}
+fn with_lock<A, B>(Mutex<A> m, A -> (A, B) f) -> Result<B, ThreadError> {}
 
 /// Locks `m` until `unlock`, waiting while another thread holds it.
 ///
@@ -495,7 +500,7 @@ fn with_lock<A, B>(Mutex m, A -> (A, B) f) -> Result<B, ThreadError> {}
 /// assert!(match lock(m) { Result::Ok(_) => true, Result::Err(_) => false });
 /// assert!(match unlock(m) { Result::Ok(_) => true, Result::Err(_) => false });
 /// ```
-fn lock(Mutex m) -> Result<unit, ThreadError> {}
+fn lock<T>(Mutex<T> m) -> Result<unit, ThreadError> {}
 
 /// Locks `m` if it is free, without waiting.
 ///
@@ -521,7 +526,7 @@ fn lock(Mutex m) -> Result<unit, ThreadError> {}
 /// assert!(match try_lock(m) { Result::Ok(_) => true, Result::Err(_) => false });
 /// let _ = unlock(m);
 /// ```
-fn try_lock(Mutex m) -> Result<unit, ThreadError> {}
+fn try_lock<T>(Mutex<T> m) -> Result<unit, ThreadError> {}
 
 /// Releases a mutex this thread locked with `lock` or `try_lock`.
 ///
@@ -544,7 +549,7 @@ fn try_lock(Mutex m) -> Result<unit, ThreadError> {}
 /// };
 /// assert!(not_held);
 /// ```
-fn unlock(Mutex m) -> Result<unit, ThreadError> {}
+fn unlock<T>(Mutex<T> m) -> Result<unit, ThreadError> {}
 
 /// Creates a readers-writer lock holding a copy of `initial`.
 ///
@@ -566,7 +571,7 @@ fn unlock(Mutex m) -> Result<unit, ThreadError> {}
 /// };
 /// assert!(n == 6);
 /// ```
-fn rwlock<T>(T initial) -> Result<RwLock, ThreadError> {}
+fn rwlock<T>(T initial) -> Result<RwLock<T>, ThreadError> {}
 
 /// Runs `f` on a snapshot of the lock's value and returns what `f` returns.
 ///
@@ -589,7 +594,7 @@ fn rwlock<T>(T initial) -> Result<RwLock, ThreadError> {}
 /// };
 /// assert!(first == 1);
 /// ```
-fn with_read<A, B>(RwLock lock, A -> B f) -> Result<B, ThreadError> {}
+fn with_read<A, B>(RwLock<A> lock, A -> B f) -> Result<B, ThreadError> {}
 
 /// Takes the write lock, runs `f` and stores the new value it returns.
 ///
@@ -613,7 +618,7 @@ fn with_read<A, B>(RwLock lock, A -> B f) -> Result<B, ThreadError> {}
 /// assert!(old == 1);
 /// assert!(match with_read(lock, fn (int n) => n) { Result::Ok(n) => n == 42, Result::Err(_) => false });
 /// ```
-fn with_write<A, B>(RwLock lock, A -> (A, B) f) -> Result<B, ThreadError> {}
+fn with_write<A, B>(RwLock<A> lock, A -> (A, B) f) -> Result<B, ThreadError> {}
 
 /// Like `with_read`, but returns `Err(ThreadError::WouldBlock)` instead of
 /// waiting when a writer holds the lock.
@@ -629,7 +634,7 @@ fn with_write<A, B>(RwLock lock, A -> (A, B) f) -> Result<B, ThreadError> {}
 /// };
 /// assert!(match try_read(lock, fn (int n) => n * 2) { Result::Ok(v) => v == 10, Result::Err(_) => false });
 /// ```
-fn try_read<A, B>(RwLock lock, A -> B f) -> Result<B, ThreadError> {}
+fn try_read<A, B>(RwLock<A> lock, A -> B f) -> Result<B, ThreadError> {}
 
 /// Like `with_write`, but returns `Err(ThreadError::WouldBlock)` instead of
 /// waiting when the lock is held.
@@ -646,4 +651,4 @@ fn try_read<A, B>(RwLock lock, A -> B f) -> Result<B, ThreadError> {}
 /// let _ = try_write(lock, fn (int n) => (n * 10, 0));
 /// assert!(match with_read(lock, fn (int n) => n) { Result::Ok(n) => n == 10, Result::Err(_) => false });
 /// ```
-fn try_write<A, B>(RwLock lock, A -> (A, B) f) -> Result<B, ThreadError> {}
+fn try_write<A, B>(RwLock<A> lock, A -> (A, B) f) -> Result<B, ThreadError> {}
