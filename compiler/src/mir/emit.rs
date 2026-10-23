@@ -2285,6 +2285,19 @@ pub(super) fn emit_br_cond(args: EmitBrCondArgs<'_>) -> Result<(), LowerError> {
         return Ok(());
     }
     if plan.needs_slot(cond) {
+        // A 0/1 bool register (`a < b || c == d`) branches as `slot != 0`:
+        // fuse-select makes that one `BinSlotImmJmpf` (and packs it into
+        // a `DenseBinJmpf` behind the `DenseBin` that computed it) where
+        // `LOAD; JMPF` took two dispatches and left the dense streak.
+        if canonical_bool_in(block, cond, 2) {
+            out.push(IlOp::BinSlotImm {
+                op: Instruction::NEQ as u8,
+                slot: regs[cond.index()],
+                imm: 0,
+                loc,
+            });
+            return Ok(());
+        }
         out.push(IlOp::Load {
             slot: u32::from(regs[cond.index()]),
             loc,
@@ -2301,6 +2314,27 @@ pub(super) fn emit_br_cond(args: EmitBrCondArgs<'_>) -> Result<(), LowerError> {
         pool,
         loc,
     })
+}
+
+/// `v` is a 0 / 1 word: a compare, or `&` / `|` / `^` of such words,
+/// defined in `block` (`depth` bounds the walk). `JMPF` tests the low byte
+/// only, so a branch may compare the whole word with 0 just for these.
+fn canonical_bool_in(block: &super::func::MirBlock, v: ValueId, depth: u32) -> bool {
+    let Some(def) = block.insts.iter().rev().find(|inst| inst.dest() == v) else {
+        return false;
+    };
+    match def {
+        MirInst::Cmp { .. } => true,
+        MirInst::Bin {
+            op: MirBinOp::BitAnd | MirBinOp::BitOr | MirBinOp::Xor,
+            lhs,
+            rhs,
+            ..
+        } if depth > 0 => {
+            canonical_bool_in(block, *lhs, depth - 1) && canonical_bool_in(block, *rhs, depth - 1)
+        }
+        _ => false,
+    }
 }
 
 pub(super) fn emit_cond_jumps(
