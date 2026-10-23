@@ -1,16 +1,16 @@
 // Unit test: adding tasks grows the board.
 use tests::assert;
-use board::{add_task, board_len, count_done, empty_board};
+use board::{Task, add_task, count_done};
 
-test("empty board has length 0") {
-    let b = empty_board();
-    assert!(board_len(b) == 0, "empty");
+test("empty board has no tasks") {
+    let b: Vec<Task> = [];
+    assert!(b.len() == 0, "empty");
 }
 
 test("board grows on add") {
-    let b = empty_board();
-    b = add_task(b, "alpha");
-    b = add_task(b, "beta");
-    assert!(board_len(b) == 2, "two tasks");
+    let b: Vec<Task> = [];
+    assert!(add_task(b, "alpha") == 1, "first id");
+    assert!(add_task(b, "beta") == 2, "second id");
+    assert!(b.len() == 2, "two tasks");
     assert!(count_done(b) == 0, "none done yet");
 }

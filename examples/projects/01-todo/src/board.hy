@@ -1,70 +1,52 @@
-// Todo board logic — imported by main and by tests via `use board::{…}`.
-//
-// Status is an int (0=Todo, 1=Doing, 2=Done): comparing an enum field on a
-// class instance (`t.status == Status::Todo`) has crashed the VM in the past.
-// Index 0 is a sentinel Task — real tasks live at indices 1..len-1.
+// Todo board logic, imported by main and by the tests via `use board::{…}`.
+
+#[derive(Eq)]
+enum Status {
+    Todo,
+    Doing,
+    Done,
+}
 
 class Task {
     pub id: int,
     pub title: string,
-    pub status: int,
+    pub status: Status,
 }
 
-fn empty_board() -> Vec<Task> {
-    let seed = new Task(0, "", 0);
-    let board = Vec::from([seed]);
-    return board;
+fn status_name(Status s) -> string {
+    return match s {
+        Status::Todo => "Todo",
+        Status::Doing => "Doing",
+        Status::Done => "Done",
+    };
 }
 
-fn add_task(Vec<Task> board, string title) {
-    let id = board.len();
-    let t = new Task(id, title, 0);
-    board.push(t);
-    return board;
+/// Adds a task in `Todo` and returns its id (ids start at 1).
+fn add_task(Vec<Task> board, string title) -> int {
+    let id = board.len() + 1;
+    board.push(new Task(id, title, Status::Todo));
+    return id;
 }
 
-fn advance_task(Vec<Task> board, int id) -> Task {
-    let n = board.len() - 1;
-    if id < 1 {
-        panic "bad id";
+/// Moves a task one step: `Todo` to `Doing` to `Done`.
+fn advance_task(Vec<Task> board, int id) -> Result<Task, string> {
+    if id < 1 || id > board.len() {
+        raise "unknown task id";
     }
-    if id > n {
-        panic "unknown task id";
-    }
-    let t = board[id];
-    if t.status == 0 {
-        t.status = 1;
-    } else {
-        if t.status == 1 {
-            t.status = 2;
-        }
-    }
+    let t = board[id - 1];
+    t.status = match t.status {
+        Status::Todo => Status::Doing,
+        default => Status::Done,
+    };
     return t;
 }
 
 fn count_done(Vec<Task> board) -> int {
     let n = 0;
-    let i = 1;
-    while i < board.len() {
-        let t = board[i];
-        if t.status == 2 {
+    for t in board {
+        if t.status == Status::Done {
             n = n + 1;
         }
-        i = i + 1;
     }
     return n;
-}
-
-fn board_len(Vec<Task> board) -> int {
-    return board.len() - 1;
-}
-
-fn status_name(int s) -> string {
-    if s == 0 {
-        return "Todo";
-    }
-    if s == 1 {
-        return "Doing";
-    }
-    return "Done";
 }
