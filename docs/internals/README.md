@@ -5,6 +5,9 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | Document | Contents |
 |----------|----------|
 | [Pipeline](pipeline.md) | Parse → typecheck → HIR (inline, optimize) → MIR for every body → dense or LIR bytecode → archive → execute |
+| [Archive history](archive-history.md) | Older archive minors (5–37); `common/src/archive.rs` is the ledger for the current version |
+| [Dictionary passing](dictionary-passing.md) | Calling convention for trait-bounded generics that are not monomorphized |
+| [Type unification](type-unification.md) | Unification rules of the checker, by type shape |
 | [Comptime](comptime.md) | Code that runs while compiling: consts, `comptime` expressions and blocks, macros, folding; stages, limits, IO grants, result cache, tooling |
 | [Macros](macros.md) | User `derive` / attribute macros: `macro` model, `quote`, compile-time VM stage, hygiene, sandbox |
 | [Numeric MIR](mir.md) | MIR: every body lowers from HIR to SSA; dense and LIR tiers; pass history (P1–P12, I1–I8) |
