@@ -916,12 +916,20 @@ impl Compiler {
         let (Some(next_fqn), &HirPat::Bind(local)) = (next_fqn, pat) else {
             return;
         };
-        let item = hir.local(local).ty.clone();
+        // `next` may be a generic instance's shared body (`Iterator for
+        // ListIter<T>`): its declared `Option<Item>`, open in the head's
+        // variables, is what it returns, not the loop's ground item (#1912).
+        let declared = self
+            .fn_return_ty(next_fqn)
+            .and_then(|r| crate::typechecking::ty::option_inner(&r))
+            .filter(|t| !crate::layout::ty_is_closed(t));
+        let shared = declared.is_some();
+        let item = declared.or_else(|| hir.local(local).ty.clone());
         let niche = item
             .as_ref()
             .is_some_and(|ty| crate::layout::niche_heap_only(&self.checker, ty));
         // Pinned as emission pins it, so `next`'s `CALL` agrees.
-        if let Some(item) = &item {
+        if let Some(item) = item.as_ref().filter(|_| !shared) {
             let opt = crate::typechecking::ty::option_ty(item.clone());
             let pair = crate::layout::two_word_kind(&self.checker, &opt);
             self.pin_two_word_return_kind(next_fqn, pair);

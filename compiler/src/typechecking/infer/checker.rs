@@ -10915,6 +10915,16 @@ impl Checker {
                 // never for the head's variables.
                 let mut inst = inst;
                 if inst_args != inst.args {
+                    // Its associated types at the goal's types too: `Item`
+                    // of `IntoIterator for HashMap<K, V>` is the map's own
+                    // `Entry<K, V>`, not one over the head's variables (#1912).
+                    let mut fresh = Subst::empty();
+                    for &(old, new) in &fresh_vars {
+                        fresh.insert(old, Ty::Var(new));
+                    }
+                    for value in inst.assoc_tys.values_mut() {
+                        value.ty = apply_ty_prune(&local, &apply_ty(&fresh, &value.ty));
+                    }
                     inst.args = inst_args.iter().map(|a| apply_ty_prune(&local, a)).collect();
                     inst.context = inst_ctx
                         .iter()
