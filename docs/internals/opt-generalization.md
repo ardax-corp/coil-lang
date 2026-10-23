@@ -5,10 +5,10 @@
 Doctrine for generalizing MIR / IL opts so they fit **majority** programs,
 not prove-board shapes. No compiler changes in this note.
 
-Linear: [Opt generalization](https://linear.app/ardax/project/opt-generalization-0adb1fb677d9)
-([COI-333](https://linear.app/ardax/issue/COI-333/a0-opt-generalization-doctrine-doc)).
+Linear: Opt generalization
+(COI-333).
 Constrained by locked [language quirks](language-quirks.md) Q1–Q9
-([COI-331](https://linear.app/ardax/issue/COI-331/q0-docs-language-quirksmd-locked-q1-q9);
+(COI-331;
 relative path — that file may land on a separate PR).
 
 Island history and refuse tables stay in [mir-islands.md](mir-islands.md),
@@ -24,8 +24,8 @@ tables shrink toward.
    or the cost gate loses. Do not grow fuse-only peeps that exist only to
    outscore a dense reconstruct.
 
-2. **One object story** (quirks [Q1](https://linear.app/ardax/issue/COI-323/q1-t-n-reference-box-once-on-escape)
-   / [Q2](https://linear.app/ardax/issue/COI-324/q2-named-class-reference-invisible-field-sroa)).
+2. **One object story** (quirks Q1 (COI-323)
+   / Q2 (COI-324)).
    The heap object is language truth. Frame slots / scalar SSA are a
    **proven non-escaping rewrite**. Escape (call, return, field, host,
    alias, identity compare) **boxes once** and reuses that identity — not
@@ -33,7 +33,7 @@ tables shrink toward.
 
 3. **Prefer dense-native ops** over residual stack boxing. Index /
    `StoreIndex` / `ArrayLen` / `Make*` / CALL should run as typed dense
-   ops when maps and ABI allow ([COI-335](https://linear.app/ardax/issue/COI-335/a2-dense-native-heap-ops-indexmakecall)).
+   ops when maps and ABI allow (COI-335).
    Box and unbox only at ABI edges (CALL / RETURN / HostInvoke), not as
    the in-loop tax.
 
@@ -58,7 +58,7 @@ tables shrink toward.
    feature-shaped refuses (W3 work-op floors, Seek≤64 prove quirks,
    HostInvoke **id** allowlists) as permanent walls — fold them into
    purity bits + measured cost
-   ([COI-336](https://linear.app/ardax/issue/COI-336/a3-broaden-mir-entry-shrink-refuse-tables)).
+   (COI-336).
    Post-quirks inventory: [B0](#b0--post-quirks-refuse-audit) below.
 
 ## Object story (opts)
@@ -72,19 +72,19 @@ tables shrink toward.
 Q3: `[T; N]` cannot grow (type error; use `Vec`). Q4: indexing `i % N`
 is defined into `0..N`. Those are language rules, not opt refusals.
 S2f–S2l shape tickets collapse into one shared escape answer
-([COI-334](https://linear.app/ardax/issue/COI-334/a1-unify-tn-sroa-under-q1-q4)).
+(COI-334).
 
 ## Phases
 
 | # | Work | Issue | Code? |
 |---|------|-------|-------|
-| **A0** | This doctrine + A4 measurement | [COI-333](https://linear.app/ardax/issue/COI-333/a0-opt-generalization-doctrine-doc) | docs only |
-| **A1** | Unify `[T; N]` / SROA under Q1–Q4 | [COI-334](https://linear.app/ardax/issue/COI-334/a1-unify-tn-sroa-under-q1-q4) | yes |
-| **A2** | Dense-native heap ops (Index / Make / CALL) | [COI-335](https://linear.app/ardax/issue/COI-335/a2-dense-native-heap-ops-indexmakecall) | yes (archive **4.10**) |
-| **A3** | Broaden MIR entry; shrink refuse tables | [COI-336](https://linear.app/ardax/issue/COI-336/a3-broaden-mir-entry-shrink-refuse-tables) | yes |
-| **A4** | Measurement contract (below) | [COI-337](https://linear.app/ardax/issue/COI-337/a4-measurement-contract-natural-suites-embed) | continuous |
-| **B0** | Post-quirks refuse audit + ranked B* | [COI-338](https://linear.app/ardax/issue/COI-338/b0-post-quirks-refuse-audit-ranked-revisit-plan) | docs only |
-| **B1** | Q6–Q8 MIR/dense entry hygiene | [COI-339](https://linear.app/ardax/issue/COI-339/b1-q6-q8-mirdense-entry-hygiene) | yes (eligibility + docs; no B2 Seek rewrite) |
+| **A0** | This doctrine + A4 measurement | COI-333 | docs only |
+| **A1** | Unify `[T; N]` / SROA under Q1–Q4 | COI-334 | yes |
+| **A2** | Dense-native heap ops (Index / Make / CALL) | COI-335 | yes (archive **4.10**) |
+| **A3** | Broaden MIR entry; shrink refuse tables | COI-336 | yes |
+| **A4** | Measurement contract (below) | COI-337 | continuous |
+| **B0** | Post-quirks refuse audit + ranked B* | COI-338 | docs only |
+| **B1** | Q6–Q8 MIR/dense entry hygiene | COI-339 | yes (eligibility + docs; no B2 Seek rewrite) |
 
 Order: A0 → A1 → A2 → A3. A4 applies to every generalization PR.
 B0 is the post-Q6–Q9 inventory; B1+ are ranked below (no impl in B0).
@@ -147,7 +147,7 @@ list. Q6–Q9 first rungs turned most of those named commits into
 | Recursion on the callee (`CALL` / `TailCall`) | **Q7:** one-word self-`CALL` / `TailCall` may dense. **B2:** tight `tak` / `fib` convoy CALL on the stack (no prologue Seek / inter-CALL STORE) so the cost gate can keep them. **B3:** two-slot helper `CALL` / `RETURN` may dense or LIR. **B7:** sibling / mutual `TailCall` may dense (stack-arg + reserved callee entries). **C1:** self two-slot `CALL` / `RETURN` may dense or LIR (same dest + `dest_hi` machinery). N>2 stays refuse until extra dests + archive encoding | Cost gate |
 | `for` / iterator (`for_in_sum`) | **Q6:** counted desugar — array / Vec / `[T; N]` / literal range helpers dense (`sum`, `for_in_range`). **B5:** first-class `let r = 0..n` locals unbox `[start,end]` (`for_in_range_value`). **C2:** free-fn param / returned numeric Range two-slot (`for_in_range_param` / `for_in_range_ret`). **C2b rung 1:** heap-field / array-held Range counted (`for_in_range_field` / `for_in_range_array`). **C2b rung 2:** user `Iterator::next` (`for_in_iter`) and counted `into_iter` Range (`for_in_iter_range`). **C2b rung 4:** coro for-in (`for_in_coro`; `ResumeCoro` / `DoneCoro`; dense or LIR). `main` + format / `Vec.push` stays fuse-IL | Ladder (counted + local + param/ret + heap-field range + user `next` + coro) |
 | Dense+match (stack vs regs) | **Q8:** niche / two-slot match may dense (register `Br`, cost gate). Boxed `JumpIfMatch` may LIR (I2) or dense (**D3** multi-payload). **B3:** two-slot `CALL` / `RETURN` may dense or LIR (cost gate) | Cost gate |
-| Multi-payload `Unpack` / `JumpIfMatch` arity > 1 | **D3:** per-index `MatchPayload` + existing `Unpack(n)` / `JumpIfMatch`. Keep when reconstruct ≤ fuse. `item_check` is the flagship | Cost gate ([COI-357](https://linear.app/ardax/issue/COI-357)) |
+| Multi-payload `Unpack` / `JumpIfMatch` arity > 1 | **D3:** per-index `MatchPayload` + existing `Unpack(n)` / `JumpIfMatch`. Keep when reconstruct ≤ fuse. `item_check` is the flagship | Cost gate (COI-357) |
 | Debugger-attached / `-Og` | **B8:** may dense / LIR (cost gate). **C3:** compiler-internal deopt maps, named-let remap, sparse MIR `DebugLoc`. Emit still skips `Deopt`. Native resume / P5 stay leftover ([mir-deopt.md](mir-deopt.md)) | Ladder (**I7** / **B8** / **C3**) |
 | Unmapped alloc / GC safepoint | **B6:** `ArrayPush` / `DenseArrayPush` grow sites encode S2b maps; CALL+alloc drafts bind (one-word `CALL`). Cost gate still refuses boxed reconstruct. Multi-payload match is **D3** | Ladder + cost (maps); leftover unmapped edges stay fuse-IL |
 | Residual `Byte` / `Pow` / `AND`/`OR` | Unchanged | Hard wall (later island) |
@@ -163,29 +163,29 @@ regular reconstruct over bench-shaped peeps.
 
 | # | Win | Why this rank | Prove / stay refuse |
 |---|-----|---------------|---------------------|
-| **B1** | Shrink leftover **entry** refuses for Q6–Q8 first rungs | **Landed** ([COI-339](https://linear.app/ardax/issue/COI-339)): `lir_eligible` / infer / island copy treat counted `for`, one-word rec `CALL`, and niche/two-slot `Br` as lift→cost, not checklist walls. Cost gate spirit unchanged | Counted `for`, one-word rec `CALL`, niche/two-slot `Br`. Do not force `tak` / `fib` / boxed match |
-| **B2** | Q7 cost-gate lose on `fib` / `tak` | **Landed** ([COI-340](https://linear.app/ardax/issue/COI-340)): dense emit convoys **self** one-word `CALL` like fuse-IL (stack args / results; Seek only when extras live). Sibling / mutual `TailCall` stays fuse-IL (B7). Cost gate unchanged. Flagship `fib` / `tak` archives stay identical (reconstruct fuse-selects to the same bytes) | Checksum + embed wall **≤ fuse**. No skip-the-gate. Regular CALL reconstruct, not a tak opcode |
-| **B3** | Two-slot `CALL` / `RETURN` (dense or LIR reconstruct) | **Landed** ([COI-341](https://linear.app/ardax/issue/COI-341)): helper two-slot `CALL` / `RETURN` lower; LIR reconstructs width-2 `CALL`; dense emit may keep when cost ≤ fuse. Self / sibling two-slot recursion stays fuse-IL (B7 / later Q7) | `option_match_call`; checksum; cost gate; flagships flat |
-| **B4** | **Q9 R2** — `string::{from_bytes,to_bytes}` dense HostInvoke | **Landed** ([COI-342](https://linear.app/ardax/issue/COI-342)): I6 dense HostInvoke (box at the host edge). Table `STRING` / `FORMAT` stay off dense | Unit reconstruct; dense loop + HostInvoke; format loop still fuse-IL |
-| **B5** | Q6 later rungs — first-class range, then user `Iterator` | **Landed** ([COI-343](https://linear.app/ardax/issue/COI-343)): unboxed `let r = 0..n` locals (no `GetField`). Param / returned Range opened as **C2**; heap-field opened as **C2b** rung 1; user `next` opened as **C2b** rung 2; dict opened as **C2b** rung 3; coro opened as **C2b** rung 4 | `for_in_range_value`; no full trait rewrite |
-| **B6** | Unmapped alloc / grow / class `new` maps | **Landed** ([COI-344](https://linear.app/ardax/issue/COI-344)): `ArrayPush` is a mapped grow safepoint; `DenseArrayPush` (archive **4.11**) is the native reconstruct. Map lift types one-word `CALL` so CALL+`Make*` / `InitTyped` drafts bind. Cost gate still refuses boxed reconstruct | `nsieve`; CALL+enum wrap; flagships flat |
-| **B7** | Mutual / sibling / self two-slot recursion | **Landed** ([COI-345](https://linear.app/ardax/issue/COI-345)): one-word and two-slot **sibling / mutual** `TailCall` may dense. Reconstruct puts TailCall args on TOS and reserves callee entry labels so `to_flat` does not treat a sibling jump as local (B2 break). B2 dest convoy stays self-`CALL` only. Leftover at B7: **self two-slot** `CALL` / `RETURN` (opened as **C1**) | `tail_sibling.hy`; even/odd + bounce + a mutual pair; checksum; flagships flat. No new opcode |
-| **C1** | Self two-slot (→ N-slot) `CALL` / `RETURN` | **Landed** ([COI-349](https://linear.app/ardax/issue/COI-349)): drop the self two-slot specialize refuse. Helper / sibling / self share `ret_words` + dest + `dest_hi`. Keep/refuse is the cost gate. **N-slot reach:** infer/lower use `ret_words >= 2` capped at `MAX_MODELED_RET_WORDS` (2). N>2 needs extra dests + `CALL`/`RETURN` archive encoding | `self_two_slot.hy`; `option_self_call`; checksum; cost gate; flagships flat. No new opcode |
-| **C2** | Param / returned heap Range; user Iterator / coro / dict later | **Landed** ([COI-351](https://linear.app/ardax/issue/COI-351)): numeric free-fn Range params and two-slot Range `CALL`/`RETURN`. Counted `for` without `GetField`. Heap-field / array Range opened as **C2b** rung 1. User `Iterator::next` opened as **C2b** rung 2. Dict for-in opened as **C2b** rung 3. Coro opened as **C2b** rung 4 | `for_in_range_param`; `for_in_range_ret`; checksum; cost gate; flagships flat. No full trait rewrite |
-| **C2b** | Heap-field / array Range; then user Iterator / coro / dict | **Complete** ([COI-353](https://linear.app/ardax/issue/COI-353)): rung 4 coro for-in on MIR (`MakeCoro` mapped alloc; `ResumeCoro` / `DoneCoro`; dense or LIR). Rungs 1–3: heap-field Range, user `Iterator::next`, dict | `for_in_coro`; checksum; cost gate; flagships flat |
-| **C3** | Native deopt maps / named let slots / sparse DebugLoc | **This rung** ([COI-350](https://linear.app/ardax/issue/COI-350)): compiler-internal `DraftDeoptMap` at leave edges; remap `fn_debug_locals` after SSA regs; forward known locs on dense / LIR emit. No archive bump. Do not set `allow_deopt` in production. Leftover: P5 resume, incomplete convoy maps, per-PC locals, codegen-unknown locs | Debugger + `-Og` boards; deopt drafts; named `let`; sparse locs; checksum; flagships flat |
-| **B8** | **I7** debugger-attached / `-Og` on MIR | **Landed** ([COI-346](https://linear.app/ardax/issue/COI-346)): drop the blanket specialize refuse. Debugger-attached / `-Og` may dense / LIR; emit skips explicit `Deopt`. C3 ladders maps / named lets / locs | Debugger + `-Og` boards; fib `print n`; checksum; flagships identical on Standard |
+| **B1** | Shrink leftover **entry** refuses for Q6–Q8 first rungs | **Landed** (COI-339): `lir_eligible` / infer / island copy treat counted `for`, one-word rec `CALL`, and niche/two-slot `Br` as lift→cost, not checklist walls. Cost gate spirit unchanged | Counted `for`, one-word rec `CALL`, niche/two-slot `Br`. Do not force `tak` / `fib` / boxed match |
+| **B2** | Q7 cost-gate lose on `fib` / `tak` | **Landed** (COI-340): dense emit convoys **self** one-word `CALL` like fuse-IL (stack args / results; Seek only when extras live). Sibling / mutual `TailCall` stays fuse-IL (B7). Cost gate unchanged. Flagship `fib` / `tak` archives stay identical (reconstruct fuse-selects to the same bytes) | Checksum + embed wall **≤ fuse**. No skip-the-gate. Regular CALL reconstruct, not a tak opcode |
+| **B3** | Two-slot `CALL` / `RETURN` (dense or LIR reconstruct) | **Landed** (COI-341): helper two-slot `CALL` / `RETURN` lower; LIR reconstructs width-2 `CALL`; dense emit may keep when cost ≤ fuse. Self / sibling two-slot recursion stays fuse-IL (B7 / later Q7) | `option_match_call`; checksum; cost gate; flagships flat |
+| **B4** | **Q9 R2** — `string::{from_bytes,to_bytes}` dense HostInvoke | **Landed** (COI-342): I6 dense HostInvoke (box at the host edge). Table `STRING` / `FORMAT` stay off dense | Unit reconstruct; dense loop + HostInvoke; format loop still fuse-IL |
+| **B5** | Q6 later rungs — first-class range, then user `Iterator` | **Landed** (COI-343): unboxed `let r = 0..n` locals (no `GetField`). Param / returned Range opened as **C2**; heap-field opened as **C2b** rung 1; user `next` opened as **C2b** rung 2; dict opened as **C2b** rung 3; coro opened as **C2b** rung 4 | `for_in_range_value`; no full trait rewrite |
+| **B6** | Unmapped alloc / grow / class `new` maps | **Landed** (COI-344): `ArrayPush` is a mapped grow safepoint; `DenseArrayPush` (archive **4.11**) is the native reconstruct. Map lift types one-word `CALL` so CALL+`Make*` / `InitTyped` drafts bind. Cost gate still refuses boxed reconstruct | `nsieve`; CALL+enum wrap; flagships flat |
+| **B7** | Mutual / sibling / self two-slot recursion | **Landed** (COI-345): one-word and two-slot **sibling / mutual** `TailCall` may dense. Reconstruct puts TailCall args on TOS and reserves callee entry labels so `to_flat` does not treat a sibling jump as local (B2 break). B2 dest convoy stays self-`CALL` only. Leftover at B7: **self two-slot** `CALL` / `RETURN` (opened as **C1**) | `tail_sibling.hy`; even/odd + bounce + a mutual pair; checksum; flagships flat. No new opcode |
+| **C1** | Self two-slot (→ N-slot) `CALL` / `RETURN` | **Landed** (COI-349): drop the self two-slot specialize refuse. Helper / sibling / self share `ret_words` + dest + `dest_hi`. Keep/refuse is the cost gate. **N-slot reach:** infer/lower use `ret_words >= 2` capped at `MAX_MODELED_RET_WORDS` (2). N>2 needs extra dests + `CALL`/`RETURN` archive encoding | `self_two_slot.hy`; `option_self_call`; checksum; cost gate; flagships flat. No new opcode |
+| **C2** | Param / returned heap Range; user Iterator / coro / dict later | **Landed** (COI-351): numeric free-fn Range params and two-slot Range `CALL`/`RETURN`. Counted `for` without `GetField`. Heap-field / array Range opened as **C2b** rung 1. User `Iterator::next` opened as **C2b** rung 2. Dict for-in opened as **C2b** rung 3. Coro opened as **C2b** rung 4 | `for_in_range_param`; `for_in_range_ret`; checksum; cost gate; flagships flat. No full trait rewrite |
+| **C2b** | Heap-field / array Range; then user Iterator / coro / dict | **Complete** (COI-353): rung 4 coro for-in on MIR (`MakeCoro` mapped alloc; `ResumeCoro` / `DoneCoro`; dense or LIR). Rungs 1–3: heap-field Range, user `Iterator::next`, dict | `for_in_coro`; checksum; cost gate; flagships flat |
+| **C3** | Native deopt maps / named let slots / sparse DebugLoc | **This rung** (COI-350): compiler-internal `DraftDeoptMap` at leave edges; remap `fn_debug_locals` after SSA regs; forward known locs on dense / LIR emit. No archive bump. Do not set `allow_deopt` in production. Leftover: P5 resume, incomplete convoy maps, per-PC locals, codegen-unknown locs | Debugger + `-Og` boards; deopt drafts; named `let`; sparse locs; checksum; flagships flat |
+| **B8** | **I7** debugger-attached / `-Og` on MIR | **Landed** (COI-346): drop the blanket specialize refuse. Debugger-attached / `-Og` may dense / LIR; emit skips explicit `Deopt`. C3 ladders maps / named lets / locs | Debugger + `-Og` boards; fib `print n`; checksum; flagships identical on Standard |
 | **B9** | Q9 **R3–R4** — maps across `FORMAT`; unicode / regex only if an island says so | **This rung (R3):** `FORMAT` / `STRINGIFY` are mapped GC safepoints (I5 roots). LIR when maps bind and cost ≤ fuse. Dense infer still refuses table ops. **R4 leftover:** unicode / regex stay out of SSA | Format/string boards; live-string map; checksum; cost gate; flagships flat. No second Format lowering |
 
 Parked (not B*): residual `Byte`/`Pow`/bitwise, Cranelift P5, PGO.
 
 Post A0–C3 denser-MIR leftovers (D0 keep-rate, class `new`, dense field, Q9
 `main`, `item_check`): [mir-dense-leftovers.md](mir-dense-leftovers.md).
-**D0** ([COI-354](https://linear.app/ardax/issue/COI-354)): `nsieve` keeps
+**D0** (COI-354): `nsieve` keeps
 dense-native after lift (`slot_env` follows trivial-phi subst). Cost gate
-unchanged. **D1** ([COI-355](https://linear.app/ardax/issue/COI-355)): class
-`new` / field maps. **D2** ([COI-356](https://linear.app/ardax/issue/COI-356)):
-dense-native field / Object make. **D3** ([COI-357](https://linear.app/ardax/issue/COI-357)):
+unchanged. **D1** (COI-355): class
+`new` / field maps. **D2** (COI-356):
+dense-native field / Object make. **D3** (COI-357):
 boxed multi-payload `Unpack` / `JumpIfMatch`. Tree-shake / BB reorder is a
 separate surface ([#405](https://github.com/ardax-corp/coil-lang/pull/405)).
 
@@ -196,5 +196,5 @@ separate surface ([#405](https://github.com/ardax-corp/coil-lang/pull/405)).
 - Permanent refuse rows for cost (those become gates)
 - PGO, score-chasing, or env-gated opts
 - Combining A0 with [language-quirks.md](language-quirks.md)
-  ([COI-331](https://linear.app/ardax/issue/COI-331/q0-docs-language-quirksmd-locked-q1-q9))
+  (COI-331)
 - B4+ compiler work in a B3 PR (Q9 R2 bytes)

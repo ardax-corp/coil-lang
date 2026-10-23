@@ -1,6 +1,6 @@
 # Heap identity (mapped slab)
 
-[COI-200](https://linear.app/ardax/issue/COI-200) asked whether `binary_trees`
+COI-200 asked whether `binary_trees`
 is bound by `Heap::alloc` identity work: one `Box<GcData>` per object plus a
 then-hot-path `live` HashSet probe in `find_object_by_addr`. That HashSet is
 gone. This note is the layout. **Decision: implement slab + header poison**
@@ -8,7 +8,7 @@ gone. This note is the layout. **Decision: implement slab + header poison**
 table, and not a moving GC.
 
 Pins remain the product for proven loops ([array-pin.md](array-pin.md),
-[COI-198](https://linear.app/ardax/issue/COI-198)). Unproven `Index` /
+COI-198). Unproven `Index` /
 `GetField` still go through `find_object_by_addr`; they must not hash.
 
 ## Model (non-moving mark-and-sweep)
