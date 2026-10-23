@@ -783,3 +783,125 @@ mod os {
         }
     }
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::fs::File;
+    use std::io::Write;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::time::Instant;
+
+    use super::*;
+    use crate::io::alloc_stream;
+    use crate::io_handle::NativeHandle;
+    use crate::memory::ObjArray;
+
+    /// A pseudo-terminal: `(master, slave as a Stream)`.
+    fn pty(heap: &mut Heap) -> (File, Value) {
+        // SAFETY: plain libc pty setup; every descriptor is owned below.
+        unsafe {
+            let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+            assert!(master >= 0, "posix_openpt");
+            assert_eq!(libc::grantpt(master), 0);
+            assert_eq!(libc::unlockpt(master), 0);
+            let name = std::ffi::CStr::from_ptr(libc::ptsname(master)).to_owned();
+            let slave = libc::open(name.as_ptr(), libc::O_RDWR | libc::O_NOCTTY);
+            assert!(slave >= 0, "open slave");
+            let slave = File::from(OwnedFd::from_raw_fd(slave));
+            let stream = alloc_stream(heap, NativeHandle::File(slave), StreamKind::File).unwrap();
+            (File::from(OwnedFd::from_raw_fd(master)), stream)
+        }
+    }
+
+    fn termios_of(heap: &mut Heap, s: Value) -> libc::termios {
+        let (fd, _) = stream_os(heap, s).unwrap();
+        let mut t: libc::termios = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::tcgetattr(fd, &mut t) }, 0);
+        t
+    }
+
+    fn bytes(heap: &mut Heap, n: usize) -> Value {
+        let (obj, _) = heap.alloc(ObjArray::from_bytes(vec![0; n]), Object::Array);
+        Value::from(obj.addr())
+    }
+
+    #[test]
+    fn pty_is_a_terminal_and_reports_its_size() {
+        let mut heap = Heap::default();
+        let (master, slave) = pty(&mut heap);
+        assert!(tty_is_tty(&mut heap, slave));
+        let ws = libc::winsize { ws_row: 40, ws_col: 100, ws_xpixel: 0, ws_ypixel: 0 };
+        // SAFETY: TIOCSWINSZ reads one `winsize`.
+        assert_eq!(unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &ws) }, 0);
+        assert_eq!(tty_size(&mut heap, slave), Ok((100, 40)));
+    }
+
+    #[test]
+    fn raw_mode_sets_and_restores_termios() {
+        let mut heap = Heap::default();
+        let (_master, slave) = pty(&mut heap);
+        let before = termios_of(&mut heap, slave);
+        assert!(before.c_lflag & libc::ECHO != 0 && before.c_lflag & libc::ICANON != 0);
+        assert!(!tty_is_raw(&mut heap, slave));
+
+        tty_enter_raw(&mut heap, slave, false, false).unwrap();
+        let raw = termios_of(&mut heap, slave);
+        assert_eq!(raw.c_lflag & (libc::ECHO | libc::ICANON | libc::IEXTEN | libc::ISIG), 0);
+        assert_eq!(raw.c_iflag & (libc::ICRNL | libc::IXON), 0);
+        assert_eq!(raw.c_oflag & libc::OPOST, 0);
+        assert_eq!(raw.c_cc[libc::VMIN], 1);
+        assert!(tty_is_raw(&mut heap, slave));
+
+        // Again with other flags: applied to the first saved settings.
+        tty_enter_raw(&mut heap, slave, true, true).unwrap();
+        let again = termios_of(&mut heap, slave);
+        assert!(again.c_lflag & libc::ISIG != 0);
+        assert_eq!(again.c_oflag & libc::OPOST, before.c_oflag & libc::OPOST);
+        assert_eq!(again.c_lflag & libc::ECHO, 0);
+
+        tty_leave_raw(&mut heap, slave).unwrap();
+        let after = termios_of(&mut heap, slave);
+        assert_eq!(after.c_lflag, before.c_lflag);
+        assert_eq!(after.c_iflag, before.c_iflag);
+        assert_eq!(after.c_oflag, before.c_oflag);
+        assert!(!tty_is_raw(&mut heap, slave));
+        // Leaving twice is a no-op.
+        tty_leave_raw(&mut heap, slave).unwrap();
+    }
+
+    #[test]
+    fn read_timeout_times_out_then_reads() {
+        let mut heap = Heap::default();
+        let (mut master, slave) = pty(&mut heap);
+        tty_enter_raw(&mut heap, slave, true, true).unwrap();
+        let buf = bytes(&mut heap, 16);
+        let start = Instant::now();
+        assert_eq!(tty_read_timeout(&mut heap, slave, buf, 30), Ok(Some(0)));
+        assert!(start.elapsed().as_millis() >= 25);
+        master.write_all(b"\x1b[A").unwrap();
+        assert_eq!(tty_read_timeout(&mut heap, slave, buf, 1000), Ok(Some(3)));
+        tty_leave_raw(&mut heap, slave).unwrap();
+    }
+
+    #[test]
+    fn resized_reports_each_sigwinch_once() {
+        let _ = tty_resized();
+        // SAFETY: the handler only stores to an atomic.
+        unsafe { libc::raise(libc::SIGWINCH) };
+        assert!(tty_resized());
+        assert!(!tty_resized());
+    }
+
+    #[test]
+    fn a_file_is_not_a_terminal() {
+        let mut heap = Heap::default();
+        let path = std::env::temp_dir().join("coil_tty_unit_file.txt");
+        std::fs::write(&path, b"x").unwrap();
+        let f = crate::io::stream_open(&mut heap, path.to_str().unwrap(), "r").unwrap();
+        assert!(!tty_is_tty(&mut heap, f));
+        assert_eq!(tty_size(&mut heap, f), Err(IoErrorTag::NotATerminal));
+        assert_eq!(tty_enter_raw(&mut heap, f, true, true), Err(IoErrorTag::NotATerminal));
+        assert_eq!(tty_leave_raw(&mut heap, f), Ok(()));
+        let _ = std::fs::remove_file(&path);
+    }
+}
