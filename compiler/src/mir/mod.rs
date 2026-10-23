@@ -38,6 +38,7 @@ mod specialize;
 mod sccp;
 mod sroa;
 mod vectorize;
+mod phi_sroa;
 mod strength;
 mod stackmap;
 mod text;
@@ -72,6 +73,7 @@ pub use specialize::{
 };
 pub use sccp::sccp;
 pub use sroa::sroa;
+pub use phi_sroa::phi_sroa;
 pub use strength::strength_reduce;
 #[cfg(test)]
 pub use text::{ParseError, parse_func};

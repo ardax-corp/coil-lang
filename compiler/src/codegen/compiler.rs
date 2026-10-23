@@ -699,10 +699,11 @@ impl Compiler {
                 // A default body is cloned per instance, as a generic head.
                 Expression::TypeClass { name, methods, .. } => {
                     for method in methods {
-                        if let Expression::Function { name: method_name, body: Some(body), is_coro: false, .. } = method.1.as_ref()
+                        if let Expression::Function { name: method_name, body: Some(body), is_coro: false, type_params, .. } = method.1.as_ref()
                             && !matches!(body.1.as_ref(), Expression::Block(items) if items.is_empty())
                         {
-                            self.note_default_clone_src(name, method_name, (method.0.start, method.0.end));
+                            let own: Vec<String> = type_params.iter().map(|p| p.name.to_string()).collect();
+                            self.note_default_clone_src(name, method_name, (method.0.start, method.0.end), &own);
                         }
                     }
                 }
@@ -1407,15 +1408,17 @@ impl Compiler {
                 emit_idx: None,
                 program: self.program_seq,
                 trait_params: None,
+                own_bounds: 0,
                 method_of: None,
             },
         );
     }
 
     /// Record default body `class::method` as a clone source: generic over
-    /// the trait's parameters.
-    fn note_default_clone_src(&mut self, class: &str, method: &str, span: (usize, usize)) {
-        let Some(params) = self.checker.generics().typeclass(class).map(|c| c.type_params.clone()) else {
+    /// the trait's parameters and, when each of its own type parameters
+    /// (`own`) has exactly one bound, over those too.
+    fn note_default_clone_src(&mut self, class: &str, method: &str, span: (usize, usize), own: &[String]) {
+        let Some(mut params) = self.checker.generics().typeclass(class).map(|c| c.type_params.clone()) else {
             return;
         };
         let Some(scheme) = self.checker.typeclass_method_scheme(class, method) else {
@@ -1424,7 +1427,24 @@ impl Compiler {
         if scheme.bounds.len() < params.len() {
             return;
         }
-        let head = scheme.bounds[..params.len()].iter().map(|&v| Ty::Var(v)).collect();
+        let mut head: Vec<Ty> = scheme.bounds[..params.len()].iter().map(|&v| Ty::Var(v)).collect();
+        // A clone at the own bounds' ground types resolves their calls
+        // statically: the head takes each bound's type variable, in the
+        // order the call site passes their dictionaries.
+        let own_bounds: Vec<Ty> = scheme.constraints.iter().skip(1).filter_map(|c| match c.args.as_slice() {
+            [v @ Ty::Var(_)] => Some(v.clone()),
+            _ => None,
+        }).collect();
+        let fits = own_bounds.len() == scheme.constraints.len().saturating_sub(1)
+            && own_bounds.len() == own.len()
+            && own_bounds.iter().all(|v| own_bounds.iter().filter(|w| *w == v).count() == 1)
+            && !own.is_empty();
+        let own_bounds = if fits { own_bounds } else { Vec::new() };
+        let n_own = own_bounds.len();
+        if n_own > 0 {
+            head.extend(own_bounds);
+            params.extend(own.iter().cloned());
+        }
         let fqn = crate::typechecking::generics::Generics::default_method_fqn(class, method);
         self.inst_clone_srcs.insert(
             fqn,
@@ -1436,6 +1456,7 @@ impl Compiler {
                 emit_idx: None,
                 program: self.program_seq,
                 trait_params: Some(params),
+                own_bounds: n_own,
                 method_of: None,
             },
         );
@@ -1484,6 +1505,7 @@ impl Compiler {
                 emit_idx: None,
                 program: self.program_seq,
                 trait_params: None,
+                own_bounds: 0,
                 method_of: Some(super::MethodCloneSrc {
                     is_static: *is_static,
                     free: false,
@@ -1528,6 +1550,7 @@ impl Compiler {
                 emit_idx: None,
                 program: self.program_seq,
                 trait_params: None,
+                own_bounds: 0,
                 method_of: Some(super::MethodCloneSrc {
                     is_static: true,
                     free: true,
@@ -1571,6 +1594,10 @@ impl Compiler {
         }
         let (class, method) = (src.class.clone(), src.method.clone());
         let inherent = src.method_of.is_some();
+        // A default body cloned at its own bounds' types too: the trait's
+        // part of the lookup is the instance's.
+        let own_bounds = src.own_bounds;
+        let trait_lookup = &lookup[..lookup.len() - own_bounds];
         let vars = self.inst_clone_vars(&src.head, lookup)?;
         let _ = vars;
         // `Option` / `Result` over a class parameter: the clone's ground
@@ -1580,9 +1607,9 @@ impl Compiler {
         // A method with bounds of its own takes their dictionaries, which a
         // clone (no dictionary) has no room for (#1471).
         if !inherent
-            && (self.trait_method_boundary_sig(&class, &method, lookup, false).is_some()
+            && (self.trait_method_boundary_sig(&class, &method, trait_lookup, false).is_some()
                 || self.checker.typeclass_method_scheme(&class, &method).is_none()
-                || !self.trait_method_own_bounds(&class, &method).is_empty())
+                || self.trait_method_own_bounds(&class, &method).len() != own_bounds)
         {
             return None;
         }
@@ -1590,8 +1617,10 @@ impl Compiler {
         // Entry labels from the program-start pool: a label minted while a
         // body is being emitted shares that body's label range, and the
         // module layout's per-body relabeling takes it for a local one.
-        // An inherent method's clone has no dictionary adapter.
-        let entries = if inherent {
+        // An inherent method's clone has no dictionary adapter, nor has a
+        // default body's clone at its own bounds' types (no dictionary
+        // holds it: a dictionary is the instance's, for any own types).
+        let entries = if inherent || own_bounds > 0 {
             vec![name.clone()]
         } else {
             vec![name.clone(), Self::dict_adapter_name(&name)]
@@ -1709,7 +1738,7 @@ impl Compiler {
                     })
             {
                 self.foreign_clone_queue.push(req.clone());
-                if src.method_of.is_none() {
+                if src.method_of.is_none() && src.own_bounds == 0 {
                     self.emit_dict_adapter_thunk(&src.class, &src.method, &req.lookup, &req.name);
                 }
                 continue;
@@ -1751,6 +1780,23 @@ impl Compiler {
                     self.mono_type_param_tys.push(names);
                     self.mono_var_tys.push(vars);
                     self.inst_clone_fallback = Some((src.clone(), req.clone()));
+                    if src.own_bounds > 0 && !self.hir_clone_plans(src.span) {
+                        self.inst_clone_fallback = None;
+                        self.mono_var_tys.pop();
+                        self.mono_type_param_tys.pop();
+                        self.mono_codegen_var_types.pop();
+                        self.pending_instance_ctx = prev_ctx;
+                        self.pending_own_dicts = prev_own;
+                        self.compiling_mono_clone = prev_mono;
+                        self.emit_idx = prev_idx;
+                        if let Some((method, namespace, qualified)) = inherent {
+                            self.compiling_method = method;
+                            self.namespace = namespace;
+                            self.current_function_qualified = qualified;
+                        }
+                        self.emit_instance_clone_thunk(&src, &req);
+                        continue;
+                    }
                     // Checked under the method it clones: an inherent
                     // method's result mode by its bare name, as its own
                     // body (and its HIR) reads it.
@@ -1775,7 +1821,7 @@ impl Compiler {
                 }
                 None => self.emit_instance_clone_thunk(&src, &req),
             }
-            if src.method_of.is_none() {
+            if src.method_of.is_none() && src.own_bounds == 0 {
                 self.emit_dict_adapter_thunk(&src.class, &src.method, &req.lookup, &req.name);
             }
         }
@@ -2067,7 +2113,9 @@ impl Compiler {
     fn emit_instance_clone_call_shared(&mut self, src: &InstCloneSrc, req: &InstClone) {
         use crate::hir::LocalKind;
         use crate::hir::synth::Synth;
-        let n = self.instance_method_unbox_tys(&src.class, &src.method, &req.lookup).len();
+        // A default body's own bounds' types follow the instance's.
+        let trait_lookup = &req.lookup[..req.lookup.len() - src.own_bounds];
+        let n = self.instance_method_unbox_tys(&src.class, &src.method, trait_lookup).len();
         // A default body has no signature of its own: the trait's, over
         // its type variables.
         let (params, ret) = match (self.checker.fn_param_tys(&req.src), self.checker.fn_return_ty(&req.src)) {
@@ -2084,7 +2132,13 @@ impl Compiler {
         debug_assert_eq!(params.len(), n, "instance clone `{}` arity", req.name);
         let mut dict = Vec::new();
         if self.instance_call_takes_dict(&src.class, &src.method, &req.src) {
-            self.plan_instance_dict(&mut dict, &src.class, &req.lookup);
+            self.plan_instance_dict(&mut dict, &src.class, trait_lookup);
+        }
+        // Then the own bounds' dictionaries, at the clone's types (#1471).
+        let own_bounds = self.trait_method_own_bounds(&src.class, &src.method);
+        for (bound, ty) in own_bounds.iter().zip(&req.lookup[trait_lookup.len()..]).take(src.own_bounds) {
+            let class = bound.class.clone();
+            self.plan_instance_dict(&mut dict, &class, std::slice::from_ref(ty));
         }
         let layouts: Vec<_> = params.iter().map(|t| self.value_layout(t)).collect();
         let ret_layout = self.value_layout(&ret);
@@ -2093,7 +2147,7 @@ impl Compiler {
         // instance's types may be a niche word where the shared method
         // takes it open (#1605).
         let (own, own_ret) = match self.checker.typeclass_method_scheme(&src.class, &src.method) {
-            Some(scheme) if scheme.bounds.len() == req.lookup.len() => {
+            Some(scheme) if src.own_bounds == 0 && scheme.bounds.len() == req.lookup.len() => {
                 let mut inst = crate::typechecking::subst::Subst::empty();
                 for (bound, ty) in scheme.bounds.iter().zip(&req.lookup) {
                     inst.insert(*bound, ty.clone());

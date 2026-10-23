@@ -797,6 +797,29 @@ impl Compiler {
         self.messages.push(message);
     }
 
+    /// Whether the body declared at `span`, at the clone types on top of
+    /// `mono_var_tys`, plans: its calls resolve at those types. A default
+    /// body cloned at its own bounds' types calls its generics at types no
+    /// mono clone was planned for; one that does not plan stays a thunk.
+    pub(super) fn hir_clone_plans(&mut self, span: (usize, usize)) -> bool {
+        let (Some(&index), Some(module)) = (self.hir_fns.get(&span), self.hir_module.take()) else {
+            return false;
+        };
+        let ok = self.mono_var_tys.last().is_some_and(|map| {
+            let inst = self.hir_instance(&module.bodies[index], map);
+            let r = match self.hir_call_shapes(&inst) {
+                Ok(Some(shaped)) => self.plan_hir_body(&shaped).map(|_| ()),
+                Ok(None) => self.plan_hir_body(&inst).map(|_| ()),
+                Err(e) => Err(e),
+            };
+            // Only its calls are probed: the clone's frame (its parameters'
+            // slots) is not set up yet, so a frame refusal says nothing.
+            !r.is_err_and(|why| why.starts_with("callee"))
+        });
+        self.hir_module = Some(module);
+        ok
+    }
+
     /// Lower the body of the function declared at `span` from HIR. `false`
     /// when the body is outside what the lowering emits; the caller reports
     /// it ([`Self::report_unlowered`]).
@@ -3093,6 +3116,18 @@ impl Compiler {
             .iter()
             .map(|e| crate::hir::HirExpr { ty: at(&e.ty), ..e.clone() })
             .collect();
+        // A local read keeps the checker's type for the read, which a bound
+        // method call's receiver may hold as a variable of its own (`p` in
+        // `p.hit(i)` under `fn count<P: Probe>`): the local's type is the
+        // instance's.
+        for e in exprs.iter_mut() {
+            if let HirKind::Local(id) = e.kind
+                && e.ty.as_ref().is_some_and(|t| !crate::typechecking::ty::ftv_ty(t).is_empty())
+                && let Some(ty) = at(&body.local(id).ty).filter(crate::layout::ty_is_closed)
+            {
+                e.ty = Some(ty);
+            }
+        }
         // An operator over a type parameter resolves to its primitive lane
         // once the instance's types are known (`a + b` at `T = int`).
         for i in 0..exprs.len() {
@@ -4998,6 +5033,11 @@ impl Compiler {
         } else {
             (arg_tys[..lookup_n].iter().map(Self::show_lookup_ty_for_instance).collect(), &arg_tys[..lookup_n])
         };
+        // A bare variable names no instance: a relaxed lookup would take
+        // whichever comes first.
+        if lookup.iter().any(|t| matches!(t, Ty::Var(_))) {
+            return Err("callee-trait");
+        }
         // Constructed values carry `Sum` types; retry with their `App` head.
         let instance = self
             .checker

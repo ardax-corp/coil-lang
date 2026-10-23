@@ -137,6 +137,24 @@ impl HirBody {
         &self.exprs[id.0 as usize]
     }
 
+    /// The operands of the string concatenation chain `id` heads, left to
+    /// right (`a + b + c` is `[a, b, c]`): the chain is one `format`, so
+    /// its partial strings are never built.
+    pub fn concat_leaves(&self, id: HirId) -> Vec<HirId> {
+        let mut out = Vec::new();
+        let mut work = vec![id];
+        while let Some(at) = work.pop() {
+            match self.expr(at).kind {
+                HirKind::Bin { op: BinOp::StrConcat, lhs, rhs } => {
+                    work.push(rhs);
+                    work.push(lhs);
+                }
+                _ => out.push(at),
+            }
+        }
+        out
+    }
+
     pub fn local(&self, id: LocalId) -> &HirLocal {
         &self.locals[id.0 as usize]
     }
