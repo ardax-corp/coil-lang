@@ -2370,6 +2370,14 @@ fn builtin_description(module: &str, name: &str, export: &BuiltinExport) -> Stri
         ("io", "capture_end") => {
             "Ends the innermost capture and returns what it kept as `(stdout, stderr)`.".into()
         }
+        ("io::tty", "is_tty") => "Returns whether a stream is a terminal.".into(),
+        ("io::tty", "size") => "Returns a terminal's size as `(columns, rows)`.".into(),
+        ("io::tty", "enter_raw") => "Puts a terminal in raw mode (no echo, byte-at-a-time input).".into(),
+        ("io::tty", "leave_raw") => "Restores the terminal settings saved by `enter_raw`.".into(),
+        ("io::tty", "is_raw") => "Returns whether a terminal is in raw mode.".into(),
+        ("io::tty", "read_timeout") => "Waits up to a timeout for input, then reads it into a buffer.".into(),
+        ("io::tty", "resized") => "Returns `true` once per terminal window resize.".into(),
+        ("io::tty", "enable_vt") => "Turns on ANSI escape handling for a Windows console.".into(),
         ("clock", "sleep_ms") => {
             "Sleeps the current thread for milliseconds (HostInvoke `clock_sleep_ms`).".into()
         }
@@ -4070,6 +4078,7 @@ fn virtual_signature_candidate(name: &str) -> Option<GoodAnalysis> {
         "prelude::math",
         "io",
         "io::fs",
+        "io::tty",
         "string",
         "thread",
         "env",
