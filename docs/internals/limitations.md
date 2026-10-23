@@ -62,7 +62,7 @@ Tracked in Linear project Known limitations (milestone **IL / codegen model**). 
 
 | Topic | Linear |
 |-------|--------|
-| Symbolic-IL `cursor_model` gate (done — IL tell vs bytecode in `cursor_model.rs`) | COI-80 |
+| Symbolic-IL `cursor_model` gate (removed with `il::tell`, #1874) | COI-80 |
 | Cursor split (`sp` vs `tell`) — **decided: keep** (operand height ≠ STORE floor) | COI-81 |
 | Copy-prop / GVN beyond straight-line — **removed 2026-10** (`copy_prop`, `cfg_gvn`, `ssa_gvn` deleted: measurement showed no bench effect; MIR keeps CSE and GVN) | COI-82 |
 | IL `MakeArray` frame scalarization (`escape_analysis` pass) — **removed 2026-10** (no bench effect); codegen `[T; N]` locals still scalarize, and the `escape_analysis` option now only gates HIR enum / tuple scalar replacement | COI-84 |
@@ -212,11 +212,10 @@ performs ([int-overflow.md](int-overflow.md)). Non-const float factors and
 | Quantity | Meaning | After `CONST; STORE 5` (height was 1) | Nested `CALL` / `MakeCoro` |
 |----------|---------|---------------------------------------|----------------------------|
 | `il::sp` (`stack_delta`) | per-op operand-height delta (eval-stack depth) | **0** (pop only) | `ret_words - arity` |
-| `il::tell` | shared-buffer cursor | **6** (`max(popped, slot+1)`) | relative `tell - arity + 1` (`call_arity_delta`) |
 
 `STORE` (packed `n`) pops `n` then floors tell to `max(tell, max_written_slot + 1)` — height does not follow that floor. `Seek s` sets tell to `s` (and poisons `sp`). `CALL` sets the callee frame base to `tell - arity`; the matching return seeks to that base and pushes, so the caller-relative tell effect is `-arity + 1`. Unifying the two would either make `sp` lie about height (break the height model) or make `tell` ignore STORE floors (break the cursor model). Split asserted in `sp.rs` / `tell.rs` (`store_does_not_raise_operand_height`, `store_floor_is_not_operand_height`, `store_floor_persists_across_call`, `call_after_store_floor_is_relative_to_the_cursor`, `store_floor_persists_across_make_coro`, `symbolic_il_seek_sets_the_cursor`). `Call` / `MakeCoro` use `call_arity_delta` (`1 - arity`), not JumpIfMatch's `signed_arity_delta` (`arity - 1`).
 
-The shared bytecode/symbolic-IL tell model is validated differentially: `tell_cursor_model_matches_vm` diffs bytecode `il::tell` against `machine::cursor_trace`, and `tell_symbolic_il_matches_bytecode` diffs post-opt IL tell against bytecode tell via lower's `pre_to_post` map (COI-80). The old `effect_il` `Entry{Call}` bug (`arity - 1` instead of `1 - arity`) is pinned by `tell_symbolic_il_entry_call_delta_is_not_jump_if_match_arity_minus_one` in `compiler/tests/cursor_model.rs`. Any future widening of copy propagation should preserve that gate because a cursor mistake is silent memory corruption, not a failing test. Fused intermediate IL ops are not compared at their own index (tell-before of the next distinct PC still covers the composed effect); bytecode `Unknown` (loop-header joins, `JumpIfMatch` taken edge) is not required to match a more precise IL `Known`.
+The tell model (`il::tell`) and its differential test against the VM's cursor trace were removed in #1874: nothing in the compiler read the cursor model once the stack-IL optimizer was gone.
 
 **Slot promotion** (`slot_promote_tell`, then `slot_promote`) was removed 2026-10 (measurement showed no bench effect).
 

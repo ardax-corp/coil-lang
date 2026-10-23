@@ -9,13 +9,9 @@ mod const_fold;
 pub mod debug_vars;
 #[cfg(any(test, feature = "dissect"))]
 mod dissect;
-// `il::tell` is exercised by `tests/cursor_model.rs`, which diffs bytecode
-// against the VM cursor and symbolic-IL tell against bytecode; the rest of
-// the IL stays crate-private.
 pub(crate) mod il;
 pub(crate) mod mir;
 pub use il::opt::{BodyTier, OptStats, last_opt_stats};
-pub use il::tell;
 pub use il::OptLevel;
 pub use common::DebugLevel;
 pub use hir::effects::{

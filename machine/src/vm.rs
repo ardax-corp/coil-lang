@@ -75,41 +75,6 @@ pub fn take_pc_profile() -> Vec<u64> {
     VM_PC_PROFILE.with(|p| p.borrow_mut().take().unwrap_or_default())
 }
 
-// Frame-relative cursor (`stack.tell() - sp`) observed before each dispatch,
-// paired with the PC. Feeds the differential test for the static cursor model
-// in `compiler::il::tell`, which cannot be trusted from code reading alone.
-#[cfg(any(test, feature = "vm_profile"))]
-thread_local! {
-    static VM_CURSOR_TRACE: std::cell::RefCell<Vec<(u32, u32)>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
-
-/// Cap the trace so a long-running program cannot exhaust memory; a prefix is
-/// still a valid check.
-#[cfg(any(test, feature = "vm_profile"))]
-const CURSOR_TRACE_CAP: usize = 400_000;
-
-#[cfg(any(test, feature = "vm_profile"))]
-pub fn reset_cursor_trace() {
-    VM_CURSOR_TRACE.with(|t| t.borrow_mut().clear());
-}
-
-/// `(pc, frame_relative_cursor)` in dispatch order.
-#[cfg(any(test, feature = "vm_profile"))]
-#[must_use]
-pub fn cursor_trace() -> Vec<(u32, u32)> {
-    VM_CURSOR_TRACE.with(|t| t.borrow().clone())
-}
-
-#[cfg(not(any(test, feature = "vm_profile")))]
-pub fn reset_cursor_trace() {}
-
-#[cfg(not(any(test, feature = "vm_profile")))]
-#[must_use]
-pub fn cursor_trace() -> Vec<(u32, u32)> {
-    Vec::new()
-}
-
 // Allocation / GC counters (`vm_profile` + tests). Useful for binary_trees-style
 // heap traffic without needing external alloc tracers.
 #[cfg(any(test, feature = "vm_profile"))]
@@ -283,7 +248,7 @@ fn set_jump_target(ip: &mut usize, target: usize, code: &[Byte]) {
 }
 
 #[inline(always)]
-fn note_dispatch_at(ip: usize, stack: &Stack<Value>, sp: usize) {
+fn note_dispatch_at(ip: usize) {
     #[cfg(any(test, feature = "vm_profile"))]
     {
         VM_DISPATCH_COUNT.with(|c| c.fetch_add(1, Ordering::Relaxed));
@@ -295,16 +260,10 @@ fn note_dispatch_at(ip: usize, stack: &Stack<Value>, sp: usize) {
                 counts[ip] += 1;
             }
         });
-        VM_CURSOR_TRACE.with(|t| {
-            let mut t = t.borrow_mut();
-            if t.len() < CURSOR_TRACE_CAP {
-                t.push((ip as u32, (stack.tell().saturating_sub(sp)) as u32));
-            }
-        });
     }
     #[cfg(not(any(test, feature = "vm_profile")))]
     {
-        let _ = (ip, stack, sp);
+        let _ = ip;
     }
 }
 
@@ -3980,7 +3939,7 @@ impl<const S: usize> Machine<S> {
             #[cfg(not(any(test, feature = "debugger")))]
             let debug_attached = false;
 
-            note_dispatch_at(ip, &self.stack, sp);
+            note_dispatch_at(ip);
 
             #[cfg(any(test, feature = "coverage"))]
             if HOOKS && unlikely(self.coverage.is_some()) {

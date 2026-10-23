@@ -1123,7 +1123,7 @@ fn execute_dense(ctx: &mut HotCtx<'_, '_>) {
         if unlikely(!is_always_hot(bc)) {
             return;
         }
-        super::note_dispatch_at(ctx.ip, ctx.stack, ctx.sp);
+        super::note_dispatch_at(ctx.ip);
         ctx.ip += 1;
         prefetch_code(ctx.code, ctx.ip);
         exec_dense(ctx, bc, opcode);
