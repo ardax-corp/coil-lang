@@ -10,13 +10,13 @@ test("later-declared fn with a local class parameter") {
 }
 
 test("later-declared fn returning Result of a local class") {
-    assert_eq!(make_guard(), 7);
+    assert!(make_guard() == 7);
 }
 
 test("recursive method returning a local class") {
-    assert_eq!(spec_kids(), 2);
+    assert!(spec_kids() == 2);
 }
 
 test("enum payload of a local class") {
-    assert_eq!(ev_value(make_ev(3)), 6);
+    assert!(ev_value(make_ev(3)) == 6);
 }
