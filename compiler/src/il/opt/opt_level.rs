@@ -111,13 +111,64 @@ fn all_off() -> OptimizeOptions {
         call_fold: false,
         mir_fold: false,
         mir_loop: false,
+        hir_inline: false,
+        hir_inline_pair: false,
+        hir_inline_heap: false,
+        hir_inline_loops: false,
+        hir_inline_specialize: false,
+        hir_inline_mono: false,
+        hir_match_tree: false,
+        hir_pair_locals: false,
+        hir_bisect: None,
+        mir_sccp: false,
+        auto_par: false,
         require_mir: false,
+    }
+}
+
+/// `name` is unset or anything but `0` / `false` / `off` / `no`.
+fn env_on(name: &str) -> bool {
+    !matches!(std::env::var(name).as_deref(), Ok("0" | "false" | "off" | "no"))
+}
+
+/// The switches no level sets: on unless their `COIL_*` variable turns
+/// them off. The environment is read here, once per options built.
+fn env_knobs(o: &mut OptimizeOptions) {
+    o.hir_inline = env_on("COIL_HIR_INLINE");
+    o.hir_inline_pair = env_on("COIL_HIR_INLINE_PAIR");
+    o.hir_inline_heap = env_on("COIL_HIR_INLINE_HEAP");
+    o.hir_inline_loops = env_on("COIL_HIR_INLINE_LOOPS");
+    o.hir_inline_specialize = env_on("COIL_HIR_SPECIALIZE");
+    o.hir_inline_mono = env_on("COIL_HIR_INLINE_MONO");
+    o.hir_match_tree = env_on("COIL_HIR_MATCH_TREE");
+    o.hir_pair_locals = env_on("COIL_HIR_PAIR_LOCALS");
+    o.hir_bisect = std::env::var("COIL_HIR_BISECT").ok().and_then(|v| v.parse::<usize>().ok());
+    o.mir_sccp = env_on("COIL_MIR_SCCP");
+    o.auto_par = env_on("COIL_AUTO_PAR");
+}
+
+impl OptimizeOptions {
+    /// Take `from`'s level-independent switches (the [`env_knobs`] ones,
+    /// which a setter may have changed since): a new level keeps them.
+    pub(crate) fn keep_knobs(&mut self, from: &OptimizeOptions) {
+        self.hir_inline = from.hir_inline;
+        self.hir_inline_pair = from.hir_inline_pair;
+        self.hir_inline_heap = from.hir_inline_heap;
+        self.hir_inline_loops = from.hir_inline_loops;
+        self.hir_inline_specialize = from.hir_inline_specialize;
+        self.hir_inline_mono = from.hir_inline_mono;
+        self.hir_match_tree = from.hir_match_tree;
+        self.hir_pair_locals = from.hir_pair_locals;
+        self.hir_bisect = from.hir_bisect;
+        self.mir_sccp = from.mir_sccp;
+        self.auto_par = from.auto_par;
     }
 }
 
 /// The switches `level` turns on.
 fn base_knobs(level: OptLevel) -> OptimizeOptions {
     let mut o = all_off();
+    env_knobs(&mut o);
     // Gate HIR passes in `emit_hir`, not IL table rows: constant folding (at
     // every level), scalar replacement (enum / tuple SROA), counted-loop
     // bounds proofs and full unroll of short counted loops (not at Size: it
@@ -255,6 +306,19 @@ mod tests {
             let o = level.options();
             assert!(o.mir_fold && o.mir_loop, "{level:?} runs every MIR pass");
         }
+    }
+
+    #[test]
+    fn env_knobs_survive_a_level_change() {
+        let mut set = OptLevel::Standard.options();
+        set.hir_inline = false;
+        set.mir_sccp = false;
+        set.hir_bisect = Some(3);
+        let mut o = OptLevel::None.options();
+        o.keep_knobs(&set);
+        assert!(!o.hir_inline && !o.mir_sccp);
+        assert_eq!(o.hir_bisect, Some(3));
+        assert!(!o.mir_fold && !o.mir_loop, "the level's own switches stay");
     }
 
     #[test]

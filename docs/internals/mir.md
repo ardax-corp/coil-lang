@@ -155,7 +155,8 @@ was.
 It runs first on dense bodies and before `instcombine_lir` on LIR ones
 (#1434: constants that only meet in MIR, after inlining, fold whether or
 not the body takes dense), under `mir_fold`. `COIL_MIR_SCCP=0` (or
-`false` / `off` / `no`) turns it off for bisecting. Tests:
+`false` / `off` / `no`) turns it off for bisecting
+(`OptimizeOptions::mir_sccp`; [environment knobs](pipeline.md#environment-knobs)). Tests:
 `sccp.tests.rs`.
 
 ## P1 — dense exec (COI-268)

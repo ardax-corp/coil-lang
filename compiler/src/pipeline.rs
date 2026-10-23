@@ -125,8 +125,9 @@ pub struct Pipeline {
     keep_fns_in: Option<KeepFnFilter>,
     /// When false, skip auto fork-join even if `COIL_AUTO_PAR` is on.
     auto_par: bool,
-    /// Typed inlining of HIR bodies (the default; `COIL_HIR_INLINE=0` off).
-    hir_inline: bool,
+    /// Typed inlining of HIR bodies, when set; `None` keeps the compiler's
+    /// [`crate::il::opt::OptimizeOptions::hir_inline`] (`COIL_HIR_INLINE`).
+    hir_inline: Option<bool>,
     /// Host/test `dload` grants (stem + file to hash). Not set from CLI flags.
     extra_dload_grants: Vec<(String, PathBuf)>,
     /// Host/test extra stems with no lock hash (`set_dload_allowlist`).
@@ -323,7 +324,9 @@ impl Pipeline {
             c.set_collect_opt_stats(self.collect_opt_stats);
             c.set_debugger_attached(self.debugger_attached);
             c.set_auto_par(self.auto_par);
-            c.set_hir_inline(self.hir_inline);
+            if let Some(on) = self.hir_inline {
+                c.set_hir_inline(on);
+            }
             c.set_include_tests(self.include_tests);
             c.set_keep_fns_in(self.keep_fns_in.clone());
             #[cfg(any(test, feature = "vm-wire"))]
@@ -738,7 +741,7 @@ impl Pipeline {
             contract_sources: Vec::new(),
             keep_fns_in: None,
             auto_par: true,
-            hir_inline: crate::hir::inline::inline_from_env(),
+            hir_inline: None,
             extra_dload_grants: Vec::new(),
             extra_dload_stems: Vec::new(),
             host_grants: HostGrants::deny_all(),
@@ -2263,7 +2266,7 @@ impl Pipeline {
     /// Typed inlining of HIR bodies. Tests that pin a callee's own code
     /// shape (its MIR tier, its `CALL`) turn it off.
     pub fn set_hir_inline(&mut self, on: bool) {
-        self.hir_inline = on;
+        self.hir_inline = Some(on);
         if self.compiler.get().is_some() {
             self.compiler_lazy_mut().set_hir_inline(on);
         }
