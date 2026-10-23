@@ -112,6 +112,7 @@ impl Checker {
             module_item_names: HashMap::new(),
             import_locals: HashMap::new(),
             imported_enum_keys: HashMap::new(),
+            module_class_names: HashSet::new(),
             def_interner,
             schemes_by_def: HashMap::new(),
             local_defs: HashMap::new(),
@@ -1703,6 +1704,9 @@ impl Checker {
         self.bare_cases_by_module
             .insert(self.current_module_id, Default::default());
 
+        // This file's class names before any signature or payload names one
+        // (#1980, #1983).
+        self.collect_module_class_names(ast);
         // Imported type aliases first: any signature may name one (#1208).
         self.import_type_aliases(ast);
         // Register enum shapes before infer so early constructor/match uses resolve.
@@ -12209,6 +12213,11 @@ impl Checker {
                 if let Some(key) = self.resolve_class_key(name) {
                     return Ty::Con(key);
                 }
+                // A class of this file the main walk has not registered yet
+                // (a forward signature or enum payload, #1980, #1983).
+                if self.module_class_names.contains(name) {
+                    return Ty::Con(self.qualify_module_name(name));
+                }
                 // COI-110: enums live under `module::Name`; annotations must use
                 // that key so they unify with `Enum::Variant` constructors.
                 if let Some(key) = self.resolve_enum_key(name) {
@@ -15644,6 +15653,30 @@ impl Checker {
 
     /// Record this module's `readonly class` keys before any body is
     /// typed, so a use ahead of the declaration sees the class as immutable.
+    /// Record every top-level class name of this file
+    /// (`module_class_names`). Classes are registered during the main walk,
+    /// after the pre-passes parse forward fn and method signatures and enum
+    /// payloads: a type there that names one of them still has to be this
+    /// module's `m::Name`, not a bare `Name` (#1980, #1983).
+    fn collect_module_class_names(&mut self, ast: &Output) {
+        fn walk(node: &Output, out: &mut HashSet<String>) {
+            match Checker::pre_pass_unwrap_stmt(node).1.as_ref() {
+                Expression::Class { name, .. } => {
+                    out.insert(name.to_string());
+                }
+                Expression::Program(children) | Expression::Fragment(children) => {
+                    for child in children {
+                        walk(child, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut names = HashSet::new();
+        walk(ast, &mut names);
+        self.module_class_names = names;
+    }
+
     fn pre_register_readonly_classes(&mut self, ast: &Output) {
         fn walk<'a>(node: &'a Output<'a>, out: &mut Vec<&'a str>) {
             match Checker::pre_pass_unwrap_stmt(node).1.as_ref() {
