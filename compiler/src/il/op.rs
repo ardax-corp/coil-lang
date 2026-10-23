@@ -6,12 +6,6 @@ use common::{Byte, DebugLoc, Instruction};
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Label(pub u32);
 
-impl Label {
-    pub fn id(self) -> u32 {
-        self.0
-    }
-}
-
 /// Lowering annotation on a jump or label bind. Not a dummy opcode.
 ///
 /// Fuse-select and invert-guard honor this; production `NOOP` / `DUP;POP`
@@ -20,51 +14,13 @@ impl Label {
 pub struct FuseHint {
     /// Do not fuse this op with neighbors (pair-`?` / pair-match `EQ;JMPF`).
     pub nofuse: bool,
-    pub join: JoinClass,
 }
 
 impl FuseHint {
-    pub const fn nofuse_value_under_jmp() -> Self {
-        Self {
-            nofuse: true,
-            join: JoinClass::ValueUnderJmp,
-        }
-    }
-
-    pub const fn value_join() -> Self {
-        Self {
-            nofuse: false,
-            join: JoinClass::Value,
-        }
-    }
-
     pub fn blocks_cmp_jmp_fuse(self) -> bool {
-        self.nofuse || matches!(self.join, JoinClass::ValueUnderJmp)
+        self.nofuse
     }
 
-    pub fn is_value_join(self) -> bool {
-        matches!(self.join, JoinClass::Value)
-    }
-
-    /// Pair `?` tag jumps keep a live payload under the cond. Cold-layout
-    /// invert would make the reconstructed fail `RETURN` a fall-through
-    /// join that convoy can steal later CALL args into.
-    pub fn blocks_cold_fallthrough_invert(self) -> bool {
-        self.nofuse || matches!(self.join, JoinClass::ValueUnderJmp)
-    }
-}
-
-/// Join class on a lowering annotation.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub enum JoinClass {
-    #[default]
-    None,
-    /// Match / `?` join that carries a stacked value. Fuse must not pull a
-    /// producer from one predecessor across this bind.
-    Value,
-    /// Guard jump whose compare sits under a still-live stacked value
-    /// (pair tag still on stack after `EQ;JMPF`).
-    ValueUnderJmp,
 }
 
 /// Control-flow jump kind (IL-level; packing happens in the lowerer).
@@ -254,8 +210,6 @@ pub enum IlOp {
     },
     /// Bind `label` to the next emitting instruction's PC (last bind wins).
     Label(Label),
-    /// Value-producing join bind (match / `?` end). Same PC rule as [`IlOp::Label`].
-    JoinLabel(Label),
     /// Control-flow jump with a symbolic target.
     Jump {
         kind: IlJumpKind,
@@ -536,7 +490,6 @@ impl IlOp {
                 Byte::new(Instruction::BinReturn).with_bin_return(*op as u8)
             }
             IlOp::Label(_)
-            | IlOp::JoinLabel(_)
             | IlOp::Jump { .. }
             | IlOp::Entry { .. }
             | IlOp::PrologueJmp { .. } => {
@@ -547,32 +500,14 @@ impl IlOp {
 
     /// True if this op becomes one (or more) final bytecode slots.
     pub fn emits_code(&self) -> bool {
-        !matches!(self, IlOp::Label(_) | IlOp::JoinLabel(_))
+        !matches!(self, IlOp::Label(_))
     }
 
     /// Bind site label id, if this is a label marker.
     pub fn bind_label(&self) -> Option<Label> {
         match self {
-            IlOp::Label(id) | IlOp::JoinLabel(id) => Some(*id),
+            IlOp::Label(id) => Some(*id),
             _ => None,
-        }
-    }
-
-    /// Lowering hint on this op (empty for everything except jumps and join labels).
-    pub fn fuse_hint(&self) -> FuseHint {
-        match self {
-            IlOp::Jump { hint, .. } => *hint,
-            IlOp::JoinLabel(_) => FuseHint::value_join(),
-            _ => FuseHint::default(),
-        }
-    }
-
-    pub fn jump(kind: IlJumpKind, target: Label, loc: DebugLoc) -> Self {
-        IlOp::Jump {
-            kind,
-            target,
-            loc,
-            hint: FuseHint::default(),
         }
     }
 
@@ -585,65 +520,12 @@ impl IlOp {
         }
     }
 
-    /// Jump / Entry / PrologueJmp — not safe to copy as a tiny-inline body.
-    pub fn is_control(&self) -> bool {
-        matches!(
-            self,
-            IlOp::Jump { .. } | IlOp::Entry { .. } | IlOp::PrologueJmp { .. }
-        )
-    }
-
     /// Plain one-word terminal `RETURN` (typed or residual `Byte`).
     ///
     /// Fused `*Return` variants are excluded — convoy opts and tiny-inline use
     /// this to find a real `RETURN` sink, not a fused return producer. A
     /// two-word `RETURN` (`ret_words == 2`) is excluded too: it pops/pushes
     /// `[payload, tag]`, not the single value these passes assume.
-    /// Ends a block with no successor: returns, halt, tail calls, and their
-    /// residual `Byte` encodings.
-    pub fn is_terminator(&self) -> bool {
-        matches!(
-            self,
-            IlOp::Return { .. }
-                | IlOp::Halt { .. }
-                | IlOp::LoadReturnSlot { .. }
-                | IlOp::ConstReturnImm { .. }
-                | IlOp::BinReturn { .. }
-                | IlOp::Entry {
-                    kind: EntryKind::TailCall,
-                    ..
-                }
-        ) || matches!(
-            self.as_encode_byte(),
-            Some(b) if matches!(
-                *b.bytecode(),
-                Instruction::RETURN
-                    | Instruction::ReturnPair
-                    | Instruction::HALT
-                    | Instruction::LoadReturnSlot
-                    | Instruction::ConstReturnImm
-                    | Instruction::BinReturn
-                    | Instruction::MakeEnumReturn
-                    | Instruction::MakeEnumReturnK
-                    | Instruction::TailCall
-            )
-        )
-    }
-
-    /// Control can continue to the next op: not a [`Self::is_terminator`]
-    /// and not an unconditional jump (conditional jumps fall through when
-    /// not taken).
-    pub fn can_fall_through(&self) -> bool {
-        !self.is_terminator()
-            && !matches!(
-                self,
-                IlOp::Jump {
-                    kind: IlJumpKind::Unconditional,
-                    ..
-                }
-            )
-    }
-
     pub fn is_plain_return(&self) -> bool {
         matches!(self, IlOp::Return { ret_words: 1, .. })
             || matches!(
@@ -688,7 +570,7 @@ impl IlOp {
             | IlOp::Jump { loc, .. }
             | IlOp::Entry { loc, .. }
             | IlOp::PrologueJmp { loc } => *loc,
-            IlOp::Label(_) | IlOp::JoinLabel(_) => DebugLoc::unknown(),
+            IlOp::Label(_) => DebugLoc::unknown(),
         }
     }
 
@@ -727,14 +609,10 @@ impl IlOp {
             | IlOp::Jump { loc: l, .. }
             | IlOp::Entry { loc: l, .. }
             | IlOp::PrologueJmp { loc: l } => *l = loc,
-            IlOp::Label(_) | IlOp::JoinLabel(_) => {}
+            IlOp::Label(_) => {}
         }
     }
 
-    /// Encode as `Byte` when this op is a plain data/compute slot (not control).
-    pub fn as_plain_byte(&self) -> Option<Byte> {
-        self.as_encode_byte()
-    }
 }
 
 #[cfg(test)]
@@ -966,9 +844,8 @@ mod tests {
 
     #[test]
     fn long_tail_control_stays_unencoded() {
-        let jmp = IlOp::jump(IlJumpKind::Unconditional, Label(0), DebugLoc::unknown());
+        let jmp = IlOp::jump_hinted(IlJumpKind::Unconditional, Label(0), DebugLoc::unknown(), FuseHint::default());
         assert!(jmp.as_encode_byte().is_none());
-        assert!(jmp.is_control());
         let entry = IlOp::Entry {
             kind: EntryKind::Call,
             arity: 1,
@@ -977,7 +854,6 @@ mod tests {
             ret_words: 1,
         };
         assert!(entry.as_encode_byte().is_none());
-        assert!(entry.is_control());
         assert!(IlOp::Label(Label(0)).as_encode_byte().is_none());
         assert!(!IlOp::Label(Label(0)).emits_code());
         // Prologue is a symbolic jump, not a data byte. Fuse-select turns it

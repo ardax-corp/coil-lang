@@ -86,7 +86,7 @@ Blocked (do not file as kick tickets): revive `FloatChainStore`; CALL-prep super
 ### Fuse-select (`compiler/src/il/lower.rs`)
 
 One named pass after concat. Residual `IlOp::Byte` is `Slot::Cold`.
-Labels / `JoinLabel` / `FuseHint` are barriers. Per-function fuse is not
+Labels / `FuseHint` are barriers. Per-function fuse is not
 production.
 
 | Opcode | Window | Emit |

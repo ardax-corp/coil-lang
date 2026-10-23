@@ -93,7 +93,7 @@ fn refuse<T>(why: impl std::fmt::Display) -> Option<T> {
 }
 
 /// The labels a body binds: its entry and the aliases a call may name.
-/// Read off the `Label` / `JoinLabel` ops alone, never the body's code.
+/// Read off the `Label` ops alone, never the body's code.
 #[derive(Clone, Debug, Default)]
 pub struct BodyLabels {
     /// First label bound anywhere in the body.
@@ -105,7 +105,7 @@ pub struct BodyLabels {
 impl BodyLabels {
     pub fn of(ops: &[IlOp]) -> Self {
         let label = |op: &IlOp| match op {
-            IlOp::Label(l) | IlOp::JoinLabel(l) => Some(*l),
+            IlOp::Label(l) => Some(*l),
             _ => None,
         };
         Self {
@@ -477,7 +477,7 @@ fn residual_heap_box(ops: &[IlOp]) -> bool {
 /// novelty — packed `Dense*` must not grow this (COI-385 S8).
 fn emit_cost(ops: &[IlOp]) -> usize {
     ops.iter()
-        .filter(|op| !matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)))
+        .filter(|op| !matches!(op, IlOp::Label(_)))
         .map(|op| match op {
             IlOp::StorePop { .. } | IlOp::Load { .. } => 2,
             IlOp::Byte { byte, .. } => match *byte.bytecode() {
@@ -728,7 +728,7 @@ fn emit_cleanup_pad(
     let top = body
         .iter()
         .filter_map(|op| match op {
-            IlOp::Label(l) | IlOp::JoinLabel(l) => Some(l.0),
+            IlOp::Label(l) => Some(l.0),
             IlOp::Entry { target, .. } | IlOp::Jump { target, .. } => Some(target.0),
             _ => None,
         })
@@ -762,7 +762,7 @@ fn eq_immediately_before(ops: &[IlOp], jump_i: usize) -> bool {
     while i > 0 {
         i -= 1;
         match &ops[i] {
-            IlOp::Label(_) | IlOp::JoinLabel(_) => continue,
+            IlOp::Label(_) => continue,
             other => return is_eq_byte(other),
         }
     }
@@ -803,7 +803,7 @@ fn has_alloc_inside_loop(ops: &[IlOp]) -> bool {
 fn loop_ranges(ops: &[IlOp]) -> Vec<(usize, usize)> {
     let mut label_at = HashMap::new();
     for (i, op) in ops.iter().enumerate() {
-        if let IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) = op {
+        if let IlOp::Label(Label(id)) = op {
             label_at.entry(*id).or_insert(i);
         }
     }
@@ -873,7 +873,7 @@ mod cost_gate_tests {
         use crate::il::Label;
         let ops = [
             IlOp::Label(Label(4)),
-            IlOp::JoinLabel(Label(9)),
+            IlOp::Label(Label(9)),
             IlOp::Const { imm: 1, loc: loc() },
             IlOp::Label(Label(12)),
         ];
