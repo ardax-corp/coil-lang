@@ -1,91 +1,67 @@
-// Command parse for the adventure (byte-line equality).
-//
-// Cmd kind: 0=look 1=go 2=take 3=inv 4=save 5=load 6=help 7=quit 8=bad
-// Dir: 0=north 1=south 2=east 3=west; unused sentinel = 99.
+// Command parsing for the adventure: words in, a `Command` out.
 
-use string::to_bytes;
+use text::{Searchable, to_lower, trim};
+use world::Dir;
 
-class Cmd {
-    pub kind: int,
-    pub dir: int,
+enum Command {
+    Look,
+    Go(Dir),
+    Take,
+    Inventory,
+    Save,
+    Load,
+    Help,
+    Quit,
+    Unknown,
 }
 
-fn bytes_eq(Vec<byte> a, Vec<byte> b) -> int {
-    if a.len() != b.len() {
-        return 0;
+fn parse_dir(string word) -> Option<Dir> {
+    if word == "north" {
+        return Option::Some(Dir::North);
     }
-    let i = 0;
-    let ok = 1;
-    while i < a.len() {
-        if a[i] != b[i] {
-            ok = 0;
-        }
-        i = i + 1;
+    if word == "south" {
+        return Option::Some(Dir::South);
     }
-    return ok;
+    if word == "east" {
+        return Option::Some(Dir::East);
+    }
+    if word == "west" {
+        return Option::Some(Dir::West);
+    }
+    return Option::None;
 }
 
-fn parse_line(Vec<byte> line) -> Cmd {
-    let look = to_bytes("look");
-    let inv = to_bytes("inventory");
-    let take = to_bytes("take");
-    let take_key = to_bytes("take key");
-    let save = to_bytes("save");
-    let load = to_bytes("load");
-    let help = to_bytes("help");
-    let quit = to_bytes("quit");
-    let exit = to_bytes("exit");
-    let go_n = to_bytes("go north");
-    let go_s = to_bytes("go south");
-    let go_e = to_bytes("go east");
-    let go_w = to_bytes("go west");
-
-    if bytes_eq(line, look) == 1 {
-        return new Cmd(0, 99);
+/// Reads one input line: `go north`, `take key`, `look`, ….
+fn parse_command(string line) -> Command {
+    let trimmed = trim(line) ?? line;
+    let words = (to_lower(trimmed) ?? trimmed).split(" ");
+    let verb = words[0];
+    if verb == "go" && words.len() > 1 {
+        return match parse_dir(words[1]) {
+            Option::Some(d) => Command::Go(d),
+            Option::None => Command::Unknown,
+        };
     }
-    if bytes_eq(line, inv) == 1 {
-        return new Cmd(3, 99);
+    if verb == "look" {
+        return Command::Look;
     }
-    if bytes_eq(line, take_key) == 1 {
-        return new Cmd(2, 99);
+    if verb == "take" {
+        return Command::Take;
     }
-    if bytes_eq(line, take) == 1 {
-        return new Cmd(2, 99);
+    if verb == "inventory" {
+        return Command::Inventory;
     }
-    if bytes_eq(line, save) == 1 {
-        return new Cmd(4, 99);
+    if verb == "save" {
+        return Command::Save;
     }
-    if bytes_eq(line, load) == 1 {
-        return new Cmd(5, 99);
+    if verb == "load" {
+        return Command::Load;
     }
-    if bytes_eq(line, help) == 1 {
-        return new Cmd(6, 99);
+    if verb == "help" {
+        return Command::Help;
     }
-    if bytes_eq(line, quit) == 1 {
-        return new Cmd(7, 99);
+    if verb == "quit" || verb == "exit" {
+        return Command::Quit;
     }
-    if bytes_eq(line, exit) == 1 {
-        return new Cmd(7, 99);
-    }
-    if bytes_eq(line, go_n) == 1 {
-        return new Cmd(1, 0);
-    }
-    if bytes_eq(line, go_s) == 1 {
-        return new Cmd(1, 1);
-    }
-    if bytes_eq(line, go_e) == 1 {
-        return new Cmd(1, 2);
-    }
-    if bytes_eq(line, go_w) == 1 {
-        return new Cmd(1, 3);
-    }
-    return new Cmd(8, 99);
-}
-
-fn cmd_kind(Cmd c) -> int {
-    return c.kind;
-}
-
-fn cmd_dir(Cmd c) -> int {
-    return c.dir;
+    return Command::Unknown;
 }
