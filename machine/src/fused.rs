@@ -34,9 +34,19 @@ impl HeapView for HeapSlot {
 }
 
 /// Outlined so `HeapSlot::get` is not hoisted above the integer arms.
+/// Two unequal words of which one lies outside the slab's mapped span (an
+/// `int` compare, mostly) answer from that span check alone, before
+/// [`crate::value_eq::values_eq`] probes the heap for both (#1866).
 #[inline(never)]
 fn eq_values<H: HeapView>(heap: &H, lhs: Value, rhs: Value) -> bool {
-    crate::value_eq::values_eq(heap.as_heap(), lhs, rhs)
+    if lhs.raw() == rhs.raw() {
+        return true;
+    }
+    let heap = heap.as_heap();
+    if !heap.may_be_ref(lhs) || !heap.may_be_ref(rhs) {
+        return false;
+    }
+    crate::value_eq::values_eq(heap, lhs, rhs)
 }
 
 /// A fused binary op; an int op that overflows or divides by zero traps.
@@ -116,6 +126,24 @@ pub(crate) fn eval_cmp<H: HeapView>(op: u8, lhs: Value, rhs: Value, heap: &H) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #1866: an int compare answers from the slab span; heap words still
+    /// compare structurally (two strings by content, Err tags included).
+    #[test]
+    fn fused_eq_ints_and_heap_words() {
+        use crate::memory::{ObjString, Object};
+        let mut heap = Heap::default();
+        let eq = |h: &Heap, a: Value, b: Value| eval_cmp(Instruction::EQ as u8, a, b, h);
+        assert!(!eq(&heap, Value::from(1_234_568_i64), Value::from(1_234_570_i64)));
+        assert!(eq(&heap, Value::from(1_234_568_i64), Value::from(1_234_568_i64)));
+        let (a, _) = heap.alloc(ObjString::new("same".to_string()), Object::String);
+        let (b, _) = heap.alloc(ObjString::new("same".to_string()), Object::String);
+        let (wa, wb) = (Value::from(a.addr()), Value::from(b.addr()));
+        assert!(eq(&heap, wa, wb));
+        assert!(!eq(&heap, wa, Value::from(4_i64)));
+        assert!(eq(&heap, Value::from(a.addr() | 1), Value::from(b.addr() | 1)));
+        assert!(!eval_cmp(Instruction::NEQ as u8, wa, wb, &heap));
+    }
 
     #[test]
     fn fused_bin_matches_int_arith() {
