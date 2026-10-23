@@ -81,6 +81,13 @@ moves the constant before every store, and nsieve's k-loop is
 `BinSlotSlotJmpf; DenseStoreIndex; DenseBin;JMP`. nsieve(2^21): 225 ms ->
 205 ms.
 
+`exec_rest` takes `ip` / `sp` by value and returns them in a two-word
+`RestExit` (`ip == usize::MAX` carries the paused flag), which comes back in
+registers instead of through `&mut` out-params (#1882). Callgrind `Ir`: a
+2M-iteration closure-call + `len` loop 2,370M -> 2,348M (-0.9%); `fib` and
+`for_in_iter` unchanged. Marking `exec_rest` `#[cold]` was measured and
+rejected: `fib` +1.8%, `for_in_iter` +0.3%, the closure loop +0.3%.
+
 Debugger-attached runs never enter the hot loop (per-op stops).
 
 ## Remaining ops (G2)

@@ -4472,9 +4472,9 @@ impl<const S: usize> Machine<S> {
                         self.stack.push(self.stack[sp + base + i]);
                     }
                 }
-                _ => match self.exec_rest(opcode, &mut ip, &mut sp, code, constants, stack_cap) {
-                    dispatch::RestFlow::Continue => {}
-                    dispatch::RestFlow::Done(paused) => return paused,
+                _ => match self.exec_rest(opcode, ip, sp, code, constants, stack_cap).get() {
+                    Ok((next_ip, next_sp)) => (ip, sp) = (next_ip, next_sp),
+                    Err(paused) => return paused,
                 },
             }
         }
