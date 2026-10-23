@@ -1041,13 +1041,9 @@ impl Checker {
             StringBuiltin::Format => fun(&[string()], string()),
             StringBuiltin::FromBytes => fun(&[bytes], result_app_ty(string(), io_err)),
             StringBuiltin::ToBytes => fun(&[string()], bytes),
-            StringBuiltin::ByteAt => fun(&[string(), int()], int()),
             StringBuiltin::SliceBytes => {
                 fun(&[string(), int(), int()], result_app_ty(string(), io_err))
             }
-            StringBuiltin::FindFrom => fun(&[string(), string(), int()], int()),
-            StringBuiltin::Rfind => fun(&[string(), string()], int()),
-            StringBuiltin::MatchAt => fun(&[string(), string(), int()], boolean()),
         };
         Scheme::mono(ty)
     }

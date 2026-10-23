@@ -372,6 +372,266 @@ fn pin_current_array_in(
     });
 }
 
+/// Eight numeric words of the array at `addr` from `index` into `reg`;
+/// `false` past either end.
+pub(crate) fn vload_words_into(heap: &Heap, reg: &mut [u64; common::simd::LANES], addr: u64, index: i64) -> bool {
+    let n = common::simd::LANES;
+    let Some(Object::Array(gc)) = heap.find_object_by_addr(addr) else {
+        return false;
+    };
+    let arr = gc.as_ref();
+    if index < 0 || (index as usize).saturating_add(n) > arr.len() {
+        return false;
+    }
+    let base = index as usize;
+    if let Some(elems) = arr.words() {
+        for (i, lane) in reg.iter_mut().enumerate() {
+            *lane = unsafe { elems.get_unchecked(base + i).raw() as u64 };
+        }
+    } else {
+        for (i, v) in arr.iter().skip(base).take(n).enumerate() {
+            reg[i] = v.raw() as u64;
+        }
+    }
+    true
+}
+
+/// 64 byte lanes of the `string` or byte array `obj` (at `addr`) from
+/// `index` into `reg`; `false` past either end (the compiler guards the
+/// range first). A boxed string is read through its box.
+pub(crate) fn vload_bytes_into(
+    heap: &Heap,
+    obj: Option<Object>,
+    reg: &mut [u64; common::simd::LANES],
+    addr: u64,
+    index: i64,
+) -> bool {
+    let n = common::simd::BYTE_LANES;
+    let Ok(base) = usize::try_from(index) else {
+        return false;
+    };
+    let obj = match obj {
+        Some(Object::Boxed(_)) => heap.find_object_by_addr(crate::io::peel_one_boxed(heap, Value::from(addr)).raw() as u64),
+        o => o,
+    };
+    let lanes = crate::simd::as_bytes_mut(reg);
+    match obj {
+        Some(Object::String(gc)) => {
+            let Some(src) = gc.as_ref().data.as_str().as_bytes().get(base..base.saturating_add(n)) else {
+                return false;
+            };
+            lanes.copy_from_slice(src);
+        }
+        Some(Object::Array(gc)) => {
+            let arr = gc.as_ref();
+            if base.saturating_add(n) > arr.len() {
+                return false;
+            }
+            if let Some(src) = arr.bytes() {
+                lanes.copy_from_slice(&src[base..base + n]);
+            } else if let Some(words) = arr.words() {
+                for (lane, w) in lanes.iter_mut().zip(&words[base..base + n]) {
+                    *lane = w.as_int() as u8;
+                }
+            } else {
+                return false;
+            }
+        }
+        _ => return false,
+    }
+    true
+}
+
+/// `VScan` (see [`Instruction::VScan`]): from `p = from` in steps of 64,
+/// while lanes `p ..= p + 63` pass `< bound` (`<= bound` when
+/// `inclusive`) and every load lies inside its array, the first `p`
+/// whose body mask is non-zero plus the mask's first lane; else the `p`
+/// it stopped at. The body runs here without dispatch, its strings
+/// resolved once. `Err` on a body that is not a byte scan.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn vscan(
+    heap: &Heap,
+    stack: &Stack<Value>,
+    sp: usize,
+    regs: &mut [[u64; common::simd::LANES]; common::simd::NREGS],
+    body: &[Byte],
+    from: i64,
+    bound: i64,
+    inclusive: bool,
+) -> Result<i64, &'static str> {
+    use common::simd;
+    const BAD: &str = "VScan: malformed body";
+    #[derive(Clone, Copy)]
+    enum Src {
+        /// Bytes in place; nothing allocates while the scan runs.
+        Bytes(*const u8, usize),
+        Other(Option<Object>, u64),
+    }
+    #[derive(Clone, Copy)]
+    enum Op {
+        Load { reg: usize, src: Src, off: i64 },
+        Bin(crate::simd::ByteOp),
+    }
+    if body.len() > simd::SCAN_MAX_BODY {
+        return Err(BAD);
+    }
+    // The last lane `p + 63` against the bound, in `i128` so nothing wraps.
+    let hi = i128::from(bound) - i128::from(!inclusive) - (simd::BYTE_LANES as i128 - 1);
+    // Fewer than 64 lanes left (a short inner loop): nothing to decode.
+    if i128::from(from) > hi {
+        return Ok(from);
+    }
+    let mut slots = [const { std::mem::MaybeUninit::<Op>::uninit() }; simd::SCAN_MAX_BODY];
+    for (op, word) in slots.iter_mut().zip(body) {
+        let (kind, dest, a, b) = word.dense_abc_parts();
+        if dest >= simd::NREGS {
+            return Err(BAD);
+        }
+        op.write(match *word.bytecode() {
+            Instruction::VLoad if kind == simd::TY_U8 => {
+                let addr = stack[sp + a].raw() as u64;
+                let mut obj = heap.find_object_by_addr(addr);
+                if let Some(Object::Boxed(_)) = obj {
+                    obj = heap.find_object_by_addr(crate::io::peel_one_boxed(heap, Value::from(addr)).raw() as u64);
+                }
+                let src = match obj {
+                    Some(Object::String(gc)) => {
+                        let s = gc.as_ref().data.as_str().as_bytes();
+                        Src::Bytes(s.as_ptr(), s.len())
+                    }
+                    Some(Object::Array(gc)) if gc.as_ref().bytes().is_some() => {
+                        let s = gc.as_ref().bytes().unwrap_or_default();
+                        Src::Bytes(s.as_ptr(), s.len())
+                    }
+                    o => Src::Other(o, addr),
+                };
+                Op::Load { reg: dest, src, off: stack[sp + b].as_int() }
+            }
+            Instruction::VBin if simd::is_byte_kind(kind) => {
+                let scalar = if kind >= simd::BS_CMP {
+                    stack[sp + a]
+                } else if a < simd::NREGS {
+                    Value::from(0i64)
+                } else {
+                    return Err(BAD);
+                };
+                if b >= simd::NREGS {
+                    return Err(BAD);
+                }
+                Op::Bin(crate::simd::ByteOp::new(kind, dest, a, b, scalar))
+            }
+            _ => return Err(BAD),
+        });
+    }
+    // SAFETY: the loop above wrote the first `body.len()` entries (an early
+    // return leaves none read).
+    let ops = unsafe { &*(&raw const slots[..body.len()] as *const [Op]) };
+    // One string against a byte (find a byte, split): a tight loop.
+    if let [Op::Load { reg, src: Src::Bytes(ptr, len), off }, Op::Bin(crate::simd::ByteOp::CmpK { pred, dest: 0, b, k })] = *ops
+        && b == reg
+    {
+        // SAFETY: the bytes stay where they were resolved; nothing allocates.
+        let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
+        return Ok(crate::simd::scan_byte(bytes, from, off, hi, pred, k));
+    }
+    // Two bytes of one string (a needle's first two): another tight loop.
+    use crate::simd::ByteOp::{CmpK, Logic};
+    if let [
+        Op::Load { reg: ra, src: Src::Bytes(pa, la), off: oa },
+        Op::Load { reg: rb, src: Src::Bytes(pb, lb), off: ob },
+        Op::Bin(CmpK { pred: simd_eq_a, dest: 0, b: xa, k: ka }),
+        Op::Bin(CmpK { pred: simd_eq_b, dest: db, b: xb, k: kb }),
+        Op::Bin(Logic { kind: simd::M_AND, dest: 0, a: 0, b: lb2 }),
+    ] = *ops
+        && (pa, la) == (pb, lb)
+        && xa == ra
+        && xb == rb
+        && db == lb2
+        && db != 0
+        && simd_eq_a == common::dense::CMP_EQ
+        && simd_eq_b == common::dense::CMP_EQ
+    {
+        // SAFETY: as above.
+        let bytes = unsafe { std::slice::from_raw_parts(pa, la) };
+        return Ok(crate::simd::scan_pair(bytes, from, (oa, ka), (ob, kb), hi));
+    }
+    // Every stream in place: range-check once, then load unchecked.
+    if ops.iter().all(|op| !matches!(op, Op::Load { src: Src::Other(..), .. })) {
+        let mut hi = hi;
+        for op in ops {
+            if let Op::Load { src: Src::Bytes(_, len), off, .. } = *op {
+                if i128::from(from) + i128::from(off) < 0 {
+                    return Ok(from);
+                }
+                hi = hi.min(len as i128 - simd::BYTE_LANES as i128 - i128::from(off));
+            }
+        }
+        let mut p = from;
+        while i128::from(p) <= hi {
+            for op in ops {
+                match *op {
+                    Op::Load { reg, src: Src::Bytes(ptr, _), off } => {
+                        // SAFETY: `0 <= p + off` and `p + off + 64 <= len` by `hi`.
+                        let lanes = unsafe { &*(ptr.add((p + off) as usize) as *const [u8; simd::BYTE_LANES]) };
+                        *crate::simd::as_bytes_mut(&mut regs[reg]) = *lanes;
+                    }
+                    Op::Load { .. } => {}
+                    Op::Bin(op) => op.run(regs),
+                }
+            }
+            let m = crate::simd::movemask(&regs[0]);
+            if m != 0 {
+                return Ok(p + i64::from(m.trailing_zeros()));
+            }
+            p += simd::BYTE_LANES as i64;
+        }
+        return Ok(p);
+    }
+    let mut p = from;
+    while i128::from(p) <= hi {
+        for op in ops {
+            match *op {
+                Op::Load { reg, src, off } => {
+                    // A load leaving its array ends the scan: the scalar loop
+                    // takes those lanes.
+                    let Some(idx) = p.checked_add(off) else {
+                        return Ok(p);
+                    };
+                    match src {
+                        Src::Bytes(ptr, len) => {
+                            let Ok(i) = usize::try_from(idx) else {
+                                return Ok(p);
+                            };
+                            if i.saturating_add(simd::BYTE_LANES) > len {
+                                return Ok(p);
+                            }
+                            // SAFETY: in bounds above; the scan does not allocate,
+                            // so the bytes stay where they were resolved.
+                            let lanes = unsafe { &*(ptr.add(i) as *const [u8; simd::BYTE_LANES]) };
+                            *crate::simd::as_bytes_mut(&mut regs[reg]) = *lanes;
+                        }
+                        Src::Other(obj, addr) => {
+                            if !vload_bytes_into(heap, obj, &mut regs[reg], addr, idx) {
+                                return Ok(p);
+                            }
+                        }
+                    }
+                }
+                Op::Bin(op) => op.run(regs),
+            }
+        }
+        let m = crate::simd::movemask(&regs[0]);
+        if m != 0 {
+            return Ok(p.saturating_add(i64::from(m.trailing_zeros())));
+        }
+        let Some(next) = p.checked_add(simd::BYTE_LANES as i64) else {
+            break;
+        };
+        p = next;
+    }
+    Ok(p)
+}
+
 /// Reuse a cached `Object` while the array address is unchanged (COI-372).
 #[inline(always)]
 fn resolve_dense_index_object_in(
@@ -392,7 +652,9 @@ fn resolve_dense_index_object_in(
         return Some(obj);
     }
     let obj = heap.find_object_by_addr(addr)?;
-    if matches!(obj, Object::Array(_) | Object::Tuple(_)) {
+    // A string too (`s[i]`): a pin is per register, so a loop reading two
+    // strings (`s[i + j] == p[j]`) finds both without a heap lookup.
+    if matches!(obj, Object::Array(_) | Object::Tuple(_) | Object::String(_)) {
         pin_current_array_in(frame_pins, frames_len, slot, obj);
         *dense_obj_addr = addr;
         *dense_obj = Some(obj);
@@ -1393,26 +1655,16 @@ impl<const S: usize> Machine<S> {
         }
     }
 
-    fn vload(&mut self, vdest: usize, addr: u64, index: i64, _ty: u8) -> bool {
-        let n = common::simd::LANES;
-        let Some(Object::Array(gc)) = Self::find_object_by_addr(&self.heap, addr) else {
-            return false;
-        };
-        let arr = gc.as_ref();
-        if index < 0 || (index as usize).saturating_add(n) > arr.len() {
-            return false;
+    fn vload(&mut self, vdest: usize, addr: u64, index: i64, ty: u8) -> bool {
+        if ty == common::simd::TY_U8 {
+            return self.vload_bytes(vdest, addr, index);
         }
-        let base = index as usize;
-        if let Some(elems) = arr.words() {
-            for i in 0..n {
-                self.vregs[vdest][i] = unsafe { elems.get_unchecked(base + i).raw() as u64 };
-            }
-        } else {
-            for (i, v) in arr.iter().skip(base).take(n).enumerate() {
-                self.vregs[vdest][i] = v.raw() as u64;
-            }
-        }
-        true
+        vload_words_into(&self.heap, &mut self.vregs[vdest], addr, index)
+    }
+
+    fn vload_bytes(&mut self, vdest: usize, addr: u64, index: i64) -> bool {
+        let obj = Self::find_object_by_addr(&self.heap, addr);
+        vload_bytes_into(&self.heap, obj, &mut self.vregs[vdest], addr, index)
     }
 
     fn vstore(&mut self, vsrc: usize, addr: u64, index: i64, _ty: u8) -> bool {
@@ -3889,6 +4141,7 @@ impl<const S: usize> Machine<S> {
                         frame_pins: &mut self.frame_pins,
                         dense_obj_addr: &mut self.dense_obj_addr,
                         dense_obj: &mut self.dense_obj,
+                        vregs: &mut self.vregs,
                         fuel: &mut self.fuel,
                         stack_cap,
                     },
@@ -3956,7 +4209,7 @@ impl<const S: usize> Machine<S> {
             // variant. A stale ceiling (e.g. YieldFromCoro) makes later opcodes
             // (`StoreIndex`, `DoneCoro`, `ArrayPush`, …) UB via assert_unchecked.
             #[cfg(not(debug_assertions))]
-            promise!(*bc as u8 <= Instruction::RestoreSnapshot as u8);
+            promise!(*bc as u8 <= Instruction::VScan as u8);
 
             match bc {
                 Instruction::STORE => {

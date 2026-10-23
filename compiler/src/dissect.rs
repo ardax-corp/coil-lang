@@ -306,6 +306,15 @@ fn format_operands(
         }
         Instruction::TagEnumType => format!("type_id={}", byte.operand_u32()),
         Instruction::RestoreSnapshot => format!("pool={}", byte.operand_u32()),
+        Instruction::VMask => {
+            let (dest, src) = byte.dense_move_parts();
+            format!("r{dest} = movemask(v{src})")
+        }
+        Instruction::VScan => {
+            let (n, dest, from, bound) = byte.dense_abc_parts();
+            let to = if n & common::simd::SCAN_INCLUSIVE != 0 { "..=" } else { ".." };
+            format!("r{dest} = scan(r{from} {to} r{bound}, body={})", n & !common::simd::SCAN_INCLUSIVE)
+        }
         Instruction::TagArrayKind => format!("kind={}", byte.operand_u32()),
         Instruction::MakeArrayK => format!("arity={} kind={}", byte.make_arity(), byte.operand_u32() >> 16),
         Instruction::CodePtr | Instruction::MakePolyFn => {

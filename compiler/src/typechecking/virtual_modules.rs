@@ -454,21 +454,18 @@ impl IoBuiltin {
 ///
 /// `format` is a compiler intrinsic that lowers to [`common::Instruction::FORMAT`];
 /// byte conversion helpers use the `from_bytes` / `to_bytes` host-native rows.
+/// Byte reads and search are `s[i]` and plain loops (`text::` in coil-stdlib),
+/// which the compiler vectorises (`docs/internals/byte-simd.md`); the
+/// `string_byte_at` native stays as what `s[i]` lowers to, and the
+/// `string_find_from` / `string_rfind` / `string_match_at` rows only for
+/// older archives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StringBuiltin {
     Format,
     FromBytes,
     ToBytes,
-    /// `byte_at(s, i) -> int`: byte at offset `i`, or `-1`.
-    ByteAt,
     /// `slice_bytes(s, start, end) -> Result<string, IoError>`.
     SliceBytes,
-    /// `find_from(hay, needle, start) -> int`: offset, or `-1`.
-    FindFrom,
-    /// `rfind(hay, needle) -> int`: last offset, or `-1`.
-    Rfind,
-    /// `match_at(s, needle, at) -> bool`.
-    MatchAt,
 }
 
 impl StringBuiltin {
@@ -477,11 +474,7 @@ impl StringBuiltin {
             Self::Format => "format",
             Self::FromBytes => "from_bytes",
             Self::ToBytes => "to_bytes",
-            Self::ByteAt => "byte_at",
             Self::SliceBytes => "slice_bytes",
-            Self::FindFrom => "find_from",
-            Self::Rfind => "rfind",
-            Self::MatchAt => "match_at",
         }
     }
 
@@ -494,11 +487,7 @@ impl StringBuiltin {
             Self::Format => None,
             Self::FromBytes => Some(IoBuiltin::FromBytes.native_name()),
             Self::ToBytes => Some(IoBuiltin::ToBytes.native_name()),
-            Self::ByteAt => Some("string_byte_at"),
             Self::SliceBytes => Some("string_slice_bytes"),
-            Self::FindFrom => Some("string_find_from"),
-            Self::Rfind => Some("string_rfind"),
-            Self::MatchAt => Some("string_match_at"),
         }
     }
 
@@ -507,11 +496,7 @@ impl StringBuiltin {
             Self::Format,
             Self::FromBytes,
             Self::ToBytes,
-            Self::ByteAt,
             Self::SliceBytes,
-            Self::FindFrom,
-            Self::Rfind,
-            Self::MatchAt,
         ]
     }
 }

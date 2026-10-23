@@ -1,9 +1,9 @@
 // A failed `requires` panics with `contract violated: requires <clause>
 // ("<message>") in <function>, called from <file:line:col>`, naming the
 // call site; a kept one runs the body. Clauses are checked in order.
+// `find_from` is a plain loop at the end of this file.
 use tests::assert;
 use task::{scope, Scope, TaskError};
-use string::find_from;
 
 fn message(Result<int, TaskError> r) -> string {
     return match r {
@@ -72,4 +72,28 @@ test("the first failing clause is reported") {
     assert!(has(m, "requires lo <= hi (\"empty range\")"), m);
     let m2 = outcome(fn () => between(5, 0, 9));
     assert!(has(m2, "requires x >= lo in between"), m2);
+}
+
+// The first `needle` in `hay` at or after `start` (clamped), or `-1`.
+fn find_from(string hay, string needle, int start) -> int {
+    let n = hay.len();
+    let m = needle.len();
+    let i = if start < 0 {
+        0
+    } else if start > n {
+        n
+    } else {
+        start
+    };
+    while i + m <= n {
+        let j = 0;
+        while j < m && hay[i + j] == needle[j] {
+            j = j + 1;
+        }
+        if j == m {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
 }

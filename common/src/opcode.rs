@@ -480,6 +480,20 @@ pub enum Instruction {
     /// `const`s computed at compile time. Stack-neutral; allocates, but
     /// runs only in the startup setup region. Archive **minor 42**.
     RestoreSnapshot,
+    /// Compiler-only byte-lane movemask (minor 46): `[15:8]` dest slot,
+    /// `[7:0]` vsrc. Bit `k` of the `i64` is the top bit of byte lane `k`.
+    VMask,
+    /// Compiler-only byte-lane scan (minor 46), dense abc: `[31:24]` body
+    /// length `n` (with [`simd::SCAN_INCLUSIVE`] for `<=`), `[23:16]` dest
+    /// slot, `[15:8]` from slot, `[7:0]` bound slot.
+    /// The next `n` words are its body: `VLoad TY_U8` (whose index slot holds
+    /// an offset from the scan position) and byte `VBin`s, leaving a lane
+    /// mask in vector register 0. From `p = from`, while every lane `p + k`
+    /// passes `p + k < bound` (`<=` when inclusive) and every load lies
+    /// inside its array: run the body at `p`; a non-zero mask
+    /// stops at `p + ctz(mask)`, else `p += 64`. `dest` gets where it
+    /// stopped. Execution resumes past the body.
+    VScan,
 }
 
 impl From<u8> for Instruction {
@@ -571,6 +585,10 @@ pub mod dense {
     pub const UNARY_NEG: u8 = 0;
     pub const UNARY_NOT: u8 = 1;
     pub const UNARY_FNEG: u8 = 2;
+    /// Trailing zero bits of an `i64` (64 for zero). Minor 46.
+    pub const UNARY_CTZ: u8 = 3;
+    /// `x & (x - 1)` without trapping: clear the lowest set bit. Minor 46.
+    pub const UNARY_BLSR: u8 = 4;
     pub const CAST_I2F: u8 = 0;
     pub const CAST_SEXT: u8 = 1;
     /// `f64` → `i64`, truncating toward zero like `CastFloatToInt` (minor 22+).
@@ -578,6 +596,10 @@ pub mod dense {
 
     /// [`super::Instruction::DenseIndex`] / [`super::Instruction::DenseStoreIndex`] flag.
     pub const HEAP_UNCHECKED: u8 = 1;
+    /// [`super::Instruction::DenseIndex`] flag (minor 45): `s[i]` on a
+    /// `string`, as `string_byte_at` answers it: the byte, or `-1` out of
+    /// range (the caller's test panics).
+    pub const HEAP_STR_BYTE: u8 = 2;
     /// [`super::Instruction::DenseFieldLoad`] / [`super::Instruction::DenseFieldStore`]:
     /// `c` is a name slot (GetField), not a field index.
     pub const FIELD_NAMED: u8 = 1;
@@ -742,6 +764,35 @@ pub mod simd {
     /// which is what every existing archive emits.
     pub const REDUCE_ADD: u8 = 0;
     pub const REDUCE_MUL: u8 = 1;
+
+    /// Byte lanes (minor 46, `docs/internals/byte-simd.md`): a vector
+    /// register read as [`BYTE_LANES`] `u8` lanes. A lane mask is `0xFF` /
+    /// `0x00` per lane.
+    pub const BYTE_LANES: usize = 64;
+    /// Most body words one `VScan` runs.
+    pub const SCAN_MAX_BODY: usize = 64;
+    /// `VScan` length-field flag: the loop's test is `iv <= bound`.
+    pub const SCAN_INCLUSIVE: u8 = 0x80;
+    /// `VLoad` type: 64 bytes of a `string` or a byte array from `idx`.
+    pub const TY_U8: u8 = 8;
+    /// `VBin` mask logic on byte lanes: `a & b`, `a | b`, `a & !b`, `!a`.
+    pub const M_AND: u8 = 40;
+    pub const M_OR: u8 = 41;
+    pub const M_ANDN: u8 = 42;
+    pub const M_NOT: u8 = 43;
+    /// `VBin` `kind = B_CMP + pred` (`dense::CMP_*`): unsigned lane `a pred
+    /// b`, both vector registers.
+    pub const B_CMP: u8 = 48;
+    /// `VBin` `kind = BS_CMP + pred`: lane `b` (a vector register) `pred` the
+    /// `i64` in frame slot `a`. A scalar outside `0..=255` compares as that
+    /// integer (`x == 300` is false in every lane).
+    pub const BS_CMP: u8 = 56;
+
+    /// Whether `kind` is a byte-lane `VBin` kind.
+    #[inline]
+    pub const fn is_byte_kind(kind: u8) -> bool {
+        kind >= M_AND && kind < BS_CMP + 6
+    }
 }
 
 /// Slot index when `operand` is an indexed [`Instruction::SetField`].
@@ -934,6 +985,8 @@ impl Instruction {
             Self::EQF => "EQF",
             Self::NEQF => "NEQF",
             Self::RestoreSnapshot => "RestoreSnapshot",
+            Self::VMask => "VMask",
+            Self::VScan => "VScan",
         }
     }
 }
@@ -2051,7 +2104,7 @@ mod tests {
     fn instruction_from_u8_covers_last_appended_variant() {
         // ARCHIVE stability: last variant must remain decodable (keep in sync
         // with machine release `promise!` ceiling).
-        let last = Instruction::RestoreSnapshot as u8;
+        let last = Instruction::VScan as u8;
         let decoded: Instruction = last.into();
         assert_eq!(decoded as u8, last);
     }

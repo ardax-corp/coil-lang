@@ -602,6 +602,16 @@ impl MirFunc {
                     }
                 }
             },
+            MirInst::ByteScan { dest, from, bound, streams, scalars, .. } => {
+                if [*dest, *from, *bound].iter().any(|&v| self.ty(v) != MirTy::I64) {
+                    return Err(format!("{dest} byte scan position is not i64"));
+                }
+                if streams.iter().any(|&(a, i)| !self.ty(a).is_heap_word() || self.ty(i) != MirTy::I64)
+                    || scalars.iter().any(|&k| self.ty(k) != MirTy::I64)
+                {
+                    return Err(format!("{dest} byte scan operand type"));
+                }
+            }
             MirInst::Cast {
                 dest,
                 kind,

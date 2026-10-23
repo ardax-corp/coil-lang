@@ -29,6 +29,7 @@ struct HotExtra<'a> {
     frame_pins: &'a mut Vec<FramePins>,
     dense_obj_addr: &'a mut u64,
     dense_obj: &'a mut Option<Object>,
+    vregs: &'a mut [[u64; common::simd::LANES]; common::simd::NREGS],
 }
 
 /// Outcome of a call helper of [`super::Machine::exec_rest`].
@@ -133,6 +134,11 @@ const ALWAYS_HOT: [u64; 4] = {
     b = or_hot(b, Instruction::LogNotJmpf);
     b = or_hot(b, Instruction::LogNotJmpt);
     b = or_hot(b, Instruction::BinSlotSlotStore);
+    // Byte lanes (`byte_scan`): a skip-ahead loop stays in the streak.
+    b = or_hot(b, Instruction::VLoad);
+    b = or_hot(b, Instruction::VBin);
+    b = or_hot(b, Instruction::VMask);
+    b = or_hot(b, Instruction::VScan);
     b
 };
 
@@ -541,6 +547,22 @@ pub(super) fn dense_index(args: DenseIndexArgs<'_>) -> Result<(), DenseFail> {
     let index = stack[sp + idx].as_int();
     let addr = stack[sp + arr].raw() as u64;
     let unchecked = flags & common::dense::HEAP_UNCHECKED != 0;
+    if flags & common::dense::HEAP_STR_BYTE != 0 {
+        let b = match resolve_dense_index_object_in(
+            heap,
+            frames_len,
+            frame_pins,
+            dense_obj_addr,
+            dense_obj,
+            arr as u32,
+            addr,
+        ) {
+            Some(Object::String(gc)) => crate::str_bytes::byte_at(gc.as_ref().data.as_str().as_bytes(), index),
+            _ => crate::str_bytes::byte_at_value(heap, stack[sp + arr], index),
+        };
+        stack[sp + dest] = Value::from(b);
+        return Ok(());
+    }
     let result = match resolve_dense_index_object_in(
         heap,
         frames_len,
@@ -992,6 +1014,89 @@ fn copy_byte(code: &[Byte], ip: usize) -> Byte {
 #[inline(always)]
 fn exec_dense(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) {
     match bc {
+        Instruction::VLoad => {
+            let (ty, vdest, arr, idx) = opcode.dense_abc_parts();
+            promise!(vdest < common::simd::NREGS);
+            promise!(ctx.sp + arr < ctx.stack_cap);
+            promise!(ctx.sp + idx < ctx.stack_cap);
+            let index = ctx.stack[ctx.sp + idx].as_int();
+            let addr = ctx.stack[ctx.sp + arr].raw() as u64;
+            let ok = if ty == common::simd::TY_U8 {
+                let x = &mut *ctx.extra;
+                let obj = resolve_dense_index_object_in(
+                    ctx.heap,
+                    x.frames_len,
+                    x.frame_pins,
+                    x.dense_obj_addr,
+                    x.dense_obj,
+                    arr as u32,
+                    addr,
+                );
+                super::vload_bytes_into(ctx.heap, obj, &mut x.vregs[vdest], addr, index)
+            } else {
+                super::vload_words_into(ctx.heap, &mut ctx.extra.vregs[vdest], addr, index)
+            };
+            if unlikely(!ok) {
+                ctx.panic_msg = Some("VLoad out of bounds");
+            }
+        }
+        Instruction::VBin => {
+            let (kind, dest, a, b) = opcode.dense_abc_parts();
+            promise!(dest < common::simd::NREGS);
+            let regs = &mut *ctx.extra.vregs;
+            if common::simd::is_byte_kind(kind) {
+                promise!(b < common::simd::NREGS);
+                let scalar = if kind >= common::simd::BS_CMP {
+                    promise!(ctx.sp + a < ctx.stack_cap);
+                    ctx.stack[ctx.sp + a]
+                } else {
+                    promise!(a < common::simd::NREGS);
+                    Value::from(0i64)
+                };
+                crate::simd::vbin_bytes_in(regs, kind, dest, a, b, scalar);
+                return;
+            }
+            let splat = matches!(kind, common::simd::SPLAT_I64 | common::simd::SPLAT_F64);
+            let scalar = if splat {
+                promise!(ctx.sp + a < ctx.stack_cap);
+                ctx.stack[ctx.sp + a]
+            } else {
+                Value::from(0i64)
+            };
+            let z = [0u64; common::simd::LANES];
+            let no_lhs = splat || matches!(kind, common::simd::IOTA_I64 | common::simd::IOTA_F64);
+            let no_rhs = no_lhs || matches!(kind, common::simd::INEG | common::simd::FNEG);
+            let lhs = if no_lhs { z } else { regs[a % common::simd::NREGS] };
+            let rhs = if no_rhs { z } else { regs[b % common::simd::NREGS] };
+            match crate::simd::eval_vbin(kind, &lhs, &rhs, scalar) {
+                Ok(out) => regs[dest] = out,
+                Err(t) => ctx.panic_msg = Some(t.message()),
+            }
+        }
+        Instruction::VScan => {
+            let (n, dest, from, bound) = opcode.dense_abc_parts();
+            let inclusive = n & common::simd::SCAN_INCLUSIVE != 0;
+            let n = usize::from(n & !common::simd::SCAN_INCLUSIVE);
+            promise!(ctx.sp + dest < ctx.stack_cap);
+            promise!(ctx.sp + from < ctx.stack_cap);
+            promise!(ctx.sp + bound < ctx.stack_cap);
+            let Some(body) = ctx.code.get(ctx.ip..ctx.ip + n) else {
+                ctx.panic_msg = Some("VScan body past the code");
+                return;
+            };
+            let (from, bound) = (ctx.stack[ctx.sp + from].as_int(), ctx.stack[ctx.sp + bound].as_int());
+            match super::vscan(ctx.heap, ctx.stack, ctx.sp, ctx.extra.vregs, body, from, bound, inclusive) {
+                Ok(p) => ctx.stack[ctx.sp + dest] = Value::from(p),
+                Err(msg) => ctx.panic_msg = Some(msg),
+            }
+            ctx.ip += n;
+        }
+        Instruction::VMask => {
+            let (dest, src) = opcode.dense_move_parts();
+            promise!(src < common::simd::NREGS);
+            promise!(ctx.sp + dest < ctx.stack_cap);
+            ctx.stack[ctx.sp + dest] = Value::from(crate::simd::movemask(&ctx.extra.vregs[src]));
+        }
         Instruction::DenseBin => {
             let r = dense_bin(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
             if hot_int(ctx, r) {
@@ -1218,6 +1323,7 @@ pub(super) struct ConsumeAlwaysHotStreakArgs<'a, const S: usize> {
     pub frame_pins: &'a mut Vec<FramePins>,
     pub dense_obj_addr: &'a mut u64,
     pub dense_obj: &'a mut Option<Object>,
+    pub vregs: &'a mut [[u64; common::simd::LANES]; common::simd::NREGS],
     pub fuel: &'a mut u64,
     pub stack_cap: usize,
 }
@@ -1243,6 +1349,7 @@ pub(super) fn consume_always_hot_streak<const S: usize>(
         frame_pins,
         dense_obj_addr,
         dense_obj,
+        vregs,
         fuel,
         stack_cap,
     } = args;
@@ -1259,6 +1366,7 @@ pub(super) fn consume_always_hot_streak<const S: usize>(
         frame_pins,
         dense_obj_addr,
         dense_obj,
+        vregs,
     };
     let mut ctx = HotCtx {
         stack,

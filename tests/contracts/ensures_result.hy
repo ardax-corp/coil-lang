@@ -2,9 +2,9 @@
 // value; a failure is reported at the clause (`in <function>`, no caller).
 // Functions meant to break their `ensures` take a class argument, so
 // `coil test` does not generate random cases for them.
+// `find_from` is a plain loop at the end of this file.
 use tests::assert;
 use task::{scope, Scope, TaskError};
-use string::find_from;
 
 fn message(Result<int, TaskError> r) -> string {
     return match r {
@@ -80,4 +80,28 @@ test("an ensures failure does not blame the caller") {
 
 test("an ensures that holds returns the value unchanged") {
     assert!(abs_bad(new In(3)) == 3);
+}
+
+// The first `needle` in `hay` at or after `start` (clamped), or `-1`.
+fn find_from(string hay, string needle, int start) -> int {
+    let n = hay.len();
+    let m = needle.len();
+    let i = if start < 0 {
+        0
+    } else if start > n {
+        n
+    } else {
+        start
+    };
+    while i + m <= n {
+        let j = 0;
+        while j < m && hay[i + j] == needle[j] {
+            j = j + 1;
+        }
+        if j == m {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
 }

@@ -13,7 +13,7 @@ trait Find<P> {
 
 impl Find for string {
     pub fn find_in(string pat, string hay) -> Option<Span> {
-        let at = string::find_from(hay, pat, 0);
+        let at = find_from(hay, pat, 0);
         if at < 0 {
             return None;
         }
@@ -23,7 +23,7 @@ impl Find for string {
 
 trait Hay<T: Show> {
     fn first(T hay, string pat) -> Option<Span> {
-        let at = string::find_from(hay.show(), pat, 0);
+        let at = find_from(hay.show(), pat, 0);
         if at < 0 {
             return None;
         }
@@ -67,4 +67,28 @@ test("a default forwards a bound call's niche Option") {
     let s = "foobar".first_of("bar") ?? new Span(-1, -1);
     assert!(s.start == 3 && s.end == 6);
     assert!(345.first_of("9").is_none());
+}
+
+// The first `needle` in `hay` at or after `start` (clamped), or `-1`.
+fn find_from(string hay, string needle, int start) -> int {
+    let n = hay.len();
+    let m = needle.len();
+    let i = if start < 0 {
+        0
+    } else if start > n {
+        n
+    } else {
+        start
+    };
+    while i + m <= n {
+        let j = 0;
+        while j < m && hay[i + j] == needle[j] {
+            j = j + 1;
+        }
+        if j == m {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
 }

@@ -2545,6 +2545,18 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
                 ),
             ));
         }
+        MirInst::ByteScan { dest, from, bound, inclusive, streams, scalars, expr } => {
+            let body = byte_scan_body(expr, streams, scalars, regs)
+                .ok_or_else(|| LowerError::Refused("byte scan body too large".into()))?;
+            let flag = if *inclusive { common::simd::SCAN_INCLUSIVE } else { 0 };
+            out.push(byte(Byte::new(Instruction::VScan).with_dense_abc(
+                body.len() as u8 | flag,
+                regs[dest.index()],
+                regs[from.index()],
+                regs[bound.index()],
+            )));
+            out.extend(body.into_iter().map(byte));
+        }
         MirInst::Unary { dest, op, src } => {
             let kind = match (*op, func.ty(*src)) {
                 (MirUnaryOp::Not, _) => dense::UNARY_NOT,
@@ -2592,6 +2604,18 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
             layout,
             args,
         } => {
+            // `s[i]` reads the byte in place (minor 45): no ABI edge.
+            if let [string, index] = args.as_slice()
+                && super::host_allow::host_edge_spec_by_name("string_byte_at").is_some_and(|s| s.id == *native_id)
+            {
+                out.push(byte(Byte::new(Instruction::DenseIndex).with_dense_abc(
+                    dense::HEAP_STR_BYTE,
+                    regs[dest.index()],
+                    regs[string.index()],
+                    regs[index.index()],
+                )));
+                return Ok(());
+            }
             // ABI edge: native id + DensePush args + HostInvoke + StorePop dest.
             out.push(IlOp::Const {
                 imm: i32::from(*native_id),
@@ -4458,4 +4482,123 @@ pub(super) fn paired_alloc_dests(func: &MirFunc) -> HashMap<ValueId, ValueId> {
         }
     }
     out
+}
+
+/// A `ByteScan`'s `VScan` body: each stream loaded once into the top
+/// vector registers (stream `s` in `v7 - s`), then byte-lane `VBin`s, each
+/// tree node into a register counted up from `v0`, so the mask ends in
+/// `v0`. A `VLoad`'s index slot holds the stream's offset from the scan
+/// position.
+fn byte_scan_body(
+    expr: &super::inst::LaneExpr,
+    streams: &[(ValueId, ValueId)],
+    scalars: &[ValueId],
+    regs: &[u8],
+) -> Option<Vec<Byte>> {
+    use super::inst::{LaneExpr, LaneVal};
+    use common::simd;
+
+    struct Ctx<'a> {
+        out: Vec<Byte>,
+        next: u8,
+        /// The lowest stream register: nodes stay below it.
+        top: u8,
+        scalars: &'a [ValueId],
+        regs: &'a [u8],
+    }
+
+    impl Ctx<'_> {
+        fn reg(&mut self) -> Option<u8> {
+            let r = self.next;
+            if r >= self.top {
+                return None;
+            }
+            self.next += 1;
+            Some(r)
+        }
+
+        fn vbin(&mut self, kind: u8, dest: u8, a: u8, b: u8) {
+            self.out.push(Byte::new(Instruction::VBin).with_dense_abc(kind, dest, a, b));
+        }
+
+        fn stream(&self, s: u8) -> Option<u8> {
+            let r = (simd::NREGS - 1).checked_sub(usize::from(s))? as u8;
+            (r >= self.top).then_some(r)
+        }
+
+        fn eval(&mut self, e: &LaneExpr) -> Option<u8> {
+            let pred = |op: MirCmpOp| match op {
+                MirCmpOp::Lt => dense::CMP_LT,
+                MirCmpOp::Le => dense::CMP_LE,
+                MirCmpOp::Gt => dense::CMP_GT,
+                MirCmpOp::Ge => dense::CMP_GE,
+                MirCmpOp::Eq => dense::CMP_EQ,
+                MirCmpOp::Ne => dense::CMP_NE,
+            };
+            let base = self.next;
+            let r = match e {
+                // `x == x` / `x != x` on a loaded lane.
+                LaneExpr::Const(b) => {
+                    let (r, x) = (self.reg()?, self.stream(0)?);
+                    let k = if *b { dense::CMP_EQ } else { dense::CMP_NE };
+                    self.vbin(simd::B_CMP + k, r, x, x);
+                    r
+                }
+                LaneExpr::Cmp { op, lhs, rhs } => match (*lhs, *rhs) {
+                    (LaneVal::Stream(a), LaneVal::Stream(b)) => {
+                        let (r, x, y) = (self.reg()?, self.stream(a)?, self.stream(b)?);
+                        self.vbin(simd::B_CMP + pred(*op), r, x, y);
+                        r
+                    }
+                    (LaneVal::Stream(a), LaneVal::Scalar(k)) => {
+                        let (r, x) = (self.reg()?, self.stream(a)?);
+                        let slot = self.regs[self.scalars.get(usize::from(k))?.index()];
+                        self.vbin(simd::BS_CMP + pred(*op), r, slot, x);
+                        r
+                    }
+                    (LaneVal::Scalar(_), LaneVal::Stream(_)) => {
+                        let flipped = match op {
+                            MirCmpOp::Lt => MirCmpOp::Gt,
+                            MirCmpOp::Le => MirCmpOp::Ge,
+                            MirCmpOp::Gt => MirCmpOp::Lt,
+                            MirCmpOp::Ge => MirCmpOp::Le,
+                            o => *o,
+                        };
+                        return self.eval(&LaneExpr::Cmp { op: flipped, lhs: *rhs, rhs: *lhs });
+                    }
+                    (LaneVal::Scalar(_), LaneVal::Scalar(_)) => return None,
+                },
+                LaneExpr::And(a, b) | LaneExpr::Or(a, b) => {
+                    let x = self.eval(a)?;
+                    let y = self.eval(b)?;
+                    let kind = if matches!(e, LaneExpr::And(..)) { simd::M_AND } else { simd::M_OR };
+                    self.vbin(kind, x, x, y);
+                    x
+                }
+                LaneExpr::Not(a) => {
+                    let x = self.eval(a)?;
+                    self.vbin(simd::M_NOT, x, x, x);
+                    x
+                }
+            };
+            // Registers past the result are free again.
+            debug_assert_eq!(r, base);
+            self.next = base + 1;
+            Some(r)
+        }
+    }
+
+    let top = simd::NREGS.checked_sub(streams.len())? as u8;
+    let mut cx = Ctx { out: Vec::new(), next: 0, top, scalars, regs };
+    for (s, &(arr, off)) in streams.iter().enumerate() {
+        let r = cx.stream(s as u8)?;
+        cx.out.push(Byte::new(Instruction::VLoad).with_dense_abc(
+            simd::TY_U8,
+            r,
+            regs[arr.index()],
+            regs[off.index()],
+        ));
+    }
+    cx.eval(expr)?;
+    (cx.out.len() <= simd::SCAN_MAX_BODY).then_some(cx.out)
 }

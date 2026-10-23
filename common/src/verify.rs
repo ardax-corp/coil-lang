@@ -86,7 +86,7 @@ pub fn verify_bytecode(
         // A fused op's inner opcode byte becomes an `Instruction` by an
         // unchecked transmute in the VM; past the last variant that is UB.
         let inner = |code: u8, what: &str| {
-            if code > Instruction::RestoreSnapshot as u8 {
+            if code > Instruction::VScan as u8 {
                 fail(format!("{what} inner opcode {code} out of range"))
             } else {
                 Ok(())
@@ -269,7 +269,7 @@ mod tests {
     fn rejects_fused_inner_opcode_out_of_range() {
         let add = Instruction::ADD as u8;
         let lt = Instruction::LE as u8;
-        let last = Instruction::RestoreSnapshot as u8;
+        let last = Instruction::VScan as u8;
         let fused = |op: u8, cmp: u8| {
             [
                 Byte::new(Instruction::BinSlotImm).with_bin_slot_imm(op, 0, 1),

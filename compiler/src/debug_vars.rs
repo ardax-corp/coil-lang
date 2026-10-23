@@ -471,6 +471,8 @@ fn writes_of(b: &Byte, constants: &[u64]) -> Option<Vec<u32>> {
         | TagArrayKind | TailCall | YieldCoro | YieldFromCoro | VLoad | VStore | VBin | VMove
         | VFma | RestoreSnapshot => Vec::new(),
         VReduce => vec![b.dense_abc_parts().1 as u32],
+        VMask => vec![b.dense_move_parts().0 as u32],
+        VScan => vec![b.dense_abc_parts().1 as u32],
         _ => return None,
     })
 }

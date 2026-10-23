@@ -1,6 +1,6 @@
 // A trait default body reads a two-word result of a bound method call (a
 // product tuple, a range) from the box the method's dictionary entry
-// returns (#1859).
+// returns (#1859). `find_from` is a plain loop at the end of this file.
 use tests::assert;
 
 trait Pattern<P> {
@@ -10,7 +10,7 @@ trait Pattern<P> {
 
 impl Pattern for string {
     pub fn find_in(string pat, string hay, int from) -> (int, int) {
-        let at = string::find_from(hay, pat, from);
+        let at = find_from(hay, pat, from);
         if at < 0 {
             return (-1, -1);
         }
@@ -18,7 +18,7 @@ impl Pattern for string {
     }
 
     pub fn span_in(string pat, string hay) -> Range<int> {
-        let at = string::find_from(hay, pat, 0);
+        let at = find_from(hay, pat, 0);
         return at..at + pat.len();
     }
 }
@@ -54,4 +54,28 @@ test("default body destructures a bound call's tuple") {
 
 test("default body reads a bound call's range") {
     assert!("foobar".span_len("ob") == 2);
+}
+
+// The first `needle` in `hay` at or after `start` (clamped), or `-1`.
+fn find_from(string hay, string needle, int start) -> int {
+    let n = hay.len();
+    let m = needle.len();
+    let i = if start < 0 {
+        0
+    } else if start > n {
+        n
+    } else {
+        start
+    };
+    while i + m <= n {
+        let j = 0;
+        while j < m && hay[i + j] == needle[j] {
+            j = j + 1;
+        }
+        if j == m {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
 }

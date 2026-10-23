@@ -1,9 +1,9 @@
 // Contracts over readonly class fields across calls and loops (#1560),
 // the shapes `coil verify` now proves, checked at run time. A plain class
 // written by a callee still breaks the `ensures` that reads it.
+// `find_from` is a plain loop at the end of this file.
 use tests::assert;
 use task::{scope, Scope, TaskError};
-use string::find_from;
 
 readonly class Bounds {
     pub lo: int,
@@ -87,4 +87,28 @@ test("a plain class written by a callee breaks the ensures") {
         }),
     );
     assert!(find_from(m, "contract violated: ensures result >= 0 in box_after_reset", 0) >= 0, m);
+}
+
+// The first `needle` in `hay` at or after `start` (clamped), or `-1`.
+fn find_from(string hay, string needle, int start) -> int {
+    let n = hay.len();
+    let m = needle.len();
+    let i = if start < 0 {
+        0
+    } else if start > n {
+        n
+    } else {
+        start
+    };
+    while i + m <= n {
+        let j = 0;
+        while j < m && hay[i + j] == needle[j] {
+            j = j + 1;
+        }
+        if j == m {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
 }
