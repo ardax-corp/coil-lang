@@ -102,12 +102,23 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             lhs,
             rhs,
         } => write!(f, "{dest} = {} {lhs}, {rhs}", op.as_str(ty.is_float())),
+        MirInst::ByteMask { dest, streams, scalars, expr } => {
+            write!(f, "{dest} = bytemask {expr} [")?;
+            for (s, (a, i)) in streams.iter().enumerate() {
+                write!(f, "{}s{s}={a}@{i}", if s > 0 { ", " } else { "" })?;
+            }
+            for (k, v) in scalars.iter().enumerate() {
+                write!(f, ", k{k}={v}")?;
+            }
+            write!(f, "]")
+        }
         MirInst::Unary { dest, op, src } => {
             let name = match (op, func.ty(*src).is_float()) {
                 (MirUnaryOp::Neg, false) => "ineg",
                 (MirUnaryOp::Neg, true) => "fneg",
                 (MirUnaryOp::Not, _) if func.ty(*src) == MirTy::Bool => "bnot",
                 (MirUnaryOp::Not, _) => "lnot",
+                (MirUnaryOp::Ctz, _) => "ctz",
             };
             write!(f, "{dest} = {name} {src}")
         }

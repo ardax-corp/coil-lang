@@ -211,6 +211,115 @@ impl MirCmpOp {
 pub enum MirUnaryOp {
     Neg,
     Not,
+    /// Trailing zero bits of an `i64` (64 for zero). Never traps.
+    Ctz,
+}
+
+/// A lane operand of a [`MirInst::ByteMask`] predicate.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum LaneVal {
+    /// Byte `k` of stream `s` in lane `k`.
+    Stream(u8),
+    /// The same `i64` (an operand of the instruction) in every lane.
+    Scalar(u8),
+}
+
+/// A [`MirInst::ByteMask`] predicate over 64 byte lanes.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum LaneExpr {
+    Const(bool),
+    /// Integer compare of two lane values (bytes are `0..=255`).
+    Cmp {
+        op: MirCmpOp,
+        lhs: LaneVal,
+        rhs: LaneVal,
+    },
+    And(Box<LaneExpr>, Box<LaneExpr>),
+    Or(Box<LaneExpr>, Box<LaneExpr>),
+    Not(Box<LaneExpr>),
+}
+
+impl LaneExpr {
+    /// `a & b`, folding constants, `a & a`, `a & !a`, and
+    /// `a & (!a | b)` (what a branch chain's masks look like).
+    pub fn and(a: Self, b: Self) -> Self {
+        match (a, b) {
+            (Self::Const(false), _) | (_, Self::Const(false)) => Self::Const(false),
+            (Self::Const(true), x) | (x, Self::Const(true)) => x,
+            (a, b) if a == b => a,
+            (a, b) if a.is_not_of(&b) => Self::Const(false),
+            (a, Self::Or(x, y)) if x.is_not_of(&a) => Self::and(a, *y),
+            (Self::Or(x, y), b) if x.is_not_of(&b) => Self::and(*y, b),
+            (a, b) => Self::And(Box::new(a), Box::new(b)),
+        }
+    }
+
+    /// `a | b`, folding constants, `a | a`, `a | !a`, and `a | (!a & b)`.
+    pub fn or(a: Self, b: Self) -> Self {
+        match (a, b) {
+            (Self::Const(true), _) | (_, Self::Const(true)) => Self::Const(true),
+            (Self::Const(false), x) | (x, Self::Const(false)) => x,
+            (a, b) if a == b => a,
+            (a, b) if a.is_not_of(&b) => Self::Const(true),
+            (a, Self::And(x, y)) if x.is_not_of(&a) => Self::or(a, *y),
+            (Self::And(x, y), b) if x.is_not_of(&b) => Self::or(*y, b),
+            (a, b) => Self::Or(Box::new(a), Box::new(b)),
+        }
+    }
+
+    /// Whether one of `self` / `other` is the negation of the other.
+    fn is_not_of(&self, other: &Self) -> bool {
+        matches!(self, Self::Not(x) if **x == *other) || matches!(other, Self::Not(x) if **x == *self)
+    }
+
+    pub fn not(a: Self) -> Self {
+        match a {
+            Self::Const(b) => Self::Const(!b),
+            Self::Not(x) => *x,
+            Self::Cmp { op, lhs, rhs } => {
+                let op = match op {
+                    MirCmpOp::Lt => MirCmpOp::Ge,
+                    MirCmpOp::Le => MirCmpOp::Gt,
+                    MirCmpOp::Gt => MirCmpOp::Le,
+                    MirCmpOp::Ge => MirCmpOp::Lt,
+                    MirCmpOp::Eq => MirCmpOp::Ne,
+                    MirCmpOp::Ne => MirCmpOp::Eq,
+                };
+                Self::Cmp { op, lhs, rhs }
+            }
+            a => Self::Not(Box::new(a)),
+        }
+    }
+
+    /// Nodes in the tree.
+    pub fn size(&self) -> usize {
+        match self {
+            Self::Const(_) | Self::Cmp { .. } => 1,
+            Self::And(a, b) | Self::Or(a, b) => 1 + a.size() + b.size(),
+            Self::Not(a) => 1 + a.size(),
+        }
+    }
+}
+
+impl std::fmt::Display for LaneVal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Stream(s) => write!(f, "s{s}"),
+            Self::Scalar(k) => write!(f, "k{k}"),
+        }
+    }
+}
+
+impl std::fmt::Display for LaneExpr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Const(b) => write!(f, "{b}"),
+            Self::Cmp { op, lhs, rhs } => write!(f, "({lhs} {} {rhs})", op.as_str(false)),
+            Self::And(a, b) => write!(f, "({a} & {b})"),
+            Self::Or(a, b) => write!(f, "({a} | {b})"),
+            Self::Not(a) => write!(f, "!{a}"),
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -538,6 +647,17 @@ pub enum MirInst {
         rhs: ValueId,
         ne: bool,
     },
+    /// 64 byte lanes of `expr` (`byte_scan`, archive minor 46): bit `k` of
+    /// the `i64` dest is `expr` at lane `k`, where stream `s` reads byte
+    /// `streams[s].1 + k` of the string or byte array `streams[s].0`, and
+    /// `LaneVal::Scalar(j)` is `scalars[j]`. The pass guards every read to
+    /// lie inside its stream. Pure; reads immutable bytes only.
+    ByteMask {
+        dest: ValueId,
+        streams: Vec<(ValueId, ValueId)>,
+        scalars: Vec<ValueId>,
+        expr: LaneExpr,
+    },
 }
 
 /// The FFI opcode a [`MirInst::Ffi`] reconstructs.
@@ -728,7 +848,8 @@ impl MirInst {
             | Self::Format { dest, .. }
             | Self::Stringify { dest, .. }
             | Self::Unbox { dest, .. }
-            | Self::StrEq { dest, .. } => dest,
+            | Self::StrEq { dest, .. }
+            | Self::ByteMask { dest, .. } => dest,
         }
     }
 
@@ -803,6 +924,9 @@ impl MirInst {
                 let mut v = vec![*fmt];
                 v.extend(args.iter().copied());
                 v
+            }
+            Self::ByteMask { streams, scalars, .. } => {
+                streams.iter().flat_map(|&(a, i)| [a, i]).chain(scalars.iter().copied()).collect()
             }
         }
     }
@@ -881,6 +1005,15 @@ impl MirInst {
             Self::Format { fmt, args, .. } => {
                 *fmt = map(*fmt);
                 for v in args.iter_mut() {
+                    *v = map(*v);
+                }
+            }
+            Self::ByteMask { streams, scalars, .. } => {
+                for (a, i) in streams.iter_mut() {
+                    *a = map(*a);
+                    *i = map(*i);
+                }
+                for v in scalars.iter_mut() {
                     *v = map(*v);
                 }
             }

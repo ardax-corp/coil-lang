@@ -226,6 +226,7 @@ fn fold_inst(
                 Some(MirConst::Bool(b)) => Fold::ToConst(MirConst::Bool(!b)),
                 _ => Fold::None,
             },
+            MirUnaryOp::Ctz => Fold::None,
         },
         MirInst::Cast {
             kind,

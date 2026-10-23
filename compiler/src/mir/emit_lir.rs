@@ -1265,9 +1265,11 @@ fn emit_stored(
                 loc,
             });
         }
+        // Dense-only (`byte_scan`).
+        MirInst::ByteMask { .. } => return Err(LowerError::Refused("LIR has no byte lanes".into())),
         MirInst::Unary { dest, op, src } => {
             emit_stack(out, *src, func, plan, regs, pool, loc)?;
-            push_unary(out, *op, func.ty(*src), loc);
+            push_unary(out, *op, func.ty(*src), loc)?;
             out.push(IlOp::StorePop {
                 slot: u32::from(regs[dest.index()]),
                 loc,
@@ -1922,9 +1924,10 @@ fn emit_stack(
             pool,
             loc,
         }),
+        MirInst::ByteMask { .. } => Err(LowerError::Refused("LIR has no byte lanes".into())),
         MirInst::Unary { op, src, .. } => {
             emit_stack(out, *src, func, plan, regs, pool, loc)?;
-            push_unary(out, *op, func.ty(*src), loc);
+            push_unary(out, *op, func.ty(*src), loc)?;
             Ok(())
         }
         MirInst::Cast { kind, src, .. } => {
@@ -2244,12 +2247,15 @@ fn str_eq_op(ne: bool) -> Instruction {
     }
 }
 
-fn push_unary(out: &mut Vec<IlOp>, op: MirUnaryOp, ty: MirTy, loc: DebugLoc) {
+fn push_unary(out: &mut Vec<IlOp>, op: MirUnaryOp, ty: MirTy, loc: DebugLoc) -> Result<(), LowerError> {
     match (op, ty.is_float()) {
         (MirUnaryOp::Not, _) => out.push(IlOp::LogNot { loc }),
         (MirUnaryOp::Neg, true) => out.push(IlOp::from_plain_byte(Byte::new(Instruction::NEGF), loc)),
         (MirUnaryOp::Neg, false) => out.push(IlOp::from_plain_byte(Byte::new(Instruction::NEG), loc)),
+        // Dense-only (`byte_scan`).
+        (MirUnaryOp::Ctz, _) => return Err(LowerError::Refused("LIR has no ctz".into())),
     }
+    Ok(())
 }
 
 fn push_cast(out: &mut Vec<IlOp>, kind: MirCastKind, loc: DebugLoc) -> Result<(), LowerError> {
