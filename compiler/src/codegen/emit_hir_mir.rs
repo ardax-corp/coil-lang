@@ -638,7 +638,7 @@ impl Compiler {
                 }
             }
             HirKind::Bin { op: BinOp::StrConcat, .. } => {
-                let idx = self.intern_string("%s%s");
+                let idx = self.intern_string("%s".repeat(hir.concat_leaves(id).len()));
                 t.formats.insert(id.0, idx);
             }
             // The operand's type name; the operand is not evaluated.

@@ -1,4 +1,4 @@
-// @output 48 -4 | 6 54 -1 | 56 -4 | -14
+// @output 48 -4 | 6 54 -1 | 56 -4 | -14 | -1:0,1:1,2:2,-1:0,4:4,
 // An object made on each path into a join (`locate(i) ?? new Cut(-1,
 // -1)`) and only read field by field after it needs no allocation: its
 // fields meet as values. One that escapes (kept in a `Vec`), is written
@@ -90,7 +90,20 @@ fn same(int n) -> int {
     return total;
 }
 
+fn labels(int n) -> string {
+    let out = "";
+    let i = 0;
+    while i < n {
+        let r = locate(i) ?? new Cut(-1, -1);
+        // Building a string is a safepoint the joined object is live at.
+        out = out + show(r.lo) + ":" + show(r.hi - r.lo) + ",";
+        i = i + 1;
+    }
+    return out;
+}
+
 fn main() {
-    let text = spans(12) + " | " + kept(9) + " | " + written(12) + " | " + show(same(12));
+    let text = spans(12) + " | " + kept(9) + " | " + written(12) + " | " + show(same(12)) + " | " +
+               labels(5);
     let _ = write(stdout(), to_bytes(text));
 }

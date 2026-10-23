@@ -29,7 +29,16 @@ was per-match overhead:
 | — | main `d1d741d` | baseline | 1.299G |
 | 1 | (reverted) | Let loops without arithmetic into dense | 1.304G (no gain) |
 | 2 | #1925 | Per-type clones of trait defaults at their own bounds' types: `Searchable__default__split$inst$string_string` is dense and inlines `find_in` | 1.017G (−22%) |
-| 3 | this step | MIR `phi_sroa`: thread the niche `None` test through its φ, then split a φ of fresh objects read only field by field into per-field φs. The `Span` per match goes. | 0.772G (−24%, −41% total) |
+| 3 | #1927 | MIR `phi_sroa`: thread the niche `None` test through its φ, then split a φ of fresh objects read only field by field into per-field φs. The `Span` per match goes. | 0.772G (−24%, −41% total) |
+
+`replace_all` has its own row of the table (same CSV row, `,` replaced by
+`;`, 20 000 times):
+
+| Step | Change | CSV-row replace_all instructions |
+|------|--------|----------------------------------|
+| — | main `d1d741d` | 2.085G |
+| 4a | The own-bound clone probe refused on a frame-only check (`parameter-slot`: the clone's parameters have no slots yet), so `replace_all` stayed a thunk to the shared body; now only a callee refusal does. `phi_sroa` drops the joined `Span` from safepoint root lists. | 1.358G |
+| 4b | A string `+` chain (`out + piece + with`) is one `FORMAT "%s%s%s"` instead of a partial string per `+` | 1.159G (−44% total) |
 
 Wall clock (`coil` release, ns per call, median of 3, x86-64 container):
 
@@ -38,11 +47,12 @@ Wall clock (`coil` release, ns per call, median of 3, x86-64 container):
 | csv-row split | 8 000 | 4 900 | 1 600 |
 | 1 KB text split | 39 000 | 25 000 | 7 100 |
 | log-line split | 1 580 | 860 | — |
-| csv-row replace_all | 11 200 | 10 600 | 1 120 |
+| csv-row replace_all | 11 200 | 6 600 (after 4b) | 1 120 |
 
-`replace_all` still runs its shared body. It is the next target, together
-with step 4: trusted typed string arguments for host natives, which skips
-the slab check.
+Next: trusted typed string arguments for host natives, which skips the
+slab check (`find_object_by_addr` is about 8% of `replace_all`).
+`replace_all` also pays a `LOAD`/`STORE` copy per FORMAT for the
+barrier's token register, and two `CONST 0; STORE` slot clears per match.
 
 ## Notes
 
