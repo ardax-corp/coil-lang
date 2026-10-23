@@ -109,6 +109,7 @@ const ALWAYS_HOT: [u64; 4] = {
     b = or_hot(b, Instruction::VLoad);
     b = or_hot(b, Instruction::VBin);
     b = or_hot(b, Instruction::VMask);
+    b = or_hot(b, Instruction::VScan);
     b
 };
 
@@ -1006,6 +1007,24 @@ fn exec_dense(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) {
                 Ok(out) => regs[dest] = out,
                 Err(t) => ctx.panic_msg = Some(t.message()),
             }
+        }
+        Instruction::VScan => {
+            let (n, dest, from, bound) = opcode.dense_abc_parts();
+            let inclusive = n & common::simd::SCAN_INCLUSIVE != 0;
+            let n = usize::from(n & !common::simd::SCAN_INCLUSIVE);
+            promise!(ctx.sp + dest < ctx.stack_cap);
+            promise!(ctx.sp + from < ctx.stack_cap);
+            promise!(ctx.sp + bound < ctx.stack_cap);
+            let Some(body) = ctx.code.get(ctx.ip..ctx.ip + n) else {
+                ctx.panic_msg = Some("VScan body past the code");
+                return;
+            };
+            let (from, bound) = (ctx.stack[ctx.sp + from].as_int(), ctx.stack[ctx.sp + bound].as_int());
+            match super::vscan(ctx.heap, ctx.stack, ctx.sp, ctx.extra.vregs, body, from, bound, inclusive) {
+                Ok(p) => ctx.stack[ctx.sp + dest] = Value::from(p),
+                Err(msg) => ctx.panic_msg = Some(msg),
+            }
+            ctx.ip += n;
         }
         Instruction::VMask => {
             let (dest, src) = opcode.dense_move_parts();

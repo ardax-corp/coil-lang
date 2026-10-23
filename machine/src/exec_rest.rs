@@ -1046,6 +1046,28 @@ impl<const S: usize> Machine<S> {
                     };
                     crate::simd::vbin_bytes_in(&mut self.vregs, kind, dest, a, b, scalar);
                 }
+                Instruction::VScan => {
+                    let (n, dest, from, bound) = opcode.dense_abc_parts();
+                    let inclusive = n & common::simd::SCAN_INCLUSIVE != 0;
+                    let n = usize::from(n & !common::simd::SCAN_INCLUSIVE);
+                    promise!(sp + dest < stack_cap);
+                    promise!(sp + from < stack_cap);
+                    promise!(sp + bound < stack_cap);
+                    let (from, bound) = (self.stack[sp + from].as_int(), self.stack[sp + bound].as_int());
+                    let found = match code.get(ip..ip + n) {
+                        Some(body) => vscan(&self.heap, &self.stack, sp, &mut self.vregs, body, from, bound, inclusive),
+                        None => Err("VScan body past the code"),
+                    };
+                    match found {
+                        Ok(p) => self.stack[sp + dest] = Value::from(p),
+                        Err(msg) => {
+                            *ip_out = ip;
+                            *sp_out = sp;
+                            return dispatch::RestFlow::Done(self.runtime_panic(msg, ip.saturating_sub(1)));
+                        }
+                    }
+                    ip += n;
+                }
                 Instruction::VMask => {
                     let (dest, src) = opcode.dense_move_parts();
                     promise!(src < common::simd::NREGS);
