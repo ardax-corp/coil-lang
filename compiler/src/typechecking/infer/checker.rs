@@ -20097,7 +20097,7 @@ impl Checker {
                         loop_range,
                         ForInInfo {
                             kind: ForInKind::Custom {
-                                into_iter_fqn,
+                                into_iter_fqn: Some(into_iter_fqn),
                                 next_fqn: None,
                                 counted: Some(counted),
                             },
@@ -20126,7 +20126,7 @@ impl Checker {
                                     loop_range,
                                     ForInInfo {
                                         kind: ForInKind::Custom {
-                                            into_iter_fqn,
+                                            into_iter_fqn: Some(into_iter_fqn),
                                             next_fqn: Some(next_fqn),
                                             counted: None,
                                         },
@@ -20168,7 +20168,31 @@ impl Checker {
                     Err(()) => None,
                 }
             }
-            Ok(None) => {
+            // An iterator itself loops on its own `next`.
+            Ok(None) => match self.find_unique_instance("Iterator", std::slice::from_ref(te), iterable_range) {
+                Ok(Some(iter_inst)) => {
+                    let item = iter_inst
+                        .assoc_tys
+                        .get("Item")
+                        .map(|v| v.ty.clone())
+                        .unwrap_or_else(|| Ty::Var(self.counter.fresh()));
+                    let next_fqn = iter_inst.method_fqns.get("next").cloned();
+                    let item_ty = apply_ty_prune(&self.subst, &item);
+                    self.record_for_in_info(
+                        loop_id,
+                        loop_range,
+                        ForInInfo {
+                            kind: ForInKind::Custom {
+                                into_iter_fqn: None,
+                                next_fqn,
+                                counted: None,
+                            },
+                            item_ty: item_ty.clone(),
+                        },
+                    );
+                    Some(item_ty)
+                }
+                Ok(None) => {
                 let _ = self.error_with_help(
                     ErrorCode::GenericTypeError,
                     format!("type `{}` is not iterable", self.diag_ty(te)),
@@ -20179,7 +20203,9 @@ impl Checker {
                     ),
                 );
                 None
-            }
+                }
+                Err(()) => None,
+            },
             Err(()) => None,
         }
     }

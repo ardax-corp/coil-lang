@@ -335,8 +335,8 @@ impl RangeInclusive<T> {
 ///
 /// Implementations define the associated type `Item` (the element type) and
 /// `next`, which returns `Some(item)` for each value and `None` when the sequence is
-/// exhausted. `for x in e` first converts `e` with `IntoIterator`, then calls
-/// `next` until it returns `None`. Arrays, `Vec`, homogeneous tuples,
+/// exhausted. `for x in e` calls `next` until it returns `None`, on `e` itself
+/// when `e` is an `Iterator`, or on what its `IntoIterator` returns. Arrays, `Vec`, homogeneous tuples,
 /// coroutines and numeric ranges are iterable without an `impl`; a record
 /// is not iterable (use `collections::map::HashMap` for keys to iterate).
 ///
@@ -359,14 +359,6 @@ impl RangeInclusive<T> {
 ///     }
 /// }
 ///
-/// impl IntoIterator for Countdown {
-///     type Item = int;
-///     type IntoIter = Countdown;
-///     pub fn into_iter(Countdown c) -> Countdown {
-///         return c;
-///     }
-/// }
-///
 /// fn main() {
 ///     let seen = 0;
 ///     for x in new Countdown(3) {
@@ -385,8 +377,8 @@ trait Iterator<I> {
 /// A type that can be turned into an `Iterator`, which makes it usable in `for x in value`.
 ///
 /// `into_iter` returns the iterator (`IntoIter`), whose `Item` must match.
-/// A class that is its own iterator returns itself. See `Iterator` for a full
-/// example.
+/// A class that is its own iterator can return itself, though an `Iterator`
+/// needs no `IntoIterator` to be used in `for`.
 ///
 /// # Examples
 ///

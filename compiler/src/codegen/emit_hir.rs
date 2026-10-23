@@ -8533,7 +8533,10 @@ impl Compiler {
                 ) = (kind, pat)
                 {
                     let known = |f: &str| self.functions.contains_key(f) || self.fn_entry_labels.contains_key(f);
-                    if !known(into_iter_fqn) || !known(next_fqn) || self.two_word_return_kind(into_iter_fqn).is_some() {
+                    let into_ok = into_iter_fqn
+                        .as_deref()
+                        .is_none_or(|f| known(f) && self.two_word_return_kind(f).is_none());
+                    if !into_ok || !known(next_fqn) {
                         return Err("for-in-iterator");
                     }
                     // The item is stored as `next` leaves it.
@@ -8547,6 +8550,9 @@ impl Compiler {
                     ..
                 }) = kind
                 {
+                    let Some(into_iter_fqn) = into_iter_fqn else {
+                        return Err("for-in-custom");
+                    };
                     if !self.functions.contains_key(into_iter_fqn) && !self.fn_entry_labels.contains_key(into_iter_fqn) {
                         return Err("for-in-custom");
                     }

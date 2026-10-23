@@ -191,7 +191,8 @@ pub enum HirIterNext {
 /// `into_iter` once, then `next` until it returns `None`.
 #[derive(Clone, Debug)]
 pub struct HirIterLoop {
-    pub into_iter: Label,
+    /// `None` when the iterable is the iterator.
+    pub into_iter: Option<Label>,
     pub next: Label,
     /// The iterator `into_iter` returns.
     pub iter_ty: Ty,
@@ -3562,12 +3563,17 @@ impl Lower<'_> {
         let Some(src) = self.word_or_boxed(iterable)? else {
             return Ok(Val::Never);
         };
-        let abi = DenseAbi {
-            params: vec![self.b.value_ty(src)],
-            ret: it_ty,
-            ret_hi: None,
+        let it = match plan.into_iter {
+            Some(into_iter) => {
+                let abi = DenseAbi {
+                    params: vec![self.b.value_ty(src)],
+                    ret: it_ty,
+                    ret_hi: None,
+                };
+                self.b.ins_call(into_iter, vec![src], &abi).map_err(mir)?.0
+            }
+            None => src,
         };
-        let (it, _) = self.b.ins_call(plan.into_iter, vec![src], &abi).map_err(mir)?;
         let item = self.hir.local(local).ty.clone().ok_or("local type")?;
         let opt = crate::typechecking::ty::option_ty(item);
         let (ret, ret_hi) = match plan.shape {
