@@ -1527,6 +1527,7 @@ impl<const S: usize> Machine<S> {
                         && !gc.as_ref().payload.is_empty()
                     {
                         gc.payload_mut().type_id = opcode.operand_u32();
+                        self.heap.note_enum_type(Object::Enum(gc), opcode.operand_u32());
                     }
                 }
                 Instruction::TagArrayKind => {

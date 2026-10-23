@@ -54,7 +54,10 @@ struct EpochBatch {
     classes: Vec<BatchClass>,
     bytes: usize,
     objects: usize,
-    weaks: usize,
+    /// Fresh `Weak` / finalizable objects for [`Heap::weaks`] /
+    /// [`Heap::finalizable`].
+    weaks: Vec<u64>,
+    finalizable: Vec<u64>,
 }
 
 impl EpochBatch {
@@ -62,8 +65,16 @@ impl EpochBatch {
         self.classes.iter().all(|(_, v)| v.is_empty())
             && self.bytes == 0
             && self.objects == 0
-            && self.weaks == 0
+            && self.weaks.is_empty()
+            && self.finalizable.is_empty()
     }
+}
+
+/// The GC side lists ([`Heap::weaks`], [`Heap::finalizable`]).
+#[derive(Clone, Copy)]
+enum SideList {
+    Weak,
+    Finalizable,
 }
 
 thread_local! {
@@ -212,9 +223,16 @@ pub struct Heap {
     /// Per class `type_id`: field word kinds from static types
     /// (`common::WORD_*`). Missing rows / fields are unknown.
     class_kinds: std::sync::Arc<Vec<Box<[u8]>>>,
-    /// Live `Weak` objects, so [`Self::clear_dead_weaks`] can skip its heap
-    /// walk (weak handles are rare).
-    weak_count: usize,
+    /// Every `Weak` object, so [`Self::clear_dead_weaks`] visits the weaks
+    /// instead of the heap (#1870). A superset: entries a sweep freed or a
+    /// slot reuse replaced drop out when it next runs.
+    weaks: Vec<u64>,
+    /// Class / enum `type_id`s with a `drop` (the VM's finalizer registry),
+    /// one bit per id: every allocation asks while any is registered.
+    finalizer_types: Vec<u64>,
+    /// Every object of a [`Self::finalizer_types`] type, a superset pruned
+    /// by [`Self::unmarked_finalizable`] like [`Self::weaks`].
+    finalizable: Vec<u64>,
     /// Immortal arity-0 enum singletons keyed by tag (never swept).
     immortal_enums: HashMap<u32, Object, AddrHashBuilder>,
     /// Last tag returned by [`Self::immortal_unit_enum`]. Unit constructors
@@ -266,7 +284,9 @@ impl Default for Heap {
             slab: Slab::new(),
             live_count: 0,
             class_kinds: std::sync::Arc::default(),
-            weak_count: 0,
+            weaks: Vec::new(),
+            finalizer_types: Vec::new(),
+            finalizable: Vec::new(),
             immortal_enums: HashMap::default(),
             unit_enum: None,
             empty_tuple: None,
@@ -450,8 +470,10 @@ impl Heap {
             let mut batch = cell.borrow_mut();
             batch.bytes += object.size();
             batch.objects += 1;
-            if matches!(object, Object::Weak(_)) {
-                batch.weaks += 1;
+            match self.side_list_of(object) {
+                Some(SideList::Weak) => batch.weaks.push(object.addr()),
+                Some(SideList::Finalizable) => batch.finalizable.push(object.addr()),
+                None => {}
             }
         });
         crate::vm::note_heap_alloc();
@@ -462,7 +484,8 @@ impl Heap {
     fn fold_epoch_counts(&mut self, batch: &mut EpochBatch) {
         self.alloc_bytes += std::mem::take(&mut batch.bytes);
         self.live_count += std::mem::take(&mut batch.objects);
-        self.weak_count += std::mem::take(&mut batch.weaks);
+        self.weaks.append(&mut batch.weaks);
+        self.finalizable.append(&mut batch.finalizable);
     }
 
     /// Give this thread's unused epoch slots back and fold its counts in.
@@ -508,8 +531,10 @@ impl Heap {
         let size = object.size();
         self.alloc_bytes += size;
         self.live_count += 1;
-        if matches!(object, Object::Weak(_)) {
-            self.weak_count += 1;
+        match self.side_list_of(object) {
+            Some(SideList::Weak) => self.weaks.push(object.addr()),
+            Some(SideList::Finalizable) => self.finalizable.push(object.addr()),
+            None => {}
         }
         // Objects allocated while a cycle is open (finalizers) are black.
         if self.gc_phase == GcPhase::Marking {
@@ -531,6 +556,100 @@ impl Heap {
         );
 
         (object, content)
+    }
+
+    /// The GC side list a fresh object joins, if any.
+    #[inline(always)]
+    fn side_list_of(&self, object: Object) -> Option<SideList> {
+        match object {
+            Object::Weak(_) => Some(SideList::Weak),
+            Object::Instance(_) | Object::Enum(_)
+                if !self.finalizer_types.is_empty()
+                    && Self::finalizer_type_of(object).is_some_and(|t| self.has_finalizer(t)) =>
+            {
+                Some(SideList::Finalizable)
+            }
+            _ => None,
+        }
+    }
+
+    fn finalizer_type_of(object: Object) -> Option<u32> {
+        match object {
+            Object::Instance(gc) => Some(gc.as_ref().type_id),
+            Object::Enum(gc) => Some(gc.as_ref().type_id),
+            _ => None,
+        }
+    }
+
+    /// Note that `type_id` has a `drop`: its objects join
+    /// [`Self::finalizable`], the ones already allocated by one heap walk.
+    pub fn register_finalizer_type(&mut self, type_id: u32) {
+        if type_id == 0 || self.has_finalizer(type_id) {
+            return;
+        }
+        let word = type_id as usize / 64;
+        if self.finalizer_types.len() <= word {
+            self.finalizer_types.resize(word + 1, 0);
+        }
+        self.finalizer_types[word] |= 1 << (type_id % 64);
+        let existing: Vec<u64> = self
+            .objects()
+            .filter(|&o| Self::finalizer_type_of(o) == Some(type_id))
+            .map(|o| o.addr())
+            .collect();
+        self.finalizable.extend(existing);
+    }
+
+    #[inline(always)]
+    fn has_finalizer(&self, type_id: u32) -> bool {
+        self.finalizer_types
+            .get(type_id as usize / 64)
+            .is_some_and(|w| w & (1 << (type_id % 64)) != 0)
+    }
+
+    /// Forget every finalizer type (a VM reset).
+    pub fn clear_finalizer_types(&mut self) {
+        self.finalizer_types.clear();
+        self.finalizable.clear();
+    }
+
+    /// An enum typed after its allocation (`TagEnumType`).
+    pub fn note_enum_type(&mut self, object: Object, type_id: u32) {
+        if self.has_finalizer(type_id) {
+            self.finalizable.push(object.addr());
+        }
+    }
+
+    /// Objects the last mark left unmarked that still owe their `drop`,
+    /// in address order. Prunes [`Self::finalizable`] to the objects that
+    /// still exist, still have a `drop` type and have not been finalized.
+    pub fn unmarked_finalizable(&mut self) -> Vec<Object> {
+        if self.finalizable.is_empty() {
+            return Vec::new();
+        }
+        let mut list = std::mem::take(&mut self.finalizable);
+        list.sort_unstable();
+        list.dedup();
+        let mut out = Vec::new();
+        list.retain(|&addr| {
+            let Some(obj) = self.find_object_by_addr(addr) else {
+                return false;
+            };
+            let (type_id, finalized) = match obj {
+                Object::Instance(gc) => (gc.as_ref().type_id, gc.as_ref().finalized),
+                Object::Enum(gc) => (gc.as_ref().type_id, gc.as_ref().finalized),
+                _ => return false,
+            };
+            if finalized || !self.has_finalizer(type_id) {
+                return false;
+            }
+            if !obj.is_marked() {
+                out.push(obj);
+            }
+            true
+        });
+        self.finalizable = list;
+        out
     }
 
     /// Write a fresh object into a slab slot and stamp its kind.
@@ -955,9 +1074,6 @@ impl Heap {
         self.alloc_bytes -= size;
         debug_assert!(self.live_count > 0);
         self.live_count -= 1;
-        if matches!(object, Object::Weak(_)) {
-            self.weak_count -= 1;
-        }
         let ptr = unsafe { NonNull::new_unchecked(object.addr() as *mut u8) };
         unsafe { object.recycle_payload() };
         self.slab.free(ptr);
@@ -1043,24 +1159,41 @@ impl Heap {
     ///
     /// Must run after the mark phase and before [`Self::sweep`] so upgrades
     /// never observe a recycled address (ABA).
-    pub fn clear_dead_weaks(&self) {
-        if self.weak_count == 0 {
+    pub fn clear_dead_weaks(&mut self) {
+        if self.weaks.is_empty() {
             return;
         }
-        for obj in self.objects() {
-            if let Object::Weak(gc) = obj {
-                let weak = gc.as_ref();
-                if !weak.cleared.get() {
-                    let target = weak.target.get();
-                    let addr = target.heap_addr();
-                    if addr != 0
-                        && let Some(referent) = self.find_object_by_addr(addr)
-                        && !referent.is_marked()
-                    {
-                        weak.cleared.set(true);
-                        weak.target.set(Value::from(0i64));
-                    }
-                }
+        let mut list = std::mem::take(&mut self.weaks);
+        list.sort_unstable();
+        list.dedup();
+        // A cleared weak stays cleared: only live, uncleared ones stay listed.
+        list.retain(|&addr| {
+            let Some(Object::Weak(gc)) = self.find_object_by_addr(addr) else {
+                return false;
+            };
+            let weak = gc.as_ref();
+            if weak.cleared.get() {
+                return false;
+            }
+            let target = weak.target.get().heap_addr();
+            if target != 0
+                && let Some(referent) = self.find_object_by_addr(target)
+                && !referent.is_marked()
+            {
+                weak.cleared.set(true);
+                weak.target.set(Value::from(0i64));
+                return false;
+            }
+            true
+        });
+        self.weaks = list;
+    }
+
+    /// Follow an evacuation in the side lists (before its old slots free).
+    fn forward_side_lists(&mut self, fwd: &AddrMap) {
+        for addr in self.weaks.iter_mut().chain(self.finalizable.iter_mut()) {
+            if let Some(&new) = fwd.get(addr) {
+                *addr = new;
             }
         }
     }
@@ -4729,6 +4862,59 @@ mod tests {
         );
         // `keep` was unmarked after sweep and not re-rooted, also gone.
         assert!(!live.contains(&keep_addr));
+    }
+
+    fn weak_to(heap: &mut Heap, target: Object) -> Object {
+        let weak = ObjWeak { target: Cell::new(Value::from(target.addr())), cleared: Cell::new(false) };
+        heap.alloc(weak, Object::Weak).0
+    }
+
+    /// A cycle visits the weak list, not the heap: cleared and swept weaks
+    /// leave it, live ones stay (#1870).
+    #[test]
+    fn weak_list_drops_cleared_and_swept_weaks() {
+        let mut heap = Heap::default();
+        let (keep, _) = heap.alloc(ObjString::from("keep"), Object::String);
+        let (dies, _) = heap.alloc(ObjString::from("dies"), Object::String);
+        let live_weak = weak_to(&mut heap, keep);
+        let dead_target = weak_to(&mut heap, dies);
+        let unreached = weak_to(&mut heap, keep);
+        assert_eq!(heap.weaks.len(), 3);
+        heap.collect(&[keep.addr(), live_weak.addr(), dead_target.addr()]);
+        let Some(Object::Weak(gc)) = heap.find_object_by_addr(dead_target.addr()) else {
+            panic!("rooted weak swept");
+        };
+        assert!(gc.as_ref().cleared.get());
+        // The unreached weak was still listed when its cycle cleared weaks.
+        assert!(heap.find_object_by_addr(unreached.addr()).is_none());
+        heap.collect(&[keep.addr(), live_weak.addr()]);
+        assert_eq!(heap.weaks, vec![live_weak.addr()]);
+    }
+
+    /// Objects of a `drop` type are listed from their allocation (or from
+    /// the registration, for ones made before it) until they are finalized.
+    #[test]
+    fn finalizable_list_tracks_drop_types() {
+        let mut heap = Heap::default();
+        let (early, _) = heap.alloc(ObjInstance::with_type_id_and_fields(7, 1), Object::Instance);
+        let (_other, _) = heap.alloc(ObjInstance::with_type_id_and_fields(8, 1), Object::Instance);
+        heap.register_finalizer_type(7);
+        let (late, _) = heap.alloc(ObjInstance::with_type_id_and_fields(7, 1), Object::Instance);
+        let (tagged, tagged_gc) = heap.alloc(ObjEnum::new(1, EnumPayload::one(Value::from(1i64))), Object::Enum);
+        tagged_gc.payload_mut().type_id = 7;
+        heap.note_enum_type(tagged, 7);
+        heap.begin_mark(&[late.addr()]);
+        while !heap.mark_quantum(usize::MAX) {}
+        let mut got: Vec<u64> = heap.unmarked_finalizable().iter().map(|o| o.addr()).collect();
+        got.sort_unstable();
+        let mut want = vec![early.addr(), tagged.addr()];
+        want.sort_unstable();
+        assert_eq!(got, want);
+        let Object::Instance(gc) = early else { unreachable!() };
+        gc.payload_mut().finalized = true;
+        let left: Vec<u64> = heap.unmarked_finalizable().iter().map(|o| o.addr()).collect();
+        assert_eq!(left, vec![tagged.addr()]);
+        assert_eq!(heap.finalizable.len(), 2, "finalized entries leave the list");
     }
 
     #[test]
