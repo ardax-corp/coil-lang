@@ -38,5 +38,5 @@ test("function value with a niche Option result") {
 
 test("spawn a function returning a unit Result") {
     let t = spawn(worker, 3)?;
-    join(t)?;
+    (join(t)?)?;
 }
