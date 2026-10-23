@@ -2,19 +2,18 @@
 //
 // @output Suspended\n1Resumed\n
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::{print, println};
+use string::format;
 
 gen fn coro() {
-    let _ = write_all(stdout(), to_bytes("Suspended\n"));
+    let _ = println("Suspended");
     yield 1;
-    let _ = write_all(stdout(), to_bytes("Resumed\n"));
+    let _ = println("Resumed");
 }
 
 fn main() {
     let h = coro();
     let x = resume h;
-    let _ = write_all(stdout(), to_bytes(format("%i", x)));
+    let _ = print(format("%i", x));
     resume h;
 }

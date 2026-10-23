@@ -908,7 +908,7 @@ impl Compiler {
                 return;
             }
             self.raw_instance_call = false;
-            if let Some(target) = self.named_entry_target(into_iter_fqn, true) {
+            if let Some(target) = into_iter_fqn.as_deref().and_then(|f| self.named_entry_target(f, true)) {
                 t.into_iters.insert(id.0, target);
             }
             return;
@@ -916,22 +916,42 @@ impl Compiler {
         let (Some(next_fqn), &HirPat::Bind(local)) = (next_fqn, pat) else {
             return;
         };
-        let item = hir.local(local).ty.clone();
+        // `next` may be a generic instance's shared body (`Iterator for
+        // ListIter<T>`): its declared `Option<Item>`, open in the head's
+        // variables, is what it returns, not the loop's ground item (#1912).
+        let declared = self
+            .fn_return_ty(next_fqn)
+            .and_then(|r| crate::typechecking::ty::option_inner(&r))
+            .filter(|t| !crate::layout::ty_is_closed(t));
+        let shared = declared.is_some();
+        let item = declared.or_else(|| hir.local(local).ty.clone());
         let niche = item
             .as_ref()
             .is_some_and(|ty| crate::layout::niche_heap_only(&self.checker, ty));
         // Pinned as emission pins it, so `next`'s `CALL` agrees.
-        if let Some(item) = &item {
+        if let Some(item) = item.as_ref().filter(|_| !shared) {
             let opt = crate::typechecking::ty::option_ty(item.clone());
             let pair = crate::layout::two_word_kind(&self.checker, &opt);
             self.pin_two_word_return_kind(next_fqn, pair);
         }
         let two_slot = self.two_word_return_kind(next_fqn).is_some();
-        self.raw_instance_call = false;
-        let into_iter = self.named_entry_target(into_iter_fqn, true);
+        // No `into_iter`: the iterable is the iterator.
+        let (into_iter, iter_ty) = match into_iter_fqn {
+            Some(f) => {
+                self.raw_instance_call = false;
+                match (self.named_entry_target(f, true), self.fn_return_ty(f)) {
+                    (Some(target), Some(ty)) => (Some(target), ty),
+                    _ => return,
+                }
+            }
+            None => match hir.expr(iterable).ty.clone() {
+                Some(ty) => (None, ty),
+                None => return,
+            },
+        };
         self.raw_instance_call = false;
         let next = self.named_entry_target(next_fqn, true);
-        if let (Some(into_iter), Some(next), Some(iter_ty)) = (into_iter, next, self.fn_return_ty(into_iter_fqn)) {
+        if let Some(next) = next {
             let shape = if niche {
                 crate::mir::HirIterNext::Niche
             } else if two_slot {

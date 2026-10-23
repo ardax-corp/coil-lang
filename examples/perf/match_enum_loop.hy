@@ -1,8 +1,7 @@
 // Canary (gate 1): hot match on boxed Option / Result / 3-variant payload
 // enum. A later match/unbox cut should drop VM-only time vs this baseline.
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 enum Phase {
     Low(int),
@@ -66,5 +65,5 @@ fn main() {
         acc = acc + score_phase(wrap_phase(i));
         i = i + 1;
     }
-    let _ = write_all(stdout(), to_bytes(format("%i", acc)));
+    let _ = print(format("%i", acc));
 }

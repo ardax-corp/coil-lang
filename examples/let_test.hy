@@ -2,15 +2,14 @@
 //
 // @output 51020
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn main() {
     let x = 5;
-    let _ = write_all(stdout(), to_bytes(format("%i", x)));
+    let _ = print(format("%i", x));
     let y = 10;
-    let _ = write_all(stdout(), to_bytes(format("%i", y)));
+    let _ = print(format("%i", y));
     x = 20;
-    let _ = write_all(stdout(), to_bytes(format("%i", x)));
+    let _ = print(format("%i", x));
 }

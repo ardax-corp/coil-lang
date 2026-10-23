@@ -5,9 +5,8 @@
 //
 // @output 32
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 class Celsius {
     pub c: int,
@@ -26,5 +25,5 @@ impl Into<Fahrenheit> for Celsius {
 fn main() {
     let c = new Celsius(0);
     let f: Fahrenheit = c.into();
-    let _ = write_all(stdout(), to_bytes(format("%i", f.f)));
+    let _ = print(format("%i", f.f));
 }

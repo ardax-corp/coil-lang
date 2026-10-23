@@ -1,9 +1,8 @@
 // Iterative sibling of nsieve.hy. Same prime count 1900 for n = 1 << 14.
 // The ones-fill is its own stride-1 store. The sieve itself still steps
 // by p and branches on flags[p], so that loop is not vectorized.
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn fill_ones(Vec<int> flags) -> int {
     let n = flags.len();
@@ -40,5 +39,5 @@ fn nsieve_iter(int n) -> int {
 }
 
 fn main() {
-    let _ = write_all(stdout(), to_bytes(format("%i", nsieve_iter(1 << 14))));
+    let _ = print(format("%i", nsieve_iter(1 << 14)));
 }

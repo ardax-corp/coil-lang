@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 use super::cse::dce;
 use super::func::MirFunc;
 use super::inst::{
-    MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp, Terminator, ValueId,
+    BlockId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp, Terminator, ValueId,
 };
 use super::ty::MirTy;
 
@@ -123,6 +123,8 @@ fn instcombine_once(func: &mut MirFunc, strength: bool) -> usize {
             }
         }
     }
+    // Each folded branch's (block, successor it no longer reaches).
+    let mut dead_edges: Vec<(BlockId, BlockId)> = Vec::new();
     for block in &mut func.blocks {
         let Some(term) = &mut block.term else {
             continue;
@@ -138,10 +140,24 @@ fn instcombine_once(func: &mut MirFunc, strength: bool) -> usize {
         let Some(MirConst::Bool(c)) = known.get(&cond).copied() else {
             continue;
         };
-        *term = Terminator::Jump {
-            dest: if c { taken } else { not_taken },
-        };
+        let (dest, dead) = if c { (taken, not_taken) } else { (not_taken, taken) };
+        *term = Terminator::Jump { dest };
+        if dead != dest {
+            dead_edges.push((block.id, dead));
+        }
         hits += 1;
+    }
+    // The join a folded branch no longer reaches drops that edge's phi
+    // inputs, so phi preds stay the block's preds (#1899).
+    for (from, to) in dead_edges {
+        let Some(block) = func.blocks.iter_mut().find(|b| b.id == to) else {
+            continue;
+        };
+        for inst in &mut block.insts {
+            if let MirInst::Phi { args, .. } = inst {
+                args.retain(|(pred, _)| *pred != from);
+            }
+        }
     }
 
     hits
@@ -747,6 +763,27 @@ mod tests {
             .flat_map(|b| b.insts.iter())
             .filter(|i| matches!(i, MirInst::Bin { op: o, .. } if *o == op))
             .count()
+    }
+
+    #[test]
+    fn folded_branch_drops_the_dead_edge_phi_input() {
+        // A `brif` on a constant becomes a `jump` (#1899): the join's phi
+        // loses the input from the edge that no longer exists.
+        let text = "func @f(v0: i64) -> i64 {
+bb0:
+    v1 = bconst true
+    brif v1, bb1, bb2
+bb1:
+    v2 = iconst.i64 1
+    jump bb2
+bb2:
+    v3 = phi.i64 [bb0: v0, bb1: v2]
+    return v3
+}";
+        let mut f = crate::mir::parse_func(text).expect(text);
+        f.verify().unwrap();
+        assert!(instcombine(&mut f) >= 1);
+        f.verify().unwrap();
     }
 
     #[test]

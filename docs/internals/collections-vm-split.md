@@ -34,7 +34,7 @@ functions may return `Option<T>` (#884).
 Ground `Option` / `Result` values use niche, two-slot, or boxed `ObjEnum` by
 shape (COI-92) — not a single boxed ABI.
 
-**`Option` field match:** `match` copies the field (GC pointer / immediate). Nested `match` on the same `Option` field is valid and does not empty the field — no write-back. See [COI-77](https://linear.app/ardax/issue/COI-77) and [Enums and Match](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/manual/tutorial/03-enums-and-match.md#match-does-not-consume-the-scrutinee).
+**`Option` field match:** `match` copies the field (GC pointer / immediate). Nested `match` on the same `Option` field is valid and does not empty the field — no write-back. See COI-77 and [Enums and Match](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/manual/tutorial/03-enums-and-match.md#match-does-not-consume-the-scrutinee).
 
 ## Known language gaps (remaining)
 

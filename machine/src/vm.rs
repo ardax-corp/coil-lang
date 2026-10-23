@@ -75,41 +75,6 @@ pub fn take_pc_profile() -> Vec<u64> {
     VM_PC_PROFILE.with(|p| p.borrow_mut().take().unwrap_or_default())
 }
 
-// Frame-relative cursor (`stack.tell() - sp`) observed before each dispatch,
-// paired with the PC. Feeds the differential test for the static cursor model
-// in `compiler::il::tell`, which cannot be trusted from code reading alone.
-#[cfg(any(test, feature = "vm_profile"))]
-thread_local! {
-    static VM_CURSOR_TRACE: std::cell::RefCell<Vec<(u32, u32)>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
-
-/// Cap the trace so a long-running program cannot exhaust memory; a prefix is
-/// still a valid check.
-#[cfg(any(test, feature = "vm_profile"))]
-const CURSOR_TRACE_CAP: usize = 400_000;
-
-#[cfg(any(test, feature = "vm_profile"))]
-pub fn reset_cursor_trace() {
-    VM_CURSOR_TRACE.with(|t| t.borrow_mut().clear());
-}
-
-/// `(pc, frame_relative_cursor)` in dispatch order.
-#[cfg(any(test, feature = "vm_profile"))]
-#[must_use]
-pub fn cursor_trace() -> Vec<(u32, u32)> {
-    VM_CURSOR_TRACE.with(|t| t.borrow().clone())
-}
-
-#[cfg(not(any(test, feature = "vm_profile")))]
-pub fn reset_cursor_trace() {}
-
-#[cfg(not(any(test, feature = "vm_profile")))]
-#[must_use]
-pub fn cursor_trace() -> Vec<(u32, u32)> {
-    Vec::new()
-}
-
 // Allocation / GC counters (`vm_profile` + tests). Useful for binary_trees-style
 // heap traffic without needing external alloc tracers.
 #[cfg(any(test, feature = "vm_profile"))]
@@ -283,7 +248,7 @@ fn set_jump_target(ip: &mut usize, target: usize, code: &[Byte]) {
 }
 
 #[inline(always)]
-fn note_dispatch_at(ip: usize, stack: &Stack<Value>, sp: usize) {
+fn note_dispatch_at(ip: usize) {
     #[cfg(any(test, feature = "vm_profile"))]
     {
         VM_DISPATCH_COUNT.with(|c| c.fetch_add(1, Ordering::Relaxed));
@@ -295,16 +260,10 @@ fn note_dispatch_at(ip: usize, stack: &Stack<Value>, sp: usize) {
                 counts[ip] += 1;
             }
         });
-        VM_CURSOR_TRACE.with(|t| {
-            let mut t = t.borrow_mut();
-            if t.len() < CURSOR_TRACE_CAP {
-                t.push((ip as u32, (stack.tell().saturating_sub(sp)) as u32));
-            }
-        });
     }
     #[cfg(not(any(test, feature = "vm_profile")))]
     {
-        let _ = (ip, stack, sp);
+        let _ = ip;
     }
 }
 
@@ -2227,19 +2186,16 @@ impl<const S: usize> Machine<S> {
         }
     }
 
-    fn queue_unmarked_finalizers(&self) -> Vec<(Value, u32)> {
+    fn queue_unmarked_finalizers(&mut self) -> Vec<(Value, u32)> {
         if self.finalizer_by_type.is_empty() {
             return Vec::new();
         }
-        let mut out = Vec::new();
-        for obj in self.heap.objects() {
-            if !obj.is_marked()
-                && let Some(pc) = self.pending_finalizer(obj)
-            {
-                out.push((Value::from(obj.addr()), pc));
-            }
-        }
-        out
+        // The heap lists its finalizable objects: no walk of the heap (#1870).
+        let unmarked = self.heap.unmarked_finalizable();
+        unmarked
+            .into_iter()
+            .filter_map(|obj| Some((Value::from(obj.addr()), self.pending_finalizer(obj)?)))
+            .collect()
     }
 
     /// Drop PC for a tagged instance or enum whose finalizer has not run.
@@ -2287,6 +2243,7 @@ impl<const S: usize> Machine<S> {
         }
         self.finalizer_by_type.insert(type_id, pc);
         self.finalizer_pcs.insert(pc);
+        self.heap.register_finalizer_type(type_id);
     }
 
     pub(crate) fn run_remaining_finalizers(&mut self) {
@@ -3267,6 +3224,7 @@ impl<const S: usize> Machine<S> {
         if self.heap.is_borrowed() {
             return;
         }
+        self.heap.owned_mut().clear_finalizer_types();
         if self.heap.owned_mut().slab_chunk_count() > 1 {
             *self.heap.owned_mut() = Heap::default();
         } else if self.heap.owned_mut().slab_chunk_count() == 1 {
@@ -3980,7 +3938,7 @@ impl<const S: usize> Machine<S> {
             #[cfg(not(any(test, feature = "debugger")))]
             let debug_attached = false;
 
-            note_dispatch_at(ip, &self.stack, sp);
+            note_dispatch_at(ip);
 
             #[cfg(any(test, feature = "coverage"))]
             if HOOKS && unlikely(self.coverage.is_some()) {
@@ -4514,9 +4472,9 @@ impl<const S: usize> Machine<S> {
                         self.stack.push(self.stack[sp + base + i]);
                     }
                 }
-                _ => match self.exec_rest(opcode, &mut ip, &mut sp, code, constants, stack_cap) {
-                    dispatch::RestFlow::Continue => {}
-                    dispatch::RestFlow::Done(paused) => return paused,
+                _ => match self.exec_rest(opcode, ip, sp, code, constants, stack_cap).get() {
+                    Ok((next_ip, next_sp)) => (ip, sp) = (next_ip, next_sp),
+                    Err(paused) => return paused,
                 },
             }
         }

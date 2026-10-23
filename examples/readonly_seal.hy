@@ -4,9 +4,8 @@
 //
 // @output 312
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 class Point {
     pub x: int,
@@ -21,9 +20,9 @@ impl Point {
 
 fn main() {
     let xs = readonly [1, 2, 3];
-    let _ = write_all(stdout(), to_bytes(format("%i", xs.len())));
+    let _ = print(format("%i", xs.len()));
     let p = readonly new Point(1, 2);
     let q = p.shifted();
-    let _ = write_all(stdout(), to_bytes(format("%i", p.x)));
-    let _ = write_all(stdout(), to_bytes(format("%i", q.x)));
+    let _ = print(format("%i", p.x));
+    let _ = print(format("%i", q.x));
 }

@@ -1,6 +1,6 @@
 # Userland locks + parallelization hints (F3)
 
-[COI-369](https://linear.app/ardax/issue/COI-369/f3-userland-locks-parallelization-hints-call-bag-escapes).
+COI-369.
 Architect-locked model: **userland locks + hints**, not compiler-inserted
 locks. This note is the first-cut contract. **Discard freely** if the
 wording, coverage rule, or sequential-on-cover choice is wrong.

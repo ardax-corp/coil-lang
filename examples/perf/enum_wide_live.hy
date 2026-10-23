@@ -1,8 +1,7 @@
 // Memory: 200k live three- and four-word enum values. Payload words are raw
 // and stored inside the object, so these variants no longer spill a `Vec`.
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 enum Shape {
     Tri(int, int, int),
@@ -43,5 +42,5 @@ fn main() {
         total = total + perimeter(build(200000));
         round = round + 1;
     }
-    let _ = write_all(stdout(), to_bytes(format("%i", total)));
+    let _ = print(format("%i", total));
 }

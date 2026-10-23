@@ -159,9 +159,6 @@ pub struct Pipeline {
     messages_emitted: usize,
     /// Told what [`Self::compile_src_from_file`] is doing (a CLI progress bar).
     progress: Option<CompileProgress>,
-    /// Retain post-opt IL across the next [`Self::compile_src`] (cursor_model).
-    retain_cursor_il: bool,
-    cursor_il: Option<crate::il::tell::CursorIlSnap>,
     /// Runs user macros at compile time (`coil` wires the VM here).
     macro_host: Option<std::sync::Arc<dyn crate::macros::MacroHost>>,
     /// Files whose macros an enclosing pipeline is expanding (cycle check).
@@ -487,7 +484,9 @@ impl Pipeline {
 
     /// Extra `use`/`mod` roots for this repo's examples and stdlib checkouts.
     ///
-    /// CLI/tests pass these as `--root`.
+    /// CLI/tests pass these as `--root`. `COIL_STDLIB` adds one more stdlib
+    /// root for the cargo-workspace tests only; the installed `coil` reads
+    /// no environment variable for roots (#1871).
     pub fn workspace_language_extra_roots() -> Vec<PathBuf> {
         let ws = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -756,8 +755,6 @@ impl Pipeline {
             sink,
             messages_emitted: 0,
             progress: None,
-            retain_cursor_il: false,
-            cursor_il: None,
             macro_host: crate::macros::default_host(),
             macro_stack: Vec::new(),
             expansion_program: false,
@@ -1701,14 +1698,7 @@ impl Pipeline {
             return Err(CompileFail);
         }
 
-        if self.retain_cursor_il {
-            self.compiler_lazy_mut().set_retain_cursor_il(true);
-        }
         self.compiler_lazy_mut().finalize_bytecode();
-        if self.retain_cursor_il {
-            self.cursor_il = self.compiler_lazy_mut().take_cursor_il();
-            self.compiler_lazy_mut().set_retain_cursor_il(false);
-        }
         self.compute_consts(Some((path, src)));
         let mut bytecode = self.compiler_lazy_mut().bytecode_vec();
 
@@ -2054,46 +2044,6 @@ impl Pipeline {
         }
     }
 
-    /// Like [`Self::compile_src`], but keeps post-opt pre-fuse IL for the
-    /// cursor_model gate. Always available so `compiler/tests/cursor_model.rs`
-    /// does not need the `dissect` feature.
-    pub fn compile_src_retaining_il(&mut self, src: &str) -> Result<(Vec<Byte>, Vec<u64>), CompileFail> {
-        self.retain_cursor_il = true;
-        let result = self.compile_src(src);
-        self.retain_cursor_il = false;
-        result
-    }
-
-    /// Number of retained post-opt IL ops after [`Self::compile_src_retaining_il`].
-    pub fn retained_cursor_il_len(&self) -> Option<usize> {
-        self.cursor_il.as_ref().map(|s| s.ops.len())
-    }
-
-    /// Diff retained symbolic-IL tell against lowered bytecode (COI-80).
-    ///
-    /// Requires a prior [`Self::compile_src_retaining_il`]. `ranges` and `seeds`
-    /// are the same function spans / entry cursors used by the VM gate.
-    pub fn diff_il_tell_against_bytecode(
-        &self,
-        bytecode: &[Byte],
-        pool: &[u64],
-        ranges: &[(String, usize, usize)],
-        seeds: &HashMap<usize, u32>,
-    ) -> crate::tell::IlTellDiff {
-        let snap = self
-            .cursor_il
-            .as_ref()
-            .expect("compile_src_retaining_il before diff_il_tell_against_bytecode");
-        crate::il::tell::diff_il_against_bytecode(
-            &snap.ops,
-            &snap.pre_to_post,
-            bytecode,
-            pool,
-            ranges,
-            seeds,
-        )
-    }
-
     /// Compile a single source file in-memory and return the
     /// resulting bytecode, resolving `use` and `mod`
     /// declarations by reading the referenced files from disk.
@@ -2121,14 +2071,7 @@ impl Pipeline {
 
         // Linked IL → one lower (fuse-select + labels). See `Pipeline::compile`.
         self.step(CompileStep::Link);
-        if self.retain_cursor_il {
-            self.compiler_lazy_mut().set_retain_cursor_il(true);
-        }
         self.compiler_lazy_mut().finalize_bytecode();
-        if self.retain_cursor_il {
-            self.cursor_il = self.compiler_lazy_mut().take_cursor_il();
-            self.compiler_lazy_mut().set_retain_cursor_il(false);
-        }
         self.compute_consts(None);
         self.bytecode = self.compiler_lazy_mut().bytecode_vec();
 
@@ -3001,70 +2944,6 @@ fn main() {
         assert_eq!(shared.into_string(), "ok");
     }
 
-    /// Default compile path must not retain IL (dissect-free gate stays opt-in).
-    #[test]
-    fn compile_src_does_not_retain_cursor_il() {
-        let mut pipeline = Pipeline::new();
-        pipeline.compile_src("fn main() {}").expect("compile");
-        assert!(pipeline.retained_cursor_il_len().is_none());
-    }
-
-    /// Failed retaining compile still clears the pipeline retain flag.
-    #[test]
-    fn compile_src_retaining_il_clears_flag_on_failure() {
-        let mut pipeline = Pipeline::new();
-        assert!(pipeline
-            .compile_src_retaining_il("fn main() { !!! }")
-            .is_err());
-        assert!(
-            !pipeline.retain_cursor_il,
-            "retain flag must clear even when compile fails"
-        );
-        assert!(
-            pipeline.retained_cursor_il_len().is_none(),
-            "failed compile must not leave a cursor-IL snap"
-        );
-    }
-
-    /// Retained snap is enough for an end-to-end IL↔bytecode tell diff.
-    #[test]
-    fn compile_src_retaining_il_supports_diff_against_bytecode() {
-        let mut pipeline = Pipeline::new();
-        let (bytecode, pool) = pipeline
-            .compile_src_retaining_il(
-                r#"
-fn add(int a, int b) -> int { return a + b; }
-fn main() { add(1, 2); }
-"#,
-            )
-            .expect("compile");
-        let n = pipeline
-            .retained_cursor_il_len()
-            .expect("cursor IL snapshot");
-        assert!(n > 0);
-        let mut syms = pipeline.program_debug().fn_symbols.clone();
-        syms.sort_by_key(|s| s.entry_pc);
-        let ranges: Vec<(String, usize, usize)> = syms
-            .iter()
-            .enumerate()
-            .map(|(i, s)| {
-                let end = syms
-                    .get(i + 1)
-                    .map(|n| n.entry_pc as usize)
-                    .unwrap_or(bytecode.len());
-                (s.name.clone(), s.entry_pc as usize, end)
-            })
-            .collect();
-        // Same seed on both sides, agreement is what the gate checks.
-        let mut seeds = std::collections::HashMap::new();
-        for (_, start, _) in &ranges {
-            seeds.insert(*start, 0u32);
-        }
-        let report = pipeline.diff_il_tell_against_bytecode(&bytecode, &pool, &ranges, &seeds);
-        assert!(report.mismatches.is_empty(), "{:?}", report.mismatches);
-        assert!(report.checked > 0);
-    }
-
     #[test]
     fn compile_src_succeeds_at_every_opt_level() {
         use crate::OptLevel;
@@ -3340,20 +3219,7 @@ fn main() {
 }
 "#;
         let mut pipeline = Pipeline::new();
-        let (bytecode, constants) = pipeline
-            .compile_src_retaining_il(src)
-            .expect("compile fib and fact");
-        let il = pipeline
-            .cursor_il
-            .as_ref()
-            .map(|snap| {
-                snap.ops
-                    .iter()
-                    .map(crate::dissect::format_il_op)
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            })
-            .unwrap_or_default();
+        let (bytecode, constants) = pipeline.compile_src(src).expect("compile fib and fact");
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         pipeline.wire_host_natives(&mut vm);
         vm.run_raw(
@@ -3364,7 +3230,7 @@ fn main() {
         );
         assert!(
             !vm.panicked(),
-            "recursive fib/fact panicked\n{il}\nbytecode={:?}",
+            "recursive fib/fact panicked\nbytecode={:?}",
             bytecode
                 .iter()
                 .map(|b| b.bytecode().mnemonic())
@@ -3413,16 +3279,16 @@ fn main() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap();
-        let src =
-            std::fs::read_to_string(root.join("examples/perf/nsieve.hy")).expect("read nsieve");
+        let path = root.join("examples/perf/nsieve.hy");
         let mut pipeline = Pipeline::new();
         pipeline.bind_workspace_language_roots();
-        let (bytecode, _) = pipeline
-            .compile_src_retaining_il(&src)
+        let art = pipeline
+            .compile_dissect(path.to_str().expect("utf-8 path"), true)
             .expect("compile nsieve");
-        let snap = pipeline.cursor_il.as_ref().expect("retained IL snapshot");
+        let bytecode = art.bytecode;
+        let snap = art.il_post.as_ref().expect("optimized IL snapshot");
         let il_index_pins = snap
-            .ops
+            .ops()
             .iter()
             .filter(|op| {
                 op.as_encode_byte().is_some_and(|b| {
@@ -3434,7 +3300,7 @@ fn main() {
             })
             .count();
         let il_pins = snap
-            .ops
+            .ops()
             .iter()
             .filter(|op| {
                 op.as_encode_byte().is_some_and(|b| {
@@ -3509,13 +3375,20 @@ fn main() -> int {
     return acc;
 }
 "#;
+        // The dissect compile keeps the optimized pre-fuse IL; it reads a file.
+        let dir = std::env::temp_dir().join(format!("coil_pure_scan_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("scan.hy");
+        std::fs::write(&path, src).expect("write source");
         let mut pipeline = Pipeline::new();
-        let (bytecode, _) = pipeline
-            .compile_src_retaining_il(src)
+        let art = pipeline
+            .compile_dissect(path.to_str().expect("utf-8 path"), true)
             .expect("compile pure helper scan");
-        let snap = pipeline.cursor_il.as_ref().expect("retained IL");
+        let _ = std::fs::remove_dir_all(&dir);
+        let bytecode = art.bytecode;
+        let snap = art.il_post.as_ref().expect("optimized IL snapshot");
         let unchecked = snap
-            .ops
+            .ops()
             .iter()
             .filter(|op| {
                 op.as_encode_byte().is_some_and(|b| {

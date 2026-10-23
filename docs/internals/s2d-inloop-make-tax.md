@@ -2,10 +2,10 @@
 
 S2d ([PR #365](https://github.com/ardax-corp/coil-lang/pull/365)) kept
 **in-loop** `Make*` off dense after an ~18% regress. S2e
-([COI-316](https://linear.app/ardax/issue/COI-316)) removes per-residual
+(COI-316) removes per-residual
 `Seek` restore. S2f–S2k SROA / escape / select delete most in-loop
 `Make*` (those bodies already take dense). S2l
-([COI-322](https://linear.app/ardax/issue/COI-322)) is the leftover
+(COI-322) is the leftover
 policy: **try** dense so MIR SROA / LICM can drop or hoist the alloc;
 **keep** it only when the reconstruct cost is ≤ fuse-IL. Residual
 in-loop Make* still loses to invert+fuse (LOAD/STORE boxing). Historical

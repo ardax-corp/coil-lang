@@ -1,6 +1,10 @@
 // Hit bench for #1434: MIR constant folding on LIR bodies. A body whose
 // only arithmetic is bitwise ops and shifts takes LIR (no dense attempt),
 // and its constants only meet once `mask` inlines.
+//
+// Prints with `write_all` rather than `print` (#1879): perf_metrics reads
+// `check`'s own body, and under `print` the HIR inliner folds `check` into
+// `main`.
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};

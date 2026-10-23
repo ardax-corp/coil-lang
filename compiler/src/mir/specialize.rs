@@ -93,7 +93,7 @@ fn refuse<T>(why: impl std::fmt::Display) -> Option<T> {
 }
 
 /// The labels a body binds: its entry and the aliases a call may name.
-/// Read off the `Label` / `JoinLabel` ops alone, never the body's code.
+/// Read off the `Label` ops alone, never the body's code.
 #[derive(Clone, Debug, Default)]
 pub struct BodyLabels {
     /// First label bound anywhere in the body.
@@ -105,7 +105,7 @@ pub struct BodyLabels {
 impl BodyLabels {
     pub fn of(ops: &[IlOp]) -> Self {
         let label = |op: &IlOp| match op {
-            IlOp::Label(l) | IlOp::JoinLabel(l) => Some(*l),
+            IlOp::Label(l) => Some(*l),
             _ => None,
         };
         Self {
@@ -228,24 +228,32 @@ fn specialize_side(
     // `-O0` / `-Og` run none of these; `-O1` only the folds.
     if opts.mir_fold && opts.mir_sccp {
         crate::mir::sccp(&mut func);
+        check_after(&func, "sccp");
     }
     if opts.mir_loop {
         loop_opts(&mut func, true);
     }
     if opts.mir_fold {
         crate::mir::instcombine(&mut func);
+        check_after(&func, "instcombine");
         crate::mir::destprop(&mut func);
+        check_after(&func, "destprop");
     }
     if opts.mir_loop {
         crate::mir::strength_reduce(&mut func);
+        check_after(&func, "strength_reduce");
         crate::mir::cse(&mut func);
+        check_after(&func, "cse");
         crate::mir::gvn(&mut func);
+        check_after(&func, "gvn");
     }
     // S2f: reuse the mutated array after StoreIndex (drop rematerialized Alloc).
     crate::mir::sroa(&mut func);
+    check_after(&func, "sroa");
     // An object made on each path into a φ and only read field by field
     // after it (`find_in(..) ?? new Span(..)`) is its fields' φs.
     crate::mir::phi_sroa(&mut func);
+    check_after(&func, "phi_sroa");
     super::deopt::fill_deopt_maps(&mut func);
     paint_index_dest_from_uses(&mut func);
     let stores_ssa = func
@@ -477,7 +485,7 @@ fn residual_heap_box(ops: &[IlOp]) -> bool {
 /// novelty — packed `Dense*` must not grow this (COI-385 S8).
 fn emit_cost(ops: &[IlOp]) -> usize {
     ops.iter()
-        .filter(|op| !matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)))
+        .filter(|op| !matches!(op, IlOp::Label(_)))
         .map(|op| match op {
             IlOp::StorePop { .. } | IlOp::Load { .. } => 2,
             IlOp::Byte { byte, .. } => match *byte.bytecode() {
@@ -531,6 +539,7 @@ pub fn try_lower_abi_body_side(
     }
     if has_alloc {
         crate::mir::sroa(&mut func);
+        check_after(&func, "sroa");
     }
     lir_tail(labels, name, pool, has_alloc, func, side, opts)
 }
@@ -542,10 +551,26 @@ pub fn try_lower_abi_body_side(
 fn loop_opts(func: &mut crate::mir::MirFunc, dense: bool) {
     let cse = if dense { crate::mir::cse } else { crate::mir::cse_lir };
     cse(func);
+    check_after(func, "cse");
     crate::mir::destprop(func);
+    check_after(func, "destprop");
     crate::mir::licm(func, dense);
+    check_after(func, "licm");
     cse(func);
+    check_after(func, "cse");
 }
+
+/// Debug builds verify the MIR after each pass, so a pass that breaks SSA
+/// is named where it does instead of surfacing as a bad emit (#1869).
+#[cfg(debug_assertions)]
+fn check_after(func: &crate::mir::MirFunc, pass: &str) {
+    if let Err(e) = func.verify().and_then(|()| func.verify_dominance()) {
+        panic!("MIR verify failed after {pass} in {}: {e}", func.name);
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn check_after(_: &crate::mir::MirFunc, _: &str) {}
 
 /// A body's LIR, lowered once from its MIR by [`fuse_fallback`] and kept
 /// for [`lower_abi_body_reusing`], with what that lowering left behind.
@@ -673,10 +698,12 @@ fn lir_tail(
     let fold = !func.keep_lines && opts.mir_fold;
     if fold && opts.mir_sccp {
         crate::mir::sccp(&mut func);
+        check_after(&func, "sccp");
     }
     if fold && crate::mir::instcombine_lir(&mut func) > 0 {
         let order: Vec<_> = func.blocks.iter().map(|b| b.id).collect();
         super::from_hir::tidy(&mut func, &order);
+        check_after(&func, "instcombine_lir");
     }
     super::deopt::fill_deopt_maps(&mut func);
     let entry = labels.first;
@@ -728,7 +755,7 @@ fn emit_cleanup_pad(
     let top = body
         .iter()
         .filter_map(|op| match op {
-            IlOp::Label(l) | IlOp::JoinLabel(l) => Some(l.0),
+            IlOp::Label(l) => Some(l.0),
             IlOp::Entry { target, .. } | IlOp::Jump { target, .. } => Some(target.0),
             _ => None,
         })
@@ -762,7 +789,7 @@ fn eq_immediately_before(ops: &[IlOp], jump_i: usize) -> bool {
     while i > 0 {
         i -= 1;
         match &ops[i] {
-            IlOp::Label(_) | IlOp::JoinLabel(_) => continue,
+            IlOp::Label(_) => continue,
             other => return is_eq_byte(other),
         }
     }
@@ -803,7 +830,7 @@ fn has_alloc_inside_loop(ops: &[IlOp]) -> bool {
 fn loop_ranges(ops: &[IlOp]) -> Vec<(usize, usize)> {
     let mut label_at = HashMap::new();
     for (i, op) in ops.iter().enumerate() {
-        if let IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) = op {
+        if let IlOp::Label(Label(id)) = op {
             label_at.entry(*id).or_insert(i);
         }
     }
@@ -873,7 +900,7 @@ mod cost_gate_tests {
         use crate::il::Label;
         let ops = [
             IlOp::Label(Label(4)),
-            IlOp::JoinLabel(Label(9)),
+            IlOp::Label(Label(9)),
             IlOp::Const { imm: 1, loc: loc() },
             IlOp::Label(Label(12)),
         ];
@@ -892,5 +919,39 @@ mod cost_gate_tests {
             IlOp::byte(Byte::new(Instruction::DenseMove).with_dense_abc(0, 1, 0, 0)),
         ];
         assert_eq!(emit_cost(&dense), 2);
+    }
+
+    /// A pass that leaves broken MIR is named in debug builds (#1869).
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "MIR verify failed after sroa in broken")]
+    fn check_after_names_the_pass() {
+        super::check_after(&crate::mir::MirFunc::new("broken"), "sroa");
+    }
+
+    /// A use one arm defines but the join reads passes the structural
+    /// check; the dominance check catches it (#1869).
+    #[test]
+    fn verify_dominance_rejects_a_use_one_arm_defines() {
+        let src = r#"
+func @arm(v0: i64) -> i64 {
+bb0:
+    v1 = iconst.i64 0
+    v2 = icmp.slt v0, v1
+    brif v2, bb1, bb2
+bb1:
+    v3 = iadd v0, v0
+    jump bb2
+bb2:
+    v4 = iadd v3, v0
+    return v4
+}
+"#;
+        let f = crate::mir::parse_func(src).expect(src);
+        f.verify().unwrap();
+        let err = f.verify_dominance().unwrap_err();
+        assert!(err.contains("reads v3"), "{err}");
+        let ok = crate::mir::parse_func(&src.replace("v4 = iadd v3, v0", "v4 = iadd v0, v0")).unwrap();
+        ok.verify_dominance().unwrap();
     }
 }

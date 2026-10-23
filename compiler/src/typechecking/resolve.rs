@@ -75,7 +75,7 @@ fn intern_items(
             local_defs.entry((*name).to_string()).or_insert(id);
         }
         // A module-level `const NAME = …;` (its binder of the pair).
-        Expression::Constant(name, _) => {
+        Expression::Constant(name, ..) => {
             if let Expression::Identifier(n) = name.1.as_ref() {
                 let id = interner.intern(module, DefKind::Const, n);
                 local_defs.entry((*n).to_string()).or_insert(id);
@@ -155,6 +155,43 @@ fn bind_uses(
         }
         _ => {}
     }
+}
+
+/// Every name a module's top level declares, of any kind: what a `use` of
+/// it may import (#1851). Includes the locals its own `use`s bind, so a
+/// module can pass an import on.
+pub fn item_names(ast: &Output, out: &mut std::collections::HashSet<String>) {
+    let ast = unwrap(ast);
+    let name: &str = match ast.1.as_ref() {
+        Expression::Program(children) | Expression::Fragment(children) | Expression::Block(children) => {
+            for child in children {
+                item_names(child, out);
+            }
+            return;
+        }
+        Expression::Function { name, .. }
+        | Expression::Class { name, .. }
+        | Expression::EnumDecl { name, .. }
+        | Expression::TypeAlias { name, .. }
+        | Expression::StaticDecl { name, .. }
+        | Expression::TypeClass { name, .. }
+        | Expression::AttrDecl { name, .. }
+        | Expression::DeriveDecl { name, .. }
+        | Expression::FnMacroDecl { name, .. } => name,
+        Expression::ExternStruct(decl) => decl.name,
+        Expression::Module(name, _) => name.as_str(),
+        Expression::Use { name, alias, .. } => alias.as_deref().unwrap_or(name),
+        Expression::Constant(name, ..) => match name.1.as_ref() {
+            Expression::Identifier(n) => n,
+            _ => return,
+        },
+        Expression::ExternBlock { declarations, .. } => {
+            out.extend(declarations.iter().map(|d| d.name.to_string()));
+            return;
+        }
+        _ => return,
+    };
+    out.insert(name.to_string());
 }
 
 /// DefId for `use path::name`.

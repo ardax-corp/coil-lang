@@ -2,7 +2,7 @@
 
 > **Status: historical.** Written while stack-lowered (fuse-IL) bodies were the default. Since M5 (2026-10-15) every body lowers through MIR and emits dense or LIR. Today's pipeline: [pipeline.md](pipeline.md).
 
-Linear: [COI-332](https://linear.app/ardax/issue/COI-332/q9-full-formatstring-on-mir-reopen-i4).
+Linear: COI-332.
 Spec: [language-quirks.md](language-quirks.md) Q9. Island: [mir-islands.md](mir-islands.md) I4.
 
 I4 (#345) closed `FORMAT` / `STRING` / `STRINGIFY` / `PRINT` as a **hard

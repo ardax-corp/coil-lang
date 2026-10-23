@@ -3,9 +3,8 @@
 //
 // @output Point ctor512
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 use attr_demo::logged_new;
 
 #[logged_new(message = "Point ctor")]
@@ -16,6 +15,6 @@ class Point {
 
 fn main() {
     let p = Point::make(5, 12);
-    let _ = write_all(stdout(), to_bytes(format("%i", p.x)));
-    let _ = write_all(stdout(), to_bytes(format("%i", p.y)));
+    let _ = print(format("%i", p.x));
+    let _ = print(format("%i", p.y));
 }

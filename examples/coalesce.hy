@@ -2,17 +2,16 @@
 //
 // @output bar,hi,7,9
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn main() {
     let a = Option::None ?? "bar";
-    let _ = write_all(stdout(), to_bytes(format("%s,", a)));
+    let _ = print(format("%s,", a));
     let b = Option::Some("hi") ?? "bar";
-    let _ = write_all(stdout(), to_bytes(format("%s,", b)));
+    let _ = print(format("%s,", b));
     let c = Result::Err("boom") ?? 7;
-    let _ = write_all(stdout(), to_bytes(format("%i,", c)));
+    let _ = print(format("%i,", c));
     let d = Result::Ok(9) ?? 7;
-    let _ = write_all(stdout(), to_bytes(format("%i", d)));
+    let _ = print(format("%i", d));
 }

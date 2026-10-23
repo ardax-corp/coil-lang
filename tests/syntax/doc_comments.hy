@@ -1,6 +1,13 @@
-// `///` doc comments directly above a declaration, a class field or a
-// function parameter are accepted and do not change what the code does.
+// `///` doc comments directly above a declaration, a class field, a
+// function parameter, a `const` or a `static let` (#1843) are accepted and
+// do not change what the code does.
 use tests::assert;
+
+/// The answer.
+const ANSWER: int = 42;
+
+/// How many times `bump` ran.
+static let BUMPS: int = 0;
 
 /// A point in the plane.
 class Point {
@@ -43,4 +50,7 @@ test("documented items behave as undocumented ones") {
     assert!(area(Shape::Square(3)) == 9);
     assert!(area(Shape::Dot) == 0);
     assert!(manhattan(new Point(2, 3), 1) == 6);
+    assert!(ANSWER == 42);
+    BUMPS += 1;
+    assert!(BUMPS == 1);
 }

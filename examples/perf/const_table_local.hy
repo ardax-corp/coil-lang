@@ -2,9 +2,8 @@
 // PRESENT cipher's 4-bit S-box) read with a variable index, in a function
 // called 4M times. The table is built on the first call and loaded after
 // that, instead of an array per call.
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn sbox16(int x) -> int {
     const SBOX = readonly [12, 5, 6, 11, 9, 0, 10, 13, 3, 14, 15, 8, 4, 7, 1, 2];
@@ -20,5 +19,5 @@ fn main() {
     for i in 0..4000000 {
         s = (s + sbox16(i ^ s)) & 65535;
     }
-    let _ = write_all(stdout(), to_bytes(format("%i", s)));
+    let _ = print(format("%i", s));
 }

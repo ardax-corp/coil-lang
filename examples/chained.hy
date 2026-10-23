@@ -5,9 +5,8 @@
 //
 // @output 427
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 enum Inner {
     Inner { v: int },
@@ -27,6 +26,6 @@ fn read_y(Outer o) -> int {
 
 fn main() {
     let p = Outer::Outer { x: Inner::Inner { v: 42 }, y: 7 };
-    let _ = write_all(stdout(), to_bytes(format("%i", read_x_v(p))));
-    let _ = write_all(stdout(), to_bytes(format("%i", read_y(p))));
+    let _ = print(format("%i", read_x_v(p)));
+    let _ = print(format("%i", read_y(p)));
 }

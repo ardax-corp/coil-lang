@@ -3,9 +3,8 @@
 // direct CALL/RETURN, like a `(float, float)` tuple, instead of an object
 // per return.
 // Checksum: 45000150000.0
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 readonly class Vec2 {
     pub x: float,
@@ -26,5 +25,5 @@ fn main() {
         let r = turn(new Vec2(i as float, 1.0), 8);
         acc = acc + r.x - r.y;
     }
-    write_all(stdout(), to_bytes(format("%f", acc)));
+    let _ = print(format("%f", acc));
 }

@@ -1,7 +1,6 @@
 // CPU: coroutine resume/yield traffic.
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 gen fn ping(int n) {
     let i = 0;
@@ -19,5 +18,5 @@ fn main() {
         acc += resume h;
         i = i + 1;
     }
-    let _ = write_all(stdout(), to_bytes(format("%i", acc)));
+    let _ = print(format("%i", acc));
 }

@@ -1,7 +1,6 @@
 // CPU: dict field read/write pressure (GetField / SetField).
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn main() {
     let d = { x: 0, y: 0 };
@@ -11,5 +10,5 @@ fn main() {
         d.y += 2;
         i = i + 1;
     }
-    let _ = write_all(stdout(), to_bytes(format("%i", d.x + d.y)));
+    let _ = print(format("%i", d.x + d.y));
 }

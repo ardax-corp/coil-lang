@@ -47,34 +47,15 @@ convoys, `invert_guard_branch`, `slot_promote_tell`, `ssa_gvn` and per-body
 The HIR passes run in `emit_hir` after inlining: unroll, fold,
 bounds, sink_return. MIR runs its own passes per tier (CSE in `mir/cse.rs`, LICM in `mir/licm.rs`) ([mir.md](../../../../docs/internals/mir.md)).
 
-## Cursor facts: `sp` vs `tell`
+## Stack height: `sp`
 
-| Analysis | Module | Quantity |
-|----------|--------|----------|
-| **`sp`** | [`crate::il::sp`] | Per-op eval-stack *height* delta (`stack_delta`, feeds `tell` and `coil dissect`). `STORE` does **not** floor height. |
-| **`tell`** | [`crate::il::tell`] | Shared operand/local *cursor*. `STORE` raises the cursor to `slot + 1` even when height is lower. |
-
-Do not substitute one for the other (COI-81). Height is a per-op delta; the
-tier choice and `Seek` normalization need the cursor. `Tell::Unknown` at a join
-is often the correct answer (a raising loop header), not a gap.
-
-## Residual `IlOp::Byte`
-
-Hot-path ops are typed variants (`Load`, `Const`, `Bin`, `BinSlot*`, `*Return`,
-`HostInvoke`, …). `IlOp::Byte` is the long-tail escape hatch (FORMAT, FFI,
-`Seek`, some unaries still waiting on typed lift, packed forms, tests): an
-opaque barrier to fuse-select unless decoded with
-`as_encode_byte()`. Absolute `JMP`/`JMPF`/`JMPT` as `Byte` is forbidden before
-fuse (`assert_no_residual_abs_jumps`).
-
-## fuse-select (D4, in `lower.rs`)
-
-**Fn:** `il::lower::fuse_select` called from `lower_optimized`. Runs **once**
-after concat. Not gated by `OptimizeOptions`. Not a second lowering: PC assign
-and encode stay in `lower_optimized`. No post-lower `adjust_target`.
+[`crate::il::sp`] gives the per-op eval-stack *height* delta (`stack_delta`),
+used by `coil dissect`'s depth column. `STORE` does **not** floor height. The
+shared-cursor model (`il::tell`) and its VM differential test were removed
+with the IL optimizer they served (#1874).
 
 - **Input:** **Typed** [`IlOp`](../op.rs). `Jump`/`Entry` stay symbolic.
-  Incoming [`Label`] / [`JoinLabel`] binds and `FuseHint` / `JoinClass` (D3) are
+  Incoming [`Label`] binds and `FuseHint` (D3) are
   hard barriers — no dummy `NOOP` / `DUP;POP`. Residual [`IlOp::Byte`] is the
   **cold set** (`FORMAT`, FFI, packed multi-slot LOAD/STORE, unmatched
   `from_plain_byte`) and is **refused** in any multi-op window.
@@ -88,10 +69,8 @@ and encode stay in `lower_optimized`. No post-lower `adjust_target`.
   non-first op; window that contains residual **`Byte`**; `*Return` fusion when
   window[0] is an **unconditional join** (stacked arm value must be popped).
   **`Entry` CALL / TailCall** is never a fuse window member.
-  **`FuseHint`** on the cond-jump (`nofuse` / `ValueUnderJmp`) refuses
-  `*Jmpf`/`*Jmpt` fusion (pair-`?` / pair-match keep `EQ;JMPF`). A
-  **`JoinLabel`** bind is a value join: same window-break as a label, including
-  `CONST;RETURN`. Residual abs JMP as `Byte` panics. Per-function fuse-select
+  **`FuseHint`** `nofuse` on the cond-jump refuses
+  `*Jmpf`/`*Jmpt` fusion (pair-`?` / pair-match keep `EQ;JMPF`). Residual abs JMP as `Byte` panics. Per-function fuse-select
   is not production (measured no win).
 - **Tests:** `il/lower.rs` `lower_fuses_bin_slot_slot`, `lower_fuses_bin_slot_imm`,
   `lower_fuses_const_return_imm`, `lower_fuses_load_const_add_store_to_bin_slot_imm_store`,

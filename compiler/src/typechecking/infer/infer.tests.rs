@@ -907,7 +907,7 @@ fn lambda_arg_node_ids_cached_before_body() {
             Expression::Program(cs) | Expression::Block(cs) | Expression::Fragment(cs) => {
                 cs.iter().find_map(find_lambda_arg_span)
             }
-            Expression::Variable(_, Some(value)) | Expression::Constant(_, Some(value)) => {
+            Expression::Variable(_, Some(value)) | Expression::Constant(_, Some(value), ..) => {
                 find_lambda_arg_span(value)
             }
             Expression::Lambda { args, .. } => {
@@ -955,7 +955,7 @@ fn lambda_multi_arg_node_ids_cached() {
                     out.extend(collect_lambda_arg_spans(c));
                 }
             }
-            Expression::Variable(_, Some(value)) | Expression::Constant(_, Some(value)) => {
+            Expression::Variable(_, Some(value)) | Expression::Constant(_, Some(value), ..) => {
                 out.extend(collect_lambda_arg_spans(value));
             }
             Expression::Lambda { args, .. } => {
@@ -1005,7 +1005,7 @@ fn nested_lambda_arg_node_ids_cached() {
                     out.extend(collect_lambda_arg_spans(c));
                 }
             }
-            Expression::Variable(_, Some(value)) | Expression::Constant(_, Some(value)) => {
+            Expression::Variable(_, Some(value)) | Expression::Constant(_, Some(value), ..) => {
                 out.extend(collect_lambda_arg_spans(value));
             }
             Expression::Lambda { args, body, .. } => {
@@ -2451,13 +2451,13 @@ fn is_thread_sendable_ty_accepts_immediates_strings_and_host_handles() {
     assert!(c.is_thread_sendable_ty(&string()));
     assert!(c.is_thread_sendable_ty(&boolean()));
     assert!(c.is_thread_sendable_ty(&unit_ty()));
-    assert!(c.is_thread_sendable_ty(&sender_ty()));
-    assert!(c.is_thread_sendable_ty(&receiver_ty()));
-    assert!(c.is_thread_sendable_ty(&mutex_ty()));
-    assert!(c.is_thread_sendable_ty(&rwlock_ty()));
+    assert!(c.is_thread_sendable_ty(&sender_ty(int())));
+    assert!(c.is_thread_sendable_ty(&receiver_ty(int())));
+    assert!(c.is_thread_sendable_ty(&mutex_ty(int())));
+    assert!(c.is_thread_sendable_ty(&rwlock_ty(int())));
     assert!(c.is_thread_sendable_ty(&array(int())));
     assert!(c.is_thread_sendable_ty(&tuple_ty(vec![int(), string()])));
-    assert!(c.is_thread_sendable_ty(&tuple_ty(vec![receiver_ty(), sender_ty()])));
+    assert!(c.is_thread_sendable_ty(&tuple_ty(vec![receiver_ty(int()), sender_ty(int())])));
 }
 
 #[test]
@@ -2465,7 +2465,7 @@ fn is_thread_sendable_ty_rejects_stream_coroutine_and_functions() {
     use crate::typechecking::ty::stream_ty;
     let c = Checker::new();
     assert!(!c.is_thread_sendable_ty(&stream_ty()));
-    assert!(!c.is_thread_sendable_ty(&crate::typechecking::ty::thread_ty()));
+    assert!(!c.is_thread_sendable_ty(&crate::typechecking::ty::thread_ty(int())));
     assert!(!c.is_thread_sendable_ty(&Ty::Fun(Box::new(unit_ty()), Box::new(int()))));
     assert!(!c.is_thread_sendable_ty(&Ty::App(
         Box::new(Ty::Con("coroutine".into())),

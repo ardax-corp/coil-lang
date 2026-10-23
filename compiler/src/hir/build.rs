@@ -1020,13 +1020,22 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             return;
         }
         let unit_body = b.body.exprs[root.0 as usize].ty.as_ref().is_some_and(layout::is_unit);
+        let returned = match &b.body.exprs[root.0 as usize].kind {
+            HirKind::Block { tail: Some(t), .. } => b.body.exprs[t.0 as usize]
+                .ty
+                .as_ref()
+                .is_some_and(|ty| matches!(ty, Ty::Never) || result_ok_err(ty).is_some()),
+            _ => false,
+        };
         let HirKind::Block { stmts, tail } = &mut b.body.exprs[root.0 as usize].kind else {
             return;
         };
         // A unit body whose last expression's value it drops (`f()?;`) is
-        // that expression as a statement, then the fall-off.
+        // that expression as a statement, then the fall-off. So is a tail
+        // that is not the function's `Result`, such as a trailing `match`
+        // whose arms are `println(…)?` (#1844).
         if let Some(t) = *tail {
-            if !unit_body {
+            if !unit_body && returned {
                 return;
             }
             stmts.push(t);
@@ -1178,7 +1187,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 let local = b.local(name, ty, LocalKind::Let);
                 self.emit_ty(b, node, HirKind::Let { local, init: None }, Some(coil_ty::unit()))
             }
-            E::Constant(name, _) => {
+            E::Constant(name, ..) => {
                 let n = match name.1.as_ref() {
                     E::Identifier(n) => n.to_string(),
                     _ => "<const>".to_string(),
@@ -1586,7 +1595,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                     let local = b.local(name, ty, LocalKind::Let);
                     return self.emit_ty(b, node, HirKind::Let { local, init: Some(init) }, Some(coil_ty::unit()));
                 }
-                Expression::Constant(name, _) => {
+                Expression::Constant(name, ..) => {
                     let n = match name.1.as_ref() {
                         Expression::Identifier(n) => n.to_string(),
                         _ => "<const>".to_string(),

@@ -1,33 +1,30 @@
 impl<const S: usize> Machine<S> {
+    /// Every opcode the giant match in `execute` leaves out. `ip` / `sp` go
+    /// in and come back by value (#1882). Not `#[cold]`: that cost `fib`
+    /// 1.8% and a closure-call loop 0.3% (callgrind).
     fn exec_rest(
         &mut self,
         opcode: &Byte,
-        ip_out: &mut usize,
-        sp_out: &mut usize,
+        mut ip: usize,
+        mut sp: usize,
         code: &[Byte],
         constants: &[u64],
         stack_cap: usize,
-    ) -> dispatch::RestFlow {
-        let mut ip = *ip_out;
-        let mut sp = *sp_out;
+    ) -> dispatch::RestExit {
         let bc = opcode.bytecode();
         // Step budget charge, as `charge_step!` in `execute`.
         macro_rules! charge_step {
             ($back:expr) => {
                 self.fuel = self.fuel.wrapping_sub(($back) as u64);
                 if unlikely(self.fuel == 0) {
-                    *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Done(self.step_budget_out(ip.saturating_sub(1)));
+                    return dispatch::RestExit::done(self.step_budget_out(ip.saturating_sub(1)));
                 }
             };
         }
         // A Coil int op: the exact result, or a panic.
         macro_rules! int_trap {
             ($trap:expr) => {{
-                *ip_out = ip;
-                *sp_out = sp;
-                return dispatch::RestFlow::Done(self.runtime_panic($trap.message(), ip.saturating_sub(1)));
+                return dispatch::RestExit::done(self.runtime_panic($trap.message(), ip.saturating_sub(1)));
             }};
         }
         // A plain binary op: [`crate::fused::eval_bin`] with a constant op,
@@ -71,34 +68,22 @@ impl<const S: usize> Machine<S> {
                     self.stack.push(Value::from(offset));
                 }
                 Instruction::OptionNicheToHeap => {
-                    *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Done(self.runtime_panic("retired opcode OptionNicheToHeap", ip.saturating_sub(1)));
+                    return dispatch::RestExit::done(self.runtime_panic("retired opcode OptionNicheToHeap", ip.saturating_sub(1)));
                 }
                 Instruction::HeapOptionToNiche => {
-                    *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Done(self.runtime_panic("retired opcode HeapOptionToNiche", ip.saturating_sub(1)));
+                    return dispatch::RestExit::done(self.runtime_panic("retired opcode HeapOptionToNiche", ip.saturating_sub(1)));
                 }
                 Instruction::PairJumpIfTag => {
-                    *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Done(self.runtime_panic("retired opcode PairJumpIfTag", ip.saturating_sub(1)));
+                    return dispatch::RestExit::done(self.runtime_panic("retired opcode PairJumpIfTag", ip.saturating_sub(1)));
                 }
                 Instruction::PairToHeap => {
-                    *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Done(self.runtime_panic("retired opcode PairToHeap", ip.saturating_sub(1)));
+                    return dispatch::RestExit::done(self.runtime_panic("retired opcode PairToHeap", ip.saturating_sub(1)));
                 }
                 Instruction::HeapToPair => {
-                    *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Done(self.runtime_panic("retired opcode HeapToPair", ip.saturating_sub(1)));
+                    return dispatch::RestExit::done(self.runtime_panic("retired opcode HeapToPair", ip.saturating_sub(1)));
                 }
                 Instruction::ReturnPair => {
-                    *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Done(self.runtime_panic("retired opcode ReturnPair", ip.saturating_sub(1)));
+                    return dispatch::RestExit::done(self.runtime_panic("retired opcode ReturnPair", ip.saturating_sub(1)));
                 }
                 Instruction::INC => {
                     let (slot, prefix, is_float) = opcode.inc_dec_parts();
@@ -455,9 +440,7 @@ impl<const S: usize> Machine<S> {
                         resume_ip: ip,
                         resume_sp: sp,
                     });
-                    *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Done(true);
+                    return dispatch::RestExit::done(true);
                 }
                 Instruction::DeclareFFI => {
                     let raw = opcode.operand_u32();
@@ -531,9 +514,7 @@ impl<const S: usize> Machine<S> {
                     let host_op = match self.natives.get_by_id(fn_id) {
                         Some(native) => native.host_op(),
                         None => {
-                            *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Done(self.runtime_panic(
+                    return dispatch::RestExit::done(self.runtime_panic(
                                 &format!("HostInvoke: unknown native id {fn_id}"),
                                 ip.saturating_sub(1),
                             ));
@@ -563,10 +544,8 @@ impl<const S: usize> Machine<S> {
                         }
                         crate::HostOp::Unwind => {
                             self.stack.seek(tell - consume);
-                            *ip_out = ip;
-                            *sp_out = sp;
                             self.unwind_resume();
-                            return dispatch::RestFlow::Done(false);
+                            return dispatch::RestExit::done(false);
                         }
                         crate::HostOp::Task => {
                             let mut args = [Value::default(); 2];
@@ -577,14 +556,10 @@ impl<const S: usize> Machine<S> {
                             match self.task_host_op(fn_id, &args[..n], &mut ip, &mut sp) {
                                 TaskFlow::Value(v) => self.stack.push(v),
                                 TaskFlow::Switched => {
-                                    *ip_out = ip;
-                                    *sp_out = sp;
-                                    return dispatch::RestFlow::Continue;
+                                    return dispatch::RestExit::resume(ip, sp);
                                 }
                                 TaskFlow::Panic(msg) => {
-                                    *ip_out = ip;
-                                    *sp_out = sp;
-                                    return dispatch::RestFlow::Done(
+                                    return dispatch::RestExit::done(
                                         self.runtime_panic(&msg, ip.saturating_sub(1)),
                                     );
                                 }
@@ -601,9 +576,7 @@ impl<const S: usize> Machine<S> {
                                 if let TaskFlow::Value(v) = self.task_sleep(ms, &mut ip, &mut sp) {
                                     self.stack.push(v);
                                 }
-                                *ip_out = ip;
-                                *sp_out = sp;
-                                return dispatch::RestFlow::Continue;
+                                return dispatch::RestExit::resume(ip, sp);
                             }
                             let native = self.natives.get_by_id(fn_id).expect("id checked above");
                             let args = &self.stack.top_window(consume)[1..];
@@ -632,18 +605,14 @@ impl<const S: usize> Machine<S> {
                                     // The arguments stay: the HostInvoke runs again
                                     // when another thread posts the wake.
                                     self.task_suspend_thread(&mut ip, &mut sp);
-                                    *ip_out = ip;
-                                    *sp_out = sp;
-                                    return dispatch::RestFlow::Continue;
+                                    return dispatch::RestExit::resume(ip, sp);
                                 }
                                 Ok(None) if park_tasks && crate::task::io_retry_parked() => {
                                     // A connect in progress: the arguments stay and
                                     // the HostInvoke runs again on readiness.
                                     let req = crate::task::take_io_retry_park().expect("checked");
                                     self.task_suspend_io_retry(req, &mut ip, &mut sp);
-                                    *ip_out = ip;
-                                    *sp_out = sp;
-                                    return dispatch::RestFlow::Continue;
+                                    return dispatch::RestExit::resume(ip, sp);
                                 }
                                 Ok(None) => {
                                     self.stack.seek(tell - consume);
@@ -652,9 +621,7 @@ impl<const S: usize> Machine<S> {
                                             // Suspend this task (with any generator it
                                             // is resuming); another task runs meanwhile.
                                             self.task_suspend_io(req, layout, &mut ip, &mut sp);
-                                            *ip_out = ip;
-                                            *sp_out = sp;
-                                            return dispatch::RestFlow::Continue;
+                                            return dispatch::RestExit::resume(ip, sp);
                                         } else {
                                             // No other task: park the whole VM, even
                                             // inside a generator (it does not yield).
@@ -665,9 +632,7 @@ impl<const S: usize> Machine<S> {
                                                 resume_sp: sp,
                                                 layout,
                                             });
-                                            *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Done(true);
+                    return dispatch::RestExit::done(true);
                                         }
                                     } else {
                                         // Void natives must still leave a defined TOS.
@@ -676,15 +641,11 @@ impl<const S: usize> Machine<S> {
                                 }
                                 Err(crate::FfiError::IntTrap(t)) => int_trap!(t),
                                 Err(crate::FfiError::Panic(msg)) => {
-                                    *ip_out = ip;
-                                    *sp_out = sp;
-                                    return dispatch::RestFlow::Done(self.runtime_panic(&msg, ip.saturating_sub(1)));
+                                    return dispatch::RestExit::done(self.runtime_panic(&msg, ip.saturating_sub(1)));
                                 }
                                 Err(e) => {
                                     let name = native.name();
-                                    *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Done(self.runtime_panic(
+                    return dispatch::RestExit::done(self.runtime_panic(
                                         &format!("HostInvoke failed for `{name}`: {e}"),
                                         ip.saturating_sub(1),
                                     ));
@@ -699,29 +660,21 @@ impl<const S: usize> Machine<S> {
                     }
                 }
                 Instruction::HostInvokeNiche => {
-                    *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Done(self.runtime_panic("retired opcode HostInvokeNiche", ip.saturating_sub(1)));
+                    return dispatch::RestExit::done(self.runtime_panic("retired opcode HostInvokeNiche", ip.saturating_sub(1)));
                 }
                 Instruction::FloatChainStore => {
-                    *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Done(self.runtime_panic("retired opcode FloatChainStore", ip.saturating_sub(1)));
+                    return dispatch::RestExit::done(self.runtime_panic("retired opcode FloatChainStore", ip.saturating_sub(1)));
                 }
                 // Fused `BinSlotSlot <arith>; CONST pool; CmpJmpf/CmpJmpt`, no stack traffic.
                 Instruction::BinSlotSlotConstJmpf => {
-                    *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Done(self.runtime_panic(
+                    return dispatch::RestExit::done(self.runtime_panic(
                         "retired opcode BinSlotSlotConstJmpf",
                         ip.saturating_sub(1),
                     ));
 
                 }
                 Instruction::BinSlotSlotConstJmpt => {
-                    *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Done(self.runtime_panic(
+                    return dispatch::RestExit::done(self.runtime_panic(
                         "retired opcode BinSlotSlotConstJmpt",
                         ip.saturating_sub(1),
                     ));
@@ -732,9 +685,7 @@ impl<const S: usize> Machine<S> {
                     } else {
                         let _ = io::stdout().flush();
                     }
-                    *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Done(false);
+                    return dispatch::RestExit::done(false);
                 }
                 Instruction::Panic => {
                     let panic_ip = ip.saturating_sub(1);
@@ -750,9 +701,7 @@ impl<const S: usize> Machine<S> {
                         // A child task's panic fails its scope, which reports it.
                         self.task_panic_message = Some(s.to_string());
                         self.panicked = true;
-                        *ip_out = ip;
-                        *sp_out = sp;
-                        return dispatch::RestFlow::Done(false);
+                        return dispatch::RestExit::done(false);
                     }
                     let loc_suffix = self
                         .format_panic_location(panic_ip)
@@ -773,9 +722,7 @@ impl<const S: usize> Machine<S> {
                         let _ = io::stderr().flush();
                     }
                     self.panicked = true;
-                    *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Done(false);
+                    return dispatch::RestExit::done(false);
                 }
                 Instruction::STRING => {
                     let idx = opcode.operand_u32() as usize;
@@ -783,9 +730,7 @@ impl<const S: usize> Machine<S> {
                     self.push_program_string(idx, ip);
                 }
                 Instruction::NOOP => {
-                    *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Continue;
+                    return dispatch::RestExit::resume(ip, sp);
                 }
                 Instruction::MakeEnum | Instruction::MakeEnumK => {
                     self.push_make_enum(opcode, ip);
@@ -855,9 +800,7 @@ impl<const S: usize> Machine<S> {
                         _ => None,
                     };
                     let Some(result) = result else {
-                        *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Done(self.runtime_panic("index out of bounds", ip.saturating_sub(1)));
+                    return dispatch::RestExit::done(self.runtime_panic("index out of bounds", ip.saturating_sub(1)));
                     };
                     self.stack.push(result);
                 }
@@ -873,9 +816,7 @@ impl<const S: usize> Machine<S> {
                         _ => None,
                     };
                     let Some(result) = result else {
-                        *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Done(self.runtime_panic("index out of bounds", ip.saturating_sub(1)));
+                    return dispatch::RestExit::done(self.runtime_panic("index out of bounds", ip.saturating_sub(1)));
                     };
                     self.stack.push(result);
                 }
@@ -917,15 +858,11 @@ impl<const S: usize> Machine<S> {
                         Some(crate::memory::Object::Instance(gc)) => match gc.as_ref().get(key) {
                             Some(v) => v,
                             None => {
-                                *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Done(self.runtime_panic("no such field", ip.saturating_sub(1)));
+                    return dispatch::RestExit::done(self.runtime_panic("no such field", ip.saturating_sub(1)));
                             }
                         },
                         _ => {
-                            *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Done(self.runtime_panic("no such field", ip.saturating_sub(1)));
+                    return dispatch::RestExit::done(self.runtime_panic("no such field", ip.saturating_sub(1)));
                         }
                     };
                     self.stack.push(result);
@@ -942,9 +879,7 @@ impl<const S: usize> Machine<S> {
                             promise!(gc.as_ref().slot_len().is_some_and(|n| idx < n));
                             gc.as_mut().set_slot(idx, value);
                         } else {
-                            *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Done(self.runtime_panic("SetField on non-instance", ip.saturating_sub(1)));
+                    return dispatch::RestExit::done(self.runtime_panic("SetField on non-instance", ip.saturating_sub(1)));
                         }
                         self.stack.push(value);
                     } else {
@@ -959,9 +894,7 @@ impl<const S: usize> Machine<S> {
                             let member = Self::value_as_member(&self.heap, value);
                             gc.as_mut().set(key, member);
                         } else {
-                            *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Done(self.runtime_panic("SetField on non-instance", ip.saturating_sub(1)));
+                    return dispatch::RestExit::done(self.runtime_panic("SetField on non-instance", ip.saturating_sub(1)));
                         }
                         self.stack.push(value);
                     }
@@ -977,14 +910,10 @@ impl<const S: usize> Machine<S> {
                         Self::find_object_by_addr(&self.heap, target_addr)
                     {
                         if !gc.as_mut().store_indexed(index, value, unchecked) {
-                            *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Done(self.runtime_panic("index out of bounds", ip.saturating_sub(1)));
+                    return dispatch::RestExit::done(self.runtime_panic("index out of bounds", ip.saturating_sub(1)));
                         }
                     } else {
-                        *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Done(self.runtime_panic("StoreIndex on non-array", ip.saturating_sub(1)));
+                    return dispatch::RestExit::done(self.runtime_panic("StoreIndex on non-array", ip.saturating_sub(1)));
                     }
                     self.stack.push(value);
                 }
@@ -995,14 +924,10 @@ impl<const S: usize> Machine<S> {
                     let unchecked = matches!(*bc, Instruction::StoreIndexPinUnchecked);
                     if let Some(Object::Array(mut gc)) = self.pinned_object(slot) {
                         if !gc.as_mut().store_indexed(index, value, unchecked) {
-                            *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Done(self.runtime_panic("index out of bounds", ip.saturating_sub(1)));
+                    return dispatch::RestExit::done(self.runtime_panic("index out of bounds", ip.saturating_sub(1)));
                         }
                     } else {
-                        *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Done(self.runtime_panic("StoreIndexPin on non-array", ip.saturating_sub(1)));
+                    return dispatch::RestExit::done(self.runtime_panic("StoreIndexPin on non-array", ip.saturating_sub(1)));
                     }
                     self.stack.push(value);
                 }
@@ -1014,9 +939,7 @@ impl<const S: usize> Machine<S> {
                     let index = self.stack[sp + idx].as_int();
                     let addr = self.stack[sp + arr].raw() as u64;
                     if !self.vload(vdest, addr, index, ty) {
-                        *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Done(self.runtime_panic("VLoad out of bounds", ip.saturating_sub(1)));
+                    return dispatch::RestExit::done(self.runtime_panic("VLoad out of bounds", ip.saturating_sub(1)));
                     }
                 }
                 Instruction::VStore => {
@@ -1027,9 +950,7 @@ impl<const S: usize> Machine<S> {
                     let index = self.stack[sp + idx].as_int();
                     let addr = self.stack[sp + arr].raw() as u64;
                     if !self.vstore(vsrc, addr, index, ty) {
-                        *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Done(self.runtime_panic("VStore out of bounds", ip.saturating_sub(1)));
+                    return dispatch::RestExit::done(self.runtime_panic("VStore out of bounds", ip.saturating_sub(1)));
                     }
                 }
                 Instruction::VBin => {
@@ -1096,6 +1017,8 @@ impl<const S: usize> Machine<S> {
                     }
                 }
                 Instruction::DenseArrayPush => {
+                    // A push the storage has room for runs in the dense
+                    // streak (`dispatch::dense_array_push`); this one grows.
                     let (_, dest, arr, val) = opcode.dense_abc_parts();
                     promise!(sp + dest < stack_cap);
                     promise!(sp + arr < stack_cap);
@@ -1103,9 +1026,7 @@ impl<const S: usize> Machine<S> {
                     let target_val = self.stack[sp + arr];
                     let value = self.stack[sp + val];
                     if !self.array_push_value(target_val, value) {
-                        *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Done(self.runtime_panic("ArrayPush on non-array", ip.saturating_sub(1)));
+                    return dispatch::RestExit::done(self.runtime_panic("ArrayPush on non-array", ip.saturating_sub(1)));
                     }
                     self.stack[sp + dest] = target_val;
                     self.maybe_gc_after_alloc(ip);
@@ -1131,9 +1052,7 @@ impl<const S: usize> Machine<S> {
                     let value = self.stack.pop();
                     let target_val = self.stack.pop();
                     if !self.array_push_value(target_val, value) {
-                        *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Done(self.runtime_panic("ArrayPush on non-array", ip.saturating_sub(1)));
+                    return dispatch::RestExit::done(self.runtime_panic("ArrayPush on non-array", ip.saturating_sub(1)));
                     }
                     self.stack.push(target_val);
                     self.maybe_gc_after_alloc(ip);
@@ -1205,9 +1124,7 @@ impl<const S: usize> Machine<S> {
                             // The frame reserve counts the widest payload the program builds.
                             let wide = payload.len() > self.match_payload_bound;
                             if unlikely(wide) && !self.reserve_wide_payload(payload.len()) {
-                                *ip_out = ip;
-                                *sp_out = sp;
-                                return dispatch::RestFlow::Done(
+                                return dispatch::RestExit::done(
                                     self.runtime_panic(STACK_OVERFLOW, ip.saturating_sub(1)),
                                 );
                             }
@@ -1341,9 +1258,7 @@ impl<const S: usize> Machine<S> {
                     if let Some(Object::Coroutine(gc)) = Self::find_object_by_addr(&self.heap, addr)
                     {
                         if gc.as_ref().state == CoroState::Done {
-                            *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Done(self.runtime_panic("resumed after completion", ip.saturating_sub(1)));
+                    return dispatch::RestExit::done(self.runtime_panic("resumed after completion", ip.saturating_sub(1)));
                         }
                         // A delegating coroutine resumes its innermost
                         // `yield from` delegate.
@@ -1355,16 +1270,12 @@ impl<const S: usize> Machine<S> {
                             target = sub;
                         }
                         if !self.resume_coroutine(&mut ip, &mut sp, target, send_val, code, true) {
-                            *ip_out = ip;
-                            *sp_out = sp;
-                            return dispatch::RestFlow::Done(
+                            return dispatch::RestExit::done(
                                 self.runtime_panic(STACK_OVERFLOW, ip.saturating_sub(1)),
                             );
                         }
                     } else {
-                        *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Done(self.runtime_panic(
+                    return dispatch::RestExit::done(self.runtime_panic(
                             "resumed invalid coroutine handle",
                             ip.saturating_sub(1),
                         ));
@@ -1384,16 +1295,12 @@ impl<const S: usize> Machine<S> {
                         Self::find_object_by_addr(&self.heap, addr)
                     {
                         if !self.start_yield_from(&mut ip, &mut sp, sub, code) {
-                            *ip_out = ip;
-                            *sp_out = sp;
-                            return dispatch::RestFlow::Done(
+                            return dispatch::RestExit::done(
                                 self.runtime_panic(STACK_OVERFLOW, ip.saturating_sub(1)),
                             );
                         }
                     } else {
-                        *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Done(self.runtime_panic(
+                    return dispatch::RestExit::done(self.runtime_panic(
                             "yield from invalid coroutine handle",
                             ip.saturating_sub(1),
                         ));
@@ -1420,9 +1327,10 @@ impl<const S: usize> Machine<S> {
                     promise!(self.stack.tell() > value_arity + app_dict_arity);
                     let raw = self.stack.pop();
                     let (next, flow) = self.call_indirect(raw, value_arity, app_dict_arity, ip, &mut sp, code);
-                    *ip_out = next;
-                    *sp_out = sp;
-                    return flow;
+                    return match flow {
+                        dispatch::RestFlow::Continue => dispatch::RestExit::resume(next, sp),
+                        dispatch::RestFlow::Done(paused) => dispatch::RestExit::done(paused),
+                    };
                 }
                 Instruction::MakeFn => {
                     // Stack (bottom → TOS):
@@ -1505,13 +1413,13 @@ impl<const S: usize> Machine<S> {
                     let snapshot = match snapshot {
                         Ok(s) if s.statics.iter().all(|(slot, _)| (*slot as usize) < self.statics.len()) => s,
                         Ok(_) => {
-                            return dispatch::RestFlow::Done(
+                            return dispatch::RestExit::done(
                                 self.runtime_panic("RestoreSnapshot: static slot out of range", ip.saturating_sub(1)),
                             );
                         }
                         Err(e) => {
                             let message = format!("RestoreSnapshot: {e}");
-                            return dispatch::RestFlow::Done(self.runtime_panic(&message, ip.saturating_sub(1)));
+                            return dispatch::RestExit::done(self.runtime_panic(&message, ip.saturating_sub(1)));
                         }
                     };
                     for (slot, value) in self.heap.restore_snapshot(&snapshot) {
@@ -1525,6 +1433,7 @@ impl<const S: usize> Machine<S> {
                         && !gc.as_ref().payload.is_empty()
                     {
                         gc.payload_mut().type_id = opcode.operand_u32();
+                        self.heap.note_enum_type(Object::Enum(gc), opcode.operand_u32());
                     }
                 }
                 Instruction::TagArrayKind => {
@@ -1555,7 +1464,7 @@ impl<const S: usize> Machine<S> {
                             #[cfg(any(debug_assertions, feature = "gc-stress"))]
                             {
                                 let message = format!("UnboxValue: boxed tag {} where tag {expected_tag} is expected", b.tag);
-                                return dispatch::RestFlow::Done(self.runtime_panic(&message, ip.saturating_sub(1)));
+                                return dispatch::RestExit::done(self.runtime_panic(&message, ip.saturating_sub(1)));
                             }
                             #[cfg(not(any(debug_assertions, feature = "gc-stress")))]
                             Value::default()
@@ -1603,19 +1512,13 @@ impl<const S: usize> Machine<S> {
                 | Instruction::DynEq
                 | Instruction::DynNe
                 | Instruction::DynPrint => {
-                    *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Done(self.runtime_panic("retired opcode Dyn*", ip.saturating_sub(1)));
+                    return dispatch::RestExit::done(self.runtime_panic("retired opcode Dyn*", ip.saturating_sub(1)));
                 }
                 _ => {
-                    *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Done(self.runtime_panic("unknown opcode", ip.saturating_sub(1)));
+                    return dispatch::RestExit::done(self.runtime_panic("unknown opcode", ip.saturating_sub(1)));
                 }
         }
-        *ip_out = ip;
-        *sp_out = sp;
-        dispatch::RestFlow::Continue
+        dispatch::RestExit::resume(ip, sp)
     }
 }
 

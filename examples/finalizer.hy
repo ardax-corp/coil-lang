@@ -3,9 +3,7 @@
 // @output closed
 
 use gc::collect;
-use io::stdout;
-use io::sync::write_all;
-use string::to_bytes;
+use io::sync::print;
 
 static let log: string = "";
 
@@ -26,5 +24,5 @@ fn leak_handle() {
 fn main() {
     leak_handle();
     collect();
-    let _ = write_all(stdout(), to_bytes(log));
+    let _ = print(log);
 }

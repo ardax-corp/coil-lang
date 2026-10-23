@@ -3,6 +3,7 @@
 // @output hello2
 
 use io::stdout;
+use io::sync::print;
 use io::sync::write_all;
 
 use string::{format, from_bytes, to_bytes};
@@ -24,5 +25,5 @@ fn main() {
     );
 
     let back = to_bytes("hi");
-    let _ = write_all(stdout(), to_bytes(format("%i", back.len())));
+    let _ = print(format("%i", back.len()));
 }

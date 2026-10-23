@@ -1,9 +1,8 @@
 // CPU/allocation workload for pointer-niche Option and unary Result pairs.
 
-use io::stdout;
-use io::sync::write_all;
+use io::sync::print;
 
-use string::{format, to_bytes};
+use string::format;
 
 fn maybe_text(int value) -> Option<string> {
     if value % 3 == 0 {
@@ -33,5 +32,5 @@ fn main() {
         };
         value = value + 1;
     }
-    let _ = write_all(stdout(), to_bytes(format("%i", total)));
+    let _ = print(format("%i", total));
 }

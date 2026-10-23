@@ -2,12 +2,11 @@
 //
 // @output 42
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn print_any(Show x) {
-    let _ = write_all(stdout(), to_bytes(format("%s", show(x))));
+    let _ = print(format("%s", show(x)));
 }
 
 fn main() {

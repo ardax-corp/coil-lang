@@ -2,9 +2,8 @@
 //
 // @output 423
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn add(int a, int b) -> int {
     return a + b;
@@ -12,7 +11,7 @@ fn add(int a, int b) -> int {
 
 fn main() {
     let f = add;
-    let _ = write_all(stdout(), to_bytes(format("%i", f(20, 22))));
+    let _ = print(format("%i", f(20, 22)));
     let g = add(1);
-    let _ = write_all(stdout(), to_bytes(format("%i", g(2))));
+    let _ = print(format("%i", g(2)));
 }

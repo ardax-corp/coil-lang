@@ -18,10 +18,8 @@
 //
 // @output use-coil-tls
 
-use io::stdout;
-use io::sync::write_all;
-use string::to_bytes;
+use io::sync::print;
 
 fn main() {
-    let _ = write_all(stdout(), to_bytes("use-coil-tls"));
+    let _ = print("use-coil-tls");
 }

@@ -1,53 +1,38 @@
-// Pure save payload encode/decode (2 bytes: room, has_key).
-// File open/read/write stays in `main.hy` for clarity (deps may also call IO).
+// Save payload encode/decode: two bytes, the room and whether the player
+// has the key. File IO stays in `main.hy`.
+
+use world::{Player, Room};
 
 class SaveData {
-    pub room: int,
-    pub has_key: int,
+    pub room: Room,
+    pub has_key: bool,
 }
 
-fn encode_save(int room, int has_key) -> Vec<byte> {
-    let z: byte = 0;
-    let one: byte = 1;
-    let two: byte = 2;
-    let hi: byte = 0;
-    let lo: byte = 0;
-    if room == 1 {
-        hi = one;
+fn encode_save(Player p) -> Vec<byte> {
+    let room: byte = match p.room {
+        Room::Hall => 0,
+        Room::Library => 1,
+        Room::Garden => 2,
+    };
+    let key: byte = 0;
+    if p.has_key {
+        key = 1;
     }
-    if room == 2 {
-        hi = two;
-    }
-    if has_key == 1 {
-        lo = one;
-    }
-    if room == 0 {
-        hi = z;
-    }
-    let payload: Vec<byte> = Vec::new();
-    payload.push(hi);
-    payload.push(lo);
-    return payload;
+    return [room, key];
 }
 
-fn decode_save(Vec<byte> got) -> SaveData {
-    if got.len() < 2 {
-        panic "save too short";
+fn decode_save(Vec<byte> got) -> Result<SaveData, string> {
+    if got.len() != 2 {
+        raise "save file has the wrong size";
     }
-    let one: byte = 1;
-    let two: byte = 2;
-    let r = 0;
-    let k = 0;
-    let rb = got[0];
-    let kb = got[1];
-    if rb == one {
-        r = 1;
+    let room = match got[0] as int {
+        0 => Room::Hall,
+        1 => Room::Library,
+        2 => Room::Garden,
+        default => Room::Hall,
+    };
+    if (got[0] as int) > 2 {
+        raise "save file names no room";
     }
-    if rb == two {
-        r = 2;
-    }
-    if kb == one {
-        k = 1;
-    }
-    return new SaveData(r, k);
+    return new SaveData(room, (got[1] as int) == 1);
 }

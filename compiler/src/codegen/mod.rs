@@ -656,10 +656,6 @@ pub struct Compiler {
     /// Cost budgets for typed inlining (COI-124).
     pub inline_cost: inline_cost::InlineCostOptions,
 
-    /// When true, [`Self::finalize_bytecode`] keeps post-opt pre-fuse IL.
-    retain_cursor_il: bool,
-    /// Snapshot filled by finalize when [`Self::retain_cursor_il`] is set.
-    cursor_il: Option<crate::il::tell::CursorIlSnap>,
     deopt_map_drafts: Vec<crate::mir::DraftDeoptMap>,
 
     /// Why the last [`Self::try_lower_hir_function`] did not lower its body.
@@ -864,8 +860,6 @@ impl Default for Compiler {
             operand_stack_slots: crate::typechecking::DEFAULT_OPERAND_STACK_SLOTS,
             opt_options: crate::il::opt::OptimizeOptions::default(),
             inline_cost: inline_cost::InlineCostOptions::default(),
-            retain_cursor_il: false,
-            cursor_il: None,
             deopt_map_drafts: Vec::new(),
             hir_refusal: None,
             hir_module: None,
@@ -901,7 +895,6 @@ fn extract_enum_name(ty: &crate::typechecking::ty::Ty) -> Option<String> {
 }
 
 mod compiler;
-mod emit_loop;
 mod inline_cost;
 mod precise_frames;
 pub(crate) use precise_frames::jump_target as jump_target_of;

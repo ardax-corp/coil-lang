@@ -1,7 +1,6 @@
 // Hit bench for COI-268 dense MIR float ops (mandelbrot-shaped kernel).
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn escape(float cr, float ci, int max_iter) -> int {
     let zr = 0.0;
@@ -38,5 +37,5 @@ fn mandel(int size, int max_iter) -> int {
 }
 
 fn main() {
-    let _ = write_all(stdout(), to_bytes(format("%i", mandel(80, 40))));
+    let _ = print(format("%i", mandel(80, 40)));
 }

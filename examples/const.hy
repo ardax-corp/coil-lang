@@ -2,13 +2,12 @@
 //
 // @output 42hi
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn main() {
     const answer = 42;
-    let _ = write_all(stdout(), to_bytes(format("%i", answer)));
+    let _ = print(format("%i", answer));
     const greeting = "hi";
-    let _ = write_all(stdout(), to_bytes(format("%s", greeting)));
+    let _ = print(format("%s", greeting));
 }

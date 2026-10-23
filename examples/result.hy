@@ -4,6 +4,7 @@
 // @output 420-1
 
 use io::stdout;
+use io::sync::print;
 use io::sync::write_all;
 use string::{format, to_bytes};
 
@@ -20,6 +21,6 @@ fn main() {
         stdout(),
         to_bytes(format("%i", unwrap_result(Result::Ok(Option::Some(42))))),
     );
-    let _ = write_all(stdout(), to_bytes(format("%i", unwrap_result(Result::Ok(Option::None)))));
-    let _ = write_all(stdout(), to_bytes(format("%i", unwrap_result(Result::Err("oops")))));
+    let _ = print(format("%i", unwrap_result(Result::Ok(Option::None))));
+    let _ = print(format("%i", unwrap_result(Result::Err("oops"))));
 }

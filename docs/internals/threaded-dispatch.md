@@ -53,8 +53,40 @@ Packed `LOAD` / `STORE` / `Seek` stay on the match by default: threading them
 without also threading every interleaved heap op **bounces** nsieve. They are
 implemented as shared helpers and used by the giant match.
 
-`DenseMake` / `DensePush` / `DenseArrayPush` / `DenseMakeObject` stay on the
-match (alloc / GC). Tombstones stay on the match.
+`DenseMake` / `DensePush` / `DenseMakeObject` stay on the match (alloc / GC).
+Tombstones stay on the match. `DenseArrayPush` is always-hot (#1864): a push
+the array's storage has room for runs in the streak (the array from the
+one-entry dense cache, no accounting, no safepoint); one that would grow
+hands itself back unexecuted (`STREAK_YIELD`, `ip` back on it) and the giant
+match grows the array and runs the allocation safepoint. (A scalar-value
+flag that would keep a `Vec<int>` unscanned is not safe: shared generic
+bodies type a `T` word as `i64` in MIR.)
+
+| #1864 (4-core container, min of 9) | before | after |
+| --- | --- | --- |
+| 2^21 pushes, `Vec::with_capacity` | 83 ms (~38 ns/push) | 37 ms (~16 ns/push) |
+| 2^21 pushes, `Vec::new` (grows) | 85 ms | 39 ms |
+| nsieve(2^21), n from argv | 303 ms | 250 ms |
+
+Fused `EQ` / `NEQ` (`BinSlotSlotJmpf op=EQ`, `DenseIndexJmpf` tails) stay
+structural (`value_eq::values_eq`); `fused::eq_values` answers two unequal
+words of which one lies outside the slab span (an `int` compare) before any
+heap probe (#1866). A 4.2M-iteration loop on `k == needle` (even, unequal
+ints): 75 ms -> 63 ms, vs 59 ms for the same loop on `k > needle`.
+
+`DenseStoreIndex` / `DenseFieldStore` read the stored word from their dest
+byte and write no register, so dense emit gives a store's unread dest its
+value's register (`alias_dead_store_dests`, #1867): `flags[k] = 0` no longer
+moves the constant before every store, and nsieve's k-loop is
+`BinSlotSlotJmpf; DenseStoreIndex; DenseBin;JMP`. nsieve(2^21): 225 ms ->
+205 ms.
+
+`exec_rest` takes `ip` / `sp` by value and returns them in a two-word
+`RestExit` (`ip == usize::MAX` carries the paused flag), which comes back in
+registers instead of through `&mut` out-params (#1882). Callgrind `Ir`: a
+2M-iteration closure-call + `len` loop 2,370M -> 2,348M (-0.9%); `fib` and
+`for_in_iter` unchanged. Marking `exec_rest` `#[cold]` was measured and
+rejected: `fib` +1.8%, `for_in_iter` +0.3%, the closure loop +0.3%.
 
 Debugger-attached runs never enter the hot loop (per-op stops).
 

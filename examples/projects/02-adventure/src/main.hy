@@ -1,215 +1,129 @@
 // 02-adventure — text adventure over stdin/stdout.
 //
-// Modules: world (rooms/player), commands (byte parse), save (encode/decode).
-// File IO and stdin live here for clarity (deps may also call IO + `?`).
-// Input: `read_to_end` once, then split on `\n` (batch / Ctrl+D on a TTY).
+// Modules: world (rooms, player), commands (parse a line into a `Command`),
+// save (encode/decode). Stdin, stdout and the save file live here.
 //
-//   rm -f out.hyc
 //   printf 'look\ngo north\ntake key\ninventory\ngo south\ngo east\nlook\nquit\n' | \
-//     timeout 10s ./target/release/coil examples/projects/02-adventure/src/main.hy
+//     coil --root examples/projects/02-adventure/src --root <coil-stdlib>/src \
+//       --allow-read --allow-write examples/projects/02-adventure/src/main.hy
 
 use io::close;
 use io::open;
 use io::stdin;
-use io::stdout;
+use io::sync::println;
+use io::sync::read_line;
 use io::sync::read_to_end;
 use io::sync::write_all;
+use string::format;
 
-use world::{Player, key_here, move_ok, new_player, player_has_key, player_room, room_exits, room_title, try_move, try_take_key};
+use commands::{Command, parse_command};
+use save::{decode_save, encode_save};
+use world::{Player, Room, key_here, new_player, room_exits, room_title, try_move, try_take_key};
 
-use commands::{cmd_dir, cmd_kind, parse_line};
+const SAVE_PATH: string = "coil_adventure_save.dat";
 
-use save::{SaveData, decode_save, encode_save};
+const HELP: string = "Commands: look, go north/south/east/west, take [key], inventory, save, load, help, quit";
 
-use string::{format, to_bytes};
-
-fn save_player(string path, int room, int has_key) {
-    let payload = encode_save(room, has_key);
-    let s = open(path, "w")?;
-    write_all(s, payload)?;
+fn save_player(Player p) -> Result<(), IoError> {
+    let s = open(SAVE_PATH, "w")?;
+    write_all(s, encode_save(p))?;
     close(s)?;
-    return 0;
+    return Ok(());
 }
 
-fn load_player(string path) {
-    let s = open(path, "r")?;
+fn load_player(Player p) -> Result<bool, IoError> {
+    let s = open(SAVE_PATH, "r")?;
     let got = read_to_end(s)?;
     close(s)?;
-    return decode_save(got);
+    if let Result::Ok(data) = decode_save(got) {
+        p.room = data.room;
+        p.has_key = data.has_key;
+        return Ok(true);
+    }
+    return Ok(false);
 }
 
-fn print_look(Player p) {
-    let room = player_room(p);
-    let _ = write_all(stdout(), to_bytes("You are in the "));
-    let _ = write_all(stdout(), to_bytes(format("%s", room_title(room))));
-    let _ = write_all(stdout(), to_bytes(". Exits: "));
-    let _ = write_all(stdout(), to_bytes(format("%s", room_exits(room))));
-    let _ = write_all(stdout(), to_bytes(". "));
-    if key_here(p) == 1 {
-        let _ = write_all(stdout(), to_bytes("A brass key glints on a shelf. "));
+fn look(Player p) -> Result<(), IoError> {
+    println(format("You are in the %s. Exits: %s.", room_title(p.room), room_exits(p.room)))?;
+    if key_here(p) {
+        println("A brass key glints on a shelf.")?;
     }
-    if player_has_key(p) == 1 {
-        if room == 2 {
-            let _ = write_all(stdout(), to_bytes("The garden gate unlocks - you win! "));
-        }
+    if p.has_key && p.room == Room::Garden {
+        println("The garden gate unlocks - you win!")?;
     }
+    return Ok(());
 }
 
-fn print_help() {
-    let _ = write_all(
-        stdout(),
-        to_bytes(
-            "Commands: look, go north/south/east/west, take [key], inventory, save, load, help, quit",
-        ),
-    );
+/// Runs one command; false once the player quits.
+fn handle(Player p, Command c) -> Result<bool, IoError> {
+    let playing = true;
+    match c {
+        Command::Look => {
+            look(p)?;
+        },
+        Command::Go(d) => {
+            if try_move(p, d) {
+                look(p)?;
+            } else {
+                println("You cannot go that way.")?;
+            }
+        },
+        Command::Take => {
+            if try_take_key(p) {
+                println("Taken: brass key.")?;
+            } else {
+                println("Nothing to take.")?;
+            }
+        },
+        Command::Inventory => {
+            if p.has_key {
+                println("Inventory: brass key.")?;
+            } else {
+                println("Inventory: (empty).")?;
+            }
+        },
+        Command::Save => {
+            if save_player(p).is_ok() {
+                println("Saved.")?;
+            } else {
+                println("Save failed.")?;
+            }
+        },
+        Command::Load => {
+            if load_player(p) ?? false {
+                look(p)?;
+            } else {
+                println("Load failed.")?;
+            }
+        },
+        Command::Help => {
+            println(HELP)?;
+        },
+        Command::Quit => {
+            playing = false;
+        },
+        Command::Unknown => {
+            println("Unknown command. Type help.")?;
+        },
+    }
+    return Ok(playing);
 }
 
-fn handle_line(Player p, Vec<byte> line, string save_path) -> int {
-    if line.len() == 0 {
-        return 1;
-    }
-    let c = parse_line(line);
-    let k = cmd_kind(c);
-
-    if k == 0 {
-        print_look(p);
-        let _ = write_all(stdout(), to_bytes(" "));
-    }
-    if k == 1 {
-        let d = cmd_dir(c);
-        if move_ok(p, d) == 1 {
-            try_move(p, d);
-            let _ = write_all(stdout(), to_bytes("OK. "));
-            print_look(p);
-            let _ = write_all(stdout(), to_bytes(" "));
-        } else {
-            let _ = write_all(stdout(), to_bytes("You cannot go that way. "));
-        }
-    }
-    if k == 2 {
-        if key_here(p) == 1 {
-            try_take_key(p);
-            let _ = write_all(stdout(), to_bytes("Taken: brass key. "));
-        } else {
-            let _ = write_all(stdout(), to_bytes("Nothing to take. "));
-        }
-    }
-    if k == 3 {
-        if player_has_key(p) == 1 {
-            let _ = write_all(stdout(), to_bytes("Inventory: brass key. "));
-        } else {
-            let _ = write_all(stdout(), to_bytes("Inventory: (empty). "));
-        }
-    }
-    if k == 4 {
-        let r = save_player(save_path, player_room(p), player_has_key(p));
-        let _ = write_all(
-            stdout(),
-            to_bytes(
-                format(
-                    "%s",
-                    match r {
-                        Result::Ok(_) => "Saved. ",
-                        Result::Err(_) => "Save failed. ",
-                    },
-                ),
-            ),
-        );
-    }
-    if k == 5 {
-        let r = load_player(save_path);
-        let ok = match r {
-            Result::Ok(_) => 1,
-            Result::Err(_) => 0,
-        };
-        if ok == 1 {
-            let data = match r {
-                Result::Ok(d) => d,
-                Result::Err(_) => new SaveData(0, 0),
-            };
-            p.room = data.room;
-            p.has_key = data.has_key;
-            let _ = write_all(stdout(), to_bytes("Loaded. "));
-            print_look(p);
-            let _ = write_all(stdout(), to_bytes(" "));
-        } else {
-            let _ = write_all(stdout(), to_bytes("Load failed. "));
-        }
-    }
-    if k == 6 {
-        print_help();
-        let _ = write_all(stdout(), to_bytes(" "));
-    }
-    if k == 7 {
-        let _ = write_all(stdout(), to_bytes("Bye."));
-        return 0;
-    }
-    if k == 8 {
-        let _ = write_all(stdout(), to_bytes("Unknown command. Type help. "));
-    }
-    return 1;
-}
-
-fn main() {
-    let _ = write_all(stdout(), to_bytes("=== Tiny Adventure === "));
-    let _ = write_all(stdout(), to_bytes("Type help for commands (end input with Ctrl+D / EOF). "));
-    print_help();
-    let _ = write_all(stdout(), to_bytes(" "));
-
+fn main() -> Result<(), IoError> {
+    println("=== Tiny Adventure ===")?;
+    println(HELP)?;
     let p = new_player();
-    print_look(p);
-    let _ = write_all(stdout(), to_bytes(" "));
-
-    let save_path = "coil_adventure_save.dat";
-    let z: byte = 0;
-    let nl: byte = 10;
-    let cr: byte = 13;
-
+    look(p)?;
     let input = stdin();
-    let raw = match read_to_end(input) {
-        Result::Ok(b) => b,
-        Result::Err(_) => Vec::from([z]),
-    };
-
-    let i = 0;
-    let running = 1;
-    while running == 1 {
-        if i >= raw.len() {
-            let _ = write_all(stdout(), to_bytes("Bye."));
-            running = 0;
+    while let Option::Some(line) = read_line(input)? {
+        if line.len() == 0 {
+            continue;
         }
-        if running == 1 {
-            let line: Vec<byte> = Vec::new();
-            line.push(z);
-            let collecting = 1;
-            while collecting == 1 {
-                if i >= raw.len() {
-                    collecting = 0;
-                }
-                if collecting == 1 {
-                    let b = raw[i];
-                    i = i + 1;
-                    if b == nl {
-                        collecting = 0;
-                    }
-                    if b != nl {
-                        if b != cr {
-                            line.push(b);
-                        }
-                    }
-                }
-            }
-            let _ = write_all(stdout(), to_bytes("> "));
-            if line.len() > 1 {
-                let out: Vec<byte> = Vec::new();
-                out.push(line[1]);
-                let j = 2;
-                while j < line.len() {
-                    out.push(line[j]);
-                    j = j + 1;
-                }
-                running = handle_line(p, out, save_path);
-            }
+        println("> " + line)?;
+        if !handle(p, parse_command(line))? {
+            break;
         }
     }
+    println("Bye.")?;
+    return Ok(());
 }

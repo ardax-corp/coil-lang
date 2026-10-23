@@ -419,7 +419,7 @@ impl SymbolIndex {
                         visit_output(index, file, source, init);
                     }
                 }
-                Expression::Constant(name, init) => {
+                Expression::Constant(name, init, ..) => {
                     visit_output(index, file, source, name);
                     if let Some(init) = init {
                         visit_output(index, file, source, init);

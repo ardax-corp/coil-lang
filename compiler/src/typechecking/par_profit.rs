@@ -737,7 +737,7 @@ impl Scan<'_> {
                 self.walk(iterable, on_return);
                 self.walk_guarded(body, on_return, ParGuard::Opaque);
             }
-            Expression::Variable(_, Some(init)) | Expression::Constant(_, Some(init)) => {
+            Expression::Variable(_, Some(init)) | Expression::Constant(_, Some(init), ..) => {
                 self.walk(init, on_return)
             }
             Expression::LetDestructure { rhs, .. } => self.walk(rhs, on_return),
@@ -805,7 +805,7 @@ fn contains_return(ast: &Output<'_>) -> bool {
         | Expression::Try(inner)
         | Expression::Readonly(inner)
         | Expression::Variable(_, Some(inner))
-        | Expression::Constant(_, Some(inner))
+        | Expression::Constant(_, Some(inner), ..)
         | Expression::LetDestructure { rhs: inner, .. } => contains_return(inner),
         Expression::Add(a, b)
         | Expression::Sub(a, b)
@@ -1305,7 +1305,7 @@ fn collect_const_calls(
             collect_const_calls(iterable, work, out);
             collect_const_calls(body, work, out);
         }
-        Expression::Variable(_, Some(init)) | Expression::Constant(_, Some(init)) => {
+        Expression::Variable(_, Some(init)) | Expression::Constant(_, Some(init), ..) => {
             collect_const_calls(init, work, out);
         }
         Expression::LetDestructure { rhs, .. } => collect_const_calls(rhs, work, out),

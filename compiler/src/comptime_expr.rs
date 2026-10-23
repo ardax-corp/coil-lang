@@ -93,7 +93,7 @@ fn collect<'a>(node: &mut Output<'a>, consts: &mut Vec<Output<'a>>) {
     // Span-keyed checker tables need each synthetic node to have its own span.
     let fresh = crate::attrs::fresh_span;
     let binder = (fresh(), Box::new(Expression::Identifier(name)));
-    let head = (fresh(), Box::new(Expression::Constant(binder, None)));
+    let head = (fresh(), Box::new(Expression::Constant(binder, None, Vec::new())));
     consts.push((fresh(), Box::new(Expression::Fragment(vec![head, value]))));
 }
 
@@ -112,7 +112,7 @@ pub fn explain_messages(program: &Output<'_>, messages: &mut [reporting::Message
             }
             Expression::Fragment(parts) => match parts.as_slice() {
                 [binder, value] => match binder.1.as_ref() {
-                    Expression::Constant(name, _) => match name.1.as_ref() {
+                    Expression::Constant(name, ..) => match name.1.as_ref() {
                         Expression::Identifier(n) if is_comptime_const(n) => Some((*n, value.0.into_range())),
                         _ => None,
                     },

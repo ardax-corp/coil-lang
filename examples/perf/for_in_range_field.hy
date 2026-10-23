@@ -1,7 +1,6 @@
 // C2b / Q6 rung 1: heap-field Range as counted cur/end (no GetField).
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 class Holder {
     pub r: Range<int>,
@@ -22,5 +21,5 @@ fn main() {
         total = total + range_sum(new Holder(0..(1 << 14)));
         round = round + 1;
     }
-    let _ = write_all(stdout(), to_bytes(format("%i", total)));
+    let _ = print(format("%i", total));
 }

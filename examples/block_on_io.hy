@@ -2,9 +2,8 @@
 //
 // @output 2
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 use task::block_on;
 
 gen fn greet() -> int {
@@ -14,5 +13,5 @@ gen fn greet() -> int {
 
 fn main() {
     let n = block_on(greet());
-    let _ = write_all(stdout(), to_bytes(format("%i", n)));
+    let _ = print(format("%i", n));
 }

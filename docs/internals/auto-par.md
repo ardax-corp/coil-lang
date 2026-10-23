@@ -287,7 +287,7 @@ of the sequential reduction, so a fold that overflows is one the sequential
 loop performs too.
 
 Array / dict / coro / user-`Iterator` `for` stays sequential: isolate IPA does not
-send the heap collection (that is C1 shared-heap steal, [COI-365](https://linear.app/ardax/issue/COI-365)).
+send the heap collection (that is C1 shared-heap steal, COI-365).
 
 ## F2 admission vs still sequential
 

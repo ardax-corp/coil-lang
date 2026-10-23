@@ -1,9 +1,8 @@
 // Memory: a loop rebuilds a large list into the same local. The previous
 // round's list is dead once the local is about to be overwritten; a frame
 // map that still lists the local keeps both lists alive at peak.
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 class Node {
     pub v: int,
@@ -47,5 +46,5 @@ fn main() {
         total = total + len_of(list);
         round = round + 1;
     }
-    let _ = write_all(stdout(), to_bytes(format("%i", total)));
+    let _ = print(format("%i", total));
 }
