@@ -2265,20 +2265,13 @@ impl<const S: usize> Machine<S> {
 
     /// In-place `Vec` / array grow. Returns false when `target` is not an array.
     fn array_push_value(&mut self, target: Value, value: Value) -> bool {
-        self.array_push_word(target, value, false)
-    }
-
-    /// [`Self::array_push_value`] for a value the compiler typed as a
-    /// scalar word (`dense::PUSH_SCALAR`), which never marks the array as
-    /// holding references (#1864).
-    pub(super) fn array_push_word(&mut self, target: Value, value: Value, scalar: bool) -> bool {
         let target_addr = target.raw() as u64;
         let Some(crate::memory::Object::Array(mut gc)) =
             Self::find_object_by_addr(&self.heap, target_addr)
         else {
             return false;
         };
-        gc.as_mut().push_word(value, scalar);
+        gc.as_mut().push(value);
         self.heap.account_array(gc.as_mut());
         true
     }

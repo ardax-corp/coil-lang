@@ -2802,22 +2802,13 @@ impl ObjArray {
 
     #[inline]
     pub fn push(&mut self, v: Value) {
-        self.push_word(v, false);
-    }
-
-    /// [`Self::push`], told whether `v` is a scalar word: a scalar is
-    /// never a reference, so the array stays unscanned (#1864).
-    #[inline]
-    pub fn push_word(&mut self, v: Value, scalar: bool) {
         if let ArrayData::Bytes(b) = &mut self.data
             && let Some(byte) = byte_of(v)
         {
             b.push(byte);
             return;
         }
-        if !scalar {
-            self.note();
-        }
+        self.note();
         self.words_vec().push(v);
     }
 
@@ -2825,10 +2816,10 @@ impl ObjArray {
     /// no unpack, so nothing to account and no allocation safepoint.
     /// False (and nothing changed) otherwise (#1864).
     #[inline(always)]
-    pub fn push_in_place(&mut self, v: Value, scalar: bool) -> bool {
+    pub fn push_in_place(&mut self, v: Value) -> bool {
         match &mut self.data {
             ArrayData::Words(w) if w.len() < w.capacity() => {
-                if !scalar && !self.may_hold_refs {
+                if !self.may_hold_refs {
                     self.may_hold_refs = true;
                 }
                 w.push(v);

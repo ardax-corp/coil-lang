@@ -58,9 +58,9 @@ Tombstones stay on the match. `DenseArrayPush` is always-hot (#1864): a push
 the array's storage has room for runs in the streak (the array from the
 one-entry dense cache, no accounting, no safepoint); one that would grow
 hands itself back unexecuted (`STREAK_YIELD`, `ip` back on it) and the giant
-match grows the array and runs the allocation safepoint. Its
-`dense::PUSH_SCALAR` flag (the compiler sets it for an `int` / `float` /
-`bool` value) keeps a `Vec<int>` unscanned by the next mark.
+match grows the array and runs the allocation safepoint. (A scalar-value
+flag that would keep a `Vec<int>` unscanned is not safe: shared generic
+bodies type a `T` word as `i64` in MIR.)
 
 | #1864 (4-core container, min of 9) | before | after |
 | --- | --- | --- |

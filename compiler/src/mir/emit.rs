@@ -2756,14 +2756,9 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
                     "dense emit refuses ArrayPush without GC maps (B6)".into(),
                 ));
             }
-            let flags = if matches!(func.ty(*value), MirTy::I64 | MirTy::F64 | MirTy::Bool) {
-                common::dense::PUSH_SCALAR
-            } else {
-                0
-            };
             out.push(byte(
                 Byte::new(Instruction::DenseArrayPush).with_dense_abc(
-                    flags,
+                    0,
                     regs[dest.index()],
                     regs[array.index()],
                     regs[value.index()],

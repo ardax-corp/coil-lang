@@ -597,7 +597,7 @@ static STREAK_YIELD: &str = "dense streak yield";
 /// an array): the giant match runs it.
 #[inline(always)]
 fn dense_array_push(ctx: &mut HotCtx<'_, '_>, opcode: &Byte) -> bool {
-    let (flags, dest, arr, val) = opcode.dense_abc_parts();
+    let (_, dest, arr, val) = opcode.dense_abc_parts();
     let (sp, stack_cap) = (ctx.sp, ctx.stack_cap);
     promise!(sp + dest < stack_cap);
     promise!(sp + arr < stack_cap);
@@ -615,7 +615,7 @@ fn dense_array_push(ctx: &mut HotCtx<'_, '_>, opcode: &Byte) -> bool {
     ) else {
         return false;
     };
-    if !gc.as_mut().push_in_place(value, flags & common::dense::PUSH_SCALAR != 0) {
+    if !gc.as_mut().push_in_place(value) {
         return false;
     }
     ctx.stack[sp + dest] = target;

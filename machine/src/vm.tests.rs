@@ -876,7 +876,6 @@
     #[test]
     fn dense_array_push_in_streak_and_on_growth() {
         let mut vm = Machine::<8>::default();
-        let scalar = common::dense::PUSH_SCALAR;
         let mut code = vec![
             Byte::new(Instruction::Seek).with_operand_u32(4),
             const_int(1),
@@ -888,7 +887,7 @@
         // A jump into the pushes enters the streak.
         code.push(Byte::new(Instruction::JMP).with_operand_u32(code.len() as u32 + 1));
         for _ in 0..9 {
-            code.push(dense_array_push(scalar, 0, 0, 1));
+            code.push(dense_array_push(0, 0, 0, 1));
         }
         code.push(Byte::new(Instruction::DenseArrayLen).with_operand_u32(2 << 8));
         code.push(const_int(9));
