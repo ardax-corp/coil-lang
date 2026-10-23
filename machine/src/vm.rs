@@ -2186,19 +2186,16 @@ impl<const S: usize> Machine<S> {
         }
     }
 
-    fn queue_unmarked_finalizers(&self) -> Vec<(Value, u32)> {
+    fn queue_unmarked_finalizers(&mut self) -> Vec<(Value, u32)> {
         if self.finalizer_by_type.is_empty() {
             return Vec::new();
         }
-        let mut out = Vec::new();
-        for obj in self.heap.objects() {
-            if !obj.is_marked()
-                && let Some(pc) = self.pending_finalizer(obj)
-            {
-                out.push((Value::from(obj.addr()), pc));
-            }
-        }
-        out
+        // The heap lists its finalizable objects: no walk of the heap (#1870).
+        let unmarked = self.heap.unmarked_finalizable();
+        unmarked
+            .into_iter()
+            .filter_map(|obj| Some((Value::from(obj.addr()), self.pending_finalizer(obj)?)))
+            .collect()
     }
 
     /// Drop PC for a tagged instance or enum whose finalizer has not run.
@@ -2246,6 +2243,7 @@ impl<const S: usize> Machine<S> {
         }
         self.finalizer_by_type.insert(type_id, pc);
         self.finalizer_pcs.insert(pc);
+        self.heap.register_finalizer_type(type_id);
     }
 
     pub(crate) fn run_remaining_finalizers(&mut self) {
@@ -3226,6 +3224,7 @@ impl<const S: usize> Machine<S> {
         if self.heap.is_borrowed() {
             return;
         }
+        self.heap.owned_mut().clear_finalizer_types();
         if self.heap.owned_mut().slab_chunk_count() > 1 {
             *self.heap.owned_mut() = Heap::default();
         } else if self.heap.owned_mut().slab_chunk_count() == 1 {
