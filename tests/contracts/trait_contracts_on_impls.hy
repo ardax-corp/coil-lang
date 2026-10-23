@@ -3,7 +3,7 @@
 // `ensures` and the impl's own `ensures` are both checked.
 // @output ok
 use io::{stdout, write};
-use string::{to_bytes, find_from};
+use string::to_bytes;
 use task::{scope, Scope, TaskError};
 
 fn message(Result<int, TaskError> r) -> string {
@@ -65,4 +65,28 @@ fn main() {
         "contract violated: ensures result < 100 in Area for int::area",
     );
     let _ = write(stdout(), to_bytes("ok"));
+}
+
+// The first `needle` in `hay` at or after `start` (clamped), or `-1`.
+fn find_from(string hay, string needle, int start) -> int {
+    let n = hay.len();
+    let m = needle.len();
+    let i = if start < 0 {
+        0
+    } else if start > n {
+        n
+    } else {
+        start
+    };
+    while i + m <= n {
+        let j = 0;
+        while j < m && hay[i + j] == needle[j] {
+            j = j + 1;
+        }
+        if j == m {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
 }

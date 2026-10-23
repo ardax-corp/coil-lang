@@ -139,9 +139,16 @@ anyway.
 
 ### 4. Userland search on it
 
-coil-stdlib's `Pattern for string` (`find_in`, `is_prefix_of`, ...) is
-rewritten as plain loops. Whether the `string::find_from` / `rfind` /
-`match_at` natives are then removed is decided on the numbers.
+coil-stdlib's `Pattern for string` (`find_in`, `is_prefix_of`, ...),
+`rfind` and `lines` are plain loops over `s[i]`; `find_in` filters
+candidates on the needle's first two bytes. With them within 2 times the
+native (see the table above), the `string::find_from` / `rfind` /
+`match_at` / `byte_at` natives left the language (Dimitar, 2026-10-23):
+userland reads bytes with `s[i]`. The VM keeps their HostInvoke rows for
+older archives, and `string_byte_at` is still what `s[i]` lowers to.
+
+Backward loops (`i = i - 1`, as `rfind` is) do not vectorise yet; that
+is filed as a follow-up.
 
 ## Steps
 

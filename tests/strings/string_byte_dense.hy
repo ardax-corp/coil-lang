@@ -1,8 +1,8 @@
 // `s[i]` in a dense loop reads the byte in place (`DenseIndex` with
-// `HEAP_STR_BYTE`): the same bytes as `byte_at`, the out-of-range panic,
+// `HEAP_STR_BYTE`): the same bytes as `to_bytes`, the out-of-range panic,
 // and a string a closure captures.
 use tests::assert;
-use string::byte_at;
+use string::to_bytes;
 use thread::{join, spawn, ThreadError};
 
 fn count(string s, byte b) -> int {
@@ -46,9 +46,10 @@ test("dense string bytes") {
     let s = "a,b,,c" + ",é";
     assert!(count(s, 44 as byte) == 4);
     assert!(sum_to(s, s.len()) == 97 + 98 + 99 + 44 * 4 + 195 + 169);
+    let b = to_bytes(s);
     let i = 0;
     while i < s.len() {
-        assert!(s[i] as int == byte_at(s, i));
+        assert!(s[i] == b[i]);
         i = i + 1;
     }
 }
