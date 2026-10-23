@@ -12,6 +12,7 @@
 //! correctness; wider ISAs are used only when present at runtime.
 
 pub mod bytes;
+pub mod bytes64;
 mod kernels;
 pub mod lanes;
 mod level;

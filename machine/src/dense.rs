@@ -102,6 +102,11 @@ pub fn eval_unary(kind: u8, src: Value) -> Result<Value, IntTrap> {
         dense::UNARY_NEG => return int_arith::neg(src.as_int()).map(Value::from),
         dense::UNARY_FNEG => Value::from(-src.as_float()),
         dense::UNARY_NOT => Value::from(!(src.as_int() != 0)),
+        dense::UNARY_CTZ => Value::from(i64::from(src.as_int().trailing_zeros())),
+        dense::UNARY_BLSR => {
+            let x = src.as_int();
+            Value::from(x & x.wrapping_sub(1))
+        }
         _ => src,
     })
 }
