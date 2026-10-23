@@ -960,8 +960,13 @@ pub(crate) struct InstCloneSrc {
     /// The emit cursor at the shared method's compile, once compiled.
     emit_idx: Option<usize>,
     program: usize,
-    /// A default body's trait parameter names (its head is theirs).
+    /// A default body's trait parameter names (its head is theirs), then
+    /// the names of its own bounded type parameters.
     trait_params: Option<Vec<String>>,
+    /// How many of `head`'s trailing types are a default body's own bounds'
+    /// arguments (`fn split<P: Pattern>`): a clone at them takes no
+    /// dictionary for those bounds and has no `$dict` adapter.
+    own_bounds: usize,
     /// An inherent method of a generic class, or one with its own type
     /// parameters: cloned per call site's ground type arguments.
     method_of: Option<MethodCloneSrc>,

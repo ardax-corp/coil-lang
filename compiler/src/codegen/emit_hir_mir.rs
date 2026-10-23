@@ -1051,6 +1051,20 @@ impl Compiler {
         t.calls.insert(id.0, site);
     }
 
+    /// The clone a ground instance call goes to: at the instance's types,
+    /// then, for a default body with bounds of its own (`fn split<P:
+    /// Pattern>`), at the types its own dictionaries are ground at.
+    fn ground_instance_clone(&mut self, call: &HirCall, inst_args: &[Ty]) -> Option<String> {
+        let mut lookup = inst_args.to_vec();
+        for own in &call.own_dicts {
+            match own {
+                super::HirOwnDict::Ground { lookup: l, .. } if l.len() == 1 => lookup.push(l[0].clone()),
+                _ => return self.instance_clone(&call.key, inst_args),
+            }
+        }
+        self.instance_clone(&call.key, &lookup)
+    }
+
     /// Call `id` of a function or method, past the builtins: its entry when it is one
     /// plain `CALL` (or `TailCall` / `MakeCoro`) of the arguments' own
     /// words with no dictionary.
@@ -1069,15 +1083,18 @@ impl Compiler {
             // that entry, as emission does, and moves it to the niche word.
             let key = match self.hir_ret_shape(hir, id, &natural) {
                 Some(true) => call.key.clone(),
-                _ => self.instance_clone(&call.key, &inst.args).unwrap_or_else(|| call.key.clone()),
+                _ => self.ground_instance_clone(call, &inst.args).unwrap_or_else(|| call.key.clone()),
             };
             let steps = self.hir_mir_once(|this| {
                 let mut steps = Vec::new();
                 this.plan_call_instance_dict(&mut steps, (&inst.class, method, &key), &inst.args, span.0..span.1);
                 steps
             });
+            // A clone at the own bounds' types takes none of their
+            // dictionaries.
+            let own_dicts: &[super::HirOwnDict] = if key != call.key { &[] } else { &call.own_dicts };
             let dicts = self.hir_mir_dict_program(&steps).and_then(|mut d| {
-                d.extend(self.hir_mir_own_dicts(&call.own_dicts)?);
+                d.extend(self.hir_mir_own_dicts(own_dicts)?);
                 Some(d)
             });
             let raw = self.raw_instance_methods.contains(&key);
@@ -1139,7 +1156,7 @@ impl Compiler {
         if call.method {
             let instance = call.instance.as_deref();
             let key = match instance.and_then(|i| i.recv_box.clone()) {
-                Some(recv) if call.generic.is_none() => self.instance_clone(&call.key, &[recv]).unwrap_or_else(|| call.key.clone()),
+                Some(recv) if call.generic.is_none() => self.ground_instance_clone(call, &[recv]).unwrap_or_else(|| call.key.clone()),
                 _ => call.key.clone(),
             };
             let raw = self.raw_instance_methods.contains(&key);
@@ -1181,9 +1198,10 @@ impl Compiler {
                 });
             }
             // A trait method's own bounds' dictionaries follow the
-            // instance's (#1471).
+            // instance's (#1471); its clone at their types takes none.
             if let Some(d) = dicts.as_mut()
                 && !call.own_dicts.is_empty()
+                && key == call.key
             {
                 match self.hir_mir_own_dicts(&call.own_dicts) {
                     Some(own) => d.extend(own),
@@ -1736,7 +1754,7 @@ impl Compiler {
                     // The entry [`Self::hir_mir_call`] calls (#1595).
                     let key = match self.hir_ret_shape(hir, id, &Self::hir_call_rep(call)) {
                         Some(true) => call.key.clone(),
-                        _ => self.instance_clone(&call.key, &inst.args).unwrap_or_else(|| call.key.clone()),
+                        _ => self.ground_instance_clone(call, &inst.args).unwrap_or_else(|| call.key.clone()),
                     };
                     return self.hir_mir_probe_unplanned(|this, steps| {
                         this.plan_call_instance_dict(steps, (&inst.class, method, &key), &inst.args, span);
@@ -1758,7 +1776,7 @@ impl Compiler {
                     return false;
                 };
                 let key = match inst.recv_box.clone() {
-                    Some(recv) if call.generic.is_none() => self.instance_clone(&call.key, &[recv]).unwrap_or_else(|| call.key.clone()),
+                    Some(recv) if call.generic.is_none() => self.ground_instance_clone(call, &[recv]).unwrap_or_else(|| call.key.clone()),
                     _ => call.key.clone(),
                 };
                 !self.raw_instance_methods.contains(&key)
