@@ -41,16 +41,21 @@ fn match_at(hay: &[u8], needle: &[u8], at: i64) -> bool {
         .is_some_and(|w| w == needle)
 }
 
+/// The byte at offset `i` of `s`, or `-1` out of range.
+#[inline]
+pub(crate) fn byte_at(s: &[u8], i: i64) -> i64 {
+    usize::try_from(i).ok().and_then(|i| s.get(i)).map_or(-1, |&b| b as i64)
+}
+
+/// [`string_byte_at`] on a word that is not a string object itself (a
+/// boxed one): what dense `DenseIndex` with `HEAP_STR_BYTE` falls back to.
+pub(crate) fn byte_at_value(heap: &Heap, s: Value, i: i64) -> i64 {
+    with_str(heap, s, |s| byte_at(s.as_bytes(), i))
+}
+
 /// `byte_at(s, i) -> int`: the byte at offset `i`, or `-1` out of range.
 pub fn string_byte_at(heap: &mut Heap, args: &[Value]) -> Value {
-    let i = args[1].as_int();
-    let b = with_str(heap, args[0], |s| {
-        usize::try_from(i)
-            .ok()
-            .and_then(|i| s.as_bytes().get(i))
-            .map_or(-1, |&b| b as i64)
-    });
-    Value::from(b)
+    Value::from(byte_at_value(heap, args[0], args[1].as_int()))
 }
 
 /// `slice_bytes(s, start, end) -> Result<string, IoError>`. Offsets clamp to

@@ -512,6 +512,22 @@ pub(super) fn dense_index(args: DenseIndexArgs<'_>) -> Result<(), DenseFail> {
     let index = stack[sp + idx].as_int();
     let addr = stack[sp + arr].raw() as u64;
     let unchecked = flags & common::dense::HEAP_UNCHECKED != 0;
+    if flags & common::dense::HEAP_STR_BYTE != 0 {
+        let b = match resolve_dense_index_object_in(
+            heap,
+            frames_len,
+            frame_pins,
+            dense_obj_addr,
+            dense_obj,
+            arr as u32,
+            addr,
+        ) {
+            Some(Object::String(gc)) => crate::str_bytes::byte_at(gc.as_ref().data.as_str().as_bytes(), index),
+            _ => crate::str_bytes::byte_at_value(heap, stack[sp + arr], index),
+        };
+        stack[sp + dest] = Value::from(b);
+        return Ok(());
+    }
     let result = match resolve_dense_index_object_in(
         heap,
         frames_len,

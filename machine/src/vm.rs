@@ -437,6 +437,10 @@ fn resolve_dense_index_object_in(
         pin_current_array_in(frame_pins, frames_len, slot, obj);
         *dense_obj_addr = addr;
         *dense_obj = Some(obj);
+    } else if matches!(obj, Object::String(_)) {
+        // `s[i]` in a loop: the string stays the one-entry cache's object.
+        *dense_obj_addr = addr;
+        *dense_obj = Some(obj);
     }
     Some(obj)
 }
