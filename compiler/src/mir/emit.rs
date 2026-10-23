@@ -2523,17 +2523,23 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
                 ),
             ));
         }
-        MirInst::ByteMask { dest, streams, scalars, expr } => {
-            let ops = byte_mask_ops(*dest, expr, streams, scalars, regs)
-                .ok_or_else(|| LowerError::Refused("byte mask needs more vector registers".into()))?;
-            out.extend(ops.into_iter().map(byte));
+        MirInst::ByteScan { dest, from, bound, inclusive, streams, scalars, expr } => {
+            let body = byte_scan_body(expr, streams, scalars, regs)
+                .ok_or_else(|| LowerError::Refused("byte scan body too large".into()))?;
+            let flag = if *inclusive { common::simd::SCAN_INCLUSIVE } else { 0 };
+            out.push(byte(Byte::new(Instruction::VScan).with_dense_abc(
+                body.len() as u8 | flag,
+                regs[dest.index()],
+                regs[from.index()],
+                regs[bound.index()],
+            )));
+            out.extend(body.into_iter().map(byte));
         }
         MirInst::Unary { dest, op, src } => {
             let kind = match (*op, func.ty(*src)) {
                 (MirUnaryOp::Not, _) => dense::UNARY_NOT,
                 (MirUnaryOp::Neg, t) if t.is_float() => dense::UNARY_FNEG,
                 (MirUnaryOp::Neg, _) => dense::UNARY_NEG,
-                (MirUnaryOp::Ctz, _) => dense::UNARY_CTZ,
             };
             out.push(byte(
                 Byte::new(Instruction::DenseUnary).with_dense_unary(
@@ -4454,10 +4460,10 @@ pub(super) fn paired_alloc_dests(func: &MirFunc) -> HashMap<ValueId, ValueId> {
     out
 }
 
-/// `ByteMask` as byte-lane `V*` ops: each node into a vector register
-/// (stack-allocated, eight in all), then `VMask` into `dest`.
-fn byte_mask_ops(
-    dest: ValueId,
+/// A `ByteScan`'s `VScan` body: byte-lane `V*` ops, each node into a
+/// vector register (stack-allocated, eight in all), the mask in `v0`. A
+/// `VLoad`'s index slot holds the stream's offset from the scan position.
+fn byte_scan_body(
     expr: &super::inst::LaneExpr,
     streams: &[(ValueId, ValueId)],
     scalars: &[ValueId],
@@ -4563,7 +4569,6 @@ fn byte_mask_ops(
     }
 
     let mut cx = Ctx { out: Vec::new(), next: 0, streams, scalars, regs };
-    let r = cx.eval(expr)?;
-    cx.out.push(Byte::new(Instruction::VMask).with_dense_move(regs[dest.index()], r));
-    Some(cx.out)
+    cx.eval(expr)?;
+    (cx.out.len() <= common::simd::SCAN_MAX_BODY).then_some(cx.out)
 }

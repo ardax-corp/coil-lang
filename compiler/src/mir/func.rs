@@ -557,20 +557,15 @@ impl MirFunc {
                         return Err(format!("{dest} neg dest type"));
                     }
                 }
-                super::inst::MirUnaryOp::Ctz => {
-                    if self.ty(*src) != MirTy::I64 || self.ty(*dest) != MirTy::I64 {
-                        return Err(format!("{dest} ctz not on i64"));
-                    }
-                }
             },
-            MirInst::ByteMask { dest, streams, scalars, .. } => {
-                if self.ty(*dest) != MirTy::I64 {
-                    return Err(format!("{dest} byte mask dest is not i64"));
+            MirInst::ByteScan { dest, from, bound, streams, scalars, .. } => {
+                if [*dest, *from, *bound].iter().any(|&v| self.ty(v) != MirTy::I64) {
+                    return Err(format!("{dest} byte scan position is not i64"));
                 }
                 if streams.iter().any(|&(a, i)| !self.ty(a).is_heap_word() || self.ty(i) != MirTy::I64)
                     || scalars.iter().any(|&k| self.ty(k) != MirTy::I64)
                 {
-                    return Err(format!("{dest} byte mask operand type"));
+                    return Err(format!("{dest} byte scan operand type"));
                 }
             }
             MirInst::Cast {

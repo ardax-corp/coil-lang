@@ -2,17 +2,14 @@
 //!
 //! A loop over `i64` `iv` (`iv = iv + 1`, `iv < n` or `iv <= n`) whose
 //! body, for some iterations, reads bytes at `s[iv + off]`, compares them,
-//! and reaches the latch with nothing changed but `iv`, gets a skip-ahead
-//! block in front of its header:
+//! and reaches the latch with nothing changed but `iv`, gets a scan in
+//! front of its header:
 //!
 //! ```text
-//! G:  φs twin the header's (from the preheader, the latch, and A)
-//!     every lane in range? (iv + 64 within the bound and each stream)
-//!     no: go to H
-//! S:  m = bytemask(lanes that do something, iv .. iv + 64)
-//!     m == 0: A: iv + 64, back to G
-//! C:  H at iv + ctz(m)
-//! H:  the old loop, its latch now going to G
+//! G:  φs twin the header's (from the preheader and the latch)
+//!     iv' = bytescan(lanes that do something, from iv, 64 at a time,
+//!                    while all 64 pass `< n` and the reads stay in range)
+//! H:  the old loop at iv', its latch now going to G
 //! ```
 //!
 //! The scalar loop still runs every iteration that does something, and
@@ -31,8 +28,6 @@ use super::inst::{
 use super::licm::{natural_loops, LoopInfo};
 use super::ty::MirTy;
 
-/// Byte lanes per mask.
-const LANES: i64 = common::simd::BYTE_LANES as i64;
 /// Most streams one mask loads.
 const MAX_STREAMS: usize = 4;
 /// Largest predicate tree.
@@ -58,7 +53,7 @@ pub fn byte_scan(func: &mut MirFunc) -> usize {
             done.insert(lp.header);
             if let Some(plan) = plan_loop(func, lp, byte_at) {
                 let run = apply(func, lp, plan);
-                done.insert(run[run.len() - 4]);
+                done.insert(run[run.len() - 1]);
                 runs.push((lp.header, run));
                 continue 'outer;
             }
@@ -622,26 +617,12 @@ impl Builder<'_> {
         let dest = self.value(c.ty());
         self.push(b, MirInst::Const { dest, c })
     }
-
-    fn bin(&mut self, b: BlockId, op: MirBinOp, ty: MirTy, lhs: ValueId, rhs: ValueId) -> ValueId {
-        let dest = self.value(ty);
-        self.push(b, MirInst::Bin { dest, op, ty, lhs, rhs })
-    }
-
-    fn cmp(&mut self, b: BlockId, op: MirCmpOp, lhs: ValueId, rhs: ValueId) -> ValueId {
-        let dest = self.value(MirTy::Bool);
-        self.push(b, MirInst::Cmp { dest, op, ty: MirTy::I64, lhs, rhs })
-    }
 }
 
-/// Put the skip-ahead in front of the loop. Returns its blocks in
-/// layout order: the preheader chain, then `G`, `S`, `A` and `C`.
-///
-/// The preheader folds every range test into one bound, so `G` is a
-/// single compare: `iv <= hi`, with `hi` the least of `n - 64` (`n - 63`
-/// for `iv <= n`) and, per stream, `s.len() - 64 - off`. `iv` only grows,
-/// so a stream index `iv + off` that starts at or above zero stays there;
-/// when one starts below, `hi` is `i64::MIN` and this entry runs scalar.
+/// Put the scan in front of the loop. Returns its blocks in layout
+/// order: the preheader, then `G`. The scan stops by itself at the loop's
+/// bound and where a read would leave its stream, so the preheader adds
+/// no range arithmetic (nothing there can overflow).
 fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: Plan) -> Vec<BlockId> {
     let h = lp.header;
     let latch = func.preds_of(h).into_iter().find(|p| lp.blocks.contains(p)).expect("latch");
@@ -675,8 +656,6 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: Plan) -> Vec<BlockId> {
         init.insert(*p, v);
     }
     let zero = b.konst(pre, MirConst::I64(0));
-    let lanes = b.konst(pre, MirConst::I64(LANES));
-    let span = b.konst(pre, MirConst::I64(if plan.inclusive { LANES - 1 } else { LANES }));
     let scalars: Vec<ValueId> = plan
         .scalars
         .iter()
@@ -692,111 +671,38 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: Plan) -> Vec<BlockId> {
             b.push(pre, MirInst::ArrayLen { dest, array })
         }
     };
-    let mut his = vec![b.bin(pre, MirBinOp::Sub, MirTy::I64, bound, span)];
-    let mut lo_ok: Option<ValueId> = None;
-    let iv0 = init[&plan.iv];
-    for st in &plan.streams {
-        let len = b.value(MirTy::I64);
-        b.push(pre, MirInst::ArrayLen { dest: len, array: st.arr });
-        let lim = b.bin(pre, MirBinOp::Sub, MirTy::I64, len, lanes);
-        let (hi, first) = match st.off {
-            Some(off) => (b.bin(pre, MirBinOp::Sub, MirTy::I64, lim, off), b.bin(pre, MirBinOp::Add, MirTy::I64, iv0, off)),
-            None => (lim, iv0),
-        };
-        his.push(hi);
-        let ok = b.cmp(pre, MirCmpOp::Ge, first, zero);
-        lo_ok = Some(match lo_ok {
-            Some(prev) => b.bin(pre, MirBinOp::BitAnd, MirTy::Bool, prev, ok),
-            None => ok,
-        });
-    }
-    // `hi = min(his)`, a diamond per extra bound.
-    let mut at = pre;
-    let mut hi = his[0];
-    for &next in &his[1..] {
-        let keep = b.cmp(at, MirCmpOp::Le, hi, next);
-        let (other, join) = (b.block(), b.block());
-        b.func.block_mut(at).term = Some(Terminator::Br { cond: keep, taken: join, not_taken: other });
-        b.func.block_mut(other).term = Some(Terminator::Jump { dest: join });
-        let dest = b.value(MirTy::I64);
-        b.push(join, MirInst::Phi { dest, ty: MirTy::I64, args: vec![(at, hi), (other, next)] });
-        run.extend([other, join]);
-        (at, hi) = (join, dest);
-    }
-    if let Some(ok) = lo_ok {
-        let (other, join) = (b.block(), b.block());
-        let never = b.konst(other, MirConst::I64(i64::MIN));
-        b.func.block_mut(at).term = Some(Terminator::Br { cond: ok, taken: join, not_taken: other });
-        b.func.block_mut(other).term = Some(Terminator::Jump { dest: join });
-        let dest = b.value(MirTy::I64);
-        b.push(join, MirInst::Phi { dest, ty: MirTy::I64, args: vec![(at, hi), (other, never)] });
-        run.extend([other, join]);
-        (at, hi) = (join, dest);
-    }
-    let (g, s, a, c) = (b.block(), b.block(), b.block(), b.block());
-    run.extend([g, s, a, c]);
+    let at = pre;
+    let g = b.block();
+    run.push(g);
     b.func.block_mut(at).term = Some(Terminator::Jump { dest: g });
 
-    // G: twin φs, then the one range test.
+    // G: twin φs, then the scan.
     let mut twin: HashMap<ValueId, ValueId> = HashMap::new();
     for (p, ty, _) in &header_phis {
         twin.insert(*p, b.value(*ty));
     }
-    let latch_in = |p: ValueId| {
-        header_phis
-            .iter()
-            .find(|(q, ..)| *q == p)
-            .and_then(|(_, _, args)| args.iter().find(|(f, _)| *f == latch))
-            .map(|(_, v)| *v)
-    };
-    let mut next64: Option<ValueId> = None;
-    for (p, ty, _) in &header_phis {
-        let dest = twin[p];
-        let from_a = if *p == plan.iv {
-            let v = b.value(MirTy::I64);
-            next64 = Some(v);
-            v
-        } else {
-            dest
-        };
-        let args = vec![(at, init[p]), (latch, latch_in(*p).expect("latch incoming")), (a, from_a)];
-        b.push(g, MirInst::Phi { dest, ty: *ty, args });
+    for (p, ty, args) in &header_phis {
+        let from_latch = args.iter().find(|(f, _)| *f == latch).map(|(_, v)| *v).expect("latch incoming");
+        let args = vec![(at, init[p]), (latch, from_latch)];
+        b.push(g, MirInst::Phi { dest: twin[p], ty: *ty, args });
     }
-    let iv = twin[&plan.iv];
-    let ok = b.cmp(g, MirCmpOp::Le, iv, hi);
-    b.func.block_mut(g).term = Some(Terminator::Br { cond: ok, taken: s, not_taken: h });
+    let streams = plan
+        .loads
+        .iter()
+        .map(|&k| {
+            let st = plan.streams[k as usize];
+            (st.arr, st.off.unwrap_or(zero))
+        })
+        .collect();
+    let first = b.value(MirTy::I64);
+    let from = twin[&plan.iv];
+    b.push(g, MirInst::ByteScan { dest: first, from, bound, inclusive: plan.inclusive, streams, scalars, expr: plan.expr });
+    b.func.block_mut(g).term = Some(Terminator::Jump { dest: h });
 
-    // S: the mask.
-    let mut streams = Vec::new();
-    for &k in &plan.loads {
-        let st = plan.streams[k as usize];
-        let idx = match st.off {
-            Some(off) => b.bin(s, MirBinOp::Add, MirTy::I64, iv, off),
-            None => iv,
-        };
-        streams.push((st.arr, idx));
-    }
-    let mask = b.value(MirTy::I64);
-    b.push(s, MirInst::ByteMask { dest: mask, streams, scalars, expr: plan.expr });
-    let none = b.cmp(s, MirCmpOp::Eq, mask, zero);
-    b.func.block_mut(s).term = Some(Terminator::Br { cond: none, taken: a, not_taken: c });
-
-    // A: 64 iterations that do nothing.
-    let v = next64.expect("iv twin");
-    b.push(a, MirInst::Bin { dest: v, op: MirBinOp::Add, ty: MirTy::I64, lhs: iv, rhs: lanes });
-    b.func.block_mut(a).term = Some(Terminator::Jump { dest: g });
-
-    // C: the first lane that does something.
-    let tz = b.value(MirTy::I64);
-    b.push(c, MirInst::Unary { dest: tz, op: MirUnaryOp::Ctz, src: mask });
-    let first = b.bin(c, MirBinOp::Add, MirTy::I64, iv, tz);
-    b.func.block_mut(c).term = Some(Terminator::Jump { dest: h });
-
-    // H now enters from G and C; the latch goes to G.
+    // H now enters from G alone; the latch goes to G.
     for inst in &mut b.func.block_mut(h).insts {
         if let MirInst::Phi { dest, args, .. } = inst {
-            let t = twin[dest];
-            *args = vec![(g, t), (c, if *dest == plan.iv { first } else { t })];
+            *args = vec![(g, if *dest == plan.iv { first } else { twin[dest] })];
         }
     }
     retarget(b.func, latch, h, g);

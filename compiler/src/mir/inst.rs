@@ -211,11 +211,9 @@ impl MirCmpOp {
 pub enum MirUnaryOp {
     Neg,
     Not,
-    /// Trailing zero bits of an `i64` (64 for zero). Never traps.
-    Ctz,
 }
 
-/// A lane operand of a [`MirInst::ByteMask`] predicate.
+/// A lane operand of a [`MirInst::ByteScan`] predicate.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum LaneVal {
     /// Byte `k` of stream `s` in lane `k`.
@@ -224,7 +222,7 @@ pub enum LaneVal {
     Scalar(u8),
 }
 
-/// A [`MirInst::ByteMask`] predicate over 64 byte lanes.
+/// A [`MirInst::ByteScan`] predicate over 64 byte lanes.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum LaneExpr {
     Const(bool),
@@ -647,13 +645,19 @@ pub enum MirInst {
         rhs: ValueId,
         ne: bool,
     },
-    /// 64 byte lanes of `expr` (`byte_scan`, archive minor 46): bit `k` of
-    /// the `i64` dest is `expr` at lane `k`, where stream `s` reads byte
-    /// `streams[s].1 + k` of the string or byte array `streams[s].0`, and
-    /// `LaneVal::Scalar(j)` is `scalars[j]`. The pass guards every read to
-    /// lie inside its stream. Pure; reads immutable bytes only.
-    ByteMask {
+    /// Byte-lane scan (`byte_scan`, archive minor 46). From `p = from` in
+    /// steps of 64, while all 64 lanes `p + k` pass the loop's test
+    /// (`p + k < bound`, or `<=` when `inclusive`) and every stream holds
+    /// them: the first `p + k` (`k` in `0..64`) where `expr` holds at
+    /// lane `k`; else the `p` it stopped at. Stream `s` reads byte
+    /// `p + streams[s].1 + k` of the string or byte array `streams[s].0`,
+    /// and `LaneVal::Scalar(j)` is `scalars[j]`. Pure; reads immutable
+    /// bytes only.
+    ByteScan {
         dest: ValueId,
+        from: ValueId,
+        bound: ValueId,
+        inclusive: bool,
         streams: Vec<(ValueId, ValueId)>,
         scalars: Vec<ValueId>,
         expr: LaneExpr,
@@ -849,7 +853,7 @@ impl MirInst {
             | Self::Stringify { dest, .. }
             | Self::Unbox { dest, .. }
             | Self::StrEq { dest, .. }
-            | Self::ByteMask { dest, .. } => dest,
+            | Self::ByteScan { dest, .. } => dest,
         }
     }
 
@@ -925,9 +929,11 @@ impl MirInst {
                 v.extend(args.iter().copied());
                 v
             }
-            Self::ByteMask { streams, scalars, .. } => {
-                streams.iter().flat_map(|&(a, i)| [a, i]).chain(scalars.iter().copied()).collect()
-            }
+            Self::ByteScan { from, bound, streams, scalars, .. } => [*from, *bound]
+                .into_iter()
+                .chain(streams.iter().flat_map(|&(a, i)| [a, i]))
+                .chain(scalars.iter().copied())
+                .collect(),
         }
     }
 
@@ -1008,7 +1014,9 @@ impl MirInst {
                     *v = map(*v);
                 }
             }
-            Self::ByteMask { streams, scalars, .. } => {
+            Self::ByteScan { from, bound, streams, scalars, .. } => {
+                *from = map(*from);
+                *bound = map(*bound);
                 for (a, i) in streams.iter_mut() {
                     *a = map(*a);
                     *i = map(*i);

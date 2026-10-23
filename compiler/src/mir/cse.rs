@@ -616,7 +616,7 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         | MirInst::Stringify { .. }
         | MirInst::Unbox { .. }
         | MirInst::StrEq { .. }
-        | MirInst::ByteMask { .. } => {
+        | MirInst::ByteScan { .. } => {
             return None
         }
     })
