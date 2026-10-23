@@ -4923,3 +4923,61 @@ fn lir_clears_about_linear_over_rebinding_joins() {
     // Linear is ~4x.
     assert!(large <= 8 * small, "100 arms cleared {large} words, 25 cleared {small}");
 }
+
+#[test]
+fn pipeline_bool_register_branch_and_join_incomings() {
+    // `i < 0 || i >= n` branches on the `|` register as one fused
+    // `DenseBinJmpf` (no `LOAD; JMPF` leaving the dense streak), and each
+    // inlined arm computes its φ incoming into the join's register.
+    let src = r#"
+fn lookup(int i, int n) -> Option<int> {
+    if i < 0 || i >= n {
+        return Option::None;
+    }
+    return Option::Some(i * 2);
+}
+fn step(int i) -> Result<int, int> {
+    if i % 5 == 0 {
+        return Result::Err(0 - 1);
+    }
+    return Result::Ok((i % 10) + 1);
+}
+fn hot(int n) -> int {
+    let acc = 0;
+    let i = 0;
+    while i < n {
+        acc = acc + match lookup(i % 10, 7) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        acc = acc + match step(i) {
+            Result::Ok(v) => v,
+            Result::Err(e) => e,
+        };
+        i = i + 1;
+    }
+    return acc;
+}
+fn main() {
+    let _ = hot(40);
+}
+"#;
+    let mut p = crate::Pipeline::new();
+    let (bc, constants) = p.compile_src(src).expect("compile bool branch kernel");
+    let load_jmpf = bc
+        .windows(2)
+        .filter(|w| *w[0].bytecode() == Instruction::LOAD && *w[1].bytecode() == Instruction::JMPF)
+        .count();
+    assert_eq!(load_jmpf, 0, "a bool register branch must not go through LOAD; JMPF");
+    assert!(
+        bc.iter().any(|b| *b.bytecode() == Instruction::DenseBinJmpf),
+        "the `|` should fuse with its branch"
+    );
+    let moves = bc
+        .iter()
+        .filter(|b| *b.bytecode() == Instruction::DenseMove)
+        .count();
+    assert!(moves <= 6, "arm results should land in the join register; moves={moves}");
+    let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+    vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+}
