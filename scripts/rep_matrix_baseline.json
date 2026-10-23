@@ -1,9 +1,1 @@
-{
-  "result_unit__hashmap_entry": {
-    "codes": [
-      "E0801"
-    ],
-    "detail": "value-type",
-    "status": "refused"
-  }
-}
+{}
