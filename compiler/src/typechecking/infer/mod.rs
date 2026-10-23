@@ -554,6 +554,9 @@ pub struct Checker {
     /// element type to resolve: a trait object packs each element (#1853),
     /// anything else is the element mismatch.
     mixed_literals: Vec<MixedLiteral>,
+    /// Function bodies being checked: a mixed literal outside one (a type
+    /// alias's right-hand side) is reported where it stands.
+    fn_body_depth: usize,
 
     /// `gc::weak` arguments and generic instantiations, checked once
     /// substitution is closed: a readonly class instance may not be

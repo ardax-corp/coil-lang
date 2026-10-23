@@ -221,6 +221,7 @@ impl Checker {
             pending_exhaustive: Vec::new(),
             open_operands: Vec::new(),
             mixed_literals: Vec::new(),
+            fn_body_depth: 0,
             weak_checks: Default::default(),
             async_functions: std::collections::HashSet::new(),
             async_depth: 0,
@@ -4551,6 +4552,16 @@ impl Checker {
         // Differently typed elements: one trait object the literal turns out
         // to be (`Vec::from([new Circle(1), new Square(2)])` as a
         // `Vec<Shape>`) takes them all, so wait for the element type (#1853).
+        if self.fn_body_depth == 0 && !to_trait_object
+            && let Some(mismatch) = mismatch.take()
+        {
+            let _ = self.error_with_help(
+                ErrorCode::TypeMismatch,
+                mismatch,
+                range.clone(),
+                Some("an array literal requires every element to have the same type".to_string()),
+            );
+        }
         if to_trait_object && mismatch.is_none() {
             mismatch = Some("array element type mismatch".to_string());
         }
@@ -14170,7 +14181,12 @@ impl Checker {
         let prev_in_test = std::mem::replace(&mut self.in_test_case, true);
 
         self.push_scope();
+        let (open_mark, mixed_mark) = (self.open_operands.len(), self.mixed_literals.len());
+        self.fn_body_depth += 1;
         let _ = self.infer(body);
+        self.fn_body_depth -= 1;
+        self.check_mixed_literals(mixed_mark);
+        self.check_open_operands(open_mark);
         self.pop_scope();
         self.in_test_case = prev_in_test;
 
