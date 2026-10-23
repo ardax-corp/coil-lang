@@ -156,3 +156,116 @@ pub fn eval_vfma(
         _ => *dest,
     })
 }
+
+/// A vector register as 64 byte lanes (lane `k` is byte `k` in memory).
+#[inline]
+pub fn as_bytes(reg: &[u64; LANES]) -> &bytes64::Block {
+    // SAFETY: `[u64; 8]` and `[u8; 64]` have the same size; `u8` has no
+    // alignment requirement.
+    unsafe { &*(reg as *const [u64; LANES] as *const bytes64::Block) }
+}
+
+/// A vector register as 64 mutable byte lanes.
+#[inline]
+pub fn as_bytes_mut(reg: &mut [u64; LANES]) -> &mut bytes64::Block {
+    // SAFETY: as `as_bytes`.
+    unsafe { &mut *(reg as *mut [u64; LANES] as *mut bytes64::Block) }
+}
+
+use coil_simd::bytes64;
+
+/// Unsigned lane `a pred b` (`dense::CMP_*`).
+#[inline]
+fn byte_cmp(pred: u8, a: &bytes64::Block, b: &bytes64::Block) -> bytes64::Block {
+    match pred {
+        dense::CMP_LT => bytes64::lt(a, b),
+        dense::CMP_LE => bytes64::le(a, b),
+        dense::CMP_GT => bytes64::lt(b, a),
+        dense::CMP_GE => bytes64::le(b, a),
+        dense::CMP_EQ => bytes64::eq(a, b),
+        _ => bytes64::not(&bytes64::eq(a, b)),
+    }
+}
+
+/// Lane `pred` the `i64` `s`. A scalar outside `0..=255` gives the same
+/// answer in every lane, as the integer compare does.
+#[inline]
+fn byte_cmp_scalar(pred: u8, a: &bytes64::Block, s: i64) -> bytes64::Block {
+    if let Ok(b) = u8::try_from(s) {
+        return byte_cmp(pred, a, &bytes64::splat(b));
+    }
+    // Every lane is in `0..=255`: below a negative `s`, above a large one.
+    let lane_lt_s = s > 255;
+    let all = match pred {
+        dense::CMP_LT | dense::CMP_LE => lane_lt_s,
+        dense::CMP_GT | dense::CMP_GE => !lane_lt_s,
+        dense::CMP_EQ => false,
+        _ => true,
+    };
+    bytes64::splat(if all { 0xFF } else { 0 })
+}
+
+/// Evaluate a byte-lane `VBin` (`simd::is_byte_kind`). `scalar` is the
+/// frame-slot word for `BS_CMP` kinds.
+#[inline]
+pub fn eval_vbin_bytes(kind: u8, a: &[u64; LANES], b: &[u64; LANES], scalar: Value) -> [u64; LANES] {
+    let (x, y) = (as_bytes(a), as_bytes(b));
+    let out = match kind {
+        simd::M_AND => bytes64::and(x, y),
+        simd::M_OR => bytes64::or(x, y),
+        simd::M_ANDN => bytes64::andnot(x, y),
+        simd::M_NOT => bytes64::not(x),
+        k if (simd::B_CMP..simd::B_CMP + 6).contains(&k) => byte_cmp(k - simd::B_CMP, x, y),
+        k => byte_cmp_scalar(k - simd::BS_CMP, y, scalar.as_int()),
+    };
+    let mut reg = [0u64; LANES];
+    *as_bytes_mut(&mut reg) = out;
+    reg
+}
+
+/// `VMask`: bit `k` is the top bit of byte lane `k`.
+#[inline]
+pub fn movemask(reg: &[u64; LANES]) -> i64 {
+    bytes64::movemask(as_bytes(reg)) as i64
+}
+
+#[cfg(test)]
+mod byte_tests {
+    use super::*;
+
+    fn reg(bytes: &[u8]) -> [u64; LANES] {
+        let mut r = [0u64; LANES];
+        as_bytes_mut(&mut r)[..bytes.len()].copy_from_slice(bytes);
+        r
+    }
+
+    #[test]
+    fn scalar_compare_out_of_byte_range() {
+        let r = reg(b"a,b");
+        let eq = |s: i64| movemask(&eval_vbin_bytes(simd::BS_CMP + dense::CMP_EQ, &[0; LANES], &r, Value::from(s)));
+        assert_eq!(eq(44), 0b10);
+        assert_eq!(eq(44 + 256), 0);
+        assert_eq!(eq(-1), 0);
+        let lt = |s: i64| movemask(&eval_vbin_bytes(simd::BS_CMP + dense::CMP_LT, &[0; LANES], &r, Value::from(s)));
+        assert_eq!(lt(300), u64::MAX as i64);
+        assert_eq!(lt(-5), 0);
+        assert_eq!(lt(98) & 0b111, 0b011);
+    }
+
+    #[test]
+    fn vector_compare_and_masks() {
+        let a = reg(b"abcd");
+        let b = reg(b"abzd");
+        let ne = eval_vbin_bytes(simd::B_CMP + dense::CMP_NE, &a, &b, Value::from(0i64));
+        assert_eq!(movemask(&ne), 0b100);
+        let gt = eval_vbin_bytes(simd::B_CMP + dense::CMP_GT, &b, &a, Value::from(0i64));
+        assert_eq!(movemask(&gt), 0b100);
+        let not = eval_vbin_bytes(simd::M_NOT, &ne, &ne, Value::from(0i64));
+        let both = eval_vbin_bytes(simd::M_AND, &not, &ne, Value::from(0i64));
+        assert_eq!(movemask(&both), 0);
+        let either = eval_vbin_bytes(simd::M_OR, &not, &ne, Value::from(0i64));
+        assert_eq!(movemask(&either), -1);
+        let andn = eval_vbin_bytes(simd::M_ANDN, &either, &ne, Value::from(0i64));
+        assert_eq!(movemask(&andn), !0b100);
+    }
+}

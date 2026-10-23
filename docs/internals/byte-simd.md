@@ -111,7 +111,7 @@ rewritten as plain loops. Whether the `string::find_from` / `rfind` /
 |------|----|--------|
 | 0 | #1951 | This plan and `examples/perf/text_scan_long.hy` |
 | 1 | | `s[i]` dense: `DenseIndex` flag `HEAP_STR_BYTE`, archive minor 45; the plain loop goes from 96 to 29 ns per byte |
-| 2 | | VM byte lanes, `VMask`, `ctz` / `blsr`; archive minor bump |
+| 2 | | VM byte lanes (`VLoad` `TY_U8`, `VBin` `M_*` / `B_CMP` / `BS_CMP`), `VMask`, dense `UNARY_CTZ` / `UNARY_BLSR`; `coil_simd::bytes64` (SSE2 / NEON baseline, no dispatch); archive minor 46 |
 | 3 | | MIR `byte_scan` skip-ahead pass |
 | 4 | | coil-stdlib `text` search in plain loops |
 | 5 | | Website docs; feature branch to `main` |

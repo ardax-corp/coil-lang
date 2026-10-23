@@ -315,6 +315,7 @@ fn step(b: &Byte, pool: &[u64], match_payload: usize) -> Step {
         }
         VBin => s.slots = hi(&[b.dense_abc_parts().2]),
         VReduce => s.slots = hi(&[b.dense_abc_parts().1]),
+        VMask => s.slots = hi(&[b.dense_move_parts().0]),
         VMove | VFma => {}
         // One new word at most (pops, if any, come first).
         DUPLICATE | CONST | STRING | CodePtr | INIT | InitTyped | MakeEnum | MakeEnumK

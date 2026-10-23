@@ -806,6 +806,52 @@
         Byte::new(Instruction::DenseStoreIndex).with_operand_u32(op)
     }
 
+    /// Byte lanes (minor 46): `VLoad` `TY_U8` of a string, a scalar compare,
+    /// `VMask`, then `ctz` / `blsr` walk the set bits; `HEAP_STR_BYTE` reads
+    /// the byte in place.
+    #[test]
+    fn byte_lanes_find_bytes_in_a_string() {
+        let mut text = "x".repeat(70);
+        text.replace_range(5..6, ",");
+        text.replace_range(40..41, ",");
+        let strings = vec![text];
+        let abc = |op: Instruction, kind: u8, dest: u8, a: u8, b: u8| {
+            Byte::new(op).with_operand_u32(((kind as u32) << 24) | ((dest as u32) << 16) | ((a as u32) << 8) | b as u32)
+        };
+        let unary = |kind: u8, dest: u8, src: u8| {
+            Byte::new(Instruction::DenseUnary).with_operand_u32(((kind as u32) << 24) | ((dest as u32) << 8) | src as u32)
+        };
+        let mut vm = Machine::<8>::default();
+        vm.run_with_pool(
+            &[
+                Byte::new(Instruction::Seek).with_operand_u32(8),
+                Byte::new(Instruction::STRING).with_operand_u32(0),
+                store_pop(0),
+                const_int(1),
+                store_pop(1),
+                const_int(44),
+                store_pop(2),
+                abc(Instruction::VLoad, common::simd::TY_U8, 0, 0, 1),
+                abc(Instruction::VBin, common::simd::BS_CMP + common::dense::CMP_EQ, 1, 2, 0),
+                Byte::new(Instruction::VMask).with_operand_u32((3 << 8) | 1),
+                unary(common::dense::UNARY_CTZ, 4, 3),
+                unary(common::dense::UNARY_BLSR, 5, 3),
+                unary(common::dense::UNARY_CTZ, 6, 5),
+                dense_index(common::dense::HEAP_STR_BYTE, 7, 0, 2),
+                load(4),
+                load(6),
+                load(7),
+                Byte::new(Instruction::HALT),
+            ],
+            &[],
+            &strings,
+            0,
+        );
+        assert_eq!(vm.pop().as_int(), 120);
+        assert_eq!(vm.pop().as_int(), 39);
+        assert_eq!(vm.pop().as_int(), 4);
+    }
+
     /// COI-372: DenseIndex fills `frame_pins` from the array register so the
     /// second index skips `find_object_by_addr`.
     #[test]

@@ -1438,7 +1438,10 @@ impl<const S: usize> Machine<S> {
         }
     }
 
-    fn vload(&mut self, vdest: usize, addr: u64, index: i64, _ty: u8) -> bool {
+    fn vload(&mut self, vdest: usize, addr: u64, index: i64, ty: u8) -> bool {
+        if ty == common::simd::TY_U8 {
+            return self.vload_bytes(vdest, addr, index);
+        }
         let n = common::simd::LANES;
         let Some(Object::Array(gc)) = Self::find_object_by_addr(&self.heap, addr) else {
             return false;
@@ -1456,6 +1459,47 @@ impl<const S: usize> Machine<S> {
             for (i, v) in arr.iter().skip(base).take(n).enumerate() {
                 self.vregs[vdest][i] = v.raw() as u64;
             }
+        }
+        true
+    }
+
+    /// 64 byte lanes of a `string` or a byte array from `index`; `false`
+    /// past the end (the compiler guards the range first).
+    fn vload_bytes(&mut self, vdest: usize, addr: u64, index: i64) -> bool {
+        let n = common::simd::BYTE_LANES;
+        let Ok(base) = usize::try_from(index) else {
+            return false;
+        };
+        let obj = match Self::find_object_by_addr(&self.heap, addr) {
+            Some(Object::Boxed(_)) => {
+                Self::find_object_by_addr(&self.heap, crate::io::peel_one_boxed(&self.heap, Value::from(addr)).raw() as u64)
+            }
+            o => o,
+        };
+        let lanes = crate::simd::as_bytes_mut(&mut self.vregs[vdest]);
+        match obj {
+            Some(Object::String(gc)) => {
+                let Some(src) = gc.as_ref().data.as_str().as_bytes().get(base..base.saturating_add(n)) else {
+                    return false;
+                };
+                lanes.copy_from_slice(src);
+            }
+            Some(Object::Array(gc)) => {
+                let arr = gc.as_ref();
+                if base.saturating_add(n) > arr.len() {
+                    return false;
+                }
+                if let Some(src) = arr.bytes() {
+                    lanes.copy_from_slice(&src[base..base + n]);
+                } else if let Some(words) = arr.words() {
+                    for (lane, w) in lanes.iter_mut().zip(&words[base..base + n]) {
+                        *lane = w.as_int() as u8;
+                    }
+                } else {
+                    return false;
+                }
+            }
+            _ => return false,
         }
         true
     }
@@ -4002,7 +4046,7 @@ impl<const S: usize> Machine<S> {
             // variant. A stale ceiling (e.g. YieldFromCoro) makes later opcodes
             // (`StoreIndex`, `DoneCoro`, `ArrayPush`, …) UB via assert_unchecked.
             #[cfg(not(debug_assertions))]
-            promise!(*bc as u8 <= Instruction::RestoreSnapshot as u8);
+            promise!(*bc as u8 <= Instruction::VMask as u8);
 
             match bc {
                 Instruction::STORE => {

@@ -1032,6 +1032,26 @@ impl<const S: usize> Machine<S> {
                     return dispatch::RestFlow::Done(self.runtime_panic("VStore out of bounds", ip.saturating_sub(1)));
                     }
                 }
+                Instruction::VBin if common::simd::is_byte_kind(opcode.dense_abc_parts().0) => {
+                    let (kind, dest, a, b) = opcode.dense_abc_parts();
+                    promise!(dest < common::simd::NREGS);
+                    promise!(b < common::simd::NREGS);
+                    // `BS_CMP` reads a frame slot in `a`; the others a register.
+                    let (scalar, lhs) = if kind >= common::simd::BS_CMP {
+                        promise!(sp + a < stack_cap);
+                        (self.stack[sp + a], [0u64; common::simd::LANES])
+                    } else {
+                        promise!(a < common::simd::NREGS);
+                        (Value::from(0i64), self.vregs[a])
+                    };
+                    self.vregs[dest] = crate::simd::eval_vbin_bytes(kind, &lhs, &self.vregs[b], scalar);
+                }
+                Instruction::VMask => {
+                    let (dest, src) = opcode.dense_move_parts();
+                    promise!(src < common::simd::NREGS);
+                    promise!(sp + dest < stack_cap);
+                    self.stack[sp + dest] = Value::from(crate::simd::movemask(&self.vregs[src]));
+                }
                 Instruction::VBin => {
                     let (kind, dest, a, b) = opcode.dense_abc_parts();
                     promise!(dest < common::simd::NREGS);

@@ -155,10 +155,13 @@ pub const ARCHIVE_MAJOR: u16 = 4;
 /// 45 — `DenseIndex` flag `HEAP_STR_BYTE`: `s[i]` on a `string` in a dense
 ///      body reads the byte in place instead of a `string_byte_at`
 ///      HostInvoke. Older runtimes would read the flag as an array index.
+/// 46 — byte-lane SIMD: `VLoad` type `simd::TY_U8`, `VBin` byte kinds
+///      (`simd::M_*`, `B_CMP`, `BS_CMP`), `VMask`, and the dense unaries
+///      `UNARY_CTZ` / `UNARY_BLSR`. Older runtimes do not know them.
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.
-pub const ARCHIVE_MINOR: u16 = 45;
+pub const ARCHIVE_MINOR: u16 = 46;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -1232,9 +1235,9 @@ mod tests {
     #[test]
     fn archive_version_matches_current_abi() {
         assert_eq!(ARCHIVE_MAJOR, 4);
-        assert_eq!(ARCHIVE_MINOR, 45);
-        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 45));
-        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.45");
+        assert_eq!(ARCHIVE_MINOR, 46);
+        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 46));
+        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.46");
     }
 
     #[test]
