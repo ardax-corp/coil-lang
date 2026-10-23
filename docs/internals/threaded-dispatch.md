@@ -74,6 +74,13 @@ words of which one lies outside the slab span (an `int` compare) before any
 heap probe (#1866). A 4.2M-iteration loop on `k == needle` (even, unequal
 ints): 75 ms -> 63 ms, vs 59 ms for the same loop on `k > needle`.
 
+`DenseStoreIndex` / `DenseFieldStore` read the stored word from their dest
+byte and write no register, so dense emit gives a store's unread dest its
+value's register (`alias_dead_store_dests`, #1867): `flags[k] = 0` no longer
+moves the constant before every store, and nsieve's k-loop is
+`BinSlotSlotJmpf; DenseStoreIndex; DenseBin;JMP`. nsieve(2^21): 225 ms ->
+205 ms.
+
 Debugger-attached runs never enter the hot loop (per-op stops).
 
 ## Remaining ops (G2)
