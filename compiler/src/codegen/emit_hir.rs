@@ -4615,11 +4615,9 @@ impl Compiler {
             return Ok(None);
         }
         let own_dicts = self.hir_own_dicts(hir, call, &class, method, args, 0)?;
-        // A pair return has its own ABI. (An open goal resolves its
-        // dictionary from scope when the call is emitted, as on the AST.)
-        if self.two_word_return_kind(&fqn).is_some() {
-            return Err("callee-trait");
-        }
+        // A pair return comes back as its two words (#1938). (An open goal
+        // resolves its dictionary from scope when the call is emitted.)
+        let pair = self.two_word_return_kind(&fqn);
         let recv = *args.first().ok_or("method-receiver")?;
         let recv_ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, recv).ok_or("method-receiver")?);
         let is_default = Self::is_default_method_fqn(&class, method, &fqn);
@@ -4638,7 +4636,7 @@ impl Compiler {
         let recv_box = (class != "Iterator" && class != "IntoIterator").then(|| Self::show_lookup_ty_for_instance(&recv_ty));
         Ok(Some(HirCall {
             key: fqn,
-            pair: None,
+            pair,
             params,
             ret,
             method: true,

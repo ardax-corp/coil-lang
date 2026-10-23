@@ -2207,7 +2207,14 @@ impl Compiler {
             .then(|| Self::ty_to_value_tag(&ret))
             .flatten()
             .filter(|&tag| tag == ValueTag::Instance && self.value_layout(&ret) != ValueLayout::Boxed);
-        let body_ret = if ret_from.is_some() {
+        // A two-word result (`Option<int>`) comes back as its pair at the
+        // method's own type; the adapter returns it boxed, as the open
+        // result a dictionary caller reads (#1938).
+        let pair_ret = self
+            .two_word_return_kind(fqn)
+            .and_then(|_| self.fn_return_ty(fqn))
+            .filter(|_| ret_from.is_none() && ret_box.is_none());
+        let body_ret = if ret_from.is_some() || pair_ret.is_some() {
             open_ret
         } else if ret_box.is_some() {
             crate::typechecking::ty::int()
@@ -2254,7 +2261,7 @@ impl Compiler {
         }
         let params = args.iter().map(|&a| self.value_layout(b.body.expr(a).ty.as_ref().expect("typed"))).collect();
         let calls = HashMap::from([(fqn.to_string(), (params, self.value_layout(&ret)))]);
-        let mut value = b.call(fqn, args, ret);
+        let mut value = b.call(fqn, args, pair_ret.unwrap_or(ret));
         if ret_from.is_some() {
             value = b.builtin(Builtin::Relayout, vec![value], body_ret);
         } else if let Some(tag) = ret_box {
