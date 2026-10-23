@@ -54,6 +54,7 @@ pub fn emit_dense(
     let plan = ConvoyPlan::new(func, entry_label);
     let (regs, scratch) = assign_regs(func, &plan.need_slot)?;
     let regs = coalesce_latch_overwrite(func, regs, &plan.need_slot);
+    let regs = alias_dead_store_dests(func, regs);
     let mut cleared = cleared_words(func, &regs, &plan.need_slot);
     let mut entry_clears = entry_clears(func, &regs, &plan.need_slot);
     let gathers = Gathers::new(func, &regs, &plan.need_slot, scratch, entry_label);
@@ -298,6 +299,7 @@ pub(super) fn dense_sidecars(func: &MirFunc, entry_label: Option<Label>) -> supe
     let plan = ConvoyPlan::new(&func, entry_label);
     let (regs, _) = assign_regs(&func, &plan.need_slot).unwrap_or_else(|_| (Vec::new(), 0));
     let regs = coalesce_latch_overwrite(&func, regs, &plan.need_slot);
+    let regs = alias_dead_store_dests(&func, regs);
     (
         super::deopt::debug_slot_remap(&func, &regs, &plan.need_slot),
         super::deopt::encode_draft(&func, &regs, &plan.need_slot),
@@ -2044,6 +2046,26 @@ pub(super) fn coalesce_latch_overwrite(
         }
     }
     coalesce_join_phis(func, regs, need_slot)
+}
+
+/// Give an element or field store's dest that nothing reads its value's
+/// register. `DenseStoreIndex` / `DenseFieldStore` read the stored word
+/// from the dest byte and write no register, so a dest of its own cost a
+/// `DenseMove` before every store (`flags[k] = 0` in a loop, #1867).
+fn alias_dead_store_dests(func: &MirFunc, mut regs: Vec<u8>) -> Vec<u8> {
+    let dead = unused_store_dests(func);
+    if dead.is_empty() {
+        return regs;
+    }
+    for inst in func.blocks.iter().flat_map(|b| &b.insts) {
+        let (MirInst::StoreIndex { dest, value, .. } | MirInst::HeapFieldStore { dest, value, .. }) = inst else {
+            continue;
+        };
+        if dead.contains(dest) && dest.index() < regs.len() && value.index() < regs.len() {
+            regs[dest.index()] = regs[value.index()];
+        }
+    }
+    regs
 }
 
 /// Alias a join φ dest with the φ of the next join that is its only use,
