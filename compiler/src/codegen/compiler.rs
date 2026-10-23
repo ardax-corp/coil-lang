@@ -7765,6 +7765,13 @@ impl Compiler {
                                 crate::hir::synth::array_show(b, a[0], element)
                             })
                         }
+                        // A `Vec` shows as an array does (#1848).
+                        ("show", Ty::App(..)) if let Some(element) = crate::typechecking::ty::vec_element_ty(&ty) => {
+                            let element = element.clone();
+                            self.emit_builtin_entry(&name, &[(ty.clone(), tag)], string.clone(), None, |b, a| {
+                                crate::hir::synth::array_show(b, a[0], element)
+                            })
+                        }
                         ("show", Ty::App(..)) => self.emit_builtin_enum_show(&name, &ty, tag.is_some()),
                         ("show", _) => self.emit_builtin_entry(&name, &[(ty.clone(), tag)], string.clone(), None, |b, a| {
                             let fmt = b.str("%v");

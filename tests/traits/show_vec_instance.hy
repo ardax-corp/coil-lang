@@ -35,5 +35,7 @@ test("empty vec and other elements") {
     let points: Vec<Point> = Vec::from([new Point(1, 2)]);
     assert!(show(points) == "[<1 2>]");
     let maybe: Vec<Option<int>> = Vec::from([Option::Some(1), Option::None]);
-    assert!(show(maybe) == format("[%v, %v]", Option::Some(1), Option::None as Option<int>));
+    let some: Option<int> = Option::Some(1);
+    let empty: Option<int> = Option::None;
+    assert!(show(maybe) == "[" + show(some) + ", " + show(empty) + "]");
 }

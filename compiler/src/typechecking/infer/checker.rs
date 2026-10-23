@@ -10778,8 +10778,8 @@ impl Checker {
             {
                 args.clone()
             }
-            // A `Vec` compares its elements (#1629).
-            Ty::App(head, args) if class == "Eq" && matches!(head.as_ref(), Ty::Con(n) if n == common::BUILTIN_VEC_TYPE) => args.clone(),
+            // A `Vec` compares its elements (#1629) and shows them (#1848).
+            Ty::App(head, args) if matches!(class, "Show" | "Eq") && matches!(head.as_ref(), Ty::Con(n) if n == common::BUILTIN_VEC_TYPE) => args.clone(),
             _ => return,
         };
         // A tuple with an open item: the instance for its arity, with a
