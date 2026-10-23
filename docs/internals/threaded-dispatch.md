@@ -66,7 +66,7 @@ bodies type a `T` word as `i64` in MIR.)
 | --- | --- | --- |
 | 2^21 pushes, `Vec::with_capacity` | 83 ms (~38 ns/push) | 37 ms (~16 ns/push) |
 | 2^21 pushes, `Vec::new` (grows) | 85 ms | 39 ms |
-| nsieve(2^21), n from argv | 303 ms | 240 ms |
+| nsieve(2^21), n from argv | 303 ms | 250 ms |
 
 Debugger-attached runs never enter the hot loop (per-op stops).
 
