@@ -15,6 +15,7 @@
 //! piece: `docs/internals/mir.md`.
 
 mod builder;
+mod byte_scan;
 mod call_convoy;
 mod cse;
 mod destprop;
@@ -74,6 +75,7 @@ pub use specialize::{
 pub use sccp::sccp;
 pub use sroa::sroa;
 pub use phi_sroa::phi_sroa;
+pub use byte_scan::byte_scan;
 pub use strength::strength_reduce;
 #[cfg(test)]
 pub use text::{ParseError, parse_func};

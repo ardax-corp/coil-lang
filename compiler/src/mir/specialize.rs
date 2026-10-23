@@ -246,6 +246,10 @@ fn specialize_side(
     // An object made on each path into a φ and only read field by field
     // after it (`find_in(..) ?? new Span(..)`) is its fields' φs.
     crate::mir::phi_sroa(&mut func);
+    // Early-exit byte loops skip 64 no-op iterations at a time.
+    if opts.mir_loop {
+        crate::mir::byte_scan(&mut func);
+    }
     super::deopt::fill_deopt_maps(&mut func);
     paint_index_dest_from_uses(&mut func);
     let stores_ssa = func
