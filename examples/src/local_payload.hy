@@ -24,3 +24,28 @@ fn ev_value(Ev e) -> int {
         Ev::N => 0,
     };
 }
+
+class Pair<T> {
+    pub a: T,
+    pub b: T,
+}
+
+enum Gv {
+    P(Pair<int>),
+    E,
+}
+
+fn make_gv(int x) -> Gv {
+    return Gv::P(new Pair(x, x + 1));
+}
+
+fn pair_sum(Pair<int> p) -> int {
+    return p.a + p.b;
+}
+
+fn gv_value(Gv g) -> int {
+    return match g {
+        Gv::P(p) => pair_sum(p) + p.a,
+        Gv::E => 0,
+    };
+}

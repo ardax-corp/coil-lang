@@ -57,3 +57,15 @@ fn spec_kids() -> int {
     s.subs.push(new Spec(Vec::new()));
     return s.build().kids.len();
 }
+
+class Cell<T> {
+    pub v: T,
+}
+
+fn cell_value() -> int {
+    return take_cell(new Cell(5));
+}
+
+fn take_cell(Cell<int> c) -> int {
+    return c.v;
+}
