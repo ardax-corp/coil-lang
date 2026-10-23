@@ -53,8 +53,20 @@ Packed `LOAD` / `STORE` / `Seek` stay on the match by default: threading them
 without also threading every interleaved heap op **bounces** nsieve. They are
 implemented as shared helpers and used by the giant match.
 
-`DenseMake` / `DensePush` / `DenseArrayPush` / `DenseMakeObject` stay on the
-match (alloc / GC). Tombstones stay on the match.
+`DenseMake` / `DensePush` / `DenseMakeObject` stay on the match (alloc / GC).
+Tombstones stay on the match. `DenseArrayPush` is always-hot (#1864): a push
+the array's storage has room for runs in the streak (the array from the
+one-entry dense cache, no accounting, no safepoint); one that would grow
+hands itself back unexecuted (`STREAK_YIELD`, `ip` back on it) and the giant
+match grows the array and runs the allocation safepoint. Its
+`dense::PUSH_SCALAR` flag (the compiler sets it for an `int` / `float` /
+`bool` value) keeps a `Vec<int>` unscanned by the next mark.
+
+| #1864 (4-core container, min of 9) | before | after |
+| --- | --- | --- |
+| 2^21 pushes, `Vec::with_capacity` | 83 ms (~38 ns/push) | 37 ms (~16 ns/push) |
+| 2^21 pushes, `Vec::new` (grows) | 85 ms | 39 ms |
+| nsieve(2^21), n from argv | 303 ms | 240 ms |
 
 Debugger-attached runs never enter the hot loop (per-op stops).
 

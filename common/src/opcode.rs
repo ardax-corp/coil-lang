@@ -408,8 +408,9 @@ pub enum Instruction {
     /// ABI edge). `[15:8]` arity, `[7:0]` base slot.
     DensePush,
     /// Dense `ArrayPush` (COI-344 B6). Stack-neutral grow.
-    /// Operand: `[23:16]` dest, `[15:8]` array slot, `[7:0]` value slot
-    /// (`dense_abc` flags unused). Dest receives the same array identity.
+    /// Operand: `[31:24]` flags (`dense::PUSH_SCALAR`), `[23:16]` dest,
+    /// `[15:8]` array slot, `[7:0]` value slot. Dest receives the same
+    /// array identity.
     DenseArrayPush,
     /// Dense `LoadField` / named `GetField` (COI-356 D2). Stack-neutral.
     /// Operand: `[31:24]` flags (bit 0 = named key in `c`), `[23:16]` dest,
@@ -581,6 +582,9 @@ pub mod dense {
     /// [`super::Instruction::DenseFieldLoad`] / [`super::Instruction::DenseFieldStore`]:
     /// `c` is a name slot (GetField), not a field index.
     pub const FIELD_NAMED: u8 = 1;
+    /// [`super::Instruction::DenseArrayPush`]: the value is a scalar word
+    /// (`int` / `float` / `bool`), never a reference (#1864).
+    pub const PUSH_SCALAR: u8 = 1;
     pub const MAKE_ARRAY: u8 = 0;
     pub const MAKE_TUPLE: u8 = 1;
     pub const MAKE_ENUM: u8 = 2;

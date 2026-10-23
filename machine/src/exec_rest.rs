@@ -1096,13 +1096,16 @@ impl<const S: usize> Machine<S> {
                     }
                 }
                 Instruction::DenseArrayPush => {
-                    let (_, dest, arr, val) = opcode.dense_abc_parts();
+                    // A push the storage has room for runs in the dense
+                    // streak (`dispatch::dense_array_push`); this one grows.
+                    let (flags, dest, arr, val) = opcode.dense_abc_parts();
                     promise!(sp + dest < stack_cap);
                     promise!(sp + arr < stack_cap);
                     promise!(sp + val < stack_cap);
                     let target_val = self.stack[sp + arr];
                     let value = self.stack[sp + val];
-                    if !self.array_push_value(target_val, value) {
+                    let scalar = flags & common::dense::PUSH_SCALAR != 0;
+                    if !self.array_push_word(target_val, value, scalar) {
                         *ip_out = ip;
                     *sp_out = sp;
                     return dispatch::RestFlow::Done(self.runtime_panic("ArrayPush on non-array", ip.saturating_sub(1)));
