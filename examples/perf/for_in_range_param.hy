@@ -1,7 +1,6 @@
 // C2 / Q6: Range parameter as counted cur/end (no heap GetField).
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn range_sum(Range<int> r) -> int {
     let iter = r;
@@ -19,5 +18,5 @@ fn main() {
         total = total + range_sum(0..(1 << 14));
         round = round + 1;
     }
-    let _ = write_all(stdout(), to_bytes(format("%i", total)));
+    let _ = print(format("%i", total));
 }

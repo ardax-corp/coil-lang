@@ -6,6 +6,7 @@
 // @output 9 15 16 swapped 2 1 clicks 2
 
 use io::stdout;
+use io::sync::print;
 use io::sync::write_all;
 use string::{format, to_bytes};
 use fn_macros::{square, sum, quad, check, swap, counter};
@@ -24,8 +25,8 @@ fn main() {
     let b = 2;
     swap!(a, b);
     check!(a == 2);
-    let _ = write_all(stdout(), to_bytes(format("swapped %i %i ", a, b)));
+    let _ = print(format("swapped %i %i ", a, b));
     let c = new Clicks(0);
     c.bump();
-    let _ = write_all(stdout(), to_bytes(format("clicks %i", c.bump())));
+    let _ = print(format("clicks %i", c.bump()));
 }

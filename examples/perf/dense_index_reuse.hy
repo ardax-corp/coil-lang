@@ -1,9 +1,8 @@
 // COI-372 hit bench: proven DenseIndex/DenseStoreIndex with stable array
 // identity. Stride 3 keeps SIMD VLoad/VStore off so the slab probe is in the
 // hot path. Flagship nsieve `.hyc` is startup-bound (~2ms); this is more trips.
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn paint(Vec<int> a, int step) -> int {
     let k = 0;
@@ -28,5 +27,5 @@ fn main() {
         acc = acc + paint(a, 3);
         round = round + 1;
     }
-    let _ = write_all(stdout(), to_bytes(format("%i", acc)));
+    let _ = print(format("%i", acc));
 }

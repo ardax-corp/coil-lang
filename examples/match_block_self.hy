@@ -5,9 +5,8 @@
 //
 // @output 5
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 enum Mode {
     Zero,
@@ -39,5 +38,5 @@ impl Counter {
 
 fn main() {
     let c = new Counter(5);
-    let _ = write_all(stdout(), to_bytes(format("%i", c.describe())));
+    let _ = print(format("%i", c.describe()));
 }

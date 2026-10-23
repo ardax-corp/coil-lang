@@ -3,9 +3,8 @@
 //
 // @output 42
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 trait Tiny<T> {
     fn base(T x) -> int {}
@@ -26,5 +25,5 @@ fn get<T: Tiny>(T x) -> int {
 }
 
 fn main() {
-    let _ = write_all(stdout(), to_bytes(format("%i", get(41))));
+    let _ = print(format("%i", get(41)));
 }

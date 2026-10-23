@@ -2,9 +2,8 @@
 //
 // @output 121
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 static let hits = 0;
 
@@ -25,7 +24,7 @@ fn main() {
     Counter::count = Counter::count + 1;
     let c = new Counter(0);
     c.bump();
-    let _ = write_all(stdout(), to_bytes(format("%i", hits)));
-    let _ = write_all(stdout(), to_bytes(format("%i", Counter::count)));
-    let _ = write_all(stdout(), to_bytes(format("%i", c.value)));
+    let _ = print(format("%i", hits));
+    let _ = print(format("%i", Counter::count));
+    let _ = print(format("%i", c.value));
 }

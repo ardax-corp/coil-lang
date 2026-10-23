@@ -4,9 +4,7 @@
 // @output ok,Assertion: 'n == 42' failed,custom
 
 use tests::assert;
-use io::stdout;
-use io::sync::write_all;
-use string::to_bytes;
+use io::sync::print;
 
 fn check(int n) -> Result<string, string> {
     assert!(n == 42);
@@ -27,5 +25,5 @@ fn show(Result<string, string> r) -> string {
 
 fn main() {
     let line = show(check(42)) + "," + show(check(1)) + "," + show(check_with_message(1));
-    let _ = write_all(stdout(), to_bytes(line));
+    let _ = print(line);
 }

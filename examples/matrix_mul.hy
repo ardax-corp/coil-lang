@@ -3,6 +3,7 @@
 // @output 19,22,43,502
 
 use io::stdout;
+use io::sync::print;
 use io::sync::write_all;
 use string::{format, to_bytes};
 
@@ -15,5 +16,5 @@ fn main() {
         to_bytes(format("%i,%i,%i,%i", c[0][0], c[0][1], c[1][0], c[1][1])),
     );
     let d = a + a;
-    let _ = write_all(stdout(), to_bytes(format("%i", d[0][0])));
+    let _ = print(format("%i", d[0][0]));
 }

@@ -3,9 +3,8 @@
 // `Vec`). Its fields stay in frame slots and the object is built only
 // where it escapes, so the hot path allocates nothing.
 // Checksum: 2999999000000 1000 1998000
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 readonly class Point {
     pub x: int,
@@ -27,5 +26,5 @@ fn main() {
         acc = acc + step(i, keep);
     }
     let last = keep[keep.len() - 1];
-    write_all(stdout(), to_bytes(format("%i %i %i", acc, keep.len(), last.x)));
+    let _ = print(format("%i %i %i", acc, keep.len(), last.x));
 }

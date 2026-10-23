@@ -3,9 +3,8 @@
 // The table is built once at startup; each byte reads one element with a
 // variable index, so the loop runs one load per byte and the table's
 // slot is read outside the loop.
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 const CRC_TABLE = readonly [
     0, 1996959894, 3993919788, 2567524794, 124634137, 1886057615, 3915621685, 2657392035, 249268274,
@@ -64,5 +63,5 @@ fn main() {
         }
         s = (s + crc32(data)) % 1000000007;
     }
-    let _ = write_all(stdout(), to_bytes(format("%i", s)));
+    let _ = print(format("%i", s));
 }

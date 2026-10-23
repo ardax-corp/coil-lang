@@ -1,8 +1,7 @@
 // Canary: interned string keys, dict increment, intern/hash pressure.
 // A later intern/hash or dict-field cut should drop VM-only time vs this.
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn main() {
     let counts = { a: 0, b: 0, c: 0, d: 0, e: 0, f: 0, g: 0, h: 0 };
@@ -52,5 +51,5 @@ fn main() {
         acc = acc + buckets[j];
         j = j + 1;
     }
-    let _ = write_all(stdout(), to_bytes(format("%i", sum + (acc & 65535))));
+    let _ = print(format("%i", sum + (acc & 65535)));
 }

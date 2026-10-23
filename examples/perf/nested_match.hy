@@ -1,8 +1,7 @@
 // Nested match hot loop: many rows share an outer tag, so a decision tree
 // tests the tag once and then only the sub-patterns of that tag's rows.
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 enum Op {
     Add(int, int),
@@ -50,5 +49,5 @@ fn run() -> int {
 }
 
 fn main() {
-    let _ = write_all(stdout(), to_bytes(format("%i", run())));
+    let _ = print(format("%i", run()));
 }

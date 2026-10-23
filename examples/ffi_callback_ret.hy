@@ -10,9 +10,8 @@ use ffi::declare;
 use ffi::dload;
 use ffi::invoke;
 use ffi::types::Ptr;
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn main() {
     let lib = match dload("sum") {
@@ -30,8 +29,8 @@ fn main() {
     // Non-zero pointer address — print low 16 bits as a smoke check
     // that we got a real address back (not -1 / null).
     if ptr == 0 {
-        let _ = write_all(stdout(), to_bytes(format("%i", 0)));
+        let _ = print(format("%i", 0));
     } else {
-        let _ = write_all(stdout(), to_bytes(format("%i", 1)));
+        let _ = print(format("%i", 1));
     }
 }

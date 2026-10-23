@@ -1,9 +1,8 @@
 // GC tracking: alloc + forced collect (not a CPU fuse target).
 // N=125000, ROUNDS=8 (~1e6 Nodes); live set drops between rounds.
 use gc::collect;
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 class Node {
     pub v: int,
@@ -55,5 +54,5 @@ fn main() {
         collect();
         r = r + 1;
     }
-    let _ = write_all(stdout(), to_bytes(format("%i", acc)));
+    let _ = print(format("%i", acc));
 }

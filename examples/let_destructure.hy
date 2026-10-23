@@ -3,20 +3,19 @@
 //
 // @output 12342
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn main() {
     let (a, b) = (1, 2);
-    let _ = write_all(stdout(), to_bytes(format("%i", a)));
-    let _ = write_all(stdout(), to_bytes(format("%i", b)));
+    let _ = print(format("%i", a));
+    let _ = print(format("%i", b));
 
     let { x, y } = { x: 3, y: 4 };
-    let _ = write_all(stdout(), to_bytes(format("%i", x)));
-    let _ = write_all(stdout(), to_bytes(format("%i", y)));
+    let _ = print(format("%i", x));
+    let _ = print(format("%i", y));
     // Nested tuple inside a record field.
     let { pair } = { pair: (2, 0) };
     let (p, _) = pair;
-    let _ = write_all(stdout(), to_bytes(format("%i", p)));
+    let _ = print(format("%i", p));
 }

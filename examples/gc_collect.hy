@@ -3,9 +3,7 @@
 // @output none
 
 use gc::{collect, get, root, unroot, upgrade, weak};
-use io::stdout;
-use io::sync::write_all;
-use string::to_bytes;
+use io::sync::print;
 
 fn ephemeral_weak() {
     let r = root([1, 2, 3]);
@@ -25,5 +23,5 @@ fn main() {
         Option::Some(_) => "some",
         Option::None => "none",
     };
-    let _ = write_all(stdout(), to_bytes(label));
+    let _ = print(label);
 }

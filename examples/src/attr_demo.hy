@@ -1,12 +1,12 @@
 // Attribute macros for examples/attr_decorator.hy and attr_class.hy.
 use macro::{FnDecl, TypeDecl, Code, lit, raw, ident};
 use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 /// Write `text` to stdout (generated code calls `attr_demo::say`).
 fn say(string text) {
-    let _ = write_all(stdout(), to_bytes(format("%s", text)));
+    let _ = print(format("%s", text));
 }
 
 // `f` renamed to `inner`, and a wrapper under `f`'s name that says `text`

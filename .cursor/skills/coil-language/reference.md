@@ -45,11 +45,13 @@ for         for x in iter { … }
 
 ```coil
 use io::{stdout, open, close};
-use io::sync::{write_all, read_to_end};   // coil-stdlib
+use io::sync::{println, write_all, read_to_end};   // coil-stdlib
 use string::{format, to_bytes};
 
-// Write formatted text
-write_all(stdout(), to_bytes(format("%s %i", "hi", 42)));
+// Write formatted text (`print` for no newline)
+let _ = println(format("%s %i", "hi", 42));
+// Raw bytes to a stream
+let _ = write_all(stdout(), to_bytes("raw"));
 
 // Read file to bytes
 let s = open("path", "r")?;

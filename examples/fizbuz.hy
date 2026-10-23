@@ -2,16 +2,14 @@
 //
 // @output FIZBUZFIZFIZBUZFIZFIZBUZ
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
 
 fn fizbuz(int n) {
     if (n % 3) == 0 {
-        let _ = write_all(stdout(), to_bytes("FIZ"));
+        let _ = print("FIZ");
     }
     if (n % 5) == 0 {
-        let _ = write_all(stdout(), to_bytes("BUZ"));
+        let _ = print("BUZ");
     }
 }
 

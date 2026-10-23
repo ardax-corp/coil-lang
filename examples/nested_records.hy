@@ -6,9 +6,8 @@
 //
 // @output 99
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 enum Inner {
     I { v: int },
@@ -26,5 +25,5 @@ fn get_v(Wrap w) -> int {
 
 fn main() {
     let w = Wrap::W { inner: Inner::I { v: 99 }, name: "x" };
-    let _ = write_all(stdout(), to_bytes(format("%i", get_v(w))));
+    let _ = print(format("%i", get_v(w)));
 }

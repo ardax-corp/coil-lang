@@ -1,9 +1,8 @@
 // Hit bench for #1559 MIR LICM: class field reads in a loop that stores
 // array elements. An element store cannot change a field, so `c.scale` and
 // `c.bias` move to the preheader.
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 class Cfg {
     pub scale: int,
@@ -32,5 +31,5 @@ fn main() {
         apply(c, xs, out);
         s = s + out[r];
     }
-    let _ = write_all(stdout(), to_bytes(format("%i", s)));
+    let _ = print(format("%i", s));
 }

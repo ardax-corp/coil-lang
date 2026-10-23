@@ -2,9 +2,8 @@
 //
 // @output i:7f:1.5s:hi
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 // Same-arity overloads selected by argument type.
 fn show(int x) -> string {
@@ -20,7 +19,7 @@ fn show(string s) -> string {
 }
 
 fn main() {
-    let _ = write_all(stdout(), to_bytes(show(7)));
-    let _ = write_all(stdout(), to_bytes(show(1.5)));
-    let _ = write_all(stdout(), to_bytes(show("hi")));
+    let _ = print(show(7));
+    let _ = print(show(1.5));
+    let _ = print(show("hi"));
 }

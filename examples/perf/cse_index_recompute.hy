@@ -1,8 +1,7 @@
 // Hit bench for local EarlyCSE: force Index recomputes InstCombine +
 // cfg_gvn/ssa_gvn do not already fold (varying index, stored first hit).
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn fill(int n) -> Vec<int> {
     let v: Vec<int> = Vec::with_capacity(n);
@@ -31,5 +30,5 @@ fn hot(Vec<int> v, int n) -> int {
 
 fn main() {
     let v = fill(64);
-    let _ = write_all(stdout(), to_bytes(format("%i", hot(v, 4000000))));
+    let _ = print(format("%i", hot(v, 4000000)));
 }

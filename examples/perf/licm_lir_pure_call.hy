@@ -3,9 +3,8 @@
 // after the loop (dense refuses that shape, so the body stays on LIR).
 // MIR LICM must move both out on LIR: the call and the division can trap,
 // so they move behind a copy of the loop test.
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 class Total {
     pub value: int,
@@ -38,5 +37,5 @@ fn main() {
         total = total + sum(50000, 3 + r).value;
         r = r + 1;
     }
-    let _ = write_all(stdout(), to_bytes(format("%i", total)));
+    let _ = print(format("%i", total));
 }

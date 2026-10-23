@@ -1,9 +1,8 @@
 // Hit bench: dense specialize on a no-back-edge numeric body when the
 // reconstruct beats fuse-IL cost. The `main` caller loop has I/O + CALL
 // (stays fuse-IL); prove is `hot` itself.
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn hot(float x, float y) -> float {
     let a = x * x + y * y;
@@ -23,5 +22,5 @@ fn main() {
         s = s + hot(xf, 1.0 - xf);
         i = i + 1;
     }
-    let _ = write_all(stdout(), to_bytes(format("%i", s as int)));
+    let _ = print(format("%i", s as int));
 }

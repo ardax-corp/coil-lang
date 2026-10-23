@@ -5,11 +5,11 @@
 
 use io::close;
 use io::open;
-use io::stdout;
 use io::sync::read_to_end;
+use io::sync::print;
 use io::sync::write_all;
 
-use string::{format, to_bytes};
+use string::format;
 
 fn main() {
     let path = "coil_io_nested_host.bin";
@@ -25,5 +25,5 @@ fn main() {
         Result::Ok(buf) => buf,
         Result::Err(_) => Vec::from([z]),
     };
-    let _ = write_all(stdout(), to_bytes(format("%i", got.len())));
+    let _ = print(format("%i", got.len()));
 }

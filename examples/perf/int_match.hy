@@ -1,8 +1,7 @@
 // Integer-literal match hot loop: sixteen cases, so a binary search tests
 // about four literals per value where a linear chain tests up to sixteen.
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn cost(int op) -> int {
     return match op {
@@ -37,5 +36,5 @@ fn run() -> int {
 }
 
 fn main() {
-    let _ = write_all(stdout(), to_bytes(format("%i", run())));
+    let _ = print(format("%i", run()));
 }

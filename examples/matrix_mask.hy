@@ -4,6 +4,7 @@
 // @output 10101001,10305008,10111101,01000010,00000001,2,221,1001
 
 use io::stdout;
+use io::sync::print;
 use io::sync::write_all;
 use string::{format, to_bytes};
 
@@ -101,7 +102,7 @@ fn main() {
             ),
         ),
     );
-    let _ = write_all(stdout(), to_bytes(format("%i,%i,", shifted[0][0], flipped[0][0] as int)));
+    let _ = print(format("%i,%i,", shifted[0][0], flipped[0][0] as int));
     let _ = write_all(
         stdout(),
         to_bytes(

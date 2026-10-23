@@ -4,9 +4,8 @@
 //
 // @output 4,8,0
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 class Val {
     pub i: int,
@@ -46,5 +45,5 @@ fn main() {
     let p = Point::from_val(new Val(4));
     let n: int = decode(new Val(4));
     let cfg = Config::default();
-    let _ = write_all(stdout(), to_bytes(format("%i,%i,%i", p.x, n, cfg.port)));
+    let _ = print(format("%i,%i,%i", p.x, n, cfg.port));
 }

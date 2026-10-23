@@ -11,9 +11,8 @@ use ffi::types::Bytes;
 use ffi::types::ConstBytes;
 use ffi::types::Int;
 use ffi::types::Ptr;
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::println;
+use string::format;
 
 fn filled(int n, int step) -> Vec<byte> {
     let out: Vec<byte> = Vec::with_capacity(n);
@@ -75,5 +74,5 @@ fn main() {
         let _ = invoke(lib, uncompress, (out, out_len, packed, packed_len[0]));
         round = round + 1;
     }
-    let _ = write_all(stdout(), to_bytes(format("crc=%i out[4095]=%i\n", crc, out[4095] as int)));
+    let _ = println(format("crc=%i out[4095]=%i", crc, out[4095] as int));
 }
