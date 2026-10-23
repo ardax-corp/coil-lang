@@ -265,9 +265,10 @@ impl LaneExpr {
         }
     }
 
-    /// Whether one of `self` / `other` is the negation of the other.
+    /// Whether one of `self` / `other` is the negation of the other
+    /// (`!a`, or a compare with the opposite predicate).
     fn is_not_of(&self, other: &Self) -> bool {
-        matches!(self, Self::Not(x) if **x == *other) || matches!(other, Self::Not(x) if **x == *self)
+        Self::not(self.clone()) == *other || Self::not(other.clone()) == *self
     }
 
     pub fn not(a: Self) -> Self {
