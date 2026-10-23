@@ -20,5 +20,5 @@ fn main() {
     let t = spawn(worker, (jobs[1], replies[0]))?;
     send(jobs[0], "ping")?;
     let _ = write_all(stdout(), to_bytes(format("%s", recv(replies[1])?)));
-    join(t)?;
+    (join(t)?)?;
 }

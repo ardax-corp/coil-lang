@@ -4007,7 +4007,7 @@ impl Compiler {
 
         // Spawn arm 0: its sequential callee, or this worker one hop down.
         let ParArm::Call { callee: callee0, args: args0 } = &site.arms[0];
-        let spawned_ty = coil_ty::result_ty(coil_ty::thread_ty(), thread_err.clone());
+        let spawned_ty = coil_ty::result_ty(coil_ty::thread_ty(arm_rets[0].clone()), thread_err.clone());
         let spawn_seq = {
             let tys: Vec<Ty> = args0.iter().filter_map(&form_ty).collect();
             let f = b.push(HirKind::Global { name: callee0.clone(), def: None }, fn_ty(&tys, &arm_rets[0]));
@@ -4030,7 +4030,7 @@ impl Compiler {
         };
 
         // With a handle: the other arms here, then join arm 0 and combine.
-        let handle = b.local("__coil_par_handle", coil_ty::thread_ty(), LocalKind::Pattern);
+        let handle = b.local("__coil_par_handle", coil_ty::thread_ty(arm_rets[0].clone()), LocalKind::Pattern);
         let joined = b.local("__coil_par_arm0", arm_rets[0].clone(), LocalKind::Pattern);
         let mut on_handle = Vec::new();
         let mut held = vec![joined];

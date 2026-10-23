@@ -821,8 +821,7 @@ fn is_gc_handle(ty: &Ty) -> bool {
 /// An opaque `thread` module handle (`Thread`, `Sender`, `Receiver`,
 /// `Mutex`, `RwLock`): a heap object.
 fn is_thread(ty: &Ty) -> bool {
-    use crate::typechecking::ty::{MUTEX, RECEIVER, RWLOCK, SENDER, THREAD};
-    matches!(strip_readonly(ty), Ty::Con(n) if [THREAD, SENDER, RECEIVER, MUTEX, RWLOCK].contains(&n.as_str()))
+    crate::typechecking::ty::opaque_handle_name(ty).is_some_and(|n| n != crate::typechecking::ty::STREAM)
 }
 
 /// The element type of an array or `Vec`.

@@ -9118,7 +9118,7 @@ impl Compiler {
         let arity = 3 + live.len();
         let worker_ty = (0..arity).fold(int.clone(), |acc, _| Ty::Fun(Box::new(coil_ty::int()), Box::new(acc)));
         let thread_err = Ty::Con(common::BUILTIN_THREAD_ERROR_ENUM.into());
-        let spawned_ty = coil_ty::result_ty(coil_ty::thread_ty(), thread_err.clone());
+        let spawned_ty = coil_ty::result_ty(coil_ty::thread_ty(int.clone()), thread_err.clone());
         let joined_ty = coil_ty::result_ty(int.clone(), thread_err);
         let fold_op = match site.op {
             LoopReduceOp::Add => BinOp::IntAdd,
@@ -9153,7 +9153,7 @@ impl Compiler {
         // A range of one or more chunks: spawn each, then join and fold.
         let fork = |b: &mut Synth, chunks: &[(Bound, Bound)], whole: (Bound, Bound)| -> HirId {
             let handles: Vec<LocalId> =
-                (0..chunks.len()).map(|i| b.local(&format!("__coil_par_handle{i}"), coil_ty::thread_ty(), LocalKind::Pattern)).collect();
+                (0..chunks.len()).map(|i| b.local(&format!("__coil_par_handle{i}"), coil_ty::thread_ty(coil_ty::int()), LocalKind::Pattern)).collect();
             let partials: Vec<LocalId> =
                 (0..chunks.len()).map(|i| b.local(&format!("__coil_par_part{i}"), coil_ty::int(), LocalKind::Pattern)).collect();
             // Innermost first: the fold, then each join, then each spawn.

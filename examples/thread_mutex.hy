@@ -15,8 +15,8 @@ fn main() {
     let m = mutex(0)?;
     let t1 = spawn(bump, m)?;
     let t2 = spawn(bump, m)?;
-    join(t1)?;
-    join(t2)?;
+    (join(t1)?)?;
+    (join(t2)?)?;
     let n = with_lock(m, fn (int x) => (x, x))?;
     let _ = write_all(stdout(), to_bytes(format("%i", n)));
 }

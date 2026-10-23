@@ -17,5 +17,5 @@ fn main() {
     let rx = pair[1];
     let t = spawn(producer, tx)?;
     let _ = write_all(stdout(), to_bytes(format("%s", recv(rx)?)));
-    join(t)?;
+    (join(t)?)?;
 }
