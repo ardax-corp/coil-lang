@@ -1714,6 +1714,7 @@ impl Checker {
             self.messages.extend(msgs);
         }
         self.check_duplicate_classes(ast);
+        self.check_duplicate_consts(ast);
         self.check_builtin_class_names(ast);
         self.pre_register_readonly_classes(ast);
         self.collect_variadic_templates(ast);
@@ -4569,7 +4570,7 @@ impl Checker {
             && let Some(mismatch) = mismatch.take()
         {
             let _ = self.error_with_help(
-                ErrorCode::TypeMismatch,
+                ErrorCode::ArrayElementMismatch,
                 mismatch,
                 range.clone(),
                 Some("an array literal requires every element to have the same type".to_string()),
@@ -7037,7 +7038,7 @@ impl Checker {
             let element = apply_ty_prune(&self.subst, &lit.element);
             let Ty::Existential { class } = strip_readonly(&element).clone() else {
                 let _ = self.error_with_help(
-                    ErrorCode::TypeMismatch,
+                    ErrorCode::ArrayElementMismatch,
                     lit.mismatch,
                     lit.range,
                     Some("an array literal requires every element to have the same type, or a trait object type it can pack each one as (`let xs: Vec<Shape> = [...]`)".to_string()),
@@ -15506,6 +15507,50 @@ impl Checker {
         for (name, range) in dups {
             let mut msg = Message::error(ErrorCode::GenericTypeError, format!("Duplicate class `{name}`"), range);
             msg.with_help(format!("a class named `{name}` was already declared in this module; remove or rename this declaration"));
+            self.messages.push(msg);
+        }
+    }
+
+    /// A second top-level `const` of a name already declared in this module
+    /// would silently replace the first (#1960): report it. A `const` whose
+    /// initializer runs at startup is a lifted static, the same declaration.
+    fn check_duplicate_consts(&mut self, ast: &Output) {
+        fn const_name<'a>(node: &'a Expression<'a>) -> Option<&'a str> {
+            match node {
+                Expression::Fragment(parts) => match parts.as_slice() {
+                    [binder, _] => match binder.1.as_ref() {
+                        Expression::Constant(name, ..) => match name.1.as_ref() {
+                            Expression::Identifier(n) => Some(*n),
+                            _ => None,
+                        },
+                        _ => None,
+                    },
+                    _ => None,
+                },
+                Expression::StaticDecl { name, lifted: true, .. } => Some(*name),
+                _ => None,
+            }
+        }
+        fn walk<'a>(node: &'a Output<'a>, seen: &mut HashSet<&'a str>, dups: &mut Vec<(&'a str, Range<usize>)>) {
+            let inner = Checker::pre_pass_unwrap_stmt(node);
+            if let Some(name) = const_name(inner.1.as_ref()) {
+                if !seen.insert(name) {
+                    dups.push((name, node.0.into_range()));
+                }
+                return;
+            }
+            if let Expression::Program(children) | Expression::Fragment(children) = inner.1.as_ref() {
+                for child in children {
+                    walk(child, seen, dups);
+                }
+            }
+        }
+        let mut seen = HashSet::new();
+        let mut dups = Vec::new();
+        walk(ast, &mut seen, &mut dups);
+        for (name, range) in dups {
+            let mut msg = Message::error(ErrorCode::ConstantRedeclaration, format!("Duplicate constant `{name}`"), range);
+            msg.with_help(format!("a constant named `{name}` was already declared in this module; remove or rename this declaration"));
             self.messages.push(msg);
         }
     }

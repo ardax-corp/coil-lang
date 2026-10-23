@@ -1,4 +1,4 @@
-// @expected E0102 — a literal of different classes with no trait object type
+// @expected E0402 — a literal of different classes with no trait object type
 // to pack them as is still an element mismatch (#1853).
 class Circle {
     pub r: int,
