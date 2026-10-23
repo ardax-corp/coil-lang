@@ -1631,6 +1631,29 @@
     }
 
     #[test]
+    fn jump_if_match_not_taken_runs_the_following_unpack() {
+        // A two-arm match: the miss unpacks the same scrutinee in the same
+        // dispatch. The stack must read exactly as after a separate `Unpack`.
+        let mut vm = Machine::<8>::default();
+        vm.run_with_pool(
+            &[
+                const_int(20),
+                const_int(10),
+                make_enum(1, 2),
+                jump_if_match(0, 0),
+                unpack(2),
+                Byte::new(Instruction::HALT),
+            ],
+            &[5],
+            &[],
+            0,
+        );
+        assert_eq!(vm.pop().as_int(), 20);
+        assert_eq!(vm.pop().as_int(), 10);
+        assert_eq!(vm.stack.tell(), 0, "the scrutinee is popped once");
+    }
+
+    #[test]
     fn unpack_pops_enum_and_pushes_payload() {
         let mut vm = Machine::<8>::default();
         vm.run(&[

@@ -1570,10 +1570,7 @@ impl<const S: usize> Machine<S> {
         if addr & 1 != 0 {
             return None;
         }
-        match Self::find_object_by_addr(heap, addr) {
-            Some(Object::Enum(e)) => Some(e),
-            _ => None,
-        }
+        heap.find_enum_by_addr(addr)
     }
 
     fn pop_call_frame(&mut self) -> usize {

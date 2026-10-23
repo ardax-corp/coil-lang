@@ -1406,6 +1406,19 @@ impl Heap {
         unsafe { Object::from_header(addr) }
     }
 
+    /// [`Self::find_object_by_addr`] for an enum (`match` / `Unpack`): reads
+    /// the header kind once instead of building an [`Object`] to match on.
+    #[inline]
+    pub fn find_enum_by_addr(&self, addr: u64) -> Option<Gc<ObjEnum>> {
+        if addr == 0 || !self.slab.contains_slot(addr) {
+            return None;
+        }
+        // SAFETY: a mapped slot start holds a header (poisoned when free).
+        let header = unsafe { &*(addr as *const GcHeader) };
+        // Kind 3 is `Object::Enum` (see `Object::from_header`).
+        (header.kind.get() == 3).then(|| unsafe { Gc::from_addr(addr) })
+    }
+
     /// Classify a raw payload / field word as an object or an immediate.
     #[cfg(test)]
     pub(crate) fn member_of(&self, v: Value) -> Member {

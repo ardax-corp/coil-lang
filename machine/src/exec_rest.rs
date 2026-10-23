@@ -1175,6 +1175,20 @@ impl<const S: usize> Machine<S> {
                             }
                             charge_step!(target_offset < ip);
                             set_jump_target(&mut ip, target_offset, code);
+                        } else if ip < code.len()
+                            && *unsafe { code.get_unchecked(ip) }.bytecode() as u8 == Instruction::Unpack as u8
+                            && unsafe { code.get_unchecked(ip) }.operand_u32() as usize == enum_ref.payload.len()
+                            && !self.exec_hooks_attached()
+                        {
+                            // A two-arm match: the other arm's `Unpack` of the
+                            // same scrutinee is next. Run it here on the enum
+                            // this op already resolved, as `Unpack` would. A
+                            // debugger / coverage still sees the `Unpack`.
+                            let _ = self.stack.pop();
+                            for member in enum_ref.payload.iter() {
+                                self.stack.push(*member);
+                            }
+                            ip += 1;
                         }
                     }
                 }
