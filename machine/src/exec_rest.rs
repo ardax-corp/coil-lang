@@ -1096,6 +1096,8 @@ impl<const S: usize> Machine<S> {
                     }
                 }
                 Instruction::DenseArrayPush => {
+                    // A push the storage has room for runs in the dense
+                    // streak (`dispatch::dense_array_push`); this one grows.
                     let (_, dest, arr, val) = opcode.dense_abc_parts();
                     promise!(sp + dest < stack_cap);
                     promise!(sp + arr < stack_cap);

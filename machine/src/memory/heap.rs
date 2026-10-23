@@ -2812,6 +2812,30 @@ impl ObjArray {
         self.words_vec().push(v);
     }
 
+    /// Append `v` when the storage has room for it as it is: no growth,
+    /// no unpack, so nothing to account and no allocation safepoint.
+    /// False (and nothing changed) otherwise (#1864).
+    #[inline(always)]
+    pub fn push_in_place(&mut self, v: Value) -> bool {
+        match &mut self.data {
+            ArrayData::Words(w) if w.len() < w.capacity() => {
+                if !self.may_hold_refs {
+                    self.may_hold_refs = true;
+                }
+                w.push(v);
+                true
+            }
+            ArrayData::Bytes(b) if b.len() < b.capacity() => match byte_of(v) {
+                Some(byte) => {
+                    b.push(byte);
+                    true
+                }
+                None => false,
+            },
+            _ => false,
+        }
+    }
+
     /// Overwrite element `i` (caller checks bounds).
     #[inline]
     pub fn set(&mut self, i: usize, v: Value) {
