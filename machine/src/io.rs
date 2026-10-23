@@ -76,6 +76,11 @@ pub fn restore_captures(frames: Vec<(Vec<u8>, Vec<u8>)>) {
     CAPTURES.with(|c| *c.borrow_mut() = frames);
 }
 
+/// Whether an `io::capture_begin()` is open on this thread.
+pub(crate) fn is_capturing() -> bool {
+    CAPTURES.with(|c| !c.borrow().is_empty())
+}
+
 /// Append `bytes` to the innermost open capture's stdout (or stderr).
 /// False when nothing is capturing.
 pub(crate) fn capture_write(stderr: bool, bytes: &[u8]) -> bool {
