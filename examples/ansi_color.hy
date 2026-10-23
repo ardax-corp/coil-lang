@@ -2,10 +2,8 @@
 //
 // @output \e[31mred\e[0m
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
 
 fn main() {
-    let _ = write_all(stdout(), to_bytes("\e[31mred\e[0m"));
+    let _ = print("\e[31mred\e[0m");
 }

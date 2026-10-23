@@ -1,9 +1,8 @@
 // Hit bench for COI-283 MIR IV strength reduction: `(i as float) * 7.0`
 // becomes add induction. IL SR refuses float affine (not IEEE-exact in
 // general); a finite integer-valued const factor is exact for this range.
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn hot(int n) -> float {
     let i = 0;
@@ -17,5 +16,5 @@ fn hot(int n) -> float {
 }
 
 fn main() {
-    let _ = write_all(stdout(), to_bytes(format("%i", hot(800000) as int)));
+    let _ = print(format("%i", hot(800000) as int));
 }

@@ -2,9 +2,8 @@
 //
 // @output 012
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 gen fn counter() {
     yield 0;
@@ -19,9 +18,9 @@ gen fn wrap() {
 fn main() {
     let h = wrap();
     let v0 = resume h;
-    let _ = write_all(stdout(), to_bytes(format("%i", v0)));
+    let _ = print(format("%i", v0));
     let v1 = resume h;
-    let _ = write_all(stdout(), to_bytes(format("%i", v1)));
+    let _ = print(format("%i", v1));
     let v2 = resume h;
-    let _ = write_all(stdout(), to_bytes(format("%i", v2)));
+    let _ = print(format("%i", v2));
 }

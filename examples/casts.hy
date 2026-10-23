@@ -3,16 +3,15 @@
 //
 // @output 13true
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn main() {
     let n = 257;
     let b = n as byte;
-    let _ = write_all(stdout(), to_bytes(format("%i", b as int)));
+    let _ = print(format("%i", b as int));
     let f = 3.9 as int;
-    let _ = write_all(stdout(), to_bytes(format("%i", f)));
+    let _ = print(format("%i", f));
     let flag = 1 as bool;
-    let _ = write_all(stdout(), to_bytes(format("%z", flag)));
+    let _ = print(format("%z", flag));
 }

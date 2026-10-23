@@ -7,9 +7,8 @@ use ffi::dload;
 use ffi::invoke;
 use ffi::types::Callback;
 use ffi::types::Int;
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn doubler(int x) -> int {
     return x * 2;
@@ -28,5 +27,5 @@ fn main() {
         Result::Ok(v) => v,
         Result::Err(e) => panic e.message,
     };
-    let _ = write_all(stdout(), to_bytes(format("%i", n)));
+    let _ = print(format("%i", n));
 }

@@ -7,11 +7,10 @@
 // @output 1242
 
 use math::{add, mul};
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn main() {
-    let _ = write_all(stdout(), to_bytes(format("%i", add(5, 7))));
-    let _ = write_all(stdout(), to_bytes(format("%i", mul(6, 7))));
+    let _ = print(format("%i", add(5, 7)));
+    let _ = print(format("%i", mul(6, 7)));
 }

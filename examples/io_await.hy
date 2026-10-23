@@ -2,12 +2,11 @@
 //
 // @output 0
 
-use io::stdout;
 use io::drive;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn main() {
     let n = drive();
-    let _ = write_all(stdout(), to_bytes(format("%i", n)));
+    let _ = print(format("%i", n));
 }

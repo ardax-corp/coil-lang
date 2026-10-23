@@ -1,7 +1,6 @@
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::println;
+use string::format;
 
 fn sadge() {
-    write_all(stdout(), to_bytes(format("%x\n", 420)));
+    println(format("%x", 420));
 }

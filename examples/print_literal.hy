@@ -5,9 +5,9 @@
 // @output hello
 
 use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::to_bytes;
 
 fn main() {
-    let _ = write_all(stdout(), to_bytes("hello"));
+    let _ = print("hello");
 }

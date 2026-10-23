@@ -5,9 +5,10 @@
 // @output 42
 
 use io::stdout;
+use io::sync::print;
 use io::sync::write_all;
-use string::{format, to_bytes};
+use string::format;
 
 fn main() {
-    let _ = write_all(stdout(), to_bytes(format("%i", 42)));
+    let _ = print(format("%i", 42));
 }

@@ -7,13 +7,13 @@
 // Expected output: ok
 
 use io::close;
-use io::stdout;
 use io::Stream;
 use io::net::tcp::connect;
 use io::net::tcp::listen;
 use io::net::tcp::local_addr;
 use io::sync::accept_wait;
 use io::sync::read_exact;
+use io::sync::print;
 use io::sync::write_all;
 
 use protocol::{encode_frame, frame_len, payload_eq};
@@ -21,8 +21,6 @@ use protocol::{encode_frame, frame_len, payload_eq};
 use server::echo_reply;
 
 use client::request_body;
-
-use string::to_bytes;
 
 use task::{scope, Scope, Task, TaskError};
 
@@ -101,5 +99,5 @@ fn main() {
         Result::Ok(s) => s,
         Result::Err(_) => "err",
     };
-    let _ = write_all(stdout(), to_bytes(text));
+    let _ = print(text);
 }

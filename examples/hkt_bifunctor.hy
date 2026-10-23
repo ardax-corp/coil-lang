@@ -2,9 +2,8 @@
 //
 // @output 42
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 trait Bifunctor<F: * -> * -> *> {
     fn tag<A, B>(F<A, B> xs) -> int {}
@@ -21,5 +20,5 @@ fn get_tag<F: * -> * -> *, Bifunctor, A, B>(F<A, B> xs) -> int {
 }
 
 fn main() {
-    let _ = write_all(stdout(), to_bytes(format("%i", get_tag(Result::Ok(7)))));
+    let _ = print(format("%i", get_tag(Result::Ok(7))));
 }

@@ -46,16 +46,15 @@ Implicit imports (no `use` needed): prelude (`prelude`, `prelude::ops`, `prelude
 Explicit `use` for: `io`, `string`, `ffi`, `thread`, `env`, `gc`, `clock` (`wall_nanos` / `mono_nanos` / `sleep_ms`). Time calendar/format: [coil-time](https://github.com/ardax-corp/coil-time). Regex: [coil-regex](https://github.com/ardax-corp/coil-regex). TLS: [coil-tls](https://github.com/ardax-corp/coil-tls). Crypto: [coil-crypto](https://github.com/ardax-corp/coil-crypto).
 
 ```coil
-use io::{stdout};
-use io::sync::{write_all};
-use string::{format, to_bytes};
+use io::sync::println;
+use string::format;
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", 42)));
+    let _ = println(format("%i", 42));
 }
 ```
 
-There is **no `print` statement** — use `io` + `string::format` / `to_bytes`.
+There is **no `print` statement**: `io::sync::println` / `print` (no newline) write a string and return a `Result` (`let _ =` or `?`). `write_all(stream, bytes)` is for other streams and raw bytes.
 
 ## Syntax essentials
 

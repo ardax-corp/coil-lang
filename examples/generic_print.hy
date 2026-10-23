@@ -4,9 +4,8 @@
 //
 // @output 42hi1.5true(3,4)99
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 enum Point {
     Point { x: int, y: int },
@@ -19,7 +18,7 @@ impl Show for Point {
 }
 
 fn show_it<T: Show>(T x) {
-    let _ = write_all(stdout(), to_bytes(format("%v", x)));
+    let _ = print(format("%v", x));
 }
 
 fn main() {

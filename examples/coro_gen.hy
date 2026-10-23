@@ -2,9 +2,8 @@
 //
 // @output 012
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 gen fn counter() {
     yield 0;
@@ -14,7 +13,7 @@ gen fn counter() {
 
 fn main() {
     let h = counter();
-    let _ = write_all(stdout(), to_bytes(format("%i", resume h)));
-    let _ = write_all(stdout(), to_bytes(format("%i", resume h)));
-    let _ = write_all(stdout(), to_bytes(format("%i", resume h)));
+    let _ = print(format("%i", resume h));
+    let _ = print(format("%i", resume h));
+    let _ = print(format("%i", resume h));
 }

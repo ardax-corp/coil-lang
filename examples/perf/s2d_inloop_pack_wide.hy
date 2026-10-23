@@ -1,7 +1,6 @@
 // In-loop MakeArray of arity 8 (heavier Alloc, same trip count).
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn pack(int n) -> int {
     let i = 0;
@@ -15,5 +14,5 @@ fn pack(int n) -> int {
 }
 
 fn main() {
-    let _ = write_all(stdout(), to_bytes(format("%i", pack(500000))));
+    let _ = print(format("%i", pack(500000)));
 }

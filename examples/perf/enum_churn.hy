@@ -1,9 +1,8 @@
 // Local enums built on several paths and matched once: escape analysis
 // turns them into a tag slot plus payload slots, so the loop allocates
 // nothing (unit, one- and two-word variants).
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 enum Shape {
     Circle(int),
@@ -41,5 +40,5 @@ fn main() {
         t = t + area(i) + direct(i);
         i = i + 1;
     }
-    let _ = write_all(stdout(), to_bytes(format("%i", t)));
+    let _ = print(format("%i", t));
 }

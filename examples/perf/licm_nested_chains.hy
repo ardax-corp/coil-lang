@@ -1,8 +1,7 @@
 // CPU: two independent invariant int chains in nested loops.
 // LICM iterate must hoist both; a single-chain-then-return pass leaves one.
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn nested(int n) -> int {
     let s = 0;
@@ -20,5 +19,5 @@ fn nested(int n) -> int {
 }
 
 fn main() {
-    let _ = write_all(stdout(), to_bytes(format("%i", nested(2000))));
+    let _ = print(format("%i", nested(2000)));
 }

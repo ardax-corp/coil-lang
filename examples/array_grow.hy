@@ -2,15 +2,14 @@
 //
 // @output 414
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn main() {
     let a = Vec::from([1, 2]);
     a.push(3);
     a.push(4);
-    let _ = write_all(stdout(), to_bytes(format("%i", a.len())));
-    let _ = write_all(stdout(), to_bytes(format("%i", a[0])));
-    let _ = write_all(stdout(), to_bytes(format("%i", a[3])));
+    let _ = print(format("%i", a.len()));
+    let _ = print(format("%i", a[0]));
+    let _ = print(format("%i", a[3]));
 }

@@ -5,9 +5,8 @@
 //
 // @output ok 200 200\n
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::println;
+use string::format;
 
 #[repr(int)]
 #[derive(Show, Eq, Ord, Hash)]
@@ -25,5 +24,5 @@ fn label(Status s) -> string {
 
 fn main() {
     let s = Status::Ok;
-    let _ = write_all(stdout(), to_bytes(format("%s %i %v\n", label(s), s, s)));
+    let _ = println(format("%s %i %v", label(s), s, s));
 }

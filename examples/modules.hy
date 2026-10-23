@@ -8,11 +8,10 @@
 // @output 1a4\n45\n
 
 use foo::sadge;
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::println;
+use string::format;
 
 fn main() {
     sadge();
-    let _ = write_all(stdout(), to_bytes(format("%x\n", 69)));
+    let _ = println(format("%x", 69));
 }

@@ -1,9 +1,8 @@
 // Hit bench for COI-382 S5: stride DenseStoreIndex + IV bump.
 // Flagship nsieve k-loop is the same shape; n=1<<14 is ~2.5ms wall (wash).
 // Fill once, then many stride passes so the store+IV latch dominates.
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn hot(int n, int p, int reps) -> int {
     let flags: Vec<int> = Vec::with_capacity(n);
@@ -25,5 +24,5 @@ fn hot(int n, int p, int reps) -> int {
 }
 
 fn main() {
-    let _ = write_all(stdout(), to_bytes(format("%i", hot(4096, 3, 20000))));
+    let _ = print(format("%i", hot(4096, 3, 20000)));
 }

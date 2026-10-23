@@ -1,9 +1,8 @@
 // GC: a large live Vec<int> through heavy allocation churn. Marking scans the
 // vector once, finds no references, and skips it until it is written again
 // (ObjArray::may_hold_refs).
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn fill(int n) -> Vec<int> {
     let v: Vec<int> = Vec::with_capacity(n);
@@ -39,5 +38,5 @@ fn main() {
         total = total + 1;
         round = round + 1;
     }
-    let _ = write_all(stdout(), to_bytes(format("%i %i", total, big.len())));
+    let _ = print(format("%i %i", total, big.len()));
 }

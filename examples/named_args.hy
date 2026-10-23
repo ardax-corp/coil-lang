@@ -2,13 +2,12 @@
 //
 // @output Ada36Grace40
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn greet(string name, int age) {
-    let _ = write_all(stdout(), to_bytes(format("%s", name)));
-    let _ = write_all(stdout(), to_bytes(format("%i", age)));
+    let _ = print(format("%s", name));
+    let _ = print(format("%i", age));
 }
 
 fn main() {

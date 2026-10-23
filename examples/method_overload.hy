@@ -2,9 +2,8 @@
 //
 // @output 1116
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 class Counter {
     pub value: int,
@@ -23,6 +22,6 @@ impl Counter {
 
 fn main() {
     let c = new Counter(10);
-    let _ = write_all(stdout(), to_bytes(format("%i", c.bump())));
-    let _ = write_all(stdout(), to_bytes(format("%i", c.bump(5))));
+    let _ = print(format("%i", c.bump()));
+    let _ = print(format("%i", c.bump(5)));
 }

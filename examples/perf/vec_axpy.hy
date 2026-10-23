@@ -1,8 +1,7 @@
 // CPU: counted saxpy store `y[i] = a * x[i] + y[i]` — S5b V1 conservative FMA.
 // Mul-then-add (two IEEE roundings), same as scalar Coil `*`.
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn axpy(float a, Vec<float> x, Vec<float> y) -> float {
     let i = 0;
@@ -38,5 +37,5 @@ fn main() {
         let _ = axpy(2.0, x, y);
         round = round + 1;
     }
-    let _ = write_all(stdout(), to_bytes(format("%i", checksum(y) as int)));
+    let _ = print(format("%i", checksum(y) as int));
 }

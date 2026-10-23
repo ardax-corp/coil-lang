@@ -4,9 +4,8 @@
 //
 // @output truetruefalse
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 trait Equal<T> {
     fn eq_val(T a, T b) -> bool {}
@@ -37,7 +36,7 @@ fn cmp_lt<T: Ordered>(T a, T b) -> bool {
 }
 
 fn main() {
-    let _ = write_all(stdout(), to_bytes(format("%z", cmp_eq(3, 3))));
-    let _ = write_all(stdout(), to_bytes(format("%z", cmp_lt(1, 2))));
-    let _ = write_all(stdout(), to_bytes(format("%z", cmp_eq(1, 2))));
+    let _ = print(format("%z", cmp_eq(3, 3)));
+    let _ = print(format("%z", cmp_lt(1, 2)));
+    let _ = print(format("%z", cmp_eq(1, 2)));
 }

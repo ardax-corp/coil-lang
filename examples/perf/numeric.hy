@@ -1,7 +1,6 @@
 // CPU: iterative arithmetic + control flow (while, compound assign).
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn main() {
     let acc = 0;
@@ -10,5 +9,5 @@ fn main() {
         acc = acc + i;
         i = i + 1;
     }
-    let _ = write_all(stdout(), to_bytes(format("%i", acc)));
+    let _ = print(format("%i", acc));
 }

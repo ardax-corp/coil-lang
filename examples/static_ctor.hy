@@ -12,9 +12,8 @@
 //
 // @output 42,1,1
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 class Point {
     pub x: int,
@@ -45,9 +44,9 @@ impl Counter {
 
 fn main() {
     let p = Point::new(40, 2);
-    let _ = write_all(stdout(), to_bytes(format("%i,", p.sum())));
+    let _ = print(format("%i,", p.sum()));
 
     let c = Counter::fresh();
-    let _ = write_all(stdout(), to_bytes(format("%i,", c.id)));
-    let _ = write_all(stdout(), to_bytes(format("%i", Counter::count)));
+    let _ = print(format("%i,", c.id));
+    let _ = print(format("%i", Counter::count));
 }

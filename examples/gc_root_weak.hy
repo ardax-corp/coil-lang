@@ -3,9 +3,8 @@
 // @output pinned\npinned
 
 use gc::{get, root, unroot, upgrade, weak};
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn main() {
     let r = root("pinned");
@@ -18,10 +17,10 @@ fn main() {
         Option::Some(s) => s,
         Option::None => "gone",
     };
-    let _ = write_all(stdout(), to_bytes(label));
+    let _ = print(label);
     let taken = match unroot(r) {
         Option::Some(s) => s,
         Option::None => "gone",
     };
-    let _ = write_all(stdout(), to_bytes(format("\n%s", taken)));
+    let _ = print(format("\n%s", taken));
 }

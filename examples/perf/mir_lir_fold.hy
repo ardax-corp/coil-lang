@@ -1,9 +1,8 @@
 // Hit bench for #1434: MIR constant folding on LIR bodies. A body whose
 // only arithmetic is bitwise ops and shifts takes LIR (no dense attempt),
 // and its constants only meet once `mask` inlines.
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn mask(int a) -> int {
     return a & 4294967295;
@@ -41,5 +40,5 @@ fn main() {
         acc = (acc + mix(i)) & 1099511627775;
         i = i + 1;
     }
-    let _ = write_all(stdout(), to_bytes(format("%i %i", check(), acc)));
+    let _ = print(format("%i %i", check(), acc));
 }

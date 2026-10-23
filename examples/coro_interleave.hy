@@ -3,9 +3,8 @@
 //
 // @output 10,100,101,11,12,102
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 gen fn counter(int base) {
     yield base;
@@ -18,10 +17,10 @@ fn main() {
     let b = counter(100);
 
     // Interleave resumes: a, b, b, a, a, b
-    let _ = write_all(stdout(), to_bytes(format("%i,", resume a)));
-    let _ = write_all(stdout(), to_bytes(format("%i,", resume b)));
-    let _ = write_all(stdout(), to_bytes(format("%i,", resume b)));
-    let _ = write_all(stdout(), to_bytes(format("%i,", resume a)));
-    let _ = write_all(stdout(), to_bytes(format("%i,", resume a)));
-    let _ = write_all(stdout(), to_bytes(format("%i", resume b)));
+    let _ = print(format("%i,", resume a));
+    let _ = print(format("%i,", resume b));
+    let _ = print(format("%i,", resume b));
+    let _ = print(format("%i,", resume a));
+    let _ = print(format("%i,", resume a));
+    let _ = print(format("%i", resume b));
 }

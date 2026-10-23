@@ -6,9 +6,8 @@
 //
 // @output 13
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn id(int n) -> int {
     return n;
@@ -24,5 +23,5 @@ fn wrap_sub(int n) -> int {
 
 fn main() {
     // (1 + 5) + (10 - 3) == 13; a leaked body clobbers the left operand.
-    let _ = write_all(stdout(), to_bytes(format("%i", wrap_add(5) + wrap_sub(3))));
+    let _ = print(format("%i", wrap_add(5) + wrap_sub(3)));
 }

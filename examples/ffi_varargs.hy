@@ -12,14 +12,13 @@
 //
 // @output (not checked: needs `--allow-dload sum`; see the example_ffi_* pipeline tests)
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 extern "sum" {
     fn sum_n(int n, ...) -> int;
 }
 
 fn main() {
-    let _ = write_all(stdout(), to_bytes(format("%i", sum_n(3, 10, 20, 30))));
+    let _ = print(format("%i", sum_n(3, 10, 20, 30)));
 }

@@ -1,8 +1,7 @@
 // Hit bench for the widened stride-1 vectorizer: sum of the index (no load),
 // a loop that does not start at 0, and a[i + 1].
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn sum_i(int n) -> int {
     let s = 0;
@@ -42,5 +41,5 @@ fn main() {
         i = i + 1;
     }
     let total = sum_i(1024) + sum_from(v, 8) + sum_next(v);
-    let _ = write_all(stdout(), to_bytes(format("%i", total)));
+    let _ = print(format("%i", total));
 }

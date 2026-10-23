@@ -1,8 +1,7 @@
 // CPU: recursive alloc + walk (cross-lang fair bench).
 // Binary trees checksum; max depth 10.
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 enum Tree {
     Leaf,
@@ -42,5 +41,5 @@ fn main() {
         depth = depth + 2;
     }
     sum = sum + item_check(long_lived);
-    let _ = write_all(stdout(), to_bytes(format("%i", sum)));
+    let _ = print(format("%i", sum));
 }

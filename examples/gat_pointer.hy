@@ -4,9 +4,8 @@
 //
 // @output 42
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 trait Pointer<P: * -> *> {
     type Ref<T>;
@@ -28,5 +27,5 @@ fn get<P: * -> *, Pointer, A>(P<A> ptr, A fallback) -> P::Ref<A> {
 }
 
 fn main() {
-    let _ = write_all(stdout(), to_bytes(format("%i", get(Option::Some(42), 0))));
+    let _ = print(format("%i", get(Option::Some(42), 0)));
 }

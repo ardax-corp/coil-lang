@@ -1,8 +1,7 @@
 // Hot GetField path: repeated reads of the same class fields.
 // Allocating `hot` is map-eligible (D1); `main` only prints.
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 class Point {
     pub x: int,
@@ -34,5 +33,5 @@ fn hot() -> int {
 }
 
 fn main() {
-    let _ = write_all(stdout(), to_bytes(format("%i", hot())));
+    let _ = print(format("%i", hot()));
 }

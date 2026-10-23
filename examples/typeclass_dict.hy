@@ -4,9 +4,8 @@
 //
 // @output 4242
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 trait Describable<T> {
     fn describe_val(T x) -> int {}
@@ -31,6 +30,6 @@ fn outer<T: Describable>(T x) -> int {
 }
 
 fn main() {
-    let _ = write_all(stdout(), to_bytes(format("%i", show(41))));
-    let _ = write_all(stdout(), to_bytes(format("%i", outer(41))));
+    let _ = print(format("%i", show(41)));
+    let _ = print(format("%i", outer(41)));
 }

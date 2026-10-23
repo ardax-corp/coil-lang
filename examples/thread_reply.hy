@@ -3,9 +3,8 @@
 // @output ping
 
 use thread::{Receiver, Sender, channel, join, recv, send, spawn};
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 // Request/reply: pass both channel ends to the worker as one tuple.
 fn worker((Receiver, Sender) ends) {
@@ -19,6 +18,6 @@ fn main() {
     let replies = channel()?;
     let t = spawn(worker, (jobs[1], replies[0]))?;
     send(jobs[0], "ping")?;
-    let _ = write_all(stdout(), to_bytes(format("%s", recv(replies[1])?)));
+    let _ = print(format("%s", recv(replies[1])?));
     (join(t)?)?;
 }

@@ -2,10 +2,9 @@
 //
 // @output 2178309
 
-use io::stdout;
-use io::sync::write_all;
+use io::sync::print;
 
-use string::{format, to_bytes};
+use string::format;
 
 /// The `n`-th Fibonacci number (1, 1, 2, 3, 5, …).
 fn fib(
@@ -19,6 +18,6 @@ fn fib(
 }
 
 fn main() {
-    let _ = write_all(stdout(), to_bytes(format("%i", fib(32))));
+    let _ = print(format("%i", fib(32)));
     return;
 }

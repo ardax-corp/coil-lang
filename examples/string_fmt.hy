@@ -2,14 +2,13 @@
 //
 // @output hello world42-x
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn main() {
     let a = "hello";
     let b = "world";
-    let _ = write_all(stdout(), to_bytes(format("%s", a + " " + b)));
+    let _ = print(format("%s", a + " " + b));
     let s = format("%i-%s", 42, "x");
-    let _ = write_all(stdout(), to_bytes(format("%s", s)));
+    let _ = print(format("%s", s));
 }

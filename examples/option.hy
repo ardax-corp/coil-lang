@@ -2,9 +2,8 @@
 //
 // @output 42
 
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn unwrap(Option o) -> int {
     return match o {
@@ -14,5 +13,5 @@ fn unwrap(Option o) -> int {
 }
 
 fn main() {
-    let _ = write_all(stdout(), to_bytes(format("%i", unwrap(Option::Some(42)))));
+    let _ = print(format("%i", unwrap(Option::Some(42))));
 }

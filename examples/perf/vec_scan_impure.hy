@@ -1,9 +1,8 @@
 // CPU: `while i < v.len() { f(v[i]) }` where `f` is impure but cannot resize
 // an array — it only writes a field. `v.len()` stays invariant across the CALL,
 // so it hoists and `v[i]` unchecks, as for a pure helper (vec_scan_pure.hy).
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 class Tally {
     pub hits: int,
@@ -58,5 +57,5 @@ fn main() {
         total = total + scan(t, v);
         round = round + 1;
     }
-    let _ = write_all(stdout(), to_bytes(format("%i %i", total, t.hits)));
+    let _ = print(format("%i %i", total, t.hits));
 }

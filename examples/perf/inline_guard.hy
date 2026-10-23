@@ -1,8 +1,7 @@
 // Guard-clause callees in a hot loop: early `return`s fold into one `if`
 // value, so typed inlining can splice `clamp` and `step` into the loop.
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn clamp(int x, int lo, int hi) -> int {
     if x < lo {
@@ -32,5 +31,5 @@ fn run() -> int {
 }
 
 fn main() {
-    let _ = write_all(stdout(), to_bytes(format("%i", run())));
+    let _ = print(format("%i", run()));
 }

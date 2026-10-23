@@ -1,9 +1,8 @@
 // Iterative sibling of tak.hy. Same tak(18, 12, 6) = 7.
 // An explicit stack walks the same call tree. There is no VM recursion
 // and no stride-1 vector loop: each step still waits on three children.
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn tak_iter(int x0, int y0, int z0) -> int {
     let xs: Vec<int> = Vec::new();
@@ -82,5 +81,5 @@ fn tak_iter(int x0, int y0, int z0) -> int {
 }
 
 fn main() {
-    let _ = write_all(stdout(), to_bytes(format("%i", tak_iter(18, 12, 6))));
+    let _ = print(format("%i", tak_iter(18, 12, 6)));
 }

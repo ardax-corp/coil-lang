@@ -2,9 +2,8 @@
 // painful under the float lexer (`0.01` / `1.03` do not parse); this is the
 // same numeric-beyond-numeric canary. A later float-loop cut should drop
 // VM-only time vs this baseline.
-use io::stdout;
-use io::sync::write_all;
-use string::{format, to_bytes};
+use io::sync::print;
+use string::format;
 
 fn eval_a(int i, int j) -> float {
     let ij = i + j;
@@ -74,5 +73,5 @@ fn main() {
         i = i + 1;
     }
     let result = sqrt(vbv / vv);
-    let _ = write_all(stdout(), to_bytes(format("%i", (result * 1000000000.0) as int)));
+    let _ = print(format("%i", (result * 1000000000.0) as int));
 }
