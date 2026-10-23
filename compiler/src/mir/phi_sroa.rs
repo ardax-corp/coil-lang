@@ -57,6 +57,11 @@ fn defs(func: &MirFunc) -> HashMap<ValueId, (BlockId, &MirInst)> {
 
 /// Drop removed values from the sidecars that name them.
 fn forget(func: &mut MirFunc, gone: &HashSet<ValueId>) {
+    for inst in func.blocks.iter_mut().flat_map(|b| &mut b.insts) {
+        if let MirInst::GcBarrier { roots, .. } = inst {
+            roots.retain(|v| !gone.contains(v));
+        }
+    }
     func.slot_env.retain(|at, _| !gone.contains(at));
     for env in func.slot_env.values_mut() {
         env.retain(|(_, v)| !gone.contains(v));
@@ -303,6 +308,8 @@ fn fresh_object(func: &MirFunc, alloc: ValueId, phi: ValueId) -> Option<Fresh> {
                     fields.insert(*index, *value);
                 }
                 MirInst::Phi { dest, .. } if *dest == phi => {}
+                // A safepoint's root list only says the word is live.
+                MirInst::GcBarrier { .. } => {}
                 _ if inst.operands().contains(&alloc) => return None,
                 _ => {}
             }
@@ -342,6 +349,7 @@ fn split_object_phis(func: &mut MirFunc) -> usize {
                 match inst {
                     MirInst::HeapFieldLoad { dest, object, index } if *object == phi => loads.push((*dest, *index)),
                     MirInst::Phi { dest, .. } if *dest == phi => {}
+                    MirInst::GcBarrier { .. } => {}
                     _ if inst.operands().contains(&phi) => ok = false,
                     _ => {}
                 }
