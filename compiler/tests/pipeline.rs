@@ -4860,8 +4860,9 @@ fn main() {
 
 
 
-/// Bytecode shape: chained concat must keep multiple STRING `"%s%s"` hits
-/// (not collapse them via Dup-CSE).
+/// Bytecode shape: two concatenations keep their STRING `"%s%s"` hits
+/// (not collapse them via Dup-CSE). (One chain `a + b + c` is a single
+/// `"%s%s%s"` format, so the two are separate statements.)
 #[test]
 fn nested_string_concat_keeps_multiple_pct_s_string_ops() {
     let src = r#"
@@ -4872,7 +4873,8 @@ fn main() {
     let a = "a";
     let b = "b";
     let c = "c";
-    write(stdout(), to_bytes(a + b + c));
+    let ab = a + b;
+    write(stdout(), to_bytes(ab + c));
 }
 "#;
     let mut pipeline = test_pipeline();
@@ -4890,7 +4892,7 @@ fn main() {
         .count();
     assert!(
         pct_string_ops >= 2,
-        "a + b + c should emit ≥2 STRING \"%s%s\" (got {pct_string_ops}); Dup-CSE would under-count"
+        "two concatenations should emit ≥2 STRING \"%s%s\" (got {pct_string_ops}); Dup-CSE would under-count"
     );
     // No STRING \"%s%s\" immediately rewritten to DUPLICATE in the final stream.
     let string_then_dup = bytecode.windows(2).any(|w| {
