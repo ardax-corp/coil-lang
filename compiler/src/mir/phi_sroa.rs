@@ -321,11 +321,14 @@ fn fresh_object(func: &MirFunc, alloc: ValueId, phi: ValueId) -> Option<Fresh> {
     Some(Fresh { alloc, fields })
 }
 
+/// A φ's incoming values, by predecessor.
+type PhiArgs = Vec<(BlockId, ValueId)>;
+
 /// Rewrite 2: a φ of fresh objects read only field by field becomes a φ
 /// per read field.
 fn split_object_phis(func: &mut MirFunc) -> usize {
     let mut hits = 0;
-    let candidates: Vec<(BlockId, ValueId, Vec<(BlockId, ValueId)>)> = func
+    let candidates: Vec<(BlockId, ValueId, PhiArgs)> = func
         .blocks
         .iter()
         .flat_map(|b| {

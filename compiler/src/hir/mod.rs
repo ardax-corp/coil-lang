@@ -137,8 +137,8 @@ impl HirBody {
         &self.exprs[id.0 as usize]
     }
 
-    /// The operands of the string concatenation chain `id` heads (`a + b
-    /// + c` is `[a, b, c]`), left to right: the chain is one `format`, so
+    /// The operands of the string concatenation chain `id` heads, left to
+    /// right (`a + b + c` is `[a, b, c]`): the chain is one `format`, so
     /// its partial strings are never built.
     pub fn concat_leaves(&self, id: HirId) -> Vec<HirId> {
         let mut out = Vec::new();

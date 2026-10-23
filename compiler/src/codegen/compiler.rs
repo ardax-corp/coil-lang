@@ -1435,12 +1435,11 @@ impl Compiler {
             [v @ Ty::Var(_)] => Some(v.clone()),
             _ => None,
         }).collect();
-        let own_bounds = (own_bounds.len() == scheme.constraints.len().saturating_sub(1)
+        let fits = own_bounds.len() == scheme.constraints.len().saturating_sub(1)
             && own_bounds.len() == own.len()
             && own_bounds.iter().all(|v| own_bounds.iter().filter(|w| *w == v).count() == 1)
-            && !own.is_empty())
-        .then_some(own_bounds)
-        .unwrap_or_default();
+            && !own.is_empty();
+        let own_bounds = if fits { own_bounds } else { Vec::new() };
         let n_own = own_bounds.len();
         if n_own > 0 {
             head.extend(own_bounds);
