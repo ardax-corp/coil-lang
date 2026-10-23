@@ -28,7 +28,7 @@ pub fn format_source(src: &str) -> Result<String, Message> {
     let mut f = Formatter::new(src, comments);
     f.fmt_expression(ast.1.as_ref());
     f.flush_comments(usize::MAX);
-    let out = f.finish();
+    let out = restore_int_spellings(src, f.finish());
     // Never hand back code that lost a comment or no longer parses.
     let kept = comments::collect(&out).len();
     let reparse = Pratt::default().parse(&out).err();
@@ -70,6 +70,87 @@ pub fn format_program_noted(expr: &Expression<'_>, notes: Vec<Option<String>>) -
     f.item_notes = notes;
     f.fmt_expression(expr);
     f.finish()
+}
+
+/// The formatter prints an integer from its value; put back each literal's
+/// own spelling (`0xff`, `1_000`, #1849). The output keeps the source's
+/// literals in order, so the n-th integer of each is the same literal; when
+/// the two lists differ the output stays decimal.
+fn restore_int_spellings(src: &str, out: String) -> String {
+    let theirs = int_tokens(src);
+    if theirs.iter().all(|r| src[r.clone()].bytes().all(|b| b.is_ascii_digit())) {
+        return out;
+    }
+    let ours = int_tokens(&out);
+    let same = ours.len() == theirs.len()
+        && ours.iter().zip(&theirs).all(|(o, t)| {
+            let value = crate::int_literal_value(&src[t.clone()]);
+            value.is_some() && value == crate::int_literal_value(&out[o.clone()])
+        });
+    if !same {
+        return out;
+    }
+    let mut restored = String::with_capacity(out.len());
+    let mut last = 0;
+    for (o, t) in ours.iter().zip(&theirs) {
+        restored.push_str(&out[last..o.start]);
+        restored.push_str(&src[t.clone()]);
+        last = o.end;
+    }
+    restored.push_str(&out[last..]);
+    restored
+}
+
+/// Byte ranges of the integer literals in `text`, outside comments and
+/// strings. A float (`1.5`) is not one; a tuple index (`t.0`) is, on both
+/// sides alike.
+fn int_tokens(text: &str) -> Vec<std::ops::Range<usize>> {
+    let comments = comments::collect(text);
+    let bytes = text.as_bytes();
+    let mut next_comment = comments.iter().peekable();
+    let mut found = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        while next_comment.peek().is_some_and(|c| c.span.end <= i) {
+            next_comment.next();
+        }
+        if let Some(c) = next_comment.peek()
+            && c.span.start == i
+        {
+            i = c.span.end;
+            continue;
+        }
+        let b = bytes[i];
+        if b == b'"' {
+            i += 1;
+            while i < bytes.len() && bytes[i] != b'"' {
+                i += if bytes[i] == b'\\' { 2 } else { 1 };
+            }
+            i += 1;
+        } else if b == b'/' && bytes[i..].starts_with(b"///") {
+            i = text[i..].find('\n').map_or(text.len(), |n| i + n);
+        } else if b.is_ascii_alphabetic() || b == b'_' {
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                i += 1;
+            }
+        } else if b.is_ascii_digit() {
+            let start = i;
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                i += 1;
+            }
+            if bytes.get(i) == Some(&b'.') && bytes.get(i + 1).is_some_and(u8::is_ascii_digit) {
+                i += 1;
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
+            } else {
+                found.push(start..i);
+            }
+        } else {
+            i += 1;
+        }
+    }
+    found
 }
 
 struct Formatter<'s> {
@@ -3042,6 +3123,13 @@ mod tests {
         let formatted = format_source(src).expect("format failed");
         let ast2 = parse_exprs(&formatted);
         assert_eq!(ast1, ast2, "formatted:\n{formatted}");
+    }
+
+    #[test]
+    fn int_literals_keep_their_spelling() {
+        let src = "const M: int = 0xff_ff;\n\nfn f(int n) -> int {\n    let s = \"0x10 // 7\";\n    let a: [int; 0b11] = [1_000, 0o17, 2];\n    return match n {\n        0x0f => g(1.5),\n        -0b1 => n,\n        _ => 42,\n    };\n}\n";
+        assert_eq!(format_source(src).unwrap(), src);
+        round_trip(src);
     }
 
     #[test]
