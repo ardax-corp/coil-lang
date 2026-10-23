@@ -19,7 +19,7 @@ test("digit separators") {
     assert!(1_000_000 == 1000000);
     assert!(0b1111_0000 == 240);
     let b: byte = 0x7f;
-    assert!(b == 127);
+    assert!((b as int) == 127);
 }
 
 test("patterns and array lengths") {
@@ -28,7 +28,7 @@ test("patterns and array lengths") {
         0x0f => 1,
         0x10 => 2,
         -0b1 => 3,
-        _ => 4,
+        default => 4,
     };
     assert!(hit == 2);
     let a: [int; 0x3] = [1, 2, 3];

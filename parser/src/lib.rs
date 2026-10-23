@@ -11,7 +11,7 @@ use ast::{
 use std::{
     collections::HashSet,
     marker::PhantomData,
-    num::{ParseFloatError, ParseIntError},
+    num::ParseFloatError,
 };
 
 pub use chumsky::span::SimpleSpan;
@@ -186,6 +186,78 @@ pub struct Pratt<'pratt> {
 /// Join `a`, `b`, `C` into `a::b::C` for a `'src` AST borrow. One segment
 /// borrows it directly; longer paths leak the joined string (as the
 /// multi-segment `Construct` head always has).
+/// An integer literal: decimal digits, or `0x` / `0o` / `0b` and digits in
+/// that radix, with `_` between digits (`0xff_ff`, `1_000`, #1849). Yields
+/// the magnitude, or why the digits are not one.
+fn int_literal<'a>() -> impl Parser<'a, &'a str, Result<i128, String>, extra::Err<Rich<'a, char>>> + Clone {
+    let body = |radix: u32| {
+        any()
+            .filter(move |c: &char| c.is_digit(radix) || *c == '_')
+            .repeated()
+            .to_slice()
+            .map(move |digits: &str| int_digits(digits, radix))
+    };
+    let decimal = text::int(10)
+        .then(just('_').then(body(10)).or_not())
+        .to_slice()
+        .map(|digits: &str| int_digits(digits, 10));
+    choice((
+        just("0x").ignore_then(body(16)),
+        just("0o").ignore_then(body(8)),
+        just("0b").ignore_then(body(2)),
+        decimal,
+    ))
+}
+
+/// The value of `digits` in `radix`, `_` separators dropped. A separator
+/// goes between two digits: not first, last, or doubled.
+fn int_digits(digits: &str, radix: u32) -> Result<i128, String> {
+    if digits.is_empty() {
+        return Err("expected digits after the radix prefix".to_string());
+    }
+    if digits.starts_with('_') || digits.ends_with('_') || digits.contains("__") {
+        return Err("`_` in a number goes between two digits".to_string());
+    }
+    let plain: String = digits.chars().filter(|c| *c != '_').collect();
+    i128::from_str_radix(&plain, radix)
+        .ok()
+        .filter(|v| *v <= i64::MAX as i128 + 1)
+        .ok_or_else(|| "integer literal is too large for `int`".to_string())
+}
+
+/// [`int_literal`] as an `int`, a too-large or malformed one reported at
+/// its span (as 0). `negative` allows `int`'s minimum (`-0x8000_…`).
+fn int_literal_i64<'a>(
+    negative: bool,
+) -> impl Parser<'a, &'a str, i64, extra::Err<Rich<'a, char>>> + Clone {
+    int_literal().validate(move |v, e, emitter| {
+        let signed = v.map(|n| if negative { -n } else { n });
+        match signed {
+            Ok(n) if (i64::MIN as i128..=i64::MAX as i128).contains(&n) => n as i64,
+            Ok(_) => {
+                emitter.emit(Rich::custom(e.span(), "integer literal is too large for `int`"));
+                0
+            }
+            Err(msg) => {
+                emitter.emit(Rich::custom(e.span(), msg));
+                0
+            }
+        }
+    })
+}
+
+/// The value of one integer literal's text, as [`int_literal`] reads it.
+/// The formatter compares literals by value (#1849).
+pub(crate) fn int_literal_value(text: &str) -> Option<i128> {
+    let (radix, digits) = match text.get(..2) {
+        Some("0x") => (16, &text[2..]),
+        Some("0o") => (8, &text[2..]),
+        Some("0b") => (2, &text[2..]),
+        _ => (10, text),
+    };
+    int_digits(digits, radix).ok()
+}
+
 fn join_path_segments(mut segments: Vec<&str>) -> &str {
     if segments.len() == 1 {
         return segments.pop().unwrap_or_default();
@@ -220,17 +292,7 @@ impl<'pratt> Pratt<'pratt> {
         &self,
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
     {
-        text::int(10)
-            .to_slice()
-            .from_str()
-            .validate(|v: Result<i64, ParseIntError>, e, emitter| match v {
-                Ok(value) => value,
-                Err(msg) => {
-                    emitter.emit(Rich::custom(e.span(), msg.to_string()));
-
-                    0_i64
-                }
-            })
+        int_literal_i64(false)
             .labelled("integer")
             .map_with(output!(Integer))
     }
@@ -304,10 +366,7 @@ impl<'pratt> Pratt<'pratt> {
             .then(
                 op!(";")
                     .ignore_then(choice((
-                        text::int(10)
-                            .to_slice()
-                            .from_str::<i64>()
-                            .validate(|v: Result<i64, _>, _, _| v.unwrap_or(0))
+                        int_literal_i64(false)
                             .map_with(|n, e| (e.span(), Box::new(Expression::Integer(n)))),
                         text::ident().padded_by(trivia()).map_with(output!(Type)),
                     )))
@@ -2645,11 +2704,7 @@ impl<'pratt> Pratt<'pratt> {
                 .ignore_then(self.string_lit_body())
                 .then_ignore(just('"'))
                 .map(AttrLit::String),
-            text::int(10)
-                .to_slice()
-                .from_str::<i64>()
-                .validate(|v: Result<i64, _>, _, _| v.unwrap_or(0))
-                .map(AttrLit::Int),
+            int_literal_i64(false).map(AttrLit::Int),
             attr_float,
             keyword!("true").to(AttrLit::Bool(true)),
             keyword!("false").to(AttrLit::Bool(false)),
@@ -3711,18 +3766,7 @@ impl<'pratt> Pratt<'pratt> {
                 constructor,
                 bare_constructor,
                 // A negative literal is one pattern (`-1 =>`, #897).
-                just('-')
-                    .or_not()
-                    .then(text::int(10))
-                    .to_slice()
-                    .from_str()
-                    .validate(|v: Result<i64, ParseIntError>, e, emitter| match v {
-                        Ok(value) => value,
-                        Err(msg) => {
-                            emitter.emit(Rich::custom(e.span(), msg.to_string()));
-                            0_i64
-                        }
-                    })
+                choice((just('-').ignore_then(int_literal_i64(true)), int_literal_i64(false)))
                     .padded_by(trivia())
                     .map_with(|n, e| (e.span(), Pattern::Integer(n))),
                 text::ident().padded_by(trivia()).validate(|name: &str, e, emitter| {
