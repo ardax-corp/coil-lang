@@ -4570,7 +4570,7 @@ impl Checker {
             && let Some(mismatch) = mismatch.take()
         {
             let _ = self.error_with_help(
-                ErrorCode::TypeMismatch,
+                ErrorCode::ArrayElementMismatch,
                 mismatch,
                 range.clone(),
                 Some("an array literal requires every element to have the same type".to_string()),
@@ -7038,7 +7038,7 @@ impl Checker {
             let element = apply_ty_prune(&self.subst, &lit.element);
             let Ty::Existential { class } = strip_readonly(&element).clone() else {
                 let _ = self.error_with_help(
-                    ErrorCode::TypeMismatch,
+                    ErrorCode::ArrayElementMismatch,
                     lit.mismatch,
                     lit.range,
                     Some("an array literal requires every element to have the same type, or a trait object type it can pack each one as (`let xs: Vec<Shape> = [...]`)".to_string()),

@@ -394,7 +394,7 @@ fn cmd_run(pipeline: &mut Pipeline, archive: &str) {
         ),
         Err(LoadErr::Version(v)) => fail_and_exit(
             pipeline,
-            ErrorCode::IoError,
+            ErrorCode::ArchiveVersionMismatch,
             format!(
                 "Bytecode archive version {} is not compatible with runtime {}. Please recompile from source.",
                 format_archive_version(v),
