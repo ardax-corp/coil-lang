@@ -201,3 +201,24 @@ impl Result<T, E> {
         };
     }
 }
+
+// Hashed as a derived enum is (#1906): seeded with the variant index, so
+// `None` is 0 and `Some(x)` is `31 ^ x.hash()`.
+impl Hash for Option<T: Hash> {
+    pub fn hash(Option<T> o) -> int {
+        return match o {
+            Some(v) => 31 ^ v.hash(),
+            None => 0,
+        };
+    }
+}
+
+// `Ok(x)` is `x.hash()`, `Err(e)` is `31 ^ e.hash()`.
+impl Hash for Result<T: Hash, E: Hash> {
+    pub fn hash(Result<T, E> r) -> int {
+        return match r {
+            Ok(v) => v.hash(),
+            Err(e) => 31 ^ e.hash(),
+        };
+    }
+}
