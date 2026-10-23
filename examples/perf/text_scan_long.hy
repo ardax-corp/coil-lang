@@ -3,7 +3,7 @@
 // plain Coil byte loop, a plain Coil substring loop, and the stdlib
 // `find` / `split`. Byte-lane SIMD (docs/internals/byte-simd.md) targets
 // the plain loops.
-use clock::{mono_nanos};
+use clock::mono_nanos;
 use io::{stdout, write};
 use string::{format, to_bytes};
 use text::{Pattern, Searchable};
