@@ -1,7 +1,7 @@
 // Early-exit byte loops skip 64 iterations at a time where the body does
-// nothing (`mir/byte_scan.rs`). Each loop here is checked against the
-// `find_from` native at every needle position around the 64-byte lanes,
-// from every start, and at the ends.
+// nothing (`mir/byte_scan.rs`). Each loop here is checked against a plain
+// `find_from` (end of file) at every needle position around the 64-byte
+// lanes, from every start, and at the ends.
 use tests::assert;
 use string::slice_bytes;
 use thread::{join, spawn, ThreadError};
