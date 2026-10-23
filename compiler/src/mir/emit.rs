@@ -2570,6 +2570,18 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
             layout,
             args,
         } => {
+            // `s[i]` reads the byte in place (minor 45): no ABI edge.
+            if let [string, index] = args.as_slice()
+                && super::host_allow::host_edge_spec_by_name("string_byte_at").is_some_and(|s| s.id == *native_id)
+            {
+                out.push(byte(Byte::new(Instruction::DenseIndex).with_dense_abc(
+                    dense::HEAP_STR_BYTE,
+                    regs[dest.index()],
+                    regs[string.index()],
+                    regs[index.index()],
+                )));
+                return Ok(());
+            }
             // ABI edge: native id + DensePush args + HostInvoke + StorePop dest.
             out.push(IlOp::Const {
                 imm: i32::from(*native_id),

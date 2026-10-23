@@ -578,6 +578,10 @@ pub mod dense {
 
     /// [`super::Instruction::DenseIndex`] / [`super::Instruction::DenseStoreIndex`] flag.
     pub const HEAP_UNCHECKED: u8 = 1;
+    /// [`super::Instruction::DenseIndex`] flag (minor 45): `s[i]` on a
+    /// `string`, as `string_byte_at` answers it: the byte, or `-1` out of
+    /// range (the caller's test panics).
+    pub const HEAP_STR_BYTE: u8 = 2;
     /// [`super::Instruction::DenseFieldLoad`] / [`super::Instruction::DenseFieldStore`]:
     /// `c` is a name slot (GetField), not a field index.
     pub const FIELD_NAMED: u8 = 1;
