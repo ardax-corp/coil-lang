@@ -426,8 +426,8 @@ pub(crate) fn vload_words_into(heap: &Heap, reg: &mut [u64; common::simd::LANES]
     }
     let base = index as usize;
     if let Some(elems) = arr.words() {
-        for i in 0..n {
-            reg[i] = unsafe { elems.get_unchecked(base + i).raw() as u64 };
+        for (i, lane) in reg.iter_mut().enumerate() {
+            *lane = unsafe { elems.get_unchecked(base + i).raw() as u64 };
         }
     } else {
         for (i, v) in arr.iter().skip(base).take(n).enumerate() {

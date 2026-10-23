@@ -619,6 +619,9 @@ impl Builder<'_> {
     }
 }
 
+/// A φ's incoming values.
+type PhiArgs = Vec<(BlockId, ValueId)>;
+
 /// Put the scan in front of the loop. Returns its blocks in layout
 /// order: the preheader, then `G`. The scan stops by itself at the loop's
 /// bound and where a read would leave its stream, so the preheader adds
@@ -627,7 +630,7 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: Plan) -> Vec<BlockId> {
     let h = lp.header;
     let latch = func.preds_of(h).into_iter().find(|p| lp.blocks.contains(p)).expect("latch");
     let outside: Vec<BlockId> = func.preds_of(h).into_iter().filter(|p| !lp.blocks.contains(p)).collect();
-    let header_phis: Vec<(ValueId, MirTy, Vec<(BlockId, ValueId)>)> = func
+    let header_phis: Vec<(ValueId, MirTy, PhiArgs)> = func
         .block(h)
         .insts
         .iter()
