@@ -175,7 +175,7 @@ pub fn as_bytes_mut(reg: &mut [u64; LANES]) -> &mut bytes64::Block {
 use coil_simd::bytes64;
 
 /// Unsigned lane `a pred b` (`dense::CMP_*`).
-#[inline]
+#[inline(always)]
 fn byte_cmp(pred: u8, a: &bytes64::Block, b: &bytes64::Block) -> bytes64::Block {
     match pred {
         dense::CMP_LT => bytes64::lt(a, b),
@@ -209,18 +209,112 @@ fn byte_cmp_scalar(pred: u8, a: &bytes64::Block, s: i64) -> bytes64::Block {
 /// regs[b]`, or lane `regs[b]` against `scalar` for `BS_CMP` kinds.
 #[inline]
 pub fn vbin_bytes_in(regs: &mut [[u64; LANES]; simd::NREGS], kind: u8, dest: usize, a: usize, b: usize, scalar: Value) {
-    let out = {
-        let y = as_bytes(&regs[b]);
-        match kind {
-            simd::M_AND => bytes64::and(as_bytes(&regs[a]), y),
-            simd::M_OR => bytes64::or(as_bytes(&regs[a]), y),
-            simd::M_ANDN => bytes64::andnot(as_bytes(&regs[a]), y),
-            simd::M_NOT => bytes64::not(as_bytes(&regs[a])),
-            k if (simd::B_CMP..simd::B_CMP + 6).contains(&k) => byte_cmp(k - simd::B_CMP, as_bytes(&regs[a]), y),
-            k => byte_cmp_scalar(k - simd::BS_CMP, y, scalar.as_int()),
+    ByteOp::new(kind, dest, a, b, scalar).run(regs);
+}
+
+/// `VScan` with one stream compared against one byte: from `p = from` in
+/// steps of 64 while `p <= hi` and lanes `p + off ..` lie in `bytes`, the
+/// first `p + k` where `bytes[p + off + k] pred b`, else where it stopped.
+pub(crate) fn scan_byte(bytes: &[u8], from: i64, off: i64, hi: i128, pred: u8, b: u8) -> i64 {
+    // The last `p` whose 64 lanes lie in `bytes`.
+    let hi = hi.min(bytes.len() as i128 - bytes64::LANES as i128 - i128::from(off));
+    if i128::from(from) + i128::from(off) < 0 {
+        return from;
+    }
+    #[inline(always)]
+    fn run(bytes: &[u8], from: i64, off: i64, hi: i128, f: impl Fn(&bytes64::Block) -> bytes64::Block) -> i64 {
+        let mut p = from;
+        while i128::from(p) <= hi {
+            let i = (p + off) as usize;
+            // SAFETY: `0 <= p + off` and `p + off + 64 <= bytes.len()` by `hi`.
+            let block = unsafe { &*(bytes.as_ptr().add(i) as *const bytes64::Block) };
+            let m = bytes64::movemask(&f(block));
+            if m != 0 {
+                return p + i64::from(m.trailing_zeros());
+            }
+            p += bytes64::LANES as i64;
         }
-    };
-    *as_bytes_mut(&mut regs[dest]) = out;
+        p
+    }
+    let k = bytes64::splat(b);
+    match pred {
+        dense::CMP_EQ => run(bytes, from, off, hi, |x| bytes64::eq(x, &k)),
+        dense::CMP_NE => run(bytes, from, off, hi, |x| bytes64::not(&bytes64::eq(x, &k))),
+        _ => run(bytes, from, off, hi, |x| byte_cmp(pred, x, &k)),
+    }
+}
+
+/// `VScan` for `bytes[p + oa + k] == a && bytes[p + ob + k] == b`, as
+/// [`scan_byte`].
+pub(crate) fn scan_pair(bytes: &[u8], from: i64, (oa, a): (i64, u8), (ob, b): (i64, u8), hi: i128) -> i64 {
+    let lanes = bytes64::LANES as i128;
+    let hi = hi.min(bytes.len() as i128 - lanes - i128::from(oa)).min(bytes.len() as i128 - lanes - i128::from(ob));
+    if i128::from(from) + i128::from(oa.min(ob)) < 0 {
+        return from;
+    }
+    let (ka, kb) = (bytes64::splat(a), bytes64::splat(b));
+    let mut p = from;
+    while i128::from(p) <= hi {
+        // SAFETY: both blocks lie in `bytes` by `hi` and the check above.
+        let x = unsafe { &*(bytes.as_ptr().add((p + oa) as usize) as *const bytes64::Block) };
+        let y = unsafe { &*(bytes.as_ptr().add((p + ob) as usize) as *const bytes64::Block) };
+        let m = bytes64::movemask(&bytes64::and(&bytes64::eq(x, &ka), &bytes64::eq(y, &kb)));
+        if m != 0 {
+            return p + i64::from(m.trailing_zeros());
+        }
+        p += bytes64::LANES as i64;
+    }
+    p
+}
+
+/// A byte-lane `VBin` with its scalar read: what a `VScan` body runs per
+/// 64 bytes. Register indices are below `NREGS`.
+#[derive(Clone, Copy)]
+pub(crate) enum ByteOp {
+    /// `M_*` kind on registers `a`, `b`.
+    Logic { kind: u8, dest: usize, a: usize, b: usize },
+    /// Lane `a pred b`.
+    Cmp { pred: u8, dest: usize, a: usize, b: usize },
+    /// Lane `b pred k`.
+    CmpK { pred: u8, dest: usize, b: usize, k: u8 },
+    /// Every lane `v` (a scalar outside a byte: the answer is the same in every lane).
+    Fill { dest: usize, v: u8 },
+}
+
+impl ByteOp {
+    pub(crate) fn new(kind: u8, dest: usize, a: usize, b: usize, scalar: Value) -> Self {
+        match kind {
+            simd::M_AND | simd::M_OR | simd::M_ANDN | simd::M_NOT => Self::Logic { kind, dest, a, b },
+            k if (simd::B_CMP..simd::B_CMP + 6).contains(&k) => Self::Cmp { pred: k - simd::B_CMP, dest, a, b },
+            k => {
+                let pred = k - simd::BS_CMP;
+                match u8::try_from(scalar.as_int()) {
+                    Ok(k) => Self::CmpK { pred, dest, b, k },
+                    Err(_) => Self::Fill { dest, v: byte_cmp_scalar(pred, &[0; bytes64::LANES], scalar.as_int())[0] },
+                }
+            }
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn run(&self, regs: &mut [[u64; LANES]; simd::NREGS]) {
+        let (dest, out) = match *self {
+            Self::Logic { kind, dest, a, b } => {
+                let (x, y) = (as_bytes(&regs[a]), as_bytes(&regs[b]));
+                let out = match kind {
+                    simd::M_AND => bytes64::and(x, y),
+                    simd::M_OR => bytes64::or(x, y),
+                    simd::M_ANDN => bytes64::andnot(x, y),
+                    _ => bytes64::not(x),
+                };
+                (dest, out)
+            }
+            Self::Cmp { pred, dest, a, b } => (dest, byte_cmp(pred, as_bytes(&regs[a]), as_bytes(&regs[b]))),
+            Self::CmpK { pred, dest, b, k } => (dest, byte_cmp(pred, as_bytes(&regs[b]), &bytes64::splat(k))),
+            Self::Fill { dest, v } => (dest, bytes64::splat(v)),
+        };
+        *as_bytes_mut(&mut regs[dest]) = out;
+    }
 }
 
 /// `VMask`: bit `k` is the top bit of byte lane `k`.

@@ -13,13 +13,13 @@ pub const LANES: usize = 64;
 pub type Block = [u8; LANES];
 
 /// Every lane `b`.
-#[inline]
+#[inline(always)]
 pub fn splat(b: u8) -> Block {
     [b; LANES]
 }
 
 /// `a == b` per lane.
-#[inline]
+#[inline(always)]
 pub fn eq(a: &Block, b: &Block) -> Block {
     #[cfg(target_arch = "x86_64")]
     {
@@ -36,7 +36,7 @@ pub fn eq(a: &Block, b: &Block) -> Block {
 }
 
 /// `a < b` per lane, unsigned.
-#[inline]
+#[inline(always)]
 pub fn lt(a: &Block, b: &Block) -> Block {
     #[cfg(target_arch = "x86_64")]
     {
@@ -53,31 +53,31 @@ pub fn lt(a: &Block, b: &Block) -> Block {
 }
 
 /// `a <= b` per lane, unsigned.
-#[inline]
+#[inline(always)]
 pub fn le(a: &Block, b: &Block) -> Block {
     not(&lt(b, a))
 }
 
 /// `a & b` per lane.
-#[inline]
+#[inline(always)]
 pub fn and(a: &Block, b: &Block) -> Block {
     zip(a, b, |x, y| x & y)
 }
 
 /// `a | b` per lane.
-#[inline]
+#[inline(always)]
 pub fn or(a: &Block, b: &Block) -> Block {
     zip(a, b, |x, y| x | y)
 }
 
 /// `a & !b` per lane.
-#[inline]
+#[inline(always)]
 pub fn andnot(a: &Block, b: &Block) -> Block {
     zip(a, b, |x, y| x & !y)
 }
 
 /// `!a` per lane.
-#[inline]
+#[inline(always)]
 pub fn not(a: &Block) -> Block {
     let mut o = [0u8; LANES];
     for (o, x) in o.iter_mut().zip(a) {
@@ -87,7 +87,7 @@ pub fn not(a: &Block) -> Block {
 }
 
 /// Bit `k` is the top bit of lane `k`.
-#[inline]
+#[inline(always)]
 pub fn movemask(a: &Block) -> u64 {
     #[cfg(target_arch = "x86_64")]
     {
@@ -104,7 +104,7 @@ pub fn movemask(a: &Block) -> u64 {
 }
 
 // Plain lane-wise loops: LLVM vectorises these on the baseline ISA.
-#[inline]
+#[inline(always)]
 fn zip(a: &Block, b: &Block, f: impl Fn(u8, u8) -> u8) -> Block {
     let mut o = [0u8; LANES];
     for i in 0..LANES {

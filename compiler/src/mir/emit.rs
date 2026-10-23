@@ -4460,9 +4460,11 @@ pub(super) fn paired_alloc_dests(func: &MirFunc) -> HashMap<ValueId, ValueId> {
     out
 }
 
-/// A `ByteScan`'s `VScan` body: byte-lane `V*` ops, each node into a
-/// vector register (stack-allocated, eight in all), the mask in `v0`. A
-/// `VLoad`'s index slot holds the stream's offset from the scan position.
+/// A `ByteScan`'s `VScan` body: each stream loaded once into the top
+/// vector registers (stream `s` in `v7 - s`), then byte-lane `VBin`s, each
+/// tree node into a register counted up from `v0`, so the mask ends in
+/// `v0`. A `VLoad`'s index slot holds the stream's offset from the scan
+/// position.
 fn byte_scan_body(
     expr: &super::inst::LaneExpr,
     streams: &[(ValueId, ValueId)],
@@ -4475,7 +4477,8 @@ fn byte_scan_body(
     struct Ctx<'a> {
         out: Vec<Byte>,
         next: u8,
-        streams: &'a [(ValueId, ValueId)],
+        /// The lowest stream register: nodes stay below it.
+        top: u8,
         scalars: &'a [ValueId],
         regs: &'a [u8],
     }
@@ -4483,7 +4486,7 @@ fn byte_scan_body(
     impl Ctx<'_> {
         fn reg(&mut self) -> Option<u8> {
             let r = self.next;
-            if usize::from(r) >= simd::NREGS {
+            if r >= self.top {
                 return None;
             }
             self.next += 1;
@@ -4494,16 +4497,9 @@ fn byte_scan_body(
             self.out.push(Byte::new(Instruction::VBin).with_dense_abc(kind, dest, a, b));
         }
 
-        fn load(&mut self, s: u8) -> Option<u8> {
-            let (arr, idx) = *self.streams.get(usize::from(s))?;
-            let r = self.reg()?;
-            self.out.push(Byte::new(Instruction::VLoad).with_dense_abc(
-                simd::TY_U8,
-                r,
-                self.regs[arr.index()],
-                self.regs[idx.index()],
-            ));
-            Some(r)
+        fn stream(&self, s: u8) -> Option<u8> {
+            let r = (simd::NREGS - 1).checked_sub(usize::from(s))? as u8;
+            (r >= self.top).then_some(r)
         }
 
         fn eval(&mut self, e: &LaneExpr) -> Option<u8> {
@@ -4517,24 +4513,24 @@ fn byte_scan_body(
             };
             let base = self.next;
             let r = match e {
-                // `x != x` / `x == x` on any loaded lane.
+                // `x == x` / `x != x` on a loaded lane.
                 LaneExpr::Const(b) => {
-                    let r = self.load(0)?;
+                    let (r, x) = (self.reg()?, self.stream(0)?);
                     let k = if *b { dense::CMP_EQ } else { dense::CMP_NE };
-                    self.vbin(simd::B_CMP + k, r, r, r);
+                    self.vbin(simd::B_CMP + k, r, x, x);
                     r
                 }
                 LaneExpr::Cmp { op, lhs, rhs } => match (*lhs, *rhs) {
                     (LaneVal::Stream(a), LaneVal::Stream(b)) => {
-                        let (x, y) = (self.load(a)?, self.load(b)?);
-                        self.vbin(simd::B_CMP + pred(*op), x, x, y);
-                        x
+                        let (r, x, y) = (self.reg()?, self.stream(a)?, self.stream(b)?);
+                        self.vbin(simd::B_CMP + pred(*op), r, x, y);
+                        r
                     }
                     (LaneVal::Stream(a), LaneVal::Scalar(k)) => {
-                        let x = self.load(a)?;
+                        let (r, x) = (self.reg()?, self.stream(a)?);
                         let slot = self.regs[self.scalars.get(usize::from(k))?.index()];
-                        self.vbin(simd::BS_CMP + pred(*op), x, slot, x);
-                        x
+                        self.vbin(simd::BS_CMP + pred(*op), r, slot, x);
+                        r
                     }
                     (LaneVal::Scalar(_), LaneVal::Stream(_)) => {
                         let flipped = match op {
@@ -4568,7 +4564,17 @@ fn byte_scan_body(
         }
     }
 
-    let mut cx = Ctx { out: Vec::new(), next: 0, streams, scalars, regs };
+    let top = simd::NREGS.checked_sub(streams.len())? as u8;
+    let mut cx = Ctx { out: Vec::new(), next: 0, top, scalars, regs };
+    for (s, &(arr, off)) in streams.iter().enumerate() {
+        let r = cx.stream(s as u8)?;
+        cx.out.push(Byte::new(Instruction::VLoad).with_dense_abc(
+            simd::TY_U8,
+            r,
+            regs[arr.index()],
+            regs[off.index()],
+        ));
+    }
     cx.eval(expr)?;
-    (cx.out.len() <= common::simd::SCAN_MAX_BODY).then_some(cx.out)
+    (cx.out.len() <= simd::SCAN_MAX_BODY).then_some(cx.out)
 }

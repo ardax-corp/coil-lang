@@ -249,3 +249,29 @@ test("bounds near the int limits do not overflow") {
     assert!(find_upto(s, 59, 0, 251) == 250);
     assert!(find_upto(s, 59, 200, 9223372036854775807) == 250);
 }
+
+// Two streams of one string: the first two bytes of a needle.
+fn find_pair(string s, byte a, byte b) -> int {
+    let i = 0;
+    let n = s.len() - 1;
+    while i < n {
+        if s[i] == a && s[i + 1] == b {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+test("a two-byte filter at every position") {
+    let sizes = [2, 63, 64, 65, 66, 129, 200];
+    for n in sizes {
+        let at = 0;
+        while at + 2 <= n {
+            let s = with_mark(n - 1, at, ";,");
+            assert!(find_pair(s, 59 as byte, 44 as byte) == find_from(s, ";,", 0));
+            assert!(find_pair(s, 44 as byte, 59 as byte) == find_from(s, ",;", 0));
+            at = at + 1;
+        }
+    }
+}

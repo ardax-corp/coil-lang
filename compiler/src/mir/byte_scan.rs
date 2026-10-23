@@ -503,13 +503,14 @@ fn plan_loop(func: &MirFunc, lp: &LoopInfo, byte_at: u16) -> Option<Plan> {
         return None;
     }
     let expr = LaneExpr::not(skip);
-    if expr.size() > MAX_EXPR || regs_needed(&expr) > common::simd::NREGS {
+    if expr.size() > MAX_EXPR {
         return None;
     }
     // Renumber the streams the mask loads.
     let mut loads: Vec<u8> = Vec::new();
     let expr = renumber(&expr, &mut loads);
-    if loads.is_empty() {
+    // Each stream is loaded once into its own register.
+    if loads.is_empty() || regs_needed(&expr) + loads.len() > common::simd::NREGS {
         return None;
     }
     Some(Plan { iv, bound, inclusive, streams: walk.streams, loads, scalars: walk.scalars, expr })
@@ -552,11 +553,10 @@ fn region_order(func: &MirFunc, lp: &LoopInfo, start: BlockId, latch: BlockId) -
 }
 
 /// Vector registers `emit::byte_mask_ops` uses for `e`.
+/// Vector registers the tree's evaluation takes, besides the streams'.
 fn regs_needed(e: &LaneExpr) -> usize {
     match e {
-        LaneExpr::Const(_) => 1,
-        LaneExpr::Cmp { lhs: LaneVal::Stream(_), rhs: LaneVal::Stream(_), .. } => 2,
-        LaneExpr::Cmp { .. } => 1,
+        LaneExpr::Const(_) | LaneExpr::Cmp { .. } => 1,
         LaneExpr::And(a, b) | LaneExpr::Or(a, b) => regs_needed(a).max(1 + regs_needed(b)),
         LaneExpr::Not(a) => regs_needed(a),
     }

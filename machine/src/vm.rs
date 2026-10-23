@@ -511,18 +511,24 @@ pub(crate) fn vscan(
     #[derive(Clone, Copy)]
     enum Op {
         Load { reg: usize, src: Src, off: i64 },
-        Bin { kind: u8, dest: usize, a: usize, b: usize, scalar: Value },
+        Bin(crate::simd::ByteOp),
     }
     if body.len() > simd::SCAN_MAX_BODY {
         return Err(BAD);
     }
-    let mut ops = [Op::Bin { kind: 0, dest: 0, a: 0, b: 0, scalar: Value::from(0i64) }; simd::SCAN_MAX_BODY];
-    for (op, word) in ops.iter_mut().zip(body) {
+    // The last lane `p + 63` against the bound, in `i128` so nothing wraps.
+    let hi = i128::from(bound) - i128::from(!inclusive) - (simd::BYTE_LANES as i128 - 1);
+    // Fewer than 64 lanes left (a short inner loop): nothing to decode.
+    if i128::from(from) > hi {
+        return Ok(from);
+    }
+    let mut slots = [const { std::mem::MaybeUninit::<Op>::uninit() }; simd::SCAN_MAX_BODY];
+    for (op, word) in slots.iter_mut().zip(body) {
         let (kind, dest, a, b) = word.dense_abc_parts();
         if dest >= simd::NREGS {
             return Err(BAD);
         }
-        *op = match *word.bytecode() {
+        op.write(match *word.bytecode() {
             Instruction::VLoad if kind == simd::TY_U8 => {
                 let addr = stack[sp + a].raw() as u64;
                 let mut obj = heap.find_object_by_addr(addr);
@@ -553,14 +559,75 @@ pub(crate) fn vscan(
                 if b >= simd::NREGS {
                     return Err(BAD);
                 }
-                Op::Bin { kind, dest, a, b, scalar }
+                Op::Bin(crate::simd::ByteOp::new(kind, dest, a, b, scalar))
             }
             _ => return Err(BAD),
-        };
+        });
     }
-    let ops = &ops[..body.len()];
-    // The last lane `p + 63` against the bound, in `i128` so nothing wraps.
-    let hi = i128::from(bound) - i128::from(!inclusive) - (simd::BYTE_LANES as i128 - 1);
+    // SAFETY: the loop above wrote the first `body.len()` entries (an early
+    // return leaves none read).
+    let ops = unsafe { &*(&raw const slots[..body.len()] as *const [Op]) };
+    // One string against a byte (find a byte, split): a tight loop.
+    if let [Op::Load { reg, src: Src::Bytes(ptr, len), off }, Op::Bin(crate::simd::ByteOp::CmpK { pred, dest: 0, b, k })] = *ops
+        && b == reg
+    {
+        // SAFETY: the bytes stay where they were resolved; nothing allocates.
+        let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
+        return Ok(crate::simd::scan_byte(bytes, from, off, hi, pred, k));
+    }
+    // Two bytes of one string (a needle's first two): another tight loop.
+    use crate::simd::ByteOp::{CmpK, Logic};
+    if let [
+        Op::Load { reg: ra, src: Src::Bytes(pa, la), off: oa },
+        Op::Load { reg: rb, src: Src::Bytes(pb, lb), off: ob },
+        Op::Bin(CmpK { pred: simd_eq_a, dest: 0, b: xa, k: ka }),
+        Op::Bin(CmpK { pred: simd_eq_b, dest: db, b: xb, k: kb }),
+        Op::Bin(Logic { kind: simd::M_AND, dest: 0, a: 0, b: lb2 }),
+    ] = *ops
+        && (pa, la) == (pb, lb)
+        && xa == ra
+        && xb == rb
+        && db == lb2
+        && db != 0
+        && simd_eq_a == common::dense::CMP_EQ
+        && simd_eq_b == common::dense::CMP_EQ
+    {
+        // SAFETY: as above.
+        let bytes = unsafe { std::slice::from_raw_parts(pa, la) };
+        return Ok(crate::simd::scan_pair(bytes, from, (oa, ka), (ob, kb), hi));
+    }
+    // Every stream in place: range-check once, then load unchecked.
+    if ops.iter().all(|op| !matches!(op, Op::Load { src: Src::Other(..), .. })) {
+        let mut hi = hi;
+        for op in ops {
+            if let Op::Load { src: Src::Bytes(_, len), off, .. } = *op {
+                if i128::from(from) + i128::from(off) < 0 {
+                    return Ok(from);
+                }
+                hi = hi.min(len as i128 - simd::BYTE_LANES as i128 - i128::from(off));
+            }
+        }
+        let mut p = from;
+        while i128::from(p) <= hi {
+            for op in ops {
+                match *op {
+                    Op::Load { reg, src: Src::Bytes(ptr, _), off } => {
+                        // SAFETY: `0 <= p + off` and `p + off + 64 <= len` by `hi`.
+                        let lanes = unsafe { &*(ptr.add((p + off) as usize) as *const [u8; simd::BYTE_LANES]) };
+                        *crate::simd::as_bytes_mut(&mut regs[reg]) = *lanes;
+                    }
+                    Op::Load { .. } => {}
+                    Op::Bin(op) => op.run(regs),
+                }
+            }
+            let m = crate::simd::movemask(&regs[0]);
+            if m != 0 {
+                return Ok(p + i64::from(m.trailing_zeros()));
+            }
+            p += simd::BYTE_LANES as i64;
+        }
+        return Ok(p);
+    }
     let mut p = from;
     while i128::from(p) <= hi {
         for op in ops {
@@ -591,7 +658,7 @@ pub(crate) fn vscan(
                         }
                     }
                 }
-                Op::Bin { kind, dest, a, b, scalar } => crate::simd::vbin_bytes_in(regs, kind, dest, a, b, scalar),
+                Op::Bin(op) => op.run(regs),
             }
         }
         let m = crate::simd::movemask(&regs[0]);
@@ -626,12 +693,10 @@ fn resolve_dense_index_object_in(
         return Some(obj);
     }
     let obj = heap.find_object_by_addr(addr)?;
-    if matches!(obj, Object::Array(_) | Object::Tuple(_)) {
+    // A string too (`s[i]`): a pin is per register, so a loop reading two
+    // strings (`s[i + j] == p[j]`) finds both without a heap lookup.
+    if matches!(obj, Object::Array(_) | Object::Tuple(_) | Object::String(_)) {
         pin_current_array_in(frame_pins, frames_len, slot, obj);
-        *dense_obj_addr = addr;
-        *dense_obj = Some(obj);
-    } else if matches!(obj, Object::String(_)) {
-        // `s[i]` in a loop: the string stays the one-entry cache's object.
         *dense_obj_addr = addr;
         *dense_obj = Some(obj);
     }
