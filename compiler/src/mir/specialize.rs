@@ -564,7 +564,7 @@ fn loop_opts(func: &mut crate::mir::MirFunc, dense: bool) {
 /// is named where it does instead of surfacing as a bad emit (#1869).
 #[cfg(debug_assertions)]
 fn check_after(func: &crate::mir::MirFunc, pass: &str) {
-    if let Err(e) = func.verify() {
+    if let Err(e) = func.verify().and_then(|()| func.verify_dominance()) {
         panic!("MIR verify failed after {pass} in {}: {e}", func.name);
     }
 }
@@ -927,5 +927,31 @@ mod cost_gate_tests {
     #[should_panic(expected = "MIR verify failed after sroa in broken")]
     fn check_after_names_the_pass() {
         super::check_after(&crate::mir::MirFunc::new("broken"), "sroa");
+    }
+
+    /// A use one arm defines but the join reads passes the structural
+    /// check; the dominance check catches it (#1869).
+    #[test]
+    fn verify_dominance_rejects_a_use_one_arm_defines() {
+        let src = r#"
+func @arm(v0: i64) -> i64 {
+bb0:
+    v1 = iconst.i64 0
+    v2 = icmp.slt v0, v1
+    brif v2, bb1, bb2
+bb1:
+    v3 = iadd v0, v0
+    jump bb2
+bb2:
+    v4 = iadd v3, v0
+    return v4
+}
+"#;
+        let f = crate::mir::parse_func(src).expect(src);
+        f.verify().unwrap();
+        let err = f.verify_dominance().unwrap_err();
+        assert!(err.contains("reads v3"), "{err}");
+        let ok = crate::mir::parse_func(&src.replace("v4 = iadd v3, v0", "v4 = iadd v0, v0")).unwrap();
+        ok.verify_dominance().unwrap();
     }
 }
