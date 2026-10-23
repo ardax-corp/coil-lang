@@ -205,22 +205,22 @@ fn byte_cmp_scalar(pred: u8, a: &bytes64::Block, s: i64) -> bytes64::Block {
     bytes64::splat(if all { 0xFF } else { 0 })
 }
 
-/// Evaluate a byte-lane `VBin` (`simd::is_byte_kind`). `scalar` is the
-/// frame-slot word for `BS_CMP` kinds.
+/// A byte-lane `VBin` on the register file: `regs[dest] = regs[a] op
+/// regs[b]`, or lane `regs[b]` against `scalar` for `BS_CMP` kinds.
 #[inline]
-pub fn eval_vbin_bytes(kind: u8, a: &[u64; LANES], b: &[u64; LANES], scalar: Value) -> [u64; LANES] {
-    let (x, y) = (as_bytes(a), as_bytes(b));
-    let out = match kind {
-        simd::M_AND => bytes64::and(x, y),
-        simd::M_OR => bytes64::or(x, y),
-        simd::M_ANDN => bytes64::andnot(x, y),
-        simd::M_NOT => bytes64::not(x),
-        k if (simd::B_CMP..simd::B_CMP + 6).contains(&k) => byte_cmp(k - simd::B_CMP, x, y),
-        k => byte_cmp_scalar(k - simd::BS_CMP, y, scalar.as_int()),
+pub fn vbin_bytes_in(regs: &mut [[u64; LANES]; simd::NREGS], kind: u8, dest: usize, a: usize, b: usize, scalar: Value) {
+    let out = {
+        let y = as_bytes(&regs[b]);
+        match kind {
+            simd::M_AND => bytes64::and(as_bytes(&regs[a]), y),
+            simd::M_OR => bytes64::or(as_bytes(&regs[a]), y),
+            simd::M_ANDN => bytes64::andnot(as_bytes(&regs[a]), y),
+            simd::M_NOT => bytes64::not(as_bytes(&regs[a])),
+            k if (simd::B_CMP..simd::B_CMP + 6).contains(&k) => byte_cmp(k - simd::B_CMP, as_bytes(&regs[a]), y),
+            k => byte_cmp_scalar(k - simd::BS_CMP, y, scalar.as_int()),
+        }
     };
-    let mut reg = [0u64; LANES];
-    *as_bytes_mut(&mut reg) = out;
-    reg
+    *as_bytes_mut(&mut regs[dest]) = out;
 }
 
 /// `VMask`: bit `k` is the top bit of byte lane `k`.
@@ -232,6 +232,15 @@ pub fn movemask(reg: &[u64; LANES]) -> i64 {
 #[cfg(test)]
 mod byte_tests {
     use super::*;
+
+    /// `a op b` (or lane `b` against `scalar`) into a fresh register.
+    fn eval_vbin_bytes(kind: u8, a: &[u64; LANES], b: &[u64; LANES], scalar: Value) -> [u64; LANES] {
+        let mut regs = [[0u64; LANES]; simd::NREGS];
+        regs[0] = *a;
+        regs[1] = *b;
+        vbin_bytes_in(&mut regs, kind, 2, 0, 1, scalar);
+        regs[2]
+    }
 
     fn reg(bytes: &[u8]) -> [u64; LANES] {
         let mut r = [0u64; LANES];
