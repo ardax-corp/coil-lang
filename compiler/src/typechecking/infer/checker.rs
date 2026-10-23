@@ -1172,7 +1172,7 @@ impl Checker {
 
     /// Scheme for `fs_*` / `env_*` pipeline host natives.
     pub fn host_fn_scheme(&mut self, registry: &str, range: Range<usize>) -> Scheme {
-        use crate::typechecking::ty::{boolean, record};
+        use crate::typechecking::ty::{boolean, byte, record, stream_ty};
         use common::{BUILTIN_ENV_ERROR_ENUM, BUILTIN_IO_ERROR_ENUM};
 
         let fun = |params: &[Ty], ret: Ty| {
@@ -1185,6 +1185,8 @@ impl Checker {
         let env_err = Ty::Con(BUILTIN_ENV_ERROR_ENUM.into());
 
         let res_bool_io = result_app_ty(boolean(), io_err.clone());
+        let res_size_io = result_app_ty(tuple_ty(vec![int(), int()]), io_err.clone());
+        let res_read_io = result_app_ty(option_app_ty(int()), io_err.clone());
         let res_unit_io = result_app_ty(unit_ty(), io_err.clone());
         let res_string_io = result_app_ty(string(), io_err.clone());
         let res_strs_io = result_app_ty(vec_app_ty(string()), io_err.clone());
@@ -1236,6 +1238,13 @@ impl Checker {
             "clock_sleep_ms" => fun(&[int()], unit_ty()),
             "io_capture_begin" => fun(&[], unit_ty()),
             "io_capture_end" => fun(&[], tuple_ty(vec![string(), string()])),
+
+            "tty_is_tty" | "tty_is_raw" | "tty_enable_vt" => fun(&[stream_ty()], boolean()),
+            "tty_size" => fun(&[stream_ty()], res_size_io),
+            "tty_enter_raw" => fun(&[stream_ty(), boolean(), boolean()], res_unit_io.clone()),
+            "tty_leave_raw" => fun(&[stream_ty()], res_unit_io.clone()),
+            "tty_read_timeout" => fun(&[stream_ty(), vec_app_ty(byte()), int()], res_read_io),
+            "tty_resized" => fun(&[], boolean()),
 
             "task_scope_open" => fun(&[], int()),
             "task_scope_close" | "task_join" => fun(&[int()], int()),

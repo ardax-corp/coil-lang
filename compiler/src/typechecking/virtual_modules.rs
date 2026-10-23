@@ -39,6 +39,9 @@ pub const THREAD_MODULE: &str = "thread";
 /// Path-oriented filesystem helpers (`exists`, `realpath`, …).
 pub const IO_FS_MODULE: &str = "io::fs";
 
+/// Terminal helpers on a stream (`is_tty`, `size`, `enter_raw`, …).
+pub const IO_TTY_MODULE: &str = "io::tty";
+
 /// Process environment (`args`, `var`, `exec`, …).
 pub const ENV_MODULE: &str = "env";
 
@@ -979,6 +982,20 @@ impl VirtualModules {
                 ("symlink", "fs_symlink"),
                 ("list_dir", "fs_list_dir"),
                 ("realpath", "fs_realpath"),
+            ]),
+        );
+
+        modules.insert(
+            IO_TTY_MODULE,
+            host_exports(&[
+                ("is_tty", common::TTY_IS_TTY_NATIVE),
+                ("size", common::TTY_SIZE_NATIVE),
+                ("enter_raw", common::TTY_ENTER_RAW_NATIVE),
+                ("leave_raw", common::TTY_LEAVE_RAW_NATIVE),
+                ("is_raw", common::TTY_IS_RAW_NATIVE),
+                ("read_timeout", common::TTY_READ_TIMEOUT_NATIVE),
+                ("resized", common::TTY_RESIZED_NATIVE),
+                ("enable_vt", common::TTY_ENABLE_VT_NATIVE),
             ]),
         );
 
