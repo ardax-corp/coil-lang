@@ -132,7 +132,7 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
             for arg in args {
                 classify_in(checker, arg, seen)?;
             }
-            params_closed(ty).then_some(ValueClass::Enum)
+            args.iter().all(|a| payload_closed(checker, a, seen)).then_some(ValueClass::Enum)
         }
         Ty::Sum { name, variants } => {
             if common::is_builtin_option_enum(name) || common::is_builtin_result_enum(name) {
@@ -141,7 +141,10 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
                         classify_in(checker, field, seen)?;
                     }
                 }
-                return params_closed(ty).then_some(ValueClass::Enum);
+                let closed = variants
+                    .iter()
+                    .all(|(_, p)| p.field_types().into_iter().all(|f| payload_closed(checker, f, seen)));
+                return closed.then_some(ValueClass::Enum);
             }
             if checker.is_scalar_enum(name) {
                 return Some(ValueClass::Opaque);
@@ -271,6 +274,13 @@ pub fn is_generic_class(checker: &Checker, name: &str) -> bool {
     }
     let ctors = &checker.generics().generic_type_ctors;
     ctors.contains_key(name) || checker.resolve_class_key(name).is_some_and(|key| ctors.contains_key(&key))
+}
+
+/// An `Option` / `Result` payload whose word is known: [`params_closed`],
+/// or a monomorphic function or existential (one heap word each), so
+/// `Option<fn() -> string>` is an enum value (#1991).
+fn payload_closed(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> bool {
+    params_closed(ty) || is_existential(ty) || mono_fun(checker, ty, seen)
 }
 
 /// A user class the lowering builds and reads: not generic, with every

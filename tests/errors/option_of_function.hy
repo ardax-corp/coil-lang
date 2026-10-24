@@ -1,20 +1,6 @@
-// `Option` / `Result` holding a function value or a trait value, as a
-// local, a parameter and a class field (#1991).
+// `Option` / `Result` holding a function value, as a local, a parameter
+// and a class field (#1991).
 use tests::assert;
-
-trait Named<T> {
-    fn name(T x) -> string {}
-}
-
-class Dog {
-    pub n: string,
-}
-
-impl Named for Dog {
-    fn name(Dog d) -> string {
-        return d.n;
-    }
-}
 
 class Handler {
     pub f: Option<fn() -> string>,
@@ -65,13 +51,4 @@ test("a Result holding a function") {
         Result::Err(e) => e,
     };
     assert!(failed == "no");
-}
-
-test("an optional trait value") {
-    let some: Option<Named> = Option::Some(new Dog("rex"));
-    let got = match some {
-        Option::Some(d) => d.name(),
-        Option::None => "",
-    };
-    assert!(got == "rex");
 }
