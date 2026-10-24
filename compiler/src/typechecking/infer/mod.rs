@@ -269,6 +269,9 @@ pub struct Checker {
     /// entry file's unqualified), so a call into an already-checked module
     /// knows when it under-applies.
     program_fn_params: HashMap<String, (usize, bool)>,
+    /// Parameter names of every typed `T... xs` free function, by module
+    /// path; kept across modules so importers pack their calls (#1990).
+    program_typed_rest: HashMap<String, Vec<String>>,
     /// Impl method effects for every file checked so far, keyed
     /// `module::Owner::method` (methods have no [`DefId`] of their own).
     pub(crate) program_method_effects: HashMap<String, crate::typechecking::purity::EffectFlags>,

@@ -2711,9 +2711,10 @@ impl Compiler {
             }
             // `C::s(b: 2, a: 1)`: a class's static method shapes as a free
             // function does (#1380); another module's `... xs` copy is called
-            // by its qualified name (#1386); other qualified names do not yet.
+            // by its qualified name (#1386), and so is its typed `T... xs`
+            // function (#1990); other qualified names do not yet.
             let static_method = name.rsplit_once("::").is_some_and(|(owner, _)| self.checker.has_impl(owner));
-            if name.contains("::") && !static_method && !self.checker.fn_tuple_rest(name) {
+            if name.contains("::") && !static_method && !self.checker.fn_tuple_rest(name) && !self.checker.is_typed_rest_import(name) {
                 return Err("call-argument");
             }
             let mut key = self.resolve_free_fn(name);

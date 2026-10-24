@@ -130,6 +130,7 @@ impl Checker {
             fn_effects: HashMap::new(),
             program_fn_effects: HashMap::new(),
             program_fn_params: HashMap::new(),
+            program_typed_rest: HashMap::new(),
             program_method_effects: HashMap::new(),
             pure_fn_names: HashSet::new(),
             length_stability: Default::default(),
@@ -14606,12 +14607,33 @@ impl Checker {
 
     /// Declaration-order parameter names for `fn_name`, if recorded.
     pub fn fn_param_names(&self, fn_name: &str) -> Option<&[String]> {
-        self.fn_param_names.get(fn_name).map(|v| v.as_slice())
+        self.fn_param_names.get(fn_name).or_else(|| self.typed_rest_params_of(fn_name)).map(|v| v.as_slice())
+    }
+
+    /// Whether `fn_name` is another module's typed `T... xs` function.
+    pub fn is_typed_rest_import(&self, fn_name: &str) -> bool {
+        !self.fn_has_rest.contains_key(fn_name) && self.typed_rest_params_of(fn_name).is_some()
     }
 
     /// Whether `fn_name` has a trailing rest parameter (`T... name` or `... name`).
     pub fn fn_has_rest(&self, fn_name: &str) -> bool {
-        self.fn_has_rest.get(fn_name).copied().unwrap_or(false)
+        match self.fn_has_rest.get(fn_name) {
+            Some(&rest) => rest,
+            // Another module's typed `T... xs` function (#1990).
+            None => self.typed_rest_params_of(fn_name).is_some(),
+        }
+    }
+
+    /// The parameter names of another module's typed rest function `name`
+    /// as written at a call (qualified, or bare through its `use`).
+    fn typed_rest_params_of(&self, name: &str) -> Option<&Vec<String>> {
+        if let Some(names) = self.program_typed_rest.get(name) {
+            return Some(names);
+        }
+        let info = self.def_interner.info(self.def_id_of(name)?)?;
+        let module = self.def_interner.module_path(info.module)?;
+        let key = if module.is_empty() { info.name.clone() } else { format!("{module}::{}", info.name) };
+        self.program_typed_rest.get(&key)
     }
 
     /// Whether `fn_name`'s trailing rest is a heterogeneous tuple pack (`... name`).
@@ -14980,7 +15002,7 @@ impl Checker {
         args: &'a [Output<'a>],
         range: &Range<usize>,
     ) -> (Vec<Ty>, Vec<Output<'a>>) {
-        let has_rest = self.fn_has_rest.get(fn_name).copied().unwrap_or(false);
+        let has_rest = self.fn_has_rest(fn_name);
         self.vec_rest_spread =
             has_rest && !self.fn_tuple_rest.get(fn_name).copied().unwrap_or(false);
         let flat_args: Vec<Output<'a>> = self.flatten_spread_call_args(args);
@@ -15001,7 +15023,12 @@ impl Checker {
             return (tys, exprs);
         }
 
-        let Some(param_names) = self.fn_param_names.get(fn_name).cloned() else {
+        let Some(param_names) = self
+            .fn_param_names
+            .get(fn_name)
+            .or_else(|| self.typed_rest_params_of(fn_name))
+            .cloned()
+        else {
             if has_named {
                 let mut msg = Message::error(
                     ErrorCode::GenericTypeError,
