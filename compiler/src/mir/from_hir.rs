@@ -5204,7 +5204,8 @@ impl Lower<'_> {
             return Err("adjust place".into());
         };
         let repeatable = match self.hir.expr(place).kind {
-            HirKind::Field { base, .. } => lower::pure_base(self.hir, base),
+            // `xs[0].v++` reads its base twice, as `xs[0].v += 1` does (#1978).
+            HirKind::Field { base, .. } => lower::read_base(self.hir, base),
             HirKind::Index { base, index, .. } => lower::pure_base(self.hir, base) && lower::pure_index(self.hir, index),
             _ => false,
         };
