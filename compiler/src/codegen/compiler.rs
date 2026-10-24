@@ -7735,8 +7735,10 @@ impl Compiler {
         self.messages.extend(self.checker.take_messages());
 
         self.bytecode.append(&mut program);
-        self.emit_used_builtin_show_thunks();
+        // Structural thunks (a `Result<_, IoError>`'s `show`) can mark a
+        // builtin enum's `Show` thunk used, so they go first (#1984).
         self.emit_structural_thunks();
+        self.emit_used_builtin_show_thunks();
         self.pad_debug_locs();
         // Kept while this module holds methods a later module may clone.
         let seq = self.program_seq;
