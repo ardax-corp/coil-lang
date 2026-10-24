@@ -418,7 +418,7 @@ impl Checker {
         }
 
         // Push param frame so parse_type_name resolves T → Var(id).
-        self.type_params_in_scope.push(param_frame);
+        self.push_type_params(param_frame);
         let mut param_constraints: Vec<Constraint> = Vec::new();
         for (tp, var) in type_params.iter().zip(param_vars.iter()) {
             // Binder bounds `T: Num` desugar to unary constraints. Bounds
