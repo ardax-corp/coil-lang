@@ -861,7 +861,8 @@ mod tests {
 
         tty_leave_raw(&mut heap, slave).unwrap();
         let after = termios_of(&mut heap, slave);
-        assert_eq!(after.c_lflag, before.c_lflag);
+        // PENDIN is kernel state: macOS sets it when leaving non-canonical mode.
+        assert_eq!(after.c_lflag & !libc::PENDIN, before.c_lflag & !libc::PENDIN);
         assert_eq!(after.c_iflag, before.c_iflag);
         assert_eq!(after.c_oflag, before.c_oflag);
         assert!(!tty_is_raw(&mut heap, slave));
