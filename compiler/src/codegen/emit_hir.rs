@@ -1473,6 +1473,11 @@ impl Compiler {
                     let opaque = crate::mir::opaque_heap_ty(&apply_ty_prune(checker.subst(), t));
                     (is_class(t) || opaque).then_some(crate::mir::MirTy::HeapRef)
                 })
+                // A bare-class existential is its `[boxed value, dictionary]`
+                // pack's heap word, also as a class field (#1988).
+                .or_else(|| {
+                    matches!(apply_ty_prune(checker.subst(), t), Ty::Existential { .. }).then_some(crate::mir::MirTy::HeapRef)
+                })
                 .or_else(|| niche(t))
                 .or_else(|| scalar_enum(t))
                 .or_else(|| (opaque_vars && is_var(t)).then_some(crate::mir::MirTy::I64))
