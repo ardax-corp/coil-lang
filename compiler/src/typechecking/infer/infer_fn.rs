@@ -478,6 +478,10 @@ impl Checker {
             Some(_) => template_key.clone(),
             None => self.qualify_module_name(name),
         };
+        if has_rest && !has_tuple_rest && method_owner.is_none() {
+            self.program_typed_rest
+                .insert(program_key.clone(), arg_tys.iter().map(|(n, _)| n.clone()).collect());
+        }
         self.program_fn_params
             .insert(program_key, (arg_tys.len() - usize::from(has_rest), has_rest));
         self.fn_tuple_rest.insert(template_key.clone(), has_tuple_rest);
