@@ -124,6 +124,8 @@ pub fn build_standard_host_natives(
     push_black_box(&mut out, &mut register_id);
     // Append-only after black_box: `io::capture_begin` / `capture_end` (minor 44).
     push_wiring(&mut out, &mut register_id, crate::io::IO_CAPTURE_WIRING, "io capture");
+    // Append-only after io capture: `io::tty` (minor 47).
+    push_wiring(&mut out, &mut register_id, crate::tty::TTY_WIRING, "io tty");
     assert_eq!(
         out.len(),
         common::HOST_NATIVES.len(),
@@ -1299,28 +1301,36 @@ mod tests {
             Some(common::RESULT_UNIT_PROBE_NATIVE)
         );
         assert_eq!(
-            names.get(names.len() - 6).map(String::as_str),
+            names.get(160).map(String::as_str),
             Some(common::FFI_READ_INTS_NATIVE)
         );
         assert_eq!(
-            names.get(names.len() - 5).map(String::as_str),
+            names.get(161).map(String::as_str),
             Some(common::VALUES_EQ_SHAPED_NATIVE)
         );
         assert_eq!(
-            names.get(names.len() - 4).map(String::as_str),
+            names.get(162).map(String::as_str),
             Some(common::STRING_COMPARE_NATIVE)
         );
         assert_eq!(
-            names.get(names.len() - 3).map(String::as_str),
+            names.get(163).map(String::as_str),
             Some(common::BLACK_BOX_NATIVE)
         );
         assert_eq!(
-            names.get(names.len() - 2).map(String::as_str),
+            names.get(164).map(String::as_str),
             Some(common::IO_CAPTURE_BEGIN_NATIVE)
         );
         assert_eq!(
-            names.last().map(String::as_str),
+            names.get(165).map(String::as_str),
             Some(common::IO_CAPTURE_END_NATIVE)
+        );
+        assert_eq!(
+            names.get(166).map(String::as_str),
+            Some(common::TTY_IS_TTY_NATIVE)
+        );
+        assert_eq!(
+            names.last().map(String::as_str),
+            Some(common::TTY_ENABLE_VT_NATIVE)
         );
         assert_eq!(attach, 119);
     }
@@ -1644,6 +1654,14 @@ mod tests {
             registrations.get(end + 29).map(|(n, _)| n.as_str()),
             Some(common::IO_CAPTURE_END_NATIVE)
         );
-        assert_eq!(registrations.len(), end + 30);
+        assert_eq!(
+            registrations.get(end + 30).map(|(n, _)| n.as_str()),
+            Some(common::TTY_IS_TTY_NATIVE)
+        );
+        assert_eq!(
+            registrations.get(end + 37).map(|(n, _)| n.as_str()),
+            Some(common::TTY_ENABLE_VT_NATIVE)
+        );
+        assert_eq!(registrations.len(), end + 38);
     }
 }

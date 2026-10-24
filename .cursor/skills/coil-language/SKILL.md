@@ -88,6 +88,7 @@ userland modules. Prelude is auto-injected.
 | Module | Typical import | Notes |
 |--------|----------------|-------|
 | `io` | `use io::{stdout, open, read, write};` | `Stream`, `Vec<byte>` buffers, files, TCP/UDP; non-blocking L0 |
+| `io::tty` | `use io::tty::{is_tty, size, enter_raw, leave_raw, read_timeout};` | terminal on a `Stream`: isatty, `(cols, rows)`, raw mode (restored at exit), timed read, `resized()`; no flag |
 | `string` | `use string::{format, to_bytes, from_bytes};` | Formatting / UTF-8 bytes |
 | `ffi` | `use ffi::{dload, declare, invoke};` + `use ffi::types::{Int, Ptr};` | Dynamic loading |
 | `thread` | `use thread::{spawn, join, channel, send, recv};` | OS threads, channels, mutex |

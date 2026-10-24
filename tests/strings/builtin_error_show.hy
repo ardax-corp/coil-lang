@@ -24,6 +24,7 @@ test("IoError variants") {
     assert!(format("%v", IoError::Truncated) == "Truncated");
     assert!(format("%v", IoError::Certificate) == "Certificate");
     assert!(format("%v", IoError::Handshake) == "Handshake");
+    assert!(format("%v", IoError::NotATerminal) == "NotATerminal");
 }
 
 test("an error returned by an io call") {

@@ -113,6 +113,7 @@ pub fn reference_url(module: &str) -> String {
         "prelude::task" => "references/modules.md",
         "io" | "io::net::tcp" | "io::net::udp" => "references/io.md",
         "io::fs" => "references/io-fs.md",
+        "io::tty" => "references/io-tty.md",
         "string" => "references/string.md",
         "thread" => "manual/tutorial/11-threads.md",
         "env" => "references/env.md",

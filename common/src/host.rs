@@ -1226,6 +1226,62 @@ pub const HOST_NATIVES: &[HostNative] = &[
         effects: HOST,
         caps: NO_CAP,
     },
+    HostNative {
+        name: "tty_is_tty",
+        arity: 1,
+        id: 166,
+        effects: HOST,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "tty_size",
+        arity: 1,
+        id: 167,
+        effects: HOST,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "tty_enter_raw",
+        arity: 3,
+        id: 168,
+        effects: HOST,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "tty_leave_raw",
+        arity: 1,
+        id: 169,
+        effects: HOST,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "tty_is_raw",
+        arity: 1,
+        id: 170,
+        effects: HOST,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "tty_read_timeout",
+        arity: 3,
+        id: 171,
+        effects: READ,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "tty_resized",
+        arity: 0,
+        id: 172,
+        effects: HOST,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "tty_enable_vt",
+        arity: 1,
+        id: 173,
+        effects: HOST,
+        caps: NO_CAP,
+    },
 ];
 
 /// First packed-LA HostInvoke (`packed_dot`).
@@ -1317,6 +1373,18 @@ pub const IO_CAPTURE_BEGIN_ID: u16 = 164;
 pub const IO_CAPTURE_BEGIN_NATIVE: &str = "io_capture_begin";
 pub const IO_CAPTURE_END_ID: u16 = 165;
 pub const IO_CAPTURE_END_NATIVE: &str = "io_capture_end";
+/// `io::tty` (archive minor 47): terminal queries, raw mode, a timed read
+/// and resize notices on a stream. Ungated like `stdin` / `stdout`.
+pub const TTY_IS_TTY_ID: u16 = 166;
+pub const TTY_ENABLE_VT_ID: u16 = 173;
+pub const TTY_IS_TTY_NATIVE: &str = "tty_is_tty";
+pub const TTY_SIZE_NATIVE: &str = "tty_size";
+pub const TTY_ENTER_RAW_NATIVE: &str = "tty_enter_raw";
+pub const TTY_LEAVE_RAW_NATIVE: &str = "tty_leave_raw";
+pub const TTY_IS_RAW_NATIVE: &str = "tty_is_raw";
+pub const TTY_READ_TIMEOUT_NATIVE: &str = "tty_read_timeout";
+pub const TTY_RESIZED_NATIVE: &str = "tty_resized";
+pub const TTY_ENABLE_VT_NATIVE: &str = "tty_enable_vt";
 
 pub const STREAM_ATTACH_NATIVE: &str = "stream_attach";
 pub const STREAM_PARK_NATIVE: &str = "stream_park";
@@ -1364,7 +1432,9 @@ pub const GC_COLLECT_NATIVE: &str = "gc_collect";
 pub const GC_REGISTER_FINALIZER_NATIVE: &str = "gc_register_finalizer";
 
 const _: () = {
-    assert!(HOST_NATIVES.len() == 166);
+    assert!(HOST_NATIVES.len() == 174);
+    assert!(HOST_NATIVES[TTY_IS_TTY_ID as usize].id == TTY_IS_TTY_ID);
+    assert!(HOST_NATIVES[TTY_ENABLE_VT_ID as usize].id == TTY_ENABLE_VT_ID);
     assert!(HOST_NATIVES[BLACK_BOX_ID as usize].id == BLACK_BOX_ID);
     assert!(HOST_NATIVES[IO_CAPTURE_BEGIN_ID as usize].id == IO_CAPTURE_BEGIN_ID);
     assert!(HOST_NATIVES[IO_CAPTURE_END_ID as usize].id == IO_CAPTURE_END_ID);

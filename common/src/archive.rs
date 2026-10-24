@@ -158,10 +158,12 @@ pub const ARCHIVE_MAJOR: u16 = 4;
 /// 46 — byte-lane SIMD: `VLoad` type `simd::TY_U8`, `VBin` byte kinds
 ///      (`simd::M_*`, `B_CMP`, `BS_CMP`), `VMask`, `VScan`, and the dense
 ///      unaries `UNARY_CTZ` / `UNARY_BLSR`. Older runtimes do not know them.
+/// 47 — HostInvoke `tty_*` (ids 166–173, `io::tty`) and `IoError` variant
+///      `NotATerminal` (tag 12). Older archives never reference them.
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.
-pub const ARCHIVE_MINOR: u16 = 46;
+pub const ARCHIVE_MINOR: u16 = 47;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -1235,9 +1237,9 @@ mod tests {
     #[test]
     fn archive_version_matches_current_abi() {
         assert_eq!(ARCHIVE_MAJOR, 4);
-        assert_eq!(ARCHIVE_MINOR, 46);
-        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 46));
-        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.46");
+        assert_eq!(ARCHIVE_MINOR, 47);
+        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 47));
+        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.47");
     }
 
     #[test]

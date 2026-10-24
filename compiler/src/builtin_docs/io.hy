@@ -173,6 +173,8 @@ enum IoError {
     Certificate,
     /// A TLS handshake failed (reported by attached packages such as coil-tls).
     Handshake,
+    /// The stream is not a terminal (`io::tty` calls on a file, pipe or socket).
+    NotATerminal,
 }
 
 /// Types that bytes can be read from; implemented for `Stream`.
