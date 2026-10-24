@@ -284,8 +284,27 @@ fn object_class(checker: &Checker, name: &str) -> Option<ValueClass> {
     let fields = checker.class_fields(&key)?;
     fields
         .iter()
-        .all(|(_, ty)| crate::layout::ty_is_closed(ty) || is_existential(ty) || mono_fun(checker, ty, &mut Vec::new()))
+        .all(|(_, ty)| closed_field(checker, ty))
         .then_some(ValueClass::Object)
+}
+
+/// A class field type the lowering stores as one known word: closed, an
+/// existential, a monomorphic function, or a `Vec` / `Option` / `Result`
+/// of those (`Vec<Comp>`, `Option<fn() -> string>`, #1988, #1991).
+fn closed_field(checker: &Checker, ty: &Ty) -> bool {
+    if crate::layout::ty_is_closed(ty) || is_existential(ty) || mono_fun(checker, ty, &mut Vec::new()) {
+        return true;
+    }
+    match strip_readonly(ty) {
+        Ty::App(head, args)
+            if matches!(head.as_ref(), Ty::Con(n) if n == common::BUILTIN_VEC_TYPE
+                || common::is_builtin_option_enum(n)
+                || common::is_builtin_result_enum(n)) =>
+        {
+            crate::typechecking::subst::ftv(ty).is_empty() && args.iter().all(|a| closed_field(checker, a))
+        }
+        _ => false,
+    }
 }
 
 /// A bare-class existential (`Show`): one `[value, dictionary]` word, closed
