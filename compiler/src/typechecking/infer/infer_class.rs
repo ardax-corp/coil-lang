@@ -141,7 +141,7 @@ impl Checker {
             param_vars.push(var);
             class_kinds.push(kind);
         }
-        self.type_params_in_scope.push(param_frame);
+        self.push_type_params(param_frame);
         self.current_typeclass = Some(name.to_string());
         // ONE constraint over all class params (multi-param ready).
         let class_constraints: Vec<Constraint> = vec![Constraint {
@@ -181,7 +181,7 @@ impl Checker {
                 }
                 let pushed_method = !method_frame.is_empty();
                 if pushed_method {
-                    self.type_params_in_scope.push(method_frame);
+                    self.push_type_params(method_frame);
                 }
                 let prev_assoc = self.current_assoc_projections.take();
                 self.current_assoc_projections = Some(Vec::new());
@@ -615,7 +615,7 @@ impl Checker {
                     }
                     let pushed_assoc_params = !assoc_frame.is_empty();
                     if pushed_assoc_params {
-                        self.type_params_in_scope.push(assoc_frame);
+                        self.push_type_params(assoc_frame);
                     }
                     let resolved = self.parse_type_name(ty);
                     if pushed_assoc_params {

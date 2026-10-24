@@ -103,6 +103,8 @@ impl Checker {
             subst: Subst::empty(),
             messages: Vec::new(),
             rejected_builtin_type_decls: Vec::new(),
+            unknown_type_names: Vec::new(),
+            type_param_names_seen: Default::default(),
             current_return_ty: None,
             current_module: String::new(),
             virtual_modules: VirtualModules::new(),
@@ -1496,9 +1498,60 @@ impl Checker {
     pub fn check_program(&mut self, ast: &Output) -> Ty {
         let first_message = self.messages.len();
         self.rejected_builtin_type_decls.clear();
+        self.unknown_type_names.clear();
+        self.type_param_names_seen.clear();
         let ty = self.check_program_body(ast);
         self.drop_reserved_type_name_cascades(first_message);
+        self.report_unknown_type_names(first_message);
         ty
+    }
+
+    /// An annotation naming no type parses as an opaque `Con`, so the
+    /// program reports only the mismatches it causes. Report each name the
+    /// module never declared as E0110 and drop the mismatches that
+    /// mention it (#1961).
+    fn report_unknown_type_names(&mut self, first_message: usize) {
+        let mut names = std::mem::take(&mut self.unknown_type_names);
+        names.retain(|(name, _)| !self.names_a_type(name));
+        if names.is_empty() {
+            return;
+        }
+        names.sort_by_key(|(_, r)| (r.start, r.end));
+        names.dedup();
+        let quoted: Vec<String> = names.iter().map(|(n, _)| format!("`{n}`")).collect();
+        let mut index = 0;
+        self.messages.retain(|msg| {
+            let keep = index < first_message
+                || msg.code() != Some(ErrorCode::TypeMismatch)
+                || !quoted.iter().any(|q| msg.message().contains(q.as_str()));
+            index += 1;
+            keep
+        });
+        for (name, range) in names {
+            let mut msg = Message::error(ErrorCode::UnknownType, format!("Unknown type `{name}`"), range);
+            msg.with_help("declare it, import it with `use`, or check the spelling".to_string());
+            self.messages.push(msg);
+        }
+    }
+
+    /// Bring a frame of type parameters into scope.
+    pub(super) fn push_type_params(&mut self, frame: HashMap<String, TyVarId>) {
+        self.type_param_names_seen.extend(frame.keys().cloned());
+        self.type_params_in_scope.push(frame);
+    }
+
+    /// Whether `name` resolves to a type now that the module is checked.
+    fn names_a_type(&self, name: &str) -> bool {
+        matches!(name, "unit" | "()" | "never" | "Self")
+            || self.type_param_names_seen.contains(name)
+            || self.resolve_class_key(name).is_some()
+            || self.module_class_names.contains_key(name)
+            || self.resolve_enum_key(name).is_some()
+            || self.enums.contains_key(name)
+            || self.generics.generic_type_ctors.contains_key(name)
+            || self.generics.nominal_type_module(name).is_some()
+            || self.generics.typeclass(name).is_some()
+            || self.type_aliases.iter().any(|f| f.contains_key(name))
     }
 
     /// A user type that takes a reserved built-in name is not a type of its
@@ -2222,7 +2275,7 @@ impl Checker {
         for tp in type_params {
             frame.insert(tp.name.to_string(), self.counter.fresh());
         }
-        self.type_params_in_scope.push(frame);
+        self.push_type_params(frame);
         true
     }
 
@@ -10318,7 +10371,7 @@ impl Checker {
             kinds.push(kind);
         }
 
-        self.type_params_in_scope.push(frame);
+        self.push_type_params(frame);
         let mut constraints = Vec::new();
         let synthetic_range = 0..0;
         for (tp, var) in params.iter().zip(bounds.iter()) {
@@ -12010,7 +12063,7 @@ impl Checker {
                 {
                     return self.resolve_type_projection(&class, name, &[], &range);
                 }
-                self.parse_type_name_str(name)
+                self.parse_type_name_str_with_range(name, Some(range))
             }
             Expression::TypeApp { name, args } => {
                 self.parse_type_app(name, args, ann.0.into_range())
@@ -12261,6 +12314,8 @@ impl Checker {
                         format!("Typeclass `{}` cannot be used as a bare value type", name),
                         range.unwrap_or(0..0),
                     ));
+                } else if let Some(range) = range {
+                    self.unknown_type_names.push((name.to_string(), range));
                 }
                 Ty::Con(name.to_string())
             }
@@ -16547,7 +16602,7 @@ impl Checker {
             param_kinds.push(kind);
         }
         if is_generic {
-            self.type_params_in_scope.push(param_frame);
+            self.push_type_params(param_frame);
         }
 
         let mut param_constraints: Vec<Constraint> = Vec::new();

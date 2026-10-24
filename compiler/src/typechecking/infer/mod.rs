@@ -184,6 +184,13 @@ pub struct Checker {
     /// Spans of this module's E0200s for a type declaration that takes a
     /// reserved built-in name: the module then reports only those (#1701).
     rejected_builtin_type_decls: Vec<std::ops::Range<usize>>,
+    /// Annotation names that resolved to no type when parsed, with their
+    /// spans; reported as E0110 at the end of the module if still unknown
+    /// (#1961).
+    unknown_type_names: Vec<(String, std::ops::Range<usize>)>,
+    /// Every type parameter name brought into scope while checking the
+    /// module: a pre-pass parses `Tree<T>` before `T` is in scope.
+    type_param_names_seen: std::collections::HashSet<String>,
 
     /// Type that the enclosing function expects to return, if any.
     /// `None` outside of a function body. Set when entering a function
