@@ -158,7 +158,7 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
         Ty::Con(name) if is_generic_class(checker, name) => Some(ValueClass::Opaque),
         // A scalar-backed enum is its backing word, only moved and matched.
         Ty::Con(name) if checker.is_scalar_enum(name) => Some(ValueClass::Opaque),
-        Ty::Con(name) if checker.is_class(name) && checker.enum_variants(name).is_none() => object_class(checker, name),
+        Ty::Con(name) if checker.is_class(name) && checker.enum_variants(name).is_none() => object_class(checker, name, seen),
         Ty::Con(name) => user_enum(checker, name, seen),
         // A type parameter inside a generic class's shared method body: one
         // boxed word, only moved.
@@ -275,24 +275,31 @@ pub fn is_generic_class(checker: &Checker, name: &str) -> bool {
 
 /// A user class the lowering builds and reads: not generic, with every
 /// field type closed.
-fn object_class(checker: &Checker, name: &str) -> Option<ValueClass> {
+fn object_class(checker: &Checker, name: &str, seen: &mut Vec<String>) -> Option<ValueClass> {
     let key = checker.resolve_class_key(name)?;
     let ctors = &checker.generics().generic_type_ctors;
     if ctors.contains_key(&key) || ctors.contains_key(name) {
         return None;
     }
+    // A class whose function field mentions the class (`fn(Node) -> ()`)
+    // reaches it again: assume the object word while its fields are
+    // checked (#1989).
+    let marker = format!("class {key}");
+    if seen.contains(&marker) {
+        return Some(ValueClass::Object);
+    }
     let fields = checker.class_fields(&key)?;
-    fields
-        .iter()
-        .all(|(_, ty)| closed_field(checker, ty))
-        .then_some(ValueClass::Object)
+    seen.push(marker);
+    let ok = fields.iter().all(|(_, ty)| closed_field(checker, ty, seen));
+    seen.pop();
+    ok.then_some(ValueClass::Object)
 }
 
 /// A class field type the lowering stores as one known word: closed, an
 /// existential, a monomorphic function, or a `Vec` / `Option` / `Result`
 /// of those (`Vec<Comp>`, `Option<fn() -> string>`, #1988, #1991).
-fn closed_field(checker: &Checker, ty: &Ty) -> bool {
-    if crate::layout::ty_is_closed(ty) || is_existential(ty) || mono_fun(checker, ty, &mut Vec::new()) {
+fn closed_field(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> bool {
+    if crate::layout::ty_is_closed(ty) || is_existential(ty) || mono_fun(checker, ty, seen) {
         return true;
     }
     match strip_readonly(ty) {
@@ -301,7 +308,7 @@ fn closed_field(checker: &Checker, ty: &Ty) -> bool {
                 || common::is_builtin_option_enum(n)
                 || common::is_builtin_result_enum(n)) =>
         {
-            crate::typechecking::subst::ftv(ty).is_empty() && args.iter().all(|a| closed_field(checker, a))
+            crate::typechecking::subst::ftv(ty).is_empty() && args.iter().all(|a| closed_field(checker, a, seen))
         }
         _ => false,
     }
