@@ -20794,14 +20794,19 @@ impl Checker {
         // discharged below so the call site passes their dictionaries.
         let (fun_ty, constraints, mapping) = self.instantiate_scheme_mapped(&scheme);
 
-        // Named-arg / rest reorder when the call uses a tuple payload.
+        // Named-arg / rest reorder when the call uses a tuple payload. The
+        // argument expressions go to `apply_function` too, so an array
+        // literal builds a `Vec` parameter as in a free call (#1992).
+        let mut arg_exprs: Option<Vec<Output>> = None;
         let arg_tys = match fields {
             EnumConstructPayload::Unit => Vec::new(),
             EnumConstructPayload::Tuple(args) => {
                 if self.fn_has_rest(&fqn) || self.fn_param_names.contains_key(&fqn) {
-                    let (tys, _) = self.infer_and_reorder_call_args(&fqn, args, &range);
+                    let (tys, exprs) = self.infer_and_reorder_call_args(&fqn, args, &range);
+                    arg_exprs = Some(exprs);
                     tys
                 } else {
+                    arg_exprs = Some(args.clone());
                     args.iter().map(|a| self.infer(a)).collect()
                 }
             }
@@ -20825,7 +20830,8 @@ impl Checker {
             }
         };
 
-        let result = self.apply_function(Some(&fqn), &fun_ty, &arg_tys, None, call_id, range.clone());
+        let exprs = arg_exprs.as_deref().filter(|e| !e.is_empty());
+        let result = self.apply_function(Some(&fqn), &fun_ty, &arg_tys, exprs, call_id, range.clone());
         if !constraints.is_empty() {
             self.discharge_constraints(call_id, &constraints, &range);
             self.pin_assoc_after_discharge("", &constraints, Some(&scheme), &mapping, &range);
