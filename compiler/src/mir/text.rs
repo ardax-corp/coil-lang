@@ -102,8 +102,13 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             lhs,
             rhs,
         } => write!(f, "{dest} = {} {lhs}, {rhs}", op.as_str(ty.is_float())),
-        MirInst::ByteScan { dest, from, bound, inclusive, streams, scalars, expr } => {
-            let to = if *inclusive { "..=" } else { ".." };
+        MirInst::ByteScan { dest, from, bound, inclusive, backward, streams, scalars, expr } => {
+            let to = match (*backward, *inclusive) {
+                (false, false) => "..",
+                (false, true) => "..=",
+                (true, false) => " down to >",
+                (true, true) => " down to >=",
+            };
             write!(f, "{dest} = bytescan {from}{to}{bound} {expr} [")?;
             for (s, (a, i)) in streams.iter().enumerate() {
                 write!(f, "{}s{s}={a}@{i}", if s > 0 { ", " } else { "" })?;

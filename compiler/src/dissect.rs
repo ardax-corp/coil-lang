@@ -312,8 +312,13 @@ fn format_operands(
         }
         Instruction::VScan => {
             let (n, dest, from, bound) = byte.dense_abc_parts();
-            let to = if n & common::simd::SCAN_INCLUSIVE != 0 { "..=" } else { ".." };
-            format!("r{dest} = scan(r{from} {to} r{bound}, body={})", n & !common::simd::SCAN_INCLUSIVE)
+            let to = match (n & common::simd::SCAN_BACKWARD != 0, n & common::simd::SCAN_INCLUSIVE != 0) {
+                (false, false) => "..",
+                (false, true) => "..=",
+                (true, false) => "down to >",
+                (true, true) => "down to >=",
+            };
+            format!("r{dest} = scan(r{from} {to} r{bound}, body={})", n & common::simd::SCAN_LEN)
         }
         Instruction::TagArrayKind => format!("kind={}", byte.operand_u32()),
         Instruction::MakeArrayK => format!("arity={} kind={}", byte.make_arity(), byte.operand_u32() >> 16),
