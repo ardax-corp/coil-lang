@@ -910,10 +910,10 @@ impl VirtualModules {
         ]));
         modules.insert(IO_MODULE, io_exports);
 
-        let string_exports: Vec<BuiltinExport> = StringBuiltin::all()
-            .iter()
-            .map(|kind| BuiltinExport::StringFn { kind: *kind })
-            .collect();
+        let mut string_exports = vec![BuiltinExport::Enum {
+            name: common::BUILTIN_STRING_ERROR_ENUM,
+        }];
+        string_exports.extend(StringBuiltin::all().iter().map(|kind| BuiltinExport::StringFn { kind: *kind }));
         modules.insert(STRING_MODULE, string_exports);
 
         let tcp_exports: Vec<BuiltinExport> = IoBuiltin::tcp()
@@ -985,19 +985,20 @@ impl VirtualModules {
             ]),
         );
 
-        modules.insert(
-            IO_TTY_MODULE,
-            host_exports(&[
-                ("is_tty", common::TTY_IS_TTY_NATIVE),
-                ("size", common::TTY_SIZE_NATIVE),
-                ("enter_raw", common::TTY_ENTER_RAW_NATIVE),
-                ("leave_raw", common::TTY_LEAVE_RAW_NATIVE),
-                ("is_raw", common::TTY_IS_RAW_NATIVE),
-                ("read_timeout", common::TTY_READ_TIMEOUT_NATIVE),
-                ("resized", common::TTY_RESIZED_NATIVE),
-                ("enable_vt", common::TTY_ENABLE_VT_NATIVE),
-            ]),
-        );
+        let mut tty_exports = vec![BuiltinExport::Enum {
+            name: common::BUILTIN_TTY_ERROR_ENUM,
+        }];
+        tty_exports.extend(host_exports(&[
+            ("is_tty", common::TTY_IS_TTY_NATIVE),
+            ("size", common::TTY_SIZE_NATIVE),
+            ("enter_raw", common::TTY_ENTER_RAW_NATIVE),
+            ("leave_raw", common::TTY_LEAVE_RAW_NATIVE),
+            ("is_raw", common::TTY_IS_RAW_NATIVE),
+            ("read_timeout", common::TTY_READ_TIMEOUT_NATIVE),
+            ("resized", common::TTY_RESIZED_NATIVE),
+            ("enable_vt", common::TTY_ENABLE_VT_NATIVE),
+        ]));
+        modules.insert(IO_TTY_MODULE, tty_exports);
 
         let mut env_exports = vec![BuiltinExport::Enum {
             name: common::BUILTIN_ENV_ERROR_ENUM,

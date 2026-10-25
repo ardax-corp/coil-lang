@@ -7768,6 +7768,13 @@ impl Compiler {
     /// its argument (dict ABI; enums box as `Instance`, an unboxed value
     /// passes through) and returns the variant's name.
     fn emit_used_builtin_show_thunks(&mut self) {
+        // `TtyError`'s thunk shows its `Io` payload through `IoError`'s.
+        use crate::typechecking::generics::Generics;
+        let tty = Generics::builtin_instance_fqn("Show", common::BUILTIN_TTY_ERROR_ENUM, "show");
+        if self.builtin_show_used.contains(&tty) {
+            self.builtin_show_used
+                .insert(Generics::builtin_instance_fqn("Show", common::BUILTIN_IO_ERROR_ENUM, "show"));
+        }
         let due: Vec<_> = self
             .builtin_show_thunks
             .iter()
@@ -7782,6 +7789,8 @@ impl Compiler {
         let mut skip = BlockBuilder::new();
         let after = skip.fresh_label(self.bytecode.il_mut());
         skip.emit_jump_to(after, BbJumpKind::Unconditional, self.bytecode.il_mut());
+        // `TtyError::Io(e)` shows its payload with `format("Io(%v)", e)`.
+        self.hir_synth_callees.insert("format".to_string(), SynthCallee { format: true, ..SynthCallee::default() });
         for (fqn, enum_name, variants) in due {
             let hir = crate::hir::synth::builtin_enum_show(&self.checker, &fqn, enum_name, variants);
             self.emit_synth_fn(&fqn, &hir, HashMap::new(), true);
