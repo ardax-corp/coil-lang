@@ -72,6 +72,16 @@ pub enum TestTry {
     NoneValue,
 }
 
+/// A `?` whose `Err` payload converts to the function's error type through
+/// `impl Into<Target> for Err` before it returns.
+#[derive(Debug, Clone)]
+pub struct TryInto {
+    /// The impl's `into` method (`Into__Low_High__into`).
+    pub fqn: String,
+    /// The function's error type the converted value has.
+    pub target: Ty,
+}
+
 /// Runtime lowering strategy for `for x in expr` (unified Iterator protocol).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ForInKind {
@@ -698,6 +708,9 @@ pub struct Checker {
     macro_imports: HashSet<String>,
     /// Test-body `?` sites that fail the case themselves, by operand span.
     test_try_sites: HashMap<(usize, usize), TestTry>,
+    /// `?` sites whose error converts to the function's error type through
+    /// an `Into` impl, by `?` span: the impl's `into` FQN and its target.
+    try_into_sites: HashMap<(usize, usize), TryInto>,
 
     /// Enclosing function is in Option mode: `?` propagates `None`.
     fn_option_mode: Option<Ty>,
