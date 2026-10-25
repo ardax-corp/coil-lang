@@ -948,17 +948,20 @@ fn decode_envelope(buffer: &[u8]) -> Result<DecodedArchive, ArchiveDecodeError> 
         .ok()
         .and_then(|archived| rkyv::deserialize::<ArchivedProgramV12, Error>(archived).ok());
 
+    // Every major-5 archive carries the full current envelope. The legacy
+    // envelopes below are major-4 layouts: they no longer load, but probing
+    // them still reports a version error instead of a corrupt archive.
     if let Some(program) = current {
-        if archive_version_compatible(program.version, ARCHIVE_VERSION)
-            && archive_minor(program.version) >= LINE_TABLE_MINOR
-        {
+        if archive_version_compatible(program.version, ARCHIVE_VERSION) {
             return Ok(DecodedArchive {
                 program,
                 operand_stack_slots_persisted: true,
                 stack_maps_persisted: true,
             });
         }
-        if !archive_version_compatible(program.version, ARCHIVE_VERSION) {
+        if archive_major(program.version) != 4
+            || archive_minor(program.version) >= LINE_TABLE_MINOR
+        {
             return Err(ArchiveDecodeError::Version(program.version));
         }
     }
@@ -1393,7 +1396,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_pre13_envelope_omits_operand_stack_slots() {
+    fn major4_pre13_envelope_is_rejected() {
         let seek = Byte::new(Instruction::Seek).with_operand_u32(25);
         let call = Byte::new(Instruction::CALL);
         let old = ArchivedProgramV12 {
@@ -1408,22 +1411,10 @@ mod tests {
             struct_layouts: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&old).expect("serialize v12");
-        assert!(
-            rkyv::access::<ArchivedArchivedProgram, Error>(bytes.as_slice()).is_err(),
-            "current envelope must not silently read a pre-13 blob"
-        );
-        let decoded = decode_archived_program(bytes.as_slice()).expect("legacy decode");
-        assert!(!decoded.operand_stack_slots_persisted);
-        assert!(!decoded.stack_maps_persisted);
-        assert!(decoded.program.stack_maps.is_empty());
-        assert_eq!(
-            resolve_archive_operand_slots(None, &decoded.program.bytecode),
-            LEGACY_MAX_OPERAND_STACK_SLOTS
-        );
-        assert_eq!(
-            legacy_archive_operand_slots(&[Byte::new(Instruction::Seek)]),
-            LEGACY_DEFAULT_OPERAND_STACK_SLOTS
-        );
+        assert!(matches!(
+            decode_archived_program(bytes.as_slice()),
+            Err(ArchiveDecodeError::Version(v)) if archive_major(v) == 4
+        ));
     }
 
     #[test]
@@ -1502,7 +1493,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_minor21_envelope_leaves_frame_words_unknown() {
+    fn major4_minor21_envelope_is_rejected() {
         use crate::stack_map::{PreciseFrameMapV21, SlotMap};
 
         let old = ArchivedProgramV21 {
@@ -1525,14 +1516,14 @@ mod tests {
             }],
         };
         let bytes = rkyv::to_bytes::<Error>(&old).expect("serialize v21");
-        let decoded = decode_archived_program(bytes.as_slice()).expect("decode v21");
-        let row = &decoded.program.precise_frames[0];
-        assert_eq!(row.at_pc[0].slots, vec![2]);
-        assert_eq!(row.frame_words, 0);
+        assert!(matches!(
+            decode_archived_program(bytes.as_slice()),
+            Err(ArchiveDecodeError::Version(v)) if archive_major(v) == 4
+        ));
     }
 
     #[test]
-    fn decode_minor23_envelope_has_no_class_word_kinds() {
+    fn major4_minor23_envelope_is_rejected() {
         let old = ArchivedProgramV23 {
             version: pack_archive_version(4, 23),
             static_slot_count: 0,
@@ -1548,9 +1539,10 @@ mod tests {
             precise_frames: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&old).expect("serialize v23");
-        let decoded = decode_archived_program(bytes.as_slice()).expect("decode v23");
-        assert!(decoded.program.class_word_kinds.is_empty());
-        assert_eq!(decoded.program.operand_stack_slots, 256);
+        assert!(matches!(
+            decode_archived_program(bytes.as_slice()),
+            Err(ArchiveDecodeError::Version(v)) if archive_major(v) == 4
+        ));
     }
 
     #[test]
@@ -1622,9 +1614,9 @@ mod tests {
     }
 
     #[test]
-    fn decode_minor29_envelope_has_no_debug_lines() {
+    fn major4_minor29_envelope_is_rejected() {
         let old = ArchivedProgramV29 {
-            version: pack_archive_version(ARCHIVE_MAJOR, 29),
+            version: pack_archive_version(4, 29),
             static_slot_count: 0,
             constants: vec![],
             strings: vec![],
@@ -1644,17 +1636,16 @@ mod tests {
             static_word_kinds: vec![WORD_POINTER],
         };
         let bytes = rkyv::to_bytes::<Error>(&old).expect("serialize v29");
-        let decoded = decode_archived_program(bytes.as_slice()).expect("decode v29");
-        assert!(decoded.program.debug_lines.is_empty());
-        assert_eq!(decoded.program.static_word_kinds, vec![WORD_POINTER]);
-        // No recorded lines: callers fall back to the source files.
-        assert_eq!(decoded.program.debug_bundle().line_at(0), None);
+        assert!(matches!(
+            decode_archived_program(bytes.as_slice()),
+            Err(ArchiveDecodeError::Version(v)) if archive_major(v) == 4
+        ));
     }
 
     #[test]
-    fn decode_minor28_envelope_has_no_static_word_kinds() {
+    fn major4_minor28_envelope_is_rejected() {
         let old = ArchivedProgramV28 {
-            version: pack_archive_version(ARCHIVE_MAJOR, 28),
+            version: pack_archive_version(4, 28),
             static_slot_count: 0,
             constants: vec![],
             strings: vec![],
@@ -1672,13 +1663,14 @@ mod tests {
             }],
         };
         let bytes = rkyv::to_bytes::<Error>(&old).expect("serialize v28");
-        let decoded = decode_archived_program(bytes.as_slice()).expect("decode v28");
-        assert!(decoded.program.static_word_kinds.is_empty());
-        assert_eq!(decoded.program.class_word_kinds.len(), 1);
+        assert!(matches!(
+            decode_archived_program(bytes.as_slice()),
+            Err(ArchiveDecodeError::Version(v)) if archive_major(v) == 4
+        ));
     }
 
     #[test]
-    fn decode_minor20_envelope_has_no_precise_frames() {
+    fn major4_minor20_envelope_is_rejected() {
         use crate::stack_map::{FrameStackMap, SlotMap};
 
         let maps = vec![FrameStackMap {
@@ -1701,14 +1693,14 @@ mod tests {
             stack_maps: maps.clone(),
         };
         let bytes = rkyv::to_bytes::<Error>(&old).expect("serialize v20");
-        let decoded = decode_archived_program(bytes.as_slice()).expect("decode v20");
-        assert!(decoded.stack_maps_persisted);
-        assert_eq!(decoded.program.stack_maps, maps);
-        assert!(decoded.program.precise_frames.is_empty());
+        assert!(matches!(
+            decode_archived_program(bytes.as_slice()),
+            Err(ArchiveDecodeError::Version(v)) if archive_major(v) == 4
+        ));
     }
 
     #[test]
-    fn decode_pre14_envelope_omits_stack_maps() {
+    fn major4_minor13_envelope_is_rejected() {
         let old = ArchivedProgramV13 {
             version: pack_archive_version(4, 13),
             static_slot_count: 0,
@@ -1722,15 +1714,10 @@ mod tests {
             operand_stack_slots: 512,
         };
         let bytes = rkyv::to_bytes::<Error>(&old).expect("serialize v13");
-        assert!(
-            rkyv::access::<ArchivedArchivedProgram, Error>(bytes.as_slice()).is_err(),
-            "current envelope must not silently read a pre-14 blob"
-        );
-        let decoded = decode_archived_program(bytes.as_slice()).expect("v13 decode");
-        assert!(decoded.operand_stack_slots_persisted);
-        assert!(!decoded.stack_maps_persisted);
-        assert_eq!(decoded.program.operand_stack_slots, 512);
-        assert!(decoded.program.stack_maps.is_empty());
+        assert!(matches!(
+            decode_archived_program(bytes.as_slice()),
+            Err(ArchiveDecodeError::Version(v)) if archive_major(v) == 4
+        ));
     }
 
     #[test]
@@ -1787,10 +1774,10 @@ mod tests {
     }
 
     #[test]
-    fn minor_39_archive_still_decodes_its_dense_tables() {
+    fn major4_minor39_envelope_is_rejected() {
         let (locs, lines) = dense_debug();
         let old = ArchivedProgramV39 {
-            version: pack_archive_version(ARCHIVE_MAJOR, 39),
+            version: pack_archive_version(4, 39),
             static_slot_count: 0,
             constants: vec![],
             strings: vec![],
@@ -1816,17 +1803,10 @@ mod tests {
             }],
         };
         let bytes = rkyv::to_bytes::<Error>(&old).expect("serialize");
-        let decoded = decode_archived_program(bytes.as_slice()).expect("decode minor 39");
-        assert_eq!(archive_minor(decoded.program.version), 39);
-        let debug = decoded.program.debug_bundle();
-        assert!(debug.table.is_empty(), "no run table before minor 40");
-        assert_eq!(debug.debug_locs, locs);
-        assert_eq!(debug.cleanup.len(), 1);
-        assert_eq!(debug.fn_symbols[0].name, "main");
-        assert_eq!(debug.file_line_at(0), Some((0, lines[0])));
-        assert_eq!(debug.file_line_at(1), None);
-        assert_eq!(debug.file_line_at(2), Some((0, lines[2])));
-        assert_eq!(debug.loc_at(2), Some(locs[2]));
+        assert!(matches!(
+            decode_archived_program(bytes.as_slice()),
+            Err(ArchiveDecodeError::Version(v)) if archive_major(v) == 4
+        ));
     }
 
     fn program_at(level: crate::DebugLevel) -> ArchivedProgram {
