@@ -17,6 +17,8 @@
 //! different arms of an `if` or a `match`. A reassignment `p = new P(..)`
 //! stores the fields; any other value stored to `p` keeps it an object.
 
+use std::collections::HashSet;
+
 use super::tuple_sroa::{fresh, mentions, parents, push, set, set_block, staged};
 use super::{HirBody, HirFlags, HirId, HirKind, HirPat, LocalId, LocalKind, MakeKind};
 use crate::typechecking::ty::Ty;
@@ -29,11 +31,28 @@ const MAX_USES: usize = 8;
 /// of a class `new` may make this way (a non-generic readonly class with
 /// 1 to 32 admitted field types), in argument order.
 pub fn scalarize(body: &HirBody, fields: impl Fn(&str) -> Option<Vec<(String, Ty)>>) -> Option<HirBody> {
+    // Only a local some `let` makes a class into can split; checking just
+    // those keeps a long body with many locals linear (#1857).
+    let made: HashSet<LocalId> = body
+        .exprs
+        .iter()
+        .filter_map(|e| match &e.kind {
+            HirKind::Let { local, init: Some(v) }
+                if matches!(body.expr(*v).kind, HirKind::Make { kind: MakeKind::Class(_), .. }) =>
+            {
+                Some(*local)
+            }
+            _ => None,
+        })
+        .collect();
+    if made.is_empty() {
+        return None;
+    }
     let parent = parents(body);
     let mut out: Option<HirBody> = None;
     for (k, l) in body.locals.iter().enumerate() {
         let local = LocalId(k as u32);
-        if l.captured || !matches!(l.kind, LocalKind::Let | LocalKind::Temp) {
+        if l.captured || !matches!(l.kind, LocalKind::Let | LocalKind::Temp) || !made.contains(&local) {
             continue;
         }
         let Some((class, decl)) = candidate(body, &parent, local, &fields) else {
