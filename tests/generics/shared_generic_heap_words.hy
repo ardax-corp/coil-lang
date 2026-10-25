@@ -4,8 +4,7 @@
 // allocation collects, so an unrooted word would be swept.
 use tests::assert;
 use string::format;
-use generic_vec_fns::filter;
-use generic_vec_fns::map;
+use generic_vec_fns::{filter, map};
 use collections::map::HashMap;
 
 class Box2 {

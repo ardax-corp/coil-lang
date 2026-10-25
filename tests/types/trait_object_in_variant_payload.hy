@@ -4,7 +4,7 @@
 use io::sync::println;
 
 trait Named<T> {
-    fn name(T x) -> string;
+    fn name(T x) -> string {}
 }
 
 class Dog {
