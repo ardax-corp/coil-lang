@@ -1103,7 +1103,8 @@ fn exec_dense(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) -> bool {
         Instruction::VScan => {
             let (n, dest, from, bound) = opcode.dense_abc_parts();
             let inclusive = n & common::simd::SCAN_INCLUSIVE != 0;
-            let n = usize::from(n & !common::simd::SCAN_INCLUSIVE);
+            let backward = n & common::simd::SCAN_BACKWARD != 0;
+            let n = usize::from(n & common::simd::SCAN_LEN);
             promise!(ctx.sp + dest < ctx.stack_cap);
             promise!(ctx.sp + from < ctx.stack_cap);
             promise!(ctx.sp + bound < ctx.stack_cap);
@@ -1112,7 +1113,7 @@ fn exec_dense(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) -> bool {
                 return true;
             };
             let (from, bound) = (ctx.stack[ctx.sp + from].as_int(), ctx.stack[ctx.sp + bound].as_int());
-            match super::vscan(ctx.heap, ctx.stack, ctx.sp, ctx.extra.vregs, body, from, bound, inclusive) {
+            match super::vscan(ctx.heap, ctx.stack, ctx.sp, ctx.extra.vregs, body, from, bound, inclusive, backward) {
                 Ok(p) => ctx.stack[ctx.sp + dest] = Value::from(p),
                 Err(msg) => ctx.panic_msg = Some(msg),
             }

@@ -970,13 +970,14 @@ impl<const S: usize> Machine<S> {
                 Instruction::VScan => {
                     let (n, dest, from, bound) = opcode.dense_abc_parts();
                     let inclusive = n & common::simd::SCAN_INCLUSIVE != 0;
-                    let n = usize::from(n & !common::simd::SCAN_INCLUSIVE);
+                    let backward = n & common::simd::SCAN_BACKWARD != 0;
+            let n = usize::from(n & common::simd::SCAN_LEN);
                     promise!(sp + dest < stack_cap);
                     promise!(sp + from < stack_cap);
                     promise!(sp + bound < stack_cap);
                     let (from, bound) = (self.stack[sp + from].as_int(), self.stack[sp + bound].as_int());
                     let found = match code.get(ip..ip + n) {
-                        Some(body) => vscan(&self.heap, &self.stack, sp, &mut self.vregs, body, from, bound, inclusive),
+                        Some(body) => vscan(&self.heap, &self.stack, sp, &mut self.vregs, body, from, bound, inclusive, backward),
                         None => Err("VScan body past the code"),
                     };
                     match found {
