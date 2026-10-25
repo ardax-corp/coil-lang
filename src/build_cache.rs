@@ -191,7 +191,7 @@ mod tests {
         let src = d.join("a.hy");
         std::fs::write(&src, "fn main() {}").unwrap();
         let cache = d.join("cache");
-        let inputs = inputs(&src, &[src.clone()], &[]);
+        let inputs = inputs(&src, std::slice::from_ref(&src), &[]);
         store(&cache, "k", &inputs, b"archive").unwrap();
         assert_eq!(load(&cache, "k").as_deref(), Some(b"archive".as_slice()));
         // A new file beside a source can change what `use` finds.
