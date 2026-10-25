@@ -169,12 +169,10 @@ enum IoError {
     TimedOut,
     /// The data ended early (the OS reported an unexpected end of file).
     Truncated,
-    /// A TLS certificate was rejected (reported by attached packages such as coil-tls).
-    Certificate,
-    /// A TLS handshake failed (reported by attached packages such as coil-tls).
-    Handshake,
-    /// The stream is not a terminal (`io::tty` calls on a file, pipe or socket).
-    NotATerminal,
+    /// An attached package stream (such as coil-tls) reported a failure of
+    /// its own protocol, for example a TLS alert; the package's API says
+    /// which.
+    Protocol,
 }
 
 /// Types that bytes can be read from; implemented for `Stream`.

@@ -21,7 +21,9 @@ pub const BUILTIN_IO_ERROR_ENUM: &str = "IoError";
 
 /// `IoError` variants in tag order.
 ///
-/// Append-only: existing discriminants must stay stable for match tags.
+/// Append-only: existing discriminants must stay stable for match tags
+/// (archive major 5 dropped `Certificate` / `Handshake` / `NotATerminal`
+/// for `Protocol`, and moved the terminal case to `TtyError`).
 pub const BUILTIN_IO_ERROR_VARIANTS: &[&str] = &[
     "WouldBlock",
     "NotFound",
@@ -33,10 +35,20 @@ pub const BUILTIN_IO_ERROR_VARIANTS: &[&str] = &[
     "AlreadyExists",
     "TimedOut",
     "Truncated",
-    "Certificate",
-    "Handshake",
-    "NotATerminal",
+    "Protocol",
 ];
+
+/// Built-in `TtyError` enum name (virtual `io::tty` module).
+pub const BUILTIN_TTY_ERROR_ENUM: &str = "TtyError";
+
+/// `TtyError` variants in tag order: `NotATerminal` = 0, `Io(IoError)` = 1.
+pub const BUILTIN_TTY_ERROR_VARIANTS: &[&str] = &["NotATerminal", "Io"];
+
+/// Built-in `StringError` enum name (virtual `string` module).
+pub const BUILTIN_STRING_ERROR_ENUM: &str = "StringError";
+
+/// `StringError` variants in tag order.
+pub const BUILTIN_STRING_ERROR_VARIANTS: &[&str] = &["InvalidUtf8", "NotCharBoundary"];
 
 /// Built-in `ThreadError` enum name (virtual `thread` module).
 pub const BUILTIN_THREAD_ERROR_ENUM: &str = "ThreadError";
@@ -99,6 +111,8 @@ pub fn is_builtin_enum(name: &str) -> bool {
     is_builtin_option_enum(name)
         || is_builtin_result_enum(name)
         || is_builtin_io_error_enum(name)
+        || name == BUILTIN_TTY_ERROR_ENUM
+        || name == BUILTIN_STRING_ERROR_ENUM
         || is_builtin_thread_error_enum(name)
         || is_builtin_env_error_enum(name)
         || is_builtin_ffi_error_enum(name)

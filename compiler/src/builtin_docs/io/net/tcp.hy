@@ -123,7 +123,7 @@ fn connect_timeout(string host, int port, int ms) -> Result<Stream, IoError> {}
 /// use io::net::tcp::{connect, listen, local_addr};
 /// use io::sync::{accept_wait, read_to_end, write_all};
 /// use io::net::tcp::{shutdown};
-/// use string::{from_bytes, to_bytes};
+/// use string::{from_bytes, to_bytes, StringError};
 /// # use tests::assert;
 /// fn run() -> Result<string, IoError> {
 ///     let listener = listen("127.0.0.1", 0)?;
@@ -132,7 +132,7 @@ fn connect_timeout(string host, int port, int ms) -> Result<Stream, IoError> {}
 ///     let server = accept_wait(listener)?;
 ///     write_all(client, to_bytes("hello"))?;
 ///     shutdown(client, 1)?;
-///     return from_bytes(read_to_end(server)?)?;
+///     return from_bytes(read_to_end(server)?).map_err(fn (StringError e) => IoError::InvalidInput)?;
 /// }
 ///
 /// fn main() {

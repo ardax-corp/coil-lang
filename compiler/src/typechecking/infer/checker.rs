@@ -617,12 +617,34 @@ impl Checker {
             BuiltinExport::Enum {
                 name: common::BUILTIN_IO_ERROR_ENUM
             } | BuiltinExport::IoFn { .. }
-                | BuiltinExport::StringFn {
-                    kind: StringBuiltin::FromBytes,
-                }
-        ) || host_registry.is_some_and(|r| r.starts_with("fs_"));
+        ) || host_registry.is_some_and(|r| r.starts_with("fs_") || r.starts_with("tty_"));
         if needs_io_error && !self.enums.contains_key(common::BUILTIN_IO_ERROR_ENUM) {
             self.register_builtin_io_error();
+        }
+
+        let needs_tty_error = matches!(
+            &export,
+            BuiltinExport::Enum {
+                name: common::BUILTIN_TTY_ERROR_ENUM
+            }
+        ) || host_registry.is_some_and(|r| r.starts_with("tty_"));
+        if needs_tty_error && !self.enums.contains_key(common::BUILTIN_TTY_ERROR_ENUM) {
+            if !self.enums.contains_key(common::BUILTIN_IO_ERROR_ENUM) {
+                self.register_builtin_io_error();
+            }
+            self.register_builtin_tty_error();
+        }
+
+        let needs_string_error = matches!(
+            &export,
+            BuiltinExport::Enum {
+                name: common::BUILTIN_STRING_ERROR_ENUM
+            } | BuiltinExport::StringFn {
+                kind: StringBuiltin::FromBytes | StringBuiltin::SliceBytes,
+            }
+        );
+        if needs_string_error && !self.enums.contains_key(common::BUILTIN_STRING_ERROR_ENUM) {
+            self.register_builtin_string_error();
         }
 
         let needs_thread_error = matches!(
@@ -898,6 +920,34 @@ impl Checker {
         self.enum_arities.insert(name, arities);
     }
 
+    fn register_builtin_string_error(&mut self) {
+        self.register_builtin_unit_enum(
+            common::BUILTIN_STRING_ERROR_ENUM,
+            common::BUILTIN_STRING_ERROR_VARIANTS,
+        );
+    }
+
+    /// `TtyError`: `NotATerminal`, or `Io(IoError)` for the stream's own
+    /// failure.
+    fn register_builtin_tty_error(&mut self) {
+        use common::{BUILTIN_IO_ERROR_ENUM, BUILTIN_TTY_ERROR_ENUM, BUILTIN_TTY_ERROR_VARIANTS};
+        let name = BUILTIN_TTY_ERROR_ENUM.to_string();
+        let variant_names: Vec<String> =
+            BUILTIN_TTY_ERROR_VARIANTS.iter().map(|s| s.to_string()).collect();
+        let payloads = vec![
+            EnumVariantPayloadTy::Unit,
+            EnumVariantPayloadTy::Tuple(vec![Ty::Con(BUILTIN_IO_ERROR_ENUM.into())]),
+        ];
+        let mut tag_map = BTreeMap::new();
+        for (i, vn) in variant_names.iter().enumerate() {
+            tag_map.insert(vn.clone(), i as u32);
+        }
+        self.enums.insert(name.clone(), variant_names);
+        self.enum_tags.insert(name.clone(), tag_map);
+        self.enum_payloads.insert(name.clone(), payloads);
+        self.enum_arities.insert(name, vec![0, 1]);
+    }
+
     fn register_builtin_env_error(&mut self) {
         self.register_builtin_unit_enum(
             common::BUILTIN_ENV_ERROR_ENUM,
@@ -983,7 +1033,7 @@ impl Checker {
         let res_int = result_app_ty(int(), io_err.clone());
         let res_unit = result_app_ty(unit_ty(), io_err.clone());
         let res_stream = result_app_ty(stream.clone(), io_err.clone());
-        let res_string = result_app_ty(string(), io_err.clone());
+        let res_string = result_app_ty(string(), Ty::Con(common::BUILTIN_STRING_ERROR_ENUM.into()));
         let addr_ty = tuple(vec![string(), int()]);
         let res_addr = result_app_ty(addr_ty, io_err.clone());
         // `(nbytes, peer_host, peer_port)` from `io::net::udp::recv_from`.
@@ -1035,7 +1085,7 @@ impl Checker {
     pub fn string_fn_scheme(kind: StringBuiltin) -> Scheme {
         use crate::typechecking::ty::byte;
         let bytes = vec_app_ty(byte());
-        let io_err = Ty::Con(common::BUILTIN_IO_ERROR_ENUM.into());
+        let str_err = Ty::Con(common::BUILTIN_STRING_ERROR_ENUM.into());
         let fun = |params: &[Ty], ret: Ty| {
             params
                 .iter()
@@ -1044,10 +1094,10 @@ impl Checker {
         };
         let ty = match kind {
             StringBuiltin::Format => fun(&[string()], string()),
-            StringBuiltin::FromBytes => fun(&[bytes], result_app_ty(string(), io_err)),
+            StringBuiltin::FromBytes => fun(&[bytes], result_app_ty(string(), str_err)),
             StringBuiltin::ToBytes => fun(&[string()], bytes),
             StringBuiltin::SliceBytes => {
-                fun(&[string(), int(), int()], result_app_ty(string(), io_err))
+                fun(&[string(), int(), int()], result_app_ty(string(), str_err))
             }
         };
         Scheme::mono(ty)
@@ -1189,9 +1239,11 @@ impl Checker {
         let io_err = Ty::Con(BUILTIN_IO_ERROR_ENUM.into());
         let env_err = Ty::Con(BUILTIN_ENV_ERROR_ENUM.into());
 
+        let tty_err = Ty::Con(common::BUILTIN_TTY_ERROR_ENUM.into());
         let res_bool_io = result_app_ty(boolean(), io_err.clone());
-        let res_size_io = result_app_ty(tuple_ty(vec![int(), int()]), io_err.clone());
-        let res_read_io = result_app_ty(option_app_ty(int()), io_err.clone());
+        let res_size_tty = result_app_ty(tuple_ty(vec![int(), int()]), tty_err.clone());
+        let res_read_tty = result_app_ty(option_app_ty(int()), tty_err.clone());
+        let res_unit_tty = result_app_ty(unit_ty(), tty_err);
         let res_unit_io = result_app_ty(unit_ty(), io_err.clone());
         let res_string_io = result_app_ty(string(), io_err.clone());
         let res_strs_io = result_app_ty(vec_app_ty(string()), io_err.clone());
@@ -1245,10 +1297,10 @@ impl Checker {
             "io_capture_end" => fun(&[], tuple_ty(vec![string(), string()])),
 
             "tty_is_tty" | "tty_is_raw" | "tty_enable_vt" => fun(&[stream_ty()], boolean()),
-            "tty_size" => fun(&[stream_ty()], res_size_io),
-            "tty_enter_raw" => fun(&[stream_ty(), boolean(), boolean()], res_unit_io.clone()),
-            "tty_leave_raw" => fun(&[stream_ty()], res_unit_io.clone()),
-            "tty_read_timeout" => fun(&[stream_ty(), vec_app_ty(byte()), int()], res_read_io),
+            "tty_size" => fun(&[stream_ty()], res_size_tty),
+            "tty_enter_raw" => fun(&[stream_ty(), boolean(), boolean()], res_unit_tty.clone()),
+            "tty_leave_raw" => fun(&[stream_ty()], res_unit_tty),
+            "tty_read_timeout" => fun(&[stream_ty(), vec_app_ty(byte()), int()], res_read_tty),
             "tty_resized" => fun(&[], boolean()),
 
             "task_scope_open" => fun(&[], int()),
@@ -5565,9 +5617,9 @@ impl Checker {
                     }
                     _ => {
                         if matches!(kind, StringBuiltin::FromBytes | StringBuiltin::SliceBytes)
-                            && !self.enums.contains_key(common::BUILTIN_IO_ERROR_ENUM)
+                            && !self.enums.contains_key(common::BUILTIN_STRING_ERROR_ENUM)
                         {
-                            self.register_builtin_io_error();
+                            self.register_builtin_string_error();
                         }
                         let fun_ty = self.instantiate_ty(&Self::string_fn_scheme(kind));
                         let flat_args = self.flatten_spread_call_args(reordered.as_slice());
@@ -5596,9 +5648,9 @@ impl Checker {
                 StringBuiltin::Format => self.infer_string_format_call(arg_slice, range),
                 _ => {
                     if matches!(kind, StringBuiltin::FromBytes | StringBuiltin::SliceBytes)
-                        && !self.enums.contains_key(common::BUILTIN_IO_ERROR_ENUM)
+                        && !self.enums.contains_key(common::BUILTIN_STRING_ERROR_ENUM)
                     {
-                        self.register_builtin_io_error();
+                        self.register_builtin_string_error();
                     }
                     let fun_ty = self.instantiate_ty(&Self::string_fn_scheme(kind));
                     let flat_args = self.flatten_spread_call_args(arg_slice);

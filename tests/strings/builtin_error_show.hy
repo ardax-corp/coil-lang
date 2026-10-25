@@ -5,7 +5,8 @@ use io::{IoError, open};
 use thread::ThreadError;
 use env::EnvError;
 use ffi::ErrorKind;
-use string::format;
+use io::tty::TtyError;
+use string::{format, StringError};
 
 fn shown<T: Show>(T x) -> string {
     return format("%v", x);
@@ -22,9 +23,15 @@ test("IoError variants") {
     assert!(format("%v", IoError::AlreadyExists) == "AlreadyExists");
     assert!(format("%v", IoError::TimedOut) == "TimedOut");
     assert!(format("%v", IoError::Truncated) == "Truncated");
-    assert!(format("%v", IoError::Certificate) == "Certificate");
-    assert!(format("%v", IoError::Handshake) == "Handshake");
-    assert!(format("%v", IoError::NotATerminal) == "NotATerminal");
+    assert!(format("%v", IoError::Protocol) == "Protocol");
+}
+
+test("TtyError and StringError") {
+    assert!(format("%v", TtyError::NotATerminal) == "NotATerminal");
+    assert!(format("%v", TtyError::Io(IoError::NotFound)) == "Io(NotFound)");
+    assert!(format("%v", StringError::InvalidUtf8) == "InvalidUtf8");
+    assert!(format("%v", StringError::NotCharBoundary) == "NotCharBoundary");
+    assert!(shown(TtyError::Io(IoError::AlreadyClosed)) == "Io(AlreadyClosed)");
 }
 
 test("an error returned by an io call") {

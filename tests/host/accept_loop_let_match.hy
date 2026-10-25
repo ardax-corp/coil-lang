@@ -10,7 +10,7 @@ use io::sync::read_to_end;
 use io::net::tcp::connect;
 use io::net::tcp::listen;
 use io::net::tcp::local_addr;
-use string::{from_bytes, to_bytes};
+use string::{from_bytes, to_bytes, StringError};
 use task::{scope, Scope, TaskError};
 
 fn serve_two(Stream listener) -> int {
@@ -36,7 +36,7 @@ fn serve_two(Stream listener) -> int {
 
 fn fetch(int port) -> Result<string, IoError> {
     let c = connect("127.0.0.1", port)?;
-    let got = from_bytes(read_to_end(c)?)?;
+    let got = from_bytes(read_to_end(c)?).map_err(fn (StringError e) => IoError::InvalidInput)?;
     close(c)?;
     return got;
 }

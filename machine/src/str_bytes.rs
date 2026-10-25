@@ -7,8 +7,30 @@
 
 use common::Value;
 
-use crate::io::{IoErrorTag, as_result_value, peel_one_boxed};
-use crate::memory::{Heap, Object};
+use crate::io::peel_one_boxed;
+use crate::memory::{EnumPayload, Heap, Object};
+
+/// Tag indices for [`StringError`](common::BUILTIN_STRING_ERROR_ENUM).
+#[repr(u32)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum StringErrorTag {
+    /// `from_bytes` on bytes that are not UTF-8.
+    InvalidUtf8 = 0,
+    /// `slice_bytes` with an offset inside a character.
+    NotCharBoundary = 1,
+}
+
+/// Allocate a `StringError` variant.
+pub fn alloc_string_error(heap: &mut Heap, tag: StringErrorTag) -> Value {
+    let _ = common::BUILTIN_STRING_ERROR_VARIANTS;
+    heap.alloc_enum_value(tag as u32, EnumPayload::empty())
+}
+
+/// `Result<T, StringError>` encoding of a host result.
+pub fn as_string_result_value(heap: &mut Heap, r: Result<Value, StringErrorTag>) -> Value {
+    let mapped = r.map_err(|tag| alloc_string_error(heap, tag));
+    crate::host_enum::pack_result_or_panic(heap, mapped)
+}
 
 /// Run `f` on the UTF-8 content of string `v`; non-strings read as `""`
 /// (the typechecker rejects them).
@@ -74,9 +96,9 @@ pub fn string_slice_bytes(heap: &mut Heap, args: &[Value]) -> Value {
     };
     let r = match part {
         Some(gc) => Ok(Value::from(gc.as_ptr() as *mut u8 as u64)),
-        None => Err(IoErrorTag::InvalidInput),
+        None => Err(StringErrorTag::NotCharBoundary),
     };
-    as_result_value(heap, r)
+    as_string_result_value(heap, r)
 }
 
 /// `find_from(hay, needle, start) -> int`: first offset `>= start` of

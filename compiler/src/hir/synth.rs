@@ -195,13 +195,25 @@ pub fn builtin_enum_show(checker: &Checker, name: &str, enum_name: &str, variant
     let scrutinee = b.builtin(Builtin::Unbox { tag }, vec![word], ty);
     let mut arms = Vec::with_capacity(variants.len() + 1);
     for (i, variant) in variants.iter().enumerate() {
+        // A one-field variant (`TtyError::Io(e)`) shows as `Io(<e>)`.
+        let payload = checker.payload_tys_for(enum_name, variant);
+        let (fields, shown) = match payload.as_slice() {
+            [(_, ty)] => {
+                let e = b.local("payload", ty.clone(), LocalKind::Pattern);
+                let fmt = b.str(&format!("{variant}(%v)"));
+                let v = b.read(e);
+                let shown = b.call("format", vec![fmt, v], coil_ty::string());
+                (HirPatFields::Tuple(vec![HirPat::Bind(e)]), shown)
+            }
+            _ => (HirPatFields::Unit, b.str(variant)),
+        };
         let pat = HirPat::Variant {
             enum_name: enum_name.to_string(),
             variant: (*variant).to_string(),
             tag: Some(i as u32),
-            fields: HirPatFields::Unit,
+            fields,
         };
-        arms.push((pat, b.str(variant)));
+        arms.push((pat, shown));
     }
     arms.push((HirPat::Wild, b.str(enum_name)));
     let shown = b.match_(scrutinee, arms, coil_ty::string());

@@ -40,7 +40,7 @@ impl Path {
         }
         return match from_bytes(mid) {
             Result::Ok(s) => new Path(s),
-            Result::Err(e) => raise e,
+            Result::Err(_) => raise IoError::InvalidInput,
         };
     }
 }

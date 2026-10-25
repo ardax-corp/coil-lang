@@ -869,7 +869,7 @@ fn push_io_natives(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMu
                 IoKind::Drive => return Ok(Some(io_drive(heap))),
                 IoKind::FromBytes => {
                     let r = from_bytes(heap, args[0]);
-                    as_result_value(heap, r)
+                    crate::str_bytes::as_string_result_value(heap, r)
                 }
                 IoKind::ToBytes => to_bytes(heap, args[0]),
                 IoKind::TcpConnect => {

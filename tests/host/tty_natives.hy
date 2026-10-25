@@ -18,6 +18,7 @@ use io::tty::leave_raw;
 use io::tty::read_timeout;
 use io::tty::resized;
 use io::tty::size;
+use io::tty::TtyError;
 use string::{from_bytes, to_bytes};
 use tests::assert;
 
@@ -34,8 +35,8 @@ test("a file is not a terminal") {
     let f = open(path, "r")?;
     assert!(!is_tty(f));
     assert!(!is_raw(f));
-    assert!(size(f) == Result::Err(IoError::NotATerminal));
-    assert!(enter_raw(f, true, true) == Result::Err(IoError::NotATerminal));
+    assert!(size(f) == Result::Err(TtyError::NotATerminal));
+    assert!(enter_raw(f, true, true) == Result::Err(TtyError::NotATerminal));
     assert!(!is_raw(f));
     // Leaving raw mode is a no-op when the stream is not raw.
     assert!(leave_raw(f) == Result::Ok(()));
@@ -62,8 +63,8 @@ test("a closed stream") {
     let f = open(path, "r")?;
     close(f)?;
     assert!(!is_tty(f));
-    assert!(size(f) == Result::Err(IoError::AlreadyClosed));
-    assert!(read_timeout(f, to_bytes(" "), 0) == Result::Err(IoError::AlreadyClosed));
+    assert!(size(f) == Result::Err(TtyError::Io(IoError::AlreadyClosed)));
+    assert!(read_timeout(f, to_bytes(" "), 0) == Result::Err(TtyError::Io(IoError::AlreadyClosed)));
     remove_file(path)?;
 }
 
