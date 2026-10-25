@@ -45,7 +45,7 @@ test("an error returned by an io call") {
 test("ThreadError, EnvError and ffi ErrorKind") {
     assert!(format("%v", ThreadError::Disconnected) == "Disconnected");
     assert!(format("%v", ThreadError::Poisoned) == "Poisoned");
-    assert!(format("%v", EnvError::ExecDisabled) == "ExecDisabled");
+    assert!(format("%v", EnvError::ExecFailed) == "ExecFailed");
     assert!(format("%v", EnvError::NotFound) == "NotFound");
     assert!(format("%v", ErrorKind::SymbolNotFound) == "SymbolNotFound");
     assert!(format("%v", ErrorKind::Other) == "Other");

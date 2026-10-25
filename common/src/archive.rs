@@ -167,8 +167,9 @@ pub const ARCHIVE_MAJOR: u16 = 5;
 /// Major 5 / minor 0: builtin error regrouping. `IoError` drops
 /// `Certificate` / `Handshake` / `NotATerminal` for `Protocol` (tag 10);
 /// `io::tty` natives return `TtyError` and `string::from_bytes` /
-/// `slice_bytes` return `StringError`. Major-4 archives would read the old
-/// tags as other variants, so they are not loadable.
+/// `slice_bytes` return `StringError`; `EnvError` drops the never-returned
+/// `ExecDisabled` (`ExecFailed` is tag 2, `Other` tag 3). Major-4 archives
+/// would read the old tags as other variants, so they are not loadable.
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.
