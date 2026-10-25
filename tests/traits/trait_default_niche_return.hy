@@ -59,7 +59,7 @@ test("default methods return niche Option and Result") {
     assert!("foobar".first("zz").is_none());
     assert!(("ab".word() ?? "") == "ab");
     assert!((12.word() ?? "") == "12");
-    assert!(("ab".checked() ?? "") == "ab");
+    assert!(("ab".checked().ok() ?? "") == "ab");
     assert!("".checked().is_err());
 }
 

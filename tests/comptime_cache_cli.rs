@@ -51,7 +51,7 @@ fn an_environment_read_is_kept_until_refreshed() {
     let p = Project::new("env");
     p.write(
         "main.hy",
-        &format!("use env::var;\n{PRINT}\nconst V = var(\"CT_VALUE\") ?? \"none\";\n\nfn main() {{\n    write(stdout(), to_bytes(V));\n}}\n"),
+        &format!("use env::var;\n{PRINT}\nconst V = var(\"CT_VALUE\").ok() ?? \"none\";\n\nfn main() {{\n    write(stdout(), to_bytes(V));\n}}\n"),
     );
     assert_eq!(p.run("one", &[]).1, "one");
     let (ok, out, _) = p.run("two", &[]);
@@ -76,7 +76,7 @@ fn a_changed_file_is_read_again() {
     p.write(
         "main.hy",
         &format!(
-            "use io::file::read_text;\nuse env::var;\n{PRINT}\nconst V = (read_text(\"data/v.txt\") ?? \"\") + (var(\"CT_VALUE\") ?? \"\");\n\nfn main() {{\n    write(stdout(), to_bytes(V));\n}}\n"
+            "use io::file::read_text;\nuse env::var;\n{PRINT}\nconst V = (read_text(\"data/v.txt\").ok() ?? \"\") + (var(\"CT_VALUE\").ok() ?? \"\");\n\nfn main() {{\n    write(stdout(), to_bytes(V));\n}}\n"
         ),
     );
     p.write("data/v.txt", "a");
@@ -96,7 +96,7 @@ fn a_macro_result_is_cached() {
     let p = Project::new("macro");
     p.write(
         "gen.hy",
-        "use macro::{Expr, Code, lit};\nuse env::var;\n\nmacro env_text(Expr name) -> Code {\n    return lit(var(name.src()) ?? \"\");\n}\n",
+        "use macro::{Expr, Code, lit};\nuse env::var;\n\nmacro env_text(Expr name) -> Code {\n    return lit(var(name.src()).ok() ?? \"\");\n}\n",
     );
     p.write(
         "main.hy",
@@ -116,7 +116,7 @@ fn a_cached_class_value_survives_new_types() {
     p.write("m/a.hy", "class A1 {\n    pub x: int,\n}\n");
     p.write(
         "m/b.hy",
-        "use env::var;\n\nclass P {\n    pub name: string,\n    pub n: int,\n}\n\nconst X = new P(var(\"CT_VALUE\") ?? \"none\", 7);\n",
+        "use env::var;\n\nclass P {\n    pub name: string,\n    pub n: int,\n}\n\nconst X = new P(var(\"CT_VALUE\").ok() ?? \"none\", 7);\n",
     );
     p.write(
         "main.hy",
@@ -162,7 +162,7 @@ fn a_block_result_is_cached() {
     );
     let main = |extra: &str| {
         format!(
-            "use env::var;\nuse gen::value_fn;\n{PRINT}\ncomptime {{\n    return value_fn(var(\"CT_VALUE\") ?? \"none\");\n}}\n\nfn main() {{\n    write(stdout(), to_bytes(value(){extra}));\n}}\n"
+            "use env::var;\nuse gen::value_fn;\n{PRINT}\ncomptime {{\n    return value_fn(var(\"CT_VALUE\").ok() ?? \"none\");\n}}\n\nfn main() {{\n    write(stdout(), to_bytes(value(){extra}));\n}}\n"
         )
     };
     p.write("main.hy", &main(""));
@@ -209,7 +209,7 @@ fn fetch() -> Result<string, IoError> {{
     return Result::Ok(text);
 }}
 
-const GOT = fetch() ?? \"failed\";
+const GOT = fetch().ok() ?? \"failed\";
 
 fn main() {{
     write(stdout(), to_bytes(GOT));

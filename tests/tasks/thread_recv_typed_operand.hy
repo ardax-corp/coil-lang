@@ -17,5 +17,5 @@ fn run() -> Result<int, ThreadError> {
 }
 
 fn main() {
-    println(format("%i", run() ?? 0))?;
+    println(format("%i", run().ok() ?? 0))?;
 }

@@ -4,11 +4,11 @@ use env::var;
 use tests::assert;
 
 test("a set variable") {
-    let path = comptime var("PATH") ?? "";
+    let path = (comptime var("PATH")).ok() ?? "";
     assert!(path.len() > 0);
 }
 
 test("an unset variable") {
-    let missing = comptime var("COIL_COMPTIME_UNSET_VAR") ?? "unset";
+    let missing = (comptime var("COIL_COMPTIME_UNSET_VAR")).ok() ?? "unset";
     assert!(missing == "unset");
 }

@@ -90,7 +90,7 @@ fn handle(Player p, Command c) -> Result<bool, IoError> {
             }
         },
         Command::Load => {
-            if load_player(p) ?? false {
+            if load_player(p).unwrap_or(false) {
                 look(p)?;
             } else {
                 println("Load failed.")?;

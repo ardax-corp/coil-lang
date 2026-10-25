@@ -17,27 +17,27 @@ fn add_name((Mutex<Vec<string>>, string) job) -> int {
 }
 
 test("with_lock with a capturing lambda") {
-    let m = mutex(0) ?? panic "no mutex";
+    let m = mutex(0).ok() ?? panic "no mutex";
     let step = 2;
-    let got = with_lock(m, fn (int n) use (step) => (n + step, n + step)) ?? -1;
+    let got = with_lock(m, fn (int n) use (step) => (n + step, n + step)).ok() ?? -1;
     assert!(got == 2);
-    let again = with_lock(m, fn (int n) use (step) => (n + step, n + step)) ?? -1;
+    let again = with_lock(m, fn (int n) use (step) => (n + step, n + step)).ok() ?? -1;
     assert!(again == 4);
 }
 
 test("with_read and with_write with capturing lambdas") {
-    let l = rwlock(10) ?? panic "no rwlock";
+    let l = rwlock(10).ok() ?? panic "no rwlock";
     let k = 5;
     let _ = with_write(l, fn (int n) use (k) => (n + k, 0));
-    let seen = with_read(l, fn (int n) use (k) => n - k) ?? -1;
+    let seen = with_read(l, fn (int n) use (k) => n - k).ok() ?? -1;
     assert!(seen == 10);
 }
 
 test("a thread pushes its own argument into a mutex") {
     let names: Vec<string> = Vec::new();
-    let m = mutex(names) ?? panic "no mutex";
-    let t = spawn(add_name, (m, "worker")) ?? panic "no thread";
-    let _ = join(t) ?? panic "join failed";
-    let n = with_lock(m, fn (Vec<string> xs) => (xs, xs.len())) ?? -1;
+    let m = mutex(names).ok() ?? panic "no mutex";
+    let t = spawn(add_name, (m, "worker")).ok() ?? panic "no thread";
+    let _ = join(t).ok() ?? panic "join failed";
+    let n = with_lock(m, fn (Vec<string> xs) => (xs, xs.len())).ok() ?? -1;
     assert!(n == 1);
 }

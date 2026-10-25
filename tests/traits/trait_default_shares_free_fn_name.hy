@@ -27,7 +27,7 @@ impl Split for int {
 test("a default method and a free fn share a name") {
     assert!(Split::pieces(7).len() == 2);
     assert!(7.pieces()[1] == "7");
-    let free = pieces("a") ?? Vec::new();
+    let free = pieces("a").ok() ?? Vec::new();
     assert!(free.len() == 1);
     assert!(pieces("").is_err());
 }

@@ -83,9 +83,9 @@ test("a user enum as the error type") {
         default => 0,
     };
     assert!(b == 500);
-    assert!((parse(2, 42) ?? -1) == 42);
-    assert!((parse(2, 99) ?? -1) == 99);
-    assert!((parse(2, 100) ?? -1) == -1);
+    assert!((parse(2, 42).ok() ?? -1) == 42);
+    assert!((parse(2, 99).ok() ?? -1) == 99);
+    assert!((parse(2, 100).ok() ?? -1) == -1);
 }
 
 test("a class as the error type") {
@@ -94,7 +94,7 @@ test("a class as the error type") {
         Result::Ok(_) => 0,
     };
     assert!(code == 7);
-    assert!((fail_with(0) ?? "") == "fine");
+    assert!((fail_with(0).ok() ?? "") == "fine");
 }
 
 test("raise from inside a loop") {

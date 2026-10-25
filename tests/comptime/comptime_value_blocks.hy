@@ -25,7 +25,7 @@ test("a block calls this module's functions") {
 
 test("a block reads a file") {
     let count = comptime {
-        let text = read_text("tests/comptime/data/names.txt") ?? "";
+        let text = read_text("tests/comptime/data/names.txt").ok() ?? "";
         let names: Vec<string> = text.lines();
         let n = 0;
         for name in names {

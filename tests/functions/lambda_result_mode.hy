@@ -20,7 +20,7 @@ fn raise_in_main_like() -> int {
         }
         return n + 1;
     };
-    return (check(-1) ?? 0) + (check(4) ?? 0);
+    return (check(-1).ok() ?? 0) + (check(4).ok() ?? 0);
 }
 
 test("a raising lambda returns a Result") {
@@ -30,8 +30,8 @@ test("a raising lambda returns a Result") {
         }
         return n + 1;
     };
-    assert!((check(-1) ?? 0) == 0);
-    assert!((check(2) ?? 0) == 3);
+    assert!((check(-1).ok() ?? 0) == 0);
+    assert!((check(2).ok() ?? 0) == 3);
     assert!(apply(check, 1) == Result::Ok(2));
     assert!(apply(check, -5) == Result::Err("neg"));
 }
