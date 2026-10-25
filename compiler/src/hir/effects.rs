@@ -2451,7 +2451,9 @@ impl Cx<'_> {
                 return Some((w.summaries[*i], Some(*i)));
             }
             let qualified = format!("{}::{key}", self.module_path);
-            for k in [key.as_str(), qualified.as_str()] {
+            // The prelude's `Option` / `Result` methods live in `core`.
+            let core = format!("core::{key}");
+            for k in [key.as_str(), qualified.as_str(), core.as_str()] {
                 if let Some(&s) = self.program.by_name.get(k) {
                     return Some((s, None));
                 }
