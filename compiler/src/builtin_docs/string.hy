@@ -1,5 +1,15 @@
 // Doc stubs for the builtin `string` module (hover docs; never compiled).
 
+/// The error of `from_bytes` and `slice_bytes`.
+///
+/// It implements `Show`, so `format("%v", e)` gives the variant name.
+enum StringError {
+    /// The bytes are not valid UTF-8.
+    InvalidUtf8,
+    /// A byte offset falls inside a multi-byte character.
+    NotCharBoundary,
+}
+
 /// Builds a string from the literal `fmt` and the arguments that follow it.
 ///
 /// `format` takes any number of arguments after `fmt`; each `%` specifier
@@ -31,14 +41,13 @@ fn format(string fmt) -> string {}
 
 /// Decodes `bytes` as UTF-8 text.
 ///
-/// Returns `Err(IoError::InvalidInput)` when `bytes` is not valid UTF-8.
+/// Returns `Err(StringError::InvalidUtf8)` when `bytes` is not valid UTF-8.
 /// The inverse of `to_bytes`.
 ///
 /// # Examples
 ///
 /// ```
-/// use io::{IoError};
-/// use string::{from_bytes};
+/// use string::{from_bytes, StringError};
 /// # use tests::assert;
 /// let text = match from_bytes(Vec::from([111 as byte, 107 as byte])) {
 ///     Result::Ok(s) => s,
@@ -46,25 +55,24 @@ fn format(string fmt) -> string {}
 /// };
 /// assert!(text == "ok");
 /// let bad = match from_bytes(Vec::from([255 as byte])) {
-///     Result::Err(IoError::InvalidInput) => true,
+///     Result::Err(StringError::InvalidUtf8) => true,
 ///     default => false,
 /// };
 /// assert!(bad);
 /// ```
-fn from_bytes(Vec<byte> bytes) -> Result<string, IoError> {}
+fn from_bytes(Vec<byte> bytes) -> Result<string, StringError> {}
 
 /// Returns the part of `s` between byte offsets `start` (inclusive) and `end` (exclusive).
 ///
 /// Offsets are clamped to `0..=s.len()`, and `end` to at least `start`, so
 /// out-of-range offsets give a shorter (possibly empty) string rather than
-/// an error. Returns `Err(IoError::InvalidInput)` when an offset falls
-/// inside a multi-byte UTF-8 character.
+/// an error. Returns `Err(StringError::NotCharBoundary)` when an offset
+/// falls inside a multi-byte UTF-8 character.
 ///
 /// # Examples
 ///
 /// ```
-/// use io::{IoError};
-/// use string::{slice_bytes};
+/// use string::{slice_bytes, StringError};
 /// # use tests::assert;
 /// let mid = match slice_bytes("hello", 1, 4) {
 ///     Result::Ok(s) => s,
@@ -77,12 +85,12 @@ fn from_bytes(Vec<byte> bytes) -> Result<string, IoError> {}
 /// };
 /// assert!(clamped == "lo");
 /// let split_char = match slice_bytes("é", 0, 1) {
-///     Result::Err(IoError::InvalidInput) => true,
+///     Result::Err(StringError::NotCharBoundary) => true,
 ///     default => false,
 /// };
 /// assert!(split_char);
 /// ```
-fn slice_bytes(string s, int start, int end) -> Result<string, IoError> {}
+fn slice_bytes(string s, int start, int end) -> Result<string, StringError> {}
 
 /// Encodes `s` as UTF-8 into a new `Vec<byte>`.
 ///

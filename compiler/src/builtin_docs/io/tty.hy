@@ -1,5 +1,30 @@
 // Doc stubs for the builtin `io::tty` module (hover docs; never compiled).
 
+/// The error of the fallible `io::tty` functions.
+///
+/// It implements `Show`: `NotATerminal`, or `Io(<IoError>)`.
+///
+/// # Examples
+///
+/// ```
+/// use io::{stdin};
+/// use io::tty::{size, TtyError};
+/// let cols = match size(stdin()) {
+///     Result::Ok(sz) => {
+///         let (c, _) = sz;
+///         c
+///     },
+///     Result::Err(TtyError::NotATerminal) => 80,
+///     Result::Err(TtyError::Io(_)) => 0,
+/// };
+/// ```
+enum TtyError {
+    /// The stream is not a terminal (a file, pipe or socket).
+    NotATerminal,
+    /// The stream itself failed, for example it is closed.
+    Io(IoError),
+}
+
 /// Returns whether `s` is a terminal (`isatty`; a console on Windows).
 ///
 /// `stdout()` and `stderr()` are not terminals while `io::capture_begin()`
@@ -19,7 +44,7 @@ fn is_tty(Stream s) -> bool {}
 /// For `stdin()`, `stdout()` or `stderr()` that is not a terminal, the other
 /// standard streams are asked too, so a program whose output is piped still
 /// learns the size of the terminal it runs in. Returns
-/// `Err(IoError::NotATerminal)` when none is a terminal.
+/// `Err(TtyError::NotATerminal)` when none is a terminal.
 ///
 /// # Examples
 ///
@@ -34,7 +59,7 @@ fn is_tty(Stream s) -> bool {}
 ///     Result::Err(_) => 80,
 /// };
 /// ```
-fn size(Stream s) -> Result<(int, int), IoError> {}
+fn size(Stream s) -> Result<(int, int), TtyError> {}
 
 /// Puts the terminal `s` in raw mode: input is not echoed and arrives byte
 /// by byte, without waiting for Enter.
@@ -49,26 +74,26 @@ fn size(Stream s) -> Result<(int, int), IoError> {}
 /// through `env::exit`, on an uncaught panic, and on SIGINT / SIGTERM /
 /// SIGHUP / SIGQUIT (Ctrl-C or closing the window on Windows). Calling it
 /// again changes the flags; `leave_raw` still restores the first settings.
-/// Returns `Err(IoError::NotATerminal)` when `s` is not a terminal.
+/// Returns `Err(TtyError::NotATerminal)` when `s` is not a terminal.
 ///
 /// # Examples
 ///
 /// ```
-/// use io::{stdin, IoError};
-/// use io::tty::{enter_raw, leave_raw};
-/// fn main() -> Result<(), IoError> {
+/// use io::{stdin};
+/// use io::tty::{enter_raw, leave_raw, TtyError};
+/// fn main() -> Result<(), TtyError> {
 ///     match enter_raw(stdin(), true, true) {
 ///         Result::Ok(_) => {
 ///             // ... read keys ...
 ///             leave_raw(stdin())?;
 ///         },
-///         Result::Err(IoError::NotATerminal) => {},
+///         Result::Err(TtyError::NotATerminal) => {},
 ///         Result::Err(e) => raise e,
 ///     }
 ///     return;
 /// }
 /// ```
-fn enter_raw(Stream s, bool keep_signals, bool keep_output) -> Result<(), IoError> {}
+fn enter_raw(Stream s, bool keep_signals, bool keep_output) -> Result<(), TtyError> {}
 
 /// Restores the settings `enter_raw` saved for the terminal `s`. Does
 /// nothing when it is not in raw mode (or not a terminal).
@@ -82,7 +107,7 @@ fn enter_raw(Stream s, bool keep_signals, bool keep_output) -> Result<(), IoErro
 /// let _ = leave_raw(stdin());
 /// assert!(!is_raw(stdin()));
 /// ```
-fn leave_raw(Stream s) -> Result<(), IoError> {}
+fn leave_raw(Stream s) -> Result<(), TtyError> {}
 
 /// Returns whether the terminal `s` is in raw mode (`enter_raw`).
 ///
@@ -111,10 +136,10 @@ fn is_raw(Stream s) -> bool {}
 /// # Examples
 ///
 /// ```
-/// use io::{stdin, IoError};
-/// use io::tty::{read_timeout};
+/// use io::{stdin};
+/// use io::tty::{read_timeout, TtyError};
 /// use string::{to_bytes};
-/// fn main() -> Result<(), IoError> {
+/// fn main() -> Result<(), TtyError> {
 ///     let buf = to_bytes("        ");
 ///     match read_timeout(stdin(), buf, 10)? {
 ///         Option::Some(0) => {}, // nothing yet
@@ -124,7 +149,7 @@ fn is_raw(Stream s) -> bool {}
 ///     return;
 /// }
 /// ```
-fn read_timeout(Stream s, Vec<byte> buf, int timeout_ms) -> Result<Option<int>, IoError> {}
+fn read_timeout(Stream s, Vec<byte> buf, int timeout_ms) -> Result<Option<int>, TtyError> {}
 
 /// Returns `true` once for each change of the terminal window's size since
 /// the last call (SIGWINCH; on Windows the console size is compared with
