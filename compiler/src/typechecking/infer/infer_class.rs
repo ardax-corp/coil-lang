@@ -773,6 +773,27 @@ impl Checker {
                                 m.0.into_range(),
                             ));
                         }
+                        // A call through the trait passes the dictionaries
+                        // of the trait method's own bounds and no others:
+                        // one the instance method adds has none (#2007).
+                        let own_bounds: Vec<(&str, &str)> =
+                            mparams.iter().flat_map(|p| p.bounds.iter().map(move |b| (p.name, *b))).collect();
+                        if let Some(scheme) = self.typeclass_method_scheme(class, mname)
+                            && own_bounds.len() > scheme.constraints.len().saturating_sub(1)
+                        {
+                            let (param, bound) = own_bounds[scheme.constraints.len().saturating_sub(1)];
+                            let mut msg = Message::error(
+                                ErrorCode::GenericTypeError,
+                                format!(
+                                    "method `{mname}` in instance of `{class}` adds the bound `{param}: {bound}`, which the trait method does not declare"
+                                ),
+                                m.0.into_range(),
+                            );
+                            msg.with_help(format!(
+                                "a call through `{class}` has no `{bound}` to pass: bound the instance's type parameter instead (as in `impl {class} for Vec<T: {bound}>`), or declare the bound on the trait method"
+                            ));
+                            self.messages.push(msg);
+                        }
                         let fqn = format!("{}__{}__{}", class, args_pretty_for_fqn, mname);
                         method_names.push(mname.to_string());
                         method_fqns.insert(mname.to_string(), fqn.clone());
