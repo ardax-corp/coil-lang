@@ -286,7 +286,27 @@ impl LaneExpr {
                 };
                 Self::Cmp { op, lhs, rhs }
             }
-            a => Self::Not(Box::new(a)),
+            // De Morgan when it costs no nodes: `!(a | b)` with compares
+            // on both sides is `!a & !b`, the shape the VM's fast scans
+            // match (a threaded `&&` chain's mask, #1976).
+            Self::And(x, y) => {
+                let size = 1 + x.size() + y.size();
+                let pushed = Self::or(Self::not((*x).clone()), Self::not((*y).clone()));
+                if pushed.size() <= size {
+                    pushed
+                } else {
+                    Self::Not(Box::new(Self::And(x, y)))
+                }
+            }
+            Self::Or(x, y) => {
+                let size = 1 + x.size() + y.size();
+                let pushed = Self::and(Self::not((*x).clone()), Self::not((*y).clone()));
+                if pushed.size() <= size {
+                    pushed
+                } else {
+                    Self::Not(Box::new(Self::Or(x, y)))
+                }
+            }
         }
     }
 

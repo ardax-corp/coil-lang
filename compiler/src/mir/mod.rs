@@ -39,6 +39,7 @@ mod specialize;
 mod sccp;
 mod sroa;
 mod vectorize;
+mod bool_thread;
 mod phi_sroa;
 mod strength;
 mod stackmap;
@@ -74,6 +75,7 @@ pub use specialize::{
 };
 pub use sccp::sccp;
 pub use sroa::sroa;
+pub use bool_thread::thread_bool_phis;
 pub use phi_sroa::phi_sroa;
 pub use byte_scan::byte_scan;
 pub use strength::strength_reduce;
