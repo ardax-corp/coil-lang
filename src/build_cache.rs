@@ -119,7 +119,10 @@ pub fn store(dir: &Path, key: &str, inputs: &[PathBuf], archive: &[u8]) -> std::
     Ok(())
 }
 
-fn decode(bytes: &[u8]) -> Option<(Vec<(PathBuf, [u8; 32])>, &[u8])> {
+/// A path the entry depends on, with its digest when stored.
+type Input = (PathBuf, [u8; 32]);
+
+fn decode(bytes: &[u8]) -> Option<(Vec<Input>, &[u8])> {
     let rest = bytes.strip_prefix(MAGIC.as_slice())?;
     let (n, mut rest) = take_u32(rest)?;
     let mut deps = Vec::with_capacity(n as usize);
