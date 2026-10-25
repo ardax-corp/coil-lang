@@ -707,6 +707,10 @@ trait Length<T> {
 /// current module (an instance with a builtin type such as `int` on either
 /// side is rejected as an orphan).
 ///
+/// `?` uses it for errors: on a `Result<_, E>` inside a function returning
+/// `Result<_, F>`, an `impl Into<F> for E` converts the error before it
+/// returns. Without one, `E` and `F` must be the same type.
+///
 /// # Examples
 ///
 /// ```
