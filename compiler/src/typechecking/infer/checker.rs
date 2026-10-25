@@ -15,7 +15,7 @@ use crate::typechecking::generics::{
 };
 use crate::typechecking::id::{self, IdTable, NodeId};
 use crate::typechecking::kind::Kind;
-use crate::typechecking::subst::{Subst, apply_ty, apply_ty_prune, compose};
+use crate::typechecking::subst::{Subst, apply_ty, apply_ty_prune};
 use crate::typechecking::ty::{ArrayLength, array, array_fixed, peel_constructor_refinement, tuple as tuple_ty};
 use crate::typechecking::ty::{AssocProjection, Constraint, Scheme};
 use crate::typechecking::ty::{
@@ -4466,7 +4466,7 @@ impl Checker {
         let is_byte = Self::is_byte_ty(&index_ty_pruned);
         if !is_byte {
             match unify_with(&self.subst, &index_ty_pruned, &int()) {
-                Ok(s) => self.absorb(&s),
+                Ok(s) => self.absorb(s),
                 Err(_) => {
                     let _ = self.error_with_help(
                         ErrorCode::TypeMismatch,
@@ -4610,7 +4610,7 @@ impl Checker {
                     let prev_pruned = apply_ty_prune(&self.subst, prev);
                     match unify_with(&self.subst, &prev_pruned, &t_pruned) {
                         Ok(s) => {
-                            self.absorb(&s);
+                            self.absorb(s);
                             let joined = apply_ty_prune(
                                 &self.subst,
                                 &crate::typechecking::ty::peel_constructor_refinement(prev_pruned.clone()),
@@ -4662,7 +4662,7 @@ impl Checker {
                 || !self.drops_readonly(vec_elem, &apply_ty_prune(&self.subst, &element)))
             && let Ok(s) = unify_with(&self.subst, vec_elem, &element)
         {
-            self.absorb(&s);
+            self.absorb(s);
             return apply_ty_prune(&self.subst, &exp);
         }
         if len == 0 {
@@ -6140,7 +6140,7 @@ impl Checker {
             return;
         }
         if let Ok(s) = unify_with(&self.subst, &resolved, &expected) {
-            self.absorb(&s);
+            self.absorb(s);
         }
     }
 
@@ -10269,7 +10269,7 @@ impl Checker {
         if arg_expr.and_then(identifier_name).is_some()
             && let Ok(s) = unify_with(&self.subst, inferred_arg, &candidate)
         {
-            self.absorb(&s);
+            self.absorb(s);
             let skolem_free = |t: &Ty| !t.to_string().contains("$forall");
             for v in ftv_ty(&candidate) {
                 let bound = apply_ty_prune(&local, &Ty::Var(v));
@@ -10278,7 +10278,7 @@ impl Checker {
                     && skolem_free(&bound)
                     && let Ok(s) = unify_with(&self.subst, &Ty::Var(v), &bound)
                 {
-                    self.absorb(&s);
+                    self.absorb(s);
                 }
             }
         }
@@ -10414,14 +10414,10 @@ impl Checker {
         }
     }
 
-    /// Adopt `s`, a substitution unification derived from `self.subst`.
-    /// When it bound nothing it is `self.subst` itself, and composing a
-    /// substitution with itself only re-resolves chains one step, which
-    /// every reader prunes anyway: skip that O(n) rebuild (#607).
-    fn absorb(&mut self, s: &Subst) {
-        if !s.is_same(&self.subst) {
-            self.subst = compose(s, &self.subst);
-        }
+    /// Adopt `s`, a substitution unification derived from `self.subst`
+    /// (see [`Subst::absorb`]).
+    fn absorb(&mut self, s: Subst) {
+        self.subst.absorb(s);
     }
 
     /// Unify two types under the current substitution, updating
@@ -10430,7 +10426,7 @@ impl Checker {
     fn unify(&mut self, t1: &Ty, t2: &Ty, range: &Range<usize>, ctx: &str) -> Ty {
         match unify_with(&self.subst, t1, t2) {
             Ok(s) => {
-                self.absorb(&s);
+                self.absorb(s);
                 apply_ty(&self.subst, t1)
             }
             Err(UnifyError::Mismatch { left, right }) => {
@@ -11105,7 +11101,7 @@ impl Checker {
             0 => Ok(None),
             1 => {
                 let (inst, local, fresh_vars) = matches.pop().expect("one match");
-                self.absorb(&local);
+                self.absorb(local);
                 // Its methods' `weak()` calls on the head's parameters (#1670).
                 self.weak_checks.record_instance(fresh_vars, range);
                 Ok(Some(inst))
@@ -11247,7 +11243,7 @@ impl Checker {
             found = Some((index, local));
         }
         let (index, local) = found?;
-        self.absorb(&local);
+        self.absorb(local);
         Some(index)
     }
 
@@ -13679,7 +13675,7 @@ impl Checker {
         } else {
             match unify_with(&self.subst, &id_ty, &int()) {
                 Ok(s) => {
-                    self.absorb(&s);
+                    self.absorb(s);
                     return;
                 }
                 Err(_) => {
@@ -13709,7 +13705,7 @@ impl Checker {
         } else {
             match unify_with(&self.subst, &lib_ty, &int()) {
                 Ok(s) => {
-                    self.absorb(&s);
+                    self.absorb(s);
                     return;
                 }
                 Err(_) => format!(
@@ -20612,7 +20608,7 @@ impl Checker {
                 local = s;
             }
         }
-        self.absorb(&local);
+        self.absorb(local);
         Some(apply_ty_prune(&self.subst, &first))
     }
 

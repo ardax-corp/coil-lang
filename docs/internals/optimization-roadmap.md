@@ -537,3 +537,30 @@ cargo test --workspace --lib --tests --bins
 ./target/debug/coil test
 ./scripts/perf_matrix.sh
 ```
+
+## Compile-time scaling (#1857)
+
+`coil compile` on a file of N one-line functions that `main` calls in
+turn (release build, wall time, one machine, 2026-10-25):
+
+| N    | before   | after   |
+|------|----------|---------|
+| 900  | 834 ms   | 303 ms  |
+| 1800 | 2498 ms  | 622 ms  |
+| 3600 | 9845 ms  | 1251 ms |
+
+Before, each doubling cost about 4x; now it costs 2x. Five passes were
+quadratic in the function count or the body size:
+
+- The checker's module frame looked names up by a backwards scan of every
+  top-level binding; it now keeps a name index.
+- Unification extended a clone of the whole-program substitution, copying
+  it on every binding, and composing the result rebuilt it again. Writes
+  to shared data go to a small overlay now, and `Subst::absorb` folds an
+  extension in place, rewriting only the positions `compose` would change.
+- Enum and readonly-class SROA walked the body once per local; they now
+  only check locals that some `let` builds a variant or class into.
+- Index facts searched the program for each function's body and call
+  sites; both are looked up by name now.
+- Tree shaking moved every PC, entry and func record once per dead
+  function; disjoint dead spans now move them all in one pass.

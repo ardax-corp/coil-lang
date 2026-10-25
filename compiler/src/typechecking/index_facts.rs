@@ -6,7 +6,7 @@
 //! write fields, elements or output keep the facts). Callers may transfer
 //! a proven `(arr, i)` pair into a helper when every site agrees.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use parser::ast::{AssignOp, EnumConstructPayload, Expression, Output};
 
@@ -102,8 +102,12 @@ pub fn analyze_index_facts(checker: &mut Checker, ast: &Output<'_>) {
 
     walk_tree(checker, ast, &pure, &mut Env::default(), &mut calls);
 
-    apply_interproc(checker, ast, &shapes, &calls, &used_as_value);
-    pin_callee_proven_params(checker, ast, &shapes);
+    // Looking each function's body and calls up by a walk of the whole
+    // program made this quadratic in the number of functions (#1857).
+    let mut bodies = HashMap::new();
+    fn_bodies(ast, &mut bodies);
+    apply_interproc(checker, &bodies, &shapes, &calls, &used_as_value);
+    pin_callee_proven_params(checker, &bodies, &shapes);
 }
 
 type FnShape = (String, Vec<(String, NodeId, bool)>);
@@ -768,25 +772,28 @@ fn collect_value_uses(ast: &Output<'_>, used: &mut HashSet<String>) {
 
 fn apply_interproc(
     checker: &mut Checker,
-    ast: &Output<'_>,
+    bodies: &HashMap<&str, &Output<'_>>,
     shapes: &[FnParamShape],
     calls: &[CallSite],
     used_as_value: &HashSet<String>,
 ) {
+    let mut by_callee: HashMap<&str, Vec<&CallSite>> = HashMap::new();
+    for c in calls {
+        by_callee.entry(c.callee.as_str()).or_default().push(c);
+    }
     for (fname, params) in shapes {
         if used_as_value.contains(fname) {
             continue;
         }
-        let Some(body) = fn_body(ast, fname) else {
+        let Some(&body) = bodies.get(fname.as_str()) else {
             continue;
         };
         if contains_yield(body) {
             continue;
         }
-        let sites: Vec<&CallSite> = calls.iter().filter(|c| c.callee == *fname).collect();
-        if sites.is_empty() {
+        let Some(sites) = by_callee.get(fname.as_str()) else {
             continue;
-        }
+        };
         let arrs: Vec<(usize, String, NodeId)> = params
             .iter()
             .enumerate()
@@ -830,11 +837,11 @@ fn apply_interproc(
 /// Pin array params that the callee itself proves (`i < a.len()` in-body).
 fn pin_callee_proven_params(
     checker: &mut Checker,
-    ast: &Output<'_>,
+    bodies: &HashMap<&str, &Output<'_>>,
     shapes: &[FnParamShape],
 ) {
     for (fname, params) in shapes {
-        let Some(body) = fn_body(ast, fname) else {
+        let Some(&body) = bodies.get(fname.as_str()) else {
             continue;
         };
         if contains_yield(body) {
@@ -880,23 +887,25 @@ fn body_has_in_bounds_index_of(checker: &Checker, body: &Output<'_>, arr: &str) 
     }
 }
 
-fn fn_body<'a>(ast: &'a Output<'a>, name: &str) -> Option<&'a Output<'a>> {
+/// Each function's body by name, the first in program order where names
+/// repeat.
+fn fn_bodies<'a>(ast: &'a Output<'a>, out: &mut HashMap<&'a str, &'a Output<'a>>) {
     match ast.1.as_ref() {
         Expression::Program(items) | Expression::Block(items) | Expression::Fragment(items) => {
-            items.iter().find_map(|i| fn_body(i, name))
+            items.iter().for_each(|i| fn_bodies(i, out))
         }
-        Expression::Module(_, body) => fn_body(body, name),
+        Expression::Module(_, body) => fn_bodies(body, out),
         Expression::Function {
             name: n,
             body: Some(body),
             ..
-        } if *n == name => Some(body),
-        Expression::Function {
-            body: Some(body), ..
-        } => fn_body(body, name),
-        Expression::Implementation { methods, .. } => methods.iter().find_map(|m| fn_body(m, name)),
-        Expression::Method(_, inner) | Expression::Member(inner) => fn_body(inner, name),
-        _ => None,
+        } => {
+            out.entry(n).or_insert(body);
+            fn_bodies(body, out);
+        }
+        Expression::Implementation { methods, .. } => methods.iter().for_each(|m| fn_bodies(m, out)),
+        Expression::Method(_, inner) | Expression::Member(inner) => fn_bodies(inner, out),
+        _ => {}
     }
 }
 
