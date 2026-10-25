@@ -182,13 +182,16 @@ fn load_store_shape(bytecode: &[Byte], start: usize, end: usize) -> LoadStoreSha
 
 /// Tightest backward-branch range `[target, jmp)` in a PC window — the innermost
 /// loop body of a well-nested function.
-fn innermost_loop_range(bytecode: &[Byte], start: usize, end: usize) -> (usize, usize) {
+fn innermost_loop_range(bytecode: &[Byte], pool: &[u64], start: usize, end: usize) -> (usize, usize) {
     let mut best: Option<(usize, usize)> = None;
     for (pc, b) in bytecode[start..end].iter().enumerate().map(|(i, b)| (start + i, b)) {
-        if *b.bytecode() != Instruction::JMP {
-            continue;
-        }
-        let target = b.operand_u32() as usize;
+        // A back edge is a `JMP`, or an inverted latch's `*Jmpt` (#1867).
+        let target = match *b.bytecode() {
+            Instruction::JMP => b.operand_u32() as usize,
+            Instruction::BinSlotSlotJmpt => (pool[b.bin_slot_slot_jmpf_parts().2] >> 32) as usize,
+            Instruction::BinSlotImmJmpt => (pool[b.bin_slot_imm_jmpf_parts().2] >> 32) as usize,
+            _ => continue,
+        };
         if target >= pc || target < start {
             continue;
         }
@@ -386,18 +389,20 @@ fn perf_stride_store_iv_k_loop_shape() {
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "hot", bc.len());
     let body = &bc[start..end];
+    // Inverted latch (#1867): the IV bump and the header's compare-branch
+    // fuse into one `DenseBinJmpf` the VM peeks from the store.
     let mut stride = 0usize;
     for w in body.windows(3) {
         if *w[0].bytecode() == Instruction::DenseStoreIndex
-            && *w[1].bytecode() == Instruction::DenseBin
-            && *w[2].bytecode() == Instruction::JMP
+            && *w[1].bytecode() == Instruction::DenseBinJmpf
+            && *w[2].bytecode() == Instruction::BinSlotSlotJmpt
         {
             stride += 1;
         }
     }
     assert!(
         stride >= 1,
-        "COI-382 S5: hot should keep DenseStoreIndex ; DenseBin ; JMP"
+        "COI-382 S5 + #1867: hot should be DenseStoreIndex ; DenseBinJmpf (BinSlotSlotJmpt)"
     );
 }
 
@@ -482,12 +487,12 @@ fn perf_field_hot_reuses_repeated_string_keys() {
 
 #[test]
 fn perf_for_in_array_uses_single_array_len() {
-    let (bc, _, _, _, pipeline) = compile("examples/for_in_array.hy");
+    let (bc, pool, _, _, pipeline) = compile("examples/for_in_array.hy");
     // Loop hoist computes the length in the preheader, never per iteration.
     // Linked `io::sync` helpers have their own ArrayLen ops, so look at `main`.
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "main", bc.len());
-    let (inner_start, inner_end) = innermost_loop_range(&bc, start, end);
+    let (inner_start, inner_end) = innermost_loop_range(&bc, &pool, start, end);
     let n = count_opcodes_in(&bc, inner_start, inner_end, Instruction::ArrayLen)
         + count_opcodes_in(&bc, inner_start, inner_end, Instruction::DenseArrayLen);
     assert_eq!(
@@ -1261,10 +1266,10 @@ fn perf_phase0_numeric_shape_inventory() {
     // turns the loop compare from `BinSlotImmJmpf` into `BinSlotSlotJmpf`.
     // The fork-join is its own function (`__coil_par_loop_fork_0`), and the
     // worker lowers to MIR and runs dense; inventory its loop.
-    let (bc, _, _, _, pipeline) = compile("examples/perf/numeric.hy");
+    let (bc, pool, _, _, pipeline) = compile("examples/perf/numeric.hy");
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "__coil_par_loop_1", bc.len());
-    let (loop_start, back_edge) = innermost_loop_range(&bc, start, end);
+    let (loop_start, back_edge) = innermost_loop_range(&bc, &pool, start, end);
     let body = &bc[loop_start..=back_edge];
     let (h, g) = (inventory_health(body), inventory_gaps(body, loop_start));
 
@@ -1469,13 +1474,13 @@ fn aot_p1_p4_tak_residual_load_store_and_call_density() {
 /// innermost body is down to 6 words.
 #[test]
 fn aot_p2_nsieve_index_shape_inventory() {
-    let (bc, _, _, _, pipeline) = compile("examples/perf/nsieve.hy");
+    let (bc, pool, _, _, pipeline) = compile("examples/perf/nsieve.hy");
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "nsieve", bc.len());
     let index = count_opcodes_in(&bc, start, end, Instruction::Index);
     let store_index = count_opcodes_in(&bc, start, end, Instruction::StoreIndex);
     let shape = load_store_shape(&bc, start, end);
-    let (inner_start, inner_end) = innermost_loop_range(&bc, start, end);
+    let (inner_start, inner_end) = innermost_loop_range(&bc, &pool, start, end);
     eprintln!(
         "[P2] nsieve::nsieve index={index} store_index={store_index} {shape:?} inner_words={}",
         inner_end - inner_start
@@ -1537,11 +1542,11 @@ fn aot_p2_nsieve_index_shape_inventory() {
 /// moves to the preheader — including in `fill`, where the loop writes elements.
 #[test]
 fn aot_p2_len_loop_hoists_invariant_array_len() {
-    let (bc, _, _, _, pipeline) = compile("examples/perf/vec_scan.hy");
+    let (bc, pool, _, _, pipeline) = compile("examples/perf/vec_scan.hy");
     let syms = pipeline.program_debug().fn_symbols;
     for (name, index, store_index) in [("scan", 1usize, 0usize), ("fill", 0, 1)] {
         let (start, end) = fn_pc_range(&syms, name, bc.len());
-        let (inner_start, inner_end) = innermost_loop_range(&bc, start, end);
+        let (inner_start, inner_end) = innermost_loop_range(&bc, &pool, start, end);
         let in_loop = count_opcodes_in(&bc, inner_start, inner_end, Instruction::ArrayLen)
             + count_opcodes_in(&bc, inner_start, inner_end, Instruction::DenseArrayLen);
         let total = count_opcodes_in(&bc, start, end, Instruction::ArrayLen)
@@ -1585,7 +1590,7 @@ fn aot_p2_vec_scan_pure_helper_hoists_and_unchecks() {
         compile_tuned("examples/perf/vec_scan_pure.hy", |p| p.set_inline_max_cost(0));
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "scan", bc.len());
-    let (inner_start, inner_end) = innermost_loop_range(&bc, start, end);
+    let (inner_start, inner_end) = innermost_loop_range(&bc, &pool, start, end);
     assert_eq!(
         count_opcodes_in(&bc, inner_start, inner_end, Instruction::ArrayLen),
         0,
@@ -1610,9 +1615,10 @@ fn aot_p2_vec_scan_pure_helper_hoists_and_unchecks() {
     let dispatches = run_dispatch(bc, pool, strings, statics, &pipeline);
     println!("[COI-99] vec_scan_pure dispatches={dispatches}");
     // absorb's 8-trip loop unrolls and folds to one add, so each element is
-    // little more than the CALL (~3.1M); a kept loop would be ~5.3M+.
+    // little more than the CALL (~2.3M since the inverted latch, #1867, was
+    // ~3.1M); a kept loop would be ~5.3M+.
     assert!(
-        dispatches > 2_500_000 && dispatches < 4_000_000,
+        dispatches > 2_000_000 && dispatches < 4_000_000,
         "vec_scan_pure dispatch count unexpected: {dispatches}"
     );
 }
@@ -1626,7 +1632,7 @@ fn aot_p2_vec_scan_impure_field_helper_hoists_and_unchecks() {
         compile_tuned("examples/perf/vec_scan_impure.hy", |p| p.set_inline_max_cost(0));
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "scan", bc.len());
-    let (inner_start, inner_end) = innermost_loop_range(&bc, start, end);
+    let (inner_start, inner_end) = innermost_loop_range(&bc, &pool, start, end);
     assert_eq!(
         count_opcodes_in(&bc, inner_start, inner_end, Instruction::ArrayLen)
             + count_opcodes_in(&bc, inner_start, inner_end, Instruction::DenseArrayLen),
@@ -2238,10 +2244,10 @@ fn main() {
 /// loop, which reads one element per byte.
 #[test]
 fn const_table_slot_load_leaves_the_loop() {
-    let (bc, _, _, _, pipeline) = compile("examples/perf/const_table_crc.hy");
+    let (bc, pool, _, _, pipeline) = compile("examples/perf/const_table_crc.hy");
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "crc32", bc.len());
-    let (loop_start, loop_end) = innermost_loop_range(&bc, start, end);
+    let (loop_start, loop_end) = innermost_loop_range(&bc, &pool, start, end);
     let ops: Vec<_> = bc[start..end].iter().map(|b| *b.bytecode()).collect();
     assert_eq!(count_opcodes_in(&bc, start, end, Instruction::LoadStatic), 1, "ops={ops:?}");
     assert_eq!(

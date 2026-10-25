@@ -132,7 +132,7 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
             for arg in args {
                 classify_in(checker, arg, seen)?;
             }
-            params_closed(ty).then_some(ValueClass::Enum)
+            args.iter().all(|a| payload_closed(checker, a, seen)).then_some(ValueClass::Enum)
         }
         Ty::Sum { name, variants } => {
             if common::is_builtin_option_enum(name) || common::is_builtin_result_enum(name) {
@@ -141,7 +141,10 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
                         classify_in(checker, field, seen)?;
                     }
                 }
-                return params_closed(ty).then_some(ValueClass::Enum);
+                let closed = variants
+                    .iter()
+                    .all(|(_, p)| p.field_types().into_iter().all(|f| payload_closed(checker, f, seen)));
+                return closed.then_some(ValueClass::Enum);
             }
             if checker.is_scalar_enum(name) {
                 return Some(ValueClass::Opaque);
@@ -158,7 +161,7 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
         Ty::Con(name) if is_generic_class(checker, name) => Some(ValueClass::Opaque),
         // A scalar-backed enum is its backing word, only moved and matched.
         Ty::Con(name) if checker.is_scalar_enum(name) => Some(ValueClass::Opaque),
-        Ty::Con(name) if checker.is_class(name) && checker.enum_variants(name).is_none() => object_class(checker, name),
+        Ty::Con(name) if checker.is_class(name) && checker.enum_variants(name).is_none() => object_class(checker, name, seen),
         Ty::Con(name) => user_enum(checker, name, seen),
         // A type parameter inside a generic class's shared method body: one
         // boxed word, only moved.
@@ -273,19 +276,52 @@ pub fn is_generic_class(checker: &Checker, name: &str) -> bool {
     ctors.contains_key(name) || checker.resolve_class_key(name).is_some_and(|key| ctors.contains_key(&key))
 }
 
+/// An `Option` / `Result` payload whose word is known: [`params_closed`],
+/// or a monomorphic function or existential (one heap word each), so
+/// `Option<fn() -> string>` is an enum value (#1991).
+fn payload_closed(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> bool {
+    params_closed(ty) || is_existential(ty) || mono_fun(checker, ty, seen)
+}
+
 /// A user class the lowering builds and reads: not generic, with every
 /// field type closed.
-fn object_class(checker: &Checker, name: &str) -> Option<ValueClass> {
+fn object_class(checker: &Checker, name: &str, seen: &mut Vec<String>) -> Option<ValueClass> {
     let key = checker.resolve_class_key(name)?;
     let ctors = &checker.generics().generic_type_ctors;
     if ctors.contains_key(&key) || ctors.contains_key(name) {
         return None;
     }
+    // A class whose function field mentions the class (`fn(Node) -> ()`)
+    // reaches it again: assume the object word while its fields are
+    // checked (#1989).
+    let marker = format!("class {key}");
+    if seen.contains(&marker) {
+        return Some(ValueClass::Object);
+    }
     let fields = checker.class_fields(&key)?;
-    fields
-        .iter()
-        .all(|(_, ty)| crate::layout::ty_is_closed(ty) || is_existential(ty) || mono_fun(checker, ty, &mut Vec::new()))
-        .then_some(ValueClass::Object)
+    seen.push(marker);
+    let ok = fields.iter().all(|(_, ty)| closed_field(checker, ty, seen));
+    seen.pop();
+    ok.then_some(ValueClass::Object)
+}
+
+/// A class field type the lowering stores as one known word: closed, an
+/// existential, a monomorphic function, or a `Vec` / `Option` / `Result`
+/// of those (`Vec<Comp>`, `Option<fn() -> string>`, #1988, #1991).
+fn closed_field(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> bool {
+    if crate::layout::ty_is_closed(ty) || is_existential(ty) || mono_fun(checker, ty, seen) {
+        return true;
+    }
+    match strip_readonly(ty) {
+        Ty::App(head, args)
+            if matches!(head.as_ref(), Ty::Con(n) if n == common::BUILTIN_VEC_TYPE
+                || common::is_builtin_option_enum(n)
+                || common::is_builtin_result_enum(n)) =>
+        {
+            crate::typechecking::subst::ftv(ty).is_empty() && args.iter().all(|a| closed_field(checker, a, seen))
+        }
+        _ => false,
+    }
 }
 
 /// A bare-class existential (`Show`): one `[value, dictionary]` word, closed
@@ -1176,7 +1212,7 @@ pub(crate) fn pure_base(body: &HirBody, id: HirId) -> bool {
 /// A field store's base that only reads: `x`, a static `G`, `x.f`, or
 /// `x[i]` of such a base with a [`pure_index`] (`xs[0].b`). The AST pushes
 /// it above the value, and a compound store builds it twice.
-fn read_base(body: &HirBody, id: HirId) -> bool {
+pub(crate) fn read_base(body: &HirBody, id: HirId) -> bool {
     match &body.expr(id).kind {
         // A static's load reads its slot, as a local's does (#1557).
         HirKind::Local(_) | HirKind::Global { .. } => true,

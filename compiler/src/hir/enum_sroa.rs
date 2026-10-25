@@ -8,7 +8,7 @@
 //! allocated. Fields must be scalars (`int` / `float` / `bool` / `byte`),
 //! and every pattern a variant with plain bindings or `_`, or a bare `_`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::{HirArm, HirBody, HirExpr, HirFlags, HirId, HirKind, HirLocal, HirPat, HirPatFields, Lit, LocalId, LocalKind, MakeKind};
 use crate::typechecking::ty::{self, Ty};
@@ -43,11 +43,24 @@ fn positional(fields: &HirPatFields, names: Option<&Vec<String>>) -> Option<Vec<
 /// `body` with every scalarizable local enum split, or `None` when there
 /// is none. `ok(enum)` admits an enum by name (one without a finalizer).
 pub fn scalarize(body: &HirBody, ok: impl Fn(&str) -> bool) -> Option<HirBody> {
+    // Only a local some `let` builds a variant into can split; checking
+    // just those keeps a long body with many locals linear (#1857).
+    let built: HashSet<LocalId> = body
+        .exprs
+        .iter()
+        .filter_map(|e| match &e.kind {
+            HirKind::Let { local, init: Some(v) } if variant_of(body, *v).is_some() => Some(*local),
+            _ => None,
+        })
+        .collect();
+    if built.is_empty() {
+        return None;
+    }
     let parent = parents(body);
     let mut candidates: Vec<LocalId> = Vec::new();
     'local: for (k, l) in body.locals.iter().enumerate() {
         let local = LocalId(k as u32);
-        if l.captured || !matches!(l.kind, LocalKind::Let | LocalKind::Temp) {
+        if l.captured || !matches!(l.kind, LocalKind::Let | LocalKind::Temp) || !built.contains(&local) {
             continue;
         }
         let mut name: Option<String> = None;

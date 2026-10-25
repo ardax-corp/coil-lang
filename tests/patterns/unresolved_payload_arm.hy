@@ -38,10 +38,10 @@ fn polled(bool shut) -> Result<string, ThreadError> {
 }
 
 test("join after detach fails") {
-    assert!((detached() ?? "error") == "jf");
+    assert!((detached().ok() ?? "error") == "jf");
 }
 
 test("try_recv on an empty channel") {
-    assert!((polled(false) ?? "error") == "wb");
-    assert!((polled(true) ?? "error") == "disc");
+    assert!((polled(false).ok() ?? "error") == "wb");
+    assert!((polled(true).ok() ?? "error") == "disc");
 }

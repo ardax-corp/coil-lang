@@ -19,10 +19,10 @@ fn first_or<T>(Vec<T> xs, T fallback) -> T {
 }
 
 test("coalesce fallback is the payload type") {
-    let a = args() ?? [];
+    let a = args().ok() ?? [];
     assert!(a.len() >= 0);
     let r: Result<Vec<int>, string> = Err("no");
-    let b = r ?? [];
+    let b = r.ok() ?? [];
     b.push(4);
     assert!(b.len() == 1);
     let o: Option<Vec<string>> = Option::None;

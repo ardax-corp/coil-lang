@@ -3,10 +3,12 @@ use std::path::Path;
 use std::process::exit;
 
 use coil_cli::{
-    LoadErr, dispatch_helper, dispatch_helper_as, execute_archived_program, try_load_archive,
+    LoadErr, LoadedArchive, dispatch_helper, dispatch_helper_as, execute_archived_program,
+    load_archive_bytes, try_load_archive,
 };
 use coil_host::{
-    ExecutePipelineArgs, bind_cli_roots, execute_pipeline, ffi_entry_path, pipeline_dload_gate,
+    CachedProgram, ExecutePipelineArgs, bind_cli_roots, execute_cached, execute_pipeline,
+    ffi_entry_path, pipeline_dload_gate,
 };
 use common::{ARCHIVE_VERSION, ArchivedProgram, ProgramDebug, format_archive_version};
 use compiler::{CompileStep, Pipeline};
@@ -14,10 +16,11 @@ use reporting::progress::{ClearingWriter, Progress};
 use reporting::{ErrorCode, ReportConfig, ReportFormat};
 use rkyv::rancor::Error;
 
+mod build_cache;
 mod cli;
 mod package_app;
 
-use cli::{Command, DEFAULT_OUT, parse_args, print_version};
+use cli::{CliArgs, Command, DEFAULT_OUT, parse_args, print_version};
 use package_app::{FfiNative, cmd_package, native_lock_from_ffi_natives};
 
 
@@ -112,7 +115,13 @@ fn print_opt_stats(text: bool, json: bool) {
     }
 }
 
-fn compile_to_archive(pipeline: &mut Pipeline, filename: &str, output: &str) {
+fn compile_to_archive(pipeline: &mut Pipeline, filename: &str, output: &str, cache: Option<BuildCache>) {
+    if let Some(cache) = &cache
+        && let Some(bytes) = cache.load()
+    {
+        write_archive(pipeline, output, &bytes);
+        return;
+    }
     // Multi-file entry: discovers `use` / `mod` via bound `--root` / default `src`.
     let (bytecode, constants) = match pipeline.compile_src_from_file(filename) {
         Ok(ok) => ok,
@@ -121,7 +130,25 @@ fn compile_to_archive(pipeline: &mut Pipeline, filename: &str, output: &str) {
             exit(1);
         }
     };
+    let bytes = archive_bytes(pipeline, bytecode, constants);
+    write_archive(pipeline, output, &bytes);
+    if let Some(cache) = &cache {
+        cache.store(pipeline, filename, &bytes);
+    }
+}
 
+fn write_archive(pipeline: &mut Pipeline, output: &str, bytes: &[u8]) {
+    if let Err(e) = std::fs::write(output, bytes) {
+        fail_and_exit(
+            pipeline,
+            ErrorCode::IoError,
+            format!("Unable to write compiled output to `{output}`: {e}"),
+        );
+    }
+}
+
+/// The `.hyc` bytes of the program `pipeline` just compiled.
+fn archive_bytes(pipeline: &mut Pipeline, bytecode: Vec<common::Byte>, constants: Vec<u64>) -> Vec<u8> {
     let mut program = ArchivedProgram {
         version: ARCHIVE_VERSION,
         static_slot_count: pipeline.static_slot_count(),
@@ -144,22 +171,68 @@ fn compile_to_archive(pipeline: &mut Pipeline, filename: &str, output: &str) {
     };
     program.set_debug(pipeline.program_debug_full(), pipeline.debug_level());
 
-    let bytes = match rkyv::to_bytes::<Error>(&program) {
-        Ok(b) => b,
+    match rkyv::to_bytes::<Error>(&program) {
+        Ok(b) => b.to_vec(),
         Err(e) => fail_and_exit(
             pipeline,
             ErrorCode::IoError,
             format!("Unable to serialize bytecode archive: {e}"),
         ),
-    };
-
-    if let Err(e) = std::fs::write(output, bytes.as_slice()) {
-        fail_and_exit(
-            pipeline,
-            ErrorCode::IoError,
-            format!("Unable to write compiled output to `{output}`: {e}"),
-        );
     }
+}
+
+/// One compile's entry in the build cache ([`build_cache`], #1881).
+struct BuildCache {
+    dir: std::path::PathBuf,
+    key: String,
+}
+
+impl BuildCache {
+    /// The entry for compiling `filename` with `options` (see
+    /// [`cache_options`]), or `None` when the cache is off.
+    fn new(options: Option<&str>, filename: &str) -> Option<Self> {
+        let options = options?;
+        Some(Self { dir: build_cache::dir()?, key: build_cache::key(Path::new(filename), options)? })
+    }
+
+    fn load(&self) -> Option<Vec<u8>> {
+        build_cache::load(&self.dir, &self.key)
+    }
+
+    /// Keep the archive of a compile that reported nothing: a cached run
+    /// would not repeat its warnings.
+    fn store(&self, pipeline: &Pipeline, filename: &str, archive: &[u8]) {
+        if pipeline.diagnostics_emitted() > 0 {
+            return;
+        }
+        let roots: Vec<std::path::PathBuf> =
+            pipeline.module_roots().iter().map(|r| pipeline.project_root().join(r)).collect();
+        let inputs = build_cache::inputs(Path::new(filename), pipeline.discovered_files(), &roots);
+        // A cache that cannot be written only costs the next compile.
+        let _ = build_cache::store(&self.dir, &self.key, &inputs, archive);
+    }
+}
+
+/// What on the command line can change a compile's archive, or `None` when
+/// the build cache is off for it: `--no-build-cache`, `--opt-stats` (they
+/// come from compiling), or compile-time IO grants (a run could read files
+/// or the environment the cache cannot see).
+fn cache_options(cli: &CliArgs) -> Option<String> {
+    if !cli.build_cache || cli.opt_stats || cli.opt_stats_json || !cli.host_grants.comptime_io.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{:?}",
+        (
+            cli.include_tests,
+            cli.opt_level,
+            cli.debug_level,
+            cli.contracts,
+            cli.fold_calls,
+            &cli.host_grants,
+            &cli.module_roots,
+        )
+    ))
 }
 
 mod archive_staleness {
@@ -308,7 +381,14 @@ fn cmd_build_and_run(
     filename: &str,
     opt_stats: bool,
     opt_stats_json: bool,
+    cache: Option<BuildCache>,
 ) {
+    if let Some(cache) = &cache
+        && let Some(loaded) = cache.load().and_then(|b| load_archive_bytes(&b).ok())
+    {
+        run_cached(pipeline, filename, &loaded);
+        return;
+    }
     let compiled = pipeline.compile_src_from_file(filename);
     end_compile_progress();
     let (bytecode, constants) = match compiled {
@@ -319,6 +399,10 @@ fn cmd_build_and_run(
         }
     };
     print_opt_stats(opt_stats, opt_stats_json);
+    if let Some(cache) = &cache {
+        let bytes = archive_bytes(pipeline, bytecode.clone(), constants.clone());
+        cache.store(pipeline, filename, &bytes);
+    }
 
     let strings = pipeline.strings().to_vec();
     let static_slots = pipeline.static_slot_count();
@@ -351,14 +435,46 @@ fn cmd_build_and_run(
     }
 }
 
+/// `coil FILE` from a build-cache hit: what [`cmd_build_and_run`] does after
+/// a compile, with the program from the archive.
+fn run_cached(pipeline: &mut Pipeline, filename: &str, loaded: &LoadedArchive) {
+    end_compile_progress();
+    if let Err(e) = pipeline.finish_reporting() {
+        pipeline.emit_spanless_warning(ErrorCode::IoError, format!("failed to flush diagnostics: {e}"));
+        let _ = pipeline.finish_reporting();
+    }
+    maybe_warn_stale_default_out(pipeline, filename, &loaded.debug);
+    let entry = ffi_entry_path(Path::new(filename));
+    let panicked = execute_cached(
+        pipeline,
+        CachedProgram {
+            bytecode: &loaded.bytecode,
+            constants: &loaded.constants,
+            strings: &loaded.strings,
+            static_slots: loaded.static_slots,
+            debug: loaded.debug.clone(),
+            operand_stack_slots: loaded.operand_stack_slots.unwrap_or(0),
+            struct_layouts: &loaded.struct_layouts,
+            precise_frames: loaded.precise_frames.clone(),
+            class_word_kinds: loaded.class_word_kinds.clone(),
+            static_word_kinds: loaded.static_word_kinds.clone(),
+        },
+        Some(entry.as_path()),
+    );
+    if panicked {
+        exit(1);
+    }
+}
+
 fn cmd_compile(
     pipeline: &mut Pipeline,
     filename: &str,
     output: &str,
     opt_stats: bool,
     opt_stats_json: bool,
+    cache: Option<BuildCache>,
 ) {
-    compile_to_archive(pipeline, filename, output);
+    compile_to_archive(pipeline, filename, output, cache);
     end_compile_progress();
     print_opt_stats(opt_stats, opt_stats_json);
     if let Err(e) = pipeline.finish_reporting() {
@@ -522,6 +638,7 @@ fn main() {
         }
     };
 
+    let cache_options = cache_options(&cli);
     match cli.command {
         Command::Test => dispatch_helper("test"),
         Command::Mutate => dispatch_helper_as("mutate", "test", &["mutate"]),
@@ -563,11 +680,13 @@ fn main() {
                         Err(msg) => fail_and_exit(&mut pipeline, ErrorCode::MissingInputFile, msg),
                     };
                     set_program_args(&filename, &cli.program_args);
+                    let cache = BuildCache::new(cache_options.as_deref(), &filename);
                     cmd_build_and_run(
                         &mut pipeline,
                         &filename,
                         cli.opt_stats,
                         cli.opt_stats_json,
+                        cache,
                     );
                 }
                 Command::Compile { filename, output } => {
@@ -575,12 +694,14 @@ fn main() {
                         Ok(f) => f,
                         Err(msg) => fail_and_exit(&mut pipeline, ErrorCode::MissingInputFile, msg),
                     };
+                    let cache = BuildCache::new(cache_options.as_deref(), &filename);
                     cmd_compile(
                         &mut pipeline,
                         &filename,
                         &output,
                         cli.opt_stats,
                         cli.opt_stats_json,
+                        cache,
                     );
                 }
                 Command::Run { archive } => {

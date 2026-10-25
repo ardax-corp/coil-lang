@@ -4,8 +4,7 @@
 // allocation collects, so an unrooted word would be swept.
 use tests::assert;
 use string::format;
-use collections::vec::filter;
-use collections::vec::map;
+use generic_vec_fns::{filter, map};
 use collections::map::HashMap;
 
 class Box2 {
@@ -36,7 +35,7 @@ test("HashMap insert keeps fresh keys and values alive") {
         m.insert(format("k%i", i), format("v%i", i * 2));
         i = i + 1;
     }
-    assert!(m.size() == 48);
+    assert!(m.len() == 48);
     match m.get("k47") {
         Option::Some(v) => {
             assert!(v == "v94");

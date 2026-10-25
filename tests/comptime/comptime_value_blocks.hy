@@ -2,7 +2,7 @@
 // `comptime { … }` in an expression: the block runs while compiling, and the
 // value it returns takes its place, like a `comptime` expression.
 use io::file::read_text;
-use text::lines;
+use text::Text;
 use tests::assert;
 
 fn sq(int x) -> int {
@@ -25,8 +25,8 @@ test("a block calls this module's functions") {
 
 test("a block reads a file") {
     let count = comptime {
-        let text = read_text("tests/comptime/data/names.txt") ?? "";
-        let names: Vec<string> = lines(text) ?? [];
+        let text = read_text("tests/comptime/data/names.txt").ok() ?? "";
+        let names: Vec<string> = text.lines();
         let n = 0;
         for name in names {
             if name != "" {

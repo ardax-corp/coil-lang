@@ -1,4 +1,5 @@
-// ?? coalesce on Option and Result (Result Err is swallowed).
+// ?? coalesce on Option; a Result takes .ok() first, which drops its error
+// on purpose (#1878).
 //
 // @output bar,hi,7,9
 
@@ -10,8 +11,8 @@ fn main() {
     let _ = print(format("%s,", a));
     let b = Option::Some("hi") ?? "bar";
     let _ = print(format("%s,", b));
-    let c = Result::Err("boom") ?? 7;
+    let c = Result::Err("boom").ok() ?? 7;
     let _ = print(format("%i,", c));
-    let d = Result::Ok(9) ?? 7;
+    let d = Result::Ok(9).ok() ?? 7;
     let _ = print(format("%i", d));
 }

@@ -1618,6 +1618,26 @@ fn try_host_mutex(heap: &mut Heap, initial: Value) -> Result<Value, ThreadErrorT
     Ok(Value::from(obj.addr()))
 }
 
+/// A lock callback's entry and `use (…)` captures. It runs on the calling
+/// thread, so unlike a `spawn` body it may capture (#1979); partial
+/// applications, rest and generic function values are still refused.
+fn lock_callback(heap: &Heap, v: Value) -> Result<(u32, Vec<Value>), ThreadErrorTag> {
+    let Some(Object::Fn(gc)) = heap.find_object_by_addr(v.raw() as u64) else {
+        return Err(ThreadErrorTag::NotSendable);
+    };
+    let f = gc.as_ref();
+    if f.is_rest || !f.captured_args.is_empty() || f.filled_mask != 0 || f.dicts.is_some() {
+        return Err(ThreadErrorTag::NotSendable);
+    }
+    Ok((f.entry, f.captures.clone()))
+}
+
+/// A callback frame's arguments: its captures, then the locked value.
+fn callback_args(mut captures: Vec<Value>, value: Value) -> Vec<Value> {
+    captures.push(value);
+    captures
+}
+
 pub fn host_with_lock(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_with_lock(heap, args[0], args[1]);
     if crate::task::thread_parked() {
@@ -1631,7 +1651,7 @@ fn try_host_with_lock(
     mtx: Value,
     callback: Value,
 ) -> Result<Value, ThreadErrorTag> {
-    let (entry, _) = fn_entry_from_value(heap, callback)?;
+    let (entry, captures) = lock_callback(heap, callback)?;
     let Some(Object::Mutex(gc)) = heap.find_object_by_addr(mtx.raw() as u64) else {
         return Err(ThreadErrorTag::Other);
     };
@@ -1642,7 +1662,7 @@ fn try_host_with_lock(
     }
     let _unlock = RawUnlock(&inner);
     let t_val = portable_to_value(heap, unsafe { (*inner.value()).clone() })?;
-    let ret = host_call_function(entry, &[t_val])?;
+    let ret = host_call_function(entry, &callback_args(captures, t_val))?;
     let (new_t, out_r) = parse_lock_callback_result(heap, ret)?;
     unsafe { *inner.value() = value_to_portable(heap, new_t)? };
     Ok(out_r)
@@ -1758,7 +1778,7 @@ fn try_host_with_read(
     lock: Value,
     callback: Value,
 ) -> Result<Value, ThreadErrorTag> {
-    let (entry, _) = fn_entry_from_value(heap, callback)?;
+    let (entry, captures) = lock_callback(heap, callback)?;
     let Some(Object::RwLock(gc)) = heap.find_object_by_addr(lock.raw() as u64) else {
         return Err(ThreadErrorTag::Other);
     };
@@ -1770,7 +1790,7 @@ fn try_host_with_read(
         .map_err(|_| ThreadErrorTag::Poisoned)?;
     let t_val = portable_to_value(heap, guard.clone())?;
     drop(guard);
-    let ret = host_call_function(entry, &[t_val])?;
+    let ret = host_call_function(entry, &callback_args(captures, t_val))?;
     Ok(ret)
 }
 
@@ -1784,14 +1804,14 @@ fn try_host_with_write(
     lock: Value,
     callback: Value,
 ) -> Result<Value, ThreadErrorTag> {
-    let (entry, _) = fn_entry_from_value(heap, callback)?;
+    let (entry, captures) = lock_callback(heap, callback)?;
     let Some(Object::RwLock(gc)) = heap.find_object_by_addr(lock.raw() as u64) else {
         return Err(ThreadErrorTag::Other);
     };
     let inner = Arc::clone(&gc.as_ref().inner);
     let mut guard = inner.cell.write().map_err(|_| ThreadErrorTag::Poisoned)?;
     let t_val = portable_to_value(heap, guard.clone())?;
-    let ret = host_call_function(entry, &[t_val])?;
+    let ret = host_call_function(entry, &callback_args(captures, t_val))?;
     let (new_t, out_r) = parse_lock_callback_result(heap, ret)?;
     *guard = value_to_portable(heap, new_t)?;
     Ok(out_r)
@@ -1807,7 +1827,7 @@ fn try_host_try_read(
     lock: Value,
     callback: Value,
 ) -> Result<Value, ThreadErrorTag> {
-    let (entry, _) = fn_entry_from_value(heap, callback)?;
+    let (entry, captures) = lock_callback(heap, callback)?;
     let Some(Object::RwLock(gc)) = heap.find_object_by_addr(lock.raw() as u64) else {
         return Err(ThreadErrorTag::Other);
     };
@@ -1818,7 +1838,7 @@ fn try_host_try_read(
     };
     let t_val = portable_to_value(heap, guard.clone())?;
     drop(guard);
-    let ret = host_call_function(entry, &[t_val])?;
+    let ret = host_call_function(entry, &callback_args(captures, t_val))?;
     Ok(ret)
 }
 
@@ -1832,7 +1852,7 @@ fn try_host_try_write(
     lock: Value,
     callback: Value,
 ) -> Result<Value, ThreadErrorTag> {
-    let (entry, _) = fn_entry_from_value(heap, callback)?;
+    let (entry, captures) = lock_callback(heap, callback)?;
     let Some(Object::RwLock(gc)) = heap.find_object_by_addr(lock.raw() as u64) else {
         return Err(ThreadErrorTag::Other);
     };
@@ -1843,7 +1863,7 @@ fn try_host_try_write(
         Err(std::sync::TryLockError::Poisoned(_)) => return Err(ThreadErrorTag::Poisoned),
     };
     let t_val = portable_to_value(heap, guard.clone())?;
-    let ret = host_call_function(entry, &[t_val])?;
+    let ret = host_call_function(entry, &callback_args(captures, t_val))?;
     let (new_t, out_r) = parse_lock_callback_result(heap, ret)?;
     *guard = value_to_portable(heap, new_t)?;
     Ok(out_r)

@@ -1,6 +1,6 @@
 // Command parsing for the adventure: words in, a `Command` out.
 
-use text::{Searchable, to_lower, trim};
+use text::{Searchable, Text};
 use world::Dir;
 
 enum Command {
@@ -33,8 +33,7 @@ fn parse_dir(string word) -> Option<Dir> {
 
 /// Reads one input line: `go north`, `take key`, `look`, ….
 fn parse_command(string line) -> Command {
-    let trimmed = trim(line) ?? line;
-    let words = (to_lower(trimmed) ?? trimmed).split(" ");
+    let words = line.trim().to_lower().split(" ");
     let verb = words[0];
     if verb == "go" && words.len() > 1 {
         return match parse_dir(words[1]) {

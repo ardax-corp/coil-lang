@@ -54,8 +54,8 @@ test("coalesce option") {
 }
 
 test("coalesce result swallows err") {
-    assert!((Result::Err("boom") ?? 7) == 7);
-    assert!((Result::Ok(9) ?? 7) == 9);
+    assert!((Result::Err("boom").ok() ?? 7) == 7);
+    assert!((Result::Ok(9).ok() ?? 7) == 9);
 }
 
 test("optional chain on dict") {

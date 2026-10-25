@@ -29,8 +29,8 @@ test("a field of an option coalesce") {
 test("a field of a result coalesce") {
     let ok: Result<Cell, string> = Result::Ok(new Cell(4, "ok"));
     let err: Result<Cell, string> = Result::Err("no");
-    assert!((ok ?? new Cell(0, "x")).v == 4);
-    assert!((err ?? new Cell(7, "x")).v == 7);
+    assert!((ok.ok() ?? new Cell(0, "x")).v == 4);
+    assert!((err.ok() ?? new Cell(7, "x")).v == 7);
 }
 
 test("a field of a match") {

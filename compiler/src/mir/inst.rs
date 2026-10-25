@@ -286,7 +286,27 @@ impl LaneExpr {
                 };
                 Self::Cmp { op, lhs, rhs }
             }
-            a => Self::Not(Box::new(a)),
+            // De Morgan when it costs no nodes: `!(a | b)` with compares
+            // on both sides is `!a & !b`, the shape the VM's fast scans
+            // match (a threaded `&&` chain's mask, #1976).
+            Self::And(x, y) => {
+                let size = 1 + x.size() + y.size();
+                let pushed = Self::or(Self::not((*x).clone()), Self::not((*y).clone()));
+                if pushed.size() <= size {
+                    pushed
+                } else {
+                    Self::Not(Box::new(Self::And(x, y)))
+                }
+            }
+            Self::Or(x, y) => {
+                let size = 1 + x.size() + y.size();
+                let pushed = Self::and(Self::not((*x).clone()), Self::not((*y).clone()));
+                if pushed.size() <= size {
+                    pushed
+                } else {
+                    Self::Not(Box::new(Self::Or(x, y)))
+                }
+            }
         }
     }
 
@@ -653,12 +673,15 @@ pub enum MirInst {
     /// lane `k`; else the `p` it stopped at. Stream `s` reads byte
     /// `p + streams[s].1 + k` of the string or byte array `streams[s].0`,
     /// and `LaneVal::Scalar(j)` is `scalars[j]`. Pure; reads immutable
-    /// bytes only.
+    /// bytes only. When `backward` (archive minor 48) the lanes are
+    /// `p - 63 + k` and must pass `> bound` (`>=` when `inclusive`), the
+    /// match is the highest lane, and `p` steps down by 64.
     ByteScan {
         dest: ValueId,
         from: ValueId,
         bound: ValueId,
         inclusive: bool,
+        backward: bool,
         streams: Vec<(ValueId, ValueId)>,
         scalars: Vec<ValueId>,
         expr: LaneExpr,

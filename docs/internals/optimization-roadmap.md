@@ -106,6 +106,8 @@ titles can oversell.
 | **`loop_bounds`** (`hir/bounds.rs` + `a.len()` hoisting in `mir/licm.rs`; stack-IL pass removed 2026-10) | Length invariance; proven counted / stride / fill-bounded sites flag `IN_BOUNDS` and lower to `IndexUnchecked` / `StoreIndexUnchecked`. Sidecar `index_facts` extend Unchecked/pin to helpers and for-in | **`LEQ`/`GEQ` headers are not length proofs** (COI-85 / COI-98). Unproven, host, FFI, yield, growing-array, alias-push and resizing-call loops stay checked. |
 | **`loop_unroll`** (`hir/unroll.rs`; stack-IL pass removed 2026-10) | Full unroll of counted loops, trip ≤ 8, after inlining; each copy reads the counter as a literal, then `hir::fold` folds the copies (merging `x = x + a; x = x + b`) | Calls, exits, closures and inner loops that do not unroll themselves refuse; nests flatten over up to 3 rounds; ≤ 512 added nodes per loop. `LEQ` accepted for **trip count** only — separate from bounds Index proofs (COI-98). |
 | **`*Jmpt`** | fuse-select emits fused `*Jmpt` twins (the IL `JMPF; JMP` → `JMPT` invert was removed 2026-10) | Loop headers stay `*Jmpf` (COI-87). |
+| **Loop inversion** (`mir/emit.rs` `rotatable_headers`, #1867) | A back edge to a header whose only code is its compare-branch repeats that compare-branch as a backward `*Jmpt` into the body, so the latch's IV bump and test fuse into one `DenseBinJmpf`; `DenseStoreIndex` peeks it, so the nsieve / `stride_store_iv` k-loop is one dispatch per iteration (was two) | Header itself stays `*Jmpf`; refused when the header has φ copies, clears or a match chain on its edges. 2026-10-25, 4-core cloud VM: `stride_store_iv` 156 → 151 instructions per iteration under callgrind, wall-clock within noise (the store itself dominates); `numeric` −9.5% instructions; `vec_scan_pure` 3.1M → 2.3M dispatches. |
+| **Inline store-loop latch** (`machine/src/dispatch.rs` `iv_add_lt_jmp`, #2012) | When `DenseStoreIndex` peeks a `DenseBinJmpf` that is `IADD64` + `BinSlotSlotJmp{f,t}` on `<`, the IV add (overflow-checked) and the compare run inline instead of through `dense::eval_bin` / `fused::eval_cmp`'s op matches | Only on that peek; the standalone `DenseBinJmpf` arm is unchanged (the same fast path there made `for_in_sum` 3.6% worse and helped nothing measured). 2026-10-25, 4-core cloud VM: `stride_store_iv` 152 → 130 instructions per iteration under callgrind, 248 → 212 ms median wall at 20000 reps; fib, numeric, for_in_*, dense_cast_bin unchanged (±0.1%, dense_cast_bin −1.2%). |
 | ~~`seek_back_edge`~~ | `Seek` latch to expose in-loop self-stores when header becomes `Known` | **Removed**: the residual `Seek` blocked MIR dense (`vec_scan` 2.5×, `mir_dense_float` 2.1×, `s2d_inloop_pack` 1.65× slower at `-O3`). |
 | ~~`iterative_optimization`~~ | Fixpoint re-runs of the IL pipeline | **Removed** (COI-130): re-running miscompiled `loops.hy` / `licm_invariants.hy`. |
 | **`collect_stats`** | Body tiers and HIR lowering / inlining counters to stderr / JSON | **Default off** (`--opt-stats`, COI-131). |
@@ -536,3 +538,30 @@ cargo test --workspace --lib --tests --bins
 ./target/debug/coil test
 ./scripts/perf_matrix.sh
 ```
+
+## Compile-time scaling (#1857)
+
+`coil compile` on a file of N one-line functions that `main` calls in
+turn (release build, wall time, one machine, 2026-10-25):
+
+| N    | before   | after   |
+|------|----------|---------|
+| 900  | 834 ms   | 303 ms  |
+| 1800 | 2498 ms  | 622 ms  |
+| 3600 | 9845 ms  | 1251 ms |
+
+Before, each doubling cost about 4x; now it costs 2x. Five passes were
+quadratic in the function count or the body size:
+
+- The checker's module frame looked names up by a backwards scan of every
+  top-level binding; it now keeps a name index.
+- Unification extended a clone of the whole-program substitution, copying
+  it on every binding, and composing the result rebuilt it again. Writes
+  to shared data go to a small overlay now, and `Subst::absorb` folds an
+  extension in place, rewriting only the positions `compose` would change.
+- Enum and readonly-class SROA walked the body once per local; they now
+  only check locals that some `let` builds a variant or class into.
+- Index facts searched the program for each function's body and call
+  sites; both are looked up by name now.
+- Tree shaking moved every PC, entry and func record once per dead
+  function; disjoint dead spans now move them all in one pass.

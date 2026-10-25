@@ -1,6 +1,7 @@
 //! Byte-lane skip-ahead for early-exit loops (`docs/internals/byte-simd.md`).
 //!
-//! A loop over `i64` `iv` (`iv = iv + 1`, `iv < n` or `iv <= n`) whose
+//! A loop over `i64` `iv` (`iv = iv + 1`, `iv < n` or `iv <= n`; or
+//! backward, `iv = iv - 1`, `iv > n` or `iv >= n`) whose
 //! body, for some iterations, reads bytes at `s[iv + off]`, compares them,
 //! and reaches the latch with nothing changed but `iv`, gets a scan in
 //! front of its header:
@@ -103,9 +104,12 @@ enum Bound {
 
 struct Plan {
     iv: ValueId,
-    /// The header's bound and whether it is `iv <= n`.
+    /// The header's bound and whether it is `iv <= n` (`iv >= n` when
+    /// `backward`).
     bound: Bound,
     inclusive: bool,
+    /// `iv` steps down by one, against a lower bound.
+    backward: bool,
     streams: Vec<Stream>,
     /// Streams the mask loads (indices into `streams`), in its numbering.
     loads: Vec<u8>,
@@ -129,11 +133,14 @@ fn const_i64(defs: &HashMap<ValueId, (BlockId, &MirInst)>, v: ValueId) -> Option
 }
 
 /// `iv` and its bound from the header test: `(bound, inclusive, cont)`,
-/// where the loop continues on the `cont` side of `cond`.
+/// where the loop continues on the `cont` side of `cond` while
+/// `iv < bound` (`<=` when inclusive), or when `backward` while
+/// `iv > bound` (`>=`).
 fn header_test(
     defs: &HashMap<ValueId, (BlockId, &MirInst)>,
     cond: ValueId,
     iv: ValueId,
+    backward: bool,
 ) -> Option<(ValueId, bool, bool)> {
     let Some((_, MirInst::Cmp { op, ty: MirTy::I64, lhs, rhs, .. })) = defs.get(&cond) else {
         return None;
@@ -153,12 +160,12 @@ fn header_test(
     } else {
         return None;
     };
-    match op {
-        MirCmpOp::Lt => Some((n, false, true)),
-        MirCmpOp::Le => Some((n, true, true)),
+    match (backward, op) {
+        (false, MirCmpOp::Lt) | (true, MirCmpOp::Gt) => Some((n, false, true)),
+        (false, MirCmpOp::Le) | (true, MirCmpOp::Ge) => Some((n, true, true)),
         // `iv >= n` exits: the loop runs while `iv < n`.
-        MirCmpOp::Ge => Some((n, false, false)),
-        MirCmpOp::Gt => Some((n, true, false)),
+        (false, MirCmpOp::Ge) | (true, MirCmpOp::Le) => Some((n, false, false)),
+        (false, MirCmpOp::Gt) | (true, MirCmpOp::Lt) => Some((n, true, false)),
         _ => None,
     }
 }
@@ -359,18 +366,36 @@ fn plan_loop(func: &MirFunc, lp: &LoopInfo, byte_at: u16) -> Option<Plan> {
             _ => None,
         })
         .collect();
+    // `Some(backward)` for `iv + 1` / `iv - 1`.
     let step_of = |p: ValueId, next: ValueId| match defs.get(&next) {
         Some((_, MirInst::Bin { op: MirBinOp::Add, ty: MirTy::I64, lhs, rhs, .. })) => {
-            (*lhs == p && const_i64(&defs, *rhs) == Some(1)) || (*rhs == p && const_i64(&defs, *lhs) == Some(1))
+            let k = if *lhs == p {
+                const_i64(&defs, *rhs)
+            } else if *rhs == p {
+                const_i64(&defs, *lhs)
+            } else {
+                None
+            };
+            match k {
+                Some(1) => Some(false),
+                Some(-1) => Some(true),
+                _ => None,
+            }
         }
-        _ => false,
+        Some((_, MirInst::Bin { op: MirBinOp::Sub, ty: MirTy::I64, lhs, rhs, .. }))
+            if *lhs == p && const_i64(&defs, *rhs) == Some(1) =>
+        {
+            Some(true)
+        }
+        _ => None,
     };
-    let (iv, bound, inclusive, cont) = phis.iter().find_map(|&(p, ty, next)| {
-        if ty != MirTy::I64 || !step_of(p, next) {
+    let (iv, bound, inclusive, backward, cont) = phis.iter().find_map(|&(p, ty, next)| {
+        if ty != MirTy::I64 {
             return None;
         }
-        let (n, inclusive, cont) = header_test(&defs, cond, p)?;
-        Some((p, n, inclusive, cont))
+        let backward = step_of(p, next)?;
+        let (n, inclusive, cont) = header_test(&defs, cond, p, backward)?;
+        Some((p, n, inclusive, backward, cont))
     })?;
     // The header's own work must be safe to skip.
     for inst in &func.block(h).insts {
@@ -513,7 +538,7 @@ fn plan_loop(func: &MirFunc, lp: &LoopInfo, byte_at: u16) -> Option<Plan> {
     if loads.is_empty() || regs_needed(&expr) + loads.len() > common::simd::NREGS {
         return None;
     }
-    Some(Plan { iv, bound, inclusive, streams: walk.streams, loads, scalars: walk.scalars, expr })
+    Some(Plan { iv, bound, inclusive, backward, streams: walk.streams, loads, scalars: walk.scalars, expr })
 }
 
 /// Blocks reachable from `start` inside the loop, without the header,
@@ -699,7 +724,16 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: Plan) -> Vec<BlockId> {
         .collect();
     let first = b.value(MirTy::I64);
     let from = twin[&plan.iv];
-    b.push(g, MirInst::ByteScan { dest: first, from, bound, inclusive: plan.inclusive, streams, scalars, expr: plan.expr });
+    b.push(g, MirInst::ByteScan {
+        dest: first,
+        from,
+        bound,
+        inclusive: plan.inclusive,
+        backward: plan.backward,
+        streams,
+        scalars,
+        expr: plan.expr,
+    });
     b.func.block_mut(g).term = Some(Terminator::Jump { dest: h });
 
     // H now enters from G alone; the latch goes to G.

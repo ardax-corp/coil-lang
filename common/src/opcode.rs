@@ -484,7 +484,8 @@ pub enum Instruction {
     /// `[7:0]` vsrc. Bit `k` of the `i64` is the top bit of byte lane `k`.
     VMask,
     /// Compiler-only byte-lane scan (minor 46), dense abc: `[31:24]` body
-    /// length `n` (with [`simd::SCAN_INCLUSIVE`] for `<=`), `[23:16]` dest
+    /// length `n` (with [`simd::SCAN_INCLUSIVE`] for `<=` and
+    /// [`simd::SCAN_BACKWARD`] for a count-down loop), `[23:16]` dest
     /// slot, `[15:8]` from slot, `[7:0]` bound slot.
     /// The next `n` words are its body: `VLoad TY_U8` (whose index slot holds
     /// an offset from the scan position) and byte `VBin`s, leaving a lane
@@ -492,7 +493,10 @@ pub enum Instruction {
     /// passes `p + k < bound` (`<=` when inclusive) and every load lies
     /// inside its array: run the body at `p`; a non-zero mask
     /// stops at `p + ctz(mask)`, else `p += 64`. `dest` gets where it
-    /// stopped. Execution resumes past the body.
+    /// stopped. Backward, from `p = from` while every lane `p - 63 + k`
+    /// passes `> bound` (`>=` when inclusive): a non-zero mask stops at
+    /// `p - 63 + (63 - lzcnt(mask))`, else `p -= 64`. Execution resumes
+    /// past the body.
     VScan,
 }
 
@@ -769,10 +773,16 @@ pub mod simd {
     /// register read as [`BYTE_LANES`] `u8` lanes. A lane mask is `0xFF` /
     /// `0x00` per lane.
     pub const BYTE_LANES: usize = 64;
-    /// Most body words one `VScan` runs.
-    pub const SCAN_MAX_BODY: usize = 64;
-    /// `VScan` length-field flag: the loop's test is `iv <= bound`.
+    /// Most body words one `VScan` runs (the length field's low six bits).
+    pub const SCAN_MAX_BODY: usize = 63;
+    /// `VScan` length-field flag: the loop's test is `iv <= bound`
+    /// (`iv >= bound` with [`SCAN_BACKWARD`]).
     pub const SCAN_INCLUSIVE: u8 = 0x80;
+    /// `VScan` length-field flag (minor 48): the loop counts down to a
+    /// lower bound.
+    pub const SCAN_BACKWARD: u8 = 0x40;
+    /// `VScan` length-field bits that hold the body length.
+    pub const SCAN_LEN: u8 = 0x3F;
     /// `VLoad` type: 64 bytes of a `string` or a byte array from `idx`.
     pub const TY_U8: u8 = 8;
     /// `VBin` mask logic on byte lanes: `a & b`, `a | b`, `a & !b`, `!a`.

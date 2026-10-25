@@ -4,7 +4,7 @@ use io::file::read_text;
 use comptime_gen::adder;
 
 comptime {
-    let text = read_text("tests/comptime/data/greeting.txt") ?? "";
+    let text = read_text("tests/comptime/data/greeting.txt").ok() ?? "";
     return adder("f", text.len());
 }
 

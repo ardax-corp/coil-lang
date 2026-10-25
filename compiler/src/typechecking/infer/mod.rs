@@ -184,6 +184,13 @@ pub struct Checker {
     /// Spans of this module's E0200s for a type declaration that takes a
     /// reserved built-in name: the module then reports only those (#1701).
     rejected_builtin_type_decls: Vec<std::ops::Range<usize>>,
+    /// Annotation names that resolved to no type when parsed, with their
+    /// spans; reported as E0110 at the end of the module if still unknown
+    /// (#1961).
+    unknown_type_names: Vec<(String, std::ops::Range<usize>)>,
+    /// Every type parameter name brought into scope while checking the
+    /// module: a pre-pass parses `Tree<T>` before `T` is in scope.
+    type_param_names_seen: std::collections::HashSet<String>,
 
     /// Type that the enclosing function expects to return, if any.
     /// `None` outside of a function body. Set when entering a function
@@ -262,6 +269,9 @@ pub struct Checker {
     /// entry file's unqualified), so a call into an already-checked module
     /// knows when it under-applies.
     program_fn_params: HashMap<String, (usize, bool)>,
+    /// Parameter names of every typed `T... xs` free function, by module
+    /// path; kept across modules so importers pack their calls (#1990).
+    program_typed_rest: HashMap<String, Vec<String>>,
     /// Impl method effects for every file checked so far, keyed
     /// `module::Owner::method` (methods have no [`DefId`] of their own).
     pub(crate) program_method_effects: HashMap<String, crate::typechecking::purity::EffectFlags>,

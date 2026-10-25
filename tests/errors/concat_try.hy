@@ -47,13 +47,13 @@ fn looped(int n) -> Result<string, string> {
 }
 
 test("try inside string concat") {
-    assert!((chain("a", 1) ?? "err") == "<a!>");
-    assert!((chain("a", -1) ?? "err") == "err");
-    assert!((tail("b", 0) ?? "err") == "xb!");
-    assert!((tail("b", -2) ?? "err") == "err");
-    assert!((both(1, 1) ?? "err") == "a!b!");
-    assert!((both(1, -1) ?? "err") == "err");
-    assert!((both(-1, 1) ?? "err") == "err");
+    assert!((chain("a", 1).ok() ?? "err") == "<a!>");
+    assert!((chain("a", -1).ok() ?? "err") == "err");
+    assert!((tail("b", 0).ok() ?? "err") == "xb!");
+    assert!((tail("b", -2).ok() ?? "err") == "err");
+    assert!((both(1, 1).ok() ?? "err") == "a!b!");
+    assert!((both(1, -1).ok() ?? "err") == "err");
+    assert!((both(-1, 1).ok() ?? "err") == "err");
 }
 
 test("coalesce inside string concat") {
@@ -62,6 +62,6 @@ test("coalesce inside string concat") {
 }
 
 test("try inside a looped concat") {
-    assert!((looped(3) ?? "err") == "i!i!i!end!");
-    assert!((looped(0) ?? "err") == "end!");
+    assert!((looped(3).ok() ?? "err") == "i!i!i!end!");
+    assert!((looped(0).ok() ?? "err") == "end!");
 }

@@ -1473,6 +1473,11 @@ impl Compiler {
                     let opaque = crate::mir::opaque_heap_ty(&apply_ty_prune(checker.subst(), t));
                     (is_class(t) || opaque).then_some(crate::mir::MirTy::HeapRef)
                 })
+                // A bare-class existential is its `[boxed value, dictionary]`
+                // pack's heap word, also as a class field (#1988).
+                .or_else(|| {
+                    matches!(apply_ty_prune(checker.subst(), t), Ty::Existential { .. }).then_some(crate::mir::MirTy::HeapRef)
+                })
                 .or_else(|| niche(t))
                 .or_else(|| scalar_enum(t))
                 .or_else(|| (opaque_vars && is_var(t)).then_some(crate::mir::MirTy::I64))
@@ -2706,9 +2711,10 @@ impl Compiler {
             }
             // `C::s(b: 2, a: 1)`: a class's static method shapes as a free
             // function does (#1380); another module's `... xs` copy is called
-            // by its qualified name (#1386); other qualified names do not yet.
+            // by its qualified name (#1386), and so is its typed `T... xs`
+            // function (#1990); other qualified names do not yet.
             let static_method = name.rsplit_once("::").is_some_and(|(owner, _)| self.checker.has_impl(owner));
-            if name.contains("::") && !static_method && !self.checker.fn_tuple_rest(name) {
+            if name.contains("::") && !static_method && !self.checker.fn_tuple_rest(name) && !self.checker.is_typed_rest_import(name) {
                 return Err("call-argument");
             }
             let mut key = self.resolve_free_fn(name);
@@ -3961,10 +3967,14 @@ impl Compiler {
         if self.checker.is_generic_fn(&lookup)
             || self.coroutine_fns.contains(&key)
             || self.coroutine_fns.contains(&lookup)
-            || self.two_word_return_kind(&key).is_some()
             || self.callee_has_unboxed_range_params(&key)
         {
             return Err("callee-overload");
+        }
+        // A two-word result (`-> Option<int>`) comes back as its pair.
+        let pair = self.two_word_return_kind(&key);
+        if pair.as_ref().is_some_and(|k| !self.hir_pair_kind(k)) {
+            return Err("callee-pair");
         }
         // Not emitted yet (a later overload): the checker matched the arity.
         if self.fn_arities.get(&key).is_some_and(|a| *a != (fixed as u32, rest)) {
@@ -3983,11 +3993,15 @@ impl Compiler {
             }
         };
         let params = args.iter().map(|&a| plain(a, false)).collect::<Result<Vec<_>, _>>()?;
+        let ret = match pair {
+            Some(_) => self.value_layout(&apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, call).ok_or("callee-signature")?)),
+            None => plain(call, true)?,
+        };
         Ok(HirCall {
             key,
-            pair: None,
+            pair,
             params,
-            ret: plain(call, true)?,
+            ret,
             method: false,
             mono: false,
             builtin: None,
@@ -4143,8 +4157,14 @@ impl Compiler {
         }
         let spec = self.hir_mono_spec(hir, call, &key, lookup).ok_or("callee-generic")?;
         let mono = self.mono_names.get(&spec.key).ok_or("callee-generic")?.clone();
-        if self.coroutine_fns.contains(&key) || self.coroutine_fns.contains(lookup) || self.two_word_return_kind(lookup).is_some() {
+        if self.coroutine_fns.contains(&key) || self.coroutine_fns.contains(lookup) {
             return Err("callee-generic");
+        }
+        // A closed two-word result (`-> Option<int>`) comes back as its
+        // pair, as from the shared body.
+        let pair = self.mono_clone_pair(lookup);
+        if pair.as_ref().is_some_and(|k| !self.hir_pair_kind(k)) {
+            return Err("callee-pair");
         }
         let mut param_tys = self.hir_mono_param_tys(lookup, arg_tys.len()).ok_or("callee-signature")?;
         let mut ret_ty = self.checker.fn_return_ty(lookup).ok_or("callee-signature")?;
@@ -4211,7 +4231,7 @@ impl Compiler {
         };
         Ok(HirCall {
             key: mono,
-            pair: None,
+            pair,
             params,
             ret: ret_layout,
             method: false,

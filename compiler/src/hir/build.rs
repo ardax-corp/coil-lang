@@ -1542,7 +1542,15 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
     /// A global read. An assignment or `++` target has no type of its own:
     /// a static takes its declared one.
     fn global(&self, b: &mut BodyBuilder, node: &Output<'_>, name: String, def: Option<DefId>) -> HirId {
-        let ty = self.ty_of(node).or_else(|| self.static_ty(&name));
+        let own = self.ty_of(node);
+        // A read of a `const` or static of type `()` (a unit `comptime`
+        // expression's hidden const) is `()`: its initializer already ran
+        // while compiling or in the prologue (#1798). An assignment target
+        // has no type of its own, so it stays a global.
+        if own.as_ref().is_some_and(|t| matches!(strip_readonly(t), Ty::Con(n) if n == coil_ty::UNIT)) {
+            return self.emit_ty(b, node, HirKind::Lit(Lit::Unit), own);
+        }
+        let ty = own.or_else(|| self.static_ty(&name));
         self.emit_ty(b, node, HirKind::Global { name, def }, ty)
     }
 

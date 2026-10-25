@@ -98,6 +98,7 @@ pub fn emit_dense(
 
     let cmp_dests = term_cmp_dests(func);
     let all_preds = func.preds();
+    let rotate = rotatable_headers(func, &cmp_dests, &all_preds, &arg_clears, &entry_clears, regs.as_slice(), scratch);
     for block in &func.blocks {
         let preds = &all_preds[block.id.index()];
         if block.id != func.entry {
@@ -283,6 +284,7 @@ pub fn emit_dense(
             pool,
             loc: func.term_loc(block.id),
             clears: &entry_clears,
+            rotate: &rotate,
         })?;
     }
     coalesce_dense_moves(&mut out);
@@ -2015,6 +2017,51 @@ pub(super) fn is_fallthrough(func: &MirFunc, from: BlockId, to: BlockId) -> bool
     next_emitted(func, from) == Some(to)
 }
 
+/// Whether `a` is emitted no later than `b` (a jump from `b` to `a` goes back).
+fn emitted_before(func: &MirFunc, a: BlockId, b: BlockId) -> bool {
+    func.blocks.iter().find(|x| x.id == a || x.id == b).is_some_and(|x| x.id == a)
+}
+
+/// Blocks whose whole body is the compare their `Br` branches on (a
+/// `while i < n` header): a back edge can repeat that compare-branch instead
+/// of jumping to it (#1867). Nothing else may be emitted at the header's
+/// start or on its out-edges (φ copies, clears, a match chain's stack), so
+/// the copy at the latch is the header's code exactly.
+fn rotatable_headers(
+    func: &MirFunc,
+    cmp_dests: &[Option<ValueId>],
+    preds: &[Vec<BlockId>],
+    arg_clears: &ArgClears,
+    entry_clears: &HashMap<(BlockId, BlockId), Vec<u8>>,
+    regs: &[u8],
+    scratch: u8,
+) -> Vec<bool> {
+    let mut out = vec![false; func.blocks.len()];
+    for b in &func.blocks {
+        if b.id == func.entry || !arg_clears.entry(b.id).is_empty() {
+            continue;
+        }
+        let Some(Terminator::Br { taken, not_taken, .. }) = &b.term else {
+            continue;
+        };
+        let Some(cmp) = cmp_dests[b.id.index()] else {
+            continue;
+        };
+        let body_ok = b.insts.iter().all(|i| {
+            (i.is_phi() || i.dest() == cmp) && arg_clears.after(i.dest()).is_empty()
+        });
+        let edges_ok = [*taken, *not_taken].into_iter().all(|s| {
+            phi_moves(func, b.id, s, regs, scratch).is_empty()
+                && entry_clears.get(&(b.id, s)).is_none_or(Vec::is_empty)
+        });
+        let preds_ok = preds[b.id.index()]
+            .iter()
+            .all(|&p| matches!(func.block(p).term, Some(Terminator::Jump { .. } | Terminator::Br { .. })));
+        out[b.id.index()] = body_ok && edges_ok && preds_ok && taken != not_taken;
+    }
+    out
+}
+
 /// Alias a header φ dest with its latch incoming when the dest is dead after
 /// that incoming is defined (so `i = i + 1` is a dest-overwrite, not a move).
 /// COI-383 S6 sinks the incoming first so mandelbrot `tr`/`zr` can alias.
@@ -2497,6 +2544,13 @@ fn pack_chained_dense_bin(ops: &mut [IlOp]) {
 fn pack_dense_bin_jmpf(ops: &mut [IlOp]) {
     let mut i = 0;
     while i + 1 < ops.len() {
+        // A `DenseBin2`'s payload word must stay `DenseBin`: the VM reads it
+        // as the second bin, and a `DenseBinJmpf` there would hide the jump
+        // behind it from the GC-map pass (a rotated latch, #1867).
+        if matches!(&ops[i], IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::DenseBin2) {
+            i += 2;
+            continue;
+        }
         let first = match &ops[i] {
             IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::DenseBin => Some(*byte),
             _ => None,
@@ -2656,10 +2710,13 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
                 ),
             ));
         }
-        MirInst::ByteScan { dest, from, bound, inclusive, streams, scalars, expr } => {
+        MirInst::ByteScan { dest, from, bound, inclusive, backward, streams, scalars, expr } => {
             let body = byte_scan_body(expr, streams, scalars, regs)
                 .ok_or_else(|| LowerError::Refused("byte scan body too large".into()))?;
-            let flag = if *inclusive { common::simd::SCAN_INCLUSIVE } else { 0 };
+            let mut flag = if *inclusive { common::simd::SCAN_INCLUSIVE } else { 0 };
+            if *backward {
+                flag |= common::simd::SCAN_BACKWARD;
+            }
             out.push(byte(Byte::new(Instruction::VScan).with_dense_abc(
                 body.len() as u8 | flag,
                 regs[dest.index()],
@@ -3132,6 +3189,8 @@ struct EmitTermArgs<'args> {
     loc: DebugLoc,
     /// Registers zeroed after an edge's φ copies ([`entry_clears`]).
     clears: &'args HashMap<(BlockId, BlockId), Vec<u8>>,
+    /// Loop headers a back edge copies its compare-branch into ([`rotatable_headers`]).
+    rotate: &'args [bool],
 }
 
 fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
@@ -3149,6 +3208,7 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
         pool,
         loc,
         clears,
+        rotate,
     } = args;
 
     let Some(term) = &block.term else {
@@ -3160,6 +3220,42 @@ fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
             emit_phi_moves(out, func, block.id, *dest, regs, scratch);
             for &r in clears(*dest) {
                 push_clear_word(out, r);
+            }
+            if rotate[dest.index()] && emitted_before(func, *dest, block.id) {
+                // Loop inversion (#1867): the back edge tests the header's
+                // condition itself and jumps straight into the body, so an
+                // iteration skips the header dispatch. The compare fuses with
+                // the latch's `DenseBin` into one `DenseBinJmpf`.
+                let header = func.block(*dest);
+                let Some(Terminator::Br { cond, taken, not_taken }) = &header.term else {
+                    unreachable!("rotatable header ends in Br");
+                };
+                let loc = func.term_loc(header.id);
+                emit_br_cond(EmitBrCondArgs {
+                    out,
+                    block: header,
+                    func,
+                    plan,
+                    regs,
+                    cond: *cond,
+                    pool,
+                    loc,
+                })?;
+                out.push(IlOp::Jump {
+                    kind: IlJumpKind::JumpIfTrue,
+                    target: block_lab[taken.index()],
+                    loc,
+                    hint: Default::default(),
+                });
+                if !is_fallthrough(func, block.id, *not_taken) {
+                    out.push(IlOp::Jump {
+                        kind: IlJumpKind::Unconditional,
+                        target: block_lab[not_taken.index()],
+                        loc,
+                        hint: Default::default(),
+                    });
+                }
+                return Ok(());
             }
             if !is_fallthrough(func, block.id, *dest) {
                 out.push(IlOp::Jump {

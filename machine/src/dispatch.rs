@@ -994,11 +994,82 @@ fn apply_trailing_dense_bin(ctx: &mut HotCtx<'_, '_>) -> bool {
 
 /// nsieve k-loop: `DenseStoreIndex ; DenseBin ; JMP` (COI-382 S5). Peek the
 /// IV bump and latch without a new discriminant. Giant match stays split.
+/// After loop inversion (#1867) the latch is `DenseBinJmpf` (IV bump and
+/// the header's compare-branch), so peek that too: a rotated store loop is
+/// one dispatch per iteration.
 #[inline(always)]
 fn apply_trailing_dense_bin_jmp(ctx: &mut HotCtx<'_, '_>) {
+    if ctx.ip < ctx.code.len() {
+        let next = copy_byte(ctx.code, ctx.ip);
+        if *next.bytecode() as u8 == Instruction::DenseBinJmpf as u8 {
+            ctx.ip += 1;
+            if iv_add_lt_jmp(ctx, &next) {
+                return;
+            }
+            let r = dense_bin(ctx.stack, ctx.sp, &next, ctx.stack_cap);
+            if !hot_int(ctx, r) {
+                return;
+            }
+            let tail = take_code_word(ctx);
+            let target = dense_bin_jmp_tail(
+                ctx.stack,
+                ctx.sp,
+                &tail,
+                ctx.constants,
+                ctx.heap,
+                ctx.stack_cap,
+            );
+            apply_jump(ctx, target);
+            return;
+        }
+    }
     if apply_trailing_dense_bin(ctx) {
         apply_trailing_jmp(ctx);
     }
+}
+
+/// The rotated store loop's latch, `iv = iv + step; if iv < n`, on int
+/// slots (#2012): the add and the compare inline, without `eval_bin`'s and
+/// `eval_cmp`'s matches on the op. `false` (nothing done) for any other
+/// `DenseBinJmpf`; `ip` is on the tail word.
+#[inline(always)]
+fn iv_add_lt_jmp(ctx: &mut HotCtx<'_, '_>, bin: &Byte) -> bool {
+    let (kind, dest, lhs, rhs) = bin.dense_abc_parts();
+    if kind != common::dense::IADD64 || ctx.ip >= ctx.code.len() {
+        return false;
+    }
+    let tail = copy_byte(ctx.code, ctx.ip);
+    let want_true = match *tail.bytecode() {
+        Instruction::BinSlotSlotJmpt => true,
+        Instruction::BinSlotSlotJmpf => false,
+        _ => return false,
+    };
+    let (op, a, pool_idx) = tail.bin_slot_slot_jmpf_parts();
+    if op != Instruction::LE as u8 {
+        return false;
+    }
+    let sp = ctx.sp;
+    promise!(sp + dest < ctx.stack_cap);
+    promise!(sp + lhs < ctx.stack_cap);
+    promise!(sp + rhs < ctx.stack_cap);
+    match common::int_arith::add(ctx.stack[sp + lhs].as_int(), ctx.stack[sp + rhs].as_int()) {
+        Ok(sum) => ctx.stack[sp + dest] = Value::from(sum),
+        Err(t) => {
+            ctx.panic_msg = Some(t.message());
+            return true;
+        }
+    }
+    ctx.ip += 1;
+    prefetch_code(ctx.code, ctx.ip);
+    promise!(pool_idx < ctx.constants.len());
+    let packed = unsafe { *ctx.constants.get_unchecked(pool_idx) };
+    let b = (packed as u32 & 0xFF) as usize;
+    promise!(sp + a < ctx.stack_cap);
+    promise!(sp + b < ctx.stack_cap);
+    if (ctx.stack[sp + a].as_int() < ctx.stack[sp + b].as_int()) == want_true {
+        hot_jump(ctx, (packed >> 32) as usize);
+    }
+    true
 }
 
 #[inline(always)]
@@ -1079,7 +1150,8 @@ fn exec_dense(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) -> bool {
         Instruction::VScan => {
             let (n, dest, from, bound) = opcode.dense_abc_parts();
             let inclusive = n & common::simd::SCAN_INCLUSIVE != 0;
-            let n = usize::from(n & !common::simd::SCAN_INCLUSIVE);
+            let backward = n & common::simd::SCAN_BACKWARD != 0;
+            let n = usize::from(n & common::simd::SCAN_LEN);
             promise!(ctx.sp + dest < ctx.stack_cap);
             promise!(ctx.sp + from < ctx.stack_cap);
             promise!(ctx.sp + bound < ctx.stack_cap);
@@ -1088,7 +1160,7 @@ fn exec_dense(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) -> bool {
                 return true;
             };
             let (from, bound) = (ctx.stack[ctx.sp + from].as_int(), ctx.stack[ctx.sp + bound].as_int());
-            match super::vscan(ctx.heap, ctx.stack, ctx.sp, ctx.extra.vregs, body, from, bound, inclusive) {
+            match super::vscan(ctx.heap, ctx.stack, ctx.sp, ctx.extra.vregs, body, from, bound, inclusive, backward) {
                 Ok(p) => ctx.stack[ctx.sp + dest] = Value::from(p),
                 Err(msg) => ctx.panic_msg = Some(msg),
             }

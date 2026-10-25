@@ -44,5 +44,5 @@ test("HashMap insert") {
         i = i + 1;
     }
     assert!(!m.insert("k3", 30));
-    assert!(m.get_or("k3", 0) == 30 && m.get_or("k39", 0) == 39 && m.size() == 40);
+    assert!(m.get_or("k3", 0) == 30 && m.get_or("k39", 0) == 39 && m.len() == 40);
 }

@@ -15,7 +15,7 @@ use crate::typechecking::generics::{
 };
 use crate::typechecking::id::{self, IdTable, NodeId};
 use crate::typechecking::kind::Kind;
-use crate::typechecking::subst::{Subst, apply_ty, apply_ty_prune, compose};
+use crate::typechecking::subst::{Subst, apply_ty, apply_ty_prune};
 use crate::typechecking::ty::{ArrayLength, array, array_fixed, peel_constructor_refinement, tuple as tuple_ty};
 use crate::typechecking::ty::{AssocProjection, Constraint, Scheme};
 use crate::typechecking::ty::{
@@ -103,6 +103,8 @@ impl Checker {
             subst: Subst::empty(),
             messages: Vec::new(),
             rejected_builtin_type_decls: Vec::new(),
+            unknown_type_names: Vec::new(),
+            type_param_names_seen: Default::default(),
             current_return_ty: None,
             current_module: String::new(),
             virtual_modules: VirtualModules::new(),
@@ -128,6 +130,7 @@ impl Checker {
             fn_effects: HashMap::new(),
             program_fn_effects: HashMap::new(),
             program_fn_params: HashMap::new(),
+            program_typed_rest: HashMap::new(),
             program_method_effects: HashMap::new(),
             pure_fn_names: HashSet::new(),
             length_stability: Default::default(),
@@ -1496,9 +1499,62 @@ impl Checker {
     pub fn check_program(&mut self, ast: &Output) -> Ty {
         let first_message = self.messages.len();
         self.rejected_builtin_type_decls.clear();
+        self.unknown_type_names.clear();
+        self.type_param_names_seen.clear();
         let ty = self.check_program_body(ast);
         self.drop_reserved_type_name_cascades(first_message);
+        self.report_unknown_type_names(first_message);
         ty
+    }
+
+    /// An annotation naming no type parses as an opaque `Con`, so the
+    /// program reports only the mismatches it causes. Report each name the
+    /// module never declared as E0110 and drop the mismatches that
+    /// mention it (#1961).
+    fn report_unknown_type_names(&mut self, first_message: usize) {
+        let mut names = std::mem::take(&mut self.unknown_type_names);
+        names.retain(|(name, _)| !self.names_a_type(name));
+        if names.is_empty() {
+            return;
+        }
+        names.sort_by_key(|(_, r)| (r.start, r.end));
+        names.dedup();
+        let quoted: Vec<String> = names.iter().map(|(n, _)| format!("`{n}`")).collect();
+        let mut index = 0;
+        self.messages.retain(|msg| {
+            let keep = index < first_message
+                || msg.code() != Some(ErrorCode::TypeMismatch)
+                || !quoted.iter().any(|q| msg.message().contains(q.as_str()));
+            index += 1;
+            keep
+        });
+        for (name, range) in names {
+            let mut msg = Message::error(ErrorCode::UnknownType, format!("Unknown type `{name}`"), range);
+            msg.with_help("declare it, import it with `use`, or check the spelling".to_string());
+            self.messages.push(msg);
+        }
+    }
+
+    /// Bring a frame of type parameters into scope.
+    pub(super) fn push_type_params(&mut self, frame: HashMap<String, TyVarId>) {
+        self.type_param_names_seen.extend(frame.keys().cloned());
+        self.type_params_in_scope.push(frame);
+    }
+
+    /// Whether `name` resolves to a type now that the module is checked.
+    fn names_a_type(&self, name: &str) -> bool {
+        matches!(name, "unit" | "()" | "never" | "Self")
+            // The FFI scalars are opaque `Con`s by name.
+            || matches!(name, "ptr" | "int8" | "int16" | "int32" | "uint8" | "uint16" | "uint32" | "uint64")
+            || self.type_param_names_seen.contains(name)
+            || self.resolve_class_key(name).is_some()
+            || self.module_class_names.contains_key(name)
+            || self.resolve_enum_key(name).is_some()
+            || self.enums.contains_key(name)
+            || self.generics.generic_type_ctors.contains_key(name)
+            || self.generics.nominal_type_module(name).is_some()
+            || self.generics.typeclass(name).is_some()
+            || self.type_aliases.iter().any(|f| f.contains_key(name))
     }
 
     /// A user type that takes a reserved built-in name is not a type of its
@@ -2222,7 +2278,7 @@ impl Checker {
         for tp in type_params {
             frame.insert(tp.name.to_string(), self.counter.fresh());
         }
-        self.type_params_in_scope.push(frame);
+        self.push_type_params(frame);
         true
     }
 
@@ -3104,7 +3160,18 @@ impl Checker {
             Expression::Coalesce(lhs, rhs) => {
                 let lhs_ty = self.infer(lhs);
                 let resolved = apply_ty_prune(&self.subst, &lhs_ty);
+                // On a Result `??` would drop the error without a word: the
+                // fallback is spelled out there (#1878).
                 let payload = if let Some((ok, _)) = result_ok_err(&resolved) {
+                    let what = self.diag_ty(&resolved);
+                    let _ = self.error_with_help(
+                        ErrorCode::InvalidCoalesce,
+                        format!("`??` takes an Option, found `{what}`: on a Result it would discard the error"),
+                        range.clone(),
+                        Some("write `.unwrap_or(fallback)` (or `.ok() ?? fallback`) to drop the error on purpose, or `?` to pass it on".into()),
+                    );
+                    // The fallback still checks against the payload, so one
+                    // mistake is one error.
                     ok
                 } else if is_option_ty(&resolved) {
                     option_inner(&resolved).unwrap_or_else(|| Ty::Var(self.counter.fresh()))
@@ -4412,7 +4479,7 @@ impl Checker {
         let is_byte = Self::is_byte_ty(&index_ty_pruned);
         if !is_byte {
             match unify_with(&self.subst, &index_ty_pruned, &int()) {
-                Ok(s) => self.absorb(&s),
+                Ok(s) => self.absorb(s),
                 Err(_) => {
                     let _ = self.error_with_help(
                         ErrorCode::TypeMismatch,
@@ -4556,7 +4623,7 @@ impl Checker {
                     let prev_pruned = apply_ty_prune(&self.subst, prev);
                     match unify_with(&self.subst, &prev_pruned, &t_pruned) {
                         Ok(s) => {
-                            self.absorb(&s);
+                            self.absorb(s);
                             let joined = apply_ty_prune(
                                 &self.subst,
                                 &crate::typechecking::ty::peel_constructor_refinement(prev_pruned.clone()),
@@ -4608,7 +4675,7 @@ impl Checker {
                 || !self.drops_readonly(vec_elem, &apply_ty_prune(&self.subst, &element)))
             && let Ok(s) = unify_with(&self.subst, vec_elem, &element)
         {
-            self.absorb(&s);
+            self.absorb(s);
             return apply_ty_prune(&self.subst, &exp);
         }
         if len == 0 {
@@ -6086,7 +6153,7 @@ impl Checker {
             return;
         }
         if let Ok(s) = unify_with(&self.subst, &resolved, &expected) {
-            self.absorb(&s);
+            self.absorb(s);
         }
     }
 
@@ -9643,6 +9710,46 @@ impl Checker {
         );
     }
 
+    /// `E::V(args)` where an `E<.., Trait, ..>` is expected: each argument
+    /// in a trait-object slot packs as that trait, as it does at a `let`
+    /// of the trait, and the construct takes the expected type (#2002).
+    /// `None` leaves it to plain unification.
+    fn coerce_construct_payload(&mut self, expected: &Ty, node: &Output, context: &str) -> Option<Ty> {
+        let Ty::App(_, targs) = expected else { return None };
+        if !targs.iter().any(|t| matches!(strip_readonly(t), Ty::Existential { .. })) {
+            return None;
+        }
+        let Expression::Construct {
+            enum_name,
+            variant_name,
+            fields: parser::ast::EnumConstructPayload::Tuple(args),
+        } = node.1.as_ref()
+        else {
+            return None;
+        };
+        let enum_str = self.resolve_enum_key(enum_name).unwrap_or_else(|| enum_name.to_string());
+        if !self.enum_tags.get(&enum_str).is_some_and(|t| t.contains_key(*variant_name)) || !self.is_poly_enum(&enum_str) {
+            return None;
+        }
+        let (payload, owner) = self.fresh_poly_construct_payload(&enum_str, variant_name);
+        let EnumVariantPayloadTy::Tuple(slots) = payload else { return None };
+        if slots.len() != args.len() {
+            return None;
+        }
+        let arg_tys: Vec<Ty> = args
+            .iter()
+            .map(|a| self.ids.id_of_output(a).and_then(|id| self.cache.get(&id).cloned()))
+            .collect::<Option<_>>()?;
+        let s = unify_with(&self.subst, &owner, expected).ok()?;
+        self.absorb(s);
+        for ((arg, slot), arg_ty) in args.iter().zip(&slots).zip(arg_tys) {
+            let _ = self.coerce_or_unify(slot, &arg_ty, Some(arg), &arg.0.into_range(), context);
+        }
+        let ty = apply_ty_prune(&self.subst, expected);
+        self.retarget_node_ty(node.0.start, node.0.end, ty.clone());
+        Some(ty)
+    }
+
     fn coerce_or_unify(
         &mut self,
         expected: &Ty,
@@ -9672,6 +9779,11 @@ impl Checker {
         {
             let filled = self.coerce_or_unify(inner, &actual, expr, range, context);
             return self.readonly_qualify(filled);
+        }
+        if let Some(expr) = expr
+            && let Some(ty) = self.coerce_construct_payload(&expected, unwrap_expr_wrappers(expr), context)
+        {
+            return ty;
         }
         // Integer literals may coerce to `byte` when in range 0..=255.
         if Self::is_byte_ty(&expected)
@@ -10215,7 +10327,7 @@ impl Checker {
         if arg_expr.and_then(identifier_name).is_some()
             && let Ok(s) = unify_with(&self.subst, inferred_arg, &candidate)
         {
-            self.absorb(&s);
+            self.absorb(s);
             let skolem_free = |t: &Ty| !t.to_string().contains("$forall");
             for v in ftv_ty(&candidate) {
                 let bound = apply_ty_prune(&local, &Ty::Var(v));
@@ -10224,7 +10336,7 @@ impl Checker {
                     && skolem_free(&bound)
                     && let Ok(s) = unify_with(&self.subst, &Ty::Var(v), &bound)
                 {
-                    self.absorb(&s);
+                    self.absorb(s);
                 }
             }
         }
@@ -10318,7 +10430,7 @@ impl Checker {
             kinds.push(kind);
         }
 
-        self.type_params_in_scope.push(frame);
+        self.push_type_params(frame);
         let mut constraints = Vec::new();
         let synthetic_range = 0..0;
         for (tp, var) in params.iter().zip(bounds.iter()) {
@@ -10360,14 +10472,10 @@ impl Checker {
         }
     }
 
-    /// Adopt `s`, a substitution unification derived from `self.subst`.
-    /// When it bound nothing it is `self.subst` itself, and composing a
-    /// substitution with itself only re-resolves chains one step, which
-    /// every reader prunes anyway: skip that O(n) rebuild (#607).
-    fn absorb(&mut self, s: &Subst) {
-        if !s.is_same(&self.subst) {
-            self.subst = compose(s, &self.subst);
-        }
+    /// Adopt `s`, a substitution unification derived from `self.subst`
+    /// (see [`Subst::absorb`]).
+    fn absorb(&mut self, s: Subst) {
+        self.subst.absorb(s);
     }
 
     /// Unify two types under the current substitution, updating
@@ -10376,7 +10484,7 @@ impl Checker {
     fn unify(&mut self, t1: &Ty, t2: &Ty, range: &Range<usize>, ctx: &str) -> Ty {
         match unify_with(&self.subst, t1, t2) {
             Ok(s) => {
-                self.absorb(&s);
+                self.absorb(s);
                 apply_ty(&self.subst, t1)
             }
             Err(UnifyError::Mismatch { left, right }) => {
@@ -11051,7 +11159,7 @@ impl Checker {
             0 => Ok(None),
             1 => {
                 let (inst, local, fresh_vars) = matches.pop().expect("one match");
-                self.absorb(&local);
+                self.absorb(local);
                 // Its methods' `weak()` calls on the head's parameters (#1670).
                 self.weak_checks.record_instance(fresh_vars, range);
                 Ok(Some(inst))
@@ -11193,7 +11301,7 @@ impl Checker {
             found = Some((index, local));
         }
         let (index, local) = found?;
-        self.absorb(&local);
+        self.absorb(local);
         Some(index)
     }
 
@@ -12010,7 +12118,7 @@ impl Checker {
                 {
                     return self.resolve_type_projection(&class, name, &[], &range);
                 }
-                self.parse_type_name_str(name)
+                self.parse_type_name_str_with_range(name, Some(range))
             }
             Expression::TypeApp { name, args } => {
                 self.parse_type_app(name, args, ann.0.into_range())
@@ -12261,6 +12369,8 @@ impl Checker {
                         format!("Typeclass `{}` cannot be used as a bare value type", name),
                         range.unwrap_or(0..0),
                     ));
+                } else if let Some(range) = range {
+                    self.unknown_type_names.push((name.to_string(), range));
                 }
                 Ty::Con(name.to_string())
             }
@@ -13623,7 +13733,7 @@ impl Checker {
         } else {
             match unify_with(&self.subst, &id_ty, &int()) {
                 Ok(s) => {
-                    self.absorb(&s);
+                    self.absorb(s);
                     return;
                 }
                 Err(_) => {
@@ -13653,7 +13763,7 @@ impl Checker {
         } else {
             match unify_with(&self.subst, &lib_ty, &int()) {
                 Ok(s) => {
-                    self.absorb(&s);
+                    self.absorb(s);
                     return;
                 }
                 Err(_) => format!(
@@ -14551,12 +14661,33 @@ impl Checker {
 
     /// Declaration-order parameter names for `fn_name`, if recorded.
     pub fn fn_param_names(&self, fn_name: &str) -> Option<&[String]> {
-        self.fn_param_names.get(fn_name).map(|v| v.as_slice())
+        self.fn_param_names.get(fn_name).or_else(|| self.typed_rest_params_of(fn_name)).map(|v| v.as_slice())
+    }
+
+    /// Whether `fn_name` is another module's typed `T... xs` function.
+    pub fn is_typed_rest_import(&self, fn_name: &str) -> bool {
+        !self.fn_has_rest.contains_key(fn_name) && self.typed_rest_params_of(fn_name).is_some()
     }
 
     /// Whether `fn_name` has a trailing rest parameter (`T... name` or `... name`).
     pub fn fn_has_rest(&self, fn_name: &str) -> bool {
-        self.fn_has_rest.get(fn_name).copied().unwrap_or(false)
+        match self.fn_has_rest.get(fn_name) {
+            Some(&rest) => rest,
+            // Another module's typed `T... xs` function (#1990).
+            None => self.typed_rest_params_of(fn_name).is_some(),
+        }
+    }
+
+    /// The parameter names of another module's typed rest function `name`
+    /// as written at a call (qualified, or bare through its `use`).
+    fn typed_rest_params_of(&self, name: &str) -> Option<&Vec<String>> {
+        if let Some(names) = self.program_typed_rest.get(name) {
+            return Some(names);
+        }
+        let info = self.def_interner.info(self.def_id_of(name)?)?;
+        let module = self.def_interner.module_path(info.module)?;
+        let key = if module.is_empty() { info.name.clone() } else { format!("{module}::{}", info.name) };
+        self.program_typed_rest.get(&key)
     }
 
     /// Whether `fn_name`'s trailing rest is a heterogeneous tuple pack (`... name`).
@@ -14925,7 +15056,7 @@ impl Checker {
         args: &'a [Output<'a>],
         range: &Range<usize>,
     ) -> (Vec<Ty>, Vec<Output<'a>>) {
-        let has_rest = self.fn_has_rest.get(fn_name).copied().unwrap_or(false);
+        let has_rest = self.fn_has_rest(fn_name);
         self.vec_rest_spread =
             has_rest && !self.fn_tuple_rest.get(fn_name).copied().unwrap_or(false);
         let flat_args: Vec<Output<'a>> = self.flatten_spread_call_args(args);
@@ -14946,7 +15077,12 @@ impl Checker {
             return (tys, exprs);
         }
 
-        let Some(param_names) = self.fn_param_names.get(fn_name).cloned() else {
+        let Some(param_names) = self
+            .fn_param_names
+            .get(fn_name)
+            .or_else(|| self.typed_rest_params_of(fn_name))
+            .cloned()
+        else {
             if has_named {
                 let mut msg = Message::error(
                     ErrorCode::GenericTypeError,
@@ -16547,7 +16683,7 @@ impl Checker {
             param_kinds.push(kind);
         }
         if is_generic {
-            self.type_params_in_scope.push(param_frame);
+            self.push_type_params(param_frame);
         }
 
         let mut param_constraints: Vec<Constraint> = Vec::new();
@@ -20530,7 +20666,7 @@ impl Checker {
                 local = s;
             }
         }
-        self.absorb(&local);
+        self.absorb(local);
         Some(apply_ty_prune(&self.subst, &first))
     }
 
@@ -20712,14 +20848,19 @@ impl Checker {
         // discharged below so the call site passes their dictionaries.
         let (fun_ty, constraints, mapping) = self.instantiate_scheme_mapped(&scheme);
 
-        // Named-arg / rest reorder when the call uses a tuple payload.
+        // Named-arg / rest reorder when the call uses a tuple payload. The
+        // argument expressions go to `apply_function` too, so an array
+        // literal builds a `Vec` parameter as in a free call (#1992).
+        let mut arg_exprs: Option<Vec<Output>> = None;
         let arg_tys = match fields {
             EnumConstructPayload::Unit => Vec::new(),
             EnumConstructPayload::Tuple(args) => {
                 if self.fn_has_rest(&fqn) || self.fn_param_names.contains_key(&fqn) {
-                    let (tys, _) = self.infer_and_reorder_call_args(&fqn, args, &range);
+                    let (tys, exprs) = self.infer_and_reorder_call_args(&fqn, args, &range);
+                    arg_exprs = Some(exprs);
                     tys
                 } else {
+                    arg_exprs = Some(args.clone());
                     args.iter().map(|a| self.infer(a)).collect()
                 }
             }
@@ -20743,7 +20884,8 @@ impl Checker {
             }
         };
 
-        let result = self.apply_function(Some(&fqn), &fun_ty, &arg_tys, None, call_id, range.clone());
+        let exprs = arg_exprs.as_deref().filter(|e| !e.is_empty());
+        let result = self.apply_function(Some(&fqn), &fun_ty, &arg_tys, exprs, call_id, range.clone());
         if !constraints.is_empty() {
             self.discharge_constraints(call_id, &constraints, &range);
             self.pin_assoc_after_discharge("", &constraints, Some(&scheme), &mapping, &range);

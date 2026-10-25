@@ -9,6 +9,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [Dictionary passing](dictionary-passing.md) | Calling convention for trait-bounded generics that are not monomorphized |
 | [Type unification](type-unification.md) | Unification rules of the checker, by type shape |
 | [Comptime](comptime.md) | Code that runs while compiling: consts, `comptime` expressions and blocks, macros, folding; stages, limits, IO grants, result cache, tooling |
+| [Build cache](build-cache.md) | #1881: `coil FILE` / `coil compile` reuse the archive of an unchanged program from `~/.cache/coil/build`; key, inputs, what is not cached, `--no-build-cache` |
 | [Macros](macros.md) | User `derive` / attribute macros: `macro` model, `quote`, compile-time VM stage, hygiene, sandbox |
 | [Numeric MIR](mir.md) | MIR: every body lowers from HIR to SSA; dense and LIR tiers; pass history (P1–P12, I1–I8) |
 | [MIR language islands](mir-islands.md) | Historical: COI-292 I0–I8 ladder that grew MIR coverage before every body went through MIR (M4/M5, 2026-10) |

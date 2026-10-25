@@ -4948,6 +4948,17 @@ impl Compiler {
         kind
     }
 
+    /// How a mono clone of generic `name` returns: the generic's pair when
+    /// its declared result is closed (`-> Option<int>`), the same at every
+    /// instance; one word otherwise.
+    pub(super) fn mono_clone_pair(&self, name: &str) -> Option<PairKind> {
+        let ty = self.checker.fn_return_ty(name)?;
+        if !crate::layout::ty_is_closed(&ty) {
+            return None;
+        }
+        self.two_word_return_kind(name)
+    }
+
     /// Pin a verdict so later queries cannot disagree with it. Definition sites
     /// use this for shapes only they can see (a coroutine body never returns a
     /// pair, however its return type reads).
@@ -5583,6 +5594,8 @@ impl Compiler {
             self.compiling_result_mode = self.checker.fn_is_result_mode(source_name);
             self.compiling_result_ok_is_result = self.checker.fn_result_ok_is_result(source_name);
             self.compiling_mono_clone = true;
+            let clone_pair = self.mono_clone_pair(qualified).or_else(|| self.mono_clone_pair(source_name));
+            let prev_two_word_enum = std::mem::replace(&mut self.compiling_two_word_enum, clone_pair);
             self.current_function_qualified = Some(qualified.to_string());
             self.current_function_table_key = Some(qualified.to_string());
             self.mono_codegen_var_types.push(overrides);
@@ -5643,6 +5656,7 @@ impl Compiler {
             self.compiling_result_mode = prev_result_mode;
             self.compiling_result_ok_is_result = prev_result_ok_is_result;
             self.compiling_mono_clone = prev_mono_clone;
+            self.compiling_two_word_enum = prev_two_word_enum;
             self.current_function_qualified = prev_fn_qualified;
             self.current_function_table_key = prev_fn_table_key;
             self.field_key_slots = prev_field_keys;
@@ -7735,8 +7749,10 @@ impl Compiler {
         self.messages.extend(self.checker.take_messages());
 
         self.bytecode.append(&mut program);
-        self.emit_used_builtin_show_thunks();
+        // Structural thunks (a `Result<_, IoError>`'s `show`) can mark a
+        // builtin enum's `Show` thunk used, so they go first (#1984).
         self.emit_structural_thunks();
+        self.emit_used_builtin_show_thunks();
         self.pad_debug_locs();
         // Kept while this module holds methods a later module may clone.
         let seq = self.program_seq;

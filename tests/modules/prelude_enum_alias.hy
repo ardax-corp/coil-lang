@@ -45,7 +45,7 @@ test("an aliased Result is a type, constructor and pattern head") {
         Res::Err(_) => 0,
     };
     assert!(c == 3);
-    assert!((half(3) ?? -1) == -1);
+    assert!((half(3).ok() ?? -1) == -1);
 }
 
 test("an aliased IoError is a type and pattern head") {

@@ -36,9 +36,9 @@ fn ordered(int n) -> int {
 }
 
 test("try in a later call argument") {
-    assert!((total(2, 3) ?? -1) == 4 + 9 + 7);
-    assert!((total(2, 2000) ?? -1) == -1);
-    assert!((total(1001, 1) ?? -1) == -1);
+    assert!((total(2, 3).ok() ?? -1) == 4 + 9 + 7);
+    assert!((total(2, 2000).ok() ?? -1) == -1);
+    assert!((total(1001, 1).ok() ?? -1) == -1);
 }
 
 test("coalesce in a later call argument keeps argument order") {

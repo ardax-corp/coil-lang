@@ -509,6 +509,19 @@ impl<'a> ModuleEffects<'a> {
             }
         }
         let facts: Vec<BodyFacts> = module.bodies.iter().map(|b| BodyFacts::new(module, b)).collect();
+        let mut instances: HashMap<(String, String), Vec<InstanceBody>> = HashMap::new();
+        for (name, &s) in &program.by_name {
+            if let Some(key) = instance_key(name) {
+                instances.entry(key).or_default().push(InstanceBody::Program(s));
+            }
+        }
+        for (i, body) in module.bodies.iter().enumerate() {
+            if body.kind == BodyKind::Method
+                && let Some(key) = instance_key(&body.name)
+            {
+                instances.entry(key).or_default().push(InstanceBody::Local(i));
+            }
+        }
         let cx = Cx {
             module,
             checker,
@@ -517,6 +530,7 @@ impl<'a> ModuleEffects<'a> {
             by_def,
             by_name,
             facts,
+            instances,
         };
         let mut out = vec![Summary::default(); module.bodies.len()];
         loop {
@@ -1235,6 +1249,26 @@ struct Cx<'a> {
     by_def: HashMap<DefId, usize>,
     by_name: HashMap<&'a str, Option<usize>>,
     facts: Vec<BodyFacts>,
+    /// Trait impl bodies by receiver head and method: `Text for string`'s
+    /// `trim` is `("string", "trim")`, `VecSum for Vec<int>`'s `sum` is
+    /// `("Vec", "sum")` (#2008).
+    instances: HashMap<(String, String), Vec<InstanceBody>>,
+}
+
+/// A trait impl's method body: in this module, or summarised by an earlier one.
+#[derive(Clone, Copy)]
+enum InstanceBody {
+    Local(usize),
+    Program(Summary),
+}
+
+/// `(receiver head, method)` of an impl method body named
+/// `…Trait for Head<…>::method`.
+fn instance_key(name: &str) -> Option<(String, String)> {
+    let (_, rest) = name.split_once(" for ")?;
+    let (owner, method) = rest.rsplit_once("::")?;
+    let head = owner.split('<').next()?.trim();
+    Some((short_name(head).to_string(), method.to_string()))
 }
 
 /// One body's walk: the effects so far and the parameters it calls.
@@ -2372,6 +2406,35 @@ impl Cx<'_> {
 
     /// The summary of `recv.name(..)` when the receiver is a user class or
     /// a trait existential, and the method's body when it is this module's.
+    /// What the impls of method `name` for receiver head `owner` cost, when
+    /// their bodies were seen: one local body as itself, several joined.
+    fn instance_summary(&self, w: &Walk<'_>, owner: &str, name: &str) -> Option<(Summary, Option<usize>)> {
+        let bodies = self.instances.get(&(short_name(owner).to_string(), name.to_string()))?;
+        if let [InstanceBody::Local(i)] = bodies.as_slice() {
+            return Some((w.summaries[*i], Some(*i)));
+        }
+        let mut out: Option<Summary> = None;
+        for body in bodies {
+            let s = match *body {
+                InstanceBody::Local(i) => w.summaries[i],
+                InstanceBody::Program(s) => s,
+            };
+            out = Some(match out {
+                None => s,
+                Some(o) => Summary {
+                    flags: o.flags.union(s.flags),
+                    visible: o.visible.union(s.visible),
+                    latent: o.latent | s.latent,
+                    mutates: o.mutates | s.mutates,
+                    statics: o.statics || s.statics,
+                    // Discharged only where every impl's bits are.
+                    param_only: o.param_only & s.param_only,
+                },
+            });
+        }
+        out.map(|s| (s, None))
+    }
+
     fn method(&self, w: &Walk<'_>, recv: HirId, name: &str) -> Option<(Summary, Option<usize>)> {
         let body = &self.module.bodies[w.index];
         let e = body.expr(recv);
@@ -2388,7 +2451,9 @@ impl Cx<'_> {
                 return Some((w.summaries[*i], Some(*i)));
             }
             let qualified = format!("{}::{key}", self.module_path);
-            for k in [key.as_str(), qualified.as_str()] {
+            // The prelude's `Option` / `Result` methods live in `core`.
+            let core = format!("core::{key}");
+            for k in [key.as_str(), qualified.as_str(), core.as_str()] {
                 if let Some(&s) = self.program.by_name.get(k) {
                     return Some((s, None));
                 }
@@ -2396,6 +2461,15 @@ impl Cx<'_> {
                     return Some((Summary::of(*fx), None));
                 }
             }
+        }
+        // A trait method on a concrete receiver whose impl body is known
+        // costs what that body does (every impl for the receiver's head
+        // together, `Vec<int>` and `Vec<float>` alike), as an inherent
+        // method does (#2008).
+        if let Some(owner) = owner.as_deref()
+            && let Some(found) = self.instance_summary(w, owner, name)
+        {
+            return Some(found);
         }
         // Not an inherent method: a trait method on a bound or a concrete
         // receiver costs what the trait declares, as `name(recv)` does. On

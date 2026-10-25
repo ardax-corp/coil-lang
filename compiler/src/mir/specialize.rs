@@ -254,6 +254,10 @@ fn specialize_side(
     // after it (`find_in(..) ?? new Span(..)`) is its fields' φs.
     crate::mir::phi_sroa(&mut func);
     check_after(&func, "phi_sroa");
+    // `a && b` joins on a `bool` φ: each way in branches for itself.
+    if opts.mir_fold && crate::mir::thread_bool_phis(&mut func) > 0 {
+        check_after(&func, "thread_bool_phis");
+    }
     // Early-exit byte loops skip 64 no-op iterations at a time. Their
     // range setup is invariant in any outer loop: hoist it.
     if opts.mir_loop && crate::mir::byte_scan(&mut func) > 0 {

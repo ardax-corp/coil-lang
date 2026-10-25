@@ -4,7 +4,7 @@
 // direct MIR makes the same `CALL`.
 use tests::assert;
 use task::{scope, shield, timeout, Scope, TaskError};
-use collections::vec::{filter, map};
+use generic_vec_fns::{filter, map};
 
 fn ok_int(Result<int, TaskError> r) -> int {
     return match r {
