@@ -263,6 +263,7 @@ impl Checker {
             module_consts: HashMap::new(),
             macro_imports: HashSet::new(),
             test_try_sites: HashMap::new(),
+            try_into_sites: HashMap::new(),
             fn_option_mode: None,
             result_mode_fns: HashSet::new(),
             result_mode_ok_is_result: HashSet::new(),
@@ -3095,6 +3096,14 @@ impl Checker {
                 if let Some(ty) = self.infer_test_try(&resolved, &range) {
                     ty
                 } else if let Some((ok, err)) = result_ok_err(&resolved) {
+                    let err = match self.try_into_target(&err) {
+                        Some(conv) => {
+                            let target = conv.target.clone();
+                            self.try_into_sites.insert((range.start, range.end), conv);
+                            target
+                        }
+                        None => err,
+                    };
                     let _ = self.ensure_result_mode(&err, &range);
                     ok
                 } else if is_option_ty(&resolved) {
@@ -14333,6 +14342,37 @@ impl Checker {
         }
         self.test_try_sites.insert(key, TestTry::ShowErr(err));
         Some(ok)
+    }
+
+    /// `?` on a `Result` whose ground error type differs from the enclosing
+    /// function's ground error type, with an `impl Into<FnErr> for Err`: the
+    /// error converts through that impl instead of having to match. Without
+    /// such an impl the types still have to agree.
+    fn try_into_target(&self, operand_err: &Ty) -> Option<TryInto> {
+        let fn_err = match &self.fn_result_mode {
+            Some((_, err)) => err.clone(),
+            None => {
+                let ret = self.current_return_ty.as_ref()?;
+                result_ok_err(&apply_ty_prune(&self.subst, ret))?.1
+            }
+        };
+        let from = strip_readonly(&apply_ty_prune(&self.subst, operand_err)).clone();
+        let to = strip_readonly(&apply_ty_prune(&self.subst, &fn_err)).clone();
+        if !ftv_ty(&from).is_empty() || !ftv_ty(&to).is_empty() {
+            return None;
+        }
+        if unify_with(&Subst::empty(), &from, &to).is_ok() {
+            return None;
+        }
+        let inst = self.generics.find_instance_relaxed("Into", &[from, to.clone()])?;
+        let fqn = inst.method_fqns.get("into")?.clone();
+        Some(TryInto { fqn, target: fn_err })
+    }
+
+    /// The `Into` conversion a `?` at this span applies to its error (see
+    /// [`Self::try_into_target`]).
+    pub fn try_into_at(&self, start: usize, end: usize) -> Option<&TryInto> {
+        self.try_into_sites.get(&(start, end))
     }
 
     /// How a test-body `?` at this span fails its case, when it does so
