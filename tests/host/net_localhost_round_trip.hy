@@ -17,12 +17,12 @@ use io::net::tcp::shutdown;
 use io::net::udp::bind;
 use io::net::udp::local_port;
 use io::net::udp::send_to;
-use string::{from_bytes, to_bytes};
+use string::{from_bytes, to_bytes, StringError};
 use task::{scope, Scope, TaskError};
 
 fn serve_once(Stream listener) -> Result<string, IoError> {
     let conn = accept_wait(listener)?;
-    let got = from_bytes(read_to_end(conn)?)?;
+    let got = from_bytes(read_to_end(conn)?).map_err(fn (StringError e) => IoError::InvalidInput)?;
     write_all(conn, to_bytes("echo:" + got))?;
     close(conn)?;
     return got;
@@ -32,7 +32,7 @@ fn call(int port, string msg) -> Result<string, IoError> {
     let c = connect("127.0.0.1", port)?;
     write_all(c, to_bytes(msg))?;
     shutdown(c, 1)?;
-    let reply = from_bytes(read_to_end(c)?)?;
+    let reply = from_bytes(read_to_end(c)?).map_err(fn (StringError e) => IoError::InvalidInput)?;
     close(c)?;
     return reply;
 }
