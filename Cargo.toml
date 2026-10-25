@@ -39,6 +39,7 @@ coil-cli = { path = "coil-cli", default-features = false }
 coil-args = { path = "coil-args" }
 comptime = { path = "comptime" }
 coil-host = { path = "coil-host" }
+coil-build-id = { path = "coil-build-id" }
 clap = { version = "4.5", features = ["derive"] }
 rkyv = "0.8.12"
 sha2 = "0.10"

@@ -85,6 +85,8 @@ pub(crate) struct CliArgs {
     pub fold_calls: Option<bool>,
     pub opt_stats: bool,
     pub opt_stats_json: bool,
+    /// Reuse and fill the build cache (off with `--no-build-cache`).
+    pub build_cache: bool,
     pub host_grants: HostGrants,
     /// Extra `--root` directories (default `src` is always included).
     pub module_roots: Vec<PathBuf>,
@@ -366,6 +368,7 @@ fn parse_coil_args(args: &[String]) -> Result<CliArgs, String> {
             fold_calls: None,
             opt_stats: false,
             opt_stats_json: false,
+            build_cache: false,
             host_grants: HostGrants::deny_all(),
             module_roots: Vec::new(),
             program_args: Vec::new(),
@@ -426,6 +429,7 @@ fn cli_from(
         fold_calls: opt.fold_calls,
         opt_stats: profile.opt_stats,
         opt_stats_json: profile.opt_stats_json,
+        build_cache: !profile.no_build_cache,
         host_grants: grants.into_grants(),
         module_roots: roots,
         program_args: Vec::new(),

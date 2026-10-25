@@ -104,6 +104,10 @@ pub struct CompileProfileFlags {
     /// Print the same counters as one JSON object (stderr)
     #[arg(long)]
     pub opt_stats_json: bool,
+    /// Compile even when the build cache holds this program (see
+    /// docs/internals/build-cache.md)
+    #[arg(long)]
+    pub no_build_cache: bool,
 }
 
 impl CompileProfileFlags {
