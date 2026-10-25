@@ -147,8 +147,20 @@ native (see the table above), the `string::find_from` / `rfind` /
 userland reads bytes with `s[i]`. The VM keeps their HostInvoke rows for
 older archives, and `string_byte_at` is still what `s[i]` lowers to.
 
-Backward loops (`i = i - 1`, as `rfind` is) do not vectorise yet; that
-is filed as a follow-up.
+### 5. Backward loops (#1968)
+
+A count-down loop (`i = i - 1`, or `i + -1`, tested `i >= lo` / `i > lo`
+in either operand order or as the exit test) gets the same scan with the
+`VScan` flag `simd::SCAN_BACKWARD` (archive minor 48; it takes bit 6 of
+the length field, so a body is at most 63 words). From `p = from` it runs
+the body over lanes `p - 63 ..= p` while the lowest one passes the bound
+and every read stays in its string, stops at the highest lane where `P`
+holds (`63 - lzcnt(mask)`), else steps `p -= 64`. coil-stdlib's
+`Text::rfind` is that loop with the needle's first and last bytes as the
+filter.
+
+A backward byte search over 1 MB (`while i >= 0 { if s[i] == b ... i = i - 1; }`,
+2000 passes, the byte at offset 0): 55.9 s before, 0.30 s with the scan.
 
 ## Steps
 
