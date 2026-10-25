@@ -653,12 +653,15 @@ pub enum MirInst {
     /// lane `k`; else the `p` it stopped at. Stream `s` reads byte
     /// `p + streams[s].1 + k` of the string or byte array `streams[s].0`,
     /// and `LaneVal::Scalar(j)` is `scalars[j]`. Pure; reads immutable
-    /// bytes only.
+    /// bytes only. When `backward` (archive minor 48) the lanes are
+    /// `p - 63 + k` and must pass `> bound` (`>=` when `inclusive`), the
+    /// match is the highest lane, and `p` steps down by 64.
     ByteScan {
         dest: ValueId,
         from: ValueId,
         bound: ValueId,
         inclusive: bool,
+        backward: bool,
         streams: Vec<(ValueId, ValueId)>,
         scalars: Vec<ValueId>,
         expr: LaneExpr,

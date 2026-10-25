@@ -2710,10 +2710,13 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
                 ),
             ));
         }
-        MirInst::ByteScan { dest, from, bound, inclusive, streams, scalars, expr } => {
+        MirInst::ByteScan { dest, from, bound, inclusive, backward, streams, scalars, expr } => {
             let body = byte_scan_body(expr, streams, scalars, regs)
                 .ok_or_else(|| LowerError::Refused("byte scan body too large".into()))?;
-            let flag = if *inclusive { common::simd::SCAN_INCLUSIVE } else { 0 };
+            let mut flag = if *inclusive { common::simd::SCAN_INCLUSIVE } else { 0 };
+            if *backward {
+                flag |= common::simd::SCAN_BACKWARD;
+            }
             out.push(byte(Byte::new(Instruction::VScan).with_dense_abc(
                 body.len() as u8 | flag,
                 regs[dest.index()],

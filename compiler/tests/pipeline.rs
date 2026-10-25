@@ -1584,7 +1584,13 @@ fn main() {
     let steps = |slice: &[common::Byte]| -> Vec<u8> {
         slice
             .iter()
-            .filter(|b| matches!(*b.bytecode(), Instruction::DenseBin | Instruction::DenseBin2))
+            // A rotated latch (#1867) bumps in its `DenseBinJmpf`.
+            .filter(|b| {
+                matches!(
+                    *b.bytecode(),
+                    Instruction::DenseBin | Instruction::DenseBin2 | Instruction::DenseBinJmpf
+                )
+            })
             .map(|b| b.dense_abc_parts().0)
             .collect()
     };

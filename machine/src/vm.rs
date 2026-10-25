@@ -446,8 +446,10 @@ pub(crate) fn vload_bytes_into(
 /// while lanes `p ..= p + 63` pass `< bound` (`<= bound` when
 /// `inclusive`) and every load lies inside its array, the first `p`
 /// whose body mask is non-zero plus the mask's first lane; else the `p`
-/// it stopped at. The body runs here without dispatch, its strings
-/// resolved once. `Err` on a body that is not a byte scan.
+/// it stopped at. `backward` steps down instead, over lanes `p - 63 ..= p`
+/// passing `> bound` (`>=`), and takes the mask's last lane. The body runs
+/// here without dispatch, its strings resolved once. `Err` on a body
+/// that is not a byte scan.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn vscan(
     heap: &Heap,
@@ -458,6 +460,7 @@ pub(crate) fn vscan(
     from: i64,
     bound: i64,
     inclusive: bool,
+    backward: bool,
 ) -> Result<i64, &'static str> {
     use common::simd;
     const BAD: &str = "VScan: malformed body";
@@ -477,8 +480,10 @@ pub(crate) fn vscan(
     }
     // The last lane `p + 63` against the bound, in `i128` so nothing wraps.
     let hi = i128::from(bound) - i128::from(!inclusive) - (simd::BYTE_LANES as i128 - 1);
+    // Backward, the lowest `p` whose lane `p - 63` passes the bound.
+    let lo = i128::from(bound) + i128::from(!inclusive) + (simd::BYTE_LANES as i128 - 1);
     // Fewer than 64 lanes left (a short inner loop): nothing to decode.
-    if i128::from(from) > hi {
+    if if backward { i128::from(from) < lo } else { i128::from(from) > hi } {
         return Ok(from);
     }
     let mut slots = [const { std::mem::MaybeUninit::<Op>::uninit() }; simd::SCAN_MAX_BODY];
@@ -526,6 +531,53 @@ pub(crate) fn vscan(
     // SAFETY: the loop above wrote the first `body.len()` entries (an early
     // return leaves none read).
     let ops = unsafe { &*(&raw const slots[..body.len()] as *const [Op]) };
+    if backward {
+        let mut p = from;
+        while i128::from(p) >= lo {
+            // `p - 63 >= bound`: no wrap.
+            let base = p - (simd::BYTE_LANES as i64 - 1);
+            for op in ops {
+                match *op {
+                    Op::Load { reg, src, off } => {
+                        // A load leaving its array ends the scan: the scalar
+                        // loop takes those lanes.
+                        let Some(idx) = base.checked_add(off) else {
+                            return Ok(p);
+                        };
+                        match src {
+                            Src::Bytes(ptr, len) => {
+                                let Ok(i) = usize::try_from(idx) else {
+                                    return Ok(p);
+                                };
+                                if i.saturating_add(simd::BYTE_LANES) > len {
+                                    return Ok(p);
+                                }
+                                // SAFETY: in bounds above; the scan does not
+                                // allocate, so the bytes stay where they were.
+                                let lanes = unsafe { &*(ptr.add(i) as *const [u8; simd::BYTE_LANES]) };
+                                *crate::simd::as_bytes_mut(&mut regs[reg]) = *lanes;
+                            }
+                            Src::Other(obj, addr) => {
+                                if !vload_bytes_into(heap, obj, &mut regs[reg], addr, idx) {
+                                    return Ok(p);
+                                }
+                            }
+                        }
+                    }
+                    Op::Bin(op) => op.run(regs),
+                }
+            }
+            let m = crate::simd::movemask(&regs[0]);
+            if m != 0 {
+                return Ok(base + (simd::BYTE_LANES as i64 - 1) - i64::from(m.leading_zeros()));
+            }
+            let Some(next) = p.checked_sub(simd::BYTE_LANES as i64) else {
+                break;
+            };
+            p = next;
+        }
+        return Ok(p);
+    }
     // One string against a byte (find a byte, split): a tight loop.
     if let [Op::Load { reg, src: Src::Bytes(ptr, len), off }, Op::Bin(crate::simd::ByteOp::CmpK { pred, dest: 0, b, k })] = *ops
         && b == reg
