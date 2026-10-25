@@ -30,6 +30,7 @@ impl Hasher for VarHasher {
 }
 
 type VarIndex = HashMap<TyVarId, usize, BuildHasherDefault<VarHasher>>;
+type PosSet = HashSet<usize, BuildHasherDefault<VarHasher>>;
 
 /// A partial map from `TyVarId` to `Ty`.
 ///
@@ -39,20 +40,80 @@ type VarIndex = HashMap<TyVarId, usize, BuildHasherDefault<VarHasher>>;
 /// is shared copy-on-write, so a clone is O(1): unification returns the
 /// whole substitution from every leaf, and a whole program's checker
 /// composes after every unification (#598).
+///
+/// A write to shared data goes to `local`, a small overlay, rather than
+/// copying it: unification extends the checker's substitution by a few
+/// bindings, and copying a whole program's worth for each made checking
+/// quadratic in its size (#1857). [`Subst::absorb`] folds such an
+/// extension back in place.
 #[derive(Debug, Clone, Default)]
 pub struct Subst {
     data: Arc<SubstData>,
+    /// Bindings over `data`, newest last; one for a variable `data` binds
+    /// shadows it.
+    local: Vec<(TyVarId, Ty)>,
 }
 
 #[derive(Debug, Clone, Default)]
 struct SubstData {
     mappings: Vec<(TyVarId, Ty)>,
     index: VarIndex,
+    /// Variable to the positions whose type mentioned it (a superset:
+    /// a rewritten position stays listed).
+    users: HashMap<TyVarId, Vec<usize>, BuildHasherDefault<VarHasher>>,
+    /// Positions whose type may mention a bound variable (a superset), the
+    /// only ones besides the users of new bindings that `compose` changes.
+    stale: PosSet,
+}
+
+impl SubstData {
+    fn mentions_bound(&self, ty: &Ty) -> bool {
+        ftv_ty(ty).iter().any(|v| self.index.contains_key(v))
+    }
+
+    /// Note what `mappings[pos]`, just written, mentions.
+    fn track(&mut self, pos: usize) {
+        let free = ftv_ty(&self.mappings[pos].1);
+        if free.iter().any(|v| self.index.contains_key(v)) {
+            self.stale.insert(pos);
+        }
+        for v in free {
+            self.users.entry(v).or_default().push(pos);
+        }
+    }
+
+    fn insert(&mut self, v: TyVarId, ty: Ty) {
+        if let Some(&pos) = self.index.get(&v) {
+            self.mappings[pos].1 = ty;
+            self.track(pos);
+            return;
+        }
+        let pos = self.mappings.len();
+        self.index.insert(v, pos);
+        self.mappings.push((v, ty));
+        // Whatever mentions `v` now mentions a bound variable.
+        if let Some(users) = self.users.get(&v) {
+            self.stale.extend(users.iter().copied());
+        }
+        self.track(pos);
+    }
+
+    fn reindex(&mut self) {
+        self.index.clear();
+        self.users.clear();
+        self.stale.clear();
+        for (pos, (v, _)) in self.mappings.iter().enumerate() {
+            self.index.insert(*v, pos);
+        }
+        for pos in 0..self.mappings.len() {
+            self.track(pos);
+        }
+    }
 }
 
 impl PartialEq for Subst {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.data, &other.data) || self.data.mappings == other.data.mappings
+        (Arc::ptr_eq(&self.data, &other.data) && self.local == other.local) || self.iter().eq(other.iter())
     }
 }
 
@@ -70,7 +131,9 @@ impl Subst {
             data: Arc::new(SubstData {
                 mappings: Vec::with_capacity(n),
                 index: VarIndex::with_capacity_and_hasher(n, Default::default()),
+                ..SubstData::default()
             }),
+            local: Vec::new(),
         }
     }
 
@@ -85,13 +148,23 @@ impl Subst {
     /// canonical "most recent substitution wins" semantics used by
     /// `compose`.
     pub fn insert(&mut self, v: TyVarId, ty: Ty) {
-        let data = Arc::make_mut(&mut self.data);
-        if let Some(&pos) = data.index.get(&v) {
-            data.mappings[pos].1 = ty;
-            return;
+        if let Some(slot) = self.local.iter_mut().find(|(k, _)| *k == v) {
+            slot.1 = ty;
+        } else if let Some(data) = Arc::get_mut(&mut self.data) {
+            data.insert(v, ty);
+        } else {
+            self.local.push((v, ty));
         }
-        data.index.insert(v, data.mappings.len());
-        data.mappings.push((v, ty));
+    }
+
+    /// Fold `local` into `data`, copying `data` if it is shared.
+    fn own(&mut self) -> &mut SubstData {
+        let local = std::mem::take(&mut self.local);
+        let data = Arc::make_mut(&mut self.data);
+        for (v, ty) in local {
+            data.insert(v, ty);
+        }
+        data
     }
 
     /// Remove any binding for `v`. Returns the removed value if there was
@@ -100,56 +173,115 @@ impl Subst {
         if !self.contains(v) {
             return None;
         }
-        let data = Arc::make_mut(&mut self.data);
+        let data = self.own();
         let pos = data.index.remove(&v)?;
         let (_, ty) = data.mappings.remove(pos);
-        for (k, _) in &data.mappings[pos..] {
-            if let Some(p) = data.index.get_mut(k) {
-                *p -= 1;
-            }
-        }
+        data.reindex();
         Some(ty)
     }
 
     /// True if `v` is in the domain of this substitution.
     pub fn contains(&self, v: TyVarId) -> bool {
-        self.data.index.contains_key(&v)
+        self.get(v).is_some()
     }
 
     /// Look up the binding for `v`, if any.
     pub fn get(&self, v: TyVarId) -> Option<&Ty> {
-        self.data.index.get(&v).map(|&pos| &self.data.mappings[pos].1)
+        match self.local.iter().rev().find(|(k, _)| *k == v) {
+            Some((_, t)) => Some(t),
+            None => self.data.index.get(&v).map(|&pos| &self.data.mappings[pos].1),
+        }
     }
 
     /// True when `other` is this very substitution (a clone that was never
     /// written to): `unify_with` hands back its input when it binds nothing.
     pub fn is_same(&self, other: &Subst) -> bool {
-        Arc::ptr_eq(&self.data, &other.data)
+        Arc::ptr_eq(&self.data, &other.data) && self.local.is_empty() && other.local.is_empty()
     }
 
     /// Number of bindings.
     pub fn len(&self) -> usize {
-        self.data.mappings.len()
+        self.data.mappings.len() + self.local.iter().filter(|(k, _)| !self.data.index.contains_key(k)).count()
     }
 
     /// True if the substitution has no bindings.
     pub fn is_empty(&self) -> bool {
-        self.data.mappings.is_empty()
+        self.data.mappings.is_empty() && self.local.is_empty()
     }
 
     /// Iterate over `(variable, type)` pairs in insertion order.
     pub fn iter(&self) -> impl Iterator<Item = (TyVarId, &Ty)> {
-        self.data.mappings.iter().map(|(k, v)| (*k, v))
+        let shadowed = |k: TyVarId| self.local.iter().rev().find(|(l, _)| *l == k).map(|(_, t)| t);
+        self.data
+            .mappings
+            .iter()
+            .map(move |(k, v)| (*k, shadowed(*k).unwrap_or(v)))
+            .chain(self.local.iter().filter(|(k, _)| !self.data.index.contains_key(k)).map(|(k, v)| (*k, v)))
     }
 
     /// Free variables of the codomain (i.e. of every mapped-to type).
     /// Useful when checking whether a substitution is closed.
     pub fn ftv(&self) -> HashSet<TyVarId> {
         let mut acc = HashSet::new();
-        for (_, t) in &self.data.mappings {
+        for (_, t) in self.iter() {
             acc.extend(ftv_ty(t));
         }
         acc
+    }
+
+    /// `*self = compose(&s, self)`, in place when `s` is `self` extended
+    /// with new bindings (what [`unify_with`](super::unify::unify_with)
+    /// returns): only the new bindings' users and the positions that may
+    /// mention a bound variable change, so the cost follows the extension,
+    /// not the whole substitution (#1857).
+    ///
+    /// When `s` bound nothing it is `self` itself, and composing a
+    /// substitution with itself only re-resolves chains one step, which
+    /// every reader prunes anyway: that is skipped (#607).
+    pub fn absorb(&mut self, s: Subst) {
+        if s.is_same(self) {
+            return;
+        }
+        let extends = Arc::ptr_eq(&self.data, &s.data)
+            && self.local.is_empty()
+            && s.local.iter().all(|(k, _)| !s.data.index.contains_key(k));
+        if !extends {
+            *self = compose(&s, self);
+            return;
+        }
+        let mut work: PosSet = s.data.stale.clone();
+        for (k, _) in &s.local {
+            if let Some(users) = s.data.users.get(k) {
+                work.extend(users.iter().copied());
+            }
+        }
+        let mut work: Vec<usize> = work.into_iter().collect();
+        work.sort_unstable();
+        // Every new value reads `s` as it stands, as `compose` does.
+        let updates: Vec<(usize, Ty)> = work
+            .into_iter()
+            .filter_map(|pos| {
+                let old = &s.data.mappings[pos].1;
+                let new = apply_ty(&s, old);
+                (new != *old).then_some((pos, new))
+            })
+            .collect();
+        let Subst { data, local } = s;
+        drop(data);
+        let data = Arc::make_mut(&mut self.data);
+        for (pos, ty) in updates {
+            data.mappings[pos].1 = ty;
+            data.track(pos);
+        }
+        for (v, ty) in local {
+            data.insert(v, ty);
+        }
+        let stale: Vec<usize> = data.stale.iter().copied().collect();
+        for pos in stale {
+            if !data.mentions_bound(&data.mappings[pos].1) {
+                data.stale.remove(&pos);
+            }
+        }
     }
 }
 
@@ -479,6 +611,37 @@ mod tests {
     #[test]
     fn compose_of_two_empties_is_empty() {
         assert_eq!(compose(&Subst::empty(), &Subst::empty()), Subst::empty());
+    }
+
+    #[test]
+    fn absorb_in_place_matches_compose() {
+        // A base with a chain, extended through a shared clone (as
+        // `unify_with` does) a few times: absorbing each extension in
+        // place gives exactly what composing does.
+        let fun = |a: Ty, b: Ty| Ty::Fun(Box::new(a), Box::new(b));
+        let mut base = Subst::empty();
+        base.insert(TyVarId(0), fun(v(1), v(2)));
+        base.insert(TyVarId(3), v(4));
+        base.insert(TyVarId(4), v(5));
+        let mut in_place = base.clone();
+        let mut composed = base;
+        let steps = [
+            vec![(1, int()), (2, v(6))],
+            vec![(6, v(7)), (7, string())],
+            vec![(5, fun(v(8), v(0)))],
+            vec![(8, float())],
+        ];
+        for step in steps {
+            let mut ext = in_place.clone();
+            for (k, t) in step {
+                ext.insert(TyVarId(k), t);
+            }
+            composed = compose(&ext, &composed);
+            in_place.absorb(ext);
+            let got: Vec<(TyVarId, Ty)> = in_place.iter().map(|(k, t)| (k, t.clone())).collect();
+            let want: Vec<(TyVarId, Ty)> = composed.iter().map(|(k, t)| (k, t.clone())).collect();
+            assert_eq!(got, want);
+        }
     }
 
     #[test]
