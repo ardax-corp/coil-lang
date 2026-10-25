@@ -51,9 +51,9 @@ Expected gist: Hall → Library (take key) → inventory → Hall → Garden →
 
 1. `match` takes no string patterns, so `parse_command` compares words with
    `==` in an `if` chain.
-2. `text::trim` / `to_lower` return `Result<string, string>` while `main`'s
-   `?` is for `IoError`; `??` with the input as the fallback keeps them out of
-   `?` (coil-lang#1847).
+2. `text::trim` / `to_lower` used to return `Result<string, string>`, which
+   clashed with `main`'s `?` on `IoError` (coil-lang#1847); they are plain
+   `Text` methods now (`line.trim().to_lower()`, coil-stdlib#59).
 3. `return` is not an expression, so a `match` arm cannot return early;
    `handle` keeps a `playing` flag instead.
 4. The test harness scans `./tests` relative to CWD only.

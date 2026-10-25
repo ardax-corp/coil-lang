@@ -3,7 +3,7 @@
 // are, and allocating callees in between must not lose them.
 use tests::assert;
 use string::format;
-use collections::vec::{chunks, concat, filter, map, partition, windows};
+use generic_vec_fns::{chunks, concat, filter, map, partition, windows};
 
 fn apply_to<T, U>(T x, T -> U f) -> U {
     return f(x);

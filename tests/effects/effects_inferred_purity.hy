@@ -3,7 +3,7 @@
 // across tasks; one whose lambda writes a static stays sequential. Both
 // must fold to the sequential sum.
 use tests::assert;
-use collections::vec::map;
+use generic_vec_fns::map;
 
 static let HITS: int = 0;
 
