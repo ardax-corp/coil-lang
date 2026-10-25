@@ -994,8 +994,32 @@ fn apply_trailing_dense_bin(ctx: &mut HotCtx<'_, '_>) -> bool {
 
 /// nsieve k-loop: `DenseStoreIndex ; DenseBin ; JMP` (COI-382 S5). Peek the
 /// IV bump and latch without a new discriminant. Giant match stays split.
+/// After loop inversion (#1867) the latch is `DenseBinJmpf` (IV bump and
+/// the header's compare-branch), so peek that too: a rotated store loop is
+/// one dispatch per iteration.
 #[inline(always)]
 fn apply_trailing_dense_bin_jmp(ctx: &mut HotCtx<'_, '_>) {
+    if ctx.ip < ctx.code.len() {
+        let next = copy_byte(ctx.code, ctx.ip);
+        if *next.bytecode() as u8 == Instruction::DenseBinJmpf as u8 {
+            ctx.ip += 1;
+            let r = dense_bin(ctx.stack, ctx.sp, &next, ctx.stack_cap);
+            if !hot_int(ctx, r) {
+                return;
+            }
+            let tail = take_code_word(ctx);
+            let target = dense_bin_jmp_tail(
+                ctx.stack,
+                ctx.sp,
+                &tail,
+                ctx.constants,
+                ctx.heap,
+                ctx.stack_cap,
+            );
+            apply_jump(ctx, target);
+            return;
+        }
+    }
     if apply_trailing_dense_bin(ctx) {
         apply_trailing_jmp(ctx);
     }
