@@ -200,9 +200,9 @@ pub enum IoErrorTag {
     AlreadyExists = 7,
     TimedOut = 8,
     Truncated = 9,
-    Certificate = 10,
-    Handshake = 11,
-    NotATerminal = 12,
+    /// An attached package stream reported a protocol failure (a TLS
+    /// certificate, handshake or alert); the package says which.
+    Protocol = 10,
 }
 
 impl IoErrorTag {
@@ -233,9 +233,9 @@ impl IoErrorTag {
             7 => Self::AlreadyExists,
             8 => Self::TimedOut,
             9 => Self::Truncated,
-            10 => Self::Certificate,
-            11 => Self::Handshake,
-            12 => Self::NotATerminal,
+            // A package's own failure: coil-tls sends its certificate (10)
+            // and handshake (11) codes; it reports which through its own API.
+            10 | 11 => Self::Protocol,
             _ => Self::Other,
         }
     }
@@ -252,9 +252,7 @@ impl IoErrorTag {
             "AlreadyExists" => Self::AlreadyExists,
             "TimedOut" => Self::TimedOut,
             "Truncated" => Self::Truncated,
-            "Certificate" => Self::Certificate,
-            "Handshake" => Self::Handshake,
-            "NotATerminal" => Self::NotATerminal,
+            "Protocol" | "Certificate" | "Handshake" => Self::Protocol,
             _ => Self::Other,
         }
     }
@@ -1577,10 +1575,11 @@ pub fn value_as_bytes(heap: &Heap, v: Value) -> Result<Vec<u8>, IoErrorTag> {
 
 /// Decode `Vec<byte>` as UTF-8 into a heap string.
 ///
-/// Invalid UTF-8 → `Err(InvalidInput)`.
-pub fn from_bytes(heap: &mut Heap, buf: Value) -> Result<Value, IoErrorTag> {
-    let bytes = value_as_bytes(heap, buf)?;
-    let s = String::from_utf8(bytes).map_err(|_| IoErrorTag::InvalidInput)?;
+/// Invalid UTF-8 → `Err(StringError::InvalidUtf8)`.
+pub fn from_bytes(heap: &mut Heap, buf: Value) -> Result<Value, crate::str_bytes::StringErrorTag> {
+    use crate::str_bytes::StringErrorTag;
+    let bytes = value_as_bytes(heap, buf).map_err(|_| StringErrorTag::InvalidUtf8)?;
+    let s = String::from_utf8(bytes).map_err(|_| StringErrorTag::InvalidUtf8)?;
     let gc = heap.alloc_string(s);
     Ok(Value::from(gc.as_ptr() as *mut u8 as u64))
 }
@@ -1846,7 +1845,7 @@ mod tests {
         let mut heap = Heap::default();
         let buf = make_byte_array(&mut heap, &[0xff, 0xfe]);
         let err = from_bytes(&mut heap, buf).unwrap_err();
-        assert_eq!(err, IoErrorTag::InvalidInput);
+        assert_eq!(err, crate::str_bytes::StringErrorTag::InvalidUtf8);
     }
 
     #[test]
@@ -1871,12 +1870,12 @@ mod tests {
         let mut heap = Heap::default();
         let ok_buf = make_byte_array(&mut heap, b"x");
         let ok_inner = from_bytes(&mut heap, ok_buf);
-        let ok = as_result_value(&mut heap, ok_inner);
+        let ok = crate::str_bytes::as_string_result_value(&mut heap, ok_inner);
         assert_eq!(enum_tag(&heap, ok), Some(0));
 
         let err_buf = make_byte_array(&mut heap, &[0x80]);
         let err_inner = from_bytes(&mut heap, err_buf);
-        let err = as_result_value(&mut heap, err_inner);
+        let err = crate::str_bytes::as_string_result_value(&mut heap, err_inner);
         assert_eq!(enum_tag(&heap, err), Some(1));
     }
 
@@ -2187,13 +2186,14 @@ mod tests {
             IoErrorTag::from_abi_name("WouldBlock"),
             IoErrorTag::WouldBlock
         );
+        // coil-tls names its own failures; the stream reports `Protocol`.
         assert_eq!(
             IoErrorTag::from_abi_name("Certificate"),
-            IoErrorTag::Certificate
+            IoErrorTag::Protocol
         );
         assert_eq!(
             IoErrorTag::from_abi_name("Handshake"),
-            IoErrorTag::Handshake
+            IoErrorTag::Protocol
         );
         assert_eq!(IoErrorTag::from_abi_name("TimedOut"), IoErrorTag::TimedOut);
         assert_eq!(IoErrorTag::from_abi_name("not-a-tag"), IoErrorTag::Other);
@@ -2201,10 +2201,9 @@ mod tests {
             IoErrorTag::from_abi_name("WouldBlock"),
             IoErrorTag::from_abi(0)
         );
-        assert_eq!(
-            IoErrorTag::from_abi_name("Handshake"),
-            IoErrorTag::from_abi(11)
-        );
+        assert_eq!(IoErrorTag::from_abi(10), IoErrorTag::Protocol);
+        assert_eq!(IoErrorTag::from_abi(11), IoErrorTag::Protocol);
+        assert_eq!(IoErrorTag::from_abi(12), IoErrorTag::Other);
     }
 
     #[test]
@@ -2213,17 +2212,14 @@ mod tests {
         for (tag, expected) in [
             (IoErrorTag::TimedOut, 8u32),
             (IoErrorTag::Truncated, 9),
-            (IoErrorTag::Certificate, 10),
-            (IoErrorTag::Handshake, 11),
-            (IoErrorTag::NotATerminal, 12),
+            (IoErrorTag::Protocol, 10),
         ] {
             let v = alloc_io_error(&mut heap, tag);
             assert_eq!(enum_tag(&heap, v), Some(expected));
         }
-        assert_eq!(BUILTIN_IO_ERROR_VARIANTS.len(), 13);
-        assert_eq!(BUILTIN_IO_ERROR_VARIANTS[12], "NotATerminal");
+        assert_eq!(BUILTIN_IO_ERROR_VARIANTS.len(), 11);
         assert_eq!(BUILTIN_IO_ERROR_VARIANTS[8], "TimedOut");
-        assert_eq!(BUILTIN_IO_ERROR_VARIANTS[11], "Handshake");
+        assert_eq!(BUILTIN_IO_ERROR_VARIANTS[10], "Protocol");
     }
 
     fn tcp_connected_pair() -> (TcpStream, TcpStream) {
