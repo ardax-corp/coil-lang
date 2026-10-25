@@ -1546,8 +1546,11 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         // A read of a `const` or static of type `()` (a unit `comptime`
         // expression's hidden const) is `()`: its initializer already ran
         // while compiling or in the prologue (#1798). An assignment target
-        // has no type of its own, so it stays a global.
-        if own.as_ref().is_some_and(|t| matches!(strip_readonly(t), Ty::Con(n) if n == coil_ty::UNIT)) {
+        // has no type of its own, so it stays a global. An FFI type tag
+        // (`ffi::types::Void`) is a signature operand, not a value.
+        if own.as_ref().is_some_and(|t| matches!(strip_readonly(t), Ty::Con(n) if n == coil_ty::UNIT))
+            && self.checker.ffi_type_tag_from_name(&name).is_none()
+        {
             return self.emit_ty(b, node, HirKind::Lit(Lit::Unit), own);
         }
         let ty = own.or_else(|| self.static_ty(&name));
