@@ -38,13 +38,16 @@ impl TyVarCounter {
     }
 }
 
-/// A single scope's bindings. Bindings are stored in insertion order so
-/// that lookup can prefer the most recently inserted (shadowing) name in
-/// linear time.
+/// A single scope's bindings, in insertion order, with an index of each
+/// name's latest (shadowing) binding: a module frame holds every top-level
+/// name, and a linear lookup there made checking quadratic in the number
+/// of functions (#1857).
 #[derive(Debug, Default, Clone)]
 pub struct Frame {
     /// Name, scheme, and whether the binding is a `const`.
     bindings: Vec<(String, Scheme, bool)>,
+    /// Name to the index of its latest binding in `bindings`.
+    latest: HashMap<String, usize>,
 }
 
 impl Frame {
@@ -55,13 +58,15 @@ impl Frame {
     /// Bind `name` to `scheme` in this frame. Later bindings with the same
     /// name shadow earlier ones within the same frame.
     pub fn insert(&mut self, name: impl Into<String>, scheme: Scheme) {
-        self.bindings.push((name.into(), scheme, false));
+        let name = name.into();
+        self.latest.insert(name.clone(), self.bindings.len());
+        self.bindings.push((name, scheme, false));
     }
 
     /// Mark the latest binding of `name` in this frame as a `const`.
     pub fn mark_const(&mut self, name: &str) {
-        if let Some(b) = self.bindings.iter_mut().rev().find(|(n, ..)| n == name) {
-            b.2 = true;
+        if let Some(&i) = self.latest.get(name) {
+            self.bindings[i].2 = true;
         }
     }
 
@@ -77,26 +82,34 @@ impl Frame {
     /// Drop bindings of `name` inserted at or after index `mark` (see
     /// [`Self::len`]), exposing whatever `name` was bound to before.
     pub fn drop_since(&mut self, name: &str, mark: usize) {
+        if self.latest.get(name).is_none_or(|&i| i < mark) {
+            return;
+        }
         let mut i = 0;
         self.bindings.retain(|(n, ..)| {
             let keep = i < mark || n != name;
             i += 1;
             keep
         });
+        // `name` falls back to its binding before `mark`, and the bindings
+        // after `mark` moved down: index those again.
+        match self.bindings[..mark.min(self.bindings.len())].iter().rposition(|(n, ..)| n == name) {
+            Some(i) => self.latest.insert(name.to_string(), i),
+            None => self.latest.remove(name),
+        };
+        for i in mark..self.bindings.len() {
+            self.latest.insert(self.bindings[i].0.clone(), i);
+        }
     }
 
     /// Look up `name` in this frame only (no parent walk).
     pub fn lookup(&self, name: &str) -> Option<&Scheme> {
-        self.bindings
-            .iter()
-            .rev()
-            .find(|(n, ..)| n == name)
-            .map(|(_, s, _)| s)
+        self.latest.get(name).map(|&i| &self.bindings[i].1)
     }
 
     /// Whether the latest binding of `name` in this frame is a `const`.
     fn binds_const(&self, name: &str) -> Option<bool> {
-        self.bindings.iter().rev().find(|(n, ..)| n == name).map(|b| b.2)
+        self.latest.get(name).map(|&i| self.bindings[i].2)
     }
 
     /// Iterate bindings in insertion order for tooling such as completions.
