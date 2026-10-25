@@ -271,7 +271,7 @@ fn command_line_roots_and_grants_reach_diagnostics() {
 /// output, and without one the diagnostic says to build the project.
 #[test]
 fn comptime_io_is_replayed_from_the_cache() {
-    let provider = "use macro::{Expr, Code, lit};\nuse env::var;\n\nmacro env_text(Expr name) -> Code {\n    return lit(var(name.src()) ?? \"\");\n}\n";
+    let provider = "use macro::{Expr, Code, lit};\nuse env::var;\n\nmacro env_text(Expr name) -> Code {\n    return lit(var(name.src()).ok() ?? \"\");\n}\n";
     let main = "use gen::{env_text};\n\nfn main() {\n    let n: int = env_text!(CT_VALUE).len();\n}\n";
     let dir = project("comptime-replay", &[("src/main.hy", main), ("src/gen.hy", provider)]);
     let main_uri = uri(&dir.join("src/main.hy"));
