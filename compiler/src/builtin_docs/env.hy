@@ -21,9 +21,6 @@ enum EnvError {
     InvalidInput,
     /// `var` asked for a variable that is not set.
     NotFound,
-    /// Reserved; no `env` function returns it today (a missing
-    /// `--allow-exec` / `--allow-exit` grant is a compile error instead).
-    ExecDisabled,
     /// `exec` could not start the program, or the program was ended by a
     /// signal and has no exit code.
     ExecFailed,

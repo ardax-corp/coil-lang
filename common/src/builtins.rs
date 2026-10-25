@@ -76,7 +76,6 @@ pub const BUILTIN_ENV_ERROR_ENUM: &str = "EnvError";
 pub const BUILTIN_ENV_ERROR_VARIANTS: &[&str] = &[
     "InvalidInput",
     "NotFound",
-    "ExecDisabled",
     "ExecFailed",
     "Other",
 ];
