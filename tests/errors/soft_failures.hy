@@ -62,7 +62,7 @@ test("option none coalesce") {
 }
 
 test("result err coalesce swallows") {
-    assert!((Result::Err("e") ?? 5) == 5);
+    assert!((Result::Err("e").ok() ?? 5) == 5);
 }
 
 test("match err arm taken") {

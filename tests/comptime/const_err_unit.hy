@@ -33,7 +33,7 @@ test("Err of a unit variant") {
         Result::Err(Why::Broken) => "broken",
     };
     assert!(why == "broken");
-    assert!((FOUND ?? "") == "found");
+    assert!((FOUND.ok() ?? "") == "found");
 }
 
 test("Err of ()") {

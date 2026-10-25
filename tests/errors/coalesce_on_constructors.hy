@@ -6,7 +6,7 @@ test("defaults for a bare None and an Err") {
     let a = Option::None ?? "bar";
     assert!((typeof a) == "string");
     assert!(a == "bar");
-    let b = Result::Err("boom") ?? 7;
+    let b = Result::Err("boom").ok() ?? 7;
     assert!((typeof b) == "int");
     assert!(b == 7);
 }

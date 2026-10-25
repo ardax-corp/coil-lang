@@ -3160,7 +3160,18 @@ impl Checker {
             Expression::Coalesce(lhs, rhs) => {
                 let lhs_ty = self.infer(lhs);
                 let resolved = apply_ty_prune(&self.subst, &lhs_ty);
+                // On a Result `??` would drop the error without a word: the
+                // fallback is spelled out there (#1878).
                 let payload = if let Some((ok, _)) = result_ok_err(&resolved) {
+                    let what = self.diag_ty(&resolved);
+                    let _ = self.error_with_help(
+                        ErrorCode::InvalidCoalesce,
+                        format!("`??` takes an Option, found `{what}`: on a Result it would discard the error"),
+                        range.clone(),
+                        Some("write `.unwrap_or(fallback)` (or `.ok() ?? fallback`) to drop the error on purpose, or `?` to pass it on".into()),
+                    );
+                    // The fallback still checks against the payload, so one
+                    // mistake is one error.
                     ok
                 } else if is_option_ty(&resolved) {
                     option_inner(&resolved).unwrap_or_else(|| Ty::Var(self.counter.fresh()))

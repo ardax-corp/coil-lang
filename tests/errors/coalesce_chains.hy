@@ -1,7 +1,7 @@
 // `??` is right-associative: `a ?? b ?? c` is `a ?? (b ?? c)`, so the first
-// success wins and the last operand is the fallback. A Result's `Err` is
-// discarded. `??` binds looser than `==` and `+`, so `a ?? b + c` is
-// `a ?? (b + c)`.
+// success wins and the last operand is the fallback. `??` takes an Option
+// only (#1878): a Result's error is dropped on purpose with `.ok()`. `??`
+// binds looser than `==` and `+`, so `a ?? b + c` is `a ?? (b + c)`.
 use tests::assert;
 
 fn some(int v) -> Option<int> {
@@ -27,9 +27,9 @@ test("the first success in a chain wins") {
 }
 
 test("Option and Result mixed in one chain") {
-    assert!((err() ?? some(4) ?? 0) == 4);
-    assert!((none() ?? ok(5) ?? 0) == 5);
-    assert!((err() ?? none() ?? -1) == -1);
+    assert!((err().ok() ?? some(4) ?? 0) == 4);
+    assert!((none() ?? ok(5).ok() ?? 0) == 5);
+    assert!((err().ok() ?? none() ?? -1) == -1);
 }
 
 test("strings and an expression fallback") {

@@ -5,7 +5,7 @@ use io::file::read_text;
 use comptime_io::file_text;
 use tests::assert;
 
-const GREETING = read_text("tests/comptime/data/greeting.txt") ?? "";
+const GREETING = read_text("tests/comptime/data/greeting.txt").ok() ?? "";
 
 test("a const reads a file") {
     assert!(GREETING == "hello from a file\n");
@@ -13,7 +13,7 @@ test("a const reads a file") {
 
 test("a comptime expression reads a file") {
     let text = comptime read_text("tests/comptime/data/greeting.txt");
-    assert!((text ?? "") == "hello from a file\n");
+    assert!((text.ok() ?? "") == "hello from a file\n");
 }
 
 test("a macro reads a file") {

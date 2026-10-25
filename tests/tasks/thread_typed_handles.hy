@@ -37,5 +37,5 @@ fn run() -> Result<string, ThreadError> {
 }
 
 fn main() {
-    println(run() ?? "failed")?;
+    println(run().ok() ?? "failed")?;
 }

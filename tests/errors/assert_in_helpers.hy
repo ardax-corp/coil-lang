@@ -35,6 +35,6 @@ test("? forwards the assert's Err") {
 
 test("the caller keeps running after a helper's assert fails") {
     let r = positive(-1);
-    let after = r ?? 99;
+    let after = r.ok() ?? 99;
     assert!(after == 99);
 }

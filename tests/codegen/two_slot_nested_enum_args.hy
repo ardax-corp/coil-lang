@@ -353,7 +353,7 @@ test("call(Some(..)) ?? default") {
 }
 
 test("call(Err(..)) ?? default") {
-    assert!((describe(Result::Err("boom")) ?? "fallback") == "fallback");
+    assert!((describe(Result::Err("boom")).ok() ?? "fallback") == "fallback");
 }
 
 test("niche match arms rebuild Some") {
