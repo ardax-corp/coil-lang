@@ -304,18 +304,19 @@ fn main() {
         packed_jmp >= 1,
         "COI-377 S1: nested mandelbrot inner escape should pack DenseBinJmpf"
     );
+    // The inverted latch (#1867) repeats the header's compare-branch.
     let mut latch = 0usize;
     for w in bc.windows(3) {
         if *w[0].bytecode() == Instruction::DenseBin2
             && *w[1].bytecode() == Instruction::DenseBin
-            && *w[2].bytecode() == Instruction::JMP
+            && is_jmpt(*w[2].bytecode())
         {
             latch += 1;
         }
     }
     assert!(
         latch >= 1,
-        "COI-387 X2: nested mandelbrot inner latch should be DenseBin2; DenseBin; JMP"
+        "COI-387 X2 + #1867: nested mandelbrot inner latch should be DenseBin2; DenseBin; *Jmpt"
     );
     let mut cast_bin = 0usize;
     for w in bc.windows(2) {
@@ -444,28 +445,21 @@ fn main() {
         packed >= 1,
         "COI-379 S4: nsieve p-loop should pack DenseIndexJmpf"
     );
-    let mut latch = 0usize;
-    for w in bc.windows(2) {
-        if *w[0].bytecode() == Instruction::DenseBin && *w[1].bytecode() == Instruction::JMP {
-            latch += 1;
-        }
-    }
-    assert!(
-        latch >= 1,
-        "COI-387 X2: nsieve k-loop should be DenseBin; JMP"
-    );
+    // Loop inversion (#1867): the k-loop latch bumps the IV and repeats the
+    // header's compare-branch in one `DenseBinJmpf`, right after the store
+    // (the VM peeks it from `DenseStoreIndex`: one dispatch per iteration).
     let mut stride = 0usize;
     for w in bc.windows(3) {
         if *w[0].bytecode() == Instruction::DenseStoreIndex
-            && *w[1].bytecode() == Instruction::DenseBin
-            && *w[2].bytecode() == Instruction::JMP
+            && *w[1].bytecode() == Instruction::DenseBinJmpf
+            && is_jmpt(*w[2].bytecode())
         {
             stride += 1;
         }
     }
     assert!(
         stride >= 1,
-        "COI-382 S5: nsieve k-loop should be DenseStoreIndex; DenseBin; JMP"
+        "COI-382 S5 + #1867: nsieve k-loop should be DenseStoreIndex; DenseBinJmpf (*Jmpt)"
     );
     // The store's unread dest shares the stored value's register: no
     // `DenseMove` re-materializes the constant before it (#1867).
@@ -3109,6 +3103,13 @@ fn main() {
     );
     let mut vm = machine::Machine::<64>::with_operand_capacity(64);
     vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+}
+
+fn is_jmpt(op: Instruction) -> bool {
+    matches!(
+        op,
+        Instruction::BinSlotSlotJmpt | Instruction::BinSlotImmJmpt | Instruction::CmpJmpt | Instruction::JMPT
+    )
 }
 
 /// A format loop may take dense (the cost gate decides); either way it runs

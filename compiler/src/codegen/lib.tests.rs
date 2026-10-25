@@ -821,7 +821,7 @@ use string::{format, to_bytes};
     };
     let latch = bc
         .iter()
-        .rposition(|b| matches!(b.bytecode(), Instruction::JMP))
+        .rposition(|b| is_back_edge_op(*b.bytecode()))
         .unwrap();
     let strings_in_loop = bc[j..=latch]
         .iter()
@@ -933,7 +933,7 @@ fn for_in_array_hoists_array_len_out_of_loop() {
     );
     let latch = bc
         .iter()
-        .rposition(|b| matches!(b.bytecode(), Instruction::JMP))
+        .rposition(|b| is_back_edge_op(*b.bytecode()))
         .unwrap();
     let lens_in_loop = bc[header..=latch]
         .iter()
@@ -1640,6 +1640,21 @@ fn loop_exit_branch_count(bc: &[common::Byte]) -> usize {
         .count()
 }
 
+/// A loop's back edge: `JMP`, or the `*Jmpt` of an inverted latch (#1867).
+fn is_back_edge_op(op: common::Instruction) -> bool {
+    use common::Instruction;
+    matches!(
+        op,
+        Instruction::JMP
+            | Instruction::JMPT
+            | Instruction::CmpJmpt
+            | Instruction::BinSlotImmJmpt
+            | Instruction::BinSlotSlotJmpt
+            | Instruction::BinSlotSlotConstJmpt
+            | Instruction::LogNotJmpt
+    )
+}
+
 fn loop_exit_target(bc: &[common::Byte], pool: &[u64]) -> Option<usize> {
     use common::Instruction;
     for b in bc {
@@ -2128,10 +2143,10 @@ fn loop_jmpf_exits_past_back_edge() {
     let back_jmp_idx = bc
         .iter()
         .enumerate()
-        .filter(|(_, b)| matches!(b.bytecode(), Instruction::JMP))
+        .filter(|(_, b)| is_back_edge_op(*b.bytecode()))
         .map(|(i, _)| i)
         .find(|&i| i > cond_idx)
-        .expect("loop should emit back-edge JMP after exit branch");
+        .expect("loop should emit a back edge (JMP, or the inverted latch's *Jmpt) after exit branch");
     let exit_target = loop_exit_target(&bc, &pool).expect("loop exit target");
     assert!(
         exit_target > back_jmp_idx,
@@ -2203,28 +2218,24 @@ fn main() { spin(false); }",
     );
 }
 
-/// Plain while headers must not invert to *Jmpt (COI-87 latch stays *Jmpf).
+/// Plain while headers must not invert to *Jmpt (COI-87: the header stays
+/// *Jmpf). The inverted latch (#1867) repeats the test as a backward *Jmpt.
 #[test]
 fn while_header_stays_fused_jmpf_not_jmpt() {
     use common::Instruction;
-    let (bc, _) = compile_src(
+    let (bc, pool) = compile_src(
         "fn main() -> Vec<int> { let i = 0; while (i < 10) { i = i + 1; } let out: Vec<int> = Vec::new(); out.push(i); return out; }",
     );
-    let jmpt = bc
+    let forward_jmpt = bc
         .iter()
-        .filter(|b| {
-            matches!(
-                b.bytecode(),
-                Instruction::JMPT
-                    | Instruction::CmpJmpt
-                    | Instruction::BinSlotImmJmpt
-                    | Instruction::BinSlotSlotJmpt
-                    | Instruction::BinSlotSlotConstJmpt
-                    | Instruction::LogNotJmpt
-            )
+        .enumerate()
+        .filter(|(pc, b)| {
+            is_back_edge_op(*b.bytecode())
+                && *b.bytecode() != Instruction::JMP
+                && crate::codegen::precise_frames::jump_target(b, &pool).is_none_or(|t| t > *pc)
         })
         .count();
-    assert_eq!(jmpt, 0, "header-only while must not emit *Jmpt");
+    assert_eq!(forward_jmpt, 0, "header-only while must not emit a forward *Jmpt");
     assert!(
         bc.iter()
             .any(|b| matches!(b.bytecode(), Instruction::BinSlotImmJmpf)),
