@@ -15,7 +15,7 @@ comptime {
 }
 
 comptime {
-    let text = read_text("tests/comptime/data/names.txt") ?? "";
+    let text = read_text("tests/comptime/data/names.txt").ok() ?? "";
     let names: Vec<string> = text.lines();
     return records(names);
 }
