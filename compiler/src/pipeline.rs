@@ -155,6 +155,8 @@ pub struct Pipeline {
     pending_native_ids: Vec<(String, usize)>,
     /// Owned diagnostic sink (pretty / SARIF / LSP).
     sink: Box<dyn DiagnosticSink>,
+    /// How many diagnostics reached [`Self::sink`] ([`Self::diagnostics_emitted`]).
+    diagnostics: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// How many compiler messages have already been emitted to [`Self::sink`].
     messages_emitted: usize,
     /// Told what [`Self::compile_src_from_file`] is doing (a CLI progress bar).
@@ -703,7 +705,11 @@ impl Pipeline {
     /// capture rendered diagnostics into a buffer.
     pub fn with_reporter(config: ReportConfig, writer: Box<dyn Write + Send>) -> Self {
         let cwd = std::env::current_dir().expect("Unable to determine current working directory");
-        let sink = create_sink(&config, SourceMap::new(), writer);
+        let diagnostics = std::sync::Arc::default();
+        let sink = Box::new(CountedSink {
+            inner: create_sink(&config, SourceMap::new(), writer),
+            emitted: std::sync::Arc::clone(&diagnostics),
+        });
 
         // The prologue is `[CALL, JMP, HALT]`. The pipeline
         // patches the JMP at offset 1 to point at `main`
@@ -753,6 +759,7 @@ impl Pipeline {
             compiler: std::cell::OnceCell::new(),
             pending_native_ids: Vec::new(),
             sink,
+            diagnostics,
             messages_emitted: 0,
             progress: None,
             macro_host: crate::macros::default_host(),
@@ -887,6 +894,13 @@ impl Pipeline {
     /// Flush the diagnostic sink (required for SARIF / LSP buffered formats).
     pub fn finish_reporting(&mut self) -> std::io::Result<()> {
         self.sink.finish()
+    }
+
+    /// How many diagnostics (errors, warnings, notes) were reported so
+    /// far. The build cache keeps only compiles that reported none, since
+    /// a cached run would not repeat them.
+    pub fn diagnostics_emitted(&self) -> usize {
+        self.diagnostics.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// True if any error diagnostic was emitted or a hard pipeline failure
@@ -2489,6 +2503,31 @@ fn ffi_type_to_ty(ty: FfiType) -> crate::typechecking::ty::Ty {
         FfiType::Bytes => array(crate::typechecking::ty::Ty::Con("byte".into())),
         FfiType::ConstBytes => string(),
         FfiType::Callback(_) | FfiType::Struct(_) => int(),
+    }
+}
+
+/// Counts what reaches `inner`, for [`Pipeline::diagnostics_emitted`].
+struct CountedSink {
+    inner: Box<dyn DiagnosticSink>,
+    emitted: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl DiagnosticSink for CountedSink {
+    fn emit(&mut self, diag: Diagnostic) {
+        self.emitted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.inner.emit(diag);
+    }
+
+    fn register_source(&mut self, path: &Path, text: &str) -> SourceId {
+        self.inner.register_source(path, text)
+    }
+
+    fn finish(&mut self) -> std::io::Result<()> {
+        self.inner.finish()
+    }
+
+    fn had_errors(&self) -> bool {
+        self.inner.had_errors()
     }
 }
 

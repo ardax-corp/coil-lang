@@ -121,3 +121,60 @@ pub fn execute_pipeline(args: ExecutePipelineArgs<'_>) -> bool {
     machine.run_raw(bytecode, constants, strings, static_slots);
     machine.panicked()
 }
+
+/// A program read back from the build cache: what [`execute_pipeline`]
+/// takes from the pipeline after a compile. The run-time grants (dload pins,
+/// FFI search paths) still come from the pipeline's flags.
+pub struct CachedProgram<'a> {
+    pub bytecode: &'a [Byte],
+    pub constants: &'a [u64],
+    pub strings: &'a [String],
+    pub static_slots: u32,
+    pub debug: common::ProgramDebug,
+    pub operand_stack_slots: u32,
+    pub struct_layouts: &'a [common::CStructLayout],
+    pub precise_frames: Vec<common::PreciseFrameMap>,
+    pub class_word_kinds: Vec<common::ClassWordKinds>,
+    pub static_word_kinds: Vec<u8>,
+}
+
+/// Run a cached program from `main` as [`execute_pipeline`] runs a fresh
+/// compile. Returns `true` when a language-level `panic` aborted.
+pub fn execute_cached(pipeline: &Pipeline, program: CachedProgram<'_>, entry: Option<&Path>) -> bool {
+    let operand_slots =
+        program.operand_stack_slots.max(machine::DEFAULT_OPERAND_STACK_SLOTS as u32) as usize;
+    let entry = entry.map(ffi_entry_path);
+    let mut machine = Machine::<256>::with_operand_capacity(operand_slots);
+    let pins = pipeline.dload_native_pins();
+    let trusted = pipeline.dload_trusted_stems();
+    let search = pipeline.ffi_search_path_bufs();
+    wire_vm_host(
+        &mut machine,
+        &VmHostSpec {
+            entry_path: entry.as_deref(),
+            project_root: pipeline.project_root(),
+            ffi_search_paths: &search,
+            native_pins: &pins,
+            trusted_stems: &trusted,
+            extra_dload_stems: pipeline.extra_dload_stems(),
+            extra_dload_grants: pipeline.extra_dload_grants(),
+            c_structs: program.struct_layouts,
+        },
+    );
+    wire_thread_program_with_maps(WireThreadProgramWithMapsArgs {
+        machine: &mut machine,
+        bytecode: program.bytecode,
+        constants: program.constants,
+        strings: program.strings,
+        static_slot_count: program.static_slots,
+        debug: program.debug.clone(),
+        operand_stack_slots: program.operand_stack_slots,
+        stack_maps: Vec::new(),
+        precise_frames: program.precise_frames,
+        class_word_kinds: program.class_word_kinds,
+        static_word_kinds: program.static_word_kinds,
+    });
+    machine.set_program_debug(program.debug);
+    machine.run_raw(program.bytecode, program.constants, program.strings, program.static_slots);
+    machine.panicked()
+}
