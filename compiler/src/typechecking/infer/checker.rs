@@ -306,6 +306,8 @@ impl Checker {
         self.register_builtin_ffi_type();
         self.register_builtin_option_result();
         self.register_builtin_io_error();
+        self.register_builtin_tty_error();
+        self.register_builtin_string_error();
         self.register_builtin_thread_error();
         self.register_builtin_env_error();
     }
