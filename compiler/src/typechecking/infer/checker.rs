@@ -9699,6 +9699,46 @@ impl Checker {
         );
     }
 
+    /// `E::V(args)` where an `E<.., Trait, ..>` is expected: each argument
+    /// in a trait-object slot packs as that trait, as it does at a `let`
+    /// of the trait, and the construct takes the expected type (#2002).
+    /// `None` leaves it to plain unification.
+    fn coerce_construct_payload(&mut self, expected: &Ty, node: &Output, context: &str) -> Option<Ty> {
+        let Ty::App(_, targs) = expected else { return None };
+        if !targs.iter().any(|t| matches!(strip_readonly(t), Ty::Existential { .. })) {
+            return None;
+        }
+        let Expression::Construct {
+            enum_name,
+            variant_name,
+            fields: parser::ast::EnumConstructPayload::Tuple(args),
+        } = node.1.as_ref()
+        else {
+            return None;
+        };
+        let enum_str = self.resolve_enum_key(enum_name).unwrap_or_else(|| enum_name.to_string());
+        if !self.enum_tags.get(&enum_str).is_some_and(|t| t.contains_key(*variant_name)) || !self.is_poly_enum(&enum_str) {
+            return None;
+        }
+        let (payload, owner) = self.fresh_poly_construct_payload(&enum_str, variant_name);
+        let EnumVariantPayloadTy::Tuple(slots) = payload else { return None };
+        if slots.len() != args.len() {
+            return None;
+        }
+        let arg_tys: Vec<Ty> = args
+            .iter()
+            .map(|a| self.ids.id_of_output(a).and_then(|id| self.cache.get(&id).cloned()))
+            .collect::<Option<_>>()?;
+        let s = unify_with(&self.subst, &owner, expected).ok()?;
+        self.absorb(s);
+        for ((arg, slot), arg_ty) in args.iter().zip(&slots).zip(arg_tys) {
+            let _ = self.coerce_or_unify(slot, &arg_ty, Some(arg), &arg.0.into_range(), context);
+        }
+        let ty = apply_ty_prune(&self.subst, expected);
+        self.retarget_node_ty(node.0.start, node.0.end, ty.clone());
+        Some(ty)
+    }
+
     fn coerce_or_unify(
         &mut self,
         expected: &Ty,
@@ -9728,6 +9768,11 @@ impl Checker {
         {
             let filled = self.coerce_or_unify(inner, &actual, expr, range, context);
             return self.readonly_qualify(filled);
+        }
+        if let Some(expr) = expr
+            && let Some(ty) = self.coerce_construct_payload(&expected, unwrap_expr_wrappers(expr), context)
+        {
+            return ty;
         }
         // Integer literals may coerce to `byte` when in range 0..=255.
         if Self::is_byte_ty(&expected)
