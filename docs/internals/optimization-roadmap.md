@@ -545,7 +545,7 @@ turn (release build, wall time, one machine, 2026-10-25):
 
 | N    | before   | after   |
 |------|----------|---------|
-| 900  | 834 ms   | 340 ms  |
+| 900  | 834 ms   | 303 ms  |
 | 1800 | 2498 ms  | 622 ms  |
 | 3600 | 9845 ms  | 1251 ms |
 
