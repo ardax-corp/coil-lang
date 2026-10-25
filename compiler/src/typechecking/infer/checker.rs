@@ -1544,6 +1544,8 @@ impl Checker {
     /// Whether `name` resolves to a type now that the module is checked.
     fn names_a_type(&self, name: &str) -> bool {
         matches!(name, "unit" | "()" | "never" | "Self")
+            // The FFI scalars are opaque `Con`s by name.
+            || matches!(name, "ptr" | "int8" | "int16" | "int32" | "uint8" | "uint16" | "uint32" | "uint64")
             || self.type_param_names_seen.contains(name)
             || self.resolve_class_key(name).is_some()
             || self.module_class_names.contains_key(name)
