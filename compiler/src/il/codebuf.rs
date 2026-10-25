@@ -346,6 +346,28 @@ impl CodeBuf {
         self.entry_at_offset = next;
     }
 
+    /// After deleting the disjoint emitting ranges in `shift`, drop the
+    /// entry PCs and func records inside them and move the rest down: what
+    /// [`Self::shift_entry_pcs_after_delete`] and friends do one range at a
+    /// time, in one pass over each (#1857).
+    pub fn drop_deleted_spans(&mut self, shift: &DeleteShift) {
+        if shift.is_empty() {
+            return;
+        }
+        let mut next = HashMap::with_capacity(self.entry_at_offset.len());
+        for (pc, label) in self.entry_at_offset.drain() {
+            if !shift.inside(pc) {
+                next.insert(shift.map(pc), label);
+            }
+        }
+        self.entry_at_offset = next;
+        self.funcs.retain(|f| !shift.overlaps(f.code_start, f.code_end));
+        for f in &mut self.funcs {
+            f.code_start = shift.map(f.code_start);
+            f.code_end = shift.map(f.code_end);
+        }
+    }
+
     /// Shrink recorded func spans after deleting emitting ops `[start, end)`.
     ///
     /// Callers must drop overlapping records first; survivors are only those
@@ -555,10 +577,71 @@ impl CodeBuf {
 
 }
 
+/// Disjoint deleted emitting ranges, ascending, and how far each PC after
+/// them moves down.
+#[derive(Debug, Default)]
+pub struct DeleteShift {
+    spans: Vec<(usize, usize)>,
+    /// `before[i]`: the length of `spans[..i]`.
+    before: Vec<usize>,
+}
+
+impl DeleteShift {
+    /// `None` when two ranges overlap.
+    pub fn new(mut spans: Vec<(usize, usize)>) -> Option<Self> {
+        spans.retain(|(s, e)| s < e);
+        spans.sort_unstable();
+        if spans.windows(2).any(|w| w[1].0 < w[0].1) {
+            return None;
+        }
+        let mut before = Vec::with_capacity(spans.len() + 1);
+        let mut total = 0;
+        before.push(0);
+        for (s, e) in &spans {
+            total += e - s;
+            before.push(total);
+        }
+        Some(Self { spans, before })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.spans.is_empty()
+    }
+
+    /// The ranges wholly at or before `pc`.
+    fn ended_by(&self, pc: usize) -> usize {
+        self.spans.partition_point(|&(_, e)| e <= pc)
+    }
+
+    /// `pc` less every range that ends at or before it.
+    pub fn map(&self, pc: usize) -> usize {
+        pc - self.before[self.ended_by(pc)]
+    }
+
+    pub fn inside(&self, pc: usize) -> bool {
+        self.spans.get(self.ended_by(pc)).is_some_and(|&(s, _)| s <= pc)
+    }
+
+    /// Whether `[start, end)` overlaps a range.
+    fn overlaps(&self, start: usize, end: usize) -> bool {
+        self.spans.get(self.ended_by(start)).is_some_and(|&(s, _)| s < end)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use common::Instruction;
+
+    #[test]
+    fn delete_shift_moves_pcs_past_disjoint_ranges() {
+        assert!(DeleteShift::new(vec![(4, 8), (6, 10)]).is_none());
+        let shift = DeleteShift::new(vec![(10, 14), (2, 5), (7, 7)]).expect("disjoint");
+        let mapped: Vec<usize> = [0, 2, 4, 5, 9, 10, 13, 14, 20].iter().map(|&pc| shift.map(pc)).collect();
+        assert_eq!(mapped, [0, 2, 4, 2, 6, 7, 10, 7, 13]);
+        assert!(!shift.inside(1) && shift.inside(2) && shift.inside(4) && !shift.inside(5) && shift.inside(13));
+        assert!(shift.overlaps(0, 3) && !shift.overlaps(0, 2) && !shift.overlaps(5, 10) && shift.overlaps(5, 11));
+    }
 
     #[test]
     fn push_lifts_hot_set_bytes_to_typed_ops() {
@@ -767,3 +850,4 @@ mod tests {
         );
     }
 }
+

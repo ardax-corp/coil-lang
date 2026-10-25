@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use common::Instruction;
 
-use super::codebuf::CodeBuf;
+use super::codebuf::{CodeBuf, DeleteShift};
 use super::op::{IlOp, Label};
 use super::opt::emitting_range_to_raw;
 
@@ -173,16 +173,37 @@ pub fn prune_unused_functions(
     dead_spans.reverse(); // high-to-low so offsets stay valid
 
     let mut shrinks: Vec<(usize, usize)> = Vec::new();
-    for (start, end, _name) in &dead_spans {
-        remove_emitting_span(buf, *start, *end);
-        let delta = end - start;
-        shrink_pcs_after(input.functions, *end, delta);
-        for (_, pc) in input.test_cases.iter_mut() {
-            if (*pc as usize) >= *end {
-                *pc -= delta as u32;
+    // Disjoint spans move every PC, entry and record once at the end; one
+    // pass over all of them per dead span made shaking a program's unused
+    // functions quadratic (#1857).
+    let all: Vec<(usize, usize)> = dead_spans.iter().map(|&(s, e, _)| (s, e)).collect();
+    if let Some(moved) = DeleteShift::new(all) {
+        let mut removed = Vec::new();
+        for (start, end, _name) in &dead_spans {
+            if remove_emitting_ops(buf, *start, *end) {
+                removed.push((*start, *end));
             }
+            shrinks.push((*end, end - start));
         }
-        shrinks.push((*end, delta));
+        for pc in input.functions.values_mut() {
+            *pc = moved.map(*pc);
+        }
+        for (_, pc) in input.test_cases.iter_mut() {
+            *pc = moved.map(*pc as usize) as u32;
+        }
+        buf.drop_deleted_spans(&DeleteShift::new(removed).expect("a subset of disjoint spans"));
+    } else {
+        for (start, end, _name) in &dead_spans {
+            remove_emitting_span(buf, *start, *end);
+            let delta = end - start;
+            shrink_pcs_after(input.functions, *end, delta);
+            for (_, pc) in input.test_cases.iter_mut() {
+                if (*pc as usize) >= *end {
+                    *pc -= delta as u32;
+                }
+            }
+            shrinks.push((*end, delta));
+        }
     }
 
     let dropped = dead.len();
@@ -449,6 +470,20 @@ fn shrink_pcs_after(map: &mut HashMap<String, usize>, threshold: usize, delta: u
             *pc -= delta;
         }
     }
+}
+
+/// Delete the raw ops of emitting range `[emit_start, emit_end)`, leaving
+/// entries and func records as they are. False when there were none.
+fn remove_emitting_ops(buf: &mut CodeBuf, emit_start: usize, emit_end: usize) -> bool {
+    if emit_start >= emit_end {
+        return false;
+    }
+    let (raw_s, raw_e) = emitting_range_to_raw(buf.ops(), emit_start, emit_end);
+    if raw_s >= raw_e {
+        return false;
+    }
+    buf.remove_raw_range(raw_s, raw_e);
+    true
 }
 
 fn remove_emitting_span(buf: &mut CodeBuf, emit_start: usize, emit_end: usize) {
