@@ -162,6 +162,22 @@ filter.
 A backward byte search over 1 MB (`while i >= 0 { if s[i] == b ... i = i - 1; }`,
 2000 passes, the byte at offset 0): 55.9 s before, 0.30 s with the scan.
 
+### 6. Per-match cost (#1976)
+
+`a && b` lowered to a join block holding only `φ(false, b)` and a branch
+on it: `DenseCmp; LOAD; JMPF` per candidate, leaving the hot streak. MIR
+`thread_bool_phis` (`mir/bool_thread.rs`) makes each way in branch for
+itself, so the test is one fused compare-branch, and `LaneExpr::not`
+pushes a negation through `&` / `|` when that costs no nodes, so the
+threaded two-byte filter is `(s0 == k0) & (s1 == k1)` again (the VM's
+`scan_pair` shape).
+
+Callgrind, 20k pieces of 62 bytes joined by `" "`, 5 passes (instructions
+per match, compile subtracted): `split(" ")` 6450 → 6408,
+`replace_all("xyz", "XYZ!")` 11455 → 10863. What is left per match is
+the calls into `find_at` / `span_text` and the slice's allocations (the
+string and its `Result`), not the scan.
+
 ## Steps
 
 | Step | PR | Change |
