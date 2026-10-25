@@ -2,7 +2,7 @@
 // to an older prefix must copy, never clobber a longer string that already
 // shares the buffer.
 use tests::assert;
-use text::join;
+use generic_vec_fns::join;
 
 fn grow(string s, int n) -> string {
     let i = 0;

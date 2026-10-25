@@ -11,5 +11,5 @@ fn main() {
     m.insert(1, "a");
     m.insert(2, "b");
     m.insert(1, "A");
-    let _ = print(format("%s,%i", m.get_or(1, "?"), m.size()));
+    let _ = print(format("%s,%i", m.get_or(1, "?"), m.len()));
 }

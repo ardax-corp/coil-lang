@@ -6,7 +6,7 @@ use comptime_gen::{adder, records};
 use comptime_block_lib::add_ten;
 use io::file::read_text;
 use macro::ident;
-use text::lines;
+use text::Text;
 use tests::assert;
 
 comptime {
@@ -16,7 +16,7 @@ comptime {
 
 comptime {
     let text = read_text("tests/comptime/data/names.txt") ?? "";
-    let names: Vec<string> = lines(text) ?? [];
+    let names: Vec<string> = text.lines();
     return records(names);
 }
 

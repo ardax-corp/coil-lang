@@ -1,7 +1,7 @@
 // A lambda or named function passed to a generic function: the generic
 // body calls it through its closure word.
 use tests::assert;
-use collections::vec::{filter, map};
+use generic_vec_fns::{filter, map};
 
 fn keep<T>(Vec<T> xs, T -> bool pred) -> int {
     let n = 0;
