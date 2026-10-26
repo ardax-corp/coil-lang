@@ -106,7 +106,7 @@ fn scalar_kinds_are_never_references() {
     let t = Value::from(heap.alloc(t, Object::Tuple).0.addr());
     let snapshot = heap.capture_snapshot(&[root(0, t)]).expect("capture");
     let common::SnapObject::Tuple { words, .. } = &snapshot.objects[0] else { panic!("tuple") };
-    assert_eq!(words[0], SnapWord::Raw(s.raw() as u64));
+    assert_eq!(words[0], SnapWord::Raw(s.bits()));
     assert!(matches!(words[1], SnapWord::Ref { .. }));
     let scalar_root = SnapRoot {
         kind: common::WORD_SCALAR,
@@ -142,7 +142,7 @@ fn singletons_enums_and_niche_bits() {
     assert_eq!(statics[0].1, Value::from(fresh.immortal_unit_enum(0).addr()));
     assert_eq!(statics[1].1, Value::from(fresh.immortal_empty_tuple().addr()));
     let err = statics[2].1;
-    assert_eq!(err.raw() as u64 & 1, 1);
+    assert_eq!(err.bits() & 1, 1);
     assert_eq!(text(&fresh, err), "bad");
     let Object::Enum(e) = object(&fresh, statics[3].1) else { panic!("enum") };
     let e = e.as_ref();

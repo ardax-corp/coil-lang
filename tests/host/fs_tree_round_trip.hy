@@ -1,3 +1,4 @@
+// @needs symlinks
 // `io::fs` on a directory tree the test creates and removes: create, list,
 // inspect, rename, symlink and remove, with the errors a missing or duplicate
 // path gives.

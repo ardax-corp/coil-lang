@@ -602,6 +602,31 @@ fn cmd_natives_dump(pipeline: &mut Pipeline, exe: Option<&str>, natives: &[FfiNa
     let _ = pipeline.finish_reporting();
 }
 
+/// `coil test` on wasm, where there is no `coil-test` to re-exec: run the
+/// test runner here with the same arguments.
+#[cfg(target_family = "wasm")]
+fn run_test_in_process() -> ! {
+    use coil_test::args::{Parsed, parse_args, print_help};
+    let argv: Vec<String> = std::iter::once("coil-test".to_string())
+        .chain(std::env::args().skip(2))
+        .collect();
+    match parse_args(&argv) {
+        Ok(Parsed::Help) => {
+            print_help();
+            exit(0)
+        }
+        Ok(Parsed::Run(config, options)) => exit(coil_test::runner::cmd_test(config, *options)),
+        Ok(Parsed::MutateHelp | Parsed::Mutate(..)) => {
+            eprintln!("coil: `coil mutate` is not available on this platform");
+            exit(1)
+        }
+        Err(msg) => {
+            coil_args::print_cli_error(&msg);
+            exit(1)
+        }
+    }
+}
+
 fn main() {
     comptime::install();
     let raw_args: Vec<String> = std::env::args().collect();
@@ -640,7 +665,10 @@ fn main() {
 
     let cache_options = cache_options(&cli);
     match cli.command {
+        #[cfg(not(target_family = "wasm"))]
         Command::Test => dispatch_helper("test"),
+        #[cfg(target_family = "wasm")]
+        Command::Test => run_test_in_process(),
         Command::Mutate => dispatch_helper_as("mutate", "test", &["mutate"]),
         Command::Verify => dispatch_helper("verify"),
         Command::Dissect { .. } => dispatch_helper("dissect"),

@@ -222,9 +222,9 @@ fn eval_in(
                 .collect();
             let ret = call_limited(&mut vm, f.entry, &args, &item_limits)?;
             if !f.text {
-                return Ok(FoldValue::Word(ret.raw() as u64));
+                return Ok(FoldValue::Word(ret.bits()));
             }
-            match vm.heap().find_object_by_addr(ret.raw() as u64) {
+            match vm.heap().find_object_by_addr(ret.bits()) {
                 Some(Object::String(s)) => Ok(FoldValue::Text(s.as_ref().data.to_string())),
                 _ => Err("it did not return a string".to_string()),
             }
@@ -450,7 +450,7 @@ fn call_entry(vm: &mut Machine<256>, entry: u32, input: &str, limits: &ComptimeL
     let input = vm.heap_mut().intern(input.to_string());
     let arg = Value::from(input.as_ptr() as *mut u8 as u64);
     let ret = call_limited(vm, entry, &[arg], limits)?;
-    match vm.heap().find_object_by_addr(ret.raw() as u64) {
+    match vm.heap().find_object_by_addr(ret.bits()) {
         Some(Object::String(s)) => Ok(s.as_ref().data.to_string()),
         _ => Err("it did not return a string".to_string()),
     }

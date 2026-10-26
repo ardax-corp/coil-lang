@@ -1422,7 +1422,7 @@ impl Heap {
     /// Classify a raw payload / field word as an object or an immediate.
     #[cfg(test)]
     pub(crate) fn member_of(&self, v: Value) -> Member {
-        match self.find_object_by_addr(v.raw() as u64) {
+        match self.find_object_by_addr(v.bits()) {
             Some(o) => Member::Object(o),
             None => Member::Value(v),
         }
@@ -1454,8 +1454,8 @@ impl Heap {
         addr != 0 && self.slab.may_contain(addr)
     }
 
-    pub fn contains_addr(&self, addr: *mut u8) -> bool {
-        self.find_object_by_addr(addr as u64).is_some()
+    pub fn contains_addr(&self, addr: u64) -> bool {
+        self.find_object_by_addr(addr).is_some()
     }
 
     #[cfg(test)]
@@ -2614,8 +2614,8 @@ enum ArrayData {
 /// The word stored as one byte, when it fits.
 #[inline(always)]
 fn byte_of(v: Value) -> Option<u8> {
-    let raw = v.raw() as usize;
-    if raw <= u8::MAX as usize { Some(raw as u8) } else { None }
+    let raw = v.bits();
+    if raw <= u8::MAX as u64 { Some(raw as u8) } else { None }
 }
 
 #[inline(always)]
@@ -4446,7 +4446,7 @@ mod tests {
         let mut heap = Heap::default();
         let (obj, _) = heap.alloc(ObjString::from("err"), Object::String);
         let tagged = Value::from(obj.addr() | 1);
-        assert!(heap.find_object_by_addr(tagged.raw() as u64).is_none());
+        assert!(heap.find_object_by_addr(tagged.bits()).is_none());
         let mut gray = Vec::new();
         heap.mark_value(tagged, &mut gray);
         assert_eq!(gray.len(), 1);

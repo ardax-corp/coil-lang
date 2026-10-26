@@ -1,3 +1,4 @@
+// @needs sockets
 use io::Stream;
 use io::IoError;
 use io::net::tcp::listen;

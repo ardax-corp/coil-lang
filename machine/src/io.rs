@@ -455,7 +455,7 @@ pub(crate) fn alloc_unsent_stream(heap: &mut Heap) -> Value {
 pub(crate) fn is_unsent_stream(heap: &Heap, v: Value) -> bool {
     let v = peel_one_boxed(heap, v);
     matches!(
-        heap.find_object_by_addr(v.raw() as u64),
+        heap.find_object_by_addr(v.bits()),
         Some(Object::Stream(gc)) if gc.as_ref().kind == StreamKind::Unsent
     )
 }
@@ -474,7 +474,7 @@ pub fn stream_open(heap: &mut Heap, path: &str, mode: &str) -> Result<Value, IoE
 }
 
 pub(crate) fn peel_one_boxed(heap: &Heap, v: Value) -> Value {
-    match heap.find_object_by_addr(v.raw() as u64) {
+    match heap.find_object_by_addr(v.bits()) {
         Some(Object::Boxed(gc)) => match &gc.as_ref().payload {
             Member::Value(inner) => *inner,
             Member::Object(o) => Value::from(o.addr()),
@@ -489,7 +489,7 @@ pub(crate) fn with_stream_mut<R>(
     f: impl FnOnce(&mut ObjStream) -> R,
 ) -> Result<R, IoErrorTag> {
     let stream = peel_one_boxed(heap, stream);
-    let addr = stream.raw() as u64;
+    let addr = stream.bits();
     let Some(Object::Stream(mut gc)) = heap.find_object_by_addr(addr) else {
         return Err(IoErrorTag::InvalidInput);
     };
@@ -524,7 +524,7 @@ pub fn stream_read(
     stream: Value,
     buf: Value,
 ) -> Result<Option<usize>, IoErrorTag> {
-    let capacity = match heap.find_object_by_addr(buf.raw() as u64) {
+    let capacity = match heap.find_object_by_addr(buf.bits()) {
         Some(Object::Array(arr_gc)) => arr_gc.as_ref().len(),
         _ => return Err(IoErrorTag::InvalidInput),
     };
@@ -538,7 +538,7 @@ fn stream_read_into(
     buf: Value,
     cap: usize,
 ) -> Result<Option<usize>, IoErrorTag> {
-    let buf_addr = buf.raw() as u64;
+    let buf_addr = buf.bits();
     let capacity = match heap.find_object_by_addr(buf_addr) {
         Some(Object::Array(arr_gc)) => arr_gc.as_ref().len().min(cap),
         _ => return Err(IoErrorTag::InvalidInput),
@@ -593,7 +593,7 @@ pub fn stream_write_from(
     if offset < 0 {
         return Err(IoErrorTag::InvalidInput);
     }
-    let buf_addr = buf.raw() as u64;
+    let buf_addr = buf.bits();
     let bytes: Vec<u8> = match heap.find_object_by_addr(buf_addr) {
         Some(Object::Array(arr_gc)) => {
             let arr = arr_gc.as_ref();
@@ -655,7 +655,7 @@ pub fn stream_read_exact(
     stream: Value,
     buf: Value,
 ) -> Result<Option<usize>, IoErrorTag> {
-    let buf_addr = buf.raw() as u64;
+    let buf_addr = buf.bits();
     let Some(Object::Array(arr_gc)) = heap.find_object_by_addr(buf_addr) else {
         return Err(IoErrorTag::InvalidInput);
     };
@@ -681,7 +681,7 @@ pub fn stream_read_exact(
                 wait_readable(heap, stream)?;
             }
             Ok(Some(n)) => {
-                let Some(Object::Array(src)) = heap.find_object_by_addr(scratch.raw() as u64)
+                let Some(Object::Array(src)) = heap.find_object_by_addr(scratch.bits())
                 else {
                     return Err(IoErrorTag::Other);
                 };
@@ -712,7 +712,7 @@ pub fn stream_read_to_end(heap: &mut Heap, stream: Value) -> Result<Value, IoErr
             Ok(None) => break,
             Ok(Some(0)) => wait_readable(heap, stream)?,
             Ok(Some(n)) => {
-                let Some(Object::Array(src)) = heap.find_object_by_addr(scratch.raw() as u64)
+                let Some(Object::Array(src)) = heap.find_object_by_addr(scratch.bits())
                 else {
                     return Err(IoErrorTag::Other);
                 };
@@ -734,7 +734,7 @@ pub fn stream_read_to_end(heap: &mut Heap, stream: Value) -> Result<Value, IoErr
 
 /// Block until the entire buffer is written.
 pub fn stream_write_all(heap: &mut Heap, stream: Value, buf: Value) -> Result<(), IoErrorTag> {
-    let buf_addr = buf.raw() as u64;
+    let buf_addr = buf.bits();
     let Some(Object::Array(arr_gc)) = heap.find_object_by_addr(buf_addr) else {
         return Err(IoErrorTag::InvalidInput);
     };
@@ -1458,7 +1458,7 @@ pub fn udp_send_to(
 /// On success returns a heap tuple `(nbytes: int, peer_host: string, peer_port: int)`.
 /// The first `nbytes` elements of `buf` are filled.
 pub fn udp_recv_from(heap: &mut Heap, stream: Value, buf: Value) -> Result<Value, IoErrorTag> {
-    let buf_addr = buf.raw() as u64;
+    let buf_addr = buf.bits();
     let capacity = match heap.find_object_by_addr(buf_addr) {
         Some(Object::Array(arr_gc)) => arr_gc.as_ref().len(),
         _ => return Err(IoErrorTag::InvalidInput),
@@ -1535,7 +1535,7 @@ pub fn udp_recv_from_wait(heap: &mut Heap, stream: Value, buf: Value) -> Result<
 /// Decode a heap string `Value` into a Rust `String`.
 pub fn value_as_string(heap: &Heap, v: Value) -> Result<String, IoErrorTag> {
     let v = peel_one_boxed(heap, v);
-    match heap.find_object_by_addr(v.raw() as u64) {
+    match heap.find_object_by_addr(v.bits()) {
         Some(Object::String(gc)) => Ok(gc.as_ref().data.to_string()),
         _ => Err(IoErrorTag::InvalidInput),
     }
@@ -1559,7 +1559,7 @@ pub fn value_as_open_mode(heap: &Heap, v: Value) -> Result<String, IoErrorTag> {
 /// Marshal a Stream (or one Boxed Stream) to its fd. `None` if `v` is not a stream.
 pub fn stream_fd_i64(heap: &Heap, v: Value) -> Option<i64> {
     let v = peel_one_boxed(heap, v);
-    match heap.find_object_by_addr(v.raw() as u64) {
+    match heap.find_object_by_addr(v.bits()) {
         Some(Object::Stream(gc)) => gc.as_ref().handle.as_ref().map(|h| h.fd_i64()),
         _ => None,
     }
@@ -1567,7 +1567,7 @@ pub fn stream_fd_i64(heap: &Heap, v: Value) -> Option<i64> {
 
 /// Read a heap `Vec<byte>` (Array carrier) into a Rust `Vec<u8>`.
 pub fn value_as_bytes(heap: &Heap, v: Value) -> Result<Vec<u8>, IoErrorTag> {
-    match heap.find_object_by_addr(v.raw() as u64) {
+    match heap.find_object_by_addr(v.bits()) {
         // Out-of-range word elements would be a typechecker bug; they
         // narrow (`as u8`) rather than panic in the host.
         Some(Object::Array(arr_gc)) => Ok(arr_gc.as_ref().to_byte_vec()),
@@ -1591,7 +1591,7 @@ pub fn from_bytes(heap: &mut Heap, buf: Value) -> Result<Value, IoErrorTag> {
 /// rejects this case).
 pub fn to_bytes(heap: &mut Heap, s: Value) -> Value {
     // One pass over the string's bytes (no intermediate `String` copy).
-    let bytes: Vec<u8> = match heap.find_object_by_addr(peel_one_boxed(heap, s).raw() as u64) {
+    let bytes: Vec<u8> = match heap.find_object_by_addr(peel_one_boxed(heap, s).bits()) {
         Some(Object::String(gc)) => gc.as_ref().data.as_bytes().to_vec(),
         _ => Vec::new(),
     };
@@ -1650,7 +1650,7 @@ mod tests {
     use std::time::Duration;
 
     fn enum_tag(heap: &Heap, v: Value) -> Option<u32> {
-        match heap.find_object_by_addr(v.raw() as u64) {
+        match heap.find_object_by_addr(v.bits()) {
             Some(Object::Enum(gc)) => Some(gc.as_ref().tag),
             _ => None,
         }
@@ -1663,7 +1663,7 @@ mod tests {
     }
 
     fn array_bytes(heap: &Heap, v: Value) -> Vec<u8> {
-        match heap.find_object_by_addr(v.raw() as u64) {
+        match heap.find_object_by_addr(v.bits()) {
             Some(Object::Array(gc)) => gc
                 .as_ref()
                 .iter()
@@ -1859,7 +1859,7 @@ mod tests {
         let buf = to_bytes(&mut heap, s);
         assert_eq!(array_bytes(&heap, buf), b"Hi");
         assert!(
-            matches!(heap.find_object_by_addr(buf.raw() as u64), Some(Object::Array(gc)) if gc.as_ref().is_packed()),
+            matches!(heap.find_object_by_addr(buf.bits()), Some(Object::Array(gc)) if gc.as_ref().is_packed()),
             "to_bytes builds a packed array"
         );
         let back = from_bytes(&mut heap, buf).expect("round-trip");
@@ -1881,7 +1881,7 @@ mod tests {
     }
 
     fn tuple_elems(heap: &Heap, v: Value) -> Vec<Value> {
-        match heap.find_object_by_addr(v.raw() as u64) {
+        match heap.find_object_by_addr(v.bits()) {
             Some(Object::Tuple(gc)) => gc.as_ref().elements().to_vec(),
             _ => panic!("expected tuple"),
         }

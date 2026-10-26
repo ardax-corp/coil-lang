@@ -7,6 +7,7 @@
 //! observes readiness.
 
 use std::collections::HashMap;
+#[cfg(any(unix, windows))]
 use std::io::{self, ErrorKind};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -24,6 +25,7 @@ pub enum Interest {
 }
 
 impl Interest {
+    #[cfg(any(unix, windows))]
     fn poll_events(self) -> i16 {
         #[cfg(unix)]
         {
@@ -491,6 +493,13 @@ fn poll_one_ms(
             Err(IoErrorTag::Other)
         }
     }
+    // No readiness API (wasm): files and stdio never block for long, so
+    // report ready and let the read or write itself wait.
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (handle, interest, timeout_ms);
+        Ok(true)
+    }
 }
 
 fn poll_many(snapshot: &[(WaitToken, WaitHandle, Interest)], timeout_ms: i32) -> Vec<usize> {
@@ -550,6 +559,11 @@ fn poll_many(snapshot: &[(WaitToken, WaitHandle, Interest)], timeout_ms: i32) ->
             );
         }
         ready
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = timeout_ms;
+        (0..snapshot.len()).collect()
     }
 }
 

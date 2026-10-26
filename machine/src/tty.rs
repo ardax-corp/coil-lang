@@ -124,6 +124,7 @@ pub fn restore_all() {
     os::restore_all();
 }
 
+#[cfg_attr(not(any(unix, windows)), allow(dead_code))]
 enum Wait {
     Ready,
     TimedOut,
@@ -781,6 +782,57 @@ mod os {
             },
             None => false,
         }
+    }
+}
+
+/// No terminal: wasm and other targets without one. Streams are never
+/// terminals, raw mode is refused and a timed read just reads.
+#[cfg(not(any(unix, windows)))]
+mod os {
+    use super::Wait;
+    use crate::io::IoErrorTag;
+    use crate::io_handle::NativeHandle;
+
+    pub type Raw = ();
+
+    pub fn raw_of(_h: &NativeHandle) -> Raw {}
+
+    pub fn is_tty(_raw: Raw) -> bool {
+        false
+    }
+
+    pub fn size(_raw: Raw) -> Option<(i64, i64)> {
+        None
+    }
+
+    pub fn std_size() -> Option<(i64, i64)> {
+        None
+    }
+
+    pub fn enter_raw(_raw: Raw, _keep_signals: bool, _keep_output: bool) -> Result<(), IoErrorTag> {
+        Err(IoErrorTag::NotATerminal)
+    }
+
+    pub fn leave_raw(_raw: Raw) -> Result<(), IoErrorTag> {
+        Ok(())
+    }
+
+    pub fn is_raw(_raw: Raw) -> bool {
+        false
+    }
+
+    pub fn restore_all() {}
+
+    pub fn resized() -> bool {
+        false
+    }
+
+    pub fn wait_readable(_raw: Raw, _timeout_ms: i64) -> Result<Wait, IoErrorTag> {
+        Ok(Wait::Ready)
+    }
+
+    pub fn enable_vt(_raw: Raw) -> bool {
+        false
     }
 }
 

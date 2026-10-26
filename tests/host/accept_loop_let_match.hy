@@ -1,3 +1,4 @@
+// @needs sockets
 // `let server = match accept_wait(listener) { … }` inside a `while` loop
 // serves one connection per trip: two clients each read the reply.
 use tests::assert;

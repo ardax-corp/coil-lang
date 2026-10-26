@@ -111,7 +111,9 @@ pub fn fresh_seed() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
-    SplitMix64::new(nanos ^ (u64::from(std::process::id()) << 32)).next_u64()
+    // wasm has no process ids (and `process::id` panics there).
+    let pid = if cfg!(target_family = "wasm") { 0 } else { std::process::id() };
+    SplitMix64::new(nanos ^ (u64::from(pid) << 32)).next_u64()
 }
 
 #[cfg(test)]

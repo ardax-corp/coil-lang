@@ -1,3 +1,4 @@
+// @needs sockets
 // Sockets on 127.0.0.1: a TCP echo between a server task and a client task,
 // peer and local addresses that match, a half-close seen as end of stream,
 // and a UDP datagram with its sender's port.

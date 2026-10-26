@@ -26,7 +26,7 @@ pub fn host_vec_with_capacity(heap: &mut Heap, args: &[Value]) -> Value {
 /// `v.capacity() -> int`
 pub fn host_vec_capacity(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
-    let cap = match heap.find_object_by_addr(handle.raw() as u64) {
+    let cap = match heap.find_object_by_addr(handle.bits()) {
         Some(Object::Array(gc)) => gc.as_ref().capacity(),
         _ => 0,
     };
@@ -37,7 +37,7 @@ pub fn host_vec_capacity(heap: &mut Heap, args: &[Value]) -> Value {
 pub fn host_vec_reserve(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
     let extra = args.get(1).map(|v| v.as_int()).unwrap_or(0).max(0) as usize;
-    if let Some(Object::Array(mut gc)) = heap.find_object_by_addr(handle.raw() as u64) {
+    if let Some(Object::Array(mut gc)) = heap.find_object_by_addr(handle.bits()) {
         gc.as_mut().reserve(extra);
         heap.account_array(gc.as_mut());
     }
@@ -47,7 +47,7 @@ pub fn host_vec_reserve(heap: &mut Heap, args: &[Value]) -> Value {
 /// `v.clear() -> ()`
 pub fn host_vec_clear(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
-    if let Some(Object::Array(mut gc)) = heap.find_object_by_addr(handle.raw() as u64) {
+    if let Some(Object::Array(mut gc)) = heap.find_object_by_addr(handle.bits()) {
         gc.as_mut().clear();
     }
     Value::from(0i64)
@@ -56,7 +56,7 @@ pub fn host_vec_clear(heap: &mut Heap, args: &[Value]) -> Value {
 /// `v.pop() -> Option<T>`
 pub fn host_vec_pop(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
-    match heap.find_object_by_addr(handle.raw() as u64) {
+    match heap.find_object_by_addr(handle.bits()) {
         Some(Object::Array(mut gc)) => match gc.as_mut().pop() {
             Some(v) => pack_vec_option(heap, Some(v)),
             None => pack_vec_option(heap, None),
@@ -70,7 +70,7 @@ pub fn host_vec_insert(heap: &mut Heap, args: &[Value]) -> Result<Value, String>
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
     let index = args.get(1).map(|v| v.as_int()).unwrap_or(0);
     let value = args.get(2).copied().unwrap_or(Value::from(0i64));
-    let Some(Object::Array(mut gc)) = heap.find_object_by_addr(handle.raw() as u64) else {
+    let Some(Object::Array(mut gc)) = heap.find_object_by_addr(handle.bits()) else {
         return Err("Vec::insert on non-array".to_string());
     };
     let len = gc.as_ref().len();
@@ -86,7 +86,7 @@ pub fn host_vec_insert(heap: &mut Heap, args: &[Value]) -> Result<Value, String>
 pub fn host_vec_remove(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
     let index = args.get(1).map(|v| v.as_int()).unwrap_or(-1);
-    match heap.find_object_by_addr(handle.raw() as u64) {
+    match heap.find_object_by_addr(handle.bits()) {
         Some(Object::Array(mut gc)) => {
             let len = gc.as_ref().len();
             if index < 0 || (index as usize) >= len {
@@ -103,7 +103,7 @@ pub fn host_vec_remove(heap: &mut Heap, args: &[Value]) -> Value {
 /// Copy a fixed array into a fresh growable vec (`Vec::from`).
 pub fn host_vec_from_array(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
-    let arr = match heap.find_object_by_addr(handle.raw() as u64) {
+    let arr = match heap.find_object_by_addr(handle.bits()) {
         Some(Object::Array(gc)) => gc.as_ref().copy(),
         _ => ObjArray::new(Vec::new()),
     };
@@ -139,21 +139,21 @@ mod tests {
     }
 
     fn array_ints(heap: &Heap, v: Value) -> Vec<i64> {
-        match heap.find_object_by_addr(v.raw() as u64) {
+        match heap.find_object_by_addr(v.bits()) {
             Some(Object::Array(gc)) => gc.as_ref().iter().map(|e| e.as_int()).collect(),
             _ => panic!("expected array"),
         }
     }
 
     fn option_tag(heap: &Heap, v: Value) -> u32 {
-        match heap.find_object_by_addr(v.raw() as u64) {
+        match heap.find_object_by_addr(v.bits()) {
             Some(Object::Enum(gc)) => gc.as_ref().tag,
             _ => panic!("expected Option enum"),
         }
     }
 
     fn option_some_int(heap: &Heap, v: Value) -> i64 {
-        match heap.find_object_by_addr(v.raw() as u64) {
+        match heap.find_object_by_addr(v.bits()) {
             Some(Object::Enum(gc)) => {
                 assert_eq!(gc.as_ref().tag, 1, "expected Option::Some");
                 gc.as_ref().payload[0].as_int()
@@ -188,7 +188,7 @@ mod tests {
         let some = with_host_enum_layout(HostEnumLayout::OptionNiche, || {
             host_vec_pop(&mut heap, &[handle])
         });
-        assert_eq!(some.raw() as u64, s.raw() as u64);
+        assert_eq!(some.bits(), s.bits());
         assert_eq!(heap.live_object_count(), live, "niche pop must not alloc Option");
         let none = with_host_enum_layout(HostEnumLayout::OptionNiche, || {
             host_vec_pop(&mut heap, &[handle])
