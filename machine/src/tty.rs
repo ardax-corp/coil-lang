@@ -116,6 +116,8 @@ pub fn tty_size(heap: &mut Heap, stream: Value) -> Result<(i64, i64), TtyFail> {
     Err(TtyFail::NotATerminal)
 }
 
+// Unix `enter_raw` returns IoErrorTag (converted by `?`); Windows already returns TtyFail.
+#[allow(clippy::needless_question_mark)]
 pub fn tty_enter_raw(
     heap: &mut Heap,
     stream: Value,
