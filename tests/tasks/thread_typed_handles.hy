@@ -3,8 +3,7 @@
 // a bare name infers it, and `recv` / `join` give it back.
 use io::sync::println;
 use string::format;
-use thread::{channel, join, mutex, recv, send, spawn, with_lock, Mutex, Receiver, Sender, Thread};
-use thread::{ThreadError, ChannelError, LockError};
+use thread::{channel, join, mutex, recv, send, spawn, with_lock, Mutex, Receiver, Sender, Thread, ThreadError, ChannelError, LockError};
 
 fn answer() -> int {
     return 42;
