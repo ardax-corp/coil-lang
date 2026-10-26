@@ -2,11 +2,11 @@
 // (#1714): a builtin enum application whose payloads hold no mutable interior
 // is fully constant and does not warn E0119 (see compiler/tests/diagnostics.rs).
 // @output 7 3
-use thread::{channel, send, recv, ThreadError};
+use thread::{channel, send, recv, ChannelError};
 use io::{stdout, write};
 use string::{format, to_bytes};
 
-fn run() -> Result<int, ThreadError> {
+fn run() -> Result<int, ChannelError> {
     const ends = channel();
     const n: Option<int> = Some(3);
     const pair = ends?;

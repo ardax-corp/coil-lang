@@ -725,7 +725,7 @@ fn main() {
 
 /// #1714: an enum whose payloads (and type arguments) hold no mutable
 /// interior has nothing a write could change, so `const` of one is fully
-/// constant: `Result<(Sender, Receiver), ThreadError>`, `Option<int>`, a
+/// constant: `Result<(Sender, Receiver), ChannelError>`, `Option<int>`, a
 /// plain user enum, an enum carrying only scalars.
 #[test]
 fn const_immutable_enum_does_not_warn_shallow() {

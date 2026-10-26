@@ -2,7 +2,7 @@
 // and `thread` channels / join / locks that suspend only the waiting task.
 use tests::assert;
 use task::{scope, Scope, TaskError, Channel, ChannelError};
-use thread::{spawn, join, send, recv, mutex, with_lock, lock, unlock, ThreadError, channel as thread_channel};
+use thread::{spawn, join, send, recv, mutex, with_lock, lock, unlock, channel as thread_channel};
 use clock::sleep_ms;
 
 fn ok_or(Result<int, TaskError> r, int fallback) -> int {
@@ -12,7 +12,7 @@ fn ok_or(Result<int, TaskError> r, int fallback) -> int {
     };
 }
 
-fn got(Result<int, ThreadError> r) -> int {
+fn got<E>(Result<int, E> r) -> int {
     return match r {
         Result::Ok(v) => v,
         Result::Err(_) => -1,

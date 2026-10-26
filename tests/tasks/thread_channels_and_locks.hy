@@ -2,11 +2,11 @@
 // reply pair of channels round-trips, `with_lock` serializes increments from
 // several threads, and a `thread::recv` inside a task suspends only that task.
 use tests::assert;
-use thread::{Sender, Receiver, Mutex, spawn, join, channel, send, recv, close, mutex, with_lock, ThreadError};
+use thread::{Sender, Receiver, Mutex, spawn, join, channel, send, recv, close, mutex, with_lock, ChannelError, LockError};
 use task::{scope, Scope, TaskError};
 use clock::sleep_ms;
 
-fn produce(Sender tx) -> Result<int, ThreadError> {
+fn produce(Sender tx) -> Result<int, ChannelError> {
     let i = 0;
     while i < 5 {
         send(tx, i * 10)?;
@@ -16,13 +16,13 @@ fn produce(Sender tx) -> Result<int, ThreadError> {
     return 5;
 }
 
-fn doubler((Receiver, Sender) ends) -> Result<int, ThreadError> {
+fn doubler((Receiver, Sender) ends) -> Result<int, ChannelError> {
     let n = recv(ends[0])?;
     send(ends[1], n * 2)?;
     return 0;
 }
 
-fn bump_many(Mutex m) -> Result<int, ThreadError> {
+fn bump_many(Mutex m) -> Result<int, LockError> {
     let i = 0;
     while i < 100 {
         with_lock(m, fn (int n) => (n + 1, 0))?;
@@ -31,7 +31,7 @@ fn bump_many(Mutex m) -> Result<int, ThreadError> {
     return 0;
 }
 
-fn late_reply(Sender tx) -> Result<int, ThreadError> {
+fn late_reply(Sender tx) -> Result<int, ChannelError> {
     sleep_ms(30);
     send(tx, 7)?;
     return 0;

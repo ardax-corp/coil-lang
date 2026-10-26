@@ -1,5 +1,5 @@
 // @output disc
-use thread::{channel, close, try_recv, ThreadError};
+use thread::{channel, close, try_recv, ChannelError};
 use io::{stdout, write};
 use string::{format, to_bytes};
 
@@ -11,7 +11,7 @@ fn main() {
     let msg = match try_recv(rx) {
         Result::Ok(_) => "ok",
         Result::Err(e) => match e {
-            ThreadError::Disconnected => "disc",
+            ChannelError::Closed => "disc",
             default => "other",
         },
     };

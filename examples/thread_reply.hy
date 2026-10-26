@@ -1,5 +1,8 @@
 // Threads: request/reply over two channels.
 //
+// `main`'s `?`s take the channels' `ChannelError`; `spawn` and `join`
+// report a `ThreadError`, so they are matched.
+//
 // @output ping
 
 use thread::{Receiver, Sender, channel, join, recv, send, spawn};
@@ -16,8 +19,14 @@ fn worker((Receiver, Sender) ends) {
 fn main() {
     let jobs = channel()?;
     let replies = channel()?;
-    let t = spawn(worker, (jobs[1], replies[0]))?;
+    let t = match spawn(worker, (jobs[1], replies[0])) {
+        Ok(t) => t,
+        Err(e) => panic format("spawn failed: %v", e),
+    };
     send(jobs[0], "ping")?;
     let _ = print(format("%s", recv(replies[1])?));
-    (join(t)?)?;
+    match join(t) {
+        Ok(done) => done?,
+        Err(e) => panic format("join failed: %v", e),
+    }
 }
