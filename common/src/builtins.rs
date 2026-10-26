@@ -50,17 +50,32 @@ pub const BUILTIN_STRING_ERROR_ENUM: &str = "StringError";
 /// `StringError` variants in tag order.
 pub const BUILTIN_STRING_ERROR_VARIANTS: &[&str] = &["InvalidUtf8", "NotCharBoundary"];
 
-/// Built-in `ThreadError` enum name (virtual `thread` module).
+/// Built-in `ThreadError` enum name (virtual `thread` module): starting,
+/// joining or detaching a thread.
 pub const BUILTIN_THREAD_ERROR_ENUM: &str = "ThreadError";
 
 /// `ThreadError` variants in tag order.
-pub const BUILTIN_THREAD_ERROR_VARIANTS: &[&str] = &[
-    "WouldBlock",
-    "Disconnected",
-    "JoinFailed",
-    "NotSendable",
-    "Poisoned",
-    "Other",
+pub const BUILTIN_THREAD_ERROR_VARIANTS: &[&str] = &["JoinFailed", "NotSendable"];
+
+/// Built-in `ChannelError` enum name (virtual `thread` module), shared by
+/// `thread` channels and `task::Channel`.
+pub const BUILTIN_CHANNEL_ERROR_ENUM: &str = "ChannelError";
+
+/// `ChannelError` variants in tag order.
+pub const BUILTIN_CHANNEL_ERROR_VARIANTS: &[&str] = &["Closed", "Empty", "Full"];
+
+/// Built-in `LockError` enum name (virtual `thread` module): `Mutex` and
+/// `RwLock` operations.
+pub const BUILTIN_LOCK_ERROR_ENUM: &str = "LockError";
+
+/// `LockError` variants in tag order.
+pub const BUILTIN_LOCK_ERROR_VARIANTS: &[&str] = &["WouldBlock", "Poisoned", "NotHeld", "AlreadyHeld"];
+
+/// The `thread` module's error enums with their variants in tag order.
+pub const BUILTIN_THREAD_ERROR_ENUMS: &[(&str, &[&str])] = &[
+    (BUILTIN_THREAD_ERROR_ENUM, BUILTIN_THREAD_ERROR_VARIANTS),
+    (BUILTIN_CHANNEL_ERROR_ENUM, BUILTIN_CHANNEL_ERROR_VARIANTS),
+    (BUILTIN_LOCK_ERROR_ENUM, BUILTIN_LOCK_ERROR_VARIANTS),
 ];
 
 /// Largest argument count accepted by the `thread_spawn` host native.
@@ -123,8 +138,10 @@ pub fn is_builtin_io_error_enum(name: &str) -> bool {
     name == BUILTIN_IO_ERROR_ENUM
 }
 
+/// True for the `thread` module's error enums (`ThreadError`,
+/// `ChannelError`, `LockError`).
 pub fn is_builtin_thread_error_enum(name: &str) -> bool {
-    name == BUILTIN_THREAD_ERROR_ENUM
+    BUILTIN_THREAD_ERROR_ENUMS.iter().any(|(n, _)| *n == name)
 }
 
 pub fn is_builtin_env_error_enum(name: &str) -> bool {

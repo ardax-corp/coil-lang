@@ -649,12 +649,11 @@ impl Checker {
             self.register_builtin_string_error();
         }
 
-        let needs_thread_error = matches!(
-            &export,
-            BuiltinExport::Enum {
-                name: common::BUILTIN_THREAD_ERROR_ENUM
-            } | BuiltinExport::ThreadFn { .. }
-        );
+        let needs_thread_error = match &export {
+            BuiltinExport::Enum { name } => common::is_builtin_thread_error_enum(name),
+            BuiltinExport::ThreadFn { .. } => true,
+            _ => false,
+        };
         if needs_thread_error && !self.enums.contains_key(common::BUILTIN_THREAD_ERROR_ENUM) {
             self.register_builtin_thread_error();
         }
@@ -957,27 +956,26 @@ impl Checker {
         );
     }
 
-    /// Pre-register `ThreadError` unit variants for the virtual `thread` module.
+    /// Pre-register the `thread` module's unit error enums (`ThreadError`,
+    /// `ChannelError`, `LockError`).
     fn register_builtin_thread_error(&mut self) {
-        use common::{BUILTIN_THREAD_ERROR_ENUM, BUILTIN_THREAD_ERROR_VARIANTS};
-        let name = BUILTIN_THREAD_ERROR_ENUM.to_string();
-        let variant_names: Vec<String> = BUILTIN_THREAD_ERROR_VARIANTS
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let payloads = variant_names
-            .iter()
-            .map(|_| EnumVariantPayloadTy::Unit)
-            .collect();
-        let arities = vec![0; variant_names.len()];
-        let mut tag_map = BTreeMap::new();
-        for (i, vn) in variant_names.iter().enumerate() {
-            tag_map.insert(vn.clone(), i as u32);
+        for (name, variants) in common::BUILTIN_THREAD_ERROR_ENUMS {
+            let name = name.to_string();
+            let variant_names: Vec<String> = variants.iter().map(|s| s.to_string()).collect();
+            let payloads = variant_names
+                .iter()
+                .map(|_| EnumVariantPayloadTy::Unit)
+                .collect();
+            let arities = vec![0; variant_names.len()];
+            let mut tag_map = BTreeMap::new();
+            for (i, vn) in variant_names.iter().enumerate() {
+                tag_map.insert(vn.clone(), i as u32);
+            }
+            self.enums.insert(name.clone(), variant_names);
+            self.enum_tags.insert(name.clone(), tag_map);
+            self.enum_payloads.insert(name.clone(), payloads);
+            self.enum_arities.insert(name, arities);
         }
-        self.enums.insert(name.clone(), variant_names);
-        self.enum_tags.insert(name.clone(), tag_map);
-        self.enum_payloads.insert(name.clone(), payloads);
-        self.enum_arities.insert(name, arities);
     }
 
     /// Pre-register `ffi::ErrorKind` unit variants.
@@ -1127,7 +1125,11 @@ impl Checker {
             mutex_ty, receiver_ty, rwlock_ty, sender_ty, thread_ty, tuple,
         };
         let thread_err = Ty::Con(common::BUILTIN_THREAD_ERROR_ENUM.into());
+        let chan_err = Ty::Con(common::BUILTIN_CHANNEL_ERROR_ENUM.into());
+        let lock_err = Ty::Con(common::BUILTIN_LOCK_ERROR_ENUM.into());
         let res_unit = result_app_ty(unit_ty(), thread_err.clone());
+        let chan_unit = result_app_ty(unit_ty(), chan_err.clone());
+        let lock_unit = result_app_ty(unit_ty(), lock_err.clone());
         let fun = |params: &[Ty], ret: Ty| {
             params
                 .iter()
@@ -1153,15 +1155,15 @@ impl Checker {
             ThreadBuiltin::Detach => fun(&[thread_ty(tv)], res_unit),
             ThreadBuiltin::Channel => fun(
                 &[],
-                result_app_ty(tuple(vec![sender_ty(tv.clone()), receiver_ty(tv)]), thread_err),
+                result_app_ty(tuple(vec![sender_ty(tv.clone()), receiver_ty(tv)]), chan_err),
             ),
-            ThreadBuiltin::Send | ThreadBuiltin::TrySend => fun(&[sender_ty(tv.clone()), tv], res_unit),
+            ThreadBuiltin::Send | ThreadBuiltin::TrySend => fun(&[sender_ty(tv.clone()), tv], chan_unit),
             ThreadBuiltin::Recv | ThreadBuiltin::TryRecv => {
-                fun(&[receiver_ty(tv.clone())], result_app_ty(tv, thread_err))
+                fun(&[receiver_ty(tv.clone())], result_app_ty(tv, chan_err))
             }
-            ThreadBuiltin::Close => fun(&[sender_ty(tv)], res_unit),
-            ThreadBuiltin::Mutex => fun(std::slice::from_ref(&tv), result_app_ty(mutex_ty(tv.clone()), thread_err)),
-            ThreadBuiltin::Rwlock => fun(std::slice::from_ref(&tv), result_app_ty(rwlock_ty(tv.clone()), thread_err)),
+            ThreadBuiltin::Close => fun(&[sender_ty(tv)], chan_unit),
+            ThreadBuiltin::Mutex => fun(std::slice::from_ref(&tv), result_app_ty(mutex_ty(tv.clone()), lock_err)),
+            ThreadBuiltin::Rwlock => fun(std::slice::from_ref(&tv), result_app_ty(rwlock_ty(tv.clone()), lock_err)),
             ThreadBuiltin::WithLock | ThreadBuiltin::WithWrite | ThreadBuiltin::TryWrite => {
                 let r = self.counter.fresh();
                 let callback = fn_ty(tv.clone(), tuple(vec![tv.clone(), Ty::Var(r)]));
@@ -1169,7 +1171,7 @@ impl Checker {
                 return Scheme::poly(
                     vec![t, r],
                     vec![],
-                    fun(&[lock, callback], result_app_ty(Ty::Var(r), thread_err)),
+                    fun(&[lock, callback], result_app_ty(Ty::Var(r), lock_err)),
                 );
             }
             ThreadBuiltin::WithRead | ThreadBuiltin::TryRead => {
@@ -1178,11 +1180,11 @@ impl Checker {
                 return Scheme::poly(
                     vec![t, r],
                     vec![],
-                    fun(&[rwlock_ty(tv), callback], result_app_ty(Ty::Var(r), thread_err)),
+                    fun(&[rwlock_ty(tv), callback], result_app_ty(Ty::Var(r), lock_err)),
                 );
             }
             ThreadBuiltin::Lock | ThreadBuiltin::TryLock | ThreadBuiltin::Unlock => {
-                fun(&[mutex_ty(tv)], res_unit)
+                fun(&[mutex_ty(tv)], lock_unit)
             }
         };
         Scheme::poly(vec![t], vec![], ty)
@@ -1365,6 +1367,32 @@ impl Checker {
                     Some("a spawned closure's `use` captures are copied to the thread, so they must be sendable".to_string()),
                 );
             }
+        }
+    }
+
+    /// `send` / `try_send` copy their value to the channel and `mutex` /
+    /// `rwlock` copy theirs into the lock, so like a `spawn` argument the
+    /// value must be sendable. Checked here so the runtime never reports it.
+    fn check_thread_value_sendable(&mut self, ident: &str, arg_tys: &[Ty], range: &Range<usize>) {
+        let (what, arg) = match self.thread_fn_in_scope(ident) {
+            Some(ThreadBuiltin::Send | ThreadBuiltin::TrySend) => ("sent value", arg_tys.get(1)),
+            Some(ThreadBuiltin::Mutex | ThreadBuiltin::Rwlock) => ("lock value", arg_tys.first()),
+            _ => return,
+        };
+        let Some(arg) = arg else {
+            return;
+        };
+        let resolved = apply_ty_prune(&self.subst, arg);
+        if !self.is_thread_sendable_ty(&resolved) {
+            self.error_with_help(
+                ErrorCode::GenericTypeError,
+                format!(
+                    "{ident} {what} type `{}` is not sendable across threads",
+                    self.diag_ty(&resolved)
+                ),
+                range.clone(),
+                Some("only immediates, strings, and aggregates of sendable values may cross threads".to_string()),
+            );
         }
     }
 
@@ -6145,6 +6173,7 @@ impl Checker {
             id,
             range.clone(),
         );
+        self.check_thread_value_sendable(&ident, &arg_tys, &range);
         // Discharge instantiated trait constraints (or propagate if caller shares the bound).
         if !fresh_constraints.is_empty() {
             self.bind_call_result_to_expected(&result);

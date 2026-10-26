@@ -937,6 +937,12 @@ impl VirtualModules {
             BuiltinExport::Enum {
                 name: common::BUILTIN_THREAD_ERROR_ENUM,
             },
+            BuiltinExport::Enum {
+                name: common::BUILTIN_CHANNEL_ERROR_ENUM,
+            },
+            BuiltinExport::Enum {
+                name: common::BUILTIN_LOCK_ERROR_ENUM,
+            },
         ];
         for kind in ThreadBuiltin::all() {
             thread_exports.push(BuiltinExport::ThreadFn { kind: *kind });
