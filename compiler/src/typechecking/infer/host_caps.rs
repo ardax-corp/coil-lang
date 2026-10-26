@@ -1,5 +1,5 @@
 //! Compile-time host capability gates for FFI (`dload`, process-exec
-//! symbols), checked where they are declared. The host calls (`env::exec`,
+//! symbols), checked where they are declared. The host calls (`env::exit`,
 //! `open`, …) are checked over what the program reaches, after codegen
 //! (`Compiler::capability_violations`).
 

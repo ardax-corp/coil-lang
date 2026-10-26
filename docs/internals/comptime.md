@@ -80,7 +80,6 @@ scoped to one module with `MODULE=`:
 | `--comptime-read PATH` | reading files under `PATH` |
 | `--comptime-write PATH` | writing files under `PATH` (such an evaluation is never cached) |
 | `--comptime-env NAME` | reading one environment variable |
-| `--comptime-exec NAME` | running one program, matched by stem |
 | `--comptime-net HOST[:PORT]` | TCP connections to that host |
 
 Results that did IO are kept in the result cache (`--comptime-cache`,

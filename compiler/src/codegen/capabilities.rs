@@ -18,10 +18,9 @@ pub struct CapViolation {
 }
 
 impl CapViolation {
-    /// The call as the user wrote it (`env::exec`), or the native's name.
+    /// The call as the user wrote it (`env::exit`), or the native's name.
     fn shown(&self) -> String {
         match self.native {
-            "env_exec" => "`env::exec`".into(),
             "env_exit" => "`env::exit`".into(),
             "stream_attach" => "`Stream.attach`".into(),
             "open" => "`io::open`".into(),
@@ -35,9 +34,7 @@ impl CapViolation {
     }
 
     pub fn message(&self) -> Message {
-        let code = if self.needed.contains(Caps::EXEC) {
-            ErrorCode::HostExecDenied
-        } else if self.needed.contains(Caps::EXIT) {
+        let code = if self.needed.contains(Caps::EXIT) {
             ErrorCode::HostExitDenied
         } else if self.needed.contains(Caps::ATTACH) {
             ErrorCode::HostAttachDenied

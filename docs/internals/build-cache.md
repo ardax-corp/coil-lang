@@ -51,7 +51,7 @@ includes an output written beside the source, such as a new `-o` file.
 - A compile that reported any diagnostic: a hit would not show its warnings
   again.
 - A compile with compile-time IO grants (`--comptime-read`, `--comptime-env`,
-  `--comptime-exec`, `--comptime-net`, `--comptime-write`): its result can
+  `--comptime-net`, `--comptime-write`): its result can
   depend on files and the environment the key does not cover. Those
   evaluations have their own result cache.
 - `--opt-stats` / `--opt-stats-json`, which report on the compile itself.

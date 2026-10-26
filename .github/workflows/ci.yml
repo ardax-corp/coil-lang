@@ -477,7 +477,7 @@ jobs:
           esac
 
       # The examples in the builtin doc stubs (compiler/src/builtin_docs/),
-      # which no test file imports. `-A`: they show exec, exit and FFI too.
+      # which no test file imports. `-A`: they show exit and FFI too.
       - name: Builtin doc-tests (${{ matrix.variant }}, ${{ matrix.mode }})
         if: matrix.variant == 'default' || matrix.variant == 'O0'
         run: |

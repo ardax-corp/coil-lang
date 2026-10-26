@@ -1868,7 +1868,7 @@ fn main() { return; }
         assert!(classify_host_name("exists").contains(EffectFlags::IO));
         assert!(!classify_host_name("exists").contains(EffectFlags::UNKNOWN));
         assert!(classify_host_name("var").contains(EffectFlags::ENV));
-        assert!(classify_host_name("exec").contains(EffectFlags::EXEC));
+        assert!(classify_host_name("exit").contains(EffectFlags::EXEC));
         assert!(classify_host_name("connect").contains(EffectFlags::NET));
         assert!(classify_host_name("wait_ready").contains(EffectFlags::SUSPEND));
         assert!(!classify_host_name("wait_ready").contains(EffectFlags::IO));

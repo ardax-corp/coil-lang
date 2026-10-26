@@ -327,26 +327,15 @@ fn compile_ok(pipeline: &mut Pipeline, src: &str) -> Vec<common::Byte> {
         .0
 }
 
+/// `env::exec` moved to the coil-process package: the `env` module no
+/// longer exports it, whatever is granted.
 #[test]
-fn granted_exec_emits_host_invoke() {
+fn env_exec_is_gone() {
     let mut pipeline = test_pipeline();
-    pipeline.grant_exec();
-    let bc = compile_ok(
-        &mut pipeline,
-        r#"
-use env::{exec};
-fn main() {
-    let args: Vec<string> = [];
-    let _ = exec("true", args);
-}
-"#,
-    );
-    assert!(
-        bc.iter()
-            .any(|b| matches!(b.bytecode(), common::Instruction::HostInvoke)),
-        "granted env::exec must emit HostInvoke, opcodes={:?}",
-        bc.iter().map(|b| *b.bytecode()).collect::<Vec<_>>()
-    );
+    pipeline.grant_all();
+    assert!(pipeline
+        .compile_src("use env::{exec};\nfn main() {\n    let args: Vec<string> = [];\n    let _ = exec(\"true\", args);\n}\n")
+        .is_err());
 }
 
 #[test]
@@ -5036,7 +5025,7 @@ fn broken_effect_declarations_are_errors() {
 /// needs none.
 #[test]
 fn reachable_host_calls_need_their_capabilities() {
-    let src = "use env::{exec, exit};\nuse io::{open};\nuse io::fs::{exists, remove_file};\nfn shell() {\n    let args: Vec<string> = Vec::new();\n    let _ = exec(\"true\", args);\n}\nfn load() -> bool {\n    let _ = open(\"cfg.toml\", \"r\");\n    let _ = exists(\"cfg.toml\");\n    return true;\n}\nfn main() {\n    if load() {\n        exit(0);\n    }\n}\n";
+    let src = "use env::{set_var, exit};\nuse io::{open};\nuse io::fs::{exists, remove_file};\nfn shell() {\n    let _ = set_var(\"A\", \"b\");\n}\nfn load() -> bool {\n    let _ = open(\"cfg.toml\", \"r\");\n    let _ = exists(\"cfg.toml\");\n    return true;\n}\nfn main() {\n    if load() {\n        exit(0);\n    }\n}\n";
     let unused_cleanup = "fn cleanup() {\n    let _ = remove_file(\"x\");\n}\n";
     let src = format!("{src}{unused_cleanup}");
     {
@@ -5051,7 +5040,7 @@ fn reachable_host_calls_need_their_capabilities() {
         assert!(has(compiler::ErrorCode::HostExitDenied, "`env::exit` requires `--allow-exit`: reached from `main`"), "{msgs:?}");
         assert!(has(compiler::ErrorCode::HostCapDenied, "`io::open` requires `--allow-read`: reached from `main` → `load`"), "{msgs:?}");
         assert!(has(compiler::ErrorCode::HostCapDenied, "`io::fs::exists` requires `--allow-read`"), "{msgs:?}");
-        assert!(!msgs.iter().any(|(_, m)| m.contains("env::exec") || m.contains("remove_file")), "unreached calls are free: {msgs:?}");
+        assert!(!msgs.iter().any(|(_, m)| m.contains("env::set_var") || m.contains("remove_file")), "unreached calls are free: {msgs:?}");
 
         let mut pipeline = deny_pipeline();
         assert!(pipeline.grant_capability("read"));

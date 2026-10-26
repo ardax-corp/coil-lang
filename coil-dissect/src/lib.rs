@@ -159,7 +159,6 @@ mod tests {
             "a.hy",
             "--allow-attach",
             "--allow-exit",
-            "--allow-exec",
             "--allow-ffi-exec",
             "--allow-dload",
             "tls",
@@ -173,7 +172,6 @@ mod tests {
         assert_eq!(args.filename, "a.hy");
         assert!(args.grants.allow_attach);
         assert!(args.grants.allow_exit);
-        assert!(args.grants.allow_exec);
         assert!(args.grants.allow_ffi_exec);
         assert_eq!(
             args.grants.allow_dload,

@@ -1,14 +1,13 @@
 // @expected E0407 — `env::exit` reached from `main` needs `--allow-exit`,
-// even when the read calls before it are granted and the unreached `exec`
+// even when the read calls before it are granted and the unreached `set_var`
 // and `remove_file` helpers need nothing.
-use env::{exec, exit};
+use env::{exit, set_var};
 use io::open;
 use io::fs::exists;
 use io::fs::remove_file;
 
 fn shell() {
-    let args: Vec<string> = Vec::new();
-    let _ = exec("true", args);
+    let _ = set_var("A", "b");
 }
 
 fn load() -> bool {

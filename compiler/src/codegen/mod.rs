@@ -559,7 +559,7 @@ pub struct Compiler {
     source_file_list: Vec<String>,
     /// One [`DebugLoc`] per bytecode slot (grows with [`Self::bytecode`]).
     debug_locs: Vec<DebugLoc>,
-    /// Host calls that need a capability (`open`, `env::exec`, …), by the
+    /// Host calls that need a capability (`open`, `env::exit`, …), by the
     /// [`DebugLoc`] on their `HostInvoke` op. Checked against the grants
     /// for the calls reachable from `main` / tests
     /// ([`Compiler::capability_violations`]).
@@ -1009,7 +1009,7 @@ pub(crate) struct CleanupPad {
 #[derive(Debug, Clone)]
 pub(crate) struct GatedHostCall {
     pub caps: common::Caps,
-    /// The native's name (`open`, `env_exec`).
+    /// The native's name (`open`, `env_exit`).
     pub native: &'static str,
 }
 

@@ -2485,8 +2485,10 @@ fn host_fn_scheme_covers_all_wiring_registries() {
         .chain(ENV_WIRING.iter())
         .chain(CLOCK_WIRING.iter())
         .map(|&(n, _, _)| n)
+        // Removed slot: `env::exec` moved to coil-process; nothing exports it.
+        .filter(|&n| n != "env_exec")
         .collect();
-    assert_eq!(names.len(), 27);
+    assert_eq!(names.len(), 26);
     for name in names {
         let _ = c.host_fn_scheme(name, 0..0);
     }

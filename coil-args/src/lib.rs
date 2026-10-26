@@ -130,9 +130,6 @@ pub struct HostGrantFlags {
     /// Allow env::exit
     #[arg(long)]
     pub allow_exit: bool,
-    /// Allow env::exec
-    #[arg(long)]
-    pub allow_exec: bool,
     /// Allow FFI process-exec symbols (system, execve, …)
     #[arg(long)]
     pub allow_ffi_exec: bool,
@@ -187,10 +184,6 @@ pub struct HostGrantFlags {
     /// `MODULE=` as above)
     #[arg(long = "comptime-env", value_name = "[MODULE=]NAME", action = clap::ArgAction::Append)]
     pub comptime_env: Vec<String>,
-    /// Let compile-time code run programs named STEM (repeatable, `MODULE=`
-    /// as above)
-    #[arg(long = "comptime-exec", value_name = "[MODULE=]STEM", action = clap::ArgAction::Append)]
-    pub comptime_exec: Vec<String>,
     /// Let compile-time code connect to HOST (any port) or HOST:PORT over
     /// TCP (repeatable, `MODULE=` as above)
     #[arg(long = "comptime-net", value_name = "[MODULE=]HOST[:PORT]", action = clap::ArgAction::Append)]
@@ -245,7 +238,6 @@ impl HostGrantFlags {
     pub fn is_set(&self) -> bool {
         self.allow_attach
             || self.allow_exit
-            || self.allow_exec
             || self.allow_ffi_exec
             || self.allow_read
             || self.allow_write
@@ -261,7 +253,6 @@ impl HostGrantFlags {
             || !self.comptime_read.is_empty()
             || !self.comptime_write.is_empty()
             || !self.comptime_env.is_empty()
-            || !self.comptime_exec.is_empty()
             || !self.comptime_net.is_empty()
             || self.comptime_timeout.is_some()
             || self.comptime_cache.is_some()
@@ -269,7 +260,7 @@ impl HostGrantFlags {
             || self.comptime_refresh
     }
 
-    /// The `--comptime-read` / `-write` / `-env` / `-exec` grants.
+    /// The `--comptime-read` / `-write` / `-env` / `-net` grants.
     fn comptime_io(&self) -> ComptimeGrants {
         let paths = |list: &[String]| list.iter().map(|g| Scoped::parse(g, |p| PathBuf::from(p))).collect();
         let names = |list: &[String]| list.iter().map(|g| Scoped::parse(g, |n| n.to_string())).collect();
@@ -277,7 +268,6 @@ impl HostGrantFlags {
             read: paths(&self.comptime_read),
             write: paths(&self.comptime_write),
             env: names(&self.comptime_env),
-            exec: names(&self.comptime_exec),
             net: names(&self.comptime_net),
         }
     }
@@ -297,7 +287,6 @@ impl HostGrantFlags {
         grants.comptime_cache.offline |= extra.comptime_cache.offline;
         grants.comptime_cache.refresh |= extra.comptime_cache.refresh;
         grants.allow_attach |= extra.allow_attach;
-        grants.allow_exec |= extra.allow_exec;
         grants.allow_exit |= extra.allow_exit;
         grants.allow_ffi_exec |= extra.allow_ffi_exec;
         grants.allow_read |= extra.allow_read;
@@ -324,7 +313,6 @@ impl HostGrantFlags {
         let mut grants = HostGrants {
             comptime_io,
             allow_attach: self.allow_attach,
-            allow_exec: self.allow_exec,
             allow_exit: self.allow_exit,
             allow_ffi_exec: self.allow_ffi_exec,
             allow_read: self.allow_read,
