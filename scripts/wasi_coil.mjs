@@ -20,7 +20,9 @@ if (!wasm) {
 const wasi = new WASI({
   version: "preview1",
   args: ["coil", ...args],
-  env: process.env,
+  // No HOME: the host's home is not preopened, and caches under it would
+  // land in the current directory instead.
+  env: Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== "HOME")),
   preopens: { ".": process.cwd(), "/tmp": tmpdir() },
   returnOnExit: true,
 });
