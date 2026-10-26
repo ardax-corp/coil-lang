@@ -2,7 +2,7 @@
 // variant name, so an error can be formatted (`%v`) or passed to a `T: Show`.
 use tests::assert;
 use io::{IoError, open};
-use thread::ThreadError;
+use thread::{ThreadError, ChannelError, LockError};
 use env::EnvError;
 use ffi::ErrorKind;
 use io::tty::TtyError;
@@ -42,9 +42,12 @@ test("an error returned by an io call") {
     assert!(text == "open failed: NotFound");
 }
 
-test("ThreadError, EnvError and ffi ErrorKind") {
-    assert!(format("%v", ThreadError::Disconnected) == "Disconnected");
-    assert!(format("%v", ThreadError::Poisoned) == "Poisoned");
+test("thread errors, EnvError and ffi ErrorKind") {
+    assert!(format("%v", ThreadError::NotSendable) == "NotSendable");
+    assert!(format("%v", ChannelError::Closed) == "Closed");
+    assert!(format("%v", ChannelError::Full) == "Full");
+    assert!(format("%v", LockError::Poisoned) == "Poisoned");
+    assert!(format("%v", LockError::AlreadyHeld) == "AlreadyHeld");
     assert!(format("%v", EnvError::ExecFailed) == "ExecFailed");
     assert!(format("%v", EnvError::NotFound) == "NotFound");
     assert!(format("%v", ErrorKind::SymbolNotFound) == "SymbolNotFound");
@@ -54,4 +57,6 @@ test("ThreadError, EnvError and ffi ErrorKind") {
 test("through a Show bound") {
     assert!(shown(IoError::TimedOut) == "TimedOut");
     assert!(shown(ThreadError::JoinFailed) == "JoinFailed");
+    assert!(shown(ChannelError::Empty) == "Empty");
+    assert!(shown(LockError::NotHeld) == "NotHeld");
 }

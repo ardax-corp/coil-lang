@@ -1,5 +1,5 @@
 // @output wb
-use thread::{channel, try_recv, ThreadError};
+use thread::{channel, try_recv, ChannelError};
 use io::{stdout, write};
 use string::{format, to_bytes};
 
@@ -9,7 +9,7 @@ fn main() {
     let msg = match try_recv(rx) {
         Result::Ok(_) => "ok",
         Result::Err(e) => match e {
-            ThreadError::WouldBlock => "wb",
+            ChannelError::Empty => "wb",
             default => "other",
         },
     };

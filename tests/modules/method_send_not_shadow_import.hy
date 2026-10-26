@@ -22,7 +22,10 @@ fn work() -> int {
 
 fn main() {
     let pair = channel()?;
-    let t = spawn(work)?;
+    let t = match spawn(work) {
+        Ok(t) => t,
+        Err(_) => panic "spawn failed",
+    };
     let w = new ThreadWrapper(t, pair[0]);
     w.send("hi")?;
     let _ = write(stdout(), to_bytes(format("%s", recv(pair[1])?)));

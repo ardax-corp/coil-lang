@@ -67,7 +67,7 @@ class Sender<T> {}
 /// # Examples
 ///
 /// ```
-/// use thread::{channel, send, try_recv, Receiver, ThreadError};
+/// use thread::{channel, send, try_recv, Receiver, ChannelError};
 /// # use tests::assert;
 /// let (tx, rx) = match channel() {
 ///     Result::Ok(pair) => pair,
@@ -75,7 +75,7 @@ class Sender<T> {}
 /// };
 /// let r: Receiver = rx;
 /// let empty = match try_recv(r) {
-///     Result::Err(ThreadError::WouldBlock) => true,
+///     Result::Err(ChannelError::Empty) => true,
 ///     default => false,
 /// };
 /// assert!(empty);
@@ -132,14 +132,53 @@ class Mutex<T> {}
 /// ```
 class RwLock<T> {}
 
-/// The error of every `thread` function.
+/// Why starting, joining or detaching a thread failed.
 ///
-/// It implements `Show`, so `format("%v", e)` gives the variant name.
+/// Channel functions report a `ChannelError` and lock functions a
+/// `LockError` instead. It implements `Show`, so `format("%v", e)` gives the
+/// variant name.
 ///
 /// # Examples
 ///
 /// ```
-/// use thread::{channel, close, send, ThreadError};
+/// use thread::{spawn, join, detach, ThreadError};
+/// # use tests::assert;
+/// fn one() -> int {
+///     return 1;
+/// }
+///
+/// fn main() {
+///     let t = match spawn(one) {
+///         Result::Ok(t) => t,
+///         Result::Err(_) => panic "spawn failed",
+///     };
+///     let _ = detach(t);
+///     let refused = match join(t) {
+///         Result::Err(ThreadError::JoinFailed) => true,
+///         default => false,
+///     };
+///     assert!(refused);
+/// }
+/// ```
+enum ThreadError {
+    /// The thread cannot be joined: it was already joined or detached, or it
+    /// panicked instead of returning a value.
+    JoinFailed,
+    /// A `spawn` argument or capture cannot cross to another thread: it is or
+    /// contains a stream, a `Thread`, a coroutine, a `gc` handle, a partially
+    /// applied function, or a cycle. The typechecker rejects most of these,
+    /// so this is left for values of a generic type.
+    NotSendable,
+}
+
+/// Why a channel operation failed.
+///
+/// `thread` channels and `task::Channel` share it. It implements `Show`.
+///
+/// # Examples
+///
+/// ```
+/// use thread::{channel, close, send, ChannelError};
 /// # use tests::assert;
 /// let (tx, rx) = match channel() {
 ///     Result::Ok(pair) => pair,
@@ -147,32 +186,54 @@ class RwLock<T> {}
 /// };
 /// let _ = close(tx);
 /// let closed = match send(tx, 1) {
-///     Result::Err(ThreadError::Disconnected) => true,
+///     Result::Err(ChannelError::Closed) => true,
 ///     default => false,
 /// };
 /// assert!(closed);
 /// ```
-enum ThreadError {
-    /// The operation would have to wait: `try_recv` on an empty channel, or
-    /// `try_lock` / `try_read` / `try_write` on a lock that is held.
-    WouldBlock,
+enum ChannelError {
     /// The channel is closed: `send` after `close`, or `recv` / `try_recv`
     /// on a closed channel with no values left.
-    Disconnected,
-    /// The thread cannot be joined: it was already joined or detached, or it
-    /// panicked instead of returning a value.
-    JoinFailed,
-    /// A value cannot cross to another thread: it is or contains a stream, a
-    /// `Thread`, a coroutine, a `gc` handle, a partially applied function, or
-    /// a cycle.
-    NotSendable,
+    Closed,
+    /// `try_recv` on an empty channel that is still open.
+    Empty,
+    /// `try_send` on a full channel (bounded `task::Channel` only; `thread`
+    /// channels are unbounded).
+    Full,
+}
+
+/// Why a `Mutex` or `RwLock` operation failed.
+///
+/// It implements `Show`.
+///
+/// # Examples
+///
+/// ```
+/// use thread::{mutex, lock, try_lock, unlock, LockError};
+/// # use tests::assert;
+/// let m = match mutex(0) {
+///     Result::Ok(m) => m,
+///     Result::Err(_) => panic "mutex failed",
+/// };
+/// let _ = lock(m);
+/// let busy = match try_lock(m) {
+///     Result::Err(LockError::WouldBlock) => true,
+///     default => false,
+/// };
+/// assert!(busy);
+/// let _ = unlock(m);
+/// ```
+enum LockError {
+    /// The lock is held: `try_lock`, `try_read` or `try_write` would wait.
+    WouldBlock,
     /// A readers-writer lock was poisoned by a thread that panicked while
     /// holding it.
     Poisoned,
-    /// Any other failure: an `unlock` of a mutex this thread does not hold, a
-    /// second `lock` while one is held, or a lock callback that does not
-    /// return a pair.
-    Other,
+    /// `unlock` of a mutex this thread does not hold.
+    NotHeld,
+    /// `lock` or `try_lock` while this thread already holds a mutex through
+    /// `lock` (one at a time).
+    AlreadyHeld,
 }
 
 /// Runs `f(arg)` on another OS thread and returns a handle to it.
@@ -183,7 +244,8 @@ enum ThreadError {
 /// to it, and the result is copied back by `join`. Sendable values are
 /// numbers, strings, tuples, arrays, records, enums and class instances made
 /// of them, plus `Sender`, `Receiver`, `Mutex` and `RwLock` handles, which
-/// stay shared. Anything else is `Err(ThreadError::NotSendable)`.
+/// stay shared. The typechecker rejects anything else; a value of a generic
+/// type that turns out not to be sendable is `Err(ThreadError::NotSendable)`.
 ///
 /// `spawn(f)` with no argument runs a function that takes none. When `main`
 /// returns, the program still waits for threads that were neither joined
@@ -304,13 +366,13 @@ fn detach<T>(Thread<T> t) -> Result<unit, ThreadError> {}
 ///     assert!(a + b == 30);
 /// }
 /// ```
-fn channel<T>() -> Result<(Sender<T>, Receiver<T>), ThreadError> {}
+fn channel<T>() -> Result<(Sender<T>, Receiver<T>), ChannelError> {}
 
 /// Sends a copy of `value` on the channel.
 ///
 /// Never waits, since channels are unbounded. Returns
-/// `Err(ThreadError::Disconnected)` once the channel is closed and
-/// `Err(ThreadError::NotSendable)` for a value that cannot cross threads.
+/// `Err(ChannelError::Closed)` once the channel is closed. The value must be
+/// sendable (see `spawn`); the typechecker rejects one that is not.
 ///
 /// # Examples
 ///
@@ -328,18 +390,18 @@ fn channel<T>() -> Result<(Sender<T>, Receiver<T>), ThreadError> {}
 /// };
 /// assert!(v[2] == 3);
 /// ```
-fn send<T>(Sender<T> tx, T value) -> Result<unit, ThreadError> {}
+fn send<T>(Sender<T> tx, T value) -> Result<unit, ChannelError> {}
 
 /// Takes the next value from the channel, waiting until one arrives.
 ///
-/// Returns `Err(ThreadError::Disconnected)` when the channel is closed and
+/// Returns `Err(ChannelError::Closed)` when the channel is closed and
 /// every value has been received. Inside a `task::scope`, only the waiting
 /// task is suspended.
 ///
 /// # Examples
 ///
 /// ```
-/// use thread::{channel, send, recv, close, ThreadError};
+/// use thread::{channel, send, recv, close, ChannelError};
 /// # use tests::assert;
 /// let (tx, rx) = match channel() {
 ///     Result::Ok(pair) => pair,
@@ -349,17 +411,17 @@ fn send<T>(Sender<T> tx, T value) -> Result<unit, ThreadError> {}
 /// let _ = close(tx);
 /// assert!(match recv(rx) { Result::Ok(s) => s == "last", Result::Err(_) => false });
 /// let done = match recv(rx) {
-///     Result::Err(ThreadError::Disconnected) => true,
+///     Result::Err(ChannelError::Closed) => true,
 ///     default => false,
 /// };
 /// assert!(done);
 /// ```
-fn recv<T>(Receiver<T> rx) -> Result<T, ThreadError> {}
+fn recv<T>(Receiver<T> rx) -> Result<T, ChannelError> {}
 
 /// Sends `value` without waiting.
 ///
 /// Channels are unbounded, so this behaves exactly like `send`: it fails
-/// only with `Disconnected` (closed channel) or `NotSendable`.
+/// only with `Closed`, never `Full`.
 ///
 /// # Examples
 ///
@@ -373,41 +435,41 @@ fn recv<T>(Receiver<T> rx) -> Result<T, ThreadError> {}
 /// assert!(match try_send(tx, 7) { Result::Ok(_) => true, Result::Err(_) => false });
 /// assert!(match try_recv(rx) { Result::Ok(v) => v == 7, Result::Err(_) => false });
 /// ```
-fn try_send<T>(Sender<T> tx, T value) -> Result<unit, ThreadError> {}
+fn try_send<T>(Sender<T> tx, T value) -> Result<unit, ChannelError> {}
 
 /// Takes the next value if there is one, without waiting.
 ///
-/// Returns `Err(ThreadError::WouldBlock)` when the channel is empty but
-/// open, and `Err(ThreadError::Disconnected)` when it is empty and closed.
+/// Returns `Err(ChannelError::Empty)` when the channel is empty but
+/// open, and `Err(ChannelError::Closed)` when it is empty and closed.
 ///
 /// # Examples
 ///
 /// ```
-/// use thread::{channel, send, try_recv, ThreadError};
+/// use thread::{channel, send, try_recv, ChannelError};
 /// # use tests::assert;
 /// let (tx, rx) = match channel() {
 ///     Result::Ok(pair) => pair,
 ///     Result::Err(_) => panic "channel failed",
 /// };
 /// let empty = match try_recv(rx) {
-///     Result::Err(ThreadError::WouldBlock) => true,
+///     Result::Err(ChannelError::Empty) => true,
 ///     default => false,
 /// };
 /// assert!(empty);
 /// let _ = send(tx, 3);
 /// assert!(match try_recv(rx) { Result::Ok(v) => v == 3, Result::Err(_) => false });
 /// ```
-fn try_recv<T>(Receiver<T> rx) -> Result<T, ThreadError> {}
+fn try_recv<T>(Receiver<T> rx) -> Result<T, ChannelError> {}
 
 /// Closes the channel: no more sends.
 ///
-/// Later `send` / `try_send` calls fail with `Disconnected`. Receivers still
-/// get the values already queued, then `Disconnected`. Closing twice is fine.
+/// Later `send` / `try_send` calls fail with `Closed`. Receivers still get
+/// the values already queued, then `Closed`. Closing twice is fine.
 ///
 /// # Examples
 ///
 /// ```
-/// use thread::{channel, close, send, ThreadError};
+/// use thread::{channel, close, send, ChannelError};
 /// # use tests::assert;
 /// let (tx, rx) = match channel() {
 ///     Result::Ok(pair) => pair,
@@ -415,17 +477,17 @@ fn try_recv<T>(Receiver<T> rx) -> Result<T, ThreadError> {}
 /// };
 /// assert!(match close(tx) { Result::Ok(_) => true, Result::Err(_) => false });
 /// let refused = match send(tx, 1) {
-///     Result::Err(ThreadError::Disconnected) => true,
+///     Result::Err(ChannelError::Closed) => true,
 ///     default => false,
 /// };
 /// assert!(refused);
 /// ```
-fn close<T>(Sender<T> tx) -> Result<unit, ThreadError> {}
+fn close<T>(Sender<T> tx) -> Result<unit, ChannelError> {}
 
 /// Creates a mutex holding a copy of `initial`.
 ///
-/// The value must be sendable (see `spawn`), or the result is
-/// `Err(ThreadError::NotSendable)`. Read and change it with `with_lock`.
+/// The value must be sendable (see `spawn`); the typechecker rejects one
+/// that is not. Read and change it with `with_lock`.
 ///
 /// # Examples
 ///
@@ -453,7 +515,7 @@ fn close<T>(Sender<T> tx) -> Result<unit, ThreadError> {}
 ///     assert!(n == 2);
 /// }
 /// ```
-fn mutex<T>(T initial) -> Result<Mutex<T>, ThreadError> {}
+fn mutex<T>(T initial) -> Result<Mutex<T>, LockError> {}
 
 /// Locks `m`, runs `f` on its value, stores the new value and returns the result.
 ///
@@ -479,14 +541,14 @@ fn mutex<T>(T initial) -> Result<Mutex<T>, ThreadError> {}
 /// assert!(before == 10);
 /// assert!(match with_lock(m, fn (int n) => (n, n)) { Result::Ok(n) => n == 20, Result::Err(_) => false });
 /// ```
-fn with_lock<A, B>(Mutex<A> m, A -> (A, B) f) -> Result<B, ThreadError> {}
+fn with_lock<A, B>(Mutex<A> m, A -> (A, B) f) -> Result<B, LockError> {}
 
 /// Locks `m` until `unlock`, waiting while another thread holds it.
 ///
 /// This gives no access to the value (use `with_lock` for that); it only
 /// excludes other `lock` / `with_lock` callers. A thread can hold one mutex
 /// through `lock` at a time: a second `lock` before `unlock` is
-/// `Err(ThreadError::Other)`.
+/// `Err(LockError::AlreadyHeld)`.
 ///
 /// # Examples
 ///
@@ -500,17 +562,17 @@ fn with_lock<A, B>(Mutex<A> m, A -> (A, B) f) -> Result<B, ThreadError> {}
 /// assert!(match lock(m) { Result::Ok(_) => true, Result::Err(_) => false });
 /// assert!(match unlock(m) { Result::Ok(_) => true, Result::Err(_) => false });
 /// ```
-fn lock<T>(Mutex<T> m) -> Result<unit, ThreadError> {}
+fn lock<T>(Mutex<T> m) -> Result<unit, LockError> {}
 
 /// Locks `m` if it is free, without waiting.
 ///
-/// Returns `Err(ThreadError::WouldBlock)` when the mutex is held (also by
+/// Returns `Err(LockError::WouldBlock)` when the mutex is held (also by
 /// this thread). On success, release it with `unlock`.
 ///
 /// # Examples
 ///
 /// ```
-/// use thread::{mutex, lock, try_lock, unlock, ThreadError};
+/// use thread::{mutex, lock, try_lock, unlock, LockError};
 /// # use tests::assert;
 /// let m = match mutex(0) {
 ///     Result::Ok(m) => m,
@@ -518,7 +580,7 @@ fn lock<T>(Mutex<T> m) -> Result<unit, ThreadError> {}
 /// };
 /// let _ = lock(m);
 /// let busy = match try_lock(m) {
-///     Result::Err(ThreadError::WouldBlock) => true,
+///     Result::Err(LockError::WouldBlock) => true,
 ///     default => false,
 /// };
 /// assert!(busy);
@@ -526,16 +588,16 @@ fn lock<T>(Mutex<T> m) -> Result<unit, ThreadError> {}
 /// assert!(match try_lock(m) { Result::Ok(_) => true, Result::Err(_) => false });
 /// let _ = unlock(m);
 /// ```
-fn try_lock<T>(Mutex<T> m) -> Result<unit, ThreadError> {}
+fn try_lock<T>(Mutex<T> m) -> Result<unit, LockError> {}
 
 /// Releases a mutex this thread locked with `lock` or `try_lock`.
 ///
-/// Returns `Err(ThreadError::Other)` if this thread does not hold `m`.
+/// Returns `Err(LockError::NotHeld)` if this thread does not hold `m`.
 ///
 /// # Examples
 ///
 /// ```
-/// use thread::{mutex, lock, unlock, ThreadError};
+/// use thread::{mutex, lock, unlock, LockError};
 /// # use tests::assert;
 /// let m = match mutex(0) {
 ///     Result::Ok(m) => m,
@@ -544,17 +606,17 @@ fn try_lock<T>(Mutex<T> m) -> Result<unit, ThreadError> {}
 /// let _ = lock(m);
 /// assert!(match unlock(m) { Result::Ok(_) => true, Result::Err(_) => false });
 /// let not_held = match unlock(m) {
-///     Result::Err(ThreadError::Other) => true,
+///     Result::Err(LockError::NotHeld) => true,
 ///     default => false,
 /// };
 /// assert!(not_held);
 /// ```
-fn unlock<T>(Mutex<T> m) -> Result<unit, ThreadError> {}
+fn unlock<T>(Mutex<T> m) -> Result<unit, LockError> {}
 
 /// Creates a readers-writer lock holding a copy of `initial`.
 ///
-/// The value must be sendable (see `spawn`), or the result is
-/// `Err(ThreadError::NotSendable)`.
+/// The value must be sendable (see `spawn`); the typechecker rejects one
+/// that is not.
 ///
 /// # Examples
 ///
@@ -571,7 +633,7 @@ fn unlock<T>(Mutex<T> m) -> Result<unit, ThreadError> {}
 /// };
 /// assert!(n == 6);
 /// ```
-fn rwlock<T>(T initial) -> Result<RwLock<T>, ThreadError> {}
+fn rwlock<T>(T initial) -> Result<RwLock<T>, LockError> {}
 
 /// Runs `f` on a snapshot of the lock's value and returns what `f` returns.
 ///
@@ -594,7 +656,7 @@ fn rwlock<T>(T initial) -> Result<RwLock<T>, ThreadError> {}
 /// };
 /// assert!(first == 1);
 /// ```
-fn with_read<A, B>(RwLock<A> lock, A -> B f) -> Result<B, ThreadError> {}
+fn with_read<A, B>(RwLock<A> lock, A -> B f) -> Result<B, LockError> {}
 
 /// Takes the write lock, runs `f` and stores the new value it returns.
 ///
@@ -618,9 +680,9 @@ fn with_read<A, B>(RwLock<A> lock, A -> B f) -> Result<B, ThreadError> {}
 /// assert!(old == 1);
 /// assert!(match with_read(lock, fn (int n) => n) { Result::Ok(n) => n == 42, Result::Err(_) => false });
 /// ```
-fn with_write<A, B>(RwLock<A> lock, A -> (A, B) f) -> Result<B, ThreadError> {}
+fn with_write<A, B>(RwLock<A> lock, A -> (A, B) f) -> Result<B, LockError> {}
 
-/// Like `with_read`, but returns `Err(ThreadError::WouldBlock)` instead of
+/// Like `with_read`, but returns `Err(LockError::WouldBlock)` instead of
 /// waiting when a writer holds the lock.
 ///
 /// # Examples
@@ -634,9 +696,9 @@ fn with_write<A, B>(RwLock<A> lock, A -> (A, B) f) -> Result<B, ThreadError> {}
 /// };
 /// assert!(match try_read(lock, fn (int n) => n * 2) { Result::Ok(v) => v == 10, Result::Err(_) => false });
 /// ```
-fn try_read<A, B>(RwLock<A> lock, A -> B f) -> Result<B, ThreadError> {}
+fn try_read<A, B>(RwLock<A> lock, A -> B f) -> Result<B, LockError> {}
 
-/// Like `with_write`, but returns `Err(ThreadError::WouldBlock)` instead of
+/// Like `with_write`, but returns `Err(LockError::WouldBlock)` instead of
 /// waiting when the lock is held.
 ///
 /// # Examples
@@ -651,4 +713,4 @@ fn try_read<A, B>(RwLock<A> lock, A -> B f) -> Result<B, ThreadError> {}
 /// let _ = try_write(lock, fn (int n) => (n * 10, 0));
 /// assert!(match with_read(lock, fn (int n) => n) { Result::Ok(n) => n == 10, Result::Err(_) => false });
 /// ```
-fn try_write<A, B>(RwLock<A> lock, A -> (A, B) f) -> Result<B, ThreadError> {}
+fn try_write<A, B>(RwLock<A> lock, A -> (A, B) f) -> Result<B, LockError> {}

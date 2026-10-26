@@ -1,5 +1,9 @@
 // Threads: send a value over a channel.
 //
+// Channel calls fail with a `ChannelError` and `spawn` / `join` with a
+// `ThreadError`, so `main`'s `?`s take the channel errors and the thread
+// calls are matched.
+//
 // @output hello
 
 use thread::{Sender, channel, join, recv, send, spawn};
@@ -11,10 +15,14 @@ fn producer(Sender tx) {
 }
 
 fn main() {
-    let pair = channel()?;
-    let tx = pair[0];
-    let rx = pair[1];
-    let t = spawn(producer, tx)?;
+    let (tx, rx) = channel()?;
+    let t = match spawn(producer, tx) {
+        Ok(t) => t,
+        Err(e) => panic format("spawn failed: %v", e),
+    };
     let _ = print(format("%s", recv(rx)?));
-    (join(t)?)?;
+    match join(t) {
+        Ok(sent) => sent?,
+        Err(e) => panic format("join failed: %v", e),
+    }
 }

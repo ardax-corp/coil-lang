@@ -3,14 +3,14 @@
 // the received value needs no annotation (#1845).
 use io::sync::println;
 use string::format;
-use thread::{channel, recv, send, Receiver, Sender, ThreadError};
+use thread::{channel, recv, send, Receiver, Sender, ChannelError};
 
-fn square(Receiver<int> rx) -> Result<int, ThreadError> {
+fn square(Receiver<int> rx) -> Result<int, ChannelError> {
     let n = recv(rx)?;
     return Ok(n * n);
 }
 
-fn run() -> Result<int, ThreadError> {
+fn run() -> Result<int, ChannelError> {
     let ends: (Sender<int>, Receiver<int>) = channel()?;
     send(ends[0], 3)?;
     return square(ends[1]);

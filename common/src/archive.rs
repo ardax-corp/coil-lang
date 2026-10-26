@@ -168,7 +168,9 @@ pub const ARCHIVE_MAJOR: u16 = 5;
 /// `Certificate` / `Handshake` / `NotATerminal` for `Protocol` (tag 10);
 /// `io::tty` natives return `TtyError` and `string::from_bytes` /
 /// `slice_bytes` return `StringError`; `EnvError` drops the never-returned
-/// `ExecDisabled` (`ExecFailed` is tag 2, `Other` tag 3). Major-4 archives
+/// `ExecDisabled` (`ExecFailed` is tag 2, `Other` tag 3); `thread` natives
+/// return `ThreadError { JoinFailed, NotSendable }`, `ChannelError` or
+/// `LockError` instead of one six-variant `ThreadError`. Major-4 archives
 /// would read the old tags as other variants, so they are not loadable.
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`

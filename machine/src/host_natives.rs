@@ -1109,6 +1109,9 @@ fn push_thread_natives(
                 ThreadKind::TryRead => thread::thread_try_read(heap, args),
                 ThreadKind::TryWrite => thread::thread_try_write(heap, args),
             };
+            if let Some(msg) = thread::take_pending_panic() {
+                return Err(FfiError::Panic(msg));
+            }
             if crate::task::thread_parked() {
                 // Parked the task (`recv`, `join`, a lock): no result yet.
                 return Ok(None);
