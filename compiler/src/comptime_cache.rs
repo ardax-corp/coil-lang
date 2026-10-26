@@ -242,7 +242,9 @@ pub fn write_atomic(dir: &Path, path: &Path, bytes: &[u8]) {
     }
     let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let tmp = dir.join(format!(".{name}.{}.{n}.tmp", std::process::id()));
+    // wasm has no process ids (and `process::id` panics there).
+    let pid = if cfg!(target_family = "wasm") { 0 } else { std::process::id() };
+    let tmp = dir.join(format!(".{name}.{pid}.{n}.tmp"));
     if std::fs::write(&tmp, bytes).is_ok() && std::fs::rename(&tmp, path).is_err() {
         let _ = std::fs::remove_file(&tmp);
     }

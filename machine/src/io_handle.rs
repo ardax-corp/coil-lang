@@ -139,6 +139,23 @@ impl NativeHandle {
     }
 }
 
+/// WASI cannot dup stdio, so a stdio stream owns descriptor 0, 1 or 2 itself
+/// (see `dup_stdio_file`). Closing the stream must not close the process's
+/// own stdio: swap in a descriptor that does not exist and forget the real one.
+#[cfg(target_os = "wasi")]
+impl Drop for NativeHandle {
+    fn drop(&mut self) {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        if let Self::File(f) = self
+            && f.as_raw_fd() <= 2
+        {
+            // SAFETY: no descriptor this high is ever open; closing it fails quietly.
+            let none = unsafe { File::from_raw_fd(i32::MAX) };
+            std::mem::forget(std::mem::replace(f, none));
+        }
+    }
+}
+
 impl Read for NativeHandle {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
