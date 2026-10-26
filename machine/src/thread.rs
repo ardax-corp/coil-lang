@@ -132,7 +132,7 @@ pub fn join_undetached_threads(registry: &LiveThreadRegistry) {
     }
 }
 
-use common::{BUILTIN_RESULT_VARIANTS, BUILTIN_THREAD_ERROR_VARIANTS, Byte, ProgramDebug, Value};
+use common::{BUILTIN_RESULT_VARIANTS, Byte, ProgramDebug, Value};
 
 use crate::ffi::Natives;
 use crate::host_enum::{pack_result_or_panic, pack_result_unit_or_panic};
@@ -167,16 +167,82 @@ pub struct ThreadProgram {
     pub static_word_kinds: Arc<Vec<u8>>,
 }
 
-/// Tag indices for [`ThreadError`](common::BUILTIN_THREAD_ERROR_ENUM).
-#[repr(u32)]
+/// Why a `thread` native failed, before it is reported as the module's
+/// `ThreadError`, `ChannelError` or `LockError` (see [`ErrorSet`]).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ThreadErrorTag {
-    WouldBlock = 0,
-    Disconnected = 1,
-    JoinFailed = 2,
-    NotSendable = 3,
-    Poisoned = 4,
-    Other = 5,
+    /// The operation would wait: an empty channel, a held lock, or a task
+    /// parked until it can go on (that value is never seen).
+    WouldBlock,
+    /// The channel is closed.
+    Disconnected,
+    /// The thread cannot be joined or detached.
+    JoinFailed,
+    /// A value cannot cross threads.
+    NotSendable,
+    /// A readers-writer lock was poisoned.
+    Poisoned,
+    /// `unlock` of a mutex this thread does not hold.
+    NotHeld,
+    /// `lock` while this thread already holds a mutex.
+    AlreadyHeld,
+    /// A handle of the wrong kind, a missing spawn context, or a malformed
+    /// lock callback result; the typechecker rules these out.
+    Other,
+}
+
+/// The `thread` error enum a native reports through.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ErrorSet {
+    /// `ThreadError { JoinFailed, NotSendable }`: spawn, join, detach.
+    Thread,
+    /// `ChannelError { Closed, Empty, Full }`: channel operations.
+    Channel,
+    /// `LockError { WouldBlock, Poisoned, NotHeld, AlreadyHeld }`: locks.
+    Lock,
+}
+
+impl ThreadErrorTag {
+    /// The variant tag of this failure in `set`'s enum.
+    ///
+    /// A non-sendable value or a malformed callback in a channel or lock
+    /// call has no variant there: the typechecker refuses non-sendable
+    /// `send` / `mutex` values, so only a generic value of a non-sendable
+    /// type, or a partially applied lock callback, gets this far. It is a
+    /// program bug: the native raises a Coil panic (see [`take_pending_panic`])
+    /// and the returned tag is never seen.
+    pub fn tag_in(self, set: ErrorSet) -> u32 {
+        use ThreadErrorTag as T;
+        let unreported = |msg: String| {
+            PENDING_PANIC.with(|p| *p.borrow_mut() = Some(msg));
+            0
+        };
+        match (set, self) {
+            (ErrorSet::Thread, T::NotSendable) => 1,
+            (ErrorSet::Thread, _) => 0,
+            (ErrorSet::Channel, T::Disconnected) => 0,
+            (ErrorSet::Channel, T::WouldBlock) => 1,
+            (ErrorSet::Lock, T::WouldBlock) => 0,
+            (ErrorSet::Lock, T::Poisoned) => 1,
+            (ErrorSet::Lock, T::NotHeld | T::Other) => 2,
+            (ErrorSet::Lock, T::AlreadyHeld) => 3,
+            (ErrorSet::Channel | ErrorSet::Lock, T::NotSendable) => unreported(
+                "value is not sendable across threads (a closure, stream, coroutine, gc handle, partially applied function or cycle)".to_string(),
+            ),
+            (set, tag) => unreported(format!("thread {set:?} call failed: {tag:?}")),
+        }
+    }
+}
+
+thread_local! {
+    /// A failure a `thread` native reports as a Coil panic, set by
+    /// [`ThreadErrorTag::tag_in`].
+    static PENDING_PANIC: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Take the panic message the last `thread` native left, if any.
+pub fn take_pending_panic() -> Option<String> {
+    PENDING_PANIC.with(|p| p.borrow_mut().take())
 }
 
 /// Host-side value graph for cross-thread copy (not a coil type).
@@ -800,33 +866,33 @@ pub(crate) fn host_io_wait_ready() -> usize {
     })
 }
 
-/// Allocate `ThreadError` variant on the heap.
-pub fn alloc_thread_error(heap: &mut Heap, tag: ThreadErrorTag) -> Value {
-    let _ = BUILTIN_THREAD_ERROR_VARIANTS;
-    alloc_enum(heap, tag as u32, vec![])
+/// Allocate the `set` error enum variant for `tag` on the heap.
+pub fn alloc_thread_error(heap: &mut Heap, set: ErrorSet, tag: ThreadErrorTag) -> Value {
+    let _ = common::BUILTIN_THREAD_ERROR_ENUMS;
+    alloc_enum(heap, tag.tag_in(set), vec![])
 }
 
-pub fn alloc_result_thread_err(heap: &mut Heap, tag: ThreadErrorTag) -> Value {
+pub fn alloc_result_thread_err(heap: &mut Heap, set: ErrorSet, tag: ThreadErrorTag) -> Value {
     let _ = BUILTIN_RESULT_VARIANTS;
-    let err = alloc_thread_error(heap, tag);
+    let err = alloc_thread_error(heap, set, tag);
     alloc_result_err(heap, err)
 }
 
-pub fn as_result_value(heap: &mut Heap, r: Result<Value, ThreadErrorTag>) -> Value {
+pub fn as_result_value(heap: &mut Heap, set: ErrorSet, r: Result<Value, ThreadErrorTag>) -> Value {
     match r {
         Ok(v) => pack_result_or_panic(heap, Ok(v)),
         Err(tag) => {
-            let err = alloc_thread_error(heap, tag);
+            let err = alloc_thread_error(heap, set, tag);
             pack_result_or_panic(heap, Err(err))
         }
     }
 }
 
-pub fn as_result_unit(heap: &mut Heap, r: Result<(), ThreadErrorTag>) -> Value {
+pub fn as_result_unit(heap: &mut Heap, set: ErrorSet, r: Result<(), ThreadErrorTag>) -> Value {
     match r {
         Ok(()) => pack_result_unit_or_panic(heap, Ok(())),
         Err(tag) => {
-            let err = alloc_thread_error(heap, tag);
+            let err = alloc_thread_error(heap, set, tag);
             pack_result_unit_or_panic(heap, Err(err))
         }
     }
@@ -1339,8 +1405,7 @@ fn copy_statics_out(heap: &Heap, words: &[u64], kinds: &[u8]) -> Vec<Option<Spaw
 
 pub fn host_spawn(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_spawn(heap, args);
-    as_result_value(heap, r)
-}
+    as_result_value(heap, ErrorSet::Thread, r)}
 
 fn try_host_spawn(heap: &mut Heap, args: &[Value]) -> Result<Value, ThreadErrorTag> {
     // A closure's frame starts with its captures, then its parameters.
@@ -1373,8 +1438,7 @@ fn try_host_spawn(heap: &mut Heap, args: &[Value]) -> Result<Value, ThreadErrorT
 
 pub fn host_spawn_shared(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_spawn_shared(heap, args);
-    as_result_value(heap, r)
-}
+    as_result_value(heap, ErrorSet::Thread, r)}
 
 fn try_host_spawn_shared(heap: &mut Heap, args: &[Value]) -> Result<Value, ThreadErrorTag> {
     if host_debugger_attached() {
@@ -1426,8 +1490,7 @@ pub fn host_join(heap: &mut Heap, args: &[Value]) -> Value {
     if crate::task::thread_parked() {
         return Value::default();
     }
-    as_result_value(heap, r)
-}
+    as_result_value(heap, ErrorSet::Thread, r)}
 
 fn try_host_join(heap: &mut Heap, handle: Value) -> Result<Value, ThreadErrorTag> {
     let Some(Object::Thread(gc)) = heap.find_object_by_addr(handle.raw() as u64) else {
@@ -1475,8 +1538,7 @@ fn try_host_join(heap: &mut Heap, handle: Value) -> Result<Value, ThreadErrorTag
 
 pub fn host_detach(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_detach(heap, args[0]);
-    as_result_unit(heap, r)
-}
+    as_result_unit(heap, ErrorSet::Thread, r)}
 
 fn try_host_detach(heap: &mut Heap, handle: Value) -> Result<(), ThreadErrorTag> {
     let Some(Object::Thread(gc)) = heap.find_object_by_addr(handle.raw() as u64) else {
@@ -1505,13 +1567,11 @@ pub fn host_channel(heap: &mut Heap, _args: &[Value]) -> Value {
     let pair = vec![Value::from(tx_obj.addr()), Value::from(rx_obj.addr())];
     let (tup, _) = heap.alloc(ObjTuple::new(pair), Object::Tuple);
     let v = Value::from(tup.addr());
-    as_result_value(heap, Ok(v))
-}
+    as_result_value(heap, ErrorSet::Channel, Ok(v))}
 
 pub fn host_send(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_send(heap, args[0], args[1]);
-    as_result_unit(heap, r)
-}
+    as_result_unit(heap, ErrorSet::Channel, r)}
 
 fn try_host_send(heap: &mut Heap, tx: Value, value: Value) -> Result<(), ThreadErrorTag> {
     let Some(Object::Sender(gc)) = heap.find_object_by_addr(tx.raw() as u64) else {
@@ -1538,8 +1598,7 @@ pub fn host_recv(heap: &mut Heap, args: &[Value]) -> Value {
     if crate::task::thread_parked() {
         return Value::default();
     }
-    as_result_value(heap, r)
-}
+    as_result_value(heap, ErrorSet::Channel, r)}
 
 fn try_host_recv(heap: &mut Heap, rx: Value) -> Result<Value, ThreadErrorTag> {
     let Some(Object::Receiver(gc)) = heap.find_object_by_addr(rx.raw() as u64) else {
@@ -1564,8 +1623,7 @@ fn try_host_recv(heap: &mut Heap, rx: Value) -> Result<Value, ThreadErrorTag> {
 
 pub fn host_try_send(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_try_send(heap, args[0], args[1]);
-    as_result_unit(heap, r)
-}
+    as_result_unit(heap, ErrorSet::Channel, r)}
 
 /// Non-blocking send. The channel is unbounded today, so this matches `try_host_send`.
 fn try_host_try_send(heap: &mut Heap, tx: Value, value: Value) -> Result<(), ThreadErrorTag> {
@@ -1574,8 +1632,7 @@ fn try_host_try_send(heap: &mut Heap, tx: Value, value: Value) -> Result<(), Thr
 
 pub fn host_try_recv(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_try_recv(heap, args[0]);
-    as_result_value(heap, r)
-}
+    as_result_value(heap, ErrorSet::Channel, r)}
 
 fn try_host_try_recv(heap: &mut Heap, rx: Value) -> Result<Value, ThreadErrorTag> {
     let Some(Object::Receiver(gc)) = heap.find_object_by_addr(rx.raw() as u64) else {
@@ -1595,8 +1652,7 @@ fn try_host_try_recv(heap: &mut Heap, rx: Value) -> Result<Value, ThreadErrorTag
 
 pub fn host_close(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_close(heap, args[0]);
-    as_result_unit(heap, r)
-}
+    as_result_unit(heap, ErrorSet::Channel, r)}
 
 fn try_host_close(heap: &mut Heap, tx: Value) -> Result<(), ThreadErrorTag> {
     let Some(Object::Sender(gc)) = heap.find_object_by_addr(tx.raw() as u64) else {
@@ -1608,8 +1664,7 @@ fn try_host_close(heap: &mut Heap, tx: Value) -> Result<(), ThreadErrorTag> {
 
 pub fn host_mutex(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_mutex(heap, args[0]);
-    as_result_value(heap, r)
-}
+    as_result_value(heap, ErrorSet::Lock, r)}
 
 fn try_host_mutex(heap: &mut Heap, initial: Value) -> Result<Value, ThreadErrorTag> {
     let pv = value_to_portable(heap, initial)?;
@@ -1643,8 +1698,7 @@ pub fn host_with_lock(heap: &mut Heap, args: &[Value]) -> Value {
     if crate::task::thread_parked() {
         return Value::default();
     }
-    as_result_value(heap, r)
-}
+    as_result_value(heap, ErrorSet::Lock, r)}
 
 fn try_host_with_lock(
     heap: &mut Heap,
@@ -1684,8 +1738,7 @@ pub fn host_lock(heap: &mut Heap, args: &[Value]) -> Value {
     if crate::task::thread_parked() {
         return Value::default();
     }
-    as_result_unit(heap, r)
-}
+    as_result_unit(heap, ErrorSet::Lock, r)}
 
 fn try_host_lock(heap: &mut Heap, mtx: Value) -> Result<(), ThreadErrorTag> {
     let Some(Object::Mutex(gc)) = heap.find_object_by_addr(mtx.raw() as u64) else {
@@ -1695,7 +1748,7 @@ fn try_host_lock(heap: &mut Heap, mtx: Value) -> Result<(), ThreadErrorTag> {
     let addr = Arc::as_ptr(&inner) as u64;
     HELD_MUTEX.with(|h| {
         if h.borrow().is_some() {
-            return Err(ThreadErrorTag::Other);
+            return Err(ThreadErrorTag::AlreadyHeld);
         }
         if !inner.lock_or_park_task() {
             // The task runs `lock` again after an unlock.
@@ -1708,8 +1761,7 @@ fn try_host_lock(heap: &mut Heap, mtx: Value) -> Result<(), ThreadErrorTag> {
 
 pub fn host_unlock(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_unlock(heap, args[0]);
-    as_result_unit(heap, r)
-}
+    as_result_unit(heap, ErrorSet::Lock, r)}
 
 fn try_host_unlock(heap: &mut Heap, mtx: Value) -> Result<(), ThreadErrorTag> {
     let Some(Object::Mutex(gc)) = heap.find_object_by_addr(mtx.raw() as u64) else {
@@ -1725,17 +1777,16 @@ fn try_host_unlock(heap: &mut Heap, mtx: Value) -> Result<(), ThreadErrorTag> {
             }
             Some((held_addr, inner)) => {
                 *slot = Some((held_addr, inner));
-                Err(ThreadErrorTag::Other)
+                Err(ThreadErrorTag::NotHeld)
             }
-            None => Err(ThreadErrorTag::Other),
+            None => Err(ThreadErrorTag::NotHeld),
         }
     })
 }
 
 pub fn host_try_lock(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_try_lock(heap, args[0]);
-    as_result_unit(heap, r)
-}
+    as_result_unit(heap, ErrorSet::Lock, r)}
 
 fn try_host_try_lock(heap: &mut Heap, mtx: Value) -> Result<(), ThreadErrorTag> {
     let Some(Object::Mutex(gc)) = heap.find_object_by_addr(mtx.raw() as u64) else {
@@ -1749,7 +1800,7 @@ fn try_host_try_lock(heap: &mut Heap, mtx: Value) -> Result<(), ThreadErrorTag> 
     HELD_MUTEX.with(|h| {
         if h.borrow().is_some() {
             unsafe { inner.unlock() };
-            return Err(ThreadErrorTag::Other);
+            return Err(ThreadErrorTag::AlreadyHeld);
         }
         *h.borrow_mut() = Some((addr, inner));
         Ok(())
@@ -1758,8 +1809,7 @@ fn try_host_try_lock(heap: &mut Heap, mtx: Value) -> Result<(), ThreadErrorTag> 
 
 pub fn host_rwlock(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_rwlock(heap, args[0]);
-    as_result_value(heap, r)
-}
+    as_result_value(heap, ErrorSet::Lock, r)}
 
 fn try_host_rwlock(heap: &mut Heap, initial: Value) -> Result<Value, ThreadErrorTag> {
     let pv = value_to_portable(heap, initial)?;
@@ -1770,8 +1820,7 @@ fn try_host_rwlock(heap: &mut Heap, initial: Value) -> Result<Value, ThreadError
 
 pub fn host_with_read(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_with_read(heap, args[0], args[1]);
-    as_result_value(heap, r)
-}
+    as_result_value(heap, ErrorSet::Lock, r)}
 
 fn try_host_with_read(
     heap: &mut Heap,
@@ -1796,8 +1845,7 @@ fn try_host_with_read(
 
 pub fn host_with_write(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_with_write(heap, args[0], args[1]);
-    as_result_value(heap, r)
-}
+    as_result_value(heap, ErrorSet::Lock, r)}
 
 fn try_host_with_write(
     heap: &mut Heap,
@@ -1819,8 +1867,7 @@ fn try_host_with_write(
 
 pub fn host_try_read(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_try_read(heap, args[0], args[1]);
-    as_result_value(heap, r)
-}
+    as_result_value(heap, ErrorSet::Lock, r)}
 
 fn try_host_try_read(
     heap: &mut Heap,
@@ -1844,8 +1891,7 @@ fn try_host_try_read(
 
 pub fn host_try_write(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_try_write(heap, args[0], args[1]);
-    as_result_value(heap, r)
-}
+    as_result_value(heap, ErrorSet::Lock, r)}
 
 fn try_host_try_write(
     heap: &mut Heap,
@@ -1970,22 +2016,16 @@ mod tests {
         }
     }
 
-    fn result_err_tag(heap: &Heap, result: Value) -> ThreadErrorTag {
+    /// The error variant tag of a `Result::Err` from a native.
+    fn result_err_tag(heap: &Heap, result: Value) -> u32 {
         let Object::Enum(gc) = heap.find_object_by_addr(result.raw() as u64).unwrap() else {
             panic!("expected Result enum");
         };
         assert_eq!(gc.as_ref().tag, 1, "expected Result::Err");
         let Member::Object(Object::Enum(err)) = &heap.member_of(gc.as_ref().payload[0]) else {
-            panic!("expected ThreadError payload");
+            panic!("expected an error enum payload");
         };
-        match err.as_ref().tag {
-            0 => ThreadErrorTag::WouldBlock,
-            1 => ThreadErrorTag::Disconnected,
-            2 => ThreadErrorTag::JoinFailed,
-            3 => ThreadErrorTag::NotSendable,
-            4 => ThreadErrorTag::Poisoned,
-            _ => ThreadErrorTag::Other,
-        }
+        err.as_ref().tag
     }
 
     fn channel_pair(heap: &mut Heap) -> (Value, Value) {
@@ -2287,7 +2327,7 @@ mod tests {
     }
 
     #[test]
-    fn channel_close_then_send_and_try_recv_are_disconnected() {
+    fn channel_close_then_send_and_try_recv_are_closed() {
         let mut heap = Heap::default();
         let (tx, rx) = channel_pair(&mut heap);
         let close_ok = host_close(&mut heap, &[tx]);
@@ -2296,13 +2336,13 @@ mod tests {
         let send_err = host_send(&mut heap, &[tx, Value::from(1_i64)]);
         assert_eq!(
             result_err_tag(&heap, send_err),
-            ThreadErrorTag::Disconnected
+            ThreadErrorTag::Disconnected.tag_in(ErrorSet::Channel)
         );
 
         let recv_err = host_try_recv(&mut heap, &[rx]);
         assert_eq!(
             result_err_tag(&heap, recv_err),
-            ThreadErrorTag::Disconnected
+            ThreadErrorTag::Disconnected.tag_in(ErrorSet::Channel)
         );
     }
 
@@ -2317,11 +2357,12 @@ mod tests {
     }
 
     #[test]
-    fn try_recv_empty_open_channel_would_block() {
+    fn try_recv_empty_open_channel_is_empty() {
         let mut heap = Heap::default();
         let (_tx, rx) = channel_pair(&mut heap);
         let err = host_try_recv(&mut heap, &[rx]);
-        assert_eq!(result_err_tag(&heap, err), ThreadErrorTag::WouldBlock);
+        // `ChannelError::Empty`.
+        assert_eq!(result_err_tag(&heap, err), 1);
     }
 
     #[test]
