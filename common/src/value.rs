@@ -59,6 +59,15 @@ type Word = u64;
 #[derive(Default, Copy, Clone, Eq)]
 pub struct Value(Word);
 
+// `self.0 as u64` is a no-op where the word is already a `u64`.
+#[cfg_attr(not(target_pointer_width = "64"), allow(clippy::unnecessary_cast))]
+impl Value {
+    #[inline(always)]
+    fn word_bits(self) -> u64 {
+        self.0 as u64
+    }
+}
+
 impl From<i64> for Value {
     fn from(value: i64) -> Self {
         Self::new(value as _)
@@ -165,7 +174,7 @@ impl Value {
     /// ```
     #[inline]
     pub fn bits(&self) -> u64 {
-        self.0 as u64
+        self.word_bits()
     }
 
     /// The all-zero word: `None`, `false`, `0`, a null pointer.
@@ -181,7 +190,7 @@ impl Value {
     /// (`None` = 0) are unchanged: `0 & !1 == 0`.
     #[inline]
     pub fn heap_addr(&self) -> u64 {
-        (self.0 as u64) & !1
+        self.word_bits() & !1
     }
 
     pub fn inc_int(&mut self) -> &Self {

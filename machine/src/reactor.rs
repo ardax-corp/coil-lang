@@ -449,6 +449,9 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
     static IS_POOL_WORKER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Reused join-help VMs (one live checkout per nested steal on this thread).
+    /// Boxed so checking one out moves a pointer, not the VM (clippy only
+    /// sees the VM as small on 32-bit targets).
+    #[allow(clippy::vec_box)]
     static HELP_VMS: std::cell::RefCell<Vec<Box<Machine<WORKER_STACK_SLOTS>>>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
