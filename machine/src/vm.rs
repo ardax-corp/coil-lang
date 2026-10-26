@@ -386,11 +386,11 @@ pub(crate) fn vload_words_into(heap: &Heap, reg: &mut [u64; common::simd::LANES]
     let base = index as usize;
     if let Some(elems) = arr.words() {
         for (i, lane) in reg.iter_mut().enumerate() {
-            *lane = unsafe { elems.get_unchecked(base + i).raw() as u64 };
+            *lane = unsafe { elems.get_unchecked(base + i).bits() };
         }
     } else {
         for (i, v) in arr.iter().skip(base).take(n).enumerate() {
-            reg[i] = v.raw() as u64;
+            reg[i] = v.bits();
         }
     }
     true
@@ -411,7 +411,7 @@ pub(crate) fn vload_bytes_into(
         return false;
     };
     let obj = match obj {
-        Some(Object::Boxed(_)) => heap.find_object_by_addr(crate::io::peel_one_boxed(heap, Value::from(addr)).raw() as u64),
+        Some(Object::Boxed(_)) => heap.find_object_by_addr(crate::io::peel_one_boxed(heap, Value::from(addr)).bits()),
         o => o,
     };
     let lanes = crate::simd::as_bytes_mut(reg);
@@ -494,10 +494,10 @@ pub(crate) fn vscan(
         }
         op.write(match *word.bytecode() {
             Instruction::VLoad if kind == simd::TY_U8 => {
-                let addr = stack[sp + a].raw() as u64;
+                let addr = stack[sp + a].bits();
                 let mut obj = heap.find_object_by_addr(addr);
                 if let Some(Object::Boxed(_)) = obj {
-                    obj = heap.find_object_by_addr(crate::io::peel_one_boxed(heap, Value::from(addr)).raw() as u64);
+                    obj = heap.find_object_by_addr(crate::io::peel_one_boxed(heap, Value::from(addr)).bits());
                 }
                 let src = match obj {
                     Some(Object::String(gc)) => {
@@ -732,7 +732,11 @@ const CALL_WINDOW: usize = 32;
 /// takes returns into the stub, and `finish_over_apply` calls the result
 /// with the rest. Past every code offset and every `u32` PC, so frame-map
 /// and symbol lookups find nothing at it.
+#[cfg(target_pointer_width = "64")]
 const OVER_APPLY_IP: usize = 1 << 40;
+/// 32-bit targets (wasm): past any code a 4 GiB address space can hold.
+#[cfg(not(target_pointer_width = "64"))]
+const OVER_APPLY_IP: usize = 1 << 31;
 
 pub struct Machine<const S: usize> {
     heap: crate::memory::HeapSlot,
@@ -1294,7 +1298,7 @@ impl<const S: usize> Machine<S> {
     pub fn debug_object(&self, v: Value) -> Option<crate::debug::DebugObject> {
         use crate::debug::DebugObject;
         use crate::memory::Object;
-        let addr = v.raw() as u64 & !1;
+        let addr = v.bits() & !1;
         if addr == 0 {
             return None;
         }
@@ -1682,7 +1686,7 @@ impl<const S: usize> Machine<S> {
                 }
                 if let Some(obj) = pin
                     && let Some(word) = stack.get(base + slot)
-                    && word.raw() as u64 != obj.addr()
+                    && word.bits() != obj.addr()
                 {
                     *pin = None;
                 }
@@ -1740,7 +1744,7 @@ impl<const S: usize> Machine<S> {
     }
 
     fn decode_ffi_type_tag(v: &Value, heap: &Heap) -> (u32, u32) {
-        let raw = v.raw() as u64;
+        let raw = v.bits();
         if raw <= common::tag::LAST as u64 {
             return (raw as u32, 0);
         }
@@ -1755,7 +1759,7 @@ impl<const S: usize> Machine<S> {
     }
 
     fn object_string_value(heap: &Heap, v: &Value) -> String {
-        let addr = v.raw() as u64;
+        let addr = v.bits();
         let obj = Self::find_object_by_addr(heap, addr);
         if let Some(crate::memory::Object::String(gc)) = obj {
             gc.as_ref().data.to_string()
@@ -1766,7 +1770,7 @@ impl<const S: usize> Machine<S> {
 
     fn intern_key(heap: &mut Heap, v: Value) -> crate::memory::RefString {
         if let Some(crate::memory::Object::String(gc)) =
-            Self::find_object_by_addr(heap, v.raw() as u64)
+            Self::find_object_by_addr(heap, v.bits())
         {
             return heap.intern_ref(gc);
         }
@@ -1775,8 +1779,8 @@ impl<const S: usize> Machine<S> {
 
     /// Convert a runtime value to a display string (Show / `%v` / STRINGIFY).
     fn stringify_value(heap: &Heap, v: Value) -> String {
-        let addr = v.raw() as u64;
-        if v.raw().is_null() {
+        let addr = v.bits();
+        if v.is_zero() {
             // `Value::default()` / unit / false-ish null pointer.
             return "0".into();
         }
@@ -1874,7 +1878,7 @@ impl<const S: usize> Machine<S> {
         self.libraries
             .entry(path.to_string())
             .or_insert_with(|| lib_arc.clone());
-        Ok(Value::from(addr as *mut u8))
+        Ok(Value::from(addr))
     }
 
     /// Complete a GC cycle (explicit `gc::collect` / tests). Finishes any
@@ -1908,7 +1912,7 @@ impl<const S: usize> Machine<S> {
             if !queue.is_empty() {
                 let mut gray = Vec::new();
                 for (val, _) in &queue {
-                    if let Some(obj) = Self::find_object_by_addr(&self.heap, val.raw() as u64) {
+                    if let Some(obj) = Self::find_object_by_addr(&self.heap, val.bits()) {
                         obj.mark(&mut gray);
                         obj.mark_references(&self.heap, &mut gray);
                     }
@@ -2100,7 +2104,7 @@ impl<const S: usize> Machine<S> {
         let queue = self.queue_unmarked_finalizers();
         if !queue.is_empty() {
             for (val, _) in &queue {
-                if let Some(obj) = Self::find_object_by_addr(&self.heap, val.raw() as u64) {
+                if let Some(obj) = Self::find_object_by_addr(&self.heap, val.bits()) {
                     self.heap.shade_for_finalizer(obj);
                 }
             }
@@ -2285,12 +2289,12 @@ impl<const S: usize> Machine<S> {
                         })
                         .unwrap_or_default();
                     let words: Vec<String> = (base..(base + 12).min(self.stack.capacity()))
-                        .map(|i| format!("{:#x}", self.stack[i].raw() as u64))
+                        .map(|i| format!("{:#x}", self.stack[i].bits()))
                         .collect();
                     panic!(
                         "gc-stress: must-pointer frame slot at stack word {idx} (frame {frame} base {base} hi {hi}, slot {}, pc {pc:?} in `{fn_name}` at {loc}) holds a non-object {:#x}; row {row:?}; words {words:?}",
                         idx.saturating_sub(base),
-                        v.raw() as u64
+                        v.bits()
                     );
                 }
             }
@@ -2513,7 +2517,7 @@ impl<const S: usize> Machine<S> {
     }
 
     fn claim_finalizer(&self, v: Value) -> bool {
-        match Self::find_object_by_addr(&self.heap, v.raw() as u64) {
+        match Self::find_object_by_addr(&self.heap, v.bits()) {
             Some(Object::Instance(gc)) => {
                 let inst = gc.payload_mut();
                 !std::mem::replace(&mut inst.finalized, true)
@@ -2564,7 +2568,7 @@ impl<const S: usize> Machine<S> {
 
     /// In-place `Vec` / array grow. Returns false when `target` is not an array.
     fn array_push_value(&mut self, target: Value, value: Value) -> bool {
-        let target_addr = target.raw() as u64;
+        let target_addr = target.bits();
         let Some(crate::memory::Object::Array(mut gc)) =
             Self::find_object_by_addr(&self.heap, target_addr)
         else {
@@ -2611,7 +2615,7 @@ impl<const S: usize> Machine<S> {
     /// Classify a stack value as an enum member; heap pointers become `Object`.
     #[inline]
     fn value_as_member(heap: &Heap, v: Value) -> Member {
-        let addr = v.raw() as u64;
+        let addr = v.bits();
         if let Some(o) = Self::find_object_by_addr(heap, addr) {
             Member::Object(o)
         } else {
@@ -2717,7 +2721,7 @@ impl<const S: usize> Machine<S> {
     /// Push `head + tail`, appending in place when `head` ends at its
     /// buffer's tail ([`crate::memory::StrData::concat`]).
     fn push_concat_str(&mut self, head: Value, tail: &str, ip: usize) {
-        let joined = match Self::find_object_by_addr(&self.heap, head.raw() as u64) {
+        let joined = match Self::find_object_by_addr(&self.heap, head.bits()) {
             Some(Object::String(gh)) => gh.as_ref().concat(tail),
             _ => crate::memory::ObjString::new(Self::object_string_value(&self.heap, &head) + tail),
         };
@@ -2739,7 +2743,7 @@ impl<const S: usize> Machine<S> {
 
     fn push_program_string(&mut self, idx: usize, ip: usize) {
         let cached = unsafe { *self.program_string_cache.get_unchecked(idx) };
-        if likely(!cached.raw().is_null()) {
+        if likely(!cached.is_zero()) {
             self.stack.push(cached);
             return;
         }
@@ -2967,13 +2971,13 @@ impl<const S: usize> Machine<S> {
 
     /// The static slots' words, for a worker that reads them.
     pub fn static_words(&self) -> Arc<Vec<u64>> {
-        Arc::new(self.statics.iter().map(|v| v.raw() as u64).collect())
+        Arc::new(self.statics.iter().map(|v| v.bits()).collect())
     }
 
     /// A shared-heap job's statics: the spawning VM's words, which name
     /// objects of the heap this VM is bound to (#1561).
     pub(crate) fn load_shared_statics(&mut self, words: &[u64]) {
-        self.statics = words.iter().map(|&w| Value::from(w as *mut u8)).collect();
+        self.statics = words.iter().map(|&w| Value::from(w)).collect();
     }
 
     /// An isolate job's statics: the spawner's, copied into this VM's heap
@@ -3023,7 +3027,7 @@ impl<const S: usize> Machine<S> {
         library_value: Value,
         signature: crate::ffi::FfiSignature,
     ) -> Result<usize, String> {
-        let addr = library_value.raw() as u64;
+        let addr = library_value.bits();
         let mut lib_obj = self
             .userland_libraries
             .get(&addr)
@@ -3052,7 +3056,7 @@ impl<const S: usize> Machine<S> {
 
     #[cfg(test)]
     pub fn instance_meta(&self, v: Value) -> Option<(u32, bool)> {
-        match Self::find_object_by_addr(&self.heap, v.raw() as u64) {
+        match Self::find_object_by_addr(&self.heap, v.bits()) {
             Some(Object::Instance(gc)) => {
                 let inst = gc.as_ref();
                 Some((inst.type_id, inst.finalized))
@@ -3691,7 +3695,7 @@ impl<const S: usize> Machine<S> {
     /// Text of a boxed `Result::Err(payload)` (a string payload as is, other
     /// payloads stringified), for harness failure reports.
     pub fn result_err_text(&self, value: Value) -> Option<String> {
-        match Self::find_object_by_addr(&self.heap, value.raw() as u64) {
+        match Self::find_object_by_addr(&self.heap, value.bits()) {
             Some(Object::Enum(gc)) if gc.as_ref().tag == 1 => {
                 let payload = gc.as_ref().payload.first().copied()?;
                 Some(Self::stringify_value(&self.heap, payload))
@@ -3701,7 +3705,7 @@ impl<const S: usize> Machine<S> {
     }
 
     pub fn result_is_ok(&self, value: Value) -> bool {
-        match Self::find_object_by_addr(&self.heap, value.raw() as u64) {
+        match Self::find_object_by_addr(&self.heap, value.bits()) {
             Some(Object::Enum(gc)) => gc.as_ref().tag == 0,
             _ => false,
         }
@@ -3752,6 +3756,10 @@ impl<const S: usize> Machine<S> {
         // process exit kills threads still blocked in `recv` / still starting,
         // which looks like "recv never blocks" and "nothing after recv runs".
         // Only joins *this* Machine's registry (not a process-global list).
+        // Without OS threads the workers are still queued: run them now.
+        if crate::reactor::NO_THREADS {
+            while self.reactor.help_local_once() {}
+        }
         crate::thread::join_undetached_threads(&self.live_threads);
         // Remaining class finalizers need host IO / FFI while the reactor is
         // still up. `Drop` still runs this as a safety net for embedders.

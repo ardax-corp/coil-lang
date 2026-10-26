@@ -2,7 +2,10 @@
 
 use std::path::Path;
 
+#[cfg(not(target_family = "wasm"))]
 use libloading::Library;
+#[cfg(target_family = "wasm")]
+use super::nolib::Library;
 
 use super::gate::DloadGate;
 use super::resolve::resolve_library;

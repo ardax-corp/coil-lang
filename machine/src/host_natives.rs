@@ -395,7 +395,7 @@ fn push_values_eq_shaped(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut imp
     let id = out.len();
     register_id(name, id);
     out.push(Arc::new(HostClosureFn::new(sig, |heap, args| {
-        let eq = match heap.find_object_by_addr(args[2].raw() as u64) {
+        let eq = match heap.find_object_by_addr(args[2].bits()) {
             Some(crate::memory::Object::String(gc)) => {
                 crate::value_eq::values_eq_shaped(heap, args[0], args[1], gc.as_ref().data.as_bytes())
             }
@@ -415,7 +415,7 @@ fn push_string_compare(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl 
     let id = out.len();
     register_id(name, id);
     out.push(Arc::new(HostClosureFn::new(sig, move |heap, args| {
-        let text = |v: Value| match heap.find_object_by_addr(crate::io::peel_one_boxed(heap, v).raw() as u64) {
+        let text = |v: Value| match heap.find_object_by_addr(crate::io::peel_one_boxed(heap, v).bits()) {
             Some(crate::memory::Object::String(gc)) => Ok(gc),
             _ => Err(FfiError::Unsupported(format!("{name}: expected a string"))),
         };

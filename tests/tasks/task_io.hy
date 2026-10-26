@@ -1,3 +1,4 @@
+// @needs sockets
 // T1 tasks and IO: an IO wait suspends the task (never a generator it is
 // resuming), so other tasks run while it waits.
 use tests::assert;

@@ -10,6 +10,11 @@
 //! [`SimdLevel`]. Kernels then pick an SSE2 / AVX2 / AVX-512 / NEON path or a
 //! scalar fallback. Callers never need `RUSTFLAGS` target-cpu flags for
 //! correctness; wider ISAs are used only when present at runtime.
+// Other targets (wasm) only ever take the scalar paths.
+#![cfg_attr(
+    not(any(target_arch = "x86_64", target_arch = "aarch64")),
+    allow(unused_imports, unused_variables)
+)]
 
 pub mod bytes;
 pub mod bytes64;

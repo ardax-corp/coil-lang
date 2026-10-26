@@ -84,7 +84,7 @@ fn elements_of(obj: &Object) -> Option<std::borrow::Cow<'_, [Value]>> {
 }
 
 fn pack_f64_1d(heap: &Heap, v: Value, n: usize, out: &mut Vec<f64>) -> bool {
-    let Some(obj) = find_object(heap, v.raw() as u64) else {
+    let Some(obj) = find_object(heap, v.bits()) else {
         return false;
     };
     let Some(elems) = elements_of(&obj) else {
@@ -97,7 +97,7 @@ fn pack_f64_1d(heap: &Heap, v: Value, n: usize, out: &mut Vec<f64>) -> bool {
 }
 
 fn pack_i64_1d(heap: &Heap, v: Value, n: usize, out: &mut Vec<i64>) -> bool {
-    let Some(obj) = find_object(heap, v.raw() as u64) else {
+    let Some(obj) = find_object(heap, v.bits()) else {
         return false;
     };
     let Some(elems) = elements_of(&obj) else {
@@ -110,7 +110,7 @@ fn pack_i64_1d(heap: &Heap, v: Value, n: usize, out: &mut Vec<i64>) -> bool {
 }
 
 fn pack_f64_matrix(heap: &Heap, v: Value, m: usize, n: usize, out: &mut Vec<f64>) -> bool {
-    let Some(outer) = find_object(heap, v.raw() as u64) else {
+    let Some(outer) = find_object(heap, v.bits()) else {
         return false;
     };
     let Some(rows) = elements_of(&outer) else {
@@ -122,7 +122,7 @@ fn pack_f64_matrix(heap: &Heap, v: Value, m: usize, n: usize, out: &mut Vec<f64>
     out.clear();
     out.reserve(m.saturating_mul(n));
     for row in rows.iter().take(m) {
-        let Some(row_obj) = find_object(heap, row.raw() as u64) else {
+        let Some(row_obj) = find_object(heap, row.bits()) else {
             return false;
         };
         let Some(cells) = elements_of(&row_obj) else {
@@ -137,7 +137,7 @@ fn pack_f64_matrix(heap: &Heap, v: Value, m: usize, n: usize, out: &mut Vec<f64>
 }
 
 fn pack_i64_matrix(heap: &Heap, v: Value, m: usize, n: usize, out: &mut Vec<i64>) -> bool {
-    let Some(outer) = find_object(heap, v.raw() as u64) else {
+    let Some(outer) = find_object(heap, v.bits()) else {
         return false;
     };
     let Some(rows) = elements_of(&outer) else {
@@ -149,7 +149,7 @@ fn pack_i64_matrix(heap: &Heap, v: Value, m: usize, n: usize, out: &mut Vec<i64>
     out.clear();
     out.reserve(m.saturating_mul(n));
     for row in rows.iter().take(m) {
-        let Some(row_obj) = find_object(heap, row.raw() as u64) else {
+        let Some(row_obj) = find_object(heap, row.bits()) else {
             return false;
         };
         let Some(cells) = elements_of(&row_obj) else {
@@ -749,7 +749,7 @@ mod tests {
     }
 
     fn aggregate_elements(heap: &Heap, v: Value) -> Option<Vec<Value>> {
-        let obj = find_object(heap, v.raw() as u64)?;
+        let obj = find_object(heap, v.bits())?;
         elements_of(&obj).map(|e| e.to_vec())
     }
 

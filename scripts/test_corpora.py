@@ -14,7 +14,8 @@ the same build mode as shipped binaries). Cargo's own cache makes a rebuild
 with no source change a no-op; `--no-build` skips cargo
 entirely and `--bin DIR` runs the `coil` / `coil-test` already in DIR.
 `--harness PATH` runs that binary instead of `coil test` (the GC-stress
-build of `coil-test`). `--limit-as-kb` caps each process's address space
+build of `coil-test`). `--wasm PATH` runs a wasm32-wasip1 `coil.wasm` under
+Node's WASI (`scripts/wasi_coil.mjs`). `--limit-as-kb` caps each process's address space
 like `ulimit -v` (the leak smoke). Exits 1 when any corpus fails.
 """
 
@@ -71,6 +72,7 @@ def main():
     ap.add_argument("--no-build", action="store_true", help="do not run cargo")
     ap.add_argument("--bin", type=Path, help="directory with coil / coil-test")
     ap.add_argument("--harness", type=Path, help="run this coil-test binary directly")
+    ap.add_argument("--wasm", type=Path, help="run this coil.wasm under Node's WASI")
     ap.add_argument("--limit-as-kb", type=int,
                     help="address-space cap per coil test process (leak smoke; POSIX)")
     ap.add_argument("--logs", type=Path, default=ROOT / "target" / "corpora",
@@ -86,10 +88,16 @@ def main():
 
     profile = "release" if args.release else "debug"
     bindir = args.bin or ROOT / "target" / profile
-    if not args.no_build and not args.bin and not args.harness:
+    if not args.no_build and not args.bin and not args.harness and not args.wasm:
         build = ["cargo", "build", "--bin", "coil", "--bin", "coil-test"]
         subprocess.run(build + (["--release"] if args.release else []), cwd=ROOT, check=True)
-    if args.harness:
+    if args.wasm:
+        runner = ROOT / "scripts" / "wasi_coil.mjs"
+        # Node 22 can run a GC inside a WASI fast API call (path_open) and
+        # crash in the frame walk; plain API calls avoid it.
+        cmd = ["node", "--no-warnings", "--no-turbo-fast-api-calls", str(runner),
+               str(args.wasm.resolve()), "test"]
+    elif args.harness:
         cmd = [str(args.harness)]
     else:
         coil = bindir / f"coil{EXE}"

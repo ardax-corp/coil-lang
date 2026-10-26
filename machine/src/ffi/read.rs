@@ -32,7 +32,7 @@ fn words_at(heap: &Heap, args: &[Value]) -> Result<Vec<i64>, (FfiErrorKindTag, S
         return Err((FfiErrorKindTag::ArityMismatch, "read_ints takes 3 arguments".into()));
     };
     if !matches!(
-        heap.find_object_by_addr(lib.raw() as u64),
+        heap.find_object_by_addr(lib.bits()),
         Some(Object::Library(_))
     ) {
         return Err((

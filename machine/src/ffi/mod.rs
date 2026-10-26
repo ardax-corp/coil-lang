@@ -1,23 +1,36 @@
 //! FFI: explicit signatures and libffi dispatch (no runtime guessing).
 
+#[cfg(not(target_family = "wasm"))]
 mod call;
+#[cfg(not(target_family = "wasm"))]
 mod closure;
 mod error;
 mod gate;
+#[cfg(target_family = "wasm")]
+mod nolib;
 mod read;
 mod registry;
 mod resolve;
 mod runtime;
 mod signature;
 
+#[cfg(not(target_family = "wasm"))]
 pub use call::{
     InvokeContext, PreparedCall, invoke_via_libffi, prepare_cif, prepare_cif_for_symbol,
     prepare_variadic_cif, promote_variadic_arg_type, resolve_symbol,
 };
+#[cfg(not(target_family = "wasm"))]
 pub use closure::{OwnedClosure, VmCallFn, callback_cif, make_int_callback};
+#[cfg(target_family = "wasm")]
+pub use nolib::{
+    InvokeContext, Library, OwnedClosure, PreparedCall, VmCallFn, callback_cif,
+    invoke_via_libffi, make_int_callback, prepare_cif, prepare_cif_for_symbol,
+    prepare_variadic_cif, promote_variadic_arg_type, resolve_symbol,
+};
 pub use error::{FfiErrorKindTag, alloc_ffi_error, alloc_ffi_error_kind, alloc_result_ffi_err};
 pub use gate::DloadGate;
 pub use read::read_ints;
+#[cfg(not(target_family = "wasm"))]
 pub use libloading::Library;
 pub use registry::{HostClosureFn, HostOp, NativeFn, Natives};
 pub use resolve::{

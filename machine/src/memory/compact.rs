@@ -75,7 +75,7 @@ fn forward(fwd: &AddrMap, v: Value) -> Option<Value> {
         return None;
     }
     let to = *fwd.get(&addr)?;
-    Some(Value::from(to | (v.raw() as u64 & 1)))
+    Some(Value::from(to | (v.bits() & 1)))
 }
 
 /// `(chunk, live objects, movable objects, slots)` for chunk choice.
@@ -521,7 +521,7 @@ mod tests {
             panic!("array is a pinned root");
         };
         for (v, w) in a.as_ref().iter().enumerate() {
-            assert_eq!(w.raw() as u64 & 1, (v % 2) as u64, "tag bit kept");
+            assert_eq!(w.bits() & 1, (v % 2) as u64, "tag bit kept");
             assert!(!moved.contains_key(&w.heap_addr()));
             let Some(Object::Enum(e)) = heap.find_object_by_addr(w.heap_addr()) else {
                 panic!("element {v} is not an enum");

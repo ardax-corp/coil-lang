@@ -53,7 +53,7 @@ pub fn prelude_char(heap: &mut Heap, args: &[Value]) -> Value {
 /// Content hash for `Hash` on `string` — the `ObjString` FNV hash as `int`,
 /// cached on the string object after the first call.
 pub fn prelude_hash_string(heap: &mut Heap, args: &[Value]) -> Value {
-    match heap.find_object_by_addr(args[0].raw() as u64) {
+    match heap.find_object_by_addr(args[0].bits()) {
         Some(crate::memory::Object::String(gc)) => Value::from(gc.as_ref().hash_code() as i64),
         _ => match value_as_string(heap, args[0]) {
             Ok(s) => Value::from(crate::memory::ObjString::hash(&s) as i64),
@@ -72,7 +72,7 @@ mod tests {
     }
 
     fn result_ok_int(heap: &Heap, v: Value) -> i64 {
-        let Some(Object::Enum(gc)) = heap.find_object_by_addr(v.raw() as u64) else {
+        let Some(Object::Enum(gc)) = heap.find_object_by_addr(v.bits()) else {
             panic!("expected Result");
         };
         assert_eq!(gc.as_ref().tag, 0, "expected Ok");
@@ -80,7 +80,7 @@ mod tests {
     }
 
     fn result_err_string(heap: &Heap, v: Value) -> String {
-        let Some(Object::Enum(gc)) = heap.find_object_by_addr(v.raw() as u64) else {
+        let Some(Object::Enum(gc)) = heap.find_object_by_addr(v.bits()) else {
             panic!("expected Result");
         };
         assert_eq!(gc.as_ref().tag, 1, "expected Err");
@@ -88,7 +88,7 @@ mod tests {
     }
 
     fn result_ok_string(heap: &Heap, v: Value) -> String {
-        let Some(Object::Enum(gc)) = heap.find_object_by_addr(v.raw() as u64) else {
+        let Some(Object::Enum(gc)) = heap.find_object_by_addr(v.bits()) else {
             panic!("expected Result");
         };
         assert_eq!(gc.as_ref().tag, 0, "expected Ok");

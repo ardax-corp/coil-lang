@@ -1,3 +1,4 @@
+// @needs sockets
 // Stream.fd() is the explicit marshal after silent Stream→Int FFI was removed.
 // `?` inside Result<int, IoError> must not treat the HostInvoke thunk as a
 // two-slot CALL (that made TLS enable see InvalidInput on a live socket).

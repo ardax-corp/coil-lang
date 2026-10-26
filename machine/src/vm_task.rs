@@ -149,7 +149,7 @@ impl<const S: usize> Machine<S> {
     }
 
     fn task_spawn(&mut self, scope: i64, coro: Value) -> TaskFlow {
-        let coro = match Self::find_object_by_addr(&self.heap, coro.raw() as u64) {
+        let coro = match Self::find_object_by_addr(&self.heap, coro.bits()) {
             Some(Object::Coroutine(gc)) => gc,
             _ => return TaskFlow::Panic("task spawn: not a coroutine".into()),
         };

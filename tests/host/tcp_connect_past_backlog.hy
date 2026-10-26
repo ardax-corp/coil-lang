@@ -1,3 +1,4 @@
+// @needs sockets
 // 200 client tasks connect against a 128-entry listen backlog: the ones whose
 // SYN is dropped wait in their own task while the server task keeps
 // accepting (coil-lang#832). Counts connections only.

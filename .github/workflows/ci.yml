@@ -469,6 +469,63 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
+  # coil for wasm32-wasip1, the build the website playground runs in the
+  # browser: clippy for that target, then every corpus under Node's WASI.
+  # Files that need sockets or symlinks say so (`// @needs`) and are skipped.
+  wasm:
+    name: wasm (wasm32-wasip1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ardax-corp/coil-stdlib
+          path: .deps/coil-stdlib
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+          components: clippy
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm
+
+      - name: Clippy (wasm32-wasip1)
+        run: cargo clippy --target wasm32-wasip1 -p coil -- -D warnings
+
+      - name: Build coil.wasm
+        run: cargo build --release --target wasm32-wasip1 -p coil
+
+      - name: Language harness (wasm)
+        run: |
+          python3 scripts/test_corpora.py --wasm target/wasm32-wasip1/release/coil.wasm -- \
+            --allow-read --allow-write --allow-net --allow-env \
+            --root examples/src --root .deps/coil-stdlib/src
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: harness-logs-wasm
+          path: target/corpora
+          retention-days: 7
+
+      - name: Cancel the rest of the run
+        if: failure() && github.event_name == 'pull_request'
+        continue-on-error: true
+        shell: bash
+        run: gh run cancel ${{ github.run_id }} --repo ${{ github.repository }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+
   harness-build-macos:
     name: harness build (${{ matrix.mode }}, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
