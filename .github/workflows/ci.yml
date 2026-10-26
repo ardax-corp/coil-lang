@@ -391,7 +391,15 @@ jobs:
       matrix:
         os: [ubuntu-latest]
         mode: [debug, release]
-        variant: [default, O0, no-inline, leak-smoke, gc-stress]
+        variant: [default, O0, no-inline, leak-smoke, gc-stress, gc-stress-1, gc-stress-2, gc-stress-O0]
+        # A debug GC-stress run takes over 30 minutes in one cell; on Linux it
+        # is split in three (two halves of the corpora, then the -O0 pass).
+        # Release, and macOS below, run it whole as `gc-stress`.
+        exclude:
+          - { mode: debug, variant: gc-stress }
+          - { mode: release, variant: gc-stress-1 }
+          - { mode: release, variant: gc-stress-2 }
+          - { mode: release, variant: gc-stress-O0 }
     env: &harness-env
       # A worker abort (coil-lang#804) prints where it happened.
       RUST_BACKTRACE: "1"
@@ -463,6 +471,10 @@ jobs:
             # pass dictionaries the default level folds away (#1530).
             gc-stress)
               $run --harness harness-bin/gc-stress/coil-test -- $FLAGS
+              $run --harness harness-bin/gc-stress/coil-test memory generics -- -O 0 $FLAGS ;;
+            gc-stress-1|gc-stress-2)
+              $run --harness harness-bin/gc-stress/coil-test --shard "${{ matrix.variant == 'gc-stress-1' && '1' || '2' }}/2" -- $FLAGS ;;
+            gc-stress-O0)
               $run --harness harness-bin/gc-stress/coil-test memory generics -- -O 0 $FLAGS ;;
           esac
 

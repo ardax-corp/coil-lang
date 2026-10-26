@@ -65,7 +65,7 @@ def main():
     ap.add_argument("-p", "--parallel", type=int, default=os.cpu_count() or 2,
                     help="corpora run at once (default: CPUs)")
     ap.add_argument("-j", "--jobs", type=int, default=0,
-                    help="`coil test -j` per corpus (default: CPUs / --parallel)")
+                    help="`coil test -j` per corpus (default: CPUs)")
     ap.add_argument("--shard", help="I/N: run every Nth corpus starting at I")
     ap.add_argument("--release", action="store_true",
                     help="build and run target/release instead of target/debug")
@@ -106,7 +106,10 @@ def main():
         cmd = [str(coil), "test"]
 
     parallel = max(1, min(args.parallel, len(names)))
-    jobs = args.jobs or max(1, (os.cpu_count() or 2) // parallel)
+    # Every corpus may use every core: a slow corpus (the GC-stress `memory`
+    # run) often finishes last, and with CPUs / --parallel jobs it ran on
+    # one thread while the other cores sat idle.
+    jobs = args.jobs or (os.cpu_count() or 2)
     if args.logs.exists():
         shutil.rmtree(args.logs)
     args.logs.mkdir(parents=True)
