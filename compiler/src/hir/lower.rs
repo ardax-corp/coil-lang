@@ -3057,6 +3057,16 @@ impl Walk<'_> {
                 self.word(*msg)?;
                 self.value(*msg)
             }
+            // An early free of a local's object.
+            HirKind::Builtin {
+                op: Builtin::FreeEarly { .. },
+                args,
+            } => {
+                let [local] = args.as_slice() else {
+                    return Err("builtin");
+                };
+                self.value(*local)
+            }
             // `panic msg`: the message, then `Panic`.
             HirKind::Builtin {
                 op: Builtin::Panic,

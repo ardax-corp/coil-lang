@@ -80,6 +80,8 @@ pub struct Summary {
 
 #[path = "escape.rs"]
 mod escape;
+#[path = "early_free.rs"]
+mod early_free;
 
 /// Effects a write to an object can have that its owner hides.
 const OWNED_BITS: u16 = EffectFlags::HEAP_MUT | EffectFlags::RESIZE;
@@ -214,6 +216,69 @@ impl ProgramEffects {
     /// The summary of the body named `name` (`module::f`, `module::Owner::m`).
     pub fn summary_named(&self, name: &str) -> Option<Summary> {
         self.by_name.get(name).copied()
+    }
+
+    /// `body` (as the HIR optimizer left it) with early frees of the
+    /// objects nothing else reaches ([`early_free`]), when it has any.
+    pub fn early_frees(&self, checker: &Checker, module_path: &str, module: &HirModule, body: &HirBody) -> Option<HirBody> {
+        let lookup = |callee: &Callee, args: &[HirId]| self.call_summary(checker, module_path, body, callee, args);
+        early_free::rewrite(module, body, &lookup)
+    }
+
+    /// What a call in `body` may do, from the summaries recorded so far:
+    /// the solver's view of a call ([`Cx::named`], [`Cx::method`]) without
+    /// its fixed point. `None` (unknown) where that view needs more.
+    fn call_summary(&self, checker: &Checker, module_path: &str, body: &HirBody, callee: &Callee, args: &[HirId]) -> Option<Summary> {
+        match callee {
+            Callee::Named { name, def, .. } => self.named_summary(checker, module_path, name, *def),
+            Callee::Method { name } => {
+                let recv = body.expr(*args.first()?);
+                let ty = recv.ty.as_ref();
+                if matches!(ty.map(crate::typechecking::ty::strip_readonly), Some(Ty::Existential { .. })) {
+                    return None;
+                }
+                let owner = checker.class_owner_at_span(recv.span).or_else(|| class_of(ty).map(str::to_string))?;
+                let key = format!("{owner}::{name}");
+                [key.clone(), format!("{module_path}::{key}"), format!("core::{key}")]
+                    .iter()
+                    .find_map(|k| self.by_name.get(k.as_str()).copied())
+            }
+            Callee::Value(f) => match &body.expr(*f).kind {
+                HirKind::Global { name, def } => self.named_summary(checker, module_path, name, *def),
+                _ => None,
+            },
+        }
+    }
+
+    fn named_summary(&self, checker: &Checker, module_path: &str, name: &str, def: Option<DefId>) -> Option<Summary> {
+        let current = checker.current_module_name() == module_path;
+        let def = def.or_else(|| current.then(|| checker.def_id_of(name)).flatten());
+        if let Some(def) = def {
+            return self.fns.get(&def).copied();
+        }
+        if let Some(&s) = self.by_name.get(name).or_else(|| self.by_name.get(format!("{module_path}::{name}").as_str())) {
+            return Some(s);
+        }
+        let member = name.rsplit_once("::");
+        let method = member.map_or(name, |(_, m)| m);
+        if checker.generics().typeclasses.values().any(|t| t.methods.iter().any(|m| m.name == method)) {
+            return None;
+        }
+        if is_vec_ctor(name) || name == "Vec::from" || member.is_some_and(|(owner, m)| checker.tag_for(owner, m).is_some()) {
+            return Some(Summary {
+                returns: u64::MAX,
+                ..Summary::default()
+            });
+        }
+        let short = if current && let Some(export) = checker.scope_binding(name) {
+            export.short_name().to_string()
+        } else {
+            name.to_string()
+        };
+        let flags = classify_host_name(&short);
+        // Only a known native: anything else is a user function this view
+        // cannot see.
+        (!flags.contains(EffectFlags::UNKNOWN) || escape::is_listed_host(&short)).then(|| escape::host_summary(&short, Summary::of(flags)))
     }
 
     /// Keep why a module's bodies mutate their parameters
@@ -1987,7 +2052,7 @@ impl Cx<'_> {
                 Builtin::Declare | Builtin::Invoke | Builtin::Dload => {
                     self.note(w, id, EffectFlags::FFI | EffectFlags::RESIZE, || "calls foreign code".into())
                 }
-                Builtin::TypeOf | Builtin::Done | Builtin::Default | Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::Relayout => {}
+                Builtin::TypeOf | Builtin::Done | Builtin::Default | Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::Relayout | Builtin::FreeEarly { .. } => {}
                 Builtin::Print => self.note(w, id, EffectFlags::WRITE, || "prints".into()),
             },
             // Workers of a parallel region have no statics, and another
