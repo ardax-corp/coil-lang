@@ -116,7 +116,7 @@ pub fn tty_size(heap: &mut Heap, stream: Value) -> Result<(i64, i64), TtyFail> {
     Err(TtyFail::NotATerminal)
 }
 
-// Unix `enter_raw` returns IoErrorTag (converted by `?`); Windows already returns TtyFail.
+// Unix `enter_raw` returns IoErrorTag (converted by `?`); Windows and wasm already return TtyFail.
 #[allow(clippy::needless_question_mark)]
 pub fn tty_enter_raw(
     heap: &mut Heap,
@@ -865,8 +865,8 @@ mod os {
         None
     }
 
-    pub fn enter_raw(_raw: Raw, _keep_signals: bool, _keep_output: bool) -> Result<(), IoErrorTag> {
-        Err(IoErrorTag::NotATerminal)
+    pub fn enter_raw(_raw: Raw, _keep_signals: bool, _keep_output: bool) -> Result<(), super::TtyFail> {
+        Err(super::TtyFail::NotATerminal)
     }
 
     pub fn leave_raw(_raw: Raw) -> Result<(), IoErrorTag> {
