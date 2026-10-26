@@ -244,6 +244,13 @@ pub fn cmd_dissect(config: ReportConfig, args: DissectArgs) {
         {
             println!("{name}: {text}");
         }
+        for (name, text) in effects
+            .escape
+            .iter()
+            .filter(|(name, _)| pat.is_none_or(|p| compiler::matches_fn_pat(name, p)))
+        {
+            println!(";; escape {name}: {text}");
+        }
         if effects.auto_par_off {
             println!(";; auto-par is off");
         }

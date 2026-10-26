@@ -538,3 +538,142 @@ fn main() {{
     assert_eq!(errs.len(), 1, "{errs:?}");
     assert!(errs[0].starts_with("Cannot pass the `readonly` `p` to `.put()`: it mutates parameter `b`"), "{errs:?}");
 }
+
+// Escape facts (`escapes`, `returns`, `shared_ret`; feature/escape-memory step 1).
+
+const TREES: &str = "
+enum Tree {
+    Leaf,
+    Node(Tree, Tree),
+}
+fn bottom_up(int depth) -> Tree {
+    if depth == 0 {
+        return Tree::Leaf();
+    }
+    return Tree::Node(bottom_up(depth - 1), bottom_up(depth - 1));
+}
+fn item_check(Tree t) -> int {
+    return match t {
+        Tree::Leaf => 1,
+        Tree::Node(left, right) => 1 + item_check(left) + item_check(right),
+    };
+}
+";
+
+#[test]
+fn a_tree_built_and_checked_stays_with_the_caller() {
+    let (m, out) = summaries(TREES);
+    let build = of(&m, &out, "bottom_up");
+    assert!(!build.shared_ret, "{build:?}");
+    let check = of(&m, &out, "item_check");
+    assert_eq!(check.escapes, 0, "{check:?}");
+    assert_eq!(check.returns, 0, "{check:?}");
+}
+
+#[test]
+fn a_store_into_a_static_or_a_parameter_keeps_the_value() {
+    let src = "
+class Box2 { pub v: string }
+static let LOG: Vec<string> = Vec::new();
+fn remember(string s) {
+    LOG.push(s);
+}
+fn put(Box2 b, string s) {
+    b.v = s;
+}
+";
+    let (m, out) = summaries(src);
+    assert_eq!(of(&m, &out, "remember").escapes, 1);
+    let put = of(&m, &out, "put");
+    assert_eq!(put.escapes, 1 << 1, "{put:?}");
+}
+
+#[test]
+fn a_getter_hands_back_what_its_receiver_reaches() {
+    let src = "
+class Holder {
+    pub name: string,
+}
+impl Holder {
+    pub fn get() -> string {
+        return self.name;
+    }
+}
+";
+    let (m, out) = summaries(src);
+    let get = of(&m, &out, "Holder::get");
+    assert_eq!(get.escapes, 0, "{get:?}");
+    assert_eq!(get.returns, 1, "{get:?}");
+    assert!(get.shared_ret);
+}
+
+#[test]
+fn a_new_vec_holding_a_parameter_returns_it() {
+    let src = "
+fn wrap(string s) -> Vec<string> {
+    let out: Vec<string> = Vec::new();
+    out.push(s);
+    return out;
+}
+fn fresh_vec(int n) -> Vec<int> {
+    let out: Vec<int> = Vec::new();
+    out.push(n);
+    return out;
+}
+";
+    let (m, out) = summaries(src);
+    let wrap = of(&m, &out, "wrap");
+    assert_eq!(wrap.escapes, 0, "{wrap:?}");
+    assert_eq!(wrap.returns, 1, "{wrap:?}");
+    assert!(wrap.shared_ret);
+    let fresh = of(&m, &out, "fresh_vec");
+    assert!(!fresh.shared_ret, "{fresh:?}");
+}
+
+#[test]
+fn a_captured_parameter_escapes_and_a_literal_is_shared() {
+    let src = "
+fn later(string s) -> () -> int {
+    return fn () use (s) => s.len();
+}
+fn name() -> string {
+    return \"coil\";
+}
+";
+    let (m, out) = summaries(src);
+    assert_eq!(of(&m, &out, "later").escapes, 1);
+    assert!(of(&m, &out, "name").shared_ret);
+}
+
+#[test]
+fn a_local_byte_copy_keeps_nothing() {
+    let src = "
+use string::{to_bytes};
+fn count_commas(string s) -> int {
+    let b = to_bytes(s);
+    let n = 0;
+    let i = 0;
+    while i < b.len() {
+        if b[i] == \",\" {
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+";
+    let (m, out) = summaries(src);
+    let s = of(&m, &out, "count_commas");
+    assert_eq!(s.escapes, 0, "{s:?}");
+}
+
+#[test]
+fn an_unknown_function_value_keeps_its_arguments() {
+    let src = "
+fn give(string s, string -> int f) -> int {
+    return f(s);
+}
+";
+    let (m, out) = summaries(src);
+    assert_eq!(of(&m, &out, "give").escapes & 1, 1);
+}

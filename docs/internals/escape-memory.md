@@ -56,13 +56,52 @@ Heap objects per run and GC safepoint time (instrumented build, best of 3):
 | Step | What | Status |
 |------|------|--------|
 | 0 | This plan | done |
-| 1 | Escape summaries: per function, which parameters may escape and whether the result is fresh; whole-program fixed point next to `ProgramEffects`; shown by `coil dissect --effects` | |
+| 1 | Escape summaries: per function, which parameters may escape and whether the result is fresh; whole-program fixed point next to `ProgramEffects`; shown by `coil dissect --effects` | done |
 | 1b | Optional stated facts (`noescape` on a parameter), checked against the inferred summary | |
 | 2 | Free at scope end and per-statement regions for non-escaping fresh objects; poison-on-free debug mode, gc-stress | |
 | 3 | Static uniqueness: append in place, zero-copy `to_bytes`/`from_bytes`, enum SROA for a `match` on an inlined call result | |
 | 4 | Nursery for young objects | |
 | 5 | Opt-in checked `region` block | |
 | 6 | Re-measure; decide whether anything else is worth doing | |
+
+## Escape facts (step 1)
+
+`hir/escape.rs` adds three facts to each body's effects `Summary`, so the
+effects fixed point solves them across calls and modules:
+
+- `escapes`: bit `i` when the call may keep what parameter `i` reaches
+  after it returns, other than through its result. Keeping means a store
+  into an object that is not a fresh object of this body, a static, a
+  closure or `defer` capture, a `yield`, or passing it where a callee keeps
+  it. A coroutine keeps all its parameters.
+- `returns`: bit `i` when the result may reach what parameter `i` reaches.
+- `shared_ret`: the result may reach an object the call did not allocate
+  (a parameter, a static, a string literal, a callee's shared result), or
+  a fresh object something else also reaches. When it is `false`, a caller
+  that drops the result may free everything it reaches.
+
+The walk is flow-insensitive: a local holds every value assigned to it, and
+a field, element or pattern binding reaches whatever its source reaches.
+Allocation sites (`Make`, string concatenation, a call with a fresh
+result, a lambda) are tracked separately, and a store into one of them is
+held there instead of escaping, so a builder that fills a new `Vec` and
+returns it keeps nothing. Values of scalar types reach nothing.
+
+Callees the analysis cannot see (function values, unresolved methods,
+trait declarations, natives) keep everything and return nothing fresh.
+Pure natives and the IO writers keep nothing; `to_bytes`, `from_bytes`,
+`format`, the byte and string slices and `Vec::with_capacity` return a
+fresh object (to be confirmed against the VM before step 2 frees them).
+
+`coil dissect --effects` prints one `;; escape NAME: …` line per function:
+`keeps nothing`, `keeps `t``, `returns `self``, `result fresh`. In
+binary_trees, `bottom_up` has a fresh result and `item_check` keeps
+nothing, which is what step 2 needs to free each tree after its check.
+
+Known gaps: the facts do not tell variants apart, so an `Err` that holds a
+string literal makes a `Result` result shared even on the `Ok` path
+(`csv::Parser::parse_unquoted`). Archives are byte-identical to main and
+compile time is unchanged (b_json 0.30 s, b_csv 0.10 s).
 
 `fn drop()` may run at the point an object is freed early instead of at a
 collection (decided 2026-10-26).

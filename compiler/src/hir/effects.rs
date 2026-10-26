@@ -67,7 +67,19 @@ pub struct Summary {
     /// or element path from one. A caller that passes there only objects
     /// it owns ([`BodyFacts::owned`]) discharges them (design §3.7, #1648).
     pub param_only: u16,
+    /// Bit `i`: the call may keep what its parameter `i` reaches after it
+    /// returns, other than through its result ([`escape`]).
+    pub escapes: u64,
+    /// Bit `i`: the result may reach what parameter `i` reaches.
+    pub returns: u64,
+    /// The result may reach an object this call did not allocate, or one
+    /// something else also reaches. `false`: a caller that drops the
+    /// result may free all of it.
+    pub shared_ret: bool,
 }
+
+#[path = "escape.rs"]
+mod escape;
 
 /// Effects a write to an object can have that its owner hides.
 const OWNED_BITS: u16 = EffectFlags::HEAP_MUT | EffectFlags::RESIZE;
@@ -114,6 +126,9 @@ impl Summary {
             mutates: 0,
             statics: false,
             param_only: 0,
+            escapes: u64::MAX,
+            returns: u64::MAX,
+            shared_ret: true,
         }
     }
 }
@@ -296,6 +311,9 @@ thread_local! {
 pub struct EffectsCapture {
     /// `(body name, description)` per function and method, in compile order.
     pub fns: Vec<(String, String)>,
+    /// `(body name, escape facts)` per function and method, in compile
+    /// order: `keeps `x`; returns `y`; result fresh`.
+    pub escape: Vec<(String, String)>,
     /// Why auto-par left a loop or a function sequential.
     pub auto_par: Vec<String>,
     /// Auto-par was off for some module.
@@ -325,9 +343,17 @@ pub(crate) fn capture(module: &HirModule, fx: &ModuleEffects<'_>, auto_par: Opti
         .filter(|(_, b)| matches!(b.kind, BodyKind::Function | BodyKind::Method))
         .map(|(i, b)| (b.name.clone(), fx.describe(i)))
         .collect();
+    let escape: Vec<(String, String)> = module
+        .bodies
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| matches!(b.kind, BodyKind::Function | BodyKind::Method))
+        .map(|(i, b)| (b.name.clone(), fx.describe_escape(i)))
+        .collect();
     EFFECTS_CAPTURE.with(|c| {
         if let Some(out) = c.borrow_mut().as_mut() {
             out.fns.extend(fns);
+            out.escape.extend(escape);
             match auto_par {
                 Some(lines) => out.auto_par.extend(lines),
                 None => out.auto_par_off = true,
@@ -650,6 +676,38 @@ impl<'a> ModuleEffects<'a> {
             uses_clause(s.visible)
         };
         format!("{head}: {}", parts.join("; "))
+    }
+
+    /// Body `index`'s escape facts in one line: the parameters it keeps
+    /// and hands back, and whether its result is fresh.
+    pub fn describe_escape(&self, index: usize) -> String {
+        let s = self.summaries[index];
+        let body = &self.cx.module.bodies[index];
+        let names = |bits: u64| -> Vec<String> {
+            body.params
+                .iter()
+                .enumerate()
+                .take(64)
+                .filter(|(i, _)| bits & (1 << i) != 0)
+                .map(|(_, p)| format!("`{}`", body.local(*p).name))
+                .collect()
+        };
+        let mut parts = Vec::new();
+        let keeps = names(s.escapes);
+        if !keeps.is_empty() {
+            parts.push(format!("keeps {}", keeps.join(", ")));
+        }
+        let returns = names(s.returns);
+        if !returns.is_empty() {
+            parts.push(format!("returns {}", returns.join(", ")));
+        }
+        if body.ret.is_some() && !escape::no_heap(body.ret.as_ref()) {
+            parts.push(if s.shared_ret { "result shared".into() } else { "result fresh".into() });
+        }
+        if parts.is_empty() {
+            return "keeps nothing".into();
+        }
+        parts.join("; ")
     }
 
     /// Every function whose effects break what it declares (`pure fn`,
@@ -1357,7 +1415,14 @@ pub struct Called {
 
 impl Cx<'_> {
     fn body(&self, index: usize, summaries: &[Summary]) -> Summary {
-        self.walk(index, summaries, false).out
+        let w = self.walk(index, summaries, false);
+        let (escapes, returns, shared_ret) = escape::summarize(self, &w);
+        Summary {
+            escapes,
+            returns,
+            shared_ret,
+            ..w.out
+        }
     }
 
     fn walk<'s>(&self, index: usize, summaries: &'s [Summary], explain: bool) -> Walk<'s> {
@@ -2180,6 +2245,9 @@ impl Cx<'_> {
             // reads or writes.
             statics: visible.contains(EffectFlags::HOST) || visible.contains(EffectFlags::HEAP_MUT),
             param_only: 0,
+            escapes: u64::MAX,
+            returns: u64::MAX,
+            shared_ret: true,
         })
     }
 
@@ -2348,22 +2416,29 @@ impl Cx<'_> {
 
     /// [`Self::named`] for a name that is no user function or trait method.
     fn named_host(&self, name: &str) -> Summary {
+        // A new `Vec` or variant holds its arguments and nothing else.
+        let holds_args = Summary {
+            returns: u64::MAX,
+            ..Summary::default()
+        };
         if is_vec_ctor(name) || name == "Vec::from" {
-            return Summary::default();
+            return holds_args;
         }
         if let Some((owner, member)) = name.rsplit_once("::")
             && self.checker.tag_for(owner, member).is_some()
         {
-            return Summary::default();
+            return holds_args;
         }
         // `use string::{to_bytes as tb}`: classify the builtin by its export
         // name, not the local alias (#1075).
-        if self.checker.current_module_name() == self.module_path
+        let short = if self.checker.current_module_name() == self.module_path
             && let Some(export) = self.checker.scope_binding(name)
         {
-            return Summary::of(classify_host_name(export.short_name()));
-        }
-        Summary::of(classify_host_name(name))
+            export.short_name().to_string()
+        } else {
+            name.to_string()
+        };
+        escape::host_summary(&short, Summary::of(classify_host_name(&short)))
     }
 
     /// A user function's summary: this module's, an earlier module's, or
@@ -2429,6 +2504,9 @@ impl Cx<'_> {
                     statics: o.statics || s.statics,
                     // Discharged only where every impl's bits are.
                     param_only: o.param_only & s.param_only,
+                    escapes: o.escapes | s.escapes,
+                    returns: o.returns | s.returns,
+                    shared_ret: o.shared_ret || s.shared_ret,
                 },
             });
         }

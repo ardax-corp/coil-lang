@@ -154,3 +154,49 @@ fn main() {
         "{fx:?}"
     );
 }
+
+/// `coil dissect --effects` also prints each function's escape facts.
+#[test]
+fn effects_capture_lists_escape_facts() {
+    let src = r#"
+enum Tree {
+    Leaf,
+    Node(Tree, Tree),
+}
+static let SEEN: Vec<Tree> = Vec::new();
+fn bottom_up(int depth) -> Tree {
+    if depth == 0 {
+        return Tree::Leaf();
+    }
+    return Tree::Node(bottom_up(depth - 1), bottom_up(depth - 1));
+}
+fn item_check(Tree t) -> int {
+    return match t {
+        Tree::Leaf => 1,
+        Tree::Node(left, right) => 1 + item_check(left) + item_check(right),
+    };
+}
+fn keep(Tree t) {
+    SEEN.push(t);
+}
+fn main() {
+    keep(bottom_up(2));
+    let _ = item_check(bottom_up(3));
+}
+"#;
+    let mut pipeline = Pipeline::new();
+    pipeline.bind_workspace_language_roots();
+    compiler::start_effects_capture();
+    pipeline.compile_src(src).expect("compiles");
+    let fx = compiler::take_effects_capture();
+    let of = |name: &str| {
+        fx.escape
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, d)| d.as_str())
+            .unwrap_or_else(|| panic!("no `{name}` in {:?}", fx.escape))
+    };
+    assert_eq!(of("bottom_up"), "result fresh");
+    assert_eq!(of("item_check"), "keeps nothing");
+    assert_eq!(of("keep"), "keeps `t`");
+}
