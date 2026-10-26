@@ -148,12 +148,12 @@ mod tests {
 
     #[test]
     fn parse_repl_grants() {
-        let parsed = parse_args(&args(&["a.hy", "--allow-exec", "--batch"]))
+        let parsed = parse_args(&args(&["a.hy", "--allow-exit", "--batch"]))
             .expect("repl grants")
             .expect("not help");
         match parsed {
             Parsed::Repl(_, args) => {
-                assert!(args.grants.allow_exec);
+                assert!(args.grants.allow_exit);
                 assert!(args.batch);
                 assert_eq!(args.filename, "a.hy");
             }

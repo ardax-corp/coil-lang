@@ -296,7 +296,7 @@ fn run(connection: &Connection, options: LspOptions) -> Result<(), Box<dyn std::
             root_uri.clone(),
             lsp_module_roots(&root_uri, &state.extra_roots),
         );
-        // Without the project's grants, `env::exec` & co. are false errors.
+        // Without the project's grants, `env::exit` & co. are false errors.
         index.pipeline_mut().set_host_grants(options.grants);
         state.project_index = Some(index);
     }
@@ -2391,7 +2391,6 @@ fn builtin_description(module: &str, name: &str, export: &BuiltinExport) -> Stri
         ("env", "cwd") => "Returns the current working directory.".into(),
         ("env", "set_cwd") => "Changes the current working directory.".into(),
         ("env", "exit") => "Terminates the process with an exit code.".into(),
-        ("env", "exec") => "Executes a process with the supplied arguments.".into(),
         ("prelude", "Option") => "Represents an optional value with `Some` or `None`.".into(),
         ("prelude", "Result") => "Represents success with `Ok` or failure with `Err`.".into(),
         ("thread", "spawn") => "Starts a thread and returns a joinable handle.".into(),
@@ -4779,7 +4778,6 @@ mod tests {
             "--root",
             "vendor",
             "--root=/abs/lib",
-            "--allow-exec",
             "--allow-exit",
             "--allow-dload",
             "sdl2",
@@ -4793,7 +4791,7 @@ mod tests {
             options.extra_roots,
             vec![PathBuf::from("/work/app/vendor"), PathBuf::from("/abs/lib")]
         );
-        assert!(options.grants.allow_exec && options.grants.allow_exit);
+        assert!(options.grants.allow_exit);
         assert!(!options.grants.allow_attach);
         assert_eq!(options.grants.allow_dload, vec!["sdl2".to_string()]);
         assert_eq!(options.grants.ffi_search_paths, vec![PathBuf::from("/work/app/native")]);
