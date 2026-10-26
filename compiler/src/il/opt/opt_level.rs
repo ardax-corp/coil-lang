@@ -122,6 +122,7 @@ fn all_off() -> OptimizeOptions {
         hir_bisect: None,
         mir_sccp: false,
         auto_par: false,
+        early_free: false,
         require_mir: false,
     }
 }
@@ -145,6 +146,7 @@ fn env_knobs(o: &mut OptimizeOptions) {
     o.hir_bisect = std::env::var("COIL_HIR_BISECT").ok().and_then(|v| v.parse::<usize>().ok());
     o.mir_sccp = env_on("COIL_MIR_SCCP");
     o.auto_par = env_on("COIL_AUTO_PAR");
+    o.early_free = env_on("COIL_EARLY_FREE");
 }
 
 impl OptimizeOptions {
@@ -162,6 +164,7 @@ impl OptimizeOptions {
         self.hir_bisect = from.hir_bisect;
         self.mir_sccp = from.mir_sccp;
         self.auto_par = from.auto_par;
+        self.early_free = from.early_free;
     }
 }
 
