@@ -23,12 +23,14 @@ common = { path = "../common" }
 coil-simd = { path = "../coil-simd" }
 crossbeam-deque = "0.8"
 rkyv = "0.8.12"
-libloading = "0.9"
-libffi = "5.1.1"
 libc = "0.2"
 memchr = "2"
 sha2 = "0.10"
 parking_lot = "0.12"
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+libloading = "0.9"
+libffi = "5.1.1"
 
 [dev-dependencies]
 # Lib tests format `Instruction`/`Value` with Debug, also under `--release` (#1686).

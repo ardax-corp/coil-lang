@@ -292,6 +292,7 @@ dependencies = [
  "coil-build-id",
  "coil-cli",
  "coil-host",
+ "coil-test",
  "common",
  "compiler",
  "comptime",

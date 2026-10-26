@@ -66,7 +66,7 @@ impl NativeHandle {
                 {
                     set_file_nonblocking(f, nb)
                 }
-                #[cfg(windows)]
+                #[cfg(not(unix))]
                 {
                     let _ = (f, nb);
                     Ok(())
@@ -109,7 +109,7 @@ impl NativeHandle {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, target_os = "wasi"))]
     pub fn as_raw_fd(&self) -> std::os::fd::RawFd {
         use std::os::fd::AsRawFd;
         match self {
@@ -122,7 +122,7 @@ impl NativeHandle {
 
     /// Socket/fd identity for attach / FFI Stream→fd marshal (Unix fd or Windows SOCKET).
     pub fn fd_i64(&self) -> i64 {
-        #[cfg(unix)]
+        #[cfg(any(unix, target_os = "wasi"))]
         {
             self.as_raw_fd() as i64
         }
@@ -184,7 +184,7 @@ pub struct WaitHandle {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 enum WaitInner {
-    #[cfg(unix)]
+    #[cfg(any(unix, target_os = "wasi"))]
     Fd(std::os::fd::RawFd),
     #[cfg(windows)]
     Socket(std::os::windows::io::RawSocket),
@@ -194,7 +194,7 @@ enum WaitInner {
 
 impl WaitHandle {
     fn from_file(file: &File) -> Self {
-        #[cfg(unix)]
+        #[cfg(any(unix, target_os = "wasi"))]
         {
             use std::os::fd::AsRawFd;
             Self {
@@ -247,7 +247,7 @@ trait AsWaitSocket {
     fn wait_socket(&self) -> WaitHandle;
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, target_os = "wasi"))]
 impl<T: std::os::fd::AsRawFd> AsWaitSocket for T {
     fn wait_socket(&self) -> WaitHandle {
         WaitHandle {
@@ -312,6 +312,17 @@ fn dup_stdio_file(kind: StdioKind) -> io::Result<File> {
             StdioKind::Stderr => std::io::stderr().as_handle().try_clone_to_owned()?,
         };
         Ok(File::from(owned))
+    }
+    // WASI has no dup: the stream owns the process descriptor itself.
+    #[cfg(target_os = "wasi")]
+    {
+        use std::os::fd::FromRawFd;
+        let fd = match kind {
+            StdioKind::Stdin => 0,
+            StdioKind::Stdout => 1,
+            StdioKind::Stderr => 2,
+        };
+        Ok(unsafe { File::from_raw_fd(fd) })
     }
 }
 

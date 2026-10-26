@@ -3,7 +3,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+#[cfg(not(target_family = "wasm"))]
 use libloading::Library;
+#[cfg(target_family = "wasm")]
+use super::nolib::Library;
 
 use super::gate::DloadGate;
 use super::signature::FfiError;
@@ -84,7 +87,7 @@ fn platform_lib_names(stem: &str) -> Vec<String> {
             format!("{}.dylib", stem),
         ]
     }
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         vec![
             stem.to_string(),
@@ -109,7 +112,7 @@ fn libc_platform_candidates() -> Vec<String> {
             "/usr/lib/libSystem.B.dylib".into(),
         ]
     }
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         vec![
             "c".into(),
@@ -139,7 +142,7 @@ pub fn platform_shared_lib_filename(stem: &str) -> String {
     {
         format!("lib{stem}.dylib")
     }
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         format!("lib{stem}.so")
     }
@@ -309,7 +312,7 @@ mod tests {
     #[test]
     fn libc_alias_includes_platform_libc() {
         let c = library_candidates("c", None, &[]);
-        #[cfg(all(unix, not(target_os = "macos")))]
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         assert!(c.iter().any(|p| p.to_string_lossy().contains("libc.so")));
         #[cfg(target_os = "macos")]
         assert!(
