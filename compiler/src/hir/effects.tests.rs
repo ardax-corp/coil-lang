@@ -677,3 +677,123 @@ fn give(string s, string -> int f) -> int {
     let (m, out) = summaries(src);
     assert_eq!(of(&m, &out, "give").escapes & 1, 1);
 }
+
+#[test]
+fn a_fresh_object_given_to_a_mutating_callee_comes_back_shared() {
+    let src = "
+class Holder {
+    pub items: Vec<string>,
+}
+fn add(Holder h, string s) {
+    h.items.push(s);
+}
+fn build(string s) -> Holder {
+    let h = new Holder(Vec::new());
+    add(h, s);
+    return h;
+}
+";
+    let (m, out) = summaries(src);
+    // `add` may have stored anything into `h`: freeing what `build`
+    // returns could free `s`.
+    assert!(of(&m, &out, "build").shared_ret);
+}
+
+#[test]
+fn a_partial_application_keeps_its_arguments() {
+    let src = "
+class Box {
+    pub n: int,
+}
+fn weigh(Box b, int k) -> int {
+    return b.n * k;
+}
+fn bind(Box b) -> (int) -> int {
+    return weigh(b);
+}
+";
+    let (m, out) = summaries(src);
+    assert_eq!(of(&m, &out, "weigh").escapes, 0);
+    assert_eq!(of(&m, &out, "bind").escapes & 1, 1);
+}
+
+// Early frees (feature/escape-memory step 2).
+
+/// `(deep, local name)` of each early free the rewrite adds to `name`.
+fn frees(src: &str, name: &str) -> Vec<(bool, String)> {
+    let owned = Box::leak(src.to_string().into_boxed_str());
+    let ast = parser::Pratt::default().parse(owned).expect("parse");
+    let mut checker = Checker::new();
+    let _ = checker.check_program(&ast);
+    let sidecar = checker.typed_sidecar();
+    let module = build_module(&checker, &sidecar, "", &ast);
+    let mut program = ProgramEffects::default();
+    let out = ModuleEffects::solve(&module, &checker, "", &program).summaries;
+    program.record(&module, &checker, "", &out);
+    let body = module.bodies.iter().find(|b| b.name == name).unwrap_or_else(|| panic!("no body `{name}`"));
+    let Some(rewritten) = program.early_frees(&checker, "", &module, body) else {
+        return Vec::new();
+    };
+    rewritten
+        .exprs
+        .iter()
+        .filter_map(|x| match &x.kind {
+            HirKind::Builtin { op: crate::hir::Builtin::FreeEarly { deep }, args } => match rewritten.expr(args[0]).kind {
+                HirKind::Local(l) => Some((*deep, rewritten.local(l).name.clone())),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_tree_checked_right_after_it_is_built_is_freed_whole() {
+    let src = format!("{TREES}\nfn run(int d) -> int {{\n    return item_check(bottom_up(d));\n}}\n");
+    let got = frees(&src, "run");
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert!(got[0].0, "{got:?}");
+}
+
+#[test]
+fn a_local_byte_copy_is_freed_before_the_return() {
+    let src = "
+use string::{to_bytes};
+fn count_commas(string s) -> int {
+    let b = to_bytes(s);
+    let n = 0;
+    let i = 0;
+    while i < b.len() {
+        if b[i] == \",\" {
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+";
+    assert_eq!(frees(src, "count_commas"), vec![(false, "b".to_string())]);
+}
+
+#[test]
+fn a_stored_returned_or_aliased_object_is_not_freed() {
+    let src = "
+use string::{to_bytes};
+fn keep(Vec<string> out, string s) {
+    let t = s + \"!\";
+    out.push(t);
+}
+fn give(string s) -> string {
+    let t = s + \"!\";
+    return t;
+}
+fn alias(string s) -> int {
+    let a = to_bytes(s);
+    let b = a;
+    return b.len();
+}
+";
+    assert!(frees(src, "keep").is_empty());
+    assert!(frees(src, "give").is_empty());
+    assert!(frees(src, "alias").is_empty());
+}
