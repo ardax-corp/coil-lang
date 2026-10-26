@@ -1,15 +1,12 @@
-// @expected E0406 — a static initializer runs at startup, so an `env::exec` it
-// reaches needs `--allow-exec`.
-use env::exec;
+// @expected E0407 — a static initializer runs at startup, so an `env::exit` it
+// reaches needs `--allow-exit`.
+use env::exit;
 
-fn run_true() -> int {
-    let args: Vec<string> = Vec::new();
-    return match exec("true", args) {
-        Result::Ok(code) => code,
-        Result::Err(_) => -1,
-    };
+fn stop() -> int {
+    exit(3);
+    return 0;
 }
 
-static let STATUS: int = run_true();
+static let STATUS: int = stop();
 
 fn main() {}

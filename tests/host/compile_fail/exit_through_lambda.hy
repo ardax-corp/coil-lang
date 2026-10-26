@@ -1,8 +1,8 @@
-// @expected E0406 — a call inside a lambda that `main` calls is reached too.
-use env::exec;
+// @expected E0407 — a call inside a lambda that `main` calls is reached too.
+use env::exit;
 
 fn main() {
-    let args: Vec<string> = Vec::new();
-    let run = fn () use (args) => exec("true", args);
-    let _ = run();
+    let code = 3;
+    let stop = fn () use (code) => exit(code);
+    stop();
 }

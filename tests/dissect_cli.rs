@@ -213,7 +213,6 @@ fn dissect_help_lists_host_grant_flags() {
     for flag in [
         "--allow-attach",
         "--allow-exit",
-        "--allow-exec",
         "--allow-ffi-exec",
         "--allow-dload",
         "--ffi-search-path",
