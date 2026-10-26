@@ -4216,7 +4216,8 @@ fn worker(Receiver rx) {
 
 fn main() {
     let pair = channel()?;
-    let t = spawn(worker, pair[1])?;
+    // spawn fails with ThreadError, channel/send with ChannelError.
+    let _ = spawn(worker, pair[1]);
     send(pair[0], "hi")?;
 }
 "#,
