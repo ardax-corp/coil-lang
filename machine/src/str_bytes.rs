@@ -35,7 +35,7 @@ pub fn as_string_result_value(heap: &mut Heap, r: Result<Value, StringErrorTag>)
 /// Run `f` on the UTF-8 content of string `v`; non-strings read as `""`
 /// (the typechecker rejects them).
 fn with_str<R>(heap: &Heap, v: Value, f: impl FnOnce(&str) -> R) -> R {
-    match heap.find_object_by_addr(peel_one_boxed(heap, v).raw() as u64) {
+    match heap.find_object_by_addr(peel_one_boxed(heap, v).bits()) {
         Some(Object::String(gc)) => f(gc.as_ref().data.as_str()),
         _ => f(""),
     }
@@ -85,7 +85,7 @@ pub fn string_byte_at(heap: &mut Heap, args: &[Value]) -> Value {
 /// offset falls inside a UTF-8 sequence.
 pub fn string_slice_bytes(heap: &mut Heap, args: &[Value]) -> Value {
     let (start, end) = (args[1].as_int(), args[2].as_int());
-    let part = match heap.find_object_by_addr(peel_one_boxed(heap, args[0]).raw() as u64) {
+    let part = match heap.find_object_by_addr(peel_one_boxed(heap, args[0]).bits()) {
         Some(Object::String(gc)) => {
             let n = gc.as_ref().data.len() as i64;
             let start = start.clamp(0, n) as usize;
@@ -180,7 +180,7 @@ mod tests {
         let ok = string_slice_bytes(&mut heap, &[s, Value::from(1_i64), Value::from(3_i64)]);
         let mid = string_slice_bytes(&mut heap, &[s, Value::from(2_i64), Value::from(4_i64)]);
         let clamp = string_slice_bytes(&mut heap, &[s, Value::from(-5_i64), Value::from(99_i64)]);
-        let tag = |heap: &Heap, v: Value| match heap.find_object_by_addr(v.raw() as u64) {
+        let tag = |heap: &Heap, v: Value| match heap.find_object_by_addr(v.bits()) {
             Some(Object::Enum(gc)) => gc.as_ref().tag,
             _ => panic!("expected Result"),
         };

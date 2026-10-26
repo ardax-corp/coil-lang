@@ -103,7 +103,7 @@ impl Renderer<'_> {
     }
 
     fn class(&self, word: common::Value, name: &str, depth: u32) -> String {
-        if word.raw().is_null() {
+        if word.is_zero() {
             return "null".into();
         }
         match self.machine.debug_object(word) {
@@ -146,10 +146,10 @@ impl Renderer<'_> {
         // Niche layouts (COI-92): `Option` of a heap object is `0` / the
         // object; heap-heap `Result` tags `Err` with bit 0.
         match name {
-            "Option" if word.raw().is_null() => "Option::None".into(),
+            "Option" if word.is_zero() => "Option::None".into(),
             "Option" => format!("Option::Some({})", self.value(word, &arg(0), depth + 1)),
-            "Result" if word.raw() as u64 & 1 == 1 => {
-                let inner = common::Value::from(word.raw() as u64 & !1);
+            "Result" if word.bits() & 1 == 1 => {
+                let inner = common::Value::from(word.bits() & !1);
                 format!("Result::Err({})", self.value(inner, &arg(1), depth + 1))
             }
             "Result" => format!("Result::Ok({})", self.value(word, &arg(0), depth + 1)),

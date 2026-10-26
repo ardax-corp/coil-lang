@@ -231,7 +231,7 @@ pub fn fs_symlink(heap: &mut Heap, target: Value, link: Value) -> Value {
         }
         #[cfg(not(any(unix, windows)))]
         {
-            let _ = (heap, original, link_path);
+            let _ = (original, link_path);
             let err = alloc_io_error(heap, IoErrorTag::Other);
             pack_result_or_panic(heap, Err(err))
         }
@@ -359,28 +359,28 @@ mod tests {
     }
 
     fn result_ok_tag(heap: &Heap, v: Value) -> Option<u32> {
-        match heap.find_object_by_addr(v.raw() as u64) {
+        match heap.find_object_by_addr(v.bits()) {
             Some(Object::Enum(gc)) if gc.as_ref().tag == 0 => Some(0),
             _ => None,
         }
     }
 
     fn result_err_io_tag(heap: &Heap, v: Value) -> Option<IoErrorTag> {
-        let Object::Enum(outer) = heap.find_object_by_addr(v.raw() as u64)? else {
+        let Object::Enum(outer) = heap.find_object_by_addr(v.bits())? else {
             return None;
         };
         if outer.as_ref().tag != 1 {
             return None;
         }
         let err_val = *outer.as_ref().payload.first()?;
-        let Object::Enum(inner) = heap.find_object_by_addr(err_val.raw() as u64)? else {
+        let Object::Enum(inner) = heap.find_object_by_addr(err_val.bits())? else {
             return None;
         };
         io_tag_from_u32(inner.as_ref().tag)
     }
 
     fn unwrap_ok_bool(heap: &Heap, v: Value) -> bool {
-        let Object::Enum(outer) = heap.find_object_by_addr(v.raw() as u64).unwrap() else {
+        let Object::Enum(outer) = heap.find_object_by_addr(v.bits()).unwrap() else {
             panic!("expected Result enum");
         };
         assert_eq!(outer.as_ref().tag, 0);
@@ -388,7 +388,7 @@ mod tests {
     }
 
     fn instance_field_bool(heap: &mut Heap, v: Value, field: &str) -> bool {
-        let Object::Instance(inst) = heap.find_object_by_addr(v.raw() as u64).unwrap() else {
+        let Object::Instance(inst) = heap.find_object_by_addr(v.bits()).unwrap() else {
             panic!("expected instance");
         };
         let key = heap.intern(field.to_string());
@@ -399,7 +399,7 @@ mod tests {
     }
 
     fn instance_field_int(heap: &mut Heap, v: Value, field: &str) -> i64 {
-        let Object::Instance(inst) = heap.find_object_by_addr(v.raw() as u64).unwrap() else {
+        let Object::Instance(inst) = heap.find_object_by_addr(v.bits()).unwrap() else {
             panic!("expected instance");
         };
         let key = heap.intern(field.to_string());
@@ -410,7 +410,7 @@ mod tests {
     }
 
     fn unwrap_ok_string(heap: &Heap, v: Value) -> String {
-        let Object::Enum(outer) = heap.find_object_by_addr(v.raw() as u64).unwrap() else {
+        let Object::Enum(outer) = heap.find_object_by_addr(v.bits()).unwrap() else {
             panic!("expected Result");
         };
         let payload = outer.as_ref().payload[0];
@@ -418,7 +418,7 @@ mod tests {
     }
 
     fn unwrap_ok_payload(heap: &Heap, v: Value) -> Value {
-        let Object::Enum(outer) = heap.find_object_by_addr(v.raw() as u64).unwrap() else {
+        let Object::Enum(outer) = heap.find_object_by_addr(v.bits()).unwrap() else {
             panic!("expected Result");
         };
         assert_eq!(outer.as_ref().tag, 0);
@@ -426,7 +426,7 @@ mod tests {
     }
 
     fn array_strings(heap: &Heap, v: Value) -> Vec<String> {
-        let Object::Array(arr) = heap.find_object_by_addr(v.raw() as u64).unwrap() else {
+        let Object::Array(arr) = heap.find_object_by_addr(v.bits()).unwrap() else {
             panic!("expected array");
         };
         arr.as_ref()
@@ -468,7 +468,7 @@ mod tests {
         let path_v = coil_string(&mut heap, &path_s);
         let r = fs_metadata(&mut heap, path_v);
         assert_eq!(result_ok_tag(&heap, r), Some(0));
-        let Object::Enum(outer) = heap.find_object_by_addr(r.raw() as u64).unwrap() else {
+        let Object::Enum(outer) = heap.find_object_by_addr(r.bits()).unwrap() else {
             panic!();
         };
         let rec = outer.as_ref().payload[0];

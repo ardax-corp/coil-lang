@@ -168,7 +168,7 @@ pub fn resolve_symbol(library: &libloading::Library, symbol: &str) -> Result<Cod
 }
 
 fn intern_string_arg(heap: &mut Heap, value: &Value) -> Result<*const c_char, FfiError> {
-    let raw = value.raw() as u64;
+    let raw = value.bits();
     if raw == 0 {
         return heap
             .intern_ffi_bytes(b"")
@@ -256,7 +256,7 @@ fn write_field_at(
         FfiType::Float => put_bytes(buf, offset, &val.as_float().to_ne_bytes()),
         FfiType::Bool => put_bytes(buf, offset, &[if val.as_bool() { 1 } else { 0 }]),
         FfiType::Ptr | FfiType::Callback(_) => {
-            put_bytes(buf, offset, &(val.raw() as u64).to_ne_bytes())
+            put_bytes(buf, offset, &(val.bits()).to_ne_bytes())
         }
         FfiType::String => {
             let p = intern_string_arg(heap, val)? as usize as u64;
@@ -286,7 +286,7 @@ fn pack_struct(
 ) -> Result<(), FfiError> {
     out.clear();
     out.resize(layout.size, 0);
-    let addr = value.raw() as u64;
+    let addr = value.bits();
     for (i, (_, fty)) in layout.fields.iter().enumerate() {
         let off = *layout
             .offsets
@@ -388,7 +388,7 @@ fn array_buffer_from_value(
     value: &Value,
     bufs: &mut Vec<Vec<i64>>,
 ) -> Result<(*mut c_void, Option<u64>), FfiError> {
-    let addr = value.raw() as u64;
+    let addr = value.bits();
     if let Some(obj) = heap.find_object_by_addr(addr) {
         let mut buf: Vec<i64> = match &obj {
             Object::Array(gc) => gc.as_ref().iter().map(|v| v.as_int()).collect(),
@@ -429,7 +429,7 @@ fn byte_arg_from_value(
     lend: bool,
     bufs: &mut Vec<Vec<u8>>,
 ) -> Result<(*mut c_void, Option<u64>), FfiError> {
-    let addr = value.raw() as u64;
+    let addr = value.bits();
     if addr == 0 && !writable {
         return Ok((EMPTY_CONST_BYTES.as_ptr() as *mut c_void, None));
     }
@@ -583,7 +583,7 @@ pub fn invoke_via_libffi(
     fn value_is_stream(heap: &Heap, value: &Value) -> bool {
         let v = crate::io::peel_one_boxed(heap, *value);
         matches!(
-            heap.find_object_by_addr(v.raw() as u64),
+            heap.find_object_by_addr(v.bits()),
             Some(Object::Stream(_))
         )
     }
@@ -656,7 +656,7 @@ pub fn invoke_via_libffi(
             FfiType::Bytes | FfiType::ConstBytes => {
                 // Lent only when no other argument is the same word.
                 let lend = ctx.lend_arrays
-                    && args.iter().filter(|a| a.raw() == value.raw()).count() == 1;
+                    && args.iter().filter(|a| a.bits() == value.bits()).count() == 1;
                 let writable = matches!(ty, FfiType::Bytes);
                 let (ptr, heap_addr) =
                     byte_arg_from_value(ctx.heap(), value, writable, lend, &mut byte_buffers)?;
@@ -1447,7 +1447,7 @@ mod tests {
 
         let unpacked =
             unpack_struct(&mut heap, &layout, std::slice::from_ref(&layout), &packed).unwrap();
-        let uaddr = unpacked.raw() as u64;
+        let uaddr = unpacked.bits();
         assert_eq!(instance_int(&mut heap, uaddr, &layout, "a"), 1);
         assert_eq!(instance_int(&mut heap, uaddr, &layout, "b"), 0x11223344);
         assert_eq!(instance_int(&mut heap, uaddr, &layout, "c"), 7);

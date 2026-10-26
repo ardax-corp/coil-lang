@@ -147,6 +147,24 @@ pub fn declared_flags(src: &str) -> Result<Option<coil_args::HostGrantFlags>, St
         .map_err(|e| format!("bad `// @flags` header: {e}"))
 }
 
+/// Platform features a file declares it needs on `// @needs` lines
+/// (`// @needs sockets`). `Err` names one this platform lacks, or one that
+/// is not a known feature.
+pub fn missing_platform_feature(src: &str) -> Result<(), String> {
+    for name in test_headers::values(src, "needs").flat_map(str::split_whitespace) {
+        let has = match name {
+            // wasm (the website playground) has no sockets, no symlinks
+            // and no dynamic libraries.
+            "sockets" | "symlinks" | "ffi" => !cfg!(target_family = "wasm"),
+            other => return Err(format!("unknown `// @needs` feature `{other}`")),
+        };
+        if !has {
+            return Err(format!("needs {name}, which this platform lacks"));
+        }
+    }
+    Ok(())
+}
+
 /// The stdout a `fn main()`-only file declares on the `// @output` line of
 /// its leading comment header, unescaped (`\n`, `\t`, `\e`, `\\`), as
 /// `examples/` document theirs. `None` when there is no such line.
@@ -671,6 +689,13 @@ pub(crate) fn compile_test_file(
         .or_else(|| std::fs::read_to_string(path).ok());
     if let Some(why) = header.as_deref().and_then(legacy_header) {
         return Compiled::Decided(false, Some(format!("> Test \"{display}\" failed ({why})")));
+    }
+    if let Some(Err(why)) = header.as_deref().map(missing_platform_feature) {
+        if why.starts_with("unknown") {
+            return Compiled::Decided(false, Some(format!("> Test \"{display}\" failed ({why})")));
+        }
+        // Skipped: a platform without the feature cannot run the file.
+        return Compiled::Nothing;
     }
     match header.as_deref().map(declared_flags) {
         Some(Ok(Some(flags))) => {

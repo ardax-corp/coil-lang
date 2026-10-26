@@ -94,7 +94,7 @@ jobs:
           Built: $(date -u '+%Y-%m-%d %H:%M UTC')
 
           Not a stable release: the binaries and this tag are replaced on every build.
-          \`coil-<triple>.tar.gz\` (\`.zip\` on Windows) holds the whole toolkit (coil, coil-test, coil-fmt, coil-lsp, coil-debug, coil-dissect, coil-embed) under one directory; \`coil-embed-<triple>\` is the standalone packaging runner. \`SHA256SUMS\` lists their checksums."
+          \`coil-<triple>.tar.gz\` (\`.zip\` on Windows) holds the whole toolkit (coil, coil-test, coil-fmt, coil-lsp, coil-debug, coil-dissect, coil-embed) under one directory; \`coil-embed-<triple>\` is the standalone packaging runner. \`coil-wasm32-wasip1.wasm\` is coil for WASI (the website playground). \`SHA256SUMS\` lists their checksums."
           if gh release view edge >/dev/null 2>&1; then
             gh release edit edge --prerelease --title "edge" --notes "$notes"
           else

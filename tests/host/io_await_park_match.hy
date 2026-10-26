@@ -1,3 +1,4 @@
+// @needs sockets
 // The old names `await_readable` / `await_writable` still work: a read that
 // would block waits, resumes, and the wait's result matches `Ok`.
 use tests::assert;

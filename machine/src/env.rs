@@ -71,14 +71,14 @@ fn contains_nul(s: &str) -> bool {
 }
 
 fn heap_string(heap: &Heap, v: Value) -> Result<String, EnvErrorTag> {
-    match heap.find_object_by_addr(v.raw() as u64) {
+    match heap.find_object_by_addr(v.bits()) {
         Some(Object::String(gc)) => Ok(gc.as_ref().data.to_string()),
         _ => Err(EnvErrorTag::InvalidInput),
     }
 }
 
 fn value_as_string_array(heap: &Heap, v: Value) -> Result<Vec<String>, EnvErrorTag> {
-    match heap.find_object_by_addr(v.raw() as u64) {
+    match heap.find_object_by_addr(v.bits()) {
         Some(Object::Array(gc)) => {
             let mut out = Vec::with_capacity(gc.as_ref().len());
             for e in gc.as_ref().iter() {
@@ -329,14 +329,14 @@ mod tests {
     static ENV_TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn enum_tag(heap: &Heap, v: Value) -> Option<u32> {
-        match heap.find_object_by_addr(v.raw() as u64) {
+        match heap.find_object_by_addr(v.bits()) {
             Some(Object::Enum(gc)) => Some(gc.as_ref().tag),
             _ => None,
         }
     }
 
     fn result_ok_payload(heap: &Heap, result: Value) -> Value {
-        let Object::Enum(gc) = heap.find_object_by_addr(result.raw() as u64).unwrap() else {
+        let Object::Enum(gc) = heap.find_object_by_addr(result.bits()).unwrap() else {
             panic!("expected Result");
         };
         assert_eq!(gc.as_ref().tag, 0);
@@ -344,7 +344,7 @@ mod tests {
     }
 
     fn result_err_tag(heap: &Heap, result: Value) -> EnvErrorTag {
-        let Object::Enum(gc) = heap.find_object_by_addr(result.raw() as u64).unwrap() else {
+        let Object::Enum(gc) = heap.find_object_by_addr(result.bits()).unwrap() else {
             panic!("expected Result");
         };
         assert_eq!(gc.as_ref().tag, 1);

@@ -1,3 +1,4 @@
+// @needs sockets
 // @output 11112
 use io::open;
 use io::stdout;

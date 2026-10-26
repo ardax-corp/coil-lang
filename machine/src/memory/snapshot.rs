@@ -160,13 +160,13 @@ impl Capture<'_> {
     /// reached object under `parent`.
     fn word(&mut self, v: Value, kind: u8, parent: Parent) -> Result<SnapWord, SnapshotError> {
         if kind == common::WORD_SCALAR || kind == common::WORD_BYTE {
-            return Ok(SnapWord::Raw(v.raw() as u64));
+            return Ok(SnapWord::Raw(v.bits()));
         }
         let addr = v.heap_addr();
         let Some(object) = (addr != 0).then(|| self.heap.find_object_by_addr(addr)).flatten() else {
-            return Ok(SnapWord::Raw(v.raw() as u64));
+            return Ok(SnapWord::Raw(v.bits()));
         };
-        self.object_word(object, v.raw() as u64 & 1 != 0, parent)
+        self.object_word(object, v.bits() & 1 != 0, parent)
     }
 
     fn object_word(&mut self, object: Object, err_bit: bool, parent: Parent) -> Result<SnapWord, SnapshotError> {

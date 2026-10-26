@@ -414,7 +414,7 @@ mod tests {
         let buf = make_byte_array(&mut heap, &[0; 8]);
         let got = stream_read(&mut heap, stream, buf).expect("read through vtable");
         assert_eq!(got, Some(2));
-        match heap.find_object_by_addr(buf.raw() as u64) {
+        match heap.find_object_by_addr(buf.bits()) {
             Some(Object::Array(arr)) => {
                 assert_eq!(arr.as_ref().get(0).unwrap().as_int(), b'h' as i64);
                 assert_eq!(arr.as_ref().get(1).unwrap().as_int(), b'i' as i64);

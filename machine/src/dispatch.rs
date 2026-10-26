@@ -545,7 +545,7 @@ pub(super) fn dense_index(args: DenseIndexArgs<'_>) -> Result<(), DenseFail> {
     promise!(sp + arr < stack_cap);
     promise!(sp + idx < stack_cap);
     let index = stack[sp + idx].as_int();
-    let addr = stack[sp + arr].raw() as u64;
+    let addr = stack[sp + arr].bits();
     let unchecked = flags & common::dense::HEAP_UNCHECKED != 0;
     if flags & common::dense::HEAP_STR_BYTE != 0 {
         let b = match resolve_dense_index_object_in(
@@ -616,7 +616,7 @@ pub(super) fn dense_store_index(args: DenseStoreIndexArgs<'_>) -> Result<(), Den
     promise!(sp + idx < stack_cap);
     let value = stack[sp + dest];
     let index = stack[sp + idx].as_int();
-    let addr = stack[sp + arr].raw() as u64;
+    let addr = stack[sp + arr].bits();
     let unchecked = flags & common::dense::HEAP_UNCHECKED != 0;
     if let Some(Object::Array(mut gc)) = resolve_dense_index_object_in(
         heap,
@@ -661,7 +661,7 @@ fn dense_array_push(ctx: &mut HotCtx<'_, '_>, opcode: &Byte) -> bool {
         ctx.extra.dense_obj_addr,
         ctx.extra.dense_obj,
         arr as u32,
-        target.raw() as u64,
+        target.bits(),
     ) else {
         return false;
     };
@@ -683,7 +683,7 @@ pub(super) fn dense_array_len(
     let (dest, arr) = opcode.dense_move_parts();
     promise!(sp + dest < stack_cap);
     promise!(sp + arr < stack_cap);
-    let addr = stack[sp + arr].raw() as u64;
+    let addr = stack[sp + arr].bits();
     let len = match heap.find_object_by_addr(addr) {
         Some(Object::Array(gc)) => gc.as_ref().len(),
         Some(Object::Tuple(gc)) => gc.as_ref().elements().len(),
@@ -708,7 +708,7 @@ pub(super) fn dense_field_load(
     let (flags, dest, obj, c) = opcode.dense_abc_parts();
     promise!(sp + dest < stack_cap);
     promise!(sp + obj < stack_cap);
-    let addr = stack[sp + obj].raw() as u64;
+    let addr = stack[sp + obj].bits();
     let named = flags & common::dense::FIELD_NAMED != 0;
     let result = if named {
         promise!(sp + c < stack_cap);
@@ -757,7 +757,7 @@ pub(super) fn dense_field_store(
     promise!(sp + dest < stack_cap);
     promise!(sp + obj < stack_cap);
     let value = stack[sp + dest];
-    let addr = stack[sp + obj].raw() as u64;
+    let addr = stack[sp + obj].bits();
     let named = flags & common::dense::FIELD_NAMED != 0;
     if let Some(Object::Instance(mut gc)) = heap.find_object_by_addr(addr) {
         if named {
@@ -1094,7 +1094,7 @@ fn exec_dense(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) -> bool {
             promise!(ctx.sp + arr < ctx.stack_cap);
             promise!(ctx.sp + idx < ctx.stack_cap);
             let index = ctx.stack[ctx.sp + idx].as_int();
-            let addr = ctx.stack[ctx.sp + arr].raw() as u64;
+            let addr = ctx.stack[ctx.sp + arr].bits();
             let ok = if ty == common::simd::TY_U8 {
                 let x = &mut *ctx.extra;
                 let obj = resolve_dense_index_object_in(

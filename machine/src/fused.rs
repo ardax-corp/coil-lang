@@ -39,7 +39,7 @@ impl HeapView for HeapSlot {
 /// [`crate::value_eq::values_eq`] probes the heap for both (#1866).
 #[inline(never)]
 fn eq_values<H: HeapView>(heap: &H, lhs: Value, rhs: Value) -> bool {
-    if lhs.raw() == rhs.raw() {
+    if lhs.bits() == rhs.bits() {
         return true;
     }
     let heap = heap.as_heap();

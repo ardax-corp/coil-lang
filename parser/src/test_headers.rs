@@ -1,10 +1,10 @@
 //! Directives in a test file's leading comment header (`// @output 3`,
-//! `// @expected E0209`, `// @flags --allow-read`), which `coil-test` and
+//! `// @expected E0209`, `// @flags --allow-read`, `// @needs sockets`), which `coil-test` and
 //! the examples check. Names are case-insensitive and the colon after a name
 //! is optional (`// @Output: 3`).
 
 /// Every header directive `coil-test` reads.
-pub const DIRECTIVES: [&str; 3] = ["output", "expected", "flags"];
+pub const DIRECTIVES: [&str; 4] = ["output", "expected", "flags", "needs"];
 
 /// The comment lines before a file's first line of code.
 fn header(src: &str) -> impl Iterator<Item = &str> {

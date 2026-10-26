@@ -87,7 +87,7 @@ mod tests {
             "missing lib".into(),
         );
         let obj = heap
-            .find_object_by_addr(err.raw() as u64)
+            .find_object_by_addr(err.bits())
             .expect("Error enum on heap");
         let Object::Enum(gc) = obj else {
             panic!("expected Enum");

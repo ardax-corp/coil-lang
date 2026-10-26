@@ -22,6 +22,11 @@ use crate::thread::{
 };
 use crate::vm::Machine;
 
+/// No OS threads on this target (wasm without the atomics feature): the pool
+/// starts no workers, and a joiner runs queued jobs itself, so a spawned
+/// thread runs when it is joined (or when a wait helps).
+pub(crate) const NO_THREADS: bool = cfg!(all(target_family = "wasm", not(target_feature = "atomics")));
+
 fn par_stats_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
@@ -209,6 +214,9 @@ impl Reactor {
                 n = crate::thread::WorkerCap::new().max().max(1);
                 reactor.n_workers.store(n, Ordering::Relaxed);
             }
+            if NO_THREADS {
+                return;
+            }
             let mut handles = reactor
                 .worker_handles
                 .lock()
@@ -300,6 +308,12 @@ impl Reactor {
     pub fn help_off_stack(self: &Arc<Self>) {
         // Each spare may itself wait on IO and need another; the cap only
         // bounds a burst of queued jobs, not a chain of waits.
+        if NO_THREADS {
+            if let Some(job) = self.steal_job() {
+                run_help_job(self, job);
+            }
+            return;
+        }
         let cap = MAX_SPARES;
         let mut n = self.spares.load(Ordering::SeqCst);
         loop {
@@ -435,6 +449,9 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
     static IS_POOL_WORKER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Reused join-help VMs (one live checkout per nested steal on this thread).
+    /// Boxed so checking one out moves a pointer, not the VM (clippy only
+    /// sees the VM as small on 32-bit targets).
+    #[allow(clippy::vec_box)]
     static HELP_VMS: std::cell::RefCell<Vec<Box<Machine<WORKER_STACK_SLOTS>>>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -626,6 +643,10 @@ fn park_join(
         run_help_job(reactor, job);
         return None;
     }
+    if NO_THREADS {
+        // Nothing else can ever finish the job: it waits on this thread.
+        return Some(Err(ThreadErrorTag::JoinFailed));
+    }
     bump(&reactor.join_parks);
     match reactor.sleep_cvar.wait(g) {
         Ok(guard) => drop(guard),
@@ -747,7 +768,7 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
             return Err(ThreadErrorTag::JoinFailed);
         }
         if shared {
-            Ok(PortableValue::Immediate(ret.raw() as u64))
+            Ok(PortableValue::Immediate(ret.bits()))
         } else {
             value_to_portable(vm.heap(), ret)
         }

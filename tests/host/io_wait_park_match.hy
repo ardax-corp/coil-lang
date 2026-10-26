@@ -1,3 +1,4 @@
+// @needs sockets
 // COI-408: park on WouldBlock, resume, match Result::Ok (not boxed-as-Err).
 use tests::assert;
 use io::{wait_readable, wait_writable, close, read};

@@ -1,3 +1,4 @@
+// @needs sockets
 // COI-410: sequential TCP HTTP/1.1 GETs with Connection: close (no pool).
 // One pair per request: park the client on wait_readable, then discard.
 // The client parks in its own task while the server task writes.
