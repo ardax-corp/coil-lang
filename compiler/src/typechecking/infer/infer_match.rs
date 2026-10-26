@@ -82,14 +82,12 @@ impl Checker {
                     variant_name,
                     ..
                 } = arm_pattern.as_ref()
-                && let Some(tag) = self
-                    .enum_tags
-                    .get(*enum_name)
-                    .and_then(|t| t.get(*variant_name).copied())
+                && let Some(tag) = self.tag_for(enum_name, variant_name)
                 {
+                    // A module's own enum is keyed `m::E` (#2033).
                     let arity = self
                         .enum_arities
-                        .get(*enum_name)
+                        .get(&self.registry_enum_key(enum_name))
                         .and_then(|a| a.get(tag as usize).copied())
                         .unwrap_or(0);
                     let owner = match &resolved_scrutinee {
