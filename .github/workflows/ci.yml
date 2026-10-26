@@ -505,6 +505,19 @@ jobs:
       - name: Build coil.wasm
         run: cargo build --release --target wasm32-wasip1 -p coil
 
+      # `coil dissect` runs in process on wasm (no coil-dissect to re-exec);
+      # the playground's Inspect panel depends on it.
+      - name: Dissect (wasm)
+        run: |
+          mkdir -p target/wasm-dissect
+          printf 'fn sq(int x) -> int {\n    return x * x;\n}\n\nfn main() {\n    sq(7);\n}\n' > target/wasm-dissect/main.hy
+          node --no-warnings --no-turbo-fast-api-calls scripts/wasi_coil.mjs \
+            target/wasm32-wasip1/release/coil.wasm dissect target/wasm-dissect/main.hy \
+            -O0 --fn sq --hir --root .deps/coil-stdlib/src > target/wasm-dissect/out.txt
+          cat target/wasm-dissect/out.txt
+          grep -q '=== hir ===' target/wasm-dissect/out.txt
+          grep -q 'op=MUL' target/wasm-dissect/out.txt
+
       - name: Language harness (wasm)
         run: |
           python3 scripts/test_corpora.py --wasm target/wasm32-wasip1/release/coil.wasm -- \

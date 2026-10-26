@@ -627,6 +627,18 @@ fn run_test_in_process() -> ! {
     }
 }
 
+/// `coil dissect` on wasm, where there is no `coil-dissect` to re-exec.
+#[cfg(target_family = "wasm")]
+fn run_dissect_in_process() -> ! {
+    use std::io::Write;
+    let argv: Vec<String> = std::iter::once("coil-dissect".to_string())
+        .chain(std::env::args().skip(2))
+        .collect();
+    coil_dissect::run(&argv);
+    let _ = std::io::stdout().flush();
+    exit(0)
+}
+
 fn main() {
     comptime::install();
     let raw_args: Vec<String> = std::env::args().collect();
@@ -671,7 +683,10 @@ fn main() {
         Command::Test => run_test_in_process(),
         Command::Mutate => dispatch_helper_as("mutate", "test", &["mutate"]),
         Command::Verify => dispatch_helper("verify"),
+        #[cfg(not(target_family = "wasm"))]
         Command::Dissect { .. } => dispatch_helper("dissect"),
+        #[cfg(target_family = "wasm")]
+        Command::Dissect { .. } => run_dissect_in_process(),
         Command::Debug { .. } => dispatch_helper("debug"),
         Command::Fmt => dispatch_helper("fmt"),
         Command::Lsp => dispatch_helper("lsp"),

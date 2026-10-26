@@ -291,6 +291,7 @@ dependencies = [
  "coil-args",
  "coil-build-id",
  "coil-cli",
+ "coil-dissect",
  "coil-host",
  "coil-test",
  "common",
