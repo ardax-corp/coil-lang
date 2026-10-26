@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-/// Deny-by-default host capabilities (`dload`, attach, env exec/exit, and
+/// Deny-by-default host capabilities (`dload`, attach, env exit, and
 /// read / write / net / env).
 ///
 /// The default denies everything. `dload("c")` /
@@ -15,8 +15,6 @@ use std::path::PathBuf;
 pub struct HostGrants {
     /// `Stream.attach` at typecheck (`--allow-attach`).
     pub allow_attach: bool,
-    /// `env::exec`.
-    pub allow_exec: bool,
     /// `env::exit`.
     pub allow_exit: bool,
     /// FFI process-exec symbols (`system`, `execve`, …).
@@ -90,7 +88,7 @@ fn is_module_path(s: &str) -> bool {
 }
 
 /// The IO compile-time code may do (`--comptime-read PATH`,
-/// `--comptime-write PATH`, `--comptime-env NAME`, `--comptime-exec STEM`,
+/// `--comptime-write PATH`, `--comptime-env NAME`, `--comptime-net HOST`,
 /// each optionally `MODULE=`-scoped). Paths are as given; [`Self::for_module`]
 /// resolves them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -98,13 +96,12 @@ pub struct ComptimeGrants {
     pub read: Vec<Scoped<PathBuf>>,
     pub write: Vec<Scoped<PathBuf>>,
     pub env: Vec<Scoped<String>>,
-    pub exec: Vec<Scoped<String>>,
     pub net: Vec<Scoped<String>>,
 }
 
 impl ComptimeGrants {
     pub fn is_empty(&self) -> bool {
-        self.read.is_empty() && self.write.is_empty() && self.env.is_empty() && self.exec.is_empty() && self.net.is_empty()
+        self.read.is_empty() && self.write.is_empty() && self.env.is_empty() && self.net.is_empty()
     }
 
     /// What code in `module` may do: the unscoped grants and those scoped
@@ -124,7 +121,6 @@ impl ComptimeGrants {
             read: paths(&self.read, module),
             write: paths(&self.write, module),
             env: names(&self.env, module),
-            exec: names(&self.exec, module),
             net: names(&self.net, module),
             offline: false,
             replay: false,
@@ -143,7 +139,6 @@ impl ComptimeGrants {
         add(&mut self.read, other.read);
         add(&mut self.write, other.write);
         add(&mut self.env, other.env);
-        add(&mut self.exec, other.exec);
         add(&mut self.net, other.net);
     }
 }
@@ -210,7 +205,6 @@ impl HostGrants {
     /// Every capability except `dload` (`--allow-all`).
     pub fn grant_all(&mut self) {
         self.allow_attach = true;
-        self.allow_exec = true;
         self.allow_exit = true;
         self.allow_ffi_exec = true;
         self.allow_read = true;
@@ -219,7 +213,7 @@ impl HostGrants {
         self.allow_env = true;
     }
 
-    /// Grant the capability named `name` (`read`, `net`, `exec`, …). False
+    /// Grant the capability named `name` (`read`, `net`, `exit`, …). False
     /// when there is no such capability.
     pub fn grant_named(&mut self, name: &str) -> bool {
         let flag = match name {
@@ -227,7 +221,6 @@ impl HostGrants {
             "write" => &mut self.allow_write,
             "net" => &mut self.allow_net,
             "env" => &mut self.allow_env,
-            "exec" => &mut self.allow_exec,
             "exit" => &mut self.allow_exit,
             "attach" => &mut self.allow_attach,
             "ffi-exec" => &mut self.allow_ffi_exec,
@@ -245,7 +238,6 @@ impl HostGrants {
             (self.allow_write, Caps::WRITE),
             (self.allow_net, Caps::NET),
             (self.allow_env, Caps::ENV),
-            (self.allow_exec, Caps::EXEC),
             (self.allow_exit, Caps::EXIT),
             (self.allow_attach, Caps::ATTACH),
         ]
@@ -317,7 +309,6 @@ mod tests {
             read: vec![Scoped { module: None, value: read.to_path_buf() }],
             write: vec![Scoped { module: None, value: read.to_path_buf() }],
             env: vec![Scoped::parse("gen=TOKEN", |n| n.to_string())],
-            exec: vec![Scoped::parse("git", |n| n.to_string())],
             net: vec![Scoped::parse("db.internal:3306", |n| n.to_string()), Scoped::parse("example.org", |n| n.to_string())],
         };
         grants.for_module("gen")
@@ -387,13 +378,10 @@ mod tests {
     }
 
     #[test]
-    fn env_names_and_program_stems_must_be_listed() {
+    fn env_names_and_hosts_must_be_listed() {
         let io = io_for(Path::new("/nonexistent-coil-grant"));
         assert!(io.check_env("TOKEN").is_ok());
         assert!(io.check_env("OTHER").unwrap_err().contains("--comptime-env OTHER"));
-        assert!(io.check_exec("git").is_ok());
-        assert!(io.check_exec("/usr/bin/git").is_ok());
-        assert!(io.check_exec("rm").unwrap_err().contains("--comptime-exec rm"));
         assert!(io.check_net("db.internal", 3306).is_ok());
         assert!(io.check_net("db.internal", 5432).unwrap_err().contains("--comptime-net db.internal:5432"));
         assert!(io.check_net("EXAMPLE.org", 443).is_ok(), "a host grant covers any port");

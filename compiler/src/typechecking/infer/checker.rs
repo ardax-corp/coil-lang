@@ -1264,8 +1264,7 @@ impl Checker {
 
         let res_string_env = result_app_ty(string(), env_err.clone());
         let res_strs_env = result_app_ty(vec_app_ty(string()), env_err.clone());
-        let res_unit_env = result_app_ty(unit_ty(), env_err.clone());
-        let res_int_env = result_app_ty(int(), env_err);
+        let res_unit_env = result_app_ty(unit_ty(), env_err);
 
         let ty = match registry {
             common::FFI_READ_INTS_NATIVE => fun(
@@ -1292,7 +1291,6 @@ impl Checker {
             "env_cwd" => fun(&[], res_string_env),
             "env_remove_var" | "env_set_cwd" => fun(&[string()], res_unit_env.clone()),
             "env_set_var" => fun(&[string(), string()], res_unit_env.clone()),
-            "env_exec" => fun(&[string(), vec_app_ty(string())], res_int_env),
             "env_exit" => fun(&[int()], unit_ty()),
 
             "clock_wall_nanos" | "clock_mono_nanos" => fun(&[], int()),
@@ -5600,7 +5598,7 @@ impl Checker {
             }
         };
 
-        // `env::exec`, `env::exit`, `Stream.attach` and the other gated host
+        // `env::exit`, `Stream.attach` and the other gated host
         // calls are checked over what `main` / tests reach, after codegen
         // (`Compiler::capability_violations`).
         if let Some(IoBuiltin::Drive | IoBuiltin::WaitReady) = self.io_fn_in_scope(&ident) {
