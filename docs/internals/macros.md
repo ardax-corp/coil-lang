@@ -342,7 +342,7 @@ that panics, errors or runs out of steps drops the machine, and the next call
 builds a fresh one. The sandboxed native table is built once per process.
 
 - The host natives are the standard table in ABI order. The fs, `open`,
-  stream, `env_var` and `env_exec` natives are gated (`comptime::io_gate`, see
+  stream and `env_var` natives are gated (`comptime::io_gate`, see
   "Compile-time IO" below); every other native that isn't pure (network,
   clocks, threads, the rest of env) is replaced by a stub that fails the
   evaluation (`native_allowed_at_compile_time`).
@@ -362,12 +362,11 @@ builds a fresh one. The sandboxed native table is built once per process.
 ## Compile-time IO
 
 A `const`, a `comptime` expression or a macro may read files, write files,
-read environment variables and run programs only as the build allows:
+read environment variables and connect to hosts only as the build allows:
 
 - `--comptime-read [MODULE=]PATH`, `--comptime-write [MODULE=]PATH`: files
   under `PATH` (a file or directory).
-- `--comptime-env [MODULE=]NAME`, `--comptime-exec [MODULE=]NAME`: one
-  variable, one program (matched by file stem).
+- `--comptime-env [MODULE=]NAME`: one variable.
 - `--comptime-net [MODULE=]HOST[:PORT]`: TCP connections to `HOST` (any
   port) or `HOST:PORT` (`tcp_connect` / `tcp_connect_timeout`; the stream
   natives, `await_readable` / `await_writable` and `tcp_peer_addr` … follow

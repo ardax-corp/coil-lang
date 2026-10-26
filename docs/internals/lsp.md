@@ -54,15 +54,15 @@ flags, as for `coil`.
 project tool can start it with the flags it uses everywhere else:
 
 ```
-coil lsp --root src --root .spool/deps --root ~/.coil/stdlib/src --allow-exec
+coil lsp --root src --root .spool/deps --root ~/.coil/stdlib/src --allow-exit
 ```
 
 `--root DIR` (repeatable; relative to the server's working directory),
 `--allow-read` / `--allow-write` / `--allow-net` / `--allow-env`,
-`--allow-attach` / `--allow-exit` / `--allow-exec` / `--allow-ffi-exec`,
+`--allow-attach` / `--allow-exit` / `--allow-ffi-exec`,
 `-A`, `--allow-dload STEM` and `--ffi-search-path DIR`. The grants reach the
 project typecheck, so code that the project is allowed to compile is not
-flagged in the editor. The read / write / net / env / exec / exit checks
+flagged in the editor. The read / write / net / env / exit checks
 run over reachable code after codegen ([pipeline.md](pipeline.md#capabilities)),
 which the editor does not run, so those show at `coil compile`, not as you type. `--stdio` is accepted and ignored; `coil lsp --help`
 lists the flags.

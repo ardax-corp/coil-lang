@@ -36,7 +36,6 @@ coil-dissect examples/fib.hy --fn fib --il
 | `--allow-env` | Allow reachable environment / working-directory calls (`env::var`, …; default deny) |
 | `--allow-attach` | Allow `Stream.attach` (default deny) |
 | `--allow-exit` | Allow reachable `env::exit` (default deny) |
-| `--allow-exec` | Allow reachable `env::exec` (default deny) |
 | `-A`, `--allow-all` | Every capability above plus `--allow-ffi-exec` (not `dload`) |
 | `--allow-ffi-exec` | Allow FFI process-exec symbols (`system`, `execve`, …) |
 | `--allow-dload STEM` | Allow `dload` of STEM (repeatable; `dload("c")` still denied) |
