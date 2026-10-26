@@ -636,6 +636,57 @@ impl<'a> ModuleEffects<'a> {
         out
     }
 
+    /// E0139: an escape fact a function states (`#[noescape(x)]`,
+    /// `#[fresh]`) that its inferred facts do not support. Stating facts is
+    /// optional; a stated fact is checked, never trusted.
+    pub fn escape_messages(&self) -> Vec<reporting::Message> {
+        use reporting::{ErrorCode, Message};
+        let mut out = Vec::new();
+        for (i, body) in self.cx.module.bodies.iter().enumerate() {
+            let Some(stated) = &body.stated_escape else { continue };
+            let s = self.summaries[i];
+            let local = local_name(self.cx.module_path, &body.name).unwrap_or(&body.name);
+            let span = stated.span.0..stated.span.1;
+            for name in &stated.noescape {
+                let Some(j) = body.params.iter().position(|p| body.local(*p).name == *name) else {
+                    out.push(Message::error(
+                        ErrorCode::EscapeMismatch,
+                        format!("`#[noescape({name})]` names no parameter of `{local}`"),
+                        span.clone(),
+                    ));
+                    continue;
+                };
+                let bit = if j < 64 { 1u64 << j } else { u64::MAX };
+                let what = if s.escapes & bit != 0 {
+                    "may keep"
+                } else if s.returns & bit != 0 {
+                    "may hand back in its result"
+                } else {
+                    continue;
+                };
+                let mut msg = Message::error(
+                    ErrorCode::EscapeMismatch,
+                    format!("`{local}` states `#[noescape({name})]`, but it {what} `{name}`"),
+                    span.clone(),
+                );
+                msg.with_help(
+                    "a call keeps a parameter when it stores it outside objects it made, captures it, or passes it where a callee keeps it; remove the attribute or the escape".to_string(),
+                );
+                out.push(msg);
+            }
+            if stated.fresh && s.shared_ret {
+                let mut msg = Message::error(
+                    ErrorCode::EscapeMismatch,
+                    format!("`{local}` states `#[fresh]`, but its result may reach an object it did not allocate, or one something else also reaches"),
+                    span.clone(),
+                );
+                msg.with_help("a fresh result holds only objects the call made and nothing else keeps; remove the attribute or return a new object".to_string());
+                out.push(msg);
+            }
+        }
+        out
+    }
+
     /// Every reason body `index` is not pure, in source order.
     pub fn explain(&self, index: usize) -> Vec<Cause> {
         self.cx.walk(index, &self.summaries, true).causes.unwrap_or_default()

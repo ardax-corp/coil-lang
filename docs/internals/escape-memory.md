@@ -57,7 +57,7 @@ Heap objects per run and GC safepoint time (instrumented build, best of 3):
 |------|------|--------|
 | 0 | This plan | done |
 | 1 | Escape summaries: per function, which parameters may escape and whether the result is fresh; whole-program fixed point next to `ProgramEffects`; shown by `coil dissect --effects` | done |
-| 1b | Optional stated facts (`noescape` on a parameter), checked against the inferred summary | |
+| 1b | Optional stated facts (`#[noescape(x)]`, `#[fresh]`), checked against the inferred summary (E0139) | done |
 | 2 | Free at scope end and per-statement regions for non-escaping fresh objects; poison-on-free debug mode, gc-stress | |
 | 3 | Static uniqueness: append in place, zero-copy `to_bytes`/`from_bytes`, enum SROA for a `match` on an inlined call result | |
 | 4 | Nursery for young objects | |
@@ -97,6 +97,12 @@ fresh object (to be confirmed against the VM before step 2 frees them).
 `keeps nothing`, `keeps `t``, `returns `self``, `result fresh`. In
 binary_trees, `bottom_up` has a fresh result and `item_check` keeps
 nothing, which is what step 2 needs to free each tree after its check.
+
+A function may state its facts, and never has to: `#[noescape(a, b)]`
+says the call neither keeps nor hands back those parameters, `#[fresh]`
+says its result is fresh. A stated fact is checked against the inferred
+one and is E0139 when it does not hold (or names no parameter); it is
+never trusted in place of the analysis.
 
 Known gaps: the facts do not tell variants apart, so an `Err` that holds a
 string literal makes a `Result` result shared even on the `Ok` path

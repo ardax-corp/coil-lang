@@ -7678,6 +7678,7 @@ impl Compiler {
             let fx = effects::ModuleEffects::solve(hir, &self.checker, module, &self.program_effects);
             self.messages.extend(fx.violation_messages());
             self.messages.extend(fx.readonly_messages());
+            self.messages.extend(fx.escape_messages());
             let pure = effects::pure_names(hir, module, &fx.summaries, &self.pure_fns);
             if effects::effects_capture_active() {
                 let explained = (self.auto_par && self.opt_options.auto_par).then(|| {

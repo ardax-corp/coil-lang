@@ -115,6 +115,34 @@ fn proved_bounds(module: &mut HirModule) {
     });
 }
 
+/// `#[noescape(a, b)]` / `#[fresh]` on a function.
+fn stated_escape(attrs: &[parser::ast::Attribute<'_>], span: super::Span) -> Option<super::StatedEscape> {
+    use parser::ast::{AttrArgs, AttrLit};
+    let mut out = super::StatedEscape { span, ..Default::default() };
+    let mut any = false;
+    for attr in attrs {
+        match attr.name {
+            "fresh" => {
+                any = true;
+                out.fresh = true;
+            }
+            "noescape" => {
+                any = true;
+                match &attr.args {
+                    AttrArgs::Idents(names) => out.noescape.extend(names.iter().map(|n| n.to_string())),
+                    AttrArgs::KeyValues(kvs) => out.noescape.extend(kvs.iter().filter_map(|(k, v)| match v {
+                        AttrLit::String(n) if k.is_empty() => Some(n.to_string()),
+                        _ => None,
+                    })),
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    any.then_some(out)
+}
+
 fn declared_effects(e: &parser::ast::EffectDecl<'_>) -> super::DeclaredEffects {
     super::DeclaredEffects {
         names: e.uses.iter().map(|n| n.to_string()).collect(),
@@ -189,6 +217,7 @@ impl BodyBuilder {
                 pinned_param: false,
                 captures: Vec::new(),
                 declared: None,
+                stated_escape: None,
                 contract_spans: Vec::new(),
                 locals: Vec::new(),
                 exprs: Vec::new(),
@@ -634,6 +663,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         invariants: &[&Contract<'_>],
     ) {
         let Expression::Function {
+            attrs,
             is_coro,
             is_static,
             type_params,
@@ -652,6 +682,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         let mut b = BodyBuilder::new(full, kind, span_of(node));
         b.body.is_coro = *is_coro;
         b.body.declared = effects.as_ref().map(declared_effects);
+        b.body.stated_escape = stated_escape(attrs, span_of(node));
         b.body.contract_spans = contracts.iter().map(|c| (c.span.start, c.span.end)).collect();
         b.body.is_generic = !type_params.is_empty();
         // A trait's default method body has only the trait method's scheme.
