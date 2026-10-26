@@ -18,7 +18,7 @@ use reporting::{ErrorCode, Message};
 
 use crate::macros::{CallPosition, MacroDecl, MacroKind, PendingMacro};
 
-const KNOWN_ATTRS: &[&str] = &["derive", "ffi", "test", "max_depth", "repr", "lang"];
+const KNOWN_ATTRS: &[&str] = &["derive", "ffi", "test", "max_depth", "repr", "lang", "noescape", "fresh"];
 
 /// Result of attribute expansion before typechecking.
 #[derive(Default, Clone)]
@@ -340,10 +340,10 @@ fn validate_attrs<'x, 'a>(
                 span.into_range(),
             ));
         }
-        if attr.name == "max_depth" && target != "function" {
+        if matches!(attr.name, "max_depth" | "noescape" | "fresh") && target != "function" {
             messages.push(Message::error(
                 ErrorCode::GenericTypeError,
-                format!("Attribute `max_depth` is not valid on {}", target),
+                format!("Attribute `{}` is not valid on {}", attr.name, target),
                 span.into_range(),
             ));
         }

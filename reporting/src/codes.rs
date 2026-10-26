@@ -87,6 +87,9 @@ pub enum ErrorCode {
     /// no `else`: there is no value on the false path.
     IfWithoutElse,
     ComptimeFoldBudget,
+    /// A function states an escape fact (`#[noescape(x)]`, `#[fresh]`)
+    /// that the inferred escape facts do not support.
+    EscapeMismatch,
 
     DuplicateEnum,
     DuplicateConstructor,
@@ -200,6 +203,7 @@ impl ErrorCode {
             Self::UnusedResult => "E0136",
             Self::IfWithoutElse => "E0137",
             Self::ComptimeFoldBudget => "E0138",
+            Self::EscapeMismatch => "E0139",
             Self::DuplicateEnum => "E0200",
             Self::DuplicateConstructor => "E0201",
             Self::UnknownEnum => "E0202",
@@ -295,6 +299,7 @@ impl ErrorCode {
             Self::UnusedResult => "unused `Result` value",
             Self::IfWithoutElse => "`if` used as a value has no `else`",
             Self::ComptimeFoldBudget => "call too long to compute while compiling without `comptime`",
+            Self::EscapeMismatch => "stated escape fact does not hold",
             Self::DuplicateEnum => "duplicate enum",
             Self::DuplicateConstructor => "duplicate constructor",
             Self::UnknownEnum => "unknown enum",
@@ -398,6 +403,7 @@ mod tests {
             | UnusedResult
             | IfWithoutElse
             | ComptimeFoldBudget
+            | EscapeMismatch
             | DuplicateEnum
             | DuplicateConstructor
             | UnknownEnum
@@ -483,6 +489,7 @@ mod tests {
             UnusedResult,
             IfWithoutElse,
             ComptimeFoldBudget,
+            EscapeMismatch,
             DuplicateEnum,
             DuplicateConstructor,
             UnknownEnum,

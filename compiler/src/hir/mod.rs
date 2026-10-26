@@ -85,6 +85,15 @@ pub struct DeclaredEffects {
 }
 
 /// What a [`HirBody`] was built from.
+/// Escape facts a function states: `#[noescape(a, b)]` names parameters
+/// the call never keeps or hands back, `#[fresh]` says its result is fresh.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct StatedEscape {
+    pub noescape: Vec<String>,
+    pub fresh: bool,
+    pub span: Span,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BodyKind {
     Function,
@@ -120,6 +129,9 @@ pub struct HirBody {
     pub captures: Vec<(LocalId, LocalId)>,
     /// `pure fn` / `uses {…}` on the function.
     pub declared: Option<DeclaredEffects>,
+    /// Escape facts the function states (`#[noescape(..)]`, `#[fresh]`),
+    /// checked against the inferred ones.
+    pub stated_escape: Option<StatedEscape>,
     /// The function's `requires` / `ensures` clauses: what runs inside one
     /// must have no visible effect.
     pub contract_spans: Vec<Span>,

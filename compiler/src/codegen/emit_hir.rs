@@ -3167,6 +3167,7 @@ impl Compiler {
             pinned_param: body.pinned_param,
             captures: body.captures.clone(),
             declared: body.declared.clone(),
+            stated_escape: body.stated_escape.clone(),
             contract_spans: body.contract_spans.clone(),
             locals: body
                 .locals
