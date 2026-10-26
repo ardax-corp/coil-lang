@@ -226,10 +226,45 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  # coil for wasm32-wasip1: what the website playground runs in the browser
+  # (no FFI, sockets or OS threads; see docs/internals/wasm.md).
+  wasm:
+    name: binaries (wasm32-wasip1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-binaries-wasm32-wasip1
+
+      - name: Build coil.wasm
+        run: |
+          cargo build --release --target wasm32-wasip1 -p coil
+          mkdir -p dist
+          cp target/wasm32-wasip1/release/coil.wasm dist/coil-wasm32-wasip1.wasm
+          ls -la dist/
+
+      - name: Upload binaries-wasm32-wasip1
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-wasm32-wasip1
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
   # Attach all matrix binaries to the GitHub Release for tag pushes (v*).
   release:
     name: publish release assets
-    needs: build
+    needs: [build, wasm]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -252,6 +287,7 @@ jobs:
             release-assets/coil-embed-*
             release-assets/coil-*.tar.gz
             release-assets/coil-*.zip
+            release-assets/coil-*.wasm
           fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
