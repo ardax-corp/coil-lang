@@ -58,6 +58,15 @@ fn collect_test_files_errors_and_discovers_nested() {
 }
 
 #[test]
+fn needs_header_names_platform_features() {
+    assert_eq!(missing_platform_feature("use io::stdout;\n"), Ok(()));
+    // Native targets have every feature a file can name.
+    assert_eq!(missing_platform_feature("// @needs sockets symlinks\n// @needs ffi\nfn main() {}\n"), Ok(()));
+    let err = missing_platform_feature("// @needs gpu\nfn main() {}\n").unwrap_err();
+    assert!(err.starts_with("unknown `// @needs` feature `gpu`"), "{err}");
+}
+
+#[test]
 fn is_compile_fail_detects_path_segment() {
     assert!(is_compile_fail(Path::new("tests/compile_fail/bad.hy")));
     assert!(is_compile_fail(Path::new("/tmp/compile_fail/x.hy")));

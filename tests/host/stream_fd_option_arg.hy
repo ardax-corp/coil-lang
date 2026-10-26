@@ -1,3 +1,4 @@
+// @needs sockets
 // `Option::None` in a two-slot Result CALL's arguments must stay a niche 0.
 // Pair-emitting it under `unbox_enum_context` shifts the frame so `Stream.fd`
 // sees a string (InvalidInput). Same shape as tls::client::enable → create_client.
