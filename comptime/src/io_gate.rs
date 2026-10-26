@@ -147,7 +147,7 @@ fn gate_of(name: &str) -> Option<Gate> {
 }
 
 fn text(heap: &Heap, v: Value) -> Option<String> {
-    match heap.find_object_by_addr(v.raw() as u64) {
+    match heap.find_object_by_addr(v.bits()) {
         Some(Object::String(s)) => Some(s.as_ref().data.to_string()),
         _ => None,
     }

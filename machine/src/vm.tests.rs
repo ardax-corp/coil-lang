@@ -218,7 +218,7 @@
             Byte::new(Instruction::HALT),
         ]);
         let arr = *vm.stack.top();
-        let packed = |vm: &Machine<8>| match vm.heap().find_object_by_addr(arr.raw() as u64) {
+        let packed = |vm: &Machine<8>| match vm.heap().find_object_by_addr(arr.bits()) {
             Some(Object::Array(gc)) => gc.as_ref().is_packed(),
             _ => panic!("not an array"),
         };
@@ -272,7 +272,7 @@
                 Byte::new(Instruction::HALT),
             ]);
 
-            let addr = vm.pop().raw() as u64;
+            let addr = vm.pop().bits();
             let elements: Vec<i64> = match vm.heap().find_object_by_addr(addr) {
                 Some(Object::Tuple(gc)) => {
                     gc.as_ref().elements().iter().map(Value::as_int).collect()
@@ -301,7 +301,7 @@
             Byte::new(Instruction::HALT),
         ]);
 
-        let addr = vm.pop().raw() as u64;
+        let addr = vm.pop().bits();
         match vm.heap().find_object_by_addr(addr) {
             Some(Object::Tuple(gc)) => assert!(gc.as_ref().elements().is_empty()),
             _ => panic!("arity-0 MakeTuple must still push a tuple"),
@@ -348,7 +348,7 @@
             0,
         );
 
-        let addr = vm.pop().raw() as u64;
+        let addr = vm.pop().bits();
         let gc = match vm.heap().find_object_by_addr(addr) {
             Some(Object::Enum(gc)) => gc,
             _ => panic!("MakeEnum did not allocate an enum"),
@@ -386,7 +386,7 @@
             Byte::new(Instruction::HALT),
         ]);
 
-        let addr = vm.pop().raw() as u64;
+        let addr = vm.pop().bits();
         let node = match vm.heap().find_object_by_addr(addr) {
             Some(Object::Enum(gc)) => gc,
             _ => panic!("the Node enum was swept by the post-alloc GC"),
@@ -432,7 +432,7 @@
                 .count(),
             1
         );
-        assert!(vm.heap().find_object_by_addr(value.raw() as u64).is_some());
+        assert!(vm.heap().find_object_by_addr(value.bits()).is_some());
     }
 
     #[test]
@@ -455,7 +455,7 @@
         let second = vm.pop();
         let first = vm.pop();
         assert_eq!(first.raw(), second.raw());
-        assert!(vm.heap().find_object_by_addr(first.raw() as u64).is_some());
+        assert!(vm.heap().find_object_by_addr(first.bits()).is_some());
         assert_eq!(
             vm.heap()
                 .into_iter()
@@ -490,7 +490,7 @@
         vm.run_with_pool(&bytecode, &[], &strings, 0);
         assert!(!vm.panicked(), "stale STRING cache must not UAF mid-sweep");
         let keep = vm.pop();
-        let text = match vm.heap().find_object_by_addr(keep.raw() as u64) {
+        let text = match vm.heap().find_object_by_addr(keep.bits()) {
             Some(Object::String(gc)) => gc.as_ref().data.to_string(),
             _ => panic!("STRING after incremental sweep must be a live string"),
         };
@@ -535,8 +535,8 @@
         vm.run_with_pool(&keep_code, &[], &strings, 0);
         assert_eq!(intern_str_count(), 2);
         let keep = vm.pop();
-        assert!(vm.heap().find_object_by_addr(keep.raw() as u64).is_some());
-        let text = match vm.heap().find_object_by_addr(keep.raw() as u64) {
+        assert!(vm.heap().find_object_by_addr(keep.bits()).is_some());
+        let text = match vm.heap().find_object_by_addr(keep.bits()) {
             Some(Object::String(gc)) => gc.as_ref().data.to_string(),
             _ => panic!("expected interned keep string on the stack after GC"),
         };
@@ -676,7 +676,7 @@
 
         let mut vm = Machine::<8>::default();
         vm.run_with_pool(&code, &[], &strings, 0);
-        let enum_addr = vm.pop().raw() as u64;
+        let enum_addr = vm.pop().bits();
         match vm.heap().find_object_by_addr(enum_addr) {
             Some(Object::Enum(gc)) => {
                 let e = gc.as_ref();
@@ -704,7 +704,7 @@
             Byte::new(Instruction::MakeTuple).with_operand_u32(2),
             Byte::new(Instruction::HALT),
         ]);
-        let addr = vm.pop().raw() as u64;
+        let addr = vm.pop().bits();
         match vm.heap().find_object_by_addr(addr) {
             Some(Object::Tuple(gc)) => {
                 let e = &gc.as_ref().elements();
@@ -1172,7 +1172,7 @@
         ]);
         assert!(vm.panicked(), "too-large tuple Index");
 
-        let neg1 = Value::from(-1_i64).raw() as u64;
+        let neg1 = Value::from(-1_i64).bits();
         let mut vm = Machine::<8>::default();
         vm.run_with_pool(
             &[
@@ -1264,7 +1264,7 @@
             "arity-2 MakeEnum should take the fixed-arity fast path"
         );
         assert!(alloc_count() >= 1, "Node must allocate one enum object");
-        let node = vm.pop().raw() as u64;
+        let node = vm.pop().bits();
         match vm.heap().find_object_by_addr(node) {
             Some(Object::Enum(gc)) => {
                 let e = gc.as_ref();
@@ -1285,7 +1285,7 @@
             Byte::new(Instruction::HALT),
             Byte::new(Instruction::MakeEnumReturn).with_operands_u16([0, 0]),
         ]);
-        let leaf = vm.pop().raw() as u64;
+        let leaf = vm.pop().bits();
         match vm.heap().find_object_by_addr(leaf) {
             Some(Object::Enum(gc)) => assert_eq!(gc.as_ref().tag, 0),
             _ => panic!("arity-0 MakeEnumReturn should return Leaf"),
@@ -1301,7 +1301,7 @@
             make_enum(0, 1),
             Byte::new(Instruction::MakeEnumReturn).with_operands_u16([1, 2]),
         ]);
-        let node = vm.pop().raw() as u64;
+        let node = vm.pop().bits();
         match vm.heap().find_object_by_addr(node) {
             Some(Object::Enum(gc)) => {
                 let e = gc.as_ref();
@@ -1327,8 +1327,8 @@
             Byte::new(Instruction::MakeTupleK).with_operand_u32((u32::from(kinds) << 8) | 2),
             Byte::new(Instruction::HALT),
         ]);
-        let tup = vm.pop().raw() as u64;
-        let en = vm.pop().raw() as u64;
+        let tup = vm.pop().bits();
+        let en = vm.pop().bits();
         match vm.heap().find_object_by_addr(en) {
             Some(Object::Enum(gc)) => {
                 assert_eq!(gc.as_ref().tag, 3);
@@ -1359,7 +1359,7 @@
             make_enum(4, 5),
             Byte::new(Instruction::HALT),
         ]);
-        let addr = vm.pop().raw() as u64;
+        let addr = vm.pop().bits();
         match vm.heap().find_object_by_addr(addr) {
             Some(Object::Enum(gc)) => {
                 let e = gc.as_ref();
@@ -1477,7 +1477,7 @@
         // contains a non-zero pointer (an allocated heap
         // object).
         assert!(
-            enum_value.raw() as u64 != 0,
+            enum_value.bits() != 0,
             "MAKE_ENUM did not push a heap pointer"
         );
     }
@@ -1492,9 +1492,9 @@
             make_enum(3, 0),
             Byte::new(Instruction::HALT),
         ]);
-        let a = vm.pop().raw() as u64;
-        let b = vm.pop().raw() as u64;
-        let c = vm.pop().raw() as u64;
+        let a = vm.pop().bits();
+        let b = vm.pop().bits();
+        let c = vm.pop().bits();
         assert_eq!(a, b);
         assert_eq!(b, c);
         // One immortal alloc only, heap bytes should not grow per construct.
@@ -1521,9 +1521,9 @@
             make_enum(1, 0),
             Byte::new(Instruction::HALT),
         ]);
-        let again_tag1 = vm.pop().raw() as u64;
-        let tag2 = vm.pop().raw() as u64;
-        let tag1 = vm.pop().raw() as u64;
+        let again_tag1 = vm.pop().bits();
+        let tag2 = vm.pop().bits();
+        let tag1 = vm.pop().bits();
         assert_eq!(tag1, again_tag1);
         assert_ne!(tag1, tag2, "different tags must not alias");
     }
@@ -1543,7 +1543,7 @@
         ]);
         let enum_value = vm.pop();
         assert!(
-            enum_value.raw() as u64 != 0,
+            enum_value.bits() != 0,
             "MAKE_ENUM with payload did not push a heap pointer"
         );
     }
@@ -2979,7 +2979,7 @@
         vm.finish_pending_io_wait(pending);
         let v = vm.pop();
         assert_eq!(
-            v.raw() as u64,
+            v.bits(),
             0,
             "OptionNiche Ok must be 0, not a boxed Result"
         );
@@ -3068,7 +3068,7 @@
                 match stream_read(vm.heap_mut(), stream, buf) {
                     Ok(Some(n)) if n > 0 => {
                         if let Some(Object::Array(arr)) =
-                            vm.heap().find_object_by_addr(buf.raw() as u64)
+                            vm.heap().find_object_by_addr(buf.bits())
                         {
                             for v in arr.as_ref().iter().take(n) {
                                 got.push(v.as_int() as u8);
@@ -3085,7 +3085,7 @@
                         vm.finish_pending_io_wait(pending);
                         let v = vm.pop();
                         assert_eq!(
-                            v.raw() as u64,
+                            v.bits(),
                             0,
                             "OptionNiche Ok must be 0 after park round {round}"
                         );
@@ -3327,7 +3327,7 @@
         let lib_val = vm
             .load_userland_library(lib_path.to_str().unwrap())
             .unwrap_or_else(|e| panic!("load {lib_name}: {e}"));
-        let lib_addr = lib_val.raw() as u64;
+        let lib_addr = lib_val.bits();
         let sig = FfiSignature::from_parts("sum", vec![FfiType::Int, FfiType::Int], FfiType::Int)
             .unwrap();
         let fn_id = vm
@@ -3369,7 +3369,7 @@
             vm.result_is_ok(out),
             "FfiInvoke after GC must not yield invalid library handle"
         );
-        let ok_int = match vm.heap().find_object_by_addr(out.raw() as u64) {
+        let ok_int = match vm.heap().find_object_by_addr(out.bits()) {
             Some(Object::Enum(gc)) => match gc.as_ref().payload.first() {
                 Some(v) => v.as_int(),
                 _ => panic!("expected Result::Ok int payload"),
@@ -3453,7 +3453,7 @@
         vm.gc_collect();
         let live = vm.heap().live_object_count();
         assert!(live <= 4, "dropped coroutines stayed live: {live}");
-        let kept = vm.pop().raw() as u64;
+        let kept = vm.pop().bits();
         assert!(
             matches!(vm.heap().find_object_by_addr(kept), Some(Object::Coroutine(_))),
             "the coroutine still on the stack must survive"
@@ -3896,7 +3896,7 @@
             &mut vm.heap,
             &[Value::from(object.addr())],
         );
-        assert!(vm.heap.find_object_by_addr(value.raw() as u64).is_some());
+        assert!(vm.heap.find_object_by_addr(value.bits()).is_some());
         assert_eq!(vm.heap.live_object_count(), before + 1);
     }
 
@@ -4103,7 +4103,7 @@
         ]);
         let addr = vm.pop();
         assert!(
-            addr.raw() as u64 != 0,
+            addr.bits() != 0,
             "MakePolyFn should push a non-null heap pointer"
         );
     }
@@ -4284,7 +4284,7 @@
         vm.run(&code);
         let dict = vm.pop();
         assert!(
-            dict.raw() as u64 != 0,
+            dict.bits() != 0,
             "captured dictionary must survive GC"
         );
     }
@@ -4527,7 +4527,7 @@
         ];
         let mut vm = Machine::<32>::default();
         vm.run_with_pool(&code, &constants, &[], 0);
-        let addr = vm.pop().raw() as u64;
+        let addr = vm.pop().bits();
         let fn_obj = vm
             .heap()
             .find_object_by_addr(addr)
@@ -4838,7 +4838,7 @@
     fn cast_int_to_byte_wraps_negatives() {
         let mut vm = Machine::<8>::default();
         // Negatives need the constant pool (inline CONST cannot encode them).
-        let neg1 = Value::from(-1_i64).raw() as u64;
+        let neg1 = Value::from(-1_i64).bits();
         vm.run_with_pool(
             &[
                 Byte::new(Instruction::CONST).with_operand_u32(Byte::POOL_FLAG),
@@ -5721,7 +5721,7 @@
             Byte::new(Instruction::InitTyped).with_operand_u32(pack_init_typed(4, 2)),
             Byte::new(Instruction::HALT),
         ]);
-        let addr = vm.pop().raw() as u64;
+        let addr = vm.pop().bits();
         match vm.heap().find_object_by_addr(addr) {
             Some(Object::Instance(gc)) => {
                 assert!(gc.as_ref().slots_are_inline());
@@ -5738,7 +5738,7 @@
             Byte::new(Instruction::InitTyped).with_operand_u32(pack_init_typed(9, 5)),
             Byte::new(Instruction::HALT),
         ]);
-        let addr = vm.pop().raw() as u64;
+        let addr = vm.pop().bits();
         match vm.heap().find_object_by_addr(addr) {
             Some(Object::Instance(gc)) => {
                 assert!(!gc.as_ref().slots_are_inline());

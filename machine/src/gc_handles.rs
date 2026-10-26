@@ -16,8 +16,8 @@ fn pack_gc_option(heap: &mut Heap, value: Option<Value>) -> Value {
 }
 
 fn member_from_value(heap: &Heap, value: Value) -> Member {
-    if !value.raw().is_null()
-        && let Some(obj) = heap.find_object_by_addr(value.raw() as u64)
+    if !value.is_zero()
+        && let Some(obj) = heap.find_object_by_addr(value.bits())
     {
         Member::Object(obj)
     } else {
@@ -47,7 +47,7 @@ pub fn host_gc_root(heap: &mut Heap, args: &[Value]) -> Value {
 /// `gc::get(root) -> Option<T>` — read the pinned value without releasing the pin.
 pub fn host_gc_get(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
-    match heap.find_object_by_addr(handle.raw() as u64) {
+    match heap.find_object_by_addr(handle.bits()) {
         Some(Object::Root(gc)) => match &gc.as_ref().payload {
             Some(m) => pack_gc_option(heap, Some(member_to_value(m))),
             None => pack_gc_option(heap, None),
@@ -59,7 +59,7 @@ pub fn host_gc_get(heap: &mut Heap, args: &[Value]) -> Value {
 /// `gc::unroot(root) -> Option<T>` — take the payload and clear the pin.
 pub fn host_gc_unroot(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
-    match heap.find_object_by_addr(handle.raw() as u64) {
+    match heap.find_object_by_addr(handle.bits()) {
         Some(Object::Root(gc)) => match gc.payload_mut().payload.take() {
             Some(m) => pack_gc_option(heap, Some(member_to_value(&m))),
             None => pack_gc_option(heap, None),
@@ -84,7 +84,7 @@ pub fn host_gc_weak(heap: &mut Heap, args: &[Value]) -> Value {
 /// `gc::upgrade(weak) -> Option<T>` — `Some` while the referent is live.
 pub fn host_gc_upgrade(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
-    let target = match heap.find_object_by_addr(handle.raw() as u64) {
+    let target = match heap.find_object_by_addr(handle.bits()) {
         Some(Object::Weak(gc)) => {
             let weak = gc.as_ref();
             if weak.cleared.get() {
@@ -142,14 +142,14 @@ mod tests {
     fn force_collect(heap: &mut Heap, keep: &[Value]) {
         let roots: Vec<u64> = keep
             .iter()
-            .map(|v| v.raw() as u64)
+            .map(|v| v.bits())
             .filter(|&a| a != 0 && heap.find_object_by_addr(a).is_some())
             .collect();
         heap.collect(&roots);
     }
 
     fn option_payload(heap: &Heap, opt: Value) -> Option<Value> {
-        match heap.find_object_by_addr(opt.raw() as u64) {
+        match heap.find_object_by_addr(opt.bits()) {
             Some(Object::Enum(gc)) if gc.as_ref().tag == 1 => {
                 Some(gc.as_ref().payload[0])
             }
@@ -171,14 +171,14 @@ mod tests {
             ObjInstance::with_slots(1, vec![Value::from(0i64)]),
             Object::Instance,
         );
-        let roots = [holder.addr(), w.raw() as u64];
+        let roots = [holder.addr(), w.bits()];
         heap.begin_mark(&roots);
         while !heap.mark_quantum(usize::MAX) {}
         assert_eq!(heap.gc_phase(), GcPhase::Marking);
 
         let opt = host_gc_upgrade(&mut heap, &[w]);
         let got = option_payload(&heap, opt).expect("weak not cleared yet");
-        assert_eq!(got.raw() as u64, leaf.addr());
+        assert_eq!(got.bits(), leaf.addr());
         holder_gc.as_mut().set_slot(0, Value::from(leaf.addr()));
 
         heap.remark_roots(&roots);
@@ -201,7 +201,7 @@ mod tests {
         force_collect(&mut heap, &[root]);
         let got_opt = host_gc_get(&mut heap, &[root]);
         let got = option_payload(&heap, got_opt).expect("rooted string");
-        match heap.find_object_by_addr(got.raw() as u64) {
+        match heap.find_object_by_addr(got.bits()) {
             Some(Object::String(gc)) => assert_eq!(gc.as_ref().data, "pinned"),
             _ => panic!("expected rooted string to survive"),
         }
@@ -215,14 +215,14 @@ mod tests {
         let taken_opt = host_gc_unroot(&mut heap, &[root]);
         let taken = option_payload(&heap, taken_opt).expect("unroot payload");
         assert_eq!(
-            heap.find_object_by_addr(taken.raw() as u64)
+            heap.find_object_by_addr(taken.bits())
                 .map(|o| matches!(o, Object::String(_))),
             Some(true)
         );
         // Neither root shell nor string kept — both should die.
         force_collect(&mut heap, &[]);
-        assert!(heap.find_object_by_addr(taken.raw() as u64).is_none());
-        assert!(heap.find_object_by_addr(root.raw() as u64).is_none());
+        assert!(heap.find_object_by_addr(taken.bits()).is_none());
+        assert!(heap.find_object_by_addr(root.bits()).is_none());
     }
 
     #[test]
@@ -232,13 +232,13 @@ mod tests {
         let w = host_gc_weak(&mut heap, &[s]);
         let some = host_gc_upgrade(&mut heap, &[w]);
         // Option::Some
-        match heap.find_object_by_addr(some.raw() as u64) {
+        match heap.find_object_by_addr(some.bits()) {
             Some(Object::Enum(gc)) => assert_eq!(gc.as_ref().tag, 1),
             _ => panic!("expected Option"),
         }
         force_collect(&mut heap, &[w]);
         let up = host_gc_upgrade(&mut heap, &[w]);
-        match heap.find_object_by_addr(up.raw() as u64) {
+        match heap.find_object_by_addr(up.bits()) {
             Some(Object::Enum(gc)) => assert_eq!(gc.as_ref().tag, 0, "expected None after collect"),
             _ => panic!("expected Option::None"),
         }
@@ -252,7 +252,7 @@ mod tests {
         let w = host_gc_weak(&mut heap, &[s]);
         force_collect(&mut heap, &[root, w]);
         let up = host_gc_upgrade(&mut heap, &[w]);
-        match heap.find_object_by_addr(up.raw() as u64) {
+        match heap.find_object_by_addr(up.bits()) {
             Some(Object::Enum(gc)) => assert_eq!(gc.as_ref().tag, 1),
             _ => panic!("expected Some while Root lives"),
         }
@@ -264,7 +264,7 @@ mod tests {
         let w = host_gc_weak(&mut heap, &[Value::from(42i64)]);
         force_collect(&mut heap, &[w]);
         let up = host_gc_upgrade(&mut heap, &[w]);
-        match heap.find_object_by_addr(up.raw() as u64) {
+        match heap.find_object_by_addr(up.bits()) {
             Some(Object::Enum(gc)) => {
                 assert_eq!(gc.as_ref().tag, 1);
                 assert_eq!(gc.as_ref().payload[0].as_int(), 42);
@@ -301,12 +301,12 @@ mod tests {
         let mut heap = Heap::default();
         let root = host_gc_root(&mut heap, &[Value::from(1i64)]);
         let up = host_gc_upgrade(&mut heap, &[root]);
-        match heap.find_object_by_addr(up.raw() as u64) {
+        match heap.find_object_by_addr(up.bits()) {
             Some(Object::Enum(gc)) => assert_eq!(gc.as_ref().tag, 0, "expected Option::None"),
             _ => panic!("expected Option"),
         }
         let empty = host_gc_upgrade(&mut heap, &[]);
-        match heap.find_object_by_addr(empty.raw() as u64) {
+        match heap.find_object_by_addr(empty.bits()) {
             Some(Object::Enum(gc)) => assert_eq!(gc.as_ref().tag, 0),
             _ => panic!("expected Option::None for missing arg"),
         }
@@ -343,9 +343,9 @@ mod tests {
         let s = intern(&mut heap, "aba");
         let w = host_gc_weak(&mut heap, &[s]);
         // Mark only the Weak shell — Weak does not keep the string alive.
-        heap.trace(&[w.raw() as u64]);
+        heap.trace(&[w.bits()]);
         heap.clear_dead_weaks();
-        match heap.find_object_by_addr(w.raw() as u64) {
+        match heap.find_object_by_addr(w.bits()) {
             Some(Object::Weak(gc)) => {
                 assert!(gc.as_ref().cleared.get());
                 assert_eq!(gc.as_ref().target.get().as_int(), 0);
@@ -353,7 +353,7 @@ mod tests {
             _ => panic!("expected Weak handle"),
         }
         // Referent still allocated until sweep; clear already closed the ABA window.
-        assert!(heap.find_object_by_addr(s.raw() as u64).is_some());
+        assert!(heap.find_object_by_addr(s.bits()).is_some());
     }
 
     #[test]
@@ -387,7 +387,7 @@ mod tests {
             "array root must live"
         );
         assert!(
-            heap.find_object_by_addr(s.raw() as u64).is_some(),
+            heap.find_object_by_addr(s.bits()).is_some(),
             "array child must live without Machine tracing"
         );
     }

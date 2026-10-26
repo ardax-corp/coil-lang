@@ -1575,7 +1575,7 @@ impl ArchivedByte {
     }
 
     pub fn with_value(mut self, value: Value) -> Self {
-        let raw = value.raw() as u64;
+        let raw = value.bits();
         let v = raw as i64;
         if v >= i32::MIN as i64 && v <= i32::MAX as i64 {
             self.operands = (v as i32 as u32).into();

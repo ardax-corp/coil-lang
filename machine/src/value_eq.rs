@@ -35,11 +35,11 @@ pub fn values_eq(heap: &Heap, a: Value, b: Value) -> bool {
 /// most one word that is itself flat (`Some(x)`, `Ok("s")`, `Err(e)`).
 /// `None` means the value needs the full walk.
 fn flat_eq(heap: &Heap, a: Value, b: Value) -> Option<bool> {
-    if a.raw() == b.raw() {
+    if a.bits() == b.bits() {
         return Some(true);
     }
-    let aa = a.raw() as u64;
-    let bb = b.raw() as u64;
+    let aa = a.bits();
+    let bb = b.bits();
     if aa == 0 || bb == 0 || (aa & 1) != (bb & 1) {
         return Some(false);
     }
@@ -77,11 +77,11 @@ fn values_eq_rec(
     fwd: &mut HashMap<u64, u64>,
     rev: &mut HashMap<u64, u64>,
 ) -> bool {
-    if a.raw() == b.raw() {
+    if a.bits() == b.bits() {
         return true;
     }
-    let aa = a.raw() as u64;
-    let bb = b.raw() as u64;
+    let aa = a.bits();
+    let bb = b.bits();
     if aa == 0 || bb == 0 {
         return false;
     }
@@ -214,16 +214,16 @@ pub fn values_eq_shaped(heap: &Heap, a: Value, b: Value, shape: &[u8]) -> bool {
 
 fn shaped_eq(heap: &Heap, a: Value, b: Value, shape: &Shape) -> bool {
     match shape {
-        Shape::Float => f64::from_bits(a.raw() as u64) == f64::from_bits(b.raw() as u64),
+        Shape::Float => f64::from_bits(a.bits()) == f64::from_bits(b.bits()),
         Shape::Word => values_eq(heap, a, b),
-        Shape::Array(elem) => match (heap.find_object_by_addr(a.raw() as u64), heap.find_object_by_addr(b.raw() as u64)) {
+        Shape::Array(elem) => match (heap.find_object_by_addr(a.bits()), heap.find_object_by_addr(b.bits())) {
             (Some(Object::Array(ga)), Some(Object::Array(gb))) => {
                 let (ea, eb) = (ga.as_ref(), gb.as_ref());
                 ea.len() == eb.len() && ea.iter().zip(eb.iter()).all(|(x, y)| shaped_eq(heap, x, y, elem))
             }
             _ => values_eq(heap, a, b),
         },
-        Shape::Tuple(items) => match (heap.find_object_by_addr(a.raw() as u64), heap.find_object_by_addr(b.raw() as u64)) {
+        Shape::Tuple(items) => match (heap.find_object_by_addr(a.bits()), heap.find_object_by_addr(b.bits())) {
             (Some(Object::Tuple(ga)), Some(Object::Tuple(gb))) => {
                 let (ea, eb) = (ga.as_ref().elements(), gb.as_ref().elements());
                 ea.len() == items.len()
@@ -232,7 +232,7 @@ fn shaped_eq(heap: &Heap, a: Value, b: Value, shape: &Shape) -> bool {
             }
             _ => values_eq(heap, a, b),
         },
-        Shape::Record(slots) => match (heap.find_object_by_addr(a.raw() as u64), heap.find_object_by_addr(b.raw() as u64)) {
+        Shape::Record(slots) => match (heap.find_object_by_addr(a.bits()), heap.find_object_by_addr(b.bits())) {
             (Some(Object::Instance(ga)), Some(Object::Instance(gb))) => match record_slots(ga.as_ref(), gb.as_ref()) {
                 Some((sa, sb)) => {
                     sa.len() == slots.len() && sa.iter().zip(sb).zip(slots).all(|((x, y), s)| shaped_eq(heap, *x, *y, s))

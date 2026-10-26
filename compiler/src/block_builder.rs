@@ -42,7 +42,7 @@ mod tests {
     use common::{Byte, Instruction, Value};
 
     fn const_int(value: i64) -> Byte {
-        Byte::new_with_value(Instruction::CONST, Value::from(value).raw() as _)
+        Byte::new_with_value(Instruction::CONST, Value::from(value).bits())
     }
 
     #[test]

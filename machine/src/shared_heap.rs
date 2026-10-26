@@ -30,7 +30,7 @@ pub fn is_c1_shareable(heap: &Heap, v: Value) -> bool {
     if is_immediate_value(heap, v) {
         return true;
     }
-    let Some(obj) = heap.find_object_by_addr(v.raw() as u64) else {
+    let Some(obj) = heap.find_object_by_addr(v.bits()) else {
         return true;
     };
     match obj {

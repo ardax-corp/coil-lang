@@ -48,8 +48,16 @@ pub const UNBOX_ANY_TAG: u32 = 0xFFFF;
 
 type Storage = u64;
 
+/// The word a [`Value`] lives in. 64-bit targets keep a pointer so heap
+/// references keep their provenance; 32-bit targets (wasm32) need a full
+/// `u64` so ints and floats are not cut to the pointer width.
+#[cfg(target_pointer_width = "64")]
+type Word = *mut u8;
+#[cfg(not(target_pointer_width = "64"))]
+type Word = u64;
+
 #[derive(Default, Copy, Clone, Eq)]
-pub struct Value(*mut u8);
+pub struct Value(Word);
 
 impl From<i64> for Value {
     fn from(value: i64) -> Self {
@@ -145,8 +153,25 @@ impl Value {
     /// ```
     #[inline]
     pub fn raw(&self) -> *mut u8 {
-        self.0
+        self.0 as _
         // (self.0 as usize >> 3) as _
+    }
+
+    /// All 64 bits of the word, whatever the pointer width.
+    ///
+    /// ```
+    /// use common::Value;
+    /// assert_eq!(Value::from(5_000_000_000_i64).bits(), 5_000_000_000);
+    /// ```
+    #[inline]
+    pub fn bits(&self) -> u64 {
+        self.0 as u64
+    }
+
+    /// The all-zero word: `None`, `false`, `0`, a null pointer.
+    #[inline]
+    pub fn is_zero(&self) -> bool {
+        self.bits() == 0
     }
 
     /// Heap address with the Result `Err` low bit cleared (`pointer | 1`).

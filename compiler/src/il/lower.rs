@@ -1084,7 +1084,7 @@ fn try_fold_const_bin_local(window: &[Byte; 3], pool: &mut Vec<u64>) -> Option<B
     if (0..=i32::MAX as i64).contains(&result) {
         return Some(Byte::new(Instruction::CONST).with_operand_u32(result as u32));
     }
-    let bits = common::Value::from(result).raw() as u64;
+    let bits = common::Value::from(result).bits();
     let idx = pool.len();
     pool.push(bits);
     Some(Byte::new(Instruction::CONST).with_const_pool(idx as u32))
@@ -1677,7 +1677,7 @@ mod tests {
     #[test]
     fn lower_fuses_three_stage_const_under_float_chain_store() {
         // CONST 2.0; BinSlotSlot MULF zr,zi; MULF; LOAD ci; ADDF; STORE zi
-        let mut pool = vec![Value::from(2.0_f64).raw() as u64];
+        let mut pool = vec![Value::from(2.0_f64).bits()];
         let mut il = IlBuilder::new();
         il.push_byte(Byte::new(Instruction::CONST).with_const_pool(0));
         il.push_byte(Byte::new(Instruction::BinSlotSlot).with_bin_slot_slot(
@@ -1727,8 +1727,8 @@ mod tests {
     #[test]
     fn lower_fuses_load_const_stage0_float_chain_store() {
         let mut pool = vec![
-            Value::from(2.0_f64).raw() as u64,
-            Value::from(1.5_f64).raw() as u64,
+            Value::from(2.0_f64).bits(),
+            Value::from(1.5_f64).bits(),
         ];
         let mut il = IlBuilder::new();
         il.push_byte(Byte::new(Instruction::LOAD).with_operand_u32(10));
@@ -1755,8 +1755,8 @@ mod tests {
     fn cast_float_chain_is_not_fused() {
         let loc = DebugLoc::unknown();
         let mut pool = vec![
-            Value::from(2.0_f64).raw() as u64,
-            Value::from(1.5_f64).raw() as u64,
+            Value::from(2.0_f64).bits(),
+            Value::from(1.5_f64).bits(),
         ];
         // CONST 2; LOAD x; Cast; LOAD size_f; DIVF; MULF; CONST 1.5; SUBF; STORE
         let ops = vec![
