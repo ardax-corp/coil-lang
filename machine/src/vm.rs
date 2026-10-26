@@ -1878,7 +1878,7 @@ impl<const S: usize> Machine<S> {
         self.libraries
             .entry(path.to_string())
             .or_insert_with(|| lib_arc.clone());
-        Ok(Value::from(addr as *mut u8))
+        Ok(Value::from(addr))
     }
 
     /// Complete a GC cycle (explicit `gc::collect` / tests). Finishes any
@@ -2977,7 +2977,7 @@ impl<const S: usize> Machine<S> {
     /// A shared-heap job's statics: the spawning VM's words, which name
     /// objects of the heap this VM is bound to (#1561).
     pub(crate) fn load_shared_statics(&mut self, words: &[u64]) {
-        self.statics = words.iter().map(|&w| Value::from(w as *mut u8)).collect();
+        self.statics = words.iter().map(|&w| Value::from(w)).collect();
     }
 
     /// An isolate job's statics: the spawner's, copied into this VM's heap

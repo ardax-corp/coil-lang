@@ -1033,7 +1033,7 @@ pub fn portable_to_value(heap: &mut Heap, p: PortableValue) -> Result<Value, Thr
 
 fn decode_portable(heap: &mut Heap, p: PortableValue) -> Result<Value, ThreadErrorTag> {
     match p {
-        PortableValue::Immediate(raw) => Ok(Value::from(raw as *mut u8)),
+        PortableValue::Immediate(raw) => Ok(Value::from(raw)),
         PortableValue::String(s) => {
             let gc = heap.alloc_string(s);
             Ok(Value::from(gc.as_ptr() as *mut u8 as u64))
@@ -1202,7 +1202,7 @@ fn spawn_arg_from(heap: &Heap, v: Value, statics: bool) -> Result<SpawnArg, Thre
 pub(crate) fn spawn_arg_to_value(heap: &mut Heap, arg: SpawnArg) -> Result<Value, ThreadErrorTag> {
     match arg {
         SpawnArg::Value(pv) => portable_to_value(heap, pv),
-        SpawnArg::Shared(raw) => Ok(Value::from(raw as *mut u8)),
+        SpawnArg::Shared(raw) => Ok(Value::from(raw)),
         SpawnArg::Sender(inner) => {
             let (obj, _) = heap.alloc(ObjSender { inner }, Object::Sender);
             Ok(Value::from(obj.addr()))
@@ -1343,7 +1343,7 @@ fn copy_statics_out(heap: &Heap, words: &[u64], kinds: &[u8]) -> Vec<Option<Spaw
             if w == 0 {
                 return None;
             }
-            let v = Value::from(w as *mut u8);
+            let v = Value::from(w);
             if kinds.get(i) == Some(&common::WORD_SCALAR) || is_immediate_value(heap, v) {
                 return Some(SpawnArg::Value(PortableValue::Immediate(w)));
             }
@@ -1470,7 +1470,7 @@ fn try_host_join(heap: &mut Heap, handle: Value) -> Result<Value, ThreadErrorTag
     if shared {
         match joined {
             Ok(PortableValue::Immediate(raw)) => {
-                let published = Value::from(raw as *mut u8);
+                let published = Value::from(raw);
                 host_end_shared_steal(published);
                 Ok(published)
             }

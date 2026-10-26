@@ -386,7 +386,7 @@ impl<const S: usize> Machine<S> {
                             let (object, _gc) = self.heap.alloc_library(lib_arc);
                             let addr = object.addr();
                             self.userland_libraries.insert(addr, object);
-                            self.push_result_ok(Value::from(addr as *mut u8));
+                            self.push_result_ok(Value::from(addr));
                         }
                         Err(e) => {
                             self.push_ffi_error(e);
