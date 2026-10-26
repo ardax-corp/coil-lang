@@ -108,8 +108,9 @@ def main():
     parallel = max(1, min(args.parallel, len(names)))
     # Every corpus may use every core: a slow corpus (the GC-stress `memory`
     # run) often finishes last, and with CPUs / --parallel jobs it ran on
-    # one thread while the other cores sat idle.
-    jobs = args.jobs or (os.cpu_count() or 2)
+    # one thread while the other cores sat idle. coil.wasm cannot spawn
+    # threads, so --wasm stays at one job per corpus.
+    jobs = args.jobs or (1 if args.wasm else (os.cpu_count() or 2))
     if args.logs.exists():
         shutil.rmtree(args.logs)
     args.logs.mkdir(parents=True)
