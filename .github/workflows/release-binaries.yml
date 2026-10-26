@@ -139,8 +139,11 @@ jobs:
       - name: Build release binaries (musl / Alpine)
         if: matrix.libc == 'musl'
         run: |
+          # -crt-static: the musl target links static-pie by default, and a
+          # static musl binary cannot dlopen, so no FFI library would load.
           docker run --rm \
             -e CARGO_HOME=/src/.cargo-musl \
+            -e RUSTFLAGS="-C target-feature=-crt-static" \
             -e CARGO_TARGET_DIR=/src/target-musl \
             -v "$PWD":/src \
             -w /src \
@@ -165,6 +168,10 @@ jobs:
             cp "target-musl/release/$b" "target/release/$b"
           done
           file "target/release/coil" || true
+          if file "target/release/coil-embed" | grep -q 'static'; then
+            echo "::error::musl coil-embed is statically linked and cannot dlopen FFI libraries"
+            exit 1
+          fi
           if command -v ldd >/dev/null && ldd "target/release/coil" 2>&1 | grep -qi 'libc\.so\.6\|ld-linux'; then
             echo "::warning::musl artifact unexpectedly references glibc dynamic linker"
             ldd "target/release/coil" || true

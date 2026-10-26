@@ -15,10 +15,8 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# `actions: write` lets a failed job cancel the rest of its run.
 permissions:
   contents: read
-  actions: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -57,15 +55,6 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --lib --tests --bins -- -D warnings
 
-      # Fail fast on pull requests: a failed job cancels the rest of the run,
-      # so a quick fix doesn't wait behind jobs that are already moot.
-      - name: Cancel the rest of the run
-        if: failure() && github.event_name == 'pull_request'
-        continue-on-error: true
-        shell: bash
-        run: gh run cancel ${{ github.run_id }} --repo ${{ github.repository }}
-        env:
-          GH_TOKEN: ${{ github.token }}
 
   # `cfg(windows)` host code (machine io / fs / reactor / threads) is only
   # linted here.
@@ -113,15 +102,6 @@ jobs:
           export PATH="$MINGW_PREFIX/bin:$cargo_bin:/usr/bin:$PATH"
           cargo clippy --workspace --lib --tests --bins -- -D warnings
 
-      # Fail fast on pull requests: a failed job cancels the rest of the run,
-      # so a quick fix doesn't wait behind jobs that are already moot.
-      - name: Cancel the rest of the run
-        if: failure() && github.event_name == 'pull_request'
-        continue-on-error: true
-        shell: bash
-        run: gh run cancel ${{ github.run_id }} --repo ${{ github.repository }}
-        env:
-          GH_TOKEN: ${{ github.token }}
 
   # `.hy` sources must be `coil fmt`-clean. `compile_fail/` directories hold
   # deliberately broken programs; `coil fmt` skips them when walking. The embedded prelude
@@ -165,15 +145,6 @@ jobs:
       - name: Representation matrix up to date
         run: python3 scripts/gen_rep_matrix.py --check
 
-      # Fail fast on pull requests: a failed job cancels the rest of the run,
-      # so a quick fix doesn't wait behind jobs that are already moot.
-      - name: Cancel the rest of the run
-        if: failure() && github.event_name == 'pull_request'
-        continue-on-error: true
-        shell: bash
-        run: gh run cancel ${{ github.run_id }} --repo ${{ github.repository }}
-        env:
-          GH_TOKEN: ${{ github.token }}
 
   test:
     name: test (${{ matrix.os }})
@@ -247,8 +218,54 @@ jobs:
           fi
           exit "$code"
 
+      - name: Showcase project tests
+        run: |
+          BIN=./target/debug/coil ./examples/projects/run-tests.sh
+
+
+  # Release-profile and VM-wire checks: Linux only, beside `test` instead of
+  # after its workspace suite.
+  test-release:
+    name: test (release checks, vm-wire)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # A PR pairs with the coil-stdlib branch of the same name when one
+      # exists (a feature branch that changes both); otherwise the default.
+      - name: Pick the coil-stdlib branch
+        id: stdlib
+        shell: bash
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          ref=""
+          if [ -n "$HEAD_REF" ] && git ls-remote --exit-code --heads \
+              https://github.com/ardax-corp/coil-stdlib "$HEAD_REF" >/dev/null; then
+            ref="$HEAD_REF"
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ardax-corp/coil-stdlib
+          path: .deps/coil-stdlib
+          ref: ${{ steps.stdlib.outputs.ref }}
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libffi-dev build-essential
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: test-release
+
       - name: Release label lower (COI-407)
-        if: runner.os == 'Linux'
         run: |
           # Opt-level 3 / no debug_assertions (the release-compiler panic).
           # Skip fat LTO so this stays a focused label-lower check.
@@ -257,7 +274,6 @@ jobs:
             cargo test --release -p compiler --test coi407_trailing_label -- --exact
 
       - name: Release compiler lib tests build (#1455)
-        if: runner.os == 'Linux'
         run: |
           # Lib tests must compile without debug_assertions (cfg-gated Debug
           # impls in `common`); build only, same profile as the step above.
@@ -266,7 +282,6 @@ jobs:
             cargo test --release -p compiler --lib --no-run
 
       - name: Release machine lib tests (#1686)
-        if: runner.os == 'Linux'
         run: |
           # Same profile as the step above, without debug_assertions; the
           # dev-dependency on `common/debug-fmt` supplies the Debug impls.
@@ -275,7 +290,6 @@ jobs:
             cargo test --release -p machine --lib
 
       - name: Release VM no_pool park/close (COI-410)
-        if: runner.os == 'Linux'
         run: |
           # Opt-level 3 like the release VM, with debug_assertions on and
           # unwind so the harness can compile.
@@ -295,26 +309,11 @@ jobs:
             -- --exact
 
       - name: VM-wire suites (pipeline / perf_metrics / namespace)
-        if: runner.os == 'Linux'
         run: |
           # `required-features = ["vm-wire"]` keeps these out of the workspace
           # suite. Name them: `--tests` would rerun every compiler test.
           cargo test -p compiler --features vm-wire \
             --test pipeline --test perf_metrics --test namespace
-
-      - name: Showcase project tests
-        run: |
-          BIN=./target/debug/coil ./examples/projects/run-tests.sh
-
-      # Fail fast on pull requests: a failed job cancels the rest of the run,
-      # so a quick fix doesn't wait behind jobs that are already moot.
-      - name: Cancel the rest of the run
-        if: failure() && github.event_name == 'pull_request'
-        continue-on-error: true
-        shell: bash
-        run: gh run cancel ${{ github.run_id }} --repo ${{ github.repository }}
-        env:
-          GH_TOKEN: ${{ github.token }}
 
   # The `.hy` harness binaries, built once per OS and build mode (debug and
   # release: the same corpus must pass in both, so a build-mode difference
@@ -376,15 +375,6 @@ jobs:
           path: harness-bin
           retention-days: 1
 
-      # Fail fast on pull requests: a failed job cancels the rest of the run,
-      # so a quick fix doesn't wait behind jobs that are already moot.
-      - name: Cancel the rest of the run
-        if: failure() && github.event_name == 'pull_request'
-        continue-on-error: true
-        shell: bash
-        run: gh run cancel ${{ github.run_id }} --repo ${{ github.repository }}
-        env:
-          GH_TOKEN: ${{ github.token }}
 
   # The `.hy` corpora under each compiler / VM setting and build mode, one
   # cell each so debug and release run side by side.
@@ -401,7 +391,15 @@ jobs:
       matrix:
         os: [ubuntu-latest]
         mode: [debug, release]
-        variant: [default, O0, no-inline, leak-smoke, gc-stress]
+        variant: [default, O0, no-inline, leak-smoke, gc-stress, gc-stress-1, gc-stress-2, gc-stress-O0]
+        # A debug GC-stress run takes over 30 minutes in one cell; on Linux it
+        # is split in three (two halves of the corpora, then the -O0 pass).
+        # Release, and macOS below, run it whole as `gc-stress`.
+        exclude:
+          - { mode: debug, variant: gc-stress }
+          - { mode: release, variant: gc-stress-1 }
+          - { mode: release, variant: gc-stress-2 }
+          - { mode: release, variant: gc-stress-O0 }
     env: &harness-env
       # A worker abort (coil-lang#804) prints where it happened.
       RUST_BACKTRACE: "1"
@@ -474,6 +472,10 @@ jobs:
             gc-stress)
               $run --harness harness-bin/gc-stress/coil-test -- $FLAGS
               $run --harness harness-bin/gc-stress/coil-test memory generics -- -O 0 $FLAGS ;;
+            gc-stress-1|gc-stress-2)
+              $run --harness harness-bin/gc-stress/coil-test --shard "${{ matrix.variant == 'gc-stress-1' && '1' || '2' }}/2" -- $FLAGS ;;
+            gc-stress-O0)
+              $run --harness harness-bin/gc-stress/coil-test memory generics -- -O 0 $FLAGS ;;
           esac
 
       # The examples in the builtin doc stubs (compiler/src/builtin_docs/),
@@ -491,15 +493,6 @@ jobs:
           path: target/corpora
           retention-days: 7
 
-      # Fail fast on pull requests: a failed job cancels the rest of the run,
-      # so a quick fix doesn't wait behind jobs that are already moot.
-      - name: Cancel the rest of the run
-        if: failure() && github.event_name == 'pull_request'
-        continue-on-error: true
-        shell: bash
-        run: gh run cancel ${{ github.run_id }} --repo ${{ github.repository }}
-        env:
-          GH_TOKEN: ${{ github.token }}
 
   # coil for wasm32-wasip1, the build the website playground runs in the
   # browser: clippy for that target, then every corpus under Node's WASI.
@@ -563,13 +556,6 @@ jobs:
           path: target/corpora
           retention-days: 7
 
-      - name: Cancel the rest of the run
-        if: failure() && github.event_name == 'pull_request'
-        continue-on-error: true
-        shell: bash
-        run: gh run cancel ${{ github.run_id }} --repo ${{ github.repository }}
-        env:
-          GH_TOKEN: ${{ github.token }}
 
   harness-build-macos:
     name: harness build (${{ matrix.mode }}, ${{ matrix.os }})
@@ -682,7 +668,7 @@ jobs:
         run: |
           cargo_bin="$(cygpath -u "${CARGO_HOME:-$USERPROFILE/.cargo}")/bin"
           export PATH="$MINGW_PREFIX/bin:$cargo_bin:/usr/bin:$PATH"
-          cargo test --workspace --lib --tests --bins --jobs 1
+          cargo test --workspace --lib --tests --bins
 
       - name: Language harness (`coil test`)
         shell: msys2 {0}
@@ -698,12 +684,3 @@ jobs:
           export PATH="$MINGW_PREFIX/bin:$cargo_bin:/usr/bin:$PATH"
           BIN=./target/debug/coil.exe bash ./examples/projects/run-tests.sh
 
-      # Fail fast on pull requests: a failed job cancels the rest of the run,
-      # so a quick fix doesn't wait behind jobs that are already moot.
-      - name: Cancel the rest of the run
-        if: failure() && github.event_name == 'pull_request'
-        continue-on-error: true
-        shell: bash
-        run: gh run cancel ${{ github.run_id }} --repo ${{ github.repository }}
-        env:
-          GH_TOKEN: ${{ github.token }}
