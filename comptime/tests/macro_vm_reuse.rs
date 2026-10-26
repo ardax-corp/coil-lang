@@ -34,6 +34,15 @@ fn compile(dir: &Path, file: &str, body: &str) -> Result<(), String> {
     let path = dir.join("src").join(file);
     std::fs::write(&path, format!("use gen::{{bump}};\n\nfn main() {{\n{body}}}\n")).unwrap();
     let mut pipeline = Pipeline::new();
+    // The runaway call only has to run out of steps; at the default budget
+    // (1e9) it spins for minutes in a debug build.
+    pipeline.set_host_grants(compiler::HostGrants {
+        comptime: compiler::ComptimeLimits {
+            steps: 1_000_000,
+            ..Default::default()
+        },
+        ..Default::default()
+    });
     pipeline.bind_project_root(dir.to_path_buf(), vec!["src".into()]);
     pipeline
         .compile_src_from_file(path.to_str().unwrap())
