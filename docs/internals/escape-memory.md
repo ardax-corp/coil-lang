@@ -58,7 +58,7 @@ Heap objects per run and GC safepoint time (instrumented build, best of 3):
 | 0 | This plan | done |
 | 1 | Escape summaries: per function, which parameters may escape and whether the result is fresh; whole-program fixed point next to `ProgramEffects`; shown by `coil dissect --effects` | done |
 | 1b | Optional stated facts (`#[noescape(x)]`, `#[fresh]`), checked against the inferred summary (E0139) | done |
-| 2 | Free at scope end and per-statement regions for non-escaping fresh objects; poison-on-free debug mode, gc-stress | |
+| 2 | Free at scope end and after the call for non-escaping fresh objects; check mode, gc-stress | done |
 | 3 | Static uniqueness: append in place, zero-copy `to_bytes`/`from_bytes`, enum SROA for a `match` on an inlined call result | |
 | 4 | Nursery for young objects | |
 | 5 | Opt-in checked `region` block | |
@@ -90,8 +90,8 @@ returns it keeps nothing. Values of scalar types reach nothing.
 Callees the analysis cannot see (function values, unresolved methods,
 trait declarations, natives) keep everything and return nothing fresh.
 Pure natives and the IO writers keep nothing; `to_bytes`, `from_bytes`,
-`format`, the byte and string slices and `Vec::with_capacity` return a
-fresh object (to be confirmed against the VM before step 2 frees them).
+`format`, the string slices and `Vec::with_capacity` return a fresh
+object (checked against the VM for step 2).
 
 `coil dissect --effects` prints one `;; escape NAME: …` line per function:
 `keeps nothing`, `keeps `t``, `returns `self``, `result fresh`. In
@@ -111,3 +111,60 @@ compile time is unchanged (b_json 0.30 s, b_csv 0.10 s).
 
 `fn drop()` may run at the point an object is freed early instead of at a
 collection (decided 2026-10-26).
+
+## Early freeing (step 2)
+
+`hir/early_free.rs` rewrites a body after the HIR optimizer (inlining,
+scalar replacement, unrolling, folding) has run, so it frees only objects
+that still exist as objects. The escape walk of step 1 runs again on the
+optimized body, with callee summaries from `ProgramEffects`
+(`ProgramEffects::early_frees`); a callee it cannot resolve there keeps
+everything. Two shapes are freed:
+
+- **Call temporaries.** In `f(…, g(x), …)`, when `g`'s result is fresh and
+  `f` neither keeps nor returns that argument, the argument is bound to a
+  temporary and freed after the call. When `f` does not change what the
+  argument reaches either, the free is deep: the VM frees every object it
+  reaches through precise pointer words. `item_check(bottom_up(d))` frees
+  each tree after its check.
+- **Block-end locals.** A `let` local whose every value is an object this
+  body allocated, that no other local, store, capture, `yield` or result
+  reaches, and that is read only inside its block, is freed (that object
+  only, not what it holds) where the block ends normally: at the clear
+  typed inlining put after its last read, before a final `return`, or
+  after the block's tail. `return`, `break`, `continue` and panics on
+  other paths leave it to the collector.
+
+Each free is `Builtin::FreeEarly { deep }` of the local and a `Clear` of
+its frame word, lowered to the `gc_free_early` HostInvoke (id 174, archive
+5.1, `HostOp::Free`). The VM frees nothing while a collection cycle or a
+steal epoch is open, and skips what it cannot free safely: interned
+strings, the shared unit variants and `()`, objects of a type with a
+`drop` (while any is registered), handles, and arrays a frame pinned. A
+freed slot goes back to the slab like a swept one, and the dense object
+cache forgets it.
+
+A dead frame word (a call's argument copy, a callee's frame left above the
+stack top) may still hold a freed address. Conservative and precise root
+scans already resolve every word through the slab, so such a word marks
+nothing, or the object now in that slot. Once something was freed early,
+typed `Member::Object` handles are resolved the same way before marking,
+and gc-stress builds accept a freed slot in a pointer word.
+
+Bodies that stay as they are: coroutines, bodies with `defer`, bodies
+spliced from another module, and any body whose rewritten form does not
+plan. `let _ = …` locals and locals a lambda or `defer` captures are never
+freed.
+
+Two holes the corpus found in the step 1 facts are closed here: a callee
+that changes what an argument reaches may store anything there, so a fresh
+object passed to one now holds "anything" (its graph is no longer fresh);
+and a call whose result is a function may be a partial application whose
+closure keeps the arguments, so it is treated as an unknown callee.
+
+Switches: `COIL_EARLY_FREE=0` compiles no frees and frees nothing at run
+time. `COIL_EARLY_FREE=check` compiles them, frees nothing, and at the next
+collection marks again from the roots that are certainly live (precise
+frame slots, statics, VM handles; not words a conservative frame scan
+finds), aborting if that reaches an object a free gave up. The test corpus
+passes in both modes and with frees on.
