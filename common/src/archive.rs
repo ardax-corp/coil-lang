@@ -173,9 +173,14 @@ pub const ARCHIVE_MAJOR: u16 = 5;
 /// `LockError` instead of one six-variant `ThreadError`. Major-4 archives
 /// would read the old tags as other variants, so they are not loadable.
 ///
+/// Major 5 minors:
+/// 1 — HostInvoke `gc_free_early` (id 174): free an object the compiler
+///     proved unreachable at the end of its scope. Older archives never
+///     reference it.
+///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.
-pub const ARCHIVE_MINOR: u16 = 0;
+pub const ARCHIVE_MINOR: u16 = 1;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -1252,9 +1257,9 @@ mod tests {
     #[test]
     fn archive_version_matches_current_abi() {
         assert_eq!(ARCHIVE_MAJOR, 5);
-        assert_eq!(ARCHIVE_MINOR, 0);
-        assert_eq!(ARCHIVE_VERSION, pack_archive_version(5, 0));
-        assert_eq!(format_archive_version(ARCHIVE_VERSION), "5.0");
+        assert_eq!(ARCHIVE_MINOR, 1);
+        assert_eq!(ARCHIVE_VERSION, pack_archive_version(5, 1));
+        assert_eq!(format_archive_version(ARCHIVE_VERSION), "5.1");
     }
 
     #[test]

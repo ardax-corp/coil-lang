@@ -42,6 +42,7 @@ const HOST: EffectFlags = fx(EffectFlags::HOST);
 const HOST_R: EffectFlags = fx(EffectFlags::HOST | R);
 const THREAD_R: EffectFlags = fx(EffectFlags::THREAD | R);
 const GC_R: EffectFlags = fx(EffectFlags::GC | R);
+const HEAP: EffectFlags = fx(EffectFlags::HEAP_MUT);
 const HEAP_R: EffectFlags = fx(EffectFlags::HEAP_MUT | R);
 const PARK_R: EffectFlags = fx(EffectFlags::ATTACH_PARK | R);
 /// Byte/string conversions and searches. Kept impure: `to_bytes` returns a
@@ -1282,6 +1283,13 @@ pub const HOST_NATIVES: &[HostNative] = &[
         effects: HOST,
         caps: NO_CAP,
     },
+    HostNative {
+        name: "gc_free_early",
+        arity: 2,
+        id: 174,
+        effects: HEAP,
+        caps: NO_CAP,
+    },
 ];
 
 /// First packed-LA HostInvoke (`packed_dot`).
@@ -1385,6 +1393,14 @@ pub const TTY_IS_RAW_NATIVE: &str = "tty_is_raw";
 pub const TTY_READ_TIMEOUT_NATIVE: &str = "tty_read_timeout";
 pub const TTY_RESIZED_NATIVE: &str = "tty_resized";
 pub const TTY_ENABLE_VT_NATIVE: &str = "tty_enable_vt";
+/// `gc_free_early(value, deep)` (archive minor 1): free an object the
+/// compiler proved nothing else reaches, at the end of its scope or after
+/// the call it was passed to (`feature/escape-memory` step 2). `deep`
+/// also frees what it reaches through precise pointer words. The VM runs
+/// it (`HostOp::Free`) and skips anything it cannot free safely.
+/// Compiler-emitted only.
+pub const GC_FREE_EARLY_ID: u16 = 174;
+pub const GC_FREE_EARLY_NATIVE: &str = "gc_free_early";
 
 pub const STREAM_ATTACH_NATIVE: &str = "stream_attach";
 pub const STREAM_PARK_NATIVE: &str = "stream_park";
@@ -1432,7 +1448,8 @@ pub const GC_COLLECT_NATIVE: &str = "gc_collect";
 pub const GC_REGISTER_FINALIZER_NATIVE: &str = "gc_register_finalizer";
 
 const _: () = {
-    assert!(HOST_NATIVES.len() == 174);
+    assert!(HOST_NATIVES.len() == 175);
+    assert!(HOST_NATIVES[GC_FREE_EARLY_ID as usize].id == GC_FREE_EARLY_ID);
     assert!(HOST_NATIVES[TTY_IS_TTY_ID as usize].id == TTY_IS_TTY_ID);
     assert!(HOST_NATIVES[TTY_ENABLE_VT_ID as usize].id == TTY_ENABLE_VT_ID);
     assert!(HOST_NATIVES[BLACK_BOX_ID as usize].id == BLACK_BOX_ID);
