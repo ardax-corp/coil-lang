@@ -15935,10 +15935,14 @@ impl Checker {
     /// signatures and enum payloads: a type there that names one of them
     /// (`Box`, `Box<int>`) still has to be this module's `m::Box`, not a bare
     /// `Box` (#1980, #1983).
+    /// Enums too: a payload that names its own enum or one declared later
+    /// (`A(E, E)`, `Cons(T, L<T>)`) is parsed before that enum is registered
+    /// (#2039).
     fn collect_module_class_names(&mut self, ast: &Output) {
         fn walk(node: &Output, out: &mut HashMap<String, usize>) {
             match Checker::pre_pass_unwrap_stmt(node).1.as_ref() {
-                Expression::Class { name, type_params, .. } => {
+                Expression::Class { name, type_params, .. }
+                | Expression::EnumDecl { name, type_params, .. } => {
                     out.insert(name.to_string(), type_params.len());
                 }
                 Expression::Program(children) | Expression::Fragment(children) => {
