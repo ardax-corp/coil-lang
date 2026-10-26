@@ -15,10 +15,64 @@
 use common::Value;
 
 use crate::io::{
-    IoErrorTag, as_result_option_int, as_result_unit, as_result_value,
-    is_capturing, stream_read, with_stream_mut,
+    IoErrorTag, alloc_io_error, alloc_option_none, alloc_option_some, alloc_result_err,
+    alloc_result_ok, is_capturing, stream_read, with_stream_mut,
 };
-use crate::memory::{Heap, ObjTuple, Object, StreamKind};
+use crate::memory::{EnumPayload, Heap, ObjTuple, Object, StreamKind};
+
+/// Why an `io::tty` call failed: a `TtyError` (`NotATerminal` = 0,
+/// `Io(IoError)` = 1).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum TtyFail {
+    NotATerminal,
+    Io(IoErrorTag),
+}
+
+impl From<IoErrorTag> for TtyFail {
+    fn from(tag: IoErrorTag) -> Self {
+        Self::Io(tag)
+    }
+}
+
+/// Allocate the `TtyError` value for `fail`.
+pub fn alloc_tty_error(heap: &mut Heap, fail: TtyFail) -> Value {
+    let _ = common::BUILTIN_TTY_ERROR_VARIANTS;
+    match fail {
+        TtyFail::NotATerminal => heap.alloc_enum_value(0, EnumPayload::empty()),
+        TtyFail::Io(tag) => {
+            let io = alloc_io_error(heap, tag);
+            heap.alloc_enum_value(1, EnumPayload::one(io))
+        }
+    }
+}
+
+fn tty_result_value(heap: &mut Heap, r: Result<Value, TtyFail>) -> Value {
+    let mapped = r.map_err(|f| alloc_tty_error(heap, f));
+    crate::host_enum::pack_result_or_panic(heap, mapped)
+}
+
+fn tty_result_unit(heap: &mut Heap, r: Result<(), TtyFail>) -> Value {
+    let mapped = r.map_err(|f| alloc_tty_error(heap, f));
+    crate::host_enum::pack_result_unit_or_panic(heap, mapped)
+}
+
+/// `Result<Option<int>, TtyError>`, boxed as `io::as_result_option_int`.
+fn tty_result_option_int(heap: &mut Heap, r: Result<Option<usize>, TtyFail>) -> Value {
+    match r {
+        Ok(None) => {
+            let none = alloc_option_none(heap);
+            alloc_result_ok(heap, none)
+        }
+        Ok(Some(n)) => {
+            let some = alloc_option_some(heap, Value::from(n as i64));
+            alloc_result_ok(heap, some)
+        }
+        Err(f) => {
+            let err = alloc_tty_error(heap, f);
+            alloc_result_err(heap, err)
+        }
+    }
+}
 
 /// The OS handle under `stream` and its kind; `Err(AlreadyClosed)` once closed.
 fn stream_os(heap: &mut Heap, stream: Value) -> Result<(os::Raw, StreamKind), IoErrorTag> {
@@ -49,7 +103,7 @@ pub fn tty_is_tty(heap: &mut Heap, stream: Value) -> bool {
 
 /// `io::tty::size(s)` as `(cols, rows)`. A standard stream that is not a
 /// terminal falls back to the other standard streams.
-pub fn tty_size(heap: &mut Heap, stream: Value) -> Result<(i64, i64), IoErrorTag> {
+pub fn tty_size(heap: &mut Heap, stream: Value) -> Result<(i64, i64), TtyFail> {
     let (raw, kind) = stream_os(heap, stream)?;
     if let Some(size) = os::size(raw) {
         return Ok(size);
@@ -59,25 +113,27 @@ pub fn tty_size(heap: &mut Heap, stream: Value) -> Result<(i64, i64), IoErrorTag
     {
         return Ok(size);
     }
-    Err(IoErrorTag::NotATerminal)
+    Err(TtyFail::NotATerminal)
 }
 
+// Unix `enter_raw` returns IoErrorTag (converted by `?`); Windows already returns TtyFail.
+#[allow(clippy::needless_question_mark)]
 pub fn tty_enter_raw(
     heap: &mut Heap,
     stream: Value,
     keep_signals: bool,
     keep_output: bool,
-) -> Result<(), IoErrorTag> {
+) -> Result<(), TtyFail> {
     let (raw, _) = stream_os(heap, stream)?;
     if !os::is_tty(raw) {
-        return Err(IoErrorTag::NotATerminal);
+        return Err(TtyFail::NotATerminal);
     }
-    os::enter_raw(raw, keep_signals, keep_output)
+    Ok(os::enter_raw(raw, keep_signals, keep_output)?)
 }
 
-pub fn tty_leave_raw(heap: &mut Heap, stream: Value) -> Result<(), IoErrorTag> {
+pub fn tty_leave_raw(heap: &mut Heap, stream: Value) -> Result<(), TtyFail> {
     let (raw, _) = stream_os(heap, stream)?;
-    os::leave_raw(raw)
+    Ok(os::leave_raw(raw)?)
 }
 
 pub fn tty_is_raw(heap: &mut Heap, stream: Value) -> bool {
@@ -92,7 +148,7 @@ pub fn tty_read_timeout(
     stream: Value,
     buf: Value,
     timeout_ms: i64,
-) -> Result<Option<usize>, IoErrorTag> {
+) -> Result<Option<usize>, TtyFail> {
     let (raw, _) = stream_os(heap, stream)?;
     match os::wait_readable(raw, timeout_ms)? {
         Wait::Ready => {}
@@ -101,7 +157,7 @@ pub fn tty_read_timeout(
     }
     match stream_read(heap, stream, buf) {
         Err(IoErrorTag::WouldBlock) => Ok(Some(0)),
-        r => r,
+        r => Ok(r?),
     }
 }
 
@@ -145,17 +201,17 @@ fn host_is_tty(heap: &mut Heap, args: &[Value]) -> Value {
 
 fn host_size(heap: &mut Heap, args: &[Value]) -> Value {
     let r = tty_size(heap, args[0]).map(|s| alloc_size(heap, s));
-    as_result_value(heap, r)
+    tty_result_value(heap, r)
 }
 
 fn host_enter_raw(heap: &mut Heap, args: &[Value]) -> Value {
     let r = tty_enter_raw(heap, args[0], args[1].as_bool(), args[2].as_bool());
-    as_result_unit(heap, r)
+    tty_result_unit(heap, r)
 }
 
 fn host_leave_raw(heap: &mut Heap, args: &[Value]) -> Value {
     let r = tty_leave_raw(heap, args[0]);
-    as_result_unit(heap, r)
+    tty_result_unit(heap, r)
 }
 
 fn host_is_raw(heap: &mut Heap, args: &[Value]) -> Value {
@@ -164,7 +220,7 @@ fn host_is_raw(heap: &mut Heap, args: &[Value]) -> Value {
 
 fn host_read_timeout(heap: &mut Heap, args: &[Value]) -> Value {
     let r = tty_read_timeout(heap, args[0], args[1], args[2].as_int());
-    as_result_option_int(heap, r)
+    tty_result_option_int(heap, r)
 }
 
 fn host_resized(_heap: &mut Heap, _args: &[Value]) -> Value {
@@ -594,7 +650,7 @@ mod os {
         unsafe { (GetStdHandle(STD_INPUT_HANDLE), GetStdHandle(STD_OUTPUT_HANDLE)) }
     }
 
-    pub fn enter_raw(_h: Raw, keep_signals: bool, _keep_output: bool) -> Result<(), IoErrorTag> {
+    pub fn enter_raw(_h: Raw, keep_signals: bool, _keep_output: bool) -> Result<(), super::TtyFail> {
         install_restore();
         let (input, output) = std_handles();
         let mut saved = SAVED.lock().unwrap_or_else(|e| e.into_inner());
@@ -603,7 +659,7 @@ mod os {
             None => (console_mode(input), console_mode(output)),
         };
         let (Some(in_mode), out_mode) = modes else {
-            return Err(IoErrorTag::NotATerminal);
+            return Err(super::TtyFail::NotATerminal);
         };
         let mut m = (in_mode & !(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT))
             | ENABLE_VIRTUAL_TERMINAL_INPUT;
@@ -611,7 +667,7 @@ mod os {
             m |= ENABLE_PROCESSED_INPUT;
         }
         if unsafe { SetConsoleMode(input, m) } == 0 {
-            return Err(IoErrorTag::from_kind(std::io::Error::last_os_error().kind()));
+            return Err(IoErrorTag::from_kind(std::io::Error::last_os_error().kind()).into());
         }
         if let Some(out_mode) = out_mode {
             let _ = unsafe {
@@ -952,8 +1008,8 @@ mod tests {
         std::fs::write(&path, b"x").unwrap();
         let f = crate::io::stream_open(&mut heap, path.to_str().unwrap(), "r").unwrap();
         assert!(!tty_is_tty(&mut heap, f));
-        assert_eq!(tty_size(&mut heap, f), Err(IoErrorTag::NotATerminal));
-        assert_eq!(tty_enter_raw(&mut heap, f, true, true), Err(IoErrorTag::NotATerminal));
+        assert_eq!(tty_size(&mut heap, f), Err(TtyFail::NotATerminal));
+        assert_eq!(tty_enter_raw(&mut heap, f, true, true), Err(TtyFail::NotATerminal));
         assert_eq!(tty_leave_raw(&mut heap, f), Ok(()));
         let _ = std::fs::remove_file(&path);
     }

@@ -444,7 +444,10 @@ class Worker {
 
 impl Worker {
     pub fn submit(string job) {
-        send(self.tx, job)?;
+        match send(self.tx, job) {
+            Ok(_) => {},
+            Err(_) => panic "send failed",
+        }
     }
 
     pub fn join() {
@@ -453,12 +456,15 @@ impl Worker {
 }
 
 fn main() {
-    let pair = channel()?;
+    let pair = match channel() {
+        Ok(p) => p,
+        Err(_) => panic "channel failed",
+    };
     let t = spawn(run_jobs, pair[1])?;
     let w = new Worker(t, pair[0]);
-    w.submit("a")?;
-    w.submit("b")?;
-    w.submit("stop")?;
+    w.submit("a");
+    w.submit("b");
+    w.submit("stop");
     w.join()?;
 }
 "#,
@@ -466,11 +472,11 @@ fn main() {
         (
             "src/pool/worker.hy",
             r#"
-use thread::{recv, Receiver};
+use thread::{recv, Receiver, ChannelError};
 use io::{stdout, write};
 use string::{format, to_bytes};
 
-fn run_jobs(Receiver rx) -> Result<int, ThreadError> {
+fn run_jobs(Receiver rx) -> Result<int, ChannelError> {
     while true {
         let job = recv(rx)?;
         if job == "stop" {

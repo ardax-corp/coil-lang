@@ -2417,7 +2417,12 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         } else {
             let err_ty = resolved.and_then(result_ok_err).map(|(_, e)| e);
             let e = b.temp("err", err_ty.clone());
-            let read = self.synth(b, span, HirKind::Local(e), err_ty);
+            let mut read = self.synth(b, span, HirKind::Local(e), err_ty);
+            // `?` converting through `impl Into<FnErr> for Err`.
+            if let Some(conv) = self.checker.try_into_at(span.0, span.1).cloned() {
+                let callee = Callee::Named { name: conv.fqn, def: None, overload: None };
+                read = self.synth(b, span, HirKind::Call { callee, args: vec![read] }, Some(conv.target));
+            }
             let pat = self.variant_pat(enum_name, miss, HirPatFields::Tuple(vec![HirPat::Bind(e)]));
             // An `Err` reaching the end of `main` fails the program (#1353).
             if is_result_main(b) {

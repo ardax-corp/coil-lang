@@ -1,8 +1,8 @@
-use thread::{ThreadError, recv};
+use thread::{ChannelError, recv};
 use io::sync::print;
 use string::format;
 
-fn run_jobs(Receiver rx) -> Result<int, ThreadError> {
+fn run_jobs(Receiver rx) -> Result<int, ChannelError> {
     while true {
         let job = recv(rx)?;
         if job == "stop" {

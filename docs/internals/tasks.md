@@ -159,7 +159,9 @@ wake one, the waiting `join` / scope end panics with `task deadlock`.
 
 `task::channel<T>(capacity)` is a bounded FIFO between tasks of one VM. It
 is an ordinary Coil class in the `task` module (a ring of `Option<T>`), so
-values are shared, not copied. A full `send` and an empty `recv` wait on a
+values are shared, not copied. Its errors use the builtin `thread`
+`ChannelError { Closed, Empty, Full }`, the same enum `thread` channels
+report, so one `match` handles both. A full `send` and an empty `recv` wait on a
 *wait condition*: `task_cond_wait` blocks the task on a condition id
 (`Block::Cond`), `task_cond_notify` makes every task waiting on it ready,
 and the waiter checks again. `close` notifies both sides. Waiting with no

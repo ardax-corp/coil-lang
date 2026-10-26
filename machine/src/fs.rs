@@ -353,9 +353,7 @@ mod tests {
             7 => Some(IoErrorTag::AlreadyExists),
             8 => Some(IoErrorTag::TimedOut),
             9 => Some(IoErrorTag::Truncated),
-            10 => Some(IoErrorTag::Certificate),
-            11 => Some(IoErrorTag::Handshake),
-            12 => Some(IoErrorTag::NotATerminal),
+            10 => Some(IoErrorTag::Protocol),
             _ => None,
         }
     }

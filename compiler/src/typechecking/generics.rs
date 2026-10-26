@@ -430,9 +430,13 @@ impl Generics {
     /// e.g. `Add__int__add`, `Lt__float__lt`, `Eq__string__eq`.
     /// Builtin enums with a builtin `Show` instance, with their variants in
     /// tag order (`Show__IoError__show` returns the variant's name).
-    pub const BUILTIN_SHOW_ENUMS: [(&'static str, &'static [&'static str]); 4] = [
+    pub const BUILTIN_SHOW_ENUMS: [(&'static str, &'static [&'static str]); 8] = [
         (common::BUILTIN_IO_ERROR_ENUM, common::BUILTIN_IO_ERROR_VARIANTS),
+        (common::BUILTIN_TTY_ERROR_ENUM, common::BUILTIN_TTY_ERROR_VARIANTS),
+        (common::BUILTIN_STRING_ERROR_ENUM, common::BUILTIN_STRING_ERROR_VARIANTS),
         (common::BUILTIN_THREAD_ERROR_ENUM, common::BUILTIN_THREAD_ERROR_VARIANTS),
+        (common::BUILTIN_CHANNEL_ERROR_ENUM, common::BUILTIN_CHANNEL_ERROR_VARIANTS),
+        (common::BUILTIN_LOCK_ERROR_ENUM, common::BUILTIN_LOCK_ERROR_VARIANTS),
         (common::BUILTIN_ENV_ERROR_ENUM, common::BUILTIN_ENV_ERROR_VARIANTS),
         (common::BUILTIN_FFI_ERROR_KIND_ENUM, common::BUILTIN_FFI_ERROR_KIND_VARIANTS),
     ];

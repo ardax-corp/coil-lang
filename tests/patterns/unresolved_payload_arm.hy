@@ -2,7 +2,7 @@
 // thread's or channel's value type nothing pins down): the arm still
 // tests the variant, and nothing reads the payload's word.
 use tests::assert;
-use thread::{channel, close, detach, join, spawn, try_recv, ThreadError};
+use thread::{channel, close, detach, join, spawn, try_recv, ThreadError, ChannelError};
 
 fn work() -> int {
     return 1;
@@ -21,7 +21,7 @@ fn detached() -> Result<string, ThreadError> {
     return Result::Ok(msg);
 }
 
-fn polled(bool shut) -> Result<string, ThreadError> {
+fn polled(bool shut) -> Result<string, ChannelError> {
     let pair = channel()?;
     if shut {
         close(pair[0])?;
@@ -29,8 +29,8 @@ fn polled(bool shut) -> Result<string, ThreadError> {
     let msg = match try_recv(pair[1]) {
         Result::Ok(_) => "ok",
         Result::Err(e) => match e {
-            ThreadError::Disconnected => "disc",
-            ThreadError::WouldBlock => "wb",
+            ChannelError::Closed => "disc",
+            ChannelError::Empty => "wb",
             default => "other",
         },
     };

@@ -7,7 +7,7 @@
 // `yield_now`. Ordinary functions that do IO work unchanged inside tasks.
 // See docs/internals/tasks.md.
 use prelude::task::{task_scope_open, task_scope_close, task_scope_error, task_spawn, task_join, task_error, task_sleep, task_yield, task_cancel, task_shield_enter, task_shield_exit, task_cond_new, task_cond_wait, task_cond_notify};
-use thread::{ThreadError, spawn as thread_spawn, join as thread_join};
+use thread::{ThreadError, ChannelError, spawn as thread_spawn, join as thread_join};
 
 // Status codes from the scheduler natives.
 fn status_panicked() -> int {
@@ -254,16 +254,6 @@ fn shield<T>(unit -> T body) -> T {
     let v = body();
     task_shield_exit();
     return v;
-}
-
-/// Why a channel operation failed.
-enum ChannelError {
-    /// The channel was closed (and, for `recv`, every value has been taken).
-    Closed,
-    /// `try_recv` on an empty channel.
-    Empty,
-    /// `try_send` on a full channel.
-    Full,
 }
 
 /// A bounded queue for passing values between tasks.

@@ -263,6 +263,7 @@ impl Checker {
             module_consts: HashMap::new(),
             macro_imports: HashSet::new(),
             test_try_sites: HashMap::new(),
+            try_into_sites: HashMap::new(),
             fn_option_mode: None,
             result_mode_fns: HashSet::new(),
             result_mode_ok_is_result: HashSet::new(),
@@ -305,6 +306,8 @@ impl Checker {
         self.register_builtin_ffi_type();
         self.register_builtin_option_result();
         self.register_builtin_io_error();
+        self.register_builtin_tty_error();
+        self.register_builtin_string_error();
         self.register_builtin_thread_error();
         self.register_builtin_env_error();
     }
@@ -616,20 +619,41 @@ impl Checker {
             BuiltinExport::Enum {
                 name: common::BUILTIN_IO_ERROR_ENUM
             } | BuiltinExport::IoFn { .. }
-                | BuiltinExport::StringFn {
-                    kind: StringBuiltin::FromBytes,
-                }
-        ) || host_registry.is_some_and(|r| r.starts_with("fs_"));
+        ) || host_registry.is_some_and(|r| r.starts_with("fs_") || r.starts_with("tty_"));
         if needs_io_error && !self.enums.contains_key(common::BUILTIN_IO_ERROR_ENUM) {
             self.register_builtin_io_error();
         }
 
-        let needs_thread_error = matches!(
+        let needs_tty_error = matches!(
             &export,
             BuiltinExport::Enum {
-                name: common::BUILTIN_THREAD_ERROR_ENUM
-            } | BuiltinExport::ThreadFn { .. }
+                name: common::BUILTIN_TTY_ERROR_ENUM
+            }
+        ) || host_registry.is_some_and(|r| r.starts_with("tty_"));
+        if needs_tty_error && !self.enums.contains_key(common::BUILTIN_TTY_ERROR_ENUM) {
+            if !self.enums.contains_key(common::BUILTIN_IO_ERROR_ENUM) {
+                self.register_builtin_io_error();
+            }
+            self.register_builtin_tty_error();
+        }
+
+        let needs_string_error = matches!(
+            &export,
+            BuiltinExport::Enum {
+                name: common::BUILTIN_STRING_ERROR_ENUM
+            } | BuiltinExport::StringFn {
+                kind: StringBuiltin::FromBytes | StringBuiltin::SliceBytes,
+            }
         );
+        if needs_string_error && !self.enums.contains_key(common::BUILTIN_STRING_ERROR_ENUM) {
+            self.register_builtin_string_error();
+        }
+
+        let needs_thread_error = match &export {
+            BuiltinExport::Enum { name } => common::is_builtin_thread_error_enum(name),
+            BuiltinExport::ThreadFn { .. } => true,
+            _ => false,
+        };
         if needs_thread_error && !self.enums.contains_key(common::BUILTIN_THREAD_ERROR_ENUM) {
             self.register_builtin_thread_error();
         }
@@ -897,26 +921,24 @@ impl Checker {
         self.enum_arities.insert(name, arities);
     }
 
-    fn register_builtin_env_error(&mut self) {
+    fn register_builtin_string_error(&mut self) {
         self.register_builtin_unit_enum(
-            common::BUILTIN_ENV_ERROR_ENUM,
-            common::BUILTIN_ENV_ERROR_VARIANTS,
+            common::BUILTIN_STRING_ERROR_ENUM,
+            common::BUILTIN_STRING_ERROR_VARIANTS,
         );
     }
 
-    /// Pre-register `ThreadError` unit variants for the virtual `thread` module.
-    fn register_builtin_thread_error(&mut self) {
-        use common::{BUILTIN_THREAD_ERROR_ENUM, BUILTIN_THREAD_ERROR_VARIANTS};
-        let name = BUILTIN_THREAD_ERROR_ENUM.to_string();
-        let variant_names: Vec<String> = BUILTIN_THREAD_ERROR_VARIANTS
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let payloads = variant_names
-            .iter()
-            .map(|_| EnumVariantPayloadTy::Unit)
-            .collect();
-        let arities = vec![0; variant_names.len()];
+    /// `TtyError`: `NotATerminal`, or `Io(IoError)` for the stream's own
+    /// failure.
+    fn register_builtin_tty_error(&mut self) {
+        use common::{BUILTIN_IO_ERROR_ENUM, BUILTIN_TTY_ERROR_ENUM, BUILTIN_TTY_ERROR_VARIANTS};
+        let name = BUILTIN_TTY_ERROR_ENUM.to_string();
+        let variant_names: Vec<String> =
+            BUILTIN_TTY_ERROR_VARIANTS.iter().map(|s| s.to_string()).collect();
+        let payloads = vec![
+            EnumVariantPayloadTy::Unit,
+            EnumVariantPayloadTy::Tuple(vec![Ty::Con(BUILTIN_IO_ERROR_ENUM.into())]),
+        ];
         let mut tag_map = BTreeMap::new();
         for (i, vn) in variant_names.iter().enumerate() {
             tag_map.insert(vn.clone(), i as u32);
@@ -924,7 +946,36 @@ impl Checker {
         self.enums.insert(name.clone(), variant_names);
         self.enum_tags.insert(name.clone(), tag_map);
         self.enum_payloads.insert(name.clone(), payloads);
-        self.enum_arities.insert(name, arities);
+        self.enum_arities.insert(name, vec![0, 1]);
+    }
+
+    fn register_builtin_env_error(&mut self) {
+        self.register_builtin_unit_enum(
+            common::BUILTIN_ENV_ERROR_ENUM,
+            common::BUILTIN_ENV_ERROR_VARIANTS,
+        );
+    }
+
+    /// Pre-register the `thread` module's unit error enums (`ThreadError`,
+    /// `ChannelError`, `LockError`).
+    fn register_builtin_thread_error(&mut self) {
+        for (name, variants) in common::BUILTIN_THREAD_ERROR_ENUMS {
+            let name = name.to_string();
+            let variant_names: Vec<String> = variants.iter().map(|s| s.to_string()).collect();
+            let payloads = variant_names
+                .iter()
+                .map(|_| EnumVariantPayloadTy::Unit)
+                .collect();
+            let arities = vec![0; variant_names.len()];
+            let mut tag_map = BTreeMap::new();
+            for (i, vn) in variant_names.iter().enumerate() {
+                tag_map.insert(vn.clone(), i as u32);
+            }
+            self.enums.insert(name.clone(), variant_names);
+            self.enum_tags.insert(name.clone(), tag_map);
+            self.enum_payloads.insert(name.clone(), payloads);
+            self.enum_arities.insert(name, arities);
+        }
     }
 
     /// Pre-register `ffi::ErrorKind` unit variants.
@@ -982,7 +1033,7 @@ impl Checker {
         let res_int = result_app_ty(int(), io_err.clone());
         let res_unit = result_app_ty(unit_ty(), io_err.clone());
         let res_stream = result_app_ty(stream.clone(), io_err.clone());
-        let res_string = result_app_ty(string(), io_err.clone());
+        let res_string = result_app_ty(string(), Ty::Con(common::BUILTIN_STRING_ERROR_ENUM.into()));
         let addr_ty = tuple(vec![string(), int()]);
         let res_addr = result_app_ty(addr_ty, io_err.clone());
         // `(nbytes, peer_host, peer_port)` from `io::net::udp::recv_from`.
@@ -1034,7 +1085,7 @@ impl Checker {
     pub fn string_fn_scheme(kind: StringBuiltin) -> Scheme {
         use crate::typechecking::ty::byte;
         let bytes = vec_app_ty(byte());
-        let io_err = Ty::Con(common::BUILTIN_IO_ERROR_ENUM.into());
+        let str_err = Ty::Con(common::BUILTIN_STRING_ERROR_ENUM.into());
         let fun = |params: &[Ty], ret: Ty| {
             params
                 .iter()
@@ -1043,10 +1094,10 @@ impl Checker {
         };
         let ty = match kind {
             StringBuiltin::Format => fun(&[string()], string()),
-            StringBuiltin::FromBytes => fun(&[bytes], result_app_ty(string(), io_err)),
+            StringBuiltin::FromBytes => fun(&[bytes], result_app_ty(string(), str_err)),
             StringBuiltin::ToBytes => fun(&[string()], bytes),
             StringBuiltin::SliceBytes => {
-                fun(&[string(), int(), int()], result_app_ty(string(), io_err))
+                fun(&[string(), int(), int()], result_app_ty(string(), str_err))
             }
         };
         Scheme::mono(ty)
@@ -1074,7 +1125,11 @@ impl Checker {
             mutex_ty, receiver_ty, rwlock_ty, sender_ty, thread_ty, tuple,
         };
         let thread_err = Ty::Con(common::BUILTIN_THREAD_ERROR_ENUM.into());
+        let chan_err = Ty::Con(common::BUILTIN_CHANNEL_ERROR_ENUM.into());
+        let lock_err = Ty::Con(common::BUILTIN_LOCK_ERROR_ENUM.into());
         let res_unit = result_app_ty(unit_ty(), thread_err.clone());
+        let chan_unit = result_app_ty(unit_ty(), chan_err.clone());
+        let lock_unit = result_app_ty(unit_ty(), lock_err.clone());
         let fun = |params: &[Ty], ret: Ty| {
             params
                 .iter()
@@ -1100,15 +1155,15 @@ impl Checker {
             ThreadBuiltin::Detach => fun(&[thread_ty(tv)], res_unit),
             ThreadBuiltin::Channel => fun(
                 &[],
-                result_app_ty(tuple(vec![sender_ty(tv.clone()), receiver_ty(tv)]), thread_err),
+                result_app_ty(tuple(vec![sender_ty(tv.clone()), receiver_ty(tv)]), chan_err),
             ),
-            ThreadBuiltin::Send | ThreadBuiltin::TrySend => fun(&[sender_ty(tv.clone()), tv], res_unit),
+            ThreadBuiltin::Send | ThreadBuiltin::TrySend => fun(&[sender_ty(tv.clone()), tv], chan_unit),
             ThreadBuiltin::Recv | ThreadBuiltin::TryRecv => {
-                fun(&[receiver_ty(tv.clone())], result_app_ty(tv, thread_err))
+                fun(&[receiver_ty(tv.clone())], result_app_ty(tv, chan_err))
             }
-            ThreadBuiltin::Close => fun(&[sender_ty(tv)], res_unit),
-            ThreadBuiltin::Mutex => fun(std::slice::from_ref(&tv), result_app_ty(mutex_ty(tv.clone()), thread_err)),
-            ThreadBuiltin::Rwlock => fun(std::slice::from_ref(&tv), result_app_ty(rwlock_ty(tv.clone()), thread_err)),
+            ThreadBuiltin::Close => fun(&[sender_ty(tv)], chan_unit),
+            ThreadBuiltin::Mutex => fun(std::slice::from_ref(&tv), result_app_ty(mutex_ty(tv.clone()), lock_err)),
+            ThreadBuiltin::Rwlock => fun(std::slice::from_ref(&tv), result_app_ty(rwlock_ty(tv.clone()), lock_err)),
             ThreadBuiltin::WithLock | ThreadBuiltin::WithWrite | ThreadBuiltin::TryWrite => {
                 let r = self.counter.fresh();
                 let callback = fn_ty(tv.clone(), tuple(vec![tv.clone(), Ty::Var(r)]));
@@ -1116,7 +1171,7 @@ impl Checker {
                 return Scheme::poly(
                     vec![t, r],
                     vec![],
-                    fun(&[lock, callback], result_app_ty(Ty::Var(r), thread_err)),
+                    fun(&[lock, callback], result_app_ty(Ty::Var(r), lock_err)),
                 );
             }
             ThreadBuiltin::WithRead | ThreadBuiltin::TryRead => {
@@ -1125,11 +1180,11 @@ impl Checker {
                 return Scheme::poly(
                     vec![t, r],
                     vec![],
-                    fun(&[rwlock_ty(tv), callback], result_app_ty(Ty::Var(r), thread_err)),
+                    fun(&[rwlock_ty(tv), callback], result_app_ty(Ty::Var(r), lock_err)),
                 );
             }
             ThreadBuiltin::Lock | ThreadBuiltin::TryLock | ThreadBuiltin::Unlock => {
-                fun(&[mutex_ty(tv)], res_unit)
+                fun(&[mutex_ty(tv)], lock_unit)
             }
         };
         Scheme::poly(vec![t], vec![], ty)
@@ -1188,9 +1243,11 @@ impl Checker {
         let io_err = Ty::Con(BUILTIN_IO_ERROR_ENUM.into());
         let env_err = Ty::Con(BUILTIN_ENV_ERROR_ENUM.into());
 
+        let tty_err = Ty::Con(common::BUILTIN_TTY_ERROR_ENUM.into());
         let res_bool_io = result_app_ty(boolean(), io_err.clone());
-        let res_size_io = result_app_ty(tuple_ty(vec![int(), int()]), io_err.clone());
-        let res_read_io = result_app_ty(option_app_ty(int()), io_err.clone());
+        let res_size_tty = result_app_ty(tuple_ty(vec![int(), int()]), tty_err.clone());
+        let res_read_tty = result_app_ty(option_app_ty(int()), tty_err.clone());
+        let res_unit_tty = result_app_ty(unit_ty(), tty_err);
         let res_unit_io = result_app_ty(unit_ty(), io_err.clone());
         let res_string_io = result_app_ty(string(), io_err.clone());
         let res_strs_io = result_app_ty(vec_app_ty(string()), io_err.clone());
@@ -1244,10 +1301,10 @@ impl Checker {
             "io_capture_end" => fun(&[], tuple_ty(vec![string(), string()])),
 
             "tty_is_tty" | "tty_is_raw" | "tty_enable_vt" => fun(&[stream_ty()], boolean()),
-            "tty_size" => fun(&[stream_ty()], res_size_io),
-            "tty_enter_raw" => fun(&[stream_ty(), boolean(), boolean()], res_unit_io.clone()),
-            "tty_leave_raw" => fun(&[stream_ty()], res_unit_io.clone()),
-            "tty_read_timeout" => fun(&[stream_ty(), vec_app_ty(byte()), int()], res_read_io),
+            "tty_size" => fun(&[stream_ty()], res_size_tty),
+            "tty_enter_raw" => fun(&[stream_ty(), boolean(), boolean()], res_unit_tty.clone()),
+            "tty_leave_raw" => fun(&[stream_ty()], res_unit_tty),
+            "tty_read_timeout" => fun(&[stream_ty(), vec_app_ty(byte()), int()], res_read_tty),
             "tty_resized" => fun(&[], boolean()),
 
             "task_scope_open" => fun(&[], int()),
@@ -1310,6 +1367,32 @@ impl Checker {
                     Some("a spawned closure's `use` captures are copied to the thread, so they must be sendable".to_string()),
                 );
             }
+        }
+    }
+
+    /// `send` / `try_send` copy their value to the channel and `mutex` /
+    /// `rwlock` copy theirs into the lock, so like a `spawn` argument the
+    /// value must be sendable. Checked here so the runtime never reports it.
+    fn check_thread_value_sendable(&mut self, ident: &str, arg_tys: &[Ty], range: &Range<usize>) {
+        let (what, arg) = match self.thread_fn_in_scope(ident) {
+            Some(ThreadBuiltin::Send | ThreadBuiltin::TrySend) => ("sent value", arg_tys.get(1)),
+            Some(ThreadBuiltin::Mutex | ThreadBuiltin::Rwlock) => ("lock value", arg_tys.first()),
+            _ => return,
+        };
+        let Some(arg) = arg else {
+            return;
+        };
+        let resolved = apply_ty_prune(&self.subst, arg);
+        if !self.is_thread_sendable_ty(&resolved) {
+            self.error_with_help(
+                ErrorCode::GenericTypeError,
+                format!(
+                    "{ident} {what} type `{}` is not sendable across threads",
+                    self.diag_ty(&resolved)
+                ),
+                range.clone(),
+                Some("only immediates, strings, and aggregates of sendable values may cross threads".to_string()),
+            );
         }
     }
 
@@ -3095,6 +3178,14 @@ impl Checker {
                 if let Some(ty) = self.infer_test_try(&resolved, &range) {
                     ty
                 } else if let Some((ok, err)) = result_ok_err(&resolved) {
+                    let err = match self.try_into_target(&err) {
+                        Some(conv) => {
+                            let target = conv.target.clone();
+                            self.try_into_sites.insert((range.start, range.end), conv);
+                            target
+                        }
+                        None => err,
+                    };
                     let _ = self.ensure_result_mode(&err, &range);
                     ok
                 } else if is_option_ty(&resolved) {
@@ -5556,9 +5647,9 @@ impl Checker {
                     }
                     _ => {
                         if matches!(kind, StringBuiltin::FromBytes | StringBuiltin::SliceBytes)
-                            && !self.enums.contains_key(common::BUILTIN_IO_ERROR_ENUM)
+                            && !self.enums.contains_key(common::BUILTIN_STRING_ERROR_ENUM)
                         {
-                            self.register_builtin_io_error();
+                            self.register_builtin_string_error();
                         }
                         let fun_ty = self.instantiate_ty(&Self::string_fn_scheme(kind));
                         let flat_args = self.flatten_spread_call_args(reordered.as_slice());
@@ -5587,9 +5678,9 @@ impl Checker {
                 StringBuiltin::Format => self.infer_string_format_call(arg_slice, range),
                 _ => {
                     if matches!(kind, StringBuiltin::FromBytes | StringBuiltin::SliceBytes)
-                        && !self.enums.contains_key(common::BUILTIN_IO_ERROR_ENUM)
+                        && !self.enums.contains_key(common::BUILTIN_STRING_ERROR_ENUM)
                     {
-                        self.register_builtin_io_error();
+                        self.register_builtin_string_error();
                     }
                     let fun_ty = self.instantiate_ty(&Self::string_fn_scheme(kind));
                     let flat_args = self.flatten_spread_call_args(arg_slice);
@@ -6082,6 +6173,7 @@ impl Checker {
             id,
             range.clone(),
         );
+        self.check_thread_value_sendable(&ident, &arg_tys, &range);
         // Discharge instantiated trait constraints (or propagate if caller shares the bound).
         if !fresh_constraints.is_empty() {
             self.bind_call_result_to_expected(&result);
@@ -14333,6 +14425,37 @@ impl Checker {
         }
         self.test_try_sites.insert(key, TestTry::ShowErr(err));
         Some(ok)
+    }
+
+    /// `?` on a `Result` whose ground error type differs from the enclosing
+    /// function's ground error type, with an `impl Into<FnErr> for Err`: the
+    /// error converts through that impl instead of having to match. Without
+    /// such an impl the types still have to agree.
+    fn try_into_target(&self, operand_err: &Ty) -> Option<TryInto> {
+        let fn_err = match &self.fn_result_mode {
+            Some((_, err)) => err.clone(),
+            None => {
+                let ret = self.current_return_ty.as_ref()?;
+                result_ok_err(&apply_ty_prune(&self.subst, ret))?.1
+            }
+        };
+        let from = strip_readonly(&apply_ty_prune(&self.subst, operand_err)).clone();
+        let to = strip_readonly(&apply_ty_prune(&self.subst, &fn_err)).clone();
+        if !ftv_ty(&from).is_empty() || !ftv_ty(&to).is_empty() {
+            return None;
+        }
+        if unify_with(&Subst::empty(), &from, &to).is_ok() {
+            return None;
+        }
+        let inst = self.generics.find_instance_relaxed("Into", &[from, to.clone()])?;
+        let fqn = inst.method_fqns.get("into")?.clone();
+        Some(TryInto { fqn, target: fn_err })
+    }
+
+    /// The `Into` conversion a `?` at this span applies to its error (see
+    /// [`Self::try_into_target`]).
+    pub fn try_into_at(&self, start: usize, end: usize) -> Option<&TryInto> {
+        self.try_into_sites.get(&(start, end))
     }
 
     /// How a test-body `?` at this span fails its case, when it does so

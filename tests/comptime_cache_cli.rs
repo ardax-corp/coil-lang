@@ -204,7 +204,10 @@ fn fetch_source(port: u16) -> String {
         "use io::close;\nuse io::sync::read_to_end;\nuse io::net::tcp::connect;\nuse string::from_bytes;\n{PRINT}
 fn fetch() -> Result<string, IoError> {{
     let s = connect(\"127.0.0.1\", {port})?;
-    let text = from_bytes(read_to_end(s)?)?;
+    let text = match from_bytes(read_to_end(s)?) {{
+        Result::Ok(t) => t,
+        Result::Err(_) => raise IoError::InvalidInput,
+    }};
     close(s)?;
     return Result::Ok(text);
 }}

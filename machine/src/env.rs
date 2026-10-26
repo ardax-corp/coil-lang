@@ -19,9 +19,8 @@ pub use common::is_ffi_exec_symbol;
 pub enum EnvErrorTag {
     InvalidInput = 0,
     NotFound = 1,
-    ExecDisabled = 2,
-    ExecFailed = 3,
-    Other = 4,
+    ExecFailed = 2,
+    Other = 3,
 }
 
 fn alloc_enum(heap: &mut Heap, tag: u32, payload: impl Into<crate::EnumPayload>) -> Value {
@@ -228,8 +227,7 @@ fn try_host_set_cwd(heap: &mut Heap, args: &[Value]) -> Result<(), EnvErrorTag> 
 /// Terminates the process (`std::process::exit`). Never returns.
 ///
 /// Compile-time `--allow-exit` is the grant; archived bytecode with this op
-/// runs it. [`EnvErrorTag::ExecDisabled`] remains an ABI tag but is not
-/// produced here. Under [`trap_exit`] the wired native is [`try_host_exit`]
+/// runs it. Under [`trap_exit`] the wired native is [`try_host_exit`]
 /// instead, which does return.
 pub fn host_exit(_heap: &mut Heap, args: &[Value]) -> Value {
     let code = if args.is_empty() { 0 } else { args[0].as_int() };
@@ -357,8 +355,7 @@ mod tests {
         match err.as_ref().tag {
             0 => EnvErrorTag::InvalidInput,
             1 => EnvErrorTag::NotFound,
-            2 => EnvErrorTag::ExecDisabled,
-            3 => EnvErrorTag::ExecFailed,
+            2 => EnvErrorTag::ExecFailed,
             _ => EnvErrorTag::Other,
         }
     }
