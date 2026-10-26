@@ -797,3 +797,22 @@ fn alias(string s) -> int {
     assert!(frees(src, "give").is_empty());
     assert!(frees(src, "alias").is_empty());
 }
+
+#[test]
+fn a_local_byte_copy_is_freed_before_every_return() {
+    let src = "
+use string::{to_bytes};
+fn needs_quote(string s) -> bool {
+    let b = to_bytes(s);
+    let i = 0;
+    while i < b.len() {
+        if b[i] == \",\" {
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+";
+    assert_eq!(frees(src, "needs_quote"), vec![(false, "b".to_string()), (false, "b".to_string())]);
+}

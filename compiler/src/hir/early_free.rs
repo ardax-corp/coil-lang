@@ -11,8 +11,9 @@
 //! - **Block-end locals.** `let x = …` whose every value is an object this
 //!   body allocated, that no other local, store, capture, `yield` or result
 //!   reaches: `x`'s object is freed (not what it holds) when the block that
-//!   declares it ends normally (`let b = to_bytes(s)`). An early exit
-//!   (`return`, `break`, `continue`, a panic) leaves it to the collector.
+//!   declares it ends, and before every `return` after the `let`
+//!   (`let b = to_bytes(s)`). `break`, `continue` and a panic leave it to
+//!   the collector.
 //!
 //! Each free is a `Builtin::FreeEarly` of the local, then a `Clear` of it.
 //! The VM skips what it cannot free safely (interned strings, shared unit
@@ -168,12 +169,10 @@ fn block_locals(body: &HirBody, e: &mut Escape<'_, '_>, kept: Src) -> Vec<(HirId
         if !stmts.contains(decl) {
             continue;
         }
-        // A block that ends in `return v` frees before it, unless `v` is
-        // (part of) the object; `break` / `continue` leave it to the GC.
-        match stmts.last().map(|s| &body.expr(*s).kind) {
-            Some(HirKind::Break | HirKind::Continue) => continue,
-            Some(HirKind::Return(Some(v))) if e.src(*v).sites & s.sites != 0 => continue,
-            _ => {}
+        // `break` / `continue` out of the block leave it to the GC; a
+        // `return` never hands it back (`kept` holds what is returned).
+        if matches!(stmts.last().map(|s| &body.expr(*s).kind), Some(HirKind::Break | HirKind::Continue)) {
+            continue;
         }
         // Every read of it is inside the block, and the block's value is
         // not (part of) its object.
@@ -292,8 +291,9 @@ fn free_temp(body: &mut HirBody, call: HirId, arg: usize, deep: bool) {
     x.layout = layout;
 }
 
-/// Free `local` when `block` ends: after its statements, and after its
-/// tail when the tail reads it.
+/// Free `local` when `block` ends: before every `return` after its `let`,
+/// and after the block's statements (and its tail, when the tail reads it)
+/// when the block can fall through.
 fn free_at_end(body: &mut HirBody, block: HirId, local: LocalId) {
     let HirKind::Block { mut stmts, tail } = body.expr(block).kind.clone() else {
         return;
@@ -308,26 +308,24 @@ fn free_at_end(body: &mut HirBody, block: HirId, local: LocalId) {
         body.exprs[block.0 as usize].kind = HirKind::Block { stmts, tail };
         return;
     }
-    // `return v`: free between computing `v` and returning it.
-    if let Some(&last) = stmts.last()
-        && let HirKind::Return(value) = body.expr(last).kind.clone()
-    {
-        stmts.pop();
-        let value = match value {
-            Some(v) if reads(body, v, local) => {
-                let ty = body.expr(v).ty.clone();
-                let r = temp(body, ty.clone());
-                let keep = push(body, HirKind::Let { local: r, init: Some(v) }, Some(ty::unit()), span);
-                stmts.push(keep);
-                Some(push(body, HirKind::Local(r), ty, span))
-            }
-            v => v,
-        };
-        stmts.extend(free_stmts(body, local, false, span));
-        let ret = relocate(body, last);
-        body.exprs[ret.0 as usize].kind = HirKind::Return(value);
-        stmts.push(ret);
-        body.exprs[block.0 as usize].kind = HirKind::Block { stmts, tail };
+    // A block that always leaves early has no end to free at.
+    let exits = |k: &HirKind| matches!(k, HirKind::Return(_) | HirKind::Break | HirKind::Continue);
+    let diverges = stmts.last().is_some_and(|s| exits(&body.expr(*s).kind)) || tail.is_some_and(|t| exits(&body.expr(t).kind));
+    // Every `return` after the `let`, nested or not, frees on its way out.
+    let decl = stmts.iter().position(|s| matches!(body.expr(*s).kind, HirKind::Let { local: l, .. } if l == local));
+    let after = decl.map_or(&stmts[..0], |d| &stmts[d + 1..]);
+    let mut work: Vec<HirId> = after.iter().copied().chain(tail).collect();
+    let mut returns = Vec::new();
+    while let Some(at) = work.pop() {
+        if matches!(body.expr(at).kind, HirKind::Return(_)) {
+            returns.push(at);
+        }
+        work.extend(super::super::lower::children(body, at));
+    }
+    for ret in returns {
+        free_before_return(body, ret, local);
+    }
+    if diverges {
         return;
     }
     let tail = match tail {
@@ -342,6 +340,30 @@ fn free_at_end(body: &mut HirBody, block: HirId, local: LocalId) {
     };
     stmts.extend(free_stmts(body, local, false, span));
     body.exprs[block.0 as usize].kind = HirKind::Block { stmts, tail };
+}
+
+/// `return v` becomes `{ let r = v; free local; return r }`.
+fn free_before_return(body: &mut HirBody, ret: HirId, local: LocalId) {
+    let HirKind::Return(value) = body.expr(ret).kind.clone() else {
+        return;
+    };
+    let span = body.expr(ret).span;
+    let mut stmts = Vec::new();
+    let value = match value {
+        Some(v) if reads(body, v, local) => {
+            let ty = body.expr(v).ty.clone();
+            let r = temp(body, ty.clone());
+            stmts.push(push(body, HirKind::Let { local: r, init: Some(v) }, Some(ty::unit()), span));
+            Some(push(body, HirKind::Local(r), ty, span))
+        }
+        v => v,
+    };
+    stmts.extend(free_stmts(body, local, false, span));
+    let inner = relocate(body, ret);
+    body.exprs[inner.0 as usize].kind = HirKind::Return(value);
+    let x = &mut body.exprs[ret.0 as usize];
+    x.kind = HirKind::Block { stmts, tail: Some(inner) };
+    x.node = None;
 }
 
 /// Whether the subtree at `id` reads `local`.
