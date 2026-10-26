@@ -88,12 +88,7 @@ pub const MAX_THREAD_SPAWN_ARGS: usize = 16;
 pub const BUILTIN_ENV_ERROR_ENUM: &str = "EnvError";
 
 /// `EnvError` variants in tag order.
-pub const BUILTIN_ENV_ERROR_VARIANTS: &[&str] = &[
-    "InvalidInput",
-    "NotFound",
-    "ExecFailed",
-    "Other",
-];
+pub const BUILTIN_ENV_ERROR_VARIANTS: &[&str] = &["InvalidInput", "NotFound", "Other"];
 
 /// Built-in `ErrorKind` enum name (virtual `ffi` module).
 pub const BUILTIN_FFI_ERROR_KIND_ENUM: &str = "ErrorKind";

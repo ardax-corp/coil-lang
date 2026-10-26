@@ -15,8 +15,7 @@ impl Caps {
     pub const NET: Caps = Caps(4);
     /// Read or change environment variables or the working directory.
     pub const ENV: Caps = Caps(8);
-    /// `env::exec`.
-    pub const EXEC: Caps = Caps(16);
+    // 16 was `env::exec` (moved to the coil-process package).
     /// `env::exit`.
     pub const EXIT: Caps = Caps(32);
     /// `Stream.attach`.
@@ -24,12 +23,11 @@ impl Caps {
 
     /// Every capability, in the order messages list them, with its name
     /// (the flag is `--allow-<name>`).
-    pub const ALL: [(Caps, &'static str); 7] = [
+    pub const ALL: [(Caps, &'static str); 6] = [
         (Caps::READ, "read"),
         (Caps::WRITE, "write"),
         (Caps::NET, "net"),
         (Caps::ENV, "env"),
-        (Caps::EXEC, "exec"),
         (Caps::EXIT, "exit"),
         (Caps::ATTACH, "attach"),
     ];

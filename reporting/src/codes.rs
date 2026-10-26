@@ -119,7 +119,7 @@ pub enum ErrorCode {
     InvalidFfiType,
     DeclareArity,
     InvokeArity,
-    /// `env::exec` without `--allow-exec`.
+    /// Retired: `env::exec` moved to the coil-process package.
     HostExecDenied,
     /// `env::exit` without `--allow-exit`.
     HostExitDenied,
@@ -320,7 +320,7 @@ impl ErrorCode {
             Self::InvalidFfiType => "invalid FFI type",
             Self::DeclareArity => "declare argument mismatch",
             Self::InvokeArity => "invoke argument mismatch",
-            Self::HostExecDenied => "env::exec is not granted",
+            Self::HostExecDenied => "env::exec is not granted (retired)",
             Self::HostExitDenied => "env::exit is not granted",
             Self::HostAttachDenied => "Stream.attach is not granted",
             Self::HostFfiExecDenied => "FFI process-exec is not granted",

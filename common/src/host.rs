@@ -58,7 +58,6 @@ const WRITE_FS: Caps = Caps::WRITE;
 const COPY_FS: Caps = Caps::READ.union(Caps::WRITE);
 const NET_CAP: Caps = Caps::NET;
 const ENV_CAP: Caps = Caps::ENV;
-const EXEC_CAP: Caps = Caps::EXEC;
 const EXIT_CAP: Caps = Caps::EXIT;
 const ATTACH_CAP: Caps = Caps::ATTACH;
 
@@ -512,12 +511,14 @@ pub const HOST_NATIVES: &[HostNative] = &[
         effects: EXEC,
         caps: EXIT_CAP,
     },
+    // Removed slot: `env::exec` moved to the coil-process package. Kept so
+    // later ids do not slide; nothing exports it and the runtime panics.
     HostNative {
         name: "env_exec",
         arity: 2,
         id: 64,
         effects: EXEC,
-        caps: EXEC_CAP,
+        caps: Caps::NONE,
     },
     HostNative {
         name: "ord",
@@ -1477,7 +1478,7 @@ pub fn host_native_ids() -> impl Iterator<Item = (&'static str, usize)> {
     HOST_NATIVES.iter().map(|e| (e.name, e.id as usize))
 }
 
-/// True when `name` is a libc/CRT process-exec symbol (not `env::exec`).
+/// True when `name` is a libc/CRT process-exec symbol.
 pub fn is_ffi_exec_symbol(name: &str) -> bool {
     let n = name.trim().trim_matches('_').to_ascii_lowercase();
     matches!(
