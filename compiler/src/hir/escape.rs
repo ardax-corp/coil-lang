@@ -1,0 +1,492 @@
+//! Escape facts per body (`feature/escape-memory` step 1): which
+//! parameters a call may keep, which it may hand back in its result, and
+//! whether its result is fresh.
+//!
+//! A value *escapes* when something may still reach it after the call
+//! returns other than through the result: a store into an object that is
+//! not a fresh object of this body, a static, a closure or `defer` capture,
+//! a `yield`, or an argument a callee keeps. A parameter is *returned* when
+//! the result may reach it. A result is *fresh* when everything it reaches
+//! was allocated by this call (here or in a callee with a fresh result) and
+//! nothing else reaches it: a caller that drops the result can free the
+//! whole graph.
+//!
+//! The facts ride on [`Summary`] (`escapes`, `returns`, `shared_ret`), so
+//! the effects fixed point solves them across calls and modules. Every
+//! fact starts optimistic and only grows, so the loop ends; a callee the
+//! analysis cannot see keeps everything and returns nothing fresh.
+//!
+//! The walk is flow-insensitive: a local holds every value ever assigned
+//! to it, and a value derived from another (a field, an element, a
+//! pattern binding) may reach whatever its source reaches.
+
+use std::collections::HashMap;
+
+use super::{Builtin, BinOp, Callee, Cx, HirBody, HirId, HirKind, HirPat, LocalId, LocalKind, MakeKind, Summary, Walk};
+use super::{is_vec, pat_binds, VEC_MUTATORS};
+use crate::typechecking::ty::Ty;
+
+/// Bit `i` of [`Src::sites`] for the first 63 allocation sites; later
+/// sites share bit 63, which only merges their facts.
+const SITE_BITS: u32 = 64;
+
+/// What a value may reach.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Src {
+    /// Parameters (bit `i` for parameter `i`, below 64).
+    params: u64,
+    /// Objects allocated in this body, by site.
+    sites: u64,
+    /// Anything else: a static, a string literal, a capture, a callee's
+    /// result that is not fresh.
+    other: bool,
+}
+
+impl Src {
+    const EMPTY: Self = Self { params: 0, sites: 0, other: false };
+    const OTHER: Self = Self { params: 0, sites: 0, other: true };
+
+    fn union(self, o: Self) -> Self {
+        Self {
+            params: self.params | o.params,
+            sites: self.sites | o.sites,
+            other: self.other || o.other,
+        }
+    }
+
+    fn is_empty(self) -> bool {
+        self == Self::EMPTY
+    }
+}
+
+/// Whether a value of `ty` is a word with nothing behind it.
+pub(super) fn no_heap(ty: Option<&Ty>) -> bool {
+    match ty {
+        Some(Ty::Readonly(inner)) => no_heap(Some(inner)),
+        Some(Ty::Con(n)) => matches!(
+            n.as_str(),
+            "int" | "float" | "bool" | "byte" | "unit" | "char" | "f32" | "f64" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64"
+        ),
+        _ => false,
+    }
+}
+
+/// The escape facts of body `w.index`, given the summaries of this
+/// iteration of the fixed point: `(escapes, returns, shared_ret)`.
+pub(super) fn summarize(cx: &Cx<'_>, w: &Walk<'_>) -> (u64, u64, bool) {
+    let body = &cx.module.bodies[w.index];
+    let mut e = Escape {
+        cx,
+        w,
+        body,
+        sites: HashMap::new(),
+        locals: HashMap::new(),
+        contained: HashMap::new(),
+    };
+    e.solve_locals();
+    let mut escaped = Src::EMPTY;
+    let mut returned = Src::EMPTY;
+    // A coroutine's frame outlives the call that starts it.
+    if body.is_coro {
+        escaped.params = u64::MAX;
+    }
+    for i in 0..body.exprs.len() {
+        e.sink(HirId(i as u32), &mut escaped, &mut returned);
+    }
+    if let Some(root) = body.root {
+        for v in result_exprs(body, root) {
+            returned = returned.union(e.src(v));
+        }
+    }
+    let escaped = e.close(escaped);
+    let returned = e.close(returned);
+    let shared_ret = returned.other || returned.params != 0 || returned.sites & escaped.sites != 0;
+    (escaped.params, returned.params & !escaped.params, shared_ret)
+}
+
+/// The expressions whose values a body's root hands back without
+/// `return`: the root, through blocks, `if` and `match` tails.
+fn result_exprs(body: &HirBody, root: HirId) -> Vec<HirId> {
+    let mut out = Vec::new();
+    let mut work = vec![root];
+    while let Some(id) = work.pop() {
+        match &body.expr(id).kind {
+            HirKind::Block { tail: Some(t), .. } => work.push(*t),
+            HirKind::Block { tail: None, .. } => {}
+            HirKind::If { then, els, .. } => {
+                work.push(*then);
+                work.extend(*els);
+            }
+            HirKind::Match { arms, .. } => work.extend(arms.iter().map(|a| a.body)),
+            _ => out.push(id),
+        }
+    }
+    out
+}
+
+struct Escape<'c, 'a, 's> {
+    cx: &'c Cx<'a>,
+    w: &'c Walk<'s>,
+    body: &'a HirBody,
+    /// Allocation site → bit.
+    sites: HashMap<HirId, u32>,
+    /// What each local may hold.
+    locals: HashMap<LocalId, Src>,
+    /// What each fresh object of this body may hold (stores into it).
+    contained: HashMap<u32, Src>,
+}
+
+impl Escape<'_, '_, '_> {
+    fn site(&mut self, id: HirId) -> Src {
+        let n = self.sites.len() as u32;
+        let bit = *self.sites.entry(id).or_insert(n.min(SITE_BITS - 1));
+        Src {
+            sites: 1 << bit,
+            ..Src::EMPTY
+        }
+    }
+
+    /// `s` and everything the fresh objects in it may hold.
+    fn close(&self, mut s: Src) -> Src {
+        loop {
+            let mut next = s;
+            for bit in 0..SITE_BITS {
+                if s.sites & (1 << bit) != 0
+                    && let Some(c) = self.contained.get(&bit)
+                {
+                    next = next.union(*c);
+                }
+            }
+            if next == s {
+                return s;
+            }
+            s = next;
+        }
+    }
+
+    fn local(&self, l: LocalId) -> Src {
+        self.locals.get(&l).copied().unwrap_or(Src::EMPTY)
+    }
+
+    /// Fill [`Self::locals`] to a fixed point: parameters, then every
+    /// `let`, assignment, pattern binding and `for` variable, and the
+    /// stores into fresh objects.
+    fn solve_locals(&mut self) {
+        let body = self.body;
+        for (i, p) in body.params.iter().enumerate() {
+            let s = if i < 64 {
+                Src {
+                    params: 1 << i,
+                    ..Src::EMPTY
+                }
+            } else {
+                Src::OTHER
+            };
+            self.locals.insert(*p, s);
+        }
+        for (i, l) in body.locals.iter().enumerate() {
+            if l.kind == LocalKind::Capture {
+                self.locals.insert(LocalId(i as u32), Src::OTHER);
+            }
+        }
+        for (_, inner) in &body.captures {
+            self.locals.insert(*inner, Src::OTHER);
+        }
+        loop {
+            let before = (self.locals.clone(), self.contained.clone());
+            for i in 0..body.exprs.len() {
+                let id = HirId(i as u32);
+                match &body.expr(id).kind {
+                    HirKind::Let { local, init: Some(init) } => {
+                        let s = self.src(*init);
+                        self.add_local(*local, s);
+                    }
+                    HirKind::LetPat { pat, init } => {
+                        let s = self.src(*init);
+                        self.bind(pat, s);
+                    }
+                    HirKind::Assign { place, value } => {
+                        let s = self.src(*value);
+                        match body.expr(*place).kind {
+                            HirKind::Local(l) => self.add_local(l, s),
+                            HirKind::Field { base, .. } | HirKind::Index { base, .. } => self.store(base, s),
+                            _ => {}
+                        }
+                    }
+                    HirKind::Append { base, value } => {
+                        let s = self.src(*value);
+                        self.store(*base, s);
+                    }
+                    HirKind::Match { scrutinee, arms } => {
+                        let s = self.src(*scrutinee);
+                        for arm in arms {
+                            self.bind(&arm.pat, s);
+                        }
+                    }
+                    HirKind::ForIn { pat, iterable, .. } => {
+                        let s = self.src(*iterable);
+                        self.bind(pat, s);
+                    }
+                    HirKind::Call { callee: Callee::Method { name }, args }
+                        if VEC_MUTATORS.contains(&name.as_str())
+                            && args.first().is_some_and(|r| is_vec(body.expr(*r).ty.as_ref())) =>
+                    {
+                        let s = args[1..].iter().fold(Src::EMPTY, |m, a| m.union(self.src(*a)));
+                        self.store(args[0], s);
+                    }
+                    _ => {}
+                }
+            }
+            if (self.locals.clone(), self.contained.clone()) == before {
+                return;
+            }
+        }
+    }
+
+    fn add_local(&mut self, l: LocalId, s: Src) {
+        if s.is_empty() {
+            return;
+        }
+        let e = self.locals.entry(l).or_default();
+        *e = e.union(s);
+    }
+
+    fn bind(&mut self, pat: &HirPat, s: Src) {
+        let mut binds = Vec::new();
+        pat_binds(pat, &mut binds);
+        for l in binds {
+            if !no_heap(self.body.local(l).ty.as_ref()) {
+                self.add_local(l, s);
+            }
+        }
+    }
+
+    /// `s` is stored into an object reached by `base`. Into a fresh
+    /// object of this body it is held there; anywhere else it escapes,
+    /// which [`Self::sink`] records.
+    fn store(&mut self, base: HirId, s: Src) {
+        let b = self.src(base);
+        if b.params == 0 && !b.other {
+            for bit in 0..SITE_BITS {
+                if b.sites & (1 << bit) != 0 {
+                    let e = self.contained.entry(bit).or_default();
+                    *e = e.union(s);
+                }
+            }
+        }
+    }
+
+    /// Whether a store into what `base` reaches keeps the value inside
+    /// fresh objects of this body.
+    fn into_fresh(&mut self, base: HirId) -> bool {
+        let b = self.src(base);
+        b.params == 0 && !b.other && b.sites != 0
+    }
+
+    /// The summary of a call's callee and whether its arguments map to
+    /// its parameters by position.
+    fn callee(&self, at: HirId, callee: &Callee, args: &[HirId]) -> Option<Summary> {
+        let body = self.body;
+        let positional = args
+            .iter()
+            .all(|a| !matches!(body.expr(*a).kind, HirKind::Named { .. } | HirKind::Spread(_)));
+        if !positional {
+            return None;
+        }
+        let _ = at;
+        match callee {
+            Callee::Named { name, def, .. } => Some(self.cx.named(self.w, name, *def)),
+            Callee::Method { name } => {
+                let recv = *args.first()?;
+                let recv_ty = body.expr(recv).ty.as_ref();
+                if is_vec(recv_ty) && matches!(name.as_str(), "len" | "capacity") {
+                    return Some(Summary::default());
+                }
+                self.cx.method(self.w, recv, name).map(|(s, _)| s)
+            }
+            Callee::Value(f) => self.cx.fn_value(self.w, *f),
+        }
+    }
+
+    /// What the value of `id` may reach.
+    fn src(&mut self, id: HirId) -> Src {
+        let body = self.body;
+        let e = body.expr(id);
+        if no_heap(e.ty.as_ref()) {
+            return Src::EMPTY;
+        }
+        match &e.kind {
+            HirKind::Lit(super::super::Lit::Str(_)) => Src::OTHER,
+            HirKind::Lit(_) => Src::EMPTY,
+            HirKind::Local(l) => self.local(*l),
+            HirKind::Global { .. } => Src::OTHER,
+            HirKind::Field { base, .. } | HirKind::Index { base, .. } => {
+                let b = self.src(*base);
+                self.close(b)
+            }
+            HirKind::Bin { op: BinOp::StrConcat, .. } => self.site(id),
+            HirKind::Bin { .. } | HirKind::Logic { .. } | HirKind::Un { .. } => Src::OTHER,
+            HirKind::Cast { value } | HirKind::Named { value, .. } | HirKind::Spread(value) => self.src(*value),
+            HirKind::Call { callee, args } => {
+                if let Callee::Method { name } = callee
+                    && VEC_MUTATORS.contains(&name.as_str())
+                    && args.first().is_some_and(|r| is_vec(body.expr(*r).ty.as_ref()))
+                {
+                    // `pop` / `remove` hand back an element.
+                    let b = self.src(args[0]);
+                    return self.close(b);
+                }
+                let Some(s) = self.callee(id, callee, args) else {
+                    return Src::OTHER;
+                };
+                let mut out = if s.shared_ret { Src::OTHER } else { self.site(id) };
+                for (j, a) in args.iter().enumerate() {
+                    if j >= 64 || s.returns & (1 << j) != 0 {
+                        out = out.union(self.src(*a));
+                    }
+                }
+                out
+            }
+            HirKind::Make { kind, args } => {
+                let mut out = self.site(id);
+                if !matches!(kind, MakeKind::Range { .. }) {
+                    for a in args {
+                        out = out.union(self.src(*a));
+                    }
+                }
+                out
+            }
+            HirKind::Block { tail, .. } => tail.map_or(Src::EMPTY, |t| self.src(t)),
+            HirKind::If { then, els, .. } => {
+                let t = self.src(*then);
+                els.map_or(t, |x| t.union(self.src(x)))
+            }
+            HirKind::Match { arms, .. } => arms.iter().fold(Src::EMPTY, |m, a| m.union(self.src(a.body))),
+            HirKind::Lambda { body: inner } => {
+                let mut out = self.site(id);
+                for (outer, _) in &self.cx.module.bodies[*inner].captures {
+                    out = out.union(self.local(*outer));
+                }
+                out
+            }
+            HirKind::Builtin { op, args } => match op {
+                Builtin::Box { .. } => args.iter().fold(self.site(id), |m, a| m.union(self.src(*a))),
+                Builtin::Unbox { .. } | Builtin::Relayout => args.first().map_or(Src::EMPTY, |a| self.src(*a)),
+                Builtin::Stringify => self.site(id),
+                _ => Src::OTHER,
+            },
+            HirKind::Resume { .. } => Src::OTHER,
+            _ => Src::EMPTY,
+        }
+    }
+
+    /// Record what node `id` lets escape or hands back.
+    fn sink(&mut self, id: HirId, escaped: &mut Src, returned: &mut Src) {
+        let body = self.body;
+        let esc = |s: Src, escaped: &mut Src| *escaped = escaped.union(s);
+        match &body.expr(id).kind {
+            HirKind::Return(Some(v)) => *returned = returned.union(self.src(*v)),
+            HirKind::Assign { place, value } => match body.expr(*place).kind {
+                HirKind::Local(_) => {}
+                HirKind::Field { base, .. } | HirKind::Index { base, .. } if self.into_fresh(base) => {}
+                _ => {
+                    let s = self.src(*value);
+                    esc(s, escaped);
+                }
+            },
+            HirKind::Append { base, value } if !self.into_fresh(*base) => {
+                let s = self.src(*value);
+                esc(s, escaped);
+            }
+            HirKind::Yield { value, .. } => {
+                let s = self.src(*value);
+                esc(s, escaped);
+            }
+            HirKind::Resume { value: Some(v), .. } => {
+                let s = self.src(*v);
+                esc(s, escaped);
+            }
+            HirKind::Lambda { body: inner } => {
+                for (outer, _) in &self.cx.module.bodies[*inner].captures {
+                    esc(self.local(*outer), escaped);
+                }
+            }
+            HirKind::Defer { captures, .. } => {
+                for l in captures.iter().flatten() {
+                    esc(self.local(*l), escaped);
+                }
+            }
+            HirKind::Builtin { op, args } => match op {
+                Builtin::Box { .. } | Builtin::Unbox { .. } | Builtin::Relayout | Builtin::Stringify | Builtin::Print | Builtin::Panic | Builtin::TypeOf => {}
+                _ => {
+                    for a in args {
+                        let s = self.src(*a);
+                        esc(s, escaped);
+                    }
+                }
+            },
+            HirKind::Bin { op: BinOp::Overloaded(_), lhs, rhs } => {
+                let s = self.src(*lhs).union(self.src(*rhs));
+                esc(s, escaped);
+            }
+            HirKind::Call { callee, args } => {
+                if let Callee::Method { name } = callee
+                    && VEC_MUTATORS.contains(&name.as_str())
+                    && args.first().is_some_and(|r| is_vec(body.expr(*r).ty.as_ref()))
+                {
+                    if !self.into_fresh(args[0]) {
+                        for a in &args[1..] {
+                            let s = self.src(*a);
+                            esc(s, escaped);
+                        }
+                    }
+                    return;
+                }
+                let s = self.callee(id, callee, args);
+                for (j, a) in args.iter().enumerate() {
+                    let keeps = s.is_none_or(|s| j >= 64 || s.escapes & (1 << j) != 0);
+                    if keeps {
+                        let v = self.src(*a);
+                        esc(v, escaped);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Host natives that allocate their result and keep nothing they are
+/// passed. Step 2 frees what these return, so each entry is checked
+/// against the VM: the result is always a new object.
+const FRESH_HOSTS: &[&str] = &[
+    "to_bytes",
+    "from_bytes",
+    "string_slice_bytes",
+    "slice_bytes",
+    "bytes_slice",
+    "format",
+    "vec_with_capacity",
+    "with_capacity",
+];
+
+/// Host natives with effects that still keep nothing they are passed: the
+/// buffer of a `write` is read during the call only.
+const NON_RETAINING_HOSTS: &[&str] = &["write", "write_from", "write_all", "read", "print", "println", "eprint", "eprintln"];
+
+/// [`Summary::of`] for host native `name`, with its escape facts: a pure
+/// native or a known non-retaining one keeps nothing (it may still hand an
+/// argument back), and the natives in [`FRESH_HOSTS`] return a fresh object.
+pub(super) fn host_summary(name: &str, mut s: Summary) -> Summary {
+    let short = name.rsplit("::").next().unwrap_or(name);
+    if FRESH_HOSTS.contains(&short) {
+        s.escapes = 0;
+        s.returns = 0;
+        s.shared_ret = false;
+    } else if NON_RETAINING_HOSTS.contains(&short)
+        || (!s.flags.contains(common::EffectFlags::UNKNOWN) && !s.flags.contains(common::EffectFlags::HEAP_MUT) && !s.flags.contains(common::EffectFlags::HOST))
+    {
+        s.escapes = 0;
+    }
+    s
+}
