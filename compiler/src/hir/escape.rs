@@ -22,7 +22,7 @@
 
 use std::collections::HashMap;
 
-use super::{Builtin, BinOp, Callee, Cx, HirBody, HirId, HirKind, HirPat, LocalId, LocalKind, MakeKind, Summary, Walk};
+use super::{Builtin, BinOp, Callee, Cx, HirBody, HirId, HirKind, HirModule, HirPat, LocalId, LocalKind, MakeKind, Summary, Walk};
 use super::{is_vec, pat_binds, VEC_MUTATORS};
 use crate::typechecking::ty::Ty;
 
@@ -32,21 +32,21 @@ const SITE_BITS: u32 = 64;
 
 /// What a value may reach.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct Src {
+pub(super) struct Src {
     /// Parameters (bit `i` for parameter `i`, below 64).
-    params: u64,
+    pub(super) params: u64,
     /// Objects allocated in this body, by site.
-    sites: u64,
+    pub(super) sites: u64,
     /// Anything else: a static, a string literal, a capture, a callee's
     /// result that is not fresh.
-    other: bool,
+    pub(super) other: bool,
 }
 
 impl Src {
-    const EMPTY: Self = Self { params: 0, sites: 0, other: false };
+    pub(super) const EMPTY: Self = Self { params: 0, sites: 0, other: false };
     const OTHER: Self = Self { params: 0, sites: 0, other: true };
 
-    fn union(self, o: Self) -> Self {
+    pub(super) fn union(self, o: Self) -> Self {
         Self {
             params: self.params | o.params,
             sites: self.sites | o.sites,
@@ -75,14 +75,12 @@ pub(super) fn no_heap(ty: Option<&Ty>) -> bool {
 /// iteration of the fixed point: `(escapes, returns, shared_ret)`.
 pub(super) fn summarize(cx: &Cx<'_>, w: &Walk<'_>) -> (u64, u64, bool) {
     let body = &cx.module.bodies[w.index];
-    let mut e = Escape {
-        cx,
-        w,
-        body,
-        sites: HashMap::new(),
-        locals: HashMap::new(),
-        contained: HashMap::new(),
+    let lookup = |callee: &Callee, args: &[HirId]| match callee {
+        Callee::Named { name, def, .. } => Some(cx.named(w, name, *def)),
+        Callee::Method { name } => cx.method(w, *args.first()?, name).map(|(s, _)| s),
+        Callee::Value(f) => cx.fn_value(w, *f),
     };
+    let mut e = Escape::new(cx.module, body, &lookup);
     e.solve_locals();
     let mut escaped = Src::EMPTY;
     let mut returned = Src::EMPTY;
@@ -106,7 +104,7 @@ pub(super) fn summarize(cx: &Cx<'_>, w: &Walk<'_>) -> (u64, u64, bool) {
 
 /// The expressions whose values a body's root hands back without
 /// `return`: the root, through blocks, `if` and `match` tails.
-fn result_exprs(body: &HirBody, root: HirId) -> Vec<HirId> {
+pub(super) fn result_exprs(body: &HirBody, root: HirId) -> Vec<HirId> {
     let mut out = Vec::new();
     let mut work = vec![root];
     while let Some(id) = work.pop() {
@@ -124,9 +122,13 @@ fn result_exprs(body: &HirBody, root: HirId) -> Vec<HirId> {
     out
 }
 
-struct Escape<'c, 'a, 's> {
-    cx: &'c Cx<'a>,
-    w: &'c Walk<'s>,
+/// The summary of a call's callee, by callee and arguments; `None` when
+/// it is unknown.
+pub(super) type CallLookup<'c> = dyn Fn(&Callee, &[HirId]) -> Option<Summary> + 'c;
+
+pub(super) struct Escape<'c, 'a> {
+    module: &'a HirModule,
+    lookup: &'c CallLookup<'c>,
     body: &'a HirBody,
     /// Allocation site → bit.
     sites: HashMap<HirId, u32>,
@@ -136,7 +138,18 @@ struct Escape<'c, 'a, 's> {
     contained: HashMap<u32, Src>,
 }
 
-impl Escape<'_, '_, '_> {
+impl<'c, 'a> Escape<'c, 'a> {
+    pub(super) fn new(module: &'a HirModule, body: &'a HirBody, lookup: &'c CallLookup<'c>) -> Self {
+        Self {
+            module,
+            lookup,
+            body,
+            sites: HashMap::new(),
+            locals: HashMap::new(),
+            contained: HashMap::new(),
+        }
+    }
+
     fn site(&mut self, id: HirId) -> Src {
         let n = self.sites.len() as u32;
         let bit = *self.sites.entry(id).or_insert(n.min(SITE_BITS - 1));
@@ -147,7 +160,7 @@ impl Escape<'_, '_, '_> {
     }
 
     /// `s` and everything the fresh objects in it may hold.
-    fn close(&self, mut s: Src) -> Src {
+    pub(super) fn close(&self, mut s: Src) -> Src {
         loop {
             let mut next = s;
             for bit in 0..SITE_BITS {
@@ -164,14 +177,20 @@ impl Escape<'_, '_, '_> {
         }
     }
 
-    fn local(&self, l: LocalId) -> Src {
+    /// Everything stored into fresh objects of this body.
+    pub(super) fn held(&self) -> Src {
+        let all = self.contained.values().fold(Src::EMPTY, |m, c| m.union(*c));
+        self.close(all)
+    }
+
+    pub(super) fn local(&self, l: LocalId) -> Src {
         self.locals.get(&l).copied().unwrap_or(Src::EMPTY)
     }
 
     /// Fill [`Self::locals`] to a fixed point: parameters, then every
     /// `let`, assignment, pattern binding and `for` variable, and the
     /// stores into fresh objects.
-    fn solve_locals(&mut self) {
+    pub(super) fn solve_locals(&mut self) {
         let body = self.body;
         for (i, p) in body.params.iter().enumerate() {
             let s = if i < 64 {
@@ -234,6 +253,17 @@ impl Escape<'_, '_, '_> {
                         let s = args[1..].iter().fold(Src::EMPTY, |m, a| m.union(self.src(*a)));
                         self.store(args[0], s);
                     }
+                    // A callee that changes what an argument reaches may
+                    // store anything there, so a fresh object passed to it
+                    // may come back holding what this body cannot see.
+                    HirKind::Call { callee, args } => {
+                        let s = self.callee(id, callee, args);
+                        for (j, a) in args.iter().enumerate() {
+                            if s.is_none_or(|s| j >= 64 || s.mutates & (1 << j) != 0) {
+                                self.store(*a, Src::OTHER);
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -283,33 +313,33 @@ impl Escape<'_, '_, '_> {
         b.params == 0 && !b.other && b.sites != 0
     }
 
-    /// The summary of a call's callee and whether its arguments map to
-    /// its parameters by position.
-    fn callee(&self, at: HirId, callee: &Callee, args: &[HirId]) -> Option<Summary> {
+    /// The summary of a call's callee, when its arguments map to its
+    /// parameters by position.
+    pub(super) fn callee(&self, at: HirId, callee: &Callee, args: &[HirId]) -> Option<Summary> {
         let body = self.body;
+        // A call that yields a function may be a partial application,
+        // whose closure keeps the arguments given.
+        if matches!(body.expr(at).ty.as_ref().map(crate::typechecking::ty::strip_readonly), Some(Ty::Fun(..))) {
+            return None;
+        }
         let positional = args
             .iter()
             .all(|a| !matches!(body.expr(*a).kind, HirKind::Named { .. } | HirKind::Spread(_)));
         if !positional {
             return None;
         }
-        let _ = at;
-        match callee {
-            Callee::Named { name, def, .. } => Some(self.cx.named(self.w, name, *def)),
-            Callee::Method { name } => {
-                let recv = *args.first()?;
-                let recv_ty = body.expr(recv).ty.as_ref();
-                if is_vec(recv_ty) && matches!(name.as_str(), "len" | "capacity") {
-                    return Some(Summary::default());
-                }
-                self.cx.method(self.w, recv, name).map(|(s, _)| s)
-            }
-            Callee::Value(f) => self.cx.fn_value(self.w, *f),
+        if let Callee::Method { name } = callee
+            && let Some(recv) = args.first()
+            && is_vec(body.expr(*recv).ty.as_ref())
+            && matches!(name.as_str(), "len" | "capacity")
+        {
+            return Some(Summary::default());
         }
+        (self.lookup)(callee, args)
     }
 
     /// What the value of `id` may reach.
-    fn src(&mut self, id: HirId) -> Src {
+    pub(super) fn src(&mut self, id: HirId) -> Src {
         let body = self.body;
         let e = body.expr(id);
         if no_heap(e.ty.as_ref()) {
@@ -364,7 +394,7 @@ impl Escape<'_, '_, '_> {
             HirKind::Match { arms, .. } => arms.iter().fold(Src::EMPTY, |m, a| m.union(self.src(a.body))),
             HirKind::Lambda { body: inner } => {
                 let mut out = self.site(id);
-                for (outer, _) in &self.cx.module.bodies[*inner].captures {
+                for (outer, _) in &self.module.bodies[*inner].captures {
                     out = out.union(self.local(*outer));
                 }
                 out
@@ -381,7 +411,7 @@ impl Escape<'_, '_, '_> {
     }
 
     /// Record what node `id` lets escape or hands back.
-    fn sink(&mut self, id: HirId, escaped: &mut Src, returned: &mut Src) {
+    pub(super) fn sink(&mut self, id: HirId, escaped: &mut Src, returned: &mut Src) {
         let body = self.body;
         let esc = |s: Src, escaped: &mut Src| *escaped = escaped.union(s);
         match &body.expr(id).kind {
@@ -407,7 +437,7 @@ impl Escape<'_, '_, '_> {
                 esc(s, escaped);
             }
             HirKind::Lambda { body: inner } => {
-                for (outer, _) in &self.cx.module.bodies[*inner].captures {
+                for (outer, _) in &self.module.bodies[*inner].captures {
                     esc(self.local(*outer), escaped);
                 }
             }
@@ -457,14 +487,16 @@ impl Escape<'_, '_, '_> {
 }
 
 /// Host natives that allocate their result and keep nothing they are
-/// passed. Step 2 frees what these return, so each entry is checked
-/// against the VM: the result is always a new object.
+/// passed. Early freeing frees what these return, so each is checked
+/// against the VM: `to_bytes`, `from_bytes` and `vec_with_capacity`
+/// allocate a new object, `string_slice_bytes` a new string (that may
+/// share its bytes, which are reference-counted), and `format` (also how
+/// `a + b` on strings runs) a new string.
 const FRESH_HOSTS: &[&str] = &[
     "to_bytes",
     "from_bytes",
     "string_slice_bytes",
     "slice_bytes",
-    "bytes_slice",
     "format",
     "vec_with_capacity",
     "with_capacity",
@@ -473,6 +505,12 @@ const FRESH_HOSTS: &[&str] = &[
 /// Host natives with effects that still keep nothing they are passed: the
 /// buffer of a `write` is read during the call only.
 const NON_RETAINING_HOSTS: &[&str] = &["write", "write_from", "write_all", "read", "print", "println", "eprint", "eprintln"];
+
+/// Whether `name` is in [`FRESH_HOSTS`] or [`NON_RETAINING_HOSTS`].
+pub(super) fn is_listed_host(name: &str) -> bool {
+    let short = name.rsplit("::").next().unwrap_or(name);
+    FRESH_HOSTS.contains(&short) || NON_RETAINING_HOSTS.contains(&short)
+}
 
 /// [`Summary::of`] for host native `name`, with its escape facts: a pure
 /// native or a known non-retaining one keeps nothing (it may still hand an
