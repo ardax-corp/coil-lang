@@ -174,9 +174,8 @@ pub const ARCHIVE_MAJOR: u16 = 5;
 /// would read the old tags as other variants, so they are not loadable.
 ///
 /// Major 5 minors:
-/// 1 — HostInvoke `gc_free_early` (id 174): free an object the compiler
-///     proved unreachable at the end of its scope. Older archives never
-///     reference it.
+/// 1 — `FreeEarly`: free an object the compiler proved dead (escape
+///     analysis). Older VMs do not know the opcode.
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.
