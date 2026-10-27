@@ -121,12 +121,17 @@ fn all_off() -> OptimizeOptions {
 }
 
 /// The switches no level sets: on at every level (a setter may turn them
-/// off), and `COIL_HIR_BISECT`, read once per options built.
+/// off), and `COIL_HIR_BISECT`, read once per options built and only by
+/// debug builds (release `coil` never bisects).
 fn level_free_knobs(o: &mut OptimizeOptions) {
     o.hir_inline = true;
     o.hir_inline_heap = true;
     o.hir_pair_locals = true;
-    o.hir_bisect = std::env::var("COIL_HIR_BISECT").ok().and_then(|v| v.parse::<usize>().ok());
+    o.hir_bisect = if cfg!(debug_assertions) {
+        std::env::var("COIL_HIR_BISECT").ok().and_then(|v| v.parse::<usize>().ok())
+    } else {
+        None
+    };
     o.auto_par = true;
 }
 

@@ -65,7 +65,7 @@ A few switches no level sets are on at every level
 |--------|-------|-----------|
 | `--auto-par on\|off` | `auto_par` | no automatic fork-join (`Pipeline::set_auto_par`) |
 | `Pipeline::set_hir_inline` (unit tests only) | `hir_inline` | no typed inlining |
-| `COIL_HIR_BISECT=N` | `hir_bisect` | (a number, unset by default) only the first `N` bodies HIR lowering admits in the process lower; the `N`th is named on stderr |
+| `COIL_HIR_BISECT=N` | `hir_bisect` | (a number, unset by default) only the first `N` bodies HIR lowering admits in the process lower; the `N`th is named on stderr. Debug builds only |
 
 Compile-time call folding: `--fold-calls on|off` or
 `Pipeline::set_call_fold` (see `call_fold`). In the compiler's own unit
