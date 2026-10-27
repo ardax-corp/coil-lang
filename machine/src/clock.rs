@@ -24,10 +24,21 @@ pub fn mono_nanos() -> i64 {
 }
 
 /// Block the calling thread for `ms` milliseconds. Negative durations are no-ops.
+///
+/// Sleeps until `Instant` (the clock `mono_nanos` reads) has advanced by `ms`:
+/// some hosts' sleeps wake early or run on a different clock (node's WASI
+/// `poll_oneoff`, coil-lang#2052), so a short wake sleeps again for the rest.
 pub fn sleep_ms(ms: i64) {
     if let Ok(ms) = u64::try_from(ms)
         && ms > 0 {
-            std::thread::sleep(Duration::from_millis(ms));
+            let deadline = Instant::now() + Duration::from_millis(ms);
+            loop {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    break;
+                }
+                std::thread::sleep(left);
+            }
         }
 }
 
