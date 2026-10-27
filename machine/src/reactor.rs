@@ -1137,6 +1137,34 @@ mod tests {
         reactor.shutdown();
     }
 
+    /// A job run on a thread that is waiting on its own job (a join's
+    /// help-steal, or a test run here) leaves that thread's static word
+    /// kinds as they were: the waiting VM's next GC reads its statics by
+    /// them, and a helped job of another program has another layout
+    /// (coil-lang#2053).
+    #[test]
+    fn job_run_here_keeps_this_threads_static_kinds() {
+        let reactor = Reactor::new(1);
+        let mine = Arc::new(vec![common::WORD_SCALAR, common::WORD_POINTER]);
+        let outer = crate::vm::swap_static_word_kinds(Arc::clone(&mine));
+        let other = Arc::new(ThreadProgram {
+            static_slot_count: 1,
+            static_word_kinds: Arc::new(vec![common::WORD_POINTER]),
+            ..(*const_return_program(1)).clone()
+        });
+        let case = TestCase {
+            entry: 0,
+            init_ip: None,
+            expect_ok_result: false,
+            coverage: false,
+            step_budget: None,
+        };
+        assert!(reactor.run_test_here(program_ctx(&reactor, other), case, Arc::default()).passed);
+        let after = crate::vm::swap_static_word_kinds(outer);
+        assert_eq!(*after, *mine);
+        reactor.shutdown();
+    }
+
     /// With coverage on, both instructions of `CONST; RETURN` are counted once.
     #[cfg(feature = "coverage")]
     #[test]
