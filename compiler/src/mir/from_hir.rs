@@ -2666,8 +2666,8 @@ impl Lower<'_> {
                     return Ok(Val::Never);
                 };
                 // A word that is no reference (a scalar niche) has nothing
-                // to free.
-                if !matches!(self.b.value_ty(v), MirTy::HeapRef | MirTy::I64) {
+                // to free; a pointer niche frees the object it points at.
+                if !matches!(self.b.value_ty(v), MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes | MirTy::I64) {
                     return Ok(Val::Unit);
                 }
                 self.at_expr(id, |l| l.b.ins_free_early(v, *deep).map_err(mir))?;

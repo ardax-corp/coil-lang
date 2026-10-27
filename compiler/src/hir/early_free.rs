@@ -2,7 +2,7 @@
 //! end of its scope, or right after the call it was passed to, when the
 //! escape facts prove nothing else can reach it.
 //!
-//! Two shapes are rewritten on a body after the HIR optimizer ran:
+//! Four shapes are rewritten on a body after the HIR optimizer ran:
 //!
 //! - **Call temporaries.** `f(g(x))` where `g`'s result is fresh (nothing
 //!   else reaches anything in it) and `f` neither keeps, returns nor
@@ -14,6 +14,12 @@
 //!   declares it ends, and before every `return` after the `let`
 //!   (`let b = to_bytes(s)`). `break`, `continue` and a panic leave it to
 //!   the collector.
+//! - **Reassigned locals** (step 3). `x = v` frees `x`'s old value once
+//!   `v` is computed, when every value `x` holds is fresh and every read
+//!   of it leaves nothing behind (`s = s + piece`, `list = build(n)`).
+//! - **Match scrutinees** (step 3). `match g(x) { … }` frees the fresh
+//!   value it matched once the arms are done, when only the arms'
+//!   bindings read it and the match does not hand it back.
 //!
 //! Each free is a `Builtin::FreeEarly` of the local, then a `Clear` of it.
 //! The VM skips what it cannot free safely (interned strings, shared unit
@@ -56,16 +62,24 @@ pub(super) fn rewrite(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_
         }
     }
     let kept = e.close(escaped.union(returned)).union(e.held());
+    let stored = e.close(escaped).union(e.held());
     let parents = parents(body);
     let temps = call_temps(body, &mut e);
-    let linear = linear_locals(body, &mut e, &parents);
+    let linear = linear_locals(body, &mut e, &parents, stored);
     let locals = block_locals(body, &mut e, kept, &linear);
     let chains = concat_temps(body, &mut e, &parents);
-    let reassigns: Vec<HirId> = (0..body.exprs.len())
+    let scrutinees = match_temps(body, &mut e, &parents, kept);
+    let reassigns: Vec<(HirId, bool)> = (0..body.exprs.len())
         .map(|i| HirId(i as u32))
-        .filter(|&a| matches!(&body.expr(a).kind, HirKind::Assign { place, .. } if matches!(body.expr(*place).kind, HirKind::Local(l) if linear.contains_key(&l))))
+        .filter_map(|a| match &body.expr(a).kind {
+            HirKind::Assign { place, .. } => match body.expr(*place).kind {
+                HirKind::Local(l) => linear.get(&l).map(|&(_, deep)| (a, deep)),
+                _ => None,
+            },
+            _ => None,
+        })
         .collect();
-    if temps.is_empty() && locals.is_empty() && chains.is_empty() && reassigns.is_empty() {
+    if temps.is_empty() && locals.is_empty() && chains.is_empty() && reassigns.is_empty() && scrutinees.is_empty() {
         return None;
     }
     let mut out = body.clone();
@@ -75,8 +89,11 @@ pub(super) fn rewrite(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_
     for (head, leaves) in chains {
         free_concat_temps(&mut out, head, &leaves);
     }
-    for assign in reassigns {
-        free_on_reassign(&mut out, assign);
+    for m in scrutinees {
+        free_match_temp(&mut out, m);
+    }
+    for (assign, deep) in reassigns {
+        free_on_reassign(&mut out, assign, deep);
     }
     for (block, local) in locals {
         free_at_end(&mut out, block, local);
@@ -146,7 +163,7 @@ fn vec_mutator(body: &HirBody, callee: &Callee, args: &[HirId]) -> bool {
 
 /// `(block, local)` for every `let` local whose object nothing else
 /// reaches, with the block that declares it.
-fn block_locals(body: &HirBody, e: &mut Escape<'_, '_>, kept: Src, linear: &HashMap<LocalId, Src>) -> Vec<(HirId, LocalId)> {
+fn block_locals(body: &HirBody, e: &mut Escape<'_, '_>, kept: Src, linear: &HashMap<LocalId, (Src, bool)>) -> Vec<(HirId, LocalId)> {
     let parents = parents(body);
     // Each local's `let`s, and every node that names it.
     let mut lets: HashMap<LocalId, Vec<HirId>> = HashMap::new();
@@ -163,7 +180,7 @@ fn block_locals(body: &HirBody, e: &mut Escape<'_, '_>, kept: Src, linear: &Hash
     let srcs: Vec<(LocalId, Src)> = (0..body.locals.len())
         .map(|i| {
             let l = LocalId(i as u32);
-            (l, linear.get(&l).copied().unwrap_or_else(|| e.local(l)))
+            (l, linear.get(&l).map_or_else(|| e.local(l), |&(s, _)| s))
         })
         .collect();
     let mut out = Vec::new();
@@ -239,13 +256,71 @@ fn fresh_top(body: &HirBody, e: &mut Escape<'_, '_>, v: HirId) -> bool {
     }
 }
 
-/// Leaf-typed locals whose value is only ever read in place (copied out of
-/// by a concatenation, an element read, or a call that keeps and returns
-/// none of it) or handed on as it dies (`return x`, the tail of the block
-/// that declares it), and set only to fresh objects or literals. On such a
-/// local, `x = e` may free the old value once `e` is computed: nothing else
-/// can hold it. Each maps to what it holds other than literals.
-fn linear_locals(body: &HirBody, e: &mut Escape<'_, '_>, parents: &HashMap<HirId, HirId>) -> HashMap<LocalId, Src> {
+/// Whether `v` (an inlined body, say) builds a graph of objects of its own
+/// that, once it is assigned to `target`, nothing else holds: no store
+/// keeps any of it, and every other local that may reach it is declared
+/// inside `v` (dead once `v` is computed).
+#[allow(clippy::too_many_arguments)]
+fn fresh_graph(
+    body: &HirBody,
+    e: &mut Escape<'_, '_>,
+    parents: &HashMap<HirId, HirId>,
+    lets: &HashMap<LocalId, Vec<HirId>>,
+    stored: Src,
+    target: LocalId,
+    v: HirId,
+) -> bool {
+    let s = e.src(v);
+    if s.params != 0 || s.other || s.sites == 0 || s.sites & stored.sites != 0 {
+        return false;
+    }
+    let within = |mut at: HirId| loop {
+        if at == v {
+            return true;
+        }
+        match parents.get(&at) {
+            Some(&p) => at = p,
+            None => return false,
+        }
+    };
+    (0..body.locals.len()).map(|i| LocalId(i as u32)).filter(|&m| m != target).all(|m| {
+        let h = e.local(m);
+        if e.close(h).sites & s.sites == 0 {
+            return true;
+        }
+        !body.local(m).captured && (lets.get(&m).is_some_and(|ds| ds.iter().all(|d| within(*d))) || cleared_after(body, parents, v, m))
+    })
+}
+
+/// Whether the statement right after the one that computes `v` clears
+/// `m` (typed inlining clears its locals after their last read).
+fn cleared_after(body: &HirBody, parents: &HashMap<HirId, HirId>, v: HirId, m: LocalId) -> bool {
+    let Some(&stmt) = parents.get(&v) else {
+        return false;
+    };
+    let Some(&block) = parents.get(&stmt) else {
+        return false;
+    };
+    let HirKind::Block { stmts, .. } = &body.expr(block).kind else {
+        return false;
+    };
+    stmts
+        .iter()
+        .position(|s| *s == stmt)
+        .and_then(|i| stmts.get(i + 1))
+        .is_some_and(|n| matches!(&body.expr(*n).kind, HirKind::Clear(ls) if ls.contains(&m)))
+}
+
+/// Locals whose value is only ever read in place (copied out of by a
+/// concatenation, a read of a plain element or field, or a call that keeps
+/// and returns none of it) or handed on as it dies (`return x`, the tail of
+/// the block that declares it), and set only to fresh objects or literals.
+/// On such a local, `x = e` may free the old value once `e` is computed:
+/// nothing else can hold it. Each maps to what it holds other than literals,
+/// and whether the free takes the whole graph: a string or vector of plain
+/// values holds nothing, and any other value is read only by callees that
+/// leave it as it was (a fresh graph stays fresh).
+fn linear_locals(body: &HirBody, e: &mut Escape<'_, '_>, parents: &HashMap<HirId, HirId>, stored: Src) -> HashMap<LocalId, (Src, bool)> {
     let mut lets: HashMap<LocalId, Vec<HirId>> = HashMap::new();
     let mut defs: HashMap<LocalId, Vec<HirId>> = HashMap::new();
     let mut reads: HashMap<LocalId, Vec<HirId>> = HashMap::new();
@@ -278,7 +353,8 @@ fn linear_locals(body: &HirBody, e: &mut Escape<'_, '_>, parents: &HashMap<HirId
     let mut out = HashMap::new();
     for (i, local) in body.locals.iter().enumerate() {
         let l = LocalId(i as u32);
-        if !matches!(local.kind, LocalKind::Let | LocalKind::Temp) || local.captured || local.name == "_" || !leaf(local.ty.as_ref()) || bad.contains(&l) {
+        let flat = leaf(local.ty.as_ref());
+        if !matches!(local.kind, LocalKind::Let | LocalKind::Temp) || local.captured || local.name == "_" || !(flat || freeable(local.ty.as_ref())) || bad.contains(&l) {
             continue;
         }
         let Some([decl]) = lets.get(&l).map(Vec::as_slice) else {
@@ -288,7 +364,7 @@ fn linear_locals(body: &HirBody, e: &mut Escape<'_, '_>, parents: &HashMap<HirId
             continue;
         };
         let vals = defs.get(&l).cloned().unwrap_or_default();
-        if !vals.iter().all(|&v| fresh_top(body, e, v)) {
+        if !vals.iter().all(|&v| fresh_top(body, e, v) || (!flat && fresh_graph(body, e, parents, &lets, stored, l, v))) {
             continue;
         }
         // Its facts must come from these definitions alone.
@@ -309,7 +385,7 @@ fn linear_locals(body: &HirBody, e: &mut Escape<'_, '_>, parents: &HashMap<HirId
                     return false;
                 };
                 match &body.expr(p).kind {
-                    HirKind::Bin { .. } => true,
+                    HirKind::Bin { op, .. } => flat || !matches!(op, BinOp::Overloaded(_)),
                     HirKind::Index { base, .. } | HirKind::Field { base, .. } => *base == r && no_heap(body.expr(p).ty.as_ref()),
                     HirKind::Return(Some(v)) => *v == r,
                     HirKind::Block { tail: Some(t), .. } => p == block && *t == r,
@@ -318,24 +394,26 @@ fn linear_locals(body: &HirBody, e: &mut Escape<'_, '_>, parents: &HashMap<HirId
                             return false;
                         };
                         if j == 0 && vec_mutator(body, callee, args) {
-                            return true;
+                            return flat;
                         }
                         let bit = 1u64 << j.min(63);
-                        j < 64 && e.callee(p, callee, args).is_some_and(|f| f.escapes & bit == 0 && f.returns & bit == 0)
+                        j < 64
+                            && e.callee(p, callee, args)
+                                .is_some_and(|f| f.escapes & bit == 0 && f.returns & bit == 0 && (flat || f.mutates & bit == 0))
                     }
                     _ => false,
                 }
             })
         });
         if ok {
-            out.insert(l, own);
+            out.insert(l, (own, !flat));
         }
     }
     out
 }
 
 /// `x = v` on a linear local becomes `{ let t = v; free x; x = t }`.
-fn free_on_reassign(body: &mut HirBody, assign: HirId) {
+fn free_on_reassign(body: &mut HirBody, assign: HirId, deep: bool) {
     let HirKind::Assign { place, value } = body.expr(assign).kind.clone() else {
         return;
     };
@@ -349,13 +427,106 @@ fn free_on_reassign(body: &mut HirBody, assign: HirId) {
     // No `Clear`: `x` is set again right after.
     let local_ty = body.local(local).ty.clone();
     let old_read = push(body, HirKind::Local(local), local_ty, span);
-    let free = push(body, HirKind::Builtin { op: Builtin::FreeEarly { deep: false }, args: vec![old_read] }, Some(ty::unit()), span);
+    let free = push(body, HirKind::Builtin { op: Builtin::FreeEarly { deep }, args: vec![old_read] }, Some(ty::unit()), span);
     let read = push(body, HirKind::Local(t), ty, span);
     let inner = relocate(body, assign);
     body.exprs[inner.0 as usize].kind = HirKind::Assign { place, value: read };
     let x = &mut body.exprs[assign.0 as usize];
     x.kind = HirKind::Block { stmts: vec![bind, free, inner], tail: None };
     x.node = None;
+}
+
+/// `match` nodes on a fresh value (a call result, an inlined body) that
+/// only the arms' bindings read, and that the match does not hand back:
+/// its object is freed once the match is done
+/// (`match step(i) { Ok(n) => n.v, … }`). Locals declared inside the
+/// scrutinee are dead once it is computed.
+fn match_temps(body: &HirBody, e: &mut Escape<'_, '_>, parents: &HashMap<HirId, HirId>, kept: Src) -> Vec<HirId> {
+    let mut lets: HashMap<LocalId, Vec<HirId>> = HashMap::new();
+    for (i, x) in body.exprs.iter().enumerate() {
+        if let HirKind::Let { local, .. } = &x.kind {
+            lets.entry(*local).or_default().push(HirId(i as u32));
+        }
+    }
+    let mut out = Vec::new();
+    for i in 0..body.exprs.len() {
+        let m = HirId(i as u32);
+        let HirKind::Match { scrutinee, arms } = &body.expr(m).kind else {
+            continue;
+        };
+        let x = body.expr(*scrutinee);
+        if matches!(x.kind, HirKind::Local(_)) || !freeable(x.ty.as_ref()) {
+            continue;
+        }
+        let s = e.src(*scrutinee);
+        if s.params != 0 || s.other || s.sites == 0 || s.sites & kept.sites != 0 {
+            continue;
+        }
+        let mut binds = Vec::new();
+        for arm in arms {
+            super::pat_binds(&arm.pat, &mut binds);
+        }
+        if binds.iter().any(|b| body.local(*b).captured) {
+            continue;
+        }
+        let inside = |mut at: HirId| loop {
+            if at == *scrutinee {
+                return true;
+            }
+            match parents.get(&at) {
+                Some(&p) => at = p,
+                None => return false,
+            }
+        };
+        let held = (0..body.locals.len()).map(|j| LocalId(j as u32)).any(|l| {
+            if binds.contains(&l) {
+                return false;
+            }
+            let h = e.local(l);
+            if e.close(h).sites & s.sites == 0 {
+                return false;
+            }
+            body.local(l).captured || !lets.get(&l).is_some_and(|ds| ds.iter().all(|d| inside(*d)))
+        });
+        let value = e.src(m);
+        if held || e.close(value).sites & s.sites != 0 {
+            continue;
+        }
+        out.push(m);
+    }
+    out
+}
+
+/// `match g(x) { … }` becomes `{ let t = g(x); let r = match t { … }; free t; r }`.
+fn free_match_temp(body: &mut HirBody, m: HirId) {
+    let HirKind::Match { scrutinee, .. } = body.expr(m).kind.clone() else {
+        return;
+    };
+    let span = body.expr(m).span;
+    let ty = body.expr(scrutinee).ty.clone();
+    let t = temp(body, ty);
+    let call = relocate(body, scrutinee);
+    let bind = push(body, HirKind::Let { local: t, init: Some(call) }, Some(ty::unit()), span);
+    let x = &mut body.exprs[scrutinee.0 as usize];
+    x.kind = HirKind::Local(t);
+    x.node = None;
+    let match_ty = body.expr(m).ty.clone();
+    let layout = body.expr(m).layout.clone();
+    let inner = relocate(body, m);
+    let frees = free_stmts(body, t, false, span);
+    let unit = match_ty.as_ref().is_none_or(|t| *t == ty::unit());
+    let (stmts, tail) = if unit {
+        (vec![bind, inner, frees[0], frees[1]], None)
+    } else {
+        let r = temp(body, match_ty.clone());
+        let keep = push(body, HirKind::Let { local: r, init: Some(inner) }, Some(ty::unit()), span);
+        let read = push(body, HirKind::Local(r), match_ty, span);
+        (vec![bind, keep, frees[0], frees[1]], Some(read))
+    };
+    let x = &mut body.exprs[m.0 as usize];
+    x.kind = HirKind::Block { stmts, tail };
+    x.node = None;
+    x.layout = layout;
 }
 
 /// `(chain head, leaves)` for each string concatenation chain with a fresh

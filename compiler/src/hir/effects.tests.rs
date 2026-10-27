@@ -897,3 +897,69 @@ impl P {
     // Before the `raise` and before the final `return`.
     assert_eq!(frees(src, "P::parse"), vec![(false, "out".to_string()), (false, "out".to_string())]);
 }
+
+const NODES: &str = "
+class Node {
+    pub v: int,
+    pub next: Option<Node>,
+}
+
+fn step(int i) -> Result<Node, Node> {
+    if i % 2 == 0 {
+        return Result::Ok(new Node(i, Option::None));
+    }
+    return Result::Err(new Node(i, Option::None));
+}
+
+fn build(int n) -> Option<Node> {
+    let head: Option<Node> = Option::None;
+    let i = 0;
+    while i < n {
+        head = Option::Some(new Node(i, head));
+        i = i + 1;
+    }
+    return head;
+}
+
+fn len_of(Option<Node> head) -> int {
+    let n = 0;
+    let cur = head;
+    let go = true;
+    while go {
+        match cur {
+            Option::Some(node) => {
+                n = n + 1;
+                cur = node.next;
+            },
+            Option::None => {
+                go = false;
+            },
+        }
+    }
+    return n;
+}
+";
+
+#[test]
+fn a_fresh_match_scrutinee_read_in_place_is_freed_after_the_match() {
+    let src = format!("{NODES}\nfn run(int i) -> int {{\n    return match step(i) {{\n        Result::Ok(n) => n.v,\n        Result::Err(e) => e.v,\n    }};\n}}\n");
+    assert_eq!(frees(&src, "run").len(), 1, "{:?}", frees(&src, "run"));
+}
+
+#[test]
+fn a_match_binding_kept_past_the_match_is_not_freed() {
+    let src = format!("{NODES}\nfn run(int i) -> Node {{\n    return match step(i) {{\n        Result::Ok(n) => n,\n        Result::Err(e) => e,\n    }};\n}}\n");
+    assert_eq!(frees(&src, "run"), vec![]);
+}
+
+#[test]
+fn a_list_replaced_by_reassignment_frees_the_old_list_whole() {
+    let src = format!("{NODES}\nfn run(int k) -> int {{\n    let total = 0;\n    let list = build(1);\n    let r = 0;\n    while r < k {{\n        list = build(100);\n        total = total + len_of(list);\n        r = r + 1;\n    }}\n    return total;\n}}\n");
+    assert!(frees(&src, "run").contains(&(true, "list".to_string())), "{:?}", frees(&src, "run"));
+}
+
+#[test]
+fn a_list_another_local_shares_is_not_freed_on_reassignment() {
+    let src = format!("{NODES}\nfn run(int k) -> int {{\n    let list = build(1);\n    let first = list;\n    let r = 0;\n    while r < k {{\n        list = build(100);\n        r = r + 1;\n    }}\n    return len_of(first);\n}}\n");
+    assert!(!frees(&src, "run").iter().any(|f| f.1 == "list"), "{:?}", frees(&src, "run"));
+}

@@ -884,7 +884,7 @@ impl MirFunc {
                 if self.ty(*dest) != MirTy::Bool {
                     return Err(format!("{dest} FreeEarly dest is not bool"));
                 }
-                if !matches!(self.ty(*value), MirTy::HeapRef | MirTy::I64) {
+                if !matches!(self.ty(*value), MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes | MirTy::I64) {
                     return Err(format!("{dest} FreeEarly value type"));
                 }
             }
