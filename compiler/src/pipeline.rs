@@ -2077,8 +2077,12 @@ impl Pipeline {
         self.expand_user_macros();
         self.compile_discovered_modules();
         // Every module is compiled, foreign clones included: nothing past
-        // this reads a tree, and finalize peaks on top of them.
+        // this reads a tree or a module's kept context, and finalize peaks
+        // on top of them.
         self.ast_cache.release_asts();
+        if let Some(compiler) = self.compiler.get_mut() {
+            compiler.release_module_ctxs();
+        }
         release_free_heap();
 
         if self.failed || self.had_errors() || !self.check_capabilities() {
