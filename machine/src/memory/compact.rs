@@ -69,7 +69,7 @@ impl EvacPlan {
 }
 
 #[inline]
-fn forward(fwd: &AddrMap, v: Value) -> Option<Value> {
+pub(super) fn forward(fwd: &AddrMap, v: Value) -> Option<Value> {
     let addr = v.heap_addr();
     if addr == 0 {
         return None;
@@ -92,7 +92,7 @@ fn worth_it(bytes: usize, slab_bytes: usize) -> bool {
 impl Object {
     /// Slot layout of a kind evacuation may move; `None` for the rest.
     #[cold]
-    fn movable_layout(&self) -> Option<Layout> {
+    pub(super) fn movable_layout(&self) -> Option<Layout> {
         Some(match self {
             Self::Instance(_) => Layout::new::<GcData<ObjInstance>>(),
             // Unit variants are shared immortals.
@@ -108,7 +108,7 @@ impl Object {
     /// Rewrite this object's precise references to moved objects. Mirrors
     /// the precise cases of [`Object::for_each_reference`].
     #[cold]
-    fn rewrite_precise_refs(&self, heap: &Heap, fwd: &AddrMap) {
+    pub(super) fn rewrite_precise_refs(&self, heap: &Heap, fwd: &AddrMap) {
         let fix = |v: &mut Value| {
             if let Some(n) = forward(fwd, *v) {
                 *v = n;
@@ -254,7 +254,8 @@ impl Heap {
         let nchunks = self.slab.chunk_count();
         let mut per_chunk: Vec<(usize, usize)> = vec![(0, 0); nchunks];
         for obj in &live {
-            if let Some(i) = self.slab.chunk_of(obj.addr()) {
+            // The nursery empties young chunks itself.
+            if let Some(i) = self.slab.chunk_of(obj.addr()).filter(|&i| !self.slab.is_young_chunk(i)) {
                 per_chunk[i].0 += 1;
                 per_chunk[i].1 += usize::from(movable(obj));
             }
@@ -394,6 +395,7 @@ impl Heap {
             mut stats,
         } = plan;
         self.forward_side_lists(&fwd);
+        self.forward_remembered(&fwd);
         for &old in fwd.keys() {
             // SAFETY: `old` is a live slot origin copied above; poisoning the
             // header makes it a free slot without dropping the moved payload.

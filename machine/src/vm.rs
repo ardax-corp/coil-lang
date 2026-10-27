@@ -81,6 +81,7 @@ pub fn take_pc_profile() -> Vec<u64> {
 thread_local! {
     static VM_ALLOC_COUNT: AtomicU64 = const { AtomicU64::new(0) };
     static VM_GC_COUNT: AtomicU64 = const { AtomicU64::new(0) };
+    static VM_MINOR_COUNT: AtomicU64 = const { AtomicU64::new(0) };
     static VM_MAKE_FAST_COUNT: AtomicU64 = const { AtomicU64::new(0) };
     static VM_INTERN_STR_COUNT: AtomicU64 = const { AtomicU64::new(0) };
 }
@@ -103,6 +104,7 @@ pub(crate) fn note_heap_alloc() {}
 pub fn reset_alloc_profile() {
     VM_ALLOC_COUNT.with(|c| c.store(0, Ordering::Relaxed));
     VM_GC_COUNT.with(|c| c.store(0, Ordering::Relaxed));
+    VM_MINOR_COUNT.with(|c| c.store(0, Ordering::Relaxed));
     VM_MAKE_FAST_COUNT.with(|c| c.store(0, Ordering::Relaxed));
     VM_INTERN_STR_COUNT.with(|c| c.store(0, Ordering::Relaxed));
 }
@@ -120,6 +122,19 @@ pub fn alloc_count() -> u64 {
 #[cfg(not(any(test, feature = "vm_profile")))]
 #[must_use]
 pub fn alloc_count() -> u64 {
+    0
+}
+
+/// Number of nursery minor collections since the last reset.
+#[cfg(any(test, feature = "vm_profile"))]
+#[must_use]
+pub fn minor_gc_count() -> u64 {
+    VM_MINOR_COUNT.with(|c| c.load(Ordering::Relaxed))
+}
+
+#[cfg(not(any(test, feature = "vm_profile")))]
+#[must_use]
+pub fn minor_gc_count() -> u64 {
     0
 }
 
@@ -231,6 +246,8 @@ thread_local! {
     static COMPACT_PACING: std::cell::Cell<(u32, u32)> = const { std::cell::Cell::new((0, COMPACT_WINDOW)) };
     /// Off with `COIL_GC_COMPACT=0` (debugging a suspected move bug).
     static COMPACT_ENABLED: bool = std::env::var_os("COIL_GC_COMPACT").is_none_or(|v| v != "0");
+    /// Young objects in a copying nursery; off with `COIL_NURSERY=0`.
+    static NURSERY_ENABLED: bool = std::env::var_os("COIL_NURSERY").is_none_or(|v| v != "0");
 }
 
 /// Collections between evacuation attempts outside stress mode, and the
@@ -926,7 +943,11 @@ impl<const S: usize> Machine<S> {
             frame_pins: Vec::new(),
             dense_obj_addr: 0,
             dense_obj: None,
-            heap: crate::memory::HeapSlot::default(),
+            heap: {
+                let mut heap = crate::memory::HeapSlot::default();
+                heap.get_mut().set_nursery(NURSERY_ENABLED.with(|e| *e));
+                heap
+            },
             stack: Stack::with_capacity(cap),
             output: None,
             natives: crate::ffi::Natives::new(),
@@ -1915,6 +1936,7 @@ impl<const S: usize> Machine<S> {
             if self.heap.gc_is_sweeping() {
                 self.heap.finish_sweep();
             }
+            self.gc_minor();
             self.clear_dense_obj_cache();
 
             self.mark_from_vm_roots();
@@ -1961,6 +1983,68 @@ impl<const S: usize> Machine<S> {
     /// movable each cycle and checks that no word still names an old slot.
     #[cold]
     #[inline(never)]
+    /// Minor collection: copy the surviving young objects out of the
+    /// nursery and reset it (`feature/escape-memory` step 4). Where nothing
+    /// may move it promotes the young objects in place instead.
+    fn gc_minor(&mut self) {
+        if !self.heap.has_young() || !self.heap.gc_is_idle() {
+            return;
+        }
+        #[cfg(any(test, feature = "vm_profile"))]
+        VM_MINOR_COUNT.with(|c| {
+            c.fetch_add(1, Ordering::Relaxed);
+        });
+        let can_move = IN_EXECUTE.get() <= 1
+            && self.shared_epoch.is_none()
+            && !self.heap.epoch_stw()
+            && !self.heap.is_borrowed();
+        #[cfg(any(test, feature = "debugger"))]
+        let can_move = can_move && self.debug.is_none();
+        if !can_move {
+            self.heap.promote_young();
+            return;
+        }
+        // The dense-index cache names an object that may move.
+        self.clear_dense_obj_cache();
+        let mut pins = self.heap.take_gc_roots();
+        let mut must = Vec::new();
+        self.for_each_stack_word(&mut |idx, kind| match kind {
+            crate::memory::RootKind::Precise => must.push(idx),
+            _ => pins.push(self.stack[idx].heap_addr()),
+        });
+        let mut must_statics = Vec::new();
+        self.for_each_static_root(&mut |i, addr, kind| match kind {
+            crate::memory::RootKind::Precise => must_statics.push(i),
+            _ => pins.push(addr),
+        });
+        self.for_each_handle_root(&mut |addr, _| pins.push(addr));
+        let precise: Vec<u64> = must
+            .iter()
+            .map(|&idx| self.stack[idx].heap_addr())
+            .chain(must_statics.iter().map(|&i| self.statics[i].heap_addr()))
+            .collect();
+        let plan = self.heap.minor_plan(&pins, &precise);
+        self.heap.restore_gc_roots(pins);
+        for idx in must {
+            if let Some(v) = plan.forward(self.stack[idx]) {
+                self.stack[idx] = v;
+            }
+        }
+        for i in must_statics {
+            if let Some(v) = plan.forward(self.statics[i]) {
+                self.statics[i] = v;
+            }
+        }
+        #[cfg(feature = "gc-stress")]
+        self.for_each_vm_root(&mut |addr, kind| {
+            assert!(
+                !plan.moved().contains_key(&addr),
+                "gc-stress: {kind:?} VM root still names young {addr:#x} after a minor collection"
+            );
+        });
+        self.heap.minor_finish(plan);
+    }
+
     fn gc_compact(&mut self) {
         if !COMPACT_ENABLED.with(|e| *e)
             || IN_EXECUTE.get() > 1
@@ -2098,11 +2182,18 @@ impl<const S: usize> Machine<S> {
         }
         match self.heap.gc_phase() {
             crate::memory::GcPhase::Idle => {
-                if self.heap.should_collect() {
+                if self.heap.should_collect_young() {
+                    self.gc_minor();
+                }
+                if self.heap.should_collect_old() {
                     self.gc_start_incremental();
                 }
             }
             crate::memory::GcPhase::Marking => self.gc_mark_slice(),
+            crate::memory::GcPhase::Sweeping if self.heap.should_collect_young() => {
+                self.gc_finish_sweep();
+                self.gc_minor();
+            }
             crate::memory::GcPhase::Sweeping => self.gc_sweep_slice(),
         }
         if unlikely(self.heap.get().over_byte_cap()) {
@@ -2117,6 +2208,8 @@ impl<const S: usize> Machine<S> {
         VM_GC_COUNT.with(|c| {
             c.fetch_add(1, Ordering::Relaxed);
         });
+        // Empty the nursery first: the major cycle then sees only old objects.
+        self.gc_minor();
         self.gc_start_mark();
         self.gc_mark_slice();
     }

@@ -30,7 +30,7 @@
 use std::collections::HashMap;
 
 use super::escape::{leaf, no_heap, result_exprs, CallLookup, Escape, Src};
-use super::{is_vec, BinOp, Builtin, Callee, HirBody, HirId, HirKind, HirModule, LocalId, LocalKind, VEC_MUTATORS};
+use super::{is_vec, BinOp, Builtin, Callee, HirBody, HirId, HirKind, HirModule, LocalId, LocalKind, MakeKind, VEC_MUTATORS};
 use crate::hir::{HirExpr, HirFlags, HirLocal, IndexKind, Span};
 use crate::typechecking::ty::{self, Ty};
 
@@ -335,8 +335,12 @@ fn block_locals(body: &HirBody, e: &mut Escape<'_, '_>, kept: Src, linear: &Hash
     // Each local's `let`s, and every node that names it.
     let mut lets: HashMap<LocalId, Vec<HirId>> = HashMap::new();
     let mut uses: HashMap<LocalId, Vec<HirId>> = HashMap::new();
+    let mut bases = std::collections::HashSet::new();
     for (i, x) in body.exprs.iter().enumerate() {
         match &x.kind {
+            HirKind::Field { base, .. } => {
+                bases.insert(*base);
+            }
             HirKind::Let { local, .. } => lets.entry(*local).or_default().push(HirId(i as u32)),
             HirKind::Local(l) => uses.entry(*l).or_default().push(HirId(i as u32)),
             _ => {}
@@ -373,6 +377,14 @@ fn block_locals(body: &HirBody, e: &mut Escape<'_, '_>, kept: Src, linear: &Hash
             continue;
         };
         if !stmts.contains(decl) {
+            continue;
+        }
+        // A class local read only through its fields lives in frame slots
+        // (lowering's SROA); freeing it would make it a whole-object use.
+        if let HirKind::Let { init: Some(i), .. } = body.expr(*decl).kind
+            && matches!(body.expr(i).kind, HirKind::Make { kind: MakeKind::Class(_), .. })
+            && uses.get(&l).is_none_or(|us| us.iter().all(|u| bases.contains(u)))
+        {
             continue;
         }
         // `break` / `continue` out of the block leave it to the GC; a

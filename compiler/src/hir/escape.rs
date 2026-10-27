@@ -320,7 +320,7 @@ impl<'c, 'a> Escape<'c, 'a> {
 
     /// Whether a store into what `base` reaches keeps the value inside
     /// fresh objects of this body.
-    fn into_fresh(&mut self, base: HirId) -> bool {
+    fn stores_into_fresh(&mut self, base: HirId) -> bool {
         let b = self.src(base);
         b.params == 0 && !b.other && b.sites != 0
     }
@@ -433,13 +433,13 @@ impl<'c, 'a> Escape<'c, 'a> {
             HirKind::Return(Some(v)) => *returned = returned.union(self.src(*v)),
             HirKind::Assign { place, value } => match body.expr(*place).kind {
                 HirKind::Local(_) => {}
-                HirKind::Field { base, .. } | HirKind::Index { base, .. } if self.into_fresh(base) => {}
+                HirKind::Field { base, .. } | HirKind::Index { base, .. } if self.stores_into_fresh(base) => {}
                 _ => {
                     let s = self.src(*value);
                     esc(s, escaped);
                 }
             },
-            HirKind::Append { base, value } if !self.into_fresh(*base) => {
+            HirKind::Append { base, value } if !self.stores_into_fresh(*base) => {
                 let s = self.src(*value);
                 esc(s, escaped);
             }
@@ -479,7 +479,7 @@ impl<'c, 'a> Escape<'c, 'a> {
                     && VEC_MUTATORS.contains(&name.as_str())
                     && args.first().is_some_and(|r| is_vec(body.expr(*r).ty.as_ref()))
                 {
-                    if !self.into_fresh(args[0]) {
+                    if !self.stores_into_fresh(args[0]) {
                         for a in &args[1..] {
                             let s = self.src(*a);
                             esc(s, escaped);
