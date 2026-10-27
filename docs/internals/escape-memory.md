@@ -61,7 +61,7 @@ Heap objects per run and GC safepoint time (instrumented build, best of 3):
 | 2 | Free at scope end and after the call for non-escaping fresh objects; check mode, gc-stress | done |
 | 3 | Static uniqueness: free a string's old value when it is rebuilt in place, free fresh concatenation operands and variable-size match scrutinees; zero-copy `to_bytes`/`from_bytes`; enum SROA dropped | done |
 | 4 | Copying nursery for young objects: write barrier, minor collections, pretenuring, held pins | done |
-| 5 | Opt-in checked `region` block | |
+| 5 | Opt-in checked `region` block: contextual keyword, E0140, nursery reset at the end | in progress |
 | 6 | Re-measure; decide whether anything else is worth doing | |
 
 ## Escape facts (step 1)
@@ -375,3 +375,52 @@ nearly everything (binary_trees, gc_rebuild) or little garbage exists
 every node of the list it is building once before pretenuring kicks in,
 and binary_trees and hashmap run within 2.5% of the instructions but touch more
 memory. Whether it stays on by default is decided with step 6.
+
+## Regions (step 5)
+
+`region { ... }` is a block whose garbage is freed when it ends, for code
+with a clear unit of work (a request handler, a compiler pass, one frame
+of a game loop). It is opt-in and checked:
+
+```
+fn handle(Request req) -> Response {
+    let status = 0;
+    let body = region {
+        let doc = json::parse(req.body)?;   // freed at the region's end
+        let total = sum_prices(doc);
+        status = 200;
+        format("%i", total)                 // E0140: a region's value cannot be an object made inside it
+    };
+    ...
+}
+```
+
+Design:
+
+- **Syntax.** `region` is a contextual keyword: only `region {` starts a
+  region, so existing code that names something `region` keeps working.
+  The block is an expression; its value may be a scalar (`int`, `bool`,
+  `float`, `byte`, a unit enum) or an object made before the region.
+- **Check (E0140).** Using step 1's escape facts, the compiler rejects an
+  object made inside the region (directly or as a fresh call result) that
+  can leave it: assigned to a local declared outside, stored into an
+  object or static from outside, captured by a closure that outlives the
+  block, passed where the callee's summary says the parameter escapes,
+  sent to another task, or yielded as the block's value. An object the
+  check cannot follow (a callee storing its own allocation in a static)
+  is not an error: the runtime keeps it.
+- **Runtime.** Entering the outermost region runs a minor collection (the
+  nursery starts empty) and widens the nursery: every object of a kind
+  that holds no finalizer, strings included, is allocated young, there is
+  no pretenuring, and the nursery may grow to 1024 chunks (64 MiB) before
+  a minor runs inside the region. Leaving it runs a minor collection: with
+  nothing escaping, nothing is traced or copied, and every young chunk is
+  reset whole. Whatever did survive (the check's blind spots above) is
+  copied or held as in any minor, so a region is never unsound, only
+  slower when something escapes. Exits by `return`, `break`, `?` and
+  panics all leave the region (it lowers like `defer`).
+- **Nesting.** An inner region inside another region is a plain block:
+  only the outermost one resets the nursery.
+- **Where it cannot run** (inside a host callback, under the debugger, in
+  a shared-heap epoch) the region is a plain block and the GC frees its
+  garbage as usual.
