@@ -130,19 +130,22 @@ everything. Two shapes are freed:
 - **Block-end locals.** A `let` local whose every value is an object this
   body allocated, that no other local, store, capture, `yield` or result
   reaches, and that is read only inside its block, is freed (that object
-  only, not what it holds) where the block ends normally: at the clear
-  typed inlining put after its last read, before a final `return`, or
-  after the block's tail. `return`, `break`, `continue` and panics on
-  other paths leave it to the collector.
+  only, not what it holds) where the block ends: at the clear typed
+  inlining put after its last read, or after the block's tail, and before
+  every `return` after its `let`, nested in a loop or `if` or not (a final
+  `return` often sits in the block's tail). `break`, `continue` and
+  panics leave it to the collector.
 
 Each free is `Builtin::FreeEarly { deep }` of the local and a `Clear` of
 its frame word, lowered to the `gc_free_early` HostInvoke (id 174, archive
 5.1, `HostOp::Free`). The VM frees nothing while a collection cycle or a
 steal epoch is open, and skips what it cannot free safely: interned
 strings, the shared unit variants and `()`, objects of a type with a
-`drop` (while any is registered), handles, and arrays a frame pinned. A
-freed slot goes back to the slab like a swept one, and the dense object
-cache forgets it.
+`drop` (while any is registered), handles, and arrays an `ArrayPin` holds
+for its frame. A dense index's pin is only a cache of its register's
+object: the free drops it, so a later object in the same slot is never
+read through the stale entry. A freed slot goes back to the slab like a
+swept one, and the dense object cache forgets it.
 
 A dead frame word (a call's argument copy, a callee's frame left above the
 stack top) may still hold a freed address. Conservative and precise root
@@ -168,3 +171,28 @@ collection marks again from the roots that are certainly live (precise
 frame slots, statics, VM handles; not words a conservative frame scan
 finds), aborting if that reaches an object a free gave up. The test corpus
 passes in both modes and with frees on.
+
+### Measured (step 2)
+
+`COIL_EARLY_FREE=0` against `=1` on the same build (`COIL_AUTO_PAR=0`,
+2026-10-27). Allocations, frees and collections come from the local
+allocation-profiling build. Time is the median of 7 runs and peak RSS the
+largest, both from the plain release build. The machine is noisy: time
+differences under about 10% are within run-to-run spread.
+
+| bench | objects allocated | freed early | collections | GC time | time | peak RSS |
+|---|---|---|---|---|---|---|
+| binary_trees 16 | 7,449,278 | 7,383,732 (99%) | 71 → 2 | 578 → 2 ms | 1703 → 1522 ms | 28 → 18 MB |
+| b_csv (1 MB) | 545,341 | 384,531 (71%) | 4 → 3 | 20 → 4 ms | 525 → 550 ms | 44 → 23 MB |
+| b_json | 348,579 | 223,998 (64%) | 3 → 2 | 5 → 0 ms | 695 → 683 ms | 38 → 23 MB |
+| strings | 300,033 | 4 | 9 → 9 | 11 → 12 ms | 126 → 124 ms | 38 → 38 MB |
+| hashmap | 40,179 | 4 | 4 → 4 | 3 → 3 ms | 374 → 400 ms | 25 → 25 MB |
+| b_coll | 200,192 | 1 | 5 → 5 | 10 → 10 ms | 3723 → 3763 ms | 146 → 148 MB |
+| byte_scan | 32,787 | 3 | 5 → 5 | 1 → 1 ms | 12 → 13 ms | 12 → 12 MB |
+
+What is left is what the plan expected later steps to take: strings
+rebuilt in place (`s = s + x`, step 3), container contents (step 4 and
+the GC), and the byte copies kept by `to_bytes` / `from_bytes` pairs
+(step 3 zero-copy). Each free is one host call (b_csv runs 5.5% more
+dispatches), so time gains show only where collections were a large share
+of the run.
