@@ -716,6 +716,10 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
     // A trapped `env::exit` belongs to the job that made it; a job this
     // thread runs while helping a join neither sees nor clears it.
     let outer_exit = crate::env::take_exit_request();
+    // `set_thread_program` installs the job's static word kinds on this
+    // thread; a VM waiting here in a join reads its own statics by the ones
+    // it had (#2053).
+    let outer_static_kinds = crate::vm::swap_static_word_kinds(Arc::clone(&program.static_word_kinds));
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         vm.install_natives(&natives);
         vm.set_thread_program(Arc::clone(&program));
@@ -774,6 +778,7 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
         }
     }));
     crate::env::restore_exit_request(outer_exit);
+    crate::vm::swap_static_word_kinds(outer_static_kinds);
     crate::io::flush_open_captures();
     if redirected {
         crate::io::set_output_redirect(prev_output);
