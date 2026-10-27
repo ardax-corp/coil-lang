@@ -59,7 +59,7 @@ Heap objects per run and GC safepoint time (instrumented build, best of 3):
 | 1 | Escape summaries: per function, which parameters may escape and whether the result is fresh; whole-program fixed point next to `ProgramEffects`; shown by `coil dissect --effects` | done |
 | 1b | Optional stated facts (`#[noescape(x)]`, `#[fresh]`), checked against the inferred summary (E0139) | done |
 | 2 | Free at scope end and after the call for non-escaping fresh objects; check mode, gc-stress | done |
-| 3 | Static uniqueness: append in place, zero-copy `to_bytes`/`from_bytes`, enum SROA for a `match` on an inlined call result | |
+| 3 | Static uniqueness: free a string's old value when it is rebuilt in place, free fresh concatenation operands; zero-copy `to_bytes`/`from_bytes` and enum SROA measured and dropped | done |
 | 4 | Nursery for young objects | |
 | 5 | Opt-in checked `region` block | |
 | 6 | Re-measure; decide whether anything else is worth doing | |
@@ -195,6 +195,60 @@ differences under about 10% are within run-to-run spread.
 What is left is what the plan expected later steps to take: strings
 rebuilt in place (`s = s + x`, step 3), container contents (step 4 and
 the GC), and the byte copies kept by `to_bytes` / `from_bytes` pairs
-(step 3 zero-copy). Each free is one host call (b_csv runs 5.5% more
-dispatches), so time gains show only where collections were a large share
-of the run.
+(step 3 zero-copy). These numbers were taken while each free was a host
+call; the `FreeEarly` instruction replaced it (see step 3's numbers).
+
+## Uniqueness (step 3)
+
+A *linear* local is one the escape walk can follow by value: a string or a
+vector of plain values, bound once by its `let` with no compound
+assignment, whose every value is fresh (a literal, a concatenation, a block
+ending in one, or a call whose summary returns a fresh, unshared result),
+and whose every read uses the value without keeping it (an operand, an
+index or field read of a plain value, a `return`, an argument a callee does
+not keep, the receiver of a vector method). For such a local:
+
+- `x = v` frees the old value after `v` is computed: `s = s + piece` in a
+  loop leaves one live string instead of one per pass.
+- It is freed at the end of its block like any step 2 local, including
+  when a callee appends to it (a vector of plain values given to a callee
+  that changes it still reaches nothing the callee could have stored).
+
+A concatenation whose operands include fresh call results (`a + f(x) + b`)
+binds those results to temporaries and frees them once the result is
+built; the chain stays one chain, so `FORMAT` fusion still applies.
+
+Freeing now has its own instruction (`FreeEarly`, archive 5.1) instead of
+a host call: a host call left the VM's fast dispatch loop on every free,
+and a `join` with one free per part ran 25% slower; with the instruction
+`join` and `append` time the same with frees on and off.
+
+Measured and dropped:
+
+- **Zero-copy `from_bytes` / `to_bytes`.** In b_csv and b_json every byte
+  buffer they copy is already freed early; what is left is the copy
+  itself. Under callgrind `from_bytes` is 1.3% of b_csv's instructions and
+  0.7% of b_json's, `to_bytes` 1.4% of b_csv's, and about half of each is
+  the copy. Taking a dying buffer over needs a new native and a last-use
+  rule in the compiler; a 1 to 2% gain does not pay for it.
+- **Enum SROA on a `match` of an inlined call.** b_json and b_csv allocate
+  under 600 enums each; nothing is left to remove.
+
+### Measured (step 3)
+
+Same method as step 2 (5 runs, 2026-10-27), `FreeEarly` instruction.
+
+| bench | objects allocated | freed early | collections | GC time | time | peak RSS |
+|---|---|---|---|---|---|---|
+| binary_trees 16 | 7,449,278 | 7,383,732 (99%) | 71 → 2 | 635 → 1 ms | 2003 → 1427 ms | 28 → 17 MB |
+| strings | 300,033 | 150,002 (50%) | 9 → 6 | 12 → 3 ms | 130 → 130 ms | 37 → 38 MB |
+| byte_scan | 32,787 | 32,770 (99%) | 5 → 1 | 1 → 0 ms | 14 → 14 ms | 12 → 12 MB |
+| b_csv (1 MB) | 545,341 | 384,531 (71%) | 4 → 3 | 19 → 4 ms | 541 → 558 ms | 44 → 23 MB |
+| b_json | 348,579 | 223,998 (64%) | 3 → 2 | 5 → 0 ms | 745 → 723 ms | 38 → 23 MB |
+| hashmap | 40,179 | 4 | 4 → 4 | 3 → 5 ms | 418 → 401 ms | 25 → 25 MB |
+| b_coll | 200,192 | 1 | 5 → 5 | 11 → 11 ms | 3948 → 3922 ms | 148 → 147 MB |
+
+What b_csv and b_json still allocate and do not free is their output: the
+parsed field strings and row vectors (b_csv), and the decoded strings and
+store (b_json). Those are live until the program drops the result, which
+is the GC's job (or step 4's).
