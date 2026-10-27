@@ -175,10 +175,17 @@ impl CachedAst {
     /// Drop the AST and what only it needs, keeping the text diagnostics
     /// report against: a compile's later stages never read the tree.
     pub fn release_ast(&mut self) {
-        self.ast = None;
+        self.release_tree();
         self.variadic_templates = Vec::new();
-        self.expand = ExpandResult::default();
         self.generated = Vec::new();
+    }
+
+    /// Drop the tree of a compiled module no later module reads, keeping its
+    /// `... xs` templates for importers' copies (and the snippets they
+    /// borrow).
+    pub fn release_tree(&mut self) {
+        self.ast = None;
+        self.expand = ExpandResult::default();
     }
 
     pub fn report_source(&self) -> String {

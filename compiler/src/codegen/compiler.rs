@@ -1964,6 +1964,12 @@ impl Compiler {
         self.program_seq
     }
 
+    /// Whether program `seq` holds methods a later module may clone, which
+    /// compile from its AST ([`Self::emit_foreign_clones`]).
+    pub fn may_clone_from(&self, seq: usize) -> bool {
+        self.module_ctxs.contains_key(&seq)
+    }
+
     /// Compile the queued clones of other modules' methods, each from its
     /// method's AST in `asts` (by program) under the context its module
     /// was compiled in ([`ModuleCtx`]): in its own layouts, with no boxing

@@ -1494,7 +1494,11 @@ impl Pipeline {
             compiler.set_source_text(cached.source());
             let ast = cached.ast_mut().expect("parsed");
             let bytecode = compiler.compile_prepared_module(namespace.as_str(), ast);
-            self.program_files.insert(compiler.program_seq(), file.clone());
+            let seq = compiler.program_seq();
+            if !compiler.may_clone_from(seq) {
+                cached.release_tree();
+            }
+            self.program_files.insert(seq, file.clone());
             self.emit_foreign_clones();
             bytecode
         };
