@@ -1654,7 +1654,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             let mut stmts = Vec::new();
             let kind = match jump.kind {
                 HirKind::Return(Some(v)) => {
-                    let ty = b.body.expr(v).ty.clone();
+                    let ty = b.body.ret.clone();
                     let t = b.temp("<region>", ty.clone());
                     stmts.push(self.synth(b, span, HirKind::Let { local: t, init: Some(v) }, unit.clone()));
                     let read = self.synth(b, span, HirKind::Local(t), ty);
@@ -1675,7 +1675,8 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             Ty::Tuple(items) => items.is_empty(),
             _ => false,
         };
-        if ty.as_ref().is_none_or(is_unit) {
+        // A block that only jumps out (`never`) has no value to keep.
+        if ty.as_ref().is_none_or(|t| is_unit(t) || matches!(strip_readonly(t), Ty::Never)) {
             let exit = mark(self, b, false);
             return self.synth(b, span, HirKind::Block { stmts: vec![enter, inner, exit], tail: None }, unit);
         }
