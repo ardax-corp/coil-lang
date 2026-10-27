@@ -322,6 +322,7 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
         MirInst::String { dest, idx } => write!(f, "{dest} = string {idx}"),
         MirInst::CodePtr { dest, target } => write!(f, "{dest} = codeptr {}", target.0),
         MirInst::Print { dest, src } => write!(f, "{dest} = print {src}"),
+        MirInst::FreeEarly { dest, value, deep } => write!(f, "{dest} = free{} {value}", if *deep { ".deep" } else { "" }),
         MirInst::Panic { dest, msg } => write!(f, "{dest} = panic {msg}"),
         MirInst::Format { dest, fmt, args } => {
             write!(f, "{dest} = format {fmt}")?;
@@ -911,6 +912,11 @@ impl<'a> Parser<'a> {
             let idx = self.uint()? as u32;
             ensure_ty(types, dest, MirTy::HeapRef);
             return Ok(MirInst::String { dest, idx });
+        }
+        if op == "free" || op == "free.deep" {
+            let value = self.value()?;
+            ensure_ty(types, dest, MirTy::Bool);
+            return Ok(MirInst::FreeEarly { dest, value, deep: op == "free.deep" });
         }
         if op == "print" {
             let src = self.value()?;

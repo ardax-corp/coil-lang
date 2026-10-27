@@ -613,6 +613,7 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         | MirInst::String { .. }
         | MirInst::CodePtr { .. }
         | MirInst::Print { .. }
+        | MirInst::FreeEarly { .. }
         | MirInst::Panic { .. }
         | MirInst::Format { .. }
         | MirInst::Stringify { .. }

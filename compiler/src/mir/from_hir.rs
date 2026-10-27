@@ -2660,7 +2660,7 @@ impl Lower<'_> {
                 self.at_expr(id, |l| l.b.ins_print(s).map_err(mir))?;
                 Ok(Val::Unit)
             }
-            // An early free (`gc_free_early`) of a local's object.
+            // An early free (`FreeEarly`) of a local's object.
             HirKind::Builtin { op: Builtin::FreeEarly { deep }, args } if let [local] = args.as_slice() => {
                 let Some(v) = self.word(*local)? else {
                     return Ok(Val::Never);
@@ -2670,8 +2670,7 @@ impl Lower<'_> {
                 if !matches!(self.b.value_ty(v), MirTy::HeapRef | MirTy::I64) {
                     return Ok(Val::Unit);
                 }
-                let deep = self.b.ins_const(MirConst::I64(i64::from(*deep))).map_err(mir)?;
-                self.b.ins_host_invoke(common::GC_FREE_EARLY_ID, vec![v, deep]).map_err(mir)?;
+                self.at_expr(id, |l| l.b.ins_free_early(v, *deep).map_err(mir))?;
                 Ok(Val::Unit)
             }
             HirKind::Builtin { op: Builtin::Done, args } if let [handle] = args.as_slice() => {

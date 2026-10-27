@@ -56,6 +56,7 @@ fn does_work(inst: &MirInst) -> bool {
             | MirInst::HostInvoke { .. }
             | MirInst::Ffi { .. }
             | MirInst::Print { .. }
+            | MirInst::FreeEarly { .. }
             | MirInst::Format { .. }
             | MirInst::Stringify { .. }
             | MirInst::ResumeCoro { .. }
