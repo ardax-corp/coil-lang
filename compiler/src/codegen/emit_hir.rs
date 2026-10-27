@@ -1179,7 +1179,8 @@ impl Compiler {
 
     /// Hand the MIR of the body just lowered to its function record.
     pub(super) fn attach_hir_mir(&mut self) {
-        if let Some(func) = self.hir_mir.take() {
+        if let Some(mut func) = self.hir_mir.take() {
+            func.shrink_to_fit();
             self.bytecode.set_last_func_hir_mir(func);
         }
         if let Some(why) = self.hir_mir_why.take() {

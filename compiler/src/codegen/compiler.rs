@@ -1970,6 +1970,13 @@ impl Compiler {
         self.module_ctxs.contains_key(&seq)
     }
 
+    /// Drop the contexts kept for later modules' clones (a checker snapshot
+    /// each): once every module is compiled, foreign clones included,
+    /// nothing reads them.
+    pub fn release_module_ctxs(&mut self) {
+        self.module_ctxs = HashMap::new();
+    }
+
     /// Compile the queued clones of other modules' methods, each from its
     /// method's AST in `asts` (by program) under the context its module
     /// was compiled in ([`ModuleCtx`]): in its own layouts, with no boxing
