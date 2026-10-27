@@ -5944,7 +5944,11 @@ impl Lower<'_> {
     /// id is the instruction's, not a value the lowering has to find).
     fn host(&mut self, id: HirId, args: &[HirId]) -> Result<Val, Refusal> {
         let (native, layout, unbox) = &self.inp.hosts[&id.0];
-        let (native, layout) = (*native, *layout);
+        let (mut native, layout) = (*native, *layout);
+        // A `from_bytes` whose buffer is dead after it takes the bytes.
+        if self.hir.expr(id).flags.contains(crate::hir::HirFlags::TAKE) && common::host_native_id("from_bytes") == Some(usize::from(native)) {
+            native = common::FROM_BYTES_TAKE_ID;
+        }
         let raw = std::mem::take(&mut self.raw_host);
         let pair = match (self.inp.pair_tys.get(&id.0), unbox) {
             (Some(_), Some(_)) if raw => None,

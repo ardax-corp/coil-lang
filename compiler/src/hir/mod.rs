@@ -210,6 +210,9 @@ impl HirFlags {
     /// An `Assign` from `x op= e` or `x++`: its place is also read, so
     /// the place's base and index are built twice.
     pub const COMPOUND: Self = Self(64);
+    /// A `from_bytes` call whose buffer nothing reads again: the string
+    /// takes the buffer's bytes (`from_bytes_take`) instead of a copy.
+    pub const TAKE: Self = Self(128);
 
     pub fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0

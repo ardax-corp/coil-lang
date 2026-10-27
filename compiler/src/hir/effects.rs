@@ -220,9 +220,10 @@ impl ProgramEffects {
 
     /// `body` (as the HIR optimizer left it) with early frees of the
     /// objects nothing else reaches ([`early_free`]), when it has any.
-    pub fn early_frees(&self, checker: &Checker, module_path: &str, module: &HirModule, body: &HirBody) -> Option<HirBody> {
+    /// `host` names the host native a call node runs, as planned.
+    pub fn early_frees(&self, checker: &Checker, module_path: &str, module: &HirModule, body: &HirBody, host: &dyn Fn(HirId) -> Option<usize>) -> Option<HirBody> {
         let lookup = |callee: &Callee, args: &[HirId]| self.call_summary(checker, module_path, body, callee, args);
-        early_free::rewrite(module, body, &lookup)
+        early_free::rewrite(module, body, &lookup, host)
     }
 
     /// What a call in `body` may do, from the summaries recorded so far:

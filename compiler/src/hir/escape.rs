@@ -37,7 +37,7 @@ pub(super) struct Src {
     pub(super) params: u64,
     /// Objects allocated in this body, by site.
     pub(super) sites: u64,
-    /// Anything else: a static, a string literal, a capture, a callee's
+    /// Anything else: a static, a capture, a callee's
     /// result that is not fresh.
     pub(super) other: bool,
 }
@@ -342,8 +342,9 @@ impl<'c, 'a> Escape<'c, 'a> {
         }
         if let Callee::Method { name } = callee
             && let Some(recv) = args.first()
-            && is_vec(body.expr(*recv).ty.as_ref())
-            && matches!(name.as_str(), "len" | "capacity")
+            && let recv_ty = body.expr(*recv).ty.as_ref()
+            && (is_vec(recv_ty) && matches!(name.as_str(), "len" | "capacity")
+                || name == "len" && args.len() == 1 && recv_ty.is_some_and(crate::typechecking::infer::Checker::is_structural_len_ty_for_codegen))
         {
             return Some(Summary::default());
         }
@@ -358,7 +359,9 @@ impl<'c, 'a> Escape<'c, 'a> {
             return Src::EMPTY;
         }
         match &e.kind {
-            HirKind::Lit(super::super::Lit::Str(_)) => Src::OTHER,
+            // A string literal is interned: immutable, and never freed early
+            // (the VM skips interned strings), so holding one is like
+            // holding nothing.
             HirKind::Lit(_) => Src::EMPTY,
             HirKind::Local(l) => self.local(*l),
             HirKind::Global { .. } => Src::OTHER,

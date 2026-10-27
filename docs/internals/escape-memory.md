@@ -76,7 +76,7 @@ effects fixed point solves them across calls and modules:
   it. A coroutine keeps all its parameters.
 - `returns`: bit `i` when the result may reach what parameter `i` reaches.
 - `shared_ret`: the result may reach an object the call did not allocate
-  (a parameter, a static, a string literal, a callee's shared result), or
+  (a parameter, a static, a callee's shared result), or
   a fresh object something else also reaches. When it is `false`, a caller
   that drops the result may free everything it reaches.
 
@@ -104,9 +104,9 @@ says its result is fresh. A stated fact is checked against the inferred
 one and is E0139 when it does not hold (or names no parameter); it is
 never trusted in place of the analysis.
 
-Known gaps: the facts do not tell variants apart, so an `Err` that holds a
-string literal makes a `Result` result shared even on the `Ok` path
-(`csv::Parser::parse_unquoted`). Archives are byte-identical to main and
+A string literal reaches nothing: it is interned, immutable, and the VM
+never frees an interned string (step 3; step 1 counted it as shared, so an
+`Err` holding a literal made a whole `Result` shared). Archives are byte-identical to main and
 compile time is unchanged (b_json 0.30 s, b_csv 0.10 s).
 
 `fn drop()` may run at the point an object is freed early instead of at a

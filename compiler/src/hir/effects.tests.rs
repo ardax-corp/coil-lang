@@ -631,7 +631,7 @@ fn fresh_vec(int n) -> Vec<int> {
 }
 
 #[test]
-fn a_captured_parameter_escapes_and_a_literal_is_shared() {
+fn a_captured_parameter_escapes_and_a_literal_counts_as_fresh() {
     let src = "
 fn later(string s) -> () -> int {
     return fn () use (s) => s.len();
@@ -642,7 +642,8 @@ fn name() -> string {
 ";
     let (m, out) = summaries(src);
     assert_eq!(of(&m, &out, "later").escapes, 1);
-    assert!(of(&m, &out, "name").shared_ret);
+    // Interned and immutable: holding one is like holding nothing.
+    assert!(!of(&m, &out, "name").shared_ret);
 }
 
 #[test]
@@ -651,6 +652,8 @@ fn a_local_byte_copy_keeps_nothing() {
 use string::{to_bytes};
 fn count_commas(string s) -> int {
     let b = to_bytes(s);
+    // Changed, so it stays a copy.
+    b.push(\".\" as byte);
     let n = 0;
     let i = 0;
     while i < b.len() {
@@ -719,6 +722,36 @@ fn bind(Box b) -> (int) -> int {
 
 // Early frees (feature/escape-memory step 2).
 
+/// The body `name` after the early-free rewrite, if it changed.
+fn rewritten(src: &str, name: &str) -> Option<HirBody> {
+    let owned = Box::leak(src.to_string().into_boxed_str());
+    let ast = parser::Pratt::default().parse(owned).expect("parse");
+    let mut checker = Checker::new();
+    let _ = checker.check_program(&ast);
+    let sidecar = checker.typed_sidecar();
+    let module = build_module(&checker, &sidecar, "", &ast);
+    let mut program = ProgramEffects::default();
+    let out = ModuleEffects::solve(&module, &checker, "", &program).summaries;
+    program.record(&module, &checker, "", &out);
+    let body = module.bodies.iter().find(|b| b.name == name).unwrap_or_else(|| panic!("no body `{name}`"));
+    let host = |id: HirId| match &body.expr(id).kind {
+        HirKind::Call { callee: Callee::Named { name, .. }, .. } => common::host_native_id(name),
+        _ => None,
+    };
+    program.early_frees(&checker, "", &module, body, &host)
+}
+
+/// Names of the calls left in `body`, and whether each takes its buffer.
+fn calls(body: &HirBody) -> Vec<(String, bool)> {
+    body.exprs
+        .iter()
+        .filter_map(|x| match &x.kind {
+            HirKind::Call { callee: Callee::Named { name, .. }, .. } => Some((name.clone(), x.flags.contains(crate::hir::HirFlags::TAKE))),
+            _ => None,
+        })
+        .collect()
+}
+
 /// `(deep, local name)` of each early free the rewrite adds to `name`.
 fn frees(src: &str, name: &str) -> Vec<(bool, String)> {
     let owned = Box::leak(src.to_string().into_boxed_str());
@@ -731,7 +764,12 @@ fn frees(src: &str, name: &str) -> Vec<(bool, String)> {
     let out = ModuleEffects::solve(&module, &checker, "", &program).summaries;
     program.record(&module, &checker, "", &out);
     let body = module.bodies.iter().find(|b| b.name == name).unwrap_or_else(|| panic!("no body `{name}`"));
-    let Some(rewritten) = program.early_frees(&checker, "", &module, body) else {
+    // Host natives by name, as the planner finds them.
+    let host = |id: HirId| match &body.expr(id).kind {
+        HirKind::Call { callee: Callee::Named { name, .. }, .. } => common::host_native_id(name),
+        _ => None,
+    };
+    let Some(rewritten) = program.early_frees(&checker, "", &module, body, &host) else {
         return Vec::new();
     };
     rewritten
@@ -761,6 +799,8 @@ fn a_local_byte_copy_is_freed_before_the_return() {
 use string::{to_bytes};
 fn count_commas(string s) -> int {
     let b = to_bytes(s);
+    // Changed, so it stays a copy.
+    b.push(\".\" as byte);
     let n = 0;
     let i = 0;
     while i < b.len() {
@@ -804,6 +844,8 @@ fn a_local_byte_copy_is_freed_before_every_return() {
 use string::{to_bytes};
 fn needs_quote(string s) -> bool {
     let b = to_bytes(s);
+    // Changed, so it stays a copy.
+    b.push(\".\" as byte);
     let i = 0;
     while i < b.len() {
         if b[i] == \",\" {
@@ -977,4 +1019,94 @@ fn a_list_replaced_by_reassignment_frees_the_old_list_whole() {
 fn a_list_another_local_shares_is_not_freed_on_reassignment() {
     let src = format!("{NODES}\nfn run(int k) -> int {{\n    let list = build(1);\n    let first = list;\n    let r = 0;\n    while r < k {{\n        list = build(100);\n        r = r + 1;\n    }}\n    return len_of(first);\n}}\n");
     assert!(!frees(&src, "run").iter().any(|f| f.1 == "list"), "{:?}", frees(&src, "run"));
+}
+
+#[test]
+fn a_byte_copy_only_indexed_reads_the_string_instead() {
+    let src = "
+use string::{to_bytes};
+fn commas(string s) -> int {
+    let b = to_bytes(s);
+    let n = 0;
+    let i = 0;
+    while i < b.len() {
+        if b[i] == \",\" {
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+";
+    let body = rewritten(src, "commas").expect("rewritten");
+    // The copy's `let` binds nothing, and the reads index the string.
+    assert!(body.exprs.iter().any(|x| matches!(x.kind, HirKind::Let { init: None, .. })));
+    assert!(body.exprs.iter().any(|x| matches!(x.kind, HirKind::Index { kind: crate::hir::IndexKind::String, .. })));
+}
+
+#[test]
+fn a_byte_copy_that_is_changed_stays_a_copy() {
+    let src = "
+use string::{to_bytes};
+fn bump(string s) -> int {
+    let b = to_bytes(s);
+    b[0] = \"x\";
+    return b.len();
+}
+";
+    let body = rewritten(src, "bump");
+    assert!(!body.is_some_and(|b| b.exprs.iter().any(|x| matches!(x.kind, HirKind::Index { kind: crate::hir::IndexKind::String, .. }))));
+}
+
+#[test]
+fn a_buffer_returned_as_a_string_gives_up_its_bytes() {
+    let src = "
+use string::{from_bytes};
+fn word(int n) -> string {
+    let out: Vec<byte> = Vec::new();
+    let i = 0;
+    while i < n {
+        out.push(\"a\" as byte);
+        i = i + 1;
+    }
+    return match from_bytes(out) {
+        Result::Ok(s) => s,
+        Result::Err(_) => \"\",
+    };
+}
+";
+    let body = rewritten(src, "word").expect("rewritten");
+    assert!(calls(&body).iter().any(|c| c.0.ends_with("from_bytes") && c.1), "{:?}", calls(&body));
+}
+
+#[test]
+fn a_buffer_read_after_its_conversion_keeps_its_bytes() {
+    let src = "
+use string::{from_bytes};
+fn word(int n) -> int {
+    let out: Vec<byte> = Vec::new();
+    out.push(\"a\" as byte);
+    return match from_bytes(out) {
+        Result::Ok(s) => out.len(),
+        Result::Err(_) => 0,
+    };
+}
+";
+    let left = rewritten(src, "word").map(|b| calls(&b)).unwrap_or_default();
+    assert!(!left.iter().any(|c| c.1), "{left:?}");
+}
+
+#[test]
+fn a_parameter_buffer_keeps_its_bytes() {
+    let src = "
+use string::{from_bytes};
+fn text(Vec<byte> b) -> string {
+    return match from_bytes(b) {
+        Result::Ok(s) => s,
+        Result::Err(_) => \"\",
+    };
+}
+";
+    let left = rewritten(src, "text").map(|b| calls(&b)).unwrap_or_default();
+    assert!(!left.iter().any(|c| c.1), "{left:?}");
 }

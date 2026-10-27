@@ -31,14 +31,17 @@ use std::collections::HashMap;
 
 use super::escape::{leaf, no_heap, result_exprs, CallLookup, Escape, Src};
 use super::{is_vec, BinOp, Builtin, Callee, HirBody, HirId, HirKind, HirModule, LocalId, LocalKind, VEC_MUTATORS};
-use crate::hir::{HirExpr, HirFlags, HirLocal, Span};
+use crate::hir::{HirExpr, HirFlags, HirLocal, IndexKind, Span};
 use crate::typechecking::ty::{self, Ty};
 
 /// `body` with early frees added, or `None` when it has no place for one.
-pub(super) fn rewrite(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>) -> Option<HirBody> {
+pub(super) fn rewrite(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>, host: &dyn Fn(HirId) -> Option<usize>) -> Option<HirBody> {
     if body.is_coro || body.root.is_none() {
         return None;
     }
+    let viewed = byte_views(body, host);
+    let changed = viewed.is_some();
+    let body = viewed.as_ref().unwrap_or(body);
     // A lambda's captures are read from `module`; a body spliced from
     // another module may name lambdas it does not hold.
     if body.exprs.iter().any(|x| matches!(x.kind, HirKind::Lambda { body: i } if i >= module.bodies.len())) {
@@ -69,6 +72,7 @@ pub(super) fn rewrite(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_
     let locals = block_locals(body, &mut e, kept, &linear);
     let chains = concat_temps(body, &mut e, &parents);
     let scrutinees = match_temps(body, &mut e, &parents, kept);
+    let takes = take_calls(body, &mut e, &parents, stored, host);
     let reassigns: Vec<(HirId, bool)> = (0..body.exprs.len())
         .map(|i| HirId(i as u32))
         .filter_map(|a| match &body.expr(a).kind {
@@ -79,10 +83,14 @@ pub(super) fn rewrite(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_
             _ => None,
         })
         .collect();
-    if temps.is_empty() && locals.is_empty() && chains.is_empty() && reassigns.is_empty() && scrutinees.is_empty() {
-        return None;
+    if temps.is_empty() && locals.is_empty() && chains.is_empty() && reassigns.is_empty() && scrutinees.is_empty() && takes.is_empty() {
+        return changed.then(|| body.clone());
     }
     let mut out = body.clone();
+    // Flags first: the rewrites below move nodes, flags and all.
+    for c in takes {
+        out.exprs[c.0 as usize].flags.insert(HirFlags::TAKE);
+    }
     for (call, arg, deep) in temps {
         free_temp(&mut out, call, arg, deep);
     }
@@ -99,6 +107,165 @@ pub(super) fn rewrite(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_
         free_at_end(&mut out, block, local);
     }
     Some(out)
+}
+
+/// `let b = to_bytes(s)` whose `b` is only indexed and measured, with `s`
+/// never set again: those reads go to `s`'s own bytes (`s[i]`, `s.len()`)
+/// and the copy is never made.
+fn byte_views(body: &HirBody, host: &dyn Fn(HirId) -> Option<usize>) -> Option<HirBody> {
+    let to_bytes = common::host_native_id("to_bytes")?;
+    let parents = parents(body);
+    let mut lets: HashMap<LocalId, Vec<HirId>> = HashMap::new();
+    let mut reads: HashMap<LocalId, Vec<HirId>> = HashMap::new();
+    let mut set = std::collections::HashSet::new();
+    for (i, x) in body.exprs.iter().enumerate() {
+        match &x.kind {
+            HirKind::Let { local, .. } => lets.entry(*local).or_default().push(HirId(i as u32)),
+            HirKind::Local(l) => reads.entry(*l).or_default().push(HirId(i as u32)),
+            HirKind::Assign { place, .. } => {
+                if let HirKind::Local(l) = body.expr(*place).kind {
+                    set.insert(l);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out: Option<HirBody> = None;
+    for (&b, decls) in &lets {
+        let [decl] = decls.as_slice() else {
+            continue;
+        };
+        let HirKind::Let { init: Some(init), .. } = body.expr(*decl).kind else {
+            continue;
+        };
+        let HirKind::Call { args, .. } = &body.expr(init).kind else {
+            continue;
+        };
+        let [arg] = args.as_slice() else {
+            continue;
+        };
+        let HirKind::Local(s) = body.expr(*arg).kind else {
+            continue;
+        };
+        let string = body.local(s).ty.as_ref().is_some_and(|t| matches!(ty::strip_readonly(t), Ty::Con(n) if n == "string"));
+        // `let _ = to_bytes(s)` runs it on purpose.
+        if host(init) != Some(to_bytes) || !string || body.local(b).name == "_" || set.contains(&b) || set.contains(&s) || body.local(b).captured || body.local(s).captured {
+            continue;
+        }
+        let uses = reads.get(&b).cloned().unwrap_or_default();
+        let ok = uses.iter().all(|&r| {
+            let Some(&p) = parents.get(&r) else {
+                return false;
+            };
+            match &body.expr(p).kind {
+                HirKind::Index { base, kind: IndexKind::Array, .. } => {
+                    *base == r && !parents.get(&p).is_some_and(|&q| matches!(body.expr(q).kind, HirKind::Assign { place, .. } if place == p))
+                }
+                HirKind::Call { callee: Callee::Method { name }, args } => name == "len" && args.as_slice() == [r],
+                _ => false,
+            }
+        });
+        if !ok {
+            continue;
+        }
+        let o = out.get_or_insert_with(|| body.clone());
+        let s_ty = o.local(s).ty.clone();
+        for &r in &uses {
+            let x = &mut o.exprs[r.0 as usize];
+            x.kind = HirKind::Local(s);
+            x.ty = s_ty.clone();
+            x.node = None;
+            let p = parents[&r];
+            if let HirKind::Index { kind, .. } = &mut o.exprs[p.0 as usize].kind {
+                *kind = IndexKind::String;
+            }
+        }
+        if let HirKind::Let { init, .. } = &mut o.exprs[decl.0 as usize].kind {
+            *init = None;
+        }
+    }
+    out
+}
+
+/// `from_bytes(x)` calls whose buffer nothing reads again: the call sits in
+/// a `return` (no loop in between), `x`'s buffer was allocated here and
+/// nothing stores it, and inside that `return` it is read only by this call
+/// (or copied into another local on the way, as inlining binds a parameter).
+fn take_calls(body: &HirBody, e: &mut Escape<'_, '_>, parents: &HashMap<HirId, HirId>, stored: Src, host: &dyn Fn(HirId) -> Option<usize>) -> Vec<HirId> {
+    let Some(from_bytes) = common::host_native_id("from_bytes") else {
+        return Vec::new();
+    };
+    let mut reads: HashMap<LocalId, Vec<HirId>> = HashMap::new();
+    for (i, x) in body.exprs.iter().enumerate() {
+        if let HirKind::Local(l) = x.kind {
+            reads.entry(l).or_default().push(HirId(i as u32));
+        }
+    }
+    let under = |mut at: HirId, root: HirId| loop {
+        if at == root {
+            return true;
+        }
+        match parents.get(&at) {
+            Some(&p) => at = p,
+            None => return false,
+        }
+    };
+    let mut out = Vec::new();
+    for i in 0..body.exprs.len() {
+        let c = HirId(i as u32);
+        let HirKind::Call { args, .. } = &body.expr(c).kind else {
+            continue;
+        };
+        let [arg] = args.as_slice() else {
+            continue;
+        };
+        let HirKind::Local(x) = body.expr(*arg).kind else {
+            continue;
+        };
+        if host(c) != Some(from_bytes) || !is_vec(body.local(x).ty.as_ref()) {
+            continue;
+        }
+        // The `return` it sits in, with no loop on the way.
+        let mut at = c;
+        let ret = loop {
+            match parents.get(&at) {
+                Some(&p) => match body.expr(p).kind {
+                    HirKind::Return(_) => break Some(p),
+                    HirKind::Loop { .. } | HirKind::ForIn { .. } | HirKind::Lambda { .. } => break None,
+                    _ => at = p,
+                },
+                None => break None,
+            }
+        };
+        let Some(ret) = ret else {
+            continue;
+        };
+        let s = e.local(x);
+        if s.params != 0 || s.other || s.sites == 0 || s.sites & stored.sites != 0 {
+            continue;
+        }
+        let holders: Vec<LocalId> = (0..body.locals.len())
+            .map(|j| LocalId(j as u32))
+            .filter(|&m| {
+                let h = e.local(m);
+                e.close(h).sites & s.sites != 0
+            })
+            .collect();
+        let ok = holders.iter().all(|&m| {
+            let local = body.local(m);
+            matches!(local.kind, LocalKind::Let | LocalKind::Temp)
+                && !local.captured
+                && reads.get(&m).is_none_or(|rs| {
+                    rs.iter().filter(|&&r| under(r, ret)).all(|&r| {
+                        r == *arg || parents.get(&r).is_some_and(|&p| matches!(&body.expr(p).kind, HirKind::Let { local, init: Some(v) } if *v == r && holders.contains(local)))
+                    })
+                })
+        });
+        if ok {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Whether a value of `ty` may be one heap object the VM can free.

@@ -1864,6 +1864,19 @@ mod tests {
     }
 
     #[test]
+    fn from_bytes_take_moves_the_bytes_and_restores_them_on_an_error() {
+        let mut heap = Heap::default();
+        let packed = |heap: &mut Heap, b: &[u8]| Value::from(heap.alloc(ObjArray::from_bytes(b.to_vec()), Object::Array).0.addr());
+        let buf = packed(&mut heap, b"hello");
+        let s = from_bytes_take(&mut heap, buf).expect("utf-8");
+        assert_eq!(value_as_string(&heap, s).unwrap(), "hello");
+        assert_eq!(value_as_bytes(&heap, buf).unwrap(), Vec::<u8>::new());
+        let bad = packed(&mut heap, &[0xff, 0xfe]);
+        assert!(from_bytes_take(&mut heap, bad).is_err());
+        assert_eq!(value_as_bytes(&heap, bad).unwrap(), vec![0xff, 0xfe]);
+    }
+
+    #[test]
     fn from_bytes_rejects_invalid_utf8() {
         let mut heap = Heap::default();
         let buf = make_byte_array(&mut heap, &[0xff, 0xfe]);
