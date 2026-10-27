@@ -328,3 +328,147 @@ impl Heap {
         fwd.len()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memory::{EnumPayload, ObjArray, ObjEnum};
+
+    fn nursery_heap() -> Heap {
+        let mut heap = Heap::default();
+        heap.set_nursery(true);
+        heap
+    }
+
+    /// A cons list `Node(v, next)` of enums with a pointer-kind link word;
+    /// returns the head.
+    fn cons_list(heap: &mut Heap, n: i64) -> u64 {
+        let kinds = common::pack_word_kinds([common::WORD_SCALAR, common::WORD_POINTER]);
+        let mut next = 0u64;
+        for v in 0..n {
+            let payload = EnumPayload::two(Value::from(v), Value::from(next)).with_kinds(kinds);
+            let (obj, _) = heap.alloc(ObjEnum::new(0, payload), Object::Enum);
+            next = obj.addr();
+        }
+        next
+    }
+
+    fn walk(heap: &Heap, head: u64) -> Vec<i64> {
+        let mut out = Vec::new();
+        let mut cur = heap.find_object_by_addr(head);
+        while let Some(Object::Enum(e)) = cur {
+            let p = &e.as_ref().payload;
+            out.push(p[0].as_int());
+            cur = heap.find_object_by_addr(p[1].heap_addr());
+        }
+        out
+    }
+
+    fn minor(heap: &mut Heap, pins: &[u64], precise: &mut [u64]) -> usize {
+        let plan = heap.minor_plan(pins, precise);
+        for root in precise.iter_mut() {
+            if let Some(v) = plan.forward(Value::from(*root)) {
+                *root = v.bits();
+            }
+        }
+        heap.minor_finish(plan)
+    }
+
+    #[test]
+    fn young_objects_are_allocated_in_the_nursery() {
+        let mut heap = nursery_heap();
+        let head = cons_list(&mut heap, 3);
+        let obj = heap.find_object_by_addr(head).expect("head");
+        assert_eq!(obj.generation() & GEN_YOUNG, GEN_YOUNG);
+        assert!(heap.has_young());
+    }
+
+    #[test]
+    fn a_minor_collection_moves_a_precisely_rooted_list_and_frees_the_rest() {
+        let mut heap = nursery_heap();
+        let head = cons_list(&mut heap, 500);
+        let before = walk(&heap, head);
+        let _garbage = cons_list(&mut heap, 1000);
+        assert_eq!(heap.live_object_count(), 1500);
+        let mut roots = [head];
+        let moved = minor(&mut heap, &[], &mut roots);
+        assert_eq!(moved, 500);
+        assert_ne!(roots[0], head, "the root names the copy");
+        assert_eq!(walk(&heap, roots[0]), before);
+        assert_eq!(heap.live_object_count(), 500);
+        assert!(!heap.has_young());
+        let copy = heap.find_object_by_addr(roots[0]).expect("copy");
+        assert_eq!(copy.generation(), GEN_UNLOGGED, "a copy is old and not remembered");
+        assert!(heap.find_object_by_addr(head).is_none(), "the young slot is poisoned");
+    }
+
+    #[test]
+    fn an_ambiguous_root_pins_its_target_and_promotes_its_chunk() {
+        let mut heap = nursery_heap();
+        let head = cons_list(&mut heap, 100);
+        let before = walk(&heap, head);
+        let moved = minor(&mut heap, &[head], &mut []);
+        assert_eq!(moved, 99, "everything but the pinned head moves");
+        assert_eq!(walk(&heap, head), before, "the pinned head's link is rewritten");
+        let obj = heap.find_object_by_addr(head).expect("pinned head stays");
+        assert_eq!(obj.generation(), GEN_UNLOGGED);
+        // The promoted chunk's free slots are reusable old slots.
+        let _ = cons_list(&mut heap, 10);
+        assert_eq!(walk(&heap, head), before);
+    }
+
+    #[test]
+    fn a_young_object_stored_into_an_old_one_survives_through_the_barrier() {
+        let mut heap = nursery_heap();
+        let (arr, _) = heap.alloc(ObjArray::new(vec![Value::from(0i64)]), Object::Array);
+        let Object::Array(mut gc) = arr else { unreachable!() };
+        gc.as_mut().set_elem_kind(common::WORD_POINTER);
+        // The array survives a collection as a root and becomes old.
+        let mut roots = [arr.addr()];
+        minor(&mut heap, &[], &mut roots);
+        let old = roots[0];
+        let Some(Object::Array(mut old_gc)) = heap.find_object_by_addr(old) else {
+            panic!("array survived")
+        };
+        assert_eq!(Object::Array(old_gc).generation() & GEN_YOUNG, 0);
+        let head = cons_list(&mut heap, 20);
+        let before = walk(&heap, head);
+        // The store goes through the barrier, which remembers the array.
+        unsafe { old_gc.as_mut().set_unchecked(0, Value::from(head)) };
+        // No root names the list: only the remembered array keeps it.
+        minor(&mut heap, &[old], &mut []);
+        let Some(Object::Array(a)) = heap.find_object_by_addr(old) else {
+            panic!("array stays")
+        };
+        let new_head = a.as_ref().iter().next().expect("element").bits();
+        assert_ne!(new_head, head, "the precise element was rewritten");
+        assert_eq!(walk(&heap, new_head), before);
+    }
+
+    #[test]
+    fn promote_young_keeps_every_young_object_in_place() {
+        let mut heap = nursery_heap();
+        let head = cons_list(&mut heap, 50);
+        let before = walk(&heap, head);
+        heap.promote_young();
+        assert!(!heap.has_young());
+        assert_eq!(walk(&heap, head), before);
+        assert_eq!(heap.live_object_count(), 50);
+        let obj = heap.find_object_by_addr(head).expect("head");
+        assert_eq!(obj.generation(), GEN_UNLOGGED);
+    }
+
+    #[test]
+    fn a_major_collection_keeps_young_objects_unmarked() {
+        let mut heap = nursery_heap();
+        let head = cons_list(&mut heap, 10);
+        heap.begin_mark(&[head]);
+        while !heap.mark_quantum(usize::MAX) {}
+        unsafe { heap.sweep() };
+        let obj = heap.find_object_by_addr(head).expect("young head survives a major cycle");
+        assert!(!obj.is_marked(), "the sweep skipped it, so its mark was cleared");
+        let mut roots = [head];
+        minor(&mut heap, &[], &mut roots);
+        assert_eq!(walk(&heap, roots[0]).len(), 10);
+    }
+}
