@@ -816,3 +816,50 @@ fn needs_quote(string s) -> bool {
 ";
     assert_eq!(frees(src, "needs_quote"), vec![(false, "b".to_string()), (false, "b".to_string())]);
 }
+
+#[test]
+fn a_string_rebuilt_in_place_frees_its_old_value() {
+    let src = "
+fn build(int n) -> string {
+    let s = \"\";
+    let i = 0;
+    while i < n {
+        s = s + \"ab\";
+        i = i + 1;
+    }
+    return s;
+}
+";
+    assert_eq!(frees(src, "build"), vec![(false, "s".to_string())]);
+}
+
+#[test]
+fn a_string_copied_before_a_rebuild_is_not_freed() {
+    let src = "
+fn snapshot(int n) -> string {
+    let s = \"x\";
+    let keep = s;
+    let i = 0;
+    while i < n {
+        s = s + \"y\";
+        i = i + 1;
+    }
+    return keep + s;
+}
+";
+    assert_eq!(frees(src, "snapshot"), vec![]);
+}
+
+#[test]
+fn a_fresh_concat_operand_is_freed_after_the_concat() {
+    let src = "
+use string::{format};
+fn piece(int i) -> string {
+    return format(\"<%i>\", i);
+}
+fn wrap(int i) -> string {
+    return \"[\" + piece(i) + \"]\";
+}
+";
+    assert_eq!(frees(src, "wrap").len(), 1);
+}

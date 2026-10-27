@@ -3,7 +3,7 @@
 // Whatever is stored, returned or shared must stay alive across collections.
 use tests::assert;
 use gc::collect;
-use string::to_bytes;
+use string::{format, to_bytes};
 
 class Tree {
     pub left: Option<Tree>,
@@ -117,4 +117,51 @@ test("a copy read in an indexed loop is freed and the next copy reads its own by
         i += 1;
     }
     assert!(total == 500 * 3);
+}
+
+// `s = s + x` frees the old `s`; a copy taken before the rebuild keeps it.
+fn build(int n) -> string {
+    let s = "";
+    let i = 0;
+    while i < n {
+        s = s + "ab" + format("%i", i);
+        i += 1;
+    }
+    return s;
+}
+
+fn snapshot(int n) -> string {
+    let s = "x";
+    let keep = s;
+    let i = 0;
+    while i < n {
+        if i == 2 {
+            keep = s;
+        }
+        s = s + "y";
+        i += 1;
+    }
+    return keep + "|" + s;
+}
+
+fn piece(int i) -> string {
+    return format("<%i>", i);
+}
+
+test("a string rebuilt in a loop frees each old value and keeps the last") {
+    let s = build(50);
+    collect();
+    assert!(s.len() == 50 * 2 + 10 + 40 * 2);
+    assert!(snapshot(5) == "xyy|xyyyyy");
+}
+
+test("a call result fed into a concatenation is freed after it") {
+    let out = "";
+    let i = 0;
+    while i < 100 {
+        out = out + piece(i) + ",";
+        i += 1;
+    }
+    collect();
+    assert!(out.len() == 10 * 4 + 90 * 5);
 }
