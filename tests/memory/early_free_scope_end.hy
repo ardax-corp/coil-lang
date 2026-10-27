@@ -88,3 +88,33 @@ test("a returned value that came through a freed local's block stays alive") {
     collect();
     assert!(w == "abcd");
 }
+
+// The loop pins `b` for indexed reads; the free drops that pin, and the
+// next call's copy (often in the freed slot) must not read the stale one.
+fn commas(string s) -> int {
+    let b = to_bytes(s);
+    let n = 0;
+    let i = 0;
+    while i < b.len() {
+        if b[i] == "!" {
+            return -1;
+        }
+        if b[i] == "," {
+            n += 1;
+        }
+        i += 1;
+    }
+    return n;
+}
+
+test("a copy read in an indexed loop is freed and the next copy reads its own bytes") {
+    let total = 0;
+    let i = 0;
+    while i < 500 {
+        total += commas("a,b,c");
+        total += commas("x,y");
+        assert!(commas("no!") == -1);
+        i += 1;
+    }
+    assert!(total == 500 * 3);
+}
