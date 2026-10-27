@@ -13,9 +13,8 @@ inputs:
     default: edge
   stdlib:
     description: >-
-      Also clone coil-stdlib and export its directory as COIL_STDLIB_DIR
-      (`true` or `false`). coil does not read it: pass
-      `--root "$COIL_STDLIB_DIR/src"` (or this action's `src` output).
+      Also clone coil-stdlib (`true` or `false`) and pass its `src` as
+      `--root` (this action's `stdlib` output).
     default: "false"
   stdlib-ref:
     description: coil-stdlib branch, tag or commit to clone (empty = default branch).
@@ -125,5 +124,4 @@ runs:
         git -C "$dir" fetch -q --depth 1 origin "${STDLIB_REF:-HEAD}"
         git -C "$dir" checkout -q --detach FETCH_HEAD
         echo "coil-stdlib $(git -C "$dir" rev-parse --short HEAD)"
-        echo "COIL_STDLIB_DIR=$dir" >> "$GITHUB_ENV"
         echo "src=$dir/src" >> "$GITHUB_OUTPUT"

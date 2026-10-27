@@ -52,12 +52,12 @@ impl CacheConfig {
     }
 }
 
-/// The user's coil cache: `$COIL_CACHE_DIR`, else `$XDG_CACHE_HOME/coil`,
+/// The user's coil cache: `$XDG_CACHE_HOME/coil`,
 /// else `~/.cache/coil` (spool's cache root).
 pub fn user_cache_root() -> Option<PathBuf> {
     let var = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);
-    var("COIL_CACHE_DIR")
-        .or_else(|| var("XDG_CACHE_HOME").map(|d| d.join("coil")))
+    var("XDG_CACHE_HOME")
+        .map(|d| d.join("coil"))
         .or_else(|| var("HOME").or_else(|| var("USERPROFILE")).map(|h| h.join(".cache").join("coil")))
 }
 

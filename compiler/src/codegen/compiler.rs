@@ -434,8 +434,7 @@ impl Compiler {
         self.opt_options.hir_inline = on;
     }
 
-    /// Keep enum locals built in place as two slots or boxed (default
-    /// `COIL_HIR_PAIR_LOCALS`).
+    /// Keep enum locals built in place as two slots (the default) or boxed.
     pub fn set_hir_pair_locals(&mut self, on: bool) {
         self.opt_options.hir_pair_locals = on;
     }

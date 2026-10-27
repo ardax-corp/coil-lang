@@ -426,7 +426,7 @@ again:
   with their names (`Checker::type_id_keys`: `class m::P`, record shapes)
   and moved to the current program's ids on load; a type that is gone or
   has a different field count is a miss.
-- Location: `--comptime-cache DIR`, else `$COIL_CACHE_DIR/comptime`,
+- Location: `--comptime-cache DIR`, else
   `$XDG_CACHE_HOME/coil/comptime`, `~/.cache/coil/comptime`. Writes go to a
   temporary file and are renamed into place; a cache that cannot be written
   only costs time.
@@ -530,8 +530,8 @@ while compiling, on the same host (`MacroHost::eval_consts`):
 
 ## Compile-time calls
 
-At `-O2` and above (`OptimizeOptions::call_fold`; `--fold-calls off`,
-`COIL_CALL_FOLD=0` or `Pipeline::set_call_fold(false)` turns it off) a pure call with constant
+At `-O2` and above (`OptimizeOptions::call_fold`; `--fold-calls off`
+or `Pipeline::set_call_fold(false)` turns it off) a pure call with constant
 arguments is computed while compiling, in the same `eval_consts` run as
 the consts (so the call can read them):
 
@@ -645,8 +645,7 @@ generator module, 244 ms cold, 109 ms with its program from the user cache.
 - A function-style macro call names the macro bare (`name!`); a path
   (`m::name!`) does not parse.
 - Compiled expansion programs are also kept on disk, in
-  `<user cache root>/macro-programs/<key>.prog` (`COIL_CACHE_DIR`, else
-  `XDG_CACHE_HOME/coil`, else `~/.cache/coil`; never the `--comptime-cache`
+  `<user cache root>/macro-programs/<key>.prog` (`XDG_CACHE_HOME/coil`, else `~/.cache/coil`; never the `--comptime-cache`
   dir, which may be committed). The key is a sha256 of the host's build id
   (`MacroHost::build_id`, the `coil-build-id` of the comptime crate, so any
   compiler change is a miss), the provider module, the generated
