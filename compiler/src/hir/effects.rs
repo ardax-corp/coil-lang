@@ -260,6 +260,17 @@ impl ProgramEffects {
         if let Some(&s) = self.by_name.get(name).or_else(|| self.by_name.get(format!("{module_path}::{name}").as_str())) {
             return Some(s);
         }
+        // An imported type's static (`Pool::with_capacity`), by the module
+        // the type is in; never a host native of the same short name.
+        if let Some((owner, m)) = name.rsplit_once("::")
+            && let Some(key) = checker.resolve_class_key(owner)
+            && let Some(&s) = self.by_name.get(format!("{key}::{m}").as_str())
+        {
+            return Some(s);
+        }
+        if user_type_member(checker, name) {
+            return None;
+        }
         let member = name.rsplit_once("::");
         let method = member.map_or(name, |(_, m)| m);
         if checker.generics().typeclasses.values().any(|t| t.methods.iter().any(|m| m.name == method)) {
@@ -1422,6 +1433,15 @@ fn readonly_at_top(checker: &Checker, ty: Option<&Ty>) -> bool {
         }
         _ => false,
     }
+}
+
+/// `Owner::member` where `Owner` is a class or enum of the program (not
+/// `Vec`): a user function, never a host native.
+fn user_type_member(checker: &Checker, name: &str) -> bool {
+    name.rsplit_once("::").is_some_and(|(owner, _)| {
+        let short = owner.rsplit("::").next().unwrap_or(owner);
+        short != "Vec" && short.starts_with(|c: char| c.is_ascii_uppercase()) && checker.has_impl(owner)
+    })
 }
 
 fn is_vec_ctor(name: &str) -> bool {
@@ -2587,6 +2607,11 @@ impl Cx<'_> {
         } else {
             name.to_string()
         };
+        // A user type's static is unknown code here, whatever its short
+        // name: `Pool::with_capacity` is not the `with_capacity` native.
+        if user_type_member(self.checker, name) {
+            return Summary::of(classify_host_name(&short));
+        }
         escape::host_summary(&short, Summary::of(classify_host_name(&short)))
     }
 
@@ -2617,7 +2642,12 @@ impl Cx<'_> {
             .and_then(|info| Some((interner.module_path(info.module)?, info.name.as_str())))
             .map(|(module, short)| if module.is_empty() { short.to_string() } else { format!("{module}::{short}") });
         let qualified = format!("{}::{name}", self.module_path);
-        for key in [Some(name), declared.as_deref(), Some(qualified.as_str())].into_iter().flatten() {
+        // An imported type's static (`Pool::with_capacity`): the type's
+        // key names the module it is in.
+        let owned = name
+            .rsplit_once("::")
+            .and_then(|(owner, member)| Some(format!("{}::{member}", self.checker.resolve_class_key(owner)?)));
+        for key in [Some(name), declared.as_deref(), Some(qualified.as_str()), owned.as_deref()].into_iter().flatten() {
             if let Some(&s) = self.program.by_name.get(key) {
                 return Some(s);
             }
