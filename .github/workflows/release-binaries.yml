@@ -217,6 +217,11 @@ jobs:
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             archive="dist/coil-${triple}.zip"
             (cd staging && tar -a -cf "../${archive}" "coil-${triple}")
+            # A real zip starts with "PK" (#2050).
+            if [[ "$(head -c 2 "${archive}")" != "PK" ]]; then
+              echo "::error::${archive} is not a zip archive"
+              exit 1
+            fi
           else
             archive="dist/coil-${triple}.tar.gz"
             tar -C staging -czf "${archive}" "coil-${triple}"
