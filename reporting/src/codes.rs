@@ -90,6 +90,8 @@ pub enum ErrorCode {
     /// A function states an escape fact (`#[noescape(x)]`, `#[fresh]`)
     /// that the inferred escape facts do not support.
     EscapeMismatch,
+    /// An object made inside a `region { … }` block can leave it.
+    RegionEscape,
 
     DuplicateEnum,
     DuplicateConstructor,
@@ -204,6 +206,7 @@ impl ErrorCode {
             Self::IfWithoutElse => "E0137",
             Self::ComptimeFoldBudget => "E0138",
             Self::EscapeMismatch => "E0139",
+            Self::RegionEscape => "E0140",
             Self::DuplicateEnum => "E0200",
             Self::DuplicateConstructor => "E0201",
             Self::UnknownEnum => "E0202",
@@ -300,6 +303,7 @@ impl ErrorCode {
             Self::IfWithoutElse => "`if` used as a value has no `else`",
             Self::ComptimeFoldBudget => "call too long to compute while compiling without `comptime`",
             Self::EscapeMismatch => "stated escape fact does not hold",
+            Self::RegionEscape => "object made in a region leaves it",
             Self::DuplicateEnum => "duplicate enum",
             Self::DuplicateConstructor => "duplicate constructor",
             Self::UnknownEnum => "unknown enum",
@@ -404,6 +408,7 @@ mod tests {
             | IfWithoutElse
             | ComptimeFoldBudget
             | EscapeMismatch
+            | RegionEscape
             | DuplicateEnum
             | DuplicateConstructor
             | UnknownEnum
@@ -490,6 +495,7 @@ mod tests {
             IfWithoutElse,
             ComptimeFoldBudget,
             EscapeMismatch,
+            RegionEscape,
             DuplicateEnum,
             DuplicateConstructor,
             UnknownEnum,
