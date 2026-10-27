@@ -533,7 +533,7 @@ impl CodeBuf {
     }
 
     fn lower_in_place_inner(&mut self, pool: &mut Vec<u64>, capture_ops: bool) -> Lowered {
-        let mut module = IlModule::from_flat(self.il.ops(), &self.funcs)
+        let mut module = IlModule::from_flat_taking_mir(self.il.ops(), &mut self.funcs)
             .with_entries(self.entry_at_offset.clone());
         let lowered = lower_module_inner(&mut module, pool, capture_ops, &self.opt_options)
             .unwrap_or_else(|e| panic!("{e}"));

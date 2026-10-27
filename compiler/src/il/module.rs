@@ -55,6 +55,21 @@ impl IlModule {
     /// `glue[i]` is the gap after `funcs[i]` (before the next func or epilogue).
     /// Empty `funcs` yields the whole buffer as prologue.
     pub fn from_flat(ops: &[IlOp], funcs: &[IlFunc]) -> Self {
+        Self::from_flat_with(ops, funcs, |i| funcs[i].hir_mir.clone())
+    }
+
+    /// [`Self::from_flat`], taking each body's MIR from `funcs` instead of
+    /// copying it: lowering is its last reader.
+    pub fn from_flat_taking_mir(ops: &[IlOp], funcs: &mut [IlFunc]) -> Self {
+        let mut mirs: Vec<_> = funcs.iter_mut().map(|f| f.hir_mir.take()).collect();
+        Self::from_flat_with(ops, funcs, |i| mirs[i].take())
+    }
+
+    fn from_flat_with(
+        ops: &[IlOp],
+        funcs: &[IlFunc],
+        mut mir: impl FnMut(usize) -> Option<Box<crate::mir::MirFunc>>,
+    ) -> Self {
         if funcs.is_empty() {
             return Self {
                 prologue: ops.to_vec(),
@@ -94,8 +109,10 @@ impl IlModule {
             } else if !module.funcs.is_empty() {
                 module.glue.push(Vec::new());
             }
+            let mut meta = funcs[*fi].clone_without_mir();
+            meta.hir_mir = mir(*fi);
             module.funcs.push(IlFuncBody {
-                meta: funcs[*fi].clone(),
+                meta,
                 ops: ops[*raw_start..*raw_end].to_vec(),
             });
             cursor = *raw_end;
@@ -122,12 +139,28 @@ impl IlModule {
     /// function's label with the same numeric id. Prologue/epilogue are copied
     /// verbatim; cross-function `Jump`/`Entry` targets are patched per segment.
     pub fn to_flat(&self) -> FlatIl {
-        let mut module = self.clone();
-        absorb_trailing_labels(&mut module);
+        Self {
+            prologue: self.prologue.clone(),
+            funcs: self
+                .funcs
+                .iter()
+                .map(|b| IlFuncBody { meta: b.meta.clone_without_mir(), ops: b.ops.clone() })
+                .collect(),
+            glue: self.glue.clone(),
+            epilogue: self.epilogue.clone(),
+            ..Self::default()
+        }
+        .into_flat()
+    }
+
+    /// [`Self::to_flat`], moving the ops out of the module instead of
+    /// copying them.
+    fn into_flat(mut self) -> FlatIl {
+        absorb_trailing_labels(&mut self);
         let mut out = Vec::new();
         // New ids must not overlap old Label/Jump/Entry ids still sitting on
         // cross-function CALL sites until the post-concat patch.
-        let mut next_label = module.max_code_label().saturating_add(1);
+        let mut next_label = self.max_code_label().saturating_add(1);
         let mut prior_labels = HashMap::new();
         let mut entry_labels = HashMap::new();
         let mut func_label_maps = Vec::new();
@@ -143,14 +176,14 @@ impl IlModule {
             out.extend(self.prologue.iter().cloned());
             segment_ranges.push((start, out.len()));
         }
-        for (i, body) in module.funcs.iter().enumerate() {
+        for (i, body) in self.funcs.iter_mut().enumerate() {
             let start = out.len();
-            let mut chunk = body.ops.clone();
-            if let Some(g) = module.glue.get(i) {
+            let body_len = body.ops.len();
+            let mut chunk = std::mem::take(&mut body.ops);
+            if let Some(g) = self.glue.get(i) {
                 chunk.extend(g.iter().cloned());
             }
             let old_entry = body.meta.entry.map(|Label(id)| id);
-            let body_len = body.ops.len();
             body_bound.push(bound_label_ids(&chunk[..body_len]));
             glue_bound.push(bound_label_ids(&chunk[body_len..]));
             let (mut chunk, map) = opt::remap_label_space(&chunk, &mut next_label, &prior_labels);
@@ -186,7 +219,7 @@ impl IlModule {
             // thunks) sit in glue, which per-body opts never relabel, so its
             // emit-time ids are the call targets. Another body's opts may
             // mint the same id, which makes the unique-map fallback refuse.
-            if let Some(g) = module.glue.get(i) {
+            if let Some(g) = self.glue.get(i) {
                 for op in g {
                     if let IlOp::Label(Label(old)) = op
                         && let Some(&new) = glue_map.get(old)
@@ -201,9 +234,9 @@ impl IlModule {
             out.extend(chunk);
             segment_ranges.push((start, out.len()));
         }
-        if !module.epilogue.is_empty() {
+        if !self.epilogue.is_empty() {
             let start = out.len();
-            out.extend(module.epilogue.iter().cloned());
+            out.extend(self.epilogue.iter().cloned());
             segment_ranges.push((start, out.len()));
         }
         // Function entry → flat id, taken from the chunk that binds the entry
@@ -211,13 +244,13 @@ impl IlModule {
         // `prior_labels` is first-wins over every body's private label space,
         // and per-body opts mint ids that may equal a later function's entry.
         let mut jump_entries: HashMap<u32, u32> = HashMap::new();
-        for (k, body) in module.funcs.iter().enumerate() {
+        for (k, body) in self.funcs.iter().enumerate() {
             let Some(Label(old)) = body.meta.entry else {
                 continue;
             };
             let owner = [k, k.wrapping_sub(1)]
                 .into_iter()
-                .filter(|&i| i < module.funcs.len())
+                .filter(|&i| i < self.funcs.len())
                 .find_map(|i| {
                     if body_bound[i].contains(&old) {
                         Some(&func_label_maps[i])
@@ -235,7 +268,7 @@ impl IlModule {
         // their ids; a body's opts may have minted the same id, and the
         // first-wins body map must not claim it (the prologue `JMP` to the
         // static-init setup would land in that body).
-        for op in self.prologue.iter().chain(module.epilogue.iter()) {
+        for op in self.prologue.iter().chain(self.epilogue.iter()) {
             if let IlOp::Label(Label(id)) = op {
                 prior_labels.insert(*id, *id);
             }
@@ -284,7 +317,9 @@ impl IlModule {
         max.max(opt::max_code_label(&self.epilogue))
     }
 
-    /// MIR specialization of each body, then concatenate the bodies.
+    /// MIR specialization of each body, then concatenate the bodies. The
+    /// bodies (and their MIR) move into the flat stream: the module keeps
+    /// only its sidecar tables.
     ///
     /// `pool` is the module const pool, which MIR specialization reads and
     /// extends.
@@ -294,7 +329,7 @@ impl IlModule {
         pool: &mut Vec<u64>,
     ) -> FlatIl {
         if self.funcs.is_empty() {
-            return self.to_flat();
+            return self.take_flat();
         }
 
         for body in self.funcs.iter_mut().filter(|b| !b.meta.pinned) {
@@ -323,6 +358,9 @@ impl IlModule {
         // refuses), `None` when it has no MIR. The LIR tier below keeps it.
         let mut fuse_fallbacks: Vec<Option<Option<crate::mir::LirDraft>>> =
             std::iter::repeat_with(|| None).take(self.funcs.len()).collect();
+        // Each body's MIR is dropped once its tier is settled; this keeps
+        // whether it had one, for the checks and stats below.
+        let had_mir: Vec<bool> = self.funcs.iter().map(|b| b.meta.hir_mir.is_some()).collect();
         while !pending.is_empty() {
             let mut next = Vec::new();
             let mut progressed = false;
@@ -361,6 +399,9 @@ impl IlModule {
                     body.ops = dense;
                     tier[i] = "dense";
                     progressed = true;
+                    // Only a body left to the LIR tier reads these again.
+                    fuse_fallbacks[i] = None;
+                    body.meta.hir_mir = None;
                 } else {
                     dense_why[i] = crate::mir::take_dense_refusal();
                     next.push(i);
@@ -424,6 +465,10 @@ impl IlModule {
                 super::opt::note_fuse_reason(why);
             }
         }
+        for body in &mut self.funcs {
+            body.meta.hir_mir = None;
+        }
+        drop(fuse_fallbacks);
         // M5p: every body runs IL emitted from its MIR (dense or LIR).
         // One left on emit_hir's stack lowering is a compiler bug.
         let fell_back: Vec<String> = (0..self.funcs.len())
@@ -433,13 +478,13 @@ impl IlModule {
             .filter(|&i| {
                 let meta = &self.funcs[i].meta;
                 tier[i] == "fuse"
-                    && (opts.require_mir || meta.hir_mir.is_some() || meta.hir_mir_why.is_some())
+                    && (opts.require_mir || had_mir[i] || meta.hir_mir_why.is_some())
             })
             .map(|i| {
                 let body = &self.funcs[i];
-                let why = match &body.meta.hir_mir {
-                    None => body.meta.hir_mir_why.clone().map_or("no MIR from HIR".to_string(), |w| format!("no MIR from HIR: {w}")),
-                    Some(_) => lir_why[i].clone().or_else(|| dense_why[i].clone()).unwrap_or_else(|| "no tier took it".to_string()),
+                let why = match had_mir[i] {
+                    false => body.meta.hir_mir_why.clone().map_or("no MIR from HIR".to_string(), |w| format!("no MIR from HIR: {w}")),
+                    true => lir_why[i].clone().or_else(|| dense_why[i].clone()).unwrap_or_else(|| "no tier took it".to_string()),
                 };
                 format!("`{}` ({why})", body.meta.name)
             })
@@ -462,16 +507,29 @@ impl IlModule {
                     tier: tier[i].to_string(),
                     dense_reason: dense_why[i].take(),
                     lir_reason: lir_why[i].take(),
-                    hir_reason: match &body.meta.hir_mir {
-                        Some(_) => Some("lowered".to_string()),
-                        None => body.meta.hir_mir_why.clone(),
+                    hir_reason: match had_mir[i] {
+                        true => Some("lowered".to_string()),
+                        false => body.meta.hir_mir_why.clone(),
                     },
                 });
             }
         }
         self.debug_slot_remaps.extend(side_remaps);
         self.deopt_map_drafts.extend(side_deopts);
-        self.to_flat()
+        self.take_flat()
+    }
+
+    /// Flatten, moving the prologue, bodies, glue and epilogue out: lowering
+    /// reads only the flat stream after this.
+    fn take_flat(&mut self) -> FlatIl {
+        Self {
+            prologue: std::mem::take(&mut self.prologue),
+            funcs: std::mem::take(&mut self.funcs),
+            glue: std::mem::take(&mut self.glue),
+            epilogue: std::mem::take(&mut self.epilogue),
+            ..Self::default()
+        }
+        .into_flat()
     }
 }
 
