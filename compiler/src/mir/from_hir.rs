@@ -537,9 +537,6 @@ pub struct HirMirInput<'a> {
     /// A variant's payload field names in declaration order, by enum and
     /// variant name (a record pattern's fields in word order).
     pub payload_names: PayloadNamesFn<'a>,
-    /// Nested matches dispatch on their outer tag first
-    /// (`COIL_HIR_MATCH_TREE`).
-    pub match_tree: bool,
     /// Like `boxed_enum` for any enum, `Option` or `Result` type: the view
     /// of a value of it boxed to one word (a pair kept in one local).
     pub boxed_view: BoxedEnumFn<'a>,
@@ -6763,8 +6760,7 @@ impl Lower<'_> {
         if self.b.value_ty(obj) != MirTy::HeapRef {
             return Err("nested match scrutinee".into());
         }
-        if self.inp.match_tree
-            && let Some(tree) = crate::hir::match_tree::outer_groups(arms)
+        if let Some(tree) = crate::hir::match_tree::outer_groups(arms)
             && tree.groups.iter().all(|g| (self.inp.scalar_variant)(g.enum_name, g.variant).is_none())
         {
             return self.match_grouped(&tree, obj, &ty, tail);

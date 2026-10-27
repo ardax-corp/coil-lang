@@ -145,7 +145,7 @@ pub struct Pipeline {
     /// Collect IL opt counters for `--opt-stats` (COI-131).
     collect_opt_stats: bool,
     /// Off: no call is computed at compile time, whatever the level.
-    /// `COIL_CALL_FOLD=0` starts it off; `--fold-calls` sets it.
+    /// `--fold-calls` sets it.
     call_fold: bool,
     /// Built on first use. `coil run` never compiles, and `Compiler::default`
     /// (builtin typeclasses + Vec signatures) was ~28% of process startup.
@@ -486,9 +486,8 @@ impl Pipeline {
 
     /// Extra `use`/`mod` roots for this repo's examples and stdlib checkouts.
     ///
-    /// CLI/tests pass these as `--root`. `COIL_STDLIB` adds one more stdlib
-    /// root for the cargo-workspace tests only; the installed `coil` reads
-    /// no environment variable for roots (#1871).
+    /// CLI/tests pass these as `--root`. Nothing reads an environment
+    /// variable for roots (#1871).
     pub fn workspace_language_extra_roots() -> Vec<PathBuf> {
         let ws = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -496,9 +495,6 @@ impl Pipeline {
         let mut extra = vec![ws.join("examples/src"), ws.join(".deps/coil-stdlib/src")];
         if let Some(parent) = ws.parent() {
             extra.push(parent.join("coil-stdlib/src"));
-        }
-        if let Ok(p) = std::env::var("COIL_STDLIB") {
-            extra.push(PathBuf::from(p));
         }
         extra
     }
@@ -749,7 +745,7 @@ impl Pipeline {
             debug_level: None,
             debugger_attached: false,
             collect_opt_stats: false,
-            call_fold: std::env::var_os("COIL_CALL_FOLD").is_none_or(|v| v != "0"),
+            call_fold: true,
             compiler: std::cell::OnceCell::new(),
             pending_native_ids: Vec::new(),
             sink,
@@ -2238,8 +2234,7 @@ impl Pipeline {
     /// Select an IL optimization preset. Default is [`crate::OptLevel::Standard`].
     /// Turn computing pure calls with constant arguments at compile time
     /// off (or back on, at `-O2` and above). Tests of what such a call
-    /// compiles to turn it off. Starts off under `COIL_CALL_FOLD=0`;
-    /// `--fold-calls on|off` calls this, so the flag wins over the env.
+    /// compiles to turn it off. `--fold-calls on|off` calls this.
     pub fn set_call_fold(&mut self, on: bool) {
         self.call_fold = on;
     }

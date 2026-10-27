@@ -360,11 +360,13 @@ fn main() {
     );
     assert!(tsv.contains("# os="), "missing os comment");
 
-    let natives_root = tmp.join("natives-cache");
+    // The natives cache is `~/.coil/natives`: run with a scratch `HOME`.
+    let home = tmp.join("home");
+    let natives_root = home.join(".coil").join("natives");
     let run_missing = run_command_with_timeout(
         {
             let mut c = Command::new(&out);
-            c.env("COIL_NATIVES_DIR", &natives_root);
+            c.env("HOME", &home);
             c
         },
         15,
@@ -403,7 +405,7 @@ fn main() {
     let run_ok = run_command_with_timeout(
         {
             let mut c = Command::new(&out);
-            c.env("COIL_NATIVES_DIR", &natives_root);
+            c.env("HOME", &home);
             c
         },
         15,
@@ -420,7 +422,7 @@ fn main() {
     let run_beside = run_command_with_timeout(
         {
             let mut c = Command::new(&out);
-            c.env("COIL_NATIVES_DIR", &natives_root);
+            c.env("HOME", &home);
             c
         },
         15,

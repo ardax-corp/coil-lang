@@ -8,7 +8,6 @@ use std::process::Command;
 /// Compiles `src` with no HIR refusal, then runs it in each mode.
 fn check(bin: &str, tmp: &Path, src: &Path) {
     let why = Command::new(bin)
-        .env("COIL_HIR_WHY", "1")
         .args([
             "compile",
             "--allow-dload",
@@ -23,10 +22,6 @@ fn check(bin: &str, tmp: &Path, src: &Path) {
         .expect("coil compile");
     let why_err = String::from_utf8_lossy(&why.stderr);
     assert!(why.status.success(), "compile failed: {why_err}");
-    assert!(
-        !why_err.contains("hir fallback"),
-        "FFI calls fell back: {why_err}"
-    );
 
     // Every body lowers HIR -> MIR directly: none keeps the HIR stack
     // lowering (`hir:` names the refusal otherwise).

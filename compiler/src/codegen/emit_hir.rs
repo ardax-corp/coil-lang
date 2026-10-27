@@ -531,7 +531,7 @@ impl Compiler {
             o.ty = ty(&l.ty);
         }
         out.ret = ty(&body.ret);
-        let out = match inline::inlinable(&out, usize::MAX, self.opt_options.hir_inline_loops) {
+        let out = match inline::inlinable(&out, usize::MAX) {
             Err("return") => inline::single_exit(&out)?,
             _ => out,
         };
@@ -598,7 +598,7 @@ impl Compiler {
         let scalar = |ty: &Option<Ty>| {
             ty.as_ref().is_some_and(|t| {
                 matches!(lower::classify(&self.checker, t), Some(ValueClass::Scalar | ValueClass::Unit))
-                    || self.opt_options.hir_inline_pair && immediate_pair(&crate::layout::of(&self.checker, t))
+                    || immediate_pair(&crate::layout::of(&self.checker, t))
             })
         };
         if lambda.exprs.iter().any(|e| matches!(e.kind, HirKind::Lambda { .. })) {
@@ -615,7 +615,7 @@ impl Compiler {
         if lambda.exprs.iter().any(|e| matches!(e.kind, HirKind::Loop { .. } | HirKind::ForIn { .. })) {
             return Err("lambda loop".to_string());
         }
-        Ok(crate::hir::inline::inlinable(lambda, budget, self.opt_options.hir_inline_loops)?
+        Ok(crate::hir::inline::inlinable(lambda, budget)?
             .with_heap_result(!scalar(&hir.expr(call).ty))
             .with_heap_locals(heap)
             .with_loop_inert(inert))
@@ -741,7 +741,7 @@ impl Compiler {
                 e.layout = crate::layout::of(&self.checker, t);
             }
         }
-        match crate::hir::inline::inlinable(&inst, usize::MAX, self.opt_options.hir_inline_loops) {
+        match crate::hir::inline::inlinable(&inst, usize::MAX) {
             Err("return") => crate::hir::inline::single_exit(&inst),
             _ => Some(inst),
         }
@@ -1081,20 +1081,6 @@ impl Compiler {
             Err(reason) => {
                 crate::il::opt::note_hir_fallback(reason);
                 self.hir_refusal = Some(reason);
-                if std::env::var_os("COIL_HIR_WHY").is_some() {
-                    eprintln!("hir fallback `{}`: {reason}", hir.name);
-                    if reason == "result-mode" {
-                        eprintln!("    hir {} ast {}", hir.result_mode, self.compiling_result_mode);
-                    }
-                    if reason == "local-type" {
-                        for l in &hir.locals {
-                            if l.ty.as_ref().and_then(|t| lower::classify(&self.checker, t)).is_none() {
-                                let t = l.ty.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t));
-                                eprintln!("    local `{}`: {:?}", l.name, t);
-                            }
-                        }
-                    }
-                }
                 false
             }
         };
@@ -1166,9 +1152,6 @@ impl Compiler {
             }
             Err(reason) => {
                 self.hir_refusal = Some(reason);
-                if std::env::var_os("COIL_HIR_WHY").is_some() {
-                    eprintln!("hir fallback `{}`: {reason}", hir.name);
-                }
                 false
             }
         };
@@ -1229,9 +1212,6 @@ impl Compiler {
                 Some(func)
             }
             Err(why) => {
-                if std::env::var_os("COIL_HIR_MIR_WHY").is_some() {
-                    eprintln!("hir mir `{}`: {why}", hir.name);
-                }
                 crate::il::opt::note_hir_mir(Some(&why));
                 self.hir_mir_why = Some(why);
                 None
@@ -1918,7 +1898,6 @@ impl Compiler {
             }),
             word_kind: Box::new(move |t: &Ty| crate::layout::word_kind(checker, t)),
             array_stamp: Box::new(move |t: &Ty| crate::layout::array_elem_stamp(checker, t)),
-            match_tree: self.opt_options.hir_match_tree,
             payload_names: Box::new(move |enum_name: &str, variant: &str| {
                 checker.payload_tys_for(enum_name, variant).into_iter().map(|(name, _)| name).collect()
             }),
@@ -2184,7 +2163,7 @@ impl Compiler {
                 Some(_) => module.instance_fns.get(&call.key).copied(),
                 None => self.hir_fn_body(&call.key),
             })
-            .filter(|&index| inline::inlinable(&module.bodies[index], budget, self.opt_options.hir_inline_loops).err() == Some("return"))
+            .filter(|&index| inline::inlinable(&module.bodies[index], budget).err() == Some("return"))
             .filter_map(|index| Some((index, inline::single_exit(&module.bodies[index])?)))
             .collect();
         // Mono clone callees, as their generic body at the call's types.
@@ -2192,12 +2171,11 @@ impl Compiler {
             .plan
             .calls
             .iter()
-            .filter(|_| self.opt_options.hir_inline_mono)
             .filter_map(|(&id, call)| {
                 let (name, map) = call.mono_of.as_deref()?;
                 let index = self.hir_fn_names.get(name.as_str()).copied().flatten()?;
                 let inst = self.hir_inline_instance(&module.bodies[index], map)?;
-                match inline::inlinable(&inst, budget, self.opt_options.hir_inline_loops) {
+                match inline::inlinable(&inst, budget) {
                     Err("return") => inline::single_exit(&inst).map(|b| (id, b)),
                     _ => Some((id, inst)),
                 }
@@ -2221,7 +2199,6 @@ impl Compiler {
             .plan
             .calls
             .iter()
-            .filter(|_| self.opt_options.hir_inline_specialize)
             .filter(|(_, call)| call.instance.is_none() && call.mono_of.is_none() && call.generic.is_none() && call.builtin.is_none())
             .filter_map(|(&id, call)| {
                 let HirKind::Call { args, .. } = &hir.expr(HirId(id)).kind else {
@@ -2246,7 +2223,7 @@ impl Compiler {
                     return None;
                 }
                 let base = folded.get(&index).unwrap_or(callee);
-                if inline::inlinable(base, budget, self.opt_options.hir_inline_loops).is_ok_and(|s| !s.looping()) {
+                if inline::inlinable(base, budget).is_ok_and(|s| !s.looping()) {
                     return None;
                 }
                 let bound = inline::bind_params(callee, &consts)?;
@@ -2256,10 +2233,10 @@ impl Compiler {
                     spec = f;
                 }
                 inline::blank_unreachable(&mut spec);
-                if inline::inlinable(&spec, budget, self.opt_options.hir_inline_loops).err() == Some("return") {
+                if inline::inlinable(&spec, budget).err() == Some("return") {
                     spec = inline::single_exit(&spec)?;
                 }
-                inline::inlinable(&spec, budget, self.opt_options.hir_inline_loops).is_ok_and(|s| !s.looping()).then_some((id, spec))
+                inline::inlinable(&spec, budget).is_ok_and(|s| !s.looping()).then_some((id, spec))
             })
             .collect();
         // Calls of a local bound once to a lambda that captures nothing
@@ -2296,12 +2273,10 @@ impl Compiler {
             let core = core_insts.get(&id.0);
             let kind = [
                 (call.builtin.is_some(), "builtin"),
-                (call.pair.is_some() && !self.opt_options.hir_inline_pair, "pair"),
                 (call.mono && !instances.contains_key(&id.0), "mono"),
                 (call.generic.is_some(), "generic"),
                 (call.instance.as_ref().is_some_and(|i| i.args.iter().any(Self::ty_has_var)), "instance"),
                 (!call.own_dicts.is_empty(), "own-bounds"),
-                (!call.ranges.is_empty() && !self.opt_options.hir_inline_pair, "ranges"),
                 (self.coroutine_fns.contains(&call.key), "coroutine"),
                 // An auto-parallel callee's call runs its split worker.
                 (self.par_shapes.contains_key(Self::par_shape_key(&call.key)), "par"),
@@ -2349,7 +2324,7 @@ impl Compiler {
                         if size > self.inline_cost.max_cross_module_inline_cost {
                             return Err("cost".to_string());
                         }
-                        let shape = inline::inlinable(callee, budget, self.opt_options.hir_inline_loops)?.with_foreign(true);
+                        let shape = inline::inlinable(callee, budget)?.with_foreign(true);
                         return Ok((callee, shape));
                     }
                     let index = self.hir_fn_body(&call.key).ok_or("ambiguous")?;
@@ -2363,12 +2338,11 @@ impl Compiler {
                 b.locals.iter().any(|l| l.ty.as_ref().is_none_or(|t| Self::ty_has_var(&apply_ty_prune(self.checker.subst(), t))))
             };
             if callee.name == hir.name
-                || callee.result_mode && !self.opt_options.hir_inline_pair
                 || if call.instance.is_some() { shared(callee) } else { callee.name.contains(" for ") }
                 || core.is_none() && home(callee) != here
                 || !matches!(callee.ret_layout, crate::layout::Layout::Word)
                     && !callee.ret_layout.is_niche()
-                    && !(self.opt_options.hir_inline_pair && immediate_pair(&callee.ret_layout))
+                    && !immediate_pair(&callee.ret_layout)
             {
                 return Err(format!("callee `{}`", callee.name));
             }
@@ -2457,7 +2431,7 @@ impl Compiler {
                     matches!(
                         lower::classify(&self.checker, t),
                         Some(ValueClass::Scalar | ValueClass::Unit)
-                    ) || self.opt_options.hir_inline_pair && immediate_pair(&crate::layout::of(&self.checker, t))
+                    ) || immediate_pair(&crate::layout::of(&self.checker, t))
                 })
             };
             let HirKind::Call { args, .. } = &hir.expr(id).kind else {
@@ -2485,7 +2459,7 @@ impl Compiler {
                 }
             }
             let inert = self.hir_loop_inert(callee, &heap);
-            let shape = inline::inlinable(callee, budget, self.opt_options.hir_inline_loops)?
+            let shape = inline::inlinable(callee, budget)?
                 .with_heap_result(!scalar(&hir.expr(id).ty))
                 .with_heap_locals(heap)
                 .with_loop_inert(inert)
@@ -2574,16 +2548,10 @@ impl Compiler {
                     let file = self.loc_from_span(SimpleSpan::from(start..end)).file;
                     self.inlined_bodies.push((file, start..end, name));
                 }
-                if std::env::var_os("COIL_HIR_WHY").is_some() {
-                    eprintln!("hir inline `{}`: {sites} sites", hir.name);
-                }
                 Some((body, emit))
             }
             Err(reason) => {
                 crate::il::opt::note_hir_inline_refused(reason);
-                if std::env::var_os("COIL_HIR_WHY").is_some() {
-                    eprintln!("hir inline refused `{}`: {reason}", hir.name);
-                }
                 None
             }
         }
@@ -3245,11 +3213,6 @@ impl Compiler {
             let ret_ty = lam.ret.as_ref().ok_or("lambda-ret")?;
             let ret = Rep::Word(self.value_layout(ret_ty));
             if let Some(reason) = lower::refusal(lam, &self.checker) {
-                if std::env::var_os("COIL_HIR_WHY").is_some() {
-                    for l in &lam.locals {
-                        eprintln!("    lambda `{}` local `{}`: {:?}", lam.name, l.name, l.ty.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t)));
-                    }
-                }
                 return Err(reason);
             }
             // A shared generic body's dictionaries (`__dictN`), captured
@@ -3802,9 +3765,6 @@ impl Compiler {
             return self.hir_builtin_abi(hir, call, HirBuiltin::Host(id));
         }
         if !known(&key) {
-            if std::env::var_os("COIL_HIR_WHY").is_some() {
-                eprintln!("    callee `{key}`");
-            }
             return Err("callee-unknown");
         }
         if key.starts_with(&format!("{}::", common::BUILTIN_VEC_TYPE)) {
@@ -5648,12 +5608,7 @@ impl Compiler {
                     // A module-qualified function's names are keyed bare.
                     .or_else(|| self.checker.fn_param_tys(&lookup).map(|tys| tys.len()))
                     .is_some_and(|n| n == explicit) => {}
-            arity => {
-                if std::env::var_os("COIL_HIR_WHY").is_some() {
-                    eprintln!("    callee `{key}` arity {arity:?}, {explicit} given");
-                }
-                return Err("callee-arity");
-            }
+            _ => return Err("callee-arity"),
         }
         // `Stream.fd()` / `.park()` / `.attach(ptr, read, write, shutdown,
         // free)`: the inherent `HostInvoke` thunks (`emit_stream_method_thunks`)
@@ -8848,9 +8803,6 @@ impl Compiler {
             .chain(site.captures.iter().map(|(n, _)| n.as_str()))
             .collect();
         if !ok || in_body.keys().any(|n| !names.contains(n.as_str())) {
-            if std::env::var_os("COIL_HIR_WHY").is_some() {
-                eprintln!("hir par loop `{}`: sequential (body reads {:?})", hir.name, in_body.keys().collect::<Vec<_>>());
-            }
             return None;
         }
         for (name, &l) in &in_body {

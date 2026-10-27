@@ -77,10 +77,8 @@ const CALL_COST: usize = 25;
 /// HIR loop weight in [`inlinable`]'s cost.
 const LOOP_COST: usize = 4;
 
-/// Whether `callee` can be inlined within `budget`, and how. `loops`:
-/// a callee with a loop may inline
-/// ([`crate::il::opt::OptimizeOptions::hir_inline_loops`]).
-pub fn inlinable(callee: &HirBody, budget: usize, loops: bool) -> Result<Shape, &'static str> {
+/// Whether `callee` can be inlined within `budget`, and how.
+pub fn inlinable(callee: &HirBody, budget: usize) -> Result<Shape, &'static str> {
     if !matches!(callee.kind, BodyKind::Function | BodyKind::Method | BodyKind::Lambda) {
         return Err("kind");
     }
@@ -119,9 +117,8 @@ pub fn inlinable(callee: &HirBody, budget: usize, loops: bool) -> Result<Shape, 
             HirKind::Call { .. } => CALL_COST,
             // A loop's body splices whole (its `break` / `continue` still
             // name the callee's loop); the loop itself costs its test.
-            HirKind::Loop { .. } | HirKind::ForIn { .. } if loops => LOOP_COST,
-            HirKind::Break | HirKind::Continue if loops => 0,
-            HirKind::Loop { .. } | HirKind::ForIn { .. } | HirKind::Break | HirKind::Continue => return Err("construct"),
+            HirKind::Loop { .. } | HirKind::ForIn { .. } => LOOP_COST,
+            HirKind::Break | HirKind::Continue => 0,
             HirKind::Block { .. } | HirKind::Lit(_) | HirKind::Local(_) => 0,
             _ => 1,
         };

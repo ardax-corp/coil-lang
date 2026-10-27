@@ -33,7 +33,7 @@ fn release_flag(coil: &std::path::Path) -> &'static [&'static str] {
 
 /// `coil dissect --fn main examples/perf/mandelbrot.hy` plus `extra` flags;
 /// stdout on success.
-fn dissect_mandelbrot_main(extra: &[&str], env_fold: Option<&str>) -> String {
+fn dissect_mandelbrot_main(extra: &[&str]) -> String {
     let entry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/perf/mandelbrot.hy");
     let mut cmd = Command::new(coil_bin());
     cmd.arg("dissect");
@@ -41,10 +41,6 @@ fn dissect_mandelbrot_main(extra: &[&str], env_fold: Option<&str>) -> String {
         cmd.arg("--root").arg(root);
     }
     cmd.args(extra).args(["--fn", "main"]).arg(&entry);
-    match env_fold {
-        Some(v) => cmd.env("COIL_CALL_FOLD", v),
-        None => cmd.env_remove("COIL_CALL_FOLD"),
-    };
     let out = cmd.output().expect("spawn coil dissect");
     assert!(
         out.status.success(),
@@ -70,7 +66,7 @@ fn calls_mandelbrot(stdout: &str) -> bool {
 fn fold_calls_off_keeps_the_flagship_call() {
     ensure_coil_dissect();
 
-    let folded = dissect_mandelbrot_main(&[], None);
+    let folded = dissect_mandelbrot_main(&[]);
     assert!(
         is_folded(&folded),
         "default folds mandelbrot(160, 50) to 625885, stdout={folded}"
@@ -80,7 +76,7 @@ fn fold_calls_off_keeps_the_flagship_call() {
         "folded main still calls mandelbrot, stdout={folded}"
     );
 
-    let kept = dissect_mandelbrot_main(&["--fold-calls", "off"], None);
+    let kept = dissect_mandelbrot_main(&["--fold-calls", "off"]);
     assert!(
         !is_folded(&kept),
         "--fold-calls off still folded, stdout={kept}"
@@ -88,23 +84,6 @@ fn fold_calls_off_keeps_the_flagship_call() {
     assert!(
         calls_mandelbrot(&kept),
         "--fold-calls off: expected CALL to mandelbrot, stdout={kept}"
-    );
-}
-
-#[test]
-fn fold_calls_flag_wins_over_env() {
-    ensure_coil_dissect();
-
-    let env_off = dissect_mandelbrot_main(&[], Some("0"));
-    assert!(
-        calls_mandelbrot(&env_off),
-        "COIL_CALL_FOLD=0: expected CALL to mandelbrot, stdout={env_off}"
-    );
-
-    let flag_on = dissect_mandelbrot_main(&["--fold-calls", "on"], Some("0"));
-    assert!(
-        is_folded(&flag_on),
-        "--fold-calls on under COIL_CALL_FOLD=0 did not fold, stdout={flag_on}"
     );
 }
 
@@ -151,7 +130,6 @@ fn compile_stderr(name: &str, src: &str, extra: &[&str]) -> String {
         cmd.arg("--root").arg(root);
     }
     cmd.args(extra).arg(&entry).arg("-o").arg(dir.join("main.hyc"));
-    cmd.env_remove("COIL_CALL_FOLD");
     let out = cmd.output().expect("spawn coil compile");
     let _ = std::fs::remove_dir_all(&dir);
     let err = String::from_utf8_lossy(&out.stderr).into_owned();

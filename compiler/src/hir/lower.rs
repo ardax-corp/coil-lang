@@ -2181,12 +2181,7 @@ impl Walk<'_> {
             // A diverging value (a `match` whose arms all `raise`) never
             // reaches its join, so it fits any word.
             None if self.ty(id).is_some_and(|t| matches!(strip_readonly(t), Ty::Never)) => Ok(()),
-            _ => {
-                if std::env::var_os("COIL_HIR_WHY").is_some() {
-                    eprintln!("    value {:?}: {:?}", self.body.expr(id).kind, self.ty(id));
-                }
-                Err("value-type")
-            }
+            _ => Err("value-type"),
         }
     }
 

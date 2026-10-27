@@ -31,7 +31,6 @@ fn coverage_counts_a_call_folding_would_compute() {
         .current_dir(&root)
         .args(["--no-shuffle", "-j", "1", "--coverage", "--root", "src", "tests"])
         .env("COIL_PROGRESS", "0")
-        .env_remove("COIL_CALL_FOLD")
         .output()
         .expect("spawn coil-test");
     let err = String::from_utf8_lossy(&out.stderr);

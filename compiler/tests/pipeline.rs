@@ -11,9 +11,6 @@ fn workspace_stdlib() -> PathBuf {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("compiler crate parent");
-    if let Ok(p) = std::env::var("COIL_STDLIB") {
-        return PathBuf::from(p);
-    }
     let candidates = [
         workspace.join(".deps/coil-stdlib/src"),
         workspace

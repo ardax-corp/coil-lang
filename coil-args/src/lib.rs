@@ -37,7 +37,7 @@ pub struct OptLevelFlags {
     #[arg(long, value_name = "LEVEL", value_parser = ContractLevel::parse)]
     pub contracts: Option<ContractLevel>,
     /// Compute pure calls with constant arguments at compile time: on
-    /// (default, at -O2 and above) or off. Overrides `COIL_CALL_FOLD`
+    /// (default, at -O2 and above) or off
     #[arg(long, value_name = "on|off", value_parser = parse_fold_calls, action = clap::ArgAction::Set)]
     pub fold_calls: Option<bool>,
 }
