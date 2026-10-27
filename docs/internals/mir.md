@@ -217,7 +217,7 @@ may run effects count as both. The `apply` loop of
 (`out[i] = xs[i] * c.scale + c.bias`) now loads both fields in the
 preheader. With both fields
 invariant the loop also takes the vectorizer (`VLoad` / `VFma` /
-`VStore`). `COIL_AUTO_PAR=0 coil compile`, release, 2026-10-19, 11
+`VStore`). `coil compile --auto-par off`, release, 2026-10-19, 11
 interleaved runs (100 calls over 100,000 elements, setup included):
 
 | | median | min |
@@ -372,7 +372,7 @@ line's constants into the next line just the same, so every body takes
 LIR there. Coverage runs pay for that in speed, not in what they count.
 
 Hit bench `examples/perf/mir_lir_fold.hy` (`mix`: bit ops of `mask(-1)`
-called 2M times from a dense loop; release, `COIL_AUTO_PAR=0`, 15
+called 2M times from a dense loop; release, `--auto-par off`, 15
 interleaved runs, 2026-10-19; auto-par on gives the same, the loop stays
 sequential):
 

@@ -149,8 +149,8 @@ dictionary, the consumer `match` / `??`, clone vs shared body). Expected
 output comes from the ground path. Refused cells go to
 `tests/representation/compile_fail/` with their issue; crashing cells are
 listed in `scripts/rep_matrix_known_wrong/`. CI's fmt job runs
-`gen_rep_matrix.py --check`; `--probe` runs every cell under default,
-`-O0` and no-inline.
+`gen_rep_matrix.py --check`; `--probe` runs every cell under default and
+`-O0`.
 
 State when the niche-vs-boxed series landed: 223 of 234 cells green (199
 before). The red cells are `#[repr(int)]` enums in containers and across

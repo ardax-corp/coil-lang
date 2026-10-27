@@ -6,7 +6,7 @@
 // pixel grid is one counted `while i < size*size` with literal `%` / `/` so
 // loop IPA can chunk it. Nested `for y { for x { sum += pixel(...) } }` is
 // still sequential today (outer IV is not an int capture inside that body).
-// Sequential A4: COIL_AUTO_PAR=0. Flagship mandelbrot.hy stays the control.
+// Sequential A4: --auto-par off. Flagship mandelbrot.hy stays the control.
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};

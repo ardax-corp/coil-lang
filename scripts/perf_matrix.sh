@@ -126,11 +126,11 @@ compile_perf() {
     local archive="$2"
     # Sequential baseline row: keep auto-par off so Coil matches the naive
     # Lua/Node ports rather than fork-join specializations (fib(32) especially).
-    COIL_AUTO_PAR=0 "$BIN" compile "examples/perf/${name}.hy" -o "$archive" >/dev/null
+    "$BIN" compile --auto-par off "examples/perf/${name}.hy" -o "$archive" >/dev/null
 }
 
 for name in "${CROSS_LANG[@]}"; do
-    # Fair sequential row vs Lua/Node (IPA off). Same sources; only COIL_AUTO_PAR differs.
+    # Fair sequential row vs Lua/Node (IPA off). Same sources; only --auto-par differs.
     archive="$OUT_DIR/${name}.hyc"
     compile_perf "$name" "$archive"
     touch "$archive"

@@ -64,7 +64,7 @@ bytes either way. Packed arrays cross threads and channels as
 
 ## Measurements
 
-Release build, `COIL_AUTO_PAR=0`, 4-core cloud box (run-to-run spread about
+Release build, `--auto-par off`, 4-core cloud box (run-to-run spread about
 ±10%).
 
 | Change | Bench | Before | After |

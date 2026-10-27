@@ -1,6 +1,6 @@
 // F2 n-ary associative helper combine (COI-368): fib(n)+fib(n-1)+fib(n-2).
 // F1 only matched the inner binary `fib(n)+fib(n-1)` as the site.
-// Sequential A4: COIL_AUTO_PAR=0.
+// Sequential A4: --auto-par off.
 // Checksum: fib(32)+fib(31)+fib(30) = 4356618 with fib(n<=2)=1.
 use io::sync::print;
 use string::format;

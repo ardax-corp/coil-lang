@@ -2488,7 +2488,8 @@ impl Compiler {
             }
             Ok((callee, shape))
         };
-        let why = std::env::var_os("COIL_HIR_INLINE_WHY").is_some();
+        // Unit tests only: `COIL_HIR_INLINE_WHY` names each refused site.
+        let why = cfg!(test) && std::env::var_os("COIL_HIR_INLINE_WHY").is_some();
         let callee_of = |id: HirId| {
             let found = callee_for(id);
             if why && let Err(reason) = &found {

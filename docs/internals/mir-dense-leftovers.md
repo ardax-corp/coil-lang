@@ -44,7 +44,7 @@ runs every `examples/perf` program with the `vm_profile` per-PC counter and
 attributes dispatches to each body's tier and refusal reasons:
 
 ```bash
-COIL_AUTO_PAR=0 CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true \
+CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true \
   cargo test --release -p compiler --features vm-wire --test perf_metrics \
   -- --ignored mir_weighted_census --nocapture
 ```

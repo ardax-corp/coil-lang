@@ -1,5 +1,5 @@
 // Helper-arm IPA hit bench (COI-367 F0): independent pure calls into fib,
-// not self-recursion. Sequential A4: COIL_AUTO_PAR=0.
+// not self-recursion. Sequential A4: --auto-par off.
 // Checksum: fib(32) + fib(31) = 3524578.
 use io::sync::print;
 use string::format;

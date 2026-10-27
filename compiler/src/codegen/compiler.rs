@@ -429,7 +429,7 @@ impl Compiler {
         self.auto_par = on;
     }
 
-    /// Turn typed inlining of HIR bodies on or off (default `COIL_HIR_INLINE`).
+    /// Turn typed inlining of HIR bodies on (the default) or off.
     pub fn set_hir_inline(&mut self, on: bool) {
         self.opt_options.hir_inline = on;
     }

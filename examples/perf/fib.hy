@@ -1,6 +1,6 @@
 // CPU: plain naive fib recursion (cross-lang fair bench).
-// Sequential A4 row: compile with COIL_AUTO_PAR=0.
-// IPA hit bench (COI-366 F1): COIL_AUTO_PAR=1 — one parameterized worker
+// Sequential A4 row: compile with --auto-par off.
+// IPA hit bench (COI-366 F1): --auto-par on — one parameterized worker
 // with hop/grain policy, not per-arg `__coil_par_fib_N` clones.
 // Checksum: fib(32) = 2178309.
 use io::sync::print;

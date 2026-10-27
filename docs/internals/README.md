@@ -38,7 +38,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [Packed byte arrays](packed-bytes.md) | #927: `Vec<byte>` / `Vec<bool>` one byte per element; lossless `Bytes` storage, `WORD_BYTE` construction stamp, byte copies for I/O / FFI / threads; measurements |
 | [Heap identity](heap-identity.md) | Mapped slab + header poison for `find_object_by_addr` (COI-200) |
 | [Incremental GC](gc-incremental.md) | COI-309 S4: safepoint mark (no write barrier) + lazy sweep; moving GC deferred |
-| [GC evacuation](gc-evacuation.md) | Mostly-copying evacuation of sparse chunks (default on, `COIL_GC_COMPACT=0` off); precise refs rewritten, ambiguous ones pin |
+| [GC evacuation](gc-evacuation.md) | Mostly-copying evacuation of sparse chunks (always on; `COIL_GC_COMPACT=0` off in unit tests); precise refs rewritten, ambiguous ones pin |
 | [SIMD](simd.md) | `coil-simd` — packed LA + V0/V1 `V*` opcode backend |
 | [Auto-par](auto-par.md) | Purity + parameterized AlwaysPar IPA (COI-366 F1 hop/grain); F2 broader admission (COI-368); loop IPA (COI-362 E4); C1/C2 shared-heap spawn (E6/E7); [branch-miss notes](auto-par-branch-misses.md) |
 | [Par lock hints](par-lock-hints.md) | F3 (COI-369): userland locks + E0805 call-bag escape hints (no compiler locks) |

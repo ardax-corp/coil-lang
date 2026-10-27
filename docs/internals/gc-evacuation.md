@@ -1,7 +1,8 @@
 # GC evacuation
 
 Mostly-copying (Bartlett) compaction of sparse slab chunks, on by default.
-Set `COIL_GC_COMPACT=0` to turn it off (debugging a suspected move bug).
+In `machine`'s unit tests, `COIL_GC_COMPACT=0` turns it off (debugging a
+suspected move bug); other builds always evacuate.
 Mark / lazy sweep are unchanged ([gc-incremental.md](gc-incremental.md)).
 Evacuation runs **between** cycles, once a sweep has finished.
 

@@ -47,8 +47,8 @@ pub struct OptimizeOptions {
     /// vectorizer. On at Standard and above (and Size).
     pub mir_loop: bool,
     /// Typed inlining of HIR bodies (`hir::inline`). Every level; the
-    /// inline budget is what turns it off at `-O0` / `-Og`.
-    /// `COIL_HIR_INLINE=0` off.
+    /// inline budget is what turns it off at `-O0` / `-Og`. Always on;
+    /// unit tests turn it off.
     pub hir_inline: bool,
     /// Typed inlining takes callees with heap locals, cleared after the
     /// splicing statement. Always on; unit tests turn it off.
@@ -61,7 +61,7 @@ pub struct OptimizeOptions {
     /// `COIL_HIR_BISECT=N`; `None` (unset) lowers every body.
     pub hir_bisect: Option<usize>,
     /// Automatic fork-join of pure recursive calls and counted loops
-    /// (`Pipeline::set_auto_par` also turns it off). `COIL_AUTO_PAR=0` off.
+    /// (`Pipeline::set_auto_par` also turns it off). `--auto-par off` off.
     pub auto_par: bool,
     /// Every function must lower through direct MIR: a body left on its
     /// raw stack IL (the fuse tier) is an internal error. The compiler sets

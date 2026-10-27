@@ -152,7 +152,7 @@ In-loop mapped Make* stays **off** by default. S2f (COI-315) SROAs
 non-escaping `[T; N]` computed-index load/store so `pack_store` does not
 rebuild `[0,0,0]` after `StoreIndex`.
 
-## S2e board (coil-embed packaged, `COIL_AUTO_PAR=0`)
+## S2e board (coil-embed packaged, `--auto-par off`)
 
 Same runner (`target/release/coil-embed`). Historical fuse vs residual-dense
 A/B (override since removed). Checksums match parent: pack `2000000999999`,
@@ -239,7 +239,7 @@ S2f:
 Computed *element* values (`i`, `i+1`) still materialize into slots
 when the local does not escape. Observed zip/broadcast results stay heap.
 
-Prove vs parent `3bcaf9e8` (same tip `coil run`, `COIL_AUTO_PAR=0`,
+Prove vs parent `3bcaf9e8` (same tip `coil run`, `--auto-par off`,
 hyperfine -w 2 -r 8). `coil-dissect --fn pack` / `bump`:
 
 | kernel | parent MakeArray | tip MakeArray | parent StoreIndex | tip StoreIndex |
@@ -282,7 +282,7 @@ Win-or-gate (only path):
    An op-count ≤ fuse still boxed slower on the leftover kernel.
 
 Hit: `examples/perf/s2d_inloop_escape.hy` (`pack(n)` = `n²`; N=2e6
-checksum `4000000000000`). Same `coil run`, `COIL_AUTO_PAR=0`,
+checksum `4000000000000`). Same `coil run`, `--auto-par off`,
 hyperfine -w 2 -r 8.
 
 | Body | Make* after S2k | Default | Residual-dense vs fuse (historical) |

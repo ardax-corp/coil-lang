@@ -391,7 +391,7 @@ jobs:
       matrix:
         os: [ubuntu-latest]
         mode: [debug, release]
-        variant: [default, O0, no-inline, leak-smoke, gc-stress, gc-stress-1, gc-stress-2, gc-stress-O0]
+        variant: [default, O0, leak-smoke, gc-stress, gc-stress-1, gc-stress-2, gc-stress-O0]
         # A debug GC-stress run takes over 30 minutes in one cell; on Linux it
         # is split in three (two halves of the corpora, then the -O0 pass).
         # Release, and macOS below, run it whole as `gc-stress`.
@@ -453,9 +453,6 @@ jobs:
             # Optimizations hide codegen bugs (LICM materializes invariants,
             # inlining drops CALL targets); run the unoptimized pipeline too.
             O0) $run -- -O 0 $FLAGS ;;
-            # Typed inlining is the default; every test must give the same
-            # result with it off.
-            no-inline) COIL_HIR_INLINE=0 $run -- $FLAGS ;;
             leak-smoke)
               # Each corpus process gets 128 MiB of address space above the
               # harness's own code, and one job: every extra thread reserves

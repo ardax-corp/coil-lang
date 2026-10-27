@@ -5,8 +5,8 @@
 # regressions are easy to spot before/after compiler changes. Requires `poop`.
 # Times `coil run` on a precompiled archive (not in-memory compile+run).
 # Flagship mandelbrot/nsieve/tak/binary_trees do not emit IPA; fib is compiled
-# with COIL_AUTO_PAR=0 so this row stays sequential. For IPA vs seq counters
-# see docs/internals/auto-par-branch-misses.md (COIL_PAR_STATS=1).
+# with --auto-par off so this row stays sequential. For IPA vs seq counters
+# see docs/internals/auto-par-branch-misses.md.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -38,7 +38,7 @@ for path in "${BENCHES[@]}"; do
     hyc="$OUT_DIR/${name}.hyc"
     echo "== compile ${path} -> ${hyc} =="
     if [[ "$name" == "fib" ]]; then
-        COIL_AUTO_PAR=0 "$BIN" compile "$path" -o "$hyc" >/dev/null
+        "$BIN" compile --auto-par off "$path" -o "$hyc" >/dev/null
     else
         "$BIN" compile "$path" -o "$hyc" >/dev/null
     fi

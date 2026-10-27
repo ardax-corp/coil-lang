@@ -120,22 +120,19 @@ fn all_off() -> OptimizeOptions {
     }
 }
 
-/// `name` is unset or anything but `0` / `false` / `off` / `no`.
-fn env_on(name: &str) -> bool {
-    !matches!(std::env::var(name).as_deref(), Ok("0" | "false" | "off" | "no"))
-}
-
-/// The switches no level sets: on unless their `COIL_*` variable turns
-/// them off. The environment is read here, once per options built.
-fn env_knobs(o: &mut OptimizeOptions) {
-    o.hir_inline = env_on("COIL_HIR_INLINE");
+/// The switches no level sets: on at every level (a setter may turn them
+/// off), and `COIL_HIR_BISECT`, read once per options built.
+fn level_free_knobs(o: &mut OptimizeOptions) {
+    o.hir_inline = true;
+    o.hir_inline_heap = true;
+    o.hir_pair_locals = true;
     o.hir_bisect = std::env::var("COIL_HIR_BISECT").ok().and_then(|v| v.parse::<usize>().ok());
-    o.auto_par = env_on("COIL_AUTO_PAR");
+    o.auto_par = true;
 }
 
 impl OptimizeOptions {
-    /// Take `from`'s level-independent switches (the [`env_knobs`] ones,
-    /// which a setter may have changed since): a new level keeps them.
+    /// Take `from`'s level-independent switches (the [`level_free_knobs`]
+    /// ones, which a setter may have changed since): a new level keeps them.
     pub(crate) fn keep_knobs(&mut self, from: &OptimizeOptions) {
         self.hir_inline = from.hir_inline;
         self.hir_inline_heap = from.hir_inline_heap;
@@ -148,9 +145,7 @@ impl OptimizeOptions {
 /// The switches `level` turns on.
 fn base_knobs(level: OptLevel) -> OptimizeOptions {
     let mut o = all_off();
-    env_knobs(&mut o);
-    o.hir_inline_heap = true;
-    o.hir_pair_locals = true;
+    level_free_knobs(&mut o);
     // Gate HIR passes in `emit_hir`, not IL table rows: constant folding (at
     // every level), scalar replacement (enum / tuple SROA), counted-loop
     // bounds proofs and full unroll of short counted loops (not at Size: it
@@ -291,7 +286,7 @@ mod tests {
     }
 
     #[test]
-    fn env_knobs_survive_a_level_change() {
+    fn level_free_knobs_survive_a_level_change() {
         let mut set = OptLevel::Standard.options();
         set.hir_inline = false;
         set.auto_par = false;

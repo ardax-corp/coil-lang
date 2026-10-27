@@ -1741,7 +1741,7 @@ fn aot_p3_binary_trees_make_enum_inventory() {
 /// MIR keep-rate weighted by executed VM dispatches over `examples/perf`.
 ///
 /// Manual census, not a gate:
-/// `COIL_AUTO_PAR=0 cargo test --release -p compiler --test perf_metrics -- --ignored mir_weighted_census --nocapture`
+/// `cargo test --release -p compiler --test perf_metrics -- --ignored mir_weighted_census --nocapture`
 #[test]
 #[ignore = "manual census; run with --release --ignored --nocapture"]
 fn mir_weighted_census() {
@@ -1767,6 +1767,8 @@ fn mir_weighted_census() {
         let mut pipeline = Pipeline::new();
         pipeline.bind_workspace_language_roots();
         pipeline.set_collect_opt_stats(true);
+        // Sequential rows: the census counts one thread's dispatches.
+        pipeline.set_auto_par(false);
         let Ok((bytecode, constants)) = pipeline.compile_src(&src) else {
             eprintln!("skip (compile) {rel}");
             continue;

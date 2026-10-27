@@ -44,7 +44,7 @@ struct VerifyCli {
     /// Only functions whose name contains PAT
     #[arg(long = "fn", value_name = "PAT")]
     fn_pat: Option<String>,
-    /// The solver binary (default `z3` on PATH, or $COIL_SMT_SOLVER)
+    /// The solver binary (default `z3` on PATH)
     #[arg(long, value_name = "PATH")]
     solver: Option<PathBuf>,
     /// Seconds the solver may spend on one check
@@ -124,7 +124,7 @@ fn main() {
             exit(1);
         }
     };
-    let program = cli.solver.clone().or_else(|| std::env::var_os("COIL_SMT_SOLVER").map(PathBuf::from));
+    let program = cli.solver.clone();
     let solver = Solver::z3(program, cli.timeout);
     if let Err(e) = solver.probe() {
         eprintln!("coil verify: {e}\n  install z3 (https://github.com/Z3Prover/z3) or pass --solver PATH");
