@@ -59,6 +59,16 @@ impl Src {
     }
 }
 
+/// Leaf objects: a string, or a vector of plain words (packed bytes,
+/// ints). They hold no references, so a new one never holds an old one.
+pub(super) fn leaf(ty: Option<&Ty>) -> bool {
+    match ty.map(crate::typechecking::ty::strip_readonly) {
+        Some(Ty::Con(n)) => n == "string",
+        Some(t @ Ty::App(_, args)) => is_vec(Some(t)) && args.len() == 1 && no_heap(Some(&args[0])),
+        _ => false,
+    }
+}
+
 /// Whether a value of `ty` is a word with nothing behind it.
 pub(super) fn no_heap(ty: Option<&Ty>) -> bool {
     match ty {
@@ -259,7 +269,9 @@ impl<'c, 'a> Escape<'c, 'a> {
                     HirKind::Call { callee, args } => {
                         let s = self.callee(id, callee, args);
                         for (j, a) in args.iter().enumerate() {
-                            if s.is_none_or(|s| j >= 64 || s.mutates & (1 << j) != 0) {
+                            // A leaf (a string, a vector of plain words)
+                            // can only be given plain words.
+                            if s.is_none_or(|s| j >= 64 || s.mutates & (1 << j) != 0) && !leaf(body.expr(*a).ty.as_ref()) {
                                 self.store(*a, Src::OTHER);
                             }
                         }

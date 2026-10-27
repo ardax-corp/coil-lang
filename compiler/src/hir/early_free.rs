@@ -23,7 +23,7 @@
 
 use std::collections::HashMap;
 
-use super::escape::{no_heap, result_exprs, CallLookup, Escape, Src};
+use super::escape::{leaf, no_heap, result_exprs, CallLookup, Escape, Src};
 use super::{is_vec, BinOp, Builtin, Callee, HirBody, HirId, HirKind, HirModule, LocalId, LocalKind, VEC_MUTATORS};
 use crate::hir::{HirExpr, HirFlags, HirLocal, Span};
 use crate::typechecking::ty::{self, Ty};
@@ -224,16 +224,6 @@ fn block_locals(body: &HirBody, e: &mut Escape<'_, '_>, kept: Src, linear: &Hash
         out.push((block, l));
     }
     out
-}
-
-/// Leaf objects: a string, or a vector of plain words (packed bytes,
-/// ints): a new one never holds an old one.
-fn leaf(ty: Option<&Ty>) -> bool {
-    match ty.map(ty::strip_readonly) {
-        Some(Ty::Con(n)) => n == "string",
-        Some(t @ Ty::App(_, args)) => is_vec(Some(t)) && args.len() == 1 && no_heap(Some(&args[0])),
-        _ => false,
-    }
 }
 
 /// Whether `v` always yields an object nothing else holds, or an interned

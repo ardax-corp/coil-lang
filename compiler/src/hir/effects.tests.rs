@@ -863,3 +863,37 @@ fn wrap(int i) -> string {
 ";
     assert_eq!(frees(src, "wrap").len(), 1);
 }
+
+
+#[test]
+fn a_byte_buffer_a_method_appends_to_is_still_freed() {
+    let src = "
+use string::{from_bytes};
+class P {
+    pub i: int,
+}
+impl P {
+    pub fn esc(Vec<byte> out) {
+        out.push(\"x\" as byte);
+        self.i = self.i + 1;
+    }
+    pub fn parse() -> Result<string, int> {
+        let out: Vec<byte> = Vec::new();
+        while self.i < 10 {
+            if self.i == 3 {
+                self.esc(out);
+                continue;
+            }
+            out.push(\"a\" as byte);
+            self.i = self.i + 1;
+        }
+        return match from_bytes(out) {
+            Result::Ok(s) => s,
+            Result::Err(_) => raise 1,
+        };
+    }
+}
+";
+    // Before the `raise` and before the final `return`.
+    assert_eq!(frees(src, "P::parse"), vec![(false, "out".to_string()), (false, "out".to_string())]);
+}
