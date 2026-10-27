@@ -27,9 +27,6 @@ pub enum HostOp {
     /// `unwind_resume`: the end of a `defer` cleanup pad; the VM unwinder
     /// takes the frame back ([`common::UNWIND_RESUME_ID`]).
     Unwind,
-    /// `gc_free_early`: the VM frees an object early, dropping its own
-    /// caches of it ([`common::GC_FREE_EARLY_ID`]).
-    Free,
 }
 
 pub trait NativeFn: Send + Sync {

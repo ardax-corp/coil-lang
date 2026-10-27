@@ -263,7 +263,7 @@ pub(super) fn slot_extent(b: &Byte, constants: &[u64]) -> Option<usize> {
             max(&[d, from, h])
         }
         VMove | VFma => Some(0),
-        NOOP | DATA | HALT | Panic | CONST | STRING | CodePtr | DUPLICATE | POP | PRINT
+        NOOP | DATA | HALT | Panic | CONST | STRING | CodePtr | DUPLICATE | POP | PRINT | FreeEarly
         | ADD | SUB | MUL | DIV | MOD | LE | LEQ | GT | GEQ | EQ | NEQ | Pow | BITAND | BITOR
         | ADDF | SUBF | MULF | DIVF | MODF | LEF | LEQF | EQF | NEQF | GTF | GEQF | PowF | SHL | SHR | XOR
         | AND | OR | NOT | LogNot | NEG | NEGF | CastIntToFloat | CastFloatToInt
@@ -1328,7 +1328,7 @@ fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Opt
             st.push_copy(heap, must)?;
             st.push_copy(heap, must)?;
         }
-        POP | PRINT | StoreStatic => {
+        POP | PRINT | FreeEarly | StoreStatic => {
             st.pop()?;
         }
         LoadStatic => st.push(true)?,

@@ -126,8 +126,6 @@ pub fn build_standard_host_natives(
     push_wiring(&mut out, &mut register_id, crate::io::IO_CAPTURE_WIRING, "io capture");
     // Append-only after io capture: `io::tty` (minor 47).
     push_wiring(&mut out, &mut register_id, crate::tty::TTY_WIRING, "io tty");
-    // Append-only after io tty: early freeing (major 5 minor 1).
-    push_gc_free_early(&mut out, &mut register_id);
     assert_eq!(
         out.len(),
         common::HOST_NATIVES.len(),
@@ -478,20 +476,6 @@ fn push_unwind_resume(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl F
             Err(FfiError::Unsupported(format!("{name} is HostOp::Unwind (VM hook only)")))
         })
         .with_host_op(HostOp::Unwind),
-    ));
-}
-
-fn push_gc_free_early(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
-    let name = common::GC_FREE_EARLY_NATIVE;
-    let sig = FfiSignature::from_parts(name.to_string(), vec![FfiType::Int, FfiType::Int], FfiType::Int)
-        .expect("gc_free_early signature");
-    assert_eq!(out.len(), common::GC_FREE_EARLY_ID as usize);
-    register_id(name, out.len());
-    out.push(Arc::new(
-        HostClosureFn::new(sig, move |_heap, _args| {
-            Err(FfiError::Unsupported(format!("{name} is HostOp::Free (VM hook only)")))
-        })
-        .with_host_op(HostOp::Free),
     ));
 }
 
@@ -1348,12 +1332,8 @@ mod tests {
             Some(common::TTY_IS_TTY_NATIVE)
         );
         assert_eq!(
-            names.get(173).map(String::as_str),
-            Some(common::TTY_ENABLE_VT_NATIVE)
-        );
-        assert_eq!(
             names.last().map(String::as_str),
-            Some(common::GC_FREE_EARLY_NATIVE)
+            Some(common::TTY_ENABLE_VT_NATIVE)
         );
         assert_eq!(attach, 119);
     }
@@ -1685,10 +1665,6 @@ mod tests {
             registrations.get(end + 37).map(|(n, _)| n.as_str()),
             Some(common::TTY_ENABLE_VT_NATIVE)
         );
-        assert_eq!(
-            registrations.get(end + 38).map(|(n, _)| n.as_str()),
-            Some(common::GC_FREE_EARLY_NATIVE)
-        );
-        assert_eq!(registrations.len(), end + 39);
+        assert_eq!(registrations.len(), end + 38);
     }
 }

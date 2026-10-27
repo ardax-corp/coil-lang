@@ -1648,9 +1648,9 @@ impl<const S: usize> Machine<S> {
         }
     }
 
-    /// `gc_free_early(v, deep)`: free what the compiler proved dead
-    /// ([`Heap::free_early`]). Frame pins keep their arrays, and the dense
-    /// object cache forgets a freed address. `COIL_EARLY_FREE=0` turns it
+    /// `FreeEarly` (`deep` from its operand): free what the compiler proved dead
+    /// ([`Heap::free_early`]). An `ArrayPin` keeps its array; a dense
+    /// index's pin and the dense object cache forget a freed address. `COIL_EARLY_FREE=0` turns it
     /// off; `COIL_EARLY_FREE=check` frees nothing and aborts when the next
     /// mark still reaches an object it would have freed.
     pub(crate) fn free_early(&mut self, v: Value, deep: bool) {
@@ -4333,7 +4333,7 @@ impl<const S: usize> Machine<S> {
             // variant. A stale ceiling (e.g. YieldFromCoro) makes later opcodes
             // (`StoreIndex`, `DoneCoro`, `ArrayPush`, …) UB via assert_unchecked.
             #[cfg(not(debug_assertions))]
-            promise!(*bc as u8 <= Instruction::VScan as u8);
+            promise!(*bc as u8 <= Instruction::FreeEarly as u8);
 
             match bc {
                 Instruction::STORE => {
@@ -4848,6 +4848,10 @@ impl<const S: usize> Machine<S> {
                     for i in 0..arity {
                         self.stack.push(self.stack[sp + base + i]);
                     }
+                }
+                Instruction::FreeEarly => {
+                    let v = self.stack.pop();
+                    self.free_early(v, opcode.operand_u32() & 1 != 0);
                 }
                 _ => match self.exec_rest(opcode, ip, sp, code, constants, stack_cap).get() {
                     Ok((next_ip, next_sp)) => (ip, sp) = (next_ip, next_sp),
