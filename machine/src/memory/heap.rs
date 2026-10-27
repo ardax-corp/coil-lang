@@ -993,7 +993,8 @@ impl Heap {
     /// a `drop`, handles, and everything while a cycle or a steal epoch is
     /// open. `check` frees nothing and records the objects instead, which
     /// the next mark must not reach. Returns how many objects it freed.
-    pub fn free_early(&mut self, v: Value, deep: bool, check: bool, keep: &dyn Fn(u64) -> bool) -> usize {
+    /// The addresses freed are pushed onto `freed`.
+    pub fn free_early(&mut self, v: Value, deep: bool, check: bool, keep: &dyn Fn(u64) -> bool, freed: &mut Vec<u64>) -> usize {
         if self.gc_phase != GcPhase::Idle || self.epoch_stw || !self.alloc_lock.is_null() {
             return 0;
         }
@@ -1035,6 +1036,7 @@ impl Heap {
             return 0;
         }
         self.freed_early = true;
+        freed.extend(found.iter().map(Object::addr));
         for &obj in &found {
             unsafe { self.dealloc(obj) };
         }

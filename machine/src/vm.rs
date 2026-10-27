@@ -744,6 +744,8 @@ pub struct Machine<const S: usize> {
     frames: ArrayVec<Frame, S>,
     /// Pin tables for frames that ran `ArrayPin` or a dense heap index.
     frame_pins: Vec<FramePins>,
+    /// Scratch for [`Self::free_early`]: the addresses one call freed.
+    early_freed: Vec<u64>,
     /// Last dense-index array identity (predicted hit in counted loops).
     dense_obj_addr: u64,
     dense_obj: Option<Object>,
@@ -923,6 +925,7 @@ impl<const S: usize> Machine<S> {
         Self {
             frames,
             frame_pins: Vec::new(),
+            early_freed: Vec::new(),
             dense_obj_addr: 0,
             dense_obj: None,
             heap: crate::memory::HeapSlot::default(),
@@ -1660,12 +1663,27 @@ impl<const S: usize> Machine<S> {
         if mode == 0 {
             return;
         }
+        // An `ArrayPin` holds its array for the frame; a dense index's pin
+        // only caches its register's object, and is dropped with it below.
         let pins = &self.frame_pins;
-        let keep = |addr: u64| pins.iter().any(|p| p.by_slot.iter().flatten().any(|o| o.addr() == addr));
-        let freed = self.heap.free_early(v, deep, mode == 2, &keep);
-        if freed != 0 {
-            self.clear_dense_obj_cache();
+        let keep = |addr: u64| {
+            pins.iter().any(|p| p.by_slot.iter().zip(&p.sticky).any(|(o, &sticky)| sticky && o.is_some_and(|o| o.addr() == addr)))
+        };
+        let mut freed = std::mem::take(&mut self.early_freed);
+        freed.clear();
+        if self.heap.free_early(v, deep, mode == 2, &keep, &mut freed) == 0 {
+            self.early_freed = freed;
+            return;
         }
+        self.clear_dense_obj_cache();
+        for p in &mut self.frame_pins {
+            for o in &mut p.by_slot {
+                if o.is_some_and(|o| freed.contains(&o.addr())) {
+                    *o = None;
+                }
+            }
+        }
+        self.early_freed = freed;
     }
 
     #[inline]
