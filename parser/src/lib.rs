@@ -4101,6 +4101,7 @@ const EXPRESSION_LABELS: &[&str] = &[
     "qualified access",
     "named argument",
     "quote",
+    "region",
 ];
 
 /// What the parser wanted, in words: `;`, a structural production
