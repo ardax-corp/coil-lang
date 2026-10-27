@@ -798,6 +798,7 @@ impl<'s> Formatter<'s> {
                 self.push_str("\"");
             }
             Expression::Identifier(id) => self.push_str(id),
+            Expression::RegionMark => self.push_str("region"),
             Expression::Type(n) => self.push_str(n),
             Expression::Break => self.push_str("break"),
             Expression::Continue => self.push_str("continue"),
@@ -1699,6 +1700,12 @@ impl<'s> Formatter<'s> {
     }
 
     fn fmt_block_braced(&mut self, items: &[Output<'_>]) {
+        if let Some((first, rest)) = items.split_first()
+            && matches!(first.1.as_ref(), Expression::RegionMark)
+        {
+            self.push_str("region ");
+            return self.fmt_block_braced(rest);
+        }
         let open = items
             .first()
             .and_then(|first| self.opening_before(self.content_start(first.0), b'{'));
