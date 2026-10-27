@@ -225,6 +225,9 @@ pub struct Heap {
     gc_growth_factor: usize,
     /// Heap bytes when the current sweep started (survival for the next budget).
     gc_sweep_start_bytes: usize,
+    /// Bytes the current sweep has freed: what survived the mark is
+    /// `gc_sweep_start_bytes` less this, whatever was allocated meanwhile.
+    gc_sweep_freed: usize,
     strings: Table<()>,
     slab: Slab,
     /// Live object count (alloc +1, sweep/dealloc −1). Not a membership set.
@@ -321,6 +324,7 @@ impl Default for Heap {
             byte_cap: usize::MAX,
             gc_growth_factor: GC_GROWTH_FACTOR,
             gc_sweep_start_bytes: 0,
+            gc_sweep_freed: 0,
             strings: Table::default(),
             slab: Slab::new(),
             live_count: 0,
@@ -889,6 +893,7 @@ impl Heap {
         self.gc_phase = GcPhase::Sweeping;
         self.unmark_young();
         self.gc_sweep_start_bytes = self.alloc_bytes;
+        self.gc_sweep_freed = 0;
         self.gc_sweep_cursor = Some(super::slab::SlotCursor::sweep());
         self.finish_sweep();
     }
@@ -994,6 +999,7 @@ impl Heap {
         self.unmark_young();
         self.gc_phase = GcPhase::Sweeping;
         self.gc_sweep_start_bytes = self.alloc_bytes;
+        self.gc_sweep_freed = 0;
         self.gc_sweep_cursor = Some(super::slab::SlotCursor::sweep());
     }
 
@@ -1064,7 +1070,11 @@ impl Heap {
         } else {
             self.gc_growth_factor
         };
-        self.gc_next_threshold = (self.alloc_bytes.saturating_sub(self.young_bytes))
+        // What the mark kept, not what a lazy sweep let the program allocate
+        // meanwhile: counting those (pretenured objects, mostly) as live
+        // would push the next collection out by the growth factor.
+        let survived = self.gc_sweep_start_bytes.saturating_sub(self.gc_sweep_freed).min(self.alloc_bytes);
+        self.gc_next_threshold = (survived.saturating_sub(self.young_bytes))
             .saturating_mul(growth)
             .max(GC_NEXT_THRESHOLD)
             .min(self.byte_cap);
@@ -1408,6 +1418,7 @@ impl Heap {
     unsafe fn dealloc_swept(&mut self, object: Object, cur: &mut super::slab::SlotCursor) {
         let size = object.size();
         self.alloc_bytes -= size;
+        self.gc_sweep_freed += size;
         debug_assert!(self.live_count > 0);
         self.live_count -= 1;
         let ptr = unsafe { NonNull::new_unchecked(object.addr() as *mut u8) };
@@ -4043,6 +4054,33 @@ thread_local! {
     /// barrier is off (nothing young to record) until their heap's nursery
     /// starts again ([`relog_quiet`]), so a write loop pays it once.
     static QUIET: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Times [`QUIET`] outgrew [`QUIET_CAP`] and was dropped: a heap that
+    /// has not seen the latest count relogs all its old objects instead
+    /// ([`relog_all`]).
+    static QUIET_OVERFLOWS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Entries [`QUIET`] holds before it is dropped for a whole-heap relog. A
+/// long pretenured stretch writes every new object once; a list per write
+/// would grow with the program (and every compaction forwards it).
+const QUIET_CAP: usize = 1 << 16;
+
+/// [`QUIET_OVERFLOWS`] now.
+pub(super) fn quiet_overflows() -> u64 {
+    QUIET_OVERFLOWS.with(Cell::get)
+}
+
+/// [`relog_quiet`] for a heap whose entries [`QUIET`] dropped: log every
+/// old object of `slab` again.
+pub(super) fn relog_all(slab: &super::slab::Slab) {
+    let mut cur = super::slab::SlotCursor::default();
+    while let Some(addr) = slab.next_slot(&mut cur) {
+        // SAFETY: `next_slot` yields slot starts in mapped chunks.
+        let header = unsafe { &*(addr as *const GcHeader) };
+        if header.kind.get() != 0 && header.generation.get() & GEN_YOUNG == 0 {
+            header.generation.set(header.generation.get() | GEN_UNLOGGED);
+        }
+    }
 }
 
 /// `slab`'s nursery starts again (no young object exists yet): turn the
@@ -4077,7 +4115,13 @@ fn remember_written(header: &GcHeader) {
     header.generation.set(header.generation.get() & !GEN_UNLOGGED);
     let addr = header as *const GcHeader as u64;
     if YOUNG_HEAPS.with(Cell::get) == 0 {
-        QUIET.with_borrow_mut(|q| q.push(addr));
+        QUIET.with_borrow_mut(|q| {
+            q.push(addr);
+            if q.len() >= QUIET_CAP {
+                q.clear();
+                QUIET_OVERFLOWS.with(|n| n.set(n.get() + 1));
+            }
+        });
         return;
     }
     REMEMBERED.with_borrow_mut(|r| r.push(addr));
