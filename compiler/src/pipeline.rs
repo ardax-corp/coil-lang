@@ -2072,6 +2072,9 @@ impl Pipeline {
         self.discover_all();
         self.expand_user_macros();
         self.compile_discovered_modules();
+        // Every module is compiled, foreign clones included: nothing past
+        // this reads a tree, and finalize peaks on top of them.
+        self.ast_cache.release_asts();
 
         if self.failed || self.had_errors() || !self.check_capabilities() {
             return Err(CompileFail);

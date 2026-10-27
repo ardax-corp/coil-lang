@@ -172,6 +172,15 @@ impl CachedAst {
     }
 
     /// Source plus every generated snippet: what diagnostics are rendered against.
+    /// Drop the AST and what only it needs, keeping the text diagnostics
+    /// report against: a compile's later stages never read the tree.
+    pub fn release_ast(&mut self) {
+        self.ast = None;
+        self.variadic_templates = Vec::new();
+        self.expand = ExpandResult::default();
+        self.generated = Vec::new();
+    }
+
     pub fn report_source(&self) -> String {
         if self.generated_text.is_empty() {
             return self.source.to_string();
@@ -226,6 +235,13 @@ impl AstCache {
 
     pub fn insert(&mut self, file: PathBuf, cached: CachedAst) {
         self.files.insert(file, cached);
+    }
+
+    /// [`CachedAst::release_ast`] for every file.
+    pub fn release_asts(&mut self) {
+        for cached in self.files.values_mut() {
+            cached.release_ast();
+        }
     }
 
     pub fn values(&self) -> impl Iterator<Item = &CachedAst> {
