@@ -170,6 +170,12 @@ impl Heap {
         for &addr in precise {
             reach(self, &mut gray, addr, true);
         }
+        // A young object typed with a `drop` after its allocation
+        // (`note_enum_type`, `register_finalizer_type`) owes its finalizer:
+        // it survives to the old space, where a major runs it.
+        for &addr in &self.finalizable {
+            reach(self, &mut gray, addr, true);
+        }
         for &addr in &remembered {
             let Some(obj) = self.find_object_by_addr(addr) else {
                 continue;
@@ -372,6 +378,22 @@ mod tests {
             }
         }
         heap.minor_finish(plan)
+    }
+
+    #[test]
+    fn a_young_enum_typed_with_a_drop_survives_to_the_old_space() {
+        let mut heap = nursery_heap();
+        heap.register_finalizer_type(7);
+        let head = cons_list(&mut heap, 1);
+        let obj = heap.find_object_by_addr(head).expect("enum");
+        let Object::Enum(gc) = obj else { unreachable!() };
+        gc.payload_mut().type_id = 7;
+        heap.note_enum_type(obj, 7);
+        assert_eq!(minor(&mut heap, &[], &mut []), 1, "it moves instead of dying");
+        assert_eq!(heap.live_object_count(), 1);
+        let copy = heap.unmarked_finalizable();
+        assert_eq!(copy.len(), 1, "the finalizable list names the copy");
+        assert_eq!(copy[0].generation() & GEN_YOUNG, 0);
     }
 
     #[test]
