@@ -137,8 +137,10 @@ everything. Two shapes are freed:
   panics leave it to the collector.
 
 Each free is `Builtin::FreeEarly { deep }` of the local and a `Clear` of
-its frame word, lowered to the `gc_free_early` HostInvoke (id 174, archive
-5.1, `HostOp::Free`). The VM frees nothing while a collection cycle or a
+its frame word. It lowers to MIR `FreeEarly` and to the `FreeEarly`
+instruction (archive 5.1), which pops the word; the VM runs it in its main
+dispatch loop. (Step 2 first used a host call; that left the fast loop on
+every free, and a `join` with a free per part ran 25% slower.) The VM frees nothing while a collection cycle or a
 steal epoch is open, and skips what it cannot free safely: interned
 strings, the shared unit variants and `()`, objects of a type with a
 `drop` (while any is registered), handles, and arrays an `ArrayPin` holds
