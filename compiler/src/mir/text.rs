@@ -332,6 +332,7 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             Ok(())
         }
         MirInst::Stringify { dest, src } => write!(f, "{dest} = stringify {src}"),
+        MirInst::Cow { dest, src, unique } => write!(f, "{dest} = cow.{} {src}", if *unique { "unique" } else { "share" }),
         MirInst::Unbox { dest, src, tag } => write!(f, "{dest} = unbox.{} {tag}, {src}", func.ty(*dest)),
         MirInst::StrEq { dest, lhs, rhs, ne } => {
             write!(f, "{dest} = {} {lhs}, {rhs}", if *ne { "strne" } else { "streq" })
@@ -944,6 +945,11 @@ impl<'a> Parser<'a> {
             let src = self.value()?;
             ensure_ty(types, dest, ty);
             return Ok(MirInst::Unbox { dest, src, tag });
+        }
+        if op == "cow.share" || op == "cow.unique" {
+            let src = self.value()?;
+            ensure_ty(types, dest, MirTy::HeapRef);
+            return Ok(MirInst::Cow { dest, src, unique: op == "cow.unique" });
         }
         if op == "stringify" {
             let src = self.value()?;

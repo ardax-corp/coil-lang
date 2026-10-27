@@ -86,7 +86,8 @@ impl MirInst {
             | Self::ResumeCoro { .. }
             | Self::ArrayPush { .. }
             | Self::Format { .. }
-            | Self::Stringify { .. } => true,
+            | Self::Stringify { .. }
+            | Self::Cow { .. } => true,
             _ => false,
         }
     }
@@ -141,7 +142,8 @@ impl MirInst {
             | Self::FreeEarly { .. }
             | Self::Panic { .. }
             | Self::Format { .. }
-            | Self::Stringify { .. } => true,
+            | Self::Stringify { .. }
+            | Self::Cow { .. } => true,
             _ => false,
         }
     }

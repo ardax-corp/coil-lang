@@ -418,6 +418,11 @@ impl<'c, 'a> Escape<'c, 'a> {
                 Builtin::Box { .. } => args.iter().fold(self.site(id), |m, a| m.union(self.src(*a))),
                 Builtin::Unbox { .. } | Builtin::Relayout => args.first().map_or(Src::EMPTY, |a| self.src(*a)),
                 Builtin::Stringify => self.site(id),
+                // The operand's object, or for unique maybe a copy of it.
+                Builtin::Cow { unique } => {
+                    let s = args.first().map_or(Src::EMPTY, |a| self.src(*a));
+                    if *unique { s.union(self.site(id)) } else { s }
+                }
                 _ => Src::OTHER,
             },
             HirKind::Resume { .. } => Src::OTHER,
@@ -462,7 +467,7 @@ impl<'c, 'a> Escape<'c, 'a> {
                 }
             }
             HirKind::Builtin { op, args } => match op {
-                Builtin::Box { .. } | Builtin::Unbox { .. } | Builtin::Relayout | Builtin::Stringify | Builtin::Print | Builtin::Panic | Builtin::TypeOf => {}
+                Builtin::Box { .. } | Builtin::Unbox { .. } | Builtin::Relayout | Builtin::Stringify | Builtin::Cow { .. } | Builtin::Print | Builtin::Panic | Builtin::TypeOf => {}
                 _ => {
                     for a in args {
                         let s = self.src(*a);

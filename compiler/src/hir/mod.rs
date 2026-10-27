@@ -378,6 +378,11 @@ pub enum Builtin {
     /// (the `FreeEarly` instruction; `deep`: and everything it reaches). Added after
     /// the HIR optimizer by the early-free rewrite only.
     FreeEarly { deep: bool },
+    /// Copy-on-write: the `Cow` instruction on its operand's object, which
+    /// it returns. `unique: false` marks it shared (a second place now
+    /// names it); `unique: true` makes it safe to write through, copying it
+    /// when shared. Added by the copy-on-write rewrite only.
+    Cow { unique: bool },
     /// Enter (`true`) or leave a `region { … }` block (escape step 5): the
     /// `gc_region_enter` / `gc_region_exit` HostInvoke. No arguments.
     Region { enter: bool },

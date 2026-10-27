@@ -175,6 +175,8 @@ pub const ARCHIVE_MAJOR: u16 = 6;
 ///     know neither.
 /// 2 — HostInvoke `gc_region_enter` / `gc_region_exit` (ids 175, 176)
 ///     around a `region` block. Older VMs do not know them.
+/// 3 — `Cow`: copy-on-write share / unique of a class instance or array.
+///     Older VMs do not know it.
 ///
 /// Major 5 / minor 0: builtin error regrouping. `IoError` drops
 /// `Certificate` / `Handshake` / `NotATerminal` for `Protocol` (tag 10);
@@ -187,7 +189,7 @@ pub const ARCHIVE_MAJOR: u16 = 6;
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.
-pub const ARCHIVE_MINOR: u16 = 2;
+pub const ARCHIVE_MINOR: u16 = 3;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);

@@ -7123,7 +7123,7 @@ impl Compiler {
                 Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |ty| self.value_layout(ty)),
             )),
             HirKind::Builtin { op: Builtin::TypeOf, .. } => Some(BOXED),
-            HirKind::Builtin { op: Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::Relayout, .. } => {
+            HirKind::Builtin { op: Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::Relayout | Builtin::Cow { .. }, .. } => {
                 Some(Rep::Word(Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |ty| self.value_layout(ty))))
             }
             // A value `match` (`x ?? y`) yields each arm at the layout asked
@@ -8146,6 +8146,11 @@ impl Compiler {
                 op: Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::Relayout,
                 args,
             } => self.hir_check_value(hir, emit, args[0], &BOXED)?,
+            // A copy-on-write op passes its operand's word through.
+            HirKind::Builtin { op: Builtin::Cow { .. }, args } => {
+                let want = self.hir_natural(hir, emit, id).ok_or("cow-shape")?;
+                self.hir_check_value(hir, emit, args[0], &want)?
+            }
             HirKind::Call { args, .. } => {
                 let call = emit.plan.calls.get(&id.0).ok_or("callee")?;
                 let args = match call.builtin {
@@ -8522,6 +8527,11 @@ impl Compiler {
             HirKind::Clear(_) => Ok(()),
             // An early free reads a one-word object reference.
             HirKind::Builtin { op: Builtin::Region { .. }, .. } => Ok(()),
+            // A share as a statement: its operand's word, then dropped.
+            HirKind::Builtin { op: Builtin::Cow { .. }, args } => {
+                let want = self.hir_natural(hir, emit, args[0]).ok_or("cow-shape")?;
+                self.hir_check_value(hir, emit, args[0], &want)
+            }
             HirKind::Builtin { op: Builtin::FreeEarly { .. }, args } => match self.hir_natural(hir, emit, args[0]) {
                 Some(want @ Rep::Word(_)) => self.hir_check_value(hir, emit, args[0], &want),
                 _ => Err("free-shape"),

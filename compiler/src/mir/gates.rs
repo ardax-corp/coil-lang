@@ -35,7 +35,7 @@ pub fn refuses_alloc(inst: &MirInst) -> bool {
         MirInst::Alloc { kind, .. } => {
             !matches!(kind, MirAllocKind::Boxed { .. } | MirAllocKind::Fn { .. } | MirAllocKind::PolyFn { .. } | MirAllocKind::PolyFnCapture { .. })
         }
-        MirInst::ArrayPush { .. } | MirInst::Stringify { .. } => true,
+        MirInst::ArrayPush { .. } | MirInst::Stringify { .. } | MirInst::Cow { .. } => true,
         MirInst::Format { args, .. } => !args.is_empty(),
         _ => false,
     }
@@ -59,6 +59,7 @@ fn does_work(inst: &MirInst) -> bool {
             | MirInst::FreeEarly { .. }
             | MirInst::Format { .. }
             | MirInst::Stringify { .. }
+            | MirInst::Cow { .. }
             | MirInst::ResumeCoro { .. }
             | MirInst::Alloc {
                 kind: MirAllocKind::Coro { .. } | MirAllocKind::Fn { .. } | MirAllocKind::PolyFn { .. } | MirAllocKind::PolyFnCapture { .. },

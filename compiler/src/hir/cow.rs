@@ -1,0 +1,903 @@
+//! Copy-on-write: value semantics for class instances, `Vec`s and arrays.
+//!
+//! Every place (a local, a field, an element) that holds a class instance
+//! or an array owns its value: a write through one place is never seen
+//! through another. Objects are still passed by reference; this rewrite
+//! keeps the sharing honest with the `Cow` instruction ([`Builtin::Cow`]):
+//!
+//! - *share* where a second place starts to name an object another place
+//!   keeps naming: a store of a place read (into a field, an element, a new
+//!   object, a static), a return of a field or a parameter, a capture, and a
+//!   binding (`let b = a.items`, a `for` or `match` binding) that is written
+//!   through, or whose source is written while it lives;
+//! - *unique* before a write through a place: each object on the path from
+//!   the place's root is made writable top-down and a copy is written back,
+//!   `a = unique(a); a.b = unique(a.b); a.b.c = v`. Unique copies an object
+//!   only when it was shared.
+//!
+//! A parameter a body writes through is the caller's place (an inferred
+//! `inout`, from the effects summary's `mutates`): the caller makes the
+//! argument unique and writes it back before the call, so the callee writes
+//! it in place, and stores of the parameter itself copy it eagerly. Class
+//! instances whose type has a `drop` are identities the VM never copies; a
+//! `readonly class` is never written, so it needs neither op.
+//!
+//! The rewrite runs once per module, after the effects fixed point and
+//! before typed inlining, so spliced callees carry their ops.
+
+use std::collections::{HashMap, HashSet};
+
+use super::escape::CallLookup;
+use super::{is_vec, pat_binds, Summary, VEC_MUTATORS};
+use crate::hir::lower::{children, pure_index};
+use crate::hir::{Builtin, Callee, HirBody, HirExpr, HirFlags, HirId, HirKind, HirLocal, HirModule, HirPat, IndexKind, LocalId, LocalKind, MakeKind, Span};
+use crate::typechecking::infer::{Checker, ForInKind};
+use crate::typechecking::ty::{self as ty, Ty, strip_readonly};
+
+/// Whether copy-on-write is on for this compile (`COIL_COW=1`).
+pub fn enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| matches!(std::env::var("COIL_COW").as_deref(), Ok("1" | "on")))
+}
+
+/// Whether a value of `ty` may be a class instance or array that a write
+/// can change: anything but a scalar, a string, a tuple, an enum, a
+/// function, a record, a `readonly class` or a class with a `drop`. A type
+/// parameter counts, since it may stand for one.
+pub(super) fn cow_ty(checker: &Checker, ty: Option<&Ty>) -> bool {
+    let Some(ty) = ty else { return false };
+    let name = match strip_readonly(ty) {
+        Ty::Con(n) => n.as_str(),
+        Ty::App(head, _) => match head.as_ref() {
+            Ty::Con(n) => n.as_str(),
+            _ => return false,
+        },
+        Ty::Array { .. } | Ty::Existential { .. } => return true,
+        _ => return false,
+    };
+    if super::escape::no_heap(Some(&Ty::Con(name.to_string()))) || matches!(name, "string" | "Option" | "Result") {
+        return false;
+    }
+    if name == common::BUILTIN_VEC_TYPE {
+        return true;
+    }
+    if checker.has_impl(name) {
+        if !checker.is_class(name) {
+            return false;
+        }
+        let key = checker.resolve_class_key(name).unwrap_or_else(|| name.to_string());
+        return !checker.is_readonly_class(&key) && !checker.class_has_drop(name);
+    }
+    checker.enum_variants(name).is_none()
+}
+
+/// What a call does with each argument (bit `i` for argument `i`).
+#[derive(Debug, Clone, Copy, Default)]
+struct ArgUse {
+    /// The callee may write through the argument.
+    written: u64,
+    /// The callee may keep the argument past the call.
+    kept: u64,
+}
+
+/// A write through a place, before node `at` runs.
+#[derive(Debug, Clone, Copy)]
+struct Write {
+    at: HirId,
+    path: HirId,
+}
+
+struct Facts<'b> {
+    body: &'b HirBody,
+    order: Vec<u32>,
+    /// One past the largest order in each node's subtree.
+    end: Vec<u32>,
+    parent: HashMap<HirId, HirId>,
+    calls: HashMap<HirId, ArgUse>,
+    writes: Vec<Write>,
+    /// The roots of the paths written through.
+    written_roots: HashSet<LocalId>,
+    /// Each local's reads (not as an assignment's place).
+    reads: HashMap<LocalId, Vec<HirId>>,
+    /// Each local's assigned values: `let` inits and assignments.
+    inits: HashMap<LocalId, Vec<HirId>>,
+    /// Pattern bindings: local, the scrutinee / iterable it comes from,
+    /// and the node that binds it (`Match` arm body, `ForIn`, `LetPat`).
+    bound: HashMap<LocalId, (HirId, HirId)>,
+    /// Locals some lambda or `defer` captures.
+    captured: HashSet<LocalId>,
+    /// The outer locals each lambda or `defer` node captures.
+    capture_lists: HashMap<HirId, Vec<LocalId>>,
+    /// Parameters the body assigns.
+    reassigned: HashSet<LocalId>,
+}
+
+/// The body with its copy-on-write ops, when it needs any.
+pub(super) fn rewrite(checker: &Checker, module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>, mutates: u64) -> Option<HirBody> {
+    let root = body.root?;
+    let facts = Facts::new(checker, module, body, lookup, root);
+    let plan = Plan::new(checker, body, &facts, mutates);
+    if plan.is_empty() {
+        return None;
+    }
+    let mut out = body.clone();
+    plan.apply(&mut out, checker);
+    Some(out)
+}
+
+impl<'b> Facts<'b> {
+    fn new(checker: &Checker, module: &HirModule, body: &'b HirBody, lookup: &CallLookup<'_>, root: HirId) -> Self {
+        let n = body.exprs.len();
+        let mut f = Facts {
+            body,
+            order: vec![u32::MAX; n],
+            end: vec![0; n],
+            parent: HashMap::new(),
+            calls: HashMap::new(),
+            writes: Vec::new(),
+            written_roots: HashSet::new(),
+            reads: HashMap::new(),
+            inits: HashMap::new(),
+            bound: HashMap::new(),
+            captured: HashSet::new(),
+            capture_lists: HashMap::new(),
+            reassigned: HashSet::new(),
+        };
+        // Evaluation order: children in the order `children` lists them.
+        let mut next = 0u32;
+        let mut stack = vec![(root, false)];
+        while let Some((id, done)) = stack.pop() {
+            if done {
+                f.end[id.0 as usize] = next;
+                continue;
+            }
+            f.order[id.0 as usize] = next;
+            next += 1;
+            stack.push((id, true));
+            let kids = children(body, id);
+            for &k in kids.iter().rev() {
+                f.parent.insert(k, id);
+                stack.push((k, false));
+            }
+        }
+        for i in 0..n {
+            let id = HirId(i as u32);
+            if f.order[i] == u32::MAX {
+                continue;
+            }
+            f.note(checker, module, lookup, id);
+        }
+        for w in &f.writes {
+            if let Some(HirKind::Local(l)) = f.root_of(w.path).map(|r| &body.expr(r).kind) {
+                f.written_roots.insert(*l);
+            }
+        }
+        f
+    }
+
+    fn note(&mut self, checker: &Checker, module: &HirModule, lookup: &CallLookup<'_>, id: HirId) {
+        let body = self.body;
+        match &body.expr(id).kind {
+            HirKind::Local(l) => {
+                let is_place = matches!(self.parent.get(&id).map(|p| &body.expr(*p).kind), Some(HirKind::Assign { place, .. }) if *place == id);
+                if !is_place {
+                    self.reads.entry(*l).or_default().push(id);
+                }
+            }
+            HirKind::Let { local, init: Some(v) } => self.inits.entry(*local).or_default().push(*v),
+            HirKind::Assign { place, value } => match &body.expr(*place).kind {
+                HirKind::Local(l) => {
+                    self.inits.entry(*l).or_default().push(*value);
+                    if body.local(*l).kind == LocalKind::Param {
+                        self.reassigned.insert(*l);
+                    }
+                }
+                HirKind::Field { base, .. } => self.writes.push(Write { at: id, path: *base }),
+                HirKind::Index { base, kind: IndexKind::Array | IndexKind::Other, .. } => {
+                    self.writes.push(Write { at: id, path: *base })
+                }
+                _ => {}
+            },
+            HirKind::Append { base, .. } => self.writes.push(Write { at: id, path: *base }),
+            HirKind::Call { callee, args } => {
+                let used = arg_use(checker, body, lookup, callee, args);
+                for (i, &a) in args.iter().enumerate().take(64) {
+                    let a = named_value(body, a);
+                    if used.written & (1 << i) != 0 && cow_ty(checker, body.expr(a).ty.as_ref()) {
+                        self.writes.push(Write { at: id, path: a });
+                    }
+                }
+                self.calls.insert(id, used);
+            }
+            HirKind::Match { scrutinee, arms } => {
+                for arm in arms {
+                    let mut ls = Vec::new();
+                    pat_binds(&arm.pat, &mut ls);
+                    for l in ls {
+                        self.bound.insert(l, (*scrutinee, arm.body));
+                    }
+                }
+            }
+            HirKind::ForIn { pat, iterable, kind, .. } => {
+                if matches!(kind, Some(ForInKind::Array)) {
+                    let mut ls = Vec::new();
+                    pat_binds(pat, &mut ls);
+                    for l in ls {
+                        self.bound.insert(l, (*iterable, id));
+                    }
+                }
+            }
+            HirKind::LetPat { pat, init } => {
+                let mut ls = Vec::new();
+                pat_binds(pat, &mut ls);
+                for l in ls {
+                    self.bound.insert(l, (*init, id));
+                }
+            }
+            HirKind::Lambda { body: inner } => {
+                let outer: Vec<LocalId> = module.bodies[*inner].captures.iter().map(|(o, _)| *o).collect();
+                self.captured.extend(outer.iter().copied());
+                self.capture_lists.insert(id, outer);
+            }
+            HirKind::Defer { captures, .. } => {
+                let outer: Vec<LocalId> = captures.iter().flatten().copied().collect();
+                self.captured.extend(outer.iter().copied());
+                self.capture_lists.insert(id, outer);
+            }
+            _ => {}
+        }
+    }
+
+    /// The block and the statement (or tail) of it that holds `id`.
+    fn statement_of(&self, id: HirId) -> (HirId, HirId) {
+        let mut at = id;
+        while let Some(&p) = self.parent.get(&at) {
+            if matches!(self.body.expr(p).kind, HirKind::Block { .. }) {
+                return (p, at);
+            }
+            at = p;
+        }
+        (at, at)
+    }
+
+    fn order(&self, id: HirId) -> u32 {
+        self.order[id.0 as usize]
+    }
+
+    /// The root of a place path: below fields, array elements and `Cow`
+    /// ops. `None` for a path through anything else.
+    fn root_of(&self, mut id: HirId) -> Option<HirId> {
+        loop {
+            match &self.body.expr(id).kind {
+                HirKind::Field { base, .. } | HirKind::Index { base, kind: IndexKind::Array, .. } => id = *base,
+                HirKind::Builtin { op: Builtin::Cow { .. }, args } if args.len() == 1 => id = args[0],
+                _ => return Some(id),
+            }
+        }
+    }
+
+    /// The innermost loop around `id` (a `Loop` or `ForIn` body).
+    fn loops_around(&self, id: HirId) -> Vec<HirId> {
+        let mut out = Vec::new();
+        let mut at = id;
+        while let Some(&p) = self.parent.get(&at) {
+            match &self.body.expr(p).kind {
+                HirKind::Loop { .. } => out.push(p),
+                HirKind::ForIn { body: b, .. } if *b == at => out.push(p),
+                _ => {}
+            }
+            at = p;
+        }
+        out
+    }
+
+    fn contains(&self, outer: HirId, inner: HirId) -> bool {
+        let (o, i) = (self.order(outer), self.order(inner));
+        o <= i && i < self.end[outer.0 as usize]
+    }
+
+    /// The evaluation-order span over which a value bound at `from` may
+    /// still be read through `l`: to its last read, widened to the whole of
+    /// any loop that reads it but does not hold the binding.
+    fn live_span(&self, l: LocalId, from: HirId) -> (u32, u32) {
+        let start = self.order(from);
+        let mut end = start;
+        for &r in self.reads.get(&l).map(Vec::as_slice).unwrap_or(&[]) {
+            end = end.max(self.order(r));
+            for lp in self.loops_around(r) {
+                if !self.contains(lp, from) {
+                    end = end.max(self.end[lp.0 as usize]);
+                }
+            }
+        }
+        (start, end)
+    }
+
+    /// Whether `read` (of `l`) is the last read of a local nothing else
+    /// names: no read follows, and no loop around it repeats it.
+    fn last_read(&self, l: LocalId, read: HirId) -> bool {
+        let at = self.order(read);
+        let reads = self.reads.get(&l).map(Vec::as_slice).unwrap_or(&[]);
+        if reads.iter().any(|&r| self.order(r) > at) {
+            return false;
+        }
+        let decl = self.inits.get(&l).and_then(|v| v.first()).copied();
+        self.loops_around(read).iter().all(|&lp| decl.is_some_and(|d| self.contains(lp, d)))
+    }
+}
+
+/// The argument `a` of a call, through `name: value`.
+fn named_value(body: &HirBody, a: HirId) -> HirId {
+    match &body.expr(a).kind {
+        HirKind::Named { value, .. } => *value,
+        _ => a,
+    }
+}
+
+/// What the callee of `callee(args)` does with each argument.
+fn arg_use(checker: &Checker, body: &HirBody, lookup: &CallLookup<'_>, callee: &Callee, args: &[HirId]) -> ArgUse {
+    let all = if args.len() >= 64 { u64::MAX } else { (1u64 << args.len()) - 1 };
+    let unknown = ArgUse { written: all, kept: all };
+    let positional = args.iter().all(|a| !matches!(body.expr(*a).kind, HirKind::Named { .. } | HirKind::Spread(_)));
+    let recv_vec = matches!(callee, Callee::Method { .. }) && args.first().is_some_and(|r| is_vec(body.expr(*r).ty.as_ref()));
+    if let Callee::Method { name } = callee
+        && recv_vec
+    {
+        let mut used = ArgUse::default();
+        if VEC_MUTATORS.contains(&name.as_str()) {
+            used.written |= 1;
+        }
+        match name.as_str() {
+            "push" => used.kept |= 1 << 1,
+            "insert" => used.kept |= 1 << 2,
+            _ => {}
+        }
+        if used.written != 0 || used.kept != 0 {
+            return used;
+        }
+    }
+    let Some(s) = lookup(callee, args) else {
+        // Structural reads of a `Vec` (`len`, `capacity`) keep nothing.
+        if recv_vec {
+            return ArgUse::default();
+        }
+        let _ = checker;
+        return unknown;
+    };
+    if !positional {
+        return ArgUse { written: if s.mutates != 0 { all } else { 0 }, kept: if s.escapes != 0 { all } else { 0 } };
+    }
+    from_summary(&s)
+}
+
+fn from_summary(s: &Summary) -> ArgUse {
+    ArgUse { written: s.mutates, kept: s.escapes | s.returns }
+}
+
+/// Where the rewrite puts ops.
+#[derive(Default)]
+struct Plan {
+    /// Values to share: (node, eager copy).
+    share: Vec<(HirId, bool)>,
+    /// Locals to share as a statement right after the node that binds
+    /// them (pattern bindings) or before a node (captures).
+    share_after: Vec<(HirId, LocalId)>,
+    share_before: Vec<((HirId, HirId), LocalId)>,
+    /// Write paths to make unique before their node.
+    unique: Vec<Write>,
+    /// Locals never shared and only ever given fresh objects.
+    fresh_locals: HashSet<LocalId>,
+    /// Parameters written in place for the caller.
+    inout: HashSet<LocalId>,
+}
+
+impl Plan {
+    fn is_empty(&self) -> bool {
+        self.share.is_empty() && self.share_after.is_empty() && self.share_before.is_empty() && self.unique.is_empty()
+    }
+
+    fn new(checker: &Checker, body: &HirBody, f: &Facts<'_>, mutates: u64) -> Self {
+        let mut plan = Plan::default();
+        let cow = |id: HirId| cow_ty(checker, body.expr(id).ty.as_ref());
+        let cow_local = |l: LocalId| cow_ty(checker, body.local(l).ty.as_ref());
+        // Parameters written in place for the caller: never copied as a
+        // whole here, so sharing one copies it eagerly instead.
+        let inout: HashSet<LocalId> = body
+            .params
+            .iter()
+            .enumerate()
+            .filter(|(i, l)| *i < 64 && mutates & (1 << i) != 0 && !f.reassigned.contains(l) && !f.captured.contains(l))
+            .map(|(_, l)| *l)
+            .collect();
+
+        // Bindings from a place: shared unless the binding is a read-only
+        // borrow (nothing writes through it, and nothing writes through its
+        // source's root while it lives).
+        let mut borrowed: HashSet<LocalId> = HashSet::new();
+        let place_root = |v: HirId| -> Option<HirId> {
+            match &body.expr(v).kind {
+                HirKind::Local(_) | HirKind::Field { .. } | HirKind::Index { .. } | HirKind::Global { .. } => f.root_of(v),
+                _ => None,
+            }
+        };
+        let needs_share = |l: LocalId, src_root: HirId, from: HirId| -> bool {
+            if f.written_roots.contains(&l) || f.captured.contains(&l) {
+                return true;
+            }
+            let root_local = match &body.expr(src_root).kind {
+                HirKind::Local(s) => *s,
+                // A static: any call may write it.
+                _ => return true,
+            };
+            let (start, end) = f.live_span(l, from);
+            f.writes.iter().any(|w| {
+                let o = f.order(w.at);
+                o >= start
+                    && o <= end
+                    && f.root_of(w.path).is_none_or(|r| match &body.expr(r).kind {
+                        HirKind::Local(x) => *x == root_local || aliases(f, body, *x, root_local),
+                        _ => true,
+                    })
+            })
+        };
+        for (&l, inits) in &f.inits {
+            if !cow_local(l) {
+                continue;
+            }
+            for &v in inits {
+                let Some(r) = place_root(v) else { continue };
+                if let HirKind::Local(m) = body.expr(v).kind
+                    && f.last_read(m, v)
+                    && owned(f, body, m, &inout)
+                {
+                    continue;
+                }
+                let from = f.parent.get(&v).copied().unwrap_or(v);
+                if needs_share(l, r, from) {
+                    plan.share_value(body, f, v, &inout);
+                } else {
+                    borrowed.insert(l);
+                }
+            }
+        }
+        for (&l, &(src, binder)) in &f.bound {
+            if !cow_local(l) {
+                continue;
+            }
+            let Some(r) = place_root(src) else {
+                // From a fresh value (a call's result): the payload was
+                // shared where it was stored.
+                continue;
+            };
+            if needs_share(l, r, binder) {
+                plan.share_after.push((binder, l));
+            } else {
+                borrowed.insert(l);
+            }
+        }
+
+        // Stores: the value now has a second name.
+        for i in 0..body.exprs.len() {
+            let id = HirId(i as u32);
+            if f.order[i] == u32::MAX {
+                continue;
+            }
+            match &body.expr(id).kind {
+                HirKind::Assign { place, value } if !matches!(body.expr(*place).kind, HirKind::Local(_)) => {
+                    plan.store(body, f, *value, &cow, &inout, &borrowed)
+                }
+                HirKind::Append { value, .. } => plan.store(body, f, *value, &cow, &inout, &borrowed),
+                HirKind::Make { kind, args } if !matches!(kind, MakeKind::Range { .. }) => {
+                    for &a in args {
+                        plan.store(body, f, named_value(body, a), &cow, &inout, &borrowed);
+                    }
+                }
+                HirKind::Call { args, .. } => {
+                    let kept = f.calls.get(&id).map_or(0, |u| u.kept);
+                    for (j, &a) in args.iter().enumerate().take(64) {
+                        if kept & (1 << j) != 0 {
+                            plan.store(body, f, named_value(body, a), &cow, &inout, &borrowed);
+                        }
+                    }
+                }
+                HirKind::Return(Some(v)) | HirKind::Yield { value: v, .. } | HirKind::Resume { value: Some(v), .. } => {
+                    plan.store(body, f, *v, &cow, &inout, &borrowed)
+                }
+                HirKind::Lambda { .. } | HirKind::Defer { .. } => {
+                    for &l in f.capture_lists.get(&id).map(Vec::as_slice).unwrap_or(&[]) {
+                        if cow_local(l) {
+                            plan.share_before.push((f.statement_of(id), l));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(root) = body.root {
+            for v in super::escape::result_exprs(body, root) {
+                if body.ret.is_some() {
+                    plan.store(body, f, v, &cow, &inout, &borrowed);
+                }
+            }
+        }
+
+        // Locals only ever given fresh objects and never shared need no
+        // unique before a write.
+        let shared_locals: HashSet<LocalId> = plan
+            .share
+            .iter()
+            .filter_map(|&(v, _)| match body.expr(v).kind {
+                HirKind::Local(l) => Some(l),
+                _ => None,
+            })
+            .chain(plan.share_before.iter().map(|&(_, l)| l))
+            .chain(plan.share_after.iter().map(|&(_, l)| l))
+            .collect();
+        let kept_locals: HashSet<LocalId> = f
+            .calls
+            .iter()
+            .flat_map(|(&c, u)| {
+                let HirKind::Call { args, .. } = &body.expr(c).kind else { unreachable!() };
+                args.iter()
+                    .enumerate()
+                    .take(64)
+                    .filter(move |(j, _)| u.kept & (1 << j) != 0)
+                    .filter_map(|(_, &a)| match body.expr(named_value(body, a)).kind {
+                        HirKind::Local(l) => Some(l),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let borrowed_from: HashSet<LocalId> = borrowed
+            .iter()
+            .flat_map(|b| f.inits.get(b).into_iter().flatten().chain(f.bound.get(b).map(|(s, _)| s)))
+            .filter_map(|&v| f.root_of(v))
+            .filter_map(|r| match body.expr(r).kind {
+                HirKind::Local(l) => Some(l),
+                _ => None,
+            })
+            .collect();
+        for (&l, inits) in &f.inits {
+            let local = body.local(l);
+            if matches!(local.kind, LocalKind::Param | LocalKind::Capture)
+                || f.bound.contains_key(&l)
+                || f.captured.contains(&l)
+                || shared_locals.contains(&l)
+                || kept_locals.contains(&l)
+                || borrowed_from.contains(&l)
+            {
+                continue;
+            }
+            if inits.iter().all(|&v| fresh_ctor(body, v)) {
+                plan.fresh_locals.insert(l);
+            }
+        }
+
+        // Writes: make each path unique top-down.
+        for &w in &f.writes {
+            if let Some(HirKind::Local(l)) = f.root_of(w.path).map(|r| &body.expr(r).kind)
+                && inout.contains(l)
+                && w.path == f.root_of(w.path).unwrap_or(w.path)
+            {
+                // The parameter itself, written in place for the caller.
+                continue;
+            }
+            plan.unique.push(w);
+        }
+        plan.inout = inout;
+        plan
+    }
+
+    fn share_value(&mut self, body: &HirBody, f: &Facts<'_>, v: HirId, inout: &HashSet<LocalId>) {
+        let eager = matches!(body.expr(v).kind, HirKind::Local(l) if inout.contains(&l));
+        let _ = f;
+        self.share.push((v, eager));
+    }
+
+    /// `v` is stored where it outlives this read: share it unless it is a
+    /// fresh value or the last read of a local that owns its object.
+    #[allow(clippy::too_many_arguments)]
+    fn store(&mut self, body: &HirBody, f: &Facts<'_>, v: HirId, cow: &dyn Fn(HirId) -> bool, inout: &HashSet<LocalId>, borrowed: &HashSet<LocalId>) {
+        let mut work = vec![v];
+        while let Some(at) = work.pop() {
+            match &body.expr(at).kind {
+                HirKind::Block { tail: Some(t), .. } => work.push(*t),
+                HirKind::If { then, els, .. } => work.extend(std::iter::once(*then).chain(*els)),
+                HirKind::Match { arms, .. } => work.extend(arms.iter().map(|a| a.body)),
+                HirKind::Local(l) if cow(at) => {
+                    if !borrowed.contains(l) && f.last_read(*l, at) && owned(f, body, *l, inout) {
+                        continue;
+                    }
+                    self.share_value(body, f, at, inout);
+                }
+                HirKind::Field { .. } | HirKind::Index { .. } | HirKind::Global { .. } if cow(at) => self.share_value(body, f, at, inout),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Whether `x` is bound from a place rooted at `root` (directly or
+/// through other such bindings).
+fn aliases(f: &Facts<'_>, body: &HirBody, x: LocalId, root: LocalId) -> bool {
+    let mut seen = HashSet::new();
+    let mut work = vec![x];
+    while let Some(l) = work.pop() {
+        if !seen.insert(l) {
+            continue;
+        }
+        if l == root {
+            return true;
+        }
+        let srcs = f.inits.get(&l).into_iter().flatten().chain(f.bound.get(&l).map(|(s, _)| s));
+        for &s in srcs {
+            if let Some(r) = f.root_of(s)
+                && let HirKind::Local(m) = body.expr(r).kind
+            {
+                work.push(m);
+            }
+        }
+    }
+    false
+}
+
+/// Whether local `l` owns its object: not a parameter or capture, and
+/// every value it is given is fresh or shared where it was read.
+fn owned(f: &Facts<'_>, body: &HirBody, l: LocalId, inout: &HashSet<LocalId>) -> bool {
+    let local = body.local(l);
+    if matches!(local.kind, LocalKind::Param | LocalKind::Capture) || inout.contains(&l) || f.captured.contains(&l) {
+        return false;
+    }
+    if f.bound.contains_key(&l) {
+        return false;
+    }
+    f.inits.get(&l).into_iter().flatten().all(|&v| !matches!(body.expr(v).kind, HirKind::Local(_) | HirKind::Field { .. } | HirKind::Index { .. } | HirKind::Global { .. }))
+}
+
+/// A value a constructor made just now: `new C(..)`, an array literal, an
+/// empty or sized `Vec`.
+fn fresh_ctor(body: &HirBody, v: HirId) -> bool {
+    match &body.expr(v).kind {
+        HirKind::Make { kind: MakeKind::Class(_) | MakeKind::Array, .. } => true,
+        HirKind::Call { callee: Callee::Named { name, .. }, .. } => {
+            matches!(name.as_str(), "Vec::new" | "Vec::with_capacity" | "Vec::from")
+        }
+        _ => false,
+    }
+}
+
+impl Plan {
+    fn apply(&self, out: &mut HirBody, checker: &Checker) {
+        let span_of = |b: &HirBody, id: HirId| b.expr(id).span;
+        // Write paths first, on the nodes as built: shares below wrap
+        // nodes in place, which a path must not look through.
+        for &w in &self.unique {
+            let stmts = self.unique_path(out, checker, w.path);
+            if !stmts.is_empty() {
+                prepend(out, w.at, stmts);
+            }
+        }
+        // Pattern-bound and captured locals: a share statement.
+        for &(binder, l) in &self.share_after {
+            let span = span_of(out, binder);
+            let stmt = share_local(out, l, span);
+            match out.expr(binder).kind.clone() {
+                HirKind::ForIn { pat, iterable, body: b, kind } => {
+                    let inner = relocate(out, b);
+                    out.exprs[b.0 as usize].kind = HirKind::Block { stmts: vec![stmt], tail: Some(inner) };
+                    out.exprs[b.0 as usize].node = None;
+                    let _ = (pat, iterable, kind);
+                }
+                HirKind::LetPat { .. } => {
+                    let inner = relocate(out, binder);
+                    let x = &mut out.exprs[binder.0 as usize];
+                    x.kind = HirKind::Block { stmts: vec![inner, stmt], tail: None };
+                    x.node = None;
+                }
+                // A `match` arm body.
+                _ => {
+                    let inner = relocate(out, binder);
+                    let x = &mut out.exprs[binder.0 as usize];
+                    x.kind = HirKind::Block { stmts: vec![stmt], tail: Some(inner) };
+                    x.node = None;
+                }
+            }
+        }
+        for &((block, at), l) in &self.share_before {
+            let span = span_of(out, at);
+            let stmt = share_local(out, l, span);
+            insert_before(out, block, at, stmt);
+        }
+        for &(v, eager) in &self.share {
+            let inner = relocate(out, v);
+            let x = &mut out.exprs[v.0 as usize];
+            x.kind = HirKind::Builtin { op: Builtin::Cow { unique: false }, args: vec![inner] };
+            x.node = None;
+            if eager {
+                let shared = relocate(out, v);
+                let x = &mut out.exprs[v.0 as usize];
+                x.kind = HirKind::Builtin { op: Builtin::Cow { unique: true }, args: vec![shared] };
+            }
+        }
+    }
+
+    /// The statements that make the objects on `path` writable, top-down,
+    /// writing each copy back where it was read.
+    fn unique_path(&self, out: &mut HirBody, checker: &Checker, path: HirId) -> Vec<HirId> {
+        // The chain from the root to `path`.
+        let mut chain = vec![path];
+        let mut at = path;
+        loop {
+            match &out.expr(at).kind {
+                HirKind::Field { base, .. } | HirKind::Index { base, kind: IndexKind::Array, .. } => {
+                    at = *base;
+                    chain.push(at);
+                }
+                _ => break,
+            }
+        }
+        chain.reverse();
+        let span = out.expr(path).span;
+        let mut stmts = Vec::new();
+        // An index that is not safe to evaluate twice is evaluated once,
+        // into a temporary, before the path.
+        for &step in &chain[1..] {
+            if let HirKind::Index { index, .. } = out.expr(step).kind.clone()
+                && !pure_index(out, index)
+            {
+                let t = temp(out, out.expr(index).ty.clone(), "$cowi");
+                let moved = relocate(out, index);
+                stmts.push(push(out, HirKind::Let { local: t, init: Some(moved) }, Some(ty::unit()), span));
+                let x = &mut out.exprs[index.0 as usize];
+                x.kind = HirKind::Local(t);
+                x.node = None;
+            }
+        }
+        // A root that is no place (a call's result) is a temporary.
+        let root = chain[0];
+        match &out.expr(root).kind {
+            HirKind::Local(l) => {
+                let l = *l;
+                let skip = self.fresh_locals.contains(&l) || self.inout.contains(&l) || !cow_ty(checker, out.local(l).ty.as_ref());
+                if !skip {
+                    stmts.push(unique_stmt(out, root, span));
+                }
+            }
+            HirKind::Global { .. } => {
+                if cow_ty(checker, out.expr(root).ty.as_ref()) {
+                    stmts.push(unique_stmt(out, root, span));
+                }
+            }
+            _ => {
+                let ty = out.expr(root).ty.clone();
+                let t = temp(out, ty.clone(), "$cowt");
+                let moved = relocate(out, root);
+                let init = if cow_ty(checker, ty.as_ref()) {
+                    push(out, HirKind::Builtin { op: Builtin::Cow { unique: true }, args: vec![moved] }, ty.clone(), span)
+                } else {
+                    moved
+                };
+                stmts.push(push(out, HirKind::Let { local: t, init: Some(init) }, Some(ty::unit()), span));
+                let x = &mut out.exprs[root.0 as usize];
+                x.kind = HirKind::Local(t);
+                x.node = None;
+            }
+        }
+        for &step in &chain[1..] {
+            if cow_ty(checker, out.expr(step).ty.as_ref()) {
+                stmts.push(unique_stmt(out, step, span));
+            }
+        }
+        stmts
+    }
+}
+
+/// `place = unique(place)` for a place made of locals, fields, elements
+/// and pure indexes.
+fn unique_stmt(out: &mut HirBody, place: HirId, span: Span) -> HirId {
+    let target = dup(out, place);
+    let read = dup(out, place);
+    let ty = out.expr(place).ty.clone();
+    let layout = out.expr(place).layout.clone();
+    let u = push(out, HirKind::Builtin { op: Builtin::Cow { unique: true }, args: vec![read] }, ty, span);
+    out.exprs[u.0 as usize].layout = layout;
+    push(out, HirKind::Assign { place: target, value: u }, Some(ty::unit()), span)
+}
+
+/// A copy of the subtree at `id` with new nodes (a place: locals, fields,
+/// elements, pure indexes).
+fn dup(out: &mut HirBody, id: HirId) -> HirId {
+    let mut e = out.expr(id).clone();
+    e.kind = match e.kind {
+        HirKind::Field { base, name } => HirKind::Field { base: dup(out, base), name },
+        HirKind::Index { base, index, kind } => HirKind::Index { base: dup(out, base), index: dup(out, index), kind },
+        HirKind::Bin { op, lhs, rhs } => HirKind::Bin { op, lhs: dup(out, lhs), rhs: dup(out, rhs) },
+        HirKind::Un { op, operand } => HirKind::Un { op, operand: dup(out, operand) },
+        HirKind::Cast { value } => HirKind::Cast { value: dup(out, value) },
+        k => k,
+    };
+    e.node = None;
+    e.flags = HirFlags::default();
+    let new = HirId(out.exprs.len() as u32);
+    out.exprs.push(e);
+    new
+}
+
+fn share_local(out: &mut HirBody, l: LocalId, span: Span) -> HirId {
+    let ty = out.local(l).ty.clone();
+    let read = push(out, HirKind::Local(l), ty.clone(), span);
+    push(out, HirKind::Builtin { op: Builtin::Cow { unique: false }, args: vec![read] }, ty, span)
+}
+
+/// Insert `stmt` into `block` before its statement or tail `at` (or
+/// before `at` itself when it is no block's).
+fn insert_before(out: &mut HirBody, block: HirId, at: HirId, stmt: HirId) {
+    if let HirKind::Block { stmts, tail } = &mut out.exprs[block.0 as usize].kind {
+        match stmts.iter().position(|s| *s == at) {
+            Some(i) => stmts.insert(i, stmt),
+            None if *tail == Some(at) => stmts.push(stmt),
+            None => {}
+        }
+        return;
+    }
+    prepend(out, at, vec![stmt]);
+}
+
+/// Run `stmts` before node `at`: `at` becomes `{ stmts; at }`.
+fn prepend(out: &mut HirBody, at: HirId, mut stmts: Vec<HirId>) {
+    let ty = out.expr(at).ty.clone();
+    let layout = out.expr(at).layout.clone();
+    let inner = relocate(out, at);
+    let unit = ty.as_ref().is_none_or(|t| *t == ty::unit());
+    let tail = if unit && matches!(out.expr(inner).kind, HirKind::Assign { .. } | HirKind::Append { .. }) {
+        stmts.push(inner);
+        None
+    } else {
+        Some(inner)
+    };
+    let x = &mut out.exprs[at.0 as usize];
+    x.kind = HirKind::Block { stmts, tail };
+    x.node = None;
+    x.layout = layout;
+}
+
+fn push(out: &mut HirBody, kind: HirKind, ty: Option<Ty>, span: Span) -> HirId {
+    let id = HirId(out.exprs.len() as u32);
+    out.exprs.push(HirExpr {
+        kind,
+        ty,
+        layout: crate::layout::Layout::Word,
+        span,
+        node: None,
+        flags: HirFlags::default(),
+    });
+    id
+}
+
+fn temp(out: &mut HirBody, ty: Option<Ty>, prefix: &str) -> LocalId {
+    let id = LocalId(out.locals.len() as u32);
+    out.locals.push(HirLocal {
+        name: format!("{prefix}{}", id.0),
+        ty,
+        kind: LocalKind::Temp,
+        captured: false,
+    });
+    id
+}
+
+/// Move node `id` to a new node and return it, so `id` can be rewritten
+/// while its parent still points at it.
+fn relocate(out: &mut HirBody, id: HirId) -> HirId {
+    let moved = out.exprs[id.0 as usize].clone();
+    let new = HirId(out.exprs.len() as u32);
+    out.exprs.push(moved);
+    new
+}
+
+#[allow(dead_code)]
+fn pat_locals(pat: &HirPat) -> Vec<LocalId> {
+    let mut out = Vec::new();
+    pat_binds(pat, &mut out);
+    out
+}

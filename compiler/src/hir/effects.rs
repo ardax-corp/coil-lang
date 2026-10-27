@@ -82,6 +82,8 @@ pub struct Summary {
 mod escape;
 #[path = "early_free.rs"]
 mod early_free;
+#[path = "cow.rs"]
+pub mod cow;
 
 /// Effects a write to an object can have that its owner hides.
 const OWNED_BITS: u16 = EffectFlags::HEAP_MUT | EffectFlags::RESIZE;
@@ -224,6 +226,14 @@ impl ProgramEffects {
     pub fn early_frees(&self, checker: &Checker, module_path: &str, module: &HirModule, body: &HirBody, host: &dyn Fn(HirId) -> Option<usize>) -> Option<HirBody> {
         let lookup = |callee: &Callee, args: &[HirId]| self.call_summary(checker, module_path, body, callee, args);
         early_free::rewrite(module, body, &lookup, host)
+    }
+
+    /// `body` with its copy-on-write ops ([`cow`]), when it needs any.
+    /// `mutates` is the body's own summary bits: the parameters it writes
+    /// in place for its caller.
+    pub fn cow_rewrite(&self, checker: &Checker, module_path: &str, module: &HirModule, body: &HirBody, mutates: u64) -> Option<HirBody> {
+        let lookup = |callee: &Callee, args: &[HirId]| self.call_summary(checker, module_path, body, callee, args);
+        cow::rewrite(checker, module, body, &lookup, mutates)
     }
 
     /// What a call in `body` may do, from the summaries recorded so far:
@@ -2103,7 +2113,7 @@ impl Cx<'_> {
                 Builtin::Declare | Builtin::Invoke | Builtin::Dload => {
                     self.note(w, id, EffectFlags::FFI | EffectFlags::RESIZE, || "calls foreign code".into())
                 }
-                Builtin::TypeOf | Builtin::Done | Builtin::Default | Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::Relayout | Builtin::FreeEarly { .. } => {}
+                Builtin::TypeOf | Builtin::Done | Builtin::Default | Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::Relayout | Builtin::FreeEarly { .. } | Builtin::Cow { .. } => {}
                 Builtin::Print => self.note(w, id, EffectFlags::WRITE, || "prints".into()),
                 // Runs a minor collection: no effect a caller can see.
                 Builtin::Region { .. } => self.note_hidden(w, id, EffectFlags::GC, || "has a `region`".into()),
