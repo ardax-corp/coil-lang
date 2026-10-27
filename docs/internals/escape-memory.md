@@ -60,7 +60,7 @@ Heap objects per run and GC safepoint time (instrumented build, best of 3):
 | 1b | Optional stated facts (`#[noescape(x)]`, `#[fresh]`), checked against the inferred summary (E0139) | done |
 | 2 | Free at scope end and after the call for non-escaping fresh objects; check mode, gc-stress | done |
 | 3 | Static uniqueness: free a string's old value when it is rebuilt in place, free fresh concatenation operands and variable-size match scrutinees; zero-copy `to_bytes`/`from_bytes`; enum SROA dropped | done |
-| 4 | Nursery for young objects | |
+| 4 | Copying nursery for young objects: write barrier, minor collections, pretenuring, held pins | done |
 | 5 | Opt-in checked `region` block | |
 | 6 | Re-measure; decide whether anything else is worth doing | |
 
@@ -316,8 +316,26 @@ Design (copying nursery, decided 2026-10-27):
   limited to the nursery.
 - **Reset.** A young chunk without pinned objects is reused whole: each
   dead object only has its payload dropped (a no-op for inline payloads)
-  and its header poisoned. A chunk with a pinned object is promoted in
-  place, and its dead slots go to the free list as the sweep would.
+  and its header poisoned. A chunk with a pinned object is *held*: the
+  pinned objects stay young where they are, later minors treat them as
+  roots and never move them, and only a major cycle frees them (its mark
+  sees every young object). The chunk is reused once a major empties it;
+  enough held chunks ask for a major. (Promoting such a chunk instead
+  left a 64 KiB chunk per stale stack word: result_heap_churn grew from
+  12 to 31 MB.)
+- **Early frees** of young objects (step 2) put the slot on a per-class
+  list that the bump allocator hands out first, so a nursery does not
+  undo early freeing's reuse.
+- **Pretenuring.** A minor where most of the nursery survived (a large
+  structure being built) copied for nothing: the next nursery's worth of
+  allocations goes old, twice as long for each such minor in a row (up to
+  32 nurseries), and the nursery is tried again after.
+- **Quiet barrier.** While no young object exists (right after a minor,
+  while pretenuring), a write cannot store one: the barrier logs the
+  object into a *quiet* set instead of the remembered set and stops
+  firing for it, and the set's objects are re-armed when the nursery
+  starts again. Without it gc_rebuild remembered every pretenured node
+  (900k entries per minor).
 - **Major collections** stay mark-and-sweep. A minor collection runs first,
   so the major mark sees an empty nursery, and the sweep skips young
   chunks.
@@ -325,4 +343,35 @@ Design (copying nursery, decided 2026-10-27):
   active (a nested `execute`), under the debugger, and with
   `COIL_NURSERY=0`.
 - **Not in the nursery:** objects of a type with `drop`. A young object
-  that becomes finalizable is pinned.
+  that becomes finalizable later (an enum tagged after it is built)
+  survives every minor as a root, so its `drop` runs from a major.
+- The slab's address-to-chunk cache went from 8 to 64 entries: young
+  chunks spread the working set, and 8 entries missed on hashmap and
+  b_coll (+13% and +10% instructions). With 64 both configurations miss
+  almost never.
+
+### Measured (step 4)
+
+`COIL_NURSERY=0` against `=1`, early freeing on in both, median of 7 runs,
+2026-10-27. Instructions are callgrind totals (deterministic); wall time
+on this machine moves about 5% between runs.
+
+| bench | instructions | time | peak RSS |
+|---|---|---|---|
+| gc_shrink | | 516 → 383 ms | 66 → 43 MB |
+| result_heap_churn | | 1066 → 1003 ms | 12 → 12 MB |
+| b_csv (1 MB) | | 603 → 598 ms | 22 → 24 MB |
+| b_json | | 751 → 802 ms | 24 → 25 MB |
+| strings | | 137 → 136 ms | 38 → 38 MB |
+| b_coll | 45.09 → 44.98 G | 4089 → 4178 ms | 147 → 123 MB |
+| binary_trees 16 | 17.27 → 17.36 G | 1597 → 1714 ms | 17 → 20 MB |
+| hashmap | 4.73 → 4.84 G | 455 → 487 ms | 25 → 31 MB |
+| gc_rebuild | 6.55 → 7.10 G | 595 → 664 ms | 47 → 57 MB |
+
+The nursery pays where step 3 left per-object reclaiming: gc_shrink is
+26% faster with a third less memory. Where early freeing already reclaims
+nearly everything (binary_trees, gc_rebuild) or little garbage exists
+(hashmap, b_coll), it costs up to 8% in instructions: gc_rebuild copies
+every node of the list it is building once before pretenuring kicks in,
+and binary_trees and hashmap run equal instructions but touch more
+memory. Whether it stays on by default is decided with step 6.
