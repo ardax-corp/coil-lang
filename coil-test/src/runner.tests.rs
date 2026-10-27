@@ -25,6 +25,8 @@ fn options(root: &Path, fail_fast: bool) -> TestOptions {
         debug_level: None,
         contracts: None,
         fold_calls: None,
+            early_free: None,
+            nursery: None,
         contract_runs: 0,
         grants: HostGrants::deny_all(),
         extra_roots: Vec::new(),

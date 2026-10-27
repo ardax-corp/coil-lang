@@ -1342,7 +1342,7 @@ impl Heap {
     }
 
     /// Allocate instances, enums, boxes, tuples and arrays in the nursery
-    /// (the VM turns it on; `COIL_NURSERY=0` keeps it off).
+    /// (the VM turns it on; `--nursery off` keeps it off).
     pub fn set_nursery(&mut self, on: bool) {
         self.nursery = on;
     }

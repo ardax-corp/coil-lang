@@ -1046,7 +1046,7 @@ impl Compiler {
         // rewritten body plans (`feature/escape-memory` step 2). Other
         // modules splice the body as it was before.
         let plan = match plan {
-            Ok(emit) if self.opt_options.escape_analysis && self.opt_options.early_free && !self.debugger_attached && !hir.is_coro => {
+            Ok(emit) if self.opt_options.early_free && !self.debugger_attached && !hir.is_coro => {
                 let module_path = self.checker.current_module_name().to_string();
                 let hosts: HashMap<u32, usize> = emit
                     .plan

@@ -33,6 +33,8 @@ pub struct DissectArgs {
     pub contracts: Option<compiler::ContractLevel>,
     /// `--fold-calls on|off`; `None` keeps the pipeline default.
     pub fold_calls: Option<bool>,
+    /// `--early-free`; `None` follows the opt level.
+    pub early_free: Option<compiler::EarlyFree>,
     pub opt_stats: bool,
     pub opt_stats_json: bool,
     /// Compile `test("…") { … }` cases too (`__zs_test_N`), like `coil test`.
@@ -91,6 +93,9 @@ pub fn cmd_dissect(config: ReportConfig, args: DissectArgs) {
     }
     if let Some(on) = args.fold_calls {
         pipeline.set_call_fold(on);
+    }
+    if let Some(mode) = args.early_free {
+        pipeline.set_early_free(mode.compiles());
     }
     if args.opt_stats || args.opt_stats_json {
         pipeline.set_collect_opt_stats(true);
