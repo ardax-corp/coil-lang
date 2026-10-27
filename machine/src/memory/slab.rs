@@ -320,6 +320,11 @@ pub struct SlotCursor {
     /// Next slot address to return (descending).
     next: u64,
     slot_size: u64,
+    /// `(slot size, align)` class of the current chunk.
+    class: (u32, u32),
+    /// Index + 1 of that class's free list in `Slab::free` once a slot of
+    /// this chunk was freed (classes are only ever appended); 0 before.
+    free_class: usize,
 }
 
 impl Slab {
@@ -393,6 +398,8 @@ impl Slab {
             }
             let top = first + (slots - 1) * size;
             cur.slot_size = size;
+            cur.class = (c.meta.slot_size, c.meta.slot_align);
+            cur.free_class = 0;
             cur.remaining = slots - 1;
             cur.next = top.wrapping_sub(size);
             return Some(top);
@@ -456,6 +463,25 @@ impl Slab {
             return;
         };
         let key = (meta.slot_size, meta.slot_align);
+        self.free_in_class(key, ptr);
+    }
+
+    /// [`Self::free`] of a slot the sweep walk just returned: the cursor
+    /// already knows its class, so no chunk lookup.
+    pub fn free_at_cursor(&mut self, cur: &mut SlotCursor, ptr: NonNull<u8>) {
+        debug_assert_eq!(
+            self.chunk_for(ptr.as_ptr() as u64).map(|(_, m)| (m.slot_size, m.slot_align)),
+            Some(cur.class)
+        );
+        if cur.free_class == 0 {
+            self.free_in_class(cur.class, ptr);
+            cur.free_class = 1 + self.free.iter().position(|c| c.key == cur.class).expect("class just used");
+            return;
+        }
+        self.free[cur.free_class - 1].slots.push(ptr);
+    }
+
+    fn free_in_class(&mut self, key: (u32, u32), ptr: NonNull<u8>) {
         if let Some(class) = self.free.iter_mut().find(|c| c.key == key) {
             class.slots.push(ptr);
             return;

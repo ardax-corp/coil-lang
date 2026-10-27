@@ -942,16 +942,16 @@ impl Heap {
                 break obj;
             }
         };
-        self.gc_sweep_cursor = Some(cur);
         // A `fresh` object is kept whatever its mark (it may postdate the
         // mark phase) — but still unmarked: a stale mark would make the next
         // cycle skip tracing its children.
-        let fresh = obj.take_fresh();
-        if obj.is_marked() {
-            obj.unmark();
-        } else if !fresh {
-            unsafe { self.dealloc(obj) };
+        // SAFETY: a live slot starts with its header.
+        let header = unsafe { &*(obj.addr() as *const GcHeader) };
+        let fresh = header.fresh.replace(false);
+        if !header.marked.replace(false) && !fresh {
+            unsafe { self.dealloc_swept(obj, &mut cur) };
         }
+        self.gc_sweep_cursor = Some(cur);
     }
 
     fn finish_sweep_cycle(&mut self) {
@@ -1215,6 +1215,17 @@ impl Heap {
         let ptr = unsafe { NonNull::new_unchecked(object.addr() as *mut u8) };
         unsafe { object.recycle_payload() };
         self.slab.free(ptr);
+    }
+
+    /// [`Self::dealloc`] of the slot the sweep walk is at.
+    unsafe fn dealloc_swept(&mut self, object: Object, cur: &mut super::slab::SlotCursor) {
+        let size = object.size();
+        self.alloc_bytes -= size;
+        debug_assert!(self.live_count > 0);
+        self.live_count -= 1;
+        let ptr = unsafe { NonNull::new_unchecked(object.addr() as *mut u8) };
+        unsafe { object.recycle_payload() };
+        self.slab.free_at_cursor(cur, ptr);
     }
 
     pub fn trace(&mut self, values: &[u64]) {
@@ -2002,12 +2013,6 @@ impl Object {
             | Self::Mutex(_)
             | Self::RwLock(_) => {}
         }
-    }
-
-    /// Clear the header's `fresh` bit (allocated during a sweep), returning
-    /// whether it was set. Every kind shares the `repr(C)` header layout.
-    fn take_fresh(&self) -> bool {
-        unsafe { &*(self.addr() as *const GcHeader) }.fresh.replace(false)
     }
 
     #[must_use]

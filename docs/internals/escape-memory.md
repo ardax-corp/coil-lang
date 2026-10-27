@@ -59,7 +59,7 @@ Heap objects per run and GC safepoint time (instrumented build, best of 3):
 | 1 | Escape summaries: per function, which parameters may escape and whether the result is fresh; whole-program fixed point next to `ProgramEffects`; shown by `coil dissect --effects` | done |
 | 1b | Optional stated facts (`#[noescape(x)]`, `#[fresh]`), checked against the inferred summary (E0139) | done |
 | 2 | Free at scope end and after the call for non-escaping fresh objects; check mode, gc-stress | done |
-| 3 | Static uniqueness: free a string's old value when it is rebuilt in place, free fresh concatenation operands; zero-copy `to_bytes`/`from_bytes` and enum SROA measured and dropped | done |
+| 3 | Static uniqueness: free a string's old value when it is rebuilt in place, free fresh concatenation operands and variable-size match scrutinees; zero-copy `to_bytes`/`from_bytes`; enum SROA dropped | done |
 | 4 | Nursery for young objects | |
 | 5 | Opt-in checked `region` block | |
 | 6 | Re-measure; decide whether anything else is worth doing | |
