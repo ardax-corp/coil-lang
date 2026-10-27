@@ -1369,8 +1369,12 @@ mod tests {
             Some(common::TTY_ENABLE_VT_NATIVE)
         );
         assert_eq!(
-            names.last().map(String::as_str),
+            names.get(174).map(String::as_str),
             Some(common::FROM_BYTES_TAKE_NATIVE)
+        );
+        assert_eq!(
+            names.last().map(String::as_str),
+            Some(common::GC_REGION_EXIT_NATIVE)
         );
         assert_eq!(attach, 119);
     }
@@ -1706,6 +1710,14 @@ mod tests {
             registrations.get(end + 38).map(|(n, _)| n.as_str()),
             Some(common::FROM_BYTES_TAKE_NATIVE)
         );
-        assert_eq!(registrations.len(), end + 39);
+        assert_eq!(
+            registrations.get(end + 39).map(|(n, _)| n.as_str()),
+            Some(common::GC_REGION_ENTER_NATIVE)
+        );
+        assert_eq!(
+            registrations.get(end + 40).map(|(n, _)| n.as_str()),
+            Some(common::GC_REGION_EXIT_NATIVE)
+        );
+        assert_eq!(registrations.len(), end + 41);
     }
 }
