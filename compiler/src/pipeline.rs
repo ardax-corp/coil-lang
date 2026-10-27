@@ -1494,7 +1494,11 @@ impl Pipeline {
             compiler.set_source_text(cached.source());
             let ast = cached.ast_mut().expect("parsed");
             let bytecode = compiler.compile_prepared_module(namespace.as_str(), ast);
-            self.program_files.insert(compiler.program_seq(), file.clone());
+            let seq = compiler.program_seq();
+            if !compiler.may_clone_from(seq) {
+                cached.release_tree();
+            }
+            self.program_files.insert(seq, file.clone());
             self.emit_foreign_clones();
             bytecode
         };
@@ -2072,6 +2076,10 @@ impl Pipeline {
         self.discover_all();
         self.expand_user_macros();
         self.compile_discovered_modules();
+        // Every module is compiled, foreign clones included: nothing past
+        // this reads a tree, and finalize peaks on top of them.
+        self.ast_cache.release_asts();
+        release_free_heap();
 
         if self.failed || self.had_errors() || !self.check_capabilities() {
             return Err(CompileFail);
@@ -2466,6 +2474,21 @@ impl Pipeline {
             program.static_slot_count,
             debug,
         ))
+    }
+}
+
+/// Hand the allocator's free pages back to the OS. glibc keeps a phase's
+/// freed small blocks mapped, so the next phase's peak would stack on them.
+pub(crate) fn release_free_heap() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        unsafe extern "C" {
+            fn malloc_trim(pad: usize) -> i32;
+        }
+        // SAFETY: glibc's `malloc_trim` only releases free memory.
+        unsafe {
+            malloc_trim(0);
+        }
     }
 }
 
