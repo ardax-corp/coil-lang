@@ -1290,6 +1290,20 @@ pub const HOST_NATIVES: &[HostNative] = &[
         effects: TEXT,
         caps: NO_CAP,
     },
+    HostNative {
+        name: "gc_region_enter",
+        arity: 0,
+        id: 175,
+        effects: GC_R,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "gc_region_exit",
+        arity: 0,
+        id: 176,
+        effects: GC_R,
+        caps: NO_CAP,
+    },
 ];
 
 /// First packed-LA HostInvoke (`packed_dot`).
@@ -1398,6 +1412,13 @@ pub const TTY_ENABLE_VT_NATIVE: &str = "tty_enable_vt";
 /// compiler swaps it in for `from_bytes`.
 pub const FROM_BYTES_TAKE_ID: u16 = 174;
 pub const FROM_BYTES_TAKE_NATIVE: &str = "from_bytes_take";
+/// HostInvoke ids around a `region { ... }` block (escape step 5, archive
+/// 6.2): enter starts a fresh nursery for the block, exit collects it.
+/// Never named in source; the compiler emits them for `region`.
+pub const GC_REGION_ENTER_ID: u16 = 175;
+pub const GC_REGION_ENTER_NATIVE: &str = "gc_region_enter";
+pub const GC_REGION_EXIT_ID: u16 = 176;
+pub const GC_REGION_EXIT_NATIVE: &str = "gc_region_exit";
 
 pub const STREAM_ATTACH_NATIVE: &str = "stream_attach";
 pub const STREAM_PARK_NATIVE: &str = "stream_park";
@@ -1445,7 +1466,9 @@ pub const GC_COLLECT_NATIVE: &str = "gc_collect";
 pub const GC_REGISTER_FINALIZER_NATIVE: &str = "gc_register_finalizer";
 
 const _: () = {
-    assert!(HOST_NATIVES.len() == 175);
+    assert!(HOST_NATIVES.len() == 177);
+    assert!(HOST_NATIVES[GC_REGION_ENTER_ID as usize].id == GC_REGION_ENTER_ID);
+    assert!(HOST_NATIVES[GC_REGION_EXIT_ID as usize].id == GC_REGION_EXIT_ID);
     assert!(HOST_NATIVES[FROM_BYTES_TAKE_ID as usize].id == FROM_BYTES_TAKE_ID);
     assert!(HOST_NATIVES[TTY_IS_TTY_ID as usize].id == TTY_IS_TTY_ID);
     assert!(HOST_NATIVES[TTY_ENABLE_VT_ID as usize].id == TTY_ENABLE_VT_ID);

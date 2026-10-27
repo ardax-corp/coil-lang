@@ -669,6 +669,8 @@ impl<'pratt> Pratt<'pratt> {
                 keyword!("comptime")
                     .ignore_then(self.brace_body(stmt.clone(), expr.clone()))
                     .map_with(|body, e| (e.span(), Box::new(Expression::ComptimeBlock(body)))),
+                // Contextual `region { … }`; any other `region` is a name.
+                self.region_block(stmt.clone(), expr.clone()),
                 // Anonymous `fn (…)` before `ident` so `fn` stays a keyword.
                 self.lambda_atom(expr.clone(), stmt),
                 self.ident(),
@@ -1574,6 +1576,37 @@ impl<'pratt> Pratt<'pratt> {
     ///
     /// The template is kept as text with `${expr}` / `$(expr) sep *` holes.
     /// Braces must balance; holes inside string literals are plain text.
+    /// `region { … }`: a block whose first item is [`Expression::RegionMark`].
+    /// `region` is contextual: followed by anything but `{` it is a name.
+    fn region_block<
+        S: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+        E: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+    >(
+        &self,
+        stmt: S,
+        expr: E,
+    ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
+    {
+        text::ident()
+            .filter(|w: &&str| *w == "region")
+            .map_with(|_, e| e.span())
+            .padded_by(trivia())
+            .then(self.brace_body(stmt, expr))
+            .map_with(|(kw, (span, body)), e| {
+                let mut body = *body;
+                if let Expression::Block(items) = &mut body {
+                    items.insert(0, (kw, Box::new(Expression::RegionMark)));
+                }
+                let _ = span;
+                (e.span(), Box::new(body))
+            })
+            .labelled("region")
+    }
+
     fn quote_atom<
         T: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
             + Clone
@@ -2244,6 +2277,10 @@ impl<'pratt> Pratt<'pratt> {
                 // `brace_body` uses that to turn a trailing one into the
                 // body's value.
                 self.match_expr(expr.clone(), stmt.clone())
+                    .then_ignore(choice((op!("."), op!("?"), op!(";"))).not())
+                    .map(|m| (m.0, Box::new(Expression::ExprStatement(m)))),
+                // A `region { … }` statement ends at its `}` too.
+                self.region_block(stmt.clone(), expr.clone())
                     .then_ignore(choice((op!("."), op!("?"), op!(";"))).not())
                     .map(|m| (m.0, Box::new(Expression::ExprStatement(m)))),
                 self.expr_statement(expr.clone()),

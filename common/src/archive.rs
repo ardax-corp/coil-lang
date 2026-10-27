@@ -173,6 +173,8 @@ pub const ARCHIVE_MAJOR: u16 = 6;
 /// 1 — `FreeEarly`: free an object the compiler proved dead (escape
 ///     analysis), and HostInvoke `from_bytes_take` (id 174). Older VMs
 ///     know neither.
+/// 2 — HostInvoke `gc_region_enter` / `gc_region_exit` (ids 175, 176)
+///     around a `region` block. Older VMs do not know them.
 ///
 /// Major 5 / minor 0: builtin error regrouping. `IoError` drops
 /// `Certificate` / `Handshake` / `NotATerminal` for `Protocol` (tag 10);
@@ -185,7 +187,7 @@ pub const ARCHIVE_MAJOR: u16 = 6;
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.
-pub const ARCHIVE_MINOR: u16 = 1;
+pub const ARCHIVE_MINOR: u16 = 2;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -1262,9 +1264,9 @@ mod tests {
     #[test]
     fn archive_version_matches_current_abi() {
         assert_eq!(ARCHIVE_MAJOR, 6);
-        assert_eq!(ARCHIVE_MINOR, 1);
-        assert_eq!(ARCHIVE_VERSION, pack_archive_version(6, 1));
-        assert_eq!(format_archive_version(ARCHIVE_VERSION), "6.1");
+        assert_eq!(ARCHIVE_MINOR, 2);
+        assert_eq!(ARCHIVE_VERSION, pack_archive_version(6, 2));
+        assert_eq!(format_archive_version(ARCHIVE_VERSION), "6.2");
     }
 
     #[test]

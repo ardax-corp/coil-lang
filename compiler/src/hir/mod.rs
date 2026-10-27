@@ -378,6 +378,9 @@ pub enum Builtin {
     /// (the `FreeEarly` instruction; `deep`: and everything it reaches). Added after
     /// the HIR optimizer by the early-free rewrite only.
     FreeEarly { deep: bool },
+    /// Enter (`true`) or leave a `region { … }` block (escape step 5): the
+    /// `gc_region_enter` / `gc_region_exit` HostInvoke. No arguments.
+    Region { enter: bool },
 }
 
 #[derive(Debug, Clone, PartialEq)]

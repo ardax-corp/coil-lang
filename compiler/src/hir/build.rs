@@ -1603,6 +1603,11 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
     }
 
     fn block(&mut self, b: &mut BodyBuilder, node: &Output<'_>, items: &[Output<'_>], scoped: bool) -> HirId {
+        if let Some((first, rest)) = items.split_first()
+            && matches!(first.1.as_ref(), Expression::RegionMark)
+        {
+            return self.region(b, node, rest);
+        }
         if scoped {
             b.scopes.push(HashMap::new());
         }
@@ -1620,6 +1625,66 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             Some(_) => self.pop_tail(b, &mut stmts),
         };
         self.emit(b, node, HirKind::Block { stmts, tail })
+    }
+
+    /// `region { items }`: enter, the block, leave; and leave before every
+    /// `return`, and every `break` / `continue` of a loop outside it. The
+    /// block's value is kept in a temporary across the leave.
+    fn region(&mut self, b: &mut BodyBuilder, node: &Output<'_>, items: &[Output<'_>]) -> HirId {
+        let span = span_of(node);
+        let unit = Some(coil_ty::unit());
+        let mark = |this: &Self, b: &mut BodyBuilder, enter: bool| {
+            this.synth(b, span, HirKind::Builtin { op: Builtin::Region { enter }, args: Vec::new() }, Some(coil_ty::unit()))
+        };
+        let inner = self.block(b, node, items, true);
+        // Leave before each jump out of the block.
+        let mut exits = Vec::new();
+        let mut work = vec![(inner, false)];
+        while let Some((at, in_loop)) = work.pop() {
+            match &b.body.expr(at).kind {
+                HirKind::Return(_) => exits.push(at),
+                HirKind::Break | HirKind::Continue if !in_loop => exits.push(at),
+                HirKind::Loop { body } => work.push((*body, true)),
+                HirKind::ForIn { iterable, body, .. } => work.extend([(*iterable, in_loop), (*body, true)]),
+                _ => work.extend(super::lower::children(&b.body, at).into_iter().map(|k| (k, in_loop))),
+            }
+        }
+        for at in exits {
+            let jump = b.body.expr(at).clone();
+            let mut stmts = Vec::new();
+            let kind = match jump.kind {
+                HirKind::Return(Some(v)) => {
+                    let ty = b.body.ret.clone();
+                    let t = b.temp("<region>", ty.clone());
+                    stmts.push(self.synth(b, span, HirKind::Let { local: t, init: Some(v) }, unit.clone()));
+                    let read = self.synth(b, span, HirKind::Local(t), ty);
+                    HirKind::Return(Some(read))
+                }
+                other => other,
+            };
+            stmts.push(mark(self, b, false));
+            let moved = b.push(kind, jump.ty.clone(), jump.span, jump.node);
+            let x = &mut b.body.exprs[at.0 as usize];
+            x.kind = HirKind::Block { stmts, tail: Some(moved) };
+            x.node = None;
+        }
+        let enter = mark(self, b, true);
+        let ty = b.body.expr(inner).ty.clone();
+        let is_unit = |t: &Ty| match strip_readonly(t) {
+            Ty::Con(n) => n == coil_ty::UNIT,
+            Ty::Tuple(items) => items.is_empty(),
+            _ => false,
+        };
+        // A block that only jumps out (`never`) has no value to keep.
+        if ty.as_ref().is_none_or(|t| is_unit(t) || matches!(strip_readonly(t), Ty::Never)) {
+            let exit = mark(self, b, false);
+            return self.synth(b, span, HirKind::Block { stmts: vec![enter, inner, exit], tail: None }, unit);
+        }
+        let t = b.temp("<region>", ty.clone());
+        let keep = self.synth(b, span, HirKind::Let { local: t, init: Some(inner) }, unit.clone());
+        let exit = mark(self, b, false);
+        let read = self.synth(b, span, HirKind::Local(t), ty.clone());
+        self.synth(b, span, HirKind::Block { stmts: vec![enter, keep, exit], tail: Some(read) }, ty)
     }
 
     fn fragment(&mut self, b: &mut BodyBuilder, node: &Output<'_>, items: &[Output<'_>]) -> HirId {

@@ -501,6 +501,171 @@ impl<'c, 'a> Escape<'c, 'a> {
     }
 }
 
+/// A way an object made inside a `region { … }` block leaves it (E0140).
+pub(super) struct RegionLeak {
+    /// The region block.
+    pub(super) region: crate::hir::Span,
+    /// The node the object leaves by.
+    pub(super) at: crate::hir::Span,
+    pub(super) how: String,
+}
+
+/// The objects made inside each `region { … }` block of `body` that can
+/// leave it: assigned to a local declared outside, stored into an object
+/// from outside or a static, passed where the callee keeps it, captured by
+/// a `defer`, yielded, or handed out as the block's value. A `return` (and
+/// `?`) out of a region may take an object along: the minor collection at
+/// the region's exit copies it. Callees the analysis cannot see are not
+/// errors either; the runtime keeps whatever they keep.
+pub(super) fn region_leaks(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>) -> Vec<RegionLeak> {
+    // A region lowers to `Block { [enter, inner | let t = inner, exit] }`.
+    let regions: Vec<(crate::hir::Span, HirId, bool)> = body
+        .exprs
+        .iter()
+        .filter_map(|x| match &x.kind {
+            HirKind::Block { stmts, .. }
+                if stmts.len() == 3 && matches!(body.expr(stmts[0]).kind, HirKind::Builtin { op: Builtin::Region { enter: true }, .. }) =>
+            {
+                match body.expr(stmts[1]).kind {
+                    HirKind::Let { init: Some(inner), .. } => Some((x.span, inner, true)),
+                    _ => Some((x.span, stmts[1], false)),
+                }
+            }
+            _ => None,
+        })
+        .collect();
+    if regions.is_empty() {
+        return Vec::new();
+    }
+    let mut e = Escape::new(module, body, lookup);
+    e.solve_locals();
+    for i in 0..body.exprs.len() {
+        e.src(HirId(i as u32));
+    }
+    let mut out = Vec::new();
+    for (region, inner, valued) in regions {
+        let mut inside = std::collections::HashSet::new();
+        let mut work = vec![inner];
+        while let Some(at) = work.pop() {
+            if inside.insert(at) {
+                work.extend(crate::hir::lower::children(body, at));
+            }
+        }
+        let mut declared = std::collections::HashSet::new();
+        for &at in &inside {
+            match &body.expr(at).kind {
+                HirKind::Let { local, .. } => {
+                    declared.insert(*local);
+                }
+                HirKind::LetPat { pat, .. } | HirKind::ForIn { pat, .. } => {
+                    let mut binds = Vec::new();
+                    pat_binds(pat, &mut binds);
+                    declared.extend(binds);
+                }
+                HirKind::Match { arms, .. } => {
+                    for arm in arms {
+                        let mut binds = Vec::new();
+                        pat_binds(&arm.pat, &mut binds);
+                        declared.extend(binds);
+                    }
+                }
+                _ => {}
+            }
+        }
+        // The region's own sites; the last bit is shared, so it never counts.
+        let made = e
+            .sites
+            .iter()
+            .filter(|(id, bit)| **bit < SITE_BITS - 1 && inside.contains(id))
+            .fold(0u64, |m, (_, bit)| m | (1 << bit));
+        if made == 0 {
+            continue;
+        }
+        let leaks = |e: &mut Escape<'_, '_>, value: HirId| {
+            let s = e.src(value);
+            e.close(s).sites & made != 0
+        };
+        // Whether `base` may reach anything but this region's objects.
+        let outside = |e: &mut Escape<'_, '_>, base: HirId| {
+            let b = e.src(base);
+            b.params != 0 || b.other || b.sites & !made != 0
+        };
+        let mut push = |at: HirId, how: String| out.push(RegionLeak { region, at: body.expr(at).span, how });
+        let mut ids: Vec<HirId> = inside.iter().copied().collect();
+        ids.sort_by_key(|id| id.0);
+        for id in ids {
+            match &body.expr(id).kind {
+                HirKind::Assign { place, value } => match &body.expr(*place).kind {
+                    HirKind::Local(l) if declared.contains(l) => {}
+                    HirKind::Local(l) => {
+                        if leaks(&mut e, *value) {
+                            push(id, format!("is assigned to `{}`, declared outside the region", body.local(*l).name));
+                        }
+                    }
+                    HirKind::Field { base, .. } | HirKind::Index { base, .. } => {
+                        if outside(&mut e, *base) && leaks(&mut e, *value) {
+                            push(id, "is stored into an object from outside the region".into());
+                        }
+                    }
+                    _ => {
+                        if leaks(&mut e, *value) {
+                            push(id, "is stored into a static".into());
+                        }
+                    }
+                },
+                HirKind::Append { base, value } => {
+                    if outside(&mut e, *base) && leaks(&mut e, *value) {
+                        push(id, "is appended to an object from outside the region".into());
+                    }
+                }
+                HirKind::Yield { value, .. } | HirKind::Resume { value: Some(value), .. } => {
+                    if leaks(&mut e, *value) {
+                        push(id, "is yielded".into());
+                    }
+                }
+                HirKind::Defer { captures, .. } => {
+                    for l in captures.iter().flatten() {
+                        let s = e.local(*l);
+                        if e.close(s).sites & made != 0 {
+                            push(id, format!("is captured by a `defer` (through `{}`)", body.local(*l).name));
+                        }
+                    }
+                }
+                HirKind::Call { callee, args } => {
+                    if let Callee::Method { name } = callee
+                        && VEC_MUTATORS.contains(&name.as_str())
+                        && args.first().is_some_and(|r| is_vec(body.expr(*r).ty.as_ref()))
+                    {
+                        if outside(&mut e, args[0]) && args[1..].iter().any(|a| leaks(&mut e, *a)) {
+                            push(id, format!("is added (`{name}`) to a vector from outside the region"));
+                        }
+                        continue;
+                    }
+                    let Some(s) = e.callee(id, callee, args) else { continue };
+                    for (j, a) in args.iter().enumerate() {
+                        if j < 64 && s.escapes & (1 << j) != 0 && leaks(&mut e, *a) {
+                            let name = match callee {
+                                Callee::Named { name, .. } | Callee::Method { name } => name.rsplit("::").next().unwrap_or(name).to_string(),
+                                Callee::Value(_) => "a function value".to_string(),
+                            };
+                            push(id, format!("is passed to `{name}`, which keeps it"));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if valued && leaks(&mut e, inner) {
+            let tail = match body.expr(inner).kind {
+                HirKind::Block { tail: Some(t), .. } => t,
+                _ => inner,
+            };
+            push(tail, "is the region's value".into());
+        }
+    }
+    out
+}
+
 /// Host natives that allocate their result and keep nothing they are
 /// passed. Early freeing frees what these return, so each is checked
 /// against the VM: `to_bytes`, `from_bytes` and `vec_with_capacity`

@@ -8521,6 +8521,7 @@ impl Compiler {
         match &hir.expr(id).kind {
             HirKind::Clear(_) => Ok(()),
             // An early free reads a one-word object reference.
+            HirKind::Builtin { op: Builtin::Region { .. }, .. } => Ok(()),
             HirKind::Builtin { op: Builtin::FreeEarly { .. }, args } => match self.hir_natural(hir, emit, args[0]) {
                 Some(want @ Rep::Word(_)) => self.hir_check_value(hir, emit, args[0], &want),
                 _ => Err("free-shape"),

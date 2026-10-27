@@ -3067,6 +3067,11 @@ impl Walk<'_> {
                 };
                 self.value(*local)
             }
+            // A region mark: a host call with no operands.
+            HirKind::Builtin {
+                op: Builtin::Region { .. },
+                ..
+            } => Ok(()),
             // `panic msg`: the message, then `Panic`.
             HirKind::Builtin {
                 op: Builtin::Panic,

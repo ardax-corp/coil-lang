@@ -61,7 +61,7 @@ Heap objects per run and GC safepoint time (instrumented build, best of 3):
 | 2 | Free at scope end and after the call for non-escaping fresh objects; check mode, gc-stress | done |
 | 3 | Static uniqueness: free a string's old value when it is rebuilt in place, free fresh concatenation operands and variable-size match scrutinees; zero-copy `to_bytes`/`from_bytes`; enum SROA dropped | done |
 | 4 | Copying nursery for young objects: write barrier, minor collections, pretenuring, held pins | done |
-| 5 | Opt-in checked `region` block | |
+| 5 | Opt-in checked `region` block: contextual keyword, E0140, nursery reset at the end | done |
 | 6 | Re-measure; decide whether anything else is worth doing | |
 
 ## Escape facts (step 1)
@@ -375,3 +375,84 @@ nearly everything (binary_trees, gc_rebuild) or little garbage exists
 every node of the list it is building once before pretenuring kicks in,
 and binary_trees and hashmap run within 2.5% of the instructions but touch more
 memory. Whether it stays on by default is decided with step 6.
+
+## Regions (step 5)
+
+`region { ... }` is a block whose garbage is freed when it ends, for code
+with a clear unit of work (a request handler, a compiler pass, one frame
+of a game loop). It is opt-in and checked:
+
+```
+fn handle(Request req) -> Response {
+    let status = 0;
+    let body = region {
+        let doc = json::parse(req.body)?;   // freed at the region's end
+        let total = sum_prices(doc);
+        status = 200;
+        format("%i", total)                 // E0140: a region's value cannot be an object made inside it
+    };
+    ...
+}
+```
+
+Design:
+
+- **Syntax.** `region` is a contextual keyword: only `region {` starts a
+  region, so existing code that names something `region` keeps working.
+  The block is an expression; its value may be a scalar (`int`, `bool`,
+  `float`, `byte`, a unit enum) or an object made before the region.
+- **Check (E0140).** Using step 1's escape facts, the compiler rejects an
+  object made inside the region (directly, by string concatenation, or as
+  a fresh call result) that can leave it: assigned to a local declared
+  outside, stored or pushed into an object, vector or static from outside,
+  passed where the callee's summary says the parameter escapes, captured
+  by a `defer`, yielded, or handed out as the block's value
+  (`escape::region_leaks`). A `return` or `?` out of the region may take
+  an object along (an error built inside, a result): the exit's minor
+  collection copies it, which is the slow path but sound. An object the
+  check cannot follow (a callee the analysis cannot see, a closure storing
+  into a captured local) is not an error either: the runtime keeps it.
+  Each region is checked against its own end, nested ones included.
+- **Runtime.** Entering the outermost region runs a minor collection (the
+  nursery starts empty) and widens the nursery: every object of a kind
+  that holds no finalizer, strings included, is allocated young, there is
+  no pretenuring, and the nursery may grow to 1024 chunks (64 MiB) before
+  a minor runs inside the region. Leaving it runs a minor collection: with
+  nothing escaping, nothing is traced or copied, and every young chunk is
+  reset whole. Whatever did survive (the check's blind spots above) is
+  copied or held as in any minor, so a region is never unsound, only
+  slower when something escapes. `return`, `break`, `continue` and `?`
+  leave the region: the HIR builder puts a `gc_region_exit` call before
+  each jump out of the block. A panic does not; it ends the task, and an
+  unwound region only leaves the nursery wide until the next region.
+- **Nesting.** An inner region inside another region is a plain block:
+  only the outermost one resets the nursery.
+- **Where it cannot run** (the nursery off with `COIL_NURSERY=0`, a
+  shared-heap epoch) the region is a plain block and the GC frees its
+  garbage as usual.
+
+Lowering: `region { … }` parses as a block whose first item is
+`Expression::RegionMark`; the HIR builder turns it into
+`Block { [Region{enter}, inner, Region{exit}] }` (or keeps the value in a
+temp), and MIR lowers each mark to a host call (`gc_region_enter` 175,
+`gc_region_exit` 176, archive 6.2).
+
+### Measured (step 5)
+
+`examples/perf/region_rounds.hy`: each round builds a linked list whose nodes a vector also holds (shared,
+so early freeing cannot take it) and sums it; the same total work (4M
+nodes) is split into rounds of different sizes. Median of 3, wall time and
+max RSS.
+
+| nodes per round × rounds | nursery off | nursery on | nursery on + `region` per round |
+|---|---|---|---|
+| 100 × 40,000 | 631 ms, 12 MB | 688 ms, 36 MB | 545 ms, 12 MB |
+| 10,000 × 400 | 680 ms, 12 MB | 729 ms, 39 MB | 506 ms, 12 MB |
+| 200,000 × 20 | 955 ms, 21 MB | 1421 ms, 84 MB | 686 ms, 34 MB |
+
+A region turns each round's garbage into one chunk reset: 21-52% faster
+than the nursery without it and 14-28% faster than no nursery. The middle
+column is a step 4 cost that step 6 has to weigh: a round whose live set
+outgrows the nursery is copied (and its RSS tripled) before pretenuring
+catches up. A request-style round dominated by string building (split a
+line, fill a map) moves within noise (±5%); its GC share is small.

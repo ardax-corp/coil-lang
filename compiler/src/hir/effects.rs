@@ -753,6 +753,36 @@ impl<'a> ModuleEffects<'a> {
         out
     }
 
+    /// E0140: an object made inside a `region { … }` block that can leave
+    /// it (see [`escape::region_leaks`]).
+    pub fn region_messages(&self) -> Vec<reporting::Message> {
+        use reporting::{ErrorCode, Label, Message};
+        let mut out = Vec::new();
+        for (i, body) in self.cx.module.bodies.iter().enumerate() {
+            if !body.exprs.iter().any(|x| matches!(x.kind, HirKind::Builtin { op: Builtin::Region { enter: true }, .. })) {
+                continue;
+            }
+            let w = self.cx.walk(i, &self.summaries, false);
+            let lookup = |callee: &Callee, args: &[HirId]| match callee {
+                Callee::Named { name, def, .. } => Some(self.cx.named(&w, name, *def)),
+                Callee::Method { name } => self.cx.method(&w, *args.first()?, name).map(|(s, _)| s),
+                Callee::Value(f) => self.cx.fn_value(&w, *f),
+            };
+            for leak in escape::region_leaks(self.cx.module, body, &lookup) {
+                let mut msg = Message::error(
+                    ErrorCode::RegionEscape,
+                    format!("an object made inside this region {}, so it would outlive the region", leak.how),
+                    leak.at.0..leak.at.1,
+                );
+                msg.push(Label::new("leaves the region here".to_string(), leak.at.0..leak.at.1));
+                msg.push(Label::new("the region".to_string(), leak.region.0..leak.region.1));
+                msg.with_help("objects made in a region are freed when it ends; make the object before the region, or copy what you need out as plain values".to_string());
+                out.push(msg);
+            }
+        }
+        out
+    }
+
     /// Every reason body `index` is not pure, in source order.
     pub fn explain(&self, index: usize) -> Vec<Cause> {
         self.cx.walk(index, &self.summaries, true).causes.unwrap_or_default()
@@ -2055,6 +2085,8 @@ impl Cx<'_> {
                 }
                 Builtin::TypeOf | Builtin::Done | Builtin::Default | Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::Relayout | Builtin::FreeEarly { .. } => {}
                 Builtin::Print => self.note(w, id, EffectFlags::WRITE, || "prints".into()),
+                // Runs a minor collection: no effect a caller can see.
+                Builtin::Region { .. } => self.note_hidden(w, id, EffectFlags::GC, || "has a `region`".into()),
             },
             // Workers of a parallel region have no statics, and another
             // call may change one (coil-lang#793).

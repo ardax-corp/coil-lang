@@ -798,6 +798,7 @@ impl<'s> Formatter<'s> {
                 self.push_str("\"");
             }
             Expression::Identifier(id) => self.push_str(id),
+            Expression::RegionMark => self.push_str("region"),
             Expression::Type(n) => self.push_str(n),
             Expression::Break => self.push_str("break"),
             Expression::Continue => self.push_str("continue"),
@@ -824,8 +825,12 @@ impl<'s> Formatter<'s> {
                 self.push_str(")");
             }
             Expression::ExprStatement(e) => {
-                // A statement `match` ends at its `}`; no `;`.
-                let semi = !matches!(strip_groups(e).1.as_ref(), Expression::Match { .. });
+                // A statement `match` or `region { … }` ends at its `}`; no `;`.
+                let semi = match strip_groups(e).1.as_ref() {
+                    Expression::Match { .. } => false,
+                    Expression::Block(items) => !matches!(items.first().map(|i| i.1.as_ref()), Some(Expression::RegionMark)),
+                    _ => true,
+                };
                 self.with_trailing(usize::from(semi), |f| f.fmt_value(e));
                 if semi {
                     self.push_str(";");
@@ -1699,6 +1704,12 @@ impl<'s> Formatter<'s> {
     }
 
     fn fmt_block_braced(&mut self, items: &[Output<'_>]) {
+        if let Some((first, rest)) = items.split_first()
+            && matches!(first.1.as_ref(), Expression::RegionMark)
+        {
+            self.push_str("region ");
+            return self.fmt_block_braced(rest);
+        }
         let open = items
             .first()
             .and_then(|first| self.opening_before(self.content_start(first.0), b'{'));
@@ -3142,6 +3153,13 @@ mod tests {
     fn comptime_value_block_round_trips() {
         let src = "fn f() -> int {\n    let n = comptime {\n        let a = sq(3);\n        return a + 1;\n    };\n    return n;\n}\n";
         assert_eq!(format_source(src).unwrap(), src);
+    }
+
+    #[test]
+    fn region_blocks_round_trip() {
+        let src = "fn f(int n) -> int {\n    let region = n;\n    region {\n        let a = g(region);\n        if a > 1 {\n            return a;\n        }\n    }\n    let v = region {\n        let b = g(2);\n        b + 1\n    };\n    return v + region;\n}\n";
+        assert_eq!(format_source(src).unwrap(), src);
+        round_trip(src);
     }
 
     #[test]
