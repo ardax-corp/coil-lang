@@ -11,7 +11,7 @@ lines (`name: dense|lir|fuse (dense: why; lir: why; hir: why)`).
     # compare two saved runs; exits 1 when any body drops a tier
     scripts/tier_census.py compare old.json new.json
 
-Environment variables set for `run` (for example `COIL_HIR_BISECT=N`) reach the
+Environment variables set for `run` (for example `COIL_HIR_BISECT=N` on a debug build) reach the
 compiler, so one binary can be compared against itself under a switch.
 """
 

@@ -21,12 +21,14 @@ pub const PARENT_ID_ENV: &str = "COIL_PARENT_BUILD_ID";
 /// `coil`'s path, as `coil` passes it to a helper.
 pub const PARENT_EXE_ENV: &str = "COIL_PARENT_EXE";
 
-/// Testing only: `coil` passes this id in place of its own.
+/// Testing only: `coil` passes this id in place of its own. Read only by
+/// debug builds, so a release `coil` always passes its real id.
 pub const FAKE_ID_ENV: &str = "COIL_TESTING_FAKE_BUILD_ID";
 
 /// Set on `helper` the id and path of `parent`, the running `coil`.
 pub fn mark_helper(helper: &mut Command, parent: &Path) {
-    let id = std::env::var_os(FAKE_ID_ENV).unwrap_or_else(|| OsString::from(BUILD_ID));
+    let fake = if cfg!(debug_assertions) { std::env::var_os(FAKE_ID_ENV) } else { None };
+    let id = fake.unwrap_or_else(|| OsString::from(BUILD_ID));
     helper.env(PARENT_ID_ENV, id).env(PARENT_EXE_ENV, parent);
 }
 

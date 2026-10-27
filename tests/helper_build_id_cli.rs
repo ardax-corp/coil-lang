@@ -1,6 +1,11 @@
 //! `coil` refuses a helper (`coil-test`, `coil-fmt`, …) built from other
 //! sources than itself (#1598): a stale `coil-test` compiles with an older
 //! compiler, so `coil test` and `coil <file>` would disagree.
+//!
+//! Debug builds only: a release `coil` ignores `COIL_TESTING_FAKE_BUILD_ID`,
+//! the override these tests plant a stale id with.
+
+#![cfg(debug_assertions)]
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
