@@ -216,7 +216,9 @@ jobs:
           # Full toolkit: compiler + debugger + LSP + fmt + dissect + embed.
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             archive="dist/coil-${triple}.zip"
-            (cd staging && tar -a -cf "../${archive}" "coil-${triple}")
+            # Not `tar -a`: Git Bash's GNU tar ignores it and writes a plain
+            # tar under the .zip name. 7-Zip ships on the Windows runners.
+            (cd staging && 7z a -tzip -bd "../${archive}" "coil-${triple}" >/dev/null)
             # A real zip starts with "PK" (#2050).
             if [[ "$(head -c 2 "${archive}")" != "PK" ]]; then
               echo "::error::${archive} is not a zip archive"
