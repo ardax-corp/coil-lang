@@ -62,7 +62,7 @@ Heap objects per run and GC safepoint time (instrumented build, best of 3):
 | 3 | Static uniqueness: free a string's old value when it is rebuilt in place, free fresh concatenation operands and variable-size match scrutinees; zero-copy `to_bytes`/`from_bytes`; enum SROA dropped | done |
 | 4 | Copying nursery for young objects: write barrier, minor collections, pretenuring, held pins | done |
 | 5 | Opt-in checked `region` block: contextual keyword, E0140, nursery reset at the end | done |
-| 6 | Re-measure; decide whether anything else is worth doing | |
+| 6 | Re-measure; decide whether anything else is worth doing | done |
 
 ## Escape facts (step 1)
 
@@ -456,3 +456,24 @@ column is a step 4 cost that step 6 has to weigh: a round whose live set
 outgrows the nursery is copied (and its RSS tripled) before pretenuring
 catches up. A request-style round dominated by string building (split a
 line, fill a map) moves within noise (±5%); its GC share is small.
+
+## Reassessment (step 6)
+
+Re-measured main c5e77ea against the branch with the nursery off and on
+(full table and reasoning: the step 6 reassessment doc, linked from #2044).
+With the nursery off the branch is 5-32% faster than main on the
+allocation-heavy benches and uses 30-50% less memory on four of them;
+pure churn costs 3-6% more instructions (barrier and nursery checks). The
+nursery wins on short-lived churn (gc_shrink -29% time, -37% RSS) and
+loses on large live sets (hashmap +2-12%, gc_rebuild +17%).
+
+Step 6 fixed two nursery costs on large live sets (#2061): the quiet
+barrier log is capped at 65,536 entries and a heap relogs all its old
+objects after an overflow (`relog_all`), and the next collection's
+threshold comes from what the mark kept rather than from `alloc_bytes`
+after a lazy sweep.
+
+Decided (Dimitar, 2026-10-27): the nursery stays on by default
+(`COIL_NURSERY=0` turns it off). Not pursued: reference counting (cycles
+need a collector anyway) and dropping the GC (the remaining garbage is
+aliased container data).
