@@ -61,6 +61,8 @@ struct EpochBatch {
     /// [`Heap::finalizable`].
     weaks: Vec<u64>,
     finalizable: Vec<u64>,
+    /// Objects that can hold references, for [`Heap::epoch_born`].
+    born: Vec<u64>,
 }
 
 impl EpochBatch {
@@ -70,6 +72,7 @@ impl EpochBatch {
             && self.objects == 0
             && self.weaks.is_empty()
             && self.finalizable.is_empty()
+            && self.born.is_empty()
     }
 }
 
@@ -259,6 +262,11 @@ pub struct Heap {
     freed_early: bool,
     /// Allocate movable kinds in the nursery ([`Self::set_nursery`]).
     nursery: bool,
+    /// Objects born in the open steal epoch that can hold references. The
+    /// nursery is empty during an epoch, so they start out naming nothing
+    /// young; when it closes they join the write barrier
+    /// ([`Self::exit_epoch_stw`]).
+    epoch_born: Vec<u64>,
     /// Bytes allocated in the nursery since the last minor collection
     /// (part of `alloc_bytes`; an estimate, arrays grow in place).
     young_bytes: usize,
@@ -317,6 +325,7 @@ impl Default for Heap {
             early_freed: Vec::new(),
             freed_early: false,
             nursery: false,
+            epoch_born: Vec::new(),
             young_bytes: 0,
             nursery_chunks: NURSERY_CHUNKS,
             gc_phase: GcPhase::Idle,
@@ -443,6 +452,13 @@ impl Heap {
     pub fn exit_epoch_stw(&mut self) {
         self.epoch_stw = false;
         self.alloc_lock = ptr::null();
+        for addr in std::mem::take(&mut self.epoch_born) {
+            if let Some(obj) = self.find_object_by_addr(addr)
+                && obj.generation() & GEN_YOUNG == 0
+            {
+                obj.set_generation(GEN_UNLOGGED);
+            }
+        }
     }
 
     /// Allocates an object and returns its handle. The object is pushed to the
@@ -503,6 +519,9 @@ impl Heap {
                 Some(SideList::Finalizable) => batch.finalizable.push(object.addr()),
                 None => {}
             }
+            if T::HOLDS_REFS && self.nursery {
+                batch.born.push(object.addr());
+            }
         });
         crate::vm::note_heap_alloc();
         (object, content)
@@ -514,6 +533,7 @@ impl Heap {
         self.live_count += std::mem::take(&mut batch.objects);
         self.weaks.append(&mut batch.weaks);
         self.finalizable.append(&mut batch.finalizable);
+        self.epoch_born.append(&mut batch.born);
     }
 
     /// Give this thread's unused epoch slots back and fold its counts in.
@@ -558,6 +578,7 @@ impl Heap {
         // object must not carry a major-cycle mark: those go old.
         let young = T::NURSERY
             && self.nursery
+            && !self.epoch_stw
             && self.gc_phase != GcPhase::Marking
             && (self.finalizer_types.is_empty()
                 || data.finalizer_type_id().is_none_or(|t| !self.has_finalizer(t)));
@@ -573,8 +594,12 @@ impl Heap {
             return (object, content);
         }
         if T::HOLDS_REFS && self.nursery {
-            // Born old, maybe naming young objects: remembered at once.
-            REMEMBERED.with_borrow_mut(|r| r.push(object.addr()));
+            if self.epoch_stw {
+                self.epoch_born.push(object.addr());
+            } else {
+                // Born old, maybe naming young objects: remembered at once.
+                REMEMBERED.with_borrow_mut(|r| r.push(object.addr()));
+            }
         }
         match self.side_list_of(object) {
             Some(SideList::Weak) => self.weaks.push(object.addr()),
