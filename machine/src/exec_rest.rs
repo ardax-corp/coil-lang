@@ -534,6 +534,16 @@ impl<const S: usize> Machine<S> {
                             let freed = before.saturating_sub(self.heap.size());
                             self.stack.push(Value::from(freed as i64));
                         }
+                        crate::HostOp::RegionEnter | crate::HostOp::RegionExit => {
+                            self.stack.seek(tell - consume);
+                            if unlikely(!self.stack_maps.is_empty()) {
+                                self.gc_ip = ip;
+                            }
+                            self.gc_top_ip = Some(ip);
+                            self.gc_region(host_op == crate::HostOp::RegionEnter);
+                            self.gc_top_ip = None;
+                            self.stack.push(Value::from(0i64));
+                        }
                         crate::HostOp::RegisterFinalizer => {
                             let args = self.stack.top_window(consume);
                             let type_id = args.get(1).map(|v| v.as_int() as u32).unwrap_or(0);

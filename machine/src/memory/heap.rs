@@ -30,6 +30,9 @@ const GC_GROWTH_FACTOR_SURVIVING: usize = 4;
 /// Nursery size in 64 KiB slab chunks: filling this many asks for a minor
 /// collection (`feature/escape-memory` step 4).
 const NURSERY_CHUNKS: usize = 32;
+/// Nursery chunks a `region` block may fill (64 MiB) before a minor
+/// collection runs inside it.
+const REGION_CHUNKS: usize = 1024;
 /// Unmarked objects considered at one alloc safepoint during lazy sweep.
 pub const GC_SWEEP_QUANTUM: usize = 128;
 
@@ -277,6 +280,12 @@ pub struct Heap {
     pretenure_bytes: usize,
     /// Minor collections in a row most of the nursery survived.
     pretenure_streak: u32,
+    /// Open `region` blocks ([`Self::region_enter`]); while non-zero the
+    /// nursery takes strings too, never pretenures, and holds up to
+    /// [`REGION_CHUNKS`].
+    region_depth: u32,
+    /// [`Self::nursery_chunks`] outside the region.
+    region_saved_chunks: usize,
     /// Incremental mark / lazy sweep (COI-309 S4).
     gc_phase: GcPhase,
     /// Next object to consider while sweeping; `None` when the cursor is idle.
@@ -335,6 +344,8 @@ impl Default for Heap {
             nursery_chunks: NURSERY_CHUNKS,
             pretenure_bytes: 0,
             pretenure_streak: 0,
+            region_depth: 0,
+            region_saved_chunks: 0,
             gc_phase: GcPhase::Idle,
             gc_sweep_cursor: None,
             ffi_strings: Vec::new(),
@@ -580,10 +591,20 @@ impl Heap {
     where
         F: Fn(Gc<T>) -> Object,
     {
+        self.alloc_unlocked_in(data, map, true)
+    }
+
+    /// [`Self::alloc_unlocked`]; `may_young: false` puts it in the old space
+    /// whatever its kind (an interned string, which the intern table names).
+    fn alloc_unlocked_in<T: GcSized, F>(&mut self, data: T, map: F, may_young: bool) -> (Object, Gc<T>)
+    where
+        F: Fn(Gc<T>) -> Object,
+    {
         let layout = Layout::new::<GcData<T>>();
         // Objects allocated while a mark is open are black, and a young
         // object must not carry a major-cycle mark: those go old.
-        let young = T::NURSERY
+        let young = (T::NURSERY || (T::REGION && self.region_depth != 0))
+            && may_young
             && self.nursery
             && !self.epoch_stw
             && self.pretenure_bytes == 0
@@ -809,13 +830,19 @@ impl Heap {
         if let Some(s) = self.strings.find(&data.data, data.hash_code()) {
             return s;
         }
+        // The table is not traced by a minor collection: a young key would
+        // be freed under it. Intern an old copy instead.
+        if string.header.generation.get() & GEN_YOUNG != 0 {
+            let hash = data.hash_code();
+            return self.intern_new(data.data.to_string(), hash);
+        }
         self.strings.insert(string, ());
         string
     }
 
     fn intern_new(&mut self, data: String, hash: u32) -> RefString {
         let obj_string = ObjString::with_hash(data, hash);
-        let (_, s) = self.alloc_unlocked(obj_string, Object::String);
+        let (_, s) = self.alloc_unlocked_in(obj_string, Object::String, false);
         self.strings.insert(s, ());
         s
     }
@@ -1252,12 +1279,43 @@ impl Heap {
     /// them buys nothing: allocate old for a while, longer each time in a
     /// row, and try the nursery again after.
     pub(super) fn note_survival(&mut self, survivors: usize, objects: usize) {
+        if self.region_depth != 0 {
+            return;
+        }
         if survivors * 2 > objects {
             self.pretenure_streak = (self.pretenure_streak + 1).min(6);
             self.pretenure_bytes = (self.nursery_chunks * super::slab::CHUNK_BYTES) << (self.pretenure_streak - 1);
         } else {
             self.pretenure_streak = 0;
         }
+    }
+
+    /// A `region` block opens. Returns true for the outermost one, which
+    /// the VM starts with an empty nursery.
+    pub fn region_enter(&mut self) -> bool {
+        self.region_depth += 1;
+        if self.region_depth != 1 {
+            return false;
+        }
+        self.region_saved_chunks = self.nursery_chunks;
+        self.nursery_chunks = self.nursery_chunks.max(REGION_CHUNKS);
+        self.pretenure_bytes = 0;
+        self.pretenure_streak = 0;
+        true
+    }
+
+    /// A `region` block ends. Returns true for the outermost one, after
+    /// which the VM collects the nursery.
+    pub fn region_exit(&mut self) -> bool {
+        if self.region_depth == 0 {
+            return false;
+        }
+        self.region_depth -= 1;
+        if self.region_depth != 0 {
+            return false;
+        }
+        self.nursery_chunks = self.region_saved_chunks;
+        true
     }
 
     /// The old space crossed its budget: run a major cycle.
@@ -2856,6 +2914,7 @@ impl ObjString {
 
 impl GcSized for ObjString {
     const HOLDS_REFS: bool = false;
+    const REGION: bool = true;
 
     fn size(&self) -> usize {
         mem::size_of::<Self>() + self.data.accounted_bytes()
@@ -3947,6 +4006,10 @@ pub trait GcSized {
     /// Allocated in the nursery when it is on: a kind a minor collection
     /// can move ([`Object::movable_layout`]).
     const NURSERY: bool = false;
+    /// Allocated in the nursery inside a `region` block: the movable kinds,
+    /// and strings, which a minor collection frees but never moves (a
+    /// surviving one is held in place).
+    const REGION: bool = Self::NURSERY;
     /// Can hold heap references: an old object of this kind is remembered
     /// when it is born, since it may start out naming young objects.
     const HOLDS_REFS: bool = true;

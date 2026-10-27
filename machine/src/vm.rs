@@ -2045,6 +2045,29 @@ impl<const S: usize> Machine<S> {
         self.heap.minor_finish(plan);
     }
 
+    /// `gc_region_enter` / `gc_region_exit` around a `region` block. The
+    /// outermost one starts and ends with a minor collection, so what the
+    /// block allocated and dropped is reclaimed when it ends.
+    fn gc_region(&mut self, enter: bool) {
+        if !self.heap.nursery() {
+            return;
+        }
+        if enter {
+            if self.heap.region_enter() {
+                if self.heap.gc_phase() == crate::memory::GcPhase::Sweeping {
+                    self.gc_finish_sweep();
+                }
+                self.gc_minor();
+            }
+        } else if self.heap.region_exit() {
+            if self.heap.gc_phase() == crate::memory::GcPhase::Sweeping {
+                self.gc_finish_sweep();
+            }
+            self.invalidate_program_string_cache();
+            self.gc_minor();
+        }
+    }
+
     fn gc_compact(&mut self) {
         if !COMPACT_ENABLED.with(|e| *e)
             || IN_EXECUTE.get() > 1
