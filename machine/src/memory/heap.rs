@@ -27,6 +27,9 @@ const EPOCH_GC_HEADROOM_MIN: usize = 256 * 1024 * 1024;
 /// Growth when most of the heap survived its last collection: the live set is
 /// still growing, so re-marking it every doubling is mostly wasted work.
 const GC_GROWTH_FACTOR_SURVIVING: usize = 4;
+/// Nursery size in 64 KiB slab chunks: filling this many asks for a minor
+/// collection (`feature/escape-memory` step 4).
+const NURSERY_CHUNKS: usize = 32;
 /// Unmarked objects considered at one alloc safepoint during lazy sweep.
 pub const GC_SWEEP_QUANTUM: usize = 128;
 
@@ -254,6 +257,13 @@ pub struct Heap {
     /// object may now point at a freed or reused slot, so a typed handle
     /// is looked up before it is marked ([`Self::early_freed_slot`]).
     freed_early: bool,
+    /// Allocate movable kinds in the nursery ([`Self::set_nursery`]).
+    nursery: bool,
+    /// Bytes allocated in the nursery since the last minor collection
+    /// (part of `alloc_bytes`; an estimate, arrays grow in place).
+    young_bytes: usize,
+    /// Nursery chunks in use that ask for a minor collection.
+    nursery_chunks: usize,
     /// Incremental mark / lazy sweep (COI-309 S4).
     gc_phase: GcPhase,
     /// Next object to consider while sweeping; `None` when the cursor is idle.
@@ -306,6 +316,9 @@ impl Default for Heap {
             doomed: Vec::new(),
             early_freed: Vec::new(),
             freed_early: false,
+            nursery: false,
+            young_bytes: 0,
+            nursery_chunks: NURSERY_CHUNKS,
             gc_phase: GcPhase::Idle,
             gc_sweep_cursor: None,
             ffi_strings: Vec::new(),
@@ -411,6 +424,9 @@ impl Heap {
     }
 
     pub fn enter_epoch_stw(&mut self, lock: &Mutex<()>) {
+        // Epoch mutators allocate old and have no barrier of their own: no
+        // young object may exist for them to store.
+        self.promote_young();
         self.epoch_stw = true;
         self.epoch_gc_ceiling = self
             .gc_next_threshold
@@ -538,11 +554,28 @@ impl Heap {
         F: Fn(Gc<T>) -> Object,
     {
         let layout = Layout::new::<GcData<T>>();
-        let slot = self.slab.alloc(layout).cast::<GcData<T>>();
-        let (object, content) = Self::init_slot(slot, data, map);
+        // Objects allocated while a mark is open are black, and a young
+        // object must not carry a major-cycle mark: those go old.
+        let young = T::NURSERY
+            && self.nursery
+            && self.gc_phase != GcPhase::Marking
+            && (self.finalizer_types.is_empty()
+                || data.finalizer_type_id().is_none_or(|t| !self.has_finalizer(t)));
+        let slot = if young { self.slab.alloc_young(layout) } else { self.slab.alloc(layout) };
+        let (object, content) = Self::init_slot(slot.cast::<GcData<T>>(), data, map);
         let size = object.size();
         self.alloc_bytes += size;
         self.live_count += 1;
+        if young {
+            content.header.generation.set(GEN_YOUNG);
+            self.young_bytes += size;
+            crate::vm::note_heap_alloc();
+            return (object, content);
+        }
+        if T::HOLDS_REFS && self.nursery {
+            // Born old, maybe naming young objects: remembered at once.
+            REMEMBERED.with_borrow_mut(|r| r.push(object.addr()));
+        }
         match self.side_list_of(object) {
             Some(SideList::Weak) => self.weaks.push(object.addr()),
             Some(SideList::Finalizable) => self.finalizable.push(object.addr()),
@@ -787,8 +820,9 @@ impl Heap {
         }
         self.unlink_unmarked_interns();
         self.gc_phase = GcPhase::Sweeping;
+        self.unmark_young();
         self.gc_sweep_start_bytes = self.alloc_bytes;
-        self.gc_sweep_cursor = Some(super::slab::SlotCursor::default());
+        self.gc_sweep_cursor = Some(super::slab::SlotCursor::sweep());
         self.finish_sweep();
     }
 
@@ -890,9 +924,10 @@ impl Heap {
             return;
         }
         self.unlink_unmarked_interns();
+        self.unmark_young();
         self.gc_phase = GcPhase::Sweeping;
         self.gc_sweep_start_bytes = self.alloc_bytes;
-        self.gc_sweep_cursor = Some(super::slab::SlotCursor::default());
+        self.gc_sweep_cursor = Some(super::slab::SlotCursor::sweep());
     }
 
     /// Reclaim up to `n` unmarked objects. Returns true when sweep finished.
@@ -962,8 +997,7 @@ impl Heap {
         } else {
             self.gc_growth_factor
         };
-        self.gc_next_threshold = self
-            .alloc_bytes
+        self.gc_next_threshold = (self.alloc_bytes.saturating_sub(self.young_bytes))
             .saturating_mul(growth)
             .max(GC_NEXT_THRESHOLD)
             .min(self.byte_cap);
@@ -1160,7 +1194,37 @@ impl Heap {
             self.gc_next_threshold
         };
         self.gc_phase == GcPhase::Idle
-            && (cfg!(feature = "gc-stress") || self.alloc_bytes > limit)
+            && (cfg!(feature = "gc-stress")
+                || self.alloc_bytes.saturating_sub(self.young_bytes) > limit
+                || self.slab.young_chunks_in_use() >= self.nursery_chunks)
+    }
+
+    /// The nursery is full: run a minor collection.
+    #[inline]
+    pub fn should_collect_young(&self) -> bool {
+        self.nursery
+            && (cfg!(feature = "gc-stress") || self.slab.young_chunks_in_use() >= self.nursery_chunks)
+    }
+
+    /// The old space crossed its budget: run a major cycle.
+    #[inline]
+    pub fn should_collect_old(&self) -> bool {
+        let limit = if self.epoch_stw {
+            self.epoch_gc_ceiling
+        } else {
+            self.gc_next_threshold
+        };
+        cfg!(feature = "gc-stress") || self.alloc_bytes.saturating_sub(self.young_bytes) > limit
+    }
+
+    /// Allocate instances, enums, boxes, tuples and arrays in the nursery
+    /// (the VM turns it on; `COIL_NURSERY=0` keeps it off).
+    pub fn set_nursery(&mut self, on: bool) {
+        self.nursery = on;
+    }
+
+    pub fn nursery(&self) -> bool {
+        self.nursery
     }
 
     /// Objects to sweep at one safepoint (doubles under pressure).
@@ -1174,10 +1238,12 @@ impl Heap {
     }
 
     /// Lower the byte threshold so the next [`Self::should_collect`] check
-    /// fires (test helper for GC stress).
+    /// fires (test helper for GC stress). The nursery then collects at every
+    /// safepoint that finds a young object.
     #[cfg(any(test, feature = "debugger"))]
     pub fn set_gc_threshold_for_test(&mut self, bytes: usize) {
         self.gc_next_threshold = bytes;
+        self.nursery_chunks = 1;
     }
 
     /// Count an array's storage change (see [`ObjArray::take_resize`]).
@@ -1213,8 +1279,14 @@ impl Heap {
         debug_assert!(self.live_count > 0);
         self.live_count -= 1;
         let ptr = unsafe { NonNull::new_unchecked(object.addr() as *mut u8) };
+        let young = object.generation() & GEN_YOUNG != 0;
         unsafe { object.recycle_payload() };
-        self.slab.free(ptr);
+        if young {
+            // A nursery slot stays poisoned until its chunk is reset.
+            self.young_bytes = self.young_bytes.saturating_sub(size);
+        } else {
+            self.slab.free(ptr);
+        }
     }
 
     /// [`Self::dealloc`] of the slot the sweep walk is at.
@@ -1617,6 +1689,7 @@ impl Drop for Heap {
     fn drop(&mut self) {
         // Drop payloads in place; the slab (and its free lists) goes away
         // next, so slots are not returned and nothing is collected first.
+        self.forget_remembered();
         let mut cur = super::slab::SlotCursor::default();
         while let Some(addr) = self.slab.next_slot(&mut cur) {
             if let Some(object) = unsafe { Object::from_header(addr) } {
@@ -2013,6 +2086,18 @@ impl Object {
             | Self::Mutex(_)
             | Self::RwLock(_) => {}
         }
+    }
+
+    /// Header nursery bits ([`GEN_YOUNG`] and friends).
+    #[inline]
+    pub(crate) fn generation(&self) -> u8 {
+        // SAFETY: every kind shares the `repr(C)` header at the slot start.
+        unsafe { &*(self.addr() as *const GcHeader) }.generation.get()
+    }
+
+    #[inline]
+    pub(crate) fn set_generation(&self, bits: u8) {
+        unsafe { &*(self.addr() as *const GcHeader) }.generation.set(bits);
     }
 
     #[must_use]
@@ -2419,6 +2504,12 @@ impl Iterator for InstanceFieldIter<'_> {
 }
 
 impl GcSized for ObjInstance {
+    const NURSERY: bool = true;
+
+    fn finalizer_type_id(&self) -> Option<u32> {
+        Some(self.type_id)
+    }
+
     fn size(&self) -> usize {
         // `Table` / inline slots live in the object; only a spill `Vec` is extra.
         std::mem::size_of::<Self>()
@@ -2623,6 +2714,12 @@ impl ObjEnum {
 }
 
 impl GcSized for ObjEnum {
+    const NURSERY: bool = true;
+
+    fn finalizer_type_id(&self) -> Option<u32> {
+        Some(self.type_id)
+    }
+
     fn size(&self) -> usize {
         std::mem::size_of::<Self>() + self.payload.spill_capacity() * std::mem::size_of::<Member>()
     }
@@ -2698,6 +2795,8 @@ impl ObjString {
 }
 
 impl GcSized for ObjString {
+    const HOLDS_REFS: bool = false;
+
     fn size(&self) -> usize {
         mem::size_of::<Self>() + self.data.accounted_bytes()
     }
@@ -3517,12 +3616,16 @@ impl fmt::Display for ObjRwLock {
 }
 
 impl GcSized for ObjTuple {
+    const NURSERY: bool = true;
+
     fn size(&self) -> usize {
         mem::size_of::<Self>() + self.elements.spill_capacity() * mem::size_of::<Value>()
     }
 }
 
 impl GcSized for ObjArray {
+    const NURSERY: bool = true;
+
     fn size(&self) -> usize {
         mem::size_of::<Self>() + self.accounted
     }
@@ -3537,6 +3640,8 @@ impl GcSized for ObjCoroutine {
 }
 
 impl GcSized for ObjBoxed {
+    const NURSERY: bool = true;
+
     fn size(&self) -> usize {
         mem::size_of::<Self>()
     }
@@ -3779,6 +3884,43 @@ impl fmt::Display for ObjLibrary {
 
 pub trait GcSized {
     fn size(&self) -> usize;
+    /// Allocated in the nursery when it is on: a kind a minor collection
+    /// can move ([`Object::movable_layout`]).
+    const NURSERY: bool = false;
+    /// Can hold heap references: an old object of this kind is remembered
+    /// when it is born, since it may start out naming young objects.
+    const HOLDS_REFS: bool = true;
+    /// Class or enum type id, so an object whose type has a `drop` stays
+    /// out of the nursery.
+    fn finalizer_type_id(&self) -> Option<u32> {
+        None
+    }
+}
+
+/// [`GcHeader::generation`]: the object lives in a young (nursery) chunk.
+pub(crate) const GEN_YOUNG: u8 = 1;
+/// [`GcHeader::generation`]: an old object not in the remembered set; its
+/// next payload write records it ([`remember_written`]).
+pub(crate) const GEN_UNLOGGED: u8 = 2;
+/// [`GcHeader::generation`]: a young object a minor collection may not
+/// move (an ambiguous word names it). Only set during a minor collection.
+pub(crate) const GEN_PINNED: u8 = 4;
+
+thread_local! {
+    /// Old objects written since the last minor collection (the nursery's
+    /// remembered set). The barrier has no heap at hand, so the set lives
+    /// with the thread; a heap takes only its own entries
+    /// ([`Heap::take_remembered`]).
+    static REMEMBERED: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Slow path of the write barrier in [`GcData::as_mut`].
+#[cold]
+#[inline(never)]
+fn remember_written(header: &GcHeader) {
+    header.generation.set(header.generation.get() & !GEN_UNLOGGED);
+    let addr = header as *const GcHeader as u64;
+    REMEMBERED.with_borrow_mut(|r| r.push(addr));
 }
 
 /// Prefix of every managed allocation. Kind reconstructs [`Object`] without
@@ -3789,6 +3931,8 @@ struct GcHeader {
     marked: Cell<bool>,
     /// Allocated while a sweep was running; that sweep skips it once.
     fresh: Cell<bool>,
+    /// Nursery bits ([`GEN_YOUNG`], [`GEN_UNLOGGED`], [`GEN_PINNED`]).
+    generation: Cell<u8>,
     /// Debug / gc-stress: generation of the steal epoch the object was
     /// allocated in, 0 outside any epoch ([`EpochWriteScope`]). It takes a
     /// byte of what is header padding before an 8-aligned payload; release
@@ -3809,6 +3953,7 @@ impl GcHeader {
             kind: Cell::new(0),
             marked: Cell::new(false),
             fresh: Cell::new(false),
+            generation: Cell::new(0),
             #[cfg(any(debug_assertions, feature = "gc-stress"))]
             epoch: Cell::new(0),
         }
@@ -3858,6 +4003,12 @@ impl<T> AsMut<T> for GcData<T> {
     fn as_mut(&mut self) -> &mut T {
         #[cfg(any(debug_assertions, feature = "gc-stress"))]
         self.check_epoch_write();
+        // Write barrier: the first write to an old object since the last
+        // minor collection records it, so the nursery finds a young object
+        // it may now name ([`remember_written`]).
+        if unlikely(self.header.generation.get() & GEN_UNLOGGED != 0) {
+            remember_written(&self.header);
+        }
         &mut self.data
     }
 }
@@ -3920,6 +4071,7 @@ impl<T> Gc<T> {
             (*p).header.kind.set(0);
             (*p).header.marked.set(false);
             (*p).header.fresh.set(false);
+            (*p).header.generation.set(0);
         }
     }
 
@@ -4295,6 +4447,10 @@ fn resident_kib() -> usize {
 #[path = "compact.rs"]
 mod compact;
 pub use compact::{AddrMap, EvacPlan, Evacuation};
+
+#[path = "nursery.rs"]
+mod nursery;
+pub use nursery::MinorPlan;
 
 #[path = "snapshot.rs"]
 mod snapshot;

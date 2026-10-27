@@ -1,0 +1,330 @@
+//! Nursery minor collection (`feature/escape-memory` step 4).
+//!
+//! Instances, payload enums, boxes, tuples and arrays are bump-allocated
+//! into young slab chunks ([`super::Slab::alloc_young`]). A minor collection
+//! traces young objects from the VM roots and the remembered set (old
+//! objects written since the last one, see the barrier in
+//! [`super::GcData`]'s `as_mut`), copies every survivor only precise words
+//! name into an old slot, rewrites those words, and resets the young chunks.
+//! A survivor an ambiguous word names is pinned: its chunk is promoted in
+//! place. See `docs/internals/escape-memory.md`.
+
+use std::ptr::NonNull;
+
+use common::Value;
+
+use super::compact::{forward, AddrMap};
+use super::{GcHeader, GcPhase, GcSized, Heap, Member, Object, GEN_PINNED, GEN_UNLOGGED, GEN_YOUNG, REMEMBERED};
+
+/// A minor collection between its copy and its reset step.
+pub struct MinorPlan {
+    fwd: AddrMap,
+    remembered: Vec<u64>,
+    /// `(chunk, first slot, end, slot size)` of every young chunk in use.
+    spans: Vec<(usize, u64, u64, u64)>,
+}
+
+impl MinorPlan {
+    /// New address of a word naming a moved object (keeps the `Result`
+    /// `Err` tag bit), or `None` when it does not.
+    #[inline]
+    pub fn forward(&self, v: Value) -> Option<Value> {
+        forward(&self.fwd, v)
+    }
+
+    /// Old address → new address of every moved object.
+    pub fn moved(&self) -> &AddrMap {
+        &self.fwd
+    }
+}
+
+/// Slot addresses of one span.
+fn slots(first: u64, end: u64, size: u64) -> impl Iterator<Item = u64> {
+    (first..end).step_by(size as usize)
+}
+
+impl Heap {
+    /// The young object at `addr` (a `Result` `Err` tag bit is ignored).
+    #[inline]
+    fn young_object(&self, addr: u64) -> Option<Object> {
+        let obj = self.find_object_by_addr(addr & !1)?;
+        (obj.generation() & GEN_YOUNG != 0).then_some(obj)
+    }
+
+    /// Whether any young chunk is in use.
+    pub fn has_young(&self) -> bool {
+        self.slab.young_chunks_in_use() != 0
+    }
+
+    /// Take this heap's entries off the thread's remembered set: the live
+    /// old objects among them. Entries of other heaps stay.
+    fn take_remembered(&self) -> Vec<u64> {
+        let mut mine = REMEMBERED.with_borrow_mut(|r| {
+            let mut mine = Vec::new();
+            r.retain(|&addr| {
+                if !self.slab.contains_slot(addr) {
+                    return true;
+                }
+                if self.find_object_by_addr(addr).is_some_and(|o| o.generation() & GEN_YOUNG == 0) {
+                    mine.push(addr);
+                }
+                false
+            });
+            mine
+        });
+        mine.sort_unstable();
+        mine.dedup();
+        mine
+    }
+
+    /// Drop this heap's entries from the thread's remembered set (the heap
+    /// goes away; another may map the same addresses).
+    pub(super) fn forget_remembered(&self) {
+        let _ = REMEMBERED.try_with(|r| {
+            if let Ok(mut r) = r.try_borrow_mut() {
+                r.retain(|&addr| !self.slab.contains_slot(addr));
+            }
+        });
+    }
+
+    /// Follow an evacuation in the remembered set.
+    pub(super) fn forward_remembered(&self, fwd: &AddrMap) {
+        REMEMBERED.with_borrow_mut(|r| {
+            for addr in r.iter_mut() {
+                if let Some(&to) = fwd.get(addr) {
+                    *addr = to;
+                }
+            }
+        });
+    }
+
+    /// Clear a major cycle's marks on young objects: the major sweep skips
+    /// young chunks, and a minor collection reads the mark as "traced".
+    pub(super) fn unmark_young(&mut self) {
+        for (_, first, end, size) in self.slab.young_spans() {
+            for addr in slots(first, end, size) {
+                // SAFETY: a slot start in a mapped chunk holds a header.
+                let header = unsafe { &*(addr as *const GcHeader) };
+                if header.kind.get() != 0 {
+                    header.marked.set(false);
+                }
+            }
+        }
+    }
+
+    /// Make every young object old where it is, without tracing: dead ones
+    /// wait for a major cycle. For points where nothing may move (a host
+    /// frame holds raw handles, a shared-heap epoch opens).
+    pub fn promote_young(&mut self) {
+        if !self.has_young() {
+            return;
+        }
+        let sweeping = self.gc_phase == GcPhase::Sweeping;
+        let mut promoted = Vec::new();
+        let mut free = Vec::new();
+        for (chunk, first, end, size) in self.slab.young_spans() {
+            promoted.push(chunk);
+            for addr in slots(first, end, size) {
+                let header = unsafe { &*(addr as *const GcHeader) };
+                if header.kind.get() == 0 {
+                    free.push(unsafe { NonNull::new_unchecked(addr as *mut u8) });
+                    continue;
+                }
+                header.generation.set(GEN_UNLOGGED);
+                if sweeping {
+                    // The sweep may still reach this chunk; it must keep
+                    // what it never marked.
+                    header.fresh.set(true);
+                }
+            }
+            let tail = self.slab.chunk_slots_end(chunk);
+            free.extend(slots(end, tail, size).map(|a| unsafe { NonNull::new_unchecked(a as *mut u8) }));
+        }
+        self.young_bytes = 0;
+        self.slab.finish_young(&promoted, free);
+    }
+
+    /// Trace the young objects reachable from `pins` (roots that cannot be
+    /// rewritten, which pin their target), `precise` (roots the VM rewrites
+    /// through [`MinorPlan::forward`]) and the remembered set; copy every
+    /// survivor that is not pinned and rewrite the heap's precise words to
+    /// it. The VM then rewrites its precise roots and calls
+    /// [`Self::minor_finish`].
+    pub fn minor_plan(&mut self, pins: &[u64], precise: &[u64]) -> MinorPlan {
+        debug_assert_eq!(self.gc_phase, GcPhase::Idle, "minor collections run between cycles");
+        let spans = self.slab.young_spans();
+        let remembered = self.take_remembered();
+        let mut gray: Vec<Object> = Vec::new();
+        let reach = |heap: &Heap, gray: &mut Vec<Object>, addr: u64, precise: bool| {
+            if let Some(obj) = heap.young_object(addr) {
+                let g = obj.generation();
+                if !precise && g & GEN_PINNED == 0 {
+                    obj.set_generation(g | GEN_PINNED);
+                }
+                obj.mark(gray);
+            }
+        };
+        for &addr in pins {
+            reach(self, &mut gray, addr, false);
+        }
+        for &addr in precise {
+            reach(self, &mut gray, addr, true);
+        }
+        for &addr in &remembered {
+            let Some(obj) = self.find_object_by_addr(addr) else {
+                continue;
+            };
+            match obj {
+                // FFI code may hold a rooted object's address.
+                Object::Root(r) => {
+                    if let Some(m) = &r.as_ref().payload {
+                        let target = match m {
+                            Member::Object(o) => o.addr(),
+                            Member::Value(v) => v.heap_addr(),
+                        };
+                        reach(self, &mut gray, target, false);
+                    }
+                }
+                _ => obj.for_each_reference(self, &mut |a, p| reach(self, &mut gray, a, p)),
+            }
+        }
+        while let Some(obj) = gray.pop() {
+            obj.for_each_reference(self, &mut |a, p| reach(self, &mut gray, a, p));
+        }
+        // Weak targets are raw words: a live one stays put, a dead one
+        // clears its weak.
+        for &w in &self.weaks {
+            let Some(Object::Weak(gc)) = self.find_object_by_addr(w) else {
+                continue;
+            };
+            let weak = gc.as_ref();
+            if weak.cleared.get() {
+                continue;
+            }
+            if let Some(target) = self.young_object(weak.target.get().heap_addr()) {
+                if target.is_marked() {
+                    target.set_generation(target.generation() | GEN_PINNED);
+                } else {
+                    weak.cleared.set(true);
+                    weak.target.set(Value::from(0i64));
+                }
+            }
+        }
+
+        // Copy the survivors nothing ambiguous names.
+        let mut fwd = AddrMap::default();
+        for &(_, first, end, size) in &spans {
+            for addr in slots(first, end, size) {
+                let Some(obj) = (unsafe { Object::from_header(addr) }) else {
+                    continue;
+                };
+                if !obj.is_marked() || obj.generation() & GEN_PINNED != 0 {
+                    continue;
+                }
+                let Some(layout) = obj.movable_layout() else {
+                    obj.set_generation(obj.generation() | GEN_PINNED);
+                    continue;
+                };
+                let to = self.slab.alloc(layout);
+                // SAFETY: same size class; the young copy is poisoned in
+                // `minor_finish` and never dropped, so the payload (spill
+                // `Vec`s included) moves bitwise.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(addr as *const u8, to.as_ptr(), layout.size());
+                    let header = &*(to.as_ptr() as *const GcHeader);
+                    header.marked.set(false);
+                    header.generation.set(0);
+                }
+                fwd.insert(addr, to.as_ptr() as u64);
+            }
+        }
+
+        // Rewrite precise words naming a moved object: in the copies, the
+        // pinned survivors and the remembered objects. Nothing else old can
+        // name a young object.
+        if !fwd.is_empty() {
+            for &to in fwd.values() {
+                if let Some(obj) = unsafe { Object::from_header(to) } {
+                    obj.rewrite_precise_refs(self, &fwd);
+                }
+            }
+            for &(_, first, end, size) in &spans {
+                for addr in slots(first, end, size) {
+                    if let Some(obj) = unsafe { Object::from_header(addr) }
+                        && obj.is_marked()
+                        && !fwd.contains_key(&addr)
+                    {
+                        obj.rewrite_precise_refs(self, &fwd);
+                    }
+                }
+            }
+            for &addr in &remembered {
+                if let Some(obj) = self.find_object_by_addr(addr) {
+                    obj.rewrite_precise_refs(self, &fwd);
+                }
+            }
+            self.forward_side_lists(&fwd);
+        }
+        MinorPlan { fwd, remembered, spans }
+    }
+
+    /// Poison the moved slots, reclaim the dead young objects, promote the
+    /// chunks with pinned survivors and reset the rest. Returns how many
+    /// objects moved.
+    pub fn minor_finish(&mut self, plan: MinorPlan) -> usize {
+        let MinorPlan { fwd, remembered, spans } = plan;
+        let mut promoted = Vec::new();
+        let mut free = Vec::new();
+        for (chunk, first, end, size) in spans {
+            let mut keep = false;
+            let mut holes = Vec::new();
+            for addr in slots(first, end, size) {
+                // SAFETY: a slot start in a mapped chunk holds a header.
+                let header = unsafe { &*(addr as *const GcHeader) };
+                if header.kind.get() != 0 {
+                    if fwd.contains_key(&addr) {
+                        header.kind.set(0);
+                        header.marked.set(false);
+                        header.generation.set(0);
+                    } else if header.marked.get() {
+                        header.marked.set(false);
+                        header.generation.set(GEN_UNLOGGED);
+                        keep = true;
+                        continue;
+                    } else {
+                        let obj = unsafe { Object::from_header(addr) }.expect("live young slot");
+                        let bytes = obj.size();
+                        self.alloc_bytes -= bytes;
+                        debug_assert!(self.live_count > 0);
+                        self.live_count -= 1;
+                        unsafe { obj.recycle_payload() };
+                    }
+                }
+                holes.push(addr);
+            }
+            if keep {
+                promoted.push(chunk);
+                let tail = self.slab.chunk_slots_end(chunk);
+                free.extend(
+                    holes
+                        .into_iter()
+                        .chain(slots(end, tail, size))
+                        .map(|a| unsafe { NonNull::new_unchecked(a as *mut u8) }),
+                );
+            }
+        }
+        for &to in fwd.values() {
+            unsafe { &*(to as *const GcHeader) }.generation.set(GEN_UNLOGGED);
+        }
+        for addr in remembered {
+            if let Some(obj) = self.find_object_by_addr(addr)
+                && obj.generation() & GEN_YOUNG == 0
+            {
+                obj.set_generation(GEN_UNLOGGED);
+            }
+        }
+        self.young_bytes = 0;
+        self.slab.finish_young(&promoted, free);
+        fwd.len()
+    }
+}

@@ -300,6 +300,27 @@ pub struct Slab {
     /// Per chunk index: pages given back (the slot walk skips them so it
     /// does not fault zero pages back in).
     released_mask: Vec<bool>,
+    /// Per chunk index: a nursery chunk (bump-allocated, never on a free
+    /// list; see [`Self::alloc_young`]).
+    young_mask: Vec<bool>,
+    /// Nursery state per size class.
+    young: Vec<YoungClass>,
+    /// Nursery chunks handed out since the last [`Self::young_chunks`] reset.
+    young_in_use: usize,
+}
+
+/// One size class's nursery: the chunk being bump-allocated and the reset
+/// chunks waiting for reuse.
+struct YoungClass {
+    key: (u32, u32),
+    /// Chunks of this class allocated into since the last minor collection,
+    /// the current one last.
+    used: Vec<usize>,
+    /// Next slot of the current chunk, and the end of its last slot.
+    next: u64,
+    end: u64,
+    /// Reset nursery chunks of this class (every slot poisoned).
+    spare: Vec<usize>,
 }
 
 /// Position of a walk over every slot of the resident chunks (sweep, heap
@@ -322,9 +343,21 @@ pub struct SlotCursor {
     slot_size: u64,
     /// `(slot size, align)` class of the current chunk.
     class: (u32, u32),
+    /// Skip nursery chunks (the sweep: a minor collection reclaims them).
+    pub skip_young: bool,
     /// Index + 1 of that class's free list in `Slab::free` once a slot of
     /// this chunk was freed (classes are only ever appended); 0 before.
     free_class: usize,
+}
+
+impl SlotCursor {
+    /// A walk for the major sweep: nursery chunks are skipped.
+    pub fn sweep() -> Self {
+        Self {
+            skip_young: true,
+            ..Self::default()
+        }
+    }
 }
 
 impl Slab {
@@ -336,7 +369,149 @@ impl Slab {
             cycles_since_scan: 0,
             recent: std::array::from_fn(|_| AtomicPtr::new(std::ptr::null_mut())),
             released_mask: Vec::new(),
+            young_mask: Vec::new(),
+            young: Vec::new(),
+            young_in_use: 0,
         }
+    }
+
+    /// Bump-allocate a slot of `layout` in a nursery chunk. Nursery slots
+    /// are never on a free list: a minor collection resets or promotes
+    /// whole chunks ([`Self::young_chunks`]).
+    #[inline]
+    pub fn alloc_young(&mut self, layout: Layout) -> NonNull<u8> {
+        let (slot_size, align) = slot_dims(layout);
+        let key = (slot_size as u32, align as u32);
+        if let Some(class) = self.young.iter_mut().find(|c| c.key == key)
+            && class.next + slot_size as u64 <= class.end
+        {
+            let p = class.next;
+            class.next += slot_size as u64;
+            return unsafe { NonNull::new_unchecked(p as *mut u8) };
+        }
+        self.young_refill(slot_size, align)
+    }
+
+    #[inline(never)]
+    fn young_refill(&mut self, slot_size: usize, align: usize) -> NonNull<u8> {
+        let key = (slot_size as u32, align as u32);
+        let at = match self.young.iter().position(|c| c.key == key) {
+            Some(at) => at,
+            None => {
+                self.young.push(YoungClass {
+                    key,
+                    used: Vec::new(),
+                    next: 0,
+                    end: 0,
+                    spare: Vec::new(),
+                });
+                self.young.len() - 1
+            }
+        };
+        let i = match self.young[at].spare.pop() {
+            Some(i) => i,
+            None => self.map_young_chunk(slot_size, align),
+        };
+        self.young_in_use += 1;
+        let c = self.chunks.get(i).expect("young chunk");
+        let first = c.ptr as u64 + u64::from(c.meta.first_off);
+        let slots = (CHUNK as u64 - u64::from(c.meta.first_off)) / slot_size as u64;
+        let class = &mut self.young[at];
+        class.used.push(i);
+        class.next = first + slot_size as u64;
+        class.end = first + slots * slot_size as u64;
+        unsafe { NonNull::new_unchecked(first as *mut u8) }
+    }
+
+    /// A chunk of the class for the nursery: a released one of that class,
+    /// else a new mapping. Its slots stay off the free lists.
+    fn map_young_chunk(&mut self, slot_size: usize, align: usize) -> usize {
+        let key = (slot_size as u32, align as u32);
+        let i = if let Some((_, list)) = self.released.iter_mut().find(|(k, _)| *k == key)
+            && let Some(i) = list.pop()
+        {
+            self.set_released(i, false);
+            i
+        } else {
+            let ptr = map_chunk(CHUNK);
+            let first_off = align_up(ptr as usize, align) - ptr as usize;
+            self.chunks.push(Chunk {
+                ptr,
+                meta: PageMeta::new(slot_size as u32, align as u32, first_off as u32),
+            });
+            self.chunks.len() - 1
+        };
+        if self.young_mask.len() <= i {
+            self.young_mask.resize(i + 1, false);
+        }
+        self.young_mask[i] = true;
+        i
+    }
+
+    /// Nursery chunks allocated into since the last minor collection.
+    #[inline]
+    pub fn young_chunks_in_use(&self) -> usize {
+        self.young_in_use
+    }
+
+    /// True when `addr` lies in a nursery chunk.
+    pub fn is_young_chunk(&self, chunk: usize) -> bool {
+        self.young_mask.get(chunk).copied().unwrap_or(false)
+    }
+
+    /// The nursery chunks in use: `(chunk index, first slot, end, slot
+    /// size)`, where `end` is past the last slot written (the bump pointer
+    /// in the current chunk). Slots past it were never written or were
+    /// poisoned by the last reset.
+    pub fn young_spans(&self) -> Vec<(usize, u64, u64, u64)> {
+        let mut out = Vec::new();
+        for class in &self.young {
+            let last = class.used.len();
+            for (n, &i) in class.used.iter().enumerate() {
+                let Some(c) = self.chunks.get(i) else {
+                    continue;
+                };
+                let size = u64::from(c.meta.slot_size);
+                let first = c.ptr as u64 + u64::from(c.meta.first_off);
+                let end = if n + 1 == last {
+                    class.next
+                } else {
+                    first + (CHUNK as u64 - u64::from(c.meta.first_off)) / size * size
+                };
+                out.push((i, first, end, size));
+            }
+        }
+        out
+    }
+
+    /// End of the last slot of chunk `i` (a promoted chunk's unused tail).
+    pub fn chunk_slots_end(&self, i: usize) -> u64 {
+        let c = self.chunks.get(i).expect("chunk");
+        let size = u64::from(c.meta.slot_size);
+        c.ptr as u64 + u64::from(c.meta.first_off) + (CHUNK as u64 - u64::from(c.meta.first_off)) / size * size
+    }
+
+    /// End a minor collection: `promoted` chunks join the old space with
+    /// `free` (their dead and never-used slots) on the free lists; every
+    /// other chunk in use is reset for reuse (its slots must already be
+    /// poisoned). The current chunks restart empty.
+    pub fn finish_young(&mut self, promoted: &[usize], free: Vec<NonNull<u8>>) {
+        for class in &mut self.young {
+            for i in class.used.drain(..) {
+                if !promoted.contains(&i) {
+                    class.spare.push(i);
+                }
+            }
+            class.next = 0;
+            class.end = 0;
+        }
+        for &i in promoted {
+            self.young_mask[i] = false;
+        }
+        for p in free {
+            self.free(p);
+        }
+        self.young_in_use = 0;
     }
 
     fn set_released(&mut self, chunk: usize, released: bool) {
@@ -387,6 +562,9 @@ impl Slab {
                 continue;
             };
             if self.released_mask.get(i).copied().unwrap_or(false) {
+                continue;
+            }
+            if cur.skip_young && self.is_young_chunk(i) {
                 continue;
             }
             let base = c.ptr as u64;
