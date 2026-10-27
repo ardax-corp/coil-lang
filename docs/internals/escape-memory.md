@@ -373,5 +373,5 @@ The nursery pays where step 3 left per-object reclaiming: gc_shrink is
 nearly everything (binary_trees, gc_rebuild) or little garbage exists
 (hashmap, b_coll), it costs up to 8% in instructions: gc_rebuild copies
 every node of the list it is building once before pretenuring kicks in,
-and binary_trees and hashmap run equal instructions but touch more
+and binary_trees and hashmap run within 2.5% of the instructions but touch more
 memory. Whether it stays on by default is decided with step 6.
