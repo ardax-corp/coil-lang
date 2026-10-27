@@ -717,6 +717,41 @@ fn main() {
 }
 ```
 
+## region
+
+Runs a block whose garbage is freed in one go when the block ends.
+
+`region { … }` suits a clear unit of work: one request, one frame, one
+pass over a file. Objects made inside are reclaimed together at the end
+instead of one by one by the collector. The compiler checks that none of
+them can leave the region (E0140): an object made inside may not be
+assigned to a local declared outside, stored into an object or static
+from outside, passed to a function that keeps it, or be the block's value.
+The value may be a plain value or an object made before the region.
+`return`, `?`, `break` and `continue` leave the region on the way out, and
+`region` is only a keyword before `{`: elsewhere it is an ordinary name.
+
+```coil
+use string::format;
+
+fn total_len(int rounds) -> int {
+    let total = 0;
+    let i = 0;
+    while i < rounds {
+        total += region {
+            let line = format("row %i", i);
+            line.len()
+        };
+        i += 1;
+    }
+    return total;
+}
+
+fn main() {
+    let n = total_len(3); // 15
+}
+```
+
 ## true
 
 The `bool` value true.
