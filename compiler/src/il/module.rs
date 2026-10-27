@@ -1509,6 +1509,7 @@ mod tests {
             hir_bisect: None,
             mir_sccp: false,
             auto_par: false,
+            early_free: false,
             require_mir: false,
         }
     }

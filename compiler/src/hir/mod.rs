@@ -371,6 +371,10 @@ pub enum Builtin {
     /// dictionary's boxed enum and a method's niche word). A niche word
     /// boxes to its enum object; an enum object becomes its niche word.
     Relayout,
+    /// Free the object a local holds, which nothing else reaches
+    /// (`gc_free_early`; `deep`: and everything it reaches). Added after
+    /// the HIR optimizer by the early-free rewrite only.
+    FreeEarly { deep: bool },
 }
 
 #[derive(Debug, Clone, PartialEq)]

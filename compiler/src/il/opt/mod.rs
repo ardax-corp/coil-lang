@@ -81,6 +81,10 @@ pub struct OptimizeOptions {
     /// Automatic fork-join of pure recursive calls and counted loops
     /// (`Pipeline::set_auto_par` also turns it off). `COIL_AUTO_PAR=0` off.
     pub auto_par: bool,
+    /// Free objects the escape facts prove dead at the end of their scope
+    /// or after the call they were passed to, with [`Self::escape_analysis`]
+    /// (`hir::early_free`). `COIL_EARLY_FREE=0` off.
+    pub early_free: bool,
     /// Every function must lower through direct MIR: a body left on its
     /// raw stack IL (the fuse tier) is an internal error. The compiler sets
     /// this when codegen reported no errors; IL-only modules leave it off.

@@ -744,6 +744,8 @@ pub struct Machine<const S: usize> {
     frames: ArrayVec<Frame, S>,
     /// Pin tables for frames that ran `ArrayPin` or a dense heap index.
     frame_pins: Vec<FramePins>,
+    /// Scratch for [`Self::free_early`]: the addresses one call freed.
+    early_freed: Vec<u64>,
     /// Last dense-index array identity (predicted hit in counted loops).
     dense_obj_addr: u64,
     dense_obj: Option<Object>,
@@ -923,6 +925,7 @@ impl<const S: usize> Machine<S> {
         Self {
             frames,
             frame_pins: Vec::new(),
+            early_freed: Vec::new(),
             dense_obj_addr: 0,
             dense_obj: None,
             heap: crate::memory::HeapSlot::default(),
@@ -1645,6 +1648,44 @@ impl<const S: usize> Machine<S> {
         }
     }
 
+    /// `gc_free_early(v, deep)`: free what the compiler proved dead
+    /// ([`Heap::free_early`]). Frame pins keep their arrays, and the dense
+    /// object cache forgets a freed address. `COIL_EARLY_FREE=0` turns it
+    /// off; `COIL_EARLY_FREE=check` frees nothing and aborts when the next
+    /// mark still reaches an object it would have freed.
+    pub(crate) fn free_early(&mut self, v: Value, deep: bool) {
+        static MODE: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+        let mode = *MODE.get_or_init(|| match std::env::var("COIL_EARLY_FREE").as_deref() {
+            Ok("0" | "off") => 0,
+            Ok("check") => 2,
+            _ => 1,
+        });
+        if mode == 0 {
+            return;
+        }
+        // An `ArrayPin` holds its array for the frame; a dense index's pin
+        // only caches its register's object, and is dropped with it below.
+        let pins = &self.frame_pins;
+        let keep = |addr: u64| {
+            pins.iter().any(|p| p.by_slot.iter().zip(&p.sticky).any(|(o, &sticky)| sticky && o.is_some_and(|o| o.addr() == addr)))
+        };
+        let mut freed = std::mem::take(&mut self.early_freed);
+        freed.clear();
+        if self.heap.free_early(v, deep, mode == 2, &keep, &mut freed) == 0 {
+            self.early_freed = freed;
+            return;
+        }
+        self.clear_dense_obj_cache();
+        for p in &mut self.frame_pins {
+            for o in &mut p.by_slot {
+                if o.is_some_and(|o| freed.contains(&o.addr())) {
+                    *o = None;
+                }
+            }
+        }
+        self.early_freed = freed;
+    }
+
     #[inline]
     fn clear_dense_obj_cache(&mut self) {
         self.dense_obj_addr = 0;
@@ -1929,6 +1970,7 @@ impl<const S: usize> Machine<S> {
 
             #[cfg(feature = "gc-stats")]
             self.note_gc_census();
+            self.check_early_frees();
             self.heap.clear_dead_weaks();
             // SAFETY: all reachable objects were marked above; dead weaks cleared.
             unsafe { self.heap.sweep() };
@@ -2028,6 +2070,30 @@ impl<const S: usize> Machine<S> {
         eprintln!("{}", self.heap.census(&roots));
     }
 
+    /// `COIL_EARLY_FREE=check`, with a complete mark: mark again from the
+    /// roots that are certainly live (precise frame slots, statics and VM
+    /// handles, not words a conservative frame scan finds, which may be
+    /// stale copies), fail if that reaches an object an early free gave
+    /// up, then restore the full mark.
+    fn check_early_frees(&mut self) {
+        if !self.heap.has_doomed() {
+            return;
+        }
+        self.unmark_heap();
+        let mut roots = self.heap.take_gc_roots();
+        self.for_each_stack_root(&mut |addr, kind| {
+            if kind == crate::memory::RootKind::Precise {
+                roots.push(addr);
+            }
+        });
+        self.for_each_non_stack_root(&mut |addr, _| roots.push(addr));
+        self.heap.mark_from_roots(&roots);
+        self.heap.restore_gc_roots(roots);
+        self.heap.check_doomed();
+        self.unmark_heap();
+        self.mark_from_vm_roots();
+    }
+
     fn gc_start_mark(&mut self) {
         // The dense-index cache is not a root (it kept the last indexed
         // array alive after its frame returned); drop it before objects can
@@ -2119,6 +2185,7 @@ impl<const S: usize> Machine<S> {
         }
         #[cfg(feature = "gc-stats")]
         self.note_gc_census();
+        self.check_early_frees();
         self.heap.clear_dead_weaks();
         self.heap.begin_sweep();
         // Intern table is unlinked; unmarked literals will be freed across
@@ -2267,7 +2334,7 @@ impl<const S: usize> Machine<S> {
                 let loc = pc
                     .and_then(|pc| self.program_debug.loc_at(pc))
                     .map_or(String::from("?"), |l| format!("{l:?}"));
-                if !(addr == 0 || heap.find_object_by_addr(addr).is_some()) {
+                if !(addr == 0 || heap.find_object_by_addr(addr).is_some() || heap.early_freed_slot(addr)) {
                     let n = self.frames.len();
                     let hi = if frame + 1 < n {
                         self.frames.iter().nth(frame + 1).map_or(0, |f| f.get())

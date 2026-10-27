@@ -245,6 +245,13 @@ pub struct Heap {
     gc_root_objects: Vec<Object>,
     gc_roots: Vec<u64>,
     gc_dangling_strings: Vec<RefString>,
+    /// Check mode of [`Self::free_early`]: objects it would have freed,
+    /// which the next mark must not reach ([`Self::check_doomed`]).
+    doomed: Vec<u64>,
+    /// [`Self::free_early`] freed something: a dead frame word or a dead
+    /// object may now point at a freed or reused slot, so a typed handle
+    /// is looked up before it is marked ([`Self::early_freed_slot`]).
+    freed_early: bool,
     /// Incremental mark / lazy sweep (COI-309 S4).
     gc_phase: GcPhase,
     /// Next object to consider while sweeping; `None` when the cursor is idle.
@@ -294,6 +301,8 @@ impl Default for Heap {
             gc_root_objects: Vec::new(),
             gc_roots: Vec::new(),
             gc_dangling_strings: Vec::new(),
+            doomed: Vec::new(),
+            freed_early: false,
             gc_phase: GcPhase::Idle,
             gc_sweep_cursor: None,
             ffi_strings: Vec::new(),
@@ -975,6 +984,115 @@ impl Heap {
         self.gc_dangling_strings = dangling_strings;
     }
 
+    /// Free the object `v` points at before a collection would, because
+    /// the compiler proved nothing else reaches it (`feature/escape-memory`
+    /// step 2). `deep` also frees every object it reaches through precise
+    /// pointer words. `keep` names objects the VM still holds itself (frame
+    /// pins); those and anything this cannot free safely stay for the GC:
+    /// interned strings, the shared unit variants and `()`, objects with
+    /// a `drop`, handles, and everything while a cycle or a steal epoch is
+    /// open. `check` frees nothing and records the objects instead, which
+    /// the next mark must not reach. Returns how many objects it freed.
+    /// The addresses freed are pushed onto `freed`.
+    pub fn free_early(&mut self, v: Value, deep: bool, check: bool, keep: &dyn Fn(u64) -> bool, freed: &mut Vec<u64>) -> usize {
+        if self.gc_phase != GcPhase::Idle || self.epoch_stw || !self.alloc_lock.is_null() {
+            return 0;
+        }
+        let Some(root) = self.find_object_by_addr(v.heap_addr()) else {
+            return 0;
+        };
+        if !self.early_freeable(root) || keep(root.addr()) {
+            return 0;
+        }
+        let mut found = vec![root];
+        if deep {
+            // Every mark bit is clear while idle: a set bit means visited.
+            let mut work = Vec::new();
+            root.mark(&mut work);
+            let mut children = Vec::new();
+            while let Some(obj) = work.pop() {
+                obj.for_each_reference(self, &mut |addr, precise| {
+                    if precise {
+                        children.push(addr);
+                    }
+                });
+                for addr in children.drain(..) {
+                    if let Some(child) = self.find_object_by_addr(addr)
+                        && self.early_freeable(child)
+                        && !child.is_marked()
+                        && !keep(addr)
+                    {
+                        child.mark(&mut work);
+                        found.push(child);
+                    }
+                }
+            }
+            for obj in &found {
+                obj.unmark();
+            }
+        }
+        if check {
+            self.doomed.extend(found.iter().map(Object::addr));
+            return 0;
+        }
+        self.freed_early = true;
+        freed.extend(found.iter().map(Object::addr));
+        for &obj in &found {
+            unsafe { self.dealloc(obj) };
+        }
+        found.len()
+    }
+
+    /// Whether `addr` may be a slot [`Self::free_early`] gave back: a stale
+    /// reference there is no heap corruption.
+    pub fn early_freed_slot(&self, addr: u64) -> bool {
+        self.freed_early && self.slab.contains_slot(addr)
+    }
+
+    /// Whether check mode recorded objects since the last check.
+    pub fn has_doomed(&self) -> bool {
+        !self.doomed.is_empty()
+    }
+
+    /// Whether [`Self::free_early`] may free `obj` (when nothing reaches it).
+    fn early_freeable(&self, obj: Object) -> bool {
+        match obj {
+            Object::String(s) => {
+                // Interning hashes a string first; an unhashed one is not interned.
+                let s_ref = s.as_ref();
+                !s_ref.hash_set() || self.strings.find(&s_ref.data, s_ref.hash_code()).is_none_or(|i| i.as_ptr() != s.as_ptr())
+            }
+            Object::Array(_) => true,
+            Object::Tuple(t) => !t.as_ref().elements().is_empty(),
+            Object::Enum(e) => self.finalizer_types.is_empty() && !e.as_ref().payload.is_empty(),
+            Object::Instance(_) => self.finalizer_types.is_empty(),
+            _ => false,
+        }
+    }
+
+    /// Check mode of [`Self::free_early`], once a mark from the roots that
+    /// are certainly live is complete: an object it would have freed that
+    /// the mark reached was still in use.
+    pub fn check_doomed(&mut self) {
+        for addr in std::mem::take(&mut self.doomed) {
+            if let Some(obj) = self.find_object_by_addr(addr)
+                && obj.is_marked()
+            {
+                let root = self.gc_roots.contains(&addr);
+                let mut holders = Vec::new();
+                for o in self.objects() {
+                    o.for_each_reference(self, &mut |a, precise| {
+                        if a == addr {
+                            holders.push(format!("{o}{}", if precise { "" } else { " (imprecise)" }));
+                        }
+                    });
+                }
+                eprintln!("early free check: {obj} at {addr:#x} was freed while still reachable (root: {root}, held by: {holders:?})");
+                std::process::abort();
+            }
+        }
+    }
+
     /// Returns the number of bytes that are being allocated.
     pub const fn size(&self) -> usize {
         self.alloc_bytes
@@ -1371,7 +1489,7 @@ impl Heap {
         if kind == common::WORD_SCALAR && resolves {
             panic!("gc-stress: scalar word {index} of {what} holds a heap reference");
         }
-        if kind == common::WORD_POINTER && addr != 0 && !resolves {
+        if kind == common::WORD_POINTER && addr != 0 && !resolves && !self.early_freed_slot(addr) {
             panic!("gc-stress: pointer word {index} of {what} holds a non-object");
         }
     }
@@ -1680,6 +1798,8 @@ impl Object {
     /// Mark a stored member, including Result `Err` tagged pointers in `Value`.
     fn mark_member(heap: &Heap, member: &Member, grey_objects: &mut Vec<Self>) {
         match member {
+            // A dead object may still name a slot an early free gave back.
+            Member::Object(o) if heap.freed_early => heap.mark_value(Value::from(o.addr()), grey_objects),
             Member::Object(o) => o.mark(grey_objects),
             Member::Value(v) => heap.mark_value(*v, grey_objects),
         }
@@ -2526,6 +2646,11 @@ impl ObjString {
 
     /// Content hash ([`Self::hash`] of `data`), cached after the first call.
     #[inline]
+    /// Whether [`Self::hash_code`] ran (interning computes it first).
+    fn hash_set(&self) -> bool {
+        self.hash.load(Ordering::Relaxed) & HASH_SET != 0
+    }
+
     pub fn hash_code(&self) -> u32 {
         let cached = self.hash.load(Ordering::Relaxed);
         if cached & HASH_SET != 0 {
