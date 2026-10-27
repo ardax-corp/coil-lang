@@ -1943,7 +1943,10 @@ impl SubProgram {
         if let Some(program) = path.as_ref().and_then(|p| std::fs::read(p).ok()).and_then(|b| decode_program(&b)) {
             return Ok(program);
         }
-        let program = self.compile()?;
+        let program = self.compile();
+        // The sub-pipeline is gone; the caller's compile goes on.
+        super::release_free_heap();
+        let program = program?;
         if let (Some(dir), Some(path)) = (dir, path)
             && let Some(bytes) = encode_program(&program)
         {

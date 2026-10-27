@@ -2075,6 +2075,7 @@ impl Pipeline {
         // Every module is compiled, foreign clones included: nothing past
         // this reads a tree, and finalize peaks on top of them.
         self.ast_cache.release_asts();
+        release_free_heap();
 
         if self.failed || self.had_errors() || !self.check_capabilities() {
             return Err(CompileFail);
@@ -2469,6 +2470,21 @@ impl Pipeline {
             program.static_slot_count,
             debug,
         ))
+    }
+}
+
+/// Hand the allocator's free pages back to the OS. glibc keeps a phase's
+/// freed small blocks mapped, so the next phase's peak would stack on them.
+pub(crate) fn release_free_heap() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        unsafe extern "C" {
+            fn malloc_trim(pad: usize) -> i32;
+        }
+        // SAFETY: glibc's `malloc_trim` only releases free memory.
+        unsafe {
+            malloc_trim(0);
+        }
     }
 }
 
