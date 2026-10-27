@@ -278,3 +278,51 @@ What b_csv and b_json still allocate and do not free is their output: the
 parsed field strings and row vectors (b_csv), and the decoded strings and
 store (b_json). Those are live until the program drops the result, which
 is the GC's job (or step 4's).
+
+## Nursery (step 4)
+
+After step 3, collections cost little marking: gc_shrink keeps 11 live
+objects and result_heap_churn about as few. What is left is reclaiming
+dead objects one at a time. The sweep visits each one, drops its payload
+and pushes its slot onto a free list, about 160 instructions per object.
+gc_shrink spends about 45% of its time there and result_heap_churn 18%;
+every other benchmark spends under 3%. Freeing small fixed-size objects
+early made this worse (step 3), so the fix is to stop paying per dead
+object at all.
+
+Design (copying nursery, decided 2026-10-27):
+
+- **Young chunks.** Instances, payload enums, boxes, tuples and arrays,
+  the kinds evacuation may move, are bump-allocated into *young* slab
+  chunks, one current chunk per size class. Every other kind (strings,
+  closures, coroutines, handles) and every allocation in a shared-heap
+  epoch goes to the old space as before. The nursery holds a fixed number
+  of chunks; filling it asks for a minor collection at the next
+  safepoint.
+- **Write barrier.** An old object is *remembered* when its payload is
+  written: every payload write goes through `GcData::as_mut`, which tests
+  one header bit and, the first time, records the object's address. An
+  old object allocated with references (a closure, a coroutine) is
+  remembered when it is born. A prototype of the barrier measured within
+  noise (0 to 3%).
+- **Minor collection.** Trace young objects from the VM roots and the
+  remembered objects, never into old ones. A young object reached through
+  an ambiguous word (a conservative frame word, an unknown-kind field, a
+  `Root` or `Weak` target, an FFI argument) is *pinned*. Every other live
+  young object is copied bitwise into an old slot of its size class, and
+  precise words naming it are rewritten: must-pointer frame slots, pointer
+  statics, the remembered objects, and the survivors themselves. This is
+  the evacuation machinery of [gc-evacuation.md](gc-evacuation.md),
+  limited to the nursery.
+- **Reset.** A young chunk without pinned objects is reused whole: each
+  dead object only has its payload dropped (a no-op for inline payloads)
+  and its header poisoned. A chunk with a pinned object is promoted in
+  place, and its dead slots go to the free list as the sweep would.
+- **Major collections** stay mark-and-sweep. A minor collection runs first,
+  so the major mark sees an empty nursery, and the sweep skips young
+  chunks.
+- **Where it cannot move,** it promotes instead: while a host frame is
+  active (a nested `execute`), under the debugger, and with
+  `COIL_NURSERY=0`.
+- **Not in the nursery:** objects of a type with `drop`. A young object
+  that becomes finalizable is pinned.
