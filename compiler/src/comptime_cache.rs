@@ -158,7 +158,7 @@ impl Key {
             self.u64(list.len() as u64);
             list.iter().for_each(|p| self.text(p));
         }
-        for names in [&io.env, &io.exec, &io.net] {
+        for names in [&io.env, &io.net] {
             let mut list = names.clone();
             list.sort();
             self.u64(list.len() as u64);
@@ -209,13 +209,12 @@ pub fn reads_unchanged(accesses: &[ComptimeAccess]) -> bool {
     })
 }
 
-/// Whether `entry` used the environment, ran a program or used the
-/// network: what `--comptime-refresh` computes again.
+/// Whether `entry` used the environment or the network: what `--comptime-refresh` computes again.
 pub fn uses_outside(entry: &Entry) -> bool {
     entry
         .accesses
         .iter()
-        .any(|a| matches!(a, ComptimeAccess::Env(_) | ComptimeAccess::Exec(_) | ComptimeAccess::Net(_)))
+        .any(|a| matches!(a, ComptimeAccess::Env(_) | ComptimeAccess::Net(_)))
 }
 
 fn entry_path(dir: &Path, key: &str) -> PathBuf {
@@ -272,10 +271,6 @@ fn encode(entry: &Entry) -> Vec<u8> {
             }
             ComptimeAccess::Env(name) => {
                 out.push(2);
-                text(&mut out, name);
-            }
-            ComptimeAccess::Exec(name) => {
-                out.push(3);
                 text(&mut out, name);
             }
             ComptimeAccess::Net(at) => {
@@ -346,7 +341,7 @@ fn decode(bytes: &[u8]) -> Option<Entry> {
             }
             1 => ComptimeAccess::Write(resolve(&r.text()?)),
             2 => ComptimeAccess::Env(r.text()?),
-            3 => ComptimeAccess::Exec(r.text()?),
+            // 3 was a program run (`env::exec`, removed).
             4 => ComptimeAccess::Net(r.text()?),
             _ => return None,
         });
@@ -437,7 +432,6 @@ mod tests {
             accesses: vec![
                 ComptimeAccess::Read { path: dir.join("x.txt"), digest: [7; 32] },
                 ComptimeAccess::Env("HOME".to_string()),
-                ComptimeAccess::Exec("git".to_string()),
             ],
             value: Value::Snapshot { types: vec![(3, "class a::P".to_string())], words: vec![1, 2, u64::MAX] },
         };

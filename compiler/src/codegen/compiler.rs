@@ -8934,7 +8934,6 @@ fn grant_hint(missing: u16) -> Option<String> {
         (F::READ, "`--comptime-read PATH`"),
         (F::WRITE, "`--comptime-write PATH`"),
         (F::ENV, "`--comptime-env NAME`"),
-        (F::EXEC, "`--comptime-exec STEM`"),
         (F::NET, "`--comptime-net HOST:PORT`"),
     ]
     .into_iter()

@@ -497,9 +497,9 @@ pub fn default_host() -> Option<std::sync::Arc<dyn MacroHost>> {
 
 /// The IO one compile-time evaluation may do, resolved for the module its
 /// code is in ([`crate::ComptimeGrants::for_module`]): files under `read` /
-/// `write` (absolute), environment variables `env`, programs whose stem is
-/// in `exec`, TCP connections to `net` (`host` or `host:port`). The host checks each native call against it. `offline`
-/// (`--comptime-offline`) refuses the environment and programs: an
+/// `write` (absolute), environment variables `env`, TCP connections to `net`
+/// (`host` or `host:port`). The host checks each native call against it. `offline`
+/// (`--comptime-offline`) refuses the environment and the network: an
 /// evaluation runs then only when no cached result was found. `replay` is
 /// the language server's offline mode: it also refuses writes, and its
 /// refusals say to build the project.
@@ -508,7 +508,6 @@ pub struct ComptimeIo {
     pub read: Vec<PathBuf>,
     pub write: Vec<PathBuf>,
     pub env: Vec<String>,
-    pub exec: Vec<String>,
     pub net: Vec<String>,
     pub offline: bool,
     pub replay: bool,
@@ -523,7 +522,6 @@ pub enum ComptimeAccess {
     Read { path: PathBuf, digest: [u8; 32] },
     Write(PathBuf),
     Env(String),
-    Exec(String),
     /// A TCP connection, `host:port`.
     Net(String),
 }
@@ -540,7 +538,6 @@ impl ComptimeIo {
             (!self.read.is_empty(), F::READ),
             (!self.write.is_empty(), F::WRITE),
             (!self.env.is_empty(), F::ENV),
-            (!self.exec.is_empty(), F::EXEC),
             (!self.net.is_empty(), F::NET),
         ]
         .into_iter()
@@ -572,14 +569,6 @@ impl ComptimeIo {
             return self.check_online(&format!("reads environment variable `{name}`"));
         }
         Err(format!("reading environment variable `{name}` while compiling needs `--comptime-env {name}`"))
-    }
-
-    pub fn check_exec(&self, program: &str) -> Result<(), String> {
-        let stem = Path::new(program).file_stem().and_then(|s| s.to_str()).unwrap_or(program);
-        if self.exec.iter().any(|s| s == stem) {
-            return self.check_online(&format!("runs `{program}`"));
-        }
-        Err(format!("running `{program}` while compiling needs `--comptime-exec {stem}`"))
     }
 
     /// A TCP connection to `host:port`: granted by `host` or `host:port`.

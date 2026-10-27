@@ -138,7 +138,7 @@ everything. Two shapes are freed:
 
 Each free is `Builtin::FreeEarly { deep }` of the local and a `Clear` of
 its frame word. It lowers to MIR `FreeEarly` and to the `FreeEarly`
-instruction (archive 5.1), which pops the word; the VM runs it in its main
+instruction (archive 6.1), which pops the word; the VM runs it in its main
 dispatch loop. (Step 2 first used a host call; that left the fast loop on
 every free, and a `join` with a free per part ran 25% slower.) The VM frees nothing while a collection cycle or a
 steal epoch is open, and skips what it cannot free safely: interned
@@ -218,7 +218,7 @@ A concatenation whose operands include fresh call results (`a + f(x) + b`)
 binds those results to temporaries and frees them once the result is
 built; the chain stays one chain, so `FORMAT` fusion still applies.
 
-Freeing now has its own instruction (`FreeEarly`, archive 5.1) instead of
+Freeing now has its own instruction (`FreeEarly`, archive 6.1) instead of
 a host call: a host call left the VM's fast dispatch loop on every free,
 and a `join` with one free per part ran 25% slower; with the instruction
 `join` and `append` time the same with frees on and off.

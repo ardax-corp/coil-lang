@@ -94,7 +94,7 @@ The IL is **compile-time only**. The archive version is recorded only in `common
 ## Capabilities
 
 Every `HOST_NATIVES` row (`common/src/host.rs`) states the capabilities it
-needs (`common::Caps`: read, write, net, env, exec, exit, attach). `open` is
+needs (`common::Caps`: read, write, net, env, exit, attach). `open` is
 refined by a literal mode (`"r"` → read; `w` / `a` / `x` → write; `+` or a
 non-literal mode → both, `common::open_mode_caps`).
 
@@ -111,16 +111,17 @@ the chain that reaches it:
 error[E0414]: `io::open` requires `--allow-read`: reached from `main` → `load`
 ```
 
-Exec / exit / attach keep their codes (`E0406`–`E0408`); read / write / net /
-env are `E0414`. Only what the program reaches counts, so importing a module
-with an unused `env::exec` helper needs no grant. A build with no `main` and
+Exit / attach keep their codes (`E0407`, `E0408`; `E0406` was `env::exec`,
+which moved to the coil-process package); read / write / net / env are
+`E0414`. Only what the program reaches counts, so importing a module with an
+unused `env::exit` helper needs no grant. A build with no `main` and
 no tests (a library) reports nothing. Two gates stay at the call site in
 typecheck, because they have no IL call to tag: the `stream.attach(…)` method
 form and FFI (`dload`, process-exec symbols). Macro sub-programs are granted
 everything: the macro VM refuses host calls at run time (`E0119`).
 
 Flags: `--allow-read`, `--allow-write`, `--allow-net`, `--allow-env`,
-`--allow-exec`, `--allow-exit`, `--allow-attach`, `--allow-ffi-exec`, and
+`--allow-exit`, `--allow-attach`, `--allow-ffi-exec`, and
 `-A` / `--allow-all` for all of them (not `dload`). `Pipeline::grant_capability`
 / `grant_all` are the library form.
 

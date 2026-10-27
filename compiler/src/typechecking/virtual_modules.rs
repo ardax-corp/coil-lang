@@ -1017,7 +1017,6 @@ impl VirtualModules {
             ("cwd", "env_cwd"),
             ("set_cwd", "env_set_cwd"),
             ("exit", "env_exit"),
-            ("exec", "env_exec"),
         ]));
         modules.insert(ENV_MODULE, env_exports);
 

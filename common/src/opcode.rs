@@ -498,7 +498,7 @@ pub enum Instruction {
     /// `p - 63 + (63 - lzcnt(mask))`, else `p -= 64`. Execution resumes
     /// past the body.
     VScan,
-    /// Early free (archive 5.1): pop a heap word the compiler proved dead
+    /// Early free (archive 6.1): pop a heap word the compiler proved dead
     /// and give its object back to the heap now; operand bit 0 frees what
     /// it reaches through precise words too. The VM skips what it cannot
     /// free safely (see `Heap::free_early`). Never collects.

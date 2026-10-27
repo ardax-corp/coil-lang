@@ -21,9 +21,6 @@ enum EnvError {
     InvalidInput,
     /// `var` asked for a variable that is not set.
     NotFound,
-    /// `exec` could not start the program, or the program was ended by a
-    /// signal and has no exit code.
-    ExecFailed,
     /// Any other failure: the working directory cannot be read or changed,
     /// or a variable's value is not valid UTF-8.
     Other,
@@ -68,7 +65,7 @@ fn var(string name) -> Result<string, EnvError> {}
 
 /// Sets the environment variable `name` to `value` for this process.
 ///
-/// Programs started later with `exec` inherit it. A name or value with a
+/// Programs started later (coil-process) inherit it. A name or value with a
 /// NUL byte is `Err(EnvError::InvalidInput)`. Needs `--allow-env`.
 ///
 /// # Examples
@@ -121,7 +118,7 @@ fn cwd() -> Result<string, EnvError> {}
 
 /// Changes the current working directory of the whole process.
 ///
-/// Relative paths opened later, and programs started with `exec`, use the
+/// Relative paths opened later, and programs started later, use the
 /// new directory. Returns `Err(EnvError::Other)` if `path` does not exist
 /// or is not an accessible directory. Needs `--allow-env`.
 ///
@@ -152,25 +149,3 @@ fn set_cwd(string path) -> Result<unit, EnvError> {}
 /// ```
 fn exit(int code) {}
 
-/// Runs `program` with the arguments `argv` and waits for it to finish.
-///
-/// There is no shell: `program` is looked up on `PATH` (unless it is a
-/// path) and `argv` excludes the program name. The child inherits this
-/// process's working directory, environment and standard streams. Returns
-/// `Ok(exit_code)`, or `Err(EnvError::ExecFailed)` if the program cannot be
-/// started or was killed by a signal. Needs `--allow-exec`; without the
-/// grant the program does not compile (error `E0406`).
-///
-/// # Examples
-///
-/// ```
-/// use env::{exec};
-/// # use tests::assert;
-/// let argv: Vec<string> = Vec::from(["-c", "exit 3"]);
-/// let code = match exec("sh", argv) {
-///     Result::Ok(c) => c,
-///     Result::Err(_) => -1,
-/// };
-/// assert!(code == 3);
-/// ```
-fn exec(string program, Vec<string> argv) -> Result<int, EnvError> {}

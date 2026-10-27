@@ -13,7 +13,7 @@ use rkyv::{Archive, Deserialize, Serialize};
 use crate::debug::{DebugLine, DebugLoc, ProgramDebug};
 
 /// Archive ABI major. Bump (and reset minor to 0) on incompatible layout/opcode changes.
-pub const ARCHIVE_MAJOR: u16 = 5;
+pub const ARCHIVE_MAJOR: u16 = 6;
 
 /// Archive ABI minor. Bump on additive, append-only bytecode changes.
 ///
@@ -164,6 +164,16 @@ pub const ARCHIVE_MAJOR: u16 = 5;
 ///      bodies of at most 63 words). Older runtimes would read the flag
 ///      as body length.
 ///
+/// Major 6 / minor 0: `env::exec` moved to the coil-process package.
+/// `EnvError` drops `ExecFailed` (`Other` is now tag 2) and HostInvoke id
+/// 64 (`env_exec`) is a removed slot. Major-5 archives would read
+/// `EnvError::Other` as a missing tag.
+///
+/// Major 6 minors:
+/// 1 — `FreeEarly`: free an object the compiler proved dead (escape
+///     analysis), and HostInvoke `from_bytes_take` (id 174). Older VMs
+///     know neither.
+///
 /// Major 5 / minor 0: builtin error regrouping. `IoError` drops
 /// `Certificate` / `Handshake` / `NotATerminal` for `Protocol` (tag 10);
 /// `io::tty` natives return `TtyError` and `string::from_bytes` /
@@ -172,11 +182,6 @@ pub const ARCHIVE_MAJOR: u16 = 5;
 /// return `ThreadError { JoinFailed, NotSendable }`, `ChannelError` or
 /// `LockError` instead of one six-variant `ThreadError`. Major-4 archives
 /// would read the old tags as other variants, so they are not loadable.
-///
-/// Major 5 minors:
-/// 1 — `FreeEarly`: free an object the compiler proved dead (escape
-///     analysis), and HostInvoke `from_bytes_take` (id 174). Older VMs
-///     know neither.
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.
@@ -956,7 +961,7 @@ fn decode_envelope(buffer: &[u8]) -> Result<DecodedArchive, ArchiveDecodeError> 
         .ok()
         .and_then(|archived| rkyv::deserialize::<ArchivedProgramV12, Error>(archived).ok());
 
-    // Every major-5 archive carries the full current envelope. The legacy
+    // Every major-5+ archive carries the full current envelope. The legacy
     // envelopes below are major-4 layouts: they no longer load, but probing
     // them still reports a version error instead of a corrupt archive.
     if let Some(program) = current {
@@ -1256,10 +1261,10 @@ mod tests {
 
     #[test]
     fn archive_version_matches_current_abi() {
-        assert_eq!(ARCHIVE_MAJOR, 5);
+        assert_eq!(ARCHIVE_MAJOR, 6);
         assert_eq!(ARCHIVE_MINOR, 1);
-        assert_eq!(ARCHIVE_VERSION, pack_archive_version(5, 1));
-        assert_eq!(format_archive_version(ARCHIVE_VERSION), "5.1");
+        assert_eq!(ARCHIVE_VERSION, pack_archive_version(6, 1));
+        assert_eq!(format_archive_version(ARCHIVE_VERSION), "6.1");
     }
 
     #[test]

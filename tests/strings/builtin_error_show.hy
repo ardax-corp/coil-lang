@@ -48,7 +48,7 @@ test("thread errors, EnvError and ffi ErrorKind") {
     assert!(format("%v", ChannelError::Full) == "Full");
     assert!(format("%v", LockError::Poisoned) == "Poisoned");
     assert!(format("%v", LockError::AlreadyHeld) == "AlreadyHeld");
-    assert!(format("%v", EnvError::ExecFailed) == "ExecFailed");
+    assert!(format("%v", EnvError::Other) == "Other");
     assert!(format("%v", EnvError::NotFound) == "NotFound");
     assert!(format("%v", ErrorKind::SymbolNotFound) == "SymbolNotFound");
     assert!(format("%v", ErrorKind::Other) == "Other");

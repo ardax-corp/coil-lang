@@ -1,6 +1,6 @@
 //! IO natives on the compile-time VM, checked against the grants of the
 //! evaluation running ([`set_active`]): `--comptime-read` / `-write` /
-//! `-env` / `-exec` for the module of the const, `comptime` expression or
+//! `-env` / `-net` for the module of the const, `comptime` expression or
 //! macro. With no grants active (silent folding, `static let`) every one
 //! of them fails the evaluation. While recording ([`start_recording`]),
 //! each granted call is noted for the result cache.
@@ -117,8 +117,6 @@ enum Gate {
     Open,
     /// Argument `0` names an environment variable.
     Env,
-    /// Argument `0` is a program to run.
-    Exec,
     /// A stream operation: the stream came from a granted `open` or connect.
     Stream,
     /// `tcp_connect(host, port)` / `tcp_connect_timeout(host, port, ms)`.
@@ -138,7 +136,6 @@ fn gate_of(name: &str) -> Option<Gate> {
         "fs_copy" => Gate::Copy,
         "open" => Gate::Open,
         "env_var" => Gate::Env,
-        "env_exec" => Gate::Exec,
         "read" | "write" | "close" | "write_from" | "await_readable" | "await_writable" | "tcp_peer_addr"
         | "tcp_local_addr" | "tcp_set_nodelay" | "tcp_shutdown" => Gate::Stream,
         "tcp_connect" | "tcp_connect_timeout" => Gate::Net,
@@ -180,12 +177,6 @@ fn check(io: &ComptimeIo, gate: Gate, heap: &Heap, args: &[Value]) -> Result<(),
             let name = arg(0)?;
             io.check_env(&name)?;
             note(ComptimeAccess::Env(name));
-            Ok(())
-        }
-        Gate::Exec => {
-            let program = arg(0)?;
-            io.check_exec(&program)?;
-            note(ComptimeAccess::Exec(program));
             Ok(())
         }
         Gate::Stream => Ok(()),

@@ -1,14 +1,14 @@
-//! Host process environment: argv, env vars, cwd, exec (no shell).
+//! Host process environment: argv, env vars, cwd, exit. Running programs
+//! is the coil-process package's job.
 
 use std::cell::Cell;
-use std::process::Command;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use common::{BUILTIN_ENV_ERROR_VARIANTS, BUILTIN_RESULT_VARIANTS, Value};
 
 use crate::host_enum::{pack_result_or_panic, pack_result_unit_or_panic};
-use crate::io::{alloc_result_err, alloc_result_ok};
+use crate::io::alloc_result_err;
 use crate::memory::{Heap, ObjArray, Object};
 
 pub use common::is_ffi_exec_symbol;
@@ -19,8 +19,7 @@ pub use common::is_ffi_exec_symbol;
 pub enum EnvErrorTag {
     InvalidInput = 0,
     NotFound = 1,
-    ExecFailed = 2,
-    Other = 3,
+    Other = 2,
 }
 
 fn alloc_enum(heap: &mut Heap, tag: u32, payload: impl Into<crate::EnumPayload>) -> Value {
@@ -59,13 +58,6 @@ pub fn as_result_unit(heap: &mut Heap, r: Result<(), EnvErrorTag>) -> Value {
     }
 }
 
-pub fn as_result_int(heap: &mut Heap, r: Result<i64, EnvErrorTag>) -> Value {
-    match r {
-        Ok(n) => alloc_result_ok(heap, Value::from(n)),
-        Err(tag) => alloc_result_env_err(heap, tag),
-    }
-}
-
 fn contains_nul(s: &str) -> bool {
     s.contains('\0')
 }
@@ -77,6 +69,7 @@ fn heap_string(heap: &Heap, v: Value) -> Result<String, EnvErrorTag> {
     }
 }
 
+#[cfg(test)]
 fn value_as_string_array(heap: &Heap, v: Value) -> Result<Vec<String>, EnvErrorTag> {
     match heap.find_object_by_addr(v.bits()) {
         Some(Object::Array(gc)) => {
@@ -272,31 +265,10 @@ pub fn try_host_exit(heap: &mut Heap, args: &[Value]) -> Result<Value, String> {
     Err(format!("env::exit({code}) ends only this job under the test harness"))
 }
 
-/// Spawn `program` with argv from `args_array` (no shell). NUL bytes rejected.
-pub fn host_exec(heap: &mut Heap, args: &[Value]) -> Value {
-    let r = try_host_exec(heap, args);
-    as_result_int(heap, r)
-}
-
-fn try_host_exec(heap: &mut Heap, args: &[Value]) -> Result<i64, EnvErrorTag> {
-    if args.len() != 2 {
-        return Err(EnvErrorTag::InvalidInput);
-    }
-    let program = heap_string(heap, args[0])?;
-    if contains_nul(&program) {
-        return Err(EnvErrorTag::InvalidInput);
-    }
-    let argv = value_as_string_array(heap, args[1])?;
-    // Inherits VM cwd + env. Typecheck already requires `--allow-exec`.
-    let status = Command::new(&program)
-        .args(&argv)
-        .status()
-        .map_err(|_| EnvErrorTag::ExecFailed)?;
-    if let Some(code) = status.code() {
-        Ok(code as i64)
-    } else {
-        Err(EnvErrorTag::ExecFailed)
-    }
+/// The removed `env_exec` slot (id 64): `env::exec` moved to the
+/// coil-process package, and no program can name it any more.
+fn host_exec_removed(_heap: &mut Heap, _args: &[Value]) -> Value {
+    panic!("removed HostInvoke `env_exec` (use the coil-process package)");
 }
 
 /// Pipeline wiring: `(registry_name, arity, host_fn)`.
@@ -308,13 +280,12 @@ pub const ENV_WIRING: &[(&str, usize, crate::HostValueFn)] = &[
     ("env_cwd", 0, host_cwd),
     ("env_set_cwd", 1, host_set_cwd),
     ("env_exit", 1, host_exit),
-    ("env_exec", 2, host_exec),
+    ("env_exec", 2, host_exec_removed),
 ];
 
 // Pipeline registry aliases (mirror `thread_spawn` pattern).
 pub use host_args as env_args;
 pub use host_cwd as env_cwd;
-pub use host_exec as env_exec;
 pub use host_exit as env_exit;
 pub use host_remove_var as env_remove_var;
 pub use host_set_cwd as env_set_cwd;
@@ -324,9 +295,6 @@ pub use host_var as env_var;
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[cfg(unix)]
-    static ENV_TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn enum_tag(heap: &Heap, v: Value) -> Option<u32> {
         match heap.find_object_by_addr(v.bits()) {
@@ -355,22 +323,8 @@ mod tests {
         match err.as_ref().tag {
             0 => EnvErrorTag::InvalidInput,
             1 => EnvErrorTag::NotFound,
-            2 => EnvErrorTag::ExecFailed,
             _ => EnvErrorTag::Other,
         }
-    }
-
-    #[cfg(unix)]
-    fn make_string_array(heap: &mut Heap, items: &[&str]) -> Value {
-        let elements: Vec<Value> = items
-            .iter()
-            .map(|s| {
-                let gc = heap.intern((*s).into());
-                Value::from(gc.as_ptr() as *mut u8 as u64)
-            })
-            .collect();
-        let (obj, _) = heap.alloc(ObjArray::new(elements), Object::Array);
-        Value::from(obj.addr())
     }
 
     #[test]
@@ -430,32 +384,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
-    fn host_exec_true_returns_zero() {
-        let _guard = ENV_TEST_GUARD.lock().expect("env test mutex");
-        let mut heap = Heap::default();
-        let prog = heap.intern("true".into());
-        let args = make_string_array(&mut heap, &[]);
-        let r = host_exec(
-            &mut heap,
-            &[Value::from(prog.as_ptr() as *mut u8 as u64), args],
-        );
-        if enum_tag(&heap, r) != Some(0) {
-            // Sandboxed CI may block spawning subprocesses.
-            let tag = result_err_tag(&heap, r);
-            assert_eq!(
-                tag,
-                EnvErrorTag::ExecFailed,
-                "unexpected exec error {:?}",
-                tag
-            );
-            return;
-        }
-        let n = result_ok_payload(&heap, r).as_int();
-        assert_eq!(n, 0);
-    }
-
-    #[test]
     fn env_wiring_arities() {
         assert_eq!(ENV_WIRING.len(), 8);
         let by_name: std::collections::BTreeMap<&str, usize> =
@@ -463,7 +391,6 @@ mod tests {
         assert_eq!(by_name["env_args"], 0);
         assert_eq!(by_name["env_cwd"], 0);
         assert_eq!(by_name["env_set_var"], 2);
-        assert_eq!(by_name["env_exec"], 2);
         assert_eq!(by_name["env_var"], 1);
     }
 }

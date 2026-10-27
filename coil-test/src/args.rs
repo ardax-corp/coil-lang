@@ -499,7 +499,7 @@ mod tests {
             o.extra_roots,
             vec![PathBuf::from("examples/src"), PathBuf::from("lib")]
         );
-        assert!(o.grants.allow_exit && !o.grants.allow_exec);
+        assert!(o.grants.allow_exit && !o.grants.allow_attach);
         assert_eq!(o.grants.allow_dload, vec!["plugin".to_string()]);
         assert_eq!(o.grants.ffi_search_paths, vec![PathBuf::from("native")]);
 

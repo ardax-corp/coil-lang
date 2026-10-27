@@ -542,19 +542,13 @@ impl Pipeline {
         self.try_sync_host_caps();
     }
 
-    /// Allow `env::exec` (`--allow-exec`).
-    pub fn grant_exec(&mut self) {
-        self.host_grants.allow_exec = true;
-        self.try_sync_host_caps();
-    }
-
     /// Allow `env::exit` (`--allow-exit`).
     pub fn grant_exit(&mut self) {
         self.host_grants.allow_exit = true;
         self.try_sync_host_caps();
     }
 
-    /// Allow a capability by name (`read`, `write`, `net`, `env`, `exec`,
+    /// Allow a capability by name (`read`, `write`, `net`, `env`,
     /// `exit`, `attach`, `ffi-exec`): `--allow-<name>`. False for an
     /// unknown name.
     pub fn grant_capability(&mut self, name: &str) -> bool {
@@ -3947,7 +3941,7 @@ fn main() {}
     }
 
     /// FFI process-exec stays a typecheck gate; host calls such as
-    /// `env::exec` are checked over reachable code after codegen.
+    /// `env::exit` are checked over reachable code after codegen.
     #[test]
     fn typecheck_project_denies_ungranted_ffi_exec() {
         let src = r#"

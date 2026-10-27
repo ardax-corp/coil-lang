@@ -1,11 +1,10 @@
 // E4: a gated call nothing reaches needs no grant, so a module can keep a
-// helper that runs a program without every importer passing `--allow-exec`.
+// helper that ends the process without every importer passing `--allow-exit`.
 use tests::assert;
-use env::exec;
+use env::exit;
 
-fn shell() {
-    let args: Vec<string> = Vec::new();
-    let _ = exec("true", args);
+fn stop() {
+    exit(1);
 }
 
 fn add(int a, int b) -> int {

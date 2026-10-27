@@ -58,7 +58,6 @@ const WRITE_FS: Caps = Caps::WRITE;
 const COPY_FS: Caps = Caps::READ.union(Caps::WRITE);
 const NET_CAP: Caps = Caps::NET;
 const ENV_CAP: Caps = Caps::ENV;
-const EXEC_CAP: Caps = Caps::EXEC;
 const EXIT_CAP: Caps = Caps::EXIT;
 const ATTACH_CAP: Caps = Caps::ATTACH;
 
@@ -512,12 +511,14 @@ pub const HOST_NATIVES: &[HostNative] = &[
         effects: EXEC,
         caps: EXIT_CAP,
     },
+    // Removed slot: `env::exec` moved to the coil-process package. Kept so
+    // later ids do not slide; nothing exports it and the runtime panics.
     HostNative {
         name: "env_exec",
         arity: 2,
         id: 64,
         effects: EXEC,
-        caps: EXEC_CAP,
+        caps: Caps::NONE,
     },
     HostNative {
         name: "ord",
@@ -1393,7 +1394,7 @@ pub const TTY_READ_TIMEOUT_NATIVE: &str = "tty_read_timeout";
 pub const TTY_RESIZED_NATIVE: &str = "tty_resized";
 pub const TTY_ENABLE_VT_NATIVE: &str = "tty_enable_vt";
 /// `from_bytes` of a buffer the compiler proved dead after the call (archive
-/// 5.1): the string takes the buffer's bytes. Never named in source; the
+/// 6.1): the string takes the buffer's bytes. Never named in source; the
 /// compiler swaps it in for `from_bytes`.
 pub const FROM_BYTES_TAKE_ID: u16 = 174;
 pub const FROM_BYTES_TAKE_NATIVE: &str = "from_bytes_take";
@@ -1490,7 +1491,7 @@ pub fn host_native_ids() -> impl Iterator<Item = (&'static str, usize)> {
     HOST_NATIVES.iter().map(|e| (e.name, e.id as usize))
 }
 
-/// True when `name` is a libc/CRT process-exec symbol (not `env::exec`).
+/// True when `name` is a libc/CRT process-exec symbol.
 pub fn is_ffi_exec_symbol(name: &str) -> bool {
     let n = name.trim().trim_matches('_').to_ascii_lowercase();
     matches!(

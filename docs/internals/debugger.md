@@ -25,7 +25,7 @@ coil-debug examples/fib.hy -x cmds.txt --batch
 | `-x <script>` | Run commands from a file (`#` comments; one command per line) |
 | `--batch` | Non-interactive; run the whole script (or stdin if no `-x`). A failing command is reported and the script goes on, like `gdb -batch`; the exit status is non-zero if any command failed or the program panicked |
 | `--dap` | Debug Adapter Protocol over **stdio** (see below); no positional `.hy` |
-| `--allow-attach` / `--allow-exit` / `--allow-exec` / `--allow-ffi-exec` / `--allow-dload STEM` | Host grants at typecheck (same as `coil compile` / `coil dissect`) |
+| `--allow-attach` / `--allow-exit` / `--allow-ffi-exec` / `--allow-dload STEM` | Host grants at typecheck (same as `coil compile` / `coil dissect`) |
 | `--ffi-search-path DIR` | Extra FFI lookup directory (not a grant) |
 | `--root DIR` | Extra `use`/`mod` search directory |
 
@@ -52,7 +52,7 @@ are not shipped in this repository.
 | `program` | Absolute or workspace-relative path to entry `.hy` |
 | `cwd` | Optional working directory for resolving paths |
 | `stopOnEntry` | Optional; stop **before** the first bytecode insn (real VM frame) |
-| `allowAttach` / `allowExit` / `allowExec` / `allowFfiExec` / `allowRead` / `allowWrite` / `allowNet` / `allowEnv` / `allowAll` | Optional; OR with CLI `--allow-*` |
+| `allowAttach` / `allowExit` / `allowFfiExec` / `allowRead` / `allowWrite` / `allowNet` / `allowEnv` / `allowAll` | Optional; OR with CLI `--allow-*` |
 | `allowDload` | Optional string array of dload stems |
 | `ffiSearchPath` | Optional string array of FFI lookup dirs |
 
