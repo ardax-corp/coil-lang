@@ -272,6 +272,11 @@ pub struct Heap {
     young_bytes: usize,
     /// Nursery chunks in use that ask for a minor collection.
     nursery_chunks: usize,
+    /// Bytes still to allocate old after a minor collection most of the
+    /// nursery survived ([`Self::note_survival`]).
+    pretenure_bytes: usize,
+    /// Minor collections in a row most of the nursery survived.
+    pretenure_streak: u32,
     /// Incremental mark / lazy sweep (COI-309 S4).
     gc_phase: GcPhase,
     /// Next object to consider while sweeping; `None` when the cursor is idle.
@@ -328,6 +333,8 @@ impl Default for Heap {
             epoch_born: Vec::new(),
             young_bytes: 0,
             nursery_chunks: NURSERY_CHUNKS,
+            pretenure_bytes: 0,
+            pretenure_streak: 0,
             gc_phase: GcPhase::Idle,
             gc_sweep_cursor: None,
             ffi_strings: Vec::new(),
@@ -579,6 +586,7 @@ impl Heap {
         let young = T::NURSERY
             && self.nursery
             && !self.epoch_stw
+            && self.pretenure_bytes == 0
             && self.gc_phase != GcPhase::Marking
             && (self.finalizer_types.is_empty()
                 || data.finalizer_type_id().is_none_or(|t| !self.has_finalizer(t)));
@@ -593,9 +601,16 @@ impl Heap {
             crate::vm::note_heap_alloc();
             return (object, content);
         }
+        if T::NURSERY && self.pretenure_bytes != 0 {
+            self.pretenure_bytes = self.pretenure_bytes.saturating_sub(size);
+        }
         if T::HOLDS_REFS && self.nursery {
             if self.epoch_stw {
                 self.epoch_born.push(object.addr());
+            } else if self.slab.young_chunks_in_use() == 0 {
+                // Nothing young to name yet (pretenuring right after a
+                // minor): the barrier records its first write.
+                content.header.generation.set(GEN_UNLOGGED);
             } else {
                 // Born old, maybe naming young objects: remembered at once.
                 REMEMBERED.with_borrow_mut(|r| r.push(object.addr()));
@@ -1221,6 +1236,7 @@ impl Heap {
         self.gc_phase == GcPhase::Idle
             && (cfg!(feature = "gc-stress")
                 || self.alloc_bytes.saturating_sub(self.young_bytes) > limit
+                || self.slab.held_chunks() >= self.nursery_chunks
                 || self.slab.young_chunks_in_use() >= self.nursery_chunks)
     }
 
@@ -1231,6 +1247,19 @@ impl Heap {
             && (cfg!(feature = "gc-stress") || self.slab.young_chunks_in_use() >= self.nursery_chunks)
     }
 
+    /// A minor collection found `survivors` of `objects` young objects
+    /// live. When most survived (a large structure being built), copying
+    /// them buys nothing: allocate old for a while, longer each time in a
+    /// row, and try the nursery again after.
+    pub(super) fn note_survival(&mut self, survivors: usize, objects: usize) {
+        if survivors * 2 > objects {
+            self.pretenure_streak = (self.pretenure_streak + 1).min(6);
+            self.pretenure_bytes = (self.nursery_chunks * super::slab::CHUNK_BYTES) << (self.pretenure_streak - 1);
+        } else {
+            self.pretenure_streak = 0;
+        }
+    }
+
     /// The old space crossed its budget: run a major cycle.
     #[inline]
     pub fn should_collect_old(&self) -> bool {
@@ -1239,7 +1268,9 @@ impl Heap {
         } else {
             self.gc_next_threshold
         };
-        cfg!(feature = "gc-stress") || self.alloc_bytes.saturating_sub(self.young_bytes) > limit
+        cfg!(feature = "gc-stress")
+            || self.alloc_bytes.saturating_sub(self.young_bytes) > limit
+            || self.slab.held_chunks() >= self.nursery_chunks
     }
 
     /// Allocate instances, enums, boxes, tuples and arrays in the nursery
@@ -1307,8 +1338,9 @@ impl Heap {
         let young = object.generation() & GEN_YOUNG != 0;
         unsafe { object.recycle_payload() };
         if young {
-            // A nursery slot stays poisoned until its chunk is reset.
+            // Reused by the nursery until its chunk is reset.
             self.young_bytes = self.young_bytes.saturating_sub(size);
+            self.slab.free_young(ptr);
         } else {
             self.slab.free(ptr);
         }
@@ -1715,6 +1747,9 @@ impl Drop for Heap {
         // Drop payloads in place; the slab (and its free lists) goes away
         // next, so slots are not returned and nothing is collected first.
         self.forget_remembered();
+        if self.slab.young_chunks_in_use() != 0 {
+            note_young_heap(false);
+        }
         let mut cur = super::slab::SlotCursor::default();
         while let Some(addr) = self.slab.next_slot(&mut cur) {
             if let Some(object) = unsafe { Object::from_header(addr) } {
@@ -3937,6 +3972,39 @@ thread_local! {
     /// with the thread; a heap takes only its own entries
     /// ([`Heap::take_remembered`]).
     static REMEMBERED: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Heaps on this thread with nursery chunks in use. While none has, no
+    /// young object exists for a write to store, and the barrier records
+    /// nothing (pretenured objects are written while the nursery is empty).
+    static YOUNG_HEAPS: Cell<u32> = const { Cell::new(0) };
+    /// Old objects written while no heap here had young objects: their
+    /// barrier is off (nothing young to record) until their heap's nursery
+    /// starts again ([`relog_quiet`]), so a write loop pays it once.
+    static QUIET: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// `slab`'s nursery starts again (no young object exists yet): turn the
+/// barrier back on for its old objects written while it was empty.
+pub(super) fn relog_quiet(slab: &super::slab::Slab) {
+    QUIET.with_borrow_mut(|q| {
+        q.retain(|&addr| {
+            if !slab.contains_slot(addr) {
+                return true;
+            }
+            // SAFETY: a slot start in a mapped chunk holds a header; a
+            // freed or re-carved slot reads as free or as another old
+            // object, and an extra log bit only costs one more record.
+            let header = unsafe { &*(addr as *const GcHeader) };
+            if header.kind.get() != 0 && header.generation.get() & GEN_YOUNG == 0 {
+                header.generation.set(header.generation.get() | GEN_UNLOGGED);
+            }
+            false
+        });
+    });
+}
+
+/// A heap on this thread started (`true`) or stopped using nursery chunks.
+pub(super) fn note_young_heap(on: bool) {
+    YOUNG_HEAPS.with(|n| n.set(if on { n.get() + 1 } else { n.get().saturating_sub(1) }));
 }
 
 /// Slow path of the write barrier in [`GcData::as_mut`].
@@ -3945,6 +4013,10 @@ thread_local! {
 fn remember_written(header: &GcHeader) {
     header.generation.set(header.generation.get() & !GEN_UNLOGGED);
     let addr = header as *const GcHeader as u64;
+    if YOUNG_HEAPS.with(Cell::get) == 0 {
+        QUIET.with_borrow_mut(|q| q.push(addr));
+        return;
+    }
     REMEMBERED.with_borrow_mut(|r| r.push(addr));
 }
 

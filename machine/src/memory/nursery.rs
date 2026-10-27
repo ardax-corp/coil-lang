@@ -14,7 +14,7 @@ use std::ptr::NonNull;
 use common::Value;
 
 use super::compact::{forward, AddrMap};
-use super::{GcHeader, GcPhase, GcSized, Heap, Member, Object, GEN_PINNED, GEN_UNLOGGED, GEN_YOUNG, REMEMBERED};
+use super::{GcHeader, GcPhase, GcSized, Heap, Member, Object, GEN_PINNED, GEN_UNLOGGED, GEN_YOUNG, QUIET, REMEMBERED};
 
 /// A minor collection between its copy and its reset step.
 pub struct MinorPlan {
@@ -53,7 +53,7 @@ impl Heap {
 
     /// Whether any young chunk is in use.
     pub fn has_young(&self) -> bool {
-        self.slab.young_chunks_in_use() != 0
+        self.slab.has_young_chunks()
     }
 
     /// Take this heap's entries off the thread's remembered set: the live
@@ -80,27 +80,54 @@ impl Heap {
     /// Drop this heap's entries from the thread's remembered set (the heap
     /// goes away; another may map the same addresses).
     pub(super) fn forget_remembered(&self) {
-        let _ = REMEMBERED.try_with(|r| {
-            if let Ok(mut r) = r.try_borrow_mut() {
-                r.retain(|&addr| !self.slab.contains_slot(addr));
-            }
-        });
+        for set in [&REMEMBERED, &QUIET] {
+            let _ = set.try_with(|r| {
+                if let Ok(mut r) = r.try_borrow_mut() {
+                    r.retain(|&addr| !self.slab.contains_slot(addr));
+                }
+            });
+        }
     }
 
-    /// Follow an evacuation in the remembered set.
+    /// Follow an evacuation in the remembered and quiet sets.
     pub(super) fn forward_remembered(&self, fwd: &AddrMap) {
-        REMEMBERED.with_borrow_mut(|r| {
-            for addr in r.iter_mut() {
-                if let Some(&to) = fwd.get(addr) {
-                    *addr = to;
+        for set in [&REMEMBERED, &QUIET] {
+            set.with_borrow_mut(|r| {
+                for addr in r.iter_mut() {
+                    if let Some(&to) = fwd.get(addr) {
+                        *addr = to;
+                    }
                 }
-            }
-        });
+            });
+        }
     }
 
     /// Clear a major cycle's marks on young objects: the major sweep skips
     /// young chunks, and a minor collection reads the mark as "traced".
+    /// Held objects (pinned by an earlier minor) the mark did not reach
+    /// are dead: they go here, since no minor ever frees one.
     pub(super) fn unmark_young(&mut self) {
+        let mut empty = Vec::new();
+        for (chunk, first, end, size) in self.slab.held_spans() {
+            let mut live = false;
+            for addr in slots(first, end, size) {
+                let header = unsafe { &*(addr as *const GcHeader) };
+                live |= header.kind.get() != 0 && header.marked.get();
+                if header.kind.get() != 0 && !header.marked.get() {
+                    let obj = unsafe { Object::from_header(addr) }.expect("live held slot");
+                    let bytes = obj.size();
+                    self.alloc_bytes -= bytes;
+                    self.young_bytes = self.young_bytes.saturating_sub(bytes);
+                    debug_assert!(self.live_count > 0);
+                    self.live_count -= 1;
+                    unsafe { obj.recycle_payload() };
+                }
+            }
+            if !live {
+                empty.push(chunk);
+            }
+        }
+        self.slab.unhold(&empty);
         for (_, first, end, size) in self.slab.young_spans() {
             for addr in slots(first, end, size) {
                 // SAFETY: a slot start in a mapped chunk holds a header.
@@ -141,7 +168,7 @@ impl Heap {
             free.extend(slots(end, tail, size).map(|a| unsafe { NonNull::new_unchecked(a as *mut u8) }));
         }
         self.young_bytes = 0;
-        self.slab.finish_young(&promoted, free);
+        self.slab.finish_young(&promoted, &[], free);
     }
 
     /// Trace the young objects reachable from `pins` (roots that cannot be
@@ -166,6 +193,15 @@ impl Heap {
         };
         for &addr in pins {
             reach(self, &mut gray, addr, false);
+        }
+        // Held objects stay put and live until a major cycle says otherwise;
+        // they may name young objects (nothing logs a write to one).
+        for (_, first, end, size) in self.slab.held_spans() {
+            for addr in slots(first, end, size) {
+                if unsafe { &*(addr as *const GcHeader) }.kind.get() != 0 {
+                    reach(self, &mut gray, addr, false);
+                }
+            }
         }
         for &addr in precise {
             reach(self, &mut gray, addr, true);
@@ -274,49 +310,48 @@ impl Heap {
         MinorPlan { fwd, remembered, spans }
     }
 
-    /// Poison the moved slots, reclaim the dead young objects, promote the
-    /// chunks with pinned survivors and reset the rest. Returns how many
-    /// objects moved.
+    /// Poison the moved slots, reclaim the dead young objects, hold the
+    /// chunks with pinned survivors in the nursery and reset the rest.
+    /// Returns how many objects moved.
     pub fn minor_finish(&mut self, plan: MinorPlan) -> usize {
         let MinorPlan { fwd, remembered, spans } = plan;
-        let mut promoted = Vec::new();
-        let mut free = Vec::new();
+        let mut held = Vec::new();
+        let (mut kept, mut kept_bytes, mut dead) = (0, 0, 0);
         for (chunk, first, end, size) in spans {
             let mut keep = false;
-            let mut holes = Vec::new();
             for addr in slots(first, end, size) {
                 // SAFETY: a slot start in a mapped chunk holds a header.
                 let header = unsafe { &*(addr as *const GcHeader) };
-                if header.kind.get() != 0 {
-                    if fwd.contains_key(&addr) {
-                        header.kind.set(0);
-                        header.marked.set(false);
-                        header.generation.set(0);
-                    } else if header.marked.get() {
-                        header.marked.set(false);
-                        header.generation.set(GEN_UNLOGGED);
-                        keep = true;
-                        continue;
-                    } else {
-                        let obj = unsafe { Object::from_header(addr) }.expect("live young slot");
-                        let bytes = obj.size();
-                        self.alloc_bytes -= bytes;
-                        debug_assert!(self.live_count > 0);
-                        self.live_count -= 1;
-                        unsafe { obj.recycle_payload() };
-                    }
+                if header.kind.get() == 0 {
+                    continue;
                 }
-                holes.push(addr);
+                if fwd.contains_key(&addr) {
+                    header.kind.set(0);
+                    header.marked.set(false);
+                    header.generation.set(0);
+                    continue;
+                }
+                let obj = unsafe { Object::from_header(addr) }.expect("live young slot");
+                if header.marked.get() {
+                    // Pinned: held where it is, young, until a major cycle
+                    // finds it dead ([`Self::unmark_young`]); its chunk
+                    // stays out of reuse until then.
+                    header.marked.set(false);
+                    header.generation.set(GEN_YOUNG);
+                    kept_bytes += obj.size();
+                    kept += 1;
+                    keep = true;
+                } else {
+                    dead += 1;
+                    let bytes = obj.size();
+                    self.alloc_bytes -= bytes;
+                    debug_assert!(self.live_count > 0);
+                    self.live_count -= 1;
+                    unsafe { obj.recycle_payload() };
+                }
             }
             if keep {
-                promoted.push(chunk);
-                let tail = self.slab.chunk_slots_end(chunk);
-                free.extend(
-                    holes
-                        .into_iter()
-                        .chain(slots(end, tail, size))
-                        .map(|a| unsafe { NonNull::new_unchecked(a as *mut u8) }),
-                );
+                held.push((chunk, end));
             }
         }
         for &to in fwd.values() {
@@ -329,8 +364,9 @@ impl Heap {
                 obj.set_generation(GEN_UNLOGGED);
             }
         }
-        self.young_bytes = 0;
-        self.slab.finish_young(&promoted, free);
+        self.young_bytes = kept_bytes;
+        self.note_survival(fwd.len() + kept, fwd.len() + kept + dead);
+        self.slab.finish_young(&[], &held, Vec::new());
         fwd.len()
     }
 }
@@ -377,7 +413,11 @@ mod tests {
                 *root = v.bits();
             }
         }
-        heap.minor_finish(plan)
+        let moved = heap.minor_finish(plan);
+        // Tests place objects themselves: no pretenuring after a minor
+        // most of the nursery survived (see the test of that below).
+        heap.pretenure_bytes = 0;
+        moved
     }
 
     #[test]
@@ -425,7 +465,7 @@ mod tests {
     }
 
     #[test]
-    fn an_ambiguous_root_pins_its_target_and_promotes_its_chunk() {
+    fn an_ambiguous_root_pins_its_target_and_holds_its_chunk() {
         let mut heap = nursery_heap();
         let head = cons_list(&mut heap, 100);
         let before = walk(&heap, head);
@@ -433,9 +473,57 @@ mod tests {
         assert_eq!(moved, 99, "everything but the pinned head moves");
         assert_eq!(walk(&heap, head), before, "the pinned head's link is rewritten");
         let obj = heap.find_object_by_addr(head).expect("pinned head stays");
-        assert_eq!(obj.generation(), GEN_UNLOGGED);
-        // The promoted chunk's free slots are reusable old slots.
+        assert_eq!(obj.generation(), GEN_YOUNG, "it stays young in a held chunk");
+        assert!(heap.has_young());
+        // New young objects go to other chunks; the held one stays intact,
+        // and later minors keep it where it is even unpinned.
         let _ = cons_list(&mut heap, 10);
+        assert_eq!(minor(&mut heap, &[], &mut []), 0);
+        assert_eq!(walk(&heap, head), before);
+        // A major cycle that does not reach it frees it, and the next
+        // minor resets its chunk.
+        heap.begin_mark(&[]);
+        while !heap.mark_quantum(usize::MAX) {}
+        unsafe { heap.sweep() };
+        assert!(heap.find_object_by_addr(head).is_none());
+        assert_eq!(heap.live_object_count(), 0);
+        minor(&mut heap, &[], &mut []);
+        assert!(!heap.has_young());
+    }
+
+    #[test]
+    fn a_minor_most_of_the_nursery_survives_pretenures_for_a_while() {
+        let mut heap = nursery_heap();
+        let head = cons_list(&mut heap, 100);
+        let plan = heap.minor_plan(&[], &[head]);
+        let head = plan.forward(Value::from(head)).expect("moved").bits();
+        heap.minor_finish(plan);
+        let old = cons_list(&mut heap, 1);
+        let obj = heap.find_object_by_addr(old).expect("old");
+        assert_eq!(obj.generation() & GEN_YOUNG, 0, "allocated old after a surviving minor");
+        assert_eq!(obj.generation(), GEN_UNLOGGED, "nothing young to name: unlogged, not remembered");
+        assert!(heap.find_object_by_addr(head).is_some());
+        heap.pretenure_bytes = 0;
+        let young = cons_list(&mut heap, 1);
+        assert_eq!(heap.find_object_by_addr(young).expect("young").generation(), GEN_YOUNG);
+    }
+
+    #[test]
+    fn a_held_object_keeps_what_it_names_alive() {
+        let mut heap = nursery_heap();
+        let head = cons_list(&mut heap, 50);
+        let before = walk(&heap, head);
+        // The head is pinned and held; the rest moves.
+        assert_eq!(minor(&mut heap, &[head], &mut []), 49);
+        // Unpinned it still holds the list up through later minors.
+        let _garbage = cons_list(&mut heap, 100);
+        assert_eq!(minor(&mut heap, &[], &mut []), 0);
+        assert_eq!(walk(&heap, head), before);
+        assert_eq!(heap.live_object_count(), 50);
+        // A major cycle that reaches it keeps it and the list.
+        heap.begin_mark(&[head]);
+        while !heap.mark_quantum(usize::MAX) {}
+        unsafe { heap.sweep() };
         assert_eq!(walk(&heap, head), before);
     }
 
