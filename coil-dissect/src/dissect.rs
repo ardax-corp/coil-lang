@@ -33,6 +33,8 @@ pub struct DissectArgs {
     pub contracts: Option<compiler::ContractLevel>,
     /// `--fold-calls on|off`; `None` keeps the pipeline default.
     pub fold_calls: Option<bool>,
+    /// `--auto-par on|off`; `None` keeps the pipeline default.
+    pub auto_par: Option<bool>,
     pub opt_stats: bool,
     pub opt_stats_json: bool,
     /// Compile `test("…") { … }` cases too (`__zs_test_N`), like `coil test`.
@@ -91,6 +93,9 @@ pub fn cmd_dissect(config: ReportConfig, args: DissectArgs) {
     }
     if let Some(on) = args.fold_calls {
         pipeline.set_call_fold(on);
+    }
+    if let Some(on) = args.auto_par {
+        pipeline.set_auto_par(on);
     }
     if args.opt_stats || args.opt_stats_json {
         pipeline.set_collect_opt_stats(true);

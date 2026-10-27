@@ -139,17 +139,17 @@ Same release binary. Process-start switch:
 | unset / `1` / `table` | fn-pointer trampoline (default) |
 | `2` / `hotmatch` | compact hot match |
 
-Always `COIL_AUTO_PAR=0` for sequential flagship `.hyc`, and compile with
+Always `--auto-par off` for sequential flagship `.hyc`, and compile with
 `--fold-calls off`: otherwise `mandelbrot`, `tak` and `nsieve` compute their
 result at compile time and `main` is a constant. Compile with
 `--root .deps/coil-stdlib/src` when the userland stdlib is not on the default
 search path.
 
 ```bash
-COIL_AUTO_PAR=0 ./target/release/coil compile --fold-calls off --root .deps/coil-stdlib/src \
+./target/release/coil compile --auto-par off --fold-calls off --root .deps/coil-stdlib/src \
   examples/perf/mandelbrot.hy -o /tmp/m.hyc
-COIL_THREADED_DISPATCH=0 COIL_AUTO_PAR=0 ./target/release/coil run /tmp/m.hyc   # expect 625885
-COIL_THREADED_DISPATCH=1 COIL_AUTO_PAR=0 ./target/release/coil run /tmp/m.hyc
+COIL_THREADED_DISPATCH=0 ./target/release/coil run /tmp/m.hyc   # expect 625885
+COIL_THREADED_DISPATCH=1 ./target/release/coil run /tmp/m.hyc
 ```
 
 Checksums: mandelbrot `625885`, fib `2178309`, nsieve `1900`, tak `7`.
@@ -158,7 +158,7 @@ Checksums: mandelbrot `625885`, fib `2178309`, nsieve `1900`, tak `7`.
 wall A/B used `hyperfine`. Auto-par vs sequential branch-miss notes:
 [auto-par-branch-misses.md](auto-par-branch-misses.md).
 
-## Measured (release, fat LTO, `COIL_AUTO_PAR=0`, same `.hyc`)
+## Measured (release, fat LTO, `--auto-par off`, same `.hyc`)
 
 ### G0 (COI-373)
 
@@ -169,7 +169,7 @@ wall A/B used `hyperfine`. Auto-par vs sequential branch-miss notes:
 
 ### G1 default hot set (CALL/RETURN/LOAD/STORE/Seek off)
 
-Isolated `hyperfine` (~50 min-runs mandelbrot, x86_64, `COIL_AUTO_PAR=0`):
+Isolated `hyperfine` (~50 min-runs mandelbrot, x86_64, `--auto-par off`):
 
 | Bench | match | table | notes |
 |---|---|---|---|
@@ -201,7 +201,7 @@ CALL-off for fib, but still slower than the giant match.
 
 ### G2 remaining coverage (COI-375)
 
-Same host, `COIL_AUTO_PAR=0`, identical `.hyc`:
+Same host, `--auto-par off`, identical `.hyc`:
 
 | Bench | match | table | notes |
 |---|---|---|---|
@@ -236,7 +236,7 @@ must not share instruction-cache lines with mandelbrot/fib dense kernels.
 
 `hotmatch` is unchanged (G1 compact match, including opt-in CALL/RETURN).
 
-### G3 measured (release, fat LTO, `COIL_AUTO_PAR=0`, same `.hyc` vs G2 `main`)
+### G3 measured (release, fat LTO, `--auto-par off`, same `.hyc` vs G2 `main`)
 
 Same host as G2. `perf_event` still unavailable (`poop` / `perf`); wall A/B is
 `hyperfine --shell=none`. ELF: `.text.hot` ~57 KiB, `.text.unlikely` ~324 KiB,

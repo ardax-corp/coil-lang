@@ -114,4 +114,4 @@ longer emitted.
 [`par_profit`](../../compiler/src/typechecking/par_profit.rs) uses its own
 fork-site detector for auto-par profitability. Stack-bound analysis remains the
 more general path (arbitrary measures, const tracing) and runs even when
-`COIL_AUTO_PAR=0`, including for impure recursive functions.
+`--auto-par off`, including for impure recursive functions.

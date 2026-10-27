@@ -40,6 +40,10 @@ pub struct OptLevelFlags {
     /// (default, at -O2 and above) or off
     #[arg(long, value_name = "on|off", value_parser = parse_fold_calls, action = clap::ArgAction::Set)]
     pub fold_calls: Option<bool>,
+    /// Automatic fork-join of pure recursive calls and counted loops: on
+    /// (default) or off
+    #[arg(long, value_name = "on|off", value_parser = parse_auto_par, action = clap::ArgAction::Set)]
+    pub auto_par: Option<bool>,
 }
 
 impl OptLevelFlags {
@@ -64,6 +68,14 @@ fn parse_fold_calls(s: &str) -> Result<bool, String> {
         "on" => Ok(true),
         "off" => Ok(false),
         _ => Err(format!("invalid --fold-calls `{s}` (expected on|off)")),
+    }
+}
+
+fn parse_auto_par(s: &str) -> Result<bool, String> {
+    match s {
+        "on" => Ok(true),
+        "off" => Ok(false),
+        _ => Err(format!("invalid --auto-par `{s}` (expected on|off)")),
     }
 }
 

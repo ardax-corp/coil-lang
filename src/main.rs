@@ -229,6 +229,7 @@ fn cache_options(cli: &CliArgs) -> Option<String> {
             cli.debug_level,
             cli.contracts,
             cli.fold_calls,
+            cli.auto_par,
             &cli.host_grants,
             &cli.module_roots,
         )
@@ -712,6 +713,9 @@ fn main() {
             }
             if let Some(on) = cli.fold_calls {
                 pipeline.set_call_fold(on);
+            }
+            if let Some(on) = cli.auto_par {
+                pipeline.set_auto_par(on);
             }
             if cli.opt_stats || cli.opt_stats_json {
                 pipeline.set_collect_opt_stats(true);

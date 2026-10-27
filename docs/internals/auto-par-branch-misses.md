@@ -2,7 +2,7 @@
 
 Report-only investigation on main `f35b3ea4` G3 (no ISA / codegen change), plus
 **COI-390** join wait (drop 1 ms poll) and **COI-391** idle park (drop 2 ms
-empty-steal). Symptom: `poop` shows many **branch misses** when `COIL_AUTO_PAR`
+empty-steal). Symptom: `poop` shows many **branch misses** when `--auto-par`
 is on.
 
 ## How to read `poop` here
@@ -20,7 +20,8 @@ On a laptop with a PMU, compare **miss rate** (`branch-misses / branches`) and
 per-thread counts, not raw process-wide misses. Auto-par starts extra OS
 threads; `inherit` counters **sum** every worker.
 
-Optional reactor dump (off by default):
+Optional reactor dump (measured when `COIL_PAR_STATS` was read by release
+builds; it is now read only by `machine`'s unit tests):
 
 ```bash
 COIL_PAR_STATS=1 COIL_MAX_WORKER_THREADS=4 ./target/release/coil run fib.par.hyc
@@ -28,9 +29,9 @@ COIL_PAR_STATS=1 COIL_MAX_WORKER_THREADS=4 ./target/release/coil run fib.par.hyc
 # idle_waits=… join_helps=… join_timeouts=… join_parks=…
 ```
 
-Fair sequential `.hyc`: `COIL_AUTO_PAR=0` at **compile**. Runtime
-`COIL_AUTO_PAR` does not rewrite an archive. `scripts/poop_baseline.sh` already
-compiles `fib` with `COIL_AUTO_PAR=0`; mandelbrot/nsieve/tak/binary_trees do not
+Fair sequential `.hyc`: `--auto-par off` at **compile**. Runtime
+`--auto-par` does not rewrite an archive. `scripts/poop_baseline.sh` already
+compiles `fib` with `--auto-par off`; mandelbrot/nsieve/tak/binary_trees do not
 emit IPA either (identical bytecode with the flag on).
 
 ## Reproduce (this host: 4 vCPU Xeon, fat LTO release, no HW PMU)
@@ -41,7 +42,7 @@ loop_ipa_sum `2666646666700000`.
 
 ### Bytecode: who actually parallelizes
 
-| Bench | `COIL_AUTO_PAR=0` vs default | IPA? |
+| Bench | `--auto-par off` vs default | IPA? |
 |---|---|---|
 | `mandelbrot` | identical 2876 B | no (nested mut locals, not a counted reduce) |
 | `nsieve` | identical 2656 B | no (heap stores) |

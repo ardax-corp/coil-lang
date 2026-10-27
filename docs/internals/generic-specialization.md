@@ -69,7 +69,7 @@ Tests: `perf_metrics::foreign_method_clone_is_specialized`,
 
 ## Measurements
 
-2026-10-17, one run each, `COIL_AUTO_PAR=0`, `vm_profile` builds (counting
+2026-10-17, one run each, `--auto-par off`, `vm_profile` builds (counting
 allocations slows both): `d1688ee` (before #1416) vs the branch with all of
 the above. Managed allocations from `machine::alloc_count`.
 

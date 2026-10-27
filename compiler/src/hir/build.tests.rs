@@ -34,7 +34,7 @@ fn hir_of(src: &str, body: &str) -> String {
 }
 
 /// Compare `name`'s printed bodies with `goldens/<name>.hir`;
-/// `HIR_BLESS=1` rewrites the file instead.
+/// `COIL_BLESS=1` rewrites the file instead.
 fn golden(name: &str, src: &str, bodies: &[&str]) {
     let got: String = bodies
         .iter()
@@ -44,16 +44,16 @@ fn golden(name: &str, src: &str, bodies: &[&str]) {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("src/hir/goldens")
         .join(format!("{name}.hir"));
-    if std::env::var_os("HIR_BLESS").is_some() {
+    if std::env::var_os("COIL_BLESS").is_some() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, &got).unwrap();
         return;
     }
     let want = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("{}: {e} (run with HIR_BLESS=1)", path.display()))
+        .unwrap_or_else(|e| panic!("{}: {e} (run with COIL_BLESS=1)", path.display()))
         // A Windows checkout with autocrlf turns the goldens into CRLF.
         .replace("\r\n", "\n");
-    assert_eq!(got, want, "HIR of `{name}` changed; rerun with HIR_BLESS=1 if intended");
+    assert_eq!(got, want, "HIR of `{name}` changed; rerun with COIL_BLESS=1 if intended");
 }
 
 #[test]

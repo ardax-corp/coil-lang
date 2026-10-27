@@ -92,7 +92,7 @@ auto-par reasons print effects in this vocabulary (`uses {read, mutate}`).
 Expression IPA runs on **any pure** function whose body contains a fork site
 (self-calls or independent helper calls). Loop IPA also needs pure body callees.
 
-Disable both transforms with `COIL_AUTO_PAR=0` (or `false` / `off` / `no`).
+Disable both transforms with `--auto-par off`.
 
 ## Expression IPA: static profitability (no runtime threshold checks)
 
@@ -328,12 +328,13 @@ the `JoinState` result is ready **or** `submit` / job-complete `notify` (COI-390
 there is no 1 ms poll. Idle workers park on the same `sleep_cvar` until `notify`
 (submit / job-complete / shutdown) — no 2 ms empty-steal poll (COI-391).
 
-| Env | Effect |
-|-----|--------|
-| `COIL_MAX_WORKER_THREADS` | Pool size (1..=512). Default `available_parallelism` (min 2), or **1** when `CI` is set. `.cargo/config.toml` also sets this to `1` (`force = false`) for local cargo test runs. Export a higher value to profile parallelism. |
-| `COIL_AUTO_PAR` | `0` / `false` / `off` / `no` disables auto fork-join codegen. |
-| `COIL_SHARED_HEAP` | Removed. Shared-heap spawn stays on. Debugger-attached runs and programs without stack maps still fall back to isolate `PortableValue` spawn. |
-| `COIL_PAR_STATS` | `1` / `true` / `on` / `yes` prints reactor steal/idle/join counters on shutdown (see [auto-par-branch-misses.md](auto-par-branch-misses.md)). |
+| Switch | Effect |
+|--------|--------|
+| `COIL_MAX_WORKER_THREADS` | Pool size (1..=512). Default `available_parallelism` (min 2). `.cargo/config.toml` sets this to `1` (`force = false`) for cargo test runs. Export a higher value to profile parallelism. |
+| `--auto-par on\|off` | `off` compiles no auto fork-join (default `on`). |
+| `COIL_PAR_STATS` | Unit tests of `machine` only: `1` / `true` / `on` / `yes` prints reactor steal/idle/join counters on shutdown (see [auto-par-branch-misses.md](auto-par-branch-misses.md)). Other builds never count. |
+
+Shared-heap spawn is always on. Debugger-attached runs and programs without stack maps still fall back to isolate `PortableValue` spawn.
 
 `.hyc` / embed execute sizes each isolate operand stack from the persisted
 compiler bound (archive minor 13). Pre-13 archives still use the Seek+CALL

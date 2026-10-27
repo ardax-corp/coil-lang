@@ -129,7 +129,7 @@ if command -v poop >/dev/null 2>&1; then
         echo "-- $name"
         hyc="$POOP_DIR/${name}.hyc"
         if [[ "$name" == "fib" ]]; then
-            COIL_AUTO_PAR=0 "$BIN" compile "examples/perf/${name}.hy" -o "$hyc" >/dev/null
+            "$BIN" compile --auto-par off "examples/perf/${name}.hy" -o "$hyc" >/dev/null
         else
             "$BIN" compile "examples/perf/${name}.hy" -o "$hyc" >/dev/null
         fi
@@ -146,7 +146,7 @@ if command -v poop >/dev/null 2>&1; then
         hyc="$POOP_DIR/${name}.hyc"
         echo "-- $path"
         if [[ "$name" == "fib" ]]; then
-            COIL_AUTO_PAR=0 "$BIN" compile "$path" -o "$hyc" >/dev/null
+            "$BIN" compile --auto-par off "$path" -o "$hyc" >/dev/null
         else
             "$BIN" compile "$path" -o "$hyc" >/dev/null
         fi

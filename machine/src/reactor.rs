@@ -27,7 +27,12 @@ use crate::vm::Machine;
 /// thread runs when it is joined (or when a wait helps).
 pub(crate) const NO_THREADS: bool = cfg!(all(target_family = "wasm", not(target_feature = "atomics")));
 
+/// `COIL_PAR_STATS=1`: count and print reactor steal/idle/join counters.
+/// Read by this crate's unit tests only; other builds never count.
 fn par_stats_enabled() -> bool {
+    if !cfg!(test) {
+        return false;
+    }
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
         matches!(

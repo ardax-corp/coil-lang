@@ -123,10 +123,10 @@ pub struct Pipeline {
     contract_sources: Vec<PathBuf>,
     /// Coverage: keep every function defined in files this accepts.
     keep_fns_in: Option<KeepFnFilter>,
-    /// When false, skip auto fork-join even if `COIL_AUTO_PAR` is on.
+    /// When false (`--auto-par off`), skip auto fork-join.
     auto_par: bool,
     /// Typed inlining of HIR bodies, when set; `None` keeps the compiler's
-    /// [`crate::il::opt::OptimizeOptions::hir_inline`] (`COIL_HIR_INLINE`).
+    /// [`crate::il::opt::OptimizeOptions::hir_inline`] (on).
     hir_inline: Option<bool>,
     /// Host/test `dload` grants (stem + file to hash). Not set from CLI flags.
     extra_dload_grants: Vec<(String, PathBuf)>,

@@ -25,7 +25,7 @@ user lock; claiming deadlock freedom; boiling every FFI type.
 ## Hint text
 
 Diagnostic **E0805** (`ParLockHint`), severity **info** (not an error).
-Emitted only when `COIL_AUTO_PAR` is on (same as IPA codegen).
+Emitted only when `--auto-par` is on (same as IPA codegen).
 
 Unlocked (the user has not taken a covering lock). The resource list is
 comma-separated **all** named escapes, for example
@@ -129,5 +129,5 @@ eligible for a later admit. Unlocked class fields stay C0 refuse.
 Prove: stdout FD hint; `open`+`write` names the bound FD; FFI
 `dload`/`invoke`; stderr; a multi-edge bag whose hint text lists **both**
 resources; one covering mutex path that documents the gate and still stays
-sequential. A4 `COIL_AUTO_PAR=0` flagships unchanged (hints are diagnostics;
+sequential. A4 `--auto-par off` flagships unchanged (hints are diagnostics;
 IPA off). Do not auto-merge — Architect re-accept after this fix.

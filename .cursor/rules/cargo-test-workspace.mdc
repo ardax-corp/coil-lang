@@ -14,7 +14,7 @@ cargo test --workspace --lib --tests --bins
 ```
 
 Retry once on transient macOS/EAGAIN listing failures (same as CI).
-Reactor pool size defaults to `1` under cargo (`COIL_MAX_WORKER_THREADS` in `.cargo/config.toml`) and when `CI` is set (`WorkerCap`).
+Reactor pool size defaults to `1` under cargo (`COIL_MAX_WORKER_THREADS` in `.cargo/config.toml`, read by `WorkerCap`).
 
 Prefer `--lib --tests --bins` over `--all-targets`: Criterion `[[bench]]` targets treat argv after `--` as their own CLI and abort the suite. Integration tests under `*/tests/` (e.g. `compiler/tests/diagnostics.rs`) are covered by `--tests`; `pipeline.rs`, `perf_metrics.rs` and `namespace.rs` need `vm-wire` (see below).
 

@@ -90,7 +90,7 @@ cannot cross threads (a cyclic graph) starts zeroed
 `examples/perf/const_table_crc.hy` (CRC-32 over a 4 KiB buffer, 2000
 times, through a 256-entry module table) and
 `examples/perf/const_table_local.hy` (a 16-entry local S-box in a function
-called 4M times). Release build, `COIL_AUTO_PAR=0`, wall time of
+called 4M times). Release build, `--auto-par off`, wall time of
 `coil run` on a compiled archive, best of 21 on a shared 4-core machine:
 
 | Bench | Before | After |
