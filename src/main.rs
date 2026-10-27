@@ -229,6 +229,7 @@ fn cache_options(cli: &CliArgs) -> Option<String> {
             cli.debug_level,
             cli.contracts,
             cli.fold_calls,
+            cli.early_free.map(compiler::EarlyFree::compiles),
             &cli.host_grants,
             &cli.module_roots,
         )
@@ -712,6 +713,15 @@ fn main() {
             }
             if let Some(on) = cli.fold_calls {
                 pipeline.set_call_fold(on);
+            }
+            if let Some(mode) = cli.early_free {
+                pipeline.set_early_free(mode.compiles());
+                if mode == compiler::EarlyFree::Check {
+                    machine::set_early_free_mode(machine::EarlyFreeMode::Check);
+                }
+            }
+            if let Some(on) = cli.nursery {
+                machine::set_nursery(on);
             }
             if cli.opt_stats || cli.opt_stats_json {
                 pipeline.set_collect_opt_stats(true);

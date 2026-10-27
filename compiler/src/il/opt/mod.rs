@@ -82,8 +82,8 @@ pub struct OptimizeOptions {
     /// (`Pipeline::set_auto_par` also turns it off). `COIL_AUTO_PAR=0` off.
     pub auto_par: bool,
     /// Free objects the escape facts prove dead at the end of their scope
-    /// or after the call they were passed to, with [`Self::escape_analysis`]
-    /// (`hir::early_free`). `COIL_EARLY_FREE=0` off.
+    /// or after the call they were passed to (`hir::early_free`). On at
+    /// `-O1` and above; `--early-free` overrides the level.
     pub early_free: bool,
     /// Every function must lower through direct MIR: a body left on its
     /// raw stack IL (the fuse tier) is an internal error. The compiler sets
@@ -150,7 +150,7 @@ mod labels;
 mod opt_level;
 mod stats;
 pub(crate) use labels::{max_code_label, remap_label_space};
-pub use opt_level::OptLevel;
+pub use opt_level::{EarlyFree, OptLevel};
 pub(crate) use stats::{
     note_body_tier, note_body_tiers, note_comptime_consts, note_comptime_macros, note_fuse_reason, note_hir_fallback, note_hir_mir, note_hir_mir_kept,
     note_hir_inline_refused, note_hir_inlined, note_hir_lowered,

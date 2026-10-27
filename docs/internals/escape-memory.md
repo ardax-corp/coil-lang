@@ -167,8 +167,10 @@ object passed to one now holds "anything" (its graph is no longer fresh);
 and a call whose result is a function may be a partial application whose
 closure keeps the arguments, so it is treated as an unknown callee.
 
-Switches: `COIL_EARLY_FREE=0` compiles no frees and frees nothing at run
-time. `COIL_EARLY_FREE=check` compiles them, frees nothing, and at the next
+Switches: early frees follow the opt level, on at `-O1` and above and off
+at `-O0` and `-Og` (frames should match the source there). `--early-free
+on|off` overrides the level. `--early-free check` compiles them, and a run
+in the same process (`coil FILE`, `coil test`) frees nothing and at the next
 collection marks again from the roots that are certainly live (precise
 frame slots, statics, VM handles; not words a conservative frame scan
 finds), aborting if that reaches an object a free gave up. The test corpus
@@ -341,7 +343,7 @@ Design (copying nursery, decided 2026-10-27):
   chunks.
 - **Where it cannot move,** it promotes instead: while a host frame is
   active (a nested `execute`), under the debugger, and with
-  `COIL_NURSERY=0`.
+  `--nursery off`.
 - **Not in the nursery:** objects of a type with `drop`. A young object
   that becomes finalizable later (an enum tagged after it is built)
   survives every minor as a root, so its `drop` runs from a major.
@@ -427,7 +429,7 @@ Design:
   unwound region only leaves the nursery wide until the next region.
 - **Nesting.** An inner region inside another region is a plain block:
   only the outermost one resets the nursery.
-- **Where it cannot run** (the nursery off with `COIL_NURSERY=0`, a
+- **Where it cannot run** (the nursery off with `--nursery off`, a
   shared-heap epoch) the region is a plain block and the GC frees its
   garbage as usual.
 
@@ -474,6 +476,10 @@ threshold comes from what the mark kept rather than from `alloc_bytes`
 after a lazy sweep.
 
 Decided (Dimitar, 2026-10-27): the nursery stays on by default
-(`COIL_NURSERY=0` turns it off). Not pursued: reference counting (cycles
+(`--nursery off` turns it off for `coil FILE`, `coil run` and `coil
+test`). The `COIL_EARLY_FREE` and `COIL_NURSERY` variables the measurements
+above used are gone: early frees follow the opt level (on at `-O1` and
+above), and `--early-free on|off|check` and `--nursery on|off` are the
+switches. Not pursued: reference counting (cycles
 need a collector anyway) and dropping the GC (the remaining garbage is
 aliased container data).

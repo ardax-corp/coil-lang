@@ -697,6 +697,9 @@ pub struct Compiler {
     hir_fns: HashMap<(usize, usize), usize>,
     /// A debugger session compiles this program: no typed inlining.
     debugger_attached: bool,
+    /// `--early-free on|off`, kept across [`Compiler::set_opt_level`];
+    /// `None` follows the level.
+    early_free: Option<bool>,
     /// Callee bodies typed inlining spliced (file, source range, name), so
     /// a capability chain still names the function a host call is in.
     inlined_bodies: Vec<(u32, std::ops::Range<usize>, String)>,
@@ -865,6 +868,7 @@ impl Default for Compiler {
             hir_module: None,
             hir_fns: HashMap::new(),
             debugger_attached: false,
+            early_free: None,
             inlined_bodies: Vec::new(),
             hir_mir: None,
             hir_mir_why: None,

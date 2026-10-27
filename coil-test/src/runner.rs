@@ -59,6 +59,10 @@ pub struct TestOptions {
     pub contracts: Option<compiler::ContractLevel>,
     /// `--fold-calls on|off`; `None` keeps the pipeline default.
     pub fold_calls: Option<bool>,
+    /// `--early-free on|off|check`; `None` follows the opt level.
+    pub early_free: Option<compiler::EarlyFree>,
+    /// `--nursery on|off`; `None` is on.
+    pub nursery: Option<bool>,
     /// `--contract-runs`: calls per generated contract test (0: none).
     pub contract_runs: u32,
     pub grants: HostGrants,
@@ -822,6 +826,9 @@ fn run_pipeline(config: &ReportConfig, options: &TestOptions, reporter: Box<dyn 
         pipeline.set_debug_level(compiler::DebugLevel::Full);
     }
     pipeline.set_contracts(options.contracts.unwrap_or(compiler::ContractLevel::All));
+    if let Some(mode) = options.early_free {
+        pipeline.set_early_free(mode.compiles());
+    }
     if let Some(on) = options.fold_calls {
         pipeline.set_call_fold(on);
     } else if options.coverage.is_some() {
@@ -1385,9 +1392,20 @@ pub fn suite_exit_code(failed: usize) -> i32 {
 
 /// `coil test` entry: run the suite, print the summary, return the process status.
 ///
+/// What `--early-free check` and `--nursery` ask of the runs in this process.
+pub fn set_memory_options(options: &TestOptions) {
+    if options.early_free == Some(compiler::EarlyFree::Check) {
+        machine::set_early_free_mode(machine::EarlyFreeMode::Check);
+    }
+    if let Some(on) = options.nursery {
+        machine::set_nursery(on);
+    }
+}
+
 /// A `test result: FAILED` summary always returns 1. Callers must `exit` that
 /// value — falling off `main` after a red summary would green CI.
 pub fn cmd_test(config: ReportConfig, options: TestOptions) -> i32 {
+    set_memory_options(&options);
     let json = options.report == Report::Json;
     let started = std::time::Instant::now();
     let SuiteResult {

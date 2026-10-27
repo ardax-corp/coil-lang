@@ -246,8 +246,6 @@ thread_local! {
     static COMPACT_PACING: std::cell::Cell<(u32, u32)> = const { std::cell::Cell::new((0, COMPACT_WINDOW)) };
     /// Off with `COIL_GC_COMPACT=0` (debugging a suspected move bug).
     static COMPACT_ENABLED: bool = std::env::var_os("COIL_GC_COMPACT").is_none_or(|v| v != "0");
-    /// Young objects in a copying nursery; off with `COIL_NURSERY=0`.
-    static NURSERY_ENABLED: bool = std::env::var_os("COIL_NURSERY").is_none_or(|v| v != "0");
 }
 
 /// Collections between evacuation attempts outside stress mode, and the
@@ -945,7 +943,7 @@ impl<const S: usize> Machine<S> {
             dense_obj: None,
             heap: {
                 let mut heap = crate::memory::HeapSlot::default();
-                heap.get_mut().set_nursery(NURSERY_ENABLED.with(|e| *e));
+                heap.get_mut().set_nursery(crate::memory::nursery_enabled());
                 heap
             },
             stack: Stack::with_capacity(cap),
@@ -1669,8 +1667,8 @@ impl<const S: usize> Machine<S> {
 
     /// `FreeEarly` (`deep` from its operand): free what the compiler proved dead
     /// ([`Heap::free_early`]). An `ArrayPin` keeps its array; a dense
-    /// index's pin and the dense object cache forget a freed address. `COIL_EARLY_FREE=0` turns it
-    /// off; `COIL_EARLY_FREE=check` frees nothing and aborts when the next
+    /// index's pin and the dense object cache forget a freed address. `--early-free off` turns it
+    /// off; `--early-free check` frees nothing and aborts when the next
     /// mark still reaches an object it would have freed.
     pub(crate) fn free_early(&mut self, v: Value, deep: bool) {
         free_early_in(&mut self.heap, &mut self.frame_pins, &mut self.dense_obj_addr, &mut self.dense_obj, v, deep);
@@ -2146,7 +2144,7 @@ impl<const S: usize> Machine<S> {
         eprintln!("{}", self.heap.census(&roots));
     }
 
-    /// `COIL_EARLY_FREE=check`, with a complete mark: mark again from the
+    /// `--early-free check`, with a complete mark: mark again from the
     /// roots that are certainly live (precise frame slots, statics and VM
     /// handles, not words a conservative frame scan finds, which may be
     /// stale copies), fail if that reaches an object an early free gave
@@ -4950,20 +4948,15 @@ impl<const S: usize> Machine<S> {
 
 /// [`Machine::free_early`] on the parts the dense streak holds too.
 fn free_early_in(heap: &mut Heap, frame_pins: &mut [FramePins], dense_obj_addr: &mut u64, dense_obj: &mut Option<Object>, v: Value, deep: bool) {
-    static MODE: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
-    let mode = *MODE.get_or_init(|| match std::env::var("COIL_EARLY_FREE").as_deref() {
-        Ok("0" | "off") => 0,
-        Ok("check") => 2,
-        _ => 1,
-    });
-    if mode == 0 {
+    let mode = crate::memory::early_free_mode();
+    if mode == crate::memory::EarlyFreeMode::Off {
         return;
     }
     // An `ArrayPin` holds its array for the frame; a dense index's pin
     // only caches its register's object, and is dropped with it below.
     let pins = &*frame_pins;
     let keep = |addr: u64| pins.iter().any(|p| p.by_slot.iter().zip(&p.sticky).any(|(o, &sticky)| sticky && o.is_some_and(|o| o.addr() == addr)));
-    if heap.free_early(v, deep, mode == 2, &keep) == 0 {
+    if heap.free_early(v, deep, mode == crate::memory::EarlyFreeMode::Check, &keep) == 0 {
         return;
     }
     *dense_obj_addr = 0;

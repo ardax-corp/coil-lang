@@ -445,12 +445,20 @@ impl Compiler {
     pub fn set_opt_level(&mut self, level: crate::OptLevel) {
         let mut opts = level.options();
         opts.keep_knobs(&self.opt_options);
+        opts.early_free = self.early_free.unwrap_or(opts.early_free);
         self.opt_options = opts;
         self.inline_cost.max_inline_cost = level.inline_max_cost();
         self.inline_cost.inline_across_modules = level.inline_across_modules();
         if !level.inline_across_modules() {
             self.inline_cost.max_cross_module_inline_cost = 0;
         }
+        self.bytecode.set_opt_options(self.opt_options.clone());
+    }
+
+    /// `--early-free on|off`: emit the early frees whatever the level.
+    pub fn set_early_free(&mut self, on: bool) {
+        self.early_free = Some(on);
+        self.opt_options.early_free = on;
         self.bytecode.set_opt_options(self.opt_options.clone());
     }
 
