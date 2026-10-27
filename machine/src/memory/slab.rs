@@ -309,6 +309,8 @@ pub struct Slab {
     young_in_use: usize,
     /// Nursery chunks held by a minor collection for a pinned survivor.
     young_held: usize,
+    /// [`super::heap::quiet_overflows`] when this slab last relogged.
+    quiet_epoch: u64,
 }
 
 /// One size class's nursery: the chunk being bump-allocated and the reset
@@ -382,6 +384,7 @@ impl Slab {
             young: Vec::new(),
             young_in_use: 0,
             young_held: 0,
+            quiet_epoch: 0,
         }
     }
 
@@ -429,6 +432,11 @@ impl Slab {
         };
         if self.young_in_use == 0 {
             super::heap::note_young_heap(true);
+            let overflows = super::heap::quiet_overflows();
+            if self.quiet_epoch != overflows {
+                super::heap::relog_all(self);
+                self.quiet_epoch = overflows;
+            }
             super::heap::relog_quiet(self);
         }
         self.young_in_use += 1;

@@ -556,6 +556,38 @@ mod tests {
     }
 
     #[test]
+    fn an_old_object_written_while_the_quiet_log_overflowed_is_still_remembered() {
+        let mut heap = nursery_heap();
+        let (arr, _) = heap.alloc(ObjArray::new(vec![Value::from(0i64)]), Object::Array);
+        let Object::Array(mut gc) = arr else { unreachable!() };
+        gc.as_mut().set_elem_kind(common::WORD_POINTER);
+        let mut roots = [arr.addr()];
+        minor(&mut heap, &[], &mut roots);
+        let old = roots[0];
+        let Some(Object::Array(mut old_gc)) = heap.find_object_by_addr(old) else {
+            panic!("array survived")
+        };
+        // No young object exists: the write turns the array's barrier off
+        // and logs it as quiet; then the log overflows and is dropped.
+        unsafe { old_gc.as_mut().set_unchecked(0, Value::from(0i64)) };
+        assert!(QUIET.with_borrow(|q| q.contains(&old)));
+        QUIET.with_borrow_mut(Vec::clear);
+        super::super::QUIET_OVERFLOWS.with(|n| n.set(n.get() + 1));
+        // The nursery starting again relogs the whole heap, so the next
+        // store of a young list is remembered.
+        let head = cons_list(&mut heap, 20);
+        let before = walk(&heap, head);
+        unsafe { old_gc.as_mut().set_unchecked(0, Value::from(head)) };
+        minor(&mut heap, &[old], &mut []);
+        let Some(Object::Array(a)) = heap.find_object_by_addr(old) else {
+            panic!("array stays")
+        };
+        let new_head = a.as_ref().iter().next().expect("element").bits();
+        assert_ne!(new_head, head, "the precise element was rewritten");
+        assert_eq!(walk(&heap, new_head), before);
+    }
+
+    #[test]
     fn promote_young_keeps_every_young_object_in_place() {
         let mut heap = nursery_heap();
         let head = cons_list(&mut heap, 50);
