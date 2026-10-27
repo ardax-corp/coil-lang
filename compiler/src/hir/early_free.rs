@@ -455,7 +455,7 @@ fn match_temps(body: &HirBody, e: &mut Escape<'_, '_>, parents: &HashMap<HirId, 
             continue;
         };
         let x = body.expr(*scrutinee);
-        if matches!(x.kind, HirKind::Local(_)) || !freeable(x.ty.as_ref()) {
+        if matches!(x.kind, HirKind::Local(_)) || !freeable(x.ty.as_ref()) || !sized_by_value(x.ty.as_ref()) {
             continue;
         }
         let s = e.src(*scrutinee);
@@ -497,6 +497,22 @@ fn match_temps(body: &HirBody, e: &mut Escape<'_, '_>, parents: &HashMap<HirId, 
     out
 }
 
+/// Whether the object a value of `ty` points at has a size its value
+/// decides (a string, a vector), possibly behind a pointer-niche
+/// `Option`. Freeing one small fixed-size object (a class instance, an enum
+/// box) costs more than the collector's sweep of it: `result_heap_churn`
+/// ran 17% slower freeing each of its 10M nodes.
+fn sized_by_value(ty: Option<&Ty>) -> bool {
+    let Some(t) = ty else {
+        return false;
+    };
+    match ty::strip_readonly(t) {
+        Ty::Con(n) => n == "string",
+        t @ Ty::App(head, args) => is_vec(Some(t)) || matches!(&**head, Ty::Con(n) if n == "Option") && sized_by_value(args.first()),
+        _ => false,
+    }
+}
+
 /// `match g(x) { … }` becomes `{ let t = g(x); let r = match t { … }; free t; r }`.
 fn free_match_temp(body: &mut HirBody, m: HirId) {
     let HirKind::Match { scrutinee, .. } = body.expr(m).kind.clone() else {
@@ -513,15 +529,18 @@ fn free_match_temp(body: &mut HirBody, m: HirId) {
     let match_ty = body.expr(m).ty.clone();
     let layout = body.expr(m).layout.clone();
     let inner = relocate(body, m);
-    let frees = free_stmts(body, t, false, span);
+    // No `Clear`: a dead word that still holds the freed address marks
+    // nothing (root scans resolve it through the slab), and clearing every
+    // register the value was copied to costs more than a small object.
+    let free = free_stmts(body, t, false, span)[0];
     let unit = match_ty.as_ref().is_none_or(|t| *t == ty::unit());
     let (stmts, tail) = if unit {
-        (vec![bind, inner, frees[0], frees[1]], None)
+        (vec![bind, inner, free], None)
     } else {
         let r = temp(body, match_ty.clone());
         let keep = push(body, HirKind::Let { local: r, init: Some(inner) }, Some(ty::unit()), span);
         let read = push(body, HirKind::Local(r), match_ty, span);
-        (vec![bind, keep, frees[0], frees[1]], Some(read))
+        (vec![bind, keep, free], Some(read))
     };
     let x = &mut body.exprs[m.0 as usize];
     x.kind = HirKind::Block { stmts, tail };

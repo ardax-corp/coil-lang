@@ -940,15 +940,30 @@ fn len_of(Option<Node> head) -> int {
 }
 ";
 
+const LINES: &str = "
+fn line(string a, int i) -> Option<string> {
+    if i % 2 == 0 {
+        return Option::Some(a + \"cd\");
+    }
+    return Option::None;
+}
+";
+
 #[test]
 fn a_fresh_match_scrutinee_read_in_place_is_freed_after_the_match() {
-    let src = format!("{NODES}\nfn run(int i) -> int {{\n    return match step(i) {{\n        Result::Ok(n) => n.v,\n        Result::Err(e) => e.v,\n    }};\n}}\n");
+    let src = format!("{LINES}\nfn run(int i) -> int {{\n    return match line(\"ab\", i) {{\n        Option::Some(s) => s[0] as int,\n        Option::None => 0,\n    }};\n}}\n");
     assert_eq!(frees(&src, "run").len(), 1, "{:?}", frees(&src, "run"));
 }
 
 #[test]
 fn a_match_binding_kept_past_the_match_is_not_freed() {
-    let src = format!("{NODES}\nfn run(int i) -> Node {{\n    return match step(i) {{\n        Result::Ok(n) => n,\n        Result::Err(e) => e,\n    }};\n}}\n");
+    let src = format!("{LINES}\nfn run(int i) -> string {{\n    return match line(\"ab\", i) {{\n        Option::Some(s) => s,\n        Option::None => \"\",\n    }};\n}}\n");
+    assert_eq!(frees(&src, "run"), vec![]);
+}
+
+#[test]
+fn a_small_fixed_size_match_scrutinee_is_left_to_the_collector() {
+    let src = format!("{NODES}\nfn run(int i) -> int {{\n    return match step(i) {{\n        Result::Ok(n) => n.v,\n        Result::Err(e) => e.v,\n    }};\n}}\n");
     assert_eq!(frees(&src, "run"), vec![]);
 }
 
