@@ -223,30 +223,56 @@ a host call: a host call left the VM's fast dispatch loop on every free,
 and a `join` with one free per part ran 25% slower; with the instruction
 `join` and `append` time the same with frees on and off.
 
-Measured and dropped:
+Later in step 3:
 
-- **Zero-copy `from_bytes` / `to_bytes`.** In b_csv and b_json every byte
-  buffer they copy is already freed early; what is left is the copy
-  itself. Under callgrind `from_bytes` is 1.3% of b_csv's instructions and
-  0.7% of b_json's, `to_bytes` 1.4% of b_csv's, and about half of each is
-  the copy. Taking a dying buffer over needs a new native and a last-use
-  rule in the compiler; a 1 to 2% gain does not pay for it.
-- **Enum SROA on a `match` of an inlined call.** b_json and b_csv allocate
-  under 600 enums each; nothing is left to remove.
+- **Variable-size match scrutinees.** `match f(x) { .. }` binds a fresh
+  scrutinee to a temporary and frees it after the match when no arm binding
+  or the match value keeps it. Only strings, vectors and options of them
+  qualify: freeing small fixed-size objects one at a time costs more than
+  the sweep that would reclaim them (result_heap_churn ran 17 to 25% slower
+  with every scrutinee freed, and still 14% with the free made cheaper).
+- **Vector reassignment.** A linear vector local whose elements are fresh
+  heap values (`list = rebuild(list)`) frees the old vector deeply when it
+  is reassigned, provided no other local still shares its elements.
+- **Literals count as fresh.** String literals are interned and never freed
+  by the VM, so a value that may be a literal is no longer treated as
+  shared.
+- **Zero-copy `to_bytes`.** `let b = to_bytes(s)` whose only reads are
+  `b[i]` and `b.len()` reads `s` directly (string indexing yields the same
+  byte); no buffer is built.
+- **Zero-copy `from_bytes`.** `return from_bytes(buf)` where `buf` is a
+  local vector allocated in this body and not kept anywhere calls
+  `from_bytes_take`, which moves the bytes into the string instead of
+  copying them (and puts them back if they are not valid UTF-8). b_csv's
+  per-field `bytes_to_s(out)` is not covered yet: the buffer arrives as a
+  parameter of a call that is not inlined.
+
+Both zero-copy rewrites measured as a 1 to 2% instruction win under
+callgrind; they go in anyway because larger programs convert far more text
+than these benchmarks. Enum SROA on a `match` of an inlined call was
+dropped: b_json and b_csv allocate under 600 enums each.
 
 ### Measured (step 3)
 
-Same method as step 2 (5 runs, 2026-10-27), `FreeEarly` instruction.
+Same method as step 2 (5 runs, 2026-10-27), all of step 3 in. b_csv and
+b_json allocate fewer objects with frees on because of the zero-copy
+rewrites.
 
 | bench | objects allocated | freed early | collections | GC time | time | peak RSS |
 |---|---|---|---|---|---|---|
-| binary_trees 16 | 7,449,278 | 7,383,732 (99%) | 71 → 2 | 635 → 1 ms | 2003 → 1427 ms | 28 → 17 MB |
-| strings | 300,033 | 150,002 (50%) | 9 → 6 | 12 → 3 ms | 130 → 130 ms | 37 → 38 MB |
-| byte_scan | 32,787 | 32,770 (99%) | 5 → 1 | 1 → 0 ms | 14 → 14 ms | 12 → 12 MB |
-| b_csv (1 MB) | 545,341 | 384,531 (71%) | 4 → 3 | 19 → 4 ms | 541 → 558 ms | 44 → 23 MB |
-| b_json | 348,579 | 223,998 (64%) | 3 → 2 | 5 → 0 ms | 745 → 723 ms | 38 → 23 MB |
-| hashmap | 40,179 | 4 | 4 → 4 | 3 → 5 ms | 418 → 401 ms | 25 → 25 MB |
-| b_coll | 200,192 | 1 | 5 → 5 | 11 → 11 ms | 3948 → 3922 ms | 148 → 147 MB |
+| binary_trees 16 | 7,449,278 | 7,383,731 (99%) | 71 → 2 | 670 → 2 ms | 2078 → 1550 ms | 28 → 17 MB |
+| strings | 300,033 | 200,001 (67%) | 9 → 2 | 12 → 1 ms | 132 → 129 ms | 37 → 38 MB |
+| byte_scan | 32,787 | 32,769 (99%) | 5 → 1 | 1 → 0 ms | 16 → 14 ms | 12 → 12 MB |
+| b_csv (1 MB) | 545,341 → 417,145 | 256,335 (61%) | 4 → 3 | 25 → 4 ms | 583 → 608 ms | 44 → 22 MB |
+| b_json | 348,579 → 228,578 | 111,999 (49%) | 3 → 2 | 5 → 0 ms | 738 → 694 ms | 38 → 24 MB |
+| gc_rebuild | 3,600,006 | 3,300,002 (92%) | 15 → 3 | 357 → 9 ms | 732 → 575 ms | 67 → 47 MB |
+| gc_shrink | 3,353,130 | 400,001 (12%) | 169 → 142 | 224 → 226 ms | 498 → 492 ms | 63 → 66 MB |
+| result_heap_churn | 10,000,005 | 1 | 686 → 686 | 189 → 166 ms | 949 → 939 ms | 12 → 12 MB |
+| hashmap | 40,179 | 3 | 4 → 4 | 4 → 4 ms | 426 → 442 ms | 25 → 25 MB |
+| b_coll | 200,192 | 1 | 5 → 5 | 13 → 14 ms | 4141 → 4154 ms | 148 → 147 MB |
+
+The machine is noisy; differences under about 5% in time are not
+meaningful. b_csv's time is within that band.
 
 What b_csv and b_json still allocate and do not free is their output: the
 parsed field strings and row vectors (b_csv), and the decoded strings and
