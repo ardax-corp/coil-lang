@@ -175,7 +175,8 @@ pub const ARCHIVE_MAJOR: u16 = 5;
 ///
 /// Major 5 minors:
 /// 1 — `FreeEarly`: free an object the compiler proved dead (escape
-///     analysis). Older VMs do not know the opcode.
+///     analysis), and HostInvoke `from_bytes_take` (id 174). Older VMs
+///     know neither.
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.

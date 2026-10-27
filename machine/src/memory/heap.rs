@@ -3230,6 +3230,20 @@ impl ObjArray {
     }
 
     /// The elements narrowed to bytes (`as u8`): one copy when packed.
+    /// Packed bytes moved out, leaving the array empty
+    /// ([`Self::restore_bytes`] puts them back); `None` for word storage.
+    pub fn take_bytes(&mut self) -> Option<Vec<u8>> {
+        match &mut self.data {
+            ArrayData::Words(_) => None,
+            ArrayData::Bytes(b) => Some(std::mem::take(b)),
+        }
+    }
+
+    /// Put back the bytes [`Self::take_bytes`] took.
+    pub fn restore_bytes(&mut self, bytes: Vec<u8>) {
+        self.data = ArrayData::Bytes(bytes);
+    }
+
     pub fn to_byte_vec(&self) -> Vec<u8> {
         match &self.data {
             ArrayData::Words(w) => w.iter().map(|v| v.as_int() as u8).collect(),
