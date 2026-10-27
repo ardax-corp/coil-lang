@@ -2055,6 +2055,8 @@ impl Cx<'_> {
                 }
                 Builtin::TypeOf | Builtin::Done | Builtin::Default | Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::Relayout | Builtin::FreeEarly { .. } => {}
                 Builtin::Print => self.note(w, id, EffectFlags::WRITE, || "prints".into()),
+                // Runs a minor collection: no effect a caller can see.
+                Builtin::Region { .. } => self.note_hidden(w, id, EffectFlags::GC, || "has a `region`".into()),
             },
             // Workers of a parallel region have no statics, and another
             // call may change one (coil-lang#793).

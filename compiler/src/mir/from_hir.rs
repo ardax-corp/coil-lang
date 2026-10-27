@@ -2673,6 +2673,13 @@ impl Lower<'_> {
                 self.at_expr(id, |l| l.b.ins_free_early(v, *deep).map_err(mir))?;
                 Ok(Val::Unit)
             }
+            // `region { … }`: its enter / leave HostInvoke.
+            HirKind::Builtin { op: Builtin::Region { enter }, .. } => {
+                let native = if *enter { common::GC_REGION_ENTER_ID } else { common::GC_REGION_EXIT_ID };
+                let layout = common::HOST_ENUM_LAYOUT_BOXED as u8;
+                self.at_expr(id, |l| l.b.ins_host_invoke_as(native, Vec::new(), layout, None).map_err(mir))?;
+                Ok(Val::Unit)
+            }
             HirKind::Builtin { op: Builtin::Done, args } if let [handle] = args.as_slice() => {
                 let Some(h) = self.word(*handle)? else {
                     return Ok(Val::Never);
