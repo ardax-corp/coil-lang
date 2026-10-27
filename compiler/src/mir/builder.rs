@@ -1045,6 +1045,14 @@ impl MirBuilder {
         Ok(dest)
     }
 
+    /// `FreeEarly` of `value`'s object (and what it reaches when `deep`).
+    pub fn ins_free_early(&mut self, value: ValueId, deep: bool) -> Result<ValueId, MirError> {
+        let value = self.resolve(value);
+        let dest = self.alloc(MirTy::Bool);
+        self.push(MirInst::FreeEarly { dest, value, deep })?;
+        Ok(dest)
+    }
+
     /// `FORMAT n` (I4 / Q9 R1). `fmt` is the format-string heap word.
     pub fn ins_format(&mut self, fmt: ValueId, args: Vec<ValueId>) -> Result<ValueId, MirError> {
         let ft = self.resolve_ty(fmt);

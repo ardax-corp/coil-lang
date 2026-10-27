@@ -3146,6 +3146,10 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
             emit_dense_push(out, &[*src], regs, scratch, loc)?;
             out.push(IlOp::Print { loc });
         }
+        MirInst::FreeEarly { value, deep, .. } => {
+            emit_dense_push(out, &[*value], regs, scratch, loc)?;
+            out.push(IlOp::from_plain_byte(Byte::new(Instruction::FreeEarly).with_operand_u32(u32::from(*deep)), loc));
+        }
         MirInst::Panic { msg, .. } => {
             emit_dense_push(out, &[*msg], regs, scratch, loc)?;
             out.push(IlOp::from_plain_byte(Byte::new(Instruction::Panic), loc));
@@ -3958,7 +3962,7 @@ fn gather_window(func: &MirFunc, self_entry: Option<Label>) -> u8 {
                 MirInst::Alloc { elems, .. } => elems.len(),
                 // Format string plus args, pushed like call args.
                 MirInst::Format { args, .. } => args.len() + 1,
-                MirInst::Stringify { .. } | MirInst::Unbox { .. } | MirInst::Print { .. } | MirInst::Panic { .. } => 1,
+                MirInst::Stringify { .. } | MirInst::Unbox { .. } | MirInst::Print { .. } | MirInst::FreeEarly { .. } | MirInst::Panic { .. } => 1,
                 MirInst::StrEq { .. } => 2,
                 _ => 0,
             };

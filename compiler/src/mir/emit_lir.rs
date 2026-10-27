@@ -419,7 +419,7 @@ impl EmitPlan {
             }
             if def[i].is_some() || def_block[i].is_some() {
                 let print_tok = def[i].is_some_and(|(b, k)| {
-                    matches!(func.block(b).insts.get(k), Some(MirInst::Print { .. } | MirInst::Panic { .. } | MirInst::StoreStatic { .. } | MirInst::HomeStore { .. } | MirInst::ClearWord { .. } | MirInst::KeepAlive { .. }))
+                    matches!(func.block(b).insts.get(k), Some(MirInst::Print { .. } | MirInst::FreeEarly { .. } | MirInst::Panic { .. } | MirInst::StoreStatic { .. } | MirInst::HomeStore { .. } | MirInst::ClearWord { .. } | MirInst::KeepAlive { .. }))
                 });
                 if !print_tok {
                     need_slot[i] = true;
@@ -647,6 +647,7 @@ fn writes_memory(inst: &MirInst) -> bool {
             | MirInst::HomeStore { .. }
             | MirInst::ClearWord { .. }
             | MirInst::Print { .. }
+            | MirInst::FreeEarly { .. }
             | MirInst::Panic { .. }
     )
 }
@@ -1585,6 +1586,10 @@ fn emit_stored(
             emit_stack(out, *src, func, plan, regs, pool, loc)?;
             out.push(IlOp::Print { loc });
         }
+        MirInst::FreeEarly { value, deep, .. } => {
+            emit_stack(out, *value, func, plan, regs, pool, loc)?;
+            out.push(IlOp::from_plain_byte(Byte::new(Instruction::FreeEarly).with_operand_u32(u32::from(*deep)), loc));
+        }
         MirInst::Panic { msg, .. } => {
             emit_stack(out, *msg, func, plan, regs, pool, loc)?;
             out.push(IlOp::from_plain_byte(Byte::new(Instruction::Panic), loc));
@@ -2198,6 +2203,11 @@ fn emit_stack(
         MirInst::Print { src, .. } => {
             emit_stack(out, *src, func, plan, regs, pool, loc)?;
             out.push(IlOp::Print { loc });
+            Ok(())
+        }
+        MirInst::FreeEarly { value, deep, .. } => {
+            emit_stack(out, *value, func, plan, regs, pool, loc)?;
+            out.push(IlOp::from_plain_byte(Byte::new(Instruction::FreeEarly).with_operand_u32(u32::from(*deep)), loc));
             Ok(())
         }
         MirInst::Panic { msg, .. } => {

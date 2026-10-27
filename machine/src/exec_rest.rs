@@ -542,15 +542,6 @@ impl<const S: usize> Machine<S> {
                             self.stack.seek(tell - consume);
                             self.stack.push(Value::from(0i64));
                         }
-                        crate::HostOp::Free => {
-                            let args = self.stack.top_window(consume);
-                            let (v, deep) = (args[1], args[2].as_int() != 0);
-                            // The window's copy of the reference is dead.
-                            self.stack[tell - 2] = Value::default();
-                            self.stack.seek(tell - consume);
-                            self.free_early(v, deep);
-                            self.stack.push(Value::from(0i64));
-                        }
                         crate::HostOp::Unwind => {
                             self.stack.seek(tell - consume);
                             self.unwind_resume();

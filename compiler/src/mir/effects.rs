@@ -138,6 +138,7 @@ impl MirInst {
             | Self::KeepAlive { .. }
             | Self::ArrayPush { .. }
             | Self::Print { .. }
+            | Self::FreeEarly { .. }
             | Self::Panic { .. }
             | Self::Format { .. }
             | Self::Stringify { .. } => true,

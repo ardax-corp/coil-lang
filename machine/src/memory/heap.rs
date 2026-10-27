@@ -248,6 +248,8 @@ pub struct Heap {
     /// Check mode of [`Self::free_early`]: objects it would have freed,
     /// which the next mark must not reach ([`Self::check_doomed`]).
     doomed: Vec<u64>,
+    /// What the last [`Self::free_early`] gave back.
+    early_freed: Vec<u64>,
     /// [`Self::free_early`] freed something: a dead frame word or a dead
     /// object may now point at a freed or reused slot, so a typed handle
     /// is looked up before it is marked ([`Self::early_freed_slot`]).
@@ -302,6 +304,7 @@ impl Default for Heap {
             gc_roots: Vec::new(),
             gc_dangling_strings: Vec::new(),
             doomed: Vec::new(),
+            early_freed: Vec::new(),
             freed_early: false,
             gc_phase: GcPhase::Idle,
             gc_sweep_cursor: None,
@@ -993,8 +996,9 @@ impl Heap {
     /// a `drop`, handles, and everything while a cycle or a steal epoch is
     /// open. `check` frees nothing and records the objects instead, which
     /// the next mark must not reach. Returns how many objects it freed.
-    /// The addresses freed are pushed onto `freed`.
-    pub fn free_early(&mut self, v: Value, deep: bool, check: bool, keep: &dyn Fn(u64) -> bool, freed: &mut Vec<u64>) -> usize {
+    /// [`Self::early_freed`] lists the addresses it freed.
+    pub fn free_early(&mut self, v: Value, deep: bool, check: bool, keep: &dyn Fn(u64) -> bool) -> usize {
+        self.early_freed.clear();
         if self.gc_phase != GcPhase::Idle || self.epoch_stw || !self.alloc_lock.is_null() {
             return 0;
         }
@@ -1004,8 +1008,19 @@ impl Heap {
         if !self.early_freeable(root) || keep(root.addr()) {
             return 0;
         }
+        if !deep {
+            // One object: no walk, no list.
+            if check {
+                self.doomed.push(root.addr());
+                return 0;
+            }
+            self.freed_early = true;
+            self.early_freed.push(root.addr());
+            unsafe { self.dealloc(root) };
+            return 1;
+        }
         let mut found = vec![root];
-        if deep {
+        {
             // Every mark bit is clear while idle: a set bit means visited.
             let mut work = Vec::new();
             root.mark(&mut work);
@@ -1036,11 +1051,16 @@ impl Heap {
             return 0;
         }
         self.freed_early = true;
-        freed.extend(found.iter().map(Object::addr));
+        self.early_freed.extend(found.iter().map(Object::addr));
         for &obj in &found {
             unsafe { self.dealloc(obj) };
         }
         found.len()
+    }
+
+    /// The addresses the last [`Self::free_early`] gave back.
+    pub fn early_freed(&self) -> &[u64] {
+        &self.early_freed
     }
 
     /// Whether `addr` may be a slot [`Self::free_early`] gave back: a stale
@@ -3210,6 +3230,20 @@ impl ObjArray {
     }
 
     /// The elements narrowed to bytes (`as u8`): one copy when packed.
+    /// Packed bytes moved out, leaving the array empty
+    /// ([`Self::restore_bytes`] puts them back); `None` for word storage.
+    pub fn take_bytes(&mut self) -> Option<Vec<u8>> {
+        match &mut self.data {
+            ArrayData::Words(_) => None,
+            ArrayData::Bytes(b) => Some(std::mem::take(b)),
+        }
+    }
+
+    /// Put back the bytes [`Self::take_bytes`] took.
+    pub fn restore_bytes(&mut self, bytes: Vec<u8>) {
+        self.data = ArrayData::Bytes(bytes);
+    }
+
     pub fn to_byte_vec(&self) -> Vec<u8> {
         match &self.data {
             ArrayData::Words(w) => w.iter().map(|v| v.as_int() as u8).collect(),

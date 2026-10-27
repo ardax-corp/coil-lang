@@ -25,6 +25,7 @@ impl MirInst {
             | Self::Alloc { .. }
             | Self::GcBarrier { .. }
             | Self::Print { .. }
+            | Self::FreeEarly { .. }
             | Self::Panic { .. }
             | Self::Format { .. }
             | Self::Stringify { .. } => Some(MirDeoptKind::Deopt),

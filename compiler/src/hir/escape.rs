@@ -37,7 +37,7 @@ pub(super) struct Src {
     pub(super) params: u64,
     /// Objects allocated in this body, by site.
     pub(super) sites: u64,
-    /// Anything else: a static, a string literal, a capture, a callee's
+    /// Anything else: a static, a capture, a callee's
     /// result that is not fresh.
     pub(super) other: bool,
 }
@@ -56,6 +56,16 @@ impl Src {
 
     fn is_empty(self) -> bool {
         self == Self::EMPTY
+    }
+}
+
+/// Leaf objects: a string, or a vector of plain words (packed bytes,
+/// ints). They hold no references, so a new one never holds an old one.
+pub(super) fn leaf(ty: Option<&Ty>) -> bool {
+    match ty.map(crate::typechecking::ty::strip_readonly) {
+        Some(Ty::Con(n)) => n == "string",
+        Some(t @ Ty::App(_, args)) => is_vec(Some(t)) && args.len() == 1 && no_heap(Some(&args[0])),
+        _ => false,
     }
 }
 
@@ -259,7 +269,9 @@ impl<'c, 'a> Escape<'c, 'a> {
                     HirKind::Call { callee, args } => {
                         let s = self.callee(id, callee, args);
                         for (j, a) in args.iter().enumerate() {
-                            if s.is_none_or(|s| j >= 64 || s.mutates & (1 << j) != 0) {
+                            // A leaf (a string, a vector of plain words)
+                            // can only be given plain words.
+                            if s.is_none_or(|s| j >= 64 || s.mutates & (1 << j) != 0) && !leaf(body.expr(*a).ty.as_ref()) {
                                 self.store(*a, Src::OTHER);
                             }
                         }
@@ -330,8 +342,9 @@ impl<'c, 'a> Escape<'c, 'a> {
         }
         if let Callee::Method { name } = callee
             && let Some(recv) = args.first()
-            && is_vec(body.expr(*recv).ty.as_ref())
-            && matches!(name.as_str(), "len" | "capacity")
+            && let recv_ty = body.expr(*recv).ty.as_ref()
+            && (is_vec(recv_ty) && matches!(name.as_str(), "len" | "capacity")
+                || name == "len" && args.len() == 1 && recv_ty.is_some_and(crate::typechecking::infer::Checker::is_structural_len_ty_for_codegen))
         {
             return Some(Summary::default());
         }
@@ -346,7 +359,9 @@ impl<'c, 'a> Escape<'c, 'a> {
             return Src::EMPTY;
         }
         match &e.kind {
-            HirKind::Lit(super::super::Lit::Str(_)) => Src::OTHER,
+            // A string literal is interned: immutable, and never freed early
+            // (the VM skips interned strings), so holding one is like
+            // holding nothing.
             HirKind::Lit(_) => Src::EMPTY,
             HirKind::Local(l) => self.local(*l),
             HirKind::Global { .. } => Src::OTHER,

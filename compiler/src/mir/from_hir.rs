@@ -2660,18 +2660,17 @@ impl Lower<'_> {
                 self.at_expr(id, |l| l.b.ins_print(s).map_err(mir))?;
                 Ok(Val::Unit)
             }
-            // An early free (`gc_free_early`) of a local's object.
+            // An early free (`FreeEarly`) of a local's object.
             HirKind::Builtin { op: Builtin::FreeEarly { deep }, args } if let [local] = args.as_slice() => {
                 let Some(v) = self.word(*local)? else {
                     return Ok(Val::Never);
                 };
                 // A word that is no reference (a scalar niche) has nothing
-                // to free.
-                if !matches!(self.b.value_ty(v), MirTy::HeapRef | MirTy::I64) {
+                // to free; a pointer niche frees the object it points at.
+                if !matches!(self.b.value_ty(v), MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes | MirTy::I64) {
                     return Ok(Val::Unit);
                 }
-                let deep = self.b.ins_const(MirConst::I64(i64::from(*deep))).map_err(mir)?;
-                self.b.ins_host_invoke(common::GC_FREE_EARLY_ID, vec![v, deep]).map_err(mir)?;
+                self.at_expr(id, |l| l.b.ins_free_early(v, *deep).map_err(mir))?;
                 Ok(Val::Unit)
             }
             HirKind::Builtin { op: Builtin::Done, args } if let [handle] = args.as_slice() => {
@@ -5945,7 +5944,11 @@ impl Lower<'_> {
     /// id is the instruction's, not a value the lowering has to find).
     fn host(&mut self, id: HirId, args: &[HirId]) -> Result<Val, Refusal> {
         let (native, layout, unbox) = &self.inp.hosts[&id.0];
-        let (native, layout) = (*native, *layout);
+        let (mut native, layout) = (*native, *layout);
+        // A `from_bytes` whose buffer is dead after it takes the bytes.
+        if self.hir.expr(id).flags.contains(crate::hir::HirFlags::TAKE) && common::host_native_id("from_bytes") == Some(usize::from(native)) {
+            native = common::FROM_BYTES_TAKE_ID;
+        }
         let raw = std::mem::take(&mut self.raw_host);
         let pair = match (self.inp.pair_tys.get(&id.0), unbox) {
             (Some(_), Some(_)) if raw => None,

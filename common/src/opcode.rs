@@ -498,6 +498,11 @@ pub enum Instruction {
     /// `p - 63 + (63 - lzcnt(mask))`, else `p -= 64`. Execution resumes
     /// past the body.
     VScan,
+    /// Early free (archive 5.1): pop a heap word the compiler proved dead
+    /// and give its object back to the heap now; operand bit 0 frees what
+    /// it reaches through precise words too. The VM skips what it cannot
+    /// free safely (see `Heap::free_early`). Never collects.
+    FreeEarly,
 }
 
 impl From<u8> for Instruction {
@@ -997,6 +1002,7 @@ impl Instruction {
             Self::RestoreSnapshot => "RestoreSnapshot",
             Self::VMask => "VMask",
             Self::VScan => "VScan",
+            Self::FreeEarly => "FreeEarly",
         }
     }
 }
@@ -2114,7 +2120,7 @@ mod tests {
     fn instruction_from_u8_covers_last_appended_variant() {
         // ARCHIVE stability: last variant must remain decodable (keep in sync
         // with machine release `promise!` ceiling).
-        let last = Instruction::VScan as u8;
+        let last = Instruction::FreeEarly as u8;
         let decoded: Instruction = last.into();
         assert_eq!(decoded as u8, last);
     }

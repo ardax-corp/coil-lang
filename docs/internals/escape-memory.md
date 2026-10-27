@@ -59,7 +59,7 @@ Heap objects per run and GC safepoint time (instrumented build, best of 3):
 | 1 | Escape summaries: per function, which parameters may escape and whether the result is fresh; whole-program fixed point next to `ProgramEffects`; shown by `coil dissect --effects` | done |
 | 1b | Optional stated facts (`#[noescape(x)]`, `#[fresh]`), checked against the inferred summary (E0139) | done |
 | 2 | Free at scope end and after the call for non-escaping fresh objects; check mode, gc-stress | done |
-| 3 | Static uniqueness: append in place, zero-copy `to_bytes`/`from_bytes`, enum SROA for a `match` on an inlined call result | |
+| 3 | Static uniqueness: free a string's old value when it is rebuilt in place, free fresh concatenation operands; zero-copy `to_bytes`/`from_bytes` and enum SROA measured and dropped | done |
 | 4 | Nursery for young objects | |
 | 5 | Opt-in checked `region` block | |
 | 6 | Re-measure; decide whether anything else is worth doing | |
@@ -76,7 +76,7 @@ effects fixed point solves them across calls and modules:
   it. A coroutine keeps all its parameters.
 - `returns`: bit `i` when the result may reach what parameter `i` reaches.
 - `shared_ret`: the result may reach an object the call did not allocate
-  (a parameter, a static, a string literal, a callee's shared result), or
+  (a parameter, a static, a callee's shared result), or
   a fresh object something else also reaches. When it is `false`, a caller
   that drops the result may free everything it reaches.
 
@@ -104,9 +104,9 @@ says its result is fresh. A stated fact is checked against the inferred
 one and is E0139 when it does not hold (or names no parameter); it is
 never trusted in place of the analysis.
 
-Known gaps: the facts do not tell variants apart, so an `Err` that holds a
-string literal makes a `Result` result shared even on the `Ok` path
-(`csv::Parser::parse_unquoted`). Archives are byte-identical to main and
+A string literal reaches nothing: it is interned, immutable, and the VM
+never frees an interned string (step 3; step 1 counted it as shared, so an
+`Err` holding a literal made a whole `Result` shared). Archives are byte-identical to main and
 compile time is unchanged (b_json 0.30 s, b_csv 0.10 s).
 
 `fn drop()` may run at the point an object is freed early instead of at a
@@ -137,8 +137,10 @@ everything. Two shapes are freed:
   panics leave it to the collector.
 
 Each free is `Builtin::FreeEarly { deep }` of the local and a `Clear` of
-its frame word, lowered to the `gc_free_early` HostInvoke (id 174, archive
-5.1, `HostOp::Free`). The VM frees nothing while a collection cycle or a
+its frame word. It lowers to MIR `FreeEarly` and to the `FreeEarly`
+instruction (archive 5.1), which pops the word; the VM runs it in its main
+dispatch loop. (Step 2 first used a host call; that left the fast loop on
+every free, and a `join` with a free per part ran 25% slower.) The VM frees nothing while a collection cycle or a
 steal epoch is open, and skips what it cannot free safely: interned
 strings, the shared unit variants and `()`, objects of a type with a
 `drop` (while any is registered), handles, and arrays an `ArrayPin` holds
@@ -193,6 +195,86 @@ differences under about 10% are within run-to-run spread.
 What is left is what the plan expected later steps to take: strings
 rebuilt in place (`s = s + x`, step 3), container contents (step 4 and
 the GC), and the byte copies kept by `to_bytes` / `from_bytes` pairs
-(step 3 zero-copy). Each free is one host call (b_csv runs 5.5% more
-dispatches), so time gains show only where collections were a large share
-of the run.
+(step 3 zero-copy). These numbers were taken while each free was a host
+call; the `FreeEarly` instruction replaced it (see step 3's numbers).
+
+## Uniqueness (step 3)
+
+A *linear* local is one the escape walk can follow by value: a string or a
+vector of plain values, bound once by its `let` with no compound
+assignment, whose every value is fresh (a literal, a concatenation, a block
+ending in one, or a call whose summary returns a fresh, unshared result),
+and whose every read uses the value without keeping it (an operand, an
+index or field read of a plain value, a `return`, an argument a callee does
+not keep, the receiver of a vector method). For such a local:
+
+- `x = v` frees the old value after `v` is computed: `s = s + piece` in a
+  loop leaves one live string instead of one per pass.
+- It is freed at the end of its block like any step 2 local, including
+  when a callee appends to it (a vector of plain values given to a callee
+  that changes it still reaches nothing the callee could have stored).
+
+A concatenation whose operands include fresh call results (`a + f(x) + b`)
+binds those results to temporaries and frees them once the result is
+built; the chain stays one chain, so `FORMAT` fusion still applies.
+
+Freeing now has its own instruction (`FreeEarly`, archive 5.1) instead of
+a host call: a host call left the VM's fast dispatch loop on every free,
+and a `join` with one free per part ran 25% slower; with the instruction
+`join` and `append` time the same with frees on and off.
+
+Later in step 3:
+
+- **Variable-size match scrutinees.** `match f(x) { .. }` binds a fresh
+  scrutinee to a temporary and frees it after the match when no arm binding
+  or the match value keeps it. Only strings, vectors and options of them
+  qualify: freeing small fixed-size objects one at a time costs more than
+  the sweep that would reclaim them (result_heap_churn ran 17 to 25% slower
+  with every scrutinee freed, and still 14% with the free made cheaper).
+- **Vector reassignment.** A linear vector local whose elements are fresh
+  heap values (`list = rebuild(list)`) frees the old vector deeply when it
+  is reassigned, provided no other local still shares its elements.
+- **Literals count as fresh.** String literals are interned and never freed
+  by the VM, so a value that may be a literal is no longer treated as
+  shared.
+- **Zero-copy `to_bytes`.** `let b = to_bytes(s)` whose only reads are
+  `b[i]` and `b.len()` reads `s` directly (string indexing yields the same
+  byte); no buffer is built.
+- **Zero-copy `from_bytes`.** `return from_bytes(buf)` where `buf` is a
+  local vector allocated in this body and not kept anywhere calls
+  `from_bytes_take`, which moves the bytes into the string instead of
+  copying them (and puts them back if they are not valid UTF-8). b_csv's
+  per-field `bytes_to_s(out)` is not covered yet: the buffer arrives as a
+  parameter of a call that is not inlined.
+
+Both zero-copy rewrites measured as a 1 to 2% instruction win under
+callgrind; they go in anyway because larger programs convert far more text
+than these benchmarks. Enum SROA on a `match` of an inlined call was
+dropped: b_json and b_csv allocate under 600 enums each.
+
+### Measured (step 3)
+
+Same method as step 2 (5 runs, 2026-10-27), all of step 3 in. b_csv and
+b_json allocate fewer objects with frees on because of the zero-copy
+rewrites.
+
+| bench | objects allocated | freed early | collections | GC time | time | peak RSS |
+|---|---|---|---|---|---|---|
+| binary_trees 16 | 7,449,278 | 7,383,731 (99%) | 71 → 2 | 670 → 2 ms | 2078 → 1550 ms | 28 → 17 MB |
+| strings | 300,033 | 200,001 (67%) | 9 → 2 | 12 → 1 ms | 132 → 129 ms | 37 → 38 MB |
+| byte_scan | 32,787 | 32,769 (99%) | 5 → 1 | 1 → 0 ms | 16 → 14 ms | 12 → 12 MB |
+| b_csv (1 MB) | 545,341 → 417,145 | 256,335 (61%) | 4 → 3 | 25 → 4 ms | 583 → 608 ms | 44 → 22 MB |
+| b_json | 348,579 → 228,578 | 111,999 (49%) | 3 → 2 | 5 → 0 ms | 738 → 694 ms | 38 → 24 MB |
+| gc_rebuild | 3,600,006 | 3,300,002 (92%) | 15 → 3 | 357 → 9 ms | 732 → 575 ms | 67 → 47 MB |
+| gc_shrink | 3,353,130 | 400,001 (12%) | 169 → 142 | 224 → 226 ms | 498 → 492 ms | 63 → 66 MB |
+| result_heap_churn | 10,000,005 | 1 | 686 → 686 | 189 → 166 ms | 949 → 939 ms | 12 → 12 MB |
+| hashmap | 40,179 | 3 | 4 → 4 | 4 → 4 ms | 426 → 442 ms | 25 → 25 MB |
+| b_coll | 200,192 | 1 | 5 → 5 | 13 → 14 ms | 4141 → 4154 ms | 148 → 147 MB |
+
+The machine is noisy; differences under about 5% in time are not
+meaningful. b_csv's time is within that band.
+
+What b_csv and b_json still allocate and do not free is their output: the
+parsed field strings and row vectors (b_csv), and the decoded strings and
+store (b_json). Those are live until the program drops the result, which
+is the GC's job (or step 4's).

@@ -880,6 +880,14 @@ impl MirFunc {
                     return Err(format!("{dest} CodePtr dest is not i64"));
                 }
             }
+            MirInst::FreeEarly { dest, value, .. } => {
+                if self.ty(*dest) != MirTy::Bool {
+                    return Err(format!("{dest} FreeEarly dest is not bool"));
+                }
+                if !matches!(self.ty(*value), MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes | MirTy::I64) {
+                    return Err(format!("{dest} FreeEarly value type"));
+                }
+            }
             MirInst::Print { dest, src } => {
                 if self.ty(*dest) != MirTy::Bool {
                     return Err(format!("{dest} Print dest is not bool"));

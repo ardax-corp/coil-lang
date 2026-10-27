@@ -1048,7 +1048,17 @@ impl Compiler {
         let plan = match plan {
             Ok(emit) if self.opt_options.escape_analysis && self.opt_options.early_free && !self.debugger_attached && !hir.is_coro => {
                 let module_path = self.checker.current_module_name().to_string();
-                match self.program_effects.early_frees(&self.checker, &module_path, &module, hir) {
+                let hosts: HashMap<u32, usize> = emit
+                    .plan
+                    .calls
+                    .iter()
+                    .filter_map(|(&i, c)| match c.builtin {
+                        Some(HirBuiltin::Host(n)) => Some((i, n)),
+                        _ => None,
+                    })
+                    .collect();
+                let host = |id: HirId| hosts.get(&id.0).copied();
+                match self.program_effects.early_frees(&self.checker, &module_path, &module, hir, &host) {
                     Some(next) => match lower::refusal(&next, &self.checker)
                         .map_or_else(|| self.plan_hir_body(&next), Err)
                         .and_then(|mut e| self.plan_hir_lambdas(&module, &next, &mut e).map(|()| e))

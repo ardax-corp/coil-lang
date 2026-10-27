@@ -625,6 +625,15 @@ pub enum MirInst {
         dest: ValueId,
         src: ValueId,
     },
+    /// `FreeEarly` (escape step 2): give `value`'s object back to the heap
+    /// (with what it reaches when `deep`); the compiler proved nothing
+    /// reads it again. Dest is a `bool` unit token. A side effect; never
+    /// collects.
+    FreeEarly {
+        dest: ValueId,
+        value: ValueId,
+        deep: bool,
+    },
     /// `Panic` of the string `msg`: the frame never continues, so the
     /// block ends in [`Terminator::Unreachable`]. Dest is a `bool` unit
     /// token, as [`Self::Print`]. A side effect.
@@ -872,6 +881,7 @@ impl MirInst {
             | Self::String { dest, .. }
             | Self::CodePtr { dest, .. }
             | Self::Print { dest, .. }
+            | Self::FreeEarly { dest, .. }
             | Self::Panic { dest, .. }
             | Self::Format { dest, .. }
             | Self::Stringify { dest, .. }
@@ -947,7 +957,7 @@ impl MirInst {
             Self::Alloc { elems, .. } => elems.clone(),
             Self::GcBarrier { roots, .. } => roots.clone(),
             Self::Deopt { .. } | Self::String { .. } | Self::CodePtr { .. } => Vec::new(),
-            Self::Print { src, .. } | Self::Stringify { src, .. } | Self::Unbox { src, .. } | Self::Panic { msg: src, .. } => vec![*src],
+            Self::Print { src, .. } | Self::FreeEarly { value: src, .. } | Self::Stringify { src, .. } | Self::Unbox { src, .. } | Self::Panic { msg: src, .. } => vec![*src],
             Self::Format { fmt, args, .. } => {
                 let mut v = vec![*fmt];
                 v.extend(args.iter().copied());
@@ -1031,7 +1041,7 @@ impl MirInst {
                 }
             }
             Self::Deopt { .. } | Self::String { .. } | Self::CodePtr { .. } => {}
-            Self::Print { src, .. } | Self::Stringify { src, .. } | Self::Unbox { src, .. } | Self::Panic { msg: src, .. } => *src = map(*src),
+            Self::Print { src, .. } | Self::FreeEarly { value: src, .. } | Self::Stringify { src, .. } | Self::Unbox { src, .. } | Self::Panic { msg: src, .. } => *src = map(*src),
             Self::Format { fmt, args, .. } => {
                 *fmt = map(*fmt);
                 for v in args.iter_mut() {

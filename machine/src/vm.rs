@@ -745,7 +745,6 @@ pub struct Machine<const S: usize> {
     /// Pin tables for frames that ran `ArrayPin` or a dense heap index.
     frame_pins: Vec<FramePins>,
     /// Scratch for [`Self::free_early`]: the addresses one call freed.
-    early_freed: Vec<u64>,
     /// Last dense-index array identity (predicted hit in counted loops).
     dense_obj_addr: u64,
     dense_obj: Option<Object>,
@@ -925,7 +924,6 @@ impl<const S: usize> Machine<S> {
         Self {
             frames,
             frame_pins: Vec::new(),
-            early_freed: Vec::new(),
             dense_obj_addr: 0,
             dense_obj: None,
             heap: crate::memory::HeapSlot::default(),
@@ -1648,42 +1646,13 @@ impl<const S: usize> Machine<S> {
         }
     }
 
-    /// `gc_free_early(v, deep)`: free what the compiler proved dead
-    /// ([`Heap::free_early`]). Frame pins keep their arrays, and the dense
-    /// object cache forgets a freed address. `COIL_EARLY_FREE=0` turns it
+    /// `FreeEarly` (`deep` from its operand): free what the compiler proved dead
+    /// ([`Heap::free_early`]). An `ArrayPin` keeps its array; a dense
+    /// index's pin and the dense object cache forget a freed address. `COIL_EARLY_FREE=0` turns it
     /// off; `COIL_EARLY_FREE=check` frees nothing and aborts when the next
     /// mark still reaches an object it would have freed.
     pub(crate) fn free_early(&mut self, v: Value, deep: bool) {
-        static MODE: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
-        let mode = *MODE.get_or_init(|| match std::env::var("COIL_EARLY_FREE").as_deref() {
-            Ok("0" | "off") => 0,
-            Ok("check") => 2,
-            _ => 1,
-        });
-        if mode == 0 {
-            return;
-        }
-        // An `ArrayPin` holds its array for the frame; a dense index's pin
-        // only caches its register's object, and is dropped with it below.
-        let pins = &self.frame_pins;
-        let keep = |addr: u64| {
-            pins.iter().any(|p| p.by_slot.iter().zip(&p.sticky).any(|(o, &sticky)| sticky && o.is_some_and(|o| o.addr() == addr)))
-        };
-        let mut freed = std::mem::take(&mut self.early_freed);
-        freed.clear();
-        if self.heap.free_early(v, deep, mode == 2, &keep, &mut freed) == 0 {
-            self.early_freed = freed;
-            return;
-        }
-        self.clear_dense_obj_cache();
-        for p in &mut self.frame_pins {
-            for o in &mut p.by_slot {
-                if o.is_some_and(|o| freed.contains(&o.addr())) {
-                    *o = None;
-                }
-            }
-        }
-        self.early_freed = freed;
+        free_early_in(&mut self.heap, &mut self.frame_pins, &mut self.dense_obj_addr, &mut self.dense_obj, v, deep);
     }
 
     #[inline]
@@ -4333,7 +4302,7 @@ impl<const S: usize> Machine<S> {
             // variant. A stale ceiling (e.g. YieldFromCoro) makes later opcodes
             // (`StoreIndex`, `DoneCoro`, `ArrayPush`, …) UB via assert_unchecked.
             #[cfg(not(debug_assertions))]
-            promise!(*bc as u8 <= Instruction::VScan as u8);
+            promise!(*bc as u8 <= Instruction::FreeEarly as u8);
 
             match bc {
                 Instruction::STORE => {
@@ -4849,6 +4818,10 @@ impl<const S: usize> Machine<S> {
                         self.stack.push(self.stack[sp + base + i]);
                     }
                 }
+                Instruction::FreeEarly => {
+                    let v = self.stack.pop();
+                    self.free_early(v, opcode.operand_u32() & 1 != 0);
+                }
                 _ => match self.exec_rest(opcode, ip, sp, code, constants, stack_cap).get() {
                     Ok((next_ip, next_sp)) => (ip, sp) = (next_ip, next_sp),
                     Err(paused) => return paused,
@@ -4856,6 +4829,36 @@ impl<const S: usize> Machine<S> {
             }
         }
         false
+    }
+}
+
+/// [`Machine::free_early`] on the parts the dense streak holds too.
+fn free_early_in(heap: &mut Heap, frame_pins: &mut [FramePins], dense_obj_addr: &mut u64, dense_obj: &mut Option<Object>, v: Value, deep: bool) {
+    static MODE: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    let mode = *MODE.get_or_init(|| match std::env::var("COIL_EARLY_FREE").as_deref() {
+        Ok("0" | "off") => 0,
+        Ok("check") => 2,
+        _ => 1,
+    });
+    if mode == 0 {
+        return;
+    }
+    // An `ArrayPin` holds its array for the frame; a dense index's pin
+    // only caches its register's object, and is dropped with it below.
+    let pins = &*frame_pins;
+    let keep = |addr: u64| pins.iter().any(|p| p.by_slot.iter().zip(&p.sticky).any(|(o, &sticky)| sticky && o.is_some_and(|o| o.addr() == addr)));
+    if heap.free_early(v, deep, mode == 2, &keep) == 0 {
+        return;
+    }
+    *dense_obj_addr = 0;
+    *dense_obj = None;
+    let freed = heap.early_freed();
+    for p in frame_pins.iter_mut() {
+        for o in &mut p.by_slot {
+            if o.is_some_and(|o| freed.contains(&o.addr())) {
+                *o = None;
+            }
+        }
     }
 }
 

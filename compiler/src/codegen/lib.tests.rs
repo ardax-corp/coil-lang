@@ -3880,9 +3880,11 @@ fn main() {
     let pack_off = pipeline.compiler_mut().get_function("pack").expect("pack");
     let pack_bc = &bc[pack_off..];
     let names: Vec<_> = pack_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
+    // Register (dense) emission boxes with `DenseMake`, e.g. when the body
+    // also frees `h` early.
     let makes = pack_bc
         .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::MakeArray))
+        .filter(|b| matches!(b.bytecode(), Instruction::MakeArray | Instruction::DenseMake))
         .count();
     assert!(makes >= 1, "box xs at field store; opcodes={names:?}");
     let mut vm = machine::Machine::<64>::with_operand_capacity(64);
