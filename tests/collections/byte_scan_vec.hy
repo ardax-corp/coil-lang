@@ -146,18 +146,22 @@ test("match length at every length around the lanes") {
         }
         let j = 0;
         while j < 300 {
-            s.push(if j == m {
-                200 as byte
-            } else {
-                (j % 7) as byte
-            });
+            s.push(
+                if j == m {
+                    200 as byte
+                } else {
+                    (j % 7) as byte
+                },
+            );
             j = j + 1;
         }
-        assert!(match_len(s, 0, 300, 258) == if m < 258 {
-            m
-        } else {
-            258
-        });
+        assert!(
+            match_len(s, 0, 300, 258) == if m < 258 {
+                m
+            } else {
+                258
+            },
+        );
     }
 }
 
