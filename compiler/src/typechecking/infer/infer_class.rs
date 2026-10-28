@@ -1194,10 +1194,17 @@ impl Checker {
                     })
                     .collect()
             };
+            // The class's own bounds (`class Sorted<T: Ord>`) hold on every
+            // inherent impl of it, its i-th parameter being the impl's i-th;
+            // they come first in the dictionary order, and a bound the impl
+            // restates is not taken twice (#2085).
+            let args: Vec<Ty> = bound_vars.iter().map(|(_, var)| Ty::Var(*var)).collect();
+            impl_constraints = self.class_param_bounds_at(&owner_key, &args);
             for (tp, (_name, var)) in type_params.iter().zip(bound_vars.iter()) {
                 for bound in &tp.bounds {
                     if let Some(constraint) =
                         self.constraint_from_bound(bound, Ty::Var(*var), range)
+                        && !impl_constraints.contains(&constraint)
                     {
                         impl_constraints.push(constraint);
                     }

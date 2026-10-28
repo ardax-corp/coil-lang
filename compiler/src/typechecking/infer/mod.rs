@@ -586,6 +586,22 @@ pub struct Checker {
     /// not resolve to a `Vec<T>` or `[T; 0]` (#1876).
     open_empty_arrays: Vec<(Ty, Range<usize>)>,
 
+    /// The bounds on a class's type parameters (`class Sorted<T: Ord>`),
+    /// by class FQN, each argument schemaized to its parameter name
+    /// (`Ord<T>`): checked at every `new` and shared by the class's
+    /// inherent impls (#2085).
+    class_param_bounds: HashMap<String, Vec<Constraint>>,
+
+    /// Call-site goals whose arguments were all still open at the call
+    /// (`Ord<a>` for `let h: Heap<int> = Heap::new()`), with the call's
+    /// node and span: the enclosing body retries them once its later
+    /// statements have had the chance to pin the variables (#2085).
+    deferred_goals: Vec<(Option<NodeId>, Vec<Constraint>, Range<usize>)>,
+
+    /// Set while the deferred goals are retried: one still open then
+    /// resolves or reports as it would have at the call.
+    retrying_deferred_goals: bool,
+
     /// Set by `infer_call_arg` for an empty `[]` argument, taken by
     /// `infer_array_literal`.
     defer_empty_array: bool,
