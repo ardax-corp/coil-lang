@@ -184,7 +184,11 @@ discover_all → expand_user_macros → (discover newly used modules) → typech
    its own macro is a staging error.
    A name that does not resolve waits a round instead when a module it would
    be imported from still has pending macros this round, or when its own file
-   has other item-level ones: their output may declare it (below).
+   has other item-level ones: their output may declare it (below). After a
+   round in which nothing ran, nothing can still declare it: the next round
+   reports it. A name a module with a parse error would provide reports that
+   error at the use site ("could not compile the macro module `m`: …"), as
+   a provider that does not typecheck does.
 3. **Encode** each call's input as one string (`macros::encode::Wire`):
    length-prefixed fields (`<len>:<bytes>`, lists as a count then their
    items) in the order the model's constructors take them, then the
