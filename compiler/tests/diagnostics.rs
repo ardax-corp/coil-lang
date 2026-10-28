@@ -124,8 +124,6 @@ fn main() { let _ = twice(1, fn (int x) => x); }
             "Into without a target",
             r#"
 class M { pub v: int }
-class N {}
-impl Into<N> for M { fn into(M m) -> N { return new N(); } }
 fn main() { let m = new M(1); let z = m.into(); }
 "#,
             "Cannot satisfy constraint `Into<M, a>`",
