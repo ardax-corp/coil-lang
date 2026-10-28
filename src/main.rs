@@ -723,6 +723,10 @@ fn main() {
             if let Some(on) = cli.nursery {
                 machine::set_nursery(on);
             }
+            if cli.cow_report {
+                // SAFETY: set before any thread starts.
+                unsafe { std::env::set_var("COIL_COW_REPORT", "1") };
+            }
             if cli.opt_stats || cli.opt_stats_json {
                 pipeline.set_collect_opt_stats(true);
             }

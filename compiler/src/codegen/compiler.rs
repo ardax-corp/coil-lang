@@ -7716,6 +7716,7 @@ impl Compiler {
             && let Some(mutates) = cow_mutates
             && let Some(mut hir) = self.hir_module.take()
         {
+            let mut notes = Vec::new();
             let rewritten: Vec<(usize, crate::hir::HirBody)> = hir
                 .bodies
                 .iter()
@@ -7725,9 +7726,12 @@ impl Compiler {
                     if std::env::var("COIL_COW_TRACE").is_ok() {
                         eprintln!("cow: {}", b.name);
                     }
-                    self.program_effects.cow_rewrite(&self.checker, module, &hir, b, m).map(|n| (i, n))
+                    let (body, n) = self.program_effects.cow_rewrite(&self.checker, module, &hir, b, m);
+                    notes.extend(n);
+                    body.map(|n| (i, n))
                 })
                 .collect();
+            self.messages.extend(notes);
             for (i, body) in rewritten {
                 hir.bodies[i] = body;
                 if std::env::var("COIL_COW_DUMP").is_ok_and(|n| hir.bodies[i].name.contains(n.as_str())) {

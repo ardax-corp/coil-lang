@@ -236,7 +236,7 @@ impl ProgramEffects {
     /// `body` with its copy-on-write ops ([`cow`]), when it needs any.
     /// `mutates` is the body's own summary bits: the parameters it writes
     /// in place for its caller.
-    pub fn cow_rewrite(&self, checker: &Checker, module_path: &str, module: &HirModule, body: &HirBody, mutates: u64) -> Option<HirBody> {
+    pub fn cow_rewrite(&self, checker: &Checker, module_path: &str, module: &HirModule, body: &HirBody, mutates: u64) -> (Option<HirBody>, Vec<reporting::Message>) {
         let lookup = |callee: &Callee, args: &[HirId]| self.call_summary(checker, module_path, body, callee, args);
         cow::rewrite(checker, module, body, &lookup, mutates)
     }

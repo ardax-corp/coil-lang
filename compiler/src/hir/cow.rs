@@ -32,6 +32,7 @@ use super::{is_vec, pat_binds, Summary, VEC_MUTATORS};
 use crate::hir::lower::{children, pure_index};
 use crate::hir::{Builtin, Callee, HirBody, HirExpr, HirFlags, HirId, HirKind, HirLocal, HirModule, HirPat, IndexKind, LocalId, LocalKind, MakeKind, Span};
 use crate::typechecking::infer::{Checker, ForInKind};
+use reporting::{ErrorCode, Message};
 use crate::typechecking::ty::{self as ty, Ty, strip_readonly};
 
 /// Whether copy-on-write is on for this compile (`COIL_COW=1`).
@@ -124,17 +125,34 @@ struct Facts<'b> {
     reassigned: HashSet<LocalId>,
 }
 
-/// The body with its copy-on-write ops, when it needs any.
-pub(super) fn rewrite(checker: &Checker, module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>, mutates: u64) -> Option<HirBody> {
-    let root = body.root?;
+/// The body with its copy-on-write ops, when it needs any, and warnings
+/// for writes that copy or are dropped.
+pub(super) fn rewrite(checker: &Checker, module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>, mutates: u64) -> (Option<HirBody>, Vec<Message>) {
+    let Some(root) = body.root else { return (None, Vec::new()) };
     let facts = Facts::new(checker, module, body, lookup, root);
-    let plan = Plan::new(checker, body, &facts, mutates);
+    let mut plan = Plan::new(checker, body, &facts, mutates);
+    let notes = std::mem::take(&mut plan.notes);
     if plan.is_empty() {
-        return None;
+        return (None, notes);
     }
     let mut out = body.clone();
     plan.apply(&mut out, checker);
-    Some(out)
+    (Some(out), notes)
+}
+
+/// How a place reads in a message: `a`, `a.b`, `a[…]`.
+fn place_text(body: &HirBody, v: HirId) -> Option<String> {
+    match &body.expr(v).kind {
+        HirKind::Local(l) => {
+            let name = &body.local(*l).name;
+            (!name.starts_with('$') && body.local(*l).kind != LocalKind::Temp).then(|| name.clone())
+        }
+        HirKind::Field { base, name } => Some(format!("{}.{name}", place_text(body, *base)?)),
+        HirKind::Index { base, .. } => Some(format!("{}[…]", place_text(body, *base)?)),
+        HirKind::Global { name, .. } => Some(name.rsplit("::").next().unwrap_or(name).to_string()),
+        HirKind::Builtin { op: Builtin::Cow { .. }, args } if args.len() == 1 => place_text(body, args[0]),
+        _ => None,
+    }
 }
 
 impl<'b> Facts<'b> {
@@ -540,6 +558,8 @@ fn from_summary(s: &Summary) -> ArgUse {
 /// Where the rewrite puts ops.
 #[derive(Default)]
 struct Plan {
+    /// Warnings about copies and dropped writes.
+    notes: Vec<Message>,
     /// Values to share: (node, eager copy).
     share: Vec<(HirId, bool)>,
     /// Locals to share as a statement right after the node that binds
@@ -584,6 +604,8 @@ impl Plan {
         // borrow (nothing writes through it, and nothing writes through its
         // source's root while it lives).
         let mut borrowed: HashSet<LocalId> = HashSet::new();
+        // Bindings shared with the place they were read from.
+        let mut copied_from: HashMap<LocalId, HirId> = HashMap::new();
         let place_root = |v: HirId| -> Option<HirId> {
             match &body.expr(v).kind {
                 HirKind::Local(_) | HirKind::Field { .. } | HirKind::Index { .. } | HirKind::Global { .. } => f.root_of(v),
@@ -635,6 +657,7 @@ impl Plan {
                 }
                 let from = f.parent.get(&v).copied().unwrap_or(v);
                 if needs_share(l, r, from) {
+                    copied_from.insert(l, v);
                     plan.share_value(body, f, v, &inout);
                 } else {
                     borrowed.insert(l);
@@ -658,6 +681,7 @@ impl Plan {
                 continue;
             };
             if needs_share(l, r, binder) {
+                copied_from.insert(l, src);
                 plan.share_after.push((binder, l));
             } else {
                 borrowed.insert(l);
@@ -783,7 +807,67 @@ impl Plan {
         }
         plan.inout = inout;
         plan.defer_captured = f.defer_captured.clone();
+        plan.note_copies(checker, body, f, &copied_from);
         plan
+    }
+
+    /// E0141 where a write copies an object a binding shares with its
+    /// source, E0142 where a method writes a temporary and the change is
+    /// dropped.
+    fn note_copies(&mut self, checker: &Checker, body: &HirBody, f: &Facts<'_>, copied_from: &HashMap<LocalId, HirId>) {
+        let mut firsts: HashMap<LocalId, Write> = HashMap::new();
+        for &w in &f.writes {
+            let Some(r) = f.root_of(w.path) else { continue };
+            if let HirKind::Local(l) = body.expr(r).kind
+                && copied_from.contains_key(&l)
+                && firsts.get(&l).is_none_or(|o| f.order(w.at) < f.order(o.at))
+            {
+                firsts.insert(l, w);
+            }
+            // A method that writes a call's result: nothing keeps the change.
+            if let HirKind::Call { callee: Callee::Method { name }, args } = &body.expr(w.at).kind
+                && args.first() == Some(&w.path)
+                && w.path == r
+                && matches!(body.expr(r).kind, HirKind::Call { .. })
+                && !fresh_ctor(body, r)
+                && f.calls.get(&w.at).is_some_and(|u| !u.opaque)
+                && cow_ty(checker, body.expr(r).ty.as_ref())
+                && f.parent.get(&w.at).is_some_and(|p| matches!(&body.expr(*p).kind, HirKind::Block { stmts, .. } if stmts.contains(&w.at)))
+            {
+                let span = body.expr(w.at).span;
+                let mut m = Message::warn(
+                    ErrorCode::CowDroppedWrite,
+                    format!("`.{name}()` changes a temporary copy; the change is dropped"),
+                    span.0..span.1,
+                );
+                m.with_help("the object is copied before the write because something else shares it; write to a variable (`let x = mut …`) to keep the change, or `let _ = …` if only the call's other effects matter".to_string());
+                self.notes.push(m);
+            }
+        }
+        let mut firsts: Vec<(LocalId, Write)> = firsts.into_iter().collect();
+        firsts.sort_by_key(|(_, w)| f.order(w.at));
+        for (l, w) in firsts {
+            let Some(src) = place_text(body, copied_from[&l]) else { continue };
+            let name = &body.local(l).name;
+            if name.starts_with('$') {
+                continue;
+            }
+            let span = body.expr(w.at).span;
+            let looped = !f.loops_around(w.at).is_empty() && !f.loops_around(copied_from[&l]).is_empty();
+            let mut m = Message::warn(
+                ErrorCode::CowCopy,
+                if looped {
+                    format!("this write copies `{name}` on every loop iteration: it shares its object with `{src}`")
+                } else {
+                    format!("this write copies `{name}`: it shares its object with `{src}`")
+                },
+                span.0..span.1,
+            );
+            m.with_help(format!(
+                "write `let {name} = mut {src}` to change `{src}`'s object in place, stop using `{src}` before the write, or hold shared state in a `Ref<T>`"
+            ));
+            self.notes.push(m);
+        }
     }
 
     fn share_value(&mut self, body: &HirBody, f: &Facts<'_>, v: HirId, inout: &HashSet<LocalId>) {
