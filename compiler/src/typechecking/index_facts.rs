@@ -5,10 +5,15 @@
 //! [`crate::typechecking::purity::LengthStability`]; impure calls that only
 //! write fields, elements or output keep the facts). Callers may transfer
 //! a proven `(arr, i)` pair into a helper when every site agrees.
+//!
+//! A loop body starts from what holds on every trip, not only the first
+//! ([`loop_invariant`]): `i < a.len()` alone does not make `i` non-negative,
+//! and a fact the body (or a `continue`) breaks is gone at its top. After
+//! the loop, only what held at every test and every `break` holds.
 
 use std::collections::{HashMap, HashSet};
 
-use parser::ast::{AssignOp, EnumConstructPayload, Expression, Output};
+use parser::ast::{AdjustOp, AssignOp, EnumConstructPayload, Expression, Output};
 
 use super::id::NodeId;
 use super::infer::{Checker, ForInKind};
@@ -21,7 +26,8 @@ type FnParamShape = (String, Vec<ParamSlot>);
 
 #[derive(Clone, Default)]
 struct Env {
-    /// Names proven `>= 0` (init from a non-negative const or `++`/`+= k>0`).
+    /// Names proven `>= 0`: bound to a non-negative constant or to such a
+    /// name; `++` / `+= k` (`k > 0`) keep it, `--` drops it.
     nonneg: HashSet<String>,
     /// `(index, array)` pairs with `index < array.len()` in this region.
     lt_len: HashSet<(String, String)>,
@@ -29,6 +35,49 @@ struct Env {
     len_poison: HashSet<String>,
     all_len_poison: bool,
     yielded: bool,
+    /// A probe of a loop body ([`loop_invariant`]): facts change as usual,
+    /// but nothing is recorded on the checker.
+    dry: bool,
+    /// The innermost loop's `continue` / `break` facts (see [`Jumps`]).
+    jumps: Option<std::rc::Rc<std::cell::RefCell<Jumps>>>,
+}
+
+/// What holds where a loop body jumps: at every `continue` (another trip
+/// starts there) and every `break` (the loop ends there). `None` until the
+/// first such jump.
+#[derive(Default)]
+struct Jumps {
+    cont: Option<Facts>,
+    brk: Option<Facts>,
+}
+
+/// The facts a jump carries.
+#[derive(Clone, PartialEq)]
+struct Facts {
+    nonneg: HashSet<String>,
+    lt_len: HashSet<(String, String)>,
+}
+
+impl Facts {
+    fn of(env: &Env) -> Self {
+        Self { nonneg: env.nonneg.clone(), lt_len: env.lt_len.clone() }
+    }
+
+    /// What holds on both ways.
+    fn meet(self, other: Option<Self>) -> Self {
+        match other {
+            None => self,
+            Some(o) => Self {
+                nonneg: self.nonneg.intersection(&o.nonneg).cloned().collect(),
+                lt_len: self.lt_len.intersection(&o.lt_len).cloned().collect(),
+            },
+        }
+    }
+
+    fn put(self, env: &mut Env) {
+        env.nonneg = self.nonneg;
+        env.lt_len = self.lt_len;
+    }
 }
 
 impl Env {
@@ -305,6 +354,14 @@ fn walk_tree(
     calls: &mut Vec<CallSite>,
 ) {
     match ast.1.as_ref() {
+        // `let x = v` parses as `[Variable(x, type), v]`: `x` takes `v`.
+        Expression::Fragment(items)
+            if let [decl, value] = items.as_slice()
+                && let Expression::Variable(name, _) = decl.1.as_ref() =>
+        {
+            walk_tree(checker, value, pure, env, calls);
+            bind_name(checker, env, name, value);
+        }
         Expression::Program(items)
         | Expression::Block(items)
         | Expression::Fragment(items) => {
@@ -385,9 +442,11 @@ fn walk_tree(
             walk_tree(checker, a, pure, env, calls);
             walk_tree(checker, b, pure, env, calls);
         }
-        Expression::Variable(name, Some(init)) => {
-            walk_tree(checker, init, pure, env, calls);
-            bind_name(checker, env, name, init);
+        // `let x` (its type, if any, is the second field): a new `x`
+        // that holds nothing known yet.
+        Expression::Variable(name, _) => {
+            env.nonneg.remove(*name);
+            env.kill_index(name);
         }
         Expression::Constant(name_n, Some(init), ..) => {
             walk_tree(checker, init, pure, env, calls);
@@ -405,11 +464,26 @@ fn walk_tree(
             walk_tree(checker, lhs, pure, env, calls);
             apply_assign(checker, env, lhs, rhs, Some(*op));
         }
-        Expression::Adjust { target, .. } => {
+        Expression::Adjust { op, target, .. } => {
             walk_tree(checker, target, pure, env, calls);
+            // `++` keeps a non-negative value non-negative; it does not make
+            // a negative one so. `--` may take it below zero.
             if let Some(n) = ident_name(target) {
-                env.nonneg.insert(n.clone());
+                if matches!(op, AdjustOp::Dec) {
+                    env.nonneg.remove(&n);
+                }
                 env.kill_index(&n);
+            }
+        }
+        Expression::Continue | Expression::Break => {
+            if let Some(j) = &env.jumps {
+                let mut j = j.borrow_mut();
+                let at = Facts::of(env);
+                if matches!(ast.1.as_ref(), Expression::Continue) {
+                    j.cont = Some(at.meet(j.cont.take()));
+                } else {
+                    j.brk = Some(at.meet(j.brk.take()));
+                }
             }
         }
         Expression::If(branches) => walk_if(checker, branches, pure, env, calls),
@@ -448,16 +522,17 @@ fn walk_tree(
             note_call(env, calls, name, args.as_deref(), pure);
         }
         Expression::Identifier(name) => {
-            if env.nonneg.contains(*name) {
+            if env.nonneg.contains(*name) && !env.dry {
                 mark_nonneg_node(checker, ast);
             }
         }
-        Expression::Integer(n) if *n >= 0 => mark_nonneg_node(checker, ast),
+        Expression::Integer(n) if *n >= 0 && !env.dry => mark_nonneg_node(checker, ast),
         Expression::Index(base, Some(idx)) => {
             walk_tree(checker, base, pure, env, calls);
             walk_tree(checker, idx, pure, env, calls);
             if let (Some(arr), Some(i)) = (ident_name(base), ident_name(idx))
                 && env.in_bounds(&i, &arr)
+                && !env.dry
                 && let Some(id) = nid(checker, ast)
             {
                 checker.in_bounds_index.insert(id);
@@ -519,7 +594,10 @@ fn walk_tree(
 }
 
 fn bind_name(checker: &Checker, env: &mut Env, name: &str, init: &Output<'_>) {
+    // `name` now holds another value: no fact about the old one holds, as
+    // an index or as an array.
     env.kill_index(name);
+    env.lt_len.retain(|(_, a)| a != name);
     if is_nonneg_const(init) {
         env.nonneg.insert(name.to_string());
     } else if let Some(src) = ident_name(init) {
@@ -548,8 +626,9 @@ fn apply_assign(
 ) {
     match peel(lhs).1.as_ref() {
         Expression::Identifier(n) => {
+            // `i += k` / `i = i + k` (`k > 0`) keeps a non-negative `i` so;
+            // it does not make a negative one non-negative.
             if matches!(compound, Some(AssignOp::Add)) && positive_int_const(rhs).is_some() {
-                env.nonneg.insert((*n).to_string());
                 env.kill_index(n);
                 return;
             }
@@ -558,7 +637,6 @@ fn apply_assign(
                     && ident_name(l).as_deref() == Some(*n)
                     && positive_int_const(r).is_some()
                 {
-                    env.nonneg.insert((*n).to_string());
                     env.kill_index(n);
                     return;
                 }
@@ -644,7 +722,9 @@ fn walk_loop(args: WalkLoopArgs<'_>) {
     if let Some(binding) = identifier {
         // for-in
         walk_tree(checker, iterable, pure, env, calls);
-        let mut body_env = env.clone();
+        let (mut body_env, at_top) = loop_invariant(checker, body, pure, env, None);
+        let jumps = std::rc::Rc::new(std::cell::RefCell::new(Jumps::default()));
+        body_env.jumps = Some(jumps.clone());
         let arr_name = ident_name(iterable);
         let kind_array = nid(checker, loop_node)
             .and_then(|id| checker.for_in_info_at(id))
@@ -662,7 +742,7 @@ fn walk_loop(args: WalkLoopArgs<'_>) {
             && arr_name
                 .as_ref()
                 .is_none_or(|a| !body_env.len_poison.contains(a));
-        if kind_array && stable && !env.yielded {
+        if kind_array && stable && !env.yielded && !env.dry {
             if let Some(id) = nid(checker, loop_node) {
                 checker.for_in_pin.insert(id);
             }
@@ -670,6 +750,8 @@ fn walk_loop(args: WalkLoopArgs<'_>) {
                 .for_in_pin_spans
                 .insert((loop_node.0.start, loop_node.0.end));
         }
+        // The loop ends at a trip's top (no element left) or at a `break`.
+        at_top.meet(jumps.borrow_mut().brk.take()).put(env);
         env.finish_nested_region(&body_env);
         let _ = binding;
         return;
@@ -677,19 +759,62 @@ fn walk_loop(args: WalkLoopArgs<'_>) {
 
     // while cond { body }
     walk_tree(checker, iterable, pure, env, calls);
-    let mut body_env = env.clone();
     let header = strict_lt_len(iterable);
-    if let Some((i, a)) = header.clone() {
-        body_env.nonneg.insert(i.clone());
-        if body_env.arr_ok(&a) {
-            body_env.lt_len.insert((i, a));
-        }
-    }
+    let (mut body_env, at_top) = loop_invariant(checker, body, pure, env, header.as_ref());
+    let jumps = std::rc::Rc::new(std::cell::RefCell::new(Jumps::default()));
+    body_env.jumps = Some(jumps.clone());
     walk_tree(checker, body, pure, &mut body_env, calls);
+    // The loop ends at its test (on a trip's top) or at a `break`.
+    at_top.meet(jumps.borrow_mut().brk.take()).put(env);
     env.finish_nested_region(&body_env);
     if let Some((i, _)) = header {
         env.kill_index(&i);
     }
+}
+
+/// The facts at the top of every trip through a loop `body` entered with
+/// `entry`. The body is walked once per facts tried (dry: nothing is
+/// recorded), keeping what holds at its end as well as its top: a fact the
+/// body keeps holds on every trip, one it may break (`j = j - 1`, `i += 1`
+/// after `i < a.len()`, a push) only on the first. `header` is the loop
+/// test's `i < a.len()`: true at each top, so in bounds while `i` stays
+/// non-negative. Fail-closed: no fixpoint within a few rounds keeps
+/// nothing.
+fn loop_invariant(
+    checker: &mut Checker,
+    body: &Output<'_>,
+    pure: &HashSet<String>,
+    entry: &Env,
+    header: Option<&(String, String)>,
+) -> (Env, Facts) {
+    let with_header = |env: &Env| {
+        let mut env = env.clone();
+        if let Some((i, a)) = header
+            && env.nonneg.contains(i)
+            && env.arr_ok(a)
+        {
+            env.lt_len.insert((i.clone(), a.clone()));
+        }
+        env
+    };
+    let mut top = entry.clone();
+    for _ in 0..4 {
+        let mut probe = with_header(&top);
+        probe.dry = true;
+        let jumps = std::rc::Rc::new(std::cell::RefCell::new(Jumps::default()));
+        probe.jumps = Some(jumps.clone());
+        walk_tree(checker, body, pure, &mut probe, &mut Vec::new());
+        // The next trip starts from the body's end or from a `continue`.
+        let back = Facts::of(&probe).meet(jumps.borrow_mut().cont.take());
+        let kept = Facts::of(&top).meet(Some(back));
+        if kept == Facts::of(&top) {
+            return (with_header(&top), kept);
+        }
+        kept.put(&mut top);
+    }
+    let none = Facts { nonneg: HashSet::new(), lt_len: HashSet::new() };
+    none.clone().put(&mut top);
+    (top, none)
 }
 
 fn note_call(
@@ -735,6 +860,9 @@ fn note_call(
         if env.arr_ok(a) {
             arr_ok.insert(a.clone());
         }
+    }
+    if env.dry {
+        return;
     }
     calls.push(CallSite {
         callee: callee.clone(),
@@ -1184,5 +1312,92 @@ fn main() {
             !s.nonneg_expr_ids().is_empty(),
             "counted-loop i should be proven nonneg"
         );
+    }
+
+    /// For each `index` node in `f`, in order: whether the checker's facts
+    /// flag it (HIR build, no HIR proof pass).
+    fn proven(src: &str) -> Vec<bool> {
+        let owned = Box::leak(src.to_string().into_boxed_str());
+        let ast = parser::Pratt::default().parse(owned).expect("parse");
+        let mut checker = Checker::new();
+        let _ = checker.check_program(&ast);
+        let sidecar = checker.typed_sidecar();
+        let module = crate::hir::build_module(&checker, &sidecar, "", &ast);
+        let body = module.bodies.into_iter().find(|b| b.name == "f").expect("body");
+        body.exprs
+            .iter()
+            .filter(|e| matches!(e.kind, crate::hir::HirKind::Index { .. }))
+            .map(|e| e.flags.contains(crate::hir::HirFlags::IN_BOUNDS))
+            .collect()
+    }
+
+    #[test]
+    fn a_counted_loop_from_a_let_is_proven() {
+        for step in ["i = i + 1;", "i++;", "i += 2;"] {
+            let src = format!("fn f(Vec<int> a) -> int {{ let s = 0; let i = 0; while i < a.len() {{ s = s + a[i]; {step} }} return s; }}");
+            assert_eq!(proven(&src), vec![true], "{step}");
+        }
+    }
+
+    #[test]
+    fn a_start_from_a_parameter_stays_checked() {
+        let src = "fn f(Vec<int> a, int k) -> int { let s = 0; let i = k; while i < a.len() { s = s + a[i]; i = i + 1; } return s; }";
+        assert_eq!(proven(src), vec![false]);
+    }
+
+    #[test]
+    fn a_step_up_from_a_negative_value_stays_checked() {
+        for step in ["i += 1;", "i++;", "i = i + 1;"] {
+            let src = format!("fn f(Vec<int> a) -> int {{ let i = 0 - 3; {step} if i < a.len() {{ return a[i]; }} return 0; }}");
+            assert_eq!(proven(&src), vec![false], "{step}");
+        }
+    }
+
+    #[test]
+    fn a_step_down_stays_checked() {
+        let src = "fn f(Vec<int> a) -> int { let i = 0; i--; if i < a.len() { return a[i]; } return 0; }";
+        assert_eq!(proven(src), vec![false]);
+    }
+
+    #[test]
+    fn a_fact_the_loop_breaks_holds_only_on_the_first_trip() {
+        // `j` goes below zero on a later trip.
+        let src = "fn f(Vec<int> a) -> int { let t = 0; let j = 1; let k = 0; while k < 4 { if j < a.len() { t = t + a[j]; } j = j - 1; k = k + 1; } return t; }";
+        assert_eq!(proven(src), vec![false]);
+        // `i < a.len()` from before the loop; the loop grows `i`.
+        let src = "fn f(Vec<int> a, int n) -> int { let t = 0; let i = 0; if i < a.len() { let k = 0; while k < n { t = t + a[i]; i = i + 1; k = k + 1; } } return t; }";
+        assert_eq!(proven(src), vec![false]);
+    }
+
+    #[test]
+    fn a_fact_the_loop_keeps_holds_on_every_trip() {
+        let src = "fn f(Vec<int> a, int n) -> int { let t = 0; let i = 0; if i < a.len() { let k = 0; while k < n { t = t + a[i]; k = k + 1; } } return t; }";
+        assert_eq!(proven(src), vec![true]);
+    }
+
+    #[test]
+    fn after_a_loop_only_what_held_on_every_trip_holds() {
+        let src = "fn f(Vec<int> a, int n) -> int { let j = 0; let k = 0; while k < n { j = j - 1; k = k + 1; } if j < a.len() { return a[j]; } return 0; }";
+        assert_eq!(proven(src), vec![false]);
+        let src = "fn f(Vec<int> a, int n) -> int { let j = 0; for k in 0..n { j = j - 1; } if j < a.len() { return a[j]; } return 0; }";
+        assert_eq!(proven(src), vec![false]);
+        let src = "fn f(Vec<int> a, int n) -> int { let j = 0; let k = 0; while k < n { k = k + 1; } if j < a.len() { return a[j]; } return 0; }";
+        assert_eq!(proven(src), vec![true]);
+    }
+
+    #[test]
+    fn a_continue_or_break_carries_its_own_facts() {
+        // The next trip starts from the `continue`, where `j` is negative.
+        let src = "fn f(Vec<int> a, int n) -> int { let t = 0; let j = 0; let k = 0; while k < n { if j < a.len() { t = t + a[j]; } k = k + 1; if k > 2 { j = 0 - 1; continue; } j = 0; } return t; }";
+        assert_eq!(proven(src), vec![false]);
+        // The loop ends at the `break`, where `j` is negative.
+        let src = "fn f(Vec<int> a, int n) -> int { let j = 0; let k = 0; while k < n { if k > 2 { j = 0 - 1; break; } j = 0; k = k + 1; } if j < a.len() { return a[j]; } return 0; }";
+        assert_eq!(proven(src), vec![false]);
+    }
+
+    #[test]
+    fn a_rebound_array_drops_its_facts() {
+        let src = "fn f(Vec<int> a, Vec<int> b) -> int { let i = 0; if i < a.len() { a = b; return a[i]; } return 0; }";
+        assert_eq!(proven(src), vec![false]);
     }
 }
