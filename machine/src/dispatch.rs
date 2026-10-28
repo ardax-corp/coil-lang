@@ -1380,7 +1380,7 @@ fn execute_dense(ctx: &mut HotCtx<'_, '_>) {
         // Same ceiling as the giant match: the `exec_dense` jump table then
         // needs no range check.
         #[cfg(not(debug_assertions))]
-        promise!(bc as u8 <= Instruction::VScan as u8);
+        promise!(bc as u8 <= Instruction::VLoop as u8);
         let at = ctx.ip;
         ctx.ip += 1;
         prefetch_code(ctx.code, ctx.ip);
@@ -1536,7 +1536,7 @@ mod tests {
         let mut dense_obj = None;
         let mut vregs = [[0u64; common::simd::LANES]; common::simd::NREGS];
         let code = [Byte::new(Instruction::HALT)];
-        for disc in 0..=Instruction::VScan as u8 {
+        for disc in 0..=Instruction::VLoop as u8 {
             let op: Instruction = disc.into();
             if is_always_hot(op) {
                 continue;

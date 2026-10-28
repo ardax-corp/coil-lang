@@ -316,7 +316,7 @@ fn step(b: &Byte, pool: &[u64], match_payload: usize) -> Step {
         VBin => s.slots = hi(&[b.dense_abc_parts().2]),
         VReduce => s.slots = hi(&[b.dense_abc_parts().1]),
         VMask => s.slots = hi(&[b.dense_move_parts().0]),
-        VScan => {
+        VScan | VLoop => {
             let (_, d, from, h) = b.dense_abc_parts();
             s.slots = hi(&[d, from, h]);
         }

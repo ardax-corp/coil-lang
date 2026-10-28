@@ -147,6 +147,7 @@ pub(super) fn byte_stack_delta(insn: Instruction, byte: &common::Byte) -> Option
         | Instruction::VFma
         | Instruction::VMask
         | Instruction::VScan
+        | Instruction::VLoop
         | Instruction::DenseIndex
         | Instruction::DenseStoreIndex
         | Instruction::DenseArrayLen

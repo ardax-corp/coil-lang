@@ -498,6 +498,16 @@ pub enum Instruction {
     /// `p - 63 + (63 - lzcnt(mask))`, else `p -= 64`. Execution resumes
     /// past the body.
     VScan,
+    /// Compiler-only counted vector loop (archive 6.2), dense abc:
+    /// `[31:24]` body length `n` (with [`simd::LOOP_POS`]), `[23:16]` dest
+    /// slot, `[15:8]` from slot, `[7:0]` to slot. The next `n` words are
+    /// its body: numeric `VLoad` / `VStore` (whose index slot holds an
+    /// offset from the block position), `VBin`, `VFma` and `VReduce`. For
+    /// `p = from, from + 8, ..` while `p < to` (`to - from` is a multiple
+    /// of 8): with `LOOP_POS`, `dest = p`; then the body runs on lanes
+    /// `p ..= p + 7`. A load or store out of range, or a lane that traps,
+    /// panics. Execution resumes past the body.
+    VLoop,
 }
 
 impl From<u8> for Instruction {
@@ -783,6 +793,11 @@ pub mod simd {
     pub const SCAN_BACKWARD: u8 = 0x40;
     /// `VScan` length-field bits that hold the body length.
     pub const SCAN_LEN: u8 = 0x3F;
+    /// `VLoop` length-field flag (archive 6.2): `dest` holds the block
+    /// position `p` while the body runs (a splat of it is the index).
+    pub const LOOP_POS: u8 = 0x80;
+    /// `VLoop` length-field bits that hold the body length.
+    pub const LOOP_LEN: u8 = 0x7F;
     /// `VLoad` type: 64 bytes of a `string` or a byte array from `idx`.
     pub const TY_U8: u8 = 8;
     /// `VBin` mask logic on byte lanes: `a & b`, `a | b`, `a & !b`, `!a`.
@@ -997,6 +1012,7 @@ impl Instruction {
             Self::RestoreSnapshot => "RestoreSnapshot",
             Self::VMask => "VMask",
             Self::VScan => "VScan",
+            Self::VLoop => "VLoop",
         }
     }
 }
@@ -2114,7 +2130,7 @@ mod tests {
     fn instruction_from_u8_covers_last_appended_variant() {
         // ARCHIVE stability: last variant must remain decodable (keep in sync
         // with machine release `promise!` ceiling).
-        let last = Instruction::VScan as u8;
+        let last = Instruction::VLoop as u8;
         let decoded: Instruction = last.into();
         assert_eq!(decoded as u8, last);
     }
