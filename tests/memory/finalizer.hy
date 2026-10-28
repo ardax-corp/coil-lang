@@ -17,7 +17,8 @@ class Fielded {
     pub fd: int,
 }
 
-class Bag {
+// Shared: the finalizer writes the static bag through a match binding.
+shared class Bag {
     pub slot: Option<Fielded>,
 }
 

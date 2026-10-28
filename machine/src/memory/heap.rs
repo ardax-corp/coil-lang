@@ -753,11 +753,14 @@ impl Heap {
     /// Copy-on-write: a second place now names `v`'s object, so the next
     /// write through either place copies it first. Anything but a class
     /// instance or an array is left alone.
+    /// `true` when it marked an object.
     #[inline]
-    pub fn cow_share(&self, v: Value) {
+    pub fn cow_share(&self, v: Value) -> bool {
         if let Some(obj @ (Object::Instance(_) | Object::Array(_))) = self.find_object_by_addr(v.heap_addr()) {
             obj.set_shared();
+            return true;
         }
+        false
     }
 
     /// Copy-on-write: before a write through `v`, a shallow copy of its
@@ -792,6 +795,66 @@ impl Heap {
         });
         self.cow_copies += 1;
         Some(Value::from(copy.addr()))
+    }
+
+    /// Measuring only (`COIL_COW_EAGER`): a deep copy of `v`'s class
+    /// instances and arrays, as a design that copies on assignment makes.
+    pub fn cow_deep_copy(&mut self, v: Value) -> Value {
+        let mut seen: std::collections::HashMap<u64, Value> = std::collections::HashMap::new();
+        self.deep_copy_in(v, &mut seen, 0)
+    }
+
+    fn deep_copy_in(&mut self, v: Value, seen: &mut std::collections::HashMap<u64, Value>, depth: u32) -> Value {
+        let addr = v.heap_addr();
+        if addr == 0 || depth > 10_000 {
+            return v;
+        }
+        if let Some(&c) = seen.get(&addr) {
+            return c;
+        }
+        let words = match self.find_object_by_addr(addr) {
+            Some(Object::Instance(gc)) => {
+                let inst = gc.as_ref();
+                if inst.type_id == 0 || self.is_identity_type(inst.type_id) {
+                    return v;
+                }
+                let Some(slots) = inst.storage.as_slice() else { return v };
+                (Some(inst.type_id), slots.to_vec())
+            }
+            Some(Object::Array(gc)) => match &gc.as_ref().data {
+                ArrayData::Words(w) => (None, w.clone()),
+                ArrayData::Bytes(_) => {
+                    let copy = gc.as_ref().copy();
+                    let c = Value::from(self.alloc(copy, Object::Array).0.addr());
+                    seen.insert(addr, c);
+                    return c;
+                }
+            },
+            _ => return v,
+        };
+        let (type_id, mut slots) = words;
+        let kind = match self.find_object_by_addr(addr) {
+            Some(Object::Array(gc)) => Some(gc.as_ref().elem_kind),
+            _ => None,
+        };
+        for w in &mut slots {
+            if matches!(self.find_object_by_addr(w.heap_addr()), Some(Object::Instance(_) | Object::Array(_))) {
+                *w = self.deep_copy_in(*w, seen, depth + 1);
+            }
+        }
+        let c = match type_id {
+            Some(t) => Value::from(self.alloc(ObjInstance::with_slots(t, slots), Object::Instance).0.addr()),
+            None => {
+                let mut a = ObjArray::new(slots);
+                if let Some(k) = kind {
+                    a.elem_kind = k;
+                }
+                Value::from(self.alloc(a, Object::Array).0.addr())
+            }
+        };
+        self.cow_copies += 1;
+        seen.insert(addr, c);
+        c
     }
 
     /// How many objects [`Self::cow_unique`] copied.

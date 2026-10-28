@@ -87,9 +87,9 @@ test("the waiting arguments survive a collection") {
 
 test("the first call runs before the second") {
     let log = Vec::new();
-    let f = fn (int a) use (log) {
+    let f = fn (int a) use (mut log) {
         log.push(a);
-        fn (int b) use (log) => log.len() * 10 + b
+        fn (int b) use (mut log) => log.len() * 10 + b
     };
     assert!(at2(f) == 12);
     assert!(log.len() == 1);

@@ -97,7 +97,8 @@ test("typed let") {
     let p = new Point(1, 2, new Inner(3));
     let q: readonly Point = p;
     p.x = 5;
-    assert!(q.x == 5);
+    assert!(q.x == 1);
+    assert!(p.x == 5);
     let r: readonly Point = readonly new Point(7, 8, new Inner(9));
     assert!(r.y == 8);
 }
@@ -128,8 +129,9 @@ test("readonly on any expression") {
     let r = readonly p;
     let i = readonly p.inner;
     p.inner.n = 4;
-    assert!(r.inner.n == 4);
-    assert!(i.n == 4);
+    assert!(p.inner.n == 4);
+    assert!(r.inner.n == 3);
+    assert!(i.n == 3);
     assert!(total(readonly p) == 7);
     let xs = [1, 2, 3];
     let ys = readonly xs;

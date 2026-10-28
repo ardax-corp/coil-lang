@@ -35,10 +35,11 @@ use crate::typechecking::infer::{Checker, ForInKind};
 use reporting::{ErrorCode, Message};
 use crate::typechecking::ty::{self as ty, Ty, strip_readonly};
 
-/// Whether copy-on-write is on for this compile (`COIL_COW=1`).
+/// Whether copy-on-write is on for this compile. On by default; `COIL_COW=0`
+/// turns it off.
 pub fn enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| matches!(std::env::var("COIL_COW").as_deref(), Ok("1" | "on")))
+    *ON.get_or_init(|| !matches!(std::env::var("COIL_COW").as_deref(), Ok("0" | "off")))
 }
 
 /// Whether a value of `ty` may be a class instance or array that a write
@@ -468,11 +469,8 @@ pub(super) fn keeps(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>)
                     kept |= holds.get(o).copied().unwrap_or(0);
                 }
             }
-            HirKind::Defer { captures, .. } => {
-                for o in captures.iter().flatten() {
-                    kept |= holds.get(o).copied().unwrap_or(0);
-                }
-            }
+            // A defer runs before the frame is left, so its captures are
+            // not kept past the call.
             _ => {}
         }
         let _ = id;
@@ -844,6 +842,35 @@ impl Plan {
                 self.notes.push(m);
             }
         }
+        // A write through a copied capture copies it on every call: the
+        // closure's own object never changes.
+        let mut captured: HashMap<LocalId, Write> = HashMap::new();
+        for &w in &f.writes {
+            let Some(r) = f.root_of(w.path) else { continue };
+            if let HirKind::Local(l) = body.expr(r).kind
+                && body.local(l).kind == LocalKind::Capture
+                && !body.local(l).borrow
+                && cow_ty(checker, body.local(l).ty.as_ref())
+                && captured.get(&l).is_none_or(|o| f.order(w.at) < f.order(o.at))
+            {
+                captured.insert(l, w);
+            }
+        }
+        let mut captured: Vec<(LocalId, Write)> = captured.into_iter().collect();
+        captured.sort_by_key(|(_, w)| f.order(w.at));
+        for (l, w) in captured {
+            let name = &body.local(l).name;
+            let span = body.expr(w.at).span;
+            let mut m = Message::warn(
+                ErrorCode::CowCopy,
+                format!("this write copies the captured `{name}` on every call: a closure captures a copy"),
+                span.0..span.1,
+            );
+            m.with_help(format!(
+                "write `use (mut {name})` to change the outer `{name}`, or hold state the closure keeps between calls in a `Ref<T>`"
+            ));
+            self.notes.push(m);
+        }
         let mut firsts: Vec<(LocalId, Write)> = firsts.into_iter().collect();
         firsts.sort_by_key(|(_, w)| f.order(w.at));
         for (l, w) in firsts {
@@ -1056,18 +1083,33 @@ impl Plan {
         // The chain from the root to `path`.
         let mut chain = vec![path];
         let mut at = path;
-        loop {
-            match &out.expr(at).kind {
-                HirKind::Field { base, .. } | HirKind::Index { base, kind: IndexKind::Array, .. } => {
-                    at = *base;
-                    chain.push(at);
-                }
-                _ => break,
-            }
+        while let HirKind::Field { base, .. } | HirKind::Index { base, kind: IndexKind::Array, .. } = &out.expr(at).kind {
+            at = *base;
+            chain.push(at);
         }
         chain.reverse();
         let span = out.expr(path).span;
         let mut stmts = Vec::new();
+        // An assignment runs its value before the place's base and index:
+        // a base or index evaluated ahead of the statement takes the value
+        // with it (not a compound one, whose value reads the place).
+        let root_temp = match &out.expr(chain[0]).kind {
+            HirKind::Local(_) | HirKind::Global { .. } => false,
+            _ => !(chain.len() == 1 && (fresh_ctor(out, chain[0]) || pack_site(checker, out, chain[0]) || !cow_ty(checker, out.expr(chain[0]).ty.as_ref()))),
+        };
+        let impure_index = chain[1..].iter().any(|&st| matches!(out.expr(st).kind, HirKind::Index { index, .. } if !pure_index(out, index)));
+        if (root_temp || impure_index)
+            && let HirKind::Assign { value, .. } = out.expr(stmt).kind
+            && !pure_index(out, value)
+            && chain.iter().all(|&st| twins_of(out, value, st).is_empty())
+        {
+            let t = temp(out, out.expr(value).ty.clone(), "$cowv");
+            let moved = relocate(out, value);
+            stmts.push(push(out, HirKind::Let { local: t, init: Some(moved) }, Some(ty::unit()), span));
+            let x = &mut out.exprs[value.0 as usize];
+            x.kind = HirKind::Local(t);
+            x.node = None;
+        }
         // An index that is not safe to evaluate twice is evaluated once,
         // into a temporary, before the path.
         for &step in &chain[1..] {

@@ -22,7 +22,7 @@ test("call a capturing lambda in place") {
 
 test("call a unit lambda in place") {
     let v = Vec::new();
-    (fn () use (v) {
+    (fn () use (mut v) {
         v.push(42);
     })();
     assert!(v.len() == 1);
