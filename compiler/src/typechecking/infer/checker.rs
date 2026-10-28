@@ -8294,7 +8294,9 @@ impl Checker {
                 self.check_readonly_external_mutation(&target_ty, range.clone());
                 let index_ty = self.infer(idx);
                 let _ = unify_with(&self.subst, &apply_ty_prune(&self.subst, &index_ty), &int());
-                match &target_ty {
+                // A `readonly` array is still an array: the readonly
+                // violation above is the whole mistake (#2092).
+                match strip_readonly(&target_ty) {
                     Ty::Array { element, length } => {
                         if let ArrayLength::Static(n) = length
                             && let Expression::Integer(i) = idx.1.as_ref()
@@ -19853,8 +19855,7 @@ impl Checker {
             return;
         }
         // `None` carries no payload: the operand's `Option<T>` need not
-        // share the function's `T` (#1165).
-        let _ = inner_ty;
+        // share the function's `T` (#1165); it only names the mismatch.
         if self.fn_option_mode.is_some() {
             return;
         }
@@ -19876,6 +19877,14 @@ impl Checker {
             }
             let payload = Ty::Var(self.counter.fresh());
             let opt = option_ty(payload.clone());
+            if unify_with(&self.subst, &ret, &opt).is_err() {
+                // Report with the operand's payload (`Option<int>`, not
+                // `Option<a>`) and leave the function's own type alone,
+                // so its final check does not repeat the mismatch (#2092).
+                let shown = option_ty(apply_ty_prune(&self.subst, inner_ty));
+                let _ = self.unify(&ret, &shown, range, "option return type");
+                return;
+            }
             self.unify(&ret, &opt, range, "option return type");
             self.fn_option_mode = Some(payload);
         } else {
