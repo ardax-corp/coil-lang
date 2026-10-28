@@ -51,6 +51,8 @@ original instead. `let c = mut a.config;` makes `c` another name for
 `fn () use (mut list) { … }` lets a lambda change the outer `list`.
 
 ```coil
+use tests::assert;
+
 class Point {
     pub x: int,
 }
@@ -656,6 +658,8 @@ a write through one is seen through all. `Ref<T>` from `cell` is a shared
 class. `shared` is a keyword only before `class` or `readonly class`.
 
 ```coil
+use tests::assert;
+
 shared class Log {
     pub lines: int,
 }
