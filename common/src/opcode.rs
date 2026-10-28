@@ -767,6 +767,10 @@ pub mod simd {
     pub const FSUB64: u8 = dense::FSUB64;
     pub const FMUL64: u8 = dense::FMUL64;
     pub const FDIV64: u8 = dense::FDIV64;
+    /// Int lane bit ops (archive 6.3); they never trap.
+    pub const IAND64: u8 = dense::IAND64;
+    pub const IOR64: u8 = dense::IOR64;
+    pub const IXOR64: u8 = dense::IXOR64;
     pub const SPLAT_I64: u8 = 32;
     pub const SPLAT_F64: u8 = 33;
     pub const IOTA_I64: u8 = 34;
@@ -778,6 +782,19 @@ pub mod simd {
     /// which is what every existing archive emits.
     pub const REDUCE_ADD: u8 = 0;
     pub const REDUCE_MUL: u8 = 1;
+    /// Int bit folds (archive 6.3).
+    pub const REDUCE_AND: u8 = 2;
+    pub const REDUCE_OR: u8 = 3;
+    pub const REDUCE_XOR: u8 = 4;
+    /// `REDUCE_TAKE + pred` (archive 6.3, `pred` one of `dense::CMP_LT`
+    /// ..= `CMP_GE`): lane by lane in order, `acc = x` when `x pred acc`
+    /// (a max is `CMP_GT`, a min `CMP_LT`; floats compare as IEEE).
+    pub const REDUCE_TAKE: u8 = 8;
+    /// `VBin` `kind = ICMP + pred` (archive 6.3, `dense::CMP_*`): int lanes
+    /// `a pred b` as `1` / `0` int lanes. `FCMP + pred` compares float
+    /// lanes (IEEE: a NaN compares unequal and unordered).
+    pub const ICMP: u8 = 64;
+    pub const FCMP: u8 = 72;
 
     /// Byte lanes (minor 46, `docs/internals/byte-simd.md`): a vector
     /// register read as [`BYTE_LANES`] `u8` lanes. A lane mask is `0xFF` /
