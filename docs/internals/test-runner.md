@@ -203,7 +203,7 @@ worker count and the number of compile threads.
 | `-j` | Compile | Cases |
 |------|---------|-------|
 | `1` | runner thread | inline on the runner thread (`Reactor::run_test_here`, the same job path) |
-| `N > 1` | `N` threads, at most `2N` files ahead of the report | reactor pool; the runner helps while it waits |
+| `N > 1` | `N` threads, at most `2N` files ahead of the report | reactor pool; the runner runs queued thread jobs while it waits |
 
 - **Output is deterministic.** Files are reported in start order whatever
   `-j` is. Each case's stdout, and its stderr with its panic message, are
@@ -233,6 +233,16 @@ worker count and the number of compile threads.
   maps as `coil <file>` (`wire_pipeline_threads`), so a `collect()` in a test
   exercises production roots.
 - Cases that call `thread::spawn` put their jobs on the same reactor.
+- **Cases never nest.** A queued case sits in the reactor's own case queue
+  (`Reactor::submit_test`), which only an idle worker drains, after every
+  thread job. A join, a task scheduler's idle help, a spare thread or the
+  runner's wait between files run thread jobs only: a case may block in a
+  host wait (`recv`, `lock`) for a thread it spawned, and one nested under
+  another executor's wait held that executor. Those waits also run queued
+  jobs on spare threads (`Reactor::help_off_stack`), since the thread a
+  worker waits for is queued on that worker's own deque. Before both, every
+  executor could end up waiting under a case whose thread nobody ran: the
+  GC-stress cells wedged past the 60-minute job limit (2026-10-27/28).
 
 ## Corpora in parallel
 
