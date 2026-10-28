@@ -6,10 +6,11 @@
 //!
 //! ```text
 //! P:  ok = i0 < n && every read and write of lanes i0 .. n is in range
-//!     br ok, F, J
+//!     br ok, F, E
 //! F:  e = i0 + ((n - i0) & -8)
 //!     s1 = vecloop i0 .. e    (the reduce or the stores, 8 lanes a time)
-//! J:  i' = φ(i0 from P, e from F), s' = φ(s0 from P, s1 from F)
+//! E:  (empty: the φ copies of the skip, so `P` branches without them)
+//! J:  i' = φ(i0 from E, e from F), s' = φ(s0 from E, s1 from F)
 //! H:  the old loop, entered at i' for the last few lanes
 //! ```
 //!
@@ -299,7 +300,7 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: Plan) -> Vec<BlockId> {
         .collect();
 
     let mut b = Builder { func };
-    let (pre, fast, join) = (b.block(), b.block(), b.block());
+    let (pre, fast, skip, join) = (b.block(), b.block(), b.block(), b.block());
     for &o in &outside {
         retarget(b.func, o, h, pre);
     }
@@ -341,13 +342,23 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: Plan) -> Vec<BlockId> {
         }
     }
     reads.dedup();
+    // One length per array; the bound's own when it is one (`i < a.len()`).
+    let mut lens: HashMap<ValueId, ValueId> = HashMap::new();
+    if let Some(MirInst::ArrayLen { array, .. }) = at.b.func.blocks.iter().flat_map(|b| &b.insts).find(|i| i.dest() == n) {
+        lens.insert(*array, n);
+    }
     for (array, off) in reads {
         let k = const_of(at.b.func, off);
         let lo = at.konst(-k);
         let from_ok = at.cmp(MirCmpOp::Ge, i0, lo);
-        let len = {
-            let dest = at.b.value(MirTy::I64);
-            at.b.push(pre, MirInst::ArrayLen { dest, array })
+        let len = match lens.get(&array) {
+            Some(&len) => len,
+            None => {
+                let dest = at.b.value(MirTy::I64);
+                let len = at.b.push(pre, MirInst::ArrayLen { dest, array });
+                lens.insert(array, len);
+                len
+            }
         };
         let hi = at.bin(MirBinOp::Sub, MirTy::I64, len, off);
         let to_ok = at.cmp(MirCmpOp::Le, n, hi);
@@ -355,7 +366,8 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: Plan) -> Vec<BlockId> {
         ok = at.bin(MirBinOp::BitAnd, MirTy::Bool, ok, both);
     }
     let Place { mut b, .. } = at;
-    b.func.block_mut(pre).term = Some(Terminator::Br { cond: ok, taken: fast, not_taken: join });
+    b.func.block_mut(pre).term = Some(Terminator::Br { cond: ok, taken: fast, not_taken: skip });
+    b.func.block_mut(skip).term = Some(Terminator::Jump { dest: join });
 
     // F: the whole blocks of lanes. `i0 >= -k` and `n <= len - k`, so
     // `n - i0` does not overflow.
@@ -377,11 +389,11 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: Plan) -> Vec<BlockId> {
 
     // J: where the scalar loop picks up.
     let iv = b.value(MirTy::I64);
-    b.push(join, MirInst::Phi { dest: iv, ty: MirTy::I64, args: vec![(pre, i0), (fast, end)] });
+    b.push(join, MirInst::Phi { dest: iv, ty: MirTy::I64, args: vec![(skip, i0), (fast, end)] });
     let acc_in = acc.map(|a| {
         let ty = b.func.ty(a);
         let v = b.value(ty);
-        b.push(join, MirInst::Phi { dest: v, ty, args: vec![(pre, init[&a]), (fast, dest)] })
+        b.push(join, MirInst::Phi { dest: v, ty, args: vec![(skip, init[&a]), (fast, dest)] })
     });
     b.func.block_mut(join).term = Some(Terminator::Jump { dest: h });
     for inst in &mut b.func.block_mut(h).insts {
@@ -397,7 +409,7 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: Plan) -> Vec<BlockId> {
             args.push((join, entry));
         }
     }
-    vec![pre, fast, join]
+    vec![pre, fast, skip, join]
 }
 
 fn const_of(func: &MirFunc, v: ValueId) -> i64 {
