@@ -29,7 +29,7 @@ use super::func::MirFunc;
 use super::inst::{BlockId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, Terminator, ValueId, VecExpr, VecLoopKind};
 use super::licm::{natural_loops, LoopInfo};
 use super::ty::MirTy;
-use super::vectorize::{match_reduce_on, match_store_on, VOp};
+use super::vectorize::{match_cond_reduce_on, match_reduce_on, match_store_on, VOp};
 
 /// Rewrite every loop that qualifies. Returns how many did.
 pub fn vec_loops(func: &mut MirFunc) -> usize {
@@ -72,10 +72,10 @@ struct Plan {
 }
 
 fn plan_loop(func: &MirFunc, lp: &LoopInfo) -> Option<Plan> {
-    if lp.header == func.entry || lp.blocks.len() != 2 {
+    if lp.header == func.entry {
         return None;
     }
-    let plan = if let Some(r) = match_reduce_on(func, lp) {
+    let plan = if let Some(r) = match_reduce_on(func, lp).or_else(|| match_cond_reduce_on(func, lp)) {
         // The index lane is an int lane.
         if uses_index(&r.term) && r.ty != dense::TY_I64 {
             return None;
