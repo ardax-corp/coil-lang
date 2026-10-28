@@ -1,7 +1,8 @@
 ; Coil highlighting for editors that load this tree-sitter grammar.
 ; `coil-lsp` semantic tokens are the primary highlighter; keep this in
 ; sync with parser comments (`//`, nestable `/* */`, `///` docs) and
-; contextual macro words (`derive` / `macro` / `quote` / `attrs`).
+; contextual macro words (`derive` / `macro` / `quote` / `attrs`), and the
+; copy-on-write and region words (`shared class`, `mut`, `region { … }`).
 
 (comment) @comment
 (doc_comment) @comment.documentation
@@ -53,6 +54,9 @@
   "test"
   "forall"
   "from"
+  "shared"
+  "mut"
+  "region"
 ] @keyword
 
 (function_declaration

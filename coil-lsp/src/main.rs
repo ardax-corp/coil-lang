@@ -1859,7 +1859,7 @@ fn completions(document: &Document, position: Position) -> Vec<CompletionItem> {
     let qualifier = offset.and_then(|offset| qualifier_before(&document.text, offset));
 
     let mut by_label: HashMap<String, CompletionCandidate> = HashMap::new();
-    for keyword in coil_keywords().iter().chain(highlight_keywords()) {
+    for keyword in coil_keywords().iter().chain(highlight_keywords()).chain(contextual_keywords()) {
         by_label.insert(
             (*keyword).into(),
             CompletionCandidate {
@@ -4590,7 +4590,8 @@ fn scan_lexical_tokens(source: &str) -> Vec<SpannedToken> {
             let macro_call = bytes.get(index) == Some(&b'!') && bytes.get(index + 1) == Some(&b'(');
             let contextual_keyword = (word == "from" && is_yield_from_keyword(source, start))
                 || (word == "with" && is_resume_with_keyword(source, start))
-                || (word == "gen" && is_gen_fn_keyword(source, index));
+                || (word == "gen" && is_gen_fn_keyword(source, index))
+                || is_borrow_keyword(source, word, index);
             if coil_keywords().contains(&word)
                 || highlight_keywords().contains(&word)
                 || contextual_keyword
@@ -4679,6 +4680,29 @@ fn is_resume_with_keyword(source: &str, with_start: usize) -> bool {
 }
 
 /// `gen` is only a keyword directly before `fn`; elsewhere it is a name.
+/// Contextual words of copy-on-write and regions: `region {`, `shared
+/// class`, and `mut` before the name it borrows (`let c = mut a`, `for mut
+/// x`, `use (mut x)`). Anywhere else they are ordinary names.
+fn is_borrow_keyword(source: &str, word: &str, end: usize) -> bool {
+    let after = source[end..].trim_start();
+    let next_word = |w: &str| {
+        after.starts_with(w) && !after[w.len()..].starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+    };
+    match word {
+        "region" => after.starts_with('{'),
+        "shared" => next_word("class") || next_word("readonly"),
+        "mut" => after.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') && !next_word("in"),
+        _ => false,
+    }
+}
+
+/// Contextual keywords offered as completions and documented on hover,
+/// highlighted only where [`is_borrow_keyword`] or the parser treats them
+/// as keywords.
+fn contextual_keywords() -> &'static [&'static str] {
+    &["region", "mut", "shared", "gen"]
+}
+
 fn is_gen_fn_keyword(source: &str, gen_end: usize) -> bool {
     let after = source[gen_end..].trim_start();
     after.starts_with("fn") && !after[2..].starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
@@ -4851,7 +4875,7 @@ mod tests {
         for name in ["int", "float", "bool", "byte", "string", "unit"] {
             check(name.to_owned(), docs.primitive(name));
         }
-        for word in coil_keywords().iter().chain(highlight_keywords()) {
+        for word in coil_keywords().iter().chain(highlight_keywords()).chain(contextual_keywords()) {
             if docs.keyword(word).is_none_or(str::is_empty) {
                 missing.push(format!("keyword `{word}`"));
             }
@@ -5508,6 +5532,21 @@ fn main() {
         let source = "fn main() { let gen = 1; return; }\n";
         let tokens = semantic_tokens(source, Some(PathBuf::from("test.hy")), None);
         assert!(!token_types_at_word(source, &tokens, "gen").contains(&TOKEN_KEYWORD));
+    }
+
+    #[test]
+    fn semantic_tokens_copy_on_write_words_are_contextual() {
+        let source = "shared class Log {\n    pub n: int,\n}\n\nfn main() {\n    let v: Vec<int> = [];\n    let w = mut v;\n    let r = region { 1 };\n}\n";
+        let tokens = semantic_tokens(source, Some(PathBuf::from("test.hy")), None);
+        for word in ["shared", "mut", "region"] {
+            assert!(token_types_at_word(source, &tokens, word).contains(&TOKEN_KEYWORD), "{word}");
+        }
+
+        let source = "fn main() {\n    let shared = 1;\n    let region = shared + 1;\n    let mut = region;\n}\n";
+        let tokens = semantic_tokens(source, Some(PathBuf::from("test.hy")), None);
+        for word in ["shared", "mut", "region"] {
+            assert!(!token_types_at_word(source, &tokens, word).contains(&TOKEN_KEYWORD), "{word}");
+        }
     }
 
     #[test]
