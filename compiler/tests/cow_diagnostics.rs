@@ -1,5 +1,6 @@
 //! Copy-on-write warnings: E0141 at a write that copies, with the borrow
-//! that avoids it, and E0142 at a write to a temporary copy.
+//! that avoids it, E0142 at a write to a temporary copy, and E0143 at an
+//! assignment to a `use (mut x)` capture.
 
 use compiler::Pipeline;
 use reporting::ErrorCode;
@@ -11,7 +12,7 @@ fn cow_notes(src: &str) -> Vec<(ErrorCode, String, String)> {
     pipeline
         .messages()
         .iter()
-        .filter(|m| matches!(m.code(), Some(ErrorCode::CowCopy | ErrorCode::CowDroppedWrite)))
+        .filter(|m| matches!(m.code(), Some(ErrorCode::CowCopy | ErrorCode::CowDroppedWrite | ErrorCode::CaptureAssign)))
         .map(|m| (m.code().unwrap(), m.message().to_string(), m.help().clone().unwrap_or_default()))
         .collect()
 }
@@ -82,4 +83,38 @@ fn main() {{
 ");
     let notes = cow_notes(&src);
     assert!(notes.iter().any(|n| n.0 == ErrorCode::CowDroppedWrite && n.1.contains("`.bump()`")), "{notes:?}");
+}
+
+// #2072: `use (mut n)` shares `n`'s object; assigning `n` stays in the
+// closure.
+#[test]
+fn assigning_a_mut_capture_warns() {
+    let notes = cow_notes("
+fn main() {
+    let n = 0;
+    let f = fn () use (mut n) { n += 1; };
+    f();
+    if n != 0 {
+        panic \"write-back\";
+    }
+}
+");
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert_eq!(notes[0].0, ErrorCode::CaptureAssign);
+    assert!(notes[0].2.contains("`Ref<T>`"), "{notes:?}");
+}
+
+#[test]
+fn writing_through_a_mut_capture_does_not_warn() {
+    let src = format!("{ITEM}
+fn main() {{
+    let it = new Item(1);
+    let f = fn () use (mut it) {{ it.n += 1; }};
+    f();
+    if it.n != 2 {{
+        panic \"borrow\";
+    }}
+}}
+");
+    assert!(cow_notes(&src).is_empty(), "{:?}", cow_notes(&src));
 }

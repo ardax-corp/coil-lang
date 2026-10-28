@@ -127,6 +127,8 @@ struct Facts<'b> {
     borrow_captures: HashSet<(HirId, LocalId)>,
     /// Parameters the body assigns.
     reassigned: HashSet<LocalId>,
+    /// Assignments to a `use (mut x)` capture (#2072).
+    capture_assigns: Vec<HirId>,
 }
 
 /// The body with its copy-on-write ops, when it needs any, and warnings
@@ -179,6 +181,7 @@ impl<'b> Facts<'b> {
             borrow_captures: HashSet::new(),
             defer_captured: HashSet::new(),
             reassigned: HashSet::new(),
+            capture_assigns: Vec::new(),
         };
         // Evaluation order: children in the order `children` lists them.
         let mut next = 0u32;
@@ -227,6 +230,9 @@ impl<'b> Facts<'b> {
                     self.inits.entry(*l).or_default().push(*value);
                     if body.local(*l).kind == LocalKind::Param {
                         self.reassigned.insert(*l);
+                    }
+                    if body.local(*l).kind == LocalKind::Capture && body.local(*l).borrow {
+                        self.capture_assigns.push(id);
                     }
                 }
                 HirKind::Field { base, .. } => self.writes.push(Write { at: id, path: *base }),
@@ -830,8 +836,25 @@ impl Plan {
 
     /// E0141 where a write copies an object a binding shares with its
     /// source, E0142 where a method writes a temporary and the change is
-    /// dropped.
+    /// dropped, E0143 where a closure assigns a `use (mut x)` capture.
     fn note_copies(&mut self, checker: &Checker, body: &HirBody, f: &Facts<'_>, copied_from: &HashMap<LocalId, HirId>) {
+        // `mut` borrows the capture's object; the closure's own word is
+        // still a copy, so assigning it never reaches the outer local.
+        for &at in &f.capture_assigns {
+            let HirKind::Assign { place, .. } = body.expr(at).kind else { continue };
+            let HirKind::Local(l) = body.expr(place).kind else { continue };
+            let name = &body.local(l).name;
+            let span = body.expr(at).span;
+            let mut m = Message::warn(
+                ErrorCode::CaptureAssign,
+                format!("this assignment changes the closure's `{name}` only: the outer `{name}` keeps its value"),
+                span.0..span.1,
+            );
+            m.with_help(format!(
+                "`use (mut {name})` shares `{name}`'s object, not the variable; hold the value in a `Ref<T>` to change it from the closure"
+            ));
+            self.notes.push(m);
+        }
         let mut firsts: HashMap<LocalId, Write> = HashMap::new();
         for &w in &f.writes {
             let Some(r) = f.root_of(w.path) else { continue };

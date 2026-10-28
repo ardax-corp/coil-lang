@@ -96,6 +96,9 @@ pub enum ErrorCode {
     CowCopy,
     /// A write lands on a temporary copy and is dropped.
     CowDroppedWrite,
+    /// A closure assigns a `use (mut x)` capture: the outer local keeps
+    /// its value.
+    CaptureAssign,
 
     DuplicateEnum,
     DuplicateConstructor,
@@ -213,6 +216,7 @@ impl ErrorCode {
             Self::RegionEscape => "E0140",
             Self::CowCopy => "E0141",
             Self::CowDroppedWrite => "E0142",
+            Self::CaptureAssign => "E0143",
             Self::DuplicateEnum => "E0200",
             Self::DuplicateConstructor => "E0201",
             Self::UnknownEnum => "E0202",
@@ -312,6 +316,7 @@ impl ErrorCode {
             Self::RegionEscape => "object made in a region leaves it",
             Self::CowCopy => "write copies a shared object",
             Self::CowDroppedWrite => "write to a temporary copy is dropped",
+            Self::CaptureAssign => "assignment to a captured local stays in the closure",
             Self::DuplicateEnum => "duplicate enum",
             Self::DuplicateConstructor => "duplicate constructor",
             Self::UnknownEnum => "unknown enum",
@@ -419,6 +424,7 @@ mod tests {
             | RegionEscape
             | CowCopy
             | CowDroppedWrite
+            | CaptureAssign
             | DuplicateEnum
             | DuplicateConstructor
             | UnknownEnum
@@ -508,6 +514,7 @@ mod tests {
             RegionEscape,
             CowCopy,
             CowDroppedWrite,
+            CaptureAssign,
             DuplicateEnum,
             DuplicateConstructor,
             UnknownEnum,
