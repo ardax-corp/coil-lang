@@ -909,8 +909,15 @@ impl Plan {
                 },
                 span.0..span.1,
             );
+            // A loop or pattern binding is borrowed where it is bound.
+            let binder = f.bound.get(&l).map(|&(_, b)| &body.expr(b).kind);
+            let borrow = match binder {
+                Some(HirKind::ForIn { .. }) => format!("`for mut {name} in {src}`"),
+                None => format!("`let {name} = mut {src}`"),
+                _ => "a `mut` binding".to_string(),
+            };
             m.with_help(format!(
-                "write `let {name} = mut {src}` to change `{src}`'s object in place, stop using `{src}` before the write, or hold shared state in a `Ref<T>`"
+                "write {borrow} to change `{src}`'s object in place, stop using `{src}` before the write, or hold shared state in a `Ref<T>`"
             ));
             self.notes.push(m);
         }
