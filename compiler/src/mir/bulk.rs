@@ -6,9 +6,10 @@
 //!
 //! ```text
 //! P:  ok = 0 <= i0 && i0 < n && n <= src.len()
-//!     br ok, F, J
+//!     br ok, F, E
 //! F:  i1 = vec_extend_range(out, src, i0, n)    (vec_fill(out, k, n - i0); i1 = n)
-//! J:  i' = φ(i0 from P, i1 from F)
+//! E:  (empty: the φ copy of the skip, so `P` branches without one)
+//! J:  i' = φ(i0 from E, i1 from F)
 //! H:  the old loop, entered at i'
 //! ```
 //!
@@ -180,7 +181,7 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: &Plan) -> Vec<BlockId> {
         .collect();
 
     let mut b = Builder { func };
-    let (pre, fast, join) = (b.block(), b.block(), b.block());
+    let (pre, fast, skip, join) = (b.block(), b.block(), b.block(), b.block());
     for &o in &outside {
         retarget(b.func, o, h, pre);
     }
@@ -223,7 +224,8 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: &Plan) -> Vec<BlockId> {
         let fits = cmp(&mut b, if plan.inclusive { MirCmpOp::Lt } else { MirCmpOp::Le }, n, have);
         ok = and(&mut b, ok, fits);
     }
-    b.func.block_mut(pre).term = Some(Terminator::Br { cond: ok, taken: fast, not_taken: join });
+    b.func.block_mut(pre).term = Some(Terminator::Br { cond: ok, taken: fast, not_taken: skip });
+    b.func.block_mut(skip).term = Some(Terminator::Jump { dest: join });
 
     let layout = common::HOST_ENUM_LAYOUT_BOXED as u8;
     let i1 = match plan.kind {
@@ -248,7 +250,7 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: &Plan) -> Vec<BlockId> {
     };
     b.func.block_mut(fast).term = Some(Terminator::Jump { dest: join });
     let iv = b.value(MirTy::I64);
-    b.push(join, MirInst::Phi { dest: iv, ty: MirTy::I64, args: vec![(pre, i0), (fast, i1)] });
+    b.push(join, MirInst::Phi { dest: iv, ty: MirTy::I64, args: vec![(skip, i0), (fast, i1)] });
     b.func.block_mut(join).term = Some(Terminator::Jump { dest: h });
 
     // H now enters from J alone.
@@ -259,5 +261,5 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: &Plan) -> Vec<BlockId> {
             args.push((join, entry));
         }
     }
-    vec![pre, fast, join]
+    vec![pre, fast, skip, join]
 }
