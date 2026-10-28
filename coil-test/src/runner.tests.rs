@@ -261,6 +261,60 @@ test("spawn and join") {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// A case on a pool worker queues the thread it spawns on that worker's own
+/// deque. When every worker (and the runner thread, helping between files)
+/// then blocks in a host wait for its own thread, nothing runs the threads:
+/// the suite wedged (the GC-stress CI cells past their 60-minute limit,
+/// 2026-10-27/28). A host wait must run queued jobs off its stack instead.
+#[test]
+fn cases_blocking_on_their_own_spawned_threads_do_not_wedge_the_pool() {
+    let root = unique_tmp("recv_own_thread");
+    std::fs::create_dir_all(&root).unwrap();
+    // The busy loop lines the cases up: every executor is inside a case
+    // before any of them spawns, so no idle worker steals a sender early.
+    let program = r#"
+use thread::{spawn, join, send, recv, channel};
+fn produce(Sender tx) -> int {
+    let _ = send(tx, 5);
+    return 0;
+}
+fn busy(int n) -> int {
+    let i = 0;
+    let acc = 0;
+    while i < n {
+        acc = (acc + i) % 1000003;
+        i = i + 1;
+    }
+    return acc;
+}
+test("recv before join") {
+    let _ = busy(3000000);
+    let (tx, rx) = channel()?;
+    let worker = spawn(produce, tx)?;
+    let v = recv(rx)?;
+    let _ = join(worker)?;
+    if !(v == 5) { raise "assertion failed"; }
+}
+"#;
+    for i in 0..6 {
+        std::fs::write(root.join(format!("recv{i}.hy")), program).unwrap();
+    }
+    let opts = TestOptions {
+        jobs: 2,
+        ..options(&root, false)
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let r = run_test_suite(ReportConfig::default(), &opts).expect("suite runs");
+        let _ = tx.send((r.passed, r.failed));
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(120)) {
+        Ok(counts) => assert_eq!(counts, (6, 0)),
+        Err(_) => panic!("the suite wedged: every executor blocked in `recv` with its sender queued on its own deque"),
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn seeded_file_order_is_reproducible_and_complete() {
     let root = unique_tmp("seeded_order");
