@@ -62,16 +62,19 @@ Stack IL: what dense / LIR emit from MIR, with symbolic labels until `finalize_b
 
 ## Verification checklist
 
+Local checks before pushing (CI runs the full suites; don't duplicate them):
+
 ```bash
+cargo build --release
+cargo test -p <crate> <filter>                  # unit tests nearest the change
+cargo test -p compiler --features vm-wire --tests   # when touching compiler behaviour
+./target/release/coil test path/to/touched.hy   # .hy tests you added or changed
 cargo clippy --workspace --lib --tests --bins -- -D warnings   # lint gate; Gc::payload_mut allows mut_from_ref
-cargo test --workspace --lib --tests --bins   # required; includes */tests/* (skip Criterion benches)
-# --no-default-features / --features dissect|debugger build the same code:
-# default features are empty and the tooling crates unify dissect/debugger/coverage.
-cargo build --bin coil && (ulimit -v 65536; ./target/debug/coil test)  # leak smoke (64MB)
-cargo build --release --workspace
-./scripts/poop_baseline.sh       # soft CPU check before/after perf work
-rm -f out.hyc && cargo run --release -- examples/fib.hy   # expect 2178309 (default run needs no out.hyc)
+cargo build -p coil-fmt && ./target/debug/coil-fmt --check examples tests compiler/src/prelude comptime/tests
+./scripts/poop_baseline.sh       # perf work only: before/after
 ```
+
+Full-suite commands (what CI runs) are listed in AGENTS.md "Commands".
 
 | Work type | Extra check |
 |-----------|-------------|
@@ -98,7 +101,7 @@ Auto: `prelude`, `prelude::ops`, `prelude::math`.
 
 Explicit `use`: `ffi`, `io`, `thread`, `env`, `string`, `gc`, `clock`. Time calendar/format: [coil-time](https://github.com/ardax-corp/coil-time). Regex: [coil-regex](https://github.com/ardax-corp/coil-regex). TLS: [coil-tls](https://github.com/ardax-corp/coil-tls). Crypto: [coil-crypto](https://github.com/ardax-corp/coil-crypto).
 
-Cargo default features are `[]`. There is no virtual `time` module; consume [coil-time](https://github.com/ardax-corp/coil-time). Process clocks are virtual `clock` (`wall_nanos` / `mono_nanos` / `sleep_ms` → HostInvoke `clock_*`). There is no virtual crypto module; hashes/AEAD live in [coil-crypto](https://github.com/ardax-corp/coil-crypto). Archive is **major 4 / minor 37** (later minors: AGENTS.md). Minor 19 appends `MakeEnumReturn` (COI-388 X3). Minor 18 appends `DenseIndexJmpf` (COI-379 S4). Minor 17 appends `DenseBinJmpf` (COI-377 S1). Minor 16 appends `DenseBin2` (COI-381 S2). Minor 15 appends HostInvoke `thread_spawn_shared` (**137**, COI-365 E6). Minor 14 persists S2b stack maps (COI-359 E1). Minor 13 persists `operand_stack_slots` (COI-358 E0). Minor 12 appends `DenseFieldLoad` / `DenseFieldStore` / `DenseMakeObject` (COI-356 D2). Minor 11 appends `DenseArrayPush` (COI-344 B6). Minor 10 appends dense-native heap ops (`DenseIndex` … `DensePush`, COI-335). Minor 9 appends `VReduce` / `VFma` (S5b V1). Minor 8 appends compiler-only `VLoad` / `VStore` / `VBin` / `VMove` (eight numeric lanes; `coil-simd`). Minor 7 appends HostInvoke `simd_axpy_reduce` (**136**). Minor 6 appends MIR dense opcodes (`DenseBin` … `DenseCast`). Minor 5 appends M1 `prelude::math` HostInvoke **125–135** (`atan`/`atan2`/`asin`/`acos`, `log10`/`log2`/`cbrt`, `rem`, `sinh`/`cosh`/`tanh`). `PI`/`E`/`TAU` are [coil-stdlib `num`](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/modules.md).
+Cargo default features are `[]`. There is no virtual `time` module; consume [coil-time](https://github.com/ardax-corp/coil-time). Process clocks are virtual `clock` (`wall_nanos` / `mono_nanos` / `sleep_ms` → HostInvoke `clock_*`). There is no virtual crypto module; hashes/AEAD live in [coil-crypto](https://github.com/ardax-corp/coil-crypto). The archive version lives in `common/src/archive.rs` (`ARCHIVE_MAJOR` / `ARCHIVE_MINOR`); older minors are in [archive-history.md](../../../docs/internals/archive-history.md). Frozen HostInvoke ids are the `*_ID` consts in `common/src/host.rs`. `PI`/`E`/`TAU` are [coil-stdlib `num`](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/modules.md).
 
 Prefer compiler builtins over userland for core type machinery.
 

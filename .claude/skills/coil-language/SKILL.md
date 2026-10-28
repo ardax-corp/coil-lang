@@ -25,7 +25,7 @@ cargo build --workspace
 cargo run -- examples/fib.hy          # in-memory compile + run (no out.hyc)
 cargo run -- compile examples/fib.hy    # writes out.hyc (or -o path)
 cargo run -- test                     # discover **/*.hy under ./tests
-cargo build --bin coil && (ulimit -v 65536; ./target/debug/coil test)  # 64MB leak check
+cargo build --bin coil && ./target/debug/coil test path/to/file.hy  # the tests you touched; CI runs the full corpus and leak smoke
 ```
 
 | Goal | Command |
