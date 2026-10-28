@@ -1,6 +1,6 @@
-// @expected E0101 — `math` has no function `nope`.
-use math::add;
+// @expected E0101 — `calc` has no function `nope`.
+use calc::add;
 
 fn main() {
-    let _ = math::nope(1);
+    let _ = calc::nope(1);
 }
