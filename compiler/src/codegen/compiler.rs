@@ -2952,9 +2952,10 @@ impl Compiler {
         concrete: &Ty,
         map: &mut HashMap<crate::typechecking::ty::TyVarId, Ty>,
     ) {
-        use crate::typechecking::ty::{option_inner, result_ok_err};
+        use crate::typechecking::ty::{option_inner, result_ok_err, strip_readonly};
 
-        match (pattern, concrete) {
+        // A `readonly T` parameter binds `T` as the plain one does (#2087).
+        match (strip_readonly(pattern), strip_readonly(concrete)) {
             (Ty::Var(v), c) => {
                 map.entry(*v).or_insert_with(|| c.clone());
             }
