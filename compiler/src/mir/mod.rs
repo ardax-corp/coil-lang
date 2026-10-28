@@ -15,6 +15,7 @@
 //! piece: `docs/internals/mir.md`.
 
 mod builder;
+mod bulk;
 mod byte_scan;
 mod call_convoy;
 mod cse;
@@ -77,6 +78,7 @@ pub use sccp::sccp;
 pub use sroa::sroa;
 pub use bool_thread::thread_bool_phis;
 pub use phi_sroa::phi_sroa;
+pub use bulk::bulk_push;
 pub use byte_scan::byte_scan;
 pub use strength::strength_reduce;
 #[cfg(test)]

@@ -85,6 +85,20 @@ beat Rust/`memcmp` slice equality.
   AVX2 and AVX-512 hosts; `>>` and float masks stay scalar and match IEEE
   / arithmetic shift. Shift counts use the low 6 bits.
 
+- MIR `bulk_push` (`compiler/src/mir/bulk.rs`, both tiers) — a counted
+  loop whose whole body is `out.push(src[i])` or `out.push(k)` becomes
+  one HostInvoke, `vec_extend_range` (**174**) or `vec_fill` (**175**),
+  archive 6.1. A guard in front of the loop checks
+  `0 <= i0 < n <= src.len()` (`n < src.len()` for `<=`); the call leaves
+  `i` at the bound and the loop is entered there, so it exits at once
+  with its values. A failed guard runs the loop as written (its
+  out-of-range panic included). `vec_extend_range` appends nothing when
+  `out` is `src`, so a loop that grows what it reads stays scalar. A
+  packed byte range is one `memcpy`. `examples/perf/vec_bulk.hy`,
+  release, ns per call (main `435021f` → after): copy 1 MiB of bytes
+  17 400 000 → 280 000, fill 1 MiB 7 500 000 → 208 000, copy 128 Ki ints
+  2 156 000 → 267 000.
+
 Matrix `*` remains matmul; Hadamard `*` on bare tuples/arrays uses
 `packed_vec_arith`.
 

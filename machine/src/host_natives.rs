@@ -126,6 +126,8 @@ pub fn build_standard_host_natives(
     push_wiring(&mut out, &mut register_id, crate::io::IO_CAPTURE_WIRING, "io capture");
     // Append-only after io capture: `io::tty` (minor 47).
     push_wiring(&mut out, &mut register_id, crate::tty::TTY_WIRING, "io tty");
+    // Append-only after io tty: bulk Vec copy / fill (major 6 minor 1).
+    push_wiring(&mut out, &mut register_id, crate::vec_ops::VEC_BULK_WIRING, "vec bulk");
     assert_eq!(
         out.len(),
         common::HOST_NATIVES.len(),
@@ -1332,8 +1334,12 @@ mod tests {
             Some(common::TTY_IS_TTY_NATIVE)
         );
         assert_eq!(
-            names.last().map(String::as_str),
+            names.get(names.len() - 3).map(String::as_str),
             Some(common::TTY_ENABLE_VT_NATIVE)
+        );
+        assert_eq!(
+            names.last().map(String::as_str),
+            Some(common::VEC_FILL_NATIVE)
         );
         assert_eq!(attach, 119);
     }
@@ -1665,6 +1671,14 @@ mod tests {
             registrations.get(end + 37).map(|(n, _)| n.as_str()),
             Some(common::TTY_ENABLE_VT_NATIVE)
         );
-        assert_eq!(registrations.len(), end + 38);
+        assert_eq!(
+            registrations.get(end + 38).map(|(n, _)| n.as_str()),
+            Some(common::VEC_EXTEND_RANGE_NATIVE)
+        );
+        assert_eq!(
+            registrations.get(end + 39).map(|(n, _)| n.as_str()),
+            Some(common::VEC_FILL_NATIVE)
+        );
+        assert_eq!(registrations.len(), end + 40);
     }
 }

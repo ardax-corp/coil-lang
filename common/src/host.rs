@@ -1283,7 +1283,32 @@ pub const HOST_NATIVES: &[HostNative] = &[
         effects: HOST,
         caps: NO_CAP,
     },
+    HostNative {
+        name: "vec_extend_range",
+        arity: 4,
+        id: 174,
+        effects: HEAP_R,
+        caps: NO_CAP,
+    },
+    HostNative {
+        name: "vec_fill",
+        arity: 3,
+        id: 175,
+        effects: HEAP_R,
+        caps: NO_CAP,
+    },
 ];
+
+/// `vec_extend_range(dst, src, from, to)` (archive minor 1, compiler
+/// rewrite only): append `src[from..to]` to `dst` and return `to`; the
+/// compiler has checked `0 <= from < to <= src.len()`. When `dst` is
+/// `src` it appends nothing and returns `from` (the loop runs scalar).
+pub const VEC_EXTEND_RANGE_ID: u16 = 174;
+pub const VEC_EXTEND_RANGE_NATIVE: &str = "vec_extend_range";
+/// `vec_fill(dst, v, n)` (archive minor 1, compiler rewrite only): push
+/// `v` onto `dst` `n` times (`n >= 1`); returns `0`.
+pub const VEC_FILL_ID: u16 = 175;
+pub const VEC_FILL_NATIVE: &str = "vec_fill";
 
 /// First packed-LA HostInvoke (`packed_dot`).
 pub const PACKED_DOT_ID: u16 = 87;
@@ -1433,7 +1458,9 @@ pub const GC_COLLECT_NATIVE: &str = "gc_collect";
 pub const GC_REGISTER_FINALIZER_NATIVE: &str = "gc_register_finalizer";
 
 const _: () = {
-    assert!(HOST_NATIVES.len() == 174);
+    assert!(HOST_NATIVES.len() == 176);
+    assert!(HOST_NATIVES[VEC_EXTEND_RANGE_ID as usize].id == VEC_EXTEND_RANGE_ID);
+    assert!(HOST_NATIVES[VEC_FILL_ID as usize].id == VEC_FILL_ID);
     assert!(HOST_NATIVES[TTY_IS_TTY_ID as usize].id == TTY_IS_TTY_ID);
     assert!(HOST_NATIVES[TTY_ENABLE_VT_ID as usize].id == TTY_ENABLE_VT_ID);
     assert!(HOST_NATIVES[BLACK_BOX_ID as usize].id == BLACK_BOX_ID);

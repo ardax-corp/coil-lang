@@ -264,6 +264,10 @@ fn specialize_side(
         loop_opts(&mut func, true);
         check_after(&func, "byte_scan");
     }
+    // Counted copy and fill loops run as one call.
+    if opts.mir_loop && crate::mir::bulk_push(&mut func) > 0 {
+        check_after(&func, "bulk_push");
+    }
     super::deopt::fill_deopt_maps(&mut func);
     paint_index_dest_from_uses(&mut func);
     let stores_ssa = func
@@ -546,6 +550,9 @@ pub fn try_lower_abi_body_side(
     let yields = func.blocks.iter().flat_map(|b| &b.insts).any(|i| matches!(i, crate::mir::MirInst::Yield { .. }));
     if !func.debug_keep && !yields && opts.mir_loop {
         loop_opts(&mut func, false);
+        if crate::mir::bulk_push(&mut func) > 0 {
+            check_after(&func, "bulk_push");
+        }
     }
     if has_alloc {
         crate::mir::sroa(&mut func);
