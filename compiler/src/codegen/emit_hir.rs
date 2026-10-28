@@ -9413,7 +9413,7 @@ impl Compiler {
         let int = hir.local(acc).ty.clone()?;
         let mut w = hir.clone();
         let param = |w: &mut HirBody, name: &str| {
-            w.locals.push(HirLocal { name: name.to_string(), ty: Some(int.clone()), kind: LocalKind::Param, captured: false });
+            w.locals.push(HirLocal { name: name.to_string(), ty: Some(int.clone()), kind: LocalKind::Param, captured: false, borrow: false });
             LocalId(w.locals.len() as u32 - 1)
         };
         let hi = param(&mut w, "__coil_par_hi");

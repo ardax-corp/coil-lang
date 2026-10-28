@@ -48,12 +48,12 @@ enum TaskError {
 ///
 /// A `Scope` only exists inside the body passed to `scope`, and every task it
 /// starts has finished by the time `scope` returns.
-class Scope {
+shared class Scope {
     id: int,
 }
 
 /// A handle to a child task started with `Scope::spawn`. `join` waits for its result.
-class Task<R> {
+shared class Task<R> {
     pub __id: int,
     pub __value: Option<R>,
 }
@@ -286,7 +286,7 @@ fn shield<T>(unit -> T body) -> T {
 /// });
 /// assert!((sum ?? 0) == 15);
 /// ```
-class Channel<T> {
+shared class Channel<T> {
     pub __buf: Vec<Option<T>>,
     pub __head: int,
     pub __len: int,

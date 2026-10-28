@@ -1199,12 +1199,24 @@ impl<'s> Formatter<'s> {
                 body,
                 contracts,
             } => {
+                // `for mut x in xs` is kept as `for x in mut xs`.
+                let (borrow, iterable) = match iterable.1.as_ref() {
+                    Expression::Call { name, args: Some(args) }
+                        if (identifier.is_some() || pattern.is_some())
+                            && matches!(name.1.as_ref(), Expression::Identifier("__mut"))
+                            && args.len() == 1 =>
+                    {
+                        (true, &args[0])
+                    }
+                    _ => (false, iterable),
+                };
+                let head = if borrow { "for mut " } else { "for " };
                 if let Some(ident) = identifier {
-                    self.push_str("for ");
+                    self.push_str(head);
                     self.fmt_output(ident);
                     self.push_str(" in ");
                 } else if let Some(pat) = pattern {
-                    self.push_str("for ");
+                    self.push_str(head);
                     self.fmt_let_pattern(pat);
                     self.push_str(" in ");
                 } else {
@@ -1292,12 +1304,16 @@ impl<'s> Formatter<'s> {
             Expression::Lambda {
                 args,
                 captures,
+                borrows,
                 body,
             } => {
                 self.push_str("fn ");
                 self.fmt_paren_arg_list(args);
                 if !captures.is_empty() {
-                    let caps: Vec<String> = captures.iter().map(|c| (*c).to_string()).collect();
+                    let caps: Vec<String> = captures
+                        .iter()
+                        .map(|c| if borrows.contains(c) { format!("mut {c}") } else { (*c).to_string() })
+                        .collect();
                     self.push_str(" use ");
                     self.fmt_delimited_strings("(", ")", &caps, false);
                 }
@@ -1519,7 +1535,12 @@ impl<'s> Formatter<'s> {
                 readonly,
             } => {
                 self.fmt_docs(docs);
-                self.fmt_attrs(attrs);
+                let shared = attrs.iter().any(|a| a.name == "shared");
+                let others: Vec<Attribute<'_>> = attrs.iter().filter(|a| a.name != "shared").cloned().collect();
+                self.fmt_attrs(&others);
+                if shared {
+                    self.push_str("shared ");
+                }
                 if *readonly {
                     self.push_str("readonly ");
                 }
@@ -2339,6 +2360,12 @@ impl<'s> Formatter<'s> {
                 self.fmt_dot_receiver(receiver.1.as_ref());
                 self.push_str("?.");
                 self.push_str(field);
+            }
+            Expression::Call { name, args: Some(args) }
+                if matches!(name.1.as_ref(), Expression::Identifier("__mut")) && args.len() == 1 =>
+            {
+                self.push_str("mut ");
+                self.fmt_output(&args[0]);
             }
             Expression::Call { name, args } => {
                 self.fmt_output(name);

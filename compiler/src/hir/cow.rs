@@ -69,7 +69,7 @@ pub(super) fn cow_ty(checker: &Checker, ty: Option<&Ty>) -> bool {
             return false;
         }
         let key = checker.resolve_class_key(name).unwrap_or_else(|| name.to_string());
-        return !checker.is_readonly_class(&key) && !checker.class_has_drop(name);
+        return !checker.is_readonly_class(&key) && !checker.is_shared_class(&key) && !checker.class_has_drop(name);
     }
     checker.enum_variants(name).is_none()
 }
@@ -118,6 +118,8 @@ struct Facts<'b> {
     defer_captured: HashSet<LocalId>,
     /// The outer locals each lambda or `defer` node captures.
     capture_lists: HashMap<HirId, Vec<LocalId>>,
+    /// Outer locals a lambda captures as `use (mut x)`, by lambda.
+    borrow_captures: HashSet<(HirId, LocalId)>,
     /// Parameters the body assigns.
     reassigned: HashSet<LocalId>,
 }
@@ -151,6 +153,7 @@ impl<'b> Facts<'b> {
             bound: HashMap::new(),
             captured: HashSet::new(),
             capture_lists: HashMap::new(),
+            borrow_captures: HashSet::new(),
             defer_captured: HashSet::new(),
             reassigned: HashSet::new(),
         };
@@ -249,7 +252,13 @@ impl<'b> Facts<'b> {
                 }
             }
             HirKind::Lambda { body: inner } => {
-                let outer: Vec<LocalId> = module.bodies[*inner].captures.iter().map(|(o, _)| *o).collect();
+                let inner_body = &module.bodies[*inner];
+                let outer: Vec<LocalId> = inner_body.captures.iter().map(|(o, _)| *o).collect();
+                for (o, i) in &inner_body.captures {
+                    if inner_body.local(*i).borrow {
+                        self.borrow_captures.insert((id, *o));
+                    }
+                }
                 self.captured.extend(outer.iter().copied());
                 self.capture_lists.insert(id, outer);
             }
@@ -537,6 +546,9 @@ struct Plan {
     /// them (pattern bindings) or before a node (captures).
     share_after: Vec<(HirId, LocalId)>,
     share_before: Vec<((HirId, HirId), LocalId)>,
+    /// Locals to make unique as a statement before a node (borrowed
+    /// captures).
+    unique_before: Vec<((HirId, HirId), LocalId)>,
     /// Write paths to make unique before their node.
     unique: Vec<(Write, (HirId, HirId))>,
     /// Locals never shared and only ever given fresh objects.
@@ -549,7 +561,7 @@ struct Plan {
 
 impl Plan {
     fn is_empty(&self) -> bool {
-        self.share.is_empty() && self.share_after.is_empty() && self.share_before.is_empty() && self.unique.is_empty()
+        self.share.is_empty() && self.share_after.is_empty() && self.share_before.is_empty() && self.unique.is_empty() && self.unique_before.is_empty()
     }
 
     fn new(checker: &Checker, body: &HirBody, f: &Facts<'_>, mutates: u64) -> Self {
@@ -564,7 +576,9 @@ impl Plan {
             .enumerate()
             .filter(|(i, l)| *i < 64 && mutates & (1 << i) != 0 && !f.reassigned.contains(l) && !f.captured.contains(l))
             .map(|(_, l)| *l)
+            .chain(body.locals.iter().enumerate().filter(|(_, x)| x.borrow).map(|(i, _)| LocalId(i as u32)))
             .collect();
+        let borrow = |l: LocalId| body.local(l).borrow;
 
         // Bindings from a place: shared unless the binding is a read-only
         // borrow (nothing writes through it, and nothing writes through its
@@ -600,6 +614,17 @@ impl Plan {
             if !cow_local(l) {
                 continue;
             }
+            // `let c = mut place`: the place's object made unique where it
+            // is, and `c` names it.
+            if borrow(l) {
+                for &v in inits {
+                    if place_root(v).is_some() {
+                        let at = f.parent.get(&v).copied().unwrap_or(v);
+                        plan.unique.push((Write { at, path: v }, f.statement_of(at)));
+                    }
+                }
+                continue;
+            }
             for &v in inits {
                 let Some(r) = place_root(v) else { continue };
                 if let HirKind::Local(m) = body.expr(v).kind
@@ -618,6 +643,13 @@ impl Plan {
         }
         for (&l, &(src, binder)) in &f.bound {
             if !cow_local(l) {
+                continue;
+            }
+            if borrow(l) {
+                if place_root(src).is_some() {
+                    let at = f.parent.get(&src).copied().unwrap_or(src);
+                    plan.unique.push((Write { at, path: src }, f.statement_of(at)));
+                }
                 continue;
             }
             let Some(r) = place_root(src) else {
@@ -661,7 +693,15 @@ impl Plan {
                 }
                 HirKind::Lambda { .. } => {
                     for &l in f.capture_lists.get(&id).map(Vec::as_slice).unwrap_or(&[]) {
-                        if cow_local(l) {
+                        if !cow_local(l) {
+                            continue;
+                        }
+                        if f.borrow_captures.contains(&(id, l)) {
+                            // `use (mut l)`: the closure writes `l`'s object.
+                            if !inout.contains(&l) {
+                                plan.unique_before.push((f.statement_of(id), l));
+                            }
+                        } else {
                             plan.share_before.push((f.statement_of(id), l));
                         }
                     }
@@ -895,6 +935,13 @@ impl Plan {
             let stmt = share_local(out, l, span);
             before.add(at, stmt);
         }
+        for &(at, l) in &self.unique_before {
+            let span = span_of(out, at.1);
+            let ty = out.local(l).ty.clone();
+            let read = push(out, HirKind::Local(l), ty, span);
+            let stmt = unique_stmt(out, read, span);
+            before.add(at, stmt);
+        }
         before.apply(out);
         for &(v, eager) in &self.share {
             // Code emission finds an existential pack by the value's node
@@ -1114,6 +1161,7 @@ fn temp(out: &mut HirBody, ty: Option<Ty>, prefix: &str) -> LocalId {
         ty,
         kind: LocalKind::Temp,
         captured: false,
+        borrow: false,
     });
     id
 }

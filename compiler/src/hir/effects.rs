@@ -1344,7 +1344,7 @@ fn local_roots(body: &HirBody, derived: &HashMap<LocalId, u64>, l: LocalId) -> u
     own | derived.get(&l).copied().unwrap_or(0)
 }
 
-fn pat_binds(pat: &HirPat, out: &mut Vec<LocalId>) {
+pub(crate) fn pat_binds(pat: &HirPat, out: &mut Vec<LocalId>) {
     match pat {
         HirPat::Bind(l) => out.push(*l),
         HirPat::Tuple(items) => items.iter().for_each(|p| pat_binds(p, out)),

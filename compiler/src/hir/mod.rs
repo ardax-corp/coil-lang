@@ -180,6 +180,9 @@ pub struct HirLocal {
     /// A lambda or `defer` in this body captures it, so it stays one plain
     /// word in its own slot.
     pub captured: bool,
+    /// Written `let x = mut place`, `for mut x in …` or `use (mut x)`: a
+    /// borrow of the object, which copy-on-write writes in place.
+    pub borrow: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

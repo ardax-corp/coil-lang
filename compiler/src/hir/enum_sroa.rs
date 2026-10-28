@@ -289,6 +289,7 @@ fn plan(body: &mut HirBody, local: LocalId) -> Option<Split> {
             ty: Some(ty),
             kind: LocalKind::Temp,
             captured: false,
+            borrow: false,
         });
         id
     };
