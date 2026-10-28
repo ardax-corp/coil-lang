@@ -579,6 +579,19 @@ impl Checker {
         // an instance with no context slot 0 still holds the instance's own
         // dictionary, which nothing in its methods dispatches through: a
         // placeholder no goal matches keeps their own bounds from 1 (#1471).
+        // A trait impl in the head type's own module is part of that type,
+        // as its inherent `impl` is: a derive (always expanded beside the
+        // declaration) and a hand-written `impl Trait for C` there read
+        // `C`'s private members, following module privacy. An impl in
+        // another module stays a foreign site and still gets E0128 (#2084).
+        let head_owner = args
+            .first()
+            .and_then(|a| self.nominal_head_from_instance_arg(a))
+            .filter(|key| {
+                self.generics.nominal_type_module(key) == Some(self.current_module.as_str())
+            });
+        let prev_impl_owner = self.impl_owner.take();
+        self.impl_owner = head_owner;
         let prev_active_len = self.active_constraints.len();
         if !context.is_empty() {
             self.active_constraints.push(Constraint {
@@ -835,6 +848,7 @@ impl Checker {
             }
         }
         self.active_constraints.truncate(prev_active_len);
+        self.impl_owner = prev_impl_owner;
         let mut invalid_instance =
             class_def.is_none() || orphaned || (overlapping.is_some() && !same_decl);
         if let Some(class_def) = class_def.as_ref() {
