@@ -711,6 +711,8 @@ pub(super) fn host_summary(name: &str, mut s: Summary) -> Summary {
     {
         s.escapes = 0;
     }
-    s.keeps = s.escapes;
+    // Only a host native keeps without sharing; other unknown code shares
+    // what it stores (copy-on-write).
+    s.keeps = if common::host_native_id(short).is_some() { s.escapes } else { 0 };
     s
 }

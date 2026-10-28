@@ -135,7 +135,7 @@ impl Summary {
             statics: false,
             param_only: 0,
             escapes: u64::MAX,
-            keeps: u64::MAX,
+            keeps: 0,
             returns: u64::MAX,
             shared_ret: true,
         }
@@ -1606,7 +1606,11 @@ impl Cx<'_> {
                 Callee::Method { name } => self.method(&w, *args.first()?, name).map(|(s, _)| s),
                 Callee::Value(f) => self.fn_value(&w, *f),
             };
-            cow::keeps(self.module, body, &lookup)
+            let k = cow::keeps(self.module, body, &lookup);
+            if std::env::var("COIL_COW_TRACE").is_ok() {
+                eprintln!("keeps {} = {k:b}", body.name);
+            }
+            k
         };
         Summary {
             escapes,
@@ -2440,7 +2444,7 @@ impl Cx<'_> {
             statics: visible.contains(EffectFlags::HOST) || visible.contains(EffectFlags::HEAP_MUT),
             param_only: 0,
             escapes: u64::MAX,
-            keeps: u64::MAX,
+            keeps: 0,
             returns: u64::MAX,
             shared_ret: true,
         })

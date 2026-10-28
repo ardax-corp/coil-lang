@@ -81,6 +81,10 @@ struct ArgUse {
     written: u64,
     /// The callee may keep the argument past the call.
     kept: u64,
+    /// The callee is not known here: code that shares what it stores
+    /// (so `kept` is clear), but a caller's fresh object passed there may
+    /// be kept all the same.
+    opaque: bool,
 }
 
 /// A write through a place, before node `at` runs.
@@ -422,6 +426,9 @@ pub(super) fn keeps(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>)
             }
             HirKind::Call { callee, args } => {
                 let used = arg_use(body, lookup, callee, args);
+                if std::env::var("COIL_COW_TRACE").is_ok() && used.kept != 0 {
+                    eprintln!("keeps   {callee:?} kept={:b}", used.kept);
+                }
                 for (j, &a) in args.iter().enumerate().take(64) {
                     if used.kept & (1 << j) != 0 {
                         kept |= of(&holds, a);
@@ -454,7 +461,7 @@ pub(super) fn keeps(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>)
 /// What the callee of `callee(args)` does with each argument.
 fn arg_use(body: &HirBody, lookup: &CallLookup<'_>, callee: &Callee, args: &[HirId]) -> ArgUse {
     let all = if args.len() >= 64 { u64::MAX } else { (1u64 << args.len()) - 1 };
-    let unknown = ArgUse { written: all, kept: all };
+    let unknown = ArgUse { written: all, kept: 0, opaque: true };
     let positional = args.iter().all(|a| !matches!(body.expr(*a).kind, HirKind::Named { .. } | HirKind::Spread(_)));
     let recv_vec = matches!(callee, Callee::Method { .. }) && args.first().is_some_and(|r| is_vec(body.expr(*r).ty.as_ref()));
     if let Callee::Method { name } = callee
@@ -486,9 +493,9 @@ fn arg_use(body: &HirBody, lookup: &CallLookup<'_>, callee: &Callee, args: &[Hir
         return unknown;
     };
     if !positional {
-        return ArgUse { written: if s.mutates != 0 { all } else { 0 }, kept: if s.keeps != 0 { all } else { 0 } };
+        return ArgUse { written: if s.mutates != 0 { all } else { 0 }, kept: if s.keeps != 0 { all } else { 0 }, opaque: s.flags.contains(common::EffectFlags::UNKNOWN) };
     }
-    from_summary(&s)
+    ArgUse { opaque: s.flags.contains(common::EffectFlags::UNKNOWN), ..from_summary(&s) }
 }
 
 /// The bare name of a host native callee, if `name` is one.
@@ -518,7 +525,7 @@ fn host_use(body: &HirBody, short: &str, args: &[HirId], all: u64) -> ArgUse {
 /// A callee shares what it returns from a place (its `return` is a
 /// store), so returning part of an argument does not keep the argument.
 fn from_summary(s: &Summary) -> ArgUse {
-    ArgUse { written: s.mutates, kept: s.keeps }
+    ArgUse { written: s.mutates, kept: s.keeps, opaque: false }
 }
 
 /// Where the rewrite puts ops.
@@ -690,7 +697,7 @@ impl Plan {
                 args.iter()
                     .enumerate()
                     .take(64)
-                    .filter(move |(j, _)| u.kept & (1 << j) != 0)
+                    .filter(move |(j, _)| u.opaque || u.kept & (1 << j) != 0)
                     .filter_map(|(_, &a)| match body.expr(named_value(body, a)).kind {
                         HirKind::Local(l) => Some(l),
                         _ => None,
@@ -805,6 +812,24 @@ fn owned(f: &Facts<'_>, body: &HirBody, l: LocalId, inout: &HashSet<LocalId>) ->
     f.inits.get(&l).into_iter().flatten().all(|&v| !matches!(body.expr(v).kind, HirKind::Local(_) | HirKind::Field { .. } | HirKind::Index { .. } | HirKind::Global { .. }))
 }
 
+/// The nodes under `at` other than `id` with `id`'s span and kind.
+fn twins_of(body: &HirBody, at: HirId, id: HirId) -> Vec<HirId> {
+    let e = body.expr(id);
+    let mut out = Vec::new();
+    let mut work = vec![at];
+    while let Some(n) = work.pop() {
+        let x = body.expr(n);
+        if n != id && x.span == e.span && std::mem::discriminant(&x.kind) == std::mem::discriminant(&e.kind) {
+            out.push(n);
+            continue;
+        }
+        if n != id {
+            work.extend(children(body, n));
+        }
+    }
+    out
+}
+
 /// Whether code emission packs `id` as an existential (by node or span).
 fn pack_site(checker: &Checker, body: &HirBody, id: HirId) -> bool {
     let e = body.expr(id);
@@ -833,7 +858,7 @@ impl Plan {
         // earlier changes nothing a program sees).
         let mut before = Before::default();
         for &(w, at) in &self.unique {
-            for s in self.unique_path(out, checker, w.path) {
+            for s in self.unique_path(out, checker, w.path, w.at) {
                 before.add(at, s);
             }
         }
@@ -891,7 +916,7 @@ impl Plan {
 
     /// The statements that make the objects on `path` writable, top-down,
     /// writing each copy back where it was read.
-    fn unique_path(&self, out: &mut HirBody, checker: &Checker, path: HirId) -> Vec<HirId> {
+    fn unique_path(&self, out: &mut HirBody, checker: &Checker, path: HirId, stmt: HirId) -> Vec<HirId> {
         // A copy of an existential pack site would share its span, and
         // code emission would pack the copy too.
         if pack_site(checker, out, path) {
@@ -919,7 +944,16 @@ impl Plan {
                 && !pure_index(out, index)
             {
                 let t = temp(out, out.expr(index).ty.clone(), "$cowi");
+                // A compound assignment reads the place again through a
+                // twin of the index (same span and shape), which lowering
+                // pairs with this one: it reads the temporary too.
+                let twins = twins_of(out, stmt, index);
                 let moved = relocate(out, index);
+                for twin in twins {
+                    let x = &mut out.exprs[twin.0 as usize];
+                    x.kind = HirKind::Local(t);
+                    x.node = None;
+                }
                 stmts.push(push(out, HirKind::Let { local: t, init: Some(moved) }, Some(ty::unit()), span));
                 let x = &mut out.exprs[index.0 as usize];
                 x.kind = HirKind::Local(t);
