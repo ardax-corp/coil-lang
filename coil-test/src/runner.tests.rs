@@ -31,6 +31,7 @@ fn options(root: &Path, fail_fast: bool) -> TestOptions {
         extra_roots: Vec::new(),
         report: Report::Human,
         doc_tests: DocTests::On,
+        wall_timeout: None,
     }
 }
 

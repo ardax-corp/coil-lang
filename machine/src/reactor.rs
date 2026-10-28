@@ -821,7 +821,24 @@ pub struct TestHandle {
     report: Arc<Mutex<Option<TestReport>>>,
 }
 
+/// Answers whether a submitted case has finished, without waiting on it
+/// (`coil test --wall-timeout` watches the cases in flight).
+pub struct TestProbe(Arc<JoinState>);
+
+impl TestProbe {
+    /// True once the case's worker stored its result (a report, or a Rust
+    /// panic turned into a failed join); stays true after [`TestHandle::wait`].
+    pub fn finished(&self) -> bool {
+        self.0.is_done()
+    }
+}
+
 impl TestHandle {
+    /// A probe for this case's completion.
+    pub fn probe(&self) -> TestProbe {
+        TestProbe(Arc::clone(&self.state))
+    }
+
     /// Block until the case finishes. A Rust panic inside the VM (an ICE) is
     /// a failed case, not a harness abort.
     pub fn wait(self) -> TestReport {

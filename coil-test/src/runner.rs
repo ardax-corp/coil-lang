@@ -22,6 +22,7 @@ use reporting::{ErrorCode, ReportConfig, ReportFormat};
 use crate::coverage::{Coverage, CoverageOptions, ProgramLines, project_filter, test_fn_ranges};
 use crate::events::{self, Event};
 use crate::order::{Order, format_seed};
+use crate::watchdog::{WatchId, Watchdog};
 
 /// How a run reports its progress.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -70,6 +71,9 @@ pub struct TestOptions {
     pub report: Report,
     /// Run the examples in `///` docs (`--no-doc-tests`, `--doc-tests-only`).
     pub doc_tests: DocTests,
+    /// `--wall-timeout`: a case that runs this long ends the run
+    /// (`crate::watchdog`); `None` never does.
+    pub wall_timeout: Option<std::time::Duration>,
 }
 
 /// Whether a run includes doc-tests (the code examples in `///` comments).
@@ -277,6 +281,8 @@ struct Run<'a> {
     sources: Discovered,
     /// The text report's progress bar.
     progress: Option<Progress>,
+    /// The cases in flight, for `--wall-timeout`.
+    watchdog: Watchdog,
 }
 
 /// Project sources (under the current directory, outside the test root and
@@ -315,6 +321,8 @@ struct PendingCase {
     /// Its stderr writes and panic message.
     stderr: Arc<Mutex<Vec<u8>>>,
     kind: CaseKind,
+    /// Its entry on the `--wall-timeout` list, until it is waited on.
+    watch: Option<WatchId>,
 }
 
 /// A file's own case, or one of its doc examples.
@@ -424,6 +432,7 @@ fn finish_file(run: &Run<'_>, file: PendingFile, result: &mut SuiteResult) -> us
             CaseState::Running(handle) => handle.wait(),
             CaseState::Done(report) => report,
         };
+        run.watchdog.done(case.watch);
         let mut ok = report_ok && !timed_out;
         let mut reason = reason;
         if case.kind == (CaseKind::Doc { should_panic: true }) && !timed_out {
@@ -935,6 +944,7 @@ fn start_file(run: &Run<'_>, dispatch: Dispatch, target: &Target) -> PendingFile
 }
 
 fn compile_and_start(run: &Run<'_>, dispatch: Dispatch, path: &Path) -> PendingFile {
+    let display = path.display().to_string();
     let diagnostics = Captured::default();
     let compiled = compile_test_file(
         run.config,
@@ -977,7 +987,7 @@ fn compile_and_start(run: &Run<'_>, dispatch: Dispatch, path: &Path) -> PendingF
         .map(|(name, entry)| {
             let case = prepared.case(*entry, run.coverage.is_some(), None);
             let ctx = prepared.ctx.clone();
-            start_case(run, dispatch, name.clone(), ctx, case, CaseKind::Test)
+            start_case(run, dispatch, &display, name.clone(), ctx, case, CaseKind::Test)
         })
         .collect::<Vec<_>>();
     let expected_output = std::fs::read_to_string(path)
@@ -994,10 +1004,11 @@ fn compile_and_start(run: &Run<'_>, dispatch: Dispatch, path: &Path) -> PendingF
     }
 }
 
-/// Queue (or run) one case, capturing its output.
+/// Queue (or run) one case of `file`, capturing its output.
 fn start_case(
     run: &Run<'_>,
     dispatch: Dispatch,
+    file: &str,
     name: String,
     mut ctx: ThreadSpawnContext,
     case: TestCase,
@@ -1010,9 +1021,19 @@ fn start_case(
     ctx.shared_stdout = Some(Arc::clone(&stdout));
     let stderr = Arc::new(Mutex::new(Vec::new()));
     ctx.shared_stderr = Some(Arc::clone(&stderr));
-    let state = match dispatch {
-        Dispatch::Pool => CaseState::Running(run.reactor.submit_test(ctx, case, print)),
-        Dispatch::Inline => CaseState::Done(run.reactor.run_test_here(ctx, case, print)),
+    let (state, watch) = match dispatch {
+        Dispatch::Pool => {
+            let handle = run.reactor.submit_test(ctx, case, print);
+            let watch = run.watchdog.watch(file, &name, Some(handle.probe()), Arc::clone(&output));
+            (CaseState::Running(handle), watch)
+        }
+        Dispatch::Inline => {
+            // On this thread: the watch ends when the case returns.
+            let watch = run.watchdog.watch(file, &name, None, Arc::clone(&output));
+            let report = run.reactor.run_test_here(ctx, case, print);
+            run.watchdog.done(watch);
+            (CaseState::Done(report), None)
+        }
     };
     PendingCase {
         name,
@@ -1021,6 +1042,7 @@ fn start_case(
         stdout,
         stderr,
         kind,
+        watch,
     }
 }
 
@@ -1039,6 +1061,7 @@ fn decided_case(name: String, passed: bool, reason: Option<String>, output: Vec<
         stdout: Arc::default(),
         stderr: Arc::new(Mutex::new(output)),
         kind,
+        watch: None,
     }
 }
 
@@ -1116,6 +1139,7 @@ fn start_doc_case(
     };
     // A program that did not get to run fails even under `should_panic`.
     let kind_failed = CaseKind::Doc { should_panic: false };
+    let display = path.display().to_string();
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("doc");
     let entry = path.with_file_name(format!("{stem}__doc_{line}.hy"));
     let diagnostics = Captured::default();
@@ -1156,7 +1180,7 @@ fn start_doc_case(
         coverage: false,
         step_budget: None,
     };
-    start_case(run, dispatch, name, ctx, case, kind)
+    start_case(run, dispatch, &display, name, ctx, case, kind)
 }
 
 /// The module path of `path` for doc-test names: its path without `.hy`
@@ -1220,6 +1244,10 @@ pub fn run_test_suite(config: ReportConfig, options: &TestOptions) -> Result<Sui
         sources: Discovered::default(),
         progress: (options.report == Report::Human)
             .then(|| Progress::new("test", "files", files.len())),
+        watchdog: match options.wall_timeout {
+            Some(limit) => Watchdog::start(limit, seed_of(options.order), options.report == Report::Json),
+            None => Watchdog::off(),
+        },
     };
     let targets: Vec<Target> = files
         .into_iter()
