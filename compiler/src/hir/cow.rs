@@ -83,10 +83,10 @@ struct ArgUse {
     written: u64,
     /// The callee may keep the argument past the call.
     kept: u64,
-    /// The callee is not known here: code that shares what it stores
-    /// (so `kept` is clear), but a caller's fresh object passed there may
-    /// be kept all the same.
-    opaque: bool,
+    /// Arguments that reach code not known here: code that shares what it
+    /// stores (so `kept` is clear), but a caller's fresh object passed
+    /// there may be kept all the same.
+    opaque: u64,
 }
 
 /// A write through a place, before node `at` runs.
@@ -103,6 +103,9 @@ struct Facts<'b> {
     end: Vec<u32>,
     parent: HashMap<HirId, HirId>,
     calls: HashMap<HirId, ArgUse>,
+    /// Calls whose result holds only objects the call made, which nothing
+    /// else reaches.
+    fresh_calls: HashSet<HirId>,
     writes: Vec<Write>,
     /// The roots of the paths written through.
     written_roots: HashSet<LocalId>,
@@ -165,6 +168,7 @@ impl<'b> Facts<'b> {
             end: vec![0; n],
             parent: HashMap::new(),
             calls: HashMap::new(),
+            fresh_calls: HashSet::new(),
             writes: Vec::new(),
             written_roots: HashSet::new(),
             reads: HashMap::new(),
@@ -242,6 +246,9 @@ impl<'b> Facts<'b> {
                     if used.written & (1 << i) != 0 && cow_ty(checker, body.expr(a).ty.as_ref()) {
                         self.writes.push(Write { at: id, path: a });
                     }
+                }
+                if lookup(callee, args).is_some_and(|s| !s.shared_ret) {
+                    self.fresh_calls.insert(id);
                 }
                 self.calls.insert(id, used);
             }
@@ -389,11 +396,13 @@ fn named_value(body: &HirBody, a: HirId) -> HirId {
 /// the call: it stores the parameter (or a local that holds it) into a
 /// field, an element, a new object, a callee that keeps it, a closure or
 /// its result. What it stores from inside the object it shares itself.
-pub(super) fn keeps(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>) -> u64 {
+/// Second: the parameters it hands, as themselves, to code not known
+/// here, which may keep them.
+pub(super) fn keeps(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>) -> (u64, u64) {
     if body.is_coro {
-        return u64::MAX;
+        return (u64::MAX, u64::MAX);
     }
-    let Some(root) = body.root else { return 0 };
+    let Some(root) = body.root else { return (0, 0) };
     // What each local may hold of the parameters, through `let x = p`.
     let mut holds: HashMap<LocalId, u64> = HashMap::new();
     for (i, &p) in body.params.iter().enumerate().take(64) {
@@ -442,6 +451,7 @@ pub(super) fn keeps(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>)
         }
     }
     let mut kept = 0u64;
+    let mut opaque = 0u64;
     for (i, e) in body.exprs.iter().enumerate() {
         let id = HirId(i as u32);
         match &e.kind {
@@ -460,6 +470,9 @@ pub(super) fn keeps(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>)
                 for (j, &a) in args.iter().enumerate().take(64) {
                     if used.kept & (1 << j) != 0 {
                         kept |= of(&holds, a);
+                    }
+                    if used.opaque & (1 << j) != 0 {
+                        opaque |= of(&holds, a);
                     }
                 }
             }
@@ -480,13 +493,13 @@ pub(super) fn keeps(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>)
             kept |= of(&holds, v);
         }
     }
-    kept
+    (kept, opaque)
 }
 
 /// What the callee of `callee(args)` does with each argument.
 fn arg_use(body: &HirBody, lookup: &CallLookup<'_>, callee: &Callee, args: &[HirId]) -> ArgUse {
     let all = if args.len() >= 64 { u64::MAX } else { (1u64 << args.len()) - 1 };
-    let unknown = ArgUse { written: all, kept: 0, opaque: true };
+    let unknown = ArgUse { written: all, kept: 0, opaque: all };
     let positional = args.iter().all(|a| !matches!(body.expr(*a).kind, HirKind::Named { .. } | HirKind::Spread(_)));
     let recv_vec = matches!(callee, Callee::Method { .. }) && args.first().is_some_and(|r| is_vec(body.expr(*r).ty.as_ref()));
     if let Callee::Method { name } = callee
@@ -518,9 +531,10 @@ fn arg_use(body: &HirBody, lookup: &CallLookup<'_>, callee: &Callee, args: &[Hir
         return unknown;
     };
     if !positional {
-        return ArgUse { written: if s.mutates != 0 { all } else { 0 }, kept: if s.keeps != 0 { all } else { 0 }, opaque: s.flags.contains(common::EffectFlags::UNKNOWN) };
+        let any = |bits: u64| if bits != 0 { all } else { 0 };
+        return ArgUse { written: any(s.mutates), kept: any(s.keeps), opaque: any(s.opaque_args) };
     }
-    ArgUse { opaque: s.flags.contains(common::EffectFlags::UNKNOWN), ..from_summary(&s) }
+    from_summary(&s)
 }
 
 /// The bare name of a host native callee, if `name` is one.
@@ -550,7 +564,7 @@ fn host_use(body: &HirBody, short: &str, args: &[HirId], all: u64) -> ArgUse {
 /// A callee shares what it returns from a place (its `return` is a
 /// store), so returning part of an argument does not keep the argument.
 fn from_summary(s: &Summary) -> ArgUse {
-    ArgUse { written: s.mutates, kept: s.keeps, opaque: false }
+    ArgUse { written: s.mutates, kept: s.keeps, opaque: s.opaque_args }
 }
 
 /// Where the rewrite puts ops.
@@ -759,7 +773,7 @@ impl Plan {
                 args.iter()
                     .enumerate()
                     .take(64)
-                    .filter(move |(j, _)| u.opaque || u.kept & (1 << j) != 0)
+                    .filter(move |(j, _)| (u.opaque | u.kept) & (1 << j) != 0)
                     .filter_map(|(_, &a)| match body.expr(named_value(body, a)).kind {
                         HirKind::Local(l) => Some(l),
                         _ => None,
@@ -787,7 +801,7 @@ impl Plan {
             {
                 continue;
             }
-            if inits.iter().all(|&v| fresh_ctor(body, v)) {
+            if inits.iter().all(|&v| fresh_ctor(body, v) || f.fresh_calls.contains(&v)) {
                 plan.fresh_locals.insert(l);
             }
         }
@@ -828,7 +842,7 @@ impl Plan {
                 && w.path == r
                 && matches!(body.expr(r).kind, HirKind::Call { .. })
                 && !fresh_ctor(body, r)
-                && f.calls.get(&w.at).is_some_and(|u| !u.opaque)
+                && f.calls.get(&w.at).is_some_and(|u| u.opaque == 0)
                 && cow_ty(checker, body.expr(r).ty.as_ref())
                 && f.parent.get(&w.at).is_some_and(|p| matches!(&body.expr(*p).kind, HirKind::Block { stmts, .. } if stmts.contains(&w.at)))
             {
