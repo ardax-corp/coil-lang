@@ -178,6 +178,42 @@ per match, compile subtracted): `split(" ")` 6450 → 6408,
 the calls into `find_at` / `span_text` and the slice's allocations (the
 string and its `Result`), not the scan.
 
+### 7. `Vec<byte>` streams
+
+The libraries (json, csv, url, deflate, http, `bytes::*`) loop over
+`Vec<byte>`, not `string`. A byte array read is a plain MIR `Index`, and
+MIR types do not say what an array holds, so HIR lowering marks each
+`Index` whose element is `byte` (a `Vec<byte>` or `[byte; N]`) in
+`MirFunc::byte_loads`. `byte_scan` takes those as streams beside
+`string_byte_at`; the VM's `VScan` already loads packed and word byte
+arrays.
+
+An array, unlike a string, can change while the loop runs: the
+iterations that run scalar may store into it or push to it. Each scan
+reads the array as it is when the scan starts, and an array bound's
+`len()` is taken again at every scan instead of once in the preheader
+(LICM still hoists it when nothing in the loop resizes an array). An
+out-of-range read panics, as `string_byte_at`'s does, and the scan stops
+short of it, so the scalar loop still raises it.
+
+The walk's masks also fold back the branches of a long `&&` chain: `or`
+pulls out the terms two `&` chains share (`(x & a) | (x & !a)` is `x`),
+and `and` drops a chain the other side already holds. Without this a
+four-way whitespace test (`c != 32 && c != 9 && c != 10 && c != 13`)
+built a 37-node mask, past the 24-node limit, and never scanned (on
+`string` too).
+
+`examples/perf/vec_byte_scan.hy`, `coil` release, ns per call:
+
+| Case | main `435021f` | after |
+|------|----------------|-------|
+| find a byte, 1 MiB | 13 100 000 | 22 600 |
+| match length, 32 KiB (deflate) | 513 000 | 3 000 |
+| skip JSON whitespace, 1 MiB | 9 120 000 | 227 000 |
+
+String loops are unchanged (find a byte, a substring and a two-byte
+filter on 64 KiB, within noise).
+
 ## Steps
 
 | Step | PR | Change |
@@ -188,3 +224,4 @@ string and its `Result`), not the scan.
 | 3 | #1963 | MIR `byte_scan` pass: `ByteScan` / VM `VScan` (archive minor 46); find a byte 6.3 ms to 11 µs per 64 KiB |
 | 4 | | coil-stdlib `text` search in plain loops (coil-stdlib, two-byte filter); VM scan fast paths, string pins |
 | 5 | | Website docs; feature branch to `main` |
+| 6 | | `Vec<byte>` streams (`MirFunc::byte_loads`); `&&` chains fold back |

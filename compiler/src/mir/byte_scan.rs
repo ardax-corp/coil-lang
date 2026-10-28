@@ -19,6 +19,12 @@
 //! from the body's branches: each block on the way to the latch is read as
 //! lane masks (`&&` / `||` chains and their `bool` φs included), and a
 //! block that does anything else stops the walk (its lanes run scalar).
+//!
+//! A stream is a `string` (`string_byte_at`) or a byte array (an `Index`
+//! in [`MirFunc::byte_loads`]: `Vec<byte>`, `[byte; N]`). An array may
+//! change between scans (the iterations that run scalar can push or
+//! store), so each scan reads it as it is then, and an array bound's
+//! length is taken again at every scan.
 
 use std::collections::{HashMap, HashSet};
 
@@ -92,14 +98,17 @@ enum Lane {
 struct Stream {
     arr: ValueId,
     off: Option<ValueId>,
+    /// A `string` (immutable), not a byte array.
+    string: bool,
 }
 
 /// The header's bound: an invariant value, or `arr.len()` computed in
-/// the header (`while i < s.len()`).
+/// the header (`while i < s.len()`). `Len`'s flag: `arr` is a string
+/// read in the loop, so its length cannot change.
 #[derive(Clone, Copy)]
 enum Bound {
     Value(ValueId),
-    Len(ValueId),
+    Len(ValueId, bool),
 }
 
 struct Plan {
@@ -219,23 +228,32 @@ impl Walk<'_> {
         Some((self.streams.len() - 1) as u8)
     }
 
+    /// A byte read `arr[idx]` as a stream's lanes.
+    fn read(&mut self, arr: ValueId, idx: ValueId, string: bool) -> Result<Lane, ()> {
+        if !self.invariant(arr) || !self.func.ty(arr).is_heap_word() {
+            return Err(());
+        }
+        let off = match self.lane(idx) {
+            Some(Lane::Iv) => None,
+            Some(Lane::Index(off)) => Some(off),
+            _ => return Err(()),
+        };
+        let k = self.stream(Stream { arr, off, string }).ok_or(())?;
+        Ok(Lane::Bytes(k))
+    }
+
     /// The lane value of a pure instruction, `None` when it cannot be
     /// modelled; `Err` when it may trap or have an effect.
     fn inst(&mut self, inst: &MirInst) -> Result<Option<Lane>, ()> {
         Ok(match inst {
             MirInst::Const { .. } => self.lane(inst.dest()),
             MirInst::HostInvoke { native_id, args, .. } if *native_id == self.byte_at && args.len() == 2 => {
-                let (arr, idx) = (args[0], args[1]);
-                if !self.invariant(arr) || !self.func.ty(arr).is_heap_word() {
-                    return Err(());
-                }
-                let off = match self.lane(idx) {
-                    Some(Lane::Iv) => None,
-                    Some(Lane::Index(off)) => Some(off),
-                    _ => return Err(()),
-                };
-                let k = self.stream(Stream { arr, off }).ok_or(())?;
-                Some(Lane::Bytes(k))
+                Some(self.read(args[0], args[1], true)?)
+            }
+            // A byte array's element; out of range it panics, as
+            // `string_byte_at` does, and the scan stops short of that.
+            MirInst::Index { dest, array, index, .. } if self.func.byte_loads.contains(dest) => {
+                Some(self.read(*array, *index, false)?)
             }
             MirInst::Bin { op: MirBinOp::Add, ty: MirTy::I64, lhs, rhs, .. } => {
                 // `iv + off`: a stream index, in range wherever the
@@ -414,7 +432,7 @@ fn plan_loop(func: &MirFunc, lp: &LoopInfo, byte_at: u16) -> Option<Plan> {
         Bound::Value(bound)
     } else {
         match walk.defs.get(&bound) {
-            Some((at, MirInst::ArrayLen { array, .. })) if *at == h && walk.invariant(*array) => Bound::Len(*array),
+            Some((at, MirInst::ArrayLen { array, .. })) if *at == h && walk.invariant(*array) => Bound::Len(*array, false),
             _ => return None,
         }
     };
@@ -531,6 +549,10 @@ fn plan_loop(func: &MirFunc, lp: &LoopInfo, byte_at: u16) -> Option<Plan> {
     if expr.size() > MAX_EXPR {
         return None;
     }
+    let bound = match bound {
+        Bound::Len(arr, _) => Bound::Len(arr, walk.streams.iter().any(|s| s.arr == arr && s.string)),
+        b => b,
+    };
     // Renumber the streams the mask loads.
     let mut loads: Vec<u8> = Vec::new();
     let expr = renumber(&expr, &mut loads);
@@ -692,13 +714,6 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: Plan) -> Vec<BlockId> {
             Scalar::Const(k) => b.konst(pre, MirConst::I64(k)),
         })
         .collect();
-    let bound = match plan.bound {
-        Bound::Value(v) => v,
-        Bound::Len(array) => {
-            let dest = b.value(MirTy::I64);
-            b.push(pre, MirInst::ArrayLen { dest, array })
-        }
-    };
     let at = pre;
     let g = b.block();
     run.push(g);
@@ -714,6 +729,14 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: Plan) -> Vec<BlockId> {
         let args = vec![(at, init[p]), (latch, from_latch)];
         b.push(g, MirInst::Phi { dest: twin[p], ty: *ty, args });
     }
+    // A string's length is fixed; an array's is taken at each scan.
+    let bound = match plan.bound {
+        Bound::Value(v) => v,
+        Bound::Len(array, fixed) => {
+            let dest = b.value(MirTy::I64);
+            b.push(if fixed { pre } else { g }, MirInst::ArrayLen { dest, array })
+        }
+    };
     let streams = plan
         .loads
         .iter()
