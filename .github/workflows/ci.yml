@@ -501,10 +501,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # A PR pairs with the coil-stdlib branch of the same name when one
+      # exists (a feature branch that changes both); otherwise the default.
+      - name: Pick the coil-stdlib branch
+        id: stdlib
+        shell: bash
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          ref=""
+          if [ -n "$HEAD_REF" ] && git ls-remote --exit-code --heads \
+              https://github.com/ardax-corp/coil-stdlib "$HEAD_REF" >/dev/null; then
+            ref="$HEAD_REF"
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v4
         with:
           repository: ardax-corp/coil-stdlib
           path: .deps/coil-stdlib
+          ref: ${{ steps.stdlib.outputs.ref }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

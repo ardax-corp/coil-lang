@@ -501,7 +501,12 @@ fn arg_use(body: &HirBody, lookup: &CallLookup<'_>, callee: &Callee, args: &[Hir
     let all = if args.len() >= 64 { u64::MAX } else { (1u64 << args.len()) - 1 };
     let unknown = ArgUse { written: all, kept: 0, opaque: all };
     let positional = args.iter().all(|a| !matches!(body.expr(*a).kind, HirKind::Named { .. } | HirKind::Spread(_)));
-    let recv_vec = matches!(callee, Callee::Method { .. }) && args.first().is_some_and(|r| is_vec(body.expr(*r).ty.as_ref()));
+    // A fixed array's methods are structural reads, like a `Vec`'s `len`.
+    let recv_vec = matches!(callee, Callee::Method { .. })
+        && args.first().is_some_and(|r| {
+            let ty = body.expr(*r).ty.as_ref();
+            is_vec(ty) || matches!(ty.map(strip_readonly), Some(Ty::Array { .. }))
+        });
     if let Callee::Method { name } = callee
         && recv_vec
     {
