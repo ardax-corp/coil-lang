@@ -33,7 +33,7 @@ fn advance_task(Vec<Task> board, int id) -> Result<Task, string> {
     if id < 1 || id > board.len() {
         raise "unknown task id";
     }
-    let t = board[id - 1];
+    let t = mut board[id - 1];
     t.status = match t.status {
         Status::Todo => Status::Doing,
         default => Status::Done,
