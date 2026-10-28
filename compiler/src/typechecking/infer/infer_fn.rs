@@ -80,6 +80,28 @@ impl Checker {
         }
         if name == "main" {
             self.main_decl_span = Some(range.clone());
+            // The entry point is called with nothing on the stack: a
+            // parameter would silently read as its type's default (#2091).
+            if self.impl_owner.is_none()
+                && self.current_typeclass.is_none()
+                && let Expression::Fragment(params) = args.1.as_ref()
+                && !params.is_empty()
+            {
+                let mut msg = Message::error(
+                    ErrorCode::GenericTypeError,
+                    "`main` takes no parameters".to_string(),
+                    args.0.into_range(),
+                );
+                msg.push(Label::new(
+                    "the entry point is called without arguments".to_string(),
+                    args.0.into_range(),
+                ));
+                msg.with_help(
+                    "write `fn main()`; read program arguments with `env::args()` (`use env::args;`)"
+                        .to_string(),
+                );
+                self.messages.push(msg);
+            }
         }
         let prev_overloadable = self.registering_overloadable_fn;
         self.registering_overloadable_fn = self.current_typeclass.is_none();
