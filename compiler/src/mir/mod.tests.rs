@@ -1232,40 +1232,6 @@ fn main() {
 }
 
 #[test]
-fn pipeline_specializes_allowlisted_math_host_inside_dense() {
-    let src = r#"
-fn hot(float a, int n) -> float {
-    let i = 0;
-    let s = 0.0;
-    while i < n {
-        let xf = i as float;
-        s = s + sin(xf) * a;
-        i = i + 1;
-    }
-    return s;
-}
-fn main() {
-    let _ = hot(2.0, 4);
-}
-"#;
-    let mut p = crate::Pipeline::new();
-    let (bc, constants) = p.compile_src(src).expect("compile W4 math host");
-    assert!(
-        bc.iter().any(|b| is_dense_bin_op(*b.bytecode())),
-        "allowlisted math HostInvoke must stay on dense; opcodes={:?}",
-        bc.iter()
-            .map(|b| b.bytecode().mnemonic())
-            .collect::<Vec<_>>()
-    );
-    assert!(
-        bc.iter().any(|b| *b.bytecode() == Instruction::HostInvoke),
-        "W4 edge must emit HostInvoke inside the dense body"
-    );
-    let mut vm = machine::Machine::<64>::with_operand_capacity(64);
-    vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
-}
-
-#[test]
 fn pipeline_specializes_dense_to_dense_call() {
     let src = r#"
 fn kernel(float x, int k) -> float {

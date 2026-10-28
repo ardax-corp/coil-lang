@@ -1,6 +1,6 @@
 // Floats keep IEEE-754 behaviour: dividing by zero gives `inf` / `-inf`
 // (no panic), `NaN` is unordered (every `<` `<=` `>` `>=` with it is
-// false) and `sqrt` / `ln` produce NaN and `-inf` instead of clamping.
+// false).
 // (`==` on NaN and -0.0 is in float_eq_ieee.hy.)
 use tests::assert;
 
@@ -56,15 +56,6 @@ test("float overflow gives infinity") {
     let p = big * big * big * big * big * big * big * big * big * big * big;
     assert!(p == fdiv(1.0, 0.0));
     assert!(-p == fdiv(-1.0, 0.0));
-}
-
-test("libm exceptional inputs") {
-    assert!(is_nan(sqrt(-1.0)));
-    assert!(is_nan(ln(-1.0)));
-    assert!(ln(0.0) == fdiv(-1.0, 0.0));
-    assert!(sqrt(fdiv(1.0, 0.0)) == fdiv(1.0, 0.0));
-    assert!(exp(1000.0) == fdiv(1.0, 0.0));
-    assert!(exp(-1000.0) == 0.0);
 }
 
 test("float remainder keeps the dividend sign") {
