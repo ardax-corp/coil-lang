@@ -217,6 +217,16 @@ worker count and the number of compile threads.
   another program's state.
 - **`--fail-fast`** stops at once with `-j 1`; with `-j N` files already
   started still finish and are reported.
+- **`--wall-timeout S`** (default 600; `0`: never): a case that has run for
+  `S` seconds without finishing ends the run. A watchdog thread
+  (`coil-test/src/watchdog.rs`) keeps the cases in flight (`TestHandle::probe`
+  says when a pool case is done; an inline case is on the list while it
+  runs) and, once one is past the limit, prints the stuck cases with their
+  file, elapsed time and output so far, plus the `--seed` that reruns the
+  order, then exits 124 (an `error` event under `--json`). A VM that never
+  comes back to a safepoint cannot be stopped from outside, so the process
+  ends, not the case; in CI that fails the harness cell with a named
+  culprit instead of holding it until the job limit.
 - **Leak smoke** runs `-j 1`: under `ulimit -v 65536` every extra thread's
   glibc malloc arena (64 MiB of address space) alone exceeds the cap.
 - **GC mode.** Cases run with the same precise frame / class / static word
@@ -241,8 +251,11 @@ It builds `coil` / `coil-test` first (`--release` for the release build;
 cargo's cache makes that a no-op when nothing changed). `--bin DIR` uses
 binaries already built, `--harness PATH` runs a `coil-test` directly (the
 GC-stress build), `--limit-as-kb N` caps each process's address space like
-`ulimit -v` (the leak smoke, `-j 1` per process). Logs land in
-`target/corpora/<corpus>.log`.
+`ulimit -v` (the leak smoke, `-j 1` per process). `--timeout S` (default
+1800) kills a corpus process still running after `S` seconds and reports it
+as timed out: the backstop behind `coil test --wall-timeout` for a wedge
+outside a case. Logs land in `target/corpora/<corpus>.log`; CI uploads them
+when a cell fails or is cut off by its job limit.
 
 CI builds the binaries once per OS and build mode (`harness-build`: debug
 and release, each with its GC-stress `coil-test`) and runs every setting
@@ -418,7 +431,8 @@ serialized to `.hyc`, so test-only data never touches the archive format.
 
 | File | Role |
 |------|------|
-| `coil-test/src/args.rs` | argv (`--fail-fast`, `--seed`, `--no-shuffle`, `-j`, `--show-output`, `--coverage*`, `--no-doc-tests`, `--doc-tests-only`, `-O`, `--root`, host grants, `--log-*`; `mutate` flags) |
+| `coil-test/src/args.rs` | argv (`--fail-fast`, `--seed`, `--no-shuffle`, `-j`, `--wall-timeout`, `--show-output`, `--coverage*`, `--no-doc-tests`, `--doc-tests-only`, `-O`, `--root`, host grants, `--log-*`; `mutate` flags) |
+| `coil-test/src/watchdog.rs` | `--wall-timeout`: the cases in flight, the thread that ends a run with a stuck one |
 | `parser/src/doc_examples.rs` | doc example rules: fences, hidden lines, the doc-test program, documented items |
 | `coil-test/src/order.rs` | seeded file / case order |
 | `machine/src/reactor.rs` | `TestJob` (incl. `step_budget`), `submit_test` / `run_test_here`, `TestHandle` |
