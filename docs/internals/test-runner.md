@@ -226,7 +226,8 @@ worker count and the number of compile threads.
   order, then exits 124 (an `error` event under `--json`). A VM that never
   comes back to a safepoint cannot be stopped from outside, so the process
   ends, not the case; in CI that fails the harness cell with a named
-  culprit instead of holding it until the job limit.
+  culprit instead of holding it until the job limit. Where no thread can be
+  spawned (wasm32-wasip1) the run goes unwatched, with a warning.
 - **Leak smoke** runs `-j 1`: under `ulimit -v 65536` every extra thread's
   glibc malloc arena (64 MiB of address space) alone exceeds the cap.
 - **GC mode.** Cases run with the same precise frame / class / static word

@@ -68,7 +68,9 @@ impl Watchdog {
     }
 
     /// Start watching with `limit` per case. `seed` is the `--seed` text of
-    /// a shuffled run; `json` selects the event report.
+    /// a shuffled run; `json` selects the event report. Where no thread can
+    /// be spawned (wasm32-wasip1, an exhausted OS) the run goes unwatched,
+    /// and says so.
     pub fn start(limit: Duration, seed: Option<String>, json: bool) -> Self {
         let inner = Arc::new(Inner {
             limit,
@@ -80,13 +82,23 @@ impl Watchdog {
             json,
         });
         let worker = Arc::clone(&inner);
-        let thread = std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("coil-test-watchdog".into())
-            .spawn(move || worker.run())
-            .expect("spawn coil-test watchdog thread");
-        Watchdog {
-            inner: Some(inner),
-            thread: Some(thread),
+            .spawn(move || worker.run());
+        match spawned {
+            Ok(thread) => Watchdog {
+                inner: Some(inner),
+                thread: Some(thread),
+            },
+            Err(e) => {
+                let message = format!("--wall-timeout: no watchdog thread ({e}); a case that never returns is not caught");
+                if json {
+                    crate::events::emit_error(&message);
+                } else {
+                    eprintln!("warning: {message}");
+                }
+                Watchdog::off()
+            }
         }
     }
 
