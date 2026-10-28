@@ -483,16 +483,28 @@ impl Checker {
         if let Some(ref cdef) = class_def {
             self.validate_instance_head_kinds(cdef, &arg_tys, &range);
         }
-        let orphaned = class_def
+        let foreign = class_def
             .as_ref()
-            .is_some_and(|cdef| !self.instance_satisfies_orphan_rule(cdef, args, &arg_tys));
+            .map(|cdef| self.foreign_instance_args(cdef, args, &arg_tys))
+            .unwrap_or_default();
+        let orphaned = !foreign.is_empty();
         if orphaned {
             let instance = self.instance_signature(class, &arg_tys);
+            let here = if self.current_module.is_empty() {
+                "in the entry file".to_string()
+            } else {
+                format!("in module `{}`", self.current_module)
+            };
+            let foreign = self
+                .diag_tys(&foreign.iter().collect::<Vec<_>>())
+                .into_iter()
+                .map(|t| format!("`{t}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
             let mut msg = Message::error(
                 ErrorCode::GenericTypeError,
                 format!(
-                    "Orphan instance `{}` is not allowed in module `{}`",
-                    instance, self.current_module
+                    "Orphan instance `{instance}` is not allowed {here}: neither the trait `{class}` nor {foreign} is defined here"
                 ),
                 range.clone(),
             );

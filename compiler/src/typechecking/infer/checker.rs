@@ -12261,25 +12261,28 @@ impl Checker {
         }
     }
 
-    fn instance_satisfies_orphan_rule(
+    /// The instance arguments the orphan rule rejects: each non-variable
+    /// argument whose nominal head is not defined in this module. Empty
+    /// when the trait is local, or every argument is.
+    pub(super) fn foreign_instance_args(
         &self,
         class_def: &TypeClassDef,
         arg_exprs: &[Output],
         arg_tys: &[Ty],
-    ) -> bool {
+    ) -> Vec<Ty> {
         if class_def.defined_module == self.current_module {
-            return true;
+            return Vec::new();
         }
 
         arg_exprs
             .iter()
             .zip(arg_tys.iter())
             .filter(|(_, ty)| !matches!(apply_ty_prune(&self.subst, ty), Ty::Var(_)))
-            .all(|(expr, ty)| {
+            .filter(|(expr, ty)| {
                 let head = self
                     .nominal_head_from_instance_arg(expr)
                     .or_else(|| self.nominal_head_from_ty(ty));
-                head.as_deref().is_some_and(|name| {
+                !head.as_deref().is_some_and(|name| {
                     let mod_of = |n: &str| self.generics.nominal_type_module(n);
                     // The core prelude declares `Option` / `Result`, which
                     // the registry files under `prelude` (#1906).
@@ -12293,6 +12296,8 @@ impl Checker {
                         || home(mod_of(&self.qualify_module_name(name)))
                 })
             })
+            .map(|(_, ty)| ty.clone())
+            .collect()
     }
 
     fn nominal_head_from_instance_arg(&self, arg: &Output) -> Option<String> {
