@@ -659,10 +659,16 @@ pub enum MirInst {
     /// unique of `src`'s object. Dest is `src`'s word, or a copy's for
     /// unique. A side effect and an allocating safepoint; pair with
     /// [`Self::GcBarrier`].
+    ///
+    /// With `field: Some(i)` (unique only), `src` is an object and the op
+    /// makes its field `i` unique in place, writing the field back only
+    /// when it copied: `src.f = unique(src.f)` in one instruction. Dest is
+    /// then `src`'s word.
     Cow {
         dest: ValueId,
         src: ValueId,
         unique: bool,
+        field: Option<u32>,
     },
     /// `UnboxValue tag`: the payload of `src` when it is a box of `tag`
     /// (the default word for another box); any other word as it is. A

@@ -3134,7 +3134,15 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
                 loc,
             });
         }
-        MirInst::Cow { dest, src, unique } => {
+        MirInst::Cow { dest, src, field: Some(index), .. } => {
+            let (d, o) = (regs[dest.index()], regs[src.index()]);
+            let index = u16::try_from(*index).map_err(|_| LowerError::Refused("cow field index".into()))?;
+            out.push(IlOp::from_plain_byte(Byte::new(Instruction::Cow).with_operand_u32(common::dense::pack_cow_field(o, index)), loc));
+            if d != o {
+                out.push(move_op(d, o));
+            }
+        }
+        MirInst::Cow { dest, src, unique, field: None } => {
             emit_dense_push(out, &[*src], regs, scratch, loc)?;
             out.push(IlOp::from_plain_byte(Byte::new(Instruction::Cow).with_operand_u32(u32::from(*unique)), loc));
             out.push(IlOp::StorePop {
@@ -3970,6 +3978,7 @@ fn gather_window(func: &MirFunc, self_entry: Option<Label>) -> u8 {
                 MirInst::Alloc { elems, .. } => elems.len(),
                 // Format string plus args, pushed like call args.
                 MirInst::Format { args, .. } => args.len() + 1,
+                MirInst::Cow { field: Some(_), .. } => 0,
                 MirInst::Stringify { .. } | MirInst::Cow { .. } | MirInst::Unbox { .. } | MirInst::Print { .. } | MirInst::FreeEarly { .. } | MirInst::Panic { .. } => 1,
                 MirInst::StrEq { .. } => 2,
                 _ => 0,

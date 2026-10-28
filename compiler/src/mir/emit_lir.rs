@@ -649,6 +649,8 @@ fn writes_memory(inst: &MirInst) -> bool {
             | MirInst::Print { .. }
             | MirInst::FreeEarly { .. }
             | MirInst::Panic { .. }
+            // A share marks the object; a unique may copy it.
+            | MirInst::Cow { .. }
     )
 }
 
@@ -1610,7 +1612,18 @@ fn emit_stored(
                 });
             }
         }
-        MirInst::Cow { dest, src, unique } => {
+        MirInst::Cow { dest, src, field: Some(index), .. } => {
+            emit_cow_field_stack(out, *src, *index, func, plan, regs, pool, loc)?;
+            if plan.need_slot[dest.index()] {
+                out.push(IlOp::StorePop {
+                    slot: u32::from(regs[dest.index()]),
+                    loc,
+                });
+            } else {
+                out.push(IlOp::Pop { loc });
+            }
+        }
+        MirInst::Cow { dest, src, unique, field: None } => {
             emit_stack(out, *src, func, plan, regs, pool, loc)?;
             out.push(IlOp::from_plain_byte(Byte::new(Instruction::Cow).with_operand_u32(u32::from(*unique)), loc));
             if plan.need_slot[dest.index()] {
@@ -1884,6 +1897,28 @@ fn emit_heap_field_store(args: EmitHeapFieldStoreArgs<'_>) -> Result<(), LowerEr
     emit_stack(out, object, func, plan, regs, pool, loc)?;
     out.push(IlOp::SetField { index: Some(index), loc });
     Ok(())
+}
+
+/// A field-mode `Cow` on the stack: `obj.f = unique(obj.f)` as HIR
+/// emission makes it, leaving the object on the stack.
+#[allow(clippy::too_many_arguments)]
+fn emit_cow_field_stack(
+    out: &mut Vec<IlOp>,
+    object: ValueId,
+    index: u32,
+    func: &MirFunc,
+    plan: &EmitPlan,
+    regs: &[u8],
+    pool: &mut Vec<u64>,
+    loc: DebugLoc,
+) -> Result<(), LowerError> {
+    emit_stack(out, object, func, plan, regs, pool, loc)?;
+    out.push(IlOp::LoadField { index, loc });
+    out.push(IlOp::from_plain_byte(Byte::new(Instruction::Cow).with_operand_u32(1), loc));
+    emit_stack(out, object, func, plan, regs, pool, loc)?;
+    out.push(IlOp::SetField { index: Some(index), loc });
+    out.push(IlOp::Pop { loc });
+    emit_stack(out, object, func, plan, regs, pool, loc)
 }
 
 fn emit_stack(
@@ -2241,7 +2276,8 @@ fn emit_stack(
             out.push(IlOp::from_plain_byte(Byte::new(Instruction::STRINGIFY), loc));
             Ok(())
         }
-        MirInst::Cow { src, unique, .. } => {
+        MirInst::Cow { src, field: Some(index), .. } => emit_cow_field_stack(out, *src, *index, func, plan, regs, pool, loc),
+        MirInst::Cow { src, unique, field: None, .. } => {
             emit_stack(out, *src, func, plan, regs, pool, loc)?;
             out.push(IlOp::from_plain_byte(Byte::new(Instruction::Cow).with_operand_u32(u32::from(*unique)), loc));
             Ok(())
