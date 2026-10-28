@@ -19,7 +19,7 @@ User-facing language docs live in
 There is no in-repo user manual to update here; cookbook / types pages there
 should cite this note when those repos take the Q1–Q5 surface. In-repo
 cookbook for Q5 is the section below plus
-[`.cursor/skills/coil-language`](../../.cursor/skills/coil-language/SKILL.md).
+[`.claude/skills/coil-language`](../../.claude/skills/coil-language/SKILL.md).
 
 ## Locked table
 
