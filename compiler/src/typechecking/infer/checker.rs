@@ -3832,6 +3832,14 @@ impl Checker {
             .or_insert_with(|| target_ty.clone());
         let val_ty = self.infer(value);
         let op_name = Self::compound_op_name(*op);
+        // `b -= 1` checks like `b = b - 1`: the literal takes the target's
+        // `byte` type (#2093); a shift count stays an `int`.
+        let val_ty = if matches!(op, parser::ast::AssignOp::Shl | parser::ast::AssignOp::Shr) {
+            val_ty
+        } else {
+            let tp = apply_ty_prune(&self.subst, &target_ty);
+            self.coerce_literal_operand_to_byte(&tp, value, &val_ty)
+        };
         let tp = apply_ty_prune(&self.subst, &target_ty);
         let vp = apply_ty_prune(&self.subst, &val_ty);
         if crate::typechecking::aggregate_arith::is_matrix_ty(&tp)
@@ -6819,6 +6827,8 @@ impl Checker {
     ) -> Ty {
         let lt = Self::peel_comparison_ty(&self.infer(lhs));
         let rt = Self::peel_comparison_ty(&self.infer(rhs));
+        // `b == "/"`, `b == 48`: a literal next to a `byte` compares as one.
+        let (lt, rt) = self.coerce_byte_literal_operands(lhs, rhs, lt, rt);
         let lt = apply_ty_prune(&self.subst, &lt);
         let rt = apply_ty_prune(&self.subst, &rt);
         if crate::typechecking::aggregate_arith::is_matrix_ty(&lt)
@@ -6837,15 +6847,6 @@ impl Checker {
         if self.cmp_scalar_enum_with_backing(&lt, &rt) {
             return boolean();
         }
-        // `b == "/"`, single-byte string literal compares as `byte`.
-        if Self::is_byte_ty(&lt) && Self::is_string_ty(&rt) {
-            if self.try_mark_string_literal_as_byte(rhs) {
-                return boolean();
-            }
-        } else if Self::is_byte_ty(&rt) && Self::is_string_ty(&lt)
-            && self.try_mark_string_literal_as_byte(lhs) {
-                return boolean();
-            }
         let unified = self.unify(&lt, &rt, &range, "comparison operands");
         let pruned = apply_ty_prune(&self.subst, &unified);
         if class != "Eq" && !matches!(&pruned, Ty::Var(_)) {
@@ -7101,6 +7102,13 @@ impl Checker {
     ) -> Ty {
         let lt = self.infer(lhs);
         let rt = self.infer(rhs);
+        // A shift count is an `int` whatever `x` is, so only the other
+        // operators take a literal as a `byte` (#2093).
+        let (lt, rt) = if matches!(op, "<<" | ">>") {
+            (lt, rt)
+        } else {
+            self.coerce_byte_literal_operands(lhs, rhs, lt, rt)
+        };
         if op == "+" {
             let lp = apply_ty_prune(&self.subst, &lt);
             let rp = apply_ty_prune(&self.subst, &rt);
@@ -10133,6 +10141,80 @@ impl Checker {
                 // `Vec<byte>` accepts `[byte; N]` via array length flexibility.
                 crate::typechecking::ty::array_fixed(crate::typechecking::ty::byte(), bytes.len())
             }
+        }
+    }
+
+    /// The operand types of a binary operator after a literal next to a
+    /// `byte` peer takes that peer's type (#2093): `b - 32`, `48 == b`,
+    /// `b - "0"`. See [`Self::coerce_literal_operand_to_byte`].
+    fn coerce_byte_literal_operands(
+        &mut self,
+        lhs: &Output,
+        rhs: &Output,
+        lt: Ty,
+        rt: Ty,
+    ) -> (Ty, Ty) {
+        let lp = apply_ty_prune(&self.subst, &lt);
+        let rp = apply_ty_prune(&self.subst, &rt);
+        if Self::is_byte_ty(&lp) {
+            let rt = self.coerce_literal_operand_to_byte(&lp, rhs, &rt);
+            (lt, rt)
+        } else if Self::is_byte_ty(&rp) {
+            let lt = self.coerce_literal_operand_to_byte(&rp, lhs, &lt);
+            (lt, rt)
+        } else {
+            (lt, rt)
+        }
+    }
+
+    /// `operand`'s type next to a `peer` operand: when the peer is a
+    /// `byte` and the operand an `int` literal or a single-byte string
+    /// literal, the operand types as `byte`, the rule an expected `byte`
+    /// applies in a `let`, an argument or a return. An `int` literal
+    /// outside 0..=255 is E0102; anything else keeps `ty` (a non-literal
+    /// `int` stays a mismatch).
+    fn coerce_literal_operand_to_byte(&mut self, peer: &Ty, operand: &Output, ty: &Ty) -> Ty {
+        if !Self::is_byte_ty(peer) {
+            return ty.clone();
+        }
+        let actual = apply_ty_prune(&self.subst, ty);
+        let byte = crate::typechecking::ty::byte();
+        if Self::is_int_ty(&actual) {
+            return match Self::byte_literal_coercion(operand) {
+                Ok(()) => {
+                    self.retarget_literal_operand(operand, &byte);
+                    byte
+                }
+                Err(Some(n)) => self.error_with_help(
+                    ErrorCode::TypeMismatch,
+                    format!("byte literal out of range: `{n}` is not in 0..=255"),
+                    operand.0.into_range(),
+                    Some("a `byte` must be an integer between 0 and 255".to_string()),
+                ),
+                Err(None) => ty.clone(),
+            };
+        }
+        if Self::is_string_ty(&actual) && self.try_mark_string_literal_as_byte(operand) {
+            self.retarget_literal_operand(operand, &byte);
+            return byte;
+        }
+        ty.clone()
+    }
+
+    /// Retarget a literal operand's codegen type, through the `(…)` /
+    /// one-item fragment wrappers around it, so HIR reads the literal
+    /// (and each wrapper) as `ty`.
+    fn retarget_literal_operand(&mut self, operand: &Output, ty: &Ty) {
+        self.retarget_node_ty(operand.0.start, operand.0.end, ty.clone());
+        match operand.1.as_ref() {
+            Expression::Expr(inner)
+            | Expression::Group(inner)
+            | Expression::Statement(inner)
+            | Expression::ExprStatement(inner) => self.retarget_literal_operand(inner, ty),
+            Expression::Fragment(items) if items.len() == 1 => {
+                self.retarget_literal_operand(&items[0], ty)
+            }
+            _ => {}
         }
     }
 
