@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use common::Value;
 
-use crate::math_libm::{MATH_LIBM_M1_WIRING, MATH_LIBM_WIRING};
+use crate::math_libm::{MATH_LIBM_M1_REMOVED, MATH_LIBM_REMOVED};
 use crate::{
     packed_dot, packed_matmul, packed_matrix_neg, packed_matrix_zip, packed_vec_arith, FfiError,
     FfiSignature, FfiType, HostClosureFn, HostOp, NativeFn, CLOCK_WIRING, ENV_WIRING, FS_WIRING,
@@ -84,7 +84,7 @@ pub fn build_standard_host_natives(
     // Append-only after clocks: `Result<(), IoError>` pack probe (no IO).
     push_result_unit_probe(&mut out, &mut register_id);
     // Append-only after result_unit_probe: M1 prelude::math expansion.
-    push_math_libm_wiring(&mut out, &mut register_id, MATH_LIBM_M1_WIRING);
+    push_removed_math_stubs(&mut out, &mut register_id, MATH_LIBM_M1_REMOVED);
     // Append-only after math: MIR saxpy-reduce pack (compiler rewrite only).
     push_simd_axpy_reduce(&mut out, &mut register_id);
     push_thread_spawn_shared(&mut out, &mut register_id);
@@ -572,22 +572,26 @@ fn push_wiring(
 }
 
 fn push_math_libm(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
-    push_math_libm_wiring(out, register_id, MATH_LIBM_WIRING);
+    push_removed_math_stubs(out, register_id, MATH_LIBM_REMOVED);
 }
 
-fn push_math_libm_wiring(
+/// Retired `prelude::math` slots: float-typed panic stubs so their ids and
+/// every later id stay put.
+fn push_removed_math_stubs(
     out: &mut Vec<Arc<dyn NativeFn>>,
     register_id: &mut impl FnMut(&str, usize),
-    wiring: &[(&str, usize, crate::HostValueFn)],
+    removed: &'static [(&'static str, usize)],
 ) {
-    for &(name, arity, host) in wiring {
+    for &(name, arity) in removed {
         let args = vec![FfiType::Float; arity];
         let sig = FfiSignature::from_parts(name.to_string(), args, FfiType::Float)
-            .expect("math libm native signature");
+            .unwrap_or_else(|_| panic!("removed math stub signature `{name}`"));
         let id = out.len();
         register_id(name, id);
-        out.push(Arc::new(HostClosureFn::new(sig, move |heap, args| {
-            Ok(Some(host(heap, args)))
+        out.push(Arc::new(HostClosureFn::new(sig, move |_heap, _args| {
+            panic!(
+                "removed HostInvoke `{name}`: prelude::math moved to coil-stdlib's `math` module; recompile with `use math::{{…}};`"
+            );
         })));
     }
 }
