@@ -117,7 +117,8 @@ fn the_wall_timeout_reports_as_a_json_error_event() {
         std::thread::sleep(Duration::from_millis(50));
     }
     let out = child.wait_with_output().expect("output");
-    let stdout = String::from_utf8_lossy(&out.stdout).replace('\\', "/");
+    // JSON escapes a Windows path separator as `\\`.
+    let stdout = String::from_utf8_lossy(&out.stdout).replace("\\\\", "/").replace('\\', "/");
     assert_eq!(out.status.code(), Some(124), "stdout={stdout}");
     let error = stdout.lines().find(|l| l.contains("\"event\":\"error\"")).unwrap_or_else(|| panic!("no error event in {stdout}"));
     assert!(error.contains("tests/spin.hy: spins"), "event={error}");
