@@ -88,6 +88,21 @@ beat Rust/`memcmp` slice equality.
   the old whole-function vectoriser took) 22 300 → 5 150, the same sum
   after an early return 66 900 → 5 150, `dot` 36 300 → 23 900, a
   scaled store 99 300 → 32 300.
+- Archive 6.3 adds the reductions through one `if`
+  (`vectorize::match_cond_reduce_on`): a select `if x > m { m = x; }`
+  (`<`, `<=`, `>=`, either operand order, int or float) folds with
+  `REDUCE_TAKE + pred`, lane by lane in order, so ties, NaN and signed
+  zeros come out as the scalar loop's; a conditional add
+  `if c { n = n + t; }` on `int` adds `c ? t : 0`, the compare as `0` /
+  `1` lanes (`VBin` `ICMP` / `FCMP + pred`) times `t`. Every lane runs
+  the vector body, so the value a select takes is the one the body
+  compared (an arm may compute it again), a conditional term cannot trap
+  (a load, an invariant or the index), and a float compare is used only
+  as written (taken on its false side it would differ at a NaN). Bit
+  folds `REDUCE_AND` / `OR` / `XOR` and bit lanes (`VBin` `IAND64` /
+  `IOR64` / `IXOR64`) cover `h = h ^ x[i]` and `out[i] = a[i] & m`.
+  Same probe: max 68 000 → 5 900, count of one value 69 000 → 19 600,
+  xor 63 000 → 7 500.
 - String intern table lookup (`Heap` hash map) uses `bytes::eq` for key
   compares.
 - `packed_matrix_zip` / `packed_matrix_neg` also lower matrix compares

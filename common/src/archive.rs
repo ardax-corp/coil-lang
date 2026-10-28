@@ -164,6 +164,12 @@ pub const ARCHIVE_MAJOR: u16 = 6;
 ///      bodies of at most 63 words). Older runtimes would read the flag
 ///      as body length.
 ///
+/// Major 6 / minor 3: `VBin` int bit ops (`simd::IAND64` / `IOR64` /
+/// `IXOR64`) and lane compares (`simd::ICMP` / `FCMP` + pred, `0` / `1`
+/// lanes); `VReduce` folds `REDUCE_AND` / `OR` / `XOR` and
+/// `REDUCE_TAKE + pred` (min / max). Older runtimes read the new kinds
+/// as zeros and the new folds as adds.
+///
 /// Major 6 / minor 2: `VLoop` (the last opcode), a counted map or
 /// reduce loop over 8 lanes that runs its body words without dispatch.
 /// Older runtimes do not know it.
@@ -189,7 +195,7 @@ pub const ARCHIVE_MAJOR: u16 = 6;
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.
-pub const ARCHIVE_MINOR: u16 = 2;
+pub const ARCHIVE_MINOR: u16 = 3;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -1266,9 +1272,9 @@ mod tests {
     #[test]
     fn archive_version_matches_current_abi() {
         assert_eq!(ARCHIVE_MAJOR, 6);
-        assert_eq!(ARCHIVE_MINOR, 2);
-        assert_eq!(ARCHIVE_VERSION, pack_archive_version(6, 2));
-        assert_eq!(format_archive_version(ARCHIVE_VERSION), "6.2");
+        assert_eq!(ARCHIVE_MINOR, 3);
+        assert_eq!(ARCHIVE_VERSION, pack_archive_version(6, 3));
+        assert_eq!(format_archive_version(ARCHIVE_VERSION), "6.3");
     }
 
     #[test]
