@@ -258,7 +258,7 @@ pub(super) fn slot_extent(b: &Byte, constants: &[u64]) -> Option<usize> {
         VBin => one(b.dense_abc_parts().2),
         VReduce => one(b.dense_abc_parts().1),
         VMask => one(b.dense_move_parts().0),
-        VScan => {
+        VScan | VLoop => {
             let (_, d, from, h) = b.dense_abc_parts();
             max(&[d, from, h])
         }
@@ -1580,7 +1580,7 @@ fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Opt
         VLoad | VStore | VBin | VMove | VFma => {}
         VReduce => st.set(b.dense_abc_parts().1, false)?,
         VMask => st.set(b.dense_move_parts().0, false)?,
-        VScan => st.set(b.dense_abc_parts().1, false)?,
+        VScan | VLoop => st.set(b.dense_abc_parts().1, false)?,
         DensePush => {
             let (arity, base) = b.dense_move_parts();
             for i in 0..arity {

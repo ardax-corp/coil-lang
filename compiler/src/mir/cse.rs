@@ -618,7 +618,8 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         | MirInst::Stringify { .. }
         | MirInst::Unbox { .. }
         | MirInst::StrEq { .. }
-        | MirInst::ByteScan { .. } => {
+        | MirInst::ByteScan { .. }
+        | MirInst::VecLoop { .. } => {
             return None
         }
     })

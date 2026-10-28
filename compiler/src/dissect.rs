@@ -320,6 +320,11 @@ fn format_operands(
             };
             format!("r{dest} = scan(r{from} {to} r{bound}, body={})", n & common::simd::SCAN_LEN)
         }
+        Instruction::VLoop => {
+            let (n, dest, from, to) = byte.dense_abc_parts();
+            let pos = if n & common::simd::LOOP_POS != 0 { " pos" } else { "" };
+            format!("r{dest} loop(r{from} .. r{to}{pos}, body={})", n & common::simd::LOOP_LEN)
+        }
         Instruction::TagArrayKind => format!("kind={}", byte.operand_u32()),
         Instruction::MakeArrayK => format!("arity={} kind={}", byte.make_arity(), byte.operand_u32() >> 16),
         Instruction::CodePtr | Instruction::MakePolyFn => {

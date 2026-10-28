@@ -66,16 +66,28 @@ beat Rust/`memcmp` slice equality.
   broadcast, and unary `-` when static length ≥ 8; smaller shapes still unroll)
 - MIR P12 — `simd_axpy_reduce` HostInvoke (**136**) from specialized counted
   saxpy-reduce loops (`compiler/src/mir/pack.rs`). Compiler rewrite only.
-- MIR S5a V0 — `VLoad` / `VStore` / `VBin` / `VMove` on stride-1 numeric
-  stores (`compiler/src/mir/vectorize.rs`). VM glue in `machine/src/simd.rs`
-  calls `coil_simd::lanes` only.
-- MIR S5b V1 — `VReduce` (left-fold add into a scalar slot) and `VFma`
-  (mul-then-add, two IEEE roundings). The counted loop may sit beside
-  other code, start at a non-zero invariant index, and use `a[i + k]`
-  or `s = s + i`. `VReduce`'s low byte selects add (`0`) or mul (`1`).
-  A straight chain of counted loops in one function is lowered in
-  order. Prove: `scan` in `vec_scan.hy`, saxpy store in `vec_axpy.hy`,
-  `examples/perf/vec_widen.hy`.
+- MIR `vec_loops` (`compiler/src/mir/vec_loop.rs`, dense tier) — a
+  counted stride-1 store loop (`a[i + k] = value(i)`) or add / mul
+  reduction (`s = s ⊕ term(i)`) over `i64` / `f64`, anywhere in a
+  function, becomes one `VecLoop` MIR instruction and one `VLoop` op
+  (archive 6.2). `vectorize.rs` matches the loop and reads its body as a
+  tree: loads `a[i + k]`, splats of invariants, the index, `+ - * /`,
+  negation, an int-to-float cast of an invariant, and `VFma`
+  (mul-then-add, two IEEE roundings). A guard in front of the loop checks
+  every read and write of lanes `i0 .. n` is in range; `VLoop` runs the
+  whole 8-lane blocks with its body words (`VLoad` / `VStore` / `VBin` /
+  `VFma` / `VReduce`) decoded once and no dispatch per block, and the
+  scalar loop takes the last lanes. A failed guard runs the loop as
+  written. `VReduce` folds left (float sums keep their order; an int
+  fold traps on the first partial that overflows). Store loops keep the
+  scalar order however the arrays alias: every read before the first
+  store, one store offset `S`, no read at an offset below `S`. VM glue
+  in `machine/src/simd.rs` calls `coil_simd::lanes` only.
+  `examples/perf/vec_reduce.hy`, 8192 elements, release, ns per call
+  (main `435021f` → after): `sum` (the function is only the loop, which
+  the old whole-function vectoriser took) 22 300 → 5 150, the same sum
+  after an early return 66 900 → 5 150, `dot` 36 300 → 23 900, a
+  scaled store 99 300 → 32 300.
 - String intern table lookup (`Heap` hash map) uses `bytes::eq` for key
   compares.
 - `packed_matrix_zip` / `packed_matrix_neg` also lower matrix compares

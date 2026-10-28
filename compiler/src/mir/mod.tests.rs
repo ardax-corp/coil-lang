@@ -24,24 +24,21 @@ fn fn_ops<'a>(bc: &'a [Byte], symbols: &[common::FnDebugSym], name: &str) -> &'a
     &bc[start..end]
 }
 
-/// Remainder `i += 1` is `DenseConst ; DenseBin` (COI-386 X1).
-fn assert_vectorize_tail_dense_const(ops: &[Byte], fn_name: &str) {
+/// The loop runs as one `VLoop`, its body words right after it.
+fn assert_vec_loop(ops: &[Byte], fn_name: &str) {
     let names: Vec<_> = ops.iter().map(|b| b.bytecode().mnemonic()).collect();
-    let stack_iv = ops.windows(3).any(|w| {
-        *w[0].bytecode() == Instruction::CONST
-            && matches!(*w[1].bytecode(), Instruction::STORE | Instruction::StorePop)
-            && *w[2].bytecode() == Instruction::DenseBin
-    });
+    let at = ops.iter().position(|b| *b.bytecode() == Instruction::VLoop);
+    let Some(at) = at else {
+        panic!("{fn_name}: expected a VLoop; opcodes={names:?}");
+    };
+    let n = usize::from(ops[at].dense_abc_parts().0 & common::simd::LOOP_LEN);
+    assert!(n > 0, "{fn_name}: empty VLoop body; opcodes={names:?}");
     assert!(
-        !stack_iv,
-        "COI-386 {fn_name}: tail i+=1 must not be CONST; STORE; DenseBin; opcodes={names:?}"
-    );
-    let dense_iv = ops.windows(2).any(|w| {
-        *w[0].bytecode() == Instruction::DenseConst && *w[1].bytecode() == Instruction::DenseBin
-    });
-    assert!(
-        dense_iv,
-        "COI-386 {fn_name}: expected DenseConst; DenseBin on remainder IV; opcodes={names:?}"
+        ops[at + 1..at + 1 + n].iter().all(|b| matches!(
+            *b.bytecode(),
+            Instruction::VLoad | Instruction::VStore | Instruction::VBin | Instruction::VFma | Instruction::VReduce
+        )),
+        "{fn_name}: VLoop body must be V* words; opcodes={names:?}"
     );
 }
 
@@ -811,7 +808,7 @@ fn main() {
         "CALL target must be the V* prelude, not the loop header ({})",
         op.mnemonic()
     );
-    assert_vectorize_tail_dense_const(fn_ops(&bc, &symbols, "fill"), "fill");
+    assert_vec_loop(fn_ops(&bc, &symbols, "fill"), "fill");
 }
 
 #[test]
@@ -886,7 +883,7 @@ fn main() {
     vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
     assert!(!vm.panicked(), "scan reduce checksum");
     let symbols = p.program_debug().fn_symbols;
-    assert_vectorize_tail_dense_const(fn_ops(&bc, &symbols, "scan"), "scan");
+    assert_vec_loop(fn_ops(&bc, &symbols, "scan"), "scan");
 }
 
 #[test]

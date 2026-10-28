@@ -268,6 +268,10 @@ fn specialize_side(
     if opts.mir_loop && crate::mir::bulk_push(&mut func) > 0 {
         check_after(&func, "bulk_push");
     }
+    // Counted map and reduce loops run 8 lanes at a time in one op.
+    if opts.mir_loop && crate::mir::vec_loops(&mut func) > 0 {
+        check_after(&func, "vec_loops");
+    }
     super::deopt::fill_deopt_maps(&mut func);
     paint_index_dest_from_uses(&mut func);
     let stores_ssa = func
@@ -286,8 +290,6 @@ fn specialize_side(
         return refuse_dense("dense abi");
     };
     let entry = official_entry.or(labels.first);
-    let named_hi = super::gates::max_named_label(from_hir).max(labels.head.iter().map(|&Label(id)| id).max().unwrap_or(0));
-    let label_hi = named_hi.max(official_entry.map(|Label(id)| id).unwrap_or(0));
     let (remap, deopt) = super::emit::dense_sidecars(&func, entry);
     side.debug_slot_remap = remap;
     side.deopt = Some(deopt);
@@ -295,11 +297,6 @@ fn specialize_side(
         && let Some(packed) = super::pack::try_axpy_pack(&func, entry, pool)
     {
         return Some((packed, abi));
-    }
-    if opts.mir_loop
-        && let Some(vecd) = super::vectorize::try_vectorize(&func, entry, pool, label_hi)
-    {
-        return Some((vecd, abi));
     }
     capture_mir(name, "dense", &func);
     let out = match emit_dense(&func, entry, pool, has_alloc) {
