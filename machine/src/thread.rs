@@ -11,6 +11,7 @@ use std::thread;
 
 use parking_lot::RawMutex;
 use parking_lot::lock_api::RawMutex as RawMutexOps;
+use parking_lot::lock_api::RawMutexTimed as _;
 
 use crate::AddrHashBuilder;
 use crate::task::ThreadWaiters;
@@ -371,6 +372,10 @@ pub struct JoinState {
     join_handle: Mutex<Option<thread::JoinHandle<()>>>,
     detached: AtomicBool,
     joined: AtomicBool,
+    /// Set once the result was stored and never cleared, so a watcher can
+    /// tell a finished job from one still running after the result was
+    /// taken ([`Self::is_done`]).
+    done: AtomicBool,
     shared_epoch: Option<Arc<crate::shared_heap::SharedHeapEpoch>>,
     /// Tasks waiting in `join` (woken when the result is stored).
     waiters: ThreadWaiters,
@@ -389,6 +394,7 @@ impl JoinState {
             join_handle: Mutex::new(None),
             detached: AtomicBool::new(false),
             joined: AtomicBool::new(false),
+            done: AtomicBool::new(false),
             shared_epoch: None,
             waiters: ThreadWaiters::default(),
         }
@@ -407,6 +413,7 @@ impl JoinState {
     pub(crate) fn store_result(&self, result: Result<PortableValue, ThreadErrorTag>) {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         g.result = Some(result);
+        self.done.store(true, Ordering::SeqCst);
         self.finished.notify_all();
         drop(g);
         self.waiters.wake_all();
@@ -431,9 +438,23 @@ impl JoinState {
                 g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
                 continue;
             }
-            g = self.finished.wait(g).unwrap_or_else(|e| e.into_inner());
+            drop(g);
+            help_while_blocked();
+            g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if g.result.is_none() {
+                g = self
+                    .finished
+                    .wait_timeout(g, HELP_SLICE)
+                    .unwrap_or_else(|e| e.into_inner())
+                    .0;
+            }
         }
         g.result.take().unwrap_or(Err(ThreadErrorTag::JoinFailed))
+    }
+
+    /// True once the job stored its result (taken since or not).
+    pub(crate) fn is_done(&self) -> bool {
+        self.done.load(Ordering::SeqCst)
     }
 
     /// Non-blocking take when the worker has finished.
@@ -506,7 +527,10 @@ impl MutexInner {
         match self.waiters.park_unless(|| self.lock.try_lock()) {
             Some(locked) => locked,
             None => {
-                self.lock.lock();
+                // The holder may be a queued job (see `help_while_blocked`).
+                while !self.lock.try_lock_for(HELP_SLICE) {
+                    help_while_blocked();
+                }
                 true
             }
         }
@@ -1636,7 +1660,13 @@ fn try_host_recv(heap: &mut Heap, rx: Value) -> Result<Value, ThreadErrorTag> {
             q = inner.queue.lock().unwrap();
             continue;
         }
-        q = inner.not_empty.wait(q).unwrap();
+        // The sender may be a queued job (see `help_while_blocked`).
+        drop(q);
+        help_while_blocked();
+        q = inner.queue.lock().unwrap();
+        if q.is_empty() && !inner.is_closed() {
+            q = inner.not_empty.wait_timeout(q, HELP_SLICE).unwrap().0;
+        }
     }
 }
 
@@ -1645,6 +1675,23 @@ fn try_host_recv(heap: &mut Heap, rx: Value) -> Result<Value, ThreadErrorTag> {
 fn help_run_queued_job() -> bool {
     let reactor = HOST_STATE.with(|c| c.borrow().as_ref().and_then(|s| s.cpu_reactor.clone()));
     reactor.is_some_and(|r| r.help_local_once())
+}
+
+/// How long an OS-level host wait sleeps between runs of [`help_while_blocked`].
+const HELP_SLICE: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// Run queued `thread::spawn` jobs on spare threads before an OS-level
+/// block in a host wait (`recv`, `lock`, a join without a reactor). A
+/// thread on a pool worker queues the threads it spawns on that worker's
+/// own deque, so a wait for one of them with every other executor busy or
+/// waiting the same way would never end. Off this stack, as an IO wait
+/// helps (#869): a job run under the wait could wait on the frame it sits
+/// on. A no-op without a reactor (a bare `Machine`) or nothing queued.
+fn help_while_blocked() {
+    let reactor = HOST_STATE.with(|c| c.borrow().as_ref().and_then(|s| s.cpu_reactor.clone()));
+    if let Some(r) = reactor {
+        r.help_off_stack();
+    }
 }
 
 pub fn host_try_send(heap: &mut Heap, args: &[Value]) -> Value {

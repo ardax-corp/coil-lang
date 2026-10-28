@@ -38,6 +38,8 @@ pub const DEFAULT_CONTRACT_RUNS: u32 = 100;
 
 /// Default `--wall-timeout` (seconds per mutant).
 pub const DEFAULT_WALL_TIMEOUT: u64 = 60;
+/// Default `coil test --wall-timeout` (seconds per case).
+pub const DEFAULT_CASE_WALL_TIMEOUT: u64 = 600;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -79,6 +81,10 @@ struct TestCli {
     /// Run cases on N reactor workers (default: available CPUs)
     #[arg(short = 'j', long = "jobs", value_name = "N", value_parser = parse_jobs)]
     jobs: Option<usize>,
+    /// Stop the run (exit 124) when a case has run for S seconds (default
+    /// 600; 0: never)
+    #[arg(long, value_name = "S", default_value_t = DEFAULT_CASE_WALL_TIMEOUT)]
+    wall_timeout: u64,
     /// Also print passing cases' output (failures always show it)
     #[arg(long)]
     show_output: bool,
@@ -237,6 +243,7 @@ fn parse_test(args: &[String]) -> Result<Parsed, String> {
         } else {
             DocTests::On
         },
+        wall_timeout: cli.wall_timeout,
     })?;
     Ok(Parsed::Run(config, test))
 }
@@ -272,6 +279,8 @@ fn parse_mutate(expanded: &[String], original: &[String]) -> Result<Parsed, Stri
         contract_runs: cli.contract_runs,
         // Mutants are scored against test cases; doc examples are not run.
         doc_tests: DocTests::Off,
+        // The parent kills a mutant's worker after `--wall-timeout`.
+        wall_timeout: 0,
     })?;
     let forwarded = original.get(2..).unwrap_or(&[]).to_vec();
     let operators = match cli.operators {
@@ -317,6 +326,8 @@ struct RunParts {
     per_test_out: Option<PathBuf>,
     contract_runs: u32,
     doc_tests: DocTests,
+    /// Seconds per case before the run stops; 0: never.
+    wall_timeout: u64,
 }
 
 fn assemble(parts: RunParts) -> Result<(ReportConfig, Box<TestOptions>), String> {
@@ -363,6 +374,8 @@ fn assemble(parts: RunParts) -> Result<(ReportConfig, Box<TestOptions>), String>
                 Report::Human
             },
             doc_tests: parts.doc_tests,
+            wall_timeout: (parts.wall_timeout != 0)
+                .then(|| std::time::Duration::from_secs(parts.wall_timeout)),
         }),
     ))
 }
