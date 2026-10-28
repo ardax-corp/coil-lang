@@ -51,6 +51,21 @@ impl Heap {
         (obj.generation() & GEN_YOUNG != 0).then_some(obj)
     }
 
+    /// Every live object: the old chunks' slots, then the written slots of
+    /// the young ones. Unlike [`Heap::objects`] it never reads a nursery
+    /// chunk's unwritten tail or a spare chunk, which under `gc-stress` (a
+    /// minor after every allocation) can be hundreds of mostly empty held
+    /// chunks walked at every collection.
+    pub(super) fn live_objects(&self) -> Vec<Object> {
+        // The sweep's walk: every chunk but the nursery's.
+        let cur = crate::memory::slab::SlotCursor::sweep();
+        let mut out: Vec<Object> = super::HeapIter { slab: &self.slab, cur }.collect();
+        for (_, first, end, size) in self.slab.young_spans() {
+            out.extend(slots(first, end, size).filter_map(|addr| unsafe { Object::from_header(addr) }));
+        }
+        out
+    }
+
     /// Whether any young chunk is in use.
     pub fn has_young(&self) -> bool {
         self.slab.has_young_chunks()

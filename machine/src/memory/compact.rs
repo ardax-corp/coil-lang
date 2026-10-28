@@ -222,7 +222,7 @@ impl Heap {
         if !everything && !worth_it(self.slab.free_slot_bytes(), slab_bytes) {
             return None;
         }
-        let live: Vec<Object> = self.objects().collect();
+        let live = self.live_objects();
 
         let mut pinned: AddrSet = vm_pins.iter().map(|a| a & !1).collect();
         for obj in &live {
@@ -349,7 +349,7 @@ impl Heap {
 
         // Rewrite precise interior references (old copies are skipped: they
         // are garbage from here on).
-        for obj in self.objects() {
+        for obj in self.live_objects() {
             if !fwd.contains_key(&obj.addr()) {
                 obj.rewrite_precise_refs(self, &fwd);
             }
@@ -369,7 +369,7 @@ impl Heap {
     #[cfg(feature = "gc-stress")]
     #[cold]
     pub fn verify_evacuation(&self, plan: &EvacPlan) {
-        for obj in self.objects() {
+        for obj in self.live_objects() {
             if plan.fwd.contains_key(&obj.addr()) {
                 continue;
             }
