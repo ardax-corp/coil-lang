@@ -74,6 +74,9 @@ pub struct Summary {
     /// itself (not only what it reaches) after it returns, other than
     /// through its result: what copy-on-write must share at the call.
     pub keeps: u64,
+    /// Bit `i`: the call hands parameter `i` itself to code not known here
+    /// (a trait method, a closure), which may keep it all the same.
+    pub opaque_args: u64,
     /// Bit `i`: the result may reach what parameter `i` reaches.
     pub returns: u64,
     /// The result may reach an object this call did not allocate, or one
@@ -136,6 +139,7 @@ impl Summary {
             param_only: 0,
             escapes: u64::MAX,
             keeps: 0,
+            opaque_args: if flags.contains(EffectFlags::UNKNOWN) { u64::MAX } else { 0 },
             returns: u64::MAX,
             shared_ret: true,
         }
@@ -1599,7 +1603,7 @@ impl Cx<'_> {
     fn body(&self, index: usize, summaries: &[Summary]) -> Summary {
         let w = self.walk(index, summaries, false);
         let (escapes, returns, shared_ret) = escape::summarize(self, &w);
-        let keeps = {
+        let (keeps, opaque_args) = {
             let body = &self.module.bodies[index];
             let lookup = |callee: &Callee, args: &[HirId]| match callee {
                 Callee::Named { name, def, .. } => Some(self.named(&w, name, *def)),
@@ -1608,13 +1612,14 @@ impl Cx<'_> {
             };
             let k = cow::keeps(self.module, body, &lookup);
             if std::env::var("COIL_COW_TRACE").is_ok() {
-                eprintln!("keeps {} = {k:b}", body.name);
+                eprintln!("keeps {} = {:b} opaque {:b}", body.name, k.0, k.1);
             }
             k
         };
         Summary {
             escapes,
             keeps,
+            opaque_args,
             returns,
             shared_ret,
             ..w.out
@@ -2445,6 +2450,7 @@ impl Cx<'_> {
             param_only: 0,
             escapes: u64::MAX,
             keeps: 0,
+            opaque_args: u64::MAX,
             returns: u64::MAX,
             shared_ret: true,
         })
@@ -2715,6 +2721,7 @@ impl Cx<'_> {
                     param_only: o.param_only & s.param_only,
                     escapes: o.escapes | s.escapes,
                     keeps: o.keeps | s.keeps,
+                    opaque_args: o.opaque_args | s.opaque_args,
                     returns: o.returns | s.returns,
                     shared_ret: o.shared_ret || s.shared_ret,
                 },
