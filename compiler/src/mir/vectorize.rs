@@ -104,7 +104,6 @@ pub(super) fn match_store_on(func: &MirFunc, lp: &super::licm::LoopInfo) -> Opti
         }
 
     let mut stores = Vec::new();
-    let mut stored_arrs = Vec::new();
     for inst in &func.block(body).insts {
         match inst {
             MirInst::StoreIndex {
@@ -118,14 +117,13 @@ pub(super) fn match_store_on(func: &MirFunc, lp: &super::licm::LoopInfo) -> Opti
                     return None;
                 }
                 let ty = store_ty(func, *value)?;
-                let vop = classify(func, *value, *iv, &lp.blocks, &stored_arrs)?;
+                let vop = classify(func, *value, *iv, &lp.blocks)?;
                 stores.push(StoreSpec {
                     array: *array,
                     value: vop,
                     ty,
                     index_off,
                 });
-                stored_arrs.push(*array);
             }
             MirInst::Index { .. }
             | MirInst::Bin { .. }
@@ -276,7 +274,7 @@ pub(super) fn match_reduce_on(func: &MirFunc, lp: &super::licm::LoopInfo) -> Opt
         }
     }
 
-    let term = classify(func, term_v, iv, &lp.blocks, &[])?;
+    let term = classify(func, term_v, iv, &lp.blocks)?;
     if region_has_barrier(func, &[header, body]) {
         return None;
     }
@@ -322,12 +320,14 @@ fn store_ty(func: &MirFunc, v: ValueId) -> Option<u8> {
     }
 }
 
+/// `v` as an 8-lane tree over the loop's index `iv`, or `None`. It does
+/// not look at aliasing between a store loop's arrays: `vec_loop` orders
+/// the reads and writes it accepts (`vec_loop::plan_loop`).
 fn classify(
     func: &MirFunc,
     v: ValueId,
     iv: ValueId,
     loop_blocks: &std::collections::HashSet<BlockId>,
-    stored: &[ValueId],
 ) -> Option<VOp> {
     if v == iv {
         return Some(VOp::Iota);
@@ -345,7 +345,6 @@ fn classify(
             if !is_invariant(func, *array, loop_blocks) {
                 return None;
             }
-            let _ = stored;
             let ty = store_ty(func, v)?;
             Some(VOp::Load {
                 array: *array,
@@ -362,9 +361,9 @@ fn classify(
         } => {
             if *op == MirBinOp::Add && matches!(ty, MirTy::I64 | MirTy::F64)
                 && let Some((a, b, c)) = split_fma(func, *lhs, *rhs) {
-                    let va = classify(func, a, iv, loop_blocks, stored)?;
-                    let vb = classify(func, b, iv, loop_blocks, stored)?;
-                    let vc = classify(func, c, iv, loop_blocks, stored)?;
+                    let va = classify(func, a, iv, loop_blocks)?;
+                    let vb = classify(func, b, iv, loop_blocks)?;
+                    let vc = classify(func, c, iv, loop_blocks)?;
                     return Some(VOp::Fma {
                         ty: store_ty(func, v)?,
                         a: Box::new(va),
@@ -373,8 +372,8 @@ fn classify(
                     });
                 }
             let kind = vbin_kind(*op, *ty)?;
-            let l = classify(func, *lhs, iv, loop_blocks, stored)?;
-            let r = classify(func, *rhs, iv, loop_blocks, stored)?;
+            let l = classify(func, *lhs, iv, loop_blocks)?;
+            let r = classify(func, *rhs, iv, loop_blocks)?;
             Some(VOp::Bin {
                 kind,
                 lhs: Box::new(l),
@@ -387,7 +386,7 @@ fn classify(
                 (MirUnaryOp::Neg, MirTy::F64) => simd::FNEG,
                 _ => return None,
             };
-            let s = classify(func, *src, iv, loop_blocks, stored)?;
+            let s = classify(func, *src, iv, loop_blocks)?;
             Some(VOp::Neg {
                 kind,
                 src: Box::new(s),
@@ -398,7 +397,7 @@ fn classify(
             src,
             ..
         } => {
-            let s = classify(func, *src, iv, loop_blocks, stored)?;
+            let s = classify(func, *src, iv, loop_blocks)?;
             Some(VOp::CastI2F(Box::new(s)))
         }
         _ => None,
@@ -582,7 +581,7 @@ pub(super) fn match_cond_reduce_on(func: &MirFunc, lp: &super::licm::LoopInfo) -
             return None;
         }
         // The value the body compared, not the `then` block's copy.
-        let term = classify(func, x, iv, &lp.blocks, &[])?;
+        let term = classify(func, x, iv, &lp.blocks)?;
         return Some(ReduceLoop { iv, iv_init, acc, n, term, ty, fold: simd::REDUCE_TAKE + pred(op) });
     }
     // Conditional add: `then` adds `t` to the accumulator.
@@ -593,15 +592,15 @@ pub(super) fn match_cond_reduce_on(func: &MirFunc, lp: &super::licm::LoopInfo) -
         return None;
     };
     let t = if *a == acc { *b } else if *b == acc { *a } else { return None };
-    let t = classify(func, t, iv, &lp.blocks, &[])?;
+    let t = classify(func, t, iv, &lp.blocks)?;
     if !matches!(t, VOp::Load { .. } | VOp::Splat { .. } | VOp::Iota) {
         return None;
     }
     let base = if *cmp_ty == MirTy::F64 { simd::FCMP } else { simd::ICMP };
     let mask = VOp::Bin {
         kind: base + pred(op),
-        lhs: Box::new(classify(func, *lhs, iv, &lp.blocks, &[])?),
-        rhs: Box::new(classify(func, *rhs, iv, &lp.blocks, &[])?),
+        lhs: Box::new(classify(func, *lhs, iv, &lp.blocks)?),
+        rhs: Box::new(classify(func, *rhs, iv, &lp.blocks)?),
     };
     let term = match t {
         VOp::Splat { v, .. } if as_const_i64(func, v) == Some(1) => mask,
