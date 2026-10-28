@@ -70,6 +70,10 @@ pub struct Summary {
     /// Bit `i`: the call may keep what its parameter `i` reaches after it
     /// returns, other than through its result ([`escape`]).
     pub escapes: u64,
+    /// Bit `i`: the call may keep the object passed as parameter `i`
+    /// itself (not only what it reaches) after it returns, other than
+    /// through its result: what copy-on-write must share at the call.
+    pub keeps: u64,
     /// Bit `i`: the result may reach what parameter `i` reaches.
     pub returns: u64,
     /// The result may reach an object this call did not allocate, or one
@@ -131,6 +135,7 @@ impl Summary {
             statics: false,
             param_only: 0,
             escapes: u64::MAX,
+            keeps: u64::MAX,
             returns: u64::MAX,
             shared_ret: true,
         }
@@ -1594,8 +1599,18 @@ impl Cx<'_> {
     fn body(&self, index: usize, summaries: &[Summary]) -> Summary {
         let w = self.walk(index, summaries, false);
         let (escapes, returns, shared_ret) = escape::summarize(self, &w);
+        let keeps = {
+            let body = &self.module.bodies[index];
+            let lookup = |callee: &Callee, args: &[HirId]| match callee {
+                Callee::Named { name, def, .. } => Some(self.named(&w, name, *def)),
+                Callee::Method { name } => self.method(&w, *args.first()?, name).map(|(s, _)| s),
+                Callee::Value(f) => self.fn_value(&w, *f),
+            };
+            cow::keeps(self.module, body, &lookup)
+        };
         Summary {
             escapes,
+            keeps,
             returns,
             shared_ret,
             ..w.out
@@ -2425,6 +2440,7 @@ impl Cx<'_> {
             statics: visible.contains(EffectFlags::HOST) || visible.contains(EffectFlags::HEAP_MUT),
             param_only: 0,
             escapes: u64::MAX,
+            keeps: u64::MAX,
             returns: u64::MAX,
             shared_ret: true,
         })
@@ -2694,6 +2710,7 @@ impl Cx<'_> {
                     // Discharged only where every impl's bits are.
                     param_only: o.param_only & s.param_only,
                     escapes: o.escapes | s.escapes,
+                    keeps: o.keeps | s.keeps,
                     returns: o.returns | s.returns,
                     shared_ret: o.shared_ret || s.shared_ret,
                 },

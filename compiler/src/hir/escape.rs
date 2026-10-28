@@ -711,5 +711,6 @@ pub(super) fn host_summary(name: &str, mut s: Summary) -> Summary {
     {
         s.escapes = 0;
     }
+    s.keeps = s.escapes;
     s
 }

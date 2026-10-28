@@ -7722,6 +7722,9 @@ impl Compiler {
                 .enumerate()
                 .filter_map(|(i, b)| {
                     let m = mutates.get(i).copied().unwrap_or(0);
+                    if std::env::var("COIL_COW_TRACE").is_ok() {
+                        eprintln!("cow: {}", b.name);
+                    }
                     self.program_effects.cow_rewrite(&self.checker, module, &hir, b, m).map(|n| (i, n))
                 })
                 .collect();
