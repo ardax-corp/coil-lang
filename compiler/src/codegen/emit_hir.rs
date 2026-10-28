@@ -4807,10 +4807,6 @@ impl Compiler {
                     Ok(HirBuiltin::LinAlg)
                 }
                 PreludeFn::Ord | PreludeFn::Char | PreludeFn::BlackBox => host(Some(kind.as_str())),
-                _ => match kind.math_native_name() {
-                    Some(native) => host(Some(native)),
-                    None => Err("callee-builtin"),
-                },
             });
         }
         if let Some(kind) = self.checker.ffi_fn_in_scope(name) {

@@ -2347,16 +2347,6 @@ fn builtin_description(module: &str, name: &str, export: &BuiltinExport) -> Stri
         ("prelude::math", "matmul") => "Multiplies two compatible matrices.".into(),
         ("prelude::math", "cross") => "Computes the three-dimensional cross product.".into(),
         ("prelude::math", "matrix") => "Constructs a matrix from nested static rows.".into(),
-        ("prelude::math", "atan") => "Arc tangent of a float (radians).".into(),
-        ("prelude::math", "atan2") => "Two-argument arc tangent `atan2(y, x)` (radians).".into(),
-        ("prelude::math", "asin") => "Arc sine of a float (radians).".into(),
-        ("prelude::math", "acos") => "Arc cosine of a float (radians).".into(),
-        ("prelude::math", "log10") => "Base-10 logarithm of a float.".into(),
-        ("prelude::math", "log2") => "Base-2 logarithm of a float.".into(),
-        ("prelude::math", "cbrt") => "Cube root of a float.".into(),
-        ("prelude::math", "sinh") => "Hyperbolic sine of a float.".into(),
-        ("prelude::math", "cosh") => "Hyperbolic cosine of a float.".into(),
-        ("prelude::math", "tanh") => "Hyperbolic tangent of a float.".into(),
         ("clock", "wall_nanos") => {
             "Wall-clock nanoseconds since the Unix epoch (HostInvoke `clock_wall_nanos`)."
                 .into()

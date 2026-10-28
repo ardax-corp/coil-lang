@@ -5624,6 +5624,22 @@ impl Checker {
             return self.infer_foreign_variadic_call(&ident, &fqn, raw_args, id, range);
         }
 
+        // The scalar float functions left `prelude::math` for coil-stdlib's `math`.
+        if crate::typechecking::virtual_modules::REMOVED_MATH_FNS.contains(&ident.as_str())
+            && self.lookup_fn_scheme(&ident).is_none()
+        {
+            for arg in raw_args {
+                let _ = self.infer(arg);
+            }
+            return self.error_with_help(
+                ErrorCode::UnknownFunction,
+                format!(
+                    "there is no built-in `{ident}`; the float functions moved from `prelude::math` to coil-stdlib's `math` module"
+                ),
+                range,
+                Some(format!("add `use math::{{{ident}}};`")),
+            );
+        }
         // The free `len(x)` was removed: a length is the method `x.len()`.
         if ident == "len" && self.lookup_fn_scheme(&ident).is_none() {
             for arg in raw_args {
@@ -5717,24 +5733,6 @@ impl Checker {
                     PreludeFn::Ord => self.infer_ord(&reordered, range),
                     PreludeFn::BlackBox => self.infer_black_box(&reordered, range),
                     PreludeFn::Char => self.infer_char(&reordered, range),
-                    PreludeFn::Sin
-                    | PreludeFn::Cos
-                    | PreludeFn::Tan
-                    | PreludeFn::Sqrt
-                    | PreludeFn::Floor
-                    | PreludeFn::Ceil
-                    | PreludeFn::Exp
-                    | PreludeFn::Ln
-                    | PreludeFn::Atan
-                    | PreludeFn::Atan2
-                    | PreludeFn::Asin
-                    | PreludeFn::Acos
-                    | PreludeFn::Log10
-                    | PreludeFn::Log2
-                    | PreludeFn::Cbrt
-                    | PreludeFn::Sinh
-                    | PreludeFn::Cosh
-                    | PreludeFn::Tanh => self.infer_math(kind, &reordered, range),
                 };
             }
             let arg_slice = args.as_deref().unwrap_or(&[]);
@@ -5750,24 +5748,6 @@ impl Checker {
                 PreludeFn::Ord => self.infer_ord(arg_slice, range),
                 PreludeFn::BlackBox => self.infer_black_box(arg_slice, range),
                 PreludeFn::Char => self.infer_char(arg_slice, range),
-                PreludeFn::Sin
-                | PreludeFn::Cos
-                | PreludeFn::Tan
-                | PreludeFn::Sqrt
-                | PreludeFn::Floor
-                | PreludeFn::Ceil
-                | PreludeFn::Exp
-                | PreludeFn::Ln
-                | PreludeFn::Atan
-                | PreludeFn::Atan2
-                | PreludeFn::Asin
-                | PreludeFn::Acos
-                | PreludeFn::Log10
-                | PreludeFn::Log2
-                | PreludeFn::Cbrt
-                | PreludeFn::Sinh
-                | PreludeFn::Cosh
-                | PreludeFn::Tanh => self.infer_math(kind, arg_slice, range),
             };
         }
         // `dload` / `declare` / `invoke` after `use ffi::{…}`.
@@ -8410,47 +8390,6 @@ impl Checker {
         self.current_expected = prev_expected;
         self.unify(&b_ty, &byte(), &args[0].0.into_range(), "char argument");
         result_app_ty(string(), string())
-    }
-
-    /// Scalar `prelude::math` natives: unary `float -> float`, or binary `float, float -> float`.
-    fn infer_math(&mut self, kind: PreludeFn, args: &[Output], range: Range<usize>) -> Ty {
-        let expected_arity = kind.math_arity().unwrap_or(1);
-        if args.len() != expected_arity {
-            for arg in args {
-                let _ = self.infer(arg);
-            }
-            let hint = match kind {
-                PreludeFn::Atan2 => "y, x",
-                _ => "x",
-            };
-            return self.error_with_help(
-                ErrorCode::ConstructorArity,
-                format!(
-                    "{} expects {} argument{}, got {}",
-                    kind.as_str(),
-                    expected_arity,
-                    if expected_arity == 1 { "" } else { "s" },
-                    args.len()
-                ),
-                range,
-                Some(format!(
-                    "use `{}({})` with float arguments",
-                    kind.as_str(),
-                    hint
-                )),
-            );
-        }
-
-        for arg in args {
-            let arg_ty = self.infer(arg);
-            self.unify(
-                &arg_ty,
-                &float(),
-                &arg.0.into_range(),
-                &format!("{} argument", kind.as_str()),
-            );
-        }
-        float()
     }
 
     /// `dot(a, b)`, equal-length homogeneous numeric vectors → scalar.

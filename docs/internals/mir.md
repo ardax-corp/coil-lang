@@ -305,7 +305,8 @@ Q9 R1 string/format may lift. User `CALL` is COI-291 (below). Dense emit keeps
 `DenseBin` for the numeric region and at each host edge: `LOAD` args
 (Value words) → `CONST` id → `HostInvoke` → `STORE` dest, then more
 dense ops. P12 whole-body saxpy pack still runs first when the pattern
-matches (no inner host). Hit bench: `examples/perf/mir_dense_host.hy`.
+matches (no inner host). The math natives that first used this edge
+(`math_sin` in a loop) are retired; `simd_axpy_reduce` and packed LA still do.
 
 ## M1–M3 — typed dense→dense CALL (COI-291)
 

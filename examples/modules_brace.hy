@@ -1,12 +1,12 @@
 // examples/modules_brace.hy — brace-group imports from a module file.
 //
-// `examples/src/math.hy` exports `add` and `mul`. Brace syntax imports
+// `examples/src/calc.hy` exports `add` and `mul`. Brace syntax imports
 // both in one statement; the resolver falls back to the module file
-// (`math.hy`) because there is no `math/add.hy` / `math/mul.hy`.
+// (`calc.hy`) because there is no `calc/add.hy` / `calc/mul.hy`.
 //
 // @output 1242
 
-use math::{add, mul};
+use calc::{add, mul};
 use io::sync::print;
 use string::format;
 

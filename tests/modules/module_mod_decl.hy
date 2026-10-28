@@ -2,7 +2,7 @@
 // reachable by qualified path.
 use tests::assert;
 
-mod math;
+mod calc;
 
 fn add(int a, int b) -> int {
     return a - b;
@@ -13,6 +13,6 @@ test("the local name is this file's own") {
 }
 
 test("the loaded module's item by qualified path") {
-    assert!(math::add(5, 3) == 8);
-    assert!(math::mul(5, 3) == 15);
+    assert!(calc::add(5, 3) == 8);
+    assert!(calc::mul(5, 3) == 15);
 }
