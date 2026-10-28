@@ -264,4 +264,4 @@ Open items are Linear issues in the Known limitations project; investigation iss
 
 COI-199 and COI-201 closed: sequential RSS is mapped `.text`, not `Heap::alloc`. TLS and crypto are no longer linked into this binary (userland [coil-tls](https://github.com/ardax-corp/coil-tls) / [coil-crypto](https://github.com/ardax-corp/coil-crypto)). Calendar/format time is userland [coil-time](https://github.com/ardax-corp/coil-time); process clocks are virtual `clock` HostInvoke **121–123** (`clock_wall_nanos` / `clock_mono_nanos` / `clock_sleep_ms`). Archive **major 4 / minor 5** appends M1 `prelude::math` **125–135**; `PI`/`E`/`TAU` are coil-stdlib `num`.
 
-Most items have no inline `TODO`/`FIXME` — knowledge lives here and in [.cursor/skills/coil-contributor/reference.md](../../.cursor/skills/coil-contributor/reference.md). Update this file when closing a limitation.
+Most items have no inline `TODO`/`FIXME` — knowledge lives here and in [.claude/skills/coil-contributor/reference.md](../../.claude/skills/coil-contributor/reference.md). Update this file when closing a limitation.

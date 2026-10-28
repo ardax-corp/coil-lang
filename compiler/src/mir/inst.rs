@@ -238,8 +238,9 @@ pub enum LaneExpr {
 }
 
 impl LaneExpr {
-    /// `a & b`, folding constants, `a & a`, `a & !a`, and
-    /// `a & (!a | b)` (what a branch chain's masks look like).
+    /// `a & b`, folding constants, `a & a`, `a & !a`,
+    /// `a & (!a | b)` (what a branch chain's masks look like), and on
+    /// `&` chains `x & (x & y)` and a term against its negation.
     pub fn and(a: Self, b: Self) -> Self {
         match (a, b) {
             (Self::Const(false), _) | (_, Self::Const(false)) => Self::Const(false),
@@ -248,11 +249,42 @@ impl LaneExpr {
             (a, b) if a.is_not_of(&b) => Self::Const(false),
             (a, Self::Or(x, y)) if x.is_not_of(&a) => Self::and(a, *y),
             (Self::Or(x, y), b) if x.is_not_of(&b) => Self::and(*y, b),
-            (a, b) => Self::And(Box::new(a), Box::new(b)),
+            (a, b) => {
+                let (ca, cb) = (a.conjuncts(), b.conjuncts());
+                if ca.iter().any(|x| cb.iter().any(|y| x.is_not_of(y))) {
+                    return Self::Const(false);
+                }
+                if cb.iter().all(|y| ca.contains(y)) {
+                    return a;
+                }
+                if ca.iter().all(|x| cb.contains(x)) {
+                    return b;
+                }
+                Self::And(Box::new(a), Box::new(b))
+            }
         }
     }
 
-    /// `a | b`, folding constants, `a | a`, `a | !a`, and `a | (!a & b)`.
+    /// The terms of an `&` chain (`self` alone when it is not one).
+    fn conjuncts(&self) -> Vec<&Self> {
+        match self {
+            Self::And(x, y) => {
+                let mut out = x.conjuncts();
+                out.extend(y.conjuncts());
+                out
+            }
+            e => vec![e],
+        }
+    }
+
+    /// `terms` joined by `&`; `true` when empty.
+    fn all(terms: &[&Self]) -> Self {
+        terms.iter().fold(Self::Const(true), |acc, t| Self::and(acc, (*t).clone()))
+    }
+
+    /// `a | b`, folding constants, `a | a`, `a | !a`, `a | (!a & b)`,
+    /// and the terms two `&` chains share: `(x & a) | (x & b)` is
+    /// `x & (a | b)`, so the two ways out of a branch join back to `x`.
     pub fn or(a: Self, b: Self) -> Self {
         match (a, b) {
             (Self::Const(true), _) | (_, Self::Const(true)) => Self::Const(true),
@@ -261,7 +293,15 @@ impl LaneExpr {
             (a, b) if a.is_not_of(&b) => Self::Const(true),
             (a, Self::And(x, y)) if x.is_not_of(&a) => Self::or(a, *y),
             (Self::And(x, y), b) if x.is_not_of(&b) => Self::or(*y, b),
-            (a, b) => Self::Or(Box::new(a), Box::new(b)),
+            (a, b) => {
+                let (ca, cb) = (a.conjuncts(), b.conjuncts());
+                let shared: Vec<&Self> = ca.iter().copied().filter(|x| cb.contains(x)).collect();
+                if shared.is_empty() {
+                    return Self::Or(Box::new(a), Box::new(b));
+                }
+                let rest = |c: &[&Self]| Self::all(&c.iter().copied().filter(|x| !shared.contains(x)).collect::<Vec<_>>());
+                Self::and(Self::all(&shared), Self::or(rest(&ca), rest(&cb)))
+            }
         }
     }
 
@@ -1290,5 +1330,24 @@ mod tests {
         assert_eq!(MirConst::f64(-2.25).ty(), MirTy::F64);
         assert_eq!(MirConst::I64(1).as_f64(), None);
         assert_eq!(MirConst::Bool(true).as_f64(), None);
+    }
+
+    fn ne(k: u8) -> LaneExpr {
+        LaneExpr::Cmp { op: MirCmpOp::Ne, lhs: LaneVal::Stream(0), rhs: LaneVal::Scalar(k) }
+    }
+
+    /// A four-way `c != a && c != b && ...` chain, as the walk builds it
+    /// from its branches and `bool` φs, folds back to the plain chain.
+    #[test]
+    fn lane_expr_factors_shared_conjuncts() {
+        let x = LaneExpr::and(ne(0), ne(1));
+        // `(x & !k2) | (x & k2)` is `x`.
+        assert_eq!(LaneExpr::or(LaneExpr::and(x.clone(), LaneExpr::not(ne(2))), LaneExpr::and(x.clone(), ne(2))), x);
+        // `x & (x & k2)` is `x & k2`; a term against its negation is false.
+        let x2 = LaneExpr::and(x.clone(), ne(2));
+        assert_eq!(LaneExpr::and(x.clone(), x2.clone()), x2);
+        assert_eq!(LaneExpr::and(x2, LaneExpr::and(ne(3), LaneExpr::not(ne(1)))), LaneExpr::Const(false));
+        // Nothing shared: left as it is.
+        assert_eq!(LaneExpr::or(ne(0), ne(1)).size(), 3);
     }
 }

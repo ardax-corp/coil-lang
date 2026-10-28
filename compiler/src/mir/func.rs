@@ -103,6 +103,9 @@ pub struct MirFunc {
     /// or call changes the word, so LICM and CSE treat them as operators
     /// on the object (#1560).
     pub invariant_loads: HashSet<ValueId>,
+    /// `Index` reads of a `byte` element (a `Vec<byte>` or `[byte; N]`):
+    /// `byte_scan` reads them as byte lanes.
+    pub byte_loads: HashSet<ValueId>,
     /// Calls of a function that never resizes an array (it may write
     /// elements and fields).
     pub steady_calls: HashSet<ValueId>,
@@ -213,6 +216,7 @@ impl MirFunc {
             tail_targets: HashSet::new(),
             pure_calls: HashSet::new(),
             invariant_loads: HashSet::new(),
+            byte_loads: HashSet::new(),
             steady_calls: HashSet::new(),
             lengths_steady: true,
             bound_words: HashSet::new(),
