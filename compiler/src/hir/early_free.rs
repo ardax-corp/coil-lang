@@ -825,6 +825,7 @@ fn temp(body: &mut HirBody, ty: Option<Ty>) -> LocalId {
         ty,
         kind: LocalKind::Temp,
         captured: false,
+        borrow: false,
     });
     id
 }

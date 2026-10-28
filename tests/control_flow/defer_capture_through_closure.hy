@@ -20,14 +20,14 @@ fn call(unit -> int body) -> int {
 
 test("through a closure") {
     let log = new Log(0);
-    let _ = call(fn () use (log) => fails(log));
+    let _ = call(fn () use (mut log) => fails(log));
     assert!(log.n == 1);
 }
 
 test("through a spawned task") {
     let log = new Log(0);
-    let _ = scope(fn (Scope s) use (log) {
-        s.spawn(fn () use (log) => fails(log));
+    let _ = scope(fn (Scope s) use (mut log) {
+        s.spawn(fn () use (mut log) => fails(log));
         0
     });
     assert!(log.n == 1);

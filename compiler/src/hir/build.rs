@@ -15,7 +15,7 @@
 //! A construct the builder does not cover yet becomes
 //! [`HirKind::Unsupported`]; [`super::check::problems`] reports them.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use parser::ast::{
     AdjustOp, AssignOp, Contract, ContractKind, EnumConstructPayload, Expression, LetPattern, MatchArm,
@@ -199,6 +199,8 @@ struct BodyBuilder {
     /// `old(e)` calls in the `ensures` clauses (by node address) and the
     /// local that holds `e` from entry.
     olds: HashMap<usize, LocalId>,
+    /// Values written `mut e`: a `let` or `for` binding from one borrows.
+    mut_marks: HashSet<HirId>,
 }
 
 impl BodyBuilder {
@@ -229,6 +231,7 @@ impl BodyBuilder {
             ok_is_result: false,
             type_params: Vec::new(),
             olds: HashMap::new(),
+            mut_marks: HashSet::new(),
         }
     }
 
@@ -258,6 +261,7 @@ impl BodyBuilder {
             ty,
             kind,
             captured: false,
+            borrow: false,
         });
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name.to_string(), id);
@@ -272,6 +276,7 @@ impl BodyBuilder {
             ty,
             kind: LocalKind::Temp,
             captured: false,
+            borrow: false,
         });
         id
     }
@@ -291,6 +296,7 @@ impl BodyBuilder {
                     ty: None,
                     kind: LocalKind::Capture,
                     captured: false,
+                    borrow: false,
                 });
                 self.body.captures.push((outer_id, inner));
                 self.scopes[0].insert(name.to_string(), inner);
@@ -300,7 +306,21 @@ impl BodyBuilder {
         None
     }
 
-    fn finish(self) -> HirBody {
+    fn finish(mut self) -> HirBody {
+        // `let x = mut place` and `for mut x in xs` bind borrows.
+        if !self.mut_marks.is_empty() {
+            let mut borrows = Vec::new();
+            for e in &self.body.exprs {
+                match &e.kind {
+                    HirKind::Let { local, init: Some(v) } if self.mut_marks.contains(v) => borrows.push(*local),
+                    HirKind::ForIn { pat, iterable, .. } if self.mut_marks.contains(iterable) => super::effects::pat_binds(pat, &mut borrows),
+                    _ => {}
+                }
+            }
+            for l in borrows {
+                self.body.locals[l.0 as usize].borrow = true;
+            }
+        }
         self.body
     }
 }
@@ -1469,7 +1489,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 self.emit_ty(b, node, HirKind::Loop { body }, Some(coil_ty::unit()))
             }
 
-            E::Lambda { args, body, .. } => self.lambda(b, node, args, body),
+            E::Lambda { args, body, borrows, .. } => self.lambda(b, node, args, body, borrows),
             E::Defer { captures, body } => {
                 let captures: Vec<Option<LocalId>> = captures.iter().map(|c| b.lookup(c)).collect();
                 // The thunk's frame copies each capture as one word (#1758):
@@ -1955,6 +1975,14 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             return self.emit_ty(b, node, HirKind::Local(local), ty);
         }
         let callee_node = peel(name);
+        // `mut e` is `e`, marked for the binding it initializes.
+        if let E::Identifier("__mut") = callee_node.1.as_ref()
+            && let [arg] = args
+        {
+            let v = self.expr(b, arg);
+            b.mut_marks.insert(v);
+            return v;
+        }
         match callee_node.1.as_ref() {
             E::Identifier(n) if b.lookup(n).is_none() => {
                 if matches!(*n, "Some") {
@@ -2910,7 +2938,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         }
     }
 
-    fn lambda(&mut self, b: &mut BodyBuilder, node: &Output<'_>, args: &Output<'_>, body: &Output<'_>) -> HirId {
+    fn lambda(&mut self, b: &mut BodyBuilder, node: &Output<'_>, args: &Output<'_>, body: &Output<'_>, borrows: &[&str]) -> HirId {
         let name = format!("{}::<lambda@{}>", b.body.name, node.0.start);
         let mut inner = BodyBuilder::new(&name, BodyKind::Lambda, span_of(node));
         let mode_key = Checker::lambda_mode_key(node.0.start);
@@ -2937,6 +2965,11 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             .map(|(_, inner_id)| inner.body.locals[inner_id.0 as usize].name.clone())
             .collect();
         for (i, name) in captured.iter().enumerate() {
+            // `use (mut x)`: the lambda borrows `x`.
+            if borrows.contains(&name.as_str()) {
+                let inner_local = inner.body.captures[i].1;
+                inner.body.locals[inner_local.0 as usize].borrow = true;
+            }
             if let Some(outer) = b.lookup(name) {
                 inner.body.captures[i].0 = outer;
                 b.body.locals[outer.0 as usize].captured = true;

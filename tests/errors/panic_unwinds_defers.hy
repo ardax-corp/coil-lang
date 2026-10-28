@@ -44,14 +44,14 @@ fn outcome(unit -> int body) -> string {
 
 test("defers run while a panic unwinds, code after it does not") {
     let t = new Trace("");
-    assert!(outcome(fn () use (t) => outer(t, 3)) == "inner 3");
+    assert!(outcome(fn () use (mut t) => outer(t, 3)) == "inner 3");
     assert!(t.text == "io");
-    assert!(outcome(fn () use (t) => outer(t, 1)) == "inner 1");
+    assert!(outcome(fn () use (mut t) => outer(t, 1)) == "inner 1");
     assert!(t.text == "ioio");
 }
 
 test("without a panic the defers run in the normal order") {
     let t = new Trace("");
-    assert!(outcome(fn () use (t) => outer(t, 0)) == "ok");
+    assert!(outcome(fn () use (mut t) => outer(t, 0)) == "ok");
     assert!(t.text == "iaftero");
 }

@@ -14,7 +14,7 @@ fn sum_alias(Cell n) -> int {
 }
 
 fn mutate_src_after_alias(Cell n) -> int {
-    let p = n;
+    let p = mut n;
     let first = p.a;
     n.a = 99;
     return first + p.a;

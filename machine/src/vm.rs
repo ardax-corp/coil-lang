@@ -759,6 +759,10 @@ pub struct Machine<const S: usize> {
     frames: ArrayVec<Frame, S>,
     /// Pin tables for frames that ran `ArrayPin` or a dense heap index.
     frame_pins: Vec<FramePins>,
+    /// `COIL_COW_REPORT`: copies the `Cow` instruction made, by its PC.
+    cow_sites: Option<std::collections::HashMap<usize, u64>>,
+    /// Shares counted while reporting copies.
+    cow_shares: u64,
     /// Scratch for [`Self::free_early`]: the addresses one call freed.
     /// Last dense-index array identity (predicted hit in counted loops).
     dense_obj_addr: u64,
@@ -939,6 +943,8 @@ impl<const S: usize> Machine<S> {
         Self {
             frames,
             frame_pins: Vec::new(),
+            cow_sites: std::env::var_os("COIL_COW_REPORT").map(|_| std::collections::HashMap::new()),
+            cow_shares: 0,
             dense_obj_addr: 0,
             dense_obj: None,
             heap: {
@@ -1491,6 +1497,35 @@ impl<const S: usize> Machine<S> {
             }
         }
         p
+    }
+
+    /// `COIL_COW_REPORT`: the copies copy-on-write made, by source line,
+    /// most first, on stderr.
+    fn print_cow_report(&mut self) {
+        let Some(sites) = self.cow_sites.take() else { return };
+        let mut by_line: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        for (ip, n) in sites {
+            let at = self
+                .pc_file_line_column(ip)
+                .and_then(|(file, line, _)| Some(format!("{}:{line}", self.program_debug.source_files.get(file as usize)?)))
+                .unwrap_or_else(|| format!("pc {ip}"));
+            *by_line.entry(at).or_insert(0) += n;
+        }
+        let mut rows: Vec<(String, u64)> = by_line.into_iter().collect();
+        rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let total: u64 = rows.iter().map(|r| r.1).sum();
+        eprintln!(
+            "cow-report: {total} copies for {} shares ({} objects copied; each share is a copy a copy-on-assign design makes)",
+            self.cow_shares,
+            self.heap.cow_copies()
+        );
+        // A line that copies over and over (a write in a loop to a value
+        // something else shares) is worth a borrow or a `Ref<T>`.
+        const HOT: u64 = 100;
+        for (at, n) in &rows {
+            let hint = if *n >= HOT { "  <- copied repeatedly: borrow with `let x = mut …` or share through a `Ref<T>`" } else { "" };
+            eprintln!("  {n:>10}  {at}{hint}");
+        }
     }
 
     fn format_panic_location(&self, panic_insn_ip: usize) -> Option<String> {
@@ -3911,6 +3946,7 @@ impl<const S: usize> Machine<S> {
             while self.reactor.help_local_once() {}
         }
         crate::thread::join_undetached_threads(&self.live_threads);
+        self.print_cow_report();
         // Remaining class finalizers need host IO / FFI while the reactor is
         // still up. `Drop` still runs this as a safety net for embedders.
         self.run_remaining_finalizers();
@@ -4416,7 +4452,7 @@ impl<const S: usize> Machine<S> {
             // variant. A stale ceiling (e.g. YieldFromCoro) makes later opcodes
             // (`StoreIndex`, `DoneCoro`, `ArrayPush`, …) UB via assert_unchecked.
             #[cfg(not(debug_assertions))]
-            promise!(*bc as u8 <= Instruction::FreeEarly as u8);
+            promise!(*bc as u8 <= Instruction::Cow as u8);
 
             match bc {
                 Instruction::STORE => {
@@ -4936,6 +4972,34 @@ impl<const S: usize> Machine<S> {
                     let v = self.stack.pop();
                     self.free_early(v, opcode.operand_u32() & 1 != 0);
                 }
+                Instruction::Cow => {
+                    let v = self.stack.pop();
+                    if opcode.operand_u32() & 1 == 0 {
+                        // Measuring only: a deep copy at every share, as a
+                        // design that copies on assignment makes.
+                        if cow_eager() && matches!(self.heap.find_object_by_addr(v.heap_addr()), Some(crate::memory::Object::Instance(_) | crate::memory::Object::Array(_))) {
+                            if self.cow_sites.is_some() {
+                                self.cow_shares += 1;
+                            }
+                            let copy = self.heap.cow_deep_copy(v);
+                            self.stack.push(copy);
+                            self.maybe_gc_after_alloc(ip);
+                        } else {
+                            if self.heap.cow_share(v) && self.cow_sites.is_some() {
+                                self.cow_shares += 1;
+                            }
+                            self.stack.push(v);
+                        }
+                    } else if let Some(copy) = self.heap.cow_unique(v) {
+                        if let Some(sites) = self.cow_sites.as_mut() {
+                            *sites.entry(ip.saturating_sub(1)).or_insert(0) += 1;
+                        }
+                        self.stack.push(copy);
+                        self.maybe_gc_after_alloc(ip);
+                    } else {
+                        self.stack.push(v);
+                    }
+                }
                 _ => match self.exec_rest(opcode, ip, sp, code, constants, stack_cap).get() {
                     Ok((next_ip, next_sp)) => (ip, sp) = (next_ip, next_sp),
                     Err(paused) => return paused,
@@ -4944,6 +5008,12 @@ impl<const S: usize> Machine<S> {
         }
         false
     }
+}
+
+/// `COIL_COW_EAGER=1` (measuring only): every copy-on-write share copies.
+fn cow_eager() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("COIL_COW_EAGER").is_some())
 }
 
 /// [`Machine::free_early`] on the parts the dense streak holds too.

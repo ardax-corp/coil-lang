@@ -1079,6 +1079,16 @@ impl MirBuilder {
     }
 
     /// `STRINGIFY` of `src` ([`MirInst::Stringify`]): a new string.
+    /// Copy-on-write share (`unique: false`) or unique of `src`'s object:
+    /// the same word, or a copy's for unique. Pair with a GC barrier.
+    pub fn ins_cow(&mut self, src: ValueId, unique: bool) -> Result<ValueId, MirError> {
+        let src = self.resolve(src);
+        let dest = self.alloc(MirTy::HeapRef);
+        self.push(MirInst::Cow { dest, src, unique })?;
+        self.snapshot_slots(dest);
+        Ok(dest)
+    }
+
     pub fn ins_stringify(&mut self, src: ValueId) -> Result<ValueId, MirError> {
         if !self.resolve_ty(src).is_specialized() {
             return Err(MirError::msg("Stringify type".to_string()));

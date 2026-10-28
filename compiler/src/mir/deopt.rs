@@ -28,7 +28,8 @@ impl MirInst {
             | Self::FreeEarly { .. }
             | Self::Panic { .. }
             | Self::Format { .. }
-            | Self::Stringify { .. } => Some(MirDeoptKind::Deopt),
+            | Self::Stringify { .. }
+            | Self::Cow { .. } => Some(MirDeoptKind::Deopt),
             Self::HostInvoke { native_id, .. } if !host_is_pure(*native_id) => {
                 Some(MirDeoptKind::Deopt)
             }

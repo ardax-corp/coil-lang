@@ -3134,6 +3134,14 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
                 loc,
             });
         }
+        MirInst::Cow { dest, src, unique } => {
+            emit_dense_push(out, &[*src], regs, scratch, loc)?;
+            out.push(IlOp::from_plain_byte(Byte::new(Instruction::Cow).with_operand_u32(u32::from(*unique)), loc));
+            out.push(IlOp::StorePop {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
+        }
         MirInst::Stringify { dest, src } => {
             emit_dense_push(out, &[*src], regs, scratch, loc)?;
             out.push(IlOp::from_plain_byte(Byte::new(Instruction::STRINGIFY), loc));
@@ -3962,7 +3970,7 @@ fn gather_window(func: &MirFunc, self_entry: Option<Label>) -> u8 {
                 MirInst::Alloc { elems, .. } => elems.len(),
                 // Format string plus args, pushed like call args.
                 MirInst::Format { args, .. } => args.len() + 1,
-                MirInst::Stringify { .. } | MirInst::Unbox { .. } | MirInst::Print { .. } | MirInst::FreeEarly { .. } | MirInst::Panic { .. } => 1,
+                MirInst::Stringify { .. } | MirInst::Cow { .. } | MirInst::Unbox { .. } | MirInst::Print { .. } | MirInst::FreeEarly { .. } | MirInst::Panic { .. } => 1,
                 MirInst::StrEq { .. } => 2,
                 _ => 0,
             };
@@ -4640,7 +4648,8 @@ fn paired_barrier_for_alloc(func: &MirFunc, alloc: ValueId) -> Option<ValueId> {
                 MirInst::Alloc { .. }
                 | MirInst::ArrayPush { .. }
                 | MirInst::Format { .. }
-                | MirInst::Stringify { .. } => pending = false,
+                | MirInst::Stringify { .. }
+                | MirInst::Cow { .. } => pending = false,
                 _ if pending => pending = false,
                 _ => {}
             }
@@ -4658,7 +4667,8 @@ pub(super) fn paired_alloc_dest(func: &MirFunc, barrier: ValueId) -> Option<Valu
                 MirInst::Alloc { dest, .. }
                 | MirInst::ArrayPush { dest, .. }
                 | MirInst::Format { dest, .. }
-                | MirInst::Stringify { dest, .. } => {
+                | MirInst::Stringify { dest, .. }
+                | MirInst::Cow { dest, .. } => {
                     pending = Some(*dest)
                 }
                 MirInst::GcBarrier { dest, .. } if *dest == barrier => return pending,
@@ -4680,7 +4690,8 @@ pub(super) fn paired_alloc_dests(func: &MirFunc) -> HashMap<ValueId, ValueId> {
                 MirInst::Alloc { dest, .. }
                 | MirInst::ArrayPush { dest, .. }
                 | MirInst::Format { dest, .. }
-                | MirInst::Stringify { dest, .. } => pending = Some(*dest),
+                | MirInst::Stringify { dest, .. }
+                | MirInst::Cow { dest, .. } => pending = Some(*dest),
                 MirInst::GcBarrier { dest, .. } => {
                     // The first barrier of a dest is the one the scan finds.
                     if let Some(obj) = pending {

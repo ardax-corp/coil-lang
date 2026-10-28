@@ -917,6 +917,11 @@ impl MirFunc {
                     }
                 }
             }
+            MirInst::Cow { dest, src, .. } => {
+                if self.ty(*dest) != MirTy::HeapRef || self.ty(*src) != MirTy::HeapRef {
+                    return Err(format!("{dest} Cow type"));
+                }
+            }
             MirInst::Stringify { dest, src } => {
                 if self.ty(*dest) != MirTy::HeapRef {
                     return Err(format!("{dest} Stringify dest is not heapref"));

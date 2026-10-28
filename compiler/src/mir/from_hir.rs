@@ -2764,6 +2764,17 @@ impl Lower<'_> {
                     _ => Err("relayout".into()),
                 }
             }
+            // Copy-on-write share / unique: the operand's word, or a copy's.
+            HirKind::Builtin { op: Builtin::Cow { unique }, args } if let [inner] = args.as_slice() => {
+                let Some(v) = self.word(*inner)? else {
+                    return Ok(Val::Never);
+                };
+                if self.b.value_ty(v) != MirTy::HeapRef {
+                    return Ok(Val::V(v));
+                }
+                let out = self.at_expr(id, |l| l.b.ins_cow(v, *unique).map_err(mir))?;
+                Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)?))
+            }
             // A primitive's text (compiler-made bodies).
             HirKind::Builtin { op: Builtin::Stringify, args } if let [inner] = args.as_slice() => {
                 let Some(v) = self.word(*inner)? else {

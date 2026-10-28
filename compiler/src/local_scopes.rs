@@ -213,7 +213,7 @@ impl<'s> Resolver<'s, '_> {
                 }
                 self.pop();
             }
-            Expression::Lambda { args, captures, body } => {
+            Expression::Lambda { args, captures, body, .. } => {
                 self.enter_isolated(captures, span);
                 self.bind_args(args);
                 self.walk(body);

@@ -731,6 +731,7 @@ impl Inliner<'_> {
             ty: moved.ty.clone(),
             kind: LocalKind::Temp,
             captured: false,
+            borrow: false,
         });
         let span = moved.span;
         let init = HirId(self.body.exprs.len() as u32);
@@ -774,6 +775,7 @@ impl Inliner<'_> {
                 ty: l.ty.clone(),
                 kind: if l.kind == LocalKind::Param { LocalKind::Let } else { l.kind },
                 captured: l.captured,
+                borrow: false,
             });
         }
         let param_of = |l: LocalId| callee.params.iter().position(|&p| p == l);
@@ -830,6 +832,7 @@ impl Inliner<'_> {
                             ty,
                             kind: LocalKind::Temp,
                             captured: false,
+                            borrow: false,
                         });
                         out.push(self.push(HirKind::Let { local, init: Some(r) }, Some(ty::unit()), span));
                         self.body.exprs[call.0 as usize].kind = HirKind::Local(local);

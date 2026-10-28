@@ -87,6 +87,8 @@ pub(crate) struct CliArgs {
     pub early_free: Option<EarlyFree>,
     /// `--nursery on|off` for `coil FILE` / `coil run`; `None` is on.
     pub nursery: Option<bool>,
+    /// `--cow-report`: copies per source line at exit.
+    pub cow_report: bool,
     pub opt_stats: bool,
     pub opt_stats_json: bool,
     /// Reuse and fill the build cache (off with `--no-build-cache`).
@@ -376,6 +378,7 @@ fn parse_coil_args(args: &[String]) -> Result<CliArgs, String> {
             fold_calls: None,
             early_free: None,
             nursery: None,
+            cow_report: false,
             opt_stats: false,
             opt_stats_json: false,
             build_cache: false,
@@ -439,6 +442,7 @@ fn cli_from(
         fold_calls: opt.fold_calls,
         early_free: opt.early_free,
         nursery: None,
+        cow_report: false,
         opt_stats: profile.opt_stats,
         opt_stats_json: profile.opt_stats_json,
         build_cache: !profile.no_build_cache,
@@ -461,6 +465,7 @@ impl RawCli {
         self.log.is_set()
             || self.opt.is_set()
             || self.nursery.nursery.is_some()
+            || self.nursery.cow_report
             || self.debug.is_set()
             || self.profile.is_set()
             || self.include_tests
@@ -486,6 +491,7 @@ impl RawCli {
                 CliArgs {
                     debug_level: self.debug.level(),
                     nursery: self.nursery.nursery,
+                    cow_report: self.nursery.cow_report,
                     ..cli_from(
                         Command::BuildAndRun { filename },
                         self.log,
@@ -587,6 +593,7 @@ impl RawCli {
                 archive,
             }) => CliArgs {
                 nursery: nursery.nursery,
+                cow_report: nursery.cow_report,
                 ..cli_from(
                     Command::Run { archive },
                     log,

@@ -40,5 +40,9 @@ test("a captured class local") {
     let f = fn (int x) use (acc) => acc.n + x;
     assert!(run(f, 4) == 7);
     acc.n = 10;
-    assert!(run(f, 4) == 14);
+    // The capture is a copy made when the lambda was.
+    assert!(run(f, 4) == 7);
+    let g = fn (int x) use (mut acc) => acc.n + x;
+    acc.n = 20;
+    assert!(run(g, 4) == 24);
 }

@@ -110,7 +110,8 @@ pub fn fill_live_roots(func: &mut MirFunc) {
                 MirInst::Alloc { dest, .. }
                 | MirInst::ArrayPush { dest, .. }
                 | MirInst::Format { dest, .. }
-                | MirInst::Stringify { dest, .. } => {
+                | MirInst::Stringify { dest, .. }
+                | MirInst::Cow { dest, .. } => {
                     let mut roots = live_heap(func, &live_after[bi][ii], &barrier_tokens);
                     roots.insert(*dest);
                     roots.append(&mut slot_heap(func, &defined, *dest));

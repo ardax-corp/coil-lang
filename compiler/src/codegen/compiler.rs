@@ -7679,6 +7679,7 @@ impl Compiler {
         self.pure_static_inits.clear();
         self.startup_consts.clear();
         self.fold_bodies.clear();
+        let mut cow_mutates = None;
         // E1: the HIR summaries also prove functions pure that call a
         // function parameter only with pure functions (`map(xs, fn ...)`).
         if let Some(hir) = self.hir_module.as_ref() {
@@ -7703,10 +7704,41 @@ impl Compiler {
             self.fold_bodies = fold_bodies(hir, &fx);
             let mutations = fx.mutations();
             let summaries = fx.summaries;
+            cow_mutates = Some(summaries.iter().map(|s| s.mutates).collect::<Vec<u64>>());
             self.pure_fns.extend(pure);
             self.steady_fns.extend(effects::steady_names(hir, module, &summaries, &self.pure_fns));
             self.program_effects.record(hir, &self.checker, module, &summaries);
             self.program_effects.record_mutations(mutations);
+        }
+        // Copy-on-write: share and unique ops in every body, before typed
+        // inlining splices any of them.
+        if crate::hir::effects::cow::enabled()
+            && let Some(mutates) = cow_mutates
+            && let Some(mut hir) = self.hir_module.take()
+        {
+            let mut notes = Vec::new();
+            let rewritten: Vec<(usize, crate::hir::HirBody)> = hir
+                .bodies
+                .iter()
+                .enumerate()
+                .filter_map(|(i, b)| {
+                    let m = mutates.get(i).copied().unwrap_or(0);
+                    if std::env::var("COIL_COW_TRACE").is_ok() {
+                        eprintln!("cow: {}", b.name);
+                    }
+                    let (body, n) = self.program_effects.cow_rewrite(&self.checker, module, &hir, b, m);
+                    notes.extend(n);
+                    body.map(|n| (i, n))
+                })
+                .collect();
+            self.messages.extend(notes);
+            for (i, body) in rewritten {
+                hir.bodies[i] = body;
+                if std::env::var("COIL_COW_DUMP").is_ok_and(|n| hir.bodies[i].name.contains(n.as_str())) {
+                    eprintln!("{}", crate::hir::print::body_to_string(&hir, &hir.bodies[i]));
+                }
+            }
+            self.hir_module = Some(hir);
         }
         if self.auto_par && self.opt_options.auto_par {
             // IPA sites on any pure function (self-recursion or helper arms).

@@ -242,6 +242,12 @@ pub struct Heap {
     /// Class / enum `type_id`s with a `drop` (the VM's finalizer registry),
     /// one bit per id: every allocation asks while any is registered.
     finalizer_types: Vec<u64>,
+    /// Class `type_id`s that are identities, never copied on write
+    /// (`shared class`, `Ref<T>`), one bit per id. Classes with a `drop`
+    /// are identities too.
+    identity_types: Vec<u64>,
+    /// Objects [`Self::cow_unique`] copied.
+    cow_copies: u64,
     /// Every object of a [`Self::finalizer_types`] type, a superset pruned
     /// by [`Self::unmarked_finalizable`] like [`Self::weaks`].
     finalizable: Vec<u64>,
@@ -331,6 +337,8 @@ impl Default for Heap {
             class_kinds: std::sync::Arc::default(),
             weaks: Vec::new(),
             finalizer_types: Vec::new(),
+            identity_types: Vec::new(),
+            cow_copies: 0,
             finalizable: Vec::new(),
             immortal_enums: HashMap::default(),
             unit_enum: None,
@@ -721,6 +729,137 @@ impl Heap {
     pub fn clear_finalizer_types(&mut self) {
         self.finalizer_types.clear();
         self.finalizable.clear();
+        self.identity_types.clear();
+    }
+
+    /// Note that `type_id` is an identity: [`Self::cow_unique`] never
+    /// copies its objects.
+    pub fn register_identity_type(&mut self, type_id: u32) {
+        let word = type_id as usize / 64;
+        if self.identity_types.len() <= word {
+            self.identity_types.resize(word + 1, 0);
+        }
+        self.identity_types[word] |= 1 << (type_id % 64);
+    }
+
+    fn is_identity_type(&self, type_id: u32) -> bool {
+        self.has_finalizer(type_id)
+            || self
+                .identity_types
+                .get(type_id as usize / 64)
+                .is_some_and(|w| w & (1 << (type_id % 64)) != 0)
+    }
+
+    /// Copy-on-write: a second place now names `v`'s object, so the next
+    /// write through either place copies it first. Anything but a class
+    /// instance or an array is left alone.
+    /// `true` when it marked an object.
+    #[inline]
+    pub fn cow_share(&self, v: Value) -> bool {
+        if let Some(obj @ (Object::Instance(_) | Object::Array(_))) = self.find_object_by_addr(v.heap_addr()) {
+            obj.set_shared();
+            return true;
+        }
+        false
+    }
+
+    /// Copy-on-write: before a write through `v`, a shallow copy of its
+    /// object when another place may name it. The original and the copy
+    /// then both name the children, so those are marked shared in turn.
+    /// `None` when `v` can be written in place: not shared, an identity
+    /// class, or not a class instance or array.
+    pub fn cow_unique(&mut self, v: Value) -> Option<Value> {
+        let obj = self.find_object_by_addr(v.heap_addr())?;
+        if !obj.is_shared() {
+            return None;
+        }
+        let copy = match obj {
+            Object::Instance(gc) => {
+                let inst = gc.as_ref();
+                if inst.type_id == 0 || self.is_identity_type(inst.type_id) {
+                    return None;
+                }
+                let slots = inst.storage.as_slice()?.to_vec();
+                self.alloc(ObjInstance::with_slots(inst.type_id, slots), Object::Instance).0
+            }
+            Object::Array(gc) => {
+                let copy = gc.as_ref().copy();
+                self.alloc(copy, Object::Array).0
+            }
+            _ => return None,
+        };
+        copy.for_each_reference(self, &mut |addr, _| {
+            if let Some(child @ (Object::Instance(_) | Object::Array(_))) = self.find_object_by_addr(addr) {
+                child.set_shared();
+            }
+        });
+        self.cow_copies += 1;
+        Some(Value::from(copy.addr()))
+    }
+
+    /// Measuring only (`COIL_COW_EAGER`): a deep copy of `v`'s class
+    /// instances and arrays, as a design that copies on assignment makes.
+    pub fn cow_deep_copy(&mut self, v: Value) -> Value {
+        let mut seen: std::collections::HashMap<u64, Value> = std::collections::HashMap::new();
+        self.deep_copy_in(v, &mut seen, 0)
+    }
+
+    fn deep_copy_in(&mut self, v: Value, seen: &mut std::collections::HashMap<u64, Value>, depth: u32) -> Value {
+        let addr = v.heap_addr();
+        if addr == 0 || depth > 10_000 {
+            return v;
+        }
+        if let Some(&c) = seen.get(&addr) {
+            return c;
+        }
+        let words = match self.find_object_by_addr(addr) {
+            Some(Object::Instance(gc)) => {
+                let inst = gc.as_ref();
+                if inst.type_id == 0 || self.is_identity_type(inst.type_id) {
+                    return v;
+                }
+                let Some(slots) = inst.storage.as_slice() else { return v };
+                (Some(inst.type_id), slots.to_vec())
+            }
+            Some(Object::Array(gc)) => match &gc.as_ref().data {
+                ArrayData::Words(w) => (None, w.clone()),
+                ArrayData::Bytes(_) => {
+                    let copy = gc.as_ref().copy();
+                    let c = Value::from(self.alloc(copy, Object::Array).0.addr());
+                    seen.insert(addr, c);
+                    return c;
+                }
+            },
+            _ => return v,
+        };
+        let (type_id, mut slots) = words;
+        let kind = match self.find_object_by_addr(addr) {
+            Some(Object::Array(gc)) => Some(gc.as_ref().elem_kind),
+            _ => None,
+        };
+        for w in &mut slots {
+            if matches!(self.find_object_by_addr(w.heap_addr()), Some(Object::Instance(_) | Object::Array(_))) {
+                *w = self.deep_copy_in(*w, seen, depth + 1);
+            }
+        }
+        let c = match type_id {
+            Some(t) => Value::from(self.alloc(ObjInstance::with_slots(t, slots), Object::Instance).0.addr()),
+            None => {
+                let mut a = ObjArray::new(slots);
+                if let Some(k) = kind {
+                    a.elem_kind = k;
+                }
+                Value::from(self.alloc(a, Object::Array).0.addr())
+            }
+        };
+        self.cow_copies += 1;
+        seen.insert(addr, c);
+        c
+    }
+
+    /// How many objects [`Self::cow_unique`] copied.
+    pub fn cow_copies(&self) -> u64 {
+        self.cow_copies
     }
 
     /// An enum typed after its allocation (`TagEnumType`).
@@ -2227,6 +2366,18 @@ impl Object {
     #[inline]
     pub(crate) fn set_generation(&self, bits: u8) {
         unsafe { &*(self.addr() as *const GcHeader) }.generation.set(bits);
+    }
+
+    /// Copy-on-write: whether a second place may name this object.
+    #[inline]
+    pub fn is_shared(&self) -> bool {
+        // SAFETY: every kind shares the `repr(C)` header at the slot start.
+        unsafe { &*(self.addr() as *const GcHeader) }.shared.get()
+    }
+
+    #[inline]
+    pub(crate) fn set_shared(&self) {
+        unsafe { &*(self.addr() as *const GcHeader) }.shared.set(true);
     }
 
     #[must_use]
@@ -4137,6 +4288,10 @@ struct GcHeader {
     fresh: Cell<bool>,
     /// Nursery bits ([`GEN_YOUNG`], [`GEN_UNLOGGED`], [`GEN_PINNED`]).
     generation: Cell<u8>,
+    /// Copy-on-write: a second place may name this object, so a write
+    /// copies it first ([`Heap::cow_unique`]). Sticky until the slot is
+    /// reused.
+    shared: Cell<bool>,
     /// Debug / gc-stress: generation of the steal epoch the object was
     /// allocated in, 0 outside any epoch ([`EpochWriteScope`]). It takes a
     /// byte of what is header padding before an 8-aligned payload; release
@@ -4158,6 +4313,7 @@ impl GcHeader {
             marked: Cell::new(false),
             fresh: Cell::new(false),
             generation: Cell::new(0),
+            shared: Cell::new(false),
             #[cfg(any(debug_assertions, feature = "gc-stress"))]
             epoch: Cell::new(0),
         }
@@ -4276,6 +4432,7 @@ impl<T> Gc<T> {
             (*p).header.marked.set(false);
             (*p).header.fresh.set(false);
             (*p).header.generation.set(0);
+            (*p).header.shared.set(false);
         }
     }
 

@@ -92,6 +92,10 @@ pub enum ErrorCode {
     EscapeMismatch,
     /// An object made inside a `region { … }` block can leave it.
     RegionEscape,
+    /// A write copies an object another name shares (copy-on-write).
+    CowCopy,
+    /// A write lands on a temporary copy and is dropped.
+    CowDroppedWrite,
 
     DuplicateEnum,
     DuplicateConstructor,
@@ -207,6 +211,8 @@ impl ErrorCode {
             Self::ComptimeFoldBudget => "E0138",
             Self::EscapeMismatch => "E0139",
             Self::RegionEscape => "E0140",
+            Self::CowCopy => "E0141",
+            Self::CowDroppedWrite => "E0142",
             Self::DuplicateEnum => "E0200",
             Self::DuplicateConstructor => "E0201",
             Self::UnknownEnum => "E0202",
@@ -304,6 +310,8 @@ impl ErrorCode {
             Self::ComptimeFoldBudget => "call too long to compute while compiling without `comptime`",
             Self::EscapeMismatch => "stated escape fact does not hold",
             Self::RegionEscape => "object made in a region leaves it",
+            Self::CowCopy => "write copies a shared object",
+            Self::CowDroppedWrite => "write to a temporary copy is dropped",
             Self::DuplicateEnum => "duplicate enum",
             Self::DuplicateConstructor => "duplicate constructor",
             Self::UnknownEnum => "unknown enum",
@@ -409,6 +417,8 @@ mod tests {
             | ComptimeFoldBudget
             | EscapeMismatch
             | RegionEscape
+            | CowCopy
+            | CowDroppedWrite
             | DuplicateEnum
             | DuplicateConstructor
             | UnknownEnum
@@ -496,6 +506,8 @@ mod tests {
             ComptimeFoldBudget,
             EscapeMismatch,
             RegionEscape,
+            CowCopy,
+            CowDroppedWrite,
             DuplicateEnum,
             DuplicateConstructor,
             UnknownEnum,

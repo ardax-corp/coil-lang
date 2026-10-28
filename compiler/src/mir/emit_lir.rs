@@ -1610,6 +1610,16 @@ fn emit_stored(
                 });
             }
         }
+        MirInst::Cow { dest, src, unique } => {
+            emit_stack(out, *src, func, plan, regs, pool, loc)?;
+            out.push(IlOp::from_plain_byte(Byte::new(Instruction::Cow).with_operand_u32(u32::from(*unique)), loc));
+            if plan.need_slot[dest.index()] {
+                out.push(IlOp::StorePop {
+                    slot: u32::from(regs[dest.index()]),
+                    loc,
+                });
+            }
+        }
         MirInst::Stringify { dest, src } => {
             emit_stack(out, *src, func, plan, regs, pool, loc)?;
             out.push(IlOp::from_plain_byte(Byte::new(Instruction::STRINGIFY), loc));
@@ -2229,6 +2239,11 @@ fn emit_stack(
         MirInst::Stringify { src, .. } => {
             emit_stack(out, *src, func, plan, regs, pool, loc)?;
             out.push(IlOp::from_plain_byte(Byte::new(Instruction::STRINGIFY), loc));
+            Ok(())
+        }
+        MirInst::Cow { src, unique, .. } => {
+            emit_stack(out, *src, func, plan, regs, pool, loc)?;
+            out.push(IlOp::from_plain_byte(Byte::new(Instruction::Cow).with_operand_u32(u32::from(*unique)), loc));
             Ok(())
         }
         MirInst::Unbox { src, tag, .. } => {

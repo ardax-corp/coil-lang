@@ -503,6 +503,13 @@ pub enum Instruction {
     /// it reaches through precise words too. The VM skips what it cannot
     /// free safely (see `Heap::free_early`). Never collects.
     FreeEarly,
+    /// Copy-on-write (archive 6.3): pop a heap word and push it back.
+    /// Operand 0 (share): a second place now names the object, so the next
+    /// write copies it. Operand 1 (unique): a write through the word
+    /// follows, so a shared class instance or array is replaced by a
+    /// shallow copy first (an allocation and safepoint). Identity classes
+    /// and other kinds pass through.
+    Cow,
 }
 
 impl From<u8> for Instruction {
@@ -1003,6 +1010,7 @@ impl Instruction {
             Self::VMask => "VMask",
             Self::VScan => "VScan",
             Self::FreeEarly => "FreeEarly",
+            Self::Cow => "Cow",
         }
     }
 }
@@ -2120,7 +2128,7 @@ mod tests {
     fn instruction_from_u8_covers_last_appended_variant() {
         // ARCHIVE stability: last variant must remain decodable (keep in sync
         // with machine release `promise!` ceiling).
-        let last = Instruction::FreeEarly as u8;
+        let last = Instruction::Cow as u8;
         let decoded: Instruction = last.into();
         assert_eq!(decoded as u8, last);
     }

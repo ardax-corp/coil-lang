@@ -543,6 +543,10 @@ pub struct Checker {
     /// fields read `readonly` and `readonly C` is `C` (#1558).
     readonly_classes: HashSet<String>,
 
+    /// `shared class` keys: identity types copy-on-write never copies
+    /// (resources, channels, `Ref<T>`).
+    shared_classes: HashSet<String>,
+
     /// Owner class while typechecking an `impl` block (`self` exception for readonly).
     impl_owner: Option<String>,
 

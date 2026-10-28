@@ -88,13 +88,13 @@ test("an IO wait in one task lets another task run") {
     let listener = listen("127.0.0.1", 0)?;
     let port = local_addr(listener)?[1];
     let log: Vec<string> = Vec::new();
-    let r = scope(fn (Scope s) use (listener, port, log) {
-        let server = s.spawn(fn () use (listener, log) {
+    let r = scope(fn (Scope s) use (listener, port, mut log) {
+        let server = s.spawn(fn () use (listener, mut log) {
             let conn = accept_one(listener);
             log.push("accepted");
             body_len(conn)
         });
-        s.spawn(fn () use (port, log) {
+        s.spawn(fn () use (port, mut log) {
             task::sleep(20);
             log.push("connecting");
             send_later(port, 0, "hello tasks")

@@ -263,7 +263,7 @@ pub(super) fn slot_extent(b: &Byte, constants: &[u64]) -> Option<usize> {
             max(&[d, from, h])
         }
         VMove | VFma => Some(0),
-        NOOP | DATA | HALT | Panic | CONST | STRING | CodePtr | DUPLICATE | POP | PRINT | FreeEarly
+        NOOP | DATA | HALT | Panic | CONST | STRING | CodePtr | DUPLICATE | POP | PRINT | FreeEarly | Cow
         | ADD | SUB | MUL | DIV | MOD | LE | LEQ | GT | GEQ | EQ | NEQ | Pow | BITAND | BITOR
         | ADDF | SUBF | MULF | DIVF | MODF | LEF | LEQF | EQF | NEQF | GTF | GEQF | PowF | SHL | SHR | XOR
         | AND | OR | NOT | LogNot | NEG | NEGF | CastIntToFloat | CastFloatToInt
@@ -1330,6 +1330,16 @@ fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Opt
         }
         POP | PRINT | FreeEarly | StoreStatic => {
             st.pop()?;
+        }
+        // Share marks the object in place; unique may allocate its copy (a
+        // safepoint with the original popped).
+        Cow if b.operand_u32() & 1 == 0 => {
+            let (heap, must) = st.pop_copy()?;
+            st.push_copy(heap, must)?;
+        }
+        Cow => {
+            st.pop()?;
+            record_alloc(st, &mut step)?;
         }
         LoadStatic => st.push(true)?,
         // Writes statics only; no stack change and no safepoint.

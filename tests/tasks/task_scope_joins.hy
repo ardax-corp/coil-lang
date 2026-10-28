@@ -26,13 +26,13 @@ test("a scope returns a non-int body value") {
 
 test("the scope waits for children nobody joined") {
     let log: Vec<int> = Vec::new();
-    let r = scope(fn (Scope s) use (log) {
-        s.spawn(fn () use (log) {
+    let r = scope(fn (Scope s) use (mut log) {
+        s.spawn(fn () use (mut log) {
             task::sleep(20);
             log.push(1);
             0
         });
-        s.spawn(fn () use (log) {
+        s.spawn(fn () use (mut log) {
             task::yield_now();
             log.push(2);
             0
@@ -70,10 +70,10 @@ test("joining a task twice returns its value both times") {
 
 test("a child can spawn a sibling through the captured scope") {
     let log: Vec<int> = Vec::new();
-    let r = scope(fn (Scope s) use (log) {
-        let first = s.spawn(fn () use (s, log) {
+    let r = scope(fn (Scope s) use (mut log) {
+        let first = s.spawn(fn () use (s, mut log) {
             log.push(1);
-            s.spawn(fn () use (log) {
+            s.spawn(fn () use (mut log) {
                 log.push(3);
                 0
             });
@@ -105,7 +105,7 @@ test("a child returns a heap value through join") {
 
 test("tasks kept past the scope still hold their values") {
     let kept: Vec<Task<string>> = Vec::new();
-    let r = scope(fn (Scope s) use (kept) {
+    let r = scope(fn (Scope s) use (mut kept) {
         kept.push(s.spawn(fn () => "a"));
         kept.push(s.spawn(fn () => "b"));
         0

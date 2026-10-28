@@ -70,6 +70,10 @@ pub struct Summary {
     /// Bit `i`: the call may keep what its parameter `i` reaches after it
     /// returns, other than through its result ([`escape`]).
     pub escapes: u64,
+    /// Bit `i`: the call may keep the object passed as parameter `i`
+    /// itself (not only what it reaches) after it returns, other than
+    /// through its result: what copy-on-write must share at the call.
+    pub keeps: u64,
     /// Bit `i`: the result may reach what parameter `i` reaches.
     pub returns: u64,
     /// The result may reach an object this call did not allocate, or one
@@ -82,6 +86,8 @@ pub struct Summary {
 mod escape;
 #[path = "early_free.rs"]
 mod early_free;
+#[path = "cow.rs"]
+pub mod cow;
 
 /// Effects a write to an object can have that its owner hides.
 const OWNED_BITS: u16 = EffectFlags::HEAP_MUT | EffectFlags::RESIZE;
@@ -129,6 +135,7 @@ impl Summary {
             statics: false,
             param_only: 0,
             escapes: u64::MAX,
+            keeps: 0,
             returns: u64::MAX,
             shared_ret: true,
         }
@@ -224,6 +231,14 @@ impl ProgramEffects {
     pub fn early_frees(&self, checker: &Checker, module_path: &str, module: &HirModule, body: &HirBody, host: &dyn Fn(HirId) -> Option<usize>) -> Option<HirBody> {
         let lookup = |callee: &Callee, args: &[HirId]| self.call_summary(checker, module_path, body, callee, args);
         early_free::rewrite(module, body, &lookup, host)
+    }
+
+    /// `body` with its copy-on-write ops ([`cow`]), when it needs any.
+    /// `mutates` is the body's own summary bits: the parameters it writes
+    /// in place for its caller.
+    pub fn cow_rewrite(&self, checker: &Checker, module_path: &str, module: &HirModule, body: &HirBody, mutates: u64) -> (Option<HirBody>, Vec<reporting::Message>) {
+        let lookup = |callee: &Callee, args: &[HirId]| self.call_summary(checker, module_path, body, callee, args);
+        cow::rewrite(checker, module, body, &lookup, mutates)
     }
 
     /// What a call in `body` may do, from the summaries recorded so far:
@@ -1329,7 +1344,7 @@ fn local_roots(body: &HirBody, derived: &HashMap<LocalId, u64>, l: LocalId) -> u
     own | derived.get(&l).copied().unwrap_or(0)
 }
 
-fn pat_binds(pat: &HirPat, out: &mut Vec<LocalId>) {
+pub(crate) fn pat_binds(pat: &HirPat, out: &mut Vec<LocalId>) {
     match pat {
         HirPat::Bind(l) => out.push(*l),
         HirPat::Tuple(items) => items.iter().for_each(|p| pat_binds(p, out)),
@@ -1584,8 +1599,22 @@ impl Cx<'_> {
     fn body(&self, index: usize, summaries: &[Summary]) -> Summary {
         let w = self.walk(index, summaries, false);
         let (escapes, returns, shared_ret) = escape::summarize(self, &w);
+        let keeps = {
+            let body = &self.module.bodies[index];
+            let lookup = |callee: &Callee, args: &[HirId]| match callee {
+                Callee::Named { name, def, .. } => Some(self.named(&w, name, *def)),
+                Callee::Method { name } => self.method(&w, *args.first()?, name).map(|(s, _)| s),
+                Callee::Value(f) => self.fn_value(&w, *f),
+            };
+            let k = cow::keeps(self.module, body, &lookup);
+            if std::env::var("COIL_COW_TRACE").is_ok() {
+                eprintln!("keeps {} = {k:b}", body.name);
+            }
+            k
+        };
         Summary {
             escapes,
+            keeps,
             returns,
             shared_ret,
             ..w.out
@@ -2103,7 +2132,7 @@ impl Cx<'_> {
                 Builtin::Declare | Builtin::Invoke | Builtin::Dload => {
                     self.note(w, id, EffectFlags::FFI | EffectFlags::RESIZE, || "calls foreign code".into())
                 }
-                Builtin::TypeOf | Builtin::Done | Builtin::Default | Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::Relayout | Builtin::FreeEarly { .. } => {}
+                Builtin::TypeOf | Builtin::Done | Builtin::Default | Builtin::Unbox { .. } | Builtin::Box { .. } | Builtin::Stringify | Builtin::Relayout | Builtin::FreeEarly { .. } | Builtin::Cow { .. } => {}
                 Builtin::Print => self.note(w, id, EffectFlags::WRITE, || "prints".into()),
                 // Runs a minor collection: no effect a caller can see.
                 Builtin::Region { .. } => self.note_hidden(w, id, EffectFlags::GC, || "has a `region`".into()),
@@ -2415,6 +2444,7 @@ impl Cx<'_> {
             statics: visible.contains(EffectFlags::HOST) || visible.contains(EffectFlags::HEAP_MUT),
             param_only: 0,
             escapes: u64::MAX,
+            keeps: 0,
             returns: u64::MAX,
             shared_ret: true,
         })
@@ -2684,6 +2714,7 @@ impl Cx<'_> {
                     // Discharged only where every impl's bits are.
                     param_only: o.param_only & s.param_only,
                     escapes: o.escapes | s.escapes,
+                    keeps: o.keeps | s.keeps,
                     returns: o.returns | s.returns,
                     shared_ret: o.shared_ret || s.shared_ret,
                 },

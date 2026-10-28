@@ -6,7 +6,7 @@ use gc::collect;
 // Two locals share the vector, so early freeing leaves it to the GC.
 fn garbage() {
     let v: Vec<int> = Vec::new();
-    let alias = v;
+    let alias = mut v;
     let i = 0;
     while i < 10000 {
         v.push(i);

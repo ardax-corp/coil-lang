@@ -57,6 +57,7 @@ impl<'a> Synth<'a> {
             ty: Some(ty),
             kind,
             captured: false,
+            borrow: false,
         });
         if kind == LocalKind::Param {
             self.body.params.push(id);

@@ -70,6 +70,9 @@ pub struct NurseryFlag {
     /// Allocate young objects in a copying nursery: on (default) or off
     #[arg(long, value_name = "on|off", value_parser = parse_nursery, action = clap::ArgAction::Set)]
     pub nursery: Option<bool>,
+    /// At exit, print how many copy-on-write copies each source line made
+    #[arg(long)]
+    pub cow_report: bool,
 }
 
 fn parse_nursery(s: &str) -> Result<bool, String> {

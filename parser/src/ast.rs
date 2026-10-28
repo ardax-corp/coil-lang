@@ -741,6 +741,9 @@ pub enum Expression<'expr> {
     Lambda {
         args: Output<'expr>,
         captures: Vec<&'expr str>,
+        /// The captures written `use (mut x)`: borrowed, not copied
+        /// (a subset of `captures`).
+        borrows: Vec<&'expr str>,
         body: Output<'expr>,
     },
 }
@@ -1324,6 +1327,9 @@ impl<'a> Display for Expression<'a> {
             }
             Self::ComptimeBlock(body) => write!(f, "comptime {}", body.1),
             Self::RegionMark => write!(f, "region"),
+            Self::Call { name, args: Some(args) } if matches!(name.1.as_ref(), Self::Identifier("__mut")) && args.len() == 1 => {
+                write!(f, "mut {}", args[0].1)
+            }
             Self::Call { name, args } => {
                 write!(
                     f,
@@ -1835,6 +1841,7 @@ impl<'a> Display for Expression<'a> {
             Self::Lambda {
                 args,
                 captures,
+                borrows,
                 body,
             } => {
                 // Prefer comma-separated params for round-trip with `arg_list`.
@@ -1848,7 +1855,8 @@ impl<'a> Display for Expression<'a> {
                 };
                 write!(f, "fn ({})", params)?;
                 if !captures.is_empty() {
-                    write!(f, " use ({})", captures.join(", "))?;
+                    let caps: Vec<String> = captures.iter().map(|c| if borrows.contains(c) { format!("mut {c}") } else { (*c).to_string() }).collect();
+                    write!(f, " use ({})", caps.join(", "))?;
                 }
                 match body.1.as_ref() {
                     Self::Block(_) => write!(f, " {{\n{}}}", body.1),
