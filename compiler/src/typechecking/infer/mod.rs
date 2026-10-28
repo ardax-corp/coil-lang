@@ -628,6 +628,11 @@ pub struct Checker {
     /// Yield value type for the enclosing `gen fn`, if any.
     current_yield_ty: Option<Ty>,
 
+    /// True while inferring a `gen fn`'s own body (not a lambda or test
+    /// case nested in it): a bare `return;` there finishes the coroutine
+    /// whatever it yields (#2088).
+    coro_body: bool,
+
     /// Send/resume-in value type for the enclosing `gen fn`, if any.
     current_send_ty: Option<Ty>,
 
