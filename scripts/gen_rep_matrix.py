@@ -18,8 +18,7 @@ written as what it does today: a refusal goes under `compile_fail/` with its
 `@expected` codes, a wrong result or a crash is written under
 `scripts/rep_matrix_known_wrong/` (outside the corpora), so CI stays green
 and the baseline is the record. `--probe` compiles and runs every cell (in
-a scratch directory, at the default level, `-O 0`, `COIL_HIR_INLINE=0` and
-`COIL_HIR_SPECIALIZE=0`) and
+a scratch directory, at the default level and `-O 0`) and
 reports how each one ends; `--update-baseline` writes what it saw.
 """
 
@@ -484,13 +483,10 @@ def run_cell(bin_dir, src, out, flags, env_extra):
     return {"status": "crash", "detail": f"exit {p.returncode}: {tail}"}
 
 
-# The settings CI runs the corpora under (plus the shared-body path with
-# specialisation off): a cell is green only when it is green in each.
+# The settings CI runs the corpora under: a cell is green only when it is green in each.
 MODES = [
     ("", [], {}),
     ("-O 0", ["-O", "0"], {}),
-    ("COIL_HIR_INLINE=0", [], {"COIL_HIR_INLINE": "0"}),
-    ("COIL_HIR_SPECIALIZE=0", [], {"COIL_HIR_SPECIALIZE": "0"}),
 ]
 
 

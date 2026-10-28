@@ -49,7 +49,7 @@ C0 answers four questions:
   that. Incremental S4 stays a **single-mutator** path.
 - Moving / compacting GC. Objects still do not move
   ([heap-identity.md](heap-identity.md)). Mapped-slot relocate stays identity.
-- Treating `COIL_AUTO_PAR` as a runtime `.hyc` switch.
+- Treating `--auto-par` as a runtime `.hyc` switch.
 - Dropping isolates for user `thread::spawn` / channels in C1. User spawn
   keeps today’s `PortableValue` copy + `NotSendable`. Shared-heap is an
   **auto-par / loop-chunk** path first.

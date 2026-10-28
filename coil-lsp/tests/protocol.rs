@@ -294,7 +294,7 @@ fn comptime_io_is_replayed_from_the_cache() {
     let built = Command::new(&coil)
         .current_dir(&dir)
         .env("CT_VALUE", "one")
-        .env("COIL_CACHE_DIR", dir.join("user-cache"))
+        .env("XDG_CACHE_HOME", dir.join("user-cache"))
         .args(["compile", "-o", "main.hyc"])
         .args(flags)
         .arg("src/main.hy")

@@ -68,7 +68,7 @@ kept dense / vectorize / fuse-IL. No `try_specialize_body` change.
 | **X1** | Vectorize remainder `i += 1`: `DenseConst` into scratch instead of `CONST ; STORE ; DenseBin` | `sum` / `scan` / `fill` scalar tails (`artifacts/.../for_in_sum.fn.txt`, `vec_scan.*.fn.txt`) | `mir/vectorize.rs` `emit_const_i64` → `emit.rs` `emit_const` (`DenseConst`) | **Done (emit, no opcode).** Remainder IV bump is `DenseConst ; DenseBin` (X2 peeks a trailing `JMP` in the dense streak). Existing `DenseConst` only; no specialize-keep; print `main` / FORMAT unchanged. |
 | **X2** | `DenseBin ; JMP` latch coalescing | mandelbrot / nsieve / SIMD tails | dense-streak VM peek | **Done (no new opcode).** A second `Instruction` discriminant (~1.12–1.17× fib execute/LTO tax on identical `.hyc`) was reverted. Bytecode stays `DenseBin ; JMP` / `DenseBin2 ; JMP`. Default table and hotmatch peek the trailing `JMP` after `DenseBin`/`DenseBin2` (one dispatch on the latch). Giant match is byte-identical to main (two dispatches). Not S1, not S2, not X4 (X4 would peek adjacent `DenseBin`). `fib` has no this shape; keep `unlikely(is_hot)` / `.rodata` `ALWAYS_HOT`. Print `main` / FORMAT unchanged. |
 | **X3** | `MakeEnum ; RETURN` fuse (one-word heap) | `bottom_up` (`MakeEnum ; RETURN` twice) | IL peep — `MakeEnum` is **typed** `IlOp`, `Return` is typed | **Done (fuse-select).** `MakeEnumReturn` (archive **minor 19**): same packing as `MakeEnum`. Two sites on `bottom_up` (Leaf arity-0, Node arity-2). Reuses `is_one_word_return` (no two-word RETURN). Not ALWAYS_HOT — alloc+return stays on the giant match like `MakeEnum`/`RETURN` (`unlikely(is_hot)`). Print `main` / FORMAT unchanged. |
-| **X4** | VM coalescing of adjacent `DenseBin` **without** a new opcode | same as S2 | `machine/src/dispatch.rs` dense-streak peek | **Cancel (A/B on main after S2).** Peek leftover `DenseBin` after `DenseBin2` only (odd-length residue / headers). Dissect **does** fire: mandelbrot y/x headers `DenseCast ; DenseBin2 ; leftover DenseBin`; inner latch `DenseBin2 ; leftover IADD ; JMP`. No unpacked `DenseBin; DenseBin` (S2). Fat LTO `COIL_AUTO_PAR=0` hyperfine vs `main` (same `.hyc`): mandelbrot 20.4±2.9 vs 20.7±2.4 ms (**wash**); fib 60.4±1.5 vs 60.9±2.2 (**flat**, no discriminant tax); nsieve 2.3 vs 2.3 (**wash**). `dense_cast_bin` hit ~1.08× then washed on a second run. Do **not** merge for flagship walls. Giant match does not peek. No archive bump. |
+| **X4** | VM coalescing of adjacent `DenseBin` **without** a new opcode | same as S2 | `machine/src/dispatch.rs` dense-streak peek | **Cancel (A/B on main after S2).** Peek leftover `DenseBin` after `DenseBin2` only (odd-length residue / headers). Dissect **does** fire: mandelbrot y/x headers `DenseCast ; DenseBin2 ; leftover DenseBin`; inner latch `DenseBin2 ; leftover IADD ; JMP`. No unpacked `DenseBin; DenseBin` (S2). Fat LTO `--auto-par off` hyperfine vs `main` (same `.hyc`): mandelbrot 20.4±2.9 vs 20.7±2.4 ms (**wash**); fib 60.4±1.5 vs 60.9±2.2 (**flat**, no discriminant tax); nsieve 2.3 vs 2.3 (**wash**). `dense_cast_bin` hit ~1.08× then washed on a second run. Do **not** merge for flagship walls. Giant match does not peek. No archive bump. |
 
 Not ready without a gate (still not specialize-keep):
 
@@ -165,7 +165,7 @@ entry tax. New packed opcodes must not be added to `hard_refuse` /
 
 ## Method / checksums
 
-Release `coil` / `coil-dissect`, `COIL_AUTO_PAR=0`,
+Release `coil` / `coil-dissect`, `--auto-par off`,
 `--root .deps/coil-stdlib/src`. No `coil dissect file.hyc`; dissect is
 in-memory on the same `Pipeline`. `--opt-stats` is IL-pass counters only.
 
@@ -182,11 +182,10 @@ in-memory on the same `Pipeline`. `--opt-stats` is IL-pass counters only.
 | `examples/perf/vec_scan.hy` | `536739840` | `scan`, `fill` | `V*` + scalar tail |
 
 ```bash
-export COIL_AUTO_PAR=0
 BIN=./target/release/coil
 DISSECT=./target/release/coil-dissect
 R=(--root .deps/coil-stdlib/src)
-$BIN compile "${R[@]}" examples/perf/mandelbrot.hy -o /tmp/m.hyc
+$BIN compile --auto-par off "${R[@]}" examples/perf/mandelbrot.hy -o /tmp/m.hyc
 $DISSECT "${R[@]}" examples/perf/mandelbrot.hy --fn mandelbrot
 $BIN run /tmp/m.hyc
 ```

@@ -20,9 +20,6 @@ use crate::runner::{DocTests, Report, TestOptions};
 /// Default test root when no path is given.
 pub const TESTS_DIR: &str = "tests";
 
-/// Environment fallback for `--seed` (CI can pin an order without editing argv).
-pub const SEED_ENV: &str = "COIL_TEST_SEED";
-
 pub enum Parsed {
     Help,
     Run(ReportConfig, Box<TestOptions>),
@@ -50,8 +47,8 @@ pub const DEFAULT_WALL_TIMEOUT: u64 = 60;
     after_help = "Files under a `compile_fail/` directory must be rejected by the compiler\n\
 with an error code their header declares (`// @expected E0209 — why`).\n\
 \n\
-`--seed N` shuffles files and cases (decimal or 0x hex; default: random,\n\
-or $COIL_TEST_SEED; the header prints the seed). `--no-shuffle` keeps\n\
+`--seed N` shuffles files and cases (decimal or 0x hex; default: random;\n\
+the header prints the seed). `--no-shuffle` keeps\n\
 sorted path order and source order.\n\
 \n\
 Code examples in `///` docs run as doc-tests (`doc: path::item (file:line)`):\n\
@@ -337,13 +334,7 @@ fn assemble(parts: RunParts) -> Result<(ReportConfig, Box<TestOptions>), String>
     if coverage && parts.debug.is_some_and(|l| l != compiler::DebugLevel::Full) {
         return Err("coverage needs byte spans: drop -g0 / -g1 (or pass -g2)".into());
     }
-    let env_seed = std::env::var(SEED_ENV).ok();
-    let order = resolve_order(
-        parts.seed,
-        parts.no_shuffle,
-        env_seed.as_deref(),
-        fresh_seed,
-    )?;
+    let order = resolve_order(parts.seed, parts.no_shuffle, fresh_seed)?;
     Ok((
         config,
         Box::new(TestOptions {
@@ -369,6 +360,7 @@ fn assemble(parts: RunParts) -> Result<(ReportConfig, Box<TestOptions>), String>
             fold_calls: parts.opt.fold_calls,
             early_free: parts.opt.early_free,
             nursery: parts.nursery,
+            auto_par: parts.opt.auto_par,
             contract_runs: parts.contract_runs,
             grants: parts.grants.into_grants(),
             extra_roots: parts.roots.root,
@@ -432,28 +424,15 @@ fn default_jobs() -> usize {
     std::thread::available_parallelism().map_or(1, |n| n.get())
 }
 
-/// `--no-shuffle` > `--seed` > `$COIL_TEST_SEED` > a fresh random seed.
-fn resolve_order(
-    seed: Option<u64>,
-    no_shuffle: bool,
-    env_seed: Option<&str>,
-    fresh: impl FnOnce() -> u64,
-) -> Result<Order, String> {
+/// `--no-shuffle` > `--seed` > a fresh random seed.
+fn resolve_order(seed: Option<u64>, no_shuffle: bool, fresh: impl FnOnce() -> u64) -> Result<Order, String> {
     if no_shuffle {
         if seed.is_some() {
             return Err("`--seed` and `--no-shuffle` cannot be combined".into());
         }
         return Ok(Order::Sorted);
     }
-    if let Some(seed) = seed {
-        return Ok(Order::Shuffled(seed));
-    }
-    match env_seed.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(text) => parse_seed(text)
-            .map(Order::Shuffled)
-            .map_err(|e| format!("{SEED_ENV}: {e}")),
-        None => Ok(Order::Shuffled(fresh())),
-    }
+    Ok(Order::Shuffled(seed.unwrap_or_else(fresh)))
 }
 
 #[cfg(test)]
@@ -570,29 +549,12 @@ mod tests {
     }
 
     #[test]
-    fn order_precedence_flag_env_then_fresh() {
+    fn order_precedence_flag_then_fresh() {
         let fresh = || 99;
-        assert_eq!(
-            resolve_order(None, false, None, fresh),
-            Ok(Order::Shuffled(99))
-        );
-        assert_eq!(
-            resolve_order(None, false, Some("0x10"), fresh),
-            Ok(Order::Shuffled(16))
-        );
-        assert_eq!(
-            resolve_order(None, false, Some("  "), fresh),
-            Ok(Order::Shuffled(99))
-        );
-        assert_eq!(
-            resolve_order(Some(5), false, Some("0x10"), fresh),
-            Ok(Order::Shuffled(5))
-        );
-        assert_eq!(
-            resolve_order(None, true, Some("0x10"), fresh),
-            Ok(Order::Sorted)
-        );
-        assert!(resolve_order(None, false, Some("bad"), fresh).is_err());
+        assert_eq!(resolve_order(None, false, fresh), Ok(Order::Shuffled(99)));
+        assert_eq!(resolve_order(Some(5), false, fresh), Ok(Order::Shuffled(5)));
+        assert_eq!(resolve_order(None, true, fresh), Ok(Order::Sorted));
+        assert!(resolve_order(Some(5), true, fresh).is_err());
     }
 
     #[test]

@@ -10,6 +10,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [Type unification](type-unification.md) | Unification rules of the checker, by type shape |
 | [Comptime](comptime.md) | Code that runs while compiling: consts, `comptime` expressions and blocks, macros, folding; stages, limits, IO grants, result cache, tooling |
 | [WebAssembly](wasm.md) | `coil` for wasm32-wasip1 (the website playground): 64-bit `Value` words, no FFI / sockets / OS threads, threads run when joined, `// @needs` test header, running the corpora under Node |
+| [Compiler peak memory](compile-memory.md) | Where `coil compile`'s own peak RSS comes from per phase, how it was measured, what was cut (2026-10-27: spool 93 → 65 MiB) and what is left |
 | [Build cache](build-cache.md) | #1881: `coil FILE` / `coil compile` reuse the archive of an unchanged program from `~/.cache/coil/build`; key, inputs, what is not cached, `--no-build-cache` |
 | [Macros](macros.md) | User `derive` / attribute macros: `macro` model, `quote`, compile-time VM stage, hygiene, sandbox |
 | [Numeric MIR](mir.md) | MIR: every body lowers from HIR to SSA; dense and LIR tiers; pass history (P1–P12, I1–I8) |
@@ -38,7 +39,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [Packed byte arrays](packed-bytes.md) | #927: `Vec<byte>` / `Vec<bool>` one byte per element; lossless `Bytes` storage, `WORD_BYTE` construction stamp, byte copies for I/O / FFI / threads; measurements |
 | [Heap identity](heap-identity.md) | Mapped slab + header poison for `find_object_by_addr` (COI-200) |
 | [Incremental GC](gc-incremental.md) | COI-309 S4: safepoint mark (no write barrier) + lazy sweep; moving GC deferred |
-| [GC evacuation](gc-evacuation.md) | Mostly-copying evacuation of sparse chunks (default on, `COIL_GC_COMPACT=0` off); precise refs rewritten, ambiguous ones pin |
+| [GC evacuation](gc-evacuation.md) | Mostly-copying evacuation of sparse chunks (always on; `COIL_GC_COMPACT=0` off in unit tests); precise refs rewritten, ambiguous ones pin |
 | [SIMD](simd.md) | `coil-simd` — packed LA + V0/V1 `V*` opcode backend |
 | [Auto-par](auto-par.md) | Purity + parameterized AlwaysPar IPA (COI-366 F1 hop/grain); F2 broader admission (COI-368); loop IPA (COI-362 E4); C1/C2 shared-heap spawn (E6/E7); [branch-miss notes](auto-par-branch-misses.md) |
 | [Par lock hints](par-lock-hints.md) | F3 (COI-369): userland locks + E0805 call-bag escape hints (no compiler locks) |

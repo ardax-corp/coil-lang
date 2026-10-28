@@ -11,8 +11,7 @@ Measured on a program that uses `collections::map::HashMap` (release build,
 
 ## Where
 
-`build/` in the user cache root (`$COIL_CACHE_DIR`, else
-`$XDG_CACHE_HOME/coil`, else `~/.cache/coil`), next to the comptime result
+`build/` in the user cache root (`$XDG_CACHE_HOME/coil`, else `~/.cache/coil`), next to the comptime result
 cache. One file per entry, `<key>.hyc`: a list of inputs with their sha256,
 then the archive. Entries are written to a temporary file and renamed, so a
 concurrent run sees a whole entry or none. At most 256 entries are kept, and

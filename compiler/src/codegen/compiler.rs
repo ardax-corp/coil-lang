@@ -429,13 +429,12 @@ impl Compiler {
         self.auto_par = on;
     }
 
-    /// Turn typed inlining of HIR bodies on or off (default `COIL_HIR_INLINE`).
+    /// Turn typed inlining of HIR bodies on (the default) or off.
     pub fn set_hir_inline(&mut self, on: bool) {
         self.opt_options.hir_inline = on;
     }
 
-    /// Keep enum locals built in place as two slots or boxed (default
-    /// `COIL_HIR_PAIR_LOCALS`).
+    /// Keep enum locals built in place as two slots (the default) or boxed.
     pub fn set_hir_pair_locals(&mut self, on: bool) {
         self.opt_options.hir_pair_locals = on;
     }
@@ -1970,6 +1969,19 @@ impl Compiler {
     /// The program number of the module compiled last.
     pub fn program_seq(&self) -> usize {
         self.program_seq
+    }
+
+    /// Whether program `seq` holds methods a later module may clone, which
+    /// compile from its AST ([`Self::emit_foreign_clones`]).
+    pub fn may_clone_from(&self, seq: usize) -> bool {
+        self.module_ctxs.contains_key(&seq)
+    }
+
+    /// Drop the contexts kept for later modules' clones (a checker snapshot
+    /// each): once every module is compiled, foreign clones included,
+    /// nothing reads them.
+    pub fn release_module_ctxs(&mut self) {
+        self.module_ctxs = HashMap::new();
     }
 
     /// Compile the queued clones of other modules' methods, each from its

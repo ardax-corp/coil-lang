@@ -89,6 +89,8 @@ pub(crate) struct CliArgs {
     pub nursery: Option<bool>,
     /// `--cow-report`: copies per source line at exit.
     pub cow_report: bool,
+    /// `--auto-par on|off`; `None` keeps the pipeline default.
+    pub auto_par: Option<bool>,
     pub opt_stats: bool,
     pub opt_stats_json: bool,
     /// Reuse and fill the build cache (off with `--no-build-cache`).
@@ -379,6 +381,7 @@ fn parse_coil_args(args: &[String]) -> Result<CliArgs, String> {
             early_free: None,
             nursery: None,
             cow_report: false,
+            auto_par: None,
             opt_stats: false,
             opt_stats_json: false,
             build_cache: false,
@@ -443,6 +446,7 @@ fn cli_from(
         early_free: opt.early_free,
         nursery: None,
         cow_report: false,
+        auto_par: opt.auto_par,
         opt_stats: profile.opt_stats,
         opt_stats_json: profile.opt_stats_json,
         build_cache: !profile.no_build_cache,

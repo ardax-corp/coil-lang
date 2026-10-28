@@ -164,7 +164,7 @@ than assume it); the
 `ObjFn` arm is unchanged, and the message is built in a `#[cold]` helper.
 
 Measured on a loop of 2×10M indirect calls (named functions and a capturing
-closure, `COIL_AUTO_PAR=0`, release, 4 cores under load): wall time was noise
+closure, `--auto-par off`, release, 4 cores under load): wall time was noise
 (median 3.35 s → 3.47 s in one 10-run interleave, 3.83 s → 3.74 s in a
 20-run one); callgrind on the 2×500k version counted 1,411.1M → 1,407.6M
 instructions (−0.25%).

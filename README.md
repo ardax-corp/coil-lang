@@ -12,12 +12,13 @@ In GitHub Actions, install the snapshot instead of building coil from source:
 
 ```yaml
 - uses: ardax-corp/coil-lang/.github/actions/setup-coil@main
+  id: coil
   with:
-    stdlib: true   # optional: also clone coil-stdlib into $COIL_STDLIB_DIR
-- run: coil test --root "$COIL_STDLIB_DIR/src"
+    stdlib: true   # optional: also clone coil-stdlib
+- run: coil test --root "${{ steps.coil.outputs.stdlib }}"
 ```
 
-`coil` reads no environment variable for library roots: pass each one with `--root`. `COIL_STDLIB_DIR` is only where the action put the checkout (also its `src` output).
+`coil` reads no environment variable for library roots: pass each one with `--root`.
 
 With [spool](https://github.com/ardax-corp/spool), `./bootstrap.sh --channel edge --install` installs the snapshot into `~/.coil`.
 

@@ -57,33 +57,20 @@ Basic-block reordering (COI-129) and jump threading also happen in HIR lowering:
 
 ### Environment knobs
 
-A few switches no level sets are on by default and turned off by an
-environment variable, for bisecting a miscompile or measuring one pass.
-Each is an `OptimizeOptions` field: `OptLevel::options` reads the
-variable once when it builds the options (`env_knobs` in
-[`opt_level.rs`](../../compiler/src/il/opt/opt_level.rs)), the passes read
-the field, and `Compiler::set_opt_level` keeps the field's value across a
-level change. `0` / `false` / `off` / `no` turn a switch off; anything
-else, or unset, leaves it on.
+A few switches no level sets are on at every level
+(`level_free_knobs` in [`opt_level.rs`](../../compiler/src/il/opt/opt_level.rs));
+`Compiler::set_opt_level` keeps their values across a level change.
 
-| Variable | Field | Off means |
-|----------|-------|-----------|
-| `COIL_HIR_INLINE` | `hir_inline` | no typed inlining (`Pipeline::set_hir_inline` overrides) |
-| `COIL_HIR_INLINE_PAIR` | `hir_inline_pair` | callees returning a two-word `Option` / `Result` / enum stay calls |
-| `COIL_HIR_INLINE_HEAP` | `hir_inline_heap` | callees with heap locals stay calls |
-| `COIL_HIR_INLINE_LOOPS` | `hir_inline_loops` | callees with loops stay calls |
-| `COIL_HIR_SPECIALIZE` | `hir_inline_specialize` | a too-big callee is not retried with its constant arguments bound |
-| `COIL_HIR_INLINE_MONO` | `hir_inline_mono` | mono clone callees stay calls |
-| `COIL_HIR_MATCH_TREE` | `hir_match_tree` | nested matches test each row in order, not by outer tag |
-| `COIL_HIR_PAIR_LOCALS` | `hir_pair_locals` | an enum local built in place is boxed, not two slots |
-| `COIL_MIR_SCCP` | `mir_sccp` | no MIR SCCP (the other `mir_fold` passes still run) |
-| `COIL_AUTO_PAR` | `auto_par` | no automatic fork-join (`Pipeline::set_auto_par(false)` too) |
-| `COIL_HIR_BISECT=N` | `hir_bisect` | (a number, unset by default) only the first `N` bodies HIR lowering admits in the process lower; the `N`th is named on stderr |
+| Switch | Field | Off means |
+|--------|-------|-----------|
+| `--auto-par on\|off` | `auto_par` | no automatic fork-join (`Pipeline::set_auto_par`) |
+| `Pipeline::set_hir_inline` (unit tests only) | `hir_inline` | no typed inlining |
+| `COIL_HIR_BISECT=N` | `hir_bisect` | (a number, unset by default) only the first `N` bodies HIR lowering admits in the process lower; the `N`th is named on stderr. Debug builds only |
 
-`COIL_CALL_FOLD=0` turns compile-time call folding off through
-`Pipeline::call_fold` instead (see `call_fold`). `COIL_HIR_WHY`,
-`COIL_HIR_MIR_WHY` and `COIL_HIR_INLINE_WHY` only print why a body or
-call was refused; they change no code.
+Compile-time call folding: `--fold-calls on|off` or
+`Pipeline::set_call_fold` (see `call_fold`). In the compiler's own unit
+tests, `COIL_HIR_INLINE_WHY` prints why a call was not inlined; other
+builds do not read it.
 
 Iterative optimization (COI-130) was removed: re-running the pipeline miscompiled loop tests (LICM is not idempotent) and no opt level enabled it. The pipeline runs once.
 

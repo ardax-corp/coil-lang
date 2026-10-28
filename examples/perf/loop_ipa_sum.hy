@@ -1,5 +1,5 @@
 // Counted for-range IPA hit bench (COI-367 F0). Const trip count so loop
-// grain applies (dynamic `0..n` stays sequential). Sequential A4: COIL_AUTO_PAR=0.
+// grain applies (dynamic `0..n` stays sequential). Sequential A4: --auto-par off.
 // Checksum: sum_{x=0}^{199999} x*x = 2666646666700000.
 use io::sync::print;
 use string::format;

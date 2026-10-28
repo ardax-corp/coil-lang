@@ -122,6 +122,32 @@ pub struct MirFunc {
 }
 
 impl MirFunc {
+    /// Drop the spare capacity building left in this body's vectors (about
+    /// half its instruction storage): it is kept until the program lowers
+    /// (docs/internals/compile-memory.md). Maps keep theirs, since
+    /// resizing one reorders its iteration.
+    pub fn shrink_to_fit(&mut self) {
+        self.params.shrink_to_fit();
+        self.blocks.shrink_to_fit();
+        for b in &mut self.blocks {
+            b.insts.shrink_to_fit();
+        }
+        self.types.shrink_to_fit();
+        self.gc_roots.shrink_to_fit();
+        for g in &mut self.gc_roots {
+            g.values.shrink_to_fit();
+            g.slots.shrink_to_fit();
+        }
+        self.deopt_sites.shrink_to_fit();
+        for d in &mut self.deopt_sites {
+            d.slots.shrink_to_fit();
+        }
+        self.homes.shrink_to_fit();
+        if let Some(c) = &mut self.cleanup {
+            c.shrink_to_fit();
+        }
+    }
+
     /// The function entries this body's code names: the callees of its
     /// calls, its code pointers and function values, its cleanup pad's
     /// included.

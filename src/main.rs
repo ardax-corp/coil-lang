@@ -230,6 +230,7 @@ fn cache_options(cli: &CliArgs) -> Option<String> {
             cli.contracts,
             cli.fold_calls,
             cli.early_free.map(compiler::EarlyFree::compiles),
+            cli.auto_par,
             &cli.host_grants,
             &cli.module_roots,
         )
@@ -726,6 +727,9 @@ fn main() {
             if cli.cow_report {
                 // SAFETY: set before any thread starts.
                 unsafe { std::env::set_var("COIL_COW_REPORT", "1") };
+            }
+            if let Some(on) = cli.auto_par {
+                pipeline.set_auto_par(on);
             }
             if cli.opt_stats || cli.opt_stats_json {
                 pipeline.set_collect_opt_stats(true);

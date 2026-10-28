@@ -244,8 +244,9 @@ thread_local! {
     /// Evacuation pacing for this thread's VM: `(cycles since the last
     /// attempt, collections to wait)`. Also outside `Machine` / `Heap`.
     static COMPACT_PACING: std::cell::Cell<(u32, u32)> = const { std::cell::Cell::new((0, COMPACT_WINDOW)) };
-    /// Off with `COIL_GC_COMPACT=0` (debugging a suspected move bug).
-    static COMPACT_ENABLED: bool = std::env::var_os("COIL_GC_COMPACT").is_none_or(|v| v != "0");
+    /// Off with `COIL_GC_COMPACT=0` (debugging a suspected move bug), in
+    /// this crate's unit tests only; other builds always evacuate.
+    static COMPACT_ENABLED: bool = !cfg!(test) || std::env::var_os("COIL_GC_COMPACT").is_none_or(|v| v != "0");
 }
 
 /// Collections between evacuation attempts outside stress mode, and the

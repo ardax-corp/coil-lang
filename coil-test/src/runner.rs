@@ -63,6 +63,8 @@ pub struct TestOptions {
     pub early_free: Option<compiler::EarlyFree>,
     /// `--nursery on|off`; `None` is on.
     pub nursery: Option<bool>,
+    /// `--auto-par on|off`; `None` keeps the pipeline default.
+    pub auto_par: Option<bool>,
     /// `--contract-runs`: calls per generated contract test (0: none).
     pub contract_runs: u32,
     pub grants: HostGrants,
@@ -835,6 +837,9 @@ fn run_pipeline(config: &ReportConfig, options: &TestOptions, reporter: Box<dyn 
         // A computed call never runs its body, so its lines would read
         // uncovered and `coil mutate` would skip them (#1856).
         pipeline.set_call_fold(false);
+    }
+    if let Some(on) = options.auto_par {
+        pipeline.set_auto_par(on);
     }
     pipeline.set_host_grants(options.grants.clone());
     // Same search path CI passes with `--root`: examples and a sibling

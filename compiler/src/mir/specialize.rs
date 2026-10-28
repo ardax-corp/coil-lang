@@ -226,7 +226,7 @@ fn specialize_side(
     }
     let mut func = from_hir.clone();
     // `-O0` / `-Og` run none of these; `-O1` only the folds.
-    if opts.mir_fold && opts.mir_sccp {
+    if opts.mir_fold {
         crate::mir::sccp(&mut func);
         check_after(&func, "sccp");
     }
@@ -706,7 +706,7 @@ fn lir_tail(
     // SCCP first: it folds through φs (a join whose other arms never run,
     // a loop φ that keeps its value), which `instcombine_lir` skips.
     let fold = !func.keep_lines && opts.mir_fold;
-    if fold && opts.mir_sccp {
+    if fold {
         crate::mir::sccp(&mut func);
         check_after(&func, "sccp");
     }

@@ -244,7 +244,7 @@ testing them. It compiles the file with every check on, captures the entry
 module's HIR (`compiler::verify::start_verify_capture`), and turns each
 reachable contract panic into an SMT-LIB query (`compiler/src/verify/
 encode.rs`) for an external solver: `z3 -in` on PATH by default,
-`--solver PATH` or `$COIL_SMT_SOLVER` otherwise. `unsat` proves the check
+`--solver PATH` otherwise. `unsat` proves the check
 can never fail.
 
 ```text

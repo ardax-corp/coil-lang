@@ -1,10 +1,9 @@
 // OS threads: `send` / `recv` keep FIFO order across a thread, a request /
 // reply pair of channels round-trips, `with_lock` serializes increments from
-// several threads, and a `thread::recv` inside a task suspends only that task.
+// several threads. (A `thread::recv` inside a task suspending only that task
+// is `tests/tasks/task_channel.hy`.)
 use tests::assert;
 use thread::{Sender, Receiver, Mutex, spawn, join, channel, send, recv, close, mutex, with_lock, ChannelError, LockError};
-use task::{scope, Scope, TaskError};
-use clock::sleep_ms;
 
 fn produce(Sender tx) -> Result<int, ChannelError> {
     let i = 0;
@@ -28,12 +27,6 @@ fn bump_many(Mutex m) -> Result<int, LockError> {
         with_lock(m, fn (int n) => (n + 1, 0))?;
         i += 1;
     }
-    return 0;
-}
-
-fn late_reply(Sender tx) -> Result<int, ChannelError> {
-    sleep_ms(30);
-    send(tx, 7)?;
     return 0;
 }
 
@@ -68,33 +61,4 @@ test("with_lock serializes increments from several threads") {
     (join(b)?)?;
     (join(c)?)?;
     assert!(with_lock(m, fn (int x) => (x, x))? == 300);
-}
-
-test("a thread recv inside a task lets the other tasks run") {
-    let log: Vec<string> = Vec::new();
-    let pair = channel()?;
-    let tx = pair[0];
-    let rx = pair[1];
-    let worker = spawn(late_reply, tx)?;
-    let r = scope(fn (Scope s) use (mut log, rx) {
-        let waiter = s.spawn(fn () use (mut log, rx) {
-            let v = match recv(rx) {
-                Result::Ok(v) => v,
-                Result::Err(_) => -1,
-            };
-            log.push("received");
-            v
-        });
-        s.spawn(fn () use (mut log) {
-            log.push("other ran");
-            0
-        });
-        match waiter.join() {
-            Result::Ok(v) => v,
-            Result::Err(_) => -1,
-        }
-    });
-    (join(worker)?)?;
-    assert!(r == Result::Ok(7));
-    assert!(log[0] == "other ran" && log[1] == "received");
 }

@@ -35,6 +35,8 @@ pub struct DissectArgs {
     pub fold_calls: Option<bool>,
     /// `--early-free`; `None` follows the opt level.
     pub early_free: Option<compiler::EarlyFree>,
+    /// `--auto-par on|off`; `None` keeps the pipeline default.
+    pub auto_par: Option<bool>,
     pub opt_stats: bool,
     pub opt_stats_json: bool,
     /// Compile `test("…") { … }` cases too (`__zs_test_N`), like `coil test`.
@@ -96,6 +98,9 @@ pub fn cmd_dissect(config: ReportConfig, args: DissectArgs) {
     }
     if let Some(mode) = args.early_free {
         pipeline.set_early_free(mode.compiles());
+    }
+    if let Some(on) = args.auto_par {
+        pipeline.set_auto_par(on);
     }
     if args.opt_stats || args.opt_stats_json {
         pipeline.set_collect_opt_stats(true);

@@ -615,11 +615,8 @@ pub fn ffi_library_names_from_bytecode(bytecode: &[Byte], strings: &[String]) ->
     names
 }
 
-/// Default natives cache root (`$COIL_NATIVES_DIR` or `~/.coil/natives`).
+/// Default natives cache root (`~/.coil/natives`).
 pub fn default_natives_root() -> std::path::PathBuf {
-    if let Ok(p) = std::env::var("COIL_NATIVES_DIR") {
-        return std::path::PathBuf::from(p);
-    }
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(std::path::PathBuf::from)

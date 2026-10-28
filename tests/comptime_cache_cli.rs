@@ -32,7 +32,7 @@ impl Project {
     /// stdout, stderr.
     fn run(&self, value: &str, flags: &[&str]) -> (bool, String, String) {
         let mut cmd = Command::new(&self.bin);
-        cmd.current_dir(&self.dir).env("CT_VALUE", value).env("COIL_CACHE_DIR", self.dir.join("user-cache"));
+        cmd.current_dir(&self.dir).env("CT_VALUE", value).env("XDG_CACHE_HOME", self.dir.join("user-cache"));
         cmd.args(["--root", ".", "--comptime-cache", "cache", "--comptime-env", "CT_VALUE"]);
         cmd.args(flags);
         for root in compiler::Pipeline::workspace_language_extra_roots() {
@@ -141,7 +141,7 @@ fn a_macro_program_from_the_user_cache_runs_the_same() {
     );
     p.write("main.hy", &format!("use gen::shout;\n{PRINT}\nfn main() {{\n    write(stdout(), to_bytes(shout!(hey)));\n}}\n"));
     let first = p.run("", &[]);
-    let programs = p.dir.join("user-cache").join("macro-programs");
+    let programs = p.dir.join("user-cache").join("coil").join("macro-programs");
     assert!(std::fs::read_dir(&programs).is_ok_and(|mut d| d.next().is_some()), "no program kept");
     assert_eq!(first.1, "hey!");
     assert_eq!(p.run("", &[]), first, "from the cache");

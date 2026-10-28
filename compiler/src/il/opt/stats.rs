@@ -73,7 +73,7 @@ pub struct OptStats {
     /// Why the other HIR bodies did not lower to MIR (counted).
     #[serde(default)]
     pub hir_mir_refused: Vec<PassHit>,
-    /// Call sites typed inlining spliced into HIR bodies (`COIL_HIR_INLINE`).
+    /// Call sites typed inlining spliced into HIR bodies.
     #[serde(default)]
     pub hir_inlined: usize,
     /// Bodies whose inlined HIR did not plan, by reason (kept un-inlined).

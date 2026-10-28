@@ -121,6 +121,7 @@ fn parse_args(args: &[String]) -> Result<Option<(ReportConfig, DissectArgs)>, St
             contracts: cli.opt.contracts,
             fold_calls: cli.opt.fold_calls,
             early_free: cli.opt.early_free,
+            auto_par: cli.opt.auto_par,
             opt_stats: cli.profile.opt_stats,
             opt_stats_json: cli.profile.opt_stats_json,
             include_tests: cli.include_tests,

@@ -95,7 +95,7 @@ pub fn format_seed(seed: u64) -> String {
     format!("{seed:#x}")
 }
 
-/// Parse a `--seed` / `COIL_TEST_SEED` value: decimal or `0x` hex.
+/// Parse a `--seed` value: decimal or `0x` hex.
 pub fn parse_seed(text: &str) -> Result<u64, String> {
     let t = text.trim();
     let parsed = match t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {

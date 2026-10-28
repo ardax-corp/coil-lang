@@ -49,7 +49,7 @@ matrix reads:
 | `binary_trees` | 12.3 ms | 9.18 ms | 15.1 ms |
 
 Every checksum matched and no benchmark regressed. The matrix runs each
-cross-language row twice — once with `COIL_AUTO_PAR=0` and once with auto-par at
+cross-language row twice — once with `--auto-par off` and once with auto-par at
 its default — and the two rows are now indistinguishable within noise on all
 four, because under the work score of item 6 none of these loads has a fork site
 that scores above the threshold. That is the intended reading: fair sequential
@@ -138,7 +138,7 @@ call with constant arguments is computed at compile time
 compile `main` to a constant and the VM never runs the benchmark:
 
 ```bash
-COIL_AUTO_PAR=0 ./target/release/coil compile --fold-calls off \
+./target/release/coil compile --auto-par off --fold-calls off \
   --root .deps/coil-stdlib/src examples/perf/mandelbrot.hy -o /tmp/m.hyc
 ```
 
@@ -151,7 +151,7 @@ Landed hit benches: `iv_mul_sr`, `licm_nested_chains`, `tail_sibling`,
 `cse_index_recompute` / `cse_cast_recompute`, `dest_prop_field_alias`,
 `result_try_churn`, `mir_cse_divf`, `mir_licm_divf`, `mir_instcombine`,
 `mir_destprop`, `mir_iv_sr`, `mir_gvn_divf`, `mir_float_pipeline`,
-IPA top-site `examples/perf/fib.hy` (`COIL_AUTO_PAR=1`, COI-361 E3),
+IPA top-site `examples/perf/fib.hy` (`--auto-par on`, COI-361 E3),
 `mir_simd_axpy`, `vec_scan` (`fill` V0 / `scan` V1), `vec_axpy` (V1 FMA),
 `s2j_class_sroa`, `s2d_inloop_pack` / `pack_store` (S2k dense select),
 `s2d_inloop_escape` (S2l leftover Make* win-or-gate),
@@ -486,7 +486,7 @@ pointer across a helper or allocation call in this tier.
 
 ### Headroom measurement (2026-10-12)
 
-Release `main` at `ecb6a7a`, `COIL_AUTO_PAR=0`, scaled benches from the
+Release `main` at `ecb6a7a`, `--auto-par off`, scaled benches from the
 2026-10 perf checkup, best of 3-5 runs. LuaJIT `-joff` is LuaJIT's
 interpreter alone, so its JIT column over it is a reference for what a JIT
 buys over a fast interpreter on the same programs.

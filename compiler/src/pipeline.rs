@@ -123,10 +123,10 @@ pub struct Pipeline {
     contract_sources: Vec<PathBuf>,
     /// Coverage: keep every function defined in files this accepts.
     keep_fns_in: Option<KeepFnFilter>,
-    /// When false, skip auto fork-join even if `COIL_AUTO_PAR` is on.
+    /// When false (`--auto-par off`), skip auto fork-join.
     auto_par: bool,
     /// Typed inlining of HIR bodies, when set; `None` keeps the compiler's
-    /// [`crate::il::opt::OptimizeOptions::hir_inline`] (`COIL_HIR_INLINE`).
+    /// [`crate::il::opt::OptimizeOptions::hir_inline`] (on).
     hir_inline: Option<bool>,
     /// `--early-free on|off`; `None` follows the opt level.
     early_free: Option<bool>,
@@ -147,7 +147,7 @@ pub struct Pipeline {
     /// Collect IL opt counters for `--opt-stats` (COI-131).
     collect_opt_stats: bool,
     /// Off: no call is computed at compile time, whatever the level.
-    /// `COIL_CALL_FOLD=0` starts it off; `--fold-calls` sets it.
+    /// `--fold-calls` sets it.
     call_fold: bool,
     /// Built on first use. `coil run` never compiles, and `Compiler::default`
     /// (builtin typeclasses + Vec signatures) was ~28% of process startup.
@@ -491,9 +491,8 @@ impl Pipeline {
 
     /// Extra `use`/`mod` roots for this repo's examples and stdlib checkouts.
     ///
-    /// CLI/tests pass these as `--root`. `COIL_STDLIB` adds one more stdlib
-    /// root for the cargo-workspace tests only; the installed `coil` reads
-    /// no environment variable for roots (#1871).
+    /// CLI/tests pass these as `--root`. Nothing reads an environment
+    /// variable for roots (#1871).
     pub fn workspace_language_extra_roots() -> Vec<PathBuf> {
         let ws = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -501,9 +500,6 @@ impl Pipeline {
         let mut extra = vec![ws.join("examples/src"), ws.join(".deps/coil-stdlib/src")];
         if let Some(parent) = ws.parent() {
             extra.push(parent.join("coil-stdlib/src"));
-        }
-        if let Ok(p) = std::env::var("COIL_STDLIB") {
-            extra.push(PathBuf::from(p));
         }
         extra
     }
@@ -755,7 +751,7 @@ impl Pipeline {
             debug_level: None,
             debugger_attached: false,
             collect_opt_stats: false,
-            call_fold: std::env::var_os("COIL_CALL_FOLD").is_none_or(|v| v != "0"),
+            call_fold: true,
             compiler: std::cell::OnceCell::new(),
             pending_native_ids: Vec::new(),
             sink,
@@ -1500,7 +1496,11 @@ impl Pipeline {
             compiler.set_source_text(cached.source());
             let ast = cached.ast_mut().expect("parsed");
             let bytecode = compiler.compile_prepared_module(namespace.as_str(), ast);
-            self.program_files.insert(compiler.program_seq(), file.clone());
+            let seq = compiler.program_seq();
+            if !compiler.may_clone_from(seq) {
+                cached.release_tree();
+            }
+            self.program_files.insert(seq, file.clone());
             self.emit_foreign_clones();
             bytecode
         };
@@ -2078,6 +2078,14 @@ impl Pipeline {
         self.discover_all();
         self.expand_user_macros();
         self.compile_discovered_modules();
+        // Every module is compiled, foreign clones included: nothing past
+        // this reads a tree or a module's kept context, and finalize peaks
+        // on top of them.
+        self.ast_cache.release_asts();
+        if let Some(compiler) = self.compiler.get_mut() {
+            compiler.release_module_ctxs();
+        }
+        release_free_heap();
 
         if self.failed || self.had_errors() || !self.check_capabilities() {
             return Err(CompileFail);
@@ -2232,8 +2240,7 @@ impl Pipeline {
     /// Select an IL optimization preset. Default is [`crate::OptLevel::Standard`].
     /// Turn computing pure calls with constant arguments at compile time
     /// off (or back on, at `-O2` and above). Tests of what such a call
-    /// compiles to turn it off. Starts off under `COIL_CALL_FOLD=0`;
-    /// `--fold-calls on|off` calls this, so the flag wins over the env.
+    /// compiles to turn it off. `--fold-calls on|off` calls this.
     pub fn set_call_fold(&mut self, on: bool) {
         self.call_fold = on;
     }
@@ -2481,6 +2488,21 @@ impl Pipeline {
             program.static_slot_count,
             debug,
         ))
+    }
+}
+
+/// Hand the allocator's free pages back to the OS. glibc keeps a phase's
+/// freed small blocks mapped, so the next phase's peak would stack on them.
+pub(crate) fn release_free_heap() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        unsafe extern "C" {
+            fn malloc_trim(pad: usize) -> i32;
+        }
+        // SAFETY: glibc's `malloc_trim` only releases free memory.
+        unsafe {
+            malloc_trim(0);
+        }
     }
 }
 

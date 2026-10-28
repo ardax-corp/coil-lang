@@ -37,7 +37,7 @@ pub struct OptLevelFlags {
     #[arg(long, value_name = "LEVEL", value_parser = ContractLevel::parse)]
     pub contracts: Option<ContractLevel>,
     /// Compute pure calls with constant arguments at compile time: on
-    /// (default, at -O2 and above) or off. Overrides `COIL_CALL_FOLD`
+    /// (default, at -O2 and above) or off
     #[arg(long, value_name = "on|off", value_parser = parse_fold_calls, action = clap::ArgAction::Set)]
     pub fold_calls: Option<bool>,
     /// Free objects the compiler proves dead: on (default at -O1 and
@@ -45,6 +45,10 @@ pub struct OptLevelFlags {
     /// a run frees nothing and aborts if a freed object was still in use)
     #[arg(long, value_name = "on|off|check", value_parser = EarlyFree::parse, action = clap::ArgAction::Set)]
     pub early_free: Option<EarlyFree>,
+    /// Automatic fork-join of pure recursive calls and counted loops: on
+    /// (default) or off
+    #[arg(long, value_name = "on|off", value_parser = parse_auto_par, action = clap::ArgAction::Set)]
+    pub auto_par: Option<bool>,
 }
 
 impl OptLevelFlags {
@@ -88,6 +92,14 @@ fn parse_fold_calls(s: &str) -> Result<bool, String> {
         "on" => Ok(true),
         "off" => Ok(false),
         _ => Err(format!("invalid --fold-calls `{s}` (expected on|off)")),
+    }
+}
+
+fn parse_auto_par(s: &str) -> Result<bool, String> {
+    match s {
+        "on" => Ok(true),
+        "off" => Ok(false),
+        _ => Err(format!("invalid --auto-par `{s}` (expected on|off)")),
     }
 }
 
