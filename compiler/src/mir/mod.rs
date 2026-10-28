@@ -17,6 +17,7 @@
 mod builder;
 mod bulk;
 mod byte_scan;
+mod vec_loop;
 mod call_convoy;
 mod cse;
 mod destprop;
@@ -80,6 +81,7 @@ pub use bool_thread::thread_bool_phis;
 pub use phi_sroa::phi_sroa;
 pub use bulk::bulk_push;
 pub use byte_scan::byte_scan;
+pub use vec_loop::vec_loops;
 pub use strength::strength_reduce;
 #[cfg(test)]
 pub use text::{ParseError, parse_func};

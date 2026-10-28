@@ -14,8 +14,9 @@ step.
 - `V*` opcodes (`VLoad` / `VStore` / `VBin` / `VMove` / `VReduce` /
   `VFma`): 8 lanes of `i64` / `f64` in eight 64-byte vector registers,
   run by `coil-simd` with runtime ISA dispatch (SSE2 / AVX2 / AVX-512 /
-  NEON). `mir/vectorize.rs` emits them only for counted map and reduce
-  loops, and only when the whole function is that loop.
+  NEON). `mir/vectorize.rs` emitted them only for counted map and reduce
+  loops, and only when the whole function was that loop (since 6.2 they
+  run in a `VLoop` anywhere in a function; see `simd.md`).
 - `s[i]` on a string is a `HostInvoke string_byte_at` per byte, plus a
   `< 0` test for the out-of-bounds panic.
 - `text::Pattern for string` calls the `string::find_from` native

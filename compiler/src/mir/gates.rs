@@ -112,12 +112,6 @@ pub fn fuse_lir_wall(func: &MirFunc, maps_ok: bool) -> Option<LirRefuse> {
     None
 }
 
-/// Highest label `func` names (call / closure / coroutine targets): fresh
-/// labels a reconstruct mints start above it.
-pub fn max_named_label(func: &MirFunc) -> u32 {
-    super::emit::foreign_targets(func, None).into_iter().max().unwrap_or(0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

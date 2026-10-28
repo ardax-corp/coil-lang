@@ -1267,6 +1267,7 @@ fn emit_stored(
         }
         // Dense-only (`byte_scan`).
         MirInst::ByteScan { .. } => return Err(LowerError::Refused("LIR has no byte lanes".into())),
+        MirInst::VecLoop { .. } => return Err(LowerError::Refused("LIR has no vector loops".into())),
         MirInst::Unary { dest, op, src } => {
             emit_stack(out, *src, func, plan, regs, pool, loc)?;
             push_unary(out, *op, func.ty(*src), loc);
@@ -1925,6 +1926,7 @@ fn emit_stack(
             loc,
         }),
         MirInst::ByteScan { .. } => Err(LowerError::Refused("LIR has no byte lanes".into())),
+        MirInst::VecLoop { .. } => Err(LowerError::Refused("LIR has no vector loops".into())),
         MirInst::Unary { op, src, .. } => {
             emit_stack(out, *src, func, plan, regs, pool, loc)?;
             push_unary(out, *op, func.ty(*src), loc);

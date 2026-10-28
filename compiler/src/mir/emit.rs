@@ -2725,6 +2725,28 @@ pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
             )));
             out.extend(body.into_iter().map(byte));
         }
+        MirInst::VecLoop { dest, pos, from, to, kind } => {
+            let d = regs[dest.index()];
+            let p = pos.map_or(d, |p| regs[p.index()]);
+            // `dest` and `pos` are written before the operands are last read.
+            if inst.operands().iter().any(|v| regs[v.index()] == d || regs[v.index()] == p) || (pos.is_some() && p == d) {
+                return Err(LowerError::Refused("vec loop dest shares an operand slot".into()));
+            }
+            let body = vec_loop_body(kind, regs, d, p).ok_or_else(|| LowerError::Refused("vec loop body too large".into()))?;
+            if let super::inst::VecLoopKind::Reduce { init, .. } = kind
+                && regs[init.index()] != d
+            {
+                out.push(move_op(d, regs[init.index()]));
+            }
+            let flag = if pos.is_some() { common::simd::LOOP_POS } else { 0 };
+            out.push(byte(Byte::new(Instruction::VLoop).with_dense_abc(
+                body.len() as u8 | flag,
+                p,
+                regs[from.index()],
+                regs[to.index()],
+            )));
+            out.extend(body.into_iter().map(byte));
+        }
         MirInst::Unary { dest, op, src } => {
             let kind = match (*op, func.ty(*src)) {
                 (MirUnaryOp::Not, _) => dense::UNARY_NOT,
@@ -4689,6 +4711,103 @@ pub(super) fn paired_alloc_dests(func: &MirFunc) -> HashMap<ValueId, ValueId> {
         }
     }
     out
+}
+
+/// A `VecLoop`'s `VLoop` body: each tree node into the next free vector
+/// register (freed again after the node), a reduce's `VReduce` into the
+/// loop's `dest` slot `d`; slot `p` holds the block position for an index.
+fn vec_loop_body(kind: &super::inst::VecLoopKind, regs: &[u8], d: u8, p: u8) -> Option<Vec<Byte>> {
+    use super::inst::{VecExpr, VecLoopKind};
+    use common::simd;
+
+    struct Ctx<'a> {
+        out: Vec<Byte>,
+        next: u8,
+        regs: &'a [u8],
+        p: u8,
+    }
+
+    impl Ctx<'_> {
+        fn reg(&mut self) -> Option<u8> {
+            let r = self.next;
+            if usize::from(r) >= simd::NREGS {
+                return None;
+            }
+            self.next += 1;
+            Some(r)
+        }
+
+        fn word(&mut self, op: Instruction, kind: u8, dest: u8, a: u8, b: u8) {
+            self.out.push(Byte::new(op).with_dense_abc(kind, dest, a, b));
+        }
+
+        fn slot(&self, v: ValueId) -> u8 {
+            self.regs[v.index()]
+        }
+
+        fn eval(&mut self, e: &VecExpr) -> Option<u8> {
+            let base = self.next;
+            let r = match e {
+                VecExpr::Splat { v, ty } => {
+                    let r = self.reg()?;
+                    let k = if *ty == dense::TY_F64 { simd::SPLAT_F64 } else { simd::SPLAT_I64 };
+                    self.word(Instruction::VBin, k, r, self.slot(*v), 0);
+                    r
+                }
+                // `p + k`: the lane offsets plus the position in `d`.
+                VecExpr::Index => {
+                    let (r, p) = (self.reg()?, self.reg()?);
+                    self.word(Instruction::VBin, simd::IOTA_I64, r, 0, 0);
+                    self.word(Instruction::VBin, simd::SPLAT_I64, p, self.p, 0);
+                    self.word(Instruction::VBin, simd::IADD64, r, r, p);
+                    r
+                }
+                VecExpr::Load { array, off, ty } => {
+                    let r = self.reg()?;
+                    self.word(Instruction::VLoad, *ty, r, self.slot(*array), self.slot(*off));
+                    r
+                }
+                VecExpr::Bin { kind, lhs, rhs } => {
+                    let x = self.eval(lhs)?;
+                    let y = self.eval(rhs)?;
+                    self.word(Instruction::VBin, *kind, x, x, y);
+                    x
+                }
+                VecExpr::Neg { kind, src } => {
+                    let x = self.eval(src)?;
+                    self.word(Instruction::VBin, *kind, x, x, 0);
+                    x
+                }
+                // `VFma` adds into its dest: `c` first, so it lands at `base`.
+                VecExpr::Fma { ty, a, b, c } => {
+                    let z = self.eval(c)?;
+                    let x = self.eval(a)?;
+                    let y = self.eval(b)?;
+                    self.word(Instruction::VFma, *ty, z, x, y);
+                    z
+                }
+            };
+            debug_assert_eq!(r, base);
+            self.next = base + 1;
+            Some(r)
+        }
+    }
+
+    let mut cx = Ctx { out: Vec::new(), next: 0, regs, p };
+    match kind {
+        VecLoopKind::Reduce { ty, fold, term, .. } => {
+            let v = cx.eval(term)?;
+            cx.word(Instruction::VReduce, *ty, d, v, *fold);
+        }
+        VecLoopKind::Store { stores } => {
+            for (array, off, ty, value) in stores {
+                cx.next = 0;
+                let v = cx.eval(value)?;
+                cx.word(Instruction::VStore, *ty, v, cx.slot(*array), cx.slot(*off));
+            }
+        }
+    }
+    (cx.out.len() <= usize::from(common::simd::LOOP_LEN)).then_some(cx.out)
 }
 
 /// A `ByteScan`'s `VScan` body: each stream loaded once into the top
