@@ -127,10 +127,17 @@ def main():
     def run(name):
         log = args.logs / f"{name}.log"
         start = time.monotonic()
+        # The seed and a stalled file also go to the console, so a run
+        # killed by the CI timeout still names them in the job log.
         with open(log, "wb") as out:
-            code = subprocess.run(
+            proc = subprocess.Popen(
                 cmd + [f"tests/{name}", "-j", str(jobs)] + passthrough,
-                cwd=ROOT, stdout=out, stderr=subprocess.STDOUT, preexec_fn=limit).returncode
+                cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, preexec_fn=limit)
+            for line in proc.stdout:
+                out.write(line)
+                if line.startswith((b"running ", b"still running")):
+                    print(f"       {name:<13} {line.decode(errors='replace').rstrip()}", flush=True)
+            code = proc.wait()
         secs = time.monotonic() - start
         text = log.read_text(errors="replace")
         m = re.search(r"test result: (\w+)\. (\d+) passed; (\d+) failed", text)

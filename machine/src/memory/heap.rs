@@ -1423,6 +1423,16 @@ impl Heap {
             && (cfg!(feature = "gc-stress") || self.slab.young_chunks_in_use() >= self.nursery_chunks)
     }
 
+    /// A minor collection that could not move promoted the nursery in
+    /// place: allocate old for a nursery's worth, into the promoted
+    /// chunks' free tails. Otherwise a nested run, where every minor
+    /// promotes, maps a fresh nursery chunk per collection: under
+    /// `gc-stress` one per allocation, thousands of mostly empty chunks
+    /// that every later collection sweeps.
+    pub fn pretenure_after_promote(&mut self) {
+        self.pretenure_bytes = self.nursery_chunks * super::slab::CHUNK_BYTES;
+    }
+
     /// A minor collection found `survivors` of `objects` young objects
     /// live. When most survived (a large structure being built), copying
     /// them buys nothing: allocate old for a while, longer each time in a

@@ -2036,6 +2036,7 @@ impl<const S: usize> Machine<S> {
         let can_move = can_move && self.debug.is_none();
         if !can_move {
             self.heap.promote_young();
+            self.heap.pretenure_after_promote();
             return;
         }
         // The dense-index cache names an object that may move.
