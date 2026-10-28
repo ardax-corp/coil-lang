@@ -7218,7 +7218,13 @@ impl Checker {
             return self.infer_shift(lhs, rhs, lt, rt, id, range, op);
         }
 
+        let before = self.messages.len();
         let result = self.unify(&lt, &rt, &range, &format!("operands of `{}`", op));
+        if self.messages.len() > before {
+            // The operands mismatched: that is the mistake. The fresh
+            // result var is not an operand "with no known type" (#2092).
+            return result;
+        }
         // Open type variables need the matching op trait (`Add` for `+`, …).
         // `T: Num` also covers these via superclass implication.
         let pruned = apply_ty_prune(&self.subst, &result);
