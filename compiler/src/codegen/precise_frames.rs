@@ -1335,7 +1335,9 @@ fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Opt
         // safepoint with the original popped).
         // A field made unique in place: no stack change, may allocate.
         Cow if b.operand_u32() & common::dense::COW_FIELD != 0 => {
-            record_alloc(st, &mut step)?;
+            // The copy goes straight into the object's field: a safepoint
+            // over the frame as it is, with nothing pushed.
+            step.record = Some(st.heap_slots(st.hi, true));
         }
         Cow if b.operand_u32() & 1 == 0 => {
             let (heap, must) = st.pop_copy()?;
