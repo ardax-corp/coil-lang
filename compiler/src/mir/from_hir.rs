@@ -2913,6 +2913,9 @@ impl Lower<'_> {
                 self.stack_store(*place, base, index, *value)
             }
             HirKind::Assign { place, value } if let Some(&slot) = self.inp.fields.get(&place.0) => {
+                if let Some(done) = self.cow_field(*place, *value, slot)? {
+                    return Ok(done);
+                }
                 let boxed = self.boxed_slot_field(*place);
                 let open = self.open_slot_niche(*place);
                 let ty = self
@@ -3025,6 +3028,15 @@ impl Lower<'_> {
                 if let HirKind::Field { base, .. } = self.hir.expr(*place).kind
                     && let Some(&(slot, ty)) = self.inp.heap_fields.get(&place.0) =>
             {
+                // `obj.f = unique(obj.f)`: one in-place op.
+                if ty == MirTy::HeapRef && !self.inp.boxed_niches.contains_key(&place.0) && self.same_field(*place, *value) {
+                    let Some(obj) = self.word(base)? else {
+                        return Ok(Val::Never);
+                    };
+                    let out = self.at_expr(*value, |l| l.b.ins_cow_at(obj, true, Some(slot)).map_err(mir))?;
+                    self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)?;
+                    return Ok(Val::Unit);
+                }
                 // The value, then the object, as HIR emission's `SetField`.
                 let v = match self.inp.boxed_niches.get(&place.0) {
                     Some(&layout) => self.boxed_niche_word(*value, layout)?,
@@ -4018,6 +4030,33 @@ impl Lower<'_> {
 
     /// For field `field` (slot `slot`) of a frame-slot class local boxed
     /// before here: the object and the field's index in it.
+    /// `obj.f = unique(obj.f)` on a heap object's field (what copy-on-write
+    /// puts before a write through `obj.f`): one in-place op that writes the
+    /// field back only when it copied.
+    fn cow_field(&mut self, place: HirId, value: HirId, slot: u32) -> Result<Option<Val>, Refusal> {
+        if !self.same_field(place, value) || self.boxed_slot_field(place) || self.open_slot_niche(place).is_some() || self.expr_ty(place).and_then(|t| self.inp.word(t)) != Some(MirTy::HeapRef) {
+            return Ok(None);
+        }
+        let Some((obj, index)) = self.boxed_field(place, slot)? else {
+            return Ok(None);
+        };
+        let out = self.at_expr(value, |l| l.b.ins_cow_at(obj, true, Some(index)).map_err(mir))?;
+        self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)?;
+        Ok(Some(Val::Unit))
+    }
+
+    /// `value` is `unique(place)` and `place` is a field of a local: the
+    /// assignment `place = value` copy-on-write puts before a write.
+    fn same_field(&self, place: HirId, value: HirId) -> bool {
+        let (HirKind::Field { base, name }, HirKind::Builtin { op: Builtin::Cow { unique: true }, args }) = (&self.hir.expr(place).kind, &self.hir.expr(value).kind) else {
+            return false;
+        };
+        let ([inner], HirKind::Local(local)) = (args.as_slice(), &self.hir.expr(*base).kind) else {
+            return false;
+        };
+        matches!(&self.hir.expr(*inner).kind, HirKind::Field { base: b, name: n } if n == name && matches!(self.hir.expr(*b).kind, HirKind::Local(l) if l == *local))
+    }
+
     fn boxed_field(&mut self, field: HirId, slot: u32) -> Result<Option<(ValueId, u32)>, Refusal> {
         let HirKind::Field { base, .. } = self.hir.expr(field).kind else {
             return Ok(None);

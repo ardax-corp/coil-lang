@@ -4972,6 +4972,23 @@ impl<const S: usize> Machine<S> {
                     let v = self.stack.pop();
                     self.free_early(v, opcode.operand_u32() & 1 != 0);
                 }
+                Instruction::Cow if opcode.operand_u32() & common::dense::COW_FIELD != 0 => {
+                    // `obj.f = unique(obj.f)` in place: the field is written
+                    // back only when it was shared and so copied.
+                    let op = opcode.operand_u32();
+                    let (obj, field) = (((op >> 8) & 0xff) as usize, (op >> 16) as usize);
+                    promise!(sp + obj < stack_cap);
+                    if let Some(crate::memory::Object::Instance(mut gc)) = self.heap.find_object_by_addr(self.stack[sp + obj].bits())
+                        && let Some(v) = gc.as_ref().slot(field)
+                        && let Some(copy) = self.heap.cow_unique(v)
+                    {
+                        gc.as_mut().set_slot(field, copy);
+                        if let Some(sites) = self.cow_sites.as_mut() {
+                            *sites.entry(ip.saturating_sub(1)).or_insert(0) += 1;
+                        }
+                        self.maybe_gc_after_alloc(ip);
+                    }
+                }
                 Instruction::Cow => {
                     let v = self.stack.pop();
                     if opcode.operand_u32() & 1 == 0 {

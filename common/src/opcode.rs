@@ -619,6 +619,17 @@ pub mod dense {
     /// [`super::Instruction::DenseFieldLoad`] / [`super::Instruction::DenseFieldStore`]:
     /// `c` is a name slot (GetField), not a field index.
     pub const FIELD_NAMED: u8 = 1;
+
+    /// [`super::Instruction::Cow`] operand bit: unique field `[31:16]` of
+    /// the object in frame slot `[15:8]` in place (stack-neutral), writing
+    /// the field back only when it copied. Bit 0 (unique) is set with it.
+    pub const COW_FIELD: u32 = 2;
+
+    /// Pack a field-mode [`super::Instruction::Cow`] operand.
+    #[inline]
+    pub const fn pack_cow_field(object: u8, field: u16) -> u32 {
+        ((field as u32) << 16) | ((object as u32) << 8) | COW_FIELD | 1
+    }
     pub const MAKE_ARRAY: u8 = 0;
     pub const MAKE_TUPLE: u8 = 1;
     pub const MAKE_ENUM: u8 = 2;

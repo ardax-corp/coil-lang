@@ -1082,9 +1082,15 @@ impl MirBuilder {
     /// Copy-on-write share (`unique: false`) or unique of `src`'s object:
     /// the same word, or a copy's for unique. Pair with a GC barrier.
     pub fn ins_cow(&mut self, src: ValueId, unique: bool) -> Result<ValueId, MirError> {
+        self.ins_cow_at(src, unique, None)
+    }
+
+    /// [`MirInst::Cow`]; with `field`, unique field `field` of object `src`
+    /// in place.
+    pub fn ins_cow_at(&mut self, src: ValueId, unique: bool, field: Option<u32>) -> Result<ValueId, MirError> {
         let src = self.resolve(src);
         let dest = self.alloc(MirTy::HeapRef);
-        self.push(MirInst::Cow { dest, src, unique })?;
+        self.push(MirInst::Cow { dest, src, unique, field })?;
         self.snapshot_slots(dest);
         Ok(dest)
     }

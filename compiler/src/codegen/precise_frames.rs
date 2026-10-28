@@ -1333,6 +1333,10 @@ fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Opt
         }
         // Share marks the object in place; unique may allocate its copy (a
         // safepoint with the original popped).
+        // A field made unique in place: no stack change, may allocate.
+        Cow if b.operand_u32() & common::dense::COW_FIELD != 0 => {
+            record_alloc(st, &mut step)?;
+        }
         Cow if b.operand_u32() & 1 == 0 => {
             let (heap, must) = st.pop_copy()?;
             st.push_copy(heap, must)?;
