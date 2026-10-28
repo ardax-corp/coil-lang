@@ -118,14 +118,14 @@ struct Plan {
     expr: LaneExpr,
 }
 
-fn defs(func: &MirFunc) -> HashMap<ValueId, (BlockId, &MirInst)> {
+pub(super) fn defs(func: &MirFunc) -> HashMap<ValueId, (BlockId, &MirInst)> {
     func.blocks
         .iter()
         .flat_map(|b| b.insts.iter().map(move |i| (i.dest(), (b.id, i))))
         .collect()
 }
 
-fn const_i64(defs: &HashMap<ValueId, (BlockId, &MirInst)>, v: ValueId) -> Option<i64> {
+pub(super) fn const_i64(defs: &HashMap<ValueId, (BlockId, &MirInst)>, v: ValueId) -> Option<i64> {
     match defs.get(&v) {
         Some((_, MirInst::Const { c: MirConst::I64(k), .. })) => Some(*k),
         _ => None,
@@ -136,7 +136,7 @@ fn const_i64(defs: &HashMap<ValueId, (BlockId, &MirInst)>, v: ValueId) -> Option
 /// where the loop continues on the `cont` side of `cond` while
 /// `iv < bound` (`<=` when inclusive), or when `backward` while
 /// `iv > bound` (`>=`).
-fn header_test(
+pub(super) fn header_test(
     defs: &HashMap<ValueId, (BlockId, &MirInst)>,
     cond: ValueId,
     iv: ValueId,
@@ -616,36 +616,36 @@ fn renumber(e: &LaneExpr, loads: &mut Vec<u8>) -> LaneExpr {
     }
 }
 
-struct Builder<'a> {
-    func: &'a mut MirFunc,
+pub(super) struct Builder<'a> {
+    pub(super) func: &'a mut MirFunc,
 }
 
 impl Builder<'_> {
-    fn value(&mut self, ty: MirTy) -> ValueId {
+    pub(super) fn value(&mut self, ty: MirTy) -> ValueId {
         self.func.types.push(ty);
         ValueId((self.func.types.len() - 1) as u32)
     }
 
-    fn block(&mut self) -> BlockId {
+    pub(super) fn block(&mut self) -> BlockId {
         let id = BlockId(self.func.blocks.len() as u32);
         self.func.blocks.push(MirBlock::new(id));
         id
     }
 
-    fn push(&mut self, b: BlockId, inst: MirInst) -> ValueId {
+    pub(super) fn push(&mut self, b: BlockId, inst: MirInst) -> ValueId {
         let d = inst.dest();
         self.func.block_mut(b).insts.push(inst);
         d
     }
 
-    fn konst(&mut self, b: BlockId, c: MirConst) -> ValueId {
+    pub(super) fn konst(&mut self, b: BlockId, c: MirConst) -> ValueId {
         let dest = self.value(c.ty());
         self.push(b, MirInst::Const { dest, c })
     }
 }
 
 /// A φ's incoming values.
-type PhiArgs = Vec<(BlockId, ValueId)>;
+pub(super) type PhiArgs = Vec<(BlockId, ValueId)>;
 
 /// Put the scan in front of the loop. Returns its blocks in layout
 /// order: the preheader, then `G`. The scan stops by itself at the loop's
@@ -746,7 +746,7 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: Plan) -> Vec<BlockId> {
     run
 }
 
-fn retarget(func: &mut MirFunc, from: BlockId, old: BlockId, new: BlockId) {
+pub(super) fn retarget(func: &mut MirFunc, from: BlockId, old: BlockId, new: BlockId) {
     match func.block_mut(from).term.as_mut() {
         Some(Terminator::Jump { dest }) if *dest == old => *dest = new,
         Some(Terminator::Br { taken, not_taken, .. } | Terminator::JumpIfMatch { taken, not_taken, .. }) => {
@@ -763,7 +763,7 @@ fn retarget(func: &mut MirFunc, from: BlockId, old: BlockId, new: BlockId) {
 
 /// Each run of new blocks goes in front of the header it was made for
 /// (the order emission lays the code out in).
-fn relayout(func: &mut MirFunc, runs: &[(BlockId, Vec<BlockId>)]) {
+pub(super) fn relayout(func: &mut MirFunc, runs: &[(BlockId, Vec<BlockId>)]) {
     let new: HashSet<BlockId> = runs.iter().flat_map(|(_, r)| r.iter().copied()).collect();
     let mut order = Vec::with_capacity(func.blocks.len());
     for blk in &func.blocks {
