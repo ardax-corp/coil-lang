@@ -20,8 +20,8 @@ reordering measured as no gain and are out of scope.
 |------|------|--------------------|--------|
 | 1 | Vectorize inner loops that index `a[base + j]` with a base the inner loop does not change (flattened 2D arrays in a nest) | `nested.hy`: `a[row + j]` 274 ms vs `r[j]` on a row 19 ms (14x), 1024² x 20 | done |
 | 2 | Vectorize one loop that both stores a map and folds a reduction | `fusion.hy`: fused 417 ms vs split 162 ms (2.6x) | done |
-| 3 | Field-sensitive mod/ref summaries (which slots and array kinds a call may write) | lets step 4 keep a field across a call that cannot touch it | planned |
-| 4 | Scalar promotion: keep an object field in a register across a loop, store it back on exit and on the panic path | `promo.hy`: 3.1x (8 vs 3 dispatches per iteration) | done (loops without calls) |
+| 3 | Field-sensitive mod/ref summaries (which fields a call may read or write) | lets step 4 keep a field across a call that cannot touch it; `promocall.hy`: 1327 vs 985 ms | done |
+| 4 | Scalar promotion: keep an object field in a register across a loop, store it back on exit and on the panic path | `promo.hy`: 3.1x (8 vs 3 dispatches per iteration) | done |
 | 5 | Copy the objects a pointer array holds in index order when the nursery promotes them | `objorder.hy`: 24 vs 147 ns per object (6.2x); `young_shuffle.hy` | done (minor collections) |
 | 6 | Prefetch the object behind `a[i + k]` in counted scans of pointer arrays | part of step 5's gap | planned |
 | 7 | Loop interchange for affine nests | `interchange.hy`: rows 277 ms vs columns 749 ms (2.7x); `fmapcols.hy` | done (non-trapping map bodies) |
@@ -121,3 +121,21 @@ Numbers land here as each step merges.
   order; so does a column reduction (`interchange.hy`), whose partial
   sums would overflow in a different order. Those would need a proof
   that no overflow happens (range analysis), which is not planned.
+- **Step 3** (field summaries): the HIR effect summary of each body
+  gains `fields`, the fields of any object it or its callees may read or
+  write, as one bit per field name (a hash into 64 bits, so names may
+  share a bit). Reading or writing `x.f`, or a record pattern naming `f`,
+  sets `f`'s bit. Everything that may touch a field it cannot name sets
+  every bit: unknown code, a trait or function-value call, `==` or an
+  ordering on objects, a builtin or native given an object, resuming a
+  generator, a custom iterator. MIR keeps the bits per call
+  (`MirFunc::call_fields`) and the names this body uses at each heap slot
+  (`MirFunc::slot_fields`; an access lowered without a name makes the
+  slot unknown). `promote_fields` now accepts a loop with direct calls
+  and keeps a slot in a register when none of the calls' bits meet the
+  slot's names; a call may panic, so a `PanicStore` goes before it like
+  any trap. A program that declares a `fn drop()` anywhere gets no
+  promotion across calls, since a finalizer can run at any allocation.
+  `promocall.hy` (the step 4 probe with a non-inlined recursive call in
+  the loop, 1M x 20, three alternating runs): 1250-1370 → 930-1020 ms,
+  the same as hand-written locals (910-1010 ms).

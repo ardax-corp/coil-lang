@@ -4930,6 +4930,12 @@ impl Compiler {
         self.checker.program_finalizers_resize = resize;
     }
 
+    /// Whole-compile answer to "does any file declare a `fn drop()`?"
+    /// (`None`: not known, so one may).
+    pub fn set_program_finalizers(&mut self, finalizers: Option<bool>) {
+        self.program_finalizers = finalizers;
+    }
+
     pub fn set_written_names_program(&mut self, names: Option<HashSet<String>>) {
         self.written_names_program = names;
     }

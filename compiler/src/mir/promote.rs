@@ -12,10 +12,16 @@
 //!
 //! The loop may hold only code that cannot see the slot otherwise:
 //! arithmetic, compares, casts, element reads and writes, field reads and
-//! writes, explicit panics and pure natives. A call, an allocation, a
-//! yield, IO or any other effect refuses the loop.
+//! writes, explicit panics, pure natives, and calls of functions whose
+//! effect summary names the fields they may touch (locality step 3): a
+//! slot stays in a register across such a call when the names this body
+//! uses at the slot ([`MirFunc::slot_fields`]) and the call's
+//! ([`MirFunc::call_fields`]) share no bit. An allocation, a yield, IO or
+//! any other effect refuses the loop.
 
 use std::collections::{HashMap, HashSet};
+
+use crate::hir::effects::ALL_FIELDS;
 
 use super::effects::host_is_pure;
 use super::func::MirFunc;
@@ -115,6 +121,8 @@ fn candidates(func: &MirFunc, lp: &LoopInfo) -> Vec<Field> {
         refused: bool,
     }
     let mut slots: HashMap<u32, Slot> = HashMap::new();
+    // The fields the loop's calls may touch.
+    let mut called = 0u64;
     let mut blocks: Vec<BlockId> = lp.blocks.iter().copied().collect();
     blocks.sort();
     for b in blocks {
@@ -122,6 +130,10 @@ fn candidates(func: &MirFunc, lp: &LoopInfo) -> Vec<Field> {
             let (object, index, word, store) = match inst {
                 MirInst::HeapFieldLoad { dest, object, index } => (*object, *index, *dest, false),
                 MirInst::HeapFieldStore { object, value, index, .. } => (*object, *index, *value, true),
+                MirInst::Call { dest, .. } => {
+                    called |= func.call_fields.get(dest).copied().unwrap_or(ALL_FIELDS);
+                    continue;
+                }
                 _ if allowed(inst) => continue,
                 _ => return Vec::new(),
             };
@@ -147,7 +159,9 @@ fn candidates(func: &MirFunc, lp: &LoopInfo) -> Vec<Field> {
             let [ty] = s.tys.iter().copied().collect::<Vec<_>>()[..] else {
                 return None;
             };
+            let unseen = called == 0 || func.slot_fields.get(&index).is_some_and(|&names| names & called == 0);
             let ok = s.stored
+                && unseen
                 && !s.refused
                 && !defined.contains(&object)
                 && func.ty(object) == MirTy::HeapRef
@@ -159,8 +173,8 @@ fn candidates(func: &MirFunc, lp: &LoopInfo) -> Vec<Field> {
     out
 }
 
-/// Code a promoted loop may hold besides its field ops: nothing that calls
-/// out, allocates, suspends or touches the heap other than by element.
+/// Code a promoted loop may hold besides its field ops and calls: nothing
+/// that allocates, suspends or touches the heap other than by element.
 fn allowed(inst: &MirInst) -> bool {
     match inst {
         MirInst::Phi { .. }
@@ -185,7 +199,11 @@ fn traps(func: &MirFunc, inst: &MirInst) -> bool {
     inst.may_trap(func)
         || matches!(
             inst,
-            MirInst::StoreIndex { unchecked: false, .. } | MirInst::Cast { .. } | MirInst::HostInvoke { .. } | MirInst::Panic { .. }
+            MirInst::StoreIndex { unchecked: false, .. }
+                | MirInst::Cast { .. }
+                | MirInst::HostInvoke { .. }
+                | MirInst::Call { .. }
+                | MirInst::Panic { .. }
         )
 }
 
