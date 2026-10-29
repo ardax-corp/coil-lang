@@ -1645,7 +1645,15 @@ fn transfer(body: &Body, pc: usize, coroutine: bool, st: &mut FrameState) -> Opt
             }
         }
         // Dense register ops write frame slots without moving the cursor.
-        DenseBin | DenseCmp => st.set(b.dense_abc_parts().1, false)?,
+        // A dense bit op builds or strips the heap-heap niche tag, as the
+        // stack ones do (see `BITAND | BITOR | XOR`): its result may still
+        // name an object when an operand did.
+        DenseBin => {
+            let (kind, dest, x, y) = b.dense_abc_parts();
+            let tag = matches!(kind, common::dense::IAND64 | common::dense::IOR64 | common::dense::IXOR64);
+            st.set(dest, tag && (st.bit(x) || st.bit(y)))?;
+        }
+        DenseCmp => st.set(b.dense_abc_parts().1, false)?,
         DenseUnary | DenseCast => st.set(b.dense_unary_parts().1, false)?,
         DenseConst => {
             let (_, dest, value, pooled) = b.dense_const_parts();
