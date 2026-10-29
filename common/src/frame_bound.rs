@@ -88,9 +88,18 @@ pub fn jump_targets(code: &[Byte], pool: &[u64]) -> Option<Vec<bool>> {
     Some(out)
 }
 
-fn frame_words(code: &[Byte], pool: &[u64], match_payload: usize) -> usize {
-    let n = code.len();
-    let steps: Vec<Step> = code.iter().map(|b| step(b, pool, match_payload)).collect();
+/// For each pc of `code`, the lowest pc of the frame it belongs to: code
+/// linked by fall-through and jumps (calls and code pointers open new
+/// frames, so they do not link). `None` when a branch target cannot be
+/// decoded.
+#[must_use]
+pub fn frame_roots(code: &[Byte], pool: &[u64]) -> Option<Vec<usize>> {
+    let steps: Vec<Step> = code.iter().map(|b| step(b, pool, 0)).collect();
+    roots(&steps)
+}
+
+fn roots(steps: &[Step]) -> Option<Vec<usize>> {
+    let n = steps.len();
     let mut parent: Vec<usize> = (0..n).collect();
     for (pc, s) in steps.iter().enumerate() {
         if s.falls && pc + 1 < n {
@@ -99,12 +108,19 @@ fn frame_words(code: &[Byte], pool: &[u64], match_payload: usize) -> usize {
         match s.jump {
             Jump::To(t) if t < n => union(&mut parent, pc, t),
             Jump::To(_) | Jump::None => {}
-            Jump::Unknown => return whole_program(&steps),
+            Jump::Unknown => return None,
         }
     }
-    let mut per_root: Vec<Bound> = vec![Bound::default(); n];
-    for (pc, s) in steps.iter().enumerate() {
-        let root = find(&mut parent, pc);
+    Some((0..n).map(|pc| find(&mut parent, pc)).collect())
+}
+
+fn frame_words(code: &[Byte], pool: &[u64], match_payload: usize) -> usize {
+    let steps: Vec<Step> = code.iter().map(|b| step(b, pool, match_payload)).collect();
+    let Some(roots) = roots(&steps) else {
+        return whole_program(&steps);
+    };
+    let mut per_root: Vec<Bound> = vec![Bound::default(); steps.len()];
+    for (s, root) in steps.iter().zip(roots) {
         per_root[root].add(s);
     }
     per_root.iter().map(Bound::words).max().unwrap_or(0)

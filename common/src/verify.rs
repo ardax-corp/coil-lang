@@ -6,8 +6,11 @@
 //! runtime test: retired opcodes, jump / call targets, constant-pool,
 //! string-table and static-slot indices, and the inner opcode byte fused
 //! ops carry (the VM turns it back into an `Instruction` by transmute).
-//! Frame-slot operands and stack height are still compiler invariants (they
-//! need per-function frame sizes).
+//! [`verify_bytecode`] also checks that every direct call expects the return
+//! width its callee's returns leave (the VM hands the caller whatever the
+//! callee left, and later ops read those words unchecked).
+//! Frame-slot operands are bounded by [`crate::frame_reserve`] at load; stack
+//! height is still a compiler invariant.
 
 use crate::opcode::{Byte, Instruction};
 
@@ -191,6 +194,71 @@ pub fn verify_bytecode(
             _ => {}
         }
     }
+    verify_calls(code, constants)
+}
+
+/// Every direct call expects the width its target's frame (and every frame
+/// it tail-calls into) returns. Arity is not checked: a dictionary adapter
+/// passes trailing words its shared entry never reads, and the entry's
+/// `Seek` sets its frame height either way.
+fn verify_calls(code: &[Byte], constants: &[u64]) -> Result<(), BytecodeError> {
+    use Instruction::*;
+    // An undecodable branch leaves frames unknown; the operand checks above
+    // already rejected the archives that would hit one.
+    let Some(roots) = crate::frame_roots(code, constants) else {
+        return Ok(());
+    };
+    // Bit `w` of `widths[root]`: some return reachable from that frame
+    // leaves `w` words.
+    let mut widths = vec![0u8; code.len()];
+    let mut tails: Vec<(usize, usize)> = Vec::new();
+    for (pc, byte) in code.iter().enumerate() {
+        let words = match *byte.bytecode() {
+            RETURN => byte.return_words(),
+            LoadReturnSlot | ConstReturnImm | BinReturn | MakeEnumReturn | MakeEnumReturnK => 1,
+            TailCall => {
+                let target = byte.call_parts().1;
+                if target != 0 {
+                    tails.push((roots[pc], roots[target]));
+                }
+                continue;
+            }
+            _ => continue,
+        };
+        widths[roots[pc]] |= 1 << words;
+    }
+    // A tail call returns straight to the caller of the frame it left.
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for &(from, to) in &tails {
+            let merged = widths[from] | widths[to];
+            if merged != widths[from] {
+                widths[from] = merged;
+                changed = true;
+            }
+        }
+    }
+    for (pc, byte) in code.iter().enumerate() {
+        if *byte.bytecode() != CALL {
+            continue;
+        }
+        let target = byte.call_parts().1;
+        if target == 0 {
+            continue;
+        }
+        let want = byte.call_ret_words();
+        let other = widths[roots[target]] & !(1 << want);
+        if other != 0 {
+            return Err(BytecodeError {
+                pc,
+                reason: format!(
+                    "call to {target} expects {want} return words, its frame returns {}",
+                    other.trailing_zeros()
+                ),
+            });
+        }
+    }
     Ok(())
 }
 
@@ -296,6 +364,33 @@ mod tests {
             assert_eq!(err.pc, 0, "{err}");
             assert!(err.reason.contains("inner opcode"), "{err}");
         }
+    }
+
+    /// A two-slot `CALL` into a frame that returns one word (or the other
+    /// way round) would hand the caller a stack it reads unchecked.
+    #[test]
+    fn call_return_width_must_match_the_callee() {
+        let ret = |w: u32| Byte::new(Instruction::RETURN).with_operand_u32(w);
+        let call = |w| Byte::new(Instruction::CALL).with_call_packed_ret(1, 3, w);
+        let program = |w, callee: &[Byte]| {
+            let mut code = vec![call(w), Byte::new(Instruction::HALT), Byte::new(Instruction::NOOP)];
+            code.extend_from_slice(callee);
+            code
+        };
+        let two = [ret(2)];
+        let one = [Byte::new(Instruction::JMPF).with_operand_u32(5), ret(2), ret(0)];
+        assert_eq!(verify_bytecode(&program(2, &two), &[], limits()), Ok(()));
+        let err = verify_bytecode(&program(1, &two), &[], limits()).unwrap_err();
+        assert_eq!(err.pc, 0, "{err}");
+        assert!(err.reason.contains("return words"), "{err}");
+        assert!(verify_bytecode(&program(2, &one), &[], limits()).is_err(), "one branch returns one word");
+        // A tail call returns to the caller of the frame it left.
+        let tail = [
+            Byte::new(Instruction::TailCall).with_call_packed(1, 4),
+            Byte::new(Instruction::ConstReturnImm),
+        ];
+        assert!(verify_bytecode(&program(2, &tail), &[], limits()).is_err(), "tail callee returns one word");
+        assert_eq!(verify_bytecode(&program(1, &tail), &[], limits()), Ok(()));
     }
 
     #[test]
