@@ -1,7 +1,8 @@
-// Bit tricks (popcount, power-of-two test, shifts, hex literal, `~`) next to prelude float math (`sqrt`, `floor`, `ceil`, `pow`) and casts.
+// Bit tricks (popcount, power-of-two test, shifts, hex literal, `~`) next to float math (stdlib `sqrt`, `floor`, `ceil`; prelude `pow`) and casts.
 // @output 3 1 8 255 -1 true 3.0 2.0 1.4142135623730951 5.0 0.5 1 2 true\n
 use io::sync::println;
 use string::format;
+use math::{ceil, floor, sqrt};
 
 fn popcount(int n) -> int {
     let c = 0;
