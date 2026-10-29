@@ -10409,7 +10409,10 @@ impl Checker {
                 if !self.constraint_is_covered(&needed) {
                     self.messages.push(Message::error(
                         ErrorCode::GenericTypeError,
-                        format!("Cannot satisfy constraint `{}`", constraint.class),
+                        format!(
+                            "Cannot satisfy constraint `{}`",
+                            self.instance_signature(&needed.class, &needed.args)
+                        ),
                         arg_expr
                             .map(|arg| arg.0.into_range())
                             .unwrap_or_else(|| range.clone()),
@@ -10668,7 +10671,10 @@ impl Checker {
                     Ok(None) => {
                         self.messages.push(Message::error(
                             ErrorCode::GenericTypeError,
-                            format!("Cannot satisfy constraint `{}`", needed),
+                            format!(
+                                "Cannot satisfy constraint `{}`",
+                                self.instance_signature(&needed.class, &needed.args)
+                            ),
                             range.clone(),
                         ));
                     }

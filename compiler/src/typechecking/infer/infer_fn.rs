@@ -819,7 +819,7 @@ impl Checker {
                         ErrorCode::GenericTypeError,
                         format!(
                             "Cannot satisfy abstract constraint `{}`; no concrete trait was selected",
-                            constraint
+                            self.instance_signature(&constraint.class, &constraint.args)
                         ),
                         range.clone(),
                     ));

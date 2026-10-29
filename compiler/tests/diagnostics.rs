@@ -92,6 +92,92 @@ fn main() {
     );
 }
 
+/// The constraint messages must rename open unknowns like the mismatch
+/// ones do: an unsolved `where` argument, a constructor-kinded bound, an
+/// `Into` call whose target is never pinned and a constraint-kind parameter
+/// all used to print the raw `tN` counter.
+#[test]
+fn constraint_messages_avoid_raw_tvar_ids() {
+    let cases = [
+        (
+            "open where argument",
+            r#"
+trait Convert<A, B> { fn conv(A a) -> B; }
+class M {}
+class N {}
+impl Convert<N> for M { fn conv(M a) -> N { return new N(); } }
+fn cast<A, B>(A x) -> B where Convert<A, B> { return conv(x); }
+fn main() { let y = cast(1.5); }
+"#,
+            "Cannot satisfy constraint `Convert<float, a>`",
+        ),
+        (
+            "constructor-kinded bound",
+            r#"
+trait Functor<F: * -> *> { fn fmap<A, B>(F<A> fa, fn(A) -> B f) -> F<B>; }
+fn twice<F: Functor, A>(F<A> x, fn(A) -> A f) -> F<A> { return fmap(fmap(x, f), f); }
+fn main() { let _ = twice(1, fn (int x) => x); }
+"#,
+            "Cannot satisfy constraint `Functor<a>`",
+        ),
+        (
+            "Into without a target",
+            r#"
+class M { pub v: int }
+fn main() { let m = new M(1); let z = m.into(); }
+"#,
+            "Cannot satisfy constraint `Into<M, a>`",
+        ),
+        (
+            "constraint-kind parameter",
+            r#"
+fn apply_c<c: * -> Constraint, T: c>(T x) -> T { return x; }
+fn main() { let _ = apply_c(1); }
+"#,
+            "Cannot satisfy abstract constraint `c<T>`",
+        ),
+    ];
+    for (what, src, expected) in cases {
+        let msgs: Vec<String> = check_messages(src).iter().map(|m| m.message().to_string()).collect();
+        let joined = msgs.join("\n");
+        assert!(
+            joined.contains(expected),
+            "{what}: expected `{expected}`, got: {joined}"
+        );
+        assert!(
+            !joined.contains("`t") && !joined.contains("<t"),
+            "{what}: diagnostics must not show raw tN type-var ids, got: {joined}"
+        );
+    }
+}
+
+/// A refined constructor type (`Tree::Node(…)` before it joins its enum) is
+/// an inference detail: a mismatch names the enum, never the `::v1` tag.
+#[test]
+fn constructor_refinement_prints_as_its_enum() {
+    let cases = [
+        (
+            r#"
+enum Tree<T> { Leaf, Node(T, Tree<T>, Tree<T>) }
+fn main() { let t: Tree<int> = Tree::Node("a", Tree::Leaf, Tree::Leaf); }
+"#,
+            "expected `Tree<int>`, found `Tree<string>`",
+        ),
+        (
+            r#"
+fn main() { let a: Option<Option<int>> = Option::Some(1); }
+"#,
+            "expected `Option<Option<int>>`, found `Option<int>`",
+        ),
+    ];
+    for (src, expected) in cases {
+        let msgs: Vec<String> = check_messages(src).iter().map(|m| m.message().to_string()).collect();
+        let joined = msgs.join("\n");
+        assert!(joined.contains(expected), "expected `{expected}`, got: {joined}");
+        assert!(!joined.contains("::v"), "constructor tags must not leak, got: {joined}");
+    }
+}
+
 #[test]
 fn multiple_errors_are_reported_in_one_pass() {
     // Two distinct problems: an unknown identifier and an assignment
