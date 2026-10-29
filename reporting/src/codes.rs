@@ -99,6 +99,8 @@ pub enum ErrorCode {
     /// A closure assigns a `use (mut x)` capture: the outer local keeps
     /// its value.
     CaptureAssign,
+    /// `symbol::fn_key` read outside a function body, or not called.
+    FnKeyOutsideFunction,
 
     DuplicateEnum,
     DuplicateConstructor,
@@ -217,6 +219,7 @@ impl ErrorCode {
             Self::CowCopy => "E0141",
             Self::CowDroppedWrite => "E0142",
             Self::CaptureAssign => "E0143",
+            Self::FnKeyOutsideFunction => "E0144",
             Self::DuplicateEnum => "E0200",
             Self::DuplicateConstructor => "E0201",
             Self::UnknownEnum => "E0202",
@@ -317,6 +320,7 @@ impl ErrorCode {
             Self::CowCopy => "write copies a shared object",
             Self::CowDroppedWrite => "write to a temporary copy is dropped",
             Self::CaptureAssign => "assignment to a captured local stays in the closure",
+            Self::FnKeyOutsideFunction => "`fn_key()` outside a function body",
             Self::DuplicateEnum => "duplicate enum",
             Self::DuplicateConstructor => "duplicate constructor",
             Self::UnknownEnum => "unknown enum",
@@ -425,6 +429,7 @@ mod tests {
             | CowCopy
             | CowDroppedWrite
             | CaptureAssign
+            | FnKeyOutsideFunction
             | DuplicateEnum
             | DuplicateConstructor
             | UnknownEnum
@@ -515,6 +520,7 @@ mod tests {
             CowCopy,
             CowDroppedWrite,
             CaptureAssign,
+            FnKeyOutsideFunction,
             DuplicateEnum,
             DuplicateConstructor,
             UnknownEnum,

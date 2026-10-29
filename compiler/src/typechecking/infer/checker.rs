@@ -1298,7 +1298,7 @@ impl Checker {
             "env_set_var" => fun(&[string(), string()], res_unit_env.clone()),
             "env_exit" => fun(&[int()], unit_ty()),
 
-            "clock_wall_nanos" | "clock_mono_nanos" => fun(&[], int()),
+            "clock_wall_nanos" | "clock_mono_nanos" | "symbol_next_id" => fun(&[], int()),
             "clock_sleep_ms" => fun(&[int()], unit_ty()),
             "io_capture_begin" => fun(&[], unit_ty()),
             "io_capture_end" => fun(&[], tuple_ty(vec![string(), string()])),
@@ -5829,6 +5829,7 @@ impl Checker {
                     PreludeFn::Diff => self.infer_matrix_cells_call(&reordered, id, range, "diff"),
                     PreludeFn::Ord => self.infer_ord(&reordered, range),
                     PreludeFn::BlackBox => self.infer_black_box(&reordered, range),
+                    PreludeFn::FnKey => self.infer_fn_key(&reordered, range),
                     PreludeFn::Char => self.infer_char(&reordered, range),
                 };
             }
@@ -5844,6 +5845,7 @@ impl Checker {
                 PreludeFn::Diff => self.infer_matrix_cells_call(arg_slice, id, range, "diff"),
                 PreludeFn::Ord => self.infer_ord(arg_slice, range),
                 PreludeFn::BlackBox => self.infer_black_box(arg_slice, range),
+                PreludeFn::FnKey => self.infer_fn_key(arg_slice, range),
                 PreludeFn::Char => self.infer_char(arg_slice, range),
             };
         }
@@ -8466,6 +8468,31 @@ impl Checker {
             );
         }
         self.infer(&args[0])
+    }
+
+    /// `symbol::fn_key() -> int`: only inside a function, method, lambda or
+    /// test body, whose key the HIR builder writes in its place.
+    fn infer_fn_key(&mut self, args: &[Output], range: Range<usize>) -> Ty {
+        if !args.is_empty() {
+            for arg in args {
+                let _ = self.infer(arg);
+            }
+            return self.error_with_help(
+                ErrorCode::ConstructorArity,
+                format!("fn_key expects no arguments, got {}", args.len()),
+                range,
+                Some("`fn_key()` names the function it is written in; it takes no arguments".to_string()),
+            );
+        }
+        if self.current_return_ty.is_none() {
+            return self.error_with_help(
+                ErrorCode::FnKeyOutsideFunction,
+                "fn_key() outside a function body".to_string(),
+                range,
+                Some("call `fn_key()` inside a function, method, lambda or test: it is that body's key".to_string()),
+            );
+        }
+        int()
     }
 
     fn infer_ord(&mut self, args: &[Output], range: Range<usize>) -> Ty {

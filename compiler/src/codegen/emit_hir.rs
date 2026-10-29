@@ -4843,6 +4843,8 @@ impl Compiler {
                     Ok(HirBuiltin::LinAlg)
                 }
                 PreludeFn::Ord | PreludeFn::Char | PreludeFn::BlackBox => host(Some(kind.as_str())),
+                // The HIR builder already wrote the key in place of the call.
+                PreludeFn::FnKey => Err("callee-builtin"),
             });
         }
         if let Some(kind) = self.checker.ffi_fn_in_scope(name) {

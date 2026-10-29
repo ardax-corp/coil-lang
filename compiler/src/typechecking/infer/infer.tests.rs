@@ -2478,17 +2478,19 @@ fn is_thread_sendable_ty_rejects_stream_coroutine_and_functions() {
 #[test]
 fn host_fn_scheme_covers_all_wiring_registries() {
     use machine::{CLOCK_WIRING, ENV_WIRING, FS_WIRING};
+    use machine::symbol::SYMBOL_WIRING;
 
     let mut c = Checker::new();
     let names: Vec<&str> = FS_WIRING
         .iter()
         .chain(ENV_WIRING.iter())
         .chain(CLOCK_WIRING.iter())
+        .chain(SYMBOL_WIRING.iter())
         .map(|&(n, _, _)| n)
         // Removed slot: `env::exec` moved to coil-process; nothing exports it.
         .filter(|&n| n != "env_exec")
         .collect();
-    assert_eq!(names.len(), 26);
+    assert_eq!(names.len(), 27);
     for name in names {
         let _ = c.host_fn_scheme(name, 0..0);
     }
