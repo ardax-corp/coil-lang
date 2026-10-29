@@ -18,7 +18,11 @@ fn input() -> Vec<int> {
     let a: Vec<int> = Vec::new();
     let i = 0;
     while i < 40 {
-        a.push(if i == 18 || i == 19 { BIG } else { i });
+        let v = i;
+        if i == 18 || i == 19 {
+            v = BIG;
+        }
+        a.push(v);
         i = i + 1;
     }
     return a;
